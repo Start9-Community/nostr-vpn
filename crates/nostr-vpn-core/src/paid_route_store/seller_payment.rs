@@ -88,6 +88,7 @@ impl PaidRouteStore {
                     &lease_id,
                     &channel_id,
                     &buyer_npub,
+                    false,
                 )?;
                 let channel = self.channels.get(&channel_id).expect("validated channel");
                 let cashu_unit = paid_route_payment_cashu_unit(&channel.payment);
@@ -403,6 +404,7 @@ impl PaidRouteStore {
             context.lease_id,
             context.channel_id,
             context.buyer_npub,
+            false,
         )?;
         if !self.sessions.contains_key(&session_id) {
             return Err(anyhow!("paid route session {session_id} does not exist"));
@@ -488,6 +490,7 @@ impl PaidRouteStore {
             context.lease_id,
             context.channel_id,
             context.buyer_npub,
+            true,
         )?;
         let (cashu_unit, capacity_sat) = {
             let channel = self
@@ -642,6 +645,7 @@ impl PaidRouteStore {
         lease_id: &str,
         channel_id: &str,
         buyer_npub: &str,
+        allow_closing: bool,
     ) -> Result<()> {
         let lease = self
             .leases
@@ -663,10 +667,10 @@ impl PaidRouteStore {
         if matches!(
             lease.status,
             PaidRouteLifecycleStatus::Closed
-                | PaidRouteLifecycleStatus::Closing
                 | PaidRouteLifecycleStatus::Expired
                 | PaidRouteLifecycleStatus::Failed
-        ) {
+        ) || (!allow_closing && lease.status == PaidRouteLifecycleStatus::Closing)
+        {
             return Err(anyhow!("paid route lease {lease_id} is not open"));
         }
 
@@ -678,10 +682,10 @@ impl PaidRouteStore {
         if matches!(
             channel.status,
             PaidRouteLifecycleStatus::Closed
-                | PaidRouteLifecycleStatus::Closing
                 | PaidRouteLifecycleStatus::Expired
                 | PaidRouteLifecycleStatus::Failed
-        ) {
+        ) || (!allow_closing && channel.status == PaidRouteLifecycleStatus::Closing)
+        {
             return Err(anyhow!("paid route channel {channel_id} is not open"));
         }
 
