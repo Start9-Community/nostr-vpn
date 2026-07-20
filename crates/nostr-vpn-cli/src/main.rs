@@ -70,10 +70,10 @@ use cashu_service::{
     CashuWalletOverview, FileSpilmanPaymentReceiver, FileSpilmanPaymentReceiverConfig,
     FileSpilmanPaymentSigner, StreamingRouteCashuTokenLease,
     StreamingRouteOpenCashuSpilmanChannelFromWalletRequest, StreamingRoutePaymentEnvelope,
-    create_topup_quote, import_payment_proofs, load_or_create_cashu_spilman_receiver_key,
-    load_wallet_activity, load_wallet_overview, normalize_mint_url,
-    open_streaming_route_cashu_spilman_channel_from_wallet, receive_payment_token,
-    send_lightning_payment, send_payment_token,
+    StreamingRoutePaymentPayload, create_topup_quote, import_payment_proofs,
+    load_or_create_cashu_spilman_receiver_key, load_wallet_activity, load_wallet_overview,
+    normalize_mint_url, open_streaming_route_cashu_spilman_channel_from_wallet,
+    receive_payment_token, send_lightning_payment, send_payment_token,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(all(feature = "paid-exit", test))]

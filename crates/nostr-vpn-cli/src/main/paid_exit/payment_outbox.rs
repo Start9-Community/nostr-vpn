@@ -28,7 +28,13 @@ fn queue_paid_exit_payment(
     }
     let seller = normalize_nostr_pubkey(&envelope.seller)
         .context("invalid paid route payment seller")?;
-    if app.public_paid_exit_node_pubkey_hex().as_deref() != Some(&seller) {
+    let closes_historical_channel = matches!(
+        &envelope.payload,
+        StreamingRoutePaymentPayload::CooperativeClose(_)
+    );
+    if !closes_historical_channel
+        && app.public_paid_exit_node_pubkey_hex().as_deref() != Some(&seller)
+    {
         return Err(anyhow!(
             "paid route payment seller is not the selected public exit"
         ));
