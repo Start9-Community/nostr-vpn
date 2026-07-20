@@ -297,7 +297,7 @@ fn buyer_signed_payment_envelope_uses_cashu_service_signer() {
 }
 
 #[test]
-fn buyer_cooperative_close_can_be_resigned_after_local_close() {
+fn buyer_cooperative_close_remains_pending_until_refund_recovery() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
@@ -333,11 +333,11 @@ fn buyer_cooperative_close_can_be_resigned_after_local_close() {
 
     assert_eq!(
         store.channels[&channel_id].status,
-        PaidRouteLifecycleStatus::Closed
+        PaidRouteLifecycleStatus::Closing
     );
     assert_eq!(
         store.leases[&store.sessions[&session_id].session.lease_id].status,
-        PaidRouteLifecycleStatus::Closed
+        PaidRouteLifecycleStatus::Closing
     );
 
     let retried = store
@@ -368,7 +368,26 @@ fn buyer_cooperative_close_can_be_resigned_after_local_close() {
     );
     assert_eq!(
         store.channels[&channel_id].status,
+        PaidRouteLifecycleStatus::Closing
+    );
+
+    assert!(
+        store
+            .mark_buyer_channel_closed(&channel_id, 151)
+            .expect("refund recovery closes buyer channel")
+    );
+    assert_eq!(
+        store.channels[&channel_id].status,
         PaidRouteLifecycleStatus::Closed
+    );
+    assert_eq!(
+        store.leases[&store.sessions[&session_id].session.lease_id].status,
+        PaidRouteLifecycleStatus::Closed
+    );
+    assert!(
+        !store
+            .mark_buyer_channel_closed(&channel_id, 152)
+            .expect("closing an already recovered buyer channel is idempotent")
     );
 
     let error = store

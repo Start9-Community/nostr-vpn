@@ -8,6 +8,91 @@ pub(crate) use automatic::*;
 pub(super) const PAID_EXIT_DAEMON_STREAM_PAYMENT_MIN_INCREMENT_MSAT: u64 = 1;
 pub(super) const PAID_EXIT_DAEMON_STREAM_PAYMENT_LIMIT: usize = 4;
 pub(super) const PAID_EXIT_SESSION_OPEN_RETRY_SECS: u64 = 5;
+pub(super) const PAID_EXIT_BUYER_REFUND_RETRY_SECS: u64 = 10;
+
+#[derive(Debug, Default)]
+pub(super) struct PaidExitBuyerRefundRecovery {
+    pub(super) scanned_count: usize,
+    pub(super) complete_count: usize,
+    pub(super) pending_count: usize,
+    pub(super) error_count: usize,
+    pub(super) imported_amount_sat: u64,
+    pub(super) changed: bool,
+}
+
+fn paid_exit_buyer_refund_channel_ids(store: &PaidRouteStore) -> Vec<String> {
+    store
+        .channels
+        .values()
+        .filter(|channel| {
+            channel.role == PaidRouteChannelRole::Buyer
+                && channel.payment.mode == PaidRoutePaymentMode::CashuSpilman
+                && channel.payment.cashu_spilman_payment.is_some()
+                && matches!(
+                    channel.status,
+                    PaidRouteLifecycleStatus::Closing | PaidRouteLifecycleStatus::Closed
+                )
+        })
+        .map(|channel| channel.channel_id.clone())
+        .collect()
+}
+
+pub(super) async fn recover_paid_exit_buyer_refunds(
+    config_path: &Path,
+) -> Result<PaidExitBuyerRefundRecovery> {
+    let store_path = paid_route_store_file_path(config_path);
+    let wallet_data_dir = paid_exit_wallet_data_dir(config_path);
+    let mut store = load_paid_route_store(&store_path)?;
+    let channel_ids = paid_exit_buyer_refund_channel_ids(&store);
+    let mut recovery = PaidExitBuyerRefundRecovery {
+        scanned_count: channel_ids.len(),
+        ..PaidExitBuyerRefundRecovery::default()
+    };
+
+    for channel_id in channel_ids {
+        match restore_streaming_route_cashu_spilman_refund(&wallet_data_dir, &channel_id).await {
+            Ok(result) if result.complete => {
+                recovery.complete_count += 1;
+                recovery.imported_amount_sat = recovery
+                    .imported_amount_sat
+                    .saturating_add(result.imported_amount_sat);
+                recovery.changed |=
+                    store.mark_buyer_channel_closed(&channel_id, unix_timestamp())?;
+            }
+            Ok(_) => {
+                recovery.pending_count += 1;
+                if let Some(channel) = store.channels.get_mut(&channel_id)
+                    && !channel.error.is_empty()
+                {
+                    channel.error.clear();
+                    channel.updated_at_unix = unix_timestamp();
+                    recovery.changed = true;
+                }
+            }
+            Err(error) => {
+                recovery.error_count += 1;
+                let message = format!("Cashu refund recovery failed: {error}");
+                if let Some(channel) = store.channels.get_mut(&channel_id)
+                    && channel.error != message
+                {
+                    channel.error = message;
+                    channel.updated_at_unix = unix_timestamp();
+                    recovery.changed = true;
+                }
+            }
+        }
+    }
+
+    if recovery.imported_amount_sat > 0 {
+        let overview = load_wallet_overview(&wallet_data_dir, false).await?;
+        recovery.changed |=
+            sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
+    }
+    if recovery.changed {
+        write_paid_route_store(&store_path, &store)?;
+    }
+    Ok(recovery)
+}
 
 #[derive(Debug, Default)]
 pub(super) struct PaidExitApplySessionOpensResult {
@@ -369,4 +454,70 @@ fn paid_route_seller_admission_routing_signature(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod refund_tests {
+    use super::*;
+
+    fn channel(
+        channel_id: &str,
+        role: PaidRouteChannelRole,
+        status: PaidRouteLifecycleStatus,
+    ) -> PaidRouteChannelRecord {
+        PaidRouteChannelRecord {
+            channel_id: channel_id.to_string(),
+            offer_id: "offer".to_string(),
+            role,
+            status,
+            payment: nostr_vpn_core::paid_routes::PaidRoutePaymentState {
+                mode: PaidRoutePaymentMode::CashuSpilman,
+                channel_id: channel_id.to_string(),
+                cashu_spilman_payment: Some(CashuSpilmanPayment {
+                    channel_id: channel_id.to_string(),
+                    balance: 1,
+                    signature: "signature".to_string(),
+                    params: None,
+                    funding_proofs: None,
+                }),
+                ..nostr_vpn_core::paid_routes::PaidRoutePaymentState::default()
+            },
+            mint_url: "https://mint.example".to_string(),
+            counterparty_npub: "seller".to_string(),
+            created_at_unix: 1,
+            expires_at_unix: 2,
+            updated_at_unix: 1,
+            error: String::new(),
+        }
+    }
+
+    #[test]
+    fn refund_recovery_selects_pending_and_legacy_closed_buyer_channels() {
+        let mut store = PaidRouteStore::default();
+        store.upsert_channel(channel(
+            "pending",
+            PaidRouteChannelRole::Buyer,
+            PaidRouteLifecycleStatus::Closing,
+        ));
+        store.upsert_channel(channel(
+            "legacy-closed",
+            PaidRouteChannelRole::Buyer,
+            PaidRouteLifecycleStatus::Closed,
+        ));
+        store.upsert_channel(channel(
+            "active",
+            PaidRouteChannelRole::Buyer,
+            PaidRouteLifecycleStatus::Active,
+        ));
+        store.upsert_channel(channel(
+            "seller",
+            PaidRouteChannelRole::Seller,
+            PaidRouteLifecycleStatus::Closing,
+        ));
+
+        assert_eq!(
+            paid_exit_buyer_refund_channel_ids(&store),
+            vec!["legacy-closed".to_string(), "pending".to_string()]
+        );
+    }
 }

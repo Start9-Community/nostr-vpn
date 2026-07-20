@@ -1,4 +1,5 @@
 use super::{persistence::*, *};
+use std::collections::BTreeSet;
 
 pub fn normalize_paid_route_mint_url(raw: &str) -> Result<String> {
     let raw = raw.trim();
@@ -295,6 +296,54 @@ impl PaidRouteStore {
         }
         lease_ids.sort();
         lease_ids.dedup();
+        for lease_id in lease_ids {
+            let Some(lease) = self.leases.get_mut(&lease_id) else {
+                continue;
+            };
+            if lease.status != PaidRouteLifecycleStatus::Closed {
+                lease.status = PaidRouteLifecycleStatus::Closed;
+                lease.updated_at_unix = updated_at_unix;
+                changed = true;
+            }
+        }
+
+        Ok(changed)
+    }
+
+    pub fn mark_buyer_channel_closed(
+        &mut self,
+        channel_id: &str,
+        updated_at_unix: u64,
+    ) -> Result<bool> {
+        let channel_id = trimmed_required(channel_id, "paid route channel id")?;
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("paid route channel {channel_id} does not exist"))?;
+        if channel.role != PaidRouteChannelRole::Buyer {
+            return Err(anyhow!(
+                "paid route channel {channel_id} is not a buyer channel"
+            ));
+        }
+
+        let mut changed = false;
+        if channel.status != PaidRouteLifecycleStatus::Closed {
+            channel.status = PaidRouteLifecycleStatus::Closed;
+            channel.updated_at_unix = updated_at_unix;
+            changed = true;
+        }
+        if !channel.error.is_empty() {
+            channel.error.clear();
+            channel.updated_at_unix = updated_at_unix;
+            changed = true;
+        }
+
+        let lease_ids = self
+            .sessions
+            .values()
+            .filter(|record| record.session.payment.channel_id == channel_id)
+            .map(|record| record.session.lease_id.clone())
+            .collect::<BTreeSet<_>>();
         for lease_id in lease_ids {
             let Some(lease) = self.leases.get_mut(&lease_id) else {
                 continue;
