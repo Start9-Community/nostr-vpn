@@ -196,7 +196,7 @@ fn seller_payment_cooperative_close_suspends_admission() {
                     payment: sample_spilman_payment("channel-1", 1),
                 }),
             ),
-            seller_npub,
+            seller_npub: seller_npub.clone(),
             config: config.clone(),
             now_unix: 130,
         })
@@ -218,6 +218,35 @@ fn seller_payment_cooperative_close_suspends_admission() {
     assert_eq!(collection.len(), 1);
     assert!(collection[0].collectable);
     assert!(collection[0].manual_collect);
+
+    let mut refreshed_payment = sample_spilman_payment("channel-1", 1);
+    refreshed_payment.signature.push_str("-retry");
+    let retry = store
+        .apply_seller_payment(ApplyPaidRouteSellerPaymentRequest {
+            envelope: seller_payment_envelope(
+                "internet-exit",
+                "lease-1",
+                &buyer_npub,
+                &seller_npub,
+                131,
+                StreamingRoutePaymentPayload::CooperativeClose(StreamingRouteCooperativeClose {
+                    final_paid_msat: 1_000,
+                    payment: refreshed_payment.clone(),
+                }),
+            ),
+            seller_npub,
+            config: config.clone(),
+            now_unix: 131,
+        })
+        .expect("refresh close authorization while settlement is pending");
+    assert!(retry.changed);
+    assert_eq!(
+        store.channels["channel-1"]
+            .payment
+            .cashu_spilman_payment
+            .as_ref(),
+        Some(&refreshed_payment)
+    );
 
     assert!(
         store
