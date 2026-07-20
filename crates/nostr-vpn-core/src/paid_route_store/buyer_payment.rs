@@ -502,13 +502,13 @@ impl PaidRouteStore {
             channel.payment.cashu_token_lease = None;
             channel.updated_at_unix = context.now_unix;
             if context.kind == BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose {
-                channel.status = PaidRouteLifecycleStatus::Closed;
+                channel.status = PaidRouteLifecycleStatus::Closing;
             }
         }
         if context.kind == BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose
             && let Some(lease) = self.leases.get_mut(context.lease_id)
         {
-            lease.status = PaidRouteLifecycleStatus::Closed;
+            lease.status = PaidRouteLifecycleStatus::Closing;
             lease.updated_at_unix = context.now_unix;
         }
         let record = self

@@ -93,7 +93,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     assert!(result.persisted);
 
     let channel = store.channels.get(&session.channel_id).expect("channel");
-    assert_eq!(channel.status, PaidRouteLifecycleStatus::Closed);
+    assert_eq!(channel.status, PaidRouteLifecycleStatus::Closing);
     assert_eq!(channel.payment.paid_msat, 2_000);
     assert_eq!(
         channel
@@ -113,7 +113,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         Some(expected_signature.as_str())
     );
     let lease = store.leases.get(&session.lease_id).expect("lease");
-    assert_eq!(lease.status, PaidRouteLifecycleStatus::Closed);
+    assert_eq!(lease.status, PaidRouteLifecycleStatus::Closing);
     assert!(
         store
             .buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {

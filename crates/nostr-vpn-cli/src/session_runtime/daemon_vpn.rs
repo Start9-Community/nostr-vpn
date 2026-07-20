@@ -57,6 +57,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     #[cfg(feature = "paid-exit")]
     let mut last_paid_exit_session_open_at =
         Instant::now() - Duration::from_secs(PAID_EXIT_SESSION_OPEN_RETRY_SECS);
+    #[cfg(feature = "paid-exit")]
+    let mut last_paid_exit_buyer_refund_at =
+        Instant::now() - Duration::from_secs(PAID_EXIT_BUYER_REFUND_RETRY_SECS);
     let mut last_recent_peer_refresh_signature = None;
     let mut last_recent_peer_cache_persisted_at = 0;
     let (join_request_ipc_tx, mut join_request_ipc_rx) =
@@ -435,6 +438,31 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 }
                 #[cfg(feature = "paid-exit")]
                 let mut automatic_paid_exit_route_changed = false;
+                #[cfg(feature = "paid-exit")]
+                if last_paid_exit_buyer_refund_at.elapsed()
+                    >= Duration::from_secs(PAID_EXIT_BUYER_REFUND_RETRY_SECS)
+                {
+                    last_paid_exit_buyer_refund_at = Instant::now();
+                    match recover_paid_exit_buyer_refunds(&config_path).await {
+                        Ok(recovery)
+                            if recovery.imported_amount_sat > 0 || recovery.error_count > 0 =>
+                        {
+                            eprintln!(
+                                "paid-exit: buyer refund recovery scanned={} complete={} pending={} imported_sat={} errors={} changed={}",
+                                recovery.scanned_count,
+                                recovery.complete_count,
+                                recovery.pending_count,
+                                recovery.imported_amount_sat,
+                                recovery.error_count,
+                                recovery.changed
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("paid-exit: buyer refund recovery failed: {error}");
+                        }
+                    }
+                }
                 if let Some(runtime) = fips_tunnel_runtime.as_mut() {
                     #[cfg(feature = "paid-exit")]
                     if last_paid_exit_session_open_at.elapsed()
