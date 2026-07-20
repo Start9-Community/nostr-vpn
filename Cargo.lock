@@ -1027,9 +1027,9 @@ dependencies = [
 
 [[package]]
 name = "cdk-spilman"
-version = "0.17.2"
+version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ad615d157eae3e78dc89ae4cccfb22a976f998c3def9a402c3be9dc6d176307"
+checksum = "4bf95eaab457f27b70703cad572e37f381b5f659a8e83cff9070d955010c4ca2"
 dependencies = [
  "anyhow",
  "async-trait",
