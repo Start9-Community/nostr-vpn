@@ -297,6 +297,97 @@ fn buyer_signed_payment_envelope_uses_cashu_service_signer() {
 }
 
 #[test]
+fn buyer_cooperative_close_can_be_resigned_after_local_close() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
+    let (mut store, session_id, channel_id) =
+        buyer_store_with_session(&seller, &buyer, &sample_config());
+
+    store
+        .build_buyer_signed_payment_envelope(
+            &FakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id: session_id.clone(),
+                buyer_npub: buyer_npub.clone(),
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::BalanceUpdate,
+                delivered_units: Some(100),
+                paid_msat: Some(2_000),
+                now_unix: 130,
+            },
+        )
+        .expect("build balance update");
+    store
+        .build_buyer_signed_payment_envelope(
+            &FakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id: session_id.clone(),
+                buyer_npub: buyer_npub.clone(),
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose,
+                delivered_units: Some(100),
+                paid_msat: Some(2_000),
+                now_unix: 140,
+            },
+        )
+        .expect("build first cooperative close");
+
+    assert_eq!(
+        store.channels[&channel_id].status,
+        PaidRouteLifecycleStatus::Closed
+    );
+    assert_eq!(
+        store.leases[&store.sessions[&session_id].session.lease_id].status,
+        PaidRouteLifecycleStatus::Closed
+    );
+
+    let retried = store
+        .build_buyer_signed_payment_envelope(
+            &FakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id: session_id.clone(),
+                buyer_npub: buyer_npub.clone(),
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose,
+                delivered_units: Some(100),
+                paid_msat: Some(2_000),
+                now_unix: 150,
+            },
+        )
+        .expect("re-sign cooperative close after local close");
+
+    assert!(retried.changed);
+    assert_eq!(retried.payload_type, "cooperative_close");
+    assert_eq!(retried.paid_msat, 2_000);
+    assert_eq!(retried.delivered_units, 100);
+    assert_eq!(
+        store.sessions[&session_id].session.usage.billable_bytes,
+        100
+    );
+    assert_eq!(
+        store.sessions[&session_id].session.payment.updated_at_unix,
+        150
+    );
+    assert_eq!(
+        store.channels[&channel_id].status,
+        PaidRouteLifecycleStatus::Closed
+    );
+
+    let error = store
+        .build_buyer_signed_payment_envelope(
+            &FakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id,
+                buyer_npub,
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::BalanceUpdate,
+                delivered_units: Some(100),
+                paid_msat: Some(2_000),
+                now_unix: 160,
+            },
+        )
+        .expect_err("closed channel must still reject balance updates");
+    assert!(error.to_string().contains("is not open"));
+}
+
+#[test]
 fn seller_payment_balance_update_raises_paid_amount_and_usage() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
