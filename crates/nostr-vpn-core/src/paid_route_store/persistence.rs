@@ -342,6 +342,36 @@ pub(super) fn ensure_open_buyer_channel(
     Ok(())
 }
 
+pub(super) fn ensure_buyer_channel_accepts_payment(
+    channel: &PaidRouteChannelRecord,
+    lease: &PaidRouteLeaseRecord,
+    kind: BuildPaidRouteBuyerPaymentEnvelopeKind,
+) -> Result<()> {
+    if kind != BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose {
+        return ensure_open_buyer_channel(channel, lease);
+    }
+
+    if matches!(
+        channel.status,
+        PaidRouteLifecycleStatus::Expired | PaidRouteLifecycleStatus::Failed
+    ) {
+        return Err(anyhow!(
+            "paid route buyer channel {} cannot be closed",
+            channel.channel_id
+        ));
+    }
+    if matches!(
+        lease.status,
+        PaidRouteLifecycleStatus::Expired | PaidRouteLifecycleStatus::Failed
+    ) {
+        return Err(anyhow!(
+            "paid route buyer lease {} cannot be closed",
+            lease.lease.lease_id
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn seller_admission_preferred(
     candidate: &PaidRouteSellerAdmission,
     existing: &PaidRouteSellerAdmission,

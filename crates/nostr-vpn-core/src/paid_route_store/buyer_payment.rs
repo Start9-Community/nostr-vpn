@@ -137,7 +137,7 @@ impl PaidRouteStore {
                 "paid route payment buyer does not match lease buyer"
             ));
         }
-        ensure_open_buyer_channel(channel, lease_record)?;
+        ensure_buyer_channel_accepts_payment(channel, lease_record, request.kind)?;
 
         let offer = self.buyer_offer_for_session(lease_record, channel)?;
         let config = PaidExitConfig::from_paid_route_offer(&offer);
@@ -221,7 +221,7 @@ impl PaidRouteStore {
                 channel_id
             ));
         }
-        ensure_open_buyer_channel(&channel, &lease_record)?;
+        ensure_buyer_channel_accepts_payment(&channel, &lease_record, request.kind)?;
 
         let offer = self.buyer_offer_for_session(&lease_record, &channel)?;
         let config = PaidExitConfig::from_paid_route_offer(&offer);
