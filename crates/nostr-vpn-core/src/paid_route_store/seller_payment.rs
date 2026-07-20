@@ -24,9 +24,13 @@ impl PaidRouteStore {
     {
         let before = self.clone();
         let mut next = before.clone();
+        let repairs_pending_close = matches!(
+            &request.envelope.payload,
+            StreamingRoutePaymentPayload::CooperativeClose(_)
+        );
         let mut result = next.apply_seller_payment_inner(request.clone())?;
         result.changed = next != before;
-        if !result.changed {
+        if !result.changed && !repairs_pending_close {
             return Ok(result);
         }
         next.process_seller_spilman_receiver_payment(&request, receiver, context)?;
