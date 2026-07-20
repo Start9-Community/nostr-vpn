@@ -260,6 +260,45 @@ fn seller_payment_cooperative_close_suspends_admission() {
 }
 
 #[test]
+fn repeated_seller_close_repairs_receiver_state_when_app_state_already_matches() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let seller_npub = seller.public_key().to_bech32().expect("seller npub");
+    let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
+    let config = sample_config();
+    let mut store = seller_store_with_open_channel(&seller, &buyer, &config);
+    let receiver = FakeSpilmanReceiver::new("channel-1", 1);
+    let request = ApplyPaidRouteSellerPaymentRequest {
+        envelope: seller_payment_envelope(
+            "internet-exit",
+            "lease-1",
+            &buyer_npub,
+            &seller_npub,
+            130,
+            StreamingRoutePaymentPayload::CooperativeClose(StreamingRouteCooperativeClose {
+                final_paid_msat: 1_000,
+                payment: sample_spilman_payment("channel-1", 1),
+            }),
+        ),
+        seller_npub,
+        config,
+        now_unix: 130,
+    };
+
+    let first = store
+        .apply_seller_payment_with_spilman_receiver(request.clone(), &receiver, &())
+        .expect("apply close to app and receiver");
+    assert!(first.changed);
+    assert_eq!(receiver.process_calls.get(), 1);
+
+    let repeated = store
+        .apply_seller_payment_with_spilman_receiver(request, &receiver, &())
+        .expect("replay close to repair receiver state");
+    assert!(!repeated.changed);
+    assert_eq!(receiver.process_calls.get(), 2);
+}
+
+#[test]
 fn seller_manual_channel_close_suspends_admission() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
