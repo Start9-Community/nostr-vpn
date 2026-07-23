@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Release the iOS UI process's shared Cashu wallet and SQLite locks before
+  suspension, then reopen the native core on foreground, preventing
+  RunningBoard `0xDEAD10CC` terminations.
+- Resolve Ad Hoc signing from the exact selected CoreDevice instead of a stale
+  environment UDID when multiple iPhones are connected.
+
+### Changed
+
+- Gate physical iOS releases with three background/foreground cycles,
+  including a ten-second suspension, and verify native-core close/reopen state
+  on every transition.
+- Verify Android Activity background/foreground survival in every physical
+  Android smoke.
+
 ## 4.1.4 - 2026-07-22
 
 ### Changed

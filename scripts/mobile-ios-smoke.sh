@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/release_common.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/mobile_env.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
 load_release_env "$ROOT"
 load_appstoreconnect_defaults
 load_mobile_env "$ROOT"
@@ -53,6 +55,8 @@ IDLE_CPU_MAX_PERCENT="${NVPN_IOS_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_PERCE
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-10}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_IOS_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-3}}"
 IOS_SIM_PROCESS_NAME="${NVPN_IOS_SIM_PROCESS_NAME:-Nostr VPN}"
+IOS_LIFECYCLE_GATE="${NVPN_IOS_LIFECYCLE_GATE:-1}"
+IOS_LIFECYCLE_CYCLES="${NVPN_IOS_LIFECYCLE_CYCLES:-3}"
 SCREENSHOT="$ROOT/artifacts/nostr-vpn-ios.png"
 vpn_cleanup_armed=0
 vpn_cleanup_device=""
@@ -63,6 +67,9 @@ usage: scripts/mobile-ios-smoke.sh [simulator|device] [--install] [--disconnect]
 
 simulator  Builds, installs, launches, and screenshots the simulator app.
 device     Launches an already installed physical test build.
+           By default, backgrounds and foregrounds it three times and proves
+           the shared native core closes and reopens on every transition,
+           including a ten-second suspended interval.
 --install  Builds and installs the current iphoneos test app
            before launching device mode.
 --disconnect
@@ -278,34 +285,35 @@ device_app_path() {
 
 connected_ios_udid() {
   local device="$1"
-  if [[ -n "${NVPN_IOS_DEVICE_UDID:-}" ]]; then
-    printf '%s\n' "$NVPN_IOS_DEVICE_UDID"
-    return 0
-  fi
-  if [[ "$device" =~ ^[0-9A-Fa-f-]{8,}$ ]]; then
-    printf '%s\n' "$device"
-    return 0
-  fi
-
-  local found=""
-  local candidate
-  if command -v idevice_id >/dev/null 2>&1; then
-    while IFS= read -r candidate; do
-      [[ -z "$candidate" ]] && continue
-      if [[ -n "$found" ]]; then
-        echo "Multiple physical iOS devices are connected; set NVPN_IOS_DEVICE_UDID for Ad Hoc signing." >&2
-        return 1
-      fi
-      found="$candidate"
-    done < <(idevice_id -l)
-  elif command -v ideviceinfo >/dev/null 2>&1; then
-    found="$(ideviceinfo -s -k UniqueDeviceID 2>/dev/null || true)"
-  fi
-  if [[ -z "$found" ]]; then
-    echo "Could not resolve the connected device UDID; set NVPN_IOS_DEVICE_UDID for Ad Hoc signing." >&2
+  local details_file udid
+  details_file="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-device-details.XXXXXX")"
+  if ! xcrun devicectl device info details \
+    --device "$device" \
+    --json-output "$details_file" \
+    --quiet >/dev/null
+  then
+    rm -f "$details_file"
+    echo "Could not inspect the selected iOS device for Ad Hoc signing." >&2
     return 1
   fi
-  printf '%s\n' "$found"
+  udid="$(python3 - "$details_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    details = json.load(handle)
+value = details.get("result", {}).get("hardwareProperties", {}).get("udid")
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit(1)
+print(value.strip())
+PY
+  )" || {
+    rm -f "$details_file"
+    echo "The selected iOS device did not report a signing UDID." >&2
+    return 1
+  }
+  rm -f "$details_file"
+  printf '%s\n' "$udid"
 }
 
 prepare_device_signing() {
@@ -975,6 +983,10 @@ run_device() {
   fi
   if bool_is_true "$INSTALL_DEVICE_APP"; then
     install_device_app "$device"
+  fi
+  if bool_is_true "$IOS_LIFECYCLE_GATE"; then
+    run_ios_app_lifecycle_gate \
+      "$device" "$BUNDLE_ID" "$VPN_RESULT_DIR" "$IOS_LIFECYCLE_CYCLES"
   fi
   if [[ "$vpn_cycle" -eq 1 ]]; then
     run_vpn_cycle "$device"

@@ -184,6 +184,8 @@ grep -Fq './scripts/mobile-ios-smoke.sh simulator' "$RELEASE_GATE" \
   || fail "release gate does not run the iOS app idle CPU smoke"
 grep -Fq './scripts/mobile-android-smoke.sh --vpn-cycle --create-network' "$RELEASE_GATE" \
   || fail "release gate does not run the Android background active-VPN idle CPU smoke"
+grep -Fq 'run_android_activity_lifecycle_gate' "$MOBILE_ANDROID_SMOKE" \
+  || fail "Android physical smoke does not verify Activity background/foreground survival"
 grep -Fq 'NVPN_ANDROID_PACKAGE="fi.siriusbusiness.nvpn.releasegate"' "$RELEASE_GATE" \
   || fail "release gate Android smoke does not use an isolated package"
 grep -Fq 'release_gate_select_android_idle_serial' "$RELEASE_GATE" \

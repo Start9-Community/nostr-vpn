@@ -84,6 +84,7 @@ COMMON_ENV=(
   NVPN_IOS_DEVICE_SIGNING_MODE=development
   NVPN_IOS_VPN_START_WAIT_SECS=0
   NVPN_IOS_VPN_RESULT_WAIT_SECS=0
+  NVPN_IOS_LIFECYCLE_GATE=0
   NVPN_IDLE_CPU_GATE=0
   NVPN_TEST_XCRUN_LOG="$FIXTURE/xcrun.log"
 )
@@ -149,7 +150,11 @@ python3 - \
   "$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift" \
   "$ROOT/scripts/ios-profiles" \
   "$ROOT/ios/Sources/AppModelDebugJoinAutomation.swift" \
-  "$ROOT/ios/Sources/AppModelDebugURLAutomation.swift" <<'PY'
+  "$ROOT/ios/Sources/AppModelDebugURLAutomation.swift" \
+  "$ROOT/ios/Sources/AppModelDebugLifecycle.swift" \
+  "$ROOT/ios/Sources/NostrVpnIosApp.swift" \
+  "$ROOT/scripts/lib-mobile-ios-lifecycle.sh" \
+  "$ROOT/scripts/release-gate.sh" <<'PY'
 import sys
 
 app_model = open(sys.argv[1], encoding="utf-8").read()
@@ -161,6 +166,10 @@ packet_tunnel = open(sys.argv[6], encoding="utf-8").read()
 profiles = open(sys.argv[7], encoding="utf-8").read()
 join_automation = open(sys.argv[8], encoding="utf-8").read()
 url_automation = open(sys.argv[9], encoding="utf-8").read()
+lifecycle_automation = open(sys.argv[10], encoding="utf-8").read()
+ios_app = open(sys.argv[11], encoding="utf-8").read()
+lifecycle_gate = open(sys.argv[12], encoding="utf-8").read()
+release_gate = open(sys.argv[13], encoding="utf-8").read()
 sync = app_model.split("private func syncPacketTunnelConfig", 1)[1].split(
     "private func actionRequiresPacketTunnelConfigSync", 1
 )[0]
@@ -265,6 +274,35 @@ if 'action == "automation"' not in app_model:
     raise SystemExit("iOS app does not receive physical automation without a process restart")
 if "debugArguments(fromBase64URL" not in url_automation:
     raise SystemExit("iOS physical automation URL arguments are not explicitly decoded")
+if "@Environment(\\.scenePhase)" not in ios_app or "model.handleScenePhase(phase)" not in ios_app:
+    raise SystemExit("iOS app does not forward background/foreground lifecycle changes")
+if "case .background:" not in app_model or "suspendNativeCore()" not in app_model:
+    raise SystemExit("iOS app does not close its shared native core before suspension")
+if "case .active:" not in app_model or "resumeNativeCore()" not in app_model:
+    raise SystemExit("iOS app does not reopen its native core after foregrounding")
+if "core?.close()" not in app_model or "core = nil" not in app_model:
+    raise SystemExit("iOS suspension path can retain the shared Cashu wallet lock")
+if "--nvpn-debug-lifecycle-result" not in lifecycle_automation:
+    raise SystemExit("iOS physical build cannot report native-core lifecycle state")
+if "com.apple.Preferences" not in lifecycle_gate:
+    raise SystemExit("iOS lifecycle gate does not physically background the app")
+if lifecycle_gate.count("ios_lifecycle_wait_for_phase") < 2:
+    raise SystemExit("iOS lifecycle gate does not prove background and foreground phases")
+if 'IOS_LIFECYCLE_GATE="${NVPN_IOS_LIFECYCLE_GATE:-1}"' not in open(
+    sys.argv[1].replace("ios/Sources/AppModel.swift", "scripts/mobile-ios-smoke.sh"),
+    encoding="utf-8",
+).read():
+    raise SystemExit("physical iOS lifecycle gate is not enabled by default")
+if "run_mobile_idle_cpu_gates" not in release_gate:
+    raise SystemExit("release gate no longer reaches the physical iOS smoke")
+ios_smoke = open(
+    sys.argv[1].replace("ios/Sources/AppModel.swift", "scripts/mobile-ios-smoke.sh"),
+    encoding="utf-8",
+).read()
+if 'get("hardwareProperties", {}).get("udid")' not in ios_smoke:
+    raise SystemExit("iOS signing does not resolve the exact selected device UDID")
+if 'printf \'%s\\n\' "$NVPN_IOS_DEVICE_UDID"' in ios_smoke:
+    raise SystemExit("iOS signing can still trust a stale unrelated device UDID")
 PY
 
 printf 'iOS VPN cleanup harness passed\n'

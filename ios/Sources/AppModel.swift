@@ -28,7 +28,7 @@ final class AppModel: ObservableObject {
     @Published var copiedValue = ""
     @Published var vpnDisclosurePromptVisible = false
 
-    let core: NativeCoreClient?
+    var core: NativeCoreClient?
     let vpnController = PacketTunnelController()
     let supportDir: URL?
     let fixtureMode: Bool
@@ -37,6 +37,10 @@ final class AppModel: ObservableObject {
     private var tunnelConfigSyncTask: Task<Void, Never>?
     var launchAutomationHandled = false
     var tunnelStateRefreshInFlight = false
+    #if DEBUG
+    var lifecycleProbeResultName: String?
+    var lifecycleProbeTransition = 0
+    #endif
 
     init() {
         fixtureMode = Self.fixtureModeRequested()
@@ -106,7 +110,11 @@ final class AppModel: ObservableObject {
                 let delay = self?.activeNetwork == nil
                     ? Self.onboardingRefreshNanoseconds
                     : Self.normalRefreshNanoseconds
-                try? await Task.sleep(nanoseconds: delay)
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    return
+                }
                 self?.refresh()
             }
         }
@@ -119,6 +127,46 @@ final class AppModel: ObservableObject {
             // is still started normally.
             ensureAutoconnectPacketTunnel(reason: "startup")
         }
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        guard !fixtureMode else {
+            return
+        }
+        switch phase {
+        case .background:
+            suspendNativeCore()
+        case .active:
+            resumeNativeCore()
+        case .inactive:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    private func suspendNativeCore() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        tunnelConfigSyncTask?.cancel()
+        tunnelConfigSyncTask = nil
+        core?.close()
+        core = nil
+        #if DEBUG
+        writeDebugLifecycleProbe(phase: "background")
+        #endif
+    }
+
+    private func resumeNativeCore() {
+        if core == nil, let supportDir {
+            let client = NativeCoreClient(dataDir: supportDir.path, appVersion: "")
+            core = client
+            state = client.state()
+        }
+        #if DEBUG
+        writeDebugLifecycleProbe(phase: "active")
+        #endif
+        start()
     }
 
     func refresh() {

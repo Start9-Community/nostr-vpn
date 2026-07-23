@@ -51,6 +51,8 @@ IDLE_CPU_GATE="${NVPN_ANDROID_IDLE_CPU_GATE:-${NVPN_IDLE_CPU_GATE:-1}}"
 IDLE_CPU_MAX_PERCENT="${NVPN_ANDROID_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_PERCENT:-5}}"
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_ANDROID_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-10}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_ANDROID_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-3}}"
+ANDROID_LIFECYCLE_GATE="${NVPN_ANDROID_LIFECYCLE_GATE:-1}"
+ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-2}"
 
 build=1
 clear_state=0
@@ -69,6 +71,8 @@ Builds and installs the debug APK, launches the app through adb, and optionally
 cycles the debug VPN action. Values may live in .env.mobile.local, shell env,
 or --serial. Keep device identifiers and signing details out of committed files.
 The installed debug app must report build metadata matching this repo checkout.
+Every smoke backgrounds and foregrounds the Activity and requires the same app
+process to survive and resume.
 
 First-run Android VPN permission prompts may need manual approval before
 --vpn-cycle can run unattended.
@@ -1375,6 +1379,49 @@ start_main_activity() {
   "$ADB" -s "$serial" shell am start -n "$MAIN_ACTIVITY" "$@" >/dev/null
 }
 
+android_app_pid() {
+  "$ADB" -s "$serial" shell pidof "$PACKAGE_NAME" 2>/dev/null \
+    | tr -d '\r' \
+    | awk '{ print $1 }'
+}
+
+android_activity_resumed() {
+  "$ADB" -s "$serial" shell dumpsys activity activities 2>/dev/null \
+    | tr -d '\r' \
+    | grep -F "topResumedActivity=" \
+    | grep -Fq "$MAIN_ACTIVITY"
+}
+
+run_android_activity_lifecycle_gate() {
+  truthy "$ANDROID_LIFECYCLE_GATE" || return 0
+  local before_pid background_pid foreground_pid
+  before_pid="$(android_app_pid)"
+  if [[ -z "$before_pid" ]]; then
+    echo "Android lifecycle gate failed: app process is not running" >&2
+    return 1
+  fi
+
+  "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME
+  sleep "$ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS"
+  background_pid="$(android_app_pid)"
+  if [[ "$background_pid" != "$before_pid" ]]; then
+    echo "Android lifecycle gate failed: app process did not survive backgrounding" >&2
+    return 1
+  fi
+
+  start_main_activity
+  if ! wait_until 5 android_activity_resumed; then
+    echo "Android lifecycle gate failed: Activity did not resume" >&2
+    return 1
+  fi
+  foreground_pid="$(android_app_pid)"
+  if [[ "$foreground_pid" != "$before_pid" ]]; then
+    echo "Android lifecycle gate failed: app process restarted while foregrounding" >&2
+    return 1
+  fi
+  echo "Android background/foreground lifecycle gate passed"
+}
+
 seed_debug_config() {
   if [[ "$create_network" == "1" || "$create_network" == "true" ]]; then
     start_main_activity \
@@ -1456,6 +1503,7 @@ fi
 start_main_activity
 "$ADB" -s "$serial" shell pm path "$PACKAGE_NAME" >/dev/null
 wait_for_android_build_metadata
+run_android_activity_lifecycle_gate
 
 if [[ "$vpn_cycle" -eq 0 ]]; then
   run_android_idle_cpu_gate "Android foreground app"

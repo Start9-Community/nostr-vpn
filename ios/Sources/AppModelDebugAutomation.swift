@@ -15,6 +15,7 @@ extension AppModel {
     func runDebugAutomation(arguments rawArguments: [String]) -> Bool {
         let arguments = Set(rawArguments)
         debugLog("debug automation args=\(Self.redactedDebugArguments(rawArguments))")
+        let lifecycleProbeArmed = armDebugLifecycleProbeIfRequested(arguments: rawArguments)
         let selectedNetwork = selectDebugNetworkIfPresent(arguments: rawArguments)
         let addedNetwork = addDebugNetworkIfPresent(arguments: rawArguments)
         let importedJoinRequest = importDebugJoinRequestIfPresent(arguments: rawArguments)
@@ -72,7 +73,8 @@ extension AppModel {
             setVpnEnabled(false, force: true)
             return true
         }
-        return selectedNetwork || addedNetwork || importedJoinRequest || manuallyJoined || exportedJoinRequest
+        return lifecycleProbeArmed || selectedNetwork || addedNetwork || importedJoinRequest
+            || manuallyJoined || exportedJoinRequest
             || addedParticipant || removedParticipant || removedNetwork || exportedSupportFile
             || waitedForJoinedNetwork
     }
