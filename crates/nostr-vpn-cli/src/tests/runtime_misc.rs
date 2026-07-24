@@ -646,7 +646,7 @@ fn fips_link_events_restart_endpoint_for_major_link_changes() {
 fn fips_link_events_refresh_paths_for_endpoint_only_changes() {
     assert_eq!(
         fips_link_event_refresh(false, false, true, false),
-        FipsLinkEventRefresh::RefreshPaths
+        FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
     );
     assert_eq!(
         fips_link_event_refresh(false, false, false, false),

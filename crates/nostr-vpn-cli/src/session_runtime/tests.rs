@@ -208,7 +208,7 @@ mod tests {
         );
         assert_eq!(
             fips_link_event_refresh(false, false, true, false),
-            FipsLinkEventRefresh::RefreshPaths
+            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
         );
     }
     #[test]

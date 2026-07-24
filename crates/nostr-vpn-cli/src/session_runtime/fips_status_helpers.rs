@@ -124,6 +124,7 @@ struct FipsRestartContext<'a> {
 pub(crate) enum FipsLinkEventRefresh {
     None,
     RestartEndpoint,
+    UpdatePeersAndRefreshPaths,
     RefreshPaths,
 }
 #[derive(Debug, Default)]
@@ -139,7 +140,9 @@ pub(crate) fn fips_link_event_refresh(
 ) -> FipsLinkEventRefresh {
     if network_changed || resumed_after_sleep {
         FipsLinkEventRefresh::RestartEndpoint
-    } else if platform_network_event || endpoint_changed {
+    } else if endpoint_changed {
+        FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+    } else if platform_network_event {
         FipsLinkEventRefresh::RefreshPaths
     } else {
         FipsLinkEventRefresh::None
@@ -444,7 +447,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
     runtime: &mut Option<crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
     context: FipsRestartContext<'_>,
     reason: &str,
-    restart_endpoint: bool,
+    refresh: FipsLinkEventRefresh,
 ) -> Result<()> {
     let config_iface = runtime
         .as_ref()
@@ -469,7 +472,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
     .await?;
     let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
     let endpoint_peers = config.endpoint_peers.clone();
-    if restart_endpoint
+    if matches!(refresh, FipsLinkEventRefresh::RestartEndpoint)
         || runtime
             .as_ref()
             .is_some_and(|existing| existing.requires_endpoint_restart(&config))
@@ -483,8 +486,13 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
             started.iface()
         );
         *runtime = Some(started);
-    } else if let Some(existing) = runtime.as_mut() {
-        existing.apply_config(config).await?;
+    } else if let Some(existing) = runtime.as_ref() {
+        if matches!(
+            refresh,
+            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+        ) {
+            existing.update_peers(&endpoint_peers).await?;
+        }
         let refreshed = existing.refresh_peer_paths(&endpoint_peers).await?;
         eprintln!(
             "daemon: refreshed FIPS private mesh paths on {} after {reason} ({refreshed} direct probe(s) started)",
@@ -697,7 +705,7 @@ async fn restart_fips_tunnel_runtime_after_pending_roster_links(
         runtime,
         context,
         "all FIPS roster links pending",
-        false,
+        FipsLinkEventRefresh::UpdatePeersAndRefreshPaths,
     )
     .await?;
     Ok(true)
