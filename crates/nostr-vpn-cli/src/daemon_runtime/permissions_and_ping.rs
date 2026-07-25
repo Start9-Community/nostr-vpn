@@ -161,6 +161,14 @@ pub(crate) fn kill_error_requires_control_fallback(message: &str) -> bool {
     lower.contains("operation not permitted") || lower.contains("permission denied")
 }
 
+fn ping_wait_arg_from_secs(timeout_secs: u64) -> String {
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        timeout_secs.saturating_mul(1000).to_string()
+    } else {
+        timeout_secs.to_string()
+    }
+}
+
 pub(crate) fn run_ping(target: &str, count: u32, timeout_secs: u64) -> Result<()> {
     let mut command = ProcessCommand::new("ping");
     if cfg!(target_os = "windows") {
@@ -168,14 +176,14 @@ pub(crate) fn run_ping(target: &str, count: u32, timeout_secs: u64) -> Result<()
             .arg("-n")
             .arg(count.to_string())
             .arg("-w")
-            .arg((timeout_secs.saturating_mul(1000)).to_string())
+            .arg(ping_wait_arg_from_secs(timeout_secs))
             .arg(target);
     } else {
         command
             .arg("-c")
             .arg(count.to_string())
             .arg("-W")
-            .arg(timeout_secs.to_string())
+            .arg(ping_wait_arg_from_secs(timeout_secs))
             .arg(target);
     }
 
@@ -191,6 +199,16 @@ pub(crate) fn run_ping(target: &str, count: u32, timeout_secs: u64) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod ping_command_tests {
+    use super::ping_wait_arg_from_secs;
+
+    #[test]
+    fn timeout_seconds_are_converted_to_macos_ping_milliseconds() {
+        assert_eq!(ping_wait_arg_from_secs(2), "2000");
+    }
 }
 
 pub(crate) fn resolve_ping_target(target: &str, peers: &[PeerAnnouncement]) -> Option<String> {
