@@ -201,8 +201,8 @@ mod tests {
         );
         assert_eq!(
             fips_link_event_refresh(false, true, false, false),
-            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths,
-            "an address/route handoff must preserve sessions unless runtime config requires replacement"
+            FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
+            "an address/route handoff must rebind carriers while preserving sessions unless runtime config requires replacement"
         );
 
         assert_eq!(

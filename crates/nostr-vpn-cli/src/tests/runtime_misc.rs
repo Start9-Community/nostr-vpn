@@ -599,8 +599,8 @@ async fn network_roam_during_route_suppression_rechecks_and_preserves_fips_sessi
     assert!(network_changed, "the new IP and gateway must be observed");
     assert_eq!(
         fips_link_event_refresh(false, network_changed, false, false),
-        FipsLinkEventRefresh::UpdatePeersAndRefreshPaths,
-        "same-interface address changes must refresh paths without discarding established sessions"
+        FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
+        "same-interface address changes must rebind underlay sockets without discarding established sessions"
     );
     assert_eq!(
         fips_link_event_refresh(false, previous.changed_since(&previous), false, false),
@@ -637,7 +637,7 @@ async fn platform_route_event_always_schedules_settle_snapshot_recheck() {
 fn fips_link_events_preserve_sessions_across_network_handoffs() {
     assert_eq!(
         fips_link_event_refresh(false, true, false, false),
-        FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+        FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
     );
 }
 #[test]

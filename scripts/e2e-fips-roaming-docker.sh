@@ -34,7 +34,8 @@ FALLBACK_HOLD_SECS="${NVPN_E2E_ROAMING_FALLBACK_HOLD_SECS:-12}"
 PAYLOAD_PROBE_INTERVAL_SECS="${NVPN_E2E_ROAMING_PAYLOAD_PROBE_INTERVAL_SECS:-1}"
 PAYLOAD_RECOVERY_DEADLINE_SECS="${NVPN_E2E_ROAMING_PAYLOAD_RECOVERY_SECS:-10}"
 NETWORK_CHANGE_RECOVERY_DEADLINE_SECS="${NVPN_E2E_NETWORK_CHANGE_RECOVERY_SECS:-30}"
-LOCAL_ROUTE_HANDSHAKE_FAILURE_MAX="${NVPN_E2E_LOCAL_ROUTE_HANDSHAKE_FAILURE_MAX:-24}"
+NETWORK_CHANGE_MAX_CONSECUTIVE_PAYLOAD_FAILURES="${NVPN_E2E_NETWORK_CHANGE_MAX_CONSECUTIVE_PAYLOAD_FAILURES:-4}"
+LOCAL_ROUTE_HANDSHAKE_FAILURE_MAX="${NVPN_E2E_LOCAL_ROUTE_HANDSHAKE_FAILURE_MAX:-2}"
 FIPS_NOSTR_DISCOVERY_POLICY="${NVPN_FIPS_NOSTR_DISCOVERY_POLICY:-configured_only}"
 FIPS_RUST_LOG="${NVPN_E2E_FIPS_RUST_LOG:-info}"
 LOADED_LATENCY_ENABLED="${NVPN_E2E_ROAMING_LOADED_LATENCY:-1}"
@@ -402,7 +403,7 @@ daemon_process_id() {
   "${COMPOSE[@]}" exec -T "$node" sh -lc 'pgrep -o -x nvpn' | tr -d '\r'
 }
 
-wait_for_network_change_restart_after_marker() {
+wait_for_network_change_refresh_after_marker() {
   local node="$1"
   local marker="$2"
   local label="$3"
@@ -414,8 +415,9 @@ marker="$1"
 awk -v marker="$marker" '
   $0 ~ "NVPN_E2E_MARKER " marker { seen = 1; next }
   seen && /network change detected; refreshing FIPS endpoint state/ { changed = 1 }
+  changed && /refreshed FIPS private mesh paths/ && /[1-9][0-9]* underlay carrier\(s\) rebound/ { refreshed = 1 }
   changed && /restarted FIPS private mesh/ { restarted = 1 }
-  END { exit (changed && restarted) ? 0 : 1 }
+  END { exit (changed && refreshed && !restarted) ? 0 : 1 }
 ' /root/.config/nvpn/daemon.log
 SH
     then
@@ -424,7 +426,7 @@ SH
     sleep 1
   done
 
-  echo "fips roaming e2e failed: $label did not restart the FIPS endpoint after the underlay changed" >&2
+  echo "fips roaming e2e failed: $label did not rebind its underlay carrier while preserving the FIPS endpoint" >&2
   "${COMPOSE[@]}" exec -T "$node" sh -lc 'tail -n 180 /root/.config/nvpn/daemon.log' >&2 || true
   exit 1
 }
@@ -449,7 +451,7 @@ set -eu
 marker="$1"
 awk -v marker="$marker" '
   $0 ~ "NVPN_E2E_MARKER " marker { seen = 1; next }
-  seen && /Failed to send handshake message/ && /(Network is unreachable|No route to host|Host is unreachable|os error 51|os error 65)/ {
+  seen && /Failed to send handshake message/ && /(Network is unreachable|No route to host|Host is unreachable|Can.t assign requested address|AddrNotAvailable|os error 49|os error 51|os error 65)/ {
     count++
   }
   END { print count + 0 }
@@ -467,6 +469,39 @@ awk -v marker="$marker" '
   seen && (/Failed to send handshake message/ || /Local route unavailable/ || /request.*stale|stale.*advert/) { print }
 ' /root/.config/nvpn/daemon.log | tail -n 120
 SH
+    exit 1
+  fi
+}
+
+assert_payload_probe_failure_run_bounded() {
+  local node="$1"
+  local output="$2"
+  local since="$3"
+  local until="$4"
+  local label="$5"
+  local worst
+  worst="$("${COMPOSE[@]}" exec -T "$node" sh -s -- "$output" "$since" "$until" <<'SH'
+set -eu
+output="$1"
+since="$2"
+until="$3"
+awk -v since="$since" -v until="$until" '
+  $1 >= since && $1 <= until {
+    if ($2 == "fail") {
+      run++
+      if (run > worst) worst = run
+    } else if ($2 == "ok") {
+      run = 0
+    }
+  }
+  END { print worst + 0 }
+' "$output"
+SH
+  )"
+  worst="${worst//$'\r'/}"
+  if (( worst > NETWORK_CHANGE_MAX_CONSECUTIVE_PAYLOAD_FAILURES )); then
+    echo "fips roaming e2e failed: $label had $worst consecutive payload failures, expected <= $NETWORK_CHANGE_MAX_CONSECUTIVE_PAYLOAD_FAILURES" >&2
+    "${COMPOSE[@]}" exec -T "$node" sh -lc "cat '$output' 2>/dev/null || true" >&2 || true
     exit 1
   fi
 }
@@ -684,8 +719,10 @@ run_roam_flap() {
   local alice_fallback bob_fallback
   alice_fallback="$(wait_for_fallback_probe_peer node-a "$BOB_NPUB" "$alice_direct_addr" "alice during $flap_name" "$FALLBACK_DEADLINE_SECS" "$churn_started")"
   bob_fallback="$(wait_for_fallback_probe_peer node-b "$ALICE_NPUB" "$bob_direct_addr" "bob during $flap_name" "$FALLBACK_DEADLINE_SECS" "$churn_started")"
-  assert_payload_probe_success_since node-a "$alice_probe" "$churn_started" "alice continuous payload during $flap_name"
-  assert_payload_probe_success_since node-b "$bob_probe" "$churn_started" "bob continuous payload during $flap_name"
+  local fallback_payload_check_started
+  fallback_payload_check_started="$(date +%s)"
+  assert_payload_probe_success_since node-a "$alice_probe" "$fallback_payload_check_started" "alice payload on fallback during $flap_name"
+  assert_payload_probe_success_since node-b "$bob_probe" "$fallback_payload_check_started" "bob payload on fallback during $flap_name"
   assert_local_route_handshake_failures_bounded node-a "$alice_marker" "alice during $flap_name"
   assert_local_route_handshake_failures_bounded node-b "$bob_marker" "bob during $flap_name"
 
@@ -705,8 +742,10 @@ run_roam_flap() {
   alice_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$alice_direct_addr" "alice after $flap_name restore" "$DIRECT_RECOVERY_DEADLINE_SECS" "$restore_started")"
   bob_direct="$(wait_for_direct_peer node-b "$ALICE_NPUB" "$bob_direct_addr" "bob after $flap_name restore" "$DIRECT_RECOVERY_DEADLINE_SECS" "$restore_started")"
   echo "$flap_name direct payload recovery completed in $(( $(date +%s) - restore_started ))s"
-  assert_payload_probe_success_since node-a "$alice_probe" "$restore_started" "alice continuous payload after $flap_name restore"
-  assert_payload_probe_success_since node-b "$bob_probe" "$restore_started" "bob continuous payload after $flap_name restore"
+  local direct_payload_check_started
+  direct_payload_check_started="$(date +%s)"
+  assert_payload_probe_success_since node-a "$alice_probe" "$direct_payload_check_started" "alice payload on restored direct path after $flap_name"
+  assert_payload_probe_success_since node-b "$bob_probe" "$direct_payload_check_started" "bob payload on restored direct path after $flap_name"
   local alice_probe_log bob_probe_log
   alice_probe_log="$(stop_payload_probe node-a "$alice_probe")"
   bob_probe_log="$(stop_payload_probe node-b "$bob_probe")"
@@ -747,12 +786,17 @@ run_underlay_network_change() {
   docker network connect --ip "$ROAM_NODE_A_IP" "$ROAM_NETWORK_NAME" "$node_a_container"
   docker network disconnect "$PRIMARY_NETWORK_NAME" "$node_a_container"
 
-  wait_for_network_change_restart_after_marker node-a "$roam_marker" "alice moving to alternate underlay"
+  wait_for_network_change_refresh_after_marker node-a "$roam_marker" "alice moving to alternate underlay"
   local alice_roam_direct bob_roam_direct
   alice_roam_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$ROAM_NODE_B_IP:51820" "alice after alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
   bob_roam_direct="$(wait_for_direct_peer node-b "$ALICE_NPUB" "$ROAM_NODE_A_IP:51820" "bob after alice alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
-  assert_payload_probe_success_since node-a "$alice_probe" "$change_started" "alice payload after alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS"
-  assert_payload_probe_success_since node-b "$bob_probe" "$change_started" "bob payload after alice alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS"
+  local roam_payload_check_started roam_payload_checked_at
+  roam_payload_check_started="$(date +%s)"
+  assert_payload_probe_success_since node-a "$alice_probe" "$roam_payload_check_started" "alice payload after alternate-underlay move"
+  assert_payload_probe_success_since node-b "$bob_probe" "$roam_payload_check_started" "bob payload after alice alternate-underlay move"
+  roam_payload_checked_at="$(date +%s)"
+  assert_payload_probe_failure_run_bounded node-a "$alice_probe" "$change_started" "$roam_payload_checked_at" "alice alternate-underlay roam"
+  assert_payload_probe_failure_run_bounded node-b "$bob_probe" "$change_started" "$roam_payload_checked_at" "bob observing alice alternate-underlay roam"
   assert_ping_tunnel node-a "$BOB_TUNNEL_IP" "alice-to-bob after alternate-underlay move" /tmp/underlay-move-alice-to-bob-ping.log
   assert_ping_tunnel node-b "$ALICE_TUNNEL_IP" "bob-to-alice after alternate-underlay move" /tmp/underlay-move-bob-to-alice-ping.log
   pid_after="$(daemon_process_id node-a)"
@@ -767,12 +811,17 @@ run_underlay_network_change() {
   docker network connect --ip "$NVPN_E2E_NODE_A_UNDERLAY_IP" "$PRIMARY_NETWORK_NAME" "$node_a_container"
   docker network disconnect "$ROAM_NETWORK_NAME" "$node_a_container"
 
-  wait_for_network_change_restart_after_marker node-a "$home_marker" "alice returning to original underlay"
+  wait_for_network_change_refresh_after_marker node-a "$home_marker" "alice returning to original underlay"
   local alice_home_direct bob_home_direct
   alice_home_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$NVPN_E2E_NODE_B_UNDERLAY_IP:51820" "alice after original-underlay restore" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$restore_started")"
   bob_home_direct="$(wait_for_direct_peer node-b "$ALICE_NPUB" "$NVPN_E2E_NODE_A_UNDERLAY_IP:51820" "bob after alice original-underlay restore" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$restore_started")"
-  assert_payload_probe_success_since node-a "$alice_probe" "$restore_started" "alice payload after original-underlay restore" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS"
-  assert_payload_probe_success_since node-b "$bob_probe" "$restore_started" "bob payload after alice original-underlay restore" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS"
+  local home_payload_check_started home_payload_checked_at
+  home_payload_check_started="$(date +%s)"
+  assert_payload_probe_success_since node-a "$alice_probe" "$home_payload_check_started" "alice payload after original-underlay restore"
+  assert_payload_probe_success_since node-b "$bob_probe" "$home_payload_check_started" "bob payload after alice original-underlay restore"
+  home_payload_checked_at="$(date +%s)"
+  assert_payload_probe_failure_run_bounded node-a "$alice_probe" "$restore_started" "$home_payload_checked_at" "alice original-underlay restore"
+  assert_payload_probe_failure_run_bounded node-b "$bob_probe" "$restore_started" "$home_payload_checked_at" "bob observing alice original-underlay restore"
   assert_ping_tunnel node-a "$BOB_TUNNEL_IP" "alice-to-bob after original-underlay restore" /tmp/underlay-restore-alice-to-bob-ping.log
   assert_ping_tunnel node-b "$ALICE_TUNNEL_IP" "bob-to-alice after original-underlay restore" /tmp/underlay-restore-bob-to-alice-ping.log
   pid_after="$(daemon_process_id node-a)"

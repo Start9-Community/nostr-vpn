@@ -125,6 +125,7 @@ struct FipsRestartContext<'a> {
 pub(crate) enum FipsLinkEventRefresh {
     None,
     RestartEndpoint,
+    RebindUnderlayAndRefreshPaths,
     UpdatePeersAndRefreshPaths,
 }
 #[derive(Debug, Default)]
@@ -140,11 +141,14 @@ pub(crate) fn fips_link_event_refresh(
 ) -> FipsLinkEventRefresh {
     if resumed_after_sleep {
         FipsLinkEventRefresh::RestartEndpoint
-    } else if network_changed || endpoint_changed {
+    } else if network_changed {
         // Preserve established FIPS sessions across ordinary address/route
-        // handoffs. The runtime's config comparison below still replaces the
-        // endpoint when its physical interface, bind, MTU, or transport
-        // configuration actually changed.
+        // handoffs, but replace the configured UDP sockets whose kernel source
+        // address belonged to the previous network. The runtime's config
+        // comparison below still replaces the endpoint when its physical
+        // interface, bind, MTU, or transport configuration actually changed.
+        FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+    } else if endpoint_changed {
         FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
     } else {
         // Route notifications wake the network snapshot comparison. They are
@@ -492,15 +496,24 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         );
         *runtime = Some(started);
     } else if let Some(existing) = runtime.as_ref() {
+        let rebound = if matches!(
+            refresh,
+            FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+        ) {
+            existing.rebind_network_transports().await?
+        } else {
+            0
+        };
         if matches!(
             refresh,
-            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+            FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+                | FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
         ) {
             existing.update_peers(&endpoint_peers).await?;
         }
         let refreshed = existing.refresh_peer_paths(&endpoint_peers).await?;
         eprintln!(
-            "daemon: refreshed FIPS private mesh paths on {} after {reason} ({refreshed} direct probe(s) started)",
+            "daemon: refreshed FIPS private mesh paths on {} after {reason} ({rebound} underlay carrier(s) rebound, {refreshed} direct probe(s) started)",
             existing.iface(),
         );
     } else {

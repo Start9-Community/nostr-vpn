@@ -64,6 +64,10 @@ impl FipsPrivateTunnelRuntime {
         Ok(0)
     }
 
+    pub(crate) async fn rebind_network_transports(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     pub(crate) fn requires_endpoint_restart(&self, _config: &FipsPrivateTunnelConfig) -> bool {
         false
     }

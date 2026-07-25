@@ -808,6 +808,10 @@ impl FipsPrivateTunnelRuntime {
         self.mesh.refresh_peer_paths(endpoint_peers).await
     }
 
+    pub(crate) async fn rebind_network_transports(&self) -> Result<usize> {
+        self.mesh.rebind_network_transports().await
+    }
+
     pub(crate) async fn ping_peers(&self, network_id: &str, now: u64) -> Result<usize> {
         self.mesh.ping_peers(network_id, now).await
     }
