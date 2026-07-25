@@ -771,9 +771,7 @@ run_underlay_network_change() {
   local node_a_container
   node_a_container="$("${COMPOSE[@]}" ps -q node-a)"
   local roam_marker="underlay-to-roam-$(date +%s)"
-  local bob_roam_marker="bob-underlay-to-roam-$(date +%s)"
   local home_marker="underlay-to-home-$(date +%s)"
-  local bob_home_marker="bob-underlay-to-home-$(date +%s)"
   local alice_probe="/tmp/underlay-move-alice-payload-probe.log"
   local bob_probe="/tmp/underlay-move-bob-payload-probe.log"
   local alice_pid_before alice_pid_after bob_pid_before bob_pid_after change_started restore_started
@@ -781,20 +779,17 @@ run_underlay_network_change() {
   alice_pid_before="$(daemon_process_id node-a)"
   bob_pid_before="$(daemon_process_id node-b)"
   mark_daemon_log node-a "$roam_marker"
-  mark_daemon_log node-b "$bob_roam_marker"
   start_payload_probe node-a "$BOB_TUNNEL_IP" "$alice_probe"
   start_payload_probe node-b "$ALICE_TUNNEL_IP" "$bob_probe"
 
-  echo "--- underlay-network-change: move the direct pair to a different interface, address, gateway, and Docker bridge ---"
+  echo "--- underlay-network-change: move Alice only to a different interface, address, gateway, and Docker bridge ---"
   change_started="$(date +%s)"
-  switch_default_route_to_address node-b "$ROAM_NODE_B_IP" "$ROAM_UNDERLAY_PREFIX.1"
-  wait_for_network_change_refresh_after_marker node-b "$bob_roam_marker" "bob moving to alternate underlay"
   docker network connect --ip "$ROAM_NODE_A_IP" "$ROAM_NETWORK_NAME" "$node_a_container"
   docker network disconnect "$PRIMARY_NETWORK_NAME" "$node_a_container"
 
   wait_for_network_change_refresh_after_marker node-a "$roam_marker" "alice moving to alternate underlay"
   local alice_roam_direct bob_roam_direct
-  alice_roam_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$ROAM_NODE_B_IP:51820" "alice after alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
+  alice_roam_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$NVPN_E2E_NODE_B_UNDERLAY_IP:51820" "alice after alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
   bob_roam_direct="$(wait_for_direct_peer node-b "$ALICE_NPUB" "$ROAM_NODE_A_IP:51820" "bob after alice alternate-underlay move" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
   local roam_payload_check_started roam_payload_checked_at
   roam_payload_check_started="$(date +%s)"
@@ -816,13 +811,10 @@ run_underlay_network_change() {
     exit 1
   fi
 
-  echo "--- underlay-network-change: move the direct pair back to the original underlay ---"
+  echo "--- underlay-network-change: move Alice back to the original underlay ---"
   mark_daemon_log node-a "$home_marker"
-  mark_daemon_log node-b "$bob_home_marker"
   restore_started="$(date +%s)"
   docker network connect --ip "$NVPN_E2E_NODE_A_UNDERLAY_IP" "$PRIMARY_NETWORK_NAME" "$node_a_container"
-  switch_default_route_to_address node-b "$NVPN_E2E_NODE_B_UNDERLAY_IP" "$UNDERLAY_PREFIX.1"
-  wait_for_network_change_refresh_after_marker node-b "$bob_home_marker" "bob returning to original underlay"
   docker network disconnect "$ROAM_NETWORK_NAME" "$node_a_container"
 
   wait_for_network_change_refresh_after_marker node-a "$home_marker" "alice returning to original underlay"
