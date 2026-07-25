@@ -195,12 +195,15 @@ mod tests {
         let idle = fips_link_event_refresh(false, false, false, false);
         assert_eq!(idle, FipsLinkEventRefresh::None);
 
-        for restart in [
-            fips_link_event_refresh(false, true, false, false),
+        assert_eq!(
             fips_link_event_refresh(false, false, false, true),
-        ] {
-            assert_eq!(restart, FipsLinkEventRefresh::RestartEndpoint);
-        }
+            FipsLinkEventRefresh::RestartEndpoint
+        );
+        assert_eq!(
+            fips_link_event_refresh(false, true, false, false),
+            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths,
+            "an address/route handoff must preserve sessions unless runtime config requires replacement"
+        );
 
         assert_eq!(
             fips_link_event_refresh(true, false, false, false),

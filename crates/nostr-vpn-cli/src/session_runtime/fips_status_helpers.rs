@@ -138,9 +138,13 @@ pub(crate) fn fips_link_event_refresh(
     endpoint_changed: bool,
     resumed_after_sleep: bool,
 ) -> FipsLinkEventRefresh {
-    if network_changed || resumed_after_sleep {
+    if resumed_after_sleep {
         FipsLinkEventRefresh::RestartEndpoint
-    } else if endpoint_changed {
+    } else if network_changed || endpoint_changed {
+        // Preserve established FIPS sessions across ordinary address/route
+        // handoffs. The runtime's config comparison below still replaces the
+        // endpoint when its physical interface, bind, MTU, or transport
+        // configuration actually changed.
         FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
     } else {
         // Route notifications wake the network snapshot comparison. They are
