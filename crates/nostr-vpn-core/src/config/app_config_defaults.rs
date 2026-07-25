@@ -1,7 +1,17 @@
 impl AppConfig {
     pub fn ensure_defaults(&mut self) {
         for (npub, addrs) in default_fips_bootstrap_peers() {
-            self.fips_bootstrap_peers.entry(npub).or_insert(addrs);
+            match self.fips_bootstrap_peers.entry(npub) {
+                std::collections::hash_map::Entry::Occupied(mut entry)
+                    if is_legacy_fips_udp_bootstrap(entry.key(), entry.get()) =>
+                {
+                    entry.insert(addrs);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(addrs);
+                }
+            }
         }
         self.fips_websocket_seed_urls = normalize_relay_urls(std::mem::take(
             &mut self.fips_websocket_seed_urls,

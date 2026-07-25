@@ -11,7 +11,7 @@ if [[ -n "${NVPN_IOS_ASC_ROOT:-}" && -z "${NVPN_ASC_ROOT:-}" ]]; then
   export NVPN_ASC_ROOT="$NVPN_IOS_ASC_ROOT"
 fi
 load_appstoreconnect_defaults
-resolve_shared_build_metadata "$ROOT"
+resolve_ios_build_metadata "$ROOT"
 
 IOS_BUNDLE_ID="${NVPN_IOS_BUNDLE_ID:-$NVPN_DEFAULT_IOS_BUNDLE_ID}"
 APP_NAME="${NVPN_ASC_APP_NAME:-Nostr VPN}"
@@ -63,11 +63,6 @@ Environment:
   NVPN_TESTFLIGHT_BUILD_NUMBER    optional build number for expire/status-style operations
   NVPN_TESTFLIGHT_WAIT_ATTEMPTS   default 40
   NVPN_TESTFLIGHT_WAIT_SECONDS    default 30
-  NVPN_TESTFLIGHT_USES_NONEXEMPT_ENCRYPTION
-                                   default false for internal-only builds that do not
-                                   require export-compliance documentation
-  NVPN_TESTFLIGHT_APP_ENCRYPTION_DECLARATION_ID
-                                   required when the build uses non-exempt encryption
 EOF
 }
 
@@ -98,6 +93,7 @@ export NVPN_IOS_BUNDLE_ID="$IOS_BUNDLE_ID"
 export NVPN_ASC_APP_NAME="$APP_NAME"
 export NVPN_ASC_APP_SKU="$APP_SKU"
 export NVPN_ASC_APP_PRIMARY_LOCALE="$APP_PRIMARY_LOCALE"
+export NVPN_TESTFLIGHT_REPO_ROOT="$ROOT"
 
 python3 <<'PY'
 import base64
@@ -108,6 +104,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(
+    0,
+    os.path.join(os.environ["NVPN_TESTFLIGHT_REPO_ROOT"], "scripts"),
+)
+from appstore_draft_metadata import testflight_review_notes
+from testflight_export_compliance import (
+    ExportComplianceError,
+    ensure_build_compliance,
+)
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -128,18 +134,6 @@ VERSION_NAME = os.environ["NVPN_APP_VERSION_NAME"]
 BUILD_NUMBER = os.environ.get("NVPN_TESTFLIGHT_BUILD_NUMBER", "").strip() or os.environ["NVPN_APP_VERSION_CODE"]
 WAIT_ATTEMPTS = int(os.environ.get("NVPN_TESTFLIGHT_WAIT_ATTEMPTS", "40"))
 WAIT_SECONDS = int(os.environ.get("NVPN_TESTFLIGHT_WAIT_SECONDS", "30"))
-USES_NONEXEMPT_ENCRYPTION_RAW = os.environ.get(
-    "NVPN_TESTFLIGHT_USES_NONEXEMPT_ENCRYPTION", "false"
-)
-USES_NONEXEMPT_ENCRYPTION = USES_NONEXEMPT_ENCRYPTION_RAW.strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-APP_ENCRYPTION_DECLARATION_ID = os.environ.get(
-    "NVPN_TESTFLIGHT_APP_ENCRYPTION_DECLARATION_ID", ""
-).strip()
 PUBLIC_ACTIONS = {"public", "public-submit", "public-attach", "public-status"}
 DEFAULT_PUBLIC_GROUP_NAME = "Public Beta"
 DEFAULT_PUBLIC_LINK_LIMIT = 9999
@@ -153,19 +147,6 @@ DEFAULT_BETA_DESCRIPTION = (
     "private mesh tunnels between devices and services the user chooses, and can route "
     "traffic through user-controlled WireGuard exit nodes. It is not a public VPN, "
     "consumer internet proxy, anonymity, or stealth browsing service."
-)
-DEFAULT_REVIEW_NOTES = (
-    "No demo account is required. To review, create a network in the app or approve a "
-    "signed join request from another Nostr VPN device, then use the main VPN switch to "
-    "start and stop the iOS packet tunnel. The app uses Apple's NetworkExtension packet "
-    "tunnel APIs for VPN control. Nostr VPN is a private VPN and generic WireGuard "
-    "exit-node utility: users choose their own networks, peers, routes, services, and "
-    "exit nodes. It does not sell or operate public VPN exits and is not a public "
-    "internet stealth, anonymity, or proxy provider. On iOS, first VPN activation "
-    "opens an in-app disclosure before starting the tunnel. The disclosure explains "
-    "what VPN data is used, how it is used for configured private networks and "
-    "WireGuard exit nodes, and that the developer does not sell, use for ads/tracking, "
-    "or disclose VPN data to third parties."
 )
 
 
@@ -402,29 +383,6 @@ def internal_beta_state(build):
     return detail.get("attributes", {}).get("internalBuildState")
 
 
-def patch_build_compliance(build, *, uses_nonexempt_encryption, declaration_id=None):
-    data = {
-        "type": "builds",
-        "id": build["id"],
-        "attributes": {
-            "usesNonExemptEncryption": uses_nonexempt_encryption,
-        },
-    }
-    if declaration_id:
-        data["relationships"] = {
-            "appEncryptionDeclaration": {
-                "data": {
-                    "type": "appEncryptionDeclarations",
-                    "id": declaration_id,
-                }
-            }
-        }
-
-    status, body = request("PATCH", f"builds/{build['id']}", body={"data": data})
-    require_ok(status, body, "Set build export compliance")
-    return get_build(build["id"])
-
-
 def expire_build(build):
     build = get_build(build["id"])
     if build.get("attributes", {}).get("expired") is True:
@@ -448,38 +406,17 @@ def expire_build(build):
 
 
 def ensure_export_compliance(build):
-    build = get_build(build["id"])
-    current = build.get("attributes", {}).get("usesNonExemptEncryption")
-    if USES_NONEXEMPT_ENCRYPTION:
-        if not APP_ENCRYPTION_DECLARATION_ID:
-            fail(
-                "Build uses non-exempt encryption. Set "
-                "NVPN_TESTFLIGHT_APP_ENCRYPTION_DECLARATION_ID to an approved "
-                "App Store Connect app encryption declaration, or set "
-                "NVPN_TESTFLIGHT_USES_NONEXEMPT_ENCRYPTION=false only if export "
-                "compliance documentation is not required."
-            )
-        build = patch_build_compliance(
+    try:
+        return ensure_build_compliance(
             build,
-            uses_nonexempt_encryption=True,
-            declaration_id=APP_ENCRYPTION_DECLARATION_ID,
+            app_id=APP_ID,
+            request=request,
+            get_all=get_all,
+            get_build=get_build,
+            log=lambda message: print(f"{message} Build {BUILD_NUMBER}."),
         )
-        print(
-            "Linked export-compliance declaration "
-            f"{APP_ENCRYPTION_DECLARATION_ID} to build {BUILD_NUMBER}"
-        )
-        return build
-
-    if current is False:
-        print(f"Build {BUILD_NUMBER} export compliance is already set.")
-        return build
-
-    build = patch_build_compliance(build, uses_nonexempt_encryption=False)
-    print(
-        f"Set build {BUILD_NUMBER} export compliance: "
-        "no non-exempt encryption documentation required."
-    )
-    return build
+    except ExportComplianceError as error:
+        fail(str(error))
 
 
 def wait_for_internal_testable_build(build):
@@ -873,10 +810,10 @@ def patch_beta_review_detail():
         attrs.get("contactEmail"),
         "contact email",
     )
-    notes = (
-        os.environ.get("NVPN_TESTFLIGHT_REVIEW_NOTES", "").strip()
-        or attrs.get("notes")
-        or DEFAULT_REVIEW_NOTES
+    notes = testflight_review_notes(
+        VERSION_NAME,
+        attrs,
+        environ=os.environ,
     )
     body = {
         "data": {

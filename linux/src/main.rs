@@ -173,6 +173,8 @@ struct AppModel {
     network_setup_mode: Option<NetworkSetupMode>,
     allow_close: bool,
     service_settling: bool,
+    render_pending: bool,
+    manual_join_expanded: bool,
     diagnostics_expanded: bool,
 }
 
@@ -231,6 +233,8 @@ impl AppModel {
             network_setup_mode: None,
             allow_close: false,
             service_settling: false,
+            render_pending: false,
+            manual_join_expanded: false,
             diagnostics_expanded,
         }
     }

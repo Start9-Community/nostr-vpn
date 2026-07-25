@@ -29,6 +29,7 @@ struct QRCodeScannerSheet: View {
                         .padding(.bottom, 18)
                 }
             }
+            .accessibilityIdentifier("qr-scanner-camera")
             .navigationTitle("Scan QR")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

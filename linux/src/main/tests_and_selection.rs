@@ -62,6 +62,42 @@ mod tests {
 
         assert!(state_needs_render(&previous, &next));
     }
+
+    #[test]
+    fn vpn_toggle_installs_missing_service_before_connecting() {
+        let missing = NativeAppState {
+            service_supported: true,
+            service_installed: false,
+            vpn_enabled: false,
+            ..NativeAppState::default()
+        };
+        assert!(matches!(
+            vpn_toggle_action(&missing),
+            NativeAppAction::InstallSystemService
+        ));
+
+        let installed = NativeAppState {
+            service_supported: true,
+            service_installed: true,
+            vpn_enabled: false,
+            ..NativeAppState::default()
+        };
+        assert!(matches!(
+            vpn_toggle_action(&installed),
+            NativeAppAction::ConnectVpn
+        ));
+
+        let enabled = NativeAppState {
+            service_supported: true,
+            service_installed: true,
+            vpn_enabled: true,
+            ..NativeAppState::default()
+        };
+        assert!(matches!(
+            vpn_toggle_action(&enabled),
+            NativeAppAction::DisconnectVpn
+        ));
+    }
 }
 
 fn active_network(state: &NativeAppState) -> Option<&NativeNetworkState> {

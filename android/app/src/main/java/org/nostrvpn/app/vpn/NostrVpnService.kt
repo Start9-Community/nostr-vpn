@@ -1,5 +1,7 @@
 package org.nostrvpn.app.vpn
 
+import android.Manifest
+import android.annotation.TargetApi
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,6 +12,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
+import android.net.IpPrefix
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -24,6 +27,7 @@ import org.nostrvpn.app.R
 import org.nostrvpn.app.appCoreDataDir
 import org.nostrvpn.app.core.NativeCore
 import org.nostrvpn.app.seedMobileConfig
+import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 class NostrVpnService : VpnService() {
@@ -61,11 +65,16 @@ class NostrVpnService : VpnService() {
             }
             VpnService.SERVICE_INTERFACE -> {
                 // Android starts the service with this action for OS Always-on VPN.
-                // Treat that as a real request to restore the tunnel from disk,
-                // not as an empty interactive connect intent.
+                val configJson = persistedTunnelConfigJson()
+                if (!configJson.supportsAlwaysOnVpn()) {
+                    VpnStartState.setUserWantsVpn(this, false)
+                    publishAlwaysOnSplitUnsupportedNotification()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 VpnStartState.setUserWantsVpn(this, true)
                 startTunnel(
-                    persistedTunnelConfigJson(),
+                    configJson,
                     foregroundRequired = false,
                 ).stickyResult()
             }
@@ -220,14 +229,6 @@ class NostrVpnService : VpnService() {
     }
 
     private fun buildVpnInterface(config: JSONObject): ParcelFileDescriptor? {
-        // Note: we deliberately do NOT call `allowBypass()` here.
-        // Bypassable VPNs are also the only ones for which Android
-        // suppresses the persistent key icon in the status bar — so
-        // marking ours bypassable would silently hide the only signal
-        // users have that the VPN is actually running. We already
-        // protect the boringtun UDP socket via `protect(fd)` below,
-        // which is the only socket that actually needs to escape the
-        // tun, so allowBypass() doesn't buy us anything anyway.
         val builder = Builder()
             .setSession("Nostr VPN")
             .setConfigureIntent(configureIntent())
@@ -245,14 +246,30 @@ class NostrVpnService : VpnService() {
         val local = parseCidr(config.optString("localAddress", "10.44.0.1/32")) ?: return null
         builder.addAddress(local.address, local.prefix)
 
-        val routes = config.optJSONArray("routeTargets")
-        if (routes != null) {
-            for (index in 0 until routes.length()) {
-                val route = parseCidr(routes.optString(index)) ?: continue
+        val routeTargets = config.routeTargets()
+        if (AndroidVpnRoutingPolicy.requiresBypass(routeTargets)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Always-on VPN ignores allowBypass(). Explicitly excluding
+                // both internet defaults keeps unmatched traffic on the
+                // device network while the more-specific mesh routes below
+                // still enter the tunnel.
+                for (route in AndroidVpnRoutingPolicy.excludedDeviceInternetRoutes(routeTargets)) {
+                    parseIpPrefix(route)?.let(builder::excludeRoute)
+                }
+            } else {
+                // On older Android releases this is the available split-VPN
+                // mechanism. Always-on without lockdown may still choose the
+                // device network for unmatched routes.
+                builder.allowBypass()
+            }
+        }
+        for (target in routeTargets) {
+            val route = parseCidr(target)
+            if (route != null) {
                 builder.addRoute(route.address, route.prefix)
             }
         }
-        addDnsServers(builder, config)
+        addDnsServers(builder, config, routeTargets)
 
         // When WG upstream or a Nostr peer exit is on, the Rust runtime
         // expanded routeTargets to 0.0.0.0/0 so all traffic enters the tun.
@@ -291,7 +308,18 @@ class NostrVpnService : VpnService() {
         }
     }
 
-    private fun addDnsServers(builder: Builder, config: JSONObject) {
+    private fun addDnsServers(
+        builder: Builder,
+        config: JSONObject,
+        routeTargets: List<String>,
+    ) {
+        // VpnService has no suffix-scoped DNS API. Installing the MagicDNS
+        // stub while only mesh routes are captured makes it Android's global
+        // resolver and can break ordinary Internet even though no exit is
+        // selected. Direct/split mode must retain the device resolver.
+        if (!AndroidVpnRoutingPolicy.installsVpnDns(routeTargets)) {
+            return
+        }
         val servers = config.optJSONArray("dnsServers") ?: return
         val magicDnsServer = config.optString("magicDnsServer").trim()
         val selected = mutableListOf<String>()
@@ -320,13 +348,36 @@ class NostrVpnService : VpnService() {
         }.getOrDefault(false)
 
     private fun JSONObject.hasDefaultRoute(): Boolean {
-        val routes = optJSONArray("routeTargets") ?: return false
-        for (index in 0 until routes.length()) {
-            if (routes.optString(index).trim() == "0.0.0.0/0") {
-                return true
+        return routeTargets().any { route ->
+            route == "0.0.0.0/0" || route == "::/0"
+        }
+    }
+
+    private fun JSONObject.routeTargets(): List<String> {
+        val routes = optJSONArray("routeTargets") ?: return emptyList()
+        return buildList {
+            for (index in 0 until routes.length()) {
+                routes.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
             }
         }
-        return false
+    }
+
+    private fun String.supportsAlwaysOnVpn(): Boolean =
+        runCatching {
+            AndroidVpnRoutingPolicy.supportsAlwaysOn(JSONObject(this).routeTargets())
+        }.getOrDefault(false)
+
+    @TargetApi(Build.VERSION_CODES.TIRAMISU)
+    private fun parseIpPrefix(value: String): IpPrefix? {
+        val parts = value.trim().split("/", limit = 2)
+        val address = parts.firstOrNull()?.takeIf(String::isNotBlank) ?: return null
+        val resolved = runCatching { InetAddress.getByName(address) }.getOrNull() ?: return null
+        val maximumPrefix = resolved.address.size * 8
+        val prefix = parts.getOrNull(1)?.toIntOrNull() ?: maximumPrefix
+        if (prefix !in 0..maximumPrefix) {
+            return null
+        }
+        return IpPrefix(resolved, prefix)
     }
 
     private fun registerUnderlyingNetworkUpdates() {
@@ -455,6 +506,9 @@ class NostrVpnService : VpnService() {
     }
 
     private fun publishTunnelNotification() {
+        if (!notificationsAllowed()) {
+            return
+        }
         createNotificationChannel()
         runCatching {
             getSystemService(NotificationManager::class.java).notify(
@@ -463,6 +517,34 @@ class NostrVpnService : VpnService() {
             )
         }.onFailure { error ->
             Log.w("NostrVpnService", "Failed to publish VPN notification", error)
+        }
+    }
+
+    private fun publishAlwaysOnSplitUnsupportedNotification() {
+        if (!notificationsAllowed()) {
+            return
+        }
+        createNotificationChannel()
+        val openSettings = PendingIntent.getActivity(
+            this,
+            3,
+            Intent(android.provider.Settings.ACTION_VPN_SETTINGS),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        runCatching {
+            getSystemService(NotificationManager::class.java).notify(
+                NOTIFICATION_ID,
+                Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+                    .setSmallIcon(R.drawable.ic_launcher_monochrome)
+                    .setContentTitle(getString(R.string.vpn_always_on_split_title))
+                    .setContentText(getString(R.string.vpn_always_on_split_message))
+                    .setContentIntent(openSettings)
+                    .setAutoCancel(true)
+                    .setCategory(Notification.CATEGORY_ERROR)
+                    .build(),
+            )
+        }.onFailure { error ->
+            Log.w("NostrVpnService", "Failed to publish Always-on VPN warning", error)
         }
     }
 
@@ -476,6 +558,11 @@ class NostrVpnService : VpnService() {
             getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
         }
     }
+
+    private fun notificationsAllowed(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
 
     private fun configureIntent(): PendingIntent {
         return PendingIntent.getActivity(

@@ -181,6 +181,7 @@ async fn persist_mobile_runtime_state(
     presence: &Arc<RwLock<HashMap<String, MobilePeerPresence>>>,
     config: &Arc<RwLock<MobileTunnelConfig>>,
     tun_counters: &MobileTunAtomicCounters,
+    secure_dns: Option<&SecureDnsResolver>,
 ) -> Result<()> {
     let endpoint_peers = endpoint
         .peers()
@@ -194,7 +195,7 @@ async fn persist_mobile_runtime_state(
         .read()
         .map_err(|_| anyhow!("mobile FIPS config lock poisoned"))?
         .clone();
-    let state = {
+    let mut state = {
         let mesh = mobile_mesh_snapshot(mesh)?;
         let presence = presence
             .read()
@@ -209,6 +210,11 @@ async fn persist_mobile_runtime_state(
             unix_timestamp(),
         )
     };
+    if let Some(counters) = secure_dns.map(SecureDnsResolver::counters) {
+        state.secure_dns_queries = counters.queries;
+        state.secure_dns_successes = counters.successes;
+        state.secure_dns_failures = counters.failures;
+    }
     write_mobile_runtime_state(path, &state)
 }
 

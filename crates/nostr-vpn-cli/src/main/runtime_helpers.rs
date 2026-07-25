@@ -240,7 +240,7 @@ struct DrainedFipsMeshEvents {
     #[cfg(feature = "paid-exit")]
     paid_route_payment_acks: Vec<(String, String)>,
 }
-fn drain_fips_mesh_events(
+async fn drain_fips_mesh_events(
     runtime: &mut crate::fips_private_mesh::FipsPrivateTunnelRuntime,
     app: &mut AppConfig,
     config_path: &Path,
@@ -311,10 +311,11 @@ fn drain_fips_mesh_events(
                 };
                 if durably_applied
                     && let Err(error) = runtime
-                        .enqueue_join_roster_ack(&sender_pubkey, roster_event_id)
+                        .send_join_roster_ack(&sender_pubkey, roster_event_id)
+                        .await
                 {
                     eprintln!(
-                        "daemon: failed to queue FIPS join roster receipt for {sender_pubkey}: {error}"
+                        "daemon: failed to deliver FIPS join roster receipt for {sender_pubkey}: {error}"
                     );
                 }
             }

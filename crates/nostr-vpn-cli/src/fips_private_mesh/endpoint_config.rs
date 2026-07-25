@@ -66,6 +66,7 @@ pub(crate) struct FipsPeerAddressHint {
 pub(crate) struct FipsEndpointPeerTransportConfig {
     pub(crate) npub: String,
     pub(crate) addresses: Vec<FipsPeerAddressHint>,
+    pub(crate) connect_on_start: bool,
     pub(crate) auto_reconnect: bool,
     pub(crate) discovery_fallback_transit: bool,
 }
@@ -91,9 +92,11 @@ fn prioritize_fips_control_peer(
         .unwrap_or_else(|| FipsEndpointPeerTransportConfig {
             npub: route_npub.to_string(),
             addresses: Vec::new(),
+            connect_on_start: true,
             auto_reconnect: true,
             discovery_fallback_transit: true,
         });
+    route_peer.connect_on_start = true;
     route_peer.auto_reconnect = true;
     peers.insert(0, route_peer);
     peers
@@ -202,7 +205,14 @@ fn fips_endpoint_config_with_open_discovery_limit(
     let nostr_discovery_enabled = transport
         .map(|transport| transport.nostr_discovery_enabled)
         .unwrap_or(true);
-    let advertise_on_nostr = nostr_discovery_enabled && transport.is_some();
+    // A fresh joiner already gives the administrator this endpoint's npub in
+    // its signed request, so publishing an ambient advert is unnecessary.
+    // Start advertising after roster membership exists so FIPS can seek a
+    // preferred direct VPN path. Explicit public endpoints still advertise
+    // because unknown clients must be able to discover them.
+    let advertise_on_nostr = nostr_discovery_enabled
+        && transport.is_some()
+        && (advertise_public_endpoint || !peers.is_empty());
     let nostr_enabled = nostr_discovery_enabled && (transport.is_some() || !peers.is_empty());
     config.node.discovery.nostr.enabled = nostr_enabled;
     config.node.discovery.nostr.advertise = advertise_on_nostr;
@@ -308,7 +318,11 @@ fn fips_endpoint_config_with_open_discovery_limit(
                 .iter()
                 .map(fips_peer_address_from_hint)
                 .collect(),
-            connect_policy: ConnectPolicy::AutoConnect,
+            connect_policy: if peer.connect_on_start {
+                ConnectPolicy::AutoConnect
+            } else {
+                ConnectPolicy::Manual
+            },
             auto_reconnect: peer.auto_reconnect,
             discovery_fallback_transit: peer.discovery_fallback_transit,
         })
@@ -357,6 +371,7 @@ fn fips_endpoint_peers_from_mesh(
             .or_insert_with(|| FipsEndpointPeerTransportConfig {
                 npub,
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: true,
                 discovery_fallback_transit: true,
             });
@@ -371,6 +386,7 @@ fn fips_endpoint_peers_from_mesh(
             .or_insert_with(|| FipsEndpointPeerTransportConfig {
                 npub,
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: true,
                 discovery_fallback_transit: true,
             });
@@ -405,6 +421,7 @@ fn fips_endpoint_peers_from_mesh(
             .or_insert_with(|| FipsEndpointPeerTransportConfig {
                 npub,
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: false,
                 discovery_fallback_transit: true,
             });
@@ -442,6 +459,79 @@ fn fips_endpoint_peers_from_mesh(
     peers
 }
 
+/// Keep a pair of public WebSocket listeners configured as routing peers on
+/// both sides while giving exactly one side ownership of the physical dial.
+/// The lexicographically greater canonical npub dials the lesser npub. This
+/// avoids cross-connection replacement races without weakening either side's
+/// configured-transit status or coupling identity to URL spelling.
+pub(crate) fn apply_canonical_websocket_dial_direction(
+    peers: &mut [FipsEndpointPeerTransportConfig],
+    local_npub: &str,
+    public_websocket_listener: bool,
+) {
+    if !public_websocket_listener {
+        return;
+    }
+    let local_npub = normalize_fips_endpoint_npub(local_npub);
+    if PublicKey::parse(&local_npub).is_err() {
+        return;
+    }
+
+    for peer in peers {
+        let peer_npub = normalize_fips_endpoint_npub(&peer.npub);
+        if peer_npub == local_npub || PublicKey::parse(&peer_npub).is_err() {
+            continue;
+        }
+
+        let mut has_configured_websocket = false;
+        let mut has_other_configured_transport = false;
+        for hint in &peer.addresses {
+            if hint.seen_at_ms.is_some() {
+                continue;
+            }
+            let (transport, _) = split_peer_transport_addr(&hint.addr);
+            if transport == "websocket" {
+                has_configured_websocket = true;
+            } else {
+                has_other_configured_transport = true;
+            }
+        }
+        if !has_configured_websocket || has_other_configured_transport {
+            continue;
+        }
+
+        peer.connect_on_start = peer_npub < local_npub;
+    }
+}
+
+/// The WebSocket transport's legacy seed list dials independently of
+/// `PeerConfig::connect_policy`. Remove only URLs belonging to a configured
+/// identity whose canonical peer policy is Manual, so the transport cannot
+/// recreate the cross-connection that peer arbitration intentionally avoids.
+fn websocket_seed_urls_after_peer_dial_ownership(
+    configured_seed_urls: &[String],
+    peers: &[FipsEndpointPeerTransportConfig],
+) -> Vec<String> {
+    configured_seed_urls
+        .iter()
+        .filter(|seed_url| {
+            let seed_url = seed_url.trim();
+            !peers.iter().any(|peer| {
+                !peer.connect_on_start
+                    && peer.addresses.iter().any(|hint| {
+                        hint.seen_at_ms.is_none()
+                            && {
+                                let (transport, addr) =
+                                    split_peer_transport_addr(&hint.addr);
+                                transport == "websocket" && addr.trim() == seed_url
+                            }
+                    })
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(feature = "paid-exit")]
 pub(crate) fn fips_endpoint_peers_with_paid_route_admissions(
     endpoint_peers: Vec<FipsEndpointPeerTransportConfig>,
@@ -465,9 +555,11 @@ pub(crate) fn fips_endpoint_peers_with_paid_route_admissions(
             .or_insert_with(|| FipsEndpointPeerTransportConfig {
                 npub,
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: true,
                 discovery_fallback_transit: false,
             });
+        peer.connect_on_start = true;
         peer.auto_reconnect = true;
         peer.discovery_fallback_transit = false;
     }
@@ -598,386 +690,4 @@ pub(crate) struct FipsPrivateTunnelConfig {
     pub(crate) control_plane_bypass_hosts: Vec<Ipv4Addr>,
 }
 
-#[cfg(test)]
-mod endpoint_config_tests {
-    use super::*;
-    use nostr_sdk::prelude::Keys;
-
-    fn test_peer() -> FipsMeshPeerConfig {
-        let participant = Keys::generate().public_key().to_hex();
-        FipsMeshPeerConfig::from_participant_pubkey(&participant, vec!["10.44.1.2/32".to_string()])
-            .expect("peer config")
-    }
-
-    fn test_transport(
-        nostr_discovery_enabled: bool,
-        webrtc_enabled: bool,
-    ) -> FipsEndpointTransportConfig {
-        FipsEndpointTransportConfig {
-            listen_port: 51820,
-            bind_interface: None,
-            advertised_endpoint: "192.168.50.20:51820".to_string(),
-            advertise_public_endpoint: false,
-            nostr_discovery_enabled,
-            webrtc_enabled,
-            stun_servers: vec!["stun:stun.example.org:3478".to_string()],
-            nostr_relays: vec!["wss://relay.example.org".to_string()],
-            websocket: WebSocketConfig {
-                seed_urls: vec!["wss://seed.example.org/fips".to_string()],
-                ..WebSocketConfig::default()
-            },
-            share_local_candidates: true,
-        }
-    }
-
-    #[test]
-    fn endpoint_config_configures_webrtc_when_nostr_discovery_on() {
-        let peer = test_peer();
-        let endpoint_peers = fips_endpoint_peers_from_mesh(&[peer], Vec::new(), Vec::new());
-        let transport = test_transport(true, true);
-        let mesh_mtu = resolve_private_mesh_mtu(None, None, None);
-        let config = fips_endpoint_config_with_open_discovery_limit(
-            &endpoint_peers,
-            Some(&transport),
-            mesh_mtu,
-            NostrDiscoveryPolicy::Open,
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
-        );
-
-        config
-            .validate()
-            .expect("WebRTC-enabled endpoint config should validate");
-        let TransportInstances::Single(webrtc) = &config.transports.webrtc else {
-            panic!("expected one WebRTC transport");
-        };
-        assert_eq!(webrtc.advertise_on_nostr, Some(true));
-        assert_eq!(webrtc.auto_connect, Some(true));
-        assert_eq!(webrtc.accept_connections, Some(true));
-        assert_eq!(webrtc.mtu, Some(mesh_mtu.underlay_udp));
-        assert_eq!(
-            webrtc.stun_servers.as_ref().expect("stun servers"),
-            &transport.stun_servers
-        );
-        let TransportInstances::Single(websocket) = &config.transports.websocket else {
-            panic!("expected one WebSocket transport");
-        };
-        assert_eq!(websocket.seed_urls, transport.websocket.seed_urls);
-    }
-
-    #[test]
-    fn endpoint_config_binds_carrier_and_traversal_to_underlay_interface() {
-        let endpoint_peers =
-            fips_endpoint_peers_from_mesh(&[test_peer()], Vec::new(), Vec::new());
-        let mut transport = test_transport(true, true);
-        transport.bind_interface = Some("en0".to_string());
-        let config = fips_endpoint_config_with_open_discovery_limit(
-            &endpoint_peers,
-            Some(&transport),
-            resolve_private_mesh_mtu(None, None, None),
-            NostrDiscoveryPolicy::Open,
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
-        );
-
-        let TransportInstances::Single(udp) = &config.transports.udp else {
-            panic!("expected one UDP transport");
-        };
-        assert_eq!(udp.bind_interface.as_deref(), Some("en0"));
-        assert_eq!(
-            config.node.discovery.nostr.bind_interface.as_deref(),
-            Some("en0"),
-            "STUN and direct-traversal sockets must use the carrier underlay"
-        );
-    }
-
-    #[test]
-    fn endpoint_config_uses_external_nostr_peerfinding_provider() {
-        let endpoint_peers =
-            fips_endpoint_peers_from_mesh(&[test_peer()], Vec::new(), Vec::new());
-        let transport = test_transport(true, false);
-        let config = fips_endpoint_config_with_open_discovery_limit(
-            &endpoint_peers,
-            Some(&transport),
-            resolve_private_mesh_mtu(None, None, None),
-            NostrDiscoveryPolicy::Open,
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
-        );
-
-        assert!(config.node.discovery.nostr.enabled);
-        assert!(config.node.discovery.nostr.advertise);
-        assert_eq!(
-            config.node.discovery.nostr.peerfinding_source,
-            NostrPeerfindingSource::External,
-            "standard nostr-pubsub must be the sole peer-advert relay provider"
-        );
-    }
-
-    #[test]
-    fn endpoint_config_keeps_in_fips_webrtc_when_nostr_discovery_off() {
-        let peer = test_peer();
-        let endpoint_peers = fips_endpoint_peers_from_mesh(&[peer], Vec::new(), Vec::new());
-        let transport = test_transport(false, true);
-        let config = fips_endpoint_config_with_open_discovery_limit(
-            &endpoint_peers,
-            Some(&transport),
-            resolve_private_mesh_mtu(None, None, None),
-            NostrDiscoveryPolicy::ConfiguredOnly,
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
-        );
-
-        assert!(!config.node.discovery.nostr.enabled);
-        let TransportInstances::Single(webrtc) = &config.transports.webrtc else {
-            panic!("expected one WebRTC transport");
-        };
-        assert_eq!(webrtc.advertise_on_nostr, Some(false));
-        assert_eq!(webrtc.auto_connect, Some(false));
-        assert_eq!(
-            webrtc.accept_connections,
-            Some(true),
-            "authenticated in-FIPS offers must not depend on relay discovery"
-        );
-        assert!(!config.transports.websocket.is_empty());
-    }
-
-    #[test]
-    fn endpoint_config_keeps_websocket_transport_without_webrtc() {
-        let peer = test_peer();
-        let endpoint_peers = fips_endpoint_peers_from_mesh(&[peer], Vec::new(), Vec::new());
-        let transport = test_transport(true, false);
-        let config = fips_endpoint_config_with_open_discovery_limit(
-            &endpoint_peers,
-            Some(&transport),
-            resolve_private_mesh_mtu(None, None, None),
-            NostrDiscoveryPolicy::Open,
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
-        );
-
-        assert!(config.node.discovery.nostr.enabled);
-        assert!(config.node.discovery.nostr.advertise);
-        assert!(config.transports.webrtc.is_empty());
-        assert!(!config.transports.udp.is_empty());
-        let TransportInstances::Single(websocket) = &config.transports.websocket else {
-            panic!("expected one WebSocket transport");
-        };
-        assert_eq!(websocket.seed_urls, transport.websocket.seed_urls);
-    }
-
-    #[test]
-    fn join_roster_recipient_keeps_enabled_roster_transports() {
-        let roster = test_peer();
-        let roster_npub = normalize_fips_endpoint_npub(&roster.endpoint_npub);
-        let ambient_npub = Keys::generate().public_key().to_bech32().expect("npub");
-        let peers = fips_endpoint_peers_from_mesh(
-            std::slice::from_ref(&roster),
-            vec![
-                (
-                    roster_npub.clone(),
-                    vec![
-                        "203.0.113.10:51820".to_string(),
-                        "tcp:203.0.113.10:443".to_string(),
-                        format!("webrtc:02{}", Keys::generate().public_key().to_hex()),
-                    ],
-                ),
-                (
-                    ambient_npub.clone(),
-                    vec!["203.0.113.20:51820".to_string()],
-                ),
-            ],
-            Vec::new(),
-        );
-        let peers = prioritize_fips_control_recipient(peers, &roster.endpoint_npub)
-            .expect("join roster recipient");
-
-        let roster_peer = &peers[0];
-        assert_eq!(roster_peer.npub, roster_npub);
-        for transport in ["udp", "tcp", "webrtc"] {
-            assert!(roster_peer.addresses.iter().any(|address| {
-                split_peer_transport_addr(&address.addr).0 == transport
-            }));
-        }
-        assert!(peers.iter().any(|peer| peer.npub == ambient_npub));
-    }
-
-    #[test]
-    fn operator_static_control_peer_reconnects_without_becoming_a_mesh_route() {
-        let peer_npub = Keys::generate().public_key().to_bech32().expect("npub");
-        let peers = fips_endpoint_peers_from_mesh(
-            &[],
-            vec![(
-                peer_npub.clone(),
-                vec!["203.0.113.20:51820".to_string()],
-            )],
-            Vec::new(),
-        );
-
-        let peer = peers
-            .iter()
-            .find(|peer| peer.npub == peer_npub)
-            .expect("static control peer");
-        assert!(peer.auto_reconnect);
-        assert!(peer.discovery_fallback_transit);
-    }
-
-    #[test]
-    fn disabled_webrtc_remains_disabled_for_join_roster_recipient() {
-        let recipient_pubkey = Keys::generate().public_key().to_hex();
-        let recipient_npub = normalize_fips_endpoint_npub(&recipient_pubkey);
-        let mut peers = vec![FipsEndpointPeerTransportConfig {
-            npub: recipient_npub.clone(),
-            addresses: vec![
-                FipsPeerAddressHint {
-                    addr: "udp:203.0.113.20:51820".to_string(),
-                    seen_at_ms: None,
-                    priority: FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY,
-                },
-                FipsPeerAddressHint {
-                    addr: format!(
-                        "webrtc:02{}",
-                        Keys::generate().public_key().to_hex()
-                    ),
-                    seen_at_ms: Some(1),
-                    priority: FIPS_DYNAMIC_PEER_ENDPOINT_PRIORITY,
-                },
-            ],
-            auto_reconnect: true,
-            discovery_fallback_transit: true,
-        }];
-
-        retain_enabled_peer_transport_addresses(&mut peers, false);
-        let peers = prioritize_fips_control_recipient(peers, &recipient_pubkey)
-            .expect("join roster recipient");
-
-        let webrtc_addresses = peers
-            .iter()
-            .flat_map(|peer| peer.addresses.iter())
-            .filter(|hint| split_peer_transport_addr(&hint.addr).0 == "webrtc")
-            .collect::<Vec<_>>();
-        assert!(webrtc_addresses.is_empty());
-        assert_eq!(peers[0].npub, recipient_npub);
-        assert!(peers.iter().any(|peer| {
-            peer.addresses
-                .iter()
-                .any(|hint| hint.addr == "udp:203.0.113.20:51820")
-        }));
-    }
-
-    #[test]
-    fn ethernet_underlay_validates_interface_and_scope() {
-        let parsed = FipsEthernetUnderlayConfig::parse(" eth0 ", " local-pairing ")
-            .expect("valid Ethernet underlay");
-        assert_eq!(parsed.interface, "eth0");
-        assert_eq!(parsed.discovery_scope, "local-pairing");
-        assert!(FipsEthernetUnderlayConfig::parse("", "scope").is_err());
-        assert!(FipsEthernetUnderlayConfig::parse("eth0", " ").is_err());
-        assert!(FipsEthernetUnderlayConfig::parse("eth0", &"x".repeat(256)).is_err());
-    }
-
-    #[test]
-    fn ethernet_underlay_is_additive_to_ordinary_transports() {
-        let peer = test_peer();
-        let endpoint_peers =
-            fips_endpoint_peers_from_mesh(std::slice::from_ref(&peer), Vec::new(), Vec::new());
-        let transport = test_transport(false, true);
-        let ethernet =
-            FipsEthernetUnderlayConfig::parse("eth0", "local-pairing").expect("underlay");
-        let mesh_mtu = resolve_private_mesh_mtu(None, None, None);
-        let config = fips_endpoint_config_for_ethernet(
-            &endpoint_peers,
-            Some(&transport),
-            &ethernet,
-            mesh_mtu,
-            NostrDiscoveryPolicy::ConfiguredOnly,
-            0,
-        );
-
-        config.validate().expect("Ethernet endpoint config");
-        assert!(!config.transports.udp.is_empty());
-        assert!(config.transports.tcp.is_empty());
-        assert!(!config.transports.webrtc.is_empty());
-        assert!(!config.transports.websocket.is_empty());
-        let TransportInstances::Single(raw) = &config.transports.ethernet else {
-            panic!("expected one Ethernet transport");
-        };
-        assert_eq!(raw.interface, "eth0");
-        assert_eq!(raw.discovery_scope.as_deref(), Some("local-pairing"));
-        assert_eq!(raw.discovery, Some(true));
-        assert_eq!(raw.announce, Some(true));
-        assert_eq!(raw.auto_connect, Some(true));
-        assert_eq!(raw.accept_connections, Some(true));
-        assert_eq!(config.peers.len(), 1);
-        assert!(config.peers[0].addresses.is_empty());
-    }
-
-    #[test]
-    fn pending_device_approval_uses_url_only_websocket_seed_without_known_admin() {
-        let keys = Keys::generate();
-        let own_pubkey = keys.public_key().to_hex();
-        let mut app = AppConfig::default();
-        app.nostr.secret_key = keys.secret_key().to_bech32().expect("nsec");
-        app.networks[0].enabled = true;
-        app.networks[0].network_id = "pending-device-approval".to_string();
-        app.networks[0].devices.clear();
-        app.networks[0].admins.clear();
-        app.networks[0].listen_for_join_requests = false;
-        app.fips_bootstrap_enabled = false;
-        app.fips_websocket_seed_urls = vec!["wss://seed.example.org/fips".to_string()];
-        app.ensure_pending_nostr_join_request(1_778_998_000)
-            .expect("pending device approval");
-
-        let tunnel = FipsPrivateTunnelConfig::from_app(
-            &app,
-            "pending-device-approval",
-            "utun-test",
-            Some(&own_pubkey),
-            None,
-            &[],
-        )
-        .expect("pending join tunnel config");
-        assert!(tunnel.endpoint_peers.is_empty());
-        assert_eq!(
-            tunnel.websocket.seed_urls,
-            ["wss://seed.example.org/fips"]
-        );
-        assert_eq!(
-            tunnel.nostr_discovery_policy,
-            NostrDiscoveryPolicy::Open,
-            "pending ordinary approval must admit authenticated physical adjacency"
-        );
-        assert!(tunnel.open_discovery_max_pending > 0);
-
-        let ethernet =
-            FipsEthernetUnderlayConfig::parse("eth0", "local-pairing").expect("underlay");
-        let endpoint = fips_endpoint_config_for_ethernet(
-            &tunnel.endpoint_peers,
-            Some(&test_transport(false, true)),
-            &ethernet,
-            tunnel.mesh_mtu,
-            tunnel.nostr_discovery_policy,
-            tunnel.open_discovery_max_pending,
-        );
-        assert_eq!(
-            endpoint.node.discovery.nostr.policy,
-            NostrDiscoveryPolicy::Open,
-            "physical underlay must preserve the pending-approval admission policy"
-        );
-        assert!(endpoint.node.discovery.nostr.open_discovery_max_pending > 0);
-
-        app.clear_pending_nostr_join_request();
-        let closed = FipsPrivateTunnelConfig::from_app(
-            &app,
-            "pending-device-approval",
-            "utun-test",
-            Some(&own_pubkey),
-            None,
-            &[],
-        )
-        .expect("closed join tunnel config");
-        assert_eq!(closed.websocket, tunnel.websocket);
-        assert_eq!(
-            closed.nostr_discovery_policy,
-            NostrDiscoveryPolicy::ConfiguredOnly,
-            "ordinary admission must close when no approval is pending"
-        );
-        assert_eq!(closed.open_discovery_max_pending, 0);
-    }
-
-}
+include!("endpoint_config/tests.rs");

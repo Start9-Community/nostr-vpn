@@ -561,6 +561,67 @@
     }
 
     #[test]
+    fn advertising_join_request_starts_the_approval_transport() {
+        let dir = unique_service_test_dir("nvpn-join-advertise-connect");
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.mobile_runtime = true;
+        runtime.config_path = dir.join("config.toml");
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("persist isolated mobile config");
+
+        assert!(!runtime.state().vpn_enabled);
+        runtime.dispatch(NativeAppAction::StartJoinRequestBroadcast);
+        let state = runtime.state();
+
+        assert!(state.error.is_empty(), "{}", state.error);
+        assert!(state.join_request_broadcast_active);
+        assert!(
+            state.vpn_enabled,
+            "a joiner cannot receive the accepted roster without the FIPS transport"
+        );
+        assert!(state.vpn_active);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manual_join_starts_the_approval_transport() {
+        let dir = unique_service_test_dir("nvpn-manual-join-connect");
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.mobile_runtime = true;
+        runtime.config_path = dir.join("config.toml");
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("persist isolated mobile config");
+        let admin_npub = Keys::generate()
+            .public_key()
+            .to_bech32()
+            .expect("admin npub");
+
+        runtime.dispatch(NativeAppAction::ManualAddNetwork {
+            admin_npub,
+            mesh_network_id: "manual-join-mesh".to_string(),
+        });
+        let state = runtime.state();
+
+        assert!(state.error.is_empty(), "{}", state.error);
+        assert!(
+            state.vpn_enabled,
+            "manual join cannot receive the signed roster without the FIPS transport"
+        );
+        assert!(state.vpn_active);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn connect_vpn_requires_a_network_or_pending_device_approval() {
         let error = anyhow!("boom");
         let mut runtime = NativeAppRuntime::from_startup_error(&error);

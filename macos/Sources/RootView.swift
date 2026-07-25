@@ -511,6 +511,7 @@ struct RootView: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled)
+        .accessibilityIdentifier("vpn-service-toggle")
         .accessibilityLabel(manager.vpnSwitchEnabled ? "Turn VPN off" : "Turn VPN on")
         .accessibilityValue(manager.vpnSwitchEnabled ? "On" : "Off")
     }

@@ -35,11 +35,20 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     var copyClearTask: Task<Void, Never>?
     private var tunnelConfigSyncTask: Task<Void, Never>?
+    private var sceneIsActive = false
+    private var pendingOpenURLs: [URL] = []
+    private var restartJoinRequestBroadcastOnForeground = false
+    private var restartNearbyDiscoveryOnForeground = false
     var launchAutomationHandled = false
-    var tunnelStateRefreshInFlight = false
+    var tunnelAppConfigRefreshInFlight = false
+    var tunnelRuntimeRefreshInFlight = false
+    var tunnelStateRefreshGeneration: UInt64 = 0
+    var appStoreTunnelRefreshPending = false
     #if DEBUG
     var lifecycleProbeResultName: String?
+    var lifecycleProbeRunId = ""
     var lifecycleProbeTransition = 0
+    var lifecycleProbeHistory: [[String: Any]] = []
     #endif
 
     init() {
@@ -81,7 +90,10 @@ final class AppModel: ObservableObject {
         // xcodeproj and the bundled nvpn binary.
         let client = NativeCoreClient(dataDir: appGroupSupportDir.path, appVersion: "")
         core = client
-        state = client.state()
+        let compatibility = Self.appStoreCompatibleState(client.state(), core: client)
+        state = compatibility.state
+        appStoreTunnelRefreshPending =
+            compatibility.removedPaidConfiguration && compatibility.vpnWasRunning
         #if DEBUG
         NSLog("nvpn-app: shared storage ready at \(appGroupSupportDir.path)")
         #endif
@@ -102,6 +114,7 @@ final class AppModel: ObservableObject {
         guard !fixtureMode else {
             return
         }
+        reconcileAppStoreTunnelAfterSanitization(reason: "startup")
         guard refreshTask == nil else {
             return
         }
@@ -135,10 +148,14 @@ final class AppModel: ObservableObject {
         }
         switch phase {
         case .background:
+            sceneIsActive = false
             suspendNativeCore()
         case .active:
+            sceneIsActive = true
             resumeNativeCore()
+            drainPendingOpenURLs()
         case .inactive:
+            sceneIsActive = false
             break
         @unknown default:
             break
@@ -146,10 +163,18 @@ final class AppModel: ObservableObject {
     }
 
     private func suspendNativeCore() {
+        restartJoinRequestBroadcastOnForeground = state.joinRequestBroadcastActive
+        restartNearbyDiscoveryOnForeground = state.nearbyDiscoveryActive
         refreshTask?.cancel()
         refreshTask = nil
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = nil
+        // A provider-message task can be frozen while iOS suspends the app.
+        // Invalidate it so foregrounding can immediately pull transactional
+        // state (notably a join approval) from the still-running packet tunnel.
+        tunnelStateRefreshGeneration &+= 1
+        tunnelAppConfigRefreshInFlight = false
+        tunnelRuntimeRefreshInFlight = false
         core?.close()
         core = nil
         #if DEBUG
@@ -158,15 +183,32 @@ final class AppModel: ObservableObject {
     }
 
     private func resumeNativeCore() {
+        let restartJoinRequestBroadcast = restartJoinRequestBroadcastOnForeground
+        let restartNearbyDiscovery = restartNearbyDiscoveryOnForeground
+        restartJoinRequestBroadcastOnForeground = false
+        restartNearbyDiscoveryOnForeground = false
         if core == nil, let supportDir {
             let client = NativeCoreClient(dataDir: supportDir.path, appVersion: "")
             core = client
-            state = client.state()
+            adoptAppStoreCompatibleState(client.state(), core: client, reason: "foreground")
         }
         #if DEBUG
         writeDebugLifecycleProbe(phase: "active")
         #endif
         start()
+        refresh()
+        if restartJoinRequestBroadcast {
+            dispatch(
+                NativeActions.startJoinRequestBroadcast(),
+                status: "Advertising nearby"
+            )
+        }
+        if restartNearbyDiscovery {
+            dispatch(
+                NativeActions.startNearbyDiscovery(),
+                status: "Finding nearby"
+            )
+        }
     }
 
     func refresh() {
@@ -175,8 +217,14 @@ final class AppModel: ObservableObject {
             return
         }
         let hadActiveNetwork = activeNetwork != nil
-        state = core.refresh()
-        refreshTunnelSidecarState()
+        let removedPaidConfiguration = adoptAppStoreCompatibleState(
+            core.refresh(),
+            core: core,
+            reason: "app refresh"
+        )
+        if !removedPaidConfiguration {
+            refreshTunnelSidecarState()
+        }
         if !hadActiveNetwork, activeNetwork != nil {
             ensureAutoconnectPacketTunnel(reason: "network joined")
         }
@@ -187,24 +235,97 @@ final class AppModel: ObservableObject {
             return
         }
         let actionType = action["type"] as? String ?? ""
+        if AppStorePolicy.blocks(action) {
+            var unavailable = state
+            unavailable.error = "Cashu wallet and paid exit-node features are unavailable in the iOS build."
+            state = unavailable
+            statusMessage = unavailable.error
+            return
+        }
         actionInFlight = true
         statusMessage = status
         if fixtureMode {
             state = ScreenshotFixtures.dispatch(action, state: state)
         } else if let core {
-            state = core.dispatch(action)
+            adoptAppStoreCompatibleState(
+                core.dispatch(action),
+                core: core,
+                reason: actionType
+            )
         }
         actionInFlight = false
         statusMessage = state.error
         debugLog(
             "dispatch action=\(actionType) error=\(!state.error.isEmpty) vpn=\(state.vpnEnabled)/\(state.vpnActive) network=\(activeNetwork?.id ?? "nil")"
         )
-        if state.error.isEmpty && actionRequiresPacketTunnelConfigSync(actionType) {
+        let updateSettingKeys = (action["patch"] as? [String: Any])
+            .map { Set($0.keys) } ?? []
+        if state.error.isEmpty
+            && actionRequiresPacketTunnelConfigSync(
+                actionType,
+                updateSettingKeys: updateSettingKeys
+            ) {
             let force = actionType == "remove_network"
                 && activeNetwork == nil
                 && !state.joinRequestQrCodeOrLink.isEmpty
             schedulePacketTunnelConfigSync(reason: actionType, force: force)
         }
+    }
+
+    private struct AppStoreCompatibleStateResult {
+        let state: AppState
+        let removedPaidConfiguration: Bool
+        let vpnWasRunning: Bool
+    }
+
+    private static func appStoreCompatibleState(
+        _ current: AppState,
+        core: NativeCoreClient
+    ) -> AppStoreCompatibleStateResult {
+        let patch = AppStorePolicy.compatibilityPatch(for: current)
+        guard !patch.isEmpty else {
+            return AppStoreCompatibleStateResult(
+                state: current,
+                removedPaidConfiguration: false,
+                vpnWasRunning: false
+            )
+        }
+        return AppStoreCompatibleStateResult(
+            state: core.dispatch(NativeActions.updateSettings(patch)),
+            removedPaidConfiguration: true,
+            vpnWasRunning: current.vpnEnabled || current.vpnActive
+        )
+    }
+
+    @discardableResult
+    func adoptAppStoreCompatibleState(
+        _ current: AppState,
+        core: NativeCoreClient,
+        reason: String
+    ) -> Bool {
+        let compatibility = Self.appStoreCompatibleState(current, core: core)
+        state = compatibility.state
+        if compatibility.removedPaidConfiguration && compatibility.vpnWasRunning {
+            appStoreTunnelRefreshPending = true
+            reconcileAppStoreTunnelAfterSanitization(reason: reason)
+        }
+        return compatibility.removedPaidConfiguration
+    }
+
+    private func reconcileAppStoreTunnelAfterSanitization(reason: String) {
+        guard appStoreTunnelRefreshPending else {
+            return
+        }
+        appStoreTunnelRefreshPending = false
+        guard UserDefaults.standard.bool(forKey: Self.vpnDisclosureAcceptedKey) else {
+            requireVpnDisclosureReview()
+            setVpnEnabled(false, force: true)
+            return
+        }
+        schedulePacketTunnelConfigSync(
+            reason: "removed unavailable paid configuration during \(reason)",
+            force: true
+        )
     }
 
     func toggleVpn() {
@@ -221,6 +342,14 @@ final class AppModel: ObservableObject {
         vpnDisclosurePromptVisible = false
         if statusMessage == Self.vpnDisclosurePromptMessage {
             statusMessage = ""
+        }
+    }
+
+    func startVpnAfterDisclosure() {
+        if state.vpnEnabled {
+            setVpnEnabled(true, force: true)
+        } else {
+            toggleVpn()
         }
     }
 
@@ -266,6 +395,16 @@ final class AppModel: ObservableObject {
             statusMessage = ""
             return
         }
+        if enabled,
+           !AppStorePolicy.allowsVpnStart(
+               disclosureAccepted: UserDefaults.standard.bool(
+                   forKey: Self.vpnDisclosureAcceptedKey
+               )
+           )
+        {
+            requireVpnDisclosureReview()
+            return
+        }
         guard let core else {
             statusMessage = "Native core unavailable"
             return
@@ -276,14 +415,18 @@ final class AppModel: ObservableObject {
                     debugLog("connect skipped: already enabled")
                     return
                 }
-                let tunnelConfigJson = core.mobileTunnelConfigJson()
-                let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
-                debugLog("mobileTunnelConfigJson len=\(tunnelConfigJson.count)")
                 if state.vpnEnabled {
                     statusMessage = "Turning VPN on"
                 } else {
                     dispatch(NativeActions.connectVpn(), status: "Turning VPN on")
                 }
+                guard state.error.isEmpty, state.vpnEnabled else {
+                    debugLog("connect aborted after native enable error=\(state.error)")
+                    return
+                }
+                let tunnelConfigJson = core.mobileTunnelConfigJson()
+                let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
+                debugLog("mobileTunnelConfigJson len=\(tunnelConfigJson.count)")
                 debugLog("starting PacketTunnel stateEnabled=\(state.vpnEnabled) network=\(activeNetwork?.id ?? "nil")")
                 do {
                     try await vpnController.start(
@@ -383,9 +526,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func actionRequiresPacketTunnelConfigSync(_ type: String) -> Bool {
+    private func actionRequiresPacketTunnelConfigSync(
+        _ type: String,
+        updateSettingKeys: Set<String> = []
+    ) -> Bool {
         switch type {
         case "import_join_request",
+             "start_join_request_broadcast",
              "manual_add_network",
              "add_network",
              "rename_network",
@@ -401,13 +548,71 @@ final class AppModel: ObservableObject {
              "accept_join_request",
              "set_participant_alias":
             return true
+        case "update_settings":
+            return !updateSettingKeys.isDisjoint(with: Self.packetTunnelSettingKeys)
         default:
             return false
         }
     }
 
+    private static let packetTunnelSettingKeys: Set<String> = [
+        "internetSource",
+        "listenPort",
+        "endpoint",
+        "relays",
+        "disabledRelays",
+        "exitNode",
+        "exitNodeLeakProtection",
+        "exitDnsMode",
+        "exitDnsDohProvider",
+        "exitDnsCustomDohUrl",
+        "exitDnsCustomDohBootstrapIps",
+        "exitDnsThroughExitServers",
+        "advertiseExitNode",
+        "advertisedRoutes",
+        "wireguardExitEnabled",
+        "wireguardExitInterface",
+        "wireguardExitAddress",
+        "wireguardExitPrivateKey",
+        "wireguardExitPeerPublicKey",
+        "wireguardExitPeerPresharedKey",
+        "wireguardExitEndpoint",
+        "wireguardExitAllowedIps",
+        "wireguardExitDns",
+        "wireguardExitMtu",
+        "wireguardExitPersistentKeepaliveSecs",
+        "wireguardExitConfig",
+    ]
+
     func handle(url: URL) {
         debugLog("handle url scheme=\(url.scheme ?? "") host=\(url.host ?? "") path=\(url.path)")
+        // iOS may deliver a deep link while the scene is inactive or
+        // backgrounded. Reopening the native core there would make its shared
+        // state suspendable again, which is the crash class this lifecycle
+        // boundary prevents. Preserve ordering and drain only after the scene
+        // becomes active.
+        guard sceneIsActive else {
+            pendingOpenURLs.append(url)
+            return
+        }
+        handleActive(url: url)
+    }
+
+    private func drainPendingOpenURLs() {
+        guard sceneIsActive, !pendingOpenURLs.isEmpty else {
+            return
+        }
+        let urls = pendingOpenURLs
+        pendingOpenURLs.removeAll(keepingCapacity: true)
+        for url in urls {
+            handleActive(url: url)
+        }
+    }
+
+    private func handleActive(url: URL) {
+        if core == nil {
+            resumeNativeCore()
+        }
         let raw = url.absoluteString
         if raw.lowercased().hasPrefix("nvpn://join-request") {
             dispatch(NativeActions.importJoinRequest(raw), status: "Adding device")
@@ -430,14 +635,6 @@ final class AppModel: ObservableObject {
             }
             _ = runDebugAutomation(arguments: arguments)
         } else if action == "tick" {
-            refresh()
-        } else if action == "connect" {
-            setVpnEnabled(true, force: true)
-        } else if action == "disconnect" {
-            setVpnEnabled(false, force: true)
-        }
-        #else
-        if action == "tick" {
             refresh()
         } else if action == "connect" {
             setVpnEnabled(true, force: true)

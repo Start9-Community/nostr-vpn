@@ -45,6 +45,194 @@ export function splitCsv(value) {
     .filter(Boolean)
 }
 
+export function validateCleanReleaseSource({
+  status,
+  headCommit,
+  taggedCommit = '',
+  tag = '',
+}) {
+  const dirty = String(status ?? '').trim()
+  const head = String(headCommit ?? '').trim()
+  const tagged = String(taggedCommit ?? '').trim()
+  if (!head) {
+    throw new Error('Release source HEAD commit is missing.')
+  }
+  if (dirty) {
+    throw new Error(
+      'Release source is dirty. Commit the exact tested candidate before building or publishing.',
+    )
+  }
+  if (tagged && tagged !== head) {
+    throw new Error(
+      `Release tag ${tag || '<unknown>'} points to ${tagged}, not candidate HEAD ${head}.`,
+    )
+  }
+  return head
+}
+
+export function zapstorePublicationRequired({
+  cliRequired = false,
+  envValue = '',
+} = {}) {
+  return Boolean(cliRequired) || /^(1|true|yes|on)$/i.test(String(envValue).trim())
+}
+
+export function zapstorePublicationPrerequisites(
+  prerequisites = {},
+  { required = false } = {},
+) {
+  const labels = {
+    apk: 'APK',
+    zsp: 'zsp tool',
+    nak: 'nak verification tool',
+    signing: 'signing configuration',
+    config: 'Zapstore config',
+    publisher: 'publisher identity',
+    relays: 'relays configuration',
+  }
+  const missing = Object.entries(labels)
+    .filter(([name]) => !prerequisites[name])
+    .map(([, label]) => label)
+  if (required && missing.length > 0) {
+    throw new Error(
+      `Required Zapstore publication unavailable: missing ${missing.join(', ')}.`,
+    )
+  }
+  return {
+    available: missing.length === 0,
+    missing,
+  }
+}
+
+export function validateZapstoreApkMetadata(
+  metadata,
+  {
+    expectedVersion,
+    expectedVersionCode,
+    expectedPackageId,
+  } = {},
+) {
+  const packageId = String(metadata?.package_id ?? '').trim()
+  const versionName = String(metadata?.version_name ?? '').trim()
+  const versionCode = Number(metadata?.version_code)
+  const certificateFingerprint = String(metadata?.cert_fingerprint ?? '').trim()
+  const sha256 = String(metadata?.sha256 ?? '').trim().toLowerCase()
+  const architectures = Array.isArray(metadata?.architectures)
+    ? metadata.architectures.map((value) => String(value).trim())
+    : []
+
+  if (!packageId || packageId !== String(expectedPackageId ?? '').trim()) {
+    throw new Error(
+      `Zapstore APK package ${packageId || '<missing>'} does not match ${expectedPackageId || '<missing>'}.`,
+    )
+  }
+  if (!versionName || versionName !== String(expectedVersion ?? '').trim()) {
+    throw new Error(
+      `Zapstore APK version ${versionName || '<missing>'} does not match ${expectedVersion || '<missing>'}.`,
+    )
+  }
+  if (
+    !Number.isSafeInteger(versionCode)
+    || versionCode <= 0
+    || versionCode !== Number(expectedVersionCode)
+  ) {
+    throw new Error(
+      `Zapstore APK version code ${Number.isFinite(versionCode) ? versionCode : '<missing>'} does not match ${expectedVersionCode || '<missing>'}.`,
+    )
+  }
+  if (!architectures.includes('arm64-v8a')) {
+    throw new Error('Zapstore APK does not contain the required arm64-v8a architecture.')
+  }
+  if (!certificateFingerprint) {
+    throw new Error('Zapstore APK is not signed with an Android certificate.')
+  }
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw new Error('Zapstore APK metadata does not contain a valid SHA-256 hash.')
+  }
+
+  return {
+    packageId,
+    versionName,
+    versionCode,
+    certificateFingerprint,
+    sha256,
+  }
+}
+
+function hasEventTag(event, name, value = null) {
+  if (!Array.isArray(event?.tags)) {
+    return false
+  }
+  return event.tags.some(
+    (tag) =>
+      Array.isArray(tag)
+      && tag[0] === name
+      && (value == null || String(tag[1] ?? '') === String(value)),
+  )
+}
+
+export function validateZapstoreRelayPublication({
+  appEvents = [],
+  releaseEvents = [],
+  assetEvents = [],
+  expected = {},
+} = {}) {
+  const {
+    pubkey,
+    packageId,
+    versionName,
+    versionCode,
+    sha256,
+    certificateFingerprint,
+  } = expected
+  const common = (event, kind) =>
+    event?.kind === kind
+    && event?.pubkey === pubkey
+    && typeof event?.id === 'string'
+    && event.id.length > 0
+
+  const asset = assetEvents.find(
+    (event) =>
+      common(event, 3063)
+      && hasEventTag(event, 'i', packageId)
+      && hasEventTag(event, 'version', versionName)
+      && hasEventTag(event, 'version_code', versionCode)
+      && hasEventTag(event, 'x', sha256)
+      && hasEventTag(event, 'apk_certificate_hash', certificateFingerprint)
+      && hasEventTag(event, 'f', 'android-arm64-v8a')
+      && hasEventTag(event, 'url'),
+  )
+  if (!asset) {
+    throw new Error('Zapstore relay does not contain the exact published software asset.')
+  }
+
+  const release = releaseEvents.find(
+    (event) =>
+      common(event, 30063)
+      && hasEventTag(event, 'i', packageId)
+      && hasEventTag(event, 'version', versionName)
+      && hasEventTag(event, 'd', `${packageId}@${versionName}`)
+      && hasEventTag(event, 'c', 'main')
+      && hasEventTag(event, 'f', 'android-arm64-v8a')
+      && hasEventTag(event, 'e', asset.id),
+  )
+  if (!release) {
+    throw new Error('Zapstore relay does not contain the exact published software release.')
+  }
+
+  const app = appEvents.find(
+    (event) =>
+      common(event, 32267)
+      && hasEventTag(event, 'd', packageId)
+      && hasEventTag(event, 'f', 'android-arm64-v8a'),
+  )
+  if (!app) {
+    throw new Error('Zapstore relay does not contain the published application metadata.')
+  }
+
+  return { app, release, asset }
+}
+
 export function deterministicBuildEnv(env = {}, { sourceDateEpoch = null } = {}) {
   const epoch = String(sourceDateEpoch ?? env.SOURCE_DATE_EPOCH ?? '0').trim()
   if (!/^\d+$/.test(epoch)) {
@@ -175,6 +363,16 @@ export function validateReleaseAssetSet(
   }
 }
 
+export function validatePromotableReleaseManifest(manifest) {
+  if (!manifest || !Array.isArray(manifest.assets)) {
+    throw new Error('Staged release manifest has no asset list.')
+  }
+  validateReleaseAssetSet(
+    manifest.assets.map((asset) => basename(asset.path || '')),
+    { requireCompleteAppRelease: true },
+  )
+}
+
 export function readWorkspaceVersionTag(cargoTomlText) {
   const match = cargoTomlText.match(
     /^\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"\n]+)"/m,
@@ -199,45 +397,71 @@ function escapeRegExp(value) {
 }
 
 export function extractChangelogSection(changelogText, tag) {
-  const version = normalizeTag(tag).replace(/^v/, '')
-  const headingPattern = new RegExp(`^##\\s+${escapeRegExp(version)}(?:\\s+-\\s+.*)?\\s*$`, 'm')
-  const headingMatch = changelogText.match(headingPattern)
-  if (!headingMatch || headingMatch.index == null) {
-    return null
-  }
+  const taggedVersion = normalizeTag(tag).replace(/^v/, '')
+  const marketingVersion = semverFromTag(tag)
+  for (const version of new Set([taggedVersion, marketingVersion])) {
+    const headingPattern = new RegExp(
+      `^##\\s+${escapeRegExp(version)}(?:\\s+-\\s+.*)?\\s*$`,
+      'm',
+    )
+    const headingMatch = changelogText.match(headingPattern)
+    if (!headingMatch || headingMatch.index == null) {
+      continue
+    }
 
-  const sectionStart = headingMatch.index + headingMatch[0].length
-  const remainder = changelogText.slice(sectionStart).replace(/^\r?\n/, '')
-  const nextHeadingMatch = remainder.match(/^##\s+/m)
-  const section = nextHeadingMatch ? remainder.slice(0, nextHeadingMatch.index) : remainder
-  const trimmed = section.trim()
-  return trimmed || null
+    const sectionStart = headingMatch.index + headingMatch[0].length
+    const remainder = changelogText.slice(sectionStart).replace(/^\r?\n/, '')
+    const nextHeadingMatch = remainder.match(/^##\s+/m)
+    const section = nextHeadingMatch ? remainder.slice(0, nextHeadingMatch.index) : remainder
+    const trimmed = section.trim()
+    return trimmed || null
+  }
+  return null
 }
 
 /**
- * "v4.0.6" / "4.0.6" → "4.0.6". Throws on malformed input.
+ * "v4.0.6" / "4.0.6" / "v4.0.6+4000007" → "4.0.6".
+ * Build metadata identifies a corrected release artifact without changing the
+ * platform marketing version. Prerelease tags remain intentionally unsupported.
  */
 export function semverFromTag(tag) {
   const stripped = normalizeTag(tag).replace(/^v/, '')
-  if (!/^\d+\.\d+\.\d+$/.test(stripped)) {
+  const match = stripped.match(
+    /^(\d+\.\d+\.\d+)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+  )
+  if (!match) {
     throw new Error(`Release tag must be a semver-shaped string, got "${tag}"`)
   }
-  return stripped
+  return match[1]
+}
+
+export function parseReleaseRevision(value, { platform = 'Release' } = {}) {
+  const text = String(value ?? '').trim()
+  if (!/^\d{1,2}$/.test(text)) {
+    throw new Error(`${platform} revision must be an integer from 0 through 99, got "${text}"`)
+  }
+  return Number(text)
 }
 
 /**
- * Encode a semver as a 5-digit-major-friendly Android versionCode:
- *   "4.0.6"  → 40006
- *   "4.10.6" → 40_10_06 = 41006
- * Each component is allotted two digits; minor/patch must be < 100.
+ * Encode a semver plus a two-digit corrected-release revision as an Android
+ * versionCode:
+ *   "4.0.6", revision 0 → 4_00_06_00 = 4000600
+ *   "4.1.4", revision 1 → 4_01_04_01 = 4010401
+ * Each minor/patch/revision component is allotted two digits.
  */
-export function androidVersionCode(version) {
+export function androidVersionCode(version, revision = 0) {
   const parts = semverFromTag(version).split('.').map(Number)
   if (parts.some((value, index) => index > 0 && value >= 100)) {
     throw new Error(`Android versionCode encoding requires minor/patch < 100, got ${version}`)
   }
   const [major, minor, patch] = parts
-  return major * 10_000 + minor * 100 + patch
+  const parsedRevision = parseReleaseRevision(revision, { platform: 'Android' })
+  const code = (major * 10_000 + minor * 100 + patch) * 100 + parsedRevision
+  if (!Number.isSafeInteger(code) || code <= 0 || code > 2_100_000_000) {
+    throw new Error(`Android versionCode is outside the supported range: ${code}`)
+  }
+  return code
 }
 
 /**
@@ -254,12 +478,57 @@ export function bumpPbxprojMarketingVersion(pbxprojText, version) {
  * Sync `versionCode = N` and `versionName = "X.Y.Z"` in an Android
  * build.gradle.kts to match the workspace version.
  */
-export function bumpAndroidGradleVersion(gradleText, version) {
+export function bumpAndroidGradleVersion(gradleText, version, { versionCode = null } = {}) {
   const semver = semverFromTag(version)
-  const code = androidVersionCode(semver)
+  const baseCode = androidVersionCode(semver)
+  let code = baseCode
+
+  if (versionCode != null && String(versionCode).trim() !== '') {
+    code = Number(versionCode)
+    if (!Number.isSafeInteger(code) || code <= 0 || code > 2_100_000_000) {
+      throw new Error(`Android versionCode must be a positive supported integer, got "${versionCode}"`)
+    }
+    if (Math.floor(code / 100) !== Math.floor(baseCode / 100)) {
+      throw new Error(
+        `Android versionCode ${code} does not encode marketing version ${semver}`,
+      )
+    }
+  } else {
+    const currentVersion = gradleText.match(/\bversionName\s*=\s*"([^"]+)"/)?.[1]
+    const currentCodeText = gradleText.match(/\bversionCode\s*=\s*(\d+)/)?.[1]
+    const currentCode = currentCodeText == null ? null : Number(currentCodeText)
+    if (
+      currentVersion === semver &&
+      Number.isSafeInteger(currentCode) &&
+      currentCode >= baseCode &&
+      currentCode <= baseCode + 99
+    ) {
+      code = currentCode
+    }
+  }
+
   return gradleText
     .replace(/(\bversionCode\s*=\s*)\d+/g, `$1${code}`)
     .replace(/(\bversionName\s*=\s*")[^"]+(")/g, `$1${semver}$2`)
+}
+
+/**
+ * Keep a StartOS correction revision while marketing version is unchanged,
+ * then reset it to zero for the next normal marketing release.
+ */
+export function bumpStartosSourceVersion(sourceText, version, { revision = null } = {}) {
+  const semver = semverFromTag(version)
+  const currentMatch = String(sourceText).match(/^\s*version:\s*'(\d+\.\d+\.\d+):(\d+)'/m)
+  let nextRevision = 0
+  if (revision != null && String(revision).trim() !== '') {
+    nextRevision = parseReleaseRevision(revision, { platform: 'StartOS' })
+  } else if (currentMatch?.[1] === semver) {
+    nextRevision = parseReleaseRevision(currentMatch[2], { platform: 'StartOS' })
+  }
+  return sourceText.replace(
+    /^(\s*version:\s*')[^'\n]+(')/m,
+    `$1${semver}:${nextRevision}$2`,
+  )
 }
 
 /**

@@ -10,12 +10,13 @@ source "$ROOT/scripts/local-fips-workspace.sh"
 # bash-style ${VAR:-default} syntax leaks through verbatim into pbxproj and
 # xcodebuild then emits an empty CFBundleVersion, which makes the simulator
 # fail with "Invalid placeholder attributes" when installing the app
-# extension. Always resolving from the workspace version keeps debug + sim
-# builds working.
+# extension. The marketing version resolves from Cargo, while the tracked iOS
+# App Store build number supplies CFBundleVersion for debug and release project
+# generation alike.
 if [[ -f "$ROOT/scripts/release_common.sh" ]]; then
   # shellcheck disable=SC1091
   source "$ROOT/scripts/release_common.sh"
-  resolve_shared_build_metadata "$ROOT"
+  resolve_ios_build_metadata "$ROOT"
 fi
 export NVPN_IOS_BUNDLE_ID="${NVPN_IOS_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
 export NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID="${NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID:-$NVPN_IOS_BUNDLE_ID.PacketTunnel}"
@@ -54,7 +55,15 @@ build_rust_target() {
   toolchain_bin="$dev_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
   sdkroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
 
-  local cargo_args=(build -p nostr-vpn-app-core --target "$target")
+  # The App Store edition has no Cashu wallet or paid-exit functionality.
+  # Keep the shared implementation for other platforms, but compile it out of
+  # both the iOS app and Packet Tunnel framework so it cannot run dormantly.
+  local cargo_args=(
+    build
+    -p nostr-vpn-app-core
+    --no-default-features
+    --target "$target"
+  )
   if [[ "$PROFILE" == "release" ]]; then
     cargo_args+=(--release)
   fi
@@ -178,6 +187,9 @@ run_app() {
     echo "Built iOS app not found" >&2
     exit 1
   fi
+  # A release smoke must start from the package's own current defaults rather
+  # than inheriting stale app-group state from an unrelated local UI test.
+  xcrun simctl uninstall "$device" "$NVPN_IOS_BUNDLE_ID" >/dev/null 2>&1 || true
   xcrun simctl install "$device" "$app_path"
   xcrun simctl launch "$device" "$NVPN_IOS_BUNDLE_ID"
   sleep 3

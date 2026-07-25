@@ -643,12 +643,14 @@
             FipsEndpointPeerTransportConfig {
                 npub: ambient_npub.clone(),
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: true,
                 discovery_fallback_transit: true,
             },
             FipsEndpointPeerTransportConfig {
                 npub: recipient_npub.clone(),
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: false,
                 discovery_fallback_transit: true,
             },

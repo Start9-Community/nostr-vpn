@@ -84,11 +84,7 @@ final class AppManager: ObservableObject {
             return
         }
 
-        let dataDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("nvpn", isDirectory: true)
-            .path ?? ""
+        let dataDir = Self.appDataDir()
         // Pass empty so the FFI falls back to its own CARGO_PKG_VERSION
         // (workspace-inherited). Avoids drift between MARKETING_VERSION in the
         // xcodeproj and the bundled nvpn binary.
@@ -96,6 +92,19 @@ final class AppManager: ObservableObject {
         app.setPrivilegedCommandRunner(runner: AuthorizationServicesPrivilegedCommandRunner())
         self.app = app
         self.state = app.state()
+    }
+
+    private static func appDataDir() -> String {
+        if let isolatedDataDir = ProcessInfo.processInfo.environment["NVPN_APP_DATA_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !isolatedDataDir.isEmpty {
+            return isolatedDataDir
+        }
+        return FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("nvpn", isDirectory: true)
+            .path ?? ""
     }
 
     var activeNetwork: NativeNetworkState? {
@@ -289,6 +298,10 @@ final class AppManager: ObservableObject {
 
     func toggleVpn() {
         let enabled = !state.vpnEnabled
+        if enabled, state.serviceSupported, !state.serviceInstalled {
+            installService()
+            return
+        }
         dispatch(
             enabled ? .connectVpn : .disconnectVpn,
             status: enabled ? "Turning VPN on" : "Turning VPN off"

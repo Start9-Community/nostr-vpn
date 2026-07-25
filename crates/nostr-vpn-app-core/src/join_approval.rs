@@ -341,7 +341,14 @@ mod tests {
             .expect("next join request remains available");
         assert_ne!(next_request.request.request_pubkey, request_pubkey);
         assert_eq!(joiner.networks.len(), 1);
-        assert_eq!(joiner.exit_node, applied.signed_by_pubkey);
+        assert_eq!(
+            joiner.internet_source,
+            nostr_vpn_core::config::InternetSource::Direct
+        );
+        assert!(
+            joiner.exit_node.is_empty(),
+            "joining a network must not silently make its admin the internet exit"
+        );
     }
 
     #[test]

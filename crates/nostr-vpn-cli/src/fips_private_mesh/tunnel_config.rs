@@ -285,13 +285,22 @@ impl FipsPrivateTunnelConfig {
         // Keep configured and cached WebRTC hints out of the endpoint when the
         // transport is disabled.
         retain_enabled_peer_transport_addresses(&mut endpoint_peers, app.fips_webrtc_enabled);
+        apply_canonical_websocket_dial_direction(
+            &mut endpoint_peers,
+            own_pubkey.unwrap_or_default(),
+            websocket_listener && !app.fips_websocket_public_url.trim().is_empty(),
+        );
+        let websocket_seed_urls = websocket_seed_urls_after_peer_dial_ownership(
+            &app.fips_websocket_seed_urls,
+            &endpoint_peers,
+        );
         let nostr_relays = effective_fips_nostr_relays(&app.nostr.relays);
         let websocket = WebSocketConfig {
             bind_addr: (!app.fips_websocket_bind_addr.is_empty())
                 .then(|| app.fips_websocket_bind_addr.clone()),
             public_url: (!app.fips_websocket_public_url.is_empty())
                 .then(|| app.fips_websocket_public_url.clone()),
-            seed_urls: app.fips_websocket_seed_urls.clone(),
+            seed_urls: websocket_seed_urls,
             ..WebSocketConfig::default()
         };
         websocket

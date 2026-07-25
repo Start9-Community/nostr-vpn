@@ -544,6 +544,9 @@ impl NativeAppRuntime {
         }
         self.refresh_lan_pairing();
         let announcement = self.build_lan_pairing_announcement()?;
+        if !self.vpn_enabled {
+            self.connect_vpn()?;
+        }
         let expires_at = lan_pairing_deadline();
         self.ensure_lan_pairing_worker(announcement.clone())?;
         if let Some(worker) = self.lan_pairing_worker.as_ref() {

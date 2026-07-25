@@ -134,6 +134,26 @@ case "$daemon_command" in
     ;;
 esac
 
+duplicate_log="$TEST_DIR/duplicate-daemon.log"
+if "$NVPN_BIN" daemon --service --config "$TEST_CONFIG" >"$duplicate_log" 2>&1; then
+  echo "FAIL: a second daemon started for the same config" >&2
+  exit 1
+fi
+grep -Fq "daemon already running" "$duplicate_log" \
+  || {
+    echo "FAIL: duplicate daemon attempt did not report the instance lock" >&2
+    cat "$duplicate_log" >&2
+    exit 1
+  }
+daemon_process_count="$(ps -axo command= \
+  | grep -F "$daemon_binary daemon --service --config $TEST_CONFIG_REAL" \
+  | grep -Fvc grep \
+  || true)"
+if [[ "$daemon_process_count" != "1" ]]; then
+  echo "FAIL: expected one isolated nvpn daemon, found $daemon_process_count" >&2
+  exit 1
+fi
+
 "$ROOT/scripts/idle-cpu-gate.py" host-pid \
   --pid "$daemon_pid" \
   --label "macOS nvpn daemon" \

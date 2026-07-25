@@ -823,6 +823,85 @@ mod tests {
     }
 
     #[test]
+    fn c_abi_manual_join_contract_reaches_both_real_native_actions() {
+        let admin_dir = temp_data_dir();
+        let joiner_dir = temp_data_dir();
+        let version = CString::new("test").expect("version");
+        let admin_data =
+            CString::new(admin_dir.to_string_lossy().as_bytes()).expect("admin data dir");
+        let joiner_data =
+            CString::new(joiner_dir.to_string_lossy().as_bytes()).expect("joiner data dir");
+        let admin = nostr_vpn_app_new(admin_data.as_ptr(), version.as_ptr());
+        let joiner = nostr_vpn_app_new(joiner_data.as_ptr(), version.as_ptr());
+        assert!(!admin.is_null());
+        assert!(!joiner.is_null());
+
+        let admin_state = state_value(admin);
+        let joiner_state = state_value(joiner);
+        let admin_npub = admin_state["ownNpub"].as_str().expect("admin npub");
+        let joiner_npub = joiner_state["ownNpub"].as_str().expect("joiner npub");
+
+        let created = dispatch_value(
+            admin,
+            &serde_json::json!({
+                "type": "add_network",
+                "name": "Manual join contract",
+            }),
+        );
+        assert_eq!(created["networks"].as_array().map(Vec::len), Some(1));
+        let network_entry_id = created["networks"][0]["id"]
+            .as_str()
+            .expect("network entry id");
+        let mesh_network_id = created["networks"][0]["networkId"]
+            .as_str()
+            .expect("mesh network id");
+
+        let configured_joiner = dispatch_value(
+            joiner,
+            &serde_json::json!({
+                "type": "manual_add_network",
+                "adminNpub": admin_npub,
+                "meshNetworkId": mesh_network_id,
+            }),
+        );
+        assert_eq!(
+            configured_joiner["networks"][0]["networkId"].as_str(),
+            Some(mesh_network_id),
+            "joiner-side production action must persist the out-of-band network identity"
+        );
+        assert_eq!(
+            configured_joiner["networks"][0]["joinRequestAdminNpub"].as_str(),
+            Some(admin_npub),
+            "joiner-side production action must persist the trusted admin identity"
+        );
+
+        let approved = dispatch_value(
+            admin,
+            &serde_json::json!({
+                "type": "add_participant",
+                "networkId": network_entry_id,
+                "npub": joiner_npub,
+                "alias": "Android",
+            }),
+        );
+        assert!(
+            approved["networks"][0]["participants"]
+                .as_array()
+                .is_some_and(|participants| participants
+                    .iter()
+                    .any(|participant| participant["npub"].as_str() == Some(joiner_npub))),
+            "admin-side production action must add the joining identity to the signed roster"
+        );
+
+        unsafe {
+            nostr_vpn_app_free(admin);
+            nostr_vpn_app_free(joiner);
+        }
+        let _ = fs::remove_dir_all(admin_dir);
+        let _ = fs::remove_dir_all(joiner_dir);
+    }
+
+    #[test]
     fn qr_matrix_reports_cells_for_join_request_text() {
         let text = CString::new("nvpn://join-request/example").expect("text");
         let json = take_string(nostr_vpn_qr_matrix_json(text.as_ptr()));
@@ -881,6 +960,20 @@ mod tests {
             std::env::temp_dir().join(format!("nostr-vpn-c-abi-{}-{stamp}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         path
+    }
+
+    fn state_value(handle: *const NvpnAppHandle) -> serde_json::Value {
+        let json = take_string(nostr_vpn_app_state_json(handle));
+        serde_json::from_str(&json).expect("state JSON")
+    }
+
+    fn dispatch_value(
+        handle: *const NvpnAppHandle,
+        action: &serde_json::Value,
+    ) -> serde_json::Value {
+        let action = CString::new(action.to_string()).expect("action JSON");
+        let json = take_string(nostr_vpn_app_dispatch_json(handle, action.as_ptr()));
+        serde_json::from_str(&json).expect("action state JSON")
     }
 
     fn take_string(value: *mut c_char) -> String {

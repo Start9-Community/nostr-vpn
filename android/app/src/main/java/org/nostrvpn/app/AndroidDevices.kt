@@ -38,6 +38,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -131,7 +133,12 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.devicesPage(
             Button(
                 onClick = onAddDevice,
                 enabled = network.enabled,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .mobileUiSelector(
+                        id = "manual-admin-open",
+                        description = "Open manual device approval",
+                    ),
             ) {
                 Text("Add device")
             }
@@ -237,7 +244,11 @@ private fun NetworkSetupCard(
                     onClick = { setupMode = NetworkSetupMode.Join },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(58.dp),
+                        .height(58.dp)
+                        .mobileUiSelector(
+                            id = "network-setup-join",
+                            description = "Join Network",
+                        ),
                     shape = RoundedCornerShape(16.dp),
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
                 ) {
@@ -289,17 +300,25 @@ private fun NetworkSetupCard(
                                     modifier = Modifier.fillMaxWidth(),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    val qrSide = maxWidth.coerceAtMost(220.dp)
                                     QrCode(
                                         text = joinRequestQrCodeOrLink,
                                         qrJson = qrJson,
-                                        side = qrSide,
+                                        modifier = Modifier.semantics {
+                                            contentDescription = "Join request QR code"
+                                        },
+                                        side = maxWidth,
                                     )
                                 }
                                 CopyButton(joinRequestQrCodeOrLink, "Copy request")
                             }
 
-                            TextButton(onClick = { manualExpanded = !manualExpanded }) {
+                            TextButton(
+                                onClick = { manualExpanded = !manualExpanded },
+                                modifier = Modifier.mobileUiSelector(
+                                    id = "manual-join-expand",
+                                    description = "Manual join",
+                                ),
+                            ) {
                                 Text(if (manualExpanded) "Manual join ▴" else "Manual join ▾")
                             }
                             if (manualExpanded) {
@@ -315,7 +334,12 @@ private fun NetworkSetupCard(
                                 OutlinedTextField(
                                     value = manualAdminId,
                                     onValueChange = { manualAdminId = it },
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .mobileUiSelector(
+                                            id = "manual-join-admin-id",
+                                            description = "Manual join admin Device ID",
+                                        ),
                                     singleLine = true,
                                     label = { Text("Admin Device ID") },
                                     isError = adminInvalid,
@@ -328,7 +352,12 @@ private fun NetworkSetupCard(
                                 OutlinedTextField(
                                     value = manualNetworkId,
                                     onValueChange = { manualNetworkId = it },
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .mobileUiSelector(
+                                            id = "manual-join-network-id",
+                                            description = "Manual join Network ID",
+                                        ),
                                     singleLine = true,
                                     label = { Text("Network ID") },
                                 )
@@ -341,7 +370,12 @@ private fun NetworkSetupCard(
                                         manualExpanded = false
                                         onCreated?.invoke()
                                     },
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .mobileUiSelector(
+                                            id = "manual-join-submit",
+                                            description = "Add network manually",
+                                        ),
                                 ) {
                                     Text("Add manually")
                                 }
@@ -502,7 +536,12 @@ internal fun AddDevicesDialog(
                 }
                 Button(
                     onClick = { scanDeviceQr(network.id) },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .mobileUiSelector(
+                            id = "join-request-scan-open",
+                            description = "Scan joining device QR",
+                        ),
                 ) {
                     Text("Scan QR")
                 }

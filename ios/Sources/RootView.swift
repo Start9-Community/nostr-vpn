@@ -20,15 +20,6 @@ struct RootView: View {
         return model.activeNetwork ?? model.state.networks.first
     }
 
-    private var paidRouteMarketAvailable: Bool {
-        model.state.paidRouteMarket.supported
-    }
-
-    private var walletTabTitle: String {
-        let balance = model.state.paidRouteMarket.wallet.navigationBalanceText
-        return balance.isEmpty ? "Wallet" : "Wallet \(balance)"
-    }
-
     var body: some View {
         Group {
             if model.state.networks.isEmpty {
@@ -58,16 +49,6 @@ struct RootView: View {
                     }
                     .tabItem { Label("Internet", systemImage: "network") }
                     .tag(AppTab.internet)
-
-                    if paidRouteMarketAvailable {
-                        NavigationStack {
-                            PaidRouteWalletPage(model: model)
-                                .navigationTitle("Wallet")
-                                .toolbar { networkSwitcherToolbar }
-                        }
-                        .tabItem { Label(walletTabTitle, systemImage: "creditcard.fill") }
-                        .tag(AppTab.wallet)
-                    }
 
                     NavigationStack {
                         SettingsPage(model: model)
@@ -105,8 +86,8 @@ struct RootView: View {
                 startVpnAfterDisclosure = false
                 vpnDisclosurePresented = false
                 model.markVpnDisclosureAccepted()
-                if shouldStartVpn, !model.state.vpnEnabled {
-                    model.toggleVpn()
+                if shouldStartVpn {
+                    model.startVpnAfterDisclosure()
                 }
             }
         }
@@ -114,7 +95,6 @@ struct RootView: View {
             if model.vpnDisclosurePromptVisible && !vpnDisclosureAccepted {
                 presentVpnDisclosure(startVpnAfterAccept: true)
             }
-            normalizeSelectedTab()
         }
         .onChange(of: model.vpnDisclosurePromptVisible) { _, visible in
             if visible && !vpnDisclosureAccepted {
@@ -126,7 +106,6 @@ struct RootView: View {
                !model.state.networks.contains(where: { $0.id == shownNetworkId }) {
                 self.shownNetworkId = nil
             }
-            normalizeSelectedTab()
         }
     }
 
@@ -156,20 +135,10 @@ struct RootView: View {
         vpnDisclosurePresented = true
     }
 
-    private func normalizeSelectedTab() {
-        if !paidRouteMarketAvailable && selectedTab == .wallet {
-            selectedTab = .devices
-        }
-    }
-
     private static func initialTab() -> AppTab {
         switch AppModel.screenshotTabArgument()?.lowercased() {
         case "internet", "exit", "exit-node", "exit-nodes", "routes", "routing":
             return .internet
-        case "public-exits", "paid-exits", "paid-market", "market":
-            return .internet
-        case "wallet", "paid-wallet":
-            return .wallet
         case "settings", "diagnostics":
             return .settings
         default:
@@ -181,7 +150,6 @@ struct RootView: View {
 private enum AppTab: Hashable {
     case devices
     case internet
-    case wallet
     case settings
 }
 
@@ -217,6 +185,7 @@ private struct NetworkSwitcher: View {
             } label: {
                 Label("Add network", systemImage: "plus")
             }
+            .accessibilityIdentifier("add-network-open")
         } label: {
             HStack(spacing: 4) {
                 if let shownNetwork, model.state.networks.count > 1 {
@@ -230,6 +199,7 @@ private struct NetworkSwitcher: View {
             }
             .foregroundStyle(.primary)
         }
+        .accessibilityIdentifier("network-switcher-open")
     }
 }
 
@@ -278,6 +248,13 @@ private struct AddNetworkPage: View {
                 switch mode {
                 case nil:
                     AddNetworkChoiceButtons(mode: $mode)
+                    if showsWelcomeHeader {
+                        Link(destination: URL(string: "https://nostrvpn.org/privacy/")!) {
+                            Label("Privacy Policy", systemImage: "hand.raised")
+                        }
+                        .font(.footnote)
+                        .accessibilityIdentifier("onboarding-privacy-policy-link")
+                    }
                 case .create:
                     AddNetworkBackButton(mode: $mode)
                     CreateNetworkCard(model: model, onCreated: onCreated)
@@ -322,6 +299,7 @@ private struct AddNetworkChoiceButtons: View {
             .buttonBorderShape(.roundedRectangle(radius: 16))
             .controlSize(.large)
             .tint(AppColors.join)
+            .accessibilityIdentifier("network-setup-join")
         }
     }
 }

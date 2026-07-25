@@ -128,6 +128,18 @@ mod tests {
     }
 
     #[test]
+    fn linux_route_delete_args_scope_defaults_to_the_tunnel_interface() {
+        assert_eq!(
+            linux_interface_route_delete_args("0.0.0.0/0", "nvpn0"),
+            vec!["-4", "route", "del", "0.0.0.0/0", "dev", "nvpn0"]
+        );
+        assert_eq!(
+            linux_interface_route_delete_args("::/0", "nvpn0"),
+            vec!["-6", "route", "del", "::/0", "dev", "nvpn0"]
+        );
+    }
+
+    #[test]
     fn wireguard_upstream_inbound_drop_rule_blocks_new_mesh_forwards() {
         assert_eq!(
             linux_wireguard_exit_inbound_drop_rule("nvpn-wg-exit", "nvpn0", "10.44.0.0/16"),

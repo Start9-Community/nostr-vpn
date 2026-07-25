@@ -6,9 +6,7 @@ use nostr_sdk::prelude::Keys;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{
-    AppConfig, InternetSource, normalize_nostr_pubkey, normalize_runtime_network_id,
-};
+use crate::config::{AppConfig, normalize_nostr_pubkey, normalize_runtime_network_id};
 use crate::fips_control::{JoinRosterControl, SignedRoster};
 use crate::identity_bridge::{
     CreateNostrIdentityDeviceApprovalRequestOptions, NostrIdentityDeviceApprovalRequest,
@@ -312,11 +310,6 @@ impl AppConfig {
 
         if !updated.apply_verified_admin_signed_shared_roster(signed_roster)? {
             return Err(anyhow!("signed join roster was not applied"));
-        }
-        if signer != updated.own_nostr_pubkey_hex()? {
-            updated.select_private_exit_node(signer)?;
-        } else {
-            updated.set_internet_source(InternetSource::Direct);
         }
         updated.pending_nostr_join_request = None;
         updated.ensure_defaults();

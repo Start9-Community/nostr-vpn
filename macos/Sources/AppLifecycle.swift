@@ -29,6 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        route(urls: urls, activate: true)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         singleInstance.release()
     }

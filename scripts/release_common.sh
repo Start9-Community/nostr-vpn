@@ -244,6 +244,38 @@ resolve_shared_build_metadata() {
   export NVPN_BUILD_TIMESTAMP_UTC
 }
 
+resolve_ios_build_metadata() {
+  local root="$1"
+  local build_number_file="$root/ios/app-store-build-number"
+  local build_number="${NVPN_IOS_BUILD_NUMBER:-}"
+
+  resolve_shared_build_metadata "$root"
+
+  if [[ -z "$build_number" ]]; then
+    if [[ ! -f "$build_number_file" ]]; then
+      echo "Tracked iOS build number is missing: $build_number_file" >&2
+      return 1
+    fi
+    build_number="$(tr -d '[:space:]' < "$build_number_file")"
+  fi
+
+  if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+    echo "iOS build number must be a positive integer, got: ${build_number:-<empty>}" >&2
+    return 1
+  fi
+
+  # App Store Connect identifies an upload by marketing version plus build
+  # number. Keep the Cargo/workspace marketing version stable while a tracked
+  # iOS build number advances for corrected uploads of that same version.
+  NVPN_APP_VERSION_CODE="$build_number"
+  NVPN_IOS_BUILD_NUMBER="$build_number"
+  NVPN_IOS_RELEASE_TAG="v${NVPN_APP_VERSION_NAME}+${build_number}"
+
+  export NVPN_APP_VERSION_CODE
+  export NVPN_IOS_BUILD_NUMBER
+  export NVPN_IOS_RELEASE_TAG
+}
+
 release_slug() {
   local channel="$1"
   printf 'NostrVPN-%s-%s+%s-%s' \

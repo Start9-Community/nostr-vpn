@@ -252,7 +252,12 @@ internal fun AddParticipantForm(network: NetworkState, dispatch: (JSONObject) ->
         OutlinedTextField(
             value = deviceId,
             onValueChange = { deviceId = it },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .mobileUiSelector(
+                    id = "manual-admin-joiner-id",
+                    description = "Manual joiner Device ID",
+                ),
             singleLine = true,
             label = { Text("Device ID") },
             isError = showError,
@@ -261,7 +266,12 @@ internal fun AddParticipantForm(network: NetworkState, dispatch: (JSONObject) ->
         OutlinedTextField(
             value = alias,
             onValueChange = { alias = it },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .mobileUiSelector(
+                    id = "manual-admin-alias",
+                    description = "Manual joiner name",
+                ),
             singleLine = true,
             label = { Text("Name") },
         )
@@ -278,6 +288,10 @@ internal fun AddParticipantForm(network: NetworkState, dispatch: (JSONObject) ->
                 deviceId = ""
                 alias = ""
             },
+            modifier = Modifier.mobileUiSelector(
+                id = "manual-admin-submit",
+                description = "Add joining device manually",
+            ),
         ) {
             Text("Add")
         }
@@ -916,85 +930,3 @@ internal val Accent = Color(0xFF7C3AED)
 internal val Ok = Color(0xFF16A34A)
 internal val Muted = Color(0xFF68717C)
 internal const val JOIN_REQUEST_SENT_TEXT = "Join request sent"
-
-private fun ParticipantState.isSelf(state: AppState): Boolean =
-    (state.ownNpub.isNotBlank() && npub == state.ownNpub) || meshState == "local"
-
-private fun ParticipantState.displayName(state: AppState): String {
-    if (magicDnsName.isNotBlank()) return magicDnsName
-    if (isSelf(state) && state.selfMagicDnsName.isNotBlank()) return state.selfMagicDnsName
-    if (alias.isNotBlank()) return alias
-    if (magicDnsAlias.isNotBlank()) return magicDnsAlias
-    return npub.shortNpub()
-}
-
-private fun ParticipantState.subtitle(isSelf: Boolean): String {
-    val ip = tunnelIp.substringBefore("/")
-    return if (isSelf) {
-        if (ip.isBlank()) "This device" else "This device - $ip"
-    } else {
-        ip
-    }
-}
-
-private fun ParticipantState.statusLabel(appState: AppState): String {
-    if (isSelf(appState)) return if (appState.vpnEnabled) "This device" else "Off"
-    if (state == "pending") {
-        return when (statusText.trim().lowercase()) {
-            "join request sent" -> JOIN_REQUEST_SENT_TEXT
-            "waiting for admin" -> "Waiting for admin"
-            else -> "Connecting"
-        }
-    }
-    return when (state) {
-        "local", "online", "present" -> "Online"
-        "offline", "absent", "off" -> "Offline"
-        else -> if (reachable) "Online" else "Unknown"
-    }
-}
-
-private fun ParticipantState.detailStatusLabel(appState: AppState): String {
-    if (isSelf(appState)) return statusLabel(appState)
-    return when {
-        statusText.isNotBlank() -> statusText
-        else -> statusLabel(appState)
-    }
-}
-
-private fun ParticipantState.fipsPathLabel(appState: AppState): String {
-    if (isSelf(appState)) return "This device"
-    if (reachable && fipsTransportAddr.isNotBlank()) {
-        val transport = if (fipsTransportType.isBlank()) "" else " (${fipsTransportType.uppercase()})"
-        return if (fipsSrttMs > 0) {
-            "Direct connection$transport, $fipsSrttMs ms"
-        } else {
-            "Direct connection$transport"
-        }
-    }
-    if (reachable) {
-        return if (fipsSrttMs > 0) "Via mesh, $fipsSrttMs ms" else "Via mesh"
-    }
-    if (state == "pending") return "Connecting"
-    return "Offline"
-}
-
-private fun ParticipantState.isFipsRouted(state: AppState): Boolean =
-    !isSelf(state) && reachable && fipsTransportAddr.isBlank()
-
-private fun ParticipantState.isActiveExitNode(state: AppState): Boolean =
-    state.exitNodeActive && state.exitNode.isNotBlank() && npub == state.exitNode
-
-private fun ParticipantState.exitNodeLabel(state: AppState): String =
-    if (isActiveExitNode(state)) "Exit active" else "Exit offered"
-
-private fun ParticipantState.exitNodeBackground(state: AppState): Color =
-    if (isActiveExitNode(state)) Color(0xFFECFDF5) else Color(0xFFFFF7ED)
-
-private fun ParticipantState.exitNodeTint(state: AppState): Color =
-    if (isActiveExitNode(state)) Ok else Color(0xFFA16207)
-
-private fun String.shortNpub(): String {
-    if (isBlank()) return "Device"
-    if (length <= 19) return this
-    return "${take(12)}...${takeLast(6)}"
-}

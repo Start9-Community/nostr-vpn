@@ -255,6 +255,7 @@
             config.magic_dns_server,
             nostr_vpn_core::MESH_MAGIC_DNS_SERVER
         );
+        assert_eq!(config.dns_match_domains, vec!["nvpn"]);
     }
 
     #[test]
@@ -311,6 +312,7 @@
             config.magic_dns_server,
             nostr_vpn_core::MESH_MAGIC_DNS_SERVER
         );
+        assert_eq!(config.dns_match_domains, vec![""]);
     }
 
     #[test]
@@ -757,12 +759,21 @@
         assert!(config.network_id.is_empty());
         assert!(config.peers.is_empty());
         assert!(config.route_targets.is_empty());
+        assert!(
+            config.dns_servers.is_empty(),
+            "an addressless joiner must keep using the device DNS until a roster arrives"
+        );
+        assert!(
+            config.magic_dns_server.is_empty(),
+            "MagicDNS is unavailable before the joiner has a mesh"
+        );
+        assert!(config.dns_match_domains.is_empty());
         assert_eq!(app.active_network().network_id, "manual-mesh");
         assert_eq!(app.active_network().join_request_admin, admin);
     }
 
     #[test]
-    fn mobile_admin_listener_without_roster_peers_keeps_fips_discovery_enabled() {
+    fn mobile_admin_listener_without_roster_peers_discovers_without_advertising() {
         let mut app = AppConfig::generated();
         app.ensure_defaults();
         let own = app.own_nostr_pubkey_hex().expect("own pubkey");
@@ -793,7 +804,10 @@
         assert!(mobile.join_requests_enabled);
         assert!(mobile.peers.is_empty());
         assert!(config.node.discovery.nostr.enabled);
-        assert!(config.node.discovery.nostr.advertise);
+        assert!(
+            !config.node.discovery.nostr.advertise,
+            "a known approval npub routes through discovery transit without a public advert"
+        );
         assert_eq!(
             config.node.discovery.nostr.policy,
             NostrDiscoveryPolicy::Open
@@ -835,6 +849,38 @@
             "bootstrap/transit peers should not use nvpn roster-style fast reconnect"
         );
         assert!(mobile.nostr_discovery_enabled);
+    }
+
+    #[test]
+    fn mobile_config_identity_pins_each_default_websocket_seed_once() {
+        let app = AppConfig::generated();
+        let mobile = MobileTunnelConfig::from_app(&app).expect("mobile config");
+        let config = fips_endpoint_config("nostr-vpn:test", &mobile);
+
+        let TransportInstances::Single(websocket) = &config.transports.websocket else {
+            panic!("expected canonical WebSocket transport");
+        };
+        assert_eq!(
+            websocket.seed_urls,
+            nostr_vpn_core::config::default_fips_websocket_seed_urls()
+        );
+        assert_eq!(
+            config.peers.len(),
+            nostr_vpn_core::config::DEFAULT_FIPS_WEBSOCKET_SEEDS.len()
+        );
+        for (expected_npub, expected_url) in
+            nostr_vpn_core::config::DEFAULT_FIPS_WEBSOCKET_SEEDS
+        {
+            let matching = config
+                .peers
+                .iter()
+                .filter(|peer| peer.npub == *expected_npub)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "seed PeerConfig must not be duplicated");
+            assert_eq!(matching[0].addresses.len(), 1);
+            assert_eq!(matching[0].addresses[0].transport, "websocket");
+            assert_eq!(matching[0].addresses[0].addr, *expected_url);
+        }
     }
 
     #[test]

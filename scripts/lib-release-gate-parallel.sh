@@ -111,3 +111,39 @@ release_gate_parallel_wait() {
   fi
   printf 'Release-gate lane passed: %s in %ss\n' "$label" "$duration"
 }
+
+release_gate_parallel_wait_group() {
+  local remaining=("$@")
+  if ((${#remaining[@]} == 0)); then
+    return 0
+  fi
+
+  # Bash 3 has no `wait -n`. Poll only the lane wrapper PIDs, then reap and
+  # report each lane as soon as it finishes. This prevents an early failure in
+  # a later-started lane from sitting unnoticed behind a slow first lane.
+  while ((${#remaining[@]})); do
+    local pending=()
+    local index pid status
+    for index in "${remaining[@]}"; do
+      pid="${RELEASE_GATE_PARALLEL_PIDS[$index]:-}"
+      if [[ -z "$pid" ]]; then
+        release_gate_parallel_wait "$index"
+        return $?
+      fi
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        pending+=("$index")
+        continue
+      fi
+      if release_gate_parallel_wait "$index"; then
+        :
+      else
+        status=$?
+        return "$status"
+      fi
+    done
+    remaining=("${pending[@]}")
+    if ((${#remaining[@]})); then
+      sleep 0.1
+    fi
+  done
+}

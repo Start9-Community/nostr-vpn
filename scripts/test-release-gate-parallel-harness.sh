@@ -51,11 +51,59 @@ set -e
 grep -Fq 'intentional lane failure' "$tmp/logs/failing-lane-2.log" \
   || fail "failing lane log was not preserved"
 
+slow_lane() {
+  local ready_marker="$1"
+  trap 'printf "slow lane cancelled\n"; exit 0' TERM
+  printf 'slow lane started\n'
+  : >"$ready_marker"
+  sleep 10
+}
+
+release_gate_parallel_start "slow cancellation peer" slow_lane "$tmp/slow-ready"
+slow="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+slow_log="${RELEASE_GATE_PARALLEL_LOGS[$slow]}"
+for _ in $(seq 1 50); do
+  [[ -f "$tmp/slow-ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$tmp/slow-ready" ]] || fail "slow cancellation peer did not start"
+release_gate_parallel_start "fast group failure" lane_fails
+fast_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+group_started="$(date +%s)"
+set +e
+release_gate_parallel_wait_group "$slow" "$fast_failure" >/dev/null 2>&1
+status=$?
+set -e
+group_elapsed=$(( $(date +%s) - group_started ))
+[[ "$status" == "7" ]] \
+  || fail "parallel group returned $status instead of the early lane failure"
+(( group_elapsed < 5 )) \
+  || fail "parallel group waited ${group_elapsed}s behind an earlier slow lane"
+[[ -z "${RELEASE_GATE_PARALLEL_PIDS[$slow]:-}" ]] \
+  || fail "parallel group did not reap its cancelled peer"
+grep -Fq 'slow lane started' "$slow_log" \
+  || fail "cancelled peer log was not preserved"
+
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
+grep -Fq 'node scripts/sync-versions.mjs --check' "$release_gate" \
+  || fail "release gate mutates generated versions before candidate snapshot"
+if grep -Fxq '  node scripts/sync-versions.mjs' "$release_gate"; then
+  fail "release gate still rewrites generated versions during preflight"
+fi
 grep -Fq 'release_gate_parallel_start "Windows platform"' "$release_gate" \
   || fail "release gate does not dispatch the remote Windows lane"
 grep -Fq 'release_gate_parallel_start "Docker node image build"' "$release_gate" \
   || fail "release gate does not overlap the reusable Docker build with host validation"
+grep -Fq '"Android compile, unit tests, and lint"' "$release_gate" \
+  || fail "release gate does not dispatch Android static validation"
+grep -Fq ':app:lintDebug' "$release_gate" \
+  || fail "release gate does not run Android lint"
+grep -Fq ':app:testDebugUnitTest' "$release_gate" \
+  || fail "release gate does not run Android unit tests"
+grep -Fq 'release_gate_parallel_wait "$android_static_lane"' "$release_gate" \
+  || fail "release gate does not join Android static validation"
+grep -Fq ':app:lintRelease' "$ROOT_DIR/.github/workflows/release.yml" \
+  || fail "hosted Android release build does not run release lint"
 grep -Fq 'export NVPN_E2E_SKIP_NODE_BUILD=1' "$release_gate" \
   || fail "release gate does not reuse its prebuilt Docker node image"
 grep -Fq 'cache_to:' "$ROOT_DIR/docker-compose.e2e.yml" \
@@ -89,26 +137,221 @@ grep -Fq 'release_gate_parallel_start "Docker kernel WireGuard exit"' "$release_
   || fail "release gate does not dispatch the isolated kernel WireGuard lane"
 grep -Fq 'release_gate_parallel_start "Docker userspace WireGuard exit"' "$release_gate" \
   || fail "release gate does not dispatch the isolated userspace WireGuard lane"
+grep -Fq 'release_gate_parallel_wait_group "${lanes[@]}"' "$release_gate" \
+  || fail "parallel Docker lane failures wait behind earlier slow lanes"
 grep -Fq 'NVPN_WG_EXIT_USERSPACE_INTERNET_SUBNET' "$release_gate" \
   || fail "parallel userspace WireGuard fixture has no isolated subnet"
 grep -Fq 'Release gate test selector matched no passing test' "$release_gate" \
   || fail "focused release-gate tests can pass with an empty selector"
 grep -Fq -- '--skip websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin' "$release_gate" \
   || fail "the strict QR-join latency gate still runs during the cold Docker build"
+for durable_receipt_test in \
+  websocket_seed_router_retries_durable_join_receipt_after_first_route_failure \
+  websocket_seed_router_delivers_durable_join_receipt_after_tunnel_restart
+do
+  grep -Fq -- "--skip $durable_receipt_test" "$release_gate" \
+    || fail "$durable_receipt_test still runs during the contended cold workspace suite"
+  [[ "$(grep -Fc "$durable_receipt_test" "$release_gate")" -ge 2 ]] \
+    || fail "$durable_receipt_test is skipped but not rerun in the strict serial lane"
+done
 grep -Fq 'desktop_mobile_manual_join_desktop_admin_to_mobile_joiner' "$release_gate" \
   || fail "release gate does not prove desktop-admin to mobile-joiner delivery"
 grep -Fq 'desktop_mobile_manual_join_mobile_admin_to_desktop_joiner' "$release_gate" \
   || fail "release gate does not prove mobile-admin to desktop-joiner delivery"
+grep -Fq 'e2e-manual-join-cli.sh' "$release_gate" \
+  || fail "release gate does not execute both real CLI manual-join commands"
+grep -Fq 'windows-vm-manual-join-e2e.sh' "$release_gate" \
+  || fail "release gate does not drive shipped Windows manual-join controls"
+grep -Fq 'macos-vm-manual-join-e2e.sh' "$release_gate" \
+  || fail "release gate does not drive shipped macOS manual-join controls"
+grep -Fq 'ubuntu-vm-manual-join-e2e.sh' "$release_gate" \
+  || fail "release gate does not drive shipped Linux manual-join controls"
+grep -Fq 'NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E:-required' "$release_gate" \
+  || fail "real desktop/physical-mobile manual join is not required by default"
+grep -Fq 'macos-vm-android-manual-join-e2e.sh' "$release_gate" \
+  || fail "release gate does not run the real macOS/physical-Android join UI"
+grep -Fq 'env NVPN_DESKTOP_MOBILE_JOIN_WAIT_SECS=15' "$release_gate" \
+  || fail "desktop/physical-mobile roster receipt and UI progress are not capped at 15 seconds"
+grep -Fq 'NVPN_MACOS_ANDROID_JOIN_SKIP_BUILD="${DESKTOP_MOBILE_REUSE_MACOS_BUILD:-0}"' \
+  "$release_gate" \
+  || fail "desktop/physical-mobile lane rebuilds the macOS candidate after its native VM lane"
+grep -Fq 'DESKTOP_MOBILE_REUSE_MACOS_BUILD=1' "$release_gate" \
+  || fail "successful macOS platform work is not reused by the physical cross-platform lane"
+grep -Fq 'NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E: '\''0'\''' \
+  "$ROOT_DIR/.github/workflows/release.yml" \
+  || fail "hosted release verifier still requires private physical desktop/mobile infrastructure"
+grep -Fq 'macos-admin-to-physical-android-joiner' \
+  "$ROOT_DIR/scripts/macos-vm-android-manual-join-e2e.sh" \
+  || fail "real desktop/mobile gate omits the desktop-admin direction"
+grep -Fq 'physical-android-admin-to-macos-joiner' \
+  "$ROOT_DIR/scripts/macos-vm-android-manual-join-e2e.sh" \
+  || fail "real desktop/mobile gate omits the mobile-admin direction"
+grep -Fq 'desktop_manual_join_e2e_fixture' \
+  "$ROOT_DIR/scripts/macos-vm-android-manual-join-e2e.sh" \
+  || fail "real desktop/mobile gate does not parse device configs through production AppConfig"
+if grep -Fq 'tomllib' "$ROOT_DIR/scripts/macos-vm-android-manual-join-e2e.sh"; then
+  fail "real desktop/mobile gate depends on a Python TOML parser absent from system macOS"
+fi
+mobile_join_line="$(grep -n '^  run_mobile_join_e2e_gate$' "$release_gate" | cut -d: -f1)"
+macos_vm_join_line="$(
+  grep -nF '    release_gate_parallel_wait "$macos_platform_lane"' \
+    "$release_gate" | cut -d: -f1 || true
+)"
+desktop_mobile_line="$(
+  grep -n '^  run_desktop_mobile_manual_join_e2e_gate$' \
+    "$release_gate" | cut -d: -f1 || true
+)"
+[[ -n "$mobile_join_line" && -n "$macos_vm_join_line" && -n "$desktop_mobile_line" ]] \
+  || fail "serialized physical desktop/mobile lane markers are incomplete"
+(( mobile_join_line < macos_vm_join_line && macos_vm_join_line < desktop_mobile_line )) \
+  || fail "physical desktop/mobile gate is not serialized after phone lanes and macOS VM UI work"
+if grep -Fq 'release_gate_parallel_start "Physical macOS/Android' "$release_gate"; then
+  fail "physical desktop/mobile gate can contend with another device lane"
+fi
+for macos_native_gate in \
+  "$ROOT_DIR/scripts/e2e-macos-manual-join-ui.sh" \
+  "$ROOT_DIR/scripts/e2e-macos-service-toggle.sh" \
+  "$ROOT_DIR/scripts/e2e-macos-android-manual-join-remote.sh"
+do
+  grep -Fq 'cargo-target/$HOST_TARGET/release/examples/desktop_manual_join_e2e_fixture' \
+    "$macos_native_gate" \
+    || fail "$(basename "$macos_native_gate") duplicates the macOS Cargo dependency graph"
+  grep -Fq -- '--target "$HOST_TARGET"' "$macos_native_gate" \
+    || fail "$(basename "$macos_native_gate") does not reuse the target-specific macOS build"
+  grep -Fq -- '-p nostr-vpn-core' "$macos_native_gate" \
+    || fail "$(basename "$macos_native_gate") builds the manual-join fixture from the wrong package"
+done
+grep -Fq 'release_gate_parallel_start "macOS platform UI"' "$release_gate" \
+  || fail "isolated macOS UI work does not overlap the host validation lane"
+grep -Fq 'release_gate_parallel_start "Linux platform UI"' "$release_gate" \
+  || fail "isolated Linux UI work does not overlap the host validation lane"
+for preparation in \
+  prepare_windows_platform_lane_sync \
+  prepare_macos_platform_lane_sync \
+  prepare_linux_platform_lane_sync
+do
+  definition_line="$(grep -n "^${preparation}()" "$release_gate" | cut -d: -f1)"
+  invocation_line="$(grep -n "^  ${preparation}$" "$release_gate" | cut -d: -f1)"
+  [[ -n "$definition_line" && -n "$invocation_line" ]] \
+    || fail "$preparation is not invoked inside its parallel platform lane"
+done
+main_line="$(grep -n '^main()' "$release_gate" | cut -d: -f1)"
+if tail -n "+$main_line" "$release_gate" \
+  | grep -Eq '^  prepare_(windows|macos|linux)_platform_lane_sync$'
+then
+  fail "remote platform syncs still serialize in main before lane dispatch"
+fi
+for platform in WINDOWS MACOS LINUX; do
+  grep -Fq "NVPN_RELEASE_GATE_${platform}_MANUAL_JOIN_UI_E2E:-required" "$release_gate" \
+    || fail "$platform manual-join native UI gate is not required by default"
+  grep -Fq "NVPN_RELEASE_GATE_${platform}_SERVICE_TOGGLE_E2E:-required" "$release_gate" \
+    || fail "$platform service-toggle native UI gate is not required by default"
+done
+hosted_release_workflow="$ROOT_DIR/.github/workflows/release.yml"
+for platform in WINDOWS MACOS LINUX; do
+  grep -Fq "NVPN_RELEASE_GATE_${platform}_MANUAL_JOIN_UI_E2E: '0'" \
+    "$hosted_release_workflow" \
+    || fail "hosted release verifier still requires the private $platform manual-join VM"
+  grep -Fq "NVPN_RELEASE_GATE_${platform}_SERVICE_TOGGLE_E2E: '0'" \
+    "$hosted_release_workflow" \
+    || fail "hosted release verifier still requires the private $platform service-toggle VM"
+done
+grep -Fq 'windows-vm-service-toggle-e2e.sh' "$release_gate" \
+  || fail "release gate does not drive the real Windows UAC service prompt"
+grep -Fq 'macos-vm-service-toggle-e2e.sh' "$release_gate" \
+  || fail "release gate does not drive the real macOS Authorization service prompt"
+grep -Fq 'ubuntu-vm-service-toggle-e2e.sh' "$release_gate" \
+  || fail "release gate does not drive the real Linux PolicyKit service prompt"
+grep -Fq 'e2e-linux-service-toggle-real.sh' \
+  "$ROOT_DIR/scripts/ubuntu-vm-service-toggle-e2e.sh" \
+  || fail "Linux VM service gate does not invoke the real PolicyKit fixture"
+if grep -Fq './scripts/e2e-linux-service-toggle.sh' "$release_gate"; then
+  fail "fake Linux service-toggle fixture can satisfy the release gate"
+fi
+python3 - \
+  "$release_gate" \
+  "$ROOT_DIR/scripts/ubuntu-vm-git-sync.sh" \
+  "$ROOT_DIR/scripts/ubuntu-vm-manual-join-e2e.sh" \
+  "$ROOT_DIR/scripts/ubuntu-vm-service-toggle-e2e.sh" \
+  "$ROOT_DIR/scripts/macos-vm-git-sync.sh" \
+  "$ROOT_DIR/scripts/macos-vm-manual-join-e2e.sh" \
+  "$ROOT_DIR/scripts/macos-vm-service-toggle-e2e.sh" \
+  "$ROOT_DIR/scripts/macos-vm-android-manual-join-e2e.sh" \
+  "$ROOT_DIR/scripts/e2e-macos-android-manual-join-remote.sh" \
+  "$ROOT_DIR/scripts/windows-vm-manual-join-e2e.sh" \
+  "$ROOT_DIR/scripts/windows-vm-service-toggle-e2e.sh" <<'PY'
+import pathlib
+import re
+import sys
+
+unsafe = re.compile(
+    r"\$\{NVPN_(?:WINDOWS|MACOS|UBUNTU)_SSH_HOST:-[A-Za-z0-9]"
+    r"|/(?:Users|home)/[A-Za-z0-9._-]+/"
+)
+for name in sys.argv[1:]:
+    text = pathlib.Path(name).read_text(encoding="utf-8")
+    if match := unsafe.search(text):
+        raise SystemExit(
+            f"native platform gate script contains a private default or absolute guest path: "
+            f"{pathlib.Path(name).name}:{match.start()}"
+        )
+PY
+if grep -Fq 'test-manual-join-platform-contract.sh' "$release_gate"; then
+  fail "release gate still substitutes source grep for native manual-join UI execution"
+fi
+grep -Fq 'e2e-umbrel-web-docker.sh' "$release_gate" \
+  || fail "release gate does not execute shipped web manual-join controls"
+grep -Fq './scripts/test-mobile-wireguard-exit-dns-harness.sh' "$release_gate" \
+  || fail "release gate does not enforce the physical mobile exit/DNS source contract"
 grep -Fq 'NVPN_RELEASE_GATE_QR_JOIN_LATENCY' "$release_gate" \
   || fail "the strict QR-join latency gate cannot be scoped to calibrated hosts"
+grep -Fq 'public_transit_routes_fips_control_by_npub_without_direct_peer_config' "$release_gate" \
+  || fail "release gate does not execute the real cross-seed public FIPS transit probe"
+grep -Fq -- '--ignored' "$release_gate" \
+  || fail "release gate does not opt into the deployed public FIPS transit probe"
 grep -Fq 'NVPN_RELEASE_GATE_TARGET_SECS:-1800' "$release_gate" \
   || fail "release gate has no explicit 30-minute wall-clock target"
 grep -Fq 'NVPN_E2E_DIRECT_RECOVERY_SECS:-20' "$ROOT_DIR/scripts/e2e-fips-roaming-docker.sh" \
   || fail "FIPS direct recovery can wait longer than the verified 20-second gate"
-grep -Fq 'NVPN_DESKTOP_ROSTER_E2E_TIMEOUT_SECS:-30' "$ROOT_DIR/scripts/e2e-desktop-roster-join.sh" \
-  || fail "desktop roster acceptance failures wait longer than 30 seconds"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))"' "$release_gate" \
   || fail "release gate rebuilds the same physical iOS app for the exit lane"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))"' "$release_gate" \
+  || fail "release gate rebuilds the same canonical Android app for the exit lane"
+grep -Fq 'release_gate_parallel_start \' "$release_gate" \
+  && grep -Fq '"Android physical WireGuard exit and DNS"' "$release_gate" \
+  || fail "release gate does not dispatch the physical Android exit lane"
+grep -Fq '"iOS physical WireGuard exit and DNS"' "$release_gate" \
+  || fail "release gate does not dispatch the physical iOS exit lane"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_IMAGE_READY=1' "$release_gate" \
+  || fail "parallel mobile exit lanes rebuild their identical Docker fixture"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-android-$$"' "$release_gate" \
+  || fail "parallel Android exit lane has no isolated Docker fixture"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$"' "$release_gate" \
+  || fail "parallel iOS exit lane has no isolated Docker fixture"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1' "$release_gate" \
+  || fail "parallel iOS exit lane shares the Android tunnel subnet"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))"' "$release_gate" \
+  || fail "parallel mobile exit lanes share a host UDP port"
+grep -Fq 'NVPN_MOBILE_JOIN_E2E_ANDROID_BUILD_TYPE=signed-debug' "$release_gate" \
+  || fail "physical join lane can replace the canonical Android app with an unsigned variant"
+grep -Fq 'NVPN_MOBILE_JOIN_E2E_BUILD="$((1 - MOBILE_ANDROID_APP_READY))"' "$release_gate" \
+  || fail "release gate rebuilds the same canonical Android app for the join lane"
+grep -Fq 'NVPN_MOBILE_JOIN_E2E_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))"' "$release_gate" \
+  || fail "release gate reinstalls the same canonical Android app for the join lane"
+grep -Fq 'NVPN_DESKTOP_MOBILE_JOIN_BUILD_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))"' "$release_gate" \
+  || fail "desktop/mobile lane rebuilds the canonical Android candidate"
+grep -Fq 'NVPN_IDLE_CPU_GATE=0' "$release_gate" \
+  || fail "mobile WireGuard exit lane repeats the dedicated physical idle CPU samples"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0' "$release_gate" \
+  || fail "mobile WireGuard exit lane repeats the dedicated physical lifecycle checks"
+if grep -Fq 'NVPN_IDLE_CPU_GATE=0' "$ROOT_DIR/scripts/mobile-wireguard-exit-e2e.sh"; then
+  fail "standalone mobile WireGuard exit e2e disables its idle CPU coverage"
+fi
+if grep -Fq 'NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0' \
+  "$ROOT_DIR/scripts/mobile-wireguard-exit-e2e.sh"
+then
+  fail "standalone mobile WireGuard exit e2e disables its lifecycle coverage"
+fi
 grep -Fq 'NVPN_MOBILE_JOIN_E2E_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))"' "$release_gate" \
   || fail "release gate rebuilds the same physical iOS app for the join lane"
 if grep -Eq '(windows_platform_lane_requested|docker_release_gates_enabled) \|\| return$' "$release_gate"; then

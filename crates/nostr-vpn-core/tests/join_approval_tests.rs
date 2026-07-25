@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nostr_sdk::prelude::Keys;
-use nostr_vpn_core::config::AppConfig;
+use nostr_vpn_core::config::{AppConfig, InternetSource};
 use nostr_vpn_core::fips_control::{JoinRosterControl, NetworkRoster, SignedRoster};
 use nostr_vpn_core::identity_bridge::{
     CreateNostrIdentityDeviceApprovalRequestOptions, create_nostr_identity_device_approval_request,
@@ -81,7 +81,11 @@ fn one_signed_roster_completes_the_pending_join() {
 
     assert_eq!(applied.request_pubkey, request_pubkey);
     assert_eq!(applied.signed_by_pubkey, signer.public_key().to_hex());
-    assert_eq!(joiner.exit_node, signer.public_key().to_hex());
+    assert_eq!(joiner.internet_source, InternetSource::Direct);
+    assert!(
+        joiner.exit_node.is_empty(),
+        "joining a network must not silently select its admin as an exit node"
+    );
     assert_ne!(
         joiner
             .pending_nostr_join_request

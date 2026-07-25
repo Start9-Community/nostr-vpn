@@ -30,10 +30,17 @@ import {
   normalizeTag,
   parseEnvFile,
   readWorkspaceVersionTag,
+  semverFromTag,
   splitCsv,
+  validatePromotableReleaseManifest,
+  validateCleanReleaseSource,
   validateReleaseAssetSet,
   validateStagedReleaseTree,
+  validateZapstoreApkMetadata,
+  validateZapstoreRelayPublication,
   windowsSshTransportArgs,
+  zapstorePublicationPrerequisites,
+  zapstorePublicationRequired,
 } from './local-release-lib.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -73,6 +80,9 @@ Options:
   --skip-zapstore           With --publish, skip the Android APK publish to
                             Zapstore (default: publish when zsp is on PATH
                             and a Nostr signing key is configured)
+  --require-zapstore        With a final publish, require a signed APK, zsp,
+                            signing configuration, successful publication,
+                            and post-publish Zapstore verification
   --dry-run                 Print the plan without running build or publish commands
   --skip-verify            Skip fmt/clippy/test verification
   --tag <tag>              Release tag (defaults to workspace version, for example v4.0.0)
@@ -85,7 +95,8 @@ Options:
   --help                   Show this help
 
 The script auto-loads .env.release.local and .env.zapstore.local when present.
-Shell environment variables override values from those files.`)
+Shell environment variables override values from those files.
+NVPN_RELEASE_REQUIRE_ZAPSTORE=true is equivalent to --require-zapstore.`)
 }
 
 function parseArgs(argv) {
@@ -97,6 +108,7 @@ function parseArgs(argv) {
     cargoPublish: false,
     skipCargoPublish: false,
     skipZapstore: false,
+    requireZapstore: false,
     skipVerify: false,
     releaseTree: null,
     stageDir: null,
@@ -139,6 +151,9 @@ function parseArgs(argv) {
         break
       case '--skip-zapstore':
         options.skipZapstore = true
+        break
+      case '--require-zapstore':
+        options.requireZapstore = true
         break
       case '--dry-run':
         options.dryRun = true
@@ -210,6 +225,37 @@ function gitHeadEpoch() {
   return result.status === 0 ? result.stdout.trim() : ''
 }
 
+function assertCleanReleaseSource(tag, expectedCommit = '') {
+  const status = run(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=all'],
+    { capture: true },
+  )
+  const headCommit = run('git', ['rev-parse', 'HEAD'], { capture: true })
+  const taggedResult = spawnSync(
+    'git',
+    ['rev-parse', '-q', '--verify', `${normalizeTag(tag)}^{commit}`],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    },
+  )
+  const taggedCommit = taggedResult.status === 0 ? taggedResult.stdout.trim() : ''
+  const candidate = validateCleanReleaseSource({
+    status,
+    headCommit,
+    taggedCommit,
+    tag,
+  })
+  if (expectedCommit && candidate !== expectedCommit) {
+    throw new Error(
+      `Release source changed during the build: started at ${expectedCommit}, now ${candidate}.`,
+    )
+  }
+  return candidate
+}
+
 function quote(arg) {
   const value = String(arg)
   return /[^\w./:-]/.test(value) ? JSON.stringify(value) : value
@@ -245,7 +291,17 @@ function findFirstFile(root, matcher) {
   return match ? join(root, match) : null
 }
 
-function run(command, args, { cwd = repoRoot, env = process.env, capture = false, dryRun = false } = {}) {
+function run(
+  command,
+  args,
+  {
+    cwd = repoRoot,
+    env = process.env,
+    capture = false,
+    input,
+    dryRun = false,
+  } = {},
+) {
   const rendered = [command, ...args].map(quote).join(' ')
   console.log(`$ ${rendered}`)
   if (dryRun) {
@@ -256,6 +312,7 @@ function run(command, args, { cwd = repoRoot, env = process.env, capture = false
     cwd,
     env,
     encoding: 'utf8',
+    input,
     stdio: capture ? 'pipe' : 'inherit',
   })
   if (result.status !== 0) {
@@ -459,7 +516,12 @@ function pullFileFromWindowsHost({ host, remotePath, localParent, name, dryRun }
 function buildWindowsArtifacts({ env, tag, dryRun, builtLines }) {
   // Windows builds run on an x86_64 Windows VM reachable over SSH.
   // Set NVPN_WINDOWS_SSH_HOST for local machine-specific hostnames.
-  const host = env.NVPN_WINDOWS_SSH_HOST || 'win11-dev'
+  const host = String(env.NVPN_WINDOWS_SSH_HOST || '').trim()
+  if (!host) {
+    throw new SkipStepError(
+      'Skipping Windows artifacts because NVPN_WINDOWS_SSH_HOST is unset.',
+    )
+  }
 
   // Probe SSH connectivity. Skip cleanly if the VM is unreachable rather
   // than aborting the whole release.
@@ -859,11 +921,17 @@ function buildIosArtifacts({ tag, dryRun, builtLines }) {
  * CARGO_PKG_VERSION fallback, but the OS-level metadata (Finder Get Info,
  * About panel, Play Store) needs these bumped before each release.
  */
-function syncPlatformVersions({ tag, dryRun, builtLines }) {
+function syncPlatformVersions({ env, tag, dryRun, builtLines }) {
   const targets = [
     { path: join(repoRoot, 'macos', 'NostrVpnMac.xcodeproj', 'project.pbxproj'), bump: bumpPbxprojMarketingVersion },
     { path: join(repoRoot, 'ios', 'NostrVpnIos.xcodeproj', 'project.pbxproj'), bump: bumpPbxprojMarketingVersion },
-    { path: join(repoRoot, 'android', 'app', 'build.gradle.kts'), bump: bumpAndroidGradleVersion },
+    {
+      path: join(repoRoot, 'android', 'app', 'build.gradle.kts'),
+      bump: (text, version) =>
+        bumpAndroidGradleVersion(text, version, {
+          versionCode: env.NVPN_ANDROID_VERSION_CODE,
+        }),
+    },
     { path: join(repoRoot, 'linux', 'Cargo.toml'), bump: bumpCargoPackageVersion },
   ]
   const updated = []
@@ -889,7 +957,23 @@ function syncPlatformVersions({ tag, dryRun, builtLines }) {
 }
 
 function runVerify({ dryRun, builtLines }) {
-  run('./scripts/release-gate.sh', [], { dryRun })
+  const env = {
+    ...process.env,
+    NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E: '1',
+    NVPN_RELEASE_GATE_MOBILE_JOIN_E2E: '1',
+    NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_E2E: '1',
+    NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E: '1',
+    NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E: '1',
+    NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE: '1',
+    NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E: '1',
+    NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E: '1',
+    NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E: '1',
+    NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E: '1',
+    NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E: '1',
+    NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '1',
+    NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E: '1',
+  }
+  run('./scripts/release-gate.sh', [], { env, dryRun })
   builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, and desktop launch smokes.')
 }
 
@@ -1056,7 +1140,8 @@ function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
 
   const releaseJsonPath = join(stageDir, 'release.json')
   const manifestJsonPath = join(stageDir, 'manifest.json')
-  readReleaseManifest(stageDir)
+  const stagedManifest = readReleaseManifest(stageDir)
+  validatePromotableReleaseManifest(stagedManifest)
 
   const publishedAt = Math.floor(Date.now() / 1000)
   for (const path of [releaseJsonPath, manifestJsonPath]) {
@@ -1083,7 +1168,7 @@ function publishRustCrates({ dryRun }) {
  * + auto-update. The APK is the one CI built and we just downloaded into
  * `dist/` — Zapstore needs the actual .apk file, not the .aab.
  *
- * Soft-skips with a warning instead of aborting when:
+ * Optional mode soft-skips with a warning instead of aborting when:
  *   - `zsp` is not on PATH (zapstore CLI not installed yet on this host)
  *   - No Nostr signing key is configured (`SIGN_WITH` env or
  *     `NOSTR_KEY_PATH` from .env.zapstore.local)
@@ -1091,38 +1176,91 @@ function publishRustCrates({ dryRun }) {
  *     (Android build was skipped or failed; we shouldn't block the rest
  *     of the release on it)
  *
- * Hard-fails when zsp itself returns non-zero.
+ * Required mode hard-fails on every missing prerequisite and unless the
+ * published release is verifiably current after zsp returns.
  */
-function publishZapstore({ env, tag, dryRun }) {
+function publishZapstore({ env, tag, dryRun, required = false }) {
   const apkName = `nostr-vpn-${tag}-android-arm64.apk`
   const apkPath = join(distDir, apkName)
-  if (!existsSync(apkPath)) {
-    console.warn(`Skipping Zapstore publish: ${apkPath} not found.`)
-    return
-  }
-  if (!commandExists('zsp')) {
-    console.warn('Skipping Zapstore publish: zsp not on PATH (install: go install github.com/zapstore/zsp@latest).')
-    return
-  }
-
-  const signWith = resolveZapstoreSignWith(env)
-  if (!signWith) {
-    console.warn(
-      'Skipping Zapstore publish: no Nostr signing key. Set SIGN_WITH=nsec1... or NOSTR_KEY_PATH=/path/to/nsec in .env.zapstore.local.',
+  if (dryRun) {
+    console.log(
+      `Would ${required ? 'require, publish, and verify' : 'publish'} ${apkName} on Zapstore`,
     )
     return
   }
 
+  const signWith = resolveZapstoreSignWith(env)
   const zapstoreYaml = join(repoRoot, 'zapstore.yaml')
-  if (!existsSync(zapstoreYaml)) {
-    console.warn(`Skipping Zapstore publish: ${zapstoreYaml} not found.`)
+  const configExists = existsSync(zapstoreYaml)
+  const zapstoreConfig = configExists ? readFileSync(zapstoreYaml, 'utf8') : ''
+  const publisherNpub = (
+    zapstoreConfig.match(/^\s*pubkey:\s*(\S+)\s*$/m)?.[1] || ''
+  ).trim()
+  const relayUrls = String(
+    env.RELAY_URLS || 'wss://relay.zapstore.dev',
+  )
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+  const prerequisites = zapstorePublicationPrerequisites(
+    {
+      apk: existsSync(apkPath),
+      zsp: commandExists('zsp'),
+      nak: commandExists('nak'),
+      signing: Boolean(signWith),
+      config: configExists,
+      publisher: Boolean(publisherNpub),
+      relays: relayUrls.length > 0,
+    },
+    { required },
+  )
+  if (!prerequisites.available) {
+    console.warn(
+      `Skipping Zapstore publish: missing ${prerequisites.missing.join(', ')}.`,
+    )
     return
+  }
+  const publisherPubkey = run('nak', ['decode', publisherNpub], {
+    capture: true,
+  }).trim()
+  if (!/^[0-9a-f]{64}$/i.test(publisherPubkey)) {
+    throw new Error('zapstore.yaml publisher pubkey could not be decoded.')
   }
 
-  if (dryRun) {
-    console.log(`Would publish ${apkName} to Zapstore`)
-    return
+  const inspectionDir = mkdtempSync(join(os.tmpdir(), 'nvpn-zapstore-apk-'))
+  const inspectionApk = join(inspectionDir, apkName)
+  let apkMetadata
+  try {
+    copyFileSync(apkPath, inspectionApk)
+    const metadataOutput = run('zsp', ['utils', 'extract-apk', inspectionApk], {
+      capture: true,
+    })
+    try {
+      apkMetadata = JSON.parse(metadataOutput)
+    } catch {
+      throw new Error('zsp APK inspection did not return valid JSON.')
+    }
+  } finally {
+    rmSync(inspectionDir, { recursive: true, force: true })
   }
+  const expectedVersion = semverFromTag(tag)
+  const androidGradle = readFileSync(
+    join(repoRoot, 'android', 'app', 'build.gradle.kts'),
+    'utf8',
+  )
+  const expectedVersionCode = Number(
+    String(env.NVPN_ANDROID_VERSION_CODE || '').trim()
+      || androidGradle.match(/\bversionCode\s*=\s*(\d+)/)?.[1]
+      || '',
+  )
+  const expectedPackageId =
+    String(env.NVPN_ANDROID_PACKAGE_ID || '').trim() || 'fi.siriusbusiness.nvpn'
+  const validatedApk = validateZapstoreApkMetadata(apkMetadata, {
+    expectedVersion,
+    expectedVersionCode,
+    expectedPackageId,
+  })
 
   // Pass `zapstore.yaml` (not the APK path) so the kind-32267 app event
   // carries the yaml's `name`, `summary`, `description`, `icon`, `tags`,
@@ -1135,6 +1273,11 @@ function publishZapstore({ env, tag, dryRun }) {
   // APK out of `dist/`.
   const stableApkPath = join(distDir, 'zapstore-current-android-arm64.apk')
   copyFileSync(apkPath, stableApkPath)
+  run(
+    'zsp',
+    ['publish', '--quiet', '--check', zapstoreYaml],
+    { capture: true },
+  )
 
   run(
     'zsp',
@@ -1146,9 +1289,82 @@ function publishZapstore({ env, tag, dryRun }) {
       zapstoreYaml,
     ],
     {
-      dryRun,
-      env: { ...process.env, SIGN_WITH: signWith },
+      env: { ...process.env, ...env, SIGN_WITH: signWith },
     },
+  )
+
+  let lastVerificationError = new Error('Zapstore release verification did not run.')
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    try {
+      const query = (kind, filters) => {
+        const output = run(
+          'nak',
+          [
+            'req',
+            '-k',
+            String(kind),
+            '-a',
+            publisherNpub,
+            ...filters,
+            '-l',
+            '20',
+            ...relayUrls,
+          ],
+          { capture: true },
+        )
+        return output
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            try {
+              return JSON.parse(line)
+            } catch {
+              throw new Error('Zapstore relay query returned invalid event JSON.')
+            }
+          })
+      }
+      const publication = validateZapstoreRelayPublication({
+        appEvents: query(32267, ['-d', validatedApk.packageId]),
+        releaseEvents: query(30063, [
+          '-d',
+          `${validatedApk.packageId}@${validatedApk.versionName}`,
+        ]),
+        assetEvents: query(3063, [
+          '-t',
+          `i=${validatedApk.packageId}`,
+          '-t',
+          `version=${validatedApk.versionName}`,
+        ]),
+        expected: {
+          pubkey: publisherPubkey,
+          packageId: validatedApk.packageId,
+          versionName: validatedApk.versionName,
+          versionCode: validatedApk.versionCode,
+          sha256: validatedApk.sha256,
+          certificateFingerprint: validatedApk.certificateFingerprint,
+        },
+      })
+      for (const event of Object.values(publication)) {
+        run('nak', ['verify'], {
+          capture: true,
+          input: `${JSON.stringify(event)}\n`,
+        })
+      }
+      console.log(
+        `Verified Zapstore ${validatedApk.packageId} ${validatedApk.versionName} (${validatedApk.versionCode}) is current.`,
+      )
+      return
+    } catch (error) {
+      lastVerificationError =
+        error instanceof Error ? error : new Error(String(error))
+      if (attempt < 8) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000)
+      }
+    }
+  }
+  throw new Error(
+    `Zapstore publication completed but verification failed: ${lastVerificationError.message}`,
   )
 }
 
@@ -1198,11 +1414,45 @@ function main() {
   const stageDir =
     options.stageDir || join(os.tmpdir(), `nostr-vpn-release-${tag.replace(/[^\w.-]/g, '_')}`)
   const allowPartial = options.allowPartial || envFlagEnabled(env.NVPN_RELEASE_ALLOW_PARTIAL)
+  const finalPublication = options.publish && !options.draft
+  const requireZapstore = zapstorePublicationRequired({
+    cliRequired: options.requireZapstore || finalPublication,
+    envValue: env.NVPN_RELEASE_REQUIRE_ZAPSTORE,
+  })
   const builtLines = []
   const skippedLines = []
 
+  if (requireZapstore && options.skipZapstore) {
+    throw new Error('--require-zapstore conflicts with --skip-zapstore.')
+  }
+  if (finalPublication && !options.dryRun && allowPartial) {
+    throw new Error('A final release cannot be published with partial platform artifacts.')
+  }
+  if (
+    finalPublication
+    && !options.dryRun
+    && !options.promoteDraft
+    && (options.only || options.skip.size > 0)
+  ) {
+    throw new Error(
+      'A final release must run every platform step; --only and --skip are staging-only.',
+    )
+  }
+  if (
+    requireZapstore
+    && !options.dryRun
+    && (!options.publish || options.draft)
+  ) {
+    throw new Error(
+      'Required Zapstore publication needs --final or --promote-draft.',
+    )
+  }
+
   console.log(`Release tag: ${tag}`)
   console.log(`Release tree: ${releaseTree}`)
+  if (requireZapstore) {
+    console.log('Zapstore publication and post-publish verification are required.')
+  }
   if (loadedPaths.length > 0) {
     console.log(`Loaded env files: ${loadedPaths.join(', ')}`)
   }
@@ -1215,6 +1465,23 @@ function main() {
     console.log('Draft mode: htree publish will repoint draft instead of latest, and crate/Zapstore publish steps are disabled.')
   }
 
+  if (
+    options.publish
+    && !options.dryRun
+    && (
+      options.skipVerify
+      || options.skip.has('verify')
+      || (options.only && !options.only.has('verify'))
+    )
+  ) {
+    throw new Error('Publishing a new release candidate cannot skip the required release gate.')
+  }
+
+  const candidateCommit =
+    options.dryRun || options.promoteDraft
+      ? ''
+      : assertCleanReleaseSource(tag)
+
   if (options.promoteDraft) {
     if (!commandExists('htree')) {
       throw new Error('Missing htree; cannot promote release.')
@@ -1225,20 +1492,32 @@ function main() {
       publishRustCrates({ dryRun: options.dryRun })
     }
     if (!options.skipZapstore) {
-      publishZapstore({ env, tag, dryRun: options.dryRun })
+      publishZapstore({
+        env,
+        tag,
+        dryRun: options.dryRun,
+        required: requireZapstore,
+      })
     }
     return
   }
 
   const steps = [
-    ['platform-versions', () => syncPlatformVersions({ tag, dryRun: options.dryRun, builtLines })],
+    ['platform-versions', () => syncPlatformVersions({
+      env,
+      tag,
+      dryRun: options.dryRun,
+      builtLines,
+    })],
     ['verify', () => runVerify({ dryRun: options.dryRun, builtLines })],
     ['startos', () => buildStartosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
     ['macos', () => buildMacosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
-    ['ios', () => buildIosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
     ['android', () => buildAndroidArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
     ['linux', () => buildLinuxArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
     ['windows', () => buildWindowsArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
+    // Upload TestFlight Internal only after every downloadable platform
+    // artifact has built successfully, avoiding a partial candidate upload.
+    ['ios', () => buildIosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
   ]
 
   for (const [name, fn] of steps) {
@@ -1249,6 +1528,13 @@ function main() {
 
     try {
       fn()
+      if (
+        name === 'platform-versions'
+        && !options.dryRun
+        && !options.promoteDraft
+      ) {
+        assertCleanReleaseSource(tag, candidateCommit)
+      }
     } catch (error) {
       if (error instanceof SkipStepError) {
         skippedLines.push(error.message)
@@ -1265,6 +1551,10 @@ function main() {
     }
   }
 
+  if (!options.dryRun) {
+    assertCleanReleaseSource(tag, candidateCommit)
+  }
+
   const commit = resolveReleaseCommit(tag, { dryRun: options.dryRun })
   stageRelease({
     tag,
@@ -1273,7 +1563,7 @@ function main() {
     builtLines,
     skippedLines,
     dryRun: options.dryRun,
-    requireCompleteAppRelease: !allowPartial && !options.dryRun && !options.draft,
+    requireCompleteAppRelease: !allowPartial && !options.dryRun,
     draft: options.draft,
   })
 
@@ -1300,7 +1590,12 @@ function main() {
   }
 
   if (options.publish && !options.draft && !options.skipZapstore) {
-    publishZapstore({ env, tag, dryRun: options.dryRun })
+    publishZapstore({
+      env,
+      tag,
+      dryRun: options.dryRun,
+      required: requireZapstore,
+    })
   }
 }
 

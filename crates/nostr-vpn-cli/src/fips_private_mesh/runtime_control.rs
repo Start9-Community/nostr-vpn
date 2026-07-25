@@ -1,3 +1,5 @@
+const JOIN_ROSTER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(8);
+
 impl FipsPrivateMeshRuntime {
     pub(crate) async fn ping_peers(&self, network_id: &str, now: u64) -> Result<usize> {
         let frame = FipsControlFrame::Ping {
@@ -70,7 +72,7 @@ impl FipsPrivateMeshRuntime {
                 &control,
                 destination,
                 &join_roster,
-                Duration::from_secs(90),
+                JOIN_ROSTER_DELIVERY_TIMEOUT,
             )
             .await
             .with_context(|| {
@@ -80,17 +82,18 @@ impl FipsPrivateMeshRuntime {
         }))
     }
 
-    pub(crate) fn enqueue_join_roster_ack(
+    pub(crate) async fn send_join_roster_ack(
         &self,
-        control: &FipsControlTcpSender,
+        control: &FipsControlTcpRuntime,
         participant: &str,
         roster_event_id: String,
     ) -> Result<()> {
-        self.enqueue_stateful_control_frame(
+        self.send_stateful_control_frame(
             control,
             participant,
             &FipsControlFrame::JoinRosterAck { roster_event_id },
         )
+        .await
     }
 
     pub(crate) fn enqueue_capabilities(
@@ -468,7 +471,11 @@ impl FipsPrivateMeshRuntime {
                     .iter()
                     .map(fips_peer_address_from_hint)
                     .collect(),
-                connect_policy: ConnectPolicy::AutoConnect,
+                connect_policy: if peer.connect_on_start {
+                    ConnectPolicy::AutoConnect
+                } else {
+                    ConnectPolicy::Manual
+                },
                 auto_reconnect: peer.auto_reconnect,
                 discovery_fallback_transit: peer.discovery_fallback_transit,
             })

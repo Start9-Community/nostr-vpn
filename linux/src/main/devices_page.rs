@@ -24,6 +24,9 @@ fn build_devices_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     header.append(&title);
     let add = gtk::Button::from_icon_name("list-add-symbolic");
     add.set_tooltip_text(Some("Add device"));
+    add.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-admin-open",
+    )]);
     {
         let app = app.clone();
         add.connect_clicked(move |_| set_page(&app, Page::Share));

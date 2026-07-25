@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -13,6 +14,7 @@ import {
   bumpAndroidGradleVersion,
   bumpCargoPackageVersion,
   bumpPbxprojMarketingVersion,
+  bumpStartosSourceVersion,
   deterministicBuildEnv,
   describeAsset,
   extractChangelogSection,
@@ -23,9 +25,15 @@ import {
   semverFromTag,
   shouldBlockLocalLinuxAmd64Qemu,
   splitCsv,
+  validatePromotableReleaseManifest,
+  validateCleanReleaseSource,
   validateReleaseAssetSet,
   validateStagedReleaseTree,
+  validateZapstoreApkMetadata,
+  validateZapstoreRelayPublication,
   windowsSshTransportArgs,
+  zapstorePublicationPrerequisites,
+  zapstorePublicationRequired,
 } from './local-release-lib.mjs'
 
 test('parseEnvFile reads basic dotenv syntax', () => {
@@ -51,6 +59,261 @@ test('splitCsv trims and drops empties', () => {
     'android',
     'macos',
   ])
+})
+
+test('release source provenance rejects dirty or mismatched tagged candidates', () => {
+  const commit = 'a'.repeat(40)
+  assert.equal(
+    validateCleanReleaseSource({
+      status: '',
+      headCommit: commit,
+      taggedCommit: commit,
+      tag: 'v4.1.4+4001006',
+    }),
+    commit,
+  )
+  assert.throws(
+    () => validateCleanReleaseSource({
+      status: ' M ios/Sources/AppModel.swift',
+      headCommit: commit,
+    }),
+    /source is dirty/i,
+  )
+  assert.throws(
+    () => validateCleanReleaseSource({
+      status: '',
+      headCommit: commit,
+      taggedCommit: 'b'.repeat(40),
+      tag: 'v4.1.4+4001006',
+    }),
+    /points to .* not candidate HEAD/i,
+  )
+})
+
+test('Zapstore publication can be made mandatory by CLI or release environment', () => {
+  assert.equal(zapstorePublicationRequired({ cliRequired: true }), true)
+  assert.equal(
+    zapstorePublicationRequired({ envValue: 'true' }),
+    true,
+  )
+  assert.equal(
+    zapstorePublicationRequired({ envValue: '0' }),
+    false,
+  )
+})
+
+test('required Zapstore mode rejects every missing publication prerequisite', () => {
+  const complete = {
+    apk: true,
+    zsp: true,
+    nak: true,
+    signing: true,
+    config: true,
+    publisher: true,
+    relays: true,
+  }
+  assert.deepEqual(
+    zapstorePublicationPrerequisites(complete, { required: true }),
+    { available: true, missing: [] },
+  )
+
+  for (const prerequisite of Object.keys(complete)) {
+    assert.throws(
+      () =>
+        zapstorePublicationPrerequisites(
+          { ...complete, [prerequisite]: false },
+          { required: true },
+        ),
+      new RegExp(`Required Zapstore publication unavailable:.*${prerequisite}`, 'i'),
+    )
+  }
+
+  const optional = zapstorePublicationPrerequisites(
+    { ...complete, signing: false },
+  )
+  assert.equal(optional.available, false)
+  assert.match(optional.missing[0], /signing/i)
+})
+
+test('required Zapstore APK metadata proves version, package, ABI, and Android signing', () => {
+  assert.deepEqual(
+    validateZapstoreApkMetadata(
+      {
+        package_id: 'fi.siriusbusiness.nvpn',
+        version_name: '4.1.4',
+        version_code: 4_010_401,
+        sha256: 'c'.repeat(64),
+        architectures: ['arm64-v8a'],
+        cert_fingerprint: 'abcdef',
+      },
+      {
+        expectedVersion: '4.1.4',
+        expectedVersionCode: 4_010_401,
+        expectedPackageId: 'fi.siriusbusiness.nvpn',
+      },
+    ),
+    {
+      packageId: 'fi.siriusbusiness.nvpn',
+      versionName: '4.1.4',
+      versionCode: 4_010_401,
+      certificateFingerprint: 'abcdef',
+      sha256: 'c'.repeat(64),
+    },
+  )
+
+  for (const [field, value, message] of [
+    ['version_name', '4.1.3', /version/],
+    ['version_code', 4_010_400, /version code/],
+    ['package_id', 'com.example.wrong', /package/],
+    ['architectures', ['x86_64'], /arm64-v8a/],
+    ['cert_fingerprint', '', /signed/],
+    ['sha256', 'not-a-hash', /SHA-256/],
+  ]) {
+    const metadata = {
+      package_id: 'fi.siriusbusiness.nvpn',
+      version_name: '4.1.4',
+      version_code: 4_010_401,
+      sha256: 'c'.repeat(64),
+      architectures: ['arm64-v8a'],
+      cert_fingerprint: 'abcdef',
+      [field]: value,
+    }
+    assert.throws(
+      () =>
+        validateZapstoreApkMetadata(metadata, {
+          expectedVersion: '4.1.4',
+          expectedVersionCode: 4_010_401,
+          expectedPackageId: 'fi.siriusbusiness.nvpn',
+        }),
+      message,
+    )
+  }
+})
+
+test('required Zapstore verification accepts only exact signed relay events', () => {
+  const pubkey = 'a'.repeat(64)
+  const asset = {
+    kind: 3063,
+    id: 'b'.repeat(64),
+    pubkey,
+    tags: [
+      ['i', 'fi.siriusbusiness.nvpn'],
+      ['version', '4.1.4'],
+      ['version_code', '4010401'],
+      ['x', 'c'.repeat(64)],
+      ['apk_certificate_hash', 'abcdef'],
+      ['f', 'android-arm64-v8a'],
+      ['url', 'https://cdn.example/app.apk'],
+    ],
+  }
+  const release = {
+    kind: 30063,
+    id: 'd'.repeat(64),
+    pubkey,
+    tags: [
+      ['i', 'fi.siriusbusiness.nvpn'],
+      ['version', '4.1.4'],
+      ['d', 'fi.siriusbusiness.nvpn@4.1.4'],
+      ['c', 'main'],
+      ['f', 'android-arm64-v8a'],
+      ['e', asset.id],
+    ],
+  }
+  const app = {
+    kind: 32267,
+    id: 'e'.repeat(64),
+    pubkey,
+    tags: [
+      ['d', 'fi.siriusbusiness.nvpn'],
+      ['f', 'android-arm64-v8a'],
+    ],
+  }
+
+  assert.deepEqual(
+    validateZapstoreRelayPublication({
+      appEvents: [app],
+      releaseEvents: [release],
+      assetEvents: [asset],
+      expected: {
+        pubkey,
+        packageId: 'fi.siriusbusiness.nvpn',
+        versionName: '4.1.4',
+        versionCode: 4_010_401,
+        sha256: 'c'.repeat(64),
+        certificateFingerprint: 'abcdef',
+      },
+    }),
+    { app, release, asset },
+  )
+
+  const wrongAsset = structuredClone(asset)
+  wrongAsset.tags = wrongAsset.tags.map((tag) =>
+    tag[0] === 'x' ? ['x', 'f'.repeat(64)] : tag
+  )
+  assert.throws(
+    () =>
+      validateZapstoreRelayPublication({
+        appEvents: [app],
+        releaseEvents: [release],
+        assetEvents: [wrongAsset],
+        expected: {
+          pubkey,
+          packageId: 'fi.siriusbusiness.nvpn',
+          versionName: '4.1.4',
+          versionCode: 4_010_401,
+          sha256: 'c'.repeat(64),
+          certificateFingerprint: 'abcdef',
+        },
+      }),
+    /software asset/,
+  )
+})
+
+test('local release CLI and environment enforce required Zapstore mode', () => {
+  const script = join(process.cwd(), 'scripts/local-release.mjs')
+  const cliConflict = spawnSync(
+    process.execPath,
+    [script, '--dry-run', '--require-zapstore', '--skip-zapstore'],
+    { encoding: 'utf8' },
+  )
+  assert.equal(cliConflict.status, 1)
+  assert.match(cliConflict.stderr, /require-zapstore conflicts with --skip-zapstore/)
+
+  const envConflict = spawnSync(
+    process.execPath,
+    [script, '--dry-run', '--skip-zapstore'],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, NVPN_RELEASE_REQUIRE_ZAPSTORE: 'true' },
+    },
+  )
+  assert.equal(envConflict.status, 1)
+  assert.match(envConflict.stderr, /require-zapstore conflicts with --skip-zapstore/)
+
+  const nonFinal = spawnSync(
+    process.execPath,
+    [script, '--require-zapstore'],
+    { encoding: 'utf8' },
+  )
+  assert.equal(nonFinal.status, 1)
+  assert.match(nonFinal.stderr, /needs --final or --promote-draft/)
+})
+
+test('final publication cannot bypass complete platform artifacts', () => {
+  const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
+
+  assert.match(
+    localRelease,
+    /cliRequired:\s*options\.requireZapstore\s*\|\|\s*finalPublication/,
+  )
+  assert.match(
+    localRelease,
+    /final release cannot be published with partial platform artifacts/,
+  )
+  assert.match(
+    localRelease,
+    /final release must run every platform step; --only and --skip are staging-only/,
+  )
 })
 
 test('release builds always include paid exit support', () => {
@@ -91,13 +354,13 @@ test('deterministicBuildEnv rejects non-numeric source dates', () => {
 })
 
 test('Windows release transport supports jump hosts and proxy commands', () => {
-  assert.deepEqual(windowsSshTransportArgs({ NVPN_WINDOWS_SSH_JUMP: 'vader' }), [
+  assert.deepEqual(windowsSshTransportArgs({ NVPN_WINDOWS_SSH_JUMP: 'jump-host' }), [
     '-o',
     'BatchMode=yes',
     '-o',
     'ConnectTimeout=10',
     '-J',
-    'vader',
+    'jump-host',
   ])
   assert.deepEqual(
     windowsSshTransportArgs({
@@ -260,6 +523,48 @@ test('validateReleaseAssetSet can require complete app release artifacts', () =>
   )
 })
 
+test('draft promotion rejects an incomplete cross-platform artifact set', () => {
+  assert.throws(
+    () =>
+      validatePromotableReleaseManifest({
+        assets: [
+          { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz' },
+          { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg' },
+        ],
+      }),
+    /Linux x64 desktop package, Windows x64 installer, signed Android APK, StartOS x86_64 package, StartOS aarch64 package/,
+  )
+
+  assert.doesNotThrow(() =>
+    validatePromotableReleaseManifest({
+      assets: [
+        { path: 'assets/nostr-vpn-v4.1.4-android-arm64.apk' },
+        { path: 'assets/nostr-vpn-v4.1.4-linux-x64.deb' },
+        { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz' },
+        { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg' },
+        { path: 'assets/nostr-vpn-v4.1.4-startos-aarch64.s9pk' },
+        { path: 'assets/nostr-vpn-v4.1.4-startos-x86_64.s9pk' },
+        { path: 'assets/nostr-vpn-v4.1.4-windows-x64-setup.exe' },
+      ],
+    }),
+  )
+})
+
+test('draft candidates are complete before the final TestFlight upload', () => {
+  const localRelease = readFileSync(
+    join(process.cwd(), 'scripts/local-release.mjs'),
+    'utf8',
+  )
+  assert.match(
+    localRelease,
+    /requireCompleteAppRelease:\s*!allowPartial\s*&&\s*!options\.dryRun/,
+  )
+  const stepsStart = localRelease.indexOf('const steps = [')
+  const stageStart = localRelease.indexOf('stageRelease({', stepsStart)
+  const steps = localRelease.slice(stepsStart, stageStart)
+  assert.ok(steps.indexOf("['windows'") < steps.indexOf("['ios'"))
+})
+
 test('Linux desktop package bundles nvpn CLI helper', () => {
   const linuxCargo = readFileSync(join(process.cwd(), 'linux/Cargo.toml'), 'utf8')
   const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
@@ -294,6 +599,21 @@ test('dispatched release notes record the checked-out tag source commit', () => 
 
   assert.match(workflow, /--commit "\$\(git rev-parse HEAD\)"/)
   assert.doesNotMatch(workflow, /--commit "\$\{GITHUB_SHA\}"/)
+})
+
+test('GitHub release requires an exact locally gated commit', () => {
+  const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
+  const trigger = workflow.slice(0, workflow.indexOf('\nenv:'))
+
+  assert.match(trigger, /workflow_dispatch:/)
+  assert.doesNotMatch(trigger, /^\s+push:/m)
+  assert.match(trigger, /locally_attested_commit:\n\s+description:[^\n]+\n\s+required: true/)
+  assert.match(workflow, /ref: \$\{\{ github\.event\.inputs\.tag \}\}/)
+  assert.match(
+    workflow,
+    /LOCALLY_ATTESTED_COMMIT: \$\{\{ github\.event\.inputs\.locally_attested_commit \}\}/,
+  )
+  assert.match(workflow, /LOCALLY_ATTESTED_COMMIT.*does not match tag commit/s)
 })
 
 test('GitHub platform builds run beside verification and join before release', () => {
@@ -338,6 +658,26 @@ test('GitHub release requires and publishes both StartOS package architectures',
   assert.match(releaseJob, /needs\.build-startos\.result == 'success'/)
   assert.match(releaseJob, /- build-startos/)
   assert.match(releaseJob, /Built signed StartOS packages for x86_64 and aarch64\./)
+})
+
+test('corrected GitHub release is explicitly promoted as latest', () => {
+  const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
+  const releaseJob = workflow.split('  release:', 2)[1]
+
+  assert.match(releaseJob, /make_latest:\s*true/)
+})
+
+test('Windows corrected-release tags keep installer version at the marketing version', () => {
+  const windowsBuild = readFileSync(join(process.cwd(), 'scripts/windows-build.ps1'), 'utf8')
+
+  assert.match(
+    windowsBuild,
+    /\$Version = \(\$VersionTag\.TrimStart\("v"\) -split '\\\+', 2\)\[0\]/,
+  )
+  assert.match(
+    windowsBuild,
+    /NVPN_WINDOWS_INSTALLER_BASENAME = "nostr-vpn-\$VersionTag-windows-x64-setup"/,
+  )
 })
 
 test('autoDetectWindowsVmName returns the only running Windows VM', () => {
@@ -511,6 +851,38 @@ Changes since v0.2.28.
   )
 })
 
+test('extractChangelogSection uses the marketing version for corrected build tags', () => {
+  const section = extractChangelogSection(`
+# Changelog
+
+## 4.1.4 - 2026-07-23
+
+- Corrected the iOS App Store build.
+
+## 4.1.3 - 2026-07-20
+
+- Earlier release.
+`, 'v4.1.4+4001006')
+
+  assert.equal(section, '- Corrected the iOS App Store build.')
+})
+
+test('extractChangelogSection prefers corrected build notes when present', () => {
+  const section = extractChangelogSection(`
+# Changelog
+
+## 4.1.4+4001006 - 2026-07-23
+
+- Corrected build-specific notes.
+
+## 4.1.4 - 2026-07-22
+
+- Original marketing release.
+`, 'v4.1.4+4001006')
+
+  assert.equal(section, '- Corrected build-specific notes.')
+})
+
 test('renderReleaseNotes includes changelog, built, and skipped sections', () => {
   const notes = renderReleaseNotes({
     tag: 'v0.2.27',
@@ -531,7 +903,7 @@ Changes since v0.2.26.
 
 - Release note formatting.
 `,
-    builtLines: ['Built Windows x64 CLI on win11-dev.'],
+    builtLines: ['Built Windows x64 CLI on windows-builder.'],
     skippedLines: ['Linux musl CLI skipped because cross was unavailable.'],
   })
 
@@ -541,7 +913,7 @@ Changes since v0.2.26.
   assert.match(notes, /### Most People Will Want/)
   assert.match(notes, /### Command Line/)
   assert.match(notes, /Windows x64 CLI/)
-  assert.match(notes, /Built Windows x64 CLI on win11-dev\./)
+  assert.match(notes, /Built Windows x64 CLI on windows-builder\./)
   assert.match(notes, /Linux musl CLI skipped because cross was unavailable\./)
 })
 
@@ -611,16 +983,55 @@ test('renderReleaseNotes groups common app downloads before advanced files', () 
 test('semverFromTag strips an optional v prefix', () => {
   assert.equal(semverFromTag('v4.0.6'), '4.0.6')
   assert.equal(semverFromTag('4.0.6'), '4.0.6')
+  assert.equal(semverFromTag('v4.1.4+4001006'), '4.1.4')
   assert.throws(() => semverFromTag('4.0'), /semver-shaped/)
   assert.throws(() => semverFromTag('4.0.6-alpha'), /semver-shaped/)
 })
 
-test('androidVersionCode encodes semver into a monotonic integer', () => {
-  assert.equal(androidVersionCode('4.0.6'), 40_006)
-  assert.equal(androidVersionCode('4.0.10'), 40_010)
-  assert.equal(androidVersionCode('4.10.0'), 41_000)
-  assert.equal(androidVersionCode('5.0.0'), 50_000)
+test('corrected release tags keep build metadata separate from marketing versions', () => {
+  const correctedTag = 'v4.1.4+4001006'
+  assert.equal(
+    bumpPbxprojMarketingVersion('MARKETING_VERSION = 4.1.3;', correctedTag),
+    'MARKETING_VERSION = 4.1.4;',
+  )
+  assert.equal(
+    bumpCargoPackageVersion('[package]\nname = "example"\nversion = "4.1.3"\n\n[dependencies]\n', correctedTag),
+    '[package]\nname = "example"\nversion = "4.1.4"\n\n[dependencies]\n',
+  )
+  const manifest = buildReleaseManifest({
+    tag: correctedTag,
+    commit: 'abc123',
+    createdAt: 123,
+    assetPaths: [],
+  })
+  assert.equal(manifest.tag, correctedTag)
+  assert.equal(manifest.prerelease, false)
+  assert.equal(
+    bumpAndroidGradleVersion(
+      `
+android {
+    defaultConfig {
+        versionCode = 4010400
+        versionName = "4.1.4"
+    }
+}
+`,
+      correctedTag,
+      { versionCode: 4_010_401 },
+    ).match(/versionCode = (\d+)/)?.[1],
+    '4010401',
+  )
+})
+
+test('androidVersionCode reserves two digits for corrected-release revisions', () => {
+  assert.equal(androidVersionCode('4.0.6'), 4_000_600)
+  assert.equal(androidVersionCode('4.0.10'), 4_001_000)
+  assert.equal(androidVersionCode('4.10.0'), 4_100_000)
+  assert.equal(androidVersionCode('5.0.0'), 5_000_000)
+  assert.equal(androidVersionCode('4.1.4', 1), 4_010_401)
+  assert.equal(androidVersionCode('4.1.5'), 4_010_500)
   assert.throws(() => androidVersionCode('4.100.0'), /minor\/patch < 100/)
+  assert.throws(() => androidVersionCode('4.1.4', 100), /revision/)
 })
 
 test('bumpPbxprojMarketingVersion replaces every MARKETING_VERSION setting', () => {
@@ -647,9 +1058,44 @@ android {
 }
 `
   const next = bumpAndroidGradleVersion(input, '4.0.6')
-  assert.match(next, /versionCode = 40006/)
+  assert.match(next, /versionCode = 4000600/)
   assert.match(next, /versionName = "4\.0\.6"/)
   assert.doesNotMatch(next, /4\.0\.2/)
+})
+
+test('bumpAndroidGradleVersion preserves a correction only for the same marketing version', () => {
+  const corrected = `
+android {
+    defaultConfig {
+        versionCode = 4010401
+        versionName = "4.1.4"
+    }
+}
+`
+  assert.match(
+    bumpAndroidGradleVersion(corrected, 'v4.1.4+4001006'),
+    /versionCode = 4010401[\s\S]*versionName = "4\.1\.4"/,
+  )
+  assert.match(
+    bumpAndroidGradleVersion(corrected, 'v4.1.5'),
+    /versionCode = 4010500[\s\S]*versionName = "4\.1\.5"/,
+  )
+  assert.throws(
+    () => bumpAndroidGradleVersion(corrected, 'v4.1.4', { versionCode: 4_010_500 }),
+    /does not encode marketing version 4\.1\.4/,
+  )
+})
+
+test('bumpStartosSourceVersion preserves a correction and resets it on the next version', () => {
+  const corrected = "export const currentVersion = VersionInfo.of({\n  version: '4.1.4:1',\n})\n"
+  assert.equal(
+    bumpStartosSourceVersion(corrected, 'v4.1.4+4001006'),
+    corrected,
+  )
+  assert.equal(
+    bumpStartosSourceVersion(corrected, 'v4.1.5'),
+    "export const currentVersion = VersionInfo.of({\n  version: '4.1.5:0',\n})\n",
+  )
 })
 
 test('bumpCargoPackageVersion only touches [package] version', () => {

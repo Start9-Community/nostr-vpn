@@ -296,10 +296,90 @@ impl NativeAppRuntime {
         {
             self.run_nvpn_service_action_with_macos_admin(args)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         {
-            self.run_nvpn(args)
+            self.run_nvpn_service_action_with_linux_admin(args)
         }
+        #[cfg(target_os = "windows")]
+        {
+            self.run_nvpn_service_action_with_windows_admin(args)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            let _ = args;
+            Err(anyhow!(
+                "background service installation is unsupported on this platform"
+            ))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_nvpn_service_action_with_linux_admin<const N: usize>(
+        &self,
+        args: [&str; N],
+    ) -> Result<Output> {
+        let Some(nvpn_bin) = &self.nvpn_bin else {
+            return Err(anyhow!(
+                "nvpn CLI binary not found; set {NVPN_BIN_ENV} or install nvpn"
+            ));
+        };
+        let output = linux_privileged_service_command(nvpn_bin, &args)
+            .output()
+            .context("failed to request administrator privileges with pkexec; install and configure PolicyKit")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if linux_elevation_cancelled(&stderr) {
+                return Err(anyhow!("user cancelled the administrator prompt"));
+            }
+            if linux_elevation_unavailable_or_denied(&stderr) {
+                return Err(anyhow!(
+                    "administrator authorization was denied or no PolicyKit authentication agent is available"
+                ));
+            }
+        }
+        Ok(output)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_nvpn_service_action_with_windows_admin<const N: usize>(
+        &self,
+        args: [&str; N],
+    ) -> Result<Output> {
+        let Some(nvpn_bin) = &self.nvpn_bin else {
+            return Err(anyhow!(
+                "nvpn CLI binary not found; set {NVPN_BIN_ENV} or install nvpn"
+            ));
+        };
+        let script = windows_elevated_service_script(nvpn_bin, &args);
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .hide_console_window()
+            .output()
+            .context("failed to request administrator privileges with Windows UAC")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("NVPN_ELEVATION_CANCELLED") {
+                return Err(anyhow!("user cancelled the administrator prompt"));
+            }
+            if let Some(detail) = stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("NVPN_ELEVATION_FAILED:"))
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty())
+            {
+                return Err(anyhow!(
+                    "failed to request administrator privileges with Windows UAC: {detail}"
+                ));
+            }
+        }
+        Ok(output)
     }
 
     #[cfg(target_os = "macos")]
@@ -340,5 +420,142 @@ impl NativeAppRuntime {
         if !error.trim().is_empty() {
             self.vpn_status = error;
         }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_privileged_service_command(nvpn_bin: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("pkexec");
+    command.arg(nvpn_bin).args(args);
+    command
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_elevation_cancelled(stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("request dismissed")
+        || lowered.contains("authentication cancelled")
+        || lowered.contains("authentication canceled")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_elevation_unavailable_or_denied(stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("not authorized")
+        || lowered.contains("authentication agent")
+        || lowered.contains("authorization failed")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_command_line_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0_usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => backslashes = backslashes.saturating_add(1),
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes.saturating_mul(2).saturating_add(1)));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                if backslashes > 0 {
+                    quoted.push_str(&"\\".repeat(backslashes));
+                    backslashes = 0;
+                }
+                quoted.push(ch);
+            }
+        }
+    }
+    if backslashes > 0 {
+        quoted.push_str(&"\\".repeat(backslashes.saturating_mul(2)));
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_elevated_service_script(nvpn_bin: &Path, args: &[&str]) -> String {
+    use base64::Engine as _;
+
+    let executable =
+        base64::engine::general_purpose::STANDARD.encode(nvpn_bin.to_string_lossy().as_bytes());
+    let argument_line = args
+        .iter()
+        .map(|arg| windows_command_line_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let argument_line = base64::engine::general_purpose::STANDARD.encode(argument_line.as_bytes());
+    format!(
+        concat!(
+            "$ErrorActionPreference='Stop';",
+            "$exe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{executable}'));",
+            "$argLine=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{argument_line}'));",
+            "try {{",
+            "$process=Start-Process -FilePath $exe -ArgumentList $argLine -Verb RunAs -Wait -PassThru -ErrorAction Stop;",
+            "exit $process.ExitCode",
+            "}} catch {{",
+            "$nativeCode=$_.Exception.NativeErrorCode;",
+            "if ($nativeCode -eq 1223 -or $_.Exception.Message -match '(?i)cancel') {{",
+            "[Console]::Error.WriteLine('NVPN_ELEVATION_CANCELLED');",
+            "exit 1",
+            "}};",
+            "[Console]::Error.WriteLine('NVPN_ELEVATION_FAILED:'+$_.Exception.Message);",
+            "exit 1",
+            "}}"
+        ),
+        executable = executable,
+        argument_line = argument_line,
+    )
+}
+
+#[cfg(test)]
+mod privileged_service_action_tests {
+    use super::*;
+
+    #[test]
+    fn linux_service_action_uses_pkexec_without_an_unelevated_fallback() {
+        let command = linux_privileged_service_command(
+            Path::new("/opt/Nostr VPN/nvpn"),
+            &["service", "install", "--force"],
+        );
+
+        assert_eq!(command.get_program(), "pkexec");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["/opt/Nostr VPN/nvpn", "service", "install", "--force"]
+        );
+    }
+
+    #[test]
+    fn linux_elevation_errors_distinguish_cancel_and_missing_agent() {
+        assert!(linux_elevation_cancelled(
+            "Error executing command as another user: Request dismissed"
+        ));
+        assert!(linux_elevation_unavailable_or_denied(
+            "No authentication agent found"
+        ));
+    }
+
+    #[test]
+    fn windows_service_action_uses_uac_and_preserves_argument_boundaries() {
+        let script = windows_elevated_service_script(
+            Path::new(r"C:\Program Files\Nostr VPN\nvpn.exe"),
+            &[
+                "service",
+                "install",
+                "--config",
+                r"C:\Users\Example User\AppData\Roaming\Nostr VPN\config.toml",
+            ],
+        );
+
+        assert!(script.contains("Start-Process"));
+        assert!(script.contains("-Verb RunAs"));
+        assert!(script.contains("NVPN_ELEVATION_CANCELLED"));
+        assert_eq!(
+            windows_command_line_quote(r#"a b\"quoted""#),
+            r#""a b\\\"quoted\"""#
+        );
     }
 }

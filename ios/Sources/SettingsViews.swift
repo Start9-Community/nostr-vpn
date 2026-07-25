@@ -11,58 +11,33 @@ struct SettingsPage: View {
             LazyVStack(spacing: 14) {
                 DeviceSettingsCard(model: model)
                 GeneralSettingsCard(model: model)
-                if model.state.paidRouteMarket.supported {
-                    WalletDisplaySettingsCard(model: model)
-                }
                 FipsSettingsCard(model: model)
                 PubsubSettingsCard(model: model)
                 RelaySettingsCard(model: model)
                 DiagnosticsCard(state: model.state)
+                PrivacySettingsCard()
             }
             .padding()
         }
+        .scrollIndicators(.hidden)
         .background(AppColors.background)
     }
 }
 
-struct WalletDisplaySettingsCard: View {
-    @ObservedObject var model: AppModel
-
+struct PrivacySettingsCard: View {
     var body: some View {
         AppCard {
-            Text("Wallet")
+            Text("Privacy")
                 .font(.headline)
-            Toggle("Show fiat value", isOn: Binding(
-                get: { model.state.walletFiatEnabled },
-                set: { enabled in
-                    model.dispatch(
-                        NativeActions.updateSettings(["walletFiatEnabled": enabled]),
-                        status: "Saving wallet display"
-                    )
-                }
-            ))
-            if model.state.walletFiatEnabled {
-                Text("Rates from Coinbase and Kraken")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Picker("Currency", selection: Binding(
-                    get: { model.state.walletFiatCurrency },
-                    set: { currency in
-                        model.dispatch(
-                            NativeActions.updateSettings(["walletFiatCurrency": currency]),
-                            status: "Saving wallet currency"
-                        )
-                    }
-                )) {
-                    ForEach(["USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF"], id: \.self) {
-                        Text($0).tag($0)
-                    }
-                }
-                .pickerStyle(.menu)
+            Link(destination: URL(string: "https://nostrvpn.org/privacy/")!) {
+                Label("Privacy Policy", systemImage: "hand.raised")
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityIdentifier("privacy-policy-link")
         }
     }
 }
+
 struct ParticipantRow: View {
     @ObservedObject var model: AppModel
     let network: NetworkState
@@ -342,6 +317,7 @@ struct AddDeviceCard: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("manual-admin-joiner-id")
             if deviceIdInvalid {
                 Text("Not a valid device ID")
                     .font(.caption)
@@ -356,6 +332,7 @@ struct AddDeviceCard: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(trimmedDeviceId.isEmpty || deviceIdInvalid)
+            .accessibilityIdentifier("manual-admin-submit")
         }
     }
 }
@@ -833,6 +810,27 @@ struct ExitDnsSettingsCard: View {
     @State private var bootstrapIps = ""
     @State private var throughExitServers = ""
     @State private var lastSyncedRev: UInt64?
+    @State private var hasUnsavedChanges = false
+
+    private var validationError: String? {
+        if mode == "encrypted" && provider == "custom" {
+            let normalizedUrl = customUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalizedUrl.isEmpty {
+                return "Enter an HTTPS DoH URL."
+            }
+            if !normalizedUrl.lowercased().hasPrefix("https://") {
+                return "DoH URL must use HTTPS."
+            }
+            if bootstrapIps.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "Enter at least one bootstrap IP."
+            }
+        }
+        if mode == "through_exit"
+            && throughExitServers.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter at least one DNS server IP."
+        }
+        return nil
+    }
 
     var body: some View {
         AppCard {
@@ -841,32 +839,73 @@ struct ExitDnsSettingsCard: View {
             Text("MagicDNS stays local. Public DNS follows this policy while an internet exit is active.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            Picker("Mode", selection: $mode) {
+            Picker("Mode", selection: Binding(
+                get: { mode },
+                set: {
+                    mode = $0
+                    hasUnsavedChanges = true
+                }
+            )) {
                 Text("Automatic (recommended)").tag("automatic")
+                    .accessibilityIdentifier("exit-dns-mode-automatic")
                 Text("Encrypted DNS").tag("encrypted")
+                    .accessibilityIdentifier("exit-dns-mode-encrypted")
                 Text("DNS through exit").tag("through_exit")
+                    .accessibilityIdentifier("exit-dns-mode-through-exit")
             }
             .pickerStyle(.menu)
+            .accessibilityIdentifier("exit-dns-mode-picker")
 
             if mode == "encrypted" {
-                Picker("Provider", selection: $provider) {
+                Picker("Provider", selection: Binding(
+                    get: { provider },
+                    set: {
+                        provider = $0
+                        hasUnsavedChanges = true
+                    }
+                )) {
                     Text("Cloudflare").tag("cloudflare")
+                        .accessibilityIdentifier("exit-dns-provider-cloudflare")
                     Text("Quad9").tag("quad9")
+                        .accessibilityIdentifier("exit-dns-provider-quad9")
                     Text("Custom DoH").tag("custom")
+                        .accessibilityIdentifier("exit-dns-provider-custom")
                 }
                 .pickerStyle(.menu)
+                .accessibilityIdentifier("exit-dns-provider-picker")
                 if provider == "custom" {
-                    TextField("https://dns.example/dns-query", text: $customUrl)
+                    TextField("https://dns.example/dns-query", text: Binding(
+                        get: { customUrl },
+                        set: {
+                            customUrl = $0
+                            hasUnsavedChanges = true
+                        }
+                    ))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    TextField("Bootstrap IPs (comma separated)", text: $bootstrapIps)
+                        .accessibilityIdentifier("exit-dns-custom-url")
+                    TextField("Bootstrap IPs (comma separated)", text: Binding(
+                        get: { bootstrapIps },
+                        set: {
+                            bootstrapIps = $0
+                            hasUnsavedChanges = true
+                        }
+                    ))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("exit-dns-custom-bootstrap-ips")
                 }
             } else if mode == "through_exit" {
-                TextField("DNS server IPs (comma separated)", text: $throughExitServers)
+                TextField("DNS server IPs (comma separated)", text: Binding(
+                    get: { throughExitServers },
+                    set: {
+                        throughExitServers = $0
+                        hasUnsavedChanges = true
+                    }
+                ))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .accessibilityIdentifier("exit-dns-through-exit-servers")
                 Text("These DNS packets are sent only through the selected exit.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -876,7 +915,16 @@ struct ExitDnsSettingsCard: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let validationError {
+                Text(validationError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("exit-dns-validation-error")
+            }
+
             Button("Save Exit DNS") {
+                hasUnsavedChanges = false
                 model.dispatch(NativeActions.updateSettings([
                     "exitDnsMode": mode,
                     "exitDnsDohProvider": provider,
@@ -886,13 +934,15 @@ struct ExitDnsSettingsCard: View {
                 ]), status: "Saving DNS")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(model.actionInFlight)
+            .disabled(model.actionInFlight || validationError != nil)
+            .accessibilityIdentifier("exit-dns-save")
         }
         .onAppear { syncFromState(force: true) }
         .onChange(of: model.state.rev) { _, _ in syncFromState() }
     }
 
     private func syncFromState(force: Bool = false) {
+        guard !hasUnsavedChanges else { return }
         guard force || lastSyncedRev != model.state.rev else { return }
         mode = model.state.exitDnsMode
         provider = model.state.exitDnsDohProvider
@@ -900,36 +950,5 @@ struct ExitDnsSettingsCard: View {
         bootstrapIps = model.state.exitDnsCustomDohBootstrapIps
         throughExitServers = model.state.exitDnsThroughExitServers
         lastSyncedRev = model.state.rev
-    }
-}
-
-struct DiagnosticsCard: View {
-    let state: AppState
-
-    var body: some View {
-        AppCard {
-            Text("Diagnostics")
-                .font(.headline)
-            Metric("Runtime", state.runtimeStatusDetail.isEmpty ? state.platform : state.runtimeStatusDetail)
-            Metric("Peers", "\(state.connectedPeerCount)/\(state.expectedPeerCount)")
-            Metric("Roster FIPS", "\(state.fipsConnectedPeerCount)/\(state.fipsRosterPeerCount) direct")
-            Metric("Other FIPS", "\(state.nonFipsRosterPeerCount)")
-            Metric("MagicDNS", state.magicDnsStatus)
-            Metric("Version", state.appVersion)
-            Metric("Config", state.configPath)
-            ForEach(state.health) { issue in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(issue.severity)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
-                    Text(issue.summary)
-                    if !issue.detail.isEmpty {
-                        Text(issue.detail)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
     }
 }

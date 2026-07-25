@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MOBILE_IOS_APP_READY=0
+MOBILE_ANDROID_APP_READY=0
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/release_common.sh"
@@ -27,10 +28,14 @@ LINUX_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_LINUX_GUI_SMOKE_TIMEOUT_SECS:-
 MACOS_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MACOS_GUI_SMOKE_TIMEOUT_SECS:-900}"
 MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS:-600}"
 WINDOWS_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE_TIMEOUT_SECS:-1800}"
+DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS:-1800}"
+DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS:-1800}"
 MOBILE_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_GUI_SMOKE_TIMEOUT_SECS:-1800}"
+ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS:-600}"
 IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS:-180}"
 MOBILE_WG_EXIT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_WG_EXIT_TIMEOUT_SECS:-3600}"
 MOBILE_JOIN_E2E_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_JOIN_E2E_TIMEOUT_SECS:-1800}"
+DESKTOP_MOBILE_JOIN_E2E_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E_TIMEOUT_SECS:-1800}"
 RELEASE_GATE_TARGET_SECS="${NVPN_RELEASE_GATE_TARGET_SECS:-1800}"
 
 release_cargo_config_args=()
@@ -187,6 +192,16 @@ run_local_fips_regression_tests() {
     cargo test -p fips-core poll_nostr_discovery_configured_only_drops_nonconfigured_handoff -- --nocapture
     cargo test -p fips-core fresh_control_with_unreturned_endpoint_data_blocks_direct_without_known_fallback -- --nocapture
     cargo test -p fips-core outbound_fmp_send_does_not_refresh_direct_path_liveness -- --nocapture
+    cargo test -p fips-core \
+      proto::lookup::tests::initiate_reply_learned_keeps_configured_transit_inside_fanout_budget \
+      -- --exact --nocapture
+    cargo test -p fips-core \
+      proto::lookup::tests::forward_reply_learned_keeps_configured_transit_inside_fanout_budget \
+      -- --exact --nocapture
+    cargo test -p fips-core \
+      --test public_websocket_transit \
+      persistent_two_seed_websocket_transit_survives_client_churn \
+      -- --exact --nocapture
   )
 }
 
@@ -223,18 +238,25 @@ run_release_gate_preflight() {
     echo "Release gate requires ripgrep (rg) for source contract harnesses." >&2
     return 1
   fi
-  node scripts/sync-versions.mjs
+  node scripts/sync-versions.mjs --check
   npm ci
   npm run check
   npm run build
-  node --test scripts/local-release.test.mjs
+  node --test scripts/local-release.test.mjs scripts/startos-release.test.mjs
+  python3 scripts/test_appstore_draft_metadata.py
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    ./scripts/test-ios-appstore-policy.sh
+  else
+    echo "Skipping iOS App Store binary-policy gate on this non-Apple host."
+  fi
   ./scripts/check-source-file-lines.sh
   ./scripts/test-release-gate-parallel-harness.sh
   ./scripts/test-idle-cpu-gate-harness.sh
   ./scripts/test-mobile-physical-device-selection-harness.sh
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
+  ./scripts/test-mobile-wireguard-exit-dns-harness.sh
+  ./scripts/test-mobile-real-qr-join-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
-  ./scripts/test-manual-join-platform-contract.sh
   cargo fmt --check
 }
 
@@ -249,6 +271,8 @@ run_rust_validation_lane() {
   release_cargo test "${release_cargo_lock_args[@]}" --workspace -- \
     --test-threads=1 \
     --skip websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin \
+    --skip websocket_seed_router_retries_durable_join_receipt_after_first_route_failure \
+    --skip websocket_seed_router_delivers_durable_join_receipt_after_tunnel_restart \
     --skip desktop_mobile_manual_join_desktop_admin_to_mobile_joiner \
     --skip desktop_mobile_manual_join_mobile_admin_to_desktop_joiner
   # Mobile VPN basics run without requiring a device/emulator: join over FIPS,
@@ -259,6 +283,7 @@ run_rust_validation_lane() {
   # before acknowledging it, and the sender must consume its durable outbox.
   release_cargo_test_filter nostr-vpn-app-core desktop_mobile_manual_join_desktop_admin_to_mobile_joiner
   release_cargo_test_filter nostr-vpn-app-core desktop_mobile_manual_join_mobile_admin_to_desktop_joiner
+  ./scripts/e2e-manual-join-cli.sh
   release_cargo_test_filter nostr-vpn-app-core mobile_magic_dns_answers_peer_name_from_tun_packet
   release_cargo_test_filter nostr-vpn-app-core mobile_config_wireguard_exit_keeps_local_stub_and_uses_profile_dns_only_while_active
   release_cargo_test_filter nostr-vpn-core exit_dns_supported_policy_matrix_selects_exact_resolver
@@ -270,6 +295,20 @@ run_rust_validation_lane() {
   # Android VpnService and iOS NEPacketTunnelProvider.
   release_cargo_test_filter nostr-vpn-core channels_round_trip_plaintext_packets_against_paired_responder
   ./scripts/e2e-update-cli.sh
+}
+
+run_android_static_validation_lane() {
+  command -v gradle >/dev/null 2>&1 || {
+    echo "Android static validation requires Gradle on PATH." >&2
+    return 1
+  }
+  # Kotlin compilation, unit tests, and Android lint do not need to rebuild the
+  # Rust shared library. Keep this lane independent from Cargo so it can overlap
+  # the longer Rust validation lane without sharing build outputs.
+  gradle -p android \
+    :app:lintDebug \
+    :app:testDebugUnitTest \
+    -x buildRustArm64
 }
 
 windows_ssh_command() {
@@ -285,12 +324,13 @@ windows_ssh_command() {
 
 windows_vm_reachable() {
   local host="$1"
+  [[ -n "$host" ]] || return 1
   windows_ssh_command "$host"
   "${WINDOWS_SSH_CMD[@]}" hostname >/dev/null 2>&1
 }
 
 run_auto_windows_vm_app_smoke() {
-  local host="${NVPN_WINDOWS_SSH_HOST:-win11-dev}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
     release_gate_run_with_timeout "Windows VM app launch smoke" "$WINDOWS_GUI_SMOKE_TIMEOUT_SECS" \
       ./scripts/windows-vm-app-launch-smoke.sh "$host"
@@ -300,12 +340,34 @@ run_auto_windows_vm_app_smoke() {
 }
 
 run_auto_windows_vm_wireguard_exit_e2e() {
-  local host="${NVPN_WINDOWS_SSH_HOST:-win11-dev}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
     release_gate_run_with_timeout "Windows WG exit e2e" "$WINDOWS_WG_EXIT_TIMEOUT_SECS" \
       ./scripts/windows-vm-wireguard-exit-e2e.sh "$host"
   else
     echo "Skipping Windows WG exit e2e because ssh $host is unreachable."
+  fi
+}
+
+run_auto_windows_vm_manual_join_ui_e2e() {
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  if windows_vm_reachable "$host"; then
+    release_gate_run_with_timeout "Windows manual-join UI e2e" \
+      "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+      ./scripts/windows-vm-manual-join-e2e.sh "$host"
+  else
+    echo "Skipping Windows manual-join UI e2e because ssh $host is unreachable."
+  fi
+}
+
+run_auto_windows_vm_service_toggle_e2e() {
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  if windows_vm_reachable "$host"; then
+    release_gate_run_with_timeout "Windows service-toggle UAC e2e" \
+      "$DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS" \
+      ./scripts/windows-vm-service-toggle-e2e.sh "$host"
+  else
+    echo "Skipping Windows service-toggle UAC e2e because ssh $host is unreachable."
   fi
 }
 
@@ -318,14 +380,16 @@ release_gate_mode_disabled() {
 
 windows_platform_lane_requested() {
   ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E:-auto}" \
-    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE:-auto}"
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE:-auto}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E:-required}"
 }
 
 prepare_windows_platform_lane_sync() {
   WINDOWS_LANE_PRE_SYNCED=0
   windows_platform_lane_requested || return 0
 
-  local host="${NVPN_WINDOWS_SSH_HOST:-win11-dev}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
     ./scripts/windows-vm-git-sync.sh "$host"
     WINDOWS_LANE_PRE_SYNCED=1
@@ -339,7 +403,7 @@ run_windows_wireguard_exit_gate() {
       ;;
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm)
       release_gate_run_with_timeout "Windows WG exit e2e" "$WINDOWS_WG_EXIT_TIMEOUT_SECS" \
-        ./scripts/windows-vm-wireguard-exit-e2e.sh "${NVPN_WINDOWS_SSH_HOST:-win11-dev}"
+        ./scripts/windows-vm-wireguard-exit-e2e.sh "${NVPN_WINDOWS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
       run_auto_windows_vm_wireguard_exit_e2e
@@ -359,7 +423,7 @@ run_windows_app_launch_gate() {
       ;;
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm)
       release_gate_run_with_timeout "Windows VM app launch smoke" "$WINDOWS_GUI_SMOKE_TIMEOUT_SECS" \
-        ./scripts/windows-vm-app-launch-smoke.sh "${NVPN_WINDOWS_SSH_HOST:-win11-dev}"
+        ./scripts/windows-vm-app-launch-smoke.sh "${NVPN_WINDOWS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
       run_auto_windows_vm_app_smoke
@@ -371,12 +435,271 @@ run_windows_app_launch_gate() {
   esac
 }
 
+run_windows_manual_join_ui_gate() {
+  local mode="${NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E:-required}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Windows manual-join UI e2e because NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm|required)
+      windows_vm_reachable "$host" \
+        || { echo "Required Windows manual-join UI VM is unreachable: $host" >&2; return 1; }
+      release_gate_run_with_timeout "Windows manual-join UI e2e" \
+        "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+        ./scripts/windows-vm-manual-join-e2e.sh "$host"
+      ;;
+    auto|AUTO|Auto|"")
+      run_auto_windows_vm_manual_join_ui_e2e
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_windows_service_toggle_gate() {
+  local mode="${NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E:-required}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Windows service-toggle UAC e2e because NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm|required)
+      windows_vm_reachable "$host" \
+        || { echo "Required Windows service-toggle VM is unreachable: $host" >&2; return 1; }
+      release_gate_run_with_timeout "Windows service-toggle UAC e2e" \
+        "$DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS" \
+        ./scripts/windows-vm-service-toggle-e2e.sh "$host"
+      ;;
+    auto|AUTO|Auto|"")
+      run_auto_windows_vm_service_toggle_e2e
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
 run_windows_platform_lane() {
+  prepare_windows_platform_lane_sync
   if [[ "${WINDOWS_LANE_PRE_SYNCED:-0}" == "1" ]]; then
     export NVPN_WINDOWS_SKIP_GIT_SYNC=1
   fi
   run_windows_wireguard_exit_gate
   run_windows_app_launch_gate
+  run_windows_manual_join_ui_gate
+  if ! release_gate_mode_disabled \
+    "${NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E:-required}"
+  then
+    export NVPN_WINDOWS_SERVICE_TOGGLE_SKIP_BUILD=1
+  fi
+  run_windows_service_toggle_gate
+}
+
+macos_vm_reachable() {
+  [[ -n "${NVPN_MACOS_SSH_HOST:-}" ]] || return 1
+  ssh -o BatchMode=yes -o ConnectTimeout=5 \
+    "$NVPN_MACOS_SSH_HOST" hostname >/dev/null 2>&1
+}
+
+macos_platform_lane_requested() {
+  ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E:-required}"
+}
+
+prepare_macos_platform_lane_sync() {
+  MACOS_PLATFORM_LANE_PRE_SYNCED=0
+  macos_platform_lane_requested || return 0
+  if macos_vm_reachable; then
+    if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
+      NVPN_MACOS_SYNC_PATH_DEPS=1 \
+        ./scripts/macos-vm-git-sync.sh "${NVPN_MACOS_SSH_HOST:-}"
+    else
+      ./scripts/macos-vm-git-sync.sh "${NVPN_MACOS_SSH_HOST:-}"
+    fi
+    MACOS_PLATFORM_LANE_PRE_SYNCED=1
+  fi
+}
+
+run_macos_manual_join_ui_gate() {
+  local mode="${NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E:-required}"
+  if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_MACOS_SKIP_GIT_SYNC=1
+  fi
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping macOS manual-join UI e2e because NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      macos_vm_reachable \
+        || { echo "Required macOS manual-join UI VM is unreachable." >&2; return 1; }
+      release_gate_run_with_timeout "macOS manual-join UI e2e" \
+        "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+        ./scripts/macos-vm-manual-join-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      ;;
+    local)
+      release_gate_run_with_timeout "macOS manual-join UI e2e" \
+        "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+        ./scripts/e2e-macos-manual-join-ui.sh
+      ;;
+    auto|AUTO|Auto|"")
+      if macos_vm_reachable; then
+        release_gate_run_with_timeout "macOS manual-join UI e2e" \
+          "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+          ./scripts/macos-vm-manual-join-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      else
+        echo "Skipping macOS manual-join UI e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_macos_service_toggle_gate() {
+  local mode="${NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E:-required}"
+  if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_MACOS_SKIP_GIT_SYNC=1
+  fi
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping macOS service-toggle Authorization e2e because NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      macos_vm_reachable \
+        || { echo "Required macOS service-toggle VM is unreachable." >&2; return 1; }
+      release_gate_run_with_timeout "macOS service-toggle Authorization e2e" \
+        "$DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS" \
+        ./scripts/macos-vm-service-toggle-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      ;;
+    auto|AUTO|Auto|"")
+      if macos_vm_reachable; then
+        release_gate_run_with_timeout "macOS service-toggle Authorization e2e" \
+          "$DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS" \
+          ./scripts/macos-vm-service-toggle-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      else
+        echo "Skipping macOS service-toggle Authorization e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_macos_platform_lane() {
+  prepare_macos_platform_lane_sync
+  run_macos_manual_join_ui_gate
+  if ! release_gate_mode_disabled \
+    "${NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E:-required}"
+  then
+    export NVPN_MACOS_SERVICE_TOGGLE_REUSE_BUILD=1
+  fi
+  run_macos_service_toggle_gate
+}
+
+ubuntu_vm_reachable() {
+  [[ -n "${NVPN_UBUNTU_SSH_HOST:-}" ]] || return 1
+  ssh -o BatchMode=yes -o ConnectTimeout=5 \
+    "$NVPN_UBUNTU_SSH_HOST" hostname >/dev/null 2>&1
+}
+
+linux_platform_lane_requested() {
+  ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E:-required}"
+}
+
+prepare_linux_platform_lane_sync() {
+  LINUX_PLATFORM_LANE_PRE_SYNCED=0
+  linux_platform_lane_requested || return 0
+  if ubuntu_vm_reachable; then
+    ./scripts/ubuntu-vm-git-sync.sh \
+      "${NVPN_UBUNTU_SSH_HOST:-}"
+    LINUX_PLATFORM_LANE_PRE_SYNCED=1
+  fi
+}
+
+run_linux_manual_join_ui_gate() {
+  local mode="${NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E:-required}"
+  local host="${NVPN_UBUNTU_SSH_HOST:-}"
+  if [[ "${LINUX_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_UBUNTU_SKIP_GIT_SYNC=1
+  fi
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Linux manual-join UI e2e because NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|ubuntu-vm|required)
+      ubuntu_vm_reachable \
+        || { echo "Required Linux manual-join UI VM is unreachable: $host" >&2; return 1; }
+      release_gate_run_with_timeout "Linux manual-join UI e2e" \
+        "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+        ./scripts/ubuntu-vm-manual-join-e2e.sh "$host"
+      ;;
+    auto|AUTO|Auto|"")
+      if ubuntu_vm_reachable; then
+        release_gate_run_with_timeout "Linux manual-join UI e2e" \
+          "$DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS" \
+          ./scripts/ubuntu-vm-manual-join-e2e.sh "$host"
+      else
+        echo "Skipping Linux manual-join UI e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_linux_service_toggle_gate() {
+  local mode="${NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E:-required}"
+  local host="${NVPN_UBUNTU_SSH_HOST:-}"
+  if [[ "${LINUX_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_UBUNTU_SKIP_GIT_SYNC=1
+  fi
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Linux service-toggle PolicyKit e2e because NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|ubuntu-vm|required)
+      ubuntu_vm_reachable \
+        || { echo "Required Linux service-toggle VM is unreachable: $host" >&2; return 1; }
+      release_gate_run_with_timeout "Linux service-toggle PolicyKit e2e" \
+        "$DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS" \
+        ./scripts/ubuntu-vm-service-toggle-e2e.sh "$host"
+      ;;
+    auto|AUTO|Auto|"")
+      if ubuntu_vm_reachable; then
+        release_gate_run_with_timeout "Linux service-toggle PolicyKit e2e" \
+          "$DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS" \
+          ./scripts/ubuntu-vm-service-toggle-e2e.sh "$host"
+      else
+        echo "Skipping Linux service-toggle PolicyKit e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_linux_platform_lane() {
+  prepare_linux_platform_lane_sync
+  run_linux_manual_join_ui_gate
+  if ! release_gate_mode_disabled \
+    "${NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E:-required}"
+  then
+    export NVPN_UBUNTU_SKIP_BUILD=1
+  fi
+  run_linux_service_toggle_gate
 }
 
 release_gate_perf_output_dir() {
@@ -558,10 +881,11 @@ run_mobile_idle_cpu_gates() {
       return 1
     }
     release_gate_run_with_timeout "Android idle CPU smoke" "$MOBILE_GUI_SMOKE_TIMEOUT_SECS" \
-      env NVPN_ANDROID_PACKAGE="fi.siriusbusiness.nvpn.releasegate" \
+      env NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_ANDROID_SERIAL="$android_idle_serial" \
       NVPN_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
       ./scripts/mobile-android-smoke.sh --vpn-cycle --create-network --accept-vpn-dialog
+    MOBILE_ANDROID_APP_READY=1
   else
     echo "Skipping Android idle CPU smoke because no adb device is online."
   fi
@@ -613,11 +937,90 @@ run_mobile_wireguard_exit_gates() {
       ;;
   esac
 
-  release_gate_run_with_timeout "Android/iOS WireGuard exit e2e" "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
-    env NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
-    NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
-    ./scripts/mobile-wireguard-exit-e2e.sh all
+  local image="${NVPN_MOBILE_WG_EXIT_IMAGE:-nostr-vpn-mobile-wireguard-exit-e2e}"
+  docker build -q \
+    -f "$ROOT_DIR/Dockerfile.mobile-wireguard-exit-e2e" \
+    -t "$image" \
+    "$ROOT_DIR" >/dev/null
+
+  local port_base="$((53000 + $$ % 1000 * 2))"
+  local lanes=()
+  release_gate_parallel_start \
+    "Android physical WireGuard exit and DNS" \
+    release_gate_run_with_timeout \
+    "Android physical WireGuard exit and DNS" \
+    "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
+    env \
+      NVPN_IDLE_CPU_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_IMAGE_READY=1 \
+      NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
+      NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-android-$$" \
+      NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
+      NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.77.1 \
+      NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.77.2 \
+      NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
+      NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
+      NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
+      ./scripts/mobile-wireguard-exit-e2e.sh android
+  lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
+
+  release_gate_parallel_start \
+    "iOS physical WireGuard exit and DNS" \
+    release_gate_run_with_timeout \
+    "iOS physical WireGuard exit and DNS" \
+    "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
+    env \
+      NVPN_IDLE_CPU_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_IMAGE_READY=1 \
+      NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
+      NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$" \
+      NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
+      NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1 \
+      NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2 \
+      NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
+      ./scripts/mobile-wireguard-exit-e2e.sh ios
+  lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
+
+  release_gate_parallel_wait_group "${lanes[@]}"
+  MOBILE_ANDROID_APP_READY=1
   MOBILE_IOS_APP_READY=1
+}
+
+run_android_legacy_replacement_gate() {
+  local mode="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_E2E:-auto}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Android legacy-package replacement e2e because NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_E2E=$mode"
+      return
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      ;;
+    auto|AUTO|Auto|"")
+      if ! command -v adb >/dev/null 2>&1 \
+        || ! adb devices 2>/dev/null | awk '
+          NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 }
+          END { exit !found }
+        '
+      then
+        echo "Skipping Android legacy-package replacement e2e because no physical device is online."
+        return
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+
+  release_gate_run_with_timeout \
+    "Android legacy-package replacement e2e" \
+    "$ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS" \
+    env NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
+    NVPN_ANDROID_LEGACY_REUSE_CANONICAL_APK="$MOBILE_ANDROID_APP_READY" \
+    ./scripts/mobile-android-legacy-replacement-e2e.sh
+  MOBILE_ANDROID_APP_READY=1
 }
 
 run_mobile_join_e2e_gate() {
@@ -653,9 +1056,61 @@ run_mobile_join_e2e_gate() {
   release_gate_run_with_timeout \
     "Physical iOS/Android bidirectional join e2e" \
     "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
-    env NVPN_MOBILE_JOIN_E2E_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
+    env NVPN_MOBILE_JOIN_E2E_ANDROID_BUILD_TYPE=signed-debug \
+    NVPN_MOBILE_JOIN_E2E_BUILD="$((1 - MOBILE_ANDROID_APP_READY))" \
+    NVPN_MOBILE_JOIN_E2E_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
+    NVPN_MOBILE_JOIN_E2E_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
     ./scripts/mobile-ios-android-join-e2e.sh
+  MOBILE_ANDROID_APP_READY=1
   MOBILE_IOS_APP_READY=1
+}
+
+run_desktop_mobile_manual_join_e2e_gate() {
+  local mode="${NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E:-required}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping physical macOS/Android manual-join e2e because NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E=$mode"
+      return
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      [[ "$(uname -s)" == "Darwin" ]] \
+        || { echo "Required physical macOS/Android manual-join gate needs a macOS host." >&2; return 1; }
+      command -v adb >/dev/null 2>&1 \
+        || { echo "Required physical macOS/Android manual-join gate needs adb." >&2; return 1; }
+      adb devices 2>/dev/null | awk '
+        NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 }
+        END { exit !found }
+      ' || { echo "Required physical macOS/Android manual-join gate needs a physical Android device." >&2; return 1; }
+      macos_vm_reachable \
+        || { echo "Required physical macOS/Android manual-join VM is unreachable." >&2; return 1; }
+      ;;
+    auto|AUTO|Auto|"")
+      if [[ "$(uname -s)" != "Darwin" ]] \
+        || ! command -v adb >/dev/null 2>&1 \
+        || ! adb devices 2>/dev/null | awk '
+          NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 }
+          END { exit !found }
+        ' \
+        || ! macos_vm_reachable
+      then
+        echo "Skipping physical macOS/Android manual-join e2e because its VM and physical Android device are not available."
+        return
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+
+  release_gate_run_with_timeout \
+    "Physical macOS/Android bidirectional manual-join e2e" \
+    "$DESKTOP_MOBILE_JOIN_E2E_TIMEOUT_SECS" \
+    env NVPN_DESKTOP_MOBILE_JOIN_WAIT_SECS=15 \
+    NVPN_MACOS_ANDROID_JOIN_SKIP_BUILD="${DESKTOP_MOBILE_REUSE_MACOS_BUILD:-0}" \
+    NVPN_DESKTOP_MOBILE_JOIN_BUILD_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
+    ./scripts/macos-vm-android-manual-join-e2e.sh \
+    "${NVPN_MACOS_SSH_HOST:-}"
 }
 
 docker_release_gates_enabled() {
@@ -690,8 +1145,25 @@ run_mobile_qr_join_latency_gate() {
     echo "Skipping mobile QR-join latency gate on this uncalibrated host."
     return 0
   fi
+  # These real public-WebSocket tests use timing ceilings and intentionally
+  # interrupt/restart a tunnel. Run them together only after build contention
+  # has ended so their delivery and durable-retry measurements remain useful.
   release_cargo_test_filter nostr-vpn-app-core \
     websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin
+  release_cargo_test_filter nostr-vpn-app-core \
+    websocket_seed_router_retries_durable_join_receipt_after_first_route_failure
+  release_cargo_test_filter nostr-vpn-app-core \
+    websocket_seed_router_delivers_durable_join_receipt_after_tunnel_restart
+}
+
+run_public_fips_transit_gate() {
+  release_cargo test "${release_cargo_lock_args[@]}" \
+    -p nostr-vpn-core \
+    --test fips_public_transit \
+    public_transit_routes_fips_control_by_npub_without_direct_peer_config \
+    -- \
+    --ignored \
+    --test-threads=1
 }
 
 run_userspace_wireguard_exit_docker_gate() {
@@ -727,10 +1199,11 @@ run_docker_isolated_functional_gates() {
     run_userspace_wireguard_exit_docker_gate
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
-  local lane
-  for lane in "${lanes[@]}"; do
-    release_gate_parallel_wait "$lane"
-  done
+  release_gate_parallel_start "Umbrel web UI manual join" \
+    ./scripts/e2e-umbrel-web-docker.sh
+  lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
+
+  release_gate_parallel_wait_group "${lanes[@]}"
 }
 
 run_docker_perf_gate() {
@@ -759,19 +1232,37 @@ main() {
   local started_at
   started_at="$(date +%s)"
   local log_dir="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT_DIR/artifacts/release-gate-logs/$(date -u +%Y%m%dT%H%M%SZ)}"
+  local DESKTOP_MOBILE_REUSE_MACOS_BUILD=0
   release_gate_parallel_init "$log_dir"
   trap release_gate_cleanup EXIT
 
-  # Fail fast on cheap deterministic checks before dispatching remote or heavy
-  # work, then sync one immutable candidate to the Windows VM exactly once.
+  # Finish deterministic checks that may update generated version files before
+  # snapshotting the candidate. Each isolated platform lane then syncs that
+  # immutable tree concurrently with the other remote lanes and Docker work.
   run_release_gate_preflight
-  prepare_windows_platform_lane_sync
 
   local windows_lane=""
   if windows_platform_lane_requested; then
     release_gate_parallel_start "Windows platform" run_windows_platform_lane
     windows_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
   fi
+
+  local macos_platform_lane=""
+  if macos_platform_lane_requested; then
+    release_gate_parallel_start "macOS platform UI" run_macos_platform_lane
+    macos_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  fi
+
+  local linux_platform_lane=""
+  if linux_platform_lane_requested; then
+    release_gate_parallel_start "Linux platform UI" run_linux_platform_lane
+    linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  fi
+
+  release_gate_parallel_start \
+    "Android compile, unit tests, and lint" \
+    run_android_static_validation_lane
+  local android_static_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 
   prepare_release_cargo_config
 
@@ -787,6 +1278,7 @@ main() {
   fi
 
   run_rust_validation_lane
+  release_gate_parallel_wait "$android_static_lane"
 
   if [[ -n "$docker_build_lane" ]]; then
     release_gate_parallel_wait "$docker_build_lane"
@@ -795,6 +1287,7 @@ main() {
   fi
 
   run_mobile_qr_join_latency_gate
+  run_public_fips_transit_gate
 
   # Routed idle CPU and roaming remain serial. The remaining functional Docker
   # projects have isolated names/subnets and no timing assertions, so overlap
@@ -808,11 +1301,25 @@ main() {
   run_desktop_app_launch_smokes
   run_macos_daemon_idle_cpu_gate
   run_mobile_idle_cpu_gates
+  run_android_legacy_replacement_gate
   run_mobile_wireguard_exit_gates
   run_mobile_join_e2e_gate
 
+  # The native macOS UI lane and this physical cross-platform lane share the
+  # isolated macOS VM. Join it before touching the VM; all physical Android/iOS
+  # lanes stay serial so one installed app and one VPN service own each phone.
+  if [[ -n "$macos_platform_lane" ]]; then
+    release_gate_parallel_wait "$macos_platform_lane"
+    DESKTOP_MOBILE_REUSE_MACOS_BUILD=1
+    macos_platform_lane=""
+  fi
+  run_desktop_mobile_manual_join_e2e_gate
+
   if [[ -n "$windows_lane" ]]; then
     release_gate_parallel_wait "$windows_lane"
+  fi
+  if [[ -n "$linux_platform_lane" ]]; then
+    release_gate_parallel_wait "$linux_platform_lane"
   fi
 
   local elapsed target_status

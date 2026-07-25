@@ -92,6 +92,60 @@ fn stage_daemon_config_apply_writes_staged_file() {
 }
 
 #[test]
+fn daemon_control_readiness_is_bound_to_the_current_process() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-control-ready-test-{nonce}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let config = dir.join("config.toml");
+
+    write_daemon_control_ready(&config, 41).expect("write stale ready marker");
+    assert!(
+        !daemon_control_ready_for_pid(&config, 42),
+        "a marker from a previous daemon must not make a new daemon controllable"
+    );
+    assert!(
+        wait_for_daemon_control_ready(&config, 42, Duration::from_millis(20)).is_err(),
+        "a caller must wait while only a stale daemon marker exists"
+    );
+
+    write_daemon_control_ready(&config, 42).expect("write current ready marker");
+    wait_for_daemon_control_ready(&config, 42, Duration::from_millis(20))
+        .expect("current daemon should be ready");
+    clear_daemon_control_ready(&config);
+    assert!(
+        !daemon_control_ready_file_path(&config).exists(),
+        "shutdown must remove the readiness marker"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn daemon_instance_lock_rejects_a_second_process_until_release() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-daemon-lock-test-{nonce}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let config = dir.join("config.toml");
+
+    let first = acquire_daemon_instance_lock(&config).expect("acquire first daemon lock");
+    let second = acquire_daemon_instance_lock(&config);
+    assert!(
+        second.is_err(),
+        "a second daemon must not acquire the same config lock"
+    );
+    drop(first);
+    acquire_daemon_instance_lock(&config).expect("released daemon lock should be reusable");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn update_daemon_config_from_staged_request_replaces_target_and_cleans_up() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -17,7 +17,12 @@ extension AppModel {
             return false
         }
         lifecycleProbeResultName = safeName
+        lifecycleProbeRunId = Self.argumentValue(
+            after: "--nvpn-debug-lifecycle-run-id",
+            in: arguments
+        ) ?? ""
         lifecycleProbeTransition = 0
+        lifecycleProbeHistory.removeAll(keepingCapacity: true)
         writeDebugLifecycleProbe(phase: "armed")
         return true
         #else
@@ -32,11 +37,22 @@ extension AppModel {
         }
         lifecycleProbeTransition += 1
         let coreAvailable = core != nil
+        let event: [String: Any] = [
+            "monotonicMilliseconds": Int64(ProcessInfo.processInfo.systemUptime * 1_000),
+            "nativeCoreAvailable": coreAvailable,
+            "phase": phase,
+            "processIdentifier": ProcessInfo.processInfo.processIdentifier,
+            "transition": lifecycleProbeTransition,
+            "wallClockMilliseconds": Int64(Date().timeIntervalSince1970 * 1_000),
+        ]
+        lifecycleProbeHistory.append(event)
         writeDebugProbeResult(
             [
                 "ok": phase == "background" ? !coreAvailable : coreAvailable,
+                "history": lifecycleProbeHistory,
                 "phase": phase,
                 "nativeCoreAvailable": coreAvailable,
+                "runId": lifecycleProbeRunId,
                 "transition": lifecycleProbeTransition,
             ],
             name: lifecycleProbeResultName

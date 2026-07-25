@@ -46,6 +46,7 @@ extension RootView {
                     Label("Join Network", systemImage: "arrow.down.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
+                .accessibilityIdentifier("manual-join-choose-join")
                 .buttonStyle(.borderedProminent)
             }
         }
@@ -174,6 +175,7 @@ extension RootView {
                 }
             }
             .controlSize(.small)
+            .accessibilityIdentifier("manual-join-admin-open")
             .disabled(!network.enabled)
             .help(network.enabled ? "Link device to this network" : "Activate this network first")
         }
@@ -543,9 +545,12 @@ extension RootView {
                 detailValueRow("Your Device ID", state.ownNpub)
             }
 
-            DisclosureGroup("Manual join", isExpanded: $manualJoinExpanded) {
+            DisclosureGroup(isExpanded: $manualJoinExpanded) {
                 manualJoinFields
                     .padding(.top, 6)
+            } label: {
+                Text("Manual join")
+                    .accessibilityIdentifier("manual-join-expander")
             }
 
             advertiseJoinRequestSection
@@ -563,6 +568,7 @@ extension RootView {
             detailValueRow("Your Device ID", state.ownNpub)
             TextField("Admin Device ID", text: $manualJoinAdminId)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("manual-join-admin-id")
             if invalid {
                 Text("Not a valid device ID")
                     .font(.caption)
@@ -570,6 +576,7 @@ extension RootView {
             }
             TextField("Network ID", text: $manualJoinMeshId)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("manual-join-network-id")
             Button("Add manually") {
                 manager.manualAddNetwork(adminNpub: admin, meshNetworkId: mesh)
                 manualJoinAdminId = ""
@@ -577,6 +584,7 @@ extension RootView {
                 manualJoinExpanded = false
                 finishCreateNetwork()
             }
+            .accessibilityIdentifier("manual-join-submit")
             .disabled(admin.isEmpty || mesh.isEmpty || invalid || manager.actionInFlight)
         }
     }
@@ -593,6 +601,7 @@ extension RootView {
             detailValueRow("Network ID", network.networkId, displayValue: displayNetworkId(network.networkId))
             TextField("Joining Device ID", text: $manualJoinDeviceId)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("manual-join-admin-device-id")
             if invalid {
                 Text("Not a valid device ID")
                     .font(.caption)
@@ -600,6 +609,7 @@ extension RootView {
             }
             TextField("Name", text: $manualJoinDeviceName)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("manual-join-admin-device-name")
             Button("Add by Device ID") {
                 manager.addParticipant(
                     networkId: network.id,
@@ -609,6 +619,7 @@ extension RootView {
                 manualJoinDeviceId = ""
                 manualJoinDeviceName = ""
             }
+            .accessibilityIdentifier("manual-join-admin-submit")
             .disabled(deviceId.isEmpty || invalid || manager.actionInFlight)
         }
     }

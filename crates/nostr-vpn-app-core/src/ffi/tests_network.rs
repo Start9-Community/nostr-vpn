@@ -538,6 +538,10 @@ exit 0
         runtime.startup_error = None;
         runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("persist isolated mobile config");
 
         runtime.dispatch(NativeAppAction::StartJoinRequestBroadcast);
         assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
@@ -585,6 +589,10 @@ exit 0
         runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
         let network_id = create_test_network(&mut runtime, "Home");
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("persist isolated mobile config");
 
         let state = runtime.state();
         assert!(state.join_request_qr_code_or_link.starts_with("nvpn://join-request/"));

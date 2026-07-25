@@ -27,6 +27,7 @@ private actor ProviderSnapshotGate {
 enum PacketTunnelControllerError: LocalizedError {
     case managerUnavailable
     case preferencesTimedOut(String)
+    case providerMessageTimedOut(String)
     case disconnectTimedOut(Int)
 
     var errorDescription: String? {
@@ -35,6 +36,8 @@ enum PacketTunnelControllerError: LocalizedError {
             return "VPN manager unavailable"
         case .preferencesTimedOut(let operation):
             return "\(operation) VPN preferences timed out; approve any iOS VPN configuration prompt and retry"
+        case .providerMessageTimedOut(let message):
+            return "\(message) packet-tunnel response timed out"
         case .disconnectTimedOut(let status):
             return "VPN disconnect timed out with status \(status); refusing to start a replacement tunnel"
         }
@@ -43,8 +46,8 @@ enum PacketTunnelControllerError: LocalizedError {
 
 final class PacketTunnelController {
     private static let preferencesOperationTimeoutSeconds: TimeInterval = 10
+    private static let providerMessageTimeoutSeconds: TimeInterval = 1
     private let runtimeStateGate = ProviderSnapshotGate()
-    private let appConfigGate = ProviderSnapshotGate()
     private let providerBundleIdentifier = Bundle.main.object(
         forInfoDictionaryKey: "NVPNPacketTunnelBundleIdentifier"
     ) as? String ?? "fi.siriusbusiness.nvpn.PacketTunnel"
@@ -168,6 +171,28 @@ final class PacketTunnelController {
         }
     }
 
+    func installedRouteState() async -> (hasDefaultRoute: Bool, hasWireGuardExit: Bool)? {
+        do {
+            guard let manager = try await loadExistingManager(),
+                  let proto = manager.protocolConfiguration as? NETunnelProviderProtocol,
+                  let configJson = proto.providerConfiguration?["mobileTunnelConfigJson"] as? String,
+                  let data = configJson.data(using: .utf8),
+                  let launch = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                return nil
+            }
+            let tunnel = launch["tunnel"] as? [String: Any] ?? launch
+            let routes = tunnel["routeTargets"] as? [String] ?? []
+            return (
+                hasDefaultRoute: routes.contains("0.0.0.0/0"),
+                hasWireGuardExit: tunnel["wireguardExit"] is [String: Any]
+            )
+        } catch {
+            debugLog("installed route state failed: \(String(describing: error))")
+            return nil
+        }
+    }
+
     func runtimeStateJson() async -> String? {
         await runtimeStateGate.acquire()
         let result = await readRuntimeStateJson()
@@ -182,7 +207,7 @@ final class PacketTunnelController {
               expectedSize >= 0,
               expectedSize <= 1_048_576
         else {
-            return await providerMessage("runtimeState")
+            return nil
         }
         var response = Data()
         response.reserveCapacity(expectedSize)
@@ -201,10 +226,7 @@ final class PacketTunnelController {
     }
 
     func takeAppConfigToml() async -> String? {
-        await appConfigGate.acquire()
-        let result = await readAppConfigToml()
-        await appConfigGate.release()
-        return result
+        await readAppConfigToml()
     }
 
     private func readAppConfigToml() async -> String? {
@@ -214,9 +236,7 @@ final class PacketTunnelController {
               expectedSize >= 0,
               expectedSize <= 4_194_304
         else {
-            // A tunnel extension left running across an in-place app update
-            // may still implement the old single-message protocol.
-            return await providerMessage("takeAppConfig")
+            return nil
         }
         var response = Data()
         response.reserveCapacity(expectedSize)
@@ -263,12 +283,22 @@ final class PacketTunnelController {
             }
             let data = message.data(using: .utf8) ?? Data()
             return try await withCheckedThrowingContinuation { continuation in
+                let completion = ProviderMessageCompletion(continuation)
                 do {
                     try session.sendProviderMessage(data) { response in
-                        continuation.resume(returning: response)
+                        _ = completion.resume(returning: response)
                     }
                 } catch {
-                    continuation.resume(throwing: error)
+                    _ = completion.resume(throwing: error)
+                }
+                let timeoutSeconds = Self.providerMessageTimeoutSeconds
+                Task.detached(priority: .utility) {
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
+                    )
+                    _ = completion.resume(
+                        throwing: PacketTunnelControllerError.providerMessageTimedOut(message)
+                    )
                 }
             }
         } catch {
@@ -363,6 +393,44 @@ final class PacketTunnelController {
         let logUrl = supportDir.appendingPathComponent("app-debug.log")
         appendIosDebugLog(message, to: logUrl)
         #endif
+    }
+}
+
+private final class ProviderMessageCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private let continuation: CheckedContinuation<Data?, Error>
+
+    init(_ continuation: CheckedContinuation<Data?, Error>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resume(returning value: Data?) -> Bool {
+        guard markCompleted() else {
+            return false
+        }
+        continuation.resume(returning: value)
+        return true
+    }
+
+    @discardableResult
+    func resume(throwing error: Error) -> Bool {
+        guard markCompleted() else {
+            return false
+        }
+        continuation.resume(throwing: error)
+        return true
+    }
+
+    private func markCompleted() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed else {
+            return false
+        }
+        completed = true
+        return true
     }
 }
 

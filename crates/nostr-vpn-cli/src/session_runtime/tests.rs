@@ -127,6 +127,7 @@ mod tests {
                 seen_at_ms: None,
                 priority: 10,
             }],
+            connect_on_start: true,
             auto_reconnect: false,
             discovery_fallback_transit: true,
         }];
@@ -227,12 +228,14 @@ mod tests {
             crate::fips_private_mesh::FipsEndpointPeerTransportConfig {
                 npub: stale_npub.clone(),
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: true,
                 discovery_fallback_transit: false,
             },
             crate::fips_private_mesh::FipsEndpointPeerTransportConfig {
                 npub: other_npub,
                 addresses: Vec::new(),
+                connect_on_start: true,
                 auto_reconnect: true,
                 discovery_fallback_transit: false,
             },

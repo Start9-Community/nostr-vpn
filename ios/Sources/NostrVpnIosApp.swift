@@ -8,13 +8,10 @@ struct NostrVpnIosApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
-                .task {
-                    model.start()
-                }
                 .onOpenURL { url in
                     model.handle(url: url)
                 }
-                .onChange(of: scenePhase) { _, phase in
+                .onChange(of: scenePhase, initial: true) { _, phase in
                     model.handleScenePhase(phase)
                 }
         }

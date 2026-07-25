@@ -47,7 +47,13 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.internetPage(
                 "wireguard" to "WireGuard VPN",
             )
             Box {
-                Button(onClick = { sourceMenuExpanded = true }) {
+                Button(
+                    onClick = { sourceMenuExpanded = true },
+                    modifier = Modifier.mobileUiSelector(
+                        id = "internet-source-picker",
+                        description = "Internet source picker",
+                    ),
+                ) {
                     Text(sourceOptions.firstOrNull { it.first == state.internetSource }?.second ?: "This device")
                 }
                 DropdownMenu(
@@ -57,6 +63,10 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.internetPage(
                     sourceOptions.forEach { (source, title) ->
                         DropdownMenuItem(
                             text = { Text(title) },
+                            modifier = Modifier.mobileUiSelector(
+                                id = "internet-source-$source",
+                                description = "Internet source $title",
+                            ),
                             onClick = {
                                 sourceMenuExpanded = false
                                 dispatch(NativeActions.updateSettings("internetSource" to source))

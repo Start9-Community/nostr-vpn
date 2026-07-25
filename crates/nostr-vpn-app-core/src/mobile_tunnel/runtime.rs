@@ -39,6 +39,7 @@ impl MobileTunnel {
                 app_config,
                 launch.queued_join_rosters,
                 launch.signed_roster,
+                non_empty_path(&launch.private_state_config_path),
             ))
                 .await
                 .context("mobile FIPS startup task failed")?
@@ -53,7 +54,9 @@ impl MobileTunnel {
             config: started.config,
             app_config: started.app_config,
             app_config_dirty: started.app_config_dirty,
+            pending_join_roster_receipts: started.pending_join_roster_receipts,
             tun_counters: started.tun_counters,
+            secure_dns: started.secure_dns,
             #[cfg(any(target_os = "android", target_os = "ios"))]
             outbound_tx: started.outbound_tx,
             inbound_rx: Some(started.inbound_rx),
@@ -72,7 +75,7 @@ impl MobileTunnel {
         config: MobileTunnelConfig,
         app_config: AppConfig,
     ) -> Result<MobileTunnelStarted> {
-        Self::start_async_with_launch_state(config, app_config, Vec::new(), None).await
+        Self::start_async_with_launch_state(config, app_config, Vec::new(), None, None).await
     }
 
     #[allow(clippy::large_futures, clippy::too_many_lines)]
@@ -81,11 +84,14 @@ impl MobileTunnel {
         app_config: AppConfig,
         queued_join_rosters: Vec<QueuedJoinRoster>,
         launch_signed_roster: Option<SignedRoster>,
+        private_state_config_path: Option<PathBuf>,
     ) -> Result<MobileTunnelStarted> {
         mobile_debug_log("MobileTunnel::start_async begin");
         let scope = mobile_lan_discovery_scope(&config.network_id);
         let initial_peers = config.peers.clone();
         let config_path = non_empty_path(&config.config_path);
+        let private_state_config_path =
+            private_state_config_path.or_else(|| config_path.clone());
         let local_capability_hints = mobile_endpoint_hints(&config);
         mobile_debug_log(format!(
             "MobileTunnel::start_async binding FIPS endpoint scope={} peers={} hints={}",
@@ -119,6 +125,11 @@ impl MobileTunnel {
         let config_state = Arc::new(RwLock::new(config.clone()));
         let app_config = Arc::new(RwLock::new(app_config));
         let app_config_dirty = Arc::new(AtomicBool::new(false));
+        let pending_join_roster_receipts = Arc::new(PendingJoinRosterReceiptQueue::load(
+            private_state_config_path
+                .as_deref()
+                .map(pending_join_roster_receipts_path),
+        )?);
         let tun_counters = Arc::new(MobileTunAtomicCounters::default());
         let (outbound_tx, mut outbound_rx) =
             tokio_mpsc::channel::<Vec<Vec<u8>>>(MOBILE_TUN_OUTBOUND_BATCH_CHANNEL_CAPACITY);
@@ -141,6 +152,13 @@ impl MobileTunnel {
         #[cfg(target_os = "android")]
         let mut wg_socket_fd: c_int = -1;
         let mut wg_address_ipv4: Option<Ipv4Addr> = None;
+        {
+            let state_control = state_control_sender.clone();
+            let pending = Arc::clone(&pending_join_roster_receipts);
+            tasks.push(tokio::spawn(async move {
+                run_pending_join_roster_receipt_delivery(state_control, pending).await;
+            }));
+        }
         let exit_dns_resolver_config = mobile_exit_dns_resolver_config(&config)?;
         let exit_dns_nat = parse_ipv4(&config.magic_dns_server)
             .and_then(|local_dns_server| {
@@ -234,6 +252,11 @@ impl MobileTunnel {
             }));
         }
 
+        let magic_dns_server = parse_ipv4(&config.magic_dns_server);
+        let secure_dns = (magic_dns_server.is_some() && exit_dns_nat.is_none())
+            .then(|| SecureDnsResolver::from_resolver_config(&exit_dns_resolver_config))
+            .transpose()
+            .context("failed to initialize mobile secure DNS")?;
         let send_task = {
             let endpoint = Arc::clone(&endpoint);
             let mesh = Arc::clone(&mesh);
@@ -243,12 +266,8 @@ impl MobileTunnel {
             let mesh_addr = mesh_ipv4;
             let inbound_tx_for_dns = inbound_tx.clone();
             let app_config_for_dns = Arc::clone(&app_config);
-            let magic_dns_server = parse_ipv4(&config.magic_dns_server);
             let outbound_exit_dns_nat = exit_dns_nat.clone();
-            let secure_dns = (magic_dns_server.is_some() && exit_dns_nat.is_none())
-                .then(|| SecureDnsResolver::from_resolver_config(&exit_dns_resolver_config))
-                .transpose()
-                .context("failed to initialize mobile secure DNS")?;
+            let secure_dns = secure_dns.clone();
             tokio::spawn(async move {
                 while let Some(packets) = outbound_rx.recv().await {
                     if !dispatch_mobile_outbound_packets(
@@ -300,12 +319,12 @@ impl MobileTunnel {
                 continue;
             };
             let state_control = state_control_sender.clone();
-            let config_path = config_path.clone();
+            let private_state_config_path = private_state_config_path.clone();
             tasks.push(tokio::spawn(async move {
                 deliver_mobile_queued_join_roster(
                     &state_control,
                     destination,
-                    config_path.as_deref(),
+                    private_state_config_path.as_deref(),
                     queued,
                 )
                 .await;
@@ -349,6 +368,7 @@ impl MobileTunnel {
             let presence = Arc::clone(&presence);
             let status_config = Arc::clone(&config_state);
             let status_tun_counters = Arc::clone(&tun_counters);
+            let status_secure_dns = secure_dns.clone();
             tasks.push(tokio::spawn(async move {
                 loop {
                     if let Err(error) = persist_mobile_runtime_state(
@@ -358,6 +378,7 @@ impl MobileTunnel {
                         &presence,
                         &status_config,
                         &status_tun_counters,
+                        status_secure_dns.as_ref(),
                     )
                     .await
                     {
@@ -446,6 +467,7 @@ impl MobileTunnel {
             let config_state = Arc::clone(&config_state);
             let app_config = Arc::clone(&app_config);
             let app_config_dirty = Arc::clone(&app_config_dirty);
+            let pending_join_roster_receipts = Arc::clone(&pending_join_roster_receipts);
             let config_path = config_path.clone();
             let join_request_active = Arc::clone(&join_request_active);
             let state_control_sender = state_control_sender.clone();
@@ -461,6 +483,7 @@ impl MobileTunnel {
                     config_state: &config_state,
                     app_config: &app_config,
                     app_config_dirty: app_config_dirty.as_ref(),
+                    pending_join_roster_receipts: &pending_join_roster_receipts,
                     config_path: config_path.as_deref(),
                     join_request_active: join_request_active.as_ref(),
                     state_control: &state_control_sender,
@@ -516,7 +539,9 @@ impl MobileTunnel {
             config: config_state,
             app_config,
             app_config_dirty,
+            pending_join_roster_receipts,
             tun_counters,
+            secure_dns,
             #[cfg(any(test, target_os = "android", target_os = "ios"))]
             outbound_tx,
             inbound_rx,
@@ -581,6 +606,7 @@ impl MobileTunnel {
 
     pub(crate) fn runtime_state_json(&self) -> Result<String> {
         let tun_counters = self.tun_counters.snapshot();
+        let secure_dns_counters = self.secure_dns.as_ref().map(SecureDnsResolver::counters);
 
         let endpoint = self
             .endpoint
@@ -602,7 +628,7 @@ impl MobileTunnel {
                 .relay_statuses()
                 .await
                 .context("mobile FIPS relay snapshot")?;
-            let state = {
+            let mut state = {
                 let mesh = mobile_mesh_snapshot(&mesh)?;
                 let presence = presence
                     .read()
@@ -617,6 +643,11 @@ impl MobileTunnel {
                     unix_timestamp(),
                 )
             };
+            if let Some(counters) = secure_dns_counters {
+                state.secure_dns_queries = counters.queries;
+                state.secure_dns_successes = counters.successes;
+                state.secure_dns_failures = counters.failures;
+            }
             serde_json::to_string(&state).context("serialize mobile runtime state")
         })
     }
@@ -630,6 +661,7 @@ impl MobileTunnel {
             &self.app_config,
             &self.config,
             &self.app_config_dirty,
+            &self.pending_join_roster_receipts,
             expected_toml,
         )
     }
@@ -658,230 +690,4 @@ impl MobileTunnel {
     }
 }
 
-fn mobile_join_roster_destination(
-    config: &MobileTunnelConfig,
-    recipient: &str,
-) -> Result<Option<PeerIdentity>> {
-    let recipient = normalize_nostr_pubkey(recipient)?;
-    config
-        .peers
-        .iter()
-        .find(|peer| peer.participant_pubkey == recipient)
-        .map(|peer| {
-            PeerIdentity::from_npub(&peer.endpoint_npub)
-                .with_context(|| format!("invalid FIPS endpoint identity {}", peer.endpoint_npub))
-        })
-        .transpose()
-}
-
-async fn deliver_mobile_queued_join_roster(
-    state_control: &FipsControlTcpSender,
-    destination: PeerIdentity,
-    config_path: Option<&Path>,
-    mut queued: QueuedJoinRoster,
-) {
-    const DELIVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
-    const DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
-
-    let outbox_path = config_path.and_then(|config_path| {
-        let event_id = queued.join_roster.signed_roster.artifact_hash();
-        load_join_rosters(config_path)
-            .into_iter()
-            .find(|(_, candidate)| {
-                candidate.recipient_npub == queued.recipient_npub
-                    && candidate.join_roster.signed_roster.artifact_hash() == event_id
-            })
-            .map(|(path, _)| path)
-    });
-
-    loop {
-        let now = unix_timestamp();
-        if join_roster_delivery_expired(&queued, now) {
-            if let Some(path) = outbox_path.as_deref()
-                && let Err(error) = fs::remove_file(path)
-            {
-                tracing::warn!(?error, "mobile: failed to remove expired join approval");
-            }
-            return;
-        }
-        if let Some(path) = outbox_path.as_deref()
-            && let Err(error) = record_join_roster_attempt(path, &mut queued, now)
-        {
-            tracing::warn!(?error, "mobile: failed to record join approval attempt");
-        }
-        match send_join_roster_with_receipt(
-            state_control,
-            destination,
-            &queued.join_roster,
-            DELIVERY_ATTEMPT_TIMEOUT,
-        )
-        .await
-        {
-            Ok(_) => {
-                if let Some(path) = outbox_path.as_deref()
-                    && let Err(error) = fs::remove_file(path)
-                {
-                    tracing::warn!(?error, "mobile: failed to consume delivered join approval");
-                }
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    recipient = %queued.recipient_npub,
-                    "mobile: join approval not yet acknowledged; retrying"
-                );
-                tokio::time::sleep(DELIVERY_RETRY_DELAY).await;
-            }
-        }
-    }
-}
-
-fn mobile_lan_discovery_scope(network_id: &str) -> String {
-    nostr_vpn_core::fips_discovery::fips_lan_discovery_scope(network_id)
-}
-
-async fn push_mobile_wg_inbound_batch(
-    batch: Vec<Vec<u8>>,
-    packets: &mut Vec<Vec<u8>>,
-    inbound_tx: &tokio_mpsc::Sender<Vec<Vec<u8>>>,
-    wg_addr: Option<Ipv4Addr>,
-    mesh_addr: Option<Ipv4Addr>,
-    exit_dns_nat: Option<&MobileExitDnsNat>,
-) -> bool {
-    for mut packet in batch {
-        if let Some(exit_dns_nat) = exit_dns_nat {
-            exit_dns_nat.rewrite_response(&mut packet);
-        }
-        if let (Some(wg), Some(mesh)) = (wg_addr, mesh_addr) {
-            rewrite_ipv4_destination(&mut packet, wg, mesh);
-            nostr_vpn_core::packet_checksums::finalize_ipv4_transport_checksum(&mut packet);
-        }
-        packets.push(packet);
-        if packets.len() == MOBILE_FIPS_RECV_BATCH
-            && !flush_mobile_inbound_packets(inbound_tx, packets).await
-        {
-            return false;
-        }
-    }
-    true
-}
-
-struct MobileTunnelStarted {
-    endpoint: Arc<FipsEndpoint>,
-    state_control: FipsControlTcpSender,
-    mesh: MobileMesh,
-    presence: Arc<RwLock<HashMap<String, MobilePeerPresence>>>,
-    config: Arc<RwLock<MobileTunnelConfig>>,
-    app_config: Arc<RwLock<AppConfig>>,
-    app_config_dirty: Arc<AtomicBool>,
-    tun_counters: Arc<MobileTunAtomicCounters>,
-    #[cfg(any(test, target_os = "android", target_os = "ios"))]
-    outbound_tx: tokio_mpsc::Sender<Vec<Vec<u8>>>,
-    inbound_rx: tokio_mpsc::Receiver<Vec<Vec<u8>>>,
-    tasks: Vec<JoinHandle<()>>,
-    wg_upstream: Option<WgUpstreamRuntime>,
-    #[cfg(target_os = "android")]
-    wg_upstream_socket_fd: c_int,
-}
-
-#[cfg(test)]
-impl MobileTunnelStarted {
-    fn take_app_config_toml(&self) -> Result<String> {
-        pending_app_config_toml(&self.app_config, &self.config, &self.app_config_dirty)
-    }
-
-    fn acknowledge_app_config_toml(&self, expected_toml: &str) -> Result<bool> {
-        acknowledge_pending_app_config_toml(
-            &self.app_config,
-            &self.config,
-            &self.app_config_dirty,
-            expected_toml,
-        )
-    }
-}
-
-fn pending_app_config_toml(
-    app_config: &Arc<RwLock<AppConfig>>,
-    config: &Arc<RwLock<MobileTunnelConfig>>,
-    app_config_dirty: &AtomicBool,
-) -> Result<String> {
-    if !app_config_dirty.load(Ordering::Acquire) {
-        return Ok(String::new());
-    }
-    let app = app_config
-        .read()
-        .map_err(|_| anyhow!("mobile app config lock poisoned"))?;
-    let config_path = config
-        .read()
-        .map_err(|_| anyhow!("mobile FIPS config lock poisoned"))?
-        .config_path
-        .clone();
-    let config_path = non_empty_path(&config_path).unwrap_or_else(|| PathBuf::from(""));
-    persisted_app_config_toml(&app, &config_path)
-}
-
-fn acknowledge_pending_app_config_toml(
-    app_config: &Arc<RwLock<AppConfig>>,
-    config: &Arc<RwLock<MobileTunnelConfig>>,
-    app_config_dirty: &AtomicBool,
-    expected_toml: &str,
-) -> Result<bool> {
-    if !app_config_dirty.load(Ordering::Acquire) {
-        return Ok(false);
-    }
-    // Hold the read locks through the acknowledgement so a newer roster
-    // cannot be applied between comparing the snapshot and clearing dirty.
-    let app = app_config
-        .read()
-        .map_err(|_| anyhow!("mobile app config lock poisoned"))?;
-    let config_path = config
-        .read()
-        .map_err(|_| anyhow!("mobile FIPS config lock poisoned"))?
-        .config_path
-        .clone();
-    let config_path = non_empty_path(&config_path).unwrap_or_else(|| PathBuf::from(""));
-    let current_toml = persisted_app_config_toml(&app, &config_path)?;
-    let expected: toml::Value =
-        toml::from_str(expected_toml).context("failed to decode acknowledged mobile app config")?;
-    let current: toml::Value =
-        toml::from_str(&current_toml).context("failed to decode current mobile app config")?;
-    if current != expected {
-        return Ok(false);
-    }
-    app_config_dirty.store(false, Ordering::Release);
-    Ok(true)
-}
-
-impl Drop for MobileTunnel {
-    fn drop(&mut self) {
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        let mut native_tun = self.native_tun.take();
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        if let Some(tun) = native_tun.as_mut() {
-            tun.stop();
-        }
-        let _ = self.inbound_rx.take();
-        for task in &self.tasks {
-            task.abort();
-        }
-        let tasks = std::mem::take(&mut self.tasks);
-        let endpoint = self.endpoint.take();
-        let wg_upstream = self.wg_upstream.take();
-        self.runtime.block_on(async move {
-            for task in tasks {
-                let _ = task.await;
-            }
-            if let Some(wg) = wg_upstream {
-                wg.shutdown().await;
-            }
-            if let Some(endpoint) = endpoint {
-                let _ = endpoint.shutdown().await;
-            }
-        });
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        if let Some(mut tun) = native_tun {
-            tun.join();
-        }
-    }
-}
+include!("runtime/support.rs");

@@ -139,6 +139,16 @@ fn service_update_recommended(state: &NativeAppState) -> bool {
         && state.service_binary_version != state.expected_service_binary_version
 }
 
+fn vpn_toggle_action(state: &NativeAppState) -> NativeAppAction {
+    if state.vpn_enabled {
+        NativeAppAction::DisconnectVpn
+    } else if state.service_supported && !state.service_installed {
+        NativeAppAction::InstallSystemService
+    } else {
+        NativeAppAction::ConnectVpn
+    }
+}
+
 fn system_version_label(state: &NativeAppState) -> String {
     let app = state.app_version.trim();
     let daemon = state.daemon_binary_version.trim();

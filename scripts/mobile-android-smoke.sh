@@ -7,15 +7,32 @@ source "$ROOT/scripts/release_common.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/mobile_env.sh"
 load_release_env "$ROOT"
+# The canonical debug candidate must replace the installed release-signed app
+# in place. Keep the signing values in the ignored local Zapstore env.
+load_env_file_defaults "$ROOT/.env.zapstore.local"
 load_mobile_env "$ROOT"
 resolve_shared_build_metadata "$ROOT"
-PACKAGE_NAME="${NVPN_ANDROID_PACKAGE:-${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}}"
-ACTION_PACKAGE_NAME="${NVPN_ANDROID_ACTION_PACKAGE:-${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}}"
+CANONICAL_PACKAGE_NAME="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+LEGACY_PACKAGE_NAME="${NVPN_ANDROID_LEGACY_PACKAGE:-org.nostrvpn.app}"
+PACKAGE_NAME="${NVPN_ANDROID_PACKAGE:-$CANONICAL_PACKAGE_NAME}"
+ACTION_PACKAGE_NAME="${NVPN_ANDROID_ACTION_PACKAGE:-$CANONICAL_PACKAGE_NAME}"
+if [[ "$PACKAGE_NAME" == "$CANONICAL_PACKAGE_NAME" \
+  && -n "${ANDROID_KEYSTORE_PATH:-}" \
+  && -n "${ANDROID_KEYSTORE_PASSWORD:-}" \
+  && -n "${ANDROID_KEY_ALIAS:-}" \
+  && -n "${ANDROID_KEY_PASSWORD:-}" ]]
+then
+  # A physical candidate must update the installed canonical release in place.
+  # Use the same key instead of creating an incompatible debug-signed APK.
+  export NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1
+fi
 MAIN_ACTIVITY="${NVPN_ANDROID_ACTIVITY:-$PACKAGE_NAME/org.nostrvpn.app.MainActivity}"
 DEBUG_ACTION_EXTRA="${NVPN_ANDROID_DEBUG_ACTION_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_ACTION}"
 DEBUG_EXIT_NODE_EXTRA="${NVPN_ANDROID_DEBUG_EXIT_NODE_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_EXIT_NODE}"
 DEBUG_NETWORK_NAME_EXTRA="${NVPN_ANDROID_DEBUG_NETWORK_NAME_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_NETWORK_NAME}"
 DEBUG_WIREGUARD_CONFIG_BASE64_EXTRA="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG_BASE64_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_WIREGUARD_CONFIG_BASE64}"
+DEBUG_EXIT_DNS_PATCH_BASE64_EXTRA="${NVPN_ANDROID_DEBUG_EXIT_DNS_PATCH_BASE64_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_EXIT_DNS_PATCH_BASE64}"
+DEBUG_NETWORK_PROBE_BASE64_EXTRA="${NVPN_ANDROID_DEBUG_NETWORK_PROBE_BASE64_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_NETWORK_PROBE_BASE64}"
 APK_PATH="${NVPN_ANDROID_APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 VPN_START_WAIT_SECS="${NVPN_ANDROID_VPN_START_WAIT_SECS:-15}"
 VPN_STOP_WAIT_SECS="${NVPN_ANDROID_VPN_STOP_WAIT_SECS:-10}"
@@ -39,12 +56,25 @@ TUN_PACKET_PROBE_REQUIRE_REPLY="${NVPN_ANDROID_TUN_PACKET_PROBE_REQUIRE_REPLY:-0
 EXIT_PROBE_HOST="${NVPN_ANDROID_EXIT_PROBE_HOST:-}"
 EXIT_PROBE_EXPECTED_IP="${NVPN_ANDROID_EXIT_PROBE_EXPECTED_IP:-}"
 DIRECT_PROBE_HOST="${NVPN_ANDROID_DIRECT_PROBE_HOST:-example.com}"
+DIRECT_PROBE_URL="${NVPN_ANDROID_DIRECT_PROBE_URL:-https://example.com/}"
+EXIT_PROBE_URL="${NVPN_ANDROID_EXIT_PROBE_URL:-https://example.com/}"
 DIRECT_RESTORE_WAIT_SECS="${NVPN_ANDROID_DIRECT_RESTORE_WAIT_SECS:-20}"
 EXPECTED_VPN_DNS="${NVPN_ANDROID_EXPECTED_VPN_DNS:-10.44.0.53}"
 DEBUG_SEED_WAIT_SECS="${NVPN_ANDROID_DEBUG_SEED_WAIT_SECS:-10}"
 DEBUG_EXIT_NODE="${NVPN_ANDROID_DEBUG_EXIT_NODE:-}"
 DEBUG_WIREGUARD_CONFIG="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG:-}"
 DEBUG_WIREGUARD_CONFIG_FILE="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG_FILE:-}"
+EXIT_DNS_MODE="${NVPN_ANDROID_EXIT_DNS_MODE:-}"
+EXIT_DNS_DOH_PROVIDER="${NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER:-cloudflare}"
+EXIT_DNS_CUSTOM_DOH_URL="${NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_URL:-}"
+EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS="${NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS:-}"
+EXIT_DNS_THROUGH_EXIT_SERVERS="${NVPN_ANDROID_EXIT_DNS_THROUGH_EXIT_SERVERS:-}"
+EXIT_DNS_USE_SHIPPED_UI="${NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI:-0}"
+ANDROID_UI_WAIT_SECS="${NVPN_ANDROID_UI_WAIT_SECS:-15}"
+SWITCH_TO_DIRECT_WHILE_CONNECTED="${NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED:-0}"
+EXIT_DNS_RESULT_FILE="debug-exit-dns-state.json"
+EXIT_DNS_RESULT_NAME="mobile-android-exit-dns-state-$$.json"
+NETWORK_PROBE_RESULT_FILE="debug-network-probe.json"
 DEBUG_NETWORK_NAME="${NVPN_ANDROID_DEBUG_NETWORK_NAME:-Android smoke}"
 cleanup_after_vpn_cycle="${NVPN_ANDROID_CLEANUP_AFTER_VPN_CYCLE:-1}"
 IDLE_CPU_GATE="${NVPN_ANDROID_IDLE_CPU_GATE:-${NVPN_IDLE_CPU_GATE:-1}}"
@@ -55,6 +85,7 @@ ANDROID_LIFECYCLE_GATE="${NVPN_ANDROID_LIFECYCLE_GATE:-1}"
 ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-2}"
 
 build=1
+install=1
 clear_state=0
 create_network="${NVPN_ANDROID_DEBUG_CREATE_NETWORK:-0}"
 accept_vpn_dialog="${NVPN_ANDROID_ACCEPT_VPN_DIALOG:-0}"
@@ -62,10 +93,11 @@ vpn_cycle=0
 serial="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 PACKAGE_UID=""
 vpn_cleanup_armed=0
+DIRECT_UNDERLYING_DNS_BASELINE=""
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/mobile-android-smoke.sh [--no-build] [--clear] [--vpn-cycle] [--create-network] [--accept-vpn-dialog] [--leave-vpn-active] [--serial SERIAL] [--probe-target IP] [--probe-count N] [--probe-timeout SECS] [--probe-require-reply] [--no-tun-probe]
+usage: scripts/mobile-android-smoke.sh [--no-build] [--no-install] [--clear] [--vpn-cycle] [--create-network] [--accept-vpn-dialog] [--leave-vpn-active] [--serial SERIAL] [--probe-target IP] [--probe-count N] [--probe-timeout SECS] [--probe-require-reply] [--no-tun-probe]
 
 Builds and installs the debug APK, launches the app through adb, and optionally
 cycles the debug VPN action. Values may live in .env.mobile.local, shell env,
@@ -110,6 +142,15 @@ answer. Public DNS and Internet reachability are checked before connect, while
 the exit is active, and after disconnect. The Android VPN network must advertise
 the local authenticated DNS stub (10.44.0.53 by default).
 
+Set NVPN_ANDROID_EXIT_DNS_MODE and its provider/custom/through-exit companion
+variables to configure Exit DNS before connecting.
+NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1 requires the physical smoke to tap and
+type through the shipped Compose controls, exercise required-field validation,
+save, and verify config.toml persistence before the functional DNS probe.
+NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED=1 then selects This device,
+requires the Android VPN network to remain connected without a default route,
+and proves DNS and Internet access in that state.
+
 After a --vpn-cycle pass or failure, the script disconnects the debug VPN so
 devices are left clean for the next smoke. Use --leave-vpn-active to preserve
 the tunnel for explicit manual inspection.
@@ -120,6 +161,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build)
       build=0
+      ;;
+    --no-install)
+      install=0
       ;;
     --clear)
       clear_state=1
@@ -241,6 +285,29 @@ resolve_package_uid() {
       '$1 == "package" && $2 == package && $3 == "uid" { print $4; exit }'
 }
 
+remove_stale_nvpn_packages() {
+  local installed stale package remaining
+  installed="$("$ADB" -s "$serial" shell pm list packages \
+    | tr -d '\r' \
+    | sed -n 's/^package://p')"
+  stale="$(printf '%s\n' "$installed" \
+    | awk -v canonical="$CANONICAL_PACKAGE_NAME" -v legacy="$LEGACY_PACKAGE_NAME" \
+      '$0 == legacy || (index($0, canonical ".") == 1 && $0 != canonical)')"
+  while IFS= read -r package; do
+    [[ -n "$package" ]] || continue
+    "$ADB" -s "$serial" shell am force-stop "$package" >/dev/null 2>&1 || true
+    "$ADB" -s "$serial" uninstall "$package" >/dev/null \
+      || { echo "Could not remove stale nVPN package $package" >&2; return 1; }
+  done <<<"$stale"
+  remaining="$("$ADB" -s "$serial" shell pm list packages \
+    | tr -d '\r' \
+    | sed -n 's/^package://p' \
+    | awk -v canonical="$CANONICAL_PACKAGE_NAME" -v legacy="$LEGACY_PACKAGE_NAME" \
+      '$0 == legacy || (index($0, canonical ".") == 1 && $0 != canonical)')"
+  [[ -z "$remaining" ]] \
+    || { echo "Stale parallel nVPN packages remain: $remaining" >&2; return 1; }
+}
+
 vpn_service_running() {
   local services
   services="$("$ADB" -s "$serial" shell dumpsys activity services "$PACKAGE_NAME" 2>/dev/null | tr -d '\r')" || return 1
@@ -360,6 +427,11 @@ android_network_probe_path() {
   printf '%s/mobile-android-network-%s-%s.txt\n' "$RUNTIME_STATE_RESULT_DIR" "$label" "$$"
 }
 
+android_app_network_probe_path() {
+  local label="$1"
+  printf '%s/mobile-android-app-network-%s-%s.json\n' "$RUNTIME_STATE_RESULT_DIR" "$label" "$$"
+}
+
 android_vpn_dns_servers() {
   "$ADB" -s "$serial" shell dumpsys connectivity 2>/dev/null \
     | tr -d '\r' \
@@ -382,6 +454,138 @@ sys.exit(1)
 ' "$PACKAGE_UID"
 }
 
+android_validated_underlying_dns_servers() {
+  "$ADB" -s "$serial" shell dumpsys connectivity 2>/dev/null \
+    | tr -d '\r' \
+    | python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+for block in re.split(r"(?=NetworkAgentInfo\{)", text):
+    if "NOT_VPN" not in block or "VALIDATED" not in block:
+        continue
+    if not re.search(r"(?<![0-9.])0\.0\.0\.0/0(?![0-9])|(?<!\S)::/0", block):
+        continue
+    match = re.search(r"DnsAddresses:\s*\[([^]]*)\]", block)
+    if not match:
+        continue
+    values = sorted(set(re.findall(r"/?([0-9a-fA-F:.]+)", match.group(1))))
+    if values:
+        print("\n".join(values))
+        sys.exit(0)
+sys.exit(1)
+'
+}
+
+android_vpn_has_default_route() {
+  "$ADB" -s "$serial" shell dumpsys connectivity 2>/dev/null \
+    | tr -d '\r' \
+    | python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+owner = sys.argv[1]
+for block in re.split(r"(?=NetworkAgentInfo\{)", text):
+    if "ni{VPN CONNECTED" not in block or f"OwnerUid: {owner}" not in block:
+        continue
+    owned_default = re.search(
+        r"(?<![0-9.])0\.0\.0\.0/0(?![0-9])\s+(?!throw\b|unreachable\b)",
+        block,
+    ) or re.search(
+        r"(?<!\S)::/0\s+(?!throw\b|unreachable\b)",
+        block,
+    )
+    sys.exit(0 if owned_default else 1)
+sys.exit(2)
+' "$PACKAGE_UID"
+}
+
+run_android_app_network_probe() {
+  local label="$1"
+  local host="$2"
+  local url="$3"
+  local expected_ip="$4"
+  local probe_id payload encoded result_path start now validation_error
+  probe_id="$label-$$-$(date +%s%N)"
+  payload="$(
+    python3 - "$probe_id" "$host" "$url" <<'PY'
+import json
+import sys
+
+probe_id, host, url = sys.argv[1:]
+print(json.dumps(
+    {"probeId": probe_id, "host": host, "url": url},
+    separators=(",", ":"),
+))
+PY
+  )"
+  encoded="$(printf '%s' "$payload" | base64_no_wrap)"
+  result_path="$(android_app_network_probe_path "$label")"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR"
+  "$ADB" -s "$serial" shell run-as "$PACKAGE_NAME" \
+    rm -f "files/app-core/$NETWORK_PROBE_RESULT_FILE"
+  start_main_activity \
+    --es "$DEBUG_ACTION_EXTRA" network_probe \
+    --es "$DEBUG_NETWORK_PROBE_BASE64_EXTRA" "$encoded"
+
+  start="$(date +%s)"
+  validation_error=""
+  while true; do
+    if "$ADB" -s "$serial" exec-out run-as "$PACKAGE_NAME" \
+      cat "files/app-core/$NETWORK_PROBE_RESULT_FILE" >"$result_path.tmp" 2>/dev/null \
+      && [[ -s "$result_path.tmp" ]]
+    then
+      if validation_error="$(
+        python3 - "$result_path.tmp" "$probe_id" "$host" "$url" "$expected_ip" <<'PY'
+import json
+import sys
+
+path, probe_id, host, url, expected_ip = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        result = json.load(handle)
+except (OSError, json.JSONDecodeError) as error:
+    print(f"receipt is not complete JSON: {error}")
+    raise SystemExit(1)
+
+errors = []
+for key, expected in (("probeId", probe_id), ("host", host), ("url", url)):
+    if result.get(key) != expected:
+        errors.append(f"{key}={result.get(key)!r} expected={expected!r}")
+addresses = result.get("resolvedAddresses")
+if not isinstance(addresses, list) or not addresses:
+    errors.append(f"resolvedAddresses={addresses!r}")
+elif expected_ip and expected_ip not in addresses:
+    errors.append(f"resolvedAddresses={addresses!r} expected to contain {expected_ip!r}")
+status = result.get("statusCode")
+if not isinstance(status, int) or not 200 <= status < 400:
+    errors.append(f"statusCode={status!r}")
+for key in ("error", "resolveError", "fetchError"):
+    if result.get(key):
+        errors.append(f"{key}={result[key]!r}")
+if errors:
+    print("Android app network probe invalid: " + ", ".join(errors))
+    raise SystemExit(1)
+PY
+      )"
+      then
+        mv "$result_path.tmp" "$result_path"
+        echo "Android app-process $label DNS/HTTPS probe passed: $result_path"
+        return 0
+      fi
+    fi
+    rm -f "$result_path.tmp"
+    now="$(date +%s)"
+    if (( now - start >= RUNTIME_STATE_WAIT_SECS )); then
+      echo "Android app-process $label DNS/HTTPS probe failed: ${validation_error:-receipt missing}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 run_android_direct_network_probe() {
   local label="$1" result_path start now attempt always_on_app lockdown
   [[ -n "$EXIT_PROBE_HOST" ]] || return 0
@@ -390,6 +594,12 @@ run_android_direct_network_probe() {
   if vpn_state_present; then
     echo "Android $label Direct probe failed: VPN state is still present" >&2
     return 1
+  fi
+  if [[ "$label" == "before-connect" ]]; then
+    DIRECT_UNDERLYING_DNS_BASELINE="$(android_validated_underlying_dns_servers)" || {
+      echo "Android before-connect Direct probe could not identify validated device DNS" >&2
+      return 1
+    }
   fi
   always_on_app="$("$ADB" -s "$serial" shell settings get secure always_on_vpn_app 2>/dev/null | tr -d '\r')"
   lockdown="$("$ADB" -s "$serial" shell settings get secure always_on_vpn_lockdown 2>/dev/null | tr -d '\r')"
@@ -407,6 +617,14 @@ run_android_direct_network_probe() {
         "$label" "$attempt" "$(( $(date +%s) - start ))" "$DIRECT_PROBE_HOST"
       "$ADB" -s "$serial" shell ping -c 2 -W 3 "$DIRECT_PROBE_HOST"
     } >>"$result_path" 2>&1 && {
+      if ! run_android_app_network_probe \
+        "$label" \
+        "$DIRECT_PROBE_HOST" \
+        "$DIRECT_PROBE_URL" \
+        ""
+      then
+        return 1
+      fi
       echo "Android $label Direct DNS/Internet probe passed after $(( $(date +%s) - start ))s: $result_path"
       return 0
     }
@@ -421,7 +639,12 @@ run_android_direct_network_probe() {
 
 run_android_exit_network_probe() {
   [[ -n "$EXIT_PROBE_HOST" ]] || return 0
-  local dns_servers result_path resolved_ip
+  local dns_servers result_path resolved_ip secure_dns_before
+  secure_dns_before=""
+  if [[ "$EXIT_DNS_MODE" == "encrypted" ]]; then
+    copy_android_runtime_state
+    secure_dns_before="$(android_runtime_state_number secureDnsSuccesses)"
+  fi
   result_path="$(android_network_probe_path wireguard-exit)"
   mkdir -p "$RUNTIME_STATE_RESULT_DIR"
   if ! dns_servers="$(android_vpn_dns_servers)"; then
@@ -447,7 +670,622 @@ run_android_exit_network_probe() {
     echo "Android WireGuard exit DNS resolved $EXIT_PROBE_HOST to '$resolved_ip', expected $EXIT_PROBE_EXPECTED_IP: $result_path" >&2
     return 1
   fi
+  if [[ "$EXIT_DNS_MODE" == "encrypted" ]]; then
+    wait_for_secure_dns_success_after "$secure_dns_before"
+  fi
   echo "Android WireGuard exit DNS/Internet probe passed: $result_path DNS=$EXPECTED_VPN_DNS answer=$resolved_ip"
+}
+
+wait_for_secure_dns_success_after() {
+  local baseline="$1"
+  local start now current
+  [[ "$baseline" =~ ^[0-9]+$ ]] || {
+    echo "Android encrypted DNS probe has no baseline success counter" >&2
+    return 1
+  }
+  start="$(date +%s)"
+  while true; do
+    if copy_android_runtime_state; then
+      current="$(android_runtime_state_number secureDnsSuccesses 2>/dev/null || true)"
+      if [[ "$current" =~ ^[0-9]+$ ]] && (( current > baseline )); then
+        echo "Android production encrypted-DNS resolver passed: successes=$baseline->$current"
+        return 0
+      fi
+    fi
+    now="$(date +%s)"
+    if (( now - start >= RUNTIME_STATE_WAIT_SECS )); then
+      echo "Android encrypted-DNS resolver did not record a successful authenticated DoH response (baseline=$baseline current=${current:-missing})" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+android_exit_dns_result_path() {
+  printf '%s/%s\n' "$RUNTIME_STATE_RESULT_DIR" "$EXIT_DNS_RESULT_NAME"
+}
+
+android_ui_query() {
+  local selector_type="$1"
+  local selector="$2"
+  local attribute="$3"
+  local remote="/sdcard/nvpn-ui-smoke.xml"
+  local xml
+  xml="$(mktemp)"
+  if ! "$ADB" -s "$serial" shell uiautomator dump "$remote" >/dev/null 2>&1 \
+    || ! "$ADB" -s "$serial" pull "$remote" "$xml" >/dev/null 2>&1
+  then
+    rm -f "$xml"
+    return 1
+  fi
+  local status=0
+  python3 - "$xml" "$selector_type" "$selector" "$attribute" <<'PY' || status="$?"
+import html
+import re
+import sys
+
+path, selector_type, selector, attribute = sys.argv[1:]
+raw = open(path, encoding="utf-8").read()
+for node in re.findall(r"<node [^>]+>", raw):
+    attributes = dict(
+        (name, html.unescape(value))
+        for name, value in re.findall(r'([a-z-]+)="([^"]*)"', node)
+    )
+    if selector_type == "resource":
+        matches = attributes.get("resource-id") == selector
+    elif selector_type == "description":
+        matches = attributes.get("content-desc") == selector
+    else:
+        raise SystemExit(f"unknown Android UI selector type: {selector_type}")
+    if not matches:
+        continue
+    if attribute in ("center", "safe-center"):
+        bounds = re.fullmatch(
+            r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+            attributes.get("bounds", ""),
+        )
+        if not bounds:
+            continue
+        left, top, right, bottom = map(int, bounds.groups())
+        if right <= left or bottom <= top:
+            continue
+        if attribute == "safe-center":
+            screen = re.search(
+                r'<node [^>]*bounds="\[0,0\]\[(\d+),(\d+)\]"',
+                raw,
+            )
+            screen_bottom = int(screen.group(2)) if screen else 2400
+            if top < 200 or bottom > screen_bottom - 300:
+                continue
+        print((left + right) // 2, (top + bottom) // 2)
+    else:
+        print(attributes.get(attribute, ""))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  rm -f "$xml"
+  return "$status"
+}
+
+android_ui_swipe() {
+  local direction="$1"
+  local size width height start_y end_y
+  size="$("$ADB" -s "$serial" shell wm size \
+    | tr -d '\r' \
+    | awk -F': ' '/Physical size:/ { print $2; exit }')"
+  width="${size%x*}"
+  height="${size#*x}"
+  if [[ ! "$width" =~ ^[0-9]+$ || ! "$height" =~ ^[0-9]+$ ]]; then
+    width=1080
+    height=2400
+  fi
+  if [[ "$direction" == "up" ]]; then
+    start_y="$((height * 4 / 5))"
+    end_y="$((height / 3))"
+  else
+    start_y="$((height / 3))"
+    end_y="$((height * 4 / 5))"
+  fi
+  "$ADB" -s "$serial" shell input swipe \
+    "$((width / 2))" "$start_y" "$((width / 2))" "$end_y" 250
+}
+
+android_ui_reset_scroll() {
+  local ignored
+  for ignored in 1 2 3 4 5 6; do
+    android_ui_swipe down >/dev/null
+  done
+}
+
+android_ui_scroll_to() {
+  local selector_type="$1"
+  local selector="$2"
+  local ignored
+  for ignored in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if android_ui_query "$selector_type" "$selector" safe-center >/dev/null; then
+      return 0
+    fi
+    android_ui_swipe up >/dev/null
+  done
+  android_ui_query "$selector_type" "$selector" safe-center >/dev/null
+}
+
+tap_android_ui() {
+  local selector_type="$1"
+  local selector="$2"
+  local point
+  point="$(android_ui_query "$selector_type" "$selector" center)" || return 1
+  # shellcheck disable=SC2086
+  "$ADB" -s "$serial" shell input tap $point
+}
+
+wait_for_android_ui() {
+  local selector_type="$1"
+  local selector="$2"
+  local deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if android_ui_query "$selector_type" "$selector" center >/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+replace_android_ui_text() {
+  local selector="$1"
+  local value="$2"
+  android_ui_scroll_to resource "$selector" || return 1
+  tap_android_ui resource "$selector" || return 1
+  local deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" == "true" ]]; then
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" != "true" ]]; then
+    echo "Android shipped text field did not gain focus: $selector" >&2
+    return 1
+  fi
+  "$ADB" -s "$serial" shell input keycombination -t 40 KEYCODE_CTRL_LEFT KEYCODE_A
+  "$ADB" -s "$serial" shell input keyevent KEYCODE_DEL
+  if [[ -n "$value" ]]; then
+    "$ADB" -s "$serial" shell input text "${value// /%s}"
+  fi
+  "$ADB" -s "$serial" shell input keyevent KEYCODE_BACK
+  sleep 0.25
+  local actual
+  actual="$(android_ui_query resource "$selector" text)" || return 1
+  if [[ "$actual" != "$value" ]]; then
+    echo "Android shipped text field entry mismatch: $selector" >&2
+    return 1
+  fi
+}
+
+assert_android_ui_validation() {
+  local expected="$1"
+  local description="Exit DNS validation error: $expected"
+  android_ui_scroll_to description "$description" || {
+    echo "Android shipped Exit DNS UI did not show validation: $expected" >&2
+    return 1
+  }
+  local enabled
+  android_ui_scroll_to resource exit-dns-save || return 1
+  enabled="$(android_ui_query resource exit-dns-save enabled)" || return 1
+  if [[ "$enabled" != "false" ]]; then
+    echo "Android shipped Exit DNS Save remained enabled for: $expected" >&2
+    return 1
+  fi
+}
+
+assert_android_ui_save_enabled() {
+  android_ui_scroll_to resource exit-dns-save || return 1
+  local enabled
+  enabled="$(android_ui_query resource exit-dns-save enabled)" || return 1
+  if [[ "$enabled" != "true" ]]; then
+    echo "Android shipped Exit DNS Save was disabled for valid settings" >&2
+    return 1
+  fi
+}
+
+android_exit_dns_persisted() {
+  "$ADB" -s "$serial" exec-out run-as "$PACKAGE_NAME" \
+    cat files/app-core/config.toml 2>/dev/null \
+    | python3 -c '
+import json
+import re
+import sys
+
+mode, provider, custom_url, bootstrap, through = sys.argv[1:]
+text = sys.stdin.read()
+
+
+def section(name):
+    match = re.search(
+        rf"(?ms)^\[{re.escape(name)}\]\s*$\n(.*?)(?=^\[|\Z)",
+        text,
+    )
+    return match.group(1) if match else ""
+
+
+def scalar(body, key, default=""):
+    match = re.search(
+        rf"(?m)^\s*{re.escape(key)}\s*=\s*\"((?:\\.|[^\"])*)\"\s*$",
+        body,
+    )
+    return json.loads(f"\"{match.group(1)}\"") if match else default
+
+
+def boolean(body, key, default=False):
+    match = re.search(
+        rf"(?m)^\s*{re.escape(key)}\s*=\s*(true|false)\s*$",
+        body,
+    )
+    return (match.group(1) == "true") if match else default
+
+
+def array(body, key):
+    match = re.search(
+        rf"(?ms)^\s*{re.escape(key)}\s*=\s*\[(.*?)\]\s*$",
+        body,
+    )
+    if not match:
+        return []
+    return [
+        json.loads(f"\"{value}\"")
+        for value in re.findall(r"\"((?:\\.|[^\"])*)\"", match.group(1))
+    ]
+
+
+top_level = re.split(r"(?m)^\[", text, maxsplit=1)[0]
+dns = section("exit_dns")
+if scalar(dns, "mode", "automatic") != mode:
+    raise SystemExit(1)
+if scalar(top_level, "internet_source") != "wire_guard":
+    raise SystemExit(1)
+if not boolean(section("wireguard_exit"), "enabled"):
+    raise SystemExit(1)
+if mode == "encrypted":
+    if scalar(dns, "doh_provider", "cloudflare") != provider:
+        raise SystemExit(1)
+    if provider == "custom":
+        expected_bootstrap = [value.strip() for value in bootstrap.split(",") if value.strip()]
+        if scalar(dns, "custom_doh_url") != custom_url:
+            raise SystemExit(1)
+        if array(dns, "custom_doh_bootstrap_ips") != expected_bootstrap:
+            raise SystemExit(1)
+if mode == "through_exit":
+    expected_servers = [value.strip() for value in through.split(",") if value.strip()]
+    if array(dns, "through_exit_servers") != expected_servers:
+        raise SystemExit(1)
+' "$EXIT_DNS_MODE" "$EXIT_DNS_DOH_PROVIDER" \
+      "$EXIT_DNS_CUSTOM_DOH_URL" "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
+      "$EXIT_DNS_THROUGH_EXIT_SERVERS"
+}
+
+wait_for_android_exit_dns_persistence() {
+  local deadline=$((SECONDS + RUNTIME_STATE_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if android_exit_dns_persisted; then
+      echo "Android shipped Exit DNS UI persistence passed: mode=$EXIT_DNS_MODE provider=$EXIT_DNS_DOH_PROVIDER"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Android shipped Exit DNS UI did not persist mode=$EXIT_DNS_MODE provider=$EXIT_DNS_DOH_PROVIDER" >&2
+  return 1
+}
+
+configure_android_exit_dns_ui() {
+  start_main_activity
+  wait_for_android_ui description "Internet tab" || {
+    echo "Android shipped Internet tab was unavailable" >&2
+    return 1
+  }
+  tap_android_ui description "Internet tab" || return 1
+  sleep 0.5
+  android_ui_reset_scroll
+
+  android_ui_scroll_to resource internet-source-picker || return 1
+  tap_android_ui resource internet-source-picker || return 1
+  wait_for_android_ui description "Internet source WireGuard VPN" || return 1
+  tap_android_ui description "Internet source WireGuard VPN" || return 1
+  sleep 0.5
+
+  local mode_description
+  case "$EXIT_DNS_MODE" in
+    automatic) mode_description="Automatic Exit DNS option" ;;
+    encrypted) mode_description="Encrypted Exit DNS option" ;;
+    through_exit) mode_description="Through exit Exit DNS option" ;;
+    *)
+      echo "Unknown Android Exit DNS UI mode: $EXIT_DNS_MODE" >&2
+      return 1
+      ;;
+  esac
+  android_ui_scroll_to description "$mode_description" || return 1
+  tap_android_ui description "$mode_description" || return 1
+  sleep 0.25
+
+  if [[ "$EXIT_DNS_MODE" == "encrypted" ]]; then
+    local provider_description
+    case "$EXIT_DNS_DOH_PROVIDER" in
+      cloudflare) provider_description="Cloudflare Exit DNS option" ;;
+      quad9) provider_description="Quad9 Exit DNS option" ;;
+      custom) provider_description="Custom Exit DNS option" ;;
+      *)
+        echo "Unknown Android Exit DNS UI provider: $EXIT_DNS_DOH_PROVIDER" >&2
+        return 1
+        ;;
+    esac
+    android_ui_scroll_to description "$provider_description" || return 1
+    tap_android_ui description "$provider_description" || return 1
+    sleep 0.25
+
+    if [[ "$EXIT_DNS_DOH_PROVIDER" == "custom" ]]; then
+      replace_android_ui_text exit-dns-custom-url ""
+      replace_android_ui_text exit-dns-custom-bootstrap-ips ""
+      assert_android_ui_validation "Enter an HTTPS DoH URL." || return 1
+
+      replace_android_ui_text \
+        exit-dns-custom-url \
+        "http://resolver.invalid/dns-query"
+      assert_android_ui_validation "DoH URL must use HTTPS." || return 1
+
+      replace_android_ui_text exit-dns-custom-url "$EXIT_DNS_CUSTOM_DOH_URL"
+      assert_android_ui_validation "Enter at least one bootstrap IP." || return 1
+      replace_android_ui_text \
+        exit-dns-custom-bootstrap-ips \
+        "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS"
+    fi
+  elif [[ "$EXIT_DNS_MODE" == "through_exit" ]]; then
+    replace_android_ui_text exit-dns-through-exit-servers ""
+    assert_android_ui_validation "Enter at least one DNS server IP." || return 1
+    replace_android_ui_text \
+      exit-dns-through-exit-servers \
+      "$EXIT_DNS_THROUGH_EXIT_SERVERS"
+  fi
+
+  assert_android_ui_save_enabled || return 1
+  tap_android_ui resource exit-dns-save || return 1
+  wait_for_android_exit_dns_persistence
+}
+
+android_direct_source_persisted() {
+  "$ADB" -s "$serial" exec-out run-as "$PACKAGE_NAME" \
+    cat files/app-core/config.toml 2>/dev/null \
+    | python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+top_level = re.split(r"(?m)^\[", text, maxsplit=1)[0]
+source_match = re.search(
+    r"(?m)^\s*internet_source\s*=\s*\"([^\"]+)\"\s*$",
+    top_level,
+)
+source = source_match.group(1) if source_match else "direct"
+wireguard_match = re.search(
+    r"(?ms)^\[wireguard_exit\]\s*$\n(.*?)(?=^\[|\Z)",
+    text,
+)
+wireguard_enabled = bool(
+    wireguard_match
+    and re.search(
+        r"(?m)^\s*enabled\s*=\s*true\s*$",
+        wireguard_match.group(1),
+    )
+)
+sys.exit(
+    0
+    if source in {"direct", "device"} and not wireguard_enabled
+    else 1
+)
+'
+}
+
+select_android_direct_ui() {
+  start_main_activity
+  wait_for_android_ui description "Internet tab" || {
+    echo "Android shipped Internet tab was unavailable for Direct transition" >&2
+    return 1
+  }
+  tap_android_ui description "Internet tab" || return 1
+  sleep 0.5
+  android_ui_reset_scroll
+  android_ui_scroll_to resource internet-source-picker || return 1
+  tap_android_ui resource internet-source-picker || return 1
+  wait_for_android_ui description "Internet source This device" || return 1
+  tap_android_ui description "Internet source This device" || return 1
+
+  local deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if android_direct_source_persisted; then
+      echo "Android shipped UI selected and persisted This device"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Android shipped UI did not persist the Direct Internet source" >&2
+  return 1
+}
+
+configure_android_exit_dns_debug() {
+  local probe_id="$1"
+  local internet_source="${2:-wireguard}"
+  local wireguard_enabled="${3:-true}"
+  local patch encoded result_path start now validation_error
+  patch="$(
+    python3 - \
+      "$probe_id" \
+      "$EXIT_DNS_MODE" \
+      "$EXIT_DNS_DOH_PROVIDER" \
+      "$EXIT_DNS_CUSTOM_DOH_URL" \
+      "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
+      "$EXIT_DNS_THROUGH_EXIT_SERVERS" \
+      "$internet_source" \
+      "$wireguard_enabled" <<'PY'
+import json
+import sys
+
+(
+    probe_id,
+    mode,
+    provider,
+    custom_url,
+    bootstrap_ips,
+    through_exit_servers,
+    internet_source,
+    wireguard_enabled,
+) = sys.argv[1:]
+print(json.dumps({
+    "probeId": probe_id,
+    "exitDnsMode": mode,
+    "exitDnsDohProvider": provider,
+    "exitDnsCustomDohUrl": custom_url,
+    "exitDnsCustomDohBootstrapIps": bootstrap_ips,
+    "exitDnsThroughExitServers": through_exit_servers,
+    "internetSource": internet_source,
+    "wireguardExitEnabled": wireguard_enabled == "true",
+    "exitNode": "",
+    "exitNodeLeakProtection": False,
+}, separators=(",", ":")))
+PY
+  )"
+  encoded="$(printf '%s' "$patch" | base64_no_wrap)"
+  result_path="$(android_exit_dns_result_path)"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR"
+  rm -f "$result_path"
+  "$ADB" -s "$serial" shell run-as "$PACKAGE_NAME" \
+    rm -f "files/app-core/$EXIT_DNS_RESULT_FILE"
+  start_main_activity \
+    --es "$DEBUG_ACTION_EXTRA" set_exit_dns \
+    --es "$DEBUG_EXIT_DNS_PATCH_BASE64_EXTRA" "$encoded"
+  start="$(date +%s)"
+  validation_error=""
+  while true; do
+    if "$ADB" -s "$serial" exec-out run-as "$PACKAGE_NAME" \
+      cat "files/app-core/$EXIT_DNS_RESULT_FILE" >"$result_path.tmp" 2>/dev/null \
+      && [[ -s "$result_path.tmp" ]]
+    then
+      if validation_error="$(
+        python3 - \
+          "$result_path.tmp" \
+          "$probe_id" \
+          "$EXIT_DNS_MODE" \
+          "$EXIT_DNS_DOH_PROVIDER" \
+          "$EXIT_DNS_CUSTOM_DOH_URL" \
+          "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
+          "$EXIT_DNS_THROUGH_EXIT_SERVERS" \
+          "$internet_source" \
+          "$wireguard_enabled" <<'PY'
+import json
+import sys
+
+path, probe_id, mode, provider, custom_url, bootstrap_ips, through_servers, source, wg = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as fh:
+        state = json.load(fh)
+except (OSError, json.JSONDecodeError) as error:
+    print(f"receipt is not complete JSON: {error}")
+    raise SystemExit(1)
+expected = {
+    "probeId": probe_id,
+    "exitDnsMode": mode,
+    "exitDnsDohProvider": provider,
+    "exitDnsCustomDohUrl": custom_url,
+    "exitDnsCustomDohBootstrapIps": bootstrap_ips,
+    "exitDnsThroughExitServers": through_servers,
+    "internetSource": source,
+    "wireguardExitEnabled": wg == "true",
+}
+errors = [
+    f"{key}={state.get(key)!r} expected={value!r}"
+    for key, value in expected.items()
+    if state.get(key) != value
+]
+if state.get("error"):
+    errors.append(f"error={state['error']!r}")
+if errors:
+    print("Android exit DNS settings receipt invalid: " + ", ".join(errors))
+    sys.exit(1)
+PY
+      )"
+      then
+        mv "$result_path.tmp" "$result_path"
+        echo "Android exit DNS production settings action passed: $result_path"
+        return 0
+      fi
+    fi
+    rm -f "$result_path.tmp"
+    now="$(date +%s)"
+    if (( now - start >= RUNTIME_STATE_WAIT_SECS )); then
+      echo "Android exit DNS settings action did not produce a matching receipt: ${validation_error:-receipt missing}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+run_android_direct_while_tunnel_probe() {
+  local result_path dns_servers underlying_dns
+  result_path="$(android_network_probe_path direct-while-tunnel-connected)"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR"
+  if ! vpn_state_present || ! vpn_active; then
+    echo "Android connected Direct probe failed: VPN service/network is not active" >&2
+    return 1
+  fi
+  if android_vpn_has_default_route; then
+    echo "Android connected Direct probe failed: active VPN still owns the default route" >&2
+    return 1
+  else
+    local route_status="$?"
+    if [[ "$route_status" -ne 1 ]]; then
+      echo "Android connected Direct probe failed: active VPN routes were unavailable" >&2
+      return 1
+    fi
+  fi
+  if ! dns_servers="$(android_vpn_dns_servers)"; then
+    echo "Android connected Direct probe failed: active VPN DNS state is unavailable" >&2
+    return 1
+  fi
+  if [[ -n "$dns_servers" ]]; then
+    echo "Android connected Direct probe failed: VPN still owns DNS: $dns_servers" >&2
+    return 1
+  fi
+  if ! underlying_dns="$(android_validated_underlying_dns_servers)"; then
+    echo "Android connected Direct probe failed: validated device DNS is unavailable" >&2
+    return 1
+  fi
+  if [[ -n "$DIRECT_UNDERLYING_DNS_BASELINE" \
+    && "$underlying_dns" != "$DIRECT_UNDERLYING_DNS_BASELINE" ]]
+  then
+    echo "Android connected Direct probe failed: device DNS changed during the transition" >&2
+    return 1
+  fi
+  {
+    printf 'vpnConnected=true\n'
+    printf 'vpnDnsServers=\n'
+    printf 'deviceDnsServers=%s\n' "$(tr '\n' ',' <<<"$underlying_dns" | sed 's/,$//')"
+    printf 'publicHost=%s\n' "$DIRECT_PROBE_HOST"
+    "$ADB" -s "$serial" shell ping -c 3 -W 3 "$DIRECT_PROBE_HOST"
+  } >"$result_path" 2>&1 || {
+    echo "Android connected Direct DNS/Internet probe failed: $result_path" >&2
+    return 1
+  }
+  if ! vpn_active; then
+    echo "Android connected Direct probe failed: VPN stopped during the probe" >&2
+    return 1
+  fi
+  if ! run_android_app_network_probe \
+    direct-while-tunnel-connected \
+    "$DIRECT_PROBE_HOST" \
+    "$DIRECT_PROBE_URL" \
+    ""
+  then
+    return 1
+  fi
+  echo "Android native device DNS/Internet passed while the split VPN remained connected: $result_path"
 }
 
 copy_android_runtime_state() {
@@ -865,7 +1703,7 @@ write_android_tun_packet_probe_summary() {
   local poll_interval_ms="${17}"
   local summary_path
   summary_path="$(android_tun_packet_probe_summary_path)"
-  python3 - \
+  python3 "$ROOT/scripts/write-mobile-android-tun-summary.py" \
     "$summary_path" \
     "$TUN_PACKET_PROBE_TARGET" \
     "$TUN_PACKET_PROBE_TIMEOUT_SECS" \
@@ -891,177 +1729,7 @@ write_android_tun_packet_probe_summary() {
     "$(android_ping_probe_summary_path)" \
     "$(android_vpn_link_stats_path)" \
     "$(android_vpn_link_stats_summary_path)" \
-    "$(android_build_metadata_path)" <<'PY'
-import json
-import sys
-
-(
-    summary_path,
-    target,
-    ping_timeout_secs,
-    baseline,
-    current,
-    required_increase,
-    baseline_bytes,
-    current_bytes,
-    baseline_written,
-    current_written,
-    baseline_bytes_written,
-    current_bytes_written,
-    baseline_dropped,
-    current_dropped,
-    ping_path,
-    ping_status,
-    first_observed_ms,
-    elapsed_ms,
-    polls,
-    poll_interval_ms,
-    require_reply,
-    runtime_state_path,
-    ping_summary_path,
-    vpn_link_stats_path,
-    vpn_link_stats_summary_path,
-    build_metadata_path,
-) = sys.argv[1:]
-
-def number(value):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-baseline = number(baseline)
-current = number(current)
-required_increase = number(required_increase)
-baseline_bytes = number(baseline_bytes)
-current_bytes = number(current_bytes)
-baseline_written = number(baseline_written)
-current_written = number(current_written)
-baseline_bytes_written = number(baseline_bytes_written)
-current_bytes_written = number(current_bytes_written)
-baseline_dropped = number(baseline_dropped)
-current_dropped = number(current_dropped)
-ping_status = number(ping_status)
-ping_timeout_secs = number(ping_timeout_secs)
-first_observed_ms = number(first_observed_ms)
-elapsed_ms = number(elapsed_ms)
-polls = number(polls)
-poll_interval_ms = number(poll_interval_ms)
-require_reply = str(require_reply).strip().lower() in {"1", "true", "yes", "on"}
-
-observed = None
-if baseline is not None and current is not None:
-    observed = max(current - baseline, 0)
-
-missing = None
-if required_increase is not None and observed is not None:
-    missing = max(required_increase - observed, 0)
-
-observed_pct = None
-packet_loss_pct = None
-if required_increase and required_increase > 0:
-    if observed is not None:
-        observed_pct = round(observed * 100.0 / required_increase, 3)
-    if missing is not None:
-        packet_loss_pct = round(missing * 100.0 / required_increase, 3)
-
-bytes_delta = None
-if baseline_bytes is not None and current_bytes is not None:
-    bytes_delta = current_bytes - baseline_bytes
-
-written_delta = None
-if baseline_written is not None and current_written is not None:
-    written_delta = current_written - baseline_written
-
-bytes_written_delta = None
-if baseline_bytes_written is not None and current_bytes_written is not None:
-    bytes_written_delta = current_bytes_written - baseline_bytes_written
-
-dropped_delta = None
-if baseline_dropped is not None and current_dropped is not None:
-    dropped_delta = current_dropped - baseline_dropped
-
-ping_received = None
-try:
-    with open(ping_summary_path, encoding="utf-8") as fh:
-        ping_summary = json.load(fh)
-    value = ping_summary.get("received")
-    if isinstance(value, int):
-        ping_received = value
-except (OSError, json.JSONDecodeError):
-    pass
-
-reply_observed = (
-    (ping_received is None or ping_received > 0)
-    and written_delta is not None
-    and written_delta > 0
-    and bytes_written_delta is not None
-    and bytes_written_delta > 0
-    and (dropped_delta is None or dropped_delta == 0)
-)
-
-summary = {
-    "target": target,
-    "pingTimeoutSecs": ping_timeout_secs,
-    "pingExitStatus": ping_status,
-    "pingReceived": ping_received,
-    "expected": required_increase,
-    "observed": observed,
-    "missing": missing,
-    "observedPct": observed_pct,
-    "packetLossPct": packet_loss_pct,
-    "baselineRead": baseline,
-    "finalRead": current,
-    "baselineBytesRead": baseline_bytes,
-    "finalBytesRead": current_bytes,
-    "observedBytesRead": bytes_delta,
-    "baselineWritten": baseline_written,
-    "finalWritten": current_written,
-    "observedWritten": written_delta,
-    "baselineBytesWritten": baseline_bytes_written,
-    "finalBytesWritten": current_bytes_written,
-    "observedBytesWritten": bytes_written_delta,
-    "writtenIncreased": written_delta is not None and written_delta > 0,
-    "bytesWrittenIncreased": bytes_written_delta is not None and bytes_written_delta > 0,
-    "baselineDropped": baseline_dropped,
-    "finalDropped": current_dropped,
-    "droppedDelta": dropped_delta,
-    "firstObservedMs": first_observed_ms,
-    "elapsedMs": elapsed_ms,
-    "polls": polls,
-    "pollIntervalMs": poll_interval_ms,
-    "readIncreased": observed is not None
-    and required_increase is not None
-    and observed >= required_increase,
-    "bytesReadIncreased": bytes_delta is not None and bytes_delta > 0,
-    "droppedIncreased": dropped_delta is not None and dropped_delta > 0,
-    "replyRequired": require_reply,
-    "replyObserved": reply_observed,
-    "rawPingOutput": ping_path,
-    "pingSummaryOutput": ping_summary_path,
-    "vpnLinkStatsOutput": vpn_link_stats_path,
-    "vpnLinkStatsSummaryOutput": vpn_link_stats_summary_path,
-    "runtimeStateOutput": runtime_state_path,
-    "buildMetadataOutput": build_metadata_path,
-}
-try:
-    with open(build_metadata_path, encoding="utf-8") as fh:
-        build_metadata = json.load(fh)
-except (OSError, json.JSONDecodeError):
-    build_metadata = {}
-for key in (
-    "appPackageName",
-    "appVersionName",
-    "appVersionCode",
-    "appBuildGitSha",
-    "appBuildTimestampUtc",
-):
-    if key in build_metadata:
-        summary[key] = build_metadata[key]
-with open(summary_path, "w", encoding="utf-8") as fh:
-    json.dump(summary, fh, sort_keys=True, indent=2)
-    fh.write("\n")
-PY
+    "$(android_build_metadata_path)"
   printf '%s\n' "$summary_path"
 }
 
@@ -1271,6 +1939,14 @@ cleanup_android_vpn_on_exit() {
       fi
     fi
   fi
+  if [[
+    "$PACKAGE_NAME" != "$CANONICAL_PACKAGE_NAME" &&
+    "${NVPN_ANDROID_KEEP_TEST_PACKAGE:-0}" != "1" &&
+    -n "${ADB:-}" &&
+    -n "$serial"
+  ]]; then
+    "$ADB" -s "$serial" uninstall "$PACKAGE_NAME" >/dev/null 2>&1 || true
+  fi
   exit "$status"
 }
 
@@ -1385,6 +2061,17 @@ android_app_pid() {
     | awk '{ print $1 }'
 }
 
+assert_single_android_app_process() {
+  local pids count
+  pids="$("$ADB" -s "$serial" shell pidof "$PACKAGE_NAME" 2>/dev/null \
+    | tr -d '\r' || true)"
+  count="$(awk '{ print NF }' <<<"$pids")"
+  if [[ "$count" != "1" ]]; then
+    echo "Android smoke requires exactly one canonical app process; found $count." >&2
+    return 1
+  fi
+}
+
 android_activity_resumed() {
   "$ADB" -s "$serial" shell dumpsys activity activities 2>/dev/null \
     | tr -d '\r' \
@@ -1445,6 +2132,14 @@ seed_debug_config() {
       --es "$DEBUG_WIREGUARD_CONFIG_BASE64_EXTRA" "$encoded"
     sleep "$DEBUG_SEED_WAIT_SECS"
   fi
+
+  if [[ -n "$EXIT_DNS_MODE" ]]; then
+    if truthy "$EXIT_DNS_USE_SHIPPED_UI"; then
+      configure_android_exit_dns_ui
+    else
+      configure_android_exit_dns_debug "dns-before-connect-$$-$(date +%s%N)"
+    fi
+  fi
 }
 
 dump_vpn_diagnostics() {
@@ -1485,7 +2180,13 @@ if [[ -z "$serial" ]]; then
 fi
 
 "$ADB" -s "$serial" wait-for-device
-"$ADB" -s "$serial" install -r "$APK_PATH"
+remove_stale_nvpn_packages
+if [[ "$install" -eq 1 ]]; then
+  if "$ADB" -s "$serial" shell pm path "$CANONICAL_PACKAGE_NAME" >/dev/null 2>&1; then
+    "$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE_NAME" >/dev/null
+  fi
+  "$ADB" -s "$serial" install -r "$APK_PATH"
+fi
 PACKAGE_UID="$(resolve_package_uid "$ADB" "$serial")"
 if [[ -z "$PACKAGE_UID" ]]; then
   echo "Could not resolve Android uid for installed package $PACKAGE_NAME" >&2
@@ -1503,7 +2204,9 @@ fi
 start_main_activity
 "$ADB" -s "$serial" shell pm path "$PACKAGE_NAME" >/dev/null
 wait_for_android_build_metadata
+assert_single_android_app_process
 run_android_activity_lifecycle_gate
+assert_single_android_app_process
 
 if [[ "$vpn_cycle" -eq 0 ]]; then
   run_android_idle_cpu_gate "Android foreground app"
@@ -1530,6 +2233,7 @@ if [[ "$vpn_cycle" -eq 1 ]]; then
     echo "Android smoke failed: VPN service and network did not become active after debug connect." >&2
     exit 1
   fi
+  assert_single_android_app_process
   if ! wait_for_android_runtime_state; then
     dump_vpn_diagnostics
     echo "Android smoke failed: Rust mobile runtime state did not become fresh after debug connect." >&2
@@ -1545,11 +2249,29 @@ if [[ "$vpn_cycle" -eq 1 ]]; then
     dump_vpn_diagnostics
     exit 1
   fi
+  if truthy "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
+    select_android_direct_ui
+    if ! wait_until "$VPN_START_WAIT_SECS" vpn_active; then
+      dump_vpn_diagnostics
+      echo "Android smoke failed: VPN service/network did not remain active after selecting Direct." >&2
+      exit 1
+    fi
+    if ! wait_for_android_runtime_state; then
+      dump_vpn_diagnostics
+      echo "Android smoke failed: runtime did not remain active after selecting Direct." >&2
+      exit 1
+    fi
+    if ! run_android_direct_while_tunnel_probe; then
+      dump_vpn_diagnostics
+      exit 1
+    fi
+  fi
   "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME
   run_android_idle_cpu_gate "Android background active VPN"
   if ! cleanup_android_vpn_after_pass; then
     exit 1
   fi
+  assert_single_android_app_process
   if ! run_android_direct_network_probe after-disconnect; then
     exit 1
   fi

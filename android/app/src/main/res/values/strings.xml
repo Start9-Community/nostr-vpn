@@ -2,4 +2,6 @@
     <string name="app_name">Nostr VPN</string>
     <string name="vpn_notification_connected">Private network connected</string>
     <string name="vpn_notification_disconnect">Disconnect</string>
+    <string name="vpn_always_on_split_title">Always-on VPN needs an Internet exit</string>
+    <string name="vpn_always_on_split_message">Turn off Always-on VPN or select an Internet exit before connecting.</string>
 </resources>

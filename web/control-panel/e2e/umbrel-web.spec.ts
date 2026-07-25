@@ -21,6 +21,7 @@ type NetworkView = {
 
 type UiState = {
   platform: string;
+  ownNpub: string;
   daemonRunning: boolean;
   vpnEnabled: boolean;
   vpnActive: boolean;
@@ -434,6 +435,78 @@ test('API supports the Umbrel web config action surface', async ({ request }) =>
     networkId: workNetwork.id,
   });
   expect(state.networks.some((network) => network.id === workNetwork.id)).toBeFalsy();
+});
+
+test('manual join admin and joiner actions persist through the shipped web UI', async ({
+  page,
+  request,
+}) => {
+  const peerNpub = process.env.NVPN_UMBREL_WEB_PEER_NPUB;
+  test.skip(!peerNpub, 'NVPN_UMBREL_WEB_PEER_NPUB is required for manual join');
+
+  const initialState = await postJson<UiState>(request, '/api/tick');
+  const originalNetwork = activeNetwork(initialState);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Add Device' }).click();
+  const adminForm = page.locator('form.modal-section').filter({
+    has: page.getByRole('heading', { name: 'Add by Device ID' }),
+  });
+  await adminForm.getByLabel('Device ID').fill(peerNpub!);
+  await adminForm.getByLabel('Name').fill('Manual web joiner');
+  await adminForm.getByRole('button', { name: 'Add', exact: true }).click();
+
+  await expect
+    .poll(async () => {
+      const state = await postJson<UiState>(request, '/api/tick');
+      return byName(state, originalNetwork.name).participants.some(
+        (participant) =>
+          participant.npub === peerNpub &&
+          participant.magicDnsAlias === 'manual-web-joiner',
+      );
+    })
+    .toBe(true);
+
+  await postJson<UiState>(request, '/api/remove_participant', {
+    networkId: originalNetwork.id,
+    npub: peerNpub,
+  });
+
+  const manualNetworkId = 'a1b2c3d4e5f60708';
+  await page.getByRole('button', { name: 'Add Network' }).click();
+  await page.getByRole('button', { name: 'Join Network', exact: true }).click();
+  const joinerForm = page.locator('form.modal-section').filter({
+    has: page.getByRole('heading', { name: 'Manual join' }),
+  });
+  await joinerForm.getByLabel('Admin Device ID').fill(peerNpub!);
+  await joinerForm.getByLabel('Network ID').fill('a1b2-c3d4-e5f6-0708');
+  await joinerForm.getByRole('button', { name: 'Add manually' }).click();
+
+  let manualNetwork: NetworkView | undefined;
+  await expect
+    .poll(async () => {
+      const state = await postJson<UiState>(request, '/api/tick');
+      manualNetwork = state.networks.find(
+        (network) => network.networkId === manualNetworkId,
+      );
+      return {
+        enabled: manualNetwork?.enabled ?? false,
+        adminPresent:
+          manualNetwork?.participants.some(
+            (participant) => participant.npub === peerNpub && participant.isAdmin,
+          ) ?? false,
+      };
+    })
+    .toEqual({ enabled: true, adminPresent: true });
+
+  expect(manualNetwork, 'manual network should have persisted').toBeTruthy();
+  await postJson<UiState>(request, '/api/set_network_enabled', {
+    networkId: originalNetwork.id,
+    enabled: true,
+  });
+  await postJson<UiState>(request, '/api/remove_network', {
+    networkId: manualNetwork!.id,
+  });
 });
 
 test('VPN switch starts the Umbrel daemon without tunnel setup errors', async ({ page, request }) => {

@@ -103,7 +103,7 @@
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupChoices, Converter={StaticResource BoolToVisibility}}">
               <StackPanel>
                 <Button Content="Create Network" Command="{Binding ShowCreateNetworkSetupCommand}" Margin="0,0,0,8" />
-                <Button Content="Join Network" Command="{Binding ShowJoinNetworkSetupCommand}" />
+                <Button Content="Join Network" Command="{Binding ShowJoinNetworkSetupCommand}" AutomationProperties.AutomationId="ManualJoinChooseJoin" />
               </StackPanel>
             </Border>
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupCreate, Converter={StaticResource BoolToVisibility}}">
@@ -128,14 +128,14 @@
                   <controls:QrCodeView Width="220" Height="220" Matrix="{Binding JoinRequestQr}" />
                 </Viewbox>
                 <Button Content="Copy Request" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding JoinRequestQrCodeOrLink}" HorizontalAlignment="Center" Margin="0,8,0,10" Visibility="{Binding ShowJoinRequestQr, Converter={StaticResource BoolToVisibility}}" />
-                <Expander Header="Manual join" Margin="0,8,0,0">
+                <Expander Header="Manual join" Margin="0,8,0,0" AutomationProperties.AutomationId="ManualJoinExpander">
                   <StackPanel Margin="0,8,0,0">
                     <TextBlock Text="Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
                     <Button Content="Copy my Device ID" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding State.OwnNpub}" HorizontalAlignment="Left" Margin="0,0,0,8" />
-                    <TextBox Text="{Binding ManualJoinAdminId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Admin Device ID" Margin="0,0,0,6" />
+                    <TextBox Text="{Binding ManualJoinAdminId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Admin Device ID" Margin="0,0,0,6" AutomationProperties.AutomationId="ManualJoinAdminId" />
                     <TextBlock Text="Not a valid device ID" Foreground="{StaticResource Danger}" FontSize="11" Visibility="{Binding ManualJoinAdminErrorVisibility}" />
-                    <TextBox Text="{Binding ManualJoinMeshId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Network ID" Margin="0,6,0,8" />
-                    <Button Content="Add manually" Command="{Binding ManualAddNetworkCommand}" HorizontalAlignment="Left" />
+                    <TextBox Text="{Binding ManualJoinMeshId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Network ID" Margin="0,6,0,8" AutomationProperties.AutomationId="ManualJoinNetworkId" />
+                    <Button Content="Add manually" Command="{Binding ManualAddNetworkCommand}" HorizontalAlignment="Left" AutomationProperties.AutomationId="ManualJoinSubmit" />
                   </StackPanel>
                 </Expander>
               </StackPanel>
@@ -162,7 +162,7 @@
               <Border Grid.Column="0" Style="{StaticResource Card}">
                 <StackPanel>
                   <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Right" Command="{Binding ShowAddDeviceCommand}" Content="+ Add device" Visibility="{Binding ActiveNetwork.LocalIsAdmin, Converter={StaticResource BoolToVisibility}}" />
+                    <Button DockPanel.Dock="Right" Command="{Binding ShowAddDeviceCommand}" Content="+ Add device" Visibility="{Binding ActiveNetwork.LocalIsAdmin, Converter={StaticResource BoolToVisibility}}" AutomationProperties.AutomationId="ManualJoinAdminOpen" />
                     <StackPanel>
                       <TextBlock Text="Devices" FontSize="18" FontWeight="SemiBold" />
                       <TextBlock Text="{Binding HeroSubtitle}" Foreground="{StaticResource TextSecondary}" FontSize="12" Margin="0,3,0,0" />
@@ -361,7 +361,7 @@
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupChoices, Converter={StaticResource BoolToVisibility}}">
               <StackPanel>
                 <Button Content="Create Network" Command="{Binding ShowCreateNetworkSetupCommand}" Margin="0,0,0,8" />
-                <Button Content="Join Network" Command="{Binding ShowJoinNetworkSetupCommand}" />
+                <Button Content="Join Network" Command="{Binding ShowJoinNetworkSetupCommand}" AutomationProperties.AutomationId="ManualJoinChooseJoin" />
               </StackPanel>
             </Border>
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupCreate, Converter={StaticResource BoolToVisibility}}">
@@ -386,14 +386,14 @@
                   <controls:QrCodeView Width="220" Height="220" Matrix="{Binding JoinRequestQr}" />
                 </Viewbox>
                 <Button Content="Copy Request" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding JoinRequestQrCodeOrLink}" HorizontalAlignment="Center" Margin="0,8,0,10" Visibility="{Binding ShowJoinRequestQr, Converter={StaticResource BoolToVisibility}}" />
-                <Expander Header="Manual join" Margin="0,8,0,0">
+                <Expander Header="Manual join" Margin="0,8,0,0" AutomationProperties.AutomationId="ManualJoinExpander">
                   <StackPanel Margin="0,8,0,0">
                     <TextBlock Text="Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
                     <Button Content="Copy my Device ID" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding State.OwnNpub}" HorizontalAlignment="Left" Margin="0,0,0,8" />
-                    <TextBox Text="{Binding ManualJoinAdminId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Admin Device ID" Margin="0,0,0,6" />
+                    <TextBox Text="{Binding ManualJoinAdminId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Admin Device ID" Margin="0,0,0,6" AutomationProperties.AutomationId="ManualJoinAdminId" />
                     <TextBlock Text="Not a valid device ID" Foreground="{StaticResource Danger}" FontSize="11" Visibility="{Binding ManualJoinAdminErrorVisibility}" />
-                    <TextBox Text="{Binding ManualJoinMeshId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Network ID" Margin="0,6,0,8" />
-                    <Button Content="Add manually" Command="{Binding ManualAddNetworkCommand}" HorizontalAlignment="Left" />
+                    <TextBox Text="{Binding ManualJoinMeshId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Network ID" Margin="0,6,0,8" AutomationProperties.AutomationId="ManualJoinNetworkId" />
+                    <Button Content="Add manually" Command="{Binding ManualAddNetworkCommand}" HorizontalAlignment="Left" AutomationProperties.AutomationId="ManualJoinSubmit" />
                   </StackPanel>
                 </Expander>
               </StackPanel>
@@ -450,10 +450,10 @@
                 <TextBlock Text="Share your Device ID and Network ID, then add the joining Device ID below." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,10" />
                 <Button Content="Copy admin Device ID" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding State.OwnNpub}" HorizontalAlignment="Left" Margin="0,0,0,6" />
                 <Button Content="Copy Network ID" Command="{Binding CopyNetworkIdCommand}" HorizontalAlignment="Left" Margin="0,0,0,10" />
-                <TextBox Text="{Binding ParticipantInput, UpdateSourceTrigger=PropertyChanged}" ToolTip="Joining Device ID" Margin="0,0,0,4" />
+                <TextBox Text="{Binding ParticipantInput, UpdateSourceTrigger=PropertyChanged}" ToolTip="Joining Device ID" Margin="0,0,0,4" AutomationProperties.AutomationId="ManualJoinAdminDeviceId" />
                 <TextBlock Text="Not a valid device ID" Foreground="{StaticResource Danger}" FontSize="11" Visibility="{Binding ParticipantInputErrorVisibility}" />
-                <TextBox Text="{Binding ParticipantAliasInput, UpdateSourceTrigger=PropertyChanged}" ToolTip="Name" Margin="0,6,0,8" />
-                <Button Content="Add by Device ID" Command="{Binding AddParticipantCommand}" HorizontalAlignment="Left" />
+                <TextBox Text="{Binding ParticipantAliasInput, UpdateSourceTrigger=PropertyChanged}" ToolTip="Name" Margin="0,6,0,8" AutomationProperties.AutomationId="ManualJoinAdminDeviceName" />
+                <Button Content="Add by Device ID" Command="{Binding AddParticipantCommand}" HorizontalAlignment="Left" AutomationProperties.AutomationId="ManualJoinAdminSubmit" />
               </StackPanel>
             </Border>
 

@@ -1,5 +1,9 @@
 pub mod actions;
 pub mod c_abi;
+#[cfg(feature = "paid-exit")]
+mod exchange_rate;
+#[cfg(not(feature = "paid-exit"))]
+#[path = "exchange_rate_disabled.rs"]
 mod exchange_rate;
 mod ffi;
 pub mod join_approval;

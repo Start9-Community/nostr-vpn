@@ -174,6 +174,8 @@ async fn mobile_paid_route_payment_and_ack_roundtrip() {
     let seller_app_config = Arc::new(RwLock::new(seller_app));
     let seller_dirty = AtomicBool::new(false);
     let seller_join = AtomicBool::new(false);
+    let seller_pending_join_roster_receipts =
+        Arc::new(PendingJoinRosterReceiptQueue::default());
     let seller_control = MobileEndpointReceiveContext {
         endpoint: &seller_endpoint,
         mesh: &seller_mesh,
@@ -184,6 +186,7 @@ async fn mobile_paid_route_payment_and_ack_roundtrip() {
         config_state: &seller_config_state,
         app_config: &seller_app_config,
         app_config_dirty: &seller_dirty,
+        pending_join_roster_receipts: &seller_pending_join_roster_receipts,
         config_path: Some(&seller_config_path),
         join_request_active: &seller_join,
         state_control: &seller_state_sender,
@@ -277,6 +280,8 @@ async fn mobile_paid_route_payment_and_ack_roundtrip() {
     let buyer_app_config = Arc::new(RwLock::new(buyer_app));
     let buyer_dirty = AtomicBool::new(false);
     let buyer_join = AtomicBool::new(false);
+    let buyer_pending_join_roster_receipts =
+        Arc::new(PendingJoinRosterReceiptQueue::default());
     let buyer_control = MobileEndpointReceiveContext {
         endpoint: &buyer_endpoint,
         mesh: &buyer_mesh,
@@ -287,6 +292,7 @@ async fn mobile_paid_route_payment_and_ack_roundtrip() {
         config_state: &buyer_config_state,
         app_config: &buyer_app_config,
         app_config_dirty: &buyer_dirty,
+        pending_join_roster_receipts: &buyer_pending_join_roster_receipts,
         config_path: Some(&buyer_config_path),
         join_request_active: &buyer_join,
         state_control: &buyer_state_sender,

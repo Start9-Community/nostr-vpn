@@ -444,6 +444,7 @@ mod windows_endpoint_bypass_tests {
                     priority: 0,
                 },
             ],
+            connect_on_start: true,
             auto_reconnect: true,
             discovery_fallback_transit: false,
         }];

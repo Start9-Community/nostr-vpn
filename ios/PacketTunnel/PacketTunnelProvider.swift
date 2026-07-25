@@ -116,7 +116,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // DNS-over-HTTPS. Never allow iOS to fall back to underlay DNS.
         let dnsConfig = iosDnsConfig(
             from: parsedConfig.dnsServers,
-            magicDnsServer: parsedConfig.magicDnsServer
+            magicDnsServer: parsedConfig.magicDnsServer,
+            matchDomains: parsedConfig.dnsMatchDomains
         )
         if !dnsConfig.servers.isEmpty {
             let dns = NEDNSSettings(servers: dnsConfig.servers)
@@ -208,8 +209,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             appMessageSnapshotLock.unlock()
             completionHandler?(chunk)
-        case "runtimeState":
-            completionHandler?(runtimeStateData())
         case "appConfigBegin":
             completionHandler?(String(appConfigSnapshotData().count).data(using: .utf8))
         case let chunkRequest where chunkRequest.hasPrefix("appConfigChunk:"):
@@ -248,11 +247,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             appMessageSnapshotLock.unlock()
             completionHandler?((acknowledged ? "ok" : "stale").data(using: .utf8))
-        case "takeAppConfig":
-            let toml = withTunnelHandle { handle in
-                consumeCString(nostr_vpn_mobile_tunnel_take_app_config_toml(handle))
-            } ?? ""
-            completionHandler?(toml.data(using: .utf8))
         default:
             completionHandler?(nil)
         }
@@ -290,19 +284,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func iosDnsConfig(
         from servers: [String],
-        magicDnsServer: String
+        magicDnsServer: String,
+        matchDomains: [String]
     ) -> (servers: [String], matchDomains: [String]) {
         let normalized = servers
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let normalizedMatchDomains = matchDomains.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let magicDnsServer = magicDnsServer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !magicDnsServer.isEmpty else {
-            return (normalized, [""])
+            return (normalized, normalizedMatchDomains)
         }
         guard normalized.contains(magicDnsServer) else {
-            return (normalized, [""])
+            return (normalized, normalizedMatchDomains)
         }
-        return ([magicDnsServer], [""])
+        return ([magicDnsServer], normalizedMatchDomains)
     }
 
     private func beginRustTunnelStart() -> UInt64 {
@@ -400,6 +398,7 @@ private struct MobileTunnelConfig {
     let excludedRoutes: [String]
     let dnsServers: [String]
     let magicDnsServer: String
+    let dnsMatchDomains: [String]
     let firstWireGuardEndpointHost: String?
     let firstFipsEndpointHost: String?
     let mtu: Int
@@ -414,6 +413,7 @@ private struct MobileTunnelConfig {
             excludedRoutes = []
             dnsServers = []
             magicDnsServer = ""
+            dnsMatchDomains = []
             firstWireGuardEndpointHost = nil
             firstFipsEndpointHost = nil
             mtu = defaultMobileMtu
@@ -426,6 +426,7 @@ private struct MobileTunnelConfig {
         excludedRoutes = object["excludedRoutes"] as? [String] ?? []
         dnsServers = object["dnsServers"] as? [String] ?? []
         magicDnsServer = object["magicDnsServer"] as? String ?? ""
+        dnsMatchDomains = object["dnsMatchDomains"] as? [String] ?? []
         if let wg = object["wireguardExit"] as? [String: Any],
            let endpoint = wg["endpoint"] as? String
         {

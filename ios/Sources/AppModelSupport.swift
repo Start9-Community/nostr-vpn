@@ -139,18 +139,25 @@ extension AppModel {
     }
 
     func refreshTunnelSidecarState() {
-        guard state.vpnEnabled, !tunnelStateRefreshInFlight else {
+        guard state.vpnEnabled else {
             return
         }
-        tunnelStateRefreshInFlight = true
+        let refreshGeneration = tunnelStateRefreshGeneration
+        refreshTunnelAppConfig(generation: refreshGeneration)
+        refreshTunnelRuntimeState(generation: refreshGeneration)
+    }
+
+    private func refreshTunnelAppConfig(generation refreshGeneration: UInt64) {
+        guard !tunnelAppConfigRefreshInFlight else {
+            return
+        }
+        tunnelAppConfigRefreshInFlight = true
         Task { [weak self] in
-            // Approval completion is transactional state. Read it before the
-            // observational runtime snapshot so a slow snapshot cannot leave
-            // the UI displaying a stale QR after the tunnel already joined.
             let appConfigToml = await self?.vpnController.takeAppConfigToml()
-            let runtimeJson = await self?.vpnController.runtimeStateJson()
             let acceptance = await MainActor.run {
-                guard let self else {
+                guard let self,
+                      self.tunnelStateRefreshGeneration == refreshGeneration
+                else {
                     return (accepted: false, networkChanged: false)
                 }
                 let previousNetworkId = self.activeNetwork?.networkId ?? ""
@@ -161,11 +168,12 @@ extension AppModel {
                     appConfigAccepted = result.accepted
                     wrote = result.wrote
                 }
-                if let runtimeJson, self.writeTunnelRuntimeStateIfNeeded(runtimeJson) {
-                    wrote = true
-                }
-                if wrote {
-                    self.state = self.core?.refresh() ?? self.state
+                if wrote, let core = self.core {
+                    self.adoptAppStoreCompatibleState(
+                        core.refresh(),
+                        core: core,
+                        reason: "packet tunnel config"
+                    )
                 }
                 let currentNetworkId = self.activeNetwork?.networkId ?? ""
                 return (
@@ -177,12 +185,47 @@ extension AppModel {
                 _ = await self?.vpnController.acknowledgeAppConfigToml()
             }
             await MainActor.run {
-                self?.tunnelStateRefreshInFlight = false
+                guard let self,
+                      self.tunnelStateRefreshGeneration == refreshGeneration
+                else {
+                    return
+                }
+                self.tunnelAppConfigRefreshInFlight = false
                 if acceptance.networkChanged {
                     // A FIPS endpoint's discovery scope is bound to its network
                     // id. Restart exactly once after a join so the accepted
                     // roster does not remain on its QR/onboarding scope.
-                    self?.schedulePacketTunnelConfigSync(reason: "network joined", force: true)
+                    self.schedulePacketTunnelConfigSync(reason: "network joined", force: true)
+                }
+            }
+        }
+    }
+
+    private func refreshTunnelRuntimeState(generation refreshGeneration: UInt64) {
+        guard !tunnelRuntimeRefreshInFlight else {
+            return
+        }
+        tunnelRuntimeRefreshInFlight = true
+        Task { [weak self] in
+            let runtimeJson = await self?.vpnController.runtimeStateJson()
+            await MainActor.run {
+                guard let self,
+                      self.tunnelStateRefreshGeneration == refreshGeneration
+                else {
+                    return
+                }
+                self.tunnelRuntimeRefreshInFlight = false
+                guard let runtimeJson,
+                      self.writeTunnelRuntimeStateIfNeeded(runtimeJson)
+                else {
+                    return
+                }
+                if let core = self.core {
+                    self.adoptAppStoreCompatibleState(
+                        core.refresh(),
+                        core: core,
+                        reason: "packet tunnel runtime"
+                    )
                 }
             }
         }

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Single source of truth: [workspace.package].version in /Cargo.toml.
-// Propagates that version to every other version-bearing file so all
-// platforms stay in lockstep without manual bumps.
+// Marketing-version source of truth: [workspace.package].version in
+// /Cargo.toml. iOS CFBundleVersion is intentionally independent and comes
+// from /ios/app-store-build-number so corrected App Store uploads can advance
+// without changing the public marketing version.
 //
 //   node scripts/sync-versions.mjs            # write (idempotent)
 //   node scripts/sync-versions.mjs --check    # exit 1 if any file is stale
@@ -9,6 +10,11 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  bumpAndroidGradleVersion,
+  bumpStartosSourceVersion,
+} from './local-release-lib.mjs'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -19,23 +25,6 @@ function readWorkspaceVersion() {
     throw new Error('Could not find [workspace.package] version in Cargo.toml')
   }
   return match[1].trim()
-}
-
-function androidVersionCode(version) {
-  // Matches the historical packing in android/app/build.gradle.kts:
-  // 4.0.2 -> 40002. Each component must fit in two digits.
-  const core = version.split(/[-+]/, 1)[0]
-  const parts = core.split('.').map((part) => parseInt(part, 10))
-  if (parts.length === 0 || parts.some((value) => Number.isNaN(value))) {
-    throw new Error(`Could not derive numeric version code from "${version}"`)
-  }
-  const [major = 0, minor = 0, patch = 0] = parts
-  if (minor > 99 || patch > 99) {
-    throw new Error(
-      `versionCode formula needs an update for "${version}" (minor/patch > 99)`,
-    )
-  }
-  return major * 10_000 + minor * 100 + patch
 }
 
 function appleVersionCode(version) {
@@ -51,6 +40,19 @@ function appleVersionCode(version) {
     )
   }
   return major * 1_000_000 + minor * 1_000 + patch
+}
+
+function readIosBuildNumber() {
+  const buildNumber = readFileSync(
+    join(repoRoot, 'ios', 'app-store-build-number'),
+    'utf8',
+  ).trim()
+  if (!/^[1-9][0-9]*$/.test(buildNumber)) {
+    throw new Error(
+      `ios/app-store-build-number must contain a positive integer, got "${buildNumber}"`,
+    )
+  }
+  return buildNumber
 }
 
 function versionTag(version) {
@@ -74,11 +76,10 @@ const targets = [
     ),
   ),
   // ios/project.yml + macos/project.yml use plain ${NVPN_APP_VERSION_NAME} /
-  // ${NVPN_APP_VERSION_CODE} substitution. Both env vars resolve from the
-  // workspace version via release_common.sh's resolve_shared_build_metadata,
-  // which is called by the entry-point scripts (tools/run-ios, scripts/ios-build,
-  // scripts/macos-build) right before xcodegen runs. Nothing for sync-versions
-  // to bump in project.yml itself — keeps a single source of truth.
+  // ${NVPN_APP_VERSION_CODE} substitution. Entry-point scripts resolve those
+  // immediately before xcodegen: macOS derives both from Cargo, while iOS uses
+  // Cargo for marketing version and ios/app-store-build-number for
+  // CFBundleVersion.
   makeTarget('macos/NostrVpnMac.xcodeproj/project.pbxproj', (text, version) => {
     const code = appleVersionCode(version)
     return text
@@ -92,7 +93,7 @@ const targets = [
       )
   }),
   makeTarget('ios/NostrVpnIos.xcodeproj/project.pbxproj', (text, version) => {
-    const code = appleVersionCode(version)
+    const code = readIosBuildNumber()
     return text
       .replace(
         /(\bMARKETING_VERSION\s*=\s*)[^;]+(;)/g,
@@ -103,18 +104,9 @@ const targets = [
         (_, prefix, suffix) => `${prefix}${code}${suffix}`,
       )
   }),
-  makeTarget('android/app/build.gradle.kts', (text, version) => {
-    const code = androidVersionCode(version)
-    return text
-      .replace(
-        /^(\s*versionCode\s*=\s*).+$/m,
-        (_, prefix) => `${prefix}${code}`,
-      )
-      .replace(
-        /^(\s*versionName\s*=\s*").+(")/m,
-        (_, prefix, suffix) => `${prefix}${version}${suffix}`,
-      )
-  }),
+  makeTarget('android/app/build.gradle.kts', (text, version) =>
+    bumpAndroidGradleVersion(text, version),
+  ),
   makeTarget('windows/NostrVpn.Windows/NostrVpn.Windows.csproj', (text, version) =>
     text.replace(
       /(<Version>)[^<]+(<\/Version>)/,
@@ -128,10 +120,7 @@ const targets = [
     ),
   ),
   makeTarget('startos/versions/current.ts', (text, version) =>
-    text.replace(
-      /^(  version:\s*')[^'\n]+(')/m,
-      (_, prefix, suffix) => `${prefix}${version}:0${suffix}`,
-    ),
+    bumpStartosSourceVersion(text, version),
   ),
 ]
 

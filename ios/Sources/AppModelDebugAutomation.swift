@@ -3,6 +3,7 @@ import Foundation
 
 extension AppModel {
     func runLaunchAutomationIfRequested() -> Bool {
+        #if DEBUG
         guard !launchAutomationHandled else {
             return false
         }
@@ -10,9 +11,13 @@ extension AppModel {
 
         let rawArguments = ProcessInfo.processInfo.arguments
         return runDebugAutomation(arguments: rawArguments)
+        #else
+        return false
+        #endif
     }
 
     func runDebugAutomation(arguments rawArguments: [String]) -> Bool {
+        #if DEBUG
         let arguments = Set(rawArguments)
         debugLog("debug automation args=\(Self.redactedDebugArguments(rawArguments))")
         let lifecycleProbeArmed = armDebugLifecycleProbeIfRequested(arguments: rawArguments)
@@ -57,6 +62,15 @@ extension AppModel {
             return true
         }
         if let resultName = Self.argumentValue(
+            after: "--nvpn-debug-start-join-advertising-result",
+            in: rawArguments
+        ) {
+            Task {
+                await runDebugStartJoinAdvertising(resultName: resultName)
+            }
+            return true
+        }
+        if let resultName = Self.argumentValue(
             after: "--nvpn-debug-runtime-result",
             in: rawArguments
         ) {
@@ -77,6 +91,9 @@ extension AppModel {
             || manuallyJoined || exportedJoinRequest
             || addedParticipant || removedParticipant || removedNetwork || exportedSupportFile
             || waitedForJoinedNetwork
+        #else
+        return false
+        #endif
     }
 
     private func exportDebugSupportFileIfRequested(arguments: [String]) -> Bool {
@@ -282,9 +299,6 @@ extension AppModel {
             ?? "debug-exit-probe.json"
         let waitSeconds = Self.argumentValue(after: "--nvpn-debug-wait-seconds", in: arguments)
             .flatMap(Double.init) ?? 12
-        let exitNode = Self.argumentValue(after: "--nvpn-debug-exit-node", in: arguments)
-        let clearExit = arguments.contains("--nvpn-debug-clear-exit")
-        let wireGuardConfig = Self.wireGuardConfig(from: arguments, supportDir: supportDir)
         let resolveHost = Self.argumentValue(after: "--nvpn-debug-resolve-host", in: arguments)
         let skipFetch = arguments.contains("--nvpn-debug-skip-fetch")
         let verifyDirectRestoration = arguments.contains("--nvpn-debug-verify-direct-restoration")
@@ -298,6 +312,8 @@ extension AppModel {
         )
         let probeStartedAt = Date()
         var result: [String: Any] = [
+            "debugDnsInjected":
+                Self.argumentValue(after: "--nvpn-debug-exit-dns-mode", in: arguments) != nil,
             "url": urlString,
             "phase": "starting",
             "startedAt": ISO8601DateFormatter().string(from: probeStartedAt),
@@ -318,24 +334,12 @@ extension AppModel {
                 await vpnController.statusRawValue()
         }
 
-        if let wireGuardConfig, !wireGuardConfig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            dispatch(NativeActions.updateSettings([
-                "wireguardExitConfig": wireGuardConfig,
-                "wireguardExitEnabled": true,
-                "exitNode": "",
-            ]))
-        } else if let exitNode, !exitNode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            dispatch(NativeActions.updateSettings([
-                "exitNode": exitNode,
-                "wireguardExitEnabled": false,
-                "exitNodeLeakProtection": true,
-            ]))
-        } else if clearExit {
-            dispatch(NativeActions.updateSettings([
-                "exitNode": "",
-                "wireguardExitEnabled": false,
-                "exitNodeLeakProtection": false,
-            ]))
+        let settingsPatch = Self.debugExitSettingsPatch(
+            arguments: arguments,
+            supportDir: supportDir
+        )
+        if !settingsPatch.isEmpty {
+            dispatch(NativeActions.updateSettings(settingsPatch))
         }
         refresh()
 
@@ -388,6 +392,7 @@ extension AppModel {
         result["wireguardExitEnabled"] = state.wireguardExitEnabled
         result["wireguardExitConfigured"] = state.wireguardExitConfigured
         result["wireguardExitEndpoint"] = state.wireguardExitEndpoint
+        result.merge(debugExitDnsStateResult()) { _, new in new }
         result["statusCollectionElapsedMs"] = Self.elapsedMilliseconds(since: statusStartedAt)
 
         if let host = resolveHost?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -406,6 +411,13 @@ extension AppModel {
                 result[key] = value
             }
             result["fetchElapsedMs"] = Self.elapsedMilliseconds(since: fetchStartedAt)
+        }
+        if arguments.contains("--nvpn-debug-await-direct-ui-while-connected") {
+            result.merge(await runDebugDirectWhileConnected(
+                waitSeconds: waitSeconds,
+                fetchUrl: directFetchUrl,
+                resolveHost: directResolveHost
+            )) { _, new in new }
         }
         if verifyDirectRestoration {
             await stopVpnForDebugProbe()
@@ -459,11 +471,14 @@ extension AppModel {
         guard let core else {
             return "Native core unavailable"
         }
-        let tunnelConfigJson = core.mobileTunnelConfigJson()
-        let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
         if !state.vpnEnabled {
             dispatch(NativeActions.connectVpn())
         }
+        guard state.error.isEmpty, state.vpnEnabled else {
+            return state.error.isEmpty ? "Native VPN state did not enable" : state.error
+        }
+        let tunnelConfigJson = core.mobileTunnelConfigJson()
+        let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
         do {
             try await vpnController.start(
                 state: state,
@@ -506,7 +521,7 @@ extension AppModel {
         return result
     }
 
-    private func debugNetworkProbe(
+    func debugNetworkProbe(
         urlString: String?,
         resolveHost: String?
     ) async -> [String: Any] {
@@ -527,293 +542,6 @@ extension AppModel {
             }
         }
         return result
-    }
-
-    private func runDebugTunPacketProbe(arguments: [String]) async -> [String: Any] {
-        let requestedTarget = Self.argumentValue(
-            after: "--nvpn-debug-tun-probe-target",
-            in: arguments
-        )?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let target: String
-        if let requestedTarget, !requestedTarget.isEmpty {
-            target = requestedTarget
-        } else {
-            target = "10.44.255.254"
-        }
-        let port = Self.argumentValue(after: "--nvpn-debug-tun-probe-port", in: arguments)
-            .flatMap(UInt16.init) ?? 9
-        let packetCount = Self.clampedIntArgument(
-            "--nvpn-debug-tun-probe-count",
-            in: arguments,
-            defaultValue: 4,
-            minValue: 1,
-            maxValue: 256
-        )
-        let waitSeconds = Self.clampedDoubleArgument(
-            "--nvpn-debug-tun-probe-wait-seconds",
-            in: arguments,
-            defaultValue: 6.0,
-            minValue: 0.5,
-            maxValue: 60.0
-        )
-        let pollIntervalNanoseconds: UInt64 = 100_000_000
-        var result: [String: Any] = [
-            "tunPacketProbeTarget": target,
-            "tunPacketProbePort": Int(port),
-            "tunPacketProbeExpectedPackets": packetCount,
-            "tunPacketProbePollIntervalMs": Int(pollIntervalNanoseconds / 1_000_000),
-            "tunPacketProbeReadIncreased": false,
-        ]
-
-        let baselineRuntimeJson = await vpnController.runtimeStateJson()
-        guard let baselineRead = Self.runtimeCounter(
-            "tunPacketsRead",
-            from: baselineRuntimeJson
-        ),
-            let baselineBytesRead = Self.runtimeCounter(
-                "tunBytesRead",
-                from: baselineRuntimeJson
-            ),
-            let baselineWritten = Self.runtimeCounter(
-                "tunPacketsWritten",
-                from: baselineRuntimeJson
-            ),
-            let baselineBytesWritten = Self.runtimeCounter(
-                "tunBytesWritten",
-                from: baselineRuntimeJson
-            ),
-            let baselineDropped = Self.runtimeCounter(
-                "tunPacketsDropped",
-                from: baselineRuntimeJson
-            )
-        else {
-            result["tunPacketProbeError"] = "baseline TUN counters missing"
-            return result
-        }
-        result["tunPacketProbeBaselineRead"] = Self.jsonCounterValue(baselineRead)
-        result["tunPacketProbeBaselineBytesRead"] = Self.jsonCounterValue(baselineBytesRead)
-        result["tunPacketProbeBaselineWritten"] = Self.jsonCounterValue(baselineWritten)
-        result["tunPacketProbeBaselineBytesWritten"] = Self.jsonCounterValue(baselineBytesWritten)
-        result["tunPacketProbeBaselineDropped"] = Self.jsonCounterValue(baselineDropped)
-
-        var sentPackets = 0
-        var sendErrors: [String] = []
-        for _ in 0..<packetCount {
-            if let sendError = Self.sendDebugUdpPacket(target: target, port: port) {
-                sendErrors.append(sendError)
-            } else {
-                sentPackets += 1
-            }
-        }
-        result["tunPacketProbeSentPackets"] = sentPackets
-        let requiredRead = Self.saturatingAdd(baselineRead, UInt64(sentPackets))
-        result["tunPacketProbeRequiredRead"] = Self.jsonCounterValue(requiredRead)
-        if !sendErrors.isEmpty {
-            result["tunPacketProbeSendError"] = sendErrors.joined(separator: "; ")
-        }
-        guard sentPackets > 0 else {
-            result["tunPacketProbeError"] = "no UDP probe packets sent"
-            return result
-        }
-
-        let deadline = Date().addingTimeInterval(waitSeconds)
-        let probeStartedAt = Date()
-        var finalRead = baselineRead
-        var finalBytesRead = baselineBytesRead
-        var finalWritten = baselineWritten
-        var finalBytesWritten = baselineBytesWritten
-        var finalDropped = baselineDropped
-        var pollCount = 0
-        var firstObservedAt: Date?
-        while Date() < deadline {
-            pollCount += 1
-            let runtimeJson = await vpnController.runtimeStateJson()
-            if let currentRead = Self.runtimeCounter(
-                "tunPacketsRead",
-                from: runtimeJson
-            ),
-                let currentBytesRead = Self.runtimeCounter(
-                    "tunBytesRead",
-                    from: runtimeJson
-                ),
-                let currentWritten = Self.runtimeCounter(
-                    "tunPacketsWritten",
-                    from: runtimeJson
-                ),
-                let currentBytesWritten = Self.runtimeCounter(
-                    "tunBytesWritten",
-                    from: runtimeJson
-                ),
-                let currentDropped = Self.runtimeCounter(
-                    "tunPacketsDropped",
-                    from: runtimeJson
-                )
-            {
-                finalRead = currentRead
-                finalBytesRead = currentBytesRead
-                finalWritten = currentWritten
-                finalBytesWritten = currentBytesWritten
-                finalDropped = currentDropped
-                if currentRead > baselineRead && firstObservedAt == nil {
-                    firstObservedAt = Date()
-                }
-                if currentRead >= requiredRead {
-                    Self.finishTunPacketProbeResult(
-                        &result,
-                        sentPackets: sentPackets,
-                        baselineRead: baselineRead,
-                        baselineBytesRead: baselineBytesRead,
-                        baselineWritten: baselineWritten,
-                        baselineBytesWritten: baselineBytesWritten,
-                        baselineDropped: baselineDropped,
-                        finalRead: currentRead,
-                        finalBytesRead: currentBytesRead,
-                        finalWritten: currentWritten,
-                        finalBytesWritten: currentBytesWritten,
-                        finalDropped: currentDropped,
-                        probeStartedAt: probeStartedAt,
-                        firstObservedAt: firstObservedAt,
-                        pollCount: pollCount
-                    )
-                    result["tunPacketProbeReadIncreased"] = true
-                    return result
-                }
-            }
-            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
-        }
-
-        Self.finishTunPacketProbeResult(
-            &result,
-            sentPackets: sentPackets,
-            baselineRead: baselineRead,
-            baselineBytesRead: baselineBytesRead,
-            baselineWritten: baselineWritten,
-            baselineBytesWritten: baselineBytesWritten,
-            baselineDropped: baselineDropped,
-            finalRead: finalRead,
-            finalBytesRead: finalBytesRead,
-            finalWritten: finalWritten,
-            finalBytesWritten: finalBytesWritten,
-            finalDropped: finalDropped,
-            probeStartedAt: probeStartedAt,
-            firstObservedAt: firstObservedAt,
-            pollCount: pollCount
-        )
-        return result
-    }
-
-    nonisolated private static func finishTunPacketProbeResult(
-        _ result: inout [String: Any],
-        sentPackets: Int,
-        baselineRead: UInt64,
-        baselineBytesRead: UInt64,
-        baselineWritten: UInt64,
-        baselineBytesWritten: UInt64,
-        baselineDropped: UInt64,
-        finalRead: UInt64,
-        finalBytesRead: UInt64,
-        finalWritten: UInt64,
-        finalBytesWritten: UInt64,
-        finalDropped: UInt64,
-        probeStartedAt: Date,
-        firstObservedAt: Date?,
-        pollCount: Int
-    ) {
-        let observedPackets = saturatingSubtract(finalRead, baselineRead)
-        let observedBytes = saturatingSubtract(finalBytesRead, baselineBytesRead)
-        let observedWritten = saturatingSubtract(finalWritten, baselineWritten)
-        let observedBytesWritten = saturatingSubtract(finalBytesWritten, baselineBytesWritten)
-        let droppedDelta = saturatingSubtract(finalDropped, baselineDropped)
-        let missingPackets = saturatingSubtract(UInt64(sentPackets), observedPackets)
-        result["tunPacketProbeFinalRead"] = jsonCounterValue(finalRead)
-        result["tunPacketProbeObservedPackets"] = jsonCounterValue(observedPackets)
-        result["tunPacketProbeMissingPackets"] = jsonCounterValue(missingPackets)
-        result["tunPacketProbeFinalBytesRead"] = jsonCounterValue(finalBytesRead)
-        result["tunPacketProbeObservedBytesRead"] = jsonCounterValue(observedBytes)
-        result["tunPacketProbeBytesReadIncreased"] = observedBytes > 0
-        result["tunPacketProbeFinalWritten"] = jsonCounterValue(finalWritten)
-        result["tunPacketProbeObservedWritten"] = jsonCounterValue(observedWritten)
-        result["tunPacketProbeFinalBytesWritten"] = jsonCounterValue(finalBytesWritten)
-        result["tunPacketProbeObservedBytesWritten"] = jsonCounterValue(observedBytesWritten)
-        result["tunPacketProbeWrittenIncreased"] = observedWritten > 0
-        result["tunPacketProbeBytesWrittenIncreased"] = observedBytesWritten > 0
-        result["tunPacketProbeFinalDropped"] = jsonCounterValue(finalDropped)
-        result["tunPacketProbeDroppedDelta"] = jsonCounterValue(droppedDelta)
-        result["tunPacketProbeDroppedIncreased"] = droppedDelta > 0
-        result["tunPacketProbeElapsedMs"] = Int(Date().timeIntervalSince(probeStartedAt) * 1000)
-        result["tunPacketProbePolls"] = pollCount
-        if let firstObservedAt {
-            result["tunPacketProbeFirstObservedMs"] = Int(
-                firstObservedAt.timeIntervalSince(probeStartedAt) * 1000
-            )
-        }
-    }
-
-    nonisolated private static func sendDebugUdpPacket(target: String, port: UInt16) -> String? {
-        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard fd >= 0 else {
-            return String(cString: strerror(errno))
-        }
-        defer { close(fd) }
-
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = port.bigEndian
-        guard inet_pton(AF_INET, target, &addr.sin_addr) == 1 else {
-            return "invalid IPv4 target"
-        }
-
-        let payload = [UInt8]("nvpn".utf8)
-        let sent = payload.withUnsafeBytes { bytes in
-            withUnsafePointer(to: &addr) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddr in
-                    sendto(
-                        fd,
-                        bytes.baseAddress,
-                        bytes.count,
-                        0,
-                        sockAddr,
-                        socklen_t(MemoryLayout<sockaddr_in>.size)
-                    )
-                }
-            }
-        }
-        return sent < 0 ? String(cString: strerror(errno)) : nil
-    }
-
-    nonisolated private static func saturatingAdd(_ left: UInt64, _ right: UInt64) -> UInt64 {
-        let (value, overflow) = left.addingReportingOverflow(right)
-        return overflow ? UInt64.max : value
-    }
-
-    nonisolated private static func saturatingSubtract(_ left: UInt64, _ right: UInt64) -> UInt64 {
-        left >= right ? left - right : 0
-    }
-
-    nonisolated private static func runtimeCounter(_ key: String, from json: String?) -> UInt64? {
-        guard let json,
-              let data = json.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let value = object[key]
-        else {
-            return nil
-        }
-        if let number = value as? NSNumber {
-            return number.uint64Value
-        }
-        if let string = value as? String {
-            return UInt64(string)
-        }
-        return nil
-    }
-
-    nonisolated private static func jsonCounterValue(_ value: UInt64) -> Any {
-        if value <= UInt64(Int.max) {
-            return Int(value)
-        }
-        return String(value)
     }
 
     nonisolated static func elapsedMilliseconds(since start: Date) -> Int {
@@ -900,7 +628,7 @@ extension AppModel {
         return arguments[valueIndex]
     }
 
-    nonisolated private static func clampedIntArgument(
+    nonisolated static func clampedIntArgument(
         _ name: String,
         in arguments: [String],
         defaultValue: Int,
@@ -913,7 +641,7 @@ extension AppModel {
         return min(max(parsed, minValue), maxValue)
     }
 
-    nonisolated private static func clampedDoubleArgument(
+    nonisolated static func clampedDoubleArgument(
         _ name: String,
         in arguments: [String],
         defaultValue: Double,
@@ -928,7 +656,7 @@ extension AppModel {
         return min(max(parsed, minValue), maxValue)
     }
 
-    nonisolated private static func wireGuardConfig(from arguments: [String], supportDir: URL?) -> String? {
+    nonisolated static func wireGuardConfig(from arguments: [String], supportDir: URL?) -> String? {
         if let encoded = argumentValue(after: "--nvpn-debug-wireguard-config-base64", in: arguments),
            let data = Data(base64Encoded: encoded),
            let config = String(data: data, encoding: .utf8) {

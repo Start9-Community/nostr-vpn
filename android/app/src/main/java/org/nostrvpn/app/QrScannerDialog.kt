@@ -240,7 +240,11 @@ private fun QrScannerCamera(
     Box(
         modifier =
             modifier
-                .background(Color.Black),
+                .background(Color.Black)
+                .mobileUiSelector(
+                    id = "qr-scanner-camera",
+                    description = "QR scanner camera",
+                ),
     ) {
         AndroidView(
             factory = { previewView },

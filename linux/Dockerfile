@@ -16,9 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libadwaita-1-dev \
     librsvg2-bin \
     adwaita-icon-theme \
+    at-spi2-core \
     dbus-x11 \
     fluxbox \
     imagemagick \
+    gir1.2-atspi-2.0 \
     fonts-dejavu \
     fonts-noto-color-emoji \
     x11-apps \
@@ -27,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdotool \
     xvfb \
     zbar-tools \
+    python3-pyatspi \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

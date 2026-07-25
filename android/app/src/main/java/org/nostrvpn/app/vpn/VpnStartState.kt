@@ -42,6 +42,13 @@ internal object VpnStartState {
         return enabled
     }
 
+    fun alwaysOnActiveForThisApp(context: Context): Boolean =
+        runCatching {
+            val appContext = context.applicationContext
+            Settings.Secure.getString(appContext.contentResolver, ALWAYS_ON_VPN_APP) ==
+                appContext.packageName
+        }.getOrDefault(false)
+
     private fun systemLockdownActiveForThisApp(context: Context): Boolean =
         runCatching {
             val appContext = context.applicationContext

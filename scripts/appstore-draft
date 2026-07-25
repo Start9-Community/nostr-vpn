@@ -8,7 +8,7 @@ source "$ROOT/scripts/release_common.sh"
 
 load_release_env "$ROOT"
 load_appstoreconnect_defaults
-resolve_shared_build_metadata "$ROOT"
+resolve_ios_build_metadata "$ROOT"
 
 IOS_BUNDLE_ID="${NVPN_IOS_BUNDLE_ID:-$NVPN_DEFAULT_IOS_BUNDLE_ID}"
 APP_PRIMARY_LOCALE="${NVPN_ASC_APP_PRIMARY_LOCALE:-en-US}"
@@ -17,21 +17,27 @@ ACTION="${1:-put}"
 
 usage() {
   cat <<'EOF'
-usage: ./scripts/appstore-draft <put|submit|status>
+usage: ./scripts/appstore-draft <put|submit|status|availability>
 
 Creates or updates the editable iOS App Store version draft for the workspace
 version, links the matching App Store Connect build, updates en-US metadata,
-and uploads screenshots from artifacts/appstore-screenshots.
+and uploads screenshots from artifacts/appstore-screenshots. Repository
+defaults replace existing managed metadata unless a non-empty override is set.
 
 Environment:
   NVPN_ASC_AUTH_KEY_PATH, NVPN_ASC_AUTH_KEY_ID, NVPN_ASC_AUTH_KEY_ISSUER_ID
                               App Store Connect API key settings
   NVPN_IOS_BUNDLE_ID          app bundle id (default fi.siriusbusiness.nvpn)
+  NVPN_IOS_BUILD_NUMBER       optional positive integer override for the tracked
+                              ios/app-store-build-number
   NVPN_ASC_APP_PRIMARY_LOCALE locale (default en-US)
   NVPN_IOS_SCREENSHOT_DIR     screenshot root (default artifacts/appstore-screenshots)
   NVPN_APPSTORE_DESCRIPTION   optional App Store description override
   NVPN_APPSTORE_KEYWORDS      optional keywords override
+  NVPN_APPSTORE_PROMOTIONAL_TEXT
+                              optional promotional text override
   NVPN_APPSTORE_SUPPORT_URL   optional support URL override
+  NVPN_APPSTORE_WHATS_NEW     optional What's New override
   NVPN_APPSTORE_PRIVACY_URL   optional privacy policy URL override
   NVPN_APPSTORE_MARKETING_URL optional marketing URL override
   NVPN_APPSTORE_COPYRIGHT     optional copyright override
@@ -41,7 +47,7 @@ EOF
 }
 
 case "$ACTION" in
-  put|submit|status)
+  put|submit|status|availability)
     ;;
   -h|--help|help)
     usage
@@ -66,6 +72,7 @@ export NVPN_APPSTORE_ACTION="$ACTION"
 export NVPN_IOS_BUNDLE_ID="$IOS_BUNDLE_ID"
 export NVPN_ASC_APP_PRIMARY_LOCALE="$APP_PRIMARY_LOCALE"
 export NVPN_IOS_SCREENSHOT_DIR="$SCREENSHOT_ROOT"
+export NVPN_APPSTORE_SCRIPT_DIR="$ROOT/scripts"
 
 python3 <<'PY'
 import base64
@@ -79,6 +86,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, os.environ["NVPN_APPSTORE_SCRIPT_DIR"])
+import appstore_draft_metadata as draft_metadata
+from appstore_availability import (
+    AppStoreAvailabilityError,
+    REQUIRED_EXCLUDED_TERRITORIES,
+    find_territory_availability,
+    require_territory_excluded,
+    territory_update_request,
+)
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -104,19 +121,6 @@ EDITABLE_STATES = {
     "METADATA_REJECTED",
 }
 
-DEFAULT_DESCRIPTION = """Nostr VPN creates private mesh VPN networks between your own devices and trusted peers.
-
-Create a network, approve devices' signed join requests, start the VPN, and reach your private services through encrypted tunnels. Devices can use readable MagicDNS names, direct LAN paths when available, relay-assisted paths when needed, and optional exit-node routing through a peer or WireGuard upstream you control.
-
-You choose the networks, peers, relays, routes, and exit nodes. Nostr VPN does not sell or operate public VPN exits and is not a public internet proxy, anonymity, or stealth browsing service."""
-
-DEFAULT_PROMOTIONAL_TEXT = "Private mesh VPN for your own devices and trusted peers."
-DEFAULT_WHATS_NEW = """Initial public launch draft for the current Nostr VPN release.
-
-This build includes native mobile network management, device presence, MagicDNS names, private mesh routing, WireGuard upstream settings, and TestFlight hardening."""
-DEFAULT_KEYWORDS = "VPN,mesh,WireGuard,Nostr,private network,LAN,peer-to-peer,DNS"
-DEFAULT_SUPPORT_URL = "https://github.com/mmalmi/nostr-vpn/issues"
-DEFAULT_MARKETING_URL = "https://nostrvpn.org/"
 DEFAULT_PRIVACY_URL = "https://nostrvpn.org/privacy/"
 DEFAULT_COPYRIGHT = "2026 Sirius Business Oy"
 DEFAULT_CATEGORY_ID = "UTILITIES"
@@ -126,11 +130,6 @@ DEFAULT_REVIEW_CONTACT_FIRST = "Sirius"
 DEFAULT_REVIEW_CONTACT_LAST = "Business"
 DEFAULT_REVIEW_CONTACT_PHONE = "+35868028660"
 DEFAULT_REVIEW_CONTACT_EMAIL = "nostrvpn@siriusbusiness.fi"
-DEFAULT_REVIEW_NOTES = """Nostr VPN is a private mesh VPN for networks, peers, relays, routes, and exit nodes that the user configures.
-
-No demo account is required. To review the app, create a network in the app, approve a signed join request if you have another device, and start the VPN from the Devices tab. The app shows the required VPN data-use disclosure before enabling the tunnel, then iOS shows the system VPN permission prompt.
-
-Nostr VPN is not a public VPN, public proxy, anonymity, stealth, or censorship-circumvention service. Sirius Business does not sell VPN data, use it for ads or tracking, or disclose it to third parties."""
 
 
 def fail(message, code=1):
@@ -370,40 +369,13 @@ def version_localizations(version_id):
 
 
 def metadata_attrs(existing=None):
-    current = existing.get("attributes", {}) if existing else {}
-    description = env_value(
-        "NVPN_APPSTORE_DESCRIPTION",
-        current.get("description") or DEFAULT_DESCRIPTION,
-    )
-    keywords = env_value(
-        "NVPN_APPSTORE_KEYWORDS",
-        current.get("keywords") or DEFAULT_KEYWORDS,
-    )
-    if len(keywords) > 100:
-        fail(f"NVPN_APPSTORE_KEYWORDS is {len(keywords)} characters; App Store limit is 100")
-    attrs = {
-        "description": description,
-        "keywords": keywords,
-        "promotionalText": env_value(
-            "NVPN_APPSTORE_PROMOTIONAL_TEXT",
-            current.get("promotionalText") or DEFAULT_PROMOTIONAL_TEXT,
-        ),
-        "supportUrl": env_value(
-            "NVPN_APPSTORE_SUPPORT_URL",
-            current.get("supportUrl") or DEFAULT_SUPPORT_URL,
-        ),
-        "whatsNew": env_value(
-            "NVPN_APPSTORE_WHATS_NEW",
-            current.get("whatsNew") or DEFAULT_WHATS_NEW,
-        ),
-    }
-    marketing_url = env_value(
-        "NVPN_APPSTORE_MARKETING_URL",
-        current.get("marketingUrl") or DEFAULT_MARKETING_URL,
-    )
-    if marketing_url:
-        attrs["marketingUrl"] = marketing_url
-    return attrs
+    try:
+        return draft_metadata.version_localization_attributes(
+            existing,
+            environ=os.environ,
+        )
+    except ValueError as exc:
+        fail(str(exc))
 
 
 def whats_new_locked(body):
@@ -669,8 +641,9 @@ def ensure_age_rating(app_info_id):
         "sexualContentOrNudity": "NONE",
         "horrorOrFearThemes": "NONE",
         "matureOrSuggestiveThemes": "NONE",
-        # VPNs can route ordinary web traffic through user-configured exits.
-        "unrestrictedWebAccess": True,
+        # The app configures VPN routing but has no embedded browser and cannot
+        # navigate to arbitrary web pages within the app.
+        "unrestrictedWebAccess": False,
         "userGeneratedContent": False,
         "violenceCartoonOrFantasy": "NONE",
         "violenceRealisticProlongedGraphicOrSadistic": "NONE",
@@ -736,9 +709,10 @@ def review_detail_attrs(existing=None):
             DEFAULT_REVIEW_CONTACT_EMAIL,
         ),
         "demoAccountRequired": False,
-        "notes": env_value(
-            "NVPN_APPSTORE_REVIEW_NOTES",
-            current.get("notes") or DEFAULT_REVIEW_NOTES,
+        "notes": draft_metadata.review_notes(
+            VERSION_NAME,
+            existing,
+            environ=os.environ,
         ),
     }
 
@@ -889,6 +863,75 @@ def ensure_free_price_schedule(app_id):
             return schedule_id
     data = require_ok(status, body, "Create free app price schedule").get("data")
     return data.get("id")
+
+
+def app_availability(app_id):
+    status, body = request(
+        "GET",
+        f"apps/{app_id}/appAvailabilityV2",
+        {
+            "fields[appAvailabilities]": "availableInNewTerritories",
+        },
+    )
+    if status == 404:
+        fail(
+            "App Store territory availability is not configured. "
+            "Set Specific Countries or Regions before submitting."
+        )
+    return require_ok(status, body, "Read app territory availability").get("data")
+
+
+def territory_availabilities(availability_id):
+    url = (
+        "https://api.appstoreconnect.apple.com/v2/appAvailabilities/"
+        f"{urllib.parse.quote(availability_id)}/territoryAvailabilities"
+        "?fields%5BterritoryAvailabilities%5D=available%2Cterritory"
+        "&include=territory&limit=200"
+    )
+    status, body = request("GET", url)
+    return require_ok(
+        status,
+        body,
+        "Read App Store territory rows",
+    ).get("data", [])
+
+
+def ensure_required_territories_excluded(app_id):
+    availability = app_availability(app_id)
+    if not availability or not availability.get("id"):
+        fail("App Store territory availability has no resource ID")
+    availability_id = availability["id"]
+    rows = territory_availabilities(availability_id)
+    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
+        row = find_territory_availability(rows, territory_id)
+        if row is None or not row.get("id"):
+            fail(f"App Store territory availability has no {territory_name} row")
+        if row.get("attributes", {}).get("available") is not False:
+            status, body = request(
+                "PATCH",
+                (
+                    "https://api.appstoreconnect.apple.com/v1/"
+                    f"territoryAvailabilities/{urllib.parse.quote(row['id'])}"
+                ),
+                body=territory_update_request(row["id"], available=False),
+            )
+            require_ok(
+                status,
+                body,
+                f"Exclude {territory_name} from App Store availability",
+            )
+
+    verified_rows = territory_availabilities(availability_id)
+    verified = {}
+    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
+        try:
+            verified[territory_id] = require_territory_excluded(
+                find_territory_availability(verified_rows, territory_id),
+                territory_id,
+            )
+        except AppStoreAvailabilityError as error:
+            fail(f"{territory_name}: {error}")
+    return verified
 
 
 def find_build(app_id):
@@ -1201,6 +1244,25 @@ if ACTION == "status":
             f"  - {attrs.get('versionString')} {attrs.get('platform')} "
             f"{attrs.get('appStoreState')} [{version['id']}]"
         )
+    availability = app_availability(app["id"])
+    rows = territory_availabilities(availability["id"])
+    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
+        row = find_territory_availability(rows, territory_id)
+        if row is None:
+            fail(f"App Store territory availability has no {territory_name} row")
+        print(
+            f"  - {territory_name} available: "
+            f"{row.get('attributes', {}).get('available')}"
+        )
+    raise SystemExit(0)
+
+if ACTION == "availability":
+    excluded = ensure_required_territories_excluded(app["id"])
+    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
+        print(
+            f"{territory_name} availability: "
+            f"{excluded[territory_id].get('attributes', {}).get('available')}"
+        )
     raise SystemExit(0)
 
 version = ensure_version(app["id"])
@@ -1212,6 +1274,7 @@ age_rating = ensure_age_rating(app_info["id"])
 review_detail = ensure_review_detail(version["id"])
 content_rights = ensure_content_rights(app["id"])
 price_schedule_id = ensure_free_price_schedule(app["id"])
+excluded_territories = ensure_required_territories_excluded(app["id"])
 build = find_build(app["id"])
 if build is None:
     fail(f"Build {BUILD_NUMBER} is not visible in App Store Connect")
@@ -1236,6 +1299,11 @@ print(
     f"{content_rights.get('attributes', {}).get('contentRightsDeclaration')}"
 )
 print(f"Price schedule: {price_schedule_id}")
+for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
+    print(
+        f"{territory_name} availability: "
+        f"{excluded_territories[territory_id].get('attributes', {}).get('available')}"
+    )
 print(f"Build: {BUILD_NUMBER} [{build['id']}]")
 print(f"Screenshots uploaded: {len(screenshots)}")
 if submission:

@@ -6,7 +6,7 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.util.Base64
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
@@ -37,31 +38,20 @@ import org.nostrvpn.app.core.activeNetwork
 import org.nostrvpn.app.update.AndroidSelfUpdateManager
 import org.nostrvpn.app.update.AndroidSelfUpdateState
 import org.nostrvpn.app.vpn.NostrVpnService
+import org.nostrvpn.app.vpn.AndroidVpnRoutingPolicy
 import org.nostrvpn.app.vpn.VpnStartState
 
 class MainActivity : ComponentActivity() {
     private var deepLink by mutableStateOf<String?>(null)
-    private var debugAction by mutableStateOf<String?>(null)
-    private var debugExitNode by mutableStateOf<String?>(null)
-    private var debugNetworkName by mutableStateOf<String?>(null)
-    private var debugWireGuardConfig by mutableStateOf<String?>(null)
-    private var debugJoinRequest by mutableStateOf<String?>(null)
-    private var debugAdminDeviceId by mutableStateOf<String?>(null)
-    private var debugMeshNetworkId by mutableStateOf<String?>(null)
-    private var debugParticipantDeviceId by mutableStateOf<String?>(null)
+    private var debugRequest by mutableStateOf(AndroidDebugRequest())
+    private var legacyPackageToRemove by mutableStateOf<String?>(null)
     private lateinit var selfUpdateManager: AndroidSelfUpdateManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        legacyPackageToRemove = AndroidLegacyPackageMigration.packageToRemove(this)
         deepLink = intent?.dataString
-        debugAction = intent?.getStringExtra(EXTRA_DEBUG_ACTION)
-        debugExitNode = intent?.getStringExtra(EXTRA_DEBUG_EXIT_NODE)
-        debugNetworkName = intent?.getStringExtra(EXTRA_DEBUG_NETWORK_NAME)
-        debugWireGuardConfig = debugWireGuardConfigFromIntent(intent)
-        debugJoinRequest = debugJoinRequestFromIntent(intent)
-        debugAdminDeviceId = debugBase64Extra(intent, EXTRA_DEBUG_ADMIN_DEVICE_ID_BASE64)
-        debugMeshNetworkId = debugBase64Extra(intent, EXTRA_DEBUG_MESH_NETWORK_ID_BASE64)
-        debugParticipantDeviceId = debugBase64Extra(intent, EXTRA_DEBUG_PARTICIPANT_DEVICE_ID_BASE64)
+        debugRequest = AndroidDebugRequest.from(intent)
         NativeCore.initializeAndroidContext(applicationContext)
         val dataDir = appCoreDataDir(this)
         seedMobileConfig(dataDir)
@@ -88,6 +78,9 @@ class MainActivity : ComponentActivity() {
             var showQrScanner by remember { mutableStateOf(false) }
             var qrScanNetworkId by remember { mutableStateOf("") }
             var pendingScannedJoinRequest by remember { mutableStateOf<String?>(null) }
+            var observedTunnelConfigJson by remember {
+                mutableStateOf(core.mobileTunnelConfigJson())
+            }
             fun showAndroidError(message: String, fallback: String = "Android action failed") {
                 androidError = message.trim().ifBlank { fallback }
             }
@@ -99,12 +92,14 @@ class MainActivity : ComponentActivity() {
                 androidError = ""
             }
             fun startVpnTunnel() {
+                val tunnelConfigJson = core.mobileTunnelConfigJson()
+                observedTunnelConfigJson = tunnelConfigJson
                 startVpnService(
                     Intent(this, NostrVpnService::class.java)
                         .setAction(NostrVpnService.ACTION_CONNECT)
                         .putExtra(
                             NostrVpnService.EXTRA_CONFIG_JSON,
-                            core.mobileTunnelConfigJson(),
+                            tunnelConfigJson,
                         ),
                 )
             }
@@ -122,7 +117,33 @@ class MainActivity : ComponentActivity() {
                 }
                 pendingVpnStart = false
             }
+            val legacyPackageRemovalLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult(),
+            ) {
+                legacyPackageToRemove = AndroidLegacyPackageMigration.packageToRemove(this)
+            }
             fun requestVpnTunnel() {
+                val tunnelConfigJson = core.mobileTunnelConfigJson()
+                observedTunnelConfigJson = tunnelConfigJson
+                val tunnelConfig = JSONObject(tunnelConfigJson)
+                val routeTargets = buildList {
+                    val routes = tunnelConfig.optJSONArray("routeTargets") ?: return@buildList
+                    for (index in 0 until routes.length()) {
+                        routes.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
+                    }
+                }
+                if (
+                    VpnStartState.alwaysOnActiveForThisApp(this) &&
+                    !AndroidVpnRoutingPolicy.supportsAlwaysOn(routeTargets)
+                ) {
+                    applyUserActionState(core.dispatch(NativeActions.disconnectVpn()))
+                    showAndroidError(
+                        "Always-on VPN cannot be used with split tunneling. " +
+                            "Turn it off in Android VPN settings or select an Internet exit.",
+                    )
+                    startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
+                    return
+                }
                 val intent = VpnService.prepare(this)
                 if (intent == null) {
                     startVpnTunnel()
@@ -265,175 +286,46 @@ class MainActivity : ComponentActivity() {
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     while (true) {
                         vpnLockdownActive = VpnStartState.refreshLockdownActive(this@MainActivity)
-                        state = try {
+                        try {
                             val nextState = core.refresh()
                             if (nextState.error.isNotBlank()) {
                                 androidError = ""
                             }
-                            nextState
+                            val currentTunnelConfigJson = core.mobileTunnelConfigJson()
+                            val requiresTunnelRefresh =
+                                TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                                    vpnEnabled = nextState.vpnEnabled,
+                                    observedConfigJson = observedTunnelConfigJson,
+                                    currentConfigJson = currentTunnelConfigJson,
+                                )
+                            state = nextState
+                            observedTunnelConfigJson = currentTunnelConfigJson
+                            if (requiresTunnelRefresh) {
+                                requestVpnTunnel()
+                            }
                         } catch (error: Exception) {
                             showAndroidError(error, "Android refresh failed")
-                            state
                         }
                         delay(2_000)
                     }
                 }
             }
-            LaunchedEffect(
-                deepLink,
-                debugAction,
-                debugExitNode,
-                debugNetworkName,
-                debugWireGuardConfig,
-                debugJoinRequest,
-                debugAdminDeviceId,
-                debugMeshNetworkId,
-                debugParticipantDeviceId,
-            ) {
+            LaunchedEffect(deepLink, debugRequest) {
                 val request = deepLink
                 if (!request.isNullOrBlank() && looksLikeJoinRequestQrOrLink(request)) {
                     dispatch(NativeActions.importJoinRequest(request))
                     deepLink = null
                 }
-                when (val action = debugAction) {
-                    DEBUG_ACTION_CONNECT -> {
-                        if (BuildConfig.DEBUG) {
-                            dispatch(NativeActions.connectVpn())
-                        }
-                        debugAction = null
-                    }
-                    DEBUG_ACTION_DISCONNECT -> {
-                        if (BuildConfig.DEBUG) {
-                            dispatch(NativeActions.disconnectVpn())
-                        }
-                        debugAction = null
-                    }
-                    DEBUG_ACTION_SET_FIPS_EXIT -> {
-                        if (BuildConfig.DEBUG) {
-                            val exitNode = debugExitNode.orEmpty().trim()
-                            if (exitNode.isNotEmpty()) {
-                                dispatch(
-                                    NativeActions.updateSettings(
-                                        "exitNode" to exitNode,
-                                        "wireguardExitEnabled" to false,
-                                        "exitNodeLeakProtection" to true,
-                                    ),
-                                )
-                            }
-                        }
-                        debugAction = null
-                        debugExitNode = null
-                    }
-                    DEBUG_ACTION_ADD_NETWORK -> {
-                        if (BuildConfig.DEBUG) {
-                            dispatch(
-                                NativeActions.addNetwork(
-                                    debugNetworkName.orEmpty().trim().ifBlank { "Android smoke" },
-                                ),
-                            )
-                        }
-                        debugAction = null
-                        debugNetworkName = null
-                    }
-                    DEBUG_ACTION_CLEAR_EXIT -> {
-                        if (BuildConfig.DEBUG) {
-                            dispatch(
-                                NativeActions.updateSettings(
-                                    "exitNode" to "",
-                                    "wireguardExitEnabled" to false,
-                                    "exitNodeLeakProtection" to false,
-                                ),
-                            )
-                        }
-                        debugAction = null
-                    }
-                    DEBUG_ACTION_SET_WIREGUARD_EXIT -> {
-                        if (BuildConfig.DEBUG) {
-                            val config = debugWireGuardConfig.orEmpty().trim()
-                            if (config.isNotEmpty()) {
-                                dispatch(
-                                    NativeActions.updateSettings(
-                                        "wireguardExitConfig" to config,
-                                        "wireguardExitEnabled" to true,
-                                        "exitNode" to "",
-                                    ),
-                                )
-                            }
-                        }
-                        debugAction = null
-                        debugWireGuardConfig = null
-                    }
-                    DEBUG_ACTION_IMPORT_JOIN_REQUEST -> {
-                        if (BuildConfig.DEBUG) {
-                            val request = debugJoinRequest.orEmpty().trim()
-                            if (request.isNotEmpty()) {
-                                dispatch(NativeActions.importJoinRequest(request))
-                            }
-                        }
-                        debugAction = null
-                        debugJoinRequest = null
-                    }
-                    DEBUG_ACTION_EXPORT_JOIN_REQUEST -> {
-                        if (BuildConfig.DEBUG) {
-                            val result = JSONObject()
-                                .put("joinRequest", state.joinRequestQrCodeOrLink)
-                                .put("deviceId", state.ownNpub)
-                                .put("error", state.error)
-                            dataDir.resolve(DEBUG_JOIN_REQUEST_RESULT_FILE).writeText(
-                                result.toString(2) + "\n",
-                                Charsets.UTF_8,
-                            )
-                        }
-                        debugAction = null
-                    }
-                    DEBUG_ACTION_REMOVE_ACTIVE_NETWORK -> {
-                        if (BuildConfig.DEBUG) {
-                            state.activeNetwork?.id?.let { networkId ->
-                                dispatch(NativeActions.removeNetwork(networkId))
-                            }
-                        }
-                        debugAction = null
-                    }
-                    DEBUG_ACTION_MANUAL_JOIN -> {
-                        if (BuildConfig.DEBUG) {
-                            val admin = debugAdminDeviceId.orEmpty().trim()
-                            val networkId = debugMeshNetworkId.orEmpty().trim()
-                            if (admin.isNotEmpty() && networkId.isNotEmpty()) {
-                                dispatch(NativeActions.manualAddNetwork(admin, networkId))
-                            }
-                        }
-                        debugAction = null
-                        debugAdminDeviceId = null
-                        debugMeshNetworkId = null
-                    }
-                    DEBUG_ACTION_ADD_PARTICIPANT -> {
-                        if (BuildConfig.DEBUG) {
-                            val participant = debugParticipantDeviceId.orEmpty().trim()
-                            state.activeNetwork?.id?.let { networkId ->
-                                if (participant.isNotEmpty()) {
-                                    dispatch(NativeActions.addParticipant(networkId, participant))
-                                }
-                            }
-                        }
-                        debugAction = null
-                        debugParticipantDeviceId = null
-                    }
-                    DEBUG_ACTION_REMOVE_PARTICIPANT -> {
-                        if (BuildConfig.DEBUG) {
-                            val participant = debugParticipantDeviceId.orEmpty().trim()
-                            state.activeNetwork?.id?.let { networkId ->
-                                if (participant.isNotEmpty()) {
-                                    dispatch(NativeActions.removeParticipant(networkId, participant))
-                                }
-                            }
-                        }
-                        debugAction = null
-                        debugParticipantDeviceId = null
-                    }
-                    null -> Unit
-                    else -> {
-                        debugAction = null
-                    }
+                val automation = debugRequest
+                if (automation.action != null) {
+                    AndroidDebugAutomation.run(
+                        request = automation,
+                        state = state,
+                        core = core,
+                        dataDir = dataDir,
+                        dispatch = dispatch,
+                    )
+                    debugRequest = AndroidDebugRequest()
                 }
             }
 
@@ -501,6 +393,10 @@ class MainActivity : ComponentActivity() {
                                     dispatch(NativeActions.importJoinRequest(request))
                                     pendingScannedJoinRequest = null
                                 },
+                                modifier = Modifier.mobileUiSelector(
+                                    id = "join-request-confirm-add",
+                                    description = "Confirm adding scanned join request",
+                                ),
                             ) {
                                 Text("Add")
                             }
@@ -512,8 +408,40 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 }
+                legacyPackageToRemove?.let { packageName ->
+                    AlertDialog(
+                        onDismissRequest = {},
+                        title = { Text("Remove older Nostr VPN") },
+                        text = {
+                            Text(
+                                "An older Nostr VPN installation is still present. " +
+                                    "Remove it so Android cannot run two VPN apps or services.",
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    legacyPackageRemovalLauncher.launch(
+                                        AndroidLegacyPackageMigration.uninstallIntent(packageName),
+                                    )
+                                },
+                                modifier = Modifier.mobileUiSelector(
+                                    id = "remove-legacy-app",
+                                    description = "Remove older Nostr VPN installation",
+                                ),
+                            ) {
+                                Text("Remove old app")
+                            }
+                        },
+                    )
+                }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        legacyPackageToRemove = AndroidLegacyPackageMigration.packageToRemove(this)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -521,49 +449,15 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         writeAndroidBuildMetadata(appCoreDataDir(this))
         deepLink = intent.dataString
-        debugAction = intent.getStringExtra(EXTRA_DEBUG_ACTION)
-        debugExitNode = intent.getStringExtra(EXTRA_DEBUG_EXIT_NODE)
-        debugNetworkName = intent.getStringExtra(EXTRA_DEBUG_NETWORK_NAME)
-        debugWireGuardConfig = debugWireGuardConfigFromIntent(intent)
-        debugJoinRequest = debugJoinRequestFromIntent(intent)
-        debugAdminDeviceId = debugBase64Extra(intent, EXTRA_DEBUG_ADMIN_DEVICE_ID_BASE64)
-        debugMeshNetworkId = debugBase64Extra(intent, EXTRA_DEBUG_MESH_NETWORK_ID_BASE64)
-        debugParticipantDeviceId = debugBase64Extra(intent, EXTRA_DEBUG_PARTICIPANT_DEVICE_ID_BASE64)
+        debugRequest = AndroidDebugRequest.from(intent)
     }
 
     private fun startVpnService(intent: Intent) {
-        if (intent.action == NostrVpnService.ACTION_CONNECT && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (intent.action == NostrVpnService.ACTION_CONNECT) {
             startForegroundService(intent)
         } else {
             startService(intent)
         }
-    }
-
-    private fun debugWireGuardConfigFromIntent(intent: Intent?): String? {
-        val inline = intent
-            ?.getStringExtra(EXTRA_DEBUG_WIREGUARD_CONFIG)
-            ?.takeIf { it.isNotBlank() }
-        if (inline != null) {
-            return inline
-        }
-        val encoded = intent
-            ?.getStringExtra(EXTRA_DEBUG_WIREGUARD_CONFIG_BASE64)
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
-        return runCatching {
-            String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
-        }.getOrNull()
-    }
-
-    private fun debugJoinRequestFromIntent(intent: Intent?): String? {
-        return debugBase64Extra(intent, EXTRA_DEBUG_JOIN_REQUEST_BASE64)
-    }
-
-    private fun debugBase64Extra(intent: Intent?, key: String): String? {
-        val encoded = intent?.getStringExtra(key)?.takeIf { it.isNotBlank() } ?: return null
-        return runCatching {
-            String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
-        }.getOrNull()
     }
 
     private fun writeAndroidBuildMetadata(dataDir: java.io.File) {
@@ -602,28 +496,6 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        const val EXTRA_DEBUG_ACTION = "fi.siriusbusiness.nvpn.DEBUG_ACTION"
-        const val EXTRA_DEBUG_EXIT_NODE = "fi.siriusbusiness.nvpn.DEBUG_EXIT_NODE"
-        const val EXTRA_DEBUG_NETWORK_NAME = "fi.siriusbusiness.nvpn.DEBUG_NETWORK_NAME"
-        const val EXTRA_DEBUG_WIREGUARD_CONFIG = "fi.siriusbusiness.nvpn.DEBUG_WIREGUARD_CONFIG"
-        const val EXTRA_DEBUG_WIREGUARD_CONFIG_BASE64 = "fi.siriusbusiness.nvpn.DEBUG_WIREGUARD_CONFIG_BASE64"
-        const val EXTRA_DEBUG_JOIN_REQUEST_BASE64 = "fi.siriusbusiness.nvpn.DEBUG_JOIN_REQUEST_BASE64"
-        const val EXTRA_DEBUG_ADMIN_DEVICE_ID_BASE64 = "fi.siriusbusiness.nvpn.DEBUG_ADMIN_DEVICE_ID_BASE64"
-        const val EXTRA_DEBUG_MESH_NETWORK_ID_BASE64 = "fi.siriusbusiness.nvpn.DEBUG_MESH_NETWORK_ID_BASE64"
-        const val EXTRA_DEBUG_PARTICIPANT_DEVICE_ID_BASE64 = "fi.siriusbusiness.nvpn.DEBUG_PARTICIPANT_DEVICE_ID_BASE64"
-        const val DEBUG_ACTION_CONNECT = "connect"
-        const val DEBUG_ACTION_DISCONNECT = "disconnect"
-        const val DEBUG_ACTION_SET_FIPS_EXIT = "set_fips_exit"
-        const val DEBUG_ACTION_ADD_NETWORK = "add_network"
-        const val DEBUG_ACTION_CLEAR_EXIT = "clear_exit"
-        const val DEBUG_ACTION_SET_WIREGUARD_EXIT = "set_wireguard_exit"
-        const val DEBUG_ACTION_IMPORT_JOIN_REQUEST = "import_join_request"
-        const val DEBUG_ACTION_EXPORT_JOIN_REQUEST = "export_join_request"
-        const val DEBUG_ACTION_REMOVE_ACTIVE_NETWORK = "remove_active_network"
-        const val DEBUG_ACTION_MANUAL_JOIN = "manual_join"
-        const val DEBUG_ACTION_ADD_PARTICIPANT = "add_participant"
-        const val DEBUG_ACTION_REMOVE_PARTICIPANT = "remove_participant"
-        private const val DEBUG_JOIN_REQUEST_RESULT_FILE = "debug-join-request.json"
         private const val ANDROID_BUILD_METADATA_FILE = "android-build-metadata.json"
         private const val ANDROID_LOCAL_NETWORK_OPT_IN_API = 36
         private const val ANDROID_ACCESS_LOCAL_NETWORK_API = 37

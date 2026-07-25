@@ -42,6 +42,7 @@ struct DevicesPage: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(!network.enabled)
+                        .accessibilityIdentifier("link-device-open")
                     }
                     ForEach(sortedParticipants(network.participants, state: model.state)) { participant in
                         ParticipantRow(model: model, network: network, participant: participant)
@@ -60,6 +61,7 @@ struct DevicesPage: View {
             }
             .padding()
         }
+        .scrollIndicators(.hidden)
         .safeAreaPadding(.bottom, 92)
         .background(AppColors.background)
         .sheet(isPresented: $addDevicePresented) {
@@ -150,10 +152,10 @@ struct VpnDisclosureSheet: View {
                 Text("Before Turning VPN On")
                     .font(.title2.weight(.semibold))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Nostr VPN is a private VPN and generic WireGuard exit-node utility. It is not a public VPN, anonymity, stealth, or consumer proxy service.")
-                Text("The app uses VPN data only to operate networks you configure: device identity, peer lists, internet-sharing settings, endpoints, join request metadata, traffic counters, and connection health.")
-                Text("Packet traffic is encrypted. User-selected peers, relays, bridge paths, and internet providers receive only the data needed to provide the connection you asked them to provide.")
-                Text("The developer does not sell VPN data, use it for ads or tracking, or disclose it to third parties.")
+                Text("Nostr VPN is a private mesh VPN for your own devices, trusted peers, and WireGuard endpoints you configure. It is not a public VPN, anonymity, stealth, or consumer proxy service.")
+                Text("The app processes device identity, peer lists, routing settings, endpoints, join metadata, traffic counters, and connection health on this device only to operate the VPN you configure.")
+                Text("Sirius Business Oy does not collect or retain your browsing traffic, private mesh traffic, or VPN connection data, and does not sell, use, or disclose VPN data to third parties.")
+                Text("Packet traffic is encrypted. At your direction, the app sends only the data needed for the requested connection to peers, relays, bridge paths, and WireGuard endpoints you choose. Independent operators handle that data under their own policies.")
                 Spacer()
             }
             .font(.body)
@@ -230,9 +232,13 @@ struct JoinNetworkCard: View {
             if !joinRequestQrCodeOrLink.isEmpty {
                 Pill("Join request", tint: .orange)
                 VStack(alignment: .leading, spacing: 8) {
-                    QrCodeView(matrix: model.qrMatrix(for: joinRequestQrCodeOrLink))
-                        .aspectRatio(1, contentMode: .fit)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    GeometryReader { geometry in
+                        QrCodeView(matrix: model.qrMatrix(for: joinRequestQrCodeOrLink))
+                            .frame(width: geometry.size.width, height: geometry.size.width)
+                            .accessibilityIdentifier("join-request-qr")
+                    }
+                    .aspectRatio(1, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
                     HStack(spacing: 10) {
                         Button {
                             model.copy(joinRequestQrCodeOrLink)
@@ -262,6 +268,7 @@ struct JoinNetworkCard: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("manual-join-admin-id")
                     if manualAdminInvalid {
                         Text("Not a valid device ID")
                             .font(.caption)
@@ -271,6 +278,7 @@ struct JoinNetworkCard: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("manual-join-network-id")
                     Button("Add manually") {
                         model.dispatch(
                             NativeActions.manualAddNetwork(
@@ -284,6 +292,7 @@ struct JoinNetworkCard: View {
                         manualExpanded = false
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("manual-join-submit")
                     .disabled(
                         manualAdminId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             || normalizeNetworkIdInput(manualNetworkId).isEmpty
@@ -293,6 +302,7 @@ struct JoinNetworkCard: View {
                 .padding(.top, 6)
             }
             .font(.subheadline)
+            .accessibilityIdentifier("manual-join-expand")
 
         }
     }
@@ -354,6 +364,7 @@ struct AddDeviceSheet: View {
                 pendingJoinRequest = nil
                 dismiss()
             }
+            .accessibilityIdentifier("join-request-confirm-add")
         } message: { pending in
             Text("Add the device from this join request to \(pending.networkName)?")
         }
@@ -471,6 +482,7 @@ struct ScanJoinerDeviceCard: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("join-request-scan-open")
             if !scanError.isEmpty {
                 Text(scanError)
                     .font(.caption)

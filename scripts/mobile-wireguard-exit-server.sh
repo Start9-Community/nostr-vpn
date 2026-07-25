@@ -28,6 +28,20 @@ wg set wg0 \
 ip link set wg0 up
 
 iptables -N nvpn-mobile-wg-forward 2>/dev/null || iptables -F nvpn-mobile-wg-forward
+iptables -N nvpn-wg-doh-cf 2>/dev/null || iptables -F nvpn-wg-doh-cf
+iptables -N nvpn-wg-doh-q9 2>/dev/null || iptables -F nvpn-wg-doh-q9
+iptables -A nvpn-wg-doh-cf -j ACCEPT
+iptables -A nvpn-wg-doh-q9 -j ACCEPT
+for resolver_ip in 1.1.1.1 1.0.0.1; do
+  iptables -A nvpn-mobile-wg-forward \
+    -i wg0 -p tcp -d "$resolver_ip" --dport 443 \
+    -j nvpn-wg-doh-cf
+done
+for resolver_ip in 9.9.9.9 149.112.112.112; do
+  iptables -A nvpn-mobile-wg-forward \
+    -i wg0 -p tcp -d "$resolver_ip" --dport 443 \
+    -j nvpn-wg-doh-q9
+done
 iptables -A nvpn-mobile-wg-forward -i wg0 -j ACCEPT
 iptables -A nvpn-mobile-wg-forward -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -I FORWARD 1 -j nvpn-mobile-wg-forward

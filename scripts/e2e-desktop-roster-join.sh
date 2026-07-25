@@ -11,13 +11,18 @@ APP_LOG="$ARTIFACT_ROOT/app.log"
 READY_FILE="$ARTIFACT_ROOT/app-ready"
 FAKE_NVPN="$ARTIFACT_ROOT/nvpn-e2e"
 TIMEOUT_SECS="${NVPN_DESKTOP_ROSTER_E2E_TIMEOUT_SECS:-30}"
+ROOT_CARGO_TARGET_DIR="${NVPN_ROOT_CARGO_TARGET_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}}"
+LINUX_CARGO_TARGET_DIR="${NVPN_LINUX_CARGO_TARGET_DIR:-$ROOT/linux/target}"
 
 mkdir -p "$ARTIFACT_ROOT"
 rm -rf "$DATA_DIR"
 rm -f "$RESULT" "$APP_LOG" "$READY_FILE"
 
-cargo build -q -p nostr-vpn-app-core --example desktop_roster_e2e_fixture
-CARGO_TARGET="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+CARGO_TARGET_DIR="$ROOT_CARGO_TARGET_DIR" \
+  cargo build -q -p nostr-vpn-app-core --example desktop_roster_e2e_fixture
+CARGO_TARGET="$(CARGO_TARGET_DIR="$ROOT_CARGO_TARGET_DIR" \
+  cargo metadata --no-deps --format-version 1 \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 FIXTURE="$CARGO_TARGET/debug/examples/desktop_roster_e2e_fixture"
 "$FIXTURE" prepare --data-dir "$DATA_DIR" --result "$RESULT"
 DEBUG_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["debugUrl"])' "$RESULT")"
@@ -55,8 +60,9 @@ case "$(uname -s)" in
     ;;
   Linux)
     launch_with_open=0
-    (cd "$ROOT/linux" && cargo build -q)
-    LINUX_TARGET="$(cd "$ROOT/linux" && cargo metadata --no-deps --format-version 1 \
+    (cd "$ROOT/linux" && CARGO_TARGET_DIR="$LINUX_CARGO_TARGET_DIR" cargo build -q)
+    LINUX_TARGET="$(cd "$ROOT/linux" && CARGO_TARGET_DIR="$LINUX_CARGO_TARGET_DIR" \
+      cargo metadata --no-deps --format-version 1 \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
     APP_EXE="$LINUX_TARGET/debug/nostr-vpn"
     ;;
@@ -92,10 +98,10 @@ if [[ "$launch_with_open" == "1" ]]; then
     echo "desktop roster e2e failed: macOS GUI did not create its main window" >&2
     exit 1
   fi
-  NVPN_APP_DATA_DIR="$DATA_DIR" \
-  NVPN_CLI_PATH="$FAKE_NVPN" \
-  NVPN_ROSTER_E2E_READY_PATH="$READY_FILE" \
-  "$APP_EXE" "$DEBUG_URL" >>"$APP_LOG" 2>&1 || true
+  # Deliver the link to the already-running app through LaunchServices. This
+  # exercises NSApplicationDelegate's open-URLs callback rather than the
+  # command-line/single-instance forwarding path used on Linux and Windows.
+  open -a "$APP_PATH" "$DEBUG_URL"
 else
   NVPN_APP_DATA_DIR="$DATA_DIR" \
   NVPN_CLI_PATH="$FAKE_NVPN" \

@@ -46,6 +46,7 @@ struct MobileEndpointReceiveContext<'a> {
     config_state: &'a Arc<RwLock<MobileTunnelConfig>>,
     app_config: &'a Arc<RwLock<AppConfig>>,
     app_config_dirty: &'a AtomicBool,
+    pending_join_roster_receipts: &'a PendingJoinRosterReceipts,
     config_path: Option<&'a Path>,
     join_request_active: &'a AtomicBool,
     #[cfg_attr(not(feature = "paid-exit"), allow(dead_code))]
@@ -387,20 +388,21 @@ async fn apply_mobile_join_roster_frame(
         control.config_path,
         join_roster,
     )?;
-    let durably_applied = updated.is_some()
+    let applied = updated.is_some()
         || mobile_join_roster_is_durably_persisted(
             control.app_config,
             control.config_path,
             join_roster,
         )?;
-    if durably_applied {
-        control.state_control.enqueue(
-            source_peer,
-            &FipsControlFrame::JoinRosterAck {
-                roster_event_id: join_roster.signed_roster.artifact_hash(),
-            },
-        )?;
+    if !applied {
+        return Ok(());
     }
+    let roster_event_id = join_roster.signed_roster.artifact_hash();
+    let committed =
+        control.config_path.is_some() || !control.app_config_dirty.load(Ordering::Acquire);
+    control
+        .pending_join_roster_receipts
+        .enqueue(roster_event_id, source_peer, committed)?;
     if let Some(updated) = updated {
         apply_mobile_roster_runtime_update(control, updated).await?;
     }

@@ -174,6 +174,10 @@ internal fun NostrVpnApp(
                         NavigationBarItem(
                             selected = effectivePage == item,
                             onClick = { page = item },
+                            modifier = Modifier.mobileUiSelector(
+                                id = "navigation-${item.title.lowercase()}",
+                                description = "${item.title} tab",
+                            ),
                             icon = {
                                 NavIcon(
                                     item,
@@ -200,6 +204,7 @@ internal fun NostrVpnApp(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
+                .exposeMobileUiSelectors()
                 .padding(padding),
             contentPadding = PaddingValues(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),

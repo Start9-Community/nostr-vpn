@@ -9,6 +9,7 @@ class TunnelRefreshPolicyTest {
     @Test
     fun qrAndManualApprovalActionsRestartTheRunningTunnel() {
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("import_join_request"))
+        assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("start_join_request_broadcast"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("accept_join_request"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("manual_add_network"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("add_participant"))
@@ -21,6 +22,12 @@ class TunnelRefreshPolicyTest {
             TunnelRefreshPolicy.requiresTunnelRefresh(
                 "update_settings",
                 setOf("exitDnsMode"),
+            ),
+        )
+        assertTrue(
+            TunnelRefreshPolicy.requiresTunnelRefresh(
+                "update_settings",
+                setOf("internetSource"),
             ),
         )
         assertFalse(TunnelRefreshPolicy.requiresTunnelRefresh("tick"))
@@ -61,11 +68,79 @@ class TunnelRefreshPolicyTest {
         )
         assertEquals(
             TunnelServiceCommand.CONNECT,
+            TunnelServiceCommandPolicy.commandAfterAction(
+                "start_join_request_broadcast",
+                false,
+                true,
+                false,
+            ),
+        )
+        assertEquals(
+            TunnelServiceCommand.CONNECT,
             TunnelServiceCommandPolicy.commandAfterAction("update_settings", true, true, true),
         )
         assertEquals(
             TunnelServiceCommand.NONE,
             TunnelServiceCommandPolicy.commandAfterAction("tick", true, true, false),
+        )
+    }
+
+    @Test
+    fun asynchronouslyReceivedRosterRestartsOnlyAnEnabledChangedTunnel() {
+        assertTrue(
+            TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                vpnEnabled = true,
+                observedConfigJson = """{"routeTargets":["10.44.0.1/32"]}""",
+                currentConfigJson = """{"routeTargets":["10.44.0.0/16"]}""",
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                vpnEnabled = true,
+                observedConfigJson = """{"routeTargets":["10.44.0.0/16"]}""",
+                currentConfigJson = """{"routeTargets":["10.44.0.0/16"]}""",
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                vpnEnabled = false,
+                observedConfigJson = """{"routeTargets":["10.44.0.1/32"]}""",
+                currentConfigJson = """{"routeTargets":["10.44.0.0/16"]}""",
+            ),
+        )
+    }
+
+    @Test
+    fun learnedEndpointsAndSerializedAppStateDoNotRestartTheTunnel() {
+        val observed = """
+            {
+              "networkId":"mesh",
+              "routeTargets":["10.44.0.0/16"],
+              "peers":[{"npub":"peer"}],
+              "advertisedEndpoint":"udp://old",
+              "peerHints":{"peer":[{"address":"udp://old"}]},
+              "appConfigToml":"old",
+              "error":""
+            }
+        """.trimIndent()
+        val refreshed = """
+            {
+              "error":"",
+              "appConfigToml":"new",
+              "peerHints":{"peer":[{"address":"udp://new"}]},
+              "advertisedEndpoint":"udp://new",
+              "peers":[{"npub":"peer"}],
+              "routeTargets":["10.44.0.0/16"],
+              "networkId":"mesh"
+            }
+        """.trimIndent()
+
+        assertFalse(
+            TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                vpnEnabled = true,
+                observedConfigJson = observed,
+                currentConfigJson = refreshed,
+            ),
         )
     }
 }

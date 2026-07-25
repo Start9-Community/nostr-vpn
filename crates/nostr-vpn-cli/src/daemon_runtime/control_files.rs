@@ -5,6 +5,67 @@ pub(crate) fn daemon_pid_file_path(config_path: &Path) -> PathBuf {
     parent.join("daemon.pid")
 }
 
+pub(crate) fn daemon_instance_lock_file_path(config_path: &Path) -> PathBuf {
+    let parent = config_path
+        .parent()
+        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
+    parent.join("daemon.instance.lock")
+}
+
+pub(crate) struct DaemonInstanceLock {
+    _file: fs::File,
+}
+
+pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonInstanceLock> {
+    let lock_path = daemon_instance_lock_file_path(config_path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut options = runtime_open_options_no_follow();
+    options.create(true).read(true).write(true);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // A zero share mode makes opening the same lock file fail until the
+        // first daemon drops its handle.
+        options.share_mode(0);
+    }
+
+    let file = options.open(&lock_path).map_err(|error| {
+        anyhow!(
+            "daemon already running or instance lock {} is unavailable: {}",
+            lock_path.display(),
+            error
+        )
+    })?;
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(0o666))
+        .with_context(|| {
+            format!(
+                "failed to set daemon instance lock permissions on {}",
+                lock_path.display()
+            )
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(anyhow!(
+                "daemon already running for config {}: {}",
+                config_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    Ok(DaemonInstanceLock { _file: file })
+}
+
 pub(crate) fn visible_daemon_state_for_status(
     running: bool,
     state: Option<&DaemonRuntimeState>,
@@ -198,6 +259,13 @@ pub(crate) fn daemon_control_file_path(config_path: &Path) -> PathBuf {
     parent.join("daemon.control")
 }
 
+pub(crate) fn daemon_control_ready_file_path(config_path: &Path) -> PathBuf {
+    let parent = config_path
+        .parent()
+        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
+    parent.join("daemon.control.ready")
+}
+
 pub(crate) fn daemon_control_result_file_path(config_path: &Path) -> PathBuf {
     let parent = config_path
         .parent()
@@ -336,6 +404,48 @@ pub(crate) fn clear_daemon_control_result(config_path: &Path) {
     let _ = fs::remove_file(daemon_control_result_file_path(config_path));
 }
 
+pub(crate) fn clear_daemon_control_ready(config_path: &Path) {
+    let _ = fs::remove_file(daemon_control_ready_file_path(config_path));
+}
+
+pub(crate) fn write_daemon_control_ready(config_path: &Path, pid: u32) -> Result<()> {
+    let ready_file = daemon_control_ready_file_path(config_path);
+    if let Some(parent) = ready_file.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    write_runtime_file_atomically(&ready_file, format!("{pid}\n").as_bytes())
+        .with_context(|| format!("failed to write {}", ready_file.display()))?;
+    set_daemon_runtime_file_permissions(&ready_file)?;
+    Ok(())
+}
+
+pub(crate) fn daemon_control_ready_for_pid(config_path: &Path, pid: u32) -> bool {
+    fs::read_to_string(daemon_control_ready_file_path(config_path))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        == Some(pid)
+}
+
+pub(crate) fn wait_for_daemon_control_ready(
+    config_path: &Path,
+    pid: u32,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if daemon_control_ready_for_pid(config_path, pid) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(anyhow!(
+        "daemon process {pid} did not become ready for control requests within {}s",
+        timeout.as_secs()
+    ))
+}
+
 pub(crate) fn write_daemon_control_result(
     config_path: &Path,
     request: DaemonControlRequest,
@@ -470,6 +580,18 @@ pub(crate) fn apply_config_via_running_daemon(
 
         return Err(anyhow!("daemon: not running"));
     }
+    let pid = status
+        .pid
+        .ok_or_else(|| anyhow!("daemon: running process has no pid"))?;
+    // A service process is visible to launchd/process scans before its config,
+    // tunnel, and control loop are initialized. Waiting for this pid-specific
+    // marker prevents a startup request from being mistaken for stale state
+    // and deleted by daemon initialization.
+    wait_for_daemon_control_ready(
+        config_path,
+        pid,
+        crate::daemon_control_ack_timeout(DaemonControlRequest::Reload),
+    )?;
 
     clear_daemon_control_result(config_path);
     stage_daemon_config_apply(config_path, source_path)?;

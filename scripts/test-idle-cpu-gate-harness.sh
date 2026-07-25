@@ -186,17 +186,26 @@ grep -Fq './scripts/mobile-android-smoke.sh --vpn-cycle --create-network' "$RELE
   || fail "release gate does not run the Android background active-VPN idle CPU smoke"
 grep -Fq 'run_android_activity_lifecycle_gate' "$MOBILE_ANDROID_SMOKE" \
   || fail "Android physical smoke does not verify Activity background/foreground survival"
-grep -Fq 'NVPN_ANDROID_PACKAGE="fi.siriusbusiness.nvpn.releasegate"' "$RELEASE_GATE" \
-  || fail "release gate Android smoke does not use an isolated package"
+if grep -Fq 'fi.siriusbusiness.nvpn.releasegate' "$RELEASE_GATE"; then
+  fail "release gate still installs a parallel Android package"
+fi
+grep -Fq 'NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1' "$RELEASE_GATE" \
+  || fail "release gate canonical Android smoke is not signed for in-place replacement"
+grep -Fq 'remove_stale_nvpn_packages' "$MOBILE_ANDROID_SMOKE" \
+  || fail "Android smoke does not remove stale parallel nVPN packages"
 grep -Fq 'release_gate_select_android_idle_serial' "$RELEASE_GATE" \
   || fail "release gate does not isolate Android idle sampling from shared emulators"
 grep -Fq 'NVPN_ANDROID_SERIAL="$android_idle_serial"' "$RELEASE_GATE" \
   || fail "release gate Android idle smoke does not pin its selected device"
-grep -Fq 'env NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT"' "$RELEASE_GATE" \
-  || fail "release gate WireGuard exit smoke does not use the active Android overlay CPU bound"
+grep -Fq 'NVPN_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT"' "$RELEASE_GATE" \
+  || fail "release gate Android active-overlay smoke does not use its CPU bound"
+grep -Fq 'env NVPN_IDLE_CPU_GATE=0' "$RELEASE_GATE" \
+  || fail "release gate repeats physical idle sampling inside the WireGuard exit smoke"
 grep -Fq 'environmentVariable("NVPN_ANDROID_PACKAGE")' "$ROOT_DIR/android/app/build.gradle.kts" \
   || fail "Android Gradle application id cannot follow the smoke package override"
-grep -Fq 'ACTION_PACKAGE_NAME="${NVPN_ANDROID_ACTION_PACKAGE:-${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}}"' "$MOBILE_ANDROID_SMOKE" \
+grep -Fq 'CANONICAL_PACKAGE_NAME="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"' "$MOBILE_ANDROID_SMOKE" \
+  || fail "Android smoke does not define the canonical action namespace"
+grep -Fq 'ACTION_PACKAGE_NAME="${NVPN_ANDROID_ACTION_PACKAGE:-$CANONICAL_PACKAGE_NAME}"' "$MOBILE_ANDROID_SMOKE" \
   || fail "Android smoke action name incorrectly follows the overridable package id"
 grep -Fq 'OwnerUid: $PACKAGE_UID' "$MOBILE_ANDROID_SMOKE" \
   || fail "Android smoke VPN state is not scoped to the candidate package uid"
@@ -204,6 +213,8 @@ grep -Fq '$1 ~ /^emulator-/' "$MOBILE_ANDROID_SMOKE" \
   || fail "Android smoke does not prefer an isolated emulator over a physical device"
 grep -Fq 'NVPN_IDLE_CPU_SAMPLE_SECONDS:-60' "$RELEASE_GATE" \
   || fail "release gate does not cover a full mDNS cadence in CPU samples"
+grep -Fq 'NVPN_IDLE_CPU_SETTLE_SECONDS:-15' "$RELEASE_GATE" \
+  || fail "release gate does not exclude the Android tunnel startup/probe tail before CPU sampling"
 grep -Fq 'env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release' "$RELEASE_GATE" \
   || fail "release gate does not measure an optimized macOS app candidate"
 grep -Fq 'run_macos_daemon_idle_cpu_gate' "$RELEASE_GATE" \

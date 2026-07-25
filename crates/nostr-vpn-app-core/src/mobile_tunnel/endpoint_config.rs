@@ -162,16 +162,7 @@ fn fips_address_hints(
             let hints = endpoints
                 .into_iter()
                 .filter_map(|endpoint| {
-                    // Validate the host:port part but keep the transport tag, so
-                    // tcp: bootstrap addresses survive into the peer config.
-                    let (transport, rest) = split_peer_transport_addr(endpoint.trim());
-                    let hint = PeerEndpointHint::udp(rest);
-                    peer_endpoint_hint_addr(&hint).map(|addr| {
-                        let addr = if transport == "udp" {
-                            addr
-                        } else {
-                            format!("{transport}:{addr}")
-                        };
+                    normalize_fips_transport_address(&endpoint).map(|addr| {
                         FipsPeerAddressHint {
                             priority: FIPS_STATIC_PEER_ENDPOINT_PRIORITY,
                             addr,
@@ -225,14 +216,19 @@ pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> 
     let include_non_roster_transit = mobile.connect_to_non_roster_fips_peers
         || mobile.join_requests_enabled
         || mobile.device_approval_pending
-        || join_request_pending;
+        || join_request_pending
+        || !mobile.websocket_seed_urls.is_empty();
     let nostr_enabled = mobile_nostr_enabled(mobile);
     config.node.discovery.nostr.enabled = nostr_enabled;
     // Publish only the generic `udp:nat` overlay advert so roster peers can
     // bootstrap encrypted traversal offers to mobile nodes. LAN addresses are
     // not placed in that public advert; when enabled, they are carried inside
     // encrypted traversal signaling/control frames.
-    config.node.discovery.nostr.advertise = nostr_enabled;
+    // A pending approval already carries the joiner's FIPS identity (the app
+    // npub), so roster delivery routes by identity through configured transit.
+    // Do not publish an advert merely to complete approval. Once roster peers
+    // exist, adverts remain enabled to seek the preferred direct VPN path.
+    config.node.discovery.nostr.advertise = nostr_enabled && !mobile.peers.is_empty();
     config.node.discovery.nostr.policy = if include_non_roster_transit {
         NostrDiscoveryPolicy::Open
     } else {
@@ -651,7 +647,10 @@ mod endpoint_config_tests {
         let config = fips_endpoint_config("nostr-vpn:pending", &mobile);
 
         assert!(config.node.discovery.nostr.enabled);
-        assert!(config.node.discovery.nostr.advertise);
+        assert!(
+            !config.node.discovery.nostr.advertise,
+            "the approval npub must route without a FIPS advert"
+        );
         assert_eq!(
             config.node.discovery.nostr.policy,
             NostrDiscoveryPolicy::Open

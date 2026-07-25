@@ -57,17 +57,22 @@
   <body>
     <main>
       <h1>Nostr VPN Privacy Policy</h1>
-      <p class="updated">Effective April 29, 2026</p>
+      <p class="updated">Effective July 23, 2026</p>
 
       <p>
-        Nostr VPN is a private VPN and generic WireGuard exit-node utility, not a
-        public VPN, anonymity, stealth, or consumer internet proxy service. It uses
-        FIPS private mesh tunnels between devices and services you choose, and can
-        route traffic through WireGuard exit nodes you configure.
+        Nostr VPN creates private FIPS mesh tunnels between devices and services
+        you choose and can route traffic through trusted peers or WireGuard exit
+        nodes you configure. Some non-iOS editions also include a Cashu wallet
+        and can discover user-operated paid exit nodes. The iOS App Store edition
+        does not expose the Cashu wallet or paid VPN access.
       </p>
 
       <h2>Data Used to Operate the VPN</h2>
-      <p>Nostr VPN processes the following data to create and maintain VPN connections:</p>
+      <p>
+        Nostr VPN processes the following data on your device, and sends only
+        the data needed to endpoints you choose, to create and maintain VPN
+        connections:
+      </p>
       <ul>
         <li>your Nostr public key, device name, network membership, and peer list;</li>
         <li>tunnel addresses, FIPS peer endpoints, and routing choices;</li>
@@ -75,21 +80,56 @@
         <li>traffic counters and health information shown in the app.</li>
       </ul>
       <p>
-        Private keys and local configuration are stored on your device. Packet traffic inside the VPN
-        tunnel is encrypted. When you use an exit node, FIPS relay/bridge path, Nostr relay, or
-        peer-operated device, that operator receives the data needed to provide the service you asked
-        to use.
+        Private keys and local configuration are stored on your device. On Apple
+        devices, supported secrets are stored in Keychain. Packet traffic inside
+        the VPN tunnel is encrypted. When you use an exit node, FIPS relay or
+        bridge path, Nostr relay, or peer-operated device, that operator receives
+        the data needed to provide the connection you asked to use and handles it
+        under its own privacy policy. These are independently operated endpoints
+        selected or configured by you, not data processors acting for Sirius
+        Business Oy.
       </p>
 
-      <h2>How the Data Is Used</h2>
+      <h2>Cashu Wallet</h2>
       <p>
-        Nostr VPN uses VPN data only to operate the VPN features you configure, including discovery,
-        pairing, routing, peer connectivity, and exit-node operation.
+        On supported non-iOS editions, the optional Cashu wallet is non-custodial
+        software. You choose the Cashu mints you use; Sirius Business Oy does not
+        operate a mint or exchange, choose a mint for you, or hold your funds.
+        The wallet seed and proofs are stored locally in the platform's secure
+        credential store where supported. The iOS App Store edition does not
+        expose the Cashu wallet.
       </p>
       <p>
-        The developer does not sell VPN data and does not use or disclose VPN data to third parties
-        for any purpose. The app only transmits the connection data needed to the peers, FIPS
-        discovery/rendezvous relays, bridge paths, and exit nodes you choose to operate your VPN.
+        Using the wallet sends the protocol requests, tokens, invoices, and
+        transaction details needed for the action to the mint you selected. That
+        mint can also receive ordinary connection information such as your IP
+        address and request time and handles data under its own terms. On
+        platforms that offer optional fiat conversion, enabling it requests
+        public exchange rates from Coinbase and Kraken, which receive ordinary
+        connection metadata.
+      </p>
+
+      <h2>How Data Is Used and Shared</h2>
+      <p>
+        Nostr VPN uses VPN data only on your device and in transit to operate the
+        VPN features you configure, including discovery, pairing, routing, peer
+        connectivity, and exit-node operation.
+      </p>
+      <p>
+        Sirius Business Oy does not collect or retain your browsing traffic,
+        private mesh traffic, VPN connection data, wallet balance, or Cashu
+        tokens. It does not sell, use, or disclose VPN data to third parties for
+        any purpose. The app has no advertising or tracking service and no
+        developer-operated VPN relay, exit, or wallet service.
+      </p>
+      <p>
+        Data the app sends to peers, relays, bridge paths, exit nodes, mints, and
+        other endpoints is a transmission you direct to provide a feature you
+        selected; Sirius Business Oy does not receive or disclose that data.
+        Sirius Business Oy does not provide VPN data to service providers or
+        partners. If that changes, this policy will identify the provider and
+        require protection equal to or greater than this policy before data is
+        shared.
       </p>
 
       <h2>Analytics and Tracking</h2>
@@ -101,14 +141,25 @@
 
       <h2>Your Choices</h2>
       <p>
-        You choose which networks, FIPS discovery/rendezvous relays, peers, routes, and exit nodes to use. You
-        can remove peers, leave networks, stop the VPN tunnel, or delete the app to remove local app
-        data from your device.
+        You choose which networks, FIPS discovery and rendezvous relays, peers,
+        routes, exit nodes, and Cashu mints to use. You can remove peers, leave
+        networks, stop the VPN tunnel, or remove mints at any time to stop the
+        corresponding processing and transmissions.
+      </p>
+      <p>
+        Configuration and identity data remain on your device until you remove
+        them or erase the app's local data. Deleting the app removes its ordinary
+        local files, although platform Keychain or secure-storage records can
+        persist independently. Cashu transfers can be irreversible; on editions
+        with a wallet, move any remaining value before erasing wallet data.
+        Independently operated endpoints may retain data under their own
+        policies. Sirius Business Oy has no server-side copy of VPN or wallet
+        data to delete.
       </p>
 
-      <h2>Contact</h2>
+      <h2 id="privacy-contact">Contact</h2>
       <p>
-        For privacy questions, contact
+        For privacy questions or help exercising these choices, contact
         <a href="mailto:nostrvpn@siriusbusiness.fi">nostrvpn@siriusbusiness.fi</a>.
       </p>
     </main>

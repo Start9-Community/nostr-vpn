@@ -29,7 +29,9 @@ EOF
 
 latest_ios_runtime() {
   xcrun simctl list runtimes available |
-    sed -n 's/.*(\(com\.apple\.CoreSimulator\.SimRuntime\.iOS-[^)]*\)).*/\1/p' |
+    sed -n -E \
+      -e 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.iOS-[^[:space:]]*).*/\1/p' \
+      -e 's/.*\((com\.apple\.CoreSimulator\.SimRuntime\.iOS-[^)]*)\).*/\1/p' |
     tail -n 1
 }
 

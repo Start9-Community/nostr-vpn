@@ -25,6 +25,9 @@ fn append_setup_choices(app: &AppRef, page: &gtk::Box) {
     }
     choices.append(&create);
     let join = icon_text_button("Join Network", "go-down-symbolic");
+    join.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-choose-join",
+    )]);
     {
         let app = app.clone();
         join.connect_clicked(move |_| {
@@ -113,6 +116,16 @@ fn append_join_network_card(
     }
 
     let manual = gtk::Expander::new(Some("Manual join"));
+    manual.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-expander",
+    )]);
+    manual.set_expanded(app.borrow().manual_join_expanded);
+    {
+        let app = app.clone();
+        manual.connect_expanded_notify(move |manual| {
+            app.borrow_mut().manual_join_expanded = manual.is_expanded();
+        });
+    }
     let manual_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let help = gtk::Label::new(Some(
         "Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too.",
@@ -136,6 +149,9 @@ fn append_join_network_card(
     own_row.append(&copy_own);
     manual_body.append(&own_row);
     let admin = entry("Admin Device ID", &app.borrow().drafts.manual_admin_npub);
+    admin.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-admin-id",
+    )]);
     {
         let app = app.clone();
         admin.connect_changed(move |entry| {
@@ -144,6 +160,9 @@ fn append_join_network_card(
     }
     manual_body.append(&admin);
     let mesh = entry("Network ID", &app.borrow().drafts.manual_mesh_id);
+    mesh.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-network-id",
+    )]);
     {
         let app = app.clone();
         mesh.connect_changed(move |entry| {
@@ -152,6 +171,9 @@ fn append_join_network_card(
     }
     manual_body.append(&mesh);
     let add_manual = icon_text_button("Add manually", "list-add-symbolic");
+    add_manual.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-submit",
+    )]);
     {
         let app = app.clone();
         add_manual.connect_clicked(move |_| {
@@ -170,6 +192,7 @@ fn append_join_network_card(
                 let mut model = app.borrow_mut();
                 model.drafts.manual_admin_npub.clear();
                 model.drafts.manual_mesh_id.clear();
+                model.manual_join_expanded = false;
             }
             dispatch(
                 &app,
@@ -365,6 +388,9 @@ fn append_link_device_card(app: &AppRef, page: &gtk::Box, network: &NativeNetwor
 
     let manual = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let npub = entry("Joiner's Device ID", &app.borrow().drafts.participant_npub);
+    npub.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-admin-device-id",
+    )]);
     {
         let app = app.clone();
         npub.connect_changed(move |entry| {
@@ -372,6 +398,9 @@ fn append_link_device_card(app: &AppRef, page: &gtk::Box, network: &NativeNetwor
         });
     }
     let alias = entry("Name", &app.borrow().drafts.participant_alias);
+    alias.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-admin-device-name",
+    )]);
     alias.set_width_chars(16);
     {
         let app = app.clone();
@@ -380,6 +409,9 @@ fn append_link_device_card(app: &AppRef, page: &gtk::Box, network: &NativeNetwor
         });
     }
     let add = icon_text_button("Add", "list-add-symbolic");
+    add.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-admin-submit",
+    )]);
     {
         let app = app.clone();
         let network_id = network.id.clone();

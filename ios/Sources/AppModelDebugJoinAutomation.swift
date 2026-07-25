@@ -1,6 +1,43 @@
 import Foundation
 
 extension AppModel {
+    func runDebugStartJoinAdvertising(resultName: String) async {
+        #if DEBUG
+        let startedAt = Date()
+        dispatch(
+            NativeActions.startJoinRequestBroadcast(),
+            status: "Advertising nearby"
+        )
+        var result: [String: Any] = [
+            "ok": false,
+            "phase": "waiting",
+            "startedAt": ISO8601DateFormatter().string(from: startedAt),
+        ]
+        writeDebugProbeResult(result, name: resultName)
+        let deadline = startedAt.addingTimeInterval(15)
+        while Date() < deadline {
+            let status = await vpnController.statusRawValue()
+            if state.joinRequestBroadcastActive, status == 3 {
+                result["ok"] = true
+                result["phase"] = "finished"
+                result["packetTunnelStatusRawValue"] = status
+                result["joinRequestBroadcastActive"] = true
+                result["elapsedMs"] = Self.elapsedMilliseconds(since: startedAt)
+                writeDebugProbeResult(result, name: resultName)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        result["phase"] = "finished"
+        result["error"] = state.error.isEmpty
+            ? "join advertising did not start a connected packet tunnel"
+            : state.error
+        result["packetTunnelStatusRawValue"] = await vpnController.statusRawValue() ?? -1
+        result["joinRequestBroadcastActive"] = state.joinRequestBroadcastActive
+        writeDebugProbeResult(result, name: resultName)
+        #endif
+    }
+
     func selectDebugNetworkIfPresent(arguments: [String]) -> Bool {
         #if DEBUG
         guard let meshNetworkId = Self.base64DebugArgument(

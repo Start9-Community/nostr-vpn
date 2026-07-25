@@ -31,6 +31,7 @@ fn refresh_header(app: &AppRef, state: &NativeAppState) {
 }
 
 fn render(app: &AppRef) {
+    app.borrow_mut().render_pending = false;
     sync_selected_device(app);
 
     let (sidebar, update_bar, content, state, page, rendered_page) = {

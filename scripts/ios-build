@@ -11,7 +11,7 @@ if [[ -n "${NVPN_IOS_ASC_ROOT:-}" && -z "${NVPN_ASC_ROOT:-}" ]]; then
   export NVPN_ASC_ROOT="$NVPN_IOS_ASC_ROOT"
 fi
 load_appstoreconnect_defaults
-resolve_shared_build_metadata "$ROOT"
+resolve_ios_build_metadata "$ROOT"
 
 IOS_DIR="$ROOT/ios"
 DIST_DIR="$ROOT/dist/ios"
@@ -22,7 +22,8 @@ PROJECT="$IOS_DIR/NostrVpnIos.xcodeproj"
 SCHEME="${NVPN_IOS_SCHEME:-NostrVpnIos}"
 CONFIGURATION="${NVPN_IOS_CONFIGURATION:-Release}"
 MIN_VERSION="${NVPN_IOS_MIN_VERSION:-17.0}"
-TEAM_ID="${NVPN_IOS_TEAM_ID:-J8PPJKD7TA}"
+: "${NVPN_IOS_TEAM_ID:?NVPN_IOS_TEAM_ID is required in the private release environment}"
+TEAM_ID="$NVPN_IOS_TEAM_ID"
 BUNDLE_ID="${NVPN_IOS_BUNDLE_ID:-$NVPN_DEFAULT_IOS_BUNDLE_ID}"
 PACKET_TUNNEL_BUNDLE_ID="${NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID:-$BUNDLE_ID.PacketTunnel}"
 APP_GROUP_IDENTIFIER="${NVPN_IOS_APP_GROUP_IDENTIFIER:-group.$BUNDLE_ID.shared}"
@@ -48,8 +49,10 @@ env (read from .env.release.local or shell):
   NVPN_ASC_AUTH_KEY_PATH         App Store Connect API key .p8
   NVPN_ASC_AUTH_KEY_ID           Key ID
   NVPN_ASC_AUTH_KEY_ISSUER_ID    Issuer ID
-  NVPN_IOS_TEAM_ID               Apple developer team id (default J8PPJKD7TA)
+  NVPN_IOS_TEAM_ID               Apple developer team id (required)
   NVPN_IOS_BUNDLE_ID             App bundle id (default fi.siriusbusiness.nvpn)
+  NVPN_IOS_BUILD_NUMBER          positive integer override for the tracked
+                                 ios/app-store-build-number
   NVPN_IOS_EXPORT_SIGNING_CERTIFICATE
                                   export signing certificate (default from profile env)
   NVPN_ITMS_TRANSPORTER          iTMSTransporter path

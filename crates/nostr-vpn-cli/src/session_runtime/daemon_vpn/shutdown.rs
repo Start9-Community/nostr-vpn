@@ -33,6 +33,7 @@ pub(super) async fn shutdown_daemon_vpn(shutdown: DaemonVpnShutdown<'_>) -> Resu
             .summary(shutdown.network_changed_at, shutdown.captive_portal),
     );
     let _ = write_daemon_state(shutdown.state_file, &final_state);
+    clear_daemon_control_ready(shutdown.config_path);
     remove_current_daemon_pid_record(shutdown.pid_file);
     Ok(())
 }

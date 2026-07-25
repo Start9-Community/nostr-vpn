@@ -33,6 +33,13 @@ internal fun ExitDnsSettingsCard(
     var throughExitServers by remember(state.exitDnsThroughExitServers) {
         mutableStateOf(state.exitDnsThroughExitServers)
     }
+    val validationError = exitDnsValidationError(
+        mode = mode,
+        provider = provider,
+        customUrl = customUrl,
+        bootstrapIps = bootstrapIps,
+        throughExitServers = throughExitServers,
+    )
 
     AppCard {
         Text("Exit DNS", style = MaterialTheme.typography.titleMedium)
@@ -49,6 +56,7 @@ internal fun ExitDnsSettingsCard(
             ),
             selected = mode,
             onSelect = { mode = it },
+            selectorPrefix = "exit-dns-mode",
         )
         when (mode) {
             "encrypted" -> {
@@ -60,21 +68,34 @@ internal fun ExitDnsSettingsCard(
                     ),
                     selected = provider,
                     onSelect = { provider = it },
+                    selectorPrefix = "exit-dns-provider",
                 )
                 if (provider == "custom") {
                     OutlinedTextField(
                         customUrl,
                         { customUrl = it },
-                        Modifier.fillMaxWidth(),
+                        Modifier
+                            .fillMaxWidth()
+                            .mobileUiSelector(
+                                id = "exit-dns-custom-url",
+                                description = "Custom DNS over HTTPS URL",
+                            ),
                         label = { Text("HTTPS DoH URL") },
                         singleLine = true,
+                        isError = customUrl.isBlank(),
                     )
                     OutlinedTextField(
                         bootstrapIps,
                         { bootstrapIps = it },
-                        Modifier.fillMaxWidth(),
+                        Modifier
+                            .fillMaxWidth()
+                            .mobileUiSelector(
+                                id = "exit-dns-custom-bootstrap-ips",
+                                description = "Custom DNS bootstrap IPs",
+                            ),
                         label = { Text("Bootstrap IPs") },
                         singleLine = true,
+                        isError = bootstrapIps.isBlank(),
                     )
                 }
             }
@@ -82,9 +103,15 @@ internal fun ExitDnsSettingsCard(
                 OutlinedTextField(
                     throughExitServers,
                     { throughExitServers = it },
-                    Modifier.fillMaxWidth(),
+                    Modifier
+                        .fillMaxWidth()
+                        .mobileUiSelector(
+                            id = "exit-dns-through-exit-servers",
+                            description = "DNS through exit server IPs",
+                        ),
                     label = { Text("DNS server IPs") },
                     singleLine = true,
+                    isError = throughExitServers.isBlank(),
                 )
                 Text(
                     "These DNS packets are sent only through the selected exit.",
@@ -98,17 +125,35 @@ internal fun ExitDnsSettingsCard(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Button(onClick = {
-            dispatch(
-                NativeActions.updateSettings(
-                    "exitDnsMode" to mode,
-                    "exitDnsDohProvider" to provider,
-                    "exitDnsCustomDohUrl" to customUrl,
-                    "exitDnsCustomDohBootstrapIps" to bootstrapIps,
-                    "exitDnsThroughExitServers" to throughExitServers,
+        if (validationError != null) {
+            Text(
+                validationError,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.mobileUiSelector(
+                    id = "exit-dns-validation-error",
+                    description = "Exit DNS validation error: $validationError",
                 ),
             )
-        }) {
+        }
+        Button(
+            onClick = {
+                dispatch(
+                    NativeActions.updateSettings(
+                        "exitDnsMode" to mode,
+                        "exitDnsDohProvider" to provider,
+                        "exitDnsCustomDohUrl" to customUrl,
+                        "exitDnsCustomDohBootstrapIps" to bootstrapIps,
+                        "exitDnsThroughExitServers" to throughExitServers,
+                    ),
+                )
+            },
+            enabled = validationError == null,
+            modifier = Modifier.mobileUiSelector(
+                id = "exit-dns-save",
+                description = "Save Exit DNS",
+            ),
+        ) {
             Text("Save Exit DNS")
         }
     }
@@ -119,20 +164,51 @@ private fun ChoiceButtons(
     choices: List<Pair<String, String>>,
     selected: String,
     onSelect: (String) -> Unit,
+    selectorPrefix: String,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         choices.forEach { (value, label) ->
             if (selected == value) {
                 Button(
                     onClick = { onSelect(value) },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .mobileUiSelector(
+                            id = "$selectorPrefix-$value",
+                            description = "$label Exit DNS option",
+                        ),
                 ) { Text(label) }
             } else {
                 OutlinedButton(
                     onClick = { onSelect(value) },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .mobileUiSelector(
+                            id = "$selectorPrefix-$value",
+                            description = "$label Exit DNS option",
+                        ),
                 ) { Text(label) }
             }
         }
     }
 }
+
+internal fun exitDnsValidationError(
+    mode: String,
+    provider: String,
+    customUrl: String,
+    bootstrapIps: String,
+    throughExitServers: String,
+): String? =
+    when {
+        mode == "encrypted" && provider == "custom" && customUrl.isBlank() ->
+            "Enter an HTTPS DoH URL."
+        mode == "encrypted" && provider == "custom" &&
+            !customUrl.trim().startsWith("https://", ignoreCase = true) ->
+            "DoH URL must use HTTPS."
+        mode == "encrypted" && provider == "custom" && bootstrapIps.isBlank() ->
+            "Enter at least one bootstrap IP."
+        mode == "through_exit" && throughExitServers.isBlank() ->
+            "Enter at least one DNS server IP."
+        else -> null
+    }

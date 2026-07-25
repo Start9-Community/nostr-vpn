@@ -1,8 +1,12 @@
 package org.nostrvpn.app
 
+import org.json.JSONArray
+import org.json.JSONObject
+
 internal object TunnelRefreshPolicy {
     private val networkActions = setOf(
         "import_join_request",
+        "start_join_request_broadcast",
         "manual_add_network",
         "add_network",
         "rename_network",
@@ -20,6 +24,7 @@ internal object TunnelRefreshPolicy {
     )
 
     private val tunnelSettingKeys = setOf(
+        "internetSource",
         "listenPort",
         "endpoint",
         "relays",
@@ -50,6 +55,77 @@ internal object TunnelRefreshPolicy {
     fun requiresTunnelRefresh(type: String, updateSettingKeys: Set<String> = emptySet()): Boolean =
         type in networkActions ||
             (type == "update_settings" && updateSettingKeys.any(tunnelSettingKeys::contains))
+}
+
+internal object TunnelConfigRefreshPolicy {
+    private val restartFields = listOf(
+        "identityNsec",
+        "nodeName",
+        "networkId",
+        "joinSecret",
+        "localAddress",
+        "listenPort",
+        "mtu",
+        "peers",
+        "bootstrapPeers",
+        "routeTargets",
+        "nostrRelays",
+        "websocketSeedUrls",
+        "stunServers",
+        "shareLocalCandidates",
+        "connectToNonRosterFipsPeers",
+        "nostrDiscoveryEnabled",
+        "webrtcEnabled",
+        "excludedRoutes",
+        "dnsServers",
+        "magicDnsServer",
+        "dnsMatchDomains",
+        "exitDns",
+        "wireguardExit",
+        "joinRequestsEnabled",
+        "deviceApprovalPending",
+        "pendingJoinRequestRecipient",
+        "pendingJoinSecret",
+    )
+
+    fun requiresAsyncRefresh(
+        vpnEnabled: Boolean,
+        observedConfigJson: String,
+        currentConfigJson: String,
+    ): Boolean =
+        vpnEnabled &&
+            currentConfigJson.isNotBlank() &&
+            stableFingerprint(currentConfigJson) != stableFingerprint(observedConfigJson)
+
+    internal fun stableFingerprint(configJson: String): String =
+        runCatching {
+            val config = JSONObject(configJson)
+            val selected = JSONObject()
+            for (field in restartFields) {
+                if (config.has(field)) {
+                    selected.put(field, config.get(field))
+                }
+            }
+            canonicalJson(selected)
+        }.getOrDefault(configJson)
+
+    private fun canonicalJson(value: Any?): String =
+        when (value) {
+            null, JSONObject.NULL -> "null"
+            is JSONObject -> value.keys().asSequence().toList().sorted().joinToString(
+                prefix = "{",
+                postfix = "}",
+            ) { key ->
+                "${JSONObject.quote(key)}:${canonicalJson(value.get(key))}"
+            }
+            is JSONArray -> (0 until value.length()).joinToString(
+                prefix = "[",
+                postfix = "]",
+            ) { index -> canonicalJson(value.get(index)) }
+            is String -> JSONObject.quote(value)
+            is Number, is Boolean -> value.toString()
+            else -> JSONObject.quote(value.toString())
+        }
 }
 
 internal enum class TunnelServiceCommand {

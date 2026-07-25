@@ -2,7 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  expectedStartosVersion,
   readStartosSourceVersion,
+  resolveStartosRevision,
   resolveStartosTarget,
   startosReleaseAssetName,
   validateStartosManifest,
@@ -29,6 +31,10 @@ test('startosReleaseAssetName includes the release tag and architecture', () => 
     startosReleaseAssetName('v4.0.97', 'aarch64'),
     'nostr-vpn-v4.0.97-startos-aarch64.s9pk',
   )
+  assert.equal(
+    startosReleaseAssetName('v4.1.4+4001006', 'aarch64'),
+    'nostr-vpn-v4.1.4+4001006-startos-aarch64.s9pk',
+  )
 })
 
 test('readStartosSourceVersion reads the SDK version graph source', () => {
@@ -36,6 +42,17 @@ test('readStartosSourceVersion reads the SDK version graph source', () => {
     readStartosSourceVersion("export const currentVersion = VersionInfo.of({\n  version: '4.0.97:0',\n})\n"),
     '4.0.97:0',
   )
+})
+
+test('corrected tag build metadata stays separate from the StartOS revision', () => {
+  assert.equal(expectedStartosVersion('v4.1.4+4001006', 1), '4.1.4:1')
+  assert.equal(resolveStartosRevision('1', '4.1.4:0', 'v4.1.4+4001006'), 1)
+  assert.equal(resolveStartosRevision('', '4.1.4:1', 'v4.1.4+4001006'), 1)
+  assert.throws(
+    () => resolveStartosRevision('', '4.1.3:1', 'v4.1.4+4001006'),
+    /marketing version 4\.1\.3 does not match release v4\.1\.4\+4001006/,
+  )
+  assert.throws(() => resolveStartosRevision('100', '4.1.4:1', 'v4.1.4'), /revision/)
 })
 
 test('validateStartosManifest requires the v0.4 runtime, release version, and target image', () => {
@@ -64,5 +81,14 @@ test('validateStartosManifest requires the v0.4 runtime, release version, and ta
         { arch: 'x86_64', tag: 'v4.0.97' },
       ),
     /nestedRuntime is false, expected true/,
+  )
+
+  const correctedManifest = { ...manifest, version: '4.1.4:1' }
+  assert.doesNotThrow(() =>
+    validateStartosManifest(correctedManifest, {
+      arch: 'x86_64',
+      tag: 'v4.1.4+4001006',
+      revision: 1,
+    }),
   )
 })

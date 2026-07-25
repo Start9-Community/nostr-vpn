@@ -306,6 +306,7 @@ fn empty_config() -> MobileTunnelConfig {
         excluded_routes: Vec::new(),
         dns_servers: Vec::new(),
         magic_dns_server: String::new(),
+        dns_match_domains: Vec::new(),
         exit_dns: ExitDnsConfig::default(),
         wireguard_exit: None,
         join_requests_enabled: false,

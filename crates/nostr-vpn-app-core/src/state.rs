@@ -52,6 +52,12 @@ pub struct DaemonRuntimeState {
     pub tun_bytes_written: u64,
     #[serde(default, alias = "tun_packets_dropped")]
     pub tun_packets_dropped: u64,
+    #[serde(default, alias = "secure_dns_queries")]
+    pub secure_dns_queries: u64,
+    #[serde(default, alias = "secure_dns_successes")]
+    pub secure_dns_successes: u64,
+    #[serde(default, alias = "secure_dns_failures")]
+    pub secure_dns_failures: u64,
     pub peers: Vec<DaemonPeerState>,
 }
 

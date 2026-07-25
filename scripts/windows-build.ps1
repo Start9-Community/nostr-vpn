@@ -255,7 +255,9 @@ try {
     if (!$VersionTag.StartsWith("v")) {
       $VersionTag = "v$VersionTag"
     }
-    $Version = $VersionTag.TrimStart("v")
+    # The immutable release tag may carry corrected-build metadata, while the
+    # Windows installer remains on the shared product/marketing version.
+    $Version = ($VersionTag.TrimStart("v") -split '\+', 2)[0]
     $InstallerOutputDir = if ($OutputDir) { Resolve-OutputPath $OutputDir } else { Join-Path $Root "dist" }
     New-Item -ItemType Directory -Force -Path $InstallerOutputDir | Out-Null
 

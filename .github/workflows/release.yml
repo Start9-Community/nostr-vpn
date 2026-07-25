@@ -1,13 +1,13 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag to release (e.g., v4.0.0)'
+        required: true
+      locally_attested_commit:
+        description: 'Exact clean commit that passed the mandatory local physical/VM release gate'
         required: true
 
 env:
@@ -26,7 +26,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Require the exact locally gated commit
+        shell: bash
+        env:
+          LOCALLY_ATTESTED_COMMIT: ${{ github.event.inputs.locally_attested_commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [[ "${LOCALLY_ATTESTED_COMMIT}" != "${actual}" ]]; then
+            echo "::error::Local gate commit ${LOCALLY_ATTESTED_COMMIT} does not match tag commit ${actual}."
+            exit 1
+          fi
 
       - name: Reclaim runner disk for the release gate
         shell: bash
@@ -72,7 +84,7 @@ jobs:
           save-if: false
 
       - name: Use the contention-safe release scripts for v4.1.3 retries
-        if: ${{ (github.event.inputs.tag || github.ref_name) == 'v4.1.3' }}
+        if: ${{ github.event.inputs.tag == 'v4.1.3' }}
         run: |
           git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
           for script in \
@@ -96,6 +108,16 @@ jobs:
           # no configured VM and skips it without consuming build resources.
           NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE: 'auto'
           NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E: '0'
+          # The signed local release gate requires the real private desktop
+          # VMs and records their UI/elevation evidence before this tag is
+          # pushed. Hosted runners cannot reach those machines.
+          NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E: '0'
+          NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E: '0'
+          NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E: '0'
+          NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E: '0'
+          NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E: '0'
+          NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '0'
+          NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E: '0'
           # Hosted runners have no stable latency baseline. The mandatory local
           # release gate measures these and the Docker perf regression after
           # contention-sensitive joins on calibrated hardware.
@@ -132,7 +154,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -181,7 +203,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          RELEASE_VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          RELEASE_VERSION="${{ github.event.inputs.tag }}"
           TARGET="${{ matrix.target }}"
           BIN_DIR="target/${TARGET}/release"
           rm -rf dist/nvpn
@@ -245,7 +267,7 @@ jobs:
         with:
           name: cli-${{ matrix.target }}
           path: |
-            dist/nvpn-${{ github.event.inputs.tag || github.ref_name }}-${{ matrix.target }}.*
+            dist/nvpn-${{ github.event.inputs.tag }}-${{ matrix.target }}.*
             dist/nvpn-${{ matrix.target }}.tar.gz
           retention-days: 7
 
@@ -258,7 +280,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -341,7 +363,7 @@ jobs:
           NVPN_MACOS_RUST_PROFILE: release
           NVPN_MACOS_XCODE_CONFIGURATION: Release
           NVPN_MACOS_RUST_TARGETS: aarch64-apple-darwin
-          NVPN_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          NVPN_RELEASE_TAG: ${{ github.event.inputs.tag }}
           NVPN_MACOS_REQUIRE_SIGNING: '1'
           NVPN_MACOS_REQUIRE_NOTARIZATION: '1'
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -367,8 +389,8 @@ jobs:
         with:
           name: macos-arm64
           path: |
-            dist/nostr-vpn-${{ github.event.inputs.tag || github.ref_name }}-macos-arm64.dmg
-            dist/nostr-vpn-${{ github.event.inputs.tag || github.ref_name }}-macos-arm64.app.tar.gz
+            dist/nostr-vpn-${{ github.event.inputs.tag }}-macos-arm64.dmg
+            dist/nostr-vpn-${{ github.event.inputs.tag }}-macos-arm64.app.tar.gz
           retention-days: 7
 
   build-linux-app:
@@ -380,7 +402,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -425,7 +447,7 @@ jobs:
       - name: Build Linux desktop package
         run: |
           set -euo pipefail
-          RELEASE_VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          RELEASE_VERSION="${{ github.event.inputs.tag }}"
           cargo build --release --locked --manifest-path linux/Cargo.toml
           cargo build --release --locked -p nvpn
           (cd linux && cargo deb --no-build)
@@ -437,7 +459,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: dist/nostr-vpn-${{ github.event.inputs.tag || github.ref_name }}-linux-x64.deb
+          path: dist/nostr-vpn-${{ github.event.inputs.tag }}-linux-x64.deb
           retention-days: 7
 
   build-windows-app:
@@ -452,7 +474,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -476,19 +498,19 @@ jobs:
         env:
           NVPN_WINDOWS_LLVM_BIN: C:\Program Files\LLVM\bin
         run: |
-          .\scripts\windows-build.ps1 -Configuration Release -Publish -Installer -Tag "${{ github.event.inputs.tag || github.ref_name }}" -OutputDir dist
-          if (!(Test-Path "dist\nostr-vpn-${{ github.event.inputs.tag || github.ref_name }}-windows-x64-setup.exe")) {
+          .\scripts\windows-build.ps1 -Configuration Release -Publish -Installer -Tag "${{ github.event.inputs.tag }}" -OutputDir dist
+          if (!(Test-Path "dist\nostr-vpn-${{ github.event.inputs.tag }}-windows-x64-setup.exe")) {
             throw "Windows setup artifact was not produced"
           }
 
       - name: Smoke launch installed Windows app
-        run: .\scripts\windows-installer-smoke.ps1 -InstallerPath "dist\nostr-vpn-${{ github.event.inputs.tag || github.ref_name }}-windows-x64-setup.exe" -ArtifactRoot artifacts
+        run: .\scripts\windows-installer-smoke.ps1 -InstallerPath "dist\nostr-vpn-${{ github.event.inputs.tag }}-windows-x64-setup.exe" -ArtifactRoot artifacts
 
       - name: Upload native Windows app
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: dist/nostr-vpn-${{ github.event.inputs.tag || github.ref_name }}-windows-x64-setup.exe
+          path: dist/nostr-vpn-${{ github.event.inputs.tag }}-windows-x64-setup.exe
           retention-days: 7
 
   build-android-app:
@@ -497,7 +519,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event.inputs.tag }}
       ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -506,7 +528,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -568,8 +590,13 @@ jobs:
             printf 'NDK_HOME=%s\n' "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}"
           } >> "${GITHUB_ENV}"
 
-      - name: Build Android artifacts
-        run: gradle -p android :app:assembleRelease :app:bundleRelease
+      - name: Validate and build Android artifacts
+        run: >-
+          gradle -p android
+          :app:lintRelease
+          :app:testDebugUnitTest
+          :app:assembleRelease
+          :app:bundleRelease
 
       - name: Package Android artifacts
         shell: bash
@@ -614,7 +641,7 @@ jobs:
             runner: ubuntu-24.04-arm
             startos_cli_sha256: eb09a55aeb8241a6ed0a7659ed8bd5f86f950fb3b5315bc2798a05d8edd07d29
     env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event.inputs.tag }}
       STARTOS_CLI_VERSION: '0.4.0-beta.9'
     steps:
       - name: Reclaim runner disk for the StartOS image build
@@ -650,7 +677,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Install StartOS developer signing key
         shell: bash
@@ -696,7 +723,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -708,7 +735,7 @@ jobs:
         shell: bash
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         run: |
           node scripts/render-release-notes.mjs \
             --tag "${RELEASE_TAG}" \
@@ -726,9 +753,10 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
           draft: false
-          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          make_latest: true
+          prerelease: ${{ contains(github.event.inputs.tag, '-') }}
           files: artifacts/*
           body_path: release-notes.md

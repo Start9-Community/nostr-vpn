@@ -66,7 +66,7 @@ impl AppConfig {
         peers
     }
 
-    /// Clear the bootstrap/transit peer list back to the public native seeds.
+    /// Clear the bootstrap/transit peer list back to the public WebSocket seeds.
     pub fn reset_fips_bootstrap_peers(&mut self) {
         self.fips_bootstrap_peers = default_fips_bootstrap_peers();
     }
@@ -82,16 +82,10 @@ impl AppConfig {
             let npub = npub_for_pubkey_hex(&pubkey);
             let mut valid = Vec::new();
             for addr in addrs {
-                let (transport, rest) = split_peer_transport_addr(&addr);
-                if let Some(host_port) = normalize_fips_peer_endpoint_hint(&rest) {
-                    let tagged = if transport == "udp" {
-                        host_port
-                    } else {
-                        format!("{transport}:{host_port}")
-                    };
-                    if !valid.contains(&tagged) {
-                        valid.push(tagged);
-                    }
+                if let Some(address) = normalize_fips_transport_address(&addr)
+                    && !valid.contains(&address)
+                {
+                    valid.push(address);
                 }
             }
             if !valid.is_empty() {

@@ -6,7 +6,14 @@ fn refresh_now(app: &AppRef) {
     let state = core.refresh();
     let should_render = state_needs_render(&previous_state, &state);
     set_state(app, state);
-    if should_render {
+    let render_pending = app.borrow().render_pending;
+    if should_render || render_pending {
+        let editing = gtk::prelude::GtkWindowExt::focus(&app.borrow().window)
+            .is_some_and(|widget| widget.is::<gtk::Entry>() || widget.is::<gtk::TextView>());
+        if editing {
+            app.borrow_mut().render_pending = true;
+            return;
+        }
         render(app);
     }
 }
@@ -76,15 +83,11 @@ fn drain_tray_commands(app: &AppRef) {
         match command {
             tray::TrayCommand::ShowWindow => show_window(app),
             tray::TrayCommand::ToggleVpn => {
-                let enabled = app.borrow().state.vpn_enabled;
-                dispatch(
-                    app,
-                    if enabled {
-                        NativeAppAction::DisconnectVpn
-                    } else {
-                        NativeAppAction::ConnectVpn
-                    },
-                );
+                let action = {
+                    let state = &app.borrow().state;
+                    vpn_toggle_action(state)
+                };
+                dispatch(app, action);
             }
             tray::TrayCommand::ToggleExitOffer => {
                 let enabled = !app.borrow().state.advertise_exit_node;

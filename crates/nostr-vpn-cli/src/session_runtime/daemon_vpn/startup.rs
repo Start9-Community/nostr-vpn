@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct DaemonVpnStartup {
     pub(super) config_path: PathBuf,
+    pub(super) _instance_lock: DaemonInstanceLock,
     pub(super) pid_file: PathBuf,
     pub(super) network_override: Option<String>,
     pub(super) participants_override: Vec<String>,
@@ -50,6 +51,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     };
 
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
+    let instance_lock = acquire_daemon_instance_lock(&config_path)?;
     if args.service
         && let Err(error) = redirect_stdio_to_daemon_log(&config_path)
     {
@@ -61,6 +63,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     #[cfg(any(target_os = "macos", test))]
     crate::ensure_macos_connect_privileges(&config_path)?;
     ensure_no_other_daemon_processes_for_config(&config_path, std::process::id())?;
+    clear_daemon_control_ready(&config_path);
     #[cfg(target_os = "macos")]
     if let Err(error) = repair_saved_network_state(&config_path) {
         eprintln!("daemon: failed to repair saved macOS network state: {error}");
@@ -243,6 +246,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
 
     Ok(DaemonVpnStartup {
         config_path,
+        _instance_lock: instance_lock,
         pid_file,
         network_override,
         participants_override,

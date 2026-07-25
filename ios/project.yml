@@ -16,10 +16,12 @@ settings:
     # Apple uses (CFBundleShortVersionString, CFBundleVersion) as the unique
     # build key on App Store Connect. Hardcoding CURRENT_PROJECT_VERSION = 1
     # makes every TestFlight upload at the same marketing version conflict
-    # silently. NVPN_APP_VERSION_CODE is derived from the workspace version
-    # (4.0.20 -> 4000020) so each release lands a unique CFBundleVersion.
+    # silently. NVPN_APP_VERSION_CODE comes from the tracked
+    # ios/app-store-build-number (or an explicit NVPN_IOS_BUILD_NUMBER) so a
+    # corrected upload can advance CFBundleVersion without changing the Cargo
+    # or App Store marketing version.
     # All entry points (scripts/ios-build for release, tools/run-ios for
-    # debug/sim) source release_common.sh + run resolve_shared_build_metadata
+    # debug/sim) source release_common.sh + run resolve_ios_build_metadata
     # before xcodegen so both env vars resolve at project-generation time.
     # xcodegen only supports plain ${VAR} substitution — bash-style
     # ${VAR:-default} leaks through verbatim into pbxproj and breaks builds.
@@ -102,3 +104,50 @@ targets:
         embed: false
       - sdk: NetworkExtension.framework
       - sdk: SystemConfiguration.framework
+
+  NostrVpnIosUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ${NVPN_IOS_BUNDLE_ID}.UITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: NostrVpnIos
+    dependencies:
+      - target: NostrVpnIos
+
+schemes:
+  NostrVpnIos:
+    build:
+      targets:
+        NostrVpnIos: all
+        NostrVpnIosUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - NostrVpnIosUITests
+      environmentVariables:
+        NVPN_XCUITEST_RUN_ID: "$(NVPN_XCUITEST_RUN_ID)"
+        NVPN_XCUITEST_PHYSICAL_JOIN_GATE: "$(NVPN_XCUITEST_PHYSICAL_JOIN_GATE)"
+        NVPN_XCUITEST_MANUAL_ADMIN_DEVICE_ID: "$(NVPN_XCUITEST_MANUAL_ADMIN_DEVICE_ID)"
+        NVPN_XCUITEST_MANUAL_NETWORK_ID: "$(NVPN_XCUITEST_MANUAL_NETWORK_ID)"
+        NVPN_XCUITEST_MANUAL_JOINER_DEVICE_ID: "$(NVPN_XCUITEST_MANUAL_JOINER_DEVICE_ID)"
+        NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64: "$(NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64)"
+        NVPN_XCUITEST_CONNECTED_DIRECT_GATE: "$(NVPN_XCUITEST_CONNECTED_DIRECT_GATE)"
+        NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64: "$(NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64)"
+        NVPN_XCUITEST_LIFECYCLE_GATE: "$(NVPN_XCUITEST_LIFECYCLE_GATE)"
+        NVPN_XCUITEST_LIFECYCLE_RESULT_NAME: "$(NVPN_XCUITEST_LIFECYCLE_RESULT_NAME)"
+        NVPN_XCUITEST_LIFECYCLE_CYCLES: "$(NVPN_XCUITEST_LIFECYCLE_CYCLES)"
+        NVPN_XCUITEST_LIFECYCLE_BACKGROUND_DWELL_SECS: "$(NVPN_XCUITEST_LIFECYCLE_BACKGROUND_DWELL_SECS)"
+        NVPN_XCUITEST_DELIVERY_WAIT_SECS: "$(NVPN_XCUITEST_DELIVERY_WAIT_SECS)"
+        NVPN_XCUITEST_CAMERA_WAIT_SECS: "$(NVPN_XCUITEST_CAMERA_WAIT_SECS)"
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

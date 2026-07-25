@@ -148,7 +148,7 @@ fn finish_join_roster_delivery(path: &Path, recipient: &str, delivery: anyhow::R
             );
         }
         Err(error) => eprintln!(
-            "join roster was not durably applied over FIPS-TCP ({error}); retaining it for retry"
+            "join roster was not durably applied over FIPS-TCP ({error:#}); retaining it for retry"
         ),
     }
 }

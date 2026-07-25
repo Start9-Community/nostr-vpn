@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$ScriptPath,
-  [int]$TimeoutSeconds = 180
+  [int]$TimeoutSeconds = 180,
+  [switch]$CleanupConsentPrompt
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,6 +63,10 @@ try {
     throw "interactive Windows GUI e2e failed with exit code $ExitCode"
   }
 } finally {
+  if ($CleanupConsentPrompt) {
+    Get-Process consent -ErrorAction SilentlyContinue |
+      Stop-Process -Force -ErrorAction SilentlyContinue
+  }
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -Force $RunnerPath, $ResultPath -ErrorAction SilentlyContinue
 }

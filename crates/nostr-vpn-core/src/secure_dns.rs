@@ -1,4 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use hickory_proto::op::{Message, MessageType, ResponseCode};
@@ -22,6 +24,21 @@ pub const SECURE_DNS_MAX_MESSAGE_BYTES: usize = 4_096;
 pub struct SecureDnsResolver {
     client: reqwest::Client,
     endpoint: reqwest::Url,
+    counters: Arc<SecureDnsAtomicCounters>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecureDnsCounters {
+    pub queries: u64,
+    pub successes: u64,
+    pub failures: u64,
+}
+
+#[derive(Default)]
+struct SecureDnsAtomicCounters {
+    queries: AtomicU64,
+    successes: AtomicU64,
+    failures: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -79,7 +96,11 @@ impl SecureDnsResolver {
             .resolve_to_addrs(host, bootstrap)
             .build()
             .map_err(SecureDnsError::ClientBuild)?;
-        Ok(Self { client, endpoint })
+        Ok(Self {
+            client,
+            endpoint,
+            counters: Arc::new(SecureDnsAtomicCounters::default()),
+        })
     }
 
     #[cfg(test)]
@@ -93,6 +114,17 @@ impl SecureDnsResolver {
     }
 
     async fn resolve_query(&self, query: &[u8]) -> Result<Vec<u8>, SecureDnsError> {
+        self.counters.queries.fetch_add(1, Ordering::Relaxed);
+        let result = self.resolve_query_inner(query).await;
+        if result.is_ok() {
+            self.counters.successes.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.counters.failures.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn resolve_query_inner(&self, query: &[u8]) -> Result<Vec<u8>, SecureDnsError> {
         let request = validated_query(query)?;
         let mut response = self
             .client
@@ -139,6 +171,15 @@ impl SecureDnsResolver {
         Self {
             client,
             endpoint: reqwest::Url::parse(endpoint).expect("test DoH URL"),
+            counters: Arc::new(SecureDnsAtomicCounters::default()),
+        }
+    }
+
+    pub fn counters(&self) -> SecureDnsCounters {
+        SecureDnsCounters {
+            queries: self.counters.queries.load(Ordering::Relaxed),
+            successes: self.counters.successes.load(Ordering::Relaxed),
+            failures: self.counters.failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -431,6 +472,14 @@ mod tests {
             SecureDnsLookup::resolve(&resolver, &dns_query(9)).await,
             Err(SecureDnsError::Request(_))
         ));
+        assert_eq!(
+            resolver.counters(),
+            SecureDnsCounters {
+                queries: 1,
+                successes: 0,
+                failures: 1,
+            }
+        );
     }
 
     #[test]
@@ -515,6 +564,14 @@ mod tests {
 
         let response = resolver.resolve_query(&query).await.expect("DoH response");
         assert_eq!(Message::from_vec(&response).expect("DNS response").id, 912);
+        assert_eq!(
+            resolver.counters(),
+            SecureDnsCounters {
+                queries: 1,
+                successes: 1,
+                failures: 0,
+            }
+        );
         server.await.expect("fixture task");
     }
 

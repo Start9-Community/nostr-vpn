@@ -216,6 +216,7 @@ impl NativeAppRuntime {
     }
 
     fn active_paid_route_exit_ip(&self, _selected_exit_node: &str) -> Option<String> {
+        let _ = self;
         None
     }
 

@@ -165,6 +165,11 @@ pub(crate) struct MobileTunnelConfig {
     /// `MagicDNS` requires nvpn to own DNS resolution.
     #[serde(default)]
     pub(crate) magic_dns_server: String,
+    /// Empty-string means all DNS should use the tunnel. A direct/split
+    /// tunnel lists only the `MagicDNS` suffix so ordinary device DNS remains
+    /// on the underlay.
+    #[serde(default)]
+    pub(crate) dns_match_domains: Vec<String>,
     /// Shared Exit DNS policy. Existing configs deserialize to Automatic.
     #[serde(default)]
     pub(crate) exit_dns: ExitDnsConfig,
@@ -195,15 +200,22 @@ struct MobileTunnelLaunchConfig {
     queued_join_rosters: Vec<QueuedJoinRoster>,
     #[serde(default, rename = "signedRoster", skip_serializing_if = "Option::is_none")]
     signed_roster: Option<SignedRoster>,
+    // The detached iOS provider must not load or save AppConfig here. This
+    // anchor is used only to derive the private receipt sidecar and approval
+    // outbox paths that have to survive a packet-tunnel restart.
+    #[serde(default, rename = "privateStateConfigPath")]
+    private_state_config_path: String,
 }
 
 impl MobileTunnelLaunchConfig {
     fn from_data_dir(data_dir: &str) -> Result<Self> {
         let tunnel = MobileTunnelConfig::from_data_dir(data_dir)?;
         let app = mobile_app_config(&tunnel)?;
-        let queued_join_rosters = non_empty_path(&tunnel.config_path)
+        let config_path = non_empty_path(&tunnel.config_path);
+        let queued_join_rosters = config_path
+            .as_deref()
             .map(|config_path| {
-                load_join_rosters(&config_path)
+                load_join_rosters(config_path)
                     .into_iter()
                     .filter_map(|(path, queued)| {
                         if !join_roster_delivery_expired(&queued, unix_timestamp()) {
@@ -224,8 +236,23 @@ impl MobileTunnelLaunchConfig {
             tunnel,
             queued_join_rosters,
             signed_roster: mobile_admin_signed_roster(&app)?,
+            private_state_config_path: config_path
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
         })
     }
+}
+
+fn pending_join_roster_receipts_path(config_path: &Path) -> PathBuf {
+    let mut file_name = config_path
+        .file_name()
+        .map_or_else(|| "config.toml".into(), std::ffi::OsStr::to_os_string);
+    file_name.push(".pending-join-roster-receipts.json");
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(file_name)
 }
 
 fn mobile_admin_signed_roster(app: &AppConfig) -> Result<Option<SignedRoster>> {
@@ -463,12 +490,28 @@ impl MobileTunnelConfig {
             };
         let local_dns_required = wireguard_exit.is_some()
             || selected_peer_exit
-            || !app.magic_dns_suffix.trim().is_empty();
+            || (!network_id.trim().is_empty() && !app.magic_dns_suffix.trim().is_empty());
         let (dns_servers, magic_dns_server) = if local_dns_required {
             let server = nostr_vpn_core::MESH_MAGIC_DNS_SERVER.to_string();
             (vec![server.clone()], server)
         } else {
             (Vec::new(), String::new())
+        };
+        let dns_match_domains = if wireguard_exit.is_some() || selected_peer_exit {
+            vec![String::new()]
+        } else if local_dns_required {
+            let suffix = app
+                .magic_dns_suffix
+                .trim()
+                .trim_start_matches('.')
+                .to_string();
+            if suffix.is_empty() {
+                Vec::new()
+            } else {
+                vec![suffix]
+            }
+        } else {
+            Vec::new()
         };
         let (pending_join_request_recipient, pending_join_secret, pending_join_requested_at) =
             app.active_network_opt()
@@ -510,6 +553,7 @@ impl MobileTunnelConfig {
             excluded_routes,
             dns_servers,
             magic_dns_server,
+            dns_match_domains,
             exit_dns: app.exit_dns.clone(),
             wireguard_exit,
             join_requests_enabled: app.join_requests_enabled(),
@@ -586,6 +630,7 @@ pub(crate) fn tunnel_config_json(data_dir: &str) -> String {
             },
             queued_join_rosters: Vec::new(),
             signed_roster: None,
+            private_state_config_path: String::new(),
         }
     });
     launch.tunnel.redact_for_launch_configuration();
@@ -606,6 +651,7 @@ pub(crate) fn tunnel_provider_options_config_json(data_dir: &str) -> String {
             },
             queued_join_rosters: Vec::new(),
             signed_roster: None,
+            private_state_config_path: String::new(),
         }
     });
     launch.tunnel.detach_from_persisted_config_path();
@@ -618,6 +664,8 @@ pub(crate) fn tunnel_provider_options_config_json(data_dir: &str) -> String {
 }
 
 type MobileMesh = Arc<RwLock<Arc<FipsMeshRuntime>>>;
+
+include!("config/pending_join_receipts.rs");
 
 fn new_mobile_mesh(runtime: FipsMeshRuntime) -> MobileMesh {
     Arc::new(RwLock::new(Arc::new(runtime)))
@@ -647,7 +695,9 @@ pub(crate) struct MobileTunnel {
     config: Arc<RwLock<MobileTunnelConfig>>,
     app_config: Arc<RwLock<AppConfig>>,
     app_config_dirty: Arc<AtomicBool>,
+    pending_join_roster_receipts: PendingJoinRosterReceipts,
     tun_counters: Arc<MobileTunAtomicCounters>,
+    secure_dns: Option<SecureDnsResolver>,
     #[cfg(any(target_os = "android", target_os = "ios"))]
     outbound_tx: tokio_mpsc::Sender<Vec<Vec<u8>>>,
     inbound_rx: Option<tokio_mpsc::Receiver<Vec<Vec<u8>>>>,

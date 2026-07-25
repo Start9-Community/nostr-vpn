@@ -19,8 +19,10 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     let terminate_wait = std::future::pending::<()>();
     tokio::pin!(terminate_wait);
     let loop_state = initialize_daemon_vpn_loop(&args, &startup).await?;
+    write_daemon_control_ready(&startup.config_path, std::process::id())?;
     let DaemonVpnStartup {
         config_path,
+        _instance_lock,
         pid_file,
         network_override,
         participants_override,
@@ -70,10 +72,8 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     let (join_request_ipc_tx, mut join_request_ipc_rx) =
         tokio::sync::mpsc::unbounded_channel::<DaemonJoinRequestIpcRequest>();
     #[cfg(unix)]
-    let _join_request_ipc = crate::join_request_ipc::JoinRequestIpcServer::spawn(
-        &config_path,
-        join_request_ipc_tx,
-    )?;
+    let _join_request_ipc =
+        crate::join_request_ipc::JoinRequestIpcServer::spawn(&config_path, join_request_ipc_tx)?;
     #[cfg(not(unix))]
     let _join_request_ipc_keepalive = join_request_ipc_tx;
     loop {
@@ -405,10 +405,8 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 }
             }
             _ = intervals.state.tick() => {
-                // Taking the request removes the control file, which is the CLI's
-                // acknowledgement. Do this before any maintenance that may await
-                // tunnel I/O or a route refresh; the request is still applied at
-                // the normal point below, before the runtime configuration sync.
+                // Remove the CLI control file before maintenance can await I/O;
+                // apply the request below before syncing the runtime config.
                 let pending_control_request = take_daemon_control_request(&config_path);
                 if let Err(error) = app.ensure_pending_nostr_join_request(unix_timestamp()) {
                     eprintln!("daemon: failed to rotate expired join request: {error}");
@@ -478,7 +476,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         &mut app,
                         &config_path,
                         &mut vpn_status,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(drained) => {
                             #[cfg(feature = "paid-exit")]
                             let mut drained = drained;

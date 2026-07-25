@@ -708,6 +708,10 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
 
     public Task ToggleVpnAsync()
     {
+        if (!State.VpnEnabled && State.ServiceSupported && !State.ServiceInstalled)
+        {
+            return DispatchAsync(NativeActions.InstallSystemService(), "Installing service");
+        }
         return DispatchAsync(
             State.VpnEnabled ? NativeActions.DisconnectVpn() : NativeActions.ConnectVpn(),
             State.VpnEnabled ? "Turning VPN off" : "Turning VPN on");

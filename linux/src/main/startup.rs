@@ -170,6 +170,9 @@ fn build_ui(app: &adw::Application, runtime: &AppRuntime, present: bool) {
     let header_vpn_switch = gtk::Switch::new();
     header_vpn_switch.set_valign(gtk::Align::Center);
     header_vpn_switch.set_tooltip_text(Some("Toggle VPN"));
+    header_vpn_switch.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-service-toggle",
+    )]);
     header.pack_end(&header_vpn_switch);
 
     let header_status_dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -241,14 +244,11 @@ fn build_ui(app: &adw::Application, runtime: &AppRuntime, present: bool) {
             if target == current {
                 return;
             }
-            dispatch(
-                &model,
-                if target {
-                    NativeAppAction::ConnectVpn
-                } else {
-                    NativeAppAction::DisconnectVpn
-                },
-            );
+            let action = {
+                let state = &model.borrow().state;
+                vpn_toggle_action(state)
+            };
+            dispatch(&model, action);
         });
     }
     {

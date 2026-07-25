@@ -5,6 +5,7 @@ plugins {
 }
 
 import org.gradle.api.tasks.Exec
+import org.gradle.api.GradleException
 
 val repoRoot = layout.projectDirectory.dir("../..")
 val rustOutputDir = layout.projectDirectory.dir("src/main/jniLibs")
@@ -17,6 +18,10 @@ val hasReleaseSigning =
         releaseStorePassword.isPresent &&
         releaseKeyAlias.isPresent &&
         releaseKeyPassword.isPresent
+val debugUsesReleaseSigning =
+    providers.environmentVariable("NVPN_ANDROID_DEBUG_RELEASE_SIGNING")
+        .orNull
+        ?.lowercase() in setOf("1", "true", "yes", "on")
 val buildGitSha = providers.environmentVariable("NVPN_BUILD_GIT_SHA").orElse("").get()
 val buildTimestampUtc = providers.environmentVariable("NVPN_BUILD_TIMESTAMP_UTC").orElse("").get()
 val androidPackageName =
@@ -33,7 +38,7 @@ android {
         applicationId = androidPackageName
         minSdk = 26
         targetSdk = 36
-        versionCode = 40104
+        versionCode = 4010401
         versionName = "4.1.4"
         buildConfigField("String", "NVPN_BUILD_GIT_SHA", buildConfigString(buildGitSha))
         buildConfigField("String", "NVPN_BUILD_TIMESTAMP_UTC", buildConfigString(buildTimestampUtc))
@@ -48,21 +53,36 @@ android {
     val updatePollSeconds =
         providers.environmentVariable("NVPN_UPDATE_POLL_SECONDS").orNull?.toLongOrNull() ?: 0L
 
+    val releaseSigningConfig =
+        if (hasReleaseSigning) {
+            signingConfigs.create("release") {
+                storeFile = file(releaseStoreFile.get())
+                storePassword = releaseStorePassword.get()
+                keyAlias = releaseKeyAlias.get()
+                keyPassword = releaseKeyPassword.get()
+            }
+        } else {
+            null
+        }
+    if (debugUsesReleaseSigning && releaseSigningConfig == null) {
+        throw GradleException(
+            "NVPN_ANDROID_DEBUG_RELEASE_SIGNING requires the Android release keystore variables",
+        )
+    }
+
     buildTypes {
         debug {
+            if (debugUsesReleaseSigning) {
+                signingConfig = releaseSigningConfig
+            }
             buildConfigField("String", "UPDATE_MANIFEST_URL", "\"${updateManifestUrl}\"")
             buildConfigField("long", "UPDATE_POLL_SECONDS", "${updatePollSeconds}L")
             buildConfigField("boolean", "SELF_UPDATE_ENABLED", "false")
         }
         release {
             isMinifyEnabled = false
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.create("release") {
-                    storeFile = file(releaseStoreFile.get())
-                    storePassword = releaseStorePassword.get()
-                    keyAlias = releaseKeyAlias.get()
-                    keyPassword = releaseKeyPassword.get()
-                }
+            if (releaseSigningConfig != null) {
+                signingConfig = releaseSigningConfig
             }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

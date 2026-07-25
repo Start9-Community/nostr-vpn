@@ -104,7 +104,9 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                         &mut app,
                         &config_path,
                         &mut connect_status,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(drained) => {
                             let roster_changed = drained.roster_changed;
                             network_id = app.effective_network_id();

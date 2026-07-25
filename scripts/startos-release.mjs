@@ -13,7 +13,12 @@ import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { normalizeTag, readWorkspaceVersionTag } from './local-release-lib.mjs'
+import {
+  normalizeTag,
+  parseReleaseRevision,
+  readWorkspaceVersionTag,
+  semverFromTag,
+} from './local-release-lib.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -35,6 +40,7 @@ Build and validate versioned StartOS release packages.
 
 Options:
   --tag <tag>           Release tag (defaults to workspace version)
+  --revision <0-99>     Corrected-release revision (defaults to source version)
   --target <target>     Build target: x86 or arm (repeatable; defaults to both)
   --output-dir <path>   Artifact directory (default: dist)
   --dry-run             Print the build plan without writing artifacts
@@ -45,6 +51,7 @@ function parseArgs(argv) {
   const options = {
     dryRun: false,
     outputDir: null,
+    revision: null,
     tag: null,
     targets: [],
   }
@@ -64,6 +71,9 @@ function parseArgs(argv) {
         break
       case '--tag':
         options.tag = normalizeTag(argv[++index] ?? '')
+        break
+      case '--revision':
+        options.revision = argv[++index] ?? ''
         break
       case '--target':
         options.targets.push(argv[++index] ?? '')
@@ -121,11 +131,29 @@ export function readStartosSourceVersion(text) {
   return match[1]
 }
 
-function expectedStartosVersion(tag) {
-  return `${normalizeTag(tag).replace(/^v/, '')}:0`
+export function expectedStartosVersion(tag, revision = 0) {
+  return `${semverFromTag(tag)}:${parseReleaseRevision(revision, { platform: 'StartOS' })}`
 }
 
-export function validateStartosManifest(manifest, { arch, tag }) {
+export function resolveStartosRevision(explicitRevision, sourceVersion, tag) {
+  if (String(explicitRevision ?? '').trim() !== '') {
+    return parseReleaseRevision(explicitRevision, { platform: 'StartOS' })
+  }
+
+  const match = String(sourceVersion).match(/^(\d+\.\d+\.\d+):(\d+)$/)
+  if (!match) {
+    throw new Error(`Could not parse StartOS source version "${sourceVersion}"`)
+  }
+  const marketingVersion = semverFromTag(tag)
+  if (match[1] !== marketingVersion) {
+    throw new Error(
+      `StartOS source marketing version ${match[1]} does not match release ${normalizeTag(tag)} (${marketingVersion})`,
+    )
+  }
+  return parseReleaseRevision(match[2], { platform: 'StartOS' })
+}
+
+export function validateStartosManifest(manifest, { arch, tag, revision = 0 }) {
   const target = resolveStartosTarget(arch)
   if (manifest?.id !== 'nostr-vpn') {
     throw new Error(`StartOS package id is ${manifest?.id ?? '<missing>'}, expected nostr-vpn`)
@@ -136,7 +164,7 @@ export function validateStartosManifest(manifest, { arch, tag }) {
     )
   }
 
-  const expectedVersion = expectedStartosVersion(tag)
+  const expectedVersion = expectedStartosVersion(tag, revision)
   if (manifest.version !== expectedVersion) {
     throw new Error(
       `StartOS package version ${manifest.version ?? '<missing>'} does not match release ${normalizeTag(tag)} (${expectedVersion})`,
@@ -168,7 +196,7 @@ async function sha256(path) {
   return hash.digest('hex')
 }
 
-async function buildTarget({ dryRun, outputDir, tag, target }) {
+async function buildTarget({ dryRun, outputDir, revision, tag, target }) {
   const { arch, makeTarget } = resolveStartosTarget(target)
   const packagePath = join(repoRoot, `nostr-vpn_${arch}.s9pk`)
   const outputPath = join(outputDir, startosReleaseAssetName(tag, arch))
@@ -194,7 +222,7 @@ async function buildTarget({ dryRun, outputDir, tag, target }) {
   } catch (error) {
     throw new Error(`Could not parse StartOS manifest JSON: ${error.message}`)
   }
-  validateStartosManifest(manifest, { arch, tag })
+  validateStartosManifest(manifest, { arch, revision, tag })
 
   mkdirSync(outputDir, { recursive: true })
   copyFileSync(packagePath, outputPath)
@@ -206,8 +234,13 @@ async function buildTarget({ dryRun, outputDir, tag, target }) {
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv)
   const tag = options.tag || readWorkspaceVersionTag(readFileSync(cargoTomlPath, 'utf8'))
-  const expectedVersion = expectedStartosVersion(tag)
   const sourceVersion = readStartosSourceVersion(readFileSync(startosVersionPath, 'utf8'))
+  const revision = resolveStartosRevision(
+    options.revision ?? process.env.NVPN_STARTOS_REVISION,
+    sourceVersion,
+    tag,
+  )
+  const expectedVersion = expectedStartosVersion(tag, revision)
   if (sourceVersion !== expectedVersion) {
     throw new Error(
       `StartOS source version ${sourceVersion} does not match release ${tag} (${expectedVersion}); run node scripts/sync-versions.mjs`,
@@ -227,6 +260,7 @@ export async function main(argv = process.argv.slice(2)) {
     await buildTarget({
       dryRun: options.dryRun,
       outputDir,
+      revision,
       tag,
       target: target.makeTarget,
     })

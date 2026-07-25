@@ -31,7 +31,7 @@ INSTALL_DEVICE_APP="${NVPN_IOS_INSTALL:-0}"
 CREATE_NETWORK="${NVPN_IOS_DEBUG_CREATE_NETWORK:-0}"
 DEBUG_NETWORK_NAME="${NVPN_IOS_DEBUG_NETWORK_NAME:-iOS smoke}"
 VPN_START_WAIT_SECS="${NVPN_IOS_VPN_START_WAIT_SECS:-12}"
-VPN_RESULT_WAIT_SECS="${NVPN_IOS_VPN_RESULT_WAIT_SECS:-4}"
+VPN_RESULT_WAIT_SECS="${NVPN_IOS_VPN_RESULT_WAIT_SECS:-12}"
 VPN_RESULT_NAME="${NVPN_IOS_VPN_RESULT_NAME:-mobile-ios-smoke-vpn-$$.json}"
 VPN_RESULT_DIR="${NVPN_IOS_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
 IOS_IDLE_CPU_RESULT_NAME="${NVPN_IOS_IDLE_CPU_RESULT_NAME:-mobile-ios-idle-cpu-$$.json}"
@@ -48,6 +48,15 @@ EXIT_PROBE_EXPECTED_IP="${NVPN_IOS_EXIT_PROBE_EXPECTED_IP:-}"
 EXIT_PROBE_URL="${NVPN_IOS_EXIT_PROBE_URL:-}"
 DIRECT_PROBE_HOST="${NVPN_IOS_DIRECT_PROBE_HOST:-example.com}"
 DIRECT_PROBE_URL="${NVPN_IOS_DIRECT_PROBE_URL:-https://example.com/}"
+EXIT_DNS_MODE="${NVPN_IOS_EXIT_DNS_MODE:-}"
+EXIT_DNS_DOH_PROVIDER="${NVPN_IOS_EXIT_DNS_DOH_PROVIDER:-cloudflare}"
+EXIT_DNS_CUSTOM_DOH_URL="${NVPN_IOS_EXIT_DNS_CUSTOM_DOH_URL:-}"
+EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS="${NVPN_IOS_EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS:-}"
+EXIT_DNS_THROUGH_EXIT_SERVERS="${NVPN_IOS_EXIT_DNS_THROUGH_EXIT_SERVERS:-}"
+EXIT_DNS_USE_SHIPPED_UI="${NVPN_IOS_EXIT_DNS_USE_SHIPPED_UI:-0}"
+EXPECT_DEBUG_DNS_INJECTED="${NVPN_IOS_EXPECT_DEBUG_DNS_INJECTED:-}"
+SWITCH_TO_DIRECT_WHILE_CONNECTED="${NVPN_IOS_SWITCH_TO_DIRECT_WHILE_CONNECTED:-0}"
+EXPECT_WIREGUARD_EXIT="${NVPN_IOS_EXPECT_WIREGUARD_EXIT:-0}"
 VERIFY_DIRECT_RESTORATION="${NVPN_IOS_VERIFY_DIRECT_RESTORATION:-0}"
 cleanup_after_vpn_cycle="${NVPN_IOS_CLEANUP_AFTER_VPN_CYCLE:-1}"
 IDLE_CPU_GATE="${NVPN_IOS_IDLE_CPU_GATE:-${NVPN_IDLE_CPU_GATE:-1}}"
@@ -55,6 +64,7 @@ IDLE_CPU_MAX_PERCENT="${NVPN_IOS_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_PERCE
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-10}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_IOS_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-3}}"
 IOS_SIM_PROCESS_NAME="${NVPN_IOS_SIM_PROCESS_NAME:-Nostr VPN}"
+IOS_SIMULATOR_UI_GATE="${NVPN_IOS_SIMULATOR_UI_GATE:-1}"
 IOS_LIFECYCLE_GATE="${NVPN_IOS_LIFECYCLE_GATE:-1}"
 IOS_LIFECYCLE_CYCLES="${NVPN_IOS_LIFECYCLE_CYCLES:-3}"
 SCREENSHOT="$ROOT/artifacts/nostr-vpn-ios.png"
@@ -65,11 +75,12 @@ usage() {
   cat >&2 <<'EOF'
 usage: scripts/mobile-ios-smoke.sh [simulator|device] [--install] [--disconnect] [--create-network] [--vpn-cycle] [--device DEVICE] [--leave-vpn-active] [--probe-target IP] [--probe-port PORT] [--probe-count N] [--probe-require-reply]
 
-simulator  Builds, installs, launches, and screenshots the simulator app.
+simulator  Builds, clean-installs, launches, screenshots, samples idle CPU,
+           and drives QR, DNS-settings, and lifecycle controls through XCTest.
 device     Launches an already installed physical test build.
            By default, backgrounds and foregrounds it three times and proves
            the shared native core closes and reopens on every transition,
-           including a ten-second suspended interval.
+           including a three-second suspended interval per cycle.
 --install  Builds and installs the current iphoneos test app
            before launching device mode.
 --disconnect
@@ -90,9 +101,9 @@ selects the only connected physical iPhone/iPad. Values may live in
 .env.mobile.local or shell env. Keep device identifiers and signing details out
 of committed files.
 
-Simulator mode is a launch smoke only; iOS Packet Tunnel dataplane checks need
-a physical device, and first-run VPN/profile permission prompts may need a
-manual approval before --vpn-cycle can run unattended.
+Simulator mode drives the shipped UI and native app core, but iOS Packet Tunnel
+dataplane checks still need a physical device. First-run VPN/profile permission
+prompts may need a manual approval before --vpn-cycle can run unattended.
 
 Device install mode requires signing access for NVPN_IOS_BUNDLE_ID and
 NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID. When App Store Connect credentials are
@@ -112,6 +123,14 @@ Set NVPN_IOS_DEBUG_WIREGUARD_CONFIG_FILE with NVPN_IOS_EXIT_PROBE_HOST,
 NVPN_IOS_EXIT_PROBE_EXPECTED_IP, and NVPN_IOS_EXIT_PROBE_URL for a real exit
 probe. NVPN_IOS_VERIFY_DIRECT_RESTORATION=1 additionally requires native DNS
 and HTTPS before connect and after the packet tunnel is fully disconnected.
+Set NVPN_IOS_EXIT_DNS_MODE and its provider/custom/through-exit companion
+variables to dispatch the production Exit DNS settings action before starting
+the real Packet Tunnel. Set NVPN_IOS_EXIT_DNS_USE_SHIPPED_UI=1 after a shipped
+UI test saves those values; the packet probe then treats them as expectations
+without injecting them. NVPN_IOS_SWITCH_TO_DIRECT_WHILE_CONNECTED=1 runs a
+physical XCTest that taps This device in the shipped Internet-source picker,
+verifies the installed tunnel config has neither a default route nor WireGuard
+exit, and proves DNS and HTTPS while the OS VPN stays connected.
 EOF
 }
 
@@ -198,6 +217,7 @@ run_simulator() {
     exit 1
   fi
   run_ios_simulator_idle_cpu_gate
+  run_ios_simulator_ui_gate
   echo "iOS simulator smoke passed: $SCREENSHOT"
 }
 
@@ -222,6 +242,33 @@ ios_simulator_app_pid() {
         !pid && index($0, device) && index($0, app) { pid = $1 }
         END { if (pid) print pid }
       '
+}
+
+run_ios_simulator_ui_gate() {
+  if ! bool_is_true "$IOS_SIMULATOR_UI_GATE"; then
+    echo "Skipping iOS simulator UI gate because NVPN_IOS_SIMULATOR_UI_GATE=$IOS_SIMULATOR_UI_GATE"
+    return
+  fi
+
+  local device
+  device="$(ios_sim_device_id)"
+  if [[ -z "$device" ]]; then
+    echo "iOS simulator UI gate failed: no simulator device id found" >&2
+    return 1
+  fi
+
+  xcodebuild \
+    -quiet \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration Debug \
+    -derivedDataPath "$ROOT/ios/.build/DerivedData" \
+    -destination "platform=iOS Simulator,id=$device" \
+    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testJoinAdvertisingUsesTheShippedUiAndSurvivesBackgrounding \
+    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testNearbyDiscoveryUsesTheShippedUiAndSurvivesBackgrounding \
+    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testExitDnsSettingsUseShippedControlsAndValidateRequiredFields \
+    test
+  echo "iOS simulator shipped-UI QR, DNS, and lifecycle gate passed"
 }
 
 run_ios_simulator_idle_cpu_gate() {
@@ -254,24 +301,6 @@ run_ios_simulator_idle_cpu_gate() {
     --settle-seconds "$IDLE_CPU_SETTLE_SECONDS"
 }
 
-auto_select_ios_device() {
-  xcrun xctrace list devices 2>/dev/null | awk '
-    /^== Devices ==/ { in_devices = 1; next }
-    /^== Simulators ==/ { in_devices = 0 }
-    in_devices && /iPhone|iPad/ {
-      device = $0
-      sub(/^.*\(/, "", device)
-      sub(/\)[[:space:]]*$/, "", device)
-      if (device ~ /^[0-9A-Fa-f-]{8,}$/) devices[++count] = device
-    }
-    END {
-      if (count == 1) { print devices[1]; exit 0 }
-      if (count > 1) exit 2
-      exit 1
-    }
-  '
-}
-
 launch_device() {
   local device="$1"
   shift
@@ -285,35 +314,7 @@ device_app_path() {
 
 connected_ios_udid() {
   local device="$1"
-  local details_file udid
-  details_file="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-device-details.XXXXXX")"
-  if ! xcrun devicectl device info details \
-    --device "$device" \
-    --json-output "$details_file" \
-    --quiet >/dev/null
-  then
-    rm -f "$details_file"
-    echo "Could not inspect the selected iOS device for Ad Hoc signing." >&2
-    return 1
-  fi
-  udid="$(python3 - "$details_file" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    details = json.load(handle)
-value = details.get("result", {}).get("hardwareProperties", {}).get("udid")
-if not isinstance(value, str) or not value.strip():
-    raise SystemExit(1)
-print(value.strip())
-PY
-  )" || {
-    rm -f "$details_file"
-    echo "The selected iOS device did not report a signing UDID." >&2
-    return 1
-  }
-  rm -f "$details_file"
-  printf '%s\n' "$udid"
+  resolve_physical_ios_udid "$device"
 }
 
 prepare_device_signing() {
@@ -426,6 +427,69 @@ device_app_is_installed() {
     | awk -v bundle="$BUNDLE_ID" '$0 ~ bundle { found = 1 } END { exit !found }'
 }
 
+ios_main_app_process_ids() {
+  local device="$1"
+  local process_json
+  process_json="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-processes.XXXXXX")"
+  if ! xcrun devicectl device info processes \
+    --device "$device" \
+    --json-output "$process_json" \
+    --quiet
+  then
+    rm -f "$process_json"
+    return 1
+  fi
+  python3 - "$process_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+
+def visit(value):
+    if isinstance(value, dict):
+        executable = str(value.get("executable", ""))
+        process_id = value.get("processIdentifier")
+        if (
+            executable.endswith("/Nostr%20VPN.app/Nostr%20VPN")
+            or executable.endswith("/Nostr VPN.app/Nostr VPN")
+        ) and isinstance(process_id, int):
+            print(process_id)
+        for child in value.values():
+            visit(child)
+    elif isinstance(value, list):
+        for child in value:
+            visit(child)
+
+
+visit(payload)
+PY
+  rm -f "$process_json"
+}
+
+terminate_ios_app_processes_before_install() {
+  local device="$1"
+  local process_ids process_id ignored
+  process_ids="$(ios_main_app_process_ids "$device")" || return 1
+  while IFS= read -r process_id; do
+    [[ -n "$process_id" ]] || continue
+    xcrun devicectl device process terminate \
+      --device "$device" \
+      --pid "$process_id" \
+      --quiet
+  done <<<"$process_ids"
+  for ignored in $(seq 1 20); do
+    process_ids="$(ios_main_app_process_ids "$device")" || return 1
+    if [[ -z "$process_ids" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "iOS app process did not terminate before replacement" >&2
+  return 1
+}
+
 copy_ios_disconnect_result() {
   local device="$1"
   local result_name="$2"
@@ -486,6 +550,10 @@ disconnect_ios_vpn_before_install() {
     echo "Disconnect it in iOS Settings or trust/launch the installed development app, then retry." >&2
     return 1
   fi
+  if ! terminate_ios_app_processes_before_install "$device"; then
+    echo "Refusing to replace $BUNDLE_ID while an old app process is still running." >&2
+    return 1
+  fi
 }
 
 copy_vpn_probe_result() {
@@ -510,6 +578,47 @@ copy_vpn_probe_result() {
     return 1
   fi
   printf '%s\n' "$result_path"
+}
+
+vpn_probe_result_finished() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        result = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if result.get("phase") == "finished" and result.get("finishedAt") else 1)
+PY
+}
+
+wait_for_vpn_probe_result() {
+  local device="$1"
+  local deadline="$((SECONDS + VPN_RESULT_WAIT_SECS))"
+  local result_path=""
+  while true; do
+    if result_path="$(copy_vpn_probe_result "$device" 2>/dev/null)" \
+      && vpn_probe_result_finished "$result_path"
+    then
+      printf '%s\n' "$result_path"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      break
+    fi
+    sleep 0.5
+  done
+
+  # Return the latest partial receipt to the validator so it reports the exact
+  # unfinished phase rather than collapsing a real transition hang into a
+  # generic missing-file error.
+  if [[ -n "$result_path" && -s "$result_path" ]]; then
+    printf '%s\n' "$result_path"
+    return 0
+  fi
+  copy_vpn_probe_result "$device"
 }
 
 copy_ios_debug_logs() {
@@ -552,303 +661,14 @@ copy_ios_debug_logs() {
 validate_vpn_probe_result() {
   local result_path="$1"
   local summary_path="$VPN_RESULT_DIR/$TUN_PACKET_PROBE_SUMMARY_NAME"
-  python3 - "$result_path" "$summary_path" "$NVPN_BUILD_GIT_SHA" \
+  python3 "$ROOT/scripts/validate-mobile-ios-vpn-probe.py" \
+    "$result_path" "$summary_path" "$NVPN_BUILD_GIT_SHA" \
     "$TUN_PACKET_PROBE_REQUIRE_REPLY" "$EXIT_PROBE_EXPECTED_IP" \
-    "$VERIFY_DIRECT_RESTORATION" <<'PY'
-import json
-import sys
-
-(
-    path,
-    summary_path,
-    expected_build_git_sha,
-    require_reply_raw,
-    expected_exit_ip,
-    verify_direct_raw,
-) = sys.argv[1:7]
-require_reply = require_reply_raw.strip().lower() in {"1", "true", "yes", "on"}
-verify_direct = verify_direct_raw.strip().lower() in {"1", "true", "yes", "on"}
-with open(path, encoding="utf-8") as fh:
-    result = json.load(fh)
-
-runtime = None
-
-def counter(value):
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
-
-def probe_values():
-    expected = counter(result.get("tunPacketProbeExpectedPackets"))
-    sent = counter(result.get("tunPacketProbeSentPackets"))
-    observed = counter(result.get("tunPacketProbeObservedPackets"))
-    missing = counter(result.get("tunPacketProbeMissingPackets"))
-    observed_bytes = counter(result.get("tunPacketProbeObservedBytesRead"))
-    observed_written = counter(result.get("tunPacketProbeObservedWritten"))
-    observed_bytes_written = counter(result.get("tunPacketProbeObservedBytesWritten"))
-    dropped_delta = counter(result.get("tunPacketProbeDroppedDelta"))
-    loss_pct = None
-    observed_pct = None
-    if expected and expected > 0:
-        if missing is not None:
-            loss_pct = round(missing * 100.0 / expected, 3)
-        if observed is not None:
-            observed_pct = round(observed * 100.0 / expected, 3)
-    return {
-        "target": result.get("tunPacketProbeTarget"),
-        "port": counter(result.get("tunPacketProbePort")),
-        "expected": expected,
-        "sent": sent,
-        "observed": observed,
-        "missing": missing,
-        "observedPct": observed_pct,
-        "packetLossPct": loss_pct,
-        "observedBytesRead": observed_bytes,
-        "observedWritten": observed_written,
-        "observedBytesWritten": observed_bytes_written,
-        "droppedDelta": dropped_delta,
-        "firstObservedMs": counter(result.get("tunPacketProbeFirstObservedMs")),
-        "elapsedMs": counter(result.get("tunPacketProbeElapsedMs")),
-        "polls": counter(result.get("tunPacketProbePolls")),
-        "pollIntervalMs": counter(result.get("tunPacketProbePollIntervalMs")),
-        "baselineRead": counter(result.get("tunPacketProbeBaselineRead")),
-        "finalRead": counter(result.get("tunPacketProbeFinalRead")),
-        "baselineBytesRead": counter(result.get("tunPacketProbeBaselineBytesRead")),
-        "finalBytesRead": counter(result.get("tunPacketProbeFinalBytesRead")),
-        "baselineWritten": counter(result.get("tunPacketProbeBaselineWritten")),
-        "finalWritten": counter(result.get("tunPacketProbeFinalWritten")),
-        "baselineBytesWritten": counter(result.get("tunPacketProbeBaselineBytesWritten")),
-        "finalBytesWritten": counter(result.get("tunPacketProbeFinalBytesWritten")),
-        "baselineDropped": counter(result.get("tunPacketProbeBaselineDropped")),
-        "finalDropped": counter(result.get("tunPacketProbeFinalDropped")),
-        "readIncreased": result.get("tunPacketProbeReadIncreased"),
-        "bytesReadIncreased": result.get("tunPacketProbeBytesReadIncreased"),
-        "writtenIncreased": result.get("tunPacketProbeWrittenIncreased"),
-        "bytesWrittenIncreased": result.get("tunPacketProbeBytesWrittenIncreased"),
-        "droppedIncreased": result.get("tunPacketProbeDroppedIncreased"),
-        "replyRequired": require_reply,
-        "replyObserved": result.get("tunPacketProbeWrittenIncreased") is True
-        and result.get("tunPacketProbeBytesWrittenIncreased") is True
-        and result.get("tunPacketProbeDroppedIncreased") is False,
-        "error": result.get("tunPacketProbeError"),
-        "sendError": result.get("tunPacketProbeSendError"),
-        "rawOutput": path,
-    }
-
-def display(value, suffix=""):
-    if value is None:
-        return "?"
-    if isinstance(value, float):
-        return f"{value:.3f}".rstrip("0").rstrip(".") + suffix
-    return f"{value}{suffix}"
-
-def probe_summary():
-    values = probe_values()
-    parts = [
-        f"read={values['baselineRead']}->{values['finalRead']}",
-        f"observed={values['observed']}/{values['expected']}",
-        f"observedPct={display(values['observedPct'], '%')}",
-        f"missing={values['missing']}",
-        f"lossPct={display(values['packetLossPct'], '%')}",
-        f"bytes={values['observedBytesRead']}",
-        f"written={values['observedWritten']}",
-        f"bytesWritten={values['observedBytesWritten']}",
-        f"drops={values['droppedDelta']}",
-        f"firstMs={values['firstObservedMs']}",
-        f"elapsedMs={values['elapsedMs']}",
-        f"polls={values['polls']}",
-        f"target={values['target']}",
-    ]
-    if isinstance(runtime, dict):
-        parts.extend([
-            f"runtimeRead={runtime.get('tunPacketsRead')}",
-            f"runtimeWritten={runtime.get('tunPacketsWritten')}",
-            f"runtimeDropped={runtime.get('tunPacketsDropped')}",
-        ])
-    return "iOS TUN packet probe counters: " + " ".join(parts)
-
-def write_probe_summary(validation_errors=None):
-    values = probe_values()
-    if isinstance(runtime, dict):
-        values["runtime"] = {
-            "tunPacketsRead": counter(runtime.get("tunPacketsRead")),
-            "tunBytesRead": counter(runtime.get("tunBytesRead")),
-            "tunPacketsWritten": counter(runtime.get("tunPacketsWritten")),
-            "tunBytesWritten": counter(runtime.get("tunBytesWritten")),
-            "tunPacketsDropped": counter(runtime.get("tunPacketsDropped")),
-        }
-    values["replyRequired"] = require_reply
-    values["passed"] = not validation_errors
-    if validation_errors:
-        values["validationErrors"] = validation_errors
-    for key in (
-        "phase",
-        "packetTunnelStatusRawValue",
-        "packetTunnelConnected",
-        "vpnEnabled",
-        "vpnActive",
-        "startError",
-        "vpnStartElapsedMs",
-        "vpnWaitRequestedMs",
-        "statusCollectionElapsedMs",
-        "fetchElapsedMs",
-        "debugProbeElapsedMs",
-        "startedAt",
-        "vpnStartFinishedAt",
-        "finishedAt",
-    ):
-        if key in result:
-            values[key] = result[key]
-    for key in (
-        "appBundleIdentifier",
-        "appVersionName",
-        "appVersionCode",
-        "appBuildGitSha",
-        "appBuildTimestampUtc",
-    ):
-        if key in result:
-            values[key] = result[key]
-    with open(summary_path, "w", encoding="utf-8") as fh:
-        json.dump(values, fh, sort_keys=True, indent=2)
-        fh.write("\n")
-    return summary_path
-
-errors = []
-actual_build_git_sha = result.get("appBuildGitSha")
-if expected_build_git_sha:
-    if not actual_build_git_sha:
-        errors.append(f"appBuildGitSha missing expected={expected_build_git_sha!r}")
-    elif actual_build_git_sha != expected_build_git_sha:
-        errors.append(
-            f"appBuildGitSha={actual_build_git_sha!r} expected={expected_build_git_sha!r}"
-        )
-if result.get("phase") != "finished" or "finishedAt" not in result:
-    errors.append(
-        "debug probe did not finish "
-        f"phase={result.get('phase')!r} finishedAt={result.get('finishedAt')!r}"
-    )
-if result.get("startError"):
-    errors.append(f"startError={result['startError']}")
-if result.get("packetTunnelStatusRawValue") != 3:
-    errors.append(f"packetTunnelStatusRawValue={result.get('packetTunnelStatusRawValue')!r}")
-if result.get("vpnEnabled") is not True:
-    errors.append(f"vpnEnabled={result.get('vpnEnabled')!r}")
-if expected_exit_ip:
-    resolved = result.get("resolvedAddresses")
-    if result.get("resolveError"):
-        errors.append(f"resolveError={result['resolveError']}")
-    if not isinstance(resolved, list) or expected_exit_ip not in resolved:
-        errors.append(
-            f"resolvedAddresses={resolved!r} expected to contain {expected_exit_ip!r}"
-        )
-    if result.get("fetchError"):
-        errors.append(f"fetchError={result['fetchError']}")
-    status = result.get("statusCode")
-    if not isinstance(status, int) or not 200 <= status < 400:
-        errors.append(f"statusCode={status!r}")
-if verify_direct:
-    for phase in ("directBefore", "directAfter"):
-        if result.get(f"{phase}ResolveError"):
-            errors.append(f"{phase}ResolveError={result[f'{phase}ResolveError']}")
-        addresses = result.get(f"{phase}ResolvedAddresses")
-        if not isinstance(addresses, list) or not addresses:
-            errors.append(f"{phase}ResolvedAddresses={addresses!r}")
-        if result.get(f"{phase}FetchError"):
-            errors.append(f"{phase}FetchError={result[f'{phase}FetchError']}")
-        status = result.get(f"{phase}StatusCode")
-        if not isinstance(status, int) or not 200 <= status < 400:
-            errors.append(f"{phase}StatusCode={status!r}")
-        tunnel_status = result.get(f"{phase}PacketTunnelStatusRawValue")
-        if tunnel_status not in (0, 1):
-            errors.append(f"{phase}PacketTunnelStatusRawValue={tunnel_status!r}")
-runtime_json = result.get("packetTunnelRuntimeStateJson") or ""
-if result.get("packetTunnelStatusRawValue") == 3:
-    if not runtime_json:
-        errors.append("packetTunnelRuntimeStateJson missing")
-    else:
-        try:
-            runtime = json.loads(runtime_json)
-        except json.JSONDecodeError as error:
-            errors.append(f"packetTunnelRuntimeStateJson invalid JSON: {error}")
-        else:
-            if runtime.get("vpnActive") is not True:
-                errors.append(f"runtime.vpnActive={runtime.get('vpnActive')!r}")
-            for key in (
-                "tunPacketsRead",
-                "tunBytesRead",
-                "tunPacketsWritten",
-                "tunBytesWritten",
-                "tunPacketsDropped",
-            ):
-                if key not in runtime:
-                    errors.append(f"runtime.{key} missing")
-            expected = result.get("tunPacketProbeExpectedPackets")
-            sent = result.get("tunPacketProbeSentPackets")
-            observed = result.get("tunPacketProbeObservedPackets")
-            observed_bytes = counter(result.get("tunPacketProbeObservedBytesRead"))
-            observed_written = counter(result.get("tunPacketProbeObservedWritten"))
-            observed_bytes_written = counter(result.get("tunPacketProbeObservedBytesWritten"))
-            dropped_delta = counter(result.get("tunPacketProbeDroppedDelta"))
-            if (
-                result.get("tunPacketProbeReadIncreased") is not True
-                or result.get("tunPacketProbeBytesReadIncreased") is not True
-                or result.get("tunPacketProbeDroppedIncreased") is not False
-                or not isinstance(expected, int)
-                or sent != expected
-                or not isinstance(observed, int)
-                or observed < expected
-                or observed_bytes is None
-                or observed_bytes <= 0
-                or dropped_delta is None
-                or dropped_delta != 0
-            ):
-                errors.append(
-                    "tunPacketProbeReadIncreased="
-                    f"{result.get('tunPacketProbeReadIncreased')!r} "
-                    f"bytesIncreased={result.get('tunPacketProbeBytesReadIncreased')!r} "
-                    f"droppedIncreased={result.get('tunPacketProbeDroppedIncreased')!r} "
-                    f"baseline={result.get('tunPacketProbeBaselineRead')!r} "
-                    f"final={result.get('tunPacketProbeFinalRead')!r} "
-                    f"expected={expected!r} sent={sent!r} observed={observed!r} "
-                    f"observedBytes={observed_bytes!r} droppedDelta={dropped_delta!r} "
-                    f"error={result.get('tunPacketProbeError')!r} "
-                    f"sendError={result.get('tunPacketProbeSendError')!r}"
-                )
-            if require_reply and (
-                result.get("tunPacketProbeWrittenIncreased") is not True
-                or result.get("tunPacketProbeBytesWrittenIncreased") is not True
-                or observed_written is None
-                or observed_written <= 0
-                or observed_bytes_written is None
-                or observed_bytes_written <= 0
-                or dropped_delta != 0
-            ):
-                errors.append(
-                    "tunPacketProbeWrittenIncreased="
-                    f"{result.get('tunPacketProbeWrittenIncreased')!r} "
-                    f"bytesWrittenIncreased={result.get('tunPacketProbeBytesWrittenIncreased')!r} "
-                    f"baselineWritten={result.get('tunPacketProbeBaselineWritten')!r} "
-                    f"finalWritten={result.get('tunPacketProbeFinalWritten')!r} "
-                    f"observedWritten={observed_written!r} "
-                    f"observedBytesWritten={observed_bytes_written!r} "
-                    f"droppedDelta={dropped_delta!r}"
-                )
-
-if errors:
-    summary_written = write_probe_summary(errors)
-    if result.get("tunPacketProbeBaselineRead") is not None:
-        print(probe_summary(), file=sys.stderr)
-    print("iOS TUN packet probe summary: " + summary_written, file=sys.stderr)
-    print("iOS VPN probe failed: " + ", ".join(errors), file=sys.stderr)
-    sys.exit(1)
-
-if result.get("tunPacketProbeReadIncreased") is True:
-    print("iOS TUN packet probe passed")
-    print(probe_summary())
-    print("iOS TUN packet probe summary: " + write_probe_summary())
-PY
+    "$VERIFY_DIRECT_RESTORATION" \
+    "$EXIT_DNS_MODE" "$EXIT_DNS_DOH_PROVIDER" \
+    "$EXIT_DNS_CUSTOM_DOH_URL" "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
+    "$EXIT_DNS_THROUGH_EXIT_SERVERS" "$SWITCH_TO_DIRECT_WHILE_CONNECTED" \
+    "$EXPECT_WIREGUARD_EXIT" "$EXPECT_DEBUG_DNS_INJECTED"
 }
 
 run_ios_device_idle_cpu_gate() {
@@ -872,6 +692,95 @@ run_ios_device_idle_cpu_gate() {
     --settle-seconds "$IDLE_CPU_SETTLE_SECONDS"
 }
 
+run_ios_connected_direct_ui_driver() {
+  local device="$1"
+  shift
+  local destination_udid
+  destination_udid="$(resolve_physical_ios_udid "$device")"
+  local team="${NVPN_IOS_TEAM_ID:-}"
+  if [[ -z "$team" ]]; then
+    echo "Set NVPN_IOS_TEAM_ID to run the physical iOS Direct UI gate." >&2
+    return 1
+  fi
+  prepare_device_signing "$device"
+
+  local arguments_base64 run_id log marker
+  arguments_base64="$(python3 - "$@" <<'PY'
+import base64
+import json
+import sys
+
+print(base64.b64encode(json.dumps(sys.argv[1:]).encode()).decode())
+PY
+  )"
+  run_id="connected-direct-ui-$$-$RANDOM-$(date +%s)"
+  mkdir -p "$VPN_RESULT_DIR"
+  log="$VPN_RESULT_DIR/mobile-ios-connected-direct-ui-$$.log"
+  marker="$VPN_RESULT_DIR/mobile-ios-connected-direct-markers-$$.log"
+
+  local -a command=(
+    xcodebuild
+    -quiet
+    -allowProvisioningUpdates
+    -project "$PROJECT"
+    -scheme "$SCHEME"
+    -configuration "$DEVICE_CONFIGURATION"
+    -derivedDataPath "$DEVICE_DERIVED_DATA"
+    -destination "platform=iOS,id=$destination_udid"
+    -destination-timeout 60
+    -collect-test-diagnostics never
+    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testSelectDirectWhilePhysicalTunnelConnected
+    DEVELOPMENT_TEAM="$team"
+  )
+  if [[ "$DEVICE_SIGNING_MODE" == "adhoc" ]]; then
+    command+=(
+      NVPN_IOS_CODE_SIGN_IDENTITY="$DEVICE_CODE_SIGN_IDENTITY"
+      NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID"
+      NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
+    )
+  else
+    command+=(CODE_SIGN_IDENTITY="$DEVICE_CODE_SIGN_IDENTITY")
+  fi
+  if [[
+    -n "${NVPN_ASC_AUTH_KEY_PATH:-}" &&
+    -n "${NVPN_ASC_AUTH_KEY_ID:-}" &&
+    -n "${NVPN_ASC_AUTH_KEY_ISSUER_ID:-}"
+  ]]; then
+    command+=(
+      -authenticationKeyPath "$NVPN_ASC_AUTH_KEY_PATH"
+      -authenticationKeyID "$NVPN_ASC_AUTH_KEY_ID"
+      -authenticationKeyIssuerID "$NVPN_ASC_AUTH_KEY_ISSUER_ID"
+    )
+  fi
+  command+=(
+    NVPN_XCUITEST_RUN_ID="$run_id"
+    NVPN_XCUITEST_CONNECTED_DIRECT_GATE=1
+    NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64="$arguments_base64"
+    test
+  )
+  if ! NSUnbufferedIO=YES "${command[@]}" >"$log" 2>&1; then
+    tail -n 120 "$log" >&2
+    echo "Enable Settings > Developer > Enable UI Automation on the unlocked iPhone, then retry." >&2
+    return 1
+  fi
+
+  rm -f "$marker"
+  xcrun devicectl device copy from \
+    --device "$device" \
+    --domain-type appDataContainer \
+    --domain-identifier "$BUNDLE_ID.UITests.xctrunner" \
+    --source "Documents/nvpn-ui-gate-markers.log" \
+    --destination "$marker" \
+    --quiet >/dev/null
+  grep -Fxq "NVPN_XCUITEST_RUN_ID=$run_id" "$marker" \
+    && grep -Fxq "NVPN_CONNECTED_DIRECT_UI_PASSED=1" "$marker" \
+    || {
+      echo "iOS physical Direct XCTest did not emit its exact UI receipt" >&2
+      return 1
+    }
+  echo "iOS shipped Direct selection passed: $log"
+}
+
 run_vpn_cycle() {
   local device="$1"
   local args=(
@@ -892,6 +801,15 @@ run_vpn_cycle() {
   if [[ -n "$wireguard_config" ]]; then
     args+=(--nvpn-debug-wireguard-config-base64 "$(printf '%s' "$wireguard_config" | base64 | tr -d '\n')")
   fi
+  if [[ -n "$EXIT_DNS_MODE" ]] && ! bool_is_true "$EXIT_DNS_USE_SHIPPED_UI"; then
+    args+=(
+      --nvpn-debug-exit-dns-mode "$EXIT_DNS_MODE"
+      --nvpn-debug-exit-dns-doh-provider "$EXIT_DNS_DOH_PROVIDER"
+      --nvpn-debug-exit-dns-custom-doh-url "$EXIT_DNS_CUSTOM_DOH_URL"
+      --nvpn-debug-exit-dns-custom-doh-bootstrap-ips "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS"
+      --nvpn-debug-exit-dns-through-exit-servers "$EXIT_DNS_THROUGH_EXIT_SERVERS"
+    )
+  fi
   if [[ -n "$EXIT_PROBE_HOST" ]]; then
     args+=(--nvpn-debug-resolve-host "$EXIT_PROBE_HOST")
   fi
@@ -900,12 +818,19 @@ run_vpn_cycle() {
   else
     args+=(--nvpn-debug-skip-fetch)
   fi
-  if bool_is_true "$VERIFY_DIRECT_RESTORATION"; then
+  if bool_is_true "$VERIFY_DIRECT_RESTORATION" \
+    || bool_is_true "$SWITCH_TO_DIRECT_WHILE_CONNECTED"
+  then
     args+=(
-      --nvpn-debug-verify-direct-restoration
       --nvpn-debug-direct-resolve-host "$DIRECT_PROBE_HOST"
       --nvpn-debug-direct-fetch-url "$DIRECT_PROBE_URL"
     )
+  fi
+  if bool_is_true "$VERIFY_DIRECT_RESTORATION"; then
+    args+=(--nvpn-debug-verify-direct-restoration)
+  fi
+  if bool_is_true "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
+    args+=(--nvpn-debug-await-direct-ui-while-connected)
   fi
   if bool_is_true "$CREATE_NETWORK"; then
     args+=(--nvpn-debug-add-network "$DEBUG_NETWORK_NAME")
@@ -914,10 +839,14 @@ run_vpn_cycle() {
     vpn_cleanup_armed=1
     vpn_cleanup_device="$device"
   fi
-  launch_device "$device" "${args[@]}"
-  sleep "$((VPN_START_WAIT_SECS + VPN_RESULT_WAIT_SECS))"
+  if bool_is_true "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
+    run_ios_connected_direct_ui_driver "$device" "${args[@]}"
+  else
+    launch_device "$device" "${args[@]}"
+    sleep "$VPN_START_WAIT_SECS"
+  fi
   local result_path
-  if ! result_path="$(copy_vpn_probe_result "$device")"; then
+  if ! result_path="$(wait_for_vpn_probe_result "$device")"; then
     copy_ios_debug_logs "$device" || true
     return 1
   fi
@@ -961,17 +890,9 @@ trap cleanup_ios_vpn_on_exit EXIT
 run_device() {
   local device="${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
   if [[ -z "$device" ]]; then
-    if device="$(auto_select_ios_device)"; then
+    if device="$(select_physical_ios_device)"; then
       echo "iOS device smoke auto-selected the only connected physical mobile device"
     else
-      case "$?" in
-        2)
-          echo "Set NVPN_IOS_DEVICE because multiple physical iOS mobile devices are connected" >&2
-          ;;
-        *)
-          echo "Set NVPN_IOS_DEVICE because no physical iOS mobile device could be auto-selected" >&2
-          ;;
-      esac
       exit 1
     fi
   fi
@@ -985,6 +906,7 @@ run_device() {
     install_device_app "$device"
   fi
   if bool_is_true "$IOS_LIFECYCLE_GATE"; then
+    disconnect_ios_vpn_confirmed "$device"
     run_ios_app_lifecycle_gate \
       "$device" "$BUNDLE_ID" "$VPN_RESULT_DIR" "$IOS_LIFECYCLE_CYCLES"
   fi

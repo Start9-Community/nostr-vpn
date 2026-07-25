@@ -135,9 +135,38 @@ pub async fn send_join_roster_with_receipt(
     let mut last_transport_error = None;
 
     loop {
-        if let Err(error) = sender.enqueue(destination, &frame) {
-            last_transport_error = Some(error.to_string());
+        let transport = sender.send(destination, &frame);
+        tokio::pin!(transport);
+        let transport_sent = loop {
+            tokio::select! {
+                result = &mut transport => break Some(result),
+                receipt = receipts.recv() => {
+                    if receipt.is_ok_and(|receipt| {
+                        join_roster_ack_matches(&receipt, destination, &roster_event_id)
+                    }) {
+                        return Ok(sent_len);
+                    }
+                }
+                () = tokio::time::sleep_until(deadline) => break None,
+            }
+        };
+        match transport_sent {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => last_transport_error = Some(error.to_string()),
+            None => {
+                last_transport_error.get_or_insert_with(|| {
+                    "FIPS-TCP transport acknowledgement did not complete before the delivery deadline"
+                        .to_string()
+                });
+            }
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(join_roster_ack_timeout_error(
+                destination,
+                last_transport_error.as_deref(),
+            ));
+        }
+
         let retry_at = (tokio::time::Instant::now() + JOIN_ROSTER_ACK_RETRY_INTERVAL).min(deadline);
         loop {
             tokio::select! {
@@ -375,6 +404,14 @@ async fn drive_ready(
         let Some(mut record) = outbound.remove(&id) else {
             continue;
         };
+        if record
+            .response
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
+        {
+            let _ = tcp.abort(id).await;
+            continue;
+        }
         let result = drive_outbound(tcp, id, &mut record, now_ms).await;
         match result {
             Ok(Some(sent)) => {
@@ -579,7 +616,7 @@ mod tests {
     use std::time::Duration;
 
     use fips_core::{FipsEndpoint, PeerIdentity};
-    use nostr_sdk::prelude::Keys;
+    use nostr_sdk::prelude::{Keys, ToBech32};
 
     use super::*;
 
@@ -695,6 +732,65 @@ mod tests {
             .await
             .expect("join delivery task")
             .expect("matching receipt should complete delivery");
+        control.stop().await;
+        endpoint.shutdown().await.expect("shutdown endpoint");
+    }
+
+    #[tokio::test]
+    async fn join_roster_timeout_reports_unacknowledged_real_transport() {
+        let endpoint = Arc::new(
+            FipsEndpoint::builder()
+                .without_system_tun()
+                .bind()
+                .await
+                .expect("bind embedded FIPS endpoint"),
+        );
+        let control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
+            .await
+            .expect("start state-control runtime");
+        let admin = Keys::generate();
+        let signed_roster = crate::fips_control::SignedRoster::sign(
+            "network",
+            crate::fips_control::NetworkRoster {
+                network_name: "Home".to_string(),
+                devices: vec![admin.public_key().to_hex()],
+                admins: vec![admin.public_key().to_hex()],
+                aliases: HashMap::new(),
+                signed_at: 42,
+            },
+            &admin,
+        )
+        .expect("sign roster");
+        let join_roster =
+            JoinRosterControl::new(signed_roster, "request-secret").expect("join roster control");
+        let unreachable = PeerIdentity::from_npub(
+            &Keys::generate()
+                .public_key()
+                .to_bech32()
+                .expect("destination npub"),
+        )
+        .expect("destination identity");
+
+        let started = Instant::now();
+        let error = send_join_roster_with_receipt(
+            &control.sender(),
+            unreachable,
+            &join_roster,
+            Duration::from_millis(150),
+        )
+        .await
+        .expect_err("unrouted roster must not look delivered");
+        assert!(
+            error
+                .to_string()
+                .contains("transport acknowledgement did not complete"),
+            "timeout must expose the real FIPS-TCP delivery state: {error:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "caller deadline must cancel the outstanding transport wait"
+        );
+
         control.stop().await;
         endpoint.shutdown().await.expect("shutdown endpoint");
     }
