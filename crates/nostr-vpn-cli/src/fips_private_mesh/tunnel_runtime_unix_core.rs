@@ -390,12 +390,17 @@ impl FipsPrivateTunnelRuntime {
     ) -> Result<(bool, Option<crate::MacosRouteSpec>)> {
         let hosts = self.endpoint_bypass_ipv4_hosts(config).await?;
         let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts);
-        // `apply_macos_network_state` clears the cached underlay before calling
-        // us so a platform-route event reinstalls bypasses the OS may have
-        // discarded. Do not short-circuit merely because the host set is
-        // unchanged: doing so returns `None` for the underlay exactly when a
-        // connected exit peer makes the default route eligible, and the exit
-        // route is then withheld forever.
+        // Peer events are frequent and normally leave both bypasses and the
+        // physical underlay unchanged. Reuse that populated cache here;
+        // `apply_macos_network_state` clears it before real config or platform
+        // route refreshes so routes dropped by the OS are still reinstalled.
+        if !macos_endpoint_bypass_underlay_refresh_required(
+            &self.endpoint_bypass_routes,
+            self.endpoint_bypass_underlay.as_ref(),
+            &routes,
+        ) {
+            return Ok((!hosts.is_empty(), self.endpoint_bypass_underlay.clone()));
+        }
         let underlay = match crate::macos_underlay_default_route_from_system() {
             Ok(underlay) => underlay,
             Err(error) => {
@@ -687,6 +692,15 @@ impl FipsPrivateTunnelRuntime {
 
         self.exit_node_runtime = crate::MacosExitNodeRuntime::default();
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_endpoint_bypass_underlay_refresh_required(
+    current_routes: &[String],
+    current_underlay: Option<&crate::MacosRouteSpec>,
+    desired_routes: &[String],
+) -> bool {
+    current_underlay.is_none() || current_routes != desired_routes
 }
 
 #[cfg(any(target_os = "macos", test))]

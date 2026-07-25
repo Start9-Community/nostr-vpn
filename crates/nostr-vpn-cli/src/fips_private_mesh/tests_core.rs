@@ -29,6 +29,7 @@
         fips_tunnel_requires_endpoint_restart, linux_cap_eff_has_net_admin,
         linux_private_ipv4_route_subnets_from_ip_route,
         linux_route_get_has_direct_private_endpoint_route, linux_tun_setup_error,
+        macos_endpoint_bypass_underlay_refresh_required,
         macos_private_ipv4_route_subnets_from_netstat,
         macos_route_get_has_direct_private_endpoint_route, mesh_status_from_endpoint_peer,
         other_endpoint_peer_statuses, parse_fips_nostr_discovery_policy,
@@ -118,6 +119,29 @@
         assert!(!linux_endpoint_bypass_hosts_unchanged(
             &current,
             &changed_hosts,
+        ));
+    }
+
+    #[test]
+    fn unchanged_macos_endpoint_bypasses_reuse_cached_underlay() {
+        let routes = vec!["198.51.100.7".to_string(), "203.0.113.8".to_string()];
+        let underlay = crate::MacosRouteSpec {
+            gateway: Some("192.0.2.1".to_string()),
+            interface: "en0".to_string(),
+        };
+
+        assert!(!macos_endpoint_bypass_underlay_refresh_required(
+            &routes,
+            Some(&underlay),
+            &routes,
+        ));
+        assert!(macos_endpoint_bypass_underlay_refresh_required(
+            &routes, None, &routes,
+        ));
+        assert!(macos_endpoint_bypass_underlay_refresh_required(
+            &routes,
+            Some(&underlay),
+            &["198.51.100.9".to_string()],
         ));
     }
 
