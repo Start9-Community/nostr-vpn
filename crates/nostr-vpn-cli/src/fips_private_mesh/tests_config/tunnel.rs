@@ -427,6 +427,13 @@
             fips_tunnel_requires_endpoint_restart(&refreshed, &changed_port),
             "transport bind changes still require a real endpoint restart",
         );
+
+        let mut changed_underlay = refreshed.clone();
+        changed_underlay.underlay_interface = Some("en0".to_string());
+        assert!(
+            fips_tunnel_requires_endpoint_restart(&refreshed, &changed_underlay),
+            "a new physical underlay must rebuild sockets on that interface",
+        );
     }
 
     #[test]

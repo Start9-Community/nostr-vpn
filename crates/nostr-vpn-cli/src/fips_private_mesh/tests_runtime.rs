@@ -642,6 +642,7 @@
         .expect("peer config");
         let transport = FipsEndpointTransportConfig {
             listen_port: 51820,
+            bind_interface: None,
             advertised_endpoint: "192.168.50.20:51820".to_string(),
             advertise_public_endpoint: false,
             nostr_discovery_enabled: false,
@@ -692,6 +693,7 @@
         .expect("peer config");
         let transport = FipsEndpointTransportConfig {
             listen_port: 51820,
+            bind_interface: None,
             advertised_endpoint: "192.168.50.20:51820".to_string(),
             advertise_public_endpoint: true,
             nostr_discovery_enabled: true,
@@ -757,6 +759,7 @@
     fn endpoint_config_advertises_public_app_endpoint_over_nostr() {
         let transport = FipsEndpointTransportConfig {
             listen_port: 51820,
+            bind_interface: None,
             advertised_endpoint: "198.51.100.20:51820".to_string(),
             advertise_public_endpoint: true,
             nostr_discovery_enabled: true,
@@ -795,6 +798,7 @@
         .expect("peer config");
         let transport = FipsEndpointTransportConfig {
             listen_port: 51820,
+            bind_interface: None,
             advertised_endpoint: "192.168.50.20:51820".to_string(),
             advertise_public_endpoint: true,
             nostr_discovery_enabled: false,
@@ -843,6 +847,7 @@
         );
         let transport = FipsEndpointTransportConfig {
             listen_port: 51820,
+            bind_interface: None,
             advertised_endpoint: "10.203.0.10:51820".to_string(),
             advertise_public_endpoint: false,
             nostr_discovery_enabled: true,

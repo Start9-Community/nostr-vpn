@@ -138,6 +138,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         config_path: &dir.join("config.toml"),
         network_id: &network_id,
         iface: "utun-test".to_string(),
+        underlay_interface: None,
         underlay_interface_mtu: None,
         own_pubkey: Some(&own_pubkey),
         recent_peers: Some(&recent_peers),

@@ -161,6 +161,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
                 config_path: &config_path,
                 network_id: &network_id,
                 iface: iface.clone(),
+                underlay_interface: network_snapshot.default_interface.as_deref(),
                 underlay_interface_mtu: network_snapshot.default_interface_mtu,
                 own_pubkey: own_pubkey.as_deref(),
                 recent_peers: Some(&recent_peers),

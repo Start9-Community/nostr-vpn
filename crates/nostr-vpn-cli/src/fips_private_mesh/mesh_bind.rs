@@ -12,6 +12,7 @@ async fn bind_fips_private_mesh(
         .flatten();
     let transport = FipsEndpointTransportConfig {
         listen_port: config.listen_port,
+        bind_interface: config.underlay_interface.clone(),
         advertised_endpoint: config.advertised_endpoint.clone(),
         advertise_public_endpoint: config.advertise_public_endpoint,
         nostr_discovery_enabled: config.nostr_discovery_enabled,

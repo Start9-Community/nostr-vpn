@@ -1,6 +1,7 @@
 #[derive(Debug, Clone)]
 struct FipsEndpointTransportConfig {
     listen_port: u16,
+    bind_interface: Option<String>,
     advertised_endpoint: String,
     advertise_public_endpoint: bool,
     /// Find/advertise peers over Nostr relays. When false, the endpoint dials
@@ -244,6 +245,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
         .filter(|_| advertise_public_endpoint)
         .and_then(fips_udp_external_addr);
     if let Some(transport) = transport {
+        config.node.discovery.nostr.bind_interface = transport.bind_interface.clone();
         config.node.discovery.nostr.stun_servers = transport.stun_servers.clone();
         if !transport.nostr_relays.is_empty() {
             config.node.discovery.nostr.advert_relays = transport.nostr_relays.clone();
@@ -265,6 +267,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
     }
     config.transports.udp = TransportInstances::Single(UdpConfig {
         bind_addr,
+        bind_interface: transport.and_then(|transport| transport.bind_interface.clone()),
         advertise_on_nostr: Some(advertise_on_nostr),
         public: Some(advertise_public_endpoint),
         external_addr,
@@ -549,6 +552,7 @@ pub(crate) struct FipsPrivateTunnelConfig {
     pub(crate) iface: String,
     pub(crate) local_address: String,
     pub(crate) listen_port: u16,
+    pub(crate) underlay_interface: Option<String>,
     pub(crate) advertised_endpoint: String,
     pub(crate) advertise_public_endpoint: bool,
     pub(crate) stun_servers: Vec<String>,
@@ -611,6 +615,7 @@ mod endpoint_config_tests {
     ) -> FipsEndpointTransportConfig {
         FipsEndpointTransportConfig {
             listen_port: 51820,
+            bind_interface: None,
             advertised_endpoint: "192.168.50.20:51820".to_string(),
             advertise_public_endpoint: false,
             nostr_discovery_enabled,
@@ -657,6 +662,31 @@ mod endpoint_config_tests {
             panic!("expected one WebSocket transport");
         };
         assert_eq!(websocket.seed_urls, transport.websocket.seed_urls);
+    }
+
+    #[test]
+    fn endpoint_config_binds_carrier_and_traversal_to_underlay_interface() {
+        let endpoint_peers =
+            fips_endpoint_peers_from_mesh(&[test_peer()], Vec::new(), Vec::new());
+        let mut transport = test_transport(true, true);
+        transport.bind_interface = Some("en0".to_string());
+        let config = fips_endpoint_config_with_open_discovery_limit(
+            &endpoint_peers,
+            Some(&transport),
+            resolve_private_mesh_mtu(None, None, None),
+            NostrDiscoveryPolicy::Open,
+            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
+        );
+
+        let TransportInstances::Single(udp) = &config.transports.udp else {
+            panic!("expected one UDP transport");
+        };
+        assert_eq!(udp.bind_interface.as_deref(), Some("en0"));
+        assert_eq!(
+            config.node.discovery.nostr.bind_interface.as_deref(),
+            Some("en0"),
+            "STUN and direct-traversal sockets must use the carrier underlay"
+        );
     }
 
     #[test]

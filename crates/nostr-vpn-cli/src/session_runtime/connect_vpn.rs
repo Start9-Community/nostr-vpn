@@ -41,6 +41,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                 config_path: &config_path,
                 network_id: &network_id,
                 iface: iface.clone(),
+                underlay_interface: network_snapshot.default_interface.as_deref(),
                 underlay_interface_mtu: network_snapshot.default_interface_mtu,
                 own_pubkey: own_pubkey.as_deref(),
                 recent_peers: None,
@@ -114,6 +115,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                                     &app,
                                     &config_path,
                                     &network_id,
+                                    network_snapshot.default_interface.as_deref(),
                                     network_snapshot.default_interface_mtu,
                                     own_pubkey.as_deref(),
                                 )
@@ -134,6 +136,9 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                                             config_path: &config_path,
                                             network_id: &network_id,
                                             fallback_iface: &iface,
+                                            underlay_interface: network_snapshot
+                                                .default_interface
+                                                .as_deref(),
                                             underlay_interface_mtu: network_snapshot
                                                 .default_interface_mtu,
                                             own_pubkey: own_pubkey.as_deref(),

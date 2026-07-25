@@ -465,6 +465,7 @@ fn fips_tunnel_config_carries_paid_route_payment_streaming_inputs() {
         config_path: &config_path,
         network_id: &network_id,
         iface: "utun-test".to_string(),
+        underlay_interface: None,
         underlay_interface_mtu: None,
         own_pubkey: Some(&own_pubkey),
         recent_peers: None,

@@ -109,6 +109,7 @@ pub(super) struct PaidExitMeshEventContext<'a> {
     pub(super) app: &'a AppConfig,
     pub(super) config_path: &'a Path,
     pub(super) network_id: &'a str,
+    pub(super) underlay_interface: Option<&'a str>,
     pub(super) underlay_interface_mtu: Option<u32>,
     pub(super) own_pubkey: Option<&'a str>,
     pub(super) vpn_status: &'a mut String,
@@ -125,6 +126,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
         app,
         config_path,
         network_id,
+        underlay_interface,
         underlay_interface_mtu,
         own_pubkey,
         vpn_status,
@@ -146,6 +148,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
                         app,
                         config_path,
                         network_id,
+                        underlay_interface,
                         underlay_interface_mtu,
                         own_pubkey,
                     )
@@ -180,6 +183,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
                     app,
                     config_path,
                     network_id,
+                    underlay_interface,
                     underlay_interface_mtu,
                     own_pubkey,
                 )
@@ -205,6 +209,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
                     app,
                     config_path,
                     network_id,
+                    underlay_interface,
                     underlay_interface_mtu,
                     own_pubkey,
                 )
@@ -247,6 +252,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
                     app,
                     config_path,
                     network_id,
+                    underlay_interface,
                     underlay_interface_mtu,
                     own_pubkey,
                 )

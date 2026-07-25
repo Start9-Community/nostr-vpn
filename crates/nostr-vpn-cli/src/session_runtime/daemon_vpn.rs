@@ -144,6 +144,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         config_path: &config_path,
                         network_id: &network_id,
                         fallback_iface: &iface,
+                        underlay_interface: network_snapshot.default_interface.as_deref(),
                         underlay_interface_mtu: network_snapshot.default_interface_mtu,
                         own_pubkey: own_pubkey.as_deref(),
                         recent_peers: &recent_peers,
@@ -312,6 +313,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                         config_path: &config_path,
                                         network_id: &network_id,
                                         fallback_iface: &iface,
+                                        underlay_interface: network_snapshot
+                                            .default_interface
+                                            .as_deref(),
                                         underlay_interface_mtu: network_snapshot
                                             .default_interface_mtu,
                                         own_pubkey: own_pubkey.as_deref(),
@@ -425,6 +429,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                 config_path: &config_path,
                                 network_id: &network_id,
                                 iface: &iface,
+                                underlay_interface: network_snapshot
+                                    .default_interface
+                                    .as_deref(),
                                 underlay_interface_mtu: network_snapshot.default_interface_mtu,
                                 own_pubkey: own_pubkey.as_deref(),
                                 recent_peers: Some(&recent_peers),
@@ -486,6 +493,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                     &app,
                                     &config_path,
                                     &network_id,
+                                    network_snapshot.default_interface.as_deref(),
                                     network_snapshot.default_interface_mtu,
                                     own_pubkey.as_deref(),
                                 )
@@ -507,6 +515,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                             config_path: &config_path,
                                             network_id: &network_id,
                                             fallback_iface: &iface,
+                                            underlay_interface: network_snapshot
+                                                .default_interface
+                                                .as_deref(),
                                             underlay_interface_mtu: network_snapshot
                                                 .default_interface_mtu,
                                             own_pubkey: own_pubkey.as_deref(),
@@ -530,6 +541,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                     app: &app,
                                     config_path: &config_path,
                                     network_id: &network_id,
+                                    underlay_interface: network_snapshot
+                                        .default_interface
+                                        .as_deref(),
                                     underlay_interface_mtu: network_snapshot.default_interface_mtu,
                                     own_pubkey: own_pubkey.as_deref(),
                                     vpn_status: &mut vpn_status,
@@ -571,6 +585,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                         &app,
                                         &config_path,
                                         &network_id,
+                                        network_snapshot.default_interface.as_deref(),
                                         network_snapshot.default_interface_mtu,
                                         own_pubkey.as_deref(),
                                     )
@@ -647,6 +662,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             config_path: &config_path,
                             network_id: &network_id,
                             iface: &iface,
+                            underlay_interface: network_snapshot.default_interface.as_deref(),
                             underlay_interface_mtu: network_snapshot.default_interface_mtu,
                             own_pubkey: own_pubkey.as_deref(),
                             recent_peers: Some(&recent_peers),
@@ -858,6 +874,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             config_path: &config_path,
                             network_id: &network_id,
                             iface: &iface,
+                            underlay_interface: network_snapshot.default_interface.as_deref(),
                             underlay_interface_mtu: network_snapshot.default_interface_mtu,
                             own_pubkey: own_pubkey.as_deref(),
                             recent_peers: Some(&recent_peers),

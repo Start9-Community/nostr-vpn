@@ -389,6 +389,7 @@ async fn refresh_fips_tunnel_config(
     app: &AppConfig,
     config_path: &Path,
     network_id: &str,
+    underlay_interface: Option<&str>,
     underlay_interface_mtu: Option<u32>,
     own_pubkey: Option<&str>,
 ) -> Result<()> {
@@ -399,6 +400,7 @@ async fn refresh_fips_tunnel_config(
         config_path,
         network_id,
         iface: runtime.iface().to_string(),
+        underlay_interface,
         underlay_interface_mtu,
         own_pubkey,
         recent_peers: None,
@@ -414,6 +416,7 @@ pub(crate) struct FipsTunnelConfigInput<'a> {
     pub(crate) config_path: &'a Path,
     pub(crate) network_id: &'a str,
     pub(crate) iface: String,
+    pub(crate) underlay_interface: Option<&'a str>,
     pub(crate) underlay_interface_mtu: Option<u32>,
     pub(crate) own_pubkey: Option<&'a str>,
     pub(crate) recent_peers: Option<&'a nostr_vpn_core::recent_peers::RecentPeerEndpoints>,
@@ -430,6 +433,7 @@ fn fips_tunnel_config_from_app(
         config_path,
         network_id,
         iface,
+        underlay_interface,
         underlay_interface_mtu,
         own_pubkey,
         recent_peers,
@@ -445,6 +449,12 @@ fn fips_tunnel_config_from_app(
         recent_peers,
         live_peer_endpoints,
     )?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        config.underlay_interface = underlay_interface.map(str::to_owned);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = underlay_interface;
     config.ethernet_underlay = ethernet_underlay.cloned();
     for (_, queued) in nostr_vpn_core::join_delivery::load_join_rosters(config_path) {
         match crate::fips_private_mesh::prioritize_fips_control_recipient(
@@ -564,6 +574,7 @@ async fn fips_tunnel_config_from_app_async(
     let config_path = input.config_path.to_path_buf();
     let network_id = input.network_id.to_string();
     let iface = input.iface;
+    let underlay_interface = input.underlay_interface.map(ToOwned::to_owned);
     let underlay_interface_mtu = input.underlay_interface_mtu;
     let own_pubkey = input.own_pubkey.map(ToOwned::to_owned);
     let recent_peers = input.recent_peers.cloned();
@@ -576,6 +587,7 @@ async fn fips_tunnel_config_from_app_async(
             config_path: &config_path,
             network_id: &network_id,
             iface,
+            underlay_interface: underlay_interface.as_deref(),
             underlay_interface_mtu,
             own_pubkey: own_pubkey.as_deref(),
             recent_peers: recent_peers.as_ref(),
@@ -616,6 +628,7 @@ struct SyncFipsPrivateRuntimeContext<'a> {
     config_path: &'a Path,
     network_id: &'a str,
     iface: &'a str,
+    underlay_interface: Option<&'a str>,
     underlay_interface_mtu: Option<u32>,
     own_pubkey: Option<&'a str>,
     recent_peers: Option<&'a nostr_vpn_core::recent_peers::RecentPeerEndpoints>,
@@ -655,6 +668,7 @@ async fn sync_fips_private_runtime(
         config_path: context.config_path,
         network_id: context.network_id,
         iface: config_iface,
+        underlay_interface: context.underlay_interface,
         underlay_interface_mtu: context.underlay_interface_mtu,
         own_pubkey: context.own_pubkey,
         // Keep the endpoint admission budget identical to startup and link

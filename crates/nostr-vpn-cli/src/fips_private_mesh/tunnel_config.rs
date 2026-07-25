@@ -327,6 +327,7 @@ impl FipsPrivateTunnelConfig {
                 .map(|tunnel_ip| local_interface_address_for_tunnel(&tunnel_ip))
                 .unwrap_or_else(|| local_interface_address_for_tunnel(&app.node.tunnel_ip)),
             listen_port: app.node.listen_port,
+            underlay_interface: None,
             advertised_endpoint: app.node.endpoint.clone(),
             advertise_public_endpoint: app.fips_advertise_public_endpoint,
             stun_servers: app.nat.stun_servers.clone(),
@@ -532,6 +533,7 @@ fn fips_tunnel_requires_endpoint_restart(
     current.identity_nsec != next.identity_nsec
         || current.network_id != next.network_id
         || current.listen_port != next.listen_port
+        || current.underlay_interface != next.underlay_interface
         || current.advertised_endpoint != next.advertised_endpoint
         || current.advertise_public_endpoint != next.advertise_public_endpoint
         || current.stun_servers != next.stun_servers
