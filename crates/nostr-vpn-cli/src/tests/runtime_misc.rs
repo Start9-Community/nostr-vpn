@@ -655,10 +655,10 @@ fn fips_link_events_refresh_paths_for_endpoint_only_changes() {
     );
 }
 #[test]
-fn fips_link_events_refresh_paths_for_route_changes() {
+fn fips_link_events_ignore_route_notifications_without_state_change() {
     assert_eq!(
         fips_link_event_refresh(true, false, false, false),
-        FipsLinkEventRefresh::RefreshPaths
+        FipsLinkEventRefresh::None
     );
 }
 #[test]

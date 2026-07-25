@@ -270,6 +270,16 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     endpoint_changed,
                     resumed_after_sleep,
                 );
+                if matches!(fips_refresh, FipsLinkEventRefresh::None) {
+                    // The kernel may notify us before DHCP and interface state
+                    // settle. Re-sample once, but do not turn an unchanged
+                    // snapshot into an all-peer recovery operation.
+                    schedule_platform_network_settle_recheck(
+                        &mut intervals.network,
+                        platform_network_event,
+                    );
+                    continue;
+                }
                 if platform_network_event
                     || network_changed
                     || resumed_after_sleep
@@ -279,8 +289,6 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         "network change"
                     } else if resumed_after_sleep {
                         "sleep/wake"
-                    } else if platform_network_event {
-                        "platform route event"
                     } else {
                         "endpoint change"
                     };
@@ -292,17 +300,12 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         network_snapshot = latest_snapshot;
                         network_changed_at = Some(now);
                         eprintln!("daemon: sleep/wake detected; refreshing FIPS endpoint state");
-                    } else if platform_network_event {
-                        eprintln!(
-                            "daemon: platform route event detected; refreshing FIPS endpoint state"
-                        );
                     } else {
                         eprintln!("daemon: endpoint changed; refreshing FIPS endpoint state");
                     }
                     let fips_result = match fips_refresh {
                         FipsLinkEventRefresh::RestartEndpoint
-                        | FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
-                        | FipsLinkEventRefresh::RefreshPaths => {
+                        | FipsLinkEventRefresh::UpdatePeersAndRefreshPaths => {
                             if fips_tunnel_runtime.is_some()
                                 || fips_private_runtime_active(&app, vpn_enabled, expected_peers)
                             {

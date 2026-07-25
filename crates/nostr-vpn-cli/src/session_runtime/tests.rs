@@ -204,7 +204,8 @@ mod tests {
 
         assert_eq!(
             fips_link_event_refresh(true, false, false, false),
-            FipsLinkEventRefresh::RefreshPaths
+            FipsLinkEventRefresh::None,
+            "a route notification only wakes the underlay snapshot comparison; unchanged state must not force healthy peer rekeys"
         );
         assert_eq!(
             fips_link_event_refresh(false, false, true, false),

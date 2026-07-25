@@ -126,7 +126,6 @@ pub(crate) enum FipsLinkEventRefresh {
     None,
     RestartEndpoint,
     UpdatePeersAndRefreshPaths,
-    RefreshPaths,
 }
 #[derive(Debug, Default)]
 pub(crate) struct FipsPendingRosterRestartState {
@@ -134,7 +133,7 @@ pub(crate) struct FipsPendingRosterRestartState {
     last_restart_at: Option<u64>,
 }
 pub(crate) fn fips_link_event_refresh(
-    platform_network_event: bool,
+    _platform_network_event: bool,
     network_changed: bool,
     endpoint_changed: bool,
     resumed_after_sleep: bool,
@@ -143,9 +142,9 @@ pub(crate) fn fips_link_event_refresh(
         FipsLinkEventRefresh::RestartEndpoint
     } else if endpoint_changed {
         FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
-    } else if platform_network_event {
-        FipsLinkEventRefresh::RefreshPaths
     } else {
+        // Route notifications wake the network snapshot comparison. They are
+        // not evidence by themselves that authenticated peer paths changed.
         FipsLinkEventRefresh::None
     }
 }
