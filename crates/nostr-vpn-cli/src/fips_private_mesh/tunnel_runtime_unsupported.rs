@@ -64,7 +64,10 @@ impl FipsPrivateTunnelRuntime {
         Ok(0)
     }
 
-    pub(crate) async fn rebind_network_transports(&self) -> Result<usize> {
+    pub(crate) async fn rebind_network_transports(
+        &self,
+        _bind_interface: Option<String>,
+    ) -> Result<usize> {
         Ok(0)
     }
 

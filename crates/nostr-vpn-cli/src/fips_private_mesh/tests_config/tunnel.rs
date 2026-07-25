@@ -431,8 +431,23 @@
         let mut changed_underlay = refreshed.clone();
         changed_underlay.underlay_interface = Some("en0".to_string());
         assert!(
-            fips_tunnel_requires_endpoint_restart(&refreshed, &changed_underlay),
-            "a new physical underlay must rebuild sockets on that interface",
+            !fips_tunnel_requires_endpoint_restart(&refreshed, &changed_underlay),
+            "a new physical underlay must rebind the configured carrier without replacing FIPS",
+        );
+
+        let mut changed_private_hint = refreshed.clone();
+        changed_private_hint.advertised_endpoint = "192.168.77.8:51820".to_string();
+        assert!(
+            !fips_tunnel_requires_endpoint_restart(&refreshed, &changed_private_hint),
+            "private local-address hint drift does not change the public FIPS advert",
+        );
+
+        let mut changed_public_hint = refreshed.clone();
+        changed_public_hint.advertise_public_endpoint = true;
+        changed_public_hint.advertised_endpoint = "198.51.100.8:51820".to_string();
+        assert!(
+            fips_tunnel_requires_endpoint_restart(&refreshed, &changed_public_hint),
+            "an effective public FIPS advert change still requires endpoint replacement",
         );
     }
 

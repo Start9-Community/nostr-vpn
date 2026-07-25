@@ -496,9 +496,12 @@ impl FipsPrivateMeshRuntime {
             .context("fips: refresh_peer_paths rejected by endpoint")
     }
 
-    pub(crate) async fn rebind_network_transports(&self) -> Result<usize> {
+    pub(crate) async fn rebind_network_transports(
+        &self,
+        bind_interface: Option<String>,
+    ) -> Result<usize> {
         self.endpoint
-            .rebind_network_transports()
+            .rebind_network_transports(bind_interface)
             .await
             .context("fips: network transport rebind rejected by endpoint")
     }

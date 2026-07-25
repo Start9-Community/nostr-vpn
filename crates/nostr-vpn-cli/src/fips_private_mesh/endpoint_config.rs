@@ -243,7 +243,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
     let bind_addr = transport.map(fips_udp_bind_addr);
     let external_addr = transport
         .filter(|_| advertise_public_endpoint)
-        .and_then(fips_udp_external_addr);
+        .and_then(|transport| fips_udp_external_addr(&transport.advertised_endpoint));
     if let Some(transport) = transport {
         config.node.discovery.nostr.bind_interface = transport.bind_interface.clone();
         config.node.discovery.nostr.stun_servers = transport.stun_servers.clone();
@@ -507,8 +507,8 @@ fn fips_udp_bind_addr(transport: &FipsEndpointTransportConfig) -> String {
     .to_string()
 }
 
-fn fips_udp_external_addr(transport: &FipsEndpointTransportConfig) -> Option<String> {
-    let endpoint = transport.advertised_endpoint.trim();
+fn fips_udp_external_addr(advertised_endpoint: &str) -> Option<String> {
+    let endpoint = advertised_endpoint.trim();
     if endpoint.is_empty() {
         return None;
     }

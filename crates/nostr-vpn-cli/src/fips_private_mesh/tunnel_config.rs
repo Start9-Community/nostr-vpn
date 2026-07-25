@@ -533,8 +533,8 @@ fn fips_tunnel_requires_endpoint_restart(
     current.identity_nsec != next.identity_nsec
         || current.network_id != next.network_id
         || current.listen_port != next.listen_port
-        || current.underlay_interface != next.underlay_interface
-        || current.advertised_endpoint != next.advertised_endpoint
+        || fips_tunnel_public_udp_external_addr(current)
+            != fips_tunnel_public_udp_external_addr(next)
         || current.advertise_public_endpoint != next.advertise_public_endpoint
         || current.stun_servers != next.stun_servers
         || current.nostr_relays != next.nostr_relays
@@ -549,6 +549,13 @@ fn fips_tunnel_requires_endpoint_restart(
         || current.open_discovery_max_pending != next.open_discovery_max_pending
         || current.mesh_mtu.underlay_udp != next.mesh_mtu.underlay_udp
         || fips_host_config_changed(current, next)
+}
+
+fn fips_tunnel_public_udp_external_addr(config: &FipsPrivateTunnelConfig) -> Option<String> {
+    config
+        .advertise_public_endpoint
+        .then(|| fips_udp_external_addr(&config.advertised_endpoint))
+        .flatten()
 }
 
 fn fips_host_config_changed(

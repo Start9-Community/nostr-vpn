@@ -495,19 +495,24 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
             started.iface()
         );
         *runtime = Some(started);
-    } else if let Some(existing) = runtime.as_ref() {
+    } else if let Some(existing) = runtime.as_mut() {
         let rebound = if matches!(
             refresh,
             FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
         ) {
-            existing.rebind_network_transports().await?
+            existing
+                .rebind_network_transports(config.underlay_interface.clone())
+                .await?
         } else {
             0
         };
-        if matches!(
+        if matches!(refresh, FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths) {
+            // Reconcile routes, DNS, and the cached runtime config only after
+            // the live carrier has accepted the new physical interface.
+            existing.apply_config(config).await?;
+        } else if matches!(
             refresh,
-            FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
-                | FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
         ) {
             existing.update_peers(&endpoint_peers).await?;
         }
