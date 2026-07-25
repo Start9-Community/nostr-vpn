@@ -771,18 +771,24 @@ run_underlay_network_change() {
   local node_a_container
   node_a_container="$("${COMPOSE[@]}" ps -q node-a)"
   local roam_marker="underlay-to-roam-$(date +%s)"
+  local bob_roam_marker="bob-underlay-to-roam-$(date +%s)"
   local home_marker="underlay-to-home-$(date +%s)"
+  local bob_home_marker="bob-underlay-to-home-$(date +%s)"
   local alice_probe="/tmp/underlay-move-alice-payload-probe.log"
   local bob_probe="/tmp/underlay-move-bob-payload-probe.log"
-  local pid_before pid_after change_started restore_started
+  local alice_pid_before alice_pid_after bob_pid_before bob_pid_after change_started restore_started
 
-  pid_before="$(daemon_process_id node-a)"
+  alice_pid_before="$(daemon_process_id node-a)"
+  bob_pid_before="$(daemon_process_id node-b)"
   mark_daemon_log node-a "$roam_marker"
+  mark_daemon_log node-b "$bob_roam_marker"
   start_payload_probe node-a "$BOB_TUNNEL_IP" "$alice_probe"
   start_payload_probe node-b "$ALICE_TUNNEL_IP" "$bob_probe"
 
-  echo "--- underlay-network-change: move Alice to a different interface, address, gateway, and Docker bridge ---"
+  echo "--- underlay-network-change: move the direct pair to a different interface, address, gateway, and Docker bridge ---"
   change_started="$(date +%s)"
+  switch_default_route_to_address node-b "$ROAM_NODE_B_IP" "$ROAM_UNDERLAY_PREFIX.1"
+  wait_for_network_change_refresh_after_marker node-b "$bob_roam_marker" "bob moving to alternate underlay"
   docker network connect --ip "$ROAM_NODE_A_IP" "$ROAM_NETWORK_NAME" "$node_a_container"
   docker network disconnect "$PRIMARY_NETWORK_NAME" "$node_a_container"
 
@@ -799,16 +805,24 @@ run_underlay_network_change() {
   assert_payload_probe_failure_run_bounded node-b "$bob_probe" "$change_started" "$roam_payload_checked_at" "bob observing alice alternate-underlay roam"
   assert_ping_tunnel node-a "$BOB_TUNNEL_IP" "alice-to-bob after alternate-underlay move" /tmp/underlay-move-alice-to-bob-ping.log
   assert_ping_tunnel node-b "$ALICE_TUNNEL_IP" "bob-to-alice after alternate-underlay move" /tmp/underlay-move-bob-to-alice-ping.log
-  pid_after="$(daemon_process_id node-a)"
-  if [[ "$pid_after" != "$pid_before" ]]; then
-    echo "fips roaming e2e failed: nvpn daemon restarted during underlay move ($pid_before -> $pid_after)" >&2
+  alice_pid_after="$(daemon_process_id node-a)"
+  bob_pid_after="$(daemon_process_id node-b)"
+  if [[ "$alice_pid_after" != "$alice_pid_before" ]]; then
+    echo "fips roaming e2e failed: alice nvpn daemon restarted during underlay move ($alice_pid_before -> $alice_pid_after)" >&2
+    exit 1
+  fi
+  if [[ "$bob_pid_after" != "$bob_pid_before" ]]; then
+    echo "fips roaming e2e failed: bob nvpn daemon restarted during underlay move ($bob_pid_before -> $bob_pid_after)" >&2
     exit 1
   fi
 
-  echo "--- underlay-network-change: move Alice back to the original underlay ---"
+  echo "--- underlay-network-change: move the direct pair back to the original underlay ---"
   mark_daemon_log node-a "$home_marker"
+  mark_daemon_log node-b "$bob_home_marker"
   restore_started="$(date +%s)"
   docker network connect --ip "$NVPN_E2E_NODE_A_UNDERLAY_IP" "$PRIMARY_NETWORK_NAME" "$node_a_container"
+  switch_default_route_to_address node-b "$NVPN_E2E_NODE_B_UNDERLAY_IP" "$UNDERLAY_PREFIX.1"
+  wait_for_network_change_refresh_after_marker node-b "$bob_home_marker" "bob returning to original underlay"
   docker network disconnect "$ROAM_NETWORK_NAME" "$node_a_container"
 
   wait_for_network_change_refresh_after_marker node-a "$home_marker" "alice returning to original underlay"
@@ -824,9 +838,14 @@ run_underlay_network_change() {
   assert_payload_probe_failure_run_bounded node-b "$bob_probe" "$restore_started" "$home_payload_checked_at" "bob observing alice original-underlay restore"
   assert_ping_tunnel node-a "$BOB_TUNNEL_IP" "alice-to-bob after original-underlay restore" /tmp/underlay-restore-alice-to-bob-ping.log
   assert_ping_tunnel node-b "$ALICE_TUNNEL_IP" "bob-to-alice after original-underlay restore" /tmp/underlay-restore-bob-to-alice-ping.log
-  pid_after="$(daemon_process_id node-a)"
-  if [[ "$pid_after" != "$pid_before" ]]; then
-    echo "fips roaming e2e failed: nvpn daemon restarted while restoring the underlay ($pid_before -> $pid_after)" >&2
+  alice_pid_after="$(daemon_process_id node-a)"
+  bob_pid_after="$(daemon_process_id node-b)"
+  if [[ "$alice_pid_after" != "$alice_pid_before" ]]; then
+    echo "fips roaming e2e failed: alice nvpn daemon restarted while restoring the underlay ($alice_pid_before -> $alice_pid_after)" >&2
+    exit 1
+  fi
+  if [[ "$bob_pid_after" != "$bob_pid_before" ]]; then
+    echo "fips roaming e2e failed: bob nvpn daemon restarted while restoring the underlay ($bob_pid_before -> $bob_pid_after)" >&2
     exit 1
   fi
 
@@ -845,6 +864,31 @@ run_underlay_network_change() {
   echo "$alice_probe_log"
   echo "--- Underlay move continuous payload probe: bob ---"
   echo "$bob_probe_log"
+}
+
+switch_default_route_to_address() {
+  local service="$1"
+  local source_ip="$2"
+  local gateway_ip="$3"
+  "${COMPOSE[@]}" exec -T "$service" sh -s -- "$source_ip" "$gateway_ip" <<'SH'
+set -eu
+source_ip="$1"
+gateway_ip="$2"
+interface="$(ip -o -4 addr show | awk -v source_ip="$source_ip" '
+  {
+    split($4, address, "/")
+    if (address[1] == source_ip) {
+      print $2
+      exit
+    }
+  }
+')"
+if [ -z "$interface" ]; then
+  echo "fips roaming e2e failed: no interface owns $source_ip" >&2
+  exit 1
+fi
+ip route replace default via "$gateway_ip" dev "$interface" src "$source_ip"
+SH
 }
 
 configure_roam_endpoint_hints() {
