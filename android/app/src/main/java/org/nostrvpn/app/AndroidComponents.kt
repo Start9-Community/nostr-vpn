@@ -72,7 +72,12 @@ internal fun ParticipantRow(
     AppCard {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable { detailOpen = true },
+            modifier = Modifier
+                .clickable { detailOpen = true }
+                .mobileUiSelector(
+                    id = "roster-participant-${participant.npub}",
+                    description = "Roster participant ${participant.npub}",
+                ),
         ) {
             Dot(selected = if (isSelf) state.vpnActive else participant.reachable)
             Spacer(Modifier.width(12.dp))
@@ -866,11 +871,24 @@ internal fun Notice(text: String) {
 }
 
 @Composable
-internal fun CopyLine(value: String, displayValue: String = value) {
+internal fun CopyLine(
+    value: String,
+    displayValue: String = value,
+    selectorId: String? = null,
+    selectorDescription: String? = null,
+) {
+    val valueModifier = if (selectorId != null && selectorDescription != null) {
+        Modifier.mobileUiSelector(
+            id = selectorId,
+            description = "$selectorDescription: $value",
+        )
+    } else {
+        Modifier
+    }
     Row(verticalAlignment = Alignment.Top) {
         Text(
             breakableDisplayValue(displayValue),
-            modifier = Modifier.weight(1f),
+            modifier = valueModifier.weight(1f),
             color = Muted,
             softWrap = true,
         )

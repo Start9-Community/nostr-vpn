@@ -40,6 +40,7 @@
 		D3C042D2A625A40B9B1DD2C6 /* ScreenshotFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47D10A3E63B2672F87095031 /* ScreenshotFixtures.swift */; };
 		DC1FC354C9FEA443CBCE3ABF /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10601F7E977CA9A2CA70782B /* PacketTunnelProvider.swift */; };
 		E3E54273AC9D7243E17F7CFD /* QRCodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEC242766CE8040856CB2DC9 /* QRCodeScannerView.swift */; };
+		E5BDA219E4E57B6EEE6D73C1 /* NostrVpnReleaseJoinUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB24149C180173EC493FFAA7 /* NostrVpnReleaseJoinUITests.swift */; };
 		F5B16700D01D8F8004402AF9 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8BAA0EBA6F30832FC35B6E6 /* NetworkExtension.framework */; };
 		FD6AFFF50E35477B86DBF788 /* ViewComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3C4F5527757D58D8C6196A /* ViewComponents.swift */; };
 /* End PBXBuildFile section */
@@ -110,6 +111,7 @@
 		E8ECBFB09C508ED9BE10C907 /* PacketTunnelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelController.swift; sourceTree = "<group>"; };
 		F581F9BC69EA220D465E29EC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F7274F66C76E9FC38CB0DEDB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		FB24149C180173EC493FFAA7 /* NostrVpnReleaseJoinUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnReleaseJoinUITests.swift; sourceTree = "<group>"; };
 		FEC242766CE8040856CB2DC9 /* QRCodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -214,6 +216,7 @@
 				A3074311455F8AF2D83E9F5F /* NostrVpnIosUITests.swift */,
 				8A3DC52B2649BE0323AB0726 /* NostrVpnLifecycleUITests.swift */,
 				C30E64E06EE252086937AA9C /* NostrVpnPhysicalQrJoinUITests.swift */,
+				FB24149C180173EC493FFAA7 /* NostrVpnReleaseJoinUITests.swift */,
 			);
 			path = UITests;
 			sourceTree = "<group>";
@@ -387,6 +390,7 @@
 				A757DAFBD074C65BC43CAA42 /* NostrVpnIosUITests.swift in Sources */,
 				C83E9A75B3E4C59753DA1E56 /* NostrVpnLifecycleUITests.swift in Sources */,
 				8BB560B4B2F27DAE9495A2FF /* NostrVpnPhysicalQrJoinUITests.swift in Sources */,
+				E5BDA219E4E57B6EEE6D73C1 /* NostrVpnReleaseJoinUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

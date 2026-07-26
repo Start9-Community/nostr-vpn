@@ -184,6 +184,7 @@ struct CreateNetworkCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Network name", text: $networkName)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("network-create-name")
                 Button {
                     let name = networkName.trimmingCharacters(in: .whitespacesAndNewlines)
                     model.dispatch(
@@ -198,6 +199,7 @@ struct CreateNetworkCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.actionInFlight)
+                .accessibilityIdentifier("network-create-submit")
             }
         }
     }
@@ -263,7 +265,11 @@ struct JoinNetworkCard: View {
                     Text("Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    CopyLine(value: model.state.ownNpub, model: model)
+                    CopyLine(
+                        value: model.state.ownNpub,
+                        valueAccessibilityIdentifier: "joiner-device-id-value",
+                        model: model
+                    )
                     TextField("Admin Device ID", text: $manualAdminId)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -435,7 +441,11 @@ struct ManualPairingInfoCard: View {
                 Text("Admin Device ID")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                CopyLine(value: model.state.ownNpub, model: model)
+                CopyLine(
+                    value: model.state.ownNpub,
+                    valueAccessibilityIdentifier: "admin-device-id-value",
+                    model: model
+                )
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Network ID")
@@ -444,6 +454,7 @@ struct ManualPairingInfoCard: View {
                 CopyLine(
                     value: network.networkId,
                     displayValue: displayNetworkId(network.networkId),
+                    valueAccessibilityIdentifier: "admin-network-id-value",
                     model: model
                 )
             }

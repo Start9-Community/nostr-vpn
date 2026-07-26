@@ -73,7 +73,7 @@ sync_repo nostr-vpn "$ROOT" "$GUEST_SRC_ROOT/nostr-vpn"
 
 case "${NVPN_MACOS_SYNC_PATH_DEPS:-0}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
-    sync_repo fips "$SRC_ROOT/fips" "$GUEST_SRC_ROOT/fips"
+    sync_repo fips "${NVPN_FIPS_REPO_PATH:-$SRC_ROOT/fips}" "$GUEST_SRC_ROOT/fips"
     sync_repo cashu-service "$SRC_ROOT/cashu-service" "$GUEST_SRC_ROOT/cashu-service"
     ;;
 esac

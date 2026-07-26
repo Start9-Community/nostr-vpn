@@ -287,6 +287,7 @@ private struct AddNetworkChoiceButtons: View {
             .buttonBorderShape(.roundedRectangle(radius: 16))
             .controlSize(.large)
             .tint(AppColors.create)
+            .accessibilityIdentifier("network-setup-create")
 
             Button {
                 mode = .join

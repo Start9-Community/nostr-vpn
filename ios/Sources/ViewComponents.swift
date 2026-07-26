@@ -129,32 +129,40 @@ struct WrappingIdentifierText: UIViewRepresentable {
 struct CopyLine: View {
     let value: String
     var displayValue: String? = nil
+    var valueAccessibilityIdentifier: String? = nil
     @ObservedObject var model: AppModel
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            if value.hasPrefix("npub1") {
-                WrappingIdentifierText(
-                    value: (displayValue ?? value).isEmpty ? "-" : (displayValue ?? value),
-                    font: .preferredFont(forTextStyle: .footnote),
-                    color: .secondaryLabel
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text((displayValue ?? value).isEmpty ? "-" : (displayValue ?? value))
-                    .font(.footnote)
-                    .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            copyValue
+                .accessibilityIdentifier(valueAccessibilityIdentifier ?? "")
+                .accessibilityLabel(value)
             Button {
                 model.copy(value)
             } label: {
                 Label("Copy", systemImage: model.copiedValue == value ? "checkmark" : "doc.on.doc")
             }
             .disabled(value.isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private var copyValue: some View {
+        if value.hasPrefix("npub1") {
+            WrappingIdentifierText(
+                value: (displayValue ?? value).isEmpty ? "-" : (displayValue ?? value),
+                font: .preferredFont(forTextStyle: .footnote),
+                color: .secondaryLabel
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text((displayValue ?? value).isEmpty ? "-" : (displayValue ?? value))
+                .font(.footnote)
+                .textSelection(.enabled)
+                .foregroundStyle(.secondary)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

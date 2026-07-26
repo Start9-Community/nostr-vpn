@@ -39,6 +39,7 @@ extension RootView {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("network-setup-create")
 
                 Button {
                     addNetworkMode = .join
@@ -231,6 +232,7 @@ extension RootView {
             )
             .contentShape(Rectangle())
         }
+        .accessibilityIdentifier("roster-participant-\(participant.npub)")
         .buttonStyle(.plain)
     }
 
@@ -416,7 +418,12 @@ extension RootView {
         }
     }
 
-    func detailValueRow(_ title: String, _ value: String, displayValue customDisplayValue: String? = nil) -> some View {
+    func detailValueRow(
+        _ title: String,
+        _ value: String,
+        displayValue customDisplayValue: String? = nil,
+        accessibilityIdentifier: String? = nil
+    ) -> some View {
         let displayValue = value.isEmpty ? "-" : customDisplayValue ?? value
         return VStack(alignment: .leading, spacing: 4) {
             if value.hasPrefix("npub1") {
@@ -449,6 +456,8 @@ extension RootView {
             }
         }
         .padding(.vertical, 3)
+        .accessibilityIdentifier(accessibilityIdentifier ?? "")
+        .accessibilityLabel(value)
     }
 
     func joinRequestInputSection(_ network: NativeNetworkState) -> some View {
@@ -489,6 +498,7 @@ extension RootView {
             sectionHeader("Create Network", systemImage: "plus.circle")
             HStack(spacing: 8) {
                 TextField("Network name", text: $networkNameInput)
+                    .accessibilityIdentifier("network-create-name")
                     .onSubmit {
                         addNetwork()
                         finishCreateNetwork()
@@ -500,6 +510,7 @@ extension RootView {
                     Label("Create", systemImage: "plus")
                 }
                 .disabled(manager.actionInFlight)
+                .accessibilityIdentifier("network-create-submit")
             }
         }
     }
@@ -542,7 +553,11 @@ extension RootView {
                     }
                 }
                 .disabled(manager.actionInFlight)
-                detailValueRow("Your Device ID", state.ownNpub)
+                detailValueRow(
+                    "Your Device ID",
+                    state.ownNpub,
+                    accessibilityIdentifier: "joiner-device-id-value"
+                )
             }
 
             DisclosureGroup(isExpanded: $manualJoinExpanded) {
@@ -565,7 +580,11 @@ extension RootView {
             Text("Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            detailValueRow("Your Device ID", state.ownNpub)
+            detailValueRow(
+                "Your Device ID",
+                state.ownNpub,
+                accessibilityIdentifier: "joiner-device-id-value"
+            )
             TextField("Admin Device ID", text: $manualJoinAdminId)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("manual-join-admin-id")
@@ -597,8 +616,17 @@ extension RootView {
             Text("Share these values with the joining device, then add its Device ID below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            detailValueRow("Admin Device ID", state.ownNpub)
-            detailValueRow("Network ID", network.networkId, displayValue: displayNetworkId(network.networkId))
+            detailValueRow(
+                "Admin Device ID",
+                state.ownNpub,
+                accessibilityIdentifier: "admin-device-id-value"
+            )
+            detailValueRow(
+                "Network ID",
+                network.networkId,
+                displayValue: displayNetworkId(network.networkId),
+                accessibilityIdentifier: "admin-network-id-value"
+            )
             TextField("Joining Device ID", text: $manualJoinDeviceId)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("manual-join-admin-device-id")

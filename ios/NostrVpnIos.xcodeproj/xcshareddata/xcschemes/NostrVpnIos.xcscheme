@@ -69,6 +69,41 @@
       </CommandLineArguments>
       <EnvironmentVariables>
          <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_ADMIN_ID"
+            value = "$(NVPN_RELEASE_JOIN_ADMIN_ID)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_BLACKBOX"
+            value = "$(NVPN_RELEASE_JOIN_BLACKBOX)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS"
+            value = "$(NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS"
+            value = "$(NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_JOINER_ID"
+            value = "$(NVPN_RELEASE_JOIN_JOINER_ID)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_NETWORK_ID"
+            value = "$(NVPN_RELEASE_JOIN_NETWORK_ID)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_RELEASE_JOIN_NETWORK_NAME"
+            value = "$(NVPN_RELEASE_JOIN_NETWORK_NAME)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
             key = "NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64"
             value = "$(NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64)"
             isEnabled = "YES">

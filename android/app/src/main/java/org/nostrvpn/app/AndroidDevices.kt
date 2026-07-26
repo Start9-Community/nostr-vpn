@@ -221,7 +221,11 @@ private fun NetworkSetupCard(
                     onClick = { setupMode = NetworkSetupMode.Create },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(58.dp),
+                        .height(58.dp)
+                        .mobileUiSelector(
+                            id = "network-setup-create",
+                            description = "Create Network",
+                        ),
                     shape = RoundedCornerShape(16.dp),
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
                 ) {
@@ -274,7 +278,12 @@ private fun NetworkSetupCard(
                             OutlinedTextField(
                                 value = networkName,
                                 onValueChange = { networkName = it },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .mobileUiSelector(
+                                        id = "network-create-name",
+                                        description = "Network name",
+                                    ),
                                 singleLine = true,
                                 label = { Text("Network name") },
                             )
@@ -284,7 +293,12 @@ private fun NetworkSetupCard(
                                     networkName = "My Network"
                                     onCreated?.invoke()
                                 },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .mobileUiSelector(
+                                        id = "network-create-submit",
+                                        description = "Create network",
+                                    ),
                             ) {
                                 Text("Create")
                             }
@@ -319,7 +333,11 @@ private fun NetworkSetupCard(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Muted,
                                 )
-                                CopyButton(state.ownNpub, "Copy Device ID")
+                                CopyLine(
+                                    value = state.ownNpub,
+                                    selectorId = "joiner-device-id-value",
+                                    selectorDescription = "Joiner Device ID value",
+                                )
                                 OutlinedTextField(
                                     value = manualAdminId,
                                     onValueChange = { manualAdminId = it },
@@ -543,9 +561,18 @@ internal fun AddDevicesDialog(
                     color = Muted,
                 )
                 Text("Your Device ID", style = MaterialTheme.typography.bodySmall, color = Muted)
-                CopyLine(state.ownNpub)
+                CopyLine(
+                    value = state.ownNpub,
+                    selectorId = "admin-device-id-value",
+                    selectorDescription = "Admin Device ID value",
+                )
                 Text("Network ID", style = MaterialTheme.typography.bodySmall, color = Muted)
-                CopyLine(network.networkId, displayNetworkId(network.networkId))
+                CopyLine(
+                    value = network.networkId,
+                    displayValue = displayNetworkId(network.networkId),
+                    selectorId = "admin-network-id-value",
+                    selectorDescription = "Admin Network ID value",
+                )
                 Text("Add by Device ID", style = MaterialTheme.typography.titleMedium)
                 AddParticipantForm(network, dispatch)
             }

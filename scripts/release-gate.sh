@@ -259,6 +259,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-real-qr-join-harness.sh
+  ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
   cargo fmt --check
 }
@@ -827,13 +828,28 @@ run_macos_daemon_idle_cpu_gate() {
 }
 
 release_gate_has_physical_ios_device() {
+  local requested="${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
   [[ "$(uname -s)" == "Darwin" ]] || return 1
-  xcrun xctrace list devices 2>/dev/null | awk '
-    /^== Devices ==/ { devices = 1; next }
-    /^== Devices Offline ==/ || /^== Simulators ==/ { devices = 0 }
-    devices && /iPhone|iPad/ { found = 1 }
-    END { exit !found }
-  '
+  if [[ -n "$requested" ]]; then
+    xcrun devicectl device info details \
+      --device "$requested" \
+      --quiet >/dev/null 2>&1
+    return
+  fi
+  xcrun xcdevice list 2>/dev/null | python3 -c '
+import json
+import sys
+
+devices = json.load(sys.stdin)
+raise SystemExit(
+    0 if any(
+        item.get("available") is True
+        and item.get("simulator") is False
+        and item.get("platform") == "com.apple.platform.iphoneos"
+        for item in devices
+    ) else 1
+)
+'
 }
 
 release_gate_select_android_idle_serial() {
@@ -1027,26 +1043,33 @@ run_android_legacy_replacement_gate() {
 }
 
 run_mobile_join_e2e_gate() {
-  local mode="${NVPN_RELEASE_GATE_MOBILE_JOIN_E2E:-auto}"
+  local mode="${NVPN_RELEASE_GATE_MOBILE_JOIN_E2E:-required}"
   case "$mode" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
-      echo "Skipping physical bidirectional mobile join e2e because NVPN_RELEASE_GATE_MOBILE_JOIN_E2E=$mode"
+      echo "Skipping signed Release cross-platform join e2e because NVPN_RELEASE_GATE_MOBILE_JOIN_E2E=$mode"
       return
       ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
+      [[ "$(uname -s)" == "Darwin" ]] \
+        || { echo "Required signed Release join gate needs macOS/Xcode." >&2; return 1; }
+      command -v adb >/dev/null 2>&1 \
+        || { echo "Required signed Release join gate needs adb." >&2; return 1; }
+      adb devices 2>/dev/null | awk \
+        'NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 } END { exit !found }' \
+        || { echo "Required signed Release join gate needs a physical Android phone." >&2; return 1; }
+      release_gate_has_physical_ios_device \
+        || { echo "Required signed Release join gate needs a physical iPhone." >&2; return 1; }
+      macos_vm_reachable \
+        || { echo "Required signed Release join gate needs the macOS VM." >&2; return 1; }
       ;;
     auto|AUTO|Auto|"")
       if [[ "$(uname -s)" != "Darwin" ]] \
         || ! command -v adb >/dev/null 2>&1 \
         || ! adb devices 2>/dev/null | awk 'NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 } END { exit !found }' \
-        || ! xcrun xctrace list devices 2>/dev/null | awk '
-          /^== Devices ==/ { devices = 1; next }
-          /^== Devices Offline ==/ || /^== Simulators ==/ { devices = 0 }
-          devices && /iPhone|iPad/ { found = 1 }
-          END { exit !found }
-        '
+        || ! release_gate_has_physical_ios_device \
+        || ! macos_vm_reachable
       then
-        echo "Skipping physical bidirectional mobile join e2e because both phones are not available."
+        echo "Skipping signed Release cross-platform join e2e because its phones or macOS VM are unavailable."
         return
       fi
       ;;
@@ -1057,13 +1080,11 @@ run_mobile_join_e2e_gate() {
   esac
 
   release_gate_run_with_timeout \
-    "Physical iOS/Android bidirectional join e2e" \
+    "Signed Release public-UI cross-platform join e2e" \
     "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
-    env NVPN_MOBILE_JOIN_E2E_ANDROID_BUILD_TYPE=signed-debug \
-    NVPN_MOBILE_JOIN_E2E_BUILD="$((1 - MOBILE_ANDROID_APP_READY))" \
-    NVPN_MOBILE_JOIN_E2E_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
-    NVPN_MOBILE_JOIN_E2E_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
-    ./scripts/mobile-ios-android-join-e2e.sh
+    env NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET=YES \
+    NVPN_RELEASE_JOIN_DESKTOP_MOBILE=1 \
+    ./scripts/mobile-release-join-e2e.sh
   MOBILE_ANDROID_APP_READY=1
   MOBILE_IOS_APP_READY=1
 }
@@ -1308,17 +1329,16 @@ main() {
   run_mobile_idle_cpu_gates
   run_android_legacy_replacement_gate
   run_mobile_wireguard_exit_gates
-  run_mobile_join_e2e_gate
 
-  # The native macOS UI lane and this physical cross-platform lane share the
-  # isolated macOS VM. Join it before touching the VM; all physical Android/iOS
-  # lanes stay serial so one installed app and one VPN service own each phone.
+  # The signed Release join lane covers both mobile role directions, both
+  # manual role directions, and desktop/mobile manual join. It shares the
+  # isolated macOS VM with its platform lane, so join that lane first.
   if [[ -n "$macos_platform_lane" ]]; then
     release_gate_parallel_wait "$macos_platform_lane"
     DESKTOP_MOBILE_REUSE_MACOS_BUILD=1
     macos_platform_lane=""
   fi
-  run_desktop_mobile_manual_join_e2e_gate
+  run_mobile_join_e2e_gate
 
   if [[ -n "$windows_lane" ]]; then
     release_gate_parallel_wait "$windows_lane"

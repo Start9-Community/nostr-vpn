@@ -190,11 +190,55 @@ func setValue(_ application: AXUIElement, _ identifier: String, _ value: String)
     throw DriverError.value(identifier, .cannotComplete)
 }
 
+func publicValue(
+    _ application: AXUIElement,
+    identifier: String,
+    validator: (String) -> Bool
+) throws -> String {
+    let element = try find(application, identifier: identifier)
+    for attributeName in [
+        kAXValueAttribute,
+        kAXDescriptionAttribute,
+        kAXTitleAttribute,
+        kAXHelpAttribute,
+    ] {
+        let candidate = stringAttribute(element, attributeName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if validator(candidate) {
+            return candidate
+        }
+    }
+    throw DriverError.value(identifier, .cannotComplete)
+}
+
+func validNpub(_ value: String) -> Bool {
+    let allowed = Set("023456789acdefghjklmnpqrstuvwxyz")
+    return value.count == 63
+        && value.hasPrefix("npub1")
+        && value.dropFirst(5).allSatisfy { allowed.contains($0) }
+}
+
+func openAddNetwork(_ application: AXUIElement, choice: String) throws {
+    if !containsVisible(application, identifier: choice) {
+        try press(
+            application,
+            "add-network-open",
+            successIdentifier: choice
+        )
+    }
+    try press(application, choice)
+}
+
+func emit(_ marker: String) {
+    print("NVPN_RELEASE_JOIN_MARKER \(marker)")
+    fflush(stdout)
+}
+
 func run() throws {
     let args = CommandLine.arguments
     guard args.count == 6, let pid = pid_t(args[1]) else {
         throw DriverError.usage(
-            "usage: desktop-manual-join-ax <pid> <joiner|admin|joined> <value-1> <value-2> <expected-process-name>"
+            "usage: desktop-manual-join-ax <pid> <phase> <value-1> <value-2> <expected-process-name>"
         )
     }
     guard AXIsProcessTrusted() else {
@@ -243,8 +287,80 @@ func run() throws {
             }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline
+    case "release-create-admin":
+        try openAddNetwork(application, choice: "network-setup-create")
+        try setValue(application, "network-create-name", args[3])
+        try press(
+            application,
+            "network-create-submit",
+            successIdentifier: "manual-join-admin-open"
+        )
+        try press(
+            application,
+            "manual-join-admin-open",
+            successIdentifier: "admin-device-id-value"
+        )
+        let admin = try publicValue(
+            application,
+            identifier: "admin-device-id-value",
+            validator: validNpub
+        )
+        let network = try publicValue(
+            application,
+            identifier: "admin-network-id-value"
+        ) { !$0.isEmpty && $0 != "-" }
+        emit("NVPN_RELEASE_JOIN_ADMIN_ID=\(admin)")
+        emit("NVPN_RELEASE_JOIN_NETWORK_ID=\(network.replacingOccurrences(of: "-", with: ""))")
+        emit("NVPN_RELEASE_JOIN_ADMIN_READY=1")
+    case "release-manual-join":
+        try openAddNetwork(application, choice: "manual-join-choose-join")
+        try press(
+            application,
+            "manual-join-expander",
+            successIdentifier: "manual-join-admin-id"
+        )
+        let joiner = try publicValue(
+            application,
+            identifier: "joiner-device-id-value",
+            validator: validNpub
+        )
+        emit("NVPN_RELEASE_JOIN_JOINER_ID=\(joiner)")
+        try setValue(application, "manual-join-admin-id", args[3])
+        try setValue(application, "manual-join-network-id", args[4])
+        try press(application, "manual-join-submit")
+        emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
+        _ = try find(
+            application,
+            identifier: "roster-participant-\(args[3])",
+            timeout: 15
+        )
+        emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
+    case "release-admin-add":
+        try press(
+            application,
+            "manual-join-admin-open",
+            successIdentifier: "manual-join-admin-device-id"
+        )
+        try setValue(application, "manual-join-admin-device-id", args[3])
+        try setValue(application, "manual-join-admin-device-name", args[4])
+        try press(application, "manual-join-admin-submit")
+        _ = try find(
+            application,
+            identifier: "roster-participant-\(args[3])",
+            timeout: 15
+        )
+        emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(args[3])")
+    case "release-verify":
+        _ = try find(
+            application,
+            identifier: "roster-participant-\(args[3])",
+            timeout: 15
+        )
+        emit("NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=\(args[3])")
     default:
-        throw DriverError.usage("phase must be joiner, admin, or joined")
+        throw DriverError.usage(
+            "unsupported phase \(args[2])"
+        )
     }
     print("MACOS_MANUAL_JOIN_UI_\(args[2].uppercased())_OK")
 }

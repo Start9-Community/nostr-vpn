@@ -446,6 +446,7 @@ struct RootView: View {
             }
             .buttonStyle(.borderless)
             .help("Add network")
+            .accessibilityIdentifier("add-network-open")
         }
         .frame(width: 220, alignment: .leading)
     }
