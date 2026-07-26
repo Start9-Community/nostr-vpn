@@ -7,24 +7,46 @@ import android.net.Uri
 import android.os.Build
 
 internal object AndroidLegacyPackageMigration {
-    const val LEGACY_PACKAGE_NAME = "org.nostrvpn.app"
+    val RETIRED_PACKAGE_NAMES = listOf(
+        "org.nostrvpn.app",
+        "fi.siriusbusiness.nvpn.releasegate",
+        "fi.siriusbusiness.nvpn.mobileexit",
+        "fi.siriusbusiness.nvpn.joine2e",
+        "fi.siriusbusiness.nvpn.debug",
+        "fi.siriusbusiness.nvpn.test",
+    )
 
-    fun packageToRemove(currentPackageName: String, installedPackageNames: Set<String>): String? {
-        if (currentPackageName == LEGACY_PACKAGE_NAME) {
-            return null
+    fun packagesToRemove(
+        currentPackageName: String,
+        installedPackageNames: Set<String>,
+    ): List<String> =
+        RETIRED_PACKAGE_NAMES.filter { packageName ->
+            packageName != currentPackageName && packageName in installedPackageNames
         }
-        return LEGACY_PACKAGE_NAME.takeIf(installedPackageNames::contains)
-    }
+
+    fun packageToRemove(
+        currentPackageName: String,
+        installedPackageNames: Set<String>,
+    ): String? =
+        packagesToRemove(currentPackageName, installedPackageNames).firstOrNull()
+
+    fun vpnStartAllowed(
+        currentPackageName: String,
+        installedPackageNames: Set<String>,
+    ): Boolean =
+        packagesToRemove(currentPackageName, installedPackageNames).isEmpty()
+
+    fun packagesToRemove(context: Context): List<String> =
+        packagesToRemove(
+            currentPackageName = context.packageName,
+            installedPackageNames = RETIRED_PACKAGE_NAMES
+                .filterTo(linkedSetOf()) { packageName ->
+                    context.packageManager.hasPackage(packageName)
+                },
+        )
 
     fun packageToRemove(context: Context): String? =
-        packageToRemove(
-            currentPackageName = context.packageName,
-            installedPackageNames = buildSet {
-                if (context.packageManager.hasPackage(LEGACY_PACKAGE_NAME)) {
-                    add(LEGACY_PACKAGE_NAME)
-                }
-            },
-        )
+        packagesToRemove(context).firstOrNull()
 
     fun uninstallIntent(packageName: String): Intent =
         Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))

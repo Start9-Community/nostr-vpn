@@ -5,7 +5,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -38,8 +37,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -296,19 +293,11 @@ private fun NetworkSetupCard(
                     NetworkSetupMode.Join -> {
                         SetupChoiceCard("Join Network", Color(0xFF2563EB)) {
                             if (joinRequestQrCodeOrLink.isNotBlank()) {
-                                BoxWithConstraints(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    QrCode(
-                                        text = joinRequestQrCodeOrLink,
-                                        qrJson = qrJson,
-                                        modifier = Modifier.semantics {
-                                            contentDescription = "Join request QR code"
-                                        },
-                                        side = maxWidth,
-                                    )
-                                }
+                                QrCode(
+                                    text = joinRequestQrCodeOrLink,
+                                    qrJson = qrJson,
+                                    accessibilityDescription = "Join request QR code",
+                                )
                                 CopyButton(joinRequestQrCodeOrLink, "Copy request")
                             }
 

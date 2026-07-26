@@ -1,19 +1,26 @@
 package org.nostrvpn.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidLegacyPackageMigrationTest {
     @Test
-    fun canonicalAppRequiresRemovalOfLegacyPackage() {
+    fun canonicalAppRequiresRemovalOfEveryRetiredPackageInStableOrder() {
         assertEquals(
-            AndroidLegacyPackageMigration.LEGACY_PACKAGE_NAME,
-            AndroidLegacyPackageMigration.packageToRemove(
+            AndroidLegacyPackageMigration.RETIRED_PACKAGE_NAMES,
+            AndroidLegacyPackageMigration.packagesToRemove(
                 currentPackageName = "fi.siriusbusiness.nvpn",
                 installedPackageNames = setOf(
                     "fi.siriusbusiness.nvpn",
-                    AndroidLegacyPackageMigration.LEGACY_PACKAGE_NAME,
+                    "fi.siriusbusiness.nvpn.test",
+                    "fi.siriusbusiness.nvpn.mobileexit",
+                    "fi.siriusbusiness.nvpn.releasegate",
+                    "fi.siriusbusiness.nvpn.debug",
+                    "fi.siriusbusiness.nvpn.joine2e",
+                    "org.nostrvpn.app",
                 ),
             ),
         )
@@ -30,11 +37,32 @@ class AndroidLegacyPackageMigrationTest {
     }
 
     @Test
-    fun legacyBuildNeverAttemptsToRemoveItself() {
-        assertNull(
-            AndroidLegacyPackageMigration.packageToRemove(
-                currentPackageName = AndroidLegacyPackageMigration.LEGACY_PACKAGE_NAME,
-                installedPackageNames = setOf(AndroidLegacyPackageMigration.LEGACY_PACKAGE_NAME),
+    fun retiredBuildNeverAttemptsToRemoveItself() {
+        for (packageName in AndroidLegacyPackageMigration.RETIRED_PACKAGE_NAMES) {
+            assertFalse(
+                AndroidLegacyPackageMigration.packagesToRemove(
+                    currentPackageName = packageName,
+                    installedPackageNames = AndroidLegacyPackageMigration.RETIRED_PACKAGE_NAMES.toSet(),
+                ).contains(packageName),
+            )
+        }
+    }
+
+    @Test
+    fun vpnStartIsBlockedUntilEveryRetiredPackageIsGone() {
+        assertFalse(
+            AndroidLegacyPackageMigration.vpnStartAllowed(
+                currentPackageName = "fi.siriusbusiness.nvpn",
+                installedPackageNames = setOf(
+                    "fi.siriusbusiness.nvpn",
+                    "fi.siriusbusiness.nvpn.mobileexit",
+                ),
+            ),
+        )
+        assertTrue(
+            AndroidLegacyPackageMigration.vpnStartAllowed(
+                currentPackageName = "fi.siriusbusiness.nvpn",
+                installedPackageNames = setOf("fi.siriusbusiness.nvpn"),
             ),
         )
     }

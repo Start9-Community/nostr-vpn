@@ -5,15 +5,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gate="$ROOT/scripts/mobile-android-legacy-replacement-e2e.sh"
 activity="$ROOT/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt"
 migration="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidLegacyPackageMigration.kt"
+boot_receiver="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnBootReceiver.kt"
+vpn_service="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt"
+manifest="$ROOT/android/app/src/main/AndroidManifest.xml"
 
 for contract in \
-  'LEGACY_PACKAGE="org.nostrvpn.app"' \
-  'NVPN_ANDROID_PACKAGE="$LEGACY_PACKAGE"' \
+  'RETIRED_PACKAGES=(' \
+  'org.nostrvpn.app' \
+  'fi.siriusbusiness.nvpn.releasegate' \
+  'fi.siriusbusiness.nvpn.mobileexit' \
+  'fi.siriusbusiness.nvpn.joine2e' \
+  'fi.siriusbusiness.nvpn.debug' \
+  'fi.siriusbusiness.nvpn.test' \
+  'build_retired_fixture_apks' \
   'gradle :app:assembleDebug -x buildRustArm64' \
-  '"$ADB" -s "$serial" install -r "$work_dir/legacy.apk"' \
+  '"$ADB" -s "$serial" install -r "$work_dir/canonical.apk"' \
+  'assert_canonical_update_preserved_data' \
+  'assert_vpn_start_blocked' \
+  'assert_no_retired_processes' \
   'tap_ui description "Remove older Nostr VPN installation"' \
   'tap_system_uninstall' \
   'assert_only_canonical_package' \
+  '"vpnStartBlockedBeforeCleanup": True' \
   '"systemUninstallConfirmed": True'
 do
   grep -Fq "$contract" "$gate" \
@@ -24,7 +37,22 @@ grep -Fq 'id = "remove-legacy-app"' "$activity" \
   || { echo "Android shipped UI has no legacy-removal selector" >&2; exit 1; }
 grep -Fq 'Intent(Intent.ACTION_DELETE' "$migration" \
   || { echo "Android legacy migration does not invoke the system uninstall UI" >&2; exit 1; }
-grep -Fq 'REQUEST_DELETE_PACKAGES' "$ROOT/android/app/src/main/AndroidManifest.xml" \
+for runtime_guard in "$activity" "$boot_receiver" "$vpn_service"; do
+  grep -Fq 'AndroidLegacyPackageMigration' "$runtime_guard" \
+    || { echo "Android VPN startup is not guarded in $runtime_guard" >&2; exit 1; }
+done
+for package_name in \
+  org.nostrvpn.app \
+  fi.siriusbusiness.nvpn.releasegate \
+  fi.siriusbusiness.nvpn.mobileexit \
+  fi.siriusbusiness.nvpn.joine2e \
+  fi.siriusbusiness.nvpn.debug \
+  fi.siriusbusiness.nvpn.test
+do
+  grep -Fq "<package android:name=\"$package_name\" />" "$manifest" \
+    || { echo "Android cannot query retired package $package_name" >&2; exit 1; }
+done
+grep -Fq 'REQUEST_DELETE_PACKAGES' "$manifest" \
   || {
     echo "Android migration cannot open the system uninstall confirmation" >&2
     exit 1

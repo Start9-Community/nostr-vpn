@@ -122,7 +122,22 @@ class MainActivity : ComponentActivity() {
             ) {
                 legacyPackageToRemove = AndroidLegacyPackageMigration.packageToRemove(this)
             }
+            fun vpnStartBlockedByRetiredPackage(): Boolean {
+                val packageName = AndroidLegacyPackageMigration.packageToRemove(this)
+                    ?: return false
+                legacyPackageToRemove = packageName
+                showAndroidError(
+                    "Remove the older Nostr VPN installation before starting VPN.",
+                )
+                return true
+            }
             fun requestVpnTunnel() {
+                if (vpnStartBlockedByRetiredPackage()) {
+                    if (state.vpnEnabled) {
+                        applyUserActionState(core.dispatch(NativeActions.disconnectVpn()))
+                    }
+                    return
+                }
                 val tunnelConfigJson = core.mobileTunnelConfigJson()
                 observedTunnelConfigJson = tunnelConfigJson
                 val tunnelConfig = JSONObject(tunnelConfigJson)
@@ -165,6 +180,12 @@ class MainActivity : ComponentActivity() {
 
             fun dispatchNow(action: JSONObject) {
                 val actionType = action.optString("type")
+                if (
+                    actionType == "connect_vpn" &&
+                    vpnStartBlockedByRetiredPackage()
+                ) {
+                    return
+                }
                 val wasEnabled = state.vpnEnabled
                 var actionSucceeded = false
                 try {

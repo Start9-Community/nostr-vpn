@@ -22,6 +22,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import org.json.JSONObject
+import org.nostrvpn.app.AndroidLegacyPackageMigration
 import org.nostrvpn.app.MainActivity
 import org.nostrvpn.app.R
 import org.nostrvpn.app.appCoreDataDir
@@ -37,6 +38,21 @@ class NostrVpnService : VpnService() {
     private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action != ACTION_DISCONNECT) {
+            val conflicts = AndroidLegacyPackageMigration.packagesToRemove(this)
+            if (conflicts.isNotEmpty()) {
+                Log.e(
+                    "NostrVpnService",
+                    "Refusing Android VPN start while conflicting nVPN packages remain: " +
+                        conflicts.joinToString(),
+                )
+                VpnStartState.setUserWantsVpn(this, false)
+                stopTunnel()
+                stopServiceForeground()
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+        }
         return when (intent?.action) {
             ACTION_DISCONNECT -> {
                 VpnStartState.setUserWantsVpn(this, false)

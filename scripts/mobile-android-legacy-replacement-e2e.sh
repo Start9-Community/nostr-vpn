@@ -11,7 +11,14 @@ load_env_file_defaults "$ROOT/.env.zapstore.local"
 load_mobile_env "$ROOT"
 
 CANONICAL_PACKAGE="${NVPN_ANDROID_PACKAGE:-fi.siriusbusiness.nvpn}"
-LEGACY_PACKAGE="org.nostrvpn.app"
+RETIRED_PACKAGES=(
+  org.nostrvpn.app
+  fi.siriusbusiness.nvpn.releasegate
+  fi.siriusbusiness.nvpn.mobileexit
+  fi.siriusbusiness.nvpn.joine2e
+  fi.siriusbusiness.nvpn.debug
+  fi.siriusbusiness.nvpn.test
+)
 CANONICAL_APK="${NVPN_ANDROID_LEGACY_CANONICAL_APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 REUSE_CANONICAL_APK="${NVPN_ANDROID_LEGACY_REUSE_CANONICAL_APK:-0}"
 RESULT_DIR="${NVPN_ANDROID_LEGACY_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
@@ -19,6 +26,7 @@ WAIT_SECS="${NVPN_ANDROID_LEGACY_WAIT_SECS:-15}"
 ADB="${ADB:-adb}"
 serial=""
 work_dir=""
+logcat_pid=""
 
 select_device() {
   if [[ -n "${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}" ]]; then
@@ -37,11 +45,22 @@ package_installed() {
 
 cleanup() {
   local status="$?"
+  local package
   trap - EXIT
-  if [[ -n "$serial" ]] && package_installed "$LEGACY_PACKAGE"; then
-    "$ADB" -s "$serial" uninstall "$LEGACY_PACKAGE" >/dev/null 2>&1 || true
+  if [[ -n "$logcat_pid" ]]; then
+    kill "$logcat_pid" >/dev/null 2>&1 || true
+    wait "$logcat_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$serial" ]]; then
+    for package in "${RETIRED_PACKAGES[@]}"; do
+      package_installed "$package" \
+        && "$ADB" -s "$serial" uninstall "$package" >/dev/null 2>&1 || true
+    done
   fi
   if [[ -n "$work_dir" ]]; then
+    if [[ -f "$work_dir/canonical.apk" ]]; then
+      cp "$work_dir/canonical.apk" "$CANONICAL_APK" || true
+    fi
     rm -rf "$work_dir"
   fi
   exit "$status"
@@ -134,6 +153,82 @@ assert_only_canonical_package() {
   printf '%s\n' "$installed" | grep -Fxq "$CANONICAL_PACKAGE"
 }
 
+assert_no_retired_processes() {
+  local package
+  for package in "${RETIRED_PACKAGES[@]}"; do
+    if [[ -n "$("$ADB" -s "$serial" shell pidof "$package" 2>/dev/null | tr -d '\r')" ]]; then
+      echo "Retired Android package still has a process: $package" >&2
+      return 1
+    fi
+  done
+}
+
+build_retired_fixture_apks() {
+  local package output_name
+  for package in "${RETIRED_PACKAGES[@]}"; do
+    output_name="${package//./_}.apk"
+    (
+      cd "$ROOT/android"
+      NVPN_ANDROID_PACKAGE="$package" \
+        NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
+        gradle :app:assembleDebug -x buildRustArm64
+    )
+    cp "$ROOT/android/app/build/outputs/apk/debug/app-debug.apk" \
+      "$work_dir/$output_name"
+  done
+  cp "$work_dir/canonical.apk" "$CANONICAL_APK"
+}
+
+install_retired_fixture_apks() {
+  local package output_name
+  for package in "${RETIRED_PACKAGES[@]}"; do
+    output_name="${package//./_}.apk"
+    "$ADB" -s "$serial" install -r "$work_dir/$output_name" >/dev/null
+    package_installed "$package" \
+      || { echo "Retired Android fixture package was not installed: $package" >&2; return 1; }
+  done
+}
+
+assert_canonical_update_preserved_data() {
+  local actual marker="canonical-update-$RANDOM-$$"
+  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" mkdir -p files
+  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
+    sh -c "echo $marker > files/nvpn-replacement-marker"
+  "$ADB" -s "$serial" install -r "$work_dir/canonical.apk" >/dev/null
+  actual="$("$ADB" -s "$serial" exec-out run-as "$CANONICAL_PACKAGE" \
+    cat files/nvpn-replacement-marker | tr -d '\r\n')"
+  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
+    rm -f files/nvpn-replacement-marker
+  [[ "$actual" == "$marker" ]]
+}
+
+assert_vpn_start_blocked() {
+  local service_component="$CANONICAL_PACKAGE/org.nostrvpn.app.vpn.NostrVpnService"
+  "$ADB" -s "$serial" logcat -v brief -s NostrVpnService:E '*:S' \
+    >"$work_dir/vpn-start-guard.log" &
+  logcat_pid="$!"
+  sleep 0.25
+  if ! "$ADB" -s "$serial" shell am start-foreground-service \
+    -n "$service_component" \
+    -a fi.siriusbusiness.nvpn.vpn.CONNECT \
+    --es configJson '{}' >/dev/null
+  then
+    kill "$logcat_pid" >/dev/null 2>&1 || true
+    wait "$logcat_pid" >/dev/null 2>&1 || true
+    logcat_pid=""
+    return 1
+  fi
+  sleep 1
+  kill "$logcat_pid" >/dev/null 2>&1 || true
+  wait "$logcat_pid" >/dev/null 2>&1 || true
+  logcat_pid=""
+  grep -Fq 'Refusing Android VPN start while conflicting nVPN packages remain:' \
+    "$work_dir/vpn-start-guard.log" \
+    || return 1
+  ! "$ADB" -s "$serial" shell dumpsys activity services "$CANONICAL_PACKAGE" \
+    | grep -Fq 'NostrVpnService'
+}
+
 for command in "$ADB" gradle; do
   command -v "$command" >/dev/null 2>&1 \
     || { echo "Android legacy replacement e2e requires $command" >&2; exit 1; }
@@ -148,6 +243,11 @@ do
     || { echo "Android legacy replacement e2e requires $signing_var" >&2; exit 1; }
 done
 
+[[ "$CANONICAL_PACKAGE" == "fi.siriusbusiness.nvpn" ]] \
+  || {
+    echo "Android replacement e2e must exercise canonical fi.siriusbusiness.nvpn" >&2
+    exit 1
+  }
 serial="$(select_device)" \
   || { echo "Android legacy replacement e2e requires exactly one physical device" >&2; exit 1; }
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-android-legacy-e2e.XXXXXX")"
@@ -160,33 +260,34 @@ if [[ "$REUSE_CANONICAL_APK" != "1" || ! -f "$CANONICAL_APK" ]]; then
 fi
 cp "$CANONICAL_APK" "$work_dir/canonical.apk"
 
-(
-  cd "$ROOT/android"
-  NVPN_ANDROID_PACKAGE="$LEGACY_PACKAGE" \
-    NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
-    gradle :app:assembleDebug -x buildRustArm64
-)
-cp "$ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$work_dir/legacy.apk"
-cp "$work_dir/canonical.apk" "$CANONICAL_APK"
-
-"$ADB" -s "$serial" install -r "$work_dir/legacy.apk" >/dev/null
 "$ADB" -s "$serial" install -r "$work_dir/canonical.apk" >/dev/null
-package_installed "$LEGACY_PACKAGE" \
-  || { echo "Legacy Android fixture package was not installed" >&2; exit 1; }
+assert_canonical_update_preserved_data \
+  || { echo "Canonical Android update did not preserve app data in place" >&2; exit 1; }
+"$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE"
+build_retired_fixture_apks
+install_retired_fixture_apks
+assert_no_retired_processes \
+  || { echo "A retired nVPN process started before migration" >&2; exit 1; }
+assert_vpn_start_blocked \
+  || { echo "Canonical Android VPN service started before retired apps were removed" >&2; exit 1; }
 
 "$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE"
 "$ADB" -s "$serial" shell monkey -p "$CANONICAL_PACKAGE" 1 >/dev/null
-tap_ui description "Remove older Nostr VPN installation" \
-  || { echo "Canonical Android app did not show its shipped legacy-removal prompt" >&2; exit 1; }
-tap_system_uninstall \
-  || { echo "Android system uninstall confirmation did not appear" >&2; exit 1; }
-
-deadline=$((SECONDS + WAIT_SECS))
-while package_installed "$LEGACY_PACKAGE" && ((SECONDS < deadline)); do
-  sleep 0.25
+for package in "${RETIRED_PACKAGES[@]}"; do
+  tap_ui description "Remove older Nostr VPN installation" \
+    || {
+      echo "Canonical Android app did not prompt to remove $package" >&2
+      exit 1
+    }
+  tap_system_uninstall \
+    || { echo "Android system uninstall confirmation did not appear for $package" >&2; exit 1; }
+  deadline=$((SECONDS + WAIT_SECS))
+  while package_installed "$package" && ((SECONDS < deadline)); do
+    sleep 0.25
+  done
+  package_installed "$package" \
+    && { echo "Retired Android package survived confirmed removal: $package" >&2; exit 1; }
 done
-package_installed "$LEGACY_PACKAGE" \
-  && { echo "Legacy Android package survived the confirmed replacement flow" >&2; exit 1; }
 assert_only_canonical_package \
   || { echo "Android replacement flow did not leave exactly the canonical package" >&2; exit 1; }
 
@@ -206,9 +307,11 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
             "canonicalPackageCount": 1,
-            "legacyPackageCount": 0,
+            "retiredPackageCount": 0,
             "canonicalMainProcessCount": 1,
+            "canonicalUpdatePreservedData": True,
             "shippedRemovalPrompt": True,
+            "vpnStartBlockedBeforeCleanup": True,
             "systemUninstallConfirmed": True,
         },
         handle,

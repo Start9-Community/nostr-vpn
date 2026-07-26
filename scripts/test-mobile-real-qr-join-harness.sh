@@ -11,6 +11,8 @@ python3 - \
   "$ROOT/ios/Sources/RootView.swift" \
   "$ROOT/ios/Sources/QRCodeScannerView.swift" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDevices.kt" \
+  "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
+  "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidPaidRoute.kt" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt" \
   "$ROOT/scripts/release-gate.sh" <<'PY'
@@ -25,7 +27,7 @@ def read(path: str) -> str:
     return file.read_text(encoding="utf-8")
 
 
-gate, ios_test, ios_project, ios_devices, ios_root, ios_scanner, android_devices, android_main, android_scanner, release_gate = (
+gate, ios_test, ios_project, ios_devices, ios_root, ios_scanner, android_devices, android_components, android_paid_route, android_main, android_scanner, release_gate = (
     read(path) for path in sys.argv[1:]
 )
 
@@ -167,6 +169,21 @@ if "join-request-confirm-add" not in android_main:
     raise SystemExit("Android scanned-request confirmation lacks a stable selector")
 if "qr-scanner-camera" not in android_scanner:
     raise SystemExit("Android camera scanner lacks a stable ready selector")
+qr_function = android_components.split("internal fun QrCode(", 1)[1].split(
+    "\n@Composable\ninternal fun AppCard", 1
+)[0]
+for required in (".fillMaxWidth()", ".aspectRatio(1f)", "accessibilityDescription: String"):
+    if required not in qr_function:
+        raise SystemExit(f"Android shipped QR component is missing {required}")
+for forbidden in ("side: Dp", ".size(side)"):
+    if forbidden in qr_function:
+        raise SystemExit(f"Android shipped QR component still permits fixed sizing via {forbidden}")
+if 'accessibilityDescription = "Join request QR code"' not in android_devices:
+    raise SystemExit("Android join QR does not use the full-width shipped QR API")
+if 'accessibilityDescription = "Wallet invoice QR code"' not in android_paid_route:
+    raise SystemExit("Android wallet invoice QR does not use the full-width shipped QR API")
+if "side = " in android_paid_route:
+    raise SystemExit("Android wallet invoice QR still overrides a fixed side length")
 
 if "./scripts/test-mobile-real-qr-join-harness.sh" not in release_gate:
     raise SystemExit("release preflight does not enforce the real QR join contract")

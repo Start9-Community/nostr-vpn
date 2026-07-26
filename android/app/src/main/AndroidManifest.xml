@@ -18,6 +18,11 @@
 
     <queries>
         <package android:name="org.nostrvpn.app" />
+        <package android:name="fi.siriusbusiness.nvpn.releasegate" />
+        <package android:name="fi.siriusbusiness.nvpn.mobileexit" />
+        <package android:name="fi.siriusbusiness.nvpn.joine2e" />
+        <package android:name="fi.siriusbusiness.nvpn.debug" />
+        <package android:name="fi.siriusbusiness.nvpn.test" />
     </queries>
 
     <application

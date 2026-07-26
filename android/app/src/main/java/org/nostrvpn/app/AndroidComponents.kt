@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -46,7 +47,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import java.net.URI
 import java.net.URLDecoder
@@ -804,15 +804,20 @@ internal fun DiagnosticsCard(state: AppState) {
 internal fun QrCode(
     text: String,
     qrJson: (String) -> JSONObject,
+    accessibilityDescription: String,
     modifier: Modifier = Modifier,
-    side: Dp = 132.dp,
 ) {
     val qr = remember(text) { qrJson(text) }
     val width = qr.optInt("width")
     val cells = qr.optJSONArray("cells")
     Canvas(
         modifier = modifier
-            .size(side)
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .mobileUiSelector(
+                id = "qr-code",
+                description = accessibilityDescription,
+            )
             .clip(RoundedCornerShape(8.dp))
             .background(Color.White),
     ) {

@@ -576,8 +576,7 @@ private fun PaidRouteWalletActionResult(
                 QrCode(
                     text = action.paymentRequest,
                     qrJson = qrJson,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
-                    side = 220.dp,
+                    accessibilityDescription = "Wallet invoice QR code",
                 )
                 if (action.expiresAtUnix > 0) {
                     Text(

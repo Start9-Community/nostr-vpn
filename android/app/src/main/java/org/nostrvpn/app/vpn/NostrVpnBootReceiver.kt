@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import org.nostrvpn.app.AndroidLegacyPackageMigration
 
 class NostrVpnBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -12,6 +13,13 @@ class NostrVpnBootReceiver : BroadcastReceiver() {
             return
         }
         if (!VpnStartState.userWantsVpn(context)) {
+            return
+        }
+        if (AndroidLegacyPackageMigration.packagesToRemove(context).isNotEmpty()) {
+            Log.w(
+                "NostrVpnBootReceiver",
+                "Not restoring VPN while another known nVPN package is installed",
+            )
             return
         }
         runCatching {
