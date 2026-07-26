@@ -1,4 +1,4 @@
-"""Pure App Store territory-availability helpers for the iOS release."""
+"""Pure helpers for enforcing worldwide App Store availability."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ DSA_TRADER_CONTENT_ERRORS = frozenset(
 
 
 class AppStoreAvailabilityError(RuntimeError):
-    """Raised when a required storefront state cannot be proven."""
+    """Raised when worldwide storefront availability cannot be proven."""
 
 
 def require_new_territories_enabled(
@@ -55,19 +55,43 @@ def territory_id(resource: Mapping[str, object]) -> str:
     return str(data.get("id", "")).strip().upper()
 
 
-def find_territory_availability(
+def require_worldwide_availability(
     resources: Iterable[Mapping[str, object]],
-    territory: str,
-) -> Mapping[str, object] | None:
-    expected = territory.strip().upper()
-    return next(
-        (
-            resource
-            for resource in resources
-            if territory_id(resource) == expected
-        ),
-        None,
-    )
+) -> list[Mapping[str, object]]:
+    rows = list(resources)
+    if not rows:
+        raise AppStoreAvailabilityError(
+            "App Store availability has no territory rows"
+        )
+    unavailable = []
+    for resource in rows:
+        resource_id = str(resource.get("id", "")).strip()
+        territory = territory_id(resource)
+        attributes = resource.get("attributes")
+        if not resource_id:
+            raise AppStoreAvailabilityError(
+                "App Store territory availability row is malformed"
+            )
+        if not territory:
+            raise AppStoreAvailabilityError(
+                "App Store availability row has no territory identifier"
+            )
+        if not isinstance(attributes, Mapping):
+            raise AppStoreAvailabilityError(
+                f"App Store territory {territory} has no attributes"
+            )
+        available = attributes.get("available")
+        if available is not True and available is not False:
+            raise AppStoreAvailabilityError(
+                f"App Store territory {territory} has no boolean available state"
+            )
+        if available is False:
+            unavailable.append(territory)
+    if unavailable:
+        raise AppStoreAvailabilityError(
+            "App Store territories are excluded: " + ", ".join(unavailable)
+        )
+    return rows
 
 
 def require_no_eu_trader_status_errors(
@@ -131,39 +155,3 @@ def territory_update_request(
             },
         }
     }
-
-
-def require_all_territories_available(
-    resources: Iterable[Mapping[str, object]],
-) -> list[Mapping[str, object]]:
-    rows = list(resources)
-    if not rows:
-        raise AppStoreAvailabilityError(
-            "App Store availability has no territory rows"
-        )
-
-    unavailable = []
-    for resource in rows:
-        territory = territory_id(resource)
-        if not territory:
-            raise AppStoreAvailabilityError(
-                "App Store availability row has no territory identifier"
-            )
-        attributes = resource.get("attributes")
-        if not isinstance(attributes, Mapping):
-            raise AppStoreAvailabilityError(
-                f"App Store territory {territory} has no attributes"
-            )
-        available = attributes.get("available")
-        if available is not True and available is not False:
-            raise AppStoreAvailabilityError(
-                f"App Store territory {territory} has no boolean available state"
-            )
-        if available is False:
-            unavailable.append(territory)
-
-    if unavailable:
-        raise AppStoreAvailabilityError(
-            "App Store territories are excluded: " + ", ".join(unavailable)
-        )
-    return rows

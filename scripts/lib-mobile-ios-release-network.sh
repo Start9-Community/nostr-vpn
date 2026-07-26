@@ -547,7 +547,8 @@ ios_release_network_copy_markers() {
 }
 
 ios_release_network_validate_markers() {
-  local markers="$1" run_id="$2" label="$3" lifecycle="$4" underlay="$5" direct="$6"
+  local markers="$1" run_id="$2" label="$3" lifecycle="$4" underlay="$5"
+  local direct="$6" start_stop="$7"
   local required
   for required in \
     "NVPN_IOS_RELEASE_RUN_ID=$run_id" \
@@ -604,10 +605,29 @@ ios_release_network_validate_markers() {
       return 1
     }
   fi
+  if bool_is_true "$start_stop"; then
+    [[ "$(grep -Fxc "NVPN_IOS_RELEASE_START_STOP_RECOVERED=1" "$markers")" -eq 1 ]] || {
+      echo "iOS Release rapid start/stop recovery receipt is missing" >&2
+      return 1
+    }
+    local cycle marker
+    for cycle in $(seq 1 8); do
+      for marker in \
+        "NVPN_IOS_RELEASE_RAPID_STOP_REQUESTED_${cycle}_MS=" \
+        "NVPN_IOS_RELEASE_RAPID_STOPPED_${cycle}_MS="
+      do
+        [[ "$(grep -Fc "$marker" "$markers")" -eq 1 ]] || {
+          echo "iOS Release rapid start/stop marker occurred zero or multiple times: $marker" >&2
+          return 1
+        }
+      done
+    done
+  fi
 }
 
 run_ios_release_network_case() {
-  local label="$1" run_id="$2" spec_base64="$3" lifecycle="$4" underlay="$5" direct="$6"
+  local label="$1" run_id="$2" spec_base64="$3" lifecycle="$4" underlay="$5"
+  local direct="$6" start_stop="$7"
   local result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
   local stem="mobile-ios-release-network-$label-$$"
   local log="$result_dir/$stem-xcodebuild.log"
@@ -668,7 +688,8 @@ run_ios_release_network_case() {
 
   ios_release_network_copy_markers "$markers" || return 1
   ios_release_network_validate_markers \
-    "$markers" "$run_id" "$label" "$lifecycle" "$underlay" "$direct" || return 1
+    "$markers" "$run_id" "$label" "$lifecycle" "$underlay" "$direct" \
+    "$start_stop" || return 1
   python3 - \
     "$process_summary" "$underlay" "$lifecycle" "$direct" \
     "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" <<'PY'

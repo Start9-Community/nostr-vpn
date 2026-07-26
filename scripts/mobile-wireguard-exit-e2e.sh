@@ -579,6 +579,7 @@ payload = {
     "sourceIpUrl": source_url,
     "expectedExitSourceIp": expected_source,
     "createNetwork": create_network == "1",
+    "exerciseStartStopStress": create_network == "1",
     "exerciseUnderlay": underlay.lower() in {"1", "true", "yes", "on"},
     "exerciseLifecycle": lifecycle.lower() in {"1", "true", "yes", "on"},
     "switchToDirect": direct == "1",
@@ -605,7 +606,7 @@ PY
   NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_DOCKER_SUDO="${NVPN_MOBILE_WG_EXIT_REMOTE_DOCKER_SUDO:-0}"
   run_ios_release_network_case \
     "$label" "$run_id" "$spec_base64" \
-    "$lifecycle_gate" "$underlay_gate" "$final"
+    "$lifecycle_gate" "$underlay_gate" "$final" "$first"
   assert_platform_traffic iOS "$label" "$before_bytes" "$before_forward"
   case "$evidence" in
     dns) assert_fixture_dns_traffic iOS "$label" "$probe_host" "$before_evidence" ;;

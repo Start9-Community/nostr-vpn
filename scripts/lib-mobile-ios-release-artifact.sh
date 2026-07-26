@@ -2,6 +2,61 @@
 
 # Rust provenance and company-signing audits for the exact iOS Release artifact.
 
+ios_release_network_forbidden_runtime_markers() {
+  cat <<'EOF'
+nvpn-cashu-wallet
+Cashu wallet worker
+paid_exit::wallet_worker
+paid_exit_wallet_runtime
+PaidRouteWalletRuntime
+wallet_worker
+cashu_service
+nvpn-updater
+secure hashtree update check
+nostr_vpn_update_check
+nostr_vpn_update_download
+EOF
+}
+
+ios_release_network_assert_no_forbidden_runtime_markers() {
+  local strings_path="$1" symbols_path="$2" label="$3" forbidden
+  while IFS= read -r forbidden; do
+    [[ -n "$forbidden" ]] || continue
+    if grep -Fiq -- "$forbidden" "$strings_path" \
+      || grep -Fiq -- "$forbidden" "$symbols_path"
+    then
+      echo "$label contains forbidden iOS runtime marker: $forbidden" >&2
+      return 1
+    fi
+  done < <(ios_release_network_forbidden_runtime_markers)
+}
+
+ios_release_network_audit_forbidden_runtime() {
+  local executable="$1" label="$2"
+  local runtime_strings runtime_symbols
+  runtime_strings="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-runtime-strings.XXXXXX")"
+  runtime_symbols="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-runtime-symbols.XXXXXX")"
+  if ! strings -a "$executable" >"$runtime_strings"; then
+    rm -f "$runtime_strings" "$runtime_symbols"
+    echo "$label runtime feature audit failed" >&2
+    return 1
+  fi
+  if ! nm -arch arm64 -gU "$executable" >"$runtime_symbols" 2>/dev/null \
+    && [[ ! -s "$runtime_symbols" ]]
+  then
+    rm -f "$runtime_strings" "$runtime_symbols"
+    echo "$label symbol audit produced no evidence" >&2
+    return 1
+  fi
+  if ! ios_release_network_assert_no_forbidden_runtime_markers \
+    "$runtime_strings" "$runtime_symbols" "$label"
+  then
+    rm -f "$runtime_strings" "$runtime_symbols"
+    return 1
+  fi
+  rm -f "$runtime_strings" "$runtime_symbols"
+}
+
 ios_release_network_audit_rust_feature_surface() {
   local target_root="${CARGO_TARGET_DIR:-$ROOT/target}"
   [[ "$target_root" = /* ]] || target_root="$ROOT/$target_root"
@@ -18,25 +73,21 @@ ios_release_network_audit_rust_feature_surface() {
   archive_strings="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-release-strings.XXXXXX")"
   archive_symbols="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-release-symbols.XXXXXX")"
   strings "$archive" >"$archive_strings"
-  local forbidden
-  for forbidden in \
-    'nvpn-cashu-wallet' \
-    'Cashu wallet worker' \
-    'wallet_worker' \
-    'cashu_service'
-  do
-    if grep -Fiq "$forbidden" "$archive_strings"; then
-      rm -f "$archive_strings" "$archive_symbols"
-      echo "iOS Release Rust archive contains forbidden paid-exit/Cashu worker code" >&2
-      return 1
-    fi
-  done
   local fips_path="${NVPN_FIPS_REPO_PATH%/}"
-  nm -arch arm64 -gU "$archive" >"$archive_symbols" 2>/dev/null || {
+  if ! nm -arch arm64 -gU "$archive" >"$archive_symbols" 2>/dev/null \
+    && [[ ! -s "$archive_symbols" ]]
+  then
     rm -f "$archive_strings" "$archive_symbols"
-    echo "iOS Release archive symbol audit failed" >&2
+    echo "iOS Release archive symbol audit produced no evidence" >&2
     return 1
-  }
+  fi
+  if ! ios_release_network_assert_no_forbidden_runtime_markers \
+    "$archive_strings" "$archive_symbols" "iOS Release Rust archive"
+  then
+    rm -f "$archive_strings" "$archive_symbols"
+    return 1
+  fi
+  local forbidden
   for forbidden in \
     'com.apple.net.utun_control' \
     'CTLIOCGINFO' \
@@ -270,6 +321,8 @@ with open(path, "w", encoding="utf-8") as handle:
             ).hexdigest(),
             "artifactType": "iOS company Ad Hoc Release app",
             "cashuAndPaidExitCompiled": False,
+            "paidExitWalletWorkerCompiled": False,
+            "updaterCompiled": False,
             "debuggable": False,
             "derivedDataPathSha256": hashlib.sha256(
                 os.path.realpath(derived_data_path).encode()
@@ -311,6 +364,10 @@ ios_release_network_audit_artifact() {
     echo "iOS Release app/Packet Tunnel artifact is incomplete" >&2
     return 1
   }
+  ios_release_network_audit_forbidden_runtime \
+    "$executable" "iOS Release app" || return 1
+  ios_release_network_audit_forbidden_runtime \
+    "$tunnel_executable" "iOS Release Packet Tunnel" || return 1
   ios_release_network_audit_packet_flow_binary "$tunnel_executable" || return 1
   codesign --verify --deep --strict "$app" >/dev/null 2>&1 || {
     echo "iOS Release app signature verification failed" >&2

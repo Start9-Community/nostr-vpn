@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"$ROOT/scripts/test-ios-packet-flow-lifecycle.sh"
 gate="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
 android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
 android_release_gate="$ROOT/scripts/lib-mobile-android-release-gate.sh"
@@ -231,6 +232,14 @@ grep -Fq -- '-configuration Release' "$ios_release_gate" \
   && grep -Fq 'testReleaseNetworkLifecycle' "$ios_release_gate" \
   && grep -Fq 'testReleaseDisconnectCleanup' "$ios_release_gate" \
   || { echo "iOS physical DNS cases do not build/test the company-signed Release app" >&2; exit 1; }
+grep -Fq 'driveRapidStartStopStress' "$ios_release_ui" \
+  && grep -Fq '"exerciseStartStopStress": create_network == "1"' "$gate" \
+  && grep -Fq 'NVPN_IOS_RELEASE_START_STOP_RECOVERED=1' "$ios_release_ui" \
+  && grep -Fq 'NVPN_IOS_RELEASE_START_STOP_RECOVERED=1' "$ios_release_gate" \
+  || {
+    echo "iOS signed Release gate lacks rapid cancel-during-start recovery coverage" >&2
+    exit 1
+  }
 grep -Fq 'ios_release_network_audit_artifact' "$ios_release_gate" \
   && grep -Fq 'fipsCoreVersion' "$ios_release_artifact" \
   && grep -Fq 'fipsGitTree' "$ios_release_artifact" \
@@ -240,6 +249,10 @@ grep -Fq 'ios_release_network_audit_artifact' "$ios_release_gate" \
   && grep -Fq 'fips_core::transport' "$ios_release_artifact" \
   && grep -Fq 'packetTunnelCodeDirectoryHash' "$ios_release_artifact" \
   && grep -Fq 'appCodeDirectoryHash' "$ios_release_artifact" \
+  && grep -Fq 'paid_exit::wallet_worker' "$ios_release_artifact" \
+  && grep -Fq 'nostr_vpn_update_check' "$ios_release_artifact" \
+  && grep -Fq '"paidExitWalletWorkerCompiled": False' "$ios_release_artifact" \
+  && grep -Fq '"updaterCompiled": False' "$ios_release_artifact" \
   || { echo "iOS Release gate lacks exact app/tunnel/FIPS artifact receipts" >&2; exit 1; }
 grep -Fq 'nvpn_verify_local_fips_metadata' "$ROOT/tools/run-ios" \
   && grep -Fq 'nvpn_force_rebuild_local_fips_target' "$ROOT/tools/run-ios" \

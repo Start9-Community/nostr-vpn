@@ -23,6 +23,47 @@ source "$ROOT_DIR/scripts/release_common.sh"
 source "$ROOT_DIR/scripts/lib-mobile-android-release-gate.sh"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/lib-mobile-ios-release-network.sh"
+cat >"$TMP_ROOT/clean-runtime.c" <<'C'
+int main(void) {
+    return 0;
+}
+C
+cat >"$TMP_ROOT/wallet-runtime.c" <<'C'
+const char *nvpn_crash_frame = "paid_exit::wallet_worker";
+int main(void) {
+    return nvpn_crash_frame[0] == '\0';
+}
+C
+cat >"$TMP_ROOT/updater-runtime.c" <<'C'
+void nostr_vpn_update_check(void) {}
+void nostr_vpn_update_download(void) {}
+int main(void) {
+    nostr_vpn_update_check();
+    nostr_vpn_update_download();
+    return 0;
+}
+C
+xcrun clang "$TMP_ROOT/clean-runtime.c" -o "$TMP_ROOT/clean-runtime"
+xcrun clang "$TMP_ROOT/wallet-runtime.c" -o "$TMP_ROOT/wallet-runtime"
+xcrun clang "$TMP_ROOT/updater-runtime.c" -o "$TMP_ROOT/updater-runtime"
+ios_release_network_audit_forbidden_runtime \
+  "$TMP_ROOT/clean-runtime" "clean fixture"
+if ios_release_network_audit_forbidden_runtime \
+  "$TMP_ROOT/wallet-runtime" "wallet fixture" \
+  >"$TMP_ROOT/wallet-runtime.log" 2>&1
+then
+  echo "iOS artifact audit accepted paid_exit::wallet_worker" >&2
+  exit 1
+fi
+grep -Fq 'paid_exit::wallet_worker' "$TMP_ROOT/wallet-runtime.log"
+if ios_release_network_audit_forbidden_runtime \
+  "$TMP_ROOT/updater-runtime" "updater fixture" \
+  >"$TMP_ROOT/updater-runtime.log" 2>&1
+then
+  echo "iOS artifact audit accepted updater entry points" >&2
+  exit 1
+fi
+grep -Fq 'nostr_vpn_update_check' "$TMP_ROOT/updater-runtime.log"
 ROOT="$APP_ROOT"
 PACKAGE_NAME=fi.siriusbusiness.nvpn
 CANONICAL_PACKAGE_NAME="$PACKAGE_NAME"
@@ -148,6 +189,12 @@ import sys
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 if receipt.get("signerCertificateSha256") != sys.argv[2]:
     raise SystemExit("iOS artifact receipt omitted the signer certificate pin")
+if receipt.get("cashuAndPaidExitCompiled") is not False:
+    raise SystemExit("iOS artifact receipt omitted Cashu/paid-exit exclusion")
+if receipt.get("paidExitWalletWorkerCompiled") is not False:
+    raise SystemExit("iOS artifact receipt omitted crash-path exclusion")
+if receipt.get("updaterCompiled") is not False:
+    raise SystemExit("iOS artifact receipt omitted updater exclusion")
 PY
 grep -Fq 'if ! ios_release_network_write_artifact_receipt' \
   "$ROOT_DIR/scripts/lib-mobile-ios-release-artifact.sh"

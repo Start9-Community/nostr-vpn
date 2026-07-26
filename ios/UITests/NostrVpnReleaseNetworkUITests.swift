@@ -28,6 +28,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         let sourceIpUrl: String
         let expectedExitSourceIp: String
         let createNetwork: Bool
+        let exerciseStartStopStress: Bool
         let exerciseUnderlay: Bool
         let exerciseLifecycle: Bool
         let switchToDirect: Bool
@@ -71,6 +72,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         try configureWireGuard(spec)
         try configureExitDNS(spec)
 
+        if spec.exerciseStartStopStress {
+            try driveRapidStartStopStress(spec, directSource: directSource)
+        }
         try turnVPNOn()
         try waitForSourceIP(
             spec.sourceIpUrl,
@@ -79,6 +83,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         )
         emit("NVPN_IOS_RELEASE_ACTIVE_SESSION_BEGIN_MS=\(millisecondsSinceEpoch())")
         try proveExit(spec, label: "connected")
+        if spec.exerciseStartStopStress {
+            emit("NVPN_IOS_RELEASE_START_STOP_RECOVERED=1")
+        }
         emit("NVPN_IOS_RELEASE_EXIT_CONNECTED=\(spec.caseName)")
 
         if spec.exerciseUnderlay {
@@ -334,6 +341,93 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("Release VPN did not turn off through its shipped control")
         }
         emit("NVPN_IOS_RELEASE_VPN_UI_OFF=1")
+    }
+
+    private func driveRapidStartStopStress(
+        _ spec: Spec,
+        directSource: String
+    ) throws {
+        let stopDelays: [TimeInterval] = [
+            0,
+            0.01,
+            0.03,
+            0.08,
+            0.16,
+            0.32,
+            0.64,
+            1,
+        ]
+        for (index, stopDelay) in stopDelays.enumerated() {
+            let cycle = index + 1
+            let startToggle = try vpnToggle()
+            guard !vpnIsOn(startToggle), startToggle.isHittable else {
+                throw gateError(
+                    "Rapid start/stop cycle \(cycle) did not begin disconnected"
+                )
+            }
+            startToggle.tap()
+            acknowledgeVPNPrompts(timeout: 0)
+            guard waitForVPNState(on: true, timeout: 2) else {
+                throw gateError(
+                    "Rapid start/stop cycle \(cycle) did not enter starting state"
+                )
+            }
+            if stopDelay > 0 {
+                Thread.sleep(forTimeInterval: stopDelay)
+            }
+
+            let stopToggle = try vpnToggle()
+            guard vpnIsOn(stopToggle), stopToggle.isHittable else {
+                throw gateError(
+                    "Rapid start/stop cycle \(cycle) could not issue stop"
+                )
+            }
+            emit(
+                "NVPN_IOS_RELEASE_RAPID_STOP_REQUESTED_\(cycle)_MS="
+                    + "\(millisecondsSinceEpoch())"
+            )
+            stopToggle.tap()
+            guard waitForVPNState(on: false, timeout: 5) else {
+                throw gateError(
+                    "Rapid start/stop cycle \(cycle) did not stop in time"
+                )
+            }
+            try requireStableDirectSource(
+                spec.sourceIpUrl,
+                expected: directSource,
+                duration: 1
+            )
+            emit(
+                "NVPN_IOS_RELEASE_RAPID_STOPPED_\(cycle)_MS="
+                    + "\(millisecondsSinceEpoch())"
+            )
+        }
+
+        // A stale asynchronous start can otherwise appear disconnected long
+        // enough for a single probe to pass and then resurrect the tunnel.
+        try requireStableDirectSource(
+            spec.sourceIpUrl,
+            expected: directSource,
+            duration: 5
+        )
+    }
+
+    private func requireStableDirectSource(
+        _ sourceIpUrl: String,
+        expected: String,
+        duration: TimeInterval
+    ) throws {
+        let deadline = Date().addingTimeInterval(duration)
+        repeat {
+            try NostrVpnReleaseNetworkProbe.requireSourceIP(
+                sourceIpUrl,
+                expected: expected
+            )
+            guard waitForVPNState(on: false, timeout: 0) else {
+                throw gateError("A stopped Release tunnel became enabled again")
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
     }
 
     func proveExit(_ spec: Spec, label: String) throws {

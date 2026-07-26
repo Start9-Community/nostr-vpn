@@ -109,7 +109,10 @@ sys.path.insert(
     0,
     os.path.join(os.environ["NVPN_TESTFLIGHT_REPO_ROOT"], "scripts"),
 )
-from appstore_draft_metadata import testflight_review_notes
+from appstore_draft_metadata import (
+    require_testflight_external_review_material,
+    testflight_review_notes,
+)
 from testflight_export_compliance import (
     ExportComplianceError,
     ensure_build_compliance,
@@ -148,6 +151,11 @@ DEFAULT_BETA_DESCRIPTION = (
     "traffic through user-controlled WireGuard exit nodes. It is not a public VPN, "
     "consumer internet proxy, anonymity, or stealth browsing service."
 )
+
+try:
+    require_testflight_external_review_material(ACTION, environ=os.environ)
+except ValueError as error:
+    raise SystemExit(str(error)) from error
 
 
 def fail(message, code=1):

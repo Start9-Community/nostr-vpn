@@ -108,9 +108,9 @@ Review paths:
 2. VPN lifecycle: tap the VPN switch, read the VPN Data Use disclosure, tap Continue, and approve Apple's VPN permission prompt. Background and foreground the app; the Packet Tunnel remains active. Switching between Wi-Fi, cellular, or a personal hotspot reconnects the same tunnel automatically.
 3. WireGuard exit and DNS: open Internet, choose WireGuard, paste the reviewer configuration below, and save. Exit DNS supports profile DNS with Cloudflare encrypted DNS as the Automatic fallback, explicit Cloudflare, Quad9, custom DoH, and DNS configured through the exit. Start the VPN, load an HTTPS page, change the network connection, then stop the VPN and select Direct; the device's native route and DNS are restored.
 
-The iOS app offers Direct, trusted Private VPN peers, and WireGuard configurations supplied by the user. The shared repository retains Cashu wallet and paid-exit implementations for non-iOS products. The iOS target is built without those feature dependencies or runtime workers and has no wallet or paid-exit UI/action path; only inert shared state-compatibility data types remain. There is no wallet, mint, token import/export; no paid VPN purchase, use, or sale; and no external purchase link in the iOS app.
+The iOS app offers Direct, trusted Private VPN peers, and WireGuard configurations supplied by the user. Nostr is used only for signed device identity, peer discovery, and encrypted VPN/mesh networking control transport; the app has no chat or messaging feature. The shared repository retains Cashu wallet and paid-exit implementations for non-iOS products. The iOS target is built without those feature dependencies or runtime workers and has no wallet or paid-exit UI/action path; only inert shared state-compatibility data types remain. There is no wallet, mint, token import/export; no paid VPN purchase, use, or sale; and no external purchase link in the iOS app.
 
-This build uses industry-standard cryptography implemented by the app, including WireGuard and encrypted Nostr/FIPS transport, in addition to cryptography provided by Apple operating systems. It is declared as using non-exempt encryption. No French encryption declaration has been filed, so France is excluded from availability for this release. China mainland is also excluded because this submission does not assert a local VPN-service authorization or app filing.
+This build uses industry-standard cryptography implemented by the app, including WireGuard and encrypted Nostr/FIPS transport, in addition to cryptography provided by Apple operating systems. It is declared as using non-exempt encryption, and the approved French-store encryption declaration is attached to the build in App Store Connect. The app is available worldwide, including France and China.
 
 Before first VPN activation, the app explains the connection data needed for configured networks, peers, relays, exits, and the selected DNS operator. Sirius Business Oy does not collect or retain VPN traffic, connection data, or DNS queries; sell VPN data; or use it for advertising or tracking. The Settings tab includes a link to the current Privacy Policy.{wireguard_fixture}"""
 
@@ -147,3 +147,26 @@ def testflight_review_notes(
         "NVPN_TESTFLIGHT_REVIEW_NOTES",
         default_review_notes(version_name, environ=source),
     )
+
+
+def require_testflight_external_review_material(
+    action: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Reject external review submission without usable reviewer material."""
+
+    if action not in {"public", "public-submit"}:
+        return
+    source = os.environ if environ is None else environ
+    wireguard_config = str(
+        source.get("NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG", "")
+    ).strip()
+    override_notes = str(
+        source.get("NVPN_TESTFLIGHT_REVIEW_NOTES", "")
+    ).strip()
+    if not wireguard_config and not override_notes:
+        raise ValueError(
+            "External TestFlight review requires a ready-to-use reviewer "
+            "WireGuard configuration or complete override notes"
+        )

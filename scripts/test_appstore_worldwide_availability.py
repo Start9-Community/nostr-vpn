@@ -55,7 +55,7 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
         china = self._row("CHN", True)
 
         self.assertEqual(
-            availability.require_all_territories_available([france, china]),
+            availability.require_worldwide_availability([france, china]),
             [france, china],
         )
 
@@ -63,7 +63,7 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
             availability.AppStoreAvailabilityError,
             "FRA",
         ):
-            availability.require_all_territories_available(
+            availability.require_worldwide_availability(
                 [self._row("FRA", False), china]
             )
 
@@ -72,7 +72,7 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
             availability.AppStoreAvailabilityError,
             "no territory rows",
         ):
-            availability.require_all_territories_available([])
+            availability.require_worldwide_availability([])
 
         for value in (None, 1, "true"):
             with self.subTest(value=value):
@@ -80,7 +80,7 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
                     availability.AppStoreAvailabilityError,
                     "boolean available state",
                 ):
-                    availability.require_all_territories_available(
+                    availability.require_worldwide_availability(
                         [self._row("USA", value)]
                     )
 
@@ -90,7 +90,7 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
             availability.AppStoreAvailabilityError,
             "no territory identifier",
         ):
-            availability.require_all_territories_available([malformed])
+            availability.require_worldwide_availability([malformed])
 
 
 if __name__ == "__main__":

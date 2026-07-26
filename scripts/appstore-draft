@@ -94,10 +94,14 @@ sys.path.insert(0, os.environ["NVPN_APPSTORE_SCRIPT_DIR"])
 import appstore_draft_metadata as draft_metadata
 from appstore_availability import (
     AppStoreAvailabilityError,
-    require_all_territories_available,
     require_new_territories_enabled,
     require_no_eu_trader_status_errors,
+    require_worldwide_availability,
     territory_update_request,
+)
+from testflight_export_compliance import (
+    ExportComplianceError,
+    ensure_build_compliance,
 )
 
 try:
@@ -926,11 +930,17 @@ def ensure_worldwide_availability(app_id):
     availability_id = availability["id"]
     rows = territory_availabilities(availability_id)
     for row in rows:
-        if row.get("attributes", {}).get("available") is not False:
-            continue
         row_id = str(row.get("id", "")).strip()
         if not row_id:
             fail("App Store territory availability has no resource ID")
+        attributes = row.get("attributes")
+        if not isinstance(attributes, dict) or (
+            attributes.get("available") is not True
+            and attributes.get("available") is not False
+        ):
+            fail("App Store territory availability has no boolean state")
+        if attributes["available"] is True:
+            continue
         status, body = request(
             "PATCH",
             (
@@ -945,10 +955,9 @@ def ensure_worldwide_availability(app_id):
             "Enable App Store territory availability",
         )
 
+    verified_rows = territory_availabilities(availability_id)
     try:
-        return require_all_territories_available(
-            territory_availabilities(availability_id)
-        )
+        return require_worldwide_availability(verified_rows)
     except AppStoreAvailabilityError as error:
         fail(str(error))
 
@@ -1150,6 +1159,20 @@ def active_review_submission(app_id):
     return None
 
 
+def get_build(build_id):
+    status, body = request(
+        "GET",
+        f"builds/{urllib.parse.quote(build_id)}",
+        {
+            "fields[builds]": (
+                "version,uploadedDate,processingState,buildAudienceType,"
+                "usesNonExemptEncryption,expired"
+            ),
+        },
+    )
+    return require_ok(status, body, "Read App Store build").get("data")
+
+
 def create_review_submission(app_id):
     status, body = request(
         "POST",
@@ -1274,15 +1297,15 @@ if ACTION == "status":
     )
     rows = territory_availabilities(availability["id"])
     try:
-        require_all_territories_available(rows)
+        require_worldwide_availability(rows)
     except AppStoreAvailabilityError as error:
         fail(str(error))
-    print(f"  - Current territories available: {len(rows)}")
+    print(f"  - Current App Store territories available: {len(rows)}")
     raise SystemExit(0)
 
 if ACTION == "availability":
-    available = ensure_worldwide_availability(app["id"])
-    print(f"Current territories available: {len(available)}")
+    worldwide = ensure_worldwide_availability(app["id"])
+    print(f"Current App Store territories available: {len(worldwide)}")
     raise SystemExit(0)
 
 version = ensure_version(app["id"])
@@ -1294,11 +1317,21 @@ age_rating = ensure_age_rating(app_info["id"])
 review_detail = ensure_review_detail(version["id"])
 content_rights = ensure_content_rights(app["id"])
 price_schedule_id = ensure_free_price_schedule(app["id"])
-available_territories = ensure_worldwide_availability(app["id"])
+worldwide_territories = ensure_worldwide_availability(app["id"])
 availability = app_availability(app["id"])
 build = find_build(app["id"])
 if build is None:
     fail(f"Build {BUILD_NUMBER} is not visible in App Store Connect")
+try:
+    build = ensure_build_compliance(
+        build,
+        app_id=app["id"],
+        request=request,
+        get_all=get_all,
+        get_build=get_build,
+    )
+except ExportComplianceError as error:
+    fail(str(error))
 link_build(version["id"], build)
 screenshots = upload_screenshots(localization["id"])
 submission = None
@@ -1324,7 +1357,7 @@ print(
     "Automatically available in new territories: "
     f"{availability.get('attributes', {}).get('availableInNewTerritories')}"
 )
-print(f"Current territories available: {len(available_territories)}")
+print(f"Current App Store territories available: {len(worldwide_territories)}")
 print(f"Build: {BUILD_NUMBER} [{build['id']}]")
 print(f"Screenshots uploaded: {len(screenshots)}")
 if submission:

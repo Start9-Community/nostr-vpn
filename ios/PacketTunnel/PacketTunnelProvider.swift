@@ -157,7 +157,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             let packetFlowBridge = PacketFlowBridge(
                 packetFlow: self.packetFlow,
-                provider: self
+                provider: self,
+                generation: startGeneration
             )
             guard self.installPacketFlowBridge(
                 packetFlowBridge,
@@ -191,8 +192,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     + "NEPacketTunnelFlow attached total=\(totalMs)ms"
             )
             packetDebugLog("setTunnelNetworkSettings succeeded settingsMs=\(settingsMs) totalMs=\(totalMs)")
-            packetFlowBridge.startReading()
-            self.startUnderlayNetworkMonitor(generation: startGeneration)
+            guard packetFlowBridge.startReading(),
+                  self.startUnderlayNetworkMonitor(
+                      generation: startGeneration,
+                      bridge: packetFlowBridge
+                  )
+            else {
+                NSLog("nvpn-pkt: tunnel stopped before packet flow activation")
+                packetDebugLog("tunnel stopped before packet flow activation")
+                self.stopRustTunnel(generation: startGeneration)
+                completionHandler(PacketTunnelError.startFailed)
+                return
+            }
             NSLog("nvpn-pkt: completionHandler(nil) — VPN should transition to connected")
             packetDebugLog("completionHandler nil totalMs=\(totalMs)")
             completionHandler(nil)
@@ -398,8 +409,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    func sendPacketFlowBatch(_ bytes: Data, lengths: [Int]) -> Bool {
-        let sent = withTunnelHandle { handle in
+    func sendPacketFlowBatch(
+        _ bytes: Data,
+        lengths: [Int],
+        generation: UInt64
+    ) -> Bool {
+        let sent = withTunnelHandle(generation: generation) { handle in
             bytes.withUnsafeBytes { rawBytes in
                 lengths.withUnsafeBufferPointer { rawLengths in
                     guard let bytes = rawBytes.bindMemory(to: UInt8.self).baseAddress,
@@ -420,27 +435,51 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return sent == true
     }
 
-    func packetFlowDidFail(_ message: String) {
+    func packetFlowDidFail(_ message: String, generation: UInt64) {
+        guard tunnelIsActive(generation: generation) else {
+            return
+        }
         NSLog("nvpn-pkt: packet flow failed: \(message)")
         packetDebugLog("packet flow failed: \(message)")
         let error = PacketTunnelError.packetFlowFailed(message)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.cancelTunnelWithError(error)
+            guard let self, self.tunnelIsActive(generation: generation) else {
+                return
+            }
+            self.cancelTunnelWithError(error)
         }
     }
 
-    private func startUnderlayNetworkMonitor(generation: UInt64) {
-        stopUnderlayNetworkMonitor()
+    private func startUnderlayNetworkMonitor(
+        generation: UInt64,
+        bridge: PacketFlowBridge
+    ) -> Bool {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             self?.handleUnderlayPathUpdate(path, generation: generation)
         }
+
+        tunnelCondition.lock()
+        guard tunnelRunning,
+              tunnelGeneration == generation,
+              tunnelHandle != nil,
+              packetFlowBridge === bridge
+        else {
+            tunnelCondition.unlock()
+            return false
+        }
         underlayMonitorLock.lock()
+        let previousMonitor = underlayMonitor
         underlayMonitor = monitor
         underlayMonitorGeneration = generation
         underlayMonitorSawInitialPath = false
+        underlayRefreshWorkItem?.cancel()
+        underlayRefreshWorkItem = nil
         underlayMonitorLock.unlock()
+        previousMonitor?.cancel()
         monitor.start(queue: underlayMonitorQueue)
+        tunnelCondition.unlock()
+        return true
     }
 
     private func stopUnderlayNetworkMonitor() {
@@ -524,6 +563,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         return body(handle)
+    }
+
+    private func tunnelIsActive(generation: UInt64) -> Bool {
+        tunnelCondition.lock()
+        let result = tunnelRunning
+            && tunnelGeneration == generation
+            && tunnelHandle != nil
+            && packetFlowBridge?.generation == generation
+        tunnelCondition.unlock()
+        return result
     }
 }
 

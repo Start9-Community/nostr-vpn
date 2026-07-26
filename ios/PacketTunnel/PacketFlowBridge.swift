@@ -46,74 +46,74 @@ final class PacketFlowBridge {
 
     private weak var provider: PacketTunnelProvider?
     private let packetFlow: NEPacketTunnelFlow
-    private let stateLock = NSLock()
-    private var running = false
+    private let lifecycle: PacketFlowBridgeLifecycle
 
-    init(packetFlow: NEPacketTunnelFlow, provider: PacketTunnelProvider) {
+    init(
+        packetFlow: NEPacketTunnelFlow,
+        provider: PacketTunnelProvider,
+        generation: UInt64
+    ) {
         self.packetFlow = packetFlow
         self.provider = provider
+        lifecycle = PacketFlowBridgeLifecycle(generation: generation)
+    }
+
+    var generation: UInt64 {
+        lifecycle.generation
     }
 
     func attach(to handle: OpaquePointer) -> Bool {
-        stateLock.lock()
-        guard !running else {
-            stateLock.unlock()
-            return false
+        lifecycle.attach {
+            // Rust owns this retain after the call starts and invokes the
+            // release callback exactly once, including every failure path.
+            let context = Unmanaged.passRetained(self).toOpaque()
+            return nostr_vpn_mobile_tunnel_packet_flow_start(
+                handle,
+                context,
+                packetFlowWriteCallback,
+                packetFlowFailureCallback,
+                packetFlowReleaseCallback
+            )
         }
-        running = true
-        stateLock.unlock()
-
-        let context = Unmanaged.passRetained(self).toOpaque()
-        let attached = nostr_vpn_mobile_tunnel_packet_flow_start(
-            handle,
-            context,
-            packetFlowWriteCallback,
-            packetFlowFailureCallback,
-            packetFlowReleaseCallback
-        )
-        if !attached {
-            stop()
-        }
-        return attached
     }
 
-    func startReading() {
-        guard isRunning else {
-            return
+    func startReading() -> Bool {
+        guard lifecycle.startReading() else {
+            return false
         }
-        readNextBatch()
+        return readNextBatch()
     }
 
     func stop() {
-        stateLock.lock()
-        running = false
-        stateLock.unlock()
+        lifecycle.stop()
     }
 
-    private var isRunning: Bool {
-        stateLock.lock()
-        let result = running
-        stateLock.unlock()
-        return result
-    }
-
-    private func readNextBatch() {
-        packetFlow.readPackets { [weak self] packets, protocols in
-            guard let self, self.isRunning else {
-                return
-            }
-            guard let batch = self.validatedBatch(packets: packets, protocols: protocols) else {
-                self.fail("NEPacketTunnelFlow returned an invalid outbound packet batch")
-                return
-            }
-            guard self.provider?.sendPacketFlowBatch(batch.bytes, lengths: batch.lengths) == true else {
-                if self.isRunning {
-                    self.fail("Rust rejected an outbound NEPacketTunnelFlow packet batch")
+    private func readNextBatch() -> Bool {
+        lifecycle.registerRead {
+            packetFlow.readPackets { [weak self] packets, protocols in
+                guard let self, self.lifecycle.isReading else {
+                    return
                 }
-                return
-            }
-            if self.isRunning {
-                self.readNextBatch()
+                guard let batch = self.validatedBatch(
+                    packets: packets,
+                    protocols: protocols
+                ) else {
+                    self.fail("NEPacketTunnelFlow returned an invalid outbound packet batch")
+                    return
+                }
+                guard self.provider?.sendPacketFlowBatch(
+                    batch.bytes,
+                    lengths: batch.lengths,
+                    generation: self.generation
+                ) == true else {
+                    if self.lifecycle.isReading {
+                        self.fail("Rust rejected an outbound NEPacketTunnelFlow packet batch")
+                    }
+                    return
+                }
+                if self.lifecycle.isReading {
+                    _ = self.readNextBatch()
+                }
             }
         }
     }
@@ -172,7 +172,7 @@ final class PacketFlowBridge {
         packetLengths: UnsafePointer<Int>?,
         packetCount: Int
     ) -> Bool {
-        guard isRunning,
+        guard lifecycle.callbacksAllowed,
               let packetPointers,
               let packetLengths,
               packetCount > 0,
@@ -213,14 +213,9 @@ final class PacketFlowBridge {
     }
 
     fileprivate func fail(_ message: String) {
-        stateLock.lock()
-        guard running else {
-            stateLock.unlock()
+        guard lifecycle.stop() else {
             return
         }
-        running = false
-        let provider = provider
-        stateLock.unlock()
-        provider?.packetFlowDidFail(message)
+        provider?.packetFlowDidFail(message, generation: generation)
     }
 }

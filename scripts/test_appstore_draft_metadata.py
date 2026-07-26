@@ -80,8 +80,13 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("no paid VPN purchase, use, or sale", notes)
         self.assertIn("no external purchase link", notes)
         self.assertIn("non-exempt encryption", notes)
-        self.assertIn("France is excluded from availability", notes)
-        self.assertIn("China mainland is also excluded", notes)
+        self.assertIn(
+            "approved French-store encryption declaration is attached",
+            notes,
+        )
+        self.assertIn("available worldwide", notes)
+        self.assertIn("including France and China", notes)
+        self.assertIn("no chat or messaging feature", notes)
         self.assertIn("Switching between Wi-Fi, cellular, or a personal hotspot", notes)
         self.assertIn("Cloudflare encrypted DNS as the Automatic fallback", notes)
         self.assertIn("Quad9", notes)
@@ -128,8 +133,12 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("no paid VPN purchase, use, or sale", notes)
         self.assertIn("VPN Data Use disclosure", notes)
         self.assertIn("non-exempt encryption", notes)
-        self.assertIn("France is excluded from availability", notes)
-        self.assertIn("China mainland is also excluded", notes)
+        self.assertIn(
+            "approved French-store encryption declaration is attached",
+            notes,
+        )
+        self.assertIn("available worldwide", notes)
+        self.assertNotIn("excluded from availability", notes)
 
     def test_explicit_testflight_notes_override_repo_default(self):
         notes = metadata.testflight_review_notes(
@@ -140,12 +149,57 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
 
         self.assertEqual(notes, "deliberate beta override")
 
+    def test_external_testflight_review_requires_fixture_or_complete_override(self):
+        for action in ("public", "public-submit"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "WireGuard configuration or complete override notes",
+                ):
+                    metadata.require_testflight_external_review_material(
+                        action,
+                        environ={},
+                    )
+
+                metadata.require_testflight_external_review_material(
+                    action,
+                    environ={
+                        "NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG": (
+                            "[Interface]\nAddress = 192.0.2.2/32"
+                        )
+                    },
+                )
+                metadata.require_testflight_external_review_material(
+                    action,
+                    environ={
+                        "NVPN_TESTFLIGHT_REVIEW_NOTES": (
+                            "Complete private reviewer setup and test steps"
+                        )
+                    },
+                )
+
+    def test_non_review_testflight_actions_do_not_require_reviewer_fixture(self):
+        for action in (
+            "put",
+            "attach",
+            "wait",
+            "status",
+            "public-attach",
+            "public-status",
+        ):
+            with self.subTest(action=action):
+                metadata.require_testflight_external_review_material(
+                    action,
+                    environ={},
+                )
+
     def test_testflight_shipper_uses_authoritative_notes_helper(self):
         shipper = (ROOT / "scripts" / "testflight-internal").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("testflight_review_notes(", shipper)
+        self.assertIn("require_testflight_external_review_material(", shipper)
         self.assertNotIn('or attrs.get("notes")', shipper)
 
     def test_support_page_exists_in_repo(self):
@@ -155,11 +209,11 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("Nostr VPN Support", contents)
         self.assertIn("mailto:", contents)
 
-    def test_required_storefronts_can_only_pass_when_explicitly_excluded(self):
+    def test_worldwide_availability_requires_every_returned_territory(self):
         france = {
             "type": "territoryAvailabilities",
             "id": "france-row",
-            "attributes": {"available": False},
+            "attributes": {"available": True},
             "relationships": {
                 "territory": {
                     "data": {"type": "territories", "id": "FRA"},
@@ -176,60 +230,37 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                 }
             },
         }
-        selected = availability.find_territory_availability(
+        self.assertEqual(
+            availability.require_worldwide_availability([germany, france]),
             [germany, france],
-            availability.FRANCE_TERRITORY_ID,
-        )
-        self.assertEqual(selected, france)
-        self.assertEqual(
-            availability.require_territory_excluded(selected, "FRA"),
-            france,
         )
         with self.assertRaises(availability.AppStoreAvailabilityError):
-            availability.require_territory_excluded(
-                {**france, "attributes": {"available": True}},
-                "FRA",
+            availability.require_worldwide_availability(
+                [{**france, "attributes": {"available": False}}, germany]
             )
-        self.assertEqual(
-            availability.REQUIRED_EXCLUDED_TERRITORIES,
-            {"FRA": "France", "CHN": "China mainland"},
-        )
-        app_availability = {
-            "type": "appAvailabilities",
-            "id": "availability",
-            "attributes": {"availableInNewTerritories": False},
-        }
-        self.assertEqual(
-            availability.require_new_territories_disabled(app_availability),
-            app_availability,
-        )
         with self.assertRaises(availability.AppStoreAvailabilityError):
-            availability.require_new_territories_disabled(
-                {
-                    **app_availability,
-                    "attributes": {"availableInNewTerritories": True},
-                }
-            )
+            availability.require_worldwide_availability([])
 
-    def test_required_storefront_patch_uses_the_territory_resource(self):
+    def test_worldwide_patch_enables_the_territory_resource(self):
         self.assertEqual(
             availability.territory_update_request(
                 "france-row",
-                available=False,
+                available=True,
             ),
             {
                 "data": {
                     "type": "territoryAvailabilities",
                     "id": "france-row",
-                    "attributes": {"available": False},
+                    "attributes": {"available": True},
                 }
             },
         )
         draft = (ROOT / "scripts" / "appstore-draft").read_text(
             encoding="utf-8"
         )
-        self.assertIn('ensure_required_territories_excluded(app["id"])', draft)
-        self.assertIn("REQUIRED_EXCLUDED_TERRITORIES.items()", draft)
+        self.assertIn('ensure_worldwide_availability(app["id"])', draft)
+        self.assertNotIn("REQUIRED_EXCLUDED_TERRITORIES", draft)
+        self.assertNotIn("require_territory_excluded", draft)
         self.assertIn("territoryAvailabilities/", draft)
 
     def test_enabled_eu_territories_reject_every_dsa_trader_error(self):
@@ -340,7 +371,7 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
 
 
 class TestFlightExportComplianceTests(unittest.TestCase):
-    def test_declaration_answers_standard_app_crypto_without_france(self):
+    def test_declaration_answers_standard_app_crypto_for_french_store(self):
         body = export_compliance.declaration_create_request("app-id")
 
         self.assertEqual(
@@ -350,7 +381,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
                     "type": "appEncryptionDeclarations",
                     "attributes": {
                         "appDescription": export_compliance.APP_DESCRIPTION,
-                        "availableOnFrenchStore": False,
+                        "availableOnFrenchStore": True,
                         "containsProprietaryCryptography": False,
                         "containsThirdPartyCryptography": True,
                     },
@@ -404,8 +435,11 @@ class TestFlightExportComplianceTests(unittest.TestCase):
         for unapproved in (rejected, created, in_review, unknown):
             self.assertFalse(export_compliance.declaration_matches_policy(unapproved))
 
-    def test_does_not_reuse_wrong_france_or_crypto_answers(self):
-        france = self._declaration("france", availableOnFrenchStore=True)
+    def test_does_not_reuse_wrong_french_store_or_crypto_answers(self):
+        not_french_store = self._declaration(
+            "not-french-store",
+            availableOnFrenchStore=False,
+        )
         proprietary = self._declaration(
             "proprietary", containsProprietaryCryptography=True
         )
@@ -416,9 +450,52 @@ class TestFlightExportComplianceTests(unittest.TestCase):
 
         self.assertIsNone(
             export_compliance.select_reusable_declaration(
-                [france, proprietary, apple_only, exempt]
+                [not_french_store, proprietary, apple_only, exempt]
             )
         )
+
+    def test_policy_match_requires_every_exact_answer(self):
+        valid = self._declaration("valid")
+        self.assertTrue(export_compliance.declaration_answers_policy(valid))
+        self.assertIn("VPN", export_compliance.APP_DESCRIPTION)
+        self.assertIn("mesh networking", export_compliance.APP_DESCRIPTION)
+        self.assertIn(
+            "encrypted networking and control transport",
+            export_compliance.APP_DESCRIPTION,
+        )
+        self.assertIn(
+            "no chat or messaging",
+            export_compliance.APP_DESCRIPTION,
+        )
+
+        wrong_answers = (
+            {"appDescription": "A different app or release"},
+            {"usesEncryption": False},
+            {"exempt": True},
+            {"availableOnFrenchStore": False},
+            {"platform": "MAC_OS"},
+            {"platform": "ios"},
+        )
+        for overrides in wrong_answers:
+            with self.subTest(overrides=overrides):
+                self.assertFalse(
+                    export_compliance.declaration_answers_policy(
+                        self._declaration("wrong", **overrides)
+                    )
+                )
+
+        for missing_field in (
+            "appDescription",
+            "usesEncryption",
+            "exempt",
+            "platform",
+        ):
+            with self.subTest(missing_field=missing_field):
+                incomplete = self._declaration("incomplete")
+                del incomplete["attributes"][missing_field]
+                self.assertFalse(
+                    export_compliance.declaration_answers_policy(incomplete)
+                )
 
     def test_ensure_reuses_and_links_without_caller_supplied_id(self):
         calls = []
@@ -526,6 +603,77 @@ class TestFlightExportComplianceTests(unittest.TestCase):
 
         self.assertFalse(any(call[0] in {"POST", "PATCH"} for call in calls))
 
+    def test_ensure_treats_only_created_and_in_review_as_pending(self):
+        for state in ("CREATED", "IN_REVIEW"):
+            with self.subTest(state=state):
+                calls = []
+                pending = self._declaration("pending", state=state)
+
+                def request(method, path, params=None, body=None):
+                    calls.append((method, path, params, body))
+                    if method == "GET":
+                        return 404, {"errors": []}
+                    raise AssertionError((method, path))
+
+                with self.assertRaisesRegex(
+                    export_compliance.ExportComplianceError,
+                    f"not approved.*{state}",
+                ):
+                    export_compliance.ensure_build_compliance(
+                        {"id": "build-id"},
+                        app_id="app-id",
+                        request=request,
+                        get_all=lambda _path, _params=None: [pending],
+                        get_build=lambda _build_id: self._build(True),
+                    )
+
+                self.assertFalse(
+                    any(call[0] in {"POST", "PATCH"} for call in calls)
+                )
+
+    def test_ensure_replaces_terminal_declarations_instead_of_treating_them_pending(self):
+        for state in ("REJECTED", "EXPIRED", "INVALID"):
+            with self.subTest(state=state):
+                calls = []
+                builds = [self._build(True), self._build(True)]
+                terminal = self._declaration("terminal", state=state)
+                approved = self._declaration("replacement", state="APPROVED")
+
+                def request(method, path, params=None, body=None):
+                    calls.append((method, path, params, body))
+                    if method == "GET":
+                        get_count = len(
+                            [call for call in calls if call[0] == "GET"]
+                        )
+                        if get_count == 1:
+                            return 404, {"errors": []}
+                        return 200, {"data": approved}
+                    if method == "POST":
+                        return 201, {"data": approved}
+                    if method == "PATCH":
+                        return 200, {"data": self._build(True)}
+                    raise AssertionError((method, path))
+
+                result = export_compliance.ensure_build_compliance(
+                    {"id": "build-id"},
+                    app_id="app-id",
+                    request=request,
+                    get_all=lambda _path, _params=None: [terminal],
+                    get_build=lambda _build_id: builds.pop(0),
+                )
+
+                self.assertTrue(
+                    result["attributes"]["usesNonExemptEncryption"]
+                )
+                self.assertEqual(
+                    [call[0] for call in calls].count("POST"),
+                    1,
+                )
+                self.assertEqual(
+                    [call[0] for call in calls].count("PATCH"),
+                    1,
+                )
+
     def test_ensure_is_noop_when_truthful_declaration_is_already_linked(self):
         calls = []
         declaration = self._declaration("linked", state="APPROVED")
@@ -568,11 +716,13 @@ class TestFlightExportComplianceTests(unittest.TestCase):
     @staticmethod
     def _declaration(declaration_id, state="APPROVED", **overrides):
         attributes = {
+            "appDescription": export_compliance.APP_DESCRIPTION,
             "usesEncryption": True,
             "exempt": False,
             "containsProprietaryCryptography": False,
             "containsThirdPartyCryptography": True,
-            "availableOnFrenchStore": False,
+            "availableOnFrenchStore": True,
+            "platform": "IOS",
             "appEncryptionDeclarationState": state,
         }
         attributes.update(overrides)

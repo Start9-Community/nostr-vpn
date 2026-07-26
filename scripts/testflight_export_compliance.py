@@ -1,10 +1,9 @@
 """App Store Connect export-compliance policy for the iOS build.
 
 The iOS binary contains app-implemented, industry-standard cryptography. Its
-Info.plist therefore declares non-exempt encryption. Because this release is
-not available in France, Apple does not require a French encryption document,
-but App Store Connect still requires an app-encryption declaration resource to
-be linked to every build whose Info.plist flag is true.
+Info.plist therefore declares non-exempt encryption. A truthful, approved
+French-store-enabled app-encryption declaration must be linked to every build
+whose Info.plist flag is true.
 """
 
 from __future__ import annotations
@@ -14,10 +13,10 @@ import json
 
 
 APP_DESCRIPTION = (
-    "Nostr VPN is a private mesh VPN and user-configured WireGuard client. "
-    "The app implements industry-standard WireGuard and encrypted Nostr/FIPS "
-    "transport. It does not use proprietary or non-standard cryptography, and "
-    "this iOS release is not distributed in France."
+    "Nostr VPN is a user-configured private VPN and mesh networking app. "
+    "It implements industry-standard WireGuard and Nostr/FIPS cryptography "
+    "for encrypted networking and control transport. It has no chat or "
+    "messaging feature and uses no proprietary or non-standard cryptography."
 )
 
 _DECLARATION_FIELDS = (
@@ -26,6 +25,7 @@ _DECLARATION_FIELDS = (
     "appEncryptionDeclarationState,createdDate"
 )
 _ACCEPTABLE_STATE = "APPROVED"
+_ACTIVE_PENDING_STATES = {"CREATED", "IN_REVIEW"}
 
 
 class ExportComplianceError(RuntimeError):
@@ -42,7 +42,7 @@ def declaration_create_request(app_id: str) -> dict[str, object]:
             "type": "appEncryptionDeclarations",
             "attributes": {
                 "appDescription": APP_DESCRIPTION,
-                "availableOnFrenchStore": False,
+                "availableOnFrenchStore": True,
                 "containsProprietaryCryptography": False,
                 "containsThirdPartyCryptography": True,
             },
@@ -95,18 +95,19 @@ def declaration_answers_policy(declaration: Mapping[str, object]) -> bool:
     attributes = declaration.get("attributes")
     if not isinstance(attributes, Mapping):
         return False
-    if attributes.get("availableOnFrenchStore") is not False:
+    if attributes.get("appDescription") != APP_DESCRIPTION:
+        return False
+    if attributes.get("usesEncryption") is not True:
+        return False
+    if attributes.get("exempt") is not False:
+        return False
+    if attributes.get("availableOnFrenchStore") is not True:
         return False
     if attributes.get("containsProprietaryCryptography") is not False:
         return False
     if attributes.get("containsThirdPartyCryptography") is not True:
         return False
-    if attributes.get("usesEncryption") is False:
-        return False
-    if attributes.get("exempt") is True:
-        return False
-    platform = attributes.get("platform")
-    if platform is not None and str(platform).upper() != "IOS":
+    if attributes.get("platform") != "IOS":
         return False
     return True
 
@@ -145,6 +146,19 @@ def select_reusable_declaration(
         return (0 if state == _ACCEPTABLE_STATE else 1, created)
 
     return sorted(matching, key=sort_key)[0]
+
+
+def declaration_is_active_pending(
+    declaration: Mapping[str, object],
+) -> bool:
+    """Return whether an exact declaration is still moving toward review."""
+
+    if not declaration_answers_policy(declaration):
+        return False
+    attributes = declaration.get("attributes")
+    assert isinstance(attributes, Mapping)
+    state = str(attributes.get("appEncryptionDeclarationState", "")).upper()
+    return state in _ACTIVE_PENDING_STATES
 
 
 def _require_response(
@@ -240,7 +254,7 @@ def ensure_build_compliance(
             (
                 candidate
                 for candidate in declarations
-                if declaration_answers_policy(candidate)
+                if declaration_is_active_pending(candidate)
                 and str(candidate.get("id", "")).strip()
             ),
             None,
@@ -276,7 +290,7 @@ def ensure_build_compliance(
         ):
             raise ExportComplianceError(
                 "Created app encryption declaration does not match the "
-                "non-exempt standard-cryptography, France-excluded policy"
+                "non-exempt, French-store-enabled standard-cryptography policy"
             )
         if not declaration_matches_policy(candidate):
             attributes = candidate.get("attributes")
@@ -343,6 +357,6 @@ def ensure_build_compliance(
     if log is not None:
         log(
             "Set usesNonExemptEncryption=true and linked the "
-            "France-excluded standard-cryptography declaration."
+            "approved French-store-enabled standard-cryptography declaration."
         )
     return updated_build
