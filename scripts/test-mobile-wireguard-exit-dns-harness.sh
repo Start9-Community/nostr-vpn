@@ -231,6 +231,11 @@ grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
 grep -Fq 'capture-mobile-ios-underlay-output.py' "$ios_release_gate" \
   && grep -Fq 'packetTunnelProcessIdentifiers' "$ios_underlay_capture" \
   && grep -Fq 'distinct packet-tunnel PIDs' "$ios_underlay_capture" \
+  && grep -Fq '"requiredCheckpoints": sorted(required_checkpoints)' "$ios_underlay_capture" \
+  && grep -Fq 'checkpoints without a valid process observation=' "$ios_underlay_capture" \
+  && grep -Fq 'self.update_checkpoint("active-session-end")' "$ios_underlay_capture" \
+  && grep -Fq 'if required != expected:' "$ios_release_gate" \
+  && grep -Fq 'if not expected.issubset(observed):' "$ios_release_gate" \
   || { echo "iOS Release gate does not independently prove stable app/tunnel processes" >&2; exit 1; }
 grep -Fq '"NVPN_IOS_RELEASE_RUN_ID=$run_id"' "$ios_release_gate" \
   && grep -Fq 'emit("NVPN_IOS_RELEASE_RUN_ID=\(spec.runId)")' "$ios_release_ui" \
@@ -389,6 +394,7 @@ for forbidden in (
 for required in (
     "configure_android_release_wireguard_ui",
     "configure_android_exit_dns_ui",
+    "android_release_capture_native_tunnel_start_baseline",
     "android_release_connect_ui",
     "android_release_pin_native_tunnel_start_count",
     "android_release_assert_native_tunnel_unchanged",
@@ -397,6 +403,16 @@ for required in (
 ):
     if required not in body:
         raise SystemExit(f"Android Release black-box cycle omits {required}")
+baseline = body.index("android_release_capture_native_tunnel_start_baseline")
+connect = body.index("android_release_connect_ui")
+pin = body.index("android_release_pin_native_tunnel_start_count")
+connected_direct = body.index("connected-direct")
+disconnect = body.index("android_release_disconnect_ui", connect)
+after_disconnect = body.index("after-disconnect", disconnect)
+if not baseline < connect < pin < connected_direct < disconnect < after_disconnect:
+    raise SystemExit(
+        "Android native-tunnel receipt is not pinned across connect, Direct, and disconnect"
+    )
 PY
 if grep -Fq -- '--nvpn-debug-' "$android_release_gate"; then
   echo "Android Release black-box library contains a debug app action" >&2

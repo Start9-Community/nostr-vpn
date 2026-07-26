@@ -142,10 +142,20 @@ tasks.register<Exec>("buildRustArm64") {
     doFirst {
         delete(rustOutputDir.dir("arm64-v8a"))
     }
+    val cargoExecutable = providers.gradleProperty("nvpnCargoExecutable")
+        .getOrElse("cargo")
+    val cargoNdkExecutable = providers.gradleProperty(
+        "nvpnCargoNdkExecutable"
+    ).orNull
+    val cargoNdkCommand = if (cargoNdkExecutable == null) {
+        listOf(cargoExecutable, "ndk")
+    } else {
+        environment("CARGO", cargoExecutable)
+        // cargo-ndk consumes the subcommand token that Cargo normally inserts.
+        listOf(cargoNdkExecutable, "ndk")
+    }
     commandLine(
-        *(listOf(
-                "cargo",
-                "ndk",
+        *(cargoNdkCommand + listOf(
                 "--target",
                 "arm64-v8a",
                 "--platform",

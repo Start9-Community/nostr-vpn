@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import subprocess
@@ -23,7 +24,7 @@ ACTIVE = re.compile(
 )
 CHECKPOINT = re.compile(
     r"NVPN_IOS_(?P<name>"
-    r"UNDERLAY_SWITCH_[12]_(?:AVAILABLE|PAYLOAD_RECOVERY|VERIFIED)"
+    r"UNDERLAY_SWITCH_[12]_(?:REQUESTED|AVAILABLE|PAYLOAD_RECOVERY|VERIFIED)"
     r"|RELEASE_BACKGROUND_\d+_REQUESTED"
     r"|RELEASE_FOREGROUND_\d+_VERIFIED"
     r"|RELEASE_CONNECTED_DIRECT_PASSED"
@@ -65,7 +66,16 @@ class ProcessSampler:
         self.active = threading.Event()
         self.stopped = threading.Event()
         self.lock = threading.Lock()
+        self.samples_lock = threading.Lock()
         self.checkpoint = "active-session-begin"
+        self.required_checkpoints: set[str] = set()
+        self.checkpoint_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="ios-process-checkpoint",
+        )
+        self.checkpoint_futures: list[
+            concurrent.futures.Future[bool]
+        ] = []
         self.begin_seen = False
         self.end_seen = False
         self.samples: list[dict[str, object]] = []
@@ -76,33 +86,73 @@ class ProcessSampler:
 
     def begin(self) -> None:
         self.begin_seen = True
+        self.update_checkpoint("active-session-begin")
         self.active.set()
 
     def update_checkpoint(self, checkpoint: str) -> None:
+        normalized = checkpoint.lower()
+        should_sample = False
         with self.lock:
-            self.checkpoint = checkpoint.lower()
+            self.checkpoint = normalized
+            if normalized not in self.required_checkpoints:
+                self.required_checkpoints.add(normalized)
+                should_sample = True
+        if should_sample:
+            future = self.checkpoint_executor.submit(
+                self._sample, normalized
+            )
+            with self.lock:
+                self.checkpoint_futures.append(future)
 
     def stop(self) -> None:
-        self.end_seen = True
+        with self.lock:
+            self.end_seen = True
+        self.update_checkpoint("active-session-end")
         self.stopped.set()
 
     def finish(self) -> int:
+        self.active.set()
         self.stopped.set()
         self.thread.join(timeout=7)
         errors: list[str] = []
+        with self.lock:
+            checkpoint_futures = list(self.checkpoint_futures)
+        done, pending = concurrent.futures.wait(
+            checkpoint_futures,
+            timeout=12,
+        )
+        if pending:
+            errors.append(
+                f"{len(pending)} checkpoint process observations did not finish"
+            )
+        for future in done:
+            try:
+                future.result()
+            except Exception as error:  # pragma: no cover - defensive boundary
+                errors.append(
+                    "checkpoint process observation raised "
+                    f"{type(error).__name__}"
+                )
+        self.checkpoint_executor.shutdown(
+            wait=False,
+            cancel_futures=True,
+        )
         if self.thread.is_alive():
             errors.append("process sampler did not stop")
         if not self.begin_seen:
             errors.append("active-session begin marker was missing")
         if not self.end_seen:
             errors.append("active-session end marker was missing")
-        if len(self.samples) < 2:
+        with self.samples_lock:
+            samples = list(self.samples)
+        if len(samples) < 2:
             errors.append(
-                f"only {len(self.samples)} active-session process observations"
+                f"only {len(samples)} active-session process observations"
             )
         app_pids: set[int] = set()
         tunnel_pids: set[int] = set()
-        for index, sample in enumerate(self.samples, start=1):
+        valid_checkpoints: set[str] = set()
+        for index, sample in enumerate(samples, start=1):
             if sample.get("error"):
                 errors.append(
                     f"process observation {index}: {sample['error']}"
@@ -122,20 +172,37 @@ class ProcessSampler:
                 )
             else:
                 tunnel_pids.add(int(tunnel[0]))
+            if (
+                isinstance(app, list)
+                and len(app) == 1
+                and isinstance(tunnel, list)
+                and len(tunnel) == 1
+            ):
+                valid_checkpoints.add(str(sample.get("checkpoint", "")))
         if len(app_pids) != 1:
             errors.append(f"distinct app PIDs={sorted(app_pids)}")
         if len(tunnel_pids) != 1:
             errors.append(
                 f"distinct packet-tunnel PIDs={sorted(tunnel_pids)}"
             )
+        with self.lock:
+            required_checkpoints = set(self.required_checkpoints)
+        missing_checkpoints = sorted(required_checkpoints - valid_checkpoints)
+        if missing_checkpoints:
+            errors.append(
+                "checkpoints without a valid process observation="
+                f"{missing_checkpoints}"
+            )
         summary = {
             "activeSessionBeginSeen": self.begin_seen,
             "activeSessionEndSeen": self.end_seen,
             "appProcessIdentifiers": sorted(app_pids),
+            "observedCheckpoints": sorted(valid_checkpoints),
             "packetTunnelProcessIdentifiers": sorted(tunnel_pids),
             "passed": not errors,
-            "sampleCount": len(self.samples),
-            "samples": self.samples,
+            "requiredCheckpoints": sorted(required_checkpoints),
+            "sampleCount": len(samples),
+            "samples": samples,
         }
         if errors:
             summary["errors"] = errors
@@ -155,13 +222,13 @@ class ProcessSampler:
     def _run(self) -> None:
         self.active.wait()
         while not self.stopped.is_set():
-            self._sample()
+            with self.lock:
+                checkpoint = self.checkpoint
+            self._sample(checkpoint)
             self.stopped.wait(0.25)
 
-    def _sample(self) -> None:
+    def _sample(self, checkpoint: str) -> bool:
         timestamp_ms = time.time_ns() // 1_000_000
-        with self.lock:
-            checkpoint = self.checkpoint
         sample: dict[str, object] = {
             "checkpoint": checkpoint,
             "observedAtMilliseconds": timestamp_ms,
@@ -199,7 +266,15 @@ class ProcessSampler:
                     sample["packetTunnelPids"] = tunnel
             except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
                 sample["error"] = type(error).__name__
-        self.samples.append(sample)
+        with self.samples_lock:
+            self.samples.append(sample)
+        return (
+            not sample.get("error")
+            and isinstance(sample.get("appPids"), list)
+            and len(sample["appPids"]) == 1
+            and isinstance(sample.get("packetTunnelPids"), list)
+            and len(sample["packetTunnelPids"]) == 1
+        )
 
 
 def main() -> int:

@@ -53,6 +53,21 @@ export NDK_HOME="${ANDROID_NDK_HOME:-${NDK_HOME:-}}"
 nvpn_prepare_local_fips_workspace "$ROOT"
 
 GRADLE="$(find_gradle)"
+gradle_args=()
+if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
+  local_fips_cargo="$(command -v cargo)"
+  local_fips_cargo_ndk="$(command -v cargo-ndk)"
+  [[ "$local_fips_cargo" == "$NVPN_LOCAL_FIPS_LOCK_DIR/cargo-wrapper/cargo" ]] || {
+    echo "local FIPS Android build did not resolve the owned Cargo wrapper" >&2
+    exit 1
+  }
+  [[ -x "$local_fips_cargo_ndk" ]] || {
+    echo "local FIPS Android build could not resolve cargo-ndk" >&2
+    exit 1
+  }
+  gradle_args+=("-PnvpnCargoExecutable=$local_fips_cargo")
+  gradle_args+=("-PnvpnCargoNdkExecutable=$local_fips_cargo_ndk")
+fi
 cmd="${1:-assembleDebug}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -72,15 +87,19 @@ fi
 
 case "$cmd" in
   build|assembleDebug|debug)
-    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" :app:assembleDebug "$@"
+    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" \
+      "${gradle_args[@]}" :app:assembleDebug "$@"
     ;;
   release|assembleRelease)
-    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" :app:assembleRelease "$@"
+    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" \
+      "${gradle_args[@]}" :app:assembleRelease "$@"
     ;;
   install|installDebug)
-    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" :app:installDebug "$@"
+    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" \
+      "${gradle_args[@]}" :app:installDebug "$@"
     ;;
   *)
-    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" "$cmd" "$@"
+    env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" \
+      "${gradle_args[@]}" "$cmd" "$@"
     ;;
 esac

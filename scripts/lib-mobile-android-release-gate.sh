@@ -6,6 +6,7 @@
 # library.
 
 ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT=""
+ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE=""
 
 android_release_require_inputs() {
   [[ "$PACKAGE_NAME" == "$CANONICAL_PACKAGE_NAME" ]] || {
@@ -590,17 +591,55 @@ run_android_release_exit_network_probe() {
   echo "Android Release $label real DNS/HTTP/HTTPS/exit-source path passed: $result_path"
 }
 
-android_release_pin_native_tunnel_start_count() {
+android_release_capture_native_tunnel_start_baseline() {
   local count
   count="$(android_vpn_native_start_count)" || {
     echo "Android Release could not inspect native-tunnel starts" >&2
     return 1
   }
-  if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Android Release connected VPN emitted no native-tunnel start receipt" >&2
+  if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+    echo "Android Release native-tunnel start baseline is invalid" >&2
     return 1
   fi
-  ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT="$count"
+  ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE="$count"
+}
+
+android_release_pin_native_tunnel_start_count() {
+  local count expected wait_seconds deadline
+  if [[ ! "$ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE" =~ ^[0-9]+$ ]]; then
+    echo "Android Release has no pre-connect native-tunnel start baseline" >&2
+    return 1
+  fi
+  expected=$((ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE + 1))
+  wait_seconds="${NVPN_ANDROID_NATIVE_START_RECEIPT_WAIT_SECS:-4}"
+  [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] \
+    && (( wait_seconds <= 4 )) || {
+    echo "Android Release native-tunnel receipt wait must be 1-4 seconds" >&2
+    return 1
+  }
+  deadline=$((SECONDS + wait_seconds))
+  while true; do
+    count="$(android_vpn_native_start_count)" || {
+      echo "Android Release could not inspect native-tunnel starts" >&2
+      return 1
+    }
+    if [[ ! "$count" =~ ^[0-9]+$ \
+      || "$count" -lt "$ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE" \
+      || "$count" -gt "$expected" ]]
+    then
+      echo "Android Release UI connect expected exactly one native-tunnel start ($ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE->$expected), observed ${count:-invalid}" >&2
+      return 1
+    fi
+    if [[ "$count" -eq "$expected" ]]; then
+      ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT="$count"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "Android Release UI connect emitted no native-tunnel start within ${wait_seconds}s" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
 }
 
 android_release_assert_native_tunnel_unchanged() {
@@ -657,6 +696,7 @@ run_android_release_blackbox_cycle() {
   if [[ -n "$EXIT_DNS_MODE" ]]; then
     configure_android_exit_dns_ui || return 1
   fi
+  android_release_capture_native_tunnel_start_baseline || return 1
   android_release_connect_ui || return 1
   vpn_cleanup_armed=1
   android_release_pin_native_tunnel_start_count || return 1
@@ -670,9 +710,13 @@ run_android_release_blackbox_cycle() {
     select_android_direct_ui || return 1
     wait_until "$VPN_START_WAIT_SECS" vpn_active || return 1
     run_android_release_direct_network_probe direct-while-connected 1 || return 1
+    android_release_assert_native_tunnel_unchanged \
+      connected-direct || return 1
   fi
   android_release_disconnect_ui || return 1
   vpn_cleanup_armed=0
   run_android_release_direct_network_probe after-disconnect 0 || return 1
+  android_release_assert_native_tunnel_unchanged \
+    after-disconnect || return 1
   assert_single_android_app_process
 }

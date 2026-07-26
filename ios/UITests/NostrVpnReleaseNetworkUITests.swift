@@ -92,6 +92,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
 
         emit("NVPN_IOS_RELEASE_ACTIVE_SESSION_END_MS=\(millisecondsSinceEpoch())")
+        // Keep the production packet tunnel alive while the external process
+        // sampler records the final active-session checkpoint.
+        Thread.sleep(forTimeInterval: 6)
         try turnVPNOffIfNeeded()
         try proveDirect(spec, expectedSource: directSource)
         emit("NVPN_IOS_RELEASE_DIRECT_AFTER_PASSED=1")
@@ -409,6 +412,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
         try proveDirect(spec, expectedSource: directSource)
         emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
+        // The external black-box sampler must observe the unchanged extension
+        // process after Direct has taken effect while the OS VPN stays active.
+        Thread.sleep(forTimeInterval: 6)
     }
 
     private func releaseSpec() throws -> Spec {

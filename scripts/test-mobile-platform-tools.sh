@@ -129,7 +129,22 @@ EOF
   cat >"$stubbin/gradle" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-cargo metadata
+cargo_executable=""
+cargo_ndk_executable=""
+for argument in "$@"; do
+  case "$argument" in
+    -PnvpnCargoExecutable=*)
+      cargo_executable="${argument#*=}"
+      ;;
+    -PnvpnCargoNdkExecutable=*)
+      cargo_ndk_executable="${argument#*=}"
+      ;;
+  esac
+done
+[[ -n "$cargo_executable" ]]
+[[ "$cargo_executable" == */cargo-wrapper/cargo ]]
+[[ -x "$cargo_ndk_executable" ]]
+"$cargo_executable" metadata
 exit 43
 EOF
   chmod +x "$stubbin/cargo" "$stubbin/gradle"

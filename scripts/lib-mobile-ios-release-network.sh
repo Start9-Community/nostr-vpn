@@ -669,14 +669,45 @@ run_ios_release_network_case() {
   ios_release_network_copy_markers "$markers" || return 1
   ios_release_network_validate_markers \
     "$markers" "$run_id" "$label" "$lifecycle" "$underlay" "$direct" || return 1
-  python3 - "$process_summary" <<'PY'
+  python3 - \
+    "$process_summary" "$underlay" "$lifecycle" "$direct" \
+    "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" <<'PY'
 import json
 import sys
+
+def truthy(value):
+    return value.lower() in {"1", "true", "yes", "on"}
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     receipt = json.load(handle)
 if receipt.get("passed") is not True:
     raise SystemExit("iOS Release process continuity receipt did not pass")
+expected = {"active-session-begin", "active-session-end"}
+if truthy(sys.argv[2]):
+    for cycle in (1, 2):
+        for phase in (
+            "requested",
+            "available",
+            "payload_recovery",
+            "verified",
+        ):
+            expected.add(f"underlay_switch_{cycle}_{phase}")
+if truthy(sys.argv[3]):
+    for cycle in range(1, int(sys.argv[5]) + 1):
+        expected.add(f"release_background_{cycle}_requested")
+        expected.add(f"release_foreground_{cycle}_verified")
+if truthy(sys.argv[4]):
+    expected.add("release_connected_direct_passed")
+required = set(receipt.get("requiredCheckpoints", []))
+observed = set(receipt.get("observedCheckpoints", []))
+if required != expected:
+    raise SystemExit(
+        "iOS Release process sampler did not receive every expected checkpoint"
+    )
+if not expected.issubset(observed):
+    raise SystemExit(
+        "iOS Release process sampler did not observe every expected checkpoint"
+    )
 PY
   if bool_is_true "$underlay"; then
     mobile_continuity_validate \

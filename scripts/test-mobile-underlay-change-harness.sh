@@ -198,12 +198,22 @@ bash -eu -o pipefail -c '
   source "$2"
   native_starts=3
   android_vpn_native_start_count() { printf "%s\n" "$native_starts"; }
-  android_release_pin_native_tunnel_start_count
-  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" == 3 ]]
-  android_release_assert_native_tunnel_unchanged stable-network-phase
+  android_release_capture_native_tunnel_start_baseline
+  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE" == 3 ]]
   native_starts=4
+  android_release_pin_native_tunnel_start_count
+  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" == 4 ]]
+  android_release_assert_native_tunnel_unchanged stable-network-phase
+  native_starts=5
   if android_release_assert_native_tunnel_unchanged recreated-network-phase; then
     echo "Android Release gate accepted native-tunnel recreation" >&2
+    exit 1
+  fi
+  native_starts=10
+  android_release_capture_native_tunnel_start_baseline
+  native_starts=12
+  if android_release_pin_native_tunnel_start_count; then
+    echo "Android Release gate accepted duplicate starts from one UI connect" >&2
     exit 1
   fi
 ' _ "$android_lib" "$android_release_lib"
