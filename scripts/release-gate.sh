@@ -836,7 +836,7 @@ release_gate_has_physical_ios_device() {
       --quiet >/dev/null 2>&1
     return
   fi
-  xcrun xcdevice list 2>/dev/null | python3 -c '
+  xcrun xcdevice list --timeout 5 2>/dev/null | python3 -c '
 import json
 import sys
 
