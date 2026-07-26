@@ -1160,6 +1160,62 @@ function publishRustCrates({ dryRun }) {
   run('bash', dryRun ? [script, '--dry-run'] : [script], { dryRun })
 }
 
+function zapstorePublicationContext(env) {
+  const signWith = resolveZapstoreSignWith(env)
+  const zapstoreYaml = join(repoRoot, 'zapstore.yaml')
+  const configExists = existsSync(zapstoreYaml)
+  const zapstoreConfig = configExists ? readFileSync(zapstoreYaml, 'utf8') : ''
+  const publisherNpub = (
+    zapstoreConfig.match(/^\s*pubkey:\s*(\S+)\s*$/m)?.[1] || ''
+  ).trim()
+  const relayUrls = String(
+    env.RELAY_URLS || 'wss://relay.zapstore.dev',
+  )
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+  return {
+    configExists,
+    publisherNpub,
+    relayUrls,
+    signWith,
+    zapstoreYaml,
+  }
+}
+
+function preflightRequiredZapstorePublication({
+  env,
+  tag,
+  requireApk = false,
+}) {
+  const apkPath = join(distDir, `nostr-vpn-${tag}-android-arm64.apk`)
+  const {
+    configExists,
+    publisherNpub,
+    relayUrls,
+    signWith,
+  } = zapstorePublicationContext(env)
+  zapstorePublicationPrerequisites(
+    {
+      apk: !requireApk || existsSync(apkPath),
+      zsp: commandExists('zsp'),
+      nak: commandExists('nak'),
+      signing: Boolean(signWith),
+      config: configExists,
+      publisher: Boolean(publisherNpub),
+      relays: relayUrls.length > 0,
+    },
+    { required: true },
+  )
+  const publisherPubkey = run('nak', ['decode', publisherNpub], {
+    capture: true,
+  }).trim()
+  if (!/^[0-9a-f]{64}$/i.test(publisherPubkey)) {
+    throw new Error('zapstore.yaml publisher pubkey could not be decoded.')
+  }
+}
+
 /**
  * Publish the Android APK for this release to Zapstore.
  *
@@ -1189,19 +1245,13 @@ function publishZapstore({ env, tag, dryRun, required = false }) {
     return
   }
 
-  const signWith = resolveZapstoreSignWith(env)
-  const zapstoreYaml = join(repoRoot, 'zapstore.yaml')
-  const configExists = existsSync(zapstoreYaml)
-  const zapstoreConfig = configExists ? readFileSync(zapstoreYaml, 'utf8') : ''
-  const publisherNpub = (
-    zapstoreConfig.match(/^\s*pubkey:\s*(\S+)\s*$/m)?.[1] || ''
-  ).trim()
-  const relayUrls = String(
-    env.RELAY_URLS || 'wss://relay.zapstore.dev',
-  )
-    .split(/[,\s]+/)
-    .map((value) => value.trim())
-    .filter(Boolean)
+  const {
+    configExists,
+    publisherNpub,
+    relayUrls,
+    signWith,
+    zapstoreYaml,
+  } = zapstorePublicationContext(env)
 
   const prerequisites = zapstorePublicationPrerequisites(
     {
@@ -1463,6 +1513,17 @@ function main() {
     console.log('Promote mode: reusing an existing staged draft and publishing it as final/latest.')
   } else if (options.publish && options.draft) {
     console.log('Draft mode: htree publish will repoint draft instead of latest, and crate/Zapstore publish steps are disabled.')
+  }
+
+  if (options.publish && !options.dryRun && !commandExists('htree')) {
+    throw new Error('Missing htree; cannot publish release.')
+  }
+  if (requireZapstore && !options.dryRun) {
+    preflightRequiredZapstorePublication({
+      env,
+      tag,
+      requireApk: options.promoteDraft,
+    })
   }
 
   if (

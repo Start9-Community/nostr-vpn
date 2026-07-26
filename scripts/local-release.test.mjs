@@ -316,6 +316,28 @@ test('final publication cannot bypass complete platform artifacts', () => {
   )
 })
 
+test('final publication preflights tools and Zapstore identity before the release gate', () => {
+  const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
+  const mainStart = localRelease.indexOf('function main()')
+  const preflightCall = localRelease.indexOf(
+    'preflightRequiredZapstorePublication({',
+    mainStart,
+  )
+  const buildSteps = localRelease.indexOf('const steps = [', mainStart)
+
+  assert.ok(preflightCall > mainStart)
+  assert.ok(preflightCall < buildSteps)
+  assert.match(
+    localRelease,
+    /options\.publish\s*&&\s*!options\.dryRun\s*&&\s*!commandExists\('htree'\)/,
+  )
+  assert.match(
+    localRelease,
+    /zapstorePublicationPrerequisites\([\s\S]*?apk:\s*!requireApk\s*\|\|\s*existsSync\(apkPath\)/,
+  )
+  assert.match(localRelease, /run\('nak', \['decode', publisherNpub\]/)
+})
+
 test('release builds always include paid exit support', () => {
   for (const manifest of [
     'crates/nostr-vpn-core/Cargo.toml',
