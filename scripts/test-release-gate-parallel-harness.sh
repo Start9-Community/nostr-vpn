@@ -299,8 +299,23 @@ PY
 if grep -Fq 'test-manual-join-platform-contract.sh' "$release_gate"; then
   fail "release gate still substitutes source grep for native manual-join UI execution"
 fi
-grep -Fq 'e2e-umbrel-web-docker.sh' "$release_gate" \
-  || fail "release gate does not execute shipped web manual-join controls"
+grep -Fq 'e2e-web-startos-manual-join-docker.sh' "$release_gate" \
+  || fail "release gate does not execute the real web/StartOS manual-join runtime gate"
+web_startos_join_gate="$ROOT_DIR/scripts/e2e-web-startos-manual-join-docker.sh"
+[[ -x "$web_startos_join_gate" ]] \
+  || fail "real web/StartOS manual-join runtime gate is missing or not executable"
+for evidence in \
+  'desktop_manual_join_e2e_fixture' \
+  'capture-delivery' \
+  'verify-runtime' \
+  'manual-join-runtime.spec.ts'
+do
+  grep -Fq "$evidence" "$web_startos_join_gate" \
+    || fail "web/StartOS manual-join gate lacks production evidence: $evidence"
+done
+grep -Fq 'dockerfile: '\''./umbrel/Dockerfile'\''' \
+  "$ROOT_DIR/startos/manifest/index.ts" \
+  || fail "StartOS no longer packages the exact web image exercised by the runtime gate"
 grep -Fq './scripts/test-mobile-wireguard-exit-dns-harness.sh' "$release_gate" \
   || fail "release gate does not enforce the physical mobile exit/DNS source contract"
 grep -Fq 'NVPN_RELEASE_GATE_QR_JOIN_LATENCY' "$release_gate" \

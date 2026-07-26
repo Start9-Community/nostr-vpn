@@ -1,0 +1,108 @@
+services:
+  node-a-daemon:
+    image: ${NVPN_WEB_STARTOS_JOIN_IMAGE:-nostr-vpn-web-startos-manual-join:local}
+    build:
+      context: ..
+      dockerfile: umbrel/Dockerfile
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint:
+      - /usr/local/bin/nvpn
+    command:
+      - daemon
+      - --paused
+      - --config
+      - /data/config/nvpn/config.toml
+    environment:
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      RUST_LOG: info
+    volumes:
+      - ${NVPN_WEB_STARTOS_JOIN_NODE_A_DATA:?set node A data directory}:/data/config/nvpn
+    networks:
+      manual_join:
+        ipv4_address: ${NVPN_WEB_STARTOS_JOIN_NODE_A_IP:-10.254.91.10}
+
+  node-a-web:
+    image: ${NVPN_WEB_STARTOS_JOIN_IMAGE:-nostr-vpn-web-startos-manual-join:local}
+    init: true
+    depends_on:
+      - node-a-daemon
+    command:
+      - --listen
+      - 0.0.0.0:38080
+      - --behind-trusted-proxy
+      - --config
+      - /data/config/nvpn/config.toml
+    ports:
+      - 127.0.0.1:${NVPN_WEB_STARTOS_JOIN_NODE_A_PORT:?set node A web port}:38080
+    environment:
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      NVPN_CLI_PATH: /usr/local/bin/nvpn
+      NVPN_DAEMON_STATUS_MODE: state-file
+      NVPN_EXTERNAL_DAEMON: "true"
+      RUST_LOG: info
+    volumes:
+      - ${NVPN_WEB_STARTOS_JOIN_NODE_A_DATA:?set node A data directory}:/data/config/nvpn
+    networks:
+      manual_join:
+        ipv4_address: ${NVPN_WEB_STARTOS_JOIN_NODE_A_WEB_IP:-10.254.91.20}
+
+  node-b-daemon:
+    image: ${NVPN_WEB_STARTOS_JOIN_IMAGE:-nostr-vpn-web-startos-manual-join:local}
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint:
+      - /usr/local/bin/nvpn
+    command:
+      - daemon
+      - --paused
+      - --config
+      - /data/config/nvpn/config.toml
+    environment:
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      RUST_LOG: info
+    volumes:
+      - ${NVPN_WEB_STARTOS_JOIN_NODE_B_DATA:?set node B data directory}:/data/config/nvpn
+    networks:
+      manual_join:
+        ipv4_address: ${NVPN_WEB_STARTOS_JOIN_NODE_B_IP:-10.254.91.11}
+
+  node-b-web:
+    image: ${NVPN_WEB_STARTOS_JOIN_IMAGE:-nostr-vpn-web-startos-manual-join:local}
+    init: true
+    depends_on:
+      - node-b-daemon
+    command:
+      - --listen
+      - 0.0.0.0:38080
+      - --behind-trusted-proxy
+      - --config
+      - /data/config/nvpn/config.toml
+    ports:
+      - 127.0.0.1:${NVPN_WEB_STARTOS_JOIN_NODE_B_PORT:?set node B web port}:38080
+    environment:
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      NVPN_CLI_PATH: /usr/local/bin/nvpn
+      NVPN_DAEMON_STATUS_MODE: state-file
+      NVPN_EXTERNAL_DAEMON: "true"
+      RUST_LOG: info
+    volumes:
+      - ${NVPN_WEB_STARTOS_JOIN_NODE_B_DATA:?set node B data directory}:/data/config/nvpn
+    networks:
+      manual_join:
+        ipv4_address: ${NVPN_WEB_STARTOS_JOIN_NODE_B_WEB_IP:-10.254.91.21}
+
+networks:
+  manual_join:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NVPN_WEB_STARTOS_JOIN_SUBNET:-10.254.91.0/24}

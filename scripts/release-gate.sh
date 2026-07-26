@@ -1199,8 +1199,8 @@ run_docker_isolated_functional_gates() {
     run_userspace_wireguard_exit_docker_gate
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
-  release_gate_parallel_start "Umbrel web UI manual join" \
-    ./scripts/e2e-umbrel-web-docker.sh
+  release_gate_parallel_start "Web/StartOS real manual join" \
+    ./scripts/e2e-web-startos-manual-join-docker.sh
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
   release_gate_parallel_wait_group "${lanes[@]}"
