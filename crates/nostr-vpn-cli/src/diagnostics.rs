@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(not(target_os = "windows"))]
 use netdev::get_default_interface;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 use netdev::get_interfaces;
 use nostr_vpn_core::config::AppConfig;
 use nostr_vpn_core::diagnostics::{
@@ -116,40 +117,81 @@ pub(crate) fn prefer_nonempty_network_snapshot(
 }
 
 pub(crate) fn capture_network_snapshot() -> NetworkSnapshot {
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "windows")]
     {
-        let snapshot = capture_macos_network_snapshot();
-        if snapshot.default_interface.is_some()
-            || snapshot.primary_ipv4.is_some()
-            || snapshot.gateway_ipv4.is_some()
+        capture_windows_network_snapshot()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "macos")]
         {
-            return snapshot;
+            let snapshot = capture_macos_network_snapshot();
+            if snapshot.default_interface.is_some()
+                || snapshot.primary_ipv4.is_some()
+                || snapshot.gateway_ipv4.is_some()
+            {
+                return snapshot;
+            }
         }
-    }
 
-    let mut snapshot = NetworkSnapshot::default();
-    let Ok(interface) = get_default_interface() else {
-        return snapshot;
+        let mut snapshot = NetworkSnapshot::default();
+        let Ok(interface) = get_default_interface() else {
+            return snapshot;
+        };
+
+        snapshot.default_interface = Some(interface.name.clone());
+        snapshot.default_interface_mtu = interface.mtu;
+        snapshot.primary_ipv4 = interface
+            .ipv4_addrs()
+            .into_iter()
+            .find(|ip| !ip.is_loopback() && !ip.is_link_local());
+        snapshot.primary_ipv6 = interface.ipv6_addrs().into_iter().find(|ip| {
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_unicast_link_local()
+                && !ip.is_multicast()
+        });
+        if let Some(gateway) = interface.gateway {
+            snapshot.gateway_ipv4 = gateway.ipv4.first().copied();
+            snapshot.gateway_ipv6 = gateway.ipv6.first().copied();
+        }
+
+        snapshot
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn capture_windows_network_snapshot() -> NetworkSnapshot {
+    let Ok(route) = crate::wg_upstream_runtime::capture_windows_default_route() else {
+        return NetworkSnapshot::default();
     };
+    windows_network_snapshot_from_route(&route, &get_interfaces()).unwrap_or_default()
+}
 
-    snapshot.default_interface = Some(interface.name.clone());
-    snapshot.default_interface_mtu = interface.mtu;
-    snapshot.primary_ipv4 = interface
-        .ipv4_addrs()
-        .into_iter()
-        .find(|ip| !ip.is_loopback() && !ip.is_link_local());
-    snapshot.primary_ipv6 = interface.ipv6_addrs().into_iter().find(|ip| {
-        !ip.is_loopback()
-            && !ip.is_unspecified()
-            && !ip.is_unicast_link_local()
-            && !ip.is_multicast()
-    });
-    if let Some(gateway) = interface.gateway {
-        snapshot.gateway_ipv4 = gateway.ipv4.first().copied();
-        snapshot.gateway_ipv6 = gateway.ipv6.first().copied();
-    }
+#[cfg(any(test, target_os = "windows"))]
+fn windows_network_snapshot_from_route(
+    route: &crate::wg_upstream_runtime::WindowsDefaultRoute,
+    interfaces: &[netdev::Interface],
+) -> Option<NetworkSnapshot> {
+    let interface = interfaces.iter().find(|interface| {
+        interface.index == route.interface_index
+            && interface.ipv4_addrs().contains(&route.interface_ipv4)
+    })?;
 
-    snapshot
+    Some(NetworkSnapshot {
+        default_interface: Some(interface.name.clone()),
+        default_interface_mtu: interface.mtu,
+        primary_ipv4: Some(route.interface_ipv4),
+        primary_ipv6: interface.ipv6_addrs().into_iter().find(|ip| {
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_unicast_link_local()
+                && !ip.is_multicast()
+        }),
+        gateway_ipv4: route.gateway.parse().ok(),
+        gateway_ipv6: None,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -541,7 +583,7 @@ mod tests {
         CaptivePortalEndpoint, NetworkSnapshot, build_health_issues,
         captive_portal_interface_name_needs_detection, check_captive_portal_endpoint,
         local_identity_missing_from_active_roster, mapping_varies_by_dest_ip, parse_http_response,
-        prefer_nonempty_network_snapshot,
+        prefer_nonempty_network_snapshot, windows_network_snapshot_from_route,
     };
     use nostr_sdk::prelude::Keys;
     use nostr_vpn_core::config::{AppConfig, PendingOutboundJoinRequest};
@@ -582,6 +624,42 @@ mod tests {
         let preferred = prefer_nonempty_network_snapshot(&previous, NetworkSnapshot::default());
 
         assert_eq!(preferred, previous);
+    }
+
+    #[test]
+    fn windows_snapshot_uses_routed_physical_adapter_when_wintun_is_default() {
+        let mut wintun = netdev::Interface::dummy();
+        wintun.index = 24;
+        wintun.name = "{FIPS-WINTUN-GUID}".to_string();
+        wintun.mtu = Some(65_535);
+        wintun.ipv4 = vec!["10.44.166.242/32".parse().expect("Wintun IPv4")];
+        wintun.default = true;
+
+        let mut physical = netdev::Interface::dummy();
+        physical.index = 4;
+        physical.name = "{PHYSICAL-ADAPTER-GUID}".to_string();
+        physical.mtu = Some(1_500);
+        physical.ipv4 = vec!["192.168.122.147/24".parse().expect("physical IPv4")];
+
+        let route = crate::wg_upstream_runtime::WindowsDefaultRoute {
+            gateway: "192.168.122.1".to_string(),
+            interface_index: 4,
+            interface_ipv4: Ipv4Addr::new(192, 168, 122, 147),
+        };
+
+        let snapshot = windows_network_snapshot_from_route(&route, &[wintun, physical])
+            .expect("physical network snapshot");
+
+        assert_eq!(
+            snapshot.default_interface.as_deref(),
+            Some("{PHYSICAL-ADAPTER-GUID}")
+        );
+        assert_eq!(snapshot.default_interface_mtu, Some(1_500));
+        assert_eq!(
+            snapshot.primary_ipv4,
+            Some(Ipv4Addr::new(192, 168, 122, 147))
+        );
+        assert_eq!(snapshot.gateway_ipv4, Some(Ipv4Addr::new(192, 168, 122, 1)));
     }
 
     #[test]

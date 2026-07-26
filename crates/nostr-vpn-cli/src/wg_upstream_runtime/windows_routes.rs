@@ -89,11 +89,12 @@ pub struct WindowsFullDefaultRoute {
     reverted: bool,
 }
 
-#[cfg(target_os = "windows")]
-#[derive(Debug, Clone)]
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WindowsDefaultRoute {
     pub(crate) gateway: String,
     pub(crate) interface_index: u32,
+    pub(crate) interface_ipv4: std::net::Ipv4Addr,
 }
 
 #[cfg(target_os = "windows")]
@@ -165,6 +166,10 @@ pub(crate) fn capture_windows_default_route() -> Result<WindowsDefaultRoute> {
     Ok(WindowsDefaultRoute {
         gateway: interface_ip.gateway,
         interface_index,
+        interface_ipv4: interface_ip
+            .interface_ip
+            .parse()
+            .context("parse Windows default-route interface IPv4 address")?,
     })
 }
 
