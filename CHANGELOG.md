@@ -11,6 +11,9 @@ All notable changes to this project are documented in this file.
   RunningBoard `0xDEAD10CC` terminations.
 - Resolve Ad Hoc signing from the exact selected CoreDevice instead of a stale
   environment UDID when multiple iPhones are connected.
+- Release completed FIPS-TCP state-control slots promptly so periodic roster
+  and capability traffic cannot starve a manual-join roster or its durable
+  application receipt behind the per-peer connection budget.
 
 ### Changed
 

@@ -30,6 +30,7 @@ const IO_CHUNK_BYTES: usize = 16 * 1024;
 const DRIVE_INTERVAL: Duration = Duration::from_millis(20);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTROL_CLOSE_RETENTION_MS: u64 = 250;
 const JOIN_ROSTER_ACK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 static CONTROL_ISN_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -242,6 +243,13 @@ impl FipsControlTcpRuntime {
             send_buffer: u16::MAX as usize,
             max_connections: MAX_CONNECTIONS,
             max_connections_per_peer: MAX_CONNECTIONS_PER_PEER,
+            // Control records use a fresh ephemeral port and both runtimes
+            // close as soon as the complete record enters the local delivery
+            // queue. Retaining those closed tuples for the general TCP
+            // defaults (30-60 seconds) lets ordinary roster/capability bursts
+            // exhaust the eight-stream peer budget and starve a join receipt.
+            fin_wait_2_ms: CONTROL_CLOSE_RETENTION_MS,
+            time_wait_ms: CONTROL_CLOSE_RETENTION_MS,
             ..Config::default()
         };
         let tcp = FipsTcpEndpoint::bind(
@@ -620,6 +628,26 @@ mod tests {
 
     use super::*;
 
+    fn test_join_roster() -> (JoinRosterControl, String) {
+        let admin = Keys::generate();
+        let signed_roster = crate::fips_control::SignedRoster::sign(
+            "network",
+            crate::fips_control::NetworkRoster {
+                network_name: "Home".to_string(),
+                devices: vec![admin.public_key().to_hex()],
+                admins: vec![admin.public_key().to_hex()],
+                aliases: HashMap::new(),
+                signed_at: 42,
+            },
+            &admin,
+        )
+        .expect("sign roster");
+        let roster_event_id = signed_roster.artifact_hash();
+        let control =
+            JoinRosterControl::new(signed_roster, "request-secret").expect("join roster control");
+        (control, roster_event_id)
+    }
+
     #[tokio::test]
     async fn carries_one_stateful_record_over_real_fips_tcp() {
         let endpoint = Arc::new(
@@ -670,22 +698,7 @@ mod tests {
         let mut control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
             .await
             .expect("start state-control runtime");
-        let admin = Keys::generate();
-        let signed_roster = crate::fips_control::SignedRoster::sign(
-            "network",
-            crate::fips_control::NetworkRoster {
-                network_name: "Home".to_string(),
-                devices: vec![admin.public_key().to_hex()],
-                admins: vec![admin.public_key().to_hex()],
-                aliases: HashMap::new(),
-                signed_at: 42,
-            },
-            &admin,
-        )
-        .expect("sign roster");
-        let expected_id = signed_roster.artifact_hash();
-        let join_roster =
-            JoinRosterControl::new(signed_roster, "request-secret").expect("join roster control");
+        let (join_roster, expected_id) = test_join_roster();
         let sender = control.sender();
         let delivery = tokio::spawn(async move {
             send_join_roster_with_receipt(&sender, local, &join_roster, Duration::from_secs(5))
@@ -737,6 +750,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_roster_receipt_survives_a_full_periodic_peer_budget() {
+        let endpoint = Arc::new(
+            FipsEndpoint::builder()
+                .without_system_tun()
+                .bind()
+                .await
+                .expect("bind embedded FIPS endpoint"),
+        );
+        let local = PeerIdentity::from_npub(endpoint.npub()).expect("local peer identity");
+        let mut control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
+            .await
+            .expect("start state-control runtime");
+
+        // Each completed loopback record leaves its client side in TIME-WAIT.
+        // Seven ordinary periodic records leave no room for both sides of the
+        // next stream under the production eight-connection per-peer budget,
+        // matching the startup/control burst that precedes a real approval.
+        for index in 0..(MAX_CONNECTIONS_PER_PEER - 1) {
+            let frame = FipsControlFrame::Capabilities {
+                network_id: format!("periodic-{index}"),
+                capabilities: Default::default(),
+            };
+            tokio::time::timeout(Duration::from_secs(3), control.send(local, &frame))
+                .await
+                .expect("periodic state-control send timed out")
+                .expect("send periodic state-control frame");
+            tokio::time::timeout(Duration::from_secs(3), control.recv())
+                .await
+                .expect("periodic state-control receive timed out")
+                .expect("receive periodic state-control frame");
+        }
+
+        let (join_roster, expected_id) = test_join_roster();
+        let sender = control.sender();
+        let delivery = tokio::spawn(async move {
+            send_join_roster_with_receipt(&sender, local, &join_roster, Duration::from_secs(3))
+                .await
+        });
+
+        let received = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let received = control.recv().await.expect("state-control frame");
+                if matches!(received.frame, FipsControlFrame::JoinRoster { .. }) {
+                    break received;
+                }
+            }
+        })
+        .await
+        .expect("join roster stayed behind retained periodic connections");
+        assert_eq!(received.source_peer, local);
+        control
+            .send(
+                local,
+                &FipsControlFrame::JoinRosterAck {
+                    roster_event_id: expected_id,
+                },
+            )
+            .await
+            .expect("send matching receipt");
+        delivery
+            .await
+            .expect("join delivery task")
+            .expect("matching receipt should complete delivery");
+
+        control.stop().await;
+        endpoint.shutdown().await.expect("shutdown endpoint");
+    }
+
+    #[tokio::test]
     async fn join_roster_timeout_reports_unacknowledged_real_transport() {
         let endpoint = Arc::new(
             FipsEndpoint::builder()
@@ -748,21 +830,7 @@ mod tests {
         let control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
             .await
             .expect("start state-control runtime");
-        let admin = Keys::generate();
-        let signed_roster = crate::fips_control::SignedRoster::sign(
-            "network",
-            crate::fips_control::NetworkRoster {
-                network_name: "Home".to_string(),
-                devices: vec![admin.public_key().to_hex()],
-                admins: vec![admin.public_key().to_hex()],
-                aliases: HashMap::new(),
-                signed_at: 42,
-            },
-            &admin,
-        )
-        .expect("sign roster");
-        let join_roster =
-            JoinRosterControl::new(signed_roster, "request-secret").expect("join roster control");
+        let (join_roster, _) = test_join_roster();
         let unreachable = PeerIdentity::from_npub(
             &Keys::generate()
                 .public_key()
