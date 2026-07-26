@@ -640,6 +640,7 @@ fn fips_link_events_preserve_sessions_across_network_handoffs() {
         FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
     );
 }
+
 #[test]
 fn fips_link_events_restart_endpoint_after_sleep() {
     assert_eq!(

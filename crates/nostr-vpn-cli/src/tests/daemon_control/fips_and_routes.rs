@@ -250,11 +250,23 @@ fn macos_route_delete_error_is_absent_matches_missing_route_output() {
 }
 
 #[test]
-fn macos_route_monitor_ignores_self_host_route_churn() {
+fn macos_route_monitor_observes_route_and_interface_changes() {
     let mut route_add = [0_u8; 4];
     route_add[3] = 0x01;
-    assert!(!crate::macos_network::macos_route_message_is_underlay_relevant(
+    assert!(crate::macos_network::macos_route_message_is_underlay_relevant(
         &route_add
+    ));
+
+    let mut route_delete = [0_u8; 4];
+    route_delete[3] = 0x02;
+    assert!(crate::macos_network::macos_route_message_is_underlay_relevant(
+        &route_delete
+    ));
+
+    let mut route_change = [0_u8; 4];
+    route_change[3] = 0x03;
+    assert!(crate::macos_network::macos_route_message_is_underlay_relevant(
+        &route_change
     ));
 
     let mut new_addr = [0_u8; 4];

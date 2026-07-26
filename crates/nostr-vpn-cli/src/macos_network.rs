@@ -107,20 +107,40 @@ pub(crate) fn macos_route_message_is_underlay_relevant(message: &[u8]) -> bool {
     let Some(message_type) = message.get(3).copied() else {
         return false;
     };
-    matches!(message_type, 0x0c | 0x0d | 0x0e | 0x12)
+    // A handoff can be route-only: macOS may delete the old default route and
+    // add the replacement without emitting a separate address or interface
+    // notification. Include route add/delete/change so the daemon observes
+    // that transition immediately. The debounced NetworkSnapshot comparison
+    // below this monitor makes notifications caused by nvpn's own host-route
+    // maintenance a no-op.
+    matches!(message_type, 0x01 | 0x02 | 0x03 | 0x0c | 0x0d | 0x0e | 0x12)
 }
 
 pub(super) fn macos_underlay_default_route_from_routes(
     routes: &[MacosRouteSpec],
 ) -> Option<MacosRouteSpec> {
-    routes
-        .iter()
-        .find(|route| {
-            route.gateway.is_some()
-                && !route.interface.starts_with("utun")
-                && !route.interface.starts_with("bridge")
-                && route.interface != "lo0"
+    macos_underlay_route_from_candidates(routes, None)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_underlay_route_from_candidates(
+    routes: &[MacosRouteSpec],
+    preferred_interface: Option<&str>,
+) -> Option<MacosRouteSpec> {
+    let is_physical = |route: &&MacosRouteSpec| {
+        route.gateway.is_some()
+            && !route.interface.starts_with("utun")
+            && !route.interface.starts_with("bridge")
+            && route.interface != "lo0"
+    };
+    preferred_interface
+        .and_then(|preferred| {
+            routes
+                .iter()
+                .filter(is_physical)
+                .find(|route| route.interface == preferred)
         })
+        .or_else(|| routes.iter().find(is_physical))
         .cloned()
 }
 
@@ -202,7 +222,15 @@ pub(crate) fn macos_ipconfig_router_for_interface(iface: &str) -> Result<Option<
 
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_underlay_default_route_from_system() -> Result<Option<MacosRouteSpec>> {
+    macos_underlay_default_route_from_system_for_interface(None)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_underlay_default_route_from_system_for_interface(
+    preferred_interface: Option<&str>,
+) -> Result<Option<MacosRouteSpec>> {
     let output = command_stdout_checked(ProcessCommand::new("ifconfig").arg("-l"))?;
+    let mut candidates = Vec::new();
     for iface in macos_interface_names_from_ifconfig_list(&output) {
         if iface.starts_with("utun")
             || iface.starts_with("bridge")
@@ -223,13 +251,16 @@ pub(crate) fn macos_underlay_default_route_from_system() -> Result<Option<MacosR
             continue;
         };
 
-        return Ok(Some(MacosRouteSpec {
+        candidates.push(MacosRouteSpec {
             gateway: Some(router.to_string()),
             interface: iface,
-        }));
+        });
     }
 
-    Ok(None)
+    Ok(macos_underlay_route_from_candidates(
+        &candidates,
+        preferred_interface,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -722,6 +753,30 @@ default            link#26            UCSIg           bridge100      !\n",
                 gateway: Some("192.168.64.1".to_string()),
                 interface: "en0".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn macos_underlay_selection_prefers_the_snapshot_interface_when_two_are_active() {
+        let candidates = vec![
+            MacosRouteSpec {
+                gateway: Some("192.168.178.1".to_string()),
+                interface: "en0".to_string(),
+            },
+            MacosRouteSpec {
+                gateway: Some("10.168.32.48".to_string()),
+                interface: "en1".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            macos_underlay_route_from_candidates(&candidates, Some("en1")),
+            Some(candidates[1].clone()),
+            "the daemon snapshot, not interface enumeration order, owns the selected underlay"
+        );
+        assert_eq!(
+            macos_underlay_route_from_candidates(&candidates, Some("en0")),
+            Some(candidates[0].clone())
         );
     }
 

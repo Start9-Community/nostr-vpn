@@ -401,7 +401,11 @@ impl FipsPrivateTunnelRuntime {
         ) {
             return Ok((!hosts.is_empty(), self.endpoint_bypass_underlay.clone()));
         }
-        let underlay = match crate::macos_underlay_default_route_from_system() {
+        let underlay = match crate::macos_network::
+            macos_underlay_default_route_from_system_for_interface(
+                config.underlay_interface.as_deref(),
+            )
+        {
             Ok(underlay) => underlay,
             Err(error) => {
                 eprintln!("fips: failed to resolve macOS endpoint underlay route: {error}");
