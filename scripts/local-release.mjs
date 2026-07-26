@@ -906,12 +906,14 @@ function buildIosArtifacts({ tag, dryRun, builtLines }) {
   const env = {
     ...process.env,
     NVPN_RELEASE_TAG: tag,
+    NVPN_IOS_INTERNAL_ONLY: 'false',
   }
   // ios-build runs ios-profiles ensure (which needs ASC creds), then archive,
-  // then export, then Transporter upload. Output is TestFlight Internal — no
-  // download artifact ends up in dist/.
+  // then export, then Transporter upload. The full release build remains
+  // eligible for internal and external TestFlight plus App Store submission;
+  // standalone ios-build calls retain their internal-only default.
   run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-testflight'], { env, dryRun })
-  builtLines.push(`Uploaded iOS ${tag} to App Store Connect (TestFlight Internal).`)
+  builtLines.push(`Uploaded iOS ${tag} to App Store Connect (TestFlight/App Store eligible).`)
 }
 
 /**
@@ -1576,8 +1578,8 @@ function main() {
     ['android', () => buildAndroidArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
     ['linux', () => buildLinuxArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
     ['windows', () => buildWindowsArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
-    // Upload TestFlight Internal only after every downloadable platform
-    // artifact has built successfully, avoiding a partial candidate upload.
+    // Upload the TestFlight/App Store candidate only after every downloadable
+    // platform artifact has built successfully, avoiding a partial upload.
     ['ios', () => buildIosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
   ]
 

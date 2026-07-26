@@ -593,6 +593,10 @@ test('draft candidates are complete before the final TestFlight upload', () => {
   const stageStart = localRelease.indexOf('stageRelease({', stepsStart)
   const steps = localRelease.slice(stepsStart, stageStart)
   assert.ok(steps.indexOf("['windows'") < steps.indexOf("['ios'"))
+  assert.match(
+    localRelease,
+    /function buildIosArtifacts[\s\S]*NVPN_IOS_INTERNAL_ONLY:\s*'false'/,
+  )
 })
 
 test('Linux desktop package bundles nvpn CLI helper', () => {
