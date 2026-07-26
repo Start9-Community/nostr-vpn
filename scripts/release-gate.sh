@@ -180,6 +180,7 @@ prepare_release_cargo_config() {
     echo "NVPN_FIPS_REPO_PATH must be an exact Git checkout." >&2
     exit 2
   }
+  require_exact_release_fips_revision "$fips_head" || exit 2
   fips_tree="$(git -C "$fips_path" rev-parse 'HEAD^{tree}')" || exit 2
   [[ -z "$(git -C "$fips_path" status --porcelain --untracked-files=all)" ]] || {
     echo "Release gate refuses a dirty local FIPS checkout." >&2

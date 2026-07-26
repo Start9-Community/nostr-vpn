@@ -98,6 +98,129 @@ grep -Fq 'recovered stale local-FIPS workspace owner' "$TMP_ROOT/recovery.log"
 cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
 [[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_acquire_local_fips_lock "$APP_ROOT"
+    NVPN_LOCAL_FIPS_ROOT="$APP_ROOT"
+    owned_lock="$NVPN_LOCAL_FIPS_LOCK_DIR"
+    printf "%s\n" "different-owner" >"$owned_lock/token"
+    if nvpn_restore_local_fips_workspace; then
+      echo "local-FIPS cleanup accepted a changed ownership token" >&2
+      exit 1
+    fi
+    [[ -d "$owned_lock" ]]
+    command rm -rf "$owned_lock"
+  '
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_acquire_local_fips_lock "$APP_ROOT"
+    NVPN_LOCAL_FIPS_ROOT="$APP_ROOT"
+    owned_lock="$NVPN_LOCAL_FIPS_LOCK_DIR"
+    rm() {
+      if [[ "$1" == "-rf" && "${2:-}" == "$owned_lock" ]]; then
+        return 73
+      fi
+      command rm "$@"
+    }
+    if nvpn_restore_local_fips_workspace; then
+      echo "local-FIPS cleanup ignored lock removal failure" >&2
+      exit 1
+    fi
+    [[ -d "$owned_lock" ]]
+    unset -f rm
+    command rm -rf "$owned_lock"
+  '
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_acquire_local_fips_lock "$APP_ROOT"
+    NVPN_LOCAL_FIPS_ROOT="$APP_ROOT"
+    owned_lock="$NVPN_LOCAL_FIPS_LOCK_DIR"
+    command rm -rf "$owned_lock"
+    if nvpn_restore_local_fips_workspace; then
+      echo "local-FIPS cleanup accepted a missing owned lock" >&2
+      exit 1
+    fi
+  '
+
+env \
+  LIB="$LIB" FIPS_ROOT="$FIPS_ROOT" LOCK_ROOT="$LOCK_ROOT" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    NVPN_LOCAL_FIPS_LOCK_DIR="$LOCK_ROOT/wrapper-setup-failure"
+    original_path="$PATH"
+    mkdir() {
+      return 71
+    }
+    if nvpn_install_local_fips_cargo_wrapper "$FIPS_ROOT"; then
+      echo "local-FIPS wrapper setup ignored directory creation failure" >&2
+      exit 1
+    fi
+    [[ "$PATH" == "$original_path" ]]
+    [[ ! -e "$NVPN_LOCAL_FIPS_LOCK_DIR" ]]
+  '
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_install_local_fips_cargo_wrapper() {
+      return 72
+    }
+    if nvpn_prepare_local_fips_workspace "$APP_ROOT"; then
+      echo "local-FIPS prepare ignored wrapper setup failure" >&2
+      exit 1
+    fi
+    [[ -z "${NVPN_LOCAL_FIPS_PREPARED:-}" ]]
+    [[ -z "$(trap -p EXIT)" ]]
+    [[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+  '
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" MARKER="$TMP_ROOT/acquire-failure-installed" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_local_fips_file_sha256() {
+      return 74
+    }
+    nvpn_install_local_fips_cargo_wrapper() {
+      : >"$MARKER"
+    }
+    if nvpn_prepare_local_fips_workspace "$APP_ROOT"; then
+      echo "local-FIPS prepare ignored lock acquisition failure" >&2
+      exit 1
+    fi
+    [[ ! -e "$MARKER" ]]
+    [[ -z "${NVPN_LOCAL_FIPS_PREPARED:-}" ]]
+    [[ -z "$(trap -p EXIT)" ]]
+    [[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+  '
+
 real_cargo="$(command -v cargo)"
 manifest_sha="$(shasum -a 256 "$APP_ROOT/Cargo.toml" | awk '{print $1}')"
 lock_sha="$(shasum -a 256 "$APP_ROOT/Cargo.lock" | awk '{print $1}')"

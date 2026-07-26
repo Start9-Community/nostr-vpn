@@ -116,6 +116,23 @@ release_file_sha256() {
   shasum -a 256 "$1" | awk '{print tolower($1)}'
 }
 
+require_exact_release_fips_revision() {
+  local observed="$1"
+  local expected="${NVPN_EXPECTED_FIPS_GIT_SHA:-}"
+  [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Release gate requires an exact lowercase NVPN_EXPECTED_FIPS_GIT_SHA" >&2
+    return 1
+  }
+  [[ "$observed" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Release gate could not resolve an exact local FIPS revision" >&2
+    return 1
+  }
+  [[ "$observed" == "$expected" ]] || {
+    echo "Release gate local FIPS revision does not match NVPN_EXPECTED_FIPS_GIT_SHA" >&2
+    return 1
+  }
+}
+
 assert_release_checkout_state() {
   local root="$1" expected_head="$2" expected_tree="$3" label="$4"
   local status manifest_sha lock_sha unexpected

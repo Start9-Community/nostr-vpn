@@ -62,6 +62,22 @@ assert_eq "${NVPN_ASC_AUTH_KEY_PATH:-}" "$tmp_dir/asc/private_keys/AuthKey_TESTK
 assert_eq "${NVPN_ASC_AUTH_KEY_ID:-}" "TESTKEY123" "derives ASC key id"
 assert_eq "${NVPN_ASC_AUTH_KEY_ISSUER_ID:-}" "test-issuer-id" "loads ASC issuer id"
 
+fips_head=0123456789abcdef0123456789abcdef01234567
+unset NVPN_EXPECTED_FIPS_GIT_SHA
+if require_exact_release_fips_revision "$fips_head"; then
+  fail "accepted a missing release FIPS revision pin"
+fi
+export NVPN_EXPECTED_FIPS_GIT_SHA=fedcba9876543210fedcba9876543210fedcba98
+if require_exact_release_fips_revision "$fips_head"; then
+  fail "accepted the wrong release FIPS revision pin"
+fi
+export NVPN_EXPECTED_FIPS_GIT_SHA=0123456789ABCDEF0123456789ABCDEF01234567
+if require_exact_release_fips_revision "$fips_head"; then
+  fail "accepted a non-lowercase release FIPS revision pin"
+fi
+export NVPN_EXPECTED_FIPS_GIT_SHA="$fips_head"
+require_exact_release_fips_revision "$fips_head"
+
 mkdir -p "$tmp_dir/repo/ios"
 cat >"$tmp_dir/repo/Cargo.toml" <<'EOF'
 [workspace.package]
