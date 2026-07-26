@@ -205,9 +205,6 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     capture_network_snapshot_for_daemon().await,
                 );
                 let network_changed = latest_snapshot.changed_since(&network_snapshot);
-                if network_changed || resumed_after_sleep {
-                    captive_portal = detect_captive_portal(timeout).await;
-                }
                 let platform_network_event = std::mem::take(&mut platform_network_event_pending);
                 let runtime_listen_port =
                     tunnel_runtime.active_listen_port.unwrap_or(app.node.listen_port);
@@ -215,34 +212,10 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 let endpoint_changed = if network_changed {
                     network_snapshot = latest_snapshot.clone();
                     network_changed_at = Some(unix_timestamp());
-                    if vpn_active {
-                        refresh_port_mapping(
-                            &app,
-                            &network_snapshot,
-                            runtime_listen_port,
-                            &mut port_mapping_runtime,
-                        )
-                        .await;
-                        true
-                    } else {
-                        port_mapping_runtime.stop().await;
-                        false
-                    }
+                    vpn_active
                 } else if resumed_after_sleep {
                     network_changed_at = Some(now);
-                    if vpn_active {
-                        refresh_port_mapping(
-                            &app,
-                            &network_snapshot,
-                            runtime_listen_port,
-                            &mut port_mapping_runtime,
-                        )
-                        .await;
-                        true
-                    } else {
-                        port_mapping_runtime.stop().await;
-                        false
-                    }
+                    vpn_active
                 } else if vpn_active {
                     match port_mapping_runtime
                         .renew_if_due(&network_snapshot, runtime_listen_port, timeout)
@@ -401,6 +374,24 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         && let Err(error) = broadcast_local_fips_capabilities(runtime, &app).await
                     {
                         eprintln!("fips: capabilities broadcast failed after network refresh: {error}");
+                    }
+                    if network_changed || resumed_after_sleep {
+                        // Carrier rebinding is the outage-critical operation. NAT
+                        // discovery and captive-portal probes can each consume the
+                        // full network timeout, so run them only after FIPS is
+                        // already moving traffic on the replacement underlay.
+                        if vpn_active {
+                            refresh_port_mapping(
+                                &app,
+                                &network_snapshot,
+                                runtime_listen_port,
+                                &mut port_mapping_runtime,
+                            )
+                            .await;
+                        } else {
+                            port_mapping_runtime.stop().await;
+                        }
+                        captive_portal = detect_captive_portal(timeout).await;
                     }
                 }
             }
