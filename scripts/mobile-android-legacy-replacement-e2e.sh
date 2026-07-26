@@ -123,6 +123,19 @@ tap_ui() {
   return 1
 }
 
+wait_for_ui() {
+  local selector_type="$1" selector="$2" deadline xml
+  xml="$work_dir/ui.xml"
+  deadline=$((SECONDS + WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if dump_ui "$xml" && ui_point "$xml" "$selector_type" "$selector" >/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 tap_system_uninstall() {
   local deadline point xml option
   xml="$work_dir/ui.xml"
@@ -181,34 +194,41 @@ build_retired_fixture_apks() {
 
 install_retired_fixture_apks() {
   local package output_name
+  local -a fixture_apks=()
   for package in "${RETIRED_PACKAGES[@]}"; do
     output_name="${package//./_}.apk"
-    "$ADB" -s "$serial" install -r "$work_dir/$output_name" >/dev/null
+    fixture_apks+=("$work_dir/$output_name")
+  done
+  "$ADB" -s "$serial" install-multi-package -r "${fixture_apks[@]}" >/dev/null
+  for package in "${RETIRED_PACKAGES[@]}"; do
     package_installed "$package" \
       || { echo "Retired Android fixture package was not installed: $package" >&2; return 1; }
   done
 }
 
 assert_canonical_update_preserved_data() {
-  local actual marker="canonical-update-$RANDOM-$$"
   "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" mkdir -p files
   "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
-    sh -c "echo $marker > files/nvpn-replacement-marker"
+    touch files/nvpn-replacement-marker
   "$ADB" -s "$serial" install -r "$work_dir/canonical.apk" >/dev/null
-  actual="$("$ADB" -s "$serial" exec-out run-as "$CANONICAL_PACKAGE" \
-    cat files/nvpn-replacement-marker | tr -d '\r\n')"
+  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
+    test -f files/nvpn-replacement-marker
   "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
     rm -f files/nvpn-replacement-marker
-  [[ "$actual" == "$marker" ]]
 }
 
 assert_vpn_start_blocked() {
-  local service_component="$CANONICAL_PACKAGE/org.nostrvpn.app.vpn.NostrVpnService"
+  local android_user service_component
+  android_user="$("$ADB" -s "$serial" shell am get-current-user | tr -d '\r')"
+  [[ "$android_user" =~ ^[0-9]+$ ]] || return 1
+  service_component="$CANONICAL_PACKAGE/org.nostrvpn.app.vpn.NostrVpnService"
   "$ADB" -s "$serial" logcat -v brief -s NostrVpnService:E '*:S' \
     >"$work_dir/vpn-start-guard.log" &
   logcat_pid="$!"
   sleep 0.25
-  if ! "$ADB" -s "$serial" shell am start-foreground-service \
+  if ! "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
+    am start-foreground-service \
+    --user "$android_user" \
     -n "$service_component" \
     -a fi.siriusbusiness.nvpn.vpn.CONNECT \
     --es configJson '{}' >/dev/null
@@ -268,11 +288,17 @@ build_retired_fixture_apks
 install_retired_fixture_apks
 assert_no_retired_processes \
   || { echo "A retired nVPN process started before migration" >&2; exit 1; }
-assert_vpn_start_blocked \
-  || { echo "Canonical Android VPN service started before retired apps were removed" >&2; exit 1; }
-
 "$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE"
 "$ADB" -s "$serial" shell monkey -p "$CANONICAL_PACKAGE" 1 >/dev/null
+wait_for_ui description "Remove older Nostr VPN installation" \
+  || { echo "Canonical Android migration prompt did not reach the foreground" >&2; exit 1; }
+assert_vpn_start_blocked \
+  || { echo "Canonical Android VPN service started before retired apps were removed" >&2; exit 1; }
+"$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE"
+"$ADB" -s "$serial" shell monkey -p "$CANONICAL_PACKAGE" 1 >/dev/null
+wait_for_ui description "Remove older Nostr VPN installation" \
+  || { echo "Canonical Android migration prompt did not recover after guarded VPN start" >&2; exit 1; }
+
 for package in "${RETIRED_PACKAGES[@]}"; do
   tap_ui description "Remove older Nostr VPN installation" \
     || {

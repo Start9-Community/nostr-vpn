@@ -18,10 +18,18 @@ for contract in \
   'fi.siriusbusiness.nvpn.debug' \
   'fi.siriusbusiness.nvpn.test' \
   'build_retired_fixture_apks' \
+  'install-multi-package -r' \
   'gradle :app:assembleDebug -x buildRustArm64' \
   '"$ADB" -s "$serial" install -r "$work_dir/canonical.apk"' \
   'assert_canonical_update_preserved_data' \
+  'touch files/nvpn-replacement-marker' \
+  'test -f files/nvpn-replacement-marker' \
   'assert_vpn_start_blocked' \
+  'am get-current-user' \
+  'shell run-as "$CANONICAL_PACKAGE"' \
+  '--user "$android_user"' \
+  'wait_for_ui description "Remove older Nostr VPN installation"' \
+  'Canonical Android migration prompt did not recover after guarded VPN start' \
   'assert_no_retired_processes' \
   'tap_ui description "Remove older Nostr VPN installation"' \
   'tap_system_uninstall' \
@@ -29,9 +37,14 @@ for contract in \
   '"vpnStartBlockedBeforeCleanup": True' \
   '"systemUninstallConfirmed": True'
 do
-  grep -Fq "$contract" "$gate" \
+  grep -Fq -- "$contract" "$gate" \
     || { echo "Android legacy replacement gate is missing: $contract" >&2; exit 1; }
 done
+
+if grep -Eq 'sh -c .*nvpn-replacement-marker' "$gate"; then
+  echo "Android upgrade marker still relies on ADB shell redirection quoting" >&2
+  exit 1
+fi
 
 grep -Fq 'id = "remove-legacy-app"' "$activity" \
   || { echo "Android shipped UI has no legacy-removal selector" >&2; exit 1; }
