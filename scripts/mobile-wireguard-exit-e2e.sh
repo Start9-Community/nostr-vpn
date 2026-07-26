@@ -19,6 +19,7 @@ source "$ROOT/scripts/lib-mobile-ios-hotspot.sh"
 load_release_env "$ROOT"
 load_appstoreconnect_defaults
 load_mobile_env "$ROOT"
+resolve_shared_build_metadata "$ROOT"
 IMAGE="${NVPN_MOBILE_WG_EXIT_IMAGE:-nostr-vpn-mobile-wireguard-exit-e2e}"
 CONTAINER="${NVPN_MOBILE_WG_EXIT_CONTAINER:-nostr-vpn-mobile-wireguard-exit-e2e}"
 HOST_PORT="${NVPN_MOBILE_WG_EXIT_HOST_PORT:-51886}"

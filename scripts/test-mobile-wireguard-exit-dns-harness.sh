@@ -44,6 +44,9 @@ server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
 fixture_lib="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
 
+grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
+  || { echo "standalone mobile gate does not initialize exact build metadata" >&2; exit 1; }
+
 # shellcheck disable=SC1090
 source "$fixture_lib"
 declare -F mobile_wg_endpoint_fields >/dev/null \
