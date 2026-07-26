@@ -132,13 +132,15 @@ if "waitForPendingQrDismissal" in ios_test:
 ios_roster_transition = ios_test.split(
     "private func waitForRosterBackedPendingQrDismissal", 1
 )[1].split("private func allowCameraAccessIfNeeded", 1)[0]
-for forbidden in (".waitForExistence", "waitUntil("):
+for forbidden in (".waitForExistence", "waitUntil(", "openDevicesTab()"):
     if forbidden in ios_roster_transition:
         raise SystemExit(
             "Release QR XCTest waits for roster state after the QR disappeared"
         )
 for required in (
-    'guard app.tabBars.buttons["Devices"].exists else {',
+    'let devicesTab = app.tabBars.buttons["Devices"]',
+    "guard devicesTab.exists else {",
+    "devicesTab.tap()",
     'guard element("roster-participant-\\(expectedParticipant)").exists else {',
     "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS",
 ):

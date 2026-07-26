@@ -329,10 +329,11 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             if qr.exists {
                 emit("NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS=\(millisecondsSinceEpoch())")
             } else {
-                guard app.tabBars.buttons["Devices"].exists else {
+                let devicesTab = app.tabBars.buttons["Devices"]
+                guard devicesTab.exists else {
                     return false
                 }
-                openDevicesTab()
+                devicesTab.tap()
                 guard element("roster-participant-\(expectedParticipant)").exists else {
                     return false
                 }
