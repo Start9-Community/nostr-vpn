@@ -3,6 +3,17 @@
 # Exact artifact preparation and installation for the physical Release join
 # gate. Callers provide ROOT, RESULT_DIR, IOS_DEVICE, ANDROID_SERIAL and ADB.
 
+RELEASE_JOIN_ARTIFACTS_VALIDATED=0
+RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=0
+RELEASE_JOIN_DEVICE_MUTATED=0
+
+release_join_reuse_artifacts() {
+  case "${NVPN_RELEASE_JOIN_REUSE_ARTIFACTS:-0}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 release_join_sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
@@ -108,7 +119,7 @@ release_join_require_clean_fips() {
   }
   RELEASE_JOIN_FIPS_SHA="$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse HEAD)"
   RELEASE_JOIN_FIPS_TREE="$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse HEAD^{tree})"
-  [[ -z "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain)" ]] || {
+  [[ -z "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain --untracked-files=all)" ]] || {
     echo "Release join gate refuses a dirty FIPS checkout" >&2
     return 1
   }
@@ -116,14 +127,45 @@ release_join_require_clean_fips() {
     echo "Release join FIPS mismatch: expected $NVPN_EXPECTED_FIPS_GIT_SHA, got $RELEASE_JOIN_FIPS_SHA" >&2
     return 1
   fi
+  RELEASE_JOIN_FIPS_VERSION="$(
+    awk '
+      $0 == "[package]" { package = 1; next }
+      package && /^\[/ { exit }
+      package && /^version = "/ {
+        value = $0
+        sub(/^version = "/, "", value)
+        sub(/".*$/, "", value)
+        print value
+        exit
+      }
+    ' "$NVPN_FIPS_REPO_PATH/crates/fips-core/Cargo.toml"
+  )"
+  [[ "$RELEASE_JOIN_FIPS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+    echo "Release join gate could not derive the exact FIPS package version" >&2
+    return 1
+  }
   export RELEASE_JOIN_FIPS_SHA RELEASE_JOIN_FIPS_TREE
+  export RELEASE_JOIN_FIPS_VERSION
 }
 
 release_join_assert_fips_unchanged() {
   [[ "$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \
     && "$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse HEAD^{tree})" == "$RELEASE_JOIN_FIPS_TREE" \
-    && -z "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain)" ]] || {
+    && -z "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain --untracked-files=all)" ]] || {
     echo "FIPS source changed while building Release join artifacts" >&2
+    return 1
+  }
+}
+
+release_join_require_device_mutation_allowed() {
+  if release_join_reuse_artifacts \
+    && [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -ne 1 ]]
+  then
+    echo "Strict Release join artifacts were not validated before device mutation" >&2
+    return 1
+  fi
+  [[ "$RELEASE_JOIN_DEVICE_MUTATION_ALLOWED" -eq 1 ]] || {
+    echo "Release join device mutation was not armed" >&2
     return 1
   }
 }
@@ -177,6 +219,7 @@ release_join_assert_one_android_process() {
 
 release_join_reset_android_state() {
   local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+  release_join_require_device_mutation_allowed || return 1
   [[ "${NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET:-}" == "YES" ]] || {
     echo "Set NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET=YES for destructive physical join coverage" >&2
     return 1
@@ -192,57 +235,71 @@ release_join_prepare_android_release() {
   local apksigner remote_path pulled apk_sha installed_sha cert_sha cert_sha_lower app_sha app_tree
   local expected_android_cert="${NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256:-}"
   local preexisting_package=false
-  for name in ANDROID_KEYSTORE_PATH ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-    [[ -n "${!name:-}" ]] || {
-      echo "Release join gate requires $name" >&2
+  if release_join_reuse_artifacts; then
+    [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -eq 1 \
+      && -f "$RELEASE_JOIN_ANDROID_APK" ]] || {
+      echo "Strict Android Release artifact was not prevalidated" >&2
       return 1
     }
-  done
-  [[ -f "$ANDROID_KEYSTORE_PATH" ]] || {
-    echo "Android release keystore does not exist" >&2
-    return 1
-  }
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  app_tree="$(git -C "$ROOT" write-tree)"
-  NVPN_IOS_RUST_PROFILE=release \
-    NVPN_BUILD_GIT_SHA="$app_sha" \
-    NVPN_FIPS_REPO_PATH="$NVPN_FIPS_REPO_PATH" \
-    NVPN_ANDROID_PACKAGE="$package" \
-    "$ROOT/tools/run-android" release
-  [[ -f "$apk" ]] || {
-    echo "Android Release APK was not built" >&2
-    return 1
-  }
-  apksigner="$(release_join_android_apksigner)"
-  [[ -x "$apksigner" ]] || {
-    echo "Android apksigner is unavailable" >&2
-    return 1
-  }
-  "$apksigner" verify "$apk" >/dev/null
-  cert_sha="$(
-    "$apksigner" verify --print-certs "$apk" \
-      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
-      | head -n 1
-  )"
-  [[ "$cert_sha" =~ ^[0-9A-Fa-f]{64}$ ]] || {
-    echo "Android Release APK has no signer certificate receipt" >&2
-    return 1
-  }
-  cert_sha_lower="$(printf '%s' "$cert_sha" | tr '[:upper:]' '[:lower:]')"
-  expected_android_cert="$(
-    printf '%s' "$expected_android_cert" \
-      | tr -d ':[:space:]' \
-      | tr '[:upper:]' '[:lower:]'
-  )"
-  [[ "$expected_android_cert" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "Release join gate requires NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256" >&2
-    return 1
-  }
-  [[ "$cert_sha_lower" == "$expected_android_cert" ]] || {
-    echo "Android Release APK was not signed by the expected company key" >&2
-    return 1
-  }
+    apk="$RELEASE_JOIN_ANDROID_APK"
+    app_sha="$RELEASE_JOIN_APP_SHA"
+    app_tree="$RELEASE_JOIN_APP_TREE"
+    cert_sha_lower="$RELEASE_JOIN_ANDROID_SIGNER_SHA"
+  else
+    for name in ANDROID_KEYSTORE_PATH ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+      [[ -n "${!name:-}" ]] || {
+        echo "Release join gate requires $name" >&2
+        return 1
+      }
+    done
+    [[ -f "$ANDROID_KEYSTORE_PATH" ]] || {
+      echo "Android release keystore does not exist" >&2
+      return 1
+    }
+    app_sha="$(git -C "$ROOT" rev-parse HEAD)"
+    app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+    NVPN_IOS_RUST_PROFILE=release \
+      NVPN_BUILD_GIT_SHA="$app_sha" \
+      NVPN_FIPS_REPO_PATH="$NVPN_FIPS_REPO_PATH" \
+      NVPN_ANDROID_PACKAGE="$package" \
+      "$ROOT/tools/run-android" release
+    [[ -f "$apk" ]] || {
+      echo "Android Release APK was not built" >&2
+      return 1
+    }
+    apksigner="$(release_join_android_apksigner)"
+    [[ -x "$apksigner" ]] || {
+      echo "Android apksigner is unavailable" >&2
+      return 1
+    }
+    "$apksigner" verify "$apk" >/dev/null
+    cert_sha="$(
+      "$apksigner" verify --print-certs "$apk" \
+        | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+        | head -n 1
+    )"
+    [[ "$cert_sha" =~ ^[0-9A-Fa-f]{64}$ ]] || {
+      echo "Android Release APK has no signer certificate receipt" >&2
+      return 1
+    }
+    cert_sha_lower="$(printf '%s' "$cert_sha" | tr '[:upper:]' '[:lower:]')"
+    expected_android_cert="$(
+      printf '%s' "$expected_android_cert" \
+        | tr -d ':[:space:]' \
+        | tr '[:upper:]' '[:lower:]'
+    )"
+    [[ "$expected_android_cert" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "Release join gate requires NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256" >&2
+      return 1
+    }
+    [[ "$cert_sha_lower" == "$expected_android_cert" ]] || {
+      echo "Android Release APK was not signed by the expected company key" >&2
+      return 1
+    }
+  fi
 
+  release_join_require_device_mutation_allowed || return 1
+  RELEASE_JOIN_DEVICE_MUTATED=1
   if "${ADB[@]}" shell pm path "$package" >/dev/null 2>&1; then
     preexisting_package=true
   fi
@@ -384,6 +441,92 @@ release_join_prepare_ios_profiles() {
   : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?Ad Hoc tunnel profile missing}"
 }
 
+release_join_install_ios_release() {
+  local app_path="$1" app_sha="$2" app_tree="$3" manifest_sha="$4"
+  local team_hash="$5" app_cert="$6" derived="$7" udid="$8"
+  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+  local installed_json="$RESULT_DIR/ios-installed-apps.json"
+  local installed_receipt="$RESULT_DIR/ios-release-install.json"
+  release_join_require_device_mutation_allowed || return 1
+  RELEASE_JOIN_DEVICE_MUTATED=1
+  xcrun devicectl device uninstall app \
+    --device "$IOS_DEVICE" "$bundle" --quiet >/dev/null 2>&1 || true
+  xcrun devicectl device install app \
+    --device "$IOS_DEVICE" "$app_path" --quiet
+  xcrun devicectl device info apps \
+    --device "$IOS_DEVICE" \
+    --json-output "$installed_json" \
+    --quiet
+  python3 - \
+    "$installed_json" "$installed_receipt" "$bundle" "$manifest_sha" \
+    "$app_sha" "$app_tree" "$RELEASE_JOIN_FIPS_SHA" \
+    "$RELEASE_JOIN_FIPS_TREE" "$RELEASE_JOIN_FIPS_VERSION" \
+    "$team_hash" "$app_cert" <<'PY'
+import json
+import sys
+
+(
+    source,
+    output,
+    bundle,
+    manifest,
+    app,
+    app_tree,
+    fips,
+    fips_tree,
+    fips_version,
+    team_hash,
+    cert,
+) = sys.argv[1:]
+payload = json.load(open(source, encoding="utf-8"))
+matches = []
+
+
+def visit(value):
+    if isinstance(value, dict):
+        if value.get("bundleIdentifier") == bundle:
+            matches.append(value)
+        for child in value.values():
+            visit(child)
+    elif isinstance(value, list):
+        for child in value:
+            visit(child)
+
+
+visit(payload)
+if len(matches) != 1:
+    raise SystemExit(f"expected one installed iOS app for {bundle}, found {len(matches)}")
+item = matches[0]
+receipt = {
+    "artifact": "iOS Ad Hoc Release app",
+    "bundleIdentifier": bundle,
+    "bundleManifestSha256": manifest,
+    "installedVersion": item.get("version") or item.get("bundleVersion") or "",
+    "installedShortVersion": item.get("shortVersion") or item.get("bundleShortVersion") or "",
+    "appGitSha": app,
+    "appGitTree": app_tree,
+    "fipsGitSha": fips,
+    "fipsGitTree": fips_tree,
+    "fipsCoreVersion": fips_version,
+    "signingTeamSha256": team_hash,
+    "signerCertificateSha256": cert,
+    "appAndPacketTunnelSignerMatch": True,
+    "distribution": "Ad Hoc",
+    "configuration": "Release",
+    "debugAutomation": False,
+    "installedBundleCount": 1,
+}
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(receipt, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+  RELEASE_JOIN_IOS_DERIVED_DATA="$derived"
+  RELEASE_JOIN_IOS_APP_PATH="$app_path"
+  RELEASE_JOIN_IOS_UDID="$udid"
+  export RELEASE_JOIN_IOS_DERIVED_DATA RELEASE_JOIN_IOS_APP_PATH
+  export RELEASE_JOIN_IOS_UDID
+}
+
 release_join_prepare_ios_release() {
   local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
   local tunnel="$bundle.PacketTunnel"
@@ -394,7 +537,29 @@ release_join_prepare_ios_release() {
   local udid app_path app_binary tunnel_app tunnel_binary profile_plist tunnel_profile_plist
   local app_signed_team tunnel_signed_team app_cert tunnel_cert team_hash
   local derived="$RESULT_DIR/ios-derived-data"
-  local app_sha app_tree manifest_sha installed_json installed_receipt
+  local app_sha app_tree manifest_sha
+  if release_join_reuse_artifacts; then
+    [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -eq 1 \
+      && -d "$RELEASE_JOIN_IOS_APP_PATH" \
+      && -d "$RELEASE_JOIN_IOS_DERIVED_DATA" \
+      && -s "$RELEASE_JOIN_IOS_XCTESTRUN" ]] || {
+      echo "Strict iOS Release artifact was not prevalidated" >&2
+      return 1
+    }
+    team_hash="$(
+      printf '%s' "$expected_team" | shasum -a 256 | awk '{print $1}'
+    )"
+    release_join_install_ios_release \
+      "$RELEASE_JOIN_IOS_APP_PATH" \
+      "$RELEASE_JOIN_APP_SHA" \
+      "$RELEASE_JOIN_APP_TREE" \
+      "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
+      "$team_hash" \
+      "$RELEASE_JOIN_IOS_APP_CERT" \
+      "$RELEASE_JOIN_IOS_DERIVED_DATA" \
+      "$RELEASE_JOIN_IOS_UDID"
+    return
+  fi
   [[ -n "$expected_team" && "$team" == "$expected_team" ]] || {
     echo "NVPN_IOS_TEAM_ID is not the explicitly expected company distribution team" >&2
     return 1
@@ -411,7 +576,7 @@ release_join_prepare_ios_release() {
   udid="$(resolve_physical_ios_udid "$IOS_DEVICE")"
   release_join_prepare_ios_profiles "$udid"
   app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  app_tree="$(git -C "$ROOT" write-tree)"
+  app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
 
   export NVPN_IOS_BUNDLE_ID="$bundle"
   export NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID="$tunnel"
@@ -487,72 +652,14 @@ release_join_prepare_ios_release() {
   )"
   release_join_assert_fips_unchanged
   release_join_assert_app_unchanged "$app_sha" "$app_tree"
-
-  xcrun devicectl device uninstall app \
-    --device "$IOS_DEVICE" "$bundle" --quiet >/dev/null 2>&1 || true
-  xcrun devicectl device install app \
-    --device "$IOS_DEVICE" "$app_path" --quiet
-  installed_json="$RESULT_DIR/ios-installed-apps.json"
-  xcrun devicectl device info apps \
-    --device "$IOS_DEVICE" \
-    --json-output "$installed_json" \
-    --quiet
-  installed_receipt="$RESULT_DIR/ios-release-install.json"
-  python3 - \
-    "$installed_json" "$installed_receipt" "$bundle" "$manifest_sha" \
-    "$app_sha" "$app_tree" "$RELEASE_JOIN_FIPS_SHA" \
-    "$RELEASE_JOIN_FIPS_TREE" "$team_hash" "$app_cert" <<'PY'
-import json
-import sys
-
-source, output, bundle, manifest, app, app_tree, fips, fips_tree, team_hash, cert = sys.argv[1:]
-payload = json.load(open(source, encoding="utf-8"))
-matches = []
-
-def visit(value):
-    if isinstance(value, dict):
-        if value.get("bundleIdentifier") == bundle:
-            matches.append(value)
-        for child in value.values():
-            visit(child)
-    elif isinstance(value, list):
-        for child in value:
-            visit(child)
-
-visit(payload)
-if len(matches) != 1:
-    raise SystemExit(f"expected one installed iOS app for {bundle}, found {len(matches)}")
-item = matches[0]
-receipt = {
-    "artifact": "iOS Ad Hoc Release app",
-    "bundleIdentifier": bundle,
-    "bundleManifestSha256": manifest,
-    "installedVersion": item.get("version") or item.get("bundleVersion") or "",
-    "installedShortVersion": item.get("shortVersion") or item.get("bundleShortVersion") or "",
-    "appGitSha": app,
-    "appGitTree": app_tree,
-    "fipsGitSha": fips,
-    "fipsGitTree": fips_tree,
-    "signingTeamSha256": team_hash,
-    "signerCertificateSha256": cert,
-    "appAndPacketTunnelSignerMatch": True,
-    "distribution": "Ad Hoc",
-    "configuration": "Release",
-    "debugAutomation": False,
-    "installedBundleCount": 1,
-}
-with open(output, "w", encoding="utf-8") as handle:
-    json.dump(receipt, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-PY
-  RELEASE_JOIN_IOS_DERIVED_DATA="$derived"
-  RELEASE_JOIN_IOS_APP_PATH="$app_path"
-  RELEASE_JOIN_IOS_UDID="$udid"
-  export RELEASE_JOIN_IOS_DERIVED_DATA RELEASE_JOIN_IOS_APP_PATH RELEASE_JOIN_IOS_UDID
+  release_join_install_ios_release \
+    "$app_path" "$app_sha" "$app_tree" "$manifest_sha" \
+    "$team_hash" "$app_cert" "$derived" "$udid"
 }
 
 release_join_reset_ios_state() {
   local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+  release_join_require_device_mutation_allowed || return 1
   [[ "${NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET:-}" == "YES" ]] || {
     echo "Set NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET=YES for destructive physical join coverage" >&2
     return 1
@@ -561,6 +668,7 @@ release_join_reset_ios_state() {
     echo "Exact iOS Release artifact is unavailable for a clean reinstall" >&2
     return 1
   }
+  RELEASE_JOIN_DEVICE_MUTATED=1
   xcrun devicectl device uninstall app \
     --device "$IOS_DEVICE" "$bundle" --quiet >/dev/null 2>&1 || true
   xcrun devicectl device install app \

@@ -261,7 +261,9 @@ import sys
     app_sha,
     tunnel_sha,
     tree_sha,
+    test_products_tree_sha,
     app_git_sha,
+    app_git_tree,
     fips_git_sha,
     app_info_path,
     installed_apps_path,
@@ -273,6 +275,8 @@ import sys
     fips_tree,
     fips_version,
     fips_metadata_sha,
+    fips_metadata_path_sha,
+    fips_checkout_path_sha,
     signer_sha,
 ) = sys.argv[1:]
 app_info = plistlib.load(open(app_info_path, "rb"))
@@ -310,15 +314,29 @@ if str(installed_app.get("bundleVersion")) != str(
 selected_device = json.load(
     open(selected_device_receipt_path, encoding="utf-8")
 )
+device_identifier_sha = selected_device.get("deviceIdentifierSha256")
+if not isinstance(device_identifier_sha, str) or len(device_identifier_sha) != 64:
+    raise SystemExit("selected iOS device receipt has no identifier hash")
+test_products_path = os.path.join(derived_data_path, "Build", "Products")
+app_profile_path = os.path.join(app_path, "embedded.mobileprovision")
+tunnel_profile_path = os.path.join(
+    app_path,
+    "PlugIns",
+    "Nostr VPN Tunnel.appex",
+    "embedded.mobileprovision",
+)
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
         {
+            "receiptSchema": 2,
             "appCodeDirectoryHash": app_cdhash,
             "appExecutableSha256": app_sha,
             "appGitSha": app_git_sha,
+            "appGitTree": app_git_tree,
             "appPathSha256": hashlib.sha256(
                 os.path.realpath(app_path).encode()
             ).hexdigest(),
+            "appBundleTreeSha256": tree_sha,
             "artifactType": "iOS company Ad Hoc Release app",
             "cashuAndPaidExitCompiled": False,
             "paidExitWalletWorkerCompiled": False,
@@ -327,9 +345,15 @@ with open(path, "w", encoding="utf-8") as handle:
             "derivedDataPathSha256": hashlib.sha256(
                 os.path.realpath(derived_data_path).encode()
             ).hexdigest(),
+            "testProductsPathSha256": hashlib.sha256(
+                os.path.realpath(test_products_path).encode()
+            ).hexdigest(),
+            "testProductsTreeSha256": test_products_tree_sha,
             "fipsGitSha": fips_git_sha,
             "fipsGitTree": fips_tree,
             "fipsCoreVersion": fips_version,
+            "fipsCheckoutPathSha256": fips_checkout_path_sha,
+            "fipsCargoMetadataReceiptPathSha256": fips_metadata_path_sha,
             "fipsCargoMetadataReceiptSha256": fips_metadata_sha,
             "fipsDependenciesForcedRebuilt": True,
             "packetTunnelCodeDirectoryHash": tunnel_cdhash,
@@ -337,9 +361,19 @@ with open(path, "w", encoding="utf-8") as handle:
             "companySigningVerified": True,
             "signerCertificateSha256": signer_sha,
             "selectedPhysicalDevice": selected_device,
+            "selectedPhysicalDeviceIdentifierSha256": device_identifier_sha,
             "treeSha256": tree_sha,
             "xctestrunPathSha256": hashlib.sha256(
                 os.path.realpath(xctestrun_path).encode()
+            ).hexdigest(),
+            "xctestrunSha256": hashlib.sha256(
+                open(xctestrun_path, "rb").read()
+            ).hexdigest(),
+            "appProvisioningProfileSha256": hashlib.sha256(
+                open(app_profile_path, "rb").read()
+            ).hexdigest(),
+            "packetTunnelProvisioningProfileSha256": hashlib.sha256(
+                open(tunnel_profile_path, "rb").read()
             ).hexdigest(),
             "installedBundleIdentifier": expected_bundle_id,
             "installedBuildNumber": str(installed_app["bundleVersion"]),
@@ -534,6 +568,7 @@ PY
   }
 
   local app_cdhash tunnel_cdhash app_sha tunnel_sha tree_sha
+  local test_products_tree_sha
   app_cdhash="$(sed -n 's/^CDHash=//p' "$app_details" | head -n 1)"
   tunnel_cdhash="$(sed -n 's/^CDHash=//p' "$tunnel_details" | head -n 1)"
   [[ "$app_cdhash" =~ ^[0-9a-fA-F]+$ \
@@ -549,14 +584,22 @@ PY
     echo "iOS DNS cases did not test one exact Release app artifact" >&2
     return 1
   fi
+  if [[ -n "$IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA" ]]; then
+    test_products_tree_sha="$IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA"
+  elif ! test_products_tree_sha="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+      tree-sha "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products"
+  )"
+  then
+    rm -rf "$audit_dir"
+    echo "iOS Release test-products hashing failed" >&2
+    return 1
+  fi
   if ! app_sha="$(shasum -a 256 "$executable" | awk '{print $1}')" \
     || ! tunnel_sha="$(shasum -a 256 "$tunnel_executable" | awk '{print $1}')" \
     || ! tree_sha="$(
-    find "$app" -type f -print \
-      | sort \
-      | while IFS= read -r file; do shasum -a 256 "$file"; done \
-      | shasum -a 256 \
-      | awk '{print $1}'
+      python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+        tree-sha "$app"
     )"
   then
     rm -rf "$audit_dir"
@@ -565,7 +608,8 @@ PY
   fi
   [[ "$app_sha" =~ ^[0-9a-f]{64}$ \
     && "$tunnel_sha" =~ ^[0-9a-f]{64}$ \
-    && "$tree_sha" =~ ^[0-9a-f]{64}$ ]] || {
+    && "$tree_sha" =~ ^[0-9a-f]{64}$ \
+    && "$test_products_tree_sha" =~ ^[0-9a-f]{64}$ ]] || {
     rm -rf "$audit_dir"
     echo "iOS Release artifact hashing produced an invalid receipt" >&2
     return 1
@@ -579,8 +623,10 @@ PY
   fi
   IOS_RELEASE_NETWORK_BASE_CDHASH="$app_cdhash"
   IOS_RELEASE_NETWORK_BASE_TREE_SHA="$tree_sha"
+  IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA="$test_products_tree_sha"
   receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$result_dir/mobile-ios-release-artifact.json}"
-  local fips_metadata_receipt fips_metadata_sha
+  local fips_metadata_receipt fips_metadata_sha fips_metadata_path_sha
+  local fips_checkout_path_sha
   fips_metadata_receipt="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-ios/fips-linkage.json}"
   if ! fips_metadata_sha="$(
     shasum -a 256 "$fips_metadata_receipt" | awk '{print $1}'
@@ -590,15 +636,27 @@ PY
     echo "iOS Release FIPS metadata receipt hashing failed" >&2
     return 1
   fi
+  fips_metadata_path_sha="$(
+    python3 -c \
+      'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
+      "$fips_metadata_receipt"
+  )"
+  fips_checkout_path_sha="$(
+    python3 -c \
+      'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
+      "$NVPN_FIPS_REPO_PATH"
+  )"
   mkdir -p "$(dirname "$receipt")"
   if ! ios_release_network_write_artifact_receipt \
     "$receipt" "$app_cdhash" "$tunnel_cdhash" "$app_sha" \
-    "$tunnel_sha" "$tree_sha" "$NVPN_BUILD_GIT_SHA" \
+    "$tunnel_sha" "$tree_sha" "$test_products_tree_sha" \
+    "$IOS_RELEASE_NETWORK_APP_HEAD" "$IOS_RELEASE_NETWORK_APP_TREE" \
     "$NVPN_EXPECTED_FIPS_GIT_SHA" "$app/Info.plist" \
     "$installed_apps" "$IOS_BUNDLE_ID" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" "$app" \
     "$IOS_RELEASE_NETWORK_DERIVED_DATA" "$IOS_RELEASE_NETWORK_XCTESTRUN" \
     "$IOS_RELEASE_NETWORK_FIPS_TREE" "$NVPN_EXPECTED_FIPS_VERSION" \
-    "$fips_metadata_sha" "$signer_sha"
+    "$fips_metadata_sha" "$fips_metadata_path_sha" \
+    "$fips_checkout_path_sha" "$signer_sha"
   then
     rm -f "$receipt"
     rm -rf "$audit_dir"

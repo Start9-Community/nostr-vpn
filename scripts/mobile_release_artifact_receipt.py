@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Hash and validate immutable mobile Release artifact receipts."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import plistlib
+import stat
+import sys
+from typing import Any
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def path_sha256(path: pathlib.Path) -> str:
+    return sha256_bytes(os.path.realpath(path).encode())
+
+
+def symlink_entry(
+    path: pathlib.Path, root: pathlib.Path, metadata: os.stat_result
+) -> dict[str, Any]:
+    target = os.readlink(path)
+    resolved = (path.parent / target).resolve(strict=False)
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as error:
+        raise ValueError(f"artifact symlink escapes its tree: {path}") from error
+    return {
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "path": path.relative_to(root).as_posix(),
+        "target": target,
+        "type": "symlink",
+    }
+
+
+def tree_sha256(root: pathlib.Path) -> str:
+    if not root.is_dir():
+        raise ValueError(f"tree root is not a directory: {root}")
+    entries: list[dict[str, Any]] = []
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = pathlib.Path(current)
+        directories.sort()
+        files.sort()
+        retained_directories: list[str] = []
+        for name in directories:
+            path = current_path / name
+            if path.is_symlink():
+                metadata = path.lstat()
+                entries.append(symlink_entry(path, root, metadata))
+            else:
+                retained_directories.append(name)
+        directories[:] = retained_directories
+        for name in files:
+            path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            metadata = path.lstat()
+            if path.is_symlink():
+                entries.append(symlink_entry(path, root, metadata))
+                continue
+            if not path.is_file():
+                raise ValueError(f"unsupported artifact tree entry: {path}")
+            entries.append(
+                {
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                    "path": relative,
+                    "sha256": sha256_file(path),
+                    "size": metadata.st_size,
+                    "type": "file",
+                }
+            )
+    canonical = json.dumps(
+        entries, separators=(",", ":"), sort_keys=True
+    ).encode()
+    return sha256_bytes(canonical)
+
+
+def load_json(path: pathlib.Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON object required: {path}")
+    return value
+
+
+def require_equal(
+    receipt: dict[str, Any], name: str, expected: Any
+) -> None:
+    actual = receipt.get(name)
+    if actual != expected:
+        raise ValueError(
+            f"{name} mismatch: expected {expected!r}, got {actual!r}"
+        )
+
+
+def validate_fips_metadata(
+    path: pathlib.Path,
+    checkout: pathlib.Path,
+    head: str,
+    tree: str,
+    version: str,
+) -> None:
+    metadata = load_json(path)
+    require_equal(metadata, "checkoutPathSha256", path_sha256(checkout))
+    require_equal(metadata, "checkoutHead", head)
+    require_equal(metadata, "checkoutTree", tree)
+    require_equal(metadata, "fipsCoreVersion", version)
+
+
+def validate_android(args: argparse.Namespace) -> None:
+    receipt_path = pathlib.Path(args.receipt)
+    apk = pathlib.Path(args.apk)
+    metadata = pathlib.Path(args.fips_metadata)
+    app_root = pathlib.Path(args.app_root)
+    fips_root = pathlib.Path(args.fips_root)
+    for path in (receipt_path, apk, metadata):
+        if not path.is_file():
+            raise ValueError(f"required Android artifact is missing: {path}")
+    receipt = load_json(receipt_path)
+    expected = {
+        "receiptSchema": 2,
+        "artifactType": "Android Release APK",
+        "apkPathSha256": path_sha256(apk),
+        "apkSha256": sha256_file(apk),
+        "installedApkSha256": sha256_file(apk),
+        "companySigningVerified": True,
+        "signerCertificateSha256": args.signer_sha,
+        "appGitSha": args.app_head,
+        "appGitTree": args.app_tree,
+        "fipsGitSha": args.fips_head,
+        "fipsGitTree": args.fips_tree,
+        "fipsCoreVersion": args.fips_version,
+        "fipsCheckoutPathSha256": path_sha256(fips_root),
+        "fipsCargoMetadataReceiptPathSha256": path_sha256(metadata),
+        "fipsCargoMetadataReceiptSha256": sha256_file(metadata),
+        "fipsDependenciesForcedRebuilt": True,
+        "package": args.package,
+        "replacementInstall": True,
+        "debuggable": False,
+    }
+    for name, value in expected.items():
+        require_equal(receipt, name, value)
+    if args.actual_package != args.package:
+        raise ValueError(
+            "Android APK package mismatch: "
+            f"expected {args.package!r}, got {args.actual_package!r}"
+        )
+    if path_sha256(app_root) == path_sha256(fips_root):
+        raise ValueError("application and FIPS checkouts unexpectedly coincide")
+    validate_fips_metadata(
+        metadata,
+        fips_root,
+        args.fips_head,
+        args.fips_tree,
+        args.fips_version,
+    )
+
+
+def validate_xctestrun(path: pathlib.Path) -> None:
+    payload = plistlib.load(path.open("rb"))
+    if not isinstance(payload, dict):
+        raise ValueError("iOS xctestrun root is not a dictionary")
+    target = payload.get("NostrVpnIosUITests")
+    if not isinstance(target, dict):
+        raise ValueError("iOS xctestrun lacks NostrVpnIosUITests")
+    for key in ("TestBundlePath", "TestHostPath", "UITargetAppPath"):
+        value = target.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"iOS xctestrun lacks {key}")
+
+
+def validate_ios(args: argparse.Namespace) -> None:
+    receipt_path = pathlib.Path(args.receipt)
+    app = pathlib.Path(args.app)
+    derived = pathlib.Path(args.derived_data)
+    xctestrun = pathlib.Path(args.xctestrun)
+    metadata = pathlib.Path(args.fips_metadata)
+    fips_root = pathlib.Path(args.fips_root)
+    products = derived / "Build" / "Products"
+    tunnel_app = app / "PlugIns" / "Nostr VPN Tunnel.appex"
+    executable = app / "Nostr VPN"
+    tunnel_executable = tunnel_app / "Nostr VPN Tunnel"
+    app_profile = app / "embedded.mobileprovision"
+    tunnel_profile = tunnel_app / "embedded.mobileprovision"
+    info = app / "Info.plist"
+    for path in (
+        receipt_path,
+        xctestrun,
+        metadata,
+        executable,
+        tunnel_executable,
+        app_profile,
+        tunnel_profile,
+        info,
+    ):
+        if not path.is_file():
+            raise ValueError(f"required iOS artifact is missing: {path}")
+    for path in (app, derived, products, tunnel_app):
+        if not path.is_dir():
+            raise ValueError(f"required iOS artifact tree is missing: {path}")
+    app_info = plistlib.load(info.open("rb"))
+    if app_info.get("CFBundleIdentifier") != args.bundle:
+        raise ValueError("iOS app bundle identifier mismatch")
+    validate_xctestrun(xctestrun)
+    receipt = load_json(receipt_path)
+    app_tree = tree_sha256(app)
+    products_tree = tree_sha256(products)
+    expected = {
+        "receiptSchema": 2,
+        "artifactType": "iOS company Ad Hoc Release app",
+        "appCodeDirectoryHash": args.app_cdhash,
+        "packetTunnelCodeDirectoryHash": args.tunnel_cdhash,
+        "appExecutableSha256": sha256_file(executable),
+        "packetTunnelExecutableSha256": sha256_file(tunnel_executable),
+        "appGitSha": args.app_head,
+        "appGitTree": args.app_tree,
+        "appPathSha256": path_sha256(app),
+        "appBundleTreeSha256": app_tree,
+        "treeSha256": app_tree,
+        "derivedDataPathSha256": path_sha256(derived),
+        "testProductsPathSha256": path_sha256(products),
+        "testProductsTreeSha256": products_tree,
+        "xctestrunPathSha256": path_sha256(xctestrun),
+        "xctestrunSha256": sha256_file(xctestrun),
+        "fipsGitSha": args.fips_head,
+        "fipsGitTree": args.fips_tree,
+        "fipsCoreVersion": args.fips_version,
+        "fipsCheckoutPathSha256": path_sha256(fips_root),
+        "fipsCargoMetadataReceiptPathSha256": path_sha256(metadata),
+        "fipsCargoMetadataReceiptSha256": sha256_file(metadata),
+        "fipsDependenciesForcedRebuilt": True,
+        "appProvisioningProfileSha256": sha256_file(app_profile),
+        "packetTunnelProvisioningProfileSha256": sha256_file(tunnel_profile),
+        "companySigningVerified": True,
+        "signerCertificateSha256": args.signer_sha,
+        "selectedPhysicalDeviceIdentifierSha256": args.device_identifier_sha,
+        "installedBundleIdentifier": args.bundle,
+        "cashuAndPaidExitCompiled": False,
+        "paidExitWalletWorkerCompiled": False,
+        "updaterCompiled": False,
+        "debuggable": False,
+    }
+    for name, value in expected.items():
+        require_equal(receipt, name, value)
+    device = receipt.get("selectedPhysicalDevice")
+    if not isinstance(device, dict):
+        raise ValueError("iOS receipt has no selected physical device")
+    require_equal(device, "explicitPhysicalDeviceVerified", True)
+    require_equal(device, "deviceIdentifierSha256", args.device_identifier_sha)
+    require_equal(device, "platform", "iOS")
+    if not device.get("model") or not device.get("productType"):
+        raise ValueError("iOS receipt has incomplete selected-device metadata")
+    validate_fips_metadata(
+        metadata,
+        fips_root,
+        args.fips_head,
+        args.fips_tree,
+        args.fips_version,
+    )
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser()
+    subparsers = result.add_subparsers(dest="command", required=True)
+    tree = subparsers.add_parser("tree-sha")
+    tree.add_argument("path")
+
+    android = subparsers.add_parser("validate-android")
+    for name in (
+        "receipt",
+        "apk",
+        "fips_metadata",
+        "app_root",
+        "fips_root",
+        "app_head",
+        "app_tree",
+        "fips_head",
+        "fips_tree",
+        "fips_version",
+        "package",
+        "actual_package",
+        "signer_sha",
+    ):
+        android.add_argument(f"--{name.replace('_', '-')}", required=True)
+
+    ios = subparsers.add_parser("validate-ios")
+    for name in (
+        "receipt",
+        "app",
+        "derived_data",
+        "xctestrun",
+        "fips_metadata",
+        "fips_root",
+        "app_head",
+        "app_tree",
+        "fips_head",
+        "fips_tree",
+        "fips_version",
+        "bundle",
+        "signer_sha",
+        "app_cdhash",
+        "tunnel_cdhash",
+        "device_identifier_sha",
+    ):
+        ios.add_argument(f"--{name.replace('_', '-')}", required=True)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "tree-sha":
+            print(tree_sha256(pathlib.Path(args.path)))
+        elif args.command == "validate-android":
+            validate_android(args)
+        elif args.command == "validate-ios":
+            validate_ios(args)
+        else:
+            raise ValueError(f"unsupported command: {args.command}")
+    except (OSError, ValueError, json.JSONDecodeError, plistlib.InvalidFileException) as error:
+        print(f"mobile Release artifact receipt rejected: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

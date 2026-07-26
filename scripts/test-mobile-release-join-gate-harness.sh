@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FILES=(
   "$ROOT/scripts/mobile-release-join-e2e.sh"
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
   "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
   "$ROOT/scripts/macos-release-mobile-join-remote.sh"

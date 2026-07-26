@@ -132,29 +132,119 @@ receipt="$TMP_ROOT/receipt.json"
 info="$TMP_ROOT/Info.plist"
 installed="$TMP_ROOT/installed.json"
 device="$TMP_ROOT/device.json"
-python3 - "$info" "$installed" "$device" <<'PY'
+receipt_app="$TMP_ROOT/receipt-app/Nostr VPN.app"
+receipt_derived="$TMP_ROOT/receipt-derived"
+receipt_xctestrun="$receipt_derived/Build/Products/NostrVpnIos_fixture.xctestrun"
+mkdir -p \
+  "$receipt_app/PlugIns/Nostr VPN Tunnel.appex" \
+  "$receipt_derived/Build/Products"
+printf 'app profile\n' >"$receipt_app/embedded.mobileprovision"
+printf 'tunnel profile\n' \
+  >"$receipt_app/PlugIns/Nostr VPN Tunnel.appex/embedded.mobileprovision"
+printf 'app executable\n' >"$receipt_app/Nostr VPN"
+printf 'tunnel executable\n' \
+  >"$receipt_app/PlugIns/Nostr VPN Tunnel.appex/Nostr VPN Tunnel"
+python3 - "$info" "$installed" "$device" "$receipt_xctestrun" <<'PY'
 import json
 import plistlib
 import sys
 
-info, installed, device = sys.argv[1:]
+info, installed, device, xctestrun = sys.argv[1:]
 with open(info, "wb") as handle:
     plistlib.dump(
-        {"CFBundleShortVersionString": "4.1.5", "CFBundleVersion": "415"},
+        {
+            "CFBundleIdentifier": "fi.siriusbusiness.nvpn",
+            "CFBundleShortVersionString": "4.1.5",
+            "CFBundleVersion": "415",
+        },
         handle,
     )
 with open(installed, "w", encoding="utf-8") as handle:
     json.dump({}, handle)
 with open(device, "w", encoding="utf-8") as handle:
-    json.dump({"explicitPhysicalDeviceVerified": True}, handle)
+    json.dump(
+        {
+            "deviceIdentifierSha256": "a" * 64,
+            "explicitPhysicalDeviceVerified": True,
+            "model": "Fixture Phone",
+            "platform": "iOS",
+            "productType": "Fixture1,1",
+        },
+        handle,
+    )
+with open(xctestrun, "wb") as handle:
+    plistlib.dump(
+        {
+            "NostrVpnIosUITests": {
+                "EnvironmentVariables": {},
+                "TestBundlePath": "__TESTHOST__/PlugIns/NostrVpnIosUITests.xctest",
+                "TestHostPath": "__TESTROOT__/NostrVpnIosUITests-Runner.app",
+                "UITargetAppPath": "__TESTROOT__/Release-iphoneos/Nostr VPN.app",
+            }
+        },
+        handle,
+    )
 PY
+cp "$info" "$receipt_app/Info.plist"
 hash64=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-hash40=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+app_head="$(git -C "$APP_ROOT" rev-parse HEAD)"
+app_tree="$(git -C "$APP_ROOT" rev-parse HEAD^{tree})"
+fips_head="$(git -C "$FIPS_ROOT" rev-parse HEAD)"
+fips_tree="$(git -C "$FIPS_ROOT" rev-parse HEAD^{tree})"
+receipt_metadata="$TMP_ROOT/fips-linkage.json"
+python3 - "$receipt_metadata" "$FIPS_ROOT" "$fips_head" "$fips_tree" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+path, checkout, head, tree = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "checkoutPathSha256": hashlib.sha256(
+                os.path.realpath(checkout).encode()
+            ).hexdigest(),
+            "checkoutHead": head,
+            "checkoutTree": tree,
+            "fipsCoreVersion": "1.2.3",
+        },
+        handle,
+        sort_keys=True,
+    )
+PY
+app_binary_sha="$(shasum -a 256 "$receipt_app/Nostr VPN" | awk '{print $1}')"
+tunnel_binary_sha="$(
+  shasum -a 256 \
+    "$receipt_app/PlugIns/Nostr VPN Tunnel.appex/Nostr VPN Tunnel" \
+    | awk '{print $1}'
+)"
+app_bundle_tree="$(
+  python3 "$ROOT_DIR/scripts/mobile_release_artifact_receipt.py" \
+    tree-sha "$receipt_app"
+)"
+test_products_tree="$(
+  python3 "$ROOT_DIR/scripts/mobile_release_artifact_receipt.py" \
+    tree-sha "$receipt_derived/Build/Products"
+)"
+metadata_sha="$(shasum -a 256 "$receipt_metadata" | awk '{print $1}')"
+metadata_path_sha="$(
+  python3 -c \
+    'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
+    "$receipt_metadata"
+)"
+fips_path_sha="$(
+  python3 -c \
+    'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
+    "$FIPS_ROOT"
+)"
 if ios_release_network_write_artifact_receipt \
-  "$receipt" cdhash tunnelcd "$hash64" "$hash64" "$hash64" \
-  "$hash40" "$hash40" "$info" "$installed" fi.siriusbusiness.nvpn \
-  "$device" /tmp/app /tmp/derived /tmp/tests.xctestrun \
-  "$hash40" 1.2.3 "$hash64" "$hash64" >/dev/null 2>&1
+  "$receipt" cdhash tunnelcd "$app_binary_sha" "$tunnel_binary_sha" \
+  "$app_bundle_tree" "$test_products_tree" \
+  "$app_head" "$app_tree" "$fips_head" "$info" "$installed" fi.siriusbusiness.nvpn \
+  "$device" "$receipt_app" "$receipt_derived" "$receipt_xctestrun" \
+  "$fips_tree" 1.2.3 "$metadata_sha" "$metadata_path_sha" \
+  "$fips_path_sha" "$hash64" >/dev/null 2>&1
 then
   echo "iOS artifact receipt accepted a missing installed app" >&2
   exit 1
@@ -178,10 +268,12 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     )
 PY
 ios_release_network_write_artifact_receipt \
-  "$receipt" cdhash tunnelcd "$hash64" "$hash64" "$hash64" \
-  "$hash40" "$hash40" "$info" "$installed" fi.siriusbusiness.nvpn \
-  "$device" /tmp/app /tmp/derived /tmp/tests.xctestrun \
-  "$hash40" 1.2.3 "$hash64" "$hash64"
+  "$receipt" cdhash tunnelcd "$app_binary_sha" "$tunnel_binary_sha" \
+  "$app_bundle_tree" "$test_products_tree" \
+  "$app_head" "$app_tree" "$fips_head" "$info" "$installed" fi.siriusbusiness.nvpn \
+  "$device" "$receipt_app" "$receipt_derived" "$receipt_xctestrun" \
+  "$fips_tree" 1.2.3 "$metadata_sha" "$metadata_path_sha" \
+  "$fips_path_sha" "$hash64"
 python3 - "$receipt" "$hash64" <<'PY'
 import json
 import sys
@@ -195,7 +287,37 @@ if receipt.get("paidExitWalletWorkerCompiled") is not False:
     raise SystemExit("iOS artifact receipt omitted crash-path exclusion")
 if receipt.get("updaterCompiled") is not False:
     raise SystemExit("iOS artifact receipt omitted updater exclusion")
+for required in (
+    "appGitTree",
+    "appBundleTreeSha256",
+    "testProductsTreeSha256",
+    "xctestrunSha256",
+    "appProvisioningProfileSha256",
+    "packetTunnelProvisioningProfileSha256",
+    "selectedPhysicalDeviceIdentifierSha256",
+    "fipsCargoMetadataReceiptPathSha256",
+):
+    if required not in receipt:
+        raise SystemExit(f"iOS artifact receipt omitted {required}")
 PY
+python3 "$ROOT_DIR/scripts/mobile_release_artifact_receipt.py" \
+  validate-ios \
+  --receipt "$receipt" \
+  --app "$receipt_app" \
+  --derived-data "$receipt_derived" \
+  --xctestrun "$receipt_xctestrun" \
+  --fips-metadata "$receipt_metadata" \
+  --fips-root "$FIPS_ROOT" \
+  --app-head "$app_head" \
+  --app-tree "$app_tree" \
+  --fips-head "$fips_head" \
+  --fips-tree "$fips_tree" \
+  --fips-version 1.2.3 \
+  --bundle fi.siriusbusiness.nvpn \
+  --signer-sha "$hash64" \
+  --app-cdhash cdhash \
+  --tunnel-cdhash tunnelcd \
+  --device-identifier-sha "$hash64"
 grep -Fq 'if ! ios_release_network_write_artifact_receipt' \
   "$ROOT_DIR/scripts/lib-mobile-ios-release-artifact.sh"
 grep -Fq 'actual_signer_sha != expected_signer_sha' \

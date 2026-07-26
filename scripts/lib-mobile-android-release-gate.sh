@@ -143,7 +143,7 @@ android_release_apksigner() {
 verify_android_release_install() {
   local apksigner remote_path pulled apk_sha installed_sha cert_sha receipt
   local native_lib native_strings target_root metadata_receipt rebuild_marker
-  local dep_file metadata_sha
+  local dep_file metadata_sha metadata_path_sha fips_path_sha
   apksigner="$(android_release_apksigner)"
   [[ -x "$apksigner" ]] || {
     echo "Android Release black-box gate could not find apksigner" >&2
@@ -303,13 +303,25 @@ PY
     return 1
   fi
   metadata_sha="$(shasum -a 256 "$metadata_receipt" | awk '{print $1}')"
+  metadata_path_sha="$(
+    python3 -c \
+      'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
+      "$metadata_receipt"
+  )"
+  fips_path_sha="$(
+    python3 -c \
+      'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
+      "$NVPN_FIPS_REPO_PATH"
+  )"
   rm -f "$native_lib"
   receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$RUNTIME_STATE_RESULT_DIR/mobile-android-release-artifact.json}"
   mkdir -p "$RUNTIME_STATE_RESULT_DIR" "$(dirname "$receipt")"
-  if ! python3 - "$receipt" "$apk_sha" "$NVPN_BUILD_GIT_SHA" \
+  if ! python3 - "$receipt" "$apk_sha" "$EXPECTED_ANDROID_APP_GIT_HEAD" \
+    "$EXPECTED_ANDROID_APP_GIT_TREE" \
     "$EXPECTED_FIPS_GIT_SHA" "$PACKAGE_NAME" "$APK_PATH" \
     "$EXPECTED_FIPS_GIT_TREE" \
     "$EXPECTED_FIPS_VERSION" "$metadata_sha" \
+    "$metadata_path_sha" "$fips_path_sha" \
     "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" <<'PY'
 import hashlib
 import json
@@ -320,17 +332,21 @@ import sys
     path,
     apk_sha,
     app_sha,
+    app_tree,
     fips_sha,
     package,
     apk_path,
     fips_tree,
     fips_version,
     metadata_sha,
+    metadata_path_sha,
+    fips_path_sha,
     signer_sha,
 ) = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
         {
+            "receiptSchema": 2,
             "artifactType": "Android Release APK",
             "apkPathSha256": hashlib.sha256(
                 os.path.realpath(apk_path).encode()
@@ -340,9 +356,12 @@ with open(path, "w", encoding="utf-8") as handle:
             "companySigningVerified": True,
             "signerCertificateSha256": signer_sha,
             "appGitSha": app_sha,
+            "appGitTree": app_tree,
             "fipsGitSha": fips_sha,
             "fipsGitTree": fips_tree,
             "fipsCoreVersion": fips_version,
+            "fipsCheckoutPathSha256": fips_path_sha,
+            "fipsCargoMetadataReceiptPathSha256": metadata_path_sha,
             "fipsCargoMetadataReceiptSha256": metadata_sha,
             "fipsDependenciesForcedRebuilt": True,
             "package": package,

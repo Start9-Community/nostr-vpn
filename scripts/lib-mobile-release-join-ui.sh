@@ -337,28 +337,93 @@ release_join_ios_test_command() {
   shift
   local team="${NVPN_IOS_TEAM_ID:?Release join gate requires NVPN_IOS_TEAM_ID}"
   local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
-  local -a command=(
-    xcodebuild
-    -quiet
-    -allowProvisioningUpdates
-    -project "$ROOT/ios/NostrVpnIos.xcodeproj"
-    -scheme NostrVpnIos
-    -configuration Release
-    -derivedDataPath "$RELEASE_JOIN_IOS_DERIVED_DATA"
-    -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID"
-    -destination-timeout 60
-    -collect-test-diagnostics never
-    -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
-    DEVELOPMENT_TEAM="$team"
-    NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY"
-    NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID"
-    NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
-    NVPN_RELEASE_JOIN_BLACKBOX=1
-    NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-    NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS="$RELEASE_JOIN_CAMERA_WAIT_SECS"
-    NVPN_IOS_BUNDLE_ID="$bundle"
-  )
-  command+=("$@")
+  local -a command=()
+  if release_join_reuse_artifacts; then
+    local case_xctestrun
+    if ! case_xctestrun="$(
+      mktemp "$PRIVATE_DIR/join-$test_name.XXXXXX.xctestrun"
+    )"; then
+      return 1
+    fi
+    if ! cp "$RELEASE_JOIN_IOS_XCTESTRUN" "$case_xctestrun"; then
+      rm -f "$case_xctestrun"
+      return 1
+    fi
+    if ! python3 - \
+      "$case_xctestrun" \
+      "NVPN_RELEASE_JOIN_BLACKBOX=1" \
+      "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
+      "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS=$RELEASE_JOIN_CAMERA_WAIT_SECS" \
+      "NVPN_IOS_BUNDLE_ID=$bundle" \
+      "$@" <<'PY'
+import plistlib
+import re
+import sys
+
+path = sys.argv[1]
+payload = plistlib.load(open(path, "rb"))
+target = payload.get("NostrVpnIosUITests")
+if not isinstance(target, dict):
+    raise SystemExit("strict Release join xctestrun lacks NostrVpnIosUITests")
+environment = target.get("EnvironmentVariables")
+if not isinstance(environment, dict):
+    raise SystemExit("strict Release join xctestrun lacks runner environment")
+for name in (
+    "NVPN_RELEASE_JOIN_ADMIN_ID",
+    "NVPN_RELEASE_JOIN_BLACKBOX",
+    "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS",
+    "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS",
+    "NVPN_RELEASE_JOIN_JOINER_ID",
+    "NVPN_RELEASE_JOIN_NETWORK_ID",
+    "NVPN_RELEASE_JOIN_NETWORK_NAME",
+    "NVPN_IOS_BUNDLE_ID",
+):
+    environment[name] = ""
+for assignment in sys.argv[2:]:
+    name, separator, value = assignment.partition("=")
+    if not separator or re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
+        raise SystemExit(f"invalid strict Release join runner variable: {assignment!r}")
+    environment[name] = value
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle, sort_keys=False)
+PY
+    then
+      rm -f "$case_xctestrun"
+      return 1
+    fi
+    command=(
+      xcodebuild
+      -quiet
+      -xctestrun "$case_xctestrun"
+      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID"
+      -destination-timeout 60
+      -collect-test-diagnostics never
+      -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
+    )
+  else
+    command=(
+      xcodebuild
+      -quiet
+      -allowProvisioningUpdates
+      -project "$ROOT/ios/NostrVpnIos.xcodeproj"
+      -scheme NostrVpnIos
+      -configuration Release
+      -derivedDataPath "$RELEASE_JOIN_IOS_DERIVED_DATA"
+      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID"
+      -destination-timeout 60
+      -collect-test-diagnostics never
+      -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
+      DEVELOPMENT_TEAM="$team"
+      NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY"
+      NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID"
+      NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
+      NVPN_RELEASE_JOIN_BLACKBOX=1
+      NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="$RELEASE_JOIN_DELIVERY_WAIT_SECS"
+      NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS="$RELEASE_JOIN_CAMERA_WAIT_SECS"
+      NVPN_IOS_BUNDLE_ID="$bundle"
+    )
+    command+=("$@")
+  fi
   command+=(test-without-building)
   printf '%s\0' "${command[@]}"
 }
@@ -367,9 +432,17 @@ release_join_ios_start_test() {
   local test_name="$1" log="$2"
   shift 2
   local -a command=()
+  local command_file
+  command_file="$(mktemp "$PRIVATE_DIR/ios-command.XXXXXX")"
+  if ! release_join_ios_test_command "$test_name" "$@" >"$command_file"; then
+    rm -f "$command_file"
+    return 1
+  fi
   while IFS= read -r -d '' item; do
     command+=("$item")
-  done < <(release_join_ios_test_command "$test_name" "$@")
+  done <"$command_file"
+  rm -f "$command_file"
+  [[ "${#command[@]}" -gt 0 ]] || return 1
   mkdir -p "$(dirname "$log")"
   "${command[@]}" >"$log" 2>&1 &
   RELEASE_JOIN_IOS_TEST_PID=$!

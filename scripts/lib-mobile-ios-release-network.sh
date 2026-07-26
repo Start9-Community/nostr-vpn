@@ -15,6 +15,7 @@ IOS_RELEASE_NETWORK_DESTINATION=""
 IOS_RELEASE_NETWORK_DEVICE=""
 IOS_RELEASE_NETWORK_BASE_CDHASH=""
 IOS_RELEASE_NETWORK_BASE_TREE_SHA=""
+IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA=""
 IOS_RELEASE_NETWORK_XCTESTRUN=""
 IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
 IOS_RELEASE_NETWORK_DEVICE_RECEIPT=""
@@ -223,6 +224,7 @@ ios_release_network_prepare() {
   if ! device_udid="$(python3 - \
     "$device_details" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" \
     "$expected_device_name" "${NVPN_IOS_EXPECTED_DEVICE_MODEL:-}" <<'PY'
+import hashlib
 import json
 import sys
 
@@ -244,6 +246,7 @@ if not isinstance(model, str) or not model:
 if not isinstance(udid, str) or not udid:
     raise SystemExit("selected iOS device has no resolved hardware identifier")
 receipt = {
+    "deviceIdentifierSha256": hashlib.sha256(udid.encode()).hexdigest(),
     "explicitPhysicalDeviceVerified": True,
     "model": model,
     "osVersion": str(device.get("osVersionNumber", "")),

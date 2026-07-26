@@ -331,6 +331,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-wireguard-fixture-cleanup-harness.sh
   ./scripts/test-mobile-release-provenance-harness.sh
+  ./scripts/test-mobile-release-artifact-reuse-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
@@ -1277,11 +1278,50 @@ run_mobile_join_e2e_gate() {
       ;;
   esac
 
+  local android_result_dir android_receipt android_fips_metadata
+  local ios_result_dir ios_derived_data ios_app ios_xctestrun ios_receipt
+  local ios_fips_metadata ios_xctestrun_count
+  android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
+  android_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$android_result_dir/mobile-android-release-artifact.json}"
+  android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
+  ios_result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-ios}"
+  ios_derived_data="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-$ROOT_DIR/ios/.build/ReleaseNetworkDerivedData}"
+  ios_app="${NVPN_MOBILE_IOS_RELEASE_APP_PATH:-$ios_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
+  ios_xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"
+  ios_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$ios_result_dir/mobile-ios-release-artifact.json}"
+  ios_fips_metadata="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-ios/fips-linkage.json}"
+  if [[ -z "$ios_xctestrun" ]]; then
+    ios_xctestrun_count="$(
+      find "$ios_derived_data/Build/Products" \
+        -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
+        | wc -l \
+        | tr -d ' '
+    )"
+    [[ "$ios_xctestrun_count" == 1 ]] || {
+      echo "Strict Release join reuse requires one preserved iOS xctestrun; found $ios_xctestrun_count" >&2
+      return 1
+    }
+    ios_xctestrun="$(
+      find "$ios_derived_data/Build/Products" \
+        -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
+        | head -n 1
+    )"
+  fi
+
   release_gate_run_with_timeout \
     "Signed Release public-UI cross-platform join e2e" \
     "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
     env NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET=YES \
     NVPN_RELEASE_JOIN_DESKTOP_MOBILE=1 \
+    NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1 \
+    NVPN_RELEASE_JOIN_ANDROID_APK="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk" \
+    NVPN_RELEASE_JOIN_ANDROID_RECEIPT="$android_receipt" \
+    NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT="$android_fips_metadata" \
+    NVPN_RELEASE_JOIN_IOS_DERIVED_DATA="$ios_derived_data" \
+    NVPN_RELEASE_JOIN_IOS_APP_PATH="$ios_app" \
+    NVPN_RELEASE_JOIN_IOS_XCTESTRUN="$ios_xctestrun" \
+    NVPN_RELEASE_JOIN_IOS_RECEIPT="$ios_receipt" \
+    NVPN_RELEASE_JOIN_IOS_FIPS_METADATA_RECEIPT="$ios_fips_metadata" \
     ./scripts/mobile-release-join-e2e.sh
   MOBILE_ANDROID_APP_READY=1
   MOBILE_IOS_APP_READY=1
@@ -1413,6 +1453,13 @@ main() {
   started_at="$(date +%s)"
   local log_dir="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT_DIR/artifacts/release-gate-logs/$(date -u +%Y%m%dT%H%M%SZ)}"
   release_gate_parallel_init "$log_dir"
+  local mobile_artifact_receipt_dir="$log_dir/mobile-release-artifacts"
+  mkdir -p "$mobile_artifact_receipt_dir"
+  export NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$mobile_artifact_receipt_dir/android.json"
+  export NVPN_MOBILE_IOS_RELEASE_RECEIPT="$mobile_artifact_receipt_dir/ios.json"
+  rm -f \
+    "$NVPN_MOBILE_ANDROID_RELEASE_RECEIPT" \
+    "$NVPN_MOBILE_IOS_RELEASE_RECEIPT"
   trap release_gate_cleanup EXIT
 
   # Validate generated version metadata before any remote lane snapshots the

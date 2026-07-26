@@ -10,6 +10,8 @@ source "$ROOT/scripts/mobile_env.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
 # shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
+# shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 
 load_release_env "$ROOT"
@@ -92,11 +94,13 @@ cleanup() {
     kill "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
     wait "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
   fi
-  "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || true
-  xcrun devicectl device uninstall app \
-    --device "$IOS_DEVICE" \
-    "${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner" \
-    --quiet >/dev/null 2>&1 || true
+  if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
+    "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || true
+    xcrun devicectl device uninstall app \
+      --device "$IOS_DEVICE" \
+      "${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner" \
+      --quiet >/dev/null 2>&1 || true
+  fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"
 }
@@ -238,6 +242,9 @@ phase_android_admin_ios_manual() {
 }
 
 release_join_require_clean_fips
+release_join_validate_reused_artifacts
+RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
+export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 release_join_prepare_android_release
 release_join_prepare_ios_release
 rm -f "$RESULT_DIR/delivery-times.tsv"
