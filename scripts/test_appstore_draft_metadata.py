@@ -34,6 +34,8 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertEqual(attrs["supportUrl"], "https://nostrvpn.org/support/")
         self.assertEqual(attrs["whatsNew"], metadata.DEFAULT_WHATS_NEW)
         self.assertEqual(attrs["marketingUrl"], metadata.DEFAULT_MARKETING_URL)
+        self.assertNotIn("Cashu", attrs["description"])
+        self.assertNotIn("paid", attrs["description"].lower())
 
     def test_explicit_environment_overrides_repo_defaults(self):
         attrs = metadata.version_localization_attributes(
@@ -80,6 +82,29 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("non-exempt encryption", notes)
         self.assertIn("France is excluded from availability", notes)
         self.assertIn("China mainland is also excluded", notes)
+        self.assertIn("Switching between Wi-Fi, cellular, or a personal hotspot", notes)
+        self.assertIn("Cloudflare encrypted DNS as the Automatic fallback", notes)
+        self.assertIn("Quad9", notes)
+        self.assertIn("custom DoH", notes)
+        self.assertIn("DNS configured through the exit", notes)
+        self.assertIn("select Direct", notes)
+        self.assertIn("signed roster containing its identity", notes)
+        self.assertIn("Manual join", notes)
+
+    def test_reviewer_notes_include_private_ready_to_use_wireguard_fixture(self):
+        notes = metadata.review_notes(
+            "4.1.5",
+            None,
+            environ={
+                "NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG": (
+                    "[Interface]\nAddress = 192.0.2.2/32\n"
+                    "[Peer]\nEndpoint = reviewer.example:51820"
+                )
+            },
+        )
+
+        self.assertIn("Ready-to-use reviewer WireGuard configuration", notes)
+        self.assertIn("Endpoint = reviewer.example:51820", notes)
 
     def test_explicit_reviewer_notes_override_repo_default(self):
         notes = metadata.review_notes(
@@ -96,7 +121,7 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             environ={},
         )
 
-        self.assertEqual(notes, metadata.default_review_notes("4.1.4"))
+        self.assertEqual(notes, metadata.default_review_notes("4.1.4", environ={}))
         self.assertNotIn("stale TestFlight review notes", notes)
         self.assertIn("without those feature dependencies or runtime workers", notes)
         self.assertIn("no wallet or paid-exit UI/action path", notes)
@@ -169,6 +194,22 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             availability.REQUIRED_EXCLUDED_TERRITORIES,
             {"FRA": "France", "CHN": "China mainland"},
         )
+        app_availability = {
+            "type": "appAvailabilities",
+            "id": "availability",
+            "attributes": {"availableInNewTerritories": False},
+        }
+        self.assertEqual(
+            availability.require_new_territories_disabled(app_availability),
+            app_availability,
+        )
+        with self.assertRaises(availability.AppStoreAvailabilityError):
+            availability.require_new_territories_disabled(
+                {
+                    **app_availability,
+                    "attributes": {"availableInNewTerritories": True},
+                }
+            )
 
     def test_required_storefront_patch_uses_the_territory_resource(self):
         self.assertEqual(
@@ -245,13 +286,17 @@ class TestFlightExportComplianceTests(unittest.TestCase):
     def test_selects_existing_matching_active_declaration(self):
         rejected = self._declaration("rejected", state="REJECTED")
         created = self._declaration("created", state="CREATED")
+        in_review = self._declaration("in-review", state="IN_REVIEW")
+        unknown = self._declaration("unknown", state="")
         approved = self._declaration("approved", state="APPROVED")
 
         selected = export_compliance.select_reusable_declaration(
-            [rejected, created, approved]
+            [rejected, created, in_review, unknown, approved]
         )
 
         self.assertEqual(selected["id"], "approved")
+        for unapproved in (rejected, created, in_review, unknown):
+            self.assertFalse(export_compliance.declaration_matches_policy(unapproved))
 
     def test_does_not_reuse_wrong_france_or_crypto_answers(self):
         france = self._declaration("france", availableOnFrenchStore=True)
@@ -350,6 +395,30 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             patch[3],
             export_compliance.build_update_request("build-id", "created"),
         )
+
+    def test_ensure_does_not_duplicate_or_link_pending_declaration(self):
+        calls = []
+        pending = self._declaration("pending", state="IN_REVIEW")
+
+        def request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            if method == "GET":
+                return 404, {"errors": []}
+            raise AssertionError((method, path))
+
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "not approved.*IN_REVIEW",
+        ):
+            export_compliance.ensure_build_compliance(
+                {"id": "build-id"},
+                app_id="app-id",
+                request=request,
+                get_all=lambda _path, _params=None: [pending],
+                get_build=lambda _build_id: self._build(True),
+            )
+
+        self.assertFalse(any(call[0] in {"POST", "PATCH"} for call in calls))
 
     def test_ensure_is_noop_when_truthful_declaration_is_already_linked(self):
         calls = []

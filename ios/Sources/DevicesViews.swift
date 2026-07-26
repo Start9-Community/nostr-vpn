@@ -149,19 +149,21 @@ struct VpnDisclosureSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Before Turning VPN On")
-                    .font(.title2.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Nostr VPN is a private mesh VPN for your own devices, trusted peers, and WireGuard endpoints you configure. It is not a public VPN, anonymity, stealth, or consumer proxy service.")
-                Text("The app processes device identity, peer lists, routing settings, endpoints, join metadata, traffic counters, and connection health on this device only to operate the VPN you configure.")
-                Text("Sirius Business Oy does not collect or retain your browsing traffic, private mesh traffic, or VPN connection data, and does not sell, use, or disclose VPN data to third parties.")
-                Text("Packet traffic is encrypted. At your direction, the app sends only the data needed for the requested connection to peers, relays, bridge paths, and WireGuard endpoints you choose. Independent operators handle that data under their own policies.")
-                Spacer()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Before Turning VPN On")
+                        .font(.title2.weight(.semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Nostr VPN is a private mesh VPN for your own devices, trusted peers, and WireGuard endpoints you configure. It is not a public VPN, anonymity, stealth, or consumer proxy service.")
+                    Text("The app processes device identity, peer lists, routing settings, endpoints, join metadata, traffic counters, and connection health on this device only to operate the VPN you configure.")
+                    Text("Sirius Business Oy does not collect or retain your browsing traffic, private mesh traffic, VPN connection data, or DNS queries, and does not sell, use, or disclose VPN data to third parties.")
+                    Text("Packet traffic is encrypted. At your direction, the app sends only the data needed for the requested connection to peers, relays, bridge paths, and WireGuard endpoints you choose. Independent operators handle that data under their own policies.")
+                    Text("Exit DNS can use DNS from your WireGuard profile, Cloudflare encrypted DNS as the Automatic fallback, Quad9, a custom encrypted DNS service, or DNS servers you configure through the exit. Those independently operated DNS services can receive your DNS queries and ordinary connection metadata, such as your IP address and request time, under their own policies.")
+                }
+                .font(.body)
+                .foregroundStyle(.primary)
+                .padding()
             }
-            .font(.body)
-            .foregroundStyle(.primary)
-            .padding()
             .navigationTitle("VPN Data Use")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

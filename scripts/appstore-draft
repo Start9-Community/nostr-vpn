@@ -43,6 +43,9 @@ Environment:
   NVPN_APPSTORE_COPYRIGHT     optional copyright override
   NVPN_APPSTORE_CATEGORY_ID   optional primary category id (default UTILITIES)
   NVPN_APPSTORE_REVIEW_*      optional App Review contact/notes overrides
+  NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG
+                              ready-to-use persistent WireGuard configuration;
+                              required when submitting for App Review
 EOF
 }
 
@@ -93,6 +96,7 @@ from appstore_availability import (
     AppStoreAvailabilityError,
     REQUIRED_EXCLUDED_TERRITORIES,
     find_territory_availability,
+    require_new_territories_disabled,
     require_territory_excluded,
     territory_update_request,
 )
@@ -135,6 +139,17 @@ DEFAULT_REVIEW_CONTACT_EMAIL = "nostrvpn@siriusbusiness.fi"
 def fail(message, code=1):
     print(message, file=sys.stderr)
     raise SystemExit(code)
+
+
+if (
+    ACTION == "submit"
+    and not os.environ.get("NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG", "").strip()
+    and not os.environ.get("NVPN_APPSTORE_REVIEW_NOTES", "").strip()
+):
+    fail(
+        "App Review submission requires either "
+        "NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG or complete override notes"
+    )
 
 
 def env_value(name, default=""):
@@ -900,6 +915,10 @@ def ensure_required_territories_excluded(app_id):
     availability = app_availability(app_id)
     if not availability or not availability.get("id"):
         fail("App Store territory availability has no resource ID")
+    try:
+        require_new_territories_disabled(availability)
+    except AppStoreAvailabilityError as error:
+        fail(str(error))
     availability_id = availability["id"]
     rows = territory_availabilities(availability_id)
     for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
@@ -1245,6 +1264,14 @@ if ACTION == "status":
             f"{attrs.get('appStoreState')} [{version['id']}]"
         )
     availability = app_availability(app["id"])
+    try:
+        require_new_territories_disabled(availability)
+    except AppStoreAvailabilityError as error:
+        fail(str(error))
+    print(
+        "  - Automatically available in new territories: "
+        f"{availability.get('attributes', {}).get('availableInNewTerritories')}"
+    )
     rows = territory_availabilities(availability["id"])
     for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
         row = find_territory_availability(rows, territory_id)
@@ -1275,6 +1302,7 @@ review_detail = ensure_review_detail(version["id"])
 content_rights = ensure_content_rights(app["id"])
 price_schedule_id = ensure_free_price_schedule(app["id"])
 excluded_territories = ensure_required_territories_excluded(app["id"])
+availability = app_availability(app["id"])
 build = find_build(app["id"])
 if build is None:
     fail(f"Build {BUILD_NUMBER} is not visible in App Store Connect")
@@ -1299,6 +1327,10 @@ print(
     f"{content_rights.get('attributes', {}).get('contentRightsDeclaration')}"
 )
 print(f"Price schedule: {price_schedule_id}")
+print(
+    "Automatically available in new territories: "
+    f"{availability.get('attributes', {}).get('availableInNewTerritories')}"
+)
 for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
     print(
         f"{territory_name} availability: "

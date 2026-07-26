@@ -15,6 +15,7 @@ use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString};
 #[cfg(target_os = "android")]
 use jni::sys::{jboolean, jint, jlong, jstring};
+#[cfg(feature = "updater")]
 use nostr_vpn_core::updater::{
     ProductUpdateMode, ProductUpdateResult, ProductUpdateSource, check_product_update_blocking,
     check_product_update_blocking_with_cache, download_product_update_blocking,
@@ -55,6 +56,7 @@ struct QrDecodeResult {
     error: String,
 }
 
+#[cfg(feature = "updater")]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateJsonError {
@@ -234,6 +236,7 @@ pub extern "C" fn nostr_vpn_mobile_tunnel_new(
     start_mobile_tunnel_handle(&config_json)
 }
 
+#[cfg(feature = "updater")]
 #[unsafe(no_mangle)]
 pub extern "C" fn nostr_vpn_update_check_json(
     current_version: *const c_char,
@@ -248,6 +251,7 @@ pub extern "C" fn nostr_vpn_update_check_json(
     update_result_json(result)
 }
 
+#[cfg(feature = "updater")]
 #[unsafe(no_mangle)]
 pub extern "C" fn nostr_vpn_update_check_with_config_json(
     current_version: *const c_char,
@@ -266,6 +270,7 @@ pub extern "C" fn nostr_vpn_update_check_with_config_json(
     update_result_json(result)
 }
 
+#[cfg(feature = "updater")]
 #[unsafe(no_mangle)]
 pub extern "C" fn nostr_vpn_update_download_json(
     current_version: *const c_char,
@@ -285,6 +290,7 @@ pub extern "C" fn nostr_vpn_update_download_json(
     update_result_json(result)
 }
 
+#[cfg(feature = "updater")]
 #[unsafe(no_mangle)]
 pub extern "C" fn nostr_vpn_update_download_with_config_json(
     current_version: *const c_char,
@@ -681,6 +687,7 @@ fn json_raw_string(value: &str) -> *mut c_char {
     into_c_string(value)
 }
 
+#[cfg(feature = "updater")]
 fn update_result_json(result: Result<ProductUpdateResult>) -> *mut c_char {
     match result {
         Ok(result) => json_string(&result),
@@ -690,6 +697,7 @@ fn update_result_json(result: Result<ProductUpdateResult>) -> *mut c_char {
     }
 }
 
+#[cfg(feature = "updater")]
 fn parse_update_mode(value: &str) -> ProductUpdateMode {
     if value.eq_ignore_ascii_case("app") {
         ProductUpdateMode::App
@@ -698,6 +706,7 @@ fn parse_update_mode(value: &str) -> ProductUpdateMode {
     }
 }
 
+#[cfg(feature = "updater")]
 fn parse_update_source(value: &str) -> ProductUpdateSource {
     if value.eq_ignore_ascii_case("github") {
         ProductUpdateSource::Github

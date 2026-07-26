@@ -131,14 +131,17 @@ done
 rg -q -- '--no-default-features' "$ROOT/tools/run-ios" \
   || fail "the iOS framework still compiles the Cashu/paid-exit feature"
 
-if cargo tree \
+no_default_feature_tree="$(
+  cargo tree \
   --manifest-path "$ROOT/Cargo.toml" \
   -p nostr-vpn-app-core \
   --no-default-features \
-  -e features \
-  | rg -i 'cashu|paid-exit' >/dev/null
-then
-  fail "the iOS no-default-features graph still resolves Cashu or paid-exit code"
+  -e features
+)"
+if printf '%s\n' "$no_default_feature_tree" \
+  | rg -i 'cashu|paid-exit|hashtree-updater|nostr-vpn-core feature "updater"' \
+  >/dev/null; then
+  fail "the iOS no-default-features graph still resolves Cashu, paid-exit, or updater code"
 fi
 
 cargo build \
@@ -159,10 +162,15 @@ no_default_core="$cargo_target_dir/debug/deps/libnostr_vpn_app_core.a"
   || fail "the no-default app-core static library was not produced"
 if strings -a "$no_default_core" \
   | rg -i \
-    'api\.coinbase\.com|api\.kraken\.com|nvpn-exchange-rate|paid_exit_wallet_runtime|wallet_worker|PaidRouteWalletRuntime' \
+    'api\.coinbase\.com|api\.kraken\.com|nvpn-exchange-rate|paid_exit_wallet_runtime|wallet_worker|PaidRouteWalletRuntime|nvpn-updater|secure hashtree update check' \
     >/dev/null
 then
-  fail "the iOS no-default app core still contains wallet, paid-exit, or fiat-rate background runtime code"
+  fail "the iOS no-default app core still contains wallet, paid-exit, updater, or fiat-rate runtime code"
+fi
+if strings -a "$no_default_core" \
+  | rg 'nostr_vpn_update_(check|download)' >/dev/null
+then
+  fail "the iOS no-default app core still exports self-update entry points"
 fi
 
 packaged_core_count=0
@@ -173,10 +181,15 @@ do
   packaged_core_count=$((packaged_core_count + 1))
   if strings -a "$packaged_core" \
     | rg -i \
-      'api\.coinbase\.com|api\.kraken\.com|nvpn-exchange-rate|paid_exit_wallet_runtime|wallet_worker|PaidRouteWalletRuntime' \
+      'api\.coinbase\.com|api\.kraken\.com|nvpn-exchange-rate|paid_exit_wallet_runtime|wallet_worker|PaidRouteWalletRuntime|nvpn-updater|secure hashtree update check' \
       >/dev/null
   then
-    fail "the packaged iOS XCFramework still contains wallet, paid-exit, or fiat-rate background runtime code"
+    fail "the packaged iOS XCFramework still contains wallet, paid-exit, updater, or fiat-rate runtime code"
+  fi
+  if strings -a "$packaged_core" \
+    | rg 'nostr_vpn_update_(check|download)' >/dev/null
+  then
+    fail "the packaged iOS XCFramework still exports self-update entry points"
   fi
 done
 [[ "$packaged_core_count" -ge 2 ]] \
@@ -196,6 +209,25 @@ fi
 rg -q 'does not collect or retain your browsing traffic' \
   "$ROOT/ios/Sources/DevicesViews.swift" \
   || fail "the pre-use VPN disclosure omits the developer collection statement"
+rg -q 'ScrollView' "$ROOT/ios/Sources/DevicesViews.swift" \
+  || fail "the pre-use VPN disclosure can clip required text on a small device"
+for dns_disclosure in \
+  'WireGuard profile' \
+  'Cloudflare encrypted DNS' \
+  'Quad9' \
+  'custom encrypted DNS' \
+  'through the exit' \
+  'DNS queries' \
+  'connection metadata'
+do
+  rg -q "$dns_disclosure" \
+    "$ROOT/ios/Sources/DevicesViews.swift" \
+    "$ROOT/docs/privacy/index.html" \
+    || fail "the iOS DNS disclosure omits: $dns_disclosure"
+done
+rg -q 'otherwise uses Cloudflare encrypted DNS' \
+  "$ROOT/ios/Sources/SettingsViews.swift" \
+  || fail "Automatic exit DNS does not name its Cloudflare fallback"
 rg -q 'does not sell, use, or disclose VPN data to third parties' \
   "$ROOT/docs/privacy/index.html" \
   || fail "the privacy policy omits the VPN data-use commitment"

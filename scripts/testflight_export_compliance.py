@@ -25,12 +25,7 @@ _DECLARATION_FIELDS = (
     "containsThirdPartyCryptography,availableOnFrenchStore,platform,"
     "appEncryptionDeclarationState,createdDate"
 )
-_UNUSABLE_STATES = {"EXPIRED", "INVALID", "REJECTED"}
-_STATE_PRIORITY = {
-    "APPROVED": 0,
-    "IN_REVIEW": 1,
-    "CREATED": 2,
-}
+_ACCEPTABLE_STATE = "APPROVED"
 
 
 class ExportComplianceError(RuntimeError):
@@ -92,8 +87,8 @@ def build_update_request(
     }
 
 
-def declaration_matches_policy(declaration: Mapping[str, object]) -> bool:
-    """Return whether a declaration represents this release's exact policy."""
+def declaration_answers_policy(declaration: Mapping[str, object]) -> bool:
+    """Return whether a declaration contains this release's truthful answers."""
 
     if declaration.get("type") != "appEncryptionDeclarations":
         return False
@@ -113,8 +108,18 @@ def declaration_matches_policy(declaration: Mapping[str, object]) -> bool:
     platform = attributes.get("platform")
     if platform is not None and str(platform).upper() != "IOS":
         return False
+    return True
+
+
+def declaration_matches_policy(declaration: Mapping[str, object]) -> bool:
+    """Return whether a truthful declaration is terminal and reusable."""
+
+    if not declaration_answers_policy(declaration):
+        return False
+    attributes = declaration.get("attributes")
+    assert isinstance(attributes, Mapping)
     state = str(attributes.get("appEncryptionDeclarationState", "")).upper()
-    return state not in _UNUSABLE_STATES
+    return state == _ACCEPTABLE_STATE
 
 
 def select_reusable_declaration(
@@ -137,7 +142,7 @@ def select_reusable_declaration(
             return (99, "")
         state = str(attributes.get("appEncryptionDeclarationState", "")).upper()
         created = str(attributes.get("createdDate", ""))
-        return (_STATE_PRIORITY.get(state, 3), created)
+        return (0 if state == _ACCEPTABLE_STATE else 1, created)
 
     return sorted(matching, key=sort_key)[0]
 
@@ -231,6 +236,27 @@ def ensure_build_compliance(
             },
         )
         declaration = select_reusable_declaration(declarations)
+        pending = next(
+            (
+                candidate
+                for candidate in declarations
+                if declaration_answers_policy(candidate)
+                and str(candidate.get("id", "")).strip()
+            ),
+            None,
+        )
+        if declaration is None and pending is not None:
+            attributes = pending.get("attributes")
+            state = (
+                str(attributes.get("appEncryptionDeclarationState", "")).upper()
+                if isinstance(attributes, Mapping)
+                else "UNKNOWN"
+            )
+            raise ExportComplianceError(
+                "The matching app encryption declaration is not approved "
+                f"(state {state or 'UNKNOWN'}). Complete App Store Connect "
+                "export-compliance review before linking this build."
+            )
 
     if declaration is None:
         create_status, create_body = request(
@@ -245,12 +271,25 @@ def ensure_build_compliance(
             expected={201},
         )
         candidate = response.get("data")
-        if not isinstance(candidate, Mapping) or not declaration_matches_policy(
+        if not isinstance(candidate, Mapping) or not declaration_answers_policy(
             candidate
         ):
             raise ExportComplianceError(
                 "Created app encryption declaration does not match the "
                 "non-exempt standard-cryptography, France-excluded policy"
+            )
+        if not declaration_matches_policy(candidate):
+            attributes = candidate.get("attributes")
+            state = (
+                str(attributes.get("appEncryptionDeclarationState", "")).upper()
+                if isinstance(attributes, Mapping)
+                else "UNKNOWN"
+            )
+            raise ExportComplianceError(
+                "Created the truthful app encryption declaration, but it is "
+                f"not approved (state {state or 'UNKNOWN'}). Complete App "
+                "Store Connect export-compliance review before linking this "
+                "build."
             )
         declaration = candidate
 

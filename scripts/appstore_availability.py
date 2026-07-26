@@ -17,6 +17,26 @@ class AppStoreAvailabilityError(RuntimeError):
     """Raised when a required storefront state cannot be proven."""
 
 
+def require_new_territories_disabled(
+    resource: Mapping[str, object] | None,
+) -> Mapping[str, object]:
+    if resource is None:
+        raise AppStoreAvailabilityError(
+            "App Store territory availability is missing"
+        )
+    attributes = resource.get("attributes")
+    if not isinstance(attributes, Mapping):
+        raise AppStoreAvailabilityError(
+            "App Store territory availability has no attributes"
+        )
+    if attributes.get("availableInNewTerritories") is not False:
+        raise AppStoreAvailabilityError(
+            "App Store availability must disable automatic distribution in "
+            "new territories"
+        )
+    return resource
+
+
 def territory_id(resource: Mapping[str, object]) -> str:
     relationships = resource.get("relationships")
     if not isinstance(relationships, Mapping):

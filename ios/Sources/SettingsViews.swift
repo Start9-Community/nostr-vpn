@@ -921,10 +921,13 @@ struct ExitDnsSettingsCard: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Uses the WireGuard profile DNS when present; otherwise built-in encrypted DNS.")
+                Text("Uses the WireGuard profile DNS when present; otherwise uses Cloudflare encrypted DNS.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            Text("The selected DNS operator can receive your DNS queries and ordinary connection metadata under its own policy. Sirius Business Oy does not operate these resolvers.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
             if let validationError {
                 Text(validationError)

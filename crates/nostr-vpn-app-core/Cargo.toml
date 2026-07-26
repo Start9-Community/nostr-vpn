@@ -13,13 +13,14 @@ name = "nostr_vpn_app_core"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-default = ["paid-exit"]
+default = ["paid-exit", "updater"]
 paid-exit = [
   "nostr-vpn-core/paid-exit",
   "nostr-vpn-core/cashu-wallet",
   "dep:cashu-service",
   "dep:cashu",
 ]
+updater = ["nostr-vpn-core/updater"]
 
 [dependencies]
 anyhow.workspace = true
@@ -36,7 +37,7 @@ fips-endpoint.workspace = true
 netdev.workspace = true
 nostr-sdk.workspace = true
 nostr-identity.workspace = true
-nostr-vpn-core = { workspace = true, features = ["updater", "secure-dns"] }
+nostr-vpn-core = { workspace = true, features = ["secure-dns"] }
 qrcode = { version = "0.14", default-features = false }
 reqwest.workspace = true
 rqrr = "0.10"

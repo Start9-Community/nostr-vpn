@@ -18,6 +18,7 @@ mod wg_upstream_nat;
 pub use actions::NativeAppAction;
 pub use ffi::FfiApp;
 pub use native_state::{NativeAppState, NativeNetworkState, NativeParticipantState};
+#[cfg(feature = "updater")]
 pub use nostr_vpn_core::updater::UpdateAutoCheckPolicy;
 pub use platform::{
     NativeRuntimeCapabilities, RuntimePlatform, current_runtime_capabilities,
