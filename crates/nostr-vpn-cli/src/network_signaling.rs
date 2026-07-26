@@ -2,6 +2,8 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use nostr_vpn_core::config::{maybe_autoconfigure_node, normalize_nostr_pubkey};
+use nostr_vpn_core::join_delivery::queue_join_roster;
+use nostr_vpn_core::join_requests::prepare_manual_join_delivery;
 use serde_json::json;
 
 use super::{
@@ -86,6 +88,12 @@ pub(crate) async fn update_active_network_roster(
 
     app.ensure_defaults();
     maybe_autoconfigure_node(&mut app);
+    if matches!(action, RosterEditAction::AddDevice) {
+        for recipient in &changed {
+            let delivery = prepare_manual_join_delivery(&app, &active_network_id, recipient)?;
+            queue_join_roster(&config_path, recipient, &delivery)?;
+        }
+    }
     app.save(&config_path)?;
     maybe_reload_running_daemon(&config_path);
 
@@ -117,4 +125,56 @@ pub(crate) async fn update_active_network_roster(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use nostr_sdk::Keys;
+    use nostr_vpn_core::config::AppConfig;
+    use nostr_vpn_core::join_delivery::{join_roster_outbox_directory, load_join_rosters};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn add_device_queues_receipt_backed_manual_join_roster() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let config_path = std::env::temp_dir().join(format!(
+            "nvpn-cli-manual-join-{}-{nonce}.toml",
+            std::process::id()
+        ));
+        let mut app = AppConfig::generated();
+        let network_id = app.add_owned_network("Admin");
+        let admin = app.own_nostr_pubkey_hex().expect("admin identity");
+        app.add_admin_to_network(&network_id, &admin)
+            .expect("make local device an admin");
+        app.save(&config_path).expect("save admin config");
+        let recipient = Keys::generate().public_key().to_hex();
+
+        update_active_network_roster(
+            UpdateRosterArgs {
+                config: Some(config_path.clone()),
+                network_id: Some(network_id),
+                devices: vec![recipient.clone()],
+                publish: true,
+                json: true,
+            },
+            RosterEditAction::AddDevice,
+        )
+        .await
+        .expect("add manual joiner");
+
+        let queued = load_join_rosters(&config_path);
+        assert_eq!(queued.len(), 1, "manual approval must remain retryable");
+        assert_eq!(queued[0].1.recipient_npub, recipient);
+
+        fs::remove_file(&queued[0].0).expect("remove queued roster");
+        fs::remove_dir(join_roster_outbox_directory(&config_path)).expect("remove outbox");
+        fs::remove_file(config_path).expect("remove config");
+    }
 }

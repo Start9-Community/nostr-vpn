@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{AppConfig, normalize_nostr_pubkey, normalize_runtime_network_id};
-use crate::fips_control::{JoinRosterControl, SignedRoster};
+use crate::fips_control::{JoinRosterControl, NetworkRoster, SignedRoster};
 use crate::identity_bridge::{
     CreateNostrIdentityDeviceApprovalRequestOptions, NostrIdentityDeviceApprovalRequest,
     create_nostr_identity_device_approval_request, encode_nostr_identity_device_approval_bootstrap,
@@ -39,6 +39,51 @@ pub struct PendingNostrJoinRequest {
     pub version: u8,
     pub request: NostrIdentityDeviceApprovalRequest,
     pub request_private_key: String,
+}
+
+pub fn prepare_manual_join_delivery(
+    config: &AppConfig,
+    network_entry_id: &str,
+    recipient: &str,
+) -> Result<JoinRosterControl> {
+    let signer_keys = config.nostr_keys()?;
+    let signer = signer_keys.public_key().to_hex();
+    let recipient = normalize_nostr_pubkey(recipient)?;
+    let network = config
+        .network_by_id(network_entry_id)
+        .ok_or_else(|| anyhow!("network not found"))?;
+    if !network.admins.iter().any(|admin| admin == &signer) {
+        return Err(anyhow!("active network is not administered by this device"));
+    }
+    if !network
+        .devices
+        .iter()
+        .chain(network.admins.iter())
+        .any(|member| member == &recipient)
+    {
+        return Err(anyhow!(
+            "manual join recipient is not in the network roster"
+        ));
+    }
+    let shared = config.shared_network_roster(network_entry_id)?;
+    if shared.updated_at == 0 {
+        return Err(anyhow!("manual join roster has no signed update timestamp"));
+    }
+    let signed_roster = SignedRoster::sign(
+        shared.network_id.clone(),
+        NetworkRoster {
+            network_name: shared.name,
+            devices: shared.devices,
+            admins: shared.admins,
+            aliases: shared.aliases,
+            signed_at: shared.updated_at,
+        },
+        &signer_keys,
+    )
+    .context("failed to sign manual join network roster")?;
+    let token = manual_join_request_token(&shared.network_id, &signer, &recipient)?;
+    JoinRosterControl::new(signed_roster, &token)
+        .context("failed to bind roster to manual join identifiers")
 }
 
 impl PendingNostrJoinRequest {

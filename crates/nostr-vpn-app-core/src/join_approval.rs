@@ -9,7 +9,8 @@ use nostr_vpn_core::identity_bridge::NostrIdentityDeviceApprovalBootstrap;
 use nostr_vpn_core::join_delivery::{
     join_roster_delivery_expired, load_join_rosters, record_join_roster_attempt,
 };
-use nostr_vpn_core::join_requests::{AppliedNostrJoinRoster, manual_join_request_token};
+use nostr_vpn_core::join_requests::AppliedNostrJoinRoster;
+pub use nostr_vpn_core::join_requests::prepare_manual_join_delivery;
 
 use crate::mobile_tunnel::{MobileTunnel, MobileTunnelConfig};
 
@@ -17,51 +18,6 @@ use crate::mobile_tunnel::{MobileTunnel, MobileTunnelConfig};
 pub struct PreparedJoinApproval {
     pub updated_config: AppConfig,
     pub join_roster: JoinRosterControl,
-}
-
-pub fn prepare_manual_join_delivery(
-    config: &AppConfig,
-    network_entry_id: &str,
-    recipient: &str,
-) -> Result<JoinRosterControl> {
-    let signer_keys = config.nostr_keys()?;
-    let signer = signer_keys.public_key().to_hex();
-    let recipient = normalize_nostr_pubkey(recipient)?;
-    let network = config
-        .network_by_id(network_entry_id)
-        .ok_or_else(|| anyhow!("network not found"))?;
-    if !network.admins.iter().any(|admin| admin == &signer) {
-        return Err(anyhow!("active network is not administered by this device"));
-    }
-    if !network
-        .devices
-        .iter()
-        .chain(network.admins.iter())
-        .any(|member| member == &recipient)
-    {
-        return Err(anyhow!(
-            "manual join recipient is not in the network roster"
-        ));
-    }
-    let shared = config.shared_network_roster(network_entry_id)?;
-    if shared.updated_at == 0 {
-        return Err(anyhow!("manual join roster has no signed update timestamp"));
-    }
-    let signed_roster = SignedRoster::sign(
-        shared.network_id.clone(),
-        NetworkRoster {
-            network_name: shared.name,
-            devices: shared.devices,
-            admins: shared.admins,
-            aliases: shared.aliases,
-            signed_at: shared.updated_at,
-        },
-        &signer_keys,
-    )
-    .context("failed to sign manual join network roster")?;
-    let token = manual_join_request_token(&shared.network_id, &signer, &recipient)?;
-    JoinRosterControl::new(signed_roster, &token)
-        .context("failed to bind roster to manual join identifiers")
 }
 
 pub fn prepare_join_approval(
