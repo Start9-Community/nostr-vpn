@@ -436,6 +436,21 @@ import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+wireguard_start = text.index("configure_android_release_wireguard_ui()")
+wireguard_end = text.index("\nandroid_release_vpn_toggle_checked()", wireguard_start)
+wireguard = text[wireguard_start:wireguard_end]
+reset = wireguard.index("android_ui_reset_scroll")
+selector = wireguard.index("android_ui_scroll_to resource wireguard-enabled")
+checked = wireguard.index("android_ui_query resource wireguard-enabled checked")
+if not reset < selector < checked:
+    raise SystemExit(
+        "Android Release WireGuard gate does not return to its shipped toggle"
+    )
+if 'android_ui_scroll_to description "WireGuard upstream off"' in wireguard:
+    raise SystemExit(
+        "Android Release WireGuard gate still scrolls away from its toggle"
+    )
+
 start = text.index("run_android_release_blackbox_cycle()")
 body = text[start:]
 for forbidden in (

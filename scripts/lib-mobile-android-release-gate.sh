@@ -428,15 +428,34 @@ configure_android_release_wireguard_ui() {
   android_ui_scroll_to resource wireguard-save || return 1
   tap_android_ui resource wireguard-save || return 1
   sleep 1
-  if android_ui_scroll_to description "WireGuard upstream off"; then
-    tap_android_ui description "WireGuard upstream off" || return 1
-    sleep 1
-  fi
-  android_ui_scroll_to description "WireGuard upstream on" || {
-    echo "Android Release WireGuard toggle did not stay enabled" >&2
-    return 1
-  }
-  echo "Android Release WireGuard config saved and enabled through shipped UI"
+  # Multiline entry leaves this card scrolled below its Enabled switch.
+  # Return to the top before inspecting the switch; the generic scroll helper
+  # only searches downward and would otherwise spend its full timeout moving
+  # away from the control.
+  android_ui_reset_scroll
+  android_ui_scroll_to resource wireguard-enabled || return 1
+  local checked
+  checked="$(android_ui_query resource wireguard-enabled checked)" || return 1
+  case "$checked" in
+    false)
+      tap_android_ui resource wireguard-enabled || return 1
+      ;;
+    true) ;;
+    *)
+      echo "Android Release WireGuard toggle state was unavailable" >&2
+      return 1
+      ;;
+  esac
+  local deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if [[ "$(android_ui_query resource wireguard-enabled checked 2>/dev/null || true)" == "true" ]]; then
+      echo "Android Release WireGuard config saved and enabled through shipped UI"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Android Release WireGuard toggle did not stay enabled" >&2
+  return 1
 }
 
 android_release_vpn_toggle_checked() {
