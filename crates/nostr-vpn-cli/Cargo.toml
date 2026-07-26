@@ -87,6 +87,7 @@ required-features = ["paid-exit"]
 
 [dev-dependencies]
 async-trait.workspace = true
+cdk-spilman = "=0.17.6"
 fips-core = { workspace = true, features = ["sim-transport"] }
 futures-util = "0.3"
 nostr-sdk.workspace = true

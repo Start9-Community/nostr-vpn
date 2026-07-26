@@ -141,6 +141,12 @@ pub(crate) fn paid_exit_stream_due_payments_for_daemon(
             ..Default::default()
         });
     }
+    let Some(_client_store_guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
+        return Ok(PaidExitDaemonStreamPaymentsResult {
+            total_due_count,
+            ..Default::default()
+        });
+    };
     let signer = FileSpilmanPaymentSigner::load(&paid_exit_wallet_data_dir(config_path))
         .map_err(|error| anyhow!("{error}"))?;
     let result = paid_exit_stream_payment_updates_with_signer(

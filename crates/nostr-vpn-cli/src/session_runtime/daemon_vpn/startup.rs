@@ -31,6 +31,27 @@ pub(super) struct DaemonVpnStartup {
     pub(super) last_fips_endpoint_peer_signature: EndpointPeerSignature,
 }
 
+pub(super) fn daemon_service_supervisor_requests_restart(
+    executable: Option<&(PathBuf, ExecutableFingerprint)>,
+) -> bool {
+    let Some((executable, launched_fingerprint)) = executable else {
+        return false;
+    };
+    match service_supervisor_restart_due(executable, launched_fingerprint) {
+        Ok(true) => {
+            eprintln!(
+                "daemon: service executable changed on disk; exiting so the supervisor restarts the updated binary"
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            eprintln!("daemon: failed to check service executable fingerprint: {error}");
+            false
+        }
+    }
+}
+
 pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpnStartup> {
     if args.iface.trim().is_empty() {
         return Err(anyhow!("--iface must not be empty"));

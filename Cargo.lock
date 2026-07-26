@@ -3953,6 +3953,7 @@ dependencies = [
  "boringtun",
  "cashu",
  "cashu-service",
+ "cdk-spilman",
  "clap",
  "crab_nat",
  "dirs 6.0.0",

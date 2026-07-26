@@ -32,6 +32,14 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
     if let Some((seller_npub, seller_pubkey, session_id, funded)) =
         recover_automatic_paid_exit_session(&store, &selection, now_unix)
     {
+        let _client_store_guard = if funded {
+            let Some(guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
+                return Ok(false);
+            };
+            Some(guard)
+        } else {
+            None
+        };
         let route_changed =
             app.public_paid_exit_node_pubkey_hex().as_deref() != Some(seller_pubkey.as_str());
         app.select_public_paid_exit_node(&seller_npub)?;

@@ -88,6 +88,8 @@ pub(crate) async fn finalize_automatic_paid_exit(
     };
     drain_paid_exit_buyer_usage(runtime, config_path, &candidate.seller_pubkey, now_unix)?;
     if candidate.funded {
+        let _client_store_guard = try_lock_paid_exit_cashu_client_store(config_path)
+            .ok_or_else(|| anyhow!("Cashu channel storage is busy; retry finalization"))?;
         let wallet_data_dir = paid_exit_wallet_data_dir(config_path);
         let signer =
             FileSpilmanPaymentSigner::load(&wallet_data_dir).map_err(|error| anyhow!("{error}"))?;

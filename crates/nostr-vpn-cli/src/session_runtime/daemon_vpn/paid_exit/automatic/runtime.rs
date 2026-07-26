@@ -125,6 +125,9 @@ pub(crate) async fn update_automatic_paid_exit(
             && candidate.health_evidence_fresh(now_unix)
     });
     if fund {
+        let Some(_client_store_guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
+            return Ok(false);
+        };
         let session_id = automatic
             .candidate
             .as_ref()

@@ -158,6 +158,32 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 #[cfg(target_os = "windows")]
 use windows_service::service_dispatcher;
 
+#[cfg(feature = "paid-exit")]
+fn try_lock_paid_exit_cashu_client_store(
+    config_path: &Path,
+) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    type ClientStoreLocks =
+        std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>;
+    static LOCKS: std::sync::OnceLock<ClientStoreLocks> = std::sync::OnceLock::new();
+
+    let key = paid_exit_wallet_data_dir(config_path);
+    let mut locks = LOCKS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = locks
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade)
+        .unwrap_or_else(|| {
+            let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(key, std::sync::Arc::downgrade(&lock));
+            lock
+        });
+    drop(locks);
+    lock.try_lock_owned().ok()
+}
+
 #[cfg(test)]
 pub(crate) use crate::config_bootstrap::default_cli_install_path;
 #[cfg(target_os = "windows")]
