@@ -94,11 +94,9 @@ sys.path.insert(0, os.environ["NVPN_APPSTORE_SCRIPT_DIR"])
 import appstore_draft_metadata as draft_metadata
 from appstore_availability import (
     AppStoreAvailabilityError,
-    REQUIRED_EXCLUDED_TERRITORIES,
-    find_territory_availability,
-    require_new_territories_disabled,
+    require_all_territories_available,
+    require_new_territories_enabled,
     require_no_eu_trader_status_errors,
-    require_territory_excluded,
     territory_update_request,
 )
 
@@ -917,46 +915,42 @@ def territory_availabilities(availability_id):
         fail(str(error))
 
 
-def ensure_required_territories_excluded(app_id):
+def ensure_worldwide_availability(app_id):
     availability = app_availability(app_id)
     if not availability or not availability.get("id"):
         fail("App Store territory availability has no resource ID")
     try:
-        require_new_territories_disabled(availability)
+        require_new_territories_enabled(availability)
     except AppStoreAvailabilityError as error:
         fail(str(error))
     availability_id = availability["id"]
     rows = territory_availabilities(availability_id)
-    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
-        row = find_territory_availability(rows, territory_id)
-        if row is None or not row.get("id"):
-            fail(f"App Store territory availability has no {territory_name} row")
+    for row in rows:
         if row.get("attributes", {}).get("available") is not False:
-            status, body = request(
-                "PATCH",
-                (
-                    "https://api.appstoreconnect.apple.com/v1/"
-                    f"territoryAvailabilities/{urllib.parse.quote(row['id'])}"
-                ),
-                body=territory_update_request(row["id"], available=False),
-            )
-            require_ok(
-                status,
-                body,
-                f"Exclude {territory_name} from App Store availability",
-            )
+            continue
+        row_id = str(row.get("id", "")).strip()
+        if not row_id:
+            fail("App Store territory availability has no resource ID")
+        status, body = request(
+            "PATCH",
+            (
+                "https://api.appstoreconnect.apple.com/v1/"
+                f"territoryAvailabilities/{urllib.parse.quote(row_id)}"
+            ),
+            body=territory_update_request(row_id, available=True),
+        )
+        require_ok(
+            status,
+            body,
+            "Enable App Store territory availability",
+        )
 
-    verified_rows = territory_availabilities(availability_id)
-    verified = {}
-    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
-        try:
-            verified[territory_id] = require_territory_excluded(
-                find_territory_availability(verified_rows, territory_id),
-                territory_id,
-            )
-        except AppStoreAvailabilityError as error:
-            fail(f"{territory_name}: {error}")
-    return verified
+    try:
+        return require_all_territories_available(
+            territory_availabilities(availability_id)
+        )
+    except AppStoreAvailabilityError as error:
+        fail(str(error))
 
 
 def find_build(app_id):
@@ -1271,7 +1265,7 @@ if ACTION == "status":
         )
     availability = app_availability(app["id"])
     try:
-        require_new_territories_disabled(availability)
+        require_new_territories_enabled(availability)
     except AppStoreAvailabilityError as error:
         fail(str(error))
     print(
@@ -1279,23 +1273,16 @@ if ACTION == "status":
         f"{availability.get('attributes', {}).get('availableInNewTerritories')}"
     )
     rows = territory_availabilities(availability["id"])
-    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
-        row = find_territory_availability(rows, territory_id)
-        if row is None:
-            fail(f"App Store territory availability has no {territory_name} row")
-        print(
-            f"  - {territory_name} available: "
-            f"{row.get('attributes', {}).get('available')}"
-        )
+    try:
+        require_all_territories_available(rows)
+    except AppStoreAvailabilityError as error:
+        fail(str(error))
+    print(f"  - Current territories available: {len(rows)}")
     raise SystemExit(0)
 
 if ACTION == "availability":
-    excluded = ensure_required_territories_excluded(app["id"])
-    for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
-        print(
-            f"{territory_name} availability: "
-            f"{excluded[territory_id].get('attributes', {}).get('available')}"
-        )
+    available = ensure_worldwide_availability(app["id"])
+    print(f"Current territories available: {len(available)}")
     raise SystemExit(0)
 
 version = ensure_version(app["id"])
@@ -1307,7 +1294,7 @@ age_rating = ensure_age_rating(app_info["id"])
 review_detail = ensure_review_detail(version["id"])
 content_rights = ensure_content_rights(app["id"])
 price_schedule_id = ensure_free_price_schedule(app["id"])
-excluded_territories = ensure_required_territories_excluded(app["id"])
+available_territories = ensure_worldwide_availability(app["id"])
 availability = app_availability(app["id"])
 build = find_build(app["id"])
 if build is None:
@@ -1337,11 +1324,7 @@ print(
     "Automatically available in new territories: "
     f"{availability.get('attributes', {}).get('availableInNewTerritories')}"
 )
-for territory_id, territory_name in REQUIRED_EXCLUDED_TERRITORIES.items():
-    print(
-        f"{territory_name} availability: "
-        f"{excluded_territories[territory_id].get('attributes', {}).get('available')}"
-    )
+print(f"Current territories available: {len(available_territories)}")
 print(f"Build: {BUILD_NUMBER} [{build['id']}]")
 print(f"Screenshots uploaded: {len(screenshots)}")
 if submission:
