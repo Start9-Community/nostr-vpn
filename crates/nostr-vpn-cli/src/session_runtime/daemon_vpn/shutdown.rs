@@ -6,9 +6,9 @@ pub(super) fn daemon_termination_wait()
     {
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .context("failed to install SIGTERM handler")?;
-        return Ok(Box::pin(async move {
+        Ok(Box::pin(async move {
             let _ = signal.recv().await;
-        }));
+        }))
     }
     #[cfg(not(unix))]
     Ok(Box::pin(std::future::pending()))
