@@ -11,6 +11,17 @@ REQUIRED_EXCLUDED_TERRITORIES = {
     FRANCE_TERRITORY_ID: "France",
     CHINA_MAINLAND_TERRITORY_ID: "China mainland",
 }
+EU_TERRITORY_IDS = frozenset(
+    "AUT BEL BGR HRV CYP CZE DNK EST FIN FRA DEU GRC HUN IRL ITA "
+    "LVA LTU LUX MLT NLD POL PRT ROU SVK SVN ESP SWE".split()
+)
+DSA_TRADER_CONTENT_ERRORS = frozenset(
+    {
+        "TRADER_STATUS_NOT_PROVIDED",
+        "TRADER_STATUS_VERIFICATION_FAILED",
+        "TRADER_STATUS_VERIFICATION_STATUS_MISSING",
+    }
+)
 
 
 class AppStoreAvailabilityError(RuntimeError):
@@ -63,6 +74,51 @@ def find_territory_availability(
         ),
         None,
     )
+
+
+def require_no_eu_trader_status_errors(
+    resources: Iterable[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Reject DSA trader errors reported for any enabled EU storefront.
+
+    This API check only detects Apple's explicit verification failures. It
+    cannot prove the account's positive trader/non-trader selection, which
+    must also be verified in App Store Connect and on a public EU listing.
+    """
+
+    rows = list(resources)
+    for resource in rows:
+        territory = territory_id(resource)
+        if territory not in EU_TERRITORY_IDS:
+            continue
+        attributes = resource.get("attributes")
+        if not isinstance(attributes, Mapping):
+            raise AppStoreAvailabilityError(
+                f"App Store EU territory {territory} has no attributes"
+            )
+        available = attributes.get("available")
+        if available is not True and available is not False:
+            raise AppStoreAvailabilityError(
+                f"App Store EU territory {territory} has no boolean available state"
+            )
+        if available is False:
+            continue
+        content_statuses = attributes.get("contentStatuses")
+        if not isinstance(content_statuses, list) or not all(
+            isinstance(status, str) for status in content_statuses
+        ):
+            raise AppStoreAvailabilityError(
+                f"App Store EU territory {territory} has malformed contentStatuses"
+            )
+        trader_errors = sorted(
+            DSA_TRADER_CONTENT_ERRORS.intersection(content_statuses)
+        )
+        if trader_errors:
+            raise AppStoreAvailabilityError(
+                f"App Store EU territory {territory} reports DSA trader "
+                f"status error(s): {', '.join(trader_errors)}"
+            )
+    return rows
 
 
 def territory_update_request(

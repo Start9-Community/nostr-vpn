@@ -232,6 +232,112 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("REQUIRED_EXCLUDED_TERRITORIES.items()", draft)
         self.assertIn("territoryAvailabilities/", draft)
 
+    def test_enabled_eu_territories_reject_every_dsa_trader_error(self):
+        for trader_error in availability.DSA_TRADER_CONTENT_ERRORS:
+            with self.subTest(trader_error=trader_error):
+                row = self._territory_availability(
+                    "FIN",
+                    available=True,
+                    content_statuses=["AVAILABLE", trader_error],
+                )
+                with self.assertRaisesRegex(
+                    availability.AppStoreAvailabilityError,
+                    rf"FIN.*{trader_error}",
+                ):
+                    availability.require_no_eu_trader_status_errors([row])
+
+    def test_dsa_gate_checks_only_enabled_eu_territories(self):
+        clean = self._territory_availability(
+            "IRL",
+            available=True,
+            content_statuses=["AVAILABLE"],
+        )
+        disabled_eu = self._territory_availability(
+            "FRA",
+            available=False,
+            content_statuses=["TRADER_STATUS_NOT_PROVIDED"],
+        )
+        enabled_non_eu = self._territory_availability(
+            "USA",
+            available=True,
+            content_statuses=["TRADER_STATUS_VERIFICATION_FAILED"],
+        )
+
+        self.assertEqual(
+            availability.require_no_eu_trader_status_errors(
+                [clean, disabled_eu, enabled_non_eu]
+            ),
+            [clean, disabled_eu, enabled_non_eu],
+        )
+
+    def test_dsa_gate_fails_closed_on_missing_or_malformed_content_statuses(self):
+        for content_statuses in (None, "AVAILABLE", {"status": "AVAILABLE"}):
+            with self.subTest(content_statuses=content_statuses):
+                row = self._territory_availability(
+                    "DEU",
+                    available=True,
+                    content_statuses=content_statuses,
+                )
+                if content_statuses is None:
+                    row["attributes"].pop("contentStatuses")
+                with self.assertRaisesRegex(
+                    availability.AppStoreAvailabilityError,
+                    "DEU.*contentStatuses",
+                ):
+                    availability.require_no_eu_trader_status_errors([row])
+
+    def test_dsa_gate_fails_closed_when_eu_availability_is_not_boolean(self):
+        for available_value in (None, 1, "true"):
+            with self.subTest(available_value=available_value):
+                row = self._territory_availability(
+                    "DEU",
+                    available=available_value,
+                    content_statuses=["AVAILABLE"],
+                )
+                with self.assertRaisesRegex(
+                    availability.AppStoreAvailabilityError,
+                    "DEU.*boolean available",
+                ):
+                    availability.require_no_eu_trader_status_errors([row])
+
+    def test_appstore_draft_requests_and_enforces_dsa_content_statuses(self):
+        draft = (ROOT / "scripts" / "appstore-draft").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            '"available%2CcontentStatuses%2Cterritory"',
+            draft,
+        )
+        self.assertIn(
+            "return require_no_eu_trader_status_errors(",
+            draft,
+        )
+
+    @staticmethod
+    def _territory_availability(
+        territory_id,
+        *,
+        available,
+        content_statuses,
+    ):
+        return {
+            "type": "territoryAvailabilities",
+            "id": f"{territory_id.lower()}-row",
+            "attributes": {
+                "available": available,
+                "contentStatuses": content_statuses,
+            },
+            "relationships": {
+                "territory": {
+                    "data": {
+                        "type": "territories",
+                        "id": territory_id,
+                    }
+                }
+            },
+        }
+
 
 class TestFlightExportComplianceTests(unittest.TestCase):
     def test_declaration_answers_standard_app_crypto_without_france(self):

@@ -97,6 +97,7 @@ from appstore_availability import (
     REQUIRED_EXCLUDED_TERRITORIES,
     find_territory_availability,
     require_new_territories_disabled,
+    require_no_eu_trader_status_errors,
     require_territory_excluded,
     territory_update_request,
 )
@@ -900,15 +901,20 @@ def territory_availabilities(availability_id):
     url = (
         "https://api.appstoreconnect.apple.com/v2/appAvailabilities/"
         f"{urllib.parse.quote(availability_id)}/territoryAvailabilities"
-        "?fields%5BterritoryAvailabilities%5D=available%2Cterritory"
+        "?fields%5BterritoryAvailabilities%5D="
+        "available%2CcontentStatuses%2Cterritory"
         "&include=territory&limit=200"
     )
     status, body = request("GET", url)
-    return require_ok(
+    rows = require_ok(
         status,
         body,
         "Read App Store territory rows",
     ).get("data", [])
+    try:
+        return require_no_eu_trader_status_errors(rows)
+    except AppStoreAvailabilityError as error:
+        fail(str(error))
 
 
 def ensure_required_territories_excluded(app_id):
