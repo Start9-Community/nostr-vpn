@@ -86,7 +86,7 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         )
         self.assertIn("available worldwide", notes)
         self.assertIn("including France and China", notes)
-        self.assertIn("no chat or messaging feature", notes)
+        self.assertNotIn("chat or messaging", notes)
         self.assertIn("Switching between Wi-Fi, cellular, or a personal hotspot", notes)
         self.assertIn("Cloudflare encrypted DNS as the Automatic fallback", notes)
         self.assertIn("Quad9", notes)
@@ -463,10 +463,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             "encrypted networking and control transport",
             export_compliance.APP_DESCRIPTION,
         )
-        self.assertIn(
-            "no chat or messaging",
-            export_compliance.APP_DESCRIPTION,
-        )
+        self.assertNotIn("chat or messaging", export_compliance.APP_DESCRIPTION)
 
         wrong_answers = (
             {"appDescription": "A different app or release"},

@@ -15,8 +15,8 @@ import json
 APP_DESCRIPTION = (
     "Nostr VPN is a user-configured private VPN and mesh networking app. "
     "It implements industry-standard WireGuard and Nostr/FIPS cryptography "
-    "for encrypted networking and control transport. It has no chat or "
-    "messaging feature and uses no proprietary or non-standard cryptography."
+    "for encrypted networking and control transport, and uses no proprietary "
+    "or non-standard cryptography."
 )
 
 _DECLARATION_FIELDS = (
