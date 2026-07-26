@@ -110,6 +110,16 @@ grep -Fq 'NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY' "$remote_native" \
   && grep -Fq 'if [[ "$endpoint_family" != "ipv4" ]]' "$remote_native" \
   && grep -Fq 'meta nfproto ipv4 iifname "$interface" accept' "$remote_native" \
   || { echo "remote native fixture lacks family-specific listener/firewall proof" >&2; exit 1; }
+dnsmasq_block="$(
+  sed -n '/^    dnsmasq \\$/,/^      --pid-file=/p' "$remote_native"
+)"
+grep -Fq -- '--bind-interfaces' <<<"$dnsmasq_block" \
+  && grep -Fq -- '--listen-address="$local_server_ip"' <<<"$dnsmasq_block" \
+  || { echo "remote native DNS is not bound to its explicit lane address" >&2; exit 1; }
+if grep -Fq -- '--interface=' <<<"$dnsmasq_block"; then
+  echo "remote native DNS implicitly unions every lane with loopback" >&2
+  exit 1
+fi
 
 for label in automatic-profile cloudflare-doh quad9-doh custom-doh through-exit; do
   grep -Fq "$label" "$gate" || {

@@ -346,10 +346,18 @@ grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-android-$$"
   || fail "parallel Android exit lane has no isolated Docker fixture"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$"' "$release_gate" \
   || fail "parallel iOS exit lane has no isolated Docker fixture"
-grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1' "$release_gate" \
-  || fail "parallel iOS exit lane shares the Android tunnel subnet"
-grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))"' "$release_gate" \
-  || fail "parallel mobile exit lanes share a host UDP port"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.77.1' <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.77.2' \
+    <<<"$mobile_exit_gate_body" \
+  || fail "parallel Android exit lane has no isolated tunnel address pair"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1' <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2' \
+    <<<"$mobile_exit_gate_body" \
+  || fail "parallel iOS exit lane shares the Android tunnel address pair"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base"' <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))"' \
+    <<<"$mobile_exit_gate_body" \
+  || fail "parallel mobile exit lanes share a WireGuard endpoint port"
 if grep -Fq 'signed-debug' "$release_gate"; then
   fail "signed Release join lane can select a debug Android artifact"
 fi

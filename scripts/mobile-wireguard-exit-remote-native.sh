@@ -678,7 +678,6 @@ PY
     acquire_ip_forward_lease
 
     dnsmasq \
-      --interface="$interface" \
       --bind-interfaces \
       --listen-address="$local_server_ip" \
       --no-hosts \
