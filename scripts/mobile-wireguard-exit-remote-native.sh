@@ -226,25 +226,68 @@ ip_forward_lease_clean() {
   with_ip_forward_lock ip_forward_lease_clean_locked
 }
 
+system_firewall_marker_handle() {
+  local family="$1" table="$2" chain="$3" marker="$4"
+  local rules="" handle="" status=0
+  rules="$(
+    nft -a list chain "$family" "$table" "$chain" 2>/dev/null
+  )" || return 3
+  if handle="$(
+    awk -v expected_marker="comment \042$marker\042" '
+        index($0, expected_marker) {
+          for (field = 1; field <= NF; field++) {
+            if ($field == "handle") {
+              if (!found) {
+                handle = $(field + 1)
+              }
+              found++
+            }
+          }
+        }
+        END {
+          if (found == 1) {
+            print handle
+            exit 0
+          }
+          exit(found == 0 ? 1 : 2)
+        }
+      ' <<<"$rules"
+  )"
+  then
+    status=0
+  else
+    status=$?
+  fi
+  [[ -z "$handle" ]] || printf '%s\n' "$handle"
+  return "$status"
+}
+
 add_system_firewall_rule() {
   local family="$1" table="$2" chain="$3" marker="$4"
   shift 4
   nft list chain "$family" "$table" "$chain" >/dev/null 2>&1 || return 0
+  local existing_status=0
+  system_firewall_marker_handle \
+    "$family" "$table" "$chain" "$marker" >/dev/null 2>&1 \
+    || existing_status=$?
+  if [[ "$existing_status" -eq 0 ]]; then
+    echo "remote fixture found a stale temporary firewall marker" >&2
+    return 1
+  elif [[ "$existing_status" -ne 1 ]]; then
+    echo "remote fixture could not prove its firewall marker is unique" >&2
+    return 1
+  fi
+  printf '%s\t%s\t%s\tpending\t%s\n' \
+    "$family" "$table" "$chain" "$marker" \
+    >>"$system_firewall_rules"
   nft insert rule "$family" "$table" "$chain" "$@" comment "$marker"
   local handle
   handle="$(
-    nft -a list chain "$family" "$table" "$chain" \
-      | awk -v marker="comment \\\"$marker\\\"" '
-          index($0, marker) {
-            for (field = 1; field <= NF; field++) {
-              if ($field == "handle") {
-                print $(field + 1)
-                exit
-              }
-            }
-          }
-        '
-  )"
+    system_firewall_marker_handle "$family" "$table" "$chain" "$marker"
+  )" || {
+    echo "remote fixture could not locate its temporary firewall rule" >&2
+    return 1
+  }
   [[ "$handle" =~ ^[1-9][0-9]*$ ]] || {
     echo "remote fixture could not record its temporary firewall rule" >&2
     return 1
@@ -280,6 +323,25 @@ system_firewall_marker_rules_clean() {
   ! grep -Fq "$marker_prefix" <<<"$ruleset"
 }
 
+delete_system_firewall_marker() {
+  local family="$1" table="$2" chain="$3" marker="$4"
+  local handle="" status=0
+  handle="$(
+    system_firewall_marker_handle "$family" "$table" "$chain" "$marker"
+  )" || status=$?
+  if [[ "$status" -eq 0 && "$handle" =~ ^[1-9][0-9]*$ ]]; then
+    nft delete rule "$family" "$table" "$chain" handle "$handle" \
+      >/dev/null 2>&1 || true
+  elif [[ "$status" -ne 1 ]]; then
+    return 1
+  fi
+  status=0
+  system_firewall_marker_handle \
+    "$family" "$table" "$chain" "$marker" >/dev/null 2>&1 \
+    || status=$?
+  [[ "$status" -eq 1 ]]
+}
+
 remove_system_firewall_rules() {
   [[ -f "$system_firewall_rules" ]] || return 0
   local family table chain handle marker failed=0
@@ -287,9 +349,16 @@ remove_system_firewall_rules() {
     if [[ ! "$family" =~ ^(inet|ip|ip6)$ \
       || ! "$table" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
       || ! "$chain" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
-      || ! "$handle" =~ ^[1-9][0-9]*$ \
       || ! "$marker" =~ ^nvpn-mobile-[a-zA-Z0-9_-]+$ ]]
     then
+      failed=1
+      continue
+    fi
+    if [[ "$handle" == "pending" ]]; then
+      delete_system_firewall_marker \
+        "$family" "$table" "$chain" "$marker" || failed=1
+      continue
+    elif [[ ! "$handle" =~ ^[1-9][0-9]*$ ]]; then
       failed=1
       continue
     fi
@@ -360,12 +429,21 @@ system_firewall_rules_clean() {
     [[ "$family" =~ ^(inet|ip|ip6)$ \
       && "$table" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
       && "$chain" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
-      && "$handle" =~ ^[1-9][0-9]*$ \
       && "$marker" =~ ^nvpn-mobile-[a-zA-Z0-9_-]+$ ]] \
       || return 1
-    if system_firewall_rule_exists \
-        "$family" "$table" "$chain" "$handle" "$marker"
-    then
+    if [[ "$handle" == "pending" ]]; then
+      local status=0
+      system_firewall_marker_handle \
+        "$family" "$table" "$chain" "$marker" >/dev/null 2>&1 \
+        || status=$?
+      [[ "$status" -eq 1 ]] || return 1
+    elif [[ "$handle" =~ ^[1-9][0-9]*$ ]]; then
+      if system_firewall_rule_exists \
+          "$family" "$table" "$chain" "$handle" "$marker"
+      then
+        return 1
+      fi
+    else
       return 1
     fi
   done <"$system_firewall_rules"

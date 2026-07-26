@@ -110,7 +110,8 @@ if [[ -n "${NFT_CALLS:-}" ]]; then
   printf '%s\n' "$*" >>"$NFT_CALLS"
 fi
 if [[ "$*" == "delete rule ip6 filter INPUT handle 42" ]]; then
-  if [[ "${MOCK_NFT_MODE:-retained}" == "owned" \
+  if [[ ("${MOCK_NFT_MODE:-retained}" == "owned" \
+      || "${MOCK_NFT_MODE:-retained}" == "large-owned") \
     && -f "${NFT_RULE_STATE:-}" ]]
   then
     rm -f "$NFT_RULE_STATE"
@@ -118,11 +119,58 @@ if [[ "$*" == "delete rule ip6 filter INPUT handle 42" ]]; then
   fi
   exit 1
 fi
+if [[ "$*" == "list chain ip6 filter INPUT" \
+  && ("${MOCK_NFT_MODE:-retained}" == "owned" \
+    || "${MOCK_NFT_MODE:-retained}" == "large-owned" \
+    || "${MOCK_NFT_MODE:-retained}" == "append-fail" \
+    || "${MOCK_NFT_MODE:-retained}" == "precheck-dump-fail" \
+    || "${MOCK_NFT_MODE:-retained}" == "transactional-fail") ]]
+then
+  exit 0
+fi
+if [[ "$*" == "insert rule ip6 filter INPUT "* \
+  && ("${MOCK_NFT_MODE:-retained}" == "large-owned" \
+    || "${MOCK_NFT_MODE:-retained}" == "owned" \
+    || "${MOCK_NFT_MODE:-retained}" == "append-fail" \
+    || "${MOCK_NFT_MODE:-retained}" == "transactional-fail") ]]
+then
+  touch "$NFT_RULE_STATE"
+  exit 0
+fi
 if [[ "$*" == "-a list chain ip6 filter INPUT" ]]; then
   if [[ "${MOCK_NFT_MODE:-retained}" == "handle-reused" ]]; then
     printf '%s\n' \
       'udp dport 22 accept comment "unrelated-host-rule" # handle 42'
-  elif [[ "${MOCK_NFT_MODE:-retained}" != "owned" \
+  elif [[ "${MOCK_NFT_MODE:-retained}" == "precheck-dump-fail" ]]; then
+    exit 1
+  elif [[ "${MOCK_NFT_MODE:-retained}" == "transactional-fail" ]]; then
+    [[ ! -f "${NFT_RULE_STATE:-}" ]]
+    exit
+  elif [[ "${MOCK_NFT_MODE:-retained}" == "append-fail" ]]; then
+    if [[ -f "${NFT_RULE_STATE:-}" ]]; then
+      chmod 400 "$NFT_RECEIPT_FILE"
+      printf '%s\n' \
+        'udp dport 55999 accept comment "nvpn-mobile-nwg55999-input-v6" # handle 42'
+    fi
+  elif [[ "${MOCK_NFT_MODE:-retained}" == "large-owned" ]]; then
+    python3 - "${NFT_RULE_STATE:-}" <<'PY'
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1])
+if state.is_file():
+    print(
+        'udp dport 55999 accept '
+        'comment "nvpn-mobile-nwg55999-input-v6" # handle 42'
+    )
+for handle in range(100_000, 150_000):
+    print(f'counter packets 0 bytes 0 # handle {handle}')
+PY
+    exit $?
+  elif [[ ("${MOCK_NFT_MODE:-retained}" != "owned" \
+      && "${MOCK_NFT_MODE:-retained}" != "large-owned" \
+      && "${MOCK_NFT_MODE:-retained}" != "append-fail" \
+      && "${MOCK_NFT_MODE:-retained}" != "transactional-fail") \
     || -f "${NFT_RULE_STATE:-}" ]]
   then
     printf '%s\n' \
@@ -134,7 +182,15 @@ if [[ "$*" == "-a list ruleset" ]]; then
   if [[ "${MOCK_NFT_MODE:-retained}" == "handle-reused" ]]; then
     printf '%s\n' \
       'udp dport 22 accept comment "unrelated-host-rule" # handle 42'
-  elif [[ "${MOCK_NFT_MODE:-retained}" != "owned" \
+  elif [[ "${MOCK_NFT_MODE:-retained}" == "large-owned" \
+    && -f "${NFT_RULE_STATE:-}" ]]
+  then
+    printf '%s\n' \
+      'udp dport 55999 accept comment "nvpn-mobile-nwg55999-input-v6" # handle 42'
+  elif [[ ("${MOCK_NFT_MODE:-retained}" != "owned" \
+      && "${MOCK_NFT_MODE:-retained}" != "large-owned" \
+      && "${MOCK_NFT_MODE:-retained}" != "append-fail" \
+      && "${MOCK_NFT_MODE:-retained}" != "transactional-fail") \
     || -f "${NFT_RULE_STATE:-}" ]]
   then
     printf '%s\n' \
@@ -199,11 +255,21 @@ fi
 case "$REMOTE_NATIVE_ACTION" in
   clean) assert_fixture_clean ;;
   stop) stop_fixture ;;
+  firewall-add)
+    : >"$system_firewall_rules"
+    add_system_firewall_rule \
+      ip6 filter INPUT nvpn-mobile-nwg55999-input-v6 \
+      udp dport 55999 accept
+    ;;
   lease-acquire) acquire_ip_forward_lease ;;
   lease-stop) release_ip_forward_lease_and_delete_interface ;;
   lease-clean) ip_forward_lease_clean ;;
-  lease-hup-wait)
+  fixture-hup-wait)
     install_fixture_cleanup_trap
+    : >"$system_firewall_rules"
+    add_system_firewall_rule \
+      ip6 filter INPUT nvpn-mobile-nwg55999-input-v6 \
+      udp dport 55999 accept
     acquire_ip_forward_lease
     printf '%s\n' "$$" >"$HUP_READY_FOR_HARNESS"
     while :; do :; done
@@ -216,6 +282,250 @@ IP_FORWARD_LOCK="$TMP_ROOT/ip-forward.lock"
 IP_FORWARD_STATE="$TMP_ROOT/ip-forward-state"
 IP_FORWARD_SYSCTL="$TMP_ROOT/ip-forward"
 printf '0\n' >"$IP_FORWARD_SYSCTL"
+
+# A marker that predates this insertion attempt is not ours. The add must fail
+# before writing a pending receipt, and cleanup must leave that rule untouched.
+PREEXISTING_RULE_STATE="$TMP_ROOT/preexisting-rule"
+touch "$PREEXISTING_RULE_STATE"
+: >"$CALLS"
+if env \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_NFT_MODE=owned \
+    NFT_CALLS="$CALLS" \
+    NFT_RULE_STATE="$PREEXISTING_RULE_STATE" \
+    REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+    REMOTE_NATIVE_ACTION=firewall-add \
+    IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+    IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+    IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+    NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+    NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+    NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+    NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+    "$REMOTE_RUNNER" >/dev/null 2>&1
+then
+  echo "firewall insertion accepted a pre-existing marker" >&2
+  exit 1
+fi
+[[ -e "$PREEXISTING_RULE_STATE" \
+  && ! -s "$REMOTE_STATE/system-firewall-rules.tsv" ]]
+if env \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_NFT_MODE=owned \
+    NFT_CALLS="$CALLS" \
+    NFT_RULE_STATE="$PREEXISTING_RULE_STATE" \
+    REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+    REMOTE_NATIVE_ACTION=stop \
+    IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+    IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+    IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+    NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+    NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+    NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+    NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+    "$REMOTE_RUNNER" >/dev/null 2>&1
+then
+  echo "cleanup accepted a pre-existing firewall marker" >&2
+  exit 1
+fi
+[[ -e "$PREEXISTING_RULE_STATE" ]]
+if grep -Eq '^(insert|delete) rule ' "$CALLS"; then
+  echo "firewall insertion mutated a pre-existing marker" >&2
+  exit 1
+fi
+rm -f "$PREEXISTING_RULE_STATE" \
+  "$REMOTE_STATE/system-firewall-rules.tsv"
+
+# A failed full-chain precheck is not proof that the marker is absent, even when
+# the failed dump returned no rows. Do not claim ownership or mutate host state.
+DUMP_FAILURE_RULE_STATE="$TMP_ROOT/dump-failure-preexisting-rule"
+touch "$DUMP_FAILURE_RULE_STATE"
+: >"$CALLS"
+if env \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_NFT_MODE=precheck-dump-fail \
+    NFT_CALLS="$CALLS" \
+    NFT_RULE_STATE="$DUMP_FAILURE_RULE_STATE" \
+    REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+    REMOTE_NATIVE_ACTION=firewall-add \
+    IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+    IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+    IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+    NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+    NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+    NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+    NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+    "$REMOTE_RUNNER" >/dev/null 2>&1
+then
+  echo "firewall insertion accepted a failed marker precheck" >&2
+  exit 1
+fi
+[[ -e "$DUMP_FAILURE_RULE_STATE" \
+  && ! -s "$REMOTE_STATE/system-firewall-rules.tsv" ]]
+if grep -Eq '^(insert|delete) rule ' "$CALLS"; then
+  echo "failed marker precheck mutated host firewall state" >&2
+  exit 1
+fi
+rm -f "$DUMP_FAILURE_RULE_STATE" \
+  "$REMOTE_STATE/system-firewall-rules.tsv"
+
+# The real host chain is large enough that an awk early-exit makes nft receive
+# SIGPIPE under pipefail. This producer puts the marker first and keeps writing;
+# insertion must still record both its pending recovery marker and exact handle.
+LARGE_RULE_STATE="$TMP_ROOT/large-owned-rule"
+touch "$LARGE_RULE_STATE"
+set +e
+MOCK_NFT_MODE=large-owned \
+  NFT_RULE_STATE="$LARGE_RULE_STATE" \
+  "$MOCK_BIN/nft" -a list chain ip6 filter INPUT 2>/dev/null \
+  | awk '/nvpn-mobile-nwg55999-input-v6/ { exit }' >/dev/null
+old_early_exit_status=$?
+set -e
+[[ "$old_early_exit_status" -ne 0 ]] || {
+  echo "large nft producer cannot reproduce the old SIGPIPE failure" >&2
+  exit 1
+}
+rm -f "$LARGE_RULE_STATE"
+: >"$CALLS"
+env \
+  PATH="$MOCK_BIN:/usr/bin:/bin" \
+  MOCK_NFT_MODE=large-owned \
+  NFT_CALLS="$CALLS" \
+  NFT_RULE_STATE="$LARGE_RULE_STATE" \
+  REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+  REMOTE_NATIVE_ACTION=firewall-add \
+  IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+  IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+  IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+  NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+  NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+  NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+  NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+  "$REMOTE_RUNNER"
+grep -Fqx \
+  $'ip6\tfilter\tINPUT\tpending\tnvpn-mobile-nwg55999-input-v6' \
+  "$REMOTE_STATE/system-firewall-rules.tsv"
+grep -Fqx \
+  $'ip6\tfilter\tINPUT\t42\tnvpn-mobile-nwg55999-input-v6' \
+  "$REMOTE_STATE/system-firewall-rules.tsv"
+env \
+  PATH="$MOCK_BIN:/usr/bin:/bin" \
+  MOCK_NFT_MODE=large-owned \
+  NFT_CALLS="$CALLS" \
+  NFT_RULE_STATE="$LARGE_RULE_STATE" \
+  REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+  REMOTE_NATIVE_ACTION=stop \
+  IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+  IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+  IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+  NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+  NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+  NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+  NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+  "$REMOTE_RUNNER"
+[[ ! -e "$LARGE_RULE_STATE" \
+  && ! -e "$REMOTE_STATE/system-firewall-rules.tsv" ]] || {
+  echo "large host-chain cleanup did not consume its recoverable receipt" >&2
+  exit 1
+}
+
+# If insertion succeeds but the immediate handle lookup fails, the pending
+# receipt must be sufficient for the next cleanup attempt to remove it.
+TRANSACTION_RULE_STATE="$TMP_ROOT/transaction-rule"
+: >"$CALLS"
+if env \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_NFT_MODE=transactional-fail \
+    NFT_CALLS="$CALLS" \
+    NFT_RULE_STATE="$TRANSACTION_RULE_STATE" \
+    REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+    REMOTE_NATIVE_ACTION=firewall-add \
+    IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+    IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+    IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+    NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+    NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+    NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+    NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+    "$REMOTE_RUNNER" >/dev/null 2>&1
+then
+  echo "firewall insertion accepted a failed handle lookup" >&2
+  exit 1
+fi
+[[ -e "$TRANSACTION_RULE_STATE" ]]
+[[ "$(<"$REMOTE_STATE/system-firewall-rules.tsv")" \
+  == $'ip6\tfilter\tINPUT\tpending\tnvpn-mobile-nwg55999-input-v6' ]]
+env \
+  PATH="$MOCK_BIN:/usr/bin:/bin" \
+  MOCK_NFT_MODE=owned \
+  NFT_CALLS="$CALLS" \
+  NFT_RULE_STATE="$TRANSACTION_RULE_STATE" \
+  REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+  REMOTE_NATIVE_ACTION=stop \
+  IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+  IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+  IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+  NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+  NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+  NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+  NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+  "$REMOTE_RUNNER"
+[[ ! -e "$TRANSACTION_RULE_STATE" \
+  && ! -e "$REMOTE_STATE/system-firewall-rules.tsv" ]] || {
+  echo "pending firewall receipt did not recover an inserted rule" >&2
+  exit 1
+}
+
+# A successful insert and handle lookup can still lose the exact receipt append
+# (for example, storage becoming unwritable). The already-durable pending row
+# must recover that rule too.
+APPEND_RULE_STATE="$TMP_ROOT/append-rule"
+: >"$CALLS"
+if env \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_NFT_MODE=append-fail \
+    NFT_CALLS="$CALLS" \
+    NFT_RULE_STATE="$APPEND_RULE_STATE" \
+    NFT_RECEIPT_FILE="$REMOTE_STATE/system-firewall-rules.tsv" \
+    REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+    REMOTE_NATIVE_ACTION=firewall-add \
+    IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+    IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+    IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+    NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+    NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+    NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+    NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+    "$REMOTE_RUNNER" >/dev/null 2>&1
+then
+  echo "firewall insertion accepted a failed exact receipt append" >&2
+  exit 1
+fi
+chmod 600 "$REMOTE_STATE/system-firewall-rules.tsv"
+[[ -e "$APPEND_RULE_STATE" ]]
+[[ "$(<"$REMOTE_STATE/system-firewall-rules.tsv")" \
+  == $'ip6\tfilter\tINPUT\tpending\tnvpn-mobile-nwg55999-input-v6' ]]
+env \
+  PATH="$MOCK_BIN:/usr/bin:/bin" \
+  MOCK_NFT_MODE=owned \
+  NFT_CALLS="$CALLS" \
+  NFT_RULE_STATE="$APPEND_RULE_STATE" \
+  REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
+  REMOTE_NATIVE_ACTION=stop \
+  IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
+  IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
+  IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
+  NVPN_MOBILE_WG_REMOTE_STATE_DIR="$REMOTE_STATE" \
+  NVPN_MOBILE_WG_REMOTE_INTERFACE=nwg55999 \
+  NVPN_MOBILE_WG_REMOTE_NFT_TABLE=nvpnwg55999 \
+  NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=ipv6 \
+  "$REMOTE_RUNNER"
+[[ ! -e "$APPEND_RULE_STATE" \
+  && ! -e "$REMOTE_STATE/system-firewall-rules.tsv" ]] || {
+  echo "pending receipt did not recover a failed exact receipt append" >&2
+  exit 1
+}
+
 printf 'ip6\tfilter\tINPUT\t42\tnvpn-mobile-nwg55999-input-v6\n' \
   >"$REMOTE_STATE/system-firewall-rules.tsv"
 if env \
@@ -260,7 +570,9 @@ then
 fi
 
 : >"$CALLS"
-printf 'ip6\tfilter\tINPUT\t42\tnvpn-mobile-nwg55999-input-v6\n' \
+printf '%s\n%s\n' \
+  $'ip6\tfilter\tINPUT\tpending\tnvpn-mobile-nwg55999-input-v6' \
+  $'ip6\tfilter\tINPUT\t42\tnvpn-mobile-nwg55999-input-v6' \
   >"$REMOTE_STATE/system-firewall-rules.tsv"
 if ! env \
     PATH="$MOCK_BIN:/usr/bin:/bin" \
@@ -347,6 +659,9 @@ run_lease_action() {
   env \
     PATH="$MOCK_BIN:/usr/bin:/bin" \
     MOCK_IP_STATE_DIR="$MOCK_IP_STATE" \
+    MOCK_NFT_MODE="${MOCK_NFT_MODE:-handle-reused}" \
+    NFT_RULE_STATE="${NFT_RULE_STATE:-}" \
+    NFT_CALLS="${NFT_CALLS:-}" \
     REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
     REMOTE_NATIVE_ACTION="$lease_action" \
     SLOW_IP_FORWARD_WRITE_FOR_HARNESS="$slow_write" \
@@ -471,12 +786,16 @@ fi
 rm -rf "$IP_FORWARD_STATE"
 
 # SSH commonly terminates the remote process with SIGHUP. Exercise the exact
-# production trap and prove it releases the lease and deletes its interface.
+# production trap after a real add receipt and prove rule, receipt, lease, and
+# interface cleanup all complete.
 printf '0\n' >"$IP_FORWARD_SYSCTL"
-touch "$MOCK_IP_STATE/nwg56004"
+touch "$MOCK_IP_STATE/nwg55999"
 HUP_READY="$TMP_ROOT/hup-ready"
+HUP_RULE_STATE="$TMP_ROOT/hup-rule"
 HUP_READY_FOR_HARNESS="$HUP_READY" \
-  run_lease_action lease-hup-wait "$LEASE_HUP" nwg56004 &
+MOCK_NFT_MODE=owned \
+NFT_RULE_STATE="$HUP_RULE_STATE" \
+  run_lease_action fixture-hup-wait "$LEASE_HUP" nwg55999 &
 hup_pid=$!
 for _ in $(seq 1 200); do
   [[ -f "$HUP_READY" ]] && break
@@ -484,11 +803,18 @@ for _ in $(seq 1 200); do
   sleep 0.01
 done
 [[ -f "$HUP_READY" ]] || {
-  echo "SIGHUP cleanup fixture did not acquire its forwarding lease" >&2
+  echo "SIGHUP cleanup fixture did not acquire its rule and lease" >&2
   kill "$hup_pid" 2>/dev/null || true
   wait "$hup_pid" 2>/dev/null || true
   exit 1
 }
+[[ -e "$HUP_RULE_STATE" ]]
+grep -Fqx \
+  $'ip6\tfilter\tINPUT\tpending\tnvpn-mobile-nwg55999-input-v6' \
+  "$LEASE_HUP/system-firewall-rules.tsv"
+grep -Fqx \
+  $'ip6\tfilter\tINPUT\t42\tnvpn-mobile-nwg55999-input-v6' \
+  "$LEASE_HUP/system-firewall-rules.tsv"
 hup_target="$(<"$HUP_READY")"
 [[ "$hup_target" =~ ^[1-9][0-9]*$ ]]
 kill -HUP "$hup_target"
@@ -497,7 +823,9 @@ wait "$hup_pid"
 hup_status=$?
 set -e
 [[ "$hup_status" -ne 0 \
-  && ! -e "$MOCK_IP_STATE/nwg56004" ]]
+  && ! -e "$MOCK_IP_STATE/nwg55999" \
+  && ! -e "$HUP_RULE_STATE" \
+  && ! -e "$LEASE_HUP/system-firewall-rules.tsv" ]]
 assert_zero_leases_and_original 0
 
 echo "mobile WireGuard fixture cleanup harness passed"
