@@ -112,7 +112,9 @@ for required in (
     "NVPN_RELEASE_JOIN_LIFECYCLE_READY=1",
     "NVPN_RELEASE_JOIN_QR_DECODED=1",
     "NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS",
-    "Joiner stayed on its QR page",
+    "waitForRosterBackedPendingQrDismissal",
+    "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS",
+    "Join QR disappeared before the exact admin roster was visible",
     "roster-participant-",
     "testScanPhysicalJoinQrAndRequireAdminRosterProgress",
     "testShowPhysicalJoinQrAndRequireRosterCompletion",
@@ -123,12 +125,41 @@ for required in (
         raise SystemExit(f"Release join XCTest is missing {required}")
 if "paste" in ios_test.lower() or "UIPasteboard" in ios_test:
     raise SystemExit("Release QR XCTest may not paste/import a join request")
+if "waitForPendingQrDismissal" in ios_test:
+    raise SystemExit(
+        "Release QR XCTest still permits dismissal before the exact roster is visible"
+    )
+ios_roster_transition = ios_test.split(
+    "private func waitForRosterBackedPendingQrDismissal", 1
+)[1].split("private func allowCameraAccessIfNeeded", 1)[0]
+for forbidden in (".waitForExistence", "waitUntil("):
+    if forbidden in ios_roster_transition:
+        raise SystemExit(
+            "Release QR XCTest waits for roster state after the QR disappeared"
+        )
+for required in (
+    'guard app.tabBars.buttons["Devices"].exists else {',
+    'guard element("roster-participant-\\(expectedParticipant)").exists else {',
+    "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS",
+):
+    if required not in ios_roster_transition:
+        raise SystemExit(
+            "Release QR XCTest lacks an immediate roster-backed dismissal check: "
+            + required
+        )
+if ios_roster_transition.index(
+    'element("roster-participant-\\(expectedParticipant)").exists'
+) > ios_roster_transition.index(
+    "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS"
+):
+    raise SystemExit("Release QR XCTest records dismissal before checking the roster")
 
 for required in (
     "phase_ios_admin_android_qr",
     "phase_android_admin_ios_qr",
     "phase_ios_admin_android_manual",
     "phase_android_admin_ios_manual",
+    "release_join_android_wait_qr_join_complete",
     "release_join_android_wait_join_complete",
     "macos-vm-release-mobile-join-e2e.sh",
     "opticalCameraQr",
@@ -270,6 +301,88 @@ if "xcrun xctrace list devices" in release_gate:
 if "devicectl device info details" not in release_gate or "xcrun xcdevice list" not in release_gate:
     raise SystemExit("Release iPhone preflight does not use CoreDevice/xcdevice")
 PY
+
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=2
+  RELEASE_JOIN_ANDROID_JOINER_ID=npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+  roster_queries=0
+
+  release_join_android_launch() { :; }
+  release_join_android_dump_ui() { :; }
+  release_join_android_query_dumped() {
+    local kind="$1" expected="$2"
+    if [[ "$kind" == resource && "$expected" == navigation-devices ]]; then
+      return 0
+    fi
+    if [[ "$kind" == resource && "$expected" == roster-participant-npub1admin ]]; then
+      roster_queries=$((roster_queries + 1))
+      ((roster_queries >= 2))
+      return
+    fi
+    return 1
+  }
+
+  declare -F release_join_android_wait_qr_join_complete >/dev/null \
+    || {
+      echo "Android Release join UI lacks the roster-backed QR completion waiter" >&2
+      exit 1
+    }
+  if release_join_android_wait_qr_join_complete npub1admin 2>/dev/null; then
+    echo "Android QR join accepted a roster that appeared after premature dismissal" >&2
+    exit 1
+  fi
+  [[ "$roster_queries" == 1 ]] || {
+    echo "Android QR join kept polling after the QR disappeared without its roster" >&2
+    exit 1
+  }
+)
+
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=2
+  RELEASE_JOIN_ANDROID_JOINER_ID=npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+  snapshot=0
+
+  release_join_android_launch() { :; }
+  release_join_android_dump_ui() {
+    snapshot=$((snapshot + 1))
+  }
+  release_join_android_query_dumped() {
+    local kind="$1" expected="$2" output="$3"
+    if ((snapshot == 1)); then
+      if [[ "$kind" == description && "$expected" == "Join request QR code" ]]; then
+        return 0
+      fi
+      if [[ "$kind" == resource \
+        && "$expected" == joiner-device-id-value \
+        && "$output" == description ]]
+      then
+        printf 'Joiner Device ID value: %s\n' "$RELEASE_JOIN_ANDROID_JOINER_ID"
+        return 0
+      fi
+      return 1
+    fi
+    if [[ "$kind" == resource ]] \
+      && [[ "$expected" == navigation-devices \
+        || "$expected" == roster-participant-npub1admin ]]
+    then
+      return 0
+    fi
+    return 1
+  }
+  sleep() { :; }
+
+  release_join_android_wait_qr_join_complete npub1admin \
+    || {
+      echo "Android QR join rejected an atomic QR-to-exact-roster transition" >&2
+      exit 1
+    }
+  [[ "$snapshot" == 2 ]] || {
+    echo "Android QR join did not accept the first exact roster snapshot" >&2
+    exit 1
+  }
+)
 
 fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
 trap 'rm -f "$fixture"' EXIT

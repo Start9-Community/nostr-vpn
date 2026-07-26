@@ -160,7 +160,7 @@ phase_ios_admin_android_qr() {
   submitted="$(
     ios_marker_value_from "$scan_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
   )"
-  release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
+  release_join_android_wait_qr_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel stayed on QR view or lacked the exact iPhone admin roster row"
   completed="$(release_join_now_ms)"
   assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-QR"

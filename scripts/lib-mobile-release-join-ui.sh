@@ -25,6 +25,11 @@ release_join_android_dump_ui() {
 release_join_android_query() {
   local kind="$1" expected="$2" output="$3"
   release_join_android_dump_ui
+  release_join_android_query_dumped "$kind" "$expected" "$output"
+}
+
+release_join_android_query_dumped() {
+  local kind="$1" expected="$2" output="$3"
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$RELEASE_JOIN_ANDROID_UI_XML" "$kind" "$expected" "$output"
 }
@@ -202,6 +207,39 @@ release_join_android_wait_join_complete() {
       fi
     fi
     sleep 0.25
+  done
+  return 1
+}
+
+release_join_android_wait_qr_join_complete() {
+  local admin="$1" deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
+  local description
+  while ((SECONDS < deadline)); do
+    release_join_android_launch >/dev/null 2>&1 || true
+    release_join_android_dump_ui
+    if release_join_android_query_dumped \
+        description "Join request QR code" center >/dev/null 2>&1; then
+      description="$(
+        release_join_android_query_dumped \
+          resource joiner-device-id-value description
+      )" || return 1
+      [[ "$description" == \
+        "Joiner Device ID value: $RELEASE_JOIN_ANDROID_JOINER_ID" ]] \
+        || return 1
+      sleep 0.25
+      continue
+    fi
+    if ! release_join_android_query_dumped \
+        resource navigation-devices center >/dev/null 2>&1; then
+      echo "Android join QR disappeared before joined navigation was visible" >&2
+      return 1
+    fi
+    if ! release_join_android_query_dumped \
+        resource "roster-participant-$admin" center >/dev/null 2>&1; then
+      echo "Android join QR disappeared before the exact admin roster was visible" >&2
+      return 1
+    fi
+    return 0
   done
   return 1
 }

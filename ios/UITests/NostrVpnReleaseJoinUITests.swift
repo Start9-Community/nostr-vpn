@@ -53,13 +53,11 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         emit("NVPN_RELEASE_JOIN_LIFECYCLE_READY=1")
 
         XCTAssertTrue(
-            waitForPendingQrDismissal(qr),
-            "Joiner stayed on its QR page after the admin accepted the request"
-        )
-        openDevicesTab()
-        XCTAssertTrue(
-            element("roster-participant-\(expectedAdmin)").waitForExistence(timeout: deliveryTimeout),
-            "Joined roster did not show the exact admin identity"
+            waitForRosterBackedPendingQrDismissal(
+                qr,
+                expectedParticipant: expectedAdmin
+            ),
+            "Join QR disappeared before the exact admin roster was visible"
         )
         emit("NVPN_RELEASE_JOIN_JOINER_LEFT_QR=1")
         emit("NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=\(expectedAdmin)")
@@ -322,12 +320,26 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
-    private func waitForPendingQrDismissal(_ qr: XCUIElement) -> Bool {
+    private func waitForRosterBackedPendingQrDismissal(
+        _ qr: XCUIElement,
+        expectedParticipant: String
+    ) -> Bool {
         let deadline = Date().addingTimeInterval(deliveryTimeout)
         repeat {
             if qr.exists {
                 emit("NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS=\(millisecondsSinceEpoch())")
-            } else if app.tabBars.buttons["Devices"].exists {
+            } else {
+                guard app.tabBars.buttons["Devices"].exists else {
+                    return false
+                }
+                openDevicesTab()
+                guard element("roster-participant-\(expectedParticipant)").exists else {
+                    return false
+                }
+                emit(
+                    "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS="
+                        + "\(millisecondsSinceEpoch())"
+                )
                 return true
             }
             Thread.sleep(forTimeInterval: 0.1)
