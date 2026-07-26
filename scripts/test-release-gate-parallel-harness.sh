@@ -92,6 +92,25 @@ if grep -Fxq '  node scripts/sync-versions.mjs' "$release_gate"; then
 fi
 grep -Fq 'release_gate_parallel_start "Windows platform"' "$release_gate" \
   || fail "release gate does not dispatch the remote Windows lane"
+candidate_preflight_line="$(
+  grep -n '^  run_release_gate_candidate_preflight$' "$release_gate" \
+    | cut -d: -f1 || true
+)"
+windows_dispatch_line="$(
+  grep -n 'release_gate_parallel_start "Windows platform"' "$release_gate" \
+    | tail -1 | cut -d: -f1 || true
+)"
+static_preflight_line="$(
+  grep -n '^  run_release_gate_static_preflight$' "$release_gate" \
+    | cut -d: -f1 || true
+)"
+[[ -n "$candidate_preflight_line" \
+  && -n "$windows_dispatch_line" \
+  && -n "$static_preflight_line" ]] \
+  || fail "release gate preflight/remote overlap markers are incomplete"
+(( candidate_preflight_line < windows_dispatch_line \
+  && windows_dispatch_line < static_preflight_line )) \
+  || fail "remote platform lanes do not overlap the non-mutating static preflight"
 grep -Fq 'release_gate_parallel_start "Docker node image build"' "$release_gate" \
   || fail "release gate does not overlap the reusable Docker build with host validation"
 grep -Fq '"Android compile, unit tests, and lint"' "$release_gate" \

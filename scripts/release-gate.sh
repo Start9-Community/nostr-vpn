@@ -233,12 +233,15 @@ release_cargo_test_filter() (
   rm -f "$output"
 )
 
-run_release_gate_preflight() {
+run_release_gate_candidate_preflight() {
   if ! command -v rg >/dev/null 2>&1; then
     echo "Release gate requires ripgrep (rg) for source contract harnesses." >&2
     return 1
   fi
   node scripts/sync-versions.mjs --check
+}
+
+run_release_gate_static_preflight() {
   npm ci
   npm run check
   npm run build
@@ -1236,10 +1239,10 @@ main() {
   release_gate_parallel_init "$log_dir"
   trap release_gate_cleanup EXIT
 
-  # Finish deterministic checks that may update generated version files before
-  # snapshotting the candidate. Each isolated platform lane then syncs that
-  # immutable tree concurrently with the other remote lanes and Docker work.
-  run_release_gate_preflight
+  # Validate generated version metadata before any remote lane snapshots the
+  # candidate. The remaining preflight leaves tracked source unchanged and can
+  # overlap work on resource-isolated remote hosts.
+  run_release_gate_candidate_preflight
 
   local windows_lane=""
   if windows_platform_lane_requested; then
@@ -1258,6 +1261,8 @@ main() {
     release_gate_parallel_start "Linux platform UI" run_linux_platform_lane
     linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
   fi
+
+  run_release_gate_static_preflight
 
   release_gate_parallel_start \
     "Android compile, unit tests, and lint" \
