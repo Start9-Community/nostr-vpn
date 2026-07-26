@@ -5,11 +5,63 @@ MOBILE_WG_FIXTURE_REMOTE_MODE=""
 MOBILE_WG_FIXTURE_REMOTE_DIR=""
 MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT=0
 MOBILE_WG_FIXTURE_VOLUME_DIR=""
+MOBILE_WG_FIXTURE_ENDPOINT_FAMILY=""
 MOBILE_WG_FIXTURE_REMOTE_INTERFACE=""
 MOBILE_WG_FIXTURE_REMOTE_NFT_TABLE=""
 MOBILE_WG_FIXTURE_STARTED=0
 MOBILE_WG_FIXTURE_REMOTE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 MOBILE_WG_FIXTURE_SSH_CONTROL_PATH="/tmp/nvpn-wg-fixture-$PPID-$$"
+
+mobile_wg_endpoint_fields() {
+  local raw_host="${1:-}" raw_port="${2:-}"
+  python3 - "$raw_host" "$raw_port" <<'PY'
+import ipaddress
+import re
+import sys
+
+host, raw_port = sys.argv[1:]
+if (
+    not host
+    or host != host.strip()
+    or any(character.isspace() for character in host)
+):
+    raise SystemExit(1)
+if not re.fullmatch(r"[1-9][0-9]*", raw_port):
+    raise SystemExit(1)
+port = int(raw_port)
+if port > 65535:
+    raise SystemExit(1)
+
+try:
+    address = ipaddress.ip_address(host)
+except ValueError:
+    name = host[:-1] if host.endswith(".") else host
+    if (
+        not name
+        or len(host) > 253
+        or re.fullmatch(r"[0-9.]+", name)
+    ):
+        raise SystemExit(1)
+    label_pattern = re.compile(
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    )
+    if any(not label_pattern.fullmatch(label) for label in name.split(".")):
+        raise SystemExit(1)
+    family = "dns"
+    authority = f"{host}:{port}"
+else:
+    family = "ipv4" if address.version == 4 else "ipv6"
+    authority = f"{host}:{port}" if address.version == 4 else f"[{host}]:{port}"
+
+print(f"{family}\t{host}\t{authority}")
+PY
+}
+
+mobile_wg_endpoint_family() {
+  local fields
+  fields="$(mobile_wg_endpoint_fields "${1:-}" 1)" || return 1
+  printf '%s\n' "${fields%%$'\t'*}"
+}
 
 mobile_wg_fixture_validate_ssh_host() {
   local host="$1"
@@ -87,6 +139,12 @@ mobile_wg_fixture_initialize() {
 
   MOBILE_WG_FIXTURE_REMOTE=1
   MOBILE_WG_FIXTURE_REMOTE_MODE="${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}"
+  MOBILE_WG_FIXTURE_ENDPOINT_FAMILY="$(
+    mobile_wg_endpoint_family "${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
+  )" || {
+    echo "remote mobile WireGuard fixture host is malformed" >&2
+    return 1
+  }
   mobile_wg_fixture_validate_ssh_host "$remote_host" || return 1
   : "${NVPN_MOBILE_WG_EXIT_HOST_IP:?remote fixture requires its reachable public address}"
   command -v ssh >/dev/null 2>&1 \
@@ -112,6 +170,8 @@ mobile_wg_fixture_initialize() {
         || missing_packages+=(dnsmasq-base)
       mobile_wg_remote_has_command nft \
         || missing_packages+=(nftables)
+      mobile_wg_remote_has_command flock \
+        || missing_packages+=(util-linux)
       if ((${#missing_packages[@]} > 0)); then
         if ! bool_is_true "${NVPN_MOBILE_WG_EXIT_REMOTE_INSTALL_PACKAGES:-1}"; then
           echo "remote native fixture is missing required packages: ${missing_packages[*]}" >&2
@@ -275,6 +335,7 @@ mobile_wg_remote_native() {
     "NVPN_MOBILE_WG_REMOTE_STATE_DIR=$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture" \
     "NVPN_MOBILE_WG_REMOTE_INTERFACE=$MOBILE_WG_FIXTURE_REMOTE_INTERFACE" \
     "NVPN_MOBILE_WG_REMOTE_NFT_TABLE=$MOBILE_WG_FIXTURE_REMOTE_NFT_TABLE" \
+    "NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY=$MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" \
     "NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE=$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/server.key" \
     "NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE=$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/client.pub" \
     "NVPN_MOBILE_WG_TUNNEL_CIDR=$TUNNEL_SERVER_IP/24" \
@@ -390,16 +451,15 @@ mobile_wg_fixture_doh_count() {
 mobile_wg_fixture_cleanup() {
   local container="$1" image="$2"
   local cleanup_failed=0 inspect_status=0 remote_dir=""
+  local native_stop_failed=0 native_clean_failed=0
   if [[ "$MOBILE_WG_FIXTURE_STARTED" -eq 1 ]]; then
     if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
-      mobile_wg_remote_native stop >/dev/null 2>&1 || true
-      if ! mobile_wg_remote_exec \
-        sudo -n sh -c \
-        '! ip link show "$1" >/dev/null 2>&1 && ! nft list table inet "$2" >/dev/null 2>&1' \
-        sh "$MOBILE_WG_FIXTURE_REMOTE_INTERFACE" \
-        "$MOBILE_WG_FIXTURE_REMOTE_NFT_TABLE" >/dev/null 2>&1
-      then
-        echo "remote native WireGuard interface or nft table survived cleanup" >&2
+      mobile_wg_remote_native stop >/dev/null 2>&1 \
+        || native_stop_failed=1
+      mobile_wg_remote_native clean >/dev/null 2>&1 \
+        || native_clean_failed=1
+      if [[ "$native_stop_failed" -ne 0 || "$native_clean_failed" -ne 0 ]]; then
+        echo "remote native WireGuard fixture did not prove complete cleanup" >&2
         cleanup_failed=1
       else
         MOBILE_WG_FIXTURE_STARTED=0

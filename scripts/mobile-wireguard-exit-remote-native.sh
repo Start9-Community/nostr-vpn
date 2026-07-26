@@ -9,6 +9,7 @@ state_dir="$NVPN_MOBILE_WG_REMOTE_STATE_DIR"
 interface="$NVPN_MOBILE_WG_REMOTE_INTERFACE"
 nft_table="$NVPN_MOBILE_WG_REMOTE_NFT_TABLE"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+endpoint_family="${NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY:-dns}"
 
 validate_names() {
   [[ "$state_dir" == /tmp/nvpn-mobile-wg-exit.* ]] \
@@ -19,8 +20,211 @@ validate_names || {
   echo "remote native fixture received an unsafe resource name" >&2
   exit 2
 }
+case "$endpoint_family" in
+  ipv4|ipv6|dns) ;;
+  *)
+    echo "remote native fixture endpoint family is invalid" >&2
+    exit 2
+    ;;
+esac
 
 system_firewall_rules="$state_dir/system-firewall-rules.tsv"
+ip_forward_lock="/run/lock/nvpn-mobile-wg-exit-ip-forward.lock"
+ip_forward_state="/run/nvpn-mobile-wg-exit-ip-forward"
+ip_forward_leases="$ip_forward_state/leases"
+ip_forward_original="$ip_forward_state/original"
+ip_forward_sysctl="/proc/sys/net/ipv4/ip_forward"
+
+read_ip_forwarding() {
+  local value
+  value="$(cat "$ip_forward_sysctl" 2>/dev/null)" || return 1
+  [[ "$value" == "0" || "$value" == "1" ]] || return 1
+  printf '%s\n' "$value"
+}
+
+write_ip_forwarding() {
+  local value="$1" current
+  [[ "$value" == "0" || "$value" == "1" ]] || return 1
+  printf '%s\n' "$value" >"$ip_forward_sysctl" || return 1
+  current="$(read_ip_forwarding)" || return 1
+  [[ "$current" == "$value" ]]
+}
+
+ip_forward_state_valid_locked() {
+  [[ -d "$ip_forward_state" \
+    && -d "$ip_forward_leases" \
+    && -f "$ip_forward_original" ]] || return 1
+  local current original lease_file lease_interface lease_owner
+  local lease_count=0 seen_owners=""
+  current="$(read_ip_forwarding)" || return 1
+  original="$(<"$ip_forward_original")"
+  [[ "$current" == "1" \
+    && ("$original" == "0" || "$original" == "1") ]] || return 1
+  for lease_file in "$ip_forward_leases"/*; do
+    [[ -f "$lease_file" ]] || continue
+    lease_interface="${lease_file##*/}"
+    lease_owner="$(<"$lease_file")"
+    [[ "$lease_interface" =~ ^[a-zA-Z][a-zA-Z0-9]{1,14}$ \
+      && "$lease_owner" =~ ^/tmp/nvpn-mobile-wg-exit\.[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$ \
+      && -d "$lease_owner" ]] || return 1
+    case $'\n'"$seen_owners"$'\n' in
+      *$'\n'"$lease_owner"$'\n'*) return 1 ;;
+    esac
+    seen_owners="${seen_owners}${seen_owners:+$'\n'}$lease_owner"
+    ip link show "$lease_interface" >/dev/null 2>&1 || return 1
+    lease_count=$((lease_count + 1))
+  done
+  (( lease_count > 0 ))
+}
+
+with_ip_forward_lock() {
+  local callback="$1" status=0
+  exec 9>"$ip_forward_lock" || return 1
+  flock -x 9 || {
+    exec 9>&-
+    return 1
+  }
+  if "$callback"; then
+    status=0
+  else
+    status=$?
+  fi
+  flock -u 9 || status=1
+  exec 9>&-
+  return "$status"
+}
+
+rollback_first_ip_forward_lease_locked() {
+  local original="$1"
+  if write_ip_forwarding "$original"; then
+    rm -f "$ip_forward_original"
+    rmdir "$ip_forward_leases" "$ip_forward_state" >/dev/null 2>&1 || true
+  fi
+}
+
+acquire_ip_forward_lease_locked() {
+  local first_lease=0 current lease_file lease_owner
+  local own_lease="$ip_forward_leases/$interface"
+  if [[ -e "$ip_forward_state" ]]; then
+    ip_forward_state_valid_locked || return 1
+  else
+    current="$(read_ip_forwarding)" || return 1
+    mkdir -m 700 "$ip_forward_state" || return 1
+    mkdir -m 700 "$ip_forward_leases" || {
+      rmdir "$ip_forward_state" >/dev/null 2>&1 || true
+      return 1
+    }
+    if ! printf '%s\n' "$current" >"$ip_forward_original"; then
+      rmdir "$ip_forward_leases" "$ip_forward_state" >/dev/null 2>&1 || true
+      return 1
+    fi
+    first_lease=1
+  fi
+  [[ ! -e "$own_lease" ]] || return 1
+  for lease_file in "$ip_forward_leases"/*; do
+    [[ -f "$lease_file" ]] || continue
+    lease_owner="$(<"$lease_file")"
+    [[ "$lease_owner" != "$state_dir" ]] || return 1
+  done
+  if [[ "$first_lease" -eq 1 ]] && ! write_ip_forwarding 1; then
+    rollback_first_ip_forward_lease_locked "$current"
+    return 1
+  fi
+  if ! printf '%s\n' "$state_dir" >"$own_lease"; then
+    rm -f "$own_lease"
+    if [[ "$first_lease" -eq 1 ]]; then
+      rollback_first_ip_forward_lease_locked "$current"
+    fi
+    return 1
+  fi
+  if ! ip_forward_state_valid_locked; then
+    rm -f "$own_lease"
+    if [[ "$first_lease" -eq 1 ]]; then
+      rollback_first_ip_forward_lease_locked "$current"
+    fi
+    return 1
+  fi
+}
+
+acquire_ip_forward_lease() {
+  with_ip_forward_lock acquire_ip_forward_lease_locked || {
+    echo "remote fixture could not acquire the shared IPv4 forwarding lease" >&2
+    return 1
+  }
+}
+
+release_ip_forward_lease_locked() {
+  [[ -e "$ip_forward_state" ]] || return 0
+  ip_forward_state_valid_locked || return 1
+  local own_lease="$ip_forward_leases/$interface"
+  local original lease_file lease_owner remaining=0
+  if [[ ! -f "$own_lease" ]]; then
+    for lease_file in "$ip_forward_leases"/*; do
+      [[ -f "$lease_file" ]] || continue
+      lease_owner="$(<"$lease_file")"
+      [[ "$lease_owner" != "$state_dir" ]] || return 1
+    done
+    return 0
+  fi
+  lease_owner="$(<"$own_lease")"
+  [[ "$lease_owner" == "$state_dir" ]] || return 1
+  original="$(<"$ip_forward_original")"
+  rm -f "$own_lease" || return 1
+  for lease_file in "$ip_forward_leases"/*; do
+    [[ -f "$lease_file" ]] || continue
+    remaining=1
+    break
+  done
+  if [[ "$remaining" -eq 1 ]]; then
+    if ip_forward_state_valid_locked; then
+      return 0
+    fi
+    printf '%s\n' "$state_dir" >"$own_lease" || true
+    return 1
+  fi
+  if ! write_ip_forwarding "$original"; then
+    write_ip_forwarding 1 >/dev/null 2>&1 || true
+    printf '%s\n' "$state_dir" >"$own_lease" || true
+    return 1
+  fi
+  rm -f "$ip_forward_original" || return 1
+  rmdir "$ip_forward_leases" "$ip_forward_state" || return 1
+}
+
+release_ip_forward_lease() {
+  with_ip_forward_lock release_ip_forward_lease_locked
+}
+
+release_ip_forward_lease_and_delete_interface_locked() {
+  release_ip_forward_lease_locked || return 1
+  if ip link show "$interface" >/dev/null 2>&1; then
+    ip link delete "$interface" >/dev/null 2>&1 || return 1
+  fi
+  ! ip link show "$interface" >/dev/null 2>&1
+}
+
+release_ip_forward_lease_and_delete_interface() {
+  with_ip_forward_lock release_ip_forward_lease_and_delete_interface_locked || {
+    echo "remote fixture could not release its IPv4 forwarding lease safely" >&2
+    return 1
+  }
+}
+
+ip_forward_lease_clean_locked() {
+  [[ -e "$ip_forward_state" ]] || return 0
+  ip_forward_state_valid_locked || return 1
+  local lease_file lease_owner
+  [[ ! -e "$ip_forward_leases/$interface" ]] || return 1
+  for lease_file in "$ip_forward_leases"/*; do
+    [[ -f "$lease_file" ]] || continue
+    lease_owner="$(<"$lease_file")"
+    [[ "$lease_owner" != "$state_dir" ]] || return 1
+  done
+}
+
+ip_forward_lease_clean() {
+  with_ip_forward_lock ip_forward_lease_clean_locked
+}
 
 add_system_firewall_rule() {
   local family="$1" table="$2" chain="$3" marker="$4"
@@ -45,23 +249,67 @@ add_system_firewall_rule() {
     echo "remote fixture could not record its temporary firewall rule" >&2
     return 1
   }
-  printf '%s\t%s\t%s\t%s\n' \
-    "$family" "$table" "$chain" "$handle" >>"$system_firewall_rules"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$family" "$table" "$chain" "$handle" "$marker" \
+    >>"$system_firewall_rules"
+}
+
+system_firewall_rule_exists() {
+  local family="$1" table="$2" chain="$3" handle="$4" marker="$5"
+  nft -a list chain "$family" "$table" "$chain" 2>/dev/null \
+    | awk \
+      -v expected_handle="$handle" \
+      -v expected_marker="comment \042$marker\042" '
+        {
+          if (index($0, expected_marker)) {
+            for (field = 1; field <= NF; field++) {
+              if ($field == "handle" && $(field + 1) == expected_handle) {
+                found = 1
+              }
+            }
+          }
+        }
+        END { exit !found }
+      '
+}
+
+system_firewall_marker_rules_clean() {
+  local ruleset marker_prefix
+  marker_prefix="comment \"nvpn-mobile-$interface-"
+  ruleset="$(nft -a list ruleset 2>/dev/null)" || return 1
+  ! grep -Fq "$marker_prefix" <<<"$ruleset"
 }
 
 remove_system_firewall_rules() {
   [[ -f "$system_firewall_rules" ]] || return 0
-  local family table chain handle
-  while IFS=$'\t' read -r family table chain handle; do
-    [[ "$family" =~ ^[a-z]+$ \
-      && "$table" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
-      && "$chain" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
-      && "$handle" =~ ^[1-9][0-9]*$ ]] \
-      || continue
-    nft delete rule "$family" "$table" "$chain" handle "$handle" \
-      >/dev/null 2>&1 || true
+  local family table chain handle marker failed=0
+  while IFS=$'\t' read -r family table chain handle marker; do
+    if [[ ! "$family" =~ ^(inet|ip|ip6)$ \
+      || ! "$table" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
+      || ! "$chain" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
+      || ! "$handle" =~ ^[1-9][0-9]*$ \
+      || ! "$marker" =~ ^nvpn-mobile-[a-zA-Z0-9_-]+$ ]]
+    then
+      failed=1
+      continue
+    fi
+    if system_firewall_rule_exists \
+        "$family" "$table" "$chain" "$handle" "$marker"
+    then
+      nft delete rule "$family" "$table" "$chain" handle "$handle" \
+        >/dev/null 2>&1 || true
+    fi
+    if system_firewall_rule_exists \
+        "$family" "$table" "$chain" "$handle" "$marker"
+    then
+      failed=1
+    fi
   done <"$system_firewall_rules"
-  rm -f "$system_firewall_rules"
+  system_firewall_marker_rules_clean || failed=1
+  if [[ "$failed" -eq 0 ]]; then
+    rm -f "$system_firewall_rules"
+  fi
+  return "$failed"
 }
 
 pid_matches_fixture() {
@@ -70,8 +318,76 @@ pid_matches_fixture() {
     && tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Fq "$needle"
 }
 
-stop_fixture() {
+wireguard_listener_ready() {
+  local listeners
+  [[ "${NVPN_MOBILE_WG_LISTEN_PORT:-}" =~ ^[1-9][0-9]{0,4}$ ]] \
+    || return 1
+  case "$endpoint_family" in
+    ipv4) listeners="$(ss -H -lun4 2>/dev/null)" ;;
+    ipv6) listeners="$(ss -H -lun6 2>/dev/null)" ;;
+    dns) listeners="$(ss -H -lun 2>/dev/null)" ;;
+  esac
+  python3 - "$NVPN_MOBILE_WG_LISTEN_PORT" "$listeners" <<'PY'
+import re
+import sys
+
+port, listeners = sys.argv[1:]
+for line in listeners.splitlines():
+    if any(
+        re.search(rf"[\].:]{re.escape(port)}$", field)
+        for field in line.split()
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+fixture_processes_clean() {
   local name pid
+  for name in dnsmasq udp-echo http-probe; do
+    if [[ -s "$state_dir/$name.pid" ]]; then
+      pid="$(<"$state_dir/$name.pid")"
+      pid_matches_fixture "$pid" "$state_dir" && return 1
+    fi
+  done
+  return 0
+}
+
+system_firewall_rules_clean() {
+  [[ -f "$system_firewall_rules" ]] || return 0
+  local family table chain handle marker
+  while IFS=$'\t' read -r family table chain handle marker; do
+    [[ "$family" =~ ^(inet|ip|ip6)$ \
+      && "$table" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
+      && "$chain" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ \
+      && "$handle" =~ ^[1-9][0-9]*$ \
+      && "$marker" =~ ^nvpn-mobile-[a-zA-Z0-9_-]+$ ]] \
+      || return 1
+    if system_firewall_rule_exists \
+        "$family" "$table" "$chain" "$handle" "$marker"
+    then
+      return 1
+    fi
+  done <"$system_firewall_rules"
+}
+
+assert_fixture_clean() {
+  local failed=0
+  fixture_processes_clean || failed=1
+  system_firewall_rules_clean || failed=1
+  system_firewall_marker_rules_clean || failed=1
+  if nft list table inet "$nft_table" >/dev/null 2>&1; then
+    failed=1
+  fi
+  if ip link show "$interface" >/dev/null 2>&1; then
+    failed=1
+  fi
+  ip_forward_lease_clean || failed=1
+  return "$failed"
+}
+
+stop_fixture() {
+  local name pid failed=0
   for name in dnsmasq udp-echo http-probe; do
     if [[ -s "$state_dir/$name.pid" ]]; then
       pid="$(<"$state_dir/$name.pid")"
@@ -84,20 +400,25 @@ stop_fixture() {
         if kill -0 "$pid" 2>/dev/null && pid_matches_fixture "$pid" "$state_dir"; then
           kill -KILL "$pid" 2>/dev/null || true
         fi
+        if pid_matches_fixture "$pid" "$state_dir"; then
+          failed=1
+        fi
       fi
     fi
   done
-  rm -f "$state_dir/ready"
-  remove_system_firewall_rules
-  nft delete table inet "$nft_table" >/dev/null 2>&1 || true
-  ip link delete "$interface" >/dev/null 2>&1 || true
-  if [[ -s "$state_dir/ip-forward.before" ]]; then
-    local previous
-    previous="$(<"$state_dir/ip-forward.before")"
-    if [[ "$previous" == "0" || "$previous" == "1" ]]; then
-      sysctl -q -w "net.ipv4.ip_forward=$previous" >/dev/null
-    fi
+  rm -f "$state_dir/ready" || failed=1
+  remove_system_firewall_rules || failed=1
+  if nft list table inet "$nft_table" >/dev/null 2>&1; then
+    nft delete table inet "$nft_table" >/dev/null 2>&1 || true
   fi
+  if nft list table inet "$nft_table" >/dev/null 2>&1; then
+    failed=1
+  fi
+  # Keep the global forwarding lease lock held until this lease's interface
+  # is gone, so another fixture cannot observe a half-completed stop.
+  release_ip_forward_lease_and_delete_interface || failed=1
+  assert_fixture_clean || failed=1
+  return "$failed"
 }
 
 fixture_ready() {
@@ -115,6 +436,7 @@ fixture_ready() {
     && pid_matches_fixture "$http_pid" "$state_dir" \
     && ip link show "$interface" >/dev/null 2>&1 \
     && wg show "$interface" >/dev/null 2>&1 \
+    && wireguard_listener_ready \
     && nft list table inet "$nft_table" >/dev/null 2>&1 \
     && ss -H -lun | grep -Fq "$server_ip:53" \
     && ss -H -lun | grep -Fq "$server_ip:9" \
@@ -136,6 +458,10 @@ counter_packets() {
       }'
 }
 
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 case "$action" in
   start)
     : "${NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE:?server key is required}"
@@ -152,7 +478,7 @@ case "$action" in
         echo "remote fixture listen port is invalid" >&2
         exit 2
       }
-    for command in ip wg nft dnsmasq python3 ss sysctl; do
+    for command in ip wg nft dnsmasq python3 ss flock; do
       command -v "$command" >/dev/null 2>&1 \
         || { echo "remote fixture requires $command" >&2; exit 2; }
     done
@@ -165,7 +491,6 @@ case "$action" in
     mkdir -p "$state_dir"
     chmod 700 "$state_dir"
     : >"$system_firewall_rules"
-    cat /proc/sys/net/ipv4/ip_forward >"$state_dir/ip-forward.before"
     trap 'status=$?; stop_fixture; exit "$status"' ERR INT TERM
     local_server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
     tunnel_subnet="$(
@@ -229,19 +554,46 @@ PY
     # policy drop. Insert narrowly scoped, handle-tracked rules into the
     # standard system chains when present, then remove those exact handles.
     firewall_marker="nvpn-mobile-$interface"
+    endpoint_inet_match=()
+    case "$endpoint_family" in
+      ipv4) endpoint_inet_match=(meta nfproto ipv4) ;;
+      ipv6) endpoint_inet_match=(meta nfproto ipv6) ;;
+      dns) ;;
+    esac
     add_system_firewall_rule \
       inet filter input "$firewall_marker-input" \
+      "${endpoint_inet_match[@]}" \
       udp dport "$NVPN_MOBILE_WG_LISTEN_PORT" accept
+    if [[ "$endpoint_family" != "ipv6" ]]; then
+      add_system_firewall_rule \
+        ip filter INPUT "$firewall_marker-input-v4" \
+        udp dport "$NVPN_MOBILE_WG_LISTEN_PORT" accept
+    fi
+    if [[ "$endpoint_family" != "ipv4" ]]; then
+      add_system_firewall_rule \
+        ip6 filter INPUT "$firewall_marker-input-v6" \
+        udp dport "$NVPN_MOBILE_WG_LISTEN_PORT" accept
+    fi
     add_system_firewall_rule \
       inet filter input "$firewall_marker-services" \
+      meta nfproto ipv4 iifname "$interface" accept
+    add_system_firewall_rule \
+      ip filter INPUT "$firewall_marker-services-v4" \
       iifname "$interface" accept
     add_system_firewall_rule \
       inet filter forward "$firewall_marker-forward-in" \
+      meta nfproto ipv4 iifname "$interface" accept
+    add_system_firewall_rule \
+      ip filter FORWARD "$firewall_marker-forward-in-v4" \
       iifname "$interface" accept
     add_system_firewall_rule \
       inet filter forward "$firewall_marker-forward-out" \
+      meta nfproto ipv4 oifname "$interface" \
+      ct state established,related accept
+    add_system_firewall_rule \
+      ip filter FORWARD "$firewall_marker-forward-out-v4" \
       oifname "$interface" ct state established,related accept
-    sysctl -q -w net.ipv4.ip_forward=1 >/dev/null
+    acquire_ip_forward_lease
 
     dnsmasq \
       --interface="$interface" \
@@ -278,6 +630,9 @@ PY
   stop)
     stop_fixture
     ;;
+  clean)
+    assert_fixture_clean
+    ;;
   ready)
     fixture_ready
     ;;
@@ -299,7 +654,7 @@ PY
     grep -Fci "${2:?DNS name is required}" "$state_dir/dns.log" 2>/dev/null || true
     ;;
   *)
-    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|ready|wg-bytes|forward-packets|doh-count|dns-count" >&2
+    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|doh-count|dns-count" >&2
     exit 2
     ;;
 esac

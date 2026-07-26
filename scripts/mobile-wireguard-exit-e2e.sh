@@ -162,18 +162,34 @@ assert_single_android_app() {
   fi
 }
 
-HOST_IP="${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
-if [[ -z "$HOST_IP" && "$(uname -s)" == "Darwin" ]]; then
-  HOST_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
+FIXTURE_HOST="${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
+if [[ -z "$FIXTURE_HOST" && "$(uname -s)" == "Darwin" ]]; then
+  FIXTURE_HOST="$(ipconfig getifaddr en0 2>/dev/null || true)"
 fi
-if [[ -z "$HOST_IP" && "$(uname -s)" == "Linux" ]]; then
-  HOST_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+if [[ -z "$FIXTURE_HOST" && "$(uname -s)" == "Linux" ]]; then
+  FIXTURE_HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
 fi
-if [[ -z "$HOST_IP" ]]; then
+if [[ -z "$FIXTURE_HOST" ]]; then
   echo "Could not resolve a LAN host address; set NVPN_MOBILE_WG_EXIT_HOST_IP" >&2
   exit 1
 fi
-export NVPN_MOBILE_WG_EXIT_HOST_IP="$HOST_IP"
+ENDPOINT_FIELDS="$(
+  mobile_wg_endpoint_fields "$FIXTURE_HOST" "$HOST_PORT"
+)" || {
+  echo "NVPN_MOBILE_WG_EXIT_HOST_IP must be a raw IPv4, IPv6, or DNS host" >&2
+  exit 2
+}
+IFS=$'\t' read -r \
+  MOBILE_WG_FIXTURE_ENDPOINT_FAMILY \
+  FIXTURE_HOST \
+  WIREGUARD_ENDPOINT_AUTHORITY <<<"$ENDPOINT_FIELDS"
+[[ -n "$MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" \
+  && -n "$FIXTURE_HOST" \
+  && -n "$WIREGUARD_ENDPOINT_AUTHORITY" ]] || {
+  echo "Could not render the mobile WireGuard fixture endpoint" >&2
+  exit 2
+}
+export NVPN_MOBILE_WG_EXIT_HOST_IP="$FIXTURE_HOST"
 
 FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-wg-exit.XXXXXX")"
 chmod 700 "$FIXTURE_DIR"
@@ -218,7 +234,7 @@ MTU = 1280
 
 [Peer]
 PublicKey = $(<"$FIXTURE_DIR/server.pub")
-Endpoint = $HOST_IP:$HOST_PORT
+Endpoint = $WIREGUARD_ENDPOINT_AUTHORITY
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 2
 EOF
@@ -436,7 +452,7 @@ run_android_case() {
     NVPN_ANDROID_EXIT_PROBE_URL="$DIRECT_URL" \
     NVPN_ANDROID_DIRECT_PROBE_HOST="$DIRECT_HOST" \
     NVPN_ANDROID_DIRECT_PROBE_URL="$DIRECT_URL" \
-    NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT" \
+    NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY" \
     NVPN_ANDROID_CAPTURED_PROBE_URL="http://$TUNNEL_SERVER_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN" \
     NVPN_ANDROID_CAPTURED_PROBE_TOKEN="$HTTP_PROBE_TOKEN" \
     NVPN_ANDROID_EXIT_SOURCE_PROBE_URL="$EXIT_SOURCE_PROBE_URL" \

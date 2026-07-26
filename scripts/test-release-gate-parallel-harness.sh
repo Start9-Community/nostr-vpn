@@ -330,8 +330,18 @@ grep -Fq 'release_gate_parallel_start \' "$release_gate" \
   || fail "release gate does not dispatch the physical Android exit lane"
 grep -Fq '"iOS physical WireGuard exit and DNS"' "$release_gate" \
   || fail "release gate does not dispatch the physical iOS exit lane"
-grep -Fq 'NVPN_MOBILE_WG_EXIT_IMAGE_READY=1' "$release_gate" \
-  || fail "parallel mobile exit lanes rebuild their identical Docker fixture"
+mobile_exit_gate_body="$(
+  sed -n '/^run_mobile_wireguard_exit_gates() {$/,/^}$/p' "$release_gate"
+)"
+grep -Fq 'local remote_native=0' <<<"$mobile_exit_gate_body" \
+  && grep -Fq '[[ "$remote_native" -eq 0 ]]' <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'local image_ready=0' <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready"' \
+    <<<"$mobile_exit_gate_body" \
+  || fail "parallel mobile exit lanes do not isolate remote-native fixture setup"
+if grep -Fq 'NVPN_MOBILE_WG_EXIT_IMAGE_READY=1' <<<"$mobile_exit_gate_body"; then
+  fail "remote-native mobile exit lanes still claim a prebuilt Docker fixture"
+fi
 grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-android-$$"' "$release_gate" \
   || fail "parallel Android exit lane has no isolated Docker fixture"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$"' "$release_gate" \

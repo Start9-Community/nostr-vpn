@@ -288,12 +288,25 @@ if match is None or not match.group(1).strip():
 mobile_ios_hotspot_probe_pixel_native() {
   local fixture_host="${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
   local public_host="${NVPN_MOBILE_WG_EXIT_DIRECT_HOST:-example.com}"
+  local fixture_family fixture_ping=ping
   [[ -n "$fixture_host" ]] || {
     echo "iOS hotspot gate requires the independently reachable fixture host" >&2
     return 1
   }
+  fixture_family="$(mobile_wg_endpoint_family "$fixture_host")" || {
+    echo "iOS hotspot gate fixture host is malformed" >&2
+    return 1
+  }
+  case "$fixture_family" in
+    ipv4|dns) ;;
+    ipv6) fixture_ping=ping6 ;;
+    *)
+      echo "iOS hotspot gate fixture host has an unsupported address family" >&2
+      return 1
+      ;;
+  esac
   "$ADB" -s "$MOBILE_IOS_HOTSPOT_ANDROID_SERIAL" shell \
-    ping -c 1 -W 3 "$fixture_host" >/dev/null 2>&1 \
+    "$fixture_ping" -c 1 -W 3 "$fixture_host" >/dev/null 2>&1 \
     && "$ADB" -s "$MOBILE_IOS_HOTSPOT_ANDROID_SERIAL" shell \
       ping -c 1 -W 3 "$public_host" >/dev/null 2>&1
 }

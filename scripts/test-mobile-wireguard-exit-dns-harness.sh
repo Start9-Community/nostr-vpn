@@ -17,8 +17,11 @@ ios_lifecycle_ui="$ROOT/ios/UITests/NostrVpnLifecycleUITests.swift"
 ios_lifecycle_lib="$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
 ios_release_gate="$ROOT/scripts/lib-mobile-ios-release-network.sh"
 ios_release_artifact="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
+ios_packet_tunnel="$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift"
+ios_hotspot="$ROOT/scripts/lib-mobile-ios-hotspot.sh"
 local_fips="$ROOT/scripts/local-fips-workspace.sh"
 fips_c_abi="$ROOT/crates/nostr-vpn-app-core/src/c_abi.rs"
+mobile_tunnel_config="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/config.rs"
 ios_release_probe="$ROOT/ios/UITests/NostrVpnReleaseNetworkProbe.swift"
 ios_release_ui="$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift"
 ios_release_ui_support="$ROOT/ios/UITests/NostrVpnReleaseNetworkUI.swift"
@@ -31,6 +34,82 @@ android_internet="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidIntern
 android_dns="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidExitDns.kt"
 server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
 fixture_lib="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
+remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
+
+# shellcheck disable=SC1090
+source "$fixture_lib"
+declare -F mobile_wg_endpoint_fields >/dev/null \
+  || { echo "mobile fixture lacks strict endpoint rendering" >&2; exit 1; }
+
+assert_endpoint_fields() {
+  local raw="$1" port="$2" expected="$3" actual
+  actual="$(mobile_wg_endpoint_fields "$raw" "$port")" || {
+    echo "valid mobile fixture endpoint was rejected" >&2
+    exit 1
+  }
+  [[ "$actual" == "$expected" ]] || {
+    echo "mobile fixture endpoint rendered incorrectly" >&2
+    exit 1
+  }
+}
+
+assert_endpoint_fields \
+  192.0.2.10 51820 $'ipv4\t192.0.2.10\t192.0.2.10:51820'
+assert_endpoint_fields \
+  fixture.example.test 51820 \
+  $'dns\tfixture.example.test\tfixture.example.test:51820'
+assert_endpoint_fields \
+  2001:db8::10 51820 $'ipv6\t2001:db8::10\t[2001:db8::10]:51820'
+
+for invalid_host in \
+  "" \
+  " fixture.example.test" \
+  "fixture.example.test " \
+  "[2001:db8::10]" \
+  "fixture.example.test:51820" \
+  "https://fixture.example.test" \
+  "fixture.example.test/path" \
+  "2001:db8::gg" \
+  "-fixture.example.test" \
+  "fixture..example.test" \
+  "999.2.3.4"
+do
+  if mobile_wg_endpoint_fields "$invalid_host" 51820 >/dev/null 2>&1; then
+    echo "mobile fixture accepted malformed raw endpoint host" >&2
+    exit 1
+  fi
+done
+for invalid_port in 0 65536 port; do
+  if mobile_wg_endpoint_fields fixture.example.test "$invalid_port" \
+      >/dev/null 2>&1
+  then
+    echo "mobile fixture accepted malformed endpoint port" >&2
+    exit 1
+  fi
+done
+
+grep -Fq 'WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
+  && grep -Fq 'Endpoint = $WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
+  && grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"' "$gate" \
+  || { echo "mobile gate does not separate raw host from endpoint authority" >&2; exit 1; }
+grep -Fq 'mobile_wg_endpoint_family "$fixture_host"' "$ios_hotspot" \
+  && grep -Fq 'ping6' "$ios_hotspot" \
+  || { echo "Pixel fixture reachability is not IP-family aware" >&2; exit 1; }
+grep -Fq 'Self.endpointHost(from: endpoint)' "$ios_packet_tunnel" \
+  || { echo "iOS packet tunnel does not parse bracketed WireGuard endpoints" >&2; exit 1; }
+grep -Fq 'if let Some(IpAddr::V4(ip)) =' "$mobile_tunnel_config" \
+  && grep -Fq 'wireguard_endpoint_host_ip(&app.wireguard_exit.endpoint)' \
+    "$mobile_tunnel_config" \
+  || { echo "mobile config can emit a non-IPv4 excluded route" >&2; exit 1; }
+grep -Fq 'NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY' "$remote_native" \
+  && grep -Fq 'ss -H -lun4' "$remote_native" \
+  && grep -Fq 'ss -H -lun6' "$remote_native" \
+  && grep -Fq 'ip filter INPUT' "$remote_native" \
+  && grep -Fq 'ip6 filter INPUT' "$remote_native" \
+  && grep -Fq 'if [[ "$endpoint_family" != "ipv6" ]]' "$remote_native" \
+  && grep -Fq 'if [[ "$endpoint_family" != "ipv4" ]]' "$remote_native" \
+  && grep -Fq 'meta nfproto ipv4 iifname "$interface" accept' "$remote_native" \
+  || { echo "remote native fixture lacks family-specific listener/firewall proof" >&2; exit 1; }
 
 for label in automatic-profile cloudflare-doh quad9-doh custom-doh through-exit; do
   grep -Fq "$label" "$gate" || {
@@ -74,7 +153,7 @@ grep -Fq 'mobile_wg_fixture_build' "$gate" \
   || { echo "parallel mobile exit lanes cannot reuse their prebuilt fixture image" >&2; exit 1; }
 grep -Fq 'NVPN_ANDROID_LIFECYCLE_GATE="$lifecycle_gate"' "$gate" \
   || { echo "Android mobile exit cases ignore the lifecycle-gate mode" >&2; exit 1; }
-grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT"' "$gate" \
+grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"' "$gate" \
   || { echo "Android mobile exit cases do not pin the expected WireGuard endpoint" >&2; exit 1; }
 grep -Fq 'NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1' "$gate" \
   || { echo "Android physical DNS cases do not require the shipped UI driver" >&2; exit 1; }

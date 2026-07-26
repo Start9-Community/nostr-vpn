@@ -1003,6 +1003,12 @@ run_mobile_idle_cpu_gates() {
 
 run_mobile_wireguard_exit_gates() {
   local mode="${NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E:-auto}"
+  local remote_native=0
+  if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    && "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" == "native" ]]
+  then
+    remote_native=1
+  fi
   case "$mode" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping mobile WireGuard exit e2e because NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E=$mode"
@@ -1012,7 +1018,8 @@ run_mobile_wireguard_exit_gates() {
       ;;
     auto|AUTO|Auto|"")
       if [[ "$(uname -s)" != "Darwin" ]] \
-        || ! command -v docker >/dev/null 2>&1 \
+        || { [[ "$remote_native" -eq 0 ]] \
+          && ! command -v docker >/dev/null 2>&1; } \
         || ! command -v wg >/dev/null 2>&1 \
         || ! command -v adb >/dev/null 2>&1 \
         || ! adb devices 2>/dev/null | awk 'NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 } END { exit !found }' \
@@ -1029,10 +1036,14 @@ run_mobile_wireguard_exit_gates() {
   esac
 
   local image="${NVPN_MOBILE_WG_EXIT_IMAGE:-nostr-vpn-mobile-wireguard-exit-e2e}"
-  docker build -q \
-    -f "$ROOT_DIR/Dockerfile.mobile-wireguard-exit-e2e" \
-    -t "$image" \
-    "$ROOT_DIR" >/dev/null
+  local image_ready=0
+  if [[ "$remote_native" -eq 0 ]]; then
+    docker build -q \
+      -f "$ROOT_DIR/Dockerfile.mobile-wireguard-exit-e2e" \
+      -t "$image" \
+      "$ROOT_DIR" >/dev/null
+    image_ready=1
+  fi
 
   local port_base="$((53000 + $$ % 1000 * 2))"
   local lanes=()
@@ -1044,7 +1055,7 @@ run_mobile_wireguard_exit_gates() {
     env \
       NVPN_IDLE_CPU_GATE=0 \
       NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0 \
-      NVPN_MOBILE_WG_EXIT_IMAGE_READY=1 \
+      NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
       NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-android-$$" \
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
@@ -1064,7 +1075,7 @@ run_mobile_wireguard_exit_gates() {
     env \
       NVPN_IDLE_CPU_GATE=0 \
       NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0 \
-      NVPN_MOBILE_WG_EXIT_IMAGE_READY=1 \
+      NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
       NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$" \
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
