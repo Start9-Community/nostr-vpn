@@ -707,7 +707,7 @@ fn macos_endpoint_bypass_underlay_refresh_required(
     current_underlay.is_none() || current_routes != desired_routes
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn macos_direct_underlay_restore_needed(
     previous_exit_requested: bool,
     next_exit_requested: bool,
