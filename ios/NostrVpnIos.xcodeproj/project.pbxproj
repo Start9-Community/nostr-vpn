@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		014C56E3EDDCB4C1B20FE959 /* PacketFlowBridgeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 106454A084D4E2BC7799376E /* PacketFlowBridgeLifecycle.swift */; };
 		050CC6FAA230A6EDA894CCF8 /* PacketTunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8ECBFB09C508ED9BE10C907 /* PacketTunnelController.swift */; };
 		0A933AB006CCAF79C262D8CB /* NostrVpnAppCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */; };
 		0B63754773064DF6054A88A9 /* NostrVpnReleaseNetworkUnderlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7344CBAC1489810776297A1B /* NostrVpnReleaseNetworkUnderlay.swift */; };
@@ -15,7 +16,6 @@
 		2376F433BA1FBD612B5DF846 /* AppModelDebugURLAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74FA92081064D235A10456E4 /* AppModelDebugURLAutomation.swift */; };
 		2CDAA4060234E6D83A9E2876 /* NostrVpnAppCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */; };
 		2E22BA531D53E86404F0D766 /* PacketFlowBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */; };
-		32B14762E257476398146EB7 /* PacketFlowBridgeLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73F9FC944CBA42109A1A91C0 /* PacketFlowBridgeLifecycle.swift */; };
 		2EEA35334ED681D30F23D58F /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8BAA0EBA6F30832FC35B6E6 /* NetworkExtension.framework */; };
 		37E58CD05130BE8377A9C9F8 /* DevicesViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75C3BB9F88382E42F86E9351 /* DevicesViews.swift */; };
 		3F51E24D847978B5D70822C0 /* AppModelSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 660636221EA934E461AE7CE9 /* AppModelSupport.swift */; };
@@ -84,6 +84,7 @@
 /* Begin PBXFileReference section */
 		06BD4BC01B5E92B3771DC4E2 /* AppModelDebugAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugAutomation.swift; sourceTree = "<group>"; };
 		10601F7E977CA9A2CA70782B /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		106454A084D4E2BC7799376E /* PacketFlowBridgeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridgeLifecycle.swift; sourceTree = "<group>"; };
 		1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = NostrVpnAppCore.xcframework; path = Frameworks/NostrVpnAppCore.xcframework; sourceTree = "<group>"; };
 		1771345400E9569613808C0B /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		18A42119DA80B93BA811494E /* NostrVpnReleaseNetworkUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnReleaseNetworkUI.swift; sourceTree = "<group>"; };
@@ -94,7 +95,6 @@
 		32C567B4190F53A52A6E419A /* NostrVpnPhysicalGateSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnPhysicalGateSupport.swift; sourceTree = "<group>"; };
 		3DDFB58648107DDDBCC8DBE5 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
 		431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridge.swift; sourceTree = "<group>"; };
-		73F9FC944CBA42109A1A91C0 /* PacketFlowBridgeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridgeLifecycle.swift; sourceTree = "<group>"; };
 		47D10A3E63B2672F87095031 /* ScreenshotFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotFixtures.swift; sourceTree = "<group>"; };
 		4E8D34EBC51BAFC05BF873C3 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		5E29C5DFF800EDE78B1158E2 /* NostrVpnReleaseNetworkProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnReleaseNetworkProbe.swift; sourceTree = "<group>"; };
@@ -193,7 +193,7 @@
 			children = (
 				F581F9BC69EA220D465E29EC /* Info.plist */,
 				431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */,
-				73F9FC944CBA42109A1A91C0 /* PacketFlowBridgeLifecycle.swift */,
+				106454A084D4E2BC7799376E /* PacketFlowBridgeLifecycle.swift */,
 				3DDFB58648107DDDBCC8DBE5 /* PacketTunnel.entitlements */,
 				10601F7E977CA9A2CA70782B /* PacketTunnelProvider.swift */,
 			);
@@ -394,7 +394,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2E22BA531D53E86404F0D766 /* PacketFlowBridge.swift in Sources */,
-				32B14762E257476398146EB7 /* PacketFlowBridgeLifecycle.swift in Sources */,
+				014C56E3EDDCB4C1B20FE959 /* PacketFlowBridgeLifecycle.swift in Sources */,
 				DC1FC354C9FEA443CBCE3ABF /* PacketTunnelProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

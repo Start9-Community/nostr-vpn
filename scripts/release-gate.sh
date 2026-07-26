@@ -317,6 +317,7 @@ run_release_gate_static_preflight() {
   node --test scripts/local-release.test.mjs scripts/startos-release.test.mjs
   python3 scripts/test_appstore_draft_metadata.py
   if [[ "$(uname -s)" == "Darwin" ]]; then
+    ./scripts/test-ios-generated-project.sh
     ./scripts/test-ios-appstore-policy.sh
   else
     echo "Skipping iOS App Store binary-policy gate on this non-Apple host."
