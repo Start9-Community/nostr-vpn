@@ -117,7 +117,6 @@ jobs:
           NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E: '0'
           NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E: '0'
           NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '0'
-          NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E: '0'
           # Hosted runners have no stable latency baseline. The mandatory local
           # release gate measures these and the Docker perf regression after
           # contention-sensitive joins on calibrated hardware.

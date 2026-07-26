@@ -35,7 +35,6 @@ ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPL
 IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS:-180}"
 MOBILE_WG_EXIT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_WG_EXIT_TIMEOUT_SECS:-3600}"
 MOBILE_JOIN_E2E_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_JOIN_E2E_TIMEOUT_SECS:-1800}"
-DESKTOP_MOBILE_JOIN_E2E_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E_TIMEOUT_SECS:-1800}"
 RELEASE_GATE_TARGET_SECS="${NVPN_RELEASE_GATE_TARGET_SECS:-1800}"
 
 release_cargo_config_args=()
@@ -1089,54 +1088,6 @@ run_mobile_join_e2e_gate() {
   MOBILE_IOS_APP_READY=1
 }
 
-run_desktop_mobile_manual_join_e2e_gate() {
-  local mode="${NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E:-required}"
-  case "$mode" in
-    0|false|FALSE|False|no|NO|No|off|OFF|Off)
-      echo "Skipping physical macOS/Android manual-join e2e because NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E=$mode"
-      return
-      ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
-      [[ "$(uname -s)" == "Darwin" ]] \
-        || { echo "Required physical macOS/Android manual-join gate needs a macOS host." >&2; return 1; }
-      command -v adb >/dev/null 2>&1 \
-        || { echo "Required physical macOS/Android manual-join gate needs adb." >&2; return 1; }
-      adb devices 2>/dev/null | awk '
-        NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 }
-        END { exit !found }
-      ' || { echo "Required physical macOS/Android manual-join gate needs a physical Android device." >&2; return 1; }
-      macos_vm_reachable \
-        || { echo "Required physical macOS/Android manual-join VM is unreachable." >&2; return 1; }
-      ;;
-    auto|AUTO|Auto|"")
-      if [[ "$(uname -s)" != "Darwin" ]] \
-        || ! command -v adb >/dev/null 2>&1 \
-        || ! adb devices 2>/dev/null | awk '
-          NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 }
-          END { exit !found }
-        ' \
-        || ! macos_vm_reachable
-      then
-        echo "Skipping physical macOS/Android manual-join e2e because its VM and physical Android device are not available."
-        return
-      fi
-      ;;
-    *)
-      echo "Unsupported NVPN_RELEASE_GATE_DESKTOP_MOBILE_JOIN_E2E=$mode" >&2
-      return 2
-      ;;
-  esac
-
-  release_gate_run_with_timeout \
-    "Physical macOS/Android bidirectional manual-join e2e" \
-    "$DESKTOP_MOBILE_JOIN_E2E_TIMEOUT_SECS" \
-    env NVPN_DESKTOP_MOBILE_JOIN_WAIT_SECS=15 \
-    NVPN_MACOS_ANDROID_JOIN_SKIP_BUILD="${DESKTOP_MOBILE_REUSE_MACOS_BUILD:-0}" \
-    NVPN_DESKTOP_MOBILE_JOIN_BUILD_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
-    ./scripts/macos-vm-android-manual-join-e2e.sh \
-    "${NVPN_MACOS_SSH_HOST:-}"
-}
-
 docker_release_gates_enabled() {
   ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_DOCKER_E2E:-1}"
 }
@@ -1256,7 +1207,6 @@ main() {
   local started_at
   started_at="$(date +%s)"
   local log_dir="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT_DIR/artifacts/release-gate-logs/$(date -u +%Y%m%dT%H%M%SZ)}"
-  local DESKTOP_MOBILE_REUSE_MACOS_BUILD=0
   release_gate_parallel_init "$log_dir"
   trap release_gate_cleanup EXIT
 
@@ -1335,7 +1285,6 @@ main() {
   # isolated macOS VM with its platform lane, so join that lane first.
   if [[ -n "$macos_platform_lane" ]]; then
     release_gate_parallel_wait "$macos_platform_lane"
-    DESKTOP_MOBILE_REUSE_MACOS_BUILD=1
     macos_platform_lane=""
   fi
   run_mobile_join_e2e_gate
