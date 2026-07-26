@@ -26,6 +26,14 @@ val buildGitSha = providers.environmentVariable("NVPN_BUILD_GIT_SHA").orElse("")
 val buildTimestampUtc = providers.environmentVariable("NVPN_BUILD_TIMESTAMP_UTC").orElse("").get()
 val androidPackageName =
     providers.environmentVariable("NVPN_ANDROID_PACKAGE").orElse("fi.siriusbusiness.nvpn").get()
+val androidLegacyFixtureWithoutNativeLibs =
+    providers.environmentVariable("NVPN_ANDROID_LEGACY_FIXTURE_WITHOUT_NATIVE_LIBS")
+        .orNull
+        ?.lowercase() in setOf("1", "true", "yes", "on")
+
+if (androidLegacyFixtureWithoutNativeLibs && androidPackageName == "fi.siriusbusiness.nvpn") {
+    throw GradleException("Native-free Android fixtures cannot use the canonical package")
+}
 
 fun buildConfigString(value: String): String =
     "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
@@ -106,14 +114,18 @@ android {
 
     packaging {
         jniLibs {
-            keepDebugSymbols += setOf(
-                "**/libbarhopper_v3.so",
-                "**/libboringtun-*.so",
-                "**/libandroidx.graphics.path.so",
-                "**/libimage_processing_util_jni.so",
-                "**/libnostr_vpn_app_core.so",
-                "**/libsurface_util_jni.so",
-            )
+            if (androidLegacyFixtureWithoutNativeLibs) {
+                excludes += "**/*.so"
+            } else {
+                keepDebugSymbols += setOf(
+                    "**/libbarhopper_v3.so",
+                    "**/libboringtun-*.so",
+                    "**/libandroidx.graphics.path.so",
+                    "**/libimage_processing_util_jni.so",
+                    "**/libnostr_vpn_app_core.so",
+                    "**/libsurface_util_jni.so",
+                )
+            }
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

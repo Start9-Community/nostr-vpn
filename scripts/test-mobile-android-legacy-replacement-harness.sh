@@ -8,6 +8,7 @@ migration="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidLegacyPackage
 boot_receiver="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnBootReceiver.kt"
 vpn_service="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt"
 manifest="$ROOT/android/app/src/main/AndroidManifest.xml"
+gradle_build="$ROOT/android/app/build.gradle.kts"
 
 for contract in \
   'RETIRED_PACKAGES=(' \
@@ -19,7 +20,10 @@ for contract in \
   'fi.siriusbusiness.nvpn.test' \
   'build_retired_fixture_apks' \
   'install-multi-package -r' \
+  'NVPN_ANDROID_LEGACY_FIXTURE_WITHOUT_NATIVE_LIBS=1' \
   'gradle :app:assembleDebug -x buildRustArm64' \
+  'assert_fixture_has_no_native_libraries' \
+  'unzip -Z1 "$apk"' \
   '"$ADB" -s "$serial" install -r "$work_dir/canonical.apk"' \
   'assert_canonical_update_preserved_data' \
   'touch files/nvpn-replacement-marker' \
@@ -45,6 +49,16 @@ if grep -Eq 'sh -c .*nvpn-replacement-marker' "$gate"; then
   echo "Android upgrade marker still relies on ADB shell redirection quoting" >&2
   exit 1
 fi
+
+for gradle_contract in \
+  'NVPN_ANDROID_LEGACY_FIXTURE_WITHOUT_NATIVE_LIBS' \
+  'androidLegacyFixtureWithoutNativeLibs' \
+  'excludes += "**/*.so"' \
+  'Native-free Android fixtures cannot use the canonical package'
+do
+  grep -Fq "$gradle_contract" "$gradle_build" \
+    || { echo "Android Gradle fixture packaging is missing: $gradle_contract" >&2; exit 1; }
+done
 
 grep -Fq 'id = "remove-legacy-app"' "$activity" \
   || { echo "Android shipped UI has no legacy-removal selector" >&2; exit 1; }

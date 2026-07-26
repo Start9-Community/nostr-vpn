@@ -27,6 +27,7 @@ ADB="${ADB:-adb}"
 serial=""
 work_dir=""
 logcat_pid=""
+retired_fixture_total_bytes=0
 
 select_device() {
   if [[ -n "${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}" ]]; then
@@ -176,19 +177,35 @@ assert_no_retired_processes() {
   done
 }
 
+assert_fixture_has_no_native_libraries() {
+  local apk="$1"
+  if unzip -Z1 "$apk" | grep -Eq '^lib/.*\.so$'; then
+    echo "Retired Android fixture unexpectedly contains native libraries: $apk" >&2
+    return 1
+  fi
+}
+
 build_retired_fixture_apks() {
-  local package output_name
+  local fixture_bytes package output_name
   for package in "${RETIRED_PACKAGES[@]}"; do
     output_name="${package//./_}.apk"
     (
       cd "$ROOT/android"
       NVPN_ANDROID_PACKAGE="$package" \
+        NVPN_ANDROID_LEGACY_FIXTURE_WITHOUT_NATIVE_LIBS=1 \
         NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
         gradle :app:assembleDebug -x buildRustArm64
     )
     cp "$ROOT/android/app/build/outputs/apk/debug/app-debug.apk" \
       "$work_dir/$output_name"
+    assert_fixture_has_no_native_libraries "$work_dir/$output_name"
+    fixture_bytes="$(wc -c <"$work_dir/$output_name" | tr -d ' ')"
+    retired_fixture_total_bytes=$((retired_fixture_total_bytes + fixture_bytes))
+    printf 'Built native-free retired fixture %s (%s bytes)\n' \
+      "$package" "$fixture_bytes"
   done
+  printf 'Native-free retired fixtures total %s bytes\n' \
+    "$retired_fixture_total_bytes"
   cp "$work_dir/canonical.apk" "$CANONICAL_APK"
 }
 
@@ -249,7 +266,7 @@ assert_vpn_start_blocked() {
     | grep -Fq 'NostrVpnService'
 }
 
-for command in "$ADB" gradle; do
+for command in "$ADB" gradle unzip; do
   command -v "$command" >/dev/null 2>&1 \
     || { echo "Android legacy replacement e2e requires $command" >&2; exit 1; }
 done
