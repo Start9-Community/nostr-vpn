@@ -1,4 +1,4 @@
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use std::ffi::c_void;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
@@ -37,6 +37,8 @@ pub struct NvpnMobileTunnelHandle {
 }
 
 include!("c_abi/mobile_network.rs");
+#[cfg(target_os = "ios")]
+include!("c_abi/ios_packet_flow.rs");
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -318,24 +320,6 @@ pub unsafe extern "C" fn nostr_vpn_mobile_tunnel_free(handle: *mut NvpnMobileTun
     unsafe {
         drop(Box::from_raw(handle));
     }
-}
-
-/// Attach the packet tunnel provider's current utun fd to the mobile tunnel.
-/// Rust locates and duplicates the fd before starting native packet I/O.
-///
-/// # Safety
-///
-/// `handle` must be a live mobile tunnel handle.
-#[cfg(target_os = "ios")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nostr_vpn_mobile_tunnel_attach_current_tun_fd(
-    handle: *mut NvpnMobileTunnelHandle,
-) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-    let tunnel = unsafe { &mut *handle };
-    tunnel.tunnel.attach_current_tun_fd().is_ok()
 }
 
 #[cfg(target_os = "android")]

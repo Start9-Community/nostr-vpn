@@ -2,9 +2,19 @@
 #define NOSTR_VPN_APP_CORE_C_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 typedef struct NvpnAppHandle NvpnAppHandle;
 typedef struct NvpnMobileTunnelHandle NvpnMobileTunnelHandle;
+typedef bool (*NvpnPacketFlowWriteCallback)(
+    void *context,
+    const uint8_t *const *packets,
+    const size_t *lengths,
+    size_t packet_count
+);
+typedef void (*NvpnPacketFlowFailureCallback)(void *context, const char *message);
+typedef void (*NvpnPacketFlowReleaseCallback)(void *context);
 
 NvpnAppHandle *nostr_vpn_app_new(const char *data_dir, const char *app_version);
 void nostr_vpn_app_free(NvpnAppHandle *handle);
@@ -28,7 +38,20 @@ bool nostr_vpn_mobile_tunnel_ack_app_config_toml(
 bool nostr_vpn_mobile_tunnel_network_changed(const NvpnMobileTunnelHandle *handle);
 char *nostr_vpn_mobile_tunnel_wg_excluded_route(const NvpnMobileTunnelHandle *handle);
 void nostr_vpn_mobile_tunnel_free(NvpnMobileTunnelHandle *handle);
-bool nostr_vpn_mobile_tunnel_attach_current_tun_fd(NvpnMobileTunnelHandle *handle);
+bool nostr_vpn_mobile_tunnel_packet_flow_start(
+    NvpnMobileTunnelHandle *handle,
+    void *context,
+    NvpnPacketFlowWriteCallback write,
+    NvpnPacketFlowFailureCallback failure,
+    NvpnPacketFlowReleaseCallback release
+);
+bool nostr_vpn_mobile_tunnel_packet_flow_send(
+    const NvpnMobileTunnelHandle *handle,
+    const uint8_t *bytes,
+    size_t byte_count,
+    const size_t *lengths,
+    size_t packet_count
+);
 void nostr_vpn_string_free(char *value);
 
 #endif

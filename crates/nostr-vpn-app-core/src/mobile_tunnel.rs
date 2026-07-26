@@ -6,7 +6,7 @@ use std::io::Write;
 #[cfg(test)]
 use std::net::UdpSocket;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -60,8 +60,10 @@ use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinHandle;
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 include!("mobile_tunnel/native_tun.rs");
+#[cfg(any(test, target_os = "ios"))]
+include!("mobile_tunnel/ios_packet_flow.rs");
 include!("mobile_tunnel/config.rs");
 include!("mobile_tunnel/runtime.rs");
 include!("mobile_tunnel/endpoint_control.rs");

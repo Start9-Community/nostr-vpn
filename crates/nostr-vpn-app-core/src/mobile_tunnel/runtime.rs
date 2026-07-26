@@ -68,8 +68,10 @@ impl MobileTunnel {
             inbound_rx: Some(started.inbound_rx),
             tasks: started.tasks,
             wg_upstream: started.wg_upstream,
-            #[cfg(any(target_os = "android", target_os = "ios"))]
+            #[cfg(target_os = "android")]
             native_tun: None,
+            #[cfg(target_os = "ios")]
+            ios_packet_flow: None,
             #[cfg(target_os = "android")]
             wg_upstream_socket_fd: started.wg_upstream_socket_fd,
         })
@@ -568,7 +570,7 @@ impl MobileTunnel {
         self.wg_upstream_socket_fd
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     pub(crate) fn attach_tun_fd(&mut self, fd: c_int) -> Result<()> {
         if fd < 0 {
             return Err(anyhow!("invalid native tun fd"));
@@ -600,8 +602,35 @@ impl MobileTunnel {
     }
 
     #[cfg(target_os = "ios")]
-    pub(crate) fn attach_current_tun_fd(&mut self) -> Result<()> {
-        self.attach_tun_fd(current_ios_utun_fd()?)
+    pub(crate) fn attach_packet_flow(&mut self, callbacks: IosPacketFlowCallbacks) -> Result<()> {
+        if self.ios_packet_flow.is_some() {
+            return Err(anyhow!("iOS packet flow already attached"));
+        }
+        let inbound_rx = self
+            .inbound_rx
+            .take()
+            .ok_or_else(|| anyhow!("mobile tunnel inbound packet receiver stopped"))?;
+        self.ios_packet_flow = Some(IosPacketFlowRuntime::start(
+            &self.runtime,
+            inbound_rx,
+            callbacks,
+            Arc::clone(&self.tun_counters),
+        ));
+        Ok(())
+    }
+
+    #[cfg(target_os = "ios")]
+    pub(crate) fn send_packet_flow_batch(
+        &self,
+        bytes: &[u8],
+        lengths: &[usize],
+    ) -> Result<()> {
+        send_ios_packet_flow_batch(
+            &self.outbound_tx,
+            &self.tun_counters,
+            bytes,
+            lengths,
+        )
     }
 
     pub(crate) fn handle_underlay_network_change(&self) -> Result<MobileNetworkChangeOutcome> {

@@ -75,21 +75,21 @@ impl MobileTunAtomicCounters {
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(test, target_os = "android", target_os = "ios"))]
     fn note_read(&self, len: usize) {
         self.packets_read.fetch_add(1, Ordering::Relaxed);
         self.bytes_read
             .fetch_add(u64::try_from(len).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(test, target_os = "android", target_os = "ios"))]
     fn note_write(&self, len: usize) {
         self.packets_written.fetch_add(1, Ordering::Relaxed);
         self.bytes_written
             .fetch_add(u64::try_from(len).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(test, target_os = "android", target_os = "ios"))]
     fn note_drop(&self) {
         self.packets_dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -705,8 +705,10 @@ pub(crate) struct MobileTunnel {
     inbound_rx: Option<tokio_mpsc::Receiver<Vec<Vec<u8>>>>,
     tasks: Vec<JoinHandle<()>>,
     wg_upstream: Option<WgUpstreamRuntime>,
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     native_tun: Option<NativeTunRuntime>,
+    #[cfg(target_os = "ios")]
+    ios_packet_flow: Option<IosPacketFlowRuntime>,
     /// Raw fd of the boringtun UDP socket. Android reads this and calls
     /// `VpnService.protect(fd)` so encrypted UDP escapes the VPN tun.
     #[cfg(target_os = "android")]

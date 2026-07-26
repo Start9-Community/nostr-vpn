@@ -21,6 +21,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var tunnelRunning = false
     private var tunnelGeneration: UInt64 = 0
     private var activeTunnelCalls = 0
+    private var packetFlowBridge: PacketFlowBridge?
     private let tunnelCondition = NSCondition()
     private let appMessageSnapshotLock = NSLock()
     private let underlayMonitorLock = NSLock()
@@ -154,13 +155,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler(PacketTunnelError.startFailed)
                 return
             }
+            let packetFlowBridge = PacketFlowBridge(
+                packetFlow: self.packetFlow,
+                provider: self
+            )
+            guard self.installPacketFlowBridge(
+                packetFlowBridge,
+                generation: startGeneration
+            ) else {
+                let settingsMs = elapsedMs(since: settingsStartedAt)
+                NSLog("nvpn-pkt: tunnel stopped before packet flow install after \(settingsMs)ms")
+                packetDebugLog("tunnel stopped before packet flow install after \(settingsMs)ms")
+                self.stopRustTunnel(generation: startGeneration)
+                completionHandler(PacketTunnelError.startFailed)
+                return
+            }
             let attachResult = self.withTunnelHandle(generation: startGeneration) { handle in
-                nostr_vpn_mobile_tunnel_attach_current_tun_fd(handle)
+                packetFlowBridge.attach(to: handle)
             }
             guard attachResult == true else {
                 let reason = attachResult == nil
-                    ? "tunnel stopped before utun fd attach"
-                    : "failed to attach utun fd to Rust"
+                    ? "tunnel stopped before packet flow attach"
+                    : "failed to attach NEPacketTunnelFlow to Rust"
                 let settingsMs = elapsedMs(since: settingsStartedAt)
                 NSLog("nvpn-pkt: \(reason) after \(settingsMs)ms")
                 packetDebugLog("\(reason) after \(settingsMs)ms")
@@ -172,9 +188,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let totalMs = elapsedMs(since: startedAt)
             NSLog(
                 "nvpn-pkt: setTunnelNetworkSettings succeeded in \(settingsMs)ms; "
-                    + "native utun fd attached total=\(totalMs)ms"
+                    + "NEPacketTunnelFlow attached total=\(totalMs)ms"
             )
             packetDebugLog("setTunnelNetworkSettings succeeded settingsMs=\(settingsMs) totalMs=\(totalMs)")
+            packetFlowBridge.startReading()
             self.startUnderlayNetworkMonitor(generation: startGeneration)
             NSLog("nvpn-pkt: completionHandler(nil) — VPN should transition to connected")
             packetDebugLog("completionHandler nil totalMs=\(totalMs)")
@@ -341,6 +358,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return installed
     }
 
+    private func installPacketFlowBridge(
+        _ bridge: PacketFlowBridge,
+        generation: UInt64
+    ) -> Bool {
+        tunnelCondition.lock()
+        defer { tunnelCondition.unlock() }
+        guard tunnelRunning,
+              tunnelGeneration == generation,
+              tunnelHandle != nil,
+              packetFlowBridge == nil
+        else {
+            return false
+        }
+        packetFlowBridge = bridge
+        return true
+    }
+
     private func stopRustTunnel(generation expectedGeneration: UInt64? = nil) {
         tunnelCondition.lock()
         if let expectedGeneration, tunnelGeneration != expectedGeneration {
@@ -348,6 +382,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         tunnelRunning = false
+        let packetFlowBridge = self.packetFlowBridge
+        self.packetFlowBridge = nil
+        packetFlowBridge?.stop()
         let handle = tunnelHandle
         tunnelHandle = nil
         while activeTunnelCalls > 0 {
@@ -358,6 +395,37 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if let handle {
             nostr_vpn_mobile_tunnel_free(handle)
+        }
+    }
+
+    func sendPacketFlowBatch(_ bytes: Data, lengths: [Int]) -> Bool {
+        let sent = withTunnelHandle { handle in
+            bytes.withUnsafeBytes { rawBytes in
+                lengths.withUnsafeBufferPointer { rawLengths in
+                    guard let bytes = rawBytes.bindMemory(to: UInt8.self).baseAddress,
+                          let lengths = rawLengths.baseAddress
+                    else {
+                        return false
+                    }
+                    return nostr_vpn_mobile_tunnel_packet_flow_send(
+                        handle,
+                        bytes,
+                        rawBytes.count,
+                        lengths,
+                        rawLengths.count
+                    )
+                }
+            }
+        }
+        return sent == true
+    }
+
+    func packetFlowDidFail(_ message: String) {
+        NSLog("nvpn-pkt: packet flow failed: \(message)")
+        packetDebugLog("packet flow failed: \(message)")
+        let error = PacketTunnelError.packetFlowFailed(message)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.cancelTunnelWithError(error)
         }
     }
 
@@ -462,6 +530,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 private enum PacketTunnelError: LocalizedError {
     case startFailed
     case invalidConfig(String)
+    case packetFlowFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -469,6 +538,8 @@ private enum PacketTunnelError: LocalizedError {
             return "Failed to start FIPS tunnel"
         case .invalidConfig(let message):
             return message
+        case .packetFlowFailed(let message):
+            return "Packet tunnel I/O failed: \(message)"
         }
     }
 }

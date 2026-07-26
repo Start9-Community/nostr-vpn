@@ -20,9 +20,14 @@ ios_lifecycle_lib="$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
 ios_release_gate="$ROOT/scripts/lib-mobile-ios-release-network.sh"
 ios_release_artifact="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
 ios_packet_tunnel="$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift"
+ios_packet_flow_bridge="$ROOT/ios/PacketTunnel/PacketFlowBridge.swift"
+ios_project_file="$ROOT/ios/NostrVpnIos.xcodeproj/project.pbxproj"
+ios_release_binary_audit="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
 ios_hotspot="$ROOT/scripts/lib-mobile-ios-hotspot.sh"
 local_fips="$ROOT/scripts/local-fips-workspace.sh"
 fips_c_abi="$ROOT/crates/nostr-vpn-app-core/src/c_abi.rs"
+mobile_packet_flow="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/ios_packet_flow.rs"
+mobile_native_tun="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/native_tun.rs"
 mobile_tunnel_config="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/config.rs"
 ios_release_probe="$ROOT/ios/UITests/NostrVpnReleaseNetworkProbe.swift"
 ios_release_ui="$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift"
@@ -99,6 +104,37 @@ grep -Fq 'mobile_wg_endpoint_family "$fixture_host"' "$ios_hotspot" \
   || { echo "Pixel fixture reachability is not IP-family aware" >&2; exit 1; }
 grep -Fq 'Self.endpointHost(from: endpoint)' "$ios_packet_tunnel" \
   || { echo "iOS packet tunnel does not parse bracketed WireGuard endpoints" >&2; exit 1; }
+grep -Fq 'packetFlow.readPackets' "$ios_packet_flow_bridge" \
+  && grep -Fq 'packetFlow.writePackets' "$ios_packet_flow_bridge" \
+  && grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_start' "$ios_packet_flow_bridge" \
+  && grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_send' "$ios_packet_tunnel" \
+  || { echo "iOS packet tunnel does not use the supported NEPacketTunnelFlow bridge" >&2; exit 1; }
+grep -Fq 'PacketFlowBridge.swift in Sources' "$ios_project_file" \
+  && grep -Fq 'ios_release_network_audit_packet_flow_binary' "$ios_release_binary_audit" \
+  && grep -Fq 'native utun fd attached' "$ios_release_binary_audit" \
+  || { echo "iOS packet-flow source or binary audit is not wired into release artifacts" >&2; exit 1; }
+grep -Fq 'include!("mobile_tunnel/ios_packet_flow.rs")' \
+  "$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel.rs" \
+  && grep -Fq 'IosPacketFlowRuntime' "$mobile_packet_flow" \
+  && grep -Fq 'Java_org_nostrvpn_app_core_NativeCore_mobileTunnelAttachTunFd' "$fips_c_abi" \
+  || { echo "mobile packet I/O does not preserve Android fd I/O beside the iOS packet-flow bridge" >&2; exit 1; }
+if rg -q \
+  'current_ios_utun_fd|CTLIOCGINFO|com\\.apple\\.net\\.utun_control|getpeername|libc::dup|libc::readv|libc::writev|attach_current_tun_fd' \
+  "$ROOT/crates/nostr-vpn-app-core/src" "$ROOT/ios/PacketTunnel"
+then
+  echo "iOS production packet I/O still reaches the private utun fd" >&2
+  exit 1
+fi
+if grep -Fq 'outbound_tx.blocking_send' "$mobile_packet_flow"; then
+  echo "iOS packet-flow send can deadlock tunnel shutdown" >&2
+  exit 1
+fi
+if grep -Fq 'nostr_vpn_mobile_tunnel_attach_current_tun_fd' \
+  "$ROOT/ios/Bindings/NostrVpnAppCoreC.h"
+then
+  echo "iOS C ABI still exports private utun fd attachment" >&2
+  exit 1
+fi
 grep -Fq 'if let Some(IpAddr::V4(ip)) =' "$mobile_tunnel_config" \
   && grep -Fq 'wireguard_endpoint_host_ip(&app.wireguard_exit.endpoint)' \
     "$mobile_tunnel_config" \

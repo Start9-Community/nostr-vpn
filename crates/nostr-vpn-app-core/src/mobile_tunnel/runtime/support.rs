@@ -295,12 +295,14 @@ fn acknowledge_pending_app_config_toml(
 
 impl Drop for MobileTunnel {
     fn drop(&mut self) {
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         let mut native_tun = self.native_tun.take();
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         if let Some(tun) = native_tun.as_mut() {
             tun.stop();
         }
+        #[cfg(target_os = "ios")]
+        let packet_flow = self.ios_packet_flow.take();
         let _ = self.inbound_rx.take();
         for task in &self.tasks {
             task.abort();
@@ -309,6 +311,10 @@ impl Drop for MobileTunnel {
         let endpoint = self.endpoint.take();
         let wg_upstream = self.wg_upstream.take();
         self.runtime.block_on(async move {
+            #[cfg(target_os = "ios")]
+            if let Some(packet_flow) = packet_flow {
+                packet_flow.shutdown().await;
+            }
             for task in tasks {
                 let _ = task.await;
             }
@@ -319,7 +325,7 @@ impl Drop for MobileTunnel {
                 let _ = endpoint.shutdown().await;
             }
         });
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         if let Some(mut tun) = native_tun {
             tun.join();
         }

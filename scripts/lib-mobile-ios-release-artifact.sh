@@ -37,6 +37,28 @@ ios_release_network_audit_rust_feature_surface() {
     echo "iOS Release archive symbol audit failed" >&2
     return 1
   }
+  for forbidden in \
+    'com.apple.net.utun_control' \
+    'CTLIOCGINFO' \
+    'current_ios_utun_fd' \
+    'nostr_vpn_mobile_tunnel_attach_current_tun_fd' \
+    'native utun fd attached'
+  do
+    if grep -Fq "$forbidden" "$archive_strings" \
+      || grep -Fq "$forbidden" "$archive_symbols"
+    then
+      rm -f "$archive_strings" "$archive_symbols"
+      echo "iOS Release archive contains retired private utun packet I/O" >&2
+      return 1
+    fi
+  done
+  if ! grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_start' "$archive_symbols" \
+    || ! grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_send' "$archive_symbols"
+  then
+    rm -f "$archive_strings" "$archive_symbols"
+    echo "iOS Release archive lacks the supported packet-flow C ABI" >&2
+    return 1
+  fi
   if ! grep -Fq "$fips_path/crates/fips-core/src/" "$archive_strings" \
     || ! grep -Fq 'fips_core::node' "$archive_strings" \
     || ! grep -Fq 'fips_core::transport' "$archive_strings" \
@@ -122,6 +144,43 @@ PY
   assert_release_checkout_state \
     "$ROOT" "$IOS_RELEASE_NETWORK_APP_HEAD" \
     "$IOS_RELEASE_NETWORK_APP_TREE" "iOS Release artifact build"
+}
+
+ios_release_network_audit_packet_flow_binary() {
+  local tunnel_executable="$1"
+  local tunnel_strings tunnel_symbols forbidden
+  tunnel_strings="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-tunnel-strings.XXXXXX")"
+  tunnel_symbols="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-tunnel-symbols.XXXXXX")"
+  strings "$tunnel_executable" >"$tunnel_strings" \
+    && nm -arch arm64 -gU "$tunnel_executable" >"$tunnel_symbols" 2>/dev/null \
+    || {
+      rm -f "$tunnel_strings" "$tunnel_symbols"
+      echo "iOS Packet Tunnel packet-flow binary audit failed" >&2
+      return 1
+    }
+  for forbidden in \
+    'com.apple.net.utun_control' \
+    'CTLIOCGINFO' \
+    'current_ios_utun_fd' \
+    'nostr_vpn_mobile_tunnel_attach_current_tun_fd' \
+    'native utun fd attached'
+  do
+    if grep -Fq "$forbidden" "$tunnel_strings" \
+      || grep -Fq "$forbidden" "$tunnel_symbols"
+    then
+      rm -f "$tunnel_strings" "$tunnel_symbols"
+      echo "iOS Packet Tunnel contains retired private utun packet I/O" >&2
+      return 1
+    fi
+  done
+  if ! grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_start' "$tunnel_symbols" \
+    || ! grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_send' "$tunnel_symbols"
+  then
+    rm -f "$tunnel_strings" "$tunnel_symbols"
+    echo "iOS Packet Tunnel lacks the supported packet-flow C ABI" >&2
+    return 1
+  fi
+  rm -f "$tunnel_strings" "$tunnel_symbols"
 }
 
 ios_release_network_app_path() {
@@ -252,6 +311,7 @@ ios_release_network_audit_artifact() {
     echo "iOS Release app/Packet Tunnel artifact is incomplete" >&2
     return 1
   }
+  ios_release_network_audit_packet_flow_binary "$tunnel_executable" || return 1
   codesign --verify --deep --strict "$app" >/dev/null 2>&1 || {
     echo "iOS Release app signature verification failed" >&2
     return 1

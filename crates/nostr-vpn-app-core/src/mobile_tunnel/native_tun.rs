@@ -1,8 +1,6 @@
 const NATIVE_TUN_PACKET_HEADROOM: usize = 128;
 const NATIVE_TUN_PACKET_MAX: usize = 65_535;
 const NATIVE_TUN_POLL_TIMEOUT_MS: i32 = 100;
-#[cfg(target_os = "ios")]
-const IOS_UTUN_HEADER_LEN: usize = 4;
 
 struct NativeTunRuntime {
     fd: c_int,
@@ -230,7 +228,6 @@ fn read_mobile_tun_packet(fd: c_int, packet: &mut Vec<u8>) -> NativeTunRead {
     }
 }
 
-#[cfg(target_os = "android")]
 fn read_mobile_tun_payload(fd: c_int, packet: &mut Vec<u8>) -> isize {
     unsafe {
         libc::read(
@@ -241,33 +238,10 @@ fn read_mobile_tun_payload(fd: c_int, packet: &mut Vec<u8>) -> isize {
     }
 }
 
-#[cfg(target_os = "ios")]
-fn read_mobile_tun_payload(fd: c_int, packet: &mut Vec<u8>) -> isize {
-    let mut header = [0u8; IOS_UTUN_HEADER_LEN];
-    let mut iov = [
-        libc::iovec {
-            iov_base: header.as_mut_ptr().cast::<libc::c_void>(),
-            iov_len: header.len(),
-        },
-        libc::iovec {
-            iov_base: packet.as_mut_ptr().cast::<libc::c_void>(),
-            iov_len: packet.capacity(),
-        },
-    ];
-    unsafe { libc::readv(fd, iov.as_mut_ptr(), iov.len() as c_int) }
-}
-
-#[cfg(target_os = "android")]
 fn mobile_tun_payload_len(read_len: usize) -> Option<usize> {
     Some(read_len)
 }
 
-#[cfg(target_os = "ios")]
-fn mobile_tun_payload_len(read_len: usize) -> Option<usize> {
-    (read_len > IOS_UTUN_HEADER_LEN).then_some(read_len - IOS_UTUN_HEADER_LEN)
-}
-
-#[cfg(target_os = "android")]
 fn write_mobile_tun_packet(fd: c_int, packet: &[u8], stop: &AtomicBool) -> NativeTunWrite {
     if packet.is_empty() {
         return NativeTunWrite::Dropped;
@@ -293,56 +267,6 @@ fn write_mobile_tun_packet(fd: c_int, packet: &[u8], stop: &AtomicBool) -> Nativ
         return NativeTunWrite::Stopped;
     }
     NativeTunWrite::Stopped
-}
-
-#[cfg(target_os = "ios")]
-fn write_mobile_tun_packet(fd: c_int, packet: &[u8], stop: &AtomicBool) -> NativeTunWrite {
-    if packet.is_empty() {
-        return NativeTunWrite::Dropped;
-    }
-    let Some(header) = ios_utun_packet_header(packet) else {
-        return NativeTunWrite::Dropped;
-    };
-    while !stop.load(Ordering::Relaxed) {
-        let mut iov = [
-            libc::iovec {
-                iov_base: header.as_ptr().cast::<libc::c_void>().cast_mut(),
-                iov_len: header.len(),
-            },
-            libc::iovec {
-                iov_base: packet.as_ptr().cast::<libc::c_void>().cast_mut(),
-                iov_len: packet.len(),
-            },
-        ];
-        let written = unsafe { libc::writev(fd, iov.as_mut_ptr(), iov.len() as c_int) };
-        if written == isize::try_from(packet.len() + IOS_UTUN_HEADER_LEN).unwrap_or(-1) {
-            return NativeTunWrite::Written;
-        }
-        if written >= 0 {
-            return NativeTunWrite::Stopped;
-        }
-        let error = std::io::Error::last_os_error();
-        if mobile_tun_errno_is_interrupted(error.raw_os_error()) {
-            continue;
-        }
-        if mobile_tun_errno_is_again(error.raw_os_error())
-            && wait_mobile_tun_fd(fd, libc::POLLOUT, stop)
-        {
-            continue;
-        }
-        return NativeTunWrite::Stopped;
-    }
-    NativeTunWrite::Stopped
-}
-
-#[cfg(target_os = "ios")]
-fn ios_utun_packet_header(packet: &[u8]) -> Option<[u8; IOS_UTUN_HEADER_LEN]> {
-    let family = match packet.first().map(|byte| byte >> 4) {
-        Some(4) => libc::AF_INET,
-        Some(6) => libc::AF_INET6,
-        _ => return None,
-    };
-    Some([0, 0, 0, u8::try_from(family).ok()?])
 }
 
 fn wait_mobile_tun_fd(fd: c_int, events: i16, stop: &AtomicBool) -> bool {
@@ -380,55 +304,8 @@ fn prepare_mobile_tun_fd(fd: c_int) -> Result<c_int> {
     Ok(fd)
 }
 
-#[cfg(target_os = "android")]
 fn native_tun_owned_fd(fd: c_int) -> Result<c_int> {
     Ok(fd)
-}
-
-#[cfg(target_os = "ios")]
-fn native_tun_owned_fd(fd: c_int) -> Result<c_int> {
-    let duplicate = unsafe { libc::dup(fd) };
-    if duplicate < 0 {
-        return Err(anyhow!(
-            "failed to duplicate iOS utun fd: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(duplicate)
-}
-
-#[cfg(target_os = "ios")]
-fn current_ios_utun_fd() -> Result<c_int> {
-    let mut info = unsafe { std::mem::zeroed::<libc::ctl_info>() };
-    let name = b"com.apple.net.utun_control\0";
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            name.as_ptr().cast::<libc::c_char>(),
-            info.ctl_name.as_mut_ptr(),
-            name.len().min(info.ctl_name.len()),
-        );
-    }
-    for fd in 0..=1024 {
-        let mut addr = unsafe { std::mem::zeroed::<libc::sockaddr_ctl>() };
-        let mut len = std::mem::size_of::<libc::sockaddr_ctl>() as libc::socklen_t;
-        let result = unsafe {
-            libc::getpeername(
-                fd,
-                (&mut addr as *mut libc::sockaddr_ctl).cast::<libc::sockaddr>(),
-                &mut len,
-            )
-        };
-        if result != 0 || i32::from(addr.sc_family) != libc::AF_SYSTEM {
-            continue;
-        }
-        if info.ctl_id == 0 && unsafe { libc::ioctl(fd, libc::CTLIOCGINFO, &mut info) } != 0 {
-            continue;
-        }
-        if addr.sc_id == info.ctl_id {
-            return Ok(fd);
-        }
-    }
-    Err(anyhow!("failed to locate iOS utun fd"))
 }
 
 fn set_mobile_tun_nonblocking(fd: c_int) -> Result<()> {
@@ -456,13 +333,9 @@ fn close_mobile_tun_fd(fd: c_int) {
     }
 }
 
-#[cfg(target_os = "android")]
 fn reject_unattached_mobile_tun_fd(fd: c_int) {
     close_mobile_tun_fd(fd);
 }
-
-#[cfg(target_os = "ios")]
-fn reject_unattached_mobile_tun_fd(_fd: c_int) {}
 
 fn mobile_tun_errno_is_interrupted(error: Option<i32>) -> bool {
     error == Some(libc::EINTR)
