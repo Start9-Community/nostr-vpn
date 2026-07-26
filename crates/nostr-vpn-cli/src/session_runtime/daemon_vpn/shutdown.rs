@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) fn daemon_termination_wait()
+-> Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    #[cfg(unix)]
+    {
+        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("failed to install SIGTERM handler")?;
+        return Ok(Box::pin(async move {
+            let _ = signal.recv().await;
+        }));
+    }
+    #[cfg(not(unix))]
+    Ok(Box::pin(std::future::pending()))
+}
+
 pub(super) struct DaemonVpnShutdown<'a> {
     pub(super) port_mapping_runtime: &'a mut PortMappingRuntime,
     pub(super) fips_tunnel_runtime: Option<crate::fips_private_mesh::FipsPrivateTunnelRuntime>,

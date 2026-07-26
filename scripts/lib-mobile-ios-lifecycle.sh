@@ -156,7 +156,7 @@ run_ios_app_lifecycle_gate() {
   local cycles="$4"
   local result_name="mobile-ios-lifecycle-$$-$RANDOM.json"
   local stem="${result_name%.json}"
-  local background_dwell="${NVPN_IOS_LIFECYCLE_BACKGROUND_DWELL_SECS:-3}"
+  local background_dwell="${NVPN_IOS_LIFECYCLE_BACKGROUND_DWELL_SECS:-10}"
   local run_id="ios-lifecycle-$$-$RANDOM-$(date +%s)"
   local log="$result_dir/$stem-xcodebuild.log"
   local markers="$result_dir/$stem-markers.log"

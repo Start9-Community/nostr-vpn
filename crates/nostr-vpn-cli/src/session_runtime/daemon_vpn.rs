@@ -7,17 +7,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     let mut last_paid_exit_usage_flush_at = Instant::now();
     let mut last_runtime_heartbeat_at = WallTimeJumpObserver::new(unix_timestamp());
     let mut platform_network_change_rx = spawn_platform_network_change_monitor();
-    #[cfg(unix)]
-    let mut terminate_signal =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .context("failed to install SIGTERM handler")?;
-    #[cfg(unix)]
-    let terminate_wait = async move {
-        let _ = terminate_signal.recv().await;
-    };
-    #[cfg(not(unix))]
-    let terminate_wait = std::future::pending::<()>();
-    tokio::pin!(terminate_wait);
+    let mut terminate_wait = daemon_termination_wait()?;
     let loop_state = initialize_daemon_vpn_loop(&args, &startup).await?;
     write_daemon_control_ready(&startup.config_path, std::process::id())?;
     let DaemonVpnStartup {

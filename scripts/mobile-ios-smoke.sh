@@ -80,7 +80,7 @@ simulator  Builds, clean-installs, launches, screenshots, samples idle CPU,
 device     Launches an already installed physical test build.
            By default, backgrounds and foregrounds it three times and proves
            the shared native core closes and reopens on every transition,
-           including a three-second suspended interval per cycle.
+           including a ten-second suspended interval per cycle.
 --install  Builds and installs the current iphoneos test app
            before launching device mode.
 --disconnect
