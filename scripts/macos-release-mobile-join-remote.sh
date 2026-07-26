@@ -8,6 +8,9 @@ APP_PATH="$ROOT/dist/macos/Nostr VPN.app"
 APP_EXE="$APP_PATH/Contents/MacOS/Nostr VPN"
 FIPS_PATH="${NVPN_FIPS_REPO_PATH:-$ROOT/../fips}"
 EXPECTED_FIPS="${NVPN_EXPECTED_FIPS_GIT_SHA:-}"
+EXPECTED_SIGNING_IDENTITY="${NVPN_EXPECTED_MACOS_SIGNING_IDENTITY:-}"
+EXPECTED_SIGNING_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-}"
+EXPECTED_SIGNER_CERT_SHA256="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
 APP_LOG="$ARTIFACT_DIR/app.log"
 APP_PID=""
 
@@ -35,8 +38,14 @@ launch_app() {
   pkill -x "Nostr VPN" >/dev/null 2>&1 || true
   sleep 0.25
   (
-    unset NVPN_FIPS_REPO_PATH NVPN_EXPECTED_FIPS_GIT_SHA
-    exec "$APP_EXE"
+    exec /usr/bin/env -i \
+      HOME="$HOME" \
+      USER="${USER:-dev}" \
+      LOGNAME="${LOGNAME:-${USER:-dev}}" \
+      PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+      TMPDIR="${TMPDIR:-/tmp}" \
+      LANG="${LANG:-en_US.UTF-8}" \
+      "$APP_EXE"
   ) >>"$APP_LOG" 2>&1 &
   APP_PID=$!
   local deadline=$((SECONDS + 10))
@@ -70,7 +79,36 @@ prepare() {
     echo "macOS Release join gate requires synced FIPS source" >&2
     return 1
   }
-  local fips_sha fips_tree app_sha app_tree team
+  local fips_sha fips_tree app_sha app_tree team authority cert_dir cert_sha cert_pem
+  [[ -n "$EXPECTED_SIGNING_IDENTITY" ]] || {
+    echo "macOS Release join gate requires an exact signing identity" >&2
+    return 1
+  }
+  [[ -n "$EXPECTED_SIGNING_TEAM" ]] || {
+    echo "macOS Release join gate requires an exact signing team" >&2
+    return 1
+  }
+  if [[ -z "$EXPECTED_SIGNER_CERT_SHA256" ]]; then
+    cert_pem="$(mktemp "${TMPDIR:-/tmp}/nvpn-macos-join-expected-cert.XXXXXX")"
+    if ! security find-certificate \
+      -c "$EXPECTED_SIGNING_IDENTITY" -p >"$cert_pem" \
+      || [[ ! -s "$cert_pem" ]]
+    then
+      rm -f "$cert_pem"
+      echo "Configured macOS company signing certificate is unavailable" >&2
+      return 1
+    fi
+    EXPECTED_SIGNER_CERT_SHA256="$(
+      openssl x509 -in "$cert_pem" -outform der \
+        | shasum -a 256 \
+        | awk '{print $1}'
+    )"
+    rm -f "$cert_pem"
+  fi
+  [[ "$EXPECTED_SIGNER_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "macOS Release join gate could not pin the signer certificate" >&2
+    return 1
+  }
   fips_sha="$(git -C "$FIPS_PATH" rev-parse HEAD)"
   fips_tree="$(git -C "$FIPS_PATH" rev-parse HEAD^{tree})"
   [[ -z "$(git -C "$FIPS_PATH" status --porcelain)" ]] || {
@@ -83,7 +121,8 @@ prepare() {
   }
   app_sha="$(git -C "$ROOT" rev-parse HEAD)"
   app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
-  NVPN_FIPS_REPO_PATH="$FIPS_PATH" \
+  MACOS_SIGNING_IDENTITY="$EXPECTED_SIGNING_IDENTITY" \
+    NVPN_FIPS_REPO_PATH="$FIPS_PATH" \
     NVPN_MACOS_RUST_PROFILE=release \
     NVPN_MACOS_XCODE_CONFIGURATION=Release \
     NVPN_MACOS_REQUIRE_SIGNING=1 \
@@ -94,13 +133,35 @@ prepare() {
       | sed -n 's/^TeamIdentifier=//p' \
       | head -n 1
   )"
-  [[ -n "$team" && "$team" != not\ set ]] || {
-    echo "macOS Release app is not signed by a distribution team" >&2
+  authority="$(
+    codesign -dvv "$APP_PATH" 2>&1 \
+      | sed -n 's/^Authority=//p' \
+      | head -n 1
+  )"
+  cert_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-join-cert.XXXXXX")"
+  (
+    cd "$cert_dir"
+    codesign -d --extract-certificates "$APP_PATH" >/dev/null 2>&1
+  )
+  cert_sha="$(shasum -a 256 "$cert_dir/codesign0" | awk '{print $1}')"
+  rm -rf "$cert_dir"
+  [[ "$team" == "$EXPECTED_SIGNING_TEAM" ]] || {
+    echo "macOS Release app was not signed by the expected company team" >&2
+    return 1
+  }
+  [[ "$authority" == "$EXPECTED_SIGNING_IDENTITY" ]] || {
+    echo "macOS Release app was not signed by the configured company identity" >&2
+    return 1
+  }
+  [[ "$(printf '%s' "$cert_sha" | tr '[:upper:]' '[:lower:]')" \
+    == "$(printf '%s' "$EXPECTED_SIGNER_CERT_SHA256" | tr '[:upper:]' '[:lower:]')" ]] || {
+    echo "macOS Release app signer certificate does not match the pinned certificate" >&2
     return 1
   }
   python3 - \
     "$APP_PATH" "$ARTIFACT_DIR/artifact.json" \
-    "$app_sha" "$app_tree" "$fips_sha" "$fips_tree" "$team" <<'PY'
+    "$app_sha" "$app_tree" "$fips_sha" "$fips_tree" \
+    "$team" "$authority" "$cert_sha" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -108,7 +169,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 output = pathlib.Path(sys.argv[2])
-app, app_tree, fips, fips_tree, team = sys.argv[3:]
+app, app_tree, fips, fips_tree, team, identity, cert_sha = sys.argv[3:]
 files = []
 for path in sorted(item for item in root.rglob("*") if item.is_file()):
     files.append(
@@ -127,6 +188,8 @@ receipt = {
     "fipsGitSha": fips,
     "fipsGitTree": fips_tree,
     "signingTeam": team,
+    "signingIdentity": identity,
+    "signerCertificateSha256": cert_sha,
     "configuration": "Release",
     "appLaunchArgumentsOrEnvironment": False,
     "privateAppStateRead": False,

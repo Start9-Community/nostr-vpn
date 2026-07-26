@@ -202,10 +202,20 @@ for required in (
         raise SystemExit(f"Desktop/mobile Release driver is missing {required}")
 if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
     raise SystemExit("Desktop Release app is launched against injected private state")
-if 'exec "$APP_EXE"' not in desktop_remote:
+if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
-if "unset NVPN_FIPS_REPO_PATH NVPN_EXPECTED_FIPS_GIT_SHA" not in desktop_remote:
-    raise SystemExit("Desktop Release app inherits gate-only environment")
+for required in (
+    "exec /usr/bin/env -i",
+    "NVPN_EXPECTED_MACOS_SIGNING_IDENTITY",
+    "NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID",
+    "NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256",
+    'MACOS_SIGNING_IDENTITY="$EXPECTED_SIGNING_IDENTITY"',
+    '[[ "$team" == "$EXPECTED_SIGNING_TEAM" ]]',
+    '[[ "$authority" == "$EXPECTED_SIGNING_IDENTITY" ]]',
+    "signerCertificateSha256",
+):
+    if required not in desktop_remote and required not in desktop:
+        raise SystemExit(f"Desktop Release provenance gate is missing {required}")
 
 main = release_gate.split("main() {", 1)[1]
 if "./scripts/mobile-release-join-e2e.sh" not in release_gate:

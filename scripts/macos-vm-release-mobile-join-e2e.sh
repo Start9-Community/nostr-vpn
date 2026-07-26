@@ -16,6 +16,18 @@ load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
 
+MACOS_SIGNING_IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
+EXPECTED_MACOS_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-${NVPN_IOS_TEAM_ID:-}}"
+EXPECTED_MACOS_CERT="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
+[[ -n "$MACOS_SIGNING_IDENTITY" ]] || {
+  echo "Set MACOS_SIGNING_IDENTITY to the company Developer ID identity" >&2
+  exit 2
+}
+[[ -n "$EXPECTED_MACOS_TEAM" ]] || {
+  echo "Set NVPN_IOS_TEAM_ID or NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID" >&2
+  exit 2
+}
+
 MAC_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
 [[ -n "$MAC_HOST" ]] || {
   echo "Set NVPN_MACOS_SSH_HOST for Release desktop/mobile join coverage" >&2
@@ -65,10 +77,13 @@ remote() {
   shift
   local remote_command argument
   printf -v remote_command \
-    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q %q %q' \
+    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q %q %q' \
     "$GUEST_REPO" \
     "../fips" \
     "${NVPN_EXPECTED_FIPS_GIT_SHA:-}" \
+    "$MACOS_SIGNING_IDENTITY" \
+    "$EXPECTED_MACOS_TEAM" \
+    "$EXPECTED_MACOS_CERT" \
     "$REMOTE_SCRIPT" \
     "$command"
   for argument in "$@"; do
