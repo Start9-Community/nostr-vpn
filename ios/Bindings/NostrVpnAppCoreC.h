@@ -25,6 +25,7 @@ bool nostr_vpn_mobile_tunnel_ack_app_config_toml(
     const NvpnMobileTunnelHandle *handle,
     const char *expected_toml
 );
+bool nostr_vpn_mobile_tunnel_network_changed(const NvpnMobileTunnelHandle *handle);
 char *nostr_vpn_mobile_tunnel_wg_excluded_route(const NvpnMobileTunnelHandle *handle);
 void nostr_vpn_mobile_tunnel_free(NvpnMobileTunnelHandle *handle);
 bool nostr_vpn_mobile_tunnel_attach_current_tun_fd(NvpnMobileTunnelHandle *handle);

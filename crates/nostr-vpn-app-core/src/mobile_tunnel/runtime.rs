@@ -1,3 +1,9 @@
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MobileNetworkChangeOutcome {
+    pub(crate) rebound_transports: usize,
+    pub(crate) refreshed_peers: usize,
+}
+
 impl MobileTunnel {
     pub(crate) fn start(config_json: &str) -> Result<Self> {
         const MOBILE_TUNNEL_WORKER_STACK_SIZE: usize = 4 * 1024 * 1024;
@@ -596,6 +602,37 @@ impl MobileTunnel {
     #[cfg(target_os = "ios")]
     pub(crate) fn attach_current_tun_fd(&mut self) -> Result<()> {
         self.attach_tun_fd(current_ios_utun_fd()?)
+    }
+
+    pub(crate) fn handle_underlay_network_change(&self) -> Result<MobileNetworkChangeOutcome> {
+        let endpoint = self
+            .endpoint
+            .clone()
+            .ok_or_else(|| anyhow!("mobile tunnel stopped"))?;
+        let peers = self
+            .config
+            .read()
+            .map_err(|_| anyhow!("mobile FIPS config lock poisoned"))?
+            .peers
+            .iter()
+            .filter_map(|peer| {
+                PeerIdentity::from_npub(&normalize_mobile_endpoint_npub(&peer.endpoint_npub)).ok()
+            })
+            .collect::<Vec<_>>();
+        self.runtime.block_on(async move {
+            let rebound_transports = endpoint
+                .rebind_network_transports(None)
+                .await
+                .context("mobile FIPS network transport rebind")?;
+            let refreshed_peers = endpoint
+                .refresh_peer_paths(peers)
+                .await
+                .context("mobile FIPS peer path refresh after network change")?;
+            Ok(MobileNetworkChangeOutcome {
+                rebound_transports,
+                refreshed_peers,
+            })
+        })
     }
 
     pub(crate) fn wg_upstream_excluded_route(&self) -> Option<String> {

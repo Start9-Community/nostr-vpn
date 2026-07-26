@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import NetworkExtension
 
 private let appGroupIdentifier: String = {
@@ -22,8 +23,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var activeTunnelCalls = 0
     private let tunnelCondition = NSCondition()
     private let appMessageSnapshotLock = NSLock()
+    private let underlayMonitorLock = NSLock()
+    private let underlayMonitorQueue = DispatchQueue(
+        label: "fi.siriusbusiness.nvpn.packet-tunnel.underlay"
+    )
     private var runtimeStateSnapshot = Data()
     private var appConfigSnapshot = Data()
+    private var underlayMonitor: NWPathMonitor?
+    private var underlayMonitorGeneration: UInt64?
+    private var underlayMonitorSawInitialPath = false
+    private var underlayRefreshWorkItem: DispatchWorkItem?
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -166,6 +175,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     + "native utun fd attached total=\(totalMs)ms"
             )
             packetDebugLog("setTunnelNetworkSettings succeeded settingsMs=\(settingsMs) totalMs=\(totalMs)")
+            self.startUnderlayNetworkMonitor(generation: startGeneration)
             NSLog("nvpn-pkt: completionHandler(nil) — VPN should transition to connected")
             packetDebugLog("completionHandler nil totalMs=\(totalMs)")
             completionHandler(nil)
@@ -344,9 +354,80 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             tunnelCondition.wait()
         }
         tunnelCondition.unlock()
+        stopUnderlayNetworkMonitor()
 
         if let handle {
             nostr_vpn_mobile_tunnel_free(handle)
+        }
+    }
+
+    private func startUnderlayNetworkMonitor(generation: UInt64) {
+        stopUnderlayNetworkMonitor()
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.handleUnderlayPathUpdate(path, generation: generation)
+        }
+        underlayMonitorLock.lock()
+        underlayMonitor = monitor
+        underlayMonitorGeneration = generation
+        underlayMonitorSawInitialPath = false
+        underlayMonitorLock.unlock()
+        monitor.start(queue: underlayMonitorQueue)
+    }
+
+    private func stopUnderlayNetworkMonitor() {
+        underlayMonitorLock.lock()
+        let monitor = underlayMonitor
+        underlayMonitor = nil
+        underlayMonitorGeneration = nil
+        underlayMonitorSawInitialPath = false
+        underlayRefreshWorkItem?.cancel()
+        underlayRefreshWorkItem = nil
+        underlayMonitorLock.unlock()
+        monitor?.cancel()
+    }
+
+    private func handleUnderlayPathUpdate(_ path: Network.NWPath, generation: UInt64) {
+        underlayMonitorLock.lock()
+        guard underlayMonitorGeneration == generation else {
+            underlayMonitorLock.unlock()
+            return
+        }
+        if !underlayMonitorSawInitialPath {
+            underlayMonitorSawInitialPath = true
+            underlayMonitorLock.unlock()
+            packetDebugLog("underlay monitor ready status=\(path.status)")
+            return
+        }
+        underlayRefreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.refreshFipsAfterUnderlayChange(generation: generation)
+        }
+        underlayRefreshWorkItem = workItem
+        underlayMonitorLock.unlock()
+        underlayMonitorQueue.asyncAfter(
+            deadline: .now() + .milliseconds(250),
+            execute: workItem
+        )
+    }
+
+    private func refreshFipsAfterUnderlayChange(generation: UInt64) {
+        underlayMonitorLock.lock()
+        guard underlayMonitorGeneration == generation else {
+            underlayMonitorLock.unlock()
+            return
+        }
+        underlayRefreshWorkItem = nil
+        underlayMonitorLock.unlock()
+        let refreshed = withTunnelHandle(generation: generation) { handle in
+            nostr_vpn_mobile_tunnel_network_changed(handle)
+        }
+        if refreshed == true {
+            NSLog("nvpn-pkt: physical network changed; live FIPS carriers refreshed")
+            packetDebugLog("physical network changed; live FIPS carriers refreshed")
+        } else {
+            NSLog("nvpn-pkt: physical network changed; live FIPS carrier refresh failed")
+            packetDebugLog("physical network changed; live FIPS carrier refresh failed")
         }
     }
 

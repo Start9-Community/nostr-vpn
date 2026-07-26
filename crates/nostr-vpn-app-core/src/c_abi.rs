@@ -36,6 +36,8 @@ pub struct NvpnMobileTunnelHandle {
     tunnel: MobileTunnel,
 }
 
+include!("c_abi/mobile_network.rs");
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QrMatrixResult {

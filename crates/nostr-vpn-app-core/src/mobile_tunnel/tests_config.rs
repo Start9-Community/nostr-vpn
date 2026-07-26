@@ -551,6 +551,55 @@
     }
 
     #[test]
+    fn mobile_network_change_rebinds_live_fips_carriers_without_restarting_endpoint() {
+        let own_keys = Keys::generate();
+        let peer_keys = Keys::generate();
+        let own_pubkey = own_keys.public_key().to_hex();
+        let mut app = AppConfig::generated();
+        app.nostr.secret_key = own_keys.secret_key().to_bech32().expect("test nsec");
+        app.networks = vec![NetworkConfig {
+            id: "mobile-network-change".to_string(),
+            name: "Mobile network change".to_string(),
+            enabled: true,
+            network_id: "mobile-network-change".to_string(),
+            join_secret: "test-secret".to_string(),
+            devices: vec![own_pubkey.clone(), peer_keys.public_key().to_hex()],
+            removed_devices: Vec::new(),
+            admins: vec![own_pubkey],
+            listen_for_join_requests: false,
+            join_request_admin: String::new(),
+            outbound_join_request: None,
+            inbound_join_requests: Vec::new(),
+            shared_roster_updated_at: 0,
+            shared_roster_signed_by: String::new(),
+        }];
+        app.ensure_defaults();
+        let mut config = MobileTunnelConfig::from_app(&app).expect("mobile config");
+        config.listen_port = available_udp_port();
+        config.nostr_discovery_enabled = false;
+        config.webrtc_enabled = false;
+        let config_json = serde_json::to_string(&config).expect("mobile config JSON");
+        let tunnel = MobileTunnel::start(&config_json).expect("mobile tunnel should start");
+        let endpoint_npub = tunnel
+            .endpoint
+            .as_ref()
+            .expect("live endpoint")
+            .npub()
+            .to_string();
+
+        let outcome = tunnel
+            .handle_underlay_network_change()
+            .expect("live mobile FIPS endpoint should accept an underlay change");
+
+        assert_eq!(outcome.rebound_transports, 1);
+        assert_eq!(
+            tunnel.endpoint.as_ref().expect("live endpoint").npub(),
+            endpoint_npub
+        );
+        drop(tunnel);
+    }
+
+    #[test]
     fn wg_upstream_excluded_route_is_ipv4_only() {
         assert_eq!(
             wg_upstream_excluded_route_for_addr("198.51.100.20:51820".parse().unwrap()),

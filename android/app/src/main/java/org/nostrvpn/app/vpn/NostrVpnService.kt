@@ -13,12 +13,15 @@ import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
 import android.net.IpPrefix
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import org.json.JSONObject
@@ -36,6 +39,20 @@ class NostrVpnService : VpnService() {
     private var tunnelHandle: Long = 0
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private val underlyingNetworkHandler = Handler(Looper.getMainLooper())
+    private var underlyingNetworkFingerprint: String? = null
+    private val refreshUnderlyingNetworksRunnable = Runnable {
+        refreshUnderlyingNetworks(notifyNative = true)
+    }
+    private val refreshNativeFipsPathsRunnable = Runnable {
+        val handle = tunnelHandle
+        if (!running.get() || handle == 0L) return@Runnable
+        if (NativeCore.mobileTunnelNetworkChanged(handle)) {
+            Log.i("NostrVpnService", "Physical network changed; live FIPS carriers refreshed")
+        } else {
+            Log.w("NostrVpnService", "Physical network changed; live FIPS carrier refresh failed")
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action != ACTION_DISCONNECT) {
@@ -401,34 +418,45 @@ class NostrVpnService : VpnService() {
         val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                refreshUnderlyingNetworks()
+                scheduleUnderlyingNetworkRefresh()
             }
 
             override fun onLost(network: Network) {
-                refreshUnderlyingNetworks()
+                scheduleUnderlyingNetworkRefresh()
             }
 
             override fun onCapabilitiesChanged(
                 network: Network,
                 networkCapabilities: NetworkCapabilities,
             ) {
-                refreshUnderlyingNetworks()
+                scheduleUnderlyingNetworkRefresh()
+            }
+
+            override fun onLinkPropertiesChanged(
+                network: Network,
+                linkProperties: LinkProperties,
+            ) {
+                scheduleUnderlyingNetworkRefresh()
             }
         }
         try {
+            refreshUnderlyingNetworks(notifyNative = false)
             val request = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 .build()
-            connectivity.registerNetworkCallback(request, callback)
+            connectivity.registerNetworkCallback(request, callback, underlyingNetworkHandler)
             networkCallback = callback
-            refreshUnderlyingNetworks()
         } catch (_: RuntimeException) {
             networkCallback = null
+            underlyingNetworkFingerprint = null
         }
     }
 
     private fun unregisterUnderlyingNetworkUpdates() {
+        underlyingNetworkHandler.removeCallbacks(refreshUnderlyingNetworksRunnable)
+        underlyingNetworkHandler.removeCallbacks(refreshNativeFipsPathsRunnable)
+        underlyingNetworkFingerprint = null
         val callback = networkCallback ?: return
         networkCallback = null
         val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
@@ -477,9 +505,78 @@ class NostrVpnService : VpnService() {
         }
     }
 
-    private fun refreshUnderlyingNetworks() {
+    private fun scheduleUnderlyingNetworkRefresh() {
+        underlyingNetworkHandler.removeCallbacks(refreshUnderlyingNetworksRunnable)
+        underlyingNetworkHandler.postDelayed(
+            refreshUnderlyingNetworksRunnable,
+            UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS,
+        )
+    }
+
+    private fun refreshUnderlyingNetworks(notifyNative: Boolean) {
         val networks = currentUnderlyingNetworks()
+        val fingerprint = currentUnderlyingNetworkFingerprint(networks)
+        val changed =
+            underlyingNetworkFingerprint != null && underlyingNetworkFingerprint != fingerprint
+        underlyingNetworkFingerprint = fingerprint
         setUnderlyingNetworks(networks.takeIf { it.isNotEmpty() })
+        if (notifyNative && changed && running.get()) {
+            underlyingNetworkHandler.removeCallbacks(refreshNativeFipsPathsRunnable)
+            underlyingNetworkHandler.post(refreshNativeFipsPathsRunnable)
+        }
+    }
+
+    private fun currentUnderlyingNetworkFingerprint(networks: Array<Network>): String {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return ""
+        val candidateHandles = networks.map(Network::getNetworkHandle).toSet()
+        val activeHandle = connectivity.activeNetwork
+            ?.getNetworkHandle()
+            ?.takeIf(candidateHandles::contains)
+            ?: 0L
+        return buildString {
+            append("active=")
+            append(activeHandle)
+            for (network in networks.sortedBy(Network::getNetworkHandle)) {
+                val capabilities = connectivity.getNetworkCapabilities(network)
+                val properties = connectivity.getLinkProperties(network)
+                append("|network=")
+                append(network.networkHandle)
+                append(";transports=")
+                append(
+                    listOf(
+                        NetworkCapabilities.TRANSPORT_WIFI,
+                        NetworkCapabilities.TRANSPORT_CELLULAR,
+                        NetworkCapabilities.TRANSPORT_ETHERNET,
+                    ).filter { capabilities?.hasTransport(it) == true }.joinToString(","),
+                )
+                append(";interface=")
+                append(properties?.interfaceName.orEmpty())
+                append(";addresses=")
+                append(
+                    properties?.linkAddresses
+                        ?.map { it.toString() }
+                        ?.sorted()
+                        ?.joinToString(",")
+                        .orEmpty(),
+                )
+                append(";routes=")
+                append(
+                    properties?.routes
+                        ?.map { it.toString() }
+                        ?.sorted()
+                        ?.joinToString(",")
+                        .orEmpty(),
+                )
+                append(";dns=")
+                append(
+                    properties?.dnsServers
+                        ?.map { it.toString() }
+                        ?.sorted()
+                        ?.joinToString(",")
+                        .orEmpty(),
+                )
+            }
+        }
     }
 
     private fun stopTunnel() {
@@ -643,6 +740,7 @@ class NostrVpnService : VpnService() {
         const val EXTRA_CONFIG_JSON = "configJson"
         private const val NOTIFICATION_CHANNEL_ID = "vpn"
         private const val NOTIFICATION_ID = 7001
+        private const val UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS = 250L
 
         fun startRestore(context: Context) {
             val intent = Intent(context, NostrVpnService::class.java)

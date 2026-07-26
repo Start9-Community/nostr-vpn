@@ -19,6 +19,7 @@ internal object NativeCore {
     external fun mobileTunnelNew(configJson: String): Long
     external fun mobileTunnelFree(handle: Long)
     external fun mobileTunnelAttachTunFd(handle: Long, fd: Int): Boolean
+    external fun mobileTunnelNetworkChanged(handle: Long): Boolean
     /// Raw fd of the userspace WG upstream UDP socket, or -1 if WG
     /// upstream isn't running. The VpnService must call `protect(fd)`
     /// on this so the encrypted UDP escapes the VPN tun.
