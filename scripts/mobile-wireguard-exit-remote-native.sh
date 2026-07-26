@@ -421,6 +421,10 @@ stop_fixture() {
   return "$failed"
 }
 
+install_fixture_cleanup_trap() {
+  trap 'status=$?; stop_fixture; exit "$status"' ERR HUP INT TERM
+}
+
 fixture_ready() {
   local dns_pid echo_pid server_ip
   server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
@@ -491,7 +495,7 @@ case "$action" in
     mkdir -p "$state_dir"
     chmod 700 "$state_dir"
     : >"$system_firewall_rules"
-    trap 'status=$?; stop_fixture; exit "$status"' ERR INT TERM
+    install_fixture_cleanup_trap
     local_server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
     tunnel_subnet="$(
       python3 - "$NVPN_MOBILE_WG_TUNNEL_CIDR" <<'PY'
@@ -616,7 +620,7 @@ PY
       >"$state_dir/http-probe.log" 2>&1 &
     for _ in $(seq 1 50); do
       fixture_ready && {
-        trap - ERR INT TERM
+        trap - ERR HUP INT TERM
         touch "$state_dir/ready"
         exit 0
       }
@@ -624,7 +628,7 @@ PY
     done
     echo "remote native fixture did not become ready" >&2
     stop_fixture
-    trap - ERR INT TERM
+    trap - ERR HUP INT TERM
     exit 1
     ;;
   stop)

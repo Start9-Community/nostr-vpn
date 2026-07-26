@@ -8,7 +8,7 @@ source "$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-wg-cleanup-harness.XXXXXX")"
 REMOTE_STATE="$(mktemp -d /tmp/nvpn-mobile-wg-exit.cleanup-harness.XXXXXX)"
 CALLS="$TMP_ROOT/calls"
-trap 'rm -rf "$TMP_ROOT" "$REMOTE_STATE" "${LEASE_A:-}" "${LEASE_B:-}" "${LEASE_C:-}"' EXIT
+trap 'rm -rf "$TMP_ROOT" "$REMOTE_STATE" "${LEASE_A:-}" "${LEASE_B:-}" "${LEASE_C:-}" "${LEASE_HUP:-}"' EXIT
 
 mobile_wg_remote_close_control() {
   printf 'close\n' >>"$CALLS"
@@ -202,6 +202,12 @@ case "$REMOTE_NATIVE_ACTION" in
   lease-acquire) acquire_ip_forward_lease ;;
   lease-stop) release_ip_forward_lease_and_delete_interface ;;
   lease-clean) ip_forward_lease_clean ;;
+  lease-hup-wait)
+    install_fixture_cleanup_trap
+    acquire_ip_forward_lease
+    printf '%s\n' "$$" >"$HUP_READY_FOR_HARNESS"
+    while :; do :; done
+    ;;
   *) exit 2 ;;
 esac
 SH
@@ -331,6 +337,7 @@ env \
 LEASE_A="$(mktemp -d /tmp/nvpn-mobile-wg-exit.lease-a.XXXXXX)"
 LEASE_B="$(mktemp -d /tmp/nvpn-mobile-wg-exit.lease-b.XXXXXX)"
 LEASE_C="$(mktemp -d /tmp/nvpn-mobile-wg-exit.lease-c.XXXXXX)"
+LEASE_HUP="$(mktemp -d /tmp/nvpn-mobile-wg-exit.lease-hup.XXXXXX)"
 MOCK_IP_STATE="$TMP_ROOT/interfaces"
 mkdir -p "$MOCK_IP_STATE"
 
@@ -343,6 +350,7 @@ run_lease_action() {
     REMOTE_NATIVE_FOR_HARNESS="$REMOTE_NATIVE" \
     REMOTE_NATIVE_ACTION="$lease_action" \
     SLOW_IP_FORWARD_WRITE_FOR_HARNESS="$slow_write" \
+    HUP_READY_FOR_HARNESS="${HUP_READY_FOR_HARNESS:-}" \
     IP_FORWARD_LOCK_FOR_HARNESS="$IP_FORWARD_LOCK" \
     IP_FORWARD_STATE_FOR_HARNESS="$IP_FORWARD_STATE" \
     IP_FORWARD_SYSCTL_FOR_HARNESS="$IP_FORWARD_SYSCTL" \
@@ -461,5 +469,35 @@ fi
   && ! -e "$IP_FORWARD_STATE/leases/nwg56002" \
   && "$(<"$IP_FORWARD_SYSCTL")" == "1" ]]
 rm -rf "$IP_FORWARD_STATE"
+
+# SSH commonly terminates the remote process with SIGHUP. Exercise the exact
+# production trap and prove it releases the lease and deletes its interface.
+printf '0\n' >"$IP_FORWARD_SYSCTL"
+touch "$MOCK_IP_STATE/nwg56004"
+HUP_READY="$TMP_ROOT/hup-ready"
+HUP_READY_FOR_HARNESS="$HUP_READY" \
+  run_lease_action lease-hup-wait "$LEASE_HUP" nwg56004 &
+hup_pid=$!
+for _ in $(seq 1 200); do
+  [[ -f "$HUP_READY" ]] && break
+  kill -0 "$hup_pid" 2>/dev/null || break
+  sleep 0.01
+done
+[[ -f "$HUP_READY" ]] || {
+  echo "SIGHUP cleanup fixture did not acquire its forwarding lease" >&2
+  kill "$hup_pid" 2>/dev/null || true
+  wait "$hup_pid" 2>/dev/null || true
+  exit 1
+}
+hup_target="$(<"$HUP_READY")"
+[[ "$hup_target" =~ ^[1-9][0-9]*$ ]]
+kill -HUP "$hup_target"
+set +e
+wait "$hup_pid"
+hup_status=$?
+set -e
+[[ "$hup_status" -ne 0 \
+  && ! -e "$MOCK_IP_STATE/nwg56004" ]]
+assert_zero_leases_and_original 0
 
 echo "mobile WireGuard fixture cleanup harness passed"
