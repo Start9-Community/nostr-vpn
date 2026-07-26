@@ -504,30 +504,35 @@ fn wall_time_jump_detection_flags_sleep_resume_after_threshold() {
     assert!(!wall_time_jump_detected(
         0,
         1_000,
+        0,
         MAJOR_LINK_CHANGE_TIME_JUMP_SECS
     ));
     assert!(!wall_time_jump_detected(
         1_000,
         1_000 + MAJOR_LINK_CHANGE_TIME_JUMP_SECS - 1,
+        MAJOR_LINK_CHANGE_TIME_JUMP_SECS - 1,
         MAJOR_LINK_CHANGE_TIME_JUMP_SECS,
     ));
     assert!(wall_time_jump_detected(
         1_000,
         1_000 + MAJOR_LINK_CHANGE_TIME_JUMP_SECS,
+        0,
         MAJOR_LINK_CHANGE_TIME_JUMP_SECS,
     ));
 }
 
 #[test]
-fn wall_time_jump_detection_refreshes_after_runtime_stalls() {
-    assert!(wall_time_jump_detected(
+fn wall_time_jump_detection_does_not_treat_runtime_stalls_as_sleep() {
+    assert!(!wall_time_jump_detected(
         1_000,
         1_000 + MAJOR_LINK_CHANGE_TIME_JUMP_SECS + 5,
+        MAJOR_LINK_CHANGE_TIME_JUMP_SECS + 5,
         MAJOR_LINK_CHANGE_TIME_JUMP_SECS,
     ));
     assert!(wall_time_jump_detected(
         1_000,
         900,
+        5,
         MAJOR_LINK_CHANGE_TIME_JUMP_SECS,
     ));
 }
