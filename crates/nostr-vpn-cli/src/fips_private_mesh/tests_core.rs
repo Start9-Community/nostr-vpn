@@ -79,6 +79,7 @@
         .expect("recent peers cache")
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn only_fips_ipv6_destinations_use_the_integrated_host_pipeline() {
         let fips = TunPipelinePacket::from_destination(

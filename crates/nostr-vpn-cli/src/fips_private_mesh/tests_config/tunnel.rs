@@ -314,6 +314,7 @@
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn fips_host_uses_the_ordinary_tunnel_interface_and_secure_dns() {
         let keys = Keys::generate();

@@ -32,6 +32,7 @@
     }
 
     #[cfg(feature = "paid-exit")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn paid_route_admissions_install_buyer_return_routes() {
         use nostr_vpn_core::fips_mesh::FipsPaidRouteAdmission;

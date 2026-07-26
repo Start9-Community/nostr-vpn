@@ -715,7 +715,7 @@ fn macos_direct_underlay_restore_needed(
     previous_exit_requested && !next_exit_requested
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod macos_wg_transition_tests {
     use super::{FipsPrivateTunnelRuntime, macos_direct_underlay_restore_needed};
 
