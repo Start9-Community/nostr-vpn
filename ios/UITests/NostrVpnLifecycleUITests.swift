@@ -72,6 +72,77 @@ final class NostrVpnLifecycleUITests: XCTestCase {
         emit("NVPN_IOS_LIFECYCLE_XCTEST_PASSED_MS=\(millisecondsSinceEpoch())")
     }
 
+    func testPhysicalActiveTunnelBackgroundForegroundLifecycle() throws {
+        let environment = ProcessInfo.processInfo.environment
+        XCTAssertEqual(
+            environment["NVPN_XCUITEST_LIFECYCLE_GATE"],
+            "1",
+            "The active-tunnel lifecycle test may only run through its physical gate."
+        )
+        let runId = try requiredEnvironment("NVPN_XCUITEST_RUN_ID", environment: environment)
+        let resultName = try requiredEnvironment(
+            "NVPN_XCUITEST_LIFECYCLE_RESULT_NAME",
+            environment: environment
+        )
+        let cycles = boundedInteger(
+            environment["NVPN_XCUITEST_LIFECYCLE_CYCLES"],
+            defaultValue: 3,
+            range: 1...5
+        )
+        let dwellSeconds = boundedInteger(
+            environment["NVPN_XCUITEST_LIFECYCLE_BACKGROUND_DWELL_SECS"],
+            defaultValue: 10,
+            range: 1...30
+        )
+        app.launchArguments = try activeTunnelLaunchArguments(environment: environment)
+        XCTAssertTrue(
+            app.launchArguments.contains(runId),
+            "The app lifecycle receipt is not tied to this XCTest run."
+        )
+
+        emit("NVPN_IOS_LIFECYCLE_LAUNCH_REQUESTED_MS=\(millisecondsSinceEpoch())")
+        app.launch()
+        XCTAssertTrue(
+            waitForApplicationState(.runningForeground, timeout: 10),
+            "The app did not reach the foreground after launch."
+        )
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitForStatus("Active VPN ready for lifecycle cycle 1", timeout: 45),
+            "The real packet tunnel never became ready for the lifecycle transition."
+        )
+        emit("NVPN_IOS_LIFECYCLE_LAUNCH_FOREGROUND_MS=\(millisecondsSinceEpoch())")
+
+        for cycle in 1...cycles {
+            emit("NVPN_IOS_LIFECYCLE_CYCLE_\(cycle)_HOME_REQUESTED_MS=\(millisecondsSinceEpoch())")
+            XCUIDevice.shared.press(.home)
+            Thread.sleep(forTimeInterval: 0.25)
+            emit("NVPN_IOS_LIFECYCLE_CYCLE_\(cycle)_BACKGROUND_OBSERVED_MS=\(millisecondsSinceEpoch())")
+
+            Thread.sleep(forTimeInterval: TimeInterval(dwellSeconds))
+
+            emit("NVPN_IOS_LIFECYCLE_CYCLE_\(cycle)_ACTIVATE_REQUESTED_MS=\(millisecondsSinceEpoch())")
+            app.activate()
+            XCTAssertTrue(
+                waitForApplicationState(.runningForeground, timeout: 10),
+                "The app did not return to the foreground with its packet tunnel active."
+            )
+            Thread.sleep(forTimeInterval: 0.25)
+            emit("NVPN_IOS_LIFECYCLE_CYCLE_\(cycle)_FOREGROUND_OBSERVED_MS=\(millisecondsSinceEpoch())")
+            let verifiedStatus = cycle < cycles
+                ? "Active VPN lifecycle verified \(cycle)/\(cycles); ready for cycle \(cycle + 1)"
+                : "Active VPN lifecycle verified \(cycle)/\(cycles)"
+            XCTAssertTrue(
+                waitForStatus(verifiedStatus, timeout: 45),
+                "The app did not re-prove tunnel, DNS, and HTTPS after lifecycle cycle \(cycle)."
+            )
+        }
+
+        driveConnectedDirectIfRequested()
+        emit("NVPN_IOS_LIFECYCLE_RESULT_NAME=\(resultName)")
+        emit("NVPN_IOS_LIFECYCLE_XCTEST_PASSED_MS=\(millisecondsSinceEpoch())")
+    }
+
     private func waitForApplicationState(
         _ expected: XCUIApplication.State,
         timeout: TimeInterval
@@ -84,6 +155,112 @@ final class NostrVpnLifecycleUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         } while Date() < deadline
         return false
+    }
+
+    private func driveConnectedDirectIfRequested() {
+        guard app.launchArguments.contains("--nvpn-debug-await-direct-ui-while-connected") else {
+            return
+        }
+        XCTAssertTrue(
+            app.buttons["Turn VPN off"].exists,
+            "The packet tunnel stopped before the connected Direct transition."
+        )
+        let internetTab = app.tabBars.buttons["Internet"]
+        XCTAssertTrue(internetTab.waitForExistence(timeout: 5))
+        internetTab.tap()
+        XCTAssertTrue(
+            waitForStatus("Waiting for This device selection", timeout: 45),
+            "The post-foreground exit probe did not reach the connected Direct transition."
+        )
+
+        let sourcePicker = scrollToElement("internet-source-picker")
+        sourcePicker.tap()
+        tapMenuOption(identifier: "internet-source-direct", label: "This device")
+        let selection = "\(sourcePicker.label) \(sourcePicker.value as? String ?? "")"
+        XCTAssertTrue(
+            selection.localizedCaseInsensitiveContains("This device"),
+            "The shipped Internet-source picker did not select This device."
+        )
+        XCTAssertTrue(
+            app.buttons["Turn VPN off"].exists,
+            "Selecting Direct unexpectedly stopped the OS packet tunnel."
+        )
+        XCTAssertTrue(
+            waitForStatus("Direct Internet verified", timeout: 45),
+            "The app did not verify native DNS and HTTPS after selecting Direct."
+        )
+        emit("NVPN_CONNECTED_DIRECT_UI_PASSED=1")
+    }
+
+    private func element(_ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)[identifier]
+    }
+
+    private func scrollToElement(_ identifier: String) -> XCUIElement {
+        let target = element(identifier)
+        for _ in 0..<8 {
+            if target.isHittable {
+                break
+            }
+            if target.exists && target.frame.midY < app.frame.midY {
+                app.swipeDown()
+            } else {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(target.waitForExistence(timeout: 2), "\(identifier) was not visible")
+        return target
+    }
+
+    private func tapMenuOption(identifier: String, label: String) {
+        let identified = element(identifier)
+        if identified.waitForExistence(timeout: 1) {
+            identified.tap()
+            return
+        }
+        let labelled = app.buttons[label]
+        XCTAssertTrue(labelled.waitForExistence(timeout: 2), "\(label) menu option was absent")
+        labelled.tap()
+    }
+
+    private func waitForStatus(_ text: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        repeat {
+            if app.staticTexts[text].exists {
+                return true
+            }
+            let disclosure = app.buttons["Continue"]
+            if disclosure.exists {
+                disclosure.tap()
+            }
+            let allow = springboard.alerts.buttons["Allow"]
+            if allow.exists {
+                allow.tap()
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
+    }
+
+    private func activeTunnelLaunchArguments(
+        environment: [String: String]
+    ) throws -> [String] {
+        let encoded = try requiredEnvironment(
+            "NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64",
+            environment: environment
+        )
+        let data = try XCTUnwrap(
+            Data(base64Encoded: encoded),
+            "The active-tunnel launch arguments were not valid base64."
+        )
+        let arguments = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: data) as? [String],
+            "The active-tunnel launch arguments were not a string array."
+        )
+        XCTAssertTrue(arguments.contains("--nvpn-debug-exit-probe"))
+        XCTAssertTrue(arguments.contains("--nvpn-debug-await-active-tunnel-lifecycle"))
+        return arguments
     }
 
     private func requiredEnvironment(

@@ -57,6 +57,7 @@ EXIT_DNS_USE_SHIPPED_UI="${NVPN_IOS_EXIT_DNS_USE_SHIPPED_UI:-0}"
 EXPECT_DEBUG_DNS_INJECTED="${NVPN_IOS_EXPECT_DEBUG_DNS_INJECTED:-}"
 SWITCH_TO_DIRECT_WHILE_CONNECTED="${NVPN_IOS_SWITCH_TO_DIRECT_WHILE_CONNECTED:-0}"
 EXPECT_WIREGUARD_EXIT="${NVPN_IOS_EXPECT_WIREGUARD_EXIT:-0}"
+EXPECTED_WIREGUARD_ENDPOINT="${NVPN_IOS_EXPECT_WIREGUARD_ENDPOINT:-}"
 VERIFY_DIRECT_RESTORATION="${NVPN_IOS_VERIFY_DIRECT_RESTORATION:-0}"
 cleanup_after_vpn_cycle="${NVPN_IOS_CLEANUP_AFTER_VPN_CYCLE:-1}"
 IDLE_CPU_GATE="${NVPN_IOS_IDLE_CPU_GATE:-${NVPN_IDLE_CPU_GATE:-1}}"
@@ -67,6 +68,7 @@ IOS_SIM_PROCESS_NAME="${NVPN_IOS_SIM_PROCESS_NAME:-Nostr VPN}"
 IOS_SIMULATOR_UI_GATE="${NVPN_IOS_SIMULATOR_UI_GATE:-1}"
 IOS_LIFECYCLE_GATE="${NVPN_IOS_LIFECYCLE_GATE:-1}"
 IOS_LIFECYCLE_CYCLES="${NVPN_IOS_LIFECYCLE_CYCLES:-3}"
+IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES="${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}"
 SCREENSHOT="$ROOT/artifacts/nostr-vpn-ios.png"
 vpn_cleanup_armed=0
 vpn_cleanup_device=""
@@ -131,6 +133,9 @@ without injecting them. NVPN_IOS_SWITCH_TO_DIRECT_WHILE_CONNECTED=1 runs a
 physical XCTest that taps This device in the shipped Internet-source picker,
 verifies the installed tunnel config has neither a default route nor WireGuard
 exit, and proves DNS and HTTPS while the OS VPN stays connected.
+With a VPN cycle, the lifecycle gate uses physical XCTest Home/activate events
+for three ten-second background cycles by default and requires a fresh real
+TUN/DNS/HTTPS/endpoint receipt after every foreground before continuing.
 EOF
 }
 
@@ -668,7 +673,9 @@ validate_vpn_probe_result() {
     "$EXIT_DNS_MODE" "$EXIT_DNS_DOH_PROVIDER" \
     "$EXIT_DNS_CUSTOM_DOH_URL" "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
     "$EXIT_DNS_THROUGH_EXIT_SERVERS" "$SWITCH_TO_DIRECT_WHILE_CONNECTED" \
-    "$EXPECT_WIREGUARD_EXIT" "$EXPECT_DEBUG_DNS_INJECTED"
+    "$EXPECT_WIREGUARD_EXIT" "$EXPECT_DEBUG_DNS_INJECTED" \
+    "$IOS_LIFECYCLE_GATE" "$IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES" \
+    "$EXPECTED_WIREGUARD_ENDPOINT" "$EXIT_PROBE_HOST" "$EXIT_PROBE_URL"
 }
 
 run_ios_device_idle_cpu_gate() {
@@ -839,7 +846,11 @@ run_vpn_cycle() {
     vpn_cleanup_armed=1
     vpn_cleanup_device="$device"
   fi
-  if bool_is_true "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
+  if bool_is_true "$IOS_LIFECYCLE_GATE"; then
+    run_ios_active_tunnel_lifecycle_gate \
+      "$device" "$BUNDLE_ID" "$VPN_RESULT_DIR" \
+      "$IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES" "${args[@]}"
+  elif bool_is_true "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
     run_ios_connected_direct_ui_driver "$device" "${args[@]}"
   else
     launch_device "$device" "${args[@]}"
@@ -905,7 +916,7 @@ run_device() {
   if bool_is_true "$INSTALL_DEVICE_APP"; then
     install_device_app "$device"
   fi
-  if bool_is_true "$IOS_LIFECYCLE_GATE"; then
+  if bool_is_true "$IOS_LIFECYCLE_GATE" && [[ "$vpn_cycle" -eq 0 ]]; then
     disconnect_ios_vpn_confirmed "$device"
     run_ios_app_lifecycle_gate \
       "$device" "$BUNDLE_ID" "$VPN_RESULT_DIR" "$IOS_LIFECYCLE_CYCLES"

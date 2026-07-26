@@ -19,11 +19,24 @@ import sys
     switch_direct_raw,
     expect_wireguard_raw,
     expected_debug_dns_injected_raw,
-) = sys.argv[1:15]
+    expect_active_lifecycle_raw,
+    expected_active_lifecycle_cycles_raw,
+    expected_wireguard_endpoint,
+    expected_resolve_host,
+    expected_fetch_url,
+) = sys.argv[1:20]
 require_reply = require_reply_raw.strip().lower() in {"1", "true", "yes", "on"}
 verify_direct = verify_direct_raw.strip().lower() in {"1", "true", "yes", "on"}
 switch_direct = switch_direct_raw.strip().lower() in {"1", "true", "yes", "on"}
 expect_wireguard = expect_wireguard_raw.strip().lower() in {"1", "true", "yes", "on"}
+expect_active_lifecycle = (
+    expect_active_lifecycle_raw.strip().lower() in {"1", "true", "yes", "on"}
+)
+expected_active_lifecycle_cycles = (
+    int(expected_active_lifecycle_cycles_raw)
+    if expected_active_lifecycle_cycles_raw.isdigit()
+    else None
+)
 expected_debug_dns_injected = None
 if expected_debug_dns_injected_raw:
     expected_debug_dns_injected = (
@@ -175,6 +188,12 @@ def write_probe_summary(validation_errors=None):
         "exitDnsCustomDohUrl",
         "exitDnsCustomDohBootstrapIps",
         "exitDnsThroughExitServers",
+        "activeTunnelLifecycleObserved",
+        "activeTunnelLifecycleCycles",
+        "activeTunnelStatusBeforeBackgroundRawValue",
+        "activeTunnelStatusAfterForegroundRawValue",
+        "postForegroundProbe",
+        "wireguardExitEndpoint",
     ):
         if key in result:
             values[key] = result[key]
@@ -219,6 +238,181 @@ if expect_wireguard:
         errors.append(
             f"wireguardExitEnabled={result.get('wireguardExitEnabled')!r} expected=True"
         )
+    if result.get("wireguardExitConfigured") is not True:
+        errors.append(
+            "wireguardExitConfigured="
+            f"{result.get('wireguardExitConfigured')!r} expected=True"
+        )
+    if (
+        expected_wireguard_endpoint
+        and result.get("wireguardExitEndpoint") != expected_wireguard_endpoint
+    ):
+        errors.append(
+            "wireguardExitEndpoint="
+            f"{result.get('wireguardExitEndpoint')!r} "
+            f"expected={expected_wireguard_endpoint!r}"
+        )
+if expect_active_lifecycle:
+    if result.get("activeTunnelLifecycleObserved") is not True:
+        errors.append(
+            "activeTunnelLifecycleObserved="
+            f"{result.get('activeTunnelLifecycleObserved')!r}"
+        )
+    cycles = counter(result.get("activeTunnelLifecycleCycles"))
+    if (
+        expected_active_lifecycle_cycles is None
+        or not 1 <= expected_active_lifecycle_cycles <= 5
+    ):
+        errors.append(
+            "expectedActiveTunnelLifecycleCycles="
+            f"{expected_active_lifecycle_cycles_raw!r}"
+        )
+    elif cycles != expected_active_lifecycle_cycles:
+        errors.append(
+            f"activeTunnelLifecycleCycles={cycles!r} "
+            f"expected={expected_active_lifecycle_cycles!r}"
+        )
+    if result.get("activeTunnelStatusBeforeBackgroundRawValue") != 3:
+        errors.append(
+            "activeTunnelStatusBeforeBackgroundRawValue="
+            f"{result.get('activeTunnelStatusBeforeBackgroundRawValue')!r}"
+        )
+    if result.get("activeTunnelStatusAfterForegroundRawValue") != 3:
+        errors.append(
+            "activeTunnelStatusAfterForegroundRawValue="
+            f"{result.get('activeTunnelStatusAfterForegroundRawValue')!r}"
+        )
+    if result.get("postForegroundProbe") is not True:
+        errors.append(f"postForegroundProbe={result.get('postForegroundProbe')!r}")
+    cycle_results = result.get("activeTunnelLifecycleCycleResults")
+    if not isinstance(cycle_results, list) or len(cycle_results) != cycles:
+        errors.append(
+            "activeTunnelLifecycleCycleResults="
+            f"{type(cycle_results).__name__}/"
+            f"{len(cycle_results) if isinstance(cycle_results, list) else '?'} "
+            f"expected={cycles!r}"
+        )
+    else:
+        expected_cycle_dns = {
+            "exitDnsMode": expected_dns_mode,
+            "exitDnsDohProvider": expected_dns_provider,
+            "exitDnsCustomDohUrl": expected_custom_url,
+            "exitDnsCustomDohBootstrapIps": expected_bootstrap_ips,
+            "exitDnsThroughExitServers": expected_through_servers,
+        }
+        for index, cycle_result in enumerate(cycle_results, start=1):
+            prefix = f"activeLifecycleCycle[{index}]"
+            if not isinstance(cycle_result, dict):
+                errors.append(f"{prefix}={cycle_result!r}")
+                continue
+            if cycle_result.get("cycle") != index:
+                errors.append(f"{prefix}.cycle={cycle_result.get('cycle')!r}")
+            for key in ("statusBeforeBackgroundRawValue", "statusAfterForegroundRawValue"):
+                if cycle_result.get(key) != 3:
+                    errors.append(f"{prefix}.{key}={cycle_result.get(key)!r}")
+            if cycle_result.get("postForegroundProbe") is not True:
+                errors.append(
+                    f"{prefix}.postForegroundProbe="
+                    f"{cycle_result.get('postForegroundProbe')!r}"
+                )
+            for key in ("vpnEnabled", "vpnActive"):
+                if cycle_result.get(key) is not True:
+                    errors.append(f"{prefix}.{key}={cycle_result.get(key)!r}")
+            if expect_wireguard:
+                for key in ("wireguardExitEnabled", "wireguardExitConfigured"):
+                    if cycle_result.get(key) is not True:
+                        errors.append(f"{prefix}.{key}={cycle_result.get(key)!r}")
+                if cycle_result.get("internetSource") != "wireguard":
+                    errors.append(
+                        f"{prefix}.internetSource="
+                        f"{cycle_result.get('internetSource')!r}"
+                    )
+                if (
+                    expected_wireguard_endpoint
+                    and cycle_result.get("wireguardExitEndpoint")
+                    != expected_wireguard_endpoint
+                ):
+                    errors.append(
+                        f"{prefix}.wireguardExitEndpoint="
+                        f"{cycle_result.get('wireguardExitEndpoint')!r}"
+                    )
+            if expected_dns_mode:
+                for key, expected in expected_cycle_dns.items():
+                    if cycle_result.get(key) != expected:
+                        errors.append(
+                            f"{prefix}.{key}={cycle_result.get(key)!r} "
+                            f"expected={expected!r}"
+                        )
+            if expected_resolve_host:
+                if cycle_result.get("resolvedHost") != expected_resolve_host:
+                    errors.append(
+                        f"{prefix}.resolvedHost="
+                        f"{cycle_result.get('resolvedHost')!r} "
+                        f"expected={expected_resolve_host!r}"
+                    )
+                if cycle_result.get("resolveError"):
+                    errors.append(
+                        f"{prefix}.resolveError={cycle_result.get('resolveError')!r}"
+                    )
+                addresses = cycle_result.get("resolvedAddresses")
+                if not isinstance(addresses, list) or not addresses:
+                    errors.append(f"{prefix}.resolvedAddresses={addresses!r}")
+                elif expected_exit_ip and expected_exit_ip not in addresses:
+                    errors.append(
+                        f"{prefix}.resolvedAddresses={addresses!r} "
+                        f"expected={expected_exit_ip!r}"
+                    )
+            if expected_fetch_url:
+                if cycle_result.get("url") != expected_fetch_url:
+                    errors.append(
+                        f"{prefix}.url={cycle_result.get('url')!r} "
+                        f"expected={expected_fetch_url!r}"
+                    )
+                if cycle_result.get("fetchError"):
+                    errors.append(
+                        f"{prefix}.fetchError={cycle_result.get('fetchError')!r}"
+                    )
+                status_code = cycle_result.get("statusCode")
+                if not isinstance(status_code, int) or not 200 <= status_code < 400:
+                    errors.append(f"{prefix}.statusCode={status_code!r}")
+            elif cycle_result.get("fetchError"):
+                errors.append(
+                    f"{prefix}.unexpectedFetchError={cycle_result.get('fetchError')!r}"
+                )
+            expected_packets = counter(
+                cycle_result.get("tunPacketProbeExpectedPackets")
+            )
+            replies = counter(cycle_result.get("tunPacketProbeReplyPackets"))
+            if (
+                cycle_result.get("tunPacketProbeReadIncreased") is not True
+                or cycle_result.get("tunPacketProbeBytesReadIncreased") is not True
+                or cycle_result.get("tunPacketProbeDroppedIncreased") is not False
+                or expected_packets is None
+                or expected_packets < 1
+            ):
+                errors.append(f"{prefix}.tunPacketProbe=invalid")
+            if require_reply and (
+                replies is None
+                or expected_packets is None
+                or replies < expected_packets
+                or cycle_result.get("tunPacketProbeWrittenIncreased") is not True
+                or cycle_result.get("tunPacketProbeBytesWrittenIncreased") is not True
+            ):
+                errors.append(
+                    f"{prefix}.tunPacketProbeReplyPackets="
+                    f"{replies!r}/{expected_packets!r}"
+                )
+            cycle_runtime_json = cycle_result.get("packetTunnelRuntimeStateJson")
+            try:
+                cycle_runtime = json.loads(cycle_runtime_json or "")
+            except (json.JSONDecodeError, TypeError):
+                errors.append(f"{prefix}.packetTunnelRuntimeStateJson=invalid")
+            else:
+                if cycle_runtime.get("vpnActive") is not True:
+                    errors.append(
+                        f"{prefix}.runtime.vpnActive="
+                        f"{cycle_runtime.get('vpnActive')!r}"
+                    )
 if (
     expected_debug_dns_injected is not None
     and result.get("debugDnsInjected") is not expected_debug_dns_injected
@@ -238,14 +432,26 @@ if expected_dns_mode:
     for key, value in expected_dns.items():
         if result.get(key) != value:
             errors.append(f"{key}={result.get(key)!r} expected={value!r}")
-if expected_exit_ip:
+if expected_exit_ip and not expected_resolve_host:
+    errors.append("expectedExitIp requires expectedResolveHost")
+if expected_resolve_host:
+    if result.get("resolvedHost") != expected_resolve_host:
+        errors.append(
+            f"resolvedHost={result.get('resolvedHost')!r} "
+            f"expected={expected_resolve_host!r}"
+        )
     resolved = result.get("resolvedAddresses")
     if result.get("resolveError"):
         errors.append(f"resolveError={result['resolveError']}")
-    if not isinstance(resolved, list) or expected_exit_ip not in resolved:
+    if not isinstance(resolved, list) or not resolved:
+        errors.append(f"resolvedAddresses={resolved!r}")
+    elif expected_exit_ip and expected_exit_ip not in resolved:
         errors.append(
             f"resolvedAddresses={resolved!r} expected to contain {expected_exit_ip!r}"
         )
+if expected_fetch_url:
+    if result.get("url") != expected_fetch_url:
+        errors.append(f"url={result.get('url')!r} expected={expected_fetch_url!r}")
     if result.get("fetchError"):
         errors.append(f"fetchError={result['fetchError']}")
     status = result.get("statusCode")

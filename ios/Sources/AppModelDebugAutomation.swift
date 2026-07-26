@@ -299,6 +299,9 @@ extension AppModel {
             ?? "debug-exit-probe.json"
         let waitSeconds = Self.argumentValue(after: "--nvpn-debug-wait-seconds", in: arguments)
             .flatMap(Double.init) ?? 12
+        let awaitActiveTunnelLifecycle = arguments.contains(
+            "--nvpn-debug-await-active-tunnel-lifecycle"
+        )
         let resolveHost = Self.argumentValue(after: "--nvpn-debug-resolve-host", in: arguments)
         let skipFetch = arguments.contains("--nvpn-debug-skip-fetch")
         let verifyDirectRestoration = arguments.contains("--nvpn-debug-verify-direct-restoration")
@@ -369,6 +372,15 @@ extension AppModel {
         }
         let packetTunnelConnected = packetTunnelStatus == 3
         result["packetTunnelConnected"] = packetTunnelConnected
+        if packetTunnelConnected, awaitActiveTunnelLifecycle {
+            result.merge(
+                await runDebugActiveTunnelLifecycle(
+                    arguments: arguments,
+                    resultName: resultName,
+                    baseResult: result
+                )
+            ) { _, new in new }
+        }
         if packetTunnelConnected {
             for (key, value) in await runDebugTunPacketProbe(arguments: arguments) {
                 result[key] = value
@@ -412,6 +424,10 @@ extension AppModel {
             }
             result["fetchElapsedMs"] = Self.elapsedMilliseconds(since: fetchStartedAt)
         }
+        if awaitActiveTunnelLifecycle {
+            result["postForegroundProbe"] =
+                result["activeTunnelLifecycleObserved"] as? Bool == true
+        }
         if arguments.contains("--nvpn-debug-await-direct-ui-while-connected") {
             result.merge(await runDebugDirectWhileConnected(
                 waitSeconds: waitSeconds,
@@ -433,6 +449,177 @@ extension AppModel {
         result["debugProbeElapsedMs"] = Self.elapsedMilliseconds(since: probeStartedAt)
         result["finishedAt"] = ISO8601DateFormatter().string(from: Date())
         writeDebugProbeResult(result, name: resultName)
+        #endif
+    }
+
+    private func runDebugActiveTunnelLifecycle(
+        arguments: [String],
+        resultName: String,
+        baseResult: [String: Any]
+    ) async -> [String: Any] {
+        #if DEBUG
+        let requiredCycles = Self.clampedIntArgument(
+            "--nvpn-debug-active-lifecycle-cycles",
+            in: arguments,
+            defaultValue: 3,
+            minValue: 1,
+            maxValue: 5
+        )
+        let timeoutSeconds = Self.clampedDoubleArgument(
+            "--nvpn-debug-active-lifecycle-timeout-seconds",
+            in: arguments,
+            defaultValue: 45,
+            minValue: 5,
+            maxValue: 600
+        )
+        let baselineTransition = lifecycleProbeTransition
+        var progress = baseResult
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var completedCycles = 0
+        var cycleResults: [[String: Any]] = []
+        var statusBeforeBackground = await vpnController.statusRawValue() ?? -1
+        statusMessage = "Active VPN ready for lifecycle cycle 1"
+
+        for cycle in 1...requiredCycles {
+            progress["activeTunnelLifecycleCycles"] = completedCycles
+            progress["activeTunnelLifecycleCycleResults"] = cycleResults
+            progress["activeTunnelLifecycleObserved"] = false
+            progress["phase"] = "awaiting_active_tunnel_lifecycle_cycle_\(cycle)"
+            writeDebugProbeResult(progress, name: resultName)
+
+            repeat {
+                completedCycles = completedDebugLifecycleCycles(
+                    after: baselineTransition
+                )
+                if completedCycles >= cycle {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            } while Date() < deadline
+            guard completedCycles >= cycle else {
+                break
+            }
+
+            var cycleResult = await runDebugActiveTunnelCycleProbe(
+                arguments: arguments,
+                cycle: cycle,
+                statusBeforeBackground: statusBeforeBackground
+            )
+            cycleResult["cycle"] = cycle
+            cycleResults.append(cycleResult)
+            progress["activeTunnelLifecycleCycles"] = completedCycles
+            progress["activeTunnelLifecycleCycleResults"] = cycleResults
+            progress["phase"] = "verified_active_tunnel_lifecycle_cycle_\(cycle)"
+            writeDebugProbeResult(progress, name: resultName)
+            if cycle < requiredCycles {
+                statusMessage =
+                    "Active VPN lifecycle verified \(cycle)/\(requiredCycles); "
+                    + "ready for cycle \(cycle + 1)"
+                statusBeforeBackground = await vpnController.statusRawValue() ?? -1
+            } else {
+                statusMessage =
+                    "Active VPN lifecycle verified \(cycle)/\(requiredCycles)"
+            }
+        }
+
+        let observed =
+            completedCycles >= requiredCycles && cycleResults.count == requiredCycles
+        if !observed {
+            statusMessage = "Active VPN lifecycle timed out"
+        }
+        let firstStatus =
+            cycleResults.first?["statusBeforeBackgroundRawValue"] ?? statusBeforeBackground
+        let lastStatus: Any
+        if let recorded = cycleResults.last?["statusAfterForegroundRawValue"] {
+            lastStatus = recorded
+        } else {
+            lastStatus = await vpnController.statusRawValue() ?? -1
+        }
+        return [
+            "activeTunnelLifecycleCycles": completedCycles,
+            "activeTunnelLifecycleCycleResults": cycleResults,
+            "activeTunnelLifecycleObserved": observed,
+            "activeTunnelStatusBeforeBackgroundRawValue": firstStatus,
+            "activeTunnelStatusAfterForegroundRawValue": lastStatus,
+        ]
+        #else
+        return [:]
+        #endif
+    }
+
+    private func runDebugActiveTunnelCycleProbe(
+        arguments: [String],
+        cycle: Int,
+        statusBeforeBackground: Int
+    ) async -> [String: Any] {
+        #if DEBUG
+        let urlString = Self.argumentValue(after: "--nvpn-debug-fetch-url", in: arguments)
+            ?? "https://am.i.mullvad.net/json"
+        let resolveHost = Self.argumentValue(after: "--nvpn-debug-resolve-host", in: arguments)
+        let skipFetch = arguments.contains("--nvpn-debug-skip-fetch")
+        let statusAfterForeground = await vpnController.statusRawValue() ?? -1
+        var result: [String: Any] = [
+            "cycle": cycle,
+            "postForegroundProbe": true,
+            "statusAfterForegroundRawValue": statusAfterForeground,
+            "statusBeforeBackgroundRawValue": statusBeforeBackground,
+        ]
+        if statusAfterForeground == 3 {
+            result.merge(await runDebugTunPacketProbe(arguments: arguments)) { _, new in new }
+        }
+        if let runtimeJson = await vpnController.runtimeStateJson() {
+            result["packetTunnelRuntimeStateJson"] = runtimeJson
+        }
+        refresh()
+        result["vpnEnabled"] = state.vpnEnabled
+        result["vpnActive"] = state.vpnActive
+        result["wireguardExitEnabled"] = state.wireguardExitEnabled
+        result["wireguardExitConfigured"] = state.wireguardExitConfigured
+        result["wireguardExitEndpoint"] = state.wireguardExitEndpoint
+        result.merge(debugExitDnsStateResult()) { _, new in new }
+
+        if let host = resolveHost?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !host.isEmpty {
+            let resolved = Self.resolveDebugHost(host)
+            result["resolvedHost"] = host
+            result["resolvedAddresses"] = resolved.addresses
+            if let error = resolved.error {
+                result["resolveError"] = error
+            }
+        }
+        if !skipFetch {
+            result["url"] = urlString
+            for (key, value) in await fetchDebugProbe(urlString: urlString) {
+                result[key] = value
+            }
+        }
+        return result
+        #else
+        return [:]
+        #endif
+    }
+
+    private func completedDebugLifecycleCycles(after baselineTransition: Int) -> Int {
+        #if DEBUG
+        var waitingForActive = false
+        var completed = 0
+        for event in lifecycleProbeHistory {
+            guard let transition = event["transition"] as? Int,
+                  transition > baselineTransition,
+                  let phase = event["phase"] as? String
+            else {
+                continue
+            }
+            if phase == "background" {
+                waitingForActive = true
+            } else if phase == "active", waitingForActive {
+                completed += 1
+                waitingForActive = false
+            }
+        }
+        return completed
+        #else
+        return 0
         #endif
     }
 

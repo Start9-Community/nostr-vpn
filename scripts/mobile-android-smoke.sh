@@ -60,6 +60,7 @@ DIRECT_PROBE_URL="${NVPN_ANDROID_DIRECT_PROBE_URL:-https://example.com/}"
 EXIT_PROBE_URL="${NVPN_ANDROID_EXIT_PROBE_URL:-https://example.com/}"
 DIRECT_RESTORE_WAIT_SECS="${NVPN_ANDROID_DIRECT_RESTORE_WAIT_SECS:-20}"
 EXPECTED_VPN_DNS="${NVPN_ANDROID_EXPECTED_VPN_DNS:-10.44.0.53}"
+EXPECTED_WIREGUARD_ENDPOINT="${NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT:-}"
 DEBUG_SEED_WAIT_SECS="${NVPN_ANDROID_DEBUG_SEED_WAIT_SECS:-10}"
 DEBUG_EXIT_NODE="${NVPN_ANDROID_DEBUG_EXIT_NODE:-}"
 DEBUG_WIREGUARD_CONFIG="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG:-}"
@@ -82,7 +83,8 @@ IDLE_CPU_MAX_PERCENT="${NVPN_ANDROID_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_P
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_ANDROID_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-10}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_ANDROID_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-3}}"
 ANDROID_LIFECYCLE_GATE="${NVPN_ANDROID_LIFECYCLE_GATE:-1}"
-ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-2}"
+ANDROID_LIFECYCLE_CYCLES="${NVPN_ANDROID_LIFECYCLE_CYCLES:-3}"
+ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-10}"
 
 build=1
 install=1
@@ -138,15 +140,19 @@ Disable with --no-tun-probe if a device image lacks ping.
 When NVPN_ANDROID_EXIT_PROBE_HOST is set, the cycle additionally proves a full
 Direct -> WireGuard exit -> Direct transition. The named host must resolve only
 through the fixture/profile DNS; NVPN_ANDROID_EXIT_PROBE_EXPECTED_IP pins its
-answer. Public DNS and Internet reachability are checked before connect, while
-the exit is active, and after disconnect. The Android VPN network must advertise
-the local authenticated DNS stub (10.44.0.53 by default).
+answer. Public DNS and HTTPS are checked before connect, while the exit is
+active, again after active-tunnel background/foreground cycles, and after
+disconnect. The Android VPN network must advertise the local authenticated DNS
+stub (10.44.0.53 by default).
 
 Set NVPN_ANDROID_EXIT_DNS_MODE and its provider/custom/through-exit companion
 variables to configure Exit DNS before connecting.
 NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1 requires the physical smoke to tap and
 type through the shipped Compose controls, exercise required-field validation,
 save, and verify config.toml persistence before the functional DNS probe.
+The active exit lifecycle gate defaults to three background/foreground cycles
+with at least ten seconds backgrounded and re-proves the real TUN, DNS policy,
+configured WireGuard endpoint, and app-process HTTPS after every foreground.
 NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED=1 then selects This device,
 requires the Android VPN network to remain connected without a default route,
 and proves DNS and Internet access in that state.
@@ -638,6 +644,7 @@ run_android_direct_network_probe() {
 }
 
 run_android_exit_network_probe() {
+  local label="${1:-wireguard-exit}"
   [[ -n "$EXIT_PROBE_HOST" ]] || return 0
   local dns_servers result_path resolved_ip secure_dns_before
   secure_dns_before=""
@@ -645,7 +652,7 @@ run_android_exit_network_probe() {
     copy_android_runtime_state
     secure_dns_before="$(android_runtime_state_number secureDnsSuccesses)"
   fi
-  result_path="$(android_network_probe_path wireguard-exit)"
+  result_path="$(android_network_probe_path "$label")"
   mkdir -p "$RUNTIME_STATE_RESULT_DIR"
   if ! dns_servers="$(android_vpn_dns_servers)"; then
     echo "Android WireGuard exit probe failed: active VPN DNS servers were unavailable" >&2
@@ -671,9 +678,23 @@ run_android_exit_network_probe() {
     return 1
   fi
   if [[ "$EXIT_DNS_MODE" == "encrypted" ]]; then
-    wait_for_secure_dns_success_after "$secure_dns_before"
+    if ! wait_for_secure_dns_success_after "$secure_dns_before"; then
+      return 1
+    fi
   fi
-  echo "Android WireGuard exit DNS/Internet probe passed: $result_path DNS=$EXPECTED_VPN_DNS answer=$resolved_ip"
+  if ! run_android_app_network_probe \
+    "$label" \
+    "$EXIT_PROBE_HOST" \
+    "$EXIT_PROBE_URL" \
+    "$EXIT_PROBE_EXPECTED_IP"
+  then
+    return 1
+  fi
+  if ! android_exit_dns_persisted; then
+    echo "Android $label probe failed: WireGuard endpoint or Exit DNS policy changed" >&2
+    return 1
+  fi
+  echo "Android WireGuard exit DNS/HTTPS probe passed after $label: $result_path DNS=$EXPECTED_VPN_DNS answer=$resolved_ip endpoint=${EXPECTED_WIREGUARD_ENDPOINT:-configured}"
 }
 
 wait_for_secure_dns_success_after() {
@@ -897,7 +918,7 @@ import json
 import re
 import sys
 
-mode, provider, custom_url, bootstrap, through = sys.argv[1:]
+mode, provider, custom_url, bootstrap, through, expected_endpoint = sys.argv[1:]
 text = sys.stdin.read()
 
 
@@ -940,11 +961,14 @@ def array(body, key):
 
 top_level = re.split(r"(?m)^\[", text, maxsplit=1)[0]
 dns = section("exit_dns")
+wireguard = section("wireguard_exit")
 if scalar(dns, "mode", "automatic") != mode:
     raise SystemExit(1)
 if scalar(top_level, "internet_source") != "wire_guard":
     raise SystemExit(1)
-if not boolean(section("wireguard_exit"), "enabled"):
+if not boolean(wireguard, "enabled"):
+    raise SystemExit(1)
+if expected_endpoint and scalar(wireguard, "endpoint") != expected_endpoint:
     raise SystemExit(1)
 if mode == "encrypted":
     if scalar(dns, "doh_provider", "cloudflare") != provider:
@@ -961,7 +985,7 @@ if mode == "through_exit":
         raise SystemExit(1)
 ' "$EXIT_DNS_MODE" "$EXIT_DNS_DOH_PROVIDER" \
       "$EXIT_DNS_CUSTOM_DOH_URL" "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
-      "$EXIT_DNS_THROUGH_EXIT_SERVERS"
+      "$EXIT_DNS_THROUGH_EXIT_SERVERS" "$EXPECTED_WIREGUARD_ENDPOINT"
 }
 
 wait_for_android_exit_dns_persistence() {
@@ -2109,6 +2133,93 @@ run_android_activity_lifecycle_gate() {
   echo "Android background/foreground lifecycle gate passed"
 }
 
+run_android_active_vpn_lifecycle_gate() {
+  if ! truthy "$ANDROID_LIFECYCLE_GATE"; then
+    "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME \
+      && run_android_idle_cpu_gate "Android background active VPN"
+    return $?
+  fi
+
+  if ! [[ "$ANDROID_LIFECYCLE_CYCLES" =~ ^[1-9][0-9]*$ ]] \
+    || ! [[ "$ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS" =~ ^[0-9]+$ ]] \
+    || (( ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS < 10 ))
+  then
+    echo "Android active lifecycle requires positive cycles and at least 10s background dwell" >&2
+    return 1
+  fi
+
+  local before_pid background_pid foreground_pid cycle background_started elapsed remaining
+  before_pid="$(android_app_pid)"
+  if [[ -z "$before_pid" ]] || ! vpn_active; then
+    echo "Android active lifecycle gate failed: app process or VPN is not active" >&2
+    return 1
+  fi
+
+  for cycle in $(seq 1 "$ANDROID_LIFECYCLE_CYCLES"); do
+    background_started="$(date +%s)"
+    if ! "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME \
+      || ! run_android_idle_cpu_gate "Android background active VPN cycle $cycle"
+    then
+      echo "Android active lifecycle gate failed in cycle $cycle: could not background/sample the app" >&2
+      return 1
+    fi
+    elapsed="$(( $(date +%s) - background_started ))"
+    remaining="$((ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS - elapsed))"
+    if (( remaining > 0 )); then
+      sleep "$remaining"
+    fi
+    background_pid="$(android_app_pid)"
+    if [[ "$background_pid" != "$before_pid" ]] || ! vpn_active; then
+      echo "Android active lifecycle gate failed in cycle $cycle: app process or VPN did not survive backgrounding" >&2
+      return 1
+    fi
+
+    if ! start_main_activity; then
+      echo "Android active lifecycle gate failed in cycle $cycle: Activity launch failed" >&2
+      return 1
+    fi
+    if ! wait_until 5 android_activity_resumed; then
+      echo "Android active lifecycle gate failed in cycle $cycle: Activity did not resume" >&2
+      return 1
+    fi
+    foreground_pid="$(android_app_pid)"
+    if [[ "$foreground_pid" != "$before_pid" ]]; then
+      echo "Android active lifecycle gate failed in cycle $cycle: app process restarted" >&2
+      return 1
+    fi
+    if ! wait_until "$VPN_START_WAIT_SECS" vpn_active \
+      || ! wait_for_android_runtime_state
+    then
+      echo "Android active lifecycle gate failed in cycle $cycle: VPN/runtime did not remain active" >&2
+      return 1
+    fi
+    capture_android_vpn_link_stats "after-foreground-$cycle" || true
+    if truthy "$TUN_PACKET_PROBE"; then
+      if ! run_android_tun_packet_probe; then
+        echo "Android active lifecycle gate failed in cycle $cycle: tunnel traffic failed" >&2
+        return 1
+      fi
+      if ! cp \
+          "$(android_tun_packet_probe_summary_path)" \
+          "$RUNTIME_STATE_RESULT_DIR/mobile-android-tun-probe-after-foreground-$cycle-$$.json"
+      then
+        echo "Android active lifecycle gate failed in cycle $cycle: TUN receipt copy failed" >&2
+        return 1
+      fi
+    fi
+    if ! run_android_exit_network_probe "wireguard-exit-after-foreground-$cycle"; then
+      echo "Android active lifecycle gate failed in cycle $cycle: DNS/HTTPS failed" >&2
+      return 1
+    fi
+    if ! assert_single_android_app_process; then
+      echo "Android active lifecycle gate failed in cycle $cycle: app process count changed" >&2
+      return 1
+    fi
+    echo "Android active-VPN lifecycle cycle $cycle/$ANDROID_LIFECYCLE_CYCLES passed after >=${ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS}s background dwell"
+  done
+  echo "Android active-VPN background/foreground lifecycle gate passed: $ANDROID_LIFECYCLE_CYCLES cycles"
+}
+
 seed_debug_config() {
   if [[ "$create_network" == "1" || "$create_network" == "true" ]]; then
     start_main_activity \
@@ -2205,7 +2316,9 @@ start_main_activity
 "$ADB" -s "$serial" shell pm path "$PACKAGE_NAME" >/dev/null
 wait_for_android_build_metadata
 assert_single_android_app_process
-run_android_activity_lifecycle_gate
+if [[ "$vpn_cycle" -eq 0 ]]; then
+  run_android_activity_lifecycle_gate
+fi
 assert_single_android_app_process
 
 if [[ "$vpn_cycle" -eq 0 ]]; then
@@ -2245,7 +2358,7 @@ if [[ "$vpn_cycle" -eq 1 ]]; then
     echo "Android smoke failed: native TUN packet probe failed." >&2
     exit 1
   fi
-  if ! run_android_exit_network_probe; then
+  if ! run_android_exit_network_probe wireguard-exit; then
     dump_vpn_diagnostics
     exit 1
   fi
@@ -2266,8 +2379,10 @@ if [[ "$vpn_cycle" -eq 1 ]]; then
       exit 1
     fi
   fi
-  "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME
-  run_android_idle_cpu_gate "Android background active VPN"
+  if ! run_android_active_vpn_lifecycle_gate; then
+    dump_vpn_diagnostics
+    exit 1
+  fi
   if ! cleanup_android_vpn_after_pass; then
     exit 1
   fi

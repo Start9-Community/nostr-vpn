@@ -41,6 +41,8 @@ physical mobile devices that:
   - Automatic/profile, Cloudflare DoH, Quad9 DoH, custom DoH with explicit
     bootstrap IPs, and DNS-through-exit all use the selected real resolver;
   - public HTTPS works through the exit;
+  - each app survives three ten-second active-tunnel background/foreground
+    cycles, with tunnel traffic, DNS policy, and HTTPS re-proved after each;
   - selecting Direct disables WireGuard while the OS VPN remains connected;
   - DNS and ordinary Internet work in that connected split-tunnel state; and
   - native device DNS and Internet still work after disconnect.
@@ -486,6 +488,7 @@ run_android_case() {
     NVPN_ANDROID_EXIT_PROBE_URL="$DIRECT_URL" \
     NVPN_ANDROID_DIRECT_PROBE_HOST="$DIRECT_HOST" \
     NVPN_ANDROID_DIRECT_PROBE_URL="$DIRECT_URL" \
+    NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT" \
     "$ROOT/scripts/mobile-android-smoke.sh" "${android_args[@]}"
   assert_platform_traffic Android "$label" "$before_bytes" "$before_forward"
   case "$evidence" in
@@ -559,6 +562,7 @@ run_ios_case() {
     NVPN_IOS_EXIT_PROBE_URL="$DIRECT_URL" \
     NVPN_IOS_DIRECT_PROBE_HOST="$DIRECT_HOST" \
     NVPN_IOS_DIRECT_PROBE_URL="$DIRECT_URL" \
+    NVPN_IOS_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT" \
     NVPN_IOS_VERIFY_DIRECT_RESTORATION="$final" \
     "$ROOT/scripts/mobile-ios-smoke.sh" "${ios_args[@]}"
   assert_platform_traffic iOS "$label" "$before_bytes" "$before_forward"

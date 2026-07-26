@@ -149,26 +149,79 @@ print(
 PY
 }
 
-run_ios_app_lifecycle_gate() {
+_run_ios_app_lifecycle_gate() {
   local device="$1"
   local bundle_id="$2"
   local result_dir="$3"
   local cycles="$4"
-  local result_name="mobile-ios-lifecycle-$$-$RANDOM.json"
+  local mode="$5"
+  shift 5
+  local result_prefix run_id_prefix test_method gate_description
+  case "$mode" in
+    standalone)
+      result_prefix="mobile-ios-lifecycle"
+      run_id_prefix="ios-lifecycle"
+      test_method="testPhysicalNativeCoreBackgroundForegroundLifecycle"
+      gate_description="physical lifecycle"
+      ;;
+    active-tunnel)
+      result_prefix="mobile-ios-active-tunnel-lifecycle"
+      run_id_prefix="ios-active-tunnel-lifecycle"
+      test_method="testPhysicalActiveTunnelBackgroundForegroundLifecycle"
+      gate_description="active-tunnel lifecycle"
+      ;;
+    *)
+      echo "Unknown iOS lifecycle gate mode: $mode" >&2
+      return 1
+      ;;
+  esac
+
+  local result_name="$result_prefix-$$-$RANDOM.json"
   local stem="${result_name%.json}"
   local background_dwell="${NVPN_IOS_LIFECYCLE_BACKGROUND_DWELL_SECS:-10}"
-  local run_id="ios-lifecycle-$$-$RANDOM-$(date +%s)"
+  local run_id="$run_id_prefix-$$-$RANDOM-$(date +%s)"
   local log="$result_dir/$stem-xcodebuild.log"
   local markers="$result_dir/$stem-markers.log"
   local history="$result_dir/$stem-history.json"
   local summary="$result_dir/$stem-summary.json"
   local xcresult="$result_dir/$stem.xcresult"
   local team="${NVPN_IOS_TEAM_ID:-}"
-  local destination_udid
-  local ignored
+  local destination_udid arguments_base64="" ignored
+
+  if ! [[ "$cycles" =~ ^[1-5]$ ]]; then
+    echo "iOS $gate_description gate requires 1-5 lifecycle cycles" >&2
+    return 1
+  fi
+  if ! [[ "$background_dwell" =~ ^[0-9]+$ ]]; then
+    echo "iOS $gate_description gate requires an integer background dwell" >&2
+    return 1
+  fi
+  if [[ "$mode" == "active-tunnel" ]]; then
+    if (( background_dwell < 10 )); then
+      echo "iOS active-tunnel lifecycle requires at least 10s background dwell" >&2
+      return 1
+    fi
+    local lifecycle_timeout="$((background_dwell * cycles + 40 * cycles + 30))"
+    local -a app_arguments=(
+      "$@"
+      --nvpn-debug-lifecycle-result "$result_name"
+      --nvpn-debug-lifecycle-run-id "$run_id"
+      --nvpn-debug-await-active-tunnel-lifecycle
+      --nvpn-debug-active-lifecycle-cycles "$cycles"
+      --nvpn-debug-active-lifecycle-timeout-seconds "$lifecycle_timeout"
+    )
+    arguments_base64="$(python3 - "${app_arguments[@]}" <<'PY'
+import base64
+import json
+import sys
+
+print(base64.b64encode(json.dumps(sys.argv[1:]).encode()).decode())
+PY
+    )"
+  fi
 
   [[ -n "$team" ]] || {
-    echo "Set NVPN_IOS_TEAM_ID to run the physical iOS lifecycle XCTest." >&2
+    echo "Set NVPN_IOS_TEAM_ID to run the physical iOS $gate_description XCTest." >&2
     return 1
   }
   destination_udid="$(resolve_physical_ios_udid "$device")"
@@ -188,7 +241,7 @@ run_ios_app_lifecycle_gate() {
     -destination-timeout 60
     -collect-test-diagnostics never
     -resultBundlePath "$xcresult"
-    -only-testing:NostrVpnIosUITests/NostrVpnLifecycleUITests/testPhysicalNativeCoreBackgroundForegroundLifecycle
+    "-only-testing:NostrVpnIosUITests/NostrVpnLifecycleUITests/$test_method"
     DEVELOPMENT_TEAM="$team"
   )
   if bool_is_true "${NVPN_IOS_XCODEBUILD_QUIET:-1}"; then
@@ -220,13 +273,16 @@ run_ios_app_lifecycle_gate() {
     NVPN_XCUITEST_LIFECYCLE_RESULT_NAME="$result_name"
     NVPN_XCUITEST_LIFECYCLE_CYCLES="$cycles"
     NVPN_XCUITEST_LIFECYCLE_BACKGROUND_DWELL_SECS="$background_dwell"
-    test
   )
+  if [[ "$mode" == "active-tunnel" ]]; then
+    command+=(NVPN_XCUITEST_APP_LAUNCH_ARGS_BASE64="$arguments_base64")
+  fi
+  command+=(test)
 
   if ! NSUnbufferedIO=YES "${command[@]}" >"$log" 2>&1; then
     tail -n 120 "$log" >&2
     echo "Enable Settings > Developer > Enable UI Automation on the unlocked iPhone, then retry." >&2
-    echo "iOS lifecycle XCTest result bundle: $xcresult" >&2
+    echo "iOS $gate_description XCTest failed: $xcresult" >&2
     return 1
   fi
 
@@ -247,8 +303,8 @@ run_ios_app_lifecycle_gate() {
         >"$summary" 2>"$summary.error"
       then
         rm -f "$summary.error"
-        printf 'iOS physical lifecycle gate passed: %s cycles, %ss dwell; artifacts: %s\n' \
-          "$cycles" "$background_dwell" "$result_dir"
+        printf 'iOS %s gate passed: %s cycles, %ss dwell; artifacts: %s\n' \
+          "$gate_description" "$cycles" "$background_dwell" "$result_dir"
         return 0
       fi
     fi
@@ -256,7 +312,26 @@ run_ios_app_lifecycle_gate() {
   done
 
   cat "$summary.error" >&2 2>/dev/null || true
-  echo "iOS lifecycle XCTest passed but its app-side native-core history was incomplete." >&2
-  echo "iOS lifecycle artifacts: $result_dir" >&2
+  echo "iOS $gate_description XCTest passed but app-side lifecycle history was incomplete." >&2
+  echo "iOS $gate_description artifacts: $result_dir" >&2
   return 1
+}
+
+run_ios_app_lifecycle_gate() {
+  local device="$1"
+  local bundle_id="$2"
+  local result_dir="$3"
+  local cycles="$4"
+  _run_ios_app_lifecycle_gate \
+    "$device" "$bundle_id" "$result_dir" "$cycles" standalone
+}
+
+run_ios_active_tunnel_lifecycle_gate() {
+  local device="$1"
+  local bundle_id="$2"
+  local result_dir="$3"
+  local cycles="$4"
+  shift 4
+  _run_ios_app_lifecycle_gate \
+    "$device" "$bundle_id" "$result_dir" "$cycles" active-tunnel "$@"
 }

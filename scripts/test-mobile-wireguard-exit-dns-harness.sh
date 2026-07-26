@@ -11,6 +11,8 @@ ios_debug_automation="$ROOT/ios/Sources/AppModelDebugAutomation.swift"
 ios_tun_probe="$ROOT/ios/Sources/AppModelDebugTunProbe.swift"
 ios_url_automation="$ROOT/ios/Sources/AppModelDebugURLAutomation.swift"
 ios_ui="$ROOT/ios/UITests/NostrVpnIosUITests.swift"
+ios_lifecycle_ui="$ROOT/ios/UITests/NostrVpnLifecycleUITests.swift"
+ios_lifecycle_lib="$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
 ios_project="$ROOT/ios/project.yml"
 ios_internet="$ROOT/ios/Sources/InternetViews.swift"
 ios_settings="$ROOT/ios/Sources/SettingsViews.swift"
@@ -57,10 +59,14 @@ grep -Fq 'if ! bool_is_true "${NVPN_MOBILE_WG_EXIT_IMAGE_READY:-0}"; then' "$gat
   || { echo "parallel mobile exit lanes cannot reuse their prebuilt fixture image" >&2; exit 1; }
 grep -Fq 'NVPN_ANDROID_LIFECYCLE_GATE="$lifecycle_gate"' "$gate" \
   || { echo "Android mobile exit cases ignore the lifecycle-gate mode" >&2; exit 1; }
+grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT"' "$gate" \
+  || { echo "Android mobile exit cases do not pin the expected WireGuard endpoint" >&2; exit 1; }
 grep -Fq 'NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1' "$gate" \
   || { echo "Android physical DNS cases do not require the shipped UI driver" >&2; exit 1; }
 grep -Fq 'NVPN_IOS_LIFECYCLE_GATE="$lifecycle_gate"' "$gate" \
   || { echo "iOS mobile exit cases ignore the lifecycle-gate mode" >&2; exit 1; }
+grep -Fq 'NVPN_IOS_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT"' "$gate" \
+  || { echo "iOS mobile exit cases do not pin the expected WireGuard endpoint" >&2; exit 1; }
 grep -Fq 'run_ios_exit_dns_shipped_ui_case_gate' "$gate" \
   || { echo "iOS physical DNS cases do not execute their shipped-controls XCTest" >&2; exit 1; }
 grep -Fq 'testConfigureExitDnsForPhysicalPacketProbe' "$gate" \
@@ -94,6 +100,35 @@ grep -Fq 'run_android_direct_while_tunnel_probe' "$android_smoke" \
   || { echo "Android smoke lacks a connected split-tunnel Internet probe" >&2; exit 1; }
 grep -Fq 'run_android_app_network_probe' "$android_smoke" \
   || { echo "Android smoke does not prove DNS and HTTPS from the shipped app process" >&2; exit 1; }
+grep -Fq 'run_android_active_vpn_lifecycle_gate' "$android_smoke" \
+  || { echo "Android smoke does not lifecycle-test the active VPN" >&2; exit 1; }
+grep -Fq 'ANDROID_LIFECYCLE_CYCLES="${NVPN_ANDROID_LIFECYCLE_CYCLES:-3}"' "$android_smoke" \
+  || { echo "Android active lifecycle does not default to three cycles" >&2; exit 1; }
+grep -Fq 'ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-10}"' "$android_smoke" \
+  || { echo "Android active lifecycle does not default to a ten-second dwell" >&2; exit 1; }
+grep -Fq 'for cycle in $(seq 1 "$ANDROID_LIFECYCLE_CYCLES")' "$android_smoke" \
+  || { echo "Android active lifecycle does not execute every configured cycle" >&2; exit 1; }
+grep -Fq 'wireguard-exit-after-foreground-$cycle' "$android_smoke" \
+  || { echo "Android active lifecycle does not re-run DNS/HTTPS after every foreground" >&2; exit 1; }
+grep -Fq 'scalar(wireguard, "endpoint") != expected_endpoint' "$android_smoke" \
+  || { echo "Android post-foreground probe does not validate tunnel identity" >&2; exit 1; }
+grep -Fq 'Android active-VPN background/foreground lifecycle gate passed' "$android_smoke" \
+  || { echo "Android active lifecycle does not emit a distinct proof receipt" >&2; exit 1; }
+python3 - "$android_smoke" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index('if [[ "$vpn_cycle" -eq 1 ]]; then', text.index("wait_for_android_build_metadata"))
+body = text[start:]
+connected = body.index('wait_until "$VPN_START_WAIT_SECS" vpn_active')
+lifecycle = body.index("run_android_active_vpn_lifecycle_gate")
+cleanup = body.index("cleanup_android_vpn_after_pass")
+direct = body.index("run_android_direct_network_probe after-disconnect")
+if not connected < lifecycle < cleanup < direct:
+    raise SystemExit(
+        "Android active lifecycle must run after connect and before cleanup/Direct restoration"
+    )
+PY
 grep -Fq 'secureDnsSuccesses' "$android_smoke" \
   || { echo "Android smoke does not require a production authenticated-DoH success" >&2; exit 1; }
 grep -Fq 'vpn_state_present' "$android_smoke" \
@@ -206,6 +241,34 @@ grep -Fq 'debugDnsInjected' "$ios_debug_automation" \
   || { echo "iOS packet receipt does not record whether debug DNS was injected" >&2; exit 1; }
 grep -Fq 'expected_debug_dns_injected' "$ios_probe_validator" \
   || { echo "iOS packet validator does not enforce debugDnsInjected" >&2; exit 1; }
+grep -Fq 'expect_active_lifecycle' "$ios_probe_validator" \
+  || { echo "iOS packet validator does not require the active-tunnel lifecycle receipt" >&2; exit 1; }
+grep -Fq 'expected_active_lifecycle_cycles' "$ios_probe_validator" \
+  || { echo "iOS packet validator ignores the configured active lifecycle cycle count" >&2; exit 1; }
+grep -Fq 'expected_resolve_host' "$ios_probe_validator" \
+  || { echo "iOS packet validator cannot distinguish configured DNS probes from optional ones" >&2; exit 1; }
+grep -Fq 'expected_fetch_url' "$ios_probe_validator" \
+  || { echo "iOS packet validator cannot distinguish configured HTTPS probes from optional ones" >&2; exit 1; }
+grep -Fq 'expected_wireguard_endpoint' "$ios_probe_validator" \
+  || { echo "iOS packet validator does not pin WireGuard tunnel identity" >&2; exit 1; }
+grep -Fq 'run_ios_active_tunnel_lifecycle_gate' "$ios_smoke" \
+  || { echo "iOS VPN cycle does not run its lifecycle gate with the tunnel active" >&2; exit 1; }
+grep -Fq 'IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES="${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}"' "$ios_smoke" \
+  || { echo "iOS active lifecycle does not default to three cycles" >&2; exit 1; }
+grep -Fq 'testPhysicalActiveTunnelBackgroundForegroundLifecycle' "$ios_lifecycle_ui" \
+  || { echo "iOS XCTest does not background a real active packet tunnel" >&2; exit 1; }
+grep -Fq 'run_ios_active_tunnel_lifecycle_gate()' "$ios_lifecycle_lib" \
+  || { echo "iOS host harness lacks the active-tunnel lifecycle driver" >&2; exit 1; }
+grep -Fq -- '--nvpn-debug-await-active-tunnel-lifecycle' "$ios_debug_automation" \
+  || { echo "iOS exit probe cannot synchronize with real Home/foreground events" >&2; exit 1; }
+grep -Fq 'postForegroundProbe' "$ios_debug_automation" \
+  || { echo "iOS exit probe does not mark its traffic as post-foreground" >&2; exit 1; }
+grep -Fq 'activeTunnelLifecycleCycleResults' "$ios_debug_automation" \
+  || { echo "iOS exit probe does not preserve evidence for every lifecycle cycle" >&2; exit 1; }
+grep -Fq 'Active VPN lifecycle verified \(' "$ios_lifecycle_ui" \
+  || { echo "iOS XCTest does not wait for each post-foreground packet proof" >&2; exit 1; }
+grep -Fq 'driveConnectedDirectIfRequested()' "$ios_lifecycle_ui" \
+  || { echo "iOS active lifecycle XCTest strands the combined Direct-restoration gate" >&2; exit 1; }
 python3 - "$ios_probe_validator" <<'PY'
 import json
 import pathlib
@@ -245,6 +308,11 @@ with tempfile.TemporaryDirectory() as directory:
             "0",
             "0",
             "0",
+            "0",
+            "3",
+            "",
+            "",
+            "",
         ],
         text=True,
         capture_output=True,
@@ -277,6 +345,11 @@ with tempfile.TemporaryDirectory() as directory:
             "",
             "1",
             "0",
+            "",
+            "0",
+            "3",
+            "",
+            "",
             "",
         ],
         text=True,
@@ -347,7 +420,50 @@ with tempfile.TemporaryDirectory() as directory:
         "tunPacketProbeFinalBytesWritten": 2256,
         "tunPacketProbeBaselineDropped": 0,
         "tunPacketProbeFinalDropped": 0,
+        "activeTunnelLifecycleObserved": True,
+        "activeTunnelLifecycleCycles": 3,
+        "activeTunnelStatusBeforeBackgroundRawValue": 3,
+        "activeTunnelStatusAfterForegroundRawValue": 3,
+        "postForegroundProbe": True,
+        "internetSource": "wireguard",
+        "wireguardExitEnabled": True,
+        "wireguardExitConfigured": True,
+        "wireguardExitEndpoint": "192.0.2.10:51820",
+        "resolvedHost": "probe.example",
+        "resolvedAddresses": ["192.0.2.53"],
+        "url": "https://example.com/",
+        "statusCode": 204,
     }
+    cycle_results = []
+    for cycle in range(1, 4):
+        cycle_result = {
+            key: value
+            for key, value in receipt.items()
+            if key.startswith("tunPacketProbe")
+        }
+        cycle_result.update(
+            {
+                "cycle": cycle,
+                "postForegroundProbe": True,
+                "statusBeforeBackgroundRawValue": 3,
+                "statusAfterForegroundRawValue": 3,
+                "vpnEnabled": True,
+                "vpnActive": True,
+                "internetSource": "wireguard",
+                "wireguardExitEnabled": True,
+                "wireguardExitConfigured": True,
+                "wireguardExitEndpoint": "192.0.2.10:51820",
+                "resolvedHost": "probe.example",
+                "resolvedAddresses": ["192.0.2.53"],
+                "url": "https://example.com/",
+                "statusCode": 204,
+                "packetTunnelRuntimeStateJson": receipt[
+                    "packetTunnelRuntimeStateJson"
+                ],
+            }
+        )
+        cycle_results.append(cycle_result)
+    receipt["activeTunnelLifecycleCycleResults"] = cycle_results
     arguments = [
         sys.executable,
         str(validator),
@@ -355,7 +471,7 @@ with tempfile.TemporaryDirectory() as directory:
         str(summary),
         "",
         "1",
-        "",
+        "192.0.2.53",
         "0",
         "",
         "",
@@ -363,8 +479,13 @@ with tempfile.TemporaryDirectory() as directory:
         "",
         "",
         "0",
-        "0",
+        "1",
         "",
+        "1",
+        "3",
+        "192.0.2.10:51820",
+        "probe.example",
+        "https://example.com/",
     ]
     result.write_text(json.dumps(receipt), encoding="utf-8")
     completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
@@ -373,6 +494,33 @@ with tempfile.TemporaryDirectory() as directory:
     validated = json.loads(summary.read_text(encoding="utf-8"))
     if validated.get("replyPackets") != 4 or validated.get("replyObserved") is not True:
         raise SystemExit(f"iOS UDP echo summary lost reply evidence: {validated!r}")
+
+    receipt["activeTunnelStatusAfterForegroundRawValue"] = 1
+    result.write_text(json.dumps(receipt), encoding="utf-8")
+    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
+    if completed.returncode == 0:
+        raise SystemExit("iOS packet validator accepted a tunnel lost while backgrounded")
+    if "activeTunnelStatusAfterForegroundRawValue=1" not in completed.stderr:
+        raise SystemExit("iOS packet validator did not report the post-foreground tunnel loss")
+    receipt["activeTunnelStatusAfterForegroundRawValue"] = 3
+
+    receipt["activeTunnelLifecycleCycles"] = 2
+    result.write_text(json.dumps(receipt), encoding="utf-8")
+    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
+    if completed.returncode == 0:
+        raise SystemExit("iOS packet validator accepted fewer than the configured cycles")
+    if "activeTunnelLifecycleCycles=2 expected=3" not in completed.stderr:
+        raise SystemExit("iOS packet validator ignored the configured lifecycle count")
+    receipt["activeTunnelLifecycleCycles"] = 3
+
+    receipt["activeTunnelLifecycleCycleResults"][1]["statusCode"] = 500
+    result.write_text(json.dumps(receipt), encoding="utf-8")
+    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
+    if completed.returncode == 0:
+        raise SystemExit("iOS packet validator skipped the second foreground HTTPS proof")
+    if "activeLifecycleCycle[2].statusCode=500" not in completed.stderr:
+        raise SystemExit("iOS packet validator did not identify the failed lifecycle cycle")
+    receipt["activeTunnelLifecycleCycleResults"][1]["statusCode"] = 204
 
     receipt["tunPacketProbeReplyPackets"] = 0
     receipt["tunPacketProbeMissingReplyPackets"] = 4
