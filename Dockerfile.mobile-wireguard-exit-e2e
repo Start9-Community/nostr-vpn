@@ -4,11 +4,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       dnsmasq \
       iproute2 \
+      iputils-ping \
       iptables \
+      python3-minimal \
       socat \
       wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/mobile-wireguard-exit-server.sh /usr/local/bin/mobile-wireguard-exit-server
+COPY scripts/mobile-wireguard-http-probe.py /usr/local/bin/mobile-wireguard-http-probe.py
 
 ENTRYPOINT ["/usr/local/bin/mobile-wireguard-exit-server"]

@@ -6,6 +6,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/release_common.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/mobile_env.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-underlay-change.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-android-underlay.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-android-external-probe.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-android-release-gate.sh"
 load_release_env "$ROOT"
 # The canonical debug candidate must replace the installed release-signed app
 # in place. Keep the signing values in the ignored local Zapstore env.
@@ -33,7 +41,15 @@ DEBUG_NETWORK_NAME_EXTRA="${NVPN_ANDROID_DEBUG_NETWORK_NAME_EXTRA:-$ACTION_PACKA
 DEBUG_WIREGUARD_CONFIG_BASE64_EXTRA="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG_BASE64_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_WIREGUARD_CONFIG_BASE64}"
 DEBUG_EXIT_DNS_PATCH_BASE64_EXTRA="${NVPN_ANDROID_DEBUG_EXIT_DNS_PATCH_BASE64_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_EXIT_DNS_PATCH_BASE64}"
 DEBUG_NETWORK_PROBE_BASE64_EXTRA="${NVPN_ANDROID_DEBUG_NETWORK_PROBE_BASE64_EXTRA:-$ACTION_PACKAGE_NAME.DEBUG_NETWORK_PROBE_BASE64}"
-APK_PATH="${NVPN_ANDROID_APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
+RELEASE_BLACKBOX_GATE="${NVPN_ANDROID_RELEASE_BLACKBOX_GATE:-0}"
+case "$RELEASE_BLACKBOX_GATE" in
+  1|true|TRUE|True|yes|YES|Yes)
+    APK_PATH="${NVPN_ANDROID_APK:-$ROOT/android/app/build/outputs/apk/release/app-release.apk}"
+    ;;
+  *)
+    APK_PATH="${NVPN_ANDROID_APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
+    ;;
+esac
 VPN_START_WAIT_SECS="${NVPN_ANDROID_VPN_START_WAIT_SECS:-15}"
 VPN_STOP_WAIT_SECS="${NVPN_ANDROID_VPN_STOP_WAIT_SECS:-10}"
 RUNTIME_STATE_WAIT_SECS="${NVPN_ANDROID_RUNTIME_STATE_WAIT_SECS:-12}"
@@ -58,13 +74,20 @@ EXIT_PROBE_EXPECTED_IP="${NVPN_ANDROID_EXIT_PROBE_EXPECTED_IP:-}"
 DIRECT_PROBE_HOST="${NVPN_ANDROID_DIRECT_PROBE_HOST:-example.com}"
 DIRECT_PROBE_URL="${NVPN_ANDROID_DIRECT_PROBE_URL:-https://example.com/}"
 EXIT_PROBE_URL="${NVPN_ANDROID_EXIT_PROBE_URL:-https://example.com/}"
+CAPTURED_PROBE_URL="${NVPN_ANDROID_CAPTURED_PROBE_URL:-}"
+CAPTURED_PROBE_TOKEN="${NVPN_ANDROID_CAPTURED_PROBE_TOKEN:-}"
+EXIT_SOURCE_PROBE_URL="${NVPN_ANDROID_EXIT_SOURCE_PROBE_URL:-}"
+EXPECTED_EXIT_SOURCE_IP="${NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP:-}"
 DIRECT_RESTORE_WAIT_SECS="${NVPN_ANDROID_DIRECT_RESTORE_WAIT_SECS:-20}"
 EXPECTED_VPN_DNS="${NVPN_ANDROID_EXPECTED_VPN_DNS:-10.44.0.53}"
 EXPECTED_WIREGUARD_ENDPOINT="${NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT:-}"
+EXPECTED_FIPS_GIT_SHA="${NVPN_EXPECTED_FIPS_GIT_SHA:-}"
 DEBUG_SEED_WAIT_SECS="${NVPN_ANDROID_DEBUG_SEED_WAIT_SECS:-10}"
 DEBUG_EXIT_NODE="${NVPN_ANDROID_DEBUG_EXIT_NODE:-}"
 DEBUG_WIREGUARD_CONFIG="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG:-}"
 DEBUG_WIREGUARD_CONFIG_FILE="${NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG_FILE:-}"
+RELEASE_WIREGUARD_CONFIG="${NVPN_ANDROID_WIREGUARD_CONFIG:-}"
+RELEASE_WIREGUARD_CONFIG_FILE="${NVPN_ANDROID_WIREGUARD_CONFIG_FILE:-}"
 EXIT_DNS_MODE="${NVPN_ANDROID_EXIT_DNS_MODE:-}"
 EXIT_DNS_DOH_PROVIDER="${NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER:-cloudflare}"
 EXIT_DNS_CUSTOM_DOH_URL="${NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_URL:-}"
@@ -96,10 +119,12 @@ serial="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 PACKAGE_UID=""
 vpn_cleanup_armed=0
 DIRECT_UNDERLYING_DNS_BASELINE=""
+ANDROID_CAPTURED_PROBE_BUILD_DIR=""
+ANDROID_CAPTURED_PROBE_REMOTE_JAR=""
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/mobile-android-smoke.sh [--no-build] [--no-install] [--clear] [--vpn-cycle] [--create-network] [--accept-vpn-dialog] [--leave-vpn-active] [--serial SERIAL] [--probe-target IP] [--probe-count N] [--probe-timeout SECS] [--probe-require-reply] [--no-tun-probe]
+usage: scripts/mobile-android-smoke.sh [--release-network-gate] [--no-build] [--no-install] [--clear] [--vpn-cycle] [--create-network] [--accept-vpn-dialog] [--leave-vpn-active] [--serial SERIAL] [--probe-target IP] [--probe-count N] [--probe-timeout SECS] [--probe-require-reply] [--no-tun-probe]
 
 Builds and installs the debug APK, launches the app through adb, and optionally
 cycles the debug VPN action. Values may live in .env.mobile.local, shell env,
@@ -107,6 +132,11 @@ or --serial. Keep device identifiers and signing details out of committed files.
 The installed debug app must report build metadata matching this repo checkout.
 Every smoke backgrounds and foregrounds the Activity and requires the same app
 process to survive and resume.
+
+--release-network-gate builds and installs the company-signed Release APK, then
+uses only shipped UI controls plus external OS/device traffic probes. Debug
+actions, app-sandbox reads, config seeding, and synthetic app probe actions are
+forbidden in this mode.
 
 First-run Android VPN permission prompts may need manual approval before
 --vpn-cycle can run unattended.
@@ -165,6 +195,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --release-network-gate)
+      RELEASE_BLACKBOX_GATE=1
+      APK_PATH="${NVPN_ANDROID_APK:-$ROOT/android/app/build/outputs/apk/release/app-release.apk}"
+      ;;
     --no-build)
       build=0
       ;;
@@ -578,7 +612,7 @@ PY
       )"
       then
         mv "$result_path.tmp" "$result_path"
-        echo "Android app-process $label DNS/HTTPS probe passed: $result_path"
+        echo "Android VPN-excluded app-process $label native DNS/HTTPS safety probe passed: $result_path"
         return 0
       fi
     fi
@@ -682,11 +716,14 @@ run_android_exit_network_probe() {
       return 1
     fi
   fi
+  if ! run_android_captured_network_probe "$label"; then
+    return 1
+  fi
   if ! run_android_app_network_probe \
-    "$label" \
-    "$EXIT_PROBE_HOST" \
-    "$EXIT_PROBE_URL" \
-    "$EXIT_PROBE_EXPECTED_IP"
+    "$label-vpn-excluded-safety" \
+    "$DIRECT_PROBE_HOST" \
+    "$DIRECT_PROBE_URL" \
+    ""
   then
     return 1
   fi
@@ -694,7 +731,7 @@ run_android_exit_network_probe() {
     echo "Android $label probe failed: WireGuard endpoint or Exit DNS policy changed" >&2
     return 1
   fi
-  echo "Android WireGuard exit DNS/HTTPS probe passed after $label: $result_path DNS=$EXPECTED_VPN_DNS answer=$resolved_ip endpoint=${EXPECTED_WIREGUARD_ENDPOINT:-configured}"
+  echo "Android WireGuard exit captured DNS/HTTP/HTTPS and exact policy passed after $label: $result_path DNS=$EXPECTED_VPN_DNS answer=$resolved_ip endpoint=${EXPECTED_WIREGUARD_ENDPOINT:-configured}"
 }
 
 wait_for_secure_dns_success_after() {
@@ -884,6 +921,45 @@ replace_android_ui_text() {
   fi
 }
 
+replace_android_ui_multiline_text() {
+  local selector="$1"
+  local value="$2"
+  android_ui_scroll_to resource "$selector" || return 1
+  tap_android_ui resource "$selector" || return 1
+  local deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" == "true" ]]; then
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" != "true" ]]; then
+    echo "Android shipped multiline field did not gain focus: $selector" >&2
+    return 1
+  fi
+  "$ADB" -s "$serial" shell input keycombination -t 40 KEYCODE_CTRL_LEFT KEYCODE_A
+  "$ADB" -s "$serial" shell input keyevent KEYCODE_DEL
+  local line first=1
+  { set +x; } 2>/dev/null
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$first" -eq 0 ]]; then
+      "$ADB" -s "$serial" shell input keyevent KEYCODE_ENTER
+    fi
+    first=0
+    if [[ -n "$line" ]]; then
+      "$ADB" -s "$serial" shell input text "${line// /%s}"
+    fi
+  done <<<"$value"
+  "$ADB" -s "$serial" shell input keyevent KEYCODE_BACK
+  sleep 0.5
+  local actual
+  actual="$(android_ui_query resource "$selector" text)" || return 1
+  if [[ "${actual%$'\n'}" != "${value%$'\n'}" ]]; then
+    echo "Android shipped multiline field entry mismatch: $selector" >&2
+    return 1
+  fi
+}
+
 assert_android_ui_validation() {
   local expected="$1"
   local description="Exit DNS validation error: $expected"
@@ -989,6 +1065,14 @@ if mode == "through_exit":
 }
 
 wait_for_android_exit_dns_persistence() {
+  if truthy "$RELEASE_BLACKBOX_GATE"; then
+    # Release APKs are non-debuggable, so the gate intentionally cannot read
+    # their sandbox. The saved policy is proved by the subsequent external
+    # resolver request and fixture-side DNS/DoH counters.
+    sleep 1
+    echo "Android Release Exit DNS save accepted through shipped UI: mode=$EXIT_DNS_MODE provider=$EXIT_DNS_DOH_PROVIDER"
+    return 0
+  fi
   local deadline=$((SECONDS + RUNTIME_STATE_WAIT_SECS))
   while ((SECONDS < deadline)); do
     if android_exit_dns_persisted; then
@@ -1076,6 +1160,10 @@ configure_android_exit_dns_ui() {
 }
 
 android_direct_source_persisted() {
+  if truthy "$RELEASE_BLACKBOX_GATE"; then
+    [[ "$(android_ui_query resource internet-source-picker text 2>/dev/null || true)" == "This device" ]]
+    return
+  fi
   "$ADB" -s "$serial" exec-out run-as "$PACKAGE_NAME" \
     cat files/app-core/config.toml 2>/dev/null \
     | python3 -c '
@@ -1935,6 +2023,13 @@ PY
 
 cleanup_android_vpn_after_pass() {
   truthy "$cleanup_after_vpn_cycle" || return 0
+  if truthy "$RELEASE_BLACKBOX_GATE"; then
+    if android_release_disconnect_ui; then
+      vpn_cleanup_armed=0
+      return 0
+    fi
+    return 1
+  fi
   start_main_activity --es "$DEBUG_ACTION_EXTRA" disconnect
   if wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive; then
     vpn_cleanup_armed=0
@@ -1949,8 +2044,34 @@ cleanup_android_vpn_after_pass() {
 cleanup_android_vpn_on_exit() {
   local status="$?"
   trap - EXIT
-  if [[ "$vpn_cleanup_armed" -eq 1 && -n "${ADB:-}" && -n "$serial" ]]; then
-    start_main_activity --es "$DEBUG_ACTION_EXTRA" disconnect >/dev/null 2>&1 || true
+  if ! android_underlay_restore_home; then
+    if [[ "$status" -eq 0 ]]; then
+      status=1
+    fi
+  fi
+  mobile_continuity_stop
+  if [[ -n "$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
+    && -n "${ADB:-}" \
+    && -n "$serial" ]]
+  then
+    "$ADB" -s "$serial" shell rm -f "$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
+      >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$ANDROID_CAPTURED_PROBE_BUILD_DIR" \
+    && -d "$ANDROID_CAPTURED_PROBE_BUILD_DIR" ]]
+  then
+    find "$ANDROID_CAPTURED_PROBE_BUILD_DIR" -type f -delete
+    rmdir "$ANDROID_CAPTURED_PROBE_BUILD_DIR" 2>/dev/null || true
+  fi
+  if [[ -n "${ADB:-}" && -n "$serial" ]] \
+    && { [[ "$vpn_cleanup_armed" -eq 1 ]] \
+      || { truthy "$RELEASE_BLACKBOX_GATE" && vpn_state_present; }; }
+  then
+    if truthy "$RELEASE_BLACKBOX_GATE"; then
+      android_release_disconnect_ui >/dev/null 2>&1 || true
+    else
+      start_main_activity --es "$DEBUG_ACTION_EXTRA" disconnect >/dev/null 2>&1 || true
+    fi
     if ! wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive; then
       "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME" >/dev/null 2>&1 || true
     fi
@@ -2068,6 +2189,14 @@ base64_no_wrap() {
 }
 
 wireguard_config() {
+  if truthy "$RELEASE_BLACKBOX_GATE"; then
+    if [[ -n "$RELEASE_WIREGUARD_CONFIG_FILE" ]]; then
+      cat "$RELEASE_WIREGUARD_CONFIG_FILE"
+      return
+    fi
+    printf '%s' "$RELEASE_WIREGUARD_CONFIG"
+    return
+  fi
   if [[ -n "$DEBUG_WIREGUARD_CONFIG_FILE" ]]; then
     cat "$DEBUG_WIREGUARD_CONFIG_FILE"
     return
@@ -2083,6 +2212,10 @@ android_app_pid() {
   "$ADB" -s "$serial" shell pidof "$PACKAGE_NAME" 2>/dev/null \
     | tr -d '\r' \
     | awk '{ print $1 }'
+}
+
+android_app_process_running() {
+  [[ -n "$(android_app_pid)" ]]
 }
 
 assert_single_android_app_process() {
@@ -2275,12 +2408,20 @@ dump_vpn_diagnostics() {
 
 ADB="$(resolve_adb)"
 
+if truthy "$RELEASE_BLACKBOX_GATE"; then
+  android_release_require_inputs
+fi
+
 if [[ "$build" -eq 1 ]]; then
-  "$ROOT/tools/run-android" build
+  if truthy "$RELEASE_BLACKBOX_GATE"; then
+    "$ROOT/tools/run-android" release
+  else
+    "$ROOT/tools/run-android" build
+  fi
 fi
 
 if [[ ! -f "$APK_PATH" ]]; then
-  echo "Debug APK not found at $APK_PATH; run just android-build first" >&2
+  echo "Android APK not found at $APK_PATH" >&2
   exit 1
 fi
 
@@ -2306,6 +2447,25 @@ fi
 
 if [[ "$clear_state" -eq 1 ]]; then
   "$ADB" -s "$serial" shell pm clear "$PACKAGE_NAME" >/dev/null
+fi
+
+if truthy "$RELEASE_BLACKBOX_GATE"; then
+  verify_android_release_install
+  start_main_activity
+  "$ADB" -s "$serial" shell pm path "$PACKAGE_NAME" >/dev/null
+  wait_until 10 android_app_process_running || {
+    echo "Android Release app process did not start within 10 seconds" >&2
+    exit 1
+  }
+  assert_single_android_app_process
+  if [[ "$vpn_cycle" -eq 1 ]]; then
+    run_android_release_blackbox_cycle
+  else
+    run_android_activity_lifecycle_gate
+  fi
+  assert_single_android_app_process
+  echo "Android Release black-box smoke passed on adb serial: $serial"
+  exit 0
 fi
 
 if [[ "$vpn_cycle" -eq 1 ]]; then
@@ -2359,6 +2519,10 @@ if [[ "$vpn_cycle" -eq 1 ]]; then
     exit 1
   fi
   if ! run_android_exit_network_probe wireguard-exit; then
+    dump_vpn_diagnostics
+    exit 1
+  fi
+  if ! run_android_underlay_network_change_gate; then
     dump_vpn_diagnostics
     exit 1
   fi

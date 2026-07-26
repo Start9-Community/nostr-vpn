@@ -7,6 +7,8 @@ set -euo pipefail
 : "${NVPN_MOBILE_WG_CLIENT_IP:=10.99.77.2}"
 : "${NVPN_MOBILE_WG_LISTEN_PORT:=51820}"
 : "${NVPN_MOBILE_WG_DNS_NAME:=wireguard-exit.nvpn-e2e.test}"
+: "${NVPN_MOBILE_WG_HTTP_PROBE_PORT:=8080}"
+: "${NVPN_MOBILE_WG_HTTP_TOKEN:=nvpn-mobile-wireguard-exit-e2e}"
 
 for key_file in "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE" "$NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE"; do
   if [[ ! -s "$key_file" ]]; then
@@ -61,6 +63,10 @@ dnsmasq \
   >/fixture/dnsmasq.log 2>&1 &
 
 socat UDP4-RECVFROM:9,bind="$server_ip",fork EXEC:/bin/cat >/fixture/udp-echo.log 2>&1 &
+python3 /usr/local/bin/mobile-wireguard-http-probe.py \
+  "$server_ip" "$NVPN_MOBILE_WG_HTTP_PROBE_PORT" \
+  /fixture/http-probe.pid "$NVPN_MOBILE_WG_HTTP_TOKEN" \
+  >/fixture/http-probe.log 2>&1 &
 
 cleanup() {
   kill "$(jobs -pr)" 2>/dev/null || true
@@ -71,7 +77,8 @@ trap cleanup EXIT INT TERM
 for _ in $(seq 1 50); do
   if wg show wg0 >/dev/null 2>&1 \
     && ss -lun | grep -Fq "$server_ip:53" \
-    && ss -lun | grep -Fq "$server_ip:9"; then
+    && ss -lun | grep -Fq "$server_ip:9" \
+    && ss -ltn | grep -Fq "$server_ip:$NVPN_MOBILE_WG_HTTP_PROBE_PORT"; then
     touch /fixture/ready
     wait -n
     exit $?

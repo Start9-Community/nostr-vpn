@@ -356,6 +356,10 @@ private fun MobileTopBar(
                     },
                 )
             },
+            modifier = Modifier.mobileUiSelector(
+                id = "vpn-toggle",
+                description = if (state.vpnEnabled) "Turn VPN off" else "Turn VPN on",
+            ),
         )
     }
 }

@@ -293,7 +293,6 @@ PY
     --source "Documents/nvpn-ui-gate-markers.log" \
     --destination "$markers" \
     --quiet >/dev/null
-
   for ignored in $(seq 1 40); do
     if ios_lifecycle_copy_result \
       "$device" "$bundle_id" "$result_name" "$history" 2>/dev/null

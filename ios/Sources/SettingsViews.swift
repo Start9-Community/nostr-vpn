@@ -730,11 +730,19 @@ struct WireGuardSettingsCard: View {
                     model.dispatch(NativeActions.updateSettings(["wireguardExitEnabled": value]), status: "Saving")
                 }
             ))
+            .accessibilityIdentifier("wireguard-enabled")
+            .accessibilityLabel(
+                model.state.wireguardExitEnabled
+                    ? "WireGuard upstream on"
+                    : "WireGuard upstream off"
+            )
+            .accessibilityValue(model.state.wireguardExitEnabled ? "On" : "Off")
             TextEditor(text: $config)
                 .font(.system(.body, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .frame(minHeight: 180)
+                .accessibilityIdentifier("wireguard-config")
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.secondary.opacity(0.25))
@@ -745,12 +753,14 @@ struct WireGuardSettingsCard: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(model.actionInFlight)
+                .accessibilityIdentifier("wireguard-import")
 
                 Button("Save") {
                     model.dispatch(NativeActions.updateSettings(["wireguardExitConfig": config]), status: "Saving")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.actionInFlight)
+                .accessibilityIdentifier("wireguard-save")
             }
         }
         .fileImporter(

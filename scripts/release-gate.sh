@@ -257,6 +257,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-physical-device-selection-harness.sh
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
+  ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-real-qr-join-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
@@ -1006,6 +1007,115 @@ run_mobile_wireguard_exit_gates() {
   MOBILE_IOS_APP_READY=1
 }
 
+run_mobile_underlay_change_gates() {
+  local mode="${NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E:-auto}"
+  local managed_ap_configured=0
+  if [[ -n "${NVPN_ANDROID_UNDERLAY_MANAGED_AP_SSH_HOST:-}" \
+    && -n "${NVPN_ANDROID_UNDERLAY_MANAGED_AP_INTERFACE:-}" ]]
+  then
+    managed_ap_configured=1
+  fi
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping physical mobile underlay-change e2e because NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=$mode"
+      return
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      ;;
+    auto|AUTO|Auto|"")
+      if [[ -z "${NVPN_MOBILE_WG_EXIT_HOST_IP:-}" ]] \
+        || { [[ "$managed_ap_configured" -eq 0 ]] \
+          && { [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SSID:-}" ]] \
+            || [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SECURITY:-}" ]] \
+            || [[ -z "${NVPN_ANDROID_UNDERLAY_ALTERNATE_SSID:-}" ]] \
+            || [[ -z "${NVPN_ANDROID_UNDERLAY_ALTERNATE_SECURITY:-}" ]]; }; }
+      then
+        echo "Skipping physical mobile underlay-change e2e because its env-only two-network fixture is not configured."
+        return
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+  local remote_native=0
+  if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    && "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" == "native" ]]
+  then
+    remote_native=1
+  fi
+  if [[ "$(uname -s)" != "Darwin" ]] \
+    || ! command -v wg >/dev/null 2>&1 \
+    || ! command -v adb >/dev/null 2>&1 \
+    || ! adb devices 2>/dev/null | awk '
+      NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { found = 1 }
+      END { exit !found }
+    ' \
+    || ! release_gate_has_physical_ios_device
+  then
+    echo "Physical mobile underlay-change e2e requires both unlocked phones, WireGuard tools, and adb." >&2
+    return 1
+  fi
+  if [[ "$remote_native" -eq 0 ]] && ! command -v docker >/dev/null 2>&1; then
+    echo "Physical mobile underlay-change local/Docker fixture requires Docker." >&2
+    return 1
+  fi
+
+  local image="${NVPN_MOBILE_WG_EXIT_IMAGE:-nostr-vpn-mobile-wireguard-exit-e2e}"
+  local image_ready=0
+  if [[ "$remote_native" -eq 0 ]]; then
+    docker build -q \
+      -f "$ROOT_DIR/Dockerfile.mobile-wireguard-exit-e2e" \
+      -t "$image" \
+      "$ROOT_DIR" >/dev/null
+    image_ready=1
+  fi
+  local port_base="$((55000 + $$ % 500 * 2))"
+
+  # Keep both physical-device switches serial and isolated from all other phone
+  # lanes. The iOS lane controls the Pixel hotspot only after the Android DUT
+  # lane has completed.
+  release_gate_run_with_timeout \
+    "Android physical Wi-Fi underlay change" \
+    "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
+    env \
+      NVPN_IDLE_CPU_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile \
+      NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=1 \
+      NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 \
+      NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
+      NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
+      NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-underlay-android-$$" \
+      NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
+      NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.79.1 \
+      NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.79.2 \
+      NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
+      NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=1 \
+      NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
+      ./scripts/mobile-wireguard-exit-e2e.sh android
+  MOBILE_ANDROID_APP_READY=1
+
+  release_gate_run_with_timeout \
+    "iOS physical Wi-Fi/Pixel-hotspot underlay change" \
+    "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
+    env \
+      NVPN_IDLE_CPU_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile \
+      NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=1 \
+      NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 \
+      NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
+      NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
+      NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-underlay-ios-$$" \
+      NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
+      NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.80.1 \
+      NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.80.2 \
+      NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=1 \
+      NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
+      ./scripts/mobile-wireguard-exit-e2e.sh ios
+  MOBILE_IOS_APP_READY=1
+}
+
 run_android_legacy_replacement_gate() {
   local mode="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_E2E:-auto}"
   case "$mode" in
@@ -1279,6 +1389,7 @@ main() {
   run_mobile_idle_cpu_gates
   run_android_legacy_replacement_gate
   run_mobile_wireguard_exit_gates
+  run_mobile_underlay_change_gates
 
   # The signed Release join lane covers both mobile role directions, both
   # manual role directions, and desktop/mobile manual join. It shares the

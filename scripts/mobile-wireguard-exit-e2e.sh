@@ -6,6 +6,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/release_common.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/mobile_env.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-android-managed-ap.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-underlay-change.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-ios-hotspot.sh"
 load_release_env "$ROOT"
 load_appstoreconnect_defaults
 load_mobile_env "$ROOT"
@@ -15,27 +25,31 @@ HOST_PORT="${NVPN_MOBILE_WG_EXIT_HOST_PORT:-51886}"
 TUNNEL_SERVER_IP="${NVPN_MOBILE_WG_EXIT_SERVER_IP:-10.99.77.1}"
 TUNNEL_CLIENT_IP="${NVPN_MOBILE_WG_EXIT_CLIENT_IP:-10.99.77.2}"
 DNS_NAME="${NVPN_MOBILE_WG_EXIT_DNS_NAME:-wireguard-exit.nvpn-e2e.test}"
+HTTP_PROBE_PORT="${NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT:-8080}"
+HTTP_PROBE_TOKEN="${NVPN_MOBILE_WG_EXIT_HTTP_TOKEN:-nvpn-mobile-$PPID-$$-$RANDOM}"
 DIRECT_HOST="${NVPN_MOBILE_WG_EXIT_DIRECT_HOST:-example.com}"
 DIRECT_URL="${NVPN_MOBILE_WG_EXIT_DIRECT_URL:-https://example.com/}"
+EXIT_SOURCE_PROBE_URL="${NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL:-https://api.ipify.org}"
+EXPECTED_EXIT_SOURCE_IP="${NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP:-}"
 PLATFORMS="${NVPN_MOBILE_WG_EXIT_PLATFORMS:-android,ios}"
-INSTALL_IOS="${NVPN_MOBILE_WG_EXIT_INSTALL_IOS:-1}"
 INSTALL_ANDROID="${NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID:-1}"
 LIFECYCLE_GATE="${NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE:-1}"
+UNDERLAY_CHANGE_GATE="${NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE:-0}"
+RELEASE_BLACKBOX_GATE="${NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX:-1}"
+REUSE_ANDROID_BUILD="${NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD:-0}"
 IOS_BUNDLE_ID="${NVPN_IOS_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
-IOS_UI_RESULT_DIR="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
-IOS_UI_DERIVED_DATA="${NVPN_IOS_DEVICE_DERIVED_DATA:-$ROOT/ios/.build/DeviceDerivedData}"
-IOS_UI_SIGNING_MODE="${NVPN_IOS_DEVICE_SIGNING_MODE:-adhoc}"
 FIXTURE_DIR=""
 ANDROID_DEVICE_SERIAL=""
 IOS_DEVICE_SELECTED=""
 IOS_CLEANUP_ARMED=0
+ADB="${ADB:-$(command -v adb || true)}"
 
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/mobile-wireguard-exit-e2e.sh [android|ios|all]
 
-Runs a real WireGuard exit and DNS resolver in Docker, then proves on selected
-physical mobile devices that:
+Runs a real WireGuard exit and DNS resolver in a local Docker fixture or an
+environment-selected remote Linux fixture, then proves on physical devices that:
   - native device DNS and Internet work before the VPN starts;
   - default traffic crosses the WireGuard exit;
   - Automatic/profile, Cloudflare DoH, Quad9 DoH, custom DoH with explicit
@@ -47,10 +61,17 @@ physical mobile devices that:
   - DNS and ordinary Internet work in that connected split-tunnel state; and
   - native device DNS and Internet still work after disconnect.
 
-The host and devices must share a LAN. Override the endpoint address with
-NVPN_MOBILE_WG_EXIT_HOST_IP when automatic en0 discovery is unsuitable.
+The default local fixture requires the host and devices to share a LAN.
+For cellular/hotspot coverage, set NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST,
+NVPN_MOBILE_WG_EXIT_HOST_IP, and optionally NVPN_MOBILE_WG_EXIT_REMOTE_MODE
+(native by default). No remote host, address, or credential is built in.
 Set NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID=0 to exercise an already-installed
 canonical company-signed debug build without replacing it.
+Set NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 for the physical two-underlay
+gate. Android then requires env-only home/alternate Wi-Fi credentials. iOS
+requires env-only home/Pixel-hotspot Wi-Fi credentials and uses the production
+Settings UIs on both phones to switch real SSIDs and control the hotspot.
+The fixture endpoint must be reachable through both physical underlays.
 NVPN_MOBILE_WG_EXIT_DNS_CASES accepts a comma-separated subset for a focused
 failure retry; the release gate leaves it unset and always runs all five.
 EOF
@@ -73,17 +94,18 @@ cleanup() {
   local cleanup_failed=0
   trap - EXIT INT TERM
   if [[ "$IOS_CLEANUP_ARMED" == "1" && -n "$IOS_DEVICE_SELECTED" ]]; then
-    if ! env \
-      NVPN_IOS_DEVICE="$IOS_DEVICE_SELECTED" \
-      NVPN_IOS_IDLE_CPU_GATE=0 \
-      NVPN_IOS_LIFECYCLE_GATE=0 \
-      "$ROOT/scripts/mobile-ios-smoke.sh" device --disconnect
-    then
+    if ! ios_release_network_disconnect_cleanup; then
       echo "iOS WireGuard exit gate cleanup could not confirm tunnel disconnect" >&2
       cleanup_failed=1
     fi
   fi
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if ! mobile_ios_hotspot_cleanup; then
+    cleanup_failed=1
+  fi
+  if ! mobile_android_managed_ap_cleanup; then
+    cleanup_failed=1
+  fi
+  mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"
   if [[ -n "$FIXTURE_DIR" ]]; then
     rm -rf "$FIXTURE_DIR"
   fi
@@ -94,7 +116,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for command in docker wg; do
+for command in wg; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "mobile WireGuard exit e2e requires $command" >&2
     exit 1
@@ -102,12 +124,12 @@ for command in docker wg; do
 done
 
 if has_platform android; then
-  if ! command -v adb >/dev/null 2>&1; then
+  if [[ -z "$ADB" ]]; then
     echo "mobile WireGuard exit e2e requires adb for the physical Android device" >&2
     exit 1
   fi
   ANDROID_DEVICE_SERIAL="$(select_physical_android_serial \
-    "$(command -v adb)" \
+    "$ADB" \
     "${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}")"
 fi
 
@@ -128,136 +150,6 @@ assert_single_android_app() {
   fi
 }
 
-run_ios_exit_dns_shipped_ui_case_gate() {
-  local label="$1" first="$2" mode="$3" provider="$4"
-  local custom_url="$5" bootstrap_ips="$6" through_servers="$7"
-  local device team configuration signing_env run_id log marker spec_base64
-  local destination_udid
-  local -a command=()
-  local -a signing_args=()
-  device="${IOS_DEVICE_SELECTED:-}"
-  if [[ -z "$device" ]]; then
-    device="$(select_physical_ios_device)" || {
-      echo "iOS shipped Exit DNS UI gate requires exactly one physical iPhone/iPad" >&2
-      return 1
-    }
-  fi
-  team="${NVPN_IOS_TEAM_ID:-}"
-  [[ -n "$team" ]] || {
-    echo "NVPN_IOS_TEAM_ID is required for the physical iOS DNS UI gate" >&2
-    return 1
-  }
-  destination_udid="$(resolve_physical_ios_udid "$device")"
-
-  case "$IOS_UI_SIGNING_MODE" in
-    adhoc)
-      signing_env="$ROOT/ios/.build/DeviceSigning/provisioning.env"
-      [[ -f "$signing_env" ]] || {
-        echo "iOS Ad Hoc signing metadata is missing after the physical install" >&2
-        return 1
-      }
-      # shellcheck disable=SC1090
-      source "$signing_env"
-      : "${NVPN_IOS_CODE_SIGN_IDENTITY:?iOS DNS UI signing identity is missing}"
-      : "${NVPN_IOS_PROVISIONING_PROFILE_UUID:?iOS DNS UI app profile is missing}"
-      : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?iOS DNS UI tunnel profile is missing}"
-      configuration="${NVPN_IOS_UI_TEST_CONFIGURATION:-DeviceDebug}"
-      signing_args=(
-        NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY"
-        NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID"
-        NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
-      )
-      ;;
-    development)
-      configuration="${NVPN_IOS_UI_TEST_CONFIGURATION:-Debug}"
-      signing_args=(CODE_SIGN_IDENTITY="${NVPN_IOS_DEVICE_CODE_SIGN_IDENTITY:-Apple Development}")
-      ;;
-    *)
-      echo "NVPN_IOS_DEVICE_SIGNING_MODE must be adhoc or development" >&2
-      return 1
-      ;;
-  esac
-
-  mkdir -p "$IOS_UI_RESULT_DIR"
-  spec_base64="$(python3 - \
-    "$label" "$mode" "$provider" "$custom_url" "$bootstrap_ips" \
-    "$through_servers" "$first" <<'PY'
-import base64
-import json
-import sys
-
-label, mode, provider, custom_url, bootstrap_ips, through_servers, first = sys.argv[1:]
-payload = json.dumps(
-    {
-        "caseName": label,
-        "mode": mode,
-        "provider": provider,
-        "customUrl": custom_url,
-        "bootstrapIps": bootstrap_ips,
-        "throughExitServers": through_servers,
-        "createNetwork": first == "1",
-    },
-    separators=(",", ":"),
-).encode()
-print(base64.b64encode(payload).decode())
-PY
-  )"
-  run_id="exit-dns-ui-$label-$$-$RANDOM-$(date +%s)"
-  log="$IOS_UI_RESULT_DIR/mobile-ios-exit-dns-ui-$label-$$.log"
-  marker="$IOS_UI_RESULT_DIR/mobile-ios-exit-dns-ui-markers-$label-$$.log"
-  command=(
-    xcodebuild
-    -quiet
-    -allowProvisioningUpdates
-    -project "$ROOT/ios/NostrVpnIos.xcodeproj"
-    -scheme NostrVpnIos
-    -configuration "$configuration"
-    -derivedDataPath "$IOS_UI_DERIVED_DATA"
-    -destination "platform=iOS,id=$destination_udid"
-    -destination-timeout 60
-    -collect-test-diagnostics never
-    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testConfigureExitDnsForPhysicalPacketProbe
-    DEVELOPMENT_TEAM="$team"
-    "${signing_args[@]}"
-  )
-  if [[
-    -n "${NVPN_ASC_AUTH_KEY_PATH:-}" &&
-    -n "${NVPN_ASC_AUTH_KEY_ID:-}" &&
-    -n "${NVPN_ASC_AUTH_KEY_ISSUER_ID:-}"
-  ]]; then
-    command+=(
-      -authenticationKeyPath "$NVPN_ASC_AUTH_KEY_PATH"
-      -authenticationKeyID "$NVPN_ASC_AUTH_KEY_ID"
-      -authenticationKeyIssuerID "$NVPN_ASC_AUTH_KEY_ISSUER_ID"
-    )
-  fi
-  command+=(
-    NVPN_XCUITEST_RUN_ID="$run_id"
-    NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64="$spec_base64"
-    test
-  )
-  if ! NSUnbufferedIO=YES "${command[@]}" >"$log" 2>&1; then
-    tail -n 120 "$log" >&2
-    echo "Enable Settings > Developer > Enable UI Automation on the unlocked iPhone, then retry." >&2
-    return 1
-  fi
-  rm -f "$marker"
-  xcrun devicectl device copy from \
-    --device "$device" \
-    --domain-type appDataContainer \
-    --domain-identifier "$IOS_BUNDLE_ID.UITests.xctrunner" \
-    --source "Documents/nvpn-ui-gate-markers.log" \
-    --destination "$marker" \
-    --quiet >/dev/null
-  grep -Fxq "NVPN_XCUITEST_RUN_ID=$run_id" "$marker" \
-    && grep -Fxq "NVPN_EXIT_DNS_UI_CONFIG_PERSISTED=$label" "$marker" \
-    || {
-      echo "iOS physical Exit DNS XCTest did not emit its exact $label receipt" >&2
-      return 1
-    }
-  echo "iOS shipped Exit DNS config persisted for $label: $log"
-}
-
 HOST_IP="${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
 if [[ -z "$HOST_IP" && "$(uname -s)" == "Darwin" ]]; then
   HOST_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
@@ -269,6 +161,7 @@ if [[ -z "$HOST_IP" ]]; then
   echo "Could not resolve a LAN host address; set NVPN_MOBILE_WG_EXIT_HOST_IP" >&2
   exit 1
 fi
+export NVPN_MOBILE_WG_EXIT_HOST_IP="$HOST_IP"
 
 FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-wg-exit.XXXXXX")"
 chmod 700 "$FIXTURE_DIR"
@@ -277,6 +170,32 @@ wg genkey >"$FIXTURE_DIR/server.key"
 wg pubkey <"$FIXTURE_DIR/server.key" >"$FIXTURE_DIR/server.pub"
 wg genkey >"$FIXTURE_DIR/client.key"
 wg pubkey <"$FIXTURE_DIR/client.key" >"$FIXTURE_DIR/client.pub"
+
+mobile_wg_fixture_initialize "$ROOT" "$FIXTURE_DIR"
+mobile_wg_fixture_assert_available "$CONTAINER" "$HOST_PORT"
+if [[ -z "$EXPECTED_EXIT_SOURCE_IP" ]]; then
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE" -eq 1 ]]; then
+    EXPECTED_EXIT_SOURCE_IP="$(
+      mobile_wg_remote_exec curl -4fsS --max-time 10 "$EXIT_SOURCE_PROBE_URL"
+    )"
+  else
+    EXPECTED_EXIT_SOURCE_IP="$(curl -4fsS --max-time 10 "$EXIT_SOURCE_PROBE_URL")"
+  fi
+fi
+if ! python3 - "$EXPECTED_EXIT_SOURCE_IP" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1].strip())
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if address.version == 4 else 1)
+PY
+then
+  echo "mobile WireGuard exit fixture has no valid expected IPv4 egress receipt" >&2
+  exit 1
+fi
 
 cat >"$FIXTURE_DIR/client.conf" <<EOF
 [Interface]
@@ -292,69 +211,60 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 2
 EOF
 
-if ! bool_is_true "${NVPN_MOBILE_WG_EXIT_IMAGE_READY:-0}"; then
-  docker build -q -f "$ROOT/Dockerfile.mobile-wireguard-exit-e2e" -t "$IMAGE" "$ROOT" >/dev/null
-fi
-docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-docker run -d \
-  --name "$CONTAINER" \
-  --cap-add NET_ADMIN \
-  --device /dev/net/tun \
-  --sysctl net.ipv4.ip_forward=1 \
-  -p "$HOST_PORT:51820/udp" \
-  -v "$FIXTURE_DIR:/fixture" \
-  -e "NVPN_MOBILE_WG_TUNNEL_CIDR=$TUNNEL_SERVER_IP/24" \
-  -e "NVPN_MOBILE_WG_CLIENT_IP=$TUNNEL_CLIENT_IP" \
-  -e "NVPN_MOBILE_WG_DNS_NAME=$DNS_NAME" \
-  "$IMAGE" >/dev/null
+mobile_wg_fixture_build \
+  "$ROOT" "$IMAGE" "${NVPN_MOBILE_WG_EXIT_IMAGE_READY:-0}"
+mobile_wg_fixture_run "$IMAGE" "$CONTAINER" "$MOBILE_WG_FIXTURE_VOLUME_DIR"
 
 for _ in $(seq 1 100); do
-  [[ -f "$FIXTURE_DIR/ready" ]] && break
-  if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != "true" ]]; then
-    docker logs "$CONTAINER" >&2 || true
+  mobile_wg_fixture_ready "$CONTAINER" >/dev/null 2>&1 && break
+  if ! mobile_wg_fixture_running "$CONTAINER"; then
+    mobile_wg_fixture_logs "$CONTAINER" >&2 || true
     echo "mobile WireGuard exit fixture stopped before becoming ready" >&2
     exit 1
   fi
   sleep 0.1
 done
-if [[ ! -f "$FIXTURE_DIR/ready" ]]; then
-  docker logs "$CONTAINER" >&2 || true
+if ! mobile_wg_fixture_ready "$CONTAINER" >/dev/null 2>&1; then
+  mobile_wg_fixture_logs "$CONTAINER" >&2 || true
   echo "mobile WireGuard exit fixture did not become ready" >&2
   exit 1
 fi
 
+if has_platform android && bool_is_true "$UNDERLAY_CHANGE_GATE" \
+  && [[ -n "${NVPN_ANDROID_UNDERLAY_MANAGED_AP_SSH_HOST:-}" ]]
+then
+  if [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SSID:-}" ]]; then
+    NVPN_ANDROID_UNDERLAY_HOME_SSID="$(
+      adb -s "$ANDROID_DEVICE_SERIAL" shell cmd wifi status 2>/dev/null \
+        | tr -d '\r' \
+        | sed -n 's/^Wifi is connected to "\(.*\)"$/\1/p' \
+        | head -n 1
+    )"
+    export NVPN_ANDROID_UNDERLAY_HOME_SSID
+  fi
+  [[ -n "$NVPN_ANDROID_UNDERLAY_HOME_SSID" ]] || {
+    echo "Android managed AP gate could not identify the current saved home Wi-Fi" >&2
+    exit 1
+  }
+  mobile_android_managed_ap_start
+fi
+
 wg_bytes() {
-  docker exec "$CONTAINER" wg show wg0 transfer \
-    | awk '{ rx += $2; tx += $3 } END { printf "%d\t%d\n", rx, tx }'
+  mobile_wg_fixture_wg_bytes "$CONTAINER"
 }
 
 forward_packets() {
-  docker exec "$CONTAINER" iptables -L nvpn-mobile-wg-forward -v -n -x \
-    | awk '$3 == "ACCEPT" && ($7 == "wg0" || $8 == "wg0") { packets += $1 } END { print packets + 0 }'
+  mobile_wg_fixture_forward_packets "$CONTAINER"
 }
 
 dns_query_count() {
   local name="$1"
-  if [[ ! -f "$FIXTURE_DIR/dns.log" ]]; then
-    echo 0
-    return
-  fi
-  grep -Fci "$name" "$FIXTURE_DIR/dns.log" || true
+  mobile_wg_fixture_dns_count "$CONTAINER" "$name"
 }
 
 doh_flow_count() {
   local provider="$1"
-  local chain
-  case "$provider" in
-    cloudflare) chain="nvpn-wg-doh-cf" ;;
-    quad9) chain="nvpn-wg-doh-q9" ;;
-    *)
-      echo "unknown DoH counter provider: $provider" >&2
-      return 2
-      ;;
-  esac
-  docker exec "$CONTAINER" iptables -L "$chain" -v -n -x \
-    | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
+  mobile_wg_fixture_doh_count "$CONTAINER" "$provider"
 }
 
 assert_platform_traffic() {
@@ -427,7 +337,7 @@ run_android_case() {
   local label="$1" first="$2" final="$3"
   local mode provider custom_url bootstrap_ips through_servers probe_host evidence
   local before_bytes before_forward before_evidence expected_ip
-  local wireguard_config_file idle_gate lifecycle_gate
+  local wireguard_config_file idle_gate lifecycle_gate underlay_gate switch_direct
   IFS='|' read -r \
     mode provider custom_url bootstrap_ips through_servers probe_host evidence \
     <<<"$(dns_case_fields "$label")"
@@ -454,27 +364,53 @@ run_android_case() {
     --probe-count 4
     --probe-require-reply
   )
+  if bool_is_true "$RELEASE_BLACKBOX_GATE"; then
+    android_args=(--release-network-gate "${android_args[@]}")
+  fi
+  wireguard_config_file="$FIXTURE_DIR/client.conf"
   if [[ "$first" == "1" ]]; then
     android_args=(--create-network "${android_args[@]}")
-    wireguard_config_file="$FIXTURE_DIR/client.conf"
     idle_gate="${NVPN_IDLE_CPU_GATE:-1}"
     lifecycle_gate="$LIFECYCLE_GATE"
-    case "$INSTALL_ANDROID" in
-      0|false|FALSE|False|no|NO|No|off|OFF|Off)
-        android_args=(--no-build --no-install "${android_args[@]}")
-        ;;
-    esac
+    underlay_gate="$UNDERLAY_CHANGE_GATE"
+    if ! bool_is_true "$RELEASE_BLACKBOX_GATE"; then
+      case "$INSTALL_ANDROID" in
+        0|false|FALSE|False|no|NO|No|off|OFF|Off)
+          android_args=(--no-build --no-install "${android_args[@]}")
+          ;;
+      esac
+    elif bool_is_true "$REUSE_ANDROID_BUILD"; then
+      android_args=(--no-build "${android_args[@]}")
+    fi
   else
     android_args=(--no-build --no-install "${android_args[@]}")
-    wireguard_config_file=""
     idle_gate=false
     lifecycle_gate=false
+    underlay_gate=false
+  fi
+  switch_direct="$final"
+  if bool_is_true "$underlay_gate"; then
+    # The active lifecycle runs after this transition in the Android driver.
+    # Native restoration is still proved after disconnect, while the ordinary
+    # all-DNS run separately covers connected WireGuard -> Direct.
+    switch_direct=0
   fi
   env \
     NVPN_ANDROID_SERIAL="$ANDROID_DEVICE_SERIAL" \
     NVPN_ANDROID_PACKAGE="${NVPN_ANDROID_PACKAGE:-fi.siriusbusiness.nvpn}" \
+    NVPN_ANDROID_RELEASE_BLACKBOX_GATE="$RELEASE_BLACKBOX_GATE" \
+    NVPN_ANDROID_WIREGUARD_CONFIG_FILE="$wireguard_config_file" \
     NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG_FILE="$wireguard_config_file" \
     NVPN_ANDROID_LIFECYCLE_GATE="$lifecycle_gate" \
+    NVPN_ANDROID_UNDERLAY_CHANGE_GATE="$underlay_gate" \
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER="$CONTAINER" \
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_CLIENT_IP="$TUNNEL_CLIENT_IP" \
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_SSH_HOST="${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_MODE="$MOBILE_WG_FIXTURE_REMOTE_MODE" \
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_INTERFACE="$MOBILE_WG_FIXTURE_REMOTE_INTERFACE" \
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_DOCKER_SUDO="${NVPN_MOBILE_WG_EXIT_REMOTE_DOCKER_SUDO:-0}" \
+    NVPN_ANDROID_UNDERLAY_UDP_ECHO_HOST="$TUNNEL_SERVER_IP" \
+    NVPN_ANDROID_UNDERLAY_UDP_ECHO_PORT=9 \
     NVPN_ANDROID_IDLE_CPU_GATE="$idle_gate" \
     NVPN_ANDROID_EXIT_DNS_MODE="$mode" \
     NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER="$provider" \
@@ -482,89 +418,166 @@ run_android_case() {
     NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS="$bootstrap_ips" \
     NVPN_ANDROID_EXIT_DNS_THROUGH_EXIT_SERVERS="$through_servers" \
     NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1 \
-    NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED="$final" \
+    NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED="$switch_direct" \
     NVPN_ANDROID_EXIT_PROBE_HOST="$probe_host" \
     NVPN_ANDROID_EXIT_PROBE_EXPECTED_IP="$expected_ip" \
     NVPN_ANDROID_EXIT_PROBE_URL="$DIRECT_URL" \
     NVPN_ANDROID_DIRECT_PROBE_HOST="$DIRECT_HOST" \
     NVPN_ANDROID_DIRECT_PROBE_URL="$DIRECT_URL" \
     NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT" \
+    NVPN_ANDROID_CAPTURED_PROBE_URL="http://$TUNNEL_SERVER_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN" \
+    NVPN_ANDROID_CAPTURED_PROBE_TOKEN="$HTTP_PROBE_TOKEN" \
+    NVPN_ANDROID_EXIT_SOURCE_PROBE_URL="$EXIT_SOURCE_PROBE_URL" \
+    NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP="$EXPECTED_EXIT_SOURCE_IP" \
     "$ROOT/scripts/mobile-android-smoke.sh" "${android_args[@]}"
   assert_platform_traffic Android "$label" "$before_bytes" "$before_forward"
   case "$evidence" in
     dns) assert_fixture_dns_traffic Android "$label" "$probe_host" "$before_evidence" ;;
-    doh-cloudflare|doh-quad9)
-      echo "Android $label resolver passed: production authenticated-DoH success counter increased"
-      ;;
+    doh-cloudflare) assert_doh_traffic Android "$label" cloudflare "$before_evidence" ;;
+    doh-quad9) assert_doh_traffic Android "$label" quad9 "$before_evidence" ;;
   esac
 }
 
 run_ios_case() {
   local label="$1" first="$2" final="$3"
   local mode provider custom_url bootstrap_ips through_servers probe_host evidence
-  local before_bytes before_forward before_evidence expected_ip
-  local wireguard_config_file idle_gate lifecycle_gate
+  local before_bytes before_forward before_evidence
+  local lifecycle_gate underlay_gate resolver_probe_url resolver_body
+  local underlay_home_ssid underlay_home_passphrase
+  local underlay_alternate_ssid underlay_alternate_passphrase
+  local run_id spec_base64
   IFS='|' read -r \
     mode provider custom_url bootstrap_ips through_servers probe_host evidence \
     <<<"$(dns_case_fields "$label")"
-  local ios_args=(
-    device
-    --vpn-cycle
-    --probe-target "$TUNNEL_SERVER_IP"
-    --probe-port 9
-    --probe-count 4
-    --probe-require-reply
-  )
   if [[ "$first" == "1" ]]; then
-    wireguard_config_file="$FIXTURE_DIR/client.conf"
-    idle_gate="${NVPN_IDLE_CPU_GATE:-1}"
     lifecycle_gate="$LIFECYCLE_GATE"
+    underlay_gate="$UNDERLAY_CHANGE_GATE"
   else
-    wireguard_config_file=""
-    idle_gate=false
     lifecycle_gate=false
+    underlay_gate=false
   fi
-  run_ios_exit_dns_shipped_ui_case_gate \
-    "$label" "$first" "$mode" "$provider" "$custom_url" "$bootstrap_ips" \
-    "$through_servers"
+  underlay_home_ssid="${NVPN_IOS_UNDERLAY_HOME_SSID:-}"
+  underlay_home_passphrase="${NVPN_IOS_UNDERLAY_HOME_PASSPHRASE:-}"
+  underlay_alternate_ssid="${NVPN_IOS_UNDERLAY_ALTERNATE_SSID:-}"
+  underlay_alternate_passphrase="${NVPN_IOS_UNDERLAY_ALTERNATE_PASSPHRASE:-}"
+  if bool_is_true "$underlay_gate"; then
+    [[ -n "$underlay_home_ssid" \
+      && -n "$underlay_alternate_ssid" \
+      && "$underlay_home_ssid" != "$underlay_alternate_ssid" ]] || {
+      echo "iOS physical underlay gate requires distinct private home/hotspot SSIDs" >&2
+      return 1
+    }
+  fi
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
   case "$evidence" in
     dns)
       before_evidence="$(dns_query_count "$probe_host")"
-      expected_ip="$TUNNEL_SERVER_IP"
+      resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
+      resolver_body="$HTTP_PROBE_TOKEN"
       ;;
     doh-cloudflare)
       before_evidence="$(doh_flow_count cloudflare)"
-      expected_ip=""
+      resolver_probe_url="$DIRECT_URL"
+      resolver_body=""
       ;;
     doh-quad9)
       before_evidence="$(doh_flow_count quad9)"
-      expected_ip=""
+      resolver_probe_url="$DIRECT_URL"
+      resolver_body=""
       ;;
   esac
-  env \
-    NVPN_IOS_DEVICE="$IOS_DEVICE_SELECTED" \
-    NVPN_IOS_DEBUG_WIREGUARD_CONFIG_FILE="$wireguard_config_file" \
-    NVPN_IOS_LIFECYCLE_GATE="$lifecycle_gate" \
-    NVPN_IOS_IDLE_CPU_GATE="$idle_gate" \
-    NVPN_IOS_EXIT_DNS_MODE="$mode" \
-    NVPN_IOS_EXIT_DNS_DOH_PROVIDER="$provider" \
-    NVPN_IOS_EXIT_DNS_CUSTOM_DOH_URL="$custom_url" \
-    NVPN_IOS_EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS="$bootstrap_ips" \
-    NVPN_IOS_EXIT_DNS_THROUGH_EXIT_SERVERS="$through_servers" \
-    NVPN_IOS_EXIT_DNS_USE_SHIPPED_UI=1 \
-    NVPN_IOS_EXPECT_DEBUG_DNS_INJECTED=0 \
-    NVPN_IOS_EXPECT_WIREGUARD_EXIT=1 \
-    NVPN_IOS_SWITCH_TO_DIRECT_WHILE_CONNECTED="$final" \
-    NVPN_IOS_EXIT_PROBE_HOST="$probe_host" \
-    NVPN_IOS_EXIT_PROBE_EXPECTED_IP="$expected_ip" \
-    NVPN_IOS_EXIT_PROBE_URL="$DIRECT_URL" \
-    NVPN_IOS_DIRECT_PROBE_HOST="$DIRECT_HOST" \
-    NVPN_IOS_DIRECT_PROBE_URL="$DIRECT_URL" \
-    NVPN_IOS_EXPECT_WIREGUARD_ENDPOINT="$HOST_IP:$HOST_PORT" \
-    NVPN_IOS_VERIFY_DIRECT_RESTORATION="$final" \
-    "$ROOT/scripts/mobile-ios-smoke.sh" "${ios_args[@]}"
+  run_id="ios-release-$label-$PPID-$$-$RANDOM"
+  spec_base64="$(
+    python3 - \
+      "$run_id" "$label" "$(<"$FIXTURE_DIR/client.conf")" "$mode" "$provider" \
+      "$custom_url" "$bootstrap_ips" "$through_servers" "$probe_host" \
+      "$resolver_probe_url" "$resolver_body" "$TUNNEL_SERVER_IP" \
+      "$DIRECT_URL" "$EXIT_SOURCE_PROBE_URL" "$EXPECTED_EXIT_SOURCE_IP" \
+      "$first" "$underlay_gate" "$lifecycle_gate" "$final" \
+      "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" \
+      "${NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS:-20}" \
+      "${NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS:-30}" \
+      "$underlay_home_ssid" "$underlay_home_passphrase" \
+      "$underlay_alternate_ssid" "$underlay_alternate_passphrase" <<'PY'
+import base64
+import json
+import sys
+
+(
+    run_id,
+    label,
+    wireguard,
+    mode,
+    provider,
+    custom_url,
+    bootstrap_ips,
+    through_servers,
+    resolver_host,
+    resolver_url,
+    resolver_body,
+    udp_host,
+    public_url,
+    source_url,
+    expected_source,
+    create_network,
+    underlay,
+    lifecycle,
+    direct,
+    cycles,
+    dwell,
+    association_timeout,
+    underlay_home_ssid,
+    underlay_home_passphrase,
+    underlay_alternate_ssid,
+    underlay_alternate_passphrase,
+) = sys.argv[1:]
+payload = {
+    "runId": run_id,
+    "caseName": label,
+    "networkName": "Physical Release Network",
+    "wireGuardConfig": wireguard,
+    "mode": mode,
+    "provider": provider,
+    "customUrl": custom_url,
+    "bootstrapIps": bootstrap_ips,
+    "throughExitServers": through_servers,
+    "resolverQueryHost": resolver_host,
+    "resolverProbeUrl": resolver_url,
+    "resolverExpectedBody": resolver_body or None,
+    "udpHost": udp_host,
+    "udpPort": 9,
+    "publicHttpsUrl": public_url,
+    "sourceIpUrl": source_url,
+    "expectedExitSourceIp": expected_source,
+    "createNetwork": create_network == "1",
+    "exerciseUnderlay": underlay.lower() in {"1", "true", "yes", "on"},
+    "exerciseLifecycle": lifecycle.lower() in {"1", "true", "yes", "on"},
+    "switchToDirect": direct == "1",
+    "lifecycleCycles": int(cycles),
+    "backgroundDwellSeconds": int(dwell),
+    "underlayAssociationTimeoutSeconds": int(association_timeout),
+    "underlayHomeSsid": underlay_home_ssid,
+    "underlayHomePassphrase": underlay_home_passphrase,
+    "underlayAlternateSsid": underlay_alternate_ssid,
+    "underlayAlternatePassphrase": underlay_alternate_passphrase,
+}
+print(
+    base64.b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode()
+)
+PY
+  )"
+  NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER="$CONTAINER"
+  NVPN_MOBILE_UNDERLAY_CONTINUITY_CLIENT_IP="$TUNNEL_CLIENT_IP"
+  NVPN_MOBILE_UNDERLAY_CONTINUITY_SSH_HOST="${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}"
+  NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_MODE="$MOBILE_WG_FIXTURE_REMOTE_MODE"
+  NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_INTERFACE="$MOBILE_WG_FIXTURE_REMOTE_INTERFACE"
+  NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_DOCKER_SUDO="${NVPN_MOBILE_WG_EXIT_REMOTE_DOCKER_SUDO:-0}"
+  run_ios_release_network_case \
+    "$label" "$run_id" "$spec_base64" \
+    "$lifecycle_gate" "$underlay_gate" "$final"
   assert_platform_traffic iOS "$label" "$before_bytes" "$before_forward"
   case "$evidence" in
     dns) assert_fixture_dns_traffic iOS "$label" "$probe_host" "$before_evidence" ;;
@@ -596,21 +609,31 @@ if has_platform android; then
   assert_single_android_app
 fi
 if has_platform ios; then
-  IOS_DEVICE_SELECTED="$(select_physical_ios_device)" || {
-    echo "iOS WireGuard exit gate requires exactly one physical iPhone/iPad" >&2
+  if ! bool_is_true "$RELEASE_BLACKBOX_GATE"; then
+    echo "iOS physical network claims require the company-signed Release black-box gate" >&2
+    exit 1
+  fi
+  if [[ -z "${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}" \
+    || -z "${NVPN_IOS_EXPECTED_DEVICE_NAME:-}" ]]
+  then
+    echo "iOS physical Release gate requires an explicit device selector and expected name" >&2
+    exit 1
+  fi
+  IOS_DEVICE_SELECTED="$(
+    select_physical_ios_device "${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
+  )" || {
+    echo "iOS WireGuard exit gate could not select the required physical phone" >&2
     exit 1
   }
   IOS_CLEANUP_ARMED=1
-  case "$INSTALL_IOS" in
-    0|false|FALSE|False|no|NO|No|off|OFF|Off) ;;
-    *)
-      env \
-        NVPN_IOS_DEVICE="$IOS_DEVICE_SELECTED" \
-        NVPN_IOS_IDLE_CPU_GATE=0 \
-        NVPN_IOS_LIFECYCLE_GATE=0 \
-        "$ROOT/scripts/mobile-ios-smoke.sh" device --install
-      ;;
-  esac
+  ios_release_network_prepare "$IOS_DEVICE_SELECTED"
+  if bool_is_true "$UNDERLAY_CHANGE_GATE"; then
+    [[ -n "$ADB" ]] || {
+      echo "iOS physical hotspot gate requires adb for the Pixel host" >&2
+      exit 1
+    }
+    mobile_ios_hotspot_prepare
+  fi
   for index in "${!DNS_CASES[@]}"; do
     final=0
     [[ "$index" -eq "$((${#DNS_CASES[@]} - 1))" ]] && final=1
@@ -618,6 +641,9 @@ if has_platform ios; then
     [[ "$index" -eq 0 ]] && first=1
     run_ios_case "${DNS_CASES[$index]}" "$first" "$final"
   done
+  ios_release_network_disconnect_cleanup
+  IOS_CLEANUP_ARMED=0
+  mobile_ios_hotspot_cleanup
 fi
 
 echo "Mobile WireGuard exit e2e passed for: $PLATFORMS"

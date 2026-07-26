@@ -314,6 +314,14 @@ test('final publication cannot bypass complete platform artifacts', () => {
     localRelease,
     /final release must run every platform step; --only and --skip are staging-only/,
   )
+  assert.match(
+    localRelease,
+    /NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E:\s*'1'/,
+  )
+  assert.match(
+    localRelease,
+    /real Android\/iOS physical underlay changes/,
+  )
 })
 
 test('final publication preflights tools and Zapstore identity before the release gate', () => {

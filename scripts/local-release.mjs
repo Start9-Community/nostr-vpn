@@ -962,6 +962,7 @@ function runVerify({ dryRun, builtLines }) {
   const env = {
     ...process.env,
     NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E: '1',
+    NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E: '1',
     NVPN_RELEASE_GATE_MOBILE_JOIN_E2E: '1',
     NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_E2E: '1',
     NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E: '1',
@@ -975,7 +976,7 @@ function runVerify({ dryRun, builtLines }) {
     NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E: '1',
   }
   run('./scripts/release-gate.sh', [], { env, dryRun })
-  builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, and desktop launch smokes.')
+  builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, real Android/iOS physical underlay changes, and desktop launch smokes.')
 }
 
 function buildStartosArtifacts({ tag, dryRun, builtLines }) {

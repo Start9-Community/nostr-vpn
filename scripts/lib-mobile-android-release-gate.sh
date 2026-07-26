@@ -1,0 +1,616 @@
+#!/usr/bin/env bash
+
+# Black-box gate for the exact non-debuggable Android Release APK. This library
+# intentionally contains only Release orchestration; UI/query/network
+# primitives remain shared with mobile-android-smoke.sh and the external probe
+# library.
+
+android_release_require_inputs() {
+  [[ "$PACKAGE_NAME" == "$CANONICAL_PACKAGE_NAME" ]] || {
+    echo "Android Release black-box gate requires canonical package $CANONICAL_PACKAGE_NAME" >&2
+    return 1
+  }
+  EXPECTED_ANDROID_APP_GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+  EXPECTED_ANDROID_APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
+    echo "Android Release black-box gate requires a clean app checkout" >&2
+    return 1
+  }
+  if [[ -n "${NVPN_BUILD_GIT_SHA:-}" \
+    && "$NVPN_BUILD_GIT_SHA" != "$EXPECTED_ANDROID_APP_GIT_HEAD" ]]
+  then
+    echo "Android Release build revision does not match the exact app checkout" >&2
+    return 1
+  fi
+  local name
+  for name in \
+    ANDROID_KEYSTORE_PATH \
+    ANDROID_KEYSTORE_PASSWORD \
+    ANDROID_KEY_ALIAS \
+    ANDROID_KEY_PASSWORD \
+    NVPN_FIPS_REPO_PATH
+  do
+    [[ -n "${!name:-}" ]] || {
+      echo "Android Release black-box gate requires $name" >&2
+      return 1
+    }
+  done
+  [[ -f "$ANDROID_KEYSTORE_PATH" ]] || {
+    echo "Android Release keystore does not exist" >&2
+    return 1
+  }
+  command -v keytool >/dev/null 2>&1 || {
+    echo "Android Release black-box gate requires keytool for signer verification" >&2
+    return 1
+  }
+  local signer_der configured_signer
+  signer_der="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-signer.XXXXXX.der")"
+  if ! env ANDROID_KEYSTORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD" \
+    keytool -exportcert \
+      -keystore "$ANDROID_KEYSTORE_PATH" \
+      -storepass:env ANDROID_KEYSTORE_PASSWORD \
+      -alias "$ANDROID_KEY_ALIAS" >"$signer_der" 2>/dev/null
+  then
+    rm -f "$signer_der"
+    echo "Android Release gate could not export the configured company signer" >&2
+    return 1
+  fi
+  EXPECTED_ANDROID_SIGNER_CERT_SHA256="$(
+    shasum -a 256 "$signer_der" | awk '{print tolower($1)}'
+  )"
+  rm -f "$signer_der"
+  configured_signer="${NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256:-}"
+  configured_signer="$(
+    printf '%s' "$configured_signer" | tr -d ':' | tr '[:upper:]' '[:lower:]'
+  )"
+  if [[ -n "$configured_signer" \
+    && "$configured_signer" != "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" ]]
+  then
+    echo "Configured Android signer digest does not match the company keystore" >&2
+    return 1
+  fi
+  [[ -d "$NVPN_FIPS_REPO_PATH/.git" || -f "$NVPN_FIPS_REPO_PATH/.git" ]] || {
+    echo "Android Release black-box gate requires an exact local FIPS checkout" >&2
+    return 1
+  }
+  local fips_head fips_tree fips_dirty fips_version
+  fips_head="$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse HEAD)"
+  fips_tree="$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse 'HEAD^{tree}')"
+  fips_dirty="$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain)"
+  [[ -z "$fips_dirty" ]] || {
+    echo "Android Release black-box gate refuses a dirty FIPS checkout" >&2
+    return 1
+  }
+  fips_version="$(
+    awk '
+      $0 == "[package]" { package = 1; next }
+      package && /^\[/ { exit }
+      package && /^version = "/ {
+        value = $0
+        sub(/^version = "/, "", value)
+        sub(/".*$/, "", value)
+        print value
+        exit
+      }
+    ' "$NVPN_FIPS_REPO_PATH/crates/fips-core/Cargo.toml"
+  )"
+  [[ "$fips_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+    echo "Android Release gate could not derive the exact FIPS package version" >&2
+    return 1
+  }
+  if [[ -n "$EXPECTED_FIPS_GIT_SHA" && "$fips_head" != "$EXPECTED_FIPS_GIT_SHA" ]]; then
+    echo "Android Release black-box FIPS mismatch: expected $EXPECTED_FIPS_GIT_SHA, got $fips_head" >&2
+    return 1
+  fi
+  EXPECTED_FIPS_GIT_SHA="$fips_head"
+  EXPECTED_FIPS_GIT_TREE="$fips_tree"
+  EXPECTED_FIPS_VERSION="$fips_version"
+  export NVPN_EXPECTED_FIPS_GIT_SHA="$fips_head"
+  export NVPN_EXPECTED_FIPS_VERSION="$fips_version"
+  [[ -n "$RELEASE_WIREGUARD_CONFIG_FILE" || -n "$RELEASE_WIREGUARD_CONFIG" ]] || {
+    echo "Android Release black-box gate requires WireGuard config for real UI entry" >&2
+    return 1
+  }
+  [[ -n "$EXIT_PROBE_HOST" && -n "$CAPTURED_PROBE_URL" \
+    && -n "$CAPTURED_PROBE_TOKEN" && -n "$EXIT_SOURCE_PROBE_URL" \
+    && -n "$EXPECTED_EXIT_SOURCE_IP" ]] || {
+    echo "Android Release black-box gate requires external DNS/HTTP/HTTPS/exit-source probes" >&2
+    return 1
+  }
+}
+
+android_release_apksigner() {
+  local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+  [[ -n "$sdk" ]] || sdk="$(sdk_from_local_properties)"
+  find "$sdk/build-tools" -type f -name apksigner 2>/dev/null \
+    | sort -V \
+    | tail -n 1
+}
+
+verify_android_release_install() {
+  local apksigner remote_path pulled apk_sha installed_sha cert_sha receipt
+  local native_lib native_strings target_root metadata_receipt rebuild_marker
+  local dep_file metadata_sha
+  apksigner="$(android_release_apksigner)"
+  [[ -x "$apksigner" ]] || {
+    echo "Android Release black-box gate could not find apksigner" >&2
+    return 1
+  }
+  "$apksigner" verify "$APK_PATH" >/dev/null || {
+    echo "Android Release APK signature verification failed" >&2
+    return 1
+  }
+  remote_path="$(
+    "$ADB" -s "$serial" shell pm path "$PACKAGE_NAME" 2>/dev/null \
+      | tr -d '\r' \
+      | sed -n 's/^package://p' \
+      | head -n 1
+  )"
+  [[ -n "$remote_path" ]] || {
+    echo "Android Release install has no canonical package path" >&2
+    return 1
+  }
+  pulled="$(mktemp "${TMPDIR:-/tmp}/nvpn-installed-release.XXXXXX.apk")"
+  if ! "$ADB" -s "$serial" pull "$remote_path" "$pulled" >/dev/null 2>&1; then
+    rm -f "$pulled"
+    echo "Android Release installed APK could not be copied for exact comparison" >&2
+    return 1
+  fi
+  apk_sha="$(shasum -a 256 "$APK_PATH" | awk '{print $1}')"
+  installed_sha="$(shasum -a 256 "$pulled" | awk '{print $1}')"
+  rm -f "$pulled"
+  [[ "$apk_sha" == "$installed_sha" ]] || {
+    echo "Android installed APK bytes differ from the tested Release artifact" >&2
+    return 1
+  }
+  if "$ADB" -s "$serial" shell run-as "$PACKAGE_NAME" true >/dev/null 2>&1; then
+    echo "Android Release black-box gate refuses a debuggable installed app" >&2
+    return 1
+  fi
+  cert_sha="$(
+    "$apksigner" verify --print-certs "$APK_PATH" 2>/dev/null \
+      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+      | head -n 1
+  )"
+  [[ "$cert_sha" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "Android Release APK has no signer certificate receipt" >&2
+    return 1
+  }
+  local normalized_cert_sha
+  normalized_cert_sha="$(
+    printf '%s' "$cert_sha" | tr '[:upper:]' '[:lower:]'
+  )"
+  if [[ "$normalized_cert_sha" != "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" ]]; then
+    echo "Android Release APK is not signed by the configured company keystore" >&2
+    return 1
+  fi
+  native_lib="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-release-native.XXXXXX.so")"
+  if ! unzip -p "$APK_PATH" \
+      lib/arm64-v8a/libnostr_vpn_app_core.so >"$native_lib"
+  then
+    rm -f "$native_lib"
+    echo "Android Release APK has no production native library" >&2
+    return 1
+  fi
+  native_strings="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-release-strings.XXXXXX")"
+  strings "$native_lib" >"$native_strings"
+  if ! grep -Fq "${NVPN_FIPS_REPO_PATH%/}/crates/fips-core/src/" "$native_strings" \
+    || ! grep -Fq 'fips_core::node' "$native_strings" \
+    || ! grep -Fq 'fips_core::transport' "$native_strings"
+  then
+    rm -f "$native_lib" "$native_strings"
+    echo "Android Release native library lacks exact-checkout FIPS production code" >&2
+    return 1
+  fi
+  rm -f "$native_strings"
+  target_root="${CARGO_TARGET_DIR:-$ROOT/target}"
+  [[ "$target_root" = /* ]] || target_root="$ROOT/$target_root"
+  dep_file="$(
+    python3 - \
+      "$target_root/aarch64-linux-android/release" \
+      "${NVPN_FIPS_REPO_PATH%/}/crates/fips-core" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+matches = []
+for path in root.rglob("fips_core-*.d"):
+    try:
+        if expected in path.read_text(encoding="utf-8", errors="ignore"):
+            matches.append(path)
+    except OSError:
+        pass
+if matches:
+    print(max(matches, key=lambda path: path.stat().st_mtime))
+PY
+  )"
+  if [[ -z "$dep_file" ]]; then
+    rm -f "$native_lib"
+    echo "Android Release dependencies do not prove the exact local FIPS checkout" >&2
+    return 1
+  fi
+  metadata_receipt="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-android/fips-linkage.json}"
+  rebuild_marker="${NVPN_ANDROID_FIPS_REBUILD_MARKER:-$ROOT/artifacts/mobile-android/fips-rebuild-aarch64-linux-android.marker}"
+  if ! python3 - \
+    "$metadata_receipt" "$rebuild_marker" "$dep_file" "$APK_PATH" \
+    "$NVPN_FIPS_REPO_PATH" "$EXPECTED_FIPS_GIT_SHA" \
+    "$EXPECTED_FIPS_GIT_TREE" "$EXPECTED_FIPS_VERSION" <<'PY'
+import json
+import hashlib
+import os
+import sys
+
+(
+    receipt_path,
+    marker_path,
+    dep_path,
+    artifact_path,
+    checkout,
+    head,
+    tree,
+    version,
+) = sys.argv[1:]
+receipt = json.load(open(receipt_path, encoding="utf-8"))
+expected_checkout_hash = hashlib.sha256(
+    os.path.realpath(checkout).encode()
+).hexdigest()
+if receipt.get("checkoutPathSha256") != expected_checkout_hash:
+    raise SystemExit("Android Cargo metadata receipt has the wrong FIPS path")
+if receipt.get("checkoutHead") != head or receipt.get("checkoutTree") != tree:
+    raise SystemExit("Android Cargo metadata receipt has the wrong FIPS tree")
+if receipt.get("fipsCoreVersion") != version:
+    raise SystemExit("Android Cargo metadata receipt has the wrong FIPS version")
+marker_mtime = os.path.getmtime(marker_path)
+if os.path.getmtime(dep_path) < marker_mtime:
+    raise SystemExit("Android fips-core dep-info predates its forced rebuild")
+if os.path.getmtime(artifact_path) < marker_mtime:
+    raise SystemExit("Android Release APK predates its forced FIPS rebuild")
+PY
+  then
+    rm -f "$native_lib"
+    echo "Android Release FIPS metadata/rebuild receipt failed" >&2
+    return 1
+  fi
+  if [[ "$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse HEAD)" \
+      != "$EXPECTED_FIPS_GIT_SHA" \
+    || "$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse 'HEAD^{tree}')" \
+      != "$EXPECTED_FIPS_GIT_TREE" \
+    || -n "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain --untracked-files=all)" \
+    || "$(git -C "$ROOT" rev-parse HEAD)" != "$EXPECTED_ANDROID_APP_GIT_HEAD" \
+    || "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" != "$EXPECTED_ANDROID_APP_GIT_TREE" \
+    || -n "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]]
+  then
+    rm -f "$native_lib"
+    echo "Android Release app/FIPS source changed during the artifact build" >&2
+    return 1
+  fi
+  metadata_sha="$(shasum -a 256 "$metadata_receipt" | awk '{print $1}')"
+  rm -f "$native_lib"
+  receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$RUNTIME_STATE_RESULT_DIR/mobile-android-release-artifact.json}"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR" "$(dirname "$receipt")"
+  python3 - "$receipt" "$apk_sha" "$NVPN_BUILD_GIT_SHA" \
+    "$EXPECTED_FIPS_GIT_SHA" "$PACKAGE_NAME" "$APK_PATH" \
+    "$EXPECTED_FIPS_GIT_TREE" \
+    "$EXPECTED_FIPS_VERSION" "$metadata_sha" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+(
+    path,
+    apk_sha,
+    app_sha,
+    fips_sha,
+    package,
+    apk_path,
+    fips_tree,
+    fips_version,
+    metadata_sha,
+) = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "artifactType": "Android Release APK",
+            "apkPathSha256": hashlib.sha256(
+                os.path.realpath(apk_path).encode()
+            ).hexdigest(),
+            "apkSha256": apk_sha,
+            "installedApkSha256": apk_sha,
+            "companySigningVerified": True,
+            "appGitSha": app_sha,
+            "fipsGitSha": fips_sha,
+            "fipsGitTree": fips_tree,
+            "fipsCoreVersion": fips_version,
+            "fipsCargoMetadataReceiptSha256": metadata_sha,
+            "fipsDependenciesForcedRebuilt": True,
+            "package": package,
+            "replacementInstall": True,
+            "debuggable": False,
+        },
+        handle,
+        indent=2,
+        sort_keys=True,
+    )
+    handle.write("\n")
+PY
+  echo "Android exact company-signed Release replacement passed: $receipt"
+}
+
+android_release_ensure_network_ui() {
+  start_main_activity
+  sleep 0.5
+  if android_ui_query description "Internet tab" center >/dev/null 2>&1; then
+    return 0
+  fi
+  truthy "$create_network" || {
+    echo "Android Release black-box gate needs an existing network or --create-network" >&2
+    return 1
+  }
+  wait_for_android_ui resource network-setup-create || {
+    echo "Android shipped Create Network control was unavailable" >&2
+    return 1
+  }
+  tap_android_ui resource network-setup-create || return 1
+  replace_android_ui_text network-create-name "$DEBUG_NETWORK_NAME" || return 1
+  android_ui_scroll_to resource network-create-submit || return 1
+  tap_android_ui resource network-create-submit || return 1
+  wait_for_android_ui description "Internet tab" || {
+    echo "Android network created through shipped UI did not reach the app shell" >&2
+    return 1
+  }
+  echo "Android Release network created through shipped UI"
+}
+
+configure_android_release_wireguard_ui() {
+  local config
+  config="$(wireguard_config)"
+  [[ -n "${config//[[:space:]]/}" ]] || {
+    echo "Android Release WireGuard config is empty" >&2
+    return 1
+  }
+  start_main_activity
+  wait_for_android_ui description "Internet tab" || return 1
+  tap_android_ui description "Internet tab" || return 1
+  sleep 0.5
+  android_ui_reset_scroll
+  android_ui_scroll_to resource internet-source-picker || return 1
+  tap_android_ui resource internet-source-picker || return 1
+  wait_for_android_ui description "Internet source WireGuard VPN" || return 1
+  tap_android_ui description "Internet source WireGuard VPN" || return 1
+  sleep 0.5
+  replace_android_ui_multiline_text wireguard-config "$config" || return 1
+  android_ui_scroll_to resource wireguard-save || return 1
+  tap_android_ui resource wireguard-save || return 1
+  sleep 1
+  if android_ui_scroll_to description "WireGuard upstream off"; then
+    tap_android_ui description "WireGuard upstream off" || return 1
+    sleep 1
+  fi
+  android_ui_scroll_to description "WireGuard upstream on" || {
+    echo "Android Release WireGuard toggle did not stay enabled" >&2
+    return 1
+  }
+  echo "Android Release WireGuard config saved and enabled through shipped UI"
+}
+
+android_release_vpn_toggle_checked() {
+  start_main_activity
+  local deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if android_ui_query description "Turn VPN off" center >/dev/null; then
+      printf 'true\n'
+      return
+    fi
+    if android_ui_query description "Turn VPN on" center >/dev/null; then
+      printf 'false\n'
+      return
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+android_release_connect_ui() {
+  local checked
+  checked="$(android_release_vpn_toggle_checked)" || return 1
+  [[ "$checked" == "false" ]] || {
+    echo "Android Release VPN toggle was already on before the UI connect" >&2
+    return 1
+  }
+  tap_android_ui description "Turn VPN on" || return 1
+  maybe_accept_vpn_dialog
+  wait_until "$VPN_START_WAIT_SECS" vpn_active || {
+    echo "Android Release VPN did not connect through the shipped toggle" >&2
+    return 1
+  }
+  [[ "$(android_release_vpn_toggle_checked)" == "true" ]] || {
+    echo "Android Release shipped VPN toggle did not report On" >&2
+    return 1
+  }
+  echo "Android Release VPN connected through shipped UI"
+}
+
+android_release_disconnect_ui() {
+  if ! vpn_state_present; then
+    return 0
+  fi
+  local checked
+  checked="$(android_release_vpn_toggle_checked 2>/dev/null || true)"
+  if [[ "$checked" == "true" ]]; then
+    tap_android_ui description "Turn VPN off" || return 1
+  fi
+  wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive || {
+    echo "Android Release VPN did not disconnect through the shipped toggle" >&2
+    return 1
+  }
+  echo "Android Release VPN disconnected through shipped UI"
+}
+
+run_android_release_direct_https_probe() {
+  local label="$1" result_path
+  android_build_captured_network_probe || return 1
+  result_path="$(android_network_probe_path "$label-direct-https")"
+  if ! "$ADB" -s "$serial" shell \
+      env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
+      app_process /system/bin MobileAndroidCapturedNetworkProbe \
+      "$DIRECT_PROBE_URL" >"$result_path" 2>&1
+  then
+    echo "Android Release $label external HTTPS probe failed: $result_path" >&2
+    return 1
+  fi
+  grep -Eq '^directHttpsStatus=[23][0-9][0-9]$' "$result_path" || {
+    echo "Android Release $label external HTTPS receipt is invalid: $result_path" >&2
+    return 1
+  }
+}
+
+run_android_release_direct_network_probe() {
+  local label="$1" connected="${2:-0}" result_path route_status dns_servers=""
+  result_path="$(android_network_probe_path "$label")"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR"
+  if truthy "$connected"; then
+    vpn_active || {
+      echo "Android Release $label expected the OS VPN to remain connected" >&2
+      return 1
+    }
+    route_status=0
+    android_vpn_has_default_route || route_status=$?
+    case "$route_status" in
+      0)
+        echo "Android Release $label VPN still owned a default route" >&2
+        return 1
+        ;;
+      1) ;;
+      *)
+        echo "Android Release $label could not inspect VPN routes" >&2
+        return 1
+        ;;
+    esac
+    dns_servers="$(android_vpn_dns_servers 2>/dev/null)" || {
+      echo "Android Release $label could not inspect the connected VPN DNS policy" >&2
+      return 1
+    }
+    [[ -z "$dns_servers" ]] || {
+      echo "Android Release $label VPN still owned DNS" >&2
+      return 1
+    }
+  else
+    vpn_inactive || {
+      echo "Android Release $label expected no VPN service/network" >&2
+      return 1
+    }
+  fi
+  {
+    printf 'label=%s\n' "$label"
+    "$ADB" -s "$serial" shell ping -c 3 -W 3 "$DIRECT_PROBE_HOST"
+  } >"$result_path" 2>&1 || {
+    echo "Android Release $label external DNS/Internet probe failed: $result_path" >&2
+    return 1
+  }
+  run_android_release_direct_https_probe "$label" || return 1
+  echo "Android Release $label external DNS/HTTPS passed: $result_path"
+}
+
+run_android_release_exit_network_probe() {
+  local label="${1:-wireguard-exit}" dns_servers result_path resolved_ip
+  vpn_active || {
+    echo "Android Release $label expected the production VPN service/network" >&2
+    return 1
+  }
+  dns_servers="$(android_vpn_dns_servers)" || {
+    echo "Android Release $label could not inspect VPN DNS" >&2
+    return 1
+  }
+  grep -Fxq "$EXPECTED_VPN_DNS" <<<"$dns_servers" || {
+    echo "Android Release $label VPN DNS was not the production local stub" >&2
+    return 1
+  }
+  android_vpn_has_default_route || {
+    echo "Android Release $label VPN did not own the default route" >&2
+    return 1
+  }
+  result_path="$(android_network_probe_path "$label")"
+  {
+    printf 'vpnDnsServers=%s\n' "$(tr '\n' ',' <<<"$dns_servers" | sed 's/,$//')"
+    "$ADB" -s "$serial" shell ping -c 3 -W 3 "$EXIT_PROBE_HOST"
+  } >"$result_path" 2>&1 || {
+    echo "Android Release $label external resolver probe failed: $result_path" >&2
+    return 1
+  }
+  resolved_ip="$(sed -n 's/^PING [^(]*(\([^)]*\)).*/\1/p' "$result_path" | head -n 1)"
+  if [[ -n "$EXIT_PROBE_EXPECTED_IP" && "$resolved_ip" != "$EXIT_PROBE_EXPECTED_IP" ]]; then
+    echo "Android Release $label resolver returned the wrong address: $result_path" >&2
+    return 1
+  fi
+  android_build_captured_network_probe || return 1
+  if ! "$ADB" -s "$serial" shell \
+      env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
+      app_process /system/bin MobileAndroidCapturedNetworkProbe \
+      "$CAPTURED_PROBE_URL" "$CAPTURED_PROBE_TOKEN" "$EXIT_PROBE_URL" \
+      "$EXIT_SOURCE_PROBE_URL" "$EXPECTED_EXIT_SOURCE_IP" \
+      >>"$result_path" 2>&1
+  then
+    echo "Android Release $label external HTTP/HTTPS/exit-source probe failed: $result_path" >&2
+    return 1
+  fi
+  grep -Fq "token=$CAPTURED_PROBE_TOKEN" "$result_path" \
+    && grep -Fq "exitSourceIp=$EXPECTED_EXIT_SOURCE_IP" "$result_path" \
+    && grep -Eq 'capturedHttpStatus=200 capturedHttpsStatus=[23][0-9][0-9]' \
+      "$result_path" \
+    || {
+      echo "Android Release $label external packet receipt is incomplete: $result_path" >&2
+      return 1
+    }
+  echo "Android Release $label real DNS/HTTP/HTTPS/exit-source path passed: $result_path"
+}
+
+run_android_release_active_vpn_lifecycle_gate() {
+  truthy "$ANDROID_LIFECYCLE_GATE" || return 0
+  [[ "$ANDROID_LIFECYCLE_CYCLES" =~ ^[1-9][0-9]*$ \
+    && "$ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS" =~ ^[0-9]+$ ]] \
+    && (( ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS >= 10 )) || {
+      echo "Android Release lifecycle requires >=10s background dwell" >&2
+      return 1
+    }
+  local expected_pid cycle
+  expected_pid="$(android_app_pid)"
+  for cycle in $(seq 1 "$ANDROID_LIFECYCLE_CYCLES"); do
+    "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME || return 1
+    sleep "$ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS"
+    android_underlay_assert_process_and_vpn "$expected_pid" || return 1
+    run_android_release_exit_network_probe \
+      "release-background-cycle-$cycle" || return 1
+    start_main_activity
+    wait_until 5 android_activity_resumed || return 1
+    android_underlay_assert_process_and_vpn "$expected_pid" || return 1
+    run_android_release_exit_network_probe \
+      "release-foreground-cycle-$cycle" || return 1
+  done
+  echo "Android Release active VPN survived $ANDROID_LIFECYCLE_CYCLES real background/foreground cycles"
+}
+
+run_android_release_blackbox_cycle() {
+  android_release_ensure_network_ui || return 1
+  android_release_disconnect_ui || return 1
+  run_android_release_direct_network_probe before-connect 0 || return 1
+  configure_android_release_wireguard_ui || return 1
+  if [[ -n "$EXIT_DNS_MODE" ]]; then
+    configure_android_exit_dns_ui || return 1
+  fi
+  android_release_connect_ui || return 1
+  vpn_cleanup_armed=1
+  run_android_release_exit_network_probe wireguard-exit || return 1
+  run_android_underlay_network_change_gate || return 1
+  run_android_release_active_vpn_lifecycle_gate || return 1
+  if truthy "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
+    select_android_direct_ui || return 1
+    wait_until "$VPN_START_WAIT_SECS" vpn_active || return 1
+    run_android_release_direct_network_probe direct-while-connected 1 || return 1
+  fi
+  android_release_disconnect_ui || return 1
+  vpn_cleanup_armed=0
+  run_android_release_direct_network_probe after-disconnect 0 || return 1
+  assert_single_android_app_process
+}

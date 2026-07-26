@@ -57,6 +57,18 @@ cmd="${1:-assembleDebug}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
+if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
+  nvpn_verify_local_fips_metadata \
+    "$ROOT" \
+    "${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-android/fips-linkage.json}"
+  case "$cmd" in
+    release|assembleRelease)
+      nvpn_force_rebuild_local_fips_target \
+        "$ROOT" aarch64-linux-android release \
+        "${NVPN_ANDROID_FIPS_REBUILD_MARKER:-$ROOT/artifacts/mobile-android/fips-rebuild-aarch64-linux-android.marker}"
+      ;;
+  esac
+fi
 
 case "$cmd" in
   build|assembleDebug|debug)

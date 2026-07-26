@@ -4,6 +4,12 @@
 import json
 import sys
 
+arguments = sys.argv[1:]
+if len(arguments) not in (19, 20):
+    raise SystemExit(
+        "validate-mobile-ios-vpn-probe.py requires 19 fields "
+        "and an optional exit-source expectation"
+    )
 (
     path,
     summary_path,
@@ -24,7 +30,8 @@ import sys
     expected_wireguard_endpoint,
     expected_resolve_host,
     expected_fetch_url,
-) = sys.argv[1:20]
+) = arguments[:19]
+expected_exit_source_ip = arguments[19] if len(arguments) == 20 else ""
 require_reply = require_reply_raw.strip().lower() in {"1", "true", "yes", "on"}
 verify_direct = verify_direct_raw.strip().lower() in {"1", "true", "yes", "on"}
 switch_direct = switch_direct_raw.strip().lower() in {"1", "true", "yes", "on"}
@@ -124,6 +131,17 @@ def display(value, suffix=""):
     if isinstance(value, float):
         return f"{value:.3f}".rstrip("0").rstrip(".") + suffix
     return f"{value}{suffix}"
+
+def validate_exit_source(record, prefix):
+    if not expected_exit_source_ip:
+        return
+    body = record.get("body")
+    observed = body.strip() if isinstance(body, str) else body
+    if observed != expected_exit_source_ip:
+        errors.append(
+            f"{prefix}exitSourceIp={observed!r} "
+            f"expected={expected_exit_source_ip!r}"
+        )
 
 def probe_summary():
     values = probe_values()
@@ -375,6 +393,7 @@ if expect_active_lifecycle:
                 status_code = cycle_result.get("statusCode")
                 if not isinstance(status_code, int) or not 200 <= status_code < 400:
                     errors.append(f"{prefix}.statusCode={status_code!r}")
+                validate_exit_source(cycle_result, f"{prefix}.")
             elif cycle_result.get("fetchError"):
                 errors.append(
                     f"{prefix}.unexpectedFetchError={cycle_result.get('fetchError')!r}"
@@ -457,6 +476,7 @@ if expected_fetch_url:
     status = result.get("statusCode")
     if not isinstance(status, int) or not 200 <= status < 400:
         errors.append(f"statusCode={status!r}")
+    validate_exit_source(result, "")
 if verify_direct:
     for phase in ("directBefore", "directAfter"):
         if result.get(f"{phase}ResolveError"):

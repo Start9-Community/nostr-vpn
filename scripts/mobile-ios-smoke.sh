@@ -6,7 +6,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/release_common.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/mobile_env.sh"
-# shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
 load_release_env "$ROOT"
 load_appstoreconnect_defaults
@@ -46,6 +45,7 @@ DEBUG_WIREGUARD_CONFIG_FILE="${NVPN_IOS_DEBUG_WIREGUARD_CONFIG_FILE:-}"
 EXIT_PROBE_HOST="${NVPN_IOS_EXIT_PROBE_HOST:-}"
 EXIT_PROBE_EXPECTED_IP="${NVPN_IOS_EXIT_PROBE_EXPECTED_IP:-}"
 EXIT_PROBE_URL="${NVPN_IOS_EXIT_PROBE_URL:-}"
+EXPECTED_EXIT_SOURCE_IP="${NVPN_IOS_EXPECTED_EXIT_SOURCE_IP:-}"
 DIRECT_PROBE_HOST="${NVPN_IOS_DIRECT_PROBE_HOST:-example.com}"
 DIRECT_PROBE_URL="${NVPN_IOS_DIRECT_PROBE_URL:-https://example.com/}"
 EXIT_DNS_MODE="${NVPN_IOS_EXIT_DNS_MODE:-}"
@@ -675,7 +675,8 @@ validate_vpn_probe_result() {
     "$EXIT_DNS_THROUGH_EXIT_SERVERS" "$SWITCH_TO_DIRECT_WHILE_CONNECTED" \
     "$EXPECT_WIREGUARD_EXIT" "$EXPECT_DEBUG_DNS_INJECTED" \
     "$IOS_LIFECYCLE_GATE" "$IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES" \
-    "$EXPECTED_WIREGUARD_ENDPOINT" "$EXIT_PROBE_HOST" "$EXIT_PROBE_URL"
+    "$EXPECTED_WIREGUARD_ENDPOINT" "$EXIT_PROBE_HOST" "$EXIT_PROBE_URL" \
+    "$EXPECTED_EXIT_SOURCE_IP"
 }
 
 run_ios_device_idle_cpu_gate() {

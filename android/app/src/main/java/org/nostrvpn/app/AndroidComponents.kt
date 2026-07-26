@@ -761,23 +761,42 @@ internal fun WireGuardSettingsCard(
                 onCheckedChange = { enabled ->
                     dispatch(NativeActions.updateSettings("wireguardExitEnabled" to enabled))
                 },
+                modifier = Modifier.mobileUiSelector(
+                    id = "wireguard-enabled",
+                    description = if (state.wireguardExitEnabled) {
+                        "WireGuard upstream on"
+                    } else {
+                        "WireGuard upstream off"
+                    },
+                ),
             )
         }
         OutlinedTextField(
             config,
             { config = it },
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                .mobileUiSelector(
+                    id = "wireguard-config",
+                    description = "WireGuard upstream config",
+                ),
             minLines = 8,
             label = { Text("Config") },
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                dispatch(
-                    NativeActions.updateSettings(
-                        "wireguardExitConfig" to config,
-                    ),
-                )
-            }) {
+            Button(
+                onClick = {
+                    dispatch(
+                        NativeActions.updateSettings(
+                            "wireguardExitConfig" to config,
+                        ),
+                    )
+                },
+                modifier = Modifier.mobileUiSelector(
+                    id = "wireguard-save",
+                    description = "Save WireGuard upstream config",
+                ),
+            ) {
                 Text("Save")
             }
             OutlinedButton(onClick = importConfigFile) {

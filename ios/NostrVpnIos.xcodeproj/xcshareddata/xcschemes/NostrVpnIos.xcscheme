@@ -169,6 +169,16 @@
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
+            key = "NVPN_XCUITEST_RELEASE_NETWORK_GATE"
+            value = "$(NVPN_XCUITEST_RELEASE_NETWORK_GATE)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "NVPN_XCUITEST_RELEASE_NETWORK_SPEC_BASE64"
+            value = "$(NVPN_XCUITEST_RELEASE_NETWORK_SPEC_BASE64)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
             key = "NVPN_XCUITEST_RUN_ID"
             value = "$(NVPN_XCUITEST_RUN_ID)"
             isEnabled = "YES">

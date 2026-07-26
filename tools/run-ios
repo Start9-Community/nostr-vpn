@@ -60,6 +60,7 @@ build_rust_target() {
   # both the iOS app and Packet Tunnel framework so it cannot run dormantly.
   local cargo_args=(
     build
+    --quiet
     -p nostr-vpn-app-core
     --no-default-features
     --target "$target"
@@ -69,6 +70,14 @@ build_rust_target() {
   fi
 
   nvpn_prepare_local_fips_workspace "$ROOT"
+  nvpn_verify_local_fips_metadata \
+    "$ROOT" \
+    "${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-ios/fips-linkage.json}"
+  if [[ "$PROFILE" == "release" ]]; then
+    nvpn_force_rebuild_local_fips_target \
+      "$ROOT" "$target" release \
+      "${NVPN_IOS_FIPS_REBUILD_MARKER_DIR:-$ROOT/artifacts/mobile-ios}/fips-rebuild-$target.marker"
+  fi
   local cargo_cmd=(cargo)
   cargo_cmd+=("${cargo_args[@]}")
 

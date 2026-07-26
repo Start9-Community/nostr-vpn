@@ -1,0 +1,195 @@
+import Foundation
+import XCTest
+
+extension NostrVpnReleaseNetworkUITests {
+    func openInternetTab() {
+        let tab = app.tabBars.buttons["Internet"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 8))
+        tab.tap()
+    }
+
+    func selectMenu(picker: String, option: String) {
+        scrollToElement(picker).tap()
+        let choice = element(option)
+        XCTAssertTrue(choice.waitForExistence(timeout: 3), "\(option) was unavailable")
+        choice.tap()
+        waitForActionToSettle()
+    }
+
+    func assertPicker(_ identifier: String, contains expected: String) {
+        let picker = scrollToElement(identifier)
+        let summary = "\(picker.label) \(picker.value as? String ?? "")"
+        XCTAssertTrue(
+            summary.localizedCaseInsensitiveContains(expected),
+            "\(identifier) was \(summary), expected \(expected)"
+        )
+    }
+
+    func vpnToggle() throws -> XCUIElement {
+        let toggle = element("vpn-toggle")
+        guard toggle.waitForExistence(timeout: 8), toggle.isEnabled else {
+            throw gateError("Shipped VPN toggle was unavailable")
+        }
+        return toggle
+    }
+
+    func waitForVPNState(on: Bool, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            acknowledgeVPNPrompts(timeout: 0)
+            let toggle = element("vpn-toggle")
+            if toggle.exists, vpnIsOn(toggle) == on {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
+    }
+
+    func vpnIsOn(_ element: XCUIElement) -> Bool {
+        let value = "\(element.value as? String ?? "") \(element.label)".lowercased()
+        if value.contains("turn vpn off") {
+            return true
+        }
+        if value.contains("turn vpn on") {
+            return false
+        }
+        let tokens = value.split(separator: " ")
+        return tokens.contains("on") || tokens.contains("1")
+    }
+
+    func wireGuardIsOn(_ element: XCUIElement) -> Bool {
+        let value = "\(element.value as? String ?? "") \(element.label)".lowercased()
+        return value.contains("wireguard upstream on")
+            || value.split(separator: " ").contains("on")
+            || value.split(separator: " ").contains("1")
+    }
+
+    func acknowledgeVPNPrompts(timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        repeat {
+            let disclosure = app.buttons["Continue"]
+            if disclosure.exists, disclosure.isHittable {
+                disclosure.tap()
+            }
+            let allow = springboard.alerts.buttons["Allow"]
+            if allow.exists, allow.isHittable {
+                allow.tap()
+            }
+            if timeout == 0 {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+    }
+
+    @discardableResult
+    func waitForSourceIP(
+        _ rawURL: String,
+        expected: String? = nil,
+        rejecting: String? = nil,
+        timeout: TimeInterval
+    ) throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastError: Error?
+        repeat {
+            do {
+                let observed = try NostrVpnReleaseNetworkProbe.sourceIP(rawURL)
+                if expected.map({ observed == $0 }) ?? true,
+                   rejecting.map({ observed != $0 }) ?? true
+                {
+                    return observed
+                }
+                lastError = gateError("Observed unexpected source IP \(observed)")
+            } catch {
+                lastError = error
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        throw lastError ?? gateError("Source-IP probe timed out")
+    }
+
+    func relaunch() {
+        app.terminate()
+        app.launchArguments = []
+        app.launchEnvironment = [:]
+        app.launch()
+        XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 5))
+    }
+
+    func waitForApplicationState(
+        _ expected: XCUIApplication.State,
+        timeout: TimeInterval
+    ) -> Bool {
+        waitForApplicationState(app, expected, timeout: timeout)
+    }
+
+    func waitForApplicationState(
+        _ application: XCUIApplication,
+        _ expected: XCUIApplication.State,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if application.state == expected {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while Date() < deadline
+        return false
+    }
+
+    func waitForActionToSettle() {
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+
+    func element(_ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)[identifier]
+    }
+
+    func scrollToElement(_ identifier: String) -> XCUIElement {
+        let target = element(identifier)
+        for _ in 0..<10 {
+            if target.isHittable {
+                break
+            }
+            if target.exists, target.frame.midY < app.frame.midY {
+                app.swipeDown()
+            } else {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(target.waitForExistence(timeout: 3), "\(identifier) was unavailable")
+        return target
+    }
+
+    func replaceText(_ field: XCUIElement, with value: String) {
+        field.tap()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeKey(.delete, modifierFlags: [])
+        field.typeText(value)
+        XCTAssertTrue(
+            enteredText(field) == value,
+            "Shipped text control did not accept the exact supplied value"
+        )
+    }
+
+    func enteredText(_ field: XCUIElement) -> String {
+        let value = field.value as? String ?? ""
+        return value == field.placeholderValue ? "" : value
+    }
+
+    func dismissKeyboard() {
+        guard app.keyboards.firstMatch.exists else {
+            return
+        }
+        let done = app.keyboards.buttons["Done"]
+        if done.exists, done.isHittable {
+            done.tap()
+            return
+        }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap()
+    }
+}
