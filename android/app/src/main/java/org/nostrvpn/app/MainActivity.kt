@@ -341,7 +341,6 @@ class MainActivity : ComponentActivity() {
                 if (automation.action != null) {
                     AndroidDebugAutomation.run(
                         request = automation,
-                        state = state,
                         core = core,
                         dataDir = dataDir,
                         dispatch = dispatch,

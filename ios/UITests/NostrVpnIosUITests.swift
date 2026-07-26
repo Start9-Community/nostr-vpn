@@ -49,18 +49,6 @@ final class NostrVpnIosUITests: XCTestCase {
             ).firstMatch.waitForExistence(timeout: 5)
         )
 
-        if ProcessInfo.processInfo.environment["NVPN_XCUITEST_PHYSICAL_JOIN_GATE"] == "1" {
-            emit("NVPN_QR_DISPLAY_READY=1")
-            let joined = XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "exists == false"),
-                object: qr
-            )
-            XCTAssertEqual(
-                XCTWaiter.wait(for: [joined], timeout: PhysicalGateTimeouts.delivery),
-                .completed,
-                "The iPhone stayed on its QR after Android approved the scanned request."
-            )
-        }
     }
 
     func testNearbyDiscoveryUsesTheShippedUiAndSurvivesBackgrounding() {

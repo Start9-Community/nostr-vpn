@@ -13,6 +13,37 @@ for file in "${FILES[@]}"; do
   bash -n "$file"
 done
 
+for obsolete in \
+  "$ROOT/scripts/mobile-ios-android-join-e2e.sh" \
+  "$ROOT/scripts/test-mobile-real-qr-join-harness.sh" \
+  "$ROOT/ios/UITests/NostrVpnPhysicalQrJoinUITests.swift" \
+  "$ROOT/ios/Sources/AppModelDebugJoinAutomation.swift"
+do
+  [[ ! -e "$obsolete" ]] || {
+    echo "Superseded private/debug join path remains: $obsolete" >&2
+    exit 1
+  }
+done
+if rg -q -- \
+  '--nvpn-debug-(start-join-advertising|import-join-request|export-join-request|manual-join|select-network|wait-for-joined-network|add-participant|remove-participant)' \
+  "$ROOT/ios/Sources"
+then
+  echo "iOS source retains orphaned private join automation tokens" >&2
+  exit 1
+fi
+if rg -q \
+  'ACTION_(IMPORT_JOIN_REQUEST|EXPORT_JOIN_REQUEST|REMOVE_ACTIVE_NETWORK|MANUAL_JOIN|ADD_PARTICIPANT|REMOVE_PARTICIPANT)|DEBUG_(JOIN_REQUEST|ADMIN_DEVICE_ID|MESH_NETWORK_ID|PARTICIPANT_DEVICE_ID)' \
+  "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDebugAutomation.kt"
+then
+  echo "Android source retains orphaned private join automation actions" >&2
+  exit 1
+fi
+grep -Fq 'ACTION_ADD_NETWORK' \
+  "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDebugAutomation.kt" \
+  || { echo "Android debug smoke lost its still-used add-network action" >&2; exit 1; }
+grep -Fq 'DEBUG_ACTION_EXTRA" add_network' "$ROOT/scripts/mobile-android-smoke.sh" \
+  || { echo "Android debug add-network action has no smoke consumer" >&2; exit 1; }
+
 python3 - \
   "$ROOT/scripts/mobile-release-join-e2e.sh" \
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" \
@@ -191,6 +222,14 @@ for variable in (
 ):
     if f'{variable}: "$({variable})"' not in ios_project:
         raise SystemExit(f"XCTest runner setting is not bridged: {variable}")
+for obsolete in (
+    "NVPN_XCUITEST_PHYSICAL_JOIN_GATE",
+    "NVPN_XCUITEST_MANUAL_ADMIN_DEVICE_ID",
+    "NVPN_XCUITEST_MANUAL_NETWORK_ID",
+    "NVPN_XCUITEST_MANUAL_JOINER_DEVICE_ID",
+):
+    if obsolete in ios_project:
+        raise SystemExit(f"XCTest runner retains obsolete debug join setting: {obsolete}")
 
 for required in (
     "release-create-admin",

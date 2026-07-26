@@ -258,7 +258,6 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
-  ./scripts/test-mobile-real-qr-join-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
   cargo fmt --check

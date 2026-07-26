@@ -36,19 +36,7 @@ extension AppModel {
             "--nvpn-debug-exit-dns-custom-doh-bootstrap-ips",
             "--nvpn-debug-exit-dns-through-exit-servers",
             "--nvpn-debug-connect-result",
-            "--nvpn-debug-start-join-advertising-result",
             "--nvpn-debug-runtime-result",
-            "--nvpn-debug-import-join-request-base64",
-            "--nvpn-debug-export-join-request",
-            "--nvpn-debug-manual-join-admin-base64",
-            "--nvpn-debug-manual-join-network-base64",
-            "--nvpn-debug-add-participant-base64",
-            "--nvpn-debug-remove-participant-base64",
-            "--nvpn-debug-select-network-base64",
-            "--nvpn-debug-select-network-result",
-            "--nvpn-debug-wait-for-joined-network-base64",
-            "--nvpn-debug-wait-for-joined-network-result",
-            "--nvpn-debug-wait-for-joined-network-timeout-seconds",
         ]
         var output: [String] = []
         var redactNext = false

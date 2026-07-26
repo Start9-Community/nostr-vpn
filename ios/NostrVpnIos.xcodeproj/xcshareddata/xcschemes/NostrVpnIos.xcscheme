@@ -109,18 +109,8 @@
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
-            key = "NVPN_XCUITEST_CAMERA_WAIT_SECS"
-            value = "$(NVPN_XCUITEST_CAMERA_WAIT_SECS)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
             key = "NVPN_XCUITEST_CONNECTED_DIRECT_GATE"
             value = "$(NVPN_XCUITEST_CONNECTED_DIRECT_GATE)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "NVPN_XCUITEST_DELIVERY_WAIT_SECS"
-            value = "$(NVPN_XCUITEST_DELIVERY_WAIT_SECS)"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
@@ -146,26 +136,6 @@
          <EnvironmentVariable
             key = "NVPN_XCUITEST_LIFECYCLE_RESULT_NAME"
             value = "$(NVPN_XCUITEST_LIFECYCLE_RESULT_NAME)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "NVPN_XCUITEST_MANUAL_ADMIN_DEVICE_ID"
-            value = "$(NVPN_XCUITEST_MANUAL_ADMIN_DEVICE_ID)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "NVPN_XCUITEST_MANUAL_JOINER_DEVICE_ID"
-            value = "$(NVPN_XCUITEST_MANUAL_JOINER_DEVICE_ID)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "NVPN_XCUITEST_MANUAL_NETWORK_ID"
-            value = "$(NVPN_XCUITEST_MANUAL_NETWORK_ID)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "NVPN_XCUITEST_PHYSICAL_JOIN_GATE"
-            value = "$(NVPN_XCUITEST_PHYSICAL_JOIN_GATE)"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable

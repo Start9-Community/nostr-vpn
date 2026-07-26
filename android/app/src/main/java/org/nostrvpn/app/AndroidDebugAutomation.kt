@@ -8,9 +8,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import org.nostrvpn.app.core.AppCoreClient
-import org.nostrvpn.app.core.AppState
 import org.nostrvpn.app.core.NativeActions
-import org.nostrvpn.app.core.activeNetwork
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.InetAddress
@@ -23,10 +21,6 @@ internal data class AndroidDebugRequest(
     val wireGuardConfig: String? = null,
     val exitDnsPatch: String? = null,
     val networkProbe: String? = null,
-    val joinRequest: String? = null,
-    val adminDeviceId: String? = null,
-    val meshNetworkId: String? = null,
-    val participantDeviceId: String? = null,
 ) {
     companion object {
         private const val PACKAGE_PREFIX = "fi.siriusbusiness.nvpn"
@@ -40,15 +34,6 @@ internal data class AndroidDebugRequest(
             "$PACKAGE_PREFIX.DEBUG_EXIT_DNS_PATCH_BASE64"
         private const val EXTRA_NETWORK_PROBE_BASE64 =
             "$PACKAGE_PREFIX.DEBUG_NETWORK_PROBE_BASE64"
-        private const val EXTRA_JOIN_REQUEST_BASE64 =
-            "$PACKAGE_PREFIX.DEBUG_JOIN_REQUEST_BASE64"
-        private const val EXTRA_ADMIN_DEVICE_ID_BASE64 =
-            "$PACKAGE_PREFIX.DEBUG_ADMIN_DEVICE_ID_BASE64"
-        private const val EXTRA_MESH_NETWORK_ID_BASE64 =
-            "$PACKAGE_PREFIX.DEBUG_MESH_NETWORK_ID_BASE64"
-        private const val EXTRA_PARTICIPANT_DEVICE_ID_BASE64 =
-            "$PACKAGE_PREFIX.DEBUG_PARTICIPANT_DEVICE_ID_BASE64"
-
         fun from(intent: Intent?): AndroidDebugRequest =
             AndroidDebugRequest(
                 action = intent?.getStringExtra(EXTRA_ACTION),
@@ -57,11 +42,6 @@ internal data class AndroidDebugRequest(
                 wireGuardConfig = wireGuardConfig(intent),
                 exitDnsPatch = decodedExtra(intent, EXTRA_EXIT_DNS_PATCH_BASE64),
                 networkProbe = decodedExtra(intent, EXTRA_NETWORK_PROBE_BASE64),
-                joinRequest = decodedExtra(intent, EXTRA_JOIN_REQUEST_BASE64),
-                adminDeviceId = decodedExtra(intent, EXTRA_ADMIN_DEVICE_ID_BASE64),
-                meshNetworkId = decodedExtra(intent, EXTRA_MESH_NETWORK_ID_BASE64),
-                participantDeviceId =
-                    decodedExtra(intent, EXTRA_PARTICIPANT_DEVICE_ID_BASE64),
             )
 
         private fun wireGuardConfig(intent: Intent?): String? {
@@ -92,19 +72,11 @@ internal object AndroidDebugAutomation {
     private const val ACTION_SET_WIREGUARD_EXIT = "set_wireguard_exit"
     private const val ACTION_SET_EXIT_DNS = "set_exit_dns"
     private const val ACTION_NETWORK_PROBE = "network_probe"
-    private const val ACTION_IMPORT_JOIN_REQUEST = "import_join_request"
-    private const val ACTION_EXPORT_JOIN_REQUEST = "export_join_request"
-    private const val ACTION_REMOVE_ACTIVE_NETWORK = "remove_active_network"
-    private const val ACTION_MANUAL_JOIN = "manual_join"
-    private const val ACTION_ADD_PARTICIPANT = "add_participant"
-    private const val ACTION_REMOVE_PARTICIPANT = "remove_participant"
-    private const val JOIN_REQUEST_RESULT_FILE = "debug-join-request.json"
     private const val EXIT_DNS_RESULT_FILE = "debug-exit-dns-state.json"
     private const val NETWORK_PROBE_RESULT_FILE = "debug-network-probe.json"
 
     suspend fun run(
         request: AndroidDebugRequest,
-        state: AppState,
         core: AppCoreClient,
         dataDir: File,
         dispatch: (JSONObject) -> Unit,
@@ -135,14 +107,6 @@ internal object AndroidDebugAutomation {
             )
             ACTION_SET_EXIT_DNS -> setExitDns(request.exitDnsPatch, core, dataDir, dispatch)
             ACTION_NETWORK_PROBE -> runNetworkProbe(request.networkProbe, dataDir)
-            ACTION_IMPORT_JOIN_REQUEST -> importJoinRequest(request.joinRequest, dispatch)
-            ACTION_EXPORT_JOIN_REQUEST -> exportJoinRequest(state, dataDir)
-            ACTION_REMOVE_ACTIVE_NETWORK -> state.activeNetwork?.id?.let { networkId ->
-                dispatch(NativeActions.removeNetwork(networkId))
-            }
-            ACTION_MANUAL_JOIN -> manualJoin(request, dispatch)
-            ACTION_ADD_PARTICIPANT -> updateParticipant(request, state, dispatch, remove = false)
-            ACTION_REMOVE_PARTICIPANT -> updateParticipant(request, state, dispatch, remove = true)
         }
     }
 
@@ -240,54 +204,6 @@ internal object AndroidDebugAutomation {
             networkProbe(requested)
         }
         writeResult(dataDir, NETWORK_PROBE_RESULT_FILE, result)
-    }
-
-    private fun importJoinRequest(
-        rawRequest: String?,
-        dispatch: (JSONObject) -> Unit,
-    ) {
-        val request = rawRequest.orEmpty().trim()
-        if (request.isNotEmpty()) {
-            dispatch(NativeActions.importJoinRequest(request))
-        }
-    }
-
-    private fun exportJoinRequest(state: AppState, dataDir: File) {
-        val result = JSONObject()
-            .put("joinRequest", state.joinRequestQrCodeOrLink)
-            .put("deviceId", state.ownNpub)
-            .put("error", state.error)
-        writeResult(dataDir, JOIN_REQUEST_RESULT_FILE, result)
-    }
-
-    private fun manualJoin(
-        request: AndroidDebugRequest,
-        dispatch: (JSONObject) -> Unit,
-    ) {
-        val admin = request.adminDeviceId.orEmpty().trim()
-        val networkId = request.meshNetworkId.orEmpty().trim()
-        if (admin.isNotEmpty() && networkId.isNotEmpty()) {
-            dispatch(NativeActions.manualAddNetwork(admin, networkId))
-        }
-    }
-
-    private fun updateParticipant(
-        request: AndroidDebugRequest,
-        state: AppState,
-        dispatch: (JSONObject) -> Unit,
-        remove: Boolean,
-    ) {
-        val participant = request.participantDeviceId.orEmpty().trim()
-        val networkId = state.activeNetwork?.id ?: return
-        if (participant.isEmpty()) {
-            return
-        }
-        val action = if (remove) {
-            NativeActions.removeParticipant(networkId, participant)
-        } else {
-            NativeActions.addParticipant(networkId, participant)
-        }
-        dispatch(action)
     }
 
     private fun networkProbe(requested: JSONObject): JSONObject {

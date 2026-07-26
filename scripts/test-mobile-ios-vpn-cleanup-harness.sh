@@ -145,7 +145,7 @@ if grep -Fq 'device install app' "$FIXTURE/xcrun.log"; then
 fi
 
 if rg -q -- '--domain-type appGroupDataContainer|NVPN_IOS_ALLOW_LEGACY_APP_DATA_CLEANUP' \
-  "$ROOT/scripts/mobile-ios-smoke.sh" "$ROOT/scripts/mobile-ios-android-join-e2e.sh"
+  "$ROOT/scripts/mobile-ios-smoke.sh"
 then
   fail "physical iOS gates retain a broken CoreDevice App Group copy or legacy receipt path"
 fi
@@ -158,7 +158,8 @@ fi
 if rg -q -- '--terminate-existing' \
   "$ROOT/scripts/mobile_env.sh" \
   "$ROOT/scripts/mobile-ios-smoke.sh" \
-  "$ROOT/scripts/mobile-ios-android-join-e2e.sh"
+  "$ROOT/scripts/lib-mobile-ios-lifecycle.sh" \
+  "$ROOT/scripts/lib-mobile-ios-release-network.sh"
 then
   fail "physical iOS automation can terminate the embedded packet tunnel"
 fi
@@ -172,25 +173,30 @@ grep -Fq -- '--payload-url "nvpn://debug/automation?arguments=$encoded_arguments
   || fail "physical iOS automation does not use the non-terminating URL command channel"
 for xcode_driver in \
   "$ROOT/scripts/lib-mobile-ios-lifecycle.sh" \
-  "$ROOT/scripts/mobile-ios-smoke.sh" \
-  "$ROOT/scripts/mobile-wireguard-exit-e2e.sh" \
-  "$ROOT/scripts/mobile-ios-android-join-e2e.sh"
+  "$ROOT/scripts/mobile-ios-smoke.sh"
 do
   grep -Fq 'resolve_physical_ios_udid' "$xcode_driver" \
     || fail "physical Xcode driver does not resolve CoreDevice names: $xcode_driver"
   grep -Fq -- '-collect-test-diagnostics never' "$xcode_driver" \
     || fail "physical Xcode failure can stall on privileged diagnostics: $xcode_driver"
 done
+grep -Fq 'value["result"]["hardwareProperties"]["udid"]' \
+  "$ROOT/scripts/lib-mobile-ios-release-network.sh" \
+  || fail "Release network gate does not resolve its selected CoreDevice hardware ID"
+grep -Fq -- '-collect-test-diagnostics never' \
+  "$ROOT/scripts/lib-mobile-ios-release-network.sh" \
+  || fail "Release network gate can stall on privileged Xcode diagnostics"
+grep -Fq 'source "$ROOT/scripts/lib-mobile-ios-release-network.sh"' \
+  "$ROOT/scripts/mobile-wireguard-exit-e2e.sh" \
+  || fail "mobile WireGuard gate bypasses the audited Release iOS driver"
 
 python3 - \
   "$ROOT/ios/Sources/AppModel.swift" \
   "$ROOT/ios/Sources/PacketTunnelController.swift" \
   "$ROOT/ios/Sources/AppModelDebugAutomation.swift" \
-  "$ROOT/scripts/mobile-ios-android-join-e2e.sh" \
   "$ROOT/ios/Sources/AppModelSupport.swift" \
   "$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift" \
   "$ROOT/scripts/ios-profiles" \
-  "$ROOT/ios/Sources/AppModelDebugJoinAutomation.swift" \
   "$ROOT/ios/Sources/AppModelDebugURLAutomation.swift" \
   "$ROOT/ios/Sources/AppModelDebugLifecycle.swift" \
   "$ROOT/ios/Sources/NostrVpnIosApp.swift" \
@@ -202,17 +208,15 @@ import sys
 app_model = open(sys.argv[1], encoding="utf-8").read()
 controller = open(sys.argv[2], encoding="utf-8").read()
 automation = open(sys.argv[3], encoding="utf-8").read()
-join_gate = open(sys.argv[4], encoding="utf-8").read()
-app_support = open(sys.argv[5], encoding="utf-8").read()
-packet_tunnel = open(sys.argv[6], encoding="utf-8").read()
-profiles = open(sys.argv[7], encoding="utf-8").read()
-join_automation = open(sys.argv[8], encoding="utf-8").read()
-url_automation = open(sys.argv[9], encoding="utf-8").read()
-lifecycle_automation = open(sys.argv[10], encoding="utf-8").read()
-ios_app = open(sys.argv[11], encoding="utf-8").read()
-lifecycle_gate = open(sys.argv[12], encoding="utf-8").read()
-release_gate = open(sys.argv[13], encoding="utf-8").read()
-lifecycle_xctest = open(sys.argv[14], encoding="utf-8").read()
+app_support = open(sys.argv[4], encoding="utf-8").read()
+packet_tunnel = open(sys.argv[5], encoding="utf-8").read()
+profiles = open(sys.argv[6], encoding="utf-8").read()
+url_automation = open(sys.argv[7], encoding="utf-8").read()
+lifecycle_automation = open(sys.argv[8], encoding="utf-8").read()
+ios_app = open(sys.argv[9], encoding="utf-8").read()
+lifecycle_gate = open(sys.argv[10], encoding="utf-8").read()
+release_gate = open(sys.argv[11], encoding="utf-8").read()
+lifecycle_xctest = open(sys.argv[12], encoding="utf-8").read()
 sync = app_model.split("private func syncPacketTunnelConfig", 1)[1].split(
     "private func actionRequiresPacketTunnelConfigSync", 1
 )[0]
@@ -249,84 +253,7 @@ debug_serialized_config = debug_start.index("let tunnelConfigJson = core.mobileT
 if debug_native_enable >= debug_serialized_config:
     raise SystemExit("physical iOS probe still serializes disabled native state")
 if "--nvpn-debug-connect-result" not in automation or "status == 3" not in automation:
-    raise SystemExit("iOS join automation does not produce a confirmed-connect result")
-approval = join_gate.rindex("scan_android_join_request_from_camera")
-display = join_gate.rfind(
-    "testJoinAdvertisingUsesTheShippedUiAndSurvivesBackgrounding", 0, approval
-)
-wait = join_gate.index("wait_for_ios_join", approval)
-if display < 0 or not display < approval < wait:
-    raise SystemExit(
-        "reverse QR gate does not display the iOS request before Android camera approval"
-    )
-first_request = join_gate.index("android_action export_join_request")
-admin_connect = join_gate.rfind("connect_ios_transport", 0, first_request)
-if admin_connect < 0:
-    raise SystemExit("first QR gate does not connect the iOS admin before approval")
-if 'select_ios_mesh "$IOS_ORIGINAL_MESH"' not in join_gate:
-    raise SystemExit("bidirectional join cleanup does not restore the original iOS network")
-if "--nvpn-debug-select-network-result" not in join_automation:
-    raise SystemExit("iOS network selection does not emit an app-core result receipt")
-if "activeNetworkId" not in join_automation or '"error": error' not in join_automation:
-    raise SystemExit("iOS network selection receipt omits loaded state or the app-core error")
-if "--nvpn-debug-select-network-result" not in join_gate:
-    raise SystemExit("bidirectional join gate does not request the iOS selection receipt")
-if 'result.get("ok") is not True' not in join_gate or 'result.get("activeNetworkId") != sys.argv[2]' not in join_gate:
-    raise SystemExit("bidirectional join gate can accept a failed or stale iOS selection")
-if 'result.get("enabledNetworkCount") != 1' not in join_gate:
-    raise SystemExit("bidirectional join gate does not reject ambiguous enabled-network state")
-if "copy_ios_debug_result" not in join_gate:
-    raise SystemExit("bidirectional join gate cannot read receipts without terminating the app")
-support_copy = join_gate.split("copy_ios_file()", 1)[1].split("copy_ios_debug_result()", 1)[0]
-if "--nvpn-debug-export-support-file" not in support_copy:
-    raise SystemExit("iOS support diagnostics do not use the explicit app export bridge")
-if "--domain-type appGroupDataContainer" in support_copy:
-    raise SystemExit("iOS support diagnostics retain a broken CoreDevice App Group copy path")
-if 'WAIT_SECS="${NVPN_MOBILE_JOIN_E2E_WAIT_SECS:-15}"' not in join_gate:
-    raise SystemExit("physical join delivery can wait longer than the 15-second gate budget")
-if 'NVPN_MOBILE_JOIN_E2E_ANDROID_BUILD_TYPE:-debug' not in join_gate:
-    raise SystemExit("physical join gate cannot select a production-signed Android replacement")
-if 'signed-debug)' not in join_gate:
-    raise SystemExit("physical join gate lacks a production-signed debuggable build mode")
-if '"$ROOT/tools/run-android" "$ANDROID_BUILD_COMMAND"' not in join_gate:
-    raise SystemExit("physical join gate ignores its selected Android build type")
-if '"${ADB[@]}" install -r "$ANDROID_APK"' not in join_gate:
-    raise SystemExit("physical join gate does not install the selected signed Android artifact")
-if 'NVPN_ANDROID_DEBUG_RELEASE_SIGNING="$(' not in join_gate:
-    raise SystemExit("physical join gate does not activate production signing for debug automation")
-for signing_var in (
-    "ANDROID_KEYSTORE_PATH",
-    "ANDROID_KEYSTORE_PASSWORD",
-    "ANDROID_KEY_ALIAS",
-    "ANDROID_KEY_PASSWORD",
-):
-    if signing_var not in join_gate:
-        raise SystemExit(
-            f"physical join release replacement does not require {signing_var}"
-        )
-if '"deliveryCeilingMs"' not in join_gate or '"deliveryElapsedMs"' not in join_gate:
-    raise SystemExit("physical join artifact does not preserve per-direction delivery latency")
-ios_wait = join_gate.split("wait_for_ios_join()", 1)[1].split("tap_android_resource_if_present()", 1)[0]
-if "--nvpn-debug-wait-for-joined-network-base64" not in ios_wait:
-    raise SystemExit("iOS joined-network gate does not use a single in-app wait receipt")
-if "copy_ios_file" in ios_wait:
-    raise SystemExit("iOS joined-network gate repeatedly relaunches the app to read config")
-if "copy_ios_debug_result" not in ios_wait:
-    raise SystemExit("iOS joined-network gate does not poll its non-terminating receipt")
-if "--nvpn-debug-wait-for-joined-network-base64" not in join_automation:
-    raise SystemExit("iOS join automation has no bounded signed-roster wait")
-selection = join_gate.split("select_ios_mesh()", 1)[1].split("connect_ios_transport()", 1)[0]
-if 'copy_ios_file "$result_name"' in selection:
-    raise SystemExit("iOS network selection still terminates the app while it writes its receipt")
-connect_receipt = join_gate.split("connect_ios_transport()", 1)[1].split("start_ios_join_advertising()", 1)[0]
-if 'copy_ios_file "$result_name"' in connect_receipt:
-    raise SystemExit("iOS connect still terminates the app while it writes its receipt")
-if 'mobile-ios-join-connect-$$-$RANDOM.json' not in connect_receipt:
-    raise SystemExit("bidirectional iOS connect phases can reuse a stale device receipt")
-if 'rm -f "$destination"' not in join_gate.split("copy_ios_debug_result()", 1)[1].split("copy_android_file()", 1)[0]:
-    raise SystemExit("iOS receipt polling cannot observe a newer atomic receipt")
-if 'result.get("phase") != "finished"' not in connect_receipt or 'result.get("startError")' not in connect_receipt:
-    raise SystemExit("iOS connect does not surface first-install VPN authorization failures early")
+    raise SystemExit("physical iOS probe does not produce a confirmed-connect result")
 if '?? "group.' in app_model or '?? "group.' in packet_tunnel:
     raise SystemExit("iOS target still silently falls back to an unrelated App Group")
 if "migrateLegacySupportDirectoryIfNeeded" not in app_support:
@@ -341,8 +268,6 @@ if "debugResultsDirectory" not in automation:
     raise SystemExit("iOS debug receipts do not have a private-container bridge")
 if "--nvpn-debug-export-support-file" not in automation:
     raise SystemExit("iOS App Group support files cannot be exported for physical diagnostics")
-if "Nostr VPN Debug Results" not in join_gate:
-    raise SystemExit("bidirectional join diagnostics cannot read current App Group files")
 if 'unavailable.error = "Shared app storage setup failed:' not in app_model:
     raise SystemExit("iOS App Group setup failures remain silent")
 if "iosDebugLogLimitBytes" not in app_support or "moveItem(at: logURL" not in app_support:

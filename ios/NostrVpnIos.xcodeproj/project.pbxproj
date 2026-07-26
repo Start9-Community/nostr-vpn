@@ -21,7 +21,6 @@
 		4680DA64259B1C447DD18C1A /* NostrVpnReleaseNetworkProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E29C5DFF800EDE78B1158E2 /* NostrVpnReleaseNetworkProbe.swift */; };
 		577F070C77BE39EC703FF5F0 /* NostrVpnReleaseNetworkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 659C5F57E19788FD82B20E52 /* NostrVpnReleaseNetworkUITests.swift */; };
 		5B0E1575EB4F5058F05B1913 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E8D34EBC51BAFC05BF873C3 /* AppModel.swift */; };
-		6109AA30280B385271873CB6 /* AppModelDebugJoinAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 294446254686F02E719AEEF5 /* AppModelDebugJoinAutomation.swift */; };
 		66A6722FA93D1694FFBD2ED8 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BD1EA5A948BC1EEB916CEC3D /* SystemConfiguration.framework */; };
 		67372B248F87FDC7705B1203 /* AppModelDebugAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06BD4BC01B5E92B3771DC4E2 /* AppModelDebugAutomation.swift */; };
 		6A2222FDE7AC3BD2946DE2D9 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29E68FA9898E0C487261BE03 /* Models.swift */; };
@@ -30,7 +29,6 @@
 		71E581C6F6310F9115EE989A /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C026B0860BA3DC6889593E3F /* AppIntents.framework */; };
 		79E8116198C0F1544EEEB1D2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B11B87B71A3CB9B7FFB57358 /* PrivacyInfo.xcprivacy */; };
 		7F3B786208DD027EA35DEFC7 /* InternetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB3DAAE80542C5B7E70586E /* InternetViews.swift */; };
-		8BB560B4B2F27DAE9495A2FF /* NostrVpnPhysicalQrJoinUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30E64E06EE252086937AA9C /* NostrVpnPhysicalQrJoinUITests.swift */; };
 		9655E8C2070C163CD6BB08D2 /* PacketTunnel.appex in Embed Dependencies */ = {isa = PBXBuildFile; fileRef = 21F75A016D5B4CB3DFBE0621 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		9E4E18AFBA1E70116199E68D /* NostrVpnIosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8C2C375478E216EE34D7E2A /* NostrVpnIosApp.swift */; };
 		A1618DBDFB947AB01162518D /* AppModelDebugTunProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C4F8D33CB171B580681282E /* AppModelDebugTunProbe.swift */; };
@@ -90,7 +88,6 @@
 		1BB3DAAE80542C5B7E70586E /* InternetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InternetViews.swift; sourceTree = "<group>"; };
 		21F75A016D5B4CB3DFBE0621 /* PacketTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		272C4FEFDAC8674186934379 /* NostrVpnIosUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = NostrVpnIosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		294446254686F02E719AEEF5 /* AppModelDebugJoinAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugJoinAutomation.swift; sourceTree = "<group>"; };
 		29E68FA9898E0C487261BE03 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		32C567B4190F53A52A6E419A /* NostrVpnPhysicalGateSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnPhysicalGateSupport.swift; sourceTree = "<group>"; };
 		3DDFB58648107DDDBCC8DBE5 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
@@ -113,7 +110,6 @@
 		BD1EA5A948BC1EEB916CEC3D /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		BD3C4F5527757D58D8C6196A /* ViewComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewComponents.swift; sourceTree = "<group>"; };
 		C026B0860BA3DC6889593E3F /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
-		C30E64E06EE252086937AA9C /* NostrVpnPhysicalQrJoinUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnPhysicalQrJoinUITests.swift; sourceTree = "<group>"; };
 		C8BAA0EBA6F30832FC35B6E6 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		D8FB8499CE8F91D4A2BC4255 /* AppModelDebugLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugLifecycle.swift; sourceTree = "<group>"; };
 		E3C4E67D5D36550552B70435 /* NativeCoreClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCoreClient.swift; sourceTree = "<group>"; };
@@ -167,7 +163,6 @@
 			children = (
 				4E8D34EBC51BAFC05BF873C3 /* AppModel.swift */,
 				06BD4BC01B5E92B3771DC4E2 /* AppModelDebugAutomation.swift */,
-				294446254686F02E719AEEF5 /* AppModelDebugJoinAutomation.swift */,
 				D8FB8499CE8F91D4A2BC4255 /* AppModelDebugLifecycle.swift */,
 				9C4F8D33CB171B580681282E /* AppModelDebugTunProbe.swift */,
 				74FA92081064D235A10456E4 /* AppModelDebugURLAutomation.swift */,
@@ -226,7 +221,6 @@
 				A3074311455F8AF2D83E9F5F /* NostrVpnIosUITests.swift */,
 				8A3DC52B2649BE0323AB0726 /* NostrVpnLifecycleUITests.swift */,
 				32C567B4190F53A52A6E419A /* NostrVpnPhysicalGateSupport.swift */,
-				C30E64E06EE252086937AA9C /* NostrVpnPhysicalQrJoinUITests.swift */,
 				FB24149C180173EC493FFAA7 /* NostrVpnReleaseJoinUITests.swift */,
 				5E29C5DFF800EDE78B1158E2 /* NostrVpnReleaseNetworkProbe.swift */,
 				18A42119DA80B93BA811494E /* NostrVpnReleaseNetworkUI.swift */,
@@ -369,7 +363,6 @@
 			files = (
 				5B0E1575EB4F5058F05B1913 /* AppModel.swift in Sources */,
 				67372B248F87FDC7705B1203 /* AppModelDebugAutomation.swift in Sources */,
-				6109AA30280B385271873CB6 /* AppModelDebugJoinAutomation.swift in Sources */,
 				BCC2E2F503096EA8DA202D4D /* AppModelDebugLifecycle.swift in Sources */,
 				A1618DBDFB947AB01162518D /* AppModelDebugTunProbe.swift in Sources */,
 				2376F433BA1FBD612B5DF846 /* AppModelDebugURLAutomation.swift in Sources */,
@@ -405,7 +398,6 @@
 				A757DAFBD074C65BC43CAA42 /* NostrVpnIosUITests.swift in Sources */,
 				C83E9A75B3E4C59753DA1E56 /* NostrVpnLifecycleUITests.swift in Sources */,
 				B9900FE8565EC1E1E2F42891 /* NostrVpnPhysicalGateSupport.swift in Sources */,
-				8BB560B4B2F27DAE9495A2FF /* NostrVpnPhysicalQrJoinUITests.swift in Sources */,
 				E5BDA219E4E57B6EEE6D73C1 /* NostrVpnReleaseJoinUITests.swift in Sources */,
 				4680DA64259B1C447DD18C1A /* NostrVpnReleaseNetworkProbe.swift in Sources */,
 				C2CEC87BAF0962926E5DD0A7 /* NostrVpnReleaseNetworkUI.swift in Sources */,

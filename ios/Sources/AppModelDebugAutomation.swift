@@ -21,16 +21,8 @@ extension AppModel {
         let arguments = Set(rawArguments)
         debugLog("debug automation args=\(Self.redactedDebugArguments(rawArguments))")
         let lifecycleProbeArmed = armDebugLifecycleProbeIfRequested(arguments: rawArguments)
-        let selectedNetwork = selectDebugNetworkIfPresent(arguments: rawArguments)
         let addedNetwork = addDebugNetworkIfPresent(arguments: rawArguments)
-        let importedJoinRequest = importDebugJoinRequestIfPresent(arguments: rawArguments)
-        let manuallyJoined = manualDebugJoinIfPresent(arguments: rawArguments)
-        let exportedJoinRequest = exportDebugJoinRequestIfRequested(arguments: rawArguments)
-        let addedParticipant = addDebugParticipantIfPresent(arguments: rawArguments)
-        let removedParticipant = removeDebugParticipantIfPresent(arguments: rawArguments)
-        let removedNetwork = removeDebugActiveNetworkIfRequested(arguments: rawArguments)
         let exportedSupportFile = exportDebugSupportFileIfRequested(arguments: rawArguments)
-        let waitedForJoinedNetwork = waitForDebugJoinedNetworkIfRequested(arguments: rawArguments)
         if arguments.contains("--nvpn-debug-idle-cpu-probe") {
             Task {
                 await runDebugIdleCpuProbe(arguments: rawArguments)
@@ -62,15 +54,6 @@ extension AppModel {
             return true
         }
         if let resultName = Self.argumentValue(
-            after: "--nvpn-debug-start-join-advertising-result",
-            in: rawArguments
-        ) {
-            Task {
-                await runDebugStartJoinAdvertising(resultName: resultName)
-            }
-            return true
-        }
-        if let resultName = Self.argumentValue(
             after: "--nvpn-debug-runtime-result",
             in: rawArguments
         ) {
@@ -87,10 +70,21 @@ extension AppModel {
             setVpnEnabled(false, force: true)
             return true
         }
-        return lifecycleProbeArmed || selectedNetwork || addedNetwork || importedJoinRequest
-            || manuallyJoined || exportedJoinRequest
-            || addedParticipant || removedParticipant || removedNetwork || exportedSupportFile
-            || waitedForJoinedNetwork
+        return lifecycleProbeArmed || addedNetwork || exportedSupportFile
+        #else
+        return false
+        #endif
+    }
+
+    private func addDebugNetworkIfPresent(arguments: [String]) -> Bool {
+        #if DEBUG
+        guard let name = Self.argumentValue(after: "--nvpn-debug-add-network", in: arguments) else {
+            return false
+        }
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        dispatch(NativeActions.addNetwork(normalized.isEmpty ? "iOS smoke" : normalized))
+        refresh()
+        return true
         #else
         return false
         #endif
