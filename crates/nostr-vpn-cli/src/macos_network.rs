@@ -33,6 +33,47 @@ pub(super) fn macos_default_routes_from_netstat(output: &str) -> Vec<MacosRouteS
     routes
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_selected_default_route_from_route_get(output: &str) -> Option<MacosRouteSpec> {
+    let mut gateway = None;
+    let mut interface = None;
+    for line in output.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("gateway:") {
+            let value = value.trim();
+            if !value.is_empty() && !value.starts_with("link#") {
+                gateway = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("interface:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                interface = Some(value.to_string());
+            }
+        }
+    }
+
+    let interface = interface?;
+    if gateway.is_none()
+        || interface.starts_with("utun")
+        || interface.starts_with("bridge")
+        || interface == "lo0"
+    {
+        return None;
+    }
+
+    Some(MacosRouteSpec { gateway, interface })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_selected_default_route_from_system() -> Result<Option<MacosRouteSpec>> {
+    let output = command_stdout_checked(
+        ProcessCommand::new("route")
+            .arg("-n")
+            .arg("get")
+            .arg("default"),
+    )?;
+    Ok(macos_selected_default_route_from_route_get(&output))
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_macos_route_change_monitor() -> Option<mpsc::Receiver<()>> {
     let fd = unsafe { libc::socket(libc::AF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
@@ -777,6 +818,27 @@ default            link#26            UCSIg           bridge100      !\n",
         assert_eq!(
             macos_underlay_route_from_candidates(&candidates, Some("en0")),
             Some(candidates[0].clone())
+        );
+    }
+
+    #[test]
+    fn macos_selected_default_route_uses_kernel_global_route_during_handoff() {
+        let route_get = "\
+   route to: default
+destination: default
+       mask: default
+    gateway: 10.168.32.48
+  interface: en1
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+";
+
+        assert_eq!(
+            macos_selected_default_route_from_route_get(route_get),
+            Some(MacosRouteSpec {
+                gateway: Some("10.168.32.48".to_string()),
+                interface: "en1".to_string(),
+            }),
+            "the kernel-selected global default must win even while netstat still lists stale en0 first"
         );
     }
 

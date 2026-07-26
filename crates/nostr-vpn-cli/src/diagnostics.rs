@@ -27,7 +27,8 @@ use self::probes::{CaptivePortalEndpoint, parse_http_response};
 #[cfg(target_os = "macos")]
 use crate::macos_network::{
     macos_default_routes, macos_ipconfig_ipv4_for_interface, macos_ipconfig_router_for_interface,
-    macos_underlay_default_route_from_routes, macos_underlay_default_route_from_system,
+    macos_selected_default_route_from_system, macos_underlay_default_route_from_routes,
+    macos_underlay_default_route_from_system,
 };
 use crate::{DaemonPeerState, DaemonStatus, unix_timestamp};
 
@@ -155,11 +156,14 @@ pub(crate) fn capture_network_snapshot() -> NetworkSnapshot {
 fn capture_macos_network_snapshot() -> NetworkSnapshot {
     let mut snapshot = NetworkSnapshot::default();
 
-    let underlay = macos_default_routes()
+    let underlay = macos_selected_default_route_from_system()
         .ok()
-        .and_then(|routes| {
-            macos_underlay_default_route_from_routes(&routes)
-                .or_else(|| macos_underlay_default_route_from_system().ok().flatten())
+        .flatten()
+        .or_else(|| {
+            macos_default_routes().ok().and_then(|routes| {
+                macos_underlay_default_route_from_routes(&routes)
+                    .or_else(|| macos_underlay_default_route_from_system().ok().flatten())
+            })
         })
         .or_else(|| macos_underlay_default_route_from_system().ok().flatten());
 
