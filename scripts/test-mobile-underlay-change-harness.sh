@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 continuity="$ROOT/scripts/validate-mobile-underlay-continuity.py"
 ios_output_capture="$ROOT/scripts/capture-mobile-ios-underlay-output.py"
 android_lib="$ROOT/scripts/lib-mobile-android-underlay.sh"
+android_release_lib="$ROOT/scripts/lib-mobile-android-release-gate.sh"
 android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
 ios_test="$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift"
 ios_underlay="$ROOT/ios/UITests/NostrVpnReleaseNetworkUnderlay.swift"
@@ -152,7 +153,14 @@ PY
 
 cat >"$temp/adb" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "Wifi is disabled"
+if [[ "$*" == *" logcat "* ]]; then
+  printf '%s\n' \
+    'I/NostrVpnService: WG upstream socket fd from native runtime: 41 (-1 means WG upstream not running)' \
+    'I/NostrVpnService: WG upstream socket fd from native runtime: 42 (-1 means WG upstream not running)' \
+    'I/NostrVpnService: Physical network changed; live FIPS carriers refreshed'
+else
+  printf '%s\n' "Wifi is disabled"
+fi
 SH
 chmod +x "$temp/adb"
 bash -eu -c '
@@ -161,6 +169,44 @@ bash -eu -c '
   serial="physical-device"
   android_underlay_wait_wifi_radio disabled 1
 ' _ "$android_lib" "$temp/adb"
+bash -eu -o pipefail -c '
+  source "$1"
+  ADB="$2"
+  serial="physical-device"
+  [[ "$(android_vpn_native_start_count)" == 2 ]]
+  [[ "$(android_underlay_rebind_count)" == 1 ]]
+  android_underlay_assert_exact_rebind_after 0 first-switch
+  android_underlay_rebind_count() { printf "%s\n" 2; }
+  if android_underlay_assert_rebind_count \
+      1 "before switch 2 after delayed duplicate"
+  then
+    echo "Android underlay absorbed a delayed duplicate into switch 2" >&2
+    exit 1
+  fi
+  if android_underlay_assert_exact_rebind_after 0 duplicate-switch; then
+    echo "Android underlay accepted duplicate native refreshes" >&2
+    exit 1
+  fi
+  if android_underlay_wait_for_rebind_after 0; then
+    echo "Android underlay wait accepted duplicate native refreshes" >&2
+    exit 1
+  fi
+' _ "$android_lib" "$temp/adb"
+
+bash -eu -o pipefail -c '
+  source "$1"
+  source "$2"
+  native_starts=3
+  android_vpn_native_start_count() { printf "%s\n" "$native_starts"; }
+  android_release_pin_native_tunnel_start_count
+  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" == 3 ]]
+  android_release_assert_native_tunnel_unchanged stable-network-phase
+  native_starts=4
+  if android_release_assert_native_tunnel_unchanged recreated-network-phase; then
+    echo "Android Release gate accepted native-tunnel recreation" >&2
+    exit 1
+  fi
+' _ "$android_lib" "$android_release_lib"
 
 bash -eu -o pipefail -c '
   source "$1"
@@ -204,6 +250,26 @@ do
   grep -Fq "$required" "$android_lib" \
     || { echo "Android underlay gate is missing $required" >&2; exit 1; }
 done
+python3 - "$android_lib" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("run_android_underlay_network_change_gate()")
+body = text[start:]
+for required in (
+    'initial_rebind="$(android_underlay_rebind_count)"',
+    "baseline_rebind=$((initial_rebind + cycle - 1))",
+    '"before underlay switch $cycle"',
+    '"$((initial_rebind + 2))" "after both underlay switches"',
+):
+    if required not in body:
+        raise SystemExit(
+            f"Android underlay gate lacks fixed-baseline checkpoint: {required}"
+        )
+if 'baseline_rebind="$(android_underlay_rebind_count)"' in body:
+    raise SystemExit("Android underlay gate can absorb a late duplicate into a new baseline")
+PY
 grep -Fq 'run_android_underlay_network_change_gate' "$android_smoke" \
   || { echo "Android smoke does not execute its physical underlay gate" >&2; exit 1; }
 for selector in vpn-toggle wireguard-enabled wireguard-config wireguard-save; do

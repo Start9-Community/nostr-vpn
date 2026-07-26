@@ -4,6 +4,8 @@ ANDROID_UNDERLAY_HOME_RESTORE_ARMED=0
 ANDROID_UNDERLAY_AVAILABLE_LOWER_BOUND_MS=""
 ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS=""
 ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS=""
+ANDROID_VPN_NATIVE_START_LOG="WG upstream socket fd from native runtime:"
+ANDROID_VPN_UNDERLAY_REFRESH_LOG="Physical network changed; live FIPS carriers refreshed"
 
 android_underlay_require_environment() {
   local name
@@ -245,23 +247,72 @@ android_underlay_unique_udp_echo() {
   ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS="$recovery_ms"
 }
 
+android_vpn_service_log_count() {
+  local needle="$1" logs
+  logs="$(
+    "$ADB" -s "$serial" logcat -d -v brief \
+      -s NostrVpnService:I '*:S' 2>/dev/null
+  )" || return 1
+  grep -Fc "$needle" <<<"$logs" || true
+}
+
+android_vpn_native_start_count() {
+  android_vpn_service_log_count "$ANDROID_VPN_NATIVE_START_LOG"
+}
+
 android_underlay_rebind_count() {
-  "$ADB" -s "$serial" logcat -d -v brief 2>/dev/null \
-    | grep -Fc \
-      "Physical network changed; live FIPS carriers refreshed" \
-    || true
+  android_vpn_service_log_count "$ANDROID_VPN_UNDERLAY_REFRESH_LOG"
+}
+
+android_underlay_assert_rebind_count() {
+  local expected="$1" label="$2" count
+  [[ "$expected" =~ ^[0-9]+$ ]] || {
+    echo "Android $label has no valid expected native refresh count" >&2
+    return 1
+  }
+  count="$(android_underlay_rebind_count)" || return 1
+  if [[ ! "$count" =~ ^[0-9]+$ || "$count" -ne "$expected" ]]; then
+    echo "Android $label expected native refresh total $expected, observed ${count:-invalid}" >&2
+    return 1
+  fi
+}
+
+android_underlay_assert_exact_rebind_after() {
+  local baseline="$1" label="$2" expected
+  [[ "$baseline" =~ ^[0-9]+$ ]] || {
+    echo "Android $label has no valid native refresh baseline" >&2
+    return 1
+  }
+  expected=$((baseline + 1))
+  android_underlay_assert_rebind_count "$expected" "$label" || return 1
+}
+
+android_underlay_assert_native_tunnel_unchanged() {
+  local label="$1"
+  truthy "${RELEASE_BLACKBOX_GATE:-0}" || return 0
+  if ! declare -F android_release_assert_native_tunnel_unchanged >/dev/null; then
+    echo "Android Release $label cannot audit native-tunnel continuity" >&2
+    return 1
+  fi
+  android_release_assert_native_tunnel_unchanged "$label"
 }
 
 android_underlay_wait_for_rebind_after() {
-  local baseline="$1" deadline=$((SECONDS + 8)) count
+  local baseline="$1" deadline=$((SECONDS + 8)) expected count
+  [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
+  expected=$((baseline + 1))
   while ((SECONDS < deadline)); do
-    count="$(android_underlay_rebind_count)"
-    if [[ "$count" =~ ^[0-9]+$ ]] && (( count > baseline )); then
+    count="$(android_underlay_rebind_count)" || return 1
+    if [[ "$count" =~ ^[0-9]+$ ]] && (( count == expected )); then
       return 0
+    fi
+    if [[ "$count" =~ ^[0-9]+$ ]] && (( count > expected )); then
+      echo "Android physical switch emitted more than one native refresh ($baseline->$count)" >&2
+      return 1
     fi
     sleep 0.1
   done
-  echo "Android production service did not log a live FIPS carrier refresh" >&2
+  echo "Android production service did not log exactly one live FIPS carrier refresh" >&2
   return 1
 }
 
@@ -333,11 +384,18 @@ run_android_underlay_network_change_gate() {
   local ping_log="$artifact_dir/$stem-continuity.log"
   local markers="$artifact_dir/$stem-markers.tsv"
   local summary="$artifact_dir/$stem-summary.json"
-  local expected_pid baseline_rebind available_ms requested_ms recovery_ms cycle
+  local expected_pid initial_rebind baseline_rebind
+  local available_ms requested_ms recovery_ms cycle
   mkdir -p "$artifact_dir"
   : >"$markers"
   expected_pid="$(android_app_pid)"
   android_underlay_assert_process_and_vpn "$expected_pid" || return 1
+  android_underlay_assert_native_tunnel_unchanged underlay-start || return 1
+  initial_rebind="$(android_underlay_rebind_count)" || return 1
+  [[ "$initial_rebind" =~ ^[0-9]+$ ]] || {
+    echo "Android underlay gate could not pin the initial native refresh total" >&2
+    return 1
+  }
   android_build_captured_network_probe || return 1
   mobile_continuity_start \
     "$NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER" \
@@ -359,10 +417,16 @@ run_android_underlay_network_change_gate() {
       passphrase="${NVPN_ANDROID_UNDERLAY_HOME_PASSPHRASE:-}"
       label="home"
     fi
+    baseline_rebind=$((initial_rebind + cycle - 1))
+    if ! android_underlay_assert_rebind_count \
+        "$baseline_rebind" "before underlay switch $cycle"
+    then
+      mobile_continuity_stop
+      return 1
+    fi
     requested_ms="$(mobile_underlay_now_ms)"
     printf 'switch_%s_requested\t%s\n' \
       "$cycle" "$requested_ms" >>"$markers"
-    baseline_rebind="$(android_underlay_rebind_count)"
     if [[ "$cycle" -eq 2 ]]; then
       if ! android_underlay_reconnect_home; then
         echo "Android could not reconnect its saved $label Wi-Fi underlay" >&2
@@ -430,12 +494,23 @@ run_android_underlay_network_change_gate() {
         return 1
       }
     fi
+    if ! android_underlay_assert_exact_rebind_after \
+        "$baseline_rebind" "underlay switch $cycle" \
+      || ! android_underlay_assert_native_tunnel_unchanged \
+        "underlay switch $cycle"
+    then
+      mobile_continuity_stop
+      return 1
+    fi
     printf 'switch_%s_verified\t%s\n' \
       "$cycle" "$(mobile_underlay_now_ms)" >>"$markers"
   done
 
   ANDROID_UNDERLAY_HOME_RESTORE_ARMED=0
   mobile_continuity_stop
+  android_underlay_assert_rebind_count \
+    "$((initial_rebind + 2))" "after both underlay switches" \
+    || return 1
   mobile_continuity_validate \
     "$ROOT" "$ping_log" "$markers" "$summary" Android "$recovery_max_ms" \
     || return 1

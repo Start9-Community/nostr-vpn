@@ -5,6 +5,8 @@
 # primitives remain shared with mobile-android-smoke.sh and the external probe
 # library.
 
+ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT=""
+
 android_release_require_inputs() {
   [[ "$PACKAGE_NAME" == "$CANONICAL_PACKAGE_NAME" ]] || {
     echo "Android Release black-box gate requires canonical package $CANONICAL_PACKAGE_NAME" >&2
@@ -588,6 +590,35 @@ run_android_release_exit_network_probe() {
   echo "Android Release $label real DNS/HTTP/HTTPS/exit-source path passed: $result_path"
 }
 
+android_release_pin_native_tunnel_start_count() {
+  local count
+  count="$(android_vpn_native_start_count)" || {
+    echo "Android Release could not inspect native-tunnel starts" >&2
+    return 1
+  }
+  if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Android Release connected VPN emitted no native-tunnel start receipt" >&2
+    return 1
+  fi
+  ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT="$count"
+}
+
+android_release_assert_native_tunnel_unchanged() {
+  local label="${1:-network phase}" count
+  if [[ ! "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Android Release $label has no pinned native-tunnel start count" >&2
+    return 1
+  fi
+  count="$(android_vpn_native_start_count)" || {
+    echo "Android Release $label could not inspect native-tunnel starts" >&2
+    return 1
+  }
+  if [[ "$count" != "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" ]]; then
+    echo "Android Release $label recreated the native tunnel ($ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT->$count)" >&2
+    return 1
+  fi
+}
+
 run_android_release_active_vpn_lifecycle_gate() {
   truthy "$ANDROID_LIFECYCLE_GATE" || return 0
   [[ "$ANDROID_LIFECYCLE_CYCLES" =~ ^[1-9][0-9]*$ \
@@ -595,20 +626,25 @@ run_android_release_active_vpn_lifecycle_gate() {
     && (( ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS >= 10 )) || {
       echo "Android Release lifecycle requires >=10s background dwell" >&2
       return 1
-    }
+  }
   local expected_pid cycle
   expected_pid="$(android_app_pid)"
+  android_release_assert_native_tunnel_unchanged lifecycle-start || return 1
   for cycle in $(seq 1 "$ANDROID_LIFECYCLE_CYCLES"); do
     "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME || return 1
     sleep "$ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS"
     android_underlay_assert_process_and_vpn "$expected_pid" || return 1
     run_android_release_exit_network_probe \
       "release-background-cycle-$cycle" || return 1
+    android_release_assert_native_tunnel_unchanged \
+      "background cycle $cycle" || return 1
     start_main_activity
     wait_until 5 android_activity_resumed || return 1
     android_underlay_assert_process_and_vpn "$expected_pid" || return 1
     run_android_release_exit_network_probe \
       "release-foreground-cycle-$cycle" || return 1
+    android_release_assert_native_tunnel_unchanged \
+      "foreground cycle $cycle" || return 1
   done
   echo "Android Release active VPN survived $ANDROID_LIFECYCLE_CYCLES real background/foreground cycles"
 }
@@ -623,9 +659,13 @@ run_android_release_blackbox_cycle() {
   fi
   android_release_connect_ui || return 1
   vpn_cleanup_armed=1
+  android_release_pin_native_tunnel_start_count || return 1
   run_android_release_exit_network_probe wireguard-exit || return 1
+  android_release_assert_native_tunnel_unchanged initial-exit || return 1
   run_android_underlay_network_change_gate || return 1
   run_android_release_active_vpn_lifecycle_gate || return 1
+  android_release_assert_native_tunnel_unchanged \
+    before-direct-selection || return 1
   if truthy "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
     select_android_direct_ui || return 1
     wait_until "$VPN_START_WAIT_SECS" vpn_active || return 1

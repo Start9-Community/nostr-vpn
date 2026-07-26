@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gate="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
 android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
 android_release_gate="$ROOT/scripts/lib-mobile-android-release-gate.sh"
+android_underlay="$ROOT/scripts/lib-mobile-android-underlay.sh"
 android_external_probe="$ROOT/scripts/lib-mobile-android-external-probe.sh"
+android_vpn_service="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt"
 android_tun_summary="$ROOT/scripts/write-mobile-android-tun-summary.py"
 ios_smoke="$ROOT/scripts/mobile-ios-smoke.sh"
 ios_probe_validator="$ROOT/scripts/validate-mobile-ios-vpn-probe.py"
@@ -348,6 +350,24 @@ do
   grep -Fq "$release_contract" "$android_smoke" "$android_release_gate" \
     || { echo "Android Release black-box gate is missing $release_contract" >&2; exit 1; }
 done
+grep -Fq 'WG upstream socket fd from native runtime:' "$android_vpn_service" \
+  && grep -Fq 'Physical network changed; live FIPS carriers refreshed' \
+    "$android_vpn_service" \
+  && grep -Fq 'android_release_pin_native_tunnel_start_count' \
+    "$android_release_gate" \
+  && grep -Fq 'android_release_assert_native_tunnel_unchanged' \
+    "$android_release_gate" "$android_underlay" \
+  || {
+    echo "Android Release gate does not pin native-tunnel continuity from production logs" >&2
+    exit 1
+  }
+grep -Fq 'android_underlay_assert_exact_rebind_after' "$android_underlay" \
+  && grep -Fq 'count == expected' "$android_underlay" \
+  && grep -Fq 'count > expected' "$android_underlay" \
+  || {
+    echo "Android underlay gate does not require exactly one native refresh per switch" >&2
+    exit 1
+  }
 python3 - "$android_release_gate" <<'PY'
 import pathlib
 import sys
@@ -370,6 +390,8 @@ for required in (
     "configure_android_release_wireguard_ui",
     "configure_android_exit_dns_ui",
     "android_release_connect_ui",
+    "android_release_pin_native_tunnel_start_count",
+    "android_release_assert_native_tunnel_unchanged",
     "run_android_release_exit_network_probe",
     "android_release_disconnect_ui",
 ):
