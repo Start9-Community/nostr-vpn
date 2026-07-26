@@ -511,8 +511,7 @@ private struct MobileTunnelConfig {
         if let wg = object["wireguardExit"] as? [String: Any],
            let endpoint = wg["endpoint"] as? String
         {
-            // Endpoint is host:port — strip the port for tunnelRemoteAddress.
-            firstWireGuardEndpointHost = endpoint.split(separator: ":", maxSplits: 1).first.map(String.init)
+            firstWireGuardEndpointHost = Self.endpointHost(from: endpoint)
         } else {
             firstWireGuardEndpointHost = nil
         }

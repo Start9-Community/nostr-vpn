@@ -466,7 +466,9 @@ impl MobileTunnelConfig {
         let (wireguard_exit, excluded_routes) =
             if app.wireguard_exit.enabled && app.wireguard_exit.configured() {
                 let mut excluded = Vec::new();
-                if let Some(ip) = wireguard_endpoint_host_ip(&app.wireguard_exit.endpoint) {
+                if let Some(IpAddr::V4(ip)) =
+                    wireguard_endpoint_host_ip(&app.wireguard_exit.endpoint)
+                {
                     excluded.push(format!("{ip}/32"));
                 }
                 if !route_targets.iter().any(|route| route == "0.0.0.0/0") {

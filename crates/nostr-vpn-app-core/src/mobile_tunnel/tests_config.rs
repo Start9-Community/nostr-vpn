@@ -367,6 +367,33 @@
             nostr_vpn_core::MESH_MAGIC_DNS_SERVER
         );
         assert_eq!(config.dns_match_domains, vec![""]);
+
+        app.wireguard_exit.endpoint = "[2001:db8::20]:51820".to_string();
+        let ipv6_transport =
+            MobileTunnelConfig::from_app(&app).expect("IPv6 WG transport config");
+        let ipv6_wg = ipv6_transport
+            .wireguard_exit
+            .as_ref()
+            .expect("IPv6 WG config");
+        assert_eq!(ipv6_wg.endpoint, "[2001:db8::20]:51820");
+        assert!(ipv6_transport.excluded_routes.is_empty());
+        assert!(
+            ipv6_transport
+                .route_targets
+                .iter()
+                .any(|route| route == "0.0.0.0/0")
+        );
+        assert!(
+            ipv6_transport
+                .local_address
+                .split_once('/')
+                .and_then(|(address, _)| address.parse::<Ipv4Addr>().ok())
+                .is_some()
+        );
+        assert_eq!(
+            ipv6_transport.dns_servers,
+            vec![nostr_vpn_core::MESH_MAGIC_DNS_SERVER]
+        );
     }
 
     #[test]
