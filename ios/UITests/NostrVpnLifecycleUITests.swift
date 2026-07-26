@@ -139,6 +139,10 @@ final class NostrVpnLifecycleUITests: XCTestCase {
         }
 
         driveConnectedDirectIfRequested()
+        XCTAssertTrue(
+            waitForStatus("VPN lifecycle release probe finished", timeout: 45),
+            "The app did not finish its aggregate and Direct-restoration release receipt."
+        )
         emit("NVPN_IOS_LIFECYCLE_RESULT_NAME=\(resultName)")
         emit("NVPN_IOS_LIFECYCLE_XCTEST_PASSED_MS=\(millisecondsSinceEpoch())")
     }

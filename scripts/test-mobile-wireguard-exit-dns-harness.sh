@@ -269,6 +269,10 @@ grep -Fq 'Active VPN lifecycle verified \(' "$ios_lifecycle_ui" \
   || { echo "iOS XCTest does not wait for each post-foreground packet proof" >&2; exit 1; }
 grep -Fq 'driveConnectedDirectIfRequested()' "$ios_lifecycle_ui" \
   || { echo "iOS active lifecycle XCTest strands the combined Direct-restoration gate" >&2; exit 1; }
+grep -Fq 'VPN lifecycle release probe finished' "$ios_debug_automation" \
+  || { echo "iOS app does not acknowledge the final post-lifecycle release receipt" >&2; exit 1; }
+grep -Fq 'VPN lifecycle release probe finished' "$ios_lifecycle_ui" \
+  || { echo "iOS lifecycle XCTest can tear down before the final release receipt" >&2; exit 1; }
 python3 - "$ios_probe_validator" <<'PY'
 import json
 import pathlib

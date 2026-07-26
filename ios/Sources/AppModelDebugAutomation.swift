@@ -449,6 +449,9 @@ extension AppModel {
         result["debugProbeElapsedMs"] = Self.elapsedMilliseconds(since: probeStartedAt)
         result["finishedAt"] = ISO8601DateFormatter().string(from: Date())
         writeDebugProbeResult(result, name: resultName)
+        if awaitActiveTunnelLifecycle {
+            statusMessage = "VPN lifecycle release probe finished"
+        }
         #endif
     }
 
