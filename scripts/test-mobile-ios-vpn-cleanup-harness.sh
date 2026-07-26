@@ -55,6 +55,25 @@ if [[ "$rendered" == "devicectl device info details"* ]]; then
   fi
   exit 0
 fi
+if [[ "$rendered" == "devicectl device info lockState"* ]]; then
+  destination=""
+  previous=""
+  for argument in "$@"; do
+    if [[ "$previous" == "--json-output" ]]; then
+      destination="$argument"
+      break
+    fi
+    previous="$argument"
+  done
+  if [[ "${NVPN_TEST_DEVICE_LOCKED:-0}" == "1" ]]; then
+    printf '{"result":{"passcodeRequired":true,"unlockedSinceBoot":true}}\n' \
+      >"$destination"
+  else
+    printf '{"result":{"passcodeRequired":false,"unlockedSinceBoot":true}}\n' \
+      >"$destination"
+  fi
+  exit 0
+fi
 if [[ "$rendered" == "devicectl device info apps"* ]]; then
   [[ "${NVPN_TEST_APP_INSTALLED:-0}" == "1" ]] \
     && printf 'Nostr VPN fi.siriusbusiness.nvpn 4.1.4 4001004\n'
@@ -108,6 +127,23 @@ resolved_udid="$(
 )"
 [[ "$resolved_udid" == "test-hardware-udid" ]] \
   || fail "physical iOS name did not resolve to its hardware UDID"
+
+env PATH="$FIXTURE/bin:$PATH" NVPN_TEST_XCRUN_LOG="$FIXTURE/xcrun.log" \
+  bash -c \
+    "source '$ROOT/scripts/lib-mobile-ios-release-network.sh'; ios_release_network_require_unlocked test-device" \
+  || fail "unlocked physical iOS device was rejected"
+set +e
+env PATH="$FIXTURE/bin:$PATH" \
+  NVPN_TEST_XCRUN_LOG="$FIXTURE/xcrun.log" \
+  NVPN_TEST_DEVICE_LOCKED=1 \
+  bash -c \
+    "source '$ROOT/scripts/lib-mobile-ios-release-network.sh'; ios_release_network_require_unlocked test-device" \
+  >"$FIXTURE/locked.out" 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || fail "locked physical iOS device was accepted"
+grep -Fq 'requires the selected phone to be unlocked' "$FIXTURE/locked.out" \
+  || fail "locked physical iOS failure was not actionable"
 
 set +e
 env "${COMMON_ENV[@]}" "$ROOT/scripts/mobile-ios-smoke.sh" device --vpn-cycle \

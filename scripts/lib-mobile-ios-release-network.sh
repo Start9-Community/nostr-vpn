@@ -537,6 +537,37 @@ ios_release_network_test_command() {
   )
 }
 
+ios_release_network_require_unlocked() {
+  local device="$1"
+  local lock_state
+  lock_state="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-lock-state.XXXXXX.json")"
+  if ! xcrun devicectl device info lockState \
+    --device "$device" \
+    --json-output "$lock_state" \
+    --quiet >/dev/null
+  then
+    rm -f "$lock_state"
+    echo "iOS Release gate could not verify that the selected phone is unlocked" >&2
+    return 1
+  fi
+  if ! python3 - "$lock_state" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1], encoding="utf-8")).get("result", {})
+if result.get("unlockedSinceBoot") is not True:
+    raise SystemExit(1)
+if result.get("passcodeRequired") is not False:
+    raise SystemExit(1)
+PY
+  then
+    rm -f "$lock_state"
+    echo "iOS Release gate requires the selected phone to be unlocked" >&2
+    return 1
+  fi
+  rm -f "$lock_state"
+}
+
 ios_release_network_copy_markers() {
   local destination="$1"
   rm -f "$destination"
@@ -656,6 +687,7 @@ run_ios_release_network_case() {
   fi
 
   local -a command=()
+  ios_release_network_require_unlocked "$IOS_RELEASE_NETWORK_DEVICE" || return 1
   ios_release_network_prepare_xctestrun "$label" "$spec_base64" || return 1
   ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
   command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
@@ -753,6 +785,7 @@ ios_release_network_disconnect_cleanup_inner() {
   local log="$result_dir/mobile-ios-release-cleanup-$$.log"
   local markers="$result_dir/mobile-ios-release-cleanup-markers-$$.log"
   local -a command=()
+  ios_release_network_require_unlocked "$IOS_RELEASE_NETWORK_DEVICE" || return 1
   ios_release_network_delete_private_test_products || return 1
   ios_release_network_prepare_xctestrun \
     cleanup "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" || return 1

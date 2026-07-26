@@ -943,11 +943,14 @@ replace_android_ui_multiline_text() {
   { set +x; } 2>/dev/null
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$first" -eq 0 ]]; then
-      "$ADB" -s "$serial" shell input keyevent KEYCODE_ENTER
+      # adb reads stdin even though `input` does not need it. Without this
+      # redirect, the first invocation consumes the here-string and silently
+      # truncates every multiline config after its first line.
+      "$ADB" -s "$serial" shell input keyevent KEYCODE_ENTER </dev/null
     fi
     first=0
     if [[ -n "$line" ]]; then
-      "$ADB" -s "$serial" shell input text "${line// /%s}"
+      "$ADB" -s "$serial" shell input text "${line// /%s}" </dev/null
     fi
   done <<<"$value"
   "$ADB" -s "$serial" shell input keyevent KEYCODE_BACK

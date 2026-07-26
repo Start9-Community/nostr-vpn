@@ -46,6 +46,12 @@ remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
 
 grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
   || { echo "standalone mobile gate does not initialize exact build metadata" >&2; exit 1; }
+grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
+  && grep -Fq 'shell input text "${line// /%s}" </dev/null' "$android_smoke" \
+  || {
+    echo "Android multiline UI entry lets adb consume the remaining config" >&2
+    exit 1
+  }
 
 # shellcheck disable=SC1090
 source "$fixture_lib"
