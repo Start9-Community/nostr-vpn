@@ -370,7 +370,7 @@ fn linux_direct_resolv_conf_allowed(container: bool, openrc: bool) -> bool {
     container || openrc
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn read_linux_resolv_conf(path: &std::path::Path) -> Result<Vec<u8>> {
     match std::fs::read(path) {
         Ok(contents) => Ok(contents),
@@ -712,6 +712,7 @@ mod tests {
         assert!(!linux_direct_resolv_conf_allowed(false, false));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn missing_openrc_resolv_conf_has_an_empty_restore_baseline() {
         let path = std::env::temp_dir().join(format!(

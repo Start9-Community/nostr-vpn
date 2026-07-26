@@ -59,6 +59,7 @@ fn fips_private_runtime_active_tolerates_no_active_network() {
     assert!(fips_private_runtime_active(&app, false, 0));
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn enabled_fips_host_tunnel_activates_runtime_while_vpn_is_paused() {
     let mut app = AppConfig::generated();
