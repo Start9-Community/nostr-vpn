@@ -207,25 +207,53 @@ fi
 
 cargo "${cargo_config_args[@]}" fetch "${cargo_lock_args[@]}" --target "$TARGET"
 
-rustables_src=$(find "${CARGO_HOME:-/root/.cargo}/registry/src" -maxdepth 3 -type d -name 'rustables-[0-9]*' -print -quit)
-if [[ -z "$rustables_src" ]]; then
-  rm -rf vendor-cargo
-  vendor_log=/tmp/nvpn-cargo-vendor.log
-  if ! cargo "${cargo_config_args[@]}" vendor --versioned-dirs vendor-cargo >/tmp/nvpn-cargo-vendor-config.toml 2>"$vendor_log"; then
-    cat "$vendor_log" >&2
-    exit 1
-  fi
-  rustables_src=$(find vendor-cargo -maxdepth 1 -type d -name 'rustables-[0-9]*' -print -quit)
-fi
-if [[ -z "$rustables_src" ]]; then
-  echo "rustables source was not found after cargo fetch/vendor" >&2
+rustables_version=$(python3 <<'PY'
+from pathlib import Path
+import re
+
+blocks = Path("Cargo.lock").read_text().split("[[package]]")
+versions = []
+for block in blocks:
+    if not re.search(r'^name = "rustables"$', block, re.MULTILINE):
+        continue
+    match = re.search(r'^version = "([^"]+)"$', block, re.MULTILINE)
+    if match:
+        versions.append(match.group(1))
+if len(versions) != 1:
+    raise SystemExit(f"expected exactly one rustables package in Cargo.lock, found {len(versions)}")
+print(versions[0])
+PY
+)
+mkdir -p vendor
+rustables_vendor="vendor/rustables-${rustables_version}"
+rm -rf "$rustables_vendor"
+rustables_fetch_dir=$(mktemp -d /tmp/nvpn-rustables-fetch.XXXXXX)
+cat >"$rustables_fetch_dir/Cargo.toml" <<EOF
+[package]
+name = "nvpn-rustables-fetch"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+rustables = "=${rustables_version}"
+EOF
+: >"$rustables_fetch_dir/lib.rs"
+cargo fetch --manifest-path "$rustables_fetch_dir/Cargo.toml" --target "$TARGET"
+rm -rf "$rustables_fetch_dir"
+rustables_crate=$(find "${CARGO_HOME:-/root/.cargo}/registry/cache" -maxdepth 3 \
+  -type f -name "rustables-${rustables_version}.crate" -print -quit)
+if [[ -z "$rustables_crate" ]]; then
+  echo "rustables ${rustables_version} was not found after its targeted cargo fetch" >&2
   exit 1
 fi
-
-mkdir -p vendor
-rustables_vendor="vendor/$(basename "$rustables_src")"
-rm -rf "$rustables_vendor"
-cp -a "$rustables_src" "$rustables_vendor"
+tar -xzf "$rustables_crate" -C vendor
+if [[ ! -f "$rustables_vendor/Cargo.toml" ]]; then
+  echo "rustables ${rustables_version} archive did not contain the expected crate" >&2
+  exit 1
+fi
 
 rustables_patch_line="rustables = { path = \"$rustables_vendor\" }"
 if ! grep -Fq "$rustables_patch_line" Cargo.toml; then
