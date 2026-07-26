@@ -178,8 +178,13 @@ assert_no_retired_processes() {
 }
 
 assert_fixture_has_no_native_libraries() {
-  local apk="$1"
-  if unzip -Z1 "$apk" | grep -Eq '^lib/.*\.so$'; then
+  local apk="$1" contents
+  contents="$(unzip -Z1 "$apk")" \
+    || {
+      echo "Retired Android fixture is not a readable APK: $apk" >&2
+      return 1
+    }
+  if grep -Eq '^lib/.*\.so$' <<<"$contents"; then
     echo "Retired Android fixture unexpectedly contains native libraries: $apk" >&2
     return 1
   fi
