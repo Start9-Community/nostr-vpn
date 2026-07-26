@@ -11,10 +11,16 @@ fail() {
 
 make_fips_fixture() {
   local dir="$1"
-  mkdir -p \
-    "$dir/crates/fips-core" \
-    "$dir/crates/fips-endpoint" \
-    "$dir/crates/fips-identity"
+  local crate
+  for crate in fips-core fips-endpoint fips-identity; do
+    mkdir -p "$dir/crates/$crate"
+    printf '[package]\nname = "%s"\nversion = "0.0.0"\n' "$crate" \
+      >"$dir/crates/$crate/Cargo.toml"
+  done
+  git -C "$dir" init -q
+  git -C "$dir" add .
+  git -C "$dir" \
+    -c user.name=Harness -c user.email=harness.invalid commit -qm fixture
 }
 
 assert_failed_run_restores_lock() {
@@ -51,8 +57,9 @@ assert_failed_run_restores_lock() {
   rm -f "$lock_snapshot" "$manifest_snapshot"
   grep -Fq 'restored Cargo.lock after local-FIPS cargo run' <<<"$out" \
     || fail "$label did not report Cargo.lock restore"
-  grep -Fq 'restored Cargo.toml after local-FIPS cargo run' <<<"$out" \
-    || fail "$label did not report Cargo.toml restore"
+  if grep -Fq 'restored Cargo.toml after local-FIPS cargo run' <<<"$out"; then
+    fail "$label still mutates the shared Cargo.toml"
+  fi
 }
 
 test_run_ios_restores_lock_after_failed_local_fips_cargo() {
@@ -78,10 +85,11 @@ if [[ "${1:-}" == "--sdk" && "${3:-}" == "--show-sdk-path" ]]; then
 fi
 exit 2
 EOF
-  cat >"$stubbin/cargo" <<'EOF'
+cat >"$stubbin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-grep -Fq "fips-core = { path = \"$NVPN_TEST_FIPS_REPO_PATH/crates/fips-core\" }" "$NVPN_TEST_CARGO_MANIFEST"
+printf '%s\n' "$*" \
+  | grep -Fq "patch.crates-io.fips-core.path=\"$NVPN_TEST_FIPS_REPO_PATH/crates/fips-core\""
 printf '\n# mutated by fake iOS cargo\n' >> "$NVPN_TEST_CARGO_LOCK"
 exit 42
 EOF
@@ -110,14 +118,21 @@ test_run_android_restores_lock_after_failed_local_fips_gradle() {
   mkdir -p "$stubbin"
   make_fips_fixture "$fips"
 
+  cat >"$stubbin/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" \
+  | grep -Fq "patch.crates-io.fips-core.path=\"$NVPN_TEST_FIPS_REPO_PATH/crates/fips-core\""
+printf '\n# mutated by fake Android cargo\n' >> "$NVPN_TEST_CARGO_LOCK"
+exit 42
+EOF
   cat >"$stubbin/gradle" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-grep -Fq "fips-core = { path = \"$NVPN_TEST_FIPS_REPO_PATH/crates/fips-core\" }" "$NVPN_TEST_CARGO_MANIFEST"
-printf '\n# mutated by fake Android Gradle task\n' >> "$NVPN_TEST_CARGO_LOCK"
+cargo metadata
 exit 43
 EOF
-  chmod +x "$stubbin/gradle"
+  chmod +x "$stubbin/cargo" "$stubbin/gradle"
 
   assert_failed_run_restores_lock \
     "run-android local-FIPS Gradle failure" \

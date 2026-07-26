@@ -112,6 +112,50 @@ git_commit_epoch() {
   git -C "$root" log -1 --format=%ct HEAD 2>/dev/null || printf '%s\n' ""
 }
 
+release_file_sha256() {
+  shasum -a 256 "$1" | awk '{print tolower($1)}'
+}
+
+assert_release_checkout_state() {
+  local root="$1" expected_head="$2" expected_tree="$3" label="$4"
+  local status manifest_sha lock_sha unexpected
+  if [[ "$(git -C "$root" rev-parse HEAD)" != "$expected_head" \
+    || "$(git -C "$root" rev-parse 'HEAD^{tree}')" != "$expected_tree" ]]
+  then
+    echo "$label source revision/tree changed" >&2
+    return 1
+  fi
+
+  status="$(git -C "$root" status --porcelain --untracked-files=all)"
+  if [[ -z "${NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256:-}" ]]; then
+    [[ -z "$status" ]] || {
+      echo "$label source checkout is dirty" >&2
+      return 1
+    }
+    return 0
+  fi
+
+  manifest_sha="$(release_file_sha256 "$root/Cargo.toml")"
+  lock_sha="$(release_file_sha256 "$root/Cargo.lock")"
+  [[ "$manifest_sha" == "${NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256:-}" ]] || {
+    echo "$label Cargo.toml differs from the release-gate session" >&2
+    return 1
+  }
+  [[ "$lock_sha" == "$NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256" ]] || {
+    echo "$label Cargo.lock differs from the release-gate session" >&2
+    return 1
+  }
+  unexpected="$(
+    printf '%s\n' "$status" \
+      | awk 'NF && $0 != " M Cargo.lock" { print }'
+  )"
+  [[ -z "$unexpected" ]] || {
+    echo "$label source checkout has unrelated changes:" >&2
+    printf '%s\n' "$unexpected" >&2
+    return 1
+  }
+}
+
 resolve_source_date_epoch() {
   local root="$1"
   local epoch="${SOURCE_DATE_EPOCH:-}"

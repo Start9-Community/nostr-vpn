@@ -1,22 +1,253 @@
 #!/usr/bin/env bash
 
+nvpn_local_fips_process_start() {
+  ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+nvpn_local_fips_lock_mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+nvpn_local_fips_file_sha256() {
+  shasum -a 256 "$1" | awk '{print tolower($1)}'
+}
+
+nvpn_restore_local_fips_lock_snapshot() {
+  local snapshot="$1" destination="$2" temporary
+  temporary="$(mktemp "${destination}.nvpn-restore.XXXXXX")" || return 1
+  if ! cp -p "$snapshot" "$temporary" || ! mv -f "$temporary" "$destination"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+nvpn_local_fips_lock_path() {
+  local root="$1" lock_root key
+  root="$(cd "$root" && pwd -P)"
+  lock_root="${NVPN_LOCAL_FIPS_LOCK_ROOT:-${TMPDIR:-/tmp}}"
+  mkdir -p "$lock_root"
+  key="$(
+    printf '%s' "$root" \
+      | shasum -a 256 \
+      | awk '{print substr($1, 1, 24)}'
+  )"
+  printf '%s/nvpn-local-fips-%s.lock\n' "${lock_root%/}" "$key"
+}
+
+nvpn_local_fips_lock_is_stale() {
+  local lock="$1" pid started current_started now mtime
+  if [[ ! -f "$lock/ready" ]]; then
+    now="$(date +%s)"
+    mtime="$(nvpn_local_fips_lock_mtime "$lock" || true)"
+    [[ "$mtime" =~ ^[0-9]+$ ]] && (( now - mtime >= 10 ))
+    return
+  fi
+  [[ -f "$lock/pid" && -f "$lock/process-start" ]] || return 0
+  pid="$(<"$lock/pid")"
+  started="$(<"$lock/process-start")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  [[ "$started" != "pid-only" ]] || return 1
+  current_started="$(nvpn_local_fips_process_start "$pid")"
+  [[ -n "$current_started" && "$current_started" != "$started" ]]
+}
+
+nvpn_local_fips_recover_stale_lock() {
+  local lock="$1" root="$2" recorded_root=""
+  mkdir "$lock/recovery" 2>/dev/null || return 1
+  if ! nvpn_local_fips_lock_is_stale "$lock"; then
+    rmdir "$lock/recovery" 2>/dev/null || true
+    return 1
+  fi
+  if [[ -f "$lock/root" ]]; then
+    recorded_root="$(<"$lock/root")"
+  fi
+  if [[ -n "$recorded_root" && "$recorded_root" != "$root" ]]; then
+    echo "local FIPS lock belongs to a different checkout: $lock" >&2
+    rmdir "$lock/recovery" 2>/dev/null || true
+    return 1
+  fi
+  if [[ -f "$lock/ready" && ! -f "$lock/Cargo.lock.snapshot" ]]; then
+    echo "stale local-FIPS owner has no recoverable Cargo.lock snapshot" >&2
+    rmdir "$lock/recovery" 2>/dev/null || true
+    return 1
+  fi
+  if [[ -f "$lock/Cargo.lock.snapshot" ]]; then
+    if ! nvpn_restore_local_fips_lock_snapshot \
+      "$lock/Cargo.lock.snapshot" "$root/Cargo.lock"
+    then
+      echo "could not restore Cargo.lock from stale local-FIPS owner" >&2
+      rmdir "$lock/recovery" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  if ! rm -rf "$lock"; then
+    echo "could not remove stale local-FIPS workspace lock" >&2
+    return 1
+  fi
+  printf 'recovered stale local-FIPS workspace owner\n'
+}
+
+nvpn_acquire_local_fips_lock() {
+  local root="$1" timeout="${NVPN_LOCAL_FIPS_LOCK_TIMEOUT_SECS:-3600}"
+  local lock deadline token started release_manifest_sha
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || {
+    echo "NVPN_LOCAL_FIPS_LOCK_TIMEOUT_SECS must be a positive integer" >&2
+    return 1
+  }
+  root="$(cd "$root" && pwd -P)"
+  lock="$(nvpn_local_fips_lock_path "$root")"
+  deadline=$((SECONDS + timeout))
+  while ! mkdir "$lock" 2>/dev/null; do
+    if nvpn_local_fips_lock_is_stale "$lock" \
+      && nvpn_local_fips_recover_stale_lock "$lock" "$root"
+    then
+      continue
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "timed out waiting for local-FIPS workspace owner: $lock" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  token="$$-$RANDOM-$(date +%s)"
+  started="$(nvpn_local_fips_process_start "$$")"
+  [[ -n "$started" ]] || started="pid-only"
+  printf '%s\n' "$$" >"$lock/pid"
+  printf '%s\n' "$started" >"$lock/process-start"
+  printf '%s\n' "$root" >"$lock/root"
+  printf '%s\n' "$token" >"$lock/token"
+  if ! cp -p "$root/Cargo.lock" "$lock/Cargo.lock.snapshot"; then
+    rm -rf "$lock"
+    echo "could not snapshot Cargo.lock for local-FIPS build" >&2
+    return 1
+  fi
+  release_manifest_sha="$(
+    nvpn_local_fips_file_sha256 "$root/Cargo.toml"
+  )"
+  printf '%s\n' "$release_manifest_sha" >"$lock/Cargo.toml.sha256"
+  : >"$lock/ready"
+
+  NVPN_LOCAL_FIPS_LOCK_DIR="$lock"
+  NVPN_LOCAL_FIPS_LOCK_TOKEN="$token"
+  NVPN_LOCAL_FIPS_LOCK_SNAPSHOT="$lock/Cargo.lock.snapshot"
+  export NVPN_LOCAL_FIPS_LOCK_DIR
+  export NVPN_LOCAL_FIPS_LOCK_TOKEN
+  export NVPN_LOCAL_FIPS_LOCK_SNAPSHOT
+}
+
 nvpn_restore_local_fips_workspace() {
+  local lock="${NVPN_LOCAL_FIPS_LOCK_DIR:-}" token="${NVPN_LOCAL_FIPS_LOCK_TOKEN:-}"
+  local cleanup_failed=0 expected_manifest_sha="" observed_manifest_sha=""
   if [[ -n "${NVPN_LOCAL_FIPS_LOCK_SNAPSHOT:-}" \
-        && -f "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT" \
-        && -f "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock" ]]; then
-    if ! cmp -s "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT" "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock"; then
-      cp -p "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT" "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock"
-      printf 'restored Cargo.lock after local-FIPS cargo run\n'
+        && -f "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT" ]]; then
+    if [[ ! -f "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock" ]] \
+      || ! cmp -s "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT" "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock"
+    then
+      if nvpn_restore_local_fips_lock_snapshot \
+        "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT" "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock"
+      then
+        printf 'restored Cargo.lock after local-FIPS cargo run\n'
+      else
+        echo "could not restore Cargo.lock after local-FIPS cargo run" >&2
+        cleanup_failed=1
+      fi
     fi
+  elif [[ -n "$lock" ]]; then
+    echo "Cargo.lock snapshot is missing after local-FIPS build" >&2
+    cleanup_failed=1
   fi
-  if [[ -n "${NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT:-}" \
-        && -f "$NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT" \
-        && -f "$NVPN_LOCAL_FIPS_ROOT/Cargo.toml" ]]; then
-    if ! cmp -s "$NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT" "$NVPN_LOCAL_FIPS_ROOT/Cargo.toml"; then
-      cp -p "$NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT" "$NVPN_LOCAL_FIPS_ROOT/Cargo.toml"
-      printf 'restored Cargo.toml after local-FIPS cargo run\n'
+  if [[ -n "$lock" && -f "$lock/Cargo.toml.sha256" \
+    && -f "$NVPN_LOCAL_FIPS_ROOT/Cargo.toml" ]]
+  then
+    expected_manifest_sha="$(<"$lock/Cargo.toml.sha256")"
+    observed_manifest_sha="$(
+      nvpn_local_fips_file_sha256 "$NVPN_LOCAL_FIPS_ROOT/Cargo.toml"
+    )"
+    if [[ "$observed_manifest_sha" != "$expected_manifest_sha" ]]; then
+      echo "Cargo.toml changed during the local-FIPS build" >&2
+      cleanup_failed=1
     fi
+  elif [[ -n "$lock" ]]; then
+    echo "Cargo.toml verification data is missing after local-FIPS build" >&2
+    cleanup_failed=1
   fi
+  if [[ -n "$lock" && -d "$lock" \
+        && -f "$lock/token" && "$(<"$lock/token")" == "$token" \
+        && "$cleanup_failed" -eq 0 ]]; then
+    rm -rf "$lock"
+  fi
+  NVPN_LOCAL_FIPS_LOCK_DIR=""
+  NVPN_LOCAL_FIPS_LOCK_TOKEN=""
+  NVPN_LOCAL_FIPS_LOCK_SNAPSHOT=""
+  return "$cleanup_failed"
+}
+
+nvpn_validate_preconfigured_local_fips_session() {
+  local root="$1" fips_path="$2"
+  local manifest_sha lock_sha fips_path_sha fips_head fips_tree session_sha
+  for session_sha in \
+    NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256 \
+    NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256 \
+    NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256
+  do
+    [[ "${!session_sha:-}" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "preconfigured local-FIPS session is missing $session_sha" >&2
+      return 1
+    }
+  done
+  [[ "${NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD:-}" =~ ^[0-9a-f]{40}$ \
+    && "${NVPN_LOCAL_FIPS_SESSION_FIPS_TREE:-}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "preconfigured local-FIPS session has no exact FIPS revision" >&2
+    return 1
+  }
+  manifest_sha="$(nvpn_local_fips_file_sha256 "$root/Cargo.toml")"
+  lock_sha="$(nvpn_local_fips_file_sha256 "$root/Cargo.lock")"
+  fips_path="$(cd "$fips_path" && pwd -P)"
+  fips_path_sha="$(
+    printf '%s' "$fips_path" | shasum -a 256 | awk '{print tolower($1)}'
+  )"
+  fips_head="$(git -C "$fips_path" rev-parse HEAD)"
+  fips_tree="$(git -C "$fips_path" rev-parse 'HEAD^{tree}')"
+  [[ "$manifest_sha" == "$NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256" \
+    && "$lock_sha" == "$NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256" \
+    && "$fips_path_sha" == "$NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256" \
+    && "$fips_head" == "$NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD" \
+    && "$fips_tree" == "$NVPN_LOCAL_FIPS_SESSION_FIPS_TREE" \
+    && -z "$(git -C "$fips_path" status --porcelain --untracked-files=all)" ]] \
+    || {
+      echo "preconfigured local-FIPS session no longer matches its exact inputs" >&2
+      return 1
+    }
+}
+
+nvpn_local_fips_exit_cleanup() {
+  local status="$?" cleanup_failed=0
+  trap - EXIT
+  nvpn_restore_local_fips_workspace || cleanup_failed=1
+  if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+    status=1
+  fi
+  exit "$status"
+}
+
+nvpn_install_local_fips_cargo_wrapper() {
+  local fips_path="$1" real_cargo wrapper
+  real_cargo="$(command -v cargo)"
+  wrapper="$NVPN_LOCAL_FIPS_LOCK_DIR/cargo-wrapper"
+  mkdir -p "$wrapper"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'exec %q' "$real_cargo"
+    printf ' --config %q' \
+      "patch.crates-io.fips-core.path=\"$fips_path/crates/fips-core\"" \
+      "patch.crates-io.fips-endpoint.path=\"$fips_path/crates/fips-endpoint\"" \
+      "patch.crates-io.fips-identity.path=\"$fips_path/crates/fips-identity\""
+    printf ' \"$@\"\n'
+  } >"$wrapper/cargo"
+  chmod 700 "$wrapper/cargo"
+  export PATH="$wrapper:$PATH"
 }
 
 nvpn_validated_fips_repo_path() {
@@ -39,27 +270,26 @@ nvpn_prepare_local_fips_workspace() {
   local fips_path
   fips_path="$(nvpn_validated_fips_repo_path)"
 
-  NVPN_LOCAL_FIPS_LOCK_SNAPSHOT="$(mktemp)"
-  NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT="$(mktemp)"
-  cp -p "$NVPN_LOCAL_FIPS_ROOT/Cargo.lock" "$NVPN_LOCAL_FIPS_LOCK_SNAPSHOT"
-  cp -p "$NVPN_LOCAL_FIPS_ROOT/Cargo.toml" "$NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT"
+  if [[ "${NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED:-0}" == "1" ]]; then
+    nvpn_validate_preconfigured_local_fips_session \
+      "$NVPN_LOCAL_FIPS_ROOT" "$fips_path" || return 1
+    NVPN_LOCAL_FIPS_PREPARED=1
+    export NVPN_LOCAL_FIPS_PREPARED
+    printf 'using preconfigured exact local FIPS checkout\n'
+    return 0
+  fi
   if [[ -n "$(trap -p EXIT)" ]]; then
     echo "local FIPS workspace refuses to replace an existing EXIT cleanup" >&2
     exit 1
   fi
-  trap nvpn_restore_local_fips_workspace EXIT
-
-  printf '\n[patch.crates-io]\nfips-core = { path = "%s" }\nfips-endpoint = { path = "%s" }\nfips-identity = { path = "%s" }\n' \
-    "$fips_path/crates/fips-core" \
-    "$fips_path/crates/fips-endpoint" \
-    "$fips_path/crates/fips-identity" \
-    >>"$NVPN_LOCAL_FIPS_ROOT/Cargo.toml"
+  nvpn_acquire_local_fips_lock "$NVPN_LOCAL_FIPS_ROOT"
+  trap nvpn_local_fips_exit_cleanup EXIT
+  nvpn_install_local_fips_cargo_wrapper "$fips_path"
 
   NVPN_LOCAL_FIPS_PREPARED=1
   export NVPN_LOCAL_FIPS_PREPARED
   export NVPN_LOCAL_FIPS_ROOT
   export NVPN_LOCAL_FIPS_LOCK_SNAPSHOT
-  export NVPN_LOCAL_FIPS_MANIFEST_SNAPSHOT
   printf 'using exact local FIPS checkout\n'
 }
 

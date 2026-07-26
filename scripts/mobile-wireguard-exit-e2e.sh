@@ -93,11 +93,15 @@ cleanup() {
   local status="$?"
   local cleanup_failed=0
   trap - EXIT INT TERM
+  mobile_continuity_stop
   if [[ "$IOS_CLEANUP_ARMED" == "1" && -n "$IOS_DEVICE_SELECTED" ]]; then
     if ! ios_release_network_disconnect_cleanup; then
       echo "iOS WireGuard exit gate cleanup could not confirm tunnel disconnect" >&2
       cleanup_failed=1
     fi
+  fi
+  if ! ios_release_network_cleanup_private_artifacts; then
+    cleanup_failed=1
   fi
   if ! mobile_ios_hotspot_cleanup; then
     cleanup_failed=1
@@ -105,9 +109,17 @@ cleanup() {
   if ! mobile_android_managed_ap_cleanup; then
     cleanup_failed=1
   fi
-  mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"
+  if ! mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"; then
+    echo "WireGuard exit fixture cleanup left a managed resource behind" >&2
+    cleanup_failed=1
+  fi
   if [[ -n "$FIXTURE_DIR" ]]; then
-    rm -rf "$FIXTURE_DIR"
+    if rm -rf "$FIXTURE_DIR" && [[ ! -e "$FIXTURE_DIR" ]]; then
+      FIXTURE_DIR=""
+    else
+      echo "WireGuard exit fixture private files survived local cleanup" >&2
+      cleanup_failed=1
+    fi
   fi
   if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
     status=1

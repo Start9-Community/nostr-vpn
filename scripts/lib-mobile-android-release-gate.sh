@@ -12,10 +12,10 @@ android_release_require_inputs() {
   }
   EXPECTED_ANDROID_APP_GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
   EXPECTED_ANDROID_APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
-  [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
-    echo "Android Release black-box gate requires a clean app checkout" >&2
-    return 1
-  }
+  assert_release_checkout_state \
+    "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" \
+    "$EXPECTED_ANDROID_APP_GIT_TREE" "Android Release black-box gate" \
+    || return 1
   if [[ -n "${NVPN_BUILD_GIT_SHA:-}" \
     && "$NVPN_BUILD_GIT_SHA" != "$EXPECTED_ANDROID_APP_GIT_HEAD" ]]
   then
@@ -28,7 +28,9 @@ android_release_require_inputs() {
     ANDROID_KEYSTORE_PASSWORD \
     ANDROID_KEY_ALIAS \
     ANDROID_KEY_PASSWORD \
-    NVPN_FIPS_REPO_PATH
+    NVPN_FIPS_REPO_PATH \
+    NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256 \
+    NVPN_EXPECTED_FIPS_GIT_SHA
   do
     [[ -n "${!name:-}" ]] || {
       echo "Android Release black-box gate requires $name" >&2
@@ -61,10 +63,15 @@ android_release_require_inputs() {
   rm -f "$signer_der"
   configured_signer="${NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256:-}"
   configured_signer="$(
-    printf '%s' "$configured_signer" | tr -d ':' | tr '[:upper:]' '[:lower:]'
+    printf '%s' "$configured_signer" \
+      | tr -d ':[:space:]' \
+      | tr '[:upper:]' '[:lower:]'
   )"
-  if [[ -n "$configured_signer" \
-    && "$configured_signer" != "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" ]]
+  [[ "$configured_signer" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Android Release gate requires an exact signer certificate SHA-256 pin" >&2
+    return 1
+  }
+  if [[ "$configured_signer" != "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" ]]
   then
     echo "Configured Android signer digest does not match the company keystore" >&2
     return 1
@@ -98,14 +105,17 @@ android_release_require_inputs() {
     echo "Android Release gate could not derive the exact FIPS package version" >&2
     return 1
   }
-  if [[ -n "$EXPECTED_FIPS_GIT_SHA" && "$fips_head" != "$EXPECTED_FIPS_GIT_SHA" ]]; then
-    echo "Android Release black-box FIPS mismatch: expected $EXPECTED_FIPS_GIT_SHA, got $fips_head" >&2
+  [[ "$NVPN_EXPECTED_FIPS_GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Android Release gate requires an exact FIPS Git SHA pin" >&2
+    return 1
+  }
+  if [[ "$fips_head" != "$NVPN_EXPECTED_FIPS_GIT_SHA" ]]; then
+    echo "Android Release black-box FIPS mismatch: expected $NVPN_EXPECTED_FIPS_GIT_SHA, got $fips_head" >&2
     return 1
   fi
-  EXPECTED_FIPS_GIT_SHA="$fips_head"
+  EXPECTED_FIPS_GIT_SHA="$NVPN_EXPECTED_FIPS_GIT_SHA"
   EXPECTED_FIPS_GIT_TREE="$fips_tree"
   EXPECTED_FIPS_VERSION="$fips_version"
-  export NVPN_EXPECTED_FIPS_GIT_SHA="$fips_head"
   export NVPN_EXPECTED_FIPS_VERSION="$fips_version"
   [[ -n "$RELEASE_WIREGUARD_CONFIG_FILE" || -n "$RELEASE_WIREGUARD_CONFIG" ]] || {
     echo "Android Release black-box gate requires WireGuard config for real UI entry" >&2
@@ -276,23 +286,28 @@ PY
       != "$EXPECTED_FIPS_GIT_SHA" \
     || "$(git -C "$NVPN_FIPS_REPO_PATH" rev-parse 'HEAD^{tree}')" \
       != "$EXPECTED_FIPS_GIT_TREE" \
-    || -n "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain --untracked-files=all)" \
-    || "$(git -C "$ROOT" rev-parse HEAD)" != "$EXPECTED_ANDROID_APP_GIT_HEAD" \
-    || "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" != "$EXPECTED_ANDROID_APP_GIT_TREE" \
-    || -n "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]]
+    || -n "$(git -C "$NVPN_FIPS_REPO_PATH" status --porcelain --untracked-files=all)" ]]
   then
     rm -f "$native_lib"
     echo "Android Release app/FIPS source changed during the artifact build" >&2
+    return 1
+  fi
+  if ! assert_release_checkout_state \
+    "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" \
+    "$EXPECTED_ANDROID_APP_GIT_TREE" "Android Release artifact build"
+  then
+    rm -f "$native_lib"
     return 1
   fi
   metadata_sha="$(shasum -a 256 "$metadata_receipt" | awk '{print $1}')"
   rm -f "$native_lib"
   receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$RUNTIME_STATE_RESULT_DIR/mobile-android-release-artifact.json}"
   mkdir -p "$RUNTIME_STATE_RESULT_DIR" "$(dirname "$receipt")"
-  python3 - "$receipt" "$apk_sha" "$NVPN_BUILD_GIT_SHA" \
+  if ! python3 - "$receipt" "$apk_sha" "$NVPN_BUILD_GIT_SHA" \
     "$EXPECTED_FIPS_GIT_SHA" "$PACKAGE_NAME" "$APK_PATH" \
     "$EXPECTED_FIPS_GIT_TREE" \
-    "$EXPECTED_FIPS_VERSION" "$metadata_sha" <<'PY'
+    "$EXPECTED_FIPS_VERSION" "$metadata_sha" \
+    "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" <<'PY'
 import hashlib
 import json
 import os
@@ -308,6 +323,7 @@ import sys
     fips_tree,
     fips_version,
     metadata_sha,
+    signer_sha,
 ) = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
@@ -319,6 +335,7 @@ with open(path, "w", encoding="utf-8") as handle:
             "apkSha256": apk_sha,
             "installedApkSha256": apk_sha,
             "companySigningVerified": True,
+            "signerCertificateSha256": signer_sha,
             "appGitSha": app_sha,
             "fipsGitSha": fips_sha,
             "fipsGitTree": fips_tree,
@@ -335,6 +352,11 @@ with open(path, "w", encoding="utf-8") as handle:
     )
     handle.write("\n")
 PY
+  then
+    rm -f "$receipt"
+    echo "Android Release artifact receipt generation failed" >&2
+    return 1
+  fi
   echo "Android exact company-signed Release replacement passed: $receipt"
 }
 

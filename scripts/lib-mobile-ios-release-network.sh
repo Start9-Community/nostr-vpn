@@ -24,6 +24,40 @@ IOS_RELEASE_NETWORK_APP_HEAD=""
 IOS_RELEASE_NETWORK_APP_TREE=""
 IOS_RELEASE_NETWORK_XCODE_COMMAND=()
 
+ios_release_network_cleanup_private_artifacts() {
+  local cleanup_failed=0 signing_removed=1
+  ios_release_network_delete_private_test_products || cleanup_failed=1
+  if [[ -n "$IOS_RELEASE_NETWORK_SIGNING_DIR" ]]; then
+    case "$(basename "$IOS_RELEASE_NETWORK_SIGNING_DIR")" in
+      nvpn-ios-release-signing.*)
+        if ! rm -rf "$IOS_RELEASE_NETWORK_SIGNING_DIR"; then
+          cleanup_failed=1
+          signing_removed=0
+        fi
+        ;;
+      *)
+        echo "Refusing to remove an unsafe iOS signing artifact path" >&2
+        cleanup_failed=1
+        signing_removed=0
+        ;;
+    esac
+  fi
+  if [[ "$signing_removed" -eq 1 ]]; then
+    IOS_RELEASE_NETWORK_SIGNING_DIR=""
+    IOS_RELEASE_NETWORK_SIGNING_ENV=""
+    IOS_RELEASE_NETWORK_DEVICE_RECEIPT=""
+    unset NVPN_IOS_CODE_SIGN_IDENTITY
+    unset NVPN_IOS_PROVISIONING_PROFILE_UUID
+    unset NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
+  fi
+  return "$cleanup_failed"
+}
+
+ios_release_network_prepare_abort() {
+  ios_release_network_cleanup_private_artifacts || true
+  return 1
+}
+
 ios_release_network_company_signing() {
   local organization="$1"
   security find-identity -v -p codesigning \
@@ -60,10 +94,10 @@ ios_release_network_prepare() {
   [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 0 ]] || return 0
   IOS_RELEASE_NETWORK_APP_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
   IOS_RELEASE_NETWORK_APP_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
-  [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
-    echo "iOS Release network gate requires a clean app checkout" >&2
-    return 1
-  }
+  assert_release_checkout_state \
+    "$ROOT" "$IOS_RELEASE_NETWORK_APP_HEAD" \
+    "$IOS_RELEASE_NETWORK_APP_TREE" "iOS Release network gate" \
+    || return 1
   if [[ -n "${NVPN_BUILD_GIT_SHA:-}" \
     && "$NVPN_BUILD_GIT_SHA" != "$IOS_RELEASE_NETWORK_APP_HEAD" ]]
   then
@@ -75,10 +109,31 @@ ios_release_network_prepare() {
   local expected_device_name="${NVPN_IOS_EXPECTED_DEVICE_NAME:-}"
   local fips_path="${NVPN_FIPS_REPO_PATH:-}"
   local expected_fips="${NVPN_EXPECTED_FIPS_GIT_SHA:-}"
+  local expected_team="${NVPN_EXPECTED_IOS_DISTRIBUTION_TEAM_ID:-}"
+  local expected_cert="${NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256:-}"
   [[ -n "$expected_device_name" ]] || {
     echo "iOS Release gate requires an explicit expected physical device name" >&2
     return 1
   }
+  [[ "$expected_team" =~ ^[A-Z0-9]{10}$ ]] || {
+    echo "iOS Release gate requires an exact distribution team pin" >&2
+    return 1
+  }
+  expected_cert="$(
+    printf '%s' "$expected_cert" \
+      | tr -d ':[:space:]' \
+      | tr '[:upper:]' '[:lower:]'
+  )"
+  [[ "$expected_cert" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "iOS Release gate requires an exact distribution certificate SHA-256 pin" >&2
+    return 1
+  }
+  [[ "$expected_fips" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "iOS Release gate requires an exact FIPS Git SHA pin" >&2
+    return 1
+  }
+  NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256="$expected_cert"
+  export NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256
   local company_signing company_identity team
   company_signing="$(
     ios_release_network_company_signing "$signer_organization"
@@ -93,11 +148,13 @@ ios_release_network_prepare() {
     echo "iOS Release company signing receipt was malformed" >&2
     return 1
   }
-  if [[ -n "$configured_team" && "$configured_team" != "$team" ]]; then
+  if [[ "$team" != "$expected_team" \
+    || (-n "$configured_team" && "$configured_team" != "$expected_team") ]]
+  then
     echo "Configured iOS team is not the Sirius Business signing team" >&2
     return 1
   fi
-  export NVPN_IOS_TEAM_ID="$team"
+  export NVPN_IOS_TEAM_ID="$expected_team"
   [[ -n "$fips_path" && (-d "$fips_path/.git" || -f "$fips_path/.git") ]] || {
     echo "iOS Release network gate requires an exact local FIPS checkout" >&2
     return 1
@@ -126,20 +183,31 @@ ios_release_network_prepare() {
     echo "iOS Release gate could not derive the exact FIPS package version" >&2
     return 1
   }
-  if [[ -n "$expected_fips" && "$expected_fips" != "$fips_head" ]]; then
+  if [[ "$expected_fips" != "$fips_head" ]]; then
     echo "iOS Release network gate FIPS mismatch" >&2
     return 1
   fi
-  export NVPN_EXPECTED_FIPS_GIT_SHA="$fips_head"
   export NVPN_EXPECTED_FIPS_VERSION="$fips_version"
   IOS_RELEASE_NETWORK_FIPS_TREE="$fips_tree"
   export NVPN_IOS_RUST_PROFILE=release
 
-  IOS_RELEASE_NETWORK_SIGNING_DIR="$ROOT/ios/.build/ReleaseNetworkSigning"
+  umask 077
+  if ! IOS_RELEASE_NETWORK_SIGNING_DIR="$(
+    mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-release-signing.XXXXXX"
+  )"; then
+    echo "iOS Release gate could not create private signing storage" >&2
+    return 1
+  fi
+  if ! chmod 700 "$IOS_RELEASE_NETWORK_SIGNING_DIR"; then
+    ios_release_network_prepare_abort
+    return
+  fi
   IOS_RELEASE_NETWORK_SIGNING_ENV="$IOS_RELEASE_NETWORK_SIGNING_DIR/provisioning.env"
   IOS_RELEASE_NETWORK_DERIVED_DATA="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-$ROOT/ios/.build/ReleaseNetworkDerivedData}"
-  mkdir -p "$IOS_RELEASE_NETWORK_SIGNING_DIR" \
-    "${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
+  if ! mkdir -p "${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"; then
+    ios_release_network_prepare_abort
+    return
+  fi
   local device_details device_udid
   device_details="$IOS_RELEASE_NETWORK_SIGNING_DIR/selected-device-details.json"
   IOS_RELEASE_NETWORK_DEVICE_RECEIPT="$IOS_RELEASE_NETWORK_SIGNING_DIR/selected-device-receipt.json"
@@ -149,9 +217,10 @@ ios_release_network_prepare() {
     --quiet >/dev/null
   then
     echo "iOS Release gate could not read back its explicitly selected phone" >&2
-    return 1
+    ios_release_network_prepare_abort
+    return
   fi
-  if ! python3 - \
+  if ! device_udid="$(python3 - \
     "$device_details" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" \
     "$expected_device_name" "${NVPN_IOS_EXPECTED_DEVICE_MODEL:-}" <<'PY'
 import json
@@ -184,21 +253,20 @@ receipt = {
 with open(receipt_path, "w", encoding="utf-8") as output:
     json.dump(receipt, output, indent=2, sort_keys=True)
     output.write("\n")
-PY
-  then
-    echo "iOS Release gate rejected the selected physical phone" >&2
-    return 1
-  fi
-  device_udid="$(
-    python3 - "$device_details" <<'PY'
-import json
-import sys
-
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-value = value["result"]["hardwareProperties"]["udid"]
-print(value)
+print(udid)
 PY
   )"
+  then
+    rm -f "$device_details"
+    echo "iOS Release gate rejected the selected physical phone" >&2
+    ios_release_network_prepare_abort
+    return
+  fi
+  rm -f "$device_details" || {
+    echo "iOS Release gate could not scrub raw device details" >&2
+    ios_release_network_prepare_abort
+    return
+  }
   IOS_RELEASE_NETWORK_DEVICE="$device_udid"
   IOS_RELEASE_NETWORK_DESTINATION="platform=iOS,id=$device_udid"
 
@@ -211,41 +279,89 @@ PY
     NVPN_IOS_PROFILES_ENV_PATH="$IOS_RELEASE_NETWORK_SIGNING_ENV" \
     "$ROOT/scripts/ios-profiles" ensure >"$profile_log" 2>&1
   then
-    echo "Unable to prepare company Ad Hoc signing; private details are in $profile_log" >&2
-    return 1
+    if rm -f "$profile_log" "$IOS_RELEASE_NETWORK_SIGNING_ENV"; then
+      echo "Unable to prepare company Ad Hoc signing; private details were deleted" >&2
+    else
+      echo "Unable to prepare company Ad Hoc signing; private cleanup failed" >&2
+    fi
+    ios_release_network_prepare_abort
+    return
   fi
+  unset NVPN_IOS_CODE_SIGN_IDENTITY
+  unset NVPN_IOS_PROVISIONING_PROFILE_UUID
+  unset NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
   # shellcheck disable=SC1090
-  source "$IOS_RELEASE_NETWORK_SIGNING_ENV"
-  : "${NVPN_IOS_CODE_SIGN_IDENTITY:?iOS Release signing identity is missing}"
-  : "${NVPN_IOS_PROVISIONING_PROFILE_UUID:?iOS Release app profile is missing}"
-  : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?iOS Release tunnel profile is missing}"
+  if ! source "$IOS_RELEASE_NETWORK_SIGNING_ENV"; then
+    rm -f "$profile_log" "$IOS_RELEASE_NETWORK_SIGNING_ENV"
+    echo "iOS Release signing receipt could not be loaded" >&2
+    ios_release_network_prepare_abort
+    return
+  fi
+  rm -f "$profile_log" "$IOS_RELEASE_NETWORK_SIGNING_ENV" || {
+    echo "iOS Release gate could not scrub profile preparation artifacts" >&2
+    ios_release_network_prepare_abort
+    return
+  }
+  local signing_name
+  for signing_name in \
+    NVPN_IOS_CODE_SIGN_IDENTITY \
+    NVPN_IOS_PROVISIONING_PROFILE_UUID \
+    NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
+  do
+    [[ -n "${!signing_name:-}" ]] || {
+      echo "iOS Release signing receipt is incomplete: $signing_name" >&2
+      ios_release_network_prepare_abort
+      return
+    }
+  done
   [[ "$NVPN_IOS_CODE_SIGN_IDENTITY" == "$company_identity" ]] || {
     echo "iOS Release profile preparation changed the explicit company signer" >&2
-    return 1
+    ios_release_network_prepare_abort
+    return
   }
 
   local reuse_build="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"
   local result_dir build_log xctestrun_count
   result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
-  build_log="$result_dir/mobile-ios-release-build-for-testing-$$.log"
+  build_log="$IOS_RELEASE_NETWORK_SIGNING_DIR/build-for-testing.log"
   if bool_is_true "$reuse_build"; then
-    ios_release_network_audit_rust_feature_surface || return 1
+    ios_release_network_audit_rust_feature_surface || {
+      ios_release_network_prepare_abort
+      return
+    }
   else
-    NVPN_IOS_RUST_PROFILE=release "$ROOT/tools/run-ios" xcframework
-    "$ROOT/tools/run-ios" project
-    ios_release_network_audit_rust_feature_surface || return 1
+    NVPN_IOS_RUST_PROFILE=release "$ROOT/tools/run-ios" xcframework || {
+      ios_release_network_prepare_abort
+      return
+    }
+    "$ROOT/tools/run-ios" project || {
+      ios_release_network_prepare_abort
+      return
+    }
+    ios_release_network_audit_rust_feature_surface || {
+      ios_release_network_prepare_abort
+      return
+    }
     [[ -z "$(git -C "$fips_path" status --porcelain)" ]] || {
       echo "iOS Release FIPS build left the exact checkout dirty" >&2
-      return 1
+      ios_release_network_prepare_abort
+      return
     }
     ios_release_network_xcode_command
     local -a build_command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
     build_command+=(build-for-testing)
     if ! "${build_command[@]}" >"$build_log" 2>&1; then
       tail -n 160 "$build_log" >&2
+      rm -f "$build_log" || true
       echo "iOS company-signed Release build-for-testing failed" >&2
-      return 1
+      ios_release_network_prepare_abort
+      return
     fi
+    rm -f "$build_log" || {
+      echo "iOS Release gate could not scrub its signing build log" >&2
+      ios_release_network_prepare_abort
+      return
+    }
   fi
   if [[ -n "${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}" ]]; then
     IOS_RELEASE_NETWORK_XCTESTRUN="$NVPN_MOBILE_IOS_RELEASE_XCTESTRUN"
@@ -258,7 +374,8 @@ PY
     )"
     if [[ "$xctestrun_count" != "1" ]]; then
       echo "iOS Release build produced $xctestrun_count xctestrun files, expected one" >&2
-      return 1
+      ios_release_network_prepare_abort
+      return
     fi
     IOS_RELEASE_NETWORK_XCTESTRUN="$(
       find "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products" \
@@ -268,13 +385,14 @@ PY
   fi
   [[ -s "$IOS_RELEASE_NETWORK_XCTESTRUN" ]] || {
     echo "iOS Release build-for-testing did not preserve its xctestrun" >&2
-    return 1
+    ios_release_network_prepare_abort
+    return
   }
   IOS_RELEASE_NETWORK_PREPARED=1
   if bool_is_true "$reuse_build"; then
     echo "iOS company-signed Release network gate reused its preserved build"
   else
-    echo "iOS company-signed Release network gate prepared once: $build_log"
+    echo "iOS company-signed Release network gate prepared once"
   fi
 }
 
@@ -346,12 +464,17 @@ ios_release_network_prepare_xctestrun() {
 
 ios_release_network_delete_private_test_products() {
   local xcresult="${1:-}" log="${2:-}"
+  local cleanup_failed=0
   if [[ -n "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" ]]; then
-    rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-    IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
+    if rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"; then
+      IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
+    else
+      cleanup_failed=1
+    fi
   fi
-  [[ -z "$xcresult" ]] || rm -rf "$xcresult"
-  [[ -z "$log" ]] || rm -f "$log"
+  [[ -z "$xcresult" ]] || rm -rf "$xcresult" || cleanup_failed=1
+  [[ -z "$log" ]] || rm -f "$log" || cleanup_failed=1
+  return "$cleanup_failed"
 }
 
 ios_release_network_assert_retained_no_secrets() {
@@ -531,7 +654,10 @@ run_ios_release_network_case() {
     command_status="${pipeline_status[1]}"
   fi
   mobile_continuity_stop
-  ios_release_network_delete_private_test_products "$xcresult" "$log"
+  ios_release_network_delete_private_test_products "$xcresult" "$log" || {
+    echo "iOS Release gate could not delete private test diagnostics" >&2
+    return 1
+  }
   if [[ "$command_status" -ne 0 ]]; then
     ios_release_network_assert_retained_no_secrets \
       "$spec_base64" "$host_markers" "$process_summary" "$ping_log" \
@@ -567,13 +693,12 @@ PY
   echo "iOS Release real-network case passed: $label"
 }
 
-ios_release_network_disconnect_cleanup() {
-  [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 1 ]] || return 0
+ios_release_network_disconnect_cleanup_inner() {
   local result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
   local log="$result_dir/mobile-ios-release-cleanup-$$.log"
   local markers="$result_dir/mobile-ios-release-cleanup-markers-$$.log"
   local -a command=()
-  ios_release_network_delete_private_test_products
+  ios_release_network_delete_private_test_products || return 1
   ios_release_network_prepare_xctestrun \
     cleanup "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" || return 1
   ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
@@ -583,11 +708,14 @@ ios_release_network_disconnect_cleanup() {
     test-without-building
   )
   if ! NSUnbufferedIO=YES "${command[@]}" >"$log" 2>&1; then
-    ios_release_network_delete_private_test_products "" "$log"
+    if ! ios_release_network_delete_private_test_products "" "$log"; then
+      echo "iOS Release cleanup failed and private diagnostics could not be deleted" >&2
+      return 1
+    fi
     echo "iOS Release cleanup failed; private diagnostics were deleted" >&2
     return 1
   fi
-  ios_release_network_delete_private_test_products "" "$log"
+  ios_release_network_delete_private_test_products "" "$log" || return 1
   ios_release_network_copy_markers "$markers" \
     && grep -Fxq "NVPN_IOS_RELEASE_DISCONNECT_PASSED=1" "$markers" \
     && {
@@ -596,4 +724,13 @@ ios_release_network_disconnect_cleanup() {
     } \
     && ios_release_network_assert_retained_no_secrets \
       "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" "$markers"
+}
+
+ios_release_network_disconnect_cleanup() {
+  local cleanup_failed=0
+  if [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 1 ]]; then
+    ios_release_network_disconnect_cleanup_inner || cleanup_failed=1
+  fi
+  ios_release_network_cleanup_private_artifacts || cleanup_failed=1
+  return "$cleanup_failed"
 }

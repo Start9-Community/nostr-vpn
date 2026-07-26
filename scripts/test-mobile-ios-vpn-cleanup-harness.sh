@@ -180,8 +180,9 @@ do
   grep -Fq -- '-collect-test-diagnostics never' "$xcode_driver" \
     || fail "physical Xcode failure can stall on privileged diagnostics: $xcode_driver"
 done
-grep -Fq 'value["result"]["hardwareProperties"]["udid"]' \
+grep -Fq 'udid = hardware.get("udid")' \
   "$ROOT/scripts/lib-mobile-ios-release-network.sh" \
+  && grep -Fq 'print(udid)' "$ROOT/scripts/lib-mobile-ios-release-network.sh" \
   || fail "Release network gate does not resolve its selected CoreDevice hardware ID"
 grep -Fq -- '-collect-test-diagnostics never' \
   "$ROOT/scripts/lib-mobile-ios-release-network.sh" \

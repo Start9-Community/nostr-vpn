@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB="$ROOT/scripts/local-fips-workspace.sh"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-local-fips-harness.XXXXXX")"
+APP_ROOT="$TMP_ROOT/app"
+FIPS_ROOT="$TMP_ROOT/fips"
+LOCK_ROOT="$TMP_ROOT/locks"
+ACTIVE="$TMP_ROOT/active"
+READY="$TMP_ROOT/stale-ready"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+mkdir -p "$APP_ROOT" "$LOCK_ROOT"
+for crate in fips-core fips-endpoint fips-identity; do
+  mkdir -p "$FIPS_ROOT/crates/$crate"
+  printf '[package]\nname = "%s"\nversion = "0.0.0"\n' "$crate" \
+    >"$FIPS_ROOT/crates/$crate/Cargo.toml"
+done
+git -C "$FIPS_ROOT" init -q
+git -C "$FIPS_ROOT" add .
+git -C "$FIPS_ROOT" \
+  -c user.name=Harness -c user.email=harness.invalid commit -qm fixture
+printf '[workspace]\nmembers = []\n' >"$APP_ROOT/Cargo.toml"
+printf '# original lock\n' >"$APP_ROOT/Cargo.lock"
+cp "$APP_ROOT/Cargo.toml" "$TMP_ROOT/Cargo.toml.expected"
+cp "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
+
+run_worker() {
+  local name="$1" dwell="$2"
+  env \
+    LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+    LOCK_ROOT="$LOCK_ROOT" ACTIVE="$ACTIVE" NAME="$name" DWELL="$dwell" \
+    bash -c '
+      set -euo pipefail
+      source "$LIB"
+      export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+      export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+      nvpn_prepare_local_fips_workspace "$APP_ROOT"
+      [[ "$(command -v cargo)" == "$NVPN_LOCAL_FIPS_LOCK_DIR/cargo-wrapper/cargo" ]]
+      cmp -s "$APP_ROOT/Cargo.lock" "$APP_ROOT/../Cargo.lock.expected"
+      mkdir "$ACTIVE"
+      printf "%s\n" "$NAME" >"$APP_ROOT/Cargo.lock"
+      sleep "$DWELL"
+      rmdir "$ACTIVE"
+    '
+}
+
+run_worker first 0.3 &
+first_pid=$!
+sleep 0.05
+run_worker second 0.1 &
+second_pid=$!
+wait "$first_pid"
+wait "$second_pid"
+cmp -s "$APP_ROOT/Cargo.toml" "$TMP_ROOT/Cargo.toml.expected"
+cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
+[[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_prepare_local_fips_workspace "$APP_ROOT"
+    rm -f "$APP_ROOT/Cargo.lock"
+  ' >"$TMP_ROOT/deletion.log"
+grep -Fq 'restored Cargo.lock after local-FIPS cargo run' "$TMP_ROOT/deletion.log"
+cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
+[[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" READY="$READY" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_prepare_local_fips_workspace "$APP_ROOT"
+    printf "# abandoned lock\n" >"$APP_ROOT/Cargo.lock"
+    : >"$READY"
+    while :; do sleep 1; done
+  ' &
+stale_pid=$!
+for _ in $(seq 1 100); do
+  [[ -f "$READY" ]] && break
+  sleep 0.02
+done
+[[ -f "$READY" ]]
+kill -KILL "$stale_pid"
+wait "$stale_pid" 2>/dev/null || true
+run_worker recovered 0.01 >"$TMP_ROOT/recovery.log"
+grep -Fq 'recovered stale local-FIPS workspace owner' "$TMP_ROOT/recovery.log"
+cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
+[[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+
+real_cargo="$(command -v cargo)"
+manifest_sha="$(shasum -a 256 "$APP_ROOT/Cargo.toml" | awk '{print $1}')"
+lock_sha="$(shasum -a 256 "$APP_ROOT/Cargo.lock" | awk '{print $1}')"
+fips_path_sha="$(
+  printf '%s' "$(cd "$FIPS_ROOT" && pwd -P)" | shasum -a 256 | awk '{print $1}'
+)"
+fips_head="$(git -C "$FIPS_ROOT" rev-parse HEAD)"
+fips_tree="$(git -C "$FIPS_ROOT" rev-parse 'HEAD^{tree}')"
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" REAL_CARGO="$real_cargo" \
+  NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED=1 \
+  NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256="$manifest_sha" \
+  NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$lock_sha" \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256="$fips_path_sha" \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD="$fips_head" \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_TREE="$fips_tree" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_prepare_local_fips_workspace "$APP_ROOT"
+    [[ "$(command -v cargo)" == "$REAL_CARGO" ]]
+  '
+if env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" FIPS_ROOT="$FIPS_ROOT" \
+  LOCK_ROOT="$LOCK_ROOT" \
+  NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED=1 \
+  NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256="$manifest_sha" \
+  NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$lock_sha" \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256="$fips_path_sha" \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD=0000000000000000000000000000000000000000 \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_TREE="$fips_tree" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_FIPS_REPO_PATH="$FIPS_ROOT"
+    nvpn_prepare_local_fips_workspace "$APP_ROOT"
+  ' >/dev/null 2>&1
+then
+  echo "preconfigured local-FIPS session accepted the wrong revision" >&2
+  exit 1
+fi
+cmp -s "$APP_ROOT/Cargo.toml" "$TMP_ROOT/Cargo.toml.expected"
+cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
+[[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+
+echo "local FIPS workspace locking harness passed"

@@ -389,26 +389,86 @@ mobile_wg_fixture_doh_count() {
 
 mobile_wg_fixture_cleanup() {
   local container="$1" image="$2"
+  local cleanup_failed=0 inspect_status=0 remote_dir=""
   if [[ "$MOBILE_WG_FIXTURE_STARTED" -eq 1 ]]; then
     if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
       mobile_wg_remote_native stop >/dev/null 2>&1 || true
+      if ! mobile_wg_remote_exec \
+        sudo -n sh -c \
+        '! ip link show "$1" >/dev/null 2>&1 && ! nft list table inet "$2" >/dev/null 2>&1' \
+        sh "$MOBILE_WG_FIXTURE_REMOTE_INTERFACE" \
+        "$MOBILE_WG_FIXTURE_REMOTE_NFT_TABLE" >/dev/null 2>&1
+      then
+        echo "remote native WireGuard interface or nft table survived cleanup" >&2
+        cleanup_failed=1
+      else
+        MOBILE_WG_FIXTURE_STARTED=0
+      fi
     else
       mobile_wg_fixture_docker rm -f "$container" >/dev/null 2>&1 || true
+      if mobile_wg_fixture_docker container inspect "$container" \
+        >/dev/null 2>&1
+      then
+        inspect_status=0
+      else
+        inspect_status=$?
+      fi
+      if [[ "$inspect_status" -eq 1 ]]; then
+        MOBILE_WG_FIXTURE_STARTED=0
+      else
+        echo "WireGuard fixture container survived cleanup or could not be verified" >&2
+        cleanup_failed=1
+      fi
     fi
-    MOBILE_WG_FIXTURE_STARTED=0
   fi
   if [[ "$MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT" -eq 1 ]]; then
     mobile_wg_fixture_docker image rm "$image" >/dev/null 2>&1 || true
-    MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT=0
+    if mobile_wg_fixture_docker image inspect "$image" >/dev/null 2>&1; then
+      inspect_status=0
+    else
+      inspect_status=$?
+    fi
+    if [[ "$inspect_status" -eq 1 ]]; then
+      MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT=0
+    else
+      echo "remote WireGuard fixture image survived cleanup or could not be verified" >&2
+      cleanup_failed=1
+    fi
   fi
   if [[ -n "$MOBILE_WG_FIXTURE_REMOTE_DIR" ]]; then
-    mobile_wg_remote_exec \
-      sudo -n find "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
-      -xdev -depth -mindepth 1 -delete \
-      >/dev/null 2>&1 || true
-    mobile_wg_remote_exec sudo -n rmdir "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
-      >/dev/null 2>&1 || true
-    MOBILE_WG_FIXTURE_REMOTE_DIR=""
+    remote_dir="$MOBILE_WG_FIXTURE_REMOTE_DIR"
+    mobile_wg_remote_exec sudo -n rm -f \
+      "$remote_dir/fixture/server.key" \
+      "$remote_dir/fixture/client.key" >/dev/null 2>&1 || true
+    if ! mobile_wg_remote_exec test ! -e \
+      "$remote_dir/fixture/server.key" >/dev/null 2>&1
+    then
+      echo "remote WireGuard fixture private keys survived cleanup" >&2
+      cleanup_failed=1
+    fi
+    if ! mobile_wg_remote_exec test ! -e \
+      "$remote_dir/fixture/client.key" >/dev/null 2>&1
+    then
+      echo "remote WireGuard fixture private keys survived cleanup" >&2
+      cleanup_failed=1
+    fi
+    if [[ "$MOBILE_WG_FIXTURE_STARTED" -eq 0 ]]; then
+      mobile_wg_remote_exec \
+        sudo -n find "$remote_dir" \
+        -xdev -depth -mindepth 1 -delete \
+        >/dev/null 2>&1 || true
+      mobile_wg_remote_exec sudo -n rmdir "$remote_dir" \
+        >/dev/null 2>&1 || true
+      if mobile_wg_remote_exec test ! -e "$remote_dir" >/dev/null 2>&1; then
+        MOBILE_WG_FIXTURE_REMOTE_DIR=""
+      else
+        echo "remote WireGuard fixture directory survived cleanup or could not be verified" >&2
+        cleanup_failed=1
+      fi
+    else
+      cleanup_failed=1
+    fi
   fi
   mobile_wg_remote_close_control
+  return "$cleanup_failed"
 }

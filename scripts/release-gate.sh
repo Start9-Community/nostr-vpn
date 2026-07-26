@@ -45,26 +45,66 @@ release_cargo_lock_args=(--locked)
 release_cargo_lock_backup=""
 release_cargo_wrapper_dir=""
 release_fips_path=""
+release_cargo_lock_original_sha256=""
+release_cargo_manifest_original_sha256=""
 
 restore_release_cargo_lock() {
+  local cleanup_failed=0
+  if [[ -n "$release_cargo_manifest_original_sha256" \
+    && "$(release_file_sha256 "$ROOT_DIR/Cargo.toml")" \
+      != "$release_cargo_manifest_original_sha256" ]]
+  then
+    echo "Release gate Cargo.toml changed during the local-FIPS session." >&2
+    cleanup_failed=1
+  fi
+  if [[ -n "${NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256:-}" \
+    && "$(release_file_sha256 "$ROOT_DIR/Cargo.lock")" \
+      != "$NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256" ]]
+  then
+    echo "Release gate Cargo.lock changed after local-FIPS preparation." >&2
+    cleanup_failed=1
+  fi
   if [[ -n "$release_cargo_config_backup" ]]; then
     if [[ "$release_cargo_config_existed" == "1" ]]; then
-      cp "$release_cargo_config_backup" "$release_cargo_config_path"
+      cp "$release_cargo_config_backup" "$release_cargo_config_path" \
+        || cleanup_failed=1
     else
-      rm -f "$release_cargo_config_path"
+      rm -f "$release_cargo_config_path" || cleanup_failed=1
     fi
-    rm -f "$release_cargo_config_backup"
+    rm -f "$release_cargo_config_backup" || cleanup_failed=1
     release_cargo_config_backup=""
   fi
   if [[ -n "$release_cargo_lock_backup" ]]; then
-    cp "$release_cargo_lock_backup" "$ROOT_DIR/Cargo.lock"
-    rm -f "$release_cargo_lock_backup"
+    cp "$release_cargo_lock_backup" "$ROOT_DIR/Cargo.lock" \
+      || cleanup_failed=1
+    rm -f "$release_cargo_lock_backup" || cleanup_failed=1
     release_cargo_lock_backup=""
   fi
   if [[ -n "$release_cargo_wrapper_dir" ]]; then
-    rm -rf "$release_cargo_wrapper_dir"
+    rm -rf "$release_cargo_wrapper_dir" || cleanup_failed=1
     release_cargo_wrapper_dir=""
   fi
+  if [[ -n "$release_cargo_manifest_original_sha256" \
+    && "$(release_file_sha256 "$ROOT_DIR/Cargo.toml")" \
+      != "$release_cargo_manifest_original_sha256" ]]
+  then
+    echo "Release gate failed to restore the original Cargo.toml." >&2
+    cleanup_failed=1
+  fi
+  if [[ -n "$release_cargo_lock_original_sha256" \
+    && "$(release_file_sha256 "$ROOT_DIR/Cargo.lock")" \
+      != "$release_cargo_lock_original_sha256" ]]
+  then
+    echo "Release gate failed to restore the original Cargo.lock." >&2
+    cleanup_failed=1
+  fi
+  unset NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED
+  unset NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256
+  unset NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256
+  unset NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256
+  unset NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD
+  unset NVPN_LOCAL_FIPS_SESSION_FIPS_TREE
+  return "$cleanup_failed"
 }
 
 install_release_cargo_wrapper() {
@@ -121,18 +161,35 @@ prepare_release_cargo_config() {
   fi
 
   local fips_path="$NVPN_FIPS_REPO_PATH"
+  local fips_head fips_tree
   if [[ ! -d "$fips_path" ]]; then
     echo "NVPN_FIPS_REPO_PATH does not exist: $fips_path" >&2
     exit 2
   fi
   fips_path="$(cd "$fips_path" && pwd -P)"
   release_fips_path="$fips_path"
+  release_cargo_lock_original_sha256="$(release_file_sha256 "$ROOT_DIR/Cargo.lock")"
+  release_cargo_manifest_original_sha256="$(release_file_sha256 "$ROOT_DIR/Cargo.toml")"
   for crate in fips-core fips-endpoint fips-identity; do
     if [[ ! -f "$fips_path/crates/$crate/Cargo.toml" ]]; then
       echo "NVPN_FIPS_REPO_PATH is missing crates/$crate/Cargo.toml: $fips_path" >&2
       exit 2
     fi
   done
+  fips_head="$(git -C "$fips_path" rev-parse HEAD)" || {
+    echo "NVPN_FIPS_REPO_PATH must be an exact Git checkout." >&2
+    exit 2
+  }
+  fips_tree="$(git -C "$fips_path" rev-parse 'HEAD^{tree}')" || exit 2
+  [[ -z "$(git -C "$fips_path" status --porcelain --untracked-files=all)" ]] || {
+    echo "Release gate refuses a dirty local FIPS checkout." >&2
+    exit 2
+  }
+  export NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD="$fips_head"
+  export NVPN_LOCAL_FIPS_SESSION_FIPS_TREE="$fips_tree"
+  export NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256="$(
+    printf '%s' "$fips_path" | shasum -a 256 | awk '{print tolower($1)}'
+  )"
 
   release_cargo_config_args+=(
     --config "patch.crates-io.fips-core.path=\"$fips_path/crates/fips-core\""
@@ -155,10 +212,18 @@ EOF
   esac
   install_release_cargo_config
   install_release_cargo_wrapper
+  # Child mobile builders inherit the immutable Cargo patch above. Tell their
+  # standalone local-FIPS helper not to append/restore the shared root manifest
+  # while the Android and iOS physical lanes run concurrently.
+  export NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED=1
 
   release_cargo_lock_backup="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-gate-Cargo.lock.XXXXXX")"
   cp "$ROOT_DIR/Cargo.lock" "$release_cargo_lock_backup"
   if release_cargo metadata --locked --format-version=1 >/dev/null 2>/dev/null; then
+    export NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256="$release_cargo_manifest_original_sha256"
+    export NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$(
+      release_file_sha256 "$ROOT_DIR/Cargo.lock"
+    )"
     echo "Local FIPS crates satisfy existing Cargo.lock; skipping temporary lock refresh."
     return
   fi
@@ -174,6 +239,10 @@ EOF
     exit 2
   fi
   release_cargo_lock_args=(--offline)
+  export NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256="$release_cargo_manifest_original_sha256"
+  export NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$(
+    release_file_sha256 "$ROOT_DIR/Cargo.lock"
+  )"
   echo "Using offline Cargo resolution for local FIPS path patches."
 }
 
@@ -253,10 +322,13 @@ run_release_gate_static_preflight() {
   fi
   ./scripts/check-source-file-lines.sh
   ./scripts/test-release-gate-parallel-harness.sh
+  ./scripts/test-local-fips-workspace-harness.sh
   ./scripts/test-idle-cpu-gate-harness.sh
   ./scripts/test-mobile-physical-device-selection-harness.sh
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
+  ./scripts/test-mobile-wireguard-fixture-cleanup-harness.sh
+  ./scripts/test-mobile-release-provenance-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
@@ -832,6 +904,7 @@ release_gate_has_physical_ios_device() {
   if [[ -n "$requested" ]]; then
     xcrun devicectl device info details \
       --device "$requested" \
+      --timeout 5 \
       --quiet >/dev/null 2>&1
     return
   fi
@@ -1308,8 +1381,14 @@ run_docker_perf_gate() {
 }
 
 release_gate_cleanup() {
+  local status="$?" cleanup_failed=0
+  trap - EXIT
   release_gate_parallel_cancel_all
-  restore_release_cargo_lock
+  restore_release_cargo_lock || cleanup_failed=1
+  if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+    status=1
+  fi
+  exit "$status"
 }
 
 main() {

@@ -114,14 +114,14 @@ PY
       != "$NVPN_EXPECTED_FIPS_GIT_SHA" \
     || "$(git -C "$fips_path" rev-parse 'HEAD^{tree}')" \
       != "$IOS_RELEASE_NETWORK_FIPS_TREE" \
-    || -n "$(git -C "$fips_path" status --porcelain --untracked-files=all)" \
-    || "$(git -C "$ROOT" rev-parse HEAD)" != "$IOS_RELEASE_NETWORK_APP_HEAD" \
-    || "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" != "$IOS_RELEASE_NETWORK_APP_TREE" \
-    || -n "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]]
+    || -n "$(git -C "$fips_path" status --porcelain --untracked-files=all)" ]]
   then
     echo "iOS Release app/FIPS source changed during the artifact build" >&2
     return 1
   fi
+  assert_release_checkout_state \
+    "$ROOT" "$IOS_RELEASE_NETWORK_APP_HEAD" \
+    "$IOS_RELEASE_NETWORK_APP_TREE" "iOS Release artifact build"
 }
 
 ios_release_network_app_path() {
@@ -136,197 +136,8 @@ ios_release_network_app_path() {
     | head -n 1
 }
 
-ios_release_network_audit_artifact() {
-  local label="$1" result_dir="$2"
-  local app appex executable tunnel_executable receipt
-  app="$(ios_release_network_app_path)"
-  appex="$app/PlugIns/Nostr VPN Tunnel.appex"
-  executable="$app/Nostr VPN"
-  tunnel_executable="$appex/Nostr VPN Tunnel"
-  [[ -d "$app" && -d "$appex" && -x "$executable" && -x "$tunnel_executable" ]] || {
-    echo "iOS Release app/Packet Tunnel artifact is incomplete" >&2
-    return 1
-  }
-  codesign --verify --deep --strict "$app" >/dev/null 2>&1 || {
-    echo "iOS Release app signature verification failed" >&2
-    return 1
-  }
-
-  local app_details tunnel_details app_profile tunnel_profile installed_apps
-  local app_entitlements tunnel_entitlements certificate_dir certificate_prefix
-  local tunnel_certificate_prefix
-  app_details="$(mktemp)"
-  tunnel_details="$(mktemp)"
-  app_profile="$(mktemp)"
-  tunnel_profile="$(mktemp)"
-  app_entitlements="$(mktemp)"
-  tunnel_entitlements="$(mktemp)"
-  certificate_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-cert.XXXXXX")"
-  certificate_prefix="$certificate_dir/cert"
-  tunnel_certificate_prefix="$certificate_dir/tunnel-cert"
-  installed_apps="$(mktemp)"
-  codesign -dvvv "$app" >"$app_details" 2>&1
-  codesign -dvvv "$appex" >"$tunnel_details" 2>&1
-  security cms -D -i "$app/embedded.mobileprovision" >"$app_profile"
-  security cms -D -i "$appex/embedded.mobileprovision" >"$tunnel_profile"
-  codesign -d --entitlements :- "$app" >"$app_entitlements" 2>/dev/null
-  codesign -d --entitlements :- "$appex" >"$tunnel_entitlements" 2>/dev/null
-  codesign -d --extract-certificates "$certificate_prefix" "$app" \
-    >/dev/null 2>&1
-  codesign -d --extract-certificates "$tunnel_certificate_prefix" "$appex" \
-    >/dev/null 2>&1
-  if ! xcrun devicectl device info apps \
-    --device "$IOS_RELEASE_NETWORK_DEVICE" \
-    --bundle-id "$IOS_BUNDLE_ID" \
-    --columns '*' \
-    --json-output "$installed_apps" \
-    --quiet >/dev/null
-  then
-    echo "iOS Release installed-app readback failed" >&2
-    return 1
-  fi
-
-  if ! python3 - \
-    "$app_profile" "$tunnel_profile" "$app_entitlements" \
-    "$tunnel_entitlements" "${certificate_prefix}0" \
-    "${tunnel_certificate_prefix}0" "$NVPN_IOS_TEAM_ID" \
-    "${NVPN_IOS_EXPECTED_SIGNER_ORGANIZATION:-Sirius Business Oy}" \
-    "$IOS_BUNDLE_ID" \
-    "${NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID:-${IOS_BUNDLE_ID}.PacketTunnel}" <<'PY'
-import hashlib
-import plistlib
-import sys
-
-(
-    app_profile_path,
-    tunnel_profile_path,
-    app_entitlements_path,
-    tunnel_entitlements_path,
-    app_certificate_path,
-    tunnel_certificate_path,
-    team_id,
-    expected_organization,
-    app_bundle_id,
-    tunnel_bundle_id,
-) = sys.argv[1:]
-app_profile, tunnel_profile, app_entitlements, tunnel_entitlements = [
-    plistlib.load(open(path, "rb"))
-    for path in (
-        app_profile_path,
-        tunnel_profile_path,
-        app_entitlements_path,
-        tunnel_entitlements_path,
-    )
-]
-app_certificate = open(app_certificate_path, "rb").read()
-tunnel_certificate = open(tunnel_certificate_path, "rb").read()
-if app_certificate != tunnel_certificate:
-    raise SystemExit("app and Packet Tunnel use different signing certificates")
-
-try:
-    from cryptography import x509
-    from cryptography.x509.oid import NameOID
-except ImportError as error:
-    raise SystemExit("cryptography is required for signer verification") from error
-
-certificate = x509.load_der_x509_certificate(app_certificate)
-organizations = certificate.subject.get_attributes_for_oid(
-    NameOID.ORGANIZATION_NAME
-)
-organizational_units = certificate.subject.get_attributes_for_oid(
-    NameOID.ORGANIZATIONAL_UNIT_NAME
-)
-if [entry.value for entry in organizations] != [expected_organization]:
-    raise SystemExit("Release signer is not the expected company organization")
-if team_id not in [entry.value for entry in organizational_units]:
-    raise SystemExit("Release signer does not belong to the expected company team")
-
-for profile, bundle_id in (
-    (app_profile, app_bundle_id),
-    (tunnel_profile, tunnel_bundle_id),
-):
-    if not profile.get("ProvisionedDevices"):
-        raise SystemExit("Ad Hoc profile has no provisioned device")
-    if profile.get("ProvisionsAllDevices") is True:
-        raise SystemExit("physical Release gate received an enterprise profile")
-    if profile.get("Entitlements", {}).get("get-task-allow") is True:
-        raise SystemExit("physical Release profile is debuggable")
-    if profile.get("TeamIdentifier") != [team_id]:
-        raise SystemExit("Ad Hoc profile belongs to the wrong Apple team")
-    profile_entitlements = profile.get("Entitlements", {})
-    if profile_entitlements.get("com.apple.developer.team-identifier") != team_id:
-        raise SystemExit("Ad Hoc profile entitlement belongs to the wrong Apple team")
-    if profile_entitlements.get("application-identifier") != f"{team_id}.{bundle_id}":
-        raise SystemExit("Ad Hoc profile application identifier is wrong")
-    signer_sha = hashlib.sha256(app_certificate).digest()
-    profile_signers = {
-        hashlib.sha256(value).digest()
-        for value in profile.get("DeveloperCertificates", [])
-    }
-    if signer_sha not in profile_signers:
-        raise SystemExit("Ad Hoc profile does not authorize the exact signer")
-for entitlements, bundle_id in (
-    (app_entitlements, app_bundle_id),
-    (tunnel_entitlements, tunnel_bundle_id),
-):
-    if entitlements.get("get-task-allow") is True:
-        raise SystemExit("signed physical Release artifact is debuggable")
-    if entitlements.get("com.apple.developer.team-identifier") != team_id:
-        raise SystemExit("signed Release artifact belongs to the wrong Apple team")
-    if entitlements.get("application-identifier") != f"{team_id}.{bundle_id}":
-        raise SystemExit("signed Release application identifier is wrong")
-if not tunnel_entitlements.get("com.apple.developer.networking.networkextension"):
-    raise SystemExit("Packet Tunnel entitlement is missing")
-PY
-  then
-    rm -f "$app_details" "$tunnel_details" "$app_profile" "$tunnel_profile" \
-      "$app_entitlements" "$tunnel_entitlements" "$installed_apps"
-    rm -rf "$certificate_dir"
-    return 1
-  fi
-
-  local app_cdhash tunnel_cdhash app_sha tunnel_sha tree_sha
-  app_cdhash="$(sed -n 's/^CDHash=//p' "$app_details" | head -n 1)"
-  tunnel_cdhash="$(sed -n 's/^CDHash=//p' "$tunnel_details" | head -n 1)"
-  [[ "$app_cdhash" =~ ^[0-9a-fA-F]+$ \
-    && "$tunnel_cdhash" =~ ^[0-9a-fA-F]+$ ]] || {
-    echo "iOS Release artifact has no CodeDirectory hash receipt" >&2
-    return 1
-  }
-  if [[ -n "$IOS_RELEASE_NETWORK_BASE_CDHASH" \
-    && "$IOS_RELEASE_NETWORK_BASE_CDHASH" != "$app_cdhash" ]]
-  then
-    echo "iOS DNS cases did not test one exact Release app artifact" >&2
-    return 1
-  fi
-  IOS_RELEASE_NETWORK_BASE_CDHASH="$app_cdhash"
-  app_sha="$(shasum -a 256 "$executable" | awk '{print $1}')"
-  tunnel_sha="$(shasum -a 256 "$tunnel_executable" | awk '{print $1}')"
-  tree_sha="$(
-    find "$app" -type f -print \
-      | sort \
-      | while IFS= read -r file; do shasum -a 256 "$file"; done \
-      | shasum -a 256 \
-      | awk '{print $1}'
-  )"
-  if [[ -n "$IOS_RELEASE_NETWORK_BASE_TREE_SHA" \
-    && "$IOS_RELEASE_NETWORK_BASE_TREE_SHA" != "$tree_sha" ]]
-  then
-    echo "iOS DNS cases did not test one byte-identical Release app tree" >&2
-    return 1
-  fi
-  IOS_RELEASE_NETWORK_BASE_TREE_SHA="$tree_sha"
-  receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$result_dir/mobile-ios-release-artifact.json}"
-  local fips_metadata_receipt fips_metadata_sha
-  fips_metadata_receipt="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-ios/fips-linkage.json}"
-  fips_metadata_sha="$(shasum -a 256 "$fips_metadata_receipt" | awk '{print $1}')"
-  python3 - "$receipt" "$app_cdhash" "$tunnel_cdhash" "$app_sha" \
-    "$tunnel_sha" "$tree_sha" "$NVPN_BUILD_GIT_SHA" \
-    "$NVPN_EXPECTED_FIPS_GIT_SHA" "$app/Info.plist" \
-    "$installed_apps" "$IOS_BUNDLE_ID" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" "$app" \
-    "$IOS_RELEASE_NETWORK_DERIVED_DATA" "$IOS_RELEASE_NETWORK_XCTESTRUN" \
-    "$IOS_RELEASE_NETWORK_FIPS_TREE" "$NVPN_EXPECTED_FIPS_VERSION" \
-    "$fips_metadata_sha" <<'PY'
+ios_release_network_write_artifact_receipt() {
+  python3 - "$@" <<'PY'
 import hashlib
 import json
 import os
@@ -352,6 +163,7 @@ import sys
     fips_tree,
     fips_version,
     fips_metadata_sha,
+    signer_sha,
 ) = sys.argv[1:]
 app_info = plistlib.load(open(app_info_path, "rb"))
 installed_payload = json.load(open(installed_apps_path, encoding="utf-8"))
@@ -411,6 +223,7 @@ with open(path, "w", encoding="utf-8") as handle:
             "packetTunnelCodeDirectoryHash": tunnel_cdhash,
             "packetTunnelExecutableSha256": tunnel_sha,
             "companySigningVerified": True,
+            "signerCertificateSha256": signer_sha,
             "selectedPhysicalDevice": selected_device,
             "treeSha256": tree_sha,
             "xctestrunPathSha256": hashlib.sha256(
@@ -426,8 +239,259 @@ with open(path, "w", encoding="utf-8") as handle:
     )
     handle.write("\n")
 PY
-  rm -f "$app_details" "$tunnel_details" "$app_profile" "$tunnel_profile" \
-    "$app_entitlements" "$tunnel_entitlements" "$installed_apps"
-  rm -rf "$certificate_dir"
+}
+
+ios_release_network_audit_artifact() {
+  local label="$1" result_dir="$2"
+  local app appex executable tunnel_executable receipt
+  app="$(ios_release_network_app_path)"
+  appex="$app/PlugIns/Nostr VPN Tunnel.appex"
+  executable="$app/Nostr VPN"
+  tunnel_executable="$appex/Nostr VPN Tunnel"
+  [[ -d "$app" && -d "$appex" && -x "$executable" && -x "$tunnel_executable" ]] || {
+    echo "iOS Release app/Packet Tunnel artifact is incomplete" >&2
+    return 1
+  }
+  codesign --verify --deep --strict "$app" >/dev/null 2>&1 || {
+    echo "iOS Release app signature verification failed" >&2
+    return 1
+  }
+
+  local audit_dir app_details tunnel_details app_profile tunnel_profile
+  local installed_apps app_entitlements tunnel_entitlements certificate_prefix
+  local tunnel_certificate_prefix signer_sha_path signer_sha
+  audit_dir="$(
+    mktemp -d "$IOS_RELEASE_NETWORK_SIGNING_DIR/artifact-audit.XXXXXX"
+  )" \
+    || return 1
+  chmod 700 "$audit_dir" || {
+    rm -rf "$audit_dir"
+    return 1
+  }
+  app_details="$audit_dir/app-codesign.txt"
+  tunnel_details="$audit_dir/tunnel-codesign.txt"
+  app_profile="$audit_dir/app-profile.plist"
+  tunnel_profile="$audit_dir/tunnel-profile.plist"
+  app_entitlements="$audit_dir/app-entitlements.plist"
+  tunnel_entitlements="$audit_dir/tunnel-entitlements.plist"
+  certificate_prefix="$audit_dir/app-cert"
+  tunnel_certificate_prefix="$audit_dir/tunnel-cert"
+  installed_apps="$audit_dir/installed-apps.json"
+  signer_sha_path="$audit_dir/signer.sha256"
+  if ! codesign -dvvv "$app" >"$app_details" 2>&1 \
+    || ! codesign -dvvv "$appex" >"$tunnel_details" 2>&1 \
+    || ! security cms -D -i "$app/embedded.mobileprovision" >"$app_profile" \
+    || ! security cms -D -i "$appex/embedded.mobileprovision" >"$tunnel_profile" \
+    || ! codesign -d --entitlements :- "$app" >"$app_entitlements" 2>/dev/null \
+    || ! codesign -d --entitlements :- "$appex" >"$tunnel_entitlements" 2>/dev/null \
+    || ! codesign -d --extract-certificates "$certificate_prefix" "$app" \
+      >/dev/null 2>&1 \
+    || ! codesign -d --extract-certificates "$tunnel_certificate_prefix" "$appex" \
+      >/dev/null 2>&1
+  then
+    rm -rf "$audit_dir"
+    echo "iOS Release signing artifact extraction failed" >&2
+    return 1
+  fi
+  if ! xcrun devicectl device info apps \
+    --device "$IOS_RELEASE_NETWORK_DEVICE" \
+    --bundle-id "$IOS_BUNDLE_ID" \
+    --columns '*' \
+    --json-output "$installed_apps" \
+    --quiet >/dev/null
+  then
+    rm -rf "$audit_dir"
+    echo "iOS Release installed-app readback failed" >&2
+    return 1
+  fi
+
+  if ! python3 - \
+    "$app_profile" "$tunnel_profile" "$app_entitlements" \
+    "$tunnel_entitlements" "${certificate_prefix}0" \
+    "${tunnel_certificate_prefix}0" "$NVPN_IOS_TEAM_ID" \
+    "${NVPN_IOS_EXPECTED_SIGNER_ORGANIZATION:-Sirius Business Oy}" \
+    "$IOS_BUNDLE_ID" \
+    "${NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID:-${IOS_BUNDLE_ID}.PacketTunnel}" \
+    "$NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256" "$signer_sha_path" <<'PY'
+import hashlib
+import plistlib
+import sys
+
+(
+    app_profile_path,
+    tunnel_profile_path,
+    app_entitlements_path,
+    tunnel_entitlements_path,
+    app_certificate_path,
+    tunnel_certificate_path,
+    team_id,
+    expected_organization,
+    app_bundle_id,
+    tunnel_bundle_id,
+    expected_signer_sha,
+    signer_sha_path,
+) = sys.argv[1:]
+app_profile, tunnel_profile, app_entitlements, tunnel_entitlements = [
+    plistlib.load(open(path, "rb"))
+    for path in (
+        app_profile_path,
+        tunnel_profile_path,
+        app_entitlements_path,
+        tunnel_entitlements_path,
+    )
+]
+app_certificate = open(app_certificate_path, "rb").read()
+tunnel_certificate = open(tunnel_certificate_path, "rb").read()
+if app_certificate != tunnel_certificate:
+    raise SystemExit("app and Packet Tunnel use different signing certificates")
+actual_signer_sha = hashlib.sha256(app_certificate).hexdigest()
+if actual_signer_sha != expected_signer_sha:
+    raise SystemExit("Release signer does not match the required certificate pin")
+
+try:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+except ImportError as error:
+    raise SystemExit("cryptography is required for signer verification") from error
+
+certificate = x509.load_der_x509_certificate(app_certificate)
+organizations = certificate.subject.get_attributes_for_oid(
+    NameOID.ORGANIZATION_NAME
+)
+organizational_units = certificate.subject.get_attributes_for_oid(
+    NameOID.ORGANIZATIONAL_UNIT_NAME
+)
+if [entry.value for entry in organizations] != [expected_organization]:
+    raise SystemExit("Release signer is not the expected company organization")
+if team_id not in [entry.value for entry in organizational_units]:
+    raise SystemExit("Release signer does not belong to the expected company team")
+
+for profile, bundle_id in (
+    (app_profile, app_bundle_id),
+    (tunnel_profile, tunnel_bundle_id),
+):
+    if not profile.get("ProvisionedDevices"):
+        raise SystemExit("Ad Hoc profile has no provisioned device")
+    if profile.get("ProvisionsAllDevices") is True:
+        raise SystemExit("physical Release gate received an enterprise profile")
+    if profile.get("Entitlements", {}).get("get-task-allow") is True:
+        raise SystemExit("physical Release profile is debuggable")
+    if profile.get("TeamIdentifier") != [team_id]:
+        raise SystemExit("Ad Hoc profile belongs to the wrong Apple team")
+    profile_entitlements = profile.get("Entitlements", {})
+    if profile_entitlements.get("com.apple.developer.team-identifier") != team_id:
+        raise SystemExit("Ad Hoc profile entitlement belongs to the wrong Apple team")
+    if profile_entitlements.get("application-identifier") != f"{team_id}.{bundle_id}":
+        raise SystemExit("Ad Hoc profile application identifier is wrong")
+    signer_sha = hashlib.sha256(app_certificate).digest()
+    profile_signers = {
+        hashlib.sha256(value).digest()
+        for value in profile.get("DeveloperCertificates", [])
+    }
+    if signer_sha not in profile_signers:
+        raise SystemExit("Ad Hoc profile does not authorize the exact signer")
+for entitlements, bundle_id in (
+    (app_entitlements, app_bundle_id),
+    (tunnel_entitlements, tunnel_bundle_id),
+):
+    if entitlements.get("get-task-allow") is True:
+        raise SystemExit("signed physical Release artifact is debuggable")
+    if entitlements.get("com.apple.developer.team-identifier") != team_id:
+        raise SystemExit("signed Release artifact belongs to the wrong Apple team")
+    if entitlements.get("application-identifier") != f"{team_id}.{bundle_id}":
+        raise SystemExit("signed Release application identifier is wrong")
+if not tunnel_entitlements.get("com.apple.developer.networking.networkextension"):
+    raise SystemExit("Packet Tunnel entitlement is missing")
+with open(signer_sha_path, "w", encoding="ascii") as handle:
+    handle.write(actual_signer_sha + "\n")
+PY
+  then
+    rm -rf "$audit_dir"
+    return 1
+  fi
+  signer_sha="$(<"$signer_sha_path")"
+  [[ "$signer_sha" =~ ^[0-9a-f]{64}$ ]] || {
+    rm -rf "$audit_dir"
+    echo "iOS Release signer audit produced no certificate receipt" >&2
+    return 1
+  }
+
+  local app_cdhash tunnel_cdhash app_sha tunnel_sha tree_sha
+  app_cdhash="$(sed -n 's/^CDHash=//p' "$app_details" | head -n 1)"
+  tunnel_cdhash="$(sed -n 's/^CDHash=//p' "$tunnel_details" | head -n 1)"
+  [[ "$app_cdhash" =~ ^[0-9a-fA-F]+$ \
+    && "$tunnel_cdhash" =~ ^[0-9a-fA-F]+$ ]] || {
+    rm -rf "$audit_dir"
+    echo "iOS Release artifact has no CodeDirectory hash receipt" >&2
+    return 1
+  }
+  if [[ -n "$IOS_RELEASE_NETWORK_BASE_CDHASH" \
+    && "$IOS_RELEASE_NETWORK_BASE_CDHASH" != "$app_cdhash" ]]
+  then
+    rm -rf "$audit_dir"
+    echo "iOS DNS cases did not test one exact Release app artifact" >&2
+    return 1
+  fi
+  if ! app_sha="$(shasum -a 256 "$executable" | awk '{print $1}')" \
+    || ! tunnel_sha="$(shasum -a 256 "$tunnel_executable" | awk '{print $1}')" \
+    || ! tree_sha="$(
+    find "$app" -type f -print \
+      | sort \
+      | while IFS= read -r file; do shasum -a 256 "$file"; done \
+      | shasum -a 256 \
+      | awk '{print $1}'
+    )"
+  then
+    rm -rf "$audit_dir"
+    echo "iOS Release artifact hashing failed" >&2
+    return 1
+  fi
+  [[ "$app_sha" =~ ^[0-9a-f]{64}$ \
+    && "$tunnel_sha" =~ ^[0-9a-f]{64}$ \
+    && "$tree_sha" =~ ^[0-9a-f]{64}$ ]] || {
+    rm -rf "$audit_dir"
+    echo "iOS Release artifact hashing produced an invalid receipt" >&2
+    return 1
+  }
+  if [[ -n "$IOS_RELEASE_NETWORK_BASE_TREE_SHA" \
+    && "$IOS_RELEASE_NETWORK_BASE_TREE_SHA" != "$tree_sha" ]]
+  then
+    rm -rf "$audit_dir"
+    echo "iOS DNS cases did not test one byte-identical Release app tree" >&2
+    return 1
+  fi
+  IOS_RELEASE_NETWORK_BASE_CDHASH="$app_cdhash"
+  IOS_RELEASE_NETWORK_BASE_TREE_SHA="$tree_sha"
+  receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$result_dir/mobile-ios-release-artifact.json}"
+  local fips_metadata_receipt fips_metadata_sha
+  fips_metadata_receipt="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-ios/fips-linkage.json}"
+  if ! fips_metadata_sha="$(
+    shasum -a 256 "$fips_metadata_receipt" | awk '{print $1}'
+  )" || [[ ! "$fips_metadata_sha" =~ ^[0-9a-f]{64}$ ]]
+  then
+    rm -rf "$audit_dir"
+    echo "iOS Release FIPS metadata receipt hashing failed" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$receipt")"
+  if ! ios_release_network_write_artifact_receipt \
+    "$receipt" "$app_cdhash" "$tunnel_cdhash" "$app_sha" \
+    "$tunnel_sha" "$tree_sha" "$NVPN_BUILD_GIT_SHA" \
+    "$NVPN_EXPECTED_FIPS_GIT_SHA" "$app/Info.plist" \
+    "$installed_apps" "$IOS_BUNDLE_ID" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" "$app" \
+    "$IOS_RELEASE_NETWORK_DERIVED_DATA" "$IOS_RELEASE_NETWORK_XCTESTRUN" \
+    "$IOS_RELEASE_NETWORK_FIPS_TREE" "$NVPN_EXPECTED_FIPS_VERSION" \
+    "$fips_metadata_sha" "$signer_sha"
+  then
+    rm -f "$receipt"
+    rm -rf "$audit_dir"
+    echo "iOS Release artifact receipt generation failed" >&2
+    return 1
+  fi
+  if ! rm -rf "$audit_dir"; then
+    rm -f "$receipt"
+    echo "iOS Release artifact audit could not scrub private signing data" >&2
+    return 1
+  fi
   echo "iOS exact company-signed Release artifact passed: $receipt"
 }
