@@ -325,6 +325,13 @@ grep -Fq 'NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))"' "$rel
   || fail "release gate rebuilds the same physical iOS app for the exit lane"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))"' "$release_gate" \
   || fail "release gate rebuilds the same canonical Android app for the exit lane"
+[[ "$(grep -Fc 'NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$port_base"' "$release_gate")" -eq 2 ]] \
+  || fail "Android physical lanes do not isolate their remote HTTP probe ports"
+[[ "$(grep -Fc 'NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))"' "$release_gate")" -eq 2 ]] \
+  || fail "iOS physical lanes do not isolate their remote HTTP probe ports"
+grep -Fq 'remote fixture HTTP probe TCP port is already occupied' \
+  "$ROOT_DIR/scripts/lib-mobile-wireguard-fixture.sh" \
+  || fail "remote native fixture does not fail before mutating on an occupied HTTP port"
 grep -Fq 'release_gate_parallel_start \' "$release_gate" \
   && grep -Fq '"Android physical WireGuard exit and DNS"' "$release_gate" \
   || fail "release gate does not dispatch the physical Android exit lane"

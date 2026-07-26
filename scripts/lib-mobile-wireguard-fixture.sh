@@ -252,8 +252,31 @@ mobile_wg_fixture_initialize() {
   MOBILE_WG_FIXTURE_VOLUME_DIR="$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture"
 }
 
+mobile_wg_listener_port_in_use() {
+  local port="$1" listeners="$2"
+  python3 - "$port" "$listeners" <<'PY'
+import re
+import sys
+
+port, listeners = sys.argv[1:]
+for line in listeners.splitlines():
+    if any(
+        re.search(rf"[\].:]{re.escape(port)}$", field)
+        for field in line.split()
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 mobile_wg_fixture_assert_available() {
   local container="$1" host_port="$2"
+  [[ "$host_port" =~ ^[1-9][0-9]{0,4}$ \
+    && "$HTTP_PROBE_PORT" =~ ^[1-9][0-9]{0,4}$ ]] \
+    && ((host_port <= 65535 && HTTP_PROBE_PORT <= 65535)) || {
+    echo "mobile WireGuard fixture ports must be in 1-65535" >&2
+    return 1
+  }
   if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" != "native" ]] \
     && mobile_wg_fixture_docker container inspect "$container" >/dev/null 2>&1
   then
@@ -272,7 +295,7 @@ mobile_wg_fixture_assert_available() {
       return 1
     fi
   fi
-  local listeners
+  local listeners tcp_listeners
   if [[ "$MOBILE_WG_FIXTURE_REMOTE" -eq 1 ]]; then
     listeners="$(mobile_wg_remote_exec ss -H -lun 2>/dev/null)" || {
       echo "remote fixture could not inspect UDP listeners before mutation" >&2
@@ -287,22 +310,19 @@ mobile_wg_fixture_assert_available() {
   else
     listeners="$(netstat -an -p udp 2>/dev/null || true)"
   fi
-  if python3 - "$host_port" "$listeners" <<'PY'
-import re
-import sys
-
-port, listeners = sys.argv[1:]
-for line in listeners.splitlines():
-    if any(
-        re.search(rf"[\].:]{re.escape(port)}$", field)
-        for field in line.split()
-    ):
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-  then
+  if mobile_wg_listener_port_in_use "$host_port" "$listeners"; then
     echo "mobile WireGuard fixture UDP port is already occupied: $host_port" >&2
     return 1
+  fi
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    tcp_listeners="$(mobile_wg_remote_exec ss -H -ltn 2>/dev/null)" || {
+      echo "remote fixture could not inspect TCP listeners before mutation" >&2
+      return 1
+    }
+    if mobile_wg_listener_port_in_use "$HTTP_PROBE_PORT" "$tcp_listeners"; then
+      echo "remote fixture HTTP probe TCP port is already occupied: $HTTP_PROBE_PORT" >&2
+      return 1
+    fi
   fi
 }
 

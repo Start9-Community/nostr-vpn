@@ -1062,6 +1062,7 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.77.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.77.2 \
+      NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$port_base" \
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
       NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
@@ -1082,6 +1083,7 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2 \
+      NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
@@ -1174,6 +1176,7 @@ run_mobile_underlay_change_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.79.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.79.2 \
+      NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$port_base" \
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=1 \
       NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
@@ -1194,6 +1197,7 @@ run_mobile_underlay_change_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.80.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.80.2 \
+      NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=1 \
       NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios

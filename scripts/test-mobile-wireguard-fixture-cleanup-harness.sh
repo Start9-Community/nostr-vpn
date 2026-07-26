@@ -10,6 +10,14 @@ REMOTE_STATE="$(mktemp -d /tmp/nvpn-mobile-wg-exit.cleanup-harness.XXXXXX)"
 CALLS="$TMP_ROOT/calls"
 trap 'rm -rf "$TMP_ROOT" "$REMOTE_STATE" "${LEASE_A:-}" "${LEASE_B:-}" "${LEASE_C:-}" "${LEASE_HUP:-}"' EXIT
 
+listeners=$'UNCONN 0 0 0.0.0.0:51886 0.0.0.0:*\nLISTEN 0 5 0.0.0.0:53000 0.0.0.0:*'
+mobile_wg_listener_port_in_use 51886 "$listeners"
+mobile_wg_listener_port_in_use 53000 "$listeners"
+if mobile_wg_listener_port_in_use 53001 "$listeners"; then
+  echo "fixture listener parser reported an unused port as occupied" >&2
+  exit 1
+fi
+
 mobile_wg_remote_close_control() {
   printf 'close\n' >>"$CALLS"
 }
