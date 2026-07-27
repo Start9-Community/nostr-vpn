@@ -735,7 +735,8 @@ prepare_macos_platform_lane_sync() {
         >"$peer_build_log" 2>&1 &
       peer_build_pid="$!"
     fi
-    NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only \
+    env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release \
+      NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only \
       ./scripts/macos-vm-release-mobile-join-e2e.sh \
         "${NVPN_MACOS_SSH_HOST:-}" \
       || artifact_status="$?"

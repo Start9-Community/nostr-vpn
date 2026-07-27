@@ -48,7 +48,13 @@ for required in (
     'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
     'git clone --quiet --no-checkout --no-hardlinks',
     'checkout --quiet --detach "$RELEASE_JOIN_FIPS_SHA"',
+    'MACOS_RUST_PROFILE="${NVPN_MACOS_RUST_PROFILE:-release}"',
+    'MACOS_XCODE_CONFIGURATION="${NVPN_MACOS_XCODE_CONFIGURATION:-Release}"',
+    '"$MACOS_RUST_PROFILE" != "release"',
+    '"$MACOS_XCODE_CONFIGURATION" != "Release"',
     'NVPN_FIPS_REPO_PATH="$HOST_FIPS_ROOT"',
+    'NVPN_MACOS_RUST_PROFILE="$MACOS_RUST_PROFILE"',
+    'NVPN_MACOS_XCODE_CONFIGURATION="$MACOS_XCODE_CONFIGURATION"',
     '--fips-root "$HOST_FIPS_ROOT"',
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-app',
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support',
@@ -179,6 +185,7 @@ if "codesign --force" in texts["e2e-macos-service-toggle.sh"]:
     raise SystemExit("service-toggle gate still re-signs a VM-side app copy")
 
 for required in (
+    "env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release",
     "NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only",
     "NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=1",
     "NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E",

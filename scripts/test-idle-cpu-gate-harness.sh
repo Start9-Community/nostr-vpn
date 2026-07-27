@@ -270,8 +270,29 @@ grep -Fq "'windows-smoke-cargo'" "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.
   || fail "Windows VM smoke discards its Cargo cache on every gate"
 grep -Fq 'Get-CimInstance Win32_Process' "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh" \
   || fail "Windows VM smoke does not stop a stale candidate before rebuilding its stable cache"
-grep -Fq '$env:CARGO_TARGET_DIR = Join-Path' "$ROOT_DIR/scripts/local-release.mjs" \
-  || fail "Windows release can rebuild binaries that the VM management service still locks"
+python3 - "$ROOT_DIR/scripts/local-release.mjs" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("function buildWindowsArtifacts(")
+end = text.index("\nfunction buildLinuxArtifacts(", start)
+windows = text[start:end]
+for required in (
+    "validateWindowsInstallerGateReceipt({",
+    "windows-release-publication-proof.ps1",
+    "Reused the exact Windows installer and CLI payload exercised by the Windows VM gate.",
+):
+    if required not in windows:
+        raise SystemExit(
+            f"Windows publication does not reuse its exact VM-gated payload: {required}"
+        )
+for forbidden in ("cargo build", "windows-build.ps1"):
+    if forbidden in windows:
+        raise SystemExit(
+            f"Windows publication can rebuild a payload held by the VM gate: {forbidden}"
+        )
+PY
 grep -Fq 'NVPN_WINDOWS_SKIP_GIT_SYNC' "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh" \
   || fail "Windows VM app smoke cannot reuse a release-gate candidate sync"
 grep -Fq 'NVPN_WINDOWS_SKIP_GIT_SYNC' "$ROOT_DIR/scripts/windows-vm-wireguard-exit-e2e.sh" \

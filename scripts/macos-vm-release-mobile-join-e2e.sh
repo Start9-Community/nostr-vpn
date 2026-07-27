@@ -28,6 +28,14 @@ case "$ARTIFACT_ACTION" in
     exit 2
     ;;
 esac
+MACOS_RUST_PROFILE="${NVPN_MACOS_RUST_PROFILE:-release}"
+MACOS_XCODE_CONFIGURATION="${NVPN_MACOS_XCODE_CONFIGURATION:-Release}"
+if [[ "$MACOS_RUST_PROFILE" != "release" \
+  || "$MACOS_XCODE_CONFIGURATION" != "Release" ]]
+then
+  echo "macOS Release gate artifacts require Rust release and Xcode Release builds" >&2
+  exit 2
+fi
 
 MACOS_SIGNING_IDENTITY="$(
   printf '%s' "${MACOS_SIGNING_IDENTITY:-}" \
@@ -251,8 +259,8 @@ prepare_host_artifact() {
       NVPN_BUILD_GIT_SHA="$APP_GIT_SHA" \
       SOURCE_DATE_EPOCH="$APP_SOURCE_DATE_EPOCH" \
       NVPN_FIPS_REPO_PATH="$HOST_FIPS_ROOT" \
-      NVPN_MACOS_RUST_PROFILE=release \
-      NVPN_MACOS_XCODE_CONFIGURATION=Release \
+      NVPN_MACOS_RUST_PROFILE="$MACOS_RUST_PROFILE" \
+      NVPN_MACOS_XCODE_CONFIGURATION="$MACOS_XCODE_CONFIGURATION" \
       NVPN_MACOS_RUST_TARGETS=aarch64-apple-darwin \
       NVPN_MACOS_REQUIRE_SIGNING=1 \
       "$HOST_BUILD_ROOT/scripts/macos-build" macos-app
