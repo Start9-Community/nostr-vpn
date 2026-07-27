@@ -85,9 +85,10 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     crate::ensure_macos_connect_privileges(&config_path)?;
     ensure_no_other_daemon_processes_for_config(&config_path, std::process::id())?;
     clear_daemon_control_ready(&config_path);
-    #[cfg(target_os = "macos")]
-    if let Err(error) = repair_saved_network_state(&config_path) {
-        eprintln!("daemon: failed to repair saved macOS network state: {error}");
+    if repair_saved_network_state(&config_path)
+        .context("daemon startup refused while saved network cleanup remains incomplete")?
+    {
+        transition_daemon_state_after_network_repair(&config_path)?;
     }
     let pid_file = daemon_pid_file_path(&config_path);
     if let Err(error) = write_daemon_pid_record(
@@ -227,34 +228,43 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
             let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
             let endpoint_peer_states =
                 daemon_endpoint_peer_states_from_signature(&endpoint_peer_signature);
-            let runtime =
-                match crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        let network = network_snapshot.summary(network_changed_at, captive_portal);
-                        let port_mapping = port_mapping_runtime.status();
-                        let advertised_routes = HashMap::new();
-                        let vpn_status = format!("FIPS private mesh startup failed ({error})");
-                        persist_daemon_startup_failure_state(
-                            &state_file,
-                            DaemonRuntimeStateInput {
-                                app: &app,
-                                vpn_enabled,
-                                vpn_active: false,
-                                expected_peers,
-                                tunnel_runtime: &tunnel_runtime,
-                                fips_peer_statuses: &[],
-                                fips_relay_statuses: &[],
-                                fips_endpoint_peers: &endpoint_peer_states,
-                                advertised_routes_by_participant: &advertised_routes,
-                                vpn_status: &vpn_status,
-                                network: &network,
-                                port_mapping: &port_mapping,
-                            },
-                        );
-                        return Err(error);
-                    }
-                };
+            let runtime = match crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config)
+                .await
+            {
+                Ok(runtime) => runtime,
+                Err(start_error) => {
+                    let error = match persist_fips_daemon_network_cleanup_state(&config_path, None)
+                    {
+                        Ok(()) => start_error,
+                        Err(persist_error) => anyhow!(
+                            "{start_error:#}; failed to persist partial FIPS startup cleanup \
+                                 ownership: {persist_error:#}"
+                        ),
+                    };
+                    let network = network_snapshot.summary(network_changed_at, captive_portal);
+                    let port_mapping = port_mapping_runtime.status();
+                    let advertised_routes = HashMap::new();
+                    let vpn_status = format!("FIPS private mesh startup failed ({error})");
+                    persist_daemon_startup_failure_state(
+                        &state_file,
+                        DaemonRuntimeStateInput {
+                            app: &app,
+                            vpn_enabled,
+                            vpn_active: false,
+                            expected_peers,
+                            tunnel_runtime: &tunnel_runtime,
+                            fips_peer_statuses: &[],
+                            fips_relay_statuses: &[],
+                            fips_endpoint_peers: &endpoint_peer_states,
+                            advertised_routes_by_participant: &advertised_routes,
+                            vpn_status: &vpn_status,
+                            network: &network,
+                            port_mapping: &port_mapping,
+                        },
+                    );
+                    return Err(error);
+                }
+            };
             eprintln!(
                 "daemon: FIPS private mesh on {} (seeded {} recently-connected peer endpoint(s))",
                 runtime.iface(),
@@ -314,7 +324,7 @@ pub(super) struct DaemonVpnLoopState {
     pub(super) last_state_persisted_at: Instant,
     pub(super) daemon_state_persist_interval: Duration,
     pub(super) platform_network_event_pending: bool,
-    pub(super) platform_network_event_suppressed_until: Option<Instant>,
+    pub(super) platform_network_settle_rechecks_remaining: u8,
     pub(super) supervised_service_executable: Option<(PathBuf, ExecutableFingerprint)>,
 }
 
@@ -367,7 +377,7 @@ pub(super) async fn initialize_daemon_vpn_loop(
     let last_state_persisted_at = Instant::now();
     let daemon_state_persist_interval = Duration::from_secs(DAEMON_STATE_PERSIST_INTERVAL_SECS);
     let platform_network_event_pending = false;
-    let platform_network_event_suppressed_until = None;
+    let platform_network_settle_rechecks_remaining = 0;
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let supervised_service_executable = if _args.service {
@@ -384,7 +394,7 @@ pub(super) async fn initialize_daemon_vpn_loop(
         last_state_persisted_at,
         daemon_state_persist_interval,
         platform_network_event_pending,
-        platform_network_event_suppressed_until,
+        platform_network_settle_rechecks_remaining,
         supervised_service_executable,
     })
 }

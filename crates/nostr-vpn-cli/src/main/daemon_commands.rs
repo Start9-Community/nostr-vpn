@@ -294,8 +294,14 @@ fn finish_stop_daemon(config_path: &Path, status: &DaemonStatus, was_running: bo
     let _ = fs::remove_file(daemon_control_file_path(config_path));
 
     match repaired {
-        Ok(true) if was_running => println!("daemon stopped; repaired network state"),
-        Ok(true) => println!("daemon: not running; repaired network state"),
+        Ok(true) if was_running => {
+            transition_daemon_state_after_network_repair(config_path)?;
+            println!("daemon stopped; repaired network state");
+        }
+        Ok(true) => {
+            transition_daemon_state_after_network_repair(config_path)?;
+            println!("daemon: not running; repaired network state");
+        }
         Ok(false) if was_running => println!("daemon stopped"),
         Ok(false) => println!("daemon: not running"),
         Err(error) => {
@@ -325,6 +331,7 @@ fn repair_network(args: RepairNetworkArgs) -> Result<()> {
     }
 
     if repair_saved_network_state(&config_path)? {
+        transition_daemon_state_after_network_repair(&config_path)?;
         println!("network state repaired");
     } else {
         println!("network state already clean");

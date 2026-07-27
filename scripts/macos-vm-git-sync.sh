@@ -71,7 +71,11 @@ sync_repo() {
 
 sync_repo nostr-vpn "$ROOT" "$GUEST_SRC_ROOT/nostr-vpn"
 
-case "${NVPN_MACOS_SYNC_PATH_DEPS:-0}" in
+sync_path_deps="${NVPN_MACOS_SYNC_PATH_DEPS:-0}"
+if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
+  sync_path_deps=1
+fi
+case "$sync_path_deps" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
     sync_repo fips "${NVPN_FIPS_REPO_PATH:-$SRC_ROOT/fips}" "$GUEST_SRC_ROOT/fips"
     sync_repo cashu-service "$SRC_ROOT/cashu-service" "$GUEST_SRC_ROOT/cashu-service"

@@ -97,22 +97,12 @@ pub struct DaemonWgUpstream {
 pub struct DaemonWgUpstream {
     pub iface: String,
     pub upstream: SocketAddr,
+    interface_index: u32,
     full_route: Option<WindowsFullDefaultRoute>,
-    backend: WindowsWgUpstreamBackend,
+    tunnel: WindowsNativeWireGuardTunnel,
+    wg_exe: PathBuf,
+    peer_public_key: String,
     config_fingerprint: WireGuardExitFingerprint,
-}
-
-#[cfg(target_os = "windows")]
-enum WindowsWgUpstreamBackend {
-    Native(WindowsNativeWireGuardTunnel),
-    Userspace {
-        runtime: Option<WgUpstreamRuntime>,
-        // Adapter + session held to keep the WinTun device open for
-        // the lifetime of the tunnel; dropping releases the WinTun
-        // adapter (which removes its routes too).
-        _session: Arc<WintunSession>,
-        _adapter: Arc<wintun::Adapter>,
-    },
 }
 
 #[cfg(target_os = "windows")]
@@ -120,6 +110,34 @@ struct WindowsNativeWireGuardTunnel {
     name: String,
     config_path: PathBuf,
     wireguard_exe: PathBuf,
+    owner_token: String,
+    service_owned: bool,
+    config_owned: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WindowsNativeWireGuardCleanupState {
+    name: String,
+    config_path: PathBuf,
+    wireguard_exe: PathBuf,
+    owner_token: String,
+    service_owned: bool,
+    config_owned: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsNativeWireGuardTunnel {
+    pub(crate) fn cleanup_state(&self) -> Option<WindowsNativeWireGuardCleanupState> {
+        (self.service_owned || self.config_owned).then(|| WindowsNativeWireGuardCleanupState {
+            name: self.name.clone(),
+            config_path: self.config_path.clone(),
+            wireguard_exe: self.wireguard_exe.clone(),
+            owner_token: self.owner_token.clone(),
+            service_owned: self.service_owned,
+            config_owned: self.config_owned,
+        })
+    }
 }
 
 /// Bring up the daemon-owned WG upstream tunnel: create utun, run the
@@ -228,38 +246,64 @@ impl DaemonWgUpstream {
         self.config_fingerprint == WireGuardExitFingerprint::from_config(new_config)
     }
 
-    pub async fn cleanup(mut self) {
-        if let Some(mut full_route) = self.full_route.take() {
-            if let Err(error) = full_route.revert() {
-                eprintln!(
-                    "fips: WG upstream route revert failed: {error}. \
-                     Routing table may need manual cleanup."
-                );
-            }
-            drop(full_route);
-        }
-        match self.backend {
-            WindowsWgUpstreamBackend::Native(mut tunnel) => {
-                if let Err(error) = tunnel.cleanup() {
-                    eprintln!(
-                        "fips: native WireGuardNT tunnel cleanup failed: {error}. \
-                         The WireGuardTunnel${} service may need manual removal.",
-                        tunnel.name
-                    );
+    pub fn refresh_underlay_routes(&mut self, excluded_tunnel_interfaces: &[u32]) -> Result<bool> {
+        let upstream = windows_native_wireguard_peer_endpoint(
+            &self.wg_exe,
+            &self.tunnel.name,
+            &self.peer_public_key,
+        )?;
+        let changed = self
+            .full_route
+            .as_mut()
+            .ok_or_else(|| anyhow!("Windows WireGuard route guard is missing"))?
+            .reconcile_endpoint_and_underlay(upstream, excluded_tunnel_interfaces)?;
+        self.upstream = upstream;
+        Ok(changed)
+    }
+
+    pub(crate) fn interface_index(&self) -> u32 {
+        self.interface_index
+    }
+
+    pub async fn cleanup(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        if let Some(full_route) = self.full_route.as_mut() {
+            match full_route.revert() {
+                Ok(()) => self.full_route = None,
+                Err(error) => {
+                    failures.push(format!("revert Windows WireGuard routes: {error:#}"))
                 }
             }
-            WindowsWgUpstreamBackend::Userspace {
-                runtime: Some(runtime),
-                ..
-            } => {
-                runtime.shutdown().await;
-            }
-            WindowsWgUpstreamBackend::Userspace { runtime: None, .. } => {}
         }
-        // Userspace backend session/adapter fields drop here. WinTun
-        // removes its adapter when the last reference goes; native
-        // backend cleanup uninstalls the official WireGuard tunnel
-        // service above.
+        if let Err(error) = retry_pending_windows_route_cleanup() {
+            failures.push(format!("retry pending Windows route cleanup: {error:#}"));
+        }
+        if let Err(error) = retry_pending_windows_native_cleanup() {
+            failures.push(format!("retry pending native WireGuard cleanup: {error:#}"));
+        }
+        if let Err(error) = self.tunnel.cleanup() {
+            failures.push(format!(
+                "clean up owned WireGuardTunnel${} service/config: {error:#}",
+                self.tunnel.name
+            ));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
+        }
+    }
+
+    pub(crate) fn native_cleanup_state(&self) -> Option<WindowsNativeWireGuardCleanupState> {
+        self.tunnel.cleanup_state()
+    }
+
+    pub(crate) fn route_cleanup_snapshot(&self) -> WindowsRouteCleanupSnapshot {
+        self.full_route
+            .as_ref()
+            .map_or_else(WindowsRouteCleanupSnapshot::default, |route| {
+                route.cleanup_snapshot()
+            })
     }
 }
 

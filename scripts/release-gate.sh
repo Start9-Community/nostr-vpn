@@ -30,6 +30,7 @@ MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU_TI
 WINDOWS_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE_TIMEOUT_SECS:-1800}"
 DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS:-1800}"
 DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS:-1800}"
+DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS:-2400}"
 MOBILE_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_GUI_SMOKE_TIMEOUT_SECS:-1800}"
 ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS:-600}"
 IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS:-180}"
@@ -334,6 +335,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-release-artifact-reuse-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
+  ./scripts/test-desktop-network-handoff-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
   cargo fmt --check
 }
@@ -561,12 +563,71 @@ run_windows_service_toggle_gate() {
   esac
 }
 
+windows_underlay_gate_reachable() {
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  local hypervisor="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}"
+  local vm="${NVPN_WINDOWS_UNDERLAY_VM_NAME:-${NVPN_WINDOWS_VM_NAME:-}}"
+  [[ -n "$host" && -n "$hypervisor" && -n "$vm" ]] || return 1
+  windows_vm_reachable "$host" || return 1
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$hypervisor" \
+    "virsh dominfo '$vm'" >/dev/null 2>&1
+}
+
+require_windows_underlay_gate() {
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  local hypervisor="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}"
+  local vm="${NVPN_WINDOWS_UNDERLAY_VM_NAME:-${NVPN_WINDOWS_VM_NAME:-}}"
+  [[ -n "$host" ]] || {
+    echo "Required Windows underlay gate needs NVPN_WINDOWS_SSH_HOST." >&2
+    return 1
+  }
+  [[ -n "$hypervisor" ]] || {
+    echo "Required Windows underlay gate needs NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH." >&2
+    return 1
+  }
+  [[ -n "$vm" ]] || {
+    echo "Required Windows underlay gate needs NVPN_WINDOWS_UNDERLAY_VM_NAME." >&2
+    return 1
+  }
+  windows_underlay_gate_reachable || {
+    echo "Required Windows underlay VM/hypervisor is unreachable." >&2
+    return 1
+  }
+}
+
+run_windows_underlay_network_change_gate() {
+  local mode="${NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E:-auto}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Windows real underlay network-change e2e because NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
+      require_windows_underlay_gate
+      release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
+        "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+        ./scripts/windows-vm-desktop-underlay-change-e2e.sh
+      ;;
+    auto|AUTO|Auto|"")
+      if windows_underlay_gate_reachable; then
+        release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
+          "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+          ./scripts/windows-vm-desktop-underlay-change-e2e.sh
+      else
+        echo "Skipping Windows real underlay network-change e2e because its isolated VM/hypervisor is unavailable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
 run_windows_platform_lane() {
   prepare_windows_platform_lane_sync
   if [[ "${WINDOWS_LANE_PRE_SYNCED:-0}" == "1" ]]; then
     export NVPN_WINDOWS_SKIP_GIT_SYNC=1
   fi
-  run_windows_wireguard_exit_gate
   run_windows_app_launch_gate
   run_windows_manual_join_ui_gate
   if ! release_gate_mode_disabled \
@@ -769,6 +830,65 @@ run_linux_service_toggle_gate() {
   esac
 }
 
+linux_underlay_gate_reachable() {
+  local hypervisor="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}"
+  local vm="${NVPN_LINUX_UNDERLAY_VM_NAME:-${NVPN_UBUNTU_VM_NAME:-}}"
+  [[ -n "${NVPN_UBUNTU_SSH_HOST:-}" && -n "$hypervisor" && -n "$vm" ]] \
+    || return 1
+  ubuntu_vm_reachable || return 1
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$hypervisor" \
+    "virsh dominfo '$vm'" >/dev/null 2>&1
+}
+
+require_linux_underlay_gate() {
+  local hypervisor="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}"
+  local vm="${NVPN_LINUX_UNDERLAY_VM_NAME:-${NVPN_UBUNTU_VM_NAME:-}}"
+  [[ -n "${NVPN_UBUNTU_SSH_HOST:-}" ]] || {
+    echo "Required Linux underlay gate needs NVPN_UBUNTU_SSH_HOST." >&2
+    return 1
+  }
+  [[ -n "$hypervisor" ]] || {
+    echo "Required Linux underlay gate needs NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH." >&2
+    return 1
+  }
+  [[ -n "$vm" ]] || {
+    echo "Required Linux underlay gate needs NVPN_LINUX_UNDERLAY_VM_NAME." >&2
+    return 1
+  }
+  linux_underlay_gate_reachable || {
+    echo "Required Linux underlay VM/hypervisor is unreachable." >&2
+    return 1
+  }
+}
+
+run_linux_underlay_network_change_gate() {
+  local mode="${NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E:-auto}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Linux real underlay network-change e2e because NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
+      require_linux_underlay_gate
+      release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
+        "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+        ./scripts/linux-vm-desktop-underlay-change-e2e.sh
+      ;;
+    auto|AUTO|Auto|"")
+      if linux_underlay_gate_reachable; then
+        release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
+          "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+          ./scripts/linux-vm-desktop-underlay-change-e2e.sh
+      else
+        echo "Skipping Linux real underlay network-change e2e because its isolated VM/hypervisor is unavailable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
 run_linux_platform_lane() {
   prepare_linux_platform_lane_sync
   run_linux_manual_join_ui_gate
@@ -778,6 +898,19 @@ run_linux_platform_lane() {
     export NVPN_UBUNTU_SKIP_BUILD=1
   fi
   run_linux_service_toggle_gate
+}
+
+run_linux_exclusive_desktop_gates() {
+  run_linux_underlay_network_change_gate
+}
+
+run_windows_exclusive_desktop_gates() {
+  run_windows_wireguard_exit_gate
+  run_windows_underlay_network_change_gate
+}
+
+run_macos_exclusive_desktop_gates() {
+  run_wireguard_exit_platform_gates
 }
 
 release_gate_perf_output_dir() {
@@ -792,30 +925,34 @@ release_gate_perf_output_dir() {
 }
 
 run_wireguard_exit_platform_gates() {
+  if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_MACOS_SKIP_GIT_SYNC=1
+  fi
   case "${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E:-auto}" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping macOS WG exit e2e because NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E=${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E}"
       ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
-      release_gate_run_with_timeout "macOS WG exit e2e" "$MACOS_WG_EXIT_TIMEOUT_SECS" \
-        ./scripts/e2e-wireguard-exit-host.sh
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      macos_vm_reachable \
+        || { echo "Required macOS WG exit VM is unreachable." >&2; return 1; }
+      release_gate_run_with_timeout "macOS VM WG exit e2e" "$MACOS_WG_EXIT_TIMEOUT_SECS" \
+        ./scripts/macos-vm-desktop-wireguard-exit-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
-      if [[ "$(uname -s)" == "Darwin" ]]; then
-        if [[ "${EUID:-$(id -u)}" == "0" ]]; then
-          release_gate_run_with_timeout "macOS WG exit e2e" "$MACOS_WG_EXIT_TIMEOUT_SECS" \
-            ./scripts/e2e-wireguard-exit-host.sh
-        else
-          echo "Skipping macOS WG exit e2e in auto mode because privileged access is not predeclared."
-          echo "Set NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E=1 to run the exact sudo-scoped test command."
-        fi
+      if macos_vm_reachable; then
+        release_gate_run_with_timeout "macOS VM WG exit e2e" "$MACOS_WG_EXIT_TIMEOUT_SECS" \
+          ./scripts/macos-vm-desktop-wireguard-exit-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
       else
-        echo "Skipping macOS WG exit e2e on this host."
+        echo "Skipping macOS WG exit e2e because its isolated VM is unreachable."
       fi
+      ;;
+    local)
+      echo "NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E=local is forbidden: release verification never mutates host routes." >&2
+      return 2
       ;;
     *)
       echo "Unsupported NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E=${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E}" >&2
-      exit 2
+      return 2
       ;;
   esac
 
@@ -847,58 +984,76 @@ run_desktop_app_launch_smokes() {
   esac
 
   local macos_gui_smoke="${NVPN_RELEASE_GATE_MACOS_GUI_SMOKE:-auto}"
+  if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_MACOS_SKIP_GIT_SYNC=1
+  fi
   case "$macos_gui_smoke" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping macOS app launch smoke because NVPN_RELEASE_GATE_MACOS_GUI_SMOKE=$macos_gui_smoke"
       ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
-      release_gate_run_with_timeout "macOS app launch smoke" "$MACOS_GUI_SMOKE_TIMEOUT_SECS" \
-        env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release \
-        ./scripts/macos-app-launch-smoke.sh
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      macos_vm_reachable \
+        || { echo "Required macOS app launch VM is unreachable." >&2; return 1; }
+      release_gate_run_with_timeout "macOS VM app launch smoke" "$MACOS_GUI_SMOKE_TIMEOUT_SECS" \
+        ./scripts/macos-vm-desktop-app-launch-smoke.sh "${NVPN_MACOS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
-      if [[ "$(uname -s)" == "Darwin" && -d "$ROOT_DIR/macos/Sources" ]]; then
-        release_gate_run_with_timeout "macOS app launch smoke" "$MACOS_GUI_SMOKE_TIMEOUT_SECS" \
-          env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release \
-          ./scripts/macos-app-launch-smoke.sh
+      if macos_vm_reachable; then
+        release_gate_run_with_timeout "macOS VM app launch smoke" "$MACOS_GUI_SMOKE_TIMEOUT_SECS" \
+          ./scripts/macos-vm-desktop-app-launch-smoke.sh "${NVPN_MACOS_SSH_HOST:-}"
       else
-        echo "Skipping macOS app launch smoke on this host."
+        echo "Skipping macOS app launch smoke because its isolated VM is unreachable."
       fi
+      ;;
+    local)
+      echo "NVPN_RELEASE_GATE_MACOS_GUI_SMOKE=local is forbidden: release verification never launches the app against host state." >&2
+      return 2
       ;;
     *)
       echo "Unsupported NVPN_RELEASE_GATE_MACOS_GUI_SMOKE=$macos_gui_smoke" >&2
-      exit 2
+      return 2
       ;;
   esac
 
 }
 
 run_macos_daemon_idle_cpu_gate() {
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "Skipping macOS daemon idle CPU gate on this host."
-    return
-  fi
   local mode="${NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU:-auto}"
+  if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_MACOS_SKIP_GIT_SYNC=1
+  fi
   case "$mode" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping macOS daemon idle CPU gate because NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU=$mode"
       return
       ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      macos_vm_reachable \
+        || { echo "Required macOS daemon idle CPU VM is unreachable." >&2; return 1; }
+      release_gate_run_with_timeout "macOS VM daemon idle CPU" \
+        "$MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS" \
+        ./scripts/macos-vm-desktop-daemon-idle-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      return
       ;;
     auto|AUTO|Auto|"")
-      if [[ "${EUID:-$(id -u)}" != "0" && "${CI:-}" != "true" ]]; then
-        echo "Skipping isolated macOS service E2E on this developer host; run it on a root-capable macOS gate host."
-        return
+      if macos_vm_reachable; then
+        release_gate_run_with_timeout "macOS VM daemon idle CPU" \
+          "$MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS" \
+          ./scripts/macos-vm-desktop-daemon-idle-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      else
+        echo "Skipping macOS daemon idle CPU gate because its isolated VM is unreachable."
       fi
+      return
+      ;;
+    local)
+      echo "NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU=local is forbidden: release verification never installs a daemon on its host." >&2
+      return 2
       ;;
     *)
       echo "Unsupported NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU=$mode" >&2
       return 2
       ;;
   esac
-  release_gate_run_with_timeout "macOS daemon idle CPU" "$MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS" \
-    env NVPN_RUN_MACOS_SERVICE_E2E=1 ./scripts/e2e-macos-service.sh
 }
 
 release_gate_has_physical_ios_device() {
@@ -1514,6 +1669,26 @@ main() {
     export NVPN_PERF_SKIP_BUILD=1
   fi
 
+  # The real desktop network proofs own their target VM and hypervisor
+  # topology. Join every parallel UI/build lane before changing links, routes,
+  # or entering any latency/performance/device measurement.
+  if [[ -n "$windows_lane" ]]; then
+    release_gate_parallel_wait "$windows_lane"
+    windows_lane=""
+  fi
+  if [[ -n "$linux_platform_lane" ]]; then
+    release_gate_parallel_wait "$linux_platform_lane"
+    linux_platform_lane=""
+  fi
+  if [[ -n "$macos_platform_lane" ]]; then
+    release_gate_parallel_wait "$macos_platform_lane"
+    macos_platform_lane=""
+  fi
+  run_desktop_app_launch_smokes
+  run_linux_exclusive_desktop_gates
+  run_windows_exclusive_desktop_gates
+  run_macos_exclusive_desktop_gates
+
   run_mobile_qr_join_latency_gate
   run_public_fips_transit_gate
 
@@ -1525,8 +1700,7 @@ main() {
   run_docker_perf_gate
   ./scripts/release-gate-host-pair-latency.sh
   ./scripts/release-gate-host-pair-loaded-latency.sh
-  run_wireguard_exit_platform_gates
-  run_desktop_app_launch_smokes
+
   run_macos_daemon_idle_cpu_gate
   run_mobile_idle_cpu_gates
   run_android_legacy_replacement_gate
@@ -1534,20 +1708,8 @@ main() {
   run_mobile_underlay_change_gates
 
   # The signed Release join lane covers both mobile role directions, both
-  # manual role directions, and desktop/mobile manual join. It shares the
-  # isolated macOS VM with its platform lane, so join that lane first.
-  if [[ -n "$macos_platform_lane" ]]; then
-    release_gate_parallel_wait "$macos_platform_lane"
-    macos_platform_lane=""
-  fi
+  # manual role directions, and desktop/mobile manual join.
   run_mobile_join_e2e_gate
-
-  if [[ -n "$windows_lane" ]]; then
-    release_gate_parallel_wait "$windows_lane"
-  fi
-  if [[ -n "$linux_platform_lane" ]]; then
-    release_gate_parallel_wait "$linux_platform_lane"
-  fi
 
   local elapsed target_status
   elapsed="$(( $(date +%s) - started_at ))"

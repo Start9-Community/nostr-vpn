@@ -1,4 +1,19 @@
 pub(crate) fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    write_runtime_file_atomically_with_mode(path, contents, 0o644)
+}
+
+pub(crate) fn write_private_runtime_file_atomically(
+    path: &Path,
+    contents: &[u8],
+) -> Result<()> {
+    write_runtime_file_atomically_with_mode(path, contents, 0o600)
+}
+
+fn write_runtime_file_atomically_with_mode(
+    path: &Path,
+    contents: &[u8],
+    unix_mode: u32,
+) -> Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -24,8 +39,10 @@ pub(crate) fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Res
         options.create_new(true).write(true);
         #[cfg(unix)]
         {
-            options.mode(0o644);
+            options.mode(unix_mode);
         }
+        #[cfg(not(unix))]
+        let _ = unix_mode;
         match options.open(&candidate) {
             Ok(file) => {
                 temp_file = Some(file);
@@ -53,7 +70,7 @@ pub(crate) fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Res
             .with_context(|| format!("failed to write temp runtime file {}", temp_path.display()));
     }
     #[cfg(unix)]
-    if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o644)) {
+    if let Err(error) = file.set_permissions(fs::Permissions::from_mode(unix_mode)) {
         let _ = fs::remove_file(&temp_path);
         return Err(error).with_context(|| {
             format!(

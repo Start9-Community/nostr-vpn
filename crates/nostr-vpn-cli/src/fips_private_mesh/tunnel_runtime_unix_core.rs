@@ -1,6 +1,12 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl FipsPrivateTunnelRuntime {
     pub(crate) async fn start(config: FipsPrivateTunnelConfig) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        if pending_linux_network_cleanup_state().is_some() {
+            return Err(anyhow!(
+                "refusing to start FIPS while prior Linux network cleanup remains pending"
+            ));
+        }
         let mesh = bind_fips_private_mesh(&config).await?;
         Self::start_with_mesh(config, mesh).await
     }
@@ -81,12 +87,24 @@ impl FipsPrivateTunnelRuntime {
             #[cfg(target_os = "macos")]
             wg_upstream: None,
         };
-        runtime.prepare_secure_dns(&config).await?;
-        runtime.apply_interface_config(&config).await?;
-        runtime.finish_secure_dns(&config).await;
-        runtime
-            .reconcile_fips_host_runtime(config.fips_host.clone())
-            .await?;
+        let startup = async {
+            runtime.prepare_secure_dns(&config).await?;
+            runtime.apply_interface_config(&config).await?;
+            runtime.finish_secure_dns(&config).await;
+            runtime
+                .reconcile_fips_host_runtime(config.fips_host.clone())
+                .await
+        }
+        .await;
+        if let Err(error) = startup {
+            let cleanup = runtime.stop().await;
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup) => anyhow!(
+                    "{error:#}; failed to clean partially-started FIPS runtime: {cleanup:#}"
+                ),
+            });
+        }
         Ok(runtime)
     }
 
@@ -176,7 +194,13 @@ impl FipsPrivateTunnelRuntime {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let runtime = self;
         #[cfg(target_os = "linux")]
-        runtime.cleanup_linux_network_state();
+        let cleanup_snapshot = LinuxNetworkCleanupState::from_runtime(&runtime);
+        #[cfg(target_os = "linux")]
+        let network_cleanup = runtime.cleanup_linux_network_state();
+        #[cfg(target_os = "linux")]
+        let network_cleanup_failed = network_cleanup.is_err();
+        #[cfg(not(target_os = "linux"))]
+        let network_cleanup: Result<()> = Ok(());
         #[cfg(target_os = "macos")]
         runtime.cleanup_macos_network_state();
         #[cfg(target_os = "macos")]
@@ -199,13 +223,27 @@ impl FipsPrivateTunnelRuntime {
             stop_fips_host_recv_worker(worker).await;
         }
         stop_mesh_recv_worker(runtime.mesh_recv_worker, &runtime.mesh).await;
-        runtime
+        let endpoint_cleanup = runtime
             .mesh
             .endpoint()
             .shutdown()
             .await
-            .context("failed to stop FIPS endpoint")?;
-        Ok(())
+            .context("failed to stop FIPS endpoint");
+        let result = match (network_cleanup, endpoint_cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(network), Ok(())) => Err(network),
+            (Ok(()), Err(endpoint)) => Err(endpoint),
+            (Err(network), Err(endpoint)) => Err(anyhow!(
+                "network cleanup failed ({network:#}); endpoint shutdown failed ({endpoint:#})"
+            )),
+        };
+        #[cfg(target_os = "linux")]
+        if network_cleanup_failed
+            && let Some(cleanup_snapshot) = cleanup_snapshot
+        {
+            retain_pending_linux_network_cleanup_state(cleanup_snapshot);
+        }
+        result
     }
 
     async fn prepare_secure_dns(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
@@ -302,7 +340,7 @@ impl FipsPrivateTunnelRuntime {
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(target_os = "macos")]
     fn macos_wg_upstream_needs_cleanup(want_up: bool, existing_matches: Option<bool>) -> bool {
         existing_matches.is_some_and(|matches| !want_up || !matches)
     }
@@ -429,7 +467,6 @@ impl FipsPrivateTunnelRuntime {
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let underlay_changed = self.endpoint_bypass_underlay.as_ref() != underlay;
 
         let stale = self
             .endpoint_bypass_routes
@@ -445,25 +482,18 @@ impl FipsPrivateTunnelRuntime {
             }
         }
 
-        if let Some(underlay) = underlay {
-            for route in routes
-                .iter()
-                .filter(|route| underlay_changed || !self.endpoint_bypass_routes.contains(*route))
-            {
-                if let Err(error) =
-                    crate::apply_macos_route_spec(route, underlay.gateway.as_deref(), None)
-                {
-                    eprintln!(
-                        "fips: failed to install macOS endpoint bypass route {}: {}",
-                        route, error
-                    );
-                }
-            }
+        for (route, error) in apply_macos_endpoint_bypass_route_changes(
+            &mut self.endpoint_bypass_routes,
+            &mut self.endpoint_bypass_underlay,
+            routes,
+            underlay,
+            |route, gateway| crate::apply_macos_route_spec(route, gateway, None),
+        ) {
+            eprintln!(
+                "fips: failed to install macOS endpoint bypass route {}: {}",
+                route, error
+            );
         }
-
-        self.endpoint_bypass_routes = desired.into_iter().collect();
-        self.endpoint_bypass_routes.sort();
-        self.endpoint_bypass_underlay = underlay.cloned();
     }
 
     #[cfg(target_os = "macos")]

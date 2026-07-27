@@ -1,7 +1,5 @@
 #[cfg(target_os = "linux")]
-fn linux_route_targets_require_ip_endpoint_bypass(
-    route_targets: &[String],
-) -> bool {
+fn linux_route_targets_require_ip_endpoint_bypass(route_targets: &[String]) -> bool {
     crate::route_targets_require_endpoint_bypass(route_targets)
 }
 
@@ -14,11 +12,33 @@ fn linux_strict_exit_requested(route_targets: &[String], exit_node_leak_protecti
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_endpoint_bypass_hosts_unchanged(
-    current_targets: &[String],
+trait LinuxEndpointBypassTarget {
+    fn endpoint_bypass_target(&self) -> &str;
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl LinuxEndpointBypassTarget for String {
+    fn endpoint_bypass_target(&self) -> &str {
+        self
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl LinuxEndpointBypassTarget for crate::LinuxManagedEndpointBypassRoute {
+    fn endpoint_bypass_target(&self) -> &str {
+        &self.route.target
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_endpoint_bypass_hosts_unchanged<T: LinuxEndpointBypassTarget>(
+    current_routes: &[T],
     desired_hosts: &[Ipv4Addr],
 ) -> bool {
-    let mut current_targets = current_targets.to_vec();
+    let mut current_targets = current_routes
+        .iter()
+        .map(|managed| managed.endpoint_bypass_target().to_string())
+        .collect::<Vec<_>>();
     current_targets.sort_unstable();
     current_targets.dedup();
 
@@ -50,6 +70,7 @@ fn linux_exit_node_runtime_is_inactive(runtime: &crate::LinuxExitNodeRuntime) ->
         && runtime.ipv4_forward_was_enabled.is_none()
         && runtime.ipv6_forward_was_enabled.is_none()
         && runtime.wireguard_exit.is_none()
+        && runtime.pending_wireguard_exit_cleanup.is_empty()
 }
 
 impl FipsPrivateTunnelRuntime {
@@ -82,12 +103,12 @@ impl FipsPrivateTunnelRuntime {
         let active_ipv6_exit = route_targets.iter().any(|route| route == "::/0");
 
         if requested_ipv4_exit {
-            self.capture_linux_original_default_route();
+            self.capture_linux_original_default_route(config.underlay_interface.as_deref())?;
         } else {
             self.restore_linux_original_default_route();
         }
         if requested_ipv6_exit {
-            self.capture_linux_original_default_ipv6_route();
+            self.capture_linux_original_default_ipv6_route(config.underlay_interface.as_deref())?;
         } else {
             self.restore_linux_original_default_ipv6_route();
         }
@@ -113,7 +134,7 @@ impl FipsPrivateTunnelRuntime {
         } else {
             Vec::new()
         };
-        self.reconcile_linux_endpoint_bypass_routes(&endpoint_bypass_specs);
+        self.reconcile_linux_endpoint_bypass_routes(&endpoint_bypass_specs)?;
 
         let interface_route_targets = config.interface_route_targets(route_targets.clone());
         let interface_addresses = config.interface_addresses();
@@ -166,35 +187,63 @@ impl FipsPrivateTunnelRuntime {
             &config.wireguard_exit,
             config.exit_node_leak_protection,
             config.mesh_mtu.tunnel,
-        );
+        )?;
         self.linux_network_state_initialized = true;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
-    fn capture_linux_original_default_route(&mut self) {
-        if self.original_default_route.is_some() {
-            return;
+    fn capture_linux_original_default_route(
+        &mut self,
+        underlay_interface: Option<&str>,
+    ) -> Result<()> {
+        if underlay_interface.is_none() && self.original_default_route.is_some() {
+            return Ok(());
         }
-        match crate::linux_default_route() {
-            Ok(route) if route.dev != self.iface => self.original_default_route = Some(route.line),
-            Ok(_) => {}
-            Err(error) => eprintln!("fips: failed to capture original default route: {error}"),
-        }
+        let route = match underlay_interface {
+            Some(interface) => crate::linux_default_route_for_interface(interface)
+                .with_context(|| format!("failed to refresh IPv4 underlay route on {interface}"))?,
+            None => match crate::linux_default_route() {
+                Ok(route) => route,
+                Err(error) => {
+                    eprintln!("fips: failed to capture original default route: {error}");
+                    return Ok(());
+                }
+            },
+        };
+        crate::update_linux_underlay_default_route(
+            &mut self.original_default_route,
+            route,
+            &self.iface,
+        )
+        .context("failed to update cached IPv4 underlay route")
     }
 
     #[cfg(target_os = "linux")]
-    fn capture_linux_original_default_ipv6_route(&mut self) {
-        if self.original_default_ipv6_route.is_some() {
-            return;
+    fn capture_linux_original_default_ipv6_route(
+        &mut self,
+        underlay_interface: Option<&str>,
+    ) -> Result<()> {
+        if underlay_interface.is_none() && self.original_default_ipv6_route.is_some() {
+            return Ok(());
         }
-        match crate::linux_default_ipv6_route() {
-            Ok(route) if route.dev != self.iface => {
-                self.original_default_ipv6_route = Some(route.line);
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("fips: failed to capture original IPv6 default route: {error}"),
-        }
+        let route = match underlay_interface {
+            Some(interface) => crate::linux_default_ipv6_route_for_interface(interface)
+                .with_context(|| format!("failed to refresh IPv6 underlay route on {interface}"))?,
+            None => match crate::linux_default_ipv6_route() {
+                Ok(route) => route,
+                Err(error) => {
+                    eprintln!("fips: failed to capture original IPv6 default route: {error}");
+                    return Ok(());
+                }
+            },
+        };
+        crate::update_linux_underlay_default_route(
+            &mut self.original_default_ipv6_route,
+            route,
+            &self.iface,
+        )
+        .context("failed to update cached IPv6 underlay route")
     }
 
     #[cfg(target_os = "linux")]
@@ -251,35 +300,114 @@ impl FipsPrivateTunnelRuntime {
     fn reconcile_linux_endpoint_bypass_routes(
         &mut self,
         routes: &[crate::LinuxEndpointBypassRoute],
-    ) {
-        let desired = routes
+    ) -> Result<()> {
+        let mut desired = routes.to_vec();
+        desired.sort_by(|left, right| left.target.cmp(&right.target));
+        desired.dedup_by(|left, right| left.target == right.target);
+        let desired_targets = desired
             .iter()
             .map(|route| route.target.clone())
             .collect::<std::collections::HashSet<_>>();
 
-        let stale = self
-            .endpoint_bypass_routes
-            .iter()
-            .filter(|route| !desired.contains(*route))
-            .cloned()
-            .collect::<Vec<_>>();
-        for route in stale {
-            if let Err(error) = crate::delete_linux_endpoint_bypass_route(&route) {
-                eprintln!("fips: failed to remove endpoint bypass route {route}: {error}");
+        // Secure every fresh identity before restoring stale identities so an
+        // underlay handoff never drops all transport bypasses at once.
+        for route in desired {
+            let current = crate::linux_endpoint_bypass_route_snapshot(&route.target)?;
+            let current_is_desired = current.len() == 1
+                && crate::linux_endpoint_bypass_route_matches_line(&route, &current[0]);
+            if let Some(index) = self
+                .endpoint_bypass_routes
+                .iter()
+                .position(|managed| managed.route.target == route.target)
+            {
+                if current_is_desired {
+                    self.endpoint_bypass_routes[index].route = route;
+                    continue;
+                }
+                let previous_managed = self.endpoint_bypass_routes[index].route.clone();
+                let current_is_previous = current.len() == 1
+                    && crate::linux_endpoint_bypass_route_matches_line(
+                        &previous_managed,
+                        &current[0],
+                    );
+                if !current.is_empty() && !current_is_previous {
+                    return Err(anyhow!(
+                        "refusing to overwrite drifted unowned endpoint route {}: {:?}",
+                        route.target,
+                        current
+                    ));
+                }
+                crate::apply_linux_endpoint_bypass_route(&route).with_context(|| {
+                    format!("failed to install endpoint bypass route {}", route.target)
+                })?;
+                let managed = &mut self.endpoint_bypass_routes[index];
+                if !managed.owned {
+                    managed.previous_routes = current;
+                    managed.owned = true;
+                }
+                managed.route = route;
+                continue;
             }
+
+            if current_is_desired {
+                self.endpoint_bypass_routes
+                    .push(crate::LinuxManagedEndpointBypassRoute {
+                        route,
+                        previous_routes: current,
+                        owned: false,
+                    });
+                continue;
+            }
+            if current.len() > 1 {
+                return Err(anyhow!(
+                    "refusing to replace ambiguous endpoint route identity {}: {:?}",
+                    route.target,
+                    current
+                ));
+            }
+            crate::apply_linux_endpoint_bypass_route(&route).with_context(|| {
+                format!("failed to install endpoint bypass route {}", route.target)
+            })?;
+            self.endpoint_bypass_routes
+                .push(crate::LinuxManagedEndpointBypassRoute {
+                    route,
+                    previous_routes: current,
+                    owned: true,
+                });
         }
 
-        for route in routes {
-            if let Err(error) = crate::apply_linux_endpoint_bypass_route(route) {
-                eprintln!(
-                    "fips: failed to install endpoint bypass route {}: {}",
-                    route.target, error
-                );
+        let mut failures = Vec::new();
+        let mut index = 0;
+        while index < self.endpoint_bypass_routes.len() {
+            if desired_targets.contains(&self.endpoint_bypass_routes[index].route.target) {
+                index += 1;
+                continue;
+            }
+            match crate::restore_linux_managed_endpoint_bypass_route(
+                &self.endpoint_bypass_routes[index],
+            ) {
+                Ok(()) => {
+                    self.endpoint_bypass_routes.remove(index);
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "{}: {error:#}",
+                        self.endpoint_bypass_routes[index].route.target
+                    ));
+                    index += 1;
+                }
             }
         }
-
-        self.endpoint_bypass_routes = desired.into_iter().collect();
-        self.endpoint_bypass_routes.sort();
+        self.endpoint_bypass_routes
+            .sort_by(|left, right| left.route.target.cmp(&right.route.target));
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "failed to restore stale endpoint bypass routes: {}",
+                failures.join("; ")
+            ))
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -290,7 +418,7 @@ impl FipsPrivateTunnelRuntime {
         wireguard_exit: &WireGuardExitConfig,
         exit_node_leak_protection: bool,
         tunnel_mtu: u16,
-    ) {
+    ) -> Result<()> {
         let ipv4_mss_clamp = exit_node_ipv4_mss_clamp(tunnel_mtu);
         let mut route_families = crate::linux_exit_node_default_route_families(routes);
         if route_families.ipv6 {
@@ -305,9 +433,10 @@ impl FipsPrivateTunnelRuntime {
         let needs_ipv4_tunnel_source = route_families.ipv4 || wireguard_exit.enabled;
         let ipv4_tunnel_source_cidr = if needs_ipv4_tunnel_source {
             let Some(tunnel_source_cidr) = crate::linux_exit_node_source_cidr(local_address) else {
-                eprintln!("fips: invalid IPv4 tunnel address '{local_address}'");
-                self.reconcile_linux_exit_node_forwarding_cleanup();
-                return;
+                self.reconcile_linux_exit_node_forwarding_cleanup()?;
+                return Err(anyhow!(
+                    "invalid IPv4 tunnel address '{local_address}' for exit forwarding"
+                ));
             };
             Some(tunnel_source_cidr)
         } else {
@@ -316,8 +445,8 @@ impl FipsPrivateTunnelRuntime {
 
         let wireguard_exit_iface = if wireguard_exit.enabled {
             let Some(source_cidr) = ipv4_tunnel_source_cidr.as_deref() else {
-                self.reconcile_linux_exit_node_forwarding_cleanup();
-                return;
+                self.reconcile_linux_exit_node_forwarding_cleanup()?;
+                return Err(anyhow!("WireGuard exit has no IPv4 tunnel source"));
             };
             match crate::validate_linux_wireguard_exit_config(wireguard_exit) {
                 Ok(iface) => {
@@ -327,32 +456,29 @@ impl FipsPrivateTunnelRuntime {
                     if let Err(error) =
                         self.apply_linux_wireguard_exit_upstream(wireguard_exit, source_cidr)
                     {
-                        eprintln!("fips: failed to configure WireGuard exit upstream: {error}");
-                        self.cleanup_linux_exit_node_forwarding_rules();
-                        self.cleanup_linux_wireguard_exit_upstream();
+                        let _ = self.cleanup_linux_exit_node_forwarding_rules();
                         self.block_linux_wireguard_exit_if_strict(exit_node_leak_protection);
-                        return;
+                        return Err(error).context("failed to configure WireGuard exit upstream");
                     }
                     Some((iface, source_cidr.to_string()))
                 }
                 Err(error) => {
-                    eprintln!("fips: WireGuard exit upstream is not ready: {error}");
-                    self.cleanup_linux_exit_node_forwarding_rules();
-                    self.cleanup_linux_wireguard_exit_upstream();
+                    let _ = self.cleanup_linux_exit_node_forwarding_rules();
+                    self.cleanup_linux_wireguard_exit_upstream()?;
                     self.block_linux_wireguard_exit_if_strict(
                         exit_node_leak_protection && wireguard_exit.enabled,
                     );
-                    return;
+                    return Err(error).context("WireGuard exit upstream is not ready");
                 }
             }
         } else {
-            self.cleanup_linux_wireguard_exit_upstream();
+            self.cleanup_linux_wireguard_exit_upstream()?;
             None
         };
 
         if !route_families.ipv4 && !route_families.ipv6 {
-            self.cleanup_linux_exit_node_forwarding_rules();
-            return;
+            self.cleanup_linux_exit_node_forwarding_rules()?;
+            return Ok(());
         }
 
         let ipv4_outbound_iface = if route_families.ipv4 {
@@ -362,9 +488,8 @@ impl FipsPrivateTunnelRuntime {
                 match crate::linux_default_route() {
                     Ok(route) => Some(route.dev),
                     Err(error) => {
-                        eprintln!("fips: failed to resolve default IPv4 route device: {error}");
-                        self.cleanup_linux_exit_node_forwarding_rules();
-                        return;
+                        let _ = self.cleanup_linux_exit_node_forwarding_rules();
+                        return Err(error).context("failed to resolve default IPv4 route device");
                     }
                 }
             }
@@ -374,20 +499,15 @@ impl FipsPrivateTunnelRuntime {
 
         let ipv6_outbound_iface = None;
 
-        if !route_families.ipv4 && !route_families.ipv6 {
-            self.cleanup_linux_exit_node_forwarding_rules();
-            return;
-        }
-
         let already_configured = self.exit_node_runtime.ipv4_outbound_iface == ipv4_outbound_iface
             && self.exit_node_runtime.ipv6_outbound_iface == ipv6_outbound_iface
             && self.exit_node_runtime.ipv4_tunnel_source_cidr == ipv4_tunnel_source_cidr
             && self.exit_node_runtime.ipv4_mss_clamp == Some(ipv4_mss_clamp);
         if already_configured {
-            return;
+            return Ok(());
         }
 
-        self.cleanup_linux_exit_node_forwarding_rules();
+        self.cleanup_linux_exit_node_forwarding_rules()?;
 
         self.exit_node_runtime.ipv4_outbound_iface = ipv4_outbound_iface.clone();
         self.exit_node_runtime.ipv6_outbound_iface = ipv6_outbound_iface.clone();
@@ -402,15 +522,13 @@ impl FipsPrivateTunnelRuntime {
                         && let Err(error) =
                             crate::write_linux_ip_forward(crate::LinuxExitNodeIpFamily::V4, true)
                     {
-                        eprintln!("fips: failed to enable IPv4 forwarding: {error}");
-                        self.cleanup_linux_exit_node_forwarding_rules();
-                        return;
+                        let _ = self.cleanup_linux_exit_node_forwarding_rules();
+                        return Err(error).context("failed to enable IPv4 forwarding");
                     }
                 }
                 Err(error) => {
-                    eprintln!("fips: failed to read IPv4 forwarding state: {error}");
-                    self.cleanup_linux_exit_node_forwarding_rules();
-                    return;
+                    let _ = self.cleanup_linux_exit_node_forwarding_rules();
+                    return Err(error).context("failed to read IPv4 forwarding state");
                 }
             }
         }
@@ -423,7 +541,7 @@ impl FipsPrivateTunnelRuntime {
                 "fips: enabling IPv4 exit forwarding on {} via {} source {}",
                 self.iface, outbound_iface, tunnel_source_cidr
             );
-            self.cleanup_linux_legacy_exit_node_forwarding_rules();
+            self.cleanup_linux_legacy_exit_node_forwarding_rules()?;
             let forward_in = crate::linux_exit_node_forward_in_rule(
                 &self.iface,
                 outbound_iface,
@@ -470,13 +588,13 @@ impl FipsPrivateTunnelRuntime {
                     &mss_clamp,
                 )
             }) {
-                eprintln!("fips: failed to install IPv4 exit firewall rules: {error}");
-                self.cleanup_linux_exit_node_forwarding_rules();
-                return;
+                let _ = self.cleanup_linux_exit_node_forwarding_rules();
+                return Err(error).context("failed to install IPv4 exit firewall rules");
             }
         }
 
-        self.cleanup_linux_legacy_exit_node_forwarding_rules();
+        self.cleanup_linux_legacy_exit_node_forwarding_rules()?;
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -485,25 +603,66 @@ impl FipsPrivateTunnelRuntime {
         config: &WireGuardExitConfig,
         source_cidr: &str,
     ) -> Result<()> {
-        let mut preserve_created_interface = false;
-        let mut previous_runtime = None;
-        if let Some(runtime) = self.exit_node_runtime.wireguard_exit.as_ref()
-            && (runtime.interface != config.interface || runtime.source_cidr != source_cidr)
-        {
-            self.cleanup_linux_wireguard_exit_upstream();
-        } else if let Some(runtime) = self.exit_node_runtime.wireguard_exit.as_ref() {
-            preserve_created_interface = runtime.created_interface;
-            previous_runtime = Some(runtime.clone());
+        self.cleanup_pending_linux_wireguard_exit_obligations()
+            .context("retry incomplete prior WireGuard apply cleanup")?;
+        let mut previous_runtime = self.exit_node_runtime.wireguard_exit.take();
+        if previous_runtime.as_ref().is_some_and(|runtime| {
+            runtime.interface != config.interface.trim()
+                || runtime.managed_address != config.address.trim()
+                || runtime.source_cidr != source_cidr
+        }) {
+            let runtime = previous_runtime.take().expect("checked WireGuard runtime");
+            if let Err(error) = self.cleanup_detached_linux_wireguard_exit_upstream(&runtime) {
+                self.exit_node_runtime.wireguard_exit = Some(runtime);
+                return Err(error);
+            }
         }
-        let mut runtime = crate::apply_linux_wireguard_exit_upstream(
+        if let Some(runtime) = previous_runtime.as_mut()
+            && let Some(refreshed_default) = crate::select_linux_wireguard_underlay_default_route(
+                self.original_default_route.as_deref(),
+                runtime.previous_default_route.as_deref(),
+                None,
+                config.interface.trim(),
+            )
+        {
+            runtime.refresh_underlay_default_route(refreshed_default);
+        }
+        let runtime = match crate::apply_linux_wireguard_exit_upstream(
             config,
             source_cidr,
             previous_runtime.as_ref(),
             self.original_default_route.as_deref(),
-        )?;
-        runtime.created_interface |= preserve_created_interface;
+        ) {
+            Ok(runtime) => runtime,
+            Err(failure) => {
+                let (error, cleanup_obligation) = failure.into_parts();
+                if let Some(obligation) = cleanup_obligation {
+                    self.exit_node_runtime
+                        .pending_wireguard_exit_cleanup
+                        .push(obligation);
+                    self.exit_node_runtime.wireguard_exit = previous_runtime;
+                    return Err(error);
+                }
+                if let Some(runtime) = previous_runtime.take() {
+                    if let Err(cleanup) =
+                        self.cleanup_detached_linux_wireguard_exit_upstream(&runtime)
+                    {
+                        self.exit_node_runtime.wireguard_exit = Some(runtime);
+                        return Err(anyhow!(
+                            "{error:#}; failed to clean previous WireGuard runtime: {cleanup:#}"
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        };
         if let Err(error) = self.ensure_linux_wireguard_exit_inbound_guard(&runtime) {
-            crate::cleanup_linux_wireguard_exit_upstream(&runtime);
+            if let Err(cleanup) = self.cleanup_detached_linux_wireguard_exit_upstream(&runtime) {
+                self.exit_node_runtime.wireguard_exit = Some(runtime);
+                return Err(anyhow!(
+                    "{error:#}; failed to roll back WireGuard after inbound-guard failure: {cleanup:#}"
+                ));
+            }
             return Err(error);
         }
         self.exit_node_runtime.wireguard_exit = Some(runtime);
@@ -531,17 +690,25 @@ impl FipsPrivateTunnelRuntime {
     fn cleanup_linux_wireguard_exit_inbound_guard(
         &self,
         runtime: &crate::LinuxWireGuardExitRuntime,
-    ) {
+    ) -> Result<()> {
         let drop_inbound = crate::linux_wireguard_exit_inbound_drop_rule(
             &runtime.interface,
             &self.iface,
             &runtime.source_cidr,
         );
-        if let Err(error) =
-            crate::linux_iptables_delete_rule(crate::LinuxExitNodeIpFamily::V4, None, &drop_inbound)
-        {
-            eprintln!("fips: failed to remove WireGuard inbound guard rule: {error}");
+        let mut last_error = None;
+        for _ in 0..3 {
+            match crate::linux_iptables_delete_rule(
+                crate::LinuxExitNodeIpFamily::V4,
+                None,
+                &drop_inbound,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
         }
+        Err(last_error.expect("bounded inbound-guard cleanup attempted"))
+            .context("failed to remove WireGuard inbound guard rule after three attempts")
     }
 
     #[cfg(target_os = "linux")]
@@ -549,130 +716,84 @@ impl FipsPrivateTunnelRuntime {
         if !enabled {
             return;
         }
-        self.capture_linux_original_default_route();
+        if let Err(error) = self.capture_linux_original_default_route(None) {
+            eprintln!("fips: failed to capture WireGuard underlay default route: {error:#}");
+        }
         self.block_linux_original_default_route();
     }
 
     #[cfg(target_os = "linux")]
-    fn cleanup_linux_wireguard_exit_upstream(&mut self) {
-        let Some(runtime) = self.exit_node_runtime.wireguard_exit.take() else {
-            return;
-        };
-        self.cleanup_linux_wireguard_exit_inbound_guard(&runtime);
-        crate::cleanup_linux_wireguard_exit_upstream(&runtime);
+    fn cleanup_linux_wireguard_exit_upstream(&mut self) -> Result<()> {
+        let iface = self.iface.clone();
+        cleanup_linux_wireguard_state(&iface, &mut self.exit_node_runtime)
     }
 
     #[cfg(target_os = "linux")]
-    fn cleanup_linux_exit_node_forwarding_rules(&mut self) {
-        if let (Some(outbound_iface), Some(tunnel_source_cidr)) = (
-            self.exit_node_runtime.ipv4_outbound_iface.as_deref(),
-            self.exit_node_runtime.ipv4_tunnel_source_cidr.as_deref(),
-        ) {
-            if let Some(mss) = self.exit_node_runtime.ipv4_mss_clamp {
-                let mss_clamp = crate::linux_exit_node_ipv4_mss_clamp_rule(
-                    &self.iface,
-                    outbound_iface,
-                    tunnel_source_cidr,
-                    mss,
-                );
-                if let Err(error) = crate::linux_iptables_delete_rule(
-                    crate::LinuxExitNodeIpFamily::V4,
-                    Some("mangle"),
-                    &mss_clamp,
-                ) {
-                    eprintln!("fips: failed to remove MSS clamp rule: {error}");
-                }
-            }
-            let forward_in = crate::linux_exit_node_forward_in_rule(
-                &self.iface,
-                outbound_iface,
-                tunnel_source_cidr,
-                crate::LinuxExitNodeIpFamily::V4,
-            );
-            let forward_out = crate::linux_exit_node_forward_out_rule(
-                &self.iface,
-                outbound_iface,
-                crate::LinuxExitNodeIpFamily::V4,
-            );
-            let masquerade =
-                crate::linux_exit_node_ipv4_masquerade_rule(outbound_iface, tunnel_source_cidr);
-
-            if let Err(error) = crate::linux_iptables_delete_rule(
-                crate::LinuxExitNodeIpFamily::V4,
-                Some("nat"),
-                &masquerade,
-            ) {
-                eprintln!("fips: failed to remove masquerade rule: {error}");
-            }
-            if let Err(error) = crate::linux_iptables_delete_rule(
-                crate::LinuxExitNodeIpFamily::V4,
-                None,
-                &forward_out,
-            ) {
-                eprintln!("fips: failed to remove forward-out rule: {error}");
-            }
-            if let Err(error) = crate::linux_iptables_delete_rule(
-                crate::LinuxExitNodeIpFamily::V4,
-                None,
-                &forward_in,
-            ) {
-                eprintln!("fips: failed to remove forward-in rule: {error}");
+    fn cleanup_pending_linux_wireguard_exit_obligations(&mut self) -> Result<()> {
+        let pending = std::mem::take(
+            &mut self
+                .exit_node_runtime
+                .pending_wireguard_exit_cleanup,
+        );
+        let mut remaining = Vec::new();
+        let mut failures = Vec::new();
+        for mut obligation in pending {
+            if let Err(error) =
+                crate::cleanup_linux_wireguard_exit_obligation(&mut obligation)
+            {
+                failures.push(format!("{error:#}"));
+                remaining.push(obligation);
             }
         }
-
-        self.cleanup_linux_legacy_exit_node_forwarding_rules();
-
-        if self.exit_node_runtime.ipv4_forward_was_enabled == Some(false)
-            && let Err(error) =
-                crate::write_linux_ip_forward(crate::LinuxExitNodeIpFamily::V4, false)
-        {
-            eprintln!("fips: failed to restore IPv4 forwarding state: {error}");
-        }
-        if self.exit_node_runtime.ipv6_forward_was_enabled == Some(false)
-            && let Err(error) =
-                crate::write_linux_ip_forward(crate::LinuxExitNodeIpFamily::V6, false)
-        {
-            eprintln!("fips: failed to restore IPv6 forwarding state: {error}");
-        }
-
-        self.exit_node_runtime.ipv4_outbound_iface = None;
-        self.exit_node_runtime.ipv6_outbound_iface = None;
-        self.exit_node_runtime.ipv4_tunnel_source_cidr = None;
-        self.exit_node_runtime.ipv4_mss_clamp = None;
-        self.exit_node_runtime.ipv4_forward_was_enabled = None;
-        self.exit_node_runtime.ipv6_forward_was_enabled = None;
-    }
-
-    #[cfg(target_os = "linux")]
-    fn cleanup_linux_legacy_exit_node_forwarding_rules(&self) {
-        for family in [
-            crate::LinuxExitNodeIpFamily::V4,
-            crate::LinuxExitNodeIpFamily::V6,
-        ] {
-            let forward_in = crate::linux_exit_node_legacy_forward_in_rule(&self.iface, family);
-            let forward_out = crate::linux_exit_node_legacy_forward_out_rule(&self.iface, family);
-            let _ = crate::linux_iptables_delete_rule(family, None, &forward_out);
-            let _ = crate::linux_iptables_delete_rule(family, None, &forward_in);
+        self.exit_node_runtime.pending_wireguard_exit_cleanup = remaining;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "retained WireGuard apply cleanup incomplete: {}",
+                failures.join("; ")
+            ))
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn reconcile_linux_exit_node_forwarding_cleanup(&mut self) {
-        self.cleanup_linux_exit_node_forwarding_rules();
-        self.cleanup_linux_wireguard_exit_upstream();
-        self.exit_node_runtime = crate::LinuxExitNodeRuntime::default();
+    fn cleanup_detached_linux_wireguard_exit_upstream(
+        &self,
+        runtime: &crate::LinuxWireGuardExitRuntime,
+    ) -> Result<()> {
+        let guard = self.cleanup_linux_wireguard_exit_inbound_guard(runtime);
+        let network = crate::cleanup_linux_wireguard_exit_upstream(runtime);
+        match (guard, network) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(guard), Ok(())) => Err(guard),
+            (Ok(()), Err(network)) => Err(network),
+            (Err(guard), Err(network)) => Err(anyhow!(
+                "inbound guard cleanup failed ({guard:#}); network cleanup failed ({network:#})"
+            )),
+        }
     }
 
     #[cfg(target_os = "linux")]
-    fn cleanup_linux_network_state(&mut self) {
+    fn cleanup_linux_exit_node_forwarding_rules(&mut self) -> Result<()> {
+        let iface = self.iface.clone();
+        cleanup_linux_forwarding_state(&iface, &mut self.exit_node_runtime)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_linux_legacy_exit_node_forwarding_rules(&self) -> Result<()> {
+        cleanup_linux_legacy_forwarding_rules(&self.iface)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reconcile_linux_exit_node_forwarding_cleanup(&mut self) -> Result<()> {
+        let iface = self.iface.clone();
+        cleanup_linux_exit_node_state(&iface, &mut self.exit_node_runtime)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_linux_network_state(&mut self) -> Result<()> {
         self.linux_network_state_initialized = false;
-        self.reconcile_linux_endpoint_bypass_routes(&[]);
-        self.reconcile_linux_exit_node_forwarding_cleanup();
-        self.restore_linux_original_default_route();
-        self.restore_linux_original_default_ipv6_route();
-        if let Err(error) = crate::flush_linux_route_cache() {
-            eprintln!("fips: failed to flush linux route cache: {error}");
-        }
+        cleanup_linux_network_state_with_actions(self)
     }
 }
 

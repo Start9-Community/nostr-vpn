@@ -545,3 +545,38 @@ pub(crate) fn disconnected_daemon_runtime_state(
         peers: Vec::new(),
     }
 }
+
+pub(crate) fn cleanup_failed_daemon_runtime_state(
+    expected_peers: usize,
+    network: &NetworkSummary,
+    failures: &[String],
+) -> DaemonRuntimeState {
+    let mut state = disconnected_daemon_runtime_state(expected_peers, network);
+    state.vpn_status = "Cleanup failed".to_string();
+    state.health.push(HealthIssue::new(
+        "network_cleanup_failed",
+        HealthSeverity::Critical,
+        "Network cleanup failed",
+        format!(
+            "{} Run `nvpn repair-network` before reconnecting.",
+            failures.join("; ")
+        ),
+    ));
+    state
+}
+
+pub(crate) fn transition_daemon_state_after_network_repair(config_path: &Path) -> Result<()> {
+    let state_file = daemon_state_file_path(config_path);
+    let previous = read_daemon_state(&state_file)?;
+    let expected_peers = previous
+        .as_ref()
+        .map_or(0, |state| state.expected_peer_count);
+    let network = previous
+        .as_ref()
+        .map_or_else(NetworkSummary::default, |state| state.network.clone());
+    write_daemon_state(
+        &state_file,
+        &disconnected_daemon_runtime_state(expected_peers, &network),
+    )
+    .context("failed to record repaired disconnected daemon state")
+}

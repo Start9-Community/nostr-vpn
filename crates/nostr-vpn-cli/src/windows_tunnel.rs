@@ -124,15 +124,6 @@ pub(crate) fn apply_windows_routes(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn apply_windows_routes_via(
-    interface_index: u32,
-    next_hop: &str,
-    route_targets: &[String],
-) -> Result<Vec<String>> {
-    apply_windows_routes_with_next_hop(interface_index, route_targets, Some(next_hop))
-}
-
-#[cfg(target_os = "windows")]
 fn apply_windows_routes_with_next_hop(
     interface_index: u32,
     route_targets: &[String],

@@ -1,0 +1,679 @@
+#[path = "linux_commands.rs"]
+mod commands;
+
+use std::path::Path;
+
+use anyhow::{Context, Result, anyhow};
+use nostr_vpn_core::config::WireGuardExitConfig;
+
+use commands::*;
+
+const WIREGUARD_EXIT_TABLE: u32 = 51_888;
+const WIREGUARD_EXIT_RULE_PRIORITY: u32 = 10_888;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LinuxInterfaceRestore {
+    addresses: Vec<LinuxAddressRestore>,
+    wireguard_config: String,
+    link: LinuxLinkState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinuxWireGuardExitRuntime {
+    pub(crate) interface: String,
+    pub(crate) managed_address: String,
+    pub(crate) source_cidr: String,
+    pub(crate) table: u32,
+    pub(crate) priority: u32,
+    pub(crate) created_interface: bool,
+    pub(crate) previous_default_route: Option<String>,
+    endpoint_routes: Vec<LinuxRouteRestore>,
+    previous_main_default_routes: Vec<String>,
+    previous_table_routes: Vec<String>,
+    policy_rule_owned: bool,
+    interface_restore: LinuxInterfaceRestore,
+}
+
+impl LinuxWireGuardExitRuntime {
+    pub(crate) fn refresh_underlay_default_route(&mut self, route: String) {
+        if let Some(previous) = self.previous_default_route.as_deref()
+            && let Some(index) = self
+                .previous_main_default_routes
+                .iter()
+                .position(|candidate| candidate == previous)
+        {
+            self.previous_main_default_routes[index] = route.clone();
+        } else if !self.previous_main_default_routes.contains(&route) {
+            self.previous_main_default_routes.push(route.clone());
+        }
+        self.previous_default_route = Some(route);
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ApplySnapshot {
+    address: LinuxAddressRestore,
+    wireguard_config: String,
+    link: LinuxLinkState,
+    endpoint_routes: Vec<LinuxRouteRestore>,
+    main_default_routes: Vec<String>,
+    table_routes: Vec<String>,
+    policy_rule_existed: bool,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ApplyProgress {
+    address_started: bool,
+    endpoint_targets_started: Vec<String>,
+    wireguard_started: bool,
+    link_started: bool,
+    table_started: bool,
+    policy_rule_added: bool,
+    main_default_started: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum LinuxWireGuardExitCleanupObligation {
+    ApplyRollback(LinuxWireGuardExitRollbackObligation),
+    CreatedInterface { interface: String },
+    RouteCacheFlush,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinuxWireGuardExitRollbackObligation {
+    interface: String,
+    source_cidr: String,
+    snapshot: ApplySnapshot,
+    progress: ApplyProgress,
+    created_interface: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct LinuxWireGuardExitApplyFailure {
+    error: anyhow::Error,
+    cleanup_obligation: Option<LinuxWireGuardExitCleanupObligation>,
+}
+
+impl LinuxWireGuardExitApplyFailure {
+    pub(crate) fn into_parts(self) -> (anyhow::Error, Option<LinuxWireGuardExitCleanupObligation>) {
+        (self.error, self.cleanup_obligation)
+    }
+}
+
+impl std::fmt::Display for LinuxWireGuardExitApplyFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for LinuxWireGuardExitApplyFailure {}
+
+pub(crate) fn apply_linux_wireguard_exit_upstream(
+    config: &WireGuardExitConfig,
+    source_cidr: &str,
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    previous_default_route_hint: Option<&str>,
+) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
+    apply_linux_wireguard_exit_upstream_with(
+        &mut SystemLinuxCommandRunner,
+        config,
+        source_cidr,
+        previous_runtime,
+        previous_default_route_hint,
+    )
+}
+
+fn apply_linux_wireguard_exit_upstream_with(
+    runner: &mut impl LinuxCommandRunner,
+    config: &WireGuardExitConfig,
+    source_cidr: &str,
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    previous_default_route_hint: Option<&str>,
+) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
+    let iface = super::validate_linux_wireguard_exit_config(config).map_err(apply_failure)?;
+    if previous_runtime
+        .is_some_and(|runtime| runtime.interface != iface || runtime.source_cidr != source_cidr)
+    {
+        return Err(apply_failure(anyhow!(
+            "WireGuard exit runtime identity changed without cleanup"
+        )));
+    }
+
+    let current_default_route = current_linux_default_route(runner).map_err(apply_failure)?;
+    let previous_default_route = super::select_linux_wireguard_underlay_default_route(
+        previous_default_route_hint,
+        previous_runtime.and_then(|runtime| runtime.previous_default_route.as_deref()),
+        current_default_route.as_deref(),
+        &iface,
+    );
+    let endpoint_specs = linux_wireguard_exit_endpoint_specs(
+        runner,
+        config,
+        &iface,
+        previous_default_route.as_deref(),
+    )
+    .map_err(apply_failure)?;
+    let kernel_config = linux_wireguard_kernel_config(config);
+    let kernel_config_file =
+        write_temp_secret_file(&iface, "setconf", &kernel_config).map_err(apply_failure)?;
+
+    let created_interface = ensure_linux_wireguard_link(runner, &iface).map_err(apply_failure)?;
+    let snapshot = match capture_apply_snapshot(
+        runner,
+        config,
+        &iface,
+        source_cidr,
+        &endpoint_specs,
+        previous_runtime,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            if created_interface {
+                let mut obligation =
+                    LinuxWireGuardExitCleanupObligation::CreatedInterface { interface: iface };
+                if let Err(cleanup) =
+                    cleanup_linux_wireguard_exit_obligation_with(runner, &mut obligation)
+                {
+                    return Err(LinuxWireGuardExitApplyFailure {
+                        error: anyhow!(
+                            "{error:#}; newly-created interface cleanup is pending: {cleanup:#}"
+                        ),
+                        cleanup_obligation: Some(obligation),
+                    });
+                }
+            }
+            return Err(apply_failure(error));
+        }
+    };
+
+    let mut progress = ApplyProgress::default();
+    if let Err(error) = apply_snapshot_mutations(
+        runner,
+        config,
+        &iface,
+        source_cidr,
+        kernel_config_file.path(),
+        &endpoint_specs,
+        previous_runtime,
+        &snapshot,
+        &mut progress,
+    ) {
+        let mut obligation = LinuxWireGuardExitCleanupObligation::ApplyRollback(
+            LinuxWireGuardExitRollbackObligation {
+                interface: iface,
+                source_cidr: source_cidr.to_string(),
+                snapshot,
+                progress,
+                created_interface,
+            },
+        );
+        return match cleanup_linux_wireguard_exit_obligation_with(runner, &mut obligation) {
+            Ok(()) => Err(apply_failure(error)),
+            Err(cleanup) => Err(LinuxWireGuardExitApplyFailure {
+                error: anyhow!("{error:#}; WireGuard apply cleanup is pending: {cleanup:#}"),
+                cleanup_obligation: Some(obligation),
+            }),
+        };
+    }
+
+    Ok(build_runtime(
+        iface,
+        source_cidr,
+        previous_default_route,
+        created_interface,
+        previous_runtime,
+        &endpoint_specs,
+        &snapshot,
+        &progress,
+    ))
+}
+
+fn apply_failure(error: anyhow::Error) -> LinuxWireGuardExitApplyFailure {
+    LinuxWireGuardExitApplyFailure {
+        error,
+        cleanup_obligation: None,
+    }
+}
+
+fn build_runtime(
+    iface: String,
+    source_cidr: &str,
+    previous_default_route: Option<String>,
+    created_interface: bool,
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    endpoint_specs: &[crate::LinuxEndpointBypassRoute],
+    snapshot: &ApplySnapshot,
+    progress: &ApplyProgress,
+) -> LinuxWireGuardExitRuntime {
+    let endpoint_routes = endpoint_specs
+        .iter()
+        .filter_map(|spec| {
+            previous_runtime
+                .and_then(|runtime| {
+                    runtime
+                        .endpoint_routes
+                        .iter()
+                        .find(|route| route.target == spec.target)
+                })
+                .or_else(|| {
+                    snapshot
+                        .endpoint_routes
+                        .iter()
+                        .find(|route| route.target == spec.target)
+                })
+                .cloned()
+        })
+        .collect();
+    let interface_restore = merge_interface_restore(
+        previous_runtime,
+        &snapshot.address,
+        &snapshot.wireguard_config,
+        &snapshot.link,
+    );
+    let mut previous_main_default_routes = previous_runtime.map_or_else(
+        || snapshot.main_default_routes.clone(),
+        |runtime| runtime.previous_main_default_routes.clone(),
+    );
+    if let (Some(runtime), Some(route)) = (previous_runtime, previous_default_route.as_ref())
+        && runtime.previous_default_route.as_deref() != Some(route)
+    {
+        replace_runtime_underlay_route(
+            &mut previous_main_default_routes,
+            runtime.previous_default_route.as_deref(),
+            route,
+        );
+    }
+
+    LinuxWireGuardExitRuntime {
+        interface: iface,
+        managed_address: snapshot.address.configured.clone(),
+        source_cidr: source_cidr.to_string(),
+        table: WIREGUARD_EXIT_TABLE,
+        priority: WIREGUARD_EXIT_RULE_PRIORITY,
+        created_interface: created_interface
+            || previous_runtime.is_some_and(|runtime| runtime.created_interface),
+        previous_default_route,
+        endpoint_routes,
+        previous_main_default_routes,
+        previous_table_routes: previous_runtime.map_or_else(
+            || snapshot.table_routes.clone(),
+            |runtime| runtime.previous_table_routes.clone(),
+        ),
+        policy_rule_owned: progress.policy_rule_added
+            || previous_runtime.is_some_and(|runtime| runtime.policy_rule_owned),
+        interface_restore,
+    }
+}
+
+fn merge_interface_restore(
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    address: &LinuxAddressRestore,
+    wireguard_config: &str,
+    link: &LinuxLinkState,
+) -> LinuxInterfaceRestore {
+    let Some(runtime) = previous_runtime else {
+        return LinuxInterfaceRestore {
+            addresses: vec![address.clone()],
+            wireguard_config: wireguard_config.to_string(),
+            link: link.clone(),
+        };
+    };
+    let mut restore = runtime.interface_restore.clone();
+    if !restore
+        .addresses
+        .iter()
+        .any(|candidate| candidate.configured == address.configured)
+    {
+        restore.addresses.push(address.clone());
+    }
+    restore
+}
+
+fn replace_runtime_underlay_route(routes: &mut Vec<String>, previous: Option<&str>, fresh: &str) {
+    if let Some(index) =
+        previous.and_then(|previous| routes.iter().position(|candidate| candidate == previous))
+    {
+        routes[index] = fresh.to_string();
+    } else if !routes.iter().any(|candidate| candidate == fresh) {
+        routes.push(fresh.to_string());
+    }
+}
+
+fn capture_apply_snapshot(
+    runner: &mut impl LinuxCommandRunner,
+    config: &WireGuardExitConfig,
+    iface: &str,
+    source_cidr: &str,
+    endpoint_specs: &[crate::LinuxEndpointBypassRoute],
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+) -> Result<ApplySnapshot> {
+    let configured = config.address.trim();
+    let address_output = command_output_checked(
+        runner,
+        "ip",
+        &strings(&["-o", "address", "show", "dev", iface]),
+    )?;
+    let address = LinuxAddressRestore {
+        configured: configured.to_string(),
+        previous: linux_interface_address_for_config(&address_output, configured),
+    };
+    let wireguard_config = command_output_checked(runner, "wg", &strings(&["showconf", iface]))?;
+    let link_output = command_output_checked(
+        runner,
+        "ip",
+        &strings(&["-j", "link", "show", "dev", iface]),
+    )?;
+    let link = linux_link_state_from_json(&link_output)?;
+
+    let mut targets = endpoint_specs
+        .iter()
+        .map(|route| route.target.clone())
+        .collect::<Vec<_>>();
+    if let Some(runtime) = previous_runtime {
+        targets.extend(
+            runtime
+                .endpoint_routes
+                .iter()
+                .map(|route| route.target.clone()),
+        );
+    }
+    targets.sort();
+    targets.dedup();
+    let endpoint_routes = targets
+        .into_iter()
+        .map(|target| {
+            linux_ipv4_route_snapshot(runner, &[target.as_str()]).map(|previous_routes| {
+                LinuxRouteRestore {
+                    target,
+                    previous_routes,
+                }
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let table_routes = linux_ipv4_table_snapshot(runner, WIREGUARD_EXIT_TABLE)?;
+    let main_default_routes = linux_ipv4_route_snapshot(runner, &["default"])?;
+    let rules = command_output_checked(runner, "ip", &strings(&["-4", "rule", "show"]))?;
+    let policy_rule_existed = linux_wireguard_exit_policy_rule_exists(
+        &rules,
+        source_cidr,
+        WIREGUARD_EXIT_TABLE,
+        WIREGUARD_EXIT_RULE_PRIORITY,
+    );
+
+    Ok(ApplySnapshot {
+        address,
+        wireguard_config,
+        link,
+        endpoint_routes,
+        main_default_routes,
+        table_routes,
+        policy_rule_existed,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_snapshot_mutations(
+    runner: &mut impl LinuxCommandRunner,
+    config: &WireGuardExitConfig,
+    iface: &str,
+    source_cidr: &str,
+    kernel_config_file: &Path,
+    endpoint_specs: &[crate::LinuxEndpointBypassRoute],
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    snapshot: &ApplySnapshot,
+    progress: &mut ApplyProgress,
+) -> Result<()> {
+    progress.address_started = true;
+    replace_linux_address(runner, iface, config.address.trim())?;
+
+    for route in endpoint_specs {
+        progress.endpoint_targets_started.push(route.target.clone());
+        apply_linux_endpoint_bypass_route(runner, route)?;
+    }
+    if let Some(runtime) = previous_runtime {
+        for stale in runtime.endpoint_routes.iter().filter(|route| {
+            !endpoint_specs
+                .iter()
+                .any(|desired| desired.target == route.target)
+        }) {
+            progress.endpoint_targets_started.push(stale.target.clone());
+            restore_linux_route_target(runner, stale, None)?;
+        }
+    }
+
+    progress.wireguard_started = true;
+    set_linux_wireguard_config(runner, iface, kernel_config_file)?;
+
+    progress.link_started = true;
+    set_linux_wireguard_link(runner, iface, config.mtu)?;
+
+    progress.table_started = true;
+    replace_linux_policy_default_route(runner, iface)?;
+
+    if !snapshot.policy_rule_existed {
+        progress.policy_rule_added = true;
+        add_linux_wireguard_exit_policy_rule(runner, source_cidr)?;
+    }
+
+    progress.main_default_started = true;
+    apply_linux_wireguard_exit_default_route(
+        runner,
+        iface,
+        config.address.trim(),
+        &snapshot.main_default_routes,
+    )?;
+    flush_linux_route_cache(runner)
+}
+
+fn rollback_apply(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    source_cidr: &str,
+    snapshot: &ApplySnapshot,
+    progress: &ApplyProgress,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    if progress.wireguard_started {
+        record_cleanup_failure(
+            &mut failures,
+            "WireGuard configuration",
+            restore_linux_wireguard_config(runner, iface, &snapshot.wireguard_config),
+        );
+    }
+    if progress.address_started {
+        record_cleanup_failure(
+            &mut failures,
+            "interface address",
+            restore_linux_address(runner, iface, &snapshot.address),
+        );
+    }
+    if progress.link_started {
+        record_cleanup_failure(
+            &mut failures,
+            "link state",
+            restore_linux_link(runner, iface, &snapshot.link),
+        );
+    }
+    for target in progress.endpoint_targets_started.iter().rev() {
+        if let Some(route) = snapshot
+            .endpoint_routes
+            .iter()
+            .find(|route| &route.target == target)
+        {
+            record_cleanup_failure(
+                &mut failures,
+                &format!("endpoint route {}", route.target),
+                restore_linux_route_target(runner, route, None),
+            );
+        }
+    }
+    if progress.policy_rule_added {
+        record_cleanup_failure(
+            &mut failures,
+            "policy rule",
+            delete_linux_wireguard_exit_policy_rule(
+                runner,
+                source_cidr,
+                WIREGUARD_EXIT_TABLE,
+                WIREGUARD_EXIT_RULE_PRIORITY,
+            ),
+        );
+    }
+    if progress.table_started {
+        record_cleanup_failure(
+            &mut failures,
+            "policy table",
+            restore_linux_table_snapshot(runner, WIREGUARD_EXIT_TABLE, &snapshot.table_routes),
+        );
+    }
+    if progress.main_default_started {
+        record_cleanup_failure(
+            &mut failures,
+            "main default routes",
+            restore_linux_main_default_snapshot_exact(runner, iface, &snapshot.main_default_routes),
+        );
+    }
+    finish_cleanup("WireGuard apply rollback", failures)
+}
+
+pub(crate) fn cleanup_linux_wireguard_exit_obligation(
+    obligation: &mut LinuxWireGuardExitCleanupObligation,
+) -> Result<()> {
+    cleanup_linux_wireguard_exit_obligation_with(&mut SystemLinuxCommandRunner, obligation)
+}
+
+fn cleanup_linux_wireguard_exit_obligation_with(
+    runner: &mut impl LinuxCommandRunner,
+    obligation: &mut LinuxWireGuardExitCleanupObligation,
+) -> Result<()> {
+    loop {
+        match obligation {
+            LinuxWireGuardExitCleanupObligation::ApplyRollback(rollback) => {
+                rollback_apply(
+                    runner,
+                    &rollback.interface,
+                    &rollback.source_cidr,
+                    &rollback.snapshot,
+                    &rollback.progress,
+                )
+                .context("retry retained WireGuard apply rollback")?;
+                *obligation = if rollback.created_interface {
+                    LinuxWireGuardExitCleanupObligation::CreatedInterface {
+                        interface: rollback.interface.clone(),
+                    }
+                } else {
+                    LinuxWireGuardExitCleanupObligation::RouteCacheFlush
+                };
+            }
+            LinuxWireGuardExitCleanupObligation::CreatedInterface { interface } => {
+                delete_linux_wireguard_exit_link(runner, interface)
+                    .context("retry retained newly-created WireGuard interface removal")?;
+                *obligation = LinuxWireGuardExitCleanupObligation::RouteCacheFlush;
+            }
+            LinuxWireGuardExitCleanupObligation::RouteCacheFlush => {
+                return flush_linux_route_cache(runner)
+                    .context("retry retained WireGuard route-cache flush");
+            }
+        }
+    }
+}
+
+pub(crate) fn cleanup_linux_wireguard_exit_upstream(
+    runtime: &LinuxWireGuardExitRuntime,
+) -> Result<()> {
+    cleanup_linux_wireguard_exit_upstream_with(&mut SystemLinuxCommandRunner, runtime)
+}
+
+fn cleanup_linux_wireguard_exit_upstream_with(
+    runner: &mut impl LinuxCommandRunner,
+    runtime: &LinuxWireGuardExitRuntime,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    if !runtime.created_interface {
+        record_cleanup_failure(
+            &mut failures,
+            "WireGuard configuration",
+            restore_linux_wireguard_config(
+                runner,
+                &runtime.interface,
+                &runtime.interface_restore.wireguard_config,
+            ),
+        );
+        for address in runtime.interface_restore.addresses.iter().rev() {
+            record_cleanup_failure(
+                &mut failures,
+                "interface address",
+                restore_linux_address(runner, &runtime.interface, address),
+            );
+        }
+        record_cleanup_failure(
+            &mut failures,
+            "link state",
+            restore_linux_link(runner, &runtime.interface, &runtime.interface_restore.link),
+        );
+    }
+    for route in runtime.endpoint_routes.iter().rev() {
+        record_cleanup_failure(
+            &mut failures,
+            &format!("endpoint route {}", route.target),
+            restore_linux_route_target(runner, route, None),
+        );
+    }
+    if runtime.policy_rule_owned {
+        record_cleanup_failure(
+            &mut failures,
+            "policy rule",
+            delete_linux_wireguard_exit_policy_rule(
+                runner,
+                &runtime.source_cidr,
+                runtime.table,
+                runtime.priority,
+            ),
+        );
+    }
+    record_cleanup_failure(
+        &mut failures,
+        "policy table",
+        restore_linux_table_snapshot(runner, runtime.table, &runtime.previous_table_routes),
+    );
+    record_cleanup_failure(
+        &mut failures,
+        "main default routes",
+        restore_linux_main_default_snapshot(
+            runner,
+            &runtime.interface,
+            &runtime.previous_main_default_routes,
+        ),
+    );
+    if runtime.created_interface {
+        record_cleanup_failure(
+            &mut failures,
+            "created interface",
+            delete_linux_wireguard_exit_link(runner, &runtime.interface),
+        );
+    }
+    record_cleanup_failure(
+        &mut failures,
+        "route-cache flush",
+        flush_linux_route_cache(runner),
+    );
+    finish_cleanup("WireGuard exit cleanup", failures)
+}
+
+fn record_cleanup_failure(failures: &mut Vec<String>, resource: &str, result: Result<()>) {
+    if let Err(error) = result {
+        failures.push(format!("{resource}: {error:#}"));
+    }
+}
+
+fn finish_cleanup(operation: &str, failures: Vec<String>) -> Result<()> {
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("{operation} incomplete: {}", failures.join("; ")))
+    }
+}
+
+#[cfg(test)]
+#[path = "linux_tests.rs"]
+mod tests;

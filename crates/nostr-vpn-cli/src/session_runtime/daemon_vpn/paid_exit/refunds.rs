@@ -80,9 +80,10 @@ impl PaidExitBuyerRefundRuntime {
         })
     }
 
-    pub(in crate::session_runtime) fn before_daemon_maintenance(
+    pub(in crate::session_runtime) fn before_tick(
         &mut self,
         config_path: &Path,
+        allow_background_maintenance: bool,
     ) -> Option<DaemonControlRequest> {
         // Leave a newly arrived request on disk while the bounded worker owns
         // Cashu state, then process it before starting another refund.
@@ -92,10 +93,12 @@ impl PaidExitBuyerRefundRuntime {
         } else {
             take_daemon_control_request(config_path)
         };
-        if let Err(error) = self.poll_and_log(
-            config_path,
-            pending_control_request.is_none() && !control_request_waiting,
-        ) {
+        if allow_background_maintenance
+            && let Err(error) = self.poll_and_log(
+                config_path,
+                pending_control_request.is_none() && !control_request_waiting,
+            )
+        {
             eprintln!("paid-exit: buyer refund recovery failed: {error}");
         }
         pending_control_request
@@ -591,6 +594,46 @@ mod tests {
         assert_eq!(
             paid_exit_buyer_refund_channel_ids(&store),
             vec!["legacy-closed".to_string(), "pending".to_string()]
+        );
+    }
+
+    #[test]
+    fn network_deadline_suppresses_refund_background_but_still_takes_control() {
+        let directory = TestDirectory::new();
+        let config_path = directory.0.join("config.toml");
+        let mut store = PaidRouteStore::default();
+        store.upsert_channel(channel(
+            "pending",
+            PaidRouteChannelRole::Buyer,
+            PaidRouteLifecycleStatus::Closing,
+        ));
+        write_paid_route_store(&paid_route_store_file_path(&config_path), &store)
+            .expect("write paid route fixture");
+        write_daemon_control_request(&config_path, DaemonControlRequest::Pause)
+            .expect("queue daemon control request");
+        let mut runtime = PaidExitBuyerRefundRuntime::with_timings(
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+        .expect("start refund runtime");
+
+        assert_eq!(
+            runtime.before_tick(&config_path, false),
+            Some(DaemonControlRequest::Pause),
+            "an active network deadline must not hide local control"
+        );
+        assert!(
+            runtime.active_channel_id.is_none(),
+            "refund background work started while the network deadline was active"
+        );
+        assert_eq!(
+            runtime.before_tick(&config_path, false),
+            None,
+            "the control request was not consumed exactly once"
+        );
+        assert!(
+            runtime.active_channel_id.is_none(),
+            "a control-free state tick started refund work during the network deadline"
         );
     }
 

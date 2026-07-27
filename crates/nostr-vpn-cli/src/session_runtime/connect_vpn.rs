@@ -6,9 +6,10 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     #[cfg(any(target_os = "macos", test))]
     crate::ensure_macos_connect_privileges(&config_path)?;
-    #[cfg(target_os = "macos")]
-    if let Err(error) = repair_saved_network_state(&config_path) {
-        eprintln!("connect: failed to repair saved macOS network state: {error}");
+    if repair_saved_network_state(&config_path)
+        .context("connect refused while saved network cleanup remains incomplete")?
+    {
+        transition_daemon_state_after_network_repair(&config_path)?;
     }
     let (mut app, mut network_id) = load_config_with_overrides(
         &config_path,
@@ -50,7 +51,22 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
             },
         )?;
         let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
-        let runtime = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
+        let runtime =
+            match crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await {
+                Ok(runtime) => runtime,
+                Err(start_error) => {
+                    return Err(match persist_fips_daemon_network_cleanup_state(
+                        &config_path,
+                        None,
+                    ) {
+                        Ok(()) => start_error,
+                        Err(persist_error) => anyhow!(
+                            "{start_error:#}; failed to persist partial FIPS startup cleanup \
+                             ownership: {persist_error:#}"
+                        ),
+                    });
+                }
+            };
         println!("connect: FIPS private mesh on {}", runtime.iface());
         (Some(runtime), endpoint_peer_signature)
     };
@@ -192,10 +208,21 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
     }
 
     port_mapping_runtime.stop().await;
-    if let Some(runtime) = fips_tunnel_runtime
-        && let Err(error) = runtime.stop().await
-    {
-        eprintln!("connect: failed to stop FIPS private mesh: {error}");
+    if let Some(runtime) = fips_tunnel_runtime {
+        let persist_error =
+            persist_fips_daemon_network_cleanup_state(&config_path, Some(&runtime)).err();
+        match runtime.stop().await {
+            Ok(()) => clear_fips_daemon_network_cleanup_state(&config_path)?,
+            Err(error) => {
+                return Err(match persist_error {
+                    Some(persist_error) => anyhow!(
+                        "failed to stop FIPS private mesh ({error:#}); failed to persist exact \
+                         cleanup ownership before teardown ({persist_error:#})"
+                    ),
+                    None => error.context("failed to stop FIPS private mesh"),
+                });
+            }
+        }
     }
     println!("connect: disconnected");
 

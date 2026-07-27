@@ -1,0 +1,695 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow};
+use nostr_vpn_core::config::WireGuardExitConfig;
+
+use super::{WIREGUARD_EXIT_RULE_PRIORITY, WIREGUARD_EXIT_TABLE};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct LinuxAddressRestore {
+    pub(super) configured: String,
+    pub(super) previous: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct LinuxLinkState {
+    pub(super) mtu: u64,
+    pub(super) up: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct LinuxRouteRestore {
+    pub(super) target: String,
+    pub(super) previous_routes: Vec<String>,
+}
+
+pub(super) struct TempSecretFile {
+    path: PathBuf,
+}
+
+impl TempSecretFile {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempSecretFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct LinuxCommandOutput {
+    pub(super) success: bool,
+    pub(super) code: Option<i32>,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
+}
+
+pub(super) trait LinuxCommandRunner {
+    fn output(&mut self, program: &str, args: &[String]) -> Result<LinuxCommandOutput>;
+}
+
+pub(super) struct SystemLinuxCommandRunner;
+
+impl LinuxCommandRunner for SystemLinuxCommandRunner {
+    fn output(&mut self, program: &str, args: &[String]) -> Result<LinuxCommandOutput> {
+        let display = command_display(program, args);
+        let output = ProcessCommand::new(program)
+            .args(args)
+            .output()
+            .with_context(|| format!("failed to execute {display}"))?;
+        Ok(LinuxCommandOutput {
+            success: output.status.success(),
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+fn command_display(program: &str, args: &[String]) -> String {
+    format!("{program} {args:?}")
+}
+
+pub(super) fn command_output_checked(
+    runner: &mut impl LinuxCommandRunner,
+    program: &str,
+    args: &[String],
+) -> Result<String> {
+    let output = runner.output(program, args)?;
+    if output.success {
+        return Ok(output.stdout);
+    }
+    Err(command_failed(program, args, &output))
+}
+
+pub(super) fn run_checked(
+    runner: &mut impl LinuxCommandRunner,
+    program: &str,
+    args: &[String],
+) -> Result<()> {
+    command_output_checked(runner, program, args).map(drop)
+}
+
+fn run_checked_allow_absent(
+    runner: &mut impl LinuxCommandRunner,
+    program: &str,
+    args: &[String],
+) -> Result<()> {
+    let output = runner.output(program, args)?;
+    if output.success || linux_absent_resource_error(&output) {
+        Ok(())
+    } else {
+        Err(command_failed(program, args, &output))
+    }
+}
+
+fn linux_absent_resource_error(output: &LinuxCommandOutput) -> bool {
+    matches!(output.code, Some(1 | 2))
+        && [
+            "No such process",
+            "No such file or directory",
+            "Cannot find device",
+            "Cannot assign requested address",
+            "does not exist",
+        ]
+        .iter()
+        .any(|message| output.stderr.contains(message))
+}
+
+fn command_failed(program: &str, args: &[String], output: &LinuxCommandOutput) -> anyhow::Error {
+    anyhow!(
+        "command failed: {}\nstdout: {}\nstderr: {}",
+        command_display(program, args),
+        output.stdout.trim(),
+        output.stderr.trim()
+    )
+}
+
+pub(super) fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+pub(super) fn current_linux_default_route(
+    runner: &mut impl LinuxCommandRunner,
+) -> Result<Option<String>> {
+    let output =
+        command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
+    Ok(lowest_metric_default_route(&output).map(|(line, _)| line))
+}
+
+pub(super) fn lowest_metric_default_route(output: &str) -> Option<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.split_whitespace().next() != Some("default") {
+                return None;
+            }
+            let dev = crate::linux_default_route_device_from_output(line)?;
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            let metric = tokens
+                .windows(2)
+                .find(|window| window[0] == "metric")
+                .and_then(|window| window[1].parse::<u32>().ok())
+                .unwrap_or(0);
+            Some((metric, line.to_string(), dev))
+        })
+        .min_by_key(|(metric, _, _)| *metric)
+        .map(|(_, line, dev)| (line, dev))
+}
+
+pub(super) fn linux_wireguard_exit_endpoint_specs(
+    runner: &mut impl LinuxCommandRunner,
+    config: &WireGuardExitConfig,
+    iface: &str,
+    previous_default_route: Option<&str>,
+) -> Result<Vec<crate::LinuxEndpointBypassRoute>> {
+    let mut routes = Vec::new();
+    for host in super::super::wireguard_exit_endpoint_ipv4_hosts(&config.endpoint) {
+        let output = command_output_checked(
+            runner,
+            "ip",
+            &strings(&["-4", "route", "get", &host.to_string()]),
+        )?;
+        routes.push(crate::linux_endpoint_bypass_route_from_output(
+            host,
+            &output,
+            iface,
+            previous_default_route,
+        )?);
+    }
+    Ok(routes)
+}
+
+pub(super) fn ensure_linux_wireguard_link(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+) -> Result<bool> {
+    let args = strings(&["link", "show", "dev", iface]);
+    let output = runner.output("ip", &args)?;
+    if output.success {
+        return Ok(false);
+    }
+    if !linux_link_missing_error(&output) {
+        return Err(command_failed("ip", &args, &output));
+    }
+    let add = run_checked(
+        runner,
+        "ip",
+        &strings(&["link", "add", "dev", iface, "type", "wireguard"]),
+    );
+    if let Err(error) = add {
+        // Only an acknowledged successful RTM_NEWLINK proves ownership. If
+        // the add fails and a same-name interface appears, a concurrent actor
+        // may have won the race; deleting it would destroy unowned state.
+        return Err(error).context(format!(
+            "WireGuard interface {iface} creation was not acknowledged; ownership is uncertain"
+        ));
+    }
+    Ok(true)
+}
+
+fn linux_link_missing_error(output: &LinuxCommandOutput) -> bool {
+    output.code == Some(1)
+        && (output.stderr.contains("does not exist")
+            || output.stderr.contains("Cannot find device"))
+}
+
+pub(super) fn linux_ipv4_route_snapshot(
+    runner: &mut impl LinuxCommandRunner,
+    args: &[&str],
+) -> Result<Vec<String>> {
+    let mut command_args = strings(&["-4", "route", "show"]);
+    command_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    let output = command_output_checked(runner, "ip", &command_args)?;
+    Ok(route_lines(&output))
+}
+
+pub(super) fn linux_ipv4_table_snapshot(
+    runner: &mut impl LinuxCommandRunner,
+    table: u32,
+) -> Result<Vec<String>> {
+    let args = strings(&["-4", "route", "show", "table", &table.to_string()]);
+    let output = runner.output("ip", &args)?;
+    if output.success {
+        return Ok(route_lines(&output.stdout));
+    }
+    if linux_missing_fib_table_error(&output) {
+        return Ok(Vec::new());
+    }
+    Err(command_failed("ip", &args, &output))
+}
+
+pub(super) fn linux_missing_fib_table_error(output: &LinuxCommandOutput) -> bool {
+    output.code == Some(2) && output.stderr.contains("FIB table does not exist")
+}
+
+fn route_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+pub(super) fn linux_interface_address_for_config(output: &str, configured: &str) -> Option<String> {
+    let configured_ip = configured.trim().split('/').next()?;
+    output.lines().find_map(|line| {
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        tokens.windows(2).find_map(|window| {
+            if !matches!(window[0], "inet" | "inet6") {
+                return None;
+            }
+            (window[1].split('/').next() == Some(configured_ip)).then(|| window[1].to_string())
+        })
+    })
+}
+
+pub(super) fn linux_link_state_from_json(output: &str) -> Result<LinuxLinkState> {
+    let value: serde_json::Value =
+        serde_json::from_str(output).context("failed to parse Linux link state")?;
+    let link = value
+        .as_array()
+        .and_then(|links| links.first())
+        .ok_or_else(|| anyhow!("Linux link state is empty"))?;
+    let mtu = link
+        .get("mtu")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow!("Linux link state has no MTU"))?;
+    let up = link
+        .get("flags")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|flags| flags.iter().any(|flag| flag.as_str() == Some("UP")));
+    Ok(LinuxLinkState { mtu, up })
+}
+
+pub(super) fn replace_linux_address(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    address: &str,
+) -> Result<()> {
+    run_checked(
+        runner,
+        "ip",
+        &strings(&["address", "replace", address, "dev", iface]),
+    )
+}
+
+pub(super) fn linux_wireguard_kernel_config(config: &WireGuardExitConfig) -> String {
+    let mut lines = vec![
+        "[Interface]".to_string(),
+        format!("PrivateKey = {}", config.private_key.trim()),
+        String::new(),
+        "[Peer]".to_string(),
+        format!("PublicKey = {}", config.peer_public_key.trim()),
+    ];
+    if !config.peer_preshared_key.trim().is_empty() {
+        lines.push(format!(
+            "PresharedKey = {}",
+            config.peer_preshared_key.trim()
+        ));
+    }
+    lines.extend([
+        format!("AllowedIPs = {}", config.allowed_ips.join(", ")),
+        format!("Endpoint = {}", config.endpoint.trim()),
+    ]);
+    if config.persistent_keepalive_secs > 0 {
+        lines.push(format!(
+            "PersistentKeepalive = {}",
+            config.persistent_keepalive_secs
+        ));
+    }
+    lines.join("\n")
+}
+
+pub(super) fn set_linux_wireguard_config(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    kernel_config_file: &Path,
+) -> Result<()> {
+    run_checked(
+        runner,
+        "wg",
+        &strings(&["setconf", iface, &kernel_config_file.display().to_string()]),
+    )
+}
+
+pub(super) fn set_linux_wireguard_link(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    mtu: u16,
+) -> Result<()> {
+    run_checked(
+        runner,
+        "ip",
+        &strings(&["link", "set", "mtu", &mtu.to_string(), "up", "dev", iface]),
+    )
+}
+
+pub(super) fn apply_linux_endpoint_bypass_route(
+    runner: &mut impl LinuxCommandRunner,
+    route: &crate::LinuxEndpointBypassRoute,
+) -> Result<()> {
+    let mut args = strings(&["-4", "route", "replace", &route.target]);
+    if let Some(gateway) = route.gateway.as_deref() {
+        args.extend(strings(&["via", gateway]));
+    }
+    args.extend(strings(&["dev", &route.dev]));
+    if let Some(src) = route.src.as_deref() {
+        args.extend(strings(&["src", src]));
+    }
+    run_checked(runner, "ip", &args)
+}
+
+pub(super) fn replace_linux_policy_default_route(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+) -> Result<()> {
+    run_checked(
+        runner,
+        "ip",
+        &strings(&[
+            "-4",
+            "route",
+            "replace",
+            "default",
+            "dev",
+            iface,
+            "table",
+            &WIREGUARD_EXIT_TABLE.to_string(),
+        ]),
+    )
+}
+
+pub(super) fn add_linux_wireguard_exit_policy_rule(
+    runner: &mut impl LinuxCommandRunner,
+    source_cidr: &str,
+) -> Result<()> {
+    run_checked(
+        runner,
+        "ip",
+        &strings(&[
+            "-4",
+            "rule",
+            "add",
+            "priority",
+            &WIREGUARD_EXIT_RULE_PRIORITY.to_string(),
+            "from",
+            source_cidr,
+            "table",
+            &WIREGUARD_EXIT_TABLE.to_string(),
+        ]),
+    )
+}
+
+pub(super) fn apply_linux_wireguard_exit_default_route(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    address: &str,
+    previous_routes: &[String],
+) -> Result<()> {
+    if lowest_metric_default_route(&previous_routes.join("\n"))
+        .is_some_and(|(_, current)| current != iface)
+    {
+        run_checked(runner, "ip", &strings(&["-4", "route", "del", "default"]))
+            .context("failed to invalidate the underlay default route")?;
+    }
+    let mut args = strings(&["-4", "route", "replace", "default", "dev", iface]);
+    if let Ok(source) = crate::strip_cidr(address).parse::<std::net::Ipv4Addr>() {
+        args.extend(strings(&["src", &source.to_string()]));
+    }
+    run_checked(runner, "ip", &args)
+}
+
+pub(super) fn restore_linux_wireguard_config(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    config: &str,
+) -> Result<()> {
+    let file = write_temp_secret_file(iface, "rollback", config)?;
+    run_checked(
+        runner,
+        "wg",
+        &strings(&["setconf", iface, &file.path().display().to_string()]),
+    )
+    .with_context(|| format!("failed to restore pre-WireGuard configuration on {iface}"))
+}
+
+pub(super) fn restore_linux_address(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    address: &LinuxAddressRestore,
+) -> Result<()> {
+    let delete = run_checked_allow_absent(
+        runner,
+        "ip",
+        &strings(&["address", "del", &address.configured, "dev", iface]),
+    );
+    let replace = if let Some(previous) = address.previous.as_deref() {
+        run_checked(
+            runner,
+            "ip",
+            &strings(&["address", "replace", previous, "dev", iface]),
+        )
+    } else {
+        Ok(())
+    };
+    match (delete, replace) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(delete), Ok(())) => Err(delete)
+            .with_context(|| format!("failed to remove managed WireGuard address on {iface}")),
+        (Ok(()), Err(replace)) => Err(replace)
+            .with_context(|| format!("failed to restore pre-WireGuard address on {iface}")),
+        (Err(delete), Err(replace)) => Err(anyhow!(
+            "failed to restore address on {iface}: delete failed ({delete:#}); replace failed ({replace:#})"
+        )),
+    }
+}
+
+pub(super) fn restore_linux_link(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    link: &LinuxLinkState,
+) -> Result<()> {
+    let mtu = run_checked(
+        runner,
+        "ip",
+        &strings(&["link", "set", "dev", iface, "mtu", &link.mtu.to_string()]),
+    );
+    let state = run_checked(
+        runner,
+        "ip",
+        &strings(&[
+            "link",
+            "set",
+            if link.up { "up" } else { "down" },
+            "dev",
+            iface,
+        ]),
+    );
+    match (mtu, state) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(mtu), Ok(())) => {
+            Err(mtu).with_context(|| format!("failed to restore pre-WireGuard MTU on {iface}"))
+        }
+        (Ok(()), Err(state)) => Err(state)
+            .with_context(|| format!("failed to restore pre-WireGuard link state on {iface}")),
+        (Err(mtu), Err(state)) => Err(anyhow!(
+            "failed to restore link on {iface}: MTU failed ({mtu:#}); state failed ({state:#})"
+        )),
+    }
+}
+
+pub(super) fn restore_linux_route_target(
+    runner: &mut impl LinuxCommandRunner,
+    route: &LinuxRouteRestore,
+    table: Option<u32>,
+) -> Result<()> {
+    let mut delete_args = strings(&["-4", "route", "del", &route.target]);
+    if let Some(table) = table {
+        delete_args.extend(strings(&["table", &table.to_string()]));
+    }
+    run_checked_allow_absent(runner, "ip", &delete_args)
+        .with_context(|| format!("failed to remove managed route '{}'", route.target))?;
+    restore_linux_route_snapshot(runner, &route.previous_routes, table)
+}
+
+pub(super) fn restore_linux_route_snapshot(
+    runner: &mut impl LinuxCommandRunner,
+    routes: &[String],
+    table: Option<u32>,
+) -> Result<()> {
+    for route in routes {
+        let mut args = strings(&["-4", "route", "replace"]);
+        args.extend(route.split_whitespace().map(ToOwned::to_owned));
+        if let Some(table) = table {
+            args.extend(strings(&["table", &table.to_string()]));
+        }
+        run_checked(runner, "ip", &args)
+            .with_context(|| format!("failed to restore pre-WireGuard route '{route}'"))?;
+    }
+    Ok(())
+}
+
+pub(super) fn restore_linux_table_snapshot(
+    runner: &mut impl LinuxCommandRunner,
+    table: u32,
+    routes: &[String],
+) -> Result<()> {
+    run_checked_allow_absent(
+        runner,
+        "ip",
+        &strings(&["-4", "route", "flush", "table", &table.to_string()]),
+    )
+    .with_context(|| format!("failed to flush WireGuard policy table {table}"))?;
+    restore_linux_route_snapshot(runner, routes, Some(table))
+        .with_context(|| format!("failed to restore WireGuard policy table {table}"))
+}
+
+pub(super) fn restore_linux_main_default_snapshot(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    routes: &[String],
+) -> Result<()> {
+    run_checked_allow_absent(
+        runner,
+        "ip",
+        &strings(&["-4", "route", "del", "default", "dev", iface]),
+    )
+    .context("failed to remove managed WireGuard default route")?;
+    let current =
+        command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
+    let has_live_physical_default = current.lines().any(|line| {
+        line.split_whitespace().next() == Some("default")
+            && crate::linux_default_route_device_from_output(line)
+                .is_some_and(|device| device != iface)
+    });
+    if has_live_physical_default {
+        let managed_interface_snapshot = routes
+            .iter()
+            .filter(|route| {
+                crate::linux_default_route_device_from_output(route)
+                    .is_some_and(|device| device == iface)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        return restore_linux_route_snapshot(runner, &managed_interface_snapshot, None)
+            .context("failed to restore preexisting defaults on the managed WireGuard interface");
+    }
+    restore_linux_route_snapshot(runner, routes, None)
+        .context("failed to restore pre-WireGuard default routes")
+}
+
+pub(super) fn restore_linux_main_default_snapshot_exact(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+    routes: &[String],
+) -> Result<()> {
+    run_checked_allow_absent(
+        runner,
+        "ip",
+        &strings(&["-4", "route", "del", "default", "dev", iface]),
+    )
+    .context("failed to remove partially-installed WireGuard default route")?;
+    restore_linux_route_snapshot(runner, routes, None)
+        .context("failed to restore pre-WireGuard default routes without deleting a new underlay")
+}
+
+pub(super) fn delete_linux_wireguard_exit_policy_rule(
+    runner: &mut impl LinuxCommandRunner,
+    source_cidr: &str,
+    table: u32,
+    priority: u32,
+) -> Result<()> {
+    run_checked_allow_absent(
+        runner,
+        "ip",
+        &strings(&[
+            "-4",
+            "rule",
+            "del",
+            "priority",
+            &priority.to_string(),
+            "from",
+            source_cidr,
+            "table",
+            &table.to_string(),
+        ]),
+    )
+}
+
+pub(super) fn delete_linux_wireguard_exit_link(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+) -> Result<()> {
+    run_checked_allow_absent(runner, "ip", &strings(&["link", "del", "dev", iface]))
+}
+
+pub(super) fn flush_linux_route_cache(runner: &mut impl LinuxCommandRunner) -> Result<()> {
+    run_checked(runner, "ip", &strings(&["-4", "route", "flush", "cache"]))
+}
+
+pub(super) fn linux_wireguard_exit_policy_rule_exists(
+    output: &str,
+    source_cidr: &str,
+    table: u32,
+    priority: u32,
+) -> bool {
+    let priority_prefix = format!("{priority}:");
+    let table_lookup = format!("lookup {table}");
+    output.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with(&priority_prefix)
+            && line.contains("from ")
+            && line.contains(source_cidr)
+            && line.contains(&table_lookup)
+    })
+}
+
+pub(super) fn write_temp_secret_file(
+    iface: &str,
+    suffix: &str,
+    secret: &str,
+) -> Result<TempSecretFile> {
+    let temp_dir = std::env::temp_dir();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    for attempt in 0..128u32 {
+        let path = temp_dir.join(format!(
+            "nvpn-{iface}-{suffix}-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", path.display()));
+            }
+        };
+        let secret_file = TempSecretFile { path };
+        file.write_all(secret.trim().as_bytes())
+            .with_context(|| format!("failed to write {}", secret_file.path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("failed to write {}", secret_file.path.display()))?;
+        file.flush()
+            .with_context(|| format!("failed to flush {}", secret_file.path.display()))?;
+        fs::set_permissions(&secret_file.path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to restrict {}", secret_file.path.display()))?;
+        return Ok(secret_file);
+    }
+    Err(anyhow!(
+        "failed to allocate unique temp secret file for {iface}"
+    ))
+}

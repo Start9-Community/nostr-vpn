@@ -31,6 +31,69 @@ pub(crate) fn set_daemon_runtime_file_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn set_daemon_cleanup_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Linux cleanup snapshots can contain an exact `wg showconf` restore
+        // payload, including private and preshared keys. Unlike UI-facing
+        // daemon status files, cleanup ownership is never desktop-readable.
+        let metadata = fs::symlink_metadata(path).with_context(|| {
+            format!(
+                "failed to inspect daemon cleanup file permissions on {}",
+                path.display()
+            )
+        })?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() || !file_type.is_file() {
+            return Err(anyhow!(
+                "refusing to set daemon cleanup permissions on non-regular file {}",
+                path.display()
+            ));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to set daemon cleanup file permissions on {}",
+                path.display()
+            )
+        })?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+pub(crate) fn set_daemon_cleanup_directory_permissions(path: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let metadata = fs::symlink_metadata(path).with_context(|| {
+            format!(
+                "failed to inspect daemon cleanup directory permissions on {}",
+                path.display()
+            )
+        })?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() || !file_type.is_dir() {
+            return Err(anyhow!(
+                "refusing to use non-directory daemon cleanup path {}",
+                path.display()
+            ));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set daemon cleanup directory permissions on {}",
+                path.display()
+            )
+        })?;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = path;
+
+    Ok(())
+}
+
 pub(crate) fn set_daemon_runtime_file_permissions_on_file(
     file: &fs::File,
     path: &Path,

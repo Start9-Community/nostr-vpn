@@ -84,6 +84,163 @@ group_elapsed=$(( $(date +%s) - group_started ))
 grep -Fq 'slow lane started' "$slow_log" \
   || fail "cancelled peer log was not preserved"
 
+stubborn_lane() {
+  local ready_marker="$1"
+  trap '' TERM
+  : >"$ready_marker"
+  sleep 4
+}
+
+release_gate_parallel_start "stubborn cancellation peer" stubborn_lane "$tmp/stubborn-ready"
+stubborn="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+for _ in $(seq 1 50); do
+  [[ -f "$tmp/stubborn-ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$tmp/stubborn-ready" ]] || fail "stubborn cancellation peer did not start"
+release_gate_parallel_start "stubborn peer failure" lane_fails
+stubborn_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+stubborn_started="$(date +%s)"
+set +e
+release_gate_parallel_wait_group "$stubborn" "$stubborn_failure" >/dev/null 2>&1
+status=$?
+set -e
+stubborn_elapsed=$(( $(date +%s) - stubborn_started ))
+[[ "$status" == "7" ]] || fail "stubborn cancellation group returned $status"
+(( stubborn_elapsed < 4 )) \
+  || fail "TERM-ignoring lane was not escalated to KILL (${stubborn_elapsed}s)"
+[[ -z "${RELEASE_GATE_PARALLEL_PIDS[$stubborn]:-}" ]] \
+  || fail "stubborn cancellation peer was not reaped"
+grep -Fq 'RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS' \
+  "$ROOT_DIR/scripts/lib-release-gate-parallel.sh" \
+  || fail "parallel cancellation has no bounded TERM grace"
+grep -Fq 'RELEASE_GATE_PARALLEL_PGIDS' \
+  "$ROOT_DIR/scripts/lib-release-gate-parallel.sh" \
+  || fail "parallel lanes do not retain a dedicated process-group identity"
+
+orphaning_lane() {
+  local ready_marker="$1"
+  local child_pid_file="$2"
+  local external_pid_file="$3"
+  (
+    trap '' TERM
+    while :; do
+      sleep 10 &
+      printf '%s\n' "$!" >"$external_pid_file"
+      wait "$!" || true
+    done
+  ) &
+  printf '%s\n' "$!" >"$child_pid_file"
+  : >"$ready_marker"
+  wait
+}
+
+release_gate_parallel_start \
+  "orphaning cancellation peer" \
+  orphaning_lane \
+  "$tmp/orphan-ready" "$tmp/orphan-child.pid" "$tmp/orphan-external.pid"
+orphaning="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+orphan_pgid="${RELEASE_GATE_PARALLEL_PGIDS[$orphaning]}"
+for _ in $(seq 1 50); do
+  [[ -f "$tmp/orphan-ready" \
+    && -s "$tmp/orphan-child.pid" \
+    && -s "$tmp/orphan-external.pid" ]] && break
+  sleep 0.02
+done
+[[ -f "$tmp/orphan-ready" \
+  && -s "$tmp/orphan-child.pid" \
+  && -s "$tmp/orphan-external.pid" ]] \
+  || fail "orphaning cancellation peer did not start"
+orphan_child="$(<"$tmp/orphan-child.pid")"
+orphan_external="$(<"$tmp/orphan-external.pid")"
+release_gate_parallel_start "orphaning peer failure" lane_fails
+orphan_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+set +e
+release_gate_parallel_wait_group "$orphaning" "$orphan_failure" >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" == "7" ]] || fail "orphaning cancellation group returned $status"
+for _ in $(seq 1 50); do
+  if ! kill -0 "$orphan_child" >/dev/null 2>&1 \
+    && ! kill -0 "$orphan_external" >/dev/null 2>&1 \
+    && ! release_gate_parallel_group_alive "$orphan_pgid"
+  then
+    break
+  fi
+  sleep 0.02
+done
+if kill -0 "$orphan_child" >/dev/null 2>&1; then
+  fail "TERM-ignoring child survived after its wrapper exited"
+fi
+if kill -0 "$orphan_external" >/dev/null 2>&1; then
+  fail "external TERM-ignoring descendant survived lane cancellation"
+fi
+if release_gate_parallel_group_alive "$orphan_pgid"; then
+  fail "cancelled lane process group still has live descendants"
+fi
+
+successful_orphan_lane() {
+  local ready_marker="$1"
+  local child_pid_file="$2"
+  local term_marker="$3"
+  (
+    trap 'printf "term received\n" >"$term_marker"' TERM
+    : >"$ready_marker"
+    while :; do
+      sleep 10 || true
+    done
+  ) &
+  printf '%s\n' "$!" >"$child_pid_file"
+  for _ in $(seq 1 50); do
+    [[ -f "$ready_marker" ]] && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
+release_gate_parallel_start \
+  "successful lane with orphan" \
+  successful_orphan_lane \
+  "$tmp/successful-orphan-ready" \
+  "$tmp/successful-orphan-child.pid" \
+  "$tmp/successful-orphan-term"
+successful_orphan="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+successful_orphan_pgid="${RELEASE_GATE_PARALLEL_PGIDS[$successful_orphan]}"
+for _ in $(seq 1 50); do
+  [[ -s "$tmp/successful-orphan-child.pid" \
+    && -f "$tmp/successful-orphan-ready" ]] && break
+  sleep 0.02
+done
+[[ -s "$tmp/successful-orphan-child.pid" \
+  && -f "$tmp/successful-orphan-ready" ]] \
+  || fail "successful orphan fixture did not start its descendant"
+successful_orphan_child="$(<"$tmp/successful-orphan-child.pid")"
+set +e
+release_gate_parallel_wait "$successful_orphan" >/dev/null 2>&1
+status=$?
+set -e
+[[ "$status" == "1" ]] \
+  || fail "successful lane with an orphan returned $status instead of failing closed"
+[[ -f "$tmp/successful-orphan-term" ]] \
+  || fail "successful lane orphan did not receive TERM before escalation"
+for _ in $(seq 1 50); do
+  if ! kill -0 "$successful_orphan_child" >/dev/null 2>&1 \
+    && ! release_gate_parallel_group_alive "$successful_orphan_pgid"
+  then
+    break
+  fi
+  sleep 0.02
+done
+if kill -0 "$successful_orphan_child" >/dev/null 2>&1; then
+  fail "successful lane orphan survived TERM/KILL cleanup"
+fi
+if release_gate_parallel_group_alive "$successful_orphan_pgid"; then
+  fail "successful lane orphan process group survived cleanup"
+fi
+[[ -z "${RELEASE_GATE_PARALLEL_PIDS[$successful_orphan]:-}" \
+  && -z "${RELEASE_GATE_PARALLEL_PGIDS[$successful_orphan]:-}" ]] \
+  || fail "successful lane orphan wrapper/process group was not reaped"
+
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
 grep -Fq 'node scripts/sync-versions.mjs --check' "$release_gate" \
   || fail "release gate mutates generated versions before candidate snapshot"

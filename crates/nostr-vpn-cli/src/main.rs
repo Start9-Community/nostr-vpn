@@ -292,6 +292,8 @@ mod tests {
     #[cfg(feature = "paid-exit")]
     #[path = "../tests/runtime_misc_paid_exit_relay.rs"]
     mod runtime_misc_paid_exit_relay;
+    #[path = "../tests/runtime_network_transitions.rs"]
+    mod runtime_network_transitions;
     #[path = "../tests/service_cli.rs"]
     mod service_cli;
 }

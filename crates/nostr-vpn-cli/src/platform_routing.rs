@@ -15,7 +15,7 @@ use std::process::Command as ProcessCommand;
 use anyhow::Context;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use anyhow::Result;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use anyhow::anyhow;
 #[cfg(target_os = "linux")]
 use netdev::get_interfaces;

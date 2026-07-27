@@ -244,11 +244,17 @@ pub(crate) fn daemon_state_file_path(config_path: &Path) -> PathBuf {
     parent.join("daemon.state.json")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) fn daemon_network_cleanup_file_path(config_path: &Path) -> PathBuf {
     let parent = config_path
         .parent()
         .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
+    #[cfg(target_os = "linux")]
+    return parent
+        .join(".nvpn-network-cleanup")
+        .join("daemon.cleanup.json");
+
+    #[cfg(not(target_os = "linux"))]
     parent.join("daemon.cleanup.json")
 }
 
@@ -742,59 +748,82 @@ pub(crate) fn write_daemon_state(path: &Path, state: &DaemonRuntimeState) -> Res
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) fn read_daemon_network_cleanup_state(
     path: &Path,
-) -> Result<Option<MacosNetworkCleanupState>> {
+) -> Result<Option<DaemonNetworkCleanupState>> {
     if !path.exists() {
         return Ok(None);
     }
 
+    if let Some(parent) = path.parent() {
+        set_daemon_cleanup_directory_permissions(parent)?;
+    }
+    set_daemon_cleanup_file_permissions(path)?;
     let raw = fs::read(path)
         .with_context(|| format!("failed to read daemon cleanup file {}", path.display()))?;
-    match serde_json::from_slice::<MacosNetworkCleanupState>(&raw) {
+    match serde_json::from_slice::<DaemonNetworkCleanupState>(&raw) {
         Ok(parsed) => Ok(Some(parsed)),
         Err(parse_error) => {
             let trimmed = trim_runtime_json_padding(&raw);
             if trimmed.len() != raw.len()
                 && !trimmed.is_empty()
-                && let Ok(parsed) = serde_json::from_slice::<MacosNetworkCleanupState>(trimmed)
+                && let Ok(parsed) = serde_json::from_slice::<DaemonNetworkCleanupState>(trimmed)
             {
-                if let Err(error) = write_runtime_file_atomically(path, trimmed) {
+                if let Err(error) = write_private_runtime_file_atomically(path, trimmed) {
                     eprintln!(
                         "daemon: parsed padded cleanup file {} but failed to rewrite clean copy: {}",
                         path.display(),
                         error
                     );
                 } else {
-                    let _ = set_daemon_runtime_file_permissions(path);
+                    set_daemon_cleanup_file_permissions(path)?;
                 }
                 return Ok(Some(parsed));
             }
 
-            quarantine_corrupt_runtime_file(path, "daemon cleanup", &parse_error);
-            Ok(None)
+            Err(parse_error).with_context(|| {
+                format!(
+                    "refusing to discard unreadable network cleanup ownership in {}",
+                    path.display()
+                )
+            })
         }
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) fn write_daemon_network_cleanup_state(
     path: &Path,
-    state: &MacosNetworkCleanupState,
+    state: &DaemonNetworkCleanupState,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
+        set_daemon_cleanup_directory_permissions(parent)?;
     }
     let raw = serde_json::to_string_pretty(state)?;
-    write_runtime_file_atomically(path, raw.as_bytes())
+    write_private_runtime_file_atomically(path, raw.as_bytes())
         .with_context(|| format!("failed to write daemon cleanup file {}", path.display()))?;
-    set_daemon_runtime_file_permissions(path)?;
+    set_daemon_cleanup_file_permissions(path)?;
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("failed to sync daemon cleanup file {}", path.display()))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| {
+                format!(
+                    "failed to sync daemon cleanup directory {}",
+                    parent.display()
+                )
+            })?;
+    }
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) fn remove_runtime_file_if_exists(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -821,6 +850,52 @@ pub(crate) fn persist_daemon_network_cleanup_state(
     {
         let _ = (config_path, tunnel_runtime);
     }
+
+    Ok(())
+}
+
+pub(crate) fn persist_fips_daemon_network_cleanup_state(
+    config_path: &Path,
+    runtime: Option<&crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = daemon_network_cleanup_file_path(config_path);
+        let state = runtime
+            .and_then(LinuxNetworkCleanupState::from_runtime)
+            .or_else(crate::fips_private_mesh::pending_linux_network_cleanup_state);
+        if let Some(state) = state {
+            write_daemon_network_cleanup_state(&path, &state)?;
+        } else if runtime.is_some() {
+            remove_runtime_file_if_exists(&path)?;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let path = daemon_network_cleanup_file_path(config_path);
+        let state = WindowsNetworkCleanupState::from_runtime_and_pending(runtime);
+        if state.is_empty() {
+            remove_runtime_file_if_exists(&path)?;
+        } else {
+            write_daemon_network_cleanup_state(&path, &state)?;
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (config_path, runtime);
+    }
+
+    Ok(())
+}
+
+pub(crate) fn clear_fips_daemon_network_cleanup_state(config_path: &Path) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    remove_runtime_file_if_exists(&daemon_network_cleanup_file_path(config_path))?;
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let _ = config_path;
 
     Ok(())
 }

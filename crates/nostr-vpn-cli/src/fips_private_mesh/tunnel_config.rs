@@ -612,7 +612,10 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     fips_host_recv_worker: Option<FipsHostRecvWorker>,
     event_rx: mpsc::Receiver<FipsPrivateMeshEvent>,
     exit_route_ready: bool,
+    #[cfg(target_os = "macos")]
     endpoint_bypass_routes: Vec<String>,
+    #[cfg(target_os = "linux")]
+    endpoint_bypass_routes: Vec<crate::LinuxManagedEndpointBypassRoute>,
     #[cfg(target_os = "macos")]
     endpoint_bypass_underlay: Option<crate::MacosRouteSpec>,
     #[cfg(target_os = "linux")]

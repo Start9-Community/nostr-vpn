@@ -121,6 +121,20 @@ struct FipsRestartContext<'a> {
     ethernet_underlay: Option<&'a crate::fips_private_mesh::FipsEthernetUnderlayConfig>,
     last_endpoint_peer_signature: &'a mut EndpointPeerSignature,
 }
+struct FipsLinkRefreshCompletion<'a> {
+    runtime: Option<&'a crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
+    app: &'a nostr_vpn_core::config::AppConfig,
+    network_id: &'a str,
+    own_pubkey: Option<&'a str>,
+    recent_peers: &'a mut nostr_vpn_core::recent_peers::RecentPeerEndpoints,
+    recent_peers_path: &'a std::path::Path,
+    last_endpoint_peer_signature: &'a mut EndpointPeerSignature,
+    last_refresh_signature: &'a mut Option<RecentPeerRefreshSignature>,
+    last_cache_persisted_at: &'a mut u64,
+    vpn_enabled: bool,
+    expected_peers: usize,
+    now: u64,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FipsLinkEventRefresh {
     None,
@@ -452,6 +466,37 @@ fn recent_peer_refresh_signature(
     live.dedup();
     (recent_peers.as_static_peer_endpoints(), live)
 }
+
+async fn rebind_fips_tunnel_runtime_underlay_after_link_event(
+    runtime: &Option<crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
+    underlay_interface: Option<&str>,
+    reason: &str,
+) -> Result<()> {
+    let Some(runtime) = runtime.as_ref() else {
+        return Ok(());
+    };
+    let rebound = runtime
+        .rebind_network_transports(underlay_interface.map(ToOwned::to_owned))
+        .await?;
+    eprintln!(
+        "daemon: FIPS underlay carrier(s) rebound on {} after {reason} ({rebound}); refreshed_unix_ms={}",
+        runtime.iface(),
+        daemon_wall_clock_unix_milliseconds()
+    );
+    Ok(())
+}
+
+async fn fips_tunnel_config_for_link_event(
+    input: FipsTunnelConfigInput<'_>,
+) -> Result<crate::fips_private_mesh::FipsPrivateTunnelConfig> {
+    tokio::time::timeout(
+        Duration::from_millis(FIPS_LINK_EVENT_CONFIG_BUILD_TIMEOUT_MILLIS),
+        fips_tunnel_config_from_app_async(input),
+    )
+    .await
+    .context("FIPS tunnel config build timed out during link recovery")?
+}
+
 async fn refresh_fips_tunnel_runtime_after_link_event(
     runtime: &mut Option<crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
     context: FipsRestartContext<'_>,
@@ -465,7 +510,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
     // Do not carry learned endpoint hints across link changes. They may belong
     // to a previous underlay or NAT mapping.
     let live_peer_endpoints = Vec::new();
-    let config = fips_tunnel_config_from_app_async(
+    let config = fips_tunnel_config_for_link_event(
         FipsTunnelConfigInput {
             app: context.app,
             config_path: context.config_path,
@@ -497,16 +542,6 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         );
         *runtime = Some(started);
     } else if let Some(existing) = runtime.as_mut() {
-        let rebound = if matches!(
-            refresh,
-            FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
-        ) {
-            existing
-                .rebind_network_transports(config.underlay_interface.clone())
-                .await?
-        } else {
-            0
-        };
         if matches!(refresh, FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths) {
             // Reconcile routes, DNS, and the cached runtime config only after
             // the live carrier has accepted the new physical interface.
@@ -519,8 +554,9 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         }
         let refreshed = existing.refresh_peer_paths(&endpoint_peers).await?;
         eprintln!(
-            "daemon: refreshed FIPS private mesh paths on {} after {reason} ({rebound} underlay carrier(s) rebound, {refreshed} direct probe(s) started)",
+            "daemon: refreshed FIPS private mesh paths on {} after {reason} ({refreshed} direct probe(s) started); refreshed_unix_ms={}",
             existing.iface(),
+            daemon_wall_clock_unix_milliseconds(),
         );
     } else {
         let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
@@ -529,6 +565,46 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
     }
     *context.last_endpoint_peer_signature = endpoint_peer_signature;
     Ok(())
+}
+
+async fn complete_fips_link_event_refresh(context: FipsLinkRefreshCompletion<'_>) -> String {
+    if let Some(runtime) = context.runtime {
+        if let Err(error) = runtime.ping_peers(context.network_id, context.now).await {
+            eprintln!("fips: peer ping failed after network refresh: {error}");
+        }
+        if let Err(error) = runtime.refresh_link_statuses().await {
+            eprintln!("fips: peer link snapshot failed after network refresh: {error}");
+        }
+        update_recent_peers_from_runtime(
+            runtime,
+            context.app,
+            context.network_id,
+            context.own_pubkey,
+            RecentPeerRefresh {
+                recent_peers: context.recent_peers,
+                recent_peers_path: context.recent_peers_path,
+                last_endpoint_peer_signature: context.last_endpoint_peer_signature,
+                last_refresh_signature: context.last_refresh_signature,
+                last_cache_persisted_at: context.last_cache_persisted_at,
+                force_rebuild: true,
+            },
+            context.now,
+        )
+        .await;
+        if let Err(error) = broadcast_local_fips_capabilities(runtime, context.app).await {
+            eprintln!("fips: capabilities broadcast failed after network refresh: {error}");
+        }
+    }
+    if daemon_vpn_active(context.vpn_enabled, context.expected_peers) {
+        "Connected (network refresh)".to_string()
+    } else {
+        daemon_vpn_idle_status(
+            context.vpn_enabled,
+            context.expected_peers,
+            context.app.join_requests_enabled(),
+        )
+        .to_string()
+    }
 }
 
 async fn rebuild_fips_tunnel_runtime_after_control_failure(
@@ -559,10 +635,11 @@ async fn rebuild_fips_tunnel_runtime_after_control_failure(
     .await?;
     let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
 
-    if let Some(existing) = runtime.take()
-        && let Err(error) = existing.stop().await
-    {
-        eprintln!("fips: unresponsive endpoint shutdown was forced: {error:#}");
+    if let Some(existing) = runtime.take() {
+        existing
+            .stop()
+            .await
+            .context("refusing to rebuild FIPS after incomplete prior cleanup")?;
     }
     let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
     eprintln!(
@@ -772,12 +849,33 @@ fn prefer_nonself_tunnel_snapshot(
     }
 }
 
-async fn capture_network_snapshot_for_daemon() -> crate::diagnostics::NetworkSnapshot {
-    match tokio::task::spawn_blocking(capture_network_snapshot).await {
+async fn capture_network_snapshot_for_daemon(
+    tunnel_interface: &str,
+    wireguard_exit_interface: Option<&str>,
+) -> crate::diagnostics::NetworkSnapshotSample {
+    let mut excluded_interfaces = vec![tunnel_interface.to_string()];
+    if let Some(interface) = wireguard_exit_interface {
+        excluded_interfaces.push(interface.to_string());
+    }
+    match tokio::task::spawn_blocking(move || {
+        let excluded_interfaces = excluded_interfaces
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        crate::diagnostics::capture_network_snapshot_sample_excluding_interfaces(
+            &excluded_interfaces,
+        )
+    })
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(error) => {
             eprintln!("daemon: network snapshot task failed: {error}");
-            crate::diagnostics::NetworkSnapshot::default()
+            let snapshot = crate::diagnostics::NetworkSnapshot::default();
+            crate::diagnostics::NetworkSnapshotSample {
+                diagnostic: "selected=none reason=snapshot-task-failed".to_string(),
+                snapshot,
+            }
         }
     }
 }
@@ -815,4 +913,30 @@ fn drain_platform_network_changes(rx: &mut Option<tokio::sync::mpsc::Receiver<()
         return;
     };
     while rx.try_recv().is_ok() {}
+}
+
+pub(crate) fn drain_platform_network_changes_for_sample(
+    rx: &mut Option<tokio::sync::mpsc::Receiver<()>>,
+    event_driven_sample: bool,
+) {
+    // Discard notifications already represented by an event-owned
+    // kernel-state sample so a storm cannot starve its absolute deadline.
+    if event_driven_sample {
+        drain_platform_network_changes(rx);
+    }
+}
+
+fn log_event_driven_network_sample(
+    event_driven_sample: bool,
+    sampled_network: &crate::diagnostics::NetworkSnapshotSample,
+    last_diagnostic: &mut String,
+) {
+    if event_driven_sample && sampled_network.diagnostic != *last_diagnostic {
+        eprintln!(
+            "daemon: physical route sample: {}; sampled_unix_ms={}",
+            sampled_network.diagnostic,
+            daemon_wall_clock_unix_milliseconds()
+        );
+        sampled_network.diagnostic.clone_into(last_diagnostic);
+    }
 }

@@ -215,6 +215,8 @@ use tokio::task::JoinHandle;
 #[cfg(target_os = "windows")]
 use wintun::{Adapter, MAX_RING_CAPACITY, Session};
 
+#[cfg(target_os = "windows")]
+use crate::WindowsNetworkCleanupState;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::fips_host_tunnel::FipsHostTunnelConfig;
 
@@ -254,12 +256,15 @@ include!("fips_private_mesh/control_frame.rs");
 include!("fips_private_mesh/endpoint_config.rs");
 include!("fips_private_mesh/tunnel_config.rs");
 include!("fips_private_mesh/mesh_bind.rs");
+include!("fips_private_mesh/macos_bypass_reconcile.rs");
 include!("fips_private_mesh/tunnel_runtime_unix_core.rs");
 include!("fips_private_mesh/linux_interface_state.rs");
+include!("fips_private_mesh/linux_cleanup.rs");
 include!("fips_private_mesh/tunnel_runtime_linux.rs");
 #[cfg(target_os = "linux")]
 include!("fips_private_mesh/linux_vnet_tun.rs");
 include!("fips_private_mesh/unix_tun.rs");
+include!("fips_private_mesh/windows_cleanup.rs");
 include!("fips_private_mesh/tunnel_runtime_windows.rs");
 include!("fips_private_mesh/windows_tun.rs");
 include!("fips_private_mesh/tunnel_runtime_unsupported.rs");
@@ -271,5 +276,7 @@ mod tests {
     include!("fips_private_mesh/tests_status.rs");
     include!("fips_private_mesh/tests_status_endpoint_data.rs");
     include!("fips_private_mesh/tests_runtime.rs");
+    include!("fips_private_mesh/tests_network_cleanup.rs");
+    include!("fips_private_mesh/tests_macos_bypass.rs");
     include!("fips_private_mesh/tests_config.rs");
 }

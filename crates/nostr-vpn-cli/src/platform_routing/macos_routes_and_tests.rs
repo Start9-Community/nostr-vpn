@@ -154,6 +154,117 @@ mod tests {
     }
 
     #[test]
+    fn linux_underlay_handoff_replaces_cached_route_and_endpoint_bypass_atomically() {
+        let routes = "\
+default dev nvut42 scope link src 10.44.33.93
+default via 192.0.2.1 dev enp1s0 proto static src 192.0.2.10 metric 100
+default via 198.51.100.2 dev enp7s0 proto static src 198.51.100.10 metric 700
+default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
+";
+        assert_eq!(
+            linux_default_route_from_output(routes)
+                .expect("lowest-metric default")
+                .dev,
+            "nvut42"
+        );
+        let old = linux_default_route_from_output_for_interface(routes, Some("enp1s0"))
+            .expect("old physical default");
+        let replacement = linux_default_route_from_output_for_interface(routes, Some("enp7s0"))
+            .expect("replacement physical default");
+        assert_eq!(
+            replacement.line,
+            "default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600"
+        );
+
+        let mut cached = Some(old.line);
+        update_linux_underlay_default_route(&mut cached, replacement, "nvut42")
+            .expect("cache replacement");
+        let cached = cached.expect("replacement cached");
+        let expected_bypass = LinuxEndpointBypassRoute {
+                target: "203.0.113.9/32".to_string(),
+                gateway: Some("198.51.100.1".to_string()),
+                dev: "enp7s0".to_string(),
+                src: Some("198.51.100.10".to_string()),
+            };
+        let managed = LinuxManagedEndpointBypassRoute {
+            route: expected_bypass.clone(),
+            previous_routes: vec![
+                "203.0.113.9/32 via 192.0.2.1 dev enp1s0 src 192.0.2.10".to_string(),
+            ],
+            owned: true,
+        };
+        assert!(linux_endpoint_bypass_route_matches_line(
+            &managed.route,
+            "203.0.113.9 via 198.51.100.1 dev enp7s0 proto static \
+             src 198.51.100.10 metric 1"
+        ));
+        assert!(!linux_endpoint_bypass_route_matches_line(
+            &managed.route,
+            "203.0.113.9/32 via 198.51.100.2 dev enp7s0 src 198.51.100.10"
+        ));
+        for stale_route in [
+            "203.0.113.9 via 192.0.2.1 dev enp1s0 src 192.0.2.10",
+            "203.0.113.9 dev nvut42 src 10.44.33.93",
+        ] {
+            assert_eq!(
+                linux_endpoint_bypass_route_from_output(
+                    "203.0.113.9".parse().unwrap(),
+                    stale_route,
+                    "nvut42",
+                    Some(&cached),
+                )
+                .expect("refreshed physical endpoint bypass"),
+                expected_bypass,
+                "stale route must not survive underlay handoff: {stale_route}"
+            );
+        }
+        for fresh_route in [
+            LinuxEndpointBypassRoute {
+                target: "203.0.113.9/32".to_string(),
+                gateway: Some("198.51.100.2".to_string()),
+                dev: "enp7s0".to_string(),
+                src: Some("198.51.100.10".to_string()),
+            },
+            LinuxEndpointBypassRoute {
+                target: "203.0.113.9/32".to_string(),
+                gateway: Some("198.51.100.1".to_string()),
+                dev: "enp7s0".to_string(),
+                src: Some("198.51.100.11".to_string()),
+            },
+            LinuxEndpointBypassRoute {
+                target: "203.0.113.9/32".to_string(),
+                gateway: None,
+                dev: "enp7s0".to_string(),
+                src: Some("198.51.100.10".to_string()),
+            },
+        ] {
+            let output = match (&fresh_route.gateway, &fresh_route.src) {
+                (Some(gateway), Some(src)) => {
+                    format!("203.0.113.9 via {gateway} dev enp7s0 src {src}")
+                }
+                (None, Some(src)) => format!("203.0.113.9 dev enp7s0 src {src}"),
+                _ => unreachable!("fixture routes have a source address"),
+            };
+            assert_eq!(
+                linux_endpoint_bypass_route_from_output(
+                    "203.0.113.9".parse().unwrap(),
+                    &output,
+                    "nvut42",
+                    Some(&cached),
+                )
+                .expect("fresh physical endpoint bypass"),
+                fresh_route,
+                "kernel-selected on-link/static/policy route must remain authoritative"
+            );
+        }
+        assert_eq!(
+            linux_default_route_replace_args(&cached).join(" "),
+            cached,
+            "Direct/cleanup restore must preserve the exact replacement route"
+        );
+    }
+
+    #[test]
     fn exit_node_forward_rules_are_scoped_to_mesh_source_and_outbound_iface() {
         assert_eq!(
             linux_exit_node_forward_in_rule(

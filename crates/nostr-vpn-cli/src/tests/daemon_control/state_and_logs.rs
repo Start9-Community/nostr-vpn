@@ -348,6 +348,84 @@ fn daemon_status_ignores_and_quarantines_corrupt_daemon_state() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+fn corrupt_network_cleanup_ownership_remains_fail_closed() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-cleanup-corrupt-test-{nonce}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let config_path = dir.join("config.toml");
+    let cleanup_path = daemon_network_cleanup_file_path(&config_path);
+    fs::create_dir_all(cleanup_path.parent().expect("cleanup parent"))
+        .expect("create cleanup parent");
+    fs::write(&cleanup_path, b"{not-valid-json").expect("write corrupt cleanup ownership");
+
+    let error = read_daemon_network_cleanup_state(&cleanup_path)
+        .expect_err("unreadable cleanup ownership must block repair/startup");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to discard unreadable network cleanup ownership")
+    );
+    assert!(
+        cleanup_path.exists(),
+        "a malformed ownership record must remain at its fail-closed path"
+    );
+    assert!(
+        fs::read_dir(cleanup_path.parent().expect("cleanup parent"))
+            .expect("list cleanup parent")
+            .filter_map(|entry| entry.ok())
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".corrupt-")),
+        "cleanup ownership must not be quarantined out of the startup path"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(all(
+    unix,
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+#[test]
+fn daemon_network_cleanup_snapshot_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-cleanup-mode-test-{nonce}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let cleanup_path = daemon_network_cleanup_file_path(&dir.join("config.toml"));
+    write_daemon_network_cleanup_state(&cleanup_path, &DaemonNetworkCleanupState::default())
+        .expect("persist cleanup ownership privately");
+
+    let mode = fs::metadata(&cleanup_path)
+        .expect("cleanup metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "cleanup snapshots may contain WireGuard keys");
+
+    #[cfg(target_os = "linux")]
+    {
+        let parent_mode = fs::metadata(cleanup_path.parent().expect("cleanup parent"))
+            .expect("cleanup parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            parent_mode, 0o700,
+            "Linux cleanup temp/final files need a private parent directory"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn persist_daemon_runtime_state_marks_vpn_on_as_active() {
     let nonce = SystemTime::now()

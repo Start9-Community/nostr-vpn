@@ -9,10 +9,12 @@ SSH_HOST="${NVPN_WINDOWS_SSH_HOST:-${1:-win11-dev}}"
 SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
-GUEST_BARE_REPO="${NVPN_WINDOWS_GIT_BARE_PATH:-C:\\src\\nostr-vpn.git}"
+GUEST_BARE_REPO="${NVPN_WINDOWS_GIT_BARE_PATH:-${GUEST_REPO}.git}"
 REMOTE_REF="${NVPN_WINDOWS_GIT_REF:-refs/heads/codex/windows-vm-sync}"
 REMOTE_URL="${NVPN_WINDOWS_GIT_REMOTE_URL:-${SSH_HOST}:${GUEST_BARE_REPO//\\//}}"
 FIPS_REPO="${NVPN_WINDOWS_FIPS_REPO_PATH:-$SRC_ROOT/fips}"
+GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\fips}"
+GUEST_FIPS_BARE_REPO="${NVPN_WINDOWS_FIPS_GIT_BARE_PATH:-${GUEST_FIPS_REPO}.git}"
 CDK_SPILMAN_REPO="${NVPN_WINDOWS_CDK_SPILMAN_REPO_PATH:-$SRC_ROOT/cashu_spilman_channels}"
 
 run_ps() {
@@ -52,10 +54,14 @@ make_sync_commit() {
   local tmp_index
   local tree
   local parent
+  local source_epoch
   git_dir="$(git -C "$repo_dir" rev-parse --path-format=absolute --git-dir)"
   tmp_index="$(mktemp "$git_dir/windows-vm-index.XXXXXX")"
   (
     export GIT_INDEX_FILE="$tmp_index"
+    source_epoch="$(git -C "$repo_dir" log -1 --format=%ct HEAD)"
+    export GIT_AUTHOR_DATE="@$source_epoch"
+    export GIT_COMMITTER_DATE="@$source_epoch"
     git -C "$repo_dir" read-tree HEAD
     git -C "$repo_dir" add -A
     tree="$(git -C "$repo_dir" write-tree)"
@@ -160,7 +166,7 @@ case "${NVPN_WINDOWS_SYNC_PATH_DEPS:-1}" in
   *)
     sync_repo "cashu-service" "$SRC_ROOT/cashu-service" "C:\\src\\cashu-service" "C:\\src\\cashu-service.git" "refs/heads/codex/windows-vm-sync-cashu-service"
     sync_repo "cashu_spilman_channels" "$CDK_SPILMAN_REPO" "C:\\src\\cashu_spilman_channels" "C:\\src\\cashu_spilman_channels.git" "refs/heads/codex/windows-vm-sync-cashu-spilman-channels"
-    sync_repo "fips" "$FIPS_REPO" "C:\\src\\fips" "C:\\src\\fips.git" "refs/heads/codex/windows-vm-sync-fips"
+    sync_repo "fips" "$FIPS_REPO" "$GUEST_FIPS_REPO" "$GUEST_FIPS_BARE_REPO" "refs/heads/codex/windows-vm-sync-fips"
     sync_repo "hashtree" "$SRC_ROOT/hashtree" "C:\\src\\hashtree" "C:\\src\\hashtree.git" "refs/heads/codex/windows-vm-sync-hashtree"
     ;;
 esac

@@ -45,10 +45,13 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
         mut last_log_compact_check,
         mut last_state_persisted_at,
         daemon_state_persist_interval,
-        mut platform_network_event_pending,
-        mut platform_network_event_suppressed_until,
+        platform_network_event_pending: mut network_event_pending,
+        platform_network_settle_rechecks_remaining: mut network_settle_rechecks,
         supervised_service_executable,
     } = loop_state;
+    let mut last_network_sample_diagnostic = String::new();
+    let mut network_refresh_attempt: Option<PlatformNetworkRefreshAttempt> = None;
+    let mut network_refresh_terminal_error = None;
     #[cfg(feature = "paid-exit")]
     let (mut paid_exit_spilman_receiver, mut paid_exit_spilman_receiver_error) =
         try_load_paid_exit_spilman_receiver(&config_path, &app.paid_exit).await;
@@ -69,17 +72,42 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     #[cfg(not(unix))]
     let _join_request_ipc_keepalive = join_request_ipc_tx;
     loop {
+        let background_ready =
+            platform_network_background_maintenance_enabled(&intervals.network_deadline);
         tokio::select! {
+            biased;
             _ = tokio::signal::ctrl_c() => {
                 break;
             }
             _ = &mut terminate_wait => {
                 break;
             }
+            platform_network_change = recv_platform_network_change(&mut platform_network_change_rx),
+                if platform_network_event_receive_enabled(
+                    network_event_pending,
+                    network_settle_rechecks,
+                    &intervals.network_deadline,
+                ) => {
+                if platform_network_change.is_none() {
+                    platform_network_change_rx = None;
+                    continue;
+                }
+                drain_platform_network_changes(&mut platform_network_change_rx);
+                network_event_pending = true;
+                last_network_sample_diagnostic.clear();
+                eprintln!(
+                    "daemon: platform network change event; sampling physical route; received_unix_ms={}",
+                    daemon_wall_clock_unix_milliseconds()
+                );
+                schedule_platform_network_event_sampling(
+                    &mut intervals.network_deadline,
+                    &mut network_settle_rechecks,
+                );
+            }
             Some(request) = join_request_ipc_rx.recv() => {
                 respond_to_join_request(&mut app, request);
             }
-            _ = announce_interval.tick() => {
+            _ = announce_interval.tick(), if background_ready => {
                 if let Some(runtime) = fips_tunnel_runtime.as_ref() {
                     if let Err(error) = publish_fips_active_network_roster(
                         runtime,
@@ -94,7 +122,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     }
                 }
             }
-            _ = recent_peer_refresh_interval.tick() => {
+            _ = recent_peer_refresh_interval.tick(), if background_ready => {
                 if let Some(runtime) = fips_tunnel_runtime.as_ref() {
                     update_recent_peers_from_runtime(
                         runtime,
@@ -114,7 +142,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     .await;
                 }
             }
-            _ = intervals.tunnel_heartbeat.tick() => {
+            _ = intervals.tunnel_heartbeat.tick(), if background_ready => {
                 if observe_wall_time_jump(
                     &mut last_runtime_heartbeat_at,
                     unix_timestamp(),
@@ -159,54 +187,64 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     continue;
                 }
             }
-            platform_network_change = recv_platform_network_change(&mut platform_network_change_rx) => {
-                if platform_network_change.is_none() {
-                    platform_network_change_rx = None;
-                    continue;
-                }
-                drain_platform_network_changes(&mut platform_network_change_rx);
-                if reschedule_suppressed_platform_network_event(
-                    &mut intervals.network,
-                    platform_network_event_suppressed_until,
-                ) {
-                    continue;
-                }
-                platform_network_event_pending = true;
-                intervals.network.reset_after(Duration::from_millis(
-                    DAEMON_NETWORK_EVENT_DEBOUNCE_MILLIS,
-                ));
-            }
-            _ = intervals.network.tick() => {
+            network_trigger = next_daemon_network_trigger(
+                &mut intervals.network_deadline,
+                &mut intervals.network,
+            ) => {
+                let event_driven_sample = daemon_network_trigger_is_event_driven(
+                    network_trigger,
+                    intervals.runtime_resume_pending,
+                );
+                drain_platform_network_changes_for_sample(
+                    &mut platform_network_change_rx,
+                    event_driven_sample,
+                );
                 let now = unix_timestamp();
                 let resumed_after_sleep = std::mem::take(&mut intervals.runtime_resume_pending);
                 if resumed_after_sleep {
                     eprintln!("daemon: sleep/wake detected; refreshing FIPS endpoint state");
                 }
+                let wireguard_exit_interface =
+                    (app.wireguard_exit.enabled && app.wireguard_exit.configured())
+                        .then_some(app.wireguard_exit.interface.trim());
+                let sampled_network = capture_network_snapshot_for_daemon(
+                    &iface,
+                    wireguard_exit_interface,
+                )
+                .await;
+                log_event_driven_network_sample(
+                    event_driven_sample,
+                    &sampled_network,
+                    &mut last_network_sample_diagnostic,
+                );
                 let latest_snapshot = prefer_nonself_tunnel_snapshot(
                     &tunnel_runtime,
-                    (app.wireguard_exit.enabled && app.wireguard_exit.configured())
-                        .then_some(app.wireguard_exit.interface.trim()),
+                    wireguard_exit_interface,
                     (app.wireguard_exit.enabled && app.wireguard_exit.configured())
                         .then(|| {
                             strip_cidr(&app.wireguard_exit.address)
                                 .parse::<Ipv4Addr>()
                                 .ok()
-                        })
+                    })
                         .flatten(),
                     &network_snapshot,
-                    capture_network_snapshot_for_daemon().await,
+                    sampled_network.snapshot,
                 );
+                if network_refresh_attempt.as_ref().is_some_and(|attempt| {
+                    attempt.is_superseded_by(&latest_snapshot, resumed_after_sleep)
+                }) {
+                    eprintln!("daemon: physical route changed during staged refresh");
+                    network_refresh_attempt = None;
+                }
                 let network_changed = latest_snapshot.changed_since(&network_snapshot);
-                let platform_network_event = std::mem::take(&mut platform_network_event_pending);
+                let platform_network_event = network_event_pending;
+                network_event_pending = false;
                 let runtime_listen_port =
                     tunnel_runtime.active_listen_port.unwrap_or(app.node.listen_port);
                 let vpn_active = daemon_vpn_active(vpn_enabled, expected_peers);
-                let endpoint_changed = if network_changed {
-                    network_snapshot = latest_snapshot.clone();
-                    network_changed_at = Some(unix_timestamp());
-                    vpn_active
-                } else if resumed_after_sleep {
-                    network_changed_at = Some(now);
+                let endpoint_changed = if network_refresh_attempt.is_some() {
+                    false
+                } else if network_changed || resumed_after_sleep {
                     vpn_active
                 } else if vpn_active {
                     match port_mapping_runtime
@@ -222,35 +260,34 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 } else {
                     false
                 };
-                if !platform_network_event
+                if network_refresh_attempt.is_none()
+                    && !platform_network_event
                     && !network_changed
                     && !endpoint_changed
                     && !resumed_after_sleep
                 {
-                    continue;
-                }
-                let fips_refresh = fips_link_event_refresh(
-                    platform_network_event,
-                    network_changed,
-                    endpoint_changed,
-                    resumed_after_sleep,
-                );
-                if matches!(fips_refresh, FipsLinkEventRefresh::None) {
-                    // The kernel may notify us before DHCP and interface state
-                    // settle. Re-sample once, but do not turn an unchanged
-                    // snapshot into an all-peer recovery operation.
                     schedule_platform_network_settle_recheck(
-                        &mut intervals.network,
-                        platform_network_event,
+                        &mut intervals.network_deadline,
+                        &mut network_settle_rechecks,
                     );
                     continue;
                 }
-                if platform_network_event
-                    || network_changed
-                    || resumed_after_sleep
-                    || endpoint_changed
-                {
-                    let refresh_reason = if network_changed {
+                if network_refresh_attempt.is_none() {
+                    let refresh = fips_link_event_refresh(
+                        platform_network_event,
+                        network_changed,
+                        endpoint_changed,
+                        resumed_after_sleep,
+                    );
+                    if matches!(refresh, FipsLinkEventRefresh::None) {
+                        schedule_platform_network_settle_recheck(
+                            &mut intervals.network_deadline,
+                            &mut network_settle_rechecks,
+                        );
+                        continue;
+                    }
+                    network_settle_rechecks = 0;
+                    let reason = if network_changed {
                         "network change"
                     } else if resumed_after_sleep {
                         "sleep/wake"
@@ -258,156 +295,149 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         "endpoint change"
                     };
                     if network_changed {
-                        network_snapshot = latest_snapshot;
-                        network_changed_at = Some(unix_timestamp());
                         eprintln!("daemon: network change detected; refreshing FIPS endpoint state");
                     } else if resumed_after_sleep {
-                        network_snapshot = latest_snapshot;
-                        network_changed_at = Some(now);
                         eprintln!("daemon: sleep/wake detected; refreshing FIPS endpoint state");
                     } else {
                         eprintln!("daemon: endpoint changed; refreshing FIPS endpoint state");
                     }
-                    let fips_result = match fips_refresh {
-                        FipsLinkEventRefresh::RestartEndpoint
+                    network_refresh_attempt =
+                        Some(PlatformNetworkRefreshAttempt::new(latest_snapshot, refresh, reason));
+                }
+                let (fips_refresh, refresh_reason, target_snapshot, needs_carrier_rebind) =
+                    network_refresh_attempt
+                        .as_ref()
+                        .expect("network refresh attempt created above")
+                        .parameters(fips_tunnel_runtime.is_some());
+                if needs_carrier_rebind {
+                    let rebind_result = rebind_fips_tunnel_runtime_underlay_after_link_event(
+                        &fips_tunnel_runtime,
+                        target_snapshot.default_interface.as_deref(),
+                        refresh_reason,
+                    )
+                    .await;
+                    if let Err(error) = rebind_result {
+                        if !stage_platform_network_refresh_failure(
+                            &mut vpn_status,
+                            &mut network_refresh_terminal_error,
+                            &mut network_refresh_attempt,
+                            &mut intervals.network_deadline,
+                            error,
+                            "FIPS underlay carrier rebind failed",
+                            "FIPS carrier rebind retry budget exhausted",
+                        ) {
+                            break;
+                        }
+                        continue;
+                    }
+                    network_refresh_attempt
+                        .as_mut()
+                        .expect("active carrier rebind attempt")
+                        .mark_carrier_rebound();
+                }
+                if target_snapshot != network_snapshot
+                    || matches!(fips_refresh, FipsLinkEventRefresh::RestartEndpoint)
+                {
+                    network_snapshot = target_snapshot;
+                    network_changed_at = Some(unix_timestamp());
+                }
+                let fips_result = if fips_tunnel_runtime.is_some()
+                    || fips_private_runtime_active(&app, vpn_enabled, expected_peers)
+                {
+                    refresh_fips_tunnel_runtime_after_link_event(
+                        &mut fips_tunnel_runtime,
+                        FipsRestartContext {
+                            app: &app,
+                            config_path: &config_path,
+                            network_id: &network_id,
+                            fallback_iface: &iface,
+                            underlay_interface: network_snapshot.default_interface.as_deref(),
+                            underlay_interface_mtu: network_snapshot.default_interface_mtu,
+                            own_pubkey: own_pubkey.as_deref(),
+                            recent_peers: Some(&recent_peers),
+                            ethernet_underlay: ethernet_underlay.as_ref(),
+                            last_endpoint_peer_signature: &mut last_fips_endpoint_peer_signature,
+                        },
+                        refresh_reason,
+                        fips_refresh,
+                    )
+                    .await
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = fips_result {
+                    if !stage_platform_network_refresh_failure(
+                        &mut vpn_status,
+                        &mut network_refresh_terminal_error,
+                        &mut network_refresh_attempt,
+                        &mut intervals.network_deadline,
+                        error,
+                        "network route refresh failed",
+                        "FIPS route refresh retry budget exhausted",
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
+                network_refresh_attempt = None;
+                vpn_status = complete_fips_link_event_refresh(FipsLinkRefreshCompletion {
+                    runtime: fips_tunnel_runtime.as_ref(),
+                    app: &app,
+                    network_id: &network_id,
+                    own_pubkey: own_pubkey.as_deref(),
+                    recent_peers: &mut recent_peers,
+                    recent_peers_path: &recent_peers_path,
+                    last_endpoint_peer_signature: &mut last_fips_endpoint_peer_signature,
+                    last_refresh_signature: &mut last_recent_peer_refresh_signature,
+                    last_cache_persisted_at: &mut last_recent_peer_cache_persisted_at,
+                    vpn_enabled,
+                    expected_peers,
+                    now,
+                })
+                .await;
+                if matches!(
+                    fips_refresh,
+                    FipsLinkEventRefresh::RestartEndpoint
                         | FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
-                        | FipsLinkEventRefresh::UpdatePeersAndRefreshPaths => {
-                            if fips_tunnel_runtime.is_some()
-                                || fips_private_runtime_active(&app, vpn_enabled, expected_peers)
-                            {
-                                refresh_fips_tunnel_runtime_after_link_event(
-                                    &mut fips_tunnel_runtime,
-                                    FipsRestartContext {
-                                        app: &app,
-                                        config_path: &config_path,
-                                        network_id: &network_id,
-                                        fallback_iface: &iface,
-                                        underlay_interface: network_snapshot
-                                            .default_interface
-                                            .as_deref(),
-                                        underlay_interface_mtu: network_snapshot
-                                            .default_interface_mtu,
-                                        own_pubkey: own_pubkey.as_deref(),
-                                        // Authenticated dial hints retained across link churn.
-                                        recent_peers: Some(&recent_peers),
-                                        ethernet_underlay: ethernet_underlay.as_ref(),
-                                        last_endpoint_peer_signature:
-                                            &mut last_fips_endpoint_peer_signature,
-                                    },
-                                    refresh_reason,
-                                    fips_refresh,
-                                )
-                                .await
-                            } else {
-                                Ok(())
-                            }
-                        }
-                        FipsLinkEventRefresh::None => Ok(()),
-                    };
-                    if let Err(error) = fips_result {
-                        vpn_status = format!("Network route refresh failed ({error})");
+                ) {
+                    if vpn_active {
+                        refresh_port_mapping(
+                            &app,
+                            &network_snapshot,
+                            runtime_listen_port,
+                            &mut port_mapping_runtime,
+                        )
+                        .await;
                     } else {
-                        if !matches!(fips_refresh, FipsLinkEventRefresh::None) {
-                            platform_network_event_pending = false;
-                            drain_platform_network_changes(&mut platform_network_change_rx);
-                            platform_network_event_suppressed_until =
-                                Some(
-                                    Instant::now()
-                                        + Duration::from_secs(
-                                            DAEMON_NETWORK_SETTLE_RECHECK_SECS,
-                                        ),
-                                );
-                            schedule_platform_network_settle_recheck(
-                                &mut intervals.network,
-                                platform_network_event,
-                            );
-                        }
-                        if let Some(runtime) = fips_tunnel_runtime.as_ref() {
-                            if let Err(error) = runtime.ping_peers(&network_id, now).await {
-                                eprintln!("fips: peer ping failed after network refresh: {error}");
-                            }
-                            if let Err(error) = runtime.refresh_link_statuses().await {
-                                eprintln!(
-                                    "fips: peer link snapshot failed after network refresh: {error}"
-                                );
-                            }
-                            update_recent_peers_from_runtime(
-                                runtime,
-                                &app,
-                                &network_id,
-                                own_pubkey.as_deref(),
-                                RecentPeerRefresh {
-                                    recent_peers: &mut recent_peers,
-                                    recent_peers_path: &recent_peers_path,
-                                    last_endpoint_peer_signature:
-                                        &mut last_fips_endpoint_peer_signature,
-                                    last_refresh_signature:
-                                        &mut last_recent_peer_refresh_signature,
-                                    last_cache_persisted_at:
-                                        &mut last_recent_peer_cache_persisted_at,
-                                    force_rebuild: true,
-                                },
-                                now,
-                            )
-                            .await;
-                        }
-                        vpn_status = if daemon_vpn_active(vpn_enabled, expected_peers) {
-                            "Connected (network refresh)".to_string()
-                        } else {
-                            daemon_vpn_idle_status(
-                                vpn_enabled,
-                                expected_peers,
-                                app.join_requests_enabled(),
-                            )
-                            .to_string()
-                        };
+                        port_mapping_runtime.stop().await;
                     }
-                    if let Some(runtime) = fips_tunnel_runtime.as_ref()
-                        && let Err(error) = broadcast_local_fips_capabilities(runtime, &app).await
-                    {
-                        eprintln!("fips: capabilities broadcast failed after network refresh: {error}");
-                    }
-                    if network_changed || resumed_after_sleep {
-                        // Carrier rebinding is the outage-critical operation. NAT
-                        // discovery and captive-portal probes can each consume the
-                        // full network timeout, so run them only after FIPS is
-                        // already moving traffic on the replacement underlay.
-                        if vpn_active {
-                            refresh_port_mapping(
-                                &app,
-                                &network_snapshot,
-                                runtime_listen_port,
-                                &mut port_mapping_runtime,
-                            )
-                            .await;
-                        } else {
-                            port_mapping_runtime.stop().await;
-                        }
-                        captive_portal = detect_captive_portal(timeout).await;
-                    }
+                    captive_portal = detect_captive_portal(timeout).await;
                 }
             }
             _ = intervals.state.tick() => {
                 #[cfg(feature = "paid-exit")]
                 let pending_control_request =
-                    paid_exit_buyer_refunds.before_daemon_maintenance(&config_path);
+                    paid_exit_buyer_refunds.before_tick(&config_path, background_ready);
                 #[cfg(not(feature = "paid-exit"))]
                 let pending_control_request = take_daemon_control_request(&config_path);
-                if let Err(error) = app.ensure_pending_nostr_join_request(unix_timestamp()) {
-                    eprintln!("daemon: failed to rotate expired join request: {error}");
-                }
-                if daemon_log_compact_check_due(&mut last_log_compact_check)
-                    && let Err(error) = compact_daemon_log_if_needed(&config_path)
-                {
-                    eprintln!("daemon: failed to compact service log: {error}");
-                }
-                #[cfg(feature = "paid-exit")]
-                match reconcile_automatic_paid_exit_selection(
-                    &mut automatic_paid_exit,
-                    &mut app,
-                    &config_path,
-                    unix_timestamp(),
-                ) {
+                let state_background_ready =
+                    background_ready && pending_control_request.is_none();
+                if state_background_ready {
+                    if let Err(error) = app.ensure_pending_nostr_join_request(unix_timestamp()) {
+                        eprintln!("daemon: failed to rotate expired join request: {error}");
+                    }
+                    if daemon_log_compact_check_due(&mut last_log_compact_check)
+                        && let Err(error) = compact_daemon_log_if_needed(&config_path)
+                    {
+                        eprintln!("daemon: failed to compact service log: {error}");
+                    }
+                    #[cfg(feature = "paid-exit")]
+                    match reconcile_automatic_paid_exit_selection(
+                        &mut automatic_paid_exit,
+                        &mut app,
+                        &config_path,
+                        unix_timestamp(),
+                    ) {
                     Ok(true) => {
                         if let Err(error) = sync_fips_private_runtime(
                             &mut fips_tunnel_runtime,
@@ -642,27 +672,28 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         }
                     }
                 }
-                #[cfg(feature = "paid-exit")]
-                if automatic_paid_exit_route_changed
-                    && let Err(error) = sync_fips_private_runtime(
-                        &mut fips_tunnel_runtime,
-                        SyncFipsPrivateRuntimeContext {
-                            app: &app,
-                            config_path: &config_path,
-                            network_id: &network_id,
-                            iface: &iface,
-                            underlay_interface: network_snapshot.default_interface.as_deref(),
-                            underlay_interface_mtu: network_snapshot.default_interface_mtu,
-                            own_pubkey: own_pubkey.as_deref(),
-                            recent_peers: Some(&recent_peers),
-                            ethernet_underlay: ethernet_underlay.as_ref(),
-                            vpn_enabled,
-                            expected_peers,
-                        },
-                    )
-                    .await
-                {
-                    vpn_status = format!("automatic paid-exit failover failed ({error})");
+                    #[cfg(feature = "paid-exit")]
+                    if automatic_paid_exit_route_changed
+                        && let Err(error) = sync_fips_private_runtime(
+                            &mut fips_tunnel_runtime,
+                            SyncFipsPrivateRuntimeContext {
+                                app: &app,
+                                config_path: &config_path,
+                                network_id: &network_id,
+                                iface: &iface,
+                                underlay_interface: network_snapshot.default_interface.as_deref(),
+                                underlay_interface_mtu: network_snapshot.default_interface_mtu,
+                                own_pubkey: own_pubkey.as_deref(),
+                                recent_peers: Some(&recent_peers),
+                                ethernet_underlay: ethernet_underlay.as_ref(),
+                                vpn_enabled,
+                                expected_peers,
+                            },
+                        )
+                        .await
+                    {
+                        vpn_status = format!("automatic paid-exit failover failed ({error})");
+                    }
                 }
                 if let Some(request) = pending_control_request {
                     let publish_fips_roster_after_control =
@@ -897,41 +928,31 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         )
                         .await;
                     }
-                    let fips_peer_statuses = current_fips_peer_statuses!(fips_tunnel_runtime);
-                    let fips_relay_statuses =
-                        current_fips_relay_statuses!(&fips_tunnel_runtime).await;
-                    let fips_endpoint_peer_states =
-                        current_fips_endpoint_peer_states!(&last_fips_endpoint_peer_signature);
-                    let fips_advertised_routes =
-                        current_fips_advertised_routes!(fips_tunnel_runtime, &app);
-                    let network = network_snapshot.summary(network_changed_at, captive_portal);
-                    let port_mapping = port_mapping_runtime.status();
-                    if persist_daemon_runtime_and_cleanup_state_async(
-                        &state_file,
-                        &config_path,
-                        DaemonRuntimeStateInput {
-                            app: &app,
-                            vpn_enabled,
-                            vpn_active: daemon_vpn_active(vpn_enabled, expected_peers),
-                            expected_peers,
-                            tunnel_runtime: &tunnel_runtime,
-                            fips_peer_statuses: &fips_peer_statuses,
-                            fips_relay_statuses: &fips_relay_statuses,
-                            fips_endpoint_peers: &fips_endpoint_peer_states,
-                            advertised_routes_by_participant: &fips_advertised_routes,
-                            vpn_status: &vpn_status,
-                            network: &network,
-                            port_mapping: &port_mapping,
-                        },
-                    )
+                    if persist_current_daemon_state(DaemonStatePersistContext {
+                        state_file: &state_file,
+                        config_path: &config_path,
+                        app: &app,
+                        vpn_enabled,
+                        expected_peers,
+                        tunnel_runtime: &tunnel_runtime,
+                        fips_tunnel_runtime: &fips_tunnel_runtime,
+                        endpoint_peer_signature: &last_fips_endpoint_peer_signature,
+                        vpn_status: &vpn_status,
+                        network_snapshot: &network_snapshot,
+                        network_changed_at,
+                        captive_portal,
+                        port_mapping_runtime: &port_mapping_runtime,
+                    })
                     .await
                     {
                         last_state_persisted_at = Instant::now();
                     }
                 }
-                if daemon_service_supervisor_requests_restart(
-                    supervised_service_executable.as_ref(),
-                ) {
+                if !state_background_ready {
+                    continue;
+                }
+                let supervised_service = supervised_service_executable.as_ref();
+                if daemon_service_supervisor_requests_restart(supervised_service) {
                     break;
                 }
                 if vpn_status == "Connected (network refresh)"
@@ -939,43 +960,30 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 {
                     vpn_status = "VPN on".to_string();
                 }
-                if last_state_persisted_at.elapsed() >= daemon_state_persist_interval {
-                    let fips_peer_statuses = current_fips_peer_statuses!(fips_tunnel_runtime);
-                    let fips_relay_statuses =
-                        current_fips_relay_statuses!(&fips_tunnel_runtime).await;
-                    let fips_endpoint_peer_states =
-                        current_fips_endpoint_peer_states!(&last_fips_endpoint_peer_signature);
-                    let fips_advertised_routes =
-                        current_fips_advertised_routes!(fips_tunnel_runtime, &app);
-                    let network = network_snapshot.summary(network_changed_at, captive_portal);
-                    let port_mapping = port_mapping_runtime.status();
-                    if persist_daemon_runtime_and_cleanup_state_async(
-                        &state_file,
-                        &config_path,
-                        DaemonRuntimeStateInput {
-                            app: &app,
-                            vpn_enabled,
-                            vpn_active: daemon_vpn_active(vpn_enabled, expected_peers),
-                            expected_peers,
-                            tunnel_runtime: &tunnel_runtime,
-                            fips_peer_statuses: &fips_peer_statuses,
-                            fips_relay_statuses: &fips_relay_statuses,
-                            fips_endpoint_peers: &fips_endpoint_peer_states,
-                            advertised_routes_by_participant: &fips_advertised_routes,
-                            vpn_status: &vpn_status,
-                            network: &network,
-                            port_mapping: &port_mapping,
-                        },
-                    )
+                if last_state_persisted_at.elapsed() >= daemon_state_persist_interval
+                    && persist_current_daemon_state(DaemonStatePersistContext {
+                        state_file: &state_file,
+                        config_path: &config_path,
+                        app: &app,
+                        vpn_enabled,
+                        expected_peers,
+                        tunnel_runtime: &tunnel_runtime,
+                        fips_tunnel_runtime: &fips_tunnel_runtime,
+                        endpoint_peer_signature: &last_fips_endpoint_peer_signature,
+                        vpn_status: &vpn_status,
+                        network_snapshot: &network_snapshot,
+                        network_changed_at,
+                        captive_portal,
+                        port_mapping_runtime: &port_mapping_runtime,
+                    })
                     .await
-                    {
-                        last_state_persisted_at = Instant::now();
-                    }
+                {
+                    last_state_persisted_at = Instant::now();
                 }
             }
         }
     }
-    shutdown_daemon_vpn(DaemonVpnShutdown {
+    let shutdown_result = shutdown_daemon_vpn(DaemonVpnShutdown {
         port_mapping_runtime: &mut port_mapping_runtime,
         fips_tunnel_runtime,
         tunnel_runtime: &mut tunnel_runtime,
@@ -987,5 +995,6 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
         network_changed_at,
         captive_portal,
     })
-    .await
+    .await;
+    finish_daemon_vpn_shutdown(network_refresh_terminal_error, shutdown_result)
 }

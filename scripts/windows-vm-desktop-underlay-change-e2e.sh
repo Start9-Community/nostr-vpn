@@ -1,0 +1,963 @@
+#!/usr/bin/env bash
+# Real Windows VM network-change gate.
+#
+# The virtualization host creates a transient second NAT network, attaches one
+# second NIC to the running guest, and then physically cuts/restores the
+# original virtual link. A production nvpn/FIPS peer on the host provides a
+# selected exit, resolver, and continuous reverse-direction payload. The guest
+# simultaneously sends continuous payload through its shipped Wintun/FIPS
+# daemon and requires in-place carrier recovery within four seconds.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HYPERVISOR_SSH="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:?set NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH}"
+VM_NAME="${NVPN_WINDOWS_UNDERLAY_VM_NAME:-${NVPN_WINDOWS_VM_NAME:-}}"
+[[ -n "$VM_NAME" ]] || {
+  echo "set NVPN_WINDOWS_UNDERLAY_VM_NAME" >&2
+  exit 2
+}
+WINDOWS_SSH="${NVPN_WINDOWS_SSH_HOST:?set NVPN_WINDOWS_SSH_HOST}"
+PRIMARY_PROXY="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
+WINDOWS_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
+GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\nostr-vpn-release-gate}"
+GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\fips-release-gate}"
+GUEST_BINARY="${NVPN_WINDOWS_UNDERLAY_BINARY:-$GUEST_REPO\\target\\release\\nvpn.exe}"
+LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
+EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
+FIPS_SOURCE_REVISION=""
+HYPERVISOR_SRC_ROOT="${NVPN_WINDOWS_UNDERLAY_HYPERVISOR_SRC_ROOT:-${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SRC_ROOT:-src/nvpn-desktop-underlay/windows-peer}}"
+HYPERVISOR_REPO="$HYPERVISOR_SRC_ROOT/nostr-vpn-release-gate"
+HYPERVISOR_BINARY="$HYPERVISOR_REPO/target/release/nvpn"
+HYPERVISOR_FIPS_REPO="$HYPERVISOR_SRC_ROOT/fips-release-gate"
+RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
+NETWORK_ID="${NVPN_WINDOWS_UNDERLAY_NETWORK_ID:-desktop-underlay-windows-release-gate}"
+SECONDARY_GATEWAY="${NVPN_WINDOWS_UNDERLAY_SECONDARY_GATEWAY:-172.31.253.1}"
+SECONDARY_ADDRESS="${NVPN_WINDOWS_UNDERLAY_SECONDARY_ADDRESS:-172.31.253.10}"
+SECONDARY_NETMASK="${NVPN_WINDOWS_UNDERLAY_SECONDARY_NETMASK:-255.255.255.0}"
+SECONDARY_PREFIX="${NVPN_WINDOWS_UNDERLAY_SECONDARY_PREFIX:-24}"
+FIXTURE_DNS_NAME="${NVPN_DESKTOP_UNDERLAY_FIXTURE_DNS_NAME:-underlay-gate.nvpn.test}"
+PROBE_URL="${NVPN_DESKTOP_UNDERLAY_PROBE_URL:-https://example.com/}"
+RUN_TOKEN="windows-$$-$RANDOM"
+NETWORK_NAME="nvpn-underlay-$RUN_TOKEN"
+PEER_STATE_DIR="/tmp/nvpn-underlay-peer-$RUN_TOKEN"
+GUEST_STATE_DIR="C:\\nvpn-underlay-$RUN_TOKEN"
+GUEST_CONFIG="$GUEST_STATE_DIR\\config.toml"
+PEER_TUN_IFACE="nvup${RANDOM}"
+PEER_LISTEN_PORT="$((46000 + RANDOM % 1000))"
+TARGET_LISTEN_PORT="$((47000 + RANDOM % 1000))"
+WG_LISTEN_PORT="$((51000 + RANDOM % 1000))"
+WG_PEER_IFACE="nvwg${RANDOM}"
+WG_CLIENT_ADDRESS="${NVPN_WINDOWS_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.1.2/32}"
+WG_SERVER_ADDRESS="${NVPN_WINDOWS_UNDERLAY_WG_SERVER_ADDRESS:-10.232.1.1/24}"
+WG_TARGET_INTERFACE="${NVPN_WINDOWS_UNDERLAY_WG_INTERFACE:-nvpn-wg-exit}"
+COUNTER_CHAIN="nvu-$((RANDOM % 100000))"
+PEER_NETNS="nvw$((RANDOM % 100000))"
+PEER_HOST_VETH="nvwh$((RANDOM % 100000))"
+PEER_NS_VETH="nvwn0"
+PEER_NAMESPACE_HOST_ADDRESS="${NVPN_WINDOWS_UNDERLAY_PEER_NAMESPACE_HOST_ADDRESS:-10.231.253.1}"
+PEER_ENDPOINT_HOST="${NVPN_WINDOWS_UNDERLAY_PEER_NAMESPACE_ADDRESS:-10.231.253.2}"
+PEER_NAMESPACE_PREFIX="${NVPN_WINDOWS_UNDERLAY_PEER_NAMESPACE_PREFIX:-30}"
+PEER_FORWARD_CHAIN="nvf$((RANDOM % 100000))"
+PEER_NAT_CHAIN="nvn$((RANDOM % 100000))"
+ARTIFACT_DIR="${NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR:-$ROOT/artifacts/desktop-underlay/windows-$RUN_TOKEN}"
+SECONDARY_MAC=""
+PRIMARY_MAC=""
+PRIMARY_IFACE=""
+PRIMARY_SOURCE=""
+PRIMARY_ADDRESS=""
+HYPERVISOR_UPLINK=""
+SECONDARY_PROXY=""
+WINDOWS_RUN_PID=""
+NETWORK_CREATED=0
+NIC_ATTACHED=0
+PEER_INITIALIZED=0
+PEER_NAMESPACE_ATTEMPTED=0
+TARGET_WG_PUBLIC_KEY=""
+TARGET_PRIMARY_GATEWAY=""
+TARGET_PRIMARY_ADDRESS=""
+WG_SERVER_PUBLIC_KEY=""
+WG_ENDPOINT=""
+
+mkdir -p "$ARTIFACT_DIR"
+
+source "$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
+current_tree() {
+  local repo="${1:-$ROOT}"
+  local git_dir tmp_index tree
+  git_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-dir)"
+  tmp_index="$(mktemp "$git_dir/desktop-underlay-index.XXXXXX")"
+  (
+    export GIT_INDEX_FILE="$tmp_index"
+    git -C "$repo" read-tree HEAD
+    git -C "$repo" add -A
+    git -C "$repo" write-tree
+  )
+  rm -f "$tmp_index"
+}
+
+resolve_expected_fips_revision() {
+  local local_revision
+  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
+    [[ -z "$(git -C "$LOCAL_FIPS_REPO" status --porcelain --untracked-files=all)" ]] \
+      || fail "the exact FIPS release-gate checkout must be committed and clean"
+    local_revision="$(git -C "$LOCAL_FIPS_REPO" rev-parse HEAD)"
+    if [[ -n "$EXPECTED_FIPS_REV" \
+      && "$local_revision" != "$EXPECTED_FIPS_REV"* \
+      && "$EXPECTED_FIPS_REV" != "$local_revision"* ]]
+    then
+      fail "NVPN_EXPECTED_FIPS_REV differs from the local FIPS candidate"
+    fi
+    FIPS_SOURCE_REVISION="$local_revision"
+    EXPECTED_FIPS_REV="${local_revision:0:10}"
+  else
+    EXPECTED_FIPS_REV="${EXPECTED_FIPS_REV:0:10}"
+  fi
+  [[ "$EXPECTED_FIPS_REV" =~ ^[0-9a-f]{10}$ ]] \
+    || fail "set NVPN_EXPECTED_FIPS_REV to the intended FIPS Git revision"
+}
+
+sync_and_build_candidates() {
+  local expected_tree candidate_source_date_epoch windows_tree hypervisor_tree
+  local expected_fips_tree="" windows_fips_tree="" hypervisor_fips_tree=""
+  expected_tree="$(current_tree)"
+  candidate_source_date_epoch="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
+  [[ "$candidate_source_date_epoch" =~ ^[0-9]+$ ]] \
+    || fail "could not derive deterministic candidate source date"
+  {
+    printf 'nvpn_base_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"
+    printf 'nvpn_tree=%s\n' "$expected_tree"
+    printf 'fips_commit=%s\n' "$FIPS_SOURCE_REVISION"
+    if [[ -n "$LOCAL_FIPS_REPO" ]]; then
+      printf 'fips_tree=%s\n' "$(current_tree "$LOCAL_FIPS_REPO")"
+    fi
+  } >"$ARTIFACT_DIR/source-provenance.txt"
+
+  env \
+    NVPN_WINDOWS_SSH_HOST="$WINDOWS_SSH" \
+    NVPN_WINDOWS_SSH_PROXY_COMMAND="$PRIMARY_PROXY" \
+    NVPN_WINDOWS_SSH_JUMP="$WINDOWS_JUMP" \
+    NVPN_WINDOWS_GUEST_REPO_PATH="$GUEST_REPO" \
+    NVPN_WINDOWS_GUEST_FIPS_REPO_PATH="$GUEST_FIPS_REPO" \
+    NVPN_WINDOWS_FIPS_REPO_PATH="${LOCAL_FIPS_REPO:-$ROOT/../fips}" \
+    NVPN_WINDOWS_SYNC_PATH_DEPS="$([[ -n "$LOCAL_FIPS_REPO" ]] && echo 1 || echo 0)" \
+    "$ROOT/scripts/windows-vm-git-sync.sh" "$WINDOWS_SSH"
+
+  env \
+    NVPN_UBUNTU_GUEST_SRC_ROOT="$HYPERVISOR_SRC_ROOT" \
+    "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$HYPERVISOR_SSH"
+  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
+    for crate in fips-core fips-endpoint fips-identity; do
+      [[ -f "$LOCAL_FIPS_REPO/crates/$crate/Cargo.toml" ]] \
+        || fail "NVPN_FIPS_REPO_PATH is missing crates/$crate/Cargo.toml"
+    done
+    expected_fips_tree="$(current_tree "$LOCAL_FIPS_REPO")"
+    env \
+      NVPN_UBUNTU_SSH_PROXY_COMMAND= \
+      NVPN_UBUNTU_SSH_JUMP= \
+      NVPN_UBUNTU_LOCAL_REPO_PATH="$LOCAL_FIPS_REPO" \
+      NVPN_UBUNTU_GUEST_SRC_ROOT="$HYPERVISOR_SRC_ROOT" \
+      NVPN_UBUNTU_GUEST_REPO_NAME=fips-release-gate \
+      NVPN_UBUNTU_REPO_LABEL=fips \
+      NVPN_UBUNTU_GIT_REF=refs/heads/codex/ubuntu-vm-fips-sync \
+      "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$HYPERVISOR_SSH"
+    run_ps_primary \
+      "git -C $(ps_quote "$GUEST_FIPS_REPO") checkout --detach $(ps_quote "$FIPS_SOURCE_REVISION") | Out-Null"
+    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      "git -C '$HYPERVISOR_FIPS_REPO' checkout --detach '$FIPS_SOURCE_REVISION' >/dev/null"
+  fi
+
+  windows_tree="$(run_ps_primary \
+    "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
+    | tr -d '\r' \
+    | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
+  hypervisor_tree="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    "git -C '$HYPERVISOR_REPO' rev-parse 'HEAD^{tree}'")"
+  [[ "$windows_tree" == "$expected_tree" ]] \
+    || fail "Windows candidate tree differs from the release-gate tree"
+  [[ "$hypervisor_tree" == "$expected_tree" ]] \
+    || fail "hypervisor candidate tree differs from the release-gate tree"
+  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
+    windows_fips_tree="$(run_ps_primary \
+      "git -C $(ps_quote "$GUEST_FIPS_REPO") rev-parse 'HEAD^{tree}'" \
+      | tr -d '\r' \
+      | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
+    hypervisor_fips_tree="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      "git -C '$HYPERVISOR_FIPS_REPO' rev-parse 'HEAD^{tree}'")"
+    [[ "$windows_fips_tree" == "$expected_fips_tree" ]] \
+      || fail "Windows FIPS tree differs from the local release-gate tree"
+    [[ "$hypervisor_fips_tree" == "$expected_fips_tree" ]] \
+      || fail "hypervisor FIPS tree differs from the local release-gate tree"
+  fi
+
+  local windows_build_script
+  windows_build_script="\$ErrorActionPreference = 'Stop'
+Set-Location $(ps_quote "$GUEST_REPO")
+\$env:SOURCE_DATE_EPOCH = $(ps_quote "$candidate_source_date_epoch")"
+  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
+    windows_build_script+="
+\$env:NVPN_FIPS_REPO_PATH = $(ps_quote "$GUEST_FIPS_REPO")"
+  fi
+  windows_build_script+="
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration Release -DaemonOnly
+if (\$LASTEXITCODE -ne 0) { throw 'native Windows Release build failed' }"
+  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
+    windows_build_script+="
+\$FipsCargo = ((Resolve-Path $(ps_quote "$GUEST_FIPS_REPO")).Path -replace '\\\\', '/')
+\$MetadataArgs = @(
+  '--config', \"patch.crates-io.fips-core.path='\$FipsCargo/crates/fips-core'\",
+  '--config', \"patch.crates-io.fips-endpoint.path='\$FipsCargo/crates/fips-endpoint'\",
+  '--config', \"patch.crates-io.fips-identity.path='\$FipsCargo/crates/fips-identity'\",
+  'metadata', '--format-version', '1'
+)
+\$Metadata = & cargo @MetadataArgs | ConvertFrom-Json
+if (\$LASTEXITCODE -ne 0) { throw 'Windows local-FIPS metadata failed' }
+\$Expected = (\$FipsCargo + '/').ToLowerInvariant()
+\$FipsPackages = @(\$Metadata.packages | Where-Object {
+  \$_.name -eq 'fips-core' -or \$_.name -eq 'fips-endpoint'
+})
+if (\$FipsPackages.Count -ne 2 -or @(\$FipsPackages | Where-Object {
+  !((((([string]\$_.manifest_path) -replace '\\\\', '/').ToLowerInvariant()).StartsWith(\$Expected)))
+}).Count -ne 0) {
+  throw 'Windows build did not resolve the exact synced local FIPS crates'
+}"
+  fi
+  run_ps_primary "$windows_build_script" \
+    >"$ARTIFACT_DIR/windows-build.log" 2>&1 &
+  local windows_build_pid="$!"
+
+  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+    "$HYPERVISOR_REPO" \
+    "$([[ -n "$LOCAL_FIPS_REPO" ]] && echo "$HYPERVISOR_FIPS_REPO" || true)" \
+    >"$ARTIFACT_DIR/peer-build.log" 2>&1 <<'SH' &
+set -euo pipefail
+repo="$1"
+fips="${2:-}"
+cd "$repo"
+if [[ -n "$fips" ]]; then
+  [[ "$fips" == /* ]] || fips="$HOME/$fips"
+  cargo_args=(
+    --config "patch.crates-io.fips-core.path='$fips/crates/fips-core'"
+    --config "patch.crates-io.fips-endpoint.path='$fips/crates/fips-endpoint'"
+    --config "patch.crates-io.fips-identity.path='$fips/crates/fips-identity'"
+  )
+  cargo "${cargo_args[@]}" metadata --format-version 1 \
+    | jq -e --arg root "$fips/" '
+        [.packages[]
+          | select(.name == "fips-core" or .name == "fips-endpoint")
+          | .manifest_path
+          | startswith($root)]
+        | length == 2 and all
+      ' >/dev/null
+  cargo \
+    "${cargo_args[@]}" \
+    build --release -p nvpn
+else
+  cargo build --release --locked -p nvpn
+fi
+SH
+  local peer_build_pid="$!"
+  local windows_build_failed=0 peer_build_failed=0
+  wait "$windows_build_pid" || windows_build_failed=1
+  wait "$peer_build_pid" || peer_build_failed=1
+  if [[ "$windows_build_failed" == "1" || "$peer_build_failed" == "1" ]]; then
+    tail -n 120 "$ARTIFACT_DIR/windows-build.log" >&2 || true
+    tail -n 120 "$ARTIFACT_DIR/peer-build.log" >&2 || true
+    fail "parallel Windows target or Linux peer build failed"
+  fi
+}
+
+capture_version_receipts() {
+  local expected="(rev $EXPECTED_FIPS_REV)"
+  run_ps_primary \
+    "& $(ps_quote "$GUEST_BINARY") version --verbose" \
+    | tr -d '\r' >"$ARTIFACT_DIR/target-version.txt"
+  ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    "'$HYPERVISOR_BINARY' version --verbose" \
+    >"$ARTIFACT_DIR/peer-version.txt"
+  grep -Fq "$expected" "$ARTIFACT_DIR/target-version.txt" \
+    || fail "Windows target binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
+  grep -Fq "$expected" "$ARTIFACT_DIR/peer-version.txt" \
+    || fail "Windows peer binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
+}
+
+random_mac() {
+  local octets
+  octets="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  printf '52:54:00:%s:%s:%s\n' \
+    "${octets:0:2}" "${octets:2:2}" "${octets:4:2}"
+}
+
+discover_primary_interface() {
+  local row_count rows
+  rows="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    "virsh domiflist '$VM_NAME' | awk '\$2 == \"network\" { print \$1 \"|\" \$3 \"|\" \$5 }'")"
+  row_count="$(grep -c . <<<"$rows" || true)"
+  [[ "$row_count" == "1" ]] \
+    || fail "Windows VM must begin with exactly one libvirt network interface"
+  IFS='|' read -r PRIMARY_IFACE PRIMARY_SOURCE PRIMARY_MAC <<<"$rows"
+  [[ -n "$PRIMARY_IFACE" && -n "$PRIMARY_SOURCE" && -n "$PRIMARY_MAC" ]]
+
+  PRIMARY_ADDRESS="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    "virsh domifaddr '$VM_NAME' --source lease | awk '\$2 == \"$PRIMARY_MAC\" && \$3 == \"ipv4\" { sub(/\\/.*/, \"\", \$4); print \$4; exit }'")"
+  [[ -n "$PRIMARY_ADDRESS" ]] \
+    || fail "could not resolve the Windows VM primary address from libvirt"
+  HYPERVISOR_UPLINK="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    "ip -j -4 route get 1.1.1.1 | jq -r '.[0].dev'")"
+  [[ -n "$HYPERVISOR_UPLINK" ]] \
+    || fail "could not resolve the hypervisor uplink for the isolated peer"
+}
+
+attach_secondary_network() {
+  SECONDARY_MAC="$(random_mac)"
+  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+    "$VM_NAME" "$NETWORK_NAME" "$SECONDARY_GATEWAY" "$SECONDARY_NETMASK" "$SECONDARY_MAC" <<'SH'
+set -euo pipefail
+vm="$1"
+network="$2"
+gateway="$3"
+netmask="$4"
+mac="$5"
+xml="$(mktemp)"
+created=0
+cleanup_remote() {
+  status="$?"
+  rm -f "$xml"
+  if [[ "$status" -ne 0 && "$created" == "1" ]]; then
+    virsh net-destroy "$network" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap cleanup_remote EXIT
+if virsh net-info "$network" >/dev/null 2>&1; then
+  echo "transient network already exists: $network" >&2
+  exit 1
+fi
+if ip -4 route | grep -Fq "$gateway"; then
+  echo "secondary gateway conflicts with an existing hypervisor route" >&2
+  exit 1
+fi
+cat >"$xml" <<EOF
+<network>
+  <name>$network</name>
+  <forward mode='nat'/>
+  <ip address='$gateway' netmask='$netmask'/>
+</network>
+EOF
+virsh net-create "$xml" >/dev/null
+created=1
+virsh attach-interface \
+  --domain "$vm" \
+  --type network \
+  --source "$network" \
+  --model e1000e \
+  --mac "$mac" \
+  --live >/dev/null
+SH
+  NETWORK_CREATED=1
+  NIC_ATTACHED=1
+  SECONDARY_PROXY="ssh -o BatchMode=yes $HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
+}
+
+wait_for_secondary_adapter() {
+  local started="$SECONDS"
+  while ((SECONDS - started < 30)); do
+    if run_ps_primary \
+      "\$m = ($(ps_quote "$SECONDARY_MAC") -replace '[^0-9A-Fa-f]', '').ToUpperInvariant(); if (Get-NetAdapter -IncludeHidden | Where-Object { (([string]\$_.MacAddress) -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() -eq \$m }) { exit 0 } else { exit 1 }" \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "Windows did not enumerate the transient second NIC"
+}
+
+parse_key_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key { value = substr($0, length(key) + 2) } END { print value }'
+}
+
+guest_initialize() {
+  local script output json
+  script="& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") \
+-Action Initialize \
+-Binary $(ps_quote "$GUEST_BINARY") \
+-Config $(ps_quote "$GUEST_CONFIG") \
+-StateDir $(ps_quote "$GUEST_STATE_DIR") \
+-PrimaryMac $(ps_quote "$PRIMARY_MAC") \
+-SecondaryMac $(ps_quote "$SECONDARY_MAC") \
+-SecondaryAddress $(ps_quote "$SECONDARY_ADDRESS") \
+-SecondaryGateway $(ps_quote "$SECONDARY_GATEWAY") \
+-SecondaryPrefixLength $SECONDARY_PREFIX \
+-NetworkId $(ps_quote "$NETWORK_ID")"
+  output="$(run_ps_primary "$script" | tr -d '\r')"
+  json="$(awk '/^\{.*\}$/ { value = $0 } END { print value }' <<<"$output")"
+  [[ -n "$json" ]] || {
+    printf '%s\n' "$output" >&2
+    fail "Windows initialization did not return its identity receipt"
+  }
+  TARGET_NPUB="$(jq -r '.npub // empty' <<<"$json")"
+  TARGET_TUNNEL_IP="$(jq -r '.tunnel_ip // empty' <<<"$json")"
+  PRIMARY_INDEX="$(jq -r '.primary_interface_index // empty' <<<"$json")"
+  SECONDARY_INDEX="$(jq -r '.secondary_interface_index // empty' <<<"$json")"
+  TARGET_PRIMARY_ADDRESS="$(jq -r '.primary_address // empty' <<<"$json")"
+  TARGET_PRIMARY_GATEWAY="$(jq -r '.primary_gateway // empty' <<<"$json")"
+  TARGET_WG_PUBLIC_KEY="$(jq -r '.wireguard_public_key // empty' <<<"$json")"
+  [[ -n "$TARGET_NPUB" \
+    && -n "$TARGET_TUNNEL_IP" \
+    && -n "$TARGET_PRIMARY_ADDRESS" \
+    && -n "$TARGET_PRIMARY_GATEWAY" \
+    && -n "$TARGET_WG_PUBLIC_KEY" ]]
+
+  for _ in $(seq 1 40); do
+    if secondary_ssh_command \
+      && "${WINDOWS_SECONDARY_SSH[@]}" hostname >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "Windows second NIC is configured but SSH cannot reach it out of band"
+}
+
+initialize_and_start_peer() {
+  local output wg_output
+  PEER_NAMESPACE_ATTEMPTED=1
+  peer_command namespace-setup
+  PEER_INITIALIZED=1
+  output="$(peer_command initialize)"
+  PEER_NPUB="$(parse_key_value npub <<<"$output")"
+  PEER_TUNNEL_IP="$(parse_key_value tunnel_ip <<<"$output")"
+  [[ -n "$PEER_NPUB" && -n "$PEER_TUNNEL_IP" ]]
+  PEER_ENDPOINT="$PEER_ENDPOINT_HOST:$PEER_LISTEN_PORT"
+  peer_command start \
+    "NVPN_UNDERLAY_PEER_PUBLIC_ENDPOINT=$PEER_ENDPOINT" \
+    "NVPN_UNDERLAY_TARGET_NPUB=$TARGET_NPUB"
+  wg_output="$(peer_command wireguard-setup \
+    "NVPN_UNDERLAY_WG_TARGET_PUBLIC_KEY=$TARGET_WG_PUBLIC_KEY")"
+  WG_SERVER_PUBLIC_KEY="$(parse_key_value wireguard_public_key <<<"$wg_output")"
+  WG_ENDPOINT="$(parse_key_value wireguard_endpoint <<<"$wg_output")"
+  [[ -n "$WG_SERVER_PUBLIC_KEY" && -n "$WG_ENDPOINT" ]]
+  peer_command listener-audit >"$ARTIFACT_DIR/peer-listener.txt"
+  peer_command services \
+    "NVPN_UNDERLAY_TARGET_TUNNEL_IP=$TARGET_TUNNEL_IP"
+}
+
+start_windows_runner() {
+  local script
+  script="& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") \
+-Action Run \
+-Binary $(ps_quote "$GUEST_BINARY") \
+-Config $(ps_quote "$GUEST_CONFIG") \
+-StateDir $(ps_quote "$GUEST_STATE_DIR") \
+-PrimaryMac $(ps_quote "$PRIMARY_MAC") \
+-SecondaryMac $(ps_quote "$SECONDARY_MAC") \
+-NetworkId $(ps_quote "$NETWORK_ID") \
+-PeerNpub $(ps_quote "$PEER_NPUB") \
+-PeerEndpoint $(ps_quote "$PEER_ENDPOINT") \
+-PeerTunnelIp $(ps_quote "$PEER_TUNNEL_IP") \
+-WireGuardPeerPublicKey $(ps_quote "$WG_SERVER_PUBLIC_KEY") \
+-WireGuardEndpoint $(ps_quote "$WG_ENDPOINT") \
+-WireGuardClientAddress $(ps_quote "$WG_CLIENT_ADDRESS") \
+-WireGuardInterface $(ps_quote "$WG_TARGET_INTERFACE") \
+-FixtureDnsName $(ps_quote "$FIXTURE_DNS_NAME") \
+-ProbeUrl $(ps_quote "$PROBE_URL") \
+-ExpectedFipsRevision $(ps_quote "$EXPECTED_FIPS_REV") \
+-ListenPort $TARGET_LISTEN_PORT \
+-RecoveryDeadlineMilliseconds $RECOVERY_DEADLINE_MS"
+  (
+    run_ps_secondary "$script"
+  ) >"$ARTIFACT_DIR/windows-run.log" 2>&1 &
+  WINDOWS_RUN_PID="$!"
+  wait_for_guest_marker ready 35
+  peer_command wait-ready >"$ARTIFACT_DIR/peer-ready.json"
+  jq -e . "$ARTIFACT_DIR/peer-ready.json" >/dev/null
+}
+
+set_primary_link() {
+  local state="$1"
+  ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    "date +%s.%N; virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' '$state' >/dev/null"
+}
+
+assert_peer_recovered_from_source() {
+  local cut_timestamp="$1"
+  local expected_source="$2"
+  local label="$3"
+  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+    "$PEER_STATE_DIR" "$cut_timestamp" "$expected_source" \
+    "$((RECOVERY_DEADLINE_MS / 1000))" "$label" <<'SH'
+set -euo pipefail
+state="$1"
+cut="$2"
+source_ip="$3"
+deadline="$4"
+label="$5"
+end="$(awk -v cut="$cut" -v deadline="$deadline" 'BEGIN { print cut + deadline }')"
+while :; do
+  fips_underlay_at="$(awk -v cut="$cut" -v ip="$source_ip" '
+    $1 + 0 >= cut && index($0, "IP " ip ".") { print $1; exit }
+  ' "$state/fips-underlay.pcap.txt" 2>/dev/null || true)"
+  wireguard_underlay_at="$(awk -v cut="$cut" -v ip="$source_ip" '
+    $1 + 0 >= cut && index($0, "IP " ip ".") { print $1; exit }
+  ' "$state/wireguard-underlay.pcap.txt" 2>/dev/null || true)"
+  reverse_at="$(awk -v underlay="$fips_underlay_at" '
+    /^\[[0-9]/ {
+      timestamp = $1
+      gsub(/^\[/, "", timestamp)
+      gsub(/\]$/, "", timestamp)
+      if (underlay != "" && timestamp + 0 >= underlay && /bytes from/) {
+        print timestamp
+        exit
+      }
+    }
+  ' "$state/peer-payload.log" 2>/dev/null || true)"
+  if [[ -n "$fips_underlay_at" \
+    && -n "$wireguard_underlay_at" \
+    && -n "$reverse_at" ]]
+  then
+    awk -v cut="$cut" -v at="$fips_underlay_at" -v deadline="$deadline" \
+      'BEGIN { if (at - cut > deadline) exit 1 }'
+    awk -v cut="$cut" -v at="$wireguard_underlay_at" -v deadline="$deadline" \
+      'BEGIN { if (at - cut > deadline) exit 1 }'
+    awk -v underlay="$fips_underlay_at" -v at="$reverse_at" -v deadline="$deadline" \
+      'BEGIN { if (at - underlay > deadline) exit 1 }'
+    awk -v cut="$cut" -v at="$reverse_at" -v deadline="$deadline" \
+      'BEGIN { if (at - cut > deadline) exit 1 }'
+    printf '%s_fips_expected_source_after_cut_seconds=%.3f\n' "$label" \
+      "$(awk -v cut="$cut" -v at="$fips_underlay_at" 'BEGIN { print at - cut }')"
+    printf '%s_wireguard_expected_source_after_cut_seconds=%.3f\n' "$label" \
+      "$(awk -v cut="$cut" -v at="$wireguard_underlay_at" 'BEGIN { print at - cut }')"
+    printf '%s_reverse_payload_after_expected_source_seconds=%.3f\n' "$label" \
+      "$(awk -v underlay="$fips_underlay_at" -v at="$reverse_at" \
+        'BEGIN { print at - underlay }')"
+    exit 0
+  fi
+  awk -v now="$(date +%s.%N)" -v end="$end" \
+    'BEGIN { exit !(now < end) }' || break
+  sleep 0.05
+done
+echo "$label did not produce new-source FIPS/WireGuard traffic and reverse payload within ${deadline}s" >&2
+exit 1
+SH
+}
+
+guest_receipt() {
+  local name="$1"
+  run_ps_secondary \
+    "Get-Content -Raw -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name")" \
+    | tr -d '\r' \
+    | awk '/^\{.*\}$/ { value = $0 } END { print value }'
+}
+
+run_underlay_switches() {
+  local cut receipt
+  signal_guest arm-secondary
+  wait_for_guest_marker armed-secondary 30
+  cut="$(set_primary_link down | tr -d '\r')"
+  printf '%s\n' "$cut" >"$ARTIFACT_DIR/secondary-link-cut-unix-seconds.txt"
+  wait_for_guest_marker secondary.receipt.json 15
+  receipt="$(guest_receipt secondary.receipt.json)"
+  receipt="$(jq --argjson link_changed "$cut" \
+    '. + {host_link_change_unix_seconds: $link_changed}' <<<"$receipt")"
+  jq -e \
+    --argjson deadline "$RECOVERY_DEADLINE_MS" \
+    --argjson interface_index "$SECONDARY_INDEX" \
+    --arg gateway "$SECONDARY_GATEWAY" \
+    --arg source "$SECONDARY_ADDRESS" \
+    '.recovery_milliseconds <= $deadline
+      and .route_usable_monotonic_milliseconds > 0
+      and .recovered_monotonic_milliseconds
+        >= .route_usable_monotonic_milliseconds
+      and .payload_successes_after > .payload_successes_before
+      and .wireguard_payload_successes_after
+        > .wireguard_payload_successes_before
+      and .wireguard_endpoint_route.destination_prefix != null
+      and .wireguard_endpoint_route.interface_index == $interface_index
+      and .wireguard_endpoint_route.next_hop == $gateway
+      and .wireguard_endpoint_route.source_address == $source
+      and .rebind_receipts_after == (.rebind_receipts_before + 1)' \
+    <<<"$receipt" >/dev/null
+  printf '%s\n' "$receipt" >"$ARTIFACT_DIR/secondary-receipt.json"
+  jq -e . "$ARTIFACT_DIR/secondary-receipt.json" >/dev/null
+  assert_peer_recovered_from_source "$cut" "$SECONDARY_ADDRESS" secondary \
+    | tee "$ARTIFACT_DIR/secondary-peer-recovery.txt"
+
+  signal_guest arm-primary
+  wait_for_guest_marker armed-primary 30
+  cut="$(set_primary_link up | tr -d '\r')"
+  printf '%s\n' "$cut" >"$ARTIFACT_DIR/primary-link-cut-unix-seconds.txt"
+  wait_for_guest_marker primary.receipt.json 15
+  receipt="$(guest_receipt primary.receipt.json)"
+  receipt="$(jq --argjson link_changed "$cut" \
+    '. + {host_link_change_unix_seconds: $link_changed}' <<<"$receipt")"
+  jq -e \
+    --argjson deadline "$RECOVERY_DEADLINE_MS" \
+    --argjson interface_index "$PRIMARY_INDEX" \
+    --arg gateway "$TARGET_PRIMARY_GATEWAY" \
+    --arg source "$TARGET_PRIMARY_ADDRESS" \
+    '.recovery_milliseconds <= $deadline
+      and .route_usable_monotonic_milliseconds > 0
+      and .recovered_monotonic_milliseconds
+        >= .route_usable_monotonic_milliseconds
+      and .payload_successes_after > .payload_successes_before
+      and .wireguard_payload_successes_after
+        > .wireguard_payload_successes_before
+      and .wireguard_endpoint_route.destination_prefix != null
+      and .wireguard_endpoint_route.interface_index == $interface_index
+      and .wireguard_endpoint_route.next_hop == $gateway
+      and .wireguard_endpoint_route.source_address == $source
+      and .rebind_receipts_after == (.rebind_receipts_before + 1)' \
+    <<<"$receipt" >/dev/null
+  printf '%s\n' "$receipt" >"$ARTIFACT_DIR/primary-receipt.json"
+  jq -e . "$ARTIFACT_DIR/primary-receipt.json" >/dev/null
+  assert_peer_recovered_from_source "$cut" "$PRIMARY_ADDRESS" primary \
+    | tee "$ARTIFACT_DIR/primary-peer-recovery.txt"
+  peer_command wireguard-audit >"$ARTIFACT_DIR/wireguard-responder-audit.txt"
+}
+
+peer_counters() {
+  peer_command counters
+}
+
+counter_value() {
+  local key="$1"
+  parse_key_value "$key"
+}
+
+run_dns_case() {
+  local name="$1"
+  local counter="$2"
+  local before after
+  before="$(peer_counters)"
+  signal_guest "dns-$name.go"
+  wait_for_guest_marker "dns-$name.receipt" 35
+  after="$(peer_counters)"
+  case "$counter" in
+    cloudflare)
+      (( $(counter_value cloudflare <<<"$after") > $(counter_value cloudflare <<<"$before") )) \
+        || fail "$name did not create a real Cloudflare DoH flow through the exit"
+      ;;
+    quad9)
+      (( $(counter_value quad9 <<<"$after") > $(counter_value quad9 <<<"$before") )) \
+        || fail "$name did not create a real Quad9 DoH flow through the exit"
+      ;;
+    fixture_dns)
+      (( $(counter_value fixture_dns <<<"$after") > $(counter_value fixture_dns <<<"$before") )) \
+        || fail "$name did not query the configured DNS-through-exit resolver"
+      ;;
+    *)
+      fail "internal error: unknown DNS counter $counter"
+      ;;
+  esac
+  {
+    printf 'case=%s\n' "$name"
+    printf 'before_%s=%s\n' "$counter" "$(counter_value "$counter" <<<"$before")"
+    printf 'after_%s=%s\n' "$counter" "$(counter_value "$counter" <<<"$after")"
+  } >>"$ARTIFACT_DIR/dns-matrix.txt"
+}
+
+run_dns_matrix_and_direct_restore() {
+  run_dns_case automatic cloudflare
+  run_dns_case cloudflare cloudflare
+  run_dns_case quad9 quad9
+  run_dns_case custom cloudflare
+  run_dns_case through-exit fixture_dns
+
+  signal_guest select-direct
+  wait_for_guest_marker direct.receipt.json 45
+  wait_for_guest_marker done 10
+  wait "$WINDOWS_RUN_PID"
+  WINDOWS_RUN_PID=""
+  guest_receipt direct.receipt.json >"$ARTIFACT_DIR/direct-receipt.json"
+  jq -e '
+    .wireguard_interface_removed == true
+    and .wireguard_endpoint_route_removed == true
+    and .wireguard_service_removed == true
+    and .wireguard_source_secrets_removed == true
+    and .verified_https == true
+  ' "$ARTIFACT_DIR/direct-receipt.json" >/dev/null
+
+  local post_stop
+  post_stop="\$ErrorActionPreference = 'Stop'
+\$primary = Get-NetAdapter -IncludeHidden | Where-Object { (([string]\$_.MacAddress) -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() -eq (($(ps_quote "$PRIMARY_MAC") -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()) }
+\$route = Find-NetRoute -RemoteIPAddress '1.1.1.1' | Select-Object -First 1
+if ([int]\$route.InterfaceIndex -ne [int]\$primary.ifIndex) { throw 'native Direct route was not restored after daemon stop' }
+if (Get-Process nvpn -ErrorAction SilentlyContinue) { throw 'candidate nvpn daemon still runs after cleanup' }
+if (Get-Service -Name $(ps_quote "WireGuardTunnel\$$WG_TARGET_INTERFACE") -ErrorAction SilentlyContinue) { throw 'WireGuard exit service remains after cleanup' }
+if (Get-NetAdapter -Name $(ps_quote "$WG_TARGET_INTERFACE") -IncludeHidden -ErrorAction SilentlyContinue) { throw 'WireGuard exit adapter remains after cleanup' }
+\$endpointHost = ([Uri]('udp://' + $(ps_quote "$WG_ENDPOINT"))).Host
+if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \"\$endpointHost/32\" -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) { throw 'WireGuard endpoint bypass remains after cleanup' }
+\$rules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { \$_.DisplayName -eq 'nostr-vpn secure DNS' -or \$_.Comment -eq 'nostr-vpn authenticated DNS-over-HTTPS stub' })
+if (\$rules.Count -ne 0) { throw 'nvpn secure DNS policy remains after daemon stop' }
+[Net.Dns]::GetHostAddresses(([Uri]$(ps_quote "$PROBE_URL")).DnsSafeHost) | Out-Null
+& curl.exe -4 --ssl-revoke-best-effort --fail --silent --max-time 8 --output NUL $(ps_quote "$PROBE_URL")
+if (\$LASTEXITCODE -ne 0) { throw 'verified HTTPS failed after native Direct restoration' }
+Write-Output 'WINDOWS_NATIVE_DIRECT_RESTORED'"
+  run_ps_secondary "$post_stop" | tee "$ARTIFACT_DIR/post-stop.txt"
+}
+
+audit_guest_cleanup() {
+  local script
+  script="\$ErrorActionPreference = 'Stop'
+\$statePath = $(ps_quote "$GUEST_STATE_DIR\\adapter-state.json")
+if (Test-Path -LiteralPath \$statePath) {
+  \$saved = Get-Content -Raw -LiteralPath \$statePath | ConvertFrom-Json
+  \$primaryIp = Get-NetIPInterface -InterfaceIndex ([int]\$saved.primary_interface_index) -AddressFamily IPv4
+  if ([string]\$saved.primary_automatic_metric -eq 'Enabled') {
+    if ([string]\$primaryIp.AutomaticMetric -ne 'Enabled') { throw 'primary automatic metric was not restored' }
+  } elseif ([int]\$primaryIp.InterfaceMetric -ne [int]\$saved.primary_metric) {
+    throw 'primary interface metric was not restored'
+  }
+}
+if (Get-Process nvpn -ErrorAction SilentlyContinue) { throw 'candidate nvpn process remains after cleanup' }
+if (Get-Service -Name $(ps_quote "WireGuardTunnel\$$WG_TARGET_INTERFACE") -ErrorAction SilentlyContinue) {
+  throw 'WireGuard exit service remains after cleanup'
+}
+if (Get-NetAdapter -Name $(ps_quote "$WG_TARGET_INTERFACE") -IncludeHidden -ErrorAction SilentlyContinue) {
+  throw 'WireGuard exit adapter remains after cleanup'
+}
+\$endpointHost = ([Uri]('udp://' + $(ps_quote "$WG_ENDPOINT"))).Host
+if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \"\$endpointHost/32\" -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) {
+  throw 'WireGuard endpoint bypass remains after cleanup'
+}
+\$nativeConfig = Join-Path \$env:ProgramData $(ps_quote "nostr-vpn\\wireguard\\$WG_TARGET_INTERFACE.conf")
+if (Test-Path -LiteralPath \$nativeConfig) {
+  throw 'native WireGuard service config remains after cleanup'
+}
+\$watchdogPath = $(ps_quote "$GUEST_STATE_DIR\\watchdog.pid")
+if (Test-Path -LiteralPath \$watchdogPath) {
+  \$watchdogPid = [int](Get-Content -Raw -LiteralPath \$watchdogPath)
+  if (Get-Process -Id \$watchdogPid -ErrorAction SilentlyContinue) {
+    throw 'independent cleanup watchdog remains after cleanup'
+  }
+}
+if (Get-NetAdapter -Name $(ps_quote "nvpn-underlay-gate") -ErrorAction SilentlyContinue) {
+  throw 'candidate Wintun interface remains after cleanup'
+}
+\$rules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {
+  \$_.DisplayName -eq 'nostr-vpn secure DNS' -or
+  \$_.Comment -eq 'nostr-vpn authenticated DNS-over-HTTPS stub'
+})
+if (\$rules.Count -ne 0) { throw 'nvpn secure DNS policy remains after cleanup' }
+\$primary = Get-NetAdapter -IncludeHidden | Where-Object {
+  (([string]\$_.MacAddress) -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() -eq
+    (($(ps_quote "$PRIMARY_MAC") -replace '[^0-9A-Fa-f]', '').ToUpperInvariant())
+}
+\$deadline = [DateTime]::UtcNow.AddSeconds(15)
+do {
+  \$route = Find-NetRoute -RemoteIPAddress '1.1.1.1' | Select-Object -First 1
+  if ([int]\$route.InterfaceIndex -eq [int]\$primary.ifIndex) { break }
+  Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt \$deadline)
+if ([int]\$route.InterfaceIndex -ne [int]\$primary.ifIndex) {
+  throw 'native primary route was not restored during cleanup'
+}
+[Net.Dns]::GetHostAddresses(([Uri]$(ps_quote "$PROBE_URL")).DnsSafeHost) | Out-Null
+& curl.exe -4 --ssl-revoke-best-effort --fail --silent --max-time 8 --output NUL $(ps_quote "$PROBE_URL")
+if (\$LASTEXITCODE -ne 0) { throw 'native HTTPS failed after cleanup' }
+\$emergencyRepair = $(ps_quote "$GUEST_STATE_DIR\\emergency-repair-invoked")
+if (Test-Path -LiteralPath \$emergencyRepair) {
+  throw 'normal Windows cleanup invoked emergency repair-network'
+}
+Remove-Item -Recurse -Force -LiteralPath $(ps_quote "$GUEST_STATE_DIR") -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR")) { throw 'guest gate state remains after cleanup' }
+Write-Output 'WINDOWS_GUEST_CLEANUP_AUDIT_OK'"
+  run_ps_secondary "$script"
+}
+
+audit_hypervisor_cleanup() {
+  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+    "$VM_NAME" "$NETWORK_NAME" "$PRIMARY_IFACE" "$PRIMARY_MAC" \
+    "$PEER_TUN_IFACE" "$PEER_STATE_DIR" "$COUNTER_CHAIN" \
+    "$PEER_NETNS" "$PEER_HOST_VETH" "$PEER_ENDPOINT_HOST" \
+    "$PEER_NAMESPACE_PREFIX" "$PEER_FORWARD_CHAIN" "$PEER_NAT_CHAIN" <<'SH'
+set -euo pipefail
+vm="$1"
+network="$2"
+primary_iface="$3"
+primary_mac="$4"
+peer_tun="$5"
+peer_state="$6"
+counter_chain="$7"
+peer_netns="$8"
+peer_host_veth="$9"
+peer_address="${10}"
+peer_prefix="${11}"
+forward_chain="${12}"
+nat_chain="${13}"
+rows="$(virsh domiflist "$vm" | awk '$2 == "network" { print $1 "|" $5 }')"
+[[ "$(grep -c . <<<"$rows" || true)" == "1" ]]
+[[ "$rows" == "$primary_iface|$primary_mac" ]]
+[[ "$(virsh domif-getlink "$vm" "$primary_iface" | awk '{ print $NF }')" == "up" ]]
+! virsh net-info "$network" >/dev/null 2>&1
+! ip link show dev "$peer_tun" >/dev/null 2>&1
+! sudo -n test -e "$peer_state"
+! sudo -n iptables -t mangle -S "$counter_chain" >/dev/null 2>&1
+! sudo -n ip netns list | awk '{ print $1 }' | grep -Fxq "$peer_netns"
+! ip link show dev "$peer_host_veth" >/dev/null 2>&1
+! ip -4 route show exact "$peer_address/$peer_prefix" | grep -q .
+! sudo -n iptables -S "$forward_chain" >/dev/null 2>&1
+! sudo -n iptables -t nat -S "$nat_chain" >/dev/null 2>&1
+! pgrep -a -x nvpn 2>/dev/null | grep -Fq -- "--config $peer_state/config.toml"
+echo "WINDOWS_HYPERVISOR_CLEANUP_AUDIT_OK"
+SH
+}
+
+collect_failure_artifacts() {
+  if [[ -n "$SECONDARY_PROXY" ]]; then
+    local guest_log="$ARTIFACT_DIR/guest-failure-diagnostics.txt"
+    : >"$guest_log"
+    for name in \
+      last-condition-error.txt \
+      daemon.stderr.log \
+      daemon.stdout.log \
+      payload.log \
+      wireguard-payload.log
+    do
+      {
+        printf '### %s\n' "$name"
+        run_ps_secondary \
+          "if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name")) { Get-Content -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name") -Tail 500 } else { Write-Output '<missing>' }"
+      } >>"$guest_log" 2>&1 || true
+    done
+    {
+      printf '### nvpn-status\n'
+      run_ps_secondary \
+        "\$raw = & $(ps_quote "$GUEST_BINARY") status --config $(ps_quote "$GUEST_CONFIG") --json --discover-secs 0
+\$status = \$raw | ConvertFrom-Json
+[pscustomobject]@{
+  status_source = \$status.status_source
+  daemon = [pscustomobject]@{
+    running = \$status.daemon.running
+    pid = \$status.daemon.pid
+    state = [pscustomobject]@{
+      binary_version = \$status.daemon.state.binary_version
+      fips_core_version = \$status.daemon.state.fips_core_version
+      mesh_ready = \$status.daemon.state.mesh_ready
+      connected_peer_count = \$status.daemon.state.connected_peer_count
+      vpn_status = \$status.daemon.state.vpn_status
+      network = \$status.daemon.state.network
+    }
+  }
+} | ConvertTo-Json -Depth 6"
+      printf '### adapters-and-routes\n'
+      run_ps_secondary \
+        "Get-NetAdapter -IncludeHidden | Format-Table -AutoSize; Get-NetRoute -AddressFamily IPv4 | Sort-Object RouteMetric,InterfaceMetric | Format-Table -AutoSize"
+    } >>"$guest_log" 2>&1 || true
+  fi
+
+  if [[ "$PEER_INITIALIZED" == "1" ]]; then
+    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      sudo -n bash -s -- "$PEER_STATE_DIR" "$HYPERVISOR_BINARY" \
+      >"$ARTIFACT_DIR/peer-failure-diagnostics.txt" 2>&1 <<'SH' || true
+set -u
+state="$1"
+binary="$2"
+for name in daemon.stderr.log daemon.stdout.log peer-payload.log dnsmasq.log dns.log fips-underlay.pcap.txt wireguard-underlay.pcap.txt; do
+  printf '### %s\n' "$name"
+  if [[ -f "$state/$name" ]]; then
+    tail -n 500 "$state/$name"
+  else
+    printf '<missing>\n'
+  fi
+done
+printf '### nvpn-status\n'
+"$binary" status --config "$state/config.toml" --json --discover-secs 0 \
+  | jq '{
+      status_source,
+      daemon: {
+        running: .daemon.running,
+        pid: .daemon.pid,
+        state: (.daemon.state | {
+          binary_version,
+          fips_core_version,
+          mesh_ready,
+          connected_peer_count,
+          vpn_status,
+          network
+        })
+      }
+    }' || true
+SH
+  fi
+}
+
+cleanup() {
+  local status="$?"
+  local cleanup_failed=0
+  trap - EXIT INT TERM
+  set +e
+
+  if [[ -n "$PRIMARY_IFACE" ]]; then
+    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      "virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' up" >/dev/null 2>&1 || true
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    collect_failure_artifacts
+  fi
+  if [[ -n "$SECONDARY_PROXY" ]]; then
+    for marker in \
+      arm-secondary arm-primary \
+      dns-automatic.go dns-cloudflare.go dns-quad9.go dns-custom.go dns-through-exit.go \
+      select-direct
+    do
+      signal_guest "$marker" >/dev/null 2>&1 || true
+    done
+    run_ps_secondary \
+      "& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") -Action Cleanup -Binary $(ps_quote "$GUEST_BINARY") -Config $(ps_quote "$GUEST_CONFIG") -StateDir $(ps_quote "$GUEST_STATE_DIR")" \
+      >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  if [[ -n "$WINDOWS_RUN_PID" ]]; then
+    kill "$WINDOWS_RUN_PID" >/dev/null 2>&1 || true
+    wait "$WINDOWS_RUN_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$SECONDARY_PROXY" ]]; then
+    run_ps_secondary \
+      "& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") -Action Cleanup -Binary $(ps_quote "$GUEST_BINARY") -Config $(ps_quote "$GUEST_CONFIG") -StateDir $(ps_quote "$GUEST_STATE_DIR")" \
+      >/dev/null 2>&1 || cleanup_failed=1
+    audit_guest_cleanup >"$ARTIFACT_DIR/guest-cleanup-audit.txt" 2>&1 \
+      || cleanup_failed=1
+  fi
+  if [[ "$PEER_INITIALIZED" == "1" ]]; then
+    peer_command cleanup >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  if [[ "$PEER_NAMESPACE_ATTEMPTED" == "1" ]]; then
+    peer_command namespace-cleanup >/dev/null 2>&1 || cleanup_failed=1
+    peer_command namespace-audit >"$ARTIFACT_DIR/peer-namespace-cleanup-audit.txt" 2>&1 \
+      || cleanup_failed=1
+  fi
+  if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
+    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \
+      >/dev/null 2>&1 || true
+  fi
+  if [[ "$NETWORK_CREATED" == "1" ]]; then
+    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      "virsh net-destroy '$NETWORK_NAME'" >/dev/null 2>&1 || cleanup_failed=1
+  fi
+
+  if [[ "$NIC_ATTACHED" == "1" ]]; then
+    audit_hypervisor_cleanup >"$ARTIFACT_DIR/hypervisor-cleanup-audit.txt" 2>&1 \
+      || cleanup_failed=1
+  fi
+  if [[ "$cleanup_failed" == "1" ]]; then
+    echo "Windows underlay cleanup audit failed; inspect $ARTIFACT_DIR" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+resolve_expected_fips_revision
+sync_and_build_candidates
+capture_version_receipts
+discover_primary_interface
+attach_secondary_network
+wait_for_secondary_adapter
+guest_initialize
+initialize_and_start_peer
+start_windows_runner
+run_underlay_switches
+run_dns_matrix_and_direct_restore
+
+echo "WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E_OK"
+echo "artifacts=$ARTIFACT_DIR"

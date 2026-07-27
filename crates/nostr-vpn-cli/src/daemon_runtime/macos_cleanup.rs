@@ -205,7 +205,54 @@ pub(crate) fn repair_saved_network_state(config_path: &Path) -> Result<bool> {
         Ok(true)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let path = daemon_network_cleanup_file_path(config_path);
+        let Some(mut state) = read_daemon_network_cleanup_state(&path)? else {
+            return Ok(false);
+        };
+        if let Err(error) = crate::fips_private_mesh::repair_linux_network_cleanup_state(&mut state)
+        {
+            return match write_daemon_network_cleanup_state(&path, &state) {
+                Ok(()) => Err(error)
+                    .with_context(|| format!("failed to repair saved state {}", path.display())),
+                Err(write_error) => Err(anyhow!(
+                    "{error:#}; failed to persist remaining cleanup ownership: {write_error:#}"
+                ))
+                .with_context(|| format!("failed to repair saved state {}", path.display())),
+            };
+        }
+        remove_runtime_file_if_exists(&path)?;
+        Ok(true)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let path = daemon_network_cleanup_file_path(config_path);
+        let Some(mut state) = read_daemon_network_cleanup_state(&path)? else {
+            return Ok(false);
+        };
+        if let Err(error) =
+            crate::fips_private_mesh::repair_windows_network_cleanup_state(&mut state)
+        {
+            return match write_daemon_network_cleanup_state(&path, &state) {
+                Ok(()) => Err(error)
+                    .with_context(|| format!("failed to repair saved state {}", path.display())),
+                Err(write_error) => Err(anyhow!(
+                    "{error:#}; failed to persist remaining cleanup ownership: {write_error:#}"
+                ))
+                .with_context(|| format!("failed to repair saved state {}", path.display())),
+            };
+        }
+        remove_runtime_file_if_exists(&path)?;
+        Ok(true)
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
     {
         let _ = config_path;
         Ok(false)

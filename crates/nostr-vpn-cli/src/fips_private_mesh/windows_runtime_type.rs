@@ -13,12 +13,9 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     event_rx: mpsc::Receiver<FipsPrivateMeshEvent>,
     exit_route_ready: bool,
     interface_index: u32,
-    route_targets: Vec<String>,
-    endpoint_bypass_underlay: Option<crate::wg_upstream_runtime::WindowsDefaultRoute>,
-    endpoint_bypass_routes: Vec<String>,
-    /// Same shape as the macOS variant: a userspace WG upstream
-    /// tunnel (boringtun + a *separate* WinTun adapter, distinct from
-    /// the FIPS adapter above) that the daemon reconciles whenever
-    /// `wireguard_exit` changes.
+    route_guard: crate::wg_upstream_runtime::WindowsManagedInterfaceRoutes,
+    endpoint_bypass_routes: Option<crate::wg_upstream_runtime::WindowsManagedEndpointRoutes>,
+    /// Native WireGuardNT upstream reconciled whenever `wireguard_exit`
+    /// changes. Its interface is distinct from the FIPS WinTun adapter.
     wg_upstream: Option<crate::wg_upstream_runtime::DaemonWgUpstream>,
 }

@@ -132,6 +132,9 @@ struct MacosNetworkCleanupState {
     pf_was_enabled: Option<bool>,
 }
 
+#[cfg(target_os = "macos")]
+type DaemonNetworkCleanupState = MacosNetworkCleanupState;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DaemonPeerState {
     participant_pubkey: String,
@@ -421,7 +424,7 @@ struct CliTunnelRuntime {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LinuxExitNodeRuntime {
     ipv4_outbound_iface: Option<String>,
     ipv6_outbound_iface: Option<String>,
@@ -430,7 +433,37 @@ struct LinuxExitNodeRuntime {
     ipv4_forward_was_enabled: Option<bool>,
     ipv6_forward_was_enabled: Option<bool>,
     wireguard_exit: Option<LinuxWireGuardExitRuntime>,
+    pending_wireguard_exit_cleanup: Vec<LinuxWireGuardExitCleanupObligation>,
 }
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LinuxNetworkCleanupState {
+    iface: String,
+    #[serde(default)]
+    endpoint_bypass_routes: Vec<LinuxManagedEndpointBypassRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_default_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_default_ipv6_route: Option<String>,
+    #[serde(default)]
+    exit_node_runtime: LinuxExitNodeRuntime,
+}
+
+#[cfg(target_os = "linux")]
+type DaemonNetworkCleanupState = LinuxNetworkCleanupState;
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct WindowsNetworkCleanupState {
+    #[serde(default)]
+    routes: crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot,
+    #[serde(default)]
+    native_wireguard: Vec<crate::wg_upstream_runtime::WindowsNativeWireGuardCleanupState>,
+}
+
+#[cfg(target_os = "windows")]
+type DaemonNetworkCleanupState = WindowsNetworkCleanupState;
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Default)]
@@ -439,18 +472,6 @@ struct MacosExitNodeRuntime {
     tunnel_source_cidr: Option<String>,
     ipv4_forward_was_enabled: Option<bool>,
     pf_was_enabled: Option<bool>,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LinuxWireGuardExitRuntime {
-    interface: String,
-    source_cidr: String,
-    table: u32,
-    priority: u32,
-    created_interface: bool,
-    endpoint_bypass_routes: Vec<String>,
-    previous_default_route: Option<String>,
 }
 
 #[cfg(any(target_os = "macos", test))]

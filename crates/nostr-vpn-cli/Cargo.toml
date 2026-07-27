@@ -93,4 +93,5 @@ futures-util = "0.3"
 nostr-sdk.workspace = true
 nostr-social-graph.workspace = true
 rand.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.26.2"

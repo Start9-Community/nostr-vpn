@@ -969,14 +969,18 @@ function runVerify({ dryRun, builtLines }) {
     NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE: '1',
     NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E: '1',
     NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E: '1',
+    NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E: '1',
+    NVPN_RELEASE_GATE_MACOS_GUI_SMOKE: '1',
+    NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU: '1',
     NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E: '1',
     NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '1',
+    NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E: '1',
   }
   run('./scripts/release-gate.sh', [], { env, dryRun })
-  builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, real Android/iOS physical underlay changes, and desktop launch smokes.')
+  builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, real Android/iOS physical underlay changes, real Windows/Linux desktop underlay changes, isolated macOS VM network/service proofs, and desktop launch smokes.')
 }
 
 function buildStartosArtifacts({ tag, dryRun, builtLines }) {

@@ -22,50 +22,66 @@ impl FipsPrivateTunnelRuntime {
         let peer_statuses = mesh.peer_statuses();
         let exit_route_ready = fips_exit_route_ready(&config, &peer_statuses);
         let effective_route_targets = effective_fips_route_targets(&config, &peer_statuses);
-        let endpoint_bypass_routes = windows_fips_endpoint_bypass_targets(
+        let endpoint_bypass_targets = windows_fips_endpoint_bypass_targets(
             &config.endpoint_peers,
             &effective_route_targets,
         );
-        let endpoint_bypass_underlay = if endpoint_bypass_routes.is_empty() {
-            None
-        } else {
-            let underlay = windows_fips_underlay_default_route(interface_index)?;
-            crate::windows_tunnel::apply_windows_routes_via(
-                underlay.interface_index,
-                &underlay.gateway,
-                &endpoint_bypass_routes,
+        let mut endpoint_bypass_routes =
+            crate::wg_upstream_runtime::WindowsManagedEndpointRoutes::apply(
+                &endpoint_bypass_targets,
+                &[interface_index],
             )
             .context("failed to apply Windows FIPS endpoint bypass routes")?;
-            Some(underlay)
-        };
-        let secure_dns = if config.secure_dns_required() {
-            Some(
-                crate::secure_dns_runtime::SecureDnsRuntime::start(
-                    &iface,
-                    Some(interface_index),
-                    config.magic_dns_records.clone(),
-                    config.exit_dns_resolver_config(false)?,
-                    None,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        let route_targets = match crate::windows_tunnel::apply_windows_routes(
+        let mut route_guard = match crate::wg_upstream_runtime::WindowsManagedInterfaceRoutes::apply(
             interface_index,
             &effective_route_targets,
         ) {
-            Ok(route_targets) => route_targets,
+            Ok(route_guard) => route_guard,
             Err(error) => {
-                if let Some(underlay) = endpoint_bypass_underlay.as_ref() {
-                    let _ = crate::windows_tunnel::remove_windows_routes(
-                        underlay.interface_index,
-                        &endpoint_bypass_routes,
-                    );
-                }
-                return Err(error);
+                let rollback = endpoint_bypass_routes
+                    .as_mut()
+                    .map_or(Ok(()), |routes| routes.revert());
+                return Err(windows_fips_with_cleanup_error(
+                    error.context("failed to apply Windows FIPS routes"),
+                    "rollback endpoint bypass routes",
+                    rollback,
+                ));
             }
+        };
+        let secure_dns = if config.secure_dns_required() {
+            match crate::secure_dns_runtime::SecureDnsRuntime::start(
+                &iface,
+                Some(interface_index),
+                config.magic_dns_records.clone(),
+                config.exit_dns_resolver_config(false)?,
+                None,
+            )
+            .await
+            {
+                Ok(secure_dns) => Some(secure_dns),
+                Err(error) => {
+                    let mut failures = Vec::new();
+                    windows_fips_record_cleanup(
+                        &mut failures,
+                        "Windows FIPS tunnel routes",
+                        route_guard.revert(),
+                    );
+                    if let Some(routes) = endpoint_bypass_routes.as_mut() {
+                        windows_fips_record_cleanup(
+                            &mut failures,
+                            "Windows FIPS endpoint bypass routes",
+                            routes.revert(),
+                        );
+                    }
+                    return Err(windows_fips_with_cleanup_error(
+                        error.context("start Windows FIPS secure DNS"),
+                        "rollback Windows FIPS startup",
+                        windows_fips_finish_cleanup(failures),
+                    ));
+                }
+            }
+        } else {
+            None
         };
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -93,8 +109,7 @@ impl FipsPrivateTunnelRuntime {
             event_rx,
             exit_route_ready,
             interface_index,
-            route_targets,
-            endpoint_bypass_underlay,
+            route_guard,
             endpoint_bypass_routes,
             wg_upstream: None,
         };
@@ -102,19 +117,32 @@ impl FipsPrivateTunnelRuntime {
         // safe-by-construction guarantee as macOS: if the WG handshake
         // doesn't complete within the watchdog window, the routing
         // table stays untouched.
-        runtime
-            .reconcile_windows_wg_upstream(&config.wireguard_exit)
-            .await;
-        let wireguard_interface = runtime
-            .wg_upstream
-            .as_ref()
-            .map(|upstream| upstream.iface.clone());
-        let resolver_config = config.exit_dns_resolver_config(wireguard_interface.is_some())?;
-        let servers = resolver_config.through_exit_servers().to_vec();
-        if let Some(secure_dns) = runtime.secure_dns.as_mut() {
-            secure_dns.update_config(config.magic_dns_records.clone(), resolver_config)?;
-            secure_dns
-                .update_windows_wireguard_dns(wireguard_interface.as_deref(), &servers)?;
+        let startup_result: Result<()> = async {
+            runtime
+                .reconcile_windows_wg_upstream(&config.wireguard_exit)
+                .await?;
+            let wireguard_interface = runtime
+                .wg_upstream
+                .as_ref()
+                .map(|upstream| upstream.iface.clone());
+            let resolver_config =
+                config.exit_dns_resolver_config(wireguard_interface.is_some())?;
+            let servers = resolver_config.through_exit_servers().to_vec();
+            if let Some(secure_dns) = runtime.secure_dns.as_mut() {
+                secure_dns.update_config(config.magic_dns_records.clone(), resolver_config)?;
+                secure_dns
+                    .update_windows_wireguard_dns(wireguard_interface.as_deref(), &servers)?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = startup_result {
+            let cleanup = runtime.stop().await;
+            return Err(windows_fips_with_cleanup_error(
+                error.context("finish Windows FIPS tunnel startup"),
+                "rollback Windows FIPS startup",
+                cleanup,
+            ));
         }
         Ok(runtime)
     }
@@ -166,7 +194,7 @@ impl FipsPrivateTunnelRuntime {
             secure_dns.stop().await;
         }
         self.reconcile_windows_wg_upstream(&config.wireguard_exit)
-            .await;
+            .await?;
         let wireguard_interface = self
             .wg_upstream
             .as_ref()
@@ -183,12 +211,8 @@ impl FipsPrivateTunnelRuntime {
     }
 
     pub(crate) async fn refresh_peer_dependent_routes(&mut self) -> Result<()> {
-        let exit_route_ready = fips_exit_route_ready(&self.config, &self.mesh.peer_statuses());
-        if self.exit_route_ready != exit_route_ready {
-            let config = self.config.clone();
-            self.apply_windows_route_config(&config)?;
-        }
-        Ok(())
+        let config = self.config.clone();
+        self.apply_windows_route_config(&config)
     }
 
     fn apply_windows_route_config(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
@@ -199,77 +223,33 @@ impl FipsPrivateTunnelRuntime {
             &config.endpoint_peers,
             &effective_route_targets,
         );
-        let added_endpoint_routes = desired_endpoint_routes
-            .iter()
-            .filter(|route| !self.endpoint_bypass_routes.contains(*route))
-            .cloned()
-            .collect::<Vec<_>>();
-
-        if !added_endpoint_routes.is_empty() {
-            let underlay = match self.endpoint_bypass_underlay.clone() {
-                Some(underlay) => underlay,
-                None => windows_fips_underlay_default_route(self.interface_index)?,
-            };
-            crate::windows_tunnel::apply_windows_routes_via(
-                underlay.interface_index,
-                &underlay.gateway,
-                &added_endpoint_routes,
-            )
-            .context("failed to apply Windows FIPS endpoint bypass routes")?;
-            self.endpoint_bypass_underlay = Some(underlay);
+        let mut excluded_tunnel_interfaces = vec![self.interface_index];
+        if let Some(upstream) = self.wg_upstream.as_ref() {
+            excluded_tunnel_interfaces.push(upstream.interface_index());
         }
-
-        if self.config.route_targets != config.route_targets
-            || self.exit_route_ready != exit_route_ready
-        {
-            if let Err(error) = crate::windows_tunnel::remove_windows_routes(
-                self.interface_index,
-                &self.route_targets,
-            ) {
-                if let Some(underlay) = self.endpoint_bypass_underlay.as_ref() {
-                    let _ = crate::windows_tunnel::remove_windows_routes(
-                        underlay.interface_index,
-                        &added_endpoint_routes,
-                    );
-                }
-                return Err(error).context("failed to remove stale Windows FIPS routes");
-            }
-            match crate::windows_tunnel::apply_windows_routes(
-                self.interface_index,
-                &effective_route_targets,
-            ) {
-                Ok(route_targets) => self.route_targets = route_targets,
-                Err(error) => {
-                    if let Some(underlay) = self.endpoint_bypass_underlay.as_ref() {
-                        let _ = crate::windows_tunnel::remove_windows_routes(
-                            underlay.interface_index,
-                            &added_endpoint_routes,
-                        );
-                    }
-                    return Err(error).context("failed to apply Windows FIPS routes");
+        match self.endpoint_bypass_routes.as_mut() {
+            Some(routes) => {
+                routes
+                    .reconcile(&desired_endpoint_routes, &excluded_tunnel_interfaces)
+                    .context("reconcile Windows FIPS endpoint bypass routes")?;
+                if desired_endpoint_routes.is_empty() {
+                    self.endpoint_bypass_routes = None;
                 }
             }
+            None if !desired_endpoint_routes.is_empty() => {
+                self.endpoint_bypass_routes =
+                    crate::wg_upstream_runtime::WindowsManagedEndpointRoutes::apply(
+                        &desired_endpoint_routes,
+                        &excluded_tunnel_interfaces,
+                    )
+                    .context("apply Windows FIPS endpoint bypass routes")?;
+            }
+            None => {}
         }
 
-        let stale_endpoint_routes = self
-            .endpoint_bypass_routes
-            .iter()
-            .filter(|route| !desired_endpoint_routes.contains(*route))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut active_endpoint_routes = desired_endpoint_routes;
-        if let Some(underlay) = self.endpoint_bypass_underlay.as_ref()
-            && let Err(error) = crate::windows_tunnel::remove_windows_routes(
-                underlay.interface_index,
-                &stale_endpoint_routes,
-            )
-        {
-            eprintln!("fips: failed to remove stale Windows endpoint bypass routes: {error}");
-            active_endpoint_routes.extend(stale_endpoint_routes);
-            active_endpoint_routes.sort();
-            active_endpoint_routes.dedup();
-        }
-        self.endpoint_bypass_routes = active_endpoint_routes;
+        self.route_guard
+            .reconcile(&effective_route_targets)
+            .context("reconcile Windows FIPS tunnel routes")?;
         self.exit_route_ready = exit_route_ready;
         Ok(())
     }
@@ -279,7 +259,10 @@ impl FipsPrivateTunnelRuntime {
     /// just teardown on disable. Handshake-first, watchdog-protected:
     /// the routing table is only modified after a successful WG
     /// handshake.
-    async fn reconcile_windows_wg_upstream(&mut self, wg_config: &WireGuardExitConfig) {
+    async fn reconcile_windows_wg_upstream(
+        &mut self,
+        wg_config: &WireGuardExitConfig,
+    ) -> Result<()> {
         let want_up = wg_config.enabled && wg_config.configured();
         if want_up
             && self
@@ -287,89 +270,142 @@ impl FipsPrivateTunnelRuntime {
                 .as_ref()
                 .is_some_and(|existing| existing.matches(wg_config))
         {
-            return;
+            let refreshed = self
+                .wg_upstream
+                .as_mut()
+                .expect("matching Windows WireGuard upstream exists")
+                .refresh_underlay_routes(&[self.interface_index])
+                .context("refresh Windows WireGuard endpoint underlay route")?;
+            if refreshed {
+                eprintln!(
+                    "fips: refreshed Windows WG endpoint bypass after physical underlay change"
+                );
+            }
+            return Ok(());
         }
-        if let Some(existing) = self.wg_upstream.take() {
-            existing.cleanup().await;
+        if let Some(existing) = self.wg_upstream.as_mut() {
+            existing
+                .cleanup()
+                .await
+                .context("clean up previous Windows WireGuard upstream")?;
+            self.wg_upstream = None;
         }
         if !want_up {
-            return;
+            return Ok(());
         }
-        match crate::wg_upstream_runtime::apply_daemon_wg_upstream(
+        let handle = crate::wg_upstream_runtime::apply_daemon_wg_upstream_for_fips(
             wg_config,
             crate::wg_upstream_runtime::DAEMON_WG_UPSTREAM_HANDSHAKE_TIMEOUT,
+            self.interface_index,
         )
         .await
-        {
-            Ok(handle) => {
-                eprintln!(
-                    "fips: WG upstream up on {} via {} (default route swapped)",
-                    handle.iface, handle.upstream
-                );
-                self.wg_upstream = Some(handle);
-            }
-            Err(error) => {
-                eprintln!("fips: WG upstream not started: {error}");
-            }
-        }
+        .context("start native Windows WireGuard upstream")?;
+        eprintln!(
+            "fips: WG upstream up on {} via {} (default route swapped)",
+            handle.iface, handle.upstream
+        );
+        self.wg_upstream = Some(handle);
+        Ok(())
     }
 
     pub(crate) async fn stop(self) -> Result<()> {
         let mut runtime = self;
+        let mut failures = Vec::new();
         // Tear the WG upstream down BEFORE the FIPS bits so the route
         // revert lands while we still have a sane working tree.
-        if let Some(handle) = runtime.wg_upstream.take() {
-            handle.cleanup().await;
+        if let Some(handle) = runtime.wg_upstream.as_mut() {
+            windows_fips_record_cleanup(
+                &mut failures,
+                "Windows WireGuard upstream",
+                handle.cleanup().await,
+            );
         }
         if let Some(control_pubsub) = runtime.control_pubsub.take() {
             control_pubsub.stop().await;
         }
         runtime.state_control.stop().await;
         runtime.stop.store(true, Ordering::Relaxed);
-        let _ = runtime.session.shutdown();
-        if let Err(error) = crate::windows_tunnel::remove_windows_routes(
-            runtime.interface_index,
-            &runtime.route_targets,
-        ) {
-            eprintln!("fips: failed to remove Windows FIPS routes: {error}");
+        windows_fips_record_cleanup(
+            &mut failures,
+            "FIPS WinTun session",
+            runtime
+                .session
+                .shutdown()
+                .context("shut down FIPS WinTun session"),
+        );
+        windows_fips_record_cleanup(
+            &mut failures,
+            "Windows FIPS tunnel routes",
+            runtime.route_guard.revert(),
+        );
+        if let Some(routes) = runtime.endpoint_bypass_routes.as_mut() {
+            windows_fips_record_cleanup(
+                &mut failures,
+                "Windows FIPS endpoint bypass routes",
+                routes.revert(),
+            );
         }
-        if let Some(underlay) = runtime.endpoint_bypass_underlay.as_ref()
-            && let Err(error) = crate::windows_tunnel::remove_windows_routes(
-                underlay.interface_index,
-                &runtime.endpoint_bypass_routes,
-            )
-        {
-            eprintln!("fips: failed to remove Windows endpoint bypass routes: {error}");
-        }
+        windows_fips_record_cleanup(
+            &mut failures,
+            "pending Windows route obligations",
+            crate::wg_upstream_runtime::retry_pending_windows_route_cleanup(),
+        );
         if let Some(secure_dns) = runtime.secure_dns.take() {
             secure_dns.stop().await;
         }
         runtime.event_rx.close();
-        let _ = runtime.tun_read_thread.join();
+        if runtime.tun_read_thread.join().is_err() {
+            failures.push("FIPS WinTun reader thread panicked".to_string());
+        }
         runtime.mesh_recv_task.abort();
         let _ = runtime.mesh_recv_task.await;
-        runtime
-            .mesh
-            .endpoint()
-            .shutdown()
-            .await
-            .context("failed to stop FIPS endpoint")?;
-        Ok(())
+        windows_fips_record_cleanup(
+            &mut failures,
+            "FIPS endpoint",
+            runtime
+                .mesh
+                .endpoint()
+                .shutdown()
+                .await
+                .context("stop FIPS endpoint"),
+        );
+        windows_fips_finish_cleanup(failures)
     }
 }
 
 #[cfg(target_os = "windows")]
-fn windows_fips_underlay_default_route(
-    tunnel_interface_index: u32,
-) -> Result<crate::wg_upstream_runtime::WindowsDefaultRoute> {
-    let underlay = crate::wg_upstream_runtime::capture_windows_default_route()
-        .context("failed to capture Windows FIPS underlay default route")?;
-    if underlay.interface_index == tunnel_interface_index {
-        return Err(anyhow!(
-            "captured Windows default route already points at the FIPS Wintun adapter (interface={tunnel_interface_index})"
-        ));
+fn windows_fips_record_cleanup(
+    failures: &mut Vec<String>,
+    resource: &str,
+    result: Result<()>,
+) {
+    if let Err(error) = result {
+        failures.push(format!("{resource}: {error:#}"));
     }
-    Ok(underlay)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_fips_finish_cleanup(failures: Vec<String>) -> Result<()> {
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Windows FIPS cleanup incomplete: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_fips_with_cleanup_error(
+    error: anyhow::Error,
+    operation: &str,
+    cleanup: Result<()>,
+) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => anyhow!("{error:#}; {operation}: {cleanup_error:#}"),
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -458,6 +494,27 @@ mod windows_endpoint_bypass_tests {
         );
         assert!(
             windows_fips_endpoint_bypass_targets(&peers, &["10.44.0.2/32".to_string()]).is_empty()
+        );
+    }
+
+    #[test]
+    fn windows_runtime_does_not_swallow_wg_or_stop_cleanup_failures() {
+        let source = include_str!("tunnel_runtime_windows.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("Windows runtime source");
+        assert!(
+            !production.contains("WG upstream not started:"),
+            "new native WireGuard apply failure must propagate"
+        );
+        assert!(
+            !production.contains("if let Some(existing) = self.wg_upstream.take()"),
+            "cleanup must retain the owned handle until teardown succeeds"
+        );
+        assert!(
+            production.contains("windows_fips_finish_cleanup"),
+            "stop must aggregate route, service, config, session, and endpoint failures"
         );
     }
 }

@@ -5,11 +5,13 @@
 # shared devices out of concurrent lanes.
 
 RELEASE_GATE_PARALLEL_PIDS=()
+RELEASE_GATE_PARALLEL_PGIDS=()
 RELEASE_GATE_PARALLEL_LABELS=()
 RELEASE_GATE_PARALLEL_LOGS=()
 RELEASE_GATE_PARALLEL_STARTED_AT=()
 RELEASE_GATE_PARALLEL_LAST_INDEX=""
 RELEASE_GATE_PARALLEL_LOG_DIR=""
+RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS="${RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS:-2}"
 
 release_gate_parallel_init() {
   RELEASE_GATE_PARALLEL_LOG_DIR="$1"
@@ -35,15 +37,40 @@ release_gate_parallel_start() {
   fi
 
   local index="${#RELEASE_GATE_PARALLEL_PIDS[@]}"
-  local log_name log_path
+  local log_name log_path monitor_was_enabled pid pgid actual_pgid caller_pgid
   log_name="$(release_gate_parallel_log_name "$label")"
   log_path="$RELEASE_GATE_PARALLEL_LOG_DIR/${log_name:-lane}-$index.log"
+  monitor_was_enabled=0
+  [[ "$-" == *m* ]] && monitor_was_enabled=1
+  # Bash 3 has no portable `setsid`, but monitor mode gives each background
+  # job a dedicated process group. Every descendant stays in that group even
+  # if it forks during TERM grace or its wrapper exits.
+  set -m
   (
+    # The parent has already placed this wrapper in its own group. Disable
+    # monitor mode inside it so nested background jobs inherit that same group
+    # instead of escaping into child-specific process groups.
+    set +m
     set -euo pipefail
     "$@"
   ) >"$log_path" 2>&1 &
+  pid=$!
+  ((monitor_was_enabled)) || set +m
 
-  RELEASE_GATE_PARALLEL_PIDS[$index]=$!
+  pgid="$pid"
+  actual_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+  caller_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -n "$actual_pgid" && "$actual_pgid" != "$pgid" ]] \
+    || [[ -n "$caller_pgid" && "$pgid" == "$caller_pgid" ]]; then
+    kill -s KILL "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+    printf 'release gate parallel lane failed: no dedicated process group for %s\n' \
+      "$label" >&2
+    return 2
+  fi
+
+  RELEASE_GATE_PARALLEL_PIDS[$index]="$pid"
+  RELEASE_GATE_PARALLEL_PGIDS[$index]="$pgid"
   RELEASE_GATE_PARALLEL_LABELS[$index]="$label"
   RELEASE_GATE_PARALLEL_LOGS[$index]="$log_path"
   RELEASE_GATE_PARALLEL_STARTED_AT[$index]="$(date +%s)"
@@ -51,21 +78,64 @@ release_gate_parallel_start() {
   printf 'Started release-gate lane: %s (log: %s)\n' "$label" "$log_path"
 }
 
-release_gate_parallel_kill_tree() {
-  local pid="$1"
-  local child
-  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
-    release_gate_parallel_kill_tree "$child"
+release_gate_parallel_group_alive() {
+  local pgid="$1"
+  [[ -n "$pgid" ]] && kill -0 -- "-$pgid" >/dev/null 2>&1
+}
+
+release_gate_parallel_terminate_group() {
+  local pgid="$1"
+  local attempts deadline
+  [[ -n "$pgid" ]] || return 0
+
+  if release_gate_parallel_group_alive "$pgid"; then
+    kill -s TERM -- "-$pgid" >/dev/null 2>&1 || true
+  fi
+  deadline=$((SECONDS + RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS))
+  while ((SECONDS < deadline)); do
+    release_gate_parallel_group_alive "$pgid" || return 0
+    sleep 0.05
   done
-  kill "$pid" >/dev/null 2>&1 || true
+  if release_gate_parallel_group_alive "$pgid"; then
+    kill -s KILL -- "-$pgid" >/dev/null 2>&1 || true
+  fi
+  # Descendants are no longer our direct children after their lane wrapper is
+  # reaped. Give their parent a bounded opportunity to reap them so callers do
+  # not observe a just-killed process group as an escaped live lane.
+  attempts=0
+  while ((attempts < 50)); do
+    release_gate_parallel_group_alive "$pgid" || return 0
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  ! release_gate_parallel_group_alive "$pgid"
 }
 
 release_gate_parallel_cancel_all() {
-  local index pid
+  local index pid pgid deadline any_running
   for index in "${!RELEASE_GATE_PARALLEL_PIDS[@]}"; do
-    pid="${RELEASE_GATE_PARALLEL_PIDS[$index]:-}"
-    if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
-      release_gate_parallel_kill_tree "$pid"
+    pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
+    if release_gate_parallel_group_alive "$pgid"; then
+      kill -s TERM -- "-$pgid" >/dev/null 2>&1 || true
+    fi
+  done
+  deadline=$((SECONDS + RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS))
+  while ((SECONDS < deadline)); do
+    any_running=0
+    for index in "${!RELEASE_GATE_PARALLEL_PGIDS[@]}"; do
+      pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
+      if release_gate_parallel_group_alive "$pgid"; then
+        any_running=1
+        break
+      fi
+    done
+    ((any_running)) || break
+    sleep 0.05
+  done
+  for index in "${!RELEASE_GATE_PARALLEL_PGIDS[@]}"; do
+    pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
+    if release_gate_parallel_group_alive "$pgid"; then
+      kill -s KILL -- "-$pgid" >/dev/null 2>&1 || true
     fi
   done
   for index in "${!RELEASE_GATE_PARALLEL_PIDS[@]}"; do
@@ -74,6 +144,7 @@ release_gate_parallel_cancel_all() {
       wait "$pid" >/dev/null 2>&1 || true
       RELEASE_GATE_PARALLEL_PIDS[$index]=""
     fi
+    RELEASE_GATE_PARALLEL_PGIDS[$index]=""
   done
 }
 
@@ -96,6 +167,14 @@ release_gate_parallel_wait() {
   fi
   RELEASE_GATE_PARALLEL_PIDS[$index]=""
 
+  local orphaned_group=0
+  local orphan_cleanup_failed=0
+  local pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
+  if ((status == 0)) && release_gate_parallel_group_alive "$pgid"; then
+    orphaned_group=1
+    release_gate_parallel_terminate_group "$pgid" || orphan_cleanup_failed=1
+  fi
+
   local duration=$(( $(date +%s) - started_at ))
   printf '\n===== release-gate lane: %s (%ss) =====\n' "$label" "$duration"
   if [[ -n "$log_path" && -f "$log_path" ]]; then
@@ -109,6 +188,18 @@ release_gate_parallel_wait() {
     release_gate_parallel_cancel_all
     return "$status"
   fi
+  if ((orphaned_group)); then
+    if ((orphan_cleanup_failed)); then
+      printf 'Release-gate lane failed: %s exited successfully but process group %s survived TERM/KILL cleanup (log: %s)\n' \
+        "$label" "$pgid" "$log_path" >&2
+    else
+      printf 'Release-gate lane failed: %s exited successfully with orphaned process-group descendants (log: %s)\n' \
+        "$label" "$log_path" >&2
+    fi
+    release_gate_parallel_cancel_all
+    return 1
+  fi
+  RELEASE_GATE_PARALLEL_PGIDS[$index]=""
   printf 'Release-gate lane passed: %s in %ss\n' "$label" "$duration"
 }
 

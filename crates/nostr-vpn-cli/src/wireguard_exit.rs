@@ -1,17 +1,16 @@
-use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "wireguard_exit/linux_runtime.rs"]
+mod linux_runtime;
 
-use anyhow::{Context, Result, anyhow};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+
+use anyhow::{Result, anyhow};
 use nostr_vpn_core::config::WireGuardExitConfig;
 
-const WIREGUARD_EXIT_TABLE: u32 = 51_888;
-const WIREGUARD_EXIT_RULE_PRIORITY: u32 = 10_888;
+pub(crate) use linux_runtime::{
+    LinuxWireGuardExitCleanupObligation, LinuxWireGuardExitRuntime,
+    apply_linux_wireguard_exit_upstream, cleanup_linux_wireguard_exit_obligation,
+    cleanup_linux_wireguard_exit_upstream,
+};
 
 pub(crate) fn validate_linux_wireguard_exit_config(config: &WireGuardExitConfig) -> Result<String> {
     if !config.enabled {
@@ -56,307 +55,35 @@ pub(crate) fn linux_wireguard_exit_ipv6_default(config: &WireGuardExitConfig) ->
             .is_some_and(|ip| ip.contains(':'))
 }
 
-pub(crate) fn apply_linux_wireguard_exit_upstream(
-    config: &WireGuardExitConfig,
-    source_cidr: &str,
-    previous_runtime: Option<&crate::LinuxWireGuardExitRuntime>,
-    previous_default_route_hint: Option<&str>,
-) -> Result<crate::LinuxWireGuardExitRuntime> {
-    let iface = validate_linux_wireguard_exit_config(config)?;
-    let created_interface = ensure_linux_wireguard_link(&iface)?;
-    let previous_default_route = previous_runtime
-        .and_then(|runtime| runtime.previous_default_route.clone())
-        .or_else(|| previous_default_route_hint.map(ToOwned::to_owned))
-        .or_else(|| {
-            crate::linux_default_route()
-                .ok()
-                .filter(|route| route.dev != iface)
-                .map(|route| route.line)
-        });
-    let endpoint_bypass_specs = linux_wireguard_exit_endpoint_bypass_specs(
-        config,
-        &iface,
-        previous_default_route.as_deref(),
-    )?;
-    let endpoint_bypass_routes = endpoint_bypass_specs
-        .iter()
-        .map(|route| route.target.clone())
-        .collect::<Vec<_>>();
-    let stale_endpoint_bypass_routes = previous_runtime
-        .map(|runtime| {
-            runtime
-                .endpoint_bypass_routes
-                .iter()
-                .filter(|route| !endpoint_bypass_routes.contains(route))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let private_key_file = write_temp_secret_file(&iface, "key", &config.private_key)?;
-    let psk_file = if config.peer_preshared_key.trim().is_empty() {
-        None
-    } else {
-        Some(write_temp_secret_file(
-            &iface,
-            "psk",
-            &config.peer_preshared_key,
-        )?)
-    };
-
-    let result = apply_linux_wireguard_exit_upstream_inner(
-        config,
-        &iface,
-        source_cidr,
-        &private_key_file,
-        psk_file.as_ref(),
-        &endpoint_bypass_specs,
-    );
-
-    let _ = fs::remove_file(&private_key_file);
-    if let Some(psk_file) = psk_file {
-        let _ = fs::remove_file(psk_file);
-    }
-
-    result.map(|()| {
-        for route in stale_endpoint_bypass_routes {
-            let _ = crate::delete_linux_endpoint_bypass_route(&route);
-        }
-        crate::LinuxWireGuardExitRuntime {
-            interface: iface,
-            source_cidr: source_cidr.to_string(),
-            table: WIREGUARD_EXIT_TABLE,
-            priority: WIREGUARD_EXIT_RULE_PRIORITY,
-            created_interface,
-            endpoint_bypass_routes,
-            previous_default_route,
-        }
-    })
-}
-
-fn apply_linux_wireguard_exit_upstream_inner(
-    config: &WireGuardExitConfig,
-    iface: &str,
-    source_cidr: &str,
-    private_key_file: &PathBuf,
-    psk_file: Option<&PathBuf>,
-    endpoint_bypass_specs: &[crate::LinuxEndpointBypassRoute],
-) -> Result<()> {
-    crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("address")
-            .arg("replace")
-            .arg(config.address.trim())
-            .arg("dev")
-            .arg(iface),
-    )?;
-    for route in endpoint_bypass_specs {
-        crate::apply_linux_endpoint_bypass_route(route)?;
-    }
-
-    let mut wg = ProcessCommand::new("wg");
-    wg.arg("set")
-        .arg(iface)
-        .arg("private-key")
-        .arg(private_key_file)
-        .arg("peer")
-        .arg(config.peer_public_key.trim())
-        .arg("allowed-ips")
-        .arg(config.allowed_ips.join(","))
-        .arg("endpoint")
-        .arg(config.endpoint.trim());
-    if let Some(psk_file) = psk_file {
-        wg.arg("preshared-key").arg(psk_file);
-    }
-    if config.persistent_keepalive_secs > 0 {
-        wg.arg("persistent-keepalive")
-            .arg(config.persistent_keepalive_secs.to_string());
-    }
-    crate::run_checked(&mut wg)?;
-
-    crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("link")
-            .arg("set")
-            .arg("mtu")
-            .arg(config.mtu.to_string())
-            .arg("up")
-            .arg("dev")
-            .arg(iface),
-    )?;
-
-    apply_linux_wireguard_exit_default_route(iface, config.address.trim())?;
-
-    crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("-4")
-            .arg("route")
-            .arg("replace")
-            .arg("default")
-            .arg("dev")
-            .arg(iface)
-            .arg("table")
-            .arg(WIREGUARD_EXIT_TABLE.to_string()),
-    )?;
-    ensure_linux_wireguard_exit_policy_rule(source_cidr)?;
-    crate::flush_linux_route_cache()
-}
-
-pub(crate) fn cleanup_linux_wireguard_exit_upstream(runtime: &crate::LinuxWireGuardExitRuntime) {
-    restore_linux_wireguard_exit_default_route(runtime);
-    let _ = crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("-4")
-            .arg("rule")
-            .arg("del")
-            .arg("priority")
-            .arg(runtime.priority.to_string())
-            .arg("from")
-            .arg(&runtime.source_cidr)
-            .arg("table")
-            .arg(runtime.table.to_string()),
-    );
-    let _ = crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("-4")
-            .arg("route")
-            .arg("flush")
-            .arg("table")
-            .arg(runtime.table.to_string()),
-    );
-    for route in &runtime.endpoint_bypass_routes {
-        let _ = crate::delete_linux_endpoint_bypass_route(route);
-    }
-    if runtime.created_interface {
-        let _ = crate::run_checked(
-            ProcessCommand::new("ip")
-                .arg("link")
-                .arg("del")
-                .arg("dev")
-                .arg(&runtime.interface),
-        );
-    }
-    let _ = crate::flush_linux_route_cache();
-}
-
-fn linux_wireguard_exit_endpoint_bypass_specs(
-    config: &WireGuardExitConfig,
-    iface: &str,
-    previous_default_route: Option<&str>,
-) -> Result<Vec<crate::LinuxEndpointBypassRoute>> {
-    let hosts = wireguard_exit_endpoint_ipv4_hosts(&config.endpoint);
-    if hosts.is_empty() {
-        return Ok(Vec::new());
-    }
-    crate::linux_bypass_route_specs_for_hosts(hosts, iface, previous_default_route)
-}
-
-fn apply_linux_wireguard_exit_default_route(iface: &str, address: &str) -> Result<()> {
-    let current_default_device = crate::linux_default_route().ok().map(|route| route.dev);
-    if linux_wireguard_exit_must_delete_underlay_default(current_default_device.as_deref(), iface) {
-        crate::delete_linux_default_route()
-            .context("failed to invalidate the underlay default route")?;
-    }
-    let mut command = ProcessCommand::new("ip");
-    command
-        .arg("-4")
-        .arg("route")
-        .arg("replace")
-        .arg("default")
-        .arg("dev")
-        .arg(iface);
-    if let Ok(source) = crate::strip_cidr(address).parse::<Ipv4Addr>() {
-        command.arg("src").arg(source.to_string());
-    }
-    crate::run_checked(&mut command)
-}
-
-fn linux_wireguard_exit_must_delete_underlay_default(
-    current_device: Option<&str>,
+fn validated_linux_wireguard_underlay_default_route(
+    route: &str,
     wireguard_iface: &str,
-) -> bool {
-    current_device.is_some_and(|current| current != wireguard_iface)
-}
-
-fn restore_linux_wireguard_exit_default_route(runtime: &crate::LinuxWireGuardExitRuntime) {
-    let current_is_wireguard = crate::linux_default_route()
-        .map(|route| route.dev == runtime.interface)
-        .unwrap_or(true);
-    if !current_is_wireguard {
-        return;
+) -> Option<String> {
+    let mut lines = route.lines().map(str::trim).filter(|line| !line.is_empty());
+    let line = lines.next()?;
+    if lines.next().is_some() || line.split_whitespace().next() != Some("default") {
+        return None;
     }
-
-    if let Some(route) = runtime.previous_default_route.as_deref() {
-        if let Err(error) = crate::restore_linux_default_route(route) {
-            eprintln!("fips: failed to restore pre-WireGuard default route: {error}");
-        }
-    } else if let Err(error) = delete_linux_wireguard_exit_default_route(&runtime.interface) {
-        eprintln!("fips: failed to delete WireGuard exit default route: {error}");
+    let spec = crate::linux_route_get_spec_from_output(line)?;
+    if spec.dev == wireguard_iface {
+        return None;
     }
+    Some(line.to_string())
 }
 
-fn delete_linux_wireguard_exit_default_route(iface: &str) -> Result<()> {
-    crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("-4")
-            .arg("route")
-            .arg("del")
-            .arg("default")
-            .arg("dev")
-            .arg(iface),
-    )
+pub(crate) fn select_linux_wireguard_underlay_default_route(
+    fresh_hint: Option<&str>,
+    previous_runtime_route: Option<&str>,
+    current_route: Option<&str>,
+    wireguard_iface: &str,
+) -> Option<String> {
+    [fresh_hint, previous_runtime_route, current_route]
+        .into_iter()
+        .flatten()
+        .find_map(|route| validated_linux_wireguard_underlay_default_route(route, wireguard_iface))
 }
 
-fn ensure_linux_wireguard_link(iface: &str) -> Result<bool> {
-    let exists = ProcessCommand::new("ip")
-        .arg("link")
-        .arg("show")
-        .arg("dev")
-        .arg(iface)
-        .status()
-        .with_context(|| "failed to inspect WireGuard exit interface")?
-        .success();
-    if exists {
-        return Ok(false);
-    }
-
-    crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("link")
-            .arg("add")
-            .arg("dev")
-            .arg(iface)
-            .arg("type")
-            .arg("wireguard"),
-    )?;
-    Ok(true)
-}
-
-fn ensure_linux_wireguard_exit_policy_rule(source_cidr: &str) -> Result<()> {
-    let output =
-        crate::command_stdout_checked(ProcessCommand::new("ip").arg("-4").arg("rule").arg("show"))?;
-    if linux_wireguard_exit_policy_rule_exists(
-        &output,
-        source_cidr,
-        WIREGUARD_EXIT_TABLE,
-        WIREGUARD_EXIT_RULE_PRIORITY,
-    ) {
-        return Ok(());
-    }
-    crate::run_checked(
-        ProcessCommand::new("ip")
-            .arg("-4")
-            .arg("rule")
-            .arg("add")
-            .arg("priority")
-            .arg(WIREGUARD_EXIT_RULE_PRIORITY.to_string())
-            .arg("from")
-            .arg(source_cidr)
-            .arg("table")
-            .arg(WIREGUARD_EXIT_TABLE.to_string()),
-    )
-}
-
-fn wireguard_exit_endpoint_ipv4_hosts(endpoint: &str) -> Vec<Ipv4Addr> {
+pub(super) fn wireguard_exit_endpoint_ipv4_hosts(endpoint: &str) -> Vec<Ipv4Addr> {
     let Some((host, port)) = crate::split_host_port(endpoint, 51820) else {
         return Vec::new();
     };
@@ -383,61 +110,6 @@ fn wireguard_exit_endpoint_ipv4_hosts(endpoint: &str) -> Vec<Ipv4Addr> {
     hosts
 }
 
-pub(crate) fn linux_wireguard_exit_policy_rule_exists(
-    output: &str,
-    source_cidr: &str,
-    table: u32,
-    priority: u32,
-) -> bool {
-    let priority_prefix = format!("{priority}:");
-    let table_lookup = format!("lookup {table}");
-    output.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with(&priority_prefix)
-            && line.contains("from ")
-            && line.contains(source_cidr)
-            && line.contains(&table_lookup)
-    })
-}
-
-fn write_temp_secret_file(iface: &str, suffix: &str, secret: &str) -> Result<PathBuf> {
-    let temp_dir = std::env::temp_dir();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    for attempt in 0..128u32 {
-        let path = temp_dir.join(format!(
-            "nvpn-{iface}-{suffix}-{}-{nonce}-{attempt}",
-            std::process::id()
-        ));
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true).mode(0o600);
-        let mut file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to create {}", path.display()));
-            }
-        };
-        if let Err(error) = file.write_all(secret.trim().as_bytes()) {
-            let _ = fs::remove_file(&path);
-            return Err(error).with_context(|| format!("failed to write {}", path.display()));
-        }
-        if let Err(error) = file.write_all(b"\n") {
-            let _ = fs::remove_file(&path);
-            return Err(error).with_context(|| format!("failed to write {}", path.display()));
-        }
-        file.flush()
-            .with_context(|| format!("failed to flush {}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to restrict {}", path.display()))?;
-        return Ok(path);
-    }
-    Err(anyhow!(
-        "failed to allocate unique temp secret file for {iface}"
-    ))
-}
-
 fn linux_iface_name_is_safe(iface: &str) -> bool {
     !iface.is_empty()
         && iface.len() <= 15
@@ -451,27 +123,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::{
-        linux_wireguard_exit_must_delete_underlay_default, linux_wireguard_exit_policy_rule_exists,
-        wireguard_exit_endpoint_ipv4_hosts, write_temp_secret_file,
+        select_linux_wireguard_underlay_default_route, wireguard_exit_endpoint_ipv4_hosts,
     };
-
-    #[test]
-    fn policy_rule_parser_matches_exact_managed_rule() {
-        let output = "0:\tfrom all lookup local\n10888:\tfrom 10.44.0.0/16 lookup 51888\n32766:\tfrom all lookup main\n";
-
-        assert!(linux_wireguard_exit_policy_rule_exists(
-            output,
-            "10.44.0.0/16",
-            51_888,
-            10_888
-        ));
-        assert!(!linux_wireguard_exit_policy_rule_exists(
-            output,
-            "10.45.0.0/16",
-            51_888,
-            10_888
-        ));
-    }
 
     #[test]
     fn endpoint_bypass_hosts_parse_ipv4_endpoint() {
@@ -482,43 +135,41 @@ mod tests {
     }
 
     #[test]
-    fn wireguard_default_transition_invalidates_a_different_underlay_route() {
-        assert!(linux_wireguard_exit_must_delete_underlay_default(
-            Some("eth0"),
-            "nvpn-wg-exit"
-        ));
-        assert!(!linux_wireguard_exit_must_delete_underlay_default(
-            Some("nvpn-wg-exit"),
-            "nvpn-wg-exit"
-        ));
-        assert!(!linux_wireguard_exit_must_delete_underlay_default(
-            None,
-            "nvpn-wg-exit"
-        ));
+    fn fresh_underlay_hint_replaces_stale_wireguard_runtime_route() {
+        let old = "default via 192.0.2.1 dev enp1s0 src 192.0.2.10 metric 100";
+        let fresh = "default via 198.51.100.1 dev enp7s0 src 198.51.100.10 metric 600";
+        let selected = select_linux_wireguard_underlay_default_route(
+            Some(fresh),
+            Some(old),
+            Some("default dev nvwg0 src 10.200.0.2"),
+            "nvwg0",
+        )
+        .expect("fresh physical default");
+        assert_eq!(selected, fresh);
+
+        let bypass = crate::linux_endpoint_bypass_route_from_output(
+            "203.0.113.9".parse().expect("host"),
+            "203.0.113.9 via 192.0.2.1 dev enp1s0 src 192.0.2.10",
+            "nvwg0",
+            Some(&selected),
+        )
+        .expect("fresh WireGuard endpoint bypass");
+        assert_eq!(bypass.dev, "enp7s0");
+        assert_eq!(bypass.gateway.as_deref(), Some("198.51.100.1"));
+        assert_eq!(bypass.src.as_deref(), Some("198.51.100.10"));
     }
 
     #[test]
-    fn temp_secret_files_are_unique_and_private() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let first = write_temp_secret_file("nvpn-test", "key", "secret-a").expect("first secret");
-        let second = write_temp_secret_file("nvpn-test", "key", "secret-b").expect("second secret");
-
-        assert_ne!(first, second);
+    fn rejects_tunnel_and_malformed_default_route_hints() {
         assert_eq!(
-            std::fs::read_to_string(&first).expect("read first"),
-            "secret-a\n"
+            select_linux_wireguard_underlay_default_route(
+                Some("default dev nvwg0"),
+                Some("not-default via 192.0.2.1 dev enp1s0"),
+                Some("default via 192.0.2.1 dev enp1s0"),
+                "nvwg0",
+            )
+            .as_deref(),
+            Some("default via 192.0.2.1 dev enp1s0")
         );
-        assert_eq!(
-            std::fs::metadata(&first)
-                .expect("first metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-
-        let _ = std::fs::remove_file(first);
-        let _ = std::fs::remove_file(second);
     }
 }

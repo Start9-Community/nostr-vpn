@@ -10,73 +10,206 @@ pub async fn apply_daemon_wg_upstream(
     config: &WireGuardExitConfig,
     handshake_timeout: Duration,
 ) -> Result<DaemonWgUpstream> {
-    match apply_daemon_wg_upstream_native(config, handshake_timeout).await {
-        Ok(handle) => return Ok(handle),
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                "wg-upstream: native WireGuardNT backend unavailable; falling back to userspace"
-            );
-        }
-    }
-    apply_daemon_wg_upstream_userspace(config, handshake_timeout).await
+    apply_daemon_wg_upstream_excluding(config, handshake_timeout, &[]).await
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) async fn apply_daemon_wg_upstream_for_fips(
+    config: &WireGuardExitConfig,
+    handshake_timeout: Duration,
+    fips_interface_index: u32,
+) -> Result<DaemonWgUpstream> {
+    apply_daemon_wg_upstream_excluding(config, handshake_timeout, &[fips_interface_index]).await
+}
+
+#[cfg(target_os = "windows")]
+async fn apply_daemon_wg_upstream_excluding(
+    config: &WireGuardExitConfig,
+    handshake_timeout: Duration,
+    excluded_tunnel_interfaces: &[u32],
+) -> Result<DaemonWgUpstream> {
+    apply_daemon_wg_upstream_native(config, handshake_timeout, excluded_tunnel_interfaces).await
 }
 
 #[cfg(target_os = "windows")]
 async fn apply_daemon_wg_upstream_native(
     config: &WireGuardExitConfig,
     handshake_timeout: Duration,
+    excluded_tunnel_interfaces: &[u32],
 ) -> Result<DaemonWgUpstream> {
     let tools = resolve_windows_wireguard_tools()?;
     let fingerprint = WireGuardExitFingerprint::from_config(config);
     let tunnel_name = windows_native_wireguard_tunnel_name(config);
-    let upstream = resolve_windows_wireguard_endpoint(&config.endpoint).await?;
-    let config_path = write_windows_native_wireguard_config(&tunnel_name, config)?;
+    let owner_token = windows_native_wireguard_owner_token();
+    let owned_config =
+        write_windows_native_wireguard_config(&tunnel_name, config, &owner_token)?;
 
     let mut tunnel = WindowsNativeWireGuardTunnel {
         name: tunnel_name.clone(),
-        config_path,
+        config_path: owned_config.transfer(),
         wireguard_exe: tools.wireguard_exe.clone(),
+        owner_token,
+        service_owned: false,
+        config_owned: true,
     };
 
-    let _ = run_windows_wireguard_command(
+    if let Err(error) =
+        ensure_windows_native_wireguard_service_absent(&tools.wireguard_exe, &tunnel_name)
+    {
+        let cleanup = tunnel.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "remove owned native WireGuard config after service-name collision",
+            cleanup,
+        ));
+    }
+    if let Err(error) = create_windows_native_wireguard_service(
         &tools.wireguard_exe,
-        &["/uninstalltunnelservice", &tunnel_name],
-    );
-    let config_path_arg = tunnel.config_path.to_string_lossy().into_owned();
-    if let Err(error) = run_windows_wireguard_command(
-        &tools.wireguard_exe,
-        &["/installtunnelservice", &config_path_arg],
+        &tunnel.config_path,
+        &tunnel_name,
+        &tunnel.owner_token,
     )
     .with_context(|| {
         format!(
-            "install native WireGuardNT tunnel service from {}",
+            "create owned native WireGuardNT tunnel service from {}",
             tunnel.config_path.display()
         )
     }) {
-        let _ = std::fs::remove_file(&tunnel.config_path);
-        return Err(error);
+        let cleanup = tunnel.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "remove owned native WireGuard config",
+            cleanup,
+        ));
+    }
+    tunnel.service_owned = true;
+    if let Err(error) = configure_and_start_windows_native_wireguard_service(&tunnel_name) {
+        return Err(with_windows_native_cleanup_error(
+            error.context("configure and start owned native WireGuardNT tunnel service"),
+            "remove owned native WireGuard service/config after startup failure",
+            tunnel.cleanup(),
+        ));
     }
     // The WireGuard tunnel service receives the config path as its
     // startup argument, so keep the file around while the native
     // service is alive. `WindowsNativeWireGuardTunnel::cleanup` removes
     // it after uninstalling the service.
 
-    if !wait_windows_native_wireguard_handshake(&tools.wg_exe, &tunnel_name, handshake_timeout)
-        .await?
+    let handshake_completed = match wait_windows_native_wireguard_handshake(
+        &tools.wg_exe,
+        &tunnel_name,
+        &config.peer_public_key,
+        handshake_timeout,
+    )
+    .await
     {
-        let _ = tunnel.cleanup();
-        return Err(anyhow!(
-            "native WireGuardNT handshake to {upstream} did not complete within {}s",
+        Ok(completed) => completed,
+        Err(error) => {
+            return Err(with_windows_native_cleanup_error(
+                error.context("query native WireGuardNT handshake"),
+                "clean up native WireGuard after handshake query failure",
+                tunnel.cleanup(),
+            ));
+        }
+    };
+    if !handshake_completed {
+        let error = anyhow!(
+            "native WireGuardNT handshake to {} did not complete within {}s",
+            config.endpoint,
             handshake_timeout.as_secs()
+        );
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "clean up native WireGuard after handshake timeout",
+            tunnel.cleanup(),
         ));
+    }
+
+    let mut upstream = match windows_native_wireguard_peer_endpoint(
+        &tools.wg_exe,
+        &tunnel_name,
+        &config.peer_public_key,
+    ) {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            return Err(with_windows_native_cleanup_error(
+                error.context("read concrete native WireGuardNT peer endpoint"),
+                "clean up native WireGuard after endpoint query failure",
+                tunnel.cleanup(),
+            ));
+        }
+    };
+    let interface_index = match resolve_windows_interface_index_for_alias_name(&tunnel_name) {
+        Ok(index) => index,
+        Err(error) => {
+            return Err(with_windows_native_cleanup_error(
+                error.context("resolve native WireGuardNT interface"),
+                "clean up native WireGuard after interface resolution failure",
+                tunnel.cleanup(),
+            ));
+        }
+    };
+    let mut full_route = match apply_windows_endpoint_bypass_route(
+        interface_index,
+        upstream,
+        excluded_tunnel_interfaces,
+    ) {
+        Ok(route) => route,
+        Err(error) => {
+            return Err(with_windows_native_cleanup_error(
+                error.context("guard native WireGuard endpoint underlay route"),
+                "clean up native WireGuard after route failure",
+                tunnel.cleanup(),
+            ));
+        }
+    };
+    let verified_upstream = match windows_native_wireguard_peer_endpoint(
+        &tools.wg_exe,
+        &tunnel_name,
+        &config.peer_public_key,
+    ) {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let route_cleanup = full_route.revert();
+            let cleanup = tunnel.cleanup();
+            return Err(with_windows_native_cleanup_error(
+                with_windows_native_cleanup_error(
+                    error.context("recheck concrete native WireGuardNT peer endpoint"),
+                    "revert native WireGuard routes after endpoint recheck failure",
+                    route_cleanup,
+                ),
+                "clean up native WireGuard after endpoint recheck failure",
+                cleanup,
+            ));
+        }
+    };
+    if verified_upstream != upstream {
+        if let Err(error) = full_route
+            .reconcile_endpoint_and_underlay(verified_upstream, excluded_tunnel_interfaces)
+        {
+            let route_cleanup = full_route.revert();
+            let cleanup = tunnel.cleanup();
+            return Err(with_windows_native_cleanup_error(
+                with_windows_native_cleanup_error(
+                    error.context("migrate native WireGuard route to rechecked peer endpoint"),
+                    "revert native WireGuard routes after endpoint migration failure",
+                    route_cleanup,
+                ),
+                "clean up native WireGuard after endpoint migration failure",
+                cleanup,
+            ));
+        }
+        upstream = verified_upstream;
     }
 
     Ok(DaemonWgUpstream {
         iface: tunnel_name,
         upstream,
-        full_route: None,
-        backend: WindowsWgUpstreamBackend::Native(tunnel),
+        interface_index,
+        full_route: Some(full_route),
+        tunnel,
+        wg_exe: tools.wg_exe,
+        peer_public_key: config.peer_public_key.clone(),
         config_fingerprint: fingerprint,
     })
 }
@@ -161,88 +294,461 @@ fn windows_native_wireguard_tunnel_name(config: &WireGuardExitConfig) -> String 
         }
     }
     let name = name.trim_matches('-');
-    if name.is_empty() {
-        "nvpn-wg-upstream".to_string()
+    let candidate = if name.is_empty() {
+        "nvpn-wg-upstream"
     } else {
-        name.chars().take(64).collect()
+        name
+    };
+    if windows_wireguard_tunnel_name_is_valid(candidate) {
+        candidate.to_string()
+    } else {
+        format!("nvpn-{:016x}", windows_wireguard_name_hash(raw.as_bytes()))
     }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_wireguard_tunnel_name_is_valid(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 32
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_=+.-".contains(&byte))
+    {
+        return false;
+    }
+    let basename = name.rsplit_once('.').map_or(name, |(basename, _)| basename);
+    !matches!(
+        basename.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_wireguard_name_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_native_wireguard_owner_token() -> String {
+    static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nonce = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("nvpn-{now:032x}-{:08x}-{nonce:016x}", std::process::id())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_native_wireguard_owner_marker_path(path: &Path) -> PathBuf {
+    let mut marker = path.as_os_str().to_os_string();
+    marker.push(":nvpn-owner");
+    PathBuf::from(marker)
+}
+
+#[cfg(target_os = "windows")]
+fn write_windows_native_wireguard_owner_marker(path: &Path, owner_token: &str) -> Result<()> {
+    let marker_path = windows_native_wireguard_owner_marker_path(path);
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)
+        .with_context(|| format!("create native WireGuard owner marker {}", path.display()))?;
+    std::io::Write::write_all(&mut marker, owner_token.as_bytes())
+        .and_then(|()| std::io::Write::flush(&mut marker))
+        .and_then(|()| marker.sync_all())
+        .with_context(|| format!("write native WireGuard owner marker {}", path.display()))
 }
 
 #[cfg(target_os = "windows")]
 fn write_windows_native_wireguard_config(
     tunnel_name: &str,
     config: &WireGuardExitConfig,
-) -> Result<PathBuf> {
-    let root = std::env::var_os("ProgramData")
+    owner_token: &str,
+) -> Result<OwnedWindowsNativeWireGuardConfig> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let program_data = std::env::var_os("ProgramData")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-        .join("nostr-vpn")
-        .join("wireguard");
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let app_root = program_data.join("nostr-vpn");
+    let root = app_root.join("wireguard");
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create native WireGuard config dir {}", root.display()))?;
+    for component in [&program_data, &app_root, &root] {
+        ensure_windows_path_is_not_reparse_point(component)?;
+    }
+    restrict_and_verify_windows_native_wireguard_acl(&root, true)
+        .context("restrict and verify native WireGuard config directory")?;
+
     let path = root.join(format!("{tunnel_name}.conf"));
     let config_text = nostr_vpn_core::config::wireguard_exit_config_text(config);
-    std::fs::write(&path, config_text)
-        .with_context(|| format!("write native WireGuard config {}", path.display()))?;
-    restrict_windows_native_wireguard_config_acl(&path);
-    Ok(path)
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)
+        .with_context(|| {
+            format!(
+                "create exclusively-owned native WireGuard config {}",
+                path.display()
+            )
+        })?;
+    let mut owned = OwnedWindowsNativeWireGuardConfig {
+        path: path.clone(),
+        owner_token: owner_token.to_string(),
+        owner_marker_written: false,
+        owned: true,
+    };
+    let file_attributes = match file.metadata() {
+        Ok(metadata) => metadata.file_attributes(),
+        Err(error) => {
+            drop(file);
+            let cleanup = owned.cleanup();
+            return Err(with_windows_native_cleanup_error(
+                error.into(),
+                "remove unauditable native WireGuard config",
+                cleanup,
+            ));
+        }
+    };
+    if file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        drop(file);
+        let cleanup = owned.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            anyhow!(
+                "refusing to write native WireGuard secret through reparse point {}",
+                path.display()
+            ),
+            "remove reparse-point native WireGuard config",
+            cleanup,
+        ));
+    }
+    if let Err(error) = restrict_and_verify_windows_native_wireguard_acl(&path, false) {
+        drop(file);
+        let cleanup = owned.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "remove unrestricted native WireGuard config",
+            cleanup,
+        ));
+    }
+    if let Err(error) = ensure_windows_path_is_not_reparse_point(&path) {
+        drop(file);
+        let cleanup = owned.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "remove reparse-point native WireGuard config",
+            cleanup,
+        ));
+    }
+    if let Err(error) = write_windows_native_wireguard_owner_marker(&path, owner_token) {
+        drop(file);
+        let cleanup = owned.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "remove native WireGuard config with incomplete ownership marker",
+            cleanup,
+        ));
+    }
+    owned.owner_marker_written = true;
+    if let Err(error) = std::io::Write::write_all(&mut file, config_text.as_bytes())
+        .and_then(|()| std::io::Write::flush(&mut file))
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("write and sync native WireGuard config {}", path.display()))
+    {
+        drop(file);
+        let cleanup = owned.cleanup();
+        return Err(with_windows_native_cleanup_error(
+            error,
+            "remove partial native WireGuard config",
+            cleanup,
+        ));
+    }
+    Ok(owned)
 }
 
 #[cfg(target_os = "windows")]
-fn restrict_windows_native_wireguard_config_acl(path: &Path) {
-    let output = ProcessCommand::new("icacls")
-        .arg(path)
-        .args([
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:F",
-            "*S-1-5-32-544:F",
-        ])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                status = %output.status,
-                stdout = %stdout.trim(),
-                stderr = %stderr.trim(),
-                "wg-upstream: failed to restrict native WireGuard config ACL"
-            );
+struct OwnedWindowsNativeWireGuardConfig {
+    path: PathBuf,
+    owner_token: String,
+    owner_marker_written: bool,
+    owned: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl OwnedWindowsNativeWireGuardConfig {
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.owned {
+            return Ok(());
         }
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                "wg-upstream: failed to run icacls for native WireGuard config"
+        if self.owner_marker_written
+            && !windows_native_wireguard_config_is_owned(&self.path, &self.owner_token)?
+        {
+            self.owned = false;
+            return Ok(());
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {
+                self.owned = false;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.owned = false;
+                Ok(())
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("remove owned config {}", self.path.display())),
+        }
+    }
+
+    fn transfer(mut self) -> PathBuf {
+        self.owned = false;
+        self.path.clone()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OwnedWindowsNativeWireGuardConfig {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            if self.owner_marker_written && self.owned {
+                retain_pending_windows_native_cleanup(WindowsNativeWireGuardCleanupState {
+                    name: String::new(),
+                    config_path: self.path.clone(),
+                    wireguard_exe: PathBuf::new(),
+                    owner_token: self.owner_token.clone(),
+                    service_owned: false,
+                    config_owned: true,
+                });
+            }
+            eprintln!(
+                "wg-upstream: WARNING — partial native WireGuard config cleanup retained: \
+                 {error:#}"
             );
         }
     }
 }
 
 #[cfg(target_os = "windows")]
-async fn resolve_windows_wireguard_endpoint(endpoint: &str) -> Result<SocketAddr> {
-    let mut addrs = tokio::net::lookup_host(endpoint.trim())
-        .await
-        .with_context(|| format!("resolve WireGuard endpoint {endpoint}"))?;
-    addrs
-        .next()
-        .ok_or_else(|| anyhow!("WireGuard endpoint {endpoint} resolved no addresses"))
+fn windows_native_wireguard_config_is_owned(path: &Path, owner_token: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect owned config {}", path.display()));
+        }
+    }
+    ensure_windows_path_is_not_reparse_point(path)?;
+    let marker = std::fs::read_to_string(windows_native_wireguard_owner_marker_path(path))
+        .with_context(|| format!("read native WireGuard owner marker {}", path.display()))?;
+    if marker == owner_token {
+        Ok(true)
+    } else {
+        Err(anyhow!(
+            "refusing to remove foreign same-name native WireGuard config {}",
+            path.display()
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn pending_windows_native_cleanup(
+) -> &'static std::sync::Mutex<Vec<WindowsNativeWireGuardCleanupState>> {
+    static PENDING: std::sync::OnceLock<
+        std::sync::Mutex<Vec<WindowsNativeWireGuardCleanupState>>,
+    > = std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn retain_pending_windows_native_cleanup(cleanup: WindowsNativeWireGuardCleanupState) {
+    let mut pending = pending_windows_native_cleanup()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = pending
+        .iter_mut()
+        .find(|existing| existing.owner_token == cleanup.owner_token)
+    {
+        existing.service_owned |= cleanup.service_owned;
+        existing.config_owned |= cleanup.config_owned;
+    } else {
+        pending.push(cleanup);
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn pending_windows_native_cleanup_snapshot(
+) -> Vec<WindowsNativeWireGuardCleanupState> {
+    pending_windows_native_cleanup()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn retry_pending_windows_native_cleanup() -> Result<()> {
+    let pending = {
+        let mut guard = pending_windows_native_cleanup()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *guard)
+    };
+    let mut remaining = Vec::new();
+    let mut failures = Vec::new();
+    for mut cleanup in pending {
+        if let Err(error) = cleanup_windows_native_wireguard_state(&mut cleanup) {
+            failures.push(format!("{error:#}"));
+            remaining.push(cleanup);
+        }
+    }
+    for cleanup in remaining {
+        retain_pending_windows_native_cleanup(cleanup);
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "pending native WireGuard cleanup incomplete: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_path_is_not_reparse_point(path: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect native WireGuard path {}", path.display()))?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(anyhow!(
+            "refusing native WireGuard secret path containing reparse point {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn restrict_and_verify_windows_native_wireguard_acl(path: &Path, directory: bool) -> Result<()> {
+    let security_type = if directory {
+        "DirectorySecurity"
+    } else {
+        "FileSecurity"
+    };
+    let inheritance = if directory {
+        "[System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'"
+    } else {
+        "[System.Security.AccessControl.InheritanceFlags]::None"
+    };
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $path = {}; \
+         $allowed = @('S-1-5-18', 'S-1-5-32-544'); \
+         $acl = New-Object System.Security.AccessControl.{security_type}; \
+         $acl.SetAccessRuleProtection($true, $false); \
+         foreach ($sidValue in $allowed) {{ \
+           $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue); \
+           $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(\
+             $sid, [System.Security.AccessControl.FileSystemRights]::FullControl, \
+             {inheritance}, [System.Security.AccessControl.PropagationFlags]::None, \
+             [System.Security.AccessControl.AccessControlType]::Allow); \
+           $acl.AddAccessRule($rule) | Out-Null; \
+         }}; \
+         Set-Acl -LiteralPath $path -AclObject $acl; \
+         $actual = Get-Acl -LiteralPath $path; \
+         if (-not $actual.AreAccessRulesProtected) {{ throw 'ACL inheritance is enabled' }}; \
+         $seen = @{{}}; \
+         foreach ($rule in $actual.Access) {{ \
+           $sid = $rule.IdentityReference.Translate(\
+             [System.Security.Principal.SecurityIdentifier]).Value; \
+           if ($allowed -notcontains $sid -or \
+               $rule.AccessControlType -ne \
+                 [System.Security.AccessControl.AccessControlType]::Allow -or \
+               ($rule.FileSystemRights -band \
+                 [System.Security.AccessControl.FileSystemRights]::FullControl) -ne \
+                 [System.Security.AccessControl.FileSystemRights]::FullControl) {{ \
+             throw \"unexpected ACL entry $sid $($rule.FileSystemRights)\"; \
+           }}; \
+           $seen[$sid] = $true; \
+         }}; \
+         foreach ($sid in $allowed) {{ \
+           if (-not $seen.ContainsKey($sid)) {{ throw \"missing ACL entry $sid\" }} \
+         }}",
+        windows_powershell_literal(&path.display().to_string()),
+    );
+    let output = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow!(
+                "Windows ACL restriction/audit failed with {}: stdout={:?}, stderr={:?}",
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            ))
+        }
+        Err(error) => Err(error).context("run native WireGuard ACL restriction/audit"),
+    }
 }
 
 #[cfg(target_os = "windows")]
 async fn wait_windows_native_wireguard_handshake(
     wg_exe: &Path,
     tunnel_name: &str,
+    peer_public_key: &str,
     timeout: Duration,
 ) -> Result<bool> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if windows_native_wireguard_has_handshake(wg_exe, tunnel_name)? {
-            return Ok(true);
-        }
+        let query_error =
+            match windows_native_wireguard_has_handshake(wg_exe, tunnel_name, peer_public_key) {
+            Ok(true) => return Ok(true),
+            Ok(false) => None,
+            Err(error) => Some(error),
+        };
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            if let Some(error) = query_error {
+                return Err(error.context(format!(
+                    "native WireGuard interface {tunnel_name} never became queryable"
+                )));
+            }
             return Ok(false);
         }
         tokio::time::sleep(remaining.min(Duration::from_millis(500))).await;
@@ -250,241 +756,225 @@ async fn wait_windows_native_wireguard_handshake(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_native_wireguard_has_handshake(wg_exe: &Path, tunnel_name: &str) -> Result<bool> {
+fn windows_native_wireguard_has_handshake(
+    wg_exe: &Path,
+    tunnel_name: &str,
+    peer_public_key: &str,
+) -> Result<bool> {
     let output = ProcessCommand::new(wg_exe)
         .args(["show", tunnel_name, "latest-handshakes"])
         .output()
         .with_context(|| format!("query native WireGuard handshakes for {tunnel_name}"))?;
-    if output.status.success()
-        && parse_windows_wireguard_latest_handshakes(&String::from_utf8_lossy(&output.stdout))
-    {
-        return Ok(true);
-    }
-
-    let output = ProcessCommand::new(wg_exe)
-        .args(["show", "all", "latest-handshakes"])
-        .output()
-        .with_context(|| "query native WireGuard handshakes for all tunnels")?;
-    if output.status.success()
-        && parse_windows_wireguard_latest_handshakes_for_tunnel(
-            &String::from_utf8_lossy(&output.stdout),
-            tunnel_name,
-        )
-    {
-        return Ok(true);
-    }
-
-    if output.status.success()
-        && parse_windows_wireguard_latest_handshakes_for_single_active_tunnel(
-            &String::from_utf8_lossy(&output.stdout),
-        )
-    {
-        return Ok(true);
-    }
-
-    let output = ProcessCommand::new(wg_exe)
-        .args(["show", tunnel_name])
-        .output()
-        .with_context(|| format!("query native WireGuard tunnel status for {tunnel_name}"))?;
-    if output.status.success()
-        && parse_windows_wireguard_show_handshake(
-            &String::from_utf8_lossy(&output.stdout),
-            tunnel_name,
-        )
-    {
-        return Ok(true);
-    }
-
-    let output = ProcessCommand::new(wg_exe)
-        .args(["show", "all"])
-        .output()
-        .with_context(|| "query native WireGuard status for all tunnels")?;
-    if output.status.success()
-        && parse_windows_wireguard_show_handshake(
-            &String::from_utf8_lossy(&output.stdout),
-            tunnel_name,
-        )
-    {
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn parse_windows_wireguard_latest_handshakes(output: &str) -> bool {
-    output.lines().any(|line| {
-        line.split_whitespace()
-            .last()
-            .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|timestamp| timestamp > 0)
-    })
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn parse_windows_wireguard_latest_handshakes_for_tunnel(output: &str, tunnel_name: &str) -> bool {
-    output.lines().any(|line| {
-        let mut parts = line.split_whitespace();
-        let Some(name) = parts.next() else {
-            return false;
-        };
-        if !name.eq_ignore_ascii_case(tunnel_name) {
-            return false;
-        }
-        parts
-            .last()
-            .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|timestamp| timestamp > 0)
-    })
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn parse_windows_wireguard_latest_handshakes_for_single_active_tunnel(output: &str) -> bool {
-    let mut active = 0usize;
-    for line in output.lines() {
-        let mut parts = line.split_whitespace();
-        if parts.next().is_none() {
-            continue;
-        }
-        let Some(timestamp) = parts.last().and_then(|value| value.parse::<u64>().ok()) else {
-            continue;
-        };
-        if timestamp > 0 {
-            active += 1;
-            if active > 1 {
-                return false;
-            }
-        }
-    }
-    active == 1
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn parse_windows_wireguard_show_handshake(output: &str, tunnel_name: &str) -> bool {
-    let mut saw_interface = false;
-    let mut in_target_interface = false;
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_prefix("interface:") {
-            saw_interface = true;
-            in_target_interface = name.trim().eq_ignore_ascii_case(tunnel_name);
-            continue;
-        }
-        let Some(value) = trimmed.strip_prefix("latest handshake:") else {
-            continue;
-        };
-        if saw_interface && !in_target_interface {
-            continue;
-        }
-        let value = value.trim();
-        if !value.is_empty() && !value.eq_ignore_ascii_case("never") {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(target_os = "windows")]
-fn run_windows_wireguard_command(exe: &Path, args: &[&str]) -> Result<()> {
-    let output = ProcessCommand::new(exe)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawn {} {}", exe.display(), args.join(" ")))?;
     if !output.status.success() {
         return Err(anyhow!(
-            "{} {} failed with {}\nstdout: {}\nstderr: {}",
-            exe.display(),
-            args.join(" "),
+            "wg.exe show {tunnel_name} latest-handshakes failed with {}: {}",
             output.status,
-            String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(())
+    parse_windows_wireguard_latest_handshakes(
+        &String::from_utf8_lossy(&output.stdout),
+        peer_public_key,
+    )
 }
 
-#[cfg(target_os = "windows")]
-impl WindowsNativeWireGuardTunnel {
-    fn cleanup(&mut self) -> Result<()> {
-        let result = run_windows_wireguard_command(
-            &self.wireguard_exe,
-            &["/uninstalltunnelservice", &self.name],
-        );
-        let _ = std::fs::remove_file(&self.config_path);
-        result
-    }
-}
-
-#[cfg(target_os = "windows")]
-async fn apply_daemon_wg_upstream_userspace(
-    config: &WireGuardExitConfig,
-    handshake_timeout: Duration,
-) -> Result<DaemonWgUpstream> {
-    let fingerprint = WireGuardExitFingerprint::from_config(config);
-    let adapter_name = if config.interface.trim().is_empty() {
-        "nvpn-wg-upstream".to_string()
-    } else {
-        config.interface.clone()
-    };
-
-    let wintun = nostr_vpn_wintun::load_wintun().context("load wintun.dll for WG upstream")?;
-    let adapter = wintun::Adapter::open(&wintun, &adapter_name)
-        .or_else(|_| wintun::Adapter::create(&wintun, &adapter_name, "NostrVPN", None))
-        .with_context(|| format!("open or create wintun adapter {adapter_name}"))?;
-
-    let mtu = if config.mtu > 0 { config.mtu } else { 1420 };
-    adapter
-        .set_mtu(mtu as usize)
-        .with_context(|| format!("set MTU on wintun adapter {adapter_name}"))?;
-    let parsed_address = crate::windows_tunnel::windows_interface_address(&config.address)?;
-    adapter
-        .set_network_addresses_tuple(
-            parsed_address.address.into(),
-            parsed_address.mask.into(),
-            None,
-        )
-        .with_context(|| format!("set address on wintun adapter {adapter_name}"))?;
-    let interface_index = adapter
-        .get_adapter_index()
-        .with_context(|| format!("read interface index for {adapter_name}"))?;
-    let session = Arc::new(
-        adapter
-            .start_session(wintun::MAX_RING_CAPACITY)
-            .with_context(|| format!("start wintun session for {adapter_name}"))?,
-    );
-
-    let runtime = start_wg_runtime_with_wintun(config, session.clone())
-        .await
-        .context("start userspace WG runtime on wintun")?;
-    let upstream = runtime.upstream();
-
-    if !runtime.wait_for_handshake(handshake_timeout).await {
-        runtime.shutdown().await;
-        // Adapter and session drop here, removing the WinTun device.
+#[cfg(any(test, target_os = "windows"))]
+fn parse_windows_wireguard_latest_handshakes(output: &str, peer_public_key: &str) -> Result<bool> {
+    let entries = parse_windows_wireguard_peer_rows(output, "latest-handshakes")?;
+    let (peer, timestamp) = entries
+        .as_slice()
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("native WireGuard returned no peer handshake row"))?;
+    if entries.len() != 1 || peer != peer_public_key.trim() {
         return Err(anyhow!(
-            "WG upstream handshake to {upstream} did not complete within {}s; \
-             routing table NOT modified",
-            handshake_timeout.as_secs()
+            "native WireGuard handshake peer mismatch: expected exactly {}, got {:?}",
+            peer_public_key.trim(),
+            entries.iter().map(|(peer, _)| *peer).collect::<Vec<_>>()
         ));
     }
+    Ok(timestamp
+        .parse::<u64>()
+        .context("parse native WireGuard handshake timestamp")?
+        > 0)
+}
 
-    let full_route = match apply_windows_full_default_route(interface_index, upstream) {
-        Ok(route) => route,
-        Err(error) => {
-            runtime.shutdown().await;
-            return Err(error.context("swap Windows default route via WG upstream"));
-        }
-    };
+#[cfg(target_os = "windows")]
+fn windows_native_wireguard_peer_endpoint(
+    wg_exe: &Path,
+    tunnel_name: &str,
+    peer_public_key: &str,
+) -> Result<SocketAddr> {
+    let output = ProcessCommand::new(wg_exe)
+        .args(["show", tunnel_name, "endpoints"])
+        .output()
+        .with_context(|| format!("query native WireGuard endpoint for {tunnel_name}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "wg.exe show {tunnel_name} endpoints failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_windows_wireguard_peer_endpoint(
+        &String::from_utf8_lossy(&output.stdout),
+        peer_public_key,
+    )
+}
 
-    Ok(DaemonWgUpstream {
-        iface: adapter_name,
-        upstream,
-        full_route: Some(full_route),
-        backend: WindowsWgUpstreamBackend::Userspace {
-            runtime: Some(runtime),
-            _session: session,
-            _adapter: adapter,
-        },
-        config_fingerprint: fingerprint,
-    })
+#[cfg(any(test, target_os = "windows"))]
+fn parse_windows_wireguard_peer_endpoint(
+    output: &str,
+    peer_public_key: &str,
+) -> Result<SocketAddr> {
+    let entries = parse_windows_wireguard_peer_rows(output, "endpoints")?;
+    let (peer, endpoint) = entries
+        .as_slice()
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("native WireGuard returned no peer endpoint row"))?;
+    if entries.len() != 1 || peer != peer_public_key.trim() {
+        return Err(anyhow!(
+            "native WireGuard endpoint peer mismatch: expected exactly {}, got {:?}",
+            peer_public_key.trim(),
+            entries.iter().map(|(peer, _)| *peer).collect::<Vec<_>>()
+        ));
+    }
+    endpoint
+        .parse::<SocketAddr>()
+        .with_context(|| format!("parse concrete native WireGuard peer endpoint {endpoint:?}"))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn parse_windows_wireguard_peer_rows<'a>(
+    output: &'a str,
+    field: &str,
+) -> Result<Vec<(&'a str, &'a str)>> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut columns = line.split_whitespace();
+            let peer = columns
+                .next()
+                .ok_or_else(|| anyhow!("missing peer key in WireGuard {field} row"))?;
+            let value = columns
+                .next()
+                .ok_or_else(|| anyhow!("missing value in WireGuard {field} row for {peer}"))?;
+            if columns.next().is_some() {
+                return Err(anyhow!(
+                    "unexpected columns in WireGuard {field} row for {peer}"
+                ));
+            }
+            Ok((peer, value))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_native_wireguard_service_absent(
+    wireguard_exe: &Path,
+    tunnel_name: &str,
+) -> Result<()> {
+    let service_name = format!("WireGuardTunnel${tunnel_name}");
+    let escaped_service_name = service_name.replace('\'', "''");
+    let script = format!(
+        "$service = Get-Service -Name '{escaped_service_name}' -ErrorAction SilentlyContinue; \
+         if ($null -eq $service) {{ 'absent' }} else {{ 'present' }}"
+    );
+    let output = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .with_context(|| format!("audit native WireGuard service {service_name}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to audit native WireGuard service {service_name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    match String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "absent" => Ok(()),
+        "present" => Err(anyhow!(
+            "refusing to install native WireGuard with existing unowned service {service_name}"
+        )),
+        state => Err(anyhow!(
+            "unexpected service ownership response {state:?} for {service_name} \
+             while preparing {}",
+            wireguard_exe.display()
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn create_windows_native_wireguard_service(
+    wireguard_exe: &Path,
+    config_path: &Path,
+    tunnel_name: &str,
+    owner_token: &str,
+) -> Result<()> {
+    let service_name = format!("WireGuardTunnel${tunnel_name}");
+    let binary_path = format!(
+        "\"{}\" /tunnelservice \"{}\"",
+        wireguard_exe.display(),
+        config_path.display()
+    );
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         New-Service -Name {} -BinaryPathName {} -DisplayName {} -Description {} \
+         -StartupType Automatic -DependsOn @('Nsi', 'TcpIp') | Out-Null",
+        windows_powershell_literal(&service_name),
+        windows_powershell_literal(&binary_path),
+        windows_powershell_literal(&format!("WireGuard Tunnel: {tunnel_name}")),
+        windows_powershell_literal(owner_token),
+    );
+    let output = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .with_context(|| format!("create native WireGuard service {service_name}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "atomic service creation refused or failed for {service_name}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn configure_and_start_windows_native_wireguard_service(tunnel_name: &str) -> Result<()> {
+    let service_name = format!("WireGuardTunnel${tunnel_name}");
+    let output = ProcessCommand::new("sc.exe")
+        .args(["sidtype", &service_name, "unrestricted"])
+        .output()
+        .with_context(|| format!("set unrestricted SID type on {service_name}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "sc.exe sidtype failed for {service_name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; Start-Service -Name {}",
+        windows_powershell_literal(&service_name)
+    );
+    let output = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .with_context(|| format!("start native WireGuard service {service_name}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "failed to start native WireGuard service {service_name}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }

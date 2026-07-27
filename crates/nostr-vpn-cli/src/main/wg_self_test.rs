@@ -510,7 +510,7 @@ async fn run_wg_upstream_windows_replace_default(
     use crate::wg_upstream_runtime::apply_daemon_wg_upstream;
     use std::time::Duration;
 
-    let handle = apply_daemon_wg_upstream(cfg, timeout)
+    let mut handle = apply_daemon_wg_upstream(cfg, timeout)
         .await
         .context("bring up Windows WG upstream and swap default route")?;
     println!(
@@ -564,7 +564,10 @@ async fn run_wg_upstream_windows_replace_default(
         }
     }
 
-    handle.cleanup().await;
+    handle
+        .cleanup()
+        .await
+        .context("restore Windows WG upstream routes")?;
 
     if !probe_result? {
         return Err(anyhow!(
