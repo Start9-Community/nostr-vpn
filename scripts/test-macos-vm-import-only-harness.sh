@@ -11,6 +11,7 @@ files=(
   "$ROOT/scripts/macos-vm-desktop-app-launch-smoke.sh"
   "$ROOT/scripts/macos-vm-desktop-wireguard-exit-e2e.sh"
   "$ROOT/scripts/macos-vm-desktop-daemon-idle-e2e.sh"
+  "$ROOT/scripts/e2e-macos-release-network.sh"
   "$ROOT/scripts/e2e-macos-manual-join-ui.sh"
   "$ROOT/scripts/e2e-macos-service-toggle.sh"
   "$ROOT/scripts/macos-app-launch-smoke.sh"
@@ -124,7 +125,8 @@ wrapper_contracts = {
     ),
     "macos-vm-desktop-wireguard-exit-e2e.sh": (
         "NVPN_MACOS_VM_IMPORT_ONLY=1",
-        "NVPN_WG_EXIT_HOST_BINARY=",
+        "NVPN_E2E_BINARY=",
+        "e2e-macos-release-network.sh",
     ),
     "macos-vm-desktop-daemon-idle-e2e.sh": (
         "NVPN_MACOS_VM_IMPORT_ONLY=1",
@@ -150,6 +152,7 @@ import_only_children = {
     ),
     "macos-app-launch-smoke.sh": ("NVPN_MACOS_APP_SMOKE_BUILD=0",),
     "e2e-wireguard-exit-host.sh": ("NVPN_WG_EXIT_HOST_BINARY",),
+    "e2e-macos-release-network.sh": ("NVPN_E2E_BINARY",),
     "e2e-macos-service.sh": ("NVPN_E2E_BINARY",),
 }
 for name, required_values in import_only_children.items():

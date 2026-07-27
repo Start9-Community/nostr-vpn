@@ -255,6 +255,21 @@ grep -Fq 'driveRapidStartStopStress' "$ios_release_ui" \
     echo "iOS signed Release gate lacks rapid cancel-during-start recovery coverage" >&2
     exit 1
   }
+grep -Fq 'NVPN_ANDROID_RAPID_START_STOP_GATE="$first"' "$gate" \
+  && grep -Fq 'run_android_release_rapid_start_stop_gate' "$android_release_gate" \
+  && grep -Fq '0 10 30 80 160 320 640 1000' "$android_release_gate" \
+  && grep -Fq 'android_release_rapid_cancel_once' "$android_release_gate" \
+  && grep -Fq 'Android Release rapid cancellation recreated more than one native tunnel' \
+    "$android_release_gate" \
+  && grep -Fq 'run_android_release_direct_network_probe rapid-cancel-stable-direct 0' \
+    "$android_release_gate" \
+  && grep -Fq 'run_android_release_exit_network_probe rapid-cancel-full-reconnect' \
+    "$android_release_gate" \
+  && grep -Fq 'assert_single_android_app_process' "$android_release_gate" \
+  || {
+    echo "Android signed Release gate lacks real rapid cancel/reconnect recovery coverage" >&2
+    exit 1
+  }
 grep -Fq 'ios_release_network_audit_artifact' "$ios_release_gate" \
   && grep -Fq 'fipsCoreVersion' "$ios_release_artifact" \
   && grep -Fq 'fipsGitTree' "$ios_release_artifact" \

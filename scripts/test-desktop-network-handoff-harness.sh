@@ -17,6 +17,7 @@ LINUX_GUEST="$ROOT/scripts/desktop-linux-underlay-change-e2e.sh"
 PEER="$ROOT/scripts/desktop-linux-underlay-peer-e2e.sh"
 LISTENER_AUDIT="$ROOT/scripts/lib-desktop-linux-listener-audit.sh"
 MACOS_WIREGUARD="$ROOT/scripts/macos-vm-desktop-wireguard-exit-e2e.sh"
+MACOS_NETWORK_GUEST="$ROOT/scripts/e2e-macos-release-network.sh"
 MACOS_APP="$ROOT/scripts/macos-vm-desktop-app-launch-smoke.sh"
 MACOS_IDLE="$ROOT/scripts/macos-vm-desktop-daemon-idle-e2e.sh"
 LINUX_SYNC="$ROOT/scripts/ubuntu-vm-git-sync.sh"
@@ -57,7 +58,7 @@ source "$LISTENER_AUDIT"
 
 for script in \
   "$WINDOWS_HOST_ENTRY" "$LINUX_HOST_ENTRY" "$LINUX_GUEST" "$PEER" \
-  "$MACOS_WIREGUARD" "$MACOS_APP" "$MACOS_IDLE"
+  "$MACOS_WIREGUARD" "$MACOS_NETWORK_GUEST" "$MACOS_APP" "$MACOS_IDLE"
 do
   [[ -x "$script" ]] || fail "$(basename "$script") is missing or not executable"
 done
@@ -255,6 +256,63 @@ require_tokens "$RELEASE_GATE" "isolated macOS network/service lanes" \
   'macos-vm-desktop-wireguard-exit-e2e.sh' \
   'macos-vm-desktop-app-launch-smoke.sh' \
   'macos-vm-desktop-daemon-idle-e2e.sh'
+require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
+  'lib-macos-vm-imported-release.sh' \
+  'lib-mobile-wireguard-fixture.sh' \
+  'macos_vm_prepare_or_verify_imported_release' \
+  'NVPN_MACOS_VM_IMPORT_ONLY=1' \
+  'NVPN_E2E_BINARY=' \
+  './scripts/e2e-macos-release-network.sh' \
+  'mobile_wg_fixture_wg_bytes' \
+  'mobile_wg_fixture_forward_packets' \
+  'mobile_wg_fixture_dns_count' \
+  'mobile_wg_fixture_doh_count' \
+  'mobile_wg_fixture_cleanup'
+for dns_case in \
+  automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
+do
+  grep -Fq "$dns_case" "$MACOS_WIREGUARD" \
+    || fail "macOS host gate omits the $dns_case real resolver case"
+done
+require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
+  'NVPN_MACOS_VM_IMPORT_ONLY' \
+  'codesign --verify --strict' \
+  'wireguard-exit-config-file' \
+  'wireguard-exit-enabled' \
+  'exit-dns-mode' \
+  'exit-dns-doh-provider' \
+  'exit-dns-custom-doh-url' \
+  'exit-dns-custom-doh-bootstrap-ips' \
+  'exit-dns-through-exit-servers' \
+  '/etc/resolver/nvpn-secure-dns' \
+  'scutil --dns' \
+  'networksetup -setnetworkserviceenabled' \
+  'Ethernet' \
+  'Roaming Underlay' \
+  'NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000' \
+  'FIPS underlay carrier(s) rebound' \
+  'runtime_wireguard_state_is false true' \
+  'runtime_wireguard_state_is false false' \
+  'select-direct' \
+  'direct_source_ip' \
+  'endpoint_route_interface' \
+  'MACOS_RELEASE_NETWORK_DIRECT_OK'
+for forbidden in \
+  'cargo build' \
+  'xcodebuild' \
+  'macos-build' \
+  'codesign --force' \
+  '/usr/bin/swift' \
+  'swift -e' \
+  'swiftc'
+do
+  if grep -Fq "$forbidden" "$MACOS_NETWORK_GUEST"; then
+    fail "macOS guest network path can build/sign in the VM: $forbidden"
+  fi
+done
+if grep -Fq './scripts/e2e-wireguard-exit-host.sh' "$MACOS_WIREGUARD"; then
+  fail "macOS release network gate still uses the scoped-host self-test"
+fi
 for forbidden_host_path in \
   './scripts/e2e-wireguard-exit-host.sh' \
   './scripts/macos-app-launch-smoke.sh' \
