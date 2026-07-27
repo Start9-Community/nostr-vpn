@@ -13,8 +13,10 @@ import json
 import os
 import pathlib
 import pwd
+import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -92,7 +94,7 @@ def service_properties(unit: str) -> dict[str, str]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,UnitFileState,ActiveState,MainPID,FragmentPath",
+            "--property=LoadState,UnitFileState,ActiveState,MainPID,FragmentPath,ExecStart",
             "--no-pager",
         ],
         check=False,
@@ -103,6 +105,16 @@ def service_properties(unit: str) -> dict[str, str]:
             key, value = line.split("=", 1)
             values[key] = value
     return values
+
+
+def systemd_exec_start_path(value: str) -> pathlib.Path:
+    matches = re.findall(r"(?:^|[{\s;])path=([^ ;}]+)", value)
+    if len(matches) != 1:
+        fail("systemd service does not expose one exact ExecStart path")
+    path = pathlib.Path(matches[0])
+    if not path.is_absolute():
+        fail("systemd ExecStart path is not absolute")
+    return path
 
 
 def nvpn_processes() -> list[int]:
@@ -142,6 +154,27 @@ def service_snapshot(
     definition_hash = (
         digest_file(fragment) if installed and fragment.is_file() else None
     )
+    configured_resolved = (
+        str(binary_path.resolve(strict=True)) if binary_present else None
+    )
+    exec_start_path = None
+    exec_start_resolved = None
+    if installed:
+        exec_start = systemd_exec_start_path(properties.get("ExecStart", ""))
+        exec_start_path = str(exec_start)
+        try:
+            exec_start_resolved = str(exec_start.resolve(strict=True))
+        except OSError as error:
+            fail(f"systemd ExecStart executable cannot be resolved: {error}")
+    main_process_exe_path = None
+    main_process_exe_sha256 = None
+    if running and pid is not None:
+        proc_exe = pathlib.Path(f"/proc/{pid}/exe")
+        try:
+            main_process_exe_path = os.readlink(proc_exe)
+            main_process_exe_sha256 = digest_file(proc_exe)
+        except OSError as error:
+            fail(f"systemd MainPID executable cannot be inspected: {error}")
     return {
         "installed": installed,
         "enabled": enabled,
@@ -153,6 +186,41 @@ def service_snapshot(
         "pid": pid,
         "_fragmentPath": str(fragment) if installed else "",
         "_processes": processes,
+        "_configuredBinaryResolvedPath": configured_resolved,
+        "_execStartPath": exec_start_path,
+        "_execStartResolvedPath": exec_start_resolved,
+        "_mainProcessExePath": main_process_exe_path,
+        "_mainProcessExeSha256": main_process_exe_sha256,
+    }
+
+
+def assert_service_runtime_binding(
+    service: dict[str, Any],
+    binary_path: pathlib.Path,
+    installed_binary_sha256: str,
+) -> dict[str, str]:
+    configured_resolved = service.get("_configuredBinaryResolvedPath")
+    if not isinstance(configured_resolved, str) or not configured_resolved:
+        fail("configured binary does not resolve to an installed executable")
+    exec_start_path = service.get("_execStartPath")
+    exec_start_resolved = service.get("_execStartResolvedPath")
+    if not isinstance(exec_start_path, str) or not exec_start_path:
+        fail("systemd service lacks an exact ExecStart executable")
+    if exec_start_resolved != configured_resolved:
+        fail("systemd ExecStart does not resolve to the configured binary")
+    main_process_path = service.get("_mainProcessExePath")
+    if main_process_path != configured_resolved:
+        fail("systemd MainPID does not execute the configured binary")
+    main_process_hash = service.get("_mainProcessExeSha256")
+    if main_process_hash != installed_binary_sha256:
+        fail("systemd MainPID executable hash is not the installed candidate")
+    return {
+        "configuredBinaryPath": str(binary_path),
+        "configuredBinaryResolvedPath": configured_resolved,
+        "execStartPath": exec_start_path,
+        "execStartResolvedPath": exec_start_resolved,
+        "mainProcessExePath": main_process_path,
+        "mainProcessExeSha256": main_process_hash,
     }
 
 
@@ -423,6 +491,16 @@ def assert_expected(
     frozen = target["expected"]
     if machine_identity() != frozen["machineIdentitySha256"]:
         fail("remote machine identity changed")
+    preinstall_probe = expected["preinstallProbe"]
+    if state["probeBinarySha256"] != preinstall_probe["probeBinarySha256"]:
+        fail("probe CLI binary changed after preflight")
+    if state["probeAppVersion"] != preinstall_probe["probeAppVersion"]:
+        fail("probe CLI app version changed after preflight")
+    if (
+        state["probeFipsCoreVersion"]
+        != preinstall_probe["probeFipsCoreVersion"]
+    ):
+        fail("probe CLI FIPS version changed after preflight")
     for field in (
         "configSha256",
         "signedRosterStoreSha256",
@@ -727,10 +805,11 @@ def restore_transaction(
     }
 
 
-def install(
+def install_staged(
     payload: dict[str, Any],
     target: dict[str, Any],
     expected: dict[str, Any],
+    stage: pathlib.Path,
 ) -> dict[str, Any]:
     if target["deployment"].get("authorization") != "install":
         fail("target inventory does not authorize install")
@@ -742,15 +821,6 @@ def install(
     transaction = root / transaction_id
     if transaction.exists():
         fail("transaction id already exists")
-    stage_name = payload.get("stageName")
-    if not isinstance(stage_name, str) or "/" in stage_name:
-        fail("staged artifact name is invalid")
-    sudo_user = os.environ.get("SUDO_USER", "")
-    if not sudo_user:
-        fail("Linux adapter requires sudo with SUDO_USER")
-    stage = pathlib.Path(pwd.getpwnam(sudo_user).pw_dir) / stage_name
-    if not stage.is_file():
-        fail("staged artifact is missing")
     if digest_file(stage) != expected["artifactSha256"]:
         fail("staged artifact SHA-256 mismatch")
     if stage.stat().st_size != expected["artifactSize"]:
@@ -761,7 +831,6 @@ def install(
     snapshot = snapshot_transaction(transaction, before, target)
     write_journal(transaction, target["id"], transaction_id, "preparing")
     candidate, companions = extract_payload(stage, transaction, expected)
-    stage.unlink(missing_ok=True)
     unit = before["unit"]
     binary = before["binaryPath"]
     config = before["configPath"]
@@ -822,6 +891,11 @@ def install(
         wait_service(unit, True)
         final = capture(target, checks=target["checks"])
         final_pid = final["service"]["pid"]
+        runtime_binding = assert_service_runtime_binding(
+            final["service"],
+            binary,
+            expected["installedBinarySha256"],
+        )
         final_answers, final_dns_receipt = dns_probe(str(target["checks"]["dnsName"]))
         final_http_status, final_direct_receipt = direct_probe(
             str(target["checks"]["directUrl"])
@@ -865,6 +939,11 @@ def install(
             "artifactSha256": expected["artifactSha256"],
             "artifactSize": expected["artifactSize"],
             "stagedArtifactSha256": expected["artifactSha256"],
+            "preinstallProbe": {
+                "probeBinarySha256": before["probeBinarySha256"],
+                "probeAppVersion": before["probeAppVersion"],
+                "probeFipsCoreVersion": before["probeFipsCoreVersion"],
+            },
             "transaction": {
                 "id": transaction_id,
                 "state": "committed",
@@ -889,6 +968,7 @@ def install(
                 "processCount": final["service"]["processCount"],
                 "pidBeforeRestart": first_pid,
                 "pidAfterRestart": final_pid,
+                **runtime_binding,
             },
             "config": {
                 "mutationOutsideInstall": False,
@@ -1003,6 +1083,179 @@ def install(
                 file=sys.stderr,
             )
         raise
+
+
+def remove_staged_path(stage: pathlib.Path) -> None:
+    try:
+        stage.unlink(missing_ok=True)
+    except OSError as error:
+        fail(f"staged artifact cleanup failed: {error}")
+    if stage.exists() or stage.is_symlink():
+        fail("staged artifact cleanup left remote residue")
+
+
+def copy_staged_artifact(
+    stage: pathlib.Path,
+    root: pathlib.Path,
+    transaction_id: str,
+) -> tuple[pathlib.Path, bool]:
+    root_created = not root.exists()
+    private = root / f".staged-{transaction_id}"
+    source_fd = -1
+    destination_fd = -1
+    private_created = False
+    primary_error: Exception | None = None
+    descriptor_cleanup_errors: list[str] = []
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root_metadata = root.lstat()
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != os.geteuid()
+            or root_metadata.st_mode & 0o077
+        ):
+            fail(
+                "fleet transaction root is not a private "
+                "administrator directory"
+            )
+        source_fd = os.open(stage, os.O_RDONLY | os.O_NOFOLLOW)
+        source_metadata = os.fstat(source_fd)
+        if not stat.S_ISREG(source_metadata.st_mode):
+            fail("staged artifact is not a regular non-symlink file")
+        destination_fd = os.open(
+            private,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        private_created = True
+        with (
+            os.fdopen(source_fd, "rb", closefd=False) as source,
+            os.fdopen(destination_fd, "wb", closefd=False) as destination,
+        ):
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except Exception as error:
+        primary_error = error
+    finally:
+        if destination_fd >= 0:
+            try:
+                os.close(destination_fd)
+            except OSError as error:
+                descriptor_cleanup_errors.append(
+                    f"private descriptor: {error}"
+                )
+        if source_fd >= 0:
+            try:
+                os.close(source_fd)
+            except OSError as error:
+                descriptor_cleanup_errors.append(
+                    f"source descriptor: {error}"
+                )
+    if primary_error is None and descriptor_cleanup_errors:
+        primary_error = RuntimeError("descriptor cleanup failed")
+        descriptor_cleanup_errors = [
+            f"staged artifact descriptor cleanup: {value}"
+            for value in descriptor_cleanup_errors
+        ]
+    if primary_error is not None:
+        cleanup_errors = descriptor_cleanup_errors
+        if private_created:
+            try:
+                private.unlink()
+            except OSError as error:
+                cleanup_errors.append(f"private staged artifact: {error}")
+        if root_created:
+            try:
+                root.rmdir()
+            except OSError as error:
+                cleanup_errors.append(f"private staging directory: {error}")
+        details = f"staged artifact could not be secured: {primary_error}"
+        if cleanup_errors:
+            details += "; cleanup also failed: " + "; ".join(cleanup_errors)
+        fail(details)
+    return private, root_created
+
+
+def finish_staged_cleanup(
+    primary_error: Exception | None,
+    cleanup_errors: list[str],
+) -> None:
+    if primary_error is not None:
+        if cleanup_errors:
+            fail(
+                f"{primary_error}; staged artifact cleanup also failed: "
+                + "; ".join(cleanup_errors)
+            )
+        raise primary_error
+    if cleanup_errors:
+        fail("staged artifact cleanup failed: " + "; ".join(cleanup_errors))
+
+
+def install(
+    payload: dict[str, Any],
+    target: dict[str, Any],
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    stage_name = payload.get("stageName")
+    if (
+        not isinstance(stage_name, str)
+        or re.fullmatch(
+            r"\.nvpn-fleet-[0-9a-f]{32}\.artifact",
+            stage_name,
+        )
+        is None
+    ):
+        fail("staged artifact name is invalid")
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if not sudo_user:
+        fail("Linux adapter requires sudo with SUDO_USER")
+    stage = pathlib.Path(pwd.getpwnam(sudo_user).pw_dir) / stage_name
+    if not stage.is_file():
+        fail("staged artifact is missing")
+    transaction_id = expected["transactionId"]
+    if (
+        not isinstance(transaction_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None
+    ):
+        fail("transaction id is invalid")
+    root = absolute_path(
+        target["deployment"].get("transactionRoot", "/var/lib/nvpn/fleet-canary"),
+        "transactionRoot",
+    )
+    transaction = root / transaction_id
+    if transaction.exists():
+        fail("transaction id already exists")
+    private_stage: pathlib.Path | None = None
+    root_created = False
+    result: dict[str, Any] | None = None
+    primary_error: Exception | None = None
+    try:
+        private_stage, root_created = copy_staged_artifact(
+            stage,
+            root,
+            transaction_id,
+        )
+        result = install_staged(payload, target, expected, private_stage)
+    except Exception as error:
+        primary_error = error
+    cleanup_errors: list[str] = []
+    for path in (private_stage,):
+        if path is None:
+            continue
+        try:
+            remove_staged_path(path)
+        except Exception as error:
+            cleanup_errors.append(str(error))
+    if root_created and not transaction.exists():
+        try:
+            root.rmdir()
+        except OSError as error:
+            cleanup_errors.append(f"private staging directory: {error}")
+    finish_staged_cleanup(primary_error, cleanup_errors)
+    if result is None:
+        fail("staged install returned no result")
+    return result
 
 
 payload = json.loads(base64.b64decode(FLEET_PAYLOAD_B64))

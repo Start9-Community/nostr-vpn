@@ -25,7 +25,11 @@ from typing import Any
 
 HOST = re.compile(r"^[A-Za-z0-9_.@:-]+$")
 TRANSACTION = re.compile(r"^[0-9a-f]{32}$")
+STAGED_ARTIFACT = re.compile(r"^\.nvpn-fleet-[0-9a-f]{32}\.artifact$")
 PROTOCOL = "nvpn-fleet-ssh-transactional-v2"
+STAGE_TIMEOUT_SECONDS = 90
+ADAPTER_TIMEOUT_SECONDS = 180
+CLEANUP_TIMEOUT_SECONDS = 20
 PYTHON_FUTURE_IMPORT = "from __future__ import annotations\n"
 WINDOWS_STDIN_WRAPPER = r"""
 $ErrorActionPreference = 'Stop'
@@ -264,21 +268,44 @@ def classify_ssh_failure(result: subprocess.CompletedProcess[str]) -> int:
     return 1
 
 
+def run_transport(
+    arguments: list[str],
+    *,
+    input_text: str | None,
+    timeout: int,
+    label: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            arguments,
+            input=input_text,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise DriverError(
+            f"{label} timed out after {timeout} seconds"
+        ) from error
+
+
 def stage_artifact(
     target: dict[str, Any],
     artifact: pathlib.Path,
-    transaction_id: str,
-) -> str:
-    stage_name = f".nvpn-fleet-{transaction_id}.artifact"
+    stage_name: str,
+) -> None:
+    if STAGED_ARTIFACT.fullmatch(stage_name) is None:
+        raise DriverError("staged artifact name is invalid")
     destination = f"{transport_arguments(target, 'scp')[-1]}:{stage_name}"
     arguments = transport_arguments(target, "scp")
     arguments[-1:] = [str(artifact), destination]
-    result = subprocess.run(
+    result = run_transport(
         arguments,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        input_text=None,
+        timeout=STAGE_TIMEOUT_SECONDS,
+        label="artifact transport",
     )
     if result.returncode != 0:
         code = classify_ssh_failure(result)
@@ -286,7 +313,105 @@ def stage_artifact(
             f"artifact transport failed (classification {code}): "
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
-    return stage_name
+
+
+def render_staged_artifact_cleanup(
+    platform_name: str,
+    stage_name: str,
+) -> tuple[str, list[str]]:
+    if platform_name not in {"linux", "windows"}:
+        raise DriverError("staged artifact cleanup platform is invalid")
+    if STAGED_ARTIFACT.fullmatch(stage_name) is None:
+        raise DriverError("staged artifact cleanup name is invalid")
+    if platform_name == "linux":
+        source = f"""\
+import os
+import pathlib
+import sys
+
+path = pathlib.Path.home() / {stage_name!r}
+try:
+    path.unlink()
+except FileNotFoundError:
+    pass
+except OSError as error:
+    print(f"staged artifact cleanup failed: {{error}}", file=sys.stderr)
+    raise SystemExit(1)
+if os.path.lexists(path):
+    print("staged artifact cleanup left remote residue", file=sys.stderr)
+    raise SystemExit(1)
+"""
+        return source, ["python3", "-"]
+    cleanup = f"""\
+$ErrorActionPreference = 'Stop'
+$path = Join-Path $HOME '{stage_name}'
+$parent = Split-Path -Parent $path
+$leaf = Split-Path -Leaf $path
+function Get-StagedItem {{
+    return @(
+        Get-ChildItem -LiteralPath $parent -Force -Filter $leaf `
+            -ErrorAction Stop |
+            Where-Object {{ $_.Name -ceq $leaf }}
+    )
+}}
+try {{
+    $items = @(Get-StagedItem)
+    if ($items.Count -gt 1) {{
+        throw 'staged artifact path is ambiguous'
+    }}
+    if ($items.Count -eq 1) {{
+        $item = $items[0]
+        if (
+            $item.PSIsContainer -and
+            !($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        ) {{
+            throw 'staged artifact path is not a regular file'
+        }}
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+    }}
+}} catch {{
+    [Console]::Error.WriteLine("staged artifact cleanup failed: $_")
+    exit 1
+}}
+if (@(Get-StagedItem).Count -ne 0) {{
+    [Console]::Error.WriteLine('staged artifact cleanup left remote residue')
+    exit 1
+}}
+"""
+    encoded = base64.b64encode(cleanup.encode("utf-16le")).decode()
+    return "", [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encoded,
+    ]
+
+
+def cleanup_staged_artifact(
+    target: dict[str, Any],
+    stage_name: str,
+) -> None:
+    source, remote_command = render_staged_artifact_cleanup(
+        target.get("platform"),
+        stage_name,
+    )
+    arguments = transport_arguments(target, "ssh") + remote_command
+    result = run_transport(
+        arguments,
+        input_text=source or None,
+        timeout=CLEANUP_TIMEOUT_SECONDS,
+        label="staged artifact cleanup",
+    )
+    if result.returncode != 0:
+        code = classify_ssh_failure(result)
+        details = result.stderr.strip() or result.stdout.strip()
+        raise DriverError(
+            f"staged artifact cleanup failed (classification {code}): "
+            f"{details or 'remote cleanup returned no details'}"
+        )
 
 
 def adapter_source(platform_name: str) -> pathlib.Path:
@@ -355,13 +480,11 @@ def invoke_adapter(
     platform_name = target.get("platform")
     source, remote_command = render_adapter_invocation(platform_name, payload)
     arguments = transport_arguments(target, "ssh") + remote_command
-    result = subprocess.run(
+    result = run_transport(
         arguments,
-        input=source,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        input_text=source,
+        timeout=ADAPTER_TIMEOUT_SECONDS,
+        label=f"{platform_name} fleet adapter",
     )
     if result.returncode != 0:
         return (
@@ -376,6 +499,47 @@ def invoke_adapter(
     if not isinstance(value, dict):
         return 1, None, "remote adapter result must be a JSON object"
     return 0, value, result.stderr.strip()
+
+
+def invoke_staged_adapter(
+    target: dict[str, Any],
+    payload: dict[str, Any],
+    artifact: pathlib.Path,
+    stage_name: str,
+) -> tuple[int, dict[str, Any] | None, str]:
+    adapter_result: tuple[int, dict[str, Any] | None, str] | None = None
+    primary_error: Exception | None = None
+    try:
+        stage_artifact(target, artifact, stage_name)
+        payload["stageName"] = stage_name
+        adapter_result = invoke_adapter(target, payload)
+    except Exception as error:
+        primary_error = error
+    cleanup_error: Exception | None = None
+    try:
+        cleanup_staged_artifact(target, stage_name)
+    except Exception as error:
+        cleanup_error = error
+    if primary_error is not None:
+        if cleanup_error is not None:
+            raise DriverError(
+                f"{primary_error}; cleanup also failed: {cleanup_error}"
+            ) from primary_error
+        raise primary_error
+    if adapter_result is not None and adapter_result[0] != 0:
+        if cleanup_error is None:
+            return adapter_result
+        code, value, details = adapter_result
+        return (
+            code,
+            value,
+            f"{details}; cleanup also failed: {cleanup_error}",
+        )
+    if cleanup_error is not None:
+        raise cleanup_error
+    if adapter_result is None:
+        raise DriverError("staged fleet adapter returned no result")
+    return adapter_result
 
 
 def parse_args() -> argparse.Namespace:
@@ -423,9 +587,15 @@ def main() -> int:
                 raise DriverError("local candidate artifact SHA-256 changed")
             if args.artifact.stat().st_size != expected_size:
                 raise DriverError("local candidate artifact size changed")
-            payload["stageName"] = stage_artifact(target, args.artifact, transaction_id)
-
-        code, result, details = invoke_adapter(target, payload)
+            stage_name = f".nvpn-fleet-{transaction_id}.artifact"
+            code, result, details = invoke_staged_adapter(
+                target,
+                payload,
+                args.artifact,
+                stage_name,
+            )
+        else:
+            code, result, details = invoke_adapter(target, payload)
         if code != 0:
             if details:
                 print(details, file=sys.stderr)

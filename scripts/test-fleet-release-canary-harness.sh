@@ -10,6 +10,8 @@ FIPS="$WORK/fips"
 DRIVER="$APP/scripts/fleet_release_canary_ssh_driver.py"
 LINUX_HELPER="$APP/scripts/fleet_release_canary_remote_linux.py"
 WINDOWS_HELPER="$APP/scripts/fleet_release_canary_remote_windows.ps1"
+GATE_VALIDATOR="$APP/scripts/fleet-release-gate-evidence.mjs"
+PROVENANCE_LIB="$APP/scripts/release-artifact-provenance-lib.mjs"
 DRIVER_LOG="$WORK/driver.log"
 LOCAL_ID="$(printf 'a%.0s' {1..64})"
 
@@ -38,6 +40,60 @@ value = json.load(open(path, encoding="utf-8"))
 matches = [row for row in value["targets"] if row["id"] == target]
 if len(matches) != 1 or matches[0]["status"] != expected:
     raise SystemExit(f"{target} status was {matches!r}, expected {expected!r}")
+PY
+}
+
+json_field_is() {
+  local path="$1" field="$2" expected="$3"
+  python3 - "$path" "$field" "$expected" <<'PY'
+import json
+import sys
+
+path, field, expected = sys.argv[1:]
+value = json.load(open(path, encoding="utf-8"))
+if value.get(field) != expected:
+    raise SystemExit(
+        f"{path} {field} was {value.get(field)!r}, expected {expected!r}"
+    )
+PY
+}
+
+json_target_evidence_is() {
+  local path="$1" target="$2"
+  shift 2
+  python3 - "$path" "$target" "$@" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+path, target, *expected = sys.argv[1:]
+value = json.load(open(path, encoding="utf-8"))
+matches = [row for row in value["targets"] if row["id"] == target]
+if len(matches) != 1:
+    raise SystemExit(f"{target} result row was not unique")
+evidence = matches[0].get("evidence")
+if not isinstance(evidence, dict) or set(evidence) != set(expected):
+    raise SystemExit(
+        f"{target} evidence keys were {sorted((evidence or {}).keys())}, "
+        f"expected {sorted(expected)}"
+    )
+paths = set()
+receipts = set()
+for action in expected:
+    binding = evidence[action]
+    if set(binding) != {"path", "sha256", "size"}:
+        raise SystemExit(f"{target} {action} binding has extra/missing fields")
+    raw = pathlib.Path(binding["path"])
+    body = raw.read_bytes()
+    observed = (hashlib.sha256(body).hexdigest(), len(body))
+    claimed = (binding["sha256"], binding["size"])
+    if observed != claimed:
+        raise SystemExit(f"{target} {action} binding does not match raw bytes")
+    if str(raw) in paths or claimed in receipts:
+        raise SystemExit(f"{target} has a duplicate raw receipt binding")
+    paths.add(str(raw))
+    receipts.add(claimed)
 PY
 }
 
@@ -220,15 +276,15 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +
 +if args.action == "probe":
 +    pending = target_id == "pending"
-+    probe_hash = os.environ["FAKE_PROBE_BINARY_SHA256"]
++    probe_hash = (
++        service["binarySha256"]
++        if service["binaryPresent"]
++        else os.environ["FAKE_PROBE_BINARY_SHA256"]
++    )
 +    probe_app_version = os.environ["FAKE_PROBE_APP_VERSION"]
 +    probe_fips_version = os.environ["FAKE_PROBE_FIPS_CORE_VERSION"]
-+    if target_id == "wrong-probe-hash":
-+        probe_hash = digest("wrong-probe-binary")
-+    elif target_id == "wrong-probe-app-version":
-+        probe_app_version = "4.1.4"
-+    elif target_id == "wrong-probe-fips-version":
-+        probe_fips_version = "0.4.44 (rev 0000000000)"
++    if target_id == "malformed-probe-hash":
++        probe_hash = "not-a-sha256"
 +    value = {
 +        "schema": 2,
 +        "targetId": target_id,
@@ -286,6 +342,15 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +        }
 +    else:
 +        wrong_roster = target_id == "wrong-roster"
++        preinstall_probe = dict(expectations["preinstallProbe"])
++        if target_id == "probe-drift-hash":
++            preinstall_probe["probeBinarySha256"] = digest("drifted-probe")
++        elif target_id == "probe-drift-app-version":
++            preinstall_probe["probeAppVersion"] = "4.1.3"
++        elif target_id == "probe-drift-fips-version":
++            preinstall_probe["probeFipsCoreVersion"] = (
++                "0.4.43 (rev 0000000000)"
++            )
 +        value = {
 +            "schema": 2,
 +            "targetId": target_id,
@@ -310,6 +375,7 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +            "artifactSha256": expectations["artifactSha256"],
 +            "artifactSize": expectations["artifactSize"],
 +            "stagedArtifactSha256": expectations["artifactSha256"],
++            "preinstallProbe": preinstall_probe,
 +            "transaction": {
 +                "id": transaction_id,
 +                "state": "committed",
@@ -363,6 +429,26 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +                ),
 +                "pidBeforeRestart": 100,
 +                "pidAfterRestart": 101,
++                "configuredBinaryPath": target["deployment"]["binaryPath"],
++                "configuredBinaryResolvedPath": target["deployment"][
++                    "binaryPath"
++                ],
++                "execStartPath": target["deployment"]["binaryPath"],
++                "execStartResolvedPath": (
++                    "/usr/local/bin/stale-nvpn"
++                    if target_id == "misdirected-unit"
++                    else target["deployment"]["binaryPath"]
++                ),
++                "mainProcessExePath": (
++                    "/usr/local/bin/stale-nvpn"
++                    if target_id == "stale-main-process"
++                    else target["deployment"]["binaryPath"]
++                ),
++                "mainProcessExeSha256": (
++                    digest("stale-main-process")
++                    if target_id == "stale-main-process"
++                    else expectations["installedBinarySha256"]
++                ),
 +            },
 +            "config": {
 +                "mutationOutsideInstall": False,
@@ -474,6 +560,8 @@ DRIVER
 chmod +x "$DRIVER"
 printf '# fixture linux helper\n' >"$LINUX_HELPER"
 printf '# fixture windows helper\n' >"$WINDOWS_HELPER"
+cp "$ROOT/scripts/fleet-release-gate-evidence.mjs" "$GATE_VALIDATOR"
+cp "$ROOT/scripts/release-artifact-provenance-lib.mjs" "$PROVENANCE_LIB"
 
 git -C "$APP" init -q
 git -C "$APP" config user.name fixture
@@ -494,23 +582,41 @@ APP_SHA="$(git -C "$APP" rev-parse HEAD)"
 APP_TREE="$(git -C "$APP" rev-parse 'HEAD^{tree}')"
 FIPS_SHA="$(git -C "$FIPS" rev-parse HEAD)"
 FIPS_TREE="$(git -C "$FIPS" rev-parse 'HEAD^{tree}')"
-ARTIFACT="$APP/artifacts/nvpn"
-GATE="$APP/artifacts/release-gate.json"
+PAYLOAD="$APP/artifacts/nvpn"
+ARTIFACT="$APP/artifacts/nvpn-v4.1.5-x86_64-unknown-linux-musl.tar.gz"
+GATE_FIXTURE_ROOT="$APP/artifacts/release-gate"
+GATE_FIXTURE="$GATE_FIXTURE_ROOT/fleet-gate-fixture.json"
+GATE_RELEASE="$GATE_FIXTURE_ROOT/release.json"
 RECEIPT="$APP/artifacts/linux-receipt.json"
 MANIFEST="$APP/private/manifest.json"
 INVENTORY="$APP/private/inventory.json"
 EVIDENCE="$APP/private/evidence"
 
-printf 'immutable candidate binary\n' >"$ARTIFACT"
-printf '{"passed":true}\n' >"$GATE"
+printf 'immutable candidate binary\n' >"$PAYLOAD"
+tar -czf "$ARTIFACT" -C "$APP/artifacts" nvpn
+PAYLOAD_SHA="$(sha256_file "$PAYLOAD")"
 ARTIFACT_SHA="$(sha256_file "$ARTIFACT")"
 ARTIFACT_SIZE="$(wc -c <"$ARTIFACT" | tr -d '[:space:]')"
-GATE_SHA="$(sha256_file "$GATE")"
-GATE_SIZE="$(wc -c <"$GATE" | tr -d '[:space:]')"
+
+NVPN_FLEET_GATE_FIXTURE_ROOT="$GATE_FIXTURE_ROOT" \
+NVPN_FLEET_GATE_TARGET_STATUS=missed \
+NVPN_FLEET_GATE_APP_GIT_SHA="$APP_SHA" \
+NVPN_FLEET_GATE_APP_GIT_TREE="$APP_TREE" \
+NVPN_FLEET_GATE_APP_VERSION=4.1.5 \
+NVPN_FLEET_GATE_FIPS_GIT_SHA="$FIPS_SHA" \
+NVPN_FLEET_GATE_FIPS_GIT_TREE="$FIPS_TREE" \
+NVPN_FLEET_GATE_FIPS_VERSION=0.4.45 \
+NVPN_FLEET_GATE_ARTIFACT_SHA256="$ARTIFACT_SHA" \
+NVPN_FLEET_GATE_ARTIFACT_SIZE="$ARTIFACT_SIZE" \
+NVPN_FLEET_GATE_PAYLOAD_SHA256="$PAYLOAD_SHA" \
+  node --test \
+    --test-name-pattern='release receipt collection requires exact source' \
+    "$ROOT/scripts/release-artifact-provenance-lib.test.mjs" >/dev/null
+GATE_RELEASE_SHA="$(sha256_file "$GATE_RELEASE")"
 
 python3 - \
   "$RECEIPT" "$APP_SHA" "$APP_TREE" "$FIPS_SHA" "$FIPS_TREE" \
-  "$ARTIFACT_SHA" "$ARTIFACT_SIZE" <<'PY'
+  "$ARTIFACT_SHA" "$ARTIFACT_SIZE" "$PAYLOAD_SHA" "$GATE_FIXTURE" <<'PY'
 import json
 import sys
 
@@ -522,7 +628,10 @@ import sys
     fips_tree,
     artifact_sha,
     artifact_size,
+    payload_sha,
+    fixture_path,
 ) = sys.argv[1:]
+fixture = json.load(open(fixture_path, encoding="utf-8"))
 value = {
     "schema": 1,
     "appGitSha": app_sha,
@@ -535,9 +644,11 @@ value = {
     "arch": "x86_64",
     "artifactSha256": artifact_sha,
     "artifactSize": int(artifact_size),
-    "installedBinarySha256": artifact_sha,
-    "installedPayloads": {"executable": artifact_sha},
-    "gateEvidenceIds": ["full-release-gate"],
+    "installedBinarySha256": payload_sha,
+    "installedPayloads": {"nvpn": payload_sha},
+    "gateEvidenceIds": ["complete-release-gate"],
+    "releaseAssetPath": fixture["releaseAssetPath"],
+    "releasePayloadLabels": {"nvpn": fixture["payloadLabel"]},
 }
 with open(output, "w", encoding="utf-8") as handle:
     json.dump(value, handle, indent=2, sort_keys=True)
@@ -547,7 +658,7 @@ PY
 python3 - \
   "$MANIFEST" "$APP_SHA" "$APP_TREE" "$FIPS_SHA" "$FIPS_TREE" \
   "$DRIVER" "$LINUX_HELPER" "$WINDOWS_HELPER" \
-  "$ARTIFACT" "$RECEIPT" "$GATE" <<'PY'
+  "$ARTIFACT" "$RECEIPT" "$GATE_FIXTURE" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -564,7 +675,7 @@ import sys
     windows_helper,
     artifact,
     receipt,
-    gate,
+    fixture_path,
 ) = sys.argv[1:]
 
 def bound(path):
@@ -576,6 +687,22 @@ def bound(path):
     }
 
 artifact_bound = bound(artifact)
+fixture = json.loads(pathlib.Path(fixture_path).read_text(encoding="utf-8"))
+gate_request = fixture["request"]
+gate_receipt_paths = {
+    "releaseGateSummary": bound(
+        gate_request["receiptPaths"]["releaseGateSummary"]
+    ),
+    "platforms": {
+        platform: {
+            name: bound(path)
+            for name, path in receipts.items()
+        }
+        for platform, receipts in gate_request["receiptPaths"][
+            "platforms"
+        ].items()
+    },
+}
 value = {
     "schema": 2,
     "inventorySha256": "0" * 64,
@@ -590,7 +717,14 @@ value = {
         "protocol": "nvpn-fleet-ssh-transactional-v2",
         "helpers": [bound(linux_helper), bound(windows_helper)],
     },
-    "gateEvidence": [{"id": "full-release-gate", **bound(gate)}],
+    "gateEvidence": [
+        {
+            "id": "complete-release-gate",
+            "kind": "staged-release-attestation-v1",
+            **bound(gate_request["releasePath"]),
+            "receiptPaths": gate_receipt_paths,
+        }
+    ],
     "artifacts": [
         {
             "id": "linux-x86_64",
@@ -598,7 +732,8 @@ value = {
             "arch": "x86_64",
             **artifact_bound,
             "installPayload": {
-                "format": "executable",
+                "format": "tar-gz",
+                "executableMember": "nvpn",
                 "companions": [],
             },
             "receipt": bound(receipt),
@@ -622,10 +757,29 @@ run_execute() {
   NVPN_FLEET_INSTALL_AUTHORIZED=1 \
   NVPN_FLEET_LOCAL_MACHINE_ID_SHA256="$LOCAL_ID" \
   FAKE_DRIVER_LOG="$DRIVER_LOG" \
-  FAKE_PROBE_BINARY_SHA256="$ARTIFACT_SHA" \
-  FAKE_PROBE_APP_VERSION="4.1.5" \
-  FAKE_PROBE_FIPS_CORE_VERSION="0.4.45 (rev ${FIPS_SHA:0:10})" \
+  FAKE_PROBE_BINARY_SHA256="$PAYLOAD_SHA" \
+  FAKE_PROBE_APP_VERSION="4.1.4" \
+  FAKE_PROBE_FIPS_CORE_VERSION="0.4.44 (rev 1111111111)" \
     python3 "$ORCHESTRATOR" execute "${common[@]}"
+}
+
+refresh_gate_binding() {
+  python3 - "$MANIFEST" "$GATE_RELEASE" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, release_path = map(pathlib.Path, sys.argv[1:])
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+gate = manifest["gateEvidence"][0]
+gate["sha256"] = hashlib.sha256(release_path.read_bytes()).hexdigest()
+gate["size"] = release_path.stat().st_size
+manifest_path.write_text(
+    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
 }
 
 python3 -m py_compile \
@@ -635,13 +789,440 @@ python3 -m py_compile \
   "$ROOT/scripts/fleet_release_canary_remote_linux.py" \
   "$DRIVER"
 bash -n "$0"
+python3 - "$ORCHESTRATOR" <<'PY'
+import hashlib
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+
+path = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(path.parent))
+spec = importlib.util.spec_from_file_location("fleet_canary", path)
+canary = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(canary)
+first = {
+    "path": "/private/probe.json",
+    "sha256": "a" * 64,
+    "size": 1,
+}
+second = {
+    "path": "/private/install.json",
+    "sha256": "b" * 64,
+    "size": 2,
+}
+accepted = canary.validate_result_evidence(
+    {"probe": first, "install": second},
+    {"probe", "install"},
+    "fixture result evidence",
+)
+if set(accepted) != {"probe", "install"}:
+    raise SystemExit("complete fleet result evidence was not retained")
+for label, value, expected_error in (
+    (
+        "missing",
+        {"probe": first},
+        "must contain exactly",
+    ),
+    (
+        "duplicate",
+        {"probe": first, "install": dict(first)},
+        "duplicate raw receipt binding",
+    ),
+    (
+        "malformed",
+        {
+            "probe": first,
+            "install": {**second, "sha256": "not-a-sha256"},
+        },
+        "install.sha256 is invalid",
+    ),
+):
+    try:
+        canary.validate_result_evidence(
+            value,
+            {"probe", "install"},
+            f"{label} result evidence",
+        )
+    except (canary.CanaryError, canary.EvidenceError) as error:
+        if expected_error not in str(error):
+            raise SystemExit(f"{label} binding returned wrong error: {error}")
+    else:
+        raise SystemExit(f"{label} result evidence was accepted")
+
+with tempfile.TemporaryDirectory(prefix="nvpn-raw-binding.") as raw:
+    root = pathlib.Path(raw)
+    receipt = root / "probe-raw.json"
+    receipt.write_text('{"schema":2}\n', encoding="utf-8")
+    wrapped = root / "probe.json"
+    value = {
+        "schema": 2,
+        "rawReceipt": {
+            "path": str(receipt),
+            "sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+            "size": receipt.stat().st_size,
+        },
+    }
+    wrapped.write_text(json.dumps(value), encoding="utf-8")
+    loaded = canary.load_driver_evidence(wrapped, root, "fixture probe")
+    if loaded["rawReceipt"] != value["rawReceipt"]:
+        raise SystemExit("valid raw binding changed during validation")
+    value["rawReceipt"]["sha256"] = "0" * 64
+    wrapped.write_text(json.dumps(value), encoding="utf-8")
+    try:
+        canary.load_driver_evidence(wrapped, root, "fixture probe")
+    except (canary.CanaryError, canary.EvidenceError) as error:
+        if "raw receipt SHA-256 mismatch" not in str(error):
+            raise SystemExit(f"mismatched raw binding returned wrong error: {error}")
+    else:
+        raise SystemExit("mismatched raw receipt binding was accepted")
+PY
+python3 - "$ROOT/scripts/fleet_release_canary_remote_linux.py" <<'PY'
+import copy
+import hashlib
+import os
+import pathlib
+import sys
+import tempfile
+import types
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+anchor = "\npayload = json.loads(base64.b64decode(FLEET_PAYLOAD_B64))"
+definitions, separator, _ = source.partition(anchor)
+if not separator:
+    raise SystemExit("Linux fleet adapter entry point is ambiguous")
+namespace = {"__name__": "fleet_adapter_probe_identity_contract"}
+exec(compile(definitions, str(path), "exec"), namespace)
+
+candidate = b"immutable candidate binary\n"
+candidate_sha256 = hashlib.sha256(candidate).hexdigest()
+preinstall_binary_sha256 = hashlib.sha256(
+    b"older installed nvpn binary\n"
+).hexdigest()
+fips_sha = "b" * 40
+preinstall_probe = {
+    "probeBinarySha256": preinstall_binary_sha256,
+    "probeAppVersion": "4.1.4",
+    "probeFipsCoreVersion": "0.4.44 (rev 1111111111)",
+}
+frozen = {
+    "machineIdentitySha256": "a" * 64,
+    "configSha256": "c" * 64,
+    "signedRosterStoreSha256": "d" * 64,
+    "rosterIdentitySha256": "e" * 64,
+    "rosterPeerCount": 1,
+    "localDeviceIdentitySha256": "f" * 64,
+    "networkIdentitySha256": "1" * 64,
+}
+base_state = {
+    **preinstall_probe,
+    "config": {
+        "sha256": frozen["configSha256"],
+        "signedRosterStoreSha256": frozen["signedRosterStoreSha256"],
+        "rosterIdentitySha256": frozen["rosterIdentitySha256"],
+        "rosterPeerCount": frozen["rosterPeerCount"],
+        "localDeviceIdentitySha256": frozen["localDeviceIdentitySha256"],
+        "networkIdentitySha256": frozen["networkIdentitySha256"],
+    },
+    "network": {
+        "directMode": True,
+        "ownedRouteCount": 0,
+        "ownedResolverArtifactCount": 0,
+    },
+}
+drifts = {
+    "probeBinarySha256": (
+        "2" * 64,
+        "probe CLI binary changed after preflight",
+    ),
+    "probeAppVersion": (
+        "4.1.3",
+        "probe CLI app version changed after preflight",
+    ),
+    "probeFipsCoreVersion": (
+        "0.4.45 (rev 0000000000)",
+        "probe CLI FIPS version changed after preflight",
+    ),
+}
+namespace["machine_identity"] = lambda: frozen["machineIdentitySha256"]
+
+with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
+    work = pathlib.Path(raw)
+    old_sudo_user = os.environ.get("SUDO_USER")
+    os.environ["SUDO_USER"] = "fixture"
+    namespace["pwd"] = types.SimpleNamespace(
+        getpwnam=lambda _user: types.SimpleNamespace(pw_dir=str(work))
+    )
+    try:
+        for index, (field, (bad_value, expected_error)) in enumerate(
+            drifts.items()
+        ):
+            stage_name = (
+                f".nvpn-fleet-{index + 1:032x}.artifact"
+            )
+            stage = work / stage_name
+            stage.write_bytes(candidate)
+            transaction_root = work / f"transaction-root-{index}"
+            target = {
+                "id": f"drift-{field}",
+                "deployment": {
+                    "authorization": "install",
+                    "transactionRoot": str(transaction_root),
+                },
+                "expected": frozen,
+                "checks": {},
+            }
+            expected = {
+                "transactionId": f"{index + 1:032x}",
+                "artifactSha256": candidate_sha256,
+                "artifactSize": len(candidate),
+                "installedBinarySha256": candidate_sha256,
+                "preinstallProbe": preinstall_probe,
+                "appVersion": "4.1.5",
+                "fipsVersion": "0.4.45",
+                "fipsGitSha": fips_sha,
+                "expected": frozen,
+            }
+            state = copy.deepcopy(base_state)
+            state[field] = bad_value
+            namespace["capture"] = lambda _target, *, checks: state
+            mutations = []
+
+            def snapshot(*_args):
+                mutations.append("snapshot")
+                raise RuntimeError("probe drift reached snapshot mutation")
+
+            namespace["snapshot_transaction"] = snapshot
+            try:
+                namespace["install"](
+                    {"stageName": stage_name},
+                    target,
+                    expected,
+                )
+            except RuntimeError as error:
+                if expected_error not in str(error):
+                    raise SystemExit(
+                        f"{field} drift reached mutation or wrong guard: {error}"
+                    ) from error
+            else:
+                raise SystemExit(f"{field} drift was accepted")
+            if (
+                mutations
+                or transaction_root.exists()
+                or not stage.is_file()
+            ):
+                raise SystemExit(
+                    f"{field} drift mutated install state or user stage"
+                )
+
+        for index, failure in enumerate(
+            ("hash-precondition", "snapshot", "extraction"),
+            start=10,
+        ):
+            stage_name = (
+                f".nvpn-fleet-{index + 1:032x}.artifact"
+            )
+            stage = work / stage_name
+            stage.write_bytes(candidate)
+            transaction_root = work / f"transaction-root-{index}"
+            target = {
+                "id": f"stage-cleanup-{failure}",
+                "deployment": {
+                    "authorization": "install",
+                    "transactionRoot": str(transaction_root),
+                },
+                "expected": frozen,
+                "checks": {},
+            }
+            expected = {
+                "transactionId": f"{index + 1:032x}",
+                "artifactSha256": candidate_sha256,
+                "artifactSize": len(candidate),
+                "installedBinarySha256": candidate_sha256,
+                "preinstallProbe": preinstall_probe,
+                "installPayload": {
+                    "format": "executable",
+                    "companions": [],
+                },
+                "appVersion": "4.1.5",
+                "fipsVersion": "0.4.45",
+                "fipsGitSha": fips_sha,
+                "expected": frozen,
+            }
+            namespace["capture"] = lambda _target, *, checks: copy.deepcopy(
+                base_state
+            )
+            expected_error = {
+                "hash-precondition": "staged artifact SHA-256 mismatch",
+                "snapshot": "fixture snapshot failure",
+                "extraction": "fixture extraction failure",
+            }[failure]
+            if failure == "hash-precondition":
+                expected["artifactSha256"] = "9" * 64
+            elif failure == "snapshot":
+                namespace["snapshot_transaction"] = lambda *_args: (
+                    namespace["fail"]("fixture snapshot failure")
+                )
+            else:
+                def snapshot(transaction, *_args):
+                    transaction.mkdir(parents=True)
+                    return {}
+
+                namespace["snapshot_transaction"] = snapshot
+                namespace["extract_payload"] = lambda *_args: (
+                    namespace["fail"]("fixture extraction failure")
+                )
+            try:
+                namespace["install"](
+                    {"stageName": stage_name},
+                    target,
+                    expected,
+                )
+            except RuntimeError as error:
+                if expected_error not in str(error):
+                    raise SystemExit(
+                        f"{failure} returned the wrong failure: {error}"
+                    ) from error
+            else:
+                raise SystemExit(f"{failure} was accepted")
+            if (
+                not stage.is_file()
+                or (
+                    transaction_root.exists()
+                    and list(transaction_root.glob(".staged-*"))
+                )
+            ):
+                raise SystemExit(
+                    f"{failure} mutated user stage or left private residue"
+                )
+
+        symlink_target = work / "symlink-target"
+        symlink_target.write_bytes(candidate)
+        symlink_stage = work / f".nvpn-fleet-{'f' * 32}.artifact"
+        symlink_stage.symlink_to(symlink_target)
+        symlink_root = work / "transaction-root-symlink"
+        target = {
+            "id": "symlink-stage",
+            "deployment": {
+                "authorization": "install",
+                "transactionRoot": str(symlink_root),
+            },
+            "expected": frozen,
+            "checks": {},
+        }
+        expected = {
+            "transactionId": "f" * 32,
+            "artifactSha256": candidate_sha256,
+            "artifactSize": len(candidate),
+            "installedBinarySha256": candidate_sha256,
+            "preinstallProbe": preinstall_probe,
+            "installPayload": {"format": "executable", "companions": []},
+            "appVersion": "4.1.5",
+            "fipsVersion": "0.4.45",
+            "fipsGitSha": fips_sha,
+            "expected": frozen,
+        }
+        try:
+            namespace["install"](
+                {"stageName": symlink_stage.name},
+                target,
+                expected,
+            )
+        except RuntimeError as error:
+            if "could not be secured" not in str(error):
+                raise SystemExit(
+                    f"symlink stage returned the wrong guard: {error}"
+                ) from error
+        else:
+            raise SystemExit("symlink staged artifact was accepted")
+        if (
+            not symlink_stage.is_symlink()
+            or symlink_root.exists()
+        ):
+            raise SystemExit("symlink rejection mutated user or private stage")
+        symlink_stage.unlink()
+    finally:
+        if old_sudo_user is None:
+            os.environ.pop("SUDO_USER", None)
+        else:
+            os.environ["SUDO_USER"] = old_sudo_user
+
+runtime_state = {
+    "_configuredBinaryResolvedPath": "/usr/local/bin/nvpn",
+    "_execStartPath": "/usr/local/bin/nvpn",
+    "_execStartResolvedPath": "/usr/local/bin/nvpn",
+    "_mainProcessExePath": "/usr/local/bin/nvpn",
+    "_mainProcessExeSha256": candidate_sha256,
+}
+runtime = namespace["assert_service_runtime_binding"](
+    runtime_state,
+    pathlib.Path("/usr/local/bin/nvpn"),
+    candidate_sha256,
+)
+if (
+    runtime["configuredBinaryResolvedPath"] != "/usr/local/bin/nvpn"
+    or runtime["execStartResolvedPath"] != "/usr/local/bin/nvpn"
+    or runtime["mainProcessExePath"] != "/usr/local/bin/nvpn"
+    or runtime["mainProcessExeSha256"] != candidate_sha256
+):
+    raise SystemExit("Linux runtime binding omitted exact service evidence")
+for field, bad_value, expected_error in (
+    (
+        "_execStartResolvedPath",
+        "/usr/local/bin/stale-nvpn",
+        "systemd ExecStart does not resolve to the configured binary",
+    ),
+    (
+        "_mainProcessExePath",
+        "/usr/local/bin/stale-nvpn",
+        "systemd MainPID does not execute the configured binary",
+    ),
+    (
+        "_mainProcessExeSha256",
+        "8" * 64,
+        "systemd MainPID executable hash is not the installed candidate",
+    ),
+):
+    stale = copy.deepcopy(runtime_state)
+    stale[field] = bad_value
+    try:
+        namespace["assert_service_runtime_binding"](
+            stale,
+            pathlib.Path("/usr/local/bin/nvpn"),
+            candidate_sha256,
+        )
+    except RuntimeError as error:
+        if expected_error not in str(error):
+            raise SystemExit(
+                f"Linux {field} drift returned the wrong guard: {error}"
+            ) from error
+    else:
+        raise SystemExit(f"Linux {field} drift was accepted")
+try:
+    namespace["finish_staged_cleanup"](
+        RuntimeError("primary adapter failure"),
+        ["private cleanup failure"],
+    )
+except RuntimeError as error:
+    if (
+        "primary adapter failure" not in str(error)
+        or "private cleanup failure" not in str(error)
+    ):
+        raise SystemExit("Linux cleanup masked the primary adapter failure")
+else:
+    raise SystemExit("Linux combined adapter/cleanup failure was accepted")
+PY
 python3 - "$ROOT/scripts/fleet_release_canary_ssh_driver.py" <<'PY'
 import base64
 import gzip
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("fleet_driver", path)
@@ -726,6 +1307,110 @@ if len(windows_source) >= len(windows_raw_source):
     raise SystemExit("Windows fleet adapter was not reduced for reliable stdin transport")
 if any("FLEET_PAYLOAD" in argument for argument in windows_command):
     raise SystemExit("private fleet payload leaked into remote argv")
+
+cleanup_name = f".nvpn-fleet-{'1' * 32}.artifact"
+linux_cleanup, linux_cleanup_command = (
+    driver.render_staged_artifact_cleanup("linux", cleanup_name)
+)
+if linux_cleanup_command != ["python3", "-"]:
+    raise SystemExit("Linux staged artifact cleanup transport changed")
+with tempfile.TemporaryDirectory(prefix="nvpn-fleet-cleanup.") as raw:
+    home = pathlib.Path(raw)
+    staged = home / cleanup_name
+    staged.write_text("remote residue\n", encoding="utf-8")
+    cleanup_env = {**os.environ, "HOME": str(home)}
+    result = subprocess.run(
+        [sys.executable, "-"],
+        input=linux_cleanup,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=cleanup_env,
+    )
+    if result.returncode != 0 or staged.exists():
+        raise SystemExit("Linux driver cleanup left a staged artifact")
+    staged.mkdir()
+    result = subprocess.run(
+        [sys.executable, "-"],
+        input=linux_cleanup,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=cleanup_env,
+    )
+    if result.returncode == 0 or not staged.is_dir():
+        raise SystemExit("Linux driver cleanup did not fail closed on residue")
+
+windows_cleanup, windows_cleanup_command = (
+    driver.render_staged_artifact_cleanup("windows", cleanup_name)
+)
+if windows_cleanup:
+    raise SystemExit("Windows cleanup unexpectedly uses remote stdin")
+if windows_cleanup_command[-2] != "-EncodedCommand":
+    raise SystemExit("Windows staged artifact cleanup is not encoded")
+decoded_cleanup = base64.b64decode(
+    windows_cleanup_command[-1]
+).decode("utf-16le")
+for required in (
+    "Remove-Item -LiteralPath $path -Force -ErrorAction Stop",
+    "staged artifact cleanup left remote residue",
+):
+    if required not in decoded_cleanup:
+        raise SystemExit("Windows driver cleanup is not fail-closed")
+
+driver_text = path.read_text(encoding="utf-8")
+staged_adapter = driver_text[driver_text.index(
+    "def invoke_staged_adapter"
+):driver_text.index(
+    "\n\ndef parse_args"
+)]
+for required in (
+    "primary_error",
+    "cleanup_error",
+    "cleanup also failed",
+):
+    if required not in staged_adapter:
+        raise SystemExit("driver cleanup masks the primary adapter failure")
+
+original_stage = driver.stage_artifact
+original_invoke = driver.invoke_adapter
+original_cleanup = driver.cleanup_staged_artifact
+try:
+    driver.stage_artifact = lambda *_args: None
+    driver.invoke_adapter = lambda *_args: (75, None, "primary adapter failure")
+
+    def cleanup_failure(*_args):
+        raise driver.DriverError("remote cleanup failure")
+
+    driver.cleanup_staged_artifact = cleanup_failure
+    preserved = driver.invoke_staged_adapter(
+        {"platform": "linux"},
+        {},
+        pathlib.Path("/fixture"),
+        cleanup_name,
+    )
+    if preserved[0] != 75 or not all(
+        value in preserved[2]
+        for value in ("primary adapter failure", "remote cleanup failure")
+    ):
+        raise SystemExit("driver cleanup replaced the primary adapter status")
+finally:
+    driver.stage_artifact = original_stage
+    driver.invoke_adapter = original_invoke
+    driver.cleanup_staged_artifact = original_cleanup
+
+try:
+    driver.run_transport(
+        [sys.executable, "-c", "import time; time.sleep(1)"],
+        input_text=None,
+        timeout=0.01,
+        label="fixture transport",
+    )
+except driver.DriverError as error:
+    if "timed out" not in str(error):
+        raise SystemExit("driver transport timeout returned the wrong error")
+else:
+    raise SystemExit("driver transport timeout was not bounded")
 PY
 windows_adapter="$ROOT/scripts/fleet_release_canary_remote_windows.ps1"
 grep -Fq "[IO.Path]::IsPathFullyQualified" "$windows_adapter" \
@@ -770,6 +1455,87 @@ if any(value not in text for value in required):
     raise SystemExit(
         "Windows fleet adapter lacks fail-closed broken-service guards"
     )
+
+guard = text[text.index("function AssertExpected"):text.index(
+    "function WriteJournal"
+)]
+for observed, exact, message in (
+    (
+        "$State.probeBinarySha256",
+        "$preinstallProbe.probeBinarySha256",
+        "probe CLI binary changed after preflight",
+    ),
+    (
+        "$State.probeAppVersion",
+        "$preinstallProbe.probeAppVersion",
+        "probe CLI app version changed after preflight",
+    ),
+    (
+        "$State.probeFipsCoreVersion",
+        "$preinstallProbe.probeFipsCoreVersion",
+        "probe CLI FIPS version changed after preflight",
+    ),
+):
+    if observed not in guard or exact not in guard or message not in guard:
+        raise SystemExit(
+            f"Windows fleet adapter lacks exact pre-mutation guard: {message}"
+        )
+
+install = text[text.index("function InstallStagedCandidate"):text.index(
+    "function InstallCandidate"
+)]
+assertion = install.index("AssertExpected $before $Target $Expected")
+for mutation in (
+    "[IO.Directory]::CreateDirectory($root)",
+    "SnapshotTransaction $transaction",
+    "WriteJournal $transaction",
+    "ExtractPayload $stage",
+    "Stop-Service -Name $name",
+    "AtomicInstall $extracted.candidate",
+):
+    if assertion >= install.index(mutation):
+        raise SystemExit(
+            f"Windows probe identity assertion follows mutation: {mutation}"
+        )
+
+wrapper = text[text.index("function InstallCandidate"):text.index(
+    "\ntry {\n    $payloadBytes"
+)]
+for required in (
+    "CopyStagedArtifact $stage $root $transactionId",
+    "$result = InstallStagedCandidate",
+    "$primary",
+    "staged artifact cleanup also failed",
+    "RemoveStagedArtifact ([string]$path)",
+):
+    if required not in wrapper:
+        raise SystemExit(
+            "Windows private-stage cleanup masks the primary failure"
+        )
+if "RemoveStagedArtifact $stage" in wrapper:
+    raise SystemExit("Windows adapter duplicates driver-owned user-stage cleanup")
+cleanup = text[text.index("function RemoveStagedArtifact"):text.index(
+    "function InstallStagedCandidate"
+)]
+for required in (
+    "Remove-Item -LiteralPath $Path -Force -ErrorAction Stop",
+    "staged artifact cleanup failed",
+    "staged artifact cleanup left remote residue",
+):
+    if required not in cleanup:
+        raise SystemExit(
+            "Windows staged artifact cleanup is not fail-closed"
+        )
+for required in (
+    "[IO.FileShare]::Read",
+    "[IO.FileMode]::CreateNew",
+    "[IO.FileAttributes]::ReparsePoint",
+    "$privateWrite.Flush($true)",
+):
+    if required not in cleanup:
+        raise SystemExit(
+            "Windows adapter does not secure one immutable private stage"
+        )
 PY
 if grep -Eq 'cargo build|dotnet build|gradle|xcodebuild' \
   "$ORCHESTRATOR" \
@@ -784,6 +1550,22 @@ rm -f "$DRIVER_LOG"
 python3 "$ORCHESTRATOR" plan "${common[@]}" >/dev/null
 [[ ! -s "$DRIVER_LOG" ]] || fail "plan contacted the fleet driver"
 json_status_is "$EVIDENCE/fleet-canary-plan.json" good planned
+json_field_is \
+  "$EVIDENCE/fleet-canary-plan.json" \
+  releaseGateManifestSha256 \
+  "$GATE_RELEASE_SHA"
+
+cp "$GATE_RELEASE" "$WORK/release-good.json"
+printf '{"passed":true}\n' >"$GATE_RELEASE"
+refresh_gate_binding
+rm -f "$DRIVER_LOG"
+if python3 "$ORCHESTRATOR" plan "${common[@]}" >/dev/null 2>&1; then
+  fail "trivial passed gate evidence was accepted"
+fi
+[[ ! -s "$DRIVER_LOG" ]] \
+  || fail "semantic gate rejection contacted the fleet driver"
+cp "$WORK/release-good.json" "$GATE_RELEASE"
+refresh_gate_binding
 
 if NVPN_FLEET_LOCAL_MACHINE_ID_SHA256="$LOCAL_ID" \
   FAKE_DRIVER_LOG="$DRIVER_LOG" \
@@ -791,6 +1573,18 @@ if NVPN_FLEET_LOCAL_MACHINE_ID_SHA256="$LOCAL_ID" \
 then
   fail "execute ran without explicit install authorization"
 fi
+
+write_inventory "$INVENTORY" good
+rm -rf "$EVIDENCE"
+rm -f "$DRIVER_LOG"
+run_execute >/dev/null
+json_field_is "$EVIDENCE/fleet-canary-result.json" status passed
+json_field_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  releaseGateManifestSha256 \
+  "$GATE_RELEASE_SHA"
+json_target_evidence_is \
+  "$EVIDENCE/fleet-canary-result.json" good probe install
 
 write_inventory \
   "$INVENTORY" good inactive absent unreachable noaccess report-only
@@ -806,6 +1600,10 @@ for target in good inactive absent; do
   grep -Fxq "install:$target" "$DRIVER_LOG" \
     || fail "$target was not installed"
 done
+json_field_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  releaseGateManifestSha256 \
+  "$GATE_RELEASE_SHA"
 json_status_is \
   "$EVIDENCE/fleet-canary-result.json" unreachable skipped-unreachable
 json_status_is \
@@ -840,6 +1638,9 @@ set -e
 json_status_is \
   "$EVIDENCE/fleet-canary-result.json" \
   bad-process-inactive failed-rolled-back
+json_target_evidence_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  bad-process-inactive probe install rollback
 json_status_is \
   "$EVIDENCE/fleet-canary-result.json" never blocked-by-prior-failure
 grep -Fxq 'rollback:bad-process-inactive' "$DRIVER_LOG" \
@@ -848,7 +1649,13 @@ if grep -Fq 'install:never' "$DRIVER_LOG"; then
   fail "rollout continued after a failed canary"
 fi
 
-for adversary in remote-build wrong-roster bad-raw; do
+for adversary in \
+  remote-build \
+  wrong-roster \
+  bad-raw \
+  misdirected-unit \
+  stale-main-process
+do
   write_inventory "$INVENTORY" "$adversary"
   rm -rf "$EVIDENCE"
   rm -f "$DRIVER_LOG"
@@ -859,6 +1666,19 @@ for adversary in remote-build wrong-roster bad-raw; do
   [[ "$status" == 1 ]] || fail "$adversary evidence was accepted"
   json_status_is \
     "$EVIDENCE/fleet-canary-result.json" "$adversary" failed-rolled-back
+  if [[ "$adversary" == bad-raw ]]; then
+    json_target_evidence_is \
+      "$EVIDENCE/fleet-canary-result.json" \
+      "$adversary" probe rollback
+  else
+    json_target_evidence_is \
+      "$EVIDENCE/fleet-canary-result.json" \
+      "$adversary" probe install rollback
+  fi
+  json_field_is \
+    "$EVIDENCE/fleet-canary-result.json" \
+    releaseGateManifestSha256 \
+    "$GATE_RELEASE_SHA"
 done
 
 write_inventory "$INVENTORY" rollback-fail
@@ -896,10 +1716,28 @@ if grep -Fq 'install:' "$DRIVER_LOG"; then
   fail "duplicate alias preflight mutated a target"
 fi
 
+write_inventory "$INVENTORY" malformed-probe-hash
+rm -rf "$EVIDENCE"
+rm -f "$DRIVER_LOG"
+set +e
+run_execute >/dev/null
+status=$?
+set -e
+[[ "$status" == 1 ]] || fail "malformed probe hash was accepted"
+json_status_is \
+  "$EVIDENCE/fleet-canary-result.json" malformed-probe-hash probe-failed
+json_field_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  releaseGateManifestSha256 \
+  "$GATE_RELEASE_SHA"
+if grep -Fq 'install:' "$DRIVER_LOG"; then
+  fail "malformed probe evidence reached install"
+fi
+
 for adversary in \
-  wrong-probe-hash \
-  wrong-probe-app-version \
-  wrong-probe-fips-version
+  probe-drift-hash \
+  probe-drift-app-version \
+  probe-drift-fips-version
 do
   write_inventory "$INVENTORY" "$adversary"
   rm -rf "$EVIDENCE"
@@ -908,12 +1746,14 @@ do
   run_execute >/dev/null
   status=$?
   set -e
-  [[ "$status" == 1 ]] || fail "$adversary probe evidence was accepted"
+  [[ "$status" == 1 ]] || fail "$adversary install evidence was accepted"
   json_status_is \
-    "$EVIDENCE/fleet-canary-result.json" "$adversary" probe-failed
-  if grep -Fq 'install:' "$DRIVER_LOG"; then
-    fail "$adversary probe failure reached install"
-  fi
+    "$EVIDENCE/fleet-canary-result.json" "$adversary" failed-rolled-back
+  json_target_evidence_is \
+    "$EVIDENCE/fleet-canary-result.json" \
+    "$adversary" probe install rollback
+  grep -Fxq "rollback:$adversary" "$DRIVER_LOG" \
+    || fail "$adversary did not trigger rollback"
 done
 
 cp "$INVENTORY" "$APP/inventory-not-private.json"

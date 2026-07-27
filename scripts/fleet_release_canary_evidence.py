@@ -7,6 +7,7 @@ is performed by ``fleet_release_canary.py`` before these semantic checks run.
 
 from __future__ import annotations
 
+import pathlib
 import re
 from typing import Any
 
@@ -78,6 +79,35 @@ def nonempty(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         fail(f"{label} is required")
     return value
+
+
+def validate_result_evidence(
+    value: Any,
+    expected_actions: set[str],
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    bindings = mapping(value, label)
+    if set(bindings) != expected_actions:
+        fail(f"{label} must contain exactly: {', '.join(sorted(expected_actions))}")
+    normalized: dict[str, dict[str, Any]] = {}
+    seen_paths: set[str] = set()
+    seen_receipts: set[tuple[str, int]] = set()
+    for action in sorted(expected_actions):
+        binding = mapping(bindings[action], f"{label}.{action}")
+        if set(binding) != {"path", "sha256", "size"}:
+            fail(f"{label}.{action} must contain exactly: path, sha256, size")
+        path = binding["path"]
+        if not isinstance(path, str) or not pathlib.Path(path).is_absolute():
+            fail(f"{label}.{action}.path must be absolute")
+        digest = hex64(binding["sha256"], f"{label}.{action}.sha256")
+        size = positive(binding["size"], f"{label}.{action}.size")
+        receipt_identity = (digest, size)
+        if path in seen_paths or receipt_identity in seen_receipts:
+            fail(f"{label} contains a duplicate raw receipt binding")
+        seen_paths.add(path)
+        seen_receipts.add(receipt_identity)
+        normalized[action] = {"path": path, "sha256": digest, "size": size}
+    return normalized
 
 
 def validate_service_snapshot(
@@ -233,8 +263,6 @@ def validate_network_snapshot(value: Any, label: str) -> dict[str, Any]:
 def validate_probe(
     result: dict[str, Any],
     target: dict[str, Any],
-    artifact: dict[str, Any],
-    source: dict[str, str],
 ) -> dict[str, Any]:
     label = f"target {target['id']} probe evidence"
     exact(result.get("schema"), 2, f"{label} schema")
@@ -249,28 +277,13 @@ def validate_probe(
         result.get("probeBinarySha256"),
         f"{label} probeBinarySha256",
     )
-    exact(
-        probe_binary_hash,
-        artifact["_installed_hash"],
-        f"{label} probeBinarySha256 frozen artifact",
-    )
     probe_app_version = nonempty(
         result.get("probeAppVersion"),
         f"{label} probeAppVersion",
     )
-    exact(
-        probe_app_version,
-        source["appVersion"],
-        f"{label} probeAppVersion frozen source",
-    )
     probe_fips_version = nonempty(
         result.get("probeFipsCoreVersion"),
         f"{label} probeFipsCoreVersion",
-    )
-    exact(
-        probe_fips_version,
-        f"{source['fipsVersion']} (rev {source['fipsGitSha'][:10]})",
-        f"{label} probeFipsCoreVersion frozen source",
     )
     identity = hex64(
         result.get("machineIdentitySha256"), f"{label} machineIdentitySha256"
@@ -291,6 +304,20 @@ def validate_probe(
         f"{label} transaction.pendingTransactionIds",
     )
     service = validate_service_snapshot(result.get("service"), f"{label} service")
+    deployment = target["deployment"]
+    probe_path = deployment.get("probeBinaryPath", deployment["binaryPath"])
+    binary_path = deployment["binaryPath"]
+    paths_match = (
+        probe_path.casefold() == binary_path.casefold()
+        if target["platform"] == "windows"
+        else probe_path == binary_path
+    )
+    if service["binaryPresent"] and paths_match:
+        exact(
+            probe_binary_hash,
+            service["binarySha256"],
+            f"{label} probe CLI versus preinstall service binary",
+        )
     config = validate_config_snapshot(result.get("config"), target, f"{label} config")
     network = validate_network_snapshot(result.get("network"), f"{label} network")
     return {
@@ -368,6 +395,20 @@ def validate_install_result(
         artifact["sha256"],
         f"{label} stagedArtifactSha256",
     )
+    preinstall_probe = mapping(
+        result.get("preinstallProbe"),
+        f"{label} preinstallProbe",
+    )
+    for field in (
+        "probeBinarySha256",
+        "probeAppVersion",
+        "probeFipsCoreVersion",
+    ):
+        exact(
+            preinstall_probe.get(field),
+            probe[field],
+            f"{label} preinstallProbe.{field}",
+        )
 
     transaction = mapping(result.get("transaction"), f"{label} transaction")
     if (
@@ -452,6 +493,39 @@ def validate_install_result(
     )
     if first_pid == final_pid:
         fail(f"{label} did not prove a real service restart")
+    if target["platform"] == "linux":
+        configured_path = nonempty(
+            service.get("configuredBinaryPath"),
+            f"{label} service.configuredBinaryPath",
+        )
+        exact(
+            configured_path,
+            target["deployment"]["binaryPath"],
+            f"{label} service.configuredBinaryPath",
+        )
+        configured_resolved = nonempty(
+            service.get("configuredBinaryResolvedPath"),
+            f"{label} service.configuredBinaryResolvedPath",
+        )
+        nonempty(
+            service.get("execStartPath"),
+            f"{label} service.execStartPath",
+        )
+        exact(
+            service.get("execStartResolvedPath"),
+            configured_resolved,
+            f"{label} service.execStartResolvedPath",
+        )
+        exact(
+            service.get("mainProcessExePath"),
+            configured_resolved,
+            f"{label} service.mainProcessExePath",
+        )
+        exact(
+            service.get("mainProcessExeSha256"),
+            artifact["_installed_hash"],
+            f"{label} service.mainProcessExeSha256",
+        )
 
     config = mapping(result.get("config"), f"{label} config evidence")
     false(

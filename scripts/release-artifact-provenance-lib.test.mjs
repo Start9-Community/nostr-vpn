@@ -126,17 +126,29 @@ test('Android bundle proof compares real APK and AAB production payload bytes', 
 })
 
 test('release receipt collection requires exact source and strict public UI gates', () => {
-  const root = mkdtempSync(join(tmpdir(), 'nvpn-gate-receipts-test-'))
+  const fixtureRoot = process.env.NVPN_FLEET_GATE_FIXTURE_ROOT
+  const root =
+    fixtureRoot ?? mkdtempSync(join(tmpdir(), 'nvpn-gate-receipts-test-'))
+  if (fixtureRoot) {
+    mkdirSync(root, { recursive: true })
+  }
   try {
-    const commit = 'a'.repeat(40)
-    const tree = 'b'.repeat(40)
+    const commit =
+      process.env.NVPN_FLEET_GATE_APP_GIT_SHA ?? 'a'.repeat(40)
+    const tree =
+      process.env.NVPN_FLEET_GATE_APP_GIT_TREE ?? 'b'.repeat(40)
     const source = {
       appGitSha: commit,
       appGitTree: tree,
-      fipsGitSha: 'c'.repeat(40),
-      fipsGitTree: 'd'.repeat(40),
+      appVersion: process.env.NVPN_FLEET_GATE_APP_VERSION ?? '4.1.5',
+      fipsGitSha:
+        process.env.NVPN_FLEET_GATE_FIPS_GIT_SHA ?? 'c'.repeat(40),
+      fipsGitTree:
+        process.env.NVPN_FLEET_GATE_FIPS_GIT_TREE ?? 'd'.repeat(40),
+      fipsVersion: process.env.NVPN_FLEET_GATE_FIPS_VERSION ?? '0.4.45',
     }
     const mobileJoinPath = join(root, 'mobile-join.json')
+    const macosJoinPath = join(root, 'macos-join.json')
     const paths = {
       android: {
         physical: join(root, 'android.json'),
@@ -146,6 +158,7 @@ test('release receipt collection requires exact source and strict public UI gate
         replacement_singleton: join(root, 'android-replacement.json'),
       },
       ios: {
+        desktop_mobile_join: macosJoinPath,
         frozen_archive: join(root, 'ios.json'),
         mobile_artifact: join(root, 'ios-artifact.json'),
         mobile_join: mobileJoinPath,
@@ -160,7 +173,7 @@ test('release receipt collection requires exact source and strict public UI gate
       },
       macos: {
         artifact: join(root, 'macos-artifact.json'),
-        public_ui_join: join(root, 'macos-join.json'),
+        public_ui_join: macosJoinPath,
         network: join(root, 'macos-network.json'),
       },
       windows: {
@@ -172,9 +185,13 @@ test('release receipt collection requires exact source and strict public UI gate
     }
     const summary = join(root, 'summary.json')
     writeFileSync(summary, JSON.stringify({
-      elapsedSeconds: 42,
+      elapsedSeconds:
+        process.env.NVPN_FLEET_GATE_TARGET_STATUS === 'missed' ? 301 : 42,
       targetSeconds: 300,
-      targetStatus: 'met',
+      targetStatus:
+        process.env.NVPN_FLEET_GATE_TARGET_STATUS === 'missed'
+          ? 'missed'
+          : 'met',
     }))
     const androidArtifact = {
       ...source,
@@ -191,6 +208,7 @@ test('release receipt collection requires exact source and strict public UI gate
       package: 'fi.siriusbusiness.nvpn',
       signerCertificateSha256: '2'.repeat(64),
       companySigningVerified: true,
+      fipsCoreVersion: source.fipsVersion,
     }
     const iosArtifact = {
       ...source,
@@ -203,6 +221,7 @@ test('release receipt collection requires exact source and strict public UI gate
       packetTunnelExecutableSha256: '7'.repeat(64),
       signerCertificateSha256: '8'.repeat(64),
       installedBundleIdentifier: 'fi.siriusbusiness.nvpn',
+      fipsCoreVersion: source.fipsVersion,
     }
     const androidText = JSON.stringify(androidArtifact)
     const iosText = JSON.stringify(iosArtifact)
@@ -387,19 +406,28 @@ test('release receipt collection requires exact source and strict public UI gate
         'iPhone-admin-to-Pixel-manual': 100,
         'Pixel-admin-to-iPhone-manual': 100,
       },
+      contentWidth: {
+        minimumRequiredBasisPoints: 9800,
+        maximumAllowedBasisPoints: 10_000,
+        androidObservedBasisPoints: 10_000,
+        iosObservedBasisPoints: 10_000,
+      },
       qr: {
         iphoneAdminPixelJoiner: true,
         pixelAdminIphoneJoiner: true,
         pendingQrBackgroundForeground: true,
         exactRosterOnBothSides: true,
         joinerRelaunchDurable: true,
+        androidJoinerRelaunchDurable: true,
+        iphoneJoinerRelaunchDurable: true,
       },
       manual: {
         iphoneAdminPixelJoiner: true,
         pixelAdminIphoneJoiner: true,
         exactRosterOnBothSides: true,
         acceptedRosterOnly: true,
-        joinerRelaunchDurable: true,
+        iphoneAdminPixelJoinerRelaunchDurable: true,
+        pixelAdminIphoneJoinerRelaunchDurable: true,
       },
     }))
     const macosArtifact = {
@@ -408,6 +436,7 @@ test('release receipt collection requires exact source and strict public UI gate
       companySigningVerified: true,
       builtOnHost: true,
       builtOnTestVm: false,
+      fipsCoreVersion: source.fipsVersion,
       appExecutableSha256: '9'.repeat(64),
       cliExecutableSha256: 'a'.repeat(64),
     }
@@ -421,6 +450,20 @@ test('release receipt collection requires exact source and strict public UI gate
         ...source,
         artifactReceiptSha256: sha256(macosText),
         appExecutableSha256: macosArtifact.appExecutableSha256,
+        ios: {
+          artifactReceiptSha256: sha256(iosText),
+          appBundleTreeSha256: iosArtifact.appBundleTreeSha256,
+          appCodeDirectoryHash: iosArtifact.appCodeDirectoryHash,
+          packetTunnelCodeDirectoryHash:
+            iosArtifact.packetTunnelCodeDirectoryHash,
+          appExecutableSha256: iosArtifact.appExecutableSha256,
+          packetTunnelExecutableSha256:
+            iosArtifact.packetTunnelExecutableSha256,
+          signerCertificateSha256:
+            iosArtifact.signerCertificateSha256,
+          installedBundleIdentifier:
+            iosArtifact.installedBundleIdentifier,
+        },
       },
       publicUiOnly: true,
       privateAppStateRead: false,
@@ -430,14 +473,20 @@ test('release receipt collection requires exact source and strict public UI gate
       appLaunchArgumentsOrEnvironment: false,
       desktopAdminAndroidJoiner: true,
       androidAdminDesktopJoiner: true,
+      desktopAdminIphoneJoiner: true,
+      iphoneAdminDesktopJoiner: true,
       exactRosterOnBothSides: true,
       acceptedRosterRetainedAcrossRelaunch: true,
       desktopRelaunchDurability: true,
       pixelRelaunchDurability: true,
+      desktopAdminIphoneJoinerRelaunchDurable: true,
+      iphoneAdminDesktopJoinerRelaunchDurable: true,
       deliveryDeadlineMilliseconds: 15_000,
       deliveryMilliseconds: {
         'macOS-admin-to-Android-manual': 100,
         'Android-admin-to-macOS-manual': 100,
+        'macOS-admin-to-iPhone-manual': 100,
+        'iPhone-admin-to-macOS-manual': 100,
       },
     }))
     writeFileSync(paths.macos.network, JSON.stringify({
@@ -684,6 +733,124 @@ test('release receipt collection requires exact source and strict public UI gate
       ['android', 'ios', 'linux', 'macos', 'windows'],
     )
 
+    const assertRejectedReceiptMutation = (path, mutate, error) => {
+      const original = readFileSync(path, 'utf8')
+      const mutated = JSON.parse(original)
+      mutate(mutated)
+      writeFileSync(path, JSON.stringify(mutated))
+      assert.throws(
+        () => collectReleaseGateReceipts({
+          commit,
+          tree,
+          releaseGateSummaryPath: summary,
+          platformReceiptPaths: paths,
+        }),
+        error,
+      )
+      writeFileSync(path, original)
+    }
+    assertRejectedReceiptMutation(
+      mobileJoinPath,
+      (receipt) => {
+        receipt.contentWidth.androidObservedBasisPoints = 10_001
+      },
+      /mobile join receipt is not strict public-UI\/relaunch evidence/,
+    )
+    assertRejectedReceiptMutation(
+      mobileJoinPath,
+      (receipt) => {
+        receipt.qr.iphoneJoinerRelaunchDurable = false
+      },
+      /mobile join receipt is not strict public-UI\/relaunch evidence/,
+    )
+    assertRejectedReceiptMutation(
+      mobileJoinPath,
+      (receipt) => {
+        receipt.manual.pixelAdminIphoneJoinerRelaunchDurable = false
+      },
+      /mobile join receipt is not strict public-UI\/relaunch evidence/,
+    )
+    assertRejectedReceiptMutation(
+      mobileJoinPath,
+      (receipt) => {
+        receipt.artifact.ios.appCodeDirectoryHash = '0'.repeat(40)
+      },
+      /iOS mobile join artifact identity differs at appCodeDirectoryHash/,
+    )
+    assertRejectedReceiptMutation(
+      macosJoinPath,
+      (receipt) => {
+        receipt.iphoneAdminDesktopJoinerRelaunchDurable = false
+      },
+      /macOS\/mobile public-UI join receipt is incomplete/,
+    )
+
+    if (fixtureRoot) {
+      const artifactSha256 =
+        process.env.NVPN_FLEET_GATE_ARTIFACT_SHA256 ?? 'e'.repeat(64)
+      const artifactSize = Number(
+        process.env.NVPN_FLEET_GATE_ARTIFACT_SIZE ?? 42,
+      )
+      const payloadSha256 =
+        process.env.NVPN_FLEET_GATE_PAYLOAD_SHA256 ?? artifactSha256
+      assert.match(artifactSha256, /^[0-9a-f]{64}$/)
+      assert.match(payloadSha256, /^[0-9a-f]{64}$/)
+      assert.ok(Number.isSafeInteger(artifactSize) && artifactSize > 0)
+      const releaseAssetPath =
+        `assets/nvpn-v${source.appVersion}-x86_64-unknown-linux-musl.tar.gz`
+      const payloadLabel = 'nvpn'
+      const assets = [{
+        name: releaseAssetPath.slice('assets/'.length),
+        path: releaseAssetPath,
+        sha256: artifactSha256,
+        size: artifactSize,
+      }]
+      const releaseGateAttestation = buildReleaseGateAttestation({
+        commit,
+        tree,
+        assets,
+        releaseGateSummarySha256: evidence.releaseGateSummarySha256,
+        platformGateReceipts: evidence.platformGateReceipts,
+        assetProofs: {
+          [releaseAssetPath]: {
+            platform: 'linux',
+            verification: 'gate-payload-identity',
+            artifact_sha256: artifactSha256,
+            gate_receipt_sha256:
+              evidence.platformGateReceipts.linux.artifact,
+            payloads: { [payloadLabel]: payloadSha256 },
+          },
+        },
+      })
+      const tag = `v${source.appVersion}`
+      const releasePath = join(root, 'release.json')
+      writeFileSync(releasePath, JSON.stringify({
+        id: tag,
+        title: tag,
+        tag,
+        commit,
+        draft: process.env.NVPN_FLEET_GATE_DRAFT !== 'false',
+        assets,
+        release_gate_attestation: releaseGateAttestation,
+      }))
+      writeFileSync(
+        join(root, 'fleet-gate-fixture.json'),
+        JSON.stringify({
+          releaseAssetPath,
+          payloadLabel,
+          request: {
+            releasePath,
+            source,
+            receiptPaths: {
+              releaseGateSummary: summary,
+              platforms: paths,
+            },
+          },
+        }),
+      )
+      return
+    }
+
     const windowsInstaller = readFileSync(
       paths.windows.installer,
       'utf8',
@@ -840,7 +1007,9 @@ test('release receipt collection requires exact source and strict public UI gate
       /strict real public-UI join receipt/,
     )
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    if (!fixtureRoot) {
+      rmSync(root, { recursive: true, force: true })
+    }
   }
 })
 

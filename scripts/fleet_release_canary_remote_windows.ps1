@@ -70,6 +70,53 @@ function AssertElevated {
     }
 }
 
+function AssertPrivateAdminDirectory([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (
+        !$item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    ) {
+        Fail 'fleet transaction root is not a private administrator directory'
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sidType = [Security.Principal.SecurityIdentifier]
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $owner = $acl.GetOwner($sidType).Value
+    $allowedOwners = @(
+        'S-1-5-18',
+        'S-1-5-32-544',
+        [string]$identity.User.Value
+    )
+    if ($owner -notin $allowedOwners) {
+        Fail 'fleet transaction root is not administrator-owned'
+    }
+    $broadSids = @(
+        'S-1-1-0',
+        'S-1-5-11',
+        'S-1-5-32-545',
+        'S-1-5-32-546'
+    )
+    $writeRights = (
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Modify -bor
+        [Security.AccessControl.FileSystemRights]::FullControl -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    )
+    foreach (
+        $rule in $acl.GetAccessRules($true, $true, $sidType)
+    ) {
+        if (
+            $rule.AccessControlType -eq
+                [Security.AccessControl.AccessControlType]::Allow -and
+            $rule.IdentityReference.Value -in $broadSids -and
+            ($rule.FileSystemRights -band $writeRights)
+        ) {
+            Fail 'fleet transaction root grants broad write access'
+        }
+    }
+}
+
 function GetServiceObject([string]$Name) {
     return Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
 }
@@ -350,6 +397,25 @@ function AssertExpected($State, $Target, $Expected) {
     $frozen = $Target.expected
     if ((MachineIdentity) -ne [string]$frozen.machineIdentitySha256) {
         Fail 'remote machine identity changed'
+    }
+    $preinstallProbe = $Expected.preinstallProbe
+    if (
+        [string]$State.probeBinarySha256 -ne
+        [string]$preinstallProbe.probeBinarySha256
+    ) {
+        Fail 'probe CLI binary changed after preflight'
+    }
+    if (
+        [string]$State.probeAppVersion -ne
+        [string]$preinstallProbe.probeAppVersion
+    ) {
+        Fail 'probe CLI app version changed after preflight'
+    }
+    if (
+        [string]$State.probeFipsCoreVersion -ne
+        [string]$preinstallProbe.probeFipsCoreVersion
+    ) {
+        Fail 'probe CLI FIPS version changed after preflight'
     }
     $pairs = @{
         configSha256 = 'sha256'
@@ -638,7 +704,152 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
     }
 }
 
-function InstallCandidate($Payload, $Target, $Expected) {
+function RemoveStagedArtifact([string]$Path) {
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    try {
+        $items = @(
+            Get-ChildItem -LiteralPath $parent -Force -Filter $leaf `
+                -ErrorAction Stop |
+                Where-Object { $_.Name -ceq $leaf }
+        )
+        if ($items.Count -gt 1) {
+            Fail 'staged artifact path is ambiguous'
+        }
+        if ($items.Count -eq 1) {
+            $item = $items[0]
+            if (
+                $item.PSIsContainer -and
+                !($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            ) {
+                Fail 'staged artifact path is not a regular file'
+            }
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        }
+    } catch {
+        Fail "staged artifact cleanup failed: $_"
+    }
+    $remaining = @(
+        Get-ChildItem -LiteralPath $parent -Force -Filter $leaf `
+            -ErrorAction Stop |
+            Where-Object { $_.Name -ceq $leaf }
+    )
+    if ($remaining.Count -ne 0) {
+        Fail 'staged artifact cleanup left remote residue'
+    }
+}
+
+function CopyStagedArtifact(
+    [string]$Stage,
+    [string]$Root,
+    [string]$TransactionId
+) {
+    $rootCreated = !(Test-Path -LiteralPath $Root)
+    $private = Join-Path $Root ('.staged-' + $TransactionId)
+    $source = $null
+    $privateWrite = $null
+    $privateLock = $null
+    $privateCreated = $false
+    $result = $null
+    $primary = $null
+    try {
+        [IO.Directory]::CreateDirectory($Root) | Out-Null
+        AssertPrivateAdminDirectory $Root
+        $stageItem = Get-Item -LiteralPath $Stage -Force -ErrorAction Stop
+        if (
+            $stageItem.PSIsContainer -or
+            ($stageItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        ) {
+            Fail 'staged artifact is not a regular non-reparse file'
+        }
+        $source = [IO.FileStream]::new(
+            $Stage,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $stageItem = Get-Item -LiteralPath $Stage -Force -ErrorAction Stop
+        if (
+            $stageItem.PSIsContainer -or
+            ($stageItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        ) {
+            Fail 'staged artifact is not a regular non-reparse file'
+        }
+        $privateWrite = [IO.FileStream]::new(
+            $private,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::Read
+        )
+        $privateCreated = $true
+        $source.CopyTo($privateWrite)
+        $privateWrite.Flush($true)
+        $privateWrite.Dispose()
+        $privateWrite = $null
+        $privateLock = [IO.FileStream]::new(
+            $private,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $result = [pscustomobject]@{
+            Path = $private
+            Lock = $privateLock
+            RootCreated = $rootCreated
+        }
+    } catch {
+        $primary = $_
+    }
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    if ($null -ne $source) {
+        try { $source.Dispose() } catch {
+            $cleanupErrors.Add("source staging handle: $_")
+        }
+    }
+    if ($null -eq $primary -and $cleanupErrors.Count -gt 0) {
+        $primary = [Management.Automation.ErrorRecord]::new(
+            [InvalidOperationException]::new(
+                'source staging handle cleanup failed'
+            ),
+            'NvpnFleetStageCleanup',
+            [Management.Automation.ErrorCategory]::CloseError,
+            $Stage
+        )
+    }
+    if ($null -ne $primary) {
+        foreach ($stream in @($privateLock, $privateWrite)) {
+            if ($null -eq $stream) { continue }
+            try { $stream.Dispose() } catch {
+                $cleanupErrors.Add("private staging handle: $_")
+            }
+        }
+        if ($privateCreated) {
+            try { RemoveStagedArtifact $private } catch {
+                $cleanupErrors.Add([string]$_)
+            }
+        }
+        if ($rootCreated) {
+            try {
+                Remove-Item -LiteralPath $Root -Force -ErrorAction Stop
+                if (Test-Path -LiteralPath $Root -ErrorAction Stop) {
+                    throw 'private staging directory cleanup left residue'
+                }
+            } catch {
+                $cleanupErrors.Add("private staging directory: $_")
+            }
+        }
+        $details = 'staged artifact could not be secured: ' +
+            $primary.Exception.Message
+        if ($cleanupErrors.Count -gt 0) {
+            $details += '; cleanup also failed: ' +
+                ($cleanupErrors -join '; ')
+        }
+        Fail $details
+    }
+    return $result
+}
+
+function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
     AssertElevated
     if ($Target.deployment.authorization -ne 'install') {
         Fail 'target inventory does not authorize install'
@@ -647,12 +858,6 @@ function InstallCandidate($Payload, $Target, $Expected) {
     $root = RequireAbsolutePath $(if ($Target.deployment.transactionRoot) { $Target.deployment.transactionRoot } else { Join-Path $env:ProgramData 'nvpn\fleet-canary' }) 'transactionRoot'
     $transaction = Join-Path $root $transactionId
     if (Test-Path -LiteralPath $transaction) { Fail 'transaction id already exists' }
-    $stageName = [string]$Payload.stageName
-    if ([string]::IsNullOrWhiteSpace($stageName) -or $stageName.Contains('\') -or $stageName.Contains('/')) {
-        Fail 'staged artifact name is invalid'
-    }
-    $stage = Join-Path $HOME $stageName
-    if (!(Test-Path -LiteralPath $stage -PathType Leaf)) { Fail 'staged artifact is missing' }
     if ((ShaFile $stage) -ne [string]$Expected.artifactSha256) { Fail 'staged artifact SHA-256 mismatch' }
     if ((Get-Item -LiteralPath $stage).Length -ne [int64]$Expected.artifactSize) { Fail 'staged artifact size mismatch' }
     $before = Capture $Target $Target.checks
@@ -664,7 +869,6 @@ function InstallCandidate($Payload, $Target, $Expected) {
     $snapshot = SnapshotTransaction $transaction $before $Target
     WriteJournal $transaction $Target.id $transactionId 'preparing' | Out-Null
     $extracted = ExtractPayload $stage $transaction $Expected
-    Remove-Item -LiteralPath $stage -Force
     $name = [string]$before.serviceName
     $binary = [string]$before.binaryPath
     $config = [string]$before.configPath
@@ -740,6 +944,11 @@ function InstallCandidate($Payload, $Target, $Expected) {
             artifactSha256 = [string]$Expected.artifactSha256
             artifactSize = [int64]$Expected.artifactSize
             stagedArtifactSha256 = [string]$Expected.artifactSha256
+            preinstallProbe = [ordered]@{
+                probeBinarySha256 = [string]$before.probeBinarySha256
+                probeAppVersion = [string]$before.probeAppVersion
+                probeFipsCoreVersion = [string]$before.probeFipsCoreVersion
+            }
             transaction = [ordered]@{
                 id = $transactionId
                 state = 'committed'
@@ -828,6 +1037,81 @@ function InstallCandidate($Payload, $Target, $Expected) {
         }
         throw
     }
+}
+
+function InstallCandidate($Payload, $Target, $Expected) {
+    AssertElevated
+    $stageName = [string]$Payload.stageName
+    if (
+        [string]::IsNullOrWhiteSpace($stageName) -or
+        $stageName -notmatch
+            '^\.nvpn-fleet-[0-9a-f]{32}\.artifact$'
+    ) {
+        Fail 'staged artifact name is invalid'
+    }
+    $stage = Join-Path $HOME $stageName
+    if (!(Test-Path -LiteralPath $stage -PathType Leaf)) {
+        Fail 'staged artifact is missing'
+    }
+    $transactionId = [string]$Expected.transactionId
+    if ($transactionId -notmatch '^[0-9a-f]{32}$') {
+        Fail 'transaction id is invalid'
+    }
+    $root = RequireAbsolutePath $(if ($Target.deployment.transactionRoot) { $Target.deployment.transactionRoot } else { Join-Path $env:ProgramData 'nvpn\fleet-canary' }) 'transactionRoot'
+    $transaction = Join-Path $root $transactionId
+    if (Test-Path -LiteralPath $transaction) {
+        Fail 'transaction id already exists'
+    }
+    $secured = $null
+    $result = $null
+    $primary = $null
+    try {
+        $secured = CopyStagedArtifact $stage $root $transactionId
+        $result = InstallStagedCandidate `
+            $Payload $Target $Expected $secured.Path
+    } catch {
+        $primary = $_
+    }
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    if ($null -ne $secured) {
+        try { $secured.Lock.Dispose() } catch {
+            $cleanupErrors.Add("private staging lock: $_")
+        }
+    }
+    foreach ($path in @($(if ($null -ne $secured) { $secured.Path }))) {
+        if ([string]::IsNullOrWhiteSpace([string]$path)) { continue }
+        try { RemoveStagedArtifact ([string]$path) } catch {
+            $cleanupErrors.Add([string]$_)
+        }
+    }
+    if (
+        $null -ne $secured -and
+        $secured.RootCreated -and
+        !(Test-Path -LiteralPath $transaction)
+    ) {
+        try {
+            Remove-Item -LiteralPath $root -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $root -ErrorAction Stop) {
+                throw 'private staging directory cleanup left residue'
+            }
+        } catch {
+            $cleanupErrors.Add("private staging directory: $_")
+        }
+    }
+    if ($null -ne $primary) {
+        if ($cleanupErrors.Count -gt 0) {
+            Fail (
+                $primary.Exception.Message +
+                '; staged artifact cleanup also failed: ' +
+                ($cleanupErrors -join '; ')
+            )
+        }
+        throw $primary
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        Fail ('staged artifact cleanup failed: ' + ($cleanupErrors -join '; '))
+    }
+    return $result
 }
 
 try {

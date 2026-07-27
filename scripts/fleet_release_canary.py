@@ -46,6 +46,7 @@ from fleet_release_canary_evidence import (
     true as require_true,
     validate_install_result,
     validate_probe,
+    validate_result_evidence,
     validate_rollback,
 )
 
@@ -64,6 +65,46 @@ DRIVER_HELPER_RELATIVE_PATHS = (
     pathlib.Path("scripts/fleet_release_canary_remote_windows.ps1"),
 )
 DRIVER_PROTOCOL = "nvpn-fleet-ssh-transactional-v2"
+GATE_EVIDENCE_ID = "complete-release-gate"
+GATE_EVIDENCE_KIND = "staged-release-attestation-v1"
+GATE_VALIDATOR_RELATIVE_PATH = pathlib.Path(
+    "scripts/fleet-release-gate-evidence.mjs"
+)
+GATE_VALIDATOR_TIMEOUT_SECONDS = 30
+GATE_RECEIPT_KEYS = {
+    "android": {
+        "physical",
+        "mobile_join",
+        "wireguard_dns",
+        "underlay_lifecycle",
+        "replacement_singleton",
+    },
+    "ios": {
+        "desktop_mobile_join",
+        "frozen_archive",
+        "mobile_artifact",
+        "mobile_join",
+        "wireguard_dns",
+        "underlay_lifecycle",
+    },
+    "linux": {
+        "artifact",
+        "public_ui_join",
+        "package_install",
+        "network",
+    },
+    "macos": {
+        "artifact",
+        "public_ui_join",
+        "network",
+    },
+    "windows": {
+        "artifact",
+        "installer",
+        "public_ui_join",
+        "network",
+    },
+}
 
 
 class CanaryError(RuntimeError):
@@ -159,6 +200,16 @@ def require_version(value: Any, label: str) -> str:
     return value
 
 
+def require_exact_keys(
+    value: Any,
+    expected: set[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        fail(f"{label} must contain exactly: {', '.join(sorted(expected))}")
+    return value
+
+
 def validate_checkout(
     root: pathlib.Path,
     fips_root: pathlib.Path,
@@ -213,25 +264,201 @@ def validate_bound_file(
 
 
 def validate_gate_evidence(
-    root: pathlib.Path, manifest: dict[str, Any]
-) -> list[dict[str, Any]]:
+    root: pathlib.Path,
+    manifest: dict[str, Any],
+    source: dict[str, str],
+) -> dict[str, Any]:
     entries = manifest.get("gateEvidence")
-    if not isinstance(entries, list) or not entries:
-        fail("fleet manifest requires at least one frozen gate evidence file")
-    validated: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, value in enumerate(entries):
-        if not isinstance(value, dict):
-            fail(f"gateEvidence[{index}] must be an object")
-        evidence_id = value.get("id")
-        if not isinstance(evidence_id, str) or not evidence_id.strip():
-            fail(f"gateEvidence[{index}].id is required")
-        if evidence_id in seen:
-            fail(f"duplicate gate evidence id: {evidence_id}")
-        seen.add(evidence_id)
-        path = validate_bound_file(root, value, f"gateEvidence[{evidence_id}]")
-        validated.append({**value, "_path": path})
-    return validated
+    if not isinstance(entries, list) or len(entries) != 1:
+        fail("fleet manifest requires exactly one complete release-gate evidence")
+    value = require_exact_keys(
+        entries[0],
+        {"id", "kind", "path", "sha256", "size", "receiptPaths"},
+        "gateEvidence[0]",
+    )
+    require_exact(value["id"], GATE_EVIDENCE_ID, "gateEvidence[0].id")
+    require_exact(value["kind"], GATE_EVIDENCE_KIND, "gateEvidence[0].kind")
+    release_path = validate_bound_file(
+        root,
+        value,
+        f"gateEvidence[{GATE_EVIDENCE_ID}]",
+    )
+    paths = require_exact_keys(
+        value["receiptPaths"],
+        {"releaseGateSummary", "platforms"},
+        "gateEvidence[0].receiptPaths",
+    )
+    summary_entry = require_exact_keys(
+        paths["releaseGateSummary"],
+        {"path", "sha256", "size"},
+        "gateEvidence[0].receiptPaths.releaseGateSummary",
+    )
+    summary_path = validate_bound_file(
+        root,
+        summary_entry,
+        "release-gate summary receipt",
+    )
+    platform_entries = require_exact_keys(
+        paths["platforms"],
+        set(GATE_RECEIPT_KEYS),
+        "gateEvidence[0].receiptPaths.platforms",
+    )
+    platform_paths: dict[str, dict[str, str]] = {}
+    for platform_name, expected_keys in GATE_RECEIPT_KEYS.items():
+        receipts = require_exact_keys(
+            platform_entries[platform_name],
+            expected_keys,
+            f"gateEvidence receiptPaths {platform_name}",
+        )
+        platform_paths[platform_name] = {}
+        for receipt_name in sorted(expected_keys):
+            entry = require_exact_keys(
+                receipts[receipt_name],
+                {"path", "sha256", "size"},
+                f"gateEvidence receiptPaths {platform_name}.{receipt_name}",
+            )
+            platform_paths[platform_name][receipt_name] = str(
+                validate_bound_file(
+                    root,
+                    entry,
+                    f"release-gate receipt {platform_name}.{receipt_name}",
+                )
+            )
+
+    validator = (root / GATE_VALIDATOR_RELATIVE_PATH).resolve()
+    require_regular_file(validator, "fleet release-gate validator")
+    tracked = run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            GATE_VALIDATOR_RELATIVE_PATH.as_posix(),
+        ],
+        check=False,
+    )
+    if tracked.returncode != 0:
+        fail("fleet release-gate validator must be tracked by the exact checkout")
+    request = {
+        "releasePath": str(release_path),
+        "source": source,
+        "receiptPaths": {
+            "releaseGateSummary": str(summary_path),
+            "platforms": platform_paths,
+        },
+    }
+    try:
+        result = subprocess.run(
+            ["node", str(validator)],
+            input=json.dumps(request, separators=(",", ":"), sort_keys=True),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=GATE_VALIDATOR_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        fail(
+            "complete release-gate evidence validation exceeded "
+            f"{GATE_VALIDATOR_TIMEOUT_SECONDS} seconds"
+        )
+    if result.returncode != 0:
+        fail(
+            "complete release-gate evidence failed semantic validation: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    try:
+        validated = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"fleet release-gate validator returned invalid JSON: {error}")
+    validated = require_exact_keys(
+        validated,
+        {
+            "schema",
+            "release",
+            "assets",
+            "assetProofs",
+            "assetSetSha256",
+            "releaseGateSummarySha256",
+            "platformGateReceipts",
+        },
+        "fleet release-gate validator result",
+    )
+    require_exact(validated["schema"], 1, "fleet release-gate validator schema")
+    release = require_exact_keys(
+        validated["release"],
+        {"id", "tag", "title", "commit", "draft"},
+        "fleet release-gate validator release",
+    )
+    expected_tag = f"v{source['appVersion']}"
+    for field in ("id", "tag", "title"):
+        require_exact(
+            release[field],
+            expected_tag,
+            f"fleet release-gate release.{field}",
+        )
+    require_exact(
+        release["commit"],
+        source["appGitSha"],
+        "fleet release-gate release.commit",
+    )
+    if not isinstance(release["draft"], bool):
+        fail("fleet release-gate release.draft must be a boolean")
+    require_hex(
+        validated["assetSetSha256"],
+        HEX64,
+        "fleet release-gate assetSetSha256",
+    )
+    require_hex(
+        validated["releaseGateSummarySha256"],
+        HEX64,
+        "fleet release-gate releaseGateSummarySha256",
+    )
+    require_exact_keys(
+        validated["platformGateReceipts"],
+        set(GATE_RECEIPT_KEYS),
+        "fleet release-gate platformGateReceipts",
+    )
+    if not isinstance(validated["assets"], list) or not validated["assets"]:
+        fail("fleet release-gate validator returned no staged assets")
+    assets: dict[str, dict[str, Any]] = {}
+    for index, asset_value in enumerate(validated["assets"]):
+        asset = require_exact_keys(
+            asset_value,
+            {"path", "sha256", "size"},
+            f"fleet release-gate asset[{index}]",
+        )
+        path_value = asset["path"]
+        if not isinstance(path_value, str) or not path_value.startswith("assets/"):
+            fail(f"fleet release-gate asset[{index}].path is invalid")
+        if path_value in assets:
+            fail(f"duplicate fleet release-gate asset path: {path_value}")
+        require_hex(
+            asset["sha256"],
+            HEX64,
+            f"fleet release-gate asset[{path_value}].sha256",
+        )
+        require_positive_int(
+            asset["size"],
+            f"fleet release-gate asset[{path_value}].size",
+        )
+        assets[path_value] = asset
+    proofs = validated["assetProofs"]
+    if not isinstance(proofs, dict) or set(proofs) != set(assets):
+        fail("fleet release-gate asset proofs do not bind every staged asset")
+    require_exact(
+        sha256_file(release_path),
+        value["sha256"],
+        "semantically validated release manifest remained stable",
+    )
+    return {
+        "id": GATE_EVIDENCE_ID,
+        "releaseManifestSha256": value["sha256"],
+        "assets": assets,
+        "proofs": proofs,
+    }
 
 
 def validate_driver(
@@ -332,7 +559,7 @@ def validate_artifacts(
     root: pathlib.Path,
     manifest: dict[str, Any],
     source: dict[str, str],
-    gate_ids: set[str],
+    gate_evidence: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     entries = manifest.get("artifacts")
     if not isinstance(entries, list) or not entries:
@@ -466,12 +693,73 @@ def validate_artifacts(
                 {"member": companion_member, "sha256": companion_hash}
             )
         receipt_gate_ids = receipt.get("gateEvidenceIds")
-        if (
-            not isinstance(receipt_gate_ids, list)
-            or not receipt_gate_ids
-            or any(item not in gate_ids for item in receipt_gate_ids)
-        ):
+        if receipt_gate_ids != [gate_evidence["id"]]:
             fail(f"artifact {artifact_id} receipt has invalid gate evidence")
+        release_asset_path = receipt.get("releaseAssetPath")
+        if not isinstance(release_asset_path, str):
+            fail(f"artifact {artifact_id} receipt lacks releaseAssetPath")
+        release_asset = gate_evidence["assets"].get(release_asset_path)
+        proof = gate_evidence["proofs"].get(release_asset_path)
+        if release_asset is None or not isinstance(proof, dict):
+            fail(f"artifact {artifact_id} is not bound to a staged release asset")
+        require_exact(
+            proof.get("platform"),
+            target_platform,
+            f"artifact {artifact_id} release proof platform",
+        )
+        require_exact(
+            proof.get("artifact_sha256"),
+            release_asset["sha256"],
+            f"artifact {artifact_id} release proof artifact SHA-256",
+        )
+        proof_payloads = proof.get("payloads")
+        if not isinstance(proof_payloads, dict) or not proof_payloads:
+            fail(f"artifact {artifact_id} release proof has no payloads")
+        release_payload_labels = receipt.get("releasePayloadLabels")
+        if (
+            not isinstance(release_payload_labels, dict)
+            or set(release_payload_labels) != set(installed_payloads)
+        ):
+            fail(
+                f"artifact {artifact_id} receipt releasePayloadLabels "
+                "must map every installed payload exactly once"
+            )
+        payload_labels: list[str] = []
+        for installed_member, payload_label in release_payload_labels.items():
+            if not isinstance(payload_label, str) or not payload_label:
+                fail(
+                    f"artifact {artifact_id} release payload label "
+                    f"for {installed_member} is invalid"
+                )
+            payload_labels.append(payload_label)
+            require_exact(
+                installed_payloads[installed_member],
+                proof_payloads.get(payload_label),
+                f"artifact {artifact_id} installed payload {installed_member} "
+                "release proof",
+            )
+        if len(set(payload_labels)) != len(payload_labels):
+            fail(
+                f"artifact {artifact_id} receipt releasePayloadLabels "
+                "must map every installed payload exactly once"
+            )
+        if payload_format == "executable":
+            require_exact(
+                value.get("sha256"),
+                installed_hash,
+                f"artifact {artifact_id} executable artifact SHA-256",
+            )
+        else:
+            require_exact(
+                value.get("sha256"),
+                release_asset["sha256"],
+                f"artifact {artifact_id} staged release asset SHA-256",
+            )
+            require_exact(
+                value.get("size"),
+                release_asset["size"],
+                f"artifact {artifact_id} staged release asset size",
+            )
         artifacts[artifact_id] = {
             **value,
             "_path": artifact_path,
@@ -676,6 +964,11 @@ def load_driver_evidence(
     binding = value.get("rawReceipt")
     if not isinstance(binding, dict):
         fail(f"{label} requires a rawReceipt binding")
+    require_exact_keys(
+        binding,
+        {"path", "sha256", "size"},
+        f"{label} rawReceipt",
+    )
     raw_path_value = binding.get("path")
     if not isinstance(raw_path_value, str):
         fail(f"{label} rawReceipt.path is required")
@@ -713,11 +1006,27 @@ def load_driver_evidence(
     return value
 
 
+def probe_report_row(
+    target_id: str,
+    status: str,
+    details: Any,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {"id": target_id, "status": status}
+    if isinstance(details, dict) and "_rawReceipt" in details:
+        row["evidence"] = validate_result_evidence(
+            {"probe": details["_rawReceipt"]},
+            {"probe"},
+            f"target {target_id} result evidence",
+        )
+    return row
+
+
 def build_expectations(
     evidence_dir: pathlib.Path,
     source: dict[str, str],
     artifact: dict[str, Any],
     target: dict[str, Any],
+    probe: dict[str, Any],
     manifest_hash: str,
     inventory_hash: str,
 ) -> pathlib.Path:
@@ -736,6 +1045,14 @@ def build_expectations(
             "artifactSize": artifact["size"],
             "installedBinarySha256": artifact["_installed_hash"],
             "installPayload": artifact["_install_payload"],
+            "preinstallProbe": {
+                field: probe[field]
+                for field in (
+                    "probeBinarySha256",
+                    "probeAppVersion",
+                    "probeFipsCoreVersion",
+                )
+            },
             "expected": target["expected"],
             "checks": target["checks"],
             "prohibitRemoteBuild": True,
@@ -763,6 +1080,7 @@ def prepare(
     str,
     pathlib.Path,
     str,
+    str,
 ]:
     root = pathlib.Path(args.root).resolve()
     fips_root = pathlib.Path(args.fips_root).resolve()
@@ -788,9 +1106,8 @@ def prepare(
     )
     source = validate_checkout(root, fips_root, manifest)
     driver, driver_hash = validate_driver(root, manifest)
-    gate_evidence = validate_gate_evidence(root, manifest)
-    gate_ids = {value["id"] for value in gate_evidence}
-    artifacts = validate_artifacts(root, manifest, source, gate_ids)
+    gate_evidence = validate_gate_evidence(root, manifest, source)
+    artifacts = validate_artifacts(root, manifest, source, gate_evidence)
     targets, parallel = validate_inventory(inventory, artifacts)
     return (
         root,
@@ -802,6 +1119,7 @@ def prepare(
         inventory_hash,
         driver,
         driver_hash,
+        gate_evidence["releaseManifestSha256"],
     )
 
 
@@ -816,6 +1134,7 @@ def plan(args: argparse.Namespace) -> int:
         inventory_hash,
         _driver,
         driver_hash,
+        release_gate_manifest_hash,
     ) = prepare(args)
     report = {
         "schema": 2,
@@ -824,6 +1143,7 @@ def plan(args: argparse.Namespace) -> int:
         "manifestSha256": manifest_hash,
         "inventorySha256": inventory_hash,
         "driverSha256": driver_hash,
+        "releaseGateManifestSha256": release_gate_manifest_hash,
         **source,
         "parallelProbes": parallel,
         "targets": [
@@ -859,6 +1179,7 @@ def execute(args: argparse.Namespace) -> int:
         inventory_hash,
         driver,
         driver_hash,
+        release_gate_manifest_hash,
     ) = prepare(args)
 
     evidence_dir = pathlib.Path(args.evidence_dir).resolve()
@@ -890,9 +1211,8 @@ def execute(args: argparse.Namespace) -> int:
             snapshot = validate_probe(
                 evidence,
                 target,
-                artifacts[target["artifact"]],
-                source,
             )
+            snapshot["_rawReceipt"] = dict(evidence["rawReceipt"])
         except (CanaryError, EvidenceError) as error:
             return target["id"], "probe-failed", str(error)
         if snapshot["machineIdentitySha256"] == local_identity:
@@ -928,8 +1248,10 @@ def execute(args: argparse.Namespace) -> int:
     ]
     if hard_probe_failures:
         for target in targets:
-            status = probe_results[target["id"]]["status"]
-            report_targets.append({"id": target["id"], "status": status})
+            probe = probe_results[target["id"]]
+            report_targets.append(
+                probe_report_row(target["id"], probe["status"], probe["details"])
+            )
         write_json(
             evidence_dir / "fleet-canary-result.json",
             {
@@ -939,6 +1261,7 @@ def execute(args: argparse.Namespace) -> int:
                 "manifestSha256": manifest_hash,
                 "inventorySha256": inventory_hash,
                 "driverSha256": driver_hash,
+                "releaseGateManifestSha256": release_gate_manifest_hash,
                 **source,
                 "targets": report_targets,
             },
@@ -949,11 +1272,17 @@ def execute(args: argparse.Namespace) -> int:
     for target in targets:
         probe = probe_results[target["id"]]
         if probe["status"] != "reachable":
-            report_targets.append({"id": target["id"], "status": probe["status"]})
+            report_targets.append(
+                probe_report_row(target["id"], probe["status"], probe["details"])
+            )
             continue
         if rollout_failed:
             report_targets.append(
-                {"id": target["id"], "status": "blocked-by-prior-failure"}
+                probe_report_row(
+                    target["id"],
+                    "blocked-by-prior-failure",
+                    probe["details"],
+                )
             )
             continue
         artifact = artifacts[target["artifact"]]
@@ -963,6 +1292,7 @@ def execute(args: argparse.Namespace) -> int:
             source,
             artifact,
             target,
+            probe_snapshot,
             manifest_hash,
             inventory_hash,
         )
@@ -980,6 +1310,7 @@ def execute(args: argparse.Namespace) -> int:
             expectations=expectations,
         )
         install_error = ""
+        install_binding: dict[str, Any] | None = None
         try:
             if install_result.returncode != 0:
                 fail(install_result.stderr.strip() or "driver install failed")
@@ -988,6 +1319,7 @@ def execute(args: argparse.Namespace) -> int:
                 evidence_dir,
                 f"install evidence for {target['id']}",
             )
+            install_binding = dict(install_evidence["rawReceipt"])
             validate_install_result(
                 install_evidence,
                 target,
@@ -1000,7 +1332,20 @@ def execute(args: argparse.Namespace) -> int:
             install_error = str(error)
 
         if not install_error:
-            report_targets.append({"id": target["id"], "status": "passed"})
+            report_targets.append(
+                {
+                    "id": target["id"],
+                    "status": "passed",
+                    "evidence": validate_result_evidence(
+                        {
+                            "probe": probe_snapshot["_rawReceipt"],
+                            "install": install_binding,
+                        },
+                        {"probe", "install"},
+                        f"target {target['id']} result evidence",
+                    ),
+                }
+            )
             continue
 
         rollback_output = evidence_dir / f"rollback-{digest}.json"
@@ -1014,6 +1359,7 @@ def execute(args: argparse.Namespace) -> int:
         )
         rollback_ok = False
         rollback_error = ""
+        rollback_binding: dict[str, Any] | None = None
         try:
             if rollback_result.returncode != 0:
                 fail(rollback_result.stderr.strip() or "driver rollback failed")
@@ -1022,6 +1368,7 @@ def execute(args: argparse.Namespace) -> int:
                 evidence_dir,
                 f"rollback evidence for {target['id']}",
             )
+            rollback_binding = dict(rollback_evidence["rawReceipt"])
             validate_rollback(
                 rollback_evidence,
                 target,
@@ -1031,12 +1378,22 @@ def execute(args: argparse.Namespace) -> int:
             rollback_ok = True
         except (CanaryError, EvidenceError) as error:
             rollback_error = str(error)
+        receipt_bindings = {"probe": probe_snapshot["_rawReceipt"]}
+        if install_binding is not None:
+            receipt_bindings["install"] = install_binding
+        if rollback_binding is not None:
+            receipt_bindings["rollback"] = rollback_binding
         report_targets.append(
             {
                 "id": target["id"],
                 "status": ("failed-rolled-back" if rollback_ok else "failed-rollback"),
                 "installError": install_error,
                 "rollbackError": rollback_error,
+                "evidence": validate_result_evidence(
+                    receipt_bindings,
+                    set(receipt_bindings),
+                    f"target {target['id']} result evidence",
+                ),
             }
         )
         rollout_failed = True
@@ -1060,6 +1417,7 @@ def execute(args: argparse.Namespace) -> int:
             "manifestSha256": manifest_hash,
             "inventorySha256": inventory_hash,
             "driverSha256": driver_hash,
+            "releaseGateManifestSha256": release_gate_manifest_hash,
             **source,
             "targets": report_targets,
         },
