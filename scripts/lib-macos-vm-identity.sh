@@ -4,11 +4,6 @@
 # changes routes/DNS. The private expected hash identifies the disposable UTM
 # guest without publishing its platform UUID.
 
-# Cache only inside the current shell. Never trust inherited environment as
-# proof that this process checked the target.
-MACOS_VM_VERIFIED_HOST=""
-MACOS_VM_VERIFIED_EXPECTED_IDENTITY=""
-
 macos_vm_identity_sha256() {
   local value="${1:-}"
   [[ "$value" =~ ^[A-Fa-f0-9-]{8,}$ ]] || {
@@ -39,12 +34,6 @@ macos_vm_require_isolated_target() {
     echo "Set NVPN_EXPECTED_MACOS_VM_IDENTITY_SHA256 to the pinned macos-utm identity hash" >&2
     return 1
   }
-  if [[ "$MACOS_VM_VERIFIED_HOST" == "$ssh_host" \
-    && "$MACOS_VM_VERIFIED_EXPECTED_IDENTITY" == "$expected" ]]
-  then
-    return 0
-  fi
-
   local_uuid="$(
     ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null \
       | macos_vm_platform_uuid_from_ioreg
@@ -64,6 +53,4 @@ macos_vm_require_isolated_target() {
     echo "Refusing macOS VM gate: SSH target is not the pinned macos-utm guest" >&2
     return 1
   }
-  MACOS_VM_VERIFIED_HOST="$ssh_host"
-  MACOS_VM_VERIFIED_EXPECTED_IDENTITY="$expected"
 }

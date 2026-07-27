@@ -21,6 +21,7 @@ MAC_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
   echo "Set NVPN_MACOS_SSH_HOST or pass the isolated macOS VM SSH target." >&2
   exit 2
 }
+macos_vm_require_isolated_target "$MAC_HOST"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 REMOTE_SCRIPT="./scripts/macos-release-exit-dns-ui-remote.sh"

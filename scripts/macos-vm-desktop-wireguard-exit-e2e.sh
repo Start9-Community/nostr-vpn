@@ -85,6 +85,7 @@ valid_npub() {
 
 [[ -n "$SSH_HOST" ]] \
   || { echo "set NVPN_MACOS_SSH_HOST or pass the macOS VM SSH target" >&2; exit 2; }
+macos_vm_require_isolated_target "$SSH_HOST"
 [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" ]] \
   || { echo "macOS Release network gate requires the remote Vader fixture" >&2; exit 2; }
 [[ "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" == "native" ]] \
