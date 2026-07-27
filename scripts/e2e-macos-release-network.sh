@@ -201,6 +201,45 @@ wireguard_routes_live() {
     && exit_source_is_expected
 }
 
+capture_wireguard_readiness_failure() {
+  local interface="" endpoint_interface="" observed_source=""
+  interface="$(wireguard_interface 2>/dev/null || true)"
+  endpoint_interface="$(endpoint_route_interface 2>/dev/null || true)"
+  observed_source="$(source_ip 2>/dev/null || true)"
+  {
+    printf 'wireguard_interface=%s\n' "${interface:-unavailable}"
+    printf 'endpoint_route_interface=%s\n' \
+      "${endpoint_interface:-unavailable}"
+    printf 'secure_dns_owned=%s\n' \
+      "$(secure_dns_owned && printf true || printf false)"
+    printf 'captured_probe_works=%s\n' \
+      "$(captured_probe_works && printf true || printf false)"
+    printf 'public_https_works=%s\n' \
+      "$(https_works && printf true || printf false)"
+    printf 'exit_source_matches=%s\n' \
+      "$([[ "$observed_source" == "$EXPECTED_EXIT_SOURCE_IP" ]] \
+        && printf true || printf false)"
+    printf 'observed_exit_source_ip=%s\n' \
+      "${observed_source:-unavailable}"
+  } >"$RESULT_DIR/wireguard-readiness-failure.txt"
+  {
+    /sbin/route -n get default 2>&1 || true
+    /sbin/route -n get 1.0.0.1 2>&1 || true
+    /sbin/route -n get 129.0.0.1 2>&1 || true
+    if [[ "$ENDPOINT_FAMILY" == "ipv6" ]]; then
+      /sbin/route -n get -inet6 "$ENDPOINT_HOST" 2>&1 || true
+    else
+      /sbin/route -n get "$ENDPOINT_HOST" 2>&1 || true
+    fi
+  } >"$RESULT_DIR/wireguard-readiness-routes.txt"
+  /usr/sbin/scutil --dns \
+    >"$RESULT_DIR/wireguard-readiness-dns.txt" 2>&1 || true
+  nvpn status --config "$CONFIG" --json --discover-secs 0 \
+    >"$RESULT_DIR/wireguard-readiness-status.json" 2>&1 || true
+  tail -n 240 "$STATE_DIR/daemon.log" \
+    >"$RESULT_DIR/wireguard-readiness-daemon.log" 2>&1 || true
+}
+
 wait_until() {
   local description="$1"
   shift
@@ -523,8 +562,13 @@ prepare_gate() {
     --exit-dns-mode automatic
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
     >"$RESULT_DIR/daemon-start.txt"
-  wait_until "the production WireGuard route, DNS, HTTPS, and source IP" \
+  if ! wait_until \
+    "the production WireGuard route, DNS, HTTPS, and source IP" \
     wireguard_routes_live
+  then
+    capture_wireguard_readiness_failure
+    return 1
+  fi
   wait_until "the daemon runtime/status WireGuard state" \
     runtime_wireguard_state_is true true
   wait_until "one exact authenticated FIPS peer session" \

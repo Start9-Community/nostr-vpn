@@ -51,6 +51,7 @@ require_tokens "$RELEASE_GATE" "parallel macOS preparation" \
   'peer_build_pid="$!"' \
   'wait "$peer_build_pid"'
 require_tokens "$CONTROLLER" "host import and exact receipts" \
+  'HTTP_PROBE_PORT="${NVPN_MACOS_WG_HTTP_PROBE_PORT:-$HOST_PORT}"' \
   'prepare_host_fips_peer_binary' \
   'fips-peer-host-receipt.json' \
   'import_host_fips_peer_binary' \
@@ -126,6 +127,13 @@ require_tokens "$GUEST" "production daemon PID record ownership" \
   'record.get("config_path") != config_path' \
   'record.get("pid")' \
   'ps -ww -p "$pid" -o command='
+require_tokens "$GUEST" "failure diagnostics survive cleanup" \
+  'capture_wireguard_readiness_failure' \
+  'wireguard-readiness-failure.txt' \
+  'wireguard-readiness-routes.txt' \
+  'wireguard-readiness-dns.txt' \
+  'wireguard-readiness-status.json' \
+  'wireguard-readiness-daemon.log'
 if grep -Fq "tr -d '[:space:]' <\"\$STATE_DIR/daemon.pid\"" "$GUEST"; then
   fail "macOS guest still treats nvpn's JSON daemon PID record as plain digits"
 fi

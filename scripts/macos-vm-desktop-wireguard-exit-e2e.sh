@@ -29,7 +29,10 @@ TUNNEL_SERVER_IP="${NVPN_MACOS_WG_SERVER_IP:-10.99.79.1}"
 TUNNEL_CLIENT_IP="${NVPN_MACOS_WG_CLIENT_IP:-10.99.79.2}"
 THROUGH_DNS_IP="${NVPN_MACOS_WG_THROUGH_DNS_IP:-10.99.79.53}"
 DNS_NAME="${NVPN_MACOS_WG_DNS_NAME:-macos-wireguard-exit.nvpn-e2e.test}"
-HTTP_PROBE_PORT="${NVPN_MACOS_WG_HTTP_PROBE_PORT:-8080}"
+# Use the fixture's already-reserved numeric port by default. WireGuard owns
+# UDP while the captured HTTP probe owns TCP, so this avoids colliding with
+# unrelated long-lived services on conventional ports such as 8080.
+HTTP_PROBE_PORT="${NVPN_MACOS_WG_HTTP_PROBE_PORT:-$HOST_PORT}"
 HTTP_PROBE_TOKEN="${NVPN_MACOS_WG_HTTP_TOKEN:-nvpn-macos-$PPID-$$-$RANDOM}"
 SOURCE_IP_URL="${NVPN_MACOS_SOURCE_IP_URL:-https://api.ipify.org}"
 INTERNET_URL="${NVPN_MACOS_INTERNET_URL:-https://example.com/}"
