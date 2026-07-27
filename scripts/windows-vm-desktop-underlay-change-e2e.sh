@@ -885,6 +885,7 @@ cleanup() {
   local cleanup_failed=0
   trap - EXIT INT TERM
   set +e
+  set +u
 
   if [[ -n "$PRIMARY_IFACE" ]]; then
     ssh -o BatchMode=yes "$HYPERVISOR_SSH" \

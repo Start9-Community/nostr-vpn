@@ -91,6 +91,8 @@ for controller in "$WINDOWS" "$LINUX"; do
     'HYPERVISOR_BINARY=""' \
     'desktop_underlay_import_host_peer' \
     'desktop_underlay_cleanup_host_peer'
+  grep -Fq 'set +u' "$controller" \
+    || fail "$controller cleanup can abort on an unset retired variable"
   if grep -Fq 'peer-build.log' "$controller"; then
     fail "$controller still has a Vader peer-build lane"
   fi
