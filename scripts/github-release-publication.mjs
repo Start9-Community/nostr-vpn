@@ -233,6 +233,7 @@ function verifyRemoteAssets({ repoRoot, repository, tag, assets }) {
 function repairExactRelease({
   repoRoot,
   repository,
+  beforeMutation,
   tag,
   commit,
   notesPath,
@@ -259,6 +260,11 @@ function repairExactRelease({
     })
   }
   if (plan.missing.length > 0) {
+    beforeMutation()
+    const mutationRepository = exactGithubRepository({
+      repoRoot,
+      expected: repository,
+    })
     run(
       'gh',
       [
@@ -266,13 +272,18 @@ function repairExactRelease({
         'upload',
         tag,
         '--repo',
-        repository,
+        mutationRepository,
         ...plan.missing.map(({ path }) => path),
       ],
       { cwd: repoRoot },
     )
   }
   if (plan.metadataNeedsEdit) {
+    beforeMutation()
+    const mutationRepository = exactGithubRepository({
+      repoRoot,
+      expected: repository,
+    })
     run(
       'gh',
       [
@@ -280,7 +291,7 @@ function repairExactRelease({
         'edit',
         tag,
         '--repo',
-        repository,
+        mutationRepository,
         '--verify-tag',
         '--target',
         commit,
@@ -356,6 +367,7 @@ export function publishExactGithubRelease({
   tag,
   commit,
   repository,
+  beforeMutation = () => {},
   dryRun = false,
 }) {
   const assets = expectedAssets(stageDir, manifest)
@@ -378,12 +390,17 @@ export function publishExactGithubRelease({
     if (!/not found|HTTP 404/i.test(viewed.error)) {
       throw new Error(viewed.error || 'Could not inspect existing GitHub release.')
     }
+    beforeMutation()
+    const mutationRepository = exactGithubRepository({
+      repoRoot,
+      expected: exactRepository,
+    })
     const arguments_ = [
       'release',
       'create',
       tag,
       '--repo',
-      exactRepository,
+      mutationRepository,
       '--verify-tag',
       '--target',
       commit,
@@ -418,6 +435,7 @@ export function publishExactGithubRelease({
   repairExactRelease({
     repoRoot,
     repository: exactRepository,
+    beforeMutation,
     tag,
     commit,
     notesPath,

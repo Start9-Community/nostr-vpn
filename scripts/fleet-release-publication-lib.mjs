@@ -159,6 +159,7 @@ export function assertPassedFleetPublication({
   env,
   stageDir,
   stagedManifest,
+  validationTimeSeconds = Math.floor(Date.now() / 1000),
 }) {
   const paths = fleetPublicationPaths({ repoRoot, options, env })
   const result = exactFleetJson(paths.result, 'Fleet execute result')
@@ -263,7 +264,7 @@ export function assertPassedFleetPublication({
     manifest,
     result,
     rawReceipts,
-    validationTimeSeconds: Math.floor(Date.now() / 1000),
+    validationTimeSeconds,
   })
   replayCanonicalEvidence({ repoRoot, paths })
   return {

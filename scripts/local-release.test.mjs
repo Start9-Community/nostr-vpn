@@ -57,8 +57,15 @@ import {
 } from './github-release-publication.mjs'
 import {
   validateFrozenIosPublication,
-  validateIosUploadReceipt,
 } from './ios-release-publication.mjs'
+import {
+  finalizeIosUploadReceipt,
+  planIosUploadReconciliation,
+  validateHistoricalIosFleetAuthorization,
+  validateIosPendingUploadReceipt,
+  validateIosUploadReceipt,
+  writeAcceptedIosPendingUpload,
+} from './ios-upload-receipt.mjs'
 import {
   assertRealStageDirectory,
   validateReleaseMutationGate,
@@ -584,14 +591,16 @@ test('frozen iOS publication rejects IPA, receipt, signer, and source substituti
   )
 })
 
-test('existing ASC build requires exact fleet-bound local upload evidence', () => {
+test('existing ASC build replays its original fleet upload authorization', () => {
   const repoRoot = mkdtempSync(join(tmpdir(), 'nvpn-ios-upload-receipt-'))
   const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
   const stageDir = join(repoRoot, 'stage')
-  const fleetDir = join(repoRoot, 'fleet')
+  const historicalFleetDir = join(repoRoot, 'fleet-historical')
+  const currentFleetDir = join(repoRoot, 'fleet-current')
   mkdirSync(frozenDir, { recursive: true })
   mkdirSync(stageDir, { recursive: true })
-  mkdirSync(fleetDir, { recursive: true })
+  mkdirSync(historicalFleetDir, { recursive: true })
+  mkdirSync(currentFleetDir, { recursive: true })
   const commit = '1'.repeat(40)
   const tree = '2'.repeat(40)
   const stagedManifest = {
@@ -600,28 +609,42 @@ test('existing ASC build requires exact fleet-bound local upload evidence', () =
     release_gate_attestation: { app_git_tree: tree },
   }
   const frozen = {
+    ipaPath: join(frozenDir, 'exact.ipa'),
     gate: {
-      ipa_sha256: '3'.repeat(64),
-      ipa_size: 42,
+      ipa_sha256: '',
+      ipa_size: 0,
       bundle_id: 'fi.siriusbusiness.nvpn',
       marketing_version: '4.1.5',
       build_number: '4010501',
     },
   }
-  const paths = {
+  writeFileSync(frozen.ipaPath, 'exact frozen IPA bytes\n')
+  frozen.gate.ipa_sha256 = createHash('sha256')
+    .update(readFileSync(frozen.ipaPath))
+    .digest('hex')
+  frozen.gate.ipa_size = statSync(frozen.ipaPath).size
+  const currentPaths = {
     stage: join(stageDir, 'release.json'),
-    result: join(fleetDir, 'result.json'),
-    manifest: join(fleetDir, 'manifest.json'),
-    inventory: join(fleetDir, 'inventory.json'),
+    result: join(currentFleetDir, 'result.json'),
+    manifest: join(currentFleetDir, 'manifest.json'),
+    inventory: join(currentFleetDir, 'inventory.json'),
   }
-  for (const [name, path] of Object.entries(paths)) {
-    writeFileSync(path, `${name}\n`)
+  const historicalPaths = {
+    result: join(historicalFleetDir, 'result.json'),
+    manifest: join(historicalFleetDir, 'manifest.json'),
+    inventory: join(historicalFleetDir, 'inventory.json'),
+  }
+  for (const [name, path] of Object.entries(currentPaths)) {
+    writeFileSync(path, `current ${name}\n`)
+  }
+  for (const [name, path] of Object.entries(historicalPaths)) {
+    writeFileSync(path, `historical ${name}\n`)
   }
   const mutationEnv = {
     NVPN_RELEASE_STAGE_DIR: stageDir,
-    NVPN_FLEET_RESULT_PATH: paths.result,
-    NVPN_FLEET_MANIFEST_PATH: paths.manifest,
-    NVPN_FLEET_INVENTORY_PATH: paths.inventory,
+    NVPN_FLEET_RESULT_PATH: currentPaths.result,
+    NVPN_FLEET_MANIFEST_PATH: currentPaths.manifest,
+    NVPN_FLEET_INVENTORY_PATH: currentPaths.inventory,
   }
   const testflight = {
     buildPresent: true,
@@ -639,35 +662,73 @@ test('existing ASC build requires exact fleet-bound local upload evidence', () =
       }),
     /no fleet-bound exact upload receipt/i,
   )
-  const digest = (path) =>
-    createHash('sha256').update(readFileSync(path)).digest('hex')
+  const binding = (path) => ({
+    path: realpathSync(path),
+    sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
+    size: statSync(path).size,
+  })
+  const authorizedAt = Math.floor(Date.now() / 1000) - 10
+  const fleetAuthorization = {
+    authorizedAt,
+    result: binding(historicalPaths.result),
+    manifest: binding(historicalPaths.manifest),
+    inventory: binding(historicalPaths.inventory),
+  }
   const uploadReceiptPath = join(
     frozenDir,
     'app-store-upload-receipt.json',
   )
-  writeFileSync(
-    uploadReceiptPath,
-    `${JSON.stringify({
-      schema: 1,
-      kind: 'nvpn-ios-app-store-upload-v1',
-      createdAt: 1_752_000_000,
-      appGitSha: commit,
-      appGitTree: tree,
-      releaseTag: 'v4.1.5',
-      stageReleaseSha256: digest(paths.stage),
-      fleetResultSha256: digest(paths.result),
-      fleetManifestSha256: digest(paths.manifest),
-      fleetInventorySha256: digest(paths.inventory),
-      ipaSha256: frozen.gate.ipa_sha256,
-      ipaSize: frozen.gate.ipa_size,
-      bundleId: frozen.gate.bundle_id,
-      version: frozen.gate.marketing_version,
-      buildNumber: frozen.gate.build_number,
-      ascBuildId: testflight.buildId,
-      ascUploadedDate: testflight.uploadedDate,
-    })}\n`,
-    { mode: 0o600 },
+  const validations = []
+  const validatePublication = (value) => {
+    validations.push(value)
+    return { targetCount: 1 }
+  }
+  const pendingReceipt = {
+    schema: 1,
+    kind: 'nvpn-ios-app-store-pending-upload-v1',
+    appGitSha: commit,
+    appGitTree: tree,
+    releaseTag: 'v4.1.5',
+    stageRelease: binding(currentPaths.stage),
+    ipa: binding(frozen.ipaPath),
+    fleetAuthorization,
+    transporterAcceptedAt: authorizedAt + 1,
+    ipaSha256: frozen.gate.ipa_sha256,
+    ipaSize: frozen.gate.ipa_size,
+    bundleId: frozen.gate.bundle_id,
+    version: frozen.gate.marketing_version,
+    buildNumber: frozen.gate.build_number,
+  }
+  const {
+    transporterAcceptedAt,
+    ...authorization
+  } = pendingReceipt
+  const accepted = writeAcceptedIosPendingUpload({
+    repoRoot,
+    mutationEnv,
+    authorization,
+    transporterAcceptedAt,
+  })
+  assert.equal(statSync(accepted.path).mode & 0o777, 0o600)
+  assert.deepEqual(
+    validateIosPendingUploadReceipt({
+      repoRoot,
+      frozen,
+      stagedManifest,
+      mutationEnv,
+      validatePublication,
+    }).value,
+    pendingReceipt,
   )
+  const finalized = finalizeIosUploadReceipt({
+    repoRoot,
+    mutationEnv,
+    pendingReceipt: accepted,
+    testflight,
+    createdAt: authorizedAt + 2,
+  })
+  assert.equal(finalized.path, uploadReceiptPath)
+  assert.equal(statSync(finalized.path).mode & 0o777, 0o600)
   assert.equal(
     validateIosUploadReceipt({
       repoRoot,
@@ -675,9 +736,49 @@ test('existing ASC build requires exact fleet-bound local upload evidence', () =
       stagedManifest,
       mutationEnv,
       testflight,
+      validatePublication,
     }),
     uploadReceiptPath,
   )
+  assert.equal(validations.length, 2)
+  assert.equal(
+    validations[1].options.fleetResult,
+    realpathSync(historicalPaths.result),
+  )
+  assert.notEqual(
+    validations[1].options.fleetResult,
+    realpathSync(currentPaths.result),
+  )
+  assert.equal(validations[1].validationTimeSeconds, authorizedAt)
+
+  writeFileSync(historicalPaths.result, 'tampered historical result\n')
+  assert.throws(
+    () =>
+      validateIosUploadReceipt({
+        repoRoot,
+        frozen,
+        stagedManifest,
+        mutationEnv,
+        testflight,
+        validatePublication,
+      }),
+    /differs from its upload authorization binding/i,
+  )
+  writeFileSync(historicalPaths.result, 'historical result\n')
+  unlinkSync(historicalPaths.inventory)
+  assert.throws(
+    () =>
+      validateHistoricalIosFleetAuthorization({
+        repoRoot,
+        authorization: fleetAuthorization,
+        stageDir,
+        stagedManifest,
+        env: mutationEnv,
+        validatePublication,
+      }),
+    /ENOENT|missing/i,
+  )
+  writeFileSync(historicalPaths.inventory, 'historical inventory\n')
   assert.throws(
     () =>
       validateIosUploadReceipt({
@@ -686,8 +787,79 @@ test('existing ASC build requires exact fleet-bound local upload evidence', () =
         stagedManifest,
         mutationEnv,
         testflight: { ...testflight, buildId: 'substituted-build' },
+        validatePublication,
       }),
-    /differs from its fleet-bound upload receipt/i,
+    /final iOS upload receipt is invalid/i,
+  )
+})
+
+test('accepted pending iOS upload waits or finalizes without duplicate upload', () => {
+  const pending = { path: '/private/pending', value: {} }
+  assert.equal(
+    planIosUploadReconciliation({
+      buildPresent: false,
+      finalReceipt: null,
+      pendingReceipt: pending,
+    }),
+    'wait-pending',
+  )
+  assert.equal(
+    planIosUploadReconciliation({
+      buildPresent: true,
+      finalReceipt: null,
+      pendingReceipt: pending,
+    }),
+    'finalize-pending',
+  )
+  assert.throws(
+    () =>
+      planIosUploadReconciliation({
+        buildPresent: true,
+        finalReceipt: null,
+        pendingReceipt: null,
+      }),
+    /no fleet-authorized exact upload receipt/i,
+  )
+  assert.throws(
+    () =>
+      planIosUploadReconciliation({
+        buildPresent: true,
+        finalReceipt: '/private/final',
+        pendingReceipt: pending,
+      }),
+    /final and pending .* coexist/i,
+  )
+
+  const publisher = readFileSync(
+    join(process.cwd(), 'scripts/ios-release-publication.mjs'),
+    'utf8',
+  )
+  const upload = publisher.indexOf("'ios-upload'")
+  const pendingWrite = publisher.indexOf(
+    'writeAcceptedIosPendingUpload({',
+    upload,
+  )
+  const wait = publisher.indexOf("'wait'", pendingWrite)
+  assert.ok(upload >= 0 && pendingWrite > upload && wait > pendingWrite)
+  assert.match(
+    publisher,
+    /preflight\.uploadAction === 'upload'[\s\S]*?ios-upload[\s\S]*?writeAcceptedIosPendingUpload/,
+  )
+  assert.match(
+    publisher,
+    /captureIosPendingUploadAuthorization\(\{[\s\S]*?beforeMutation\(\)\s*run\([\s\S]*?'ios-upload'/,
+  )
+  assert.match(
+    publisher,
+    /preflight\.uploadAction === 'wait-pending'[\s\S]*?testflight-internal'\), 'wait'/,
+  )
+  assert.match(
+    publisher,
+    /for \(const \[script, action\] of \[[\s\S]*?'put'[\s\S]*?'public'[\s\S]*?\]\) \{\s*beforeMutation\(\)\s*run\(/,
+  )
+  assert.match(
+    publisher,
+    /!submittedStates\.has[\s\S]*?\) \{\s*beforeMutation\(\)\s*run\([\s\S]*?'appstore-draft'\), 'submit'/,
   )
 })
 
@@ -819,7 +991,7 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   )
   assert.match(
     staged,
-    /beforeMutation:\s*\(\)\s*=>\s*replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*false/,
+    /beforeMutation:\s*\(\)\s*=>\s*\{[\s\S]*?preflightHtreeRelease\(\{[\s\S]*?replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*false/,
   )
 
   const promoteStart = source.indexOf(
@@ -841,7 +1013,7 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   }
   assert.match(
     promote,
-    /promoteStagedDraft\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
+    /promoteStagedDraft\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*\{[\s\S]*?preflightHtreeRelease\(\{[\s\S]*?replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
   )
   assert.match(
     promote,
@@ -868,6 +1040,20 @@ test('GitHub mutation uses the repository pinned by preflight', () => {
     source,
     /expected:\s*repository/,
   )
+  assert.doesNotMatch(source, /arguments_\s*\[/)
+  assert.match(
+    source,
+    /beforeMutation\(\)[\s\S]*?const mutationRepository = exactGithubRepository\(\{[\s\S]*?const arguments_ = \[[\s\S]*?'create'[\s\S]*?'--repo',[\s\S]*?mutationRepository/,
+  )
+  for (const command of ['upload', 'edit']) {
+    assert.match(
+      source,
+      new RegExp(
+        `beforeMutation\\(\\)[\\s\\S]*?const mutationRepository = exactGithubRepository\\(\\{[\\s\\S]*?'${command}',[\\s\\S]*?'--repo',[\\s\\S]*?mutationRepository`,
+      ),
+      command,
+    )
+  }
   for (const command of ['view', 'download', 'upload', 'edit', 'create']) {
     assert.match(
       source,
@@ -917,6 +1103,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     'github-release-publication.mjs',
     'htree-release-publication.mjs',
     'ios-release-publication.mjs',
+    'ios-upload-receipt.mjs',
     'release-mutation-gate.mjs',
     'verify-release-publication-bundle.mjs',
     'startos-release.mjs',
@@ -1437,20 +1624,21 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
   }
 
   const htreeCommands = readFileSync(htreeLog, 'utf8').trim().split('\n')
-  assert.deepEqual(
-    htreeCommands.slice(0, 3),
-    ['user', 'status', 'release publish --help'],
-  )
-  assert.equal(htreeCommands[3], `add ${stage}`)
-  assert.equal(htreeCommands[4], `push --force ${fakeCid}`)
-  assert.deepEqual(
-    htreeCommands.slice(5, -1),
-    [...stagedBefore.keys()].map((path) => `cat ${fakeCid}/${path}`),
-  )
-  assert.equal(
-    htreeCommands.at(-1),
+  assert.deepEqual(htreeCommands, [
+    'user',
+    'status',
+    'release publish --help',
+    `add ${stage}`,
+    'user',
+    'status',
+    'release publish --help',
+    `push --force ${fakeCid}`,
+    ...[...stagedBefore.keys()].map((path) => `cat ${fakeCid}/${path}`),
+    'user',
+    'status',
+    'release publish --help',
     `release publish releases/test v4.1.5 ${fakeCid} --draft`,
-  )
+  ])
 
   const staleTag = spawnSync('git', ['tag', 'v4.1.5', 'HEAD^'], {
     cwd: repo,
@@ -2062,6 +2250,10 @@ test('promotion preflights and publishes exact iOS to both TestFlight lanes and 
       < promote.indexOf('promoteStagedDraft({'),
   )
   assert.match(promote, /publishExactIosDistribution\(\{/)
+  assert.match(
+    promote,
+    /publishExactIosDistribution\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
+  )
 
   const publisher = readFileSync(
     join(process.cwd(), 'scripts/ios-release-publication.mjs'),
@@ -2077,7 +2269,13 @@ test('promotion preflights and publishes exact iOS to both TestFlight lanes and 
   assert.match(publisher, /\['appstore-draft', 'status'\]/)
   assert.match(publisher, /validateFrozenIosPublication\(/)
   assert.match(publisher, /validateIosUploadReceipt\(/)
-  assert.match(publisher, /fleetResultSha256/)
+  const uploadReceipts = readFileSync(
+    join(process.cwd(), 'scripts/ios-upload-receipt.mjs'),
+    'utf8',
+  )
+  assert.match(uploadReceipts, /fleetAuthorization/)
+  assert.match(uploadReceipts, /authorizedAt/)
+  assert.match(uploadReceipts, /validationTimeSeconds:\s*authorization\.authorizedAt/)
 
   const promoteFunctionStart = localRelease.indexOf(
     'function promoteStagedDraft(',

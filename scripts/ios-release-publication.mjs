@@ -1,17 +1,20 @@
 import { spawnSync } from 'node:child_process'
 import {
-  chmodSync,
-  existsSync,
   lstatSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   statSync,
-  writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { join } from 'node:path'
 
+import {
+  captureIosPendingUploadAuthorization,
+  finalizeIosUploadReceipt,
+  reconcileIosUploadReceipts,
+  removeIosPendingUploadReceipt,
+  validateIosUploadReceipt,
+  writeAcceptedIosPendingUpload,
+} from './ios-upload-receipt.mjs'
 import {
   semverFromTag,
   sha256FileSync,
@@ -177,126 +180,6 @@ function testflightPreflight({ repoRoot, mutationEnv }) {
   )
 }
 
-function uploadReceiptPath({ repoRoot, mutationEnv }) {
-  return resolve(
-    mutationEnv.NVPN_IOS_UPLOAD_RECEIPT_PATH
-    || join(
-      repoRoot,
-      'dist',
-      'ios',
-      'frozen',
-      'app-store-upload-receipt.json',
-    ),
-  )
-}
-
-function uploadReceiptValue({
-  frozen,
-  stagedManifest,
-  mutationEnv,
-  testflight,
-}) {
-  if (
-    testflight.buildPresent !== true
-    || typeof testflight.buildId !== 'string'
-    || !testflight.buildId
-    || typeof testflight.uploadedDate !== 'string'
-    || !testflight.uploadedDate
-  ) {
-    throw new Error(
-      'App Store Connect did not return an exact build ID and upload date.',
-    )
-  }
-  return {
-    schema: 1,
-    kind: 'nvpn-ios-app-store-upload-v1',
-    createdAt: Math.floor(Date.now() / 1000),
-    appGitSha: stagedManifest.commit,
-    appGitTree: stagedManifest.release_gate_attestation.app_git_tree,
-    releaseTag: stagedManifest.tag,
-    stageReleaseSha256: sha256FileSync(
-      join(mutationEnv.NVPN_RELEASE_STAGE_DIR, 'release.json'),
-    ),
-    fleetResultSha256: sha256FileSync(
-      mutationEnv.NVPN_FLEET_RESULT_PATH,
-    ),
-    fleetManifestSha256: sha256FileSync(
-      mutationEnv.NVPN_FLEET_MANIFEST_PATH,
-    ),
-    fleetInventorySha256: sha256FileSync(
-      mutationEnv.NVPN_FLEET_INVENTORY_PATH,
-    ),
-    ipaSha256: frozen.gate.ipa_sha256,
-    ipaSize: frozen.gate.ipa_size,
-    bundleId: frozen.gate.bundle_id,
-    version: frozen.gate.marketing_version,
-    buildNumber: frozen.gate.build_number,
-    ascBuildId: testflight.buildId,
-    ascUploadedDate: testflight.uploadedDate,
-  }
-}
-
-export function validateIosUploadReceipt({
-  repoRoot,
-  frozen,
-  stagedManifest,
-  mutationEnv,
-  testflight,
-}) {
-  const path = uploadReceiptPath({ repoRoot, mutationEnv })
-  if (!existsSync(path)) {
-    throw new Error(
-      'Existing App Store Connect build has no fleet-bound exact upload receipt.',
-    )
-  }
-  const actual = exactJson(path, 'Fleet-bound iOS upload receipt')
-  const expected = uploadReceiptValue({
-    frozen,
-    stagedManifest,
-    mutationEnv,
-    testflight,
-  })
-  const keys = Object.keys(expected).sort()
-  if (
-    JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(keys)
-    || keys.some(
-      (key) => key !== 'createdAt' && actual[key] !== expected[key],
-    )
-    || !Number.isSafeInteger(actual.createdAt)
-    || actual.createdAt <= 0
-  ) {
-    throw new Error(
-      'Existing App Store Connect build differs from its fleet-bound upload receipt.',
-    )
-  }
-  return path
-}
-
-function writeUploadReceipt({
-  repoRoot,
-  frozen,
-  stagedManifest,
-  mutationEnv,
-  testflight,
-}) {
-  const path = uploadReceiptPath({ repoRoot, mutationEnv })
-  const value = uploadReceiptValue({
-    frozen,
-    stagedManifest,
-    mutationEnv,
-    testflight,
-  })
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  const temporary = `${path}.tmp-${process.pid}`
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    mode: 0o600,
-  })
-  chmodSync(temporary, 0o600)
-  renameSync(temporary, path)
-  chmodSync(path, 0o600)
-  return path
-}
-
 export function preflightIosPublication({
   repoRoot,
   stagedManifest,
@@ -339,26 +222,19 @@ export function preflightIosPublication({
       throw new Error('App Store Connect preflight differs from frozen iOS staging.')
     }
   }
-  if (testflight.buildPresent) {
-    validateIosUploadReceipt({
-      repoRoot,
-      frozen,
-      stagedManifest,
-      mutationEnv,
-      testflight,
-    })
-  } else if (
-    existsSync(uploadReceiptPath({ repoRoot, mutationEnv }))
-  ) {
-    throw new Error(
-      'Fleet-bound iOS upload receipt exists but App Store Connect has no exact build.',
-    )
-  }
+  const receipts = reconcileIosUploadReceipts({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv,
+    testflight,
+  })
   return {
     ...frozen,
     appStore,
     buildPresent: testflight.buildPresent === true,
     dryRun: false,
+    ...receipts,
     testflight,
   }
 }
@@ -368,6 +244,7 @@ export function publishExactIosDistribution({
   stagedManifest,
   mutationEnv,
   preflight,
+  beforeMutation = () => {},
   dryRun = false,
 }) {
   validateFrozenIosPublication({ repoRoot, stagedManifest })
@@ -383,39 +260,64 @@ export function publishExactIosDistribution({
     throw new Error('iOS publication preflight does not bind exact staging.')
   }
 
-  if (!preflight.buildPresent) {
-    validateFrozenIosPublication({ repoRoot, stagedManifest })
+  let pending = preflight.pendingReceipt
+  let uploaded = preflight.testflight
+  if (preflight.uploadAction === 'upload') {
+    const authorization = captureIosPendingUploadAuthorization({
+      repoRoot,
+      frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
+      stagedManifest,
+      mutationEnv,
+    })
+    beforeMutation()
     run(
       'bash',
       [join(repoRoot, 'scripts', 'ios-build'), 'ios-upload'],
       { cwd: repoRoot, env: mutationEnv },
     )
+    pending = writeAcceptedIosPendingUpload({
+      repoRoot,
+      mutationEnv,
+      authorization,
+    })
+  }
+  if (
+    preflight.uploadAction === 'upload'
+    || preflight.uploadAction === 'wait-pending'
+  ) {
     run(
       'bash',
       [join(repoRoot, 'scripts', 'testflight-internal'), 'wait'],
       { cwd: repoRoot, env: mutationEnv },
     )
-    const uploaded = testflightPreflight({ repoRoot, mutationEnv })
-    writeUploadReceipt({
+    uploaded = testflightPreflight({ repoRoot, mutationEnv })
+  }
+  if (preflight.uploadAction !== 'use-final') {
+    if (!pending) {
+      throw new Error(
+        'Visible App Store Connect build has no accepted upload receipt to finalize.',
+      )
+    }
+    finalizeIosUploadReceipt({
+      repoRoot,
+      mutationEnv,
+      pendingReceipt: pending,
+      testflight: uploaded,
+    })
+    validateIosUploadReceipt({
       repoRoot,
       frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
       stagedManifest,
       mutationEnv,
       testflight: uploaded,
     })
-  } else {
-    validateIosUploadReceipt({
-      repoRoot,
-      frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
-      stagedManifest,
-      mutationEnv,
-      testflight: preflight.testflight,
-    })
+    removeIosPendingUploadReceipt(pending)
   }
   for (const [script, action] of [
     ['testflight-internal', 'put'],
     ['testflight-internal', 'public'],
   ]) {
+    beforeMutation()
     run(
       'bash',
       [join(repoRoot, 'scripts', script), action],
@@ -434,6 +336,7 @@ export function publishExactIosDistribution({
     !submittedStates.has(preflight.appStore?.reviewState)
     && !submittedStates.has(preflight.appStore?.versionState)
   ) {
+    beforeMutation()
     run(
       'bash',
       [join(repoRoot, 'scripts', 'appstore-draft'), 'submit'],

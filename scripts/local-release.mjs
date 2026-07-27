@@ -1834,6 +1834,7 @@ function publishRelease({
   if (draft) {
     args.push('--draft')
   }
+  beforeMutation()
   run('htree', args, { dryRun })
   return cid
 }
@@ -2290,13 +2291,20 @@ function main() {
       tag,
       draft: true,
       dryRun: options.dryRun,
-      beforeMutation: () => replayCanonicalMutationGate({
-        stageDir,
-        tag,
-        options,
-        env: mutationEnv,
-        requireTag: false,
-      }),
+      beforeMutation: () => {
+        preflightHtreeRelease({
+          repoRoot,
+          env: mutationEnv,
+          dryRun: options.dryRun,
+        })
+        replayCanonicalMutationGate({
+          stageDir,
+          tag,
+          options,
+          env: mutationEnv,
+          requireTag: false,
+        })
+      },
     })
     console.log(`Published staged draft ${tag} to ${releaseTree} via ${cid}`)
     return
@@ -2404,6 +2412,13 @@ function main() {
       stagedManifest,
       mutationEnv,
       preflight: iosPublication,
+      beforeMutation: () => replayCanonicalMutationGate({
+        stageDir,
+        tag,
+        options,
+        env: mutationEnv,
+        requireTag: true,
+      }),
       dryRun: options.dryRun,
     })
     console.log(
@@ -2414,13 +2429,20 @@ function main() {
       releaseTree,
       tag,
       dryRun: options.dryRun,
-      beforeMutation: () => replayCanonicalMutationGate({
-        stageDir,
-        tag,
-        options,
-        env: mutationEnv,
-        requireTag: true,
-      }),
+      beforeMutation: () => {
+        preflightHtreeRelease({
+          repoRoot,
+          env: mutationEnv,
+          dryRun: options.dryRun,
+        })
+        replayCanonicalMutationGate({
+          stageDir,
+          tag,
+          options,
+          env: mutationEnv,
+          requireTag: true,
+        })
+      },
     })
     console.log(`Promoted ${tag} to ${releaseTree} via ${promoted.cid}`)
     replayCanonicalMutationGate({
@@ -2437,6 +2459,13 @@ function main() {
       tag,
       commit: stagedCommit,
       repository: githubPreflight.repository,
+      beforeMutation: () => replayCanonicalMutationGate({
+        stageDir,
+        tag,
+        options,
+        env: mutationEnv,
+        requireTag: true,
+      }),
       dryRun: options.dryRun,
     })
     console.log(
