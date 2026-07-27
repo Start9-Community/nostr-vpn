@@ -44,18 +44,24 @@ primary_ssh_command() {
 }
 
 secondary_ssh_command() {
+  local channel_timeout="${1:-}"
   WINDOWS_SECONDARY_SSH=(
     ssh
     -o BatchMode=yes
     -o ConnectTimeout=10
+    -o ConnectionAttempts=1
     -o "ProxyCommand=$SECONDARY_PROXY"
-    "$WINDOWS_SSH"
   )
+  if [[ -n "$channel_timeout" ]]; then
+    WINDOWS_SECONDARY_SSH+=(-o "ChannelTimeout=session=${channel_timeout}s")
+  fi
+  WINDOWS_SECONDARY_SSH+=("$WINDOWS_SSH")
 }
 
 run_ps_with() {
   local transport="$1"
   local script="$2"
+  local channel_timeout="${3:-}"
   local encoded
   encoded="$(printf '%s' "$script" | iconv -t UTF-16LE | base64 | tr -d '\n')"
   case "$transport" in
@@ -66,7 +72,7 @@ run_ps_with() {
           -EncodedCommand "$encoded"
       ;;
     secondary)
-      secondary_ssh_command
+      secondary_ssh_command "$channel_timeout"
       "${WINDOWS_SECONDARY_SSH[@]}" \
         powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
           -EncodedCommand "$encoded"
@@ -85,9 +91,13 @@ run_ps_secondary() {
   run_ps_with secondary "$1"
 }
 
+run_ps_secondary_bounded() {
+  run_ps_with secondary "$1" 5
+}
+
 guest_marker_exists() {
   local name="$1"
-  run_ps_secondary "if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name")) { exit 0 } else { exit 1 }" \
+  run_ps_secondary_bounded "if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name")) { exit 0 } else { exit 1 }" \
     >/dev/null 2>&1
 }
 

@@ -218,6 +218,9 @@ require_tokens "$PEER" "WireGuard/DNS responder evidence" \
   'fixture_dns='
 require_tokens "$WINDOWS_HOST" "provenance/diagnostic evidence" \
   'manifest_path) -replace' 'collect_failure_artifacts'
+require_tokens "$WINDOWS_HOST_LIB" "bounded out-of-band marker probes" \
+  'run_ps_secondary_bounded' \
+  'ChannelTimeout=session=${channel_timeout}s'
 require_tokens "$WINDOWS_GUEST" "failed-readiness diagnostics" \
   'last-condition-error.txt'
 require_tokens "$WINDOWS_HOST" "isolated peer namespace lifecycle" \
