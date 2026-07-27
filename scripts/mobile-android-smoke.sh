@@ -784,11 +784,22 @@ import sys
 
 path, selector_type, selector, attribute = sys.argv[1:]
 raw = open(path, encoding="utf-8").read()
-for node in re.findall(r"<node [^>]+>", raw):
-    attributes = dict(
+nodes = [
+    dict(
         (name, html.unescape(value))
         for name, value in re.findall(r'([a-z-]+)="([^"]*)"', node)
     )
+    for node in re.findall(r"<node [^>]+>", raw)
+]
+
+def bounds(attributes):
+    match = re.fullmatch(
+        r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+        attributes.get("bounds", ""),
+    )
+    return tuple(map(int, match.groups())) if match else None
+
+for attributes in nodes:
     if selector_type == "resource":
         matches = attributes.get("resource-id") == selector
     elif selector_type == "description":
@@ -816,6 +827,28 @@ for node in re.findall(r"<node [^>]+>", raw):
             if top < 200 or bottom > screen_bottom - 300:
                 continue
         print((left + right) // 2, (top + bottom) // 2)
+    elif attribute == "descendant-text":
+        parent = bounds(attributes)
+        if parent is None:
+            continue
+        left, top, right, bottom = parent
+        values = []
+        for child in nodes:
+            value = child.get("text", "")
+            child_bounds = bounds(child)
+            if not value or child_bounds is None:
+                continue
+            child_left, child_top, child_right, child_bottom = child_bounds
+            if (
+                child_left >= left
+                and child_top >= top
+                and child_right <= right
+                and child_bottom <= bottom
+            ):
+                values.append(value)
+        if len(values) != 1:
+            continue
+        print(values[0])
     else:
         print(attributes.get(attribute, ""))
     raise SystemExit(0)
@@ -1164,7 +1197,7 @@ configure_android_exit_dns_ui() {
 
 android_direct_source_persisted() {
   if truthy "$RELEASE_BLACKBOX_GATE"; then
-    [[ "$(android_ui_query resource internet-source-picker text 2>/dev/null || true)" == "This device" ]]
+    [[ "$(android_ui_query resource internet-source-picker descendant-text 2>/dev/null || true)" == "This device" ]]
     return
   fi
   "$ADB" -s "$serial" exec-out run-as "$PACKAGE_NAME" \

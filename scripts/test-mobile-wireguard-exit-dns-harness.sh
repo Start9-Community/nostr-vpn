@@ -52,6 +52,12 @@ grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
     echo "Android multiline UI entry lets adb consume the remaining config" >&2
     exit 1
   }
+grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
+  && grep -Fq 'internet-source-picker descendant-text' "$android_smoke" \
+  || {
+    echo "Android Release gate does not read the shipped picker label" >&2
+    exit 1
+  }
 
 # shellcheck disable=SC1090
 source "$fixture_lib"
