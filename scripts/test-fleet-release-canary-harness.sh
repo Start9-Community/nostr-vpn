@@ -409,6 +409,12 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +else:
 +    expectations = json.loads(args.expectations.read_text(encoding="utf-8"))
 +    transaction_id = expectations["transactionId"]
++    if args.action == "install" and (
++        not isinstance(expectations.get("rosterFreshnessDeadline"), int)
++        or expectations["rosterFreshnessDeadline"] <= 0
++    ):
++        print("fixture install lacks roster freshness deadline", file=sys.stderr)
++        raise SystemExit(1)
 +    if args.action == "rollback":
 +        if target_id == "rollback-fail":
 +            print("fixture rollback failed", file=sys.stderr)
@@ -1044,6 +1050,44 @@ if not separator:
 namespace = {"__name__": "fleet_adapter_probe_identity_contract"}
 exec(compile(definitions, str(path), "exec"), namespace)
 
+linux_install = definitions[
+    definitions.index("def install_staged"):
+    definitions.index("def remove_staged_path")
+]
+freshness_guard = linux_install.index(
+    "require_fresh_install_authorization(expected)"
+)
+expired_cleanup = linux_install.index(
+    "shutil.rmtree(transaction)",
+    freshness_guard,
+)
+service_stop = linux_install.index('run(["systemctl", "stop", unit]')
+binary_install = linux_install.index("atomic_install(candidate, binary)")
+if not freshness_guard < expired_cleanup < service_stop < binary_install:
+    raise SystemExit(
+        "Linux roster freshness is not checked at the mutation boundary"
+    )
+
+original_time = namespace["time"]
+try:
+    namespace["time"] = types.SimpleNamespace(time=lambda: 1_000)
+    namespace["require_fresh_install_authorization"](
+        {"rosterFreshnessDeadline": 1_000}
+    )
+    try:
+        namespace["require_fresh_install_authorization"](
+            {"rosterFreshnessDeadline": 999}
+        )
+    except RuntimeError as error:
+        if "expired before remote install mutation" not in str(error):
+            raise SystemExit(
+                "Linux expired roster deadline returned the wrong guard"
+            ) from error
+    else:
+        raise SystemExit("Linux accepted an expired remote install deadline")
+finally:
+    namespace["time"] = original_time
+
 candidate = b"immutable candidate binary\n"
 candidate_sha256 = hashlib.sha256(candidate).hexdigest()
 preinstall_binary_sha256 = hashlib.sha256(
@@ -1129,6 +1173,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
             }
             expected = {
                 "transactionId": f"{index + 1:032x}",
+                "rosterFreshnessDeadline": 4_000_000_000,
                 "artifactSha256": candidate_sha256,
                 "artifactSize": len(candidate),
                 "installedBinarySha256": candidate_sha256,
@@ -1199,6 +1244,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
             }
             expected = {
                 "transactionId": f"{index + 1:032x}",
+                "rosterFreshnessDeadline": 4_000_000_000,
                 "artifactSha256": candidate_sha256,
                 "artifactSize": len(candidate),
                 "installedBinarySha256": candidate_sha256,
@@ -1278,6 +1324,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
         }
         expected = {
             "transactionId": "f" * 32,
+            "rosterFreshnessDeadline": 4_000_000_000,
             "artifactSha256": candidate_sha256,
             "artifactSize": len(candidate),
             "installedBinarySha256": candidate_sha256,
@@ -1679,6 +1726,99 @@ finally:
     driver.cleanup_staged_artifact = original_cleanup
 
 try:
+    for classified in (75, 76):
+        def stage_failure(*_args, code=classified):
+            raise driver.DriverError(
+                "classified staging failure",
+                exit_code=code,
+            )
+
+        driver.stage_artifact = stage_failure
+        driver.cleanup_staged_artifact = lambda *_args: None
+        try:
+            driver.invoke_staged_adapter(
+                {"platform": "linux"},
+                {},
+                pathlib.Path("/fixture"),
+                cleanup_name,
+            )
+        except driver.DriverError as error:
+            if error.exit_code != classified:
+                raise SystemExit(
+                    "driver flattened a classified staging failure"
+                ) from error
+        else:
+            raise SystemExit("classified staging failure was accepted")
+
+        driver.stage_artifact = lambda *_args: None
+        driver.invoke_adapter = lambda *_args: (0, {}, "")
+
+        def cleanup_classified(*_args, code=classified):
+            raise driver.DriverError(
+                "classified cleanup failure",
+                exit_code=code,
+            )
+
+        driver.cleanup_staged_artifact = cleanup_classified
+        try:
+            driver.invoke_staged_adapter(
+                {"platform": "linux"},
+                {},
+                pathlib.Path("/fixture"),
+                cleanup_name,
+            )
+        except driver.DriverError as error:
+            if error.exit_code != classified:
+                raise SystemExit(
+                    "driver flattened a classified cleanup failure"
+                ) from error
+        else:
+            raise SystemExit("classified cleanup failure was accepted")
+
+        def primary_classified(*_args, code=classified):
+            raise driver.DriverError(
+                "classified primary failure",
+                exit_code=code,
+            )
+
+        secondary_code = 76 if classified == 75 else 75
+
+        def secondary_cleanup(*_args, code=secondary_code):
+            raise driver.DriverError(
+                "secondary cleanup failure",
+                exit_code=code,
+            )
+
+        driver.stage_artifact = primary_classified
+        driver.cleanup_staged_artifact = secondary_cleanup
+        try:
+            driver.invoke_staged_adapter(
+                {"platform": "linux"},
+                {},
+                pathlib.Path("/fixture"),
+                cleanup_name,
+            )
+        except driver.DriverError as error:
+            if (
+                error.exit_code != classified
+                or "secondary cleanup failure" not in str(error)
+            ):
+                raise SystemExit(
+                    "driver did not preserve the classified primary failure"
+                ) from error
+        else:
+            raise SystemExit(
+                "combined classified stage and cleanup failure was accepted"
+            )
+finally:
+    driver.stage_artifact = original_stage
+    driver.invoke_adapter = original_invoke
+    driver.cleanup_staged_artifact = original_cleanup
+
+if "return error.exit_code" not in driver_text:
+    raise SystemExit("driver main flattens classified transport failures")
+
+try:
     driver.run_transport(
         [sys.executable, "-c", "import time; time.sleep(1)"],
         input_text=None,
@@ -1799,6 +1939,17 @@ if not extraction < capture < identity_candidate < assertion:
     raise SystemExit(
         "Windows preinstall identity is not decoded by the extracted candidate"
     )
+freshness = install.index("AssertFreshInstallAuthorization $Expected")
+expired_cleanup = install.index(
+    "Remove-Item -LiteralPath $transaction -Recurse -Force",
+    freshness,
+)
+stop_service = install.index("Stop-Service -Name $name")
+atomic_install = install.index("AtomicInstall $extracted.candidate")
+if not assertion < freshness < expired_cleanup < stop_service < atomic_install:
+    raise SystemExit(
+        "Windows roster freshness is not checked at the mutation boundary"
+    )
 for mutation in (
     "SnapshotTransaction $transaction",
     "WriteJournal $transaction",
@@ -1830,10 +1981,12 @@ cleanup = text[text.index("function RemoveStagedArtifact"):text.index(
     "function InstallStagedCandidate"
 )]
 private_directory = text[
-    text.index("function CreatePrivateAdminDirectory"):
+    text.index("function AssertPrivateAdminDirectory"):
     text.index("function GetServiceObject")
 ]
 for required in (
+    "$acl.AreAccessRulesProtected",
+    "$rule.IdentityReference.Value -notin $allowedOwners",
     "$acl.SetAccessRuleProtection($true, $false)",
     "[Security.Principal.SecurityIdentifier]::new('S-1-5-18')",
     "[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')",
@@ -1846,6 +1999,14 @@ for required in (
         raise SystemExit(
             "Windows private stage does not install a protected admin-only ACL"
         )
+identity_inputs = text[
+    text.index("function PrepareIdentityInputs"):
+    text.index("function ResolveNvpnServiceName")
+]
+if "CreatePrivateAdminDirectory $workspace" not in identity_inputs:
+    raise SystemExit(
+        "Windows identity secrets do not use a protected snapshot directory"
+    )
 copy_stage = text[
     text.index("function CopyStagedArtifact"):
     text.index("function ProbeCandidate")

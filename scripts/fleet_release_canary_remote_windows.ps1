@@ -90,29 +90,18 @@ function AssertPrivateAdminDirectory([string]$Path) {
     if ($owner -notin $allowedOwners) {
         Fail 'fleet transaction root is not administrator-owned'
     }
-    $broadSids = @(
-        'S-1-1-0',
-        'S-1-5-11',
-        'S-1-5-32-545',
-        'S-1-5-32-546'
-    )
-    $writeRights = (
-        [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Modify -bor
-        [Security.AccessControl.FileSystemRights]::FullControl -bor
-        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership
-    )
+    if (!$acl.AreAccessRulesProtected) {
+        Fail 'fleet transaction root ACL is not protected'
+    }
     foreach (
         $rule in $acl.GetAccessRules($true, $true, $sidType)
     ) {
         if (
             $rule.AccessControlType -eq
                 [Security.AccessControl.AccessControlType]::Allow -and
-            $rule.IdentityReference.Value -in $broadSids -and
-            ($rule.FileSystemRights -band $writeRights)
+            $rule.IdentityReference.Value -notin $allowedOwners
         ) {
-            Fail 'fleet transaction root grants broad write access'
+            Fail 'fleet transaction root grants non-administrator access'
         }
     }
 }
@@ -574,7 +563,7 @@ function PrepareIdentityInputs(
     $workspace = Join-Path $WorkspaceRoot (
         '.identity-' + [Guid]::NewGuid().ToString('N')
     )
-    [IO.Directory]::CreateDirectory($workspace) | Out-Null
+    CreatePrivateAdminDirectory $workspace
     $snapshotConfig = Join-Path $workspace (
         [IO.Path]::GetFileName($ConfigPath)
     )
@@ -650,6 +639,31 @@ function ResolveNvpnServiceName($Deployment) {
         Fail "Windows fleet serviceName must be $script:NvpnServiceName"
     }
     return $serviceName
+}
+
+function AssertFreshInstallAuthorization($Expected) {
+    $deadline = 0L
+    if (
+        $null -eq $Expected.rosterFreshnessDeadline -or
+        $Expected.rosterFreshnessDeadline -is [bool] -or
+        ![long]::TryParse(
+            [string]$Expected.rosterFreshnessDeadline,
+            [ref]$deadline
+        ) -or
+        $deadline -le 0
+    ) {
+        Fail 'roster freshness deadline is invalid'
+    }
+    $epoch = [DateTime]::SpecifyKind(
+        [DateTime]'1970-01-01',
+        [DateTimeKind]::Utc
+    )
+    $now = [long][Math]::Floor(
+        ([DateTime]::UtcNow - $epoch).TotalSeconds
+    )
+    if ($now -gt $deadline) {
+        Fail 'fleet roster evidence expired before remote install mutation'
+    }
 }
 
 function Capture(
@@ -1504,6 +1518,25 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
     $binary = [string]$before.binaryPath
     $config = [string]$before.configPath
     WriteJournal $transaction $Target.id $transactionId 'installing' | Out-Null
+    try {
+        AssertFreshInstallAuthorization $Expected
+    } catch {
+        $primary = $_
+        try {
+            Remove-Item -LiteralPath $transaction -Recurse -Force `
+                -ErrorAction Stop
+            if (Test-Path -LiteralPath $transaction) {
+                throw 'expired transaction cleanup left residue'
+            }
+        } catch {
+            Fail (
+                $primary.Exception.Message +
+                '; expired transaction cleanup also failed: ' +
+                $_.Exception.Message
+            )
+        }
+        throw $primary
+    }
     try {
         Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
         AtomicInstall $extracted.candidate $binary

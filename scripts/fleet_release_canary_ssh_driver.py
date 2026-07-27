@@ -173,6 +173,12 @@ exit $exitCode
 class DriverError(RuntimeError):
     """A local transport or adapter failure."""
 
+    def __init__(self, message: str, *, exit_code: int = 1) -> None:
+        super().__init__(message)
+        if exit_code not in {1, 75, 76}:
+            raise ValueError("fleet driver exit code is invalid")
+        self.exit_code = exit_code
+
 
 def load_json(path: pathlib.Path, label: str) -> dict[str, Any]:
     try:
@@ -404,7 +410,8 @@ def stage_artifact(
         code = classify_ssh_failure(result)
         raise DriverError(
             f"artifact transport failed (classification {code}): "
-            f"{result.stderr.strip() or result.stdout.strip()}"
+            f"{result.stderr.strip() or result.stdout.strip()}",
+            exit_code=code,
         )
 
 
@@ -503,7 +510,8 @@ def cleanup_staged_artifact(
         details = result.stderr.strip() or result.stdout.strip()
         raise DriverError(
             f"staged artifact cleanup failed (classification {code}): "
-            f"{details or 'remote cleanup returned no details'}"
+            f"{details or 'remote cleanup returned no details'}",
+            exit_code=code,
         )
 
 
@@ -615,8 +623,14 @@ def invoke_staged_adapter(
         cleanup_error = error
     if primary_error is not None:
         if cleanup_error is not None:
+            exit_code = (
+                primary_error.exit_code
+                if isinstance(primary_error, DriverError)
+                else 1
+            )
             raise DriverError(
-                f"{primary_error}; cleanup also failed: {cleanup_error}"
+                f"{primary_error}; cleanup also failed: {cleanup_error}",
+                exit_code=exit_code,
             ) from primary_error
         raise primary_error
     if adapter_result is not None and adapter_result[0] != 0:
@@ -741,7 +755,10 @@ def main() -> int:
         }
         atomic_json(args.output, wrapped)
         return 0
-    except (DriverError, OSError) as error:
+    except DriverError as error:
+        print(f"fleet SSH driver blocked: {error}", file=sys.stderr)
+        return error.exit_code
+    except OSError as error:
         print(f"fleet SSH driver blocked: {error}", file=sys.stderr)
         return 1
 

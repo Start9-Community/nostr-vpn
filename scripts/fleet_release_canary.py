@@ -1109,6 +1109,7 @@ def build_expectations(
     probe: dict[str, Any],
     manifest_hash: str,
     inventory_hash: str,
+    freshness_deadline: int,
 ) -> pathlib.Path:
     digest = hashlib.sha256(target["id"].encode("utf-8")).hexdigest()[:16]
     path = evidence_dir / f"expectations-{digest}.json"
@@ -1121,6 +1122,7 @@ def build_expectations(
             "transactionId": transaction_id,
             "manifestSha256": manifest_hash,
             "inventorySha256": inventory_hash,
+            "rosterFreshnessDeadline": freshness_deadline,
             "artifactSha256": artifact["sha256"],
             "artifactSize": artifact["size"],
             "installedBinarySha256": artifact["_installed_hash"],
@@ -1403,6 +1405,7 @@ def execute(args: argparse.Namespace) -> int:
             probe_snapshot,
             manifest_hash,
             inventory_hash,
+            freshness_deadline,
         )
         expectation_value = load_json(expectations, f"expectations for {target['id']}")
         transaction_id = expectation_value["transactionId"]

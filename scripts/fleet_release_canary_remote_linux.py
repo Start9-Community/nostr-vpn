@@ -1092,6 +1092,11 @@ def install_staged(
     config = before["configPath"]
     write_journal(transaction, target["id"], transaction_id, "installing")
     try:
+        require_fresh_install_authorization(expected)
+    except Exception:
+        shutil.rmtree(transaction)
+        raise
+    try:
         run(["systemctl", "stop", unit], check=False)
         atomic_install(candidate, binary)
         companion_paths = target["deployment"].get("companionPaths", {})
@@ -1464,6 +1469,18 @@ def finish_staged_cleanup(
         raise primary_error
     if cleanup_errors:
         fail("staged artifact cleanup failed: " + "; ".join(cleanup_errors))
+
+
+def require_fresh_install_authorization(expected: dict[str, Any]) -> None:
+    deadline = expected.get("rosterFreshnessDeadline")
+    if (
+        not isinstance(deadline, int)
+        or isinstance(deadline, bool)
+        or deadline <= 0
+    ):
+        fail("roster freshness deadline is invalid")
+    if int(time.time()) > deadline:
+        fail("fleet roster evidence expired before remote install mutation")
 
 
 def probe_candidate(
