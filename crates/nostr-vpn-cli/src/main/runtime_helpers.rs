@@ -654,7 +654,7 @@ async fn sync_fips_private_runtime(
 ) -> Result<()> {
     if !fips_private_runtime_active(context.app, context.vpn_enabled, context.expected_peers) {
         if let Some(runtime) = runtime.take() {
-            runtime.stop().await?;
+            stop_fips_private_tunnel_runtime(context.config_path, runtime).await?;
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if !context.app.fips_host_tunnel_enabled {
@@ -699,7 +699,7 @@ async fn sync_fips_private_runtime(
         .is_some_and(|existing| existing.requires_endpoint_restart(&config));
     if restart {
         if let Some(existing) = runtime.take() {
-            existing.stop().await?;
+            stop_fips_private_tunnel_runtime(context.config_path, existing).await?;
         }
         let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
         eprintln!("daemon: restarted FIPS private mesh on {}", started.iface());

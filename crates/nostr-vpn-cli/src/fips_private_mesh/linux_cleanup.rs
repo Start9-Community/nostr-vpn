@@ -19,10 +19,20 @@ pub(crate) fn pending_linux_network_cleanup_state() -> Option<LinuxNetworkCleanu
 }
 
 #[cfg(target_os = "linux")]
-fn retain_pending_linux_network_cleanup_state(state: LinuxNetworkCleanupState) {
+fn replace_pending_linux_network_cleanup_state(state: Option<LinuxNetworkCleanupState>) {
     *PENDING_LINUX_NETWORK_CLEANUP
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+}
+
+#[cfg(target_os = "linux")]
+fn record_linux_stop_cleanup_ownership(
+    cleanup_result: &Result<()>,
+    remaining: Option<LinuxNetworkCleanupState>,
+) {
+    replace_pending_linux_network_cleanup_state(
+        cleanup_result.is_err().then_some(remaining).flatten(),
+    );
 }
 
 #[cfg(all(test, target_os = "linux"))]

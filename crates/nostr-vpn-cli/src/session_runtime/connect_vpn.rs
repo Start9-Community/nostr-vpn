@@ -209,20 +209,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
 
     port_mapping_runtime.stop().await;
     if let Some(runtime) = fips_tunnel_runtime {
-        let persist_error =
-            persist_fips_daemon_network_cleanup_state(&config_path, Some(&runtime)).err();
-        match runtime.stop().await {
-            Ok(()) => clear_fips_daemon_network_cleanup_state(&config_path)?,
-            Err(error) => {
-                return Err(match persist_error {
-                    Some(persist_error) => anyhow!(
-                        "failed to stop FIPS private mesh ({error:#}); failed to persist exact \
-                         cleanup ownership before teardown ({persist_error:#})"
-                    ),
-                    None => error.context("failed to stop FIPS private mesh"),
-                });
-            }
-        }
+        stop_fips_private_tunnel_runtime(&config_path, runtime).await?;
     }
     println!("connect: disconnected");
 

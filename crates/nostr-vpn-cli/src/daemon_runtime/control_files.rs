@@ -866,7 +866,7 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
             .or_else(crate::fips_private_mesh::pending_linux_network_cleanup_state);
         if let Some(state) = state {
             write_daemon_network_cleanup_state(&path, &state)?;
-        } else if runtime.is_some() {
+        } else {
             remove_runtime_file_if_exists(&path)?;
         }
     }
@@ -890,12 +890,33 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
     Ok(())
 }
 
-pub(crate) fn clear_fips_daemon_network_cleanup_state(config_path: &Path) -> Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    remove_runtime_file_if_exists(&daemon_network_cleanup_file_path(config_path))?;
+pub(crate) async fn stop_fips_private_tunnel_runtime(
+    config_path: &Path,
+    runtime: crate::fips_private_mesh::FipsPrivateTunnelRuntime,
+) -> Result<()> {
+    let before_error =
+        persist_fips_daemon_network_cleanup_state(config_path, Some(&runtime)).err();
+    let stop_error = runtime.stop().await.err();
+    let remaining_error = persist_fips_daemon_network_cleanup_state(config_path, None).err();
+    if stop_error.is_none() && remaining_error.is_none() {
+        return Ok(());
+    }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    let _ = config_path;
-
-    Ok(())
+    let mut failures = Vec::new();
+    if let Some(error) = stop_error {
+        failures.push(format!("failed to stop FIPS private mesh: {error:#}"));
+    }
+    if remaining_error.is_some()
+        && let Some(error) = before_error
+    {
+        failures.push(format!(
+            "failed to persist cleanup ownership before teardown: {error:#}"
+        ));
+    }
+    if let Some(error) = remaining_error {
+        failures.push(format!(
+            "failed to persist remaining cleanup ownership after teardown: {error:#}"
+        ));
+    }
+    Err(anyhow!(failures.join("; ")))
 }

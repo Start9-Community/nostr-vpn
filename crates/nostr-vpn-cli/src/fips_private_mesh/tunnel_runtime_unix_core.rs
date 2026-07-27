@@ -194,11 +194,12 @@ impl FipsPrivateTunnelRuntime {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let runtime = self;
         #[cfg(target_os = "linux")]
-        let cleanup_snapshot = LinuxNetworkCleanupState::from_runtime(&runtime);
-        #[cfg(target_os = "linux")]
         let network_cleanup = runtime.cleanup_linux_network_state();
         #[cfg(target_os = "linux")]
-        let network_cleanup_failed = network_cleanup.is_err();
+        record_linux_stop_cleanup_ownership(
+            &network_cleanup,
+            LinuxNetworkCleanupState::from_runtime(&runtime),
+        );
         #[cfg(not(target_os = "linux"))]
         let network_cleanup: Result<()> = Ok(());
         #[cfg(target_os = "macos")]
@@ -229,21 +230,14 @@ impl FipsPrivateTunnelRuntime {
             .shutdown()
             .await
             .context("failed to stop FIPS endpoint");
-        let result = match (network_cleanup, endpoint_cleanup) {
+        match (network_cleanup, endpoint_cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(network), Ok(())) => Err(network),
             (Ok(()), Err(endpoint)) => Err(endpoint),
             (Err(network), Err(endpoint)) => Err(anyhow!(
                 "network cleanup failed ({network:#}); endpoint shutdown failed ({endpoint:#})"
             )),
-        };
-        #[cfg(target_os = "linux")]
-        if network_cleanup_failed
-            && let Some(cleanup_snapshot) = cleanup_snapshot
-        {
-            retain_pending_linux_network_cleanup_state(cleanup_snapshot);
         }
-        result
     }
 
     async fn prepare_secure_dns(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {

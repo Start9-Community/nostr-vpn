@@ -533,7 +533,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
             .is_some_and(|existing| existing.requires_endpoint_restart(&config))
     {
         if let Some(existing) = runtime.take() {
-            existing.stop().await?;
+            stop_fips_private_tunnel_runtime(context.config_path, existing).await?;
         }
         let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
         eprintln!(
@@ -636,8 +636,7 @@ async fn rebuild_fips_tunnel_runtime_after_control_failure(
     let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
 
     if let Some(existing) = runtime.take() {
-        existing
-            .stop()
+        stop_fips_private_tunnel_runtime(context.config_path, existing)
             .await
             .context("refusing to rebuild FIPS after incomplete prior cleanup")?;
     }

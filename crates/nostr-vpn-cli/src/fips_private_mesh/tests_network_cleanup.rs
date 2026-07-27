@@ -50,6 +50,9 @@
         }
     }
 
+    #[cfg(target_os = "linux")]
+    static LINUX_PENDING_CLEANUP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn linux_cleanup_restores_defaults_after_forwarding_cleanup_exhausts_retries() {
         let mut actions = FakeLinuxNetworkCleanupActions {
@@ -85,6 +88,9 @@
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_failed_start_cleanup_is_persisted_without_a_live_runtime() {
+        let _guard = LINUX_PENDING_CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prior = super::take_pending_linux_network_cleanup_state();
         assert!(
             prior.is_none(),
@@ -92,11 +98,13 @@
         );
 
         let expected_default = "default via 192.0.2.1 dev eth0 metric 100".to_string();
-        super::retain_pending_linux_network_cleanup_state(crate::LinuxNetworkCleanupState {
-            iface: "nvpn-start-failure".to_string(),
-            original_default_route: Some(expected_default.clone()),
-            ..crate::LinuxNetworkCleanupState::default()
-        });
+        super::replace_pending_linux_network_cleanup_state(Some(
+            crate::LinuxNetworkCleanupState {
+                iface: "nvpn-start-failure".to_string(),
+                original_default_route: Some(expected_default.clone()),
+                ..crate::LinuxNetworkCleanupState::default()
+            },
+        ));
 
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -114,6 +122,83 @@
             .expect("cleanup ownership exists");
         assert_eq!(saved.iface, "nvpn-start-failure");
         assert_eq!(saved.original_default_route, Some(expected_default));
+
+        super::take_pending_linux_network_cleanup_state();
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_failed_stop_persists_only_remaining_cleanup_ownership() {
+        let _guard = LINUX_PENDING_CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior = super::take_pending_linux_network_cleanup_state();
+        assert!(
+            prior.is_none(),
+            "failed-stop persistence test requires an empty in-process registry"
+        );
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("nvpn-linux-stop-cleanup-test-{nonce}"));
+        std::fs::create_dir_all(&directory).expect("create temp directory");
+        let config_path = directory.join("config.toml");
+        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path);
+        let stale_default = "default via 192.0.2.1 dev eth0 metric 100".to_string();
+        crate::write_daemon_network_cleanup_state(
+            &cleanup_path,
+            &crate::LinuxNetworkCleanupState {
+                iface: "nvpn-stop-failure".to_string(),
+                original_default_route: Some(stale_default),
+                ..crate::LinuxNetworkCleanupState::default()
+            },
+        )
+        .expect("persist pre-stop cleanup ownership");
+
+        let cleanup_error = Err(anyhow::anyhow!("synthetic partial cleanup failure"));
+        super::record_linux_stop_cleanup_ownership(
+            &cleanup_error,
+            Some(crate::LinuxNetworkCleanupState {
+                iface: "nvpn-stop-failure".to_string(),
+                exit_node_runtime: crate::LinuxExitNodeRuntime {
+                    ipv4_forward_was_enabled: Some(false),
+                    ..crate::LinuxExitNodeRuntime::default()
+                },
+                ..crate::LinuxNetworkCleanupState::default()
+            }),
+        );
+        crate::persist_fips_daemon_network_cleanup_state(&config_path, None)
+            .expect("replace pre-stop ownership with remaining obligations");
+
+        let saved = crate::read_daemon_network_cleanup_state(&cleanup_path)
+            .expect("read remaining cleanup ownership")
+            .expect("remaining cleanup ownership exists");
+        assert_eq!(saved.iface, "nvpn-stop-failure");
+        assert!(
+            saved.original_default_route.is_none(),
+            "a successfully restored default route must not be replayed after restart"
+        );
+        assert_eq!(
+            saved.exit_node_runtime.ipv4_forward_was_enabled,
+            Some(false),
+            "the cleanup obligation that actually remains must stay persisted"
+        );
+
+        super::record_linux_stop_cleanup_ownership(&cleanup_error, None);
+        crate::persist_fips_daemon_network_cleanup_state(&config_path, None)
+            .expect("remove pre-stop ownership when no cleanup obligation remains");
+        assert!(
+            super::pending_linux_network_cleanup_state().is_none(),
+            "an error without remaining ownership must not block the next start"
+        );
+        assert!(
+            !cleanup_path.exists(),
+            "an error without remaining ownership must remove the stale pre-stop file"
+        );
 
         super::take_pending_linux_network_cleanup_state();
         let _ = std::fs::remove_dir_all(directory);
