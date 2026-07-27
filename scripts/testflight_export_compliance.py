@@ -9,6 +9,7 @@ whose Info.plist flag is true.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 import json
 
 
@@ -30,6 +31,26 @@ _ACTIVE_PENDING_STATES = {"CREATED", "IN_REVIEW"}
 
 class ExportComplianceError(RuntimeError):
     """Raised when App Store Connect cannot be made consistent with policy."""
+
+
+@dataclass(frozen=True)
+class VerifiedBuildCompliance:
+    """Proof from a live exact-build declaration relationship readback."""
+
+    build: Mapping[str, object]
+    build_id: str
+    declaration_id: str
+
+    def __post_init__(self) -> None:
+        attributes = self.build.get("attributes")
+        if (
+            not self.build_id
+            or self.build.get("id") != self.build_id
+            or not self.declaration_id
+            or not isinstance(attributes, Mapping)
+            or attributes.get("usesNonExemptEncryption") is not True
+        ):
+            raise ValueError("invalid verified build compliance proof")
 
 
 def declaration_create_request(app_id: str) -> dict[str, object]:
@@ -159,6 +180,58 @@ def declaration_is_active_pending(
     assert isinstance(attributes, Mapping)
     state = str(attributes.get("appEncryptionDeclarationState", "")).upper()
     return state in _ACTIVE_PENDING_STATES
+
+
+def verify_build_compliance(
+    build_id: str,
+    *,
+    request: Callable[..., tuple[int, object]],
+    get_build: Callable[[str], Mapping[str, object]],
+) -> VerifiedBuildCompliance:
+    """Read back an exact build and its approved declaration relationship."""
+
+    if not build_id:
+        raise ExportComplianceError("Build is missing its App Store Connect ID")
+
+    build = get_build(build_id)
+    attributes = build.get("attributes")
+    if (
+        build.get("id") != build_id
+        or not isinstance(attributes, Mapping)
+        or attributes.get("usesNonExemptEncryption") is not True
+    ):
+        raise ExportComplianceError(
+            "The exact App Store Connect build is not declared as using "
+            "non-exempt encryption"
+        )
+
+    status, body = request(
+        "GET",
+        f"builds/{build_id}/appEncryptionDeclaration",
+        {"fields[appEncryptionDeclarations]": _DECLARATION_FIELDS},
+    )
+    response = _require_response(
+        status,
+        body,
+        "Verify exact build app encryption declaration",
+        expected={200},
+    )
+    declaration = response.get("data")
+    if (
+        not isinstance(declaration, Mapping)
+        or not str(declaration.get("id", "")).strip()
+        or not declaration_matches_policy(declaration)
+    ):
+        raise ExportComplianceError(
+            "The exact App Store Connect build is not linked to the matching "
+            "approved French-store encryption declaration"
+        )
+
+    return VerifiedBuildCompliance(
+        build=build,
+        build_id=build_id,
+        declaration_id=str(declaration["id"]),
+    )
 
 
 def _require_response(
@@ -360,3 +433,29 @@ def ensure_build_compliance(
             "approved French-store-enabled standard-cryptography declaration."
         )
     return updated_build
+
+
+def ensure_build_compliance_with_proof(
+    build: Mapping[str, object],
+    *,
+    app_id: str,
+    request: Callable[..., tuple[int, object]],
+    get_all: Callable[..., list[Mapping[str, object]]],
+    get_build: Callable[[str], Mapping[str, object]],
+    log: Callable[[str], None] | None = None,
+) -> VerifiedBuildCompliance:
+    """Ensure compliance, then independently read back exact-build proof."""
+
+    updated_build = ensure_build_compliance(
+        build,
+        app_id=app_id,
+        request=request,
+        get_all=get_all,
+        get_build=get_build,
+        log=log,
+    )
+    return verify_build_compliance(
+        str(updated_build.get("id", "")).strip(),
+        request=request,
+        get_build=get_build,
+    )

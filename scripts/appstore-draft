@@ -101,7 +101,7 @@ from appstore_availability import (
 )
 from testflight_export_compliance import (
     ExportComplianceError,
-    ensure_build_compliance,
+    ensure_build_compliance_with_proof,
 )
 
 try:
@@ -699,7 +699,7 @@ def app_store_review_detail(version_id):
     return require_ok(status, body, "Read App Review detail").get("data")
 
 
-def review_detail_attrs(existing=None):
+def review_detail_attrs(existing=None, encryption_compliance=None):
     current = existing.get("attributes", {}) if existing else {}
     return {
         "contactFirstName": required_metadata_value(
@@ -731,13 +731,14 @@ def review_detail_attrs(existing=None):
             VERSION_NAME,
             existing,
             environ=os.environ,
+            encryption_compliance=encryption_compliance,
         ),
     }
 
 
-def ensure_review_detail(version_id):
+def ensure_review_detail(version_id, encryption_compliance):
     detail = app_store_review_detail(version_id)
-    attrs = review_detail_attrs(detail)
+    attrs = review_detail_attrs(detail, encryption_compliance)
     if detail:
         status, body = request(
             "PATCH",
@@ -1314,7 +1315,6 @@ app_info = ensure_app_info(app["id"])
 app_info_localization = ensure_app_info_localization(app_info["id"])
 category_id = ensure_primary_category(app_info["id"])
 age_rating = ensure_age_rating(app_info["id"])
-review_detail = ensure_review_detail(version["id"])
 content_rights = ensure_content_rights(app["id"])
 price_schedule_id = ensure_free_price_schedule(app["id"])
 worldwide_territories = ensure_worldwide_availability(app["id"])
@@ -1323,7 +1323,7 @@ build = find_build(app["id"])
 if build is None:
     fail(f"Build {BUILD_NUMBER} is not visible in App Store Connect")
 try:
-    build = ensure_build_compliance(
+    encryption_compliance = ensure_build_compliance_with_proof(
         build,
         app_id=app["id"],
         request=request,
@@ -1332,6 +1332,18 @@ try:
     )
 except ExportComplianceError as error:
     fail(str(error))
+build = encryption_compliance.build
+try:
+    draft_metadata.require_review_submission_encryption_compliance(
+        ACTION,
+        encryption_compliance,
+    )
+except ValueError as error:
+    fail(str(error))
+review_detail = ensure_review_detail(
+    version["id"],
+    encryption_compliance,
+)
 link_build(version["id"], build)
 screenshots = upload_screenshots(localization["id"])
 submission = None

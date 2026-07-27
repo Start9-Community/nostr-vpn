@@ -80,13 +80,12 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("no paid VPN purchase, use, or sale", notes)
         self.assertIn("no external purchase link", notes)
         self.assertIn("non-exempt encryption", notes)
-        self.assertIn(
+        self.assertNotIn(
             "approved French-store encryption declaration is attached",
             notes,
         )
         self.assertIn("available worldwide", notes)
         self.assertIn("including France and China", notes)
-        self.assertNotIn("chat or messaging", notes)
         self.assertIn("Switching between Wi-Fi, cellular, or a personal hotspot", notes)
         self.assertIn("Cloudflare encrypted DNS as the Automatic fallback", notes)
         self.assertIn("Quad9", notes)
@@ -95,6 +94,67 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("select Direct", notes)
         self.assertIn("signed roster containing its identity", notes)
         self.assertIn("Manual join", notes)
+
+    def test_reviewer_notes_claim_french_attachment_only_with_live_build_proof(self):
+        proof = export_compliance.VerifiedBuildCompliance(
+            build={
+                "type": "builds",
+                "id": "build-id",
+                "attributes": {"usesNonExemptEncryption": True},
+            },
+            build_id="build-id",
+            declaration_id="declaration-id",
+        )
+
+        notes = metadata.review_notes(
+            "4.1.5",
+            None,
+            environ={},
+            encryption_compliance=proof,
+        )
+
+        self.assertIn(
+            "approved French-store encryption declaration is attached",
+            notes,
+        )
+
+    def test_unproved_override_cannot_claim_french_approval_or_attachment(self):
+        with self.assertRaisesRegex(ValueError, "verified live build"):
+            metadata.review_notes(
+                "4.1.5",
+                None,
+                environ={
+                    "NVPN_APPSTORE_REVIEW_NOTES": (
+                        "The approved French-store encryption declaration "
+                        "is attached to the build."
+                    )
+                },
+            )
+
+    def test_boolean_cannot_stand_in_for_live_build_compliance_proof(self):
+        with self.assertRaisesRegex(ValueError, "live build compliance proof"):
+            metadata.review_notes(
+                "4.1.5",
+                None,
+                environ={},
+                encryption_compliance=True,
+            )
+
+    def test_review_submission_actions_require_exact_build_compliance_proof(self):
+        for action in ("submit", "public", "public-submit"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(ValueError, "verified.*declaration"):
+                    metadata.require_review_submission_encryption_compliance(
+                        action,
+                        None,
+                    )
+
+        for action in ("put", "attach", "status", "public-attach"):
+            with self.subTest(action=action):
+                metadata.require_review_submission_encryption_compliance(
+                    action,
+                    None,
+                )
 
     def test_reviewer_notes_include_private_ready_to_use_wireguard_fixture(self):
         notes = metadata.review_notes(
@@ -133,7 +193,7 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("no paid VPN purchase, use, or sale", notes)
         self.assertIn("VPN Data Use disclosure", notes)
         self.assertIn("non-exempt encryption", notes)
-        self.assertIn(
+        self.assertNotIn(
             "approved French-store encryption declaration is attached",
             notes,
         )
@@ -200,7 +260,33 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
 
         self.assertIn("testflight_review_notes(", shipper)
         self.assertIn("require_testflight_external_review_material(", shipper)
+        proof = shipper.index("encryption_compliance = ensure_export_compliance(build)")
+        gate = shipper.index(
+            "require_review_submission_encryption_compliance(",
+            proof,
+        )
+        submit = shipper.rindex("submit_beta_review(build)")
+        self.assertLess(proof, gate)
+        self.assertLess(gate, submit)
         self.assertNotIn('or attrs.get("notes")', shipper)
+
+    def test_appstore_submission_proves_compliance_before_notes_and_submit(self):
+        shipper = (ROOT / "scripts" / "appstore-draft").read_text(
+            encoding="utf-8"
+        )
+
+        proof = shipper.index(
+            "encryption_compliance = ensure_build_compliance_with_proof("
+        )
+        gate = shipper.index(
+            "require_review_submission_encryption_compliance(",
+            proof,
+        )
+        notes = shipper.index("review_detail = ensure_review_detail(", gate)
+        submit = shipper.rindex("submit_review_submission(")
+        self.assertLess(proof, gate)
+        self.assertLess(gate, notes)
+        self.assertLess(notes, submit)
 
     def test_support_page_exists_in_repo(self):
         support_page = ROOT / "docs" / "support" / "index.html"
@@ -463,7 +549,6 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             "encrypted networking and control transport",
             export_compliance.APP_DESCRIPTION,
         )
-        self.assertNotIn("chat or messaging", export_compliance.APP_DESCRIPTION)
 
         wrong_answers = (
             {"appDescription": "A different app or release"},
@@ -692,6 +777,49 @@ class TestFlightExportComplianceTests(unittest.TestCase):
         self.assertTrue(result["attributes"]["usesNonExemptEncryption"])
         self.assertEqual([call[0] for call in calls], ["GET"])
 
+    def test_live_verifier_proves_exact_build_and_approved_link(self):
+        declaration = self._declaration("linked", state="APPROVED")
+        calls = []
+
+        def request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            return 200, {"data": declaration}
+
+        proof = export_compliance.verify_build_compliance(
+            "build-id",
+            request=request,
+            get_build=lambda build_id: self._build(True) | {"id": build_id},
+        )
+
+        self.assertEqual(proof.build_id, "build-id")
+        self.assertEqual(proof.declaration_id, "linked")
+        self.assertEqual(proof.build["id"], "build-id")
+        self.assertEqual(
+            [call[1] for call in calls],
+            ["builds/build-id/appEncryptionDeclaration"],
+        )
+
+    def test_live_verifier_rejects_unapproved_or_unlinked_build(self):
+        for uses_non_exempt, state in (
+            (False, "APPROVED"),
+            (True, "IN_REVIEW"),
+        ):
+            with self.subTest(
+                uses_non_exempt=uses_non_exempt,
+                state=state,
+            ):
+                with self.assertRaises(export_compliance.ExportComplianceError):
+                    export_compliance.verify_build_compliance(
+                        "build-id",
+                        request=lambda *_args, **_kwargs: (
+                            200,
+                            {"data": self._declaration("linked", state=state)},
+                        ),
+                        get_build=lambda build_id: (
+                            self._build(uses_non_exempt) | {"id": build_id}
+                        ),
+                    )
+
     def test_shipper_has_no_false_or_manual_id_policy(self):
         shipper = (ROOT / "scripts" / "testflight-internal").read_text(
             encoding="utf-8"
@@ -700,7 +828,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
         self.assertNotIn("NVPN_TESTFLIGHT_USES_NONEXEMPT_ENCRYPTION", shipper)
         self.assertNotIn("NVPN_TESTFLIGHT_APP_ENCRYPTION_DECLARATION_ID", shipper)
         self.assertNotIn("uses_nonexempt_encryption=False", shipper)
-        self.assertIn("ensure_build_compliance(", shipper)
+        self.assertIn("ensure_build_compliance_with_proof(", shipper)
 
     @staticmethod
     def _build(value):
