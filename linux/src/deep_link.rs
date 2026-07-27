@@ -62,6 +62,7 @@ fn parse_debug(raw: &str) -> Option<DeepLink> {
     }
 }
 
+#[cfg(debug_assertions)]
 fn query_value(raw: &str, names: &[&str]) -> Option<String> {
     let query = raw.split_once('?')?.1.split('#').next().unwrap_or_default();
     for pair in query.split('&') {
@@ -77,6 +78,7 @@ fn query_value(raw: &str, names: &[&str]) -> Option<String> {
     None
 }
 
+#[cfg(debug_assertions)]
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -101,6 +103,7 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+#[cfg(debug_assertions)]
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -124,6 +127,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn parses_debug_accept_join_requester_alias() {
         assert_eq!(
@@ -131,6 +135,18 @@ mod tests {
             Some(DeepLink::Debug(DebugAction::AcceptJoin {
                 network_id: Some("mesh".to_string()),
                 requester_npub: Some("npub1abc".to_string())
+            }))
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn percent_decodes_debug_accept_join_query_values() {
+        assert_eq!(
+            parse("nvpn://debug/accept-join?networkId=mesh%2Dalpha&requester=npub1abc%2Bdevice"),
+            Some(DeepLink::Debug(DebugAction::AcceptJoin {
+                network_id: Some("mesh-alpha".to_string()),
+                requester_npub: Some("npub1abc+device".to_string())
             }))
         );
     }

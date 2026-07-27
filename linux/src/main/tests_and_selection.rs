@@ -117,6 +117,29 @@ mod tests {
             Some("nvpn-roster-participant-accepted-npub1pending")
         );
     }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn resolves_debug_network_ids_to_internal_ids() {
+        let state = NativeAppState {
+            networks: vec![NativeNetworkState {
+                id: "internal-id".to_string(),
+                network_id: "mesh-id".to_string(),
+                enabled: true,
+                ..NativeNetworkState::default()
+            }],
+            ..NativeAppState::default()
+        };
+
+        assert_eq!(
+            resolve_network_id(&state, Some("mesh-id".to_string())).as_deref(),
+            Some("internal-id")
+        );
+        assert_eq!(
+            resolve_network_id(&state, None).as_deref(),
+            Some("internal-id")
+        );
+    }
 }
 
 fn active_network(state: &NativeAppState) -> Option<&NativeNetworkState> {
@@ -204,6 +227,7 @@ fn accepted_roster_accessibility_label(participant: &NativeParticipantState) -> 
         .then(|| format!("nvpn-roster-participant-accepted-{}", participant.npub))
 }
 
+#[cfg(debug_assertions)]
 fn resolve_network_id(state: &NativeAppState, requested: Option<String>) -> Option<String> {
     if let Some(requested) = requested {
         if let Some(network) = state
