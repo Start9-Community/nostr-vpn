@@ -18,6 +18,16 @@ DIST_DIR="$ROOT/dist/ios"
 ARCHIVE_PATH="$DIST_DIR/NostrVpnIos.xcarchive"
 EXPORT_DIR="$DIST_DIR/export"
 EXPORT_OPTIONS="$DIST_DIR/ExportOptions.plist"
+FROZEN_DIR="$DIST_DIR/frozen"
+FROZEN_ARCHIVE_RECEIPT="$FROZEN_DIR/archive-receipt.json"
+FROZEN_ADHOC_EXPORT_DIR="$FROZEN_DIR/release-testing-export"
+FROZEN_ADHOC_UNPACK_DIR="$FROZEN_DIR/release-testing-unpacked"
+FROZEN_ADHOC_RECEIPT="$FROZEN_DIR/release-testing-receipt.json"
+FROZEN_APPSTORE_UNPACK_DIR="$FROZEN_DIR/app-store-unpacked"
+FROZEN_APPSTORE_RECEIPT="$FROZEN_DIR/app-store-receipt.json"
+FROZEN_MOBILE_RECEIPT="$FROZEN_DIR/physical-mobile-receipt.json"
+FROZEN_GATE_SEAL="$FROZEN_DIR/physical-gate-seal.json"
+FROZEN_TOOL="$ROOT/scripts/ios_frozen_archive.py"
 PROJECT="$IOS_DIR/NostrVpnIos.xcodeproj"
 SCHEME="${NVPN_IOS_SCHEME:-NostrVpnIos}"
 CONFIGURATION="${NVPN_IOS_CONFIGURATION:-Release}"
@@ -39,10 +49,11 @@ commands:
   ios-rust              build Rust app-core for ios-sim + iphoneos
   ios-xcframework       build the app-core xcframework
   ios-project           regenerate the Xcode project from project.yml
-  ios-archive           archive the app for the App Store (Release config)
-  ios-export            export an IPA from the archive (App Store distribution)
-  ios-upload            upload the exported IPA to App Store Connect
-  ios-testflight        archive + export + upload (full TestFlight ship)
+  ios-archive           create or verify the one frozen App Store archive
+  ios-release-testing   export an Ad Hoc app from that frozen archive
+  ios-export            export App Store IPA from the verified frozen archive
+  ios-upload            upload the exact verified frozen-archive IPA
+  ios-testflight        verify gate seal + export + upload, without rebuilding
   ios-release-artifacts alias for ios-testflight
 
 env (read from .env.release.local or shell):
@@ -57,6 +68,10 @@ env (read from .env.release.local or shell):
                                   export signing certificate (default from profile env)
   NVPN_ITMS_TRANSPORTER          iTMSTransporter path
   NVPN_IOS_UPLOAD_TRANSPORT      Transporter delivery method (default HTTP)
+  NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID
+  NVPN_IOS_ADHOC_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
+                                  exact Ad Hoc profiles for ios-release-testing
+  NVPN_IOS_FROZEN_DEVICE_UDID    physical device required in those profiles
 EOF
 }
 
@@ -86,24 +101,34 @@ ensure_profiles() {
 }
 
 write_export_options() {
-  local app_uuid="$1"
-  local tunnel_uuid="$2"
-  local testflight_internal_only
+  local output="$1"
+  local method="$2"
+  local app_uuid="$3"
+  local tunnel_uuid="$4"
+  local internal_only="$5"
+  local testflight_internal_only=""
+  local testflight_entry=""
   local signing_certificate="${NVPN_IOS_EXPORT_SIGNING_CERTIFICATE:-${NVPN_IOS_CODE_SIGN_IDENTITY:-Apple Distribution}}"
-  if bool_is_true "$IOS_INTERNAL_ONLY"; then
+  if bool_is_true "$internal_only"; then
     testflight_internal_only="<true/>"
   else
     testflight_internal_only="<false/>"
   fi
-  cat >"$EXPORT_OPTIONS" <<EOF
+  if [[ "$method" == "app-store-connect" ]]; then
+    testflight_entry="  <key>testFlightInternalTestingOnly</key>
+  $testflight_internal_only"
+  fi
+  cat >"$output" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>method</key>
-  <string>app-store-connect</string>
+  <string>$method</string>
   <key>destination</key>
   <string>export</string>
+  <key>manageAppVersionAndBuildNumber</key>
+  <false/>
   <key>teamID</key>
   <string>$TEAM_ID</string>
   <key>signingStyle</key>
@@ -114,8 +139,7 @@ write_export_options() {
   <true/>
   <key>uploadBitcode</key>
   <false/>
-  <key>testFlightInternalTestingOnly</key>
-  $testflight_internal_only
+$testflight_entry
   <key>provisioningProfiles</key>
   <dict>
     <key>$BUNDLE_ID</key>
@@ -128,10 +152,131 @@ write_export_options() {
 EOF
 }
 
+prepare_frozen_revision_args() {
+  local app_head app_tree fips_path fips_head fips_tree fips_version
+  local expected_team expected_signer fips_metadata source_version
+  app_head="$(git -C "$ROOT" rev-parse HEAD)"
+  app_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  assert_release_checkout_state \
+    "$ROOT" "$app_head" "$app_tree" "frozen iOS archive" \
+    || return 1
+  pin_exact_release_build_git_sha \
+    "$ROOT" "$app_head" "Frozen iOS archive" \
+    || return 1
+  [[ "$BUNDLE_ID" == "$NVPN_BUILTIN_IOS_BUNDLE_ID" \
+    && "$PACKET_TUNNEL_BUNDLE_ID" == "$BUNDLE_ID.PacketTunnel" \
+    && "$APP_GROUP_IDENTIFIER" == "group.$BUNDLE_ID.shared" ]] || {
+    echo "Frozen iOS archive requires the canonical production identifiers." >&2
+    return 1
+  }
+  source_version="$(package_version "$ROOT")"
+  [[ -n "$source_version" \
+    && "$NVPN_APP_VERSION_NAME" == "$source_version" ]] || {
+    echo "Frozen iOS archive version does not match the tracked source." >&2
+    return 1
+  }
+
+  fips_path="${NVPN_FIPS_REPO_PATH:-}"
+  [[ -n "$fips_path" && (-d "$fips_path/.git" || -f "$fips_path/.git") ]] || {
+    echo "Frozen iOS archive requires NVPN_FIPS_REPO_PATH." >&2
+    return 1
+  }
+  fips_head="$(git -C "$fips_path" rev-parse HEAD)"
+  fips_tree="$(git -C "$fips_path" rev-parse 'HEAD^{tree}')"
+  [[ -z "$(git -C "$fips_path" status --porcelain --untracked-files=all)" ]] || {
+    echo "Frozen iOS archive refuses a dirty FIPS checkout." >&2
+    return 1
+  }
+  require_exact_release_fips_revision "$fips_head" || return 1
+  fips_version="$(
+    awk '
+      $0 == "[package]" { package = 1; next }
+      package && /^\[/ { exit }
+      package && /^version = "/ {
+        value = $0
+        sub(/^version = "/, "", value)
+        sub(/".*$/, "", value)
+        print value
+        exit
+      }
+    ' "$fips_path/crates/fips-core/Cargo.toml"
+  )"
+  [[ "$fips_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+    echo "Frozen iOS archive could not derive the FIPS version." >&2
+    return 1
+  }
+  if [[ -n "${NVPN_EXPECTED_FIPS_VERSION:-}" \
+    && "$NVPN_EXPECTED_FIPS_VERSION" != "$fips_version" ]]
+  then
+    echo "Frozen iOS archive FIPS version does not match the required version." >&2
+    return 1
+  fi
+  export NVPN_EXPECTED_FIPS_VERSION="$fips_version"
+
+  expected_team="${NVPN_EXPECTED_IOS_DISTRIBUTION_TEAM_ID:-}"
+  [[ "$expected_team" =~ ^[A-Z0-9]{10}$ && "$TEAM_ID" == "$expected_team" ]] || {
+    echo "Frozen iOS archive requires the pinned company distribution team." >&2
+    return 1
+  }
+  expected_signer="$(
+    printf '%s' "${NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256:-}" \
+      | tr -d ':[:space:]' \
+      | tr '[:upper:]' '[:lower:]'
+  )"
+  [[ "$expected_signer" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Frozen iOS archive requires the pinned distribution certificate." >&2
+    return 1
+  }
+  fips_metadata="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-ios/fips-linkage.json}"
+  FROZEN_REVISION_ARGS=(
+    --source-root "$ROOT"
+    --fips-root "$fips_path"
+    --fips-metadata "$fips_metadata"
+    --app-head "$app_head"
+    --app-tree "$app_tree"
+    --fips-head "$fips_head"
+    --fips-tree "$fips_tree"
+    --fips-version "$fips_version"
+    --version "$NVPN_APP_VERSION_NAME"
+    --build "$NVPN_IOS_BUILD_NUMBER"
+    --app-bundle-id "$BUNDLE_ID"
+    --tunnel-bundle-id "$PACKET_TUNNEL_BUNDLE_ID"
+    --app-group-id "$APP_GROUP_IDENTIFIER"
+    --team-id "$expected_team"
+    --signer-sha "$expected_signer"
+  )
+}
+
+validate_frozen_archive() {
+  prepare_frozen_revision_args
+  python3 "$FROZEN_TOOL" validate-archive \
+    --archive "$ARCHIVE_PATH" \
+    --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
+    "${FROZEN_REVISION_ARGS[@]}"
+}
+
+write_frozen_archive_receipt() {
+  prepare_frozen_revision_args
+  python3 "$FROZEN_TOOL" freeze \
+    --archive "$ARCHIVE_PATH" \
+    --receipt "$FROZEN_ARCHIVE_RECEIPT" \
+    "${FROZEN_REVISION_ARGS[@]}"
+}
+
 run_ios_archive() {
+  prepare_frozen_revision_args
+  if [[ -d "$ARCHIVE_PATH" || -f "$FROZEN_ARCHIVE_RECEIPT" ]]; then
+    if [[ -d "$ARCHIVE_PATH" && -f "$FROZEN_ARCHIVE_RECEIPT" ]] \
+      && validate_frozen_archive
+    then
+      echo "Reusing the exact verified frozen iOS archive."
+      return
+    fi
+    echo "Frozen iOS archive state is incomplete or stale; refusing to rebuild over it." >&2
+    return 1
+  fi
   ensure_profiles
   ensure_dir "$DIST_DIR"
-  rm -rf "$ARCHIVE_PATH"
 
   run_ios_rust
   run_ios_xcframework
@@ -157,42 +302,198 @@ run_ios_archive() {
     NVPN_BUILD_GIT_SHA="$NVPN_BUILD_GIT_SHA" \
     NVPN_BUILD_TIMESTAMP_UTC="$NVPN_BUILD_TIMESTAMP_UTC" \
     archive
+  write_frozen_archive_receipt
+  echo "Frozen iOS archive created once: $ARCHIVE_PATH"
+}
+
+run_export_archive() {
+  local export_dir="$1" options="$2"
+  ensure_dir "$(dirname "$export_dir")"
+  rm -rf "$export_dir"
+  mkdir -p "$export_dir"
+  xcodebuild \
+    -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportPath "$export_dir" \
+    -exportOptionsPlist "$options" \
+    -allowProvisioningUpdates
+}
+
+exact_ipa_path() {
+  local export_dir="$1"
+  local -a matches=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && matches+=("$path")
+  done < <(find "$export_dir" -maxdepth 1 -name '*.ipa' -type f | sort)
+  [[ "${#matches[@]}" -eq 1 ]] || {
+    echo "Expected exactly one IPA in $export_dir; found ${#matches[@]}." >&2
+    return 1
+  }
+  printf '%s\n' "${matches[0]}"
+}
+
+unpack_ipa() {
+  local ipa="$1" destination="$2"
+  local -a matches=()
+  rm -rf "$destination"
+  mkdir -p "$destination"
+  ditto -x -k "$ipa" "$destination"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && matches+=("$path")
+  done < <(
+    find "$destination/Payload" -maxdepth 1 -name '*.app' -type d | sort
+  )
+  [[ "${#matches[@]}" -eq 1 ]] || {
+    echo "Expected one app in exported IPA; found ${#matches[@]}." >&2
+    return 1
+  }
+  printf '%s\n' "${matches[0]}"
+}
+
+frozen_gate_arguments() {
+  FROZEN_GATE_ARGS=(
+    --required-gate wireguard-exit-and-five-dns-policies
+    --required-gate background-foreground-and-rapid-start-stop
+    --required-gate wifi-hotspot-underlay-roaming
+    --required-gate bidirectional-mobile-qr-and-manual-join
+    --required-gate desktop-mobile-manual-join
+  )
+}
+
+validate_frozen_gate_seal() {
+  frozen_gate_arguments
+  python3 "$FROZEN_TOOL" validate-gate-seal \
+    --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
+    --adhoc-receipt "$FROZEN_ADHOC_RECEIPT" \
+    --sealed-mobile-receipt "$FROZEN_MOBILE_RECEIPT" \
+    --gate-seal "$FROZEN_GATE_SEAL" \
+    "${FROZEN_GATE_ARGS[@]}"
+}
+
+run_ios_release_testing_export() {
+  local app_uuid="${NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID:-}"
+  local tunnel_uuid="${NVPN_IOS_ADHOC_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:-}"
+  local device_udid="${NVPN_IOS_FROZEN_DEVICE_UDID:-}"
+  local options="$FROZEN_DIR/ReleaseTestingExportOptions.plist"
+  local ipa app
+  : "${app_uuid:?NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID is required}"
+  : "${tunnel_uuid:?NVPN_IOS_ADHOC_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID is required}"
+  : "${device_udid:?NVPN_IOS_FROZEN_DEVICE_UDID is required}"
+  validate_frozen_archive
+  if [[ -f "$FROZEN_ADHOC_RECEIPT" \
+    || -d "$FROZEN_ADHOC_EXPORT_DIR" \
+    || -d "$FROZEN_ADHOC_UNPACK_DIR" ]]
+  then
+    [[ -f "$FROZEN_ADHOC_RECEIPT" \
+      && -d "$FROZEN_ADHOC_EXPORT_DIR" \
+      && -d "$FROZEN_ADHOC_UNPACK_DIR" ]] || {
+      echo "Frozen release-testing export state is incomplete; refusing to replace it." >&2
+      return 1
+    }
+    ipa="$(exact_ipa_path "$FROZEN_ADHOC_EXPORT_DIR")"
+    app="$(unpack_ipa "$ipa" "$FROZEN_ADHOC_UNPACK_DIR")"
+    prepare_frozen_revision_args
+    python3 "$FROZEN_TOOL" validate-export \
+      --archive "$ARCHIVE_PATH" \
+      --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
+      --app "$app" \
+      --ipa "$ipa" \
+      --output "$FROZEN_ADHOC_RECEIPT" \
+      --distribution release-testing \
+      --device-udid "$device_udid" \
+      "${FROZEN_REVISION_ARGS[@]}"
+    echo "Reusing the exact verified release-testing export."
+    return
+  fi
+  ensure_dir "$FROZEN_DIR"
+  write_export_options \
+    "$options" \
+    release-testing \
+    "$app_uuid" \
+    "$tunnel_uuid" \
+    false
+  run_export_archive "$FROZEN_ADHOC_EXPORT_DIR" "$options"
+  ipa="$(exact_ipa_path "$FROZEN_ADHOC_EXPORT_DIR")"
+  app="$(unpack_ipa "$ipa" "$FROZEN_ADHOC_UNPACK_DIR")"
+  prepare_frozen_revision_args
+  python3 "$FROZEN_TOOL" validate-export \
+    --archive "$ARCHIVE_PATH" \
+    --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
+    --app "$app" \
+    --ipa "$ipa" \
+    --output "$FROZEN_ADHOC_RECEIPT" \
+    --distribution release-testing \
+    --device-udid "$device_udid" \
+    "${FROZEN_REVISION_ARGS[@]}"
+  echo "Release-testing app exported from the frozen archive: $app"
 }
 
 run_ios_export() {
-  ensure_dir "$EXPORT_DIR"
-  rm -rf "$EXPORT_DIR"
-  mkdir -p "$EXPORT_DIR"
-
+  local ipa app
+  validate_frozen_archive
+  validate_frozen_gate_seal
+  ensure_profiles
   # shellcheck disable=SC1090
   source "$PROVISIONING_ENV"
   : "${NVPN_IOS_PROVISIONING_PROFILE_UUID:?profile uuid not set}"
   : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?packet tunnel profile uuid not set}"
-
   write_export_options \
+    "$EXPORT_OPTIONS" \
+    app-store-connect \
     "$NVPN_IOS_PROVISIONING_PROFILE_UUID" \
-    "$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
-
-  xcodebuild \
-    -exportArchive \
-    -archivePath "$ARCHIVE_PATH" \
-    -exportPath "$EXPORT_DIR" \
-    -exportOptionsPlist "$EXPORT_OPTIONS" \
-    -allowProvisioningUpdates
-}
-
-ipa_path() {
-  find "$EXPORT_DIR" -maxdepth 1 -name '*.ipa' -type f | head -n 1
+    "$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID" \
+    "$IOS_INTERNAL_ONLY"
+  run_export_archive "$EXPORT_DIR" "$EXPORT_OPTIONS"
+  ipa="$(exact_ipa_path "$EXPORT_DIR")"
+  app="$(unpack_ipa "$ipa" "$FROZEN_APPSTORE_UNPACK_DIR")"
+  prepare_frozen_revision_args
+  python3 "$FROZEN_TOOL" validate-export \
+    --archive "$ARCHIVE_PATH" \
+    --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
+    --app "$app" \
+    --ipa "$ipa" \
+    --output "$FROZEN_APPSTORE_RECEIPT" \
+    --distribution app-store-connect \
+    "${FROZEN_REVISION_ARGS[@]}"
 }
 
 run_ios_upload() {
-  local ipa
+  local ipa app expected_sha actual_sha
   local transporter="${NVPN_ITMS_TRANSPORTER:-/Applications/Transporter.app/Contents/itms/bin/iTMSTransporter}"
-  ipa="$(ipa_path)"
-  if [[ -z "$ipa" ]]; then
-    echo "No IPA found in $EXPORT_DIR; run ios-export first" >&2
-    exit 1
-  fi
+  validate_frozen_archive
+  validate_frozen_gate_seal
+  ipa="$(exact_ipa_path "$EXPORT_DIR")"
+  app="$(unpack_ipa "$ipa" "$FROZEN_APPSTORE_UNPACK_DIR")"
+  prepare_frozen_revision_args
+  python3 "$FROZEN_TOOL" validate-export \
+    --archive "$ARCHIVE_PATH" \
+    --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
+    --app "$app" \
+    --ipa "$ipa" \
+    --output "$FROZEN_APPSTORE_RECEIPT" \
+    --distribution app-store-connect \
+    "${FROZEN_REVISION_ARGS[@]}"
+  expected_sha="$(
+    python3 - "$FROZEN_APPSTORE_RECEIPT" "$ipa" <<'PY'
+import json
+import os
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+if receipt.get("distribution") != "app-store-connect":
+    raise SystemExit("wrong App Store export receipt distribution")
+expected_path = receipt.get("ipaPathSha256")
+actual_path = __import__("hashlib").sha256(os.path.realpath(sys.argv[2]).encode()).hexdigest()
+if expected_path != actual_path:
+    raise SystemExit("App Store export receipt points at a different IPA")
+print(receipt.get("ipaSha256", ""))
+PY
+  )"
+  actual_sha="$(shasum -a 256 "$ipa" | awk '{print tolower($1)}')"
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ && "$actual_sha" == "$expected_sha" ]] || {
+    echo "App Store IPA changed after frozen-archive verification." >&2
+    return 1
+  }
   if [[ ! -x "$transporter" ]]; then
     echo "iTMSTransporter not found: $transporter" >&2
     echo "Install Apple's Transporter app or set NVPN_ITMS_TRANSPORTER." >&2
@@ -222,7 +523,8 @@ run_ios_attach_internal() {
 }
 
 run_ios_testflight() {
-  run_ios_archive
+  validate_frozen_archive
+  validate_frozen_gate_seal
   run_ios_export
   run_ios_upload
   run_ios_attach_internal
@@ -233,6 +535,7 @@ case "${1:-}" in
   ios-xcframework) run_ios_xcframework ;;
   ios-project) run_ios_project ;;
   ios-archive) run_ios_archive ;;
+  ios-release-testing) run_ios_release_testing_export ;;
   ios-export) run_ios_export ;;
   ios-upload) run_ios_upload ;;
   ios-attach-internal) run_ios_attach_internal ;;

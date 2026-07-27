@@ -168,13 +168,29 @@ def validate_xctestrun(path: pathlib.Path) -> None:
     payload = plistlib.load(path.open("rb"))
     if not isinstance(payload, dict):
         raise ValueError("iOS xctestrun root is not a dictionary")
-    target = payload.get("NostrVpnIosUITests")
-    if not isinstance(target, dict):
+    targets = []
+    legacy = payload.get("NostrVpnIosUITests")
+    if isinstance(legacy, dict):
+        targets.append(legacy)
+    configurations = payload.get("TestConfigurations")
+    if isinstance(configurations, list):
+        for configuration in configurations:
+            if not isinstance(configuration, dict):
+                continue
+            for target in configuration.get("TestTargets", []):
+                if isinstance(target, dict) and (
+                    target.get("BlueprintName") == "NostrVpnIosUITests"
+                    or target.get("ProductModuleName")
+                    == "NostrVpnIosUITests"
+                ):
+                    targets.append(target)
+    if not targets:
         raise ValueError("iOS xctestrun lacks NostrVpnIosUITests")
-    for key in ("TestBundlePath", "TestHostPath", "UITargetAppPath"):
-        value = target.get(key)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"iOS xctestrun lacks {key}")
+    for target in targets:
+        for key in ("TestBundlePath", "TestHostPath", "UITargetAppPath"):
+            value = target.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"iOS xctestrun lacks {key}")
 
 
 def validate_ios(args: argparse.Namespace) -> None:

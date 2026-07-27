@@ -340,53 +340,42 @@ release_join_ios_test_command() {
   local -a command=()
   if release_join_reuse_artifacts; then
     local case_xctestrun
+    local -a rewrite_command=()
+    local -a runner_environment=()
     if ! case_xctestrun="$(
       mktemp "$PRIVATE_DIR/join-$test_name.XXXXXX.xctestrun"
     )"; then
       return 1
     fi
-    if ! cp "$RELEASE_JOIN_IOS_XCTESTRUN" "$case_xctestrun"; then
-      rm -f "$case_xctestrun"
-      return 1
-    fi
-    if ! python3 - \
-      "$case_xctestrun" \
-      "NVPN_RELEASE_JOIN_BLACKBOX=1" \
-      "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
-      "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS=$RELEASE_JOIN_CAMERA_WAIT_SECS" \
-      "NVPN_IOS_BUNDLE_ID=$bundle" \
-      "$@" <<'PY'
-import plistlib
-import re
-import sys
-
-path = sys.argv[1]
-payload = plistlib.load(open(path, "rb"))
-target = payload.get("NostrVpnIosUITests")
-if not isinstance(target, dict):
-    raise SystemExit("strict Release join xctestrun lacks NostrVpnIosUITests")
-environment = target.get("EnvironmentVariables")
-if not isinstance(environment, dict):
-    raise SystemExit("strict Release join xctestrun lacks runner environment")
-for name in (
-    "NVPN_RELEASE_JOIN_ADMIN_ID",
-    "NVPN_RELEASE_JOIN_BLACKBOX",
-    "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS",
-    "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS",
-    "NVPN_RELEASE_JOIN_JOINER_ID",
-    "NVPN_RELEASE_JOIN_NETWORK_ID",
-    "NVPN_RELEASE_JOIN_NETWORK_NAME",
-    "NVPN_IOS_BUNDLE_ID",
-):
-    environment[name] = ""
-for assignment in sys.argv[2:]:
-    name, separator, value = assignment.partition("=")
-    if not separator or re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
-        raise SystemExit(f"invalid strict Release join runner variable: {assignment!r}")
-    environment[name] = value
-with open(path, "wb") as handle:
-    plistlib.dump(payload, handle, sort_keys=False)
-PY
+    rewrite_command=(
+      python3 "$ROOT/scripts/ios_frozen_archive.py"
+      rewrite-xctestrun
+      --source "$RELEASE_JOIN_IOS_XCTESTRUN"
+      --output "$case_xctestrun"
+      --products-root "$RELEASE_JOIN_IOS_DERIVED_DATA/Build/Products"
+      --target-app "$RELEASE_JOIN_IOS_APP_PATH"
+      --environment-stdin0
+    )
+    runner_environment=(
+      "NVPN_RELEASE_JOIN_ADMIN_ID="
+      "NVPN_RELEASE_JOIN_BLACKBOX="
+      "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS="
+      "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="
+      "NVPN_RELEASE_JOIN_JOINER_ID="
+      "NVPN_RELEASE_JOIN_NETWORK_ID="
+      "NVPN_RELEASE_JOIN_NETWORK_NAME="
+      "NVPN_IOS_BUNDLE_ID="
+      "NVPN_RELEASE_JOIN_BLACKBOX=1"
+      "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS"
+      "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS=$RELEASE_JOIN_CAMERA_WAIT_SECS"
+      "NVPN_IOS_BUNDLE_ID=$bundle"
+    )
+    local assignment
+    for assignment in "$@"; do
+      runner_environment+=("$assignment")
+    done
+    if ! printf '%s\0' "${runner_environment[@]}" \
+      | "${rewrite_command[@]}"
     then
       rm -f "$case_xctestrun"
       return 1

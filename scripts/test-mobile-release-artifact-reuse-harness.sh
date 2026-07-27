@@ -19,14 +19,14 @@ mkdir -p \
   "$FIPS_ROOT" \
   "$ANDROID_DIR" \
   "$IOS_TUNNEL" \
-  "$IOS_PRODUCTS/NostrVpnIosUITests-Runner.app"
+  "$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/PlugIns/NostrVpnIosUITests.xctest"
 
 printf 'apk fixture\n' >"$ANDROID_DIR/app-release.apk"
 printf 'app executable\n' >"$IOS_APP/Nostr VPN"
 printf 'tunnel executable\n' >"$IOS_TUNNEL/Nostr VPN Tunnel"
 printf 'app profile\n' >"$IOS_APP/embedded.mobileprovision"
 printf 'tunnel profile\n' >"$IOS_TUNNEL/embedded.mobileprovision"
-printf 'runner product\n' >"$IOS_PRODUCTS/NostrVpnIosUITests-Runner.app/runner"
+printf 'runner product\n' >"$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/runner"
 
 APP_HEAD=1111111111111111111111111111111111111111
 APP_TREE=2222222222222222222222222222222222222222
@@ -276,13 +276,13 @@ if validate_ios >"$TMP_ROOT/ios-xctestrun-tamper.log" 2>&1; then
 fi
 mv "$TMP_ROOT/ios-xctestrun.clean" "$IOS_XCTESTRUN"
 
-cp "$IOS_PRODUCTS/NostrVpnIosUITests-Runner.app/runner" "$TMP_ROOT/runner.clean"
-printf 'tamper\n' >>"$IOS_PRODUCTS/NostrVpnIosUITests-Runner.app/runner"
+cp "$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/runner" "$TMP_ROOT/runner.clean"
+printf 'tamper\n' >>"$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/runner"
 if validate_ios >"$TMP_ROOT/ios-products-tamper.log" 2>&1; then
   echo "iOS artifact receipt accepted tampered UI test products" >&2
   exit 1
 fi
-mv "$TMP_ROOT/runner.clean" "$IOS_PRODUCTS/NostrVpnIosUITests-Runner.app/runner"
+mv "$TMP_ROOT/runner.clean" "$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/runner"
 
 ln -s "$TMP_ROOT" "$IOS_PRODUCTS/escaping-product"
 if python3 "$VALIDATOR" tree-sha "$IOS_PRODUCTS" \
@@ -304,6 +304,8 @@ rm "$IOS_PRODUCTS/escaping-product"
   NVPN_IOS_TEAM_ID=ABCDE12345
   NVPN_DEFAULT_IOS_BUNDLE_ID="$PACKAGE"
   PRIVATE_DIR="$TMP_ROOT/join-private"
+  RELEASE_JOIN_IOS_DERIVED_DATA="$IOS_DERIVED"
+  RELEASE_JOIN_IOS_APP_PATH="$IOS_APP"
   RELEASE_JOIN_IOS_XCTESTRUN="$IOS_XCTESTRUN"
   RELEASE_JOIN_IOS_UDID=fixture-device
   RELEASE_JOIN_DELIVERY_WAIT_SECS=15

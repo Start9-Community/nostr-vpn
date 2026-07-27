@@ -23,6 +23,7 @@ IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64=""
 IOS_RELEASE_NETWORK_FIPS_TREE=""
 IOS_RELEASE_NETWORK_APP_HEAD=""
 IOS_RELEASE_NETWORK_APP_TREE=""
+IOS_RELEASE_NETWORK_FROZEN_APP=""
 IOS_RELEASE_NETWORK_XCODE_COMMAND=()
 
 ios_release_network_cleanup_private_artifacts() {
@@ -99,12 +100,9 @@ ios_release_network_prepare() {
     "$ROOT" "$IOS_RELEASE_NETWORK_APP_HEAD" \
     "$IOS_RELEASE_NETWORK_APP_TREE" "iOS Release network gate" \
     || return 1
-  if [[ -n "${NVPN_BUILD_GIT_SHA:-}" \
-    && "$NVPN_BUILD_GIT_SHA" != "$IOS_RELEASE_NETWORK_APP_HEAD" ]]
-  then
-    echo "iOS Release build revision does not match the exact app checkout" >&2
-    return 1
-  fi
+  pin_exact_release_build_git_sha \
+    "$ROOT" "$IOS_RELEASE_NETWORK_APP_HEAD" "iOS Release" \
+    || return 1
   local configured_team="${NVPN_IOS_TEAM_ID:-}"
   local signer_organization="${NVPN_IOS_EXPECTED_SIGNER_ORGANIZATION:-Sirius Business Oy}"
   local expected_device_name="${NVPN_IOS_EXPECTED_DEVICE_NAME:-}"
@@ -191,6 +189,9 @@ ios_release_network_prepare() {
   export NVPN_EXPECTED_FIPS_VERSION="$fips_version"
   IOS_RELEASE_NETWORK_FIPS_TREE="$fips_tree"
   export NVPN_IOS_RUST_PROFILE=release
+  NVPN_IOS_CODE_SIGN_IDENTITY="$company_identity" \
+    "$ROOT/scripts/ios-build" ios-archive || return 1
+  IOS_RELEASE_NETWORK_FROZEN_APP="$ROOT/dist/ios/frozen/release-testing-unpacked/Payload/Nostr VPN.app"
 
   umask 077
   if ! IOS_RELEASE_NETWORK_SIGNING_DIR="$(
@@ -204,7 +205,7 @@ ios_release_network_prepare() {
     return
   fi
   IOS_RELEASE_NETWORK_SIGNING_ENV="$IOS_RELEASE_NETWORK_SIGNING_DIR/provisioning.env"
-  IOS_RELEASE_NETWORK_DERIVED_DATA="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-$ROOT/ios/.build/ReleaseNetworkDerivedData}"
+  IOS_RELEASE_NETWORK_DERIVED_DATA="$ROOT/ios/.build/ReleaseNetworkDerivedData"
   if ! mkdir -p "${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"; then
     ios_release_network_prepare_abort
     return
@@ -300,8 +301,8 @@ PY
     ios_release_network_prepare_abort
     return
   fi
-  rm -f "$profile_log" "$IOS_RELEASE_NETWORK_SIGNING_ENV" || {
-    echo "iOS Release gate could not scrub profile preparation artifacts" >&2
+  rm -f "$profile_log" || {
+    echo "iOS Release gate could not scrub its profile preparation log" >&2
     ios_release_network_prepare_abort
     return
   }
@@ -324,7 +325,7 @@ PY
   }
 
   local reuse_build="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"
-  local result_dir build_log xctestrun_count
+  local result_dir build_log
   result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
   build_log="$IOS_RELEASE_NETWORK_SIGNING_DIR/build-for-testing.log"
   if bool_is_true "$reuse_build"; then
@@ -333,14 +334,6 @@ PY
       return
     }
   else
-    NVPN_IOS_RUST_PROFILE=release "$ROOT/tools/run-ios" xcframework || {
-      ios_release_network_prepare_abort
-      return
-    }
-    "$ROOT/tools/run-ios" project || {
-      ios_release_network_prepare_abort
-      return
-    }
     ios_release_network_audit_rust_feature_surface || {
       ios_release_network_prepare_abort
       return
@@ -366,26 +359,35 @@ PY
       return
     }
   fi
-  if [[ -n "${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}" ]]; then
-    IOS_RELEASE_NETWORK_XCTESTRUN="$NVPN_MOBILE_IOS_RELEASE_XCTESTRUN"
-  else
-    xctestrun_count="$(
-      find "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products" \
-        -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
-        | wc -l \
-        | tr -d ' '
-    )"
-    if [[ "$xctestrun_count" != "1" ]]; then
-      echo "iOS Release build produced $xctestrun_count xctestrun files, expected one" >&2
-      ios_release_network_prepare_abort
-      return
-    fi
-    IOS_RELEASE_NETWORK_XCTESTRUN="$(
-      find "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products" \
-        -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
-        | head -n 1
-    )"
+  if ! NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID" \
+    NVPN_IOS_ADHOC_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID" \
+    NVPN_IOS_EXPORT_SIGNING_CERTIFICATE="$NVPN_IOS_CODE_SIGN_IDENTITY" \
+    NVPN_IOS_FROZEN_DEVICE_UDID="$device_udid" \
+    "$ROOT/scripts/ios-build" ios-release-testing
+  then
+    echo "iOS Release gate could not export the frozen archive for physical testing" >&2
+    ios_release_network_prepare_abort
+    return
   fi
+  [[ -d "$IOS_RELEASE_NETWORK_FROZEN_APP" ]] || {
+    echo "Frozen release-testing iOS app is missing" >&2
+    ios_release_network_prepare_abort
+    return
+  }
+  export NVPN_MOBILE_IOS_RELEASE_APP_PATH="$IOS_RELEASE_NETWORK_FROZEN_APP"
+  rm -f "$IOS_RELEASE_NETWORK_SIGNING_ENV" || {
+    echo "iOS Release gate could not scrub profile preparation artifacts" >&2
+    ios_release_network_prepare_abort
+    return
+  }
+  IOS_RELEASE_NETWORK_XCTESTRUN="$(
+    select_generated_ios_release_xctestrun \
+      "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products" \
+      "iOS Release build"
+  )" || {
+    ios_release_network_prepare_abort
+    return
+  }
   [[ -s "$IOS_RELEASE_NETWORK_XCTESTRUN" ]] || {
     echo "iOS Release build-for-testing did not preserve its xctestrun" >&2
     ios_release_network_prepare_abort
@@ -432,6 +434,8 @@ ios_release_network_xcode_command() {
 
 ios_release_network_prepare_xctestrun() {
   local label="$1" spec_base64="$2"
+  local -a rewrite_command=()
+  local -a runner_environment=()
   [[ "$label" =~ ^[a-zA-Z0-9._-]+$ ]] || {
     echo "iOS Release xctestrun label is invalid" >&2
     return 1
@@ -441,27 +445,32 @@ ios_release_network_prepare_xctestrun() {
     return 1
   }
   IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$(
-    mktemp "${TMPDIR:-/tmp}/NostrVpnIos-$label.XXXXXX.xctestrun"
+    mktemp "$IOS_RELEASE_NETWORK_SIGNING_DIR/NostrVpnIos-$label.XXXXXX.xctestrun"
   )"
-  cp "$IOS_RELEASE_NETWORK_XCTESTRUN" "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-  chmod 600 "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-  if ! /usr/libexec/PlistBuddy \
-    -c "Set :NostrVpnIosUITests:EnvironmentVariables:NVPN_XCUITEST_RELEASE_NETWORK_GATE 1" \
-    "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
+  rewrite_command=(
+    python3 "$ROOT/scripts/ios_frozen_archive.py"
+    rewrite-xctestrun
+    --source "$IOS_RELEASE_NETWORK_XCTESTRUN"
+    --output "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
+    --products-root "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products"
+    --target-app "$(ios_release_network_app_path)"
+    --environment-stdin0
+  )
+  runner_environment=(
+    "NVPN_XCUITEST_RELEASE_NETWORK_GATE=1"
+    "NVPN_XCUITEST_RELEASE_NETWORK_SPEC_BASE64="
+  )
+  if [[ -n "$spec_base64" ]]; then
+    runner_environment+=(
+      "NVPN_XCUITEST_RELEASE_NETWORK_SPEC_BASE64=$spec_base64"
+    )
+  fi
+  if ! printf '%s\0' "${runner_environment[@]}" \
+    | "${rewrite_command[@]}"
   then
     rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
     IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
     return 1
-  fi
-  if [[ -n "$spec_base64" ]]; then
-    if ! /usr/libexec/PlistBuddy \
-      -c "Set :NostrVpnIosUITests:EnvironmentVariables:NVPN_XCUITEST_RELEASE_NETWORK_SPEC_BASE64 $spec_base64" \
-      "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-    then
-      rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-      IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
-      return 1
-    fi
   fi
 }
 

@@ -336,6 +336,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-desktop-network-handoff-harness.sh
+  ./scripts/test-ios-frozen-archive-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
   cargo fmt --check
 }
@@ -1212,9 +1213,16 @@ run_mobile_wireguard_exit_gates() {
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env \
       NVPN_IDLE_CPU_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
+      NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
+      NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile,cloudflare-doh,quad9-doh,custom-doh,through-exit \
+      NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP= \
       NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX=1 \
+      NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL=https://api.ipify.org \
       NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
+      NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=0 \
       NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-android-$$" \
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.77.1 \
@@ -1233,9 +1241,16 @@ run_mobile_wireguard_exit_gates() {
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env \
       NVPN_IDLE_CPU_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
+      NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
+      NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile,cloudflare-doh,quad9-doh,custom-doh,through-exit \
+      NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP= \
       NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0 \
+      NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX=1 \
+      NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL=https://api.ipify.org \
       NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
+      NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=0 \
       NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$" \
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1 \
@@ -1324,8 +1339,19 @@ run_mobile_underlay_change_gates() {
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env \
       NVPN_IDLE_CPU_GATE=0 \
+      NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
+      NVPN_ANDROID_LIFECYCLE_CYCLES=3 \
+      NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=3 \
+      NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS=20 \
+      NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS=30 \
+      NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS=4000 \
+      NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
+      NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
       NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile \
+      NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP= \
       NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=1 \
+      NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX=1 \
+      NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL=https://api.ipify.org \
       NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 \
       NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
@@ -1345,8 +1371,19 @@ run_mobile_underlay_change_gates() {
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env \
       NVPN_IDLE_CPU_GATE=0 \
+      NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
+      NVPN_ANDROID_LIFECYCLE_CYCLES=3 \
+      NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=3 \
+      NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS=20 \
+      NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS=30 \
+      NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS=4000 \
+      NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
+      NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
       NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile \
+      NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP= \
       NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=1 \
+      NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX=1 \
+      NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL=https://api.ipify.org \
       NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 \
       NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
@@ -1435,33 +1472,20 @@ run_mobile_join_e2e_gate() {
 
   local android_result_dir android_receipt android_fips_metadata
   local ios_result_dir ios_derived_data ios_app ios_xctestrun ios_receipt
-  local ios_fips_metadata ios_xctestrun_count
+  local ios_fips_metadata
   android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
   android_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$android_result_dir/mobile-android-release-artifact.json}"
   android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
   ios_result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-ios}"
-  ios_derived_data="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-$ROOT_DIR/ios/.build/ReleaseNetworkDerivedData}"
-  ios_app="${NVPN_MOBILE_IOS_RELEASE_APP_PATH:-$ios_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
-  ios_xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"
+  ios_derived_data="$ROOT_DIR/ios/.build/ReleaseNetworkDerivedData"
+  ios_app="$ROOT_DIR/dist/ios/frozen/release-testing-unpacked/Payload/Nostr VPN.app"
   ios_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$ios_result_dir/mobile-ios-release-artifact.json}"
   ios_fips_metadata="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-ios/fips-linkage.json}"
-  if [[ -z "$ios_xctestrun" ]]; then
-    ios_xctestrun_count="$(
-      find "$ios_derived_data/Build/Products" \
-        -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
-        | wc -l \
-        | tr -d ' '
-    )"
-    [[ "$ios_xctestrun_count" == 1 ]] || {
-      echo "Strict Release join reuse requires one preserved iOS xctestrun; found $ios_xctestrun_count" >&2
-      return 1
-    }
-    ios_xctestrun="$(
-      find "$ios_derived_data/Build/Products" \
-        -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
-        | head -n 1
-    )"
-  fi
+  ios_xctestrun="$(
+    select_generated_ios_release_xctestrun \
+      "$ios_derived_data/Build/Products" \
+      "Strict Release join reuse"
+  )" || return 1
 
   release_gate_run_with_timeout \
     "Signed Release public-UI cross-platform join e2e" \
@@ -1480,6 +1504,33 @@ run_mobile_join_e2e_gate() {
     ./scripts/mobile-release-join-e2e.sh
   MOBILE_ANDROID_APP_READY=1
   MOBILE_IOS_APP_READY=1
+}
+
+seal_frozen_ios_release_gate() {
+  bool_is_true "${NVPN_RELEASE_IOS_FROZEN_ARCHIVE:-0}" || return 0
+  local required_mode
+  for required_mode in \
+    NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E \
+    NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E \
+    NVPN_RELEASE_GATE_MOBILE_JOIN_E2E
+  do
+    bool_is_true "${!required_mode:-}" || {
+      echo "Frozen iOS release requires $required_mode=1." >&2
+      return 1
+    }
+  done
+  python3 "$ROOT_DIR/scripts/ios_frozen_archive.py" seal-gate \
+    --archive-receipt "$ROOT_DIR/dist/ios/frozen/archive-receipt.json" \
+    --adhoc-receipt "$ROOT_DIR/dist/ios/frozen/release-testing-receipt.json" \
+    --mobile-receipt "$NVPN_MOBILE_IOS_RELEASE_RECEIPT" \
+    --sealed-mobile-receipt "$ROOT_DIR/dist/ios/frozen/physical-mobile-receipt.json" \
+    --output "$ROOT_DIR/dist/ios/frozen/physical-gate-seal.json" \
+    --required-gate wireguard-exit-and-five-dns-policies \
+    --required-gate background-foreground-and-rapid-start-stop \
+    --required-gate wifi-hotspot-underlay-roaming \
+    --required-gate bidirectional-mobile-qr-and-manual-join \
+    --required-gate desktop-mobile-manual-join
+  echo "Sealed the real-device gates to the frozen iOS archive."
 }
 
 docker_release_gates_enabled() {
@@ -1710,6 +1761,7 @@ main() {
   # The signed Release join lane covers both mobile role directions, both
   # manual role directions, and desktop/mobile manual join.
   run_mobile_join_e2e_gate
+  seal_frozen_ios_release_gate
 
   local elapsed target_status
   elapsed="$(( $(date +%s) - started_at ))"

@@ -907,11 +907,12 @@ function buildIosArtifacts({ tag, dryRun, builtLines }) {
     ...process.env,
     NVPN_RELEASE_TAG: tag,
     NVPN_IOS_INTERNAL_ONLY: 'false',
+    NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
   }
-  // ios-build runs ios-profiles ensure (which needs ASC creds), then archive,
-  // then export, then Transporter upload. The full release build remains
-  // eligible for internal and external TestFlight plus App Store submission;
-  // standalone ios-build calls retain their internal-only default.
+  // The release gate already created and physically tested one frozen archive.
+  // This command refuses to archive: it verifies the gate seal, exports that
+  // same xcarchive for App Store Connect, uploads its exact receipt-bound IPA,
+  // and attaches the build to the internal TestFlight group.
   run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-testflight'], { env, dryRun })
   builtLines.push(`Uploaded iOS ${tag} to App Store Connect (TestFlight/App Store eligible).`)
 }
@@ -978,6 +979,7 @@ function runVerify({ dryRun, builtLines }) {
     NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '1',
     NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E: '1',
+    NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
   }
   run('./scripts/release-gate.sh', [], { env, dryRun })
   builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, real Android/iOS physical underlay changes, real Windows/Linux desktop underlay changes, isolated macOS VM network/service proofs, and desktop launch smokes.')

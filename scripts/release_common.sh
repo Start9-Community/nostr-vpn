@@ -96,6 +96,50 @@ git_short_sha() {
   git -C "$root" rev-parse --short=12 HEAD 2>/dev/null || printf '%s\n' "unknown"
 }
 
+pin_exact_release_build_git_sha() {
+  local root="$1"
+  local expected_head="$2"
+  local context="$3"
+  local configured="${NVPN_BUILD_GIT_SHA:-}"
+  local default_short
+  default_short="$(git_short_sha "$root")"
+  if [[ -n "$configured" \
+    && "$configured" != "$expected_head" \
+    && "$configured" != "$default_short" ]]
+  then
+    echo "$context build revision does not match the exact app checkout" >&2
+    return 1
+  fi
+  export NVPN_BUILD_GIT_SHA="$expected_head"
+}
+
+select_generated_ios_release_xctestrun() {
+  local products_root="$1"
+  local context="$2"
+  local path
+  local -a matches=()
+  [[ -z "${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}" ]] || {
+    echo "$context refuses an external iOS xctestrun override" >&2
+    return 1
+  }
+  [[ -d "$products_root" ]] || {
+    echo "$context iOS test-products directory is missing" >&2
+    return 1
+  }
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && matches+=("$path")
+  done < <(
+    find "$products_root" \
+      -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
+      | sort
+  )
+  [[ "${#matches[@]}" -eq 1 ]] || {
+    echo "$context requires one generated iOS xctestrun; found ${#matches[@]}" >&2
+    return 1
+  }
+  printf '%s\n' "${matches[0]}"
+}
+
 git_commit_timestamp_utc() {
   local root="$1"
   local epoch
