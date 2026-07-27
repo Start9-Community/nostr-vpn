@@ -9,21 +9,82 @@ macos_release_app_process_args() {
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+macos_release_app_reap_if_terminated() {
+  local pid="$1" state
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    wait "$pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+  state="$(
+    ps -ww -p "$pid" -o stat= 2>/dev/null \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*$//'
+  )"
+  [[ "$state" == Z* ]] || return 1
+  wait "$pid" >/dev/null 2>&1 || true
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+macos_release_app_poll_pid_gone() {
+  local pid="$1"
+  local remaining=30
+  while ((remaining > 0)); do
+    macos_release_app_reap_if_terminated "$pid" && return 0
+    sleep 0.1
+    remaining=$((remaining - 1))
+  done
+  macos_release_app_reap_if_terminated "$pid"
+}
+
+macos_release_stop_owned_child() {
+  local pid="$1" parent
+  macos_release_app_reap_if_terminated "$pid" && return 0
+  parent="$(ps -ww -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+  [[ "$parent" == "$$" ]] || {
+    echo "refusing to stop a process not owned by this shell" >&2
+    return 1
+  }
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  macos_release_app_poll_pid_gone "$pid" && return 0
+  parent="$(ps -ww -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+  [[ "$parent" == "$$" ]] || {
+    echo "refusing to KILL a process no longer owned by this shell" >&2
+    return 1
+  }
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+  macos_release_app_poll_pid_gone "$pid"
+}
+
 macos_release_app_stop_pid() {
-  local pid="$1" expected_args="$2"
-  kill -0 "$pid" >/dev/null 2>&1 || return 0
+  local pid="$1" expected_args="$2" current_args
+  macos_release_app_reap_if_terminated "$pid" && return 0
   [[ "$(macos_release_app_process_args "$pid")" == "$expected_args" ]] || {
     echo "refusing to stop an app process not owned by this gate" >&2
     return 1
   }
-  kill "$pid" >/dev/null 2>&1 || true
-  for _ in {1..30}; do
-    kill -0 "$pid" >/dev/null 2>&1 || return 0
-    wait "$pid" >/dev/null 2>&1 || true
-    sleep 0.1
-  done
-  [[ "$(macos_release_app_process_args "$pid")" == "$expected_args" ]]
-  kill -9 "$pid" >/dev/null 2>&1 || true
+  if ! kill -TERM "$pid" >/dev/null 2>&1; then
+    macos_release_app_poll_pid_gone "$pid" && return 0
+    echo "failed to send TERM to the gate-owned app process" >&2
+    return 1
+  fi
+  macos_release_app_poll_pid_gone "$pid" && return 0
+
+  current_args="$(macos_release_app_process_args "$pid")"
+  if [[ "$current_args" != "$expected_args" ]]; then
+    macos_release_app_reap_if_terminated "$pid" && return 0
+    echo "refusing to KILL an app process no longer owned by this gate" >&2
+    return 1
+  fi
+  if ! kill -KILL "$pid" >/dev/null 2>&1; then
+    macos_release_app_poll_pid_gone "$pid" && return 0
+    echo "failed to send KILL to the gate-owned app process" >&2
+    return 1
+  fi
+  macos_release_app_poll_pid_gone "$pid" && return 0
+  echo "gate-owned app process survived TERM and KILL" >&2
+  return 1
 }
 
 macos_release_app_acquire() {

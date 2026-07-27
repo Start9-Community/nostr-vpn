@@ -11,11 +11,11 @@ source "$ROOT/scripts/mobile_env.sh"
 source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
-
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-release-app-ownership.sh"
 load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
-
 ARTIFACT_ACTION="${NVPN_MACOS_RELEASE_ARTIFACT_ACTION:-full}"
 case "$ARTIFACT_ACTION" in
   full|prepare-only|verify-only) ;;
@@ -108,13 +108,24 @@ remote_pid=""
 remote_app_ownership_armed=0
 cleanup() {
   local status=$?
+  local cleanup_status=0
   trap - EXIT
-  if [[ -n "$remote_pid" ]] && kill -0 "$remote_pid" 2>/dev/null; then
-    kill "$remote_pid" >/dev/null 2>&1 || true
-    wait "$remote_pid" >/dev/null 2>&1 || true
+  if [[ -n "$remote_pid" ]] \
+    && ! macos_release_stop_owned_child "$remote_pid"
+  then
+    cleanup_status=1
+    echo "macOS VM remote child survived bounded cleanup" >&2
+    [[ "$status" -ne 0 ]] || status="$cleanup_status"
   fi
+  remote_pid=""
   if [[ "$remote_app_ownership_armed" -eq 1 ]]; then
-    remote cleanup >/dev/null 2>&1 || true
+    if remote cleanup >/dev/null; then
+      :
+    else
+      cleanup_status=$?
+      echo "macOS VM app restoration failed during release gate cleanup (status $cleanup_status)" >&2
+      [[ "$status" -ne 0 ]] || status="$cleanup_status"
+    fi
   fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"

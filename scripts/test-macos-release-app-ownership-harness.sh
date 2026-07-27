@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
 REMOTE="$ROOT/scripts/macos-release-mobile-join-remote.sh"
 HELPER="$ROOT/scripts/lib-macos-release-app-ownership.sh"
+trap 'echo "macOS app ownership harness failed at line $LINENO" >&2' ERR
 
 bash -n "$HOST" "$REMOTE" "$HELPER"
 python3 - "$HOST" "$REMOTE" "$HELPER" <<'PY'
@@ -19,6 +20,7 @@ for required in (
     "remote_app_ownership_armed=0",
     'if [[ "$remote_app_ownership_armed" -eq 1 ]]',
     "remote_app_ownership_armed=1",
+    "macos_release_stop_owned_child",
 ):
     if required not in host:
         raise SystemExit(f"host importer lacks cleanup ownership guard: {required}")
@@ -62,10 +64,24 @@ for required in (
 ):
     if required not in helper:
         raise SystemExit(f"ownership helper lacks {required}")
+stop = helper.split("macos_release_app_stop_pid() {", 1)[1].split(
+    "\n}\n\nmacos_release_app_acquire()", 1
+)[0]
+for required in (
+    "kill -TERM",
+    "kill -KILL",
+    "gate-owned app process survived TERM and KILL",
+):
+    if required not in stop:
+        raise SystemExit(f"bounded stop helper lacks {required}")
+if stop.count("macos_release_app_poll_pid_gone") < 2 or "wait " in stop:
+    raise SystemExit("bounded stop helper does not poll twice without blocking wait")
+if "macos_release_stop_owned_child" not in helper:
+    raise SystemExit("host remote child has no shared bounded stop helper")
 PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-app-owner.XXXXXX")"
-fixture_name="NvpnOwnTest"
+fixture_name="NvOwn$$"
 cleanup() {
   while IFS= read -r pid; do
     [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
@@ -74,11 +90,71 @@ cleanup() {
 }
 trap cleanup EXIT
 
+python3 - "$HOST" "$tmp/host-cleanup.sh" <<'PY'
+import pathlib
+import sys
+
+host = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+cleanup = host.split("cleanup() {", 1)[1].split(
+    "\n}\ntrap cleanup EXIT", 1
+)[0]
+pathlib.Path(sys.argv[2]).write_text(
+    "cleanup() {" + cleanup + "\n}\n",
+    encoding="utf-8",
+)
+PY
+bash -s -- "$tmp/host-cleanup.sh" "$tmp" <<'TEST'
+set -euo pipefail
+cleanup_source="$1"
+tmp="$2"
+# shellcheck disable=SC1090
+source "$cleanup_source"
+
+run_cleanup_case() {
+  local primary_status="$1"
+  local remote_status="$2"
+  remote_pid=""
+  remote_app_ownership_armed=1
+  PRIVATE_DIR="$tmp/private-$primary_status-$remote_status"
+  mkdir -p "$PRIVATE_DIR"
+  remote() {
+    echo "synthetic remote cleanup failure" >&2
+    return "$remote_status"
+  }
+  set +e
+  (exit "$primary_status")
+  cleanup
+}
+
+assert_cleanup_case() {
+  local primary_status="$1" remote_status="$2" expected="$3"
+  local output observed
+  set +e
+  output="$(run_cleanup_case "$primary_status" "$remote_status" 2>&1)"
+  observed=$?
+  set -e
+  [[ "$observed" -eq "$expected" ]] || {
+    echo "cleanup status mismatch: primary=$primary_status cleanup=$remote_status observed=$observed expected=$expected" >&2
+    return 1
+  }
+  grep -Fq "macOS VM app restoration failed during release gate cleanup" \
+    <<<"$output" || {
+      echo "cleanup failure was not reported" >&2
+      return 1
+    }
+}
+
+assert_cleanup_case 0 23 23
+assert_cleanup_case 17 23 17
+TEST
+
 mkdir -p \
-  "$tmp/installed/NvpnOwnTest.app/Contents/MacOS" \
-  "$tmp/unknown"
-installed="$tmp/installed/NvpnOwnTest.app/Contents/MacOS/$fixture_name"
+  "$tmp/installed/$fixture_name.app/Contents/MacOS" \
+  "$tmp/unknown" \
+  "$tmp/stubborn"
+installed="$tmp/installed/$fixture_name.app/Contents/MacOS/$fixture_name"
 unknown="$tmp/unknown/$fixture_name"
+stubborn="$tmp/stubborn/$fixture_name"
 fixture_source='#include <signal.h>
 #include <unistd.h>
 int main(void) {
@@ -89,22 +165,37 @@ printf '%s\n' "$fixture_source" \
   | xcrun clang -x c - -o "$installed"
 printf '%s\n' "$fixture_source" \
   | xcrun clang -x c - -o "$unknown"
+printf '%s\n' '#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  if (argc != 2) return 2;
+  signal(SIGTERM, SIG_IGN);
+  int ready = open(argv[1], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (ready < 0) return 3;
+  close(ready);
+  for (;;) pause();
+}' | xcrun clang -x c - -o "$stubborn"
 
-bash -s -- "$HELPER" "$installed" "$unknown" "$tmp" <<'TEST'
+bash -s -- \
+  "$HELPER" "$installed" "$unknown" "$stubborn" "$fixture_name" "$tmp" <<'TEST'
 set -euo pipefail
+trap 'echo "ownership fixture failed at line $LINENO" >&2' ERR
 helper="$1"
 installed="$2"
 unknown="$3"
-tmp="$4"
+stubborn="$4"
+fixture_name="$5"
+tmp="$6"
 
 # shellcheck disable=SC1090
 source "$helper"
 
 set_artifact() {
   MACOS_RELEASE_APP_STATE_DIR="$1/app-ownership"
-  MACOS_RELEASE_APP_GATE_EXE="$1/imported/NvpnOwnTest.app/Contents/MacOS/NvpnOwnTest"
+  MACOS_RELEASE_APP_GATE_EXE="$1/imported/$fixture_name.app/Contents/MacOS/$fixture_name"
   MACOS_RELEASE_APP_INSTALLED_EXE="$installed"
-  MACOS_RELEASE_APP_PROCESS_NAME=NvpnOwnTest
+  MACOS_RELEASE_APP_PROCESS_NAME="$fixture_name"
   APP_PID=""
   mkdir -p "$(dirname "$MACOS_RELEASE_APP_GATE_EXE")"
   printf '%s\n' '#include <signal.h>
@@ -117,7 +208,7 @@ int main(void) {
 
 single_pid() {
   local values
-  values="$(pgrep -x NvpnOwnTest 2>/dev/null || true)"
+  values="$(pgrep -x "$fixture_name" 2>/dev/null || true)"
   [[ "$(wc -w <<<"$values" | tr -d " ")" == 1 ]]
   printf '%s\n' "$values"
 }
@@ -189,5 +280,84 @@ kill -0 "$unknown_pid"
 stop_fixture "$unknown_pid"
 APP_PID=""
 TEST
+
+# Run both bounded stop paths in a watchdog-protected shell where each
+# TERM-ignoring fixture is a real child that must be reaped.
+child_pid_file="$tmp/stubborn-child.pid"
+timings="$tmp/stubborn-timings"
+worker_log="$tmp/stubborn-worker.log"
+bash -s -- "$HELPER" "$stubborn" "$child_pid_file" "$timings" \
+  >"$worker_log" 2>&1 <<'TEST' &
+set -euo pipefail
+trap 'echo "bounded stop worker failed at line $LINENO" >&2' ERR
+source "$1"
+stubborn="$2"
+child_pid_file="$3"
+timings="$4"
+child=""
+cleanup_child() {
+  [[ -n "$child" ]] || return 0
+  kill -KILL "$child" >/dev/null 2>&1 || true
+  wait "$child" >/dev/null 2>&1 || true
+}
+trap cleanup_child EXIT
+for mode in exact-app owned-child; do
+  ready="$timings.$mode.ready"
+  "$stubborn" "$ready" &
+  child=$!
+  printf '%s\n' "$child" >"$child_pid_file"
+  for _ in {1..50}; do
+    [[ -e "$ready" ]] && break
+    sleep 0.02
+  done
+  [[ -e "$ready" ]]
+  SECONDS=0
+  if [[ "$mode" == exact-app ]]; then
+    macos_release_app_stop_pid "$child" "$stubborn $ready"
+  else
+    macos_release_stop_owned_child "$child"
+  fi
+  elapsed="$SECONDS"
+  ! kill -0 "$child" >/dev/null 2>&1
+  [[ -z "$(ps -ww -p "$child" -o stat= 2>/dev/null)" ]]
+  printf '%s\t%s\n' "$mode" "$elapsed" >>"$timings"
+  child=""
+done
+trap - EXIT
+TEST
+worker_pid=$!
+timed_out=1
+for _ in {1..180}; do
+  if ! kill -0 "$worker_pid" >/dev/null 2>&1; then
+    timed_out=0
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$timed_out" -eq 1 ]]; then
+  child="$(cat "$child_pid_file" 2>/dev/null || true)"
+  [[ -z "$child" ]] || kill -KILL "$child" >/dev/null 2>&1 || true
+  kill -KILL "$worker_pid" >/dev/null 2>&1 || true
+  wait "$worker_pid" >/dev/null 2>&1 || true
+  tail -n 40 "$worker_log" >&2 || true
+  echo "bounded stop helper hung on a TERM-ignoring child" >&2
+  exit 1
+fi
+if ! wait "$worker_pid"; then
+  tail -n 40 "$worker_log" >&2 || true
+  exit 1
+fi
+if ! awk -F'\t' '
+  ($1 == "exact-app" || $1 == "owned-child") && $2 >= 2 && $2 < 8 {
+    passed[$1] = 1
+  }
+  END { exit !(passed["exact-app"] && passed["owned-child"]) }
+' "$timings"
+then
+  echo "bounded stop timings were incomplete or out of range:" >&2
+  cat "$timings" >&2 || true
+  tail -n 40 "$worker_log" >&2 || true
+  exit 1
+fi
 
 echo "MACOS_RELEASE_APP_OWNERSHIP_HARNESS_OK"
