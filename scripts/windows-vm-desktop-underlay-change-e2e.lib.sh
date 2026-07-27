@@ -18,8 +18,7 @@ for pair in \
   "hypervisor SSH:$HYPERVISOR_SSH" \
   "VM name:$VM_NAME" \
   "Windows SSH:$WINDOWS_SSH" \
-  "network ID:$NETWORK_ID" \
-  "hypervisor source root:$HYPERVISOR_SRC_ROOT"
+  "network ID:$NETWORK_ID"
 do
   validate_simple_value "${pair%%:*}" "${pair#*:}"
 done

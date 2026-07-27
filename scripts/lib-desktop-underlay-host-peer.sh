@@ -8,24 +8,47 @@ DESKTOP_UNDERLAY_HOST_PEER_SIZE=""
 DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR=""
 DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=0
 
-desktop_underlay_import_host_peer() {
-  : "${ROOT:?desktop underlay host-peer import requires ROOT}"
-  : "${HYPERVISOR_SSH:?desktop underlay host-peer import requires HYPERVISOR_SSH}"
-  : "${ARTIFACT_DIR:?desktop underlay host-peer import requires ARTIFACT_DIR}"
-  [[ "$(uname -s)" == "Darwin" ]] \
-    || fail "desktop underlay Linux peer must be built on the host Mac"
-  [[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ ]] \
-    || fail "desktop underlay host-peer import requires exact NVPN_EXPECTED_APP_GIT_SHA"
+desktop_underlay_host_peer_error() {
+  echo "desktop underlay host-peer import failed: $*" >&2
+}
 
-  local app_sha app_tree app_version
+desktop_underlay_import_host_peer() {
+  [[ -n "${ROOT:-}" && -n "${HYPERVISOR_SSH:-}" && -n "${ARTIFACT_DIR:-}" ]] || {
+    desktop_underlay_host_peer_error "ROOT, HYPERVISOR_SSH, and ARTIFACT_DIR are required"
+    return 1
+  }
+  [[ "$(uname -s)" == "Darwin" ]] || {
+    desktop_underlay_host_peer_error "Linux peer must be built on the host Mac"
+    return 1
+  }
+  [[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || {
+    desktop_underlay_host_peer_error "exact NVPN_EXPECTED_APP_GIT_SHA is required"
+    return 1
+  }
+
+  local app_sha app_tree app_status app_version
   local fips_sha fips_tree fips_version target receipt
   local remote_dir
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  app_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
-  [[ "$app_sha" == "$NVPN_EXPECTED_APP_GIT_SHA" ]] \
-    || fail "desktop underlay app checkout differs from NVPN_EXPECTED_APP_GIT_SHA"
-  [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] \
-    || fail "desktop underlay host-peer import refuses a dirty app checkout"
+  app_sha="$(git -C "$ROOT" rev-parse HEAD)" || {
+    desktop_underlay_host_peer_error "could not resolve app Git SHA"
+    return 1
+  }
+  app_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" || {
+    desktop_underlay_host_peer_error "could not resolve app Git tree"
+    return 1
+  }
+  [[ "$app_sha" == "$NVPN_EXPECTED_APP_GIT_SHA" ]] || {
+    desktop_underlay_host_peer_error "app checkout differs from NVPN_EXPECTED_APP_GIT_SHA"
+    return 1
+  }
+  app_status="$(git -C "$ROOT" status --porcelain --untracked-files=all)" || {
+    desktop_underlay_host_peer_error "could not inspect app checkout"
+    return 1
+  }
+  [[ -z "$app_status" ]] || {
+    desktop_underlay_host_peer_error "dirty app checkout is not importable"
+    return 1
+  }
   app_version="$(
     awk '
       $0 == "[package]" { package = 1; next }
@@ -38,14 +61,32 @@ desktop_underlay_import_host_peer() {
         exit
       }
     ' "$ROOT/Cargo.toml"
-  )"
-  [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] \
-    || fail "desktop underlay host-peer import could not derive app version"
+  )" || {
+    desktop_underlay_host_peer_error "could not read app version"
+    return 1
+  }
+  [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+    desktop_underlay_host_peer_error "could not derive app version"
+    return 1
+  }
 
   # This establishes exact FIPS SHA/tree/version globals and independently
   # rejects a dirty or unexpected FIPS checkout before the host build/cache.
-  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
-  release_join_require_clean_fips
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" || {
+    desktop_underlay_host_peer_error "could not load exact FIPS validation"
+    return 1
+  }
+  release_join_require_clean_fips || {
+    desktop_underlay_host_peer_error "exact FIPS validation failed"
+    return 1
+  }
+  [[ "${RELEASE_JOIN_FIPS_SHA:-}" =~ ^[0-9a-f]{40}$ \
+    && "${RELEASE_JOIN_FIPS_TREE:-}" =~ ^[0-9a-f]{40}$ \
+    && "${RELEASE_JOIN_FIPS_VERSION:-}" =~ \
+      ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+    desktop_underlay_host_peer_error "exact FIPS validation returned incomplete identity"
+    return 1
+  }
   fips_sha="$RELEASE_JOIN_FIPS_SHA"
   fips_tree="$RELEASE_JOIN_FIPS_TREE"
   fips_version="$RELEASE_JOIN_FIPS_VERSION"
@@ -53,10 +94,19 @@ desktop_underlay_import_host_peer() {
 
   DESKTOP_UNDERLAY_HOST_PEER_BINARY="$(
     "$ROOT/scripts/prepare-macos-release-fips-peer.sh"
-  )"
+  )" || {
+    desktop_underlay_host_peer_error "host Linux peer preparation failed"
+    return 1
+  }
   [[ "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" == /* \
-    && -x "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" ]]
-  receipt="$(dirname "$DESKTOP_UNDERLAY_HOST_PEER_BINARY")/receipt.json"
+    && -x "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" ]] || {
+    desktop_underlay_host_peer_error "host Linux peer path is invalid"
+    return 1
+  }
+  receipt="$(dirname "$DESKTOP_UNDERLAY_HOST_PEER_BINARY")/receipt.json" || {
+    desktop_underlay_host_peer_error "could not derive host Linux peer receipt path"
+    return 1
+  }
   python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
     "$receipt" \
     "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" \
@@ -65,42 +115,74 @@ desktop_underlay_import_host_peer() {
     "$fips_sha" \
     "$fips_tree" \
     "$fips_version" \
-    "$target"
+    "$target" || {
+      desktop_underlay_host_peer_error "host Linux peer receipt verification failed"
+      return 1
+    }
   file "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" \
     | grep -Eq 'ELF 64-bit.*x86-64' \
-    || fail "host-built desktop underlay peer is not x86_64 ELF"
+    || {
+      desktop_underlay_host_peer_error "host-built peer is not x86_64 ELF"
+      return 1
+    }
 
   DESKTOP_UNDERLAY_HOST_PEER_SHA256="$(
     shasum -a 256 "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" | awk '{ print $1 }'
-  )"
+  )" || {
+    desktop_underlay_host_peer_error "could not hash host Linux peer"
+    return 1
+  }
   DESKTOP_UNDERLAY_HOST_PEER_SIZE="$(
     stat -f '%z' "$DESKTOP_UNDERLAY_HOST_PEER_BINARY"
-  )"
+  )" || {
+    desktop_underlay_host_peer_error "could not size host Linux peer"
+    return 1
+  }
   [[ "$DESKTOP_UNDERLAY_HOST_PEER_SHA256" =~ ^[0-9a-f]{64}$ \
-    && "$DESKTOP_UNDERLAY_HOST_PEER_SIZE" =~ ^[1-9][0-9]*$ ]] \
-    || fail "host-built desktop underlay peer has invalid byte receipts"
+    && "$DESKTOP_UNDERLAY_HOST_PEER_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+    desktop_underlay_host_peer_error "host-built peer has invalid byte receipts"
+    return 1
+  }
 
-  mkdir -p "$ARTIFACT_DIR"
-  cp "$receipt" "$ARTIFACT_DIR/host-peer-local-receipt.json"
+  mkdir -p "$ARTIFACT_DIR" || {
+    desktop_underlay_host_peer_error "could not create local evidence directory"
+    return 1
+  }
+  cp "$receipt" "$ARTIFACT_DIR/host-peer-local-receipt.json" || {
+    desktop_underlay_host_peer_error "could not preserve local host-peer receipt"
+    return 1
+  }
 
   remote_dir="$(
     ssh -o BatchMode=yes -o ConnectTimeout=10 "$HYPERVISOR_SSH" \
       mktemp -d /tmp/nvpn-desktop-underlay-peer.XXXXXX
-  )"
+  )" || {
+    desktop_underlay_host_peer_error "could not create remote import directory"
+    return 1
+  }
   case "$remote_dir" in
     /tmp/nvpn-desktop-underlay-peer.*) ;;
-    *) fail "Vader returned an unsafe desktop-underlay peer directory" ;;
+    *)
+      desktop_underlay_host_peer_error "Vader returned an unsafe import directory"
+      return 1
+      ;;
   esac
   DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR="$remote_dir"
 
   scp -q -o BatchMode=yes -o ConnectTimeout=10 \
     "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" \
-    "$HYPERVISOR_SSH:$remote_dir/nvpn.copy"
+    "$HYPERVISOR_SSH:$remote_dir/nvpn.copy" || {
+      desktop_underlay_host_peer_error "could not import host Linux peer"
+      return 1
+    }
   scp -q -o BatchMode=yes -o ConnectTimeout=10 \
     "$receipt" \
-    "$HYPERVISOR_SSH:$remote_dir/receipt.json.copy"
+    "$HYPERVISOR_SSH:$remote_dir/receipt.json.copy" || {
+      desktop_underlay_host_peer_error "could not import host Linux peer receipt"
+      return 1
+    }
 
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  if ! ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
     "$remote_dir" \
     "$DESKTOP_UNDERLAY_HOST_PEER_SHA256" \
     "$DESKTOP_UNDERLAY_HOST_PEER_SIZE" \
@@ -163,8 +245,10 @@ verbose_version="$("$remote_dir/nvpn" version --verbose)"
 printf '%s\n' "$verbose_version" | grep -Fq "(rev ${fips_sha:0:10})"
 printf '%s\n%s\n' "$short_version" "$verbose_version"
 SH
-  HYPERVISOR_BINARY="$remote_dir/nvpn"
-  DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=1
+  then
+    desktop_underlay_host_peer_error "remote host-peer verification failed"
+    return 1
+  fi
   {
     printf 'builtOnHostMac=true\n'
     printf 'builtOnRemoteVm=false\n'
@@ -177,8 +261,13 @@ SH
     printf 'target=%s\n' "$target"
     printf 'binarySha256=%s\n' "$DESKTOP_UNDERLAY_HOST_PEER_SHA256"
     printf 'binarySize=%s\n' "$DESKTOP_UNDERLAY_HOST_PEER_SIZE"
-    printf 'remoteBinary=%s\n' "$HYPERVISOR_BINARY"
-  } >"$ARTIFACT_DIR/host-peer-import-receipt.txt"
+    printf 'remoteBinary=%s\n' "$remote_dir/nvpn"
+  } >"$ARTIFACT_DIR/host-peer-import-receipt.txt" || {
+    desktop_underlay_host_peer_error "could not write host-peer import receipt"
+    return 1
+  }
+  HYPERVISOR_BINARY="$remote_dir/nvpn"
+  DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=1
 }
 
 desktop_underlay_cleanup_host_peer() {
@@ -191,7 +280,7 @@ desktop_underlay_cleanup_host_peer() {
       return 1
       ;;
   esac
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- "$remote_dir" <<'SH'
+  if ! ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- "$remote_dir" <<'SH'
 set -euo pipefail
 remote_dir="$1"
 case "$remote_dir" in
@@ -202,9 +291,19 @@ find "$remote_dir" -xdev -depth -mindepth 1 -delete
 rmdir "$remote_dir"
 test ! -e "$remote_dir"
 SH
-  mkdir -p "$ARTIFACT_DIR"
+  then
+    echo "desktop underlay host-peer cleanup failed: remote removal failed" >&2
+    return 1
+  fi
+  mkdir -p "$ARTIFACT_DIR" || {
+    echo "desktop underlay host-peer cleanup failed: cannot create evidence directory" >&2
+    return 1
+  }
   printf 'remote_artifact_removed=true\n' \
-    >"$ARTIFACT_DIR/host-peer-cleanup-audit.txt"
+    >"$ARTIFACT_DIR/host-peer-cleanup-audit.txt" || {
+      echo "desktop underlay host-peer cleanup failed: cannot write removal audit" >&2
+      return 1
+    }
   DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR=""
   DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=0
   HYPERVISOR_BINARY=""

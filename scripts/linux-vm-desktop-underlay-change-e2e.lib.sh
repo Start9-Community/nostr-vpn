@@ -19,8 +19,7 @@ for pair in \
   "VM name:$VM_NAME" \
   "Linux SSH:$LINUX_SSH" \
   "network ID:$NETWORK_ID" \
-  "guest source root:$GUEST_SRC_ROOT" \
-  "hypervisor source root:$HYPERVISOR_SRC_ROOT"
+  "guest source root:$GUEST_SRC_ROOT"
 do
   validate_simple_value "${pair%%:*}" "${pair#*:}"
 done

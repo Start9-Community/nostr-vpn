@@ -7,6 +7,8 @@ HELPER="$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
 VERIFIER="$ROOT/scripts/verify-host-linux-peer-artifact.py"
 WINDOWS="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.sh"
 LINUX="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
+WINDOWS_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
+LINUX_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-underlay-peer-import.XXXXXX")"
 
 cleanup() {
@@ -29,7 +31,7 @@ require_tokens() {
   done
 }
 
-for path in "$HELPER" "$WINDOWS" "$LINUX"; do
+for path in "$HELPER" "$WINDOWS" "$LINUX" "$WINDOWS_LIB" "$LINUX_LIB"; do
   bash -n "$path"
 done
 PYTHONPYCACHEPREFIX="$TMP_ROOT/pycache" python3 -m py_compile "$VERIFIER"
@@ -76,6 +78,31 @@ for controller in "$WINDOWS" "$LINUX"; do
   fi
 done
 
+if grep -Fq 'HYPERVISOR_SRC_ROOT' "$WINDOWS_LIB" "$LINUX_LIB"; then
+  fail "desktop underlay helper still requires the removed Vader source checkout"
+fi
+
+# Source both controller libraries under nounset without the deleted
+# HYPERVISOR_SRC_ROOT. This catches stale top-level expansions that bash -n
+# cannot see.
+(
+  set -euo pipefail
+  HYPERVISOR_SSH=fake-vader
+  VM_NAME=fake-windows
+  WINDOWS_SSH=fake-windows
+  NETWORK_ID=fake-network
+  source "$WINDOWS_LIB"
+)
+(
+  set -euo pipefail
+  HYPERVISOR_SSH=fake-vader
+  VM_NAME=fake-linux
+  LINUX_SSH=fake-linux
+  NETWORK_ID=fake-network
+  GUEST_SRC_ROOT=fake-linux-source
+  source "$LINUX_LIB"
+)
+
 require_tokens "$WINDOWS" "Windows native build ownership" \
   'windows-build.ps1 -Configuration Release -DaemonOnly' \
   'native Windows Release build failed'
@@ -93,6 +120,133 @@ fips_sha="$(printf 'c%.0s' {1..40})"
 fips_tree="$(printf 'd%.0s' {1..40})"
 fips_version="0.4.44"
 target="x86_64-unknown-linux-musl"
+
+# Exercise the shared helper in the exact `helper || status=$?` context used by
+# both real controllers. Bash disables implicit errexit inside a function in
+# that context, so every security-sensitive command must return explicitly.
+fake_root="$TMP_ROOT/fake-app"
+fake_artifacts="$TMP_ROOT/fake-artifacts"
+fake_binary="$fake_root/peer/nvpn"
+mkdir -p "$fake_root/scripts" "$fake_root/peer" "$fake_artifacts"
+printf '%s\n' \
+  '[package]' \
+  'name = "fake-nvpn"' \
+  'version = "4.1.5"' \
+  >"$fake_root/Cargo.toml"
+{
+  printf '%s\n' 'release_join_require_clean_fips() {'
+  printf '  RELEASE_JOIN_FIPS_SHA=%q\n' "$fips_sha"
+  printf '  RELEASE_JOIN_FIPS_TREE=%q\n' "$fips_tree"
+  printf '  RELEASE_JOIN_FIPS_VERSION=%q\n' "$fips_version"
+  printf '%s\n' '  return 0' '}'
+} >"$fake_root/scripts/lib-mobile-release-join-artifacts.sh"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "${FAKE_PREPARE_MODE:-ok}" == "fail" ]]; then exit 42; fi' \
+  'printf "%s\n" "$FAKE_PEER_BINARY"' \
+  >"$fake_root/scripts/prepare-macos-release-fips-peer.sh"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'exit "${FAKE_VERIFY_STATUS:-0}"' \
+  >"$fake_root/scripts/verify-host-linux-peer-artifact.py"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_binary"
+printf '%s\n' '{}' >"$fake_root/peer/receipt.json"
+chmod 0755 \
+  "$fake_root/scripts/prepare-macos-release-fips-peer.sh" \
+  "$fake_root/scripts/verify-host-linux-peer-artifact.py"
+chmod 0555 "$fake_binary"
+git -C "$fake_root" init -q
+git -C "$fake_root" add -A
+git -C "$fake_root" \
+  -c user.name=Gate \
+  -c user.email=gate.invalid \
+  commit -qm fixture
+fake_sha="$(git -C "$fake_root" rev-parse HEAD)"
+
+(
+  set -euo pipefail
+  ROOT="$fake_root"
+  HYPERVISOR_SSH=fake-vader
+  ARTIFACT_DIR="$fake_artifacts"
+  NVPN_EXPECTED_APP_GIT_SHA="$fake_sha"
+  FAKE_PEER_BINARY="$fake_binary"
+  export NVPN_EXPECTED_APP_GIT_SHA FAKE_PEER_BINARY
+
+  uname() {
+    printf '%s\n' Darwin
+  }
+  file() {
+    printf '%s\n' "$1: ELF 64-bit LSB executable, x86-64"
+  }
+  shasum() {
+    printf '%064d  %s\n' 0 "${*: -1}"
+  }
+  stat() {
+    printf '%s\n' 123
+  }
+  scp() {
+    return "${FAKE_SCP_STATUS:-0}"
+  }
+  ssh() {
+    if [[ "$*" == *'mktemp -d /tmp/nvpn-desktop-underlay-peer.XXXXXX'* ]]; then
+      printf '%s\n' /tmp/nvpn-desktop-underlay-peer.failure-injection
+      return 0
+    fi
+    return "${FAKE_SSH_STATUS:-0}"
+  }
+
+  source "$HELPER"
+
+  expect_import_failure() {
+    local status=0
+    DESKTOP_UNDERLAY_HOST_PEER_BINARY=""
+    DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR=""
+    DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=0
+    rm -f "$ARTIFACT_DIR/host-peer-import-receipt.txt"
+    desktop_underlay_import_host_peer >/dev/null 2>&1 || status="$?"
+    [[ "$status" -ne 0 ]] \
+      || fail "host-peer importer swallowed an injected command failure"
+    [[ "$DESKTOP_UNDERLAY_HOST_PEER_IMPORTED" -eq 0 ]] \
+      || fail "failed host-peer import was marked complete"
+    [[ ! -e "$ARTIFACT_DIR/host-peer-import-receipt.txt" ]] \
+      || fail "failed host-peer import wrote a success receipt"
+  }
+
+  FAKE_PREPARE_MODE=fail
+  FAKE_VERIFY_STATUS=0
+  FAKE_SCP_STATUS=0
+  FAKE_SSH_STATUS=0
+  export FAKE_PREPARE_MODE FAKE_VERIFY_STATUS FAKE_SCP_STATUS FAKE_SSH_STATUS
+  expect_import_failure
+
+  FAKE_PREPARE_MODE=ok
+  FAKE_VERIFY_STATUS=73
+  export FAKE_PREPARE_MODE FAKE_VERIFY_STATUS
+  expect_import_failure
+
+  FAKE_VERIFY_STATUS=0
+  FAKE_SCP_STATUS=74
+  export FAKE_VERIFY_STATUS FAKE_SCP_STATUS
+  expect_import_failure
+
+  FAKE_SCP_STATUS=0
+  FAKE_SSH_STATUS=75
+  export FAKE_SCP_STATUS FAKE_SSH_STATUS
+  expect_import_failure
+
+  DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR=/tmp/nvpn-desktop-underlay-peer.cleanup-failure
+  rm -f "$ARTIFACT_DIR/host-peer-cleanup-audit.txt"
+  cleanup_status=0
+  desktop_underlay_cleanup_host_peer >/dev/null 2>&1 \
+    || cleanup_status="$?"
+  [[ "$cleanup_status" -ne 0 ]] \
+    || fail "host-peer cleanup swallowed an injected SSH failure"
+  [[ "$DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR" == \
+    /tmp/nvpn-desktop-underlay-peer.cleanup-failure ]] \
+    || fail "failed host-peer cleanup discarded retry state"
+  [[ ! -e "$ARTIFACT_DIR/host-peer-cleanup-audit.txt" ]] \
+    || fail "failed host-peer cleanup wrote a false removal audit"
+)
 
 python3 - \
   "$receipt" "$binary" \
