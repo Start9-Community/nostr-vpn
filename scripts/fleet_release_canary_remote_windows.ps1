@@ -141,6 +141,34 @@ function DefinitionValue($Service) {
     }
 }
 
+function ParseServiceExecutablePath([string]$PathName) {
+    if ([string]::IsNullOrWhiteSpace($PathName)) {
+        Fail 'Windows service PathName is empty'
+    }
+    $value = $PathName.Trim()
+    if ($value.StartsWith('"')) {
+        $closingQuote = $value.IndexOf('"', 1)
+        if ($closingQuote -le 1) {
+            Fail 'Windows service PathName has an invalid quoted executable'
+        }
+        $executable = $value.Substring(1, $closingQuote - 1)
+        $remainder = $value.Substring($closingQuote + 1)
+        if (
+            $remainder.Length -gt 0 -and
+            ![char]::IsWhiteSpace($remainder[0])
+        ) {
+            Fail 'Windows service PathName has text joined to its executable'
+        }
+    } else {
+        $match = [regex]::Match($value, '^\S+')
+        if (!$match.Success) {
+            Fail 'Windows service PathName lacks an executable'
+        }
+        $executable = $match.Value
+    }
+    return RequireAbsolutePath $executable 'service PathName executable'
+}
+
 function ServiceSnapshot([string]$Name, [string]$BinaryPath) {
     $service = GetServiceObject $Name
     $installed = $null -ne $service
@@ -149,6 +177,31 @@ function ServiceSnapshot([string]$Name, [string]$BinaryPath) {
     $processes = @(GetProcessIds)
     $binaryPresent = Test-Path -LiteralPath $BinaryPath -PathType Leaf
     $definition = DefinitionValue $service
+    $configuredResolved = RequireAbsolutePath $BinaryPath 'binaryPath'
+    $execStartPath = $(if ($installed) {
+        ParseServiceExecutablePath ([string]$service.PathName)
+    } else {
+        $null
+    })
+    $pid = $(if ($running -and [int]$service.ProcessId -gt 0) {
+        [int]$service.ProcessId
+    } else {
+        $null
+    })
+    $mainProcessExePath = $null
+    $mainProcessExeSha256 = $null
+    if ($null -ne $pid) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" `
+            -ErrorAction SilentlyContinue
+        if (
+            $null -ne $process -and
+            ![string]::IsNullOrWhiteSpace([string]$process.ExecutablePath)
+        ) {
+            $mainProcessExePath = RequireAbsolutePath `
+                ([string]$process.ExecutablePath) 'service process executable'
+            $mainProcessExeSha256 = ShaFile $mainProcessExePath
+        }
+    }
     return [ordered]@{
         installed = [bool]$installed
         enabled = [bool]$enabled
@@ -157,10 +210,83 @@ function ServiceSnapshot([string]$Name, [string]$BinaryPath) {
         binarySha256 = $(if ($binaryPresent) { ShaFile $BinaryPath } else { $null })
         definitionSha256 = $(if ($installed) { ShaText (CanonicalJson $definition) } else { $null })
         processCount = [int]$processes.Count
-        pid = $(if ($running -and [int]$service.ProcessId -gt 0) { [int]$service.ProcessId } else { $null })
+        pid = $pid
         _definition = $definition
         _processes = $processes
-        _pathName = $(if ($installed) { [string]$service.PathName } else { '' })
+        _configuredBinaryResolvedPath = $configuredResolved
+        _execStartPath = $execStartPath
+        _execStartResolvedPath = $execStartPath
+        _mainProcessExePath = $mainProcessExePath
+        _mainProcessExeSha256 = $mainProcessExeSha256
+    }
+}
+
+function AssertServiceRuntimeBinding(
+    $Service,
+    [string]$BinaryPath,
+    [string]$ExpectedBinarySha256,
+    [bool]$RequireProcess = $true
+) {
+    if (!$Service.installed) {
+        Fail 'cannot bind an absent Windows service'
+    }
+    $configured = RequireAbsolutePath $BinaryPath 'binaryPath'
+    if (
+        ![string]::Equals(
+            [string]$Service._configuredBinaryResolvedPath,
+            $configured,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        Fail 'configured Windows binary path changed'
+    }
+    $execStart = [string]$Service._execStartPath
+    if (
+        [string]::IsNullOrWhiteSpace($execStart) -or
+        ![string]::Equals(
+            $execStart,
+            $configured,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        Fail 'Windows service PathName executable is not the configured binary'
+    }
+    $mainProcessPath = $Service._mainProcessExePath
+    $mainProcessSha256 = $Service._mainProcessExeSha256
+    if ($RequireProcess) {
+        if (
+            $null -eq $Service.pid -or
+            [int]$Service.pid -le 0 -or
+            [int]$Service.pid -notin @($Service._processes)
+        ) {
+            Fail 'Windows service PID is not an nvpn process'
+        }
+        if (
+            [string]::IsNullOrWhiteSpace([string]$mainProcessPath) -or
+            ![string]::Equals(
+                [string]$mainProcessPath,
+                $configured,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            Fail 'Windows service PID does not execute the configured binary'
+        }
+        if ([string]$mainProcessSha256 -ne $ExpectedBinarySha256) {
+            Fail 'Windows service process hash is not the expected binary'
+        }
+    } elseif (
+        $null -ne $mainProcessPath -or
+        $null -ne $mainProcessSha256
+    ) {
+        Fail 'stopped Windows service unexpectedly has a bound process'
+    }
+    return [ordered]@{
+        configuredBinaryPath = $configured
+        configuredBinaryResolvedPath = $configured
+        execStartPath = $execStart
+        execStartResolvedPath = $execStart
+        mainProcessExePath = $mainProcessPath
+        mainProcessExeSha256 = $mainProcessSha256
     }
 }
 
@@ -436,6 +562,24 @@ function AssertExpected($State, $Target, $Expected) {
     if ((CanonicalJson $Expected.expected) -ne (CanonicalJson $frozen)) {
         Fail 'expectations do not bind the frozen target identity'
     }
+    if ($State.service.installed) {
+        if (!$State.service.binaryPresent) {
+            Fail 'cannot safely canary an installed Windows service whose binary is absent'
+        }
+        $transition = if (
+            [string]$State.service.binarySha256 -eq
+            [string]$Expected.installedBinarySha256
+        ) {
+            'reinstalled-exact'
+        } else {
+            'candidate-transition'
+        }
+    } else {
+        $transition = 'fresh-install'
+    }
+    if ([string]$Expected.installTransition -ne $transition) {
+        Fail 'install transition does not match the preinstall service state'
+    }
 }
 
 function WriteJournal([string]$Transaction, [string]$TargetId, [string]$TransactionId, [string]$State) {
@@ -677,8 +821,62 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
         config = $raw.config
         network = $raw.network
     }
-    if ((CanonicalJson $afterPublic) -ne (CanonicalJson $expectedPublic)) {
-        Fail 'rollback did not restore the exact service/config/network snapshot'
+    foreach (
+        $field in @(
+            'installed',
+            'enabled',
+            'running',
+            'binaryPresent',
+            'binarySha256',
+            'definitionSha256',
+            'processCount'
+        )
+    ) {
+        if (
+            (CanonicalJson $afterPublic.service.$field) -ne
+            (CanonicalJson $expectedPublic.service.$field)
+        ) {
+            Fail "rollback did not restore service field $field"
+        }
+    }
+    if ($prior.running) {
+        if ($null -eq $afterPublic.service.pid -or [int]$afterPublic.service.pid -le 0) {
+            Fail 'rollback did not restart the restored Windows service'
+        }
+        if ([int]$afterPublic.service.pid -eq [int]$expectedPublic.service.pid) {
+            Fail 'rollback did not prove a new restored Windows service process'
+        }
+    } elseif ($null -ne $afterPublic.service.pid) {
+        Fail 'rollback unexpectedly started a previously stopped Windows service'
+    }
+    if ((CanonicalJson $afterPublic.config) -ne (CanonicalJson $expectedPublic.config)) {
+        Fail 'rollback did not restore the exact config snapshot'
+    }
+    if ((CanonicalJson $afterPublic.network) -ne (CanonicalJson $expectedPublic.network)) {
+        Fail 'rollback did not restore the exact network snapshot'
+    }
+    $runtimeBinding = $null
+    if ($prior.installed) {
+        $runtimeBinding = AssertServiceRuntimeBinding `
+            $after.service `
+            $binary `
+            ([string]$prior.binarySha256) `
+            ([bool]$prior.running)
+    }
+    $restoredService = PublicService $after.service
+    if ($null -ne $runtimeBinding) {
+        foreach (
+            $field in @(
+                'configuredBinaryPath',
+                'configuredBinaryResolvedPath',
+                'execStartPath',
+                'execStartResolvedPath',
+                'mainProcessExePath',
+                'mainProcessExeSha256'
+            )
+        ) {
+            $restoredService[$field] = $runtimeBinding.$field
+        }
     }
     $journalHash = WriteJournal $Transaction $Target.id $TransactionId 'rolled-back'
     return [ordered]@{
@@ -692,11 +890,11 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
             durableJournal = $true
             journalReceiptSha256 = $journalHash
         }
-        service = $afterPublic.service
+        service = $restoredService
         config = $afterPublic.config
         network = $afterPublic.network
         snapshotReceiptSha256 = ShaFile $statePath
-        serviceReceiptSha256 = ShaText (CanonicalJson $afterPublic.service)
+        serviceReceiptSha256 = ShaText (CanonicalJson $restoredService)
         configReceiptSha256 = ShaText (CanonicalJson $afterPublic.config)
         routesReceiptSha256 = ShaText $after.network._routesJson
         resolverReceiptSha256 = ShaText $after.network._resolverJson
@@ -862,8 +1060,12 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
     if ((Get-Item -LiteralPath $stage).Length -ne [int64]$Expected.artifactSize) { Fail 'staged artifact size mismatch' }
     $before = Capture $Target $Target.checks
     AssertExpected $before $Target $Expected
-    if ($before.service.installed -and !$before.service.binaryPresent) {
-        Fail 'cannot safely canary an installed Windows service whose binary is absent'
+    if ($before.service.installed) {
+        AssertServiceRuntimeBinding `
+            $before.service `
+            ([string]$before.binaryPath) `
+            ([string]$before.service.binarySha256) `
+            ([bool]$before.service.running) | Out-Null
     }
     [IO.Directory]::CreateDirectory($root) | Out-Null
     $snapshot = SnapshotTransaction $transaction $before $Target
@@ -885,10 +1087,6 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
             AtomicInstall $extracted.companions[$member] (RequireAbsolutePath $destination "companionPaths[$member]")
         }
         if ($before.service.installed) {
-            $normalizedBinary = $binary.Trim('"').ToLowerInvariant()
-            if (!$before.service._pathName.ToLowerInvariant().Contains($normalizedBinary)) {
-                Fail 'installed Windows service does not use the frozen binary path'
-            }
             Set-Service -Name $name -StartupType Automatic
             Start-Service -Name $name
         } else {
@@ -898,6 +1096,10 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
         WaitService $name $true
         $first = Capture $Target $Target.checks
         $firstPid = [int]$first.service.pid
+        AssertServiceRuntimeBinding `
+            $first.service `
+            $binary `
+            ([string]$Expected.installedBinarySha256) | Out-Null
         $beforeCounters = AggregateCounters $first.status
         $payloadTarget = [string]$Target.checks.payloadTarget
         $pingOutput = & ping.exe -n 1 -w 3000 $payloadTarget 2>&1
@@ -911,6 +1113,10 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
         WaitService $name $true
         $final = Capture $Target $Target.checks
         $finalPid = [int]$final.service.pid
+        $runtimeBinding = AssertServiceRuntimeBinding `
+            $final.service `
+            $binary `
+            ([string]$Expected.installedBinarySha256)
         $dnsAfter = DnsProbe ([string]$Target.checks.dnsName)
         $directAfter = DirectProbe ([string]$Target.checks.directUrl)
         if ((CanonicalJson $before.config) -ne (CanonicalJson $final.config)) {
@@ -970,9 +1176,16 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
                 priorRunning = [bool]$before.service.running
                 priorBinaryPresent = [bool]$before.service.binaryPresent
                 priorBinarySha256 = $before.service.binarySha256
+                installTransition = [string]$Expected.installTransition
                 processCount = [int]$final.service.processCount
                 pidBeforeRestart = $firstPid
                 pidAfterRestart = $finalPid
+                configuredBinaryPath = [string]$runtimeBinding.configuredBinaryPath
+                configuredBinaryResolvedPath = [string]$runtimeBinding.configuredBinaryResolvedPath
+                execStartPath = [string]$runtimeBinding.execStartPath
+                execStartResolvedPath = [string]$runtimeBinding.execStartResolvedPath
+                mainProcessExePath = [string]$runtimeBinding.mainProcessExePath
+                mainProcessExeSha256 = [string]$runtimeBinding.mainProcessExeSha256
             }
             config = [ordered]@{
                 mutationOutsideInstall = $false

@@ -14,6 +14,11 @@ from typing import Any
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TRANSACTION_ID = re.compile(r"^[0-9a-f]{32}$")
+INSTALL_TRANSITIONS = {
+    "fresh-install",
+    "candidate-transition",
+    "reinstalled-exact",
+}
 
 
 class EvidenceError(RuntimeError):
@@ -79,6 +84,112 @@ def nonempty(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         fail(f"{label} is required")
     return value
+
+
+def expected_install_transition(
+    probe: dict[str, Any],
+    installed_binary_sha256: str,
+) -> str:
+    service = mapping(probe.get("service"), "preinstall service")
+    if service.get("installed") is not True:
+        return "fresh-install"
+    prior_hash = hex64(
+        service.get("binarySha256"),
+        "preinstall service.binarySha256",
+    )
+    if prior_hash == installed_binary_sha256:
+        return "reinstalled-exact"
+    return "candidate-transition"
+
+
+def validate_runtime_service_binding(
+    service: dict[str, Any],
+    target: dict[str, Any],
+    expected_binary_sha256: str,
+    label: str,
+    *,
+    require_process: bool,
+) -> None:
+    configured_path = nonempty(
+        service.get("configuredBinaryPath"),
+        f"{label}.configuredBinaryPath",
+    )
+    expected_path = target["deployment"]["binaryPath"]
+    if target["platform"] == "windows":
+        exact(
+            pathlib.PureWindowsPath(configured_path),
+            pathlib.PureWindowsPath(expected_path),
+            f"{label}.configuredBinaryPath",
+        )
+    else:
+        exact(
+            configured_path,
+            expected_path,
+            f"{label}.configuredBinaryPath",
+        )
+    configured_resolved = nonempty(
+        service.get("configuredBinaryResolvedPath"),
+        f"{label}.configuredBinaryResolvedPath",
+    )
+    exec_start = nonempty(
+        service.get("execStartPath"),
+        f"{label}.execStartPath",
+    )
+    exec_start_resolved = nonempty(
+        service.get("execStartResolvedPath"),
+        f"{label}.execStartResolvedPath",
+    )
+    if target["platform"] == "windows":
+        exact(
+            pathlib.PureWindowsPath(configured_resolved),
+            pathlib.PureWindowsPath(expected_path),
+            f"{label}.configuredBinaryResolvedPath",
+        )
+        exact(
+            pathlib.PureWindowsPath(exec_start),
+            pathlib.PureWindowsPath(configured_resolved),
+            f"{label}.execStartPath",
+        )
+        exact(
+            pathlib.PureWindowsPath(exec_start_resolved),
+            pathlib.PureWindowsPath(configured_resolved),
+            f"{label}.execStartResolvedPath",
+        )
+    else:
+        exact(
+            exec_start_resolved,
+            configured_resolved,
+            f"{label}.execStartResolvedPath",
+        )
+    if not require_process:
+        exact(service.get("mainProcessExePath"), None, f"{label}.mainProcessExePath")
+        exact(
+            service.get("mainProcessExeSha256"),
+            None,
+            f"{label}.mainProcessExeSha256",
+        )
+        return
+    main_process_path = nonempty(
+        service.get("mainProcessExePath"),
+        f"{label}.mainProcessExePath",
+    )
+    if target["platform"] == "windows":
+        exact(
+            pathlib.PureWindowsPath(main_process_path),
+            pathlib.PureWindowsPath(configured_resolved),
+            f"{label}.mainProcessExePath",
+        )
+    else:
+        exact(
+            main_process_path,
+            configured_resolved,
+            f"{label}.mainProcessExePath",
+        )
+    exact(
+        service.get("mainProcessExeSha256"),
+        expected_binary_sha256,
+        f"{label}.mainProcessExeSha256",
+    )
 
 
 def validate_result_evidence(
@@ -484,6 +595,17 @@ def validate_install_result(
         probe["service"]["binarySha256"],
         f"{label} service.priorBinarySha256",
     )
+    transition = nonempty(
+        service.get("installTransition"),
+        f"{label} service.installTransition",
+    )
+    if transition not in INSTALL_TRANSITIONS:
+        fail(f"{label} service.installTransition is invalid")
+    exact(
+        transition,
+        expected_install_transition(probe, artifact["_installed_hash"]),
+        f"{label} service.installTransition",
+    )
     exact(service.get("processCount"), 1, f"{label} service.processCount")
     first_pid = positive(
         service.get("pidBeforeRestart"), f"{label} service.pidBeforeRestart"
@@ -493,39 +615,13 @@ def validate_install_result(
     )
     if first_pid == final_pid:
         fail(f"{label} did not prove a real service restart")
-    if target["platform"] == "linux":
-        configured_path = nonempty(
-            service.get("configuredBinaryPath"),
-            f"{label} service.configuredBinaryPath",
-        )
-        exact(
-            configured_path,
-            target["deployment"]["binaryPath"],
-            f"{label} service.configuredBinaryPath",
-        )
-        configured_resolved = nonempty(
-            service.get("configuredBinaryResolvedPath"),
-            f"{label} service.configuredBinaryResolvedPath",
-        )
-        nonempty(
-            service.get("execStartPath"),
-            f"{label} service.execStartPath",
-        )
-        exact(
-            service.get("execStartResolvedPath"),
-            configured_resolved,
-            f"{label} service.execStartResolvedPath",
-        )
-        exact(
-            service.get("mainProcessExePath"),
-            configured_resolved,
-            f"{label} service.mainProcessExePath",
-        )
-        exact(
-            service.get("mainProcessExeSha256"),
-            artifact["_installed_hash"],
-            f"{label} service.mainProcessExeSha256",
-        )
+    validate_runtime_service_binding(
+        service,
+        target,
+        artifact["_installed_hash"],
+        f"{label} service",
+        require_process=True,
+    )
 
     config = mapping(result.get("config"), f"{label} config evidence")
     false(
@@ -716,7 +812,28 @@ def validate_rollback(
     service = validate_service_snapshot(result.get("service"), f"{label} service")
     config = validate_config_snapshot(result.get("config"), target, f"{label} config")
     network = validate_network_snapshot(result.get("network"), f"{label} network")
-    exact(service, probe["service"], f"{label} service versus probe")
+    for field, expected in probe["service"].items():
+        if field == "pid":
+            continue
+        exact(
+            service[field],
+            expected,
+            f"{label} service.{field} versus probe",
+        )
+    if probe["service"]["running"]:
+        restored_pid = positive(service["pid"], f"{label} service.pid")
+        if restored_pid == probe["service"]["pid"]:
+            fail(f"{label} did not prove a restarted restored service")
+    else:
+        exact(service["pid"], None, f"{label} service.pid")
+    if probe["service"]["installed"]:
+        validate_runtime_service_binding(
+            mapping(result.get("service"), f"{label} service"),
+            target,
+            probe["service"]["binarySha256"],
+            f"{label} service",
+            require_process=probe["service"]["running"],
+        )
     exact(config, probe["config"], f"{label} config versus probe")
     exact(network, probe["network"], f"{label} network versus probe")
     for field in (

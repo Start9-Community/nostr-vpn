@@ -41,6 +41,7 @@ from typing import Any
 from fleet_release_canary_evidence import (
     EvidenceError,
     exact as require_exact,
+    expected_install_transition,
     false as require_false,
     positive as require_positive_int,
     true as require_true,
@@ -871,9 +872,6 @@ def validate_inventory(
 
 
 def local_machine_identity_sha256() -> str:
-    override = os.environ.get("NVPN_FLEET_LOCAL_MACHINE_ID_SHA256", "").strip()
-    if override:
-        return require_hex(override, HEX64, "NVPN_FLEET_LOCAL_MACHINE_ID_SHA256")
     system = platform.system()
     raw = ""
     if system == "Darwin":
@@ -1044,6 +1042,10 @@ def build_expectations(
             "artifactSha256": artifact["sha256"],
             "artifactSize": artifact["size"],
             "installedBinarySha256": artifact["_installed_hash"],
+            "installTransition": expected_install_transition(
+                probe,
+                artifact["_installed_hash"],
+            ),
             "installPayload": artifact["_install_payload"],
             "preinstallProbe": {
                 field: probe[field]

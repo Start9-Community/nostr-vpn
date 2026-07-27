@@ -198,7 +198,9 @@ def assert_service_runtime_binding(
     service: dict[str, Any],
     binary_path: pathlib.Path,
     installed_binary_sha256: str,
-) -> dict[str, str]:
+    *,
+    require_process: bool = True,
+) -> dict[str, Any]:
     configured_resolved = service.get("_configuredBinaryResolvedPath")
     if not isinstance(configured_resolved, str) or not configured_resolved:
         fail("configured binary does not resolve to an installed executable")
@@ -209,11 +211,14 @@ def assert_service_runtime_binding(
     if exec_start_resolved != configured_resolved:
         fail("systemd ExecStart does not resolve to the configured binary")
     main_process_path = service.get("_mainProcessExePath")
-    if main_process_path != configured_resolved:
-        fail("systemd MainPID does not execute the configured binary")
     main_process_hash = service.get("_mainProcessExeSha256")
-    if main_process_hash != installed_binary_sha256:
-        fail("systemd MainPID executable hash is not the installed candidate")
+    if require_process:
+        if main_process_path != configured_resolved:
+            fail("systemd MainPID does not execute the configured binary")
+        if main_process_hash != installed_binary_sha256:
+            fail("systemd MainPID executable hash is not the expected binary")
+    elif main_process_path is not None or main_process_hash is not None:
+        fail("stopped systemd service unexpectedly has a bound MainPID")
     return {
         "configuredBinaryPath": str(binary_path),
         "configuredBinaryResolvedPath": configured_resolved,
@@ -527,6 +532,19 @@ def assert_expected(
         fail("target has stale exit resolver state before install")
     if expected.get("expected") != frozen:
         fail("expectations do not bind the frozen target identity")
+    service = state["service"]
+    if service["installed"]:
+        if not service["binaryPresent"]:
+            fail("cannot canary an installed service whose binary is absent")
+        transition = (
+            "reinstalled-exact"
+            if service["binarySha256"] == expected["installedBinarySha256"]
+            else "candidate-transition"
+        )
+    else:
+        transition = "fresh-install"
+    if expected.get("installTransition") != transition:
+        fail("install transition does not match the preinstall service state")
 
 
 def snapshot_transaction(
@@ -777,8 +795,34 @@ def restore_transaction(
         "config": raw["config"],
         "network": raw["network"],
     }
-    if after_public != expected_public:
-        fail("rollback did not restore the exact service/config/network snapshot")
+    for field, value in expected_public["service"].items():
+        if field != "pid" and after_public["service"].get(field) != value:
+            fail(f"rollback did not restore service field {field}")
+    prior_pid = expected_public["service"]["pid"]
+    restored_pid = after_public["service"]["pid"]
+    if prior["running"]:
+        if not isinstance(restored_pid, int) or restored_pid <= 0:
+            fail("rollback did not restart the restored service")
+        if restored_pid == prior_pid:
+            fail("rollback did not prove a new restored service process")
+    elif restored_pid is not None:
+        fail("rollback unexpectedly started a previously stopped service")
+    if after_public["config"] != expected_public["config"]:
+        fail("rollback did not restore the exact config snapshot")
+    if after_public["network"] != expected_public["network"]:
+        fail("rollback did not restore the exact network snapshot")
+    runtime_binding: dict[str, Any] = {}
+    if prior["installed"]:
+        runtime_binding = assert_service_runtime_binding(
+            after["service"],
+            binary,
+            prior["binarySha256"],
+            require_process=prior["running"],
+        )
+    restored_service = {
+        **after_public["service"],
+        **runtime_binding,
+    }
     journal_hash = write_journal(
         transaction, target["id"], transaction_id, "rolled-back"
     )
@@ -793,9 +837,11 @@ def restore_transaction(
             "durableJournal": True,
             "journalReceiptSha256": journal_hash,
         },
-        **after_public,
+        "service": restored_service,
+        "config": after_public["config"],
+        "network": after_public["network"],
         "snapshotReceiptSha256": digest_file(snapshot_file),
-        "serviceReceiptSha256": digest_bytes(canonical(after_public["service"])),
+        "serviceReceiptSha256": digest_bytes(canonical(restored_service)),
         "configReceiptSha256": digest_bytes(canonical(after_public["config"])),
         "routesReceiptSha256": digest_bytes(after["network"]["_routesBytes"]),
         "resolverReceiptSha256": digest_bytes(after["network"]["_resolverBytes"]),
@@ -827,6 +873,13 @@ def install_staged(
         fail("staged artifact size mismatch")
     before = capture(target, checks=target["checks"])
     assert_expected(before, target, expected)
+    if before["service"]["installed"]:
+        assert_service_runtime_binding(
+            before["service"],
+            before["binaryPath"],
+            before["service"]["binarySha256"],
+            require_process=before["service"]["running"],
+        )
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     snapshot = snapshot_transaction(transaction, before, target)
     write_journal(transaction, target["id"], transaction_id, "preparing")
@@ -867,6 +920,11 @@ def install_staged(
         wait_service(unit, True)
         first = capture(target, checks=target["checks"])
         first_pid = first["service"]["pid"]
+        assert_service_runtime_binding(
+            first["service"],
+            binary,
+            expected["installedBinarySha256"],
+        )
         status_before = first["status"]
         tx_before, rx_before = aggregate_counters(status_before)
         payload_target = str(target["checks"]["payloadTarget"])
@@ -965,6 +1023,7 @@ def install_staged(
                 "priorRunning": before["service"]["running"],
                 "priorBinaryPresent": before["service"]["binaryPresent"],
                 "priorBinarySha256": before["service"]["binarySha256"],
+                "installTransition": expected["installTransition"],
                 "processCount": final["service"]["processCount"],
                 "pidBeforeRestart": first_pid,
                 "pidAfterRestart": final_pid,

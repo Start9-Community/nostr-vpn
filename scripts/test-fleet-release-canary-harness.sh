@@ -13,7 +13,13 @@ WINDOWS_HELPER="$APP/scripts/fleet_release_canary_remote_windows.ps1"
 GATE_VALIDATOR="$APP/scripts/fleet-release-gate-evidence.mjs"
 PROVENANCE_LIB="$APP/scripts/release-artifact-provenance-lib.mjs"
 DRIVER_LOG="$WORK/driver.log"
-LOCAL_ID="$(printf 'a%.0s' {1..64})"
+LOCAL_ID="$(
+  PYTHONPATH="$ROOT/scripts" python3 - <<'PY'
+from fleet_release_canary import local_machine_identity_sha256
+
+print(local_machine_identity_sha256())
+PY
+)"
 
 cleanup() {
   rm -rf "$WORK"
@@ -94,6 +100,28 @@ for action in expected:
         raise SystemExit(f"{target} has a duplicate raw receipt binding")
     paths.add(str(raw))
     receipts.add(claimed)
+PY
+}
+
+json_target_install_transition_is() {
+  local path="$1" target="$2" expected="$3"
+  python3 - "$path" "$target" "$expected" <<'PY'
+import json
+import pathlib
+import sys
+
+path, target, expected = sys.argv[1:]
+value = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+matches = [row for row in value["targets"] if row["id"] == target]
+if len(matches) != 1:
+    raise SystemExit(f"{target} result row was not unique")
+raw_path = pathlib.Path(matches[0]["evidence"]["install"]["path"])
+raw = json.loads(raw_path.read_text(encoding="utf-8"))
+observed = raw["service"].get("installTransition")
+if observed != expected:
+    raise SystemExit(
+        f"{target} transition was {observed!r}, expected {expected!r}"
+    )
 PY
 }
 
@@ -235,13 +263,20 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +expected_target = target["expected"]
 +inactive = target_id in {"inactive", "bad-process-inactive"}
 +absent = target_id == "absent"
++exact_candidate = target_id in {"already-exact", "already-exact-wrong"}
 +service = {
 +    "installed": not absent,
 +    "enabled": not (inactive or absent),
 +    "running": not (inactive or absent),
 +    "binaryPresent": not absent,
 +    "binarySha256": (
-+        None if absent else digest(f"prior-binary:{target_id}")
++        None
++        if absent
++        else (
++            os.environ["FAKE_PROBE_BINARY_SHA256"]
++            if exact_candidate
++            else digest(f"prior-binary:{target_id}")
++        )
 +    ),
 +    "definitionSha256": (
 +        None if absent else digest(f"definition:{target_id}")
@@ -283,6 +318,11 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +    )
 +    probe_app_version = os.environ["FAKE_PROBE_APP_VERSION"]
 +    probe_fips_version = os.environ["FAKE_PROBE_FIPS_CORE_VERSION"]
++    if exact_candidate:
++        probe_app_version = os.environ["FAKE_CANDIDATE_APP_VERSION"]
++        probe_fips_version = os.environ["FAKE_CANDIDATE_FIPS_CORE_VERSION"]
++    elif target_id == "same-version-transition":
++        probe_app_version = os.environ["FAKE_CANDIDATE_APP_VERSION"]
 +    if target_id == "malformed-probe-hash":
 +        probe_hash = "not-a-sha256"
 +    value = {
@@ -313,6 +353,37 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +        if target_id == "rollback-fail":
 +            print("fixture rollback failed", file=sys.stderr)
 +            raise SystemExit(1)
++        rollback_service = dict(service)
++        if (
++            rollback_service["running"]
++            and target_id != "rollback-stale-pid"
++        ):
++            rollback_service["pid"] = 199
++        if rollback_service["installed"]:
++            rollback_service.update(
++                {
++                    "configuredBinaryPath": target["deployment"]["binaryPath"],
++                    "configuredBinaryResolvedPath": target["deployment"][
++                        "binaryPath"
++                    ],
++                    "execStartPath": target["deployment"]["binaryPath"],
++                    "execStartResolvedPath": target["deployment"][
++                        "binaryPath"
++                    ],
++                    "mainProcessExePath": (
++                        target["deployment"]["binaryPath"]
++                        if rollback_service["running"]
++                        else None
++                    ),
++                    "mainProcessExeSha256": (
++                        digest("stale-rollback-process")
++                        if target_id == "rollback-stale-image"
++                        else rollback_service["binarySha256"]
++                        if rollback_service["running"]
++                        else None
++                    ),
++                }
++            )
 +        value = {
 +            "schema": 2,
 +            "targetId": target_id,
@@ -326,7 +397,7 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +                    f"rollback-journal:{target_id}"
 +                ),
 +            },
-+            "service": service,
++            "service": rollback_service,
 +            "config": config,
 +            "network": network,
 +            "snapshotReceiptSha256": digest(f"snapshot:{target_id}"),
@@ -418,12 +489,19 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +                "priorRunning": service["running"],
 +                "priorBinaryPresent": service["binaryPresent"],
 +                "priorBinarySha256": service["binarySha256"],
++                "installTransition": (
++                    "candidate-transition"
++                    if target_id == "already-exact-wrong"
++                    else expectations["installTransition"]
++                ),
 +                "processCount": (
 +                    2
 +                    if target_id in {
 +                        "bad-process",
 +                        "bad-process-inactive",
 +                        "rollback-fail",
++                        "rollback-stale-pid",
++                        "rollback-stale-image",
 +                    }
 +                    else 1
 +                ),
@@ -755,11 +833,12 @@ common=(
 
 run_execute() {
   NVPN_FLEET_INSTALL_AUTHORIZED=1 \
-  NVPN_FLEET_LOCAL_MACHINE_ID_SHA256="$LOCAL_ID" \
   FAKE_DRIVER_LOG="$DRIVER_LOG" \
   FAKE_PROBE_BINARY_SHA256="$PAYLOAD_SHA" \
   FAKE_PROBE_APP_VERSION="4.1.4" \
   FAKE_PROBE_FIPS_CORE_VERSION="0.4.44 (rev 1111111111)" \
+  FAKE_CANDIDATE_APP_VERSION="4.1.5" \
+  FAKE_CANDIDATE_FIPS_CORE_VERSION="0.4.45 (rev ${FIPS_SHA:0:10})" \
     python3 "$ORCHESTRATOR" execute "${common[@]}"
 }
 
@@ -789,6 +868,15 @@ python3 -m py_compile \
   "$ROOT/scripts/fleet_release_canary_remote_linux.py" \
   "$DRIVER"
 bash -n "$0"
+if grep -Fq "NVPN_FLEET_LOCAL_MACHINE_ID_SHA256" \
+  "$ORCHESTRATOR" \
+  "$ROOT/scripts/fleet_release_canary_evidence.py" \
+  "$ROOT/scripts/fleet_release_canary_ssh_driver.py" \
+  "$ROOT/scripts/fleet_release_canary_remote_linux.py" \
+  "$ROOT/scripts/fleet_release_canary_remote_windows.ps1"
+then
+  fail "fleet production path retains a current-host identity override"
+fi
 python3 - "$ORCHESTRATOR" <<'PY'
 import hashlib
 import importlib.util
@@ -918,6 +1006,11 @@ frozen = {
 }
 base_state = {
     **preinstall_probe,
+    "service": {
+        "installed": False,
+        "binaryPresent": False,
+        "binarySha256": None,
+    },
     "config": {
         "sha256": frozen["configSha256"],
         "signedRosterStoreSha256": frozen["signedRosterStoreSha256"],
@@ -979,6 +1072,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
                 "artifactSha256": candidate_sha256,
                 "artifactSize": len(candidate),
                 "installedBinarySha256": candidate_sha256,
+                "installTransition": "fresh-install",
                 "preinstallProbe": preinstall_probe,
                 "appVersion": "4.1.5",
                 "fipsVersion": "0.4.45",
@@ -1041,6 +1135,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
                 "artifactSha256": candidate_sha256,
                 "artifactSize": len(candidate),
                 "installedBinarySha256": candidate_sha256,
+                "installTransition": "fresh-install",
                 "preinstallProbe": preinstall_probe,
                 "installPayload": {
                     "format": "executable",
@@ -1117,6 +1212,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
             "artifactSha256": candidate_sha256,
             "artifactSize": len(candidate),
             "installedBinarySha256": candidate_sha256,
+            "installTransition": "fresh-install",
             "preinstallProbe": preinstall_probe,
             "installPayload": {"format": "executable", "companions": []},
             "appVersion": "4.1.5",
@@ -1182,7 +1278,7 @@ for field, bad_value, expected_error in (
     (
         "_mainProcessExeSha256",
         "8" * 64,
-        "systemd MainPID executable hash is not the installed candidate",
+        "systemd MainPID executable hash is not the expected binary",
     ),
 ):
     stale = copy.deepcopy(runtime_state)
@@ -1200,6 +1296,35 @@ for field, bad_value, expected_error in (
             ) from error
     else:
         raise SystemExit(f"Linux {field} drift was accepted")
+stopped = copy.deepcopy(runtime_state)
+stopped["_mainProcessExePath"] = None
+stopped["_mainProcessExeSha256"] = None
+stopped_runtime = namespace["assert_service_runtime_binding"](
+    stopped,
+    pathlib.Path("/usr/local/bin/nvpn"),
+    candidate_sha256,
+    require_process=False,
+)
+if (
+    stopped_runtime["mainProcessExePath"] is not None
+    or stopped_runtime["mainProcessExeSha256"] is not None
+):
+    raise SystemExit("Linux stopped-service binding invented a process")
+stopped["_mainProcessExePath"] = "/usr/local/bin/nvpn"
+try:
+    namespace["assert_service_runtime_binding"](
+        stopped,
+        pathlib.Path("/usr/local/bin/nvpn"),
+        candidate_sha256,
+        require_process=False,
+    )
+except RuntimeError as error:
+    if "unexpectedly has a bound MainPID" not in str(error):
+        raise SystemExit(
+            f"Linux stopped-process drift returned the wrong guard: {error}"
+        ) from error
+else:
+    raise SystemExit("Linux stopped service accepted a live process binding")
 try:
     namespace["finish_staged_cleanup"](
         RuntimeError("primary adapter failure"),
@@ -1431,9 +1556,34 @@ import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for required in (
+    "function ParseServiceExecutablePath",
+    "function AssertServiceRuntimeBinding",
+    "_execStartPath",
+    "_mainProcessExePath",
+    "_mainProcessExeSha256",
+    "[StringComparison]::OrdinalIgnoreCase",
+):
+    if required not in text:
+        raise SystemExit(
+            f"Windows exact service/process binding lacks {required}"
+        )
+if ".Contains(" in text:
+    raise SystemExit(
+        "Windows service executable binding still accepts substring matches"
+    )
 restore = text[text.index("function RestoreTransaction"):text.index(
     "function InstallCandidate"
 )]
+for required in (
+    "rollback did not prove a new restored Windows service process",
+    "AssertServiceRuntimeBinding",
+    "$restoredService",
+):
+    if required not in restore:
+        raise SystemExit(
+            "Windows rollback lacks PID-safe restored executable binding"
+        )
 delete = restore.index("sc.exe delete $name")
 wait_deleted = restore.index("WaitServiceDeleted $name")
 remove_binary = restore.index(
@@ -1567,8 +1717,7 @@ fi
 cp "$WORK/release-good.json" "$GATE_RELEASE"
 refresh_gate_binding
 
-if NVPN_FLEET_LOCAL_MACHINE_ID_SHA256="$LOCAL_ID" \
-  FAKE_DRIVER_LOG="$DRIVER_LOG" \
+if FAKE_DRIVER_LOG="$DRIVER_LOG" \
   python3 "$ORCHESTRATOR" execute "${common[@]}" >/dev/null 2>&1
 then
   fail "execute ran without explicit install authorization"
@@ -1587,7 +1736,9 @@ json_target_evidence_is \
   "$EVIDENCE/fleet-canary-result.json" good probe install
 
 write_inventory \
-  "$INVENTORY" good inactive absent unreachable noaccess report-only
+  "$INVENTORY" \
+  good inactive absent already-exact same-version-transition \
+  unreachable noaccess report-only
 rm -rf "$EVIDENCE"
 rm -f "$DRIVER_LOG"
 set +e
@@ -1595,11 +1746,20 @@ run_execute >/dev/null
 status=$?
 set -e
 [[ "$status" == 2 ]] || fail "incomplete access did not return status 2"
-for target in good inactive absent; do
+for target in good inactive absent already-exact same-version-transition; do
   json_status_is "$EVIDENCE/fleet-canary-result.json" "$target" passed
   grep -Fxq "install:$target" "$DRIVER_LOG" \
     || fail "$target was not installed"
 done
+json_target_install_transition_is \
+  "$EVIDENCE/fleet-canary-result.json" good candidate-transition
+json_target_install_transition_is \
+  "$EVIDENCE/fleet-canary-result.json" absent fresh-install
+json_target_install_transition_is \
+  "$EVIDENCE/fleet-canary-result.json" already-exact reinstalled-exact
+json_target_install_transition_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  same-version-transition candidate-transition
 json_field_is \
   "$EVIDENCE/fleet-canary-result.json" \
   releaseGateManifestSha256 \
@@ -1654,7 +1814,8 @@ for adversary in \
   wrong-roster \
   bad-raw \
   misdirected-unit \
-  stale-main-process
+  stale-main-process \
+  already-exact-wrong
 do
   write_inventory "$INVENTORY" "$adversary"
   rm -rf "$EVIDENCE"
@@ -1681,16 +1842,20 @@ do
     "$GATE_RELEASE_SHA"
 done
 
-write_inventory "$INVENTORY" rollback-fail
-rm -rf "$EVIDENCE"
-rm -f "$DRIVER_LOG"
-set +e
-run_execute >/dev/null
-status=$?
-set -e
-[[ "$status" == 1 ]] || fail "rollback failure was accepted"
-json_status_is \
-  "$EVIDENCE/fleet-canary-result.json" rollback-fail failed-rollback
+for adversary in rollback-fail rollback-stale-pid rollback-stale-image; do
+  write_inventory "$INVENTORY" "$adversary"
+  rm -rf "$EVIDENCE"
+  rm -f "$DRIVER_LOG"
+  set +e
+  run_execute >/dev/null
+  status=$?
+  set -e
+  [[ "$status" == 1 ]] || fail "$adversary rollback failure was accepted"
+  json_status_is \
+    "$EVIDENCE/fleet-canary-result.json" "$adversary" failed-rollback
+  grep -Fxq "rollback:$adversary" "$DRIVER_LOG" \
+    || fail "$adversary did not execute rollback"
+done
 
 write_inventory "$INVENTORY" pending never
 rm -rf "$EVIDENCE"
