@@ -11,6 +11,7 @@ WINDOWS_HOST_ENTRY="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.sh"
 WINDOWS_HOST_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 WINDOWS_GUEST_ENTRY="$ROOT/scripts/desktop-windows-underlay-change-e2e.ps1"
 WINDOWS_GUEST_LIB="$ROOT/scripts/desktop-windows-underlay-change-e2e.lib.ps1"
+WINDOWS_GUEST_CRASH_LIB="$ROOT/scripts/desktop-windows-underlay-crash-recovery.lib.ps1"
 LINUX_HOST_ENTRY="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
 LINUX_HOST_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_GUEST="$ROOT/scripts/desktop-linux-underlay-change-e2e.sh"
@@ -31,7 +32,8 @@ WINDOWS_HOST="$COMBINED_DIR/windows-host.sh"
 WINDOWS_GUEST="$COMBINED_DIR/windows-guest.ps1"
 LINUX_HOST="$COMBINED_DIR/linux-host.sh"
 cat "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" >"$WINDOWS_HOST"
-cat "$WINDOWS_GUEST_ENTRY" "$WINDOWS_GUEST_LIB" >"$WINDOWS_GUEST"
+cat "$WINDOWS_GUEST_ENTRY" "$WINDOWS_GUEST_LIB" "$WINDOWS_GUEST_CRASH_LIB" \
+  >"$WINDOWS_GUEST"
 cat "$LINUX_HOST_ENTRY" "$LINUX_HOST_LIB" >"$LINUX_HOST"
 
 fail() {
@@ -65,7 +67,10 @@ for script in \
 do
   [[ -x "$script" ]] || fail "$(basename "$script") is missing or not executable"
 done
-for helper in "$WINDOWS_HOST_LIB" "$WINDOWS_GUEST_LIB" "$LINUX_HOST_LIB"; do
+for helper in \
+  "$WINDOWS_HOST_LIB" "$WINDOWS_GUEST_LIB" "$WINDOWS_GUEST_CRASH_LIB" \
+  "$LINUX_HOST_LIB"
+do
   [[ -f "$helper" ]] || fail "$(basename "$helper") is missing"
 done
 [[ -f "$HOST_PEER_IMPORT" ]] || fail "host-built peer importer is missing"
@@ -74,7 +79,8 @@ done
 require_tokens "$WINDOWS_HOST_ENTRY" "helper module" \
   'windows-vm-desktop-underlay-change-e2e.lib.sh'
 require_tokens "$WINDOWS_GUEST_ENTRY" "helper module" \
-  'desktop-windows-underlay-change-e2e.lib.ps1'
+  'desktop-windows-underlay-change-e2e.lib.ps1' \
+  'desktop-windows-underlay-crash-recovery.lib.ps1'
 require_tokens "$LINUX_HOST_ENTRY" "helper module" \
   'linux-vm-desktop-underlay-change-e2e.lib.sh'
 require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
@@ -236,6 +242,35 @@ require_tokens "$WINDOWS_GUEST" "independent cleanup evidence" \
   '"WireGuardProbe"' \
   'Test-WireGuardHandshake' \
   'Assert-WireGuardEndpointRoute'
+require_tokens "$WINDOWS_GUEST" "power-loss startup recovery evidence" \
+  'Stop-Process -Id $crashedPid -Force' \
+  '$CleanupJournalPath = Join-Path $StateDir "daemon.cleanup.json"' \
+  'cleanup_journal_present_before_crash' \
+  'cleanup_journal_survived_forced_termination' \
+  'cleanup_journal_removed_after_restart' \
+  'selected_direct_while_daemon_stopped' \
+  'Assert-SingleExactCandidateDaemon' \
+  'daemon_process_count = 1' \
+  'crash-recovery.receipt.json'
+require_tokens "$WINDOWS_HOST" "power-loss receipt enforcement" \
+  'wait_for_guest_marker crash-recovery.receipt.json 45' \
+  'crash-recovery-receipt.json' \
+  '.replacement_daemon_pid != .crashed_daemon_pid' \
+  '.daemon_process_count == 1' \
+  '.startup_recovery_milliseconds <= 30000' \
+  '.cleanup_journal_removed_after_restart == true'
+python3 - "$WINDOWS_GUEST" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+crash = text[text.index("function Invoke-CrashRecovery {"):]
+for forbidden in ("repair-network", "Invoke-IsolatedNetworkCleanup"):
+    if forbidden in crash:
+        raise SystemExit(
+            f"Windows crash recovery uses forbidden fallback path: {forbidden}"
+        )
+PY
 for evidence in \
   '.wireguard_endpoint_route.interface_index == $interface_index' \
   '.wireguard_endpoint_route.next_hop == $gateway' \

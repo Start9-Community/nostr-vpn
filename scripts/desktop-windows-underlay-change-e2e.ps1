@@ -38,8 +38,10 @@ param(
 $ErrorActionPreference = "Stop"
 $WireGuardPrivateKeyPath = Join-Path $StateDir "wireguard-client-private.key"
 $WireGuardConfigPath = Join-Path $StateDir "wireguard-client.conf"
+$CleanupJournalPath = Join-Path $StateDir "daemon.cleanup.json"
 
 . (Join-Path $PSScriptRoot "desktop-windows-underlay-change-e2e.lib.ps1")
+. (Join-Path $PSScriptRoot "desktop-windows-underlay-crash-recovery.lib.ps1")
 function Protect-SecretFile {
   param([string]$Path)
   & icacls.exe $Path /inheritance:r `
@@ -742,14 +744,7 @@ switch ($Action) {
         "--autoconnect", "true"
       )
 
-      $daemon = Start-Process -FilePath $Binary -ArgumentList @(
-        "daemon",
-        "--config", $Config,
-        "--iface", $TunnelInterface,
-        "--mesh-refresh-interval-secs", "2"
-      ) -RedirectStandardOutput (Join-Path $StateDir "daemon.stdout.log") `
-        -RedirectStandardError (Join-Path $StateDir "daemon.stderr.log") `
-        -WindowStyle Hidden -PassThru
+      $daemon = Start-CandidateDaemon "daemon"
 
       Wait-ForCondition "candidate daemon PID file" 30000 {
         try { (Get-DaemonPid) -eq $daemon.Id } catch { $false }
@@ -841,61 +836,11 @@ switch ($Action) {
       ) $FixtureDnsName $daemonPid ([int]$primary.ifIndex)
 
       Wait-ForFile "select-direct"
-      Invoke-Nvpn @(
-        "set", "--config", $Config,
-        "--wireguard-exit-enabled", "false",
-        "--exit-dns-mode", "automatic"
-      )
-      Wait-ForCondition "native Direct route, DNS, and HTTPS restoration" 30000 {
-        try {
-          $route = Get-BestRoute "1.1.1.1"
-          $endpointHost = Get-WireGuardEndpointHost
-          $endpointRoutes = @(Get-NetRoute -AddressFamily IPv4 `
-            -DestinationPrefix "$endpointHost/32" `
-            -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
-          $wireGuardService = Get-Service `
-            -Name ('WireGuardTunnel$' + $WireGuardInterface) `
-            -ErrorAction SilentlyContinue
-          return (
-            [int]$route.InterfaceIndex -eq [int]$primary.ifIndex -and
-            (Get-DaemonPid) -eq $daemonPid -and
-            !(Get-NetAdapter -Name $WireGuardInterface `
-              -IncludeHidden -ErrorAction SilentlyContinue) -and
-            !$wireGuardService -and
-            $endpointRoutes.Count -eq 0 -and
-            (Test-PublicDns) -and
-            (Test-ExternalHttps)
-          )
-        }
-        catch {
-          return $false
-        }
-      } 250 | Out-Null
-      Assert-SessionContinuity `
-        $daemonPid `
-        $endpointStartCount `
+      $daemon = Invoke-CrashRecovery `
+        $daemon `
+        ([int]$primary.ifIndex) `
         $identityNpub `
         $tunnelIp
-      Remove-Item -LiteralPath $WireGuardConfigPath `
-        -Force -ErrorAction SilentlyContinue
-      Remove-Item -LiteralPath $WireGuardPrivateKeyPath `
-        -Force -ErrorAction SilentlyContinue
-      Write-Marker "direct.receipt.json" (
-        [PSCustomObject]@{
-          daemon_pid = $daemonPid
-          physical_interface_index = [int]$primary.ifIndex
-          identity_npub = $identityNpub
-          tunnel_ip = $tunnelIp
-          participant_npub = $PeerNpub
-          endpoint_start_count = $endpointStartCount
-          wireguard_interface_removed = $true
-          wireguard_endpoint_route_removed = $true
-          wireguard_service_removed = $true
-          wireguard_source_secrets_removed = $true
-          public_dns = $true
-          verified_https = $true
-        } | ConvertTo-Json -Compress
-      )
       Write-Marker "done"
     }
     finally {

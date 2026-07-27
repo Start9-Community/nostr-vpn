@@ -654,7 +654,7 @@ run_dns_case() {
   } >>"$ARTIFACT_DIR/dns-matrix.txt"
 }
 
-run_dns_matrix_and_direct_restore() {
+run_dns_matrix_and_crash_restore() {
   run_dns_case automatic cloudflare
   run_dns_case cloudflare cloudflare
   run_dns_case quad9 quad9
@@ -662,11 +662,30 @@ run_dns_matrix_and_direct_restore() {
   run_dns_case through-exit fixture_dns
 
   signal_guest select-direct
+  wait_for_guest_marker crash-recovery.receipt.json 45
   wait_for_guest_marker direct.receipt.json 45
   wait_for_guest_marker done 10
   wait "$WINDOWS_RUN_PID"
   WINDOWS_RUN_PID=""
+  guest_receipt crash-recovery.receipt.json \
+    >"$ARTIFACT_DIR/crash-recovery-receipt.json"
   guest_receipt direct.receipt.json >"$ARTIFACT_DIR/direct-receipt.json"
+  jq -e '
+    .crashed_daemon_pid > 0
+    and .replacement_daemon_pid > 0
+    and .replacement_daemon_pid != .crashed_daemon_pid
+    and .daemon_process_count == 1
+    and .exact_candidate_binary_restarted == true
+    and .cleanup_journal_present_before_crash == true
+    and .cleanup_journal_survived_forced_termination == true
+    and .cleanup_journal_removed_after_restart == true
+    and .selected_direct_while_daemon_stopped == true
+    and .startup_recovery_milliseconds <= 30000
+    and .wireguard_exit_state_remained_installed_after_crash == true
+    and .dns_policy_remained_installed_after_crash == true
+    and .public_dns == true
+    and .verified_https == true
+  ' "$ARTIFACT_DIR/crash-recovery-receipt.json" >/dev/null
   jq -e '
     .wireguard_interface_removed == true
     and .wireguard_endpoint_route_removed == true
@@ -731,6 +750,10 @@ if (Test-Path -LiteralPath \$watchdogPath) {
 }
 if (Get-NetAdapter -Name $(ps_quote "nvpn-underlay-gate") -ErrorAction SilentlyContinue) {
   throw 'candidate Wintun interface remains after cleanup'
+}
+\$cleanupJournal = $(ps_quote "$GUEST_STATE_DIR\\daemon.cleanup.json")
+if (Test-Path -LiteralPath \$cleanupJournal) {
+  throw 'durable cleanup journal remains after recovered daemon stop'
 }
 \$rules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {
   \$_.DisplayName -eq 'nostr-vpn secure DNS' -or
@@ -959,7 +982,7 @@ guest_initialize
 initialize_and_start_peer
 start_windows_runner
 run_underlay_switches
-run_dns_matrix_and_direct_restore
+run_dns_matrix_and_crash_restore
 
 echo "WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E_OK"
 echo "artifacts=$ARTIFACT_DIR"
