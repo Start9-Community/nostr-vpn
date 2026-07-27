@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -25,6 +26,139 @@ from typing import Any
 HOST = re.compile(r"^[A-Za-z0-9_.@:-]+$")
 TRANSACTION = re.compile(r"^[0-9a-f]{32}$")
 PROTOCOL = "nvpn-fleet-ssh-transactional-v2"
+PYTHON_FUTURE_IMPORT = "from __future__ import annotations\n"
+WINDOWS_STDIN_WRAPPER = r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$transport = [Console]::In.ReadToEnd()
+$compressed = [Convert]::FromBase64String($transport)
+$memory = [IO.MemoryStream]::new([byte[]]$compressed)
+$gzip = [IO.Compression.GzipStream]::new(
+    $memory,
+    [IO.Compression.CompressionMode]::Decompress
+)
+$reader = [IO.StreamReader]::new(
+    $gzip,
+    [Text.UTF8Encoding]::new($false),
+    $true
+)
+try {
+    $source = $reader.ReadToEnd()
+} finally {
+    $reader.Dispose()
+    $gzip.Dispose()
+    $memory.Dispose()
+}
+
+$path = [IO.Path]::Combine(
+    [IO.Path]::GetTempPath(),
+    ('nvpn-fleet-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+)
+$exitCode = 1
+$writeStream = $null
+$lockStream = $null
+try {
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $bytes = $encoding.GetBytes($source)
+    $writeStream = [IO.FileStream]::new(
+        $path,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+    )
+    $writeStream.Write($bytes, 0, $bytes.Length)
+    $writeStream.Flush($true)
+    $writeStream.Position = 0
+    $writtenBeforeClose = [byte[]]::new($bytes.Length)
+    $offset = 0
+    while ($offset -lt $writtenBeforeClose.Length) {
+        $count = $writeStream.Read(
+            $writtenBeforeClose,
+            $offset,
+            $writtenBeforeClose.Length - $offset
+        )
+        if ($count -eq 0) {
+            throw 'transient fleet adapter initial readback was truncated'
+        }
+        $offset += $count
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $sourceHash = [Convert]::ToBase64String(
+            $sha.ComputeHash($bytes)
+        )
+        $initialHash = [Convert]::ToBase64String(
+            $sha.ComputeHash($writtenBeforeClose)
+        )
+    } finally {
+        $sha.Dispose()
+    }
+    if (
+        $sourceHash -cne $initialHash -or
+        $encoding.GetString($writtenBeforeClose) -cne $source
+    ) {
+        throw 'transient fleet adapter initial readback mismatch'
+    }
+    $writeStream.Dispose()
+    $writeStream = $null
+
+    $lockStream = [IO.FileStream]::new(
+        $path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    if ($lockStream.Length -ne $bytes.Length) {
+        throw 'transient fleet adapter readback length mismatch'
+    }
+    $lockStream.Position = 0
+    $written = [byte[]]::new($bytes.Length)
+    $offset = 0
+    while ($offset -lt $written.Length) {
+        $count = $lockStream.Read(
+            $written,
+            $offset,
+            $written.Length - $offset
+        )
+        if ($count -eq 0) {
+            throw 'transient fleet adapter readback was truncated'
+        }
+        $offset += $count
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $fileHash = [Convert]::ToBase64String(
+            $sha.ComputeHash($written)
+        )
+    } finally {
+        $sha.Dispose()
+    }
+    if (
+        $sourceHash -cne $fileHash -or
+        $encoding.GetString($written) -cne $source
+    ) {
+        throw 'transient fleet adapter readback mismatch'
+    }
+
+    & ([IO.Path]::Combine($PSHOME, 'powershell.exe')) `
+        -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
+    $exitCode = $LASTEXITCODE
+} finally {
+    if ($null -ne $writeStream) {
+        $writeStream.Dispose()
+    }
+    if ($null -ne $lockStream) {
+        $lockStream.Dispose()
+    }
+    if ([IO.File]::Exists($path)) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+    }
+    if ([IO.File]::Exists($path)) {
+        throw 'transient fleet adapter cleanup failed'
+    }
+}
+exit $exitCode
+""".strip()
 
 
 class DriverError(RuntimeError):
@@ -164,11 +298,10 @@ def adapter_source(platform_name: str) -> pathlib.Path:
     )
 
 
-def invoke_adapter(
-    target: dict[str, Any],
+def render_adapter_invocation(
+    platform_name: str,
     payload: dict[str, Any],
-) -> tuple[int, dict[str, Any] | None, str]:
-    platform_name = target.get("platform")
+) -> tuple[str, list[str]]:
     if platform_name not in {"linux", "windows"}:
         raise DriverError("only Linux and Windows fleet targets are supported")
     source_path = adapter_source(platform_name)
@@ -176,24 +309,51 @@ def invoke_adapter(
     encoded = base64.b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     ).decode()
+    helper = source_path.read_text(encoding="utf-8")
     if platform_name == "linux":
-        source = f"FLEET_PAYLOAD_B64={encoded!r}\n" + source_path.read_text(
-            encoding="utf-8"
+        if helper.count(PYTHON_FUTURE_IMPORT) != 1:
+            raise DriverError(
+                "Linux fleet adapter must contain exactly one canonical "
+                "future-import line"
+            )
+        source = helper.replace(
+            PYTHON_FUTURE_IMPORT,
+            f"{PYTHON_FUTURE_IMPORT}\nFLEET_PAYLOAD_B64={encoded!r}\n",
+            1,
         )
+        try:
+            compile(source, str(source_path), "exec")
+        except SyntaxError as error:
+            raise DriverError(
+                f"generated Linux fleet adapter is invalid: {error}"
+            ) from error
         remote_command = ["sudo", "-n", "python3", "-"]
     else:
-        source = f"$script:FleetPayloadB64 = '{encoded}'\n" + source_path.read_text(
-            encoding="utf-8"
-        )
+        raw_source = f"$script:FleetPayloadB64 = '{encoded}'\n{helper}"
+        source = base64.b64encode(
+            gzip.compress(raw_source.encode(), mtime=0)
+        ).decode()
+        wrapper = base64.b64encode(
+            WINDOWS_STDIN_WRAPPER.encode("utf-16le")
+        ).decode()
         remote_command = [
             "powershell.exe",
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-Command",
-            "-",
+            "-EncodedCommand",
+            wrapper,
         ]
+    return source, remote_command
+
+
+def invoke_adapter(
+    target: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None, str]:
+    platform_name = target.get("platform")
+    source, remote_command = render_adapter_invocation(platform_name, payload)
     arguments = transport_arguments(target, "ssh") + remote_command
     result = subprocess.run(
         arguments,

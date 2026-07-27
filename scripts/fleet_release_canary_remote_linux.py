@@ -1,7 +1,8 @@
 """Transient root-side Linux adapter for the nvpn fleet canary.
 
-The checked-in SSH driver prepends ``FLEET_PAYLOAD_B64`` and streams this file
-to ``sudo -n python3 -``.  Nothing from this adapter is installed on the host.
+The checked-in SSH driver injects ``FLEET_PAYLOAD_B64`` immediately after the
+future import and streams this file to ``sudo -n python3 -``.  Nothing from
+this adapter is installed on the host.
 """
 
 from __future__ import annotations
@@ -175,6 +176,26 @@ def status_json(binary: pathlib.Path, config: pathlib.Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail("nvpn status must be an object")
     return value
+
+
+def version_json(binary: pathlib.Path) -> dict[str, str]:
+    result = run([str(binary), "version", "--json"], timeout=30)
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"nvpn version was not JSON: {error}")
+    if not isinstance(value, dict):
+        fail("nvpn version must be an object")
+    app_version = value.get("version")
+    fips_version = value.get("fips_core_version")
+    if not isinstance(app_version, str) or not app_version:
+        fail("nvpn version lacks version")
+    if not isinstance(fips_version, str) or not fips_version:
+        fail("nvpn version lacks fips_core_version")
+    return {
+        "version": app_version,
+        "fips_core_version": fips_version,
+    }
 
 
 def peer_identity(peer: dict[str, Any]) -> str:
@@ -375,6 +396,7 @@ def capture(
     )
     if not probe_binary.is_file():
         fail(f"probe CLI does not exist: {probe_binary}")
+    probe_version = version_json(probe_binary)
     status = status_json(probe_binary, config)
     service = service_snapshot(unit, binary)
     config_value = config_snapshot(config, status)
@@ -384,6 +406,9 @@ def capture(
         "config": config_value,
         "network": network,
         "status": status,
+        "probeBinarySha256": digest_file(probe_binary),
+        "probeAppVersion": probe_version["version"],
+        "probeFipsCoreVersion": probe_version["fips_core_version"],
         "binaryPath": binary,
         "configPath": config,
         "unit": unit,
@@ -1002,6 +1027,9 @@ if action == "probe":
         "realChecks": True,
         "mocked": False,
         "remoteBuildPerformed": False,
+        "probeBinarySha256": state["probeBinarySha256"],
+        "probeAppVersion": state["probeAppVersion"],
+        "probeFipsCoreVersion": state["probeFipsCoreVersion"],
         "transaction": {
             "recoveryRequired": bool(pending),
             "pendingTransactionIds": pending,

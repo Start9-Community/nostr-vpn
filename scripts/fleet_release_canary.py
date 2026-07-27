@@ -887,7 +887,12 @@ def execute(args: argparse.Namespace) -> int:
                 evidence_dir,
                 f"probe evidence for {target['id']}",
             )
-            snapshot = validate_probe(evidence, target)
+            snapshot = validate_probe(
+                evidence,
+                target,
+                artifacts[target["artifact"]],
+                source,
+            )
         except (CanaryError, EvidenceError) as error:
             return target["id"], "probe-failed", str(error)
         if snapshot["machineIdentitySha256"] == local_identity:

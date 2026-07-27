@@ -233,6 +233,8 @@ def validate_network_snapshot(value: Any, label: str) -> dict[str, Any]:
 def validate_probe(
     result: dict[str, Any],
     target: dict[str, Any],
+    artifact: dict[str, Any],
+    source: dict[str, str],
 ) -> dict[str, Any]:
     label = f"target {target['id']} probe evidence"
     exact(result.get("schema"), 2, f"{label} schema")
@@ -243,6 +245,33 @@ def validate_probe(
     true(result.get("realChecks"), f"{label} realChecks")
     false(result.get("mocked"), f"{label} mocked")
     false(result.get("remoteBuildPerformed"), f"{label} remoteBuildPerformed")
+    probe_binary_hash = hex64(
+        result.get("probeBinarySha256"),
+        f"{label} probeBinarySha256",
+    )
+    exact(
+        probe_binary_hash,
+        artifact["_installed_hash"],
+        f"{label} probeBinarySha256 frozen artifact",
+    )
+    probe_app_version = nonempty(
+        result.get("probeAppVersion"),
+        f"{label} probeAppVersion",
+    )
+    exact(
+        probe_app_version,
+        source["appVersion"],
+        f"{label} probeAppVersion frozen source",
+    )
+    probe_fips_version = nonempty(
+        result.get("probeFipsCoreVersion"),
+        f"{label} probeFipsCoreVersion",
+    )
+    exact(
+        probe_fips_version,
+        f"{source['fipsVersion']} (rev {source['fipsGitSha'][:10]})",
+        f"{label} probeFipsCoreVersion frozen source",
+    )
     identity = hex64(
         result.get("machineIdentitySha256"), f"{label} machineIdentitySha256"
     )
@@ -266,6 +295,9 @@ def validate_probe(
     network = validate_network_snapshot(result.get("network"), f"{label} network")
     return {
         "machineIdentitySha256": identity,
+        "probeBinarySha256": probe_binary_hash,
+        "probeAppVersion": probe_app_version,
+        "probeFipsCoreVersion": probe_fips_version,
         "service": service,
         "config": config,
         "network": network,

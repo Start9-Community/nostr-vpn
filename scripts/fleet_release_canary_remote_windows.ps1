@@ -1,6 +1,6 @@
 # Transient elevated Windows adapter for the nvpn fleet canary. The checked-in
-# SSH driver prepends $script:FleetPayloadB64 and streams this file to
-# powershell.exe -Command -. Nothing from this adapter is installed.
+# SSH driver prepends $script:FleetPayloadB64 and streams this file through a
+# checked transient script. Nothing from this adapter remains on the host.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:NvpnServiceName = 'NvpnService'
@@ -46,7 +46,13 @@ function AtomicJson([string]$Path, $Value) {
 }
 
 function RequireAbsolutePath($Value, [string]$Label) {
-    if (!($Value -is [string]) -or ![IO.Path]::IsPathFullyQualified($Value)) {
+    if (!($Value -is [string]) -or ![IO.Path]::IsPathRooted($Value)) {
+        Fail "$Label must be an absolute Windows path"
+    }
+    if (
+        $Value -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))' -or
+        $Value -match '^\\\\[?.][\\/]'
+    ) {
         Fail "$Label must be an absolute Windows path"
     }
     if ($Value -match '(^|[\\/])\.\.([\\/]|$)') {
@@ -318,12 +324,22 @@ function Capture($Target, $Checks) {
     if (!(Test-Path -LiteralPath $probeBinary -PathType Leaf)) {
         Fail "probe CLI does not exist: $probeBinary"
     }
+    $probeVersion = InvokeNvpnJson $probeBinary @('version', '--json')
+    if (
+        [string]::IsNullOrWhiteSpace([string]$probeVersion.version) -or
+        [string]::IsNullOrWhiteSpace([string]$probeVersion.fips_core_version)
+    ) {
+        Fail 'probe CLI version receipt is incomplete'
+    }
     $status = InvokeNvpnJson $probeBinary @('status', '--config', $config, '--json', '--discover-secs', '0')
     return [ordered]@{
         service = ServiceSnapshot $serviceName $binary
         config = ConfigSnapshot $config $status
         network = NetworkSnapshot $status $Checks
         status = $status
+        probeBinarySha256 = ShaFile $probeBinary
+        probeAppVersion = [string]$probeVersion.version
+        probeFipsCoreVersion = [string]$probeVersion.fips_core_version
         binaryPath = $binary
         configPath = $config
         serviceName = $serviceName
@@ -836,6 +852,9 @@ try {
             realChecks = $true
             mocked = $false
             remoteBuildPerformed = $false
+            probeBinarySha256 = [string]$state.probeBinarySha256
+            probeAppVersion = [string]$state.probeAppVersion
+            probeFipsCoreVersion = [string]$state.probeFipsCoreVersion
             transaction = [ordered]@{
                 recoveryRequired = $pending.Count -gt 0
                 pendingTransactionIds = $pending

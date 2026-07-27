@@ -220,6 +220,15 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +
 +if args.action == "probe":
 +    pending = target_id == "pending"
++    probe_hash = os.environ["FAKE_PROBE_BINARY_SHA256"]
++    probe_app_version = os.environ["FAKE_PROBE_APP_VERSION"]
++    probe_fips_version = os.environ["FAKE_PROBE_FIPS_CORE_VERSION"]
++    if target_id == "wrong-probe-hash":
++        probe_hash = digest("wrong-probe-binary")
++    elif target_id == "wrong-probe-app-version":
++        probe_app_version = "4.1.4"
++    elif target_id == "wrong-probe-fips-version":
++        probe_fips_version = "0.4.44 (rev 0000000000)"
 +    value = {
 +        "schema": 2,
 +        "targetId": target_id,
@@ -230,6 +239,9 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +        "realChecks": True,
 +        "mocked": False,
 +        "remoteBuildPerformed": False,
++        "probeBinarySha256": probe_hash,
++        "probeAppVersion": probe_app_version,
++        "probeFipsCoreVersion": probe_fips_version,
 +        "transaction": {
 +            "recoveryRequired": pending,
 +            "pendingTransactionIds": ["b" * 32] if pending else [],
@@ -610,6 +622,9 @@ run_execute() {
   NVPN_FLEET_INSTALL_AUTHORIZED=1 \
   NVPN_FLEET_LOCAL_MACHINE_ID_SHA256="$LOCAL_ID" \
   FAKE_DRIVER_LOG="$DRIVER_LOG" \
+  FAKE_PROBE_BINARY_SHA256="$ARTIFACT_SHA" \
+  FAKE_PROBE_APP_VERSION="4.1.5" \
+  FAKE_PROBE_FIPS_CORE_VERSION="0.4.45 (rev ${FIPS_SHA:0:10})" \
     python3 "$ORCHESTRATOR" execute "${common[@]}"
 }
 
@@ -620,7 +635,103 @@ python3 -m py_compile \
   "$ROOT/scripts/fleet_release_canary_remote_linux.py" \
   "$DRIVER"
 bash -n "$0"
+python3 - "$ROOT/scripts/fleet_release_canary_ssh_driver.py" <<'PY'
+import base64
+import gzip
+import importlib.util
+import pathlib
+import subprocess
+import sys
+
+path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("fleet_driver", path)
+driver = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(driver)
+payload = {
+    "protocol": "nvpn-fleet-ssh-transactional-v2",
+    "action": "unsupported-transport-contract-probe",
+    "target": {"deployment": {}},
+}
+
+linux_source, linux_command = driver.render_adapter_invocation("linux", payload)
+future_import = "from __future__ import annotations\n"
+assignment = "FLEET_PAYLOAD_B64="
+if linux_source.count(future_import) != 1:
+    raise SystemExit("Linux fleet helper future-import structure is ambiguous")
+if not linux_source.index(future_import) < linux_source.index(assignment):
+    raise SystemExit("Linux fleet payload precedes the future import")
+if linux_command != ["sudo", "-n", "python3", "-"]:
+    raise SystemExit("Linux fleet transport command changed")
+executed = subprocess.run(
+    [sys.executable, "-"],
+    input=linux_source,
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+if executed.returncode == 0 or "unsupported fleet action" not in executed.stderr:
+    raise SystemExit(
+        "generated Linux fleet adapter did not execute past payload loading"
+    )
+if "SyntaxError" in executed.stderr:
+    raise SystemExit("generated Linux fleet adapter is syntactically invalid")
+
+windows_source, windows_command = driver.render_adapter_invocation(
+    "windows", payload
+)
+if windows_command[-2] != "-EncodedCommand":
+    raise SystemExit("Windows fleet transport does not use EncodedCommand")
+wrapper = base64.b64decode(windows_command[-1]).decode("utf-16le")
+for required in (
+    "[Console]::In.ReadToEnd()",
+    "[IO.Compression.GzipStream]",
+    "[IO.FileMode]::CreateNew",
+    "[IO.FileAccess]::ReadWrite",
+    "[IO.FileShare]::None",
+    "$writeStream.Flush($true)",
+    "$writeStream.Position = 0",
+    "$initialHash",
+    "$writeStream.Dispose()",
+    "[IO.FileMode]::Open",
+    "[IO.FileAccess]::Read",
+    "[IO.FileShare]::Read",
+    "$lockStream.Length -ne $bytes.Length",
+    "$lockStream.Position = 0",
+    "$lockStream.Dispose()",
+    "[Security.Cryptography.SHA256]::Create()",
+    "-File $path",
+    "Remove-Item -LiteralPath $path",
+    "transient fleet adapter cleanup failed",
+):
+    if required not in wrapper:
+        raise SystemExit("Windows fleet stdin wrapper is incomplete")
+if "[ScriptBlock]::Create" in wrapper:
+    raise SystemExit("Windows fleet transport still uses the unreliable stdin scriptblock")
+write_close = wrapper.index("$writeStream.Dispose()")
+read_lock = wrapper.index("$lockStream = [IO.FileStream]::new(")
+execute = wrapper.index("-File $path")
+read_unlock = wrapper.index("$lockStream.Dispose()")
+delete = wrapper.index("Remove-Item -LiteralPath $path")
+if not write_close < read_lock < execute < read_unlock < delete:
+    raise SystemExit("Windows fleet transient file is not read-locked through execution")
+try:
+    windows_raw_source = gzip.decompress(
+        base64.b64decode(windows_source)
+    ).decode()
+except Exception as error:
+    raise SystemExit("Windows fleet stdin is not compressed source") from error
+if "$script:FleetPayloadB64" not in windows_raw_source:
+    raise SystemExit("Windows fleet adapter lacks its private stdin payload")
+if len(windows_source) >= len(windows_raw_source):
+    raise SystemExit("Windows fleet adapter was not reduced for reliable stdin transport")
+if any("FLEET_PAYLOAD" in argument for argument in windows_command):
+    raise SystemExit("private fleet payload leaked into remote argv")
+PY
 windows_adapter="$ROOT/scripts/fleet_release_canary_remote_windows.ps1"
+grep -Fq "[IO.Path]::IsPathFullyQualified" "$windows_adapter" \
+  && fail "Windows fleet adapter requires unavailable modern .NET path APIs"
+grep -Fq "[IO.Path]::IsPathRooted" "$windows_adapter" \
+  || fail "Windows fleet adapter does not reject relative paths compatibly"
 grep -Fq "\$script:NvpnServiceName = 'NvpnService'" "$windows_adapter" \
   || fail "Windows fleet adapter does not use the production service name"
 grep -Fq \
@@ -784,6 +895,26 @@ set -e
 if grep -Fq 'install:' "$DRIVER_LOG"; then
   fail "duplicate alias preflight mutated a target"
 fi
+
+for adversary in \
+  wrong-probe-hash \
+  wrong-probe-app-version \
+  wrong-probe-fips-version
+do
+  write_inventory "$INVENTORY" "$adversary"
+  rm -rf "$EVIDENCE"
+  rm -f "$DRIVER_LOG"
+  set +e
+  run_execute >/dev/null
+  status=$?
+  set -e
+  [[ "$status" == 1 ]] || fail "$adversary probe evidence was accepted"
+  json_status_is \
+    "$EVIDENCE/fleet-canary-result.json" "$adversary" probe-failed
+  if grep -Fq 'install:' "$DRIVER_LOG"; then
+    fail "$adversary probe failure reached install"
+  fi
+done
 
 cp "$INVENTORY" "$APP/inventory-not-private.json"
 if python3 "$ORCHESTRATOR" plan \
