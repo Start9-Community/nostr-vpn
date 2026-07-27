@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ORCHESTRATOR="$ROOT/scripts/windows-vm-wireguard-exit-e2e.sh"
 GUEST_GATE="$ROOT/scripts/e2e-windows-wireguard-direct.ps1"
+RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 
 fail() {
   echo "Windows WireGuard fixture contract failed: $*" >&2
@@ -92,6 +93,28 @@ cleanup = text.index(
 )
 if not direct < wireguard < restore < cleanup:
     raise SystemExit("guest transition is not ordered Direct -> WireGuard -> Direct -> cleanup")
+PY
+
+python3 - "$RELEASE_GATE" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+orchestrator = "./scripts/windows-vm-wireguard-exit-e2e.sh"
+required = "env NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E=1"
+calls = [index for index, line in enumerate(lines) if orchestrator in line]
+if len(calls) != 2:
+    raise SystemExit(
+        f"release gate must have exactly two Windows WireGuard call sites, got {len(calls)}"
+    )
+for index in calls:
+    command = "\n".join(lines[max(0, index - 3) : index + 1])
+    if required not in command:
+        raise SystemExit(
+            "release gate can invoke Windows WireGuard without forcing "
+            "Direct -> WireGuard -> Direct"
+        )
 PY
 
 echo "Windows provider-independent WireGuard exit fixture contract passed"

@@ -441,6 +441,7 @@ run_auto_windows_vm_wireguard_exit_e2e() {
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
     release_gate_run_with_timeout "Windows WG exit e2e" "$WINDOWS_WG_EXIT_TIMEOUT_SECS" \
+      env NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E=1 \
       ./scripts/windows-vm-wireguard-exit-e2e.sh "$host"
   else
     echo "Skipping Windows WG exit e2e because ssh $host is unreachable."
@@ -502,6 +503,7 @@ run_windows_wireguard_exit_gate() {
       ;;
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm)
       release_gate_run_with_timeout "Windows WG exit e2e" "$WINDOWS_WG_EXIT_TIMEOUT_SECS" \
+        env NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E=1 \
         ./scripts/windows-vm-wireguard-exit-e2e.sh "${NVPN_WINDOWS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
