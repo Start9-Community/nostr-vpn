@@ -6,6 +6,7 @@ DESKTOP_UNDERLAY_HOST_PEER_BINARY=""
 DESKTOP_UNDERLAY_HOST_PEER_SHA256=""
 DESKTOP_UNDERLAY_HOST_PEER_SIZE=""
 DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR=""
+DESKTOP_UNDERLAY_HOST_PEER_RUNNER=""
 DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=0
 
 desktop_underlay_host_peer_error() {
@@ -43,7 +44,7 @@ desktop_underlay_import_host_peer() {
 
   local app_sha app_tree app_status app_version
   local fips_sha fips_tree fips_version target receipt
-  local remote_dir
+  local peer_runner peer_runner_sha listener_audit listener_audit_sha remote_dir
   app_sha="$(git -C "$ROOT" rev-parse HEAD)" || {
     desktop_underlay_host_peer_error "could not resolve app Git SHA"
     return 1
@@ -146,6 +147,27 @@ desktop_underlay_import_host_peer() {
     desktop_underlay_host_peer_error "host-built peer has invalid byte receipts"
     return 1
   }
+  peer_runner="$ROOT/scripts/desktop-linux-underlay-peer-e2e.sh"
+  listener_audit="$ROOT/scripts/lib-desktop-linux-listener-audit.sh"
+  [[ -x "$peer_runner" && -f "$listener_audit" ]] || {
+    desktop_underlay_host_peer_error "host peer fixture sources are missing"
+    return 1
+  }
+  peer_runner_sha="$(shasum -a 256 "$peer_runner" | awk '{ print $1 }')" || {
+    desktop_underlay_host_peer_error "could not hash host peer fixture"
+    return 1
+  }
+  listener_audit_sha="$(
+    shasum -a 256 "$listener_audit" | awk '{ print $1 }'
+  )" || {
+    desktop_underlay_host_peer_error "could not hash host listener audit"
+    return 1
+  }
+  [[ "$peer_runner_sha" =~ ^[0-9a-f]{64}$ \
+    && "$listener_audit_sha" =~ ^[0-9a-f]{64}$ ]] || {
+    desktop_underlay_host_peer_error "host peer fixture hashes are invalid"
+    return 1
+  }
 
   mkdir -p "$ARTIFACT_DIR" || {
     desktop_underlay_host_peer_error "could not create local evidence directory"
@@ -184,6 +206,18 @@ desktop_underlay_import_host_peer() {
       desktop_underlay_host_peer_error "could not import host Linux peer receipt"
       return 1
     }
+  scp -q -o BatchMode=yes -o ConnectTimeout=10 \
+    "$peer_runner" \
+    "$HYPERVISOR_SSH:$remote_dir/desktop-linux-underlay-peer-e2e.sh.copy" || {
+      desktop_underlay_host_peer_error "could not import host peer fixture"
+      return 1
+    }
+  scp -q -o BatchMode=yes -o ConnectTimeout=10 \
+    "$listener_audit" \
+    "$HYPERVISOR_SSH:$remote_dir/lib-desktop-linux-listener-audit.sh.copy" || {
+      desktop_underlay_host_peer_error "could not import host listener audit"
+      return 1
+    }
 
   if ! ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
     "$remote_dir" \
@@ -196,6 +230,8 @@ desktop_underlay_import_host_peer() {
     "$fips_version" \
     "$target" \
     "$app_version" \
+    "$peer_runner_sha" \
+    "$listener_audit_sha" \
     >"$ARTIFACT_DIR/host-peer-remote-version.txt" <<'SH'
 set -euo pipefail
 remote_dir="$1"
@@ -208,6 +244,8 @@ fips_tree="$7"
 fips_version="$8"
 target="$9"
 app_version="${10}"
+peer_runner_sha="${11}"
+listener_audit_sha="${12}"
 case "$remote_dir" in
   /tmp/nvpn-desktop-underlay-peer.*) ;;
   *) exit 2 ;;
@@ -216,8 +254,18 @@ esac
 chmod 0700 "$remote_dir"
 chmod 0500 "$remote_dir/nvpn.copy"
 chmod 0400 "$remote_dir/receipt.json.copy"
+chmod 0500 "$remote_dir/desktop-linux-underlay-peer-e2e.sh.copy"
+chmod 0400 "$remote_dir/lib-desktop-linux-listener-audit.sh.copy"
 [[ "$(sha256sum "$remote_dir/nvpn.copy" | awk '{ print $1 }')" == "$expected_sha" ]]
 [[ "$(stat -c '%s' "$remote_dir/nvpn.copy")" == "$expected_size" ]]
+[[ "$(
+  sha256sum "$remote_dir/desktop-linux-underlay-peer-e2e.sh.copy" \
+    | awk '{ print $1 }'
+)" == "$peer_runner_sha" ]]
+[[ "$(
+  sha256sum "$remote_dir/lib-desktop-linux-listener-audit.sh.copy" \
+    | awk '{ print $1 }'
+)" == "$listener_audit_sha" ]]
 file "$remote_dir/nvpn.copy" | grep -Eq 'ELF 64-bit.*x86-64'
 jq -e \
   --arg app_sha "$app_sha" \
@@ -242,6 +290,12 @@ jq -e \
   "$remote_dir/receipt.json.copy" >/dev/null
 mv "$remote_dir/nvpn.copy" "$remote_dir/nvpn"
 mv "$remote_dir/receipt.json.copy" "$remote_dir/receipt.json"
+mv \
+  "$remote_dir/desktop-linux-underlay-peer-e2e.sh.copy" \
+  "$remote_dir/desktop-linux-underlay-peer-e2e.sh"
+mv \
+  "$remote_dir/lib-desktop-linux-listener-audit.sh.copy" \
+  "$remote_dir/lib-desktop-linux-listener-audit.sh"
 short_version="$("$remote_dir/nvpn" --version)"
 [[ "$short_version" == "nvpn $app_version" ]]
 verbose_version="$("$remote_dir/nvpn" version --verbose)"
@@ -264,12 +318,17 @@ SH
     printf 'target=%s\n' "$target"
     printf 'binarySha256=%s\n' "$DESKTOP_UNDERLAY_HOST_PEER_SHA256"
     printf 'binarySize=%s\n' "$DESKTOP_UNDERLAY_HOST_PEER_SIZE"
+    printf 'peerRunnerSha256=%s\n' "$peer_runner_sha"
+    printf 'listenerAuditSha256=%s\n' "$listener_audit_sha"
     printf 'remoteBinary=%s\n' "$remote_dir/nvpn"
+    printf 'remotePeerRunner=%s\n' \
+      "$remote_dir/desktop-linux-underlay-peer-e2e.sh"
   } >"$ARTIFACT_DIR/host-peer-import-receipt.txt" || {
     desktop_underlay_host_peer_error "could not write host-peer import receipt"
     return 1
   }
   HYPERVISOR_BINARY="$remote_dir/nvpn"
+  DESKTOP_UNDERLAY_HOST_PEER_RUNNER="$remote_dir/desktop-linux-underlay-peer-e2e.sh"
   DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=1
 }
 
@@ -310,4 +369,5 @@ SH
   DESKTOP_UNDERLAY_HOST_PEER_REMOTE_DIR=""
   DESKTOP_UNDERLAY_HOST_PEER_IMPORTED=0
   HYPERVISOR_BINARY=""
+  DESKTOP_UNDERLAY_HOST_PEER_RUNNER=""
 }

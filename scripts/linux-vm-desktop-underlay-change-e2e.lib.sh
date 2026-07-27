@@ -164,12 +164,12 @@ peer_command() {
     namespace-setup|namespace-cleanup|namespace-audit)
       ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
         sudo -n env "${peer_env[@]}" "$@" \
-        "$HYPERVISOR_REPO/scripts/desktop-linux-underlay-peer-e2e.sh" "$action"
+        "$DESKTOP_UNDERLAY_HOST_PEER_RUNNER" "$action"
       ;;
     *)
       ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
         sudo -n ip netns exec "$PEER_NETNS" env "${peer_env[@]}" "$@" \
-        "$HYPERVISOR_REPO/scripts/desktop-linux-underlay-peer-e2e.sh" "$action"
+        "$DESKTOP_UNDERLAY_HOST_PEER_RUNNER" "$action"
       ;;
   esac
 }

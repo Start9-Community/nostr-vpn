@@ -45,6 +45,11 @@ require_tokens "$HELPER" "shared host-peer importer" \
   'mktemp -d /tmp/nvpn-desktop-underlay-peer.XXXXXX' \
   'host-peer-local-receipt.json' \
   'host-peer-import-receipt.txt' \
+  'desktop-linux-underlay-peer-e2e.sh.copy' \
+  'lib-desktop-linux-listener-audit.sh.copy' \
+  'peerRunnerSha256=' \
+  'listenerAuditSha256=' \
+  'DESKTOP_UNDERLAY_HOST_PEER_RUNNER=' \
   'builtOnRemoteVm' \
   '[[ "$short_version" == "nvpn $app_version" ]]' \
   'grep -Fq "(rev ${fips_sha:0:10})"' \
@@ -94,9 +99,13 @@ for controller in "$WINDOWS" "$LINUX"; do
   fi
 done
 
-if grep -Fq 'HYPERVISOR_SRC_ROOT' "$WINDOWS_LIB" "$LINUX_LIB"; then
+if grep -Eq 'HYPERVISOR_(SRC_ROOT|REPO)' "$WINDOWS_LIB" "$LINUX_LIB"; then
   fail "desktop underlay helper still requires the removed Vader source checkout"
 fi
+for controller_lib in "$WINDOWS_LIB" "$LINUX_LIB"; do
+  require_tokens "$controller_lib" "imported peer fixture ownership" \
+    '"$DESKTOP_UNDERLAY_HOST_PEER_RUNNER" "$action"'
+done
 
 # Source both controller libraries under nounset without the deleted
 # HYPERVISOR_SRC_ROOT. This catches stale top-level expansions that bash -n
