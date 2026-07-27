@@ -183,8 +183,10 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +    "installed": not absent,
 +    "enabled": not (inactive or absent),
 +    "running": not (inactive or absent),
-+    "binaryPresent": True,
-+    "binarySha256": digest(f"prior-binary:{target_id}"),
++    "binaryPresent": not absent,
++    "binarySha256": (
++        None if absent else digest(f"prior-binary:{target_id}")
++    ),
 +    "definitionSha256": (
 +        None if absent else digest(f"definition:{target_id}")
 +    ),
@@ -628,6 +630,36 @@ grep -Fq \
 if grep -Eq "else \\{ 'nvpn' \\}|must be nvpn" "$windows_adapter"; then
   fail "Windows fleet adapter retains the obsolete service name"
 fi
+python3 - "$windows_adapter" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+restore = text[text.index("function RestoreTransaction"):text.index(
+    "function InstallCandidate"
+)]
+delete = restore.index("sc.exe delete $name")
+wait_deleted = restore.index("WaitServiceDeleted $name")
+remove_binary = restore.index(
+    "Remove-Item -LiteralPath $binary -Force -ErrorAction SilentlyContinue"
+)
+if not delete < wait_deleted < remove_binary:
+    raise SystemExit(
+        "Windows pristine-host rollback removes the candidate in the wrong order"
+    )
+if "& $binary service uninstall" in restore:
+    raise SystemExit(
+        "Windows pristine-host rollback invokes a potentially missing executable"
+    )
+required = (
+    "cannot safely canary an installed Windows service whose binary is absent",
+    "cannot safely roll back an installed Windows service whose prior binary was absent",
+)
+if any(value not in text for value in required):
+    raise SystemExit(
+        "Windows fleet adapter lacks fail-closed broken-service guards"
+    )
+PY
 if grep -Eq 'cargo build|dotnet build|gradle|xcodebuild' \
   "$ORCHESTRATOR" \
   "$ROOT/scripts/fleet_release_canary_evidence.py" \

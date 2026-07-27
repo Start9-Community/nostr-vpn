@@ -474,6 +474,15 @@ function WaitService([string]$Name, [bool]$Running) {
     Fail "$Name did not reach the expected state"
 }
 
+function WaitServiceDeleted([string]$Name) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($null -eq (GetServiceObject $Name)) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    Fail "$Name was not deleted"
+}
+
 function AggregateCounters($Status) {
     $tx = [uint64]0
     $rx = [uint64]0
@@ -529,8 +538,19 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
     $config = [string]$raw.configPath
     $signedRosterPath = [string]$raw.signedRosterPath
     $prior = $raw.service
+    if ($prior.installed -and !$prior.binaryPresent) {
+        Fail 'cannot safely roll back an installed Windows service whose prior binary was absent'
+    }
     WriteJournal $Transaction $Target.id $TransactionId 'rolling-back' | Out-Null
     Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+    if (!$prior.installed) {
+        $deleteOutput = & sc.exe delete $name 2>&1
+        $deleteExit = $LASTEXITCODE
+        if ($deleteExit -ne 0 -and $null -ne (GetServiceObject $name)) {
+            Fail "rollback failed to delete candidate-created service: $($deleteOutput -join "`n")"
+        }
+        WaitServiceDeleted $name
+    }
     if ($prior.binaryPresent) {
         AtomicInstall (Join-Path $snapshot 'binary') $binary
     } else {
@@ -538,10 +558,6 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
     }
     Copy-Item -LiteralPath (Join-Path $snapshot 'config') -Destination $config -Force
     Copy-Item -LiteralPath (Join-Path $snapshot 'signed-rosters.json') -Destination $signedRosterPath -Force
-    if (!$prior.installed) {
-        & $binary service uninstall --config $config 2>&1 | Out-Null
-        sc.exe delete $name 2>&1 | Out-Null
-    }
     if ($prior.installed -and $null -eq (GetServiceObject $name)) {
         Fail 'rollback cannot recreate a missing prior Windows service definition safely'
     }
@@ -625,6 +641,9 @@ function InstallCandidate($Payload, $Target, $Expected) {
     if ((Get-Item -LiteralPath $stage).Length -ne [int64]$Expected.artifactSize) { Fail 'staged artifact size mismatch' }
     $before = Capture $Target $Target.checks
     AssertExpected $before $Target $Expected
+    if ($before.service.installed -and !$before.service.binaryPresent) {
+        Fail 'cannot safely canary an installed Windows service whose binary is absent'
+    }
     [IO.Directory]::CreateDirectory($root) | Out-Null
     $snapshot = SnapshotTransaction $transaction $before $Target
     WriteJournal $transaction $Target.id $transactionId 'preparing' | Out-Null
