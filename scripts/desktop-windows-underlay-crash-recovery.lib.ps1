@@ -1,6 +1,11 @@
 # Power-loss recovery assertions for the production Windows underlay gate.
 # Dot-sourced after the run-scoped paths and common network helpers are loaded.
 
+$script:CandidateNativeWireGuardConfigPath = ""
+$script:CandidateNativeWireGuardOwnerMarkerPath = ""
+$script:CandidateNativeWireGuardOwnerDirectoryPath = ""
+$script:CandidateNativeWireGuardOwnerToken = ""
+
 function Start-CandidateDaemon {
   param([string]$LogStem)
   $process = Start-Process -FilePath $Binary -ArgumentList @(
@@ -54,6 +59,96 @@ function Assert-SingleExactCandidateDaemon {
   Assert-ExpectedFipsRoster $status
 }
 
+function Read-CandidateNativeWireGuardOwnership {
+  $journal = Get-Content -Raw -LiteralPath $CleanupJournalPath |
+    ConvertFrom-Json
+  $nativeEntries = @($journal.native_wireguard)
+  if ($nativeEntries.Count -ne 1) {
+    throw (
+      "expected exactly one journaled native WireGuard owner, found {0}" -f
+      $nativeEntries.Count
+    )
+  }
+  $native = $nativeEntries[0]
+  if (
+    [string]$native.name -ne $WireGuardInterface -or
+    $native.service_owned -ne $true -or
+    $native.config_owned -ne $true -or
+    [string]::IsNullOrWhiteSpace([string]$native.config_path) -or
+    [string]::IsNullOrWhiteSpace([string]$native.owner_token)
+  ) {
+    throw "cleanup journal lacks exact native WireGuard ownership"
+  }
+
+  $configRoot = [IO.Path]::GetFullPath(
+    (Join-Path $env:ProgramData "nostr-vpn\wireguard")
+  ).TrimEnd("\")
+  $configPath = [IO.Path]::GetFullPath([string]$native.config_path)
+  $ownerDirectory = [IO.Path]::GetDirectoryName($configPath)
+  $actualRoot = [IO.Path]::GetDirectoryName($ownerDirectory)
+  $ownerToken = [string]$native.owner_token
+  if (
+    ![string]::Equals(
+      $actualRoot,
+      $configRoot,
+      [StringComparison]::OrdinalIgnoreCase
+    ) -or
+    [IO.Path]::GetFileName($ownerDirectory) -ne $ownerToken -or
+    [IO.Path]::GetFileName($configPath) -ne "$WireGuardInterface.conf"
+  ) {
+    throw "native WireGuard config is not in its exact owner directory"
+  }
+  $markerPath = "$configPath.nvpn-owner"
+  foreach ($path in @($ownerDirectory, $configPath, $markerPath)) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "native WireGuard ownership traverses a reparse point: $path"
+    }
+  }
+  if (
+    (Get-Content -Raw -LiteralPath $markerPath -ErrorAction Stop) -ne
+      $ownerToken
+  ) {
+    throw "native WireGuard owner marker does not match the cleanup journal"
+  }
+
+  $script:CandidateNativeWireGuardConfigPath = $configPath
+  $script:CandidateNativeWireGuardOwnerMarkerPath = $markerPath
+  $script:CandidateNativeWireGuardOwnerDirectoryPath = $ownerDirectory
+  $script:CandidateNativeWireGuardOwnerToken = $ownerToken
+}
+
+function Assert-CandidateNativeWireGuardOwnershipPresent {
+  foreach ($path in @(
+    $script:CandidateNativeWireGuardOwnerDirectoryPath,
+    $script:CandidateNativeWireGuardConfigPath,
+    $script:CandidateNativeWireGuardOwnerMarkerPath
+  )) {
+    if (!(Test-Path -LiteralPath $path)) {
+      throw "candidate-owned native WireGuard artifact disappeared: $path"
+    }
+  }
+  if (
+    (Get-Content -Raw `
+      -LiteralPath $script:CandidateNativeWireGuardOwnerMarkerPath) -ne
+      $script:CandidateNativeWireGuardOwnerToken
+  ) {
+    throw "candidate native WireGuard marker changed after the crash"
+  }
+}
+
+function Assert-CandidateNativeWireGuardOwnershipRemoved {
+  foreach ($path in @(
+    $script:CandidateNativeWireGuardConfigPath,
+    $script:CandidateNativeWireGuardOwnerMarkerPath,
+    $script:CandidateNativeWireGuardOwnerDirectoryPath
+  )) {
+    if (Test-Path -LiteralPath $path) {
+      throw "candidate-owned native WireGuard artifact remains: $path"
+    }
+  }
+}
+
 function Assert-CrashRecoveredDirectState {
   param(
     [int]$ExpectedPhysicalIndex,
@@ -67,8 +162,6 @@ function Assert-CrashRecoveredDirectState {
   $wireGuardService = Get-Service `
     -Name ('WireGuardTunnel$' + $WireGuardInterface) `
     -ErrorAction SilentlyContinue
-  $nativeWireGuardConfig = Join-Path $env:ProgramData `
-    "nostr-vpn\wireguard\$WireGuardInterface.conf"
   if (
     [int]$route.InterfaceIndex -ne $ExpectedPhysicalIndex -or
     (Get-NetAdapter -Name $WireGuardInterface `
@@ -76,13 +169,13 @@ function Assert-CrashRecoveredDirectState {
     $wireGuardService -or
     $endpointRoutes.Count -ne 0 -or
     (Get-SecureDnsRules).Count -ne 0 -or
-    (Test-Path -LiteralPath $nativeWireGuardConfig) -or
     (Test-Path -LiteralPath $CleanupJournalPath) -or
     !(Test-PublicDns) -or
     !(Test-ExternalHttps)
   ) {
     throw "startup recovery has not restored a clean native Direct network"
   }
+  Assert-CandidateNativeWireGuardOwnershipRemoved
   Assert-SingleExactCandidateDaemon $ExpectedDaemonPid
 }
 
@@ -107,6 +200,8 @@ function Invoke-CrashRecovery {
   $cleanupJournalHash = (
     Get-FileHash -Algorithm SHA256 -LiteralPath $CleanupJournalPath
   ).Hash.ToLowerInvariant()
+  Read-CandidateNativeWireGuardOwnership
+  Assert-CandidateNativeWireGuardOwnershipPresent
 
   Stop-Process -Id $crashedPid -Force -ErrorAction Stop
   Wait-ForCondition "forced candidate daemon termination" 5000 {
@@ -125,6 +220,7 @@ function Invoke-CrashRecovery {
   if ($cleanupJournalHashAfterCrash -ne $cleanupJournalHash) {
     throw "durable cleanup journal did not survive forced daemon termination"
   }
+  Assert-CandidateNativeWireGuardOwnershipPresent
   if (@(Get-CimInstance Win32_Process -Filter "Name = 'nvpn.exe'").Count -ne 0) {
     throw "an nvpn process survived forced candidate daemon termination"
   }
@@ -200,6 +296,14 @@ function Invoke-CrashRecovery {
     cleanup_journal_survived_forced_termination = $true
     cleanup_journal_sha256 = $cleanupJournalHash
     cleanup_journal_removed_after_restart = $true
+    native_wireguard_config_path = $script:CandidateNativeWireGuardConfigPath
+    native_wireguard_owner_marker_path =
+      $script:CandidateNativeWireGuardOwnerMarkerPath
+    native_wireguard_owner_directory_path =
+      $script:CandidateNativeWireGuardOwnerDirectoryPath
+    native_wireguard_owner_directory_layout = $true
+    native_wireguard_owned_files_survived_forced_termination = $true
+    native_wireguard_owned_files_removed_after_restart = $true
     selected_direct_while_daemon_stopped = $true
     startup_recovery_milliseconds = $recoveryMilliseconds
     physical_interface_index = $ExpectedPhysicalIndex

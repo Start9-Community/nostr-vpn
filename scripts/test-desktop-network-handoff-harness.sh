@@ -248,6 +248,14 @@ require_tokens "$WINDOWS_GUEST" "power-loss startup recovery evidence" \
   'cleanup_journal_present_before_crash' \
   'cleanup_journal_survived_forced_termination' \
   'cleanup_journal_removed_after_restart' \
+  'Read-CandidateNativeWireGuardOwnership' \
+  '$markerPath = "$configPath.nvpn-owner"' \
+  'native WireGuard config is not in its exact owner directory' \
+  'Assert-CandidateNativeWireGuardOwnershipPresent' \
+  'Assert-CandidateNativeWireGuardOwnershipRemoved' \
+  'native_wireguard_owner_directory_layout = $true' \
+  'native_wireguard_owned_files_survived_forced_termination' \
+  'native_wireguard_owned_files_removed_after_restart' \
   'selected_direct_while_daemon_stopped' \
   'Assert-SingleExactCandidateDaemon' \
   'daemon_process_count = 1' \
@@ -258,13 +266,34 @@ require_tokens "$WINDOWS_HOST" "power-loss receipt enforcement" \
   '.replacement_daemon_pid != .crashed_daemon_pid' \
   '.daemon_process_count == 1' \
   '.startup_recovery_milliseconds <= 30000' \
-  '.cleanup_journal_removed_after_restart == true'
+  '.cleanup_journal_removed_after_restart == true' \
+  '.native_wireguard_owner_directory_layout == true' \
+  '.native_wireguard_owned_files_survived_forced_termination == true' \
+  '.native_wireguard_owned_files_removed_after_restart == true' \
+  'CANDIDATE_NATIVE_CONFIG_PATH=' \
+  'CANDIDATE_NATIVE_MARKER_PATH=' \
+  'CANDIDATE_NATIVE_OWNER_DIR=' \
+  'candidate-owned native WireGuard artifact remains after daemon stop' \
+  'candidate-owned native WireGuard artifact remains after cleanup'
 python3 - "$WINDOWS_GUEST" <<'PY'
 import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 crash = text[text.index("function Invoke-CrashRecovery {"):]
+ownership = crash.index("Read-CandidateNativeWireGuardOwnership")
+termination = crash.index("Stop-Process -Id $crashedPid -Force")
+if ownership >= termination:
+    raise SystemExit(
+        "Windows crash gate reads native WireGuard ownership after terminating it"
+    )
+if crash.index(
+    "Assert-CandidateNativeWireGuardOwnershipPresent",
+    termination,
+) >= crash.index("$recoveryTimer = [Diagnostics.Stopwatch]::StartNew()"):
+    raise SystemExit(
+        "Windows crash gate does not prove candidate-owned files survive termination"
+    )
 for forbidden in ("repair-network", "Invoke-IsolatedNetworkCleanup"):
     if forbidden in crash:
         raise SystemExit(

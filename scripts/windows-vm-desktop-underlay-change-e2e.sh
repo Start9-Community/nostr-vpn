@@ -74,6 +74,9 @@ TARGET_PRIMARY_GATEWAY=""
 TARGET_PRIMARY_ADDRESS=""
 WG_SERVER_PUBLIC_KEY=""
 WG_ENDPOINT=""
+CANDIDATE_NATIVE_CONFIG_PATH=""
+CANDIDATE_NATIVE_MARKER_PATH=""
+CANDIDATE_NATIVE_OWNER_DIR=""
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -679,6 +682,12 @@ run_dns_matrix_and_crash_restore() {
     and .cleanup_journal_present_before_crash == true
     and .cleanup_journal_survived_forced_termination == true
     and .cleanup_journal_removed_after_restart == true
+    and (.native_wireguard_config_path | type == "string" and length > 0)
+    and (.native_wireguard_owner_marker_path | type == "string" and length > 0)
+    and (.native_wireguard_owner_directory_path | type == "string" and length > 0)
+    and .native_wireguard_owner_directory_layout == true
+    and .native_wireguard_owned_files_survived_forced_termination == true
+    and .native_wireguard_owned_files_removed_after_restart == true
     and .selected_direct_while_daemon_stopped == true
     and .startup_recovery_milliseconds <= 30000
     and .wireguard_exit_state_remained_installed_after_crash == true
@@ -686,6 +695,18 @@ run_dns_matrix_and_crash_restore() {
     and .public_dns == true
     and .verified_https == true
   ' "$ARTIFACT_DIR/crash-recovery-receipt.json" >/dev/null
+  CANDIDATE_NATIVE_CONFIG_PATH="$(
+    jq -er '.native_wireguard_config_path' \
+      "$ARTIFACT_DIR/crash-recovery-receipt.json"
+  )"
+  CANDIDATE_NATIVE_MARKER_PATH="$(
+    jq -er '.native_wireguard_owner_marker_path' \
+      "$ARTIFACT_DIR/crash-recovery-receipt.json"
+  )"
+  CANDIDATE_NATIVE_OWNER_DIR="$(
+    jq -er '.native_wireguard_owner_directory_path' \
+      "$ARTIFACT_DIR/crash-recovery-receipt.json"
+  )"
   jq -e '
     .wireguard_interface_removed == true
     and .wireguard_endpoint_route_removed == true
@@ -704,6 +725,9 @@ if (Get-Service -Name $(ps_quote "WireGuardTunnel\$$WG_TARGET_INTERFACE") -Error
 if (Get-NetAdapter -Name $(ps_quote "$WG_TARGET_INTERFACE") -IncludeHidden -ErrorAction SilentlyContinue) { throw 'WireGuard exit adapter remains after cleanup' }
 \$endpointHost = ([Uri]('udp://' + $(ps_quote "$WG_ENDPOINT"))).Host
 if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \"\$endpointHost/32\" -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) { throw 'WireGuard endpoint bypass remains after cleanup' }
+foreach (\$ownedPath in @($(ps_quote "$CANDIDATE_NATIVE_CONFIG_PATH"), $(ps_quote "$CANDIDATE_NATIVE_MARKER_PATH"), $(ps_quote "$CANDIDATE_NATIVE_OWNER_DIR"))) {
+  if (Test-Path -LiteralPath \$ownedPath) { throw ('candidate-owned native WireGuard artifact remains after daemon stop: ' + \$ownedPath) }
+}
 \$rules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { \$_.DisplayName -eq 'nostr-vpn secure DNS' -or \$_.Comment -eq 'nostr-vpn authenticated DNS-over-HTTPS stub' })
 if (\$rules.Count -ne 0) { throw 'nvpn secure DNS policy remains after daemon stop' }
 [Net.Dns]::GetHostAddresses(([Uri]$(ps_quote "$PROBE_URL")).DnsSafeHost) | Out-Null
@@ -737,9 +761,10 @@ if (Get-NetAdapter -Name $(ps_quote "$WG_TARGET_INTERFACE") -IncludeHidden -Erro
 if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \"\$endpointHost/32\" -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -ne 0) {
   throw 'WireGuard endpoint bypass remains after cleanup'
 }
-\$nativeConfig = Join-Path \$env:ProgramData $(ps_quote "nostr-vpn\\wireguard\\$WG_TARGET_INTERFACE.conf")
-if (Test-Path -LiteralPath \$nativeConfig) {
-  throw 'native WireGuard service config remains after cleanup'
+foreach (\$ownedPath in @($(ps_quote "$CANDIDATE_NATIVE_CONFIG_PATH"), $(ps_quote "$CANDIDATE_NATIVE_MARKER_PATH"), $(ps_quote "$CANDIDATE_NATIVE_OWNER_DIR"))) {
+  if (Test-Path -LiteralPath \$ownedPath) {
+    throw ('candidate-owned native WireGuard artifact remains after cleanup: ' + \$ownedPath)
+  }
 }
 \$watchdogPath = $(ps_quote "$GUEST_STATE_DIR\\watchdog.pid")
 if (Test-Path -LiteralPath \$watchdogPath) {
