@@ -2469,7 +2469,15 @@ test('crates publication has no dirty bypass and replays exact source immediatel
   assert.match(publisher, /cargo package --locked -p "\$crate"/)
   assert.match(publisher, /packageSha256/)
   assert.match(publisher, /preflight_crates_io_credentials/)
-  assert.match(publisher, /crates\.io\/api\/v1\/me/)
+  assert.doesNotMatch(publisher, /import tomllib/)
+  assert.doesNotMatch(
+    publisher,
+    /url = "https:\/\/crates\.io\/api\/v1\/me"/,
+  )
+  assert.match(
+    publisher,
+    /for crate in "\$\{ALL_CRATES\[@\]\}"; do[\s\S]*cargo owner --list --registry crates-io "\$crate"/,
+  )
   assert.match(publisher, /verify_published_crate "\$crate"/)
   assert.match(
     publisher,

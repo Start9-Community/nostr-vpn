@@ -204,38 +204,20 @@ print(json.load(open(sys.argv[1], encoding="utf-8"))["packageSha256"])
 }
 
 preflight_crates_io_credentials() {
-    local token response
-    token="$(
-        python3 - "${CARGO_HOME:-$HOME/.cargo}/credentials.toml" <<'PY'
-import os
-import pathlib
-import sys
-import tomllib
+    local crate
 
-token = os.environ.get("CARGO_REGISTRY_TOKEN", "").strip()
-if not token:
-    path = pathlib.Path(sys.argv[1])
-    if path.is_file():
-        value = tomllib.loads(path.read_text())
-        token = str(value.get("registry", {}).get("token", "")).strip()
-if not token:
-    raise SystemExit("crates.io publication token is not configured")
-print(token)
-PY
-    )"
-    response="$(
-        printf 'silent\nshow-error\nfail\nheader = "Authorization: %s"\nurl = "https://crates.io/api/v1/me"\n' "$token" \
-            | curl --config -
-    )"
-    python3 -c '
-import json
-import sys
-
-value = json.load(sys.stdin)
-if not isinstance(value.get("user"), dict) or not value["user"].get("id"):
-    raise SystemExit("crates.io credential preflight returned no authenticated user")
-' <<<"$response"
-    unset token response
+    # crates.io no longer exposes an API-token identity lookup. Cargo's
+    # read-only owner query is the supported way to resolve the configured
+    # credential provider without uploading. The owners response is public, so
+    # the first cargo publish remains the server-side permission check. Query
+    # every crate in the plan before packaging.
+    for crate in "${ALL_CRATES[@]}"; do
+        if ! cargo owner --list --registry crates-io "$crate" >/dev/null; then
+            echo "Cargo could not resolve crates.io credentials for ${crate}." >&2
+            return 1
+        fi
+        echo "[ok] Cargo credential provider is ready for ${crate}"
+    done
 }
 
 publish_crate() {
