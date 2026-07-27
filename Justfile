@@ -17,9 +17,6 @@ info:
     @echo "Build"
     @echo "  just build"
     @echo "  just release"
-    @echo "  just release-publish"
-    @echo "  just release-final"
-    @echo "  just release-promote"
     @echo "  just release-startos"
     @echo
     @echo "macOS"
@@ -198,15 +195,6 @@ icons:
 
 release:
     node scripts/local-release.mjs
-
-release-publish:
-    node scripts/local-release.mjs --publish
-
-release-final:
-    node scripts/local-release.mjs --final
-
-release-promote:
-    node scripts/local-release.mjs --promote-draft
 
 release-startos:
     node scripts/startos-release.mjs

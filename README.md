@@ -188,18 +188,24 @@ Docker e2e and desktop updater scripts live under [`scripts`](scripts). The most
 
 1. Move `CHANGELOG.md` from `## Unreleased` to `## X.Y.Z - YYYY-MM-DD`.
 2. Bump the root `[workspace.package].version` in `Cargo.toml`.
-3. Run `node scripts/sync-versions.mjs` and verify with `node scripts/sync-versions.mjs --check`.
-4. Run `just release-gate`.
-5. Commit, create `git tag vX.Y.Z`, push the tag to `github`, and push `master` to both `github` and htree `origin`.
-6. Watch `.github/workflows/release.yml`.
+3. Run `node scripts/sync-versions.mjs`, verify with `node scripts/sync-versions.mjs --check`, and commit the release source.
+4. From that exact clean commit, stage the complete release with `node scripts/local-release.mjs --stage-dir <stage-dir>`. Staging runs the mandatory release gate and binds its real-platform receipts.
+5. Prepare fresh private fleet inventory and manifest files with `scripts/prepare-fleet-release-canary.mjs`. Validate them with `scripts/fleet_release_canary.py plan`, then run its explicitly authorized `execute` mode. Continue only when `fleet-canary-result.json` reports `passed`.
+6. Publish the immutable fleet-gated draft:
 
-For local artifact staging, use:
+   ```bash
+   node scripts/local-release.mjs \
+     --publish-staged-draft \
+     --stage-dir <stage-dir> \
+     --fleet-result <fleet-dir>/evidence/fleet-canary-result.json \
+     --fleet-manifest <fleet-dir>/manifest.json \
+     --fleet-inventory <fleet-dir>/inventory.json
+   ```
 
-```bash
-cp .env.release.example .env.release.local
-$EDITOR .env.release.local
-just release-publish
-```
+7. Create the lightweight `vX.Y.Z` tag at the staged commit. Push that exact commit as `master` and the tag to `github`, and push the same `master` to htree `origin`. Dispatch `.github/workflows/release.yml` with the tag, attested commit, and immutable draft CID; require it to pass.
+8. Promote the same staged bytes and fleet evidence with `scripts/local-release.mjs --promote-draft` plus the four paths above. Promotion preflights and publishes Apple distribution, htree, the exact GitHub release, crates.io packages, and Zapstore.
+
+Direct `--publish` and `--final` modes are intentionally disabled. Every external release mutation must replay the exact staged-source and passed-fleet gates.
 
 ### Workspace Layout
 
