@@ -51,6 +51,7 @@ import {
 } from './local-release-lib.mjs'
 import { buildFrozenFleetInventory } from './fleet-release-preparer-lib.mjs'
 import {
+  githubRepositoryFromRemote,
   githubReleaseRepairPlan,
   validateGithubReleaseMetadata,
 } from './github-release-publication.mjs'
@@ -84,6 +85,27 @@ INVALID KEY=nope
     NVPN_WINDOWS_VM_NAME: 'Windows 11',
     NVPN_NOTE: 'line one',
   })
+})
+
+test('GitHub publication derives one explicit repository from the github remote', () => {
+  for (const remote of [
+    'git@github.com:mmalmi/nostr-vpn.git',
+    'ssh://git@github.com/mmalmi/nostr-vpn.git',
+    'https://github.com/mmalmi/nostr-vpn.git',
+  ]) {
+    assert.equal(githubRepositoryFromRemote(remote), 'mmalmi/nostr-vpn')
+  }
+  for (const remote of [
+    '',
+    'git@example.com:mmalmi/nostr-vpn.git',
+    'https://github.com/mmalmi/nostr-vpn/extra',
+    'mmalmi/nostr-vpn',
+  ]) {
+    assert.throws(
+      () => githubRepositoryFromRemote(remote),
+      /exact github\.com owner\/repository URL/,
+    )
+  }
 })
 
 test('splitCsv trims and drops empties', () => {
@@ -791,6 +813,14 @@ test('every remaining publisher runs only after exact fleet validation', () => {
     staged.indexOf('assertPassedFleetPublication({')
     < staged.indexOf('publishRelease({'),
   )
+  assert.ok(
+    staged.indexOf('preflightHtreeRelease({')
+    < staged.indexOf('publishRelease({'),
+  )
+  assert.match(
+    staged,
+    /beforeMutation:\s*\(\)\s*=>\s*replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*false/,
+  )
 
   const promoteStart = source.indexOf(
     'if (options.promoteDraft) {\n    if (!commandExists',
@@ -809,12 +839,42 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   ]) {
     assert.ok(fleetValidation < promote.indexOf(publisher), publisher)
   }
+  assert.match(
+    promote,
+    /promoteStagedDraft\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
+  )
+  assert.match(
+    promote,
+    /Promoted \$\{tag\}[\s\S]*?replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true[\s\S]*?publishExactGithubRelease\(\{/,
+  )
 
   const publication = readFileSync(
     join(process.cwd(), 'scripts/fleet-release-publication-lib.mjs'),
     'utf8',
   )
   assert.match(publication, /fleet_release_result_replay\.py/)
+})
+
+test('GitHub mutation uses the repository pinned by preflight', () => {
+  const source = readFileSync(
+    join(process.cwd(), 'scripts/github-release-publication.mjs'),
+    'utf8',
+  )
+  assert.match(
+    source,
+    /const repository = exactGithubRepository\(\{ repoRoot \}\)/,
+  )
+  assert.match(
+    source,
+    /expected:\s*repository/,
+  )
+  for (const command of ['view', 'download', 'upload', 'edit', 'create']) {
+    assert.match(
+      source,
+      new RegExp(`'${command}',[\\s\\S]{0,180}?'--repo'`),
+      command,
+    )
+  }
 })
 
 test('staged draft publication publishes only the already validated bytes', () => {
@@ -833,6 +893,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     ['init', '-q'],
     ['config', 'user.email', 'release-test@example.invalid'],
     ['config', 'user.name', 'Release Test'],
+    ['remote', 'add', 'origin', 'htree://self/test'],
   ]) {
     const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
@@ -856,6 +917,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     'github-release-publication.mjs',
     'htree-release-publication.mjs',
     'ios-release-publication.mjs',
+    'release-mutation-gate.mjs',
     'verify-release-publication-bundle.mjs',
     'startos-release.mjs',
     'zapstore-release-publication.mjs',
@@ -1260,6 +1322,11 @@ test('staged draft publication publishes only the already validated bytes', () =
 set -eu
 printf '%s\\n' "$*" >> "$FAKE_HTREE_LOG"
 case "$1" in
+  user)
+    printf '%s (self)\\n' "$FAKE_HTREE_NPUB"
+    ;;
+  status)
+    ;;
   add)
     printf 'url: %s\\n' "$FAKE_HTREE_CID"
     ;;
@@ -1318,7 +1385,10 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
       PATH: `${bin}:${process.env.PATH}`,
       FAKE_HTREE_CID: fakeCid,
       FAKE_HTREE_LOG: htreeLog,
+      FAKE_HTREE_NPUB: 'npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm',
       FAKE_HTREE_STAGE: stage,
+      NVPN_HTREE_PUBLISHER_NPUB:
+        'npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm',
     },
   }
   const unexpectedStagePath = join(stage, 'unsealed.txt')
@@ -1367,10 +1437,14 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
   }
 
   const htreeCommands = readFileSync(htreeLog, 'utf8').trim().split('\n')
-  assert.equal(htreeCommands[0], `add ${stage}`)
-  assert.equal(htreeCommands[1], `push --force ${fakeCid}`)
   assert.deepEqual(
-    htreeCommands.slice(2, -1),
+    htreeCommands.slice(0, 3),
+    ['user', 'status', 'release publish --help'],
+  )
+  assert.equal(htreeCommands[3], `add ${stage}`)
+  assert.equal(htreeCommands[4], `push --force ${fakeCid}`)
+  assert.deepEqual(
+    htreeCommands.slice(5, -1),
     [...stagedBefore.keys()].map((path) => `cat ${fakeCid}/${path}`),
   )
   assert.equal(

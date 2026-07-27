@@ -27,6 +27,34 @@ function run(command, commandArgs, { cwd, allowFailure = false } = {}) {
   return result
 }
 
+export function githubRepositoryFromRemote(remote) {
+  const value = String(remote ?? '').trim()
+  const match = value.match(
+    /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?$/,
+  )
+  if (!match || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(match[1])) {
+    throw new Error(
+      'The github remote must be an exact github.com owner/repository URL.',
+    )
+  }
+  return match[1]
+}
+
+function exactGithubRepository({ repoRoot, expected = '' }) {
+  const remote = run(
+    'git',
+    ['remote', 'get-url', 'github'],
+    { cwd: repoRoot },
+  ).stdout.trim()
+  const repository = githubRepositoryFromRemote(remote)
+  if (expected && repository !== expected) {
+    throw new Error(
+      'The github remote changed after release publication preflight.',
+    )
+  }
+  return repository
+}
+
 function expectedAssets(stageDir, manifest) {
   return manifest.assets.map((asset) => {
     const path = join(stageDir, asset.path)
@@ -140,13 +168,15 @@ export function githubReleaseRepairPlan({
   }
 }
 
-function viewRelease({ repoRoot, tag }) {
+function viewRelease({ repoRoot, repository, tag }) {
   const viewed = run(
     'gh',
     [
       'release',
       'view',
       tag,
+      '--repo',
+      repository,
       '--json',
       'tagName,name,isDraft,isPrerelease,targetCommitish,body,assets',
     ],
@@ -162,12 +192,21 @@ function viewRelease({ repoRoot, tag }) {
   }
 }
 
-function verifyRemoteAssets({ repoRoot, tag, assets }) {
+function verifyRemoteAssets({ repoRoot, repository, tag, assets }) {
   const downloadDir = mkdtempSync(join(tmpdir(), 'nvpn-gh-release-'))
   try {
     run(
       'gh',
-      ['release', 'download', tag, '--dir', downloadDir, '--clobber'],
+      [
+        'release',
+        'download',
+        tag,
+        '--repo',
+        repository,
+        '--dir',
+        downloadDir,
+        '--clobber',
+      ],
       { cwd: repoRoot },
     )
     const names = readdirSync(downloadDir).sort()
@@ -193,6 +232,7 @@ function verifyRemoteAssets({ repoRoot, tag, assets }) {
 
 function repairExactRelease({
   repoRoot,
+  repository,
   tag,
   commit,
   notesPath,
@@ -213,6 +253,7 @@ function repairExactRelease({
   if (plan.present.length > 0) {
     verifyRemoteAssets({
       repoRoot,
+      repository,
       tag,
       assets: plan.present,
     })
@@ -224,6 +265,8 @@ function repairExactRelease({
         'release',
         'upload',
         tag,
+        '--repo',
+        repository,
         ...plan.missing.map(({ path }) => path),
       ],
       { cwd: repoRoot },
@@ -236,6 +279,8 @@ function repairExactRelease({
         'release',
         'edit',
         tag,
+        '--repo',
+        repository,
         '--verify-tag',
         '--target',
         commit,
@@ -259,10 +304,26 @@ export function preflightGithubRelease({
   dryRun = false,
 }) {
   if (dryRun) {
-    return
+    return { repository: 'dry-run' }
   }
+  const repository = exactGithubRepository({ repoRoot })
   run('gh', ['auth', 'status'], { cwd: repoRoot })
-  run('gh', ['repo', 'view', '--json', 'nameWithOwner'], { cwd: repoRoot })
+  const viewedRepository = run(
+    'gh',
+    [
+      'repo',
+      'view',
+      repository,
+      '--json',
+      'nameWithOwner',
+      '--jq',
+      '.nameWithOwner',
+    ],
+    { cwd: repoRoot },
+  ).stdout.trim()
+  if (viewedRepository !== repository) {
+    throw new Error('GitHub CLI repository differs from the exact github remote.')
+  }
   const tagCommit = run(
     'git',
     ['rev-parse', '-q', '--verify', `${tag}^{commit}`],
@@ -285,6 +346,7 @@ export function preflightGithubRelease({
       throw new Error(`${label} does not resolve to staged commit ${commit}.`)
     }
   }
+  return { repository }
 }
 
 export function publishExactGithubRelease({
@@ -293,6 +355,7 @@ export function publishExactGithubRelease({
   manifest,
   tag,
   commit,
+  repository,
   dryRun = false,
 }) {
   const assets = expectedAssets(stageDir, manifest)
@@ -301,7 +364,15 @@ export function publishExactGithubRelease({
   if (dryRun) {
     return { created: false, verified: true }
   }
-  let viewed = viewRelease({ repoRoot, tag })
+  const exactRepository = exactGithubRepository({
+    repoRoot,
+    expected: repository,
+  })
+  let viewed = viewRelease({
+    repoRoot,
+    repository: exactRepository,
+    tag,
+  })
   let created = false
   if (viewed.release === null) {
     if (!/not found|HTTP 404/i.test(viewed.error)) {
@@ -311,6 +382,8 @@ export function publishExactGithubRelease({
       'release',
       'create',
       tag,
+      '--repo',
+      exactRepository,
       '--verify-tag',
       '--target',
       commit,
@@ -328,7 +401,11 @@ export function publishExactGithubRelease({
     if (creation.status === 0) {
       created = true
     }
-    viewed = viewRelease({ repoRoot, tag })
+    viewed = viewRelease({
+      repoRoot,
+      repository: exactRepository,
+      tag,
+    })
     if (viewed.release === null) {
       throw new Error(
         creation.stderr.trim()
@@ -340,6 +417,7 @@ export function publishExactGithubRelease({
   }
   repairExactRelease({
     repoRoot,
+    repository: exactRepository,
     tag,
     commit,
     notesPath,
@@ -347,7 +425,11 @@ export function publishExactGithubRelease({
     assets,
     release: viewed.release,
   })
-  viewed = viewRelease({ repoRoot, tag })
+  viewed = viewRelease({
+    repoRoot,
+    repository: exactRepository,
+    tag,
+  })
   if (viewed.release === null) {
     throw new Error(
       viewed.error || 'GitHub release disappeared during exact verification.',
@@ -360,6 +442,11 @@ export function publishExactGithubRelease({
     notes,
     assets,
   })
-  verifyRemoteAssets({ repoRoot, tag, assets })
+  verifyRemoteAssets({
+    repoRoot,
+    repository: exactRepository,
+    tag,
+    assets,
+  })
   return { created, verified: true }
 }

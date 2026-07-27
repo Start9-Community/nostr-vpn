@@ -72,6 +72,7 @@ import {
   preflightIosPublication,
   publishExactIosDistribution,
 } from './ios-release-publication.mjs'
+import { validateReleaseMutationGate } from './release-mutation-gate.mjs'
 import {
   preflightRequiredZapstorePublication as preflightExactZapstorePublication,
   publishExactZapstoreRelease,
@@ -1802,7 +1803,14 @@ function stageRelease({
   return { assetPaths, stageDir, stagedAndroidApkPath }
 }
 
-function publishRelease({ stageDir, releaseTree, tag, draft, dryRun }) {
+function publishRelease({
+  stageDir,
+  releaseTree,
+  tag,
+  draft,
+  dryRun,
+  beforeMutation = () => {},
+}) {
   if (dryRun) {
     console.log(`Would publish ${tag} from ${stageDir} into ${releaseTree}`)
     return 'dry-run'
@@ -1819,6 +1827,7 @@ function publishRelease({ stageDir, releaseTree, tag, draft, dryRun }) {
   }
 
   const cid = match[1]
+  beforeMutation()
   run('htree', ['push', '--force', cid], { dryRun })
   verifyHtreeReleaseCid({ cid, manifest, dryRun })
   const args = ['release', 'publish', releaseTree, tag, cid]
@@ -1829,7 +1838,13 @@ function publishRelease({ stageDir, releaseTree, tag, draft, dryRun }) {
   return cid
 }
 
-function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
+function promoteStagedDraft({
+  stageDir,
+  releaseTree,
+  tag,
+  dryRun,
+  beforeMutation = () => {},
+}) {
   if (dryRun) {
     console.log(`Would promote staged draft ${tag} from ${stageDir} into ${releaseTree}`)
     return {
@@ -1874,6 +1889,7 @@ function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
         tag,
         draft: false,
         dryRun,
+        beforeMutation,
       }),
       finalManifest,
       stagedAndroidApkPath,
@@ -1899,6 +1915,25 @@ function releaseMutationEnvironment({
     NVPN_FLEET_MANIFEST_PATH: fleet.manifest,
     NVPN_FLEET_INVENTORY_PATH: fleet.inventory,
   }
+}
+
+function replayCanonicalMutationGate({
+  stageDir,
+  tag,
+  options,
+  env,
+  requireTag,
+}) {
+  const fleet = fleetPublicationPaths({ repoRoot, options, env })
+  return validateReleaseMutationGate({
+    stageDir: resolve(stageDir),
+    fleetResult: fleet.result,
+    fleetManifest: fleet.manifest,
+    fleetInventory: fleet.inventory,
+    expectedTag: tag,
+    requireTag,
+    env,
+  })
 }
 
 function publishRustCrates({
@@ -2238,12 +2273,30 @@ function main() {
     console.log(
       `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
     )
+    const mutationEnv = releaseMutationEnvironment({
+      env,
+      options,
+      stageDir,
+      stagedManifest,
+    })
+    preflightHtreeRelease({
+      repoRoot,
+      env: mutationEnv,
+      dryRun: options.dryRun,
+    })
     const cid = publishRelease({
       stageDir,
       releaseTree,
       tag,
       draft: true,
       dryRun: options.dryRun,
+      beforeMutation: () => replayCanonicalMutationGate({
+        stageDir,
+        tag,
+        options,
+        env: mutationEnv,
+        requireTag: false,
+      }),
     })
     console.log(`Published staged draft ${tag} to ${releaseTree} via ${cid}`)
     return
@@ -2306,7 +2359,7 @@ function main() {
       env: mutationEnv,
       dryRun: options.dryRun,
     })
-    preflightGithubRelease({
+    const githubPreflight = preflightGithubRelease({
       repoRoot,
       tag,
       commit: stagedCommit,
@@ -2361,14 +2414,29 @@ function main() {
       releaseTree,
       tag,
       dryRun: options.dryRun,
+      beforeMutation: () => replayCanonicalMutationGate({
+        stageDir,
+        tag,
+        options,
+        env: mutationEnv,
+        requireTag: true,
+      }),
     })
     console.log(`Promoted ${tag} to ${releaseTree} via ${promoted.cid}`)
+    replayCanonicalMutationGate({
+      stageDir,
+      tag,
+      options,
+      env: mutationEnv,
+      requireTag: true,
+    })
     const githubRelease = publishExactGithubRelease({
       repoRoot,
       stageDir,
       manifest: stagedManifest,
       tag,
       commit: stagedCommit,
+      repository: githubPreflight.repository,
       dryRun: options.dryRun,
     })
     console.log(
