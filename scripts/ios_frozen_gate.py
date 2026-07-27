@@ -450,7 +450,8 @@ def validate_mobile_join_receipt(
         and manual.get("pixelAdminIphoneJoiner") is True
         and manual.get("exactRosterOnBothSides") is True
         and manual.get("acceptedRosterOnly") is True
-        and manual.get("joinerRelaunchDurable") is True
+        and manual.get("iphoneAdminPixelJoinerRelaunchDurable") is True
+        and manual.get("pixelAdminIphoneJoinerRelaunchDurable") is True
         and isinstance(content_width, dict)
         and content_width.get("minimumRequiredBasisPoints") == 9_800
         and content_width.get("maximumAllowedBasisPoints") == 10_000

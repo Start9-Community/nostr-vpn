@@ -223,7 +223,7 @@ phase_android_admin_ios_qr() {
 }
 
 phase_ios_admin_android_manual() {
-  local admin_log submitted completed
+  local admin_log ios_admin_relaunch_joiner submitted completed
   release_join_reset_ios_state
   release_join_reset_android_state
   ios_create_admin "Release manual iPhone admin"
@@ -237,6 +237,13 @@ phase_ios_admin_android_manual() {
   submitted="$(
     ios_marker_value_from "$admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
   )"
+  ios_admin_relaunch_joiner="$(
+    ios_marker_value_from \
+      "$admin_log" NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE
+  )"
+  [[ "$ios_admin_relaunch_joiner" == "$RELEASE_JOIN_ANDROID_JOINER_ID" ]] \
+    || fail "iPhone admin relaunch did not retain the exact Pixel joiner"
+  RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE=1
   release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel manual join never left its locally pending admin row"
   release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
@@ -246,7 +253,7 @@ phase_ios_admin_android_manual() {
 }
 
 phase_android_admin_ios_manual() {
-  local join_log android_admin_log submitted completed
+  local join_log ios_joiner_relaunch_admin android_admin_log submitted completed
   release_join_reset_ios_state
   release_join_reset_android_state
   release_join_android_create_admin
@@ -275,6 +282,12 @@ phase_android_admin_ios_manual() {
   )"
   release_join_ios_finish_test \
     || fail "iPhone manual join never received and retained the Pixel's signed roster"
+  ios_joiner_relaunch_admin="$(
+    ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_RELAUNCH_DURABLE
+  )"
+  [[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]] \
+    || fail "iPhone joiner relaunch did not retain the exact Pixel admin"
+  RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE=1
   completed="$(release_join_now_ms)"
   assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-manual"
 }
@@ -298,8 +311,10 @@ release_join_launch_ios_release
 release_join_assert_one_ios_process
 [[ "${RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
   && "${RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
-  && "${RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE:-}" == 1 ]] \
-  || fail "mobile QR width or relaunch evidence is incomplete"
+  && "${RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE:-}" == 1 \
+  && "${RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE:-}" == 1 \
+  && "${RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE:-}" == 1 ]] \
+  || fail "mobile QR width or directional relaunch evidence is incomplete"
 
 case "$MACOS_JOIN_GATE" in
   0|false|FALSE|False|no|NO|No|off|OFF|Off) ;;
@@ -323,6 +338,8 @@ python3 - \
   "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
   "$RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS" \
   "$RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE" \
+  "$RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE" \
+  "$RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE" \
   "$MACOS_JOIN_GATE" <<'PY'
 import hashlib
 import json
@@ -343,6 +360,8 @@ import sys
     android_qr_content_width_bps,
     ios_qr_content_width_bps,
     ios_qr_relaunch_durable,
+    ios_admin_manual_relaunch_durable,
+    ios_joiner_manual_relaunch_durable,
     desktop_mode,
 ) = sys.argv[1:]
 
@@ -442,8 +461,12 @@ if any(
     for observed in qr_content_width_bps.values()
 ):
     raise SystemExit("mobile join QR did not fill its content width")
-if ios_qr_relaunch_durable != "1":
-    raise SystemExit("iPhone QR joiner relaunch evidence is incomplete")
+if (
+    ios_qr_relaunch_durable != "1"
+    or ios_admin_manual_relaunch_durable != "1"
+    or ios_joiner_manual_relaunch_durable != "1"
+):
+    raise SystemExit("iPhone directional relaunch evidence is incomplete")
 desktop_enabled = desktop_mode.lower() not in {
     "0", "false", "no", "off",
 }
@@ -498,7 +521,10 @@ with open(path, "w", encoding="utf-8") as handle:
                 "pixelAdminIphoneJoiner": True,
                 "exactRosterOnBothSides": True,
                 "acceptedRosterOnly": True,
-                "joinerRelaunchDurable": True,
+                "iphoneAdminPixelJoinerRelaunchDurable":
+                    ios_admin_manual_relaunch_durable == "1",
+                "pixelAdminIphoneJoinerRelaunchDurable":
+                    ios_joiner_manual_relaunch_durable == "1",
             },
             "deliveryMilliseconds": timings,
             "desktopMobileManual": desktop_enabled,

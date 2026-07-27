@@ -251,6 +251,52 @@ if ios_qr_joiner_phase.index(
 ) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
 
+ios_admin_android_manual_phase = gate.split(
+    "phase_ios_admin_android_manual() {", 1
+)[1].split("phase_android_admin_ios_manual() {", 1)[0]
+for required in (
+    "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE",
+    '[[ "$ios_admin_relaunch_joiner" == "$RELEASE_JOIN_ANDROID_JOINER_ID" ]]',
+    "RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE=1",
+):
+    if required not in ios_admin_android_manual_phase:
+        raise SystemExit(
+            f"iPhone-admin manual phase does not consume exact relaunch proof: {required}"
+        )
+if ios_admin_android_manual_phase.index(
+    "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE"
+) < ios_admin_android_manual_phase.index("release_join_ios_run_test"):
+    raise SystemExit("iPhone-admin relaunch evidence is read before XCTest completes")
+
+android_admin_ios_manual_phase = gate.split(
+    "phase_android_admin_ios_manual() {", 1
+)[1].split("release_join_require_clean_fips", 1)[0]
+for required in (
+    "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
+    '[[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
+    "RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE=1",
+):
+    if required not in android_admin_ios_manual_phase:
+        raise SystemExit(
+            f"iPhone-joiner manual phase does not consume exact relaunch proof: {required}"
+        )
+if android_admin_ios_manual_phase.index(
+    "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE"
+) < android_admin_ios_manual_phase.index("release_join_ios_finish_test"):
+    raise SystemExit("iPhone-joiner relaunch evidence is read before XCTest completes")
+for required in (
+    "ios_admin_manual_relaunch_durable != \"1\"",
+    "ios_joiner_manual_relaunch_durable != \"1\"",
+    '"iphoneAdminPixelJoinerRelaunchDurable":',
+    "ios_admin_manual_relaunch_durable == \"1\"",
+    '"pixelAdminIphoneJoinerRelaunchDurable":',
+    "ios_joiner_manual_relaunch_durable == \"1\"",
+):
+    if required not in gate:
+        raise SystemExit(
+            f"Mobile receipt is not bound to directional manual relaunch proof: {required}"
+        )
+
 macos_iphone_joiner_phase = desktop.split(
     "# macOS admin -> physical iPhone joiner.", 1
 )[1].split("# Physical iPhone admin -> macOS joiner.", 1)[0]
@@ -392,9 +438,13 @@ for source, label in (
         "iosObservedBasisPoints",
         "androidJoinerRelaunchDurable",
         "iphoneJoinerRelaunchDurable",
+        "iphoneAdminPixelJoinerRelaunchDurable",
+        "pixelAdminIphoneJoinerRelaunchDurable",
     ):
         if required not in source:
-            raise SystemExit(f"{label} does not validate QR width evidence: {required}")
+            raise SystemExit(
+                f"{label} does not validate mobile join evidence: {required}"
+            )
 
 for selector in (
     "network-setup-create",

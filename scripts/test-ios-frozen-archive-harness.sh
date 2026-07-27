@@ -415,7 +415,8 @@ join = {
         "pixelAdminIphoneJoiner": True,
         "exactRosterOnBothSides": True,
         "acceptedRosterOnly": True,
-        "joinerRelaunchDurable": True,
+        "iphoneAdminPixelJoinerRelaunchDurable": True,
+        "pixelAdminIphoneJoinerRelaunchDurable": True,
     },
 }
 join_path.write_text(
@@ -674,6 +675,40 @@ path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 PY
 if seal_gate >/dev/null 2>&1; then
   echo "Frozen iOS gate accepted QR evidence without iPhone relaunch durability" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["manual"]["iphoneAdminPixelJoinerRelaunchDurable"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted iPhone-admin manual evidence without relaunch durability" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["manual"]["pixelAdminIphoneJoinerRelaunchDurable"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted iPhone-joiner manual evidence without relaunch durability" >&2
   exit 1
 fi
 cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"

@@ -458,7 +458,8 @@ function requireMobileJoinReceipt({
     || receipt.manual?.pixelAdminIphoneJoiner !== true
     || receipt.manual?.exactRosterOnBothSides !== true
     || receipt.manual?.acceptedRosterOnly !== true
-    || receipt.manual?.joinerRelaunchDurable !== true
+    || receipt.manual?.iphoneAdminPixelJoinerRelaunchDurable !== true
+    || receipt.manual?.pixelAdminIphoneJoinerRelaunchDurable !== true
     || contentWidth?.minimumRequiredBasisPoints !== 9800
     || contentWidth?.maximumAllowedBasisPoints !== 10000
     || !Number.isSafeInteger(contentWidth?.androidObservedBasisPoints)
