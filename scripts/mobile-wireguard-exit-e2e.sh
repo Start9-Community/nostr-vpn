@@ -45,6 +45,10 @@ ANDROID_DEVICE_SERIAL=""
 IOS_DEVICE_SELECTED=""
 IOS_CLEANUP_ARMED=0
 ADB="${ADB:-$(command -v adb || true)}"
+ANDROID_COUNTER_LEDGER="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-network-counters.XXXXXX")"
+IOS_COUNTER_LEDGER="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-network-counters.XXXXXX")"
+NETWORK_AFTER_BYTES=""
+NETWORK_AFTER_FORWARD=""
 
 usage() {
   cat >&2 <<'EOF'
@@ -123,6 +127,7 @@ cleanup() {
       cleanup_failed=1
     fi
   fi
+  rm -f "$ANDROID_COUNTER_LEDGER" "$IOS_COUNTER_LEDGER"
   if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
     status=1
   fi
@@ -319,7 +324,38 @@ assert_platform_traffic() {
     echo "$platform $label failed: no forwarded Internet traffic crossed wg0 ($before_forward->$after_forward packets)" >&2
     exit 1
   fi
+  NETWORK_AFTER_BYTES="$after_bytes"
+  NETWORK_AFTER_FORWARD="$after_forward"
   echo "$platform $label packet path passed: transfer rx=$before_rx->$after_rx tx=$before_tx->$after_tx forwarded=$before_forward->$after_forward"
+}
+
+record_case_evidence() {
+  local platform="$1" label="$2" evidence="$3"
+  local before_bytes="$4" after_bytes="$5"
+  local before_forward="$6" after_forward="$7"
+  local before_dns="$8" after_dns="$9"
+  local before_rx before_tx after_rx after_tx ledger
+  local -a before_dns_values=() after_dns_values=()
+  IFS=$'\t' read -r before_rx before_tx <<<"$before_bytes"
+  IFS=$'\t' read -r after_rx after_tx <<<"$after_bytes"
+  IFS=$'\t' read -r -a before_dns_values <<<"$before_dns"
+  IFS=$'\t' read -r -a after_dns_values <<<"$after_dns"
+  [[ "${#before_dns_values[@]}" -eq 7 \
+    && "${#after_dns_values[@]}" -eq 7 ]] || {
+    echo "$platform $label has an incomplete DNS counter snapshot" >&2
+    return 1
+  }
+  case "$platform" in
+    Android) ledger="$ANDROID_COUNTER_LEDGER" ;;
+    iOS) ledger="$IOS_COUNTER_LEDGER" ;;
+    *) echo "unknown mobile evidence platform: $platform" >&2; return 2 ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$label" "$evidence" \
+    "$before_rx" "$after_rx" "$before_tx" "$after_tx" \
+    "$before_forward" "$after_forward" >>"$ledger"
+  printf '\t%s' "${before_dns_values[@]}" "${after_dns_values[@]}" >>"$ledger"
+  printf '\n' >>"$ledger"
 }
 
 run_android_case() {
@@ -420,6 +456,11 @@ run_android_case() {
   )"
   mobile_wg_fixture_assert_dns_case_evidence \
     Android "$label" "$evidence" "$before_dns_evidence" "$after_dns_evidence"
+  record_case_evidence \
+    Android "$label" "$evidence" \
+    "$before_bytes" "$NETWORK_AFTER_BYTES" \
+    "$before_forward" "$NETWORK_AFTER_FORWARD" \
+    "$before_dns_evidence" "$after_dns_evidence"
 }
 
 run_ios_case() {
@@ -582,6 +623,46 @@ PY
   )"
   mobile_wg_fixture_assert_dns_case_evidence \
     iOS "$label" "$evidence" "$before_dns_evidence" "$after_dns_evidence"
+  record_case_evidence \
+    iOS "$label" "$evidence" \
+    "$before_bytes" "$NETWORK_AFTER_BYTES" \
+    "$before_forward" "$NETWORK_AFTER_FORWARD" \
+    "$before_dns_evidence" "$after_dns_evidence"
+}
+
+write_network_evidence() {
+  local platform="$1" output artifact_receipt artifact_dir ledger mode
+  if bool_is_true "$UNDERLAY_CHANGE_GATE"; then
+    mode=underlay-lifecycle
+  else
+    mode=wireguard-dns
+  fi
+  case "$platform" in
+    android)
+      output="${NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT:-}"
+      artifact_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-}"
+      artifact_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
+      ledger="$ANDROID_COUNTER_LEDGER"
+      ;;
+    ios)
+      output="${NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT:-}"
+      artifact_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-}"
+      artifact_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
+      ledger="$IOS_COUNTER_LEDGER"
+      ;;
+  esac
+  [[ -n "$output" ]] || return 0
+  [[ -n "$artifact_receipt" ]] || {
+    echo "$platform network evidence requires an exact artifact receipt" >&2
+    return 1
+  }
+  python3 "$ROOT/scripts/release-network-evidence.py" mobile \
+    --platform "$platform" \
+    --mode "$mode" \
+    --artifact-receipt "$artifact_receipt" \
+    --artifact-dir "$artifact_dir" \
+    --counter-ledger "$ledger" \
+    --output "$output"
 }
 
 DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)
@@ -606,6 +687,7 @@ if has_platform android; then
     run_android_case "${DNS_CASES[$index]}" "$first" "$final"
   done
   assert_single_android_app
+  write_network_evidence android
 fi
 if has_platform ios; then
   if ! bool_is_true "$RELEASE_BLACKBOX_GATE"; then
@@ -640,6 +722,7 @@ if has_platform ios; then
     [[ "$index" -eq 0 ]] && first=1
     run_ios_case "${DNS_CASES[$index]}" "$first" "$final"
   done
+  write_network_evidence ios
   ios_release_network_disconnect_cleanup
   IOS_CLEANUP_ARMED=0
   mobile_ios_hotspot_cleanup

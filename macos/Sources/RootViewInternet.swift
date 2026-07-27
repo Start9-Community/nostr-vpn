@@ -154,6 +154,7 @@ extension RootView {
                 Text("Encrypted DNS").tag("encrypted")
                 Text("DNS through exit").tag("through_exit")
             }
+            .accessibilityIdentifier("exit-dns-mode")
 
             if exitDnsMode == "encrypted" {
                 Picker("Provider", selection: $exitDnsDohProvider) {
@@ -161,15 +162,19 @@ extension RootView {
                     Text("Quad9").tag("quad9")
                     Text("Custom DoH").tag("custom")
                 }
+                .accessibilityIdentifier("exit-dns-provider")
                 if exitDnsDohProvider == "custom" {
                     TextField("HTTPS DoH URL", text: $exitDnsCustomDohUrl)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("exit-dns-custom-url")
                     TextField("Bootstrap IPs, comma separated", text: $exitDnsCustomDohBootstrapIps)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("exit-dns-bootstrap-ips")
                 }
             } else if exitDnsMode == "through_exit" {
                 TextField("DNS server IPs, comma separated", text: $exitDnsThroughExitServers)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("exit-dns-through-servers")
                 Text("These DNS packets are sent only through the selected exit.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -191,6 +196,7 @@ extension RootView {
                 Label("Save Exit DNS", systemImage: "checkmark")
             }
             .disabled(manager.actionInFlight)
+            .accessibilityIdentifier("exit-dns-save")
         }
     }
 

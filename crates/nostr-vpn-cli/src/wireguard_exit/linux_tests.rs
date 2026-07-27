@@ -1,6 +1,8 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Mutex;
 
 use super::*;
@@ -32,6 +34,7 @@ struct FakeRunner {
     fail_after_mutation: Option<usize>,
     mutation_count: usize,
     secret_paths: Vec<String>,
+    link_add_journal_ready: Option<Rc<Cell<bool>>>,
 }
 
 impl FakeRunner {
@@ -69,6 +72,7 @@ impl FakeRunner {
             fail_after_mutation: None,
             mutation_count: 0,
             secret_paths: Vec::new(),
+            link_add_journal_ready: None,
         }
     }
 
@@ -171,6 +175,16 @@ impl LinuxCommandRunner for FakeRunner {
                 });
             }
             "link add dev nvwg0 type wireguard" => {
+                if self
+                    .link_add_journal_ready
+                    .as_ref()
+                    .is_some_and(|ready| !ready.get())
+                {
+                    return Ok(Self::failure(
+                        5,
+                        "link add reached before durable cleanup intent",
+                    ));
+                }
                 self.state.link_exists = true;
                 return Ok(self.mutation_result());
             }
@@ -709,6 +723,49 @@ fn capture_failure_after_link_creation_removes_link_and_temp_secrets() {
     assert!(error.to_string().contains("Unable to access interface"));
     assert!(!runner.state.link_exists);
     assert_eq!(temp_secret_paths(iface), before);
+}
+
+#[test]
+fn new_interface_cleanup_intent_precedes_link_creation() {
+    let _guard = lock_tests();
+    let journal_ready = Rc::new(Cell::new(false));
+    let mut runner = FakeRunner::existing();
+    runner.state.link_exists = false;
+    runner.fail_showconf = true;
+    runner.link_add_journal_ready = Some(Rc::clone(&journal_ready));
+    let mut first_obligation = None;
+
+    let failure = apply_linux_wireguard_exit_upstream_with_journal(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        None,
+        |obligation| {
+            first_obligation.get_or_insert_with(|| obligation.clone());
+            if matches!(
+                obligation,
+                LinuxWireGuardExitCleanupObligation::CreatedInterface { interface }
+                    if interface == "nvwg0"
+            ) {
+                journal_ready.set(true);
+            }
+            Ok(())
+        },
+    )
+    .expect_err("capture fails after the journaled interface creation");
+
+    assert!(failure.to_string().contains("Unable to access interface"));
+    assert!(
+        journal_ready.get(),
+        "link creation never received a cleanup intent"
+    );
+    assert!(matches!(
+        first_obligation,
+        Some(LinuxWireGuardExitCleanupObligation::CreatedInterface { ref interface })
+            if interface == "nvwg0"
+    ));
+    assert!(!runner.state.link_exists);
 }
 
 #[test]

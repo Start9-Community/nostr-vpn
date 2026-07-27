@@ -9,16 +9,14 @@ pub(crate) fn macos_route_delete_error_is_absent(message: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_cleanup_managed_routes(state: &MacosNetworkCleanupState) -> Vec<MacosManagedRoute> {
+pub(crate) fn macos_cleanup_managed_routes(
+    state: &MacosNetworkCleanupState,
+) -> Vec<MacosManagedRoute> {
     let mut routes = state.managed_routes.clone();
     if routes.is_empty() {
-        routes.extend(state.endpoint_bypass_routes.iter().cloned().map(|target| {
-            MacosManagedRoute {
-                target,
-                gateway: None,
-                interface: None,
-            }
-        }));
+        // Legacy journals did not record the gateway or interface that owned
+        // endpoint bypass routes. Treat those entries as non-actionable instead
+        // of risking deletion of a route now owned by another connection.
         if state.original_default_route.is_some() && !state.iface.trim().is_empty() {
             routes.extend(
                 crate::macos_network::macos_tunnel_default_route_targets()
@@ -49,9 +47,15 @@ fn macos_cleanup_managed_routes(state: &MacosNetworkCleanupState) -> Vec<MacosMa
 }
 
 #[cfg(target_os = "macos")]
+fn cleanup_owned_macos_secure_dns_resolver_files() -> Result<bool> {
+    crate::secure_dns_runtime::cleanup_owned_macos_secure_dns_resolver_files()
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn repair_legacy_macos_network_state(config_path: &Path) -> Result<bool> {
     let app = load_or_default_config(config_path)?;
-    let mut repaired = false;
+    let mut repaired = cleanup_owned_macos_secure_dns_resolver_files()
+        .context("remove legacy secure DNS resolver files")?;
 
     if let Ok(tunnel_ip) = strip_cidr(&app.node.tunnel_ip).parse::<Ipv4Addr>() {
         let default_routes = macos_default_routes()?;
@@ -188,6 +192,12 @@ pub(crate) fn repair_saved_network_state(config_path: &Path) -> Result<bool> {
             && let Err(error) = write_macos_ipv4_forwarding(false)
         {
             failures.push(format!("restore IPv4 forwarding state: {error}"));
+        }
+
+        if state.secure_dns_resolver_files
+            && let Err(error) = cleanup_owned_macos_secure_dns_resolver_files()
+        {
+            failures.push(format!("remove secure DNS resolver files: {error}"));
         }
 
         if using_legacy_route_cleanup

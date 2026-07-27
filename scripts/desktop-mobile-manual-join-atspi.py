@@ -1,0 +1,762 @@
+#!/usr/bin/env python3
+"""Drive the shipped Linux GTK desktop/mobile join flow through AT-SPI."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any
+
+import pyatspi
+
+
+NPUB = re.compile(r"npub1[023456789acdefghjklmnpqrstuvwxyz]{58}")
+TARGET_PID = 0
+TARGET_WINDOW = 0
+
+
+def now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def write_json_atomically(path: pathlib.Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def walk(node: Any):
+    yield node
+    try:
+        children = list(node)
+    except Exception:
+        return
+    for child in children:
+        yield from walk(child)
+
+
+def visible(node: Any) -> bool:
+    try:
+        state = node.getState()
+        return (
+            state.contains(pyatspi.STATE_VISIBLE)
+            and state.contains(pyatspi.STATE_SHOWING)
+            and not state.contains(pyatspi.STATE_DEFUNCT)
+        )
+    except Exception:
+        return False
+
+
+def matching_nodes(name: str) -> list[Any]:
+    matches = []
+    desktop = pyatspi.Registry.getDesktop(0)
+    for node in walk(desktop):
+        try:
+            if (
+                node.get_process_id() == TARGET_PID
+                and node.name == name
+                and visible(node)
+            ):
+                matches.append(node)
+        except Exception:
+            continue
+    return matches
+
+
+def has_action(node: Any) -> bool:
+    try:
+        return node.queryAction().nActions > 0
+    except Exception:
+        return False
+
+
+def find_named(
+    name: str,
+    timeout: float = 15,
+    *,
+    actionable: bool = False,
+) -> Any:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for node in matching_nodes(name):
+            if not actionable or has_action(node):
+                return node
+        pyatspi.Registry.pumpQueuedEvents()
+        time.sleep(0.1)
+    visible_nodes = []
+    for node in walk(pyatspi.Registry.getDesktop(0)):
+        try:
+            if (
+                node.get_process_id() == TARGET_PID
+                and visible(node)
+                and node.name
+            ):
+                visible_nodes.append(f"{node.getRoleName()}:{node.name}")
+        except Exception:
+            continue
+    print(
+        "Visible AT-SPI controls: " + ", ".join(visible_nodes[:300]),
+        file=sys.stderr,
+    )
+    raise RuntimeError(f"visible AT-SPI control did not appear: {name}")
+
+
+def focus_named_with_keyboard(name: str, max_tabs: int = 100) -> Any:
+    subprocess.run(
+        ["xdotool", "windowfocus", "--sync", str(TARGET_WINDOW)],
+        check=True,
+    )
+    focused_names = []
+    for _ in range(max_tabs):
+        for node in matching_nodes(name):
+            try:
+                if node.getState().contains(pyatspi.STATE_FOCUSED):
+                    return node
+            except Exception:
+                continue
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "Tab"],
+            check=True,
+        )
+        time.sleep(0.05)
+        for candidate in walk(pyatspi.Registry.getDesktop(0)):
+            try:
+                if (
+                    candidate.get_process_id() == TARGET_PID
+                    and candidate.getState().contains(pyatspi.STATE_FOCUSED)
+                ):
+                    focused_names.append(
+                        f"{candidate.getRoleName()}:{candidate.name}"
+                    )
+                    break
+            except Exception:
+                continue
+    raise RuntimeError(
+        f"keyboard focus did not reach {name}; focused sequence: "
+        + ", ".join(focused_names)
+    )
+
+
+def invoke(name: str) -> None:
+    node = find_named(name, actionable=True)
+    try:
+        action = node.queryAction()
+        if action.nActions > 0 and action.doAction(0):
+            time.sleep(0.25)
+            return
+    except Exception:
+        pass
+    try:
+        component = node.queryComponent()
+        if component.grabFocus():
+            subprocess.run(
+                ["xdotool", "key", "--clearmodifiers", "space"],
+                check=True,
+            )
+            time.sleep(0.25)
+            return
+    except Exception:
+        pass
+    focus_named_with_keyboard(name)
+    subprocess.run(
+        ["xdotool", "key", "--clearmodifiers", "space"],
+        check=True,
+    )
+    time.sleep(0.25)
+
+
+def set_text(name: str, value: str) -> None:
+    node = find_named(name)
+    try:
+        node.queryEditableText().setTextContents(value)
+    except Exception:
+        focus_named_with_keyboard(name)
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "ctrl+a"],
+            check=True,
+        )
+        subprocess.run(
+            ["xdotool", "type", "--clearmodifiers", "--delay", "1", "--", value],
+            check=True,
+        )
+    deadline = time.monotonic() + 3
+    actual = ""
+    while time.monotonic() < deadline:
+        for candidate in matching_nodes(name):
+            try:
+                actual = candidate.queryText().getText(0, -1)
+                if actual == value:
+                    return
+            except Exception:
+                continue
+        time.sleep(0.05)
+    raise RuntimeError(f"AT-SPI failed to set {name}: got {actual!r}")
+
+
+def read_text(name: str) -> str:
+    node = find_named(name)
+    try:
+        value = node.queryText().getText(0, -1).strip()
+    except Exception as error:
+        raise RuntimeError(f"AT-SPI could not read public text from {name}") from error
+    if not value:
+        raise RuntimeError(f"public GTK value is empty: {name}")
+    return value
+
+
+def read_npub(name: str) -> str:
+    value = read_text(name)
+    match = NPUB.search(value)
+    if match is None:
+        raise RuntimeError(f"public GTK value is not a valid npub: {name}")
+    return match.group(0)
+
+
+def read_network_id(name: str) -> str:
+    value = read_text(name)
+    if ":" in value:
+        value = value.split(":", 1)[1]
+    normalized = re.sub(r"[\s-]", "", value)
+    if len(normalized) < 8:
+        raise RuntimeError("public GTK Network ID is empty or invalid")
+    return normalized
+
+
+def sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def select_index(name: str, index: int) -> None:
+    node = find_named(name)
+    try:
+        selection = node.querySelection()
+        if selection.selectChild(index):
+            time.sleep(0.25)
+            if selected_index(name) == index:
+                return
+    except Exception:
+        pass
+    focus_named_with_keyboard(name)
+    subprocess.run(
+        ["xdotool", "key", "--clearmodifiers", "Home"],
+        check=True,
+    )
+    for _ in range(index):
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "Down"],
+            check=True,
+        )
+    subprocess.run(
+        ["xdotool", "key", "--clearmodifiers", "Return"],
+        check=True,
+    )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if selected_index(name) == index:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"AT-SPI failed to select index {index} on {name}")
+
+
+def selected_index(name: str) -> int:
+    node = find_named(name)
+    try:
+        value = node.queryValue().currentValue
+        return int(round(float(value)))
+    except Exception:
+        pass
+    try:
+        selected = node.querySelection().getSelectedChild(0)
+        if selected is not None:
+            parent = selected.parent
+            for index, child in enumerate(parent):
+                if child == selected:
+                    return index
+    except Exception:
+        pass
+    raise RuntimeError(f"AT-SPI could not read the selected index from {name}")
+
+
+def screenshot(root: pathlib.Path, label: str) -> None:
+    executable = shutil.which("import")
+    if executable is None:
+        return
+    subprocess.run(
+        [executable, "-window", str(TARGET_WINDOW), str(root / f"{label}.png")],
+        check=True,
+    )
+
+
+def canonical_data_dir() -> pathlib.Path:
+    override = os.environ.get("XDG_DATA_HOME", "").strip()
+    if override:
+        base = pathlib.Path(override).expanduser().resolve()
+    else:
+        base = pathlib.Path.home().resolve() / ".local" / "share"
+    return base / "nostr-vpn"
+
+
+def exact_app_pids(app: pathlib.Path) -> list[int]:
+    expected = app.resolve()
+    result = []
+    proc = pathlib.Path("/proc")
+    if not proc.is_dir():
+        return result
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if (entry / "exe").resolve() == expected:
+                result.append(int(entry.name))
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+    return result
+
+
+def stop_exact_app_instances(app: pathlib.Path) -> None:
+    pids = exact_app_pids(app)
+    for pid in pids:
+        os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and exact_app_pids(app):
+        time.sleep(0.05)
+    for pid in exact_app_pids(app):
+        os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and exact_app_pids(app):
+        time.sleep(0.05)
+    if exact_app_pids(app):
+        raise RuntimeError("could not stop the exact imported GTK app")
+
+
+class Driver:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.app = args.app.resolve()
+        self.marker = args.marker.resolve()
+        self.stop_path = args.stop_path.resolve() if args.stop_path else None
+        self.artifact_root = args.artifact_root.resolve()
+        self.process: subprocess.Popen[bytes] | None = None
+        self.log_handle: Any | None = None
+        self.evidence: dict[str, Any] = {
+            "schema": 1,
+            "mode": args.mode,
+            "publicUiOnly": True,
+            "privateStateRead": False,
+            "appLaunchArgumentsOrEnvironment": False,
+        }
+
+    def write_evidence(self) -> None:
+        write_json_atomically(self.marker, self.evidence)
+
+    def reset(self) -> None:
+        if os.environ.get("NVPN_APP_DATA_DIR") or os.environ.get("NVPN_CLI_PATH"):
+            raise RuntimeError("public-UI gate refuses app data or CLI overrides")
+        stop_exact_app_instances(self.app)
+        data_dir = canonical_data_dir()
+        expected_parent = (
+            pathlib.Path(os.environ.get("XDG_DATA_HOME", "")).expanduser().resolve()
+            if os.environ.get("XDG_DATA_HOME", "").strip()
+            else pathlib.Path.home().resolve() / ".local" / "share"
+        )
+        if data_dir.parent != expected_parent or data_dir.name != "nostr-vpn":
+            raise RuntimeError("refusing unsafe canonical Linux app-data reset")
+        if data_dir.is_symlink():
+            raise RuntimeError("refusing symlinked canonical Linux app-data reset")
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+        self.evidence["resetComplete"] = True
+        self.evidence["canonicalProfile"] = True
+        self.write_evidence()
+
+    def launch(self) -> None:
+        global TARGET_PID, TARGET_WINDOW
+        if not self.app.is_file() or self.app.is_symlink():
+            raise RuntimeError(f"imported GTK app is missing: {self.app}")
+        stop_exact_app_instances(self.app)
+        child_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("NVPN_", "FIPS_", "RUST_"))
+        }
+        self.log_handle = (
+            self.artifact_root / f"{self.args.mode.lower()}-app.log"
+        ).open("ab")
+        self.process = subprocess.Popen(
+            [str(self.app)],
+            cwd=self.app.parent,
+            env=child_env,
+            stdout=self.log_handle,
+            stderr=subprocess.STDOUT,
+        )
+        TARGET_PID = self.process.pid
+        deadline = time.monotonic() + self.args.ui_timeout
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError("GTK app exited before showing its public window")
+            search = subprocess.run(
+                [
+                    "xdotool",
+                    "search",
+                    "--onlyvisible",
+                    "--pid",
+                    str(TARGET_PID),
+                    "--name",
+                    "^Nostr VPN$",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            window = search.stdout.strip().splitlines()
+            if window:
+                TARGET_WINDOW = int(window[0])
+                return
+            time.sleep(0.1)
+        raise RuntimeError("GTK app window did not appear")
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        self.process = None
+        if self.log_handle is not None:
+            self.log_handle.close()
+            self.log_handle = None
+
+    def bootstrap(self) -> None:
+        self.launch()
+        find_named("nvpn-manual-join-create-network-choice")
+        self.evidence["bootstrapComplete"] = True
+        screenshot(self.artifact_root, "bootstrap")
+        self.write_evidence()
+
+    def create_admin(self) -> None:
+        self.launch()
+        invoke("nvpn-manual-join-create-network-choice")
+        set_text("nvpn-manual-join-create-network-name", self.args.network_name)
+        invoke("nvpn-manual-join-create-network-submit")
+        invoke("nvpn-manual-join-admin-open")
+        admin = read_npub("nvpn-manual-join-admin-device-id-value")
+        network = read_network_id("nvpn-manual-join-admin-network-id-value")
+        self.evidence.update(
+            {
+                "adminNpub": admin,
+                "networkId": network,
+                "adminReady": True,
+            }
+        )
+        screenshot(self.artifact_root, "create-admin")
+        self.write_evidence()
+
+    def admin_add(self) -> None:
+        if not NPUB.fullmatch(self.args.participant_npub):
+            raise RuntimeError("Pixel joiner Device ID is invalid")
+        if self.stop_path is None:
+            raise RuntimeError("AdminAdd requires a stop path")
+        self.launch()
+        invoke("nvpn-manual-join-admin-open")
+        set_text(
+            "nvpn-manual-join-admin-device-id", self.args.participant_npub
+        )
+        set_text(
+            "nvpn-manual-join-admin-device-name", self.args.participant_alias
+        )
+        self.evidence["participantNpub"] = self.args.participant_npub
+        self.evidence["approvalSubmittedMs"] = now_ms()
+        self.write_evidence()
+        invoke("nvpn-manual-join-admin-submit")
+        invoke("Devices")
+        find_named(
+            f"nvpn-roster-participant-accepted-{self.args.participant_npub}",
+            timeout=self.args.coordination_timeout,
+        )
+        self.evidence["acceptedSelector"] = (
+            "nvpn-roster-participant-accepted-"
+            f"{self.args.participant_npub}"
+        )
+        self.evidence["desktopAccepted"] = True
+        self.evidence["acceptedAtMs"] = now_ms()
+        screenshot(self.artifact_root, "desktop-admin-accepted")
+        self.write_evidence()
+        deadline = time.monotonic() + self.args.hold_timeout
+        while time.monotonic() < deadline:
+            if self.stop_path.is_file() and not self.stop_path.is_symlink():
+                self.evidence["holdReleased"] = True
+                self.write_evidence()
+                return
+            if self.process is None or self.process.poll() is not None:
+                raise RuntimeError("GTK admin app exited while holding delivery")
+            time.sleep(0.1)
+        raise RuntimeError("GTK admin hold timed out before orchestrator release")
+
+    def manual_join(self) -> None:
+        if not NPUB.fullmatch(self.args.admin_npub):
+            raise RuntimeError("Pixel admin Device ID is invalid")
+        if not self.args.network_id.strip():
+            raise RuntimeError("Pixel admin Network ID is empty")
+        self.launch()
+        invoke("nvpn-manual-join-choose-join")
+        invoke("nvpn-manual-join-expander")
+        joiner = read_npub("nvpn-manual-join-joiner-device-id-value")
+        self.evidence["joinerNpub"] = joiner
+        self.write_evidence()
+        set_text("nvpn-manual-join-admin-id", self.args.admin_npub)
+        set_text("nvpn-manual-join-network-id", self.args.network_id)
+        self.evidence["manualSubmittedMs"] = now_ms()
+        self.write_evidence()
+        invoke("nvpn-manual-join-submit")
+        find_named(
+            f"nvpn-roster-participant-accepted-{self.args.admin_npub}",
+            timeout=self.args.coordination_timeout,
+        )
+        self.evidence["acceptedSelector"] = (
+            f"nvpn-roster-participant-accepted-{self.args.admin_npub}"
+        )
+        self.evidence["desktopAccepted"] = True
+        self.evidence["acceptedAtMs"] = now_ms()
+        screenshot(self.artifact_root, "desktop-joiner-accepted")
+        self.write_evidence()
+
+    def verify(self) -> None:
+        if not NPUB.fullmatch(self.args.participant_npub):
+            raise RuntimeError("expected accepted participant is invalid")
+        self.launch()
+        find_named(
+            f"nvpn-roster-participant-accepted-{self.args.participant_npub}",
+            timeout=self.args.ui_timeout,
+        )
+        self.evidence["participantNpub"] = self.args.participant_npub
+        self.evidence["acceptedSelector"] = (
+            "nvpn-roster-participant-accepted-"
+            f"{self.args.participant_npub}"
+        )
+        self.evidence["relaunchAccepted"] = True
+        screenshot(self.artifact_root, "relaunch-accepted")
+        self.write_evidence()
+
+    def dns_policy(self) -> None:
+        mode_indexes = {
+            "automatic": 0,
+            "encrypted": 1,
+            "through_exit": 2,
+        }
+        provider_indexes = {
+            "cloudflare": 0,
+            "quad9": 1,
+            "custom": 2,
+        }
+        if self.args.dns_mode not in mode_indexes:
+            raise RuntimeError("unsupported DNS mode")
+        if self.args.dns_provider not in provider_indexes:
+            raise RuntimeError("unsupported DNS provider")
+        if self.args.case not in {
+            "automatic",
+            "cloudflare",
+            "quad9",
+            "custom",
+            "through-exit",
+        }:
+            raise RuntimeError("unsupported desktop DNS case")
+        if self.args.cli is None:
+            raise RuntimeError("DnsPolicy requires the exact release CLI")
+        cli = self.args.cli.resolve()
+        if not cli.is_file() or cli.is_symlink():
+            raise RuntimeError("exact release CLI is missing")
+
+        def open_dns() -> None:
+            self.launch()
+            invoke("Internet")
+            find_named("nvpn-exit-dns-mode")
+
+        open_dns()
+        select_index(
+            "nvpn-exit-dns-mode",
+            mode_indexes[self.args.dns_mode],
+        )
+        if self.args.dns_mode == "encrypted":
+            select_index(
+                "nvpn-exit-dns-provider",
+                provider_indexes[self.args.dns_provider],
+            )
+            if self.args.dns_provider == "custom":
+                set_text(
+                    "nvpn-exit-dns-custom-url",
+                    self.args.dns_custom_url,
+                )
+                set_text(
+                    "nvpn-exit-dns-bootstrap-ips",
+                    self.args.dns_bootstrap_ips,
+                )
+        elif self.args.dns_mode == "through_exit":
+            set_text(
+                "nvpn-exit-dns-through-servers",
+                self.args.dns_through_servers,
+            )
+        invoke("nvpn-exit-dns-save")
+        time.sleep(0.75)
+        screenshot(self.artifact_root, f"dns-{self.args.case}-saved")
+        self.stop()
+
+        open_dns()
+        if (
+            selected_index("nvpn-exit-dns-mode")
+            != mode_indexes[self.args.dns_mode]
+        ):
+            raise RuntimeError("relaunch changed the saved DNS mode")
+        if self.args.dns_mode == "encrypted":
+            if (
+                selected_index("nvpn-exit-dns-provider")
+                != provider_indexes[self.args.dns_provider]
+            ):
+                raise RuntimeError("relaunch changed the saved DNS provider")
+            if self.args.dns_provider == "custom":
+                if (
+                    read_text("nvpn-exit-dns-custom-url")
+                    != self.args.dns_custom_url
+                    or read_text("nvpn-exit-dns-bootstrap-ips")
+                    != self.args.dns_bootstrap_ips
+                ):
+                    raise RuntimeError(
+                        "relaunch changed the custom DoH UI fields"
+                    )
+        elif self.args.dns_mode == "through_exit":
+            if (
+                read_text("nvpn-exit-dns-through-servers")
+                != self.args.dns_through_servers
+            ):
+                raise RuntimeError(
+                    "relaunch changed the through-exit DNS UI field"
+                )
+        screenshot(self.artifact_root, f"dns-{self.args.case}-readback")
+        self.evidence.update(
+            {
+                "receiptSchema": 1,
+                "platform": "linux",
+                "case": self.args.case,
+                "evidenceSource": "shipped-ui-restart-readback",
+                "savedViaShippedUi": True,
+                "uiRestartReadback": True,
+                "releaseBlackbox": True,
+                "exitDnsMode": self.args.dns_mode,
+                "exitDnsDohProvider": self.args.dns_provider,
+                "exitDnsCustomDohUrl": self.args.dns_custom_url,
+                "exitDnsCustomDohBootstrapIps": (
+                    self.args.dns_bootstrap_ips
+                ),
+                "exitDnsThroughExitServers": (
+                    self.args.dns_through_servers
+                ),
+                "appGitSha": self.args.app_git_sha,
+                "appGitTree": self.args.app_git_tree,
+                "appExecutableSha256": sha256(self.app),
+                "cliExecutableSha256": sha256(cli),
+            }
+        )
+        self.write_evidence()
+
+    def run(self) -> None:
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        if self.args.mode == "Reset":
+            self.reset()
+        elif self.args.mode == "Bootstrap":
+            self.bootstrap()
+        elif self.args.mode == "CreateAdmin":
+            self.create_admin()
+        elif self.args.mode == "AdminAdd":
+            self.admin_add()
+        elif self.args.mode == "ManualJoin":
+            self.manual_join()
+        elif self.args.mode == "DnsPolicy":
+            self.dns_policy()
+        else:
+            self.verify()
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser()
+    result.add_argument(
+        "mode",
+        choices=(
+            "Reset",
+            "Bootstrap",
+            "CreateAdmin",
+            "AdminAdd",
+            "ManualJoin",
+            "DnsPolicy",
+            "Verify",
+        ),
+    )
+    result.add_argument("--app", type=pathlib.Path, required=True)
+    result.add_argument("--marker", type=pathlib.Path, required=True)
+    result.add_argument("--artifact-root", type=pathlib.Path, required=True)
+    result.add_argument("--stop-path", type=pathlib.Path)
+    result.add_argument("--network-name", default="Release Linux admin")
+    result.add_argument("--admin-npub", default="")
+    result.add_argument("--network-id", default="")
+    result.add_argument("--participant-npub", default="")
+    result.add_argument("--participant-alias", default="Release Pixel")
+    result.add_argument("--cli", type=pathlib.Path)
+    result.add_argument("--case", default="")
+    result.add_argument("--dns-mode", default="")
+    result.add_argument("--dns-provider", default="cloudflare")
+    result.add_argument("--dns-custom-url", default="")
+    result.add_argument("--dns-bootstrap-ips", default="")
+    result.add_argument("--dns-through-servers", default="")
+    result.add_argument("--app-git-sha", default="")
+    result.add_argument("--app-git-tree", default="")
+    result.add_argument("--ui-timeout", type=int, default=15)
+    result.add_argument("--coordination-timeout", type=int, default=20)
+    result.add_argument("--hold-timeout", type=int, default=30)
+    return result
+
+
+def main() -> None:
+    args = parser().parse_args()
+    driver = Driver(args)
+    try:
+        driver.run()
+    finally:
+        driver.stop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(f"Linux desktop/mobile AT-SPI gate failed: {error}", file=sys.stderr)
+        raise

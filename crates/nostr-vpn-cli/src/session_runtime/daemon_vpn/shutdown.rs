@@ -75,11 +75,13 @@ fn finalize_daemon_shutdown_ownership(
 
 pub(super) async fn shutdown_daemon_vpn(shutdown: DaemonVpnShutdown<'_>) -> Result<()> {
     let mut failures = Vec::new();
+    let mut preserve_fips_cleanup_ownership = false;
     shutdown.port_mapping_runtime.stop().await;
     if let Some(runtime) = shutdown.fips_tunnel_runtime {
         if let Err(error) = stop_fips_private_tunnel_runtime(shutdown.config_path, runtime).await {
             eprintln!("daemon: failed to stop FIPS private mesh: {error}");
             failures.push(error.to_string());
+            preserve_fips_cleanup_ownership = true;
         }
     } else if let Err(persist_error) =
         persist_fips_daemon_network_cleanup_state(shutdown.config_path, None)
@@ -89,8 +91,9 @@ pub(super) async fn shutdown_daemon_vpn(shutdown: DaemonVpnShutdown<'_>) -> Resu
         ));
     }
     shutdown.tunnel_runtime.stop();
-    if let Err(error) =
-        persist_daemon_network_cleanup_state(shutdown.config_path, shutdown.tunnel_runtime)
+    if !preserve_fips_cleanup_ownership
+        && let Err(error) =
+            persist_daemon_network_cleanup_state(shutdown.config_path, shutdown.tunnel_runtime)
     {
         eprintln!("daemon: failed to clear network cleanup state: {error}");
         failures.push(format!("failed to clear network cleanup state: {error:#}"));

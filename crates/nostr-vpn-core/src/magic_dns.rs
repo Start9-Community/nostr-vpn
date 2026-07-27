@@ -202,6 +202,9 @@ fn build_dns_error_response(request: &[u8], code: ResponseCode) -> Option<Vec<u8
 }
 
 pub fn build_magic_dns_records(config: &AppConfig) -> HashMap<String, Ipv4Addr> {
+    if !config.active_network_has_confirmed_local_identity() {
+        return HashMap::new();
+    }
     let suffix = config
         .magic_dns_suffix
         .trim()

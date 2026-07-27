@@ -8,7 +8,6 @@
         FIPS_MESH_EVENT_DRAIN_LIMIT,
         FIPS_NOSTR_EXTENDED_COOLDOWN_SECS, FIPS_NOSTR_FAILURE_STREAK_THRESHOLD,
         FIPS_NOSTR_EXIT_OPEN_DISCOVERY_MAX_PENDING, FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
-        FIPS_NOSTR_PAID_EXIT_OPEN_DISCOVERY_MAX_PENDING,
         FIPS_NOSTR_STARTUP_SWEEP_MAX_AGE_SECS,
         FIPS_RECONNECT_BACKOFF_BASE_SECS, FIPS_RECONNECT_BACKOFF_MAX_SECS,
         FIPS_RECENT_NON_ROSTER_TRANSIT_MAX_SEEDS,
@@ -37,6 +36,8 @@
         prioritize_fips_control_peer,
         static_endpoint_allowed_on_current_underlay_with_route_check, strip_cidr, unix_timestamp,
     };
+    #[cfg(feature = "paid-exit")]
+    use super::FIPS_NOSTR_PAID_EXIT_OPEN_DISCOVERY_MAX_PENDING;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::{
         BorrowedTunFd, TunPipelinePacket, raw_write_packet_to_tun,
@@ -63,7 +64,7 @@
         encode_fips_control_frame,
     };
     use nostr_vpn_core::fips_mesh::{FipsMeshPeerConfig, FipsMeshRuntime};
-    use nostr_vpn_core::join_requests::MeshJoinRequest;
+    use nostr_vpn_core::join_requests::{MeshJoinRequest, prepare_manual_join_delivery};
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, Ipv4Addr, UdpSocket};
     use std::time::Duration;

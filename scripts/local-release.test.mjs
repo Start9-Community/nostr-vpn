@@ -38,6 +38,12 @@ import {
   zapstorePublicationPrerequisites,
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
+import {
+  buildReleaseGateAttestation,
+  releaseAssetSetSha256,
+  startosExactPackageValidator,
+  validateReleaseGateAttestation,
+} from './release-artifact-provenance-lib.mjs'
 
 test('parseEnvFile reads basic dotenv syntax', () => {
   const parsed = parseEnvFile(`
@@ -131,6 +137,7 @@ test('draft promotion requires one clean commit across source, tag, and manifest
 
 test('Android publication accepts only the exact signed APK sealed by the physical gate', () => {
   const apkSha256 = 'a'.repeat(64)
+  const aabSha256 = '9'.repeat(64)
   const pathSha256 = 'b'.repeat(64)
   const appGitSha = 'c'.repeat(40)
   const appGitTree = 'd'.repeat(40)
@@ -141,6 +148,12 @@ test('Android publication accepts only the exact signed APK sealed by the physic
     apkPathSha256: pathSha256,
     apkSha256,
     installedApkSha256: apkSha256,
+    aabSha256,
+    apkDerivedFromAab: true,
+    bundleReceiptSha256: '8'.repeat(64),
+    bundletoolVersion: '1.18.3',
+    bundletoolSha256:
+      'a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29',
     companySigningVerified: true,
     signerCertificateSha256: 'e'.repeat(64),
     appGitSha,
@@ -151,6 +164,7 @@ test('Android publication accepts only the exact signed APK sealed by the physic
   }
   const context = {
     apkSha256,
+    aabSha256,
     apkPathSha256: pathSha256,
     expectedAppGitSha: appGitSha,
     expectedAppGitTree: appGitTree,
@@ -160,6 +174,7 @@ test('Android publication accepts only the exact signed APK sealed by the physic
   assert.deepEqual(validateAndroidReleaseGateReceipt(receipt, context), {
     receiptSchema: 2,
     apkSha256,
+    aabSha256,
     appGitSha,
     appGitTree,
     package: packageId,
@@ -167,6 +182,7 @@ test('Android publication accepts only the exact signed APK sealed by the physic
   })
   for (const [override, message] of [
     [{ apkSha256: 'f'.repeat(64) }, /APK bytes.*physical gate/i],
+    [{ aabSha256: 'f'.repeat(64) }, /exact Play AAB/i],
     [{ apkPathSha256: 'f'.repeat(64) }, /APK path.*physical gate/i],
     [{ expectedAppGitSha: 'f'.repeat(40) }, /application commit/i],
     [{ expectedAppGitTree: 'f'.repeat(40) }, /application tree/i],
@@ -185,6 +201,13 @@ test('Android publication accepts only the exact signed APK sealed by the physic
       message,
     )
   }
+  assert.throws(
+    () => validateAndroidReleaseGateReceipt(
+      { ...receipt, apkDerivedFromAab: false },
+      context,
+    ),
+    /exact Play AAB/i,
+  )
   assert.throws(
     () => validateAndroidReleaseGateReceipt(
       { ...receipt, installedApkSha256: 'f'.repeat(64) },
@@ -722,14 +745,71 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
     {
       path: 'assets/nostr-vpn-v4.1.4-android-arm64.apk',
       sha256: apkSha256,
+      size: 1,
     },
-    { path: 'assets/nostr-vpn-v4.1.4-linux-x64.deb' },
-    { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz' },
-    { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg' },
-    { path: 'assets/nostr-vpn-v4.1.4-startos-aarch64.s9pk' },
-    { path: 'assets/nostr-vpn-v4.1.4-startos-x86_64.s9pk' },
-    { path: 'assets/nostr-vpn-v4.1.4-windows-x64-setup.exe' },
-  ]
+    { path: 'assets/nostr-vpn-v4.1.4-linux-x64.deb', size: 1 },
+    { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz', size: 1 },
+    { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg', size: 1 },
+    { path: 'assets/nostr-vpn-v4.1.4-startos-aarch64.s9pk', size: 1 },
+    { path: 'assets/nostr-vpn-v4.1.4-startos-x86_64.s9pk', size: 1 },
+    { path: 'assets/nostr-vpn-v4.1.4-windows-x64-setup.exe', size: 1 },
+  ].map((asset, index) => ({
+    sha256: String(index + 1).padStart(64, '0'),
+    ...asset,
+  }))
+  const platformGateReceipts = Object.fromEntries(
+    ['android', 'ios', 'linux', 'macos', 'windows'].map(
+      (platform, index) => [
+        platform,
+        { receipt: String(index + 20).padStart(64, '0') },
+      ],
+    ),
+  )
+  const platformForAsset = (path) => {
+    if (path.includes('android')) return 'android'
+    if (path.includes('linux')) return 'linux'
+    if (path.includes('macos')) return 'macos'
+    if (path.includes('windows')) return 'windows'
+    return 'startos'
+  }
+  const assetProofs = Object.fromEntries(
+    completeAssets.map((asset) => {
+      const platform = platformForAsset(asset.path)
+      return [
+        asset.path,
+        {
+          platform,
+          verification:
+            platform === 'startos'
+              ? 'post-build-exact-package-gate'
+              : 'gate-payload-identity',
+          artifact_sha256: asset.sha256,
+          gate_receipt_sha256:
+            platform === 'startos'
+              ? '9'.repeat(64)
+              : platformGateReceipts[platform].receipt,
+          ...(platform === 'startos'
+            ? { post_build_validator: startosExactPackageValidator }
+            : {}),
+          payloads:
+            platform === 'startos'
+              ? {
+                  manifest_json: '8'.repeat(64),
+                  package: asset.sha256,
+                }
+              : { runtime: asset.sha256 },
+        },
+      ]
+    }),
+  )
+  const releaseGateAttestation = buildReleaseGateAttestation({
+    commit,
+    tree: 'd'.repeat(40),
+    assets: completeAssets,
+    releaseGateSummarySha256: '9'.repeat(64),
+    platformGateReceipts,
+    assetProofs,
+  })
   assert.throws(
     () =>
       validatePromotableReleaseManifest({
@@ -743,6 +823,7 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
       commit,
       assets: completeAssets,
       android_release_gate: androidGate,
+      release_gate_attestation: releaseGateAttestation,
     }),
   )
   assert.throws(
@@ -754,8 +835,76 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
           ...androidGate,
           apk_sha256: 'f'.repeat(64),
         },
+        release_gate_attestation: releaseGateAttestation,
       }),
     /physical Android gate.*APK/i,
+  )
+})
+
+test('release-gate attestation seals every staged asset and all real platforms', () => {
+  const commit = 'a'.repeat(40)
+  const tree = 'b'.repeat(40)
+  const assets = [
+    {
+      path: 'assets/nostr-vpn-v4.1.5-linux-x64.deb',
+      sha256: 'c'.repeat(64),
+      size: 42,
+    },
+  ]
+  const receipts = Object.fromEntries(
+    ['android', 'ios', 'linux', 'macos', 'windows'].map(
+      (platform, index) => [
+        platform,
+        { gate: String(index + 1).padStart(64, '0') },
+      ],
+    ),
+  )
+  const attestation = buildReleaseGateAttestation({
+    commit,
+    tree,
+    assets,
+    releaseGateSummarySha256: 'd'.repeat(64),
+    platformGateReceipts: receipts,
+    assetProofs: {
+      [assets[0].path]: {
+        platform: 'linux',
+        verification: 'gate-payload-identity',
+        artifact_sha256: assets[0].sha256,
+        gate_receipt_sha256: receipts.linux.gate,
+        payloads: { runtime: assets[0].sha256 },
+      },
+    },
+  })
+  const manifest = {
+    commit,
+    assets,
+    release_gate_attestation: attestation,
+  }
+  assert.equal(attestation.asset_set_sha256, releaseAssetSetSha256(assets))
+  assert.doesNotThrow(() => validateReleaseGateAttestation(manifest))
+
+  assert.throws(
+    () =>
+      validateReleaseGateAttestation({
+        ...manifest,
+        assets: [{ ...assets[0], sha256: 'e'.repeat(64) }],
+      }),
+    /differs from its exact-artifact proof|assets differ from the set sealed/i,
+  )
+  assert.throws(
+    () =>
+      buildReleaseGateAttestation({
+        commit,
+        tree,
+        assets,
+        releaseGateSummarySha256: 'd'.repeat(64),
+        platformGateReceipts: {
+          ...receipts,
+          windows: undefined,
+        },
+        assetProofs: {},
+      }),
+    /must include exactly|windows receipt is missing/i,
   )
 })
 
@@ -766,9 +915,12 @@ test('release script binds Android publication to the physical-gate receipt and 
   const androidBuild = localRelease.slice(androidBuildStart, androidBuildEnd)
 
   assert.match(androidBuild, /validateAndroidReleaseGateReceipt\(/)
-  assert.match(androidBuild, /:app:bundleRelease/)
-  assert.doesNotMatch(androidBuild, /:app:assembleRelease/)
+  assert.doesNotMatch(androidBuild, /:app:(?:assemble|bundle)Release/)
   assert.match(androidBuild, /copyFileSync\(testedApkPath,\s*apkDest\)/)
+  assert.match(
+    androidBuild,
+    /sha256FileSync\(aabDest\)\s*!==\s*gate\.aabSha256/,
+  )
 
   const promoteStart = localRelease.indexOf('function promoteStagedDraft(')
   const promoteEnd = localRelease.indexOf('\nfunction publishRustCrates', promoteStart)
@@ -806,20 +958,89 @@ test('draft candidates are complete before the final TestFlight upload', () => {
   const stageStart = localRelease.indexOf('stageRelease({', stepsStart)
   const steps = localRelease.slice(stepsStart, stageStart)
   assert.ok(steps.indexOf("['windows'") < steps.indexOf("['ios'"))
+  assert.ok(
+    steps.indexOf('collectReleaseGateReceipts({')
+      < steps.indexOf("['ios'"),
+  )
   assert.match(
     localRelease,
     /function buildIosArtifacts[\s\S]*NVPN_IOS_INTERNAL_ONLY:\s*'false'/,
   )
+  assert.match(
+    localRelease,
+    /function buildIosArtifacts[\s\S]*NVPN_RELEASE_GATE_LOG_DIR:\s*releaseGateLogDir/,
+  )
+  assert.match(
+    steps,
+    /buildIosArtifacts\(\{[\s\S]*releaseGateLogDir,[\s\S]*\}\)/,
+  )
 })
 
-test('Linux desktop package bundles nvpn CLI helper', () => {
+test('Linux publication reuses the VM-installed deb and real static-musl CLI archive', () => {
   const linuxCargo = readFileSync(join(process.cwd(), 'linux/Cargo.toml'), 'utf8')
   const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
   const githubRelease = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
+  const linuxBuildStart = localRelease.indexOf('function buildLinuxArtifacts(')
+  const linuxBuildEnd = localRelease.indexOf(
+    '\nfunction ensureAndroidSdkEnv',
+    linuxBuildStart,
+  )
+  const linuxBuild = localRelease.slice(linuxBuildStart, linuxBuildEnd)
 
   assert.match(linuxCargo, /\["\.\.\/target\/release\/nvpn", "usr\/bin\/nvpn", "755"\]/)
-  assert.match(localRelease, /cargo build --release --locked -p nvpn/)
+  assert.match(linuxBuild, /gatedBundlePathReceipt/)
+  assert.match(linuxBuild, /host-bundle path receipt/)
+  assert.match(linuxBuild, /nostr-vpn\.deb/)
+  assert.match(linuxBuild, /nvpn-x86_64-unknown-linux-musl\.tar\.gz/)
+  assert.match(linuxBuild, /packageInstalledByDpkg/)
+  assert.match(linuxBuild, /copyFileSync\(gatedDebPath, debPath\)/)
+  assert.match(linuxBuild, /musl_archive: expectedMuslArchive/)
+  assert.doesNotMatch(linuxBuild, /cargo deb/)
+  assert.doesNotMatch(
+    linuxBuild,
+    /cp \/gated\/nvpn \/work\/dist\/nvpn/,
+  )
+  assert.doesNotMatch(linuxBuild, /cargo build/)
+  assert.doesNotMatch(linuxBuild, /prepare-host-linux-vm-bundle\.sh/)
   assert.match(githubRelease, /cargo build --release --locked -p nvpn/)
+})
+
+test('Windows publication reuses the exact installer that passed the VM smoke gate', () => {
+  const localRelease = readFileSync(
+    join(process.cwd(), 'scripts/local-release.mjs'),
+    'utf8',
+  )
+  const proof = readFileSync(
+    join(process.cwd(), 'scripts/windows-release-publication-proof.ps1'),
+    'utf8',
+  )
+  const buildStart = localRelease.indexOf('function buildWindowsArtifacts(')
+  const buildEnd = localRelease.indexOf(
+    '\nfunction buildLinuxArtifacts',
+    buildStart,
+  )
+  const build = localRelease.slice(buildStart, buildEnd)
+
+  assert.match(build, /validateWindowsInstallerGateReceipt\(/)
+  assert.match(
+    build,
+    /copyFileSync\(installerArtifactPath,\s*installerPath\)/,
+  )
+  assert.match(build, /ExpectedInstallerSha256/)
+  assert.match(build, /ExpectedInstallerSize/)
+  assert.match(build, /gateReceiptPath:\s*installerReceiptPath/)
+  assert.doesNotMatch(
+    build,
+    /pullFileFromWindowsHost\(\{[\s\S]*?name:\s*installerName/,
+  )
+  const hashCheck = proof.indexOf(
+    '$installerSha256 = (',
+  )
+  const install = proof.indexOf(
+    '$setup = Start-Process -FilePath $InstallerPath',
+  )
+  assert.ok(hashCheck >= 0 && install > hashCheck)
+  assert.match(proof, /\$installer\.Length -ne \$ExpectedInstallerSize/)
 })
 
 test('Linux release reclaims Docker smoke storage before host packaging', () => {
@@ -855,12 +1076,19 @@ test('GitHub release requires an exact locally gated commit', () => {
   assert.match(trigger, /workflow_dispatch:/)
   assert.doesNotMatch(trigger, /^\s+push:/m)
   assert.match(trigger, /locally_attested_commit:\n\s+description:[^\n]+\n\s+required: true/)
+  assert.match(trigger, /locally_gated_release_cid:\n\s+description:[^\n]+\n\s+required: true/)
   assert.match(workflow, /ref: \$\{\{ github\.event\.inputs\.tag \}\}/)
   assert.match(
     workflow,
     /LOCALLY_ATTESTED_COMMIT: \$\{\{ github\.event\.inputs\.locally_attested_commit \}\}/,
   )
   assert.match(workflow, /LOCALLY_ATTESTED_COMMIT.*does not match tag commit/s)
+  const releaseJob = workflow.slice(workflow.indexOf('  release:'))
+  assert.match(releaseJob, /htree get "\$\{LOCALLY_GATED_RELEASE_CID\}"/)
+  assert.match(releaseJob, /verify-release-publication-bundle\.mjs/)
+  assert.match(releaseJob, /start-cli_x86_64-linux/)
+  assert.match(releaseJob, /files: locally-gated-release\/assets\/\*/)
+  assert.doesNotMatch(releaseJob, /actions\/download-artifact/)
 })
 
 test('GitHub platform builds run beside verification and join before release', () => {

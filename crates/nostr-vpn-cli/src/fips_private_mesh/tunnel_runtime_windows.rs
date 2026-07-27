@@ -1,6 +1,9 @@
 #[cfg(target_os = "windows")]
 impl FipsPrivateTunnelRuntime {
-    pub(crate) async fn start(config: FipsPrivateTunnelConfig) -> Result<Self> {
+    pub(crate) async fn start(
+        config: FipsPrivateTunnelConfig,
+        cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<Self> {
         crate::pipeline_profile::maybe_spawn_reporter();
         let mesh = bind_fips_private_mesh(&config).await?;
         #[cfg(feature = "paid-exit")]
@@ -30,11 +33,13 @@ impl FipsPrivateTunnelRuntime {
             crate::wg_upstream_runtime::WindowsManagedEndpointRoutes::apply(
                 &endpoint_bypass_targets,
                 &[interface_index],
+                cleanup_journal_config_path,
             )
             .context("failed to apply Windows FIPS endpoint bypass routes")?;
         let mut route_guard = match crate::wg_upstream_runtime::WindowsManagedInterfaceRoutes::apply(
             interface_index,
             &effective_route_targets,
+            cleanup_journal_config_path,
         ) {
             Ok(route_guard) => route_guard,
             Err(error) => {
@@ -48,41 +53,52 @@ impl FipsPrivateTunnelRuntime {
                 ));
             }
         };
-        let secure_dns = if config.secure_dns_required() {
-            match crate::secure_dns_runtime::SecureDnsRuntime::start(
+        let mut secure_dns = None;
+        if config.secure_dns_required()
+            && let Err(error) = crate::secure_dns_runtime::SecureDnsRuntime::start_into(
+                &mut secure_dns,
                 &iface,
                 Some(interface_index),
                 config.magic_dns_records.clone(),
                 config.exit_dns_resolver_config(false)?,
                 None,
+                |intent| {
+                    crate::daemon_runtime::persist_fips_secure_dns_cleanup_intent(
+                        cleanup_journal_config_path,
+                        intent,
+                    )
+                },
             )
             .await
-            {
-                Ok(secure_dns) => Some(secure_dns),
-                Err(error) => {
-                    let mut failures = Vec::new();
-                    windows_fips_record_cleanup(
-                        &mut failures,
-                        "Windows FIPS tunnel routes",
-                        route_guard.revert(),
-                    );
-                    if let Some(routes) = endpoint_bypass_routes.as_mut() {
-                        windows_fips_record_cleanup(
-                            &mut failures,
-                            "Windows FIPS endpoint bypass routes",
-                            routes.revert(),
-                        );
-                    }
-                    return Err(windows_fips_with_cleanup_error(
-                        error.context("start Windows FIPS secure DNS"),
-                        "rollback Windows FIPS startup",
-                        windows_fips_finish_cleanup(failures),
-                    ));
-                }
+        {
+            let mut failures = Vec::new();
+            if let Some(runtime) = secure_dns.as_mut() {
+                let cleanup = runtime.stop().await;
+                record_windows_secure_dns_cleanup(interface_index, &cleanup);
+                windows_fips_record_cleanup(
+                    &mut failures,
+                    "partially installed Windows secure DNS",
+                    cleanup,
+                );
             }
-        } else {
-            None
-        };
+            windows_fips_record_cleanup(
+                &mut failures,
+                "Windows FIPS tunnel routes",
+                route_guard.revert(),
+            );
+            if let Some(routes) = endpoint_bypass_routes.as_mut() {
+                windows_fips_record_cleanup(
+                    &mut failures,
+                    "Windows FIPS endpoint bypass routes",
+                    routes.revert(),
+                );
+            }
+            return Err(windows_fips_with_cleanup_error(
+                error.context("start Windows FIPS secure DNS"),
+                "rollback Windows FIPS startup",
+                windows_fips_finish_cleanup(failures),
+            ));
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = mpsc::channel::<FipsPrivateMeshEvent>(1024);
@@ -102,6 +118,7 @@ impl FipsPrivateTunnelRuntime {
             state_control,
             secure_dns,
             config: config.clone(),
+            cleanup_journal_config_path: cleanup_journal_config_path.to_path_buf(),
             session,
             stop,
             tun_read_thread,
@@ -153,7 +170,11 @@ impl FipsPrivateTunnelRuntime {
             || fips_tunnel_requires_endpoint_restart(&self.config, config)
     }
 
-    pub(crate) async fn apply_config(&mut self, config: FipsPrivateTunnelConfig) -> Result<()> {
+    pub(crate) async fn apply_config(
+        &mut self,
+        config: FipsPrivateTunnelConfig,
+        cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<()> {
         self.mesh.replace_peers(
             config.peers.clone(),
             config.local_allowed_ips(),
@@ -169,16 +190,21 @@ impl FipsPrivateTunnelRuntime {
             self.mesh.update_relays(&config.nostr_relays).await?;
         }
         if config.secure_dns_required() && self.secure_dns.is_none() {
-            self.secure_dns = Some(
-                crate::secure_dns_runtime::SecureDnsRuntime::start(
-                    &self.iface,
-                    Some(self.interface_index),
-                    config.magic_dns_records.clone(),
-                    config.exit_dns_resolver_config(false)?,
-                    None,
-                )
-                .await?,
-            );
+            crate::secure_dns_runtime::SecureDnsRuntime::start_into(
+                &mut self.secure_dns,
+                &self.iface,
+                Some(self.interface_index),
+                config.magic_dns_records.clone(),
+                config.exit_dns_resolver_config(false)?,
+                None,
+                |intent| {
+                    crate::daemon_runtime::persist_fips_secure_dns_cleanup_intent(
+                        cleanup_journal_config_path,
+                        intent,
+                    )
+                },
+            )
+            .await?;
         }
         if let Some(secure_dns) = self.secure_dns.as_mut() {
             secure_dns.update_records(config.magic_dns_records.clone());
@@ -189,9 +215,15 @@ impl FipsPrivateTunnelRuntime {
         }
         self.apply_windows_route_config(&config)?;
         if !config.secure_dns_required()
-            && let Some(secure_dns) = self.secure_dns.take()
+            && let Some(secure_dns) = self.secure_dns.as_mut()
         {
-            secure_dns.stop().await;
+            let interface_index = secure_dns
+                .windows_cleanup_interface_index()
+                .unwrap_or(self.interface_index);
+            let cleanup = secure_dns.stop().await;
+            record_windows_secure_dns_cleanup(interface_index, &cleanup);
+            cleanup?;
+            self.secure_dns.take();
         }
         self.reconcile_windows_wg_upstream(&config.wireguard_exit)
             .await?;
@@ -241,6 +273,7 @@ impl FipsPrivateTunnelRuntime {
                     crate::wg_upstream_runtime::WindowsManagedEndpointRoutes::apply(
                         &desired_endpoint_routes,
                         &excluded_tunnel_interfaces,
+                        &self.cleanup_journal_config_path,
                     )
                     .context("apply Windows FIPS endpoint bypass routes")?;
             }
@@ -297,6 +330,7 @@ impl FipsPrivateTunnelRuntime {
             wg_config,
             crate::wg_upstream_runtime::DAEMON_WG_UPSTREAM_HANDSHAKE_TIMEOUT,
             self.interface_index,
+            &self.cleanup_journal_config_path,
         )
         .await
         .context("start native Windows WireGuard upstream")?;
@@ -350,8 +384,18 @@ impl FipsPrivateTunnelRuntime {
             "pending Windows route obligations",
             crate::wg_upstream_runtime::retry_pending_windows_route_cleanup(),
         );
-        if let Some(secure_dns) = runtime.secure_dns.take() {
-            secure_dns.stop().await;
+        let mut secure_dns_cleanup_succeeded = false;
+        if let Some(secure_dns) = runtime.secure_dns.as_mut() {
+            let interface_index = secure_dns
+                .windows_cleanup_interface_index()
+                .unwrap_or(runtime.interface_index);
+            let cleanup = secure_dns.stop().await;
+            record_windows_secure_dns_cleanup(interface_index, &cleanup);
+            secure_dns_cleanup_succeeded = cleanup.is_ok();
+            windows_fips_record_cleanup(&mut failures, "Windows secure DNS", cleanup);
+        }
+        if secure_dns_cleanup_succeeded {
+            runtime.secure_dns.take();
         }
         runtime.event_rx.close();
         if runtime.tun_read_thread.join().is_err() {

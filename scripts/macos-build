@@ -942,7 +942,7 @@ run_macos_release_artifacts() {
   tag="$(release_version_tag)"
   rm -f "$DIST_DIR/nostr-vpn-$tag-macos-arm64.zip"
 
-  prepare_signed_notarized_app true
+  prepare_signed_notarized_app "${NVPN_MACOS_FORCE_REBUILD_APP:-true}"
   updater_path="$(release_asset_path ".app.tar.gz")"
   rm -f "$updater_path"
   tar -czf "$updater_path" -C "$MACOS_DIST_DIR" "$APP_NAME"

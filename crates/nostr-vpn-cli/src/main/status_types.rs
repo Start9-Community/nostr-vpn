@@ -130,6 +130,8 @@ struct MacosNetworkCleanupState {
     ipv4_forward_was_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pf_was_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    secure_dns_resolver_files: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -401,6 +403,17 @@ fn start_split_magic_dns(app: &AppConfig) -> Option<ConnectMagicDnsRuntime> {
     }
 }
 
+fn refresh_or_start_split_magic_dns(
+    runtime: &mut Option<ConnectMagicDnsRuntime>,
+    app: &AppConfig,
+) {
+    if let Some(runtime) = runtime.as_ref() {
+        runtime.refresh_records(app);
+    } else {
+        *runtime = start_split_magic_dns(app);
+    }
+}
+
 impl Drop for ConnectMagicDnsRuntime {
     fn drop(&mut self) {
         if self.resolver_installed
@@ -433,6 +446,7 @@ struct LinuxExitNodeRuntime {
     ipv4_forward_was_enabled: Option<bool>,
     ipv6_forward_was_enabled: Option<bool>,
     wireguard_exit: Option<LinuxWireGuardExitRuntime>,
+    #[serde(default)]
     pending_wireguard_exit_cleanup: Vec<LinuxWireGuardExitCleanupObligation>,
 }
 
@@ -448,6 +462,8 @@ struct LinuxNetworkCleanupState {
     original_default_ipv6_route: Option<String>,
     #[serde(default)]
     exit_node_runtime: LinuxExitNodeRuntime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secure_dns: Option<crate::secure_dns_runtime::LinuxSecureDnsCleanupState>,
 }
 
 #[cfg(target_os = "linux")]
@@ -460,6 +476,8 @@ struct WindowsNetworkCleanupState {
     routes: crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot,
     #[serde(default)]
     native_wireguard: Vec<crate::wg_upstream_runtime::WindowsNativeWireGuardCleanupState>,
+    #[serde(default)]
+    secure_dns_interface_indexes: Vec<u32>,
 }
 
 #[cfg(target_os = "windows")]

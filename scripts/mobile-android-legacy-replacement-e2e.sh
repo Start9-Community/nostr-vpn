@@ -22,6 +22,7 @@ RETIRED_PACKAGES=(
 CANONICAL_APK="${NVPN_ANDROID_LEGACY_CANONICAL_APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 REUSE_CANONICAL_APK="${NVPN_ANDROID_LEGACY_REUSE_CANONICAL_APK:-0}"
 RESULT_DIR="${NVPN_ANDROID_LEGACY_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
+ARTIFACT_RECEIPT="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-}"
 WAIT_SECS="${NVPN_ANDROID_LEGACY_WAIT_SECS:-15}"
 ADB="${ADB:-adb}"
 serial=""
@@ -347,13 +348,50 @@ process_count="$("$ADB" -s "$serial" shell pidof "$CANONICAL_PACKAGE" 2>/dev/nul
   || { echo "Canonical Android app has $process_count main processes after replacement" >&2; exit 1; }
 
 mkdir -p "$RESULT_DIR"
-python3 - "$RESULT_DIR/mobile-android-legacy-replacement.json" <<'PY'
+python3 - \
+  "$RESULT_DIR/mobile-android-legacy-replacement.json" \
+  "$work_dir/canonical.apk" \
+  "$ARTIFACT_RECEIPT" \
+  "$(git -C "$ROOT" rev-parse HEAD)" \
+  "$(git -C "$ROOT" rev-parse HEAD^{tree})" <<'PY'
+import hashlib
 import json
+import pathlib
 import sys
 
-with open(sys.argv[1], "w", encoding="utf-8") as handle:
+output, apk_path, receipt_path, app_sha, app_tree = sys.argv[1:]
+apk = pathlib.Path(apk_path)
+receipt_file = pathlib.Path(receipt_path)
+if not receipt_path or not receipt_file.is_file():
+    raise SystemExit("Android replacement gate requires the exact artifact receipt")
+receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+apk_sha = hashlib.sha256(apk.read_bytes()).hexdigest()
+if (
+    receipt.get("receiptSchema") != 2
+    or receipt.get("artifactType") != "Android Release APK"
+    or receipt.get("appGitSha") != app_sha
+    or receipt.get("appGitTree") != app_tree
+    or receipt.get("apkSha256") != apk_sha
+    or receipt.get("installedApkSha256") != apk_sha
+    or receipt.get("companySigningVerified") is not True
+):
+    raise SystemExit("Android replacement gate artifact identity differs")
+with open(output, "w", encoding="utf-8") as handle:
     json.dump(
         {
+            "receiptSchema": 1,
+            "artifactType": "Android Release replacement/singleton gate",
+            "appGitSha": app_sha,
+            "appGitTree": app_tree,
+            "artifactReceiptSha256": hashlib.sha256(
+                receipt_file.read_bytes()
+            ).hexdigest(),
+            "apkSha256": apk_sha,
+            "installedApkSha256": receipt["installedApkSha256"],
+            "package": receipt["package"],
+            "signerCertificateSha256": receipt[
+                "signerCertificateSha256"
+            ],
             "canonicalPackageCount": 1,
             "retiredPackageCount": 0,
             "canonicalMainProcessCount": 1,

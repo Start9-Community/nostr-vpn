@@ -12,6 +12,21 @@ desktop_underlay_host_peer_error() {
   echo "desktop underlay host-peer import failed: $*" >&2
 }
 
+desktop_underlay_app_version() {
+  local manifest="$1"
+  awk '
+    $0 == "[workspace.package]" { package = 1; next }
+    package && /^\[/ { exit }
+    package && /^version = "/ {
+      value = $0
+      sub(/^version = "/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      exit
+    }
+  ' "$manifest"
+}
+
 desktop_underlay_import_host_peer() {
   [[ -n "${ROOT:-}" && -n "${HYPERVISOR_SSH:-}" && -n "${ARTIFACT_DIR:-}" ]] || {
     desktop_underlay_host_peer_error "ROOT, HYPERVISOR_SSH, and ARTIFACT_DIR are required"
@@ -49,19 +64,7 @@ desktop_underlay_import_host_peer() {
     desktop_underlay_host_peer_error "dirty app checkout is not importable"
     return 1
   }
-  app_version="$(
-    awk '
-      $0 == "[package]" { package = 1; next }
-      package && /^\[/ { exit }
-      package && /^version = "/ {
-        value = $0
-        sub(/^version = "/, "", value)
-        sub(/".*$/, "", value)
-        print value
-        exit
-      }
-    ' "$ROOT/Cargo.toml"
-  )" || {
+  app_version="$(desktop_underlay_app_version "$ROOT/Cargo.toml")" || {
     desktop_underlay_host_peer_error "could not read app version"
     return 1
   }

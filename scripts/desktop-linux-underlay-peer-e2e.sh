@@ -476,6 +476,7 @@ case "$ACTION" in
     require_root
     printf 'cloudflare=%s\n' "$(counter_for_destinations 1.1.1.1 1.0.0.1)"
     printf 'quad9=%s\n' "$(counter_for_destinations 9.9.9.9 149.112.112.112)"
+    printf 'google=%s\n' "$(counter_for_destinations 8.8.8.8 8.8.4.4)"
     printf 'fixture_dns=%s\n' "$(
       grep -Fci "query[A-Z]* $FIXTURE_DNS_NAME" "$STATE_DIR/dns.log" 2>/dev/null || true
     )"

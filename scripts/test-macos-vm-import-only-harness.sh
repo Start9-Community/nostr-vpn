@@ -72,6 +72,8 @@ for required in (
 
 for required in (
     "packageTreeSha256",
+    "appExecutableSha256",
+    "cliExecutableSha256",
     "manualJoinFixtureSha256",
     "manualJoinDriverSha256",
     "serviceToggleDriverSha256",
@@ -234,18 +236,20 @@ module.git_snapshot = lambda path: {
     "tree": "5" * 40,
     "manifest": "6" * 64,
 }
-module.fips_version = lambda path: "0.4.44"
+module.fips_version = lambda path: "0.4.45"
 
 with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
     work = pathlib.Path(tmp)
     package = work / "package"
     app = package / "Nostr VPN.app"
     executable = app / "Contents" / "MacOS" / "Nostr VPN"
+    cli = app / "Contents" / "Resources" / "nvpn"
     fixture = package / "fixtures" / "desktop_manual_join_e2e_fixture"
     manual = package / "drivers" / "desktop-manual-join-ax"
     service = package / "drivers" / "macos-service-toggle-ax"
     for path, payload in (
         (executable, b"app"),
+        (cli, b"cli"),
         (fixture, b"fixture"),
         (manual, b"manual"),
         (service, b"service"),
@@ -271,7 +275,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
         expected_app_tree="5" * 40,
         expected_fips_head="4" * 40,
         expected_fips_tree="5" * 40,
-        expected_fips_version="0.4.44",
+        expected_fips_version="0.4.45",
         expected_team="ABCDEFGHIJ",
         expected_identity_sha1="2" * 40,
         expected_signer_sha256="3" * 64,
@@ -279,7 +283,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
     )
     module.create_receipt(args)
     module.validate_receipt(args)
-    for path in (executable, fixture, manual, service):
+    for path in (executable, cli, fixture, manual, service):
         original = path.read_bytes()
         path.write_bytes(original + b"-tampered")
         try:

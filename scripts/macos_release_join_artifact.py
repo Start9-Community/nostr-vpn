@@ -160,7 +160,15 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     app_root = pathlib.Path(args.app_root).resolve()
     fips_root = pathlib.Path(args.fips_root).resolve()
     executable = app / "Contents" / "MacOS" / "Nostr VPN"
-    for path in (archive, executable, fixture, manual_driver, service_driver):
+    cli = app / "Contents" / "Resources" / "nvpn"
+    for path in (
+        archive,
+        executable,
+        cli,
+        fixture,
+        manual_driver,
+        service_driver,
+    ):
         if not path.is_file():
             raise ValueError(f"required macOS Release artifact is missing: {path}")
     if not package.is_dir():
@@ -234,6 +242,7 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "appBundleTreeSha256": bundle_manifest,
         "bundleManifestSha256": bundle_manifest,
         "appExecutableSha256": sha256_file(executable),
+        "cliExecutableSha256": sha256_file(cli),
         "appCodeDirectoryHash": signature["cdhash"],
         "manualJoinFixtureSha256": sha256_file(fixture),
         "manualJoinFixtureCodeDirectoryHash": fixture_signature["cdhash"],
@@ -282,6 +291,8 @@ def validate_receipt(args: argparse.Namespace) -> None:
         "archiveSha256": observed["archiveSha256"],
         "packageTreeSha256": observed["packageTreeSha256"],
         "bundleManifestSha256": observed["bundleManifestSha256"],
+        "appExecutableSha256": observed["appExecutableSha256"],
+        "cliExecutableSha256": observed["cliExecutableSha256"],
         "manualJoinFixtureSha256": observed["manualJoinFixtureSha256"],
         "manualJoinDriverSha256": observed["manualJoinDriverSha256"],
         "serviceToggleDriverSha256": observed["serviceToggleDriverSha256"],
@@ -299,6 +310,65 @@ def validate_receipt(args: argparse.Namespace) -> None:
     pathlib.Path(args.verification_output).write_text(
         json.dumps(verification, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+
+
+def validate_published_app(args: argparse.Namespace) -> None:
+    receipt = load_json(pathlib.Path(args.receipt))
+    app = pathlib.Path(args.app).resolve()
+    executable = app / "Contents" / "MacOS" / "Nostr VPN"
+    cli = app / "Contents" / "Resources" / "nvpn"
+    if (
+        receipt.get("receiptSchema") != 1
+        or receipt.get("artifactType")
+        != "macOS company Developer ID Release gate package"
+        or receipt.get("companySigningVerified") is not True
+    ):
+        raise ValueError("macOS publication received the wrong gate receipt")
+    for name, expected in (
+        ("appGitSha", args.expected_app_head),
+        ("appGitTree", args.expected_app_tree),
+    ):
+        if receipt.get(name) != expected:
+            raise ValueError(f"macOS publication receipt {name} changed")
+    if not app.is_dir() or not executable.is_file() or not cli.is_file():
+        raise ValueError("macOS publication app payload is missing")
+    if (
+        args.require_gate_bundle_tree
+        and tree_sha256(app) != receipt.get("appBundleTreeSha256")
+    ):
+        raise ValueError(
+            "macOS publication app bundle differs from the exact gated bundle"
+        )
+    signature = inspect_signature(app, deep=True)
+    expected_signature = {
+        "cdhash": receipt.get("appCodeDirectoryHash"),
+        "certificateSha1": receipt.get("signingIdentitySha1"),
+        "certificateSha256": receipt.get("signerCertificateSha256"),
+        "team": receipt.get("signingTeam"),
+    }
+    for name, expected in expected_signature.items():
+        if signature.get(name) != expected:
+            raise ValueError(
+                f"macOS publication app {name} differs from the gated app"
+            )
+    if sha256_file(executable) != receipt.get("appExecutableSha256"):
+        raise ValueError(
+            "macOS publication executable bytes differ from the gated app"
+        )
+    if sha256_file(cli) != receipt.get("cliExecutableSha256"):
+        raise ValueError(
+            "macOS publication CLI bytes differ from the gated app"
+        )
+    print(
+        json.dumps(
+            {
+                "appCodeDirectoryHash": signature["cdhash"],
+                "appExecutableSha256": receipt["appExecutableSha256"],
+                "cliExecutableSha256": receipt["cliExecutableSha256"],
+            },
+            sort_keys=True,
+        )
     )
 
 
@@ -335,6 +405,12 @@ def parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate")
     add_common_arguments(validate)
     validate.add_argument("--verification-output", required=True)
+    publication = subparsers.add_parser("validate-published-app")
+    publication.add_argument("--receipt", required=True)
+    publication.add_argument("--app", required=True)
+    publication.add_argument("--expected-app-head", required=True)
+    publication.add_argument("--expected-app-tree", required=True)
+    publication.add_argument("--require-gate-bundle-tree", action="store_true")
     return result
 
 
@@ -345,8 +421,10 @@ def main() -> int:
             print(resolve_certificate(args.identity_sha1))
         elif args.command == "create":
             create_receipt(args)
-        else:
+        elif args.command == "validate":
             validate_receipt(args)
+        else:
+            validate_published_app(args)
     except (
         OSError,
         ValueError,

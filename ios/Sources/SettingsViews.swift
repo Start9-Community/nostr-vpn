@@ -89,7 +89,9 @@ struct ParticipantRow: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("roster-participant-\(participant.npub)")
+        .accessibilityIdentifier(
+            "roster-participant-\(participant.state == "pending" ? "pending" : "accepted")-\(participant.npub)"
+        )
         .sheet(isPresented: $detailPresented) {
             NavigationStack {
                 DeviceDetailSheet(model: model, network: network, participant: participant)

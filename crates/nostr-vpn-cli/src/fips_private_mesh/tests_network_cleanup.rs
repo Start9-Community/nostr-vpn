@@ -70,11 +70,11 @@
             actions.events,
             vec![
                 "endpoint",
-                "forwarding-wireguard",
-                "forwarding-wireguard",
-                "forwarding-wireguard",
                 "restore-ipv4",
                 "restore-ipv6",
+                "forwarding-wireguard",
+                "forwarding-wireguard",
+                "forwarding-wireguard",
                 "flush-route-cache",
             ]
         );

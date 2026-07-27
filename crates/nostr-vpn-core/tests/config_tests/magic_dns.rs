@@ -254,11 +254,12 @@ fn active_admin_alias_resolves_even_when_not_a_participant() {
 
     let mut config = AppConfig::generated_without_networks();
     config.nostr.secret_key = own.secret_key().to_secret_hex();
-    config.nostr.public_key = own_hex;
+    config.nostr.public_key = own_hex.clone();
     let network_id = config.add_network("Joined");
     config
         .set_network_mesh_id(&network_id, "mesh-home")
         .expect("set mesh id");
+    config.networks[0].devices = vec![own_hex];
     config.networks[0].admins = vec![admin_hex.clone()];
     config
         .set_peer_alias(&admin_hex, "admin")

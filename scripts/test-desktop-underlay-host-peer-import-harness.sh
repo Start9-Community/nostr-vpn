@@ -38,6 +38,8 @@ PYTHONPYCACHEPREFIX="$TMP_ROOT/pycache" python3 -m py_compile "$VERIFIER"
 
 require_tokens "$HELPER" "shared host-peer importer" \
   '[[ "$(uname -s)" == "Darwin" ]]' \
+  'desktop_underlay_app_version' \
+  '$0 == "[workspace.package]"' \
   'prepare-macos-release-fips-peer.sh' \
   'verify-host-linux-peer-artifact.py' \
   'mktemp -d /tmp/nvpn-desktop-underlay-peer.XXXXXX' \
@@ -48,6 +50,20 @@ require_tokens "$HELPER" "shared host-peer importer" \
   'grep -Fq "(rev ${fips_sha:0:10})"' \
   'desktop_underlay_cleanup_host_peer' \
   'test ! -e "$remote_dir"'
+
+workspace_manifest="$TMP_ROOT/Cargo.toml"
+cat >"$workspace_manifest" <<'TOML'
+[workspace]
+members = []
+
+[workspace.package]
+version = "4.1.5"
+edition = "2024"
+TOML
+# shellcheck disable=SC1090
+source "$HELPER"
+[[ "$(desktop_underlay_app_version "$workspace_manifest")" == "4.1.5" ]] \
+  || fail "shared host-peer importer cannot derive the workspace package version"
 
 for forbidden in \
   'cargo build' \
@@ -107,8 +123,13 @@ require_tokens "$WINDOWS" "Windows native build ownership" \
   'windows-build.ps1 -Configuration Release -DaemonOnly' \
   'native Windows Release build failed'
 require_tokens "$LINUX" "Linux exact host artifact reuse" \
-  '"${primary_scp[@]}" "$DESKTOP_UNDERLAY_HOST_PEER_BINARY"' \
-  'Linux target and imported peer binary SHA-256 receipts differ'
+  'TARGET_RELEASE_BINARY="$TARGET_RELEASE_BUNDLE/nvpn"' \
+  'host-built Linux release bundle receipt differs' \
+  '"${primary_scp[@]}" "$TARGET_RELEASE_BINARY"' \
+  'Linux target differs from the exact host-built release CLI' \
+  'Linux fixture peer differs from its exact host-built receipt' \
+  'tested-artifact-receipt.json' \
+  'tested-artifact.json'
 
 binary="$TMP_ROOT/nvpn"
 receipt="$TMP_ROOT/receipt.json"
@@ -118,7 +139,7 @@ app_sha="$(printf 'a%.0s' {1..40})"
 app_tree="$(printf 'b%.0s' {1..40})"
 fips_sha="$(printf 'c%.0s' {1..40})"
 fips_tree="$(printf 'd%.0s' {1..40})"
-fips_version="0.4.44"
+fips_version="0.4.45"
 target="x86_64-unknown-linux-musl"
 
 # Exercise the shared helper in the exact `helper || status=$?` context used by

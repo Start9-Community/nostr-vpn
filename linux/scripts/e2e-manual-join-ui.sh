@@ -15,6 +15,17 @@ TIMEOUT_SECS="${NVPN_DESKTOP_MANUAL_JOIN_TIMEOUT_SECS:-20}"
 RUNTIME_TIMEOUT_SECS="${NVPN_DESKTOP_MANUAL_JOIN_RUNTIME_TIMEOUT_SECS:-20}"
 LINUX_CARGO_TARGET_DIR="${NVPN_LINUX_CARGO_TARGET_DIR:-$LINUX_DIR/target}"
 ROOT_CARGO_TARGET_DIR="${NVPN_ROOT_CARGO_TARGET_DIR:-$LINUX_CARGO_TARGET_DIR}"
+FIXTURE="${NVPN_LINUX_FIXTURE_PATH:-$ROOT_CARGO_TARGET_DIR/debug/examples/desktop_manual_join_e2e_fixture}"
+NVPN="${NVPN_LINUX_NVPN_PATH:-$ROOT_CARGO_TARGET_DIR/debug/nvpn}"
+APP="${NVPN_LINUX_APP_PATH:-$LINUX_CARGO_TARGET_DIR/debug/nostr-vpn}"
+EXPLICIT_ARTIFACT_COUNT=0
+[[ -z "${NVPN_LINUX_FIXTURE_PATH:-}" ]] || ((EXPLICIT_ARTIFACT_COUNT += 1))
+[[ -z "${NVPN_LINUX_NVPN_PATH:-}" ]] || ((EXPLICIT_ARTIFACT_COUNT += 1))
+[[ -z "${NVPN_LINUX_APP_PATH:-}" ]] || ((EXPLICIT_ARTIFACT_COUNT += 1))
+[[ "$EXPLICIT_ARTIFACT_COUNT" == 0 || "$EXPLICIT_ARTIFACT_COUNT" == 3 ]] || {
+  echo "Set all three explicit Linux app, CLI, and fixture paths together." >&2
+  exit 2
+}
 cargo_config_args=()
 app_pid=""
 window_id=""
@@ -76,9 +87,6 @@ mkdir -p "$ARTIFACT_DIR" "$E2E_ROOT"
 rm -f "$RESULT" "$APP_LOG" "$ARTIFACT_DIR"/*.png
 
 cd "$ROOT_DIR"
-FIXTURE="$ROOT_CARGO_TARGET_DIR/debug/examples/desktop_manual_join_e2e_fixture"
-NVPN="$ROOT_CARGO_TARGET_DIR/debug/nvpn"
-APP="$LINUX_CARGO_TARGET_DIR/debug/nostr-vpn"
 
 sudo -n true >/dev/null 2>&1 || {
   echo "Linux real manual-join runtime gate requires passwordless sudo on the isolated VM." >&2
@@ -113,8 +121,16 @@ snapshot_default_route >"$ARTIFACT_DIR/default-route-before.json"
 snapshot_dns >"$ARTIFACT_DIR/dns-before.txt"
 assert_direct_internet
 
-case "${NVPN_DESKTOP_MANUAL_JOIN_SKIP_BUILD:-0}" in
-  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+case "$EXPLICIT_ARTIFACT_COUNT:${NVPN_DESKTOP_MANUAL_JOIN_SKIP_BUILD:-0}" in
+  3:*)
+    for executable in "$FIXTURE" "$NVPN" "$APP"; do
+      [[ -x "$executable" ]] || {
+        echo "Imported Linux manual-join executable is missing: $executable" >&2
+        exit 1
+      }
+    done
+    ;;
+  0:1|0:true|0:TRUE|0:True|0:yes|0:YES|0:Yes|0:on|0:ON|0:On)
     for executable in "$FIXTURE" "$NVPN" "$APP"; do
       [[ -x "$executable" ]] || {
         echo "Prebuilt Linux manual-join executable is missing: $executable" >&2
@@ -122,7 +138,7 @@ case "${NVPN_DESKTOP_MANUAL_JOIN_SKIP_BUILD:-0}" in
       }
     done
     ;;
-  *)
+  0:*)
     CARGO_TARGET_DIR="$ROOT_CARGO_TARGET_DIR" \
       cargo_run build -q -p nvpn
     CARGO_TARGET_DIR="$ROOT_CARGO_TARGET_DIR" \

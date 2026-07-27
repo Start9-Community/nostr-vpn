@@ -347,14 +347,38 @@ grep -Fq 'NVPN_RELEASE_GATE_MOBILE_JOIN_E2E:-required' "$release_gate" \
 grep -Fq 'NVPN_RELEASE_JOIN_DESKTOP_MOBILE=1' "$release_gate" \
   || fail "signed Release join omits desktop/mobile role coverage"
 mobile_join_line="$(grep -n '^  run_mobile_join_e2e_gate$' "$release_gate" | cut -d: -f1)"
+windows_mobile_join_line="$(
+  grep -n '^  run_windows_release_mobile_join_e2e_gate$' \
+    "$release_gate" | cut -d: -f1
+)"
+linux_mobile_join_line="$(
+  grep -n '^  run_linux_release_mobile_join_e2e_gate$' \
+    "$release_gate" | cut -d: -f1
+)"
 macos_vm_join_line="$(
   grep -nF '    release_gate_parallel_wait "$macos_platform_lane"' \
     "$release_gate" | cut -d: -f1 || true
 )"
-[[ -n "$mobile_join_line" && -n "$macos_vm_join_line" ]] \
+[[ -n "$mobile_join_line" \
+  && -n "$windows_mobile_join_line" \
+  && -n "$linux_mobile_join_line" \
+  && -n "$macos_vm_join_line" ]] \
   || fail "serialized physical desktop/mobile lane markers are incomplete"
-(( macos_vm_join_line < mobile_join_line )) \
+(( macos_vm_join_line < mobile_join_line \
+  && mobile_join_line < windows_mobile_join_line \
+  && windows_mobile_join_line < linux_mobile_join_line )) \
   || fail "physical desktop/mobile gate is not serialized after phone lanes and macOS VM UI work"
+for platform_join in \
+  windows-vm-release-mobile-join-e2e.sh \
+  ubuntu-vm-release-mobile-join-e2e.sh
+do
+  grep -Fq "$platform_join" "$release_gate" \
+    || fail "release gate omits exact signed public-UI lane $platform_join"
+done
+grep -Fq 'NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT=' "$release_gate" \
+  || fail "Windows/Pixel join does not reuse the exact physical Android install receipt"
+grep -Fq 'NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1' "$release_gate" \
+  || fail "Linux/Pixel join does not reuse the exact physical Android artifact"
 if grep -Fq 'run_desktop_mobile_manual_join_e2e_gate' "$release_gate" \
   || [[ -e "$ROOT_DIR/scripts/macos-vm-android-manual-join-e2e.sh" ]] \
   || [[ -e "$ROOT_DIR/scripts/e2e-macos-android-manual-join-remote.sh" ]]
@@ -417,6 +441,28 @@ grep -Fq 'ubuntu-vm-service-toggle-e2e.sh' "$release_gate" \
 grep -Fq 'e2e-linux-service-toggle-real.sh' \
   "$ROOT_DIR/scripts/ubuntu-vm-service-toggle-e2e.sh" \
   || fail "Linux VM service gate does not invoke the real PolicyKit fixture"
+grep -Fq 'test-host-linux-vm-import-only-harness.sh' "$release_gate" \
+  || fail "release gate omits the Linux host-build/import-only source contract"
+for linux_vm_gate in \
+  "$ROOT_DIR/scripts/ubuntu-vm-manual-join-e2e.sh" \
+  "$ROOT_DIR/scripts/ubuntu-vm-service-toggle-e2e.sh"
+do
+  grep -Fq 'lib-ubuntu-vm-imported-release.sh' "$linux_vm_gate" \
+    || fail "$(basename "$linux_vm_gate") does not use the shared immutable import"
+  grep -Fq 'NVPN_LINUX_APP_PATH="$app"' "$linux_vm_gate" \
+    || fail "$(basename "$linux_vm_gate") does not execute the imported GTK app"
+  grep -Fq 'NVPN_LINUX_NVPN_PATH="$cli"' "$linux_vm_gate" \
+    || fail "$(basename "$linux_vm_gate") does not execute the imported CLI"
+  grep -Fq 'NVPN_LINUX_FIXTURE_PATH="$fixture"' "$linux_vm_gate" \
+    || fail "$(basename "$linux_vm_gate") does not execute the imported fixture"
+  if grep -Eq '(^|[[:space:]])(cargo|rustc)([[:space:]]|$)' "$linux_vm_gate"; then
+    fail "$(basename "$linux_vm_gate") can compile on the Ubuntu VM"
+  fi
+done
+grep -Fq './scripts/prepare-host-linux-vm-bundle.sh' "$release_gate" \
+  || fail "Linux platform lane does not prepare its immutable bundle on the host"
+grep -Fq 'export NVPN_HOST_LINUX_VM_BUNDLE_DIR' "$release_gate" \
+  || fail "Linux manual-join and service gates cannot reuse one host bundle"
 if grep -Fq './scripts/e2e-linux-service-toggle.sh' "$release_gate"; then
   fail "fake Linux service-toggle fixture can satisfy the release gate"
 fi
@@ -425,6 +471,8 @@ python3 - \
   "$ROOT_DIR/scripts/ubuntu-vm-git-sync.sh" \
   "$ROOT_DIR/scripts/ubuntu-vm-manual-join-e2e.sh" \
   "$ROOT_DIR/scripts/ubuntu-vm-service-toggle-e2e.sh" \
+  "$ROOT_DIR/scripts/lib-ubuntu-vm-imported-release.sh" \
+  "$ROOT_DIR/scripts/prepare-host-linux-vm-bundle.sh" \
   "$ROOT_DIR/scripts/macos-vm-git-sync.sh" \
   "$ROOT_DIR/scripts/macos-vm-manual-join-e2e.sh" \
   "$ROOT_DIR/scripts/macos-vm-service-toggle-e2e.sh" \

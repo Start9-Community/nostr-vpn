@@ -11,9 +11,29 @@ GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
 GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\fips}"
 GUEST_ARTIFACT_ROOT="${GUEST_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$ROOT/artifacts}"
-SMOKE_TAG="${NVPN_WINDOWS_APP_SMOKE_TAG:-v0.0.0}"
+VERSION="$(
+  awk '
+    $0 == "[workspace.package]" { package = 1; next }
+    package && /^\[/ { exit }
+    package && /^version = "/ {
+      value = $0
+      sub(/^version = "/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      exit
+    }
+  ' "$ROOT/Cargo.toml"
+)"
+SMOKE_TAG="${NVPN_WINDOWS_APP_SMOKE_TAG:-v$VERSION}"
+LOCAL_GATE_DIR="${NVPN_WINDOWS_INSTALLER_GATE_ARTIFACT_DIR:-$ARTIFACT_ROOT/windows-installer-gate}"
+REMOTE_GATE_DIR="$GUEST_ARTIFACT_ROOT\\windows-installer-gate"
 
-mkdir -p "$ARTIFACT_ROOT"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ \
+  && "$SMOKE_TAG" == "v$VERSION" ]] || {
+  echo "Windows installer smoke tag must exactly match workspace version v$VERSION" >&2
+  exit 2
+}
+mkdir -p "$LOCAL_GATE_DIR"
 
 ssh_command() {
   SSH_CMD=(ssh -o BatchMode=yes)
@@ -23,6 +43,15 @@ ssh_command() {
     SSH_CMD+=(-J "$SSH_JUMP")
   fi
   SSH_CMD+=("$SSH_HOST")
+}
+
+scp_command() {
+  SCP_CMD=(scp -q -o BatchMode=yes -o ConnectTimeout=10)
+  if [[ -n "$SSH_PROXY_COMMAND" ]]; then
+    SCP_CMD+=(-o "ProxyCommand=$SSH_PROXY_COMMAND")
+  elif [[ -n "$SSH_JUMP" ]]; then
+    SCP_CMD+=(-J "$SSH_JUMP")
+  fi
 }
 
 run_ps() {
@@ -45,6 +74,8 @@ esac
 run_ps "\$ErrorActionPreference = 'Stop'
 Set-Location '$GUEST_REPO'
 New-Item -ItemType Directory -Force -Path '$GUEST_ARTIFACT_ROOT' | Out-Null
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '$REMOTE_GATE_DIR'
+New-Item -ItemType Directory -Force -Path '$REMOTE_GATE_DIR' | Out-Null
 if ('${NVPN_FIPS_REPO_PATH:-}' -ne '') { \$env:NVPN_FIPS_REPO_PATH = '$GUEST_FIPS_REPO' }
 \$env:CARGO_TARGET_DIR = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-smoke-cargo'
 \$targetPrefix = [IO.Path]::GetFullPath(\$env:CARGO_TARGET_DIR).TrimEnd([char]92) + [char]92
@@ -54,16 +85,114 @@ Get-CimInstance Win32_Process -Filter \"Name = 'nvpn.exe'\" |
     [IO.Path]::GetFullPath(\$_.ExecutablePath).StartsWith(\$targetPrefix, [StringComparison]::OrdinalIgnoreCase)
   } |
   ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction Stop }
-\$installer = Join-Path '$GUEST_ARTIFACT_ROOT' 'nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe'
+\$installer = Join-Path '$REMOTE_GATE_DIR' 'nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe'
 Remove-Item -Force \$installer -ErrorAction SilentlyContinue
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration Release -Installer -Tag '$SMOKE_TAG' -OutputDir '$GUEST_ARTIFACT_ROOT'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration Release -Installer -Tag '$SMOKE_TAG' -OutputDir '$REMOTE_GATE_DIR'
 if (\$LASTEXITCODE -ne 0) { throw ('windows-build.ps1 failed with exit code {0}' -f \$LASTEXITCODE) }
 if (!(Test-Path \$installer)) { throw ('Windows installer was not created: {0}' -f \$installer) }
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-installer-smoke.ps1 -InstallerPath \$installer -ArtifactRoot '$GUEST_ARTIFACT_ROOT'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-installer-smoke.ps1 -InstallerPath \$installer -ArtifactRoot (Join-Path '$REMOTE_GATE_DIR' 'smoke')
 if (\$LASTEXITCODE -ne 0) { throw ('windows-installer-smoke.ps1 failed with exit code {0}' -f \$LASTEXITCODE) }
 \$candidate = Join-Path \$env:CARGO_TARGET_DIR 'release\\nvpn.exe'
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-daemon-idle-cpu.ps1 -Bin \$candidate -ArtifactRoot '$GUEST_ARTIFACT_ROOT'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-daemon-idle-cpu.ps1 -Bin \$candidate -ArtifactRoot (Join-Path '$REMOTE_GATE_DIR' 'daemon-idle')
 if (\$LASTEXITCODE -ne 0) { throw ('windows-daemon-idle-cpu.ps1 failed with exit code {0}' -f \$LASTEXITCODE) }
+\$smokePath = Join-Path '$REMOTE_GATE_DIR' 'smoke\\windows-app-launch-smoke.json'
+\$smoke = Get-Content -Raw -LiteralPath \$smokePath | ConvertFrom-Json
+if (\$smoke.ok -ne \$true) { throw 'exact installer app launch receipt did not pass' }
+\$head = (git rev-parse HEAD).Trim()
+\$tree = (git rev-parse 'HEAD^{tree}').Trim()
+\$status = (git status --porcelain --untracked-files=all | Out-String).Trim()
+if (\$status) { throw 'Windows installer build changed the exact source checkout' }
+\$publish = Join-Path '$GUEST_REPO' 'windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish'
+\$payloads = [ordered]@{}
+\$payloadFiles = [ordered]@{
+  app = (Join-Path \$publish 'NostrVpn.Windows.exe')
+  appCore = (Join-Path \$publish 'nostr_vpn_app_core.dll')
+  cli = (Join-Path \$publish 'nvpn.exe')
+  wintun = (Join-Path \$publish 'binaries\\wintun.dll')
+}
+foreach (\$entry in \$payloadFiles.GetEnumerator()) {
+  if (!(Test-Path -LiteralPath \$entry.Value -PathType Leaf)) {
+    throw ('Windows installer payload is missing: ' + \$entry.Key)
+  }
+  \$payloads[\$entry.Key] = [ordered]@{
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$entry.Value).Hash.ToLowerInvariant()
+    size = (Get-Item -LiteralPath \$entry.Value).Length
+  }
+}
+\$receipt = [ordered]@{
+  receiptSchema = 1
+  platform = 'windows'
+  artifactType = 'exact installed Windows Release setup'
+  appGitSha = \$head
+  appGitTree = \$tree
+  tag = '$SMOKE_TAG'
+  installerName = (Split-Path -Leaf \$installer)
+  installerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$installer).Hash.ToLowerInvariant()
+  installerSize = (Get-Item -LiteralPath \$installer).Length
+  installerInstalledAndLaunched = \$true
+  installedAppStayedAlive = \$true
+  smokeReceiptSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$smokePath).Hash.ToLowerInvariant()
+  payloads = \$payloads
+  builtOnWindowsVm = \$true
+  builtOnHostMac = \$false
+}
+\$receipt | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 -LiteralPath (Join-Path '$REMOTE_GATE_DIR' 'installer-receipt.json')
 exit \$LASTEXITCODE"
+
+rm -rf "$LOCAL_GATE_DIR"
+mkdir -p "$LOCAL_GATE_DIR"
+scp_command
+remote_gate_posix="${REMOTE_GATE_DIR//\\//}"
+"${SCP_CMD[@]}" \
+  "$SSH_HOST:$remote_gate_posix/nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe" \
+  "$LOCAL_GATE_DIR/nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe"
+"${SCP_CMD[@]}" \
+  "$SSH_HOST:$remote_gate_posix/installer-receipt.json" \
+  "$LOCAL_GATE_DIR/installer-receipt.json"
+python3 - \
+  "$LOCAL_GATE_DIR/installer-receipt.json" \
+  "$LOCAL_GATE_DIR/nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe" \
+  "$(git -C "$ROOT" rev-parse HEAD)" \
+  "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "$SMOKE_TAG" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+receipt_path = pathlib.Path(sys.argv[1])
+installer_path = pathlib.Path(sys.argv[2])
+commit, tree, tag = sys.argv[3:]
+receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+digest = hashlib.sha256(installer_path.read_bytes()).hexdigest()
+if not (
+    receipt.get("receiptSchema") == 1
+    and receipt.get("platform") == "windows"
+    and receipt.get("artifactType") == "exact installed Windows Release setup"
+    and receipt.get("appGitSha") == commit
+    and receipt.get("appGitTree") == tree
+    and receipt.get("tag") == tag
+    and receipt.get("installerName") == installer_path.name
+    and receipt.get("installerSha256") == digest
+    and receipt.get("installerSize") == installer_path.stat().st_size
+    and receipt.get("installerInstalledAndLaunched") is True
+    and receipt.get("installedAppStayedAlive") is True
+    and receipt.get("builtOnWindowsVm") is True
+    and receipt.get("builtOnHostMac") is False
+    and re.fullmatch(r"[0-9a-f]{64}", receipt.get("smokeReceiptSha256", ""))
+):
+    raise SystemExit("pulled Windows installer receipt is incomplete")
+payloads = receipt.get("payloads", {})
+if set(payloads) != {"app", "appCore", "cli", "wintun"}:
+    raise SystemExit("Windows installer receipt has the wrong payload set")
+for name, value in payloads.items():
+    if not (
+        re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256", "")))
+        and isinstance(value.get("size"), int)
+        and value["size"] > 0
+    ):
+        raise SystemExit(f"Windows installer receipt has invalid {name} payload")
+PY
 
 echo "WINDOWS_VM_APP_LAUNCH_SMOKE_OK"

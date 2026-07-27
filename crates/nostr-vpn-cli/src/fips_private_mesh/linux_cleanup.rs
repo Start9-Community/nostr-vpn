@@ -26,6 +26,33 @@ fn replace_pending_linux_network_cleanup_state(state: Option<LinuxNetworkCleanup
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn record_linux_secure_dns_cleanup(
+    cleanup_state: crate::secure_dns_runtime::LinuxSecureDnsCleanupState,
+    cleanup_result: &Result<()>,
+) {
+    let mut pending = PENDING_LINUX_NETWORK_CLEANUP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cleanup_result.is_err() {
+        pending
+            .get_or_insert_with(LinuxNetworkCleanupState::default)
+            .secure_dns = Some(cleanup_state);
+        return;
+    }
+    if let Some(state) = pending.as_mut()
+        && state.secure_dns.as_ref() == Some(&cleanup_state)
+    {
+        state.secure_dns = None;
+    }
+    if pending
+        .as_ref()
+        .is_some_and(LinuxNetworkCleanupState::is_empty)
+    {
+        *pending = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn record_linux_stop_cleanup_ownership(
     cleanup_result: &Result<()>,
     remaining: Option<LinuxNetworkCleanupState>,
@@ -75,6 +102,19 @@ fn cleanup_linux_network_state_with_actions(
         ));
     }
 
+    // Physical default restoration and cache invalidation are independent
+    // safety obligations. Restore while overlay identities are still present
+    // so exact-ownership checks can distinguish an nVPN default from a new
+    // NetworkManager default after an underlay switch.
+    actions.restore_original_ipv4_default();
+    actions.restore_original_ipv6_default();
+    if actions.ipv4_default_restore_pending() {
+        failures.push("failed to restore original IPv4 default route".to_string());
+    }
+    if actions.ipv6_default_restore_pending() {
+        failures.push("failed to restore original IPv6 default route".to_string());
+    }
+
     let mut forwarding_cleanup_error = None;
     for _ in 0..LINUX_NETWORK_CLEANUP_ATTEMPTS {
         match actions.cleanup_forwarding_and_wireguard() {
@@ -91,18 +131,6 @@ fn cleanup_linux_network_state_with_actions(
         ));
     }
 
-    // Physical default restoration and cache invalidation are independent
-    // safety obligations. They must run even when overlay-owned cleanup is
-    // still incomplete, otherwise a transient firewall or WireGuard teardown
-    // error can strand native internet access.
-    actions.restore_original_ipv4_default();
-    actions.restore_original_ipv6_default();
-    if actions.ipv4_default_restore_pending() {
-        failures.push("failed to restore original IPv4 default route".to_string());
-    }
-    if actions.ipv6_default_restore_pending() {
-        failures.push("failed to restore original IPv6 default route".to_string());
-    }
     if let Err(error) = actions.flush_route_cache() {
         failures.push(format!("failed to flush Linux route cache: {error:#}"));
     }
@@ -128,11 +156,13 @@ impl LinuxNetworkCleanupActions for FipsPrivateTunnelRuntime {
     }
 
     fn restore_original_ipv4_default(&mut self) {
-        self.restore_linux_original_default_route();
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        restore_linux_saved_default(&mut self.original_default_route, false, &owned);
     }
 
     fn restore_original_ipv6_default(&mut self) {
-        self.restore_linux_original_default_ipv6_route();
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        restore_linux_saved_default(&mut self.original_default_ipv6_route, true, &owned);
     }
 
     fn ipv4_default_restore_pending(&self) -> bool {
@@ -157,15 +187,23 @@ impl LinuxNetworkCleanupState {
             original_default_route: runtime.original_default_route.clone(),
             original_default_ipv6_route: runtime.original_default_ipv6_route.clone(),
             exit_node_runtime: runtime.exit_node_runtime.clone(),
+            secure_dns: runtime
+                .secure_dns
+                .as_ref()
+                .and_then(crate::secure_dns_runtime::SecureDnsRuntime::linux_cleanup_state),
         };
         (!state.is_empty()).then_some(state)
     }
 
     fn is_empty(&self) -> bool {
-        self.endpoint_bypass_routes.is_empty()
-            && self.original_default_route.is_none()
-            && self.original_default_ipv6_route.is_none()
-            && linux_exit_cleanup_state_is_empty(&self.exit_node_runtime)
+        !self.has_network_ownership() && self.secure_dns.is_none()
+    }
+
+    fn has_network_ownership(&self) -> bool {
+        !self.endpoint_bypass_routes.is_empty()
+            || self.original_default_route.is_some()
+            || self.original_default_ipv6_route.is_some()
+            || !linux_exit_cleanup_state_is_empty(&self.exit_node_runtime)
     }
 }
 
@@ -206,17 +244,70 @@ fn cleanup_linux_endpoint_bypass_state(state: &mut LinuxNetworkCleanupState) -> 
 }
 
 #[cfg(target_os = "linux")]
-fn restore_linux_saved_default(route: &mut Option<String>, ipv6: bool) {
-    let Some(saved) = route.take() else {
+fn linux_owned_default_interfaces(iface: &str, state: &LinuxExitNodeRuntime) -> Vec<String> {
+    let mut interfaces = vec![iface.to_string()];
+    if let Some(runtime) = state.wireguard_exit.as_ref() {
+        interfaces.push(runtime.interface.clone());
+    }
+    interfaces.extend(
+        state
+            .pending_wireguard_exit_cleanup
+            .iter()
+            .filter_map(crate::LinuxWireGuardExitCleanupObligation::interface)
+            .map(str::to_string),
+    );
+    interfaces.sort();
+    interfaces.dedup();
+    interfaces
+}
+
+#[cfg(target_os = "linux")]
+fn restore_linux_saved_default(
+    route: &mut Option<String>,
+    ipv6: bool,
+    owned_interfaces: &[String],
+) {
+    let Some(saved) = route.as_deref() else {
         return;
     };
-    let result = if ipv6 {
-        crate::restore_linux_default_ipv6_route(&saved)
+    let current = if ipv6 {
+        crate::linux_current_default_ipv6_route()
     } else {
-        crate::restore_linux_default_route(&saved)
+        crate::linux_current_default_route()
     };
-    if result.is_err() {
-        *route = Some(saved);
+    let current = match current {
+        Ok(current) => current,
+        Err(error) => {
+            eprintln!(
+                "fips: retaining saved {} default after current-route query failed: {error:#}",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
+            return;
+        }
+    };
+    if !crate::linux_saved_default_restore_required(
+        saved,
+        current.as_ref(),
+        owned_interfaces,
+    ) {
+        // Either the exact saved route is already active or the OS installed
+        // a different physical default during a network switch. In both
+        // cases our stale restore obligation is complete.
+        *route = None;
+        return;
+    }
+    let result = if ipv6 {
+        crate::restore_linux_default_ipv6_route(saved)
+    } else {
+        crate::restore_linux_default_route(saved)
+    };
+    if let Err(error) = result {
+        eprintln!(
+            "fips: failed to restore saved {} default route: {error:#}",
+            if ipv6 { "IPv6" } else { "IPv4" }
+        );
+    } else {
+        *route = None;
     }
 }
 
@@ -443,11 +534,13 @@ impl LinuxNetworkCleanupActions for LinuxNetworkCleanupState {
     }
 
     fn restore_original_ipv4_default(&mut self) {
-        restore_linux_saved_default(&mut self.original_default_route, false);
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        restore_linux_saved_default(&mut self.original_default_route, false, &owned);
     }
 
     fn restore_original_ipv6_default(&mut self) {
-        restore_linux_saved_default(&mut self.original_default_ipv6_route, true);
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        restore_linux_saved_default(&mut self.original_default_ipv6_route, true, &owned);
     }
 
     fn ipv4_default_restore_pending(&self) -> bool {
@@ -467,5 +560,19 @@ impl LinuxNetworkCleanupActions for LinuxNetworkCleanupState {
 pub(crate) fn repair_linux_network_cleanup_state(
     state: &mut LinuxNetworkCleanupState,
 ) -> Result<()> {
-    cleanup_linux_network_state_with_actions(state)
+    let network_error = state
+        .has_network_ownership()
+        .then(|| cleanup_linux_network_state_with_actions(state).err())
+        .flatten();
+    let dns_error =
+        crate::secure_dns_runtime::repair_linux_secure_dns_cleanup_state(&mut state.secure_dns)
+            .err();
+    match (network_error, dns_error) {
+        (None, None) => Ok(()),
+        (Some(network), None) => Err(network),
+        (None, Some(dns)) => Err(dns),
+        (Some(network), Some(dns)) => Err(anyhow!(
+            "Linux network cleanup failed ({network:#}); secure DNS cleanup failed ({dns:#})"
+        )),
+    }
 }

@@ -85,7 +85,8 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         confirm.tap()
         openDevicesTab()
         XCTAssertTrue(
-            element("roster-participant-\(expectedJoiner)").waitForExistence(timeout: deliveryTimeout),
+            element("roster-participant-accepted-\(expectedJoiner)")
+                .waitForExistence(timeout: deliveryTimeout),
             "Admin roster did not show the scanned joining identity"
         )
         XCTAssertGreaterThanOrEqual(rosterParticipantCount(), before + 1)
@@ -114,11 +115,13 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Manual join did not leave the first-run join screen"
         )
         openDevicesTab()
-        XCTAssertTrue(
-            element("roster-participant-\(admin)").waitForExistence(timeout: deliveryTimeout),
-            "Manual join roster did not show the exact admin identity"
+        requireAcceptedRoster(
+            admin,
+            relaunch: true,
+            failureMessage: "Manual join did not receive and retain the admin's signed roster"
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(admin)")
+        emit("NVPN_RELEASE_JOIN_RELAUNCH_DURABLE=\(admin)")
     }
 
     func testManualAdminAddRequiresRosterProgress() throws {
@@ -130,10 +133,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         if alias.exists {
             replaceText(alias, with: "Release gate phone")
         }
+        emit("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=\(millisecondsSinceEpoch())")
         scrollTo("manual-admin-submit").tap()
         openDevicesTab()
         XCTAssertTrue(
-            element("roster-participant-\(joiner)").waitForExistence(timeout: deliveryTimeout),
+            element("roster-participant-accepted-\(joiner)")
+                .waitForExistence(timeout: deliveryTimeout),
             "Manual admin add did not produce an exact roster row"
         )
         XCTAssertGreaterThanOrEqual(rosterParticipantCount(), before + 1)
@@ -309,6 +314,29 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             .count
     }
 
+    private func requireAcceptedRoster(
+        _ participant: String,
+        relaunch: Bool,
+        failureMessage: String
+    ) {
+        let identifier = "roster-participant-accepted-\(participant)"
+        XCTAssertTrue(
+            element(identifier).waitForExistence(timeout: deliveryTimeout),
+            failureMessage
+        )
+        guard relaunch else {
+            return
+        }
+        app.terminate()
+        app.launch()
+        dismissSystemPromptsIfPresent()
+        openDevicesTab()
+        XCTAssertTrue(
+            element(identifier).waitForExistence(timeout: deliveryTimeout),
+            "\(failureMessage) after a real app relaunch"
+        )
+    }
+
     private func waitUntil(
         timeout: TimeInterval,
         predicate: @escaping () -> Bool
@@ -334,7 +362,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
                     return false
                 }
                 devicesTab.tap()
-                guard element("roster-participant-\(expectedParticipant)").exists else {
+                guard element("roster-participant-accepted-\(expectedParticipant)").exists else {
                     return false
                 }
                 emit(

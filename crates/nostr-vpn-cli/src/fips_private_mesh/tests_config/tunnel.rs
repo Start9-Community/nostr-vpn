@@ -1,4 +1,113 @@
     #[test]
+    fn pending_manual_join_tunnel_is_control_only_until_receipt_backed_acceptance() {
+        let joiner_keys = Keys::generate();
+        let admin_keys = Keys::generate();
+        let joiner_pubkey = joiner_keys.public_key().to_hex();
+        let admin_pubkey = admin_keys.public_key().to_hex();
+        let network_id = "desktop-manual-pending";
+
+        let mut joining = AppConfig::generated_without_networks();
+        joining.nostr.secret_key = joiner_keys.secret_key().to_secret_hex();
+        joining.nostr.public_key = joiner_pubkey.clone();
+        joining
+            .add_manual_join_network(&admin_pubkey, network_id)
+            .expect("configure manual join");
+
+        let assert_control_only = |app: &AppConfig| {
+            let config = FipsPrivateTunnelConfig::from_app(
+                app,
+                network_id,
+                "utun-manual-pending",
+                Some(&joiner_pubkey),
+                None,
+                &[],
+            )
+            .expect("pending manual tunnel config");
+            assert!(
+                config.network_id.is_empty(),
+                "an unaccepted join must not enter the requested discovery scope"
+            );
+            assert!(config.route_targets.is_empty());
+            assert!(
+                config
+                    .peers
+                    .iter()
+                    .all(|peer| peer.allowed_ips.is_empty()),
+                "the configured admin may carry control frames but must own no mesh route"
+            );
+            assert!(!config.secure_dns_required());
+            assert!(config.magic_dns_records.is_empty());
+            assert!(!config.advertise_on_nostr);
+            assert!(!config.wireguard_exit.enabled);
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                assert!(config.fips_host.is_none());
+                assert!(config.local_exit_forwarding_routes.is_empty());
+            }
+            assert!(config.local_advertised_routes.is_empty());
+        };
+
+        assert_control_only(&joining);
+
+        let roster_without_joiner = SignedRoster::sign(
+            network_id,
+            NetworkRoster {
+                network_name: "Manual desktop".to_string(),
+                devices: Vec::new(),
+                admins: vec![admin_pubkey.clone()],
+                aliases: HashMap::new(),
+                signed_at: unix_timestamp(),
+            },
+            &admin_keys,
+        )
+        .expect("sign unrelated current roster");
+        assert!(
+            joining
+                .apply_verified_admin_signed_shared_roster(&roster_without_joiner)
+                .expect("apply configured admin roster")
+        );
+        assert_control_only(&joining);
+
+        let mut admin = AppConfig::generated();
+        admin.nostr.secret_key = admin_keys.secret_key().to_secret_hex();
+        admin.nostr.public_key = admin_pubkey.clone();
+        let admin_network_entry_id = admin.networks[0].id.clone();
+        admin.networks[0].network_id = network_id.to_string();
+        admin.networks[0].name = "Manual desktop".to_string();
+        admin.networks[0].admins = vec![admin_pubkey.clone()];
+        admin.networks[0].devices = vec![joiner_pubkey.clone()];
+        admin.networks[0].shared_roster_updated_at = unix_timestamp().saturating_add(1);
+        admin.networks[0].shared_roster_signed_by = admin_pubkey.clone();
+        let accepted =
+            prepare_manual_join_delivery(&admin, &admin_network_entry_id, &joiner_pubkey)
+                .expect("prepare accepted manual roster");
+        joining
+            .apply_manual_join_roster(&accepted, unix_timestamp().saturating_add(1))
+            .expect("apply accepted manual roster")
+            .expect("manual roster must match pending join");
+
+        let accepted = FipsPrivateTunnelConfig::from_app(
+            &joining,
+            network_id,
+            "utun-manual-accepted",
+            Some(&joiner_pubkey),
+            None,
+            &[],
+        )
+        .expect("accepted manual tunnel config");
+        assert_eq!(accepted.network_id, network_id);
+        assert!(accepted.advertise_on_nostr);
+        assert!(!accepted.route_targets.is_empty());
+        assert!(
+            accepted
+                .peers
+                .iter()
+                .any(|peer| peer.participant_pubkey == admin_pubkey
+                    && !peer.allowed_ips.is_empty())
+        );
+    }
+
+    #[test]
     fn tunnel_config_applies_live_endpoint_hints_only_for_network_signal_peers() {
         let alice_keys = Keys::generate();
         let bob_keys = Keys::generate();
@@ -857,127 +966,5 @@
         assert!(
             fips_tunnel_requires_endpoint_restart(&current, &dropped_cache),
             "a reload path that drops recent-peer state would flap the endpoint"
-        );
-    }
-
-    #[test]
-    fn tunnel_config_caps_bootstrap_transit_peers_without_exhausting_open_discovery() {
-        let alice_keys = Keys::generate();
-        let bob_keys = Keys::generate();
-        let alice_nsec = alice_keys.secret_key().to_bech32().expect("alice nsec");
-        let alice_pubkey = alice_keys.public_key().to_hex();
-        let bob_pubkey = bob_keys.public_key().to_hex();
-        let network_id = "fips-bootstrap-transit-cap-test";
-
-        let mut app = AppConfig::default();
-        app.nostr.secret_key = alice_nsec;
-        app.connect_to_non_roster_fips_peers = true;
-        app.fips_bootstrap_enabled = true;
-        app.networks[0].enabled = true;
-        app.networks[0].network_id = network_id.to_string();
-        app.networks[0].devices = vec![alice_pubkey.clone(), bob_pubkey.clone()];
-        app.fips_bootstrap_peers.clear();
-
-        let mut bootstrap_npubs = Vec::new();
-        for i in 0..(FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING + 2) {
-            let keys = Keys::generate();
-            let npub = keys.public_key().to_bech32().expect("bootstrap npub");
-            app.fips_bootstrap_peers.insert(
-                npub.clone(),
-                vec![format!("[2001:db8::{:x}]:51820", i + 10)],
-            );
-            bootstrap_npubs.push(npub);
-        }
-        assert_eq!(
-            app.fips_bootstrap_peer_endpoints().len(),
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING + 2,
-        );
-
-        let config = FipsPrivateTunnelConfig::from_app(
-            &app,
-            network_id,
-            "utun-test",
-            Some(&alice_pubkey),
-            None,
-            &[],
-        )
-        .expect("fips tunnel config");
-
-        let seeded_bootstrap = config
-            .endpoint_peers
-            .iter()
-            .filter(|peer| bootstrap_npubs.iter().any(|npub| npub == &peer.npub))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            seeded_bootstrap.len(),
-            FIPS_STATIC_NON_ROSTER_TRANSIT_MAX_SEEDS,
-            "bootstrap transit peers should not consume the whole open-discovery cap"
-        );
-        assert_eq!(
-            config.open_discovery_max_pending,
-            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING
-                - FIPS_STATIC_NON_ROSTER_TRANSIT_MAX_SEEDS,
-            "bounded bootstrap transit should leave a nonzero fresh open-discovery budget"
-        );
-        assert!(config.open_discovery_max_pending > 0);
-    }
-
-    #[test]
-    fn tunnel_config_keeps_public_native_seeds_inside_static_cap() {
-        let alice_keys = Keys::generate();
-        let bob_keys = Keys::generate();
-        let alice_nsec = alice_keys.secret_key().to_bech32().expect("alice nsec");
-        let alice_pubkey = alice_keys.public_key().to_hex();
-        let bob_pubkey = bob_keys.public_key().to_hex();
-        let network_id = "fips-public-bootstrap-priority-test";
-
-        let mut app = AppConfig::default();
-        app.nostr.secret_key = alice_nsec;
-        app.connect_to_non_roster_fips_peers = true;
-        app.fips_bootstrap_enabled = true;
-        app.networks[0].enabled = true;
-        app.networks[0].network_id = network_id.to_string();
-        app.networks[0].devices = vec![alice_pubkey.clone(), bob_pubkey];
-        for i in 0..2 {
-            let npub = Keys::generate()
-                .public_key()
-                .to_bech32()
-                .expect("custom bootstrap npub");
-            app.fips_bootstrap_peers
-                .insert(npub, vec![format!("[2001:db8::{:x}]:51820", i + 10)]);
-        }
-
-        let config = FipsPrivateTunnelConfig::from_app(
-            &app,
-            network_id,
-            "utun-test",
-            Some(&alice_pubkey),
-            None,
-            &[],
-        )
-        .expect("fips tunnel config");
-
-        let endpoint_npubs = config
-            .endpoint_peers
-            .iter()
-            .map(|peer| peer.npub.as_str())
-            .collect::<HashSet<_>>();
-        for (npub, _) in nostr_vpn_core::config::DEFAULT_FIPS_BOOTSTRAP_PEERS {
-            assert!(
-                endpoint_npubs.contains(npub),
-                "public native seed {npub} must survive the static transit cap"
-            );
-        }
-        assert_eq!(
-            config
-                .endpoint_peers
-                .iter()
-                .filter(|peer| {
-                    nostr_vpn_core::config::DEFAULT_FIPS_BOOTSTRAP_PEERS
-                        .iter()
-                        .any(|(npub, _)| peer.npub == *npub)
-                })
-                .count(),
-            FIPS_STATIC_NON_ROSTER_TRANSIT_MAX_SEEDS
         );
     }

@@ -1152,6 +1152,119 @@ wait_for_android_exit_dns_persistence() {
   return 1
 }
 
+write_android_exit_dns_ui_receipt() {
+  local result_path
+  result_path="$(android_exit_dns_result_path)"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR"
+  python3 - \
+    "$result_path" \
+    "$EXIT_DNS_MODE" \
+    "$EXIT_DNS_DOH_PROVIDER" \
+    "$EXIT_DNS_CUSTOM_DOH_URL" \
+    "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" \
+    "$EXIT_DNS_THROUGH_EXIT_SERVERS" \
+    "$RELEASE_BLACKBOX_GATE" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    output,
+    mode,
+    provider,
+    custom_url,
+    bootstrap_ips,
+    through_servers,
+    release_blackbox,
+) = sys.argv[1:]
+payload = {
+    "receiptSchema": 1,
+    "evidenceSource": "shipped-ui-restart-readback",
+    "uiRestartReadback": True,
+    "releaseBlackbox": release_blackbox.lower()
+    in {"1", "true", "yes", "on"},
+    "exitDnsMode": mode,
+    "exitDnsDohProvider": provider,
+    "exitDnsCustomDohUrl": custom_url,
+    "exitDnsCustomDohBootstrapIps": bootstrap_ips,
+    "exitDnsThroughExitServers": through_servers,
+    "internetSource": "wireguard",
+    "wireguardExitEnabled": True,
+    "error": "",
+}
+path = pathlib.Path(output)
+temporary = path.with_name(f".{path.name}.tmp")
+temporary.write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+temporary.replace(path)
+PY
+}
+
+assert_android_exit_dns_ui_reloaded() {
+  "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME"
+  start_main_activity
+  wait_for_android_ui description "Internet tab" || {
+    echo "Android Exit DNS restart readback could not open the shipped Internet tab" >&2
+    return 1
+  }
+  tap_android_ui description "Internet tab" || return 1
+  sleep 0.5
+  android_ui_reset_scroll
+
+  local source mode_selector selected
+  android_ui_scroll_to resource internet-source-picker || return 1
+  source="$(android_ui_query resource internet-source-picker descendant-text)" || return 1
+  if [[ "$source" != "WireGuard VPN" ]]; then
+    echo "Android Exit DNS restart readback lost WireGuard internet source: $source" >&2
+    return 1
+  fi
+
+  mode_selector="exit-dns-mode-$EXIT_DNS_MODE"
+  android_ui_scroll_to resource "$mode_selector" || return 1
+  selected="$(android_ui_query resource "$mode_selector" selected)" || return 1
+  if [[ "$selected" != "true" ]]; then
+    echo "Android Exit DNS restart readback lost mode=$EXIT_DNS_MODE" >&2
+    return 1
+  fi
+
+  if [[ "$EXIT_DNS_MODE" == "encrypted" ]]; then
+    local provider_selector
+    provider_selector="exit-dns-provider-$EXIT_DNS_DOH_PROVIDER"
+    android_ui_scroll_to resource "$provider_selector" || return 1
+    selected="$(android_ui_query resource "$provider_selector" selected)" || return 1
+    if [[ "$selected" != "true" ]]; then
+      echo "Android Exit DNS restart readback lost provider=$EXIT_DNS_DOH_PROVIDER" >&2
+      return 1
+    fi
+    if [[ "$EXIT_DNS_DOH_PROVIDER" == "custom" ]]; then
+      android_ui_scroll_to resource exit-dns-custom-url || return 1
+      [[ "$(android_ui_query resource exit-dns-custom-url text)" == "$EXIT_DNS_CUSTOM_DOH_URL" ]] \
+        || {
+          echo "Android Exit DNS restart readback lost the custom DoH URL" >&2
+          return 1
+        }
+      android_ui_scroll_to resource exit-dns-custom-bootstrap-ips || return 1
+      [[ "$(android_ui_query resource exit-dns-custom-bootstrap-ips text)" == "$EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS" ]] \
+        || {
+          echo "Android Exit DNS restart readback lost custom bootstrap IPs" >&2
+          return 1
+        }
+    fi
+  elif [[ "$EXIT_DNS_MODE" == "through_exit" ]]; then
+    android_ui_scroll_to resource exit-dns-through-exit-servers || return 1
+    [[ "$(android_ui_query resource exit-dns-through-exit-servers text)" == "$EXIT_DNS_THROUGH_EXIT_SERVERS" ]] \
+      || {
+        echo "Android Exit DNS restart readback lost through-exit DNS servers" >&2
+        return 1
+      }
+  fi
+
+  write_android_exit_dns_ui_receipt || return 1
+  echo "Android shipped Exit DNS restart readback passed: mode=$EXIT_DNS_MODE provider=$EXIT_DNS_DOH_PROVIDER"
+}
+
 configure_android_exit_dns_ui() {
   start_main_activity
   wait_for_android_ui description "Internet tab" || {
@@ -1223,7 +1336,8 @@ configure_android_exit_dns_ui() {
 
   assert_android_ui_save_enabled || return 1
   tap_android_ui resource exit-dns-save || return 1
-  wait_for_android_exit_dns_persistence
+  wait_for_android_exit_dns_persistence || return 1
+  assert_android_exit_dns_ui_reloaded
 }
 
 android_direct_source_persisted() {

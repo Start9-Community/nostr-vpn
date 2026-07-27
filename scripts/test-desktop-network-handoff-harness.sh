@@ -176,6 +176,35 @@ require_tokens "$WINDOWS_GUEST" "PID-bound continuous payload" \
   'Get-DaemonPid' '[Net.NetworkInformation.Ping]::new()'
 require_tokens "$LINUX_GUEST" "PID-bound continuous payload" \
   'daemon_pid()' 'ping -D -n -i 0.1'
+require_tokens "$LINUX_GUEST" "production SIGKILL/startup-repair evidence" \
+  'crash_repair_gate()' \
+  'CLEANUP_JOURNAL="$STATE_DIR/.nvpn-network-cleanup/daemon.cleanup.json"' \
+  'kill -KILL "$CRASH_CONNECT_PID"' \
+  'cleanup journal lacks exact WireGuard and secure-DNS ownership' \
+  'SIGKILL journal lost exact WireGuard or secure-DNS ownership' \
+  'assert_wireguard_endpoint_route "$primary_iface"' \
+  'wireguard_latest_handshake' \
+  'assert_secure_dns' \
+  'resolve_fixture' \
+  'test_https' \
+  '    --paused \' \
+  'assert_single_nvpn_process "$CRASH_RESTART_PID"' \
+  'secure_dns_cleanup_ownership_survived_sigkill: true' \
+  'secure_dns_cleanup_ownership_removed: true' \
+  'startup_repair_without_explicit_command: true' \
+  'restart_repair_milliseconds'
+require_tokens "$LINUX_HOST" "mandatory SIGKILL/startup-repair receipt" \
+  'run_sigkill_restart_recovery()' \
+  'run_guest_primary crash-repair' \
+  'crash-repair.receipt.json' \
+  'crash-journal-ownership.json' \
+  '.binary_sha256 == $binary_sha256' \
+  '.sigkill_exit_code == 137' \
+  '.secure_dns_cleanup_ownership_survived_sigkill == true' \
+  '.secure_dns_cleanup_ownership_removed == true' \
+  '.startup_repair_without_explicit_command == true' \
+  '.restart_daemon_count == 1' \
+  '.restart_repair_milliseconds <= $deadline'
 require_tokens "$PEER" "reverse payload and physical source capture" \
   'ping -D -n -i 0.1' 'tcpdump -n -tt -l -i any'
 require_tokens "$PEER" "WireGuard/DNS responder evidence" \
@@ -268,6 +297,10 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   'NVPN_MACOS_VM_IMPORT_ONLY=1' \
   'NVPN_E2E_BINARY=' \
   './scripts/e2e-macos-release-network.sh' \
+  'NVPN_MACOS_WG_FIXTURE_IPV4' \
+  'discover_remote_fixture_ipv4' \
+  'MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" == "ipv4"' \
+  'remote FIPS peer must use its separate numeric IPv6 address' \
   'mobile_wg_fixture_wg_bytes' \
   'mobile_wg_fixture_forward_packets' \
   'mobile_wg_fixture_dns_evidence_snapshot' \
@@ -305,6 +338,9 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'FIPS underlay carrier(s) rebound' \
   'runtime_wireguard_state_is false true' \
   'runtime_wireguard_state_is false false' \
+  'cleanup_journal_owns_wireguard_and_dns' \
+  'sudo -n /bin/kill -KILL "$old_pid"' \
+  'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK' \
   'select-direct' \
   'direct_source_ip' \
   'endpoint_route_interface' \
@@ -411,6 +447,7 @@ set -euo pipefail
 source "$NVPN_TEST_MACOS_DEFINITIONS"
 mkdir -p "$RESULT_DIR"
 printf '0\n' >"$STATE_DIR/rebind-baseline"
+printf '0\n' >"$STATE_DIR/wireguard-rebind-baseline"
 printf '%s\n' "$$" >"$STATE_DIR/underlay.pid"
 process_start_signature "$$" >"$STATE_DIR/underlay.start"
 payload_loop() {
@@ -579,8 +616,8 @@ order = [
     "./scripts/release-gate-host-pair-loaded-latency.sh",
     "run_macos_daemon_idle_cpu_gate",
     "run_mobile_idle_cpu_gates",
-    "run_android_legacy_replacement_gate",
     "run_mobile_wireguard_exit_gates",
+    "run_android_legacy_replacement_gate",
     "run_mobile_underlay_change_gates",
     "run_mobile_join_e2e_gate",
 ]
@@ -633,25 +670,32 @@ for forbidden in 'cargo build' 'cargo check' 'cargo run' 'rustc '; do
     fail "Vader peer importer can compile: $forbidden"
   fi
 done
-if grep -Fq 'lock_args=()' "$LINUX_HOST"; then
-  fail "Linux exact-FIPS builds can silently rewrite the candidate dependency graph"
-fi
-grep -Fq 'update --offline -p fips-core -p fips-endpoint -p fips-identity' "$LINUX_HOST" \
-  || fail "Linux exact-FIPS builds do not update only the patched FIPS lock entries"
-grep -Fq "checkout --detach '\$FIPS_SOURCE_REVISION'" "$LINUX_HOST" \
-  || fail "Linux exact-FIPS build does not preserve the selected source revision"
+for forbidden in 'cargo ' 'rustc ' 'target-linux-check.log' 'GUEST_FIPS_REPO'; do
+  if grep -Fq "$forbidden" "$LINUX_HOST_ENTRY"; then
+    fail "Linux underlay VM wrapper can compile or validate source remotely: $forbidden"
+  fi
+done
 for evidence in \
   'host-peer-import.log' \
-  'target-linux-check.log' \
   'linux-binary-sha256.txt' \
   'desktop_underlay_import_host_peer' \
-  'wait "$target_check_pid"'
+  'GUEST_IMPORT_DIR="/tmp/nvpn-linux-underlay-release-$RUN_TOKEN"' \
+  'TARGET_RELEASE_SIZE' \
+  'tested-artifact-receipt.json' \
+  'tested-artifact.json' \
+  'builtOnHostMac=true' \
+  'builtOnRemoteVm=false' \
+  'targetImportDirectoryUnique=true' \
+  'cleanup_guest_import' \
+  'target-import-cleanup-audit.txt'
 do
-  grep -Fq "$evidence" "$LINUX_HOST" \
-    || fail "Linux host import and target check/copy contract is missing: $evidence"
+  grep -Fq "$evidence" "$LINUX_HOST_ENTRY" \
+    || fail "Linux host import-only target contract is missing: $evidence"
 done
-grep -Fq '[[ "$source_sha" == "$target_sha" && "$source_sha" == "$peer_sha" ]]' "$LINUX_HOST" \
-  || fail "Linux copied production binaries are not SHA-256 identical"
+grep -Fq '[[ "$source_sha" == "$target_sha" ]]' "$LINUX_HOST" \
+  && grep -Fq '[[ "$peer_sha" == "$DESKTOP_UNDERLAY_HOST_PEER_SHA256" ]]' "$LINUX_HOST" \
+  && grep -Fq -- '--arg binary_sha256 "$TARGET_RELEASE_SHA256"' "$LINUX_HOST" \
+  || fail "Linux target/fixture hashes are not independently bound"
 for evidence in \
   'peer_command namespace-setup' \
   'ip netns exec "$PEER_NETNS"' \
@@ -693,11 +737,60 @@ grep -Fq '.daemon.state.connected_peer_count >= 1' "$PEER" \
 grep -Fq 'jq -e . "$ARTIFACT_DIR/peer-ready.json"' "$LINUX_HOST" \
   || fail "Linux gate does not reject a contaminated peer status receipt"
 for receipt in \
-  peer-ready.json secondary-receipt.json primary-receipt.json direct-receipt.json
+  peer-ready.json secondary-receipt.json primary-receipt.json direct-receipt.json \
+  crash-repair-receipt.json
 do
   grep -Fq "jq -e . \"\$ARTIFACT_DIR/$receipt\"" "$LINUX_HOST" \
     || fail "Linux gate does not validate JSON receipt: $receipt"
 done
+python3 - "$LINUX_HOST_ENTRY" "$LINUX_GUEST" <<'PY'
+import pathlib
+import sys
+
+host = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+guest = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+host_order = (
+    host.index("run_dns_matrix_and_direct_restore\n"),
+    host.index("run_sigkill_restart_recovery\n"),
+    host.index("run_cleanup_fault_regression\n"),
+)
+if host_order != tuple(sorted(host_order)):
+    raise SystemExit(
+        "Linux SIGKILL recovery does not run after real DNS/Direct and before cleanup fault"
+    )
+crash = guest[
+    guest.index("crash_repair_gate() {"):
+    guest.index("\ncleanup_gate() {")
+]
+crash_order = (
+    crash.index('resolve_fixture'),
+    crash.index('kill -KILL "$CRASH_CONNECT_PID"'),
+    crash.index('[[ -s "$CLEANUP_JOURNAL" ]]', crash.index('kill -KILL')),
+    crash.index('"$BINARY" daemon \\\n    --paused'),
+    crash.index('[[ ! -e "$CLEANUP_JOURNAL" ]]'),
+    crash.index('assert_single_nvpn_process "$CRASH_RESTART_PID"'),
+)
+if crash_order != tuple(sorted(crash_order)):
+    raise SystemExit(
+        "Linux crash gate does not prove traffic, SIGKILL persistence, startup repair, and singleton in order"
+    )
+restart = crash.index('"$BINARY" daemon \\\n    --paused')
+final_network_predicate = crash.index("&& test_https", restart)
+final_repair_clock = crash.index(
+    'restart_repaired_at="$(monotonic_milliseconds)"',
+    final_network_predicate,
+)
+receipt_clock = crash.index(
+    '--argjson restart_repair_milliseconds "$restart_elapsed"',
+    final_repair_clock,
+)
+if not final_network_predicate < final_repair_clock < receipt_clock:
+    raise SystemExit(
+        "Linux crash-repair receipt stops its four-second clock before final DNS/HTTPS assertions"
+    )
+if "repair-network" in crash:
+    raise SystemExit("Linux crash gate can bypass startup recovery with explicit repair-network")
+PY
 grep -Fq 'version --verbose' "$LINUX_HOST" \
   || fail "Linux gate does not capture immutable target/peer version receipts"
 grep -Fq 'NVPN_UNDERLAY_EXPECTED_FIPS_REV' "$LINUX_GUEST" \

@@ -132,12 +132,13 @@ fn daemon_instance_lock_rejects_a_second_process_until_release() {
     let dir = std::env::temp_dir().join(format!("nvpn-daemon-lock-test-{nonce}"));
     fs::create_dir_all(&dir).expect("create temp dir");
     let config = dir.join("config.toml");
+    let other_config = dir.join("other").join("config.toml");
 
     let first = acquire_daemon_instance_lock(&config).expect("acquire first daemon lock");
-    let second = acquire_daemon_instance_lock(&config);
+    let second = acquire_daemon_instance_lock(&other_config);
     assert!(
         second.is_err(),
-        "a second daemon must not acquire the same config lock"
+        "a second daemon must not acquire the process-global lock through another config path"
     );
     drop(first);
     acquire_daemon_instance_lock(&config).expect("released daemon lock should be reusable");

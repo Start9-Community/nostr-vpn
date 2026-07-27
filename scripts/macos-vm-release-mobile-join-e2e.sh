@@ -75,9 +75,24 @@ HOST_MANUAL_DRIVER="$HOST_SUPPORT/drivers/desktop-manual-join-ax"
 HOST_SERVICE_DRIVER="$HOST_SUPPORT/drivers/macos-service-toggle-ax"
 HOST_ARCHIVE="$PRIVATE_DIR/macos-release-gate.zip"
 HOST_RECEIPT="$PRIVATE_DIR/artifact.json"
+PUBLICATION_DIR="$RESULT_DIR/macos/publication"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
+for value in \
+  "$RELEASE_JOIN_UI_WAIT_SECS" \
+  "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
+  "$RELEASE_JOIN_CAMERA_WAIT_SECS"
+do
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Join gate timeouts must be positive integers" >&2
+    exit 2
+  }
+done
+((RELEASE_JOIN_DELIVERY_WAIT_SECS <= 15)) || {
+  echo "Join delivery wait cannot exceed 15 seconds" >&2
+  exit 2
+}
 mkdir -p "$PRIVATE_DIR" "$RESULT_DIR/macos"
 chmod 700 "$PRIVATE_DIR"
 
@@ -154,6 +169,21 @@ finish_remote() {
     tail -n 120 "$log" >&2 || true
   fi
   return "$status"
+}
+
+assert_delivery_deadline() {
+  local submitted_ms="$1" completed_ms="$2" label="$3"
+  [[ "$submitted_ms" =~ ^[0-9]+$ ]] || {
+    echo "$label has no real approval timestamp" >&2
+    return 1
+  }
+  local elapsed=$((completed_ms - submitted_ms))
+  ((elapsed >= 0 && elapsed <= RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000)) || {
+    echo "$label took ${elapsed}ms after approval" >&2
+    return 1
+  }
+  printf '%s\t%s\n' "$label" "$elapsed" \
+    >>"$RESULT_DIR/macos/delivery-times.tsv"
 }
 
 prepare_host_artifact() {
@@ -281,6 +311,10 @@ case "$ARTIFACT_ACTION" in
       "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/"
     remote prepare | tee "$RESULT_DIR/macos/prepare.log"
     cp "$HOST_RECEIPT" "$RESULT_DIR/macos/artifact.json"
+    rm -rf "$PUBLICATION_DIR"
+    mkdir -p "$PUBLICATION_DIR"
+    ditto "$HOST_APP" "$PUBLICATION_DIR/Nostr VPN.app"
+    cp "$HOST_RECEIPT" "$PUBLICATION_DIR/artifact.json"
     ;;
 esac
 scp -q \
@@ -303,6 +337,7 @@ ANDROID_SERIAL_SELECTED="$(
     "$ANDROID_REQUESTED"
 )"
 ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
+rm -f "$RESULT_DIR/macos/delivery-times.tsv"
 
 # macOS admin -> physical Android joiner.
 release_join_reset_android_state
@@ -317,11 +352,21 @@ desktop_add_log="$RESULT_DIR/macos/desktop-add-android.log"
 remote admin-add "$RELEASE_JOIN_ANDROID_JOINER_ID" ReleaseGatePhone \
   >"$desktop_add_log" 2>&1 &
 remote_pid=$!
+wait_log_marker "$desktop_add_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
+desktop_submitted_ms="$(
+  marker_value "$desktop_add_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
+)"
 wait_log_marker "$desktop_add_log" \
   "NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=$RELEASE_JOIN_ANDROID_JOINER_ID"
 wait_log_marker "$desktop_add_log" NVPN_MACOS_RELEASE_APP_HOLDING=1
 release_join_android_wait_join_complete "$DESKTOP_ADMIN_ID" \
   || { tail -n 100 "$desktop_add_log" >&2; exit 1; }
+release_join_android_relaunch_and_wait_accepted "$DESKTOP_ADMIN_ID" \
+  || { echo "Android did not retain the macOS signed roster across relaunch" >&2; exit 1; }
+desktop_completed_ms="$(release_join_now_ms)"
+assert_delivery_deadline \
+  "$desktop_submitted_ms" "$desktop_completed_ms" \
+  "macOS-admin-to-Android-manual"
 kill "$remote_pid" >/dev/null 2>&1 || true
 wait "$remote_pid" >/dev/null 2>&1 || true
 remote_pid=""
@@ -341,28 +386,93 @@ wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID= 10
 DESKTOP_JOINER_ID="$(marker_value "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID)"
 release_join_valid_npub "$DESKTOP_JOINER_ID"
 wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
-release_join_android_manual_admin_add "$DESKTOP_JOINER_ID"
+android_admin_log="$RESULT_DIR/macos/android-admin-add-desktop.log"
+release_join_android_manual_admin_add "$DESKTOP_JOINER_ID" \
+  | tee "$android_admin_log"
+android_submitted_ms="$(
+  sed -n \
+    's/.*NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=//p' \
+    "$android_admin_log" \
+    | tail -n 1
+)"
 finish_remote "$desktop_join_log"
 remote verify "$RELEASE_JOIN_ANDROID_ADMIN_ID" \
   >"$RESULT_DIR/macos/desktop-joiner-verify.log"
+android_completed_ms="$(release_join_now_ms)"
+assert_delivery_deadline \
+  "$android_submitted_ms" "$android_completed_ms" \
+  "Android-admin-to-macOS-manual"
+release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_ID" \
+  || {
+    echo "Android admin did not retain the macOS joiner roster across relaunch" >&2
+    exit 1
+  }
 
-python3 - "$RESULT_DIR/macos/summary.json" <<'PY'
+python3 - \
+  "$RESULT_DIR/macos/summary.json" \
+  "$RESULT_DIR/macos/delivery-times.tsv" \
+  "$RESULT_DIR/macos/artifact.json" \
+  "$APP_GIT_SHA" \
+  "$APP_GIT_TREE" <<'PY'
+import hashlib
 import json
+import pathlib
 import sys
 
+timings = {}
+for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines():
+    label, elapsed = line.split("\t")
+    timings[label] = int(elapsed)
+expected_timings = {
+    "macOS-admin-to-Android-manual",
+    "Android-admin-to-macOS-manual",
+}
+if set(timings) != expected_timings or any(
+    elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
+):
+    raise SystemExit("macOS/Android join timing receipt is incomplete or slow")
+artifact_path = pathlib.Path(sys.argv[3])
+artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+app_sha, app_tree = sys.argv[4:]
+if (
+    artifact.get("receiptSchema") != 1
+    or artifact.get("appGitSha") != app_sha
+    or artifact.get("appGitTree") != app_tree
+    or artifact.get("companySigningVerified") is not True
+    or not artifact.get("appExecutableSha256")
+):
+    raise SystemExit("macOS join artifact receipt is not exact")
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
-            "artifact": "signed macOS Release app",
+            "schema": 1,
+            "platform": "macos",
+            "artifact": {
+                "type": "signed macOS Release app",
+                "appGitSha": app_sha,
+                "appGitTree": app_tree,
+                "artifactReceiptSha256": hashlib.sha256(
+                    artifact_path.read_bytes()
+                ).hexdigest(),
+                "appExecutableSha256": artifact["appExecutableSha256"],
+            },
             "builtOnHost": True,
             "builtOnTestVm": False,
             "remoteImportVerified": True,
             "publicUiOnly": True,
             "appLaunchArgumentsOrEnvironment": False,
             "privateAppStateRead": False,
+            "privateStateRead": False,
+            "fixtureInvoked": False,
+            "acceptedSelectorSemantics": "participant-state-not-pending",
             "desktopAdminAndroidJoiner": True,
             "androidAdminDesktopJoiner": True,
             "exactRosterOnBothSides": True,
+            "acceptedRosterRetainedAcrossRelaunch": True,
+            "desktopRelaunchDurability": True,
+            "pixelRelaunchDurability": True,
+            "deliveryDeadlineMilliseconds": 15_000,
+            "deliveryMilliseconds": timings,
         },
         handle,
         indent=2,

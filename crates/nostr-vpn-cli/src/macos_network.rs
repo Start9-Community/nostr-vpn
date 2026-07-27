@@ -336,13 +336,34 @@ pub(super) fn delete_macos_managed_route(
     gateway: Option<&str>,
     interface: Option<&str>,
 ) -> Result<()> {
-    if gateway.is_none()
-        && let Some(iface) = interface
-    {
-        return delete_macos_direct_route_variants(target, iface);
+    if gateway.is_none() && interface.is_none() {
+        return Err(anyhow!(
+            "refusing to delete macOS route {target} without recorded ownership"
+        ));
     }
 
-    delete_macos_route_spec(target, None)
+    let before = macos_ipv4_route_table().context("inspect managed route before cleanup")?;
+    if !macos_managed_route_present(&before, target, gateway, interface) {
+        return Ok(());
+    }
+
+    let deletion = if let Some(gateway) = gateway {
+        delete_macos_gateway_route(target, gateway, interface)
+    } else {
+        delete_macos_direct_route_on_interface(target, interface.expect("owner checked above"))
+    };
+    let after = macos_ipv4_route_table().context("verify managed route after cleanup")?;
+    if macos_managed_route_present(&after, target, gateway, interface) {
+        return match deletion {
+            Ok(()) => Err(anyhow!(
+                "managed macOS route {target} still matches its recorded owner after deletion"
+            )),
+            Err(error) => Err(error.context(format!(
+                "managed macOS route {target} still matches its recorded owner"
+            ))),
+        };
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -408,36 +429,87 @@ pub(crate) fn macos_tunnel_default_route_targets() -> &'static [&'static str] {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_split_default_route_interface(output: &str) -> Option<&str> {
-    let has_split_mask = output.lines().map(str::trim).any(|line| {
-        line.strip_prefix("mask:")
-            .is_some_and(|mask| mask.trim() == "128.0.0.0")
-    });
-    if !has_split_mask {
-        return None;
+fn macos_split_default_route_destination_matches(destination: &str, target: &str) -> bool {
+    match target {
+        "0.0.0.0/1" => matches!(destination, "0/1" | "0.0/1" | "0.0.0/1" | "0.0.0.0/1"),
+        "128.0.0.0/1" => matches!(
+            destination,
+            "128/1" | "128.0/1" | "128.0.0/1" | "128.0.0.0/1"
+        ),
+        _ => false,
     }
+}
 
-    output.lines().map(str::trim).find_map(|line| {
-        line.strip_prefix("interface:")
-            .map(str::trim)
-            .filter(|iface| !iface.is_empty())
+#[cfg(any(target_os = "macos", test))]
+fn macos_split_default_route_owners_from_netstat(output: &str, target: &str) -> Vec<String> {
+    let mut owners = output
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            if tokens.len() < 4 || !macos_split_default_route_destination_matches(tokens[0], target)
+            {
+                return None;
+            }
+            tokens.get(3).map(|iface| (*iface).to_string())
+        })
+        .collect::<Vec<_>>();
+    owners.sort();
+    owners.dedup();
+    owners
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_route_destination_matches(destination: &str, target: &str) -> bool {
+    if matches!(target, "0.0.0.0/1" | "128.0.0.0/1") {
+        return macos_split_default_route_destination_matches(destination, target);
+    }
+    if target.ends_with("/32") {
+        return destination == strip_cidr(target);
+    }
+    if target == "0.0.0.0/0" {
+        return destination == "default";
+    }
+    destination == target
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_managed_route_present(
+    output: &str,
+    target: &str,
+    gateway: Option<&str>,
+    interface: Option<&str>,
+) -> bool {
+    if gateway.is_none() && interface.is_none() {
+        return false;
+    }
+    output.lines().map(str::trim).any(|line| {
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        if tokens.len() < 4 || !macos_route_destination_matches(tokens[0], target) {
+            return false;
+        }
+        gateway.is_none_or(|expected| tokens[1] == expected)
+            && interface.is_none_or(|expected| tokens.get(3).copied() == Some(expected))
     })
 }
 
 #[cfg(target_os = "macos")]
-fn macos_split_default_route_owner(target: &str) -> Result<Option<String>> {
-    let probe = match target {
-        "0.0.0.0/1" => "1.0.0.1",
-        "128.0.0.0/1" => "129.0.0.1",
-        _ => return Err(anyhow!("unsupported macOS split-default target {target}")),
-    };
-    let output =
-        command_stdout_checked(ProcessCommand::new("route").arg("-n").arg("get").arg(probe))?;
-    Ok(macos_split_default_route_interface(&output).map(ToOwned::to_owned))
+fn macos_ipv4_route_table() -> Result<String> {
+    command_stdout_checked(
+        ProcessCommand::new("netstat")
+            .arg("-rn")
+            .arg("-f")
+            .arg("inet"),
+    )
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_gateway_route_args(action: &str, target: &str, gateway: &str) -> Vec<String> {
+fn macos_gateway_route_args(
+    action: &str,
+    target: &str,
+    gateway: &str,
+    ifscope: Option<&str>,
+) -> Vec<String> {
     let target_ip = strip_cidr(target);
     let is_host = target.ends_with("/32") || !target.contains('/');
 
@@ -452,6 +524,10 @@ fn macos_gateway_route_args(action: &str, target: &str, gateway: &str) -> Vec<St
         args.push(target.to_string());
     }
     args.push(gateway.to_string());
+    if let Some(ifscope) = ifscope {
+        args.push("-ifscope".to_string());
+        args.push(ifscope.to_string());
+    }
     args
 }
 
@@ -499,17 +575,32 @@ pub(super) fn apply_macos_default_route(
 #[cfg(target_os = "macos")]
 pub(super) fn delete_macos_default_route_for_interface(iface: &str) -> Result<()> {
     let mut failures = Vec::new();
+    let mut deletion_errors = std::collections::HashMap::new();
+    let before =
+        macos_ipv4_route_table().context("inspect exact macOS IPv4 routes before cleanup")?;
     for target in macos_tunnel_default_route_targets() {
-        match macos_split_default_route_owner(target) {
-            Ok(Some(owner)) if owner == iface => {}
-            Ok(Some(_)) | Ok(None) => continue,
-            Err(error) => {
-                failures.push(format!("inspect {target}: {error}"));
-                continue;
-            }
+        if !macos_split_default_route_owners_from_netstat(&before, target)
+            .iter()
+            .any(|owner| owner == iface)
+        {
+            continue;
         }
-        if let Err(error) = delete_macos_direct_route_variants(target, iface) {
-            failures.push(format!("remove {target} on {iface}: {error}"));
+        if let Err(error) = delete_macos_direct_route_on_interface(target, iface) {
+            deletion_errors.insert(*target, error);
+        }
+    }
+
+    let after = macos_ipv4_route_table().context("verify exact macOS IPv4 routes after cleanup")?;
+    for target in macos_tunnel_default_route_targets() {
+        if macos_split_default_route_owners_from_netstat(&after, target)
+            .iter()
+            .any(|owner| owner == iface)
+        {
+            if let Some(error) = deletion_errors.remove(*target) {
+                failures.push(format!("remove {target} on {iface}: {error:#}"));
+            } else {
+                failures.push(format!("{target} is still owned by {iface} after cleanup"));
+            }
         }
     }
 
@@ -540,17 +631,21 @@ pub(super) fn apply_macos_route_spec(
     gateway: Option<&str>,
     ifscope: Option<&str>,
 ) -> Result<()> {
+    if gateway.is_none() && ifscope.is_none() {
+        return Err(anyhow!("missing owner for macOS route {target}"));
+    }
+    let existing = macos_ipv4_route_table().context("inspect managed route before install")?;
+    if macos_managed_route_present(&existing, target, gateway, ifscope) {
+        return Ok(());
+    }
+
     let target_ip = strip_cidr(target);
     let is_host = target.ends_with("/32") || !target.contains('/');
 
     let mut add = ProcessCommand::new("route");
     if let Some(gateway) = gateway {
-        add.args(macos_gateway_route_args("add", target, gateway));
+        add.args(macos_gateway_route_args("add", target, gateway, ifscope));
     } else {
-        if let Some(iface) = ifscope {
-            let _ = delete_macos_route_spec(target, Some(iface));
-            let _ = delete_macos_route_spec(target, None);
-        }
         add.arg("-n").arg("add");
         if is_host {
             add.arg("-host").arg(target_ip);
@@ -563,39 +658,31 @@ pub(super) fn apply_macos_route_spec(
         add.arg("-interface").arg(iface);
     }
 
-    match run_checked(&mut add) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let mut change = ProcessCommand::new("route");
-            if let Some(gateway) = gateway {
-                change.args(macos_gateway_route_args("change", target, gateway));
-            } else {
-                change.arg("-n").arg("change");
-                if is_host {
-                    change.arg("-host").arg(target_ip);
-                } else if target == "0.0.0.0/0" {
-                    change.arg("default");
-                } else {
-                    change.arg("-net").arg(target);
-                }
-                let iface = ifscope.ok_or_else(|| anyhow!("missing interface for direct route"))?;
-                change.arg("-interface").arg(iface);
-            }
-            run_checked(&mut change)
-        }
+    run_checked(&mut add)?;
+    let installed = macos_ipv4_route_table().context("verify managed route after install")?;
+    if !macos_managed_route_present(&installed, target, gateway, ifscope) {
+        return Err(anyhow!(
+            "macOS route {target} did not match its requested owner after install"
+        ));
     }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn delete_macos_route_spec(target: &str, ifscope: Option<&str>) -> Result<()> {
+fn delete_macos_gateway_route(target: &str, gateway: &str, interface: Option<&str>) -> Result<()> {
+    let mut delete = ProcessCommand::new("route");
+    delete.args(macos_gateway_route_args(
+        "delete", target, gateway, interface,
+    ));
+    run_checked(&mut delete)
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_direct_route_on_interface(target: &str, iface: &str) -> Result<()> {
     let target_ip = strip_cidr(target);
     let is_host = target.ends_with("/32") || !target.contains('/');
-
     let mut delete = ProcessCommand::new("route");
     delete.arg("-n").arg("delete");
-    if let Some(ifscope) = ifscope {
-        delete.arg("-ifscope").arg(ifscope);
-    }
     if is_host {
         delete.arg("-host").arg(target_ip);
     } else if target == "0.0.0.0/0" {
@@ -603,27 +690,8 @@ fn delete_macos_route_spec(target: &str, ifscope: Option<&str>) -> Result<()> {
     } else {
         delete.arg("-net").arg(target);
     }
-
+    delete.arg("-interface").arg(iface);
     run_checked(&mut delete)
-}
-
-#[cfg(target_os = "macos")]
-fn delete_macos_direct_route_variants(target: &str, iface: &str) -> Result<()> {
-    let mut failures = Vec::new();
-
-    for attempt in [Some(iface), None] {
-        if let Err(error) = delete_macos_route_spec(target, attempt)
-            && !crate::daemon_runtime::macos_route_delete_error_is_absent(&error.to_string())
-        {
-            failures.push(error.to_string());
-        }
-    }
-
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow!(failures.join("; ")))
-    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -758,179 +826,5 @@ pub(super) fn cleanup_macos_pf_nat() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn macos_default_routes_from_netstat_finds_underlay_and_utun_routes() {
-        let routes = macos_default_routes_from_netstat(
-            "Routing tables\n\
-Internet:\n\
-Destination        Gateway            Flags               Netif Expire\n\
-default            192.168.64.1       UGScg                 en0\n\
-default            link#13            UCSIg               utun5\n\
-default            link#26            UCSIg           bridge100      !\n",
-        );
-
-        assert_eq!(
-            routes,
-            vec![
-                MacosRouteSpec {
-                    gateway: Some("192.168.64.1".to_string()),
-                    interface: "en0".to_string(),
-                },
-                MacosRouteSpec {
-                    gateway: None,
-                    interface: "utun5".to_string(),
-                },
-                MacosRouteSpec {
-                    gateway: None,
-                    interface: "bridge100".to_string(),
-                },
-            ]
-        );
-
-        assert_eq!(
-            macos_underlay_default_route_from_routes(&routes),
-            Some(MacosRouteSpec {
-                gateway: Some("192.168.64.1".to_string()),
-                interface: "en0".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn macos_underlay_selection_prefers_the_snapshot_interface_when_two_are_active() {
-        let candidates = vec![
-            MacosRouteSpec {
-                gateway: Some("192.168.178.1".to_string()),
-                interface: "en0".to_string(),
-            },
-            MacosRouteSpec {
-                gateway: Some("10.168.32.48".to_string()),
-                interface: "en1".to_string(),
-            },
-        ];
-
-        assert_eq!(
-            macos_underlay_route_from_candidates(&candidates, Some("en1")),
-            Some(candidates[1].clone()),
-            "the daemon snapshot, not interface enumeration order, owns the selected underlay"
-        );
-        assert_eq!(
-            macos_underlay_route_from_candidates(&candidates, Some("en0")),
-            Some(candidates[0].clone())
-        );
-    }
-
-    #[test]
-    fn macos_selected_default_route_uses_kernel_global_route_during_handoff() {
-        let route_get = "\
-   route to: default
-destination: default
-       mask: default
-    gateway: 10.168.32.48
-  interface: en1
-      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
-";
-
-        assert_eq!(
-            macos_selected_default_route_from_route_get(route_get),
-            Some(MacosRouteSpec {
-                gateway: Some("10.168.32.48".to_string()),
-                interface: "en1".to_string(),
-            }),
-            "the kernel-selected global default must win even while netstat still lists stale en0 first"
-        );
-    }
-
-    #[test]
-    fn macos_gateway_route_args_install_global_host_routes() {
-        assert_eq!(
-            macos_gateway_route_args("add", "65.109.48.91/32", "192.168.64.1"),
-            vec![
-                "-n".to_string(),
-                "add".to_string(),
-                "-host".to_string(),
-                "65.109.48.91".to_string(),
-                "192.168.64.1".to_string(),
-            ]
-        );
-        assert_eq!(
-            macos_gateway_route_args("change", "0.0.0.0/0", "192.168.64.1"),
-            vec![
-                "-n".to_string(),
-                "change".to_string(),
-                "default".to_string(),
-                "192.168.64.1".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn macos_ifconfig_has_ipv4_matches_exact_interface_address() {
-        let output = "utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n\
-\tinet 10.44.10.23 --> 10.44.10.23 netmask 0xffffffff\n\
-\tinet6 fe80::1%utun5 prefixlen 64 scopeid 0x8\n";
-
-        assert!(macos_ifconfig_has_ipv4(
-            output,
-            Ipv4Addr::new(10, 44, 10, 23)
-        ));
-        assert!(!macos_ifconfig_has_ipv4(
-            output,
-            Ipv4Addr::new(10, 44, 10, 24)
-        ));
-    }
-
-    #[test]
-    fn split_default_cleanup_only_claims_the_route_owner() {
-        let wireguard_route = "\
-   route to: 1.0.0.1\n\
-destination: 0.0.0.0\n\
-       mask: 128.0.0.0\n\
-    gateway: utun6\n\
-  interface: utun6\n";
-        assert_eq!(
-            macos_split_default_route_interface(wireguard_route),
-            Some("utun6")
-        );
-
-        let physical_default = "\
-   route to: 1.0.0.1\n\
-destination: default\n\
-       mask: default\n\
-    gateway: 192.168.64.1\n\
-  interface: en0\n";
-        assert_eq!(macos_split_default_route_interface(physical_default), None);
-    }
-
-    #[test]
-    fn direct_transition_repairs_only_a_missing_physical_default() {
-        let tunnel_only = vec![MacosRouteSpec {
-            gateway: None,
-            interface: "utun5".to_string(),
-        }];
-        assert!(macos_underlay_default_route_needs_restore(&tunnel_only));
-
-        let physical_and_tunnel = vec![
-            MacosRouteSpec {
-                gateway: Some("192.168.64.1".to_string()),
-                interface: "en0".to_string(),
-            },
-            MacosRouteSpec {
-                gateway: None,
-                interface: "utun5".to_string(),
-            },
-        ];
-        assert!(!macos_underlay_default_route_needs_restore(
-            &physical_and_tunnel
-        ));
-    }
-
-    #[test]
-    fn underlay_restore_adds_without_changing_a_foreign_default() {
-        assert_eq!(
-            macos_add_underlay_default_route_args("192.168.64.1"),
-            vec!["-n", "add", "default", "192.168.64.1"]
-        );
-    }
+    include!("macos_network_tests.rs");
 }

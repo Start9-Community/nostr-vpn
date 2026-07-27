@@ -74,10 +74,7 @@ Network Destination        Netmask          Gateway       Interface  Metric
         )
         .expect("eligible physical default route");
 
-        assert_eq!(
-            route,
-            windows_underlay(11, "192.168.1.1", "192.168.1.42")
-        );
+        assert_eq!(route, windows_underlay(11, "192.168.1.1", "192.168.1.42"));
     }
 
     #[test]
@@ -151,8 +148,7 @@ Idx     Met         MTU          State                Name
     #[test]
     fn parses_windows_wireguard_latest_handshake_output() {
         assert!(
-            !parse_windows_wireguard_latest_handshakes("abc\t0\n", "abc")
-                .expect("zero handshake")
+            !parse_windows_wireguard_latest_handshakes("abc\t0\n", "abc").expect("zero handshake")
         );
         assert!(
             parse_windows_wireguard_latest_handshakes("abc\t1778720702\n", "abc")
@@ -171,9 +167,7 @@ Idx     Met         MTU          State                Name
         assert_eq!(
             parse_windows_wireguard_peer_endpoint("abc\t198.51.100.42:51820\n", "abc")
                 .expect("concrete endpoint"),
-            "198.51.100.42:51820"
-                .parse::<SocketAddr>()
-                .expect("socket")
+            "198.51.100.42:51820".parse::<SocketAddr>().expect("socket")
         );
         assert!(
             parse_windows_wireguard_peer_endpoint(
@@ -195,6 +189,7 @@ Idx     Met         MTU          State                Name
     #[test]
     fn windows_daemon_uses_only_native_owned_tunnel_state() {
         let source = include_str!("windows_daemon.rs");
+        let config_source = include_str!("windows_native_config.rs");
         let cleanup_source = include_str!("windows_native_ownership.rs");
         assert!(
             !source.contains("apply_daemon_wg_upstream_userspace"),
@@ -213,7 +208,7 @@ Idx     Met         MTU          State                Name
             "owned service/config state needs a final synchronous cleanup retry"
         );
         assert!(
-            source.contains("impl Drop for OwnedWindowsNativeWireGuardConfig"),
+            config_source.contains("impl Drop for OwnedWindowsNativeWireGuardConfig"),
             "partial config creation needs an owned cleanup guard"
         );
         let startup = source
@@ -234,6 +229,19 @@ Idx     Met         MTU          State                Name
         assert!(
             collision_guard < install,
             "same-name service ownership must be rejected before native service creation"
+        );
+        let config_journal = startup
+            .find("fsync native WireGuard config cleanup intent before creation")
+            .expect("write-ahead config ownership");
+        let config_create = startup
+            .find("write_windows_native_wireguard_config")
+            .expect("native config creation");
+        let service_journal = startup
+            .find("fsync native WireGuard service cleanup intent before creation")
+            .expect("write-ahead service ownership");
+        assert!(
+            config_journal < config_create && service_journal < install,
+            "config and Automatic service ownership must be fsynced before their first side effect"
         );
         assert!(
             !startup.contains("/installtunnelservice"),
@@ -266,8 +274,38 @@ Idx     Met         MTU          State                Name
     }
 
     #[test]
+    fn windows_routes_are_journaled_and_adapter_bound_before_mutation() {
+        let source = include_str!("windows_default_routes.rs");
+        let runner = source
+            .split("impl WindowsRouteCommandRunner for SystemWindowsRouteCommandRunner")
+            .nth(1)
+            .expect("system Windows route runner");
+        let journaled_mutation = source
+            .split("fn run_journaled_route_mutation")
+            .nth(1)
+            .and_then(|tail| tail.split("impl WindowsRouteCommandRunner").next())
+            .expect("journaled route mutation implementation");
+        let intent = journaled_mutation
+            .find("persist_route_intent(route, true)")
+            .expect("write-ahead route ownership");
+        let mutation = journaled_mutation
+            .find("operation()")
+            .expect("route side effect callback");
+        assert!(
+            intent < mutation && runner.contains("run_journaled_route_mutation"),
+            "route cleanup intent must be fsynced before netsh mutates the table"
+        );
+        assert!(
+            runner.contains("resolve_windows_interface_identity(route.interface_index)")
+                && runner.contains("refusing to touch a possibly reused interface index"),
+            "route repair must bind ownership to a stable adapter identity and fail closed"
+        );
+    }
+
+    #[test]
     fn windows_native_wireguard_secret_is_acl_protected_before_write() {
-        let source = include_str!("windows_daemon.rs");
+        let source = include_str!("windows_native_config.rs");
+        let daemon_source = include_str!("windows_daemon.rs");
         let writer = source
             .split("fn write_windows_native_wireguard_config")
             .nth(1)
@@ -294,19 +332,93 @@ Idx     Met         MTU          State                Name
             .expect("secret write");
         let sync = writer.find("file.sync_all()").expect("durable secret sync");
         assert!(
-            directory_acl < create
+            directory_acl < owner_marker
+                && owner_marker < create
                 && create < no_reparse
                 && no_reparse < file_acl
-                && file_acl < owner_marker
-                && owner_marker < secret_write
+                && file_acl < secret_write
                 && secret_write < sync,
-            "directory/file ACLs and non-reparse ownership must be verified before secret bytes"
+            "durable ownership and directory/file safety must precede native WireGuard secrets"
+        );
+        let marker_writer = source
+            .split("fn write_windows_native_wireguard_owner_marker")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn write_windows_native_wireguard_config")
+                    .next()
+            })
+            .expect("native owner marker writer source");
+        assert!(
+            marker_writer.contains(".create_new(true)")
+                && marker_writer.contains(".custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)")
+                && marker_writer
+                    .contains("restrict_and_verify_windows_native_wireguard_acl(&marker_path")
+                && marker_writer.contains("marker.sync_all()")
+                && source.contains(".join(owner_token)"),
+            "the pre-config owner marker must be unique, ACL-protected, non-reparse, and durable"
         );
         assert!(
-            source.contains("-Description {}")
+            daemon_source.contains("-Description {}")
+                && include_str!("windows_native_ownership.rs")
+                    .contains("$service.PathName -cne $expectedPath")
                 && include_str!("windows_native_ownership.rs")
                     .contains("windows_native_wireguard_service_is_owned"),
-            "service cleanup must verify its durable owner token"
+            "service cleanup must verify its exact binary path and durable owner token"
+        );
+        let cleanup_source = include_str!("windows_native_ownership.rs");
+        let config_cleanup = cleanup_source
+            .split("fn cleanup_windows_native_wireguard_config")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub(crate) fn cleanup_windows_native_wireguard_state")
+                    .next()
+            })
+            .expect("native config cleanup source");
+        let ownership_audit = config_cleanup
+            .find("windows_native_wireguard_config_is_owned")
+            .expect("exact config ownership audit");
+        let config_delete = config_cleanup
+            .find("std::fs::remove_file(path)")
+            .expect("owned config deletion");
+        assert!(
+            ownership_audit < config_delete
+                && config_cleanup.contains("windows_native_wireguard_owner_marker_is_owned"),
+            "repair must verify the exact durable marker before deleting a native config"
+        );
+    }
+
+    #[test]
+    fn prior_release_native_wireguard_config_layout_remains_auditable() {
+        let root = std::path::Path::new("/ProgramData/nostr-vpn/wireguard");
+        let owner_token = "nvpn-owner-token";
+        let legacy = root.join("nvpn-wg-exit.conf");
+        assert_eq!(
+            classify_windows_native_wireguard_config_path(&legacy, root, owner_token)
+                .expect("legacy config layout"),
+            WindowsNativeWireGuardConfigLayout::Legacy
+        );
+        assert_eq!(
+            windows_native_wireguard_legacy_owner_marker_path(&legacy),
+            root.join("nvpn-wg-exit.conf:nvpn-owner"),
+            "the prior release stored its exact owner token in this NTFS ADS"
+        );
+
+        let current = root.join(owner_token).join("nvpn-wg-exit.conf");
+        assert_eq!(
+            classify_windows_native_wireguard_config_path(&current, root, owner_token)
+                .expect("current config layout"),
+            WindowsNativeWireGuardConfigLayout::OwnerDirectory(
+                root.join(owner_token)
+            )
+        );
+        assert!(
+            classify_windows_native_wireguard_config_path(
+                &root.join("foreign").join("nvpn-wg-exit.conf"),
+                root,
+                owner_token,
+            )
+            .is_err(),
+            "cleanup must not accept a config outside either exact owned layout"
         );
     }
 

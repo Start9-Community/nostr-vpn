@@ -144,6 +144,7 @@ verify_android_release_install() {
   local apksigner remote_path pulled apk_sha installed_sha cert_sha receipt
   local native_lib native_strings target_root metadata_receipt rebuild_marker
   local dep_file metadata_sha metadata_path_sha fips_path_sha
+  local bundle_receipt aab_path
   apksigner="$(android_release_apksigner)"
   [[ -x "$apksigner" ]] || {
     echo "Android Release black-box gate could not find apksigner" >&2
@@ -313,6 +314,14 @@ PY
       'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' \
       "$NVPN_FIPS_REPO_PATH"
   )"
+  bundle_receipt="$ROOT/android/app/build/outputs/bundle/release/physical-gate-artifact.json"
+  aab_path="$ROOT/android/app/build/outputs/bundle/release/app-release.aab"
+  [[ -f "$bundle_receipt" && ! -L "$bundle_receipt" \
+    && -f "$aab_path" && ! -L "$aab_path" ]] || {
+    rm -f "$native_lib"
+    echo "Android Release lacks the exact AAB-derived APK receipt" >&2
+    return 1
+  }
   rm -f "$native_lib"
   receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$RUNTIME_STATE_RESULT_DIR/mobile-android-release-artifact.json}"
   mkdir -p "$RUNTIME_STATE_RESULT_DIR" "$(dirname "$receipt")"
@@ -322,10 +331,12 @@ PY
     "$EXPECTED_FIPS_GIT_TREE" \
     "$EXPECTED_FIPS_VERSION" "$metadata_sha" \
     "$metadata_path_sha" "$fips_path_sha" \
-    "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" <<'PY'
+    "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" \
+    "$bundle_receipt" "$aab_path" <<'PY'
 import hashlib
 import json
 import os
+import pathlib
 import sys
 
 (
@@ -342,7 +353,34 @@ import sys
     metadata_path_sha,
     fips_path_sha,
     signer_sha,
+    bundle_receipt_path,
+    aab_path,
 ) = sys.argv[1:]
+bundle_receipt_file = pathlib.Path(bundle_receipt_path)
+aab_file = pathlib.Path(aab_path)
+bundle = json.loads(bundle_receipt_file.read_text(encoding="utf-8"))
+actual_aab_sha = hashlib.sha256(aab_file.read_bytes()).hexdigest()
+actual_aab_path_sha = hashlib.sha256(
+    os.path.realpath(aab_path).encode()
+).hexdigest()
+actual_apk_path_sha = hashlib.sha256(
+    os.path.realpath(apk_path).encode()
+).hexdigest()
+if (
+    bundle.get("schema") != 1
+    or bundle.get("relationship")
+    != "universal-apk-derived-from-exact-aab"
+    or bundle.get("appGitSha") != app_sha
+    or bundle.get("appGitTree") != app_tree
+    or bundle.get("aabSha256") != actual_aab_sha
+    or bundle.get("aabPathSha256") != actual_aab_path_sha
+    or bundle.get("apkSha256") != apk_sha
+    or bundle.get("apkPathSha256") != actual_apk_path_sha
+    or bundle.get("bundletoolVersion") != "1.18.3"
+    or bundle.get("bundletoolSha256")
+    != "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+):
+    raise SystemExit("Android APK is not derived from the exact Play AAB")
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
         {
@@ -353,6 +391,13 @@ with open(path, "w", encoding="utf-8") as handle:
             ).hexdigest(),
             "apkSha256": apk_sha,
             "installedApkSha256": apk_sha,
+            "aabSha256": actual_aab_sha,
+            "apkDerivedFromAab": True,
+            "bundleReceiptSha256": hashlib.sha256(
+                bundle_receipt_file.read_bytes()
+            ).hexdigest(),
+            "bundletoolVersion": bundle["bundletoolVersion"],
+            "bundletoolSha256": bundle["bundletoolSha256"],
             "companySigningVerified": True,
             "signerCertificateSha256": signer_sha,
             "appGitSha": app_sha,
@@ -762,6 +807,8 @@ run_android_release_active_vpn_lifecycle_gate() {
       return 1
   }
   local expected_pid cycle
+  local lifecycle_ledger="$RUNTIME_STATE_RESULT_DIR/mobile-android-release-lifecycle-$$.tsv"
+  : >"$lifecycle_ledger"
   expected_pid="$(android_app_pid)"
   android_release_assert_native_tunnel_unchanged lifecycle-start || return 1
   for cycle in $(seq 1 "$ANDROID_LIFECYCLE_CYCLES"); do
@@ -779,6 +826,9 @@ run_android_release_active_vpn_lifecycle_gate() {
       "release-foreground-cycle-$cycle" || return 1
     android_release_assert_native_tunnel_unchanged \
       "foreground cycle $cycle" || return 1
+    printf '%s\t%s\t%s\n' \
+      "$cycle" "$expected_pid" "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
+      >>"$lifecycle_ledger"
   done
   echo "Android Release active VPN survived $ANDROID_LIFECYCLE_CYCLES real background/foreground cycles"
 }
@@ -846,6 +896,8 @@ android_release_rapid_cancel_once() {
 run_android_release_rapid_start_stop_gate() {
   truthy "$ANDROID_RAPID_START_STOP_GATE" || return 0
   local delay_ms
+  local rapid_ledger="$RUNTIME_STATE_RESULT_DIR/mobile-android-release-rapid-start-stop-$$.tsv"
+  : >"$rapid_ledger"
   # The ordinary Release cycle runs first, so Android's real VPN permission
   # dialog has already been accepted. These taps therefore measure production
   # start/cancel behavior rather than an eight-second permission-dialog wait.
@@ -855,6 +907,9 @@ run_android_release_rapid_start_stop_gate() {
   fi
   for delay_ms in 0 10 30 80 160 320 640 1000; do
     android_release_rapid_cancel_once "$delay_ms" || return 1
+    printf '%s\t%s\t%s\n' \
+      "$delay_ms" "$(android_app_pid)" "$(android_vpn_native_start_count)" \
+      >>"$rapid_ledger"
   done
   run_android_release_direct_network_probe rapid-cancel-stable-direct 0 || return 1
 

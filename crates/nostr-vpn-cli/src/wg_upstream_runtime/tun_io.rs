@@ -14,6 +14,50 @@ pub async fn start_wg_runtime_with_posix_tun(
     WgUpstreamRuntime::start_with_io(config, Some((in_rx, out_tx)), Some((reader, writer))).await
 }
 
+/// macOS daemon path: bind encrypted WG UDP to the chosen physical
+/// interface before the runtime sends its first handshake.
+#[cfg(target_os = "macos")]
+pub async fn start_wg_runtime_with_posix_tun_on_interface(
+    config: &WireGuardExitConfig,
+    tun: Arc<TunSocket>,
+    interface_index: u32,
+) -> Result<WgUpstreamRuntime> {
+    let (in_tx, in_rx) = mpsc::channel::<Vec<Vec<u8>>>(WG_TUN_BATCH_CHANNEL_CAPACITY);
+    let (out_tx, out_rx) = mpsc::channel::<Vec<Vec<u8>>>(WG_TUN_BATCH_CHANNEL_CAPACITY);
+    let reader = spawn_posix_tun_reader(tun.clone(), in_tx);
+    let writer = spawn_posix_tun_writer(tun, out_rx);
+    WgUpstreamRuntime::start_with_io_on_interface(
+        config,
+        Some((in_rx, out_tx)),
+        Some((reader, writer)),
+        interface_index,
+    )
+    .await
+}
+
+/// macOS restart path using the exact endpoint resolved before split-default
+/// routing made system DNS dependent on the active WireGuard tunnel.
+#[cfg(target_os = "macos")]
+pub async fn start_wg_runtime_with_posix_tun_on_interface_at_upstream(
+    config: &WireGuardExitConfig,
+    tun: Arc<TunSocket>,
+    interface_index: u32,
+    upstream: std::net::SocketAddr,
+) -> Result<WgUpstreamRuntime> {
+    let (in_tx, in_rx) = mpsc::channel::<Vec<Vec<u8>>>(WG_TUN_BATCH_CHANNEL_CAPACITY);
+    let (out_tx, out_rx) = mpsc::channel::<Vec<Vec<u8>>>(WG_TUN_BATCH_CHANNEL_CAPACITY);
+    let reader = spawn_posix_tun_reader(tun.clone(), in_tx);
+    let writer = spawn_posix_tun_writer(tun, out_rx);
+    WgUpstreamRuntime::start_with_io_on_interface_at_upstream(
+        config,
+        Some((in_rx, out_tx)),
+        Some((reader, writer)),
+        interface_index,
+        upstream,
+    )
+    .await
+}
+
 /// Same idea for Windows WinTun.
 #[cfg(target_os = "windows")]
 pub async fn start_wg_runtime_with_wintun(

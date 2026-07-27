@@ -189,32 +189,33 @@ pub(super) fn linux_wireguard_exit_endpoint_specs(
     Ok(routes)
 }
 
-pub(super) fn ensure_linux_wireguard_link(
+pub(super) fn linux_wireguard_link_exists(
     runner: &mut impl LinuxCommandRunner,
     iface: &str,
 ) -> Result<bool> {
     let args = strings(&["link", "show", "dev", iface]);
     let output = runner.output("ip", &args)?;
     if output.success {
-        return Ok(false);
+        return Ok(true);
     }
     if !linux_link_missing_error(&output) {
         return Err(command_failed("ip", &args, &output));
     }
-    let add = run_checked(
+    Ok(false)
+}
+
+pub(super) fn create_linux_wireguard_link(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+) -> Result<()> {
+    run_checked(
         runner,
         "ip",
         &strings(&["link", "add", "dev", iface, "type", "wireguard"]),
-    );
-    if let Err(error) = add {
-        // Only an acknowledged successful RTM_NEWLINK proves ownership. If
-        // the add fails and a same-name interface appears, a concurrent actor
-        // may have won the race; deleting it would destroy unowned state.
-        return Err(error).context(format!(
-            "WireGuard interface {iface} creation was not acknowledged; ownership is uncertain"
-        ));
-    }
-    Ok(true)
+    )
+    .with_context(|| {
+        format!("WireGuard interface {iface} creation was not acknowledged; ownership is uncertain")
+    })
 }
 
 fn linux_link_missing_error(output: &LinuxCommandOutput) -> bool {

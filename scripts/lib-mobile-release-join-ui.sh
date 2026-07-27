@@ -196,12 +196,17 @@ release_join_android_assert_pending_qr() {
 }
 
 release_join_android_wait_join_complete() {
-  local admin="$1" deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
+  release_join_android_wait_accepted_participant "$1"
+}
+
+release_join_android_wait_accepted_participant() {
+  local participant="$1" deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_launch >/dev/null 2>&1 || true
     if release_join_android_query resource navigation-devices center >/dev/null 2>&1; then
       release_join_android_tap resource navigation-devices >/dev/null
-      if release_join_android_query resource "roster-participant-$admin" center \
+      if release_join_android_query \
+          resource "roster-participant-accepted-$participant" center \
           >/dev/null 2>&1; then
         return 0
       fi
@@ -209,6 +214,14 @@ release_join_android_wait_join_complete() {
     sleep 0.25
   done
   return 1
+}
+
+release_join_android_relaunch_and_wait_accepted() {
+  local participant="$1"
+  local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+  "${ADB[@]}" shell am force-stop "$package" >/dev/null
+  release_join_android_launch >/dev/null
+  release_join_android_wait_accepted_participant "$participant"
 }
 
 release_join_android_wait_qr_join_complete() {
@@ -235,8 +248,8 @@ release_join_android_wait_qr_join_complete() {
       return 1
     fi
     if ! release_join_android_query_dumped \
-        resource "roster-participant-$admin" center >/dev/null 2>&1; then
-      echo "Android join QR disappeared before the exact admin roster was visible" >&2
+        resource "roster-participant-accepted-$admin" center >/dev/null 2>&1; then
+      echo "Android join QR disappeared before the exact accepted admin roster was visible" >&2
       return 1
     fi
     return 0
@@ -260,7 +273,8 @@ release_join_android_scan_and_accept() {
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
-    if release_join_android_query resource "roster-participant-$joiner" center \
+    if release_join_android_query \
+        resource "roster-participant-accepted-$joiner" center \
         >/dev/null 2>&1; then
       after="$(release_join_android_query resource-prefix roster-participant- count)"
       ((after >= before + 1)) || return 1
@@ -317,11 +331,13 @@ release_join_android_manual_admin_add() {
   release_join_android_scroll_to resource manual-admin-joiner-id
   release_join_android_enter manual-admin-joiner-id "$joiner"
   release_join_android_scroll_to resource manual-admin-submit
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
   release_join_android_tap resource manual-admin-submit
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
-    if release_join_android_query resource "roster-participant-$joiner" center \
+    if release_join_android_query \
+        resource "roster-participant-accepted-$joiner" center \
         >/dev/null 2>&1; then
       after="$(release_join_android_query resource-prefix roster-participant- count)"
       ((after >= before + 1)) || return 1

@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+# Shared immutable host-bundle import lifecycle for native Ubuntu UI gates.
+
+NVPN_UBUNTU_IMPORTED_DIR=""
+NVPN_UBUNTU_IMPORTED_APP=""
+NVPN_UBUNTU_IMPORTED_CLI=""
+NVPN_UBUNTU_IMPORTED_FIXTURE=""
+NVPN_UBUNTU_IMPORTED_MUSL_CLI=""
+NVPN_UBUNTU_IMPORTED_MUSL_ARCHIVE=""
+NVPN_UBUNTU_IMPORTED_DEB=""
+NVPN_UBUNTU_IMPORTED_RECEIPT=""
+NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT=""
+NVPN_UBUNTU_IMPORTED=0
+
+ubuntu_vm_import_error() {
+  echo "Ubuntu VM imported release failed: $*" >&2
+}
+
+ubuntu_vm_import_ssh_command() {
+  NVPN_UBUNTU_IMPORT_SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
+  if [[ -n "${NVPN_UBUNTU_SSH_PROXY_COMMAND:-}" ]]; then
+    NVPN_UBUNTU_IMPORT_SSH+=(-o "ProxyCommand=$NVPN_UBUNTU_SSH_PROXY_COMMAND")
+  elif [[ -n "${NVPN_UBUNTU_SSH_JUMP:-}" ]]; then
+    NVPN_UBUNTU_IMPORT_SSH+=(-J "$NVPN_UBUNTU_SSH_JUMP")
+  fi
+  NVPN_UBUNTU_IMPORT_SSH+=("$SSH_HOST")
+}
+
+ubuntu_vm_import_scp_command() {
+  NVPN_UBUNTU_IMPORT_SCP=(scp -q -o BatchMode=yes -o ConnectTimeout=10)
+  if [[ -n "${NVPN_UBUNTU_SSH_PROXY_COMMAND:-}" ]]; then
+    NVPN_UBUNTU_IMPORT_SCP+=(-o "ProxyCommand=$NVPN_UBUNTU_SSH_PROXY_COMMAND")
+  elif [[ -n "${NVPN_UBUNTU_SSH_JUMP:-}" ]]; then
+    NVPN_UBUNTU_IMPORT_SCP+=(-J "$NVPN_UBUNTU_SSH_JUMP")
+  fi
+}
+
+ubuntu_vm_import_release_bundle() {
+  [[ -n "${ROOT:-}" && -n "${SSH_HOST:-}" && -n "${GUEST_REPO:-}" ]] || {
+    ubuntu_vm_import_error "ROOT, SSH_HOST, and GUEST_REPO are required"
+    return 1
+  }
+  [[ "$(uname -s)" == "Darwin" ]] || {
+    ubuntu_vm_import_error "bundle import must be controlled by the host Mac"
+    return 1
+  }
+  local bundle receipt app_sha app_tree app_version
+  local fips_sha fips_tree fips_version target evidence_dir remote_dir
+  local root_lock_sha linux_lock_sha
+  local app_hash app_size cli_hash cli_size fixture_hash fixture_size
+  local musl_hash musl_size archive_hash archive_size deb_hash deb_size
+
+  bundle="${NVPN_HOST_LINUX_VM_BUNDLE_DIR:-}"
+  if [[ -z "$bundle" ]]; then
+    bundle="$("$ROOT/scripts/prepare-host-linux-vm-bundle.sh")" || {
+      ubuntu_vm_import_error "host bundle preparation failed"
+      return 1
+    }
+  fi
+  [[ "$bundle" == /* && -d "$bundle" && ! -L "$bundle" ]] || {
+    ubuntu_vm_import_error "host bundle path is not an absolute real directory"
+    return 1
+  }
+  receipt="$bundle/receipt.json"
+  [[ -f "$receipt" && ! -L "$receipt" ]] || {
+    ubuntu_vm_import_error "host bundle receipt is missing"
+    return 1
+  }
+  app_sha="$(jq -er '.appGitSha' "$receipt")" || return 1
+  app_tree="$(jq -er '.appGitTree' "$receipt")" || return 1
+  app_version="$(jq -er '.appVersion' "$receipt")" || return 1
+  fips_sha="$(jq -er '.fipsGitSha' "$receipt")" || return 1
+  fips_tree="$(jq -er '.fipsGitTree' "$receipt")" || return 1
+  fips_version="$(jq -er '.fipsVersion' "$receipt")" || return 1
+  root_lock_sha="$(shasum -a 256 "$ROOT/Cargo.lock" | awk '{ print $1 }')" \
+    || return 1
+  linux_lock_sha="$(
+    shasum -a 256 "$ROOT/linux/Cargo.lock" | awk '{ print $1 }'
+  )" || return 1
+  target="$(jq -er '.target' "$receipt")" || return 1
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/release_common.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  load_release_env "$ROOT"
+  release_join_require_clean_fips || {
+    ubuntu_vm_import_error "exact FIPS validation failed before import"
+    return 1
+  }
+  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$app_sha" \
+    && "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" == "$app_tree" \
+    && -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
+    ubuntu_vm_import_error "host bundle differs from the clean app checkout"
+    return 1
+  }
+  [[ "$fips_sha" == "$RELEASE_JOIN_FIPS_SHA" \
+    && "$fips_tree" == "$RELEASE_JOIN_FIPS_TREE" \
+    && "$fips_version" == "$RELEASE_JOIN_FIPS_VERSION" ]] || {
+    ubuntu_vm_import_error "host bundle differs from the exact FIPS checkout"
+    return 1
+  }
+  python3 "$ROOT/scripts/verify-host-linux-vm-bundle.py" \
+    "$bundle" "$receipt" \
+    "$app_sha" "$app_tree" "$app_version" \
+    "$fips_sha" "$fips_tree" "$fips_version" \
+    "$root_lock_sha" "$linux_lock_sha" "$target" \
+    >/dev/null || {
+      ubuntu_vm_import_error "host bundle verification failed"
+      return 1
+    }
+
+  app_hash="$(jq -er '.artifacts.app.sha256' "$receipt")"
+  app_size="$(jq -er '.artifacts.app.size' "$receipt")"
+  cli_hash="$(jq -er '.artifacts.cli.sha256' "$receipt")"
+  cli_size="$(jq -er '.artifacts.cli.size' "$receipt")"
+  fixture_hash="$(jq -er '.artifacts.manualJoinFixture.sha256' "$receipt")"
+  fixture_size="$(jq -er '.artifacts.manualJoinFixture.size' "$receipt")"
+  musl_hash="$(jq -er '.artifacts.muslCli.sha256' "$receipt")"
+  musl_size="$(jq -er '.artifacts.muslCli.size' "$receipt")"
+  archive_hash="$(jq -er '.artifacts.muslCliArchive.sha256' "$receipt")"
+  archive_size="$(jq -er '.artifacts.muslCliArchive.size' "$receipt")"
+  deb_hash="$(jq -er '.artifacts.debianPackage.sha256' "$receipt")"
+  deb_size="$(jq -er '.artifacts.debianPackage.size' "$receipt")"
+
+  ubuntu_vm_import_ssh_command
+  remote_dir="$(
+    "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
+      mktemp -d /tmp/nvpn-linux-vm-release.XXXXXX
+  )" || {
+    ubuntu_vm_import_error "could not create the unique VM import directory"
+    return 1
+  }
+  case "$remote_dir" in
+    /tmp/nvpn-linux-vm-release.*) ;;
+    *)
+      ubuntu_vm_import_error "VM returned an unsafe import directory"
+      return 1
+      ;;
+  esac
+  NVPN_UBUNTU_IMPORTED_DIR="$remote_dir"
+
+  ubuntu_vm_import_scp_command
+  "${NVPN_UBUNTU_IMPORT_SCP[@]}" \
+    "$bundle/desktop_manual_join_e2e_fixture" \
+    "$SSH_HOST:$remote_dir/desktop_manual_join_e2e_fixture.copy" || return 1
+  "${NVPN_UBUNTU_IMPORT_SCP[@]}" \
+    "$bundle/nvpn-x86_64-unknown-linux-musl" \
+    "$SSH_HOST:$remote_dir/nvpn-x86_64-unknown-linux-musl.copy" || return 1
+  "${NVPN_UBUNTU_IMPORT_SCP[@]}" \
+    "$bundle/nvpn-x86_64-unknown-linux-musl.tar.gz" \
+    "$SSH_HOST:$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz.copy" \
+    || return 1
+  "${NVPN_UBUNTU_IMPORT_SCP[@]}" \
+    "$bundle/nostr-vpn.deb" \
+    "$SSH_HOST:$remote_dir/nostr-vpn.deb.copy" || return 1
+  "${NVPN_UBUNTU_IMPORT_SCP[@]}" \
+    "$receipt" \
+    "$SSH_HOST:$remote_dir/receipt.json.copy" || return 1
+
+  if ! "${NVPN_UBUNTU_IMPORT_SSH[@]}" bash -s -- \
+    "$remote_dir" "$GUEST_REPO" \
+    "$app_sha" "$app_tree" "$app_version" \
+    "$fips_sha" "$fips_tree" "$fips_version" \
+    "$root_lock_sha" "$linux_lock_sha" "$target" \
+    "$app_hash" "$app_size" \
+    "$cli_hash" "$cli_size" \
+    "$fixture_hash" "$fixture_size" \
+    "$musl_hash" "$musl_size" \
+    "$archive_hash" "$archive_size" \
+    "$deb_hash" "$deb_size" <<'GUEST'
+set -euo pipefail
+remote_dir="$1"
+guest_repo="$2"
+app_sha="$3"
+app_tree="$4"
+app_version="$5"
+fips_sha="$6"
+fips_tree="$7"
+fips_version="$8"
+root_lock_sha="$9"
+linux_lock_sha="${10}"
+target="${11}"
+app_hash="${12}"
+app_size="${13}"
+cli_hash="${14}"
+cli_size="${15}"
+fixture_hash="${16}"
+fixture_size="${17}"
+musl_hash="${18}"
+musl_size="${19}"
+archive_hash="${20}"
+archive_size="${21}"
+deb_hash="${22}"
+deb_size="${23}"
+case "$remote_dir" in
+  /tmp/nvpn-linux-vm-release.*) ;;
+  *) exit 2 ;;
+esac
+[[ -d "$remote_dir" && -O "$remote_dir" && ! -L "$remote_dir" ]]
+chmod 0700 "$remote_dir"
+[[ "$(git -C "$guest_repo" rev-parse HEAD)" == "$app_sha" ]]
+[[ "$(git -C "$guest_repo" rev-parse 'HEAD^{tree}')" == "$app_tree" ]]
+[[ -z "$(git -C "$guest_repo" status --porcelain --untracked-files=all)" ]]
+[[ "$(sha256sum "$guest_repo/Cargo.lock" | awk '{ print $1 }')" == "$root_lock_sha" ]]
+[[ "$(sha256sum "$guest_repo/linux/Cargo.lock" | awk '{ print $1 }')" == "$linux_lock_sha" ]]
+for artifact in \
+  desktop_manual_join_e2e_fixture \
+  nvpn-x86_64-unknown-linux-musl
+do
+  [[ -f "$remote_dir/$artifact.copy" && ! -L "$remote_dir/$artifact.copy" ]]
+  chmod 0500 "$remote_dir/$artifact.copy"
+  file "$remote_dir/$artifact.copy" | grep -Eq 'ELF 64-bit.*x86-64'
+done
+for artifact in nostr-vpn.deb nvpn-x86_64-unknown-linux-musl.tar.gz; do
+  [[ -f "$remote_dir/$artifact.copy" && ! -L "$remote_dir/$artifact.copy" ]]
+  chmod 0400 "$remote_dir/$artifact.copy"
+done
+chmod 0400 "$remote_dir/receipt.json.copy"
+[[ "$(sha256sum "$remote_dir/desktop_manual_join_e2e_fixture.copy" | awk '{ print $1 }')" == "$fixture_hash" ]]
+[[ "$(stat -c '%s' "$remote_dir/desktop_manual_join_e2e_fixture.copy")" == "$fixture_size" ]]
+[[ "$(sha256sum "$remote_dir/nvpn-x86_64-unknown-linux-musl.copy" | awk '{ print $1 }')" == "$musl_hash" ]]
+[[ "$(stat -c '%s' "$remote_dir/nvpn-x86_64-unknown-linux-musl.copy")" == "$musl_size" ]]
+[[ "$(sha256sum "$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz.copy" | awk '{ print $1 }')" == "$archive_hash" ]]
+[[ "$(stat -c '%s' "$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz.copy")" == "$archive_size" ]]
+[[ "$(sha256sum "$remote_dir/nostr-vpn.deb.copy" | awk '{ print $1 }')" == "$deb_hash" ]]
+[[ "$(stat -c '%s' "$remote_dir/nostr-vpn.deb.copy")" == "$deb_size" ]]
+jq -e \
+  --arg app_sha "$app_sha" \
+  --arg app_tree "$app_tree" \
+  --arg app_version "$app_version" \
+  --arg fips_sha "$fips_sha" \
+  --arg fips_tree "$fips_tree" \
+  --arg fips_version "$fips_version" \
+  --arg root_lock_sha "$root_lock_sha" \
+  --arg linux_lock_sha "$linux_lock_sha" \
+  --arg target "$target" \
+  --arg app_hash "$app_hash" \
+  --argjson app_size "$app_size" \
+  --arg cli_hash "$cli_hash" \
+  --argjson cli_size "$cli_size" \
+  --arg fixture_hash "$fixture_hash" \
+  --argjson fixture_size "$fixture_size" \
+  --arg musl_hash "$musl_hash" \
+  --argjson musl_size "$musl_size" \
+  --arg archive_hash "$archive_hash" \
+  --argjson archive_size "$archive_size" \
+  --arg deb_hash "$deb_hash" \
+  --argjson deb_size "$deb_size" '
+    .schema == 1
+    and .builtOnHostMac == true
+    and .builtOnRemoteVm == false
+    and .appGitSha == $app_sha
+    and .appGitTree == $app_tree
+    and .appVersion == $app_version
+    and .fipsGitSha == $fips_sha
+    and .fipsGitTree == $fips_tree
+    and .fipsVersion == $fips_version
+    and .rootCargoLockSha256 == $root_lock_sha
+    and .linuxCargoLockSha256 == $linux_lock_sha
+    and .target == $target
+    and .dockerPlatform == "linux/amd64"
+    and .containerBase == "ubuntu:24.04"
+    and .artifacts.app.sha256 == $app_hash
+    and .artifacts.app.size == $app_size
+    and .artifacts.cli.sha256 == $cli_hash
+    and .artifacts.cli.size == $cli_size
+    and .artifacts.manualJoinFixture.sha256 == $fixture_hash
+    and .artifacts.manualJoinFixture.size == $fixture_size
+    and .artifacts.muslCli.sha256 == $musl_hash
+    and .artifacts.muslCli.size == $musl_size
+    and .artifacts.muslCliArchive.sha256 == $archive_hash
+    and .artifacts.muslCliArchive.size == $archive_size
+    and .artifacts.debianPackage.sha256 == $deb_hash
+    and .artifacts.debianPackage.size == $deb_size
+  ' "$remote_dir/receipt.json.copy" >/dev/null
+sed -n '1p' "$remote_dir/nostr-vpn.deb.copy" >/dev/null
+[[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Package)" == "nostr-vpn" ]]
+[[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Version)" == "$app_version" \
+  || "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Version)" == "$app_version-1" ]]
+[[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Architecture)" == "amd64" ]]
+package_root="$remote_dir/package-root"
+mkdir -m 0700 "$package_root"
+dpkg-deb -x "$remote_dir/nostr-vpn.deb.copy" "$package_root"
+[[ "$(sha256sum "$package_root/usr/bin/nostr-vpn" | awk '{ print $1 }')" == "$app_hash" ]]
+[[ "$(sha256sum "$package_root/usr/bin/nvpn" | awk '{ print $1 }')" == "$cli_hash" ]]
+[[ "$(stat -c '%a' "$package_root/usr/bin/nostr-vpn")" == "755" ]]
+[[ "$(stat -c '%a' "$package_root/usr/bin/nvpn")" == "755" ]]
+[[ -f "$package_root/usr/share/applications/nostr-vpn.desktop" ]]
+find "$package_root/usr/share/icons/hicolor" -type f \
+  -name nostr-vpn.png -print -quit | grep -q .
+
+archive_root="$remote_dir/archive-root"
+mkdir -m 0700 "$archive_root"
+tar -xzf "$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz.copy" \
+  -C "$archive_root"
+[[ "$(find "$archive_root" -type f | wc -l)" == "3" ]]
+[[ "$(sha256sum "$archive_root/nvpn/nvpn" | awk '{ print $1 }')" == "$musl_hash" ]]
+chmod 0500 "$archive_root/nvpn/nvpn"
+[[ "$("$archive_root/nvpn/nvpn" --version)" == "nvpn $app_version" ]]
+"$archive_root/nvpn/nvpn" version --verbose \
+  | grep -Fq "(rev ${fips_sha:0:10})"
+rm -rf "$archive_root"
+
+pre_package_status="$(
+  dpkg-query -W -f='${db:Status-Status}' nostr-vpn 2>/dev/null || true
+)"
+if [[ -n "$pre_package_status" ]]; then
+  echo "The isolated Ubuntu gate has existing nostr-vpn package state: $pre_package_status" >&2
+  exit 2
+fi
+
+# Preserve unmanaged/orphaned files at every path the package will own. The
+# release VM has historically accumulated old package list files and binaries;
+# an exact-package gate must not silently erase that pre-gate state.
+preexisting_root="$remote_dir/preexisting-root"
+preexisting_info="$remote_dir/preexisting-dpkg-info"
+preexisting_paths="$remote_dir/preexisting-paths.txt"
+preexisting_manifest="$remote_dir/preexisting-manifest.txt"
+mkdir -m 0700 "$preexisting_root" "$preexisting_info"
+: >"$preexisting_paths"
+while IFS= read -r -d '' candidate; do
+  relative="${candidate#"$package_root"}"
+  [[ "$relative" == /* && "$relative" != "/" ]] || exit 2
+  if [[ -e "$relative" || -L "$relative" ]]; then
+    printf '%s\n' "$relative" >>"$preexisting_paths"
+    sudo -n cp -a --parents -- "$relative" "$preexisting_root"
+  fi
+done < <(find "$package_root" -mindepth 1 \( -type f -o -type l \) -print0)
+while IFS= read -r info; do
+  [[ -f "$info" || -L "$info" ]] || continue
+  sudo -n cp -a -- "$info" "$preexisting_info/"
+done < <(find /var/lib/dpkg/info -maxdepth 1 \
+  \( -name 'nostr-vpn.*' -o -name 'nostr-vpn:*.*' \) -print)
+while IFS= read -r candidate; do
+  metadata="$(stat -c '%F|%a|%u|%g|%s' "$candidate")"
+  if [[ -L "$candidate" ]]; then
+    digest="link:$(readlink "$candidate")"
+  else
+    digest="sha256:$(sha256sum "$candidate" | awk '{ print $1 }')"
+  fi
+  printf '%s|%s|%s\n' "$candidate" "$metadata" "$digest"
+done <"$preexisting_paths" >"$preexisting_manifest"
+
+touch "$remote_dir/.nvpn-deb-installed"
+sudo -n dpkg --install "$remote_dir/nostr-vpn.deb.copy" >/dev/null
+[[ "$(dpkg-query -W -f='${db:Status-Status}' nostr-vpn)" == "installed" ]]
+[[ "$(sha256sum /usr/bin/nostr-vpn | awk '{ print $1 }')" == "$app_hash" ]]
+[[ "$(sha256sum /usr/bin/nvpn | awk '{ print $1 }')" == "$cli_hash" ]]
+[[ "$(/usr/bin/nvpn --version)" == "nvpn $app_version" ]]
+/usr/bin/nvpn version --verbose | grep -Fq "(rev ${fips_sha:0:10})"
+
+mv "$remote_dir/desktop_manual_join_e2e_fixture.copy" \
+  "$remote_dir/desktop_manual_join_e2e_fixture"
+mv "$remote_dir/nvpn-x86_64-unknown-linux-musl.copy" \
+  "$remote_dir/nvpn-x86_64-unknown-linux-musl"
+mv "$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz.copy" \
+  "$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz"
+mv "$remote_dir/nostr-vpn.deb.copy" "$remote_dir/nostr-vpn.deb"
+mv "$remote_dir/receipt.json.copy" "$remote_dir/receipt.json"
+python3 - \
+  "$remote_dir/debian-package-install.json" \
+  "$remote_dir/receipt.json" \
+  "$app_sha" "$app_tree" "$fips_sha" "$fips_tree" \
+  "$app_version" "$deb_hash" "$deb_size" \
+  "$app_hash" "$cli_hash" "$musl_hash" "$archive_hash" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+(
+    output_arg,
+    bundle_receipt_arg,
+    app_sha,
+    app_tree,
+    fips_sha,
+    fips_tree,
+    app_version,
+    deb_sha,
+    deb_size,
+    app_hash,
+    cli_hash,
+    musl_hash,
+    archive_hash,
+) = sys.argv[1:]
+bundle_receipt = pathlib.Path(bundle_receipt_arg)
+output = pathlib.Path(output_arg)
+payload = {
+    "schema": 1,
+    "artifactType": "host-built exact Debian package installed on Ubuntu VM",
+    "appGitSha": app_sha,
+    "appGitTree": app_tree,
+    "fipsGitSha": fips_sha,
+    "fipsGitTree": fips_tree,
+    "appVersion": app_version,
+    "builtOnHostMac": True,
+    "builtOnRemoteVm": False,
+    "package": "nostr-vpn",
+    "packageArchitecture": "amd64",
+    "packageInstalledByDpkg": True,
+    "installedStatus": "installed",
+    "installedAppPath": "/usr/bin/nostr-vpn",
+    "installedCliPath": "/usr/bin/nvpn",
+    "debSha256": deb_sha,
+    "debSize": int(deb_size),
+    "installedAppSha256": app_hash,
+    "installedCliSha256": cli_hash,
+    "muslCliSha256": musl_hash,
+    "muslArchiveSha256": archive_hash,
+    "bundleReceiptSha256": hashlib.sha256(
+        bundle_receipt.read_bytes()
+    ).hexdigest(),
+    "packagePayloadVerifiedBeforeInstall": True,
+    "desktopEntryPresent": True,
+    "iconThemeAssetPresent": True,
+    "muslArchiveExtractedAndExecuted": True,
+}
+descriptor, temporary_arg = tempfile.mkstemp(
+    prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+)
+temporary = pathlib.Path(temporary_arg)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+finally:
+    temporary.unlink(missing_ok=True)
+PY
+GUEST
+  then
+    ubuntu_vm_import_error "VM hash/version/source verification failed"
+    return 1
+  fi
+
+  NVPN_UBUNTU_IMPORTED_APP="/usr/bin/nostr-vpn"
+  NVPN_UBUNTU_IMPORTED_CLI="/usr/bin/nvpn"
+  NVPN_UBUNTU_IMPORTED_FIXTURE="$remote_dir/desktop_manual_join_e2e_fixture"
+  NVPN_UBUNTU_IMPORTED_MUSL_CLI="$remote_dir/nvpn-x86_64-unknown-linux-musl"
+  NVPN_UBUNTU_IMPORTED_MUSL_ARCHIVE="$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz"
+  NVPN_UBUNTU_IMPORTED_DEB="$remote_dir/nostr-vpn.deb"
+  NVPN_UBUNTU_IMPORTED_RECEIPT="$remote_dir/receipt.json"
+  NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT="$remote_dir/debian-package-install.json"
+  NVPN_UBUNTU_IMPORTED=1
+  evidence_dir="${NVPN_UBUNTU_IMPORT_EVIDENCE_DIR:-$ROOT/artifacts/ubuntu-vm-import}"
+  mkdir -p "$evidence_dir"
+  cp "$receipt" "$evidence_dir/host-bundle-receipt.json"
+  "${NVPN_UBUNTU_IMPORT_SCP[@]}" \
+    "$SSH_HOST:$remote_dir/debian-package-install.json" \
+    "$evidence_dir/debian-package-install.json"
+  {
+    printf 'builtOnHostMac=true\n'
+    printf 'builtOnRemoteVm=false\n'
+    printf 'appGitSha=%s\n' "$app_sha"
+    printf 'appGitTree=%s\n' "$app_tree"
+    printf 'fipsGitSha=%s\n' "$fips_sha"
+    printf 'fipsGitTree=%s\n' "$fips_tree"
+    printf 'rootCargoLockSha256=%s\n' "$root_lock_sha"
+    printf 'linuxCargoLockSha256=%s\n' "$linux_lock_sha"
+    printf 'target=%s\n' "$target"
+    printf 'remoteSourceTreeVerified=true\n'
+    printf 'remoteArtifactHashesVerified=true\n'
+    printf 'remoteArtifactSizesVerified=true\n'
+    printf 'remoteArtifactVersionsVerified=true\n'
+    printf 'exactDebianPackageInstalled=true\n'
+    printf 'installedAppPath=/usr/bin/nostr-vpn\n'
+    printf 'installedCliPath=/usr/bin/nvpn\n'
+    printf 'muslArchiveExtractedAndExecuted=true\n'
+  } >"$evidence_dir/import-receipt.txt"
+}
+
+ubuntu_vm_cleanup_imported_release_bundle() {
+  local remote_dir="${NVPN_UBUNTU_IMPORTED_DIR:-}"
+  [[ -n "$remote_dir" ]] || return 0
+  case "$remote_dir" in
+    /tmp/nvpn-linux-vm-release.*) ;;
+    *)
+      ubuntu_vm_import_error "refusing unsafe VM import cleanup path"
+      return 1
+      ;;
+  esac
+  ubuntu_vm_import_ssh_command
+  local cleanup_script="$GUEST_REPO/scripts/ubuntu-vm-exact-deb-cleanup.sh"
+  "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
+    bash "$cleanup_script" "$remote_dir" || {
+    ubuntu_vm_import_error \
+      "exact Debian package cleanup failed; preserving $remote_dir for repair"
+    return 1
+  }
+  "${NVPN_UBUNTU_IMPORT_SSH[@]}" bash -s -- "$remote_dir" <<'GUEST'
+set -euo pipefail
+remote_dir="$1"
+case "$remote_dir" in
+  /tmp/nvpn-linux-vm-release.*) ;;
+  *) exit 2 ;;
+esac
+find "$remote_dir" -xdev -depth -mindepth 1 -delete
+rmdir "$remote_dir"
+test ! -e "$remote_dir"
+GUEST
+  local evidence_dir="${NVPN_UBUNTU_IMPORT_EVIDENCE_DIR:-$ROOT/artifacts/ubuntu-vm-import}"
+  mkdir -p "$evidence_dir"
+  printf 'remoteArtifactRemoved=true\n' >"$evidence_dir/cleanup-audit.txt"
+  NVPN_UBUNTU_IMPORTED_DIR=""
+  NVPN_UBUNTU_IMPORTED_APP=""
+  NVPN_UBUNTU_IMPORTED_CLI=""
+  NVPN_UBUNTU_IMPORTED_FIXTURE=""
+  NVPN_UBUNTU_IMPORTED_MUSL_CLI=""
+  NVPN_UBUNTU_IMPORTED_MUSL_ARCHIVE=""
+  NVPN_UBUNTU_IMPORTED_DEB=""
+  NVPN_UBUNTU_IMPORTED_RECEIPT=""
+  NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT=""
+  NVPN_UBUNTU_IMPORTED=0
+}

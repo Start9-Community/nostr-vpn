@@ -3,12 +3,14 @@ fn apply_windows_endpoint_bypass_route(
     wg_iface_index: u32,
     upstream: SocketAddr,
     excluded_tunnel_interfaces: &[u32],
+    cleanup_journal_config_path: &Path,
 ) -> Result<WindowsFullDefaultRoute> {
     apply_windows_managed_default_routes(
         wg_iface_index,
         upstream,
         excluded_tunnel_interfaces,
         false,
+        cleanup_journal_config_path,
     )
 }
 
@@ -18,6 +20,7 @@ fn apply_windows_managed_default_routes(
     upstream: SocketAddr,
     excluded_tunnel_interfaces: &[u32],
     manage_default: bool,
+    cleanup_journal_config_path: &Path,
 ) -> Result<WindowsFullDefaultRoute> {
     retry_pending_windows_route_cleanup()?;
     let upstream_ip = match upstream.ip() {
@@ -31,8 +34,9 @@ fn apply_windows_managed_default_routes(
     let mut excluded = excluded_tunnel_interfaces.to_vec();
     excluded.push(wg_iface_index);
     let underlay = capture_windows_default_route_excluding(&excluded)?;
+    let mut runner = SystemWindowsRouteCommandRunner::journaled(cleanup_journal_config_path);
     let routes = match WindowsManagedDefaultRoutes::apply_with(
-        &mut SystemWindowsRouteCommandRunner,
+        &mut runner,
         wg_iface_index,
         upstream_ip,
         underlay,
@@ -44,12 +48,16 @@ fn apply_windows_managed_default_routes(
             return Err(failure.error);
         }
     };
-    Ok(WindowsFullDefaultRoute { routes })
+    Ok(WindowsFullDefaultRoute {
+        routes,
+        cleanup_journal_config_path: cleanup_journal_config_path.to_path_buf(),
+    })
 }
 
 #[cfg(target_os = "windows")]
 pub struct WindowsFullDefaultRoute {
     routes: WindowsManagedDefaultRoutes,
+    cleanup_journal_config_path: PathBuf,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -86,8 +94,10 @@ impl WindowsFullDefaultRoute {
         let mut excluded = excluded_tunnel_interfaces.to_vec();
         excluded.push(self.routes.wg_iface_index);
         let fresh_underlay = capture_windows_default_route_excluding(&excluded)?;
+        let mut runner =
+            SystemWindowsRouteCommandRunner::journaled(&self.cleanup_journal_config_path);
         self.routes.reconcile_with(
-            &mut SystemWindowsRouteCommandRunner,
+            &mut runner,
             upstream_ip,
             fresh_underlay,
             excluded_tunnel_interfaces,
@@ -95,8 +105,9 @@ impl WindowsFullDefaultRoute {
     }
 
     pub fn revert(&mut self) -> Result<()> {
-        self.routes
-            .revert_with(&mut SystemWindowsRouteCommandRunner)
+        self.routes.revert_with(&mut SystemWindowsRouteCommandRunner::journaled(
+            &self.cleanup_journal_config_path,
+        ))
     }
 
     pub(crate) fn cleanup_snapshot(&self) -> WindowsRouteCleanupSnapshot {
@@ -107,9 +118,11 @@ impl WindowsFullDefaultRoute {
 #[cfg(target_os = "windows")]
 impl Drop for WindowsFullDefaultRoute {
     fn drop(&mut self) {
+        let mut runner =
+            SystemWindowsRouteCommandRunner::journaled(&self.cleanup_journal_config_path);
         if let Err(error) = self
             .routes
-            .revert_retaining_pending_with(&mut SystemWindowsRouteCommandRunner)
+            .revert_retaining_pending_with(&mut runner)
         {
             eprintln!(
                 "wg-upstream: WARNING — Windows route revert failed: {error}. \
@@ -317,6 +330,40 @@ fn resolve_windows_interface_index_for_address(interface_ip: &str) -> Result<u32
     Err(anyhow!(
         "no Windows interface found with IPv4 address {target}"
     ))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_interface_identity(interface_index: u32) -> Result<String> {
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $adapters = @(Get-NetAdapter -IncludeHidden -InterfaceIndex {interface_index}); \
+         if ($adapters.Count -ne 1) {{ \
+           throw \"expected one adapter for interface index {interface_index}, got \
+                  $($adapters.Count)\" \
+         }}; \
+         $adapters[0].InterfaceGuid.ToString('D').ToLowerInvariant()"
+    );
+    let output = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .with_context(|| {
+            format!("resolve stable Windows identity for interface {interface_index}")
+        })?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Get-NetAdapter identity query failed for interface {interface_index}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let identity = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if identity.is_empty() {
+        return Err(anyhow!(
+            "Get-NetAdapter returned an empty identity for interface {interface_index}"
+        ));
+    }
+    Ok(identity)
 }
 
 #[cfg(any(test, target_os = "windows"))]

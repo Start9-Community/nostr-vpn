@@ -98,6 +98,25 @@ mod tests {
             NativeAppAction::DisconnectVpn
         ));
     }
+
+    #[test]
+    fn accepted_roster_selector_is_absent_while_manual_join_is_pending() {
+        let pending = NativeParticipantState {
+            npub: "npub1pending".to_string(),
+            state: "pending".to_string(),
+            ..NativeParticipantState::default()
+        };
+        assert_eq!(accepted_roster_accessibility_label(&pending), None);
+
+        let accepted = NativeParticipantState {
+            state: "offline".to_string(),
+            ..pending
+        };
+        assert_eq!(
+            accepted_roster_accessibility_label(&accepted).as_deref(),
+            Some("nvpn-roster-participant-accepted-npub1pending")
+        );
+    }
 }
 
 fn active_network(state: &NativeAppState) -> Option<&NativeNetworkState> {
@@ -178,6 +197,11 @@ fn participant_key(participant: &NativeParticipantState) -> String {
     } else {
         participant.pubkey_hex.clone()
     }
+}
+
+fn accepted_roster_accessibility_label(participant: &NativeParticipantState) -> Option<String> {
+    (!participant.npub.trim().is_empty() && !participant.state.eq_ignore_ascii_case("pending"))
+        .then(|| format!("nvpn-roster-participant-accepted-{}", participant.npub))
 }
 
 fn resolve_network_id(state: &NativeAppState, requested: Option<String>) -> Option<String> {

@@ -143,6 +143,28 @@ wireguard_interface() {
   printf '%s\n' "$low"
 }
 
+wireguard_endpoint_route_state_valid() {
+  local expected_underlay="${1:-}" endpoint_iface wg_iface
+  endpoint_iface="$(endpoint_route_interface)" || return 1
+  if [[ "$ENDPOINT_FAMILY" == "ipv6" ]]; then
+    if [[ -n "$expected_underlay" ]]; then
+      [[ "$endpoint_iface" == "$expected_underlay" ]]
+      return
+    fi
+    [[ "$endpoint_iface" == "$PRIMARY_IFACE" \
+      || "$endpoint_iface" == "$SECONDARY_IFACE" ]]
+    return
+  fi
+  wg_iface="$(wireguard_interface)" || return 1
+  # IPv4 follows the global split default. The encrypted UDP escapes because
+  # nvpn binds its socket to the selected Apple interface, never via a global
+  # endpoint host-route fallback.
+  [[ "$endpoint_iface" == "$wg_iface" ]] \
+    && ! /usr/sbin/netstat -rn -f inet \
+      | awk -v endpoint="$ENDPOINT_HOST" \
+        '$1 == endpoint { found = 1 } END { exit found ? 0 : 1 }'
+}
+
 secure_dns_owned() {
   [[ -f "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
     && grep -Fq 'Managed by nvpn' "$SECURE_RESOLVER" \
@@ -193,8 +215,7 @@ exit_source_is_expected() {
 wireguard_routes_live() {
   local interface
   interface="$(wireguard_interface)" || return 1
-  [[ "$(endpoint_route_interface)" == "$PRIMARY_IFACE" \
-    || "$(endpoint_route_interface)" == "$SECONDARY_IFACE" ]] \
+  wireguard_endpoint_route_state_valid \
     && secure_dns_owned \
     && captured_probe_works \
     && https_works \
@@ -276,6 +297,20 @@ monotonic_ms() {
 rebind_count() {
   grep -Fc 'FIPS underlay carrier(s) rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
     || true
+}
+
+wireguard_rebind_count() {
+  grep -Fc 'WG upstream rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+    || true
+}
+
+wireguard_last_rebind_target_is() {
+  local expected_iface="$1" last_rebind
+  last_rebind="$(
+    grep -F 'WG upstream rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+      | tail -n 1
+  )"
+  [[ "$last_rebind" == *" -> $expected_iface with a fresh handshake" ]]
 }
 
 runtime_wireguard_state_is() {
@@ -434,10 +469,8 @@ with open(destination, "w", encoding="utf-8") as handle:
 PY
 }
 
-assert_single_owned_daemon() {
-  local pid command
-  pid="$(
-    /usr/bin/python3 - "$STATE_DIR/daemon.pid" "$CONFIG" <<'PY'
+owned_daemon_pid() {
+  /usr/bin/python3 - "$STATE_DIR/daemon.pid" "$CONFIG" <<'PY'
 import json
 import sys
 
@@ -457,15 +490,53 @@ if (
     raise SystemExit(1)
 print(pid)
 PY
-  )" || return 1
+}
+
+daemon_process_alive() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null \
+    || sudo -n /bin/kill -0 "$pid" 2>/dev/null
+}
+
+assert_single_owned_daemon() {
+  local pid command
+  pid="$(owned_daemon_pid)" || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
+  daemon_process_alive "$pid" || return 1
   [[ "$(pgrep -x nvpn | wc -l | tr -d '[:space:]')" == "1" ]] \
     || return 1
   command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
   [[ "$command" == *"$NVPN_BIN"* \
     && "$command" == *" daemon "* \
     && "$command" == *" --config $CONFIG"* ]]
+}
+
+cleanup_journal_owns_wireguard_and_dns() {
+  /usr/bin/python3 - "$STATE_DIR/daemon.cleanup.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        state = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(1)
+targets = {
+    route.get("target")
+    for route in state.get("managed_routes", [])
+    if isinstance(route, dict)
+}
+if (
+    state.get("secure_dns_resolver_files") is True
+    and {"0.0.0.0/1", "128.0.0.0/1"}.issubset(targets)
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+no_nvpn_processes() {
+  ! pgrep -x nvpn >/dev/null 2>&1
 }
 
 snapshot_direct_state() {
@@ -577,9 +648,14 @@ prepare_gate() {
     || fail "authenticated FIPS peer disappeared after initial readiness"
   [[ -s "$STATE_DIR/daemon.log" ]] \
     || fail "the owned daemon did not write its config-scoped log"
+  grep -Fq \
+    " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
+    "$STATE_DIR/daemon.log" \
+    || fail "WireGuard did not bind to the initial physical underlay before readiness"
   assert_single_owned_daemon || fail "the gate does not own exactly one daemon"
   wireguard_interface >"$STATE_DIR/wireguard-interface"
   rebind_count >"$STATE_DIR/rebind-baseline"
+  wireguard_rebind_count >"$STATE_DIR/wireguard-rebind-baseline"
   {
     printf 'direct_interface=%s\n' "$(cat "$STATE_DIR/direct-interface")"
     printf 'wireguard_interface=%s\n' "$(cat "$STATE_DIR/wireguard-interface")"
@@ -809,22 +885,27 @@ stop_owned_underlay_runner() {
 
 underlay_recovered() {
   local expected_iface="$1" requested_ms="$2" expected_rebind="$3"
-  local status_file="$4"
-  [[ "$(endpoint_route_interface)" == "$expected_iface" ]] \
+  local expected_wg_rebind="$4" status_file="$5"
+  wireguard_endpoint_route_state_valid "$expected_iface" \
     && wireguard_interface >/dev/null \
     && fips_host_tunnel_route_live \
     && payload_after "$requested_ms" \
     && fips_payload_after "$requested_ms" \
+    && runtime_dns_state_matches \
     && runtime_fips_peer_connected "$status_file" \
-    && [[ "$(rebind_count)" == "$expected_rebind" ]]
+    && [[ "$(rebind_count)" == "$expected_rebind" ]] \
+    && [[ "$(wireguard_rebind_count)" == "$expected_wg_rebind" ]] \
+    && wireguard_last_rebind_target_is "$expected_iface"
 }
 
 wait_for_underlay_recovery() {
-  local label="$1" expected_iface="$2" requested_ms="$3" expected_rebind="$4"
+  local label="$1" expected_iface="$2" requested_ms="$3"
+  local expected_rebind="$4" expected_wg_rebind="$5"
   local now elapsed status_file="$RESULT_DIR/fips-peer-$label.json"
   while true; do
     if underlay_recovered \
-      "$expected_iface" "$requested_ms" "$expected_rebind" "$status_file"
+      "$expected_iface" "$requested_ms" "$expected_rebind" \
+      "$expected_wg_rebind" "$status_file"
     then
       now="$(monotonic_ms)"
       elapsed=$((now - requested_ms))
@@ -836,18 +917,20 @@ wait_for_underlay_recovery() {
     fi
     now="$(monotonic_ms)"
     if (( now - requested_ms > RECOVERY_DEADLINE_MS )); then
-      fail "$label did not restore WireGuard + authenticated private-FIPS payload, route, and one carrier rebind in ${RECOVERY_DEADLINE_MS}ms"
+      fail "$label did not restore WireGuard + authenticated private-FIPS payload, route, FIPS carrier rebind, and fresh WireGuard handshake on $expected_iface in ${RECOVERY_DEADLINE_MS}ms"
     fi
     sleep 0.1
   done
 }
 
 run_underlay_gate() {
-  local payload_pid fips_payload_pid baseline first_requested first_elapsed
+  local payload_pid fips_payload_pid baseline wg_baseline first_requested first_elapsed
   local second_requested second_elapsed fips_before_first fips_after_first
   local fips_before_second fips_after_second
   baseline="$(tr -d '[:space:]' <"$STATE_DIR/rebind-baseline")"
+  wg_baseline="$(tr -d '[:space:]' <"$STATE_DIR/wireguard-rebind-baseline")"
   [[ "$baseline" =~ ^[0-9]+$ ]] || fail "invalid carrier-rebind baseline"
+  [[ "$wg_baseline" =~ ^[0-9]+$ ]] || fail "invalid WG-rebind baseline"
   : >"$STATE_DIR/underlay-payload.tsv"
   : >"$STATE_DIR/underlay-fips-payload.tsv"
   payload_loop >>"$STATE_DIR/underlay-payload.tsv" 2>&1 &
@@ -882,7 +965,8 @@ run_underlay_gate() {
     -setnetworkserviceenabled "$PRIMARY_SERVICE" off
   first_elapsed="$(
     wait_for_underlay_recovery \
-      primary-to-secondary "$SECONDARY_IFACE" "$first_requested" "$((baseline + 1))"
+      primary-to-secondary "$SECONDARY_IFACE" "$first_requested" \
+      "$((baseline + 1))" "$((wg_baseline + 1))"
   )"
   fips_after_first="$(fips_payload_success_count)"
   (( fips_after_first > fips_before_first )) \
@@ -897,7 +981,8 @@ run_underlay_gate() {
     -setnetworkserviceenabled "$PRIMARY_SERVICE" on
   second_elapsed="$(
     wait_for_underlay_recovery \
-      secondary-to-primary "$PRIMARY_IFACE" "$second_requested" "$((baseline + 2))"
+      secondary-to-primary "$PRIMARY_IFACE" "$second_requested" \
+      "$((baseline + 2))" "$((wg_baseline + 2))"
   )"
   fips_after_second="$(fips_payload_success_count)"
   (( fips_after_second > fips_before_second )) \
@@ -915,6 +1000,8 @@ run_underlay_gate() {
     printf 'secondary_to_primary_ms=%s\n' "$second_elapsed"
     printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
     printf 'carrier_rebinds=%s->%s\n' "$baseline" "$(rebind_count)"
+    printf 'wireguard_rebinds=%s->%s\n' \
+      "$wg_baseline" "$(wireguard_rebind_count)"
     printf 'primary_to_secondary_fips_pings=%s->%s\n' \
       "$fips_before_first" "$fips_after_first"
     printf 'secondary_to_primary_fips_pings=%s->%s\n' \
@@ -984,6 +1071,85 @@ start_underlay_gate() {
   [[ -s "$STATE_DIR/underlay.start" ]] \
     || fail "detached underlay runner has no start-time receipt"
   echo "MACOS_RELEASE_NETWORK_UNDERLAY_STARTED"
+}
+
+run_crash_restart_gate() {
+  local old_pid new_pid killed_ms ready_ms restart_elapsed_ms bind_baseline
+  local bind_receipts
+  assert_single_owned_daemon \
+    || fail "SIGKILL gate did not start with exactly one owned daemon"
+  cleanup_journal_owns_wireguard_and_dns \
+    || fail "SIGKILL gate lacks persisted WireGuard route and DNS ownership"
+  old_pid="$(owned_daemon_pid)"
+  bind_baseline="$(
+    grep -Fc \
+      " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
+      "$STATE_DIR/daemon.log" 2>/dev/null || true
+  )"
+  [[ "$bind_baseline" =~ ^[1-9][0-9]*$ ]] \
+    || fail "SIGKILL gate has no initial WireGuard bind receipt"
+
+  killed_ms="$(monotonic_ms)"
+  sudo -n /bin/kill -KILL "$old_pid"
+  wait_until "the SIGKILLed production daemon to exit" no_nvpn_processes
+  daemon_process_alive "$old_pid" \
+    && fail "SIGKILLed production daemon is still alive"
+  cleanup_journal_owns_wireguard_and_dns \
+    || fail "SIGKILL lost the persisted WireGuard route or DNS ownership"
+  [[ -f "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
+    || fail "SIGKILL did not leave the real secure-DNS state for startup repair"
+  runtime_wireguard_state_is true false \
+    || fail "stopped status did not distinguish the crashed daemon"
+  cleanup_journal_owns_wireguard_and_dns \
+    || fail "status inspection repaired or discarded the crash journal"
+
+  privileged_nvpn start --config "$CONFIG" --connect --daemon \
+    >"$RESULT_DIR/daemon-start-after-sigkill.txt"
+  if ! wait_until \
+    "automatic startup repair and a fresh production WireGuard payload" \
+    wireguard_routes_live
+  then
+    capture_wireguard_readiness_failure
+    return 1
+  fi
+  ready_ms="$(monotonic_ms)"
+  restart_elapsed_ms=$((ready_ms - killed_ms))
+  wait_until "the restarted daemon runtime/status WireGuard state" \
+    runtime_wireguard_state_is true true
+  wait_until "the restarted configured DNS state" runtime_dns_state_matches
+  wait_until "the restarted exact authenticated FIPS peer" \
+    runtime_fips_peer_connected
+  fips_host_tunnel_route_live \
+    || fail "restarted private-FIPS payload is not on its host tunnel"
+  assert_single_owned_daemon \
+    || fail "restart did not converge to exactly one owned daemon"
+  new_pid="$(owned_daemon_pid)"
+  [[ "$new_pid" != "$old_pid" ]] \
+    || fail "restart reused the SIGKILLed daemon PID"
+  cleanup_journal_owns_wireguard_and_dns \
+    || fail "restarted daemon did not persist fresh network ownership"
+  bind_receipts="$(
+    grep -Fc \
+      " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
+      "$STATE_DIR/daemon.log" 2>/dev/null || true
+  )"
+  [[ "$bind_receipts" == "$((bind_baseline + 1))" ]] \
+    || fail "restart did not produce exactly one fresh WireGuard bind receipt"
+
+  {
+    printf 'sigkill_journal_seen=true\n'
+    printf 'old_pid=%s\n' "$old_pid"
+    printf 'new_pid=%s\n' "$new_pid"
+    printf 'restart_payload_ms=%s\n' "$restart_elapsed_ms"
+    printf 'wireguard_interface=%s\n' "$(wireguard_interface)"
+    printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
+    printf 'exit_source_ip=%s\n' "$(source_ip)"
+    printf 'dns_label=%s\n' "$DNS_LABEL"
+    printf 'dns_mode=%s\n' "$DNS_MODE"
+    printf 'authenticated_fips_peer=%s\n' "$FIPS_PEER_NPUB"
+    printf 'connected_peer_count=1\n'
+  } >"$RESULT_DIR/crash-restart.txt"
+  echo "MACOS_RELEASE_NETWORK_CRASH_RESTART_OK"
 }
 
 direct_state_matches() {
@@ -1107,6 +1273,8 @@ select_direct_and_stop() {
   if pgrep -x nvpn >/dev/null 2>&1; then
     fail "owned nvpn daemon survived Direct cleanup"
   fi
+  [[ ! -e "$STATE_DIR/daemon.cleanup.json" ]] \
+    || fail "Direct cleanup retained the network ownership journal"
   saved_service_states_match \
     || fail "guest network-service state was not restored"
   wait_until "the exact effective and per-service Direct DNS baseline" \
@@ -1176,6 +1344,7 @@ case "$ACTION" in
   dns-case) set_dns_case ;;
   underlay-start) start_underlay_gate ;;
   underlay-run) run_underlay_with_status ;;
+  crash-restart) run_crash_restart_gate ;;
   direct) select_direct_and_stop ;;
   cleanup) cleanup_gate ;;
   *) fail "unknown action: ${ACTION:-empty}" ;;

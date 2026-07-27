@@ -3,6 +3,7 @@ use nostr_vpn_core::config::{
     AdminSignedSharedRosterUpdate, PendingOutboundJoinRequest, normalize_runtime_network_id,
 };
 use nostr_vpn_core::fips_control::{NetworkRoster, SignedRoster};
+use nostr_vpn_core::join_requests::prepare_manual_join_delivery;
 
 fn admin_signed_roster_update(
     network_id: &str,

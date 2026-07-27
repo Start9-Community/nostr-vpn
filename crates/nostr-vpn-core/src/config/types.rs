@@ -421,6 +421,12 @@ pub struct NetworkConfig {
     pub listen_for_join_requests: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub join_request_admin: String,
+    /// True only for a network entered through the manual join UI until a
+    /// verified roster from its configured admin explicitly contains this
+    /// device. This must remain independent of ordinary roster metadata:
+    /// admins can publish valid pre-acceptance rosters that omit the joiner.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_identity_confirmation_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbound_join_request: Option<PendingOutboundJoinRequest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -494,6 +500,7 @@ impl Default for AppConfig {
                 admins: Vec::new(),
                 listen_for_join_requests: default_listen_for_join_requests(),
                 join_request_admin: String::new(),
+                local_identity_confirmation_pending: false,
                 outbound_join_request: None,
                 inbound_join_requests: Vec::new(),
                 shared_roster_updated_at: 0,

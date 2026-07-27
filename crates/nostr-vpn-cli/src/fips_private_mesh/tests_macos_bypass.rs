@@ -21,7 +21,7 @@ fn failed_macos_endpoint_bypass_install_is_retried_by_production_reconciler() {
     );
     assert_eq!(attempts, 1);
     assert_eq!(failures.len(), 1);
-    assert_eq!(cached_routes, desired);
+    assert!(cached_routes.is_empty());
     assert_eq!(cached_underlay, None);
     assert!(
         super::macos_endpoint_bypass_underlay_refresh_required(

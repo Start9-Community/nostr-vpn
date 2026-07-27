@@ -67,6 +67,78 @@ grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
     echo "Android Release gate does not read the shipped picker label" >&2
     exit 1
   }
+grep -Fq 'write_android_exit_dns_ui_receipt' "$android_smoke" \
+  && grep -Fq '"evidenceSource": "shipped-ui-restart-readback"' "$android_smoke" \
+  || {
+    echo "Android Release UI restart readback does not emit DNS settings evidence" >&2
+    exit 1
+  }
+
+python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
+import importlib.util
+import json
+import pathlib
+import tempfile
+import sys
+
+spec = importlib.util.spec_from_file_location("network_evidence", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+cases = {
+    "automatic-profile": ("automatic", "cloudflare", "", "", ""),
+    "cloudflare-doh": ("encrypted", "cloudflare", "", "", ""),
+    "quad9-doh": ("encrypted", "quad9", "", "", ""),
+    "custom-doh": (
+        "encrypted",
+        "custom",
+        "https://dns.google/dns-query",
+        "8.8.8.8",
+        "",
+    ),
+    "through-exit": (
+        "through_exit",
+        "cloudflare",
+        "",
+        "",
+        "10.99.77.53",
+    ),
+}
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    for index, (label, values) in enumerate(cases.items()):
+        mode, provider, custom_url, bootstrap, through = values
+        payload = {
+            "receiptSchema": 1,
+            "evidenceSource": "shipped-ui-restart-readback",
+            "uiRestartReadback": True,
+            "releaseBlackbox": True,
+            "exitDnsMode": mode,
+            "exitDnsDohProvider": provider,
+            "exitDnsCustomDohUrl": custom_url,
+            "exitDnsCustomDohBootstrapIps": bootstrap,
+            "exitDnsThroughExitServers": through,
+            "internetSource": "wireguard",
+            "wireguardExitEnabled": True,
+            "error": "",
+        }
+        (root / f"mobile-android-exit-dns-state-{index}.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+    module.validate_android_dns_ui_receipts(root, list(cases))
+    custom = root / "mobile-android-exit-dns-state-3.json"
+    payload = json.loads(custom.read_text(encoding="utf-8"))
+    payload["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"
+    custom.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        module.validate_android_dns_ui_receipts(root, list(cases))
+    except ValueError as error:
+        if "custom DoH values" not in str(error):
+            raise
+    else:
+        raise SystemExit("Android Release UI evidence accepted wrong custom bootstrap")
+PY
 
 # shellcheck disable=SC1090
 source "$fixture_lib"
@@ -707,7 +779,12 @@ for shipped_ui_contract in \
   'assert_android_ui_validation "DoH URL must use HTTPS."' \
   'assert_android_ui_validation "Enter at least one bootstrap IP."' \
   'assert_android_ui_validation "Enter at least one DNS server IP."' \
-  wait_for_android_exit_dns_persistence
+  wait_for_android_exit_dns_persistence \
+  assert_android_exit_dns_ui_reloaded \
+  'shell am force-stop "$PACKAGE_NAME"' \
+  'android_ui_query resource "$mode_selector" selected' \
+  'android_ui_query resource "$provider_selector" selected' \
+  'Android shipped Exit DNS restart readback passed'
 do
   grep -Fq "$shipped_ui_contract" "$android_smoke" \
     || { echo "Android shipped DNS UI driver is missing: $shipped_ui_contract" >&2; exit 1; }

@@ -44,5 +44,6 @@ include!("wg_upstream_runtime/posix_routes.rs");
 include!("wg_upstream_runtime/daemon_handles.rs");
 include!("wg_upstream_runtime/windows_routes.rs");
 include!("wg_upstream_runtime/windows_daemon.rs");
+include!("wg_upstream_runtime/windows_native_config.rs");
 include!("wg_upstream_runtime/windows_native_ownership.rs");
 include!("wg_upstream_runtime/tests.rs");

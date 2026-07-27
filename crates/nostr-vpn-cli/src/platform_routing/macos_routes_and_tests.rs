@@ -265,6 +265,46 @@ default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
     }
 
     #[test]
+    fn linux_saved_default_never_overwrites_a_new_physical_underlay() {
+        let saved = "default via 192.0.2.1 dev enp1s0 metric 100";
+        let new_physical = LinuxDefaultRouteSpec {
+            line: "default via 198.51.100.1 dev enp7s0 metric 100".to_string(),
+            dev: "enp7s0".to_string(),
+        };
+        let owned = vec!["nvpn0".to_string(), "nvwg0".to_string()];
+        assert!(!linux_saved_default_restore_required(
+            saved,
+            Some(&new_physical),
+            &owned
+        ));
+    }
+
+    #[test]
+    fn linux_saved_default_replaces_only_an_owned_or_missing_overlay_default() {
+        let saved = "default via 192.0.2.1 dev enp1s0 metric 100";
+        let overlay = LinuxDefaultRouteSpec {
+            line: "default dev nvwg0 metric 5".to_string(),
+            dev: "nvwg0".to_string(),
+        };
+        let already_restored = LinuxDefaultRouteSpec {
+            line: saved.to_string(),
+            dev: "enp1s0".to_string(),
+        };
+        let owned = vec!["nvpn0".to_string(), "nvwg0".to_string()];
+        assert!(linux_saved_default_restore_required(
+            saved,
+            Some(&overlay),
+            &owned
+        ));
+        assert!(linux_saved_default_restore_required(saved, None, &owned));
+        assert!(!linux_saved_default_restore_required(
+            saved,
+            Some(&already_restored),
+            &owned
+        ));
+    }
+
+    #[test]
     fn exit_node_forward_rules_are_scoped_to_mesh_source_and_outbound_iface() {
         assert_eq!(
             linux_exit_node_forward_in_rule(

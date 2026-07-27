@@ -813,6 +813,47 @@ fn legacy_macos_exit_cleanup_leaves_global_ipv4_forwarding_alone() {
     assert!(!plan.restore_ipv4_forwarding);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn legacy_macos_cleanup_journal_does_not_claim_ownerless_endpoint_routes() {
+    let state: MacosNetworkCleanupState = serde_json::from_str(
+        r#"{
+            "iface": "utun42",
+            "endpoint_bypass_routes": ["203.0.113.7/32"],
+            "original_default_route": {
+                "gateway": "192.0.2.1",
+                "interface": "en0"
+            }
+        }"#,
+    )
+    .expect("deserialize pre-ownership cleanup journal");
+
+    let actionable = crate::daemon_runtime::macos_cleanup_managed_routes(&state);
+
+    assert!(
+        actionable
+            .iter()
+            .all(|route| route.target != "203.0.113.7/32"),
+        "an ownerless legacy endpoint route is non-actionable migration data"
+    );
+    assert_eq!(
+        actionable,
+        vec![
+            MacosManagedRoute {
+                target: "0.0.0.0/1".to_string(),
+                gateway: None,
+                interface: Some("utun42".to_string()),
+            },
+            MacosManagedRoute {
+                target: "128.0.0.0/1".to_string(),
+                gateway: None,
+                interface: Some("utun42".to_string()),
+            },
+        ],
+        "exact legacy tunnel ownership remains actionable"
+    );
+}
+
 #[test]
 fn macos_exit_node_pf_rules_are_scoped_to_tunnel_source_and_outbound_iface() {
     let rules = crate::macos_network::macos_exit_node_pf_rules("utun42", "en0", "10.44.0.0/16");

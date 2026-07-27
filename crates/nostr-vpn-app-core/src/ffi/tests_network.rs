@@ -339,6 +339,17 @@
         assert!(!network.join_secret.is_empty());
         assert!(network.outbound_join_request.is_none());
         assert!(runtime.vpn_enabled);
+        let state = runtime.state();
+        let pending_admin = state.networks[0]
+            .participants
+            .iter()
+            .find(|participant| participant.pubkey_hex == network.admins[0])
+            .expect("manual-join admin participant should be visible");
+        assert_eq!(
+            pending_admin.state, "pending",
+            "an out-of-band admin row must remain pending until its signed roster arrives"
+        );
+        assert_eq!(pending_admin.status_text, "waiting for admin");
 
         let persisted = AppConfig::load(&runtime.config_path).expect("reload manual network");
         assert_eq!(persisted.active_network().network_id, "8d4f34f5425bc50e");

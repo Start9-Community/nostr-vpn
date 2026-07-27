@@ -29,8 +29,11 @@ WG_ENDPOINT="${NVPN_UNDERLAY_WG_ENDPOINT:-}"
 WG_CLIENT_ADDRESS="${NVPN_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.0.2/32}"
 WG_PRIVATE_KEY_FILE="$STATE_DIR/wg-client-private.key"
 WG_CONFIG_FILE="$STATE_DIR/wg-client.conf"
+CLEANUP_JOURNAL="$STATE_DIR/.nvpn-network-cleanup/daemon.cleanup.json"
 ORIGINAL_NPUB=""
 ORIGINAL_TUNNEL_IP=""
+CRASH_CONNECT_PID=""
+CRASH_RESTART_PID=""
 
 fail() {
   echo "Linux underlay network-change e2e failed: $*" >&2
@@ -172,6 +175,11 @@ wireguard_payload_success_count() {
 wireguard_handshake_active() {
   wg show "$WG_IFACE" latest-handshakes 2>/dev/null \
     | awk 'NF == 2 && $2 + 0 > 0 { found = 1 } END { exit !found }'
+}
+
+wireguard_latest_handshake() {
+  wg show "$WG_IFACE" latest-handshakes 2>/dev/null \
+    | awk 'NF == 2 && $2 + 0 > latest { latest = $2 } END { print latest + 0 }'
 }
 
 wireguard_payload_loop() {
@@ -350,6 +358,14 @@ assert_active_exit() {
   fi
   resolve_name "$(probe_host)"
   test_https
+}
+
+assert_single_nvpn_process() {
+  local expected_pid="$1"
+  local processes
+  processes="$(pgrep -x nvpn 2>/dev/null || true)"
+  [[ "$processes" == "$expected_pid" ]] \
+    || fail "expected exactly one nvpn process ($expected_pid), found: ${processes:-none}"
 }
 
 wait_initial_ready() {
@@ -597,6 +613,22 @@ finish_run_cleanup() {
   local status="$?"
   trap - EXIT
   restore_network || status=1
+  exit "$status"
+}
+
+finish_crash_repair_cleanup() {
+  local status="$?"
+  trap - EXIT
+  if [[ -n "$CRASH_RESTART_PID" ]]; then
+    "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >/dev/null 2>&1 || true
+    kill "$CRASH_RESTART_PID" >/dev/null 2>&1 || true
+    wait "$CRASH_RESTART_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$CRASH_CONNECT_PID" ]]; then
+    kill -KILL "$CRASH_CONNECT_PID" >/dev/null 2>&1 || true
+    wait "$CRASH_CONNECT_PID" >/dev/null 2>&1 || true
+  fi
+  emergency_restore_network >/dev/null 2>&1 || true
   exit "$status"
 }
 
@@ -853,8 +885,8 @@ run_gate() {
   run_dns_case custom iana.org "$daemon_process" "$primary_iface" \
     --exit-dns-mode encrypted \
     --exit-dns-doh-provider custom \
-    --exit-dns-custom-doh-url https://cloudflare-dns.com/dns-query \
-    --exit-dns-custom-doh-bootstrap-ips 1.1.1.1,1.0.0.1
+    --exit-dns-custom-doh-url https://dns.google/dns-query \
+    --exit-dns-custom-doh-bootstrap-ips 8.8.8.8,8.8.4.4
   run_dns_case through-exit "$FIXTURE_DNS_NAME" "$daemon_process" "$primary_iface" \
     --exit-dns-mode through_exit \
     --exit-dns-through-exit-servers "$PEER_TUNNEL_IP"
@@ -917,6 +949,279 @@ run_gate() {
   write_marker done
 }
 
+crash_repair_gate() {
+  require_root
+  for value in \
+    "$PRIMARY_MAC" "$NETWORK_ID" "$PEER_NPUB" "$PEER_ENDPOINT" \
+    "$PEER_TUNNEL_IP" "$EXPECTED_FIPS_REV" "$WG_PEER_PUBLIC_KEY" \
+    "$WG_ENDPOINT" "$WG_CLIENT_ADDRESS"
+  do
+    [[ -n "$value" ]] || fail "Crash repair is missing a required peer/underlay argument"
+  done
+  [[ -x "$BINARY" && -s "$CONFIG" && -s "$WG_CONFIG_FILE" ]] \
+    || fail "Crash repair requires the initialized exact candidate and WireGuard profile"
+  if pgrep -x nvpn >/dev/null 2>&1; then
+    fail "another nvpn process is already running before crash recovery"
+  fi
+
+  local primary_iface crash_started handshake deadline killed_status
+  local journal_sha restart_started restart_repaired_at restart_elapsed
+  local daemon_status policy_table binary_sha
+  primary_iface="$(require_iface_for_mac "$PRIMARY_MAC")"
+  ORIGINAL_NPUB="$(read_npub)"
+  ORIGINAL_TUNNEL_IP="$("$BINARY" ip --config "$CONFIG")"
+  [[ -n "$ORIGINAL_NPUB" && -n "$ORIGINAL_TUNNEL_IP" ]] \
+    || fail "Crash repair could not pin the initialized identity"
+  trap finish_crash_repair_cleanup EXIT
+  rm -f \
+    "$STATE_DIR/crash-connect.pid" \
+    "$STATE_DIR/crash-restart-daemon.pid" \
+    "$STATE_DIR/crash-repair.receipt.json" \
+    "$STATE_DIR/crash-journal-ownership.json"
+
+  # The foreground production path intentionally ignores autoconnect. Persist
+  # false first so the post-SIGKILL daemon can repair ownership while paused.
+  "$BINARY" set \
+    --config "$CONFIG" \
+    --wireguard-exit-enabled true \
+    --exit-node-leak-protection true \
+    --exit-dns-mode through_exit \
+    --exit-dns-through-exit-servers "$PEER_TUNNEL_IP" \
+    --autoconnect false \
+    >/dev/null
+  crash_started="$(date +%s)"
+  env RUST_LOG=info "$BINARY" connect \
+    --config "$CONFIG" \
+    --iface "$TUN_IFACE" \
+    --mesh-refresh-interval-secs 2 \
+    >"$STATE_DIR/crash-connect.stdout.log" \
+    2>"$STATE_DIR/crash-connect.stderr.log" &
+  CRASH_CONNECT_PID="$!"
+  printf '%s\n' "$CRASH_CONNECT_PID" >"$STATE_DIR/crash-connect.pid"
+
+  deadline="$((SECONDS + 30))"
+  while ((SECONDS < deadline)); do
+    handshake="$(wireguard_latest_handshake 2>/dev/null || echo 0)"
+    if kill -0 "$CRASH_CONNECT_PID" >/dev/null 2>&1 \
+      && [[ "$(route_dev 1.1.1.1 2>/dev/null || true)" == "$WG_IFACE" ]] \
+      && [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$primary_iface" ]] \
+      && assert_wireguard_endpoint_route "$primary_iface" \
+      && [[ "$handshake" =~ ^[0-9]+$ && "$handshake" -ge "$crash_started" ]] \
+      && assert_secure_dns \
+      && resolve_fixture \
+      && resolve_name "$(probe_host)" \
+      && test_https \
+      && ping -n -c 1 -W 1 "$PEER_TUNNEL_IP" >/dev/null 2>&1
+    then
+      break
+    fi
+    sleep 0.2
+  done
+  if ((SECONDS >= deadline)); then
+    {
+      echo "crash_connect_route=$(route_dev 1.1.1.1 2>/dev/null || echo unavailable)"
+      echo "crash_connect_endpoint_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
+      echo "crash_connect_handshake=$(wireguard_latest_handshake 2>/dev/null || echo unavailable)"
+      resolvectl status "$TUN_IFACE" 2>/dev/null || true
+      tail -n 100 "$STATE_DIR/crash-connect.stderr.log" 2>/dev/null || true
+    } >&2
+    fail "foreground exit, through-exit DNS, HTTPS, and fresh handshake did not become ready"
+  fi
+  assert_single_nvpn_process "$CRASH_CONNECT_PID"
+  [[ -s "$CLEANUP_JOURNAL" ]] \
+    || fail "foreground exit did not durably persist network cleanup ownership"
+  jq -e \
+    --arg iface "$TUN_IFACE" \
+    --arg wireguard "$WG_IFACE" '
+      .iface == $iface
+      and .exit_node_runtime.wireguard_exit.interface == $wireguard
+      and .exit_node_runtime.wireguard_exit.table == 51888
+      and .exit_node_runtime.wireguard_exit.priority == 10888
+      and .secure_dns.Resolved.interface == $iface
+    ' "$CLEANUP_JOURNAL" >/dev/null \
+    || fail "cleanup journal lacks exact WireGuard and secure-DNS ownership"
+
+  kill -KILL "$CRASH_CONNECT_PID"
+  set +e
+  wait "$CRASH_CONNECT_PID"
+  killed_status="$?"
+  set -e
+  CRASH_CONNECT_PID=""
+  [[ "$killed_status" == "137" ]] \
+    || fail "foreground connect did not exit from SIGKILL (status $killed_status)"
+  [[ -z "$(pgrep -x nvpn 2>/dev/null || true)" ]] \
+    || fail "SIGKILL left an nvpn process running"
+
+  # Prove the real owned state and exact durable journal survived the crash.
+  [[ -s "$CLEANUP_JOURNAL" ]] \
+    || fail "SIGKILL removed the durable cleanup journal"
+  journal_sha="$(sha256sum "$CLEANUP_JOURNAL" | awk '{ print $1 }')"
+  jq -e \
+    --arg iface "$TUN_IFACE" \
+    --arg wireguard "$WG_IFACE" '
+      .iface == $iface
+      and .exit_node_runtime.wireguard_exit.interface == $wireguard
+      and .exit_node_runtime.wireguard_exit.table == 51888
+      and .exit_node_runtime.wireguard_exit.priority == 10888
+      and .secure_dns.Resolved.interface == $iface
+    ' "$CLEANUP_JOURNAL" >/dev/null \
+    || fail "SIGKILL journal lost exact WireGuard or secure-DNS ownership"
+  jq \
+    --arg iface "$TUN_IFACE" \
+    --arg wireguard "$WG_IFACE" '
+      {
+        iface: .iface,
+        original_default_route_owned: (.original_default_route != null),
+        endpoint_bypass_route_count: (.endpoint_bypass_routes | length),
+        wireguard: {
+          interface: .exit_node_runtime.wireguard_exit.interface,
+          table: .exit_node_runtime.wireguard_exit.table,
+          priority: .exit_node_runtime.wireguard_exit.priority
+        },
+        secure_dns: {
+          interface: .secure_dns.Resolved.interface
+        }
+      }
+      | select(.iface == $iface and .wireguard.interface == $wireguard)
+    ' "$CLEANUP_JOURNAL" >"$STATE_DIR/crash-journal-ownership.json"
+  [[ "$(route_dev 1.1.1.1)" == "$WG_IFACE" ]] \
+    || fail "SIGKILL did not retain the owned WireGuard default"
+  [[ "$(route_dev "$(endpoint_host)")" == "$primary_iface" ]] \
+    || fail "SIGKILL did not retain the owned endpoint bypass"
+  assert_wireguard_endpoint_route "$primary_iface"
+  ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
+    || fail "SIGKILL removed the owned WireGuard interface"
+  ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
+    || fail "SIGKILL removed the owned WireGuard policy rule"
+  ip -4 route show table 51888 | grep -q . \
+    || fail "SIGKILL removed the owned WireGuard policy table"
+
+  # Starting the same exact candidate paused must run startup repair before it
+  # publishes daemon readiness. No explicit recovery command is used.
+  restart_started="$(monotonic_milliseconds)"
+  env RUST_LOG=info "$BINARY" daemon \
+    --paused \
+    --config "$CONFIG" \
+    --iface "$TUN_IFACE" \
+    --mesh-refresh-interval-secs 2 \
+    >"$STATE_DIR/crash-restart-daemon.stdout.log" \
+    2>"$STATE_DIR/crash-restart-daemon.stderr.log" &
+  CRASH_RESTART_PID="$!"
+  printf '%s\n' "$CRASH_RESTART_PID" >"$STATE_DIR/crash-restart-daemon.pid"
+
+  while :; do
+    restart_repaired_at="$(monotonic_milliseconds)"
+    restart_elapsed="$((restart_repaired_at - restart_started))"
+    if ((restart_elapsed > RECOVERY_DEADLINE_MS)); then
+      {
+        echo "restart_repair_elapsed_milliseconds=$restart_elapsed"
+        echo "restart_route=$(route_dev 1.1.1.1 2>/dev/null || echo unavailable)"
+        echo "restart_journal_present=$([[ -e "$CLEANUP_JOURNAL" ]] && echo true || echo false)"
+        ip -4 route show
+        ip -4 rule show
+        resolvectl status "$TUN_IFACE" 2>/dev/null || true
+        tail -n 100 "$STATE_DIR/crash-restart-daemon.stderr.log" 2>/dev/null || true
+      } >&2
+      fail "paused daemon startup repair exceeded ${RECOVERY_DEADLINE_MS}ms"
+    fi
+    policy_table="$(ip -4 route show table 51888 2>&1 || true)"
+    if [[ ! -e "$CLEANUP_JOURNAL" ]] \
+      && [[ "$(route_dev 1.1.1.1 2>/dev/null || true)" == "$primary_iface" ]] \
+      && ! ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
+      && ! ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
+      && [[ -z "$(ip -4 route show exact "$(endpoint_host)/32")" ]] \
+      && { [[ -z "$policy_table" ]] || grep -Fq 'FIB table does not exist' <<<"$policy_table"; } \
+      && ! resolvectl dns "$TUN_IFACE" 2>/dev/null | grep -Fq 127.0.0.1 \
+      && resolve_name "$(probe_host)" \
+      && test_https
+    then
+      restart_repaired_at="$(monotonic_milliseconds)"
+      restart_elapsed="$((restart_repaired_at - restart_started))"
+      ((restart_elapsed <= RECOVERY_DEADLINE_MS)) \
+        || fail "paused daemon startup repair exceeded ${RECOVERY_DEADLINE_MS}ms"
+      break
+    fi
+    sleep 0.05
+  done
+
+  deadline="$((SECONDS + 15))"
+  while ((SECONDS < deadline)); do
+    daemon_status="$(status_json 2>/dev/null || true)"
+    if jq -e --argjson pid "$CRASH_RESTART_PID" '
+      .status_source == "daemon"
+      and .daemon.running == true
+      and .daemon.pid == $pid
+      and .daemon.state.vpn_enabled == false
+      and .daemon.state.vpn_active == false
+      and (
+        .daemon.state.vpn_status == "Paused"
+        or .daemon.state.vpn_status == "Listening for join requests"
+      )
+    ' <<<"$daemon_status" >/dev/null 2>&1
+    then
+      break
+    fi
+    sleep 0.1
+  done
+  ((SECONDS < deadline)) \
+    || fail "paused daemon did not publish repaired inactive state"
+  assert_single_nvpn_process "$CRASH_RESTART_PID"
+  binary_sha="$(sha256sum "$BINARY" | awk '{ print $1 }')"
+  jq -cn \
+    --arg binary_sha256 "$binary_sha" \
+    --arg cleanup_journal_sha256 "$journal_sha" \
+    --arg physical_interface "$primary_iface" \
+    --arg wireguard_interface "$WG_IFACE" \
+    --argjson sigkill_exit_code "$killed_status" \
+    --argjson restart_daemon_pid "$CRASH_RESTART_PID" \
+    --argjson restart_daemon_count 1 \
+    --argjson restart_repair_milliseconds "$restart_elapsed" \
+    '{
+      binary_sha256: $binary_sha256,
+      cleanup_journal_sha256: $cleanup_journal_sha256,
+      physical_interface: $physical_interface,
+      wireguard_interface: $wireguard_interface,
+      sigkill_exit_code: $sigkill_exit_code,
+      fresh_wireguard_handshake: true,
+      through_exit_dns_before_crash: true,
+      verified_https_before_crash: true,
+      cleanup_journal_survived_sigkill: true,
+      wireguard_interface_survived_sigkill: true,
+      wireguard_endpoint_route_survived_sigkill: true,
+      wireguard_policy_rule_survived_sigkill: true,
+      wireguard_policy_table_survived_sigkill: true,
+      secure_dns_cleanup_ownership_survived_sigkill: true,
+      startup_repair_without_explicit_command: true,
+      cleanup_journal_removed: true,
+      wireguard_interface_removed: true,
+      wireguard_endpoint_route_removed: true,
+      wireguard_policy_rule_removed: true,
+      wireguard_policy_table_empty: true,
+      secure_dns_cleanup_ownership_removed: true,
+      physical_default_restored: true,
+      public_dns_restored: true,
+      verified_https_after_restart: true,
+      restart_daemon_paused: true,
+      restart_daemon_pid: $restart_daemon_pid,
+      restart_daemon_count: $restart_daemon_count,
+      restart_repair_milliseconds: $restart_repair_milliseconds
+    }' >"$STATE_DIR/crash-repair.receipt.json"
+
+  "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >/dev/null
+  wait "$CRASH_RESTART_PID" >/dev/null 2>&1 || true
+  CRASH_RESTART_PID=""
+  [[ -z "$(pgrep -x nvpn 2>/dev/null || true)" ]] \
+    || fail "clean stop after crash repair left an nvpn process"
+  "$BINARY" set \
+    --config "$CONFIG" \
+    --wireguard-exit-enabled false \
+    --exit-dns-mode automatic \
+    --autoconnect true \
+    >/dev/null
+  rm -f "$STATE_DIR/crash-connect.pid" "$STATE_DIR/crash-restart-daemon.pid"
+  trap - EXIT
+}
+
 cleanup_gate() {
   require_root
   mkdir -p "$STATE_DIR"
@@ -926,10 +1231,11 @@ cleanup_gate() {
 case "$ACTION" in
   initialize) initialize ;;
   run) run_gate ;;
+  crash-repair) crash_repair_gate ;;
   cleanup-fault)
     require_root
     exec "$(dirname "$0")/desktop-linux-cleanup-fault-e2e.sh"
     ;;
   cleanup) cleanup_gate ;;
-  *) echo "usage: $0 {initialize|run|cleanup-fault|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {initialize|run|crash-repair|cleanup-fault|cleanup}" >&2; exit 2 ;;
 esac

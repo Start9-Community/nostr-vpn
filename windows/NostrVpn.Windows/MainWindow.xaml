@@ -30,7 +30,7 @@
               <TextBlock Grid.Column="1" Text="Devices" />
             </Grid>
           </Button>
-          <Button Style="{StaticResource NavButton}" Command="{Binding ShowInternetCommand}">
+          <Button Style="{StaticResource NavButton}" Command="{Binding ShowInternetCommand}" AutomationProperties.AutomationId="ExitDnsInternetNavigation">
             <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE774;" Width="24" /><TextBlock Text="Internet" /></StackPanel>
           </Button>
           <Button Style="{StaticResource NavButton}" Command="{Binding ShowWalletCommand}" Visibility="{Binding PaidRouteMarketVisible, Converter={StaticResource BoolToVisibility}}">
@@ -102,7 +102,7 @@
           <StackPanel Visibility="{Binding HasActiveNetwork, Converter={StaticResource InverseBoolToVisibility}}">
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupChoices, Converter={StaticResource BoolToVisibility}}">
               <StackPanel>
-                <Button Content="Create Network" Command="{Binding ShowCreateNetworkSetupCommand}" Margin="0,0,0,8" />
+                <Button Content="Create Network" Command="{Binding ShowCreateNetworkSetupCommand}" Margin="0,0,0,8" AutomationProperties.AutomationId="ManualJoinCreateNetworkChoice" />
                 <Button Content="Join Network" Command="{Binding ShowJoinNetworkSetupCommand}" AutomationProperties.AutomationId="ManualJoinChooseJoin" />
               </StackPanel>
             </Border>
@@ -115,8 +115,8 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
-                  <TextBox Text="{Binding NetworkNameInput, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0" />
-                  <Button Grid.Column="1" Content="Create" Command="{Binding CreateNetworkCommand}" />
+                  <TextBox Text="{Binding NetworkNameInput, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0" AutomationProperties.AutomationId="ManualJoinCreateNetworkName" />
+                  <Button Grid.Column="1" Content="Create" Command="{Binding CreateNetworkCommand}" AutomationProperties.AutomationId="ManualJoinCreateNetworkSubmit" />
                 </Grid>
               </StackPanel>
             </Border>
@@ -131,6 +131,7 @@
                 <Expander Header="Manual join" Margin="0,8,0,0" AutomationProperties.AutomationId="ManualJoinExpander">
                   <StackPanel Margin="0,8,0,0">
                     <TextBlock Text="Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                    <TextBlock Text="{Binding State.OwnNpub}" TextWrapping="Wrap" Margin="0,0,0,6" AutomationProperties.AutomationId="ManualJoinJoinerDeviceIdValue" />
                     <Button Content="Copy my Device ID" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding State.OwnNpub}" HorizontalAlignment="Left" Margin="0,0,0,8" />
                     <TextBox Text="{Binding ManualJoinAdminId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Admin Device ID" Margin="0,0,0,6" AutomationProperties.AutomationId="ManualJoinAdminId" />
                     <TextBlock Text="Not a valid device ID" Foreground="{StaticResource Danger}" FontSize="11" Visibility="{Binding ManualJoinAdminErrorVisibility}" />
@@ -217,7 +218,7 @@
                                 <Run Text="{Binding CleanTunnelIp, Mode=OneWay}" /><Run Text="  " /><Run Text="{Binding ConnectivityStateText, Mode=OneWay}" />
                               </TextBlock>
                             </StackPanel>
-                            <Button Grid.Column="2" Content="Copy" Tag="{Binding Npub}" Click="CopyPeer_Click" Margin="8,0,0,0" />
+                            <Button Grid.Column="2" Content="Copy" Tag="{Binding Npub}" Click="CopyPeer_Click" Margin="8,0,0,0" AutomationProperties.AutomationId="{Binding AcceptedRosterAutomationId}" />
                           </Grid>
                         </Border>
                       </DataTemplate>
@@ -360,7 +361,7 @@
           <StackPanel Visibility="{Binding Page, Converter={StaticResource PageVisibility}, ConverterParameter=AddNetwork}">
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupChoices, Converter={StaticResource BoolToVisibility}}">
               <StackPanel>
-                <Button Content="Create Network" Command="{Binding ShowCreateNetworkSetupCommand}" Margin="0,0,0,8" />
+                <Button Content="Create Network" Command="{Binding ShowCreateNetworkSetupCommand}" Margin="0,0,0,8" AutomationProperties.AutomationId="ManualJoinCreateNetworkChoice" />
                 <Button Content="Join Network" Command="{Binding ShowJoinNetworkSetupCommand}" AutomationProperties.AutomationId="ManualJoinChooseJoin" />
               </StackPanel>
             </Border>
@@ -373,8 +374,8 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
-                  <TextBox Text="{Binding NetworkNameInput, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0" />
-                  <Button Grid.Column="1" Content="Create" Command="{Binding CreateNetworkCommand}" />
+                  <TextBox Text="{Binding NetworkNameInput, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0" AutomationProperties.AutomationId="ManualJoinCreateNetworkName" />
+                  <Button Grid.Column="1" Content="Create" Command="{Binding CreateNetworkCommand}" AutomationProperties.AutomationId="ManualJoinCreateNetworkSubmit" />
                 </Grid>
               </StackPanel>
             </Border>
@@ -389,6 +390,7 @@
                 <Expander Header="Manual join" Margin="0,8,0,0" AutomationProperties.AutomationId="ManualJoinExpander">
                   <StackPanel Margin="0,8,0,0">
                     <TextBlock Text="Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                    <TextBlock Text="{Binding State.OwnNpub}" TextWrapping="Wrap" Margin="0,0,0,6" AutomationProperties.AutomationId="ManualJoinJoinerDeviceIdValue" />
                     <Button Content="Copy my Device ID" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding State.OwnNpub}" HorizontalAlignment="Left" Margin="0,0,0,8" />
                     <TextBox Text="{Binding ManualJoinAdminId, UpdateSourceTrigger=PropertyChanged}" ToolTip="Admin Device ID" Margin="0,0,0,6" AutomationProperties.AutomationId="ManualJoinAdminId" />
                     <TextBlock Text="Not a valid device ID" Foreground="{StaticResource Danger}" FontSize="11" Visibility="{Binding ManualJoinAdminErrorVisibility}" />
@@ -448,6 +450,8 @@
               <StackPanel>
                 <TextBlock Text="For manual join" FontSize="18" FontWeight="SemiBold" />
                 <TextBlock Text="Share your Device ID and Network ID, then add the joining Device ID below." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,10" />
+                <TextBlock Text="{Binding State.OwnNpub}" TextWrapping="Wrap" Margin="0,0,0,4" AutomationProperties.AutomationId="ManualJoinAdminDeviceIdValue" />
+                <TextBlock Text="{Binding ActiveNetwork.NetworkId}" TextWrapping="Wrap" Margin="0,0,0,8" AutomationProperties.AutomationId="ManualJoinAdminNetworkIdValue" />
                 <Button Content="Copy admin Device ID" Command="{Binding CopyPeerCommand}" CommandParameter="{Binding State.OwnNpub}" HorizontalAlignment="Left" Margin="0,0,0,6" />
                 <Button Content="Copy Network ID" Command="{Binding CopyNetworkIdCommand}" HorizontalAlignment="Left" Margin="0,0,0,10" />
                 <TextBox Text="{Binding ParticipantInput, UpdateSourceTrigger=PropertyChanged}" ToolTip="Joining Device ID" Margin="0,0,0,4" AutomationProperties.AutomationId="ManualJoinAdminDeviceId" />
@@ -531,29 +535,29 @@
                 <TextBlock Text="Exit DNS" FontSize="18" FontWeight="SemiBold" />
                 <TextBlock Text="MagicDNS stays local. Public DNS follows this policy while an internet exit is active." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,10" />
                 <TextBlock Text="Mode" FontWeight="SemiBold" />
-                <ComboBox SelectedValue="{Binding ExitDnsMode, UpdateSourceTrigger=PropertyChanged}" SelectedValuePath="Tag" Margin="0,4,0,10">
+                <ComboBox SelectedValue="{Binding ExitDnsMode, UpdateSourceTrigger=PropertyChanged}" SelectedValuePath="Tag" Margin="0,4,0,10" AutomationProperties.AutomationId="ExitDnsMode">
                   <ComboBoxItem Tag="automatic" Content="Automatic (recommended)" />
                   <ComboBoxItem Tag="encrypted" Content="Encrypted DNS" />
                   <ComboBoxItem Tag="through_exit" Content="DNS through exit" />
                 </ComboBox>
                 <StackPanel Visibility="{Binding ExitDnsEncryptedSelected, Converter={StaticResource BoolToVisibility}}">
                   <TextBlock Text="Provider" FontWeight="SemiBold" />
-                  <ComboBox SelectedValue="{Binding ExitDnsDohProvider, UpdateSourceTrigger=PropertyChanged}" SelectedValuePath="Tag" Margin="0,4,0,10">
+                  <ComboBox SelectedValue="{Binding ExitDnsDohProvider, UpdateSourceTrigger=PropertyChanged}" SelectedValuePath="Tag" Margin="0,4,0,10" AutomationProperties.AutomationId="ExitDnsProvider">
                     <ComboBoxItem Tag="cloudflare" Content="Cloudflare" />
                     <ComboBoxItem Tag="quad9" Content="Quad9" />
                     <ComboBoxItem Tag="custom" Content="Custom DoH" />
                   </ComboBox>
                   <StackPanel Visibility="{Binding ExitDnsCustomSelected, Converter={StaticResource BoolToVisibility}}">
-                    <TextBox Text="{Binding ExitDnsCustomDohUrl, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8" ToolTip="HTTPS DoH URL" />
-                    <TextBox Text="{Binding ExitDnsCustomDohBootstrapIps, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8" ToolTip="Bootstrap IPs, comma separated" />
+                    <TextBox Text="{Binding ExitDnsCustomDohUrl, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8" ToolTip="HTTPS DoH URL" AutomationProperties.AutomationId="ExitDnsCustomUrl" />
+                    <TextBox Text="{Binding ExitDnsCustomDohBootstrapIps, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8" ToolTip="Bootstrap IPs, comma separated" AutomationProperties.AutomationId="ExitDnsBootstrapIps" />
                   </StackPanel>
                 </StackPanel>
                 <StackPanel Visibility="{Binding ExitDnsThroughExitSelected, Converter={StaticResource BoolToVisibility}}">
-                  <TextBox Text="{Binding ExitDnsThroughExitServers, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8" ToolTip="DNS server IPs, comma separated" />
+                  <TextBox Text="{Binding ExitDnsThroughExitServers, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8" ToolTip="DNS server IPs, comma separated" AutomationProperties.AutomationId="ExitDnsThroughServers" />
                   <TextBlock Text="These DNS packets are sent only through the selected exit." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
                 </StackPanel>
                 <TextBlock Text="Automatic uses profile DNS when supplied; otherwise built-in encrypted DNS." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,10" />
-                <Button Content="Save Exit DNS" Command="{Binding SaveExitDnsCommand}" HorizontalAlignment="Left" />
+                <Button Content="Save Exit DNS" Command="{Binding SaveExitDnsCommand}" HorizontalAlignment="Left" AutomationProperties.AutomationId="ExitDnsSave" />
               </StackPanel>
             </Border>
           </StackPanel>

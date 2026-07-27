@@ -376,13 +376,9 @@ impl MobileTunnelConfig {
         let own_pubkey = app.own_nostr_pubkey_hex()?;
         let mut peers = Vec::new();
         let mut route_targets = Vec::new();
-        let manual_roster_pending = app.active_network_opt().is_some_and(|network| {
-            network.shared_roster_updated_at == 0
-                && network.shared_roster_signed_by.is_empty()
-                && !network.join_request_admin.is_empty()
-                && network.join_request_admin != own_pubkey
-                && network.outbound_join_request.is_none()
-        });
+        let manual_roster_pending = app
+            .active_network_opt()
+            .is_some_and(|network| network.local_identity_confirmation_pending);
         // Until the configured admin signs the roster, manual join is an
         // onboarding endpoint rather than a member of that mesh. Advertising
         // the requested mesh id/local route early can make transit learn a

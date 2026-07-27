@@ -16,6 +16,7 @@ async fn bind_fips_private_mesh(
         advertised_endpoint: config.advertised_endpoint.clone(),
         advertise_public_endpoint: config.advertise_public_endpoint,
         nostr_discovery_enabled: config.nostr_discovery_enabled,
+        advertise_on_nostr: config.advertise_on_nostr,
         webrtc_enabled: config.webrtc_enabled,
         stun_servers: config.stun_servers.clone(),
         nostr_relays: config.nostr_relays.clone(),

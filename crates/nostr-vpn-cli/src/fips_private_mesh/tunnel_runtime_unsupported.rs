@@ -3,7 +3,10 @@ pub(crate) struct FipsPrivateTunnelRuntime;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 impl FipsPrivateTunnelRuntime {
-    pub(crate) async fn start(_config: FipsPrivateTunnelConfig) -> Result<Self> {
+    pub(crate) async fn start(
+        _config: FipsPrivateTunnelConfig,
+        _cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<Self> {
         Err(anyhow!(
             "FIPS private tunnel runtime is not implemented for this platform"
         ))
@@ -75,7 +78,11 @@ impl FipsPrivateTunnelRuntime {
         false
     }
 
-    pub(crate) async fn apply_config(&self, _config: FipsPrivateTunnelConfig) -> Result<()> {
+    pub(crate) async fn apply_config(
+        &self,
+        _config: FipsPrivateTunnelConfig,
+        _cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<()> {
         Ok(())
     }
 

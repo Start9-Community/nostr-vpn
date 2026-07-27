@@ -263,8 +263,7 @@ impl AppConfig {
         let own_pubkey = self.own_nostr_pubkey_hex()?;
         let Some(network_entry_id) = self.networks.iter().find_map(|network| {
             (normalize_runtime_network_id(&network.network_id) == network_id
-                && network.shared_roster_updated_at == 0
-                && network.shared_roster_signed_by.is_empty()
+                && network.local_identity_confirmation_pending
                 && network.join_request_admin == signer
                 && network.admins.iter().any(|admin| admin == &signer))
             .then(|| network.id.clone())

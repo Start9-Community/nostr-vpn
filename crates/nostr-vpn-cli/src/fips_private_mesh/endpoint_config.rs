@@ -8,6 +8,10 @@ struct FipsEndpointTransportConfig {
     /// only configured static/bootstrap peers and does not enable ambient
     /// relay, LAN, or same-host endpoint discovery.
     nostr_discovery_enabled: bool,
+    /// Publishing is independent from consuming relay discovery. A pending
+    /// join already supplied its npub to the administrator and only needs
+    /// identity-routed control delivery until membership is confirmed.
+    advertise_on_nostr: bool,
     webrtc_enabled: bool,
     stun_servers: Vec<String>,
     nostr_relays: Vec<String>,
@@ -211,7 +215,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
     // preferred direct VPN path. Explicit public endpoints still advertise
     // because unknown clients must be able to discover them.
     let advertise_on_nostr = nostr_discovery_enabled
-        && transport.is_some()
+        && transport.is_some_and(|transport| transport.advertise_on_nostr)
         && (advertise_public_endpoint || !peers.is_empty());
     let nostr_enabled = nostr_discovery_enabled && (transport.is_some() || !peers.is_empty());
     config.node.discovery.nostr.enabled = nostr_enabled;
@@ -682,6 +686,7 @@ pub(crate) struct FipsPrivateTunnelConfig {
     pub(crate) wireguard_exit: WireGuardExitConfig,
     pub(crate) exit_node_leak_protection: bool,
     nostr_discovery_enabled: bool,
+    advertise_on_nostr: bool,
     webrtc_enabled: bool,
     nostr_discovery_policy: NostrDiscoveryPolicy,
     open_discovery_max_pending: usize,

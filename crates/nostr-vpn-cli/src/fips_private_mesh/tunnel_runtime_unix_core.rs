@@ -1,6 +1,17 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl FipsPrivateTunnelRuntime {
-    pub(crate) async fn start(config: FipsPrivateTunnelConfig) -> Result<Self> {
+    fn persist_network_cleanup_ownership(&self) -> Result<()> {
+        crate::daemon_runtime::persist_fips_daemon_network_cleanup_state(
+            &self.cleanup_journal_config_path,
+            Some(self),
+        )
+        .context("persist network cleanup ownership before mutation")
+    }
+
+    pub(crate) async fn start(
+        config: FipsPrivateTunnelConfig,
+        cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<Self> {
         #[cfg(target_os = "linux")]
         if pending_linux_network_cleanup_state().is_some() {
             return Err(anyhow!(
@@ -8,12 +19,13 @@ impl FipsPrivateTunnelRuntime {
             ));
         }
         let mesh = bind_fips_private_mesh(&config).await?;
-        Self::start_with_mesh(config, mesh).await
+        Self::start_with_mesh(config, mesh, cleanup_journal_config_path).await
     }
 
     async fn start_with_mesh(
         config: FipsPrivateTunnelConfig,
         mesh: Arc<FipsPrivateMeshRuntime>,
+        cleanup_journal_config_path: &std::path::Path,
     ) -> Result<Self> {
         crate::pipeline_profile::maybe_spawn_reporter();
         #[cfg(target_os = "linux")]
@@ -63,6 +75,7 @@ impl FipsPrivateTunnelRuntime {
             secure_dns: None,
             manages_secure_dns: true,
             config: config.clone(),
+            cleanup_journal_config_path: cleanup_journal_config_path.to_path_buf(),
             _tun: tun,
             fips_host: None,
             fips_host_disabled_artifacts_cleaned: false,
@@ -74,6 +87,8 @@ impl FipsPrivateTunnelRuntime {
             endpoint_bypass_routes: Vec::new(),
             #[cfg(target_os = "macos")]
             endpoint_bypass_underlay: None,
+            #[cfg(target_os = "macos")]
+            macos_underlay_refresh_pending: true,
             #[cfg(target_os = "linux")]
             original_default_route: None,
             #[cfg(target_os = "linux")]
@@ -88,9 +103,11 @@ impl FipsPrivateTunnelRuntime {
             wg_upstream: None,
         };
         let startup = async {
-            runtime.prepare_secure_dns(&config).await?;
+            runtime
+                .prepare_secure_dns(&config, cleanup_journal_config_path)
+                .await?;
             runtime.apply_interface_config(&config).await?;
-            runtime.finish_secure_dns(&config).await;
+            runtime.finish_secure_dns(&config).await?;
             runtime
                 .reconcile_fips_host_runtime(config.fips_host.clone())
                 .await
@@ -130,7 +147,11 @@ impl FipsPrivateTunnelRuntime {
         fips_tunnel_requires_endpoint_restart(&self.config, config)
     }
 
-    pub(crate) async fn apply_config(&mut self, config: FipsPrivateTunnelConfig) -> Result<()> {
+    pub(crate) async fn apply_config(
+        &mut self,
+        config: FipsPrivateTunnelConfig,
+        cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<()> {
         self.mesh.replace_peers(
             config.peers.clone(),
             config.local_allowed_ips(),
@@ -145,9 +166,10 @@ impl FipsPrivateTunnelRuntime {
         if self.config.nostr_relays != config.nostr_relays {
             self.mesh.update_relays(&config.nostr_relays).await?;
         }
-        self.prepare_secure_dns(&config).await?;
+        self.prepare_secure_dns(&config, cleanup_journal_config_path)
+            .await?;
         self.apply_interface_config(&config).await?;
-        self.finish_secure_dns(&config).await;
+        self.finish_secure_dns(&config).await?;
         self.reconcile_fips_host_runtime(config.fips_host.clone())
             .await?;
         self.config = config;
@@ -195,24 +217,67 @@ impl FipsPrivateTunnelRuntime {
         let runtime = self;
         #[cfg(target_os = "linux")]
         let network_cleanup = runtime.cleanup_linux_network_state();
+        #[cfg(target_os = "macos")]
+        let mut macos_network_failures = Vec::new();
+        #[cfg(target_os = "macos")]
+        if let Err(error) = runtime.cleanup_macos_network_state() {
+            macos_network_failures.push(format!("remove macOS tunnel routes: {error:#}"));
+        }
+        #[cfg(target_os = "macos")]
+        if let Err(error) = runtime.cleanup_macos_exit_node_forwarding_checked() {
+            macos_network_failures.push(format!("restore macOS exit forwarding: {error:#}"));
+        }
+        #[cfg(target_os = "macos")]
+        let mut wg_cleanup_succeeded = false;
+        #[cfg(target_os = "macos")]
+        if let Some(handle) = runtime.wg_upstream.as_mut() {
+            match handle.cleanup().await {
+                Ok(()) => wg_cleanup_succeeded = true,
+                Err(error) => {
+                    macos_network_failures.push(format!("remove macOS WG upstream: {error:#}"));
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if wg_cleanup_succeeded {
+            runtime.wg_upstream.take();
+        }
+        let dns_cleanup = if let Some(secure_dns) = runtime.secure_dns.as_mut() {
+            secure_dns.stop().await
+        } else {
+            Ok(())
+        };
+        if dns_cleanup.is_ok() {
+            runtime.secure_dns.take();
+        }
+        #[cfg(target_os = "linux")]
+        let linux_owned_cleanup = if network_cleanup.is_ok() && dns_cleanup.is_ok() {
+            Ok(())
+        } else {
+            Err(anyhow!("Linux network or secure DNS cleanup remains incomplete"))
+        };
         #[cfg(target_os = "linux")]
         record_linux_stop_cleanup_ownership(
-            &network_cleanup,
+            &linux_owned_cleanup,
             LinuxNetworkCleanupState::from_runtime(&runtime),
         );
-        #[cfg(not(target_os = "linux"))]
-        let network_cleanup: Result<()> = Ok(());
         #[cfg(target_os = "macos")]
-        runtime.cleanup_macos_network_state();
+        let network_cleanup = if macos_network_failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(macos_network_failures.join("; ")))
+        };
         #[cfg(target_os = "macos")]
-        runtime.cleanup_macos_exit_node_forwarding();
+        let macos_owned_cleanup = if network_cleanup.is_ok() && dns_cleanup.is_ok() {
+            Ok(())
+        } else {
+            Err(anyhow!("macOS network or secure DNS cleanup remains incomplete"))
+        };
         #[cfg(target_os = "macos")]
-        if let Some(handle) = runtime.wg_upstream.take() {
-            handle.cleanup().await;
-        }
-        if let Some(secure_dns) = runtime.secure_dns.take() {
-            secure_dns.stop().await;
-        }
+        record_macos_stop_cleanup_ownership(
+            &macos_owned_cleanup,
+            runtime.macos_network_cleanup_state(),
+        );
         runtime.stop_fips_host_runtime().await;
         if let Some(control_pubsub) = runtime.control_pubsub.take() {
             control_pubsub.stop().await;
@@ -230,31 +295,47 @@ impl FipsPrivateTunnelRuntime {
             .shutdown()
             .await
             .context("failed to stop FIPS endpoint");
-        match (network_cleanup, endpoint_cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(network), Ok(())) => Err(network),
-            (Ok(()), Err(endpoint)) => Err(endpoint),
-            (Err(network), Err(endpoint)) => Err(anyhow!(
-                "network cleanup failed ({network:#}); endpoint shutdown failed ({endpoint:#})"
-            )),
+        let mut failures = Vec::new();
+        if let Err(error) = network_cleanup {
+            failures.push(format!("network cleanup failed ({error:#})"));
+        }
+        if let Err(error) = dns_cleanup {
+            failures.push(format!("secure DNS cleanup failed ({error:#})"));
+        }
+        if let Err(error) = endpoint_cleanup {
+            failures.push(format!("endpoint shutdown failed ({error:#})"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
         }
     }
 
-    async fn prepare_secure_dns(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
+    async fn prepare_secure_dns(
+        &mut self,
+        config: &FipsPrivateTunnelConfig,
+        cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<()> {
         if self.manages_secure_dns && config.secure_dns_required() && self.secure_dns.is_none() {
-            self.secure_dns = Some(
-                crate::secure_dns_runtime::SecureDnsRuntime::start(
-                    &self.iface,
-                    None,
-                    config.magic_dns_records.clone(),
-                    config.exit_dns_resolver_config(false)?,
-                    config
-                        .fips_host
-                        .as_ref()
-                        .map(|_| Arc::clone(self.mesh.endpoint())),
-                )
-                .await?,
-            );
+            crate::secure_dns_runtime::SecureDnsRuntime::start_into(
+                &mut self.secure_dns,
+                &self.iface,
+                None,
+                config.magic_dns_records.clone(),
+                config.exit_dns_resolver_config(false)?,
+                config
+                    .fips_host
+                    .as_ref()
+                    .map(|_| Arc::clone(self.mesh.endpoint())),
+                |intent| {
+                    crate::daemon_runtime::persist_fips_secure_dns_cleanup_intent(
+                        cleanup_journal_config_path,
+                        intent,
+                    )
+                },
+            )
+            .await?;
         }
         if let Some(secure_dns) = self.secure_dns.as_mut() {
             secure_dns.update_records(config.magic_dns_records.clone());
@@ -266,7 +347,7 @@ impl FipsPrivateTunnelRuntime {
         Ok(())
     }
 
-    async fn finish_secure_dns(&mut self, config: &FipsPrivateTunnelConfig) {
+    async fn finish_secure_dns(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
         if self.manages_secure_dns
             && config.secure_dns_required()
             && let Some(secure_dns) = self.secure_dns.as_mut()
@@ -281,19 +362,16 @@ impl FipsPrivateTunnelRuntime {
                     self.wg_upstream.is_some()
                 }
             };
-            let resolver_config = config.exit_dns_resolver_config(wireguard_active);
-            if let Err(error) = resolver_config.and_then(|resolver_config| {
-                secure_dns.update_config(config.magic_dns_records.clone(), resolver_config)
-            })
-            {
-                eprintln!("fips: failed to update exit DNS resolver: {error:#}");
-            }
+            let resolver_config = config.exit_dns_resolver_config(wireguard_active)?;
+            secure_dns.update_config(config.magic_dns_records.clone(), resolver_config)?;
         }
         if (!self.manages_secure_dns || !config.secure_dns_required())
-            && let Some(secure_dns) = self.secure_dns.take()
+            && let Some(secure_dns) = self.secure_dns.as_mut()
         {
-            secure_dns.stop().await;
+            secure_dns.stop().await?;
+            self.secure_dns.take();
         }
+        Ok(())
     }
 
     async fn apply_interface_config(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
@@ -321,36 +399,16 @@ impl FipsPrivateTunnelRuntime {
                 crate::macos_network::restore_macos_underlay_default_route_if_missing()?;
             }
             self.cleanup_stale_macos_wg_upstream(&config.wireguard_exit)
-                .await;
+                .await?;
             self.apply_macos_network_state(config).await?;
-            self.reconcile_macos_wg_upstream(&config.wireguard_exit)
-                .await;
+            self.reconcile_macos_wg_upstream(config).await?;
             self.reconcile_macos_exit_node_forwarding(
                 &config.local_address,
                 &config.local_exit_forwarding_routes,
-            );
+            )?;
         }
         self.exit_route_ready = fips_exit_route_ready(config, &self.mesh.peer_statuses());
         Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn macos_wg_upstream_needs_cleanup(want_up: bool, existing_matches: Option<bool>) -> bool {
-        existing_matches.is_some_and(|matches| !want_up || !matches)
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn cleanup_stale_macos_wg_upstream(&mut self, wg_config: &WireGuardExitConfig) {
-        let want_up = wg_config.enabled && wg_config.configured();
-        let existing_matches = self
-            .wg_upstream
-            .as_ref()
-            .map(|existing| existing.matches(wg_config));
-        if Self::macos_wg_upstream_needs_cleanup(want_up, existing_matches)
-            && let Some(existing) = self.wg_upstream.take()
-        {
-            existing.cleanup().await;
-        }
     }
 
     #[cfg(target_os = "macos")]
@@ -370,8 +428,6 @@ impl FipsPrivateTunnelRuntime {
         let original_route_targets_require_bypass =
             crate::route_targets_require_endpoint_bypass(&route_targets);
 
-        // A config or platform-network refresh must restore routes the OS may have dropped.
-        self.endpoint_bypass_underlay = None;
         let (has_peer_endpoint_hosts, underlay) = self
             .reconcile_macos_endpoint_bypass_for_config(config)
             .await?;
@@ -402,6 +458,7 @@ impl FipsPrivateTunnelRuntime {
         }
 
         route_targets = config.interface_route_targets(route_targets);
+        self.persist_network_cleanup_ownership()?;
         // FIPS mesh peer routes go in first. They're /32s for each peer's
         // tunnel IP, so even when we install split defaults below, mesh traffic
         // still wins on longest-prefix-match and stays inside the FIPS tunnel.
@@ -422,15 +479,17 @@ impl FipsPrivateTunnelRuntime {
     ) -> Result<(bool, Option<crate::MacosRouteSpec>)> {
         let hosts = self.endpoint_bypass_ipv4_hosts(config).await?;
         let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts);
+        let force_underlay_refresh = self.macos_underlay_refresh_pending
+            || self.config.underlay_interface != config.underlay_interface;
         // Peer events are frequent and normally leave both bypasses and the
-        // physical underlay unchanged. Reuse that populated cache here;
-        // `apply_macos_network_state` clears it before real config or platform
-        // route refreshes so routes dropped by the OS are still reinstalled.
+        // physical underlay unchanged. Only a real link/config transition
+        // invalidates the populated ownership cache.
         if !macos_endpoint_bypass_underlay_refresh_required(
             &self.endpoint_bypass_routes,
             self.endpoint_bypass_underlay.as_ref(),
             &routes,
-        ) {
+        ) && !force_underlay_refresh
+        {
             return Ok((!hosts.is_empty(), self.endpoint_bypass_underlay.clone()));
         }
         let underlay = match crate::macos_network::
@@ -447,7 +506,8 @@ impl FipsPrivateTunnelRuntime {
         self.reconcile_macos_endpoint_bypass_routes(
             underlay.as_ref().map_or(&[], |_| routes.as_slice()),
             underlay.as_ref(),
-        );
+        )?;
+        self.macos_underlay_refresh_pending = false;
         Ok((!hosts.is_empty(), underlay))
     }
 
@@ -456,50 +516,103 @@ impl FipsPrivateTunnelRuntime {
         &mut self,
         routes: &[String],
         underlay: Option<&crate::MacosRouteSpec>,
-    ) {
+    ) -> Result<()> {
+        // Reassert the currently owned identity before removing anything.
+        // This also makes a previously successful runtime crash-repairable
+        // even if an earlier post-apply journal update was interrupted.
+        self.persist_network_cleanup_ownership()?;
+        let mut failures = Vec::new();
         let desired = routes
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
+        let underlay_changed = self.endpoint_bypass_underlay.as_ref() != underlay;
+        let current_underlay = self.endpoint_bypass_underlay.clone();
 
         let stale = self
             .endpoint_bypass_routes
             .iter()
-            .filter(|route| !desired.contains(*route))
+            .filter(|route| underlay_changed || !desired.contains(*route))
             .cloned()
             .collect::<Vec<_>>();
         for route in stale {
-            if let Err(error) = crate::delete_macos_managed_route(&route, None, None)
+            if let Err(error) = crate::delete_macos_managed_route(
+                &route,
+                current_underlay
+                    .as_ref()
+                    .and_then(|owner| owner.gateway.as_deref()),
+                current_underlay
+                    .as_ref()
+                    .map(|owner| owner.interface.as_str()),
+            )
                 && !crate::daemon_runtime::macos_route_delete_error_is_absent(&error.to_string())
             {
-                eprintln!("fips: failed to remove macOS endpoint bypass route {route}: {error}");
+                failures.push(format!("remove endpoint bypass route {route}: {error:#}"));
             }
         }
+        if !failures.is_empty() {
+            return Err(anyhow!(failures.join("; ")));
+        }
+        if underlay_changed {
+            self.endpoint_bypass_routes.clear();
+            self.endpoint_bypass_underlay = None;
+        } else {
+            self.endpoint_bypass_routes
+                .retain(|route| desired.contains(route));
+        }
+
+        // Journal every exact desired route and underlay before the first
+        // route add. Replaying this intent is safe if the crash happened
+        // before an add because cleanup verifies exact route ownership and
+        // treats an absent route as already clean.
+        let actual_routes = std::mem::replace(&mut self.endpoint_bypass_routes, routes.to_vec());
+        let actual_underlay =
+            std::mem::replace(&mut self.endpoint_bypass_underlay, underlay.cloned());
+        let persist_intent = self.persist_network_cleanup_ownership();
+        self.endpoint_bypass_routes = actual_routes;
+        self.endpoint_bypass_underlay = actual_underlay;
+        persist_intent?;
 
         for (route, error) in apply_macos_endpoint_bypass_route_changes(
             &mut self.endpoint_bypass_routes,
             &mut self.endpoint_bypass_underlay,
             routes,
             underlay,
-            |route, gateway| crate::apply_macos_route_spec(route, gateway, None),
+            |route, gateway| {
+                crate::apply_macos_route_spec(
+                    route,
+                    gateway,
+                    underlay.map(|owner| owner.interface.as_str()),
+                )
+            },
         ) {
-            eprintln!(
-                "fips: failed to install macOS endpoint bypass route {}: {}",
-                route, error
-            );
+            failures.push(format!("install endpoint bypass route {route}: {error:#}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn cleanup_macos_network_state(&mut self) {
-        self.reconcile_macos_endpoint_bypass_routes(&[], None);
+    fn cleanup_macos_network_state(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        if let Err(error) = self.reconcile_macos_endpoint_bypass_routes(&[], None) {
+            failures.push(error.to_string());
+        }
         if let Err(error) = crate::delete_macos_default_route_for_interface(&self.iface)
             && !crate::daemon_runtime::macos_route_delete_error_is_absent(&error.to_string())
         {
-            eprintln!(
-                "fips: failed to remove macOS default routes on {}: {}",
-                self.iface, error
-            );
+            failures.push(format!(
+                "remove split-default routes on {}: {error:#}",
+                self.iface
+            ));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
         }
     }
 
@@ -549,76 +662,15 @@ impl FipsPrivateTunnelRuntime {
         }
     }
 
-    /// Bring the WG upstream tunnel up / down to match `wireguard_exit`.
-    ///
-    /// Called on every `apply_interface_config` (which fires on
-    /// startup, on every config change, and on the periodic
-    /// peer-dependent route refresh). The function is idempotent: a
-    /// no-op if the existing tunnel already matches the config, a
-    /// teardown-then-bring-up if the config changed, just a teardown
-    /// if WG is now disabled. Stale WG routing is normally removed by
-    /// `cleanup_stale_macos_wg_upstream` before FIPS routes are applied;
-    /// the cleanup below is a defensive fallback.
-    ///
-    /// **Safe-by-construction**: if the WG handshake doesn't complete
-    /// within the watchdog window (10s), nothing modifies the routing
-    /// table. The host's default route only ever swaps to the WG tun
-    /// after we've seen a real handshake from the upstream.
     #[cfg(target_os = "macos")]
-    async fn reconcile_macos_wg_upstream(&mut self, wg_config: &WireGuardExitConfig) {
-        let want_up = wg_config.enabled && wg_config.configured();
-
-        // Already up with matching config → nothing to do.
-        if want_up
-            && self
-                .wg_upstream
-                .as_ref()
-                .is_some_and(|existing| existing.matches(wg_config))
-        {
-            return;
-        }
-
-        // If we have a stale tunnel (config changed, or now disabled),
-        // tear it down before doing anything else. This restores the
-        // original default route + deletes the bypass.
-        if let Some(existing) = self.wg_upstream.take() {
-            existing.cleanup().await;
-        }
-
-        if !want_up {
-            return;
-        }
-
-        match crate::wg_upstream_runtime::apply_daemon_wg_upstream(
-            wg_config,
-            crate::wg_upstream_runtime::DAEMON_WG_UPSTREAM_HANDSHAKE_TIMEOUT,
-        )
-        .await
-        {
-            Ok(handle) => {
-                eprintln!(
-                    "fips: WG upstream up on {} via {} (default route swapped)",
-                    handle.iface, handle.upstream
-                );
-                self.wg_upstream = Some(handle);
-            }
-            Err(error) => {
-                // The watchdog fired or another error occurred. The
-                // routing table was deliberately left untouched, so
-                // the host's internet is still fine — surface the
-                // error for the GUI / status page and try again on
-                // the next reconcile tick.
-                eprintln!("fips: WG upstream not started: {error}");
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn reconcile_macos_exit_node_forwarding(&mut self, local_address: &str, routes: &[String]) {
+    fn reconcile_macos_exit_node_forwarding(
+        &mut self,
+        local_address: &str,
+        routes: &[String],
+    ) -> Result<()> {
         let route_families = crate::linux_exit_node_default_route_families(routes);
         if !route_families.ipv4 {
-            self.cleanup_macos_exit_node_forwarding();
-            return;
+            return self.cleanup_macos_exit_node_forwarding_checked();
         }
         if route_families.ipv6 {
             eprintln!(
@@ -626,25 +678,11 @@ impl FipsPrivateTunnelRuntime {
             );
         }
 
-        let Some(tunnel_source_cidr) = crate::linux_exit_node_source_cidr(local_address) else {
-            eprintln!("fips: invalid IPv4 tunnel address '{local_address}'");
-            self.cleanup_macos_exit_node_forwarding();
-            return;
-        };
-
-        let outbound_iface = match crate::macos_underlay_default_route_from_system() {
-            Ok(Some(route)) => route.interface,
-            Ok(None) => {
-                eprintln!("fips: failed to resolve macOS underlay default route for exit NAT");
-                self.cleanup_macos_exit_node_forwarding();
-                return;
-            }
-            Err(error) => {
-                eprintln!("fips: failed to resolve macOS underlay default route: {error}");
-                self.cleanup_macos_exit_node_forwarding();
-                return;
-            }
-        };
+        let tunnel_source_cidr = crate::linux_exit_node_source_cidr(local_address)
+            .ok_or_else(|| anyhow!("invalid IPv4 tunnel address '{local_address}'"))?;
+        let outbound_iface = crate::macos_underlay_default_route_from_system()?
+            .map(|route| route.interface)
+            .ok_or_else(|| anyhow!("no macOS underlay default route is available for exit NAT"))?;
 
         let already_configured = self.exit_node_runtime.outbound_iface.as_deref()
             == Some(outbound_iface.as_str())
@@ -652,123 +690,108 @@ impl FipsPrivateTunnelRuntime {
                 == Some(tunnel_source_cidr.as_str())
             && self.exit_node_runtime.ipv4_forward_was_enabled.is_some();
         if already_configured {
-            return;
+            return Ok(());
         }
 
-        self.cleanup_macos_exit_node_forwarding();
-        match crate::read_macos_ipv4_forwarding() {
-            Ok(previous) => {
-                self.exit_node_runtime.ipv4_forward_was_enabled = Some(previous);
-                if !previous && let Err(error) = crate::write_macos_ipv4_forwarding(true) {
-                    eprintln!("fips: failed to enable macOS IPv4 forwarding: {error}");
-                    self.cleanup_macos_exit_node_forwarding();
-                    return;
-                }
-            }
-            Err(error) => {
-                eprintln!("fips: failed to read macOS IPv4 forwarding state: {error}");
-                self.cleanup_macos_exit_node_forwarding();
-                return;
-            }
+        self.cleanup_macos_exit_node_forwarding_checked()?;
+        let previous_forwarding = crate::read_macos_ipv4_forwarding()
+            .context("read macOS IPv4 forwarding state")?;
+        self.exit_node_runtime.ipv4_forward_was_enabled = Some(previous_forwarding);
+        self.persist_network_cleanup_ownership()?;
+        if !previous_forwarding
+            && let Err(error) = crate::write_macos_ipv4_forwarding(true)
+        {
+            return Err(self.rollback_macos_exit_node_setup(
+                error.context("enable macOS IPv4 forwarding"),
+            ));
         }
-        match crate::macos_pf_enabled() {
-            Ok(enabled) => {
-                self.exit_node_runtime.pf_was_enabled = Some(enabled);
-                if !enabled && let Err(error) = crate::enable_macos_pf() {
-                    eprintln!("fips: failed to enable macOS PF for exit NAT: {error}");
-                    self.cleanup_macos_exit_node_forwarding();
-                    return;
-                }
-            }
+
+        let previous_pf = match crate::macos_pf_enabled() {
+            Ok(enabled) => enabled,
             Err(error) => {
-                eprintln!("fips: failed to read macOS PF state: {error}");
-                self.cleanup_macos_exit_node_forwarding();
-                return;
+                return Err(self
+                    .rollback_macos_exit_node_setup(error.context("read macOS PF enabled state")));
             }
+        };
+        self.exit_node_runtime.pf_was_enabled = Some(previous_pf);
+        self.exit_node_runtime.outbound_iface = Some(outbound_iface.clone());
+        self.exit_node_runtime.tunnel_source_cidr = Some(tunnel_source_cidr.clone());
+        self.persist_network_cleanup_ownership()?;
+        if !previous_pf
+            && let Err(error) = crate::enable_macos_pf()
+        {
+            return Err(
+                self.rollback_macos_exit_node_setup(error.context("enable macOS PF for exit NAT"))
+            );
         }
 
         if let Err(error) =
             crate::apply_macos_exit_node_pf_rules(&self.iface, &outbound_iface, &tunnel_source_cidr)
         {
-            eprintln!("fips: failed to install macOS exit PF rules: {error}");
-            self.cleanup_macos_exit_node_forwarding();
-            return;
+            return Err(
+                self.rollback_macos_exit_node_setup(error.context("install macOS exit PF rules"))
+            );
         }
 
-        self.exit_node_runtime.outbound_iface = Some(outbound_iface);
-        self.exit_node_runtime.tunnel_source_cidr = Some(tunnel_source_cidr);
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
-    fn cleanup_macos_exit_node_forwarding(&mut self) {
-        if self.exit_node_runtime.pf_was_enabled.is_some()
-            && let Err(error) = crate::cleanup_macos_pf_nat()
-        {
-            eprintln!("fips: failed to remove macOS exit PF rules: {error}");
+    fn cleanup_macos_exit_node_forwarding_checked(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        if self.exit_node_runtime.pf_was_enabled.is_some() {
+            match crate::cleanup_macos_pf_nat() {
+                Ok(()) => {
+                    if self.exit_node_runtime.pf_was_enabled == Some(false) {
+                        match crate::run_checked(ProcessCommand::new("pfctl").arg("-d")) {
+                            Ok(()) => self.exit_node_runtime.pf_was_enabled = None,
+                            Err(error) => {
+                                failures.push(format!("restore PF disabled state: {error:#}"));
+                            }
+                        }
+                    } else {
+                        self.exit_node_runtime.pf_was_enabled = None;
+                    }
+                }
+                Err(error) => failures.push(format!("remove PF exit rules: {error:#}")),
+            }
         }
 
-        if self.exit_node_runtime.pf_was_enabled == Some(false)
-            && let Err(error) = crate::run_checked(ProcessCommand::new("pfctl").arg("-d"))
-        {
-            eprintln!("fips: failed to restore macOS PF enabled state: {error}");
-        }
-        if self.exit_node_runtime.ipv4_forward_was_enabled == Some(false)
-            && let Err(error) = crate::write_macos_ipv4_forwarding(false)
-        {
-            eprintln!("fips: failed to restore macOS IPv4 forwarding state: {error}");
+        match self.exit_node_runtime.ipv4_forward_was_enabled {
+            Some(false) => match crate::write_macos_ipv4_forwarding(false) {
+                Ok(()) => self.exit_node_runtime.ipv4_forward_was_enabled = None,
+                Err(error) => {
+                    failures.push(format!("restore IPv4 forwarding state: {error:#}"));
+                }
+            },
+            Some(true) => self.exit_node_runtime.ipv4_forward_was_enabled = None,
+            None => {}
         }
 
-        self.exit_node_runtime = crate::MacosExitNodeRuntime::default();
+        if self.exit_node_runtime.pf_was_enabled.is_none() {
+            self.exit_node_runtime.outbound_iface = None;
+            self.exit_node_runtime.tunnel_source_cidr = None;
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn rollback_macos_exit_node_setup(&mut self, setup_error: anyhow::Error) -> anyhow::Error {
+        match self.cleanup_macos_exit_node_forwarding_checked() {
+            Ok(()) => setup_error,
+            Err(cleanup_error) => anyhow!(
+                "{setup_error:#}; failed to roll back partial macOS exit-node setup: \
+                 {cleanup_error:#}"
+            ),
+        }
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn macos_endpoint_bypass_underlay_refresh_required(
-    current_routes: &[String],
-    current_underlay: Option<&crate::MacosRouteSpec>,
-    desired_routes: &[String],
-) -> bool {
-    current_underlay.is_none() || current_routes != desired_routes
-}
-
-#[cfg(target_os = "macos")]
-fn macos_direct_underlay_restore_needed(
-    previous_exit_requested: bool,
-    next_exit_requested: bool,
-) -> bool {
-    previous_exit_requested && !next_exit_requested
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod macos_wg_transition_tests {
-    use super::{FipsPrivateTunnelRuntime, macos_direct_underlay_restore_needed};
-
-    #[test]
-    fn stale_wireguard_is_removed_before_fips_routes_change() {
-        assert!(FipsPrivateTunnelRuntime::macos_wg_upstream_needs_cleanup(
-            false,
-            Some(true)
-        ));
-        assert!(FipsPrivateTunnelRuntime::macos_wg_upstream_needs_cleanup(
-            true,
-            Some(false)
-        ));
-        assert!(!FipsPrivateTunnelRuntime::macos_wg_upstream_needs_cleanup(
-            true,
-            Some(true)
-        ));
-        assert!(!FipsPrivateTunnelRuntime::macos_wg_upstream_needs_cleanup(
-            false, None
-        ));
-    }
-
-    #[test]
-    fn only_an_exit_to_direct_transition_repairs_the_underlay_default() {
-        assert!(macos_direct_underlay_restore_needed(true, false));
-        assert!(!macos_direct_underlay_restore_needed(false, false));
-        assert!(!macos_direct_underlay_restore_needed(true, true));
-    }
-}
+include!("macos_wg_transition.rs");
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn fips_host_disabled_cleanup_due(runtime_running: bool, cleanup_complete: bool) -> bool {

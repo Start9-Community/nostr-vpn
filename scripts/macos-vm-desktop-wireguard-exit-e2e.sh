@@ -44,13 +44,18 @@ RECOVERY_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 FIPS_NETWORK_ID="${NVPN_MACOS_FIPS_NETWORK_ID:-macos-release-roaming-$PPID-$$}"
 IMAGE="${NVPN_MACOS_WG_FIXTURE_IMAGE:-nostr-vpn-macos-wireguard-exit-e2e}"
 CONTAINER="${NVPN_MACOS_WG_FIXTURE_CONTAINER:-nostr-vpn-macos-wireguard-exit-e2e-$$}"
-FIXTURE_HOST="${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
+# The IPv4 WireGuard endpoint is intentionally separate from the FIPS peer's
+# public address. An IPv4 endpoint must follow the split default in the guest,
+# which proves the production Apple IP_BOUND_IF path rather than an endpoint
+# host-route fallback. FIPS keeps its independently routed IPv6 endpoint.
+FIXTURE_HOST="${NVPN_MACOS_WG_FIXTURE_IPV4:-}"
+FIPS_FIXTURE_HOST="${NVPN_MACOS_FIPS_PEER_HOST_IP:-${NVPN_MOBILE_WG_EXIT_HOST_IP:-}}"
 FIXTURE_DIR=""
 REMOTE_DIR=""
 SECONDARY_IP=""
 EXPECTED_EXIT_SOURCE_IP=""
 PACKAGE=""
-ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT/artifacts}/macos-release-network-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+ARTIFACT_DIR="${NVPN_MACOS_NETWORK_ARTIFACT_DIR:-${ARTIFACT_ROOT:-$ROOT/artifacts}/macos-release-network-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PRIMARY_CONTROL_PATH="/tmp/nvpn-macos-network-primary-$PPID-$$"
 SECONDARY_CONTROL_PATH="/tmp/nvpn-macos-network-secondary-$PPID-$$"
 MOBILE_WG_FIXTURE_REMOTE_MODE=""
@@ -84,8 +89,8 @@ valid_npub() {
   || { echo "macOS Release network gate requires the remote Vader fixture" >&2; exit 2; }
 [[ "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" == "native" ]] \
   || { echo "macOS Release network gate requires the native remote fixture" >&2; exit 2; }
-[[ -n "$FIXTURE_HOST" ]] \
-  || { echo "macOS Release network gate requires its env-only fixture address" >&2; exit 2; }
+[[ -n "$FIPS_FIXTURE_HOST" ]] \
+  || { echo "macOS Release network gate requires the FIPS fixture address" >&2; exit 2; }
 for port in "$HOST_PORT" "$FIPS_PEER_PORT" "$FIPS_CLIENT_LISTEN_PORT"; do
   [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && ((port <= 65535)) \
     || { echo "macOS Release network gate received an invalid UDP port" >&2; exit 2; }
@@ -289,6 +294,18 @@ parse_key_value() {
     '$1 == key { value = substr($0, length(key) + 2) } END { print value }'
 }
 
+discover_remote_fixture_ipv4() {
+  mobile_wg_remote_exec sh -c '
+    ip -4 route get 1.1.1.1 |
+      awk '"'"'{ for (field = 1; field <= NF; field++) {
+        if ($field == "src" && field < NF) {
+          print $(field + 1)
+          exit
+        }
+      } }'"'"'
+  '
+}
+
 prepare_host_fips_peer_binary() {
   FIPS_PEER_BINARY="$("$ROOT/scripts/prepare-macos-release-fips-peer.sh")"
   [[ "$FIPS_PEER_BINARY" == /* && -x "$FIPS_PEER_BINARY" ]] \
@@ -408,6 +425,10 @@ macos_vm_prepare_or_verify_imported_release "$ROOT" "$SSH_HOST"
 PACKAGE="$(macos_vm_imported_release_package "$GUEST_REPO")"
 prepare_host_fips_peer_binary
 
+if [[ -z "$FIXTURE_HOST" ]]; then
+  FIXTURE_HOST="$(discover_remote_fixture_ipv4)" \
+    || fail "could not discover the remote fixture's reachable IPv4 address"
+fi
 ENDPOINT_FIELDS="$(
   mobile_wg_endpoint_fields "$FIXTURE_HOST" "$HOST_PORT"
 )" || fail "remote fixture endpoint is malformed"
@@ -415,18 +436,18 @@ IFS=$'\t' read -r \
   MOBILE_WG_FIXTURE_ENDPOINT_FAMILY \
   FIXTURE_HOST \
   WIREGUARD_ENDPOINT_AUTHORITY <<<"$ENDPOINT_FIELDS"
-[[ "$MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" == "ipv6" ]] \
-  || fail "macOS underlay gate requires the real IPv6 Vader endpoint"
+[[ "$MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" == "ipv4" ]] \
+  || fail "macOS underlay gate requires a reachable numeric IPv4 WireGuard endpoint"
 FIPS_ENDPOINT_FIELDS="$(
-  mobile_wg_endpoint_fields "$FIXTURE_HOST" "$FIPS_PEER_PORT"
+  mobile_wg_endpoint_fields "$FIPS_FIXTURE_HOST" "$FIPS_PEER_PORT"
 )" || fail "remote FIPS peer endpoint is malformed"
 IFS=$'\t' read -r \
   fips_endpoint_family \
   fips_endpoint_host \
   FIPS_PEER_ENDPOINT_AUTHORITY <<<"$FIPS_ENDPOINT_FIELDS"
 [[ "$fips_endpoint_family" == "ipv6" \
-  && "$fips_endpoint_host" == "$FIXTURE_HOST" ]] \
-  || fail "remote FIPS peer must use the same real IPv6 Vader underlay"
+  && "$fips_endpoint_host" != "$FIXTURE_HOST" ]] \
+  || fail "remote FIPS peer must use its separate numeric IPv6 address"
 export NVPN_MOBILE_WG_EXIT_HOST_IP="$FIXTURE_HOST"
 export NVPN_MOBILE_WG_EXIT_REMOTE_MODE=native
 
@@ -625,6 +646,23 @@ fips_peer_remote wait-ready >"$ARTIFACT_DIR/fips-peer-after-underlay.json"
 fips_peer_remote listener-audit \
   >"$ARTIFACT_DIR/fips-peer-listener-after-underlay.txt"
 
+before_transfer="$(
+  mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
+)"
+before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
+remote_phase secondary crash-restart
+after_transfer="$(
+  mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
+)"
+after_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
+assert_increased "macOS SIGKILL/restart WireGuard bytes" \
+  "$before_transfer" "$after_transfer"
+assert_increased "macOS SIGKILL/restart forwarded packets" \
+  "$before_forward" "$after_forward"
+fips_peer_remote wait-ready >"$ARTIFACT_DIR/fips-peer-after-crash-restart.json"
+fips_peer_remote listener-audit \
+  >"$ARTIFACT_DIR/fips-peer-listener-after-crash-restart.txt"
+
 DNS_CASE_LABEL=direct-restore
 DNS_CASE_MODE=automatic
 DNS_CASE_PROVIDER=cloudflare
@@ -641,4 +679,4 @@ cleanup_fips_peer
 mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"
 
 echo "MACOS_VM_WIREGUARD_EXIT_E2E_OK"
-echo "Real Direct -> authenticated FIPS + WireGuard -> two-underlay handoff -> Direct and all five DNS modes passed"
+echo "Real Direct -> authenticated FIPS + IPv4 WireGuard -> two-underlay handoff -> SIGKILL/restart -> Direct and all five DNS modes passed"

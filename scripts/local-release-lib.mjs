@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto'
 import {
   closeSync,
+  lstatSync,
   openSync,
   readSync,
   statSync,
 } from 'node:fs'
 import { basename, join, posix as pathPosix } from 'node:path'
+
+import { validateReleaseGateAttestation } from './release-artifact-provenance-lib.mjs'
 
 export function sha256FileSync(path) {
   const hash = createHash('sha256')
@@ -150,6 +153,7 @@ export function validateAndroidReleaseGateReceipt(
   receipt,
   {
     apkSha256,
+    aabSha256,
     apkPathSha256,
     expectedAppGitSha,
     expectedAppGitTree,
@@ -176,6 +180,23 @@ export function validateAndroidReleaseGateReceipt(
     !== testedApkSha
   ) {
     throw new Error('Installed APK differs from the tested artifact sealed by the physical gate.')
+  }
+  const testedAabSha = String(aabSha256 ?? '').trim().toLowerCase()
+  if (
+    !/^[0-9a-f]{64}$/.test(testedAabSha)
+    || String(receipt.aabSha256 ?? '').trim().toLowerCase()
+      !== testedAabSha
+    || receipt.apkDerivedFromAab !== true
+    || !/^[0-9a-f]{64}$/.test(
+      String(receipt.bundleReceiptSha256 ?? '').trim().toLowerCase(),
+    )
+    || receipt.bundletoolVersion !== '1.18.3'
+    || receipt.bundletoolSha256
+      !== 'a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29'
+  ) {
+    throw new Error(
+      'Android APK was not physically gated from the exact Play AAB.',
+    )
   }
   if (
     !/^[0-9a-f]{64}$/.test(testedPathSha)
@@ -215,6 +236,7 @@ export function validateAndroidReleaseGateReceipt(
   return {
     receiptSchema: 2,
     apkSha256: testedApkSha,
+    aabSha256: testedAabSha,
     appGitSha,
     appGitTree,
     package: packageId,
@@ -544,6 +566,7 @@ export function validatePromotableReleaseManifest(manifest) {
   ) {
     throw new Error('Staged physical Android gate provenance is incomplete or inconsistent.')
   }
+  validateReleaseGateAttestation(manifest)
 }
 
 export function readWorkspaceVersionTag(cargoTomlText) {
@@ -938,6 +961,7 @@ export function buildReleaseManifest({
   assetPaths,
   draft = false,
   androidReleaseGate = null,
+  releaseGateAttestation = null,
 }) {
   const normalizedTag = normalizeTag(tag)
   const assets = [...assetPaths]
@@ -964,6 +988,9 @@ export function buildReleaseManifest({
   if (androidReleaseGate) {
     manifest.android_release_gate = androidReleaseGate
   }
+  if (releaseGateAttestation) {
+    manifest.release_gate_attestation = releaseGateAttestation
+  }
   return manifest
 }
 
@@ -983,10 +1010,17 @@ export function validateStagedReleaseTree(stageDir, manifest) {
     throw new Error('Release manifest does not contain an assets array.')
   }
 
+  const seenNames = new Set()
+  const seenPaths = new Set()
   for (const asset of manifest.assets) {
     if (!asset || typeof asset.path !== 'string' || typeof asset.name !== 'string') {
       throw new Error('Release manifest contains an asset without a name and path.')
     }
+    if (seenNames.has(asset.name) || seenPaths.has(asset.path)) {
+      throw new Error(`Release manifest contains a duplicate asset: ${asset.path}`)
+    }
+    seenNames.add(asset.name)
+    seenPaths.add(asset.path)
 
     const normalizedPath = pathPosix.normalize(asset.path)
     if (
@@ -1002,13 +1036,15 @@ export function validateStagedReleaseTree(stageDir, manifest) {
     const assetPath = join(stageDir, normalizedPath)
     let stats
     try {
-      stats = statSync(assetPath)
+      stats = lstatSync(assetPath)
     } catch {
       throw new Error(`Release manifest lists missing asset: ${asset.path}`)
     }
 
-    if (!stats.isFile()) {
-      throw new Error(`Release manifest asset is not a file: ${asset.path}`)
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new Error(
+        `Release manifest asset is not a regular non-symlink file: ${asset.path}`,
+      )
     }
 
     if (Number.isFinite(asset.size) && stats.size !== asset.size) {

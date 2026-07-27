@@ -385,14 +385,9 @@ fn corrupt_network_cleanup_ownership_remains_fail_closed() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[cfg(all(
-    unix,
-    any(target_os = "linux", target_os = "macos", target_os = "windows")
-))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[test]
-fn daemon_network_cleanup_snapshot_is_private() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn daemon_network_cleanup_snapshot_is_durable_and_private() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock is after epoch")
@@ -402,25 +397,36 @@ fn daemon_network_cleanup_snapshot_is_private() {
     let cleanup_path = daemon_network_cleanup_file_path(&dir.join("config.toml"));
     write_daemon_network_cleanup_state(&cleanup_path, &DaemonNetworkCleanupState::default())
         .expect("persist cleanup ownership privately");
+    assert!(
+        read_daemon_network_cleanup_state(&cleanup_path)
+            .expect("read durable cleanup ownership")
+            .is_some(),
+        "cleanup ownership must survive durable readback"
+    );
 
-    let mode = fs::metadata(&cleanup_path)
-        .expect("cleanup metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600, "cleanup snapshots may contain WireGuard keys");
-
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        let parent_mode = fs::metadata(cleanup_path.parent().expect("cleanup parent"))
-            .expect("cleanup parent metadata")
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(&cleanup_path)
+            .expect("cleanup metadata")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(
-            parent_mode, 0o700,
-            "Linux cleanup temp/final files need a private parent directory"
-        );
+        assert_eq!(mode, 0o600, "cleanup snapshots may contain WireGuard keys");
+
+        #[cfg(target_os = "linux")]
+        {
+            let parent_mode = fs::metadata(cleanup_path.parent().expect("cleanup parent"))
+                .expect("cleanup parent metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                parent_mode, 0o700,
+                "Linux cleanup temp/final files need a private parent directory"
+            );
+        }
     }
 
     let _ = fs::remove_dir_all(&dir);

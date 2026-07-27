@@ -211,6 +211,10 @@ mod tests {
             recipient: admin_pubkey.clone(),
             requested_at: 1_778_998_001,
         });
+        assert!(
+            !config.active_network_has_confirmed_local_identity(),
+            "an automatic join must remain pending until its signed roster arrives"
+        );
 
         assert!(
             config

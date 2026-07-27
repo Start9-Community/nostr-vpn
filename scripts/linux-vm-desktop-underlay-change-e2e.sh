@@ -15,11 +15,12 @@ PRIMARY_PROXY="${NVPN_UBUNTU_SSH_PROXY_COMMAND:-}"
 LINUX_JUMP="${NVPN_UBUNTU_SSH_JUMP:-}"
 GUEST_SRC_ROOT="${NVPN_LINUX_UNDERLAY_GUEST_SRC_ROOT:-src/nvpn-desktop-underlay/linux-target}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn-release-gate"
-GUEST_BINARY="$GUEST_REPO/target/release/nvpn"
+RUN_TOKEN="linux-$$-$RANDOM"
+GUEST_IMPORT_DIR="/tmp/nvpn-linux-underlay-release-$RUN_TOKEN"
+GUEST_BINARY="$GUEST_IMPORT_DIR/nvpn"
 LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
 EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
 FIPS_SOURCE_REVISION=""
-GUEST_FIPS_REPO="$GUEST_SRC_ROOT/fips-release-gate"
 HYPERVISOR_BINARY=""
 RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 NETWORK_ID="${NVPN_LINUX_UNDERLAY_NETWORK_ID:-desktop-underlay-linux-release-gate}"
@@ -29,7 +30,6 @@ SECONDARY_NETMASK="${NVPN_LINUX_UNDERLAY_SECONDARY_NETMASK:-255.255.255.0}"
 SECONDARY_PREFIX="${NVPN_LINUX_UNDERLAY_SECONDARY_PREFIX:-24}"
 FIXTURE_DNS_NAME="${NVPN_DESKTOP_UNDERLAY_FIXTURE_DNS_NAME:-underlay-gate.nvpn.test}"
 PROBE_URL="${NVPN_DESKTOP_UNDERLAY_PROBE_URL:-https://example.com/}"
-RUN_TOKEN="linux-$$-$RANDOM"
 NETWORK_NAME="nvpn-underlay-$RUN_TOKEN"
 PEER_STATE_DIR="/tmp/nvpn-underlay-peer-$RUN_TOKEN"
 GUEST_STATE_DIR="/tmp/nvpn-underlay-target-$RUN_TOKEN"
@@ -51,6 +51,11 @@ PEER_NAMESPACE_PREFIX="${NVPN_LINUX_UNDERLAY_PEER_NAMESPACE_PREFIX:-30}"
 PEER_FORWARD_CHAIN="nvf$((RANDOM % 100000))"
 PEER_NAT_CHAIN="nvn$((RANDOM % 100000))"
 ARTIFACT_DIR="${NVPN_LINUX_UNDERLAY_ARTIFACT_DIR:-$ROOT/artifacts/desktop-underlay/linux-$RUN_TOKEN}"
+TARGET_RELEASE_BUNDLE="${NVPN_HOST_LINUX_VM_BUNDLE_DIR:-}"
+TARGET_RELEASE_BINARY=""
+TARGET_RELEASE_RECEIPT=""
+TARGET_RELEASE_SHA256=""
+TARGET_RELEASE_SIZE=""
 SECONDARY_MAC=""
 PRIMARY_MAC=""
 PRIMARY_IFACE=""
@@ -113,9 +118,9 @@ resolve_expected_fips_revision() {
     || fail "set NVPN_EXPECTED_FIPS_REV to the intended FIPS Git revision"
 }
 
-sync_and_build_candidates() {
+sync_and_import_candidates() {
   local expected_tree target_tree
-  local expected_fips_tree="" target_fips_tree=""
+  local host_peer_import_status=0
   expected_tree="$(current_tree)"
   {
     printf 'nvpn_base_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"
@@ -127,71 +132,63 @@ sync_and_build_candidates() {
   } >"$ARTIFACT_DIR/source-provenance.txt"
   env NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
     "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
-
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    for crate in fips-core fips-endpoint fips-identity; do
-      [[ -f "$LOCAL_FIPS_REPO/crates/$crate/Cargo.toml" ]] \
-        || fail "NVPN_FIPS_REPO_PATH is missing crates/$crate/Cargo.toml"
-    done
-    expected_fips_tree="$(current_tree "$LOCAL_FIPS_REPO")"
-    env \
-      NVPN_UBUNTU_LOCAL_REPO_PATH="$LOCAL_FIPS_REPO" \
-      NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
-      NVPN_UBUNTU_GUEST_REPO_NAME=fips-release-gate \
-      NVPN_UBUNTU_REPO_LABEL=fips \
-      NVPN_UBUNTU_GIT_REF=refs/heads/codex/ubuntu-vm-fips-sync \
-      "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
-    run_primary \
-      "git -C '$GUEST_FIPS_REPO' checkout --detach '$FIPS_SOURCE_REVISION' >/dev/null"
-  fi
-
   target_tree="$(run_primary "git -C '$GUEST_REPO' rev-parse 'HEAD^{tree}'")"
   [[ "$target_tree" == "$expected_tree" ]] \
     || fail "Linux target tree differs from the release-gate tree"
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    target_fips_tree="$(run_primary \
-      "git -C '$GUEST_FIPS_REPO' rev-parse 'HEAD^{tree}'")"
-    [[ "$target_fips_tree" == "$expected_fips_tree" ]] \
-      || fail "Linux target FIPS tree differs from the local release-gate tree"
-  fi
-
-  primary_ssh_command
-  "${LINUX_PRIMARY_SSH[@]}" bash -s -- \
-    "$GUEST_REPO" "$([[ -n "$LOCAL_FIPS_REPO" ]] && echo "$GUEST_FIPS_REPO" || true)" \
-    >"$ARTIFACT_DIR/target-linux-check.log" 2>&1 <<'SH' &
-set -euo pipefail
-repo="$1"
-fips="${2:-}"
-cd "$repo/linux"
-cargo_args=()
-if [[ -n "$fips" ]]; then
-  [[ "$fips" == /* ]] || fips="$HOME/$fips"
-  cargo_args=(
-    --config "patch.crates-io.fips-core.path='$fips/crates/fips-core'"
-    --config "patch.crates-io.fips-endpoint.path='$fips/crates/fips-endpoint'"
-    --config "patch.crates-io.fips-identity.path='$fips/crates/fips-identity'"
-  )
-  cargo "${cargo_args[@]}" update --offline -p fips-core -p fips-endpoint -p fips-identity
-fi
-cargo "${cargo_args[@]}" check --locked --offline
-SH
-  local target_check_pid="$!"
-  local host_peer_import_status=0 target_check_status=0
   desktop_underlay_import_host_peer \
     >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
     || host_peer_import_status="$?"
-  wait "$target_check_pid" || target_check_status="$?"
-  if [[ "$host_peer_import_status" != "0" \
-    || "$target_check_status" != "0" ]]
-  then
+  if [[ "$host_peer_import_status" != "0" ]]; then
     echo "Host peer import status: $host_peer_import_status" >&2
     tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
-    echo "Linux target GTK check status: $target_check_status" >&2
-    tail -n 120 "$ARTIFACT_DIR/target-linux-check.log" >&2 || true
-    fail "parallel host-peer import or Linux target check failed"
+    fail "host-built Linux candidate import failed"
   fi
 
-  GUEST_BINARY_COPY_TMP="$GUEST_BINARY.copy-$RUN_TOKEN"
+  [[ -n "$TARGET_RELEASE_BUNDLE" \
+    && "$TARGET_RELEASE_BUNDLE" == /* \
+    && -d "$TARGET_RELEASE_BUNDLE" ]] \
+    || fail "Linux underlay gate requires the host-built release bundle"
+  TARGET_RELEASE_BINARY="$TARGET_RELEASE_BUNDLE/nvpn"
+  TARGET_RELEASE_RECEIPT="$TARGET_RELEASE_BUNDLE/receipt.json"
+  [[ -x "$TARGET_RELEASE_BINARY" && -f "$TARGET_RELEASE_RECEIPT" ]] \
+    || fail "host-built Linux release bundle is incomplete"
+  python3 - \
+    "$TARGET_RELEASE_RECEIPT" \
+    "$TARGET_RELEASE_BINARY" \
+    "$(git -C "$ROOT" rev-parse HEAD)" \
+    "$expected_tree" \
+    "$FIPS_SOURCE_REVISION" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+receipt_path, binary_path, app_sha, app_tree, fips_sha = sys.argv[1:]
+receipt_file = pathlib.Path(receipt_path)
+binary = pathlib.Path(binary_path)
+receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+cli = receipt.get("artifacts", {}).get("cli", {})
+if (
+    receipt.get("schema") != 1
+    or receipt.get("builtOnHostMac") is not True
+    or receipt.get("builtOnRemoteVm") is not False
+    or receipt.get("appGitSha") != app_sha
+    or receipt.get("appGitTree") != app_tree
+    or receipt.get("fipsGitSha") != fips_sha
+    or cli.get("sha256") != digest
+    or cli.get("size") != binary.stat().st_size
+):
+    raise SystemExit("host-built Linux release bundle receipt differs")
+PY
+  TARGET_RELEASE_SHA256="$(
+    shasum -a 256 "$TARGET_RELEASE_BINARY" | awk '{ print $1 }'
+  )"
+  TARGET_RELEASE_SIZE="$(stat -f '%z' "$TARGET_RELEASE_BINARY")"
+  cp "$TARGET_RELEASE_RECEIPT" \
+    "$ARTIFACT_DIR/tested-artifact-receipt.json"
+
+  GUEST_BINARY_COPY_TMP="$GUEST_IMPORT_DIR/nvpn.copy"
   local -a primary_scp
   primary_scp=(scp -q -o BatchMode=yes -o ConnectTimeout=10)
   if [[ -n "$PRIMARY_PROXY" ]]; then
@@ -199,25 +196,82 @@ SH
   elif [[ -n "$LINUX_JUMP" ]]; then
     primary_scp+=(-J "$LINUX_JUMP")
   fi
-  run_primary "mkdir -p '$(dirname "$GUEST_BINARY")'"
-  "${primary_scp[@]}" "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" \
-    "$LINUX_SSH:$GUEST_BINARY_COPY_TMP"
   run_primary \
-    "chmod 0755 '$GUEST_BINARY_COPY_TMP' && mv -f '$GUEST_BINARY_COPY_TMP' '$GUEST_BINARY'"
+    "test ! -e '$GUEST_IMPORT_DIR' && install -d -m 0700 '$GUEST_IMPORT_DIR'"
+  "${primary_scp[@]}" "$TARGET_RELEASE_BINARY" \
+    "$LINUX_SSH:$GUEST_BINARY_COPY_TMP"
+  run_primary bash -s -- \
+    "$GUEST_IMPORT_DIR" \
+    "$TARGET_RELEASE_SHA256" \
+    "$TARGET_RELEASE_SIZE" \
+    "$EXPECTED_FIPS_REV" <<'GUEST'
+set -euo pipefail
+import_dir="$1"
+expected_sha="$2"
+expected_size="$3"
+expected_fips_rev="$4"
+case "$import_dir" in
+  /tmp/nvpn-linux-underlay-release-linux-*) ;;
+  *) exit 2 ;;
+esac
+[[ -d "$import_dir" && -O "$import_dir" && ! -L "$import_dir" ]]
+[[ -f "$import_dir/nvpn.copy" && ! -L "$import_dir/nvpn.copy" ]]
+chmod 0500 "$import_dir/nvpn.copy"
+[[ "$(sha256sum "$import_dir/nvpn.copy" | awk '{ print $1 }')" == "$expected_sha" ]]
+[[ "$(stat -c '%s' "$import_dir/nvpn.copy")" == "$expected_size" ]]
+file "$import_dir/nvpn.copy" | grep -Eq 'ELF 64-bit.*x86-64'
+"$import_dir/nvpn.copy" version --verbose \
+  | grep -Fq "(rev $expected_fips_rev)"
+mv "$import_dir/nvpn.copy" "$import_dir/nvpn"
+GUEST
   GUEST_BINARY_COPY_TMP=""
 
   local source_sha target_sha peer_sha
-  source_sha="$DESKTOP_UNDERLAY_HOST_PEER_SHA256"
+  source_sha="$TARGET_RELEASE_SHA256"
   target_sha="$(run_primary "sha256sum '$GUEST_BINARY' | cut -d ' ' -f1")"
   peer_sha="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
     "sha256sum '$HYPERVISOR_BINARY' | cut -d ' ' -f1")"
-  [[ "$source_sha" == "$target_sha" && "$source_sha" == "$peer_sha" ]] \
-    || fail "Linux target and imported peer binary SHA-256 receipts differ"
+  [[ "$source_sha" == "$target_sha" ]] \
+    || fail "Linux target differs from the exact host-built release CLI"
+  [[ "$peer_sha" == "$DESKTOP_UNDERLAY_HOST_PEER_SHA256" ]] \
+    || fail "Linux fixture peer differs from its exact host-built receipt"
   {
     printf 'source=%s\n' "$source_sha"
     printf 'target=%s\n' "$target_sha"
     printf 'peer=%s\n' "$peer_sha"
+    printf 'builtOnHostMac=true\n'
+    printf 'builtOnRemoteVm=false\n'
+    printf 'targetImportSize=%s\n' "$TARGET_RELEASE_SIZE"
+    printf 'targetImportDirectoryUnique=true\n'
   } >"$ARTIFACT_DIR/linux-binary-sha256.txt"
+  python3 - \
+    "$ARTIFACT_DIR/tested-artifact.json" \
+    "$ARTIFACT_DIR/tested-artifact-receipt.json" \
+    "$TARGET_RELEASE_SHA256" \
+    "$TARGET_RELEASE_SIZE" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+output, receipt_arg, cli_sha, cli_size = sys.argv[1:]
+receipt = pathlib.Path(receipt_arg)
+pathlib.Path(output).write_text(
+    json.dumps(
+        {
+            "cliSha256": cli_sha,
+            "cliSize": int(cli_size),
+            "artifactReceiptSha256": hashlib.sha256(
+                receipt.read_bytes()
+            ).hexdigest(),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
 }
 
 capture_version_receipts() {
@@ -568,20 +622,49 @@ counter_value() {
   parse_key_value "$key"
 }
 
+stable_dns_counters() {
+  local previous current attempt
+  previous="$(peer_command counters)"
+  for attempt in $(seq 1 20); do
+    sleep 0.2
+    current="$(peer_command counters)"
+    if [[ "$current" == "$previous" ]]; then
+      printf '%s\n' "$current"
+      return 0
+    fi
+    previous="$current"
+  done
+  fail "resolver path counters did not settle"
+}
+
 run_dns_case() {
   local name="$1"
   local counter="$2"
-  local before after
-  before="$(peer_command counters)"
+  local before after key before_value after_value
+  local -a counters=(cloudflare quad9 google fixture_dns)
+  before="$(stable_dns_counters)"
   signal_guest "dns-$name.go"
   wait_for_guest_marker "dns-$name.receipt" 30
-  after="$(peer_command counters)"
-  (( $(counter_value "$counter" <<<"$after") > $(counter_value "$counter" <<<"$before") )) \
-    || fail "$name did not create a real $counter resolver flow through the exit"
+  after="$(stable_dns_counters)"
+  for key in "${counters[@]}"; do
+    before_value="$(counter_value "$key" <<<"$before")"
+    after_value="$(counter_value "$key" <<<"$after")"
+    [[ "$before_value" =~ ^[0-9]+$ && "$after_value" =~ ^[0-9]+$ ]] \
+      || fail "$name returned an invalid $key resolver counter"
+    if [[ "$key" == "$counter" ]]; then
+      ((after_value > before_value)) \
+        || fail "$name did not create a real $counter resolver flow through the exit"
+    else
+      [[ "$after_value" == "$before_value" ]] \
+        || fail "$name also used the forbidden $key resolver path"
+    fi
+  done
   {
     printf 'case=%s\n' "$name"
-    printf 'before_%s=%s\n' "$counter" "$(counter_value "$counter" <<<"$before")"
-    printf 'after_%s=%s\n' "$counter" "$(counter_value "$counter" <<<"$after")"
+    for key in "${counters[@]}"; do
+      printf 'before_%s=%s\n' "$key" "$(counter_value "$key" <<<"$before")"
+      printf 'after_%s=%s\n' "$key" "$(counter_value "$key" <<<"$after")"
+    done
   } >>"$ARTIFACT_DIR/dns-matrix.txt"
 }
 
@@ -589,7 +672,7 @@ run_dns_matrix_and_direct_restore() {
   run_dns_case automatic cloudflare
   run_dns_case cloudflare cloudflare
   run_dns_case quad9 quad9
-  run_dns_case custom cloudflare
+  run_dns_case custom google
   run_dns_case through-exit fixture_dns
 
   signal_guest select-direct
@@ -606,6 +689,60 @@ run_dns_matrix_and_direct_restore() {
   ' "$ARTIFACT_DIR/direct-receipt.json" >/dev/null
   wait "$LINUX_RUN_PID"
   LINUX_RUN_PID=""
+}
+
+run_sigkill_restart_recovery() {
+  run_guest_primary crash-repair \
+    "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
+    "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
+    "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
+    "NVPN_UNDERLAY_LISTEN_PORT=$TARGET_LISTEN_PORT" \
+    "NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY=$WG_SERVER_PUBLIC_KEY" \
+    "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
+    "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
+    >"$ARTIFACT_DIR/crash-repair.log"
+  run_primary sudo -n cat "$GUEST_STATE_DIR/crash-repair.receipt.json" \
+    >"$ARTIFACT_DIR/crash-repair-receipt.json"
+  jq -e . "$ARTIFACT_DIR/crash-repair-receipt.json" >/dev/null
+  jq -e \
+    --arg binary_sha256 "$TARGET_RELEASE_SHA256" \
+    --argjson deadline "$RECOVERY_DEADLINE_MS" '
+      .binary_sha256 == $binary_sha256
+      and .sigkill_exit_code == 137
+      and .fresh_wireguard_handshake == true
+      and .through_exit_dns_before_crash == true
+      and .verified_https_before_crash == true
+      and .cleanup_journal_survived_sigkill == true
+      and .wireguard_interface_survived_sigkill == true
+      and .wireguard_endpoint_route_survived_sigkill == true
+      and .wireguard_policy_rule_survived_sigkill == true
+      and .wireguard_policy_table_survived_sigkill == true
+      and .secure_dns_cleanup_ownership_survived_sigkill == true
+      and .startup_repair_without_explicit_command == true
+      and .cleanup_journal_removed == true
+      and .wireguard_interface_removed == true
+      and .wireguard_endpoint_route_removed == true
+      and .wireguard_policy_rule_removed == true
+      and .wireguard_policy_table_empty == true
+      and .secure_dns_cleanup_ownership_removed == true
+      and .physical_default_restored == true
+      and .public_dns_restored == true
+      and .verified_https_after_restart == true
+      and .restart_daemon_paused == true
+      and .restart_daemon_count == 1
+      and .restart_daemon_pid > 0
+      and .restart_repair_milliseconds <= $deadline
+    ' "$ARTIFACT_DIR/crash-repair-receipt.json" >/dev/null
+  run_primary sudo -n cat "$GUEST_STATE_DIR/crash-journal-ownership.json" \
+    >"$ARTIFACT_DIR/crash-journal-ownership.json"
+  jq -e \
+    --arg iface "$TARGET_TUN_IFACE" '
+      .iface == $iface
+      and .wireguard.interface == "nvpn-wg-exit"
+      and .wireguard.table == 51888
+      and .wireguard.priority == 10888
+      and .secure_dns.interface == $iface
+    ' "$ARTIFACT_DIR/crash-journal-ownership.json" >/dev/null
 }
 
 run_cleanup_fault_regression() {
@@ -640,7 +777,9 @@ capture_remote_state() {
         identity.json daemon.state.json daemon.stderr.log daemon.stdout.log \
         payload.log platform-network-monitor-probe.log signed-rosters.json \
         secondary-underlay-ready.json secondary.nm-uuid \
-        secondary.receipt.json primary.receipt.json direct.receipt.json" \
+        secondary.receipt.json primary.receipt.json direct.receipt.json \
+        crash-repair.receipt.json crash-journal-ownership.json \
+        crash-connect.stderr.log crash-restart-daemon.stderr.log" \
       | tar -C "$ARTIFACT_DIR/guest-state" -xf -
     captured=1
   fi
@@ -796,6 +935,25 @@ echo "LINUX_HYPERVISOR_CLEANUP_AUDIT_OK"
 SH
 }
 
+cleanup_guest_import() {
+  run_primary bash -s -- "$GUEST_IMPORT_DIR" <<'GUEST'
+set -euo pipefail
+import_dir="$1"
+case "$import_dir" in
+  /tmp/nvpn-linux-underlay-release-linux-*) ;;
+  *) exit 2 ;;
+esac
+if [[ -e "$import_dir" ]]; then
+  [[ -d "$import_dir" && ! -L "$import_dir" ]]
+  find "$import_dir" -xdev -depth -mindepth 1 -delete
+  rmdir "$import_dir"
+fi
+test ! -e "$import_dir"
+GUEST
+  printf 'remoteArtifactRemoved=true\n' \
+    >"$ARTIFACT_DIR/target-import-cleanup-audit.txt"
+}
+
 cleanup() {
   local status="$?"
   local cleanup_failed=0
@@ -846,6 +1004,7 @@ cleanup() {
     audit_hypervisor_cleanup >"$ARTIFACT_DIR/hypervisor-cleanup-audit.txt" 2>&1 \
       || cleanup_failed=1
   fi
+  cleanup_guest_import >/dev/null 2>&1 || cleanup_failed=1
   if [[ "$cleanup_failed" == "1" ]]; then
     echo "Linux underlay cleanup audit failed; inspect $ARTIFACT_DIR" >&2
     status=1
@@ -855,7 +1014,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 resolve_expected_fips_revision
-sync_and_build_candidates
+sync_and_import_candidates
 capture_version_receipts
 discover_primary_interface
 attach_secondary_network
@@ -865,6 +1024,7 @@ initialize_and_start_peer
 start_linux_runner
 run_underlay_switches
 run_dns_matrix_and_direct_restore
+run_sigkill_restart_recovery
 run_cleanup_fault_regression
 
 echo "LINUX_UNDERLAY_NETWORK_CHANGE_E2E_OK"

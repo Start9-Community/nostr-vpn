@@ -89,7 +89,17 @@ impl<P: WindowsManagedRouteSetPolicy> WindowsManagedRouteSet<P> {
     ) -> std::result::Result<Self, WindowsRouteApplyFailure<Self>> {
         let mut manager = Self::empty();
         manager.routes.reserve(specs.len());
-        for spec in specs {
+        for mut spec in specs {
+            if let Err(error) = runner.bind_interface_identity(&mut spec) {
+                let rollback = manager.revert_with(runner);
+                return Err(WindowsRouteApplyFailure {
+                    error: with_windows_route_rollback(
+                        error.context("bind Windows route to stable interface identity"),
+                        rollback,
+                    ),
+                    cleanup: manager,
+                });
+            }
             match ensure_windows_route(runner, &spec) {
                 Ok(owned) => manager.routes.push(WindowsManagedRoute { spec, owned }),
                 Err(error) => {
@@ -129,7 +139,10 @@ impl<P: WindowsManagedRouteSetPolicy> WindowsManagedRouteSet<P> {
 
         let mut fresh_routes = Vec::with_capacity(specs.len());
         let mut newly_owned = Vec::new();
-        for spec in specs {
+        for mut spec in specs {
+            runner
+                .bind_interface_identity(&mut spec)
+                .context("bind reconciled Windows route to stable interface identity")?;
             let existing = self.routes.iter().find(|route| route.spec == spec).cloned();
             let ensured = if let Some(existing) = existing.as_ref() {
                 ensure_tracked_windows_route(runner, &spec, existing.owned)
@@ -312,6 +325,8 @@ impl<P: WindowsManagedRouteSetPolicy> WindowsManagedRouteSet<P> {
 pub(crate) struct WindowsManagedEndpointRoutes {
     underlay: WindowsDefaultRoute,
     routes: WindowsManagedRouteSet<WindowsEndpointRouteSet>,
+    #[cfg(target_os = "windows")]
+    cleanup_journal_config_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -328,6 +343,8 @@ impl WindowsManagedEndpointRoutes {
                 cleanup: Self {
                     underlay,
                     routes: WindowsManagedRouteSet::empty(),
+                    #[cfg(target_os = "windows")]
+                    cleanup_journal_config_path: None,
                 },
             });
         }
@@ -336,12 +353,19 @@ impl WindowsManagedEndpointRoutes {
             .map(|target| WindowsRouteSpec::endpoint(target, &underlay))
             .collect();
         match WindowsManagedRouteSet::apply_with(runner, specs) {
-            Ok(routes) => Ok(Self { underlay, routes }),
+            Ok(routes) => Ok(Self {
+                underlay,
+                routes,
+                #[cfg(target_os = "windows")]
+                cleanup_journal_config_path: None,
+            }),
             Err(failure) => Err(WindowsRouteApplyFailure {
                 error: failure.error,
                 cleanup: Self {
                     underlay,
                     routes: failure.cleanup,
+                    #[cfg(target_os = "windows")]
+                    cleanup_journal_config_path: None,
                 },
             }),
         }
@@ -377,6 +401,8 @@ impl WindowsManagedEndpointRoutes {
 pub(crate) struct WindowsManagedInterfaceRoutes {
     interface_index: u32,
     routes: WindowsManagedRouteSet<WindowsInterfaceRouteSet>,
+    #[cfg(target_os = "windows")]
+    cleanup_journal_config_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -394,6 +420,8 @@ impl WindowsManagedInterfaceRoutes {
                     cleanup: Self {
                         interface_index,
                         routes: WindowsManagedRouteSet::empty(),
+                        #[cfg(target_os = "windows")]
+                        cleanup_journal_config_path: None,
                     },
                 });
             }
@@ -402,12 +430,16 @@ impl WindowsManagedInterfaceRoutes {
             Ok(routes) => Ok(Self {
                 interface_index,
                 routes,
+                #[cfg(target_os = "windows")]
+                cleanup_journal_config_path: None,
             }),
             Err(failure) => Err(WindowsRouteApplyFailure {
                 error: failure.error,
                 cleanup: Self {
                     interface_index,
                     routes: failure.cleanup,
+                    #[cfg(target_os = "windows")]
+                    cleanup_journal_config_path: None,
                 },
             }),
         }
@@ -450,10 +482,26 @@ impl WindowsRouteCleanupSnapshot {
         self.normalize();
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remove(&mut self, other: &Self) {
+        self.owned_routes
+            .retain(|route| !other.owned_routes.contains(route));
+        self.normalize();
+    }
+
     fn retry_with(&mut self, runner: &mut impl WindowsRouteCommandRunner) -> Result<()> {
         let mut remaining = Vec::new();
         let mut failures = Vec::new();
         for route in std::mem::take(&mut self.owned_routes) {
+            // Journals written before stable adapter identities were added
+            // cannot prove ownership of a route on a shared physical
+            // interface. Retire those endpoint-bypass obligations
+            // without issuing an unscoped delete. On-link routes belong to
+            // the process-created tunnel interface; they must still be
+            // removed or a stale default can leave the device offline.
+            if route.is_identityless_legacy_physical_bypass() {
+                continue;
+            }
             if let Err(error) = delete_windows_route_with_retry(runner, &route) {
                 failures.push(format!("{}: {error:#}", route.prefix));
                 remaining.push(route);
@@ -473,7 +521,7 @@ impl WindowsRouteCleanupSnapshot {
     fn normalize(&mut self) {
         self.owned_routes.sort_by(windows_route_spec_order);
         self.owned_routes
-            .dedup_by(|right, left| windows_route_identity_matches(left, right));
+            .dedup();
     }
 }
 
@@ -514,7 +562,7 @@ pub(crate) fn pending_windows_route_cleanup_snapshot() -> WindowsRouteCleanupSna
 pub(crate) fn retry_windows_route_cleanup_snapshot(
     cleanup: &mut WindowsRouteCleanupSnapshot,
 ) -> Result<()> {
-    cleanup.retry_with(&mut SystemWindowsRouteCommandRunner)
+    cleanup.retry_with(&mut SystemWindowsRouteCommandRunner::repair())
 }
 
 #[cfg(target_os = "windows")]
@@ -530,6 +578,7 @@ impl WindowsManagedEndpointRoutes {
     pub(crate) fn apply(
         targets: &[String],
         excluded_tunnel_interfaces: &[u32],
+        cleanup_journal_config_path: &std::path::Path,
     ) -> Result<Option<Self>> {
         retry_pending_windows_route_cleanup()?;
         let targets = windows_endpoint_target_ips(targets)?;
@@ -537,14 +586,22 @@ impl WindowsManagedEndpointRoutes {
             return Ok(None);
         }
         let underlay = capture_windows_default_route_excluding(excluded_tunnel_interfaces)?;
+        let mut runner =
+            SystemWindowsRouteCommandRunner::journaled(cleanup_journal_config_path);
         match Self::apply_with(
-            &mut SystemWindowsRouteCommandRunner,
+            &mut runner,
             &targets,
             underlay,
             excluded_tunnel_interfaces,
         ) {
-            Ok(routes) => Ok(Some(routes)),
+            Ok(mut routes) => {
+                routes.cleanup_journal_config_path =
+                    Some(cleanup_journal_config_path.to_path_buf());
+                Ok(Some(routes))
+            }
             Err(mut failure) => {
+                failure.cleanup.cleanup_journal_config_path =
+                    Some(cleanup_journal_config_path.to_path_buf());
                 retain_pending_windows_route_cleanup(
                     failure.cleanup.routes.take_cleanup_snapshot(),
                 );
@@ -565,8 +622,9 @@ impl WindowsManagedEndpointRoutes {
         } else {
             capture_windows_default_route_excluding(excluded_tunnel_interfaces)?
         };
+        let mut runner = self.system_runner();
         self.reconcile_with(
-            &mut SystemWindowsRouteCommandRunner,
+            &mut runner,
             &targets,
             underlay,
             excluded_tunnel_interfaces,
@@ -574,20 +632,29 @@ impl WindowsManagedEndpointRoutes {
     }
 
     pub(crate) fn revert(&mut self) -> Result<()> {
-        self.revert_with(&mut SystemWindowsRouteCommandRunner)
+        let mut runner = self.system_runner();
+        self.revert_with(&mut runner)
     }
 
     pub(crate) fn cleanup_snapshot(&self) -> WindowsRouteCleanupSnapshot {
         self.routes.cleanup_snapshot()
+    }
+
+    fn system_runner(&self) -> SystemWindowsRouteCommandRunner {
+        self.cleanup_journal_config_path.as_deref().map_or_else(
+            SystemWindowsRouteCommandRunner::repair,
+            SystemWindowsRouteCommandRunner::journaled,
+        )
     }
 }
 
 #[cfg(target_os = "windows")]
 impl Drop for WindowsManagedEndpointRoutes {
     fn drop(&mut self) {
+        let mut runner = self.system_runner();
         if let Err(error) = self
             .routes
-            .revert_retaining_pending_with(&mut SystemWindowsRouteCommandRunner)
+            .revert_retaining_pending_with(&mut runner)
         {
             eprintln!("fips: WARNING — owned Windows endpoint bypass cleanup failed: {error:#}");
         }
@@ -596,15 +663,27 @@ impl Drop for WindowsManagedEndpointRoutes {
 
 #[cfg(target_os = "windows")]
 impl WindowsManagedInterfaceRoutes {
-    pub(crate) fn apply(interface_index: u32, targets: &[String]) -> Result<Self> {
+    pub(crate) fn apply(
+        interface_index: u32,
+        targets: &[String],
+        cleanup_journal_config_path: &std::path::Path,
+    ) -> Result<Self> {
         retry_pending_windows_route_cleanup()?;
+        let mut runner =
+            SystemWindowsRouteCommandRunner::journaled(cleanup_journal_config_path);
         match Self::apply_with(
-            &mut SystemWindowsRouteCommandRunner,
+            &mut runner,
             interface_index,
             targets,
         ) {
-            Ok(routes) => Ok(routes),
+            Ok(mut routes) => {
+                routes.cleanup_journal_config_path =
+                    Some(cleanup_journal_config_path.to_path_buf());
+                Ok(routes)
+            }
             Err(mut failure) => {
+                failure.cleanup.cleanup_journal_config_path =
+                    Some(cleanup_journal_config_path.to_path_buf());
                 retain_pending_windows_route_cleanup(
                     failure.cleanup.routes.take_cleanup_snapshot(),
                 );
@@ -615,24 +694,34 @@ impl WindowsManagedInterfaceRoutes {
 
     pub(crate) fn reconcile(&mut self, targets: &[String]) -> Result<bool> {
         retry_pending_windows_route_cleanup()?;
-        self.reconcile_with(&mut SystemWindowsRouteCommandRunner, targets)
+        let mut runner = self.system_runner();
+        self.reconcile_with(&mut runner, targets)
     }
 
     pub(crate) fn revert(&mut self) -> Result<()> {
-        self.revert_with(&mut SystemWindowsRouteCommandRunner)
+        let mut runner = self.system_runner();
+        self.revert_with(&mut runner)
     }
 
     pub(crate) fn cleanup_snapshot(&self) -> WindowsRouteCleanupSnapshot {
         self.routes.cleanup_snapshot()
+    }
+
+    fn system_runner(&self) -> SystemWindowsRouteCommandRunner {
+        self.cleanup_journal_config_path.as_deref().map_or_else(
+            SystemWindowsRouteCommandRunner::repair,
+            SystemWindowsRouteCommandRunner::journaled,
+        )
     }
 }
 
 #[cfg(target_os = "windows")]
 impl Drop for WindowsManagedInterfaceRoutes {
     fn drop(&mut self) {
+        let mut runner = self.system_runner();
         if let Err(error) = self
             .routes
-            .revert_retaining_pending_with(&mut SystemWindowsRouteCommandRunner)
+            .revert_retaining_pending_with(&mut runner)
         {
             eprintln!("fips: WARNING — owned Windows tunnel route cleanup failed: {error:#}");
         }
@@ -726,13 +815,6 @@ fn restore_owned_windows_routes<P: WindowsManagedRouteSetPolicy>(
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn windows_route_identity_matches(left: &WindowsRouteSpec, right: &WindowsRouteSpec) -> bool {
-    left.prefix == right.prefix
-        && left.interface_index == right.interface_index
-        && left.next_hop == right.next_hop
-}
-
-#[cfg(any(test, target_os = "windows"))]
 fn windows_route_spec_order(
     left: &WindowsRouteSpec,
     right: &WindowsRouteSpec,
@@ -742,6 +824,7 @@ fn windows_route_spec_order(
         .then(left.interface_index.cmp(&right.interface_index))
         .then(left.next_hop.cmp(&right.next_hop))
         .then(left.metric.cmp(&right.metric))
+        .then(left.interface_identity.cmp(&right.interface_identity))
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -803,16 +886,34 @@ fn delete_windows_route_with_retry(
 ) -> Result<()> {
     let mut last_error = None;
     for _ in 0..WINDOWS_ROUTE_CLEANUP_ATTEMPTS {
-        match runner.route_identity_exists(route) {
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
+        match runner.route_exists(route) {
+            Ok(false) => match runner.route_identity_exists(route) {
+                Ok(false) => return runner.finish_route_cleanup(route),
+                Ok(true) => {}
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            },
+            Ok(true) => {
+                // The exact desired attributes still exist.
+            }
             Err(error) => {
                 last_error = Some(error);
                 continue;
             }
         }
+        if !route.is_identityless_legacy_tunnel_route()
+            && let Err(error) = runner.verify_interface_identity(route)
+        {
+            last_error = Some(error);
+            continue;
+        }
         match runner.delete_route(route) {
-            Ok(()) => return Ok(()),
+            Ok(()) => match runner.finish_route_cleanup(route) {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            },
             Err(error) => last_error = Some(error),
         }
     }

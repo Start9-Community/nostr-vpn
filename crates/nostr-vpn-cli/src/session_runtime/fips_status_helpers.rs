@@ -545,7 +545,11 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         if matches!(refresh, FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths) {
             // Reconcile routes, DNS, and the cached runtime config only after
             // the live carrier has accepted the new physical interface.
-            existing.apply_config(config).await?;
+            #[cfg(target_os = "macos")]
+            existing
+                .rebind_macos_wg_upstream_after_link_event(&config)
+                .await?;
+            apply_fips_private_tunnel_runtime_config(context.config_path, existing, config).await?;
         } else if matches!(
             refresh,
             FipsLinkEventRefresh::UpdatePeersAndRefreshPaths

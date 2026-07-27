@@ -133,8 +133,7 @@ impl Drafts {
         self.exit_dns_mode = state.exit_dns_mode.clone();
         self.exit_dns_doh_provider = state.exit_dns_doh_provider.clone();
         self.exit_dns_custom_doh_url = state.exit_dns_custom_doh_url.clone();
-        self.exit_dns_custom_doh_bootstrap_ips =
-            state.exit_dns_custom_doh_bootstrap_ips.clone();
+        self.exit_dns_custom_doh_bootstrap_ips = state.exit_dns_custom_doh_bootstrap_ips.clone();
         self.exit_dns_through_exit_servers = state.exit_dns_through_exit_servers.clone();
         if let Some(network) = active_network(state) {
             self.network_name = display_network_name(network);

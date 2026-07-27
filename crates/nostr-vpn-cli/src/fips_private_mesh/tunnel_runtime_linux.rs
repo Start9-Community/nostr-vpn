@@ -120,6 +120,11 @@ impl FipsPrivateTunnelRuntime {
                 self.restore_linux_original_default_ipv6_route();
             }
         }
+        // The saved physical defaults are the only information that can
+        // restore native internet after a hard crash. Fsync them before any
+        // endpoint, interface, split-default, firewall, or forwarding
+        // mutation below.
+        self.persist_network_cleanup_ownership()?;
 
         let endpoint_bypass_specs = if original_route_targets_require_bypass || strict_exit {
             let mut bypass_hosts = config.control_plane_bypass_hosts.clone();
@@ -248,24 +253,14 @@ impl FipsPrivateTunnelRuntime {
 
     #[cfg(target_os = "linux")]
     fn restore_linux_original_default_route(&mut self) {
-        let Some(route) = self.original_default_route.take() else {
-            return;
-        };
-        if let Err(error) = crate::restore_linux_default_route(&route) {
-            eprintln!("fips: failed to restore original default route: {error}");
-            self.original_default_route = Some(route);
-        }
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        restore_linux_saved_default(&mut self.original_default_route, false, &owned);
     }
 
     #[cfg(target_os = "linux")]
     fn restore_linux_original_default_ipv6_route(&mut self) {
-        let Some(route) = self.original_default_ipv6_route.take() else {
-            return;
-        };
-        if let Err(error) = crate::restore_linux_default_ipv6_route(&route) {
-            eprintln!("fips: failed to restore original IPv6 default route: {error}");
-            self.original_default_ipv6_route = Some(route);
-        }
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        restore_linux_saved_default(&mut self.original_default_ipv6_route, true, &owned);
     }
 
     #[cfg(target_os = "linux")]
@@ -337,15 +332,22 @@ impl FipsPrivateTunnelRuntime {
                         current
                     ));
                 }
-                crate::apply_linux_endpoint_bypass_route(&route).with_context(|| {
-                    format!("failed to install endpoint bypass route {}", route.target)
-                })?;
-                let managed = &mut self.endpoint_bypass_routes[index];
-                if !managed.owned {
-                    managed.previous_routes = current;
-                    managed.owned = true;
+                {
+                    let managed = &mut self.endpoint_bypass_routes[index];
+                    if !managed.owned {
+                        managed.previous_routes = current;
+                        managed.owned = true;
+                    }
+                    managed.route = route;
                 }
-                managed.route = route;
+                self.persist_network_cleanup_ownership()?;
+                let managed_route = self.endpoint_bypass_routes[index].route.clone();
+                crate::apply_linux_endpoint_bypass_route(&managed_route).with_context(|| {
+                    format!(
+                        "failed to install endpoint bypass route {}",
+                        managed_route.target
+                    )
+                })?;
                 continue;
             }
 
@@ -365,15 +367,23 @@ impl FipsPrivateTunnelRuntime {
                     current
                 ));
             }
-            crate::apply_linux_endpoint_bypass_route(&route).with_context(|| {
-                format!("failed to install endpoint bypass route {}", route.target)
-            })?;
             self.endpoint_bypass_routes
                 .push(crate::LinuxManagedEndpointBypassRoute {
                     route,
                     previous_routes: current,
                     owned: true,
                 });
+            self.persist_network_cleanup_ownership()?;
+            let managed = self
+                .endpoint_bypass_routes
+                .last()
+                .expect("managed endpoint route was just inserted");
+            crate::apply_linux_endpoint_bypass_route(&managed.route).with_context(|| {
+                format!(
+                    "failed to install endpoint bypass route {}",
+                    managed.route.target
+                )
+            })?;
         }
 
         let mut failures = Vec::new();
@@ -513,11 +523,13 @@ impl FipsPrivateTunnelRuntime {
         self.exit_node_runtime.ipv6_outbound_iface = ipv6_outbound_iface.clone();
         self.exit_node_runtime.ipv4_tunnel_source_cidr = ipv4_tunnel_source_cidr.clone();
         self.exit_node_runtime.ipv4_mss_clamp = Some(ipv4_mss_clamp);
+        self.persist_network_cleanup_ownership()?;
 
         if route_families.ipv4 {
             match crate::read_linux_ip_forward(crate::LinuxExitNodeIpFamily::V4) {
                 Ok(previous) => {
                     self.exit_node_runtime.ipv4_forward_was_enabled = Some(previous);
+                    self.persist_network_cleanup_ownership()?;
                     if !previous
                         && let Err(error) =
                             crate::write_linux_ip_forward(crate::LinuxExitNodeIpFamily::V4, true)
@@ -627,22 +639,49 @@ impl FipsPrivateTunnelRuntime {
         {
             runtime.refresh_underlay_default_route(refreshed_default);
         }
-        let runtime = match crate::apply_linux_wireguard_exit_upstream(
-            config,
-            source_cidr,
-            previous_runtime.as_ref(),
-            self.original_default_route.as_deref(),
-        ) {
+        let original_default_route = self.original_default_route.clone();
+        let apply_result = {
+            let mut persist_cleanup_intent =
+                |obligation: &crate::LinuxWireGuardExitCleanupObligation| {
+                    self.exit_node_runtime
+                        .pending_wireguard_exit_cleanup
+                        .clear();
+                    self.exit_node_runtime
+                        .pending_wireguard_exit_cleanup
+                        .push(obligation.clone());
+                    self.persist_network_cleanup_ownership()
+                };
+            crate::apply_linux_wireguard_exit_upstream(
+                config,
+                source_cidr,
+                previous_runtime.as_ref(),
+                original_default_route.as_deref(),
+                &mut persist_cleanup_intent,
+            )
+        };
+        let runtime = match apply_result {
             Ok(runtime) => runtime,
             Err(failure) => {
                 let (error, cleanup_obligation) = failure.into_parts();
                 if let Some(obligation) = cleanup_obligation {
                     self.exit_node_runtime
                         .pending_wireguard_exit_cleanup
+                        .clear();
+                    self.exit_node_runtime
+                        .pending_wireguard_exit_cleanup
                         .push(obligation);
                     self.exit_node_runtime.wireguard_exit = previous_runtime;
-                    return Err(error);
+                    return match self.persist_network_cleanup_ownership() {
+                        Ok(()) => Err(error),
+                        Err(persist) => Err(anyhow!(
+                            "{error:#}; failed to persist remaining WireGuard cleanup \
+                             ownership: {persist:#}"
+                        )),
+                    };
                 }
+                self.exit_node_runtime
+                    .pending_wireguard_exit_cleanup
+                    .clear();
                 if let Some(runtime) = previous_runtime.take() {
                     if let Err(cleanup) =
                         self.cleanup_detached_linux_wireguard_exit_upstream(&runtime)
@@ -653,19 +692,52 @@ impl FipsPrivateTunnelRuntime {
                         ));
                     }
                 }
-                return Err(error);
+                return match self.persist_network_cleanup_ownership() {
+                    Ok(()) => Err(error),
+                    Err(persist) => Err(anyhow!(
+                        "{error:#}; failed to persist completed WireGuard rollback: {persist:#}"
+                    )),
+                };
             }
         };
-        if let Err(error) = self.ensure_linux_wireguard_exit_inbound_guard(&runtime) {
+        self.exit_node_runtime
+            .pending_wireguard_exit_cleanup
+            .clear();
+        self.exit_node_runtime.wireguard_exit = Some(runtime);
+        // Persist the complete runtime before the inbound firewall mutation.
+        // The conservative apply rollback remains on disk if this replacement
+        // fails, so either journal can restore native internet after a crash.
+        self.persist_network_cleanup_ownership()?;
+        let inbound_guard = self
+            .exit_node_runtime
+            .wireguard_exit
+            .as_ref()
+            .ok_or_else(|| anyhow!("WireGuard runtime disappeared before inbound guard"))
+            .and_then(|runtime| self.ensure_linux_wireguard_exit_inbound_guard(runtime));
+        if let Err(error) = inbound_guard {
+            let runtime = self
+                .exit_node_runtime
+                .wireguard_exit
+                .take()
+                .expect("WireGuard runtime exists for inbound-guard rollback");
             if let Err(cleanup) = self.cleanup_detached_linux_wireguard_exit_upstream(&runtime) {
                 self.exit_node_runtime.wireguard_exit = Some(runtime);
-                return Err(anyhow!(
-                    "{error:#}; failed to roll back WireGuard after inbound-guard failure: {cleanup:#}"
-                ));
+                let persist = self.persist_network_cleanup_ownership().err();
+                return Err(match persist {
+                    Some(persist) => anyhow!(
+                        "{error:#}; failed to roll back WireGuard after inbound-guard failure \
+                         ({cleanup:#}); failed to persist remaining ownership ({persist:#})"
+                    ),
+                    None => anyhow!(
+                        "{error:#}; failed to roll back WireGuard after inbound-guard failure: \
+                         {cleanup:#}"
+                    ),
+                });
             }
+            self.persist_network_cleanup_ownership()?;
             return Err(error);
         }
-        self.exit_node_runtime.wireguard_exit = Some(runtime);
+        self.persist_network_cleanup_ownership()?;
         Ok(())
     }
 
@@ -718,6 +790,13 @@ impl FipsPrivateTunnelRuntime {
         }
         if let Err(error) = self.capture_linux_original_default_route(None) {
             eprintln!("fips: failed to capture WireGuard underlay default route: {error:#}");
+        }
+        if let Err(error) = self.persist_network_cleanup_ownership() {
+            eprintln!(
+                "fips: refusing to block the Linux default route without durable cleanup \
+                 ownership: {error:#}"
+            );
+            return;
         }
         self.block_linux_original_default_route();
     }

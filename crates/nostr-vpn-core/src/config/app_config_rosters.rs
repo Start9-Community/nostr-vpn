@@ -3,6 +3,13 @@ impl AppConfig {
         let Some(network) = self.active_network_opt() else {
             return false;
         };
+        self.network_has_confirmed_local_identity(&network.id)
+    }
+
+    pub fn network_has_confirmed_local_identity(&self, network_id: &str) -> bool {
+        let Some(network) = self.network_by_id(network_id) else {
+            return false;
+        };
         let Ok(own_pubkey) = self.own_nostr_pubkey_hex() else {
             return false;
         };
@@ -166,6 +173,9 @@ impl AppConfig {
         }
         network.shared_roster_updated_at = signed_at;
         network.shared_roster_signed_by = normalized_signed_by;
+        if own_in_shared_roster {
+            network.local_identity_confirmation_pending = false;
+        }
         if (suppressed_stale_devices || suppressed_stale_admins)
             && own_pubkey
                 .as_deref()
@@ -241,6 +251,9 @@ impl AppConfig {
 }
 
 fn local_identity_was_confirmed(network: &NetworkConfig, own_pubkey: &str) -> bool {
+    if network.local_identity_confirmation_pending {
+        return false;
+    }
     if network
         .devices
         .iter()

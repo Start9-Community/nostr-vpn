@@ -52,6 +52,11 @@ require_tokens "$RELEASE_GATE" "parallel macOS preparation" \
   'wait "$peer_build_pid"'
 require_tokens "$CONTROLLER" "host import and exact receipts" \
   'HTTP_PROBE_PORT="${NVPN_MACOS_WG_HTTP_PROBE_PORT:-$HOST_PORT}"' \
+  'FIXTURE_HOST="${NVPN_MACOS_WG_FIXTURE_IPV4:-}"' \
+  'discover_remote_fixture_ipv4' \
+  'requires a reachable numeric IPv4 WireGuard endpoint' \
+  'FIPS_FIXTURE_HOST=' \
+  'remote FIPS peer must use its separate numeric IPv6 address' \
   'prepare_host_fips_peer_binary' \
   'fips-peer-host-receipt.json' \
   'import_host_fips_peer_binary' \
@@ -60,7 +65,10 @@ require_tokens "$CONTROLLER" "host import and exact receipts" \
   'NVPN_MACOS_FIPS_PEER_BINARY_SHA256' \
   'fips_peer_remote clean-audit' \
   'preserving its state' \
-  'test ! -e "$FIPS_PEER_REMOTE_DIR"'
+  'test ! -e "$FIPS_PEER_REMOTE_DIR"' \
+  'remote_phase secondary crash-restart' \
+  'macOS SIGKILL/restart WireGuard bytes' \
+  'fips-peer-after-crash-restart.json'
 require_tokens "$REMOTE_PEER" "owned unique production peer" \
   'EXPECTED_BINARY_SHA256' \
   'EXPECTED_APP_SHA' \
@@ -116,12 +124,26 @@ require_tokens "$GUEST" "per-transition authenticated FIPS evidence" \
   'fips_route_interface_owns_tunnel_ip "$actual_iface"' \
   'fips-route-interface' \
   'runtime_fips_peer_connected "$status_file"' \
+  'wireguard_endpoint_route_state_valid "$expected_iface"' \
+  'wireguard_last_rebind_target_is "$expected_iface"' \
+  'wireguard_rebind_count' \
+  'runtime_dns_state_matches' \
   'status_file="$RESULT_DIR/fips-peer-$label.json"' \
   'primary-to-secondary' \
   'secondary-to-primary' \
   'primary_to_secondary_fips_pings=' \
   'secondary_to_primary_fips_pings=' \
   'RECOVERY_DEADLINE_MS'
+require_tokens "$GUEST" "real crash/restart cleanup evidence" \
+  'run_crash_restart_gate' \
+  'cleanup_journal_owns_wireguard_and_dns' \
+  'sudo -n /bin/kill -KILL "$old_pid"' \
+  'runtime_wireguard_state_is true false' \
+  'privileged_nvpn start --config "$CONFIG" --connect --daemon' \
+  'restart did not converge to exactly one owned daemon' \
+  'restart did not produce exactly one fresh WireGuard bind receipt' \
+  'daemon.cleanup.json' \
+  'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK'
 require_tokens "$GUEST" "production daemon PID record ownership" \
   'json.load(handle)' \
   'record.get("config_path") != config_path' \
@@ -166,7 +188,7 @@ def payload(count, peers):
                 "mesh_ready": True,
                 "connected_peer_count": count,
                 "listen_port": 51990,
-                "fips_core_version": "0.4.44 (rev 0123456789)",
+                "fips_core_version": "0.4.45 (rev 0123456789)",
                 "fips_endpoint_peers": [
                     {
                         "npub": peer,
@@ -246,6 +268,23 @@ for STATUS_FIXTURE in "$wrong" "$zero" "$two"; do
   fi
 done
 
+cat >"$state/daemon.cleanup.json" <<'EOF'
+{
+  "managed_routes": [
+    {"target": "0.0.0.0/1", "interface": "utun9"},
+    {"target": "128.0.0.0/1", "interface": "utun9"}
+  ],
+  "secure_dns_resolver_files": true
+}
+EOF
+cleanup_journal_owns_wireguard_and_dns
+printf '{"managed_routes":[],"secure_dns_resolver_files":true}\n' \
+  >"$state/daemon.cleanup.json"
+if cleanup_journal_owns_wireguard_and_dns; then
+  echo "crash journal accepted without both WireGuard split defaults" >&2
+  exit 1
+fi
+
 cat >"$state/underlay-fips-payload.tsv" <<EOF
 999	$expected
 1001	$expected
@@ -258,42 +297,60 @@ fi
 
 endpoint_route_interface() { printf 'en2\n'; }
 wireguard_interface() { printf 'utun9\n'; }
+wireguard_endpoint_route_state_valid() { return 0; }
+wireguard_last_rebind_target_is() {
+  [[ "$1" == "${WG_REBIND_TARGET:-en2}" ]]
+}
 fips_route_interface() { printf '%s\n' "${FIPS_ROUTE_INTERFACE:-utun8}"; }
 fips_route_interface_owns_tunnel_ip() {
   return "${FIPS_ROUTE_ADDRESS_STATUS:-0}"
 }
 payload_after() { return 0; }
 fips_payload_after() { return "${FIPS_PAYLOAD_STATUS:-0}"; }
+runtime_dns_state_matches() { return "${DNS_STATUS_STATUS:-0}"; }
 runtime_fips_peer_connected() { return "${FIPS_STATUS_STATUS:-0}"; }
 rebind_count() { printf '1\n'; }
+wireguard_rebind_count() { printf '1\n'; }
 printf 'utun8\n' >"$state/fips-route-interface"
-underlay_recovered en2 1000 1 "$state/transition.json"
+underlay_recovered en2 1000 1 1 "$state/transition.json"
 FIPS_ROUTE_INTERFACE=utun9
-if underlay_recovered en2 1000 1 "$state/transition.json"; then
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
   echo "transition accepted private payload through the WireGuard interface" >&2
   exit 1
 fi
 FIPS_ROUTE_INTERFACE=en2
-if underlay_recovered en2 1000 1 "$state/transition.json"; then
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
   echo "transition accepted private payload through the physical underlay" >&2
   exit 1
 fi
 FIPS_ROUTE_INTERFACE=utun8
 FIPS_ROUTE_ADDRESS_STATUS=1
-if underlay_recovered en2 1000 1 "$state/transition.json"; then
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
   echo "transition accepted a route through a utun that does not own the nVPN address" >&2
   exit 1
 fi
 FIPS_ROUTE_ADDRESS_STATUS=0
 FIPS_PAYLOAD_STATUS=1
-if underlay_recovered en2 1000 1 "$state/transition.json"; then
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
   echo "transition passed without fresh private-FIPS payload" >&2
   exit 1
 fi
 FIPS_PAYLOAD_STATUS=0
 FIPS_STATUS_STATUS=1
-if underlay_recovered en2 1000 1 "$state/transition.json"; then
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
   echo "transition passed without one authenticated FIPS peer" >&2
+  exit 1
+fi
+FIPS_STATUS_STATUS=0
+DNS_STATUS_STATUS=1
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
+  echo "transition passed without the configured DNS runtime state" >&2
+  exit 1
+fi
+DNS_STATUS_STATUS=0
+WG_REBIND_TARGET=en0
+if underlay_recovered en2 1000 1 1 "$state/transition.json"; then
+  echo "transition accepted a fresh WireGuard handshake on the wrong underlay" >&2
   exit 1
 fi
 BASH

@@ -521,9 +521,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                     vpn_status =
                                         format!("Roster applied, but FIPS reload failed ({error})");
                                 }
-                                if let Some(rt) = magic_dns_runtime.as_ref() {
-                                    rt.refresh_records(&app);
-                                }
+                                refresh_or_start_split_magic_dns(&mut magic_dns_runtime, &app);
                             }
                             if !drained.endpoint_hint_participants.is_empty()
                                 && let Err(error) =

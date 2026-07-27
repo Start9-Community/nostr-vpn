@@ -79,6 +79,16 @@ pub(crate) enum LinuxWireGuardExitCleanupObligation {
     RouteCacheFlush,
 }
 
+impl LinuxWireGuardExitCleanupObligation {
+    pub(crate) fn interface(&self) -> Option<&str> {
+        match self {
+            Self::ApplyRollback(rollback) => Some(&rollback.interface),
+            Self::CreatedInterface { interface } => Some(interface),
+            Self::RouteCacheFlush => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LinuxWireGuardExitRollbackObligation {
     interface: String,
@@ -113,22 +123,43 @@ pub(crate) fn apply_linux_wireguard_exit_upstream(
     source_cidr: &str,
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     previous_default_route_hint: Option<&str>,
+    persist_cleanup_intent: impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
 ) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
-    apply_linux_wireguard_exit_upstream_with(
+    apply_linux_wireguard_exit_upstream_with_journal(
         &mut SystemLinuxCommandRunner,
         config,
         source_cidr,
         previous_runtime,
         previous_default_route_hint,
+        persist_cleanup_intent,
     )
 }
 
+#[cfg(test)]
 fn apply_linux_wireguard_exit_upstream_with(
     runner: &mut impl LinuxCommandRunner,
     config: &WireGuardExitConfig,
     source_cidr: &str,
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     previous_default_route_hint: Option<&str>,
+) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
+    apply_linux_wireguard_exit_upstream_with_journal(
+        runner,
+        config,
+        source_cidr,
+        previous_runtime,
+        previous_default_route_hint,
+        |_| Ok(()),
+    )
+}
+
+fn apply_linux_wireguard_exit_upstream_with_journal(
+    runner: &mut impl LinuxCommandRunner,
+    config: &WireGuardExitConfig,
+    source_cidr: &str,
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    previous_default_route_hint: Option<&str>,
+    mut persist_cleanup_intent: impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
 ) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
     let iface = super::validate_linux_wireguard_exit_config(config).map_err(apply_failure)?;
     if previous_runtime
@@ -157,7 +188,44 @@ fn apply_linux_wireguard_exit_upstream_with(
     let kernel_config_file =
         write_temp_secret_file(&iface, "setconf", &kernel_config).map_err(apply_failure)?;
 
-    let created_interface = ensure_linux_wireguard_link(runner, &iface).map_err(apply_failure)?;
+    let created_interface = !linux_wireguard_link_exists(runner, &iface).map_err(apply_failure)?;
+    if created_interface {
+        let obligation = LinuxWireGuardExitCleanupObligation::CreatedInterface {
+            interface: iface.clone(),
+        };
+        if let Err(error) = persist_cleanup_intent(&obligation) {
+            let mut obligation = obligation;
+            return match cleanup_linux_wireguard_exit_obligation_with(runner, &mut obligation) {
+                Ok(()) => Err(apply_failure(error.context(
+                    "persist WireGuard interface creation intent before mutation",
+                ))),
+                Err(cleanup) => Err(LinuxWireGuardExitApplyFailure {
+                    error: anyhow!(
+                        "failed to persist WireGuard interface creation intent \
+                         ({error:#}); immediate cleanup also failed ({cleanup:#})"
+                    ),
+                    cleanup_obligation: Some(obligation),
+                }),
+            };
+        }
+        if let Err(error) = create_linux_wireguard_link(runner, &iface) {
+            // A failed command does not prove that RTM_NEWLINK did or did not
+            // happen. Replace the pre-mutation deletion intent before
+            // returning so a concurrently-created same-name interface is
+            // never claimed as ours after an observed failure.
+            let neutral_obligation = LinuxWireGuardExitCleanupObligation::RouteCacheFlush;
+            if let Err(persist) = persist_cleanup_intent(&neutral_obligation) {
+                return Err(LinuxWireGuardExitApplyFailure {
+                    error: anyhow!(
+                        "{error:#}; failed to retire uncertain WireGuard interface creation \
+                         intent: {persist:#}"
+                    ),
+                    cleanup_obligation: Some(neutral_obligation),
+                });
+            }
+            return Err(apply_failure(error));
+        }
+    }
     let snapshot = match capture_apply_snapshot(
         runner,
         config,
@@ -185,6 +253,34 @@ fn apply_linux_wireguard_exit_upstream_with(
             return Err(apply_failure(error));
         }
     };
+
+    let conservative_progress =
+        conservative_apply_progress(&endpoint_specs, previous_runtime, &snapshot);
+    let mut write_ahead_obligation =
+        LinuxWireGuardExitCleanupObligation::ApplyRollback(LinuxWireGuardExitRollbackObligation {
+            interface: iface.clone(),
+            source_cidr: source_cidr.to_string(),
+            snapshot: snapshot.clone(),
+            progress: conservative_progress,
+            created_interface,
+        });
+    if let Err(error) = persist_cleanup_intent(&write_ahead_obligation) {
+        return match cleanup_linux_wireguard_exit_obligation_with(
+            runner,
+            &mut write_ahead_obligation,
+        ) {
+            Ok(()) => Err(apply_failure(
+                error.context("persist WireGuard apply rollback before network mutation"),
+            )),
+            Err(cleanup) => Err(LinuxWireGuardExitApplyFailure {
+                error: anyhow!(
+                    "failed to persist WireGuard apply rollback before network mutation \
+                     ({error:#}); immediate cleanup also failed ({cleanup:#})"
+                ),
+                cleanup_obligation: Some(write_ahead_obligation),
+            }),
+        };
+    }
 
     let mut progress = ApplyProgress::default();
     if let Err(error) = apply_snapshot_mutations(
@@ -226,6 +322,41 @@ fn apply_linux_wireguard_exit_upstream_with(
         &snapshot,
         &progress,
     ))
+}
+
+fn conservative_apply_progress(
+    endpoint_specs: &[crate::LinuxEndpointBypassRoute],
+    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
+    snapshot: &ApplySnapshot,
+) -> ApplyProgress {
+    let mut endpoint_targets_started = endpoint_specs
+        .iter()
+        .map(|route| route.target.clone())
+        .collect::<Vec<_>>();
+    if let Some(runtime) = previous_runtime {
+        endpoint_targets_started.extend(
+            runtime
+                .endpoint_routes
+                .iter()
+                .filter(|route| {
+                    !endpoint_specs
+                        .iter()
+                        .any(|desired| desired.target == route.target)
+                })
+                .map(|route| route.target.clone()),
+        );
+    }
+    endpoint_targets_started.sort();
+    endpoint_targets_started.dedup();
+    ApplyProgress {
+        address_started: true,
+        endpoint_targets_started,
+        wireguard_started: true,
+        link_started: true,
+        table_started: true,
+        policy_rule_added: !snapshot.policy_rule_existed,
+        main_default_started: true,
+    }
 }
 
 fn apply_failure(error: anyhow::Error) -> LinuxWireGuardExitApplyFailure {

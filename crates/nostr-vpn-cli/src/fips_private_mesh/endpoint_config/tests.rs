@@ -33,6 +33,7 @@ mod endpoint_config_tests {
             advertised_endpoint: "192.168.50.20:51820".to_string(),
             advertise_public_endpoint: false,
             nostr_discovery_enabled,
+            advertise_on_nostr: true,
             webrtc_enabled,
             stun_servers: vec!["stun:stun.example.org:3478".to_string()],
             nostr_relays: vec!["wss://relay.example.org".to_string()],
@@ -63,6 +64,27 @@ mod endpoint_config_tests {
             !config.node.discovery.nostr.advertise,
             "the signed join request already supplies the joiner's npub"
         );
+        let TransportInstances::Single(udp) = &config.transports.udp else {
+            panic!("expected one UDP transport");
+        };
+        assert!(!udp.advertise_on_nostr());
+    }
+
+    #[test]
+    fn configured_control_peer_does_not_force_joiner_advertising() {
+        let mut transport = test_transport(true, false);
+        transport.advertise_on_nostr = false;
+        let endpoint_peers = fips_endpoint_peers_from_mesh(&[test_peer()], Vec::new(), Vec::new());
+        let config = fips_endpoint_config_with_open_discovery_limit(
+            &endpoint_peers,
+            Some(&transport),
+            resolve_private_mesh_mtu(None, None, None),
+            NostrDiscoveryPolicy::Open,
+            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
+        );
+
+        assert!(config.node.discovery.nostr.enabled);
+        assert!(!config.node.discovery.nostr.advertise);
         let TransportInstances::Single(udp) = &config.transports.udp else {
             panic!("expected one UDP transport");
         };

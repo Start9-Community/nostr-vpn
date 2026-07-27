@@ -179,7 +179,7 @@ impl NativeAppRuntime {
         });
         let is_local = participant == own_pubkey_hex;
         let reachable = vpn_active && (is_local || daemon_peer.is_some_and(|peer| peer.reachable));
-        let access_pending = Self::network_access_pending(network, own_pubkey_hex) && !is_local;
+        let access_pending = self.network_access_pending(network, own_pubkey_hex) && !is_local;
         let assigned_magic_dns_alias = self.config.peer_alias(participant).unwrap_or_default();
         let magic_dns_alias = if assigned_magic_dns_alias.is_empty() && is_local {
             self.config.self_magic_dns_label().unwrap_or_default()
@@ -289,15 +289,13 @@ impl NativeAppRuntime {
         }
     }
 
-    fn network_access_pending(network: &NetworkConfig, own_pubkey_hex: &str) -> bool {
-        if own_pubkey_hex.is_empty() || network.outbound_join_request.is_none() {
+    fn network_access_pending(&self, network: &NetworkConfig, own_pubkey_hex: &str) -> bool {
+        if own_pubkey_hex.is_empty() {
             return false;
         }
-        !network
-            .devices
-            .iter()
-            .chain(network.admins.iter())
-            .any(|member| member == own_pubkey_hex)
+        !self
+            .config
+            .network_has_confirmed_local_identity(&network.id)
     }
 
 }

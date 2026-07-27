@@ -74,6 +74,8 @@ include!("mobile_tunnel/magic_dns.rs");
 #[cfg(test)]
 mod tests {
     include!("mobile_tunnel/tests_core.rs");
+    include!("mobile_tunnel/tests_control_source.rs");
+    include!("mobile_tunnel/tests_pending_identity.rs");
     include!("mobile_tunnel/tests_identity.rs");
     include!("mobile_tunnel/tests_runtime_join_request.rs");
     include!("mobile_tunnel/tests_runtime.rs");

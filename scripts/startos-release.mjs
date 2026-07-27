@@ -91,8 +91,14 @@ function quote(arg) {
   return /[^\w./:@=-]/.test(value) ? JSON.stringify(value) : value
 }
 
-function run(command, args, { capture = false, dryRun = false } = {}) {
-  console.log(`$ ${[command, ...args].map(quote).join(' ')}`)
+function run(
+  command,
+  args,
+  { capture = false, dryRun = false, quiet = false } = {},
+) {
+  if (!quiet) {
+    console.log(`$ ${[command, ...args].map(quote).join(' ')}`)
+  }
   if (dryRun) {
     return ''
   }
@@ -188,6 +194,58 @@ export function validateStartosManifest(manifest, { arch, tag, revision = 0 }) {
   return manifest
 }
 
+export function inspectStartosReleasePackage({
+  packagePath,
+  arch,
+  tag,
+  revision,
+  quiet = false,
+}) {
+  const sourceVersion = readStartosSourceVersion(
+    readFileSync(startosVersionPath, 'utf8'),
+  )
+  const resolvedRevision = resolveStartosRevision(
+    revision ?? process.env.NVPN_STARTOS_REVISION,
+    sourceVersion,
+    tag,
+  )
+  const manifestText = run(
+    'start-cli',
+    ['s9pk', 'inspect', packagePath, 'manifest'],
+    { capture: true, quiet },
+  )
+  let manifest
+  try {
+    manifest = JSON.parse(manifestText)
+  } catch (error) {
+    throw new Error(`Could not parse StartOS manifest JSON: ${error.message}`)
+  }
+  validateStartosManifest(manifest, {
+    arch,
+    revision: resolvedRevision,
+    tag,
+  })
+  return {
+    manifest,
+    manifestSha256: createHash('sha256')
+      .update(canonicalJson(manifest))
+      .digest('hex'),
+  }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
 async function sha256(path) {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(path)) {
@@ -211,21 +269,21 @@ async function buildTarget({ dryRun, outputDir, revision, tag, target }) {
     return outputPath
   }
 
-  const manifestText = run(
-    'start-cli',
-    ['s9pk', 'inspect', packagePath, 'manifest'],
-    { capture: true },
-  )
-  let manifest
-  try {
-    manifest = JSON.parse(manifestText)
-  } catch (error) {
-    throw new Error(`Could not parse StartOS manifest JSON: ${error.message}`)
-  }
-  validateStartosManifest(manifest, { arch, revision, tag })
+  inspectStartosReleasePackage({
+    packagePath,
+    arch,
+    revision,
+    tag,
+  })
 
   mkdirSync(outputDir, { recursive: true })
   copyFileSync(packagePath, outputPath)
+  inspectStartosReleasePackage({
+    packagePath: outputPath,
+    arch,
+    revision,
+    tag,
+  })
   console.log(`Wrote ${outputPath}`)
   console.log(`SHA256 ${await sha256(outputPath)}  ${outputPath}`)
   return outputPath

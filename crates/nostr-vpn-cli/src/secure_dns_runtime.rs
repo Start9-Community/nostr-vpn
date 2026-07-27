@@ -13,12 +13,22 @@ use anyhow::{Context, Result, anyhow};
 use fips_endpoint::{FipsEndpoint, PeerIdentity};
 use nostr_vpn_core::config::ExitDnsResolverConfig;
 use nostr_vpn_core::secure_dns::{
-    SECURE_DNS_MAX_MESSAGE_BYTES, SecureDnsError, SecureDnsLookup, SecureDnsResolver,
-    WireGuardDnsResolver, build_servfail_response,
+    SECURE_DNS_MAX_MESSAGE_BYTES, SecureDnsLookup, build_servfail_response,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
+
+mod resolver;
+use resolver::{current_resolver, dns_resolver, resolve_fips_dns_if_handled};
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::cleanup_owned_macos_secure_dns_resolver_files;
+#[cfg(target_os = "macos")]
+use macos::{
+    macos_resolver_configs, remove_owned_macos_resolver_file, write_macos_resolver_atomically,
+};
 
 #[cfg(target_os = "macos")]
 const SECURE_DNS_PORT: u16 = 1053;
@@ -32,24 +42,31 @@ type SharedResolver = Arc<dyn SecureDnsLookup>;
 type ResolverState = Arc<RwLock<SharedResolver>>;
 type FipsDnsEndpoint = Option<Arc<FipsEndpoint>>;
 const FIPS_DNS_TTL_SECS: u32 = 30;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_DIRECT_RESOLV_CONF: &[u8] = b"# Managed by nvpn secure DNS\n\
+nameserver 127.0.0.1\n\
+options timeout:1 attempts:1\n";
 
 pub(crate) struct SecureDnsRuntime {
-    udp_task: JoinHandle<()>,
-    tcp_task: JoinHandle<()>,
+    udp_task: Option<JoinHandle<()>>,
+    tcp_task: Option<JoinHandle<()>>,
     records: Arc<RwLock<HashMap<String, Ipv4Addr>>>,
     resolver: ResolverState,
     resolver_config: ExitDnsResolverConfig,
-    _system_dns: SystemDnsGuard,
+    system_dns: SystemDnsGuard,
 }
 
 impl SecureDnsRuntime {
-    pub(crate) async fn start(
+    pub(crate) async fn start_into(
+        slot: &mut Option<Self>,
         interface: &str,
         interface_index: Option<u32>,
         records: HashMap<String, Ipv4Addr>,
         resolver_config: ExitDnsResolverConfig,
         fips_endpoint: FipsDnsEndpoint,
-    ) -> Result<Self> {
+        persist_cleanup_intent: impl FnOnce(&SystemDnsCleanupIntent) -> Result<()>,
+    ) -> Result<()> {
+        let cleanup_intent = system_dns_cleanup_intent(interface, interface_index)?;
         let udp = Arc::new(
             tokio::net::UdpSocket::bind(SECURE_DNS_BIND)
                 .await
@@ -72,22 +89,49 @@ impl SecureDnsRuntime {
             Arc::clone(&records),
             fips_endpoint,
         ));
-        let system_dns = match SystemDnsGuard::install(interface, interface_index) {
-            Ok(guard) => guard,
-            Err(error) => {
-                udp_task.abort();
-                tcp_task.abort();
-                return Err(error);
+        if let Err(error) = persist_cleanup_intent(&cleanup_intent) {
+            udp_task.abort();
+            tcp_task.abort();
+            return Err(error.context(
+                "persist secure DNS cleanup ownership before changing the system resolver",
+            ));
+        }
+        match SystemDnsGuard::install(cleanup_intent) {
+            Ok(system_dns) => {
+                *slot = Some(Self {
+                    udp_task: Some(udp_task),
+                    tcp_task: Some(tcp_task),
+                    records,
+                    resolver,
+                    resolver_config,
+                    system_dns,
+                });
+                Ok(())
             }
-        };
-        Ok(Self {
-            udp_task,
-            tcp_task,
-            records,
-            resolver,
-            resolver_config,
-            _system_dns: system_dns,
-        })
+            Err(mut failure) => {
+                if let Some(system_dns) = failure.cleanup_guard.take() {
+                    // A platform DNS mutation could not be rolled back. Keep
+                    // the localhost stub alive and retain exact cleanup
+                    // ownership in the caller's runtime slot. The enclosing
+                    // apply transaction journals that ownership before
+                    // returning this error.
+                    *slot = Some(Self {
+                        udp_task: Some(udp_task),
+                        tcp_task: Some(tcp_task),
+                        records,
+                        resolver,
+                        resolver_config,
+                        system_dns,
+                    });
+                } else {
+                    // The install either made no system change or rolled it
+                    // back completely, so the stub is no longer needed.
+                    udp_task.abort();
+                    tcp_task.abort();
+                }
+                Err(failure.error)
+            }
+        }
     }
 
     pub(crate) fn update_config(
@@ -121,50 +165,58 @@ impl SecureDnsRuntime {
         interface: Option<&str>,
         servers: &[IpAddr],
     ) -> Result<()> {
-        self._system_dns
+        self.system_dns
             .update_windows_wireguard_dns(interface, servers)
     }
 
-    pub(crate) async fn stop(self) {
-        let mut runtime = self;
-        runtime.udp_task.abort();
-        runtime.tcp_task.abort();
-        let _ = (&mut runtime.udp_task).await;
-        let _ = (&mut runtime.tcp_task).await;
+    pub(crate) async fn stop(&mut self) -> Result<()> {
+        // Keep the local stub alive until the OS resolver is restored. If
+        // resolver cleanup fails, callers retain this runtime and DNS keeps
+        // working while the exact cleanup is retried.
+        self.system_dns.cleanup()?;
+        if let Some(task) = self.udp_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.tcp_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        Ok(())
     }
-}
 
-fn dns_resolver(config: &ExitDnsResolverConfig) -> Result<SharedResolver> {
-    match config {
-        ExitDnsResolverConfig::Doh { .. } => Ok(Arc::new(
-            SecureDnsResolver::from_resolver_config(config)
-                .context("failed to initialize encrypted DNS")?,
-        )),
-        ExitDnsResolverConfig::ThroughExit { servers } => Ok(Arc::new(
-            WireGuardDnsResolver::new(servers)
-                .context("failed to initialize DNS through the selected exit")?,
-        )),
-        ExitDnsResolverConfig::FailClosed => Ok(Arc::new(FailClosedDnsResolver)),
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_cleanup_state(&self) -> Option<LinuxSecureDnsCleanupState> {
+        self.system_dns
+            .active
+            .then(|| self.system_dns.linux.clone())
     }
-}
 
-struct FailClosedDnsResolver;
-
-#[async_trait::async_trait]
-impl SecureDnsLookup for FailClosedDnsResolver {
-    async fn resolve(&self, _query: &[u8]) -> Result<Vec<u8>, SecureDnsError> {
-        Err(SecureDnsError::ExitNotReady)
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_cleanup_interface_index(&self) -> Option<u32> {
+        self.system_dns
+            .active
+            .then_some(self.system_dns.interface_index)
     }
-}
-
-fn current_resolver(resolver: &ResolverState) -> Option<SharedResolver> {
-    resolver.read().ok().map(|resolver| Arc::clone(&*resolver))
 }
 
 impl Drop for SecureDnsRuntime {
     fn drop(&mut self) {
-        self.udp_task.abort();
-        self.tcp_task.abort();
+        if let Err(error) = self.system_dns.cleanup() {
+            // Dropping JoinHandle detaches rather than cancels the tasks. Keep
+            // the stub serving when the OS still points at it.
+            eprintln!(
+                "secure DNS: resolver cleanup failed during drop; keeping local stub alive: \
+                 {error:#}"
+            );
+            return;
+        }
+        if let Some(task) = self.udp_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.tcp_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -334,35 +386,202 @@ async fn resolve_or_servfail(
     }
 }
 
-fn resolve_fips_dns_if_handled(
-    query: &[u8],
-) -> Option<(Vec<u8>, Option<fips_core::upper::dns::DnsResolvedIdentity>)> {
-    let request = hickory_proto::op::Message::from_vec(query).ok()?;
-    let name = request.queries.first()?.name.to_utf8();
-    let name = name.trim_end_matches('.');
-    if !name.to_ascii_lowercase().ends_with(".fips") {
-        return None;
-    }
-    fips_core::upper::dns::handle_dns_packet(
-        query,
-        FIPS_DNS_TTL_SECS,
-        &fips_core::upper::hosts::HostMap::new(),
-    )
-}
-
 struct SystemDnsGuard {
     #[cfg(target_os = "linux")]
-    linux: LinuxDnsRestore,
+    linux: LinuxSecureDnsCleanupState,
     #[cfg(target_os = "macos")]
     resolver_paths: Vec<PathBuf>,
     #[cfg(target_os = "windows")]
     interface_index: u32,
+    active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SystemDnsCleanupIntent {
+    #[cfg(target_os = "linux")]
+    Linux(LinuxSecureDnsCleanupState),
+    #[cfg(target_os = "macos")]
+    MacosResolverFiles,
+    #[cfg(target_os = "windows")]
+    WindowsInterface(u32),
+}
+
+struct SystemDnsInstallFailure {
+    error: anyhow::Error,
+    cleanup_guard: Option<SystemDnsGuard>,
+}
+
+fn system_dns_cleanup_intent(
+    interface: &str,
+    interface_index: Option<u32>,
+) -> Result<SystemDnsCleanupIntent> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = interface_index;
+        let direct_resolv_conf = linux_direct_resolv_conf_allowed(
+            std::path::Path::new("/.dockerenv").exists(),
+            std::path::Path::new("/run/openrc").exists()
+                || std::path::Path::new("/sbin/openrc").exists(),
+        );
+        let state = if direct_resolv_conf {
+            LinuxSecureDnsCleanupState::DirectResolvConf {
+                previous: read_linux_resolv_conf(std::path::Path::new("/etc/resolv.conf"))?,
+            }
+        } else {
+            LinuxSecureDnsCleanupState::Resolved {
+                interface: interface.to_string(),
+                interface_index: read_linux_interface_index(interface)?,
+            }
+        };
+        return Ok(SystemDnsCleanupIntent::Linux(state));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (interface, interface_index);
+        return Ok(SystemDnsCleanupIntent::MacosResolverFiles);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = interface;
+        return interface_index
+            .map(SystemDnsCleanupIntent::WindowsInterface)
+            .ok_or_else(|| anyhow!("Windows secure DNS requires a tunnel interface index"));
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!("secure system DNS is unsupported on this platform"))
+}
+
+impl SystemDnsInstallFailure {
+    fn rolled_back(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            cleanup_guard: None,
+        }
+    }
+
+    fn cleanup_pending(error: anyhow::Error, cleanup_guard: SystemDnsGuard) -> Self {
+        Self {
+            error,
+            cleanup_guard: Some(cleanup_guard),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
-enum LinuxDnsRestore {
-    Resolved { interface: String },
-    DirectResolvConf { previous: Vec<u8> },
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum LinuxSecureDnsCleanupState {
+    Resolved {
+        interface: String,
+        #[serde(default)]
+        interface_index: Option<u32>,
+    },
+    DirectResolvConf {
+        previous: Vec<u8>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+fn restore_linux_secure_dns(state: &LinuxSecureDnsCleanupState) -> Result<()> {
+    match state {
+        LinuxSecureDnsCleanupState::Resolved {
+            interface,
+            interface_index,
+        } => {
+            if !linux_resolved_link_is_owned(interface, *interface_index)? {
+                return Ok(());
+            }
+            run_checked(Command::new("resolvectl").args(["revert", interface]))
+        }
+        LinuxSecureDnsCleanupState::DirectResolvConf { previous } => {
+            let current = read_linux_resolv_conf(std::path::Path::new("/etc/resolv.conf"))?;
+            if linux_direct_resolv_conf_needs_restore(&current, previous) {
+                return write_linux_resolv_conf(previous)
+                    .context("failed to restore and sync /etc/resolv.conf");
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_direct_resolv_conf_needs_restore(current: &[u8], previous: &[u8]) -> bool {
+    current != previous
+        && (current == LINUX_DIRECT_RESOLV_CONF
+            || LINUX_DIRECT_RESOLV_CONF.starts_with(current)
+            || previous.starts_with(current))
+}
+
+#[cfg(target_os = "linux")]
+fn write_linux_resolv_conf(contents: &[u8]) -> Result<()> {
+    std::fs::write("/etc/resolv.conf", contents).context("write /etc/resolv.conf")?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/etc/resolv.conf")
+        .and_then(|file| file.sync_all())
+        .context("sync /etc/resolv.conf")
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_interface_index(interface: &str) -> Result<Option<u32>> {
+    let path = std::path::Path::new("/sys/class/net")
+        .join(interface)
+        .join("ifindex");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => Ok(Some(raw.trim().parse().with_context(|| {
+            format!("parse Linux interface index from {}", path.display())
+        })?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("read Linux interface index from {}", path.display())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resolved_link_is_owned(interface: &str, expected_index: Option<u32>) -> Result<bool> {
+    let interface_root = std::path::Path::new("/sys/class/net").join(interface);
+    if !interface_root.exists() {
+        return Ok(false);
+    }
+    if let Some(expected_index) = expected_index
+        && read_linux_interface_index(interface)? != Some(expected_index)
+    {
+        return Ok(false);
+    }
+    if !interface_root.join("tun_flags").exists() {
+        return Ok(false);
+    }
+    let output = Command::new("resolvectl")
+        .args(["dns", interface])
+        .output()
+        .context("query Linux per-link DNS ownership")?;
+    if !output.status.success() {
+        if !interface_root.exists() {
+            return Ok(false);
+        }
+        return Err(anyhow!(
+            "failed to query DNS for Linux link {interface}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_ascii_whitespace()
+        .any(|token| token == "127.0.0.1"))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn repair_linux_secure_dns_cleanup_state(
+    state: &mut Option<LinuxSecureDnsCleanupState>,
+) -> Result<()> {
+    let Some(restore) = state.as_ref() else {
+        return Ok(());
+    };
+    restore_linux_secure_dns(restore)?;
+    state.take();
+    let _ = Command::new("resolvectl").arg("flush-caches").status();
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -380,88 +599,135 @@ fn read_linux_resolv_conf(path: &std::path::Path) -> Result<Vec<u8>> {
 }
 
 impl SystemDnsGuard {
-    fn install(interface: &str, interface_index: Option<u32>) -> Result<Self> {
+    fn install(
+        cleanup_intent: SystemDnsCleanupIntent,
+    ) -> std::result::Result<Self, SystemDnsInstallFailure> {
         #[cfg(target_os = "linux")]
         {
-            let _ = interface_index;
-            let resolved = (|| -> Result<()> {
-                run_checked(Command::new("resolvectl").args(["dns", interface, "127.0.0.1"]))?;
-                run_checked(Command::new("resolvectl").args(["domain", interface, "~."]))?;
-                Ok(())
-            })();
-            if resolved.is_ok() {
-                let _ = Command::new("resolvectl").arg("flush-caches").status();
-                return Ok(Self {
-                    linux: LinuxDnsRestore::Resolved {
-                        interface: interface.to_string(),
-                    },
-                });
+            let SystemDnsCleanupIntent::Linux(cleanup_state) = cleanup_intent;
+            let install = match &cleanup_state {
+                LinuxSecureDnsCleanupState::Resolved { interface, .. } => (|| -> Result<()> {
+                    run_checked(Command::new("resolvectl").args(["dns", interface, "127.0.0.1"]))?;
+                    run_checked(Command::new("resolvectl").args(["domain", interface, "~."]))?;
+                    Ok(())
+                })(),
+                LinuxSecureDnsCleanupState::DirectResolvConf { .. } => {
+                    write_linux_resolv_conf(LINUX_DIRECT_RESOLV_CONF)
+                        .context("failed to install direct secure DNS resolver")
+                }
+            };
+            if let Err(install_error) = install {
+                let rollback = restore_linux_secure_dns(&cleanup_state);
+                crate::fips_private_mesh::record_linux_secure_dns_cleanup(
+                    cleanup_state.clone(),
+                    &rollback,
+                );
+                return match rollback {
+                    Ok(()) => Err(SystemDnsInstallFailure::rolled_back(install_error)),
+                    Err(rollback_error) => Err(SystemDnsInstallFailure::cleanup_pending(
+                        anyhow!(
+                            "failed to install Linux secure DNS ({install_error:#}); \
+                                 rollback also failed ({rollback_error:#})"
+                        ),
+                        Self {
+                            linux: cleanup_state,
+                            active: true,
+                        },
+                    )),
+                };
             }
-            let _ = Command::new("resolvectl")
-                .args(["revert", interface])
-                .status();
-            let direct_resolv_conf_allowed = linux_direct_resolv_conf_allowed(
-                std::path::Path::new("/.dockerenv").exists(),
-                std::path::Path::new("/run/openrc").exists()
-                    || std::path::Path::new("/sbin/openrc").exists(),
-            );
-            if !direct_resolv_conf_allowed {
-                return Err(resolved.expect_err("failed resolved setup has an error"));
-            }
-            let path = std::path::Path::new("/etc/resolv.conf");
-            let previous = read_linux_resolv_conf(path)?;
-            std::fs::write(
-                path,
-                b"# Managed by nvpn secure DNS\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n",
-            )
-            .context("failed to install container secure DNS resolver")?;
+            let _ = Command::new("resolvectl").arg("flush-caches").status();
             return Ok(Self {
-                linux: LinuxDnsRestore::DirectResolvConf { previous },
+                linux: cleanup_state,
+                active: true,
             });
         }
 
         #[cfg(target_os = "macos")]
         {
-            let _ = (interface, interface_index);
-            let resolver_configs = [
-                (
-                    PathBuf::from("/etc/resolver/nvpn-secure-dns"),
-                    macos_secure_dns_resolver_config(),
-                ),
-                (
-                    PathBuf::from("/etc/resolver/nvpn"),
-                    macos_magic_dns_resolver_config(),
-                ),
-            ];
+            let SystemDnsCleanupIntent::MacosResolverFiles = cleanup_intent;
+            let resolver_configs = macos_resolver_configs();
             if let Some(parent) = resolver_configs[0].0.parent() {
                 std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
+                    .with_context(|| format!("failed to create {}", parent.display()))
+                    .map_err(SystemDnsInstallFailure::rolled_back)?;
             }
-            let mut resolver_paths = Vec::with_capacity(resolver_configs.len());
+            let mut resolver_paths: Vec<PathBuf> = Vec::with_capacity(resolver_configs.len());
             for (resolver_path, config) in resolver_configs {
-                if let Err(error) = std::fs::write(&resolver_path, config) {
+                if let Err(error) = write_macos_resolver_atomically(&resolver_path, &config) {
+                    let mut rollback_failures = Vec::new();
                     for installed_path in &resolver_paths {
-                        let _ = std::fs::remove_file(installed_path);
+                        if let Err(rollback_error) =
+                            remove_owned_macos_resolver_file(installed_path)
+                        {
+                            rollback_failures.push(format!(
+                                "remove {}: {rollback_error}",
+                                installed_path.display()
+                            ));
+                        }
                     }
-                    return Err(error)
-                        .with_context(|| format!("failed to install {}", resolver_path.display()));
+                    if !rollback_failures.is_empty() {
+                        return Err(SystemDnsInstallFailure::cleanup_pending(
+                            anyhow!(
+                                "failed to install {}: {error}; rollback failed: {}",
+                                resolver_path.display(),
+                                rollback_failures.join("; ")
+                            ),
+                            Self {
+                                resolver_paths,
+                                active: true,
+                            },
+                        ));
+                    }
+                    return Err(SystemDnsInstallFailure::rolled_back(
+                        anyhow!(error)
+                            .context(format!("failed to install {}", resolver_path.display())),
+                    ));
                 }
                 resolver_paths.push(resolver_path);
             }
-            return Ok(Self { resolver_paths });
+            return Ok(Self {
+                resolver_paths,
+                active: true,
+            });
         }
 
         #[cfg(target_os = "windows")]
         {
-            let _ = interface;
-            let interface_index = interface_index
-                .ok_or_else(|| anyhow!("Windows secure DNS requires a tunnel interface index"))?;
-            run_windows_powershell(&windows_secure_dns_install_script(interface_index))?;
-            return Ok(Self { interface_index });
+            let SystemDnsCleanupIntent::WindowsInterface(interface_index) = cleanup_intent;
+            if let Err(install_error) =
+                run_windows_powershell(&windows_secure_dns_install_script(interface_index))
+            {
+                let rollback =
+                    run_windows_powershell(&windows_secure_dns_uninstall_script(interface_index));
+                crate::fips_private_mesh::record_windows_secure_dns_cleanup(
+                    interface_index,
+                    &rollback,
+                );
+                return match rollback {
+                    Ok(()) => Err(SystemDnsInstallFailure::rolled_back(install_error)),
+                    Err(rollback_error) => Err(SystemDnsInstallFailure::cleanup_pending(
+                        anyhow!(
+                            "failed to install Windows secure DNS ({install_error:#}); \
+                             rollback also failed ({rollback_error:#})"
+                        ),
+                        Self {
+                            interface_index,
+                            active: true,
+                        },
+                    )),
+                };
+            }
+            return Ok(Self {
+                interface_index,
+                active: true,
+            });
         }
 
         #[allow(unreachable_code)]
-        Err(anyhow!("secure system DNS is unsupported on this platform"))
+        Err(SystemDnsInstallFailure::rolled_back(anyhow!(
+            "secure system DNS is unsupported on this platform"
+        )))
     }
 
     #[cfg(target_os = "windows")]
@@ -479,46 +745,63 @@ impl SystemDnsGuard {
             }
         }
     }
-}
 
-#[cfg(target_os = "macos")]
-fn macos_secure_dns_resolver_config() -> String {
-    format!(
-        "# Managed by nvpn\ndomain .\nsearch_order 1\nnameserver 127.0.0.1\nport {SECURE_DNS_PORT}\noptions timeout:1 attempts:1\n"
-    )
-}
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
 
-#[cfg(target_os = "macos")]
-fn macos_magic_dns_resolver_config() -> String {
-    format!(
-        "# Managed by nvpn secure DNS\nnameserver 127.0.0.1\nport {SECURE_DNS_PORT}\noptions timeout:1 attempts:1\n"
-    )
+        #[cfg(target_os = "linux")]
+        {
+            let result = restore_linux_secure_dns(&self.linux);
+            if result.is_ok() {
+                self.active = false;
+                let _ = Command::new("resolvectl").arg("flush-caches").status();
+            }
+            return result;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut failures = Vec::new();
+            let mut remaining = Vec::new();
+            for resolver_path in std::mem::take(&mut self.resolver_paths) {
+                match remove_owned_macos_resolver_file(&resolver_path) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        failures.push(format!("remove {}: {error}", resolver_path.display()));
+                        remaining.push(resolver_path);
+                    }
+                }
+            }
+            self.resolver_paths = remaining;
+            self.active = !self.resolver_paths.is_empty();
+            return if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!(failures.join("; ")))
+            };
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let result =
+                run_windows_powershell(&windows_secure_dns_uninstall_script(self.interface_index));
+            if result.is_ok() {
+                self.active = false;
+            }
+            return result;
+        }
+
+        #[allow(unreachable_code)]
+        Ok(())
+    }
 }
 
 impl Drop for SystemDnsGuard {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        match &self.linux {
-            LinuxDnsRestore::Resolved { interface } => {
-                let _ = Command::new("resolvectl")
-                    .args(["revert", interface])
-                    .status();
-                let _ = Command::new("resolvectl").arg("flush-caches").status();
-            }
-            LinuxDnsRestore::DirectResolvConf { previous } => {
-                let _ = std::fs::write("/etc/resolv.conf", previous);
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            for resolver_path in &self.resolver_paths {
-                let _ = std::fs::remove_file(resolver_path);
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let _ =
-                run_windows_powershell(&windows_secure_dns_uninstall_script(self.interface_index));
+        if let Err(error) = self.cleanup() {
+            eprintln!("secure DNS: cleanup failed: {error:#}");
         }
     }
 }
@@ -542,6 +825,16 @@ fn run_checked(command: &mut Command) -> Result<()> {
     ))
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn repair_windows_secure_dns(_interface_index: u32) -> Result<()> {
+    // The Wintun adapter is process-owned and normally disappears on a hard
+    // crash. A saved interface index can be reused by an unrelated adapter,
+    // so crash repair removes only nVPN's uniquely marked global NRPT rules.
+    // Live cleanup uses `windows_secure_dns_uninstall_script` while the
+    // runtime still owns the exact adapter.
+    run_windows_powershell(&windows_secure_dns_repair_script())
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn windows_secure_dns_install_script(interface_index: u32) -> String {
     format!(
@@ -549,7 +842,7 @@ fn windows_secure_dns_install_script(interface_index: u32) -> String {
             "$ErrorActionPreference = 'Stop'\n",
             "$displayName = 'nostr-vpn secure DNS'\n",
             "$comment = 'nostr-vpn authenticated DNS-over-HTTPS stub'\n",
-            "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -eq $displayName -or $_.Comment -eq $comment }} | ForEach-Object {{ $_ | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue | Out-Null }}\n",
+            "Get-DnsClientNrptRule -ErrorAction Stop | Where-Object {{ $_.DisplayName -eq $displayName -or $_.Comment -eq $comment }} | ForEach-Object {{ $_ | Remove-DnsClientNrptRule -Force -ErrorAction Stop | Out-Null }}\n",
             "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses @('127.0.0.1') -ErrorAction Stop\n",
             "Add-DnsClientNrptRule -Namespace '.' -NameServers '127.0.0.1' -DisplayName $displayName -Comment $comment -ErrorAction Stop | Out-Null\n",
             "Clear-DnsClientCache -ErrorAction SilentlyContinue\n",
@@ -562,14 +855,31 @@ fn windows_secure_dns_install_script(interface_index: u32) -> String {
 fn windows_secure_dns_uninstall_script(interface_index: u32) -> String {
     format!(
         concat!(
+            "$ErrorActionPreference = 'Stop'\n",
             "$displayName = 'nostr-vpn secure DNS'\n",
             "$comment = 'nostr-vpn authenticated DNS-over-HTTPS stub'\n",
-            "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -eq $displayName -or $_.Comment -eq $comment }} | ForEach-Object {{ $_ | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue | Out-Null }}\n",
-            "Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses -ErrorAction SilentlyContinue\n",
+            "Get-DnsClientNrptRule -ErrorAction Stop | Where-Object {{ $_.DisplayName -eq $displayName -or $_.Comment -eq $comment }} | ForEach-Object {{ $_ | Remove-DnsClientNrptRule -Force -ErrorAction Stop | Out-Null }}\n",
+            "$adapter = Get-NetAdapter -InterfaceIndex {} -ErrorAction SilentlyContinue\n",
+            "if ($null -ne $adapter) {{\n",
+            "  $servers = @((Get-DnsClientServerAddress -InterfaceIndex {} -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses | Where-Object {{ $_ }})\n",
+            "  if ($servers.Count -eq 1 -and $servers[0] -eq '127.0.0.1') {{ Set-DnsClientServerAddress -InterfaceIndex {} -ResetServerAddresses -ErrorAction Stop }}\n",
+            "}}\n",
             "Clear-DnsClientCache -ErrorAction SilentlyContinue\n",
         ),
-        interface_index
+        interface_index, interface_index, interface_index
     )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_secure_dns_repair_script() -> String {
+    concat!(
+        "$ErrorActionPreference = 'Stop'\n",
+        "$displayName = 'nostr-vpn secure DNS'\n",
+        "$comment = 'nostr-vpn authenticated DNS-over-HTTPS stub'\n",
+        "Get-DnsClientNrptRule -ErrorAction Stop | Where-Object { $_.DisplayName -eq $displayName -or $_.Comment -eq $comment } | ForEach-Object { $_ | Remove-DnsClientNrptRule -Force -ErrorAction Stop | Out-Null }\n",
+        "Clear-DnsClientCache -ErrorAction SilentlyContinue\n",
+    )
+    .to_string()
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -587,7 +897,7 @@ fn windows_wireguard_dns_script(interface: &str, servers: &[IpAddr]) -> String {
             "$comment = 'nostr-vpn authenticated DNS-over-HTTPS stub'\n",
             "$wireGuard = Get-NetAdapter -Name '{}' -ErrorAction Stop\n",
             "Set-DnsClientServerAddress -InterfaceIndex $wireGuard.ifIndex -ServerAddresses @({}) -ErrorAction Stop\n",
-            "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -eq $displayName -or $_.Comment -eq $comment }} | ForEach-Object {{ $_ | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue | Out-Null }}\n",
+            "Get-DnsClientNrptRule -ErrorAction Stop | Where-Object {{ $_.DisplayName -eq $displayName -or $_.Comment -eq $comment }} | ForEach-Object {{ $_ | Remove-DnsClientNrptRule -Force -ErrorAction Stop | Out-Null }}\n",
             "Add-DnsClientNrptRule -Namespace '.nvpn' -NameServers '127.0.0.1' -DisplayName $displayName -Comment $comment -ErrorAction Stop | Out-Null\n",
             "Add-DnsClientNrptRule -Namespace '.fips' -NameServers '127.0.0.1' -DisplayName $displayName -Comment $comment -ErrorAction Stop | Out-Null\n",
             "Add-DnsClientNrptRule -Namespace '.' -NameServers @({}) -DisplayName $displayName -Comment $comment -ErrorAction Stop | Out-Null\n",
@@ -608,228 +918,5 @@ fn run_windows_powershell(script: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RData, RecordType};
-    use hickory_proto::serialize::binary::{BinEncodable as _, BinEncoder};
-
-    struct FixtureResolver {
-        fail: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl SecureDnsLookup for FixtureResolver {
-        async fn resolve(
-            &self,
-            query: &[u8],
-        ) -> std::result::Result<Vec<u8>, nostr_vpn_core::secure_dns::SecureDnsError> {
-            if self.fail {
-                return Err(nostr_vpn_core::secure_dns::SecureDnsError::InvalidResponse);
-            }
-            let request = Message::from_vec(query).expect("fixture query");
-            let mut response =
-                Message::new(request.id, MessageType::Response, request.metadata.op_code);
-            response.metadata.recursion_available = true;
-            for query in request.queries {
-                response.add_query(query);
-            }
-            let mut packet = Vec::new();
-            response
-                .emit(&mut BinEncoder::new(&mut packet))
-                .expect("fixture response");
-            Ok(packet)
-        }
-    }
-
-    fn query_packet_with_type(name: &str, id: u16, record_type: RecordType) -> Vec<u8> {
-        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-        query.add_query(Query::query(
-            Name::from_ascii(name).expect("query name"),
-            record_type,
-        ));
-        let mut packet = Vec::new();
-        query
-            .emit(&mut BinEncoder::new(&mut packet))
-            .expect("query packet");
-        packet
-    }
-
-    fn query_packet(name: &str, id: u16) -> Vec<u8> {
-        query_packet_with_type(name, id, RecordType::A)
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_secure_dns_uses_explicit_unicast_resolver_port() {
-        assert_eq!(
-            SECURE_DNS_BIND,
-            "127.0.0.1:1053".parse::<SocketAddr>().unwrap()
-        );
-        let resolver = macos_secure_dns_resolver_config();
-        assert!(resolver.contains("nameserver 127.0.0.1\n"));
-        assert!(resolver.contains("port 1053\n"));
-        assert!(resolver.contains("domain .\n"));
-        assert!(resolver.contains("search_order 1\n"));
-
-        let magic_dns_resolver = macos_magic_dns_resolver_config();
-        assert!(magic_dns_resolver.contains("nameserver 127.0.0.1\n"));
-        assert!(magic_dns_resolver.contains("port 1053\n"));
-        assert!(!magic_dns_resolver.contains("domain .\n"));
-    }
-
-    #[test]
-    fn windows_policy_forces_all_dns_to_local_authenticated_stub() {
-        let script = windows_secure_dns_install_script(42);
-        assert!(script.contains("-InterfaceIndex 42"));
-        assert!(script.contains("-Namespace '.'"));
-        assert!(script.contains("-NameServers '127.0.0.1'"));
-        assert!(!script.contains("1.1.1.1"));
-        assert!(!script.contains("9.9.9.9"));
-        let cleanup = windows_secure_dns_uninstall_script(42);
-        assert!(cleanup.contains("-InterfaceIndex 42"));
-        assert!(cleanup.contains("-ResetServerAddresses"));
-    }
-
-    #[test]
-    fn windows_wireguard_policy_uses_provider_dns_and_keeps_magic_dns_local() {
-        let script = windows_wireguard_dns_script(
-            "nvpn-wg-'exit",
-            &["10.99.99.1".parse().expect("DNS address")],
-        );
-        assert!(script.contains("-Name 'nvpn-wg-''exit'"));
-        assert!(script.contains("-ServerAddresses @('10.99.99.1')"));
-        assert!(script.contains("-Namespace '.nvpn'"));
-        assert!(script.contains("-Namespace '.fips'"));
-        assert!(script.contains("-Namespace '.' -NameServers @('10.99.99.1')"));
-        assert!(!script.contains("-Namespace '.' -NameServers '127.0.0.1'"));
-    }
-
-    #[test]
-    fn direct_resolv_conf_is_limited_to_containers_and_openrc_hosts() {
-        assert!(linux_direct_resolv_conf_allowed(true, false));
-        assert!(linux_direct_resolv_conf_allowed(false, true));
-        assert!(!linux_direct_resolv_conf_allowed(false, false));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn missing_openrc_resolv_conf_has_an_empty_restore_baseline() {
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-missing-resolv-conf-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
-        assert!(!path.exists());
-        assert_eq!(
-            read_linux_resolv_conf(&path).expect("missing baseline"),
-            b""
-        );
-    }
-
-    #[tokio::test]
-    async fn magic_dns_is_answered_locally_before_doh() {
-        let packet = query_packet("peer.nvpn.", 55);
-        let records = Arc::new(RwLock::new(HashMap::from([(
-            "peer.nvpn".to_string(),
-            Ipv4Addr::new(10, 44, 1, 9),
-        )])));
-        let resolver = SecureDnsResolver::new().expect("secure resolver");
-
-        let response = resolve_or_servfail(&resolver, &records, None, &packet)
-            .await
-            .expect("local response");
-        let response = Message::from_vec(&response).expect("DNS response");
-        assert_eq!(response.id, 55);
-        assert!(response.answers.iter().any(|answer| {
-            matches!(
-                &answer.data,
-                RData::A(hickory_proto::rr::rdata::A(address))
-                    if *address == Ipv4Addr::new(10, 44, 1, 9)
-            )
-        }));
-    }
-
-    #[test]
-    fn direct_npub_fips_query_returns_ipv6_and_identity_without_doh() {
-        let identity = fips_core::Identity::generate();
-        let packet =
-            query_packet_with_type(&format!("{}.fips.", identity.npub()), 77, RecordType::AAAA);
-
-        let (response, resolved) =
-            resolve_fips_dns_if_handled(&packet).expect("direct .fips response");
-        let response = Message::from_vec(&response).expect("DNS response");
-        assert_eq!(response.id, 77);
-        assert!(response.answers.iter().any(|answer| {
-            matches!(&answer.data, RData::AAAA(address) if address.0 == identity.address().to_ipv6())
-        }));
-        let resolved = resolved.expect("resolved identity");
-        assert_eq!(resolved.node_addr, *identity.node_addr());
-        let canonical_peer = PeerIdentity::from_npub(&identity.npub()).expect("canonical npub");
-        assert_eq!(resolved.pubkey, canonical_peer.pubkey_full());
-    }
-
-    #[tokio::test]
-    async fn local_stub_serves_udp_and_fails_closed() {
-        let server = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .expect("UDP server"),
-        );
-        let address = server.local_addr().expect("UDP address");
-        let resolver: ResolverState =
-            Arc::new(RwLock::new(Arc::new(FixtureResolver { fail: true })));
-        let records = Arc::new(RwLock::new(HashMap::new()));
-        let task = tokio::spawn(run_udp(server, resolver, records, None));
-        let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("UDP client");
-        client
-            .send_to(&query_packet("example.com.", 81), address)
-            .await
-            .expect("UDP query");
-        let mut response = [0_u8; 512];
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut response))
-                .await
-                .expect("UDP timeout")
-                .expect("UDP response");
-        task.abort();
-
-        let response = Message::from_vec(&response[..length]).expect("DNS response");
-        assert_eq!(response.id, 81);
-        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
-    }
-
-    #[tokio::test]
-    async fn local_stub_serves_framed_tcp_dns() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("TCP server");
-        let address = listener.local_addr().expect("TCP address");
-        let resolver: ResolverState =
-            Arc::new(RwLock::new(Arc::new(FixtureResolver { fail: false })));
-        let records = Arc::new(RwLock::new(HashMap::new()));
-        let task = tokio::spawn(run_tcp(listener, resolver, records, None));
-        let mut client = tokio::net::TcpStream::connect(address)
-            .await
-            .expect("TCP client");
-        let query = query_packet("example.com.", 82);
-        client
-            .write_all(&(query.len() as u16).to_be_bytes())
-            .await
-            .expect("TCP query length");
-        client.write_all(&query).await.expect("TCP query");
-        let response_length = client.read_u16().await.expect("TCP response length") as usize;
-        let mut response = vec![0_u8; response_length];
-        client
-            .read_exact(&mut response)
-            .await
-            .expect("TCP response");
-        task.abort();
-
-        let response = Message::from_vec(&response).expect("DNS response");
-        assert_eq!(response.id, 82);
-        assert_eq!(response.metadata.message_type, MessageType::Response);
-    }
-}
+#[path = "secure_dns_runtime/tests.rs"]
+mod tests;

@@ -557,6 +557,7 @@ struct RootView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("sidebar-\(item)")
     }
 
     @ViewBuilder

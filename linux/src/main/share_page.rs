@@ -16,6 +16,9 @@ fn build_network_setup(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
 fn append_setup_choices(app: &AppRef, page: &gtk::Box) {
     let choices = card();
     let create = icon_text_button("Create Network", "list-add-symbolic");
+    create.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-create-network-choice",
+    )]);
     {
         let app = app.clone();
         create.connect_clicked(move |_| {
@@ -58,6 +61,9 @@ fn append_create_network_card(app: &AppRef, page: &gtk::Box) {
     section_header(&create_card, "Create Network", "list-add-symbolic");
     let create_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let name = entry("Network name", &app.borrow().drafts.new_network_name);
+    name.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-create-network-name",
+    )]);
     {
         let app = app.clone();
         name.connect_changed(move |entry| {
@@ -65,6 +71,9 @@ fn append_create_network_card(app: &AppRef, page: &gtk::Box) {
         });
     }
     let create = icon_text_button("Create", "list-add-symbolic");
+    create.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-create-network-submit",
+    )]);
     {
         let app = app.clone();
         create.connect_clicked(move |_| {
@@ -137,6 +146,9 @@ fn append_join_network_card(
     manual_body.append(&help);
     let own_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let own = gtk::Label::new(Some(&state.own_npub));
+    own.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-manual-join-joiner-device-id-value",
+    )]);
     own.set_hexpand(true);
     own.set_xalign(0.0);
     own.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -327,12 +339,23 @@ fn append_link_device_card(app: &AppRef, page: &gtk::Box, network: &NativeNetwor
     manual_help.add_css_class("caption");
     manual_help.add_css_class("dim-label");
     link.append(&manual_help);
-    for (label, raw, shown) in [
-        ("Admin Device ID", app.borrow().state.own_npub.clone(), app.borrow().state.own_npub.clone()),
-        ("Network ID", network.network_id.clone(), display_network_id(&network.network_id)),
+    for (label, selector, raw, shown) in [
+        (
+            "Admin Device ID",
+            "nvpn-manual-join-admin-device-id-value",
+            app.borrow().state.own_npub.clone(),
+            app.borrow().state.own_npub.clone(),
+        ),
+        (
+            "Network ID",
+            "nvpn-manual-join-admin-network-id-value",
+            network.network_id.clone(),
+            display_network_id(&network.network_id),
+        ),
     ] {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let value = gtk::Label::new(Some(&format!("{label}: {shown}")));
+        value.update_property(&[gtk::accessible::Property::Label(selector)]);
         value.set_hexpand(true);
         value.set_xalign(0.0);
         value.set_ellipsize(gtk::pango::EllipsizeMode::Middle);

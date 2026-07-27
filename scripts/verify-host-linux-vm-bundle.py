@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Verify the immutable host-built bundle imported by Ubuntu VM gates."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+import tarfile
+
+
+def fail(message: str) -> "NoReturn":
+    raise SystemExit(f"host Linux VM bundle verification failed: {message}")
+
+
+def sha256_path(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as artifact:
+        for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+if len(sys.argv) != 12:
+    fail(
+        "usage: verify-host-linux-vm-bundle.py "
+        "BUNDLE RECEIPT APP_SHA APP_TREE APP_VERSION "
+        "FIPS_SHA FIPS_TREE FIPS_VERSION "
+        "ROOT_CARGO_LOCK_SHA256 LINUX_CARGO_LOCK_SHA256 TARGET"
+    )
+
+(
+    bundle_arg,
+    receipt_arg,
+    app_sha,
+    app_tree,
+    app_version,
+    fips_sha,
+    fips_tree,
+    fips_version,
+    root_cargo_lock_sha256,
+    linux_cargo_lock_sha256,
+    target,
+) = sys.argv[1:]
+bundle = pathlib.Path(bundle_arg)
+receipt_path = pathlib.Path(receipt_arg)
+
+if not bundle.is_dir() or bundle.is_symlink():
+    fail("bundle path is not a real directory")
+if receipt_path.parent.resolve() != bundle.resolve():
+    fail("receipt is not inside the bundle")
+if receipt_path.name != "receipt.json" or receipt_path.is_symlink():
+    fail("receipt path is not the exact regular receipt")
+
+try:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as error:
+    fail(f"could not parse receipt: {error}")
+
+expected_metadata = {
+    "schema": 1,
+    "builtOnHostMac": True,
+    "builtOnRemoteVm": False,
+    "appGitSha": app_sha,
+    "appGitTree": app_tree,
+    "appVersion": app_version,
+    "fipsGitSha": fips_sha,
+    "fipsGitTree": fips_tree,
+    "fipsVersion": fips_version,
+    "rootCargoLockSha256": root_cargo_lock_sha256,
+    "linuxCargoLockSha256": linux_cargo_lock_sha256,
+    "target": target,
+    "dockerPlatform": "linux/amd64",
+    "containerBase": "ubuntu:24.04",
+}
+for key, expected in expected_metadata.items():
+    if receipt.get(key) != expected:
+        fail(f"receipt {key} differs from the exact candidate")
+
+if not isinstance(receipt.get("sourceDateEpoch"), int) or receipt["sourceDateEpoch"] <= 0:
+    fail("receipt lacks a positive sourceDateEpoch")
+for key in ("rustcVersion", "cargoVersion"):
+    if not isinstance(receipt.get(key), str) or not receipt[key].strip():
+        fail(f"receipt lacks {key}")
+
+artifacts = receipt.get("artifacts")
+expected_artifacts = {
+    "app": "nostr-vpn",
+    "cli": "nvpn",
+    "manualJoinFixture": "desktop_manual_join_e2e_fixture",
+    "muslCli": "nvpn-x86_64-unknown-linux-musl",
+    "debianPackage": "nostr-vpn.deb",
+    "muslCliArchive": "nvpn-x86_64-unknown-linux-musl.tar.gz",
+}
+if not isinstance(artifacts, dict) or set(artifacts) != set(expected_artifacts):
+    fail("receipt artifact set is not exact")
+
+expected_files = {"receipt.json", *expected_artifacts.values()}
+actual_files = {path.name for path in bundle.iterdir()}
+if actual_files != expected_files:
+    fail(f"bundle file set differs: expected {sorted(expected_files)}, got {sorted(actual_files)}")
+
+executable_labels = {"app", "cli", "manualJoinFixture", "muslCli"}
+for label, filename in expected_artifacts.items():
+    entry = artifacts.get(label)
+    if not isinstance(entry, dict) or entry.get("file") != filename:
+        fail(f"{label} receipt has the wrong filename")
+    path = bundle / filename
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        fail(f"could not stat {filename}: {error}")
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        fail(f"{filename} is not a regular non-symlink artifact")
+    if label in executable_labels and not os.access(path, os.X_OK):
+        fail(f"{filename} is not executable")
+    if label in executable_labels:
+        with path.open("rb") as artifact:
+            header = artifact.read(20)
+        if (
+            len(header) < 20
+            or header[:4] != b"\x7fELF"
+            or header[4] != 2
+            or header[5] != 1
+            or int.from_bytes(header[18:20], "little") != 62
+        ):
+            fail(f"{filename} is not a little-endian x86_64 ELF64 executable")
+    digest = sha256_path(path)
+    if entry.get("sha256") != digest:
+        fail(f"{filename} SHA-256 differs from receipt")
+    if entry.get("size") != metadata.st_size or metadata.st_size <= 0:
+        fail(f"{filename} size differs from receipt")
+
+cli_short = receipt.get("cliShortVersion")
+cli_verbose = receipt.get("cliVerboseVersion")
+if cli_short != f"nvpn {app_version}":
+    fail("receipt CLI short version differs from app version")
+if not isinstance(cli_verbose, str) or f"(rev {fips_sha[:10]})" not in cli_verbose:
+    fail("receipt CLI verbose version differs from exact FIPS revision")
+
+if receipt.get("muslTarget") != "x86_64-unknown-linux-musl":
+    fail("receipt lacks the exact static Linux CLI target")
+if receipt.get("cargoDebVersion") != "3.7.0":
+    fail("receipt lacks the pinned cargo-deb version")
+if receipt.get("muslCliShortVersion") != f"nvpn {app_version}":
+    fail("receipt static CLI short version differs from app version")
+musl_verbose = receipt.get("muslCliVerboseVersion")
+if (
+    not isinstance(musl_verbose, str)
+    or f"(rev {fips_sha[:10]})" not in musl_verbose
+):
+    fail("receipt static CLI verbose version differs from exact FIPS revision")
+
+package = receipt.get("debianPackage")
+if (
+    not isinstance(package, dict)
+    or package.get("package") != "nostr-vpn"
+    or package.get("version") not in {app_version, f"{app_version}-1"}
+    or package.get("architecture") != "amd64"
+    or package.get("appPath") != "usr/bin/nostr-vpn"
+    or package.get("cliPath") != "usr/bin/nvpn"
+):
+    fail("receipt Debian package metadata differs from the candidate")
+with (bundle / expected_artifacts["debianPackage"]).open("rb") as artifact:
+    if artifact.read(8) != b"!<arch>\n":
+        fail("Debian package is not an ar archive")
+
+archive_path = bundle / expected_artifacts["muslCliArchive"]
+try:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = archive.getmembers()
+        names = [member.name for member in members]
+        if names != ["nvpn/README.txt", "nvpn/install.sh", "nvpn/nvpn"]:
+            fail("static Linux CLI archive has the wrong member set")
+        for member in members:
+            if not member.isfile() or member.issym() or member.islnk():
+                fail("static Linux CLI archive contains a non-regular member")
+        cli_member = archive.extractfile("nvpn/nvpn")
+        if cli_member is None:
+            fail("static Linux CLI archive lacks its executable")
+        archived_cli = cli_member.read()
+except (OSError, tarfile.TarError) as error:
+    fail(f"static Linux CLI archive could not be read: {error}")
+if hashlib.sha256(archived_cli).hexdigest() != artifacts["muslCli"]["sha256"]:
+    fail("static Linux CLI archive payload differs from its target receipt")
+
+print("HOST_LINUX_VM_BUNDLE_VERIFIED")

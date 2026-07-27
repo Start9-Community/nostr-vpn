@@ -220,20 +220,37 @@ done
 ARCHIVE_RECEIPT="$TMP_ROOT/archive.json"
 ADHOC_RECEIPT="$TMP_ROOT/adhoc.json"
 MOBILE_RECEIPT="$TMP_ROOT/mobile.json"
+MOBILE_JOIN_RECEIPT="$TMP_ROOT/mobile-join.json"
+MOBILE_WG_RECEIPT="$TMP_ROOT/mobile-wg.json"
+MOBILE_UNDERLAY_RECEIPT="$TMP_ROOT/mobile-underlay.json"
+DESKTOP_MOBILE_JOIN_RECEIPT="$TMP_ROOT/desktop-mobile-join.json"
 SEALED_MOBILE_RECEIPT="$TMP_ROOT/sealed-mobile.json"
 GATE_SEAL="$TMP_ROOT/gate-seal.json"
 ARCHIVE_CLEAN="$TMP_ROOT/archive-clean.json"
 ADHOC_CLEAN="$TMP_ROOT/adhoc-clean.json"
 MOBILE_CLEAN="$TMP_ROOT/mobile-clean.json"
+MOBILE_JOIN_CLEAN="$TMP_ROOT/mobile-join-clean.json"
 
 python3 - \
-  "$ARCHIVE_RECEIPT" "$ADHOC_RECEIPT" "$MOBILE_RECEIPT" <<'PY'
+  "$ARCHIVE_RECEIPT" "$ADHOC_RECEIPT" "$MOBILE_RECEIPT" \
+  "$MOBILE_JOIN_RECEIPT" "$MOBILE_WG_RECEIPT" \
+  "$MOBILE_UNDERLAY_RECEIPT" "$DESKTOP_MOBILE_JOIN_RECEIPT" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-archive_path, adhoc_path, mobile_path = map(pathlib.Path, sys.argv[1:])
+(
+    archive_path,
+    adhoc_path,
+    mobile_path,
+    join_path,
+    wg_path,
+    underlay_path,
+    desktop_join_path,
+) = map(
+    pathlib.Path, sys.argv[1:]
+)
 identity = {
     "appBundleIdentifier": "example.nvpn",
     "buildNumber": "4001005",
@@ -346,15 +363,156 @@ for path, payload in ((adhoc_path, adhoc), (mobile_path, mobile)):
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+join = {
+    "schema": 1,
+    "platform": "mobile",
+    "artifact": {
+        "appGitSha": mobile["appGitSha"],
+        "appGitTree": mobile["appGitTree"],
+        "ios": {
+            key: mobile[key]
+            for key in (
+                "appBundleTreeSha256",
+                "appCodeDirectoryHash",
+                "packetTunnelCodeDirectoryHash",
+                "appExecutableSha256",
+                "packetTunnelExecutableSha256",
+                "signerCertificateSha256",
+                "installedBundleIdentifier",
+            )
+        },
+    },
+    "publicUiOnly": True,
+    "opticalCameraQr": True,
+    "privateAppStateRead": False,
+    "appLaunchArgumentsOrEnvironment": False,
+    "desktopMobileManual": True,
+    "deliveryDeadlineMilliseconds": 15000,
+    "deliveryMilliseconds": {
+        "iPhone-admin-to-Pixel-QR": 100,
+        "Pixel-admin-to-iPhone-QR": 100,
+        "iPhone-admin-to-Pixel-manual": 100,
+        "Pixel-admin-to-iPhone-manual": 100,
+    },
+    "qr": {
+        "iphoneAdminPixelJoiner": True,
+        "pixelAdminIphoneJoiner": True,
+        "pendingQrBackgroundForeground": True,
+        "exactRosterOnBothSides": True,
+        "joinerRelaunchDurable": True,
+    },
+    "manual": {
+        "iphoneAdminPixelJoiner": True,
+        "pixelAdminIphoneJoiner": True,
+        "exactRosterOnBothSides": True,
+        "acceptedRosterOnly": True,
+        "joinerRelaunchDurable": True,
+    },
+}
+join_path.write_text(
+    json.dumps(join, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+identity_fields = {
+    key: mobile[key]
+    for key in (
+        "appBundleTreeSha256",
+        "appCodeDirectoryHash",
+        "packetTunnelCodeDirectoryHash",
+        "appExecutableSha256",
+        "packetTunnelExecutableSha256",
+        "signerCertificateSha256",
+        "installedBundleIdentifier",
+    )
+}
+def counter_case():
+    return {
+        "wireGuardRxBytesBefore": 1,
+        "wireGuardRxBytesAfter": 2,
+        "wireGuardTxBytesBefore": 1,
+        "wireGuardTxBytesAfter": 2,
+        "forwardedPacketsBefore": 1,
+        "forwardedPacketsAfter": 2,
+        "dnsPathCountersBefore": {"query": 1},
+        "dnsPathCountersAfter": {"query": 2},
+    }
+base_network = {
+    "receiptSchema": 1,
+    "platform": "ios",
+    "appGitSha": mobile["appGitSha"],
+    "appGitTree": mobile["appGitTree"],
+    "fipsGitSha": mobile["fipsGitSha"],
+    "fipsGitTree": mobile["fipsGitTree"],
+    "artifactIdentity": identity_fields,
+    "evidenceFiles": {"processes.json": "a" * 64},
+}
+wg = {
+    **base_network,
+    "artifactType": "physical ios Release wireguard-dns gate",
+    "mode": "wireguard-dns",
+    "dnsCases": {
+        label: counter_case()
+        for label in (
+            "automatic-profile",
+            "cloudflare-doh",
+            "quad9-doh",
+            "custom-doh",
+            "through-exit",
+        )
+    },
+    "support": {"rapidStartStopCycles": 8},
+}
+underlay = {
+    **base_network,
+    "artifactType": "physical ios Release underlay-lifecycle gate",
+    "mode": "underlay-lifecycle",
+    "dnsCases": {"automatic-profile": counter_case()},
+    "support": {
+        "lifecycleCycles": 3,
+        "underlayCycles": [{}, {}],
+    },
+}
+desktop_join = {
+    "schema": 1,
+    "platform": "macos",
+    "artifact": {
+        "appGitSha": mobile["appGitSha"],
+        "appGitTree": mobile["appGitTree"],
+    },
+    "publicUiOnly": True,
+    "privateStateRead": False,
+    "fixtureInvoked": False,
+    "desktopAdminAndroidJoiner": True,
+    "androidAdminDesktopJoiner": True,
+    "acceptedRosterRetainedAcrossRelaunch": True,
+    "desktopRelaunchDurability": True,
+    "pixelRelaunchDurability": True,
+    "deliveryDeadlineMilliseconds": 15000,
+    "deliveryMilliseconds": {
+        "macOS-admin-to-Android-manual": 100,
+        "Android-admin-to-macOS-manual": 100,
+    },
+}
+for path, payload in (
+    (wg_path, wg),
+    (underlay_path, underlay),
+    (desktop_join_path, desktop_join),
+):
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 PY
 cp "$ARCHIVE_RECEIPT" "$ARCHIVE_CLEAN"
 cp "$ADHOC_RECEIPT" "$ADHOC_CLEAN"
 cp "$MOBILE_RECEIPT" "$MOBILE_CLEAN"
+cp "$MOBILE_JOIN_RECEIPT" "$MOBILE_JOIN_CLEAN"
 
 restore_receipts() {
   cp "$ARCHIVE_CLEAN" "$ARCHIVE_RECEIPT"
   cp "$ADHOC_CLEAN" "$ADHOC_RECEIPT"
   cp "$MOBILE_CLEAN" "$MOBILE_RECEIPT"
+  cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
 }
 
 GATE_ARGS=(
@@ -370,6 +528,10 @@ seal_gate() {
     --archive-receipt "$ARCHIVE_RECEIPT" \
     --adhoc-receipt "$ADHOC_RECEIPT" \
     --mobile-receipt "$MOBILE_RECEIPT" \
+    --mobile-join-receipt "$MOBILE_JOIN_RECEIPT" \
+    --mobile-wg-receipt "$MOBILE_WG_RECEIPT" \
+    --mobile-underlay-receipt "$MOBILE_UNDERLAY_RECEIPT" \
+    --desktop-mobile-join-receipt "$DESKTOP_MOBILE_JOIN_RECEIPT" \
     --sealed-mobile-receipt "$SEALED_MOBILE_RECEIPT" \
     --output "$GATE_SEAL" \
     "${GATE_ARGS[@]}"
@@ -380,6 +542,10 @@ validate_gate() {
     --archive-receipt "$ARCHIVE_RECEIPT" \
     --adhoc-receipt "$ADHOC_RECEIPT" \
     --sealed-mobile-receipt "$SEALED_MOBILE_RECEIPT" \
+    --mobile-join-receipt "$MOBILE_JOIN_RECEIPT" \
+    --mobile-wg-receipt "$MOBILE_WG_RECEIPT" \
+    --mobile-underlay-receipt "$MOBILE_UNDERLAY_RECEIPT" \
+    --desktop-mobile-join-receipt "$DESKTOP_MOBILE_JOIN_RECEIPT" \
     --gate-seal "$GATE_SEAL" \
     "${GATE_ARGS[@]}"
 }
@@ -437,6 +603,23 @@ seal_gate
 validate_gate
 [[ "$(stat -f '%Lp' "$GATE_SEAL" 2>/dev/null || stat -c '%a' "$GATE_SEAL")" == 600 ]] \
   || { echo "Frozen iOS gate seal is not mode 0600" >&2; exit 1; }
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["deliveryMilliseconds"]["iPhone-admin-to-Pixel-QR"] = 15001
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if validate_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted a stale or slow mobile join receipt" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+seal_gate
 
 python3 - "$GATE_SEAL" <<'PY'
 import json

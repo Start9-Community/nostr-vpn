@@ -159,6 +159,16 @@ pub(crate) fn linux_default_ipv6_route() -> Result<LinuxDefaultRouteSpec> {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn linux_current_default_route() -> Result<Option<LinuxDefaultRouteSpec>> {
+    linux_current_default_route_for_family("-4", None)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_current_default_ipv6_route() -> Result<Option<LinuxDefaultRouteSpec>> {
+    linux_current_default_route_for_family("-6", None)
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn linux_default_route_for_interface(
     interface: &str,
 ) -> Result<LinuxDefaultRouteSpec> {
@@ -178,6 +188,19 @@ fn linux_default_route_for_family(
     family_label: &str,
     interface: Option<&str>,
 ) -> Result<LinuxDefaultRouteSpec> {
+    linux_current_default_route_for_family(family_flag, interface)?.ok_or_else(|| {
+        anyhow!(
+            "failed to resolve default {family_label} route{}",
+            interface.map_or_else(String::new, |interface| format!(" on {interface}"))
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_current_default_route_for_family(
+    family_flag: &str,
+    interface: Option<&str>,
+) -> Result<Option<LinuxDefaultRouteSpec>> {
     let output = command_stdout_checked(
         ProcessCommand::new("ip")
             .arg(family_flag)
@@ -185,12 +208,24 @@ fn linux_default_route_for_family(
             .arg("show")
             .arg("default"),
     )?;
-    linux_default_route_from_output_for_interface(&output, interface).ok_or_else(|| {
-        anyhow!(
-            "failed to resolve default {family_label} route{}",
-            interface.map_or_else(String::new, |interface| format!(" on {interface}"))
-        )
-    })
+    Ok(linux_default_route_from_output_for_interface(
+        &output, interface,
+    ))
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_saved_default_restore_required(
+    saved: &str,
+    current: Option<&LinuxDefaultRouteSpec>,
+    owned_interfaces: &[String],
+) -> bool {
+    match current {
+        None => true,
+        Some(current) if current.line == saved => false,
+        Some(current) => owned_interfaces
+            .iter()
+            .any(|interface| interface == &current.dev),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -559,6 +594,11 @@ pub(crate) fn restore_linux_managed_endpoint_bypass_route(
         return Ok(());
     }
     let current = linux_endpoint_bypass_route_snapshot(&managed.route.target)?;
+    if current == managed.previous_routes {
+        // A write-ahead cleanup intent can be replayed after a crash that
+        // happened before the managed route was installed.
+        return Ok(());
+    }
     if !(current.is_empty()
         || (current.len() == 1
             && linux_endpoint_bypass_route_matches_line(&managed.route, &current[0])))

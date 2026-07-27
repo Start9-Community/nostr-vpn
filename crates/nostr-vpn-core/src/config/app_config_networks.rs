@@ -71,6 +71,7 @@ impl AppConfig {
         network.devices = vec![admin.clone()];
         network.admins = vec![admin.clone()];
         network.join_request_admin.clone_from(&admin);
+        network.local_identity_confirmation_pending = true;
         network.outbound_join_request = None;
         network.inbound_join_requests.clear();
         network.shared_roster_updated_at = 0;

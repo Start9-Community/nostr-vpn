@@ -30,6 +30,7 @@ MACOS_DAEMON_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU_TI
 WINDOWS_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE_TIMEOUT_SECS:-1800}"
 DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS:-1800}"
 DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS:-1800}"
+DESKTOP_DNS_UI_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_DNS_UI_TIMEOUT_SECS:-900}"
 DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS:-2400}"
 MOBILE_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_GUI_SMOKE_TIMEOUT_SECS:-1800}"
 ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS:-600}"
@@ -48,6 +49,7 @@ release_cargo_wrapper_dir=""
 release_fips_path=""
 release_cargo_lock_original_sha256=""
 release_cargo_manifest_original_sha256=""
+HOST_LINUX_VM_BUNDLE_PATH_RECEIPT=""
 
 restore_release_cargo_lock() {
   local cleanup_failed=0
@@ -315,7 +317,11 @@ run_release_gate_static_preflight() {
   npm ci
   npm run check
   npm run build
-  node --test scripts/local-release.test.mjs scripts/startos-release.test.mjs
+  node --test \
+    scripts/local-release.test.mjs \
+    scripts/release-artifact-provenance-lib.test.mjs \
+    scripts/release-publication-bundle.test.mjs \
+    scripts/startos-release.test.mjs
   python3 scripts/test_appstore_draft_metadata.py
   if [[ "$(uname -s)" == "Darwin" ]]; then
     ./scripts/test-ios-generated-project.sh
@@ -333,11 +339,14 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-wireguard-fixture-cleanup-harness.sh
   ./scripts/test-mobile-release-provenance-harness.sh
+  ./scripts/test-android-aab-derived-release-harness.sh
   ./scripts/test-mobile-release-artifact-reuse-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-vm-import-only-harness.sh
+  ./scripts/test-host-linux-vm-import-only-harness.sh
   ./scripts/test-desktop-network-handoff-harness.sh
+  ./scripts/test-desktop-dns-ui-evidence-harness.sh
   ./scripts/test-desktop-underlay-host-peer-import-harness.sh
   ./scripts/test-macos-release-fips-roaming-harness.sh
   ./scripts/test-ios-frozen-archive-harness.sh
@@ -418,6 +427,7 @@ run_auto_windows_vm_app_smoke() {
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
     release_gate_run_with_timeout "Windows VM app launch smoke" "$WINDOWS_GUI_SMOKE_TIMEOUT_SECS" \
+      env NVPN_WINDOWS_INSTALLER_GATE_ARTIFACT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer" \
       ./scripts/windows-vm-app-launch-smoke.sh "$host"
   else
     echo "Skipping Windows VM app launch smoke because ssh $host is unreachable."
@@ -467,6 +477,7 @@ windows_platform_lane_requested() {
   ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E:-auto}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE:-auto}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_DNS_UI_E2E:-required}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E:-required}"
 }
 
@@ -508,6 +519,7 @@ run_windows_app_launch_gate() {
       ;;
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm)
       release_gate_run_with_timeout "Windows VM app launch smoke" "$WINDOWS_GUI_SMOKE_TIMEOUT_SECS" \
+        env NVPN_WINDOWS_INSTALLER_GATE_ARTIFACT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer" \
         ./scripts/windows-vm-app-launch-smoke.sh "${NVPN_WINDOWS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
@@ -568,6 +580,41 @@ run_windows_service_toggle_gate() {
   esac
 }
 
+run_windows_exit_dns_ui_gate() {
+  local mode="${NVPN_RELEASE_GATE_WINDOWS_DNS_UI_E2E:-required}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-dns-ui/windows"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Windows Exit DNS UI e2e because NVPN_RELEASE_GATE_WINDOWS_DNS_UI_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm|required)
+      windows_vm_reachable "$host" \
+        || { echo "Required Windows Exit DNS UI VM is unreachable: $host" >&2; return 1; }
+      release_gate_run_with_timeout "Windows Exit DNS UI save/relaunch/readback" \
+        "$DESKTOP_DNS_UI_TIMEOUT_SECS" \
+        env \
+          NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR="$artifact_dir" \
+          ./scripts/windows-vm-exit-dns-ui-e2e.sh "$host"
+      ;;
+    auto|AUTO|Auto|"")
+      if windows_vm_reachable "$host"; then
+        release_gate_run_with_timeout "Windows Exit DNS UI save/relaunch/readback" \
+          "$DESKTOP_DNS_UI_TIMEOUT_SECS" \
+          env \
+            NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR="$artifact_dir" \
+            ./scripts/windows-vm-exit-dns-ui-e2e.sh "$host"
+      else
+        echo "Skipping Windows Exit DNS UI e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_WINDOWS_DNS_UI_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
 windows_underlay_gate_reachable() {
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
   local hypervisor="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}"
@@ -602,6 +649,10 @@ require_windows_underlay_gate() {
 
 run_windows_underlay_network_change_gate() {
   local mode="${NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E:-auto}"
+  local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/windows-artifacts"
+  local receipt="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/windows.json"
+  local ran=0
+  rm -rf "$artifact_dir"
   case "$mode" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping Windows real underlay network-change e2e because NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E=$mode"
@@ -610,13 +661,17 @@ run_windows_underlay_network_change_gate() {
       require_windows_underlay_gate
       release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
         "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+        env NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
         ./scripts/windows-vm-desktop-underlay-change-e2e.sh
+      ran=1
       ;;
     auto|AUTO|Auto|"")
       if windows_underlay_gate_reachable; then
         release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
           "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+          env NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
           ./scripts/windows-vm-desktop-underlay-change-e2e.sh
+        ran=1
       else
         echo "Skipping Windows real underlay network-change e2e because its isolated VM/hypervisor is unavailable."
       fi
@@ -626,6 +681,15 @@ run_windows_underlay_network_change_gate() {
       return 2
       ;;
   esac
+  if [[ "$ran" -eq 1 ]]; then
+    python3 "$ROOT_DIR/scripts/release-network-evidence.py" desktop \
+      --platform windows \
+      --artifact-dir "$artifact_dir" \
+      --dns-ui-dir "$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-dns-ui/windows" \
+      --app-git-sha "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+      --app-git-tree "$(git -C "$ROOT_DIR" rev-parse HEAD^{tree})" \
+      --output "$receipt"
+  fi
 }
 
 run_windows_platform_lane() {
@@ -635,11 +699,7 @@ run_windows_platform_lane() {
   fi
   run_windows_app_launch_gate
   run_windows_manual_join_ui_gate
-  if ! release_gate_mode_disabled \
-    "${NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E:-required}"
-  then
-    export NVPN_WINDOWS_SERVICE_TOGGLE_SKIP_BUILD=1
-  fi
+  run_windows_exit_dns_ui_gate
   run_windows_service_toggle_gate
 }
 
@@ -651,6 +711,7 @@ macos_vm_reachable() {
 
 macos_platform_lane_requested() {
   ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_DNS_UI_E2E:-required}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E:-required}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E:-auto}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_GUI_SMOKE:-auto}" \
@@ -756,9 +817,42 @@ run_macos_service_toggle_gate() {
   esac
 }
 
+run_macos_exit_dns_ui_gate() {
+  local mode="${NVPN_RELEASE_GATE_MACOS_DNS_UI_E2E:-required}"
+  local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-dns-ui/macos"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping macOS Exit DNS UI e2e because NVPN_RELEASE_GATE_MACOS_DNS_UI_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|macos-vm|required)
+      macos_vm_reachable \
+        || { echo "Required macOS Exit DNS UI VM is unreachable." >&2; return 1; }
+      release_gate_run_with_timeout "macOS Exit DNS UI save/relaunch/readback" \
+        "$DESKTOP_DNS_UI_TIMEOUT_SECS" \
+        env NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR="$artifact_dir" \
+        ./scripts/macos-vm-release-exit-dns-ui-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      ;;
+    auto|AUTO|Auto|"")
+      if macos_vm_reachable; then
+        release_gate_run_with_timeout "macOS Exit DNS UI save/relaunch/readback" \
+          "$DESKTOP_DNS_UI_TIMEOUT_SECS" \
+          env NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR="$artifact_dir" \
+          ./scripts/macos-vm-release-exit-dns-ui-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      else
+        echo "Skipping macOS Exit DNS UI e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_MACOS_DNS_UI_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
 run_macos_platform_lane() {
   prepare_macos_platform_lane_sync
   run_macos_manual_join_ui_gate
+  run_macos_exit_dns_ui_gate
   run_macos_service_toggle_gate
 }
 
@@ -770,13 +864,48 @@ ubuntu_vm_reachable() {
 
 linux_platform_lane_requested() {
   ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_DNS_UI_E2E:-required}" \
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E:-required}"
+}
+
+prepare_host_linux_vm_bundle_and_record() {
+  local bundle receipt temporary
+  bundle="$(./scripts/prepare-host-linux-vm-bundle.sh)"
+  [[ "$bundle" == /* && -d "$bundle" && ! -L "$bundle" ]] \
+    || { echo "Host Linux VM bundle builder returned an invalid path." >&2; return 1; }
+  NVPN_HOST_LINUX_VM_BUNDLE_DIR="$bundle"
+  export NVPN_HOST_LINUX_VM_BUNDLE_DIR
+
+  receipt="${HOST_LINUX_VM_BUNDLE_PATH_RECEIPT:-}"
+  [[ -n "$receipt" ]] || return 0
+  temporary="${receipt}.tmp.$$"
+  (
+    umask 077
+    printf '%s\n' "$bundle" >"$temporary"
+  )
+  mv -f "$temporary" "$receipt"
+}
+
+load_host_linux_vm_bundle_path_receipt() {
+  local receipt="${HOST_LINUX_VM_BUNDLE_PATH_RECEIPT:-}"
+  local bundle line_count
+  [[ -n "$receipt" && -f "$receipt" && ! -L "$receipt" ]] \
+    || { echo "Host Linux VM bundle path receipt is missing." >&2; return 1; }
+  line_count="$(wc -l <"$receipt" | tr -d '[:space:]')"
+  [[ "$line_count" == "1" ]] \
+    || { echo "Host Linux VM bundle path receipt is invalid." >&2; return 1; }
+  IFS= read -r bundle <"$receipt"
+  [[ "$bundle" == /* && -d "$bundle" && ! -L "$bundle" ]] \
+    || { echo "Host Linux VM bundle path receipt is invalid." >&2; return 1; }
+  NVPN_HOST_LINUX_VM_BUNDLE_DIR="$bundle"
+  export NVPN_HOST_LINUX_VM_BUNDLE_DIR
 }
 
 prepare_linux_platform_lane_sync() {
   LINUX_PLATFORM_LANE_PRE_SYNCED=0
   linux_platform_lane_requested || return 0
   if ubuntu_vm_reachable; then
+    prepare_host_linux_vm_bundle_and_record
     ./scripts/ubuntu-vm-git-sync.sh \
       "${NVPN_UBUNTU_SSH_HOST:-}"
     LINUX_PLATFORM_LANE_PRE_SYNCED=1
@@ -811,6 +940,42 @@ run_linux_manual_join_ui_gate() {
       ;;
     *)
       echo "Unsupported NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_linux_exit_dns_ui_gate() {
+  local mode="${NVPN_RELEASE_GATE_LINUX_DNS_UI_E2E:-required}"
+  local host="${NVPN_UBUNTU_SSH_HOST:-}"
+  local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-dns-ui/linux"
+  if [[ "${LINUX_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
+    export NVPN_UBUNTU_SKIP_GIT_SYNC=1
+  fi
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Linux Exit DNS UI e2e because NVPN_RELEASE_GATE_LINUX_DNS_UI_E2E=$mode"
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|ubuntu-vm|required)
+      ubuntu_vm_reachable \
+        || { echo "Required Linux Exit DNS UI VM is unreachable: $host" >&2; return 1; }
+      release_gate_run_with_timeout "Linux Exit DNS UI save/relaunch/readback" \
+        "$DESKTOP_DNS_UI_TIMEOUT_SECS" \
+        env NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR="$artifact_dir" \
+        ./scripts/ubuntu-vm-exit-dns-ui-e2e.sh "$host"
+      ;;
+    auto|AUTO|Auto|"")
+      if ubuntu_vm_reachable; then
+        release_gate_run_with_timeout "Linux Exit DNS UI save/relaunch/readback" \
+          "$DESKTOP_DNS_UI_TIMEOUT_SECS" \
+          env NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR="$artifact_dir" \
+          ./scripts/ubuntu-vm-exit-dns-ui-e2e.sh "$host"
+      else
+        echo "Skipping Linux Exit DNS UI e2e because its isolated VM is unreachable."
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_LINUX_DNS_UI_E2E=$mode" >&2
       return 2
       ;;
   esac
@@ -882,6 +1047,10 @@ require_linux_underlay_gate() {
 
 run_linux_underlay_network_change_gate() {
   local mode="${NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E:-auto}"
+  local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/linux-artifacts"
+  local receipt="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/linux.json"
+  local ran=0
+  rm -rf "$artifact_dir"
   case "$mode" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping Linux real underlay network-change e2e because NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E=$mode"
@@ -890,13 +1059,17 @@ run_linux_underlay_network_change_gate() {
       require_linux_underlay_gate
       release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
         "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+        env NVPN_LINUX_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
         ./scripts/linux-vm-desktop-underlay-change-e2e.sh
+      ran=1
       ;;
     auto|AUTO|Auto|"")
       if linux_underlay_gate_reachable; then
         release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
           "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
+          env NVPN_LINUX_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
           ./scripts/linux-vm-desktop-underlay-change-e2e.sh
+        ran=1
       else
         echo "Skipping Linux real underlay network-change e2e because its isolated VM/hypervisor is unavailable."
       fi
@@ -906,16 +1079,21 @@ run_linux_underlay_network_change_gate() {
       return 2
       ;;
   esac
+  if [[ "$ran" -eq 1 ]]; then
+    python3 "$ROOT_DIR/scripts/release-network-evidence.py" desktop \
+      --platform linux \
+      --artifact-dir "$artifact_dir" \
+      --dns-ui-dir "$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-dns-ui/linux" \
+      --app-git-sha "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+      --app-git-tree "$(git -C "$ROOT_DIR" rev-parse HEAD^{tree})" \
+      --output "$receipt"
+  fi
 }
 
 run_linux_platform_lane() {
   prepare_linux_platform_lane_sync
   run_linux_manual_join_ui_gate
-  if ! release_gate_mode_disabled \
-    "${NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E:-required}"
-  then
-    export NVPN_UBUNTU_SKIP_BUILD=1
-  fi
+  run_linux_exit_dns_ui_gate
   run_linux_service_toggle_gate
 }
 
@@ -944,6 +1122,10 @@ release_gate_perf_output_dir() {
 }
 
 run_wireguard_exit_platform_gates() {
+  local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/macos-artifacts"
+  local receipt="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/macos.json"
+  local ran=0
+  rm -rf "$artifact_dir"
   if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]]; then
     export NVPN_MACOS_SKIP_GIT_SYNC=1
   fi
@@ -955,12 +1137,16 @@ run_wireguard_exit_platform_gates() {
       macos_vm_reachable \
         || { echo "Required macOS WG exit VM is unreachable." >&2; return 1; }
       release_gate_run_with_timeout "macOS VM WG exit e2e" "$MACOS_WG_EXIT_TIMEOUT_SECS" \
+        env NVPN_MACOS_NETWORK_ARTIFACT_DIR="$artifact_dir" \
         ./scripts/macos-vm-desktop-wireguard-exit-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+      ran=1
       ;;
     auto|AUTO|Auto|"")
       if macos_vm_reachable; then
         release_gate_run_with_timeout "macOS VM WG exit e2e" "$MACOS_WG_EXIT_TIMEOUT_SECS" \
+          env NVPN_MACOS_NETWORK_ARTIFACT_DIR="$artifact_dir" \
           ./scripts/macos-vm-desktop-wireguard-exit-e2e.sh "${NVPN_MACOS_SSH_HOST:-}"
+        ran=1
       else
         echo "Skipping macOS WG exit e2e because its isolated VM is unreachable."
       fi
@@ -974,7 +1160,16 @@ run_wireguard_exit_platform_gates() {
       return 2
       ;;
   esac
-
+  if [[ "$ran" -eq 1 ]]; then
+    python3 "$ROOT_DIR/scripts/release-network-evidence.py" desktop \
+      --platform macos \
+      --artifact-dir "$artifact_dir" \
+      --dns-ui-dir "$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-dns-ui/macos/cases" \
+      --artifact-receipt "${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}/macos/artifact.json" \
+      --app-git-sha "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+      --app-git-tree "$(git -C "$ROOT_DIR" rev-parse HEAD^{tree})" \
+      --output "$receipt"
+  fi
 }
 
 run_desktop_app_launch_smokes() {
@@ -1212,6 +1407,13 @@ run_mobile_wireguard_exit_gates() {
       ;;
   esac
 
+  local evidence_dir android_artifact_dir ios_artifact_dir
+  evidence_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network"
+  android_artifact_dir="$evidence_dir/android-wireguard-dns-artifacts"
+  ios_artifact_dir="$evidence_dir/ios-wireguard-dns-artifacts"
+  rm -rf "$android_artifact_dir" "$ios_artifact_dir"
+  mkdir -p "$android_artifact_dir" "$ios_artifact_dir"
+
   local image="${NVPN_MOBILE_WG_EXIT_IMAGE:-nostr-vpn-mobile-wireguard-exit-e2e}"
   local image_ready=0
   if [[ "$remote_native" -eq 0 ]]; then
@@ -1229,8 +1431,7 @@ run_mobile_wireguard_exit_gates() {
     release_gate_run_with_timeout \
     "Android physical WireGuard exit and DNS" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
-    env \
-      NVPN_IDLE_CPU_GATE=0 \
+    env NVPN_IDLE_CPU_GATE=0 \
       NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
       NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
       NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile,cloudflare-doh,quad9-doh,custom-doh,through-exit \
@@ -1250,6 +1451,8 @@ run_mobile_wireguard_exit_gates() {
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
       NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
+      NVPN_ANDROID_RESULT_DIR="$android_artifact_dir" \
+      NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/android-wireguard-dns.json" \
       ./scripts/mobile-wireguard-exit-e2e.sh android
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
@@ -1258,8 +1461,7 @@ run_mobile_wireguard_exit_gates() {
     release_gate_run_with_timeout \
     "iOS physical WireGuard exit and DNS" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
-    env \
-      NVPN_IDLE_CPU_GATE=0 \
+    env NVPN_IDLE_CPU_GATE=0 \
       NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
       NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
       NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile,cloudflare-doh,quad9-doh,custom-doh,through-exit \
@@ -1277,6 +1479,8 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.78.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
+      NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$ios_artifact_dir" \
+      NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/ios-wireguard-dns.json" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
@@ -1340,6 +1544,13 @@ run_mobile_underlay_change_gates() {
     return 1
   fi
 
+  local evidence_dir android_artifact_dir ios_artifact_dir
+  evidence_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network"
+  android_artifact_dir="$evidence_dir/android-underlay-lifecycle-artifacts"
+  ios_artifact_dir="$evidence_dir/ios-underlay-lifecycle-artifacts"
+  rm -rf "$android_artifact_dir" "$ios_artifact_dir"
+  mkdir -p "$android_artifact_dir" "$ios_artifact_dir"
+
   local image="${NVPN_MOBILE_WG_EXIT_IMAGE:-nostr-vpn-mobile-wireguard-exit-e2e}"
   local image_ready=0
   if [[ "$remote_native" -eq 0 ]]; then
@@ -1357,8 +1568,7 @@ run_mobile_underlay_change_gates() {
   release_gate_run_with_timeout \
     "Android physical Wi-Fi underlay change" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
-    env \
-      NVPN_IDLE_CPU_GATE=0 \
+    env NVPN_IDLE_CPU_GATE=0 \
       NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
       NVPN_ANDROID_LIFECYCLE_CYCLES=3 \
       NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=3 \
@@ -1384,14 +1594,15 @@ run_mobile_underlay_change_gates() {
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=1 \
       NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
+      NVPN_ANDROID_RESULT_DIR="$android_artifact_dir" \
+      NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/android-underlay-lifecycle.json" \
       ./scripts/mobile-wireguard-exit-e2e.sh android
   MOBILE_ANDROID_APP_READY=1
 
   release_gate_run_with_timeout \
     "iOS physical Wi-Fi/Pixel-hotspot underlay change" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
-    env \
-      NVPN_IDLE_CPU_GATE=0 \
+    env NVPN_IDLE_CPU_GATE=0 \
       NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
       NVPN_ANDROID_LIFECYCLE_CYCLES=3 \
       NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=3 \
@@ -1416,6 +1627,8 @@ run_mobile_underlay_change_gates() {
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=1 \
       NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
+      NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$ios_artifact_dir" \
+      NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/ios-underlay-lifecycle.json" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios
   MOBILE_IOS_APP_READY=1
 }
@@ -1451,6 +1664,8 @@ run_android_legacy_replacement_gate() {
     "$ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS" \
     env NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
     NVPN_ANDROID_LEGACY_REUSE_CANONICAL_APK="$MOBILE_ANDROID_APP_READY" \
+    NVPN_ANDROID_LEGACY_CANONICAL_APK="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk" \
+    NVPN_ANDROID_LEGACY_RESULT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network/android-replacement-artifacts" \
     ./scripts/mobile-android-legacy-replacement-e2e.sh
   MOBILE_ANDROID_APP_READY=1
 }
@@ -1528,9 +1743,97 @@ run_mobile_join_e2e_gate() {
   MOBILE_IOS_APP_READY=1
 }
 
+run_windows_release_mobile_join_e2e_gate() {
+  local mode="${NVPN_RELEASE_GATE_WINDOWS_MOBILE_JOIN_E2E:-${NVPN_RELEASE_GATE_MOBILE_JOIN_E2E:-required}}"
+  local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Windows/Pixel signed Release join e2e because NVPN_RELEASE_GATE_WINDOWS_MOBILE_JOIN_E2E=$mode"
+      return
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
+      windows_vm_reachable "$host" \
+        || { echo "Required Windows/Pixel join VM is unreachable." >&2; return 1; }
+      ;;
+    auto|AUTO|Auto|"")
+      if ! windows_vm_reachable "$host"; then
+        echo "Skipping Windows/Pixel signed Release join e2e because its VM is unreachable."
+        return
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_WINDOWS_MOBILE_JOIN_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+
+  local result_dir android_apk android_install_receipt
+  result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
+  android_apk="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
+  android_install_receipt="$result_dir/android-release-install.json"
+  [[ -f "$android_apk" && -f "$android_install_receipt" ]] || {
+    echo "Windows/Pixel join requires the exact APK and install receipt from the mobile join lane." >&2
+    return 1
+  }
+  release_gate_run_with_timeout \
+    "Windows/Pixel signed Release public-UI manual join e2e" \
+    "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
+    env \
+      NVPN_RELEASE_JOIN_ANDROID_APK="$android_apk" \
+      NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT="$android_install_receipt" \
+      NVPN_RELEASE_JOIN_RESULT_DIR="$result_dir" \
+      ./scripts/windows-vm-release-mobile-join-e2e.sh "$host"
+}
+
+run_linux_release_mobile_join_e2e_gate() {
+  local mode="${NVPN_RELEASE_GATE_LINUX_MOBILE_JOIN_E2E:-${NVPN_RELEASE_GATE_MOBILE_JOIN_E2E:-required}}"
+  local host="${NVPN_UBUNTU_SSH_HOST:-}"
+  case "$mode" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping Linux/Pixel signed Release join e2e because NVPN_RELEASE_GATE_LINUX_MOBILE_JOIN_E2E=$mode"
+      return
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
+      ubuntu_vm_reachable \
+        || { echo "Required Linux/Pixel join VM is unreachable." >&2; return 1; }
+      ;;
+    auto|AUTO|Auto|"")
+      if ! ubuntu_vm_reachable; then
+        echo "Skipping Linux/Pixel signed Release join e2e because its VM is unreachable."
+        return
+      fi
+      ;;
+    *)
+      echo "Unsupported NVPN_RELEASE_GATE_LINUX_MOBILE_JOIN_E2E=$mode" >&2
+      return 2
+      ;;
+  esac
+
+  local result_dir android_result_dir android_receipt android_fips_metadata
+  result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
+  android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
+  android_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$android_result_dir/mobile-android-release-artifact.json}"
+  android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
+  [[ -f "$android_receipt" && -f "$android_fips_metadata" ]] || {
+    echo "Linux/Pixel join requires the exact Android artifact and FIPS receipts." >&2
+    return 1
+  }
+  release_gate_run_with_timeout \
+    "Linux/Pixel signed Release public-UI manual join e2e" \
+    "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
+    env \
+      NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1 \
+      NVPN_RELEASE_JOIN_ANDROID_APK="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk" \
+      NVPN_RELEASE_JOIN_ANDROID_RECEIPT="$android_receipt" \
+      NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT="$android_fips_metadata" \
+      NVPN_RELEASE_JOIN_RESULT_DIR="$result_dir" \
+      ./scripts/ubuntu-vm-release-mobile-join-e2e.sh "$host"
+}
+
 seal_frozen_ios_release_gate() {
   bool_is_true "${NVPN_RELEASE_IOS_FROZEN_ARCHIVE:-0}" || return 0
-  local required_mode
+  local required_mode release_join_result_dir
+  release_join_result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
   for required_mode in \
     NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E \
     NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E \
@@ -1545,6 +1848,10 @@ seal_frozen_ios_release_gate() {
     --archive-receipt "$ROOT_DIR/dist/ios/frozen/archive-receipt.json" \
     --adhoc-receipt "$ROOT_DIR/dist/ios/frozen/release-testing-receipt.json" \
     --mobile-receipt "$NVPN_MOBILE_IOS_RELEASE_RECEIPT" \
+    --mobile-join-receipt "$release_join_result_dir/summary.json" \
+    --mobile-wg-receipt "$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network/ios-wireguard-dns.json" \
+    --mobile-underlay-receipt "$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network/ios-underlay-lifecycle.json" \
+    --desktop-mobile-join-receipt "$release_join_result_dir/macos/summary.json" \
     --sealed-mobile-receipt "$ROOT_DIR/dist/ios/frozen/physical-mobile-receipt.json" \
     --output "$ROOT_DIR/dist/ios/frozen/physical-gate-seal.json" \
     --required-gate wireguard-exit-and-five-dns-policies \
@@ -1681,6 +1988,9 @@ main() {
   started_at="$(date +%s)"
   local log_dir="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT_DIR/artifacts/release-gate-logs/$(date -u +%Y%m%dT%H%M%SZ)}"
   release_gate_parallel_init "$log_dir"
+  HOST_LINUX_VM_BUNDLE_PATH_RECEIPT="$log_dir/host-linux-vm-bundle-path.txt"
+  export HOST_LINUX_VM_BUNDLE_PATH_RECEIPT
+  rm -f "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT"
   local mobile_artifact_receipt_dir="$log_dir/mobile-release-artifacts"
   mkdir -p "$mobile_artifact_receipt_dir"
   export NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$mobile_artifact_receipt_dir/android.json"
@@ -1709,9 +2019,15 @@ main() {
   fi
 
   local linux_platform_lane=""
+  local linux_bundle_lane=""
   if linux_platform_lane_requested; then
     release_gate_parallel_start "Linux platform UI" run_linux_platform_lane
     linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  elif linux_underlay_gate_reachable; then
+    release_gate_parallel_start \
+      "Linux host-built release bundle" \
+      prepare_host_linux_vm_bundle_and_record
+    linux_bundle_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
   fi
 
   run_release_gate_static_preflight
@@ -1754,6 +2070,13 @@ main() {
     release_gate_parallel_wait "$linux_platform_lane"
     linux_platform_lane=""
   fi
+  if [[ -n "$linux_bundle_lane" ]]; then
+    release_gate_parallel_wait "$linux_bundle_lane"
+    linux_bundle_lane=""
+  fi
+  if [[ -f "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT" ]]; then
+    load_host_linux_vm_bundle_path_receipt
+  fi
   if [[ -n "$macos_platform_lane" ]]; then
     release_gate_parallel_wait "$macos_platform_lane"
     macos_platform_lane=""
@@ -1777,13 +2100,16 @@ main() {
 
   run_macos_daemon_idle_cpu_gate
   run_mobile_idle_cpu_gates
-  run_android_legacy_replacement_gate
   run_mobile_wireguard_exit_gates
+  run_android_legacy_replacement_gate
   run_mobile_underlay_change_gates
 
-  # The signed Release join lane covers both mobile role directions, both
-  # manual role directions, and desktop/mobile manual join.
+  # One physical Pixel cannot safely serve multiple admin/joiner drivers at
+  # once. Keep these exact-artifact public-UI lanes serial, while reusing the
+  # already installed signed APK and host-built desktop artifacts.
   run_mobile_join_e2e_gate
+  run_windows_release_mobile_join_e2e_gate
+  run_linux_release_mobile_join_e2e_gate
   seal_frozen_ios_release_gate
 
   local elapsed target_status

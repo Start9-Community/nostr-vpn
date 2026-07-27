@@ -157,6 +157,20 @@ impl AppConfig {
             if network.shared_roster_signed_by.is_empty() {
                 network.shared_roster_updated_at = 0;
             }
+            if !network.local_identity_confirmation_pending
+                && network.outbound_join_request.is_none()
+                && network.shared_roster_updated_at == 0
+                && network.shared_roster_signed_by.is_empty()
+                && own_pubkey_hex
+                    .as_deref()
+                    .is_some_and(|own| network.join_request_admin != own)
+                && !network.join_request_admin.is_empty()
+            {
+                // Pre-marker manual joins used this exact state while waiting
+                // for their first accepted roster. Recover it on upgrade so a
+                // receipt-backed approval can still complete.
+                network.local_identity_confirmation_pending = true;
+            }
         }
 
         self.ensure_single_active_network();
@@ -398,6 +412,7 @@ impl AppConfig {
             admins: Vec::new(),
             listen_for_join_requests: default_listen_for_join_requests(),
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,

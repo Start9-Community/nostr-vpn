@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -47,6 +48,19 @@ import {
   zapstorePublicationPrerequisites,
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
+import {
+  androidRuntimePayloads,
+  archiveMemberSha256 as commandOutputSha256,
+  buildReleaseGateAttestation,
+  collectReleaseGateReceipts,
+  exactArtifactProof,
+  mergeArtifactProofs,
+  readRequiredJson,
+  requireReceiptSource,
+  startosExactPackageValidator,
+  validateWindowsInstallerGateReceipt,
+} from './release-artifact-provenance-lib.mjs'
+import { inspectStartosReleasePackage } from './startos-release.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -529,31 +543,6 @@ function runWindowsPowerShell(host, script, { capture = false, dryRun = false } 
   )
 }
 
-function windowsArtifactArch(targetTriple) {
-  if (targetTriple.startsWith('x86_64-')) {
-    return 'x64'
-  }
-  if (targetTriple.startsWith('aarch64-')) {
-    return 'arm64'
-  }
-  return targetTriple
-}
-
-function syncRepoToWindowsHost({ host, guestRepo, dryRun }) {
-  run(
-    'bash',
-    [join(repoRoot, 'scripts', 'windows-vm-git-sync.sh'), host],
-    {
-      env: {
-        ...process.env,
-        NVPN_WINDOWS_SSH_HOST: host,
-        NVPN_WINDOWS_GUEST_REPO_PATH: guestRepo,
-      },
-      dryRun,
-    },
-  )
-}
-
 function pullFileFromWindowsHost({ host, remotePath, localParent, name, dryRun }) {
   const remoteFile = `${remotePath.replace(/\\/g, '/')}/${name}`
   const dest = join(localParent, name)
@@ -563,9 +552,17 @@ function pullFileFromWindowsHost({ host, remotePath, localParent, name, dryRun }
   run('scp', [...windowsSshTransportArgs(process.env), `${host}:${remoteFile}`, dest], { dryRun })
 }
 
-function buildWindowsArtifacts({ env, tag, dryRun, builtLines }) {
-  // Windows builds run on an x86_64 Windows VM reachable over SSH.
-  // Set NVPN_WINDOWS_SSH_HOST for local machine-specific hostnames.
+function buildWindowsArtifacts({
+  env,
+  tag,
+  dryRun,
+  builtLines,
+  candidateCommit,
+  candidateTree,
+  gateReceiptPath,
+  installerReceiptPath,
+  installerArtifactPath,
+}) {
   const host = String(env.NVPN_WINDOWS_SSH_HOST || '').trim()
   if (!host) {
     throw new SkipStepError(
@@ -573,8 +570,6 @@ function buildWindowsArtifacts({ env, tag, dryRun, builtLines }) {
     )
   }
 
-  // Probe SSH connectivity. Skip cleanly if the VM is unreachable rather
-  // than aborting the whole release.
   if (!dryRun) {
     const probe = spawnSync(
       'ssh',
@@ -589,13 +584,7 @@ function buildWindowsArtifacts({ env, tag, dryRun, builtLines }) {
     }
   }
 
-  // Path to the working copy on the Windows host. Has to be a valid
-  // PowerShell-quoted absolute path; cargo-target chains can get long, so
-  // pick something short.
   const guestRepo = env.NVPN_WINDOWS_GUEST_REPO_PATH || 'C:\\src\\nostr-vpn'
-
-  syncRepoToWindowsHost({ host, guestRepo, dryRun })
-
   const vmArchitecture = runWindowsPowerShell(
     host,
     '[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()',
@@ -607,180 +596,343 @@ function buildWindowsArtifacts({ env, tag, dryRun, builtLines }) {
     )
   }
 
-  const llvmBin = env.NVPN_WINDOWS_LLVM_BIN || 'C:\\Program Files\\LLVM\\bin'
   const targets = splitCsv(
     env.NVPN_WINDOWS_CLI_TARGETS || 'x86_64-pc-windows-msvc',
   )
-  const guestDist = `${guestRepo}\\dist`
-  const guestRepoQuoted = psQuote(guestRepo)
-  const guestDistQuoted = psQuote(guestDist)
-  const pathSetup = `$env:PATH = ${psQuote(llvmBin)} + ';' + $env:PATH`
-  const deterministicEnvSetup = [
-    `$env:SOURCE_DATE_EPOCH = ${psQuote(env.SOURCE_DATE_EPOCH || '0')}`,
-    `$env:CARGO_INCREMENTAL = ${psQuote(env.CARGO_INCREMENTAL || '0')}`,
-    `$env:ZERO_AR_DATE = ${psQuote(env.ZERO_AR_DATE || '1')}`,
-  ].join('\n')
-
-  // Make sure the guest's dist dir exists so we can write archives to it.
-  runWindowsPowerShell(
-    host,
-    `New-Item -ItemType Directory -Force -Path ${guestDistQuoted} | Out-Null`,
-    { dryRun },
-  )
-
-  for (const target of targets) {
-    const archiveName = `nvpn-${tag}-${target}.zip`
-    runWindowsPowerShell(
-      host,
-      `
-${pathSetup}
-${deterministicEnvSetup}
-Set-Location ${guestRepoQuoted}
-cargo build --release --locked --target ${psQuote(target)} -p nvpn
-if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
-$cli = Join-Path ${guestRepoQuoted} ${psQuote(`target\\${target}\\release\\nvpn.exe`)}
-if (!(Test-Path $cli)) { throw "Missing nvpn.exe for ${target}" }
-$wintun = Join-Path ${guestRepoQuoted} ${psQuote(`target\\${target}\\release\\wintun.dll`)}
-if (!(Test-Path $wintun)) { throw "Missing wintun.dll for ${target}" }
-$tempDir = Join-Path $env:TEMP ${psQuote(`nvpn-${target}-zip`)}
-Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-Copy-Item $cli (Join-Path $tempDir 'nvpn.exe')
-New-Item -ItemType Directory -Force -Path (Join-Path $tempDir 'binaries') | Out-Null
-Copy-Item $wintun (Join-Path $tempDir 'binaries\\wintun.dll')
-$epoch = [DateTimeOffset]::FromUnixTimeSeconds([int64]$env:SOURCE_DATE_EPOCH).UtcDateTime
-Get-ChildItem -Recurse $tempDir | ForEach-Object { $_.LastWriteTimeUtc = $epoch }
-(Get-Item $tempDir).LastWriteTimeUtc = $epoch
-Compress-Archive -Path (Join-Path $tempDir '*') -DestinationPath ${psQuote(`${guestDist}\\${archiveName}`)} -Force
-Remove-Item -Recurse -Force $tempDir
-`,
-      { dryRun },
+  if (
+    targets.length !== 1
+    || targets[0] !== 'x86_64-pc-windows-msvc'
+  ) {
+    throw new Error(
+      'Windows publication only supports the x64 CLI payload exercised by the real Windows gate.',
     )
-    pullFileFromWindowsHost({ host, remotePath: guestDist, localParent: distDir, name: archiveName, dryRun })
-    builtLines.push(`Built Windows ${windowsArtifactArch(target)} CLI on ${host}.`)
+  }
+  const guiTargets = splitCsv(env.NVPN_WINDOWS_GUI_TARGETS || 'x86_64-pc-windows-msvc')
+  if (
+    guiTargets.length !== 1
+    || guiTargets[0] !== 'x86_64-pc-windows-msvc'
+  ) {
+    throw new Error(
+      'Windows publication only supports the x64 installer exercised by the real Windows gate.',
+    )
   }
 
-  const guiTargets = splitCsv(env.NVPN_WINDOWS_GUI_TARGETS || 'x86_64-pc-windows-msvc')
-  for (const target of guiTargets) {
-    const arch = windowsArtifactArch(target)
-    if (arch !== 'x64') {
-      throw new Error(`Windows desktop installer currently supports x64 only, got ${target}.`)
-    }
+  const guestArtifactRoot =
+    env.NVPN_WINDOWS_RELEASE_ARTIFACT_ROOT
+    || env.GUEST_ARTIFACT_ROOT
+    || `${guestRepo}\\artifacts`
+  const guestPublishDir =
+    env.NVPN_WINDOWS_RELEASE_PUBLISH_DIR
+    || `${guestRepo}\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish`
+  const installerName = `nostr-vpn-${tag}-windows-x64-setup.exe`
+  const archiveName = `nvpn-${tag}-x86_64-pc-windows-msvc.zip`
+  if (dryRun) {
+    builtLines.push('Reused the exact Windows installer and CLI payload exercised by the Windows VM gate.')
+    return {}
+  }
 
-    const installerName = `nostr-vpn-${tag}-windows-${arch}-setup.exe`
-    runWindowsPowerShell(
-      host,
-      `
-${pathSetup}
-${deterministicEnvSetup}
-Set-Location ${guestRepoQuoted}
-$env:CARGO_TARGET_DIR = Join-Path ${guestDistQuoted} (${psQuote(`windows-release-cargo-${tag}-`)} + $PID)
-$installer = ${psQuote(`${guestDist}\\${installerName}`)}
-Remove-Item -Force $installer -ErrorAction SilentlyContinue
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration Release -Publish -Installer -Tag ${psQuote(tag)} -OutputDir ${guestDistQuoted}
-if ($LASTEXITCODE -ne 0) { throw "windows-build.ps1 failed with exit code $LASTEXITCODE" }
-if (!(Test-Path $installer)) { throw "Missing Windows installer: $installer" }
-`,
-      { dryRun },
+  const receipt = readRequiredJson(
+    gateReceiptPath,
+    'Windows exact-artifact gate receipt',
+  )
+  requireReceiptSource(receipt, {
+    commit: candidateCommit,
+    tree: candidateTree,
+    label: 'Windows exact-artifact gate receipt',
+  })
+  const installerReceipt = readRequiredJson(
+    installerReceiptPath,
+    'Windows exact installer gate receipt',
+  )
+  const sealedInstaller = validateWindowsInstallerGateReceipt({
+    receipt: installerReceipt,
+    artifactReceipt: receipt,
+    commit: candidateCommit,
+    tree: candidateTree,
+    expectedTag: tag,
+  })
+  if (
+    !existsSync(installerArtifactPath)
+    || basename(installerArtifactPath) !== sealedInstaller.installerName
+    || sha256FileSync(installerArtifactPath)
+      !== sealedInstaller.installerSha256
+    || statSync(installerArtifactPath).size
+      !== sealedInstaller.installerSize
+  ) {
+    throw new Error(
+      'Windows publication installer is not the exact locally retained installer exercised by the real gate.',
     )
-    pullFileFromWindowsHost({ host, remotePath: guestDist, localParent: distDir, name: installerName, dryRun })
-    builtLines.push(`Built Windows ${arch} desktop installer on ${host}.`)
+  }
+  const expected = sealedInstaller.payloads
+
+  const guestInstallerGateDir =
+    env.NVPN_WINDOWS_INSTALLER_GATE_REMOTE_DIR
+    || `${guestArtifactRoot}\\windows-installer-gate`
+  const guestInstaller = `${guestInstallerGateDir}\\${installerName}`
+  const guestArchive = `${guestArtifactRoot}\\${archiveName}`
+  runWindowsPowerShell(
+    host,
+    `
+$ErrorActionPreference = 'Stop'
+& ${psQuote(`${guestRepo}\\scripts\\windows-release-publication-proof.ps1`)} \`
+  -RepoPath ${psQuote(guestRepo)} \`
+  -ExpectedCommit ${psQuote(candidateCommit)} \`
+  -ExpectedTree ${psQuote(candidateTree)} \`
+  -PublishDir ${psQuote(guestPublishDir)} \`
+  -InstallerPath ${psQuote(guestInstaller)} \`
+  -ArtifactRoot ${psQuote(guestArtifactRoot)} \`
+  -ArchivePath ${psQuote(guestArchive)} \`
+  -ExpectedInstallerSha256 ${psQuote(sealedInstaller.installerSha256)} \`
+  -ExpectedInstallerSize ${sealedInstaller.installerSize} \`
+  -ExpectedAppSha256 ${psQuote(expected.app)} \`
+  -ExpectedAppCoreSha256 ${psQuote(expected.appCore)} \`
+  -ExpectedCliSha256 ${psQuote(expected.cli)} \`
+  -ExpectedWintunSha256 ${psQuote(expected.wintun)}
+`,
+  )
+  pullFileFromWindowsHost({
+    host,
+    remotePath: guestArtifactRoot,
+    localParent: distDir,
+    name: archiveName,
+    dryRun: false,
+  })
+  const installerPath = join(distDir, installerName)
+  const archivePath = join(distDir, archiveName)
+  mkdirSync(distDir, { recursive: true })
+  copyFileSync(installerArtifactPath, installerPath)
+  if (
+    sha256FileSync(installerPath) !== sealedInstaller.installerSha256
+    || statSync(installerPath).size !== sealedInstaller.installerSize
+  ) {
+    throw new Error(
+      'Windows exact installer changed while copying it into the publication directory.',
+    )
+  }
+  if (
+    commandOutputSha256('unzip', ['-p', archivePath, 'nvpn.exe'])
+      !== expected.cli
+    || commandOutputSha256(
+      'unzip',
+      ['-p', archivePath, 'binaries/wintun.dll'],
+    ) !== expected.wintun
+  ) {
+    throw new Error(
+      'Windows CLI archive differs from the exact Windows VM gate payload.',
+    )
+  }
+  builtLines.push('Reused the exact Windows installer and CLI payload exercised by the Windows VM gate.')
+  return {
+    [installerName]: exactArtifactProof({
+      artifactPath: installerPath,
+      platform: 'windows',
+      gateReceiptPath: installerReceiptPath,
+      payloads: {
+        app: expected.app,
+        app_core: expected.appCore,
+        cli: expected.cli,
+        wintun: expected.wintun,
+      },
+    }),
+    [archiveName]: exactArtifactProof({
+      artifactPath: archivePath,
+      platform: 'windows',
+      gateReceiptPath,
+      payloads: {
+        cli: expected.cli,
+        wintun: expected.wintun,
+      },
+    }),
   }
 }
 
-function buildLinuxArtifacts({ env, tag, dryRun, builtLines }) {
+function buildLinuxArtifacts({
+  env,
+  tag,
+  dryRun,
+  builtLines,
+  candidateCommit,
+  candidateTree,
+  testedReceiptPath,
+  testedPackageInstallReceiptPath,
+  gatedBundlePathReceipt,
+}) {
   if (!commandExists('docker')) {
     throw new SkipStepError('Skipping Linux artifacts because docker is not on PATH.')
   }
 
   const platform = env.NVPN_LINUX_DOCKER_PLATFORM || 'linux/amd64'
   const { linuxArchSuffix, muslTriple } = linuxReleaseTargetsForDockerPlatform(platform)
-  const imageName = 'nostr-vpn-linux-release'
+  if (platform !== 'linux/amd64') {
+    throw new Error(
+      'Public Linux artifacts require the exact x86_64 host bundle exercised by the Ubuntu VM gate.',
+    )
+  }
   const linuxDebName = `nostr-vpn-${tag}-linux-${linuxArchSuffix}.deb`
-  const dockerVolumes = ['-v', `${repoRoot}:/work`]
-  const fipsRepoPath = resolve(env.NVPN_FIPS_REPO_PATH || join(repoRoot, '..', 'fips'))
-  for (const crate of ['fips-core', 'fips-endpoint', 'fips-identity']) {
-    const manifest = join(fipsRepoPath, 'crates', crate, 'Cargo.toml')
-    if (!existsSync(manifest)) {
-      throw new Error(`FIPS release source is missing crates/${crate}/Cargo.toml: ${fipsRepoPath}`)
+
+  let gatedBundle = ''
+  let gateReceiptPath = ''
+  let gateReceipt = null
+  let packageInstallReceipt = null
+  if (!dryRun) {
+    if (!existsSync(gatedBundlePathReceipt)) {
+      throw new Error(
+        `Linux exact host-bundle path receipt is missing: ${gatedBundlePathReceipt}`,
+      )
+    }
+    const bundleLines = readFileSync(gatedBundlePathReceipt, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0)
+    if (bundleLines.length !== 1) {
+      throw new Error(
+        'Linux exact host-bundle path receipt must contain one path.',
+      )
+    }
+    gatedBundle = bundleLines[0]
+    if (
+      resolve(gatedBundle) !== gatedBundle
+      || !existsSync(gatedBundle)
+      || lstatSync(gatedBundle).isSymbolicLink()
+      || !statSync(gatedBundle).isDirectory()
+    ) {
+      throw new Error(
+        'Linux exact host-bundle path receipt points to an invalid directory.',
+      )
+    }
+    const bundleReceiptPath = join(gatedBundle, 'receipt.json')
+    if (
+      sha256FileSync(bundleReceiptPath)
+      !== sha256FileSync(testedReceiptPath)
+    ) {
+      throw new Error(
+        'Linux host bundle receipt differs from the exact bundle imported by the Ubuntu VM gate.',
+      )
+    }
+    gateReceiptPath = testedReceiptPath
+    gateReceipt = readRequiredJson(
+      gateReceiptPath,
+      'Linux exact-artifact gate receipt',
+    )
+    requireReceiptSource(gateReceipt, {
+      commit: candidateCommit,
+      tree: candidateTree,
+      label: 'Linux exact-artifact gate receipt',
+    })
+    packageInstallReceipt = readRequiredJson(
+      testedPackageInstallReceiptPath,
+      'Linux exact Debian package install receipt',
+    )
+    const expectedBundleReceiptSha256 = sha256FileSync(testedReceiptPath)
+    if (
+      packageInstallReceipt.appGitSha !== candidateCommit
+      || packageInstallReceipt.appGitTree !== candidateTree
+      || packageInstallReceipt.packageInstalledByDpkg !== true
+      || packageInstallReceipt.installedStatus !== 'installed'
+      || packageInstallReceipt.bundleReceiptSha256
+        !== expectedBundleReceiptSha256
+    ) {
+      throw new Error(
+        'Linux Debian package install receipt differs from the exact release candidate.',
+      )
     }
   }
-  dockerVolumes.push('-v', `${fipsRepoPath}:/fips:ro`)
 
-  run('docker', ['build', '--platform', platform, '-f', 'Dockerfile.linux-release', '-t', imageName, '.'], {
-    dryRun,
-  })
-
-  if (!dryRun) {
-    mkdirSync(distDir, { recursive: true })
+  if (dryRun) {
+    builtLines.push('Reused the exact gate-tested Linux x64 Debian package and static-musl CLI archive.')
+    return {}
   }
 
-  const innerScript = [
-    'set -euo pipefail',
-    `rustup target add ${muslTriple}`,
-    [
-      'rsync -a',
-      '--exclude target',
-      '--exclude dist',
-      '--exclude .git',
-      '--exclude .cargo/config.toml',
-      '--exclude "*/.build"',
-      '--exclude "*/.build/**"',
-      '--exclude "*/DerivedData"',
-      '--exclude "*/DerivedData/**"',
-      '/work/',
-      '/build/',
-    ].join(' '),
-    'cd /build',
-    'cargo build --release --locked --manifest-path linux/Cargo.toml',
-    'cargo build --release --locked -p nvpn',
-    'cd /build/linux',
-    'cargo deb --no-build',
-    `cp "$(ls -1t target/debian/*.deb | head -1)" "/work/dist/${linuxDebName}"`,
-    'cd /build',
-    `cargo build --release --locked --target ${muslTriple} -p nvpn`,
-    'rm -rf /work/dist/nvpn',
-    'mkdir -p /work/dist/nvpn',
-    `cp target/${muslTriple}/release/nvpn /work/dist/nvpn/`,
-    "printf '%s\\n' '#!/bin/bash' 'set -e' 'install -d \"${1:-/usr/local/bin}\"' 'install -m 755 nvpn \"${1:-/usr/local/bin}/\"' > /work/dist/nvpn/install.sh",
-    'chmod +x /work/dist/nvpn/install.sh',
-    "printf '%s\\n' 'nvpn - FIPS private mesh CLI' > /work/dist/nvpn/README.txt",
-    'find /work/dist/nvpn -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +',
-    `tar -cf /work/dist/nvpn-${muslTriple}.tar -C /work/dist nvpn/README.txt nvpn/install.sh nvpn/nvpn`,
-    `gzip -n -f /work/dist/nvpn-${muslTriple}.tar`,
-    `cp /work/dist/nvpn-${muslTriple}.tar.gz /work/dist/nvpn-${tag}-${muslTriple}.tar.gz`,
-  ].join(' && ')
-
-  run(
-    'docker',
-    [
-      'run',
-      '--rm',
-      '--platform',
-      platform,
-      ...dockerVolumes,
-      '-e',
-      'SOURCE_DATE_EPOCH',
-      '-e',
-      'CARGO_INCREMENTAL',
-      '-e',
-      'ZERO_AR_DATE',
-      '-e',
-      'LC_ALL',
-      '-e',
-      'TZ',
-      '-w',
-      '/work',
-      imageName,
-      'bash',
-      '-c',
-      innerScript,
-    ],
-    { dryRun },
+  mkdirSync(distDir, { recursive: true })
+  const debPath = join(distDir, linuxDebName)
+  const cliAssets = [
+    join(distDir, `nvpn-${muslTriple}.tar.gz`),
+    join(distDir, `nvpn-${tag}-${muslTriple}.tar.gz`),
+  ]
+  const expectedApp = gateReceipt.artifacts?.app?.sha256
+  const expectedCli = gateReceipt.artifacts?.cli?.sha256
+  const expectedDeb = gateReceipt.artifacts?.debianPackage?.sha256
+  const expectedDebSize = gateReceipt.artifacts?.debianPackage?.size
+  const expectedMuslCli = gateReceipt.artifacts?.muslCli?.sha256
+  const expectedMuslArchive = gateReceipt.artifacts?.muslCliArchive?.sha256
+  const expectedMuslArchiveSize = gateReceipt.artifacts?.muslCliArchive?.size
+  for (const [name, digest] of Object.entries({
+    app: expectedApp,
+    cli: expectedCli,
+    debian_package: expectedDeb,
+    musl_cli: expectedMuslCli,
+    musl_archive: expectedMuslArchive,
+  })) {
+    if (!/^[0-9a-f]{64}$/.test(String(digest ?? ''))) {
+      throw new Error(`Linux gate receipt lacks the ${name} payload hash.`)
+    }
+  }
+  if (
+    packageInstallReceipt.debSha256 !== expectedDeb
+    || packageInstallReceipt.debSize !== expectedDebSize
+    || packageInstallReceipt.muslCliSha256 !== expectedMuslCli
+    || packageInstallReceipt.muslArchiveSha256 !== expectedMuslArchive
+  ) {
+    throw new Error(
+      'Linux exact package-install receipt does not match the sealed host bundle.',
+    )
+  }
+  const gatedDebPath = join(gatedBundle, 'nostr-vpn.deb')
+  const gatedMuslArchivePath = join(
+    gatedBundle,
+    'nvpn-x86_64-unknown-linux-musl.tar.gz',
   )
-
-  builtLines.push(`Built Linux ${linuxArchSuffix} desktop Debian package in Docker (${platform}).`)
-  builtLines.push(`Built Linux ${linuxArchSuffix} musl CLI in Docker (${platform}).`)
+  if (
+    sha256FileSync(gatedDebPath) !== expectedDeb
+    || statSync(gatedDebPath).size !== expectedDebSize
+    || sha256FileSync(gatedMuslArchivePath) !== expectedMuslArchive
+    || statSync(gatedMuslArchivePath).size !== expectedMuslArchiveSize
+  ) {
+    throw new Error(
+      'Linux sealed publication artifacts changed after their Ubuntu VM gate.',
+    )
+  }
+  copyFileSync(gatedDebPath, debPath)
+  for (const cliAsset of cliAssets) {
+    copyFileSync(gatedMuslArchivePath, cliAsset)
+  }
+  if (
+    sha256FileSync(debPath) !== expectedDeb
+    || statSync(debPath).size !== expectedDebSize
+    || cliAssets.some(
+      (path) =>
+        sha256FileSync(path) !== expectedMuslArchive
+        || statSync(path).size !== expectedMuslArchiveSize,
+    )
+  ) {
+    throw new Error(
+      'Linux publication copy differs from the exact Ubuntu VM-gated artifacts.',
+    )
+  }
+  const proofs = {
+    [basename(debPath)]: exactArtifactProof({
+      artifactPath: debPath,
+      platform: 'linux',
+      gateReceiptPath: testedPackageInstallReceiptPath,
+      payloads: {
+        debian_package: expectedDeb,
+        nostr_vpn: expectedApp,
+        nvpn: expectedCli,
+      },
+    }),
+  }
+  for (const cliAsset of cliAssets) {
+    proofs[basename(cliAsset)] = exactArtifactProof({
+      artifactPath: cliAsset,
+      platform: 'linux',
+      gateReceiptPath,
+      payloads: {
+        musl_archive: expectedMuslArchive,
+        nvpn_musl: expectedMuslCli,
+      },
+    })
+  }
+  builtLines.push('Reused the exact Linux x64 Debian package and static-musl CLI archive exercised by the Ubuntu VM gate.')
+  return proofs
 }
 
 function ensureAndroidSdkEnv(env) {
@@ -884,14 +1036,10 @@ function buildAndroidArtifacts({
       )
     }
 
-    // The release gate already installed and physically exercised this exact
-    // signed APK. Build only the Play bundle here; assembling another APK
-    // would create untested bytes after the gate.
-    run('bash', [join(repoRoot, 'tools', 'run-android'), ':app:bundleRelease'], {
-      env: androidEnv,
-      dryRun,
-    })
-
+    // The release gate built the Play AAB first, derived the installable APK
+    // from it with pinned bundletool, and physically exercised that APK.
+    // Reuse both sealed artifacts; rebuilding either here would break the
+    // relationship proven on the Pixel.
     const testedApkPath = join(
       repoRoot,
       'android',
@@ -902,12 +1050,31 @@ function buildAndroidArtifacts({
       'release',
       'app-release.apk',
     )
+    const bundleReceiptPath = join(
+      repoRoot,
+      'android',
+      'app',
+      'build',
+      'outputs',
+      'bundle',
+      'release',
+      'physical-gate-artifact.json',
+    )
     const aabPath = findFirstFile(
       join(repoRoot, 'android', 'app', 'build', 'outputs', 'bundle', 'release'),
       (entry) => entry.endsWith('.aab'),
     )
-    if (!dryRun && (!existsSync(testedApkPath) || !aabPath)) {
-      throw new Error('Expected gate-tested Android APK and signed AAB were not produced.')
+    if (
+      !dryRun
+      && (
+        !existsSync(testedApkPath)
+        || !aabPath
+        || !existsSync(bundleReceiptPath)
+      )
+    ) {
+      throw new Error(
+        'Expected gate-tested AAB-derived Android APK and signed AAB were not produced.',
+      )
     }
 
     const apkDest = join(distDir, androidReleaseAssetName(tag, { extension: 'apk', signed }))
@@ -925,8 +1092,33 @@ function buildAndroidArtifacts({
       } catch {
         throw new Error('Physical Android release-gate receipt is not valid JSON.')
       }
+      let bundleReceipt
+      try {
+        bundleReceipt = JSON.parse(readFileSync(bundleReceiptPath, 'utf8'))
+      } catch {
+        throw new Error('Android AAB-derived APK receipt is not valid JSON.')
+      }
+      const aabSha256 = sha256FileSync(aabPath)
+      const apkSha256 = sha256FileSync(testedApkPath)
+      if (
+        sha256FileSync(bundleReceiptPath) !== receipt.bundleReceiptSha256
+        || bundleReceipt.schema !== 1
+        || bundleReceipt.relationship
+          !== 'universal-apk-derived-from-exact-aab'
+        || bundleReceipt.appGitSha !== candidateCommit
+        || bundleReceipt.appGitTree !== candidateTree
+        || bundleReceipt.aabSha256 !== aabSha256
+        || bundleReceipt.apkSha256 !== apkSha256
+        || bundleReceipt.aabPathSha256 !== pathSha256(aabPath)
+        || bundleReceipt.apkPathSha256 !== pathSha256(testedApkPath)
+      ) {
+        throw new Error(
+          'Android APK/AAB bytes differ from the bundle relationship sealed by the physical gate.',
+        )
+      }
       gate = validateAndroidReleaseGateReceipt(receipt, {
-        apkSha256: sha256FileSync(testedApkPath),
+        apkSha256,
+        aabSha256,
         apkPathSha256: pathSha256(testedApkPath),
         expectedAppGitSha: candidateCommit,
         expectedAppGitTree: candidateTree,
@@ -940,6 +1132,9 @@ function buildAndroidArtifacts({
       if (sha256FileSync(apkDest) !== gate.apkSha256) {
         throw new Error('Copied Android release APK differs from the physical-gate artifact.')
       }
+      if (sha256FileSync(aabDest) !== gate.aabSha256) {
+        throw new Error('Copied Android Play AAB differs from the physical-gate artifact.')
+      }
     }
 
     if (signed) {
@@ -951,10 +1146,30 @@ function buildAndroidArtifacts({
 
     builtLines.push(
       signed
-        ? 'Reused the physical-gate-sealed signed Android arm64 APK and built the signed AAB.'
-        : 'Reused the physical-gate-sealed Android arm64 APK and built the unsigned AAB.',
+        ? 'Reused the signed Play AAB and its physical-gate-sealed bundletool-derived APK.'
+        : 'Reused the Play AAB and its physical-gate-sealed bundletool-derived APK.',
     )
-    return dryRun ? null : gate
+    if (dryRun) {
+      return { gate: null, proofs: {} }
+    }
+    const runtimePayloads = androidRuntimePayloads(apkDest, aabDest)
+    return {
+      gate,
+      proofs: {
+        [basename(apkDest)]: exactArtifactProof({
+          artifactPath: apkDest,
+          platform: 'android',
+          gateReceiptPath,
+          payloads: runtimePayloads,
+        }),
+        [basename(aabDest)]: exactArtifactProof({
+          artifactPath: aabDest,
+          platform: 'android',
+          gateReceiptPath,
+          payloads: runtimePayloads,
+        }),
+      },
+    }
   } finally {
     if (wroteTempKeystore && androidEnv.ANDROID_KEYSTORE_PATH) {
       rmSync(androidEnv.ANDROID_KEYSTORE_PATH, { force: true })
@@ -965,7 +1180,15 @@ function buildAndroidArtifacts({
   }
 }
 
-function buildMacosArtifacts({ tag, dryRun, builtLines }) {
+function buildMacosArtifacts({
+  tag,
+  dryRun,
+  builtLines,
+  candidateCommit,
+  candidateTree,
+  gateReceiptPath,
+  gatedAppPath,
+}) {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') {
     throw new SkipStepError('Skipping macOS artifacts because the host is not Apple Silicon macOS.')
   }
@@ -982,20 +1205,134 @@ function buildMacosArtifacts({ tag, dryRun, builtLines }) {
   }
   if (!dryRun) {
     rmSync(join(distDir, `nostr-vpn-${tag}-macos-arm64.zip`), { force: true })
+    readRequiredJson(gateReceiptPath, 'macOS exact-artifact gate receipt')
+    if (!existsSync(gatedAppPath)) {
+      throw new Error(
+        `Gate-tested macOS Release app is missing: ${gatedAppPath}`,
+      )
+    }
+    const releaseApp = join(distDir, 'macos', 'Nostr VPN.app')
+    rmSync(releaseApp, { recursive: true, force: true })
+    mkdirSync(dirname(releaseApp), { recursive: true })
+    run('ditto', [gatedAppPath, releaseApp])
+    run(
+      'python3',
+      [
+        join(repoRoot, 'scripts', 'macos_release_join_artifact.py'),
+        'validate-published-app',
+        '--receipt',
+        gateReceiptPath,
+        '--app',
+        releaseApp,
+        '--expected-app-head',
+        candidateCommit,
+        '--expected-app-tree',
+        candidateTree,
+        '--require-gate-bundle-tree',
+      ],
+    )
   }
-  run('bash', [join(repoRoot, 'scripts', 'macos-build'), 'macos-release-artifacts'], { env, dryRun })
+  run(
+    'bash',
+    [join(repoRoot, 'scripts', 'macos-build'), 'macos-release-artifacts'],
+    {
+      env: {
+        ...env,
+        NVPN_MACOS_FORCE_REBUILD_APP: '0',
+      },
+      dryRun,
+    },
+  )
 
-  packageUnixCliTarball({
-    binaryPath: join(macosCargoTargetDir(env), 'aarch64-apple-darwin', 'release', 'nvpn'),
+  const gatedCli = join(
+    gatedAppPath,
+    'Contents',
+    'Resources',
+    'binaries',
+    'nvpn',
+  )
+  const cliAssets = packageUnixCliTarball({
+    binaryPath: gatedCli,
     targetTriple: 'aarch64-apple-darwin',
     tag,
     dryRun,
   })
+  if (dryRun) {
+    builtLines.push('Reused the gate-tested Apple Silicon CLI.')
+    builtLines.push('Packaged the gate-tested signed macOS app for notarized distribution.')
+    return {}
+  }
+
+  const receipt = readRequiredJson(
+    gateReceiptPath,
+    'macOS exact-artifact gate receipt',
+  )
+  const releaseApp = join(distDir, 'macos', 'Nostr VPN.app')
+  const updater = join(
+    distDir,
+    `nostr-vpn-${tag}-macos-arm64.app.tar.gz`,
+  )
+  const dmg = join(distDir, `nostr-vpn-${tag}-macos-arm64.dmg`)
+  run(
+    'bash',
+    [
+      join(repoRoot, 'scripts', 'verify-macos-release-publication-artifacts.sh'),
+      gateReceiptPath,
+      releaseApp,
+      updater,
+      dmg,
+      candidateCommit,
+      candidateTree,
+      join(repoRoot, 'scripts', 'macos_release_join_artifact.py'),
+    ],
+  )
+
+  const appPayload = {
+    app_executable: receipt.appExecutableSha256,
+  }
+  const cliPayloadSha256 = sha256FileSync(gatedCli)
+  const proofs = {
+    [basename(dmg)]: exactArtifactProof({
+      artifactPath: dmg,
+      platform: 'macos',
+      gateReceiptPath,
+      payloads: appPayload,
+    }),
+    [basename(updater)]: exactArtifactProof({
+      artifactPath: updater,
+      platform: 'macos',
+      gateReceiptPath,
+      payloads: appPayload,
+    }),
+  }
+  for (const cliAsset of cliAssets) {
+    const packagedCliSha256 = commandOutputSha256(
+      'tar',
+      ['-xOf', cliAsset, 'nvpn/nvpn'],
+    )
+    if (packagedCliSha256 !== cliPayloadSha256) {
+      throw new Error(
+        `macOS CLI archive ${basename(cliAsset)} differs from the gate-tested app payload.`,
+      )
+    }
+    proofs[basename(cliAsset)] = exactArtifactProof({
+      artifactPath: cliAsset,
+      platform: 'macos',
+      gateReceiptPath,
+      payloads: { nvpn: cliPayloadSha256 },
+    })
+  }
   builtLines.push('Built Apple Silicon CLI locally.')
-  builtLines.push('Built signed and notarized Apple Silicon macOS DMG and updater archive locally.')
+  builtLines.push('Packaged the gate-tested signed and notarized Apple Silicon app.')
+  return proofs
 }
 
-function buildIosArtifacts({ tag, dryRun, builtLines }) {
+function buildIosArtifacts({
+  tag,
+  dryRun,
+  builtLines,
+  releaseGateLogDir,
+}) {
   if (process.platform !== 'darwin') {
     throw new SkipStepError('Skipping iOS artifacts because the host is not macOS.')
   }
@@ -1004,6 +1341,7 @@ function buildIosArtifacts({ tag, dryRun, builtLines }) {
     NVPN_RELEASE_TAG: tag,
     NVPN_IOS_INTERNAL_ONLY: 'false',
     NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
+    NVPN_RELEASE_GATE_LOG_DIR: releaseGateLogDir,
   }
   // The release gate already created and physically tested one frozen archive.
   // This command refuses to archive: it verifies the gate seal, exports that
@@ -1055,7 +1393,7 @@ function syncPlatformVersions({ env, tag, dryRun, builtLines }) {
   }
 }
 
-function runVerify({ dryRun, builtLines, releaseGateLogDir }) {
+function runVerify({ dryRun, builtLines, releaseGateLogDir, tag }) {
   const env = {
     ...process.env,
     NVPN_RELEASE_GATE_LOG_DIR: releaseGateLogDir,
@@ -1066,15 +1404,21 @@ function runVerify({ dryRun, builtLines, releaseGateLogDir }) {
     NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E: '1',
     NVPN_RELEASE_GATE_WINDOWS_GUI_SMOKE: '1',
     NVPN_RELEASE_GATE_WINDOWS_MANUAL_JOIN_UI_E2E: '1',
+    NVPN_RELEASE_GATE_WINDOWS_DNS_UI_E2E: '1',
     NVPN_RELEASE_GATE_WINDOWS_SERVICE_TOGGLE_E2E: '1',
     NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E: '1',
+    NVPN_RELEASE_GATE_WINDOWS_MOBILE_JOIN_E2E: '1',
+    NVPN_WINDOWS_APP_SMOKE_TAG: tag,
     NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E: '1',
+    NVPN_RELEASE_GATE_MACOS_DNS_UI_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_GUI_SMOKE: '1',
     NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU: '1',
     NVPN_RELEASE_GATE_LINUX_MANUAL_JOIN_UI_E2E: '1',
+    NVPN_RELEASE_GATE_LINUX_DNS_UI_E2E: '1',
     NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '1',
     NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E: '1',
+    NVPN_RELEASE_GATE_LINUX_MOBILE_JOIN_E2E: '1',
     NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E: '1',
     NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
   }
@@ -1082,7 +1426,12 @@ function runVerify({ dryRun, builtLines, releaseGateLogDir }) {
   builtLines.push('Ran release gate: sync-versions, fmt, clippy, tests, FIPS Docker e2e, WireGuard exit Docker/platform e2e, real Android/iOS physical underlay changes, real Windows/Linux desktop underlay changes, isolated macOS VM network/service proofs, and desktop launch smokes.')
 }
 
-function buildStartosArtifacts({ tag, dryRun, builtLines }) {
+function buildStartosArtifacts({
+  tag,
+  dryRun,
+  builtLines,
+  releaseGateSummaryPath,
+}) {
   run(
     'node',
     [
@@ -1095,6 +1444,34 @@ function buildStartosArtifacts({ tag, dryRun, builtLines }) {
     { dryRun },
   )
   builtLines.push('Built signed StartOS packages for x86_64 and aarch64.')
+  if (dryRun) {
+    return {}
+  }
+  const proofs = {}
+  for (const arch of ['x86_64', 'aarch64']) {
+    const path = join(
+      distDir,
+      `nostr-vpn-${tag}-startos-${arch}.s9pk`,
+    )
+    const digest = sha256FileSync(path)
+    const inspection = inspectStartosReleasePackage({
+      packagePath: path,
+      arch,
+      tag,
+    })
+    proofs[basename(path)] = exactArtifactProof({
+      artifactPath: path,
+      platform: 'startos',
+      gateReceiptPath: releaseGateSummaryPath,
+      verification: 'post-build-exact-package-gate',
+      postBuildValidator: startosExactPackageValidator,
+      payloads: {
+        manifest_json: inspection.manifestSha256,
+        package: digest,
+      },
+    })
+  }
+  return proofs
 }
 
 function shouldRunStep(step, options) {
@@ -1166,6 +1543,7 @@ function writeReleaseNotes({ tag, commit, stageDir, builtLines, skippedLines, dr
 function stageRelease({
   tag,
   commit,
+  tree,
   stageDir,
   builtLines,
   skippedLines,
@@ -1173,6 +1551,8 @@ function stageRelease({
   requireCompleteAppRelease,
   draft,
   androidReleaseGate,
+  releaseGateEvidence,
+  artifactProofs,
 }) {
   const assetPaths = collectReleaseAssetPaths(tag)
   const assetNames = assetPaths.map((assetPath) => basename(assetPath))
@@ -1243,6 +1623,30 @@ function stageRelease({
     draft,
     androidReleaseGate: androidGateManifest,
   })
+  if (requireCompleteAppRelease) {
+    if (!releaseGateEvidence) {
+      throw new Error(
+        'Complete release staging requires the real platform-gate evidence.',
+      )
+    }
+    manifest.release_gate_attestation = buildReleaseGateAttestation({
+      commit,
+      tree,
+      assets: manifest.assets,
+      assetProofs: Object.fromEntries(
+        manifest.assets.map((asset) => {
+          const proof = artifactProofs?.[asset.name]
+          if (!proof) {
+            throw new Error(
+              `Release asset ${asset.name} has no exact platform-gate proof.`,
+            )
+          }
+          return [asset.path, proof]
+        }),
+      ),
+      ...releaseGateEvidence,
+    })
+  }
 
   for (const [fileName, text] of buildReleaseManifestFiles(manifest)) {
     writeFileSync(join(stageDir, fileName), text)
@@ -1260,6 +1664,9 @@ function publishRelease({ stageDir, releaseTree, tag, draft, dryRun }) {
   }
 
   const manifest = readReleaseManifest(stageDir)
+  if (!draft) {
+    validatePromotableReleaseManifest(manifest)
+  }
   const addOutput = run('htree', ['add', stageDir], { capture: true, dryRun })
   const match = addOutput.match(/^\s*url:\s*(\S+)/m)
   if (!match) {
@@ -1645,6 +2052,110 @@ function main() {
     'mobile-release-artifacts',
     'android.json',
   )
+  const releaseGateSummaryPath = join(
+    releaseGateLogDir,
+    'release-gate-summary.json',
+  )
+  const releaseJoinResultDir = resolve(
+    env.NVPN_RELEASE_JOIN_RESULT_DIR
+      || join(repoRoot, 'artifacts', 'mobile-release-join'),
+  )
+  const platformReceiptPaths = {
+    android: {
+      physical: androidGateReceiptPath,
+      mobile_join: join(releaseJoinResultDir, 'summary.json'),
+      wireguard_dns: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'android-wireguard-dns.json',
+      ),
+      underlay_lifecycle: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'android-underlay-lifecycle.json',
+      ),
+      replacement_singleton: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'android-replacement-artifacts',
+        'mobile-android-legacy-replacement.json',
+      ),
+    },
+    ios: {
+      frozen_archive: join(
+        repoRoot,
+        'dist',
+        'ios',
+        'frozen',
+        'physical-gate-seal.json',
+      ),
+      mobile_artifact: join(
+        repoRoot,
+        'dist',
+        'ios',
+        'frozen',
+        'physical-mobile-receipt.json',
+      ),
+      mobile_join: join(releaseJoinResultDir, 'summary.json'),
+      wireguard_dns: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'ios-wireguard-dns.json',
+      ),
+      underlay_lifecycle: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'ios-underlay-lifecycle.json',
+      ),
+    },
+    linux: {
+      artifact: join(
+        releaseJoinResultDir,
+        'linux',
+        'import',
+        'host-bundle-receipt.json',
+      ),
+      public_ui_join: join(releaseJoinResultDir, 'linux', 'summary.json'),
+      package_install: join(
+        releaseJoinResultDir,
+        'linux',
+        'import',
+        'debian-package-install.json',
+      ),
+      network: join(
+        releaseGateLogDir,
+        'desktop-network',
+        'linux.json',
+      ),
+    },
+    macos: {
+      artifact: join(releaseJoinResultDir, 'macos', 'artifact.json'),
+      public_ui_join: join(releaseJoinResultDir, 'macos', 'summary.json'),
+      network: join(
+        releaseGateLogDir,
+        'desktop-network',
+        'macos.json',
+      ),
+    },
+    windows: {
+      artifact: join(
+        releaseJoinResultDir,
+        'windows',
+        'windows-release-artifact.json',
+      ),
+      installer: join(
+        releaseGateLogDir,
+        'windows-installer',
+        'installer-receipt.json',
+      ),
+      public_ui_join: join(releaseJoinResultDir, 'windows', 'summary.json'),
+      network: join(
+        releaseGateLogDir,
+        'desktop-network',
+        'windows.json',
+      ),
+    },
+  }
   const expectedStagedAndroidApkPath = join(
     stageDir,
     'assets',
@@ -1659,6 +2170,9 @@ function main() {
   const builtLines = []
   const skippedLines = []
   let androidReleaseGate = null
+  let releaseGateCompleted = false
+  let releaseGateEvidence = null
+  const artifactProofs = {}
 
   if (requireZapstore && options.skipZapstore) {
     throw new Error('--require-zapstore conflicts with --skip-zapstore.')
@@ -1768,15 +2282,51 @@ function main() {
       dryRun: options.dryRun,
       builtLines,
     })],
-    ['verify', () => runVerify({
-      dryRun: options.dryRun,
-      builtLines,
-      releaseGateLogDir,
-    })],
-    ['startos', () => buildStartosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
-    ['macos', () => buildMacosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
+    ['verify', () => {
+      runVerify({
+        dryRun: options.dryRun,
+        builtLines,
+        releaseGateLogDir,
+        tag,
+      })
+      releaseGateCompleted = true
+      if (!options.dryRun && !allowPartial) {
+        releaseGateEvidence = collectReleaseGateReceipts({
+          commit: candidateCommit,
+          tree: candidateTree,
+          releaseGateSummaryPath,
+          platformReceiptPaths,
+        })
+      }
+    }],
+    ['startos', () => mergeArtifactProofs(
+      artifactProofs,
+      buildStartosArtifacts({
+        tag,
+        dryRun: options.dryRun,
+        builtLines,
+        releaseGateSummaryPath,
+      }),
+    )],
+    ['macos', () => mergeArtifactProofs(
+      artifactProofs,
+      buildMacosArtifacts({
+        tag,
+        dryRun: options.dryRun,
+        builtLines,
+        candidateCommit,
+        candidateTree,
+        gateReceiptPath: platformReceiptPaths.macos.artifact,
+        gatedAppPath: join(
+          releaseJoinResultDir,
+          'macos',
+          'publication',
+          'Nostr VPN.app',
+        ),
+      }),
+    )],
     ['android', () => {
-      androidReleaseGate = buildAndroidArtifacts({
+      const android = buildAndroidArtifacts({
         env,
         tag,
         dryRun: options.dryRun,
@@ -1785,12 +2335,53 @@ function main() {
         candidateCommit,
         candidateTree,
       })
+      androidReleaseGate = android.gate
+      mergeArtifactProofs(artifactProofs, android.proofs)
     }],
-    ['linux', () => buildLinuxArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
-    ['windows', () => buildWindowsArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
+    ['linux', () => mergeArtifactProofs(
+      artifactProofs,
+      buildLinuxArtifacts({
+        env,
+        tag,
+        dryRun: options.dryRun,
+        builtLines,
+        candidateCommit,
+        candidateTree,
+        testedReceiptPath: platformReceiptPaths.linux.artifact,
+        testedPackageInstallReceiptPath:
+          platformReceiptPaths.linux.package_install,
+        gatedBundlePathReceipt: join(
+          releaseGateLogDir,
+          'host-linux-vm-bundle-path.txt',
+        ),
+      }),
+    )],
+    ['windows', () => mergeArtifactProofs(
+      artifactProofs,
+      buildWindowsArtifacts({
+        env,
+        tag,
+        dryRun: options.dryRun,
+        builtLines,
+        candidateCommit,
+        candidateTree,
+        gateReceiptPath: platformReceiptPaths.windows.artifact,
+        installerReceiptPath: platformReceiptPaths.windows.installer,
+        installerArtifactPath: join(
+          releaseGateLogDir,
+          'windows-installer',
+          `nostr-vpn-${tag}-windows-x64-setup.exe`,
+        ),
+      }),
+    )],
     // Upload the TestFlight/App Store candidate only after every downloadable
     // platform artifact has built successfully, avoiding a partial upload.
-    ['ios', () => buildIosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
+    ['ios', () => buildIosArtifacts({
+      tag,
+      dryRun: options.dryRun,
+      builtLines,
+      releaseGateLogDir,
+    })],
   ]
 
   for (const [name, fn] of steps) {
@@ -1829,9 +2420,17 @@ function main() {
   }
 
   const commit = resolveReleaseCommit(tag, { dryRun: options.dryRun })
+  if (!options.dryRun && !allowPartial) {
+    if (!releaseGateCompleted || !releaseGateEvidence) {
+      throw new Error(
+        'Complete release staging requires validated real-platform receipts.',
+      )
+    }
+  }
   const stagedRelease = stageRelease({
     tag,
     commit,
+    tree: candidateTree,
     stageDir,
     builtLines,
     skippedLines,
@@ -1839,6 +2438,8 @@ function main() {
     requireCompleteAppRelease: !allowPartial && !options.dryRun,
     draft: options.draft,
     androidReleaseGate,
+    releaseGateEvidence,
+    artifactProofs,
   })
 
   if (options.publish) {

@@ -215,7 +215,7 @@ if (\$FipsPackages.Count -ne 2 -or @(\$FipsPackages | Where-Object {
 }
 
 capture_version_receipts() {
-  local expected="(rev $EXPECTED_FIPS_REV)"
+  local expected="(rev $EXPECTED_FIPS_REV)" target_sha target_size
   run_ps_primary \
     "& $(ps_quote "$GUEST_BINARY") version --verbose" \
     | tr -d '\r' >"$ARTIFACT_DIR/target-version.txt"
@@ -226,6 +226,43 @@ capture_version_receipts() {
     || fail "Windows target binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
   grep -Fq "$expected" "$ARTIFACT_DIR/peer-version.txt" \
     || fail "Windows peer binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
+  target_sha="$(
+    run_ps_primary \
+      "(Get-FileHash -Algorithm SHA256 -LiteralPath $(ps_quote "$GUEST_BINARY")).Hash.ToLowerInvariant()" \
+      | tr -d '\r' \
+      | awk '/^[0-9a-f]{64}$/ { value = $0 } END { print value }'
+  )"
+  target_size="$(
+    run_ps_primary \
+      "(Get-Item -LiteralPath $(ps_quote "$GUEST_BINARY")).Length" \
+      | tr -d '\r' \
+      | awk '/^[1-9][0-9]*$/ { value = $0 } END { print value }'
+  )"
+  [[ "$target_sha" =~ ^[0-9a-f]{64}$ \
+    && "$target_size" =~ ^[1-9][0-9]*$ ]] \
+    || fail "Windows target binary has no exact byte receipt"
+  python3 - \
+    "$ARTIFACT_DIR/tested-artifact.json" \
+    "$target_sha" \
+    "$target_size" <<'PY'
+import json
+import pathlib
+import sys
+
+output, cli_sha, cli_size = sys.argv[1:]
+pathlib.Path(output).write_text(
+    json.dumps(
+        {
+            "cliSha256": cli_sha,
+            "cliSize": int(cli_size),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
 }
 
 random_mac() {
@@ -571,35 +608,49 @@ counter_value() {
   parse_key_value "$key"
 }
 
+stable_dns_counters() {
+  local previous current attempt
+  previous="$(peer_counters)"
+  for attempt in $(seq 1 20); do
+    sleep 0.2
+    current="$(peer_counters)"
+    if [[ "$current" == "$previous" ]]; then
+      printf '%s\n' "$current"
+      return 0
+    fi
+    previous="$current"
+  done
+  fail "resolver path counters did not settle"
+}
+
 run_dns_case() {
   local name="$1"
   local counter="$2"
-  local before after
-  before="$(peer_counters)"
+  local before after key before_value after_value
+  local -a counters=(cloudflare quad9 google fixture_dns)
+  before="$(stable_dns_counters)"
   signal_guest "dns-$name.go"
   wait_for_guest_marker "dns-$name.receipt" 35
-  after="$(peer_counters)"
-  case "$counter" in
-    cloudflare)
-      (( $(counter_value cloudflare <<<"$after") > $(counter_value cloudflare <<<"$before") )) \
-        || fail "$name did not create a real Cloudflare DoH flow through the exit"
-      ;;
-    quad9)
-      (( $(counter_value quad9 <<<"$after") > $(counter_value quad9 <<<"$before") )) \
-        || fail "$name did not create a real Quad9 DoH flow through the exit"
-      ;;
-    fixture_dns)
-      (( $(counter_value fixture_dns <<<"$after") > $(counter_value fixture_dns <<<"$before") )) \
-        || fail "$name did not query the configured DNS-through-exit resolver"
-      ;;
-    *)
-      fail "internal error: unknown DNS counter $counter"
-      ;;
-  esac
+  after="$(stable_dns_counters)"
+  for key in "${counters[@]}"; do
+    before_value="$(counter_value "$key" <<<"$before")"
+    after_value="$(counter_value "$key" <<<"$after")"
+    [[ "$before_value" =~ ^[0-9]+$ && "$after_value" =~ ^[0-9]+$ ]] \
+      || fail "$name returned an invalid $key resolver counter"
+    if [[ "$key" == "$counter" ]]; then
+      ((after_value > before_value)) \
+        || fail "$name did not create a real $counter resolver flow through the exit"
+    else
+      [[ "$after_value" == "$before_value" ]] \
+        || fail "$name also used the forbidden $key resolver path"
+    fi
+  done
   {
     printf 'case=%s\n' "$name"
-    printf 'before_%s=%s\n' "$counter" "$(counter_value "$counter" <<<"$before")"
-    printf 'after_%s=%s\n' "$counter" "$(counter_value "$counter" <<<"$after")"
+    for key in "${counters[@]}"; do
+      printf 'before_%s=%s\n' "$key" "$(counter_value "$key" <<<"$before")"
+      printf 'after_%s=%s\n' "$key" "$(counter_value "$key" <<<"$after")"
+    done
   } >>"$ARTIFACT_DIR/dns-matrix.txt"
 }
 
@@ -607,7 +658,7 @@ run_dns_matrix_and_direct_restore() {
   run_dns_case automatic cloudflare
   run_dns_case cloudflare cloudflare
   run_dns_case quad9 quad9
-  run_dns_case custom cloudflare
+  run_dns_case custom google
   run_dns_case through-exit fixture_dns
 
   signal_guest select-direct

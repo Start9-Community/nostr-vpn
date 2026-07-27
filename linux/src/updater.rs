@@ -6,8 +6,8 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use nostr_vpn_core::updater::{
-    ProductUpdateMode, ProductUpdateSource, check_product_update_blocking_with_cache,
-    download_product_update_blocking_with_cache, update_event_cache_path,
+    check_product_update_blocking_with_cache, download_product_update_blocking_with_cache,
+    update_event_cache_path, ProductUpdateMode, ProductUpdateSource,
 };
 
 #[derive(Clone, Debug, Default)]

@@ -29,6 +29,7 @@ resolve_shared_build_metadata "$ROOT"
   exit 2
 }
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
 [[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
   && "$APP_GIT_SHA" == "$NVPN_EXPECTED_APP_GIT_SHA" ]] || {
   echo "Set NVPN_EXPECTED_APP_GIT_SHA to this exact committed candidate" >&2
@@ -166,6 +167,8 @@ phase_ios_admin_android_qr() {
   )"
   release_join_android_wait_qr_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel stayed on QR view or lacked the exact iPhone admin roster row"
+  release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    || fail "Pixel QR join did not retain the signed roster across relaunch"
   completed="$(release_join_now_ms)"
   assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-QR"
 }
@@ -204,21 +207,30 @@ phase_android_admin_ios_qr() {
 }
 
 phase_ios_admin_android_manual() {
+  local admin_log submitted completed
   release_join_reset_ios_state
   release_join_reset_android_state
   ios_create_admin "Release manual iPhone admin"
   release_join_android_manual_submit \
     "$RELEASE_JOIN_IOS_ADMIN_ID" "$RELEASE_JOIN_IOS_NETWORK_ID"
+  admin_log="$(ios_log ios-admin-android-manual)"
   release_join_ios_run_test \
     testManualAdminAddRequiresRosterProgress \
-    "$(ios_log ios-admin-android-manual)" \
+    "$admin_log" \
     "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
+  submitted="$(
+    ios_marker_value_from "$admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
+  )"
   release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
-    || fail "Pixel manual join lacked the exact iPhone admin roster row"
+    || fail "Pixel manual join never left its locally pending admin row"
+  release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    || fail "Pixel manual join did not retain the signed roster across relaunch"
+  completed="$(release_join_now_ms)"
+  assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-manual"
 }
 
 phase_android_admin_ios_manual() {
-  local join_log
+  local join_log android_admin_log submitted completed
   release_join_reset_ios_state
   release_join_reset_android_state
   release_join_android_create_admin
@@ -236,9 +248,19 @@ phase_android_admin_ios_manual() {
     || fail "iPhone manual join identity was invalid"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10 \
     || fail "iPhone did not submit through shipped manual-join controls"
-  release_join_android_manual_admin_add "$RELEASE_JOIN_IOS_JOINER_ID"
+  android_admin_log="$RESULT_DIR/android-admin-ios-manual.log"
+  release_join_android_manual_admin_add "$RELEASE_JOIN_IOS_JOINER_ID" \
+    | tee "$android_admin_log"
+  submitted="$(
+    sed -n \
+      's/.*NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=//p' \
+      "$android_admin_log" \
+      | tail -n 1
+  )"
   release_join_ios_finish_test \
-    || fail "iPhone manual join lacked the exact Pixel admin roster row"
+    || fail "iPhone manual join never received and retained the Pixel's signed roster"
+  completed="$(release_join_now_ms)"
+  assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-manual"
 }
 
 release_join_require_clean_fips
@@ -269,48 +291,167 @@ esac
 
 python3 - \
   "$SUMMARY" \
-  "$RELEASE_JOIN_ANDROID_APK_SHA" \
-  "$RELEASE_JOIN_FIPS_SHA" \
-  "$APP_GIT_SHA" \
   "$RESULT_DIR/delivery-times.tsv" \
+  "$APP_GIT_SHA" \
+  "$APP_GIT_TREE" \
+  "$RELEASE_JOIN_FIPS_SHA" \
+  "$RELEASE_JOIN_FIPS_TREE" \
+  "$RELEASE_JOIN_ANDROID_APK_SHA" \
+  "${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:?exact Android receipt is required}" \
+  "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
+  "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
   "$MACOS_JOIN_GATE" <<'PY'
+import hashlib
 import json
 import pathlib
 import sys
 
-path, apk, fips, app, timing_path, desktop_mode = sys.argv[1:]
+(
+    path,
+    timing_path,
+    app_sha,
+    app_tree,
+    fips_sha,
+    fips_tree,
+    apk_sha,
+    android_receipt_path,
+    ios_app_tree,
+    ios_receipt_path,
+    desktop_mode,
+) = sys.argv[1:]
+
+
+def load_receipt(receipt_path):
+    value = pathlib.Path(receipt_path)
+    payload = json.loads(value.read_text(encoding="utf-8"))
+    return payload, hashlib.sha256(value.read_bytes()).hexdigest()
+
+
+def require_hash(value, label, length=64):
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise SystemExit(f"{label} is not a lowercase hash")
+
+
+require_hash(app_sha, "application commit", 40)
+require_hash(app_tree, "application tree", 40)
+require_hash(fips_sha, "FIPS commit", 40)
+require_hash(fips_tree, "FIPS tree", 40)
+require_hash(apk_sha, "Android APK")
+require_hash(ios_app_tree, "iOS app bundle tree")
+android, android_receipt_sha = load_receipt(android_receipt_path)
+ios, ios_receipt_sha = load_receipt(ios_receipt_path)
+if (
+    android.get("receiptSchema") != 2
+    or android.get("artifactType") != "Android Release APK"
+    or android.get("appGitSha") != app_sha
+    or android.get("appGitTree") != app_tree
+    or android.get("fipsGitSha") != fips_sha
+    or android.get("fipsGitTree") != fips_tree
+    or android.get("apkSha256") != apk_sha
+    or android.get("installedApkSha256") != apk_sha
+    or android.get("companySigningVerified") is not True
+):
+    raise SystemExit("Android join artifact receipt is not exact")
+if (
+    ios.get("receiptSchema") != 2
+    or ios.get("artifactType") != "iOS company Ad Hoc Release app"
+    or ios.get("appGitSha") != app_sha
+    or ios.get("appGitTree") != app_tree
+    or ios.get("fipsGitSha") != fips_sha
+    or ios.get("fipsGitTree") != fips_tree
+    or ios.get("appBundleTreeSha256") != ios_app_tree
+    or ios.get("companySigningVerified") is not True
+):
+    raise SystemExit("iOS join artifact receipt is not exact")
+
+android_identity_keys = (
+    "apkSha256",
+    "installedApkSha256",
+    "package",
+    "signerCertificateSha256",
+)
+ios_identity_keys = (
+    "appBundleTreeSha256",
+    "appCodeDirectoryHash",
+    "packetTunnelCodeDirectoryHash",
+    "appExecutableSha256",
+    "packetTunnelExecutableSha256",
+    "signerCertificateSha256",
+    "installedBundleIdentifier",
+)
+for key in android_identity_keys:
+    if not android.get(key):
+        raise SystemExit(f"Android join artifact lacks {key}")
+for key in ios_identity_keys:
+    if not ios.get(key):
+        raise SystemExit(f"iOS join artifact lacks {key}")
+
 timings = {}
 for line in pathlib.Path(timing_path).read_text(encoding="utf-8").splitlines():
     label, elapsed = line.split("\t")
     timings[label] = int(elapsed)
+expected_timings = {
+    "iPhone-admin-to-Pixel-QR",
+    "Pixel-admin-to-iPhone-QR",
+    "iPhone-admin-to-Pixel-manual",
+    "Pixel-admin-to-iPhone-manual",
+}
+if set(timings) != expected_timings or any(
+    elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
+):
+    raise SystemExit("mobile join delivery timing receipt is incomplete or slow")
 desktop_enabled = desktop_mode.lower() not in {
     "0", "false", "no", "off",
 }
+if not desktop_enabled:
+    raise SystemExit("complete mobile release join requires desktop/mobile coverage")
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
         {
+            "schema": 1,
+            "platform": "mobile",
             "artifact": {
-                "androidApkSha256": apk,
-                "appGitSha": app,
-                "fipsGitSha": fips,
+                "appGitSha": app_sha,
+                "appGitTree": app_tree,
+                "fipsGitSha": fips_sha,
+                "fipsGitTree": fips_tree,
                 "androidBuildType": "Release",
                 "iosBuildType": "Release",
                 "iosDistribution": "Ad Hoc",
+                "android": {
+                    "artifactReceiptSha256": android_receipt_sha,
+                    **{
+                        key: android[key]
+                        for key in android_identity_keys
+                    },
+                },
+                "ios": {
+                    "artifactReceiptSha256": ios_receipt_sha,
+                    **{key: ios[key] for key in ios_identity_keys},
+                },
             },
             "publicUiOnly": True,
             "opticalCameraQr": True,
             "privateAppStateRead": False,
             "appLaunchArgumentsOrEnvironment": False,
+            "deliveryDeadlineMilliseconds": 15_000,
             "qr": {
                 "iphoneAdminPixelJoiner": True,
                 "pixelAdminIphoneJoiner": True,
                 "pendingQrBackgroundForeground": True,
                 "exactRosterOnBothSides": True,
+                "joinerRelaunchDurable": True,
             },
             "manual": {
                 "iphoneAdminPixelJoiner": True,
                 "pixelAdminIphoneJoiner": True,
                 "exactRosterOnBothSides": True,
+                "acceptedRosterOnly": True,
+                "joinerRelaunchDurable": True,
             },
             "deliveryMilliseconds": timings,
             "desktopMobileManual": desktop_enabled,

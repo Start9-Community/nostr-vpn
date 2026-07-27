@@ -52,6 +52,7 @@ python3 - \
   "$ROOT/scripts/lib-mobile-release-join-ui.sh" \
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
   "$ROOT/scripts/macos-release-mobile-join-remote.sh" \
+  "$ROOT/scripts/desktop-manual-join-ax.swift" \
   "$ROOT/scripts/macos_release_join_artifact.py" \
   "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift" \
   "$ROOT/ios/project.yml" \
@@ -60,6 +61,13 @@ python3 - \
   "$ROOT/ios/Sources/DevicesViews.swift" \
   "$ROOT/ios/Sources/SettingsViews.swift" \
   "$ROOT/macos/Sources/RootViewDevices.swift" \
+  "$ROOT/crates/nostr-vpn-app-core/src/ffi/runtime_network.rs" \
+  "$ROOT/crates/nostr-vpn-app-core/src/ffi/tests_network.rs" \
+  "$ROOT/crates/nostr-vpn-core/src/config/types.rs" \
+  "$ROOT/crates/nostr-vpn-core/src/config/app_config_networks.rs" \
+  "$ROOT/crates/nostr-vpn-core/src/config/app_config_rosters.rs" \
+  "$ROOT/crates/nostr-vpn-core/src/join_requests.rs" \
+  "$ROOT/crates/nostr-vpn-core/tests/config_tests/defaults/roster_apply.rs" \
   "$ROOT/scripts/release-gate.sh" <<'PY'
 import pathlib
 import sys
@@ -78,6 +86,7 @@ def read(path):
     ui,
     desktop,
     desktop_remote,
+    desktop_ui_driver,
     desktop_artifact,
     ios_test,
     ios_project,
@@ -86,6 +95,13 @@ def read(path):
     ios_devices,
     ios_participants,
     macos_devices,
+    runtime_network,
+    runtime_network_tests,
+    config_types,
+    config_networks,
+    config_rosters,
+    join_requests,
+    roster_apply_tests,
     release_gate,
 ) = map(read, sys.argv[1:])
 
@@ -119,11 +135,14 @@ for required in (
     "waitForRosterBackedPendingQrDismissal",
     "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS",
     "Join QR disappeared before the exact admin roster was visible",
-    "roster-participant-",
+    "roster-participant-accepted-",
     "testScanPhysicalJoinQrAndRequireAdminRosterProgress",
     "testShowPhysicalJoinQrAndRequireRosterCompletion",
     "testManualJoinAndRequireRosterCompletion",
     "testManualAdminAddRequiresRosterProgress",
+    "requireAcceptedRoster",
+    "app.terminate()",
+    "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
 ):
     if required not in ios_test:
         raise SystemExit(f"Release join XCTest is missing {required}")
@@ -145,7 +164,7 @@ for required in (
     'let devicesTab = app.tabBars.buttons["Devices"]',
     "guard devicesTab.exists else {",
     "devicesTab.tap()",
-    'guard element("roster-participant-\\(expectedParticipant)").exists else {',
+    'guard element("roster-participant-accepted-\\(expectedParticipant)").exists else {',
     "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS",
 ):
     if required not in ios_roster_transition:
@@ -154,7 +173,7 @@ for required in (
             + required
         )
 if ios_roster_transition.index(
-    'element("roster-participant-\\(expectedParticipant)").exists'
+    'element("roster-participant-accepted-\\(expectedParticipant)").exists'
 ) > ios_roster_transition.index(
     "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS"
 ):
@@ -167,6 +186,7 @@ for required in (
     "phase_android_admin_ios_manual",
     "release_join_android_wait_qr_join_complete",
     "release_join_android_wait_join_complete",
+    "release_join_android_relaunch_and_wait_accepted",
     "macos-vm-release-mobile-join-e2e.sh",
     "opticalCameraQr",
     "exactRosterOnBothSides",
@@ -175,6 +195,19 @@ for required in (
         raise SystemExit(f"Release join orchestrator is missing {required}")
 if "NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET" not in artifacts:
     raise SystemExit("Physical app-state reset lacks an explicit destructive opt-in")
+
+macos_pixel_admin_phase = desktop.split(
+    "# Physical Android admin -> macOS joiner.", 1
+)[1].split("python3 -", 1)[0]
+for required in (
+    'release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_ID"',
+    "Android admin did not retain the macOS joiner roster across relaunch",
+):
+    if required not in macos_pixel_admin_phase:
+        raise SystemExit(
+            "macOS/Pixel join gate claims Pixel relaunch durability without "
+            f"the Android-admin direction check: {required}"
+        )
 
 for required in (
     "-configuration Release",
@@ -223,8 +256,10 @@ for required in (
     "release_join_android_assert_qr_full_width",
     "release_join_android_assert_pending_qr",
     "release_join_require_fresh_ios_pending_qr",
-    "roster-participant-$admin",
-    "roster-participant-$joiner",
+    "roster-participant-accepted-$admin",
+    "roster-participant-accepted-$joiner",
+    "release_join_android_wait_accepted_participant",
+    "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS",
     "test-without-building",
 ):
     if required not in ui:
@@ -244,12 +279,67 @@ for selector in (
         raise SystemExit(f"iOS shipped UI lacks {selector}")
     if selector not in macos_devices:
         raise SystemExit(f"macOS shipped UI lacks {selector}")
-if "roster-participant-${participant.npub}" not in android_components:
-    raise SystemExit("Android Release UI lacks exact roster participant identity")
-if "roster-participant-\\(participant.npub)" not in ios_participants:
-    raise SystemExit("iOS Release UI lacks exact roster participant identity")
-if "roster-participant-\\(participant.npub)" not in macos_devices:
-    raise SystemExit("macOS Release UI lacks exact roster participant identity")
+for source, label, interpolation in (
+    (android_components, "Android", "${participant.npub}"),
+    (ios_participants, "iOS", "\\(participant.npub)"),
+    (macos_devices, "macOS", "\\(participant.npub)"),
+):
+    if "roster-participant-" not in source or interpolation not in source:
+        raise SystemExit(f"{label} Release UI lacks exact roster participant identity")
+    if "participant.state == \"pending\"" not in source:
+        raise SystemExit(f"{label} Release UI does not distinguish pending from accepted rows")
+    if "accepted" not in source or "pending" not in source:
+        raise SystemExit(f"{label} Release UI lacks explicit accepted/pending selectors")
+
+if "network_has_confirmed_local_identity(&network.id)" not in runtime_network:
+    raise SystemExit(
+        "Native UI state does not keep a manual admin pending until a signed roster applies"
+    )
+for source, required, label in (
+    (
+        config_types,
+        "pub local_identity_confirmation_pending: bool",
+        "persisted manual-join confirmation state",
+    ),
+    (
+        config_networks,
+        "network.local_identity_confirmation_pending = true",
+        "manual-join pending transition",
+    ),
+    (
+        config_rosters,
+        "if network.local_identity_confirmation_pending",
+        "pending-first confirmation predicate",
+    ),
+    (
+        config_rosters,
+        "network.local_identity_confirmation_pending = false",
+        "explicit membership confirmation transition",
+    ),
+    (
+        join_requests,
+        "&& network.local_identity_confirmation_pending",
+        "receipt lookup for a still-pending manual join",
+    ),
+):
+    if required not in source:
+        raise SystemExit(f"Release join core lacks {label}")
+for required in (
+    "manual_join_stays_pending_until_a_signed_roster_contains_this_device",
+    "apply_verified_admin_signed_shared_roster(&roster_without_joiner)",
+    "!reloaded.active_network_has_confirmed_local_identity()",
+    "apply_manual_join_roster(&accepted",
+    "reload accepted manual join",
+):
+    if required not in roster_apply_tests:
+        raise SystemExit(f"Manual signed-membership regression is missing {required}")
+for required in (
+    "an out-of-band admin row must remain pending until its signed roster arrives",
+    'pending_admin.state, "pending"',
+    'assert_eq!(pending_admin.status_text, "waiting for admin")',
+):
+    if required not in runtime_network_tests:
+        raise SystemExit(f"Manual pending-row regression is missing {required}")
 
 for variable in (
     "NVPN_RELEASE_JOIN_BLACKBOX",
@@ -276,6 +366,10 @@ for required in (
 ):
     if required not in desktop_remote and required not in desktop:
         raise SystemExit(f"Desktop/mobile Release driver is missing {required}")
+if "roster-participant-accepted-" not in desktop_ui_driver:
+    raise SystemExit(
+        "Desktop/mobile Release UI driver does not require an accepted roster row"
+    )
 if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
     raise SystemExit("Desktop Release app is launched against injected private state")
 if '"$APP_EXE"' not in desktop_remote:
@@ -370,7 +464,9 @@ PY
     if [[ "$kind" == resource && "$expected" == navigation-devices ]]; then
       return 0
     fi
-    if [[ "$kind" == resource && "$expected" == roster-participant-npub1admin ]]; then
+    if [[ "$kind" == resource \
+      && "$expected" == roster-participant-accepted-npub1admin ]]
+    then
       roster_queries=$((roster_queries + 1))
       ((roster_queries >= 2))
       return
@@ -420,7 +516,7 @@ PY
     fi
     if [[ "$kind" == resource ]] \
       && [[ "$expected" == navigation-devices \
-        || "$expected" == roster-participant-npub1admin ]]
+        || "$expected" == roster-participant-accepted-npub1admin ]]
     then
       return 0
     fi
@@ -439,13 +535,69 @@ PY
   }
 )
 
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=1
+  accepted_queries=0
+
+  release_join_android_launch() { :; }
+  release_join_android_query() {
+    local kind="$1" expected="$2"
+    if [[ "$kind" == resource && "$expected" == navigation-devices ]]; then
+      return 0
+    fi
+    if [[ "$kind" == resource \
+      && "$expected" == roster-participant-pending-npub1admin ]]
+    then
+      return 0
+    fi
+    if [[ "$kind" == resource \
+      && "$expected" == roster-participant-accepted-npub1admin ]]
+    then
+      accepted_queries=$((accepted_queries + 1))
+      return 1
+    fi
+    return 1
+  }
+  release_join_android_tap() { :; }
+  sleep() { :; }
+
+  if release_join_android_wait_accepted_participant npub1admin; then
+    echo "Android manual join accepted a locally pending roster row" >&2
+    exit 1
+  fi
+  ((accepted_queries > 0)) || {
+    echo "Android manual join never queried the accepted-only roster selector" >&2
+    exit 1
+  }
+)
+
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=1
+
+  release_join_android_launch() { :; }
+  release_join_android_query() {
+    local kind="$1" expected="$2"
+    [[ "$kind" == resource ]] \
+      && [[ "$expected" == navigation-devices \
+        || "$expected" == roster-participant-accepted-npub1admin ]]
+  }
+  release_join_android_tap() { :; }
+
+  release_join_android_wait_accepted_participant npub1admin || {
+    echo "Android manual join rejected the exact accepted roster row" >&2
+    exit 1
+  }
+)
+
 fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
 trap 'rm -f "$fixture"' EXIT
 printf '%s\n' \
   '<hierarchy>' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/admin-device-id-value" content-desc="Admin Device ID value: npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" bounds="[10,20][110,80]" />' \
-  '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-a" content-desc="Roster participant a" bounds="[0,100][100,200]" />' \
-  '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-b" content-desc="Roster participant b" bounds="[0,200][100,300]" />' \
+  '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-pending-a" content-desc="Roster participant pending a" bounds="[0,100][100,200]" />' \
+  '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-accepted-b" content-desc="Roster participant accepted b" bounds="[0,200][100,300]" />' \
   '</hierarchy>' >"$fixture"
 
 description="$(
@@ -457,6 +609,16 @@ description="$(
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource-prefix roster-participant- count
 )" == 2 ]]
+if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" resource roster-participant-accepted-a center >/dev/null 2>&1
+then
+  echo "Pending roster row satisfied an accepted-only UI query" >&2
+  exit 1
+fi
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" resource roster-participant-accepted-b center
+)" == "50 250" ]]
 [[ "$(
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource admin-device-id-value center

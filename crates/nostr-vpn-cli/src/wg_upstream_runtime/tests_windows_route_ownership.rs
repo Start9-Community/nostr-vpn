@@ -15,6 +15,7 @@ struct FakeWindowsRouteRunner {
     fail_add: Option<WindowsRouteSpec>,
     fail_delete: Option<WindowsRouteSpec>,
     fail_deletes: HashSet<WindowsRouteSpec>,
+    reject_interface_identity: bool,
 }
 
 impl WindowsRouteCommandRunner for FakeWindowsRouteRunner {
@@ -32,6 +33,16 @@ impl WindowsRouteCommandRunner for FakeWindowsRouteRunner {
                 && candidate.interface_index == route.interface_index
                 && candidate.next_hop == route.next_hop
         }))
+    }
+
+    fn verify_interface_identity(&mut self, route: &WindowsRouteSpec) -> Result<()> {
+        if self.reject_interface_identity {
+            return Err(anyhow!(
+                "interface {} stable identity no longer matches",
+                route.interface_index
+            ));
+        }
+        Ok(())
     }
 
     fn add_route(&mut self, route: &WindowsRouteSpec) -> Result<()> {
@@ -99,6 +110,7 @@ fn windows_wg_underlay_refresh_installs_fresh_bypass_before_removing_stale() {
         interface_index: 31,
         next_hop: "198.51.100.254".to_string(),
         metric: 9,
+        interface_identity: None,
     };
     let mut runner = FakeWindowsRouteRunner::default();
     runner.routes.insert(foreign.clone());
@@ -257,6 +269,7 @@ fn windows_fips_endpoint_routes_migrate_fresh_before_stale_and_preserve_unowned(
         interface_index: 31,
         next_hop: "198.51.100.254".to_string(),
         metric: 9,
+        interface_identity: None,
     };
     let mut runner = FakeWindowsRouteRunner::default();
     runner
@@ -586,6 +599,7 @@ fn windows_wg_apply_rolls_back_bypass_when_default_install_fails() {
         interface_index: 5,
         next_hop: "192.0.2.254".to_string(),
         metric: 3,
+        interface_identity: None,
     };
     let mut runner = FakeWindowsRouteRunner::default();
     runner.routes.insert(foreign.clone());
@@ -699,6 +713,7 @@ fn windows_failed_active_guard_cleanup_is_snapshotted_and_retried_by_owned_ident
         interface_index: 88,
         next_hop: "0.0.0.0".to_string(),
         metric: owned.metric,
+        interface_identity: None,
     };
     let mut runner = FakeWindowsRouteRunner::default();
     runner
@@ -747,6 +762,7 @@ fn windows_failed_active_guard_cleanup_is_snapshotted_and_retried_by_owned_ident
         interface_index: 88,
         next_hop: "0.0.0.0".to_string(),
         metric: owned_default.metric,
+        interface_identity: None,
     };
     let mut default_runner = FakeWindowsRouteRunner::default();
     default_runner.routes.insert(foreign_default.clone());
@@ -776,6 +792,102 @@ fn windows_failed_active_guard_cleanup_is_snapshotted_and_retried_by_owned_ident
         .retry_with(&mut default_runner)
         .expect("retry retained full-default cleanup");
     assert_eq!(default_runner.routes, HashSet::from([foreign_default]));
+}
+
+#[test]
+fn windows_cleanup_refuses_route_on_reused_interface_index() {
+    let mut route = WindowsRouteSpec::direct("10.44.0.0/16", 77).expect("owned route");
+    route.interface_identity = Some("{original-tunnel-adapter}".to_string());
+    let mut runner = FakeWindowsRouteRunner {
+        routes: HashSet::from([route.clone()]),
+        reject_interface_identity: true,
+        ..Default::default()
+    };
+    let mut cleanup = WindowsRouteCleanupSnapshot::from_owned_routes(vec![route.clone()]);
+
+    let error = cleanup
+        .retry_with(&mut runner)
+        .expect_err("a recycled interface index must fail closed");
+    assert!(error.to_string().contains("stable identity"));
+    assert!(runner.routes.contains(&route));
+    assert!(
+        runner
+            .events
+            .iter()
+            .all(|event| !matches!(event, FakeWindowsRouteEvent::Delete(_))),
+        "identity mismatch must be detected before any delete command"
+    );
+    assert_eq!(cleanup.owned_routes, vec![route]);
+}
+
+#[test]
+fn windows_legacy_route_journal_retires_physical_bypasses_but_cleans_tunnel_routes() {
+    let serialized = r#"{
+        "owned_routes": [
+            {
+                "prefix": "203.0.113.7/32",
+                "interface_index": 11,
+                "next_hop": "192.0.2.1",
+                "metric": 1
+            },
+            {
+                "prefix": "0.0.0.0/0",
+                "interface_index": 77,
+                "next_hop": "0.0.0.0",
+                "metric": 1
+            },
+            {
+                "prefix": "10.44.0.0/16",
+                "interface_index": 77,
+                "next_hop": "0.0.0.0",
+                "metric": 1
+            }
+        ]
+    }"#;
+    let mut cleanup: WindowsRouteCleanupSnapshot =
+        serde_json::from_str(serialized).expect("deserialize prior-release cleanup journal");
+    assert!(
+        cleanup
+            .owned_routes
+            .iter()
+            .all(|route| route.interface_identity.is_none()),
+        "the fixture must exercise the schema before stable adapter identities"
+    );
+
+    let endpoint = cleanup.owned_routes[0].clone();
+    let tunnel_default = cleanup.owned_routes[1].clone();
+    let tunnel_subnet = cleanup.owned_routes[2].clone();
+    let mut runner = FakeWindowsRouteRunner::default();
+    runner.routes.extend([
+        endpoint.clone(),
+        tunnel_default.clone(),
+        tunnel_subnet.clone(),
+    ]);
+
+    cleanup
+        .retry_with(&mut runner)
+        .expect("migrate prior-release cleanup journal");
+
+    assert!(cleanup.is_empty(), "legacy obligations must not brick startup");
+    assert!(
+        runner.routes.contains(&endpoint),
+        "an identity-less route on a shared physical interface is not safe to delete"
+    );
+    assert!(
+        !runner.routes.contains(&tunnel_default),
+        "an owned tunnel default must not remain and break device internet"
+    );
+    assert!(
+        !runner.routes.contains(&tunnel_subnet),
+        "other exact on-link tunnel routes should be cleaned with the default"
+    );
+    assert!(
+        !runner
+            .events
+            .iter()
+            .any(|event| event == &FakeWindowsRouteEvent::Delete(endpoint.clone())),
+        "migration must not issue an unscoped delete for a physical endpoint bypass"
+    );
 }
 
 #[test]

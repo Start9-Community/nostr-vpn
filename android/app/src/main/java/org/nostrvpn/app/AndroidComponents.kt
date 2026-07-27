@@ -68,6 +68,7 @@ internal fun ParticipantRow(
     dispatch: ((JSONObject) -> Unit)? = null,
 ) {
     val isSelf = participant.isSelf(state)
+    val rosterAcceptance = if (participant.state == "pending") "pending" else "accepted"
     var detailOpen by remember { mutableStateOf(false) }
     AppCard {
         Row(
@@ -75,8 +76,8 @@ internal fun ParticipantRow(
             modifier = Modifier
                 .clickable { detailOpen = true }
                 .mobileUiSelector(
-                    id = "roster-participant-${participant.npub}",
-                    description = "Roster participant ${participant.npub}",
+                    id = "roster-participant-$rosterAcceptance-${participant.npub}",
+                    description = "Roster participant $rosterAcceptance ${participant.npub}",
                 ),
         ) {
             Dot(selected = if (isSelf) state.vpnActive else participant.reachable)

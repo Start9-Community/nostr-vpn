@@ -5,11 +5,43 @@ pub(crate) fn daemon_pid_file_path(config_path: &Path) -> PathBuf {
     parent.join("daemon.pid")
 }
 
-pub(crate) fn daemon_instance_lock_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
-        .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    parent.join("daemon.instance.lock")
+pub(crate) fn daemon_instance_lock_file_path(_config_path: &Path) -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        return Ok(std::env::temp_dir().join(format!(
+            "to.nostrvpn.nvpn.daemon-instance-test-{}.lock",
+            std::process::id()
+        )));
+    }
+
+    #[cfg(all(not(test), unix))]
+    {
+        return Ok(PathBuf::from(
+            "/tmp/to.nostrvpn.nvpn.daemon.instance.lock",
+        ));
+    }
+
+    #[cfg(all(not(test), windows))]
+    {
+        let root = std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "PROGRAMDATA is unavailable; refusing to use a per-user daemon instance lock"
+                )
+            })?;
+        return Ok(root
+            .join("nVPN")
+            .join("to.nostrvpn.nvpn.daemon.instance.lock"));
+    }
+
+    #[cfg(all(not(test), not(any(unix, windows))))]
+    {
+        Err(anyhow!(
+            "daemon instance locking is unsupported on this platform"
+        ))
+    }
 }
 
 pub(crate) struct DaemonInstanceLock {
@@ -17,7 +49,7 @@ pub(crate) struct DaemonInstanceLock {
 }
 
 pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonInstanceLock> {
-    let lock_path = daemon_instance_lock_file_path(config_path);
+    let lock_path = daemon_instance_lock_file_path(config_path)?;
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -56,8 +88,7 @@ pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonI
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if result != 0 {
             return Err(anyhow!(
-                "daemon already running for config {}: {}",
-                config_path.display(),
+                "another nvpn daemon is already running: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -746,201 +777,4 @@ pub(crate) fn write_daemon_state(path: &Path, state: &DaemonRuntimeState) -> Res
         .with_context(|| format!("failed to write daemon state file {}", path.display()))?;
     set_daemon_runtime_file_permissions(path)?;
     Ok(())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) fn read_daemon_network_cleanup_state(
-    path: &Path,
-) -> Result<Option<DaemonNetworkCleanupState>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    if let Some(parent) = path.parent() {
-        set_daemon_cleanup_directory_permissions(parent)?;
-    }
-    set_daemon_cleanup_file_permissions(path)?;
-    let raw = fs::read(path)
-        .with_context(|| format!("failed to read daemon cleanup file {}", path.display()))?;
-    match serde_json::from_slice::<DaemonNetworkCleanupState>(&raw) {
-        Ok(parsed) => Ok(Some(parsed)),
-        Err(parse_error) => {
-            let trimmed = trim_runtime_json_padding(&raw);
-            if trimmed.len() != raw.len()
-                && !trimmed.is_empty()
-                && let Ok(parsed) = serde_json::from_slice::<DaemonNetworkCleanupState>(trimmed)
-            {
-                if let Err(error) = write_private_runtime_file_atomically(path, trimmed) {
-                    eprintln!(
-                        "daemon: parsed padded cleanup file {} but failed to rewrite clean copy: {}",
-                        path.display(),
-                        error
-                    );
-                } else {
-                    set_daemon_cleanup_file_permissions(path)?;
-                }
-                return Ok(Some(parsed));
-            }
-
-            Err(parse_error).with_context(|| {
-                format!(
-                    "refusing to discard unreadable network cleanup ownership in {}",
-                    path.display()
-                )
-            })
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) fn write_daemon_network_cleanup_state(
-    path: &Path,
-    state: &DaemonNetworkCleanupState,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-        set_daemon_cleanup_directory_permissions(parent)?;
-    }
-    let raw = serde_json::to_string_pretty(state)?;
-    write_private_runtime_file_atomically(path, raw.as_bytes())
-        .with_context(|| format!("failed to write daemon cleanup file {}", path.display()))?;
-    set_daemon_cleanup_file_permissions(path)?;
-    fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .with_context(|| format!("failed to sync daemon cleanup file {}", path.display()))?;
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| {
-                format!(
-                    "failed to sync daemon cleanup directory {}",
-                    parent.display()
-                )
-            })?;
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) fn remove_runtime_file_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
-    }
-}
-
-pub(crate) fn persist_daemon_network_cleanup_state(
-    config_path: &Path,
-    tunnel_runtime: &CliTunnelRuntime,
-) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let path = daemon_network_cleanup_file_path(config_path);
-        if let Some(state) = tunnel_runtime.macos_network_cleanup_state() {
-            write_daemon_network_cleanup_state(&path, &state)?;
-        } else {
-            remove_runtime_file_if_exists(&path)?;
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (config_path, tunnel_runtime);
-    }
-
-    Ok(())
-}
-
-pub(crate) fn persist_fips_daemon_network_cleanup_state(
-    config_path: &Path,
-    runtime: Option<&crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = daemon_network_cleanup_file_path(config_path);
-        let state = runtime
-            .and_then(LinuxNetworkCleanupState::from_runtime)
-            .or_else(crate::fips_private_mesh::pending_linux_network_cleanup_state);
-        if let Some(state) = state {
-            write_daemon_network_cleanup_state(&path, &state)?;
-        } else {
-            remove_runtime_file_if_exists(&path)?;
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let path = daemon_network_cleanup_file_path(config_path);
-        let state = WindowsNetworkCleanupState::from_runtime_and_pending(runtime);
-        if state.is_empty() {
-            remove_runtime_file_if_exists(&path)?;
-        } else {
-            write_daemon_network_cleanup_state(&path, &state)?;
-        }
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let _ = (config_path, runtime);
-    }
-
-    Ok(())
-}
-
-pub(crate) fn persist_fips_private_tunnel_start_result<T>(
-    config_path: &Path,
-    result: Result<T>,
-) -> Result<T> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(start_error) => match persist_fips_daemon_network_cleanup_state(config_path, None) {
-            Ok(()) => Err(start_error),
-            Err(persist_error) => Err(anyhow!(
-                "{start_error:#}; failed to persist partial FIPS startup cleanup ownership: \
-                 {persist_error:#}"
-            )),
-        },
-    }
-}
-
-pub(crate) async fn start_fips_private_tunnel_runtime(
-    config_path: &Path,
-    config: crate::fips_private_mesh::FipsPrivateTunnelConfig,
-) -> Result<crate::fips_private_mesh::FipsPrivateTunnelRuntime> {
-    let result = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await;
-    persist_fips_private_tunnel_start_result(config_path, result)
-}
-
-pub(crate) async fn stop_fips_private_tunnel_runtime(
-    config_path: &Path,
-    runtime: crate::fips_private_mesh::FipsPrivateTunnelRuntime,
-) -> Result<()> {
-    let before_error =
-        persist_fips_daemon_network_cleanup_state(config_path, Some(&runtime)).err();
-    let stop_error = runtime.stop().await.err();
-    let remaining_error = persist_fips_daemon_network_cleanup_state(config_path, None).err();
-    if stop_error.is_none() && remaining_error.is_none() {
-        return Ok(());
-    }
-
-    let mut failures = Vec::new();
-    if let Some(error) = stop_error {
-        failures.push(format!("failed to stop FIPS private mesh: {error:#}"));
-    }
-    if remaining_error.is_some()
-        && let Some(error) = before_error
-    {
-        failures.push(format!(
-            "failed to persist cleanup ownership before teardown: {error:#}"
-        ));
-    }
-    if let Some(error) = remaining_error {
-        failures.push(format!(
-            "failed to persist remaining cleanup ownership after teardown: {error:#}"
-        ));
-    }
-    Err(anyhow!(failures.join("; ")))
 }

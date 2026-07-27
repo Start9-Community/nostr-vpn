@@ -6,6 +6,7 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     state_control: FipsControlTcpRuntime,
     secure_dns: Option<crate::secure_dns_runtime::SecureDnsRuntime>,
     config: FipsPrivateTunnelConfig,
+    cleanup_journal_config_path: std::path::PathBuf,
     session: Arc<Session>,
     stop: Arc<AtomicBool>,
     tun_read_thread: ThreadJoinHandle<()>,

@@ -232,7 +232,9 @@ extension RootView {
             )
             .contentShape(Rectangle())
         }
-        .accessibilityIdentifier("roster-participant-\(participant.npub)")
+        .accessibilityIdentifier(
+            "roster-participant-\(participant.state == "pending" ? "pending" : "accepted")-\(participant.npub)"
+        )
         .buttonStyle(.plain)
     }
 

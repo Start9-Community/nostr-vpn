@@ -393,6 +393,103 @@ fn apply_admin_signed_shared_roster_keeps_network_when_own_key_was_never_in_rost
 }
 
 #[test]
+fn manual_join_stays_pending_until_a_signed_roster_contains_this_device() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_secs();
+    let joiner_keys = Keys::generate();
+    let admin_keys = Keys::generate();
+    let joiner_hex = joiner_keys.public_key().to_hex();
+    let admin_hex = admin_keys.public_key().to_hex();
+    let network_id = "manual-pending-mesh";
+
+    let mut joining = AppConfig::generated_without_networks();
+    joining.nostr.secret_key = joiner_keys.secret_key().to_secret_hex();
+    joining.nostr.public_key = joiner_hex.clone();
+    joining
+        .add_manual_join_network(&admin_hex, network_id)
+        .expect("seed manual join");
+    assert!(!joining.active_network_has_confirmed_local_identity());
+    let current_toml = joining.plaintext_toml().expect("encode manual join");
+    let legacy_toml =
+        current_toml.replace("local_identity_confirmation_pending = true\n", "");
+    assert_ne!(
+        current_toml, legacy_toml,
+        "test fixture must remove the new persisted marker"
+    );
+    let mut legacy_joining: AppConfig =
+        toml::from_str(&legacy_toml).expect("decode legacy manual join");
+    legacy_joining.ensure_defaults();
+    assert!(
+        legacy_joining
+            .active_network()
+            .local_identity_confirmation_pending,
+        "loading a pre-marker manual join must recover its pending acceptance state"
+    );
+
+    let roster_without_joiner = SignedRoster::sign(
+        network_id,
+        NetworkRoster {
+            network_name: "Manual mesh".to_string(),
+            devices: Vec::new(),
+            admins: vec![admin_hex.clone()],
+            aliases: std::collections::HashMap::new(),
+            signed_at: now,
+        },
+        &admin_keys,
+    )
+    .expect("sign pre-acceptance roster");
+    assert!(
+        joining
+            .apply_verified_admin_signed_shared_roster(&roster_without_joiner)
+            .expect("apply configured admin roster")
+    );
+    assert!(
+        !joining.active_network_has_confirmed_local_identity(),
+        "a configured admin's roster must not confirm a manual join until it contains this device"
+    );
+
+    let path = unique_temp_config_path("manual-join-confirmation");
+    joining.save(&path).expect("persist pending manual join");
+    let mut reloaded = AppConfig::load(&path).expect("reload pending manual join");
+    assert!(
+        !reloaded.active_network_has_confirmed_local_identity(),
+        "manual-join pending state must survive save/load"
+    );
+
+    let mut admin = AppConfig::generated();
+    admin.nostr.secret_key = admin_keys.secret_key().to_secret_hex();
+    admin.nostr.public_key = admin_hex.clone();
+    let admin_network_entry_id = admin.networks[0].id.clone();
+    admin.networks[0].network_id = network_id.to_string();
+    admin.networks[0].name = "Manual mesh".to_string();
+    admin.networks[0].admins = vec![admin_hex];
+    admin.networks[0].devices = vec![joiner_hex.clone()];
+    admin.networks[0].shared_roster_updated_at = now + 1;
+    admin.networks[0].shared_roster_signed_by =
+        admin.own_nostr_pubkey_hex().expect("admin pubkey");
+    let accepted = prepare_manual_join_delivery(&admin, &admin_network_entry_id, &joiner_hex)
+        .expect("prepare receipt-backed accepted roster");
+    assert_eq!(
+        reloaded
+            .apply_manual_join_roster(&accepted, now + 1)
+            .expect("apply receipt-backed accepted roster"),
+        Some(network_id.to_string())
+    );
+    assert!(reloaded.active_network_has_confirmed_local_identity());
+    reloaded.save(&path).expect("persist accepted manual join");
+    assert!(
+        AppConfig::load(&path)
+            .expect("reload accepted manual join")
+            .active_network_has_confirmed_local_identity(),
+        "manual-join acceptance must survive save/load"
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn apply_admin_signed_shared_roster_ignores_unknown_signer() {
     let known_admin = Keys::generate();
     let unknown_admin = Keys::generate();

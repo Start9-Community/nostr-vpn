@@ -76,9 +76,21 @@ impl FipsPrivateTunnelConfig {
         recent_peers: Option<&nostr_vpn_core::recent_peers::RecentPeerEndpoints>,
         live_peer_endpoints: &[(String, Vec<(String, u64)>)],
     ) -> Result<Self> {
+        let local_identity_confirmation_pending = app
+            .active_network_opt()
+            .is_some_and(|network| network.local_identity_confirmation_pending);
+        let network_id = if local_identity_confirmation_pending {
+            ""
+        } else {
+            network_id
+        };
         let mut peers = Vec::new();
         let mut route_targets = Vec::new();
-        let participants = app.participant_pubkeys_hex();
+        let participants = if local_identity_confirmation_pending {
+            Vec::new()
+        } else {
+            app.participant_pubkeys_hex()
+        };
         let mut route_by_participant = HashMap::<String, Vec<String>>::new();
         for participant in participants {
             if Some(participant.as_str()) == own_pubkey {
@@ -104,7 +116,8 @@ impl FipsPrivateTunnelConfig {
         }
 
         #[cfg(feature = "paid-exit")]
-        if let Some(public_paid_exit) = app.public_paid_exit_node_pubkey_hex()
+        if !local_identity_confirmation_pending
+            && let Some(public_paid_exit) = app.public_paid_exit_node_pubkey_hex()
             && Some(public_paid_exit.as_str()) != own_pubkey
         {
             let exit_routes = crate::runtime_exit_node_default_routes();
@@ -122,13 +135,18 @@ impl FipsPrivateTunnelConfig {
                     | InternetSource::PaidAutomatic
                     | InternetSource::PaidManual
             );
-        if app.exit_node_leak_protection && pending_remote_exit {
+        if !local_identity_confirmation_pending
+            && app.exit_node_leak_protection
+            && pending_remote_exit
+        {
             route_targets.extend(crate::runtime_exit_node_default_routes());
         }
 
         let mut route_participants = app.active_network_signal_pubkeys_hex();
         #[cfg(feature = "paid-exit")]
-        if let Some(public_paid_exit) = app.public_paid_exit_node_pubkey_hex() {
+        if !local_identity_confirmation_pending
+            && let Some(public_paid_exit) = app.public_paid_exit_node_pubkey_hex()
+        {
             route_participants.push(public_paid_exit);
         }
         route_participants.sort();
@@ -318,7 +336,11 @@ impl FipsPrivateTunnelConfig {
         route_targets.sort();
         route_targets.dedup();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let fips_host = FipsHostTunnelConfig::from_app(app)?;
+        let fips_host = if local_identity_confirmation_pending {
+            None
+        } else {
+            FipsHostTunnelConfig::from_app(app)?
+        };
         #[cfg(target_os = "linux")]
         let control_plane_bypass_hosts =
             if crate::route_targets_require_endpoint_bypass(&route_targets) {
@@ -338,7 +360,8 @@ impl FipsPrivateTunnelConfig {
             listen_port: app.node.listen_port,
             underlay_interface: None,
             advertised_endpoint: app.node.endpoint.clone(),
-            advertise_public_endpoint: app.fips_advertise_public_endpoint,
+            advertise_public_endpoint: app.fips_advertise_public_endpoint
+                && !local_identity_confirmation_pending,
             stun_servers: app.nat.stun_servers.clone(),
             nostr_relays,
             nostr_pubsub: app.nostr.pubsub.clone(),
@@ -349,28 +372,49 @@ impl FipsPrivateTunnelConfig {
             peers,
             endpoint_peers,
             route_targets,
-            secure_dns_requested: !app.internet_source.is_direct(),
+            secure_dns_requested: !app.internet_source.is_direct()
+                && (!local_identity_confirmation_pending
+                    || app.internet_source == InternetSource::WireGuard),
             public_paid_exit_waiting_for_admission: false,
-            magic_dns_records: build_magic_dns_records(app),
+            magic_dns_records: if local_identity_confirmation_pending {
+                HashMap::new()
+            } else {
+                build_magic_dns_records(app)
+            },
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             fips_host,
-            local_advertised_routes: crate::runtime_effective_advertised_routes(app),
+            local_advertised_routes: if local_identity_confirmation_pending {
+                Vec::new()
+            } else {
+                crate::runtime_effective_advertised_routes(app)
+            },
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            local_exit_forwarding_routes: crate::runtime_local_exit_forwarding_routes(app),
+            local_exit_forwarding_routes: if local_identity_confirmation_pending {
+                Vec::new()
+            } else {
+                crate::runtime_local_exit_forwarding_routes(app)
+            },
             paid_route_admissions: Vec::new(),
             #[cfg(feature = "paid-exit")]
-            paid_route_accounting_peers: app
-                .public_paid_exit_node_pubkey_hex()
-                .and_then(|participant_pubkey| {
-                    FipsPaidRouteAccountingPeer::parse(
-                        &participant_pubkey,
-                        FipsPaidRouteAccountingRole::LocalBuyer,
-                    )
-                })
-                .into_iter()
-                .collect(),
+            paid_route_accounting_peers: if local_identity_confirmation_pending {
+                Vec::new()
+            } else {
+                app.public_paid_exit_node_pubkey_hex()
+                    .and_then(|participant_pubkey| {
+                        FipsPaidRouteAccountingPeer::parse(
+                            &participant_pubkey,
+                            FipsPaidRouteAccountingRole::LocalBuyer,
+                        )
+                    })
+                    .into_iter()
+                    .collect()
+            },
             #[cfg(feature = "paid-exit")]
-            paid_exit: app.paid_exit.clone(),
+            paid_exit: if local_identity_confirmation_pending {
+                PaidExitConfig::default()
+            } else {
+                app.paid_exit.clone()
+            },
             #[cfg(feature = "paid-exit")]
             paid_route_store_path: PathBuf::new(),
             #[cfg(feature = "paid-exit")]
@@ -379,8 +423,10 @@ impl FipsPrivateTunnelConfig {
             paid_route_payment_relays: Vec::new(),
             exit_dns: app.exit_dns.clone(),
             wireguard_exit: app.wireguard_exit.clone(),
-            exit_node_leak_protection: app.exit_node_leak_protection,
+            exit_node_leak_protection: !local_identity_confirmation_pending
+                && app.exit_node_leak_protection,
             nostr_discovery_enabled: app.fips_nostr_discovery_enabled,
+            advertise_on_nostr: !local_identity_confirmation_pending,
             webrtc_enabled: app.fips_webrtc_enabled,
             nostr_discovery_policy,
             open_discovery_max_pending,
@@ -604,6 +650,7 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     secure_dns: Option<crate::secure_dns_runtime::SecureDnsRuntime>,
     manages_secure_dns: bool,
     config: FipsPrivateTunnelConfig,
+    cleanup_journal_config_path: std::path::PathBuf,
     _tun: Arc<SystemTun>,
     fips_host: Option<crate::fips_host_tunnel::FipsHostTunnelRuntime>,
     fips_host_disabled_artifacts_cleaned: bool,
@@ -618,6 +665,8 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     endpoint_bypass_routes: Vec<crate::LinuxManagedEndpointBypassRoute>,
     #[cfg(target_os = "macos")]
     endpoint_bypass_underlay: Option<crate::MacosRouteSpec>,
+    #[cfg(target_os = "macos")]
+    macos_underlay_refresh_pending: bool,
     #[cfg(target_os = "linux")]
     original_default_route: Option<String>,
     #[cfg(target_os = "linux")]

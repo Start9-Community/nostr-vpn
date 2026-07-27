@@ -12,29 +12,29 @@ pub fn apply_windows_scoped_host_route(
         }
     };
     let route_targets = vec![format!("{target}/32")];
-    crate::windows_tunnel::apply_windows_routes(interface_index, &route_targets)?;
-    Ok(WindowsScopedHostRoute {
+    let cleanup_journal_config_path = crate::default_config_path();
+    let routes = WindowsManagedInterfaceRoutes::apply(
         interface_index,
-        route_targets,
-        reverted: false,
+        &route_targets,
+        &cleanup_journal_config_path,
+    )?;
+    Ok(WindowsScopedHostRoute {
+        routes: Some(routes),
     })
 }
 
 #[cfg(target_os = "windows")]
 pub struct WindowsScopedHostRoute {
-    interface_index: u32,
-    route_targets: Vec<String>,
-    reverted: bool,
+    routes: Option<WindowsManagedInterfaceRoutes>,
 }
 
 #[cfg(target_os = "windows")]
 impl WindowsScopedHostRoute {
     pub fn revert(&mut self) -> Result<()> {
-        if self.reverted {
-            return Ok(());
+        if let Some(routes) = self.routes.as_mut() {
+            routes.revert()?;
+            self.routes.take();
         }
-        crate::windows_tunnel::remove_windows_routes(self.interface_index, &self.route_targets)?;
-        self.reverted = true;
         Ok(())
     }
 }
@@ -44,10 +44,7 @@ impl Drop for WindowsScopedHostRoute {
     fn drop(&mut self) {
         if let Err(error) = self.revert() {
             eprintln!(
-                "wg-upstream: WARNING — Windows scoped host route cleanup failed: {error}. \
-                 You may need to run `netsh interface ipv4 delete route <target>/32 \
-                 interface={}` manually.",
-                self.interface_index
+                "wg-upstream: WARNING — Windows scoped host route cleanup failed: {error:#}"
             );
         }
     }
@@ -85,6 +82,7 @@ fn run_checked(command: &mut ProcessCommand) -> Result<()> {
 pub struct DaemonWgUpstream {
     pub iface: String,
     pub upstream: SocketAddr,
+    underlay_interface: String,
     runtime: Option<WgUpstreamRuntime>,
     full_route: Option<FullDefaultRoute>,
     // Tun is held to keep the utun fd open for the lifetime of the
@@ -113,6 +111,7 @@ struct WindowsNativeWireGuardTunnel {
     owner_token: String,
     service_owned: bool,
     config_owned: bool,
+    cleanup_journal_config_path: PathBuf,
 }
 
 #[cfg(target_os = "windows")]
@@ -124,6 +123,23 @@ pub(crate) struct WindowsNativeWireGuardCleanupState {
     owner_token: String,
     service_owned: bool,
     config_owned: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsNativeWireGuardCleanupState {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.owner_token == other.owner_token
+    }
+
+    pub(crate) fn merge_ownership(&mut self, other: &Self) {
+        debug_assert!(self.same_owner(other));
+        self.service_owned |= other.service_owned;
+        self.config_owned |= other.config_owned;
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.service_owned && !self.config_owned
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -153,6 +169,7 @@ impl WindowsNativeWireGuardTunnel {
 #[cfg(target_os = "macos")]
 pub async fn apply_daemon_wg_upstream(
     config: &WireGuardExitConfig,
+    underlay_interface: &str,
     handshake_timeout: Duration,
 ) -> Result<DaemonWgUpstream> {
     let fingerprint = WireGuardExitFingerprint::from_config(config);
@@ -172,9 +189,18 @@ pub async fn apply_daemon_wg_upstream(
     let actual_iface = tun.name().context("read utun name (probably needs root)")?;
     let tun = Arc::new(tun);
 
-    let runtime = start_wg_runtime_with_posix_tun(config, tun.clone())
+    let interface_index = macos_interface_index(underlay_interface)?;
+    let runtime = start_wg_runtime_with_posix_tun_on_interface(
+        config,
+        tun.clone(),
+        interface_index,
+    )
         .await
-        .context("start userspace WG runtime")?;
+        .with_context(|| {
+            format!(
+                "start userspace WG runtime on physical interface {underlay_interface}"
+            )
+        })?;
     let upstream = runtime.upstream();
 
     // Watchdog: wait up to `handshake_timeout` for the WG handshake to
@@ -201,6 +227,7 @@ pub async fn apply_daemon_wg_upstream(
     Ok(DaemonWgUpstream {
         iface: actual_iface,
         upstream,
+        underlay_interface: underlay_interface.to_string(),
         runtime: Some(runtime),
         full_route: Some(full_route),
         _tun: tun,
@@ -215,29 +242,180 @@ impl DaemonWgUpstream {
     /// reconcile loop to short-circuit a teardown+rebuild on every
     /// tick.
     pub fn matches(&self, new_config: &WireGuardExitConfig) -> bool {
+        self.config_matches(new_config)
+            && self
+                .runtime
+                .as_ref()
+                .is_some_and(WgUpstreamRuntime::is_running)
+    }
+
+    pub fn config_matches(&self, new_config: &WireGuardExitConfig) -> bool {
         self.config_fingerprint == WireGuardExitFingerprint::from_config(new_config)
+    }
+
+    pub fn underlay_interface(&self) -> &str {
+        &self.underlay_interface
+    }
+
+    /// Move the live encrypted UDP socket to the newly selected physical
+    /// interface, force a fresh handshake, and keep the split-default kill
+    /// switch installed throughout. A stalled pump gets one bounded restart
+    /// on the same utun and exact previously resolved endpoint; the function's
+    /// deadline covers both phases.
+    pub async fn rebind_underlay(
+        &mut self,
+        config: &WireGuardExitConfig,
+        underlay_interface: &str,
+        handshake_timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + handshake_timeout;
+        let interface_index = macos_interface_index(underlay_interface)?;
+        let rebind_result = if let Some(runtime) = self.runtime.as_mut() {
+            let live_budget =
+                std::cmp::min(handshake_timeout / 2, Duration::from_millis(1_500));
+            match tokio::time::timeout(live_budget, async {
+                let receiver_index = runtime
+                    .rebind_interface(interface_index)
+                    .await
+                    .context("rebind live WG UDP socket")?;
+                runtime
+                    .wait_for_handshake_response(receiver_index, live_budget)
+                    .await
+                    .then_some(())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "WG upstream did not complete the exact forced handshake on \
+                             {underlay_interface}"
+                        )
+                    })
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!(
+                    "live WG rebind phase exceeded {}ms",
+                    live_budget.as_millis()
+                )),
+            }
+        } else {
+            Err(anyhow!("WG userspace runtime is not running"))
+        };
+
+        if let Err(rebind_error) = rebind_result {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!(
+                    "live WG underlay rebind failed ({rebind_error:#}); no time remained inside \
+                     the {}ms handoff deadline",
+                    handshake_timeout.as_millis()
+                ));
+            }
+            match tokio::time::timeout(
+                remaining,
+                self.restart_runtime(config, underlay_interface, interface_index, remaining),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(restart_error)) => {
+                    return Err(anyhow!(
+                        "live WG underlay rebind failed ({rebind_error:#}); bounded restart on \
+                         the cached endpoint also failed ({restart_error:#})"
+                    ));
+                }
+                Err(_) => {
+                    return Err(anyhow!(
+                        "live WG underlay rebind failed ({rebind_error:#}); cached-endpoint \
+                         restart exceeded the end-to-end {}ms deadline",
+                        handshake_timeout.as_millis()
+                    ));
+                }
+            }
+        } else {
+            self.underlay_interface = underlay_interface.to_string();
+        }
+        Ok(())
+    }
+
+    async fn restart_runtime(
+        &mut self,
+        config: &WireGuardExitConfig,
+        underlay_interface: &str,
+        interface_index: u32,
+        handshake_timeout: Duration,
+    ) -> Result<()> {
+        // Split-default routes already point at this utun, so resolving a
+        // hostname after stopping the old pump would route DNS into a dead
+        // tunnel. Restart against the exact previously resolved endpoint.
+        let upstream = self.upstream;
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown().await;
+        }
+        let runtime = start_wg_runtime_with_posix_tun_on_interface_at_upstream(
+            config,
+            self._tun.clone(),
+            interface_index,
+            upstream,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "restart WG runtime for {upstream} on physical interface {underlay_interface}"
+            )
+        })?;
+        if !runtime.wait_for_handshake(handshake_timeout).await {
+            runtime.shutdown().await;
+            return Err(anyhow!(
+                "restarted WG upstream handshake to {upstream} on \
+                 {underlay_interface} did not complete within {}s",
+                handshake_timeout.as_secs()
+            ));
+        }
+        self.upstream = upstream;
+        self.underlay_interface = underlay_interface.to_string();
+        self.config_fingerprint = WireGuardExitFingerprint::from_config(config);
+        self.runtime = Some(runtime);
+        Ok(())
     }
 
     /// Tear down the WG upstream cleanly: remove the two WG split-default
     /// routes while leaving the physical default untouched, then stop the
     /// boringtun pump and drop the tun device.
-    pub async fn cleanup(mut self) {
-        if let Some(mut full_route) = self.full_route.take() {
+    pub async fn cleanup(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        if let Some(full_route) = self.full_route.as_mut() {
             if let Err(error) = full_route.revert() {
-                eprintln!(
-                    "fips: WG upstream route revert failed: {error}. \
-                     Routing table may need manual cleanup."
-                );
+                failures.push(format!("revert macOS WG split-default routes: {error:#}"));
+            } else {
+                self.full_route.take();
             }
-            // Drop FullDefaultRoute *after* explicit revert; the Drop
-            // impl is idempotent, so doing it twice is harmless.
-            drop(full_route);
         }
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown().await;
         }
         // self._tun drops here, removing the utun device.
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
+        }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_interface_index(interface: &str) -> Result<u32> {
+    let interface = interface.trim();
+    if interface.is_empty() {
+        return Err(anyhow!("missing physical interface for macOS WG upstream"));
+    }
+    let name = std::ffi::CString::new(interface)
+        .with_context(|| format!("physical interface contains NUL: {interface:?}"))?;
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    if index == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("resolve macOS interface index for {interface}"));
+    }
+    Ok(index)
 }
 
 #[cfg(target_os = "windows")]

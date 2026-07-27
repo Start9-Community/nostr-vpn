@@ -24,9 +24,18 @@ All notable changes to this project are documented in this file.
 - Restore device-native routes and DNS after exit-node or private-tunnel
   shutdown on every platform, and fail closed when owned network state cannot
   be cleaned up.
+- Bind macOS WireGuard UDP sockets to the selected physical interface before
+  the first handshake, then rebind and prove a fresh handshake across
+  Wi-Fi/hotspot changes while the split-default kill switch stays installed.
+- Track exact macOS route ownership, preserve foreign routes, and retain the
+  cleanup journal whenever route, DNS, forwarding, or WireGuard teardown is
+  incomplete.
 - Complete QR and manual joins only after the joining device applies the
   signed roster, support both admin/joiner directions across desktop and
   mobile, and make mobile QR codes use the available screen width.
+- Keep join, roster, and control delivery progressing during network-settle
+  sampling so a scanned or manually entered phone join cannot stall behind an
+  unrelated underlay event.
 - Replace prior Android installs in place, reject parallel package variants,
   and prevent duplicate VPN service/process ownership.
 - Release the iOS UI process's shared Cashu wallet and SQLite locks before
@@ -37,7 +46,7 @@ All notable changes to this project are documented in this file.
 - Release completed FIPS-TCP state-control slots promptly so periodic roster
   and capability traffic cannot starve a manual-join roster or its durable
   application receipt behind the per-peer connection budget.
-- Upgrade FIPS to 0.4.44 so a new one-bit session-key epoch waits for the
+- Upgrade FIPS to 0.4.45 so a new one-bit session-key epoch waits for the
   previous epoch's drain to retire and duplicate simultaneous connections keep
   one canonical authenticated owner, preventing ambiguous rekeys or delivery
   into a superseded connection while real payload traffic continues.
@@ -60,6 +69,10 @@ All notable changes to this project are documented in this file.
   on every transition.
 - Verify Android Activity background/foreground survival in every physical
   Android smoke.
+- Build the signed macOS and Linux release candidates on the release Mac once,
+  verify their exact source and bytes, and import them into the macOS and Linux
+  VMs; reuse a separately sealed host-built Linux fixture peer for the Linux
+  and Windows network gates while keeping the Windows release build native.
 
 ## 4.1.4 - 2026-07-22
 

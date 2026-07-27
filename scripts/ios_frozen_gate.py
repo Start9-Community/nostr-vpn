@@ -15,6 +15,13 @@ from mobile_release_artifact_receipt import load_json, sha256_file
 
 
 RECEIPT_SCHEMA = 1
+REQUIRED_REAL_DEVICE_GATES = [
+    "background-foreground-and-rapid-start-stop",
+    "bidirectional-mobile-qr-and-manual-join",
+    "desktop-mobile-manual-join",
+    "wifi-hotspot-underlay-roaming",
+    "wireguard-exit-and-five-dns-policies",
+]
 
 
 def require(condition: bool, message: str) -> None:
@@ -372,11 +379,207 @@ def validate_mobile_receipt(
     }
 
 
+def validate_mobile_join_receipt(
+    receipt: dict[str, Any],
+    mobile_artifact: dict[str, Any],
+) -> None:
+    artifact = receipt.get("artifact")
+    ios = artifact.get("ios") if isinstance(artifact, dict) else None
+    require(
+        receipt.get("schema") == 1
+        and receipt.get("platform") == "mobile"
+        and receipt.get("publicUiOnly") is True
+        and receipt.get("opticalCameraQr") is True
+        and receipt.get("privateAppStateRead") is False
+        and receipt.get("appLaunchArgumentsOrEnvironment") is False
+        and receipt.get("desktopMobileManual") is True
+        and receipt.get("deliveryDeadlineMilliseconds") == 15_000,
+        "iOS gate seal received a non-strict mobile join receipt",
+    )
+    require(
+        isinstance(artifact, dict)
+        and artifact.get("appGitSha") == mobile_artifact.get("appGitSha")
+        and artifact.get("appGitTree") == mobile_artifact.get("appGitTree")
+        and isinstance(ios, dict),
+        "mobile join receipt is not source-bound to the iOS artifact",
+    )
+    for field in (
+        "appBundleTreeSha256",
+        "appCodeDirectoryHash",
+        "packetTunnelCodeDirectoryHash",
+        "appExecutableSha256",
+        "packetTunnelExecutableSha256",
+        "signerCertificateSha256",
+        "installedBundleIdentifier",
+    ):
+        require(
+            ios.get(field) == mobile_artifact.get(field)
+            and bool(mobile_artifact.get(field)),
+            f"mobile join receipt iOS identity differs at {field}",
+        )
+    expected_timings = {
+        "iPhone-admin-to-Pixel-QR",
+        "Pixel-admin-to-iPhone-QR",
+        "iPhone-admin-to-Pixel-manual",
+        "Pixel-admin-to-iPhone-manual",
+    }
+    timings = receipt.get("deliveryMilliseconds")
+    require(
+        isinstance(timings, dict)
+        and set(timings) == expected_timings
+        and all(
+            isinstance(value, int) and 0 <= value <= 15_000
+            for value in timings.values()
+        ),
+        "mobile join receipt has incomplete or slow delivery timings",
+    )
+    qr = receipt.get("qr")
+    manual = receipt.get("manual")
+    require(
+        isinstance(qr, dict)
+        and qr.get("iphoneAdminPixelJoiner") is True
+        and qr.get("pixelAdminIphoneJoiner") is True
+        and qr.get("pendingQrBackgroundForeground") is True
+        and qr.get("exactRosterOnBothSides") is True
+        and qr.get("joinerRelaunchDurable") is True
+        and isinstance(manual, dict)
+        and manual.get("iphoneAdminPixelJoiner") is True
+        and manual.get("pixelAdminIphoneJoiner") is True
+        and manual.get("exactRosterOnBothSides") is True
+        and manual.get("acceptedRosterOnly") is True
+        and manual.get("joinerRelaunchDurable") is True,
+        "mobile join receipt lacks strict public-UI/relaunch semantics",
+    )
+
+
+def validate_mobile_network_receipt(
+    receipt: dict[str, Any],
+    mobile_artifact: dict[str, Any],
+    mode: str,
+) -> None:
+    expected_cases = (
+        {
+            "automatic-profile",
+            "cloudflare-doh",
+            "quad9-doh",
+            "custom-doh",
+            "through-exit",
+        }
+        if mode == "wireguard-dns"
+        else {"automatic-profile"}
+    )
+    identity = receipt.get("artifactIdentity")
+    require(
+        receipt.get("receiptSchema") == 1
+        and receipt.get("artifactType") == f"physical ios Release {mode} gate"
+        and receipt.get("platform") == "ios"
+        and receipt.get("mode") == mode
+        and receipt.get("appGitSha") == mobile_artifact.get("appGitSha")
+        and receipt.get("appGitTree") == mobile_artifact.get("appGitTree")
+        and receipt.get("fipsGitSha") == mobile_artifact.get("fipsGitSha")
+        and receipt.get("fipsGitTree") == mobile_artifact.get("fipsGitTree")
+        and isinstance(identity, dict),
+        f"iOS {mode} receipt is not source/artifact bound",
+    )
+    for field in (
+        "appBundleTreeSha256",
+        "appCodeDirectoryHash",
+        "packetTunnelCodeDirectoryHash",
+        "appExecutableSha256",
+        "packetTunnelExecutableSha256",
+        "signerCertificateSha256",
+        "installedBundleIdentifier",
+    ):
+        require(
+            identity.get(field) == mobile_artifact.get(field)
+            and bool(mobile_artifact.get(field)),
+            f"iOS {mode} artifact identity differs at {field}",
+        )
+    cases = receipt.get("dnsCases")
+    require(
+        isinstance(cases, dict)
+        and set(cases) == expected_cases
+        and isinstance(receipt.get("evidenceFiles"), dict)
+        and bool(receipt["evidenceFiles"]),
+        f"iOS {mode} receipt has incomplete concrete evidence",
+    )
+    for label, case in cases.items():
+        require(
+            isinstance(case, dict)
+            and case.get("wireGuardRxBytesAfter", 0)
+            > case.get("wireGuardRxBytesBefore", 0)
+            and case.get("wireGuardTxBytesAfter", 0)
+            > case.get("wireGuardTxBytesBefore", 0)
+            and case.get("forwardedPacketsAfter", 0)
+            > case.get("forwardedPacketsBefore", 0)
+            and isinstance(case.get("dnsPathCountersBefore"), dict)
+            and isinstance(case.get("dnsPathCountersAfter"), dict),
+            f"iOS {mode} {label} lacks real traffic/DNS counters",
+        )
+    support = receipt.get("support")
+    require(isinstance(support, dict), f"iOS {mode} support evidence is missing")
+    if mode == "wireguard-dns":
+        require(
+            support.get("rapidStartStopCycles") == 8,
+            "iOS WireGuard/DNS receipt lacks eight rapid start/stop cycles",
+        )
+    else:
+        require(
+            support.get("lifecycleCycles") == 3
+            and isinstance(support.get("underlayCycles"), list)
+            and len(support["underlayCycles"]) == 2,
+            "iOS underlay receipt lacks lifecycle/roaming counters",
+        )
+
+
+def validate_desktop_mobile_join_receipt(
+    receipt: dict[str, Any],
+    mobile_artifact: dict[str, Any],
+) -> None:
+    artifact = receipt.get("artifact")
+    timings = receipt.get("deliveryMilliseconds")
+    require(
+        receipt.get("schema") == 1
+        and receipt.get("platform") == "macos"
+        and receipt.get("publicUiOnly") is True
+        and receipt.get("privateStateRead") is False
+        and receipt.get("fixtureInvoked") is False
+        and receipt.get("desktopAdminAndroidJoiner") is True
+        and receipt.get("androidAdminDesktopJoiner") is True
+        and receipt.get("acceptedRosterRetainedAcrossRelaunch") is True
+        and receipt.get("desktopRelaunchDurability") is True
+        and receipt.get("pixelRelaunchDurability") is True
+        and receipt.get("deliveryDeadlineMilliseconds") == 15_000
+        and isinstance(artifact, dict)
+        and artifact.get("appGitSha") == mobile_artifact.get("appGitSha")
+        and artifact.get("appGitTree") == mobile_artifact.get("appGitTree")
+        and isinstance(timings, dict)
+        and set(timings)
+        == {
+            "macOS-admin-to-Android-manual",
+            "Android-admin-to-macOS-manual",
+        }
+        and all(
+            isinstance(value, int) and 0 <= value <= 15_000
+            for value in timings.values()
+        ),
+        "desktop/mobile join receipt is incomplete or not source-bound",
+    )
+
+
 def seal_gate(args: argparse.Namespace) -> None:
     archive_receipt = pathlib.Path(args.archive_receipt)
     archive = load_json(archive_receipt)
     adhoc = load_json(pathlib.Path(args.adhoc_receipt))
     mobile = load_json(pathlib.Path(args.mobile_receipt))
+    mobile_join_receipt = pathlib.Path(args.mobile_join_receipt)
+    mobile_join = load_json(mobile_join_receipt)
+    mobile_wg_receipt = pathlib.Path(args.mobile_wg_receipt)
+    mobile_wg = load_json(mobile_wg_receipt)
+    mobile_underlay_receipt = pathlib.Path(args.mobile_underlay_receipt)
+    mobile_underlay = load_json(mobile_underlay_receipt)
+    desktop_join_receipt = pathlib.Path(args.desktop_mobile_join_receipt)
+    desktop_join = load_json(desktop_join_receipt)
     identity, adhoc_signing = validate_archive_and_adhoc(
         archive,
         adhoc,
@@ -389,8 +592,19 @@ def seal_gate(args: argparse.Namespace) -> None:
         adhoc_signing,
         mobile,
     )
+    validate_mobile_join_receipt(mobile_join, mobile)
+    validate_mobile_network_receipt(mobile_wg, mobile, "wireguard-dns")
+    validate_mobile_network_receipt(
+        mobile_underlay,
+        mobile,
+        "underlay-lifecycle",
+    )
+    validate_desktop_mobile_join_receipt(desktop_join, mobile)
     required_gates = sorted(set(args.required_gate))
-    require(required_gates, "gate seal requires named real-device gates")
+    require(
+        required_gates == REQUIRED_REAL_DEVICE_GATES,
+        "gate seal requires the exact five real-device gates",
+    )
     sealed_mobile_receipt = pathlib.Path(args.sealed_mobile_receipt)
     atomic_json(sealed_mobile_receipt, mobile)
     value = {
@@ -400,6 +614,30 @@ def seal_gate(args: argparse.Namespace) -> None:
         "archiveReceiptSha256": sha256_file(pathlib.Path(args.archive_receipt)),
         "archiveTreeSha256": archive["archiveTreeSha256"],
         "mobileArtifactReceiptSha256": sha256_file(sealed_mobile_receipt),
+        "mobileJoinReceiptSha256": sha256_file(mobile_join_receipt),
+        "mobileWireGuardDnsReceiptSha256": sha256_file(mobile_wg_receipt),
+        "mobileUnderlayLifecycleReceiptSha256": sha256_file(
+            mobile_underlay_receipt
+        ),
+        "desktopMobileJoinReceiptSha256": sha256_file(desktop_join_receipt),
+        "realDeviceGateReceiptSha256": {
+            "background-foreground-and-rapid-start-stop": [
+                sha256_file(mobile_wg_receipt),
+                sha256_file(mobile_underlay_receipt),
+            ],
+            "bidirectional-mobile-qr-and-manual-join": [
+                sha256_file(mobile_join_receipt)
+            ],
+            "desktop-mobile-manual-join": [
+                sha256_file(desktop_join_receipt)
+            ],
+            "wifi-hotspot-underlay-roaming": [
+                sha256_file(mobile_underlay_receipt)
+            ],
+            "wireguard-exit-and-five-dns-policies": [
+                sha256_file(mobile_wg_receipt)
+            ],
+        },
         "mobileArtifactEvidence": mobile_evidence,
         "requiredRealDeviceGates": required_gates,
     }
@@ -413,6 +651,14 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
     adhoc = load_json(pathlib.Path(args.adhoc_receipt))
     sealed_mobile_receipt = pathlib.Path(args.sealed_mobile_receipt)
     mobile = load_json(sealed_mobile_receipt)
+    mobile_join_receipt = pathlib.Path(args.mobile_join_receipt)
+    mobile_join = load_json(mobile_join_receipt)
+    mobile_wg_receipt = pathlib.Path(args.mobile_wg_receipt)
+    mobile_wg = load_json(mobile_wg_receipt)
+    mobile_underlay_receipt = pathlib.Path(args.mobile_underlay_receipt)
+    mobile_underlay = load_json(mobile_underlay_receipt)
+    desktop_join_receipt = pathlib.Path(args.desktop_mobile_join_receipt)
+    desktop_join = load_json(desktop_join_receipt)
     require(
         seal.get("receiptSchema") == RECEIPT_SCHEMA
         and seal.get("artifactType")
@@ -431,6 +677,14 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         signing,
         mobile,
     )
+    validate_mobile_join_receipt(mobile_join, mobile)
+    validate_mobile_network_receipt(mobile_wg, mobile, "wireguard-dns")
+    validate_mobile_network_receipt(
+        mobile_underlay,
+        mobile,
+        "underlay-lifecycle",
+    )
+    validate_desktop_mobile_join_receipt(desktop_join, mobile)
     required_hash(
         seal.get("archiveReceiptSha256"),
         "sealed archive receipt hash",
@@ -447,6 +701,26 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         64,
     )
     required_hash(
+        seal.get("mobileJoinReceiptSha256"),
+        "sealed mobile join receipt hash",
+        64,
+    )
+    required_hash(
+        seal.get("mobileWireGuardDnsReceiptSha256"),
+        "sealed mobile WireGuard/DNS receipt hash",
+        64,
+    )
+    required_hash(
+        seal.get("mobileUnderlayLifecycleReceiptSha256"),
+        "sealed mobile underlay/lifecycle receipt hash",
+        64,
+    )
+    required_hash(
+        seal.get("desktopMobileJoinReceiptSha256"),
+        "sealed desktop/mobile join receipt hash",
+        64,
+    )
+    required_hash(
         seal.get("archiveTreeSha256"),
         "sealed archive tree hash",
         64,
@@ -458,6 +732,14 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         == sha256_file(pathlib.Path(args.adhoc_receipt))
         and seal.get("mobileArtifactReceiptSha256")
         == sha256_file(sealed_mobile_receipt)
+        and seal.get("mobileJoinReceiptSha256")
+        == sha256_file(mobile_join_receipt)
+        and seal.get("mobileWireGuardDnsReceiptSha256")
+        == sha256_file(mobile_wg_receipt)
+        and seal.get("mobileUnderlayLifecycleReceiptSha256")
+        == sha256_file(mobile_underlay_receipt)
+        and seal.get("desktopMobileJoinReceiptSha256")
+        == sha256_file(desktop_join_receipt)
         and seal.get("archiveTreeSha256") == archive.get("archiveTreeSha256"),
         "iOS physical-gate seal is stale",
     )
@@ -478,10 +760,32 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
     required_list = sorted(required)
     observed_list = seal.get("requiredRealDeviceGates")
     require(
-        required
+        required_list == REQUIRED_REAL_DEVICE_GATES
         and isinstance(observed_list, list)
         and all(isinstance(value, str) and value for value in observed_list)
         and observed_list == required_list,
         f"iOS physical-gate seal mismatch: expected {required_list}, "
         f"got {observed_list!r}",
+    )
+    expected_gate_receipts = {
+        "background-foreground-and-rapid-start-stop": [
+            sha256_file(mobile_wg_receipt),
+            sha256_file(mobile_underlay_receipt),
+        ],
+        "bidirectional-mobile-qr-and-manual-join": [
+            sha256_file(mobile_join_receipt)
+        ],
+        "desktop-mobile-manual-join": [
+            sha256_file(desktop_join_receipt)
+        ],
+        "wifi-hotspot-underlay-roaming": [
+            sha256_file(mobile_underlay_receipt)
+        ],
+        "wireguard-exit-and-five-dns-policies": [
+            sha256_file(mobile_wg_receipt)
+        ],
+    }
+    require(
+        seal.get("realDeviceGateReceiptSha256") == expected_gate_receipts,
+        "iOS physical-gate labels are not backed by exact concrete receipts",
     )

@@ -26,14 +26,17 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::raw::c_int;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use boringtun::noise::{Tunn, TunnResult};
+use boringtun::noise::{Packet, Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::net::UdpSocket;
+#[cfg(target_os = "macos")]
+use tokio::sync::oneshot;
 use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
@@ -49,6 +52,23 @@ type TunPacketRx = mpsc::Receiver<TunPacketBatch>;
 type TunPacketTx = mpsc::Sender<TunPacketBatch>;
 type TunIo = (TunPacketRx, TunPacketTx);
 type TunTaskHandles = (JoinHandle<()>, JoinHandle<()>);
+
+struct TunTaskAbortGuard(Option<TunTaskHandles>);
+
+impl TunTaskAbortGuard {
+    fn take(&mut self) -> Option<TunTaskHandles> {
+        self.0.take()
+    }
+}
+
+impl Drop for TunTaskAbortGuard {
+    fn drop(&mut self) {
+        if let Some((reader, writer)) = self.0.take() {
+            reader.abort();
+            writer.abort();
+        }
+    }
+}
 
 /// Default time the daemon / mobile runtime waits for the WG handshake
 /// to complete before giving up. Acts as the implicit watchdog: by
@@ -69,13 +89,27 @@ pub struct WgUpstreamRuntime {
     tun_writer: Option<JoinHandle<()>>,
     handshake: Arc<HandshakeState>,
     upstream: SocketAddr,
-    udp_socket_fd: c_int,
+    udp: Arc<UdpSocket>,
+    // Keeping the sender alive prevents the coordinator's control branch
+    // from becoming an always-ready closed channel on non-macOS targets.
+    _control_tx: mpsc::UnboundedSender<WgUpstreamCommand>,
 }
 
 #[derive(Default)]
 struct HandshakeState {
     completed: Notify,
     last_age: RwLock<Option<Duration>>,
+    // Zero means no completed initiator handshake. WireGuard receiver
+    // indices are stored as index + 1 so every u32 value remains representable.
+    last_completed_receiver_index: AtomicU64,
+}
+
+enum WgUpstreamCommand {
+    #[cfg(target_os = "macos")]
+    RebindInterface {
+        interface_index: u32,
+        response: oneshot::Sender<Result<u32>>,
+    },
 }
 
 #[derive(Clone)]
@@ -123,11 +157,57 @@ impl WgUpstreamRuntime {
         tun_io: Option<TunIo>,
         tun_handles: Option<TunTaskHandles>,
     ) -> Result<Self> {
+        Self::start_with_io_inner(config, tun_io, tun_handles, None, None).await
+    }
+
+    /// macOS constructor that pins encrypted WG UDP traffic to the
+    /// selected physical underlay before the first handshake is sent.
+    #[cfg(target_os = "macos")]
+    pub async fn start_with_io_on_interface(
+        config: &WireGuardExitConfig,
+        tun_io: Option<TunIo>,
+        tun_handles: Option<TunTaskHandles>,
+        interface_index: u32,
+    ) -> Result<Self> {
+        Self::start_with_io_inner(config, tun_io, tun_handles, Some(interface_index), None).await
+    }
+
+    /// macOS restart constructor for an endpoint that was resolved before
+    /// split-default routing made system DNS dependent on the active tunnel.
+    #[cfg(target_os = "macos")]
+    pub async fn start_with_io_on_interface_at_upstream(
+        config: &WireGuardExitConfig,
+        tun_io: Option<TunIo>,
+        tun_handles: Option<TunTaskHandles>,
+        interface_index: u32,
+        upstream: SocketAddr,
+    ) -> Result<Self> {
+        Self::start_with_io_inner(
+            config,
+            tun_io,
+            tun_handles,
+            Some(interface_index),
+            Some(upstream),
+        )
+        .await
+    }
+
+    async fn start_with_io_inner(
+        config: &WireGuardExitConfig,
+        tun_io: Option<TunIo>,
+        tun_handles: Option<TunTaskHandles>,
+        interface_index: Option<u32>,
+        resolved_upstream: Option<SocketAddr>,
+    ) -> Result<Self> {
+        let mut tun_handles = TunTaskAbortGuard(tun_handles);
         log_android_info("wg-upstream: start_with_io entered");
         let private = decode_private_key(&config.private_key)?;
         let public = decode_public_key(&config.peer_public_key)?;
         let preshared = decode_optional_preshared_key(&config.peer_preshared_key)?;
-        let upstream = resolve_endpoint(&config.endpoint).await?;
+        let upstream = match resolved_upstream {
+            Some(upstream) => upstream,
+            None => resolve_endpoint(&config.endpoint).await?,
+        };
         log_android_info(&format!(
             "wg-upstream: keys decoded, upstream resolved to {upstream}"
         ));
@@ -137,6 +217,12 @@ impl WgUpstreamRuntime {
             .await
             .with_context(|| format!("bind upstream WG udp socket on {bind_addr}"))?;
         let udp_socket_fd = raw_udp_socket_fd(&udp);
+        #[cfg(target_os = "macos")]
+        if let Some(interface_index) = interface_index {
+            bind_apple_udp_socket_to_interface(udp_socket_fd, upstream, interface_index)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        debug_assert!(interface_index.is_none());
         log_android_info(&format!(
             "wg-upstream: udp socket bound, fd={udp_socket_fd}"
         ));
@@ -154,18 +240,20 @@ impl WgUpstreamRuntime {
             Some((rx, tx)) => (Some(rx), Some(tx)),
             None => (None, None),
         };
-        let (tun_reader, tun_writer) = match tun_handles {
+        let (tun_reader, tun_writer) = match tun_handles.take() {
             Some((r, w)) => (Some(r), Some(w)),
             None => (None, None),
         };
 
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let pump = tokio::spawn(run_pump(
             tunn,
-            udp,
+            Arc::clone(&udp),
             upstream,
             tun_in_rx,
             tun_out_tx,
             handshake.clone(),
+            control_rx,
         ));
 
         Ok(Self {
@@ -174,7 +262,8 @@ impl WgUpstreamRuntime {
             tun_writer,
             handshake,
             upstream,
-            udp_socket_fd,
+            udp,
+            _control_tx: control_tx,
         })
     }
 
@@ -194,12 +283,45 @@ impl WgUpstreamRuntime {
         self.upstream
     }
 
+    pub fn is_running(&self) -> bool {
+        self.pump.as_ref().is_some_and(|pump| !pump.is_finished())
+    }
+
     /// Raw fd of the UDP socket talking to the WG upstream. On Android
     /// the host should pass this to `VpnService.protect(fd)` so the
     /// encrypted UDP escapes the VPN tun. Returns -1 on platforms
     /// where the underlying socket type doesn't expose a raw fd.
     pub fn udp_socket_fd(&self) -> c_int {
-        self.udp_socket_fd
+        raw_udp_socket_fd(&self.udp)
+    }
+
+    /// Rebind encrypted WG UDP traffic to a new macOS underlay and
+    /// actively initiate a fresh handshake on it. The returned receiver index
+    /// identifies the exact forced initiation whose response must complete.
+    #[cfg(target_os = "macos")]
+    pub async fn rebind_interface(&mut self, interface_index: u32) -> Result<u32> {
+        let (response, result) = oneshot::channel();
+        self._control_tx
+            .send(WgUpstreamCommand::RebindInterface {
+                interface_index,
+                response,
+            })
+            .map_err(|_| anyhow!("WG upstream pump stopped before underlay rebind"))?;
+        result
+            .await
+            .context("WG upstream pump stopped while forcing post-rebind handshake")?
+    }
+
+    /// Wait for the authenticated response to one exact locally initiated
+    /// WireGuard handshake. Delayed responses to older initiations and cookie
+    /// challenges cannot satisfy this proof.
+    #[cfg(target_os = "macos")]
+    pub async fn wait_for_handshake_response(
+        &self,
+        receiver_index: u32,
+        timeout: Duration,
+    ) -> bool {
+        wait_for_handshake_response(&self.handshake, receiver_index, timeout).await
     }
 
     /// Stop the pump and drop the tunnel state. Idempotent.
@@ -225,13 +347,63 @@ async fn wait_for_handshake(handshake: &Arc<HandshakeState>, timeout: Duration) 
         if handshake.last_age.read().await.is_some() {
             return true;
         }
+        let notified = handshake.completed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if handshake.last_age.read().await.is_some() {
+            return true;
+        }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return false;
         }
         tokio::select! {
-            _ = handshake.completed.notified() => continue,
-            _ = tokio::time::sleep(remaining) => return false,
+            _ = &mut notified => continue,
+            _ = tokio::time::sleep(remaining) => {
+                return handshake.last_age.read().await.is_some();
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_handshake_response(
+    handshake: &Arc<HandshakeState>,
+    receiver_index: u32,
+    timeout: Duration,
+) -> bool {
+    let expected = u64::from(receiver_index) + 1;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if handshake
+            .last_completed_receiver_index
+            .load(Ordering::Acquire)
+            == expected
+        {
+            return true;
+        }
+        let notified = handshake.completed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if handshake
+            .last_completed_receiver_index
+            .load(Ordering::Acquire)
+            == expected
+        {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        tokio::select! {
+            _ = &mut notified => continue,
+            _ = tokio::time::sleep(remaining) => {
+                return handshake
+                    .last_completed_receiver_index
+                    .load(Ordering::Acquire)
+                    == expected;
+            },
         }
     }
 }
@@ -288,6 +460,7 @@ async fn run_pump(
     mut tun_in_rx: Option<TunPacketRx>,
     tun_out_tx: Option<TunPacketTx>,
     handshake: Arc<HandshakeState>,
+    mut control_rx: mpsc::UnboundedReceiver<WgUpstreamCommand>,
 ) {
     log_android_info(&format!(
         "wg-upstream: run_pump starting, upstream={upstream}"
@@ -350,7 +523,7 @@ async fn run_pump(
                 if !flush_tun_out_batch(tun_out_tx.as_ref(), &mut tun_out_batch).await {
                     break;
                 }
-                let (age, _) = refresh_handshake_state(&tunn, &handshake).await;
+                let (age, _) = refresh_handshake_state(&tunn, &handshake, false).await;
 
                 // Belt-and-braces keepalive: every 20s, if the
                 // session is alive, push a 0-byte plaintext through
@@ -392,6 +565,8 @@ async fn run_pump(
 
                 {
                     let result = tunn.decapsulate(Some(source.ip()), &udp_buf[..len], &mut out);
+                    let completed_handshake_receiver =
+                        completed_handshake_receiver_index(&udp_buf[..len], &result);
                     if matches!(result, TunnResult::Done) {
                         consecutive_decap_errors = 0;
                     } else if let TunnResult::Err(error) = &result {
@@ -409,6 +584,9 @@ async fn run_pump(
                         tun_out_tx.as_ref(),
                         &mut tun_out_batch,
                     ).await;
+                    if let Some(receiver_index) = completed_handshake_receiver {
+                        record_completed_handshake(&tunn, &handshake, receiver_index).await;
+                    }
                 }
                 drain_decapsulate(
                     &mut tunn,
@@ -421,10 +599,7 @@ async fn run_pump(
                 if !flush_tun_out_batch(tun_out_tx.as_ref(), &mut tun_out_batch).await {
                     break;
                 }
-                let (age, newly_completed) = refresh_handshake_state(&tunn, &handshake).await;
-                if newly_completed {
-                    log_android_info(&format!("wg-upstream: handshake completed, age={age:?}"));
-                }
+                refresh_handshake_state(&tunn, &handshake, false).await;
 
                 // 5+ consecutive decap errors means our session lost
                 // sync with the upstream. Force a fresh handshake init
@@ -473,8 +648,62 @@ async fn run_pump(
                     break;
                 }
             }
+            Some(command) = control_rx.recv() => {
+                #[cfg(target_os = "macos")]
+                match command {
+                    WgUpstreamCommand::RebindInterface {
+                        interface_index,
+                        response,
+                    } => {
+                        let result = rebind_and_force_new_handshake(
+                            &mut tunn,
+                            &udp,
+                            upstream,
+                            interface_index,
+                            &mut out,
+                        ).await;
+                        let _ = response.send(result);
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                match command {}
+            }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn rebind_and_force_new_handshake(
+    tunn: &mut Tunn,
+    udp: &UdpSocket,
+    upstream: SocketAddr,
+    interface_index: u32,
+    out: &mut [u8],
+) -> Result<u32> {
+    bind_apple_udp_socket_to_interface(raw_udp_socket_fd(udp), upstream, interface_index)?;
+    force_new_handshake(tunn, udp, upstream, out).await
+}
+
+#[cfg(target_os = "macos")]
+async fn force_new_handshake(
+    tunn: &mut Tunn,
+    udp: &UdpSocket,
+    upstream: SocketAddr,
+    out: &mut [u8],
+) -> Result<u32> {
+    let packet = match tunn.format_handshake_initiation(out, true) {
+        TunnResult::WriteToNetwork(packet) => packet,
+        TunnResult::Err(error) => {
+            return Err(anyhow!("format forced WG handshake: {error:?}"));
+        }
+        _ => return Err(anyhow!("forced WG handshake produced no network packet")),
+    };
+    let receiver_index = handshake_initiation_sender_index(packet)
+        .ok_or_else(|| anyhow!("forced WG handshake produced an invalid initiation"))?;
+    udp.send_to(packet, upstream)
+        .await
+        .with_context(|| format!("send forced WG handshake to {upstream}"))?;
+    Ok(receiver_index)
 }
 
 async fn recv_tun_packets(tun_in_rx: &mut Option<TunPacketRx>) -> Option<TunPacketBatch> {
@@ -487,16 +716,64 @@ async fn recv_tun_packets(tun_in_rx: &mut Option<TunPacketRx>) -> Option<TunPack
 async fn refresh_handshake_state(
     tunn: &Tunn,
     handshake: &Arc<HandshakeState>,
+    completed_handshake: bool,
 ) -> (Option<Duration>, bool) {
     let (age, _, _, _, _) = tunn.stats();
-    let mut current = handshake.last_age.write().await;
-    let prev = current.is_some();
-    *current = age;
-    let newly_completed = !prev && age.is_some();
-    if newly_completed {
+    let became_live = {
+        let mut last_age = handshake.last_age.write().await;
+        let became_live = last_age.is_none() && age.is_some();
+        *last_age = age;
+        became_live
+    };
+    let newly_completed = completed_handshake && age.is_some();
+    if became_live || newly_completed {
         handshake.completed.notify_waiters();
     }
     (age, newly_completed)
+}
+
+async fn record_completed_handshake(
+    tunn: &Tunn,
+    handshake: &Arc<HandshakeState>,
+    receiver_index: u32,
+) {
+    let (age, completed) = refresh_handshake_state(tunn, handshake, true).await;
+    if completed {
+        handshake
+            .last_completed_receiver_index
+            .store(u64::from(receiver_index) + 1, Ordering::Release);
+        handshake.completed.notify_waiters();
+        log_android_info(&format!("wg-upstream: handshake completed, age={age:?}"));
+    }
+}
+
+fn completed_handshake_receiver_index(incoming: &[u8], result: &TunnResult<'_>) -> Option<u32> {
+    let receiver_index = match Tunn::parse_incoming_packet(incoming).ok()? {
+        Packet::HandshakeResponse(response) => response.receiver_idx,
+        _ => return None,
+    };
+    let TunnResult::WriteToNetwork(outgoing) = result else {
+        return None;
+    };
+    matches!(
+        Tunn::parse_incoming_packet(outgoing),
+        Ok(Packet::PacketData(_))
+    )
+    .then_some(receiver_index)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn handshake_initiation_sender_index(packet: &[u8]) -> Option<u32> {
+    if !matches!(
+        Tunn::parse_incoming_packet(packet),
+        Ok(Packet::HandshakeInit(_))
+    ) {
+        return None;
+    }
+    packet
+        .get(4..8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
 }
 
 async fn handle_tunn_result(
@@ -604,397 +881,7 @@ fn decode_key_bytes(encoded: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("WG key must be exactly 32 bytes"))
 }
 
-async fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr> {
-    let endpoint = endpoint.trim();
-    if let Ok(addr) = endpoint.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-    let resolved = tokio::net::lookup_host(endpoint)
-        .await
-        .with_context(|| format!("resolve WG upstream endpoint '{endpoint}'"))?
-        .next()
-        .ok_or_else(|| anyhow!("no DNS results for '{endpoint}'"))?;
-    Ok(resolved)
-}
-
-#[cfg(unix)]
-fn raw_udp_socket_fd(socket: &UdpSocket) -> c_int {
-    use std::os::unix::io::AsRawFd;
-    socket.as_raw_fd() as c_int
-}
-
-#[cfg(not(unix))]
-fn raw_udp_socket_fd(_socket: &UdpSocket) -> c_int {
-    -1
-}
-
-fn udp_bind_addr_for_upstream(upstream: SocketAddr) -> SocketAddr {
-    match upstream {
-        SocketAddr::V4(addr) if addr.ip().is_loopback() => {
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into()
-        }
-        SocketAddr::V4(_) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into(),
-        SocketAddr::V6(addr) if addr.ip().is_loopback() => {
-            SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0).into()
-        }
-        SocketAddr::V6(_) => SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0).into(),
-    }
-}
-
-// Direct OS-log bridges so the WG pump's diagnostic messages surface
-// during device testing — Rust stderr/stdout is redirected to
-// /dev/null on Android and inside an iOS app extension, and the
-// existing `tracing` macros silently no-op without a registered
-// subscriber. The Android side bridges to logcat; iOS appends to a
-// file inside the extension's sandboxed temp dir, which we can pull
-// back with `xcrun devicectl device copy from`.
-
-#[cfg(target_os = "android")]
-fn log_android(prio: i32, message: &str) {
-    use std::ffi::CString;
-    let tag = CString::new("nvpn-wg").unwrap_or_default();
-    if let Ok(msg) = CString::new(message) {
-        unsafe {
-            __android_log_write(prio, tag.as_ptr(), msg.as_ptr());
-        }
-    }
-}
-
-#[cfg(target_os = "android")]
-fn log_android_info(message: &str) {
-    log_android(4 /* ANDROID_LOG_INFO */, message);
-}
-
-#[cfg(target_os = "android")]
-fn log_android_warn(message: &str) {
-    log_android(5 /* ANDROID_LOG_WARN */, message);
-}
-
-#[cfg(target_os = "ios")]
-fn log_android_info(message: &str) {
-    log_ios_file(message);
-}
-
-#[cfg(target_os = "ios")]
-fn log_android_warn(message: &str) {
-    log_ios_file(message);
-}
-
-#[cfg(target_os = "ios")]
-fn log_ios_file(message: &str) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let path = std::env::temp_dir().join("nvpn-wg.log");
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{secs:.3} {message}");
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn log_android_info(_message: &str) {}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn log_android_warn(_message: &str) {}
-
-#[cfg(target_os = "android")]
-unsafe extern "C" {
-    fn __android_log_write(
-        prio: i32,
-        tag: *const std::os::raw::c_char,
-        text: *const std::os::raw::c_char,
-    ) -> i32;
-}
+include!("wg_upstream_platform.rs");
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::parse_wireguard_exit_config;
-
-    fn internet_checksum(bytes: &[u8]) -> u16 {
-        let mut sum = 0u32;
-        let mut chunks = bytes.chunks_exact(2);
-        for chunk in &mut chunks {
-            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-        }
-        if let Some(&byte) = chunks.remainder().first() {
-            sum += u16::from_be_bytes([byte, 0]) as u32;
-        }
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xffff) + (sum >> 16);
-        }
-        !(sum as u16)
-    }
-
-    fn ipv4_icmp_echo_request(src: [u8; 4], dst: [u8; 4], seq: u16) -> Vec<u8> {
-        let mut packet = vec![0u8; 28];
-        packet[0] = 0x45;
-        packet[1] = 0;
-        let total_len = packet.len() as u16;
-        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
-        packet[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
-        packet[6..8].copy_from_slice(&0u16.to_be_bytes());
-        packet[8] = 64;
-        packet[9] = 1;
-        packet[12..16].copy_from_slice(&src);
-        packet[16..20].copy_from_slice(&dst);
-        let header_checksum = internet_checksum(&packet[..20]);
-        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
-
-        packet[20] = 8;
-        packet[21] = 0;
-        packet[24..26].copy_from_slice(&0x4e56u16.to_be_bytes());
-        packet[26..28].copy_from_slice(&seq.to_be_bytes());
-        let icmp_checksum = internet_checksum(&packet[20..]);
-        packet[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
-        packet
-    }
-
-    fn ipv4_icmp_echo_reply(request: &[u8]) -> Option<Vec<u8>> {
-        if request.len() < 28 || request[0] >> 4 != 4 {
-            return None;
-        }
-        let ihl = usize::from(request[0] & 0x0f) * 4;
-        if ihl < 20 || request.len() < ihl + 8 || request[9] != 1 || request[ihl] != 8 {
-            return None;
-        }
-        let total_len = usize::from(u16::from_be_bytes([request[2], request[3]]));
-        if total_len < ihl + 8 || total_len > request.len() {
-            return None;
-        }
-
-        let mut reply = request[..total_len].to_vec();
-        reply[8] = 64;
-        reply[10] = 0;
-        reply[11] = 0;
-        let src = [reply[12], reply[13], reply[14], reply[15]];
-        let dst = [reply[16], reply[17], reply[18], reply[19]];
-        reply[12..16].copy_from_slice(&dst);
-        reply[16..20].copy_from_slice(&src);
-        let header_checksum = internet_checksum(&reply[..ihl]);
-        reply[10..12].copy_from_slice(&header_checksum.to_be_bytes());
-
-        reply[ihl] = 0;
-        reply[ihl + 2] = 0;
-        reply[ihl + 3] = 0;
-        let icmp_checksum = internet_checksum(&reply[ihl..]);
-        reply[ihl + 2..ihl + 4].copy_from_slice(&icmp_checksum.to_be_bytes());
-        Some(reply)
-    }
-
-    #[test]
-    fn upstream_udp_bind_uses_loopback_for_loopback_peer() {
-        assert_eq!(
-            udp_bind_addr_for_upstream("127.0.0.1:51820".parse().unwrap()),
-            "127.0.0.1:0".parse::<SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            udp_bind_addr_for_upstream("[::1]:51820".parse().unwrap()),
-            "[::1]:0".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn upstream_udp_bind_preserves_non_loopback_ip_family() {
-        assert_eq!(
-            udp_bind_addr_for_upstream("198.51.100.10:51820".parse().unwrap()),
-            "0.0.0.0:0".parse::<SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            udp_bind_addr_for_upstream("[2001:db8::1]:51820".parse().unwrap()),
-            "[::]:0".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    fn random_keypair() -> (StaticSecret, PublicKey, String, String) {
-        // Deterministic but unique per call. boringtun + x25519-dalek
-        // accept any 32-byte little-endian secret; ChaCha20-style
-        // clamping is applied internally on use.
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let mut bytes = [0u8; 32];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = (nanos as u8).wrapping_add(i as u8 * 7);
-        }
-        let private = StaticSecret::from(bytes);
-        let public = PublicKey::from(&private);
-        let priv_b64 = STANDARD.encode(private.to_bytes());
-        let pub_b64 = STANDARD.encode(public.as_bytes());
-        (private, public, priv_b64, pub_b64)
-    }
-
-    /// Stand up a paired Tunn on a real UDP port acting as the upstream
-    /// "server"; verifies the boringtun pump's handshake state machine
-    /// drives `wait_for_handshake` to true.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn handshake_completes_against_paired_responder() {
-        let (_, _client_pub, client_priv_b64, _) = random_keypair();
-        let (server_priv_obj, _, _, server_pub_b64) = random_keypair();
-
-        let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = server_socket.local_addr().unwrap();
-        let server_socket = Arc::new(server_socket);
-
-        let mut server_tunn = Tunn::new(
-            server_priv_obj,
-            PublicKey::from(&decode_private_key(&client_priv_b64).unwrap()),
-            None,
-            Some(25),
-            2,
-            None,
-        );
-
-        let server_socket_pump = server_socket.clone();
-        let server_pump = tokio::spawn(async move {
-            let mut udp_buf = vec![0u8; MAX_WG_PACKET];
-            for _ in 0..32 {
-                let (n, src) = match tokio::time::timeout(
-                    Duration::from_millis(500),
-                    server_socket_pump.recv_from(&mut udp_buf),
-                )
-                .await
-                {
-                    Ok(Ok(value)) => value,
-                    _ => continue,
-                };
-                let mut out = vec![0u8; MAX_WG_PACKET];
-                let to_send = match server_tunn.decapsulate(Some(src.ip()), &udp_buf[..n], &mut out)
-                {
-                    TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
-                    _ => None,
-                };
-                if let Some(bytes) = to_send {
-                    let _ = server_socket_pump.send_to(&bytes, src).await;
-                }
-                loop {
-                    let mut drain_buf = vec![0u8; MAX_WG_PACKET];
-                    let drained = match server_tunn.decapsulate(None, &[], &mut drain_buf) {
-                        TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
-                        _ => None,
-                    };
-                    let Some(bytes) = drained else { break };
-                    let _ = server_socket_pump.send_to(&bytes, src).await;
-                }
-            }
-        });
-
-        let cfg_text = format!(
-            "[Interface]\nPrivateKey = {client_priv_b64}\nAddress = 10.99.99.2/32\n\n[Peer]\nPublicKey = {server_pub_b64}\nEndpoint = {server_addr}\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 1\n"
-        );
-        let cfg = parse_wireguard_exit_config(&cfg_text).expect("parse WG config");
-
-        let runtime = WgUpstreamRuntime::start_handshake_only(&cfg)
-            .await
-            .expect("start runtime");
-        let ok = runtime.wait_for_handshake(Duration::from_secs(10)).await;
-        runtime.shutdown().await;
-        server_pump.abort();
-        let _ = server_pump.await;
-        assert!(
-            ok,
-            "expected handshake to complete against the paired responder"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn channels_round_trip_plaintext_packets_against_paired_responder() {
-        let (_, _client_pub, client_priv_b64, _) = random_keypair();
-        let (server_priv_obj, _, _, server_pub_b64) = random_keypair();
-
-        let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = server_socket.local_addr().unwrap();
-        let server_socket = Arc::new(server_socket);
-
-        let mut server_tunn = Tunn::new(
-            server_priv_obj,
-            PublicKey::from(&decode_private_key(&client_priv_b64).unwrap()),
-            None,
-            Some(25),
-            2,
-            None,
-        );
-
-        let request = ipv4_icmp_echo_request([10, 99, 99, 2], [10, 99, 99, 1], 7);
-        let expected_reply = ipv4_icmp_echo_reply(&request).expect("reply packet");
-
-        let server_socket_pump = server_socket.clone();
-        let server_pump = tokio::spawn(async move {
-            let mut udp_buf = vec![0u8; MAX_WG_PACKET];
-            for _ in 0..64 {
-                let (n, src) = match tokio::time::timeout(
-                    Duration::from_millis(500),
-                    server_socket_pump.recv_from(&mut udp_buf),
-                )
-                .await
-                {
-                    Ok(Ok(value)) => value,
-                    _ => continue,
-                };
-                let mut out = vec![0u8; MAX_WG_PACKET];
-                let action = match server_tunn.decapsulate(Some(src.ip()), &udp_buf[..n], &mut out)
-                {
-                    TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
-                    TunnResult::WriteToTunnelV4(packet, _) => {
-                        let reply = ipv4_icmp_echo_reply(packet).expect("ICMP echo request");
-                        let mut reply_out = vec![0u8; MAX_WG_PACKET];
-                        match server_tunn.encapsulate(&reply, &mut reply_out) {
-                            TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(bytes) = action {
-                    let _ = server_socket_pump.send_to(&bytes, src).await;
-                }
-                loop {
-                    let mut drain_buf = vec![0u8; MAX_WG_PACKET];
-                    let drained = match server_tunn.decapsulate(None, &[], &mut drain_buf) {
-                        TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
-                        _ => None,
-                    };
-                    let Some(bytes) = drained else { break };
-                    let _ = server_socket_pump.send_to(&bytes, src).await;
-                }
-            }
-        });
-
-        let cfg_text = format!(
-            "[Interface]\nPrivateKey = {client_priv_b64}\nAddress = 10.99.99.2/32\n\n[Peer]\nPublicKey = {server_pub_b64}\nEndpoint = {server_addr}\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 1\n"
-        );
-        let cfg = parse_wireguard_exit_config(&cfg_text).expect("parse WG config");
-        let (tun_in_tx, tun_in_rx) = mpsc::channel(8);
-        let (tun_out_tx, mut tun_out_rx) = mpsc::channel(8);
-
-        let runtime = WgUpstreamRuntime::start_with_channels(&cfg, tun_in_rx, tun_out_tx)
-            .await
-            .expect("start runtime");
-        let ok = runtime.wait_for_handshake(Duration::from_secs(10)).await;
-        assert!(
-            ok,
-            "expected handshake to complete against the paired responder"
-        );
-
-        tun_in_tx
-            .send(vec![request])
-            .await
-            .expect("send plaintext packet into tunnel");
-        let actual_replies = tokio::time::timeout(Duration::from_secs(10), tun_out_rx.recv())
-            .await
-            .expect("reply timeout")
-            .expect("reply channel closed");
-        let actual_reply = actual_replies.into_iter().next().expect("reply packet");
-        runtime.shutdown().await;
-        server_pump.abort();
-        let _ = server_pump.await;
-
-        assert_eq!(actual_reply, expected_reply);
-    }
-}
+include!("wg_upstream_tests.rs");

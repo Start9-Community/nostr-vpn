@@ -26,6 +26,10 @@ FROZEN_ADHOC_RECEIPT="$FROZEN_DIR/release-testing-receipt.json"
 FROZEN_APPSTORE_UNPACK_DIR="$FROZEN_DIR/app-store-unpacked"
 FROZEN_APPSTORE_RECEIPT="$FROZEN_DIR/app-store-receipt.json"
 FROZEN_MOBILE_RECEIPT="$FROZEN_DIR/physical-mobile-receipt.json"
+FROZEN_MOBILE_JOIN_RECEIPT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}/summary.json"
+FROZEN_DESKTOP_MOBILE_JOIN_RECEIPT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}/macos/summary.json"
+FROZEN_MOBILE_WG_RECEIPT="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT/artifacts/release-gate-logs}/mobile-network/ios-wireguard-dns.json"
+FROZEN_MOBILE_UNDERLAY_RECEIPT="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT/artifacts/release-gate-logs}/mobile-network/ios-underlay-lifecycle.json"
 FROZEN_GATE_SEAL="$FROZEN_DIR/physical-gate-seal.json"
 FROZEN_TOOL="$ROOT/scripts/ios_frozen_archive.py"
 PROJECT="$IOS_DIR/NostrVpnIos.xcodeproj"
@@ -366,6 +370,10 @@ validate_frozen_gate_seal() {
     --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
     --adhoc-receipt "$FROZEN_ADHOC_RECEIPT" \
     --sealed-mobile-receipt "$FROZEN_MOBILE_RECEIPT" \
+    --mobile-join-receipt "$FROZEN_MOBILE_JOIN_RECEIPT" \
+    --mobile-wg-receipt "$FROZEN_MOBILE_WG_RECEIPT" \
+    --mobile-underlay-receipt "$FROZEN_MOBILE_UNDERLAY_RECEIPT" \
+    --desktop-mobile-join-receipt "$FROZEN_DESKTOP_MOBILE_JOIN_RECEIPT" \
     --gate-seal "$FROZEN_GATE_SEAL" \
     "${FROZEN_GATE_ARGS[@]}"
 }

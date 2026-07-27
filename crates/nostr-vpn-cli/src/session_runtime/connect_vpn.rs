@@ -4,6 +4,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
     }
 
     let config_path = args.config.unwrap_or_else(default_config_path);
+    let _instance_lock = acquire_daemon_instance_lock(&config_path)?;
     #[cfg(any(target_os = "macos", test))]
     crate::ensure_macos_connect_privileges(&config_path)?;
     if repair_saved_network_state(&config_path)
@@ -55,7 +56,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
         println!("connect: FIPS private mesh on {}", runtime.iface());
         (Some(runtime), endpoint_peer_signature)
     };
-    let magic_dns_runtime = start_split_magic_dns(&app);
+    let mut magic_dns_runtime = start_split_magic_dns(&app);
 
     println!(
         "connect: network {network_id} using FIPS private mesh; waiting for {expected_peers} configured peer(s)"
@@ -126,9 +127,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                                 {
                                     eprintln!("connect: roster applied, but FIPS reload failed: {error}");
                                 }
-                                if let Some(rt) = magic_dns_runtime.as_ref() {
-                                    rt.refresh_records(&app);
-                                }
+                                refresh_or_start_split_magic_dns(&mut magic_dns_runtime, &app);
                             }
                             if !drained.endpoint_hint_participants.is_empty()
                                 && let Err(error) =

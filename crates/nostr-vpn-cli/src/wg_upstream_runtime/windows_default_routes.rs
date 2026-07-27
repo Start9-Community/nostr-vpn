@@ -15,6 +15,8 @@ struct WindowsRouteSpec {
     interface_index: u32,
     next_hop: String,
     metric: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interface_identity: Option<String>,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -25,6 +27,7 @@ impl WindowsRouteSpec {
             interface_index: underlay.interface_index,
             next_hop: underlay.gateway.clone(),
             metric: 1,
+            interface_identity: None,
         }
     }
 
@@ -34,6 +37,7 @@ impl WindowsRouteSpec {
             interface_index,
             next_hop: "0.0.0.0".to_string(),
             metric: 1,
+            interface_identity: None,
         }
     }
 
@@ -56,7 +60,16 @@ impl WindowsRouteSpec {
             interface_index,
             next_hop: "0.0.0.0".to_string(),
             metric: 1,
+            interface_identity: None,
         })
+    }
+
+    fn is_identityless_legacy_physical_bypass(&self) -> bool {
+        self.interface_identity.is_none() && self.next_hop != "0.0.0.0"
+    }
+
+    fn is_identityless_legacy_tunnel_route(&self) -> bool {
+        self.interface_identity.is_none() && self.next_hop == "0.0.0.0"
     }
 }
 
@@ -64,9 +77,18 @@ impl WindowsRouteSpec {
 trait WindowsRouteCommandRunner {
     fn route_exists(&mut self, route: &WindowsRouteSpec) -> Result<bool>;
     fn route_identity_exists(&mut self, route: &WindowsRouteSpec) -> Result<bool>;
+    fn bind_interface_identity(&mut self, _route: &mut WindowsRouteSpec) -> Result<()> {
+        Ok(())
+    }
+    fn verify_interface_identity(&mut self, _route: &WindowsRouteSpec) -> Result<()> {
+        Ok(())
+    }
     fn add_route(&mut self, route: &WindowsRouteSpec) -> Result<()>;
     fn set_route(&mut self, route: &WindowsRouteSpec) -> Result<()>;
     fn delete_route(&mut self, route: &WindowsRouteSpec) -> Result<()>;
+    fn finish_route_cleanup(&mut self, _route: &WindowsRouteSpec) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -87,7 +109,68 @@ impl<T> std::fmt::Display for WindowsRouteApplyFailure<T> {
 impl<T: std::fmt::Debug> std::error::Error for WindowsRouteApplyFailure<T> {}
 
 #[cfg(target_os = "windows")]
-struct SystemWindowsRouteCommandRunner;
+struct SystemWindowsRouteCommandRunner {
+    cleanup_journal_config_path: Option<PathBuf>,
+}
+
+#[cfg(target_os = "windows")]
+impl SystemWindowsRouteCommandRunner {
+    fn repair() -> Self {
+        Self {
+            cleanup_journal_config_path: None,
+        }
+    }
+
+    fn journaled(config_path: &Path) -> Self {
+        Self {
+            cleanup_journal_config_path: Some(config_path.to_path_buf()),
+        }
+    }
+
+    fn persist_route_intent(&self, route: &WindowsRouteSpec, retain: bool) -> Result<()> {
+        let Some(config_path) = self.cleanup_journal_config_path.as_deref() else {
+            return Ok(());
+        };
+        crate::daemon_runtime::persist_windows_route_cleanup_intent(
+            config_path,
+            &WindowsRouteCleanupSnapshot::from_owned_routes(vec![route.clone()]),
+            retain,
+        )
+    }
+
+    fn run_journaled_route_mutation(
+        &self,
+        route: &WindowsRouteSpec,
+        operation: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.persist_route_intent(route, true)
+            .context("fsync Windows route cleanup intent before mutation")?;
+        let Err(mutation_error) = operation() else {
+            return Ok(());
+        };
+        let cleanup = WindowsRouteCleanupSnapshot::from_owned_routes(vec![route.clone()]);
+        match windows_route_exists(route, false) {
+            Ok(true) => {
+                retain_pending_windows_route_cleanup(cleanup);
+                Err(mutation_error)
+            }
+            Ok(false) => match self.persist_route_intent(route, false) {
+                Ok(()) => Err(mutation_error),
+                Err(persist_error) => Err(anyhow!(
+                    "{mutation_error:#}; route mutation left no matching route, but clearing its \
+                     write-ahead cleanup intent failed: {persist_error:#}"
+                )),
+            },
+            Err(audit_error) => {
+                retain_pending_windows_route_cleanup(cleanup);
+                Err(anyhow!(
+                    "{mutation_error:#}; failed to audit route state after mutation failure, so \
+                     its write-ahead cleanup intent was retained: {audit_error:#}"
+                ))
+            }
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 impl WindowsRouteCommandRunner for SystemWindowsRouteCommandRunner {
@@ -99,16 +182,64 @@ impl WindowsRouteCommandRunner for SystemWindowsRouteCommandRunner {
         windows_route_exists(route, false)
     }
 
+    fn bind_interface_identity(&mut self, route: &mut WindowsRouteSpec) -> Result<()> {
+        let identity = resolve_windows_interface_identity(route.interface_index)?;
+        if let Some(expected) = route.interface_identity.as_deref()
+            && expected != identity
+        {
+            return Err(anyhow!(
+                "Windows interface {} identity changed from {} to {}; refusing route mutation",
+                route.interface_index,
+                expected,
+                identity
+            ));
+        }
+        route.interface_identity = Some(identity);
+        Ok(())
+    }
+
+    fn verify_interface_identity(&mut self, route: &WindowsRouteSpec) -> Result<()> {
+        let expected = route.interface_identity.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Windows route cleanup for {} interface={} has no durable interface identity; \
+                 refusing to touch a possibly reused interface index",
+                route.prefix,
+                route.interface_index
+            )
+        })?;
+        let current = resolve_windows_interface_identity(route.interface_index)?;
+        if current != expected {
+            return Err(anyhow!(
+                "Windows interface {} was reused (expected identity {}, current {}); refusing \
+                 route cleanup for {}",
+                route.interface_index,
+                expected,
+                current,
+                route.prefix
+            ));
+        }
+        Ok(())
+    }
+
     fn add_route(&mut self, route: &WindowsRouteSpec) -> Result<()> {
-        run_windows_netsh(&windows_route_add_args(route))
+        self.run_journaled_route_mutation(route, || {
+            run_windows_netsh(&windows_route_add_args(route))
+        })
     }
 
     fn set_route(&mut self, route: &WindowsRouteSpec) -> Result<()> {
-        run_windows_netsh(&windows_route_set_args(route))
+        self.run_journaled_route_mutation(route, || {
+            run_windows_netsh(&windows_route_set_args(route))
+        })
     }
 
     fn delete_route(&mut self, route: &WindowsRouteSpec) -> Result<()> {
         run_windows_netsh(&windows_route_delete_args(route))
+    }
+
+    fn finish_route_cleanup(&mut self, route: &WindowsRouteSpec) -> Result<()> {
+        self.persist_route_intent(route, false)
+            .context("persist completed Windows route cleanup")
     }
 }
 
@@ -122,6 +253,8 @@ struct WindowsManagedDefaultRoutes {
     manage_default: bool,
     default_owned: bool,
     orphaned_bypass_routes: Vec<WindowsRouteSpec>,
+    bypass_interface_identity: Option<Box<str>>,
+    default_interface_identity: Option<Box<str>>,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -141,6 +274,8 @@ impl WindowsManagedDefaultRoutes {
             manage_default,
             default_owned: false,
             orphaned_bypass_routes: Vec::new(),
+            bypass_interface_identity: None,
+            default_interface_identity: None,
         };
         if let Err(error) = validate_windows_underlay(&routes.underlay, &[wg_iface_index]) {
             return Err(WindowsRouteApplyFailure {
@@ -148,7 +283,18 @@ impl WindowsManagedDefaultRoutes {
                 cleanup: routes,
             });
         }
-        let bypass = WindowsRouteSpec::endpoint(upstream_ip, &routes.underlay);
+        let mut bypass = WindowsRouteSpec::endpoint(upstream_ip, &routes.underlay);
+        if let Err(error) = runner.bind_interface_identity(&mut bypass) {
+            return Err(WindowsRouteApplyFailure {
+                error: error.context("bind WireGuard endpoint route to physical interface"),
+                cleanup: routes,
+            });
+        }
+        routes.bypass_interface_identity = bypass
+            .interface_identity
+            .as_deref()
+            .map(str::to_owned)
+            .map(String::into_boxed_str);
         match ensure_windows_route(runner, &bypass) {
             Ok(owned) => routes.bypass_owned = owned,
             Err(error) => {
@@ -159,7 +305,22 @@ impl WindowsManagedDefaultRoutes {
             }
         }
         if manage_default {
-            let default = WindowsRouteSpec::wireguard_default(wg_iface_index);
+            let mut default = WindowsRouteSpec::wireguard_default(wg_iface_index);
+            if let Err(error) = runner.bind_interface_identity(&mut default) {
+                let rollback = routes.revert_with(runner);
+                return Err(WindowsRouteApplyFailure {
+                    error: with_windows_route_rollback(
+                        error.context("bind WireGuard default route to tunnel interface"),
+                        rollback,
+                    ),
+                    cleanup: routes,
+                });
+            }
+            routes.default_interface_identity = default
+                .interface_identity
+                .as_deref()
+                .map(str::to_owned)
+                .map(String::into_boxed_str);
             match ensure_windows_route(runner, &default) {
                 Ok(owned) => routes.default_owned = owned,
                 Err(error) => {
@@ -211,8 +372,11 @@ impl WindowsManagedDefaultRoutes {
             return Ok(repaired);
         }
 
-        let stale_bypass = WindowsRouteSpec::endpoint(self.bypass_target, &self.underlay);
-        let fresh_bypass = WindowsRouteSpec::endpoint(fresh_target, &fresh_underlay);
+        let stale_bypass = self.bypass_route_spec();
+        let mut fresh_bypass = WindowsRouteSpec::endpoint(fresh_target, &fresh_underlay);
+        runner
+            .bind_interface_identity(&mut fresh_bypass)
+            .context("bind refreshed WireGuard endpoint route to physical interface")?;
         if stale_bypass == fresh_bypass {
             // A DHCP renewal can replace only the local source address while
             // retaining the interface/gateway tuple. The existing owned route
@@ -245,20 +409,22 @@ impl WindowsManagedDefaultRoutes {
         self.bypass_target = fresh_target;
         self.underlay = fresh_underlay;
         self.bypass_owned = fresh_owned;
+        self.bypass_interface_identity =
+            fresh_bypass.interface_identity.map(String::into_boxed_str);
         Ok(true)
     }
 
     fn revert_with(&mut self, runner: &mut impl WindowsRouteCommandRunner) -> Result<()> {
         let mut failures = Vec::new();
         if self.default_owned {
-            let route = WindowsRouteSpec::wireguard_default(self.wg_iface_index);
+            let route = self.default_route_spec();
             match delete_windows_route_with_retry(runner, &route) {
                 Ok(()) => self.default_owned = false,
                 Err(error) => failures.push(format!("remove WireGuard default route: {error:#}")),
             }
         }
         if self.bypass_owned {
-            let route = WindowsRouteSpec::endpoint(self.bypass_target, &self.underlay);
+            let route = self.bypass_route_spec();
             match delete_windows_route_with_retry(runner, &route) {
                 Ok(()) => self.bypass_owned = false,
                 Err(error) => {
@@ -302,14 +468,14 @@ impl WindowsManagedDefaultRoutes {
         &mut self,
         runner: &mut impl WindowsRouteCommandRunner,
     ) -> Result<bool> {
-        let bypass = WindowsRouteSpec::endpoint(self.bypass_target, &self.underlay);
+        let bypass = self.bypass_route_spec();
         let repaired_bypass = ensure_tracked_windows_route(runner, &bypass, self.bypass_owned)
             .context("ensure current WireGuard endpoint bypass route")?;
         if repaired_bypass {
             self.bypass_owned = true;
         }
         let repaired_default = if self.manage_default {
-            let route = WindowsRouteSpec::wireguard_default(self.wg_iface_index);
+            let route = self.default_route_spec();
             match ensure_tracked_windows_route(runner, &route, self.default_owned) {
                 Ok(owned) => {
                     if owned {
@@ -341,16 +507,28 @@ impl WindowsManagedDefaultRoutes {
     fn cleanup_snapshot(&self) -> WindowsRouteCleanupSnapshot {
         let mut owned_routes = Vec::new();
         if self.default_owned {
-            owned_routes.push(WindowsRouteSpec::wireguard_default(self.wg_iface_index));
+            owned_routes.push(self.default_route_spec());
         }
         if self.bypass_owned {
-            owned_routes.push(WindowsRouteSpec::endpoint(
-                self.bypass_target,
-                &self.underlay,
-            ));
+            owned_routes.push(self.bypass_route_spec());
         }
         owned_routes.extend(self.orphaned_bypass_routes.iter().cloned());
         WindowsRouteCleanupSnapshot::from_owned_routes(owned_routes)
+    }
+
+    fn bypass_route_spec(&self) -> WindowsRouteSpec {
+        let mut route = WindowsRouteSpec::endpoint(self.bypass_target, &self.underlay);
+        route.interface_identity = self.bypass_interface_identity.as_deref().map(str::to_owned);
+        route
+    }
+
+    fn default_route_spec(&self) -> WindowsRouteSpec {
+        let mut route = WindowsRouteSpec::wireguard_default(self.wg_iface_index);
+        route.interface_identity = self
+            .default_interface_identity
+            .as_deref()
+            .map(str::to_owned);
+        route
     }
 
     fn take_cleanup_snapshot(&mut self) -> WindowsRouteCleanupSnapshot {

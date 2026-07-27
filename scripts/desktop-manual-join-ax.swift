@@ -234,6 +234,10 @@ func emit(_ marker: String) {
     fflush(stdout)
 }
 
+func millisecondsSinceEpoch() -> Int64 {
+    Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+}
+
 func run() throws {
     let args = CommandLine.arguments
     if args.count == 2 && args[1] == "--check-accessibility" {
@@ -338,7 +342,7 @@ func run() throws {
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
         _ = try find(
             application,
-            identifier: "roster-participant-\(args[3])",
+            identifier: "roster-participant-accepted-\(args[3])",
             timeout: 15
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
@@ -350,17 +354,18 @@ func run() throws {
         )
         try setValue(application, "manual-join-admin-device-id", args[3])
         try setValue(application, "manual-join-admin-device-name", args[4])
+        emit("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=\(millisecondsSinceEpoch())")
         try press(application, "manual-join-admin-submit")
         _ = try find(
             application,
-            identifier: "roster-participant-\(args[3])",
+            identifier: "roster-participant-accepted-\(args[3])",
             timeout: 15
         )
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(args[3])")
     case "release-verify":
         _ = try find(
             application,
-            identifier: "roster-participant-\(args[3])",
+            identifier: "roster-participant-accepted-\(args[3])",
             timeout: 15
         )
         emit("NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=\(args[3])")

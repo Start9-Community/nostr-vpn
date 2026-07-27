@@ -420,7 +420,7 @@ async fn refresh_fips_tunnel_config(
         ethernet_underlay: ethernet_underlay.as_ref(),
     })
     .await?;
-    runtime.apply_config(config).await
+    apply_fips_private_tunnel_runtime_config(config_path, runtime, config).await
 }
 
 pub(crate) struct FipsTunnelConfigInput<'a> {
@@ -705,7 +705,7 @@ async fn sync_fips_private_runtime(
         eprintln!("daemon: restarted FIPS private mesh on {}", started.iface());
         *runtime = Some(started);
     } else if let Some(existing) = runtime.as_mut() {
-        existing.apply_config(config).await?;
+        apply_fips_private_tunnel_runtime_config(context.config_path, existing, config).await?;
     } else {
         let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
         eprintln!("daemon: FIPS private mesh on {}", started.iface());

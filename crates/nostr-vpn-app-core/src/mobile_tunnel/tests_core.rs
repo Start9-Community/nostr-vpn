@@ -15,6 +15,7 @@
             admins: vec![admin_hex],
             listen_for_join_requests: true,
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,
@@ -218,6 +219,7 @@
             admins: vec![own],
             listen_for_join_requests: true,
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,
@@ -275,6 +277,7 @@
             admins: vec![own],
             listen_for_join_requests: true,
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,
@@ -445,6 +448,7 @@
             admins: vec![own],
             listen_for_join_requests: true,
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,
@@ -650,6 +654,7 @@
             admins: vec![own],
             listen_for_join_requests: true,
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,
@@ -693,6 +698,7 @@
             admins: vec![admin.clone()],
             listen_for_join_requests: false,
             join_request_admin: admin.clone(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: Some(PendingOutboundJoinRequest {
                 recipient: admin.clone(),
                 requested_at: 1,
@@ -749,7 +755,8 @@
 
     #[test]
     fn unconfirmed_manual_join_stays_out_of_the_mesh_until_admin_roster_arrives() {
-        let admin = Keys::generate().public_key().to_hex();
+        let admin_keys = Keys::generate();
+        let admin = admin_keys.public_key().to_hex();
         let mut app = AppConfig::generated_without_networks();
         app.add_manual_join_network(&admin, "manual-mesh")
             .expect("configure manual join");
@@ -770,6 +777,35 @@
         assert!(config.dns_match_domains.is_empty());
         assert_eq!(app.active_network().network_id, "manual-mesh");
         assert_eq!(app.active_network().join_request_admin, admin);
+
+        let signed_without_joiner = SignedRoster::sign(
+            "manual-mesh",
+            NetworkRoster {
+                network_name: "Manual mesh".to_string(),
+                devices: Vec::new(),
+                admins: vec![admin],
+                aliases: HashMap::new(),
+                signed_at: unix_timestamp(),
+            },
+            &admin_keys,
+        )
+        .expect("sign admin roster without joiner");
+        assert!(
+            app.apply_verified_admin_signed_shared_roster(&signed_without_joiner)
+                .expect("apply configured admin roster")
+        );
+
+        let still_pending =
+            MobileTunnelConfig::from_app(&app).expect("pending manual bootstrap config");
+        assert!(
+            still_pending.network_id.is_empty(),
+            "an unrelated signed roster must not move an unaccepted manual join into the mesh"
+        );
+        assert!(still_pending.peers.is_empty());
+        assert!(still_pending.route_targets.is_empty());
+        assert!(still_pending.dns_servers.is_empty());
+        assert!(still_pending.magic_dns_server.is_empty());
+        assert!(still_pending.dns_match_domains.is_empty());
     }
 
     #[test]
@@ -788,6 +824,7 @@
             admins: vec![own],
             listen_for_join_requests: true,
             join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
             outbound_join_request: None,
             inbound_join_requests: Vec::new(),
             shared_roster_updated_at: 0,
@@ -926,68 +963,5 @@
                     requester_node_name: "iPhone".to_string(),
                 },
             }
-        );
-    }
-
-    #[test]
-    fn mobile_control_source_accepts_unknown_sender_for_first_contact_records() {
-        let roster_peer =
-            "26525c442dd039de4e728b41ee8d7f717b267ab25b7c219d53a3249e1c9174cc".to_string();
-        let peer = FipsMeshPeerConfig::from_participant_pubkey(&roster_peer, Vec::new())
-            .expect("roster peer");
-        let peer_npub = peer.endpoint_npub.clone();
-        let mesh = FipsMeshRuntime::with_local_routes(vec![peer], Vec::new());
-        let unknown_keys = Keys::generate();
-        let unknown_npub = unknown_keys.public_key().to_bech32().expect("unknown npub");
-        let unknown_hex = unknown_keys.public_key().to_hex();
-        let peer_identity = PeerIdentity::from_npub(&peer_npub).expect("peer identity");
-        let unknown_identity = PeerIdentity::from_npub(&unknown_npub).expect("unknown identity");
-        let ping = FipsControlFrame::Ping {
-            network_id: "mesh-home".to_string(),
-            sent_at: 1,
-        };
-        let join_request = FipsControlFrame::JoinRequest {
-            requested_at: 2,
-            request: MeshJoinRequest {
-                network_id: "mesh-home".to_string(),
-                join_secret: String::new(),
-                requester_node_name: "iPhone".to_string(),
-            },
-        };
-        let admin = Keys::generate();
-        let signed_roster = SignedRoster::sign(
-            "mesh-home",
-            NetworkRoster {
-                network_name: "Home".to_string(),
-                devices: vec![Keys::generate().public_key().to_hex()],
-                admins: vec![admin.public_key().to_hex()],
-                aliases: HashMap::new(),
-                signed_at: 2,
-            },
-            &admin,
-        )
-        .expect("signed roster");
-        let join_roster = FipsControlFrame::JoinRoster {
-            control: Box::new(
-                JoinRosterControl::new(signed_roster, "request-secret")
-                    .expect("join control"),
-            ),
-        };
-
-        assert_eq!(
-            control_frame_source_pubkey(&mesh, peer_identity, &ping),
-            Some(roster_peer)
-        );
-        assert_eq!(
-            control_frame_source_pubkey(&mesh, unknown_identity, &ping),
-            None
-        );
-        assert_eq!(
-            control_frame_source_pubkey(&mesh, unknown_identity, &join_request),
-            Some(unknown_hex.clone())
-        );
-        assert_eq!(
-            control_frame_source_pubkey(&mesh, unknown_identity, &join_roster),
-            Some(unknown_hex)
         );
     }

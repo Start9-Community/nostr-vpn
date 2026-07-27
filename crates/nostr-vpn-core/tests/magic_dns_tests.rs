@@ -11,6 +11,23 @@ use nostr_vpn_core::config::{AppConfig, derive_mesh_tunnel_ip};
 use nostr_vpn_core::magic_dns::{MagicDnsServer, build_magic_dns_records};
 
 #[test]
+fn build_magic_dns_records_stays_empty_until_manual_join_is_accepted() {
+    let joiner = Keys::generate();
+    let admin = Keys::generate();
+    let mut config = AppConfig::generated_without_networks();
+    config.nostr.secret_key = joiner.secret_key().to_secret_hex();
+    config.nostr.public_key = joiner.public_key().to_hex();
+    config
+        .add_manual_join_network(&admin.public_key().to_hex(), "pending-magic-dns")
+        .expect("configure manual join");
+
+    assert!(
+        build_magic_dns_records(&config).is_empty(),
+        "unaccepted identities must not publish unusable mesh DNS records"
+    );
+}
+
+#[test]
 fn build_magic_dns_records_emits_alias_and_suffix_variants() {
     let own = Keys::generate();
     let peer = Keys::generate();
@@ -23,6 +40,7 @@ fn build_magic_dns_records_emits_alias_and_suffix_variants() {
     if let Some(network) = config.networks.first_mut() {
         network.enabled = true;
         network.devices = vec![peer_hex.clone()];
+        network.admins = vec![own_hex.clone()];
     }
     config.ensure_defaults();
     config

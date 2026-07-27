@@ -832,8 +832,8 @@ switch ($Action) {
       Run-DnsSettingCase "custom" @(
         "--exit-dns-mode", "encrypted",
         "--exit-dns-doh-provider", "custom",
-        "--exit-dns-custom-doh-url", "https://cloudflare-dns.com/dns-query",
-        "--exit-dns-custom-doh-bootstrap-ips", "1.1.1.1,1.0.0.1"
+        "--exit-dns-custom-doh-url", "https://dns.google/dns-query",
+        "--exit-dns-custom-doh-bootstrap-ips", "8.8.8.8,8.8.4.4"
       ) "iana.org" $daemonPid ([int]$primary.ifIndex)
       Run-DnsSettingCase "through-exit" @(
         "--exit-dns-mode", "through_exit",

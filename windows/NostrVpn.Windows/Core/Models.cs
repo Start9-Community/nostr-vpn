@@ -488,6 +488,11 @@ public sealed class NativeParticipantState
     public bool IsSelf { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public string SelectionKey => string.IsNullOrWhiteSpace(PubkeyHex) ? Npub : PubkeyHex;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string AcceptedRosterAutomationId =>
+        string.Equals(State, "pending", StringComparison.OrdinalIgnoreCase)
+            ? ""
+            : $"RosterParticipantAccepted-{Npub}";
     public string DisplayName => FirstNonEmpty(
         MagicDnsName,
         Alias,

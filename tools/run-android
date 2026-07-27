@@ -92,7 +92,8 @@ case "$cmd" in
     ;;
   release|assembleRelease)
     env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" \
-      "${gradle_args[@]}" :app:assembleRelease "$@"
+      "${gradle_args[@]}" :app:bundleRelease "$@"
+    "$ROOT/scripts/prepare-android-release-from-bundle.sh"
     ;;
   install|installDebug)
     env -u NVPN_FIPS_REPO_PATH "$GRADLE" -p "$ANDROID_DIR" \
