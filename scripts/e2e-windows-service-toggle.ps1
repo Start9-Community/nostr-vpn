@@ -78,8 +78,13 @@ public static class NvpnServiceToggleInput {
   public static extern bool GetWindowRect(IntPtr handle, out Rect rect);
   [DllImport("user32.dll")]
   public static extern bool SetForegroundWindow(IntPtr handle);
+  [DllImport("kernel32.dll")]
+  public static extern uint SetThreadExecutionState(uint flags);
 }
 '@
+  if ([NvpnServiceToggleInput]::SetThreadExecutionState(2147483651) -eq 0) {
+    throw "could not hold the interactive display for visible UI evidence"
+  }
   $Process.WaitForInputIdle(10000) | Out-Null
   Start-Sleep -Milliseconds 750
   $WindowRect = [NvpnServiceToggleInput+Rect]::new()
@@ -93,26 +98,6 @@ public static class NvpnServiceToggleInput {
     $WindowRect.Right,
     $WindowRect.Bottom
   )
-  Add-Type -AssemblyName System.Drawing
-  $Screenshot = [System.Drawing.Bitmap]::new(
-    $WindowRect.Right - $WindowRect.Left,
-    $WindowRect.Bottom - $WindowRect.Top
-  )
-  $ScreenshotGraphics = [System.Drawing.Graphics]::FromImage($Screenshot)
-  try {
-    $ScreenshotGraphics.CopyFromScreen(
-      $WindowRect.Left,
-      $WindowRect.Top,
-      0,
-      0,
-      $Screenshot.Size
-    )
-    $Screenshot.Save((Join-Path $ArtifactRoot "window.png"))
-  } finally {
-    $ScreenshotGraphics.Dispose()
-    $Screenshot.Dispose()
-  }
-  [NvpnServiceToggleInput]::SetForegroundWindow($Process.MainWindowHandle) | Out-Null
   Add-Type -AssemblyName UIAutomationClient
   Add-Type -AssemblyName UIAutomationTypes
   $Window = [System.Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
@@ -134,6 +119,52 @@ public static class NvpnServiceToggleInput {
   if (!$Toggle) {
     $ButtonNames = @($Buttons | ForEach-Object { $_.Current.Name }) -join ", "
     throw "Windows VPN toggle button was not found after input idle; buttons: $ButtonNames"
+  }
+  [NvpnServiceToggleInput]::SetForegroundWindow($Process.MainWindowHandle) | Out-Null
+  Start-Sleep -Milliseconds 250
+  Add-Type -AssemblyName System.Drawing
+  $ScreenshotCaptured = $false
+  $ScreenshotError = $null
+  for ($ScreenshotAttempt = 1; $ScreenshotAttempt -le 20; $ScreenshotAttempt++) {
+    $Screenshot = [System.Drawing.Bitmap]::new(
+      $WindowRect.Right - $WindowRect.Left,
+      $WindowRect.Bottom - $WindowRect.Top
+    )
+    $ScreenshotGraphics = [System.Drawing.Graphics]::FromImage($Screenshot)
+    try {
+      $ScreenshotGraphics.CopyFromScreen(
+        $WindowRect.Left,
+        $WindowRect.Top,
+        0,
+        0,
+        $Screenshot.Size
+      )
+      $PaintSample = $Screenshot.GetPixel(
+        [Math]::Min(50, $Screenshot.Width - 1),
+        [Math]::Min(100, $Screenshot.Height - 1)
+      )
+      if (
+        $PaintSample.R -ge 250 -and
+        $PaintSample.G -ge 250 -and
+        $PaintSample.B -ge 250
+      ) {
+        throw "the visible WPF content has not painted yet"
+      }
+      $Screenshot.Save((Join-Path $ArtifactRoot "window.png"))
+      $ScreenshotCaptured = $true
+      break
+    } catch {
+      $ScreenshotError = $_
+      if ($ScreenshotAttempt -lt 20) {
+        Start-Sleep -Milliseconds 250
+      }
+    } finally {
+      $ScreenshotGraphics.Dispose()
+      $Screenshot.Dispose()
+    }
+  }
+  if (!$ScreenshotCaptured) {
+    throw "could not capture the painted visible WPF window after 20 attempts: $ScreenshotError"
   }
   $Invoke = $Toggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   $Invoke.Invoke()
@@ -168,6 +199,10 @@ public static class NvpnServiceToggleInput {
 
   Write-Host "WINDOWS_SERVICE_TOGGLE_UAC_PROMPT_OK"
 } finally {
+  try {
+    [NvpnServiceToggleInput]::SetThreadExecutionState(2147483648) | Out-Null
+  } catch {
+  }
   if ($ElevationProcess) {
     Stop-Process -Id $ElevationProcess.ProcessId -Force -ErrorAction SilentlyContinue
   }

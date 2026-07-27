@@ -62,7 +62,14 @@ if (
 \$ErrorActionPreference = 'Stop'
 \$env:CARGO_TARGET_DIR = '$GUEST_ARTIFACT_ROOT\\windows-ui-e2e-cargo'
 & '$GUEST_REPO\\scripts\\e2e-windows-service-toggle.ps1' -AppExe '$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe' -ArtifactRoot '$GUEST_ARTIFACT_ROOT\\windows-service-toggle'
-'@ | Set-Content -Encoding utf8 \$interactiveWrapper
+'@ | Set-Content -Encoding utf8 \$interactiveWrapper"
+
+"$ROOT/scripts/windows-vm-wake-display.sh"
+
+run_ps "\$ErrorActionPreference = 'Stop'
+Set-Location '$GUEST_REPO'
+\$artifact = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-service-toggle'
+\$interactiveWrapper = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-service-toggle-interactive.ps1'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-windows-interactive-e2e.ps1 -ScriptPath \$interactiveWrapper -TimeoutSeconds 180 -CleanupConsentPrompt
 if (\$LASTEXITCODE -ne 0) { throw ('interactive service-toggle e2e failed with exit code {0}' -f \$LASTEXITCODE) }
 if (!(Test-Path (Join-Path \$artifact 'window.png'))) {

@@ -63,7 +63,15 @@ if (
 \$ErrorActionPreference = 'Stop'
 \$env:CARGO_TARGET_DIR = '$GUEST_ARTIFACT_ROOT\\windows-ui-e2e-cargo'
 & '$GUEST_REPO\\scripts\\e2e-windows-manual-join-ui.ps1' -AppExe '$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe' -ArtifactRoot '$GUEST_ARTIFACT_ROOT\\windows-manual-join-ui'
-'@ | Set-Content -Encoding utf8 \$interactiveWrapper
+'@ | Set-Content -Encoding utf8 \$interactiveWrapper"
+
+"$ROOT/scripts/windows-vm-wake-display.sh"
+
+run_ps "\$ErrorActionPreference = 'Stop'
+Set-Location '$GUEST_REPO'
+\$app = Join-Path '$GUEST_REPO' 'windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe'
+\$artifact = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-manual-join-ui'
+\$interactiveWrapper = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-manual-join-interactive.ps1'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-windows-interactive-e2e.ps1 -ScriptPath \$interactiveWrapper -TimeoutSeconds 180
 if (\$LASTEXITCODE -ne 0) { throw ('interactive manual-join e2e failed with exit code {0}' -f \$LASTEXITCODE) }
 if (!(Test-Path (Join-Path \$artifact 'result.json'))) {

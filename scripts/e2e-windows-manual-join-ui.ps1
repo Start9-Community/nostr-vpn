@@ -22,6 +22,16 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class NvpnManualJoinInput {
+  [DllImport("user32.dll")]
+  public static extern bool SetForegroundWindow(IntPtr handle);
+  [DllImport("kernel32.dll")]
+  public static extern uint SetThreadExecutionState(uint flags);
+}
+'@
 
 function Stop-IsolatedProcesses {
   if ($script:Process -and !$script:Process.HasExited) {
@@ -148,21 +158,65 @@ function Wait-Fixture {
 function Save-Screenshot {
   param([string]$Name)
   $Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-  $Bitmap = New-Object System.Drawing.Bitmap $Bounds.Width, $Bounds.Height
-  $Graphics = [System.Drawing.Graphics]::FromImage($Bitmap)
-  try {
-    $Graphics.CopyFromScreen($Bounds.Location, [System.Drawing.Point]::Empty, $Bounds.Size)
-    $Bitmap.Save(
-      (Join-Path $ArtifactRoot "$Name.png"),
-      [System.Drawing.Imaging.ImageFormat]::Png
-    )
-  } finally {
-    $Graphics.Dispose()
-    $Bitmap.Dispose()
+  $script:Process.Refresh()
+  [NvpnManualJoinInput]::SetForegroundWindow($script:Process.MainWindowHandle) |
+    Out-Null
+  Start-Sleep -Milliseconds 250
+  $Window = [System.Windows.Automation.AutomationElement]::FromHandle(
+    $script:Process.MainWindowHandle
+  )
+  $WindowBounds = $Window.Current.BoundingRectangle
+  $SampleX = [Math]::Min(
+    $Bounds.Width - 1,
+    [Math]::Max(0, [int]($WindowBounds.Left - $Bounds.Left + 50))
+  )
+  $SampleY = [Math]::Min(
+    $Bounds.Height - 1,
+    [Math]::Max(0, [int]($WindowBounds.Top - $Bounds.Top + 100))
+  )
+  $ScreenshotError = $null
+  for ($ScreenshotAttempt = 1; $ScreenshotAttempt -le 20; $ScreenshotAttempt++) {
+    $Bitmap = New-Object System.Drawing.Bitmap $Bounds.Width, $Bounds.Height
+    $Graphics = [System.Drawing.Graphics]::FromImage($Bitmap)
+    try {
+      $Graphics.CopyFromScreen(
+        $Bounds.Location,
+        [System.Drawing.Point]::Empty,
+        $Bounds.Size
+      )
+      $PaintSample = $Bitmap.GetPixel($SampleX, $SampleY)
+      if (
+        $PaintSample.R -ge 250 -and
+        $PaintSample.G -ge 250 -and
+        $PaintSample.B -ge 250
+      ) {
+        throw "the visible WPF content has not painted yet"
+      }
+      $Bitmap.Save(
+        (Join-Path $ArtifactRoot "$Name.png"),
+        [System.Drawing.Imaging.ImageFormat]::Png
+      )
+      return
+    } catch {
+      $ScreenshotError = $_
+      if ($ScreenshotAttempt -lt 20) {
+        Start-Sleep -Milliseconds 250
+      }
+    } finally {
+      $Graphics.Dispose()
+      $Bitmap.Dispose()
+    }
   }
+  throw (
+    "could not capture the painted visible WPF window after 20 attempts: {0}" -f
+    $ScreenshotError
+  )
 }
 
 try {
+  if ([NvpnManualJoinInput]::SetThreadExecutionState(2147483651) -eq 0) {
+    throw "could not hold the interactive display for visible UI evidence"
+  }
   Set-Location $Root
   New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AdminDataDir, $JoinerDataDir
@@ -215,6 +269,7 @@ try {
   Write-Host "WINDOWS_DESKTOP_MANUAL_JOIN_UI_ACTIONS_OK"
   Write-Host "Result: $Result"
 } finally {
+  [NvpnManualJoinInput]::SetThreadExecutionState(2147483648) | Out-Null
   Stop-IsolatedProcesses
   Remove-Item Env:NVPN_APP_DATA_DIR -ErrorAction SilentlyContinue
   Remove-Item Env:NVPN_CLI_PATH -ErrorAction SilentlyContinue

@@ -434,6 +434,56 @@ for platform in WINDOWS MACOS LINUX; do
 done
 grep -Fq 'windows-vm-service-toggle-e2e.sh' "$release_gate" \
   || fail "release gate does not drive the real Windows UAC service prompt"
+windows_display_wake="$ROOT_DIR/scripts/windows-vm-wake-display.sh"
+for windows_ui_wrapper in \
+  "$ROOT_DIR/scripts/windows-vm-manual-join-e2e.sh" \
+  "$ROOT_DIR/scripts/windows-vm-service-toggle-e2e.sh"
+do
+  grep -Fq '"$ROOT/scripts/windows-vm-wake-display.sh"' "$windows_ui_wrapper" \
+    || fail "$(basename "$windows_ui_wrapper") does not wake the real VM display"
+done
+grep -Fq 'virsh send-key "$vm" KEY_LEFTSHIFT' "$windows_display_wake" \
+  || fail "Windows VM display wake does not inject a real console input event"
+windows_manual_join="$ROOT_DIR/scripts/e2e-windows-manual-join-ui.ps1"
+grep -Fq 'SetThreadExecutionState(2147483651)' "$windows_manual_join" \
+  || fail "Windows manual-join evidence does not hold the interactive display awake"
+grep -Fq '$PaintSample = $Bitmap.GetPixel(' "$windows_manual_join" \
+  || fail "Windows manual-join evidence accepts an unpainted blank WPF frame"
+windows_service_toggle="$ROOT_DIR/scripts/e2e-windows-service-toggle.ps1"
+grep -Fq 'CopyFromScreen' "$windows_service_toggle" \
+  || fail "Windows service-toggle evidence does not capture the visible app window"
+if grep -Fq 'PrintWindow' "$windows_service_toggle"; then
+  fail "Windows service-toggle evidence uses PrintWindow, which omits WebView content"
+fi
+python3 - "$windows_service_toggle" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+toggle = text.index("$Toggle = $null")
+foreground = text.index("[NvpnServiceToggleInput]::SetForegroundWindow(")
+capture = text.index("$ScreenshotGraphics.CopyFromScreen(")
+if toggle > foreground:
+    raise SystemExit(
+        "Windows service-toggle evidence is captured before the real toggle is ready"
+    )
+if foreground > capture:
+    raise SystemExit(
+        "Windows service-toggle evidence is captured before foregrounding the real app"
+    )
+if "for ($ScreenshotAttempt = 1;" not in text:
+    raise SystemExit(
+        "Windows service-toggle evidence does not retry transient desktop-capture failures"
+    )
+if "SetThreadExecutionState(2147483651)" not in text:
+    raise SystemExit(
+        "Windows service-toggle evidence does not hold the interactive display"
+    )
+if "$Screenshot.GetPixel(" not in text:
+    raise SystemExit(
+        "Windows service-toggle evidence accepts an unpainted blank WPF frame"
+    )
+PY
 grep -Fq 'macos-vm-service-toggle-e2e.sh' "$release_gate" \
   || fail "release gate does not drive the real macOS Authorization service prompt"
 grep -Fq 'ubuntu-vm-service-toggle-e2e.sh' "$release_gate" \
@@ -477,7 +527,8 @@ python3 - \
   "$ROOT_DIR/scripts/macos-vm-manual-join-e2e.sh" \
   "$ROOT_DIR/scripts/macos-vm-service-toggle-e2e.sh" \
   "$ROOT_DIR/scripts/windows-vm-manual-join-e2e.sh" \
-  "$ROOT_DIR/scripts/windows-vm-service-toggle-e2e.sh" <<'PY'
+  "$ROOT_DIR/scripts/windows-vm-service-toggle-e2e.sh" \
+  "$ROOT_DIR/scripts/windows-vm-wake-display.sh" <<'PY'
 import pathlib
 import re
 import sys
