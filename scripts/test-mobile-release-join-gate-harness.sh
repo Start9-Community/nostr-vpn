@@ -13,6 +13,7 @@ FILES=(
 for file in "${FILES[@]}"; do
   bash -n "$file"
 done
+python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 
 for obsolete in \
   "$ROOT/scripts/mobile-ios-android-join-e2e.sh" \
@@ -51,6 +52,7 @@ python3 - \
   "$ROOT/scripts/lib-mobile-release-join-ui.sh" \
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
   "$ROOT/scripts/macos-release-mobile-join-remote.sh" \
+  "$ROOT/scripts/macos_release_join_artifact.py" \
   "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift" \
   "$ROOT/ios/project.yml" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDevices.kt" \
@@ -76,6 +78,7 @@ def read(path):
     ui,
     desktop,
     desktop_remote,
+    desktop_artifact,
     ios_test,
     ios_project,
     android_devices,
@@ -279,16 +282,54 @@ if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
 for required in (
     "exec /usr/bin/env -i",
-    "NVPN_EXPECTED_MACOS_SIGNING_IDENTITY",
+    "NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1",
     "NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID",
     "NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256",
-    'MACOS_SIGNING_IDENTITY="$EXPECTED_SIGNING_IDENTITY"',
-    '[[ "$team" == "$EXPECTED_SIGNING_TEAM" ]]',
-    '[[ "$authority" == "$EXPECTED_SIGNING_IDENTITY" ]]',
+    "expected-identity-sha1",
+    "appSourceManifestSha256",
+    "fipsSourceManifestSha256",
+    "signingIdentitySha1",
     "signerCertificateSha256",
 ):
-    if required not in desktop_remote and required not in desktop:
+    if (
+        required not in desktop_remote
+        and required not in desktop
+        and required not in desktop_artifact
+    ):
         raise SystemExit(f"Desktop Release provenance gate is missing {required}")
+for required in (
+    '"$ROOT/scripts/macos-build" macos-app',
+    "ditto -c -k --sequesterRsrc --keepParent",
+    "macos_release_join_artifact.py\" create",
+    "scp -q",
+):
+    if required not in desktop:
+        raise SystemExit(f"Host-built macOS artifact path is missing {required}")
+for required in (
+    "ditto -x -k",
+    "macos_release_join_artifact.py\" validate",
+    "verification.json",
+):
+    if required not in desktop_remote:
+        raise SystemExit(f"VM macOS artifact import path is missing {required}")
+for forbidden in ("macos-build", "xcodebuild", "cargo build"):
+    if forbidden in desktop_remote:
+        raise SystemExit(f"macOS VM still builds the Release app through {forbidden}")
+if "security find-certificate" in desktop or "security find-certificate" in desktop_remote:
+    raise SystemExit("macOS Release gate may not select an ambiguous certificate by name")
+if '"find-certificate", "-c"' in desktop_artifact:
+    raise SystemExit("macOS Release artifact helper may not select a certificate by name")
+for required in (
+    '"security", "find-certificate", "-a", "-p"',
+    '"codesign", "--verify", "--deep", "--strict"',
+    '"--extract-certificates=',
+    "tree_sha256(app)",
+    '"builtOnHost": True',
+    '"builtOnTestVm": False',
+    '"remoteImportVerified": True',
+):
+    if required not in desktop_artifact:
+        raise SystemExit(f"macOS immutable artifact verifier is missing {required}")
 
 main = release_gate.split("main() {", 1)[1]
 if "./scripts/mobile-release-join-e2e.sh" not in release_gate:

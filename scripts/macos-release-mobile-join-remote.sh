@@ -7,8 +7,14 @@ ARTIFACT_DIR="${NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR:-$ROOT/artifacts/macos-rele
 APP_PATH="$ROOT/dist/macos/Nostr VPN.app"
 APP_EXE="$APP_PATH/Contents/MacOS/Nostr VPN"
 FIPS_PATH="${NVPN_FIPS_REPO_PATH:-$ROOT/../fips}"
+ARCHIVE="$ARTIFACT_DIR/macos-release-app.zip"
+RECEIPT="$ARTIFACT_DIR/artifact.json"
+EXPECTED_APP="${NVPN_EXPECTED_APP_GIT_SHA:-}"
+EXPECTED_APP_TREE="${NVPN_EXPECTED_APP_GIT_TREE:-}"
 EXPECTED_FIPS="${NVPN_EXPECTED_FIPS_GIT_SHA:-}"
-EXPECTED_SIGNING_IDENTITY="${NVPN_EXPECTED_MACOS_SIGNING_IDENTITY:-}"
+EXPECTED_FIPS_TREE="${NVPN_EXPECTED_FIPS_GIT_TREE:-}"
+EXPECTED_FIPS_VERSION="${NVPN_EXPECTED_FIPS_VERSION:-}"
+EXPECTED_SIGNING_IDENTITY="${NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1:-}"
 EXPECTED_SIGNING_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-}"
 EXPECTED_SIGNER_CERT_SHA256="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
 APP_LOG="$ARTIFACT_DIR/app.log"
@@ -74,132 +80,51 @@ run_driver_hold() {
   stop_app
 }
 
-prepare() {
-  [[ -f "$FIPS_PATH/crates/fips-core/Cargo.toml" ]] || {
-    echo "macOS Release join gate requires synced FIPS source" >&2
-    return 1
-  }
-  local fips_sha fips_tree app_sha app_tree team authority cert_dir cert_sha cert_pem
-  [[ -n "$EXPECTED_SIGNING_IDENTITY" ]] || {
-    echo "macOS Release join gate requires an exact signing identity" >&2
-    return 1
-  }
-  [[ -n "$EXPECTED_SIGNING_TEAM" ]] || {
-    echo "macOS Release join gate requires an exact signing team" >&2
-    return 1
-  }
-  if [[ -z "$EXPECTED_SIGNER_CERT_SHA256" ]]; then
-    cert_pem="$(mktemp "${TMPDIR:-/tmp}/nvpn-macos-join-expected-cert.XXXXXX")"
-    if ! security find-certificate \
-      -c "$EXPECTED_SIGNING_IDENTITY" -p >"$cert_pem" \
-      || [[ ! -s "$cert_pem" ]]
-    then
-      rm -f "$cert_pem"
-      echo "Configured macOS company signing certificate is unavailable" >&2
-      return 1
-    fi
-    EXPECTED_SIGNER_CERT_SHA256="$(
-      openssl x509 -in "$cert_pem" -outform der \
-        | shasum -a 256 \
-        | awk '{print $1}'
-    )"
-    rm -f "$cert_pem"
-  fi
-  [[ "$EXPECTED_SIGNER_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || {
-    echo "macOS Release join gate could not pin the signer certificate" >&2
-    return 1
-  }
-  fips_sha="$(git -C "$FIPS_PATH" rev-parse HEAD)"
-  fips_tree="$(git -C "$FIPS_PATH" rev-parse HEAD^{tree})"
-  [[ -z "$(git -C "$FIPS_PATH" status --porcelain)" ]] || {
-    echo "macOS Release join gate refuses dirty FIPS source" >&2
-    return 1
-  }
-  [[ -z "$EXPECTED_FIPS" || "$fips_sha" == "$EXPECTED_FIPS" ]] || {
-    echo "macOS Release join FIPS mismatch" >&2
-    return 1
-  }
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
-  MACOS_SIGNING_IDENTITY="$EXPECTED_SIGNING_IDENTITY" \
-    NVPN_FIPS_REPO_PATH="$FIPS_PATH" \
-    NVPN_MACOS_RUST_PROFILE=release \
-    NVPN_MACOS_XCODE_CONFIGURATION=Release \
-    NVPN_MACOS_REQUIRE_SIGNING=1 \
-    "$ROOT/scripts/macos-build" macos-app >/dev/null
-  load_app
-  team="$(
-    codesign -dvv "$APP_PATH" 2>&1 \
-      | sed -n 's/^TeamIdentifier=//p' \
-      | head -n 1
-  )"
-  authority="$(
-    codesign -dvv "$APP_PATH" 2>&1 \
-      | sed -n 's/^Authority=//p' \
-      | head -n 1
-  )"
-  cert_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-join-cert.XXXXXX")"
-  (
-    cd "$cert_dir"
-    codesign -d --extract-certificates "$APP_PATH" >/dev/null 2>&1
-  )
-  cert_sha="$(shasum -a 256 "$cert_dir/codesign0" | awk '{print $1}')"
-  rm -rf "$cert_dir"
-  [[ "$team" == "$EXPECTED_SIGNING_TEAM" ]] || {
-    echo "macOS Release app was not signed by the expected company team" >&2
-    return 1
-  }
-  [[ "$authority" == "$EXPECTED_SIGNING_IDENTITY" ]] || {
-    echo "macOS Release app was not signed by the configured company identity" >&2
-    return 1
-  }
-  [[ "$(printf '%s' "$cert_sha" | tr '[:upper:]' '[:lower:]')" \
-    == "$(printf '%s' "$EXPECTED_SIGNER_CERT_SHA256" | tr '[:upper:]' '[:lower:]')" ]] || {
-    echo "macOS Release app signer certificate does not match the pinned certificate" >&2
-    return 1
-  }
-  python3 - \
-    "$APP_PATH" "$ARTIFACT_DIR/artifact.json" \
-    "$app_sha" "$app_tree" "$fips_sha" "$fips_tree" \
-    "$team" "$authority" "$cert_sha" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-output = pathlib.Path(sys.argv[2])
-app, app_tree, fips, fips_tree, team, identity, cert_sha = sys.argv[3:]
-files = []
-for path in sorted(item for item in root.rglob("*") if item.is_file()):
-    files.append(
-        {
-            "path": str(path.relative_to(root)),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "size": path.stat().st_size,
-        }
-    )
-canonical = json.dumps(files, separators=(",", ":"), sort_keys=True).encode()
-receipt = {
-    "artifact": "signed macOS Release app",
-    "bundleManifestSha256": hashlib.sha256(canonical).hexdigest(),
-    "appGitSha": app,
-    "appGitTree": app_tree,
-    "fipsGitSha": fips,
-    "fipsGitTree": fips_tree,
-    "signingTeam": team,
-    "signingIdentity": identity,
-    "signerCertificateSha256": cert_sha,
-    "configuration": "Release",
-    "appLaunchArgumentsOrEnvironment": False,
-    "privateAppStateRead": False,
+stage() {
+  stop_app
+  rm -rf "$ARTIFACT_DIR" "$APP_PATH"
+  mkdir -p "$ARTIFACT_DIR" "$(dirname "$APP_PATH")"
 }
-output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+
+prepare() {
+  local import_dir="$ARTIFACT_DIR/import"
+  [[ -s "$ARCHIVE" && -s "$RECEIPT" ]] || {
+    echo "Host-built macOS Release app archive or receipt is missing" >&2
+    return 1
+  }
+  rm -rf "$import_dir" "$APP_PATH"
+  mkdir -p "$import_dir" "$(dirname "$APP_PATH")"
+  ditto -x -k "$ARCHIVE" "$import_dir"
+  [[ -d "$import_dir/Nostr VPN.app" \
+    && "$(find "$import_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]] || {
+    echo "Imported macOS Release archive has an unexpected root layout" >&2
+    return 1
+  }
+  mv "$import_dir/Nostr VPN.app" "$APP_PATH"
+  rmdir "$import_dir"
+  python3 "$ROOT/scripts/macos_release_join_artifact.py" validate \
+    --receipt "$RECEIPT" \
+    --app "$APP_PATH" \
+    --archive "$ARCHIVE" \
+    --app-root "$ROOT" \
+    --fips-root "$FIPS_PATH" \
+    --expected-app-head "$EXPECTED_APP" \
+    --expected-app-tree "$EXPECTED_APP_TREE" \
+    --expected-fips-head "$EXPECTED_FIPS" \
+    --expected-fips-tree "$EXPECTED_FIPS_TREE" \
+    --expected-fips-version "$EXPECTED_FIPS_VERSION" \
+    --expected-team "$EXPECTED_SIGNING_TEAM" \
+    --expected-identity-sha1 "$EXPECTED_SIGNING_IDENTITY" \
+    --expected-signer-sha256 "$EXPECTED_SIGNER_CERT_SHA256" \
+    --verification-output "$ARTIFACT_DIR/verification.json"
+  load_app
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_ARTIFACT_READY=1"
 }
 
 case "${1:-}" in
+  stage)
+    stage
+    ;;
   prepare)
     prepare
     ;;
@@ -223,7 +148,7 @@ case "${1:-}" in
     pkill -x "Nostr VPN" >/dev/null 2>&1 || true
     ;;
   *)
-    echo "usage: $0 <prepare|create-admin|manual-join|admin-add|verify|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|create-admin|manual-join|admin-add|verify|cleanup>" >&2
     exit 2
     ;;
 esac

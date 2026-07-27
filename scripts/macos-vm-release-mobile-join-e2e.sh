@@ -16,15 +16,33 @@ load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
 
-MACOS_SIGNING_IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
+MACOS_SIGNING_IDENTITY="$(
+  printf '%s' "${MACOS_SIGNING_IDENTITY:-}" \
+    | tr -d ':[:space:]' \
+    | tr '[:lower:]' '[:upper:]'
+)"
 EXPECTED_MACOS_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-${NVPN_IOS_TEAM_ID:-}}"
-EXPECTED_MACOS_CERT="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
-[[ -n "$MACOS_SIGNING_IDENTITY" ]] || {
-  echo "Set MACOS_SIGNING_IDENTITY to the company Developer ID identity" >&2
+EXPECTED_MACOS_CERT="$(
+  printf '%s' "${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}" \
+    | tr -d ':[:space:]' \
+    | tr '[:upper:]' '[:lower:]'
+)"
+[[ "$MACOS_SIGNING_IDENTITY" =~ ^[0-9A-F]{40}$ ]] || {
+  echo "Set MACOS_SIGNING_IDENTITY to the exact Developer ID certificate SHA-1" >&2
   exit 2
 }
-[[ -n "$EXPECTED_MACOS_TEAM" ]] || {
+[[ "$EXPECTED_MACOS_TEAM" =~ ^[A-Z0-9]{10}$ ]] || {
   echo "Set NVPN_IOS_TEAM_ID or NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID" >&2
+  exit 2
+}
+if [[ -z "$EXPECTED_MACOS_CERT" ]]; then
+  EXPECTED_MACOS_CERT="$(
+    python3 "$ROOT/scripts/macos_release_join_artifact.py" \
+      resolve-certificate --identity-sha1 "$MACOS_SIGNING_IDENTITY"
+  )"
+fi
+[[ "$EXPECTED_MACOS_CERT" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Set NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256 to the exact Developer ID certificate" >&2
   exit 2
 }
 
@@ -38,6 +56,9 @@ GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 REMOTE_SCRIPT="./scripts/macos-release-mobile-join-remote.sh"
 RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}"
 PRIVATE_DIR="$RESULT_DIR/.desktop-private-$$"
+HOST_APP="$ROOT/dist/macos/Nostr VPN.app"
+HOST_ARCHIVE="$PRIVATE_DIR/macos-release-app.zip"
+HOST_RECEIPT="$PRIVATE_DIR/artifact.json"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
@@ -57,6 +78,10 @@ ANDROID_SERIAL_SELECTED="$(
 ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
 export RESULT_DIR PRIVATE_DIR RELEASE_JOIN_UI_WAIT_SECS
 export RELEASE_JOIN_DELIVERY_WAIT_SECS RELEASE_JOIN_CAMERA_WAIT_SECS
+release_join_require_clean_fips
+APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 remote_pid=""
 cleanup() {
@@ -77,10 +102,14 @@ remote() {
   shift
   local remote_command argument
   printf -v remote_command \
-    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q %q %q' \
+    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q %q %q' \
     "$GUEST_REPO" \
     "../fips" \
-    "${NVPN_EXPECTED_FIPS_GIT_SHA:-}" \
+    "$APP_GIT_SHA" \
+    "$APP_GIT_TREE" \
+    "$RELEASE_JOIN_FIPS_SHA" \
+    "$RELEASE_JOIN_FIPS_TREE" \
+    "$RELEASE_JOIN_FIPS_VERSION" \
     "$MACOS_SIGNING_IDENTITY" \
     "$EXPECTED_MACOS_TEAM" \
     "$EXPECTED_MACOS_CERT" \
@@ -121,13 +150,54 @@ finish_remote() {
   return "$status"
 }
 
+prepare_host_artifact() {
+  local build_log="$RESULT_DIR/macos/host-build.log"
+  rm -f "$HOST_ARCHIVE" "$HOST_RECEIPT"
+  if ! MACOS_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" \
+    NVPN_BUILD_GIT_SHA="$APP_GIT_SHA" \
+    NVPN_FIPS_REPO_PATH="$NVPN_FIPS_REPO_PATH" \
+    NVPN_MACOS_RUST_PROFILE=release \
+    NVPN_MACOS_XCODE_CONFIGURATION=Release \
+    NVPN_MACOS_RUST_TARGETS=aarch64-apple-darwin \
+    NVPN_MACOS_CARGO_LOCKED=1 \
+    NVPN_MACOS_REQUIRE_SIGNING=1 \
+    "$ROOT/scripts/macos-build" macos-app >"$build_log" 2>&1
+  then
+    tail -n 120 "$build_log" >&2 || true
+    return 1
+  fi
+  release_join_assert_fips_unchanged
+  release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
+  codesign --verify --deep --strict "$HOST_APP"
+  ditto -c -k --sequesterRsrc --keepParent "$HOST_APP" "$HOST_ARCHIVE"
+  python3 "$ROOT/scripts/macos_release_join_artifact.py" create \
+    --receipt "$HOST_RECEIPT" \
+    --app "$HOST_APP" \
+    --archive "$HOST_ARCHIVE" \
+    --app-root "$ROOT" \
+    --fips-root "$NVPN_FIPS_REPO_PATH" \
+    --expected-app-head "$APP_GIT_SHA" \
+    --expected-app-tree "$APP_GIT_TREE" \
+    --expected-fips-head "$RELEASE_JOIN_FIPS_SHA" \
+    --expected-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
+    --expected-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
+    --expected-team "$EXPECTED_MACOS_TEAM" \
+    --expected-identity-sha1 "$MACOS_SIGNING_IDENTITY" \
+    --expected-signer-sha256 "$EXPECTED_MACOS_CERT"
+}
+
+prepare_host_artifact
 NVPN_MACOS_SYNC_PATH_DEPS=1 \
   NVPN_FIPS_REPO_PATH="$NVPN_FIPS_REPO_PATH" \
   "$ROOT/scripts/macos-vm-git-sync.sh" "$MAC_HOST"
+remote stage
+scp -q "$HOST_ARCHIVE" "$HOST_RECEIPT" \
+  "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/"
 remote prepare | tee "$RESULT_DIR/macos/prepare.log"
+cp "$HOST_RECEIPT" "$RESULT_DIR/macos/artifact.json"
 scp -q \
-  "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/artifact.json" \
-  "$RESULT_DIR/macos/artifact.json"
+  "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/verification.json" \
+  "$RESULT_DIR/macos/verification.json"
 
 # macOS admin -> physical Android joiner.
 release_join_reset_android_state
@@ -179,6 +249,9 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
             "artifact": "signed macOS Release app",
+            "builtOnHost": True,
+            "builtOnTestVm": False,
+            "remoteImportVerified": True,
             "publicUiOnly": True,
             "appLaunchArgumentsOrEnvironment": False,
             "privateAppStateRead": False,
