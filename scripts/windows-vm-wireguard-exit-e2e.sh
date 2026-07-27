@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # Run the native Windows WG-exit tests on an SSH-reachable disposable VM.
 #
-# Without a provider profile this runs the secretless scoped Wintun self-test.
-# Set NVPN_WINDOWS_WG_EXIT_CONFIG_FILE to also exercise real Internet routing:
-# Direct -> provider WireGuard -> Direct. Set NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E=1
-# when a skipped provider-backed test must fail the run.
+# With the configured remote Linux fixture this creates a one-use WireGuard
+# exit, DNS resolver, and NAT gateway without provider credentials. An external
+# profile remains supported through NVPN_WINDOWS_WG_EXIT_CONFIG_FILE.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/release_common.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/mobile_env.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
+
+load_release_env "$ROOT"
+load_mobile_env "$ROOT"
+
 SSH_HOST="${NVPN_WINDOWS_SSH_HOST:-${1:-win11-dev}}"
 SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
@@ -17,9 +26,30 @@ GUEST_CONFIG="${NVPN_WINDOWS_E2E_CONFIG:-C:\\ProgramData\\Nostr VPN\\config.toml
 PROVIDER_CONFIG="${NVPN_WINDOWS_WG_EXIT_CONFIG_FILE:-${NVPN_WG_EXIT_CONFIG_FILE:-}}"
 REQUIRE_PROVIDER_E2E="${NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E:-0}"
 PROBE_URL="${NVPN_WINDOWS_E2E_INTERNET_URL:-https://example.com/}"
+SOURCE_IP_URL="${NVPN_WINDOWS_E2E_SOURCE_IP_URL:-https://api.ipify.org}"
 WAIT_SECS="${NVPN_WINDOWS_E2E_WAIT_SECS:-60}"
 SETTLE_SECS="${NVPN_WINDOWS_E2E_SETTLE_SECS:-3}"
 REMOTE_PROVIDER_CONFIG=""
+FIXTURE_HOST="${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-${NVPN_MOBILE_WG_EXIT_HOST_IP:-}}"
+HOST_PORT="${NVPN_WINDOWS_WG_FIXTURE_PORT:-51893}"
+TUNNEL_SERVER_IP="${NVPN_WINDOWS_WG_SERVER_IP:-10.99.89.1}"
+TUNNEL_CLIENT_IP="${NVPN_WINDOWS_WG_CLIENT_IP:-10.99.89.2}"
+THROUGH_DNS_IP="${NVPN_WINDOWS_WG_THROUGH_DNS_IP:-10.99.89.53}"
+DNS_NAME="${NVPN_WINDOWS_WG_DNS_NAME:-windows-wireguard-exit.nvpn-e2e.test}"
+HTTP_PROBE_PORT="${NVPN_WINDOWS_WG_HTTP_PROBE_PORT:-$HOST_PORT}"
+HTTP_PROBE_TOKEN="${NVPN_WINDOWS_WG_HTTP_TOKEN:-nvpn-windows-$PPID-$$-$RANDOM}"
+IMAGE="${NVPN_WINDOWS_WG_FIXTURE_IMAGE:-nostr-vpn-windows-wireguard-exit-e2e}"
+CONTAINER="${NVPN_WINDOWS_WG_FIXTURE_CONTAINER:-nostr-vpn-windows-wireguard-exit-e2e-$$}"
+FIXTURE_DIR=""
+FIXTURE_ACTIVE=0
+FIXTURE_INITIALIZED=0
+EXPECTED_EXIT_SOURCE_IP=""
+EXPECTED_DNS_IP=""
+DNS_PROBE_NAME=""
+ENDPOINT_HOST=""
+WG_BEFORE=""
+FORWARD_BEFORE=""
+DNS_BEFORE=""
 
 ps_quote() {
   local value="${1//\'/\'\'}"
@@ -84,17 +114,176 @@ Remove-Item -Force -LiteralPath $(ps_quote "$REMOTE_PROVIDER_CONFIG") -ErrorActi
     >/dev/null 2>&1 || true
 }
 
-if [[ -n "$PROVIDER_CONFIG" && ! -r "$PROVIDER_CONFIG" ]]; then
-  echo "NVPN_WINDOWS_WG_EXIT_CONFIG_FILE must name a readable provider WireGuard config" >&2
-  exit 2
-fi
-if [[ -z "$PROVIDER_CONFIG" ]] && provider_e2e_required; then
-  echo "NVPN_WINDOWS_WG_EXIT_CONFIG_FILE is required for the Windows Direct/WireGuard/Direct e2e" >&2
-  exit 2
-fi
+cleanup() {
+  local status="$?" cleanup_failed=0
+  trap - EXIT INT TERM
+  if [[ -n "$REMOTE_PROVIDER_CONFIG" ]]; then
+    cleanup_remote_provider_config
+    if ! run_ps "if (Test-Path -LiteralPath $(ps_quote "$REMOTE_PROVIDER_CONFIG")) { exit 1 }" \
+      >/dev/null 2>&1
+    then
+      echo "Windows WireGuard source config survived cleanup" >&2
+      cleanup_failed=1
+    else
+      REMOTE_PROVIDER_CONFIG=""
+    fi
+  fi
+  if [[ "$FIXTURE_INITIALIZED" -eq 1 ]]; then
+    if mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"; then
+      FIXTURE_ACTIVE=0
+      FIXTURE_INITIALIZED=0
+    else
+      echo "Windows remote WireGuard fixture did not prove complete cleanup" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ -n "$FIXTURE_DIR" ]]; then
+    rm -rf "$FIXTURE_DIR"
+    if [[ -e "$FIXTURE_DIR" ]]; then
+      echo "Windows local WireGuard fixture secrets survived cleanup" >&2
+      cleanup_failed=1
+    else
+      FIXTURE_DIR=""
+    fi
+  fi
+  if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+current_tree() {
+  local git_dir tmp_index
+  git_dir="$(git -C "$ROOT" rev-parse --path-format=absolute --git-dir)"
+  tmp_index="$(mktemp "$git_dir/windows-wg-index.XXXXXX")"
+  (
+    export GIT_INDEX_FILE="$tmp_index"
+    git -C "$ROOT" read-tree HEAD
+    git -C "$ROOT" add -A
+    git -C "$ROOT" write-tree
+  )
+  rm -f "$tmp_index"
+}
+
+prepare_ephemeral_fixture() {
+  [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" && -n "$FIXTURE_HOST" ]] \
+    || return 1
+  [[ "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" == "native" ]] || {
+    echo "Windows provider-independent exit requires the native remote fixture" >&2
+    return 2
+  }
+  for command in wg python3 ssh scp; do
+    command -v "$command" >/dev/null 2>&1 || {
+      echo "Windows provider-independent exit fixture requires $command" >&2
+      return 2
+    }
+  done
+  python3 - \
+    "$TUNNEL_SERVER_IP" "$TUNNEL_CLIENT_IP" "$THROUGH_DNS_IP" \
+    "$HOST_PORT" "$HTTP_PROBE_PORT" <<'PY'
+import ipaddress
+import sys
+
+server, client, through = map(ipaddress.ip_address, sys.argv[1:4])
+network = ipaddress.ip_network(f"{server}/24", strict=False)
+ports = tuple(map(int, sys.argv[4:]))
+if (
+    any(address.version != 4 for address in (server, client, through))
+    or any(address not in network for address in (client, through))
+    or len({server, client, through}) != 3
+    or any(port < 1 or port > 65535 for port in ports)
+):
+    raise SystemExit("invalid Windows WireGuard fixture network or port")
+PY
+
+  local endpoint_fields endpoint_family endpoint_authority
+  endpoint_fields="$(mobile_wg_endpoint_fields "$FIXTURE_HOST" "$HOST_PORT")" \
+    || {
+      echo "Windows WireGuard fixture endpoint is malformed" >&2
+      return 2
+    }
+  IFS=$'\t' read -r endpoint_family ENDPOINT_HOST endpoint_authority \
+    <<<"$endpoint_fields"
+  export NVPN_MOBILE_WG_EXIT_HOST_IP="$ENDPOINT_HOST"
+  export NVPN_MOBILE_WG_EXIT_REMOTE_MODE=native
+
+  FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-windows-wg-exit.XXXXXX")"
+  chmod 700 "$FIXTURE_DIR"
+  umask 077
+  wg genkey >"$FIXTURE_DIR/server.key"
+  wg pubkey <"$FIXTURE_DIR/server.key" >"$FIXTURE_DIR/server.pub"
+  wg genkey >"$FIXTURE_DIR/client.key"
+  wg pubkey <"$FIXTURE_DIR/client.key" >"$FIXTURE_DIR/client.pub"
+
+  mobile_wg_fixture_initialize "$ROOT" "$FIXTURE_DIR"
+  FIXTURE_INITIALIZED=1
+  mobile_wg_fixture_assert_available "$CONTAINER" "$HOST_PORT"
+  EXPECTED_EXIT_SOURCE_IP="$(
+    mobile_wg_remote_exec curl -4fsS --max-time 8 "$SOURCE_IP_URL"
+  )"
+  python3 - "$EXPECTED_EXIT_SOURCE_IP" <<'PY'
+import ipaddress
+import sys
+if ipaddress.ip_address(sys.argv[1]).version != 4:
+    raise SystemExit("remote fixture returned no valid IPv4 exit source")
+PY
+
+  cat >"$FIXTURE_DIR/client.conf" <<EOF
+[Interface]
+PrivateKey = $(<"$FIXTURE_DIR/client.key")
+Address = $TUNNEL_CLIENT_IP/32
+DNS = $TUNNEL_SERVER_IP
+MTU = 1280
+
+[Peer]
+PublicKey = $(<"$FIXTURE_DIR/server.pub")
+Endpoint = $endpoint_authority
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 2
+EOF
+  PROVIDER_CONFIG="$FIXTURE_DIR/client.conf"
+  EXPECTED_DNS_IP="$TUNNEL_SERVER_IP"
+  DNS_PROBE_NAME="$DNS_NAME"
+
+  mobile_wg_fixture_build "$ROOT" "$IMAGE" 0
+  FIXTURE_ACTIVE=1
+  mobile_wg_fixture_run "$IMAGE" "$CONTAINER" "$MOBILE_WG_FIXTURE_VOLUME_DIR"
+  local ignored
+  for ignored in $(seq 1 100); do
+    mobile_wg_fixture_ready "$CONTAINER" >/dev/null 2>&1 && return 0
+    mobile_wg_fixture_running "$CONTAINER" \
+      || {
+        mobile_wg_fixture_logs "$CONTAINER" >&2
+        echo "Windows remote WireGuard fixture stopped during readiness" >&2
+        return 1
+      }
+    sleep 0.1
+  done
+  mobile_wg_fixture_logs "$CONTAINER" >&2
+  echo "Windows remote WireGuard fixture did not become ready" >&2
+  return 1
+}
+
 if [[ ! "$WAIT_SECS" =~ ^[1-9][0-9]*$ || ! "$SETTLE_SECS" =~ ^[0-9]+$ ]]; then
   echo "Windows WG e2e wait/settle values must be non-negative integer seconds" >&2
   exit 2
+fi
+if [[ -n "$PROVIDER_CONFIG" && ! -r "$PROVIDER_CONFIG" ]]; then
+  echo "NVPN_WINDOWS_WG_EXIT_CONFIG_FILE must name a readable WireGuard config" >&2
+  exit 2
+fi
+if [[ -z "$PROVIDER_CONFIG" ]]; then
+  if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    && -n "$FIXTURE_HOST" ]]
+  then
+    prepare_ephemeral_fixture
+  elif provider_e2e_required; then
+    echo "Windows Direct/WireGuard/Direct e2e requires either the remote Linux fixture or NVPN_WINDOWS_WG_EXIT_CONFIG_FILE" >&2
+    exit 2
+  else
+    echo "Windows provider-independent WireGuard fixture is not configured; running scoped Wintun only."
+  fi
 fi
 
 case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
@@ -105,6 +294,17 @@ case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
     "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST"
     ;;
 esac
+
+EXPECTED_TREE="$(current_tree)"
+REMOTE_TREE="$(
+  run_ps "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
+    | tr -d '\r' \
+    | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }'
+)"
+[[ "$REMOTE_TREE" == "$EXPECTED_TREE" ]] || {
+  echo "Windows WG e2e checkout differs from the exact candidate tree" >&2
+  exit 1
+}
 
 BUILD_CONFIGURATION="Debug"
 BUILD_PROFILE="debug"
@@ -143,10 +343,12 @@ finally {
 }
 \$Bin = $(ps_quote "$GUEST_BINARY")
 if (!(Test-Path \$Bin)) { throw \"Missing nvpn.exe: \$Bin\" }
+\$ExpectedBinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash
 \$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (!\$IsAdmin) { throw 'Windows WG exit e2e requires an elevated/Admin SSH session for Wintun and route changes' }
 & \$Bin wg-upstream-test --self-test --timeout-secs 15 --scoped-host 10.99.99.1 --ping-count 3
 if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+Write-Host \"WINDOWS_EXACT_CANDIDATE_SHA256=\$ExpectedBinarySha256\"
 Write-Host 'WINDOWS_WIREGUARD_SCOPED_E2E_OK'"
 
 if [[ -z "$PROVIDER_CONFIG" ]]; then
@@ -156,8 +358,13 @@ if [[ -z "$PROVIDER_CONFIG" ]]; then
 fi
 
 REMOTE_PROVIDER_CONFIG="C:\\Windows\\Temp\\nvpn-provider-wg-e2e-$$-$RANDOM.conf"
-trap cleanup_remote_provider_config EXIT
 copy_to_guest "$PROVIDER_CONFIG" "$REMOTE_PROVIDER_CONFIG"
+
+if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
+  WG_BEFORE="$(mobile_wg_fixture_wg_bytes "$CONTAINER" | awk '{ print ($1 + 0) + ($2 + 0) }')"
+  FORWARD_BEFORE="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
+  DNS_BEFORE="$(mobile_wg_fixture_dns_count "$CONTAINER" "$DNS_PROBE_NAME")"
+fi
 
 run_ps "\$ErrorActionPreference = 'Stop'
 \$ProviderConfig = $(ps_quote "$REMOTE_PROVIDER_CONFIG")
@@ -185,6 +392,19 @@ try {
   if (\$LASTEXITCODE -ne 0) { throw 'failed to establish Direct before the Windows WG e2e' }
   & \$Bin service install --force --config \$Config
   if (\$LASTEXITCODE -ne 0) { throw 'failed to install the Windows WG e2e daemon' }
+  \$ExpectedBinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash
+  \$Service = Get-CimInstance Win32_Service -Filter \"Name='NvpnService'\"
+  if (!\$Service -or [int]\$Service.ProcessId -le 0) {
+    throw 'exact Windows candidate service is not running'
+  }
+  \$Process = Get-CimInstance Win32_Process -Filter (\"ProcessId=\" + [int]\$Service.ProcessId)
+  if (
+    !\$Process -or
+    (Get-FileHash -Algorithm SHA256 -LiteralPath \$Process.ExecutablePath).Hash -ne
+      \$ExpectedBinarySha256
+  ) {
+    throw 'NvpnService is not running the exact candidate binary'
+  }
 
   powershell.exe -NoProfile -ExecutionPolicy Bypass \
     -File .\\scripts\\e2e-windows-wireguard-direct.ps1 \
@@ -192,6 +412,11 @@ try {
     -Config \$Config \
     -WireGuardConfig \$ProviderConfig \
     -ProbeUrl $(ps_quote "$PROBE_URL") \
+    -SourceIpUrl $(ps_quote "$SOURCE_IP_URL") \
+    -ExpectedExitSourceIp $(ps_quote "$EXPECTED_EXIT_SOURCE_IP") \
+    -DnsProbeName $(ps_quote "$DNS_PROBE_NAME") \
+    -ExpectedDnsProbeIp $(ps_quote "$EXPECTED_DNS_IP") \
+    -WireGuardEndpointHost $(ps_quote "$ENDPOINT_HOST") \
     -WaitSeconds $WAIT_SECS \
     -SettleSeconds $SETTLE_SECS
   if (\$LASTEXITCODE -ne 0) { throw 'Windows Direct/WireGuard/Direct e2e failed' }
@@ -200,7 +425,19 @@ finally {
   & \$Bin set --config \$Config '--exit-node=' 2>\$null | Out-Null
 }"
 
-cleanup_remote_provider_config
-trap - EXIT
-REMOTE_PROVIDER_CONFIG=""
+if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
+  WG_AFTER="$(mobile_wg_fixture_wg_bytes "$CONTAINER" | awk '{ print ($1 + 0) + ($2 + 0) }')"
+  FORWARD_AFTER="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
+  DNS_AFTER="$(mobile_wg_fixture_dns_count "$CONTAINER" "$DNS_PROBE_NAME")"
+  [[ "$WG_BEFORE" =~ ^[0-9]+$ && "$WG_AFTER" =~ ^[0-9]+$ \
+    && "$WG_AFTER" -gt "$WG_BEFORE" ]] \
+    || { echo "Windows WireGuard fixture transfer counter did not increase" >&2; exit 1; }
+  [[ "$FORWARD_BEFORE" =~ ^[0-9]+$ && "$FORWARD_AFTER" =~ ^[0-9]+$ \
+    && "$FORWARD_AFTER" -gt "$FORWARD_BEFORE" ]] \
+    || { echo "Windows WireGuard fixture Internet-forward counter did not increase" >&2; exit 1; }
+  [[ "$DNS_BEFORE" =~ ^[0-9]+$ && "$DNS_AFTER" =~ ^[0-9]+$ \
+    && "$DNS_AFTER" -gt "$DNS_BEFORE" ]] \
+    || { echo "Windows WireGuard fixture DNS query counter did not increase" >&2; exit 1; }
+  echo "WINDOWS_EPHEMERAL_WG_SOURCE_TRAFFIC_DNS_OK"
+fi
 echo "WINDOWS_WIREGUARD_EXIT_E2E_OK"
