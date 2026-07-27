@@ -9,6 +9,7 @@ EU_TERRITORY_IDS = frozenset(
     "AUT BEL BGR HRV CYP CZE DNK EST FIN FRA DEU GRC HUN IRL ITA "
     "LVA LTU LUX MLT NLD POL PRT ROU SVK SVN ESP SWE".split()
 )
+REQUIRED_TERRITORY_IDS = frozenset({"CHN", "FRA"})
 DSA_TRADER_CONTENT_ERRORS = frozenset(
     {
         "TRADER_STATUS_NOT_PROVIDED",
@@ -64,6 +65,7 @@ def require_worldwide_availability(
             "App Store availability has no territory rows"
         )
     unavailable = []
+    present = set()
     for resource in rows:
         resource_id = str(resource.get("id", "")).strip()
         territory = territory_id(resource)
@@ -85,8 +87,14 @@ def require_worldwide_availability(
             raise AppStoreAvailabilityError(
                 f"App Store territory {territory} has no boolean available state"
             )
+        present.add(territory)
         if available is False:
             unavailable.append(territory)
+    missing = sorted(REQUIRED_TERRITORY_IDS - present)
+    if missing:
+        raise AppStoreAvailabilityError(
+            "App Store required territories are missing: " + ", ".join(missing)
+        )
     if unavailable:
         raise AppStoreAvailabilityError(
             "App Store territories are excluded: " + ", ".join(unavailable)

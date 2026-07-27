@@ -333,13 +333,29 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                 }
             },
         }
+        china = {
+            "type": "territoryAvailabilities",
+            "id": "china-row",
+            "attributes": {"available": True},
+            "relationships": {
+                "territory": {
+                    "data": {"type": "territories", "id": "CHN"},
+                }
+            },
+        }
         self.assertEqual(
-            availability.require_worldwide_availability([germany, france]),
-            [germany, france],
+            availability.require_worldwide_availability(
+                [germany, france, china]
+            ),
+            [germany, france, china],
         )
         with self.assertRaises(availability.AppStoreAvailabilityError):
             availability.require_worldwide_availability(
-                [{**france, "attributes": {"available": False}}, germany]
+                [
+                    {**france, "attributes": {"available": False}},
+                    germany,
+                    china,
+                ]
             )
         with self.assertRaises(availability.AppStoreAvailabilityError):
             availability.require_worldwide_availability([])

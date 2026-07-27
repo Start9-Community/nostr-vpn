@@ -8,17 +8,17 @@ pub(crate) fn daemon_pid_file_path(config_path: &Path) -> PathBuf {
 pub(crate) fn daemon_instance_lock_file_path(_config_path: &Path) -> Result<PathBuf> {
     #[cfg(test)]
     {
-        return Ok(std::env::temp_dir().join(format!(
+        Ok(std::env::temp_dir().join(format!(
             "to.nostrvpn.nvpn.daemon-instance-test-{}.lock",
             std::process::id()
-        )));
+        )))
     }
 
     #[cfg(all(not(test), unix))]
     {
-        return Ok(PathBuf::from(
+        Ok(PathBuf::from(
             "/tmp/to.nostrvpn.nvpn.daemon.instance.lock",
-        ));
+        ))
     }
 
     #[cfg(all(not(test), windows))]
@@ -31,9 +31,9 @@ pub(crate) fn daemon_instance_lock_file_path(_config_path: &Path) -> Result<Path
                     "PROGRAMDATA is unavailable; refusing to use a per-user daemon instance lock"
                 )
             })?;
-        return Ok(root
+        Ok(root
             .join("nVPN")
-            .join("to.nostrvpn.nvpn.daemon.instance.lock"));
+            .join("to.nostrvpn.nvpn.daemon.instance.lock"))
     }
 
     #[cfg(all(not(test), not(any(unix, windows))))]

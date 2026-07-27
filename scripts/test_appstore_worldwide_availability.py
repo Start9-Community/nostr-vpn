@@ -67,6 +67,23 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
                 [self._row("FRA", False), china]
             )
 
+    def test_france_and_china_must_be_present(self):
+        with self.assertRaisesRegex(
+            availability.AppStoreAvailabilityError,
+            "CHN",
+        ):
+            availability.require_worldwide_availability(
+                [self._row("FRA", True), self._row("USA", True)]
+            )
+
+        with self.assertRaisesRegex(
+            availability.AppStoreAvailabilityError,
+            "FRA",
+        ):
+            availability.require_worldwide_availability(
+                [self._row("CHN", True), self._row("USA", True)]
+            )
+
     def test_worldwide_check_fails_closed_on_malformed_or_empty_rows(self):
         with self.assertRaisesRegex(
             availability.AppStoreAvailabilityError,
