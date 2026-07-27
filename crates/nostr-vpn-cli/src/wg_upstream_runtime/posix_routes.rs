@@ -177,30 +177,51 @@ pub fn apply_full_default_route(
     // on Linux, restoration on Drop. Do this before touching routes.
     let original_default = capture_default_route()?;
 
-    // 3. Install the bypass /32 for the WG endpoint via the original
-    // default gateway. This MUST exist before we swap the default,
-    // otherwise the encrypted UDP would loop back into the tun.
-    install_endpoint_bypass(&upstream_ip, &original_default)?;
+    // 3. Install the bypass /32 for an IPv4 WG endpoint via the original
+    // default gateway. The route swap below is IPv4-only, so an IPv6
+    // endpoint must remain on its untouched IPv6 underlay and needs no
+    // bypass.
+    let bypass_target = ipv4_default_swap_bypass_target(upstream_ip);
+    if let Some(target) = bypass_target.as_ref() {
+        install_endpoint_bypass(target, &original_default)?;
+    }
 
-    // 4. Swap the default route to the WG tun.
-    install_default_via_iface(iface, &address_ip)?;
-
-    Ok(FullDefaultRoute {
+    let mut full_route = FullDefaultRoute {
         #[cfg(target_os = "macos")]
         iface: iface.to_string(),
-        bypass_target: upstream_ip,
+        bypass_target,
         original_default,
         reverted: false,
-    })
+    };
+
+    // 4. Swap the default route to the WG tun. If any command fails after
+    // partially applying the route set, remove every route we own before
+    // returning the error.
+    if let Err(error) = install_default_via_iface(iface, &address_ip) {
+        let cleanup = full_route.revert();
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(error.context(format!(
+                "rollback partially applied WG routes: {cleanup:#}"
+            ))),
+        };
+    }
+
+    Ok(full_route)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct FullDefaultRoute {
     #[cfg(target_os = "macos")]
     iface: String,
-    bypass_target: IpAddr,
+    bypass_target: Option<IpAddr>,
     original_default: CapturedDefaultRoute,
     reverted: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn ipv4_default_swap_bypass_target(upstream_ip: IpAddr) -> Option<IpAddr> {
+    upstream_ip.is_ipv4().then_some(upstream_ip)
 }
 
 /// Captured underlay default route, used to restore on Drop. The
@@ -429,7 +450,6 @@ impl FullDefaultRoute {
         if self.reverted {
             return Ok(());
         }
-        let target_str = self.bypass_target.to_string();
         // Linux replaces its default and restores it first. macOS leaves
         // the underlay default intact and only removes its two covering /1s.
         #[cfg(target_os = "linux")]
@@ -443,40 +463,45 @@ impl FullDefaultRoute {
                 command.arg(arg);
             }
             run_checked(&mut command)?;
-            let _ = ProcessCommand::new("ip")
-                .arg("route")
-                .arg("del")
-                .arg(format!("{target_str}/32"))
-                .status();
+            if let Some(target) = self.bypass_target {
+                let _ = ProcessCommand::new("ip")
+                    .arg("route")
+                    .arg("del")
+                    .arg(format!("{target}/32"))
+                    .status();
+            }
         }
         #[cfg(target_os = "macos")]
         {
             for args in macos_wg_default_route_cleanup_args(&self.iface) {
                 let _ = ProcessCommand::new("route").args(args).status();
             }
-            let _ = ProcessCommand::new("route")
-                .arg("-n")
-                .arg("delete")
-                .arg("-host")
-                .arg(&target_str)
-                .arg(&self.original_default.gateway)
-                .arg("-ifscope")
-                .arg(&self.original_default.interface)
-                .status();
-            let _ = ProcessCommand::new("route")
-                .arg("-n")
-                .arg("delete")
-                .arg("-host")
-                .arg(&target_str)
-                .arg("-ifscope")
-                .arg(&self.original_default.interface)
-                .status();
-            let _ = ProcessCommand::new("route")
-                .arg("-n")
-                .arg("delete")
-                .arg("-host")
-                .arg(&target_str)
-                .status();
+            if let Some(target) = self.bypass_target {
+                let target = target.to_string();
+                let _ = ProcessCommand::new("route")
+                    .arg("-n")
+                    .arg("delete")
+                    .arg("-host")
+                    .arg(&target)
+                    .arg(&self.original_default.gateway)
+                    .arg("-ifscope")
+                    .arg(&self.original_default.interface)
+                    .status();
+                let _ = ProcessCommand::new("route")
+                    .arg("-n")
+                    .arg("delete")
+                    .arg("-host")
+                    .arg(&target)
+                    .arg("-ifscope")
+                    .arg(&self.original_default.interface)
+                    .status();
+                let _ = ProcessCommand::new("route")
+                    .arg("-n")
+                    .arg("delete")
+                    .arg("-host")
+                    .arg(&target)
+                    .status();
+            }
         }
         self.reverted = true;
         Ok(())

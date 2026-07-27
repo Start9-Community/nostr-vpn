@@ -38,3 +38,12 @@ default            192.168.64.1       UGScg                 en0\n";
             Some(("192.168.64.1".to_string(), "en0".to_string()))
         );
     }
+
+    #[test]
+    fn ipv4_only_wireguard_route_swap_leaves_ipv6_endpoint_on_underlay() {
+        let ipv4 = "198.51.100.7".parse::<IpAddr>().expect("IPv4 endpoint");
+        let ipv6 = "2001:db8::7".parse::<IpAddr>().expect("IPv6 endpoint");
+
+        assert_eq!(ipv4_default_swap_bypass_target(ipv4), Some(ipv4));
+        assert_eq!(ipv4_default_swap_bypass_target(ipv6), None);
+    }
