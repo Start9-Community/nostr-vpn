@@ -61,6 +61,7 @@ import {
   validateWindowsInstallerGateReceipt,
 } from './release-artifact-provenance-lib.mjs'
 import { inspectStartosReleasePackage } from './startos-release.mjs'
+import { assertPassedFleetPublication } from './fleet-release-publication-lib.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -83,25 +84,24 @@ Build local Rust/native release artifacts, stage a hashtree release directory,
 and optionally publish it.
 
 Options:
-  --publish                 Publish the staged htree release as a draft
-                            (default publish mode; repoints draft instead of
-                            latest and does not publish crates/Zapstore)
-  --final                   Publish the htree release as final/latest (also
-                            runs scripts/publish.sh to ship the Rust crates
-                            unless --skip-cargo-publish is given)
-  --draft                   Alias for --publish, kept for explicitness
+  --publish                 Disabled direct publication mode; stage, execute
+                            the fleet canary, then publish the staged draft
+  --final                   Disabled direct final mode; use --promote-draft
+                            with exact passed fleet evidence
+  --draft                   Disabled alias for --publish
   --promote-draft           Promote an existing staged draft directory for
                             this tag to final/latest without rebuilding
   --publish-staged-draft    Publish an existing complete staged draft without
                             rebuilding, rerunning gates, or shipping elsewhere
-  --cargo-publish           Force publishing Rust crates to crates.io even
-                            without --publish (e.g. to retry a partial release)
-  --skip-cargo-publish      With --publish, stage and publish the htree tree
-                            but don't push the crates to crates.io
-  --skip-zapstore           With --publish, skip the Android APK publish to
-                            Zapstore (default: publish when zsp is on PATH
-                            and a Nostr signing key is configured)
-  --require-zapstore        With a final publish, require a signed APK, zsp,
+  --fleet-result <path>     Exact fleet-canary-result.json from execute mode
+  --fleet-manifest <path>   Frozen fleet manifest used by that execution
+  --fleet-inventory <path>  Frozen authoritative-roster inventory used by it
+  --cargo-publish           Publish Rust crates during an exact fleet-gated
+                            --promote-draft operation
+  --skip-cargo-publish      With --promote-draft, don't push Rust crates
+  --skip-zapstore           With --promote-draft, skip Android Zapstore
+                            publication
+  --require-zapstore        With --promote-draft, require a signed APK, zsp,
                             signing configuration, successful publication,
                             and post-publish Zapstore verification
   --dry-run                 Print the plan without running build or publish commands
@@ -112,7 +112,7 @@ Options:
   --env-file <path>        Extra dotenv file to load (repeatable)
   --only <csv>             Limit steps to platform-versions,verify,startos,macos,ios,linux,windows,android
   --skip <csv>             Skip steps by name
-  --allow-partial          Stage/publish even if a selected platform build fails
+  --allow-partial          Stage even if a selected platform build fails
   --help                   Show this help
 
 The script auto-loads .env.release.local and .env.zapstore.local when present.
@@ -127,6 +127,9 @@ function parseArgs(argv) {
     draft: true,
     promoteDraft: false,
     publishStagedDraft: false,
+    fleetResult: null,
+    fleetManifest: null,
+    fleetInventory: null,
     cargoPublish: false,
     skipCargoPublish: false,
     skipZapstore: false,
@@ -167,6 +170,15 @@ function parseArgs(argv) {
         break
       case '--publish-staged-draft':
         options.publishStagedDraft = true
+        break
+      case '--fleet-result':
+        options.fleetResult = resolve(repoRoot, argv[++index] ?? '')
+        break
+      case '--fleet-manifest':
+        options.fleetManifest = resolve(repoRoot, argv[++index] ?? '')
+        break
+      case '--fleet-inventory':
+        options.fleetInventory = resolve(repoRoot, argv[++index] ?? '')
         break
       case '--cargo-publish':
         options.cargoPublish = true
@@ -2238,6 +2250,30 @@ function main() {
       )
     }
   }
+  const hasFleetPublicationPaths = Boolean(
+    options.fleetResult
+    || options.fleetManifest
+    || options.fleetInventory,
+  )
+  if (
+    hasFleetPublicationPaths
+    && !options.publishStagedDraft
+    && !options.promoteDraft
+  ) {
+    throw new Error(
+      'Fleet evidence paths are valid only with --publish-staged-draft or --promote-draft.',
+    )
+  }
+  if (options.publish && !options.promoteDraft) {
+    throw new Error(
+      'Direct --publish/--final is disabled: stage first, execute the exact fleet canary, then use --publish-staged-draft and --promote-draft.',
+    )
+  }
+  if (options.cargoPublish && !options.promoteDraft) {
+    throw new Error(
+      'Direct --cargo-publish is disabled: publish crates only while promoting an exact fleet-gated draft.',
+    )
+  }
   if (requireZapstore && options.skipZapstore) {
     throw new Error('--require-zapstore conflicts with --skip-zapstore.')
   }
@@ -2300,6 +2336,16 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
+    const fleetTargetCount = assertPassedFleetPublication({
+      repoRoot,
+      options,
+      env,
+      stageDir,
+      stagedManifest,
+    })
+    console.log(
+      `Verified passed fleet execution for ${fleetTargetCount} target(s).`,
+    )
     const cid = publishRelease({
       stageDir,
       releaseTree,
@@ -2343,6 +2389,28 @@ function main() {
     if (!commandExists('htree')) {
       throw new Error('Missing htree; cannot promote release.')
     }
+    const stagedManifest = readReleaseManifest(stageDir)
+    validatePromotableReleaseManifest(stagedManifest)
+    const stagedCommit = assertPromotableDraftSource(
+      tag,
+      stagedManifest,
+    )
+    verifyStagedPublicationBundle({
+      stageDir,
+      tag,
+      commit: stagedCommit,
+      tree: gitTree(stagedCommit),
+    })
+    const fleetTargetCount = assertPassedFleetPublication({
+      repoRoot,
+      options,
+      env,
+      stageDir,
+      stagedManifest,
+    })
+    console.log(
+      `Verified passed fleet execution for ${fleetTargetCount} target(s).`,
+    )
     const promoted = promoteStagedDraft({
       stageDir,
       releaseTree,
@@ -2517,7 +2585,7 @@ function main() {
       )
     }
   }
-  const stagedRelease = stageRelease({
+  stageRelease({
     tag,
     commit,
     tree: candidateTree,
@@ -2532,36 +2600,8 @@ function main() {
     artifactProofs,
   })
 
-  if (options.publish) {
-    if (!commandExists('htree')) {
-      throw new Error('Missing htree; cannot publish release.')
-    }
-    const cid = publishRelease({ stageDir, releaseTree, tag, draft: options.draft, dryRun: options.dryRun })
-    console.log(`Published ${options.draft ? 'draft ' : ''}${tag} to ${releaseTree} via ${cid}`)
-  } else if (!options.dryRun) {
+  if (!options.dryRun) {
     console.log(`Staged ${tag} at ${stageDir}`)
-  }
-
-  // A "publish" is supposed to ship the whole release: the htree tree AND
-  // the Rust crates on crates.io. Anything that ends up only half-shipped
-  // forces us to remember to re-run the cargo half later, which we forget.
-  // Default cargo publish on whenever --publish is set; --skip-cargo-publish
-  // is the explicit opt-out, --cargo-publish still lets you publish crates
-  // without doing the htree publish (e.g. retrying a partial release).
-  const shouldPublishCrates =
-    options.cargoPublish || (options.publish && !options.draft && !options.skipCargoPublish)
-  if (shouldPublishCrates) {
-    publishRustCrates({ dryRun: options.dryRun })
-  }
-
-  if (options.publish && !options.draft && !options.skipZapstore) {
-    publishZapstore({
-      env,
-      tag,
-      apkPath: stagedRelease.stagedAndroidApkPath,
-      dryRun: options.dryRun,
-      required: requireZapstore,
-    })
   }
 }
 

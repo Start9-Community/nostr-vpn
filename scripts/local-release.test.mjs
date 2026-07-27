@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -46,6 +47,7 @@ import {
   zapstorePublicationPrerequisites,
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
+import { buildFrozenFleetInventory } from './fleet-release-preparer-lib.mjs'
 import {
   buildReleaseGateAttestation,
   releaseAssetSetSha256,
@@ -473,6 +475,63 @@ test('staged draft publication rejects build, final, and distribution flags', ()
   }
 })
 
+test('direct htree and crates publication paths fail closed', () => {
+  const script = join(process.cwd(), 'scripts/local-release.mjs')
+  for (const [args, message] of [
+    [['--publish', '--dry-run'], /Direct --publish\/--final is disabled/],
+    [['--final', '--dry-run'], /Direct --publish\/--final is disabled/],
+    [['--cargo-publish', '--dry-run'], /Direct --cargo-publish is disabled/],
+  ]) {
+    const result = spawnSync(process.execPath, [script, ...args], {
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 1, args.join(' '))
+    assert.match(result.stderr, message, args.join(' '))
+  }
+})
+
+test('every remaining publisher runs only after exact fleet validation', () => {
+  const source = readFileSync(
+    join(process.cwd(), 'scripts/local-release.mjs'),
+    'utf8',
+  )
+  const stagedStart = source.indexOf(
+    'if (options.publishStagedDraft) {\n    const stagedManifest',
+  )
+  const stagedEnd = source.indexOf(
+    '\n  if (requireZapstore && !options.dryRun)',
+    stagedStart,
+  )
+  const staged = source.slice(stagedStart, stagedEnd)
+  assert.ok(stagedStart >= 0 && stagedEnd > stagedStart)
+  assert.ok(
+    staged.indexOf('assertPassedFleetPublication({')
+    < staged.indexOf('publishRelease({'),
+  )
+
+  const promoteStart = source.indexOf(
+    'if (options.promoteDraft) {\n    if (!commandExists',
+  )
+  const promoteEnd = source.indexOf('\n  const steps = [', promoteStart)
+  const promote = source.slice(promoteStart, promoteEnd)
+  const fleetValidation = promote.indexOf('assertPassedFleetPublication({')
+  assert.ok(promoteStart >= 0 && promoteEnd > promoteStart)
+  assert.ok(fleetValidation >= 0)
+  for (const publisher of [
+    'promoteStagedDraft({',
+    'publishRustCrates({',
+    'publishZapstore({',
+  ]) {
+    assert.ok(fleetValidation < promote.indexOf(publisher), publisher)
+  }
+
+  const publication = readFileSync(
+    join(process.cwd(), 'scripts/fleet-release-publication-lib.mjs'),
+    'utf8',
+  )
+  assert.match(publication, /fleet_release_result_replay\.py/)
+})
+
 test('staged draft publication publishes only the already validated bytes', () => {
   const root = mkdtempSync(join(tmpdir(), 'nostr-vpn-staged-draft-test-'))
   const repo = join(root, 'repo')
@@ -506,11 +565,25 @@ test('staged draft publication publishes only the already validated bytes', () =
     'local-release.mjs',
     'local-release-lib.mjs',
     'release-artifact-provenance-lib.mjs',
+    'fleet-release-publication-lib.mjs',
+    'fleet-release-preparer-lib.mjs',
     'verify-release-publication-bundle.mjs',
     'startos-release.mjs',
   ]) {
     copyFileSync(join(process.cwd(), 'scripts', name), join(scripts, name))
   }
+  for (const [name, contents] of [
+    ['fleet_release_canary_ssh_driver.py', '#!/usr/bin/env python3\n'],
+    ['fleet_release_canary_remote_linux.py', '# linux adapter\n'],
+    ['fleet_release_canary_remote_windows.ps1', '# windows adapter\n'],
+    [
+      'fleet_release_result_replay.py',
+      '#!/usr/bin/env python3\nraise SystemExit(0)\n',
+    ],
+  ]) {
+    writeFileSync(join(scripts, name), contents)
+  }
+  chmodSync(join(scripts, 'fleet_release_canary_ssh_driver.py'), 0o755)
   mkdirSync(join(repo, 'startos', 'versions'), { recursive: true })
   writeFileSync(
     join(repo, 'startos', 'versions', 'current.ts'),
@@ -641,6 +714,171 @@ test('staged draft publication publishes only the already validated bytes', () =
     )].map((path) => [path, readFileSync(join(stage, path))]),
   )
 
+  const fleetDir = join(root, 'fleet')
+  mkdirSync(fleetDir)
+  const fleetBound = (path) => {
+    const canonicalPath = realpathSync(path)
+    const bytes = readFileSync(canonicalPath)
+    return {
+      path: canonicalPath,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      size: bytes.length,
+    }
+  }
+  const installDiscovery = join(fleetDir, 'install-discovery.json')
+  const currentDiscovery = join(fleetDir, 'current-discovery.json')
+  writeFileSync(installDiscovery, '{"real":true}\n')
+  writeFileSync(currentDiscovery, '{"real":true}\n')
+  const fleetTarget = {
+    id: 'linux-guest',
+    role: 'linux-guest',
+    platform: 'linux',
+    arch: 'x86_64',
+    transport: { kind: 'ssh', hostAlias: 'private-linux' },
+    deployment: {
+      binaryPath: '/usr/local/bin/nvpn',
+      probeBinaryPath: '/usr/local/bin/nvpn',
+      configPath: '/etc/nvpn/config.toml',
+      serviceName: 'nvpn.service',
+    },
+    expected: {
+      machineIdentitySha256: '1'.repeat(64),
+      configSha256: '2'.repeat(64),
+      signedRosterStoreSha256: '3'.repeat(64),
+      rosterIdentitySha256: '4'.repeat(64),
+      rosterPeerCount: 1,
+      localDeviceIdentitySha256: '5'.repeat(64),
+      networkIdentitySha256: '6'.repeat(64),
+    },
+    checks: {
+      payloadTarget: '10.44.0.2',
+      dnsName: 'example.com',
+      directUrl: 'https://example.com/',
+    },
+  }
+  const rosterSnapshot = {
+    schema: 1,
+    authority: 'nvpn-known-host-roster-v1',
+    capturedAt: 123,
+    roles: [
+      {
+        id: fleetTarget.id,
+        disposition: 'install',
+        reason: 'reachable supported roster host',
+        observedAt: 123,
+        machineIdentitySha256:
+          fleetTarget.expected.machineIdentitySha256,
+        evidence: fleetBound(installDiscovery),
+        target: fleetTarget,
+      },
+      {
+        id: 'current-mac',
+        disposition: 'excluded-current-mac',
+        reason: 'release host is explicitly excluded',
+        observedAt: 123,
+        machineIdentitySha256: '7'.repeat(64),
+        evidence: fleetBound(currentDiscovery),
+        target: null,
+      },
+    ],
+  }
+  const rosterPath = join(fleetDir, 'roster.json')
+  writeFileSync(rosterPath, `${JSON.stringify(rosterSnapshot)}\n`)
+  const fleetInventory = buildFrozenFleetInventory({
+    snapshot: rosterSnapshot,
+    snapshotBinding: fleetBound(rosterPath),
+    currentMacMachineIdentitySha256: '7'.repeat(64),
+    parallelProbes: 1,
+  })
+  const inventoryPath = join(fleetDir, 'inventory.json')
+  writeFileSync(inventoryPath, `${JSON.stringify(fleetInventory)}\n`)
+  const fleetSource = {
+    appGitSha: commit,
+    appGitTree: tree,
+    appVersion: '4.1.5',
+    fipsGitSha: '8'.repeat(40),
+    fipsGitTree: '9'.repeat(40),
+    fipsVersion: '0.4.45',
+  }
+  const fleetDriverPath = join(
+    scripts,
+    'fleet_release_canary_ssh_driver.py',
+  )
+  const fleetHelpers = [
+    'fleet_release_canary_remote_linux.py',
+    'fleet_release_canary_remote_windows.ps1',
+  ].map((name) => fleetBound(join(scripts, name)))
+  const fleetManifest = {
+    schema: 2,
+    inventorySha256: fleetBound(inventoryPath).sha256,
+    ...fleetSource,
+    driver: {
+      ...fleetBound(fleetDriverPath),
+      protocol: 'nvpn-fleet-ssh-transactional-v2',
+      helpers: fleetHelpers,
+    },
+    gateEvidence: [
+      {
+        id: 'complete-release-gate',
+        kind: 'staged-release-attestation-v1',
+        ...fleetBound(join(stage, 'release.json')),
+        receiptPaths: {
+          releaseGateSummary: {
+            path: join(fleetDir, 'unused-summary.json'),
+            sha256: 'a'.repeat(64),
+            size: 1,
+          },
+          platforms: {},
+        },
+      },
+    ],
+    artifacts: [{ id: 'linux-x86_64' }],
+  }
+  const fleetManifestPath = join(fleetDir, 'manifest.json')
+  writeFileSync(fleetManifestPath, `${JSON.stringify(fleetManifest)}\n`)
+  const probePath = join(fleetDir, 'probe-raw.json')
+  const installPath = join(fleetDir, 'install-raw.json')
+  writeFileSync(probePath, `${JSON.stringify({
+    schema: 2,
+    targetId: fleetTarget.id,
+    realChecks: true,
+    mocked: false,
+    remoteBuildPerformed: false,
+  })}\n`)
+  writeFileSync(installPath, `${JSON.stringify({
+    schema: 2,
+    targetId: fleetTarget.id,
+    realChecks: true,
+    mocked: false,
+    remoteBuildPerformed: false,
+    installAuthorized: true,
+    transaction: { state: 'committed' },
+    ...fleetSource,
+  })}\n`)
+  const fleetResult = {
+    schema: 2,
+    mode: 'execute',
+    status: 'passed',
+    manifestSha256: fleetBound(fleetManifestPath).sha256,
+    inventorySha256: fleetBound(inventoryPath).sha256,
+    driverSha256: fleetBound(fleetDriverPath).sha256,
+    releaseGateManifestSha256:
+      fleetBound(join(stage, 'release.json')).sha256,
+    ...fleetSource,
+    targets: [
+      {
+        id: fleetTarget.id,
+        status: 'passed',
+        evidence: {
+          probe: fleetBound(probePath),
+          install: fleetBound(installPath),
+        },
+      },
+    ],
+  }
+  const fleetResultPath = join(fleetDir, 'result.json')
+  writeFileSync(fleetResultPath, `${JSON.stringify(fleetResult)}\n`)
+
   const fakeCid = `nhash1${'q'.repeat(58)}`
   const htree = join(bin, 'htree')
   writeFileSync(
@@ -692,6 +930,12 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     stage,
     '--release-tree',
     'releases/test',
+    '--fleet-result',
+    fleetResultPath,
+    '--fleet-manifest',
+    fleetManifestPath,
+    '--fleet-inventory',
+    inventoryPath,
   ]
   const releaseOptions = {
     cwd: repo,
@@ -1258,9 +1502,9 @@ test('release script binds Android publication to the physical-gate receipt and 
     localRelease,
     /publishZapstore\(\{[\s\S]*?apkPath:\s*promoted\.stagedAndroidApkPath/,
   )
-  assert.match(
+  assert.doesNotMatch(
     localRelease,
-    /publishZapstore\(\{[\s\S]*?apkPath:\s*stagedRelease\.stagedAndroidApkPath/,
+    /apkPath:\s*stagedRelease\.stagedAndroidApkPath/,
   )
   assert.doesNotMatch(
     localRelease,
