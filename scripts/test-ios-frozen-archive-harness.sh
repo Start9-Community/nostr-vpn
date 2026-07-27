@@ -397,6 +397,7 @@ join = {
     },
     "contentWidth": {
         "minimumRequiredBasisPoints": 9800,
+        "maximumAllowedBasisPoints": 10000,
         "androidObservedBasisPoints": 10000,
         "iosObservedBasisPoints": 10000,
     },
@@ -504,7 +505,8 @@ desktop_join = {
     "acceptedRosterRetainedAcrossRelaunch": True,
     "desktopRelaunchDurability": True,
     "pixelRelaunchDurability": True,
-    "iphoneRelaunchDurability": True,
+    "desktopAdminIphoneJoinerRelaunchDurable": True,
+    "iphoneAdminDesktopJoinerRelaunchDurable": True,
     "deliveryDeadlineMilliseconds": 15000,
     "deliveryMilliseconds": {
         "macOS-admin-to-Android-manual": 100,
@@ -650,6 +652,23 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 value = json.loads(path.read_text(encoding="utf-8"))
+value["contentWidth"]["androidObservedBasisPoints"] = 10001
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted an impossible oversized QR ratio" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
 del value["qr"]["iphoneJoinerRelaunchDurable"]
 path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -672,6 +691,23 @@ path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 PY
 if seal_gate >/dev/null 2>&1; then
   echo "Frozen iOS gate accepted desktop/mobile evidence without the iPhone joiner role" >&2
+  exit 1
+fi
+cp "$DESKTOP_MOBILE_JOIN_CLEAN" "$DESKTOP_MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$DESKTOP_MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["iphoneAdminDesktopJoinerRelaunchDurable"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted iPhone-admin evidence without relaunch durability" >&2
   exit 1
 fi
 cp "$DESKTOP_MOBILE_JOIN_CLEAN" "$DESKTOP_MOBILE_JOIN_RECEIPT"

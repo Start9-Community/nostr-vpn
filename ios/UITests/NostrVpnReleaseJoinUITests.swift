@@ -11,6 +11,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     private let app = XCUIApplication()
     private let environment = ProcessInfo.processInfo.environment
     private let qrContentWidthMinimumBasisPoints = 9_800
+    private let qrContentWidthMaximumBasisPoints = 10_000
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -153,6 +154,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Manual admin add did not produce an exact roster row"
         )
         XCTAssertGreaterThanOrEqual(rosterParticipantCount(), before + 1)
+        requireAcceptedRoster(
+            joiner,
+            relaunch: true,
+            failureMessage: "Manual admin add did not retain the joining device's signed roster"
+        )
+        emit("NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE=\(joiner)")
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(joiner)")
     }
 
@@ -213,6 +220,11 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             ratioBasisPoints,
             qrContentWidthMinimumBasisPoints,
             "Join QR did not occupy the mobile content width"
+        )
+        XCTAssertLessThanOrEqual(
+            ratioBasisPoints,
+            qrContentWidthMaximumBasisPoints,
+            "Join QR exceeded its mobile content width"
         )
         return ratioBasisPoints
     }

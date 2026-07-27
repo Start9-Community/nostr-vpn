@@ -460,10 +460,13 @@ function requireMobileJoinReceipt({
     || receipt.manual?.acceptedRosterOnly !== true
     || receipt.manual?.joinerRelaunchDurable !== true
     || contentWidth?.minimumRequiredBasisPoints !== 9800
+    || contentWidth?.maximumAllowedBasisPoints !== 10000
     || !Number.isSafeInteger(contentWidth?.androidObservedBasisPoints)
     || contentWidth.androidObservedBasisPoints < 9800
+    || contentWidth.androidObservedBasisPoints > 10000
     || !Number.isSafeInteger(contentWidth?.iosObservedBasisPoints)
     || contentWidth.iosObservedBasisPoints < 9800
+    || contentWidth.iosObservedBasisPoints > 10000
   ) {
     throw new Error(
       'Android/iOS mobile join receipt is not strict public-UI/relaunch evidence.',
@@ -549,7 +552,8 @@ function requireMacosJoinReceipt({
     || receipt.iphoneAdminDesktopJoiner !== true
     || receipt.exactRosterOnBothSides !== true
     || receipt.acceptedRosterRetainedAcrossRelaunch !== true
-    || receipt.iphoneRelaunchDurability !== true
+    || receipt.desktopAdminIphoneJoinerRelaunchDurable !== true
+    || receipt.iphoneAdminDesktopJoinerRelaunchDurable !== true
     || receipt.artifact?.artifactReceiptSha256 !== artifactReceiptSha256
     || receipt.artifact?.appExecutableSha256
       !== artifactReceipt.appExecutableSha256

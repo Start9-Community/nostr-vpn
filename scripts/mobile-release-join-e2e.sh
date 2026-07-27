@@ -431,12 +431,14 @@ if set(timings) != expected_timings or any(
 ):
     raise SystemExit("mobile join delivery timing receipt is incomplete or slow")
 minimum_qr_content_width_bps = 9_800
+maximum_qr_content_width_bps = 10_000
 qr_content_width_bps = {
     "androidObservedBasisPoints": int(android_qr_content_width_bps),
     "iosObservedBasisPoints": int(ios_qr_content_width_bps),
 }
 if any(
     observed < minimum_qr_content_width_bps
+    or observed > maximum_qr_content_width_bps
     for observed in qr_content_width_bps.values()
 ):
     raise SystemExit("mobile join QR did not fill its content width")
@@ -479,6 +481,7 @@ with open(path, "w", encoding="utf-8") as handle:
             "deliveryDeadlineMilliseconds": 15_000,
             "contentWidth": {
                 "minimumRequiredBasisPoints": minimum_qr_content_width_bps,
+                "maximumAllowedBasisPoints": maximum_qr_content_width_bps,
                 **qr_content_width_bps,
             },
             "qr": {

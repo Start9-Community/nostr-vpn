@@ -138,6 +138,7 @@ for required in (
     'element("join-request-qr-content")',
     "NVPN_RELEASE_JOIN_QR_CONTENT_WIDTH_BPS",
     "qrContentWidthMinimumBasisPoints",
+    "qrContentWidthMaximumBasisPoints",
     "NVPN_RELEASE_JOIN_LIFECYCLE_READY=1",
     "NVPN_RELEASE_JOIN_QR_DECODED=1",
     "NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS",
@@ -249,6 +250,43 @@ if ios_qr_joiner_phase.index(
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE"
 ) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
+
+macos_iphone_joiner_phase = desktop.split(
+    "# macOS admin -> physical iPhone joiner.", 1
+)[1].split("# Physical iPhone admin -> macOS joiner.", 1)[0]
+for required in (
+    "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
+    '[[ "$iphone_joiner_relaunch_admin" == "$DESKTOP_IOS_ADMIN_ID" ]]',
+):
+    if required not in macos_iphone_joiner_phase:
+        raise SystemExit(
+            f"macOS/iPhone gate does not consume iPhone-joiner relaunch proof: {required}"
+        )
+
+ios_manual_admin = ios_test.split(
+    "func testManualAdminAddRequiresRosterProgress()", 1
+)[1].split("func testReportJoinerPublicIdentity()", 1)[0]
+for required in (
+    "requireAcceptedRoster(",
+    "relaunch: true",
+    "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE",
+):
+    if required not in ios_manual_admin:
+        raise SystemExit(
+            f"iPhone admin does not prove roster durability after relaunch: {required}"
+        )
+
+macos_iphone_admin_phase = desktop.split(
+    "# Physical iPhone admin -> macOS joiner.", 1
+)[1].split("python3 -", 1)[0]
+for required in (
+    "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE",
+    '[[ "$ios_admin_relaunch_joiner" == "$DESKTOP_IOS_JOINER_ID" ]]',
+):
+    if required not in macos_iphone_admin_phase:
+        raise SystemExit(
+            f"macOS/iPhone gate does not consume iPhone-admin relaunch proof: {required}"
+        )
 if "NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET" not in artifacts:
     raise SystemExit("Physical app-state reset lacks an explicit destructive opt-in")
 
@@ -311,6 +349,7 @@ for required in (
     "Join request QR code",
     "release_join_android_assert_qr_full_width",
     "RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS",
+    "RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS",
     'resource "join-request-qr-content" width',
     "RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS",
     "release_join_android_assert_pending_qr",
@@ -334,7 +373,9 @@ for source, label in (
 for required in (
     '"contentWidth": {',
     "minimum_qr_content_width_bps = 9_800",
+    "maximum_qr_content_width_bps = 10_000",
     '"minimumRequiredBasisPoints": minimum_qr_content_width_bps',
+    '"maximumAllowedBasisPoints": maximum_qr_content_width_bps',
     '"androidObservedBasisPoints"',
     '"iosObservedBasisPoints"',
 ):
@@ -346,6 +387,7 @@ for source, label in (
 ):
     for required in (
         "minimumRequiredBasisPoints",
+        "maximumAllowedBasisPoints",
         "androidObservedBasisPoints",
         "iosObservedBasisPoints",
         "androidJoinerRelaunchDurable",
@@ -501,6 +543,8 @@ for required in (
     "iPhone-admin-to-macOS-manual",
     "desktopAdminIphoneJoiner",
     "iphoneAdminDesktopJoiner",
+    "desktopAdminIphoneJoinerRelaunchDurable",
+    "iphoneAdminDesktopJoinerRelaunchDurable",
     "NVPN_RELEASE_JOIN_IOS_RECEIPT",
     "release_join_validate_ios_reuse",
 ):
@@ -515,6 +559,8 @@ for source, label in (
     for required in (
         "desktopAdminIphoneJoiner",
         "iphoneAdminDesktopJoiner",
+        "desktopAdminIphoneJoinerRelaunchDurable",
+        "iphoneAdminDesktopJoinerRelaunchDurable",
         "macOS-admin-to-iPhone-manual",
         "iPhone-admin-to-macOS-manual",
     ):
@@ -526,6 +572,13 @@ if "desktop_mobile_join" not in local_release:
     raise SystemExit(
         "Local release platform evidence does not include the iPhone/macOS receipt"
     )
+for source, label in (
+    (desktop, "macOS/iPhone receipt producer"),
+    (ios_frozen_gate, "frozen iOS gate"),
+    (release_provenance, "release provenance"),
+):
+    if "iphoneRelaunchDurability" in source:
+        raise SystemExit(f"{label} retains ambiguous iPhone relaunch semantics")
 for required in (
     "ditto -x -k",
     "macos_release_join_artifact.py\" validate",
@@ -606,6 +659,11 @@ PY
     echo "Android full-width gate did not record the observed content ratio" >&2
     exit 1
   }
+  fake_qr_width=404
+  if release_join_android_assert_qr_full_width 2>/dev/null; then
+    echo "Android full-width gate accepted a QR wider than its content" >&2
+    exit 1
+  fi
 )
 
 (

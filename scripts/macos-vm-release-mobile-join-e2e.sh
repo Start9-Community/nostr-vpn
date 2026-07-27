@@ -15,6 +15,8 @@ source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-macos-release-app-ownership.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-vm-identity.sh"
 load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
@@ -62,6 +64,7 @@ MAC_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
   echo "Set NVPN_MACOS_SSH_HOST for Release desktop/mobile join coverage" >&2
   exit 2
 }
+macos_vm_require_isolated_target "$MAC_HOST"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 REMOTE_SCRIPT="./scripts/macos-release-mobile-join-remote.sh"
@@ -529,6 +532,16 @@ release_join_ios_finish_test \
     echo "iPhone did not receive and retain the macOS signed roster" >&2
     exit 1
   }
+iphone_joiner_relaunch_admin="$(
+  ios_marker_value_from \
+    "$ios_join_log" NVPN_RELEASE_JOIN_RELAUNCH_DURABLE
+)"
+[[ "$iphone_joiner_relaunch_admin" == "$DESKTOP_IOS_ADMIN_ID" ]] \
+  || {
+    echo "iPhone relaunch evidence did not name the exact macOS admin" >&2
+    exit 1
+  }
+DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1
 desktop_ios_completed_ms="$(release_join_now_ms)"
 assert_delivery_deadline \
   "$desktop_ios_submitted_ms" "$desktop_ios_completed_ms" \
@@ -560,6 +573,16 @@ release_join_ios_run_test \
 ios_admin_submitted_ms="$(
   ios_marker_value_from "$ios_admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
 )"
+ios_admin_relaunch_joiner="$(
+  ios_marker_value_from \
+    "$ios_admin_log" NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE
+)"
+[[ "$ios_admin_relaunch_joiner" == "$DESKTOP_IOS_JOINER_ID" ]] \
+  || {
+    echo "iPhone admin relaunch evidence did not name the exact macOS joiner" >&2
+    exit 1
+  }
+IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE=1
 finish_remote "$desktop_ios_join_log" \
   || {
     echo "macOS joiner did not receive the iPhone's signed roster" >&2
@@ -579,6 +602,8 @@ python3 - \
   "$RESULT_DIR/macos/delivery-times.tsv" \
   "$RESULT_DIR/macos/artifact.json" \
   "$NVPN_RELEASE_JOIN_IOS_RECEIPT" \
+  "$DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE" \
+  "$IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE" \
   "$APP_GIT_SHA" \
   "$APP_GIT_TREE" <<'PY'
 import hashlib
@@ -604,7 +629,17 @@ artifact_path = pathlib.Path(sys.argv[3])
 artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
 ios_artifact_path = pathlib.Path(sys.argv[4])
 ios_artifact = json.loads(ios_artifact_path.read_text(encoding="utf-8"))
-app_sha, app_tree = sys.argv[5:]
+(
+    desktop_admin_iphone_joiner_relaunch,
+    iphone_admin_desktop_joiner_relaunch,
+    app_sha,
+    app_tree,
+) = sys.argv[5:]
+if (
+    desktop_admin_iphone_joiner_relaunch != "1"
+    or iphone_admin_desktop_joiner_relaunch != "1"
+):
+    raise SystemExit("macOS/iPhone directional relaunch evidence is incomplete")
 if (
     artifact.get("receiptSchema") != 1
     or artifact.get("appGitSha") != app_sha
@@ -672,7 +707,10 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             "acceptedRosterRetainedAcrossRelaunch": True,
             "desktopRelaunchDurability": True,
             "pixelRelaunchDurability": True,
-            "iphoneRelaunchDurability": True,
+            "desktopAdminIphoneJoinerRelaunchDurable":
+                desktop_admin_iphone_joiner_relaunch == "1",
+            "iphoneAdminDesktopJoinerRelaunchDurable":
+                iphone_admin_desktop_joiner_relaunch == "1",
             "deliveryDeadlineMilliseconds": 15_000,
             "deliveryMilliseconds": timings,
         },

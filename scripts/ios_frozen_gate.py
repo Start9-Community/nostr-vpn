@@ -453,12 +453,15 @@ def validate_mobile_join_receipt(
         and manual.get("joinerRelaunchDurable") is True
         and isinstance(content_width, dict)
         and content_width.get("minimumRequiredBasisPoints") == 9_800
+        and content_width.get("maximumAllowedBasisPoints") == 10_000
         and isinstance(
             content_width.get("androidObservedBasisPoints"), int
         )
         and content_width.get("androidObservedBasisPoints") >= 9_800
+        and content_width.get("androidObservedBasisPoints") <= 10_000
         and isinstance(content_width.get("iosObservedBasisPoints"), int)
-        and content_width.get("iosObservedBasisPoints") >= 9_800,
+        and content_width.get("iosObservedBasisPoints") >= 9_800
+        and content_width.get("iosObservedBasisPoints") <= 10_000,
         "mobile join receipt lacks strict public-UI/relaunch semantics",
     )
 
@@ -565,7 +568,8 @@ def validate_desktop_mobile_join_receipt(
         and receipt.get("acceptedRosterRetainedAcrossRelaunch") is True
         and receipt.get("desktopRelaunchDurability") is True
         and receipt.get("pixelRelaunchDurability") is True
-        and receipt.get("iphoneRelaunchDurability") is True
+        and receipt.get("desktopAdminIphoneJoinerRelaunchDurable") is True
+        and receipt.get("iphoneAdminDesktopJoinerRelaunchDurable") is True
         and receipt.get("deliveryDeadlineMilliseconds") == 15_000
         and isinstance(artifact, dict)
         and artifact.get("appGitSha") == mobile_artifact.get("appGitSha")

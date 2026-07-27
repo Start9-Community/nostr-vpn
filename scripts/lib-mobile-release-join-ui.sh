@@ -8,6 +8,7 @@ RELEASE_JOIN_ANDROID_UI_XML=""
 RELEASE_JOIN_IOS_TEST_PID=""
 RELEASE_JOIN_IOS_TEST_LOG=""
 RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
+RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
 
 release_join_now_ms() {
@@ -189,7 +190,8 @@ release_join_android_assert_qr_full_width() {
     && "$content_width" =~ ^[1-9][0-9]*$ ]] \
     || return 1
   ratio_bps=$((qr_width * 10000 / content_width))
-  ((ratio_bps >= RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS)) || {
+  ((ratio_bps >= RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS \
+    && ratio_bps <= RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS)) || {
     echo "Android join QR does not fill its content width ($qr_width/$content_width px)" >&2
     return 1
   }
