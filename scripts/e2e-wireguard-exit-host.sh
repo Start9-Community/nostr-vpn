@@ -11,27 +11,41 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PROFILE="${NVPN_WG_EXIT_HOST_PROFILE:-debug}"
-BUILD_ARGS=(--locked -p nvpn --bin nvpn)
-OUTPUT_ARGS=(nvpn)
-case "$PROFILE" in
-  release)
-    BUILD_ARGS+=(--release)
-    OUTPUT_ARGS+=(--release)
-    ;;
-  debug)
-    ;;
-  *)
-    echo "Unsupported NVPN_WG_EXIT_HOST_PROFILE=$PROFILE; expected debug or release" >&2
-    exit 2
-    ;;
-esac
-
-cargo build "${BUILD_ARGS[@]}"
-NVPN_BIN="$(./scripts/build-output-path --raw "${OUTPUT_ARGS[@]}")"
+NVPN_BIN="${NVPN_WG_EXIT_HOST_BINARY:-}"
+VM_IMPORT_ONLY="${NVPN_MACOS_VM_IMPORT_ONLY:-0}"
+if [[ -z "$NVPN_BIN" ]]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      echo "VM import-only WireGuard exit requires NVPN_WG_EXIT_HOST_BINARY." >&2
+      exit 2
+      ;;
+  esac
+  BUILD_ARGS=(--locked -p nvpn --bin nvpn)
+  OUTPUT_ARGS=(nvpn)
+  case "$PROFILE" in
+    release)
+      BUILD_ARGS+=(--release)
+      OUTPUT_ARGS+=(--release)
+      ;;
+    debug)
+      ;;
+    *)
+      echo "Unsupported NVPN_WG_EXIT_HOST_PROFILE=$PROFILE; expected debug or release" >&2
+      exit 2
+      ;;
+  esac
+  cargo build "${BUILD_ARGS[@]}"
+  NVPN_BIN="$(./scripts/build-output-path --raw "${OUTPUT_ARGS[@]}")"
+fi
 if [[ ! -x "$NVPN_BIN" ]]; then
-  echo "Built nvpn binary not found at $NVPN_BIN" >&2
+  echo "nvpn binary not found at $NVPN_BIN" >&2
   exit 1
 fi
+case "$VM_IMPORT_ONLY:$(uname -s)" in
+  1:Darwin|true:Darwin|TRUE:Darwin|True:Darwin|yes:Darwin|YES:Darwin|Yes:Darwin|on:Darwin|ON:Darwin|On:Darwin)
+    codesign --verify --strict "$NVPN_BIN"
+    ;;
+esac
 
 TEST_ARGS=(
   wg-upstream-test

@@ -35,12 +35,19 @@ esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NVPN_BIN="${NVPN_E2E_BINARY:-}"
+VM_IMPORT_ONLY="${NVPN_MACOS_VM_IMPORT_ONLY:-0}"
 IDLE_CPU_MAX_PERCENT="${NVPN_MACOS_DAEMON_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_PERCENT:-2}}"
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_MACOS_DAEMON_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-60}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_MACOS_DAEMON_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-15}}"
 IDLE_CPU_RESULT="${NVPN_MACOS_DAEMON_IDLE_CPU_RESULT:-$ROOT/artifacts/macos-daemon-idle-cpu.json}"
 
 if [ -z "$NVPN_BIN" ]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      echo "VM import-only macOS service gate requires NVPN_E2E_BINARY." >&2
+      exit 2
+      ;;
+  esac
   echo "Building nvpn (release)..."
   (cd "$ROOT" && cargo build --release -p nvpn)
   NVPN_BIN="$("$ROOT/scripts/build-output-path" --raw nvpn --release)"
@@ -49,6 +56,11 @@ if [ ! -x "$NVPN_BIN" ]; then
   echo "FAIL: $NVPN_BIN missing after build"
   exit 1
 fi
+case "$VM_IMPORT_ONLY" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    codesign --verify --strict "$NVPN_BIN"
+    ;;
+esac
 
 # Use a config path with a unique suffix so the service label resolves to
 # to.nostrvpn.nvpn.<suffix> and we don't touch a real user's service.

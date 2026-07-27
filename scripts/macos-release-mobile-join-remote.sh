@@ -4,10 +4,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR:-$ROOT/artifacts/macos-release-mobile-join}"
-APP_PATH="$ROOT/dist/macos/Nostr VPN.app"
+PACKAGE="$ARTIFACT_DIR/imported"
+APP_PATH="$PACKAGE/Nostr VPN.app"
 APP_EXE="$APP_PATH/Contents/MacOS/Nostr VPN"
+MANUAL_JOIN_FIXTURE="$PACKAGE/fixtures/desktop_manual_join_e2e_fixture"
+MANUAL_JOIN_DRIVER="$PACKAGE/drivers/desktop-manual-join-ax"
+SERVICE_TOGGLE_DRIVER="$PACKAGE/drivers/macos-service-toggle-ax"
 FIPS_PATH="${NVPN_FIPS_REPO_PATH:-$ROOT/../fips}"
-ARCHIVE="$ARTIFACT_DIR/macos-release-app.zip"
+ARCHIVE="$ARTIFACT_DIR/macos-release-gate.zip"
 RECEIPT="$ARTIFACT_DIR/artifact.json"
 EXPECTED_APP="${NVPN_EXPECTED_APP_GIT_SHA:-}"
 EXPECTED_APP_TREE="${NVPN_EXPECTED_APP_GIT_TREE:-}"
@@ -39,8 +43,35 @@ load_app() {
   codesign --verify --deep --strict "$APP_PATH"
 }
 
-launch_app() {
+verify_import() {
+  [[ -s "$ARCHIVE" && -s "$RECEIPT" && -d "$PACKAGE" ]] || {
+    echo "Host-built macOS Release gate package is incomplete" >&2
+    return 1
+  }
+  python3 "$ROOT/scripts/macos_release_join_artifact.py" validate \
+    --receipt "$RECEIPT" \
+    --package "$PACKAGE" \
+    --app "$APP_PATH" \
+    --archive "$ARCHIVE" \
+    --manual-join-fixture "$MANUAL_JOIN_FIXTURE" \
+    --manual-join-driver "$MANUAL_JOIN_DRIVER" \
+    --service-toggle-driver "$SERVICE_TOGGLE_DRIVER" \
+    --app-root "$ROOT" \
+    --fips-root "$FIPS_PATH" \
+    --expected-app-head "$EXPECTED_APP" \
+    --expected-app-tree "$EXPECTED_APP_TREE" \
+    --expected-fips-head "$EXPECTED_FIPS" \
+    --expected-fips-tree "$EXPECTED_FIPS_TREE" \
+    --expected-fips-version "$EXPECTED_FIPS_VERSION" \
+    --expected-team "$EXPECTED_SIGNING_TEAM" \
+    --expected-identity-sha1 "$EXPECTED_SIGNING_IDENTITY" \
+    --expected-signer-sha256 "$EXPECTED_SIGNER_CERT_SHA256" \
+    --verification-output "$ARTIFACT_DIR/verification.json"
   load_app
+}
+
+launch_app() {
+  verify_import
   pkill -x "Nostr VPN" >/dev/null 2>&1 || true
   sleep 0.25
   (
@@ -65,7 +96,7 @@ launch_app() {
 run_driver() {
   local phase="$1" value1="$2" value2="$3"
   launch_app
-  /usr/bin/swift "$ROOT/scripts/desktop-manual-join-ax.swift" \
+  "$MANUAL_JOIN_DRIVER" \
     "$APP_PID" "$phase" "$value1" "$value2" "Nostr VPN"
   stop_app
 }
@@ -73,7 +104,7 @@ run_driver() {
 run_driver_hold() {
   local phase="$1" value1="$2" value2="$3"
   launch_app
-  /usr/bin/swift "$ROOT/scripts/desktop-manual-join-ax.swift" \
+  "$MANUAL_JOIN_DRIVER" \
     "$APP_PID" "$phase" "$value1" "$value2" "Nostr VPN"
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_APP_HOLDING=1"
   sleep "${NVPN_MACOS_RELEASE_JOIN_HOLD_SECS:-20}"
@@ -82,8 +113,8 @@ run_driver_hold() {
 
 stage() {
   stop_app
-  rm -rf "$ARTIFACT_DIR" "$APP_PATH"
-  mkdir -p "$ARTIFACT_DIR" "$(dirname "$APP_PATH")"
+  rm -rf "$ARTIFACT_DIR"
+  mkdir -p "$ARTIFACT_DIR"
 }
 
 prepare() {
@@ -92,32 +123,20 @@ prepare() {
     echo "Host-built macOS Release app archive or receipt is missing" >&2
     return 1
   }
-  rm -rf "$import_dir" "$APP_PATH"
-  mkdir -p "$import_dir" "$(dirname "$APP_PATH")"
+  rm -rf "$import_dir" "$PACKAGE"
+  mkdir -p "$import_dir"
   ditto -x -k "$ARCHIVE" "$import_dir"
-  [[ -d "$import_dir/Nostr VPN.app" \
+  [[ -d "$import_dir/package/Nostr VPN.app" \
+    && -x "$import_dir/package/fixtures/desktop_manual_join_e2e_fixture" \
+    && -x "$import_dir/package/drivers/desktop-manual-join-ax" \
+    && -x "$import_dir/package/drivers/macos-service-toggle-ax" \
     && "$(find "$import_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]] || {
     echo "Imported macOS Release archive has an unexpected root layout" >&2
     return 1
   }
-  mv "$import_dir/Nostr VPN.app" "$APP_PATH"
+  mv "$import_dir/package" "$PACKAGE"
   rmdir "$import_dir"
-  python3 "$ROOT/scripts/macos_release_join_artifact.py" validate \
-    --receipt "$RECEIPT" \
-    --app "$APP_PATH" \
-    --archive "$ARCHIVE" \
-    --app-root "$ROOT" \
-    --fips-root "$FIPS_PATH" \
-    --expected-app-head "$EXPECTED_APP" \
-    --expected-app-tree "$EXPECTED_APP_TREE" \
-    --expected-fips-head "$EXPECTED_FIPS" \
-    --expected-fips-tree "$EXPECTED_FIPS_TREE" \
-    --expected-fips-version "$EXPECTED_FIPS_VERSION" \
-    --expected-team "$EXPECTED_SIGNING_TEAM" \
-    --expected-identity-sha1 "$EXPECTED_SIGNING_IDENTITY" \
-    --expected-signer-sha256 "$EXPECTED_SIGNER_CERT_SHA256" \
-    --verification-output "$ARTIFACT_DIR/verification.json"
-  load_app
+  verify_import
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_ARTIFACT_READY=1"
 }
 
@@ -127,6 +146,10 @@ case "${1:-}" in
     ;;
   prepare)
     prepare
+    ;;
+  verify-import)
+    verify_import
+    echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_ARTIFACT_VERIFIED=1"
     ;;
   create-admin)
     [[ $# == 2 ]] || { echo "usage: $0 create-admin <network-name>" >&2; exit 2; }
@@ -148,7 +171,7 @@ case "${1:-}" in
     pkill -x "Nostr VPN" >/dev/null 2>&1 || true
     ;;
   *)
-    echo "usage: $0 <stage|prepare|create-admin|manual-join|admin-add|verify|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|verify-import|create-admin|manual-join|admin-add|verify|cleanup>" >&2
     exit 2
     ;;
 esac

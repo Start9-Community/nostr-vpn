@@ -335,6 +335,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-release-artifact-reuse-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
+  ./scripts/test-macos-vm-import-only-harness.sh
   ./scripts/test-desktop-network-handoff-harness.sh
   ./scripts/test-ios-frozen-archive-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
@@ -647,19 +648,19 @@ macos_vm_reachable() {
 
 macos_platform_lane_requested() {
   ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E:-required}" \
-    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E:-required}"
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_SERVICE_TOGGLE_E2E:-required}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E:-auto}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_GUI_SMOKE:-auto}" \
+    || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_MACOS_DAEMON_IDLE_CPU:-auto}"
 }
 
 prepare_macos_platform_lane_sync() {
   MACOS_PLATFORM_LANE_PRE_SYNCED=0
   macos_platform_lane_requested || return 0
   if macos_vm_reachable; then
-    if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
-      NVPN_MACOS_SYNC_PATH_DEPS=1 \
-        ./scripts/macos-vm-git-sync.sh "${NVPN_MACOS_SSH_HOST:-}"
-    else
-      ./scripts/macos-vm-git-sync.sh "${NVPN_MACOS_SSH_HOST:-}"
-    fi
+    NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only \
+      ./scripts/macos-vm-release-mobile-join-e2e.sh \
+        "${NVPN_MACOS_SSH_HOST:-}"
     MACOS_PLATFORM_LANE_PRE_SYNCED=1
   fi
 }
@@ -736,11 +737,6 @@ run_macos_service_toggle_gate() {
 run_macos_platform_lane() {
   prepare_macos_platform_lane_sync
   run_macos_manual_join_ui_gate
-  if ! release_gate_mode_disabled \
-    "${NVPN_RELEASE_GATE_MACOS_MANUAL_JOIN_UI_E2E:-required}"
-  then
-    export NVPN_MACOS_SERVICE_TOGGLE_REUSE_BUILD=1
-  fi
   run_macos_service_toggle_gate
 }
 
@@ -1681,6 +1677,7 @@ main() {
 
   local macos_platform_lane=""
   if macos_platform_lane_requested; then
+    export NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=1
     release_gate_parallel_start "macOS platform UI" run_macos_platform_lane
     macos_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
   fi

@@ -95,10 +95,14 @@ def codesign_value(details: str, label: str) -> str:
     raise ValueError(f"macOS signature has no {label}")
 
 
-def inspect_signature(app: pathlib.Path) -> dict[str, str]:
-    run(["codesign", "--verify", "--deep", "--strict", str(app)])
+def inspect_signature(path: pathlib.Path, *, deep: bool = False) -> dict[str, str]:
+    verify = ["codesign", "--verify"]
+    if deep:
+        verify.append("--deep")
+    verify.extend(["--strict", str(path)])
+    run(verify)
     completed = subprocess.run(
-        ["codesign", "-dvvv", str(app)],
+        ["codesign", "-dvvv", str(path)],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -112,7 +116,7 @@ def inspect_signature(app: pathlib.Path) -> dict[str, str]:
                 "codesign",
                 "-d",
                 f"--extract-certificates={prefix}",
-                str(app),
+                str(path),
             ]
         )
         certificate = pathlib.Path(f"{prefix}0")
@@ -128,15 +132,46 @@ def inspect_signature(app: pathlib.Path) -> dict[str, str]:
     }
 
 
+def verify_signature(
+    signature: dict[str, str],
+    *,
+    expected_team: str,
+    expected_identity: str,
+    expected_signer: str,
+    label: str,
+) -> None:
+    if signature["team"] != expected_team:
+        raise ValueError(f"{label} has the wrong signing team")
+    if signature["certificateSha1"] != expected_identity:
+        raise ValueError(f"{label} has the wrong signing identity")
+    if signature["certificateSha256"] != expected_signer:
+        raise ValueError(f"{label} has the wrong signer certificate")
+    if not signature["authority"].startswith("Developer ID Application: "):
+        raise ValueError(f"{label} is not Developer ID signed")
+
+
 def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
+    package = pathlib.Path(args.package).resolve()
     app = pathlib.Path(args.app).resolve()
     archive = pathlib.Path(args.archive).resolve()
+    fixture = pathlib.Path(args.manual_join_fixture).resolve()
+    manual_driver = pathlib.Path(args.manual_join_driver).resolve()
+    service_driver = pathlib.Path(args.service_toggle_driver).resolve()
     app_root = pathlib.Path(args.app_root).resolve()
     fips_root = pathlib.Path(args.fips_root).resolve()
     executable = app / "Contents" / "MacOS" / "Nostr VPN"
-    for path in (archive, executable):
+    for path in (archive, executable, fixture, manual_driver, service_driver):
         if not path.is_file():
             raise ValueError(f"required macOS Release artifact is missing: {path}")
+    if not package.is_dir():
+        raise ValueError(f"macOS Release package is missing: {package}")
+    for path in (app, fixture, manual_driver, service_driver):
+        try:
+            path.relative_to(package)
+        except ValueError as error:
+            raise ValueError(
+                f"macOS Release package does not contain {path}"
+            ) from error
     app_source = git_snapshot(app_root)
     fips_source = git_snapshot(fips_root)
     expected_identity = normalized_hex(
@@ -145,7 +180,10 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     expected_signer = normalized_hex(
         args.expected_signer_sha256, 64, "signer certificate SHA-256"
     )
-    signature = inspect_signature(app)
+    signature = inspect_signature(app, deep=True)
+    fixture_signature = inspect_signature(fixture)
+    manual_driver_signature = inspect_signature(manual_driver)
+    service_driver_signature = inspect_signature(service_driver)
     expected = {
         "appGitSha": args.expected_app_head,
         "appGitTree": args.expected_app_tree,
@@ -165,25 +203,44 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 f"{name} mismatch: expected {value!r}, got {actual[name]!r}"
             )
-    if signature["team"] != args.expected_team:
-        raise ValueError("macOS Release app has the wrong signing team")
-    if signature["certificateSha1"] != expected_identity:
-        raise ValueError("macOS Release app has the wrong signing identity")
-    if signature["certificateSha256"] != expected_signer:
-        raise ValueError("macOS Release app has the wrong signer certificate")
-    if not signature["authority"].startswith("Developer ID Application: "):
-        raise ValueError("macOS Release app is not Developer ID signed")
+    verify_signature(
+        signature,
+        expected_team=args.expected_team,
+        expected_identity=expected_identity,
+        expected_signer=expected_signer,
+        label="macOS Release app",
+    )
+    for label, support_signature in (
+        ("macOS manual-join fixture", fixture_signature),
+        ("macOS manual-join AX driver", manual_driver_signature),
+        ("macOS service-toggle AX driver", service_driver_signature),
+    ):
+        verify_signature(
+            support_signature,
+            expected_team=args.expected_team,
+            expected_identity=expected_identity,
+            expected_signer=expected_signer,
+            label=label,
+        )
     bundle_manifest = tree_sha256(app)
+    package_manifest = tree_sha256(package)
     return {
         "receiptSchema": 1,
-        "artifactType": "macOS company Developer ID Release app",
+        "artifactType": "macOS company Developer ID Release gate package",
         "archiveSha256": sha256_file(archive),
         "archiveSize": archive.stat().st_size,
+        "packageTreeSha256": package_manifest,
         "appBundleName": app.name,
         "appBundleTreeSha256": bundle_manifest,
         "bundleManifestSha256": bundle_manifest,
         "appExecutableSha256": sha256_file(executable),
         "appCodeDirectoryHash": signature["cdhash"],
+        "manualJoinFixtureSha256": sha256_file(fixture),
+        "manualJoinFixtureCodeDirectoryHash": fixture_signature["cdhash"],
+        "manualJoinDriverSha256": sha256_file(manual_driver),
+        "manualJoinDriverCodeDirectoryHash": manual_driver_signature["cdhash"],
+        "serviceToggleDriverSha256": sha256_file(service_driver),
+        "serviceToggleDriverCodeDirectoryHash": service_driver_signature["cdhash"],
         "appGitSha": app_source["head"],
         "appGitTree": app_source["tree"],
         "appSourceManifestSha256": app_source["manifest"],
@@ -223,7 +280,11 @@ def validate_receipt(args: argparse.Namespace) -> None:
         "remoteImportVerified": True,
         "artifactReceiptSha256": sha256_file(receipt_path),
         "archiveSha256": observed["archiveSha256"],
+        "packageTreeSha256": observed["packageTreeSha256"],
         "bundleManifestSha256": observed["bundleManifestSha256"],
+        "manualJoinFixtureSha256": observed["manualJoinFixtureSha256"],
+        "manualJoinDriverSha256": observed["manualJoinDriverSha256"],
+        "serviceToggleDriverSha256": observed["serviceToggleDriverSha256"],
         "appGitSha": observed["appGitSha"],
         "appGitTree": observed["appGitTree"],
         "fipsGitSha": observed["fipsGitSha"],
@@ -244,8 +305,12 @@ def validate_receipt(args: argparse.Namespace) -> None:
 def add_common_arguments(command: argparse.ArgumentParser) -> None:
     for name in (
         "receipt",
+        "package",
         "app",
         "archive",
+        "manual_join_fixture",
+        "manual_join_driver",
+        "service_toggle_driver",
         "app_root",
         "fips_root",
         "expected_app_head",

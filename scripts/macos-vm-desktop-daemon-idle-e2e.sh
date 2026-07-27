@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-vm-imported-release.sh"
 SSH_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
@@ -14,21 +16,17 @@ LOCAL_RESULT="${ARTIFACT_ROOT:-$ROOT/artifacts}/macos-daemon-idle-cpu.json"
   exit 2
 }
 
-case "${NVPN_MACOS_SKIP_GIT_SYNC:-0}" in
-  1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
-  *) "$ROOT/scripts/macos-vm-git-sync.sh" "$SSH_HOST" ;;
-esac
-
+macos_vm_prepare_or_verify_imported_release "$ROOT" "$SSH_HOST"
+package="$(macos_vm_imported_release_package "$GUEST_REPO")"
 remote_env=(
+  NVPN_MACOS_VM_IMPORT_ONLY=1
+  "NVPN_E2E_BINARY=$package/Nostr VPN.app/Contents/Resources/nvpn"
   NVPN_RUN_MACOS_SERVICE_E2E=1
   NVPN_MACOS_DAEMON_IDLE_CPU_RESULT="$REMOTE_RESULT"
   NVPN_MACOS_DAEMON_IDLE_CPU_MAX_PERCENT="${NVPN_MACOS_DAEMON_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_PERCENT:-2}}"
   NVPN_MACOS_DAEMON_IDLE_CPU_SAMPLE_SECONDS="${NVPN_MACOS_DAEMON_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-60}}"
   NVPN_MACOS_DAEMON_IDLE_CPU_SETTLE_SECONDS="${NVPN_MACOS_DAEMON_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-15}}"
 )
-if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
-  remote_env+=(NVPN_FIPS_REPO_PATH="$GUEST_SRC_ROOT/fips")
-fi
 remote_command="cd '$GUEST_REPO' && mkdir -p artifacts && env"
 for assignment in "${remote_env[@]}"; do
   remote_command+=" '$assignment'"

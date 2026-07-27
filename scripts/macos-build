@@ -191,6 +191,7 @@ commands:
   macos-xcodeproj           regenerate the Xcode project
   macos-build               build the development app with signing disabled
   macos-app                 build a release app bundle, signed when configured
+  macos-gate-support        build the macOS release-gate fixture and AX drivers
   macos-notarize            notarize and staple the release app bundle
   macos-dmg                 build the signed/notarized release DMG
   macos-release-artifacts   build the release DMG and updater .app.tar.gz
@@ -515,6 +516,71 @@ run_macos_build() {
     -destination "platform=macOS,arch=$host_arch" \
     CODE_SIGNING_ALLOWED=NO \
     build
+}
+
+run_macos_gate_support() {
+  local output_dir="${NVPN_MACOS_GATE_SUPPORT_DIR:-$BUILD_DIR/gate-support}"
+  local fixture_target
+  local swift_target
+  local sdkroot
+  local min_version="${NVPN_MACOS_MIN_VERSION:-14.0}"
+
+  PROFILE=release
+  HOST_TARGET="${NVPN_MACOS_HOST_TARGET:-aarch64-apple-darwin}"
+  prepare_cargo_config
+
+  case "$HOST_TARGET" in
+    aarch64-apple-darwin)
+      swift_target="arm64-apple-macos${min_version}"
+      ;;
+    x86_64-apple-darwin)
+      swift_target="x86_64-apple-macos${min_version}"
+      ;;
+    *)
+      echo "Unsupported macOS release-gate host target: $HOST_TARGET" >&2
+      exit 2
+      ;;
+  esac
+
+  CARGO_TARGET_DIR="$(macos_rust_target_root)" \
+    "${cargo_prefix[@]}" build --release --target "$HOST_TARGET" \
+      -p nostr-vpn-core --example desktop_manual_join_e2e_fixture
+  fixture_target="$(
+    printf '%s/%s/release/examples/desktop_manual_join_e2e_fixture' \
+      "$(macos_rust_target_root)" "$HOST_TARGET"
+  )"
+  [[ -x "$fixture_target" ]] || {
+    echo "macOS release-gate fixture build produced no executable" >&2
+    exit 1
+  }
+
+  rm -rf "$output_dir"
+  mkdir -p "$output_dir/fixtures" "$output_dir/drivers"
+  ditto "$fixture_target" \
+    "$output_dir/fixtures/desktop_manual_join_e2e_fixture"
+
+  sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
+  MACOSX_DEPLOYMENT_TARGET="$min_version" \
+    xcrun --sdk macosx swiftc \
+      -O \
+      -whole-module-optimization \
+      -sdk "$sdkroot" \
+      -target "$swift_target" \
+      -o "$output_dir/drivers/desktop-manual-join-ax" \
+      "$ROOT/scripts/desktop-manual-join-ax.swift"
+  MACOSX_DEPLOYMENT_TARGET="$min_version" \
+    xcrun --sdk macosx swiftc \
+      -O \
+      -whole-module-optimization \
+      -sdk "$sdkroot" \
+      -target "$swift_target" \
+      -o "$output_dir/drivers/macos-service-toggle-ax" \
+      "$ROOT/scripts/macos-service-toggle-ax.swift"
+  chmod 755 \
+    "$output_dir/fixtures/desktop_manual_join_e2e_fixture" \
+    "$output_dir/drivers/desktop-manual-join-ax" \
+    "$output_dir/drivers/macos-service-toggle-ax"
+  printf '%s\n' "$output_dir"
 }
 
 release_version_tag() {
@@ -896,6 +962,7 @@ case "${1:-}" in
   macos-xcodeproj) run_macos_xcodeproj ;;
   macos-build) run_macos_build ;;
   macos-app) run_macos_app ;;
+  macos-gate-support) run_macos_gate_support ;;
   macos-notarize) run_macos_notarize ;;
   macos-dmg) run_macos_dmg ;;
   macos-release-artifacts) run_macos_release_artifacts ;;

@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$ROOT/artifacts}"
 APP_PATH="${NVPN_MACOS_APP_PATH:-${1:-}}"
+VM_IMPORT_ONLY="${NVPN_MACOS_VM_IMPORT_ONLY:-0}"
 STARTUP_TIMEOUT_SECONDS="${NVPN_MACOS_APP_SMOKE_STARTUP_TIMEOUT_SECONDS:-30}"
 ALIVE_SECONDS="${NVPN_MACOS_APP_SMOKE_ALIVE_SECONDS:-5}"
 RESULT_PATH="$ARTIFACT_ROOT/macos-app-launch-smoke.json"
@@ -23,6 +24,12 @@ fi
 mkdir -p "$ARTIFACT_ROOT"
 
 if [[ -z "$APP_PATH" ]]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      echo "VM import-only app smoke requires NVPN_MACOS_APP_PATH and NVPN_MACOS_APP_SMOKE_BUILD=0." >&2
+      exit 2
+      ;;
+  esac
   case "${NVPN_MACOS_APP_SMOKE_BUILD:-1}" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Set NVPN_MACOS_APP_PATH or pass a .app path when NVPN_MACOS_APP_SMOKE_BUILD=0." >&2
@@ -35,10 +42,19 @@ if [[ -z "$APP_PATH" ]]; then
   esac
 fi
 
+case "$VM_IMPORT_ONLY:${NVPN_MACOS_APP_SMOKE_BUILD:-1}" in
+  1:0|true:0|TRUE:0|True:0|yes:0|YES:0|Yes:0|on:0|ON:0|On:0) ;;
+  1:*|true:*|TRUE:*|True:*|yes:*|YES:*|Yes:*|on:*|ON:*|On:*)
+    echo "VM import-only app smoke requires NVPN_MACOS_APP_SMOKE_BUILD=0." >&2
+    exit 2
+    ;;
+esac
+
 if [[ ! -d "$APP_PATH" ]]; then
   echo "macOS app bundle not found: $APP_PATH" >&2
   exit 1
 fi
+codesign --verify --deep --strict "$APP_PATH"
 
 executable="$(
   /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist" 2>/dev/null \

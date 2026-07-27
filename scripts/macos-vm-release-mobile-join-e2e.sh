@@ -16,6 +16,15 @@ load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
 
+ARTIFACT_ACTION="${NVPN_MACOS_RELEASE_ARTIFACT_ACTION:-full}"
+case "$ARTIFACT_ACTION" in
+  full|prepare-only|verify-only) ;;
+  *)
+    echo "Unsupported NVPN_MACOS_RELEASE_ARTIFACT_ACTION=$ARTIFACT_ACTION" >&2
+    exit 2
+    ;;
+esac
+
 MACOS_SIGNING_IDENTITY="$(
   printf '%s' "${MACOS_SIGNING_IDENTITY:-}" \
     | tr -d ':[:space:]' \
@@ -56,8 +65,15 @@ GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 REMOTE_SCRIPT="./scripts/macos-release-mobile-join-remote.sh"
 RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}"
 PRIVATE_DIR="$RESULT_DIR/.desktop-private-$$"
-HOST_APP="$ROOT/dist/macos/Nostr VPN.app"
-HOST_ARCHIVE="$PRIVATE_DIR/macos-release-app.zip"
+HOST_BUILD_ROOT="$PRIVATE_DIR/source"
+HOST_FIPS_ROOT="$PRIVATE_DIR/fips"
+HOST_APP="$HOST_BUILD_ROOT/dist/macos/Nostr VPN.app"
+HOST_PACKAGE="$PRIVATE_DIR/package"
+HOST_SUPPORT="$PRIVATE_DIR/support"
+HOST_FIXTURE="$HOST_SUPPORT/fixtures/desktop_manual_join_e2e_fixture"
+HOST_MANUAL_DRIVER="$HOST_SUPPORT/drivers/desktop-manual-join-ax"
+HOST_SERVICE_DRIVER="$HOST_SUPPORT/drivers/macos-service-toggle-ax"
+HOST_ARCHIVE="$PRIVATE_DIR/macos-release-gate.zip"
 HOST_RECEIPT="$PRIVATE_DIR/artifact.json"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
@@ -65,22 +81,12 @@ RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
 mkdir -p "$PRIVATE_DIR" "$RESULT_DIR/macos"
 chmod 700 "$PRIVATE_DIR"
 
-ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
-[[ -n "$ANDROID_REQUESTED" ]] || {
-  echo "Set NVPN_ANDROID_SERIAL to the exact physical Android phone" >&2
-  exit 2
-}
-ANDROID_SERIAL_SELECTED="$(
-  select_physical_android_serial \
-    "${ADB_BIN:-adb}" \
-    "$ANDROID_REQUESTED"
-)"
-ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
 export RESULT_DIR PRIVATE_DIR RELEASE_JOIN_UI_WAIT_SECS
 export RELEASE_JOIN_DELIVERY_WAIT_SECS RELEASE_JOIN_CAMERA_WAIT_SECS
 release_join_require_clean_fips
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+APP_SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
 release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 remote_pid=""
@@ -152,30 +158,75 @@ finish_remote() {
 
 prepare_host_artifact() {
   local build_log="$RESULT_DIR/macos/host-build.log"
+  local support
+  rm -rf "$HOST_PACKAGE" "$HOST_SUPPORT"
   rm -f "$HOST_ARCHIVE" "$HOST_RECEIPT"
-  if ! MACOS_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" \
-    NVPN_BUILD_GIT_SHA="$APP_GIT_SHA" \
-    NVPN_FIPS_REPO_PATH="$NVPN_FIPS_REPO_PATH" \
-    NVPN_MACOS_RUST_PROFILE=release \
-    NVPN_MACOS_XCODE_CONFIGURATION=Release \
-    NVPN_MACOS_RUST_TARGETS=aarch64-apple-darwin \
-    NVPN_MACOS_CARGO_LOCKED=1 \
-    NVPN_MACOS_REQUIRE_SIGNING=1 \
-    "$ROOT/scripts/macos-build" macos-app >"$build_log" 2>&1
+  if ! (
+    cd "$HOST_BUILD_ROOT"
+    MACOS_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" \
+      NVPN_BUILD_GIT_SHA="$APP_GIT_SHA" \
+      SOURCE_DATE_EPOCH="$APP_SOURCE_DATE_EPOCH" \
+      NVPN_FIPS_REPO_PATH="$HOST_FIPS_ROOT" \
+      NVPN_MACOS_RUST_PROFILE=release \
+      NVPN_MACOS_XCODE_CONFIGURATION=Release \
+      NVPN_MACOS_RUST_TARGETS=aarch64-apple-darwin \
+      NVPN_MACOS_REQUIRE_SIGNING=1 \
+      "$HOST_BUILD_ROOT/scripts/macos-build" macos-app
+    NVPN_FIPS_REPO_PATH="$HOST_FIPS_ROOT" \
+      SOURCE_DATE_EPOCH="$APP_SOURCE_DATE_EPOCH" \
+      NVPN_MACOS_HOST_TARGET=aarch64-apple-darwin \
+      NVPN_MACOS_GATE_SUPPORT_DIR="$HOST_SUPPORT" \
+      "$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support
+  ) >"$build_log" 2>&1
   then
     tail -n 120 "$build_log" >&2 || true
     return 1
   fi
-  release_join_assert_fips_unchanged
+  [[ "$(git -C "$HOST_FIPS_ROOT" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \
+    && "$(git -C "$HOST_FIPS_ROOT" rev-parse HEAD^{tree})" == "$RELEASE_JOIN_FIPS_TREE" \
+    && -z "$(git -C "$HOST_FIPS_ROOT" status --porcelain --untracked-files=all)" ]] || {
+    echo "Isolated FIPS source changed while building Release join artifacts" >&2
+    return 1
+  }
   release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
   codesign --verify --deep --strict "$HOST_APP"
-  ditto -c -k --sequesterRsrc --keepParent "$HOST_APP" "$HOST_ARCHIVE"
+  for support in \
+    "$HOST_FIXTURE" \
+    "$HOST_MANUAL_DRIVER" \
+    "$HOST_SERVICE_DRIVER"
+  do
+    [[ -x "$support" ]] || {
+      echo "Host-built macOS Release gate support is missing: $support" >&2
+      return 1
+    }
+    codesign --force --timestamp --options runtime \
+      --sign "$MACOS_SIGNING_IDENTITY" "$support"
+    codesign --verify --strict "$support"
+  done
+
+  mkdir -p "$HOST_PACKAGE/fixtures" "$HOST_PACKAGE/drivers"
+  ditto "$HOST_APP" "$HOST_PACKAGE/Nostr VPN.app"
+  ditto "$HOST_FIXTURE" \
+    "$HOST_PACKAGE/fixtures/desktop_manual_join_e2e_fixture"
+  ditto "$HOST_MANUAL_DRIVER" \
+    "$HOST_PACKAGE/drivers/desktop-manual-join-ax"
+  ditto "$HOST_SERVICE_DRIVER" \
+    "$HOST_PACKAGE/drivers/macos-service-toggle-ax"
+  ditto -c -k --sequesterRsrc --keepParent \
+    "$HOST_PACKAGE" "$HOST_ARCHIVE"
   python3 "$ROOT/scripts/macos_release_join_artifact.py" create \
     --receipt "$HOST_RECEIPT" \
-    --app "$HOST_APP" \
+    --package "$HOST_PACKAGE" \
+    --app "$HOST_PACKAGE/Nostr VPN.app" \
     --archive "$HOST_ARCHIVE" \
+    --manual-join-fixture \
+      "$HOST_PACKAGE/fixtures/desktop_manual_join_e2e_fixture" \
+    --manual-join-driver \
+      "$HOST_PACKAGE/drivers/desktop-manual-join-ax" \
+    --service-toggle-driver \
+      "$HOST_PACKAGE/drivers/macos-service-toggle-ax" \
     --app-root "$ROOT" \
-    --fips-root "$NVPN_FIPS_REPO_PATH" \
+    --fips-root "$HOST_FIPS_ROOT" \
     --expected-app-head "$APP_GIT_SHA" \
     --expected-app-tree "$APP_GIT_TREE" \
     --expected-fips-head "$RELEASE_JOIN_FIPS_SHA" \
@@ -186,18 +237,72 @@ prepare_host_artifact() {
     --expected-signer-sha256 "$EXPECTED_MACOS_CERT"
 }
 
-prepare_host_artifact
-NVPN_MACOS_SYNC_PATH_DEPS=1 \
-  NVPN_FIPS_REPO_PATH="$NVPN_FIPS_REPO_PATH" \
-  "$ROOT/scripts/macos-vm-git-sync.sh" "$MAC_HOST"
-remote stage
-scp -q "$HOST_ARCHIVE" "$HOST_RECEIPT" \
-  "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/"
-remote prepare | tee "$RESULT_DIR/macos/prepare.log"
-cp "$HOST_RECEIPT" "$RESULT_DIR/macos/artifact.json"
+prepare_host_sources() {
+  rm -rf "$HOST_BUILD_ROOT" "$HOST_FIPS_ROOT"
+  mkdir -p "$HOST_BUILD_ROOT"
+  git -C "$ROOT" archive --format=tar "$APP_GIT_SHA" \
+    | tar -x -C "$HOST_BUILD_ROOT"
+  git clone --quiet --no-checkout --no-hardlinks \
+    "$NVPN_FIPS_REPO_PATH" "$HOST_FIPS_ROOT"
+  git -C "$HOST_FIPS_ROOT" checkout --quiet --detach "$RELEASE_JOIN_FIPS_SHA"
+  [[ "$(git -C "$HOST_FIPS_ROOT" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \
+    && "$(git -C "$HOST_FIPS_ROOT" rev-parse HEAD^{tree})" == "$RELEASE_JOIN_FIPS_TREE" \
+    && -z "$(git -C "$HOST_FIPS_ROOT" status --porcelain --untracked-files=all)" ]] || {
+    echo "Could not isolate exact FIPS source for macOS Release artifacts" >&2
+    return 1
+  }
+}
+
+if [[ "$ARTIFACT_ACTION" != "verify-only" ]]; then
+  prepare_host_sources
+fi
+SYNC_FIPS_ROOT="$NVPN_FIPS_REPO_PATH"
+if [[ "$ARTIFACT_ACTION" != "verify-only" ]]; then
+  SYNC_FIPS_ROOT="$HOST_FIPS_ROOT"
+fi
+
+case "${NVPN_MACOS_SKIP_GIT_SYNC:-0}" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
+  *)
+    NVPN_MACOS_SYNC_PATH_DEPS=1 \
+      NVPN_FIPS_REPO_PATH="$SYNC_FIPS_ROOT" \
+      "$ROOT/scripts/macos-vm-git-sync.sh" "$MAC_HOST"
+    ;;
+esac
+
+case "$ARTIFACT_ACTION" in
+  verify-only)
+    remote verify-import | tee "$RESULT_DIR/macos/verify-import.log"
+    ;;
+  full|prepare-only)
+    prepare_host_artifact
+    remote stage
+    scp -q "$HOST_ARCHIVE" "$HOST_RECEIPT" \
+      "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/"
+    remote prepare | tee "$RESULT_DIR/macos/prepare.log"
+    cp "$HOST_RECEIPT" "$RESULT_DIR/macos/artifact.json"
+    ;;
+esac
 scp -q \
   "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/verification.json" \
   "$RESULT_DIR/macos/verification.json"
+
+if [[ "$ARTIFACT_ACTION" != "full" ]]; then
+  echo "MACOS_VM_IMPORTED_RELEASE_ARTIFACT_OK"
+  exit 0
+fi
+
+ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
+[[ -n "$ANDROID_REQUESTED" ]] || {
+  echo "Set NVPN_ANDROID_SERIAL to the exact physical Android phone" >&2
+  exit 2
+}
+ANDROID_SERIAL_SELECTED="$(
+  select_physical_android_serial \
+    "${ADB_BIN:-adb}" \
+    "$ANDROID_REQUESTED"
+)"
+ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
 
 # macOS admin -> physical Android joiner.
 release_join_reset_android_state

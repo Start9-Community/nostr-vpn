@@ -3,7 +3,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOST_TARGET="${NVPN_MACOS_HOST_TARGET:-$(rustc -vV | awk '/host:/ {print $2}')}"
 ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT/artifacts/macos-manual-join-ui}"
 E2E_ROOT="$ARTIFACT_DIR/app-data"
 ADMIN_DATA_DIR="$E2E_ROOT/admin"
@@ -12,6 +11,9 @@ RESULT="$ARTIFACT_DIR/result.json"
 APP_LOG="$ARTIFACT_DIR/app.log"
 TIMEOUT_SECS="${NVPN_DESKTOP_MANUAL_JOIN_TIMEOUT_SECS:-20}"
 APP_PATH="${NVPN_MACOS_APP_PATH:-}"
+FIXTURE="${NVPN_DESKTOP_MANUAL_JOIN_FIXTURE:-}"
+DRIVER="${NVPN_DESKTOP_MANUAL_JOIN_DRIVER:-}"
+VM_IMPORT_ONLY="${NVPN_MACOS_VM_IMPORT_ONLY:-0}"
 app_pid=""
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -19,7 +21,20 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 ulimit -n "${NVPN_MACOS_OPEN_FILES_LIMIT:-8192}"
-if ! /usr/bin/swift -e 'import ApplicationServices; exit(AXIsProcessTrusted() ? 0 : 1)'; then
+if [[ -z "$DRIVER" ]]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      echo "VM import-only macOS manual join requires NVPN_DESKTOP_MANUAL_JOIN_DRIVER." >&2
+      exit 2
+      ;;
+  esac
+  DRIVER="$ROOT/scripts/desktop-manual-join-ax.swift"
+fi
+if [[ ! -x "$DRIVER" ]]; then
+  echo "macOS manual-join AX driver is missing: $DRIVER" >&2
+  exit 1
+fi
+if ! "$DRIVER" --check-accessibility >/dev/null; then
   echo "macOS manual-join UI e2e requires Accessibility permission for the invoking terminal." >&2
   exit 1
 fi
@@ -38,6 +53,12 @@ mkdir -p "$ARTIFACT_DIR" "$E2E_ROOT"
 rm -f "$RESULT" "$APP_LOG" "$ARTIFACT_DIR"/*.png
 
 if [[ -z "$APP_PATH" ]]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      echo "VM import-only macOS manual join requires NVPN_MACOS_APP_PATH." >&2
+      exit 2
+      ;;
+  esac
   NVPN_MACOS_RUST_PROFILE=release \
     NVPN_MACOS_XCODE_CONFIGURATION=Release \
     "$ROOT/scripts/macos-build" macos-build
@@ -47,6 +68,7 @@ if [[ ! -d "$APP_PATH" ]]; then
   echo "macOS release app not found: $APP_PATH" >&2
   exit 1
 fi
+codesign --verify --deep --strict "$APP_PATH"
 
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
 APP_EXE="$APP_PATH/Contents/MacOS/$executable"
@@ -80,9 +102,18 @@ then
   exit 1
 fi
 
-FIXTURE="$ROOT/macos/.build/cargo-target/$HOST_TARGET/release/examples/desktop_manual_join_e2e_fixture"
-case "${NVPN_DESKTOP_MANUAL_JOIN_SKIP_FIXTURE_BUILD:-0}" in
-  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+if [[ -z "$FIXTURE" ]]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      echo "VM import-only macOS manual join requires NVPN_DESKTOP_MANUAL_JOIN_FIXTURE." >&2
+      exit 2
+      ;;
+  esac
+  HOST_TARGET="${NVPN_MACOS_HOST_TARGET:-$(rustc -vV | awk '/host:/ {print $2}')}"
+  FIXTURE="$ROOT/macos/.build/cargo-target/$HOST_TARGET/release/examples/desktop_manual_join_e2e_fixture"
+fi
+case "$VM_IMPORT_ONLY:${NVPN_DESKTOP_MANUAL_JOIN_SKIP_FIXTURE_BUILD:-0}" in
+  1:*|true:*|TRUE:*|True:*|yes:*|YES:*|Yes:*|on:*|ON:*|On:*|*:1|*:true|*:TRUE|*:True|*:yes|*:YES|*:Yes|*:on|*:ON|*:On)
     [[ -x "$FIXTURE" ]] || {
       echo "Prebuilt macOS manual-join fixture is missing: $FIXTURE" >&2
       exit 1
@@ -92,6 +123,12 @@ case "${NVPN_DESKTOP_MANUAL_JOIN_SKIP_FIXTURE_BUILD:-0}" in
     CARGO_TARGET_DIR="$ROOT/macos/.build/cargo-target" \
       cargo build -q --release --target "$HOST_TARGET" -p nostr-vpn-core \
         --example desktop_manual_join_e2e_fixture
+    ;;
+esac
+case "$VM_IMPORT_ONLY" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    codesign --verify --strict "$FIXTURE"
+    codesign --verify --strict "$DRIVER"
     ;;
 esac
 fixture_args=(
@@ -150,7 +187,7 @@ launch_app() {
 }
 
 launch_app "$JOINER_DATA_DIR"
-/usr/bin/swift "$ROOT/scripts/desktop-manual-join-ax.swift" \
+"$DRIVER" \
   "$app_pid" joiner "$ADMIN_NPUB" "$MESH_NETWORK_ID" "$executable"
 wait_for_fixture verify-joiner joiner
 if ! screencapture -x "$ARTIFACT_DIR/joiner.png"; then
@@ -159,7 +196,7 @@ fi
 stop_app
 
 launch_app "$ADMIN_DATA_DIR"
-/usr/bin/swift "$ROOT/scripts/desktop-manual-join-ax.swift" \
+"$DRIVER" \
   "$app_pid" admin "$JOINER_NPUB" "$JOINER_ALIAS" "$executable"
 wait_for_fixture verify-admin admin
 if ! screencapture -x "$ARTIFACT_DIR/admin.png"; then

@@ -180,6 +180,13 @@ func cancelAuthorizationPrompt(
 
 func run() throws {
     let args = CommandLine.arguments
+    if args.count == 2 && args[1] == "--check-accessibility" {
+        guard AXIsProcessTrusted() else {
+            throw DriverError.accessibilityPermission
+        }
+        print("MACOS_AX_ACCESSIBILITY_READY")
+        return
+    }
     guard args.count == 3, let pid = pid_t(args[1]) else {
         throw DriverError.usage
     }

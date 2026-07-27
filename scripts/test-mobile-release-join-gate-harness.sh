@@ -298,7 +298,12 @@ for required in (
     ):
         raise SystemExit(f"Desktop Release provenance gate is missing {required}")
 for required in (
-    '"$ROOT/scripts/macos-build" macos-app',
+    'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
+    '"$HOST_BUILD_ROOT/scripts/macos-build" macos-app',
+    '"$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support',
+    "desktop_manual_join_e2e_fixture",
+    "desktop-manual-join-ax",
+    "macos-service-toggle-ax",
     "ditto -c -k --sequesterRsrc --keepParent",
     "macos_release_join_artifact.py\" create",
     "scp -q",
@@ -308,6 +313,7 @@ for required in (
 for required in (
     "ditto -x -k",
     "macos_release_join_artifact.py\" validate",
+    "verify-import",
     "verification.json",
 ):
     if required not in desktop_remote:
@@ -321,9 +327,14 @@ if '"find-certificate", "-c"' in desktop_artifact:
     raise SystemExit("macOS Release artifact helper may not select a certificate by name")
 for required in (
     '"security", "find-certificate", "-a", "-p"',
-    '"codesign", "--verify", "--deep", "--strict"',
+    'verify = ["codesign", "--verify"]',
+    'verify.append("--deep")',
     '"--extract-certificates=',
     "tree_sha256(app)",
+    "tree_sha256(package)",
+    "manualJoinFixtureSha256",
+    "manualJoinDriverSha256",
+    "serviceToggleDriverSha256",
     '"builtOnHost": True',
     '"builtOnTestVm": False',
     '"remoteImportVerified": True',
