@@ -68,8 +68,11 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   'release_join_require_clean_fips' \
   'CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package3"' \
   'HOST_BUILD_LOCK="$CACHE_ROOT/.host-linux-vm-bundle.lock"' \
+  'HOST_BUILD_LOCK_HELD=0' \
   'exec 9>"$HOST_BUILD_LOCK"' \
   '/usr/bin/lockf 9' \
+  'HOST_BUILD_LOCK_HELD=1' \
+  'if [[ "$HOST_BUILD_LOCK_HELD" == "1" ]]; then' \
   'if verify_bundle; then' \
   'Dockerfile.linux-vm-gate' \
   'verify-cargo-path-patch-lock.py' \
@@ -78,7 +81,6 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '--validate /output/linux-Cargo.lock.committed Cargo.lock' \
   'TARGET_CACHE_GENERATION="serialized-v2-rust${RUST_TOOLCHAIN//./-}"' \
   '"$TARGET_CACHE_ROOT/root-target:/target-root"' \
-  '"$TARGET_CACHE_ROOT/linux-target:/target-linux"' \
   '--name "$CONTAINER_NAME"' \
   '--label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID"' \
   'host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"' \
@@ -99,7 +101,7 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '/target-root/release/nvpn' \
   '/target-root/x86_64-unknown-linux-musl/release/nvpn' \
   '/target-root/release/examples/desktop_manual_join_e2e_fixture' \
-  '/target-linux/release/nostr-vpn' \
+  '/target-root/release/nostr-vpn' \
   'cargo deb --no-build --no-strip' \
   '/output/nostr-vpn.deb' \
   '/output/nvpn-x86_64-unknown-linux-musl.tar.gz' \
@@ -108,6 +110,9 @@ if grep -Fq '"$CACHE_ROOT/build-cache/root-target:/target-root"' "$PREPARER" \
   || grep -Fq '"$CACHE_ROOT/build-cache/linux-target:/target-linux"' "$PREPARER"
 then
   fail "host Linux builder still uses the unversioned, unserialized Cargo targets"
+fi
+if grep -Fq '/target-linux' "$PREPARER"; then
+  fail "host Linux builder still recompiles GTK dependencies in a second target"
 fi
 if grep -Fq 'CONTAINER_CID_FILE' "$PREPARER"; then
   fail "host Linux builder has two competing identities for its deterministic container"
@@ -118,13 +123,27 @@ import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 initial_verify = text.index("if verify_bundle; then")
+lock_unowned = text.index("HOST_BUILD_LOCK_HELD=0")
 lock_open = text.index('exec 9>"$HOST_BUILD_LOCK"')
 lock_acquire = text.index("/usr/bin/lockf 9")
+lock_owned = text.index("HOST_BUILD_LOCK_HELD=1")
 second_verify = text.index("if verify_bundle; then", initial_verify + 1)
 temp_create = text.index('TEMP_DIR="$(mktemp -d')
-if not initial_verify < lock_open < lock_acquire < second_verify < temp_create:
+if not (
+    lock_unowned
+    < initial_verify
+    < lock_open
+    < lock_acquire
+    < lock_owned
+    < second_verify
+    < temp_create
+):
     raise SystemExit(
         "host Linux builder does not re-verify the bundle under its kernel lock"
+    )
+if text.count('if [[ "$HOST_BUILD_LOCK_HELD" == "1" ]]; then') < 2:
+    raise SystemExit(
+        "pre-lock cleanup can remove the authoritative builder container"
     )
 container_create = text.index('--name "$CONTAINER_NAME"')
 container_cleanup = text.index("host_linux_builder_stop_container", second_verify)
@@ -141,6 +160,10 @@ if not stale_cleanup < target_mount:
     raise SystemExit(
         "host Linux builder can mount its persistent target cache before stale "
         "server-side builders are removed"
+    )
+if text.count("export CARGO_TARGET_DIR=/target-root") != 2:
+    raise SystemExit(
+        "root and GTK builds do not share the one serialized native target"
     )
 PY
 require_tokens "$ISOLATION_LIB" "validated exact-container cleanup" \

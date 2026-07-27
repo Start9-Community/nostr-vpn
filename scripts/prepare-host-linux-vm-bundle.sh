@@ -121,13 +121,16 @@ LINUX_REALIZED_CARGO_LOCK_SHA256="$(
 )"
 TEMP_DIR=""
 CONTAINER_NAME="nvpn-linux-bundle-${BUILD_CACHE_ID:0:24}"
+HOST_BUILD_LOCK_HELD=0
 
 cleanup() {
   local status="$?" cleanup_failed=0
   trap - EXIT HUP INT TERM
-  host_linux_builder_stop_container \
-    "$CONTAINER_NAME" "$BUILD_CACHE_ID" \
-    || cleanup_failed=1
+  if [[ "$HOST_BUILD_LOCK_HELD" == "1" ]]; then
+    host_linux_builder_stop_container \
+      "$CONTAINER_NAME" "$BUILD_CACHE_ID" \
+      || cleanup_failed=1
+  fi
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
     find "$TEMP_DIR" -xdev -depth -mindepth 1 -delete || cleanup_failed=1
     rmdir "$TEMP_DIR" || cleanup_failed=1
@@ -140,8 +143,10 @@ cleanup() {
 
 terminate() {
   local status="$1"
-  host_linux_builder_stop_container \
-    "$CONTAINER_NAME" "$BUILD_CACHE_ID" || true
+  if [[ "$HOST_BUILD_LOCK_HELD" == "1" ]]; then
+    host_linux_builder_stop_container \
+      "$CONTAINER_NAME" "$BUILD_CACHE_ID" || true
+  fi
   exit "$status"
 }
 
@@ -182,6 +187,7 @@ fi
 exec 9>"$HOST_BUILD_LOCK"
 chmod 0600 "$HOST_BUILD_LOCK"
 /usr/bin/lockf 9
+HOST_BUILD_LOCK_HELD=1
 
 # A second process can finish the exact bundle while this process waits for
 # the kernel lock. Re-verify under the lock before spending any build work.
@@ -201,8 +207,7 @@ mkdir -p \
   "$TEMP_DIR/output" \
   "$TEMP_DIR/final" \
   "$CACHE_ROOT/build-cache/cargo-home" \
-  "$TARGET_CACHE_ROOT/root-target" \
-  "$TARGET_CACHE_ROOT/linux-target"
+  "$TARGET_CACHE_ROOT/root-target"
 git clone --no-hardlinks --quiet "$ROOT" "$TEMP_DIR/source/app"
 git -C "$TEMP_DIR/source/app" checkout --detach --quiet "$APP_GIT_SHA"
 git -C "$TEMP_DIR/source/app" clean -ffd >/dev/null
@@ -240,7 +245,6 @@ docker run --rm \
   --volume "$TEMP_DIR/output:/output" \
   --volume "$CACHE_ROOT/build-cache/cargo-home:/cargo-home" \
   --volume "$TARGET_CACHE_ROOT/root-target:/target-root" \
-  --volume "$TARGET_CACHE_ROOT/linux-target:/target-linux" \
   --env CARGO_HOME=/cargo-home \
   --env CARGO_INCREMENTAL=0 \
   --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
@@ -284,7 +288,7 @@ cargo "${fips_config[@]}" build --locked --release \
   -p nostr-vpn-core --example desktop_manual_join_e2e_fixture
 
 cd /workspace/app/linux
-export CARGO_TARGET_DIR=/target-linux
+export CARGO_TARGET_DIR=/target-root
 cp Cargo.lock /output/linux-Cargo.lock.committed
 cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
 python3 "$lock_verifier" \
@@ -301,7 +305,7 @@ install -m 0555 /target-root/release/nvpn /output/nvpn
 install -m 0555 \
   /target-root/release/examples/desktop_manual_join_e2e_fixture \
   /output/desktop_manual_join_e2e_fixture
-install -m 0555 /target-linux/release/nostr-vpn /output/nostr-vpn
+install -m 0555 /target-root/release/nostr-vpn /output/nostr-vpn
 install -m 0555 \
   /target-root/x86_64-unknown-linux-musl/release/nvpn \
   /output/nvpn-x86_64-unknown-linux-musl

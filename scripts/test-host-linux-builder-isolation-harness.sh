@@ -55,6 +55,76 @@ wait "$first_builder" "$second_builder"
   && "$(grep -Fc reused "$TMP_ROOT/results")" == "1" ]] \
   || fail "the lock waiter did not re-verify and reuse the completed bundle"
 
+assert_cancelled_waiter_does_not_cleanup() {
+  local prefix="$1"
+  local container_name="${2:-}"
+  local cache_id="${3:-}"
+  local lock="$TMP_ROOT/$prefix.lock"
+  local holder_ready="$TMP_ROOT/$prefix-holder-ready"
+  local cleanup_marker="$TMP_ROOT/$prefix-cleanup"
+  local acquired_marker="$TMP_ROOT/$prefix-acquired"
+  local monitor_was_enabled=0
+  local holder_pid waiter_pid waiter_pgid waiter_status
+
+  (
+    trap 'exit 0' TERM
+    exec 8>"$lock"
+    /usr/bin/lockf 8
+    : >"$holder_ready"
+    while :; do
+      sleep 0.1
+    done
+  ) &
+  holder_pid="$!"
+  while [[ ! -f "$holder_ready" ]]; do
+    sleep 0.02
+  done
+
+  [[ "$-" == *m* ]] && monitor_was_enabled=1
+  set -m
+  (
+    lock_held=0
+    trap '
+      if [[ "$lock_held" == "1" ]]; then
+        : >"$cleanup_marker"
+        if [[ -n "$container_name" ]]; then
+          host_linux_builder_stop_container "$container_name" "$cache_id"
+        fi
+      fi
+      exit 143
+    ' TERM
+    exec 9>"$lock"
+    /usr/bin/lockf 9
+    lock_held=1
+    : >"$acquired_marker"
+  ) >/dev/null 2>&1 &
+  waiter_pid="$!"
+  ((monitor_was_enabled)) || set +m
+  sleep 0.1
+  waiter_pgid="$(
+    ps -o pgid= -p "$waiter_pid" | tr -d '[:space:]'
+  )"
+  [[ "$waiter_pgid" == "$waiter_pid" ]] \
+    || fail "cancelled waiter did not receive an isolated process group"
+  kill -TERM -- "-$waiter_pgid"
+  set +e
+  wait "$waiter_pid"
+  waiter_status="$?"
+  set -e
+  [[ "$waiter_status" == "143" ]] \
+    || fail "cancelled lock waiter returned $waiter_status instead of 143"
+  [[ ! -e "$cleanup_marker" && ! -e "$acquired_marker" ]] \
+    || fail "cancelled pre-lock waiter acted as the cache owner"
+  if [[ -n "$container_name" ]]; then
+    docker container inspect "$container_name" >/dev/null 2>&1 \
+      || fail "cancelled pre-lock waiter removed the holder container"
+  fi
+  kill -TERM "$holder_pid"
+  wait "$holder_pid"
+}
+
+assert_cancelled_waiter_does_not_cleanup marker-only
+
 if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
   command -v docker >/dev/null 2>&1 \
     || fail "real container cleanup test requires Docker"
@@ -73,6 +143,8 @@ if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
     --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
     --label "to.nostrvpn.release-builder-cache=$TEST_CACHE_ID" \
     "$image" sleep 120 >/dev/null
+  assert_cancelled_waiter_does_not_cleanup \
+    real-container "$TEST_CONTAINER_NAME" "$TEST_CACHE_ID"
   ready="$TMP_ROOT/termination-ready"
   (
     trap 'host_linux_builder_stop_container \
