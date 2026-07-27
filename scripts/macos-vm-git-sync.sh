@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_ROOT="$(cd "$ROOT/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-vm-identity.sh"
 SSH_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 REMOTE_REF="${NVPN_MACOS_GIT_REF:-refs/heads/codex/macos-vm-sync}"
@@ -11,6 +13,7 @@ REMOTE_REF="${NVPN_MACOS_GIT_REF:-refs/heads/codex/macos-vm-sync}"
   echo "set NVPN_MACOS_SSH_HOST or pass the macOS VM SSH target" >&2
   exit 2
 }
+macos_vm_require_isolated_target "$SSH_HOST"
 if [[ "$GUEST_SRC_ROOT" != /* ]]; then
   remote_home="$(ssh -o BatchMode=yes "$SSH_HOST" 'printf %s "$HOME"')"
   GUEST_SRC_ROOT="$remote_home/$GUEST_SRC_ROOT"

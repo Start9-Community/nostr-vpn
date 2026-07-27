@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+_MACOS_VM_IMPORTED_RELEASE_LIB_DIR="$(
+  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+)"
+# shellcheck disable=SC1091
+source "$_MACOS_VM_IMPORTED_RELEASE_LIB_DIR/lib-macos-vm-identity.sh"
+unset _MACOS_VM_IMPORTED_RELEASE_LIB_DIR
+
 macos_vm_imported_release_bool() {
   case "${1:-}" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
@@ -12,6 +19,8 @@ macos_vm_prepare_or_verify_imported_release() {
   local ssh_host="$2"
   local action="prepare-only"
   local skip_sync="${NVPN_MACOS_SKIP_GIT_SYNC:-0}"
+
+  macos_vm_require_isolated_target "$ssh_host"
 
   if macos_vm_imported_release_bool \
     "${NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY:-0}"

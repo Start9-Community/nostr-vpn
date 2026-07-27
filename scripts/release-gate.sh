@@ -9,6 +9,7 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/release_common.sh"
 source "$ROOT_DIR/scripts/lib-release-gate-timeout.sh"
 source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
+source "$ROOT_DIR/scripts/lib-macos-vm-identity.sh"
 source "$ROOT_DIR/scripts/mobile_env.sh"
 load_mobile_env "$ROOT_DIR"
 enable_deterministic_build_env "$ROOT_DIR"
@@ -344,6 +345,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-release-artifact-reuse-harness.sh
   ./scripts/test-mobile-underlay-change-harness.sh
   ./scripts/test-mobile-release-join-gate-harness.sh
+  ./scripts/test-macos-vm-identity-guard-harness.sh
   ./scripts/test-macos-vm-import-only-harness.sh
   ./scripts/test-host-linux-vm-import-only-harness.sh
   ./scripts/test-desktop-network-handoff-harness.sh
@@ -706,8 +708,7 @@ run_windows_platform_lane() {
 
 macos_vm_reachable() {
   [[ -n "${NVPN_MACOS_SSH_HOST:-}" ]] || return 1
-  ssh -o BatchMode=yes -o ConnectTimeout=5 \
-    "$NVPN_MACOS_SSH_HOST" hostname >/dev/null 2>&1
+  macos_vm_require_isolated_target "$NVPN_MACOS_SSH_HOST"
 }
 
 macos_platform_lane_requested() {
