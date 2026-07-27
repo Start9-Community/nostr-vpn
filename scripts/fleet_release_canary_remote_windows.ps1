@@ -3,6 +3,7 @@
 # powershell.exe -Command -. Nothing from this adapter is installed.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$script:NvpnServiceName = 'NvpnService'
 
 function Fail([string]$Message) {
     throw $Message
@@ -296,12 +297,21 @@ function PublicNetwork($Value) {
     }
 }
 
+function ResolveNvpnServiceName($Deployment) {
+    $serviceName = if ($Deployment.serviceName) {
+        [string]$Deployment.serviceName
+    } else {
+        $script:NvpnServiceName
+    }
+    if ($serviceName -ne $script:NvpnServiceName) {
+        Fail "Windows fleet serviceName must be $script:NvpnServiceName"
+    }
+    return $serviceName
+}
+
 function Capture($Target, $Checks) {
     $deployment = $Target.deployment
-    $serviceName = if ($deployment.serviceName) { [string]$deployment.serviceName } else { 'nvpn' }
-    if ($serviceName -ne 'nvpn') {
-        Fail 'Windows fleet serviceName must be nvpn'
-    }
+    $serviceName = ResolveNvpnServiceName $deployment
     $binary = RequireAbsolutePath $deployment.binaryPath 'binaryPath'
     $config = RequireAbsolutePath $deployment.configPath 'configPath'
     $probeBinary = RequireAbsolutePath $(if ($deployment.probeBinaryPath) { $deployment.probeBinaryPath } else { $binary }) 'probeBinaryPath'
@@ -514,7 +524,7 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
         Fail 'durable rollback snapshot is missing'
     }
     $raw = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-    $name = if ($Target.deployment.serviceName) { [string]$Target.deployment.serviceName } else { 'nvpn' }
+    $name = ResolveNvpnServiceName $Target.deployment
     $binary = [string]$raw.binaryPath
     $config = [string]$raw.configPath
     $signedRosterPath = [string]$raw.signedRosterPath

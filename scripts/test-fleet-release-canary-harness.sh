@@ -618,6 +618,16 @@ python3 -m py_compile \
   "$ROOT/scripts/fleet_release_canary_remote_linux.py" \
   "$DRIVER"
 bash -n "$0"
+windows_adapter="$ROOT/scripts/fleet_release_canary_remote_windows.ps1"
+grep -Fq "\$script:NvpnServiceName = 'NvpnService'" "$windows_adapter" \
+  || fail "Windows fleet adapter does not use the production service name"
+grep -Fq \
+  "if (\$serviceName -ne \$script:NvpnServiceName)" \
+  "$windows_adapter" \
+  || fail "Windows fleet adapter does not reject non-production service names"
+if grep -Eq "else \\{ 'nvpn' \\}|must be nvpn" "$windows_adapter"; then
+  fail "Windows fleet adapter retains the obsolete service name"
+fi
 if grep -Eq 'cargo build|dotnet build|gradle|xcodebuild' \
   "$ORCHESTRATOR" \
   "$ROOT/scripts/fleet_release_canary_evidence.py" \
