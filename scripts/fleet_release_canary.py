@@ -16,7 +16,8 @@ The private driver is invoked as:
                   --output OUTPUT_JSON
 
 Probe exit 75 means unreachable and exit 76 means access is unauthorized.
-Any other non-zero exit is a hard failure.
+Install exit 77 means the roster authorization expired before any live target
+mutation.  Any other non-zero exit is a hard failure.
 Install is only invoked with both --execute and
 NVPN_FLEET_INSTALL_AUTHORIZED=1.  The driver must not build remotely or alter a
 network/config outside that explicitly authorized install transaction.
@@ -73,6 +74,7 @@ GATE_VALIDATOR_RELATIVE_PATH = pathlib.Path(
     "scripts/fleet-release-gate-evidence.mjs"
 )
 GATE_VALIDATOR_TIMEOUT_SECONDS = 30
+INSTALL_AUTHORIZATION_EXPIRED = 77
 GATE_RECEIPT_KEYS = {
     "android": {
         "physical",
@@ -826,7 +828,7 @@ def validate_inventory_freshness(inventory: dict[str, Any]) -> int:
 
 def require_fresh_install_authorization(deadline: int) -> None:
     if int(time.time()) > deadline:
-        fail("fleet roster evidence expired before install; no target was installed")
+        fail("fleet roster evidence expired before target install")
 
 
 def validate_inventory(
@@ -1071,6 +1073,16 @@ def probe_report_row(
             {"probe"},
             f"target {target_id} result evidence",
         )
+    return row
+
+
+def expired_install_report_row(
+    target_id: str,
+    probe: dict[str, Any],
+    error: str,
+) -> dict[str, Any]:
+    row = probe_report_row(target_id, "failed-expired", probe)
+    row["installError"] = error
     return row
 
 
@@ -1378,6 +1390,7 @@ def execute(args: argparse.Namespace) -> int:
         fail("fleet probe failed; no target was installed")
 
     rollout_failed = False
+    blocked_status = "blocked-by-prior-failure"
     for target in targets:
         probe = probe_results[target["id"]]
         if probe["status"] != "reachable":
@@ -1389,12 +1402,24 @@ def execute(args: argparse.Namespace) -> int:
             report_targets.append(
                 probe_report_row(
                     target["id"],
-                    "blocked-by-prior-failure",
+                    blocked_status,
                     probe["details"],
                 )
             )
             continue
-        require_fresh_install_authorization(freshness_deadline)
+        try:
+            require_fresh_install_authorization(freshness_deadline)
+        except CanaryError as error:
+            report_targets.append(
+                expired_install_report_row(
+                    target["id"],
+                    probe["details"],
+                    str(error),
+                )
+            )
+            rollout_failed = True
+            blocked_status = "blocked-by-expired-authorization"
+            continue
         artifact = artifacts[target["artifact"]]
         probe_snapshot = probe["details"]
         expectations = build_expectations(
@@ -1420,6 +1445,18 @@ def execute(args: argparse.Namespace) -> int:
             artifact=artifact,
             expectations=expectations,
         )
+        if install_result.returncode == INSTALL_AUTHORIZATION_EXPIRED:
+            report_targets.append(
+                expired_install_report_row(
+                    target["id"],
+                    probe_snapshot,
+                    install_result.stderr.strip()
+                    or "fleet roster evidence expired before remote install mutation",
+                )
+            )
+            rollout_failed = True
+            blocked_status = "blocked-by-expired-authorization"
+            continue
         install_error = ""
         install_binding: dict[str, Any] | None = None
         try:

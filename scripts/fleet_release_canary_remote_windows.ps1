@@ -9,6 +9,29 @@ function Fail([string]$Message) {
     throw $Message
 }
 
+function FailInstallAuthorizationExpired([string]$Message) {
+    $error = [InvalidOperationException]::new($Message)
+    $error.Data['NvpnFleetExitCode'] = 77
+    throw $error
+}
+
+function TestInstallAuthorizationExpired($Failure) {
+    $exception = if ($Failure -is [Exception]) {
+        $Failure
+    } elseif ($null -ne $Failure.Exception) {
+        $Failure.Exception
+    } else {
+        $null
+    }
+    while ($null -ne $exception) {
+        if ($exception.Data['NvpnFleetExitCode'] -eq 77) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
 function ShaBytes([byte[]]$Bytes) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
@@ -662,7 +685,8 @@ function AssertFreshInstallAuthorization($Expected) {
         ([DateTime]::UtcNow - $epoch).TotalSeconds
     )
     if ($now -gt $deadline) {
-        Fail 'fleet roster evidence expired before remote install mutation'
+        FailInstallAuthorizationExpired `
+            'fleet roster evidence expired before remote install mutation'
     }
 }
 
@@ -1529,11 +1553,18 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
                 throw 'expired transaction cleanup left residue'
             }
         } catch {
-            Fail (
+            $message = (
                 $primary.Exception.Message +
                 '; expired transaction cleanup also failed: ' +
                 $_.Exception.Message
             )
+            if (TestInstallAuthorizationExpired $primary) {
+                FailInstallAuthorizationExpired $message
+            }
+            Fail $message
+        }
+        if (TestInstallAuthorizationExpired $primary) {
+            FailInstallAuthorizationExpired $primary.Exception.Message
         }
         throw $primary
     }
@@ -1780,11 +1811,18 @@ function InstallCandidate($Payload, $Target, $Expected) {
     }
     if ($null -ne $primary) {
         if ($cleanupErrors.Count -gt 0) {
-            Fail (
+            $message = (
                 $primary.Exception.Message +
                 '; staged artifact cleanup also failed: ' +
                 ($cleanupErrors -join '; ')
             )
+            if (TestInstallAuthorizationExpired $primary) {
+                FailInstallAuthorizationExpired $message
+            }
+            Fail $message
+        }
+        if (TestInstallAuthorizationExpired $primary) {
+            FailInstallAuthorizationExpired $primary.Exception.Message
         }
         throw $primary
     }
@@ -1820,5 +1858,8 @@ try {
     [Console]::Out.Write((CanonicalJson $result))
 } catch {
     [Console]::Error.WriteLine("Windows fleet adapter blocked: $_")
+    if (TestInstallAuthorizationExpired $_) {
+        exit 77
+    }
     exit 1
 }

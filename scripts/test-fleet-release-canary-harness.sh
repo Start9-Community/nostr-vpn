@@ -415,6 +415,12 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +    ):
 +        print("fixture install lacks roster freshness deadline", file=sys.stderr)
 +        raise SystemExit(1)
++    if args.action == "install" and target_id == "remote-expired":
++        print(
++            "fleet roster evidence expired before remote install mutation",
++            file=sys.stderr,
++        )
++        raise SystemExit(77)
 +    if args.action == "rollback":
 +        if target_id == "rollback-fail":
 +            print("fixture rollback failed", file=sys.stderr)
@@ -1043,7 +1049,7 @@ import types
 
 path = pathlib.Path(sys.argv[1])
 source = path.read_text(encoding="utf-8")
-anchor = "\npayload = json.loads(base64.b64decode(FLEET_PAYLOAD_B64))"
+anchor = "\ntry:\n    payload = json.loads(base64.b64decode(FLEET_PAYLOAD_B64))"
 definitions, separator, _ = source.partition(anchor)
 if not separator:
     raise SystemExit("Linux fleet adapter entry point is ambiguous")
@@ -1078,7 +1084,7 @@ try:
         namespace["require_fresh_install_authorization"](
             {"rosterFreshnessDeadline": 999}
         )
-    except RuntimeError as error:
+    except namespace["InstallAuthorizationExpired"] as error:
         if "expired before remote install mutation" not in str(error):
             raise SystemExit(
                 "Linux expired roster deadline returned the wrong guard"
@@ -1454,6 +1460,26 @@ except RuntimeError as error:
         raise SystemExit("Linux cleanup masked the primary adapter failure")
 else:
     raise SystemExit("Linux combined adapter/cleanup failure was accepted")
+expired = namespace["InstallAuthorizationExpired"](
+    "fleet roster evidence expired before remote install mutation"
+)
+try:
+    namespace["finish_staged_cleanup"](
+        expired,
+        ["private cleanup failure"],
+    )
+except namespace["InstallAuthorizationExpired"] as error:
+    if (
+        "expired before remote install mutation" not in str(error)
+        or "private cleanup failure" not in str(error)
+    ):
+        raise SystemExit(
+            "Linux expiry cleanup did not preserve classification and details"
+        )
+else:
+    raise SystemExit("Linux expiry classification was lost during cleanup")
+if "raise SystemExit(77)" not in source:
+    raise SystemExit("Linux adapter does not expose the expiry exit code")
 PY
 python3 - "$ROOT/scripts/fleet_release_canary_ssh_driver.py" <<'PY'
 import base64
@@ -1552,6 +1578,38 @@ if len(windows_source) >= len(windows_raw_source):
     raise SystemExit("Windows fleet adapter was not reduced for reliable stdin transport")
 if any("FLEET_PAYLOAD" in argument for argument in windows_command):
     raise SystemExit("private fleet payload leaked into remote argv")
+
+expired_result = subprocess.CompletedProcess(
+    ["ssh"],
+    77,
+    stdout="",
+    stderr="fleet roster evidence expired before remote install mutation",
+)
+if driver.classify_ssh_failure(expired_result) != 77:
+    raise SystemExit("driver lost the remote expiry exit classification")
+original_stage = driver.stage_artifact
+original_invoke = driver.invoke_adapter
+original_cleanup = driver.cleanup_staged_artifact
+try:
+    driver.stage_artifact = lambda *_args, **_kwargs: None
+    driver.invoke_adapter = lambda *_args, **_kwargs: (
+        77,
+        None,
+        "expired before mutation",
+    )
+    driver.cleanup_staged_artifact = lambda *_args, **_kwargs: None
+    staged = driver.invoke_staged_adapter(
+        {"platform": "linux"},
+        {},
+        pathlib.Path("unused"),
+        ".nvpn-fleet-" + ("a" * 32) + ".artifact",
+    )
+    if staged != (77, None, "expired before mutation"):
+        raise SystemExit("staged transport lost the expiry classification")
+finally:
+    driver.stage_artifact = original_stage
+    driver.invoke_adapter = original_invoke
+    driver.cleanup_staged_artifact = original_cleanup
 
 candidate_bytes = b"candidate executable bytes\n"
 candidate_hash = hashlib.sha256(candidate_bytes).hexdigest()
@@ -1856,6 +1914,10 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 for required in (
     "function ParseServiceExecutablePath",
     "function AssertServiceRuntimeBinding",
+    "function FailInstallAuthorizationExpired",
+    "function TestInstallAuthorizationExpired",
+    "$error.Data['NvpnFleetExitCode'] = 77",
+    "exit 77",
     "_execStartPath",
     "_mainProcessExePath",
     "_mainProcessExeSha256",
@@ -2082,6 +2144,99 @@ json_field_is \
   "$GATE_RELEASE_SHA"
 json_target_evidence_is \
   "$EVIDENCE/fleet-canary-result.json" good probe install
+
+write_inventory "$INVENTORY" remote-expired never
+rm -rf "$EVIDENCE"
+rm -f "$DRIVER_LOG"
+set +e
+run_execute >/dev/null
+status=$?
+set -e
+[[ "$status" == 1 ]] || fail "remote roster expiry was not a failed rollout"
+json_status_is \
+  "$EVIDENCE/fleet-canary-result.json" remote-expired failed-expired
+json_target_evidence_is \
+  "$EVIDENCE/fleet-canary-result.json" remote-expired probe
+json_status_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  never blocked-by-expired-authorization
+grep -Fxq 'install:remote-expired' "$DRIVER_LOG" \
+  || fail "remote expiry fixture did not reach the install boundary"
+if grep -Eq 'rollback:remote-expired|install:never' "$DRIVER_LOG"; then
+  fail "remote pre-mutation expiry rolled back or continued the rollout"
+fi
+
+write_inventory "$INVENTORY" good local-expired never
+rm -rf "$EVIDENCE"
+rm -f "$DRIVER_LOG"
+set +e
+NVPN_FLEET_INSTALL_AUTHORIZED=1 \
+FAKE_DRIVER_LOG="$DRIVER_LOG" \
+FAKE_PROBE_BINARY_SHA256="$PAYLOAD_SHA" \
+FAKE_PROBE_APP_VERSION="4.1.4" \
+FAKE_PROBE_FIPS_CORE_VERSION="0.4.44 (rev 1111111111)" \
+FAKE_CANDIDATE_APP_VERSION="4.1.5" \
+FAKE_CANDIDATE_FIPS_CORE_VERSION="0.4.45 (rev ${FIPS_SHA:0:10})" \
+python3 - \
+  "$ORCHESTRATOR" "$APP" "$FIPS" "$INVENTORY" "$MANIFEST" "$EVIDENCE" <<'PY'
+import argparse
+import importlib.util
+import pathlib
+import sys
+
+orchestrator, root, fips, inventory, manifest, evidence = map(
+    pathlib.Path,
+    sys.argv[1:],
+)
+sys.path.insert(0, str(orchestrator.parent))
+spec = importlib.util.spec_from_file_location(
+    "fleet_canary_expiry_fixture",
+    orchestrator,
+)
+canary = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(canary)
+checks = 0
+
+def expire_after_first_install(_deadline):
+    global checks
+    checks += 1
+    if checks > 1:
+        raise canary.CanaryError(
+            "fleet roster evidence expired before target install"
+        )
+
+canary.require_fresh_install_authorization = expire_after_first_install
+raise SystemExit(
+    canary.execute(
+        argparse.Namespace(
+            root=root,
+            fips_root=fips,
+            inventory=inventory,
+            manifest=manifest,
+            evidence_dir=evidence,
+        )
+    )
+)
+PY
+status=$?
+set -e
+[[ "$status" == 1 ]] || fail "sequential roster expiry was not a failed rollout"
+json_field_is "$EVIDENCE/fleet-canary-result.json" status failed
+json_status_is "$EVIDENCE/fleet-canary-result.json" good passed
+json_target_evidence_is \
+  "$EVIDENCE/fleet-canary-result.json" good probe install
+json_status_is \
+  "$EVIDENCE/fleet-canary-result.json" local-expired failed-expired
+json_target_evidence_is \
+  "$EVIDENCE/fleet-canary-result.json" local-expired probe
+json_status_is \
+  "$EVIDENCE/fleet-canary-result.json" \
+  never blocked-by-expired-authorization
+grep -Fxq 'install:good' "$DRIVER_LOG" \
+  || fail "sequential expiry lost the prior successful install"
+if grep -Eq 'install:(local-expired|never)|rollback:' "$DRIVER_LOG"; then
+  fail "sequential pre-mutation expiry mutated or rolled back another target"
+fi
 
 write_inventory \
   "$INVENTORY" \

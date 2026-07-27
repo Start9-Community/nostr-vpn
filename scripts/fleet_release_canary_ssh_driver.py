@@ -5,6 +5,9 @@ All machine names and paths come from an ignored inventory.  The platform
 adapters are streamed over SSH and never installed permanently.  Candidate
 artifacts are copied byte-for-byte and verified remotely before an adapter is
 allowed to stop a service or replace a file.
+
+Remote adapter exit 77 means install authorization expired before live target
+mutation and is preserved through staged-artifact cleanup.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ PROTOCOL = "nvpn-fleet-ssh-transactional-v2"
 STAGE_TIMEOUT_SECONDS = 90
 ADAPTER_TIMEOUT_SECONDS = 180
 CLEANUP_TIMEOUT_SECONDS = 20
+INSTALL_AUTHORIZATION_EXPIRED = 77
 PYTHON_FUTURE_IMPORT = "from __future__ import annotations\n"
 WINDOWS_STDIN_WRAPPER = r"""
 $ErrorActionPreference = 'Stop'
@@ -175,7 +179,7 @@ class DriverError(RuntimeError):
 
     def __init__(self, message: str, *, exit_code: int = 1) -> None:
         super().__init__(message)
-        if exit_code not in {1, 75, 76}:
+        if exit_code not in {1, 75, 76, INSTALL_AUTHORIZATION_EXPIRED}:
             raise ValueError("fleet driver exit code is invalid")
         self.exit_code = exit_code
 
@@ -341,6 +345,8 @@ def transport_arguments(target: dict[str, Any], command: str) -> list[str]:
 
 
 def classify_ssh_failure(result: subprocess.CompletedProcess[str]) -> int:
+    if result.returncode == INSTALL_AUTHORIZATION_EXPIRED:
+        return INSTALL_AUTHORIZATION_EXPIRED
     details = f"{result.stdout}\n{result.stderr}".lower()
     if any(
         marker in details

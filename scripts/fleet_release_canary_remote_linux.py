@@ -26,6 +26,10 @@ import urllib.request
 from typing import Any
 
 
+class InstallAuthorizationExpired(RuntimeError):
+    """Roster authorization expired before a live target mutation."""
+
+
 def fail(message: str) -> None:
     raise RuntimeError(message)
 
@@ -1093,8 +1097,16 @@ def install_staged(
     write_journal(transaction, target["id"], transaction_id, "installing")
     try:
         require_fresh_install_authorization(expected)
-    except Exception:
-        shutil.rmtree(transaction)
+    except Exception as error:
+        try:
+            shutil.rmtree(transaction)
+        except Exception as cleanup_error:
+            if isinstance(error, InstallAuthorizationExpired):
+                raise InstallAuthorizationExpired(
+                    f"{error}; expired transaction cleanup also failed: "
+                    f"{cleanup_error}"
+                ) from error
+            raise
         raise
     try:
         run(["systemctl", "stop", unit], check=False)
@@ -1462,10 +1474,13 @@ def finish_staged_cleanup(
 ) -> None:
     if primary_error is not None:
         if cleanup_errors:
-            fail(
+            message = (
                 f"{primary_error}; staged artifact cleanup also failed: "
                 + "; ".join(cleanup_errors)
             )
+            if isinstance(primary_error, InstallAuthorizationExpired):
+                raise InstallAuthorizationExpired(message) from primary_error
+            fail(message)
         raise primary_error
     if cleanup_errors:
         fail("staged artifact cleanup failed: " + "; ".join(cleanup_errors))
@@ -1480,7 +1495,9 @@ def require_fresh_install_authorization(expected: dict[str, Any]) -> None:
     ):
         fail("roster freshness deadline is invalid")
     if int(time.time()) > deadline:
-        fail("fleet roster evidence expired before remote install mutation")
+        raise InstallAuthorizationExpired(
+            "fleet roster evidence expired before remote install mutation"
+        )
 
 
 def probe_candidate(
@@ -1654,27 +1671,34 @@ def install(
     return result
 
 
-payload = json.loads(base64.b64decode(FLEET_PAYLOAD_B64))
-if payload.get("protocol") != "nvpn-fleet-ssh-transactional-v2":
-    fail("fleet protocol mismatch")
-target = payload["target"]
-action = payload["action"]
-transaction_root = absolute_path(
-    target["deployment"].get("transactionRoot", "/var/lib/nvpn/fleet-canary"),
-    "transactionRoot",
-)
-if action == "probe":
-    result = probe_candidate(payload, target, payload["expectations"])
-elif action == "install":
-    result = install(payload, target, payload["expectations"])
-elif action == "rollback":
-    transaction_id = payload["expectations"]["transactionId"]
-    result = restore_transaction(
-        transaction_root / transaction_id,
-        target,
-        transaction_id,
-        payload["expectations"],
+try:
+    payload = json.loads(base64.b64decode(FLEET_PAYLOAD_B64))
+    if payload.get("protocol") != "nvpn-fleet-ssh-transactional-v2":
+        fail("fleet protocol mismatch")
+    target = payload["target"]
+    action = payload["action"]
+    transaction_root = absolute_path(
+        target["deployment"].get(
+            "transactionRoot",
+            "/var/lib/nvpn/fleet-canary",
+        ),
+        "transactionRoot",
     )
-else:
-    fail("unsupported fleet action")
-sys.stdout.write(json.dumps(result, separators=(",", ":"), sort_keys=True))
+    if action == "probe":
+        result = probe_candidate(payload, target, payload["expectations"])
+    elif action == "install":
+        result = install(payload, target, payload["expectations"])
+    elif action == "rollback":
+        transaction_id = payload["expectations"]["transactionId"]
+        result = restore_transaction(
+            transaction_root / transaction_id,
+            target,
+            transaction_id,
+            payload["expectations"],
+        )
+    else:
+        fail("unsupported fleet action")
+    sys.stdout.write(json.dumps(result, separators=(",", ":"), sort_keys=True))
+except InstallAuthorizationExpired as error:
+    print(f"Linux fleet adapter blocked: {error}", file=sys.stderr)
+    raise SystemExit(77) from error
