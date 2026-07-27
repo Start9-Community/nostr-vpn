@@ -15,6 +15,8 @@ All notable changes to this project are documented in this file.
 - Add real macOS, Windows, and Linux gates for underlay changes, WireGuard exit
   cleanup, native route/DNS recovery, service lifecycle, and single-listener
   ownership.
+- Add an exact-artifact, transactional fleet rollout with frozen roster and
+  machine identities, restart/network verification, and verified rollback.
 
 ### Fixed
 
@@ -73,6 +75,8 @@ All notable changes to this project are documented in this file.
   verify their exact source and bytes, and import them into the macOS and Linux
   VMs; reuse a separately sealed host-built Linux fixture peer for the Linux
   and Windows network gates while keeping the Windows release build native.
+- Pin every macOS release gate to the disposable UTM guest identity so a
+  misconfigured SSH alias cannot change the release Mac's routes or DNS.
 
 ## 4.1.4 - 2026-07-22
 
