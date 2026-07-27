@@ -9,6 +9,7 @@ pub(crate) enum DaemonNetworkTrigger {
 #[derive(Default)]
 pub(crate) struct PlatformNetworkSampleDeadline {
     sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    blocks_background_maintenance: bool,
 }
 
 impl PlatformNetworkSampleDeadline {
@@ -16,12 +17,17 @@ impl PlatformNetworkSampleDeadline {
         self.sleep.is_some()
     }
 
-    pub(crate) fn reset_after(&mut self, delay: Duration) {
+    pub(crate) fn blocks_background_maintenance(&self) -> bool {
+        self.sleep.is_some() && self.blocks_background_maintenance
+    }
+
+    pub(crate) fn reset_after(&mut self, delay: Duration, blocks_background_maintenance: bool) {
         let deadline = tokio::time::Instant::now() + delay;
         match self.sleep.as_mut() {
             Some(sleep) => sleep.as_mut().reset(deadline),
             None => self.sleep = Some(Box::pin(tokio::time::sleep_until(deadline))),
         }
+        self.blocks_background_maintenance = blocks_background_maintenance;
     }
 
     async fn wait(&mut self) {
@@ -31,6 +37,7 @@ impl PlatformNetworkSampleDeadline {
             .as_mut()
             .await;
         self.sleep = None;
+        self.blocks_background_maintenance = false;
     }
 }
 

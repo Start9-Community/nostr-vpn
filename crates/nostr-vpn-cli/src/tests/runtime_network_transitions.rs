@@ -58,6 +58,10 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
         PlatformNetworkRefreshRetry::Scheduled
     );
     assert!(
+        !platform_network_background_maintenance_enabled(&rebind_retry_deadline),
+        "a failed route refresh retry must remain exclusive"
+    );
+    assert!(
         failed_rebind.needs_carrier_rebind(true),
         "a failed carrier operation was incorrectly recorded as complete"
     );
@@ -639,6 +643,71 @@ async fn join_and_control_work_remain_selectable_throughout_unchanged_settle() {
         );
     }
     assert_eq!(settle_rechecks_remaining, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fips_control_maintenance_continues_between_unchanged_settle_samples() {
+    let mut sparse_snapshot_timer = tokio::time::interval(std::time::Duration::from_secs(
+        DAEMON_NETWORK_REFRESH_INTERVAL_SECS,
+    ));
+    sparse_snapshot_timer.tick().await;
+    let mut event_deadline = PlatformNetworkSampleDeadline::default();
+    let mut settle_rechecks_remaining = 0;
+
+    schedule_platform_network_event_sampling(&mut event_deadline, &mut settle_rechecks_remaining);
+    assert!(
+        !platform_network_background_maintenance_enabled(&event_deadline),
+        "the initial event debounce must remain exclusive"
+    );
+    tokio::time::advance(std::time::Duration::from_millis(
+        DAEMON_NETWORK_EVENT_DEBOUNCE_MILLIS,
+    ))
+    .await;
+    assert_eq!(
+        next_daemon_network_trigger(&mut event_deadline, &mut sparse_snapshot_timer).await,
+        DaemonNetworkTrigger::EventDeadline
+    );
+
+    let mut status_refreshes = 0;
+    let mut heartbeat_runs = 0;
+    let mut roster_retries = 0;
+    for _ in 0..3 {
+        assert!(schedule_platform_network_settle_recheck(
+            &mut event_deadline,
+            &mut settle_rechecks_remaining,
+        ));
+        assert!(
+            platform_network_background_maintenance_enabled(&event_deadline),
+            "an unchanged-route settle timer must not black out FIPS control maintenance"
+        );
+
+        tokio::select! {
+            biased;
+            _ = std::future::ready(()),
+                if platform_network_background_maintenance_enabled(&event_deadline) => {
+                status_refreshes += 1;
+                heartbeat_runs += 1;
+                roster_retries += 1;
+            }
+            trigger = next_daemon_network_trigger(
+                &mut event_deadline,
+                &mut sparse_snapshot_timer,
+            ) => panic!("settle sample fired before its absolute deadline: {trigger:?}"),
+        }
+
+        tokio::time::advance(std::time::Duration::from_millis(
+            DAEMON_NETWORK_SETTLE_RECHECK_MILLIS,
+        ))
+        .await;
+        assert_eq!(
+            next_daemon_network_trigger(&mut event_deadline, &mut sparse_snapshot_timer).await,
+            DaemonNetworkTrigger::EventDeadline
+        );
+    }
+
+    assert_eq!(status_refreshes, 3);
+    assert_eq!(heartbeat_runs, 3);
+    assert_eq!(roster_retries, 3);
 }
 
 #[test]

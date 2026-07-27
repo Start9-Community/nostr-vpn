@@ -35,7 +35,7 @@ pub(crate) fn platform_network_event_receive_enabled(
 pub(crate) fn platform_network_background_maintenance_enabled(
     event_deadline: &PlatformNetworkSampleDeadline,
 ) -> bool {
-    !event_deadline.is_active()
+    !event_deadline.blocks_background_maintenance()
 }
 
 #[cfg(test)]
@@ -51,7 +51,10 @@ pub(crate) fn schedule_platform_network_event_sampling(
     remaining: &mut u8,
 ) {
     begin_platform_network_settle_rechecks(remaining);
-    event_deadline.reset_after(Duration::from_millis(DAEMON_NETWORK_EVENT_DEBOUNCE_MILLIS));
+    event_deadline.reset_after(
+        Duration::from_millis(DAEMON_NETWORK_EVENT_DEBOUNCE_MILLIS),
+        true,
+    );
 }
 
 pub(crate) fn schedule_platform_network_settle_recheck(
@@ -64,8 +67,14 @@ pub(crate) fn schedule_platform_network_settle_recheck(
     *remaining -= 1;
     // Route notifications commonly arrive while an interface is disappearing,
     // before DHCP and the replacement default route are usable. Re-sample for
-    // a short, bounded window because there may be no later notification.
-    event_deadline.reset_after(Duration::from_millis(DAEMON_NETWORK_SETTLE_RECHECK_MILLIS));
+    // a short, bounded window because there may be no later notification. The
+    // first sample already gave route recovery exclusive ownership; unchanged
+    // settle probes must not black out status, FIPS heartbeats, or durable
+    // roster delivery retries for the entire sampling window.
+    event_deadline.reset_after(
+        Duration::from_millis(DAEMON_NETWORK_SETTLE_RECHECK_MILLIS),
+        false,
+    );
     true
 }
 
@@ -145,7 +154,10 @@ impl PlatformNetworkRefreshAttempt {
             return PlatformNetworkRefreshRetry::Exhausted;
         }
         self.completion_retries_remaining -= 1;
-        event_deadline.reset_after(Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS));
+        event_deadline.reset_after(
+            Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS),
+            true,
+        );
         PlatformNetworkRefreshRetry::Scheduled
     }
 }
