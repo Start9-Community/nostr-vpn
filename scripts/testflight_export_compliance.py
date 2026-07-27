@@ -33,6 +33,27 @@ class ExportComplianceError(RuntimeError):
     """Raised when App Store Connect cannot be made consistent with policy."""
 
 
+class FrenchDeclarationNotApproved(ExportComplianceError):
+    """Raised when truthful French-store paperwork exists but is not approved."""
+
+
+def strict_resource_id(
+    resource: Mapping[str, object],
+    expected_type: str,
+) -> str | None:
+    """Return a canonical JSON:API ID only for the expected resource type."""
+
+    value = resource.get("id")
+    if (
+        resource.get("type") != expected_type
+        or not isinstance(value, str)
+        or not value
+        or value.strip() != value
+    ):
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class VerifiedBuildCompliance:
     """Proof from a live exact-build declaration relationship readback."""
@@ -44,9 +65,13 @@ class VerifiedBuildCompliance:
     def __post_init__(self) -> None:
         attributes = self.build.get("attributes")
         if (
-            not self.build_id
-            or self.build.get("id") != self.build_id
+            strict_resource_id(self.build, "builds") != self.build_id
+            or not isinstance(self.build_id, str)
+            or not self.build_id
+            or self.build_id.strip() != self.build_id
+            or not isinstance(self.declaration_id, str)
             or not self.declaration_id
+            or self.declaration_id.strip() != self.declaration_id
             or not isinstance(attributes, Mapping)
             or attributes.get("usesNonExemptEncryption") is not True
         ):
@@ -108,6 +133,62 @@ def build_update_request(
     }
 
 
+def non_exempt_build_update_request(build_id: str) -> dict[str, object]:
+    """Mark the exact build truthfully without asserting declaration approval."""
+
+    if not build_id:
+        raise ValueError("build_id is required")
+    return {
+        "data": {
+            "type": "builds",
+            "id": build_id,
+            "attributes": {
+                "usesNonExemptEncryption": True,
+            },
+        }
+    }
+
+
+def select_exact_app(
+    apps: Iterable[Mapping[str, object]],
+    bundle_id: str,
+) -> Mapping[str, object] | None:
+    """Return only an exact, well-formed App Store app resource."""
+
+    expected = str(bundle_id).strip()
+    if not expected:
+        raise ValueError("bundle_id is required")
+    for app in apps:
+        attributes = app.get("attributes")
+        if (
+            strict_resource_id(app, "apps") is not None
+            and isinstance(attributes, Mapping)
+            and attributes.get("bundleId") == expected
+        ):
+            return app
+    return None
+
+
+def select_exact_build(
+    builds: Iterable[Mapping[str, object]],
+    build_number: str,
+) -> Mapping[str, object] | None:
+    """Return only a build whose live version exactly matches the request."""
+
+    expected = str(build_number).strip()
+    if not expected:
+        raise ValueError("build_number is required")
+    for build in builds:
+        attributes = build.get("attributes")
+        if (
+            strict_resource_id(build, "builds") is not None
+            and isinstance(attributes, Mapping)
+            and str(attributes.get("version", "")).strip() == expected
+        ):
+            return build
+    return None
+
+
 def declaration_answers_policy(declaration: Mapping[str, object]) -> bool:
     """Return whether a declaration contains this release's truthful answers."""
 
@@ -153,7 +234,9 @@ def select_reusable_declaration(
         declaration
         for declaration in declarations
         if declaration_matches_policy(declaration)
-        and str(declaration.get("id", "")).strip()
+        and strict_resource_id(
+            declaration, "appEncryptionDeclarations"
+        ) is not None
     ]
     if not matching:
         return None
@@ -190,13 +273,17 @@ def verify_build_compliance(
 ) -> VerifiedBuildCompliance:
     """Read back an exact build and its approved declaration relationship."""
 
-    if not build_id:
+    if (
+        not isinstance(build_id, str)
+        or not build_id
+        or build_id.strip() != build_id
+    ):
         raise ExportComplianceError("Build is missing its App Store Connect ID")
 
     build = get_build(build_id)
     attributes = build.get("attributes")
     if (
-        build.get("id") != build_id
+        strict_resource_id(build, "builds") != build_id
         or not isinstance(attributes, Mapping)
         or attributes.get("usesNonExemptEncryption") is not True
     ):
@@ -219,7 +306,9 @@ def verify_build_compliance(
     declaration = response.get("data")
     if (
         not isinstance(declaration, Mapping)
-        or not str(declaration.get("id", "")).strip()
+        or strict_resource_id(
+            declaration, "appEncryptionDeclarations"
+        ) is None
         or not declaration_matches_policy(declaration)
     ):
         raise ExportComplianceError(
@@ -267,12 +356,18 @@ def ensure_build_compliance(
     be verified offline without App Store Connect credentials or mutations.
     """
 
-    build_id = str(build.get("id", "")).strip()
-    if not build_id:
+    build_id = strict_resource_id(build, "builds")
+    if build_id is None:
         raise ExportComplianceError("Build is missing its App Store Connect ID")
 
     current_build = get_build(build_id)
     current_attributes = current_build.get("attributes")
+    if (
+        strict_resource_id(current_build, "builds") != build_id
+    ):
+        raise ExportComplianceError(
+            "App Store Connect returned the wrong exact build"
+        )
     if not isinstance(current_attributes, Mapping):
         raise ExportComplianceError("App Store Connect build has no attributes")
 
@@ -289,13 +384,47 @@ def ensure_build_compliance(
             "Read build app encryption declaration",
         )
         candidate = response.get("data")
-        if isinstance(candidate, Mapping):
-            linked_declaration = candidate
+        if (
+            not isinstance(candidate, Mapping)
+            or strict_resource_id(
+                candidate, "appEncryptionDeclarations"
+            ) is None
+        ):
+            raise ExportComplianceError(
+                "Read build app encryption declaration returned a malformed "
+                "relationship"
+            )
+        linked_declaration = candidate
     elif linked_status != 404:
         _require_response(
             linked_status,
             linked_body,
             "Read build app encryption declaration",
+        )
+
+    if (
+        linked_declaration is not None
+        and not declaration_answers_policy(linked_declaration)
+    ):
+        raise ExportComplianceError(
+            "The exact build is linked to a mismatched app encryption "
+            "declaration"
+        )
+
+    if (
+        linked_declaration is not None
+        and declaration_is_active_pending(linked_declaration)
+    ):
+        attributes = linked_declaration.get("attributes")
+        state = (
+            str(attributes.get("appEncryptionDeclarationState", "")).upper()
+            if isinstance(attributes, Mapping)
+            else "UNKNOWN"
+        )
+        raise FrenchDeclarationNotApproved(
+            "The exact build's matching app encryption declaration is not "
+            f"approved (state {state or 'UNKNOWN'}). Complete App Store "
+            "Connect export-compliance review before linking this build."
         )
 
     if (
@@ -328,7 +457,9 @@ def ensure_build_compliance(
                 candidate
                 for candidate in declarations
                 if declaration_is_active_pending(candidate)
-                and str(candidate.get("id", "")).strip()
+                and strict_resource_id(
+                    candidate, "appEncryptionDeclarations"
+                ) is not None
             ),
             None,
         )
@@ -339,7 +470,7 @@ def ensure_build_compliance(
                 if isinstance(attributes, Mapping)
                 else "UNKNOWN"
             )
-            raise ExportComplianceError(
+            raise FrenchDeclarationNotApproved(
                 "The matching app encryption declaration is not approved "
                 f"(state {state or 'UNKNOWN'}). Complete App Store Connect "
                 "export-compliance review before linking this build."
@@ -365,6 +496,12 @@ def ensure_build_compliance(
                 "Created app encryption declaration does not match the "
                 "non-exempt, French-store-enabled standard-cryptography policy"
             )
+        if strict_resource_id(
+            candidate, "appEncryptionDeclarations"
+        ) is None:
+            raise ExportComplianceError(
+                "Created app encryption declaration has no ID"
+            )
         if not declaration_matches_policy(candidate):
             attributes = candidate.get("attributes")
             state = (
@@ -372,16 +509,24 @@ def ensure_build_compliance(
                 if isinstance(attributes, Mapping)
                 else "UNKNOWN"
             )
-            raise ExportComplianceError(
+            message = (
                 "Created the truthful app encryption declaration, but it is "
-                f"not approved (state {state or 'UNKNOWN'}). Complete App "
-                "Store Connect export-compliance review before linking this "
-                "build."
+                f"not approved (state {state or 'UNKNOWN'})."
+            )
+            if state in _ACTIVE_PENDING_STATES:
+                raise FrenchDeclarationNotApproved(
+                    f"{message} Complete App Store Connect export-compliance "
+                    "review before linking this build."
+                )
+            raise ExportComplianceError(
+                f"{message} App Store Connect returned a non-pending state."
             )
         declaration = candidate
 
-    declaration_id = str(declaration.get("id", "")).strip()
-    if not declaration_id:
+    declaration_id = strict_resource_id(
+        declaration, "appEncryptionDeclarations"
+    )
+    if declaration_id is None:
         raise ExportComplianceError("App encryption declaration has no ID")
 
     patch_status, patch_body = request(
@@ -398,7 +543,8 @@ def ensure_build_compliance(
     updated_build = get_build(build_id)
     updated_attributes = updated_build.get("attributes")
     if (
-        not isinstance(updated_attributes, Mapping)
+        strict_resource_id(updated_build, "builds") != build_id
+        or not isinstance(updated_attributes, Mapping)
         or updated_attributes.get("usesNonExemptEncryption") is not True
     ):
         raise ExportComplianceError(
@@ -446,6 +592,9 @@ def ensure_build_compliance_with_proof(
 ) -> VerifiedBuildCompliance:
     """Ensure compliance, then independently read back exact-build proof."""
 
+    build_id = strict_resource_id(build, "builds")
+    if build_id is None:
+        raise ExportComplianceError("Build is missing its App Store Connect ID")
     updated_build = ensure_build_compliance(
         build,
         app_id=app_id,
@@ -455,7 +604,104 @@ def ensure_build_compliance_with_proof(
         log=log,
     )
     return verify_build_compliance(
-        str(updated_build.get("id", "")).strip(),
+        build_id,
         request=request,
         get_build=get_build,
     )
+
+
+def ensure_build_non_exempt_encryption(
+    build: Mapping[str, object],
+    *,
+    request: Callable[..., tuple[int, object]],
+    get_build: Callable[[str], Mapping[str, object]],
+    log: Callable[[str], None] | None = None,
+) -> Mapping[str, object]:
+    """Truthfully mark one exact build without claiming French approval."""
+
+    build_id = strict_resource_id(build, "builds")
+    if build_id is None:
+        raise ExportComplianceError("Build is missing its App Store Connect ID")
+
+    current_build = get_build(build_id)
+    attributes = current_build.get("attributes")
+    if (
+        strict_resource_id(current_build, "builds") != build_id
+    ):
+        raise ExportComplianceError(
+            "App Store Connect returned the wrong exact build"
+        )
+    if not isinstance(attributes, Mapping):
+        raise ExportComplianceError("App Store Connect build has no attributes")
+
+    if attributes.get("usesNonExemptEncryption") is not True:
+        status, body = request(
+            "PATCH",
+            f"builds/{build_id}",
+            body=non_exempt_build_update_request(build_id),
+        )
+        _require_response(
+            status,
+            body,
+            "Set exact build non-exempt encryption flag",
+        )
+        current_build = get_build(build_id)
+        attributes = current_build.get("attributes")
+
+    if (
+        strict_resource_id(current_build, "builds") != build_id
+        or not isinstance(attributes, Mapping)
+        or attributes.get("usesNonExemptEncryption") is not True
+    ):
+        raise ExportComplianceError(
+            "App Store Connect did not retain usesNonExemptEncryption=true "
+            "for the exact build"
+        )
+
+    if log is not None:
+        log(
+            "The exact build is truthfully marked as using non-exempt "
+            "encryption; no French approval is claimed."
+        )
+    return current_build
+
+
+def prepare_build_compliance_for_submission(
+    build: Mapping[str, object],
+    *,
+    app_id: str,
+    request: Callable[..., tuple[int, object]],
+    get_all: Callable[..., list[Mapping[str, object]]],
+    get_build: Callable[[str], Mapping[str, object]],
+    log: Callable[[str], None] | None = None,
+) -> tuple[Mapping[str, object], VerifiedBuildCompliance | None]:
+    """Prefer approved proof, but allow App Store Connect to judge France.
+
+    Only the narrow, truthful not-yet-approved state is allowed through. API
+    errors, malformed responses, mismatched declarations, and failed exact
+    build readbacks still fail closed.
+    """
+
+    try:
+        proof = ensure_build_compliance_with_proof(
+            build,
+            app_id=app_id,
+            request=request,
+            get_all=get_all,
+            get_build=get_build,
+            log=log,
+        )
+        return proof.build, proof
+    except FrenchDeclarationNotApproved as error:
+        if log is not None:
+            log(
+                f"{error} Continuing with France enabled and truthful "
+                "review metadata so App Store Connect can decide."
+            )
+        current_build = ensure_build_non_exempt_encryption(
+            build,
+            request=request,
+            get_build=get_build,
+            log=log,
+        )
+        return current_build, None

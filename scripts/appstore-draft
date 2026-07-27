@@ -101,7 +101,9 @@ from appstore_availability import (
 )
 from testflight_export_compliance import (
     ExportComplianceError,
-    ensure_build_compliance_with_proof,
+    prepare_build_compliance_for_submission,
+    select_exact_app,
+    select_exact_build,
 )
 
 try:
@@ -277,10 +279,7 @@ def get_all(path, params=None):
 
 def find_app():
     apps = get_all("apps", {"filter[bundleId]": BUNDLE_ID, "limit": "10"})
-    for app in apps:
-        if app.get("attributes", {}).get("bundleId") == BUNDLE_ID:
-            return app
-    return apps[0] if apps else None
+    return select_exact_app(apps, BUNDLE_ID)
 
 
 def app_store_versions(app_id):
@@ -976,11 +975,7 @@ def find_build(app_id):
             "limit": "20",
         },
     )
-    for build in builds:
-        attrs = build.get("attributes", {})
-        if str(attrs.get("version")) == str(BUILD_NUMBER):
-            return build
-    return builds[0] if builds else None
+    return select_exact_build(builds, BUILD_NUMBER)
 
 
 def link_build(version_id, build):
@@ -1323,16 +1318,16 @@ build = find_build(app["id"])
 if build is None:
     fail(f"Build {BUILD_NUMBER} is not visible in App Store Connect")
 try:
-    encryption_compliance = ensure_build_compliance_with_proof(
+    build, encryption_compliance = prepare_build_compliance_for_submission(
         build,
         app_id=app["id"],
         request=request,
         get_all=get_all,
         get_build=get_build,
+        log=lambda message: print(f"{message} Build {BUILD_NUMBER}."),
     )
 except ExportComplianceError as error:
     fail(str(error))
-build = encryption_compliance.build
 try:
     draft_metadata.require_review_submission_encryption_compliance(
         ACTION,

@@ -119,17 +119,28 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         )
 
     def test_unproved_override_cannot_claim_french_approval_or_attachment(self):
-        with self.assertRaisesRegex(ValueError, "verified live build"):
-            metadata.review_notes(
-                "4.1.5",
-                None,
-                environ={
-                    "NVPN_APPSTORE_REVIEW_NOTES": (
-                        "The approved French-store encryption declaration "
-                        "is attached to the build."
+        for claim in (
+            "The French-store encryption declaration is approved.",
+            "The French-store encryption declaration is attached.",
+            "The French-store encryption declaration is linked.",
+            "The encryption declaration is approved.",
+            "French export-compliance approval is attached.",
+            (
+                "The French encryption declaration is available. "
+                "It is approved and attached."
+            ),
+            (
+                "The encryption declaration was filed. "
+                "Apple approved it."
+            ),
+        ):
+            with self.subTest(claim=claim):
+                with self.assertRaisesRegex(ValueError, "verified live build"):
+                    metadata.review_notes(
+                        "4.1.5",
+                        None,
+                        environ={"NVPN_APPSTORE_REVIEW_NOTES": claim},
                     )
-                },
-            )
 
     def test_boolean_cannot_stand_in_for_live_build_compliance_proof(self):
         with self.assertRaisesRegex(ValueError, "live build compliance proof"):
@@ -140,21 +151,26 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                 encryption_compliance=True,
             )
 
-    def test_review_submission_actions_require_exact_build_compliance_proof(self):
-        for action in ("submit", "public", "public-submit"):
-            with self.subTest(action=action):
-                with self.assertRaisesRegex(ValueError, "verified.*declaration"):
-                    metadata.require_review_submission_encryption_compliance(
-                        action,
-                        None,
-                    )
-
-        for action in ("put", "attach", "status", "public-attach"):
+    def test_review_submission_allows_truthful_unapproved_france_state(self):
+        for action in (
+            "submit",
+            "public",
+            "public-submit",
+            "put",
+            "attach",
+            "status",
+            "public-attach",
+        ):
             with self.subTest(action=action):
                 metadata.require_review_submission_encryption_compliance(
                     action,
                     None,
                 )
+        with self.assertRaisesRegex(ValueError, "verified exact-build proof"):
+            metadata.require_review_submission_encryption_compliance(
+                "submit",
+                True,
+            )
 
     def test_reviewer_notes_include_private_ready_to_use_wireguard_fixture(self):
         notes = metadata.review_notes(
@@ -270,13 +286,14 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertLess(gate, submit)
         self.assertNotIn('or attrs.get("notes")', shipper)
 
-    def test_appstore_submission_proves_compliance_before_notes_and_submit(self):
+    def test_appstore_submission_prepares_compliance_before_notes_and_submit(self):
         shipper = (ROOT / "scripts" / "appstore-draft").read_text(
             encoding="utf-8"
         )
 
         proof = shipper.index(
-            "encryption_compliance = ensure_build_compliance_with_proof("
+            "build, encryption_compliance = "
+            "prepare_build_compliance_for_submission("
         )
         gate = shipper.index(
             "require_review_submission_encryption_compliance(",
@@ -603,7 +620,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             return [declaration]
 
         result = export_compliance.ensure_build_compliance(
-            {"id": "build-id"},
+            self._build(False),
             app_id="app-id",
             request=request,
             get_all=get_all,
@@ -641,7 +658,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             raise AssertionError((method, path))
 
         result = export_compliance.ensure_build_compliance(
-            {"id": "build-id"},
+            self._build(False),
             app_id="app-id",
             request=request,
             get_all=lambda _path, _params=None: [],
@@ -676,7 +693,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             "not approved.*IN_REVIEW",
         ):
             export_compliance.ensure_build_compliance(
-                {"id": "build-id"},
+                self._build(False),
                 app_id="app-id",
                 request=request,
                 get_all=lambda _path, _params=None: [pending],
@@ -684,6 +701,279 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             )
 
         self.assertFalse(any(call[0] in {"POST", "PATCH"} for call in calls))
+
+    def test_created_terminal_or_unknown_declaration_cannot_submit(self):
+        for state in ("REJECTED", "EXPIRED", "INVALID", "UNKNOWN"):
+            with self.subTest(state=state):
+                calls = []
+                created = self._declaration("created", state=state)
+
+                def request(method, path, params=None, body=None):
+                    calls.append((method, path, params, body))
+                    if method == "GET":
+                        return 404, {"errors": []}
+                    if method == "POST":
+                        return 201, {"data": created}
+                    raise AssertionError((method, path))
+
+                with self.assertRaises(
+                    export_compliance.ExportComplianceError
+                ) as raised:
+                    export_compliance.prepare_build_compliance_for_submission(
+                        self._build(False),
+                        app_id="app-id",
+                        request=request,
+                        get_all=lambda _path, _params=None: [],
+                        get_build=lambda _build_id: self._build(False),
+                    )
+
+                self.assertNotIsInstance(
+                    raised.exception,
+                    export_compliance.FrenchDeclarationNotApproved,
+                )
+                self.assertFalse(any(call[0] == "PATCH" for call in calls))
+
+    def test_created_pending_declaration_requires_resource_id(self):
+        for declaration_id in ("", 123):
+            with self.subTest(declaration_id=declaration_id):
+                created = self._declaration(
+                    declaration_id, state="IN_REVIEW"
+                )
+                calls = []
+
+                def request(method, path, params=None, body=None):
+                    calls.append((method, path, params, body))
+                    if method == "GET":
+                        return 404, {"errors": []}
+                    if method == "POST":
+                        return 201, {"data": created}
+                    raise AssertionError((method, path))
+
+                with self.assertRaisesRegex(
+                    export_compliance.ExportComplianceError,
+                    "no ID",
+                ) as raised:
+                    export_compliance.prepare_build_compliance_for_submission(
+                        self._build(False),
+                        app_id="app-id",
+                        request=request,
+                        get_all=lambda _path, _params=None: [],
+                        get_build=lambda _build_id: self._build(False),
+                    )
+
+                self.assertNotIsInstance(
+                    raised.exception,
+                    export_compliance.FrenchDeclarationNotApproved,
+                )
+                self.assertFalse(
+                    any(call[0] == "PATCH" for call in calls)
+                )
+
+    def test_malformed_link_relationship_fails_closed(self):
+        calls = []
+
+        def request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            return 200, {"data": None}
+
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "malformed",
+        ):
+            export_compliance.prepare_build_compliance_for_submission(
+                self._build(False),
+                app_id="app-id",
+                request=request,
+                get_all=lambda *_args, **_kwargs: self.fail(
+                    "malformed relationship must not list declarations"
+                ),
+                get_build=lambda _build_id: self._build(True),
+            )
+
+    def test_mismatched_exact_build_link_cannot_use_separate_pending_proof(self):
+        calls = []
+        wrong = self._declaration(
+            "wrong",
+            state="APPROVED",
+            appDescription="different product",
+        )
+        pending = self._declaration("pending", state="IN_REVIEW")
+
+        def request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            return 200, {"data": wrong}
+
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "mismatched",
+        ):
+            export_compliance.prepare_build_compliance_for_submission(
+                self._build(False),
+                app_id="app-id",
+                request=request,
+                get_all=lambda _path, _params=None: [pending],
+                get_build=lambda _build_id: self._build(True),
+            )
+
+        self.assertFalse(any(call[0] in {"POST", "PATCH"} for call in calls))
+
+    def test_approved_path_rejects_exact_build_id_substitution(self):
+        approved = self._declaration("approved", state="APPROVED")
+
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "exact build",
+        ):
+            export_compliance.prepare_build_compliance_for_submission(
+                self._build(False) | {"id": "build-a"},
+                app_id="app-id",
+                request=lambda *_args, **_kwargs: (
+                    200,
+                    {"data": approved},
+                ),
+                get_all=lambda *_args, **_kwargs: [],
+                get_build=lambda _build_id: (
+                    self._build(True) | {"id": "build-b"}
+                ),
+            )
+
+    def test_exact_linked_pending_declaration_is_not_duplicated(self):
+        calls = []
+        pending = self._declaration("pending", state="IN_REVIEW")
+
+        def request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            if method == "GET":
+                return 200, {"data": pending}
+            raise AssertionError((method, path))
+
+        build, proof = (
+            export_compliance.prepare_build_compliance_for_submission(
+                self._build(False),
+                app_id="app-id",
+                request=request,
+                get_all=lambda *_args, **_kwargs: self.fail(
+                    "exact linked pending declaration must not be relisted"
+                ),
+                get_build=lambda _build_id: self._build(True),
+            )
+        )
+
+        self.assertIsNone(proof)
+        self.assertTrue(build["attributes"]["usesNonExemptEncryption"])
+        self.assertEqual([call[0] for call in calls], ["GET"])
+
+    def test_exact_build_selector_never_falls_back_to_another_build(self):
+        wrong = self._build(True)
+        wrong["attributes"]["version"] = "4001006"
+        self.assertIsNone(
+            export_compliance.select_exact_build([wrong], "4001007")
+        )
+        exact = self._build(True)
+        exact["attributes"]["version"] = "4001007"
+        self.assertIs(
+            export_compliance.select_exact_build([wrong, exact], "4001007"),
+            exact,
+        )
+        malformed = dict(exact)
+        malformed.pop("type")
+        self.assertIsNone(
+            export_compliance.select_exact_build([malformed], "4001007")
+        )
+        malformed = dict(exact)
+        malformed["id"] = 123
+        self.assertIsNone(
+            export_compliance.select_exact_build([malformed], "4001007")
+        )
+
+    def test_exact_app_selector_never_falls_back_or_accepts_numeric_id(self):
+        exact = {
+            "type": "apps",
+            "id": "app-id",
+            "attributes": {"bundleId": "fi.siriusbusiness.nvpn"},
+        }
+        wrong = {
+            "type": "apps",
+            "id": "wrong-app",
+            "attributes": {"bundleId": "example.wrong"},
+        }
+
+        self.assertIsNone(
+            export_compliance.select_exact_app(
+                [wrong], "fi.siriusbusiness.nvpn"
+            )
+        )
+        self.assertIs(
+            export_compliance.select_exact_app(
+                [wrong, exact], "fi.siriusbusiness.nvpn"
+            ),
+            exact,
+        )
+        malformed = dict(exact)
+        malformed["id"] = 123
+        self.assertIsNone(
+            export_compliance.select_exact_app(
+                [malformed], "fi.siriusbusiness.nvpn"
+            )
+        )
+
+    def test_compliance_rejects_build_resource_without_jsonapi_type(self):
+        malformed = self._build(True)
+        malformed.pop("type")
+        approved = self._declaration("approved", state="APPROVED")
+
+        with self.assertRaises(export_compliance.ExportComplianceError):
+            export_compliance.prepare_build_compliance_for_submission(
+                malformed,
+                app_id="app-id",
+                request=lambda *_args, **_kwargs: (
+                    200,
+                    {"data": approved},
+                ),
+                get_all=lambda *_args, **_kwargs: [],
+                get_build=lambda _build_id: malformed,
+            )
+        with self.assertRaises(ValueError):
+            export_compliance.VerifiedBuildCompliance(
+                build=malformed,
+                build_id="build-id",
+                declaration_id="approved",
+            )
+
+    def test_submission_preparation_keeps_france_enabled_while_pending(self):
+        calls = []
+        pending = self._declaration("pending", state="IN_REVIEW")
+        build_reads = [
+            self._build(False),
+            self._build(False),
+            self._build(True),
+        ]
+
+        def request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            if method == "GET" and path.endswith("/appEncryptionDeclaration"):
+                return 404, {"errors": []}
+            if method == "PATCH" and path == "builds/build-id":
+                return 200, {"data": self._build(True)}
+            raise AssertionError((method, path))
+
+        build, proof = (
+            export_compliance.prepare_build_compliance_for_submission(
+                self._build(False),
+                app_id="app-id",
+                request=request,
+                get_all=lambda _path, _params=None: [pending],
+                get_build=lambda _build_id: build_reads.pop(0),
+            )
+        )
+
+        self.assertIsNone(proof)
+        self.assertTrue(build["attributes"]["usesNonExemptEncryption"])
+        self.assertEqual(
+            [call for call in calls if call[0] == "PATCH"][0][3],
+            export_compliance.non_exempt_build_update_request("build-id"),
+        )
+        self.assertFalse(any(call[0] == "POST" for call in calls))
 
     def test_ensure_treats_only_created_and_in_review_as_pending(self):
         for state in ("CREATED", "IN_REVIEW"):
@@ -702,7 +992,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
                     f"not approved.*{state}",
                 ):
                     export_compliance.ensure_build_compliance(
-                        {"id": "build-id"},
+                        self._build(False),
                         app_id="app-id",
                         request=request,
                         get_all=lambda _path, _params=None: [pending],
@@ -737,7 +1027,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
                     raise AssertionError((method, path))
 
                 result = export_compliance.ensure_build_compliance(
-                    {"id": "build-id"},
+                    self._build(False),
                     app_id="app-id",
                     request=request,
                     get_all=lambda _path, _params=None: [terminal],
@@ -765,7 +1055,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
             return 200, {"data": declaration}
 
         result = export_compliance.ensure_build_compliance(
-            {"id": "build-id"},
+            self._build(False),
             app_id="app-id",
             request=request,
             get_all=lambda *_args, **_kwargs: self.fail(
@@ -828,7 +1118,7 @@ class TestFlightExportComplianceTests(unittest.TestCase):
         self.assertNotIn("NVPN_TESTFLIGHT_USES_NONEXEMPT_ENCRYPTION", shipper)
         self.assertNotIn("NVPN_TESTFLIGHT_APP_ENCRYPTION_DECLARATION_ID", shipper)
         self.assertNotIn("uses_nonexempt_encryption=False", shipper)
-        self.assertIn("ensure_build_compliance_with_proof(", shipper)
+        self.assertIn("prepare_build_compliance_for_submission(", shipper)
 
     @staticmethod
     def _build(value):

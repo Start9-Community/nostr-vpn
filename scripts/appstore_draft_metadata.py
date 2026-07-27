@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import os
+import re
 
 from testflight_export_compliance import VerifiedBuildCompliance
 
@@ -130,12 +131,22 @@ Before first VPN activation, the app explains the connection data needed for con
 
 
 def _claims_unverified_french_approval(notes: str) -> bool:
-    normalized = notes.lower()
-    return (
+    normalized = re.sub(r"\s+", " ", notes.lower())
+    claims_approval_or_link = (
+        "approv" in normalized
+        or "attach" in normalized
+        or "link" in normalized
+    )
+    identifies_french_export_compliance = (
         ("french" in normalized or "france" in normalized)
-        and "declaration" in normalized
-        and "approv" in normalized
-        and ("attach" in normalized or "link" in normalized)
+        and (
+            "encryption" in normalized
+            or "export-compliance" in normalized
+            or "export compliance" in normalized
+        )
+    )
+    return claims_approval_or_link and (
+        "declaration" in normalized or identifies_french_export_compliance
     )
 
 
@@ -146,8 +157,13 @@ def _review_notes_value(
     default: str,
     encryption_compliance: VerifiedBuildCompliance | None,
 ) -> str:
-    notes = _value(source, override_name, default)
-    if encryption_compliance is None and _claims_unverified_french_approval(notes):
+    override = str(source.get(override_name, "")).strip()
+    notes = override or default
+    if (
+        override
+        and encryption_compliance is None
+        and _claims_unverified_french_approval(notes)
+    ):
         raise ValueError(
             "French encryption approval or attachment may be claimed only "
             "after a verified live build relationship readback"
@@ -205,15 +221,21 @@ def require_review_submission_encryption_compliance(
     action: str,
     encryption_compliance: VerifiedBuildCompliance | None,
 ) -> None:
-    """Fail closed before App Store or external TestFlight review submission."""
+    """Validate an optional live approval proof before review submission.
 
-    if action in {"submit", "public", "public-submit"} and not isinstance(
-        encryption_compliance,
-        VerifiedBuildCompliance,
+    France remains enabled even while a truthful encryption declaration is
+    pending. In that case reviewer notes must omit any approval claim and App
+    Store Connect decides whether the worldwide submission can proceed.
+    """
+
+    if action not in {"submit", "public", "public-submit"}:
+        return
+    if encryption_compliance is not None and not isinstance(
+        encryption_compliance, VerifiedBuildCompliance
     ):
         raise ValueError(
-            "Review submission requires a verified exact-build approved "
-            "French-store encryption declaration relationship"
+            "Review submission encryption compliance must be a verified "
+            "exact-build proof when supplied"
         )
 
 
