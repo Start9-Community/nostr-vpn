@@ -2,7 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -433,6 +441,325 @@ test('local release CLI and environment enforce required Zapstore mode', () => {
   assert.match(nonFinal.stderr, /needs --final or --promote-draft/)
 })
 
+test('staged draft publication rejects build, final, and distribution flags', () => {
+  const script = join(process.cwd(), 'scripts/local-release.mjs')
+  const conflicts = [
+    ['--publish'],
+    ['--draft'],
+    ['--final'],
+    ['--promote-draft'],
+    ['--cargo-publish'],
+    ['--skip-cargo-publish'],
+    ['--skip-zapstore'],
+    ['--require-zapstore'],
+    ['--skip-verify'],
+    ['--only', 'verify'],
+    ['--skip', 'ios'],
+    ['--allow-partial'],
+  ]
+
+  for (const conflict of conflicts) {
+    const result = spawnSync(
+      process.execPath,
+      [script, '--publish-staged-draft', '--dry-run', ...conflict],
+      { encoding: 'utf8' },
+    )
+    assert.equal(result.status, 1, conflict.join(' '))
+    assert.match(
+      result.stderr,
+      /--publish-staged-draft cannot be combined with/i,
+      conflict.join(' '),
+    )
+  }
+})
+
+test('staged draft publication publishes only the already validated bytes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nostr-vpn-staged-draft-test-'))
+  const repo = join(root, 'repo')
+  const scripts = join(repo, 'scripts')
+  const stage = join(root, 'stage')
+  const assetsDir = join(stage, 'assets')
+  const bin = join(root, 'bin')
+  const htreeLog = join(root, 'htree.log')
+  mkdirSync(scripts, { recursive: true })
+  mkdirSync(assetsDir, { recursive: true })
+  mkdirSync(bin, { recursive: true })
+
+  for (const args of [
+    ['init', '-q'],
+    ['config', 'user.email', 'release-test@example.invalid'],
+    ['config', 'user.name', 'Release Test'],
+  ]) {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  writeFileSync(join(repo, 'README.md'), 'base revision for stale-tag test\n')
+  for (const args of [
+    ['add', '.'],
+    ['commit', '-qm', 'base source'],
+  ]) {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+  }
+
+  for (const name of [
+    'local-release.mjs',
+    'local-release-lib.mjs',
+    'release-artifact-provenance-lib.mjs',
+    'verify-release-publication-bundle.mjs',
+    'startos-release.mjs',
+  ]) {
+    copyFileSync(join(process.cwd(), 'scripts', name), join(scripts, name))
+  }
+  mkdirSync(join(repo, 'startos', 'versions'), { recursive: true })
+  writeFileSync(
+    join(repo, 'startos', 'versions', 'current.ts'),
+    "version: '4.1.5:0'\n",
+  )
+  writeFileSync(
+    join(repo, 'Cargo.toml'),
+    '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "4.1.5"\n',
+  )
+  for (const args of [
+    ['add', '.'],
+    ['commit', '-qm', 'exact staged source'],
+  ]) {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], {
+    cwd: repo,
+    encoding: 'utf8',
+  }).stdout.trim()
+  const tree = spawnSync('git', ['rev-parse', 'HEAD^{tree}'], {
+    cwd: repo,
+    encoding: 'utf8',
+  }).stdout.trim()
+
+  const assetNames = [
+    'nostr-vpn-v4.1.5-android-arm64.apk',
+    'nostr-vpn-v4.1.5-linux-x64.deb',
+    'nostr-vpn-v4.1.5-macos-arm64.app.tar.gz',
+    'nostr-vpn-v4.1.5-macos-arm64.dmg',
+    'nostr-vpn-v4.1.5-startos-aarch64.s9pk',
+    'nostr-vpn-v4.1.5-startos-x86_64.s9pk',
+    'nostr-vpn-v4.1.5-windows-x64-setup.exe',
+  ]
+  const assetPaths = assetNames.map((name) => {
+    const path = join(assetsDir, name)
+    writeFileSync(path, `exact pre-staged bytes for ${name}\n`)
+    return path
+  })
+  const androidPath = assetPaths[0]
+  const androidSha256 = createHash('sha256')
+    .update(readFileSync(androidPath))
+    .digest('hex')
+  const manifest = buildReleaseManifest({
+    tag: 'v4.1.5',
+    commit,
+    createdAt: 123,
+    assetPaths,
+    draft: true,
+    androidReleaseGate: {
+      receipt_schema: 2,
+      apk_path: `assets/${assetNames[0]}`,
+      apk_sha256: androidSha256,
+      app_git_sha: commit,
+      app_git_tree: tree,
+      package: 'fi.siriusbusiness.nvpn',
+      signer_certificate_sha256: 'e'.repeat(64),
+    },
+  })
+  const receiptDigests = Object.fromEntries(
+    ['android', 'ios', 'linux', 'macos', 'windows'].map(
+      (platform, index) => [
+        platform,
+        { gate: String(index + 1).padStart(64, '0') },
+      ],
+    ),
+  )
+  const summarySha256 = '9'.repeat(64)
+  const platformForAsset = (path) => {
+    for (const platform of ['android', 'linux', 'macos', 'windows']) {
+      if (path.includes(platform)) return platform
+    }
+    return 'startos'
+  }
+  const assetProofs = Object.fromEntries(
+    manifest.assets.map((asset) => {
+      const platform = platformForAsset(asset.path)
+      return [
+        asset.path,
+        {
+          platform,
+          verification:
+            platform === 'startos'
+              ? 'post-build-exact-package-gate'
+              : 'gate-payload-identity',
+          artifact_sha256: asset.sha256,
+          gate_receipt_sha256:
+            platform === 'startos'
+              ? summarySha256
+              : receiptDigests[platform].gate,
+          ...(platform === 'startos'
+            ? { post_build_validator: startosExactPackageValidator }
+            : {}),
+          payloads:
+            platform === 'startos'
+              ? {
+                  manifest_json: createHash('sha256')
+                    .update(
+                      `{"id":"nostr-vpn","images":[{"arch":["${
+                        asset.name.includes('aarch64')
+                          ? 'aarch64'
+                          : 'x86_64'
+                      }"],"id":"app"}],"nestedRuntime":true,"version":"4.1.5:0"}`,
+                    )
+                    .digest('hex'),
+                  package: asset.sha256,
+                }
+              : { runtime: asset.sha256 },
+        },
+      ]
+    }),
+  )
+  manifest.release_gate_attestation = buildReleaseGateAttestation({
+    commit,
+    tree,
+    assets: manifest.assets,
+    releaseGateSummarySha256: summarySha256,
+    platformGateReceipts: receiptDigests,
+    assetProofs,
+  })
+  for (const [name, contents] of buildReleaseManifestFiles(manifest)) {
+    writeFileSync(join(stage, name), contents)
+  }
+  writeFileSync(join(stage, 'notes.md'), 'exact staged notes\n')
+  const stagedBefore = new Map(
+    ['release.json', 'manifest.json', 'notes.md', ...manifest.assets.map(
+      (asset) => asset.path,
+    )].map((path) => [path, readFileSync(join(stage, path))]),
+  )
+
+  const fakeCid = `nhash1${'q'.repeat(58)}`
+  const htree = join(bin, 'htree')
+  writeFileSync(
+    htree,
+    `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$FAKE_HTREE_LOG"
+case "$1" in
+  add)
+    printf 'url: %s\\n' "$FAKE_HTREE_CID"
+    ;;
+  push)
+    ;;
+  cat)
+    relative="\${2#*/}"
+    exec /bin/cat "$FAKE_HTREE_STAGE/$relative"
+    ;;
+  release)
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`,
+  )
+  chmodSync(htree, 0o755)
+  writeFileSync(htreeLog, '')
+  const startCli = join(bin, 'start-cli')
+  writeFileSync(
+    startCli,
+    `#!/bin/sh
+set -eu
+case "$3" in
+  *-startos-aarch64.s9pk) arch=aarch64 ;;
+  *-startos-x86_64.s9pk) arch=x86_64 ;;
+  *) exit 2 ;;
+esac
+printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
+`,
+  )
+  chmodSync(startCli, 0o755)
+
+  const releaseArgs = [
+    join(scripts, 'local-release.mjs'),
+    '--publish-staged-draft',
+    '--tag',
+    'v4.1.5',
+    '--stage-dir',
+    stage,
+    '--release-tree',
+    'releases/test',
+  ]
+  const releaseOptions = {
+    cwd: repo,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      FAKE_HTREE_CID: fakeCid,
+      FAKE_HTREE_LOG: htreeLog,
+      FAKE_HTREE_STAGE: stage,
+    },
+  }
+  const unexpectedStagePath = join(stage, 'unsealed.txt')
+  writeFileSync(unexpectedStagePath, 'not in the staged manifest\n')
+  const unexpectedStageResult = spawnSync(
+    process.execPath,
+    releaseArgs,
+    releaseOptions,
+  )
+  assert.equal(unexpectedStageResult.status, 1)
+  assert.match(
+    unexpectedStageResult.stderr,
+    /unexpected staged root entries/i,
+  )
+  assert.equal(readFileSync(htreeLog, 'utf8'), '')
+  unlinkSync(unexpectedStagePath)
+
+  const result = spawnSync(process.execPath, releaseArgs, releaseOptions)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(
+    result.stdout,
+    new RegExp(`Published staged draft v4\\.1\\.5 .* ${fakeCid}`),
+  )
+  assert.equal(
+    spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).stdout,
+    '',
+  )
+  for (const [path, before] of stagedBefore) {
+    assert.deepEqual(readFileSync(join(stage, path)), before)
+  }
+
+  const htreeCommands = readFileSync(htreeLog, 'utf8').trim().split('\n')
+  assert.equal(htreeCommands[0], `add ${stage}`)
+  assert.equal(htreeCommands[1], `push --force ${fakeCid}`)
+  assert.deepEqual(
+    htreeCommands.slice(2, -1),
+    [...stagedBefore.keys()].map((path) => `cat ${fakeCid}/${path}`),
+  )
+  assert.equal(
+    htreeCommands.at(-1),
+    `release publish releases/test v4.1.5 ${fakeCid} --draft`,
+  )
+
+  const staleTag = spawnSync('git', ['tag', 'v4.1.5', 'HEAD^'], {
+    cwd: repo,
+    encoding: 'utf8',
+  })
+  assert.equal(staleTag.status, 0, staleTag.stderr)
+  const logBeforeStaleTagAttempt = readFileSync(htreeLog, 'utf8')
+  const staleTagResult = spawnSync(process.execPath, releaseArgs, releaseOptions)
+  assert.equal(staleTagResult.status, 1)
+  assert.match(staleTagResult.stderr, /release tag .* not staged commit/i)
+  assert.equal(readFileSync(htreeLog, 'utf8'), logBeforeStaleTagAttempt)
+})
+
 test('final publication cannot bypass complete platform artifacts', () => {
   const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
 
@@ -471,7 +798,7 @@ test('final publication preflights tools and Zapstore identity before the releas
   assert.ok(preflightCall < buildSteps)
   assert.match(
     localRelease,
-    /options\.publish\s*&&\s*!options\.dryRun\s*&&\s*!commandExists\('htree'\)/,
+    /\(options\.publish\s*\|\|\s*options\.publishStagedDraft\)[\s\S]*?&&\s*!options\.dryRun[\s\S]*?&&\s*!commandExists\('htree'\)/,
   )
   assert.match(
     localRelease,

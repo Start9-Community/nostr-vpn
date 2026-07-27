@@ -92,6 +92,8 @@ Options:
   --draft                   Alias for --publish, kept for explicitness
   --promote-draft           Promote an existing staged draft directory for
                             this tag to final/latest without rebuilding
+  --publish-staged-draft    Publish an existing complete staged draft without
+                            rebuilding, rerunning gates, or shipping elsewhere
   --cargo-publish           Force publishing Rust crates to crates.io even
                             without --publish (e.g. to retry a partial release)
   --skip-cargo-publish      With --publish, stage and publish the htree tree
@@ -124,6 +126,7 @@ function parseArgs(argv) {
     publish: false,
     draft: true,
     promoteDraft: false,
+    publishStagedDraft: false,
     cargoPublish: false,
     skipCargoPublish: false,
     skipZapstore: false,
@@ -161,6 +164,9 @@ function parseArgs(argv) {
         options.publish = true
         options.draft = false
         options.promoteDraft = true
+        break
+      case '--publish-staged-draft':
+        options.publishStagedDraft = true
         break
       case '--cargo-publish':
         options.cargoPublish = true
@@ -283,7 +289,7 @@ function pathSha256(path) {
   return createHash('sha256').update(realpathSync(path)).digest('hex')
 }
 
-function assertPromotableDraftSource(tag, manifest) {
+function stagedDraftSourceContext(tag, manifest) {
   const status = run(
     'git',
     ['status', '--porcelain=v1', '--untracked-files=all'],
@@ -299,14 +305,50 @@ function assertPromotableDraftSource(tag, manifest) {
       stdio: 'pipe',
     },
   )
-  return validatePromotableReleaseSource({
+  return {
     manifest,
     requestedTag: tag,
     workspaceTag: readWorkspaceVersionTag(readFileSync(rootCargoToml, 'utf8')),
     status,
     headCommit,
     taggedCommit: taggedResult.status === 0 ? taggedResult.stdout.trim() : '',
+  }
+}
+
+function assertPublishableStagedDraftSource(tag, manifest) {
+  const context = stagedDraftSourceContext(tag, manifest)
+  return validatePromotableReleaseSource({
+    ...context,
+    // Draft publication deliberately precedes tag creation. Reuse the full
+    // promotion validator while still rejecting a pre-existing mismatched tag.
+    taggedCommit: context.taggedCommit || String(manifest.commit ?? '').trim(),
   })
+}
+
+function assertPromotableDraftSource(tag, manifest) {
+  return validatePromotableReleaseSource(
+    stagedDraftSourceContext(tag, manifest),
+  )
+}
+
+function verifyStagedPublicationBundle({
+  stageDir,
+  tag,
+  commit,
+  tree,
+}) {
+  run(process.execPath, [
+    join(repoRoot, 'scripts', 'verify-release-publication-bundle.mjs'),
+    '--stage-dir',
+    stageDir,
+    '--tag',
+    tag,
+    '--commit',
+    commit,
+    '--tree',
+    tree,
+    '--require-draft',
+  ])
 }
 
 function quote(arg) {
@@ -2097,6 +2139,11 @@ function main() {
         'physical-mobile-receipt.json',
       ),
       mobile_join: join(releaseJoinResultDir, 'summary.json'),
+      desktop_mobile_join: join(
+        releaseJoinResultDir,
+        'macos',
+        'summary.json',
+      ),
       wireguard_dns: join(
         releaseGateLogDir,
         'mobile-network',
@@ -2174,6 +2221,23 @@ function main() {
   let releaseGateEvidence = null
   const artifactProofs = {}
 
+  if (options.publishStagedDraft) {
+    const conflicts = []
+    if (options.publish) conflicts.push('another publication mode')
+    if (options.cargoPublish) conflicts.push('--cargo-publish')
+    if (options.skipCargoPublish) conflicts.push('--skip-cargo-publish')
+    if (options.skipZapstore) conflicts.push('--skip-zapstore')
+    if (options.requireZapstore) conflicts.push('--require-zapstore')
+    if (options.skipVerify) conflicts.push('--skip-verify')
+    if (options.only) conflicts.push('--only')
+    if (options.skip.size > 0) conflicts.push('--skip')
+    if (allowPartial) conflicts.push('--allow-partial')
+    if (conflicts.length > 0) {
+      throw new Error(
+        `--publish-staged-draft cannot be combined with ${conflicts.join(', ')}.`,
+      )
+    }
+  }
   if (requireZapstore && options.skipZapstore) {
     throw new Error('--require-zapstore conflicts with --skip-zapstore.')
   }
@@ -2213,12 +2277,38 @@ function main() {
   }
   if (options.promoteDraft) {
     console.log('Promote mode: reusing an existing staged draft and publishing it as final/latest.')
+  } else if (options.publishStagedDraft) {
+    console.log('Staged-draft mode: publishing only the existing validated draft bytes.')
   } else if (options.publish && options.draft) {
     console.log('Draft mode: htree publish will repoint draft instead of latest, and crate/Zapstore publish steps are disabled.')
   }
 
-  if (options.publish && !options.dryRun && !commandExists('htree')) {
+  if (
+    (options.publish || options.publishStagedDraft)
+    && !options.dryRun
+    && !commandExists('htree')
+  ) {
     throw new Error('Missing htree; cannot publish release.')
+  }
+  if (options.publishStagedDraft) {
+    const stagedManifest = readReleaseManifest(stageDir)
+    validatePromotableReleaseManifest(stagedManifest)
+    const stagedCommit = assertPublishableStagedDraftSource(tag, stagedManifest)
+    verifyStagedPublicationBundle({
+      stageDir,
+      tag,
+      commit: stagedCommit,
+      tree: gitTree(stagedCommit),
+    })
+    const cid = publishRelease({
+      stageDir,
+      releaseTree,
+      tag,
+      draft: true,
+      dryRun: options.dryRun,
+    })
+    console.log(`Published staged draft ${tag} to ${releaseTree} via ${cid}`)
+    return
   }
   if (requireZapstore && !options.dryRun) {
     preflightRequiredZapstorePublication({
