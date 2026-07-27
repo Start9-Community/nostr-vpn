@@ -719,7 +719,7 @@ jobs:
           compression-level: 0
 
   release:
-    name: Publish exact locally gated assets
+    name: Verify exact locally gated assets (no publication)
     if: ${{ always() && needs.verify.result == 'success' && needs.build-cli.result == 'success' && needs.build-macos-app.result == 'success' && needs.build-linux-app.result == 'success' && needs.build-windows-app.result == 'success' && needs.build-android-app.result == 'success' && needs.build-startos.result == 'success' }}
     needs:
       - verify
@@ -731,7 +731,7 @@ jobs:
       - build-startos
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -806,13 +806,7 @@ jobs:
             --built-line "Built signed StartOS packages for x86_64 and aarch64." \
             --out release-notes.md
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: ${{ github.event.inputs.tag }}
-          draft: false
-          make_latest: true
-          prerelease: ${{ contains(github.event.inputs.tag, '-') }}
-          files: locally-gated-release/assets/*
-          body_path: release-notes.md
+      - name: Confirm publication remains local and fleet-gated
+        run: |
+          echo "GitHub Actions verified the immutable staged assets."
+          echo "Public GitHub release mutation is performed locally only after fleet validation."

@@ -76,6 +76,9 @@ env (read from .env.release.local or shell):
   NVPN_IOS_ADHOC_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
                                   exact Ad Hoc profiles for ios-release-testing
   NVPN_IOS_FROZEN_DEVICE_UDID    physical device required in those profiles
+  NVPN_RELEASE_STAGE_DIR, NVPN_FLEET_RESULT_PATH,
+  NVPN_FLEET_MANIFEST_PATH, NVPN_FLEET_INVENTORY_PATH
+                                  exact passed release gate for upload actions
 EOF
 }
 
@@ -545,9 +548,18 @@ case "${1:-}" in
   ios-archive) run_ios_archive ;;
   ios-release-testing) run_ios_release_testing_export ;;
   ios-export) run_ios_export ;;
-  ios-upload) run_ios_upload ;;
-  ios-attach-internal) run_ios_attach_internal ;;
-  ios-testflight|ios-release-artifacts) run_ios_testflight ;;
+  ios-upload)
+    require_release_mutation_gate "$ROOT"
+    run_ios_upload
+    ;;
+  ios-attach-internal)
+    require_release_mutation_gate "$ROOT"
+    run_ios_attach_internal
+    ;;
+  ios-testflight|ios-release-artifacts)
+    require_release_mutation_gate "$ROOT"
+    run_ios_testflight
+    ;;
   -h|--help|help|"") usage ;;
   *)
     usage >&2

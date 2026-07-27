@@ -17,7 +17,7 @@ ACTION="${1:-put}"
 
 usage() {
   cat <<'EOF'
-usage: ./scripts/appstore-draft <put|submit|status|availability>
+usage: ./scripts/appstore-draft <preflight|put|submit|status|availability>
 
 Creates or updates the editable iOS App Store version draft for the workspace
 version, links the matching App Store Connect build, updates en-US metadata,
@@ -50,7 +50,7 @@ EOF
 }
 
 case "$ACTION" in
-  put|submit|status|availability)
+  preflight|put|submit|status|availability)
     ;;
   -h|--help|help)
     usage
@@ -59,6 +59,12 @@ case "$ACTION" in
   *)
     usage >&2
     exit 2
+    ;;
+esac
+
+case "$ACTION" in
+  put|submit|availability)
+    require_release_mutation_gate "$ROOT"
     ;;
 esac
 
@@ -1190,7 +1196,37 @@ def create_review_submission(app_id):
     return require_ok(status, body, "Create review submission").get("data")
 
 
+def review_submission_version_ids(submission_id):
+    items = get_all(
+        f"reviewSubmissions/{submission_id}/items",
+        {
+            "fields[reviewSubmissionItems]": "appStoreVersion",
+            "include": "appStoreVersion",
+            "limit": "200",
+        },
+    )
+    version_ids = set()
+    for item in items:
+        relationship = (
+            item.get("relationships", {})
+            .get("appStoreVersion", {})
+            .get("data")
+        )
+        if isinstance(relationship, dict) and relationship.get("id"):
+            version_ids.add(relationship["id"])
+    return version_ids
+
+
 def add_review_submission_item(submission_id, version_id):
+    existing = review_submission_version_ids(submission_id)
+    if version_id in existing:
+        print("Exact App Store version is already in the review submission")
+        return
+    if existing:
+        fail(
+            "Active App Store review submission contains a different version: "
+            + ", ".join(sorted(existing))
+        )
     status, body = request(
         "POST",
         "reviewSubmissionItems",
@@ -1214,11 +1250,11 @@ def add_review_submission_item(submission_id, version_id):
             }
         },
     )
-    if status == 409:
-        fail(
-            "Create review submission item failed: HTTP 409\n"
-            + json.dumps(body, indent=2)
-        )
+    if status == 409 and version_id in review_submission_version_ids(
+        submission_id
+    ):
+        print("Exact App Store review submission item already exists")
+        return
     return require_ok(status, body, "Create review submission item").get("data")
 
 
@@ -1226,6 +1262,10 @@ def submit_review_submission(app_id, version_id):
     submission = active_review_submission(app_id) or create_review_submission(app_id)
     state = submission.get("attributes", {}).get("state")
     if state in {"WAITING_FOR_REVIEW", "IN_REVIEW"}:
+        if version_id not in review_submission_version_ids(submission["id"]):
+            fail(
+                "Active App Store review submission is for a different version"
+            )
         print(f"App Store review submission already submitted: {state}")
         return submission
     if state in {"UNRESOLVED_ISSUES", "CANCELING", "COMPLETING"}:
@@ -1273,6 +1313,48 @@ def upload_screenshots(localization_id):
 app = find_app()
 if app is None:
     fail(f"No App Store Connect app found for bundle {BUNDLE_ID}")
+
+if ACTION == "preflight":
+    matching_versions = [
+        version
+        for version in app_store_versions(app["id"])
+        if version.get("attributes", {}).get("platform") == "IOS"
+        and version.get("attributes", {}).get("versionString") == VERSION_NAME
+    ]
+    if len(matching_versions) > 1:
+        fail(f"Multiple App Store versions match {VERSION_NAME}")
+    availability = app_availability(app["id"])
+    build = find_build(app["id"])
+    review = active_review_submission(app["id"])
+    print(
+        json.dumps(
+            {
+                "schema": 1,
+                "status": "passed",
+                "bundleId": BUNDLE_ID,
+                "version": VERSION_NAME,
+                "buildNumber": BUILD_NUMBER,
+                "buildPresent": build is not None,
+                "versionState": (
+                    matching_versions[0].get("attributes", {}).get(
+                        "appStoreState"
+                    )
+                    if matching_versions
+                    else None
+                ),
+                "reviewState": (
+                    review.get("attributes", {}).get("state")
+                    if review
+                    else None
+                ),
+                "availabilityPresent": bool(
+                    availability and availability.get("id")
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+    raise SystemExit(0)
 
 if ACTION == "status":
     print(f"App: {app.get('attributes', {}).get('name')} [{app['id']}]")

@@ -21,9 +21,11 @@ ACTION="${1:-put}"
 
 usage() {
   cat <<'EOF'
-usage: ./scripts/testflight-internal <ensure-app|compliance|put|attach|wait|status|groups|expire|public|public-submit|public-attach|public-status>
+usage: ./scripts/testflight-internal <preflight|ensure-app|compliance|put|attach|wait|status|groups|expire|public|public-submit|public-attach|public-status>
 
 Commands:
+  preflight    verify credentials, exact app identity, and exact-build state
+               without changing App Store Connect
   ensure-app   create the App Store Connect app record if it is missing
   compliance   set export-compliance metadata on the uploaded build
   put          wait for the uploaded build, then attach it to internal TestFlight groups
@@ -67,7 +69,7 @@ EOF
 }
 
 case "$ACTION" in
-  ensure-app|compliance|put|attach|wait|status|groups|expire|public|public-submit|public-attach|public-status)
+  preflight|ensure-app|compliance|put|attach|wait|status|groups|expire|public|public-submit|public-attach|public-status)
     ;;
   -h|--help|help)
     usage
@@ -76,6 +78,12 @@ case "$ACTION" in
   *)
     usage >&2
     exit 2
+    ;;
+esac
+
+case "$ACTION" in
+  ensure-app|compliance|put|attach|expire|public|public-submit|public-attach)
+    require_release_mutation_gate "$ROOT"
     ;;
 esac
 
@@ -1016,6 +1024,31 @@ def submit_beta_review(build):
     data = body.get("data", {})
     review_state = data.get("attributes", {}).get("betaReviewState") or "submitted"
     print(f"Submitted build {BUILD_NUMBER} for Beta App Review: {review_state}")
+
+
+if ACTION == "preflight":
+    build = find_build()
+    if build:
+        build = get_build(build["id"])
+    attributes = build.get("attributes", {}) if build else {}
+    print(
+        json.dumps(
+            {
+                "schema": 1,
+                "status": "passed",
+                "bundleId": BUNDLE_ID,
+                "version": VERSION_NAME,
+                "buildNumber": BUILD_NUMBER,
+                "buildPresent": build is not None,
+                "buildId": build.get("id") if build else None,
+                "uploadedDate": attributes.get("uploadedDate"),
+                "processingState": attributes.get("processingState"),
+                "audience": attributes.get("buildAudienceType"),
+            },
+            sort_keys=True,
+        )
+    )
+    raise SystemExit(0)
 
 
 if ACTION == "groups":

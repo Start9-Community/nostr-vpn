@@ -9,6 +9,8 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -48,6 +50,19 @@ import {
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
 import { buildFrozenFleetInventory } from './fleet-release-preparer-lib.mjs'
+import {
+  githubReleaseRepairPlan,
+  validateGithubReleaseMetadata,
+} from './github-release-publication.mjs'
+import {
+  validateFrozenIosPublication,
+  validateIosUploadReceipt,
+} from './ios-release-publication.mjs'
+import {
+  assertRealStageDirectory,
+  validateReleaseMutationGate,
+} from './release-mutation-gate.mjs'
+import { resolveSignWith } from './zapstore-release-publication.mjs'
 import {
   buildReleaseGateAttestation,
   releaseAssetSetSha256,
@@ -279,6 +294,21 @@ test('required Zapstore mode rejects every missing publication prerequisite', ()
   assert.match(optional.missing[0], /signing/i)
 })
 
+test('Zapstore signing identity comes only from the sealed publication environment', () => {
+  const ambient = process.env.SIGN_WITH
+  process.env.SIGN_WITH = 'ambient-substitution'
+  try {
+    assert.equal(resolveSignWith({ SIGN_WITH: 'sealed-identity' }), 'sealed-identity')
+    assert.equal(resolveSignWith({}), '')
+  } finally {
+    if (ambient === undefined) {
+      delete process.env.SIGN_WITH
+    } else {
+      process.env.SIGN_WITH = ambient
+    }
+  }
+})
+
 test('required Zapstore APK metadata proves version, package, ABI, and Android signing', () => {
   assert.deepEqual(
     validateZapstoreApkMetadata(
@@ -294,6 +324,7 @@ test('required Zapstore APK metadata proves version, package, ABI, and Android s
         expectedVersion: '4.1.4',
         expectedVersionCode: 4_010_401,
         expectedPackageId: 'fi.siriusbusiness.nvpn',
+        expectedCertificateFingerprint: 'abcdef',
       },
     ),
     {
@@ -328,10 +359,31 @@ test('required Zapstore APK metadata proves version, package, ABI, and Android s
           expectedVersion: '4.1.4',
           expectedVersionCode: 4_010_401,
           expectedPackageId: 'fi.siriusbusiness.nvpn',
+          expectedCertificateFingerprint: 'abcdef',
         }),
       message,
     )
   }
+  assert.throws(
+    () =>
+      validateZapstoreApkMetadata(
+        {
+          package_id: 'fi.siriusbusiness.nvpn',
+          version_name: '4.1.4',
+          version_code: 4_010_401,
+          sha256: 'c'.repeat(64),
+          architectures: ['arm64-v8a'],
+          cert_fingerprint: 'abcdef',
+        },
+        {
+          expectedVersion: '4.1.4',
+          expectedVersionCode: 4_010_401,
+          expectedPackageId: 'fi.siriusbusiness.nvpn',
+          expectedCertificateFingerprint: '123456',
+        },
+      ),
+    /certificate/i,
+  )
 })
 
 test('required Zapstore verification accepts only exact signed relay events', () => {
@@ -413,6 +465,210 @@ test('required Zapstore verification accepts only exact signed relay events', ()
   )
 })
 
+test('frozen iOS publication rejects IPA, receipt, signer, and source substitution', () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'nvpn-ios-publication-'))
+  const exportDir = join(repoRoot, 'dist', 'ios', 'export')
+  const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
+  mkdirSync(exportDir, { recursive: true })
+  mkdirSync(frozenDir, { recursive: true })
+  const ipaPath = join(exportDir, 'NostrVpnIos.ipa')
+  const receiptPath = join(frozenDir, 'app-store-receipt.json')
+  writeFileSync(ipaPath, 'exact frozen ipa bytes')
+  const ipaSha256 = createHash('sha256')
+    .update(readFileSync(ipaPath))
+    .digest('hex')
+  const commit = '1'.repeat(40)
+  const tree = '2'.repeat(40)
+  const signer = '3'.repeat(64)
+  const receipt = {
+    receiptSchema: 1,
+    artifactType: 'iOS export from frozen xcarchive',
+    distribution: 'app-store-connect',
+    appGitSha: commit,
+    appGitTree: tree,
+    ipaSha256,
+    identity: {
+      appBundleIdentifier: 'fi.siriusbusiness.nvpn',
+      appBuildGitSha: commit,
+      buildNumber: '4010501',
+      marketingVersion: '4.1.5',
+      packetTunnelBuildGitSha: commit,
+    },
+    signing: {
+      signerCertificateSha256: signer,
+      signingTeamIdentifier: 'ABCDEFGHIJ',
+    },
+  }
+  writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`)
+  const receiptSha256 = createHash('sha256')
+    .update(readFileSync(receiptPath))
+    .digest('hex')
+  const stagedManifest = {
+    tag: 'v4.1.5',
+    commit,
+    release_gate_attestation: { app_git_tree: tree },
+    ios_app_store_gate: {
+      receipt_schema: 1,
+      app_git_sha: commit,
+      app_git_tree: tree,
+      bundle_id: 'fi.siriusbusiness.nvpn',
+      marketing_version: '4.1.5',
+      build_number: '4010501',
+      ipa_sha256: ipaSha256,
+      ipa_size: statSync(ipaPath).size,
+      export_receipt_sha256: receiptSha256,
+      signing_team_id: 'ABCDEFGHIJ',
+      signer_certificate_sha256: signer,
+    },
+  }
+  assert.equal(
+    validateFrozenIosPublication({ repoRoot, stagedManifest }).ipaPath,
+    ipaPath,
+  )
+
+  writeFileSync(ipaPath, 'substituted ipa bytes')
+  assert.throws(
+    () => validateFrozenIosPublication({ repoRoot, stagedManifest }),
+    /differs from exact staging/i,
+  )
+  writeFileSync(ipaPath, 'exact frozen ipa bytes')
+
+  writeFileSync(
+    receiptPath,
+    `${JSON.stringify({
+      ...receipt,
+      signing: {
+        ...receipt.signing,
+        signerCertificateSha256: '4'.repeat(64),
+      },
+    })}\n`,
+  )
+  assert.throws(
+    () => validateFrozenIosPublication({ repoRoot, stagedManifest }),
+    /differs from exact staging/i,
+  )
+  writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`)
+
+  assert.throws(
+    () =>
+      validateFrozenIosPublication({
+        repoRoot,
+        stagedManifest: {
+          ...stagedManifest,
+          commit: '5'.repeat(40),
+        },
+      }),
+    /differs from exact staging/i,
+  )
+})
+
+test('existing ASC build requires exact fleet-bound local upload evidence', () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'nvpn-ios-upload-receipt-'))
+  const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
+  const stageDir = join(repoRoot, 'stage')
+  const fleetDir = join(repoRoot, 'fleet')
+  mkdirSync(frozenDir, { recursive: true })
+  mkdirSync(stageDir, { recursive: true })
+  mkdirSync(fleetDir, { recursive: true })
+  const commit = '1'.repeat(40)
+  const tree = '2'.repeat(40)
+  const stagedManifest = {
+    tag: 'v4.1.5',
+    commit,
+    release_gate_attestation: { app_git_tree: tree },
+  }
+  const frozen = {
+    gate: {
+      ipa_sha256: '3'.repeat(64),
+      ipa_size: 42,
+      bundle_id: 'fi.siriusbusiness.nvpn',
+      marketing_version: '4.1.5',
+      build_number: '4010501',
+    },
+  }
+  const paths = {
+    stage: join(stageDir, 'release.json'),
+    result: join(fleetDir, 'result.json'),
+    manifest: join(fleetDir, 'manifest.json'),
+    inventory: join(fleetDir, 'inventory.json'),
+  }
+  for (const [name, path] of Object.entries(paths)) {
+    writeFileSync(path, `${name}\n`)
+  }
+  const mutationEnv = {
+    NVPN_RELEASE_STAGE_DIR: stageDir,
+    NVPN_FLEET_RESULT_PATH: paths.result,
+    NVPN_FLEET_MANIFEST_PATH: paths.manifest,
+    NVPN_FLEET_INVENTORY_PATH: paths.inventory,
+  }
+  const testflight = {
+    buildPresent: true,
+    buildId: 'asc-build-id',
+    uploadedDate: '2026-07-27T10:00:00Z',
+  }
+  assert.throws(
+    () =>
+      validateIosUploadReceipt({
+        repoRoot,
+        frozen,
+        stagedManifest,
+        mutationEnv,
+        testflight,
+      }),
+    /no fleet-bound exact upload receipt/i,
+  )
+  const digest = (path) =>
+    createHash('sha256').update(readFileSync(path)).digest('hex')
+  const uploadReceiptPath = join(
+    frozenDir,
+    'app-store-upload-receipt.json',
+  )
+  writeFileSync(
+    uploadReceiptPath,
+    `${JSON.stringify({
+      schema: 1,
+      kind: 'nvpn-ios-app-store-upload-v1',
+      createdAt: 1_752_000_000,
+      appGitSha: commit,
+      appGitTree: tree,
+      releaseTag: 'v4.1.5',
+      stageReleaseSha256: digest(paths.stage),
+      fleetResultSha256: digest(paths.result),
+      fleetManifestSha256: digest(paths.manifest),
+      fleetInventorySha256: digest(paths.inventory),
+      ipaSha256: frozen.gate.ipa_sha256,
+      ipaSize: frozen.gate.ipa_size,
+      bundleId: frozen.gate.bundle_id,
+      version: frozen.gate.marketing_version,
+      buildNumber: frozen.gate.build_number,
+      ascBuildId: testflight.buildId,
+      ascUploadedDate: testflight.uploadedDate,
+    })}\n`,
+    { mode: 0o600 },
+  )
+  assert.equal(
+    validateIosUploadReceipt({
+      repoRoot,
+      frozen,
+      stagedManifest,
+      mutationEnv,
+      testflight,
+    }),
+    uploadReceiptPath,
+  )
+  assert.throws(
+    () =>
+      validateIosUploadReceipt({
+        repoRoot,
+        frozen,
+        stagedManifest,
+        mutationEnv,
+        testflight: { ...testflight, buildId: 'substituted-build' },
+      }),
+    /differs from its fleet-bound upload receipt/i,
+  )
+})
+
 test('local release CLI and environment enforce required Zapstore mode', () => {
   const script = join(process.cwd(), 'scripts/local-release.mjs')
   const cliConflict = spawnSync(
@@ -490,6 +746,33 @@ test('direct htree and crates publication paths fail closed', () => {
   }
 })
 
+test('canonical mutation gate rejects non-exact evidence paths before publication', () => {
+  assert.throws(
+    () =>
+      validateReleaseMutationGate({
+        stageDir: 'relative-stage',
+        fleetResult: 'relative-result',
+        fleetManifest: 'relative-manifest',
+        fleetInventory: 'relative-inventory',
+      }),
+    /exact absolute path/i,
+  )
+})
+
+test('canonical mutation gate rejects a symlinked stage directory', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-stage-symlink-test-'))
+  const exact = join(root, 'exact')
+  const substituted = join(root, 'stage')
+  mkdirSync(exact)
+  symlinkSync(exact, substituted)
+
+  assert.throws(
+    () => assertRealStageDirectory(substituted),
+    /non-symlink directory/i,
+  )
+  assert.doesNotThrow(() => assertRealStageDirectory(exact))
+})
+
 test('every remaining publisher runs only after exact fleet validation', () => {
   const source = readFileSync(
     join(process.cwd(), 'scripts/local-release.mjs'),
@@ -499,7 +782,7 @@ test('every remaining publisher runs only after exact fleet validation', () => {
     'if (options.publishStagedDraft) {\n    const stagedManifest',
   )
   const stagedEnd = source.indexOf(
-    '\n  if (requireZapstore && !options.dryRun)',
+    '\n  if (\n    options.publish',
     stagedStart,
   )
   const staged = source.slice(stagedStart, stagedEnd)
@@ -519,8 +802,10 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   assert.ok(fleetValidation >= 0)
   for (const publisher of [
     'promoteStagedDraft({',
+    'publishExactGithubRelease({',
     'publishRustCrates({',
-    'publishZapstore({',
+    'publishExactZapstoreRelease({',
+    'publishExactIosDistribution({',
   ]) {
     assert.ok(fleetValidation < promote.indexOf(publisher), publisher)
   }
@@ -567,8 +852,13 @@ test('staged draft publication publishes only the already validated bytes', () =
     'release-artifact-provenance-lib.mjs',
     'fleet-release-publication-lib.mjs',
     'fleet-release-preparer-lib.mjs',
+    'fleet-roster-catalog-lib.mjs',
+    'github-release-publication.mjs',
+    'htree-release-publication.mjs',
+    'ios-release-publication.mjs',
     'verify-release-publication-bundle.mjs',
     'startos-release.mjs',
+    'zapstore-release-publication.mjs',
   ]) {
     copyFileSync(join(process.cwd(), 'scripts', name), join(scripts, name))
   }
@@ -716,6 +1006,7 @@ test('staged draft publication publishes only the already validated bytes', () =
 
   const fleetDir = join(root, 'fleet')
   mkdirSync(fleetDir)
+  const fleetObservedAt = Math.floor(Date.now() / 1000)
   const fleetBound = (path) => {
     const canonicalPath = realpathSync(path)
     const bytes = readFileSync(canonicalPath)
@@ -727,8 +1018,6 @@ test('staged draft publication publishes only the already validated bytes', () =
   }
   const installDiscovery = join(fleetDir, 'install-discovery.json')
   const currentDiscovery = join(fleetDir, 'current-discovery.json')
-  writeFileSync(installDiscovery, '{"real":true}\n')
-  writeFileSync(currentDiscovery, '{"real":true}\n')
   const fleetTarget = {
     id: 'linux-guest',
     role: 'linux-guest',
@@ -759,36 +1048,120 @@ test('staged draft publication publishes only the already validated bytes', () =
   const rosterSnapshot = {
     schema: 1,
     authority: 'nvpn-known-host-roster-v1',
-    capturedAt: 123,
+    capturedAt: fleetObservedAt,
+    catalogSha256: '',
     roles: [
       {
         id: fleetTarget.id,
         disposition: 'install',
         reason: 'reachable supported roster host',
-        observedAt: 123,
+        observedAt: fleetObservedAt,
         machineIdentitySha256:
           fleetTarget.expected.machineIdentitySha256,
-        evidence: fleetBound(installDiscovery),
+        evidence: null,
         target: fleetTarget,
       },
       {
         id: 'current-mac',
         disposition: 'excluded-current-mac',
         reason: 'release host is explicitly excluded',
-        observedAt: 123,
+        observedAt: fleetObservedAt,
         machineIdentitySha256: '7'.repeat(64),
-        evidence: fleetBound(currentDiscovery),
+        evidence: null,
         target: null,
       },
     ],
   }
+  const rosterCatalog = {
+    schema: 1,
+    authority: 'nvpn-private-roster-catalog-v1',
+    roles: [
+      {
+        id: fleetTarget.id,
+        platform: 'linux',
+        arch: 'x86_64',
+        dependencies: [],
+        capability: {
+          supported: true,
+          reason: 'transactional Linux adapter is supported',
+        },
+      },
+      {
+        id: 'current-mac',
+        platform: 'macos',
+        arch: 'aarch64',
+        dependencies: [],
+        capability: {
+          supported: false,
+          reason: 'current release host is never a fleet target',
+        },
+      },
+    ],
+  }
+  writeFileSync(installDiscovery, `${JSON.stringify({
+    schema: 1,
+    kind: 'nvpn-roster-install-observation-v1',
+    roleId: fleetTarget.id,
+    disposition: 'install',
+    observedAt: fleetObservedAt,
+    machineIdentitySha256:
+      fleetTarget.expected.machineIdentitySha256,
+    platform: 'linux',
+    arch: 'x86_64',
+    reachable: true,
+    installSupported: true,
+    capabilityReason: 'transactional Linux adapter is supported',
+  })}\n`)
+  writeFileSync(currentDiscovery, `${JSON.stringify({
+    schema: 1,
+    kind: 'nvpn-roster-current-host-observation-v1',
+    roleId: 'current-mac',
+    disposition: 'excluded-current-mac',
+    observedAt: fleetObservedAt,
+    machineIdentitySha256: '7'.repeat(64),
+    platform: 'macos',
+    arch: 'aarch64',
+    reachable: true,
+    installSupported: false,
+    capabilityReason: 'current release host is never a fleet target',
+  })}\n`)
+  rosterSnapshot.roles[0].evidence = fleetBound(installDiscovery)
+  rosterSnapshot.roles[1].evidence = fleetBound(currentDiscovery)
+  const catalogPath = join(fleetDir, 'catalog.json')
+  writeFileSync(catalogPath, `${JSON.stringify(rosterCatalog)}\n`)
+  rosterSnapshot.catalogSha256 = fleetBound(catalogPath).sha256
   const rosterPath = join(fleetDir, 'roster.json')
   writeFileSync(rosterPath, `${JSON.stringify(rosterSnapshot)}\n`)
+  const currentMacReceiptPath = join(
+    fleetDir,
+    'current-mac-receipt.json',
+  )
+  const currentMacReceipt = {
+    schema: 1,
+    kind: 'nvpn-current-mac-measurement-v1',
+    source: 'ioreg-IOPlatformUUID-sha256',
+    measuredAt: fleetObservedAt,
+    machineIdentitySha256: '7'.repeat(64),
+  }
+  writeFileSync(
+    currentMacReceiptPath,
+    `${JSON.stringify(currentMacReceipt)}\n`,
+  )
   const fleetInventory = buildFrozenFleetInventory({
+    catalog: rosterCatalog,
+    catalogBinding: fleetBound(catalogPath),
+    expectedCatalogSha256: fleetBound(catalogPath).sha256,
     snapshot: rosterSnapshot,
     snapshotBinding: fleetBound(rosterPath),
-    currentMacMachineIdentitySha256: '7'.repeat(64),
+    currentMacReceipt,
+    currentMacReceiptBinding: fleetBound(currentMacReceiptPath),
+    roleEvidence: {
+      [fleetTarget.id]: JSON.parse(readFileSync(installDiscovery, 'utf8')),
+      'current-mac': JSON.parse(readFileSync(currentDiscovery, 'utf8')),
+    },
     parallelProbes: 1,
+    validatedAtSeconds: fleetObservedAt,
+    maxEvidenceAgeSeconds: 1_800,
   })
   const inventoryPath = join(fleetDir, 'inventory.json')
   writeFileSync(inventoryPath, `${JSON.stringify(fleetInventory)}\n`)
@@ -969,6 +1342,19 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     result.stdout,
     new RegExp(`Published staged draft v4\\.1\\.5 .* ${fakeCid}`),
   )
+  const fleetProofPath = join(
+    fleetDir,
+    'fleet-publication-proof.json',
+  )
+  const fleetProofText = readFileSync(fleetProofPath, 'utf8')
+  assert.doesNotMatch(
+    fleetProofText,
+    /private-linux|linux-guest|current-mac/,
+  )
+  assert.equal(
+    statSync(fleetProofPath).mode & 0o777,
+    0o600,
+  )
   assert.equal(
     spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
       cwd: repo,
@@ -1033,7 +1419,7 @@ test('final publication preflights tools and Zapstore identity before the releas
   const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
   const mainStart = localRelease.indexOf('function main()')
   const preflightCall = localRelease.indexOf(
-    'preflightRequiredZapstorePublication({',
+    'preflightExactZapstorePublication({',
     mainStart,
   )
   const buildSteps = localRelease.indexOf('const steps = [', mainStart)
@@ -1044,11 +1430,15 @@ test('final publication preflights tools and Zapstore identity before the releas
     localRelease,
     /\(options\.publish\s*\|\|\s*options\.publishStagedDraft\)[\s\S]*?&&\s*!options\.dryRun[\s\S]*?&&\s*!commandExists\('htree'\)/,
   )
+  const zapstorePublisher = readFileSync(
+    join(process.cwd(), 'scripts/zapstore-release-publication.mjs'),
+    'utf8',
+  )
   assert.match(
-    localRelease,
+    zapstorePublisher,
     /zapstorePublicationPrerequisites\([\s\S]*?apk:\s*!requireApk\s*\|\|\s*Boolean\(apkPath\s*&&\s*existsSync\(apkPath\)\)/,
   )
-  assert.match(localRelease, /run\('nak', \['decode', publisherNpub\]/)
+  assert.match(zapstorePublisher, /'nak',[\s\S]*\['decode', context\.publisherNpub\]/)
 })
 
 test('publication verification requires real Windows and Linux underlay gates', () => {
@@ -1500,7 +1890,7 @@ test('release script binds Android publication to the physical-gate receipt and 
 
   assert.match(
     localRelease,
-    /publishZapstore\(\{[\s\S]*?apkPath:\s*promoted\.stagedAndroidApkPath/,
+    /publishExactZapstoreRelease\(\{[\s\S]*?apkPath:\s*promoted\.stagedAndroidApkPath/,
   )
   assert.doesNotMatch(
     localRelease,
@@ -1508,15 +1898,19 @@ test('release script binds Android publication to the physical-gate receipt and 
   )
   assert.doesNotMatch(
     localRelease,
-    /function publishZapstore\(\{[\s\S]*?const apkPath = join\(distDir/,
+    /apkPath:\s*stagedRelease\.stagedAndroidApkPath/,
+  )
+  const zapstorePublisher = readFileSync(
+    join(process.cwd(), 'scripts/zapstore-release-publication.mjs'),
+    'utf8',
   )
   assert.match(
-    localRelease,
-    /validatedApk\.sha256\s*!==\s*sha256FileSync\(apkPath\)/,
+    zapstorePublisher,
+    /validated\.sha256\s*!==\s*sha256FileSync\(apk\)/,
   )
 })
 
-test('draft candidates are complete before the final TestFlight upload', () => {
+test('ordinary staging exports iOS without any App Store Connect mutation', () => {
   const localRelease = readFileSync(
     join(process.cwd(), 'scripts/local-release.mjs'),
     'utf8',
@@ -1541,9 +1935,183 @@ test('draft candidates are complete before the final TestFlight upload', () => {
     localRelease,
     /function buildIosArtifacts[\s\S]*NVPN_RELEASE_GATE_LOG_DIR:\s*releaseGateLogDir/,
   )
+  const iosBuildStart = localRelease.indexOf('function buildIosArtifacts')
+  const iosBuildEnd = localRelease.indexOf(
+    '\nfunction syncPlatformVersions',
+    iosBuildStart,
+  )
+  const iosBuild = localRelease.slice(iosBuildStart, iosBuildEnd)
+  assert.match(iosBuild, /'ios-export'/)
+  assert.doesNotMatch(iosBuild, /ios-testflight|ios-upload|testflight-internal/)
   assert.match(
     steps,
     /buildIosArtifacts\(\{[\s\S]*releaseGateLogDir,[\s\S]*\}\)/,
+  )
+})
+
+test('promotion preflights and publishes exact iOS to both TestFlight lanes and App Review', () => {
+  const localRelease = readFileSync(
+    join(process.cwd(), 'scripts/local-release.mjs'),
+    'utf8',
+  )
+  const promoteStart = localRelease.indexOf('if (options.promoteDraft)')
+  const promoteEnd = localRelease.indexOf('\n  const steps = [', promoteStart)
+  const promote = localRelease.slice(promoteStart, promoteEnd)
+  assert.ok(
+    promote.indexOf('preflightIosPublication({')
+      < promote.indexOf('promoteStagedDraft({'),
+  )
+  assert.ok(
+    promote.indexOf('assertPassedFleetPublication({')
+      < promote.indexOf('preflightIosPublication({'),
+  )
+  for (const preflight of [
+    'preflightHtreeRelease({',
+    'preflightGithubRelease({',
+    'preflightIosPublication({',
+    'preflightExactZapstorePublication({',
+    'preflightRustCrates({',
+  ]) {
+    assert.ok(
+      promote.indexOf(preflight) >= 0
+        && promote.indexOf(preflight)
+          < promote.indexOf('promoteStagedDraft({'),
+      preflight,
+    )
+  }
+  assert.ok(
+    promote.indexOf('preflightRustCrates({')
+      < promote.indexOf('publishExactIosDistribution({'),
+  )
+  assert.ok(
+    promote.indexOf('publishExactIosDistribution({')
+      < promote.indexOf('promoteStagedDraft({'),
+  )
+  assert.match(promote, /publishExactIosDistribution\(\{/)
+
+  const publisher = readFileSync(
+    join(process.cwd(), 'scripts/ios-release-publication.mjs'),
+    'utf8',
+  )
+  assert.match(publisher, /\['testflight-internal', 'put'\]/)
+  assert.match(publisher, /\['testflight-internal', 'public'\]/)
+  assert.match(
+    publisher,
+    /\[join\(repoRoot, 'scripts', 'appstore-draft'\), 'submit'\]/,
+  )
+  assert.match(publisher, /\['testflight-internal', 'public-status'\]/)
+  assert.match(publisher, /\['appstore-draft', 'status'\]/)
+  assert.match(publisher, /validateFrozenIosPublication\(/)
+  assert.match(publisher, /validateIosUploadReceipt\(/)
+  assert.match(publisher, /fleetResultSha256/)
+
+  const promoteFunctionStart = localRelease.indexOf(
+    'function promoteStagedDraft(',
+  )
+  const promoteFunctionEnd = localRelease.indexOf(
+    '\nfunction releaseMutationEnvironment',
+    promoteFunctionStart,
+  )
+  const promoteFunction = localRelease.slice(
+    promoteFunctionStart,
+    promoteFunctionEnd,
+  )
+  assert.match(promoteFunction, /cpSync\(stageDir,\s*finalStageDir/)
+  assert.match(promoteFunction, /join\(finalStageDir,\s*name\)/)
+  assert.doesNotMatch(
+    promoteFunction,
+    /join\(stageDir,\s*(?:'release\.json'|'manifest\.json'|name)\)/,
+  )
+})
+
+test('htree promotion requires an exact private publisher identity pin', () => {
+  const publisher = readFileSync(
+    join(process.cwd(), 'scripts/htree-release-publication.mjs'),
+    'utf8',
+  )
+  assert.match(publisher, /if \(!expected\)/)
+  assert.match(
+    publisher,
+    /NVPN_HTREE_PUBLISHER_NPUB must pin the expected htree release identity/,
+  )
+  assert.match(publisher, /if \(expected !== npub\)/)
+})
+
+test('every mutating Apple distribution entry point requires the canonical fleet gate', () => {
+  const iosBuild = readFileSync(
+    join(process.cwd(), 'scripts/ios-build'),
+    'utf8',
+  )
+  assert.match(
+    iosBuild,
+    /ios-upload\)\s*\n\s*require_release_mutation_gate/,
+  )
+  assert.match(
+    iosBuild,
+    /ios-attach-internal\)\s*\n\s*require_release_mutation_gate/,
+  )
+  assert.match(
+    iosBuild,
+    /ios-testflight\|ios-release-artifacts\)\s*\n\s*require_release_mutation_gate/,
+  )
+
+  const testflight = readFileSync(
+    join(process.cwd(), 'scripts/testflight-internal'),
+    'utf8',
+  )
+  const gate = testflight.indexOf('require_release_mutation_gate "$ROOT"')
+  const network = testflight.indexOf("python3 <<'PY'")
+  assert.ok(gate >= 0 && network > gate)
+  assert.match(
+    testflight,
+    /ensure-app\|compliance\|put\|attach\|expire\|public\|public-submit\|public-attach\)/,
+  )
+  assert.doesNotMatch(
+    testflight,
+    /wait\|status\|groups\|public-status\)\s*\n\s*require_release_mutation_gate/,
+  )
+  assert.doesNotMatch(
+    testflight,
+    /preflight\)\s*\n\s*require_release_mutation_gate/,
+  )
+
+  const appstore = readFileSync(
+    join(process.cwd(), 'scripts/appstore-draft'),
+    'utf8',
+  )
+  assert.match(
+    appstore,
+    /put\|submit\|availability\)\s*\n\s*require_release_mutation_gate/,
+  )
+  assert.doesNotMatch(
+    appstore,
+    /status\)\s*\n\s*require_release_mutation_gate/,
+  )
+  assert.doesNotMatch(
+    appstore,
+    /preflight\)\s*\n\s*require_release_mutation_gate/,
+  )
+})
+
+test('crates publication has no dirty bypass and replays exact source immediately before publish', () => {
+  const publisher = readFileSync(
+    join(process.cwd(), 'scripts/publish.sh'),
+    'utf8',
+  )
+  assert.doesNotMatch(publisher, /--allow-dirty/)
+  assert.match(publisher, /require_release_mutation_gate "\$REPO_DIR"/)
+  assert.match(publisher, /cargo package --locked -p "\$crate"/)
+  assert.match(publisher, /packageSha256/)
+  assert.match(publisher, /preflight_crates_io_credentials/)
+  assert.match(publisher, /crates\.io\/api\/v1\/me/)
+  assert.match(publisher, /verify_published_crate "\$crate"/)
+  assert.match(
+    publisher,
+    /crates\.io\/api\/v1\/crates\/\$\{crate\}\/\$\{version\}\/download/,
+  )
+  assert.match(
+    publisher,
+    /package_crate_and_bind_digest "\$crate"\s*\n\s*verify_exact_release_source\s*\n\s*fi\s*\n\s*if output=\$\(cargo publish --locked/,
   )
 })
 
@@ -1640,9 +2208,163 @@ test('dispatched release notes record the checked-out tag source commit', () => 
   assert.doesNotMatch(workflow, /--commit "\$\{GITHUB_SHA\}"/)
 })
 
-test('GitHub release requires an exact locally gated commit', () => {
+test('GitHub release metadata rejects same-tag asset substitution', () => {
+  const exact = {
+    release: {
+      tagName: 'v4.1.5',
+      name: 'v4.1.5',
+      isDraft: false,
+      isPrerelease: false,
+      targetCommitish: 'a'.repeat(40),
+      body: 'exact notes\n',
+      assets: [
+        {
+          name: 'asset.zip',
+          size: 42,
+          digest: `sha256:${'b'.repeat(64)}`,
+        },
+      ],
+    },
+    tag: 'v4.1.5',
+    commit: 'a'.repeat(40),
+    notes: 'exact notes\n',
+    assets: [
+      {
+        name: 'asset.zip',
+        size: 42,
+        sha256: 'b'.repeat(64),
+      },
+    ],
+  }
+  assert.doesNotThrow(() => validateGithubReleaseMetadata(exact))
+  for (const mutate of [
+    (value) => {
+      value.release.targetCommitish = 'c'.repeat(40)
+    },
+    (value) => {
+      value.release.assets[0].digest = `sha256:${'d'.repeat(64)}`
+    },
+    (value) => {
+      value.release.assets[0].name = 'substitute.zip'
+    },
+    (value) => {
+      value.release.body = 'different notes'
+    },
+  ]) {
+    const value = structuredClone(exact)
+    mutate(value)
+    assert.throws(
+      () => validateGithubReleaseMetadata(value),
+      /GitHub release/i,
+    )
+  }
+})
+
+test('GitHub retry repairs only missing assets and mutable exact metadata', () => {
+  const commit = 'a'.repeat(40)
+  const assets = [
+    {
+      name: 'present.zip',
+      path: '/sealed/present.zip',
+      size: 42,
+      sha256: 'b'.repeat(64),
+    },
+    {
+      name: 'missing.zip',
+      path: '/sealed/missing.zip',
+      size: 84,
+      sha256: 'c'.repeat(64),
+    },
+  ]
+  const release = {
+    tagName: 'v4.1.5',
+    name: 'incomplete title',
+    isDraft: true,
+    isPrerelease: false,
+    targetCommitish: commit,
+    body: 'incomplete notes',
+    assets: [
+      {
+        name: 'present.zip',
+        size: 42,
+        digest: `sha256:${'b'.repeat(64)}`,
+      },
+    ],
+  }
+
+  const plan = githubReleaseRepairPlan({
+    release,
+    tag: 'v4.1.5',
+    commit,
+    notes: 'exact notes\n',
+    assets,
+  })
+  assert.equal(plan.metadataNeedsEdit, true)
+  assert.deepEqual(plan.present.map(({ name }) => name), ['present.zip'])
+  assert.deepEqual(plan.missing.map(({ name }) => name), ['missing.zip'])
+})
+
+test('GitHub retry never repairs a conflicting release or asset', () => {
+  const commit = 'a'.repeat(40)
+  const assets = [
+    {
+      name: 'asset.zip',
+      path: '/sealed/asset.zip',
+      size: 42,
+      sha256: 'b'.repeat(64),
+    },
+  ]
+  const release = {
+    tagName: 'v4.1.5',
+    name: 'v4.1.5',
+    isDraft: false,
+    isPrerelease: false,
+    targetCommitish: commit,
+    body: 'exact notes\n',
+    assets: [
+      {
+        name: 'asset.zip',
+        size: 42,
+        digest: `sha256:${'b'.repeat(64)}`,
+      },
+    ],
+  }
+  for (const mutate of [
+    (value) => {
+      value.targetCommitish = 'd'.repeat(40)
+    },
+    (value) => {
+      value.assets[0].name = 'unexpected.zip'
+    },
+    (value) => {
+      value.assets[0].size = 43
+    },
+    (value) => {
+      value.assets[0].digest = `sha256:${'e'.repeat(64)}`
+    },
+  ]) {
+    const conflicting = structuredClone(release)
+    mutate(conflicting)
+    assert.throws(
+      () => githubReleaseRepairPlan({
+        release: conflicting,
+        tag: 'v4.1.5',
+        commit,
+        notes: 'exact notes\n',
+        assets,
+      }),
+      /GitHub release asset|target commit/i,
+    )
+  }
+})
+
+test('Actions cannot mutate public releases and local promotion is fleet-gated', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
   const trigger = workflow.slice(0, workflow.indexOf('\nenv:'))
+  const localRelease = readFileSync(
+    join(process.cwd(), 'scripts/local-release.mjs'),
+    'utf8',
+  )
 
   assert.match(trigger, /workflow_dispatch:/)
   assert.doesNotMatch(trigger, /^\s+push:/m)
@@ -1658,8 +2380,20 @@ test('GitHub release requires an exact locally gated commit', () => {
   assert.match(releaseJob, /htree get "\$\{LOCALLY_GATED_RELEASE_CID\}"/)
   assert.match(releaseJob, /verify-release-publication-bundle\.mjs/)
   assert.match(releaseJob, /start-cli_x86_64-linux/)
-  assert.match(releaseJob, /files: locally-gated-release\/assets\/\*/)
   assert.doesNotMatch(releaseJob, /actions\/download-artifact/)
+  assert.doesNotMatch(releaseJob, /contents:\s*write/)
+  assert.doesNotMatch(releaseJob, /action-gh-release|gh release create/)
+  const promoteStart = localRelease.indexOf(
+    'if (options.promoteDraft) {',
+  )
+  const promote = localRelease.slice(
+    promoteStart,
+    localRelease.indexOf('\n  const steps = [', promoteStart),
+  )
+  const fleet = promote.indexOf('assertPassedFleetPublication({')
+  const preflight = promote.indexOf('preflightGithubRelease({')
+  const publish = promote.indexOf('publishExactGithubRelease({')
+  assert.ok(fleet >= 0 && preflight > fleet && publish > preflight)
 })
 
 test('GitHub platform builds run beside verification and join before release', () => {
@@ -1707,10 +2441,16 @@ test('GitHub release requires and publishes both StartOS package architectures',
 })
 
 test('corrected GitHub release is explicitly promoted as latest', () => {
-  const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
-  const releaseJob = workflow.split('  release:', 2)[1]
+  const publisher = readFileSync(
+    join(process.cwd(), 'scripts/github-release-publication.mjs'),
+    'utf8',
+  )
 
-  assert.match(releaseJob, /make_latest:\s*true/)
+  assert.match(publisher, /'--latest'/)
+  assert.match(publisher, /'--verify-tag'/)
+  assert.match(publisher, /'refs\/heads\/master'/)
+  assert.match(publisher, /`refs\/tags\/\$\{tag\}`/)
+  assert.match(publisher, /\['origin', 'refs\/heads\/master'/)
 })
 
 test('Windows corrected-release tags keep installer version at the marketing version', () => {

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
+import { validateFleetRosterInputs } from './fleet-roster-catalog-lib.mjs'
+
 const fleetHex40 = /^[0-9a-f]{40}$/
 const fleetHex64 = /^[0-9a-f]{64}$/
 const fleetVersion = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/
@@ -121,7 +123,7 @@ function requireFleetInstallTarget(target, role) {
   }
   const arches = target.platform === 'windows'
     ? ['x86_64']
-    : ['x86_64', 'aarch64']
+    : ['x86_64', 'aarch64', 'armv6', 'armv7']
   if (!arches.includes(target.arch)) {
     throw new Error(`Roster role ${role.id} target architecture is unsupported.`)
   }
@@ -187,14 +189,22 @@ function fleetTargetSetSha256(targets) {
 }
 
 export function buildFrozenFleetInventory({
+  catalog,
+  catalogBinding,
+  expectedCatalogSha256,
   snapshot,
   snapshotBinding,
-  currentMacMachineIdentitySha256,
+  currentMacReceipt,
+  currentMacReceiptBinding,
+  roleEvidence,
   parallelProbes = 4,
+  validatedAtSeconds,
+  freshnessCheckSeconds = validatedAtSeconds,
+  maxEvidenceAgeSeconds = 1_800,
 }) {
   requireFleetExactKeys(
     snapshot,
-    ['authority', 'capturedAt', 'roles', 'schema'],
+    ['authority', 'capturedAt', 'catalogSha256', 'roles', 'schema'],
     'Authoritative roster snapshot',
   )
   if (
@@ -208,6 +218,32 @@ export function buildFrozenFleetInventory({
     'Authoritative roster snapshot capturedAt',
   )
   requireFleetBoundFileMetadata(snapshotBinding, 'Roster snapshot binding')
+  requireFleetBoundFileMetadata(catalogBinding, 'Roster catalog binding')
+  requireFleetBoundFileMetadata(
+    currentMacReceiptBinding,
+    'Measured current Mac receipt binding',
+  )
+  requireFleetPositiveInteger(
+    validatedAtSeconds,
+    'Roster inventory validation time',
+  )
+  requireFleetPositiveInteger(
+    freshnessCheckSeconds,
+    'Roster freshness check time',
+  )
+  validateFleetRosterInputs({
+    catalog,
+    catalogBinding,
+    expectedCatalogSha256,
+    snapshot,
+    currentMacReceipt,
+    currentMacReceiptBinding,
+    roleEvidence,
+    nowSeconds: freshnessCheckSeconds,
+    maxAgeSeconds: maxEvidenceAgeSeconds,
+  })
+  const currentMacMachineIdentitySha256 =
+    currentMacReceipt.machineIdentitySha256
   requireFleetHex(
     currentMacMachineIdentitySha256,
     fleetHex64,
@@ -346,6 +382,15 @@ export function buildFrozenFleetInventory({
       authority: snapshot.authority,
       capturedAt: snapshot.capturedAt,
     },
+    rosterCatalog: {
+      ...catalogBinding,
+      authority: catalog.authority,
+    },
+    currentMacReceipt: currentMacReceiptBinding,
+    rosterFreshness: {
+      validatedAt: validatedAtSeconds,
+      maxAgeSeconds: maxEvidenceAgeSeconds,
+    },
     currentMacExclusion: {
       id: currentMac.id,
       machineIdentitySha256: currentMac.machineIdentitySha256,
@@ -403,6 +448,9 @@ function requireFleetRawReceipt({
 }
 
 export function validateFleetPublicationMetadata({
+  catalog,
+  currentMacReceipt,
+  roleEvidence,
   snapshot,
   inventory,
   source,
@@ -412,18 +460,30 @@ export function validateFleetPublicationMetadata({
   manifest,
   result,
   rawReceipts,
+  validationTimeSeconds = inventory.rosterFreshness?.validatedAt,
 }) {
   const exactSource = requireFleetSource(source, 'Expected fleet source')
   const rebuiltInventory = buildFrozenFleetInventory({
+    catalog,
+    catalogBinding: {
+      path: inventory.rosterCatalog?.path,
+      sha256: inventory.rosterCatalog?.sha256,
+      size: inventory.rosterCatalog?.size,
+    },
+    expectedCatalogSha256: inventory.rosterCatalog?.sha256,
     snapshot,
     snapshotBinding: {
       path: inventory.rosterSnapshot?.path,
       sha256: inventory.rosterSnapshot?.sha256,
       size: inventory.rosterSnapshot?.size,
     },
-    currentMacMachineIdentitySha256:
-      inventory.currentMacExclusion?.machineIdentitySha256,
+    currentMacReceipt,
+    currentMacReceiptBinding: inventory.currentMacReceipt,
+    roleEvidence,
     parallelProbes: inventory.parallelProbes,
+    validatedAtSeconds: inventory.rosterFreshness?.validatedAt,
+    freshnessCheckSeconds: validationTimeSeconds,
+    maxEvidenceAgeSeconds: inventory.rosterFreshness?.maxAgeSeconds,
   })
   if (!isDeepStrictEqual(inventory, rebuiltInventory)) {
     throw new Error(

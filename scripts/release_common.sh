@@ -402,6 +402,25 @@ require_var() {
   fi
 }
 
+require_release_mutation_gate() {
+  local root="$1"
+  local args=()
+  require_var NVPN_RELEASE_STAGE_DIR
+  require_var NVPN_FLEET_RESULT_PATH
+  require_var NVPN_FLEET_MANIFEST_PATH
+  require_var NVPN_FLEET_INVENTORY_PATH
+  args=(
+    --stage-dir "$NVPN_RELEASE_STAGE_DIR"
+    --fleet-result "$NVPN_FLEET_RESULT_PATH"
+    --fleet-manifest "$NVPN_FLEET_MANIFEST_PATH"
+    --fleet-inventory "$NVPN_FLEET_INVENTORY_PATH"
+  )
+  if [[ -n "${NVPN_RELEASE_TAG:-}" ]]; then
+    args+=(--tag "$NVPN_RELEASE_TAG")
+  fi
+  node "$root/scripts/release-mutation-gate.mjs" "${args[@]}"
+}
+
 write_manifest() {
   local path="$1"
   shift

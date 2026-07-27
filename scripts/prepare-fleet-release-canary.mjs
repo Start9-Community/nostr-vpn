@@ -12,7 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -40,12 +40,17 @@ function parseArgs(argv) {
   const values = {
     root: scriptRoot,
     stageDir: '',
-    rosterSnapshot: '',
+    rosterSnapshot: process.env.NVPN_FLEET_ROSTER_SNAPSHOT_PATH || '',
+    rosterCatalog: process.env.NVPN_FLEET_ROSTER_CATALOG_PATH || '',
+    rosterCatalogSha256:
+      process.env.NVPN_FLEET_ROSTER_CATALOG_SHA256 || '',
+    currentMacReceipt:
+      process.env.NVPN_FLEET_CURRENT_MAC_RECEIPT_PATH || '',
     outputDir: '',
-    currentMacMachineIdentitySha256: '',
     releaseGateLogDir: '',
     releaseJoinResultDir: '',
     parallelProbes: 4,
+    maxEvidenceAgeSeconds: 1_800,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -59,11 +64,17 @@ function parseArgs(argv) {
       case '--roster-snapshot':
         values.rosterSnapshot = argv[++index] ?? ''
         break
+      case '--roster-catalog':
+        values.rosterCatalog = argv[++index] ?? ''
+        break
+      case '--roster-catalog-sha256':
+        values.rosterCatalogSha256 = argv[++index] ?? ''
+        break
+      case '--current-mac-receipt':
+        values.currentMacReceipt = argv[++index] ?? ''
+        break
       case '--output-dir':
         values.outputDir = argv[++index] ?? ''
-        break
-      case '--current-mac-machine-identity-sha256':
-        values.currentMacMachineIdentitySha256 = argv[++index] ?? ''
         break
       case '--release-gate-log-dir':
         values.releaseGateLogDir = argv[++index] ?? ''
@@ -74,11 +85,15 @@ function parseArgs(argv) {
       case '--parallel-probes':
         values.parallelProbes = Number(argv[++index] ?? '')
         break
+      case '--max-evidence-age-seconds':
+        values.maxEvidenceAgeSeconds = Number(argv[++index] ?? '')
+        break
       case '--help':
       case '-h':
         console.log(`Usage: node scripts/prepare-fleet-release-canary.mjs \\
-  --stage-dir DIR --roster-snapshot JSON --output-dir DIR \\
-  --current-mac-machine-identity-sha256 SHA256 [options]
+  --stage-dir DIR --roster-snapshot JSON --roster-catalog JSON \\
+  --roster-catalog-sha256 SHA256 --current-mac-receipt JSON \\
+  --output-dir DIR [options]
 
 Creates the private inventory, exact artifact receipts, and fleet manifest from
 the immutable staged release and authoritative roster snapshot. It never builds,
@@ -88,7 +103,8 @@ Options:
   --root DIR                     Exact app checkout (default: script checkout)
   --release-gate-log-dir DIR     Release gate receipts directory
   --release-join-result-dir DIR  Desktop/mobile join receipts directory
-  --parallel-probes N            Concurrent read-only probes (default: 4)`)
+  --parallel-probes N            Concurrent read-only probes (default: 4)
+  --max-evidence-age-seconds N   Observation freshness limit (default/max: 1800)`)
         process.exit(0)
         break
       default:
@@ -98,14 +114,37 @@ Options:
   for (const field of [
     'stageDir',
     'rosterSnapshot',
+    'rosterCatalog',
+    'rosterCatalogSha256',
+    'currentMacReceipt',
     'outputDir',
-    'currentMacMachineIdentitySha256',
   ]) {
     if (!String(values[field]).trim()) {
       fail(`--${field.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`)} is required`)
     }
   }
   return values
+}
+
+function requirePrivatePath(root, path, label) {
+  if (typeof path !== 'string' || !path.trim()) {
+    fail(`${label} path is required`)
+  }
+  const rootPath = resolve(root)
+  const candidate = resolve(path)
+  const relativePath = relative(rootPath, candidate)
+  if (relativePath.startsWith('..') || relativePath === '') {
+    return candidate
+  }
+  const ignored = spawnSync(
+    'git',
+    ['-C', rootPath, 'check-ignore', '-q', '--no-index', '--', relativePath],
+    { stdio: 'ignore' },
+  )
+  if (ignored.status !== 0) {
+    fail(`${label} must be outside the checkout or ignored as private`)
+  }
+  return candidate
 }
 
 function regularFile(path, label) {
@@ -421,8 +460,26 @@ function boundReceiptPaths(paths) {
 export function prepareFleetReleaseCanary(options) {
   const root = resolve(options.root)
   const stageDir = resolve(options.stageDir)
-  const rosterPath = resolve(options.rosterSnapshot)
-  const outputDir = resolve(options.outputDir)
+  const rosterPath = requirePrivatePath(
+    root,
+    options.rosterSnapshot,
+    'authoritative roster snapshot',
+  )
+  const catalogPath = requirePrivatePath(
+    root,
+    options.rosterCatalog,
+    'private roster catalog',
+  )
+  const currentMacReceiptPath = requirePrivatePath(
+    root,
+    options.currentMacReceipt,
+    'measured current Mac receipt',
+  )
+  const outputDir = requirePrivatePath(
+    root,
+    options.outputDir,
+    'fleet preparation output',
+  )
   if (existsSync(outputDir)) {
     fail(`output directory already exists: ${outputDir}`)
   }
@@ -430,16 +487,41 @@ export function prepareFleetReleaseCanary(options) {
   const release = readJson(releasePath, 'staged release')
   validateStagedReleaseTree(stageDir, release)
   validatePromotableReleaseManifest(release)
+  const catalog = readJson(catalogPath, 'private roster catalog')
+  const currentMacReceipt = readJson(
+    currentMacReceiptPath,
+    'measured current Mac receipt',
+  )
   const roster = readJson(rosterPath, 'authoritative roster snapshot')
+  const roleEvidence = {}
   for (const role of roster.roles ?? []) {
+    requirePrivatePath(
+      root,
+      role.evidence?.path,
+      `roster evidence for ${role.id}`,
+    )
     validateBoundFile(role.evidence, `roster evidence for ${role.id}`)
+    roleEvidence[role.id] = readJson(
+      role.evidence.path,
+      `roster evidence for ${role.id}`,
+    )
   }
+  const validatedAtSeconds = Math.floor(Date.now() / 1000)
   const inventory = buildFrozenFleetInventory({
+    catalog,
+    catalogBinding: boundFile(catalogPath, 'private roster catalog'),
+    expectedCatalogSha256: options.rosterCatalogSha256,
     snapshot: roster,
     snapshotBinding: boundFile(rosterPath, 'authoritative roster snapshot'),
-    currentMacMachineIdentitySha256:
-      options.currentMacMachineIdentitySha256,
+    currentMacReceipt,
+    currentMacReceiptBinding: boundFile(
+      currentMacReceiptPath,
+      'measured current Mac receipt',
+    ),
+    roleEvidence,
     parallelProbes: options.parallelProbes,
+    validatedAtSeconds,
+    maxEvidenceAgeSeconds: options.maxEvidenceAgeSeconds,
   })
 
   const gateDir = resolve(

@@ -1,10 +1,13 @@
 import { spawnSync } from 'node:child_process'
 import {
+  chmodSync,
   lstatSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  writeFileSync,
 } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import { sha256FileSync } from './local-release-lib.mjs'
 import { validateFleetPublicationMetadata } from './fleet-release-preparer-lib.mjs'
@@ -56,7 +59,7 @@ function verifyFleetBinding(binding, label, { json = false } = {}) {
   return json ? exactFleetJson(binding.path, label) : null
 }
 
-function fleetPublicationPaths({ repoRoot, options, env }) {
+export function fleetPublicationPaths({ repoRoot, options, env }) {
   const values = {
     result:
       options.fleetResult
@@ -77,6 +80,50 @@ function fleetPublicationPaths({ repoRoot, options, env }) {
     values[name] = resolve(repoRoot, value)
   }
   return values
+}
+
+function writeSanitizedPublicationProof({
+  paths,
+  inventory,
+  manifest,
+  result,
+  release,
+}) {
+  const proofPath = join(
+    dirname(paths.result),
+    'fleet-publication-proof.json',
+  )
+  const proof = {
+    schema: 1,
+    kind: 'nvpn-sanitized-fleet-publication-proof-v1',
+    status: 'passed',
+    validatedAt: Math.floor(Date.now() / 1000),
+    source: {
+      appGitSha: result.appGitSha,
+      appGitTree: result.appGitTree,
+      appVersion: result.appVersion,
+      fipsGitSha: result.fipsGitSha,
+      fipsGitTree: result.fipsGitTree,
+      fipsVersion: result.fipsVersion,
+    },
+    evidence: {
+      catalogSha256: inventory.rosterCatalog.sha256,
+      inventorySha256: sha256FileSync(paths.inventory),
+      manifestSha256: sha256FileSync(paths.manifest),
+      releaseManifestSha256: release.sha256,
+      resultTargetSetSha256: inventory.targetSetSha256,
+      targetCount: result.targets.length,
+      fleetDriverSha256: manifest.driver.sha256,
+    },
+  }
+  const temporary = `${proofPath}.tmp-${process.pid}`
+  writeFileSync(temporary, `${JSON.stringify(proof, null, 2)}\n`, {
+    mode: 0o600,
+  })
+  chmodSync(temporary, 0o600)
+  renameSync(temporary, proofPath)
+  chmodSync(proofPath, 0o600)
+  return proofPath
 }
 
 function replayCanonicalEvidence({ repoRoot, paths }) {
@@ -120,14 +167,29 @@ export function assertPassedFleetPublication({
     paths.inventory,
     'Frozen fleet inventory',
   )
+  const catalog = verifyFleetBinding(
+    inventory.rosterCatalog,
+    'Private roster catalog',
+    { json: true },
+  )
   const snapshot = verifyFleetBinding(
     inventory.rosterSnapshot,
     'Authoritative roster snapshot',
     { json: true },
   )
+  const currentMacReceipt = verifyFleetBinding(
+    inventory.currentMacReceipt,
+    'Measured current Mac receipt',
+    { json: true },
+  )
+  const roleEvidence = {}
   for (const role of snapshot.roles ?? []) {
     verifyFleetBinding(
       role.evidence,
+      `Authoritative roster evidence for ${role.id}`,
+    )
+    roleEvidence[role.id] = exactFleetJson(
+      role.evidence.path,
       `Authoritative roster evidence for ${role.id}`,
     )
   }
@@ -173,6 +235,9 @@ export function assertPassedFleetPublication({
     'Staged release manifest',
   )
   validateFleetPublicationMetadata({
+    catalog,
+    currentMacReceipt,
+    roleEvidence,
     snapshot,
     inventory,
     source: {
@@ -198,7 +263,17 @@ export function assertPassedFleetPublication({
     manifest,
     result,
     rawReceipts,
+    validationTimeSeconds: Math.floor(Date.now() / 1000),
   })
   replayCanonicalEvidence({ repoRoot, paths })
-  return result.targets.length
+  return {
+    proofPath: writeSanitizedPublicationProof({
+      paths,
+      inventory,
+      manifest,
+      result,
+      release,
+    }),
+    targetCount: result.targets.length,
+  }
 }

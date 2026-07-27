@@ -22,6 +22,7 @@ import { deriveFleetArtifacts } from './prepare-fleet-release-canary.mjs'
 const hex = (character, length = 64) => character.repeat(length)
 const sha256 = (value) =>
   createHash('sha256').update(value).digest('hex')
+const validatedAtSeconds = 1_785_000_100
 
 function bound(path, character) {
   return {
@@ -69,6 +70,7 @@ function rosterSnapshot() {
     schema: 1,
     authority: 'nvpn-known-host-roster-v1',
     capturedAt: 1_785_000_000,
+    catalogSha256: hex('e'),
     roles: [
       {
         id: 'linux-main',
@@ -110,15 +112,106 @@ function rosterSnapshot() {
   }
 }
 
+function rosterCatalog(snapshot = rosterSnapshot()) {
+  const capabilities = {
+    'linux-main': {
+      supported: true,
+      reason: 'transactional Linux adapter is supported',
+    },
+    'current-mac': {
+      supported: false,
+      reason: 'current release host is never a fleet target',
+    },
+    'offline-edge': {
+      supported: true,
+      reason: 'transactional Linux adapter is supported',
+    },
+    'unsupported-mac': {
+      supported: false,
+      reason: 'production canary has no macOS transactional adapter',
+    },
+  }
+  return {
+    schema: 1,
+    authority: 'nvpn-private-roster-catalog-v1',
+    roles: snapshot.roles.map((role) => ({
+      id: role.id,
+      platform: role.target?.platform
+        ?? (role.id === 'offline-edge' ? 'linux' : 'macos'),
+      arch: role.target?.arch ?? 'aarch64',
+      dependencies: [],
+      capability: capabilities[role.id] ?? {
+        supported: true,
+        reason: 'transactional Linux adapter is supported',
+      },
+    })),
+  }
+}
+
+function roleEvidence(snapshot, catalog = rosterCatalog(snapshot)) {
+  const catalogById = new Map(
+    catalog.roles.map((role) => [role.id, role]),
+  )
+  const kinds = {
+    install: 'nvpn-roster-install-observation-v1',
+    'excluded-current-mac': 'nvpn-roster-current-host-observation-v1',
+    unreachable: 'nvpn-roster-unreachable-observation-v1',
+    'unsupported-platform': 'nvpn-roster-capability-observation-v1',
+  }
+  return Object.fromEntries(snapshot.roles.map((role) => {
+    const catalogRole = catalogById.get(role.id)
+    return [
+      role.id,
+      {
+        schema: 1,
+        kind: kinds[role.disposition],
+        roleId: role.id,
+        disposition: role.disposition,
+        observedAt: role.observedAt,
+        machineIdentitySha256: role.machineIdentitySha256,
+        platform: catalogRole.platform,
+        arch: catalogRole.arch,
+        reachable: role.disposition !== 'unreachable',
+        installSupported: catalogRole.capability.supported,
+        capabilityReason: catalogRole.capability.reason,
+      },
+    ]
+  }))
+}
+
+function currentMacReceipt() {
+  return {
+    schema: 1,
+    kind: 'nvpn-current-mac-measurement-v1',
+    source: 'ioreg-IOPlatformUUID-sha256',
+    measuredAt: 1_785_000_000,
+    machineIdentitySha256: hex('7'),
+  }
+}
+
+function inventoryArgs(snapshot = rosterSnapshot(), catalog = rosterCatalog(snapshot)) {
+  return {
+    catalog,
+    catalogBinding: bound('/private/roster-catalog.json', 'e'),
+    expectedCatalogSha256: hex('e'),
+    snapshot,
+    snapshotBinding: bound('/private/roster-snapshot.json', 'f'),
+    currentMacReceipt: currentMacReceipt(),
+    currentMacReceiptBinding: bound(
+      '/private/current-mac-receipt.json',
+      '0',
+    ),
+    roleEvidence: roleEvidence(snapshot, catalog),
+    parallelProbes: 4,
+    validatedAtSeconds,
+    maxEvidenceAgeSeconds: 1_800,
+  }
+}
+
 function publicationFixture() {
   const snapshot = rosterSnapshot()
-  const snapshotBinding = bound('/private/roster-snapshot.json', 'e')
-  const inventory = buildFrozenFleetInventory({
-    snapshot,
-    snapshotBinding,
-    currentMacMachineIdentitySha256: hex('7'),
-    parallelProbes: 4,
-  })
+  const input = inventoryArgs(snapshot)
+  const inventory = buildFrozenFleetInventory(input)
   const source = {
     appGitSha: hex('a', 40),
     appGitTree: hex('b', 40),
@@ -223,6 +316,9 @@ function publicationFixture() {
     },
   }
   return {
+    catalog: input.catalog,
+    currentMacReceipt: input.currentMacReceipt,
+    roleEvidence: input.roleEvidence,
     snapshot,
     inventory,
     source,
@@ -232,17 +328,13 @@ function publicationFixture() {
     manifest,
     result,
     rawReceipts,
+    validationTimeSeconds: validatedAtSeconds,
   }
 }
 
 test('authoritative roster snapshot yields one exact install target and explicit coverage', () => {
   const snapshot = rosterSnapshot()
-  const inventory = buildFrozenFleetInventory({
-    snapshot,
-    snapshotBinding: bound('/private/roster-snapshot.json', 'e'),
-    currentMacMachineIdentitySha256: hex('7'),
-    parallelProbes: 4,
-  })
+  const inventory = buildFrozenFleetInventory(inventoryArgs(snapshot))
 
   assert.equal(inventory.excludeCurrentHost, true)
   assert.deepEqual(
@@ -273,6 +365,8 @@ test('authoritative roster snapshot yields one exact install target and explicit
     inventory.currentMacExclusion.machineIdentitySha256,
     hex('7'),
   )
+  assert.equal(inventory.rosterCatalog.sha256, hex('e'))
+  assert.equal(inventory.currentMacReceipt.sha256, hex('0'))
 })
 
 test('authoritative roster preserves explicit safe rollout order', () => {
@@ -287,12 +381,11 @@ test('authoritative roster preserves explicit safe rollout order', () => {
     hypervisor.machineIdentitySha256
   snapshot.roles.splice(1, 0, hypervisor)
 
-  const inventory = buildFrozenFleetInventory({
-    snapshot,
-    snapshotBinding: bound('/private/roster-snapshot.json', 'e'),
-    currentMacMachineIdentitySha256: hex('7'),
-    parallelProbes: 4,
-  })
+  const catalog = rosterCatalog(snapshot)
+  catalog.roles[1].dependencies = ['linux-main']
+  const inventory = buildFrozenFleetInventory(
+    inventoryArgs(snapshot, catalog),
+  )
   assert.deepEqual(
     inventory.targets.map(({ id }) => id),
     ['linux-main', 'aaa-hypervisor'],
@@ -329,13 +422,13 @@ test('authoritative roster snapshot rejects escape hatches and ambiguous coverag
           ({ disposition }) => disposition !== 'excluded-current-mac',
         )
       },
-      /exactly one.*current Mac/i,
+      /current Mac/i,
     ],
     [
       (value) => {
         value.roles[1].machineIdentitySha256 = hex('9')
       },
-      /current Mac.*identity/i,
+      /current Mac.*(?:identity|measured receipt)/i,
     ],
     [
       (value) => {
@@ -356,17 +449,81 @@ test('authoritative roster snapshot rejects escape hatches and ambiguous coverag
     mutate(snapshot)
     assert.throws(
       () =>
-        buildFrozenFleetInventory({
-          snapshot,
-          snapshotBinding: bound(
-            '/private/roster-snapshot.json',
-            'e',
-          ),
-          currentMacMachineIdentitySha256: hex('7'),
-          parallelProbes: 4,
-        }),
+        buildFrozenFleetInventory(inventoryArgs(snapshot)),
       error,
     )
+  }
+})
+
+test('private roster catalog rejects omissions, fake evidence, staleness, and unsafe order', () => {
+  const cases = [
+    [
+      (args) => {
+        args.catalog.roles.pop()
+      },
+      /exact catalog role order/i,
+    ],
+    [
+      (args) => {
+        args.roleEvidence['linux-main'].kind = 'hand-authored-pass'
+      },
+      /schema or kind/i,
+    ],
+    [
+      (args) => {
+        args.freshnessCheckSeconds += 7_200
+      },
+      /stale/i,
+    ],
+    [
+      (args) => {
+        args.catalog.roles[0].dependencies = ['offline-edge']
+      },
+      /not topological/i,
+    ],
+    [
+      (args) => {
+        args.currentMacReceipt.source = 'typed-by-hand'
+      },
+      /provenance/i,
+    ],
+    [
+      (args) => {
+        args.expectedCatalogSha256 = hex('f')
+      },
+      /pinned SHA-256/i,
+    ],
+    [
+      (args) => {
+        const first = args.snapshot.roles[0]
+        args.snapshot.roles[0] = args.snapshot.roles[1]
+        args.snapshot.roles[1] = first
+      },
+      /exact catalog role order/i,
+    ],
+  ]
+  for (const [mutate, error] of cases) {
+    const args = inventoryArgs()
+    args.freshnessCheckSeconds = validatedAtSeconds
+    mutate(args)
+    assert.throws(() => buildFrozenFleetInventory(args), error)
+  }
+})
+
+test('private roster can represent unsupported armv6 and armv7 Linux machines', () => {
+  for (const arch of ['armv6', 'armv7']) {
+    const snapshot = rosterSnapshot()
+    const catalog = rosterCatalog(snapshot)
+    const role = catalog.roles.find(({ id }) => id === 'unsupported-mac')
+    role.platform = 'linux'
+    role.arch = arch
+    role.capability.reason = `no staged ${arch} release artifact`
+    const snapshotRole = snapshot.roles.find(
+      ({ id }) => id === 'unsupported-mac',
+    )
+    snapshotRole.reason = role.capability.reason
+    const args = inventoryArgs(snapshot, catalog)
+    assert.doesNotThrow(() => buildFrozenFleetInventory(args))
   }
 })
 
@@ -531,12 +688,7 @@ test('preparer derives artifact receipts and payload labels from archive bytes',
         },
       },
     }
-    const inventory = buildFrozenFleetInventory({
-      snapshot: rosterSnapshot(),
-      snapshotBinding: bound('/private/roster-snapshot.json', 'e'),
-      currentMacMachineIdentitySha256: hex('7'),
-      parallelProbes: 4,
-    })
+    const inventory = buildFrozenFleetInventory(inventoryArgs())
     const source = publicationFixture().source
     const prepared = deriveFleetArtifacts({
       stageDir,

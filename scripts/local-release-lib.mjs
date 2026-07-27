@@ -284,6 +284,7 @@ export function validateZapstoreApkMetadata(
     expectedVersion,
     expectedVersionCode,
     expectedPackageId,
+    expectedCertificateFingerprint = '',
   } = {},
 ) {
   const packageId = String(metadata?.package_id ?? '').trim()
@@ -319,6 +320,17 @@ export function validateZapstoreApkMetadata(
   }
   if (!certificateFingerprint) {
     throw new Error('Zapstore APK is not signed with an Android certificate.')
+  }
+  if (
+    expectedCertificateFingerprint
+    && certificateFingerprint.replaceAll(':', '').toLowerCase()
+      !== String(expectedCertificateFingerprint)
+        .replaceAll(':', '')
+        .toLowerCase()
+  ) {
+    throw new Error(
+      'Zapstore APK signing certificate differs from the frozen release manifest.',
+    )
   }
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
     throw new Error('Zapstore APK metadata does not contain a valid SHA-256 hash.')

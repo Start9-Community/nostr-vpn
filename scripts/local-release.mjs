@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  cpSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -42,10 +43,7 @@ import {
   validatePromotableReleaseSource,
   validateReleaseAssetSet,
   validateStagedReleaseTree,
-  validateZapstoreApkMetadata,
-  validateZapstoreRelayPublication,
   windowsSshTransportArgs,
-  zapstorePublicationPrerequisites,
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
 import {
@@ -61,7 +59,23 @@ import {
   validateWindowsInstallerGateReceipt,
 } from './release-artifact-provenance-lib.mjs'
 import { inspectStartosReleasePackage } from './startos-release.mjs'
-import { assertPassedFleetPublication } from './fleet-release-publication-lib.mjs'
+import {
+  assertPassedFleetPublication,
+  fleetPublicationPaths,
+} from './fleet-release-publication-lib.mjs'
+import {
+  preflightGithubRelease,
+  publishExactGithubRelease,
+} from './github-release-publication.mjs'
+import { preflightHtreeRelease } from './htree-release-publication.mjs'
+import {
+  preflightIosPublication,
+  publishExactIosDistribution,
+} from './ios-release-publication.mjs'
+import {
+  preflightRequiredZapstorePublication as preflightExactZapstorePublication,
+  publishExactZapstoreRelease,
+} from './zapstore-release-publication.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -1386,6 +1400,8 @@ function buildIosArtifacts({
   dryRun,
   builtLines,
   releaseGateLogDir,
+  candidateCommit,
+  candidateTree,
 }) {
   if (process.platform !== 'darwin') {
     throw new SkipStepError('Skipping iOS artifacts because the host is not macOS.')
@@ -1397,12 +1413,79 @@ function buildIosArtifacts({
     NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
     NVPN_RELEASE_GATE_LOG_DIR: releaseGateLogDir,
   }
-  // The release gate already created and physically tested one frozen archive.
-  // This command refuses to archive: it verifies the gate seal, exports that
-  // same xcarchive for App Store Connect, uploads its exact receipt-bound IPA,
-  // and attaches the build to the internal TestFlight group.
-  run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-testflight'], { env, dryRun })
-  builtLines.push(`Uploaded iOS ${tag} to App Store Connect (TestFlight/App Store eligible).`)
+  // Ordinary staging is local-only. It verifies the physically tested frozen
+  // archive and exports its exact App Store IPA without contacting Apple.
+  // Upload/attach/submission entry points require the post-fleet mutation gate.
+  run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], {
+    env,
+    dryRun,
+  })
+  builtLines.push(`Verified and exported iOS ${tag} without uploading it.`)
+  if (dryRun) {
+    return null
+  }
+
+  const exportDir = join(repoRoot, 'dist', 'ios', 'export')
+  const ipaNames = readdirSync(exportDir)
+    .filter((name) => name.endsWith('.ipa'))
+    .sort()
+  if (ipaNames.length !== 1) {
+    throw new Error(
+      `Expected exactly one frozen App Store IPA; found ${ipaNames.length}.`,
+    )
+  }
+  const ipaPath = join(exportDir, ipaNames[0])
+  const receiptPath = join(
+    repoRoot,
+    'dist',
+    'ios',
+    'frozen',
+    'app-store-receipt.json',
+  )
+  const receipt = readRequiredJson(
+    receiptPath,
+    'Frozen iOS App Store export receipt',
+  )
+  const identity = receipt.identity ?? {}
+  const signing = receipt.signing ?? {}
+  const expectedVersion = semverFromTag(tag)
+  if (
+    receipt.receiptSchema !== 1
+    || receipt.artifactType !== 'iOS export from frozen xcarchive'
+    || receipt.distribution !== 'app-store-connect'
+    || receipt.appGitSha !== candidateCommit
+    || receipt.appGitTree !== candidateTree
+    || identity.appBuildGitSha !== candidateCommit
+    || identity.packetTunnelBuildGitSha !== candidateCommit
+    || identity.appBundleIdentifier !== 'fi.siriusbusiness.nvpn'
+    || identity.marketingVersion !== expectedVersion
+    || !/^[1-9][0-9]*$/.test(String(identity.buildNumber ?? ''))
+    || !/^[A-Z0-9]{10}$/.test(
+      String(signing.signingTeamIdentifier ?? ''),
+    )
+    || !/^[0-9a-f]{64}$/.test(
+      String(signing.signerCertificateSha256 ?? ''),
+    )
+    || !/^[0-9a-f]{64}$/.test(String(receipt.ipaSha256 ?? ''))
+    || receipt.ipaSha256 !== sha256FileSync(ipaPath)
+  ) {
+    throw new Error(
+      'Frozen iOS App Store export is not exact production release evidence.',
+    )
+  }
+  return {
+    receipt_schema: receipt.receiptSchema,
+    app_git_sha: receipt.appGitSha,
+    app_git_tree: receipt.appGitTree,
+    bundle_id: identity.appBundleIdentifier,
+    marketing_version: identity.marketingVersion,
+    build_number: String(identity.buildNumber),
+    ipa_sha256: receipt.ipaSha256,
+    ipa_size: statSync(ipaPath).size,
+    export_receipt_sha256: sha256FileSync(receiptPath),
+    signing_team_id: signing.signingTeamIdentifier,
+    signer_certificate_sha256: signing.signerCertificateSha256,
+  }
 }
 
 /**
@@ -1605,6 +1688,7 @@ function stageRelease({
   requireCompleteAppRelease,
   draft,
   androidReleaseGate,
+  iosAppStoreGate,
   releaseGateEvidence,
   artifactProofs,
 }) {
@@ -1677,6 +1761,13 @@ function stageRelease({
     draft,
     androidReleaseGate: androidGateManifest,
   })
+  if (iosAppStoreGate) {
+    manifest.ios_app_store_gate = iosAppStoreGate
+  } else if (requireCompleteAppRelease) {
+    throw new Error(
+      'Complete release staging requires a frozen iOS App Store export.',
+    )
+  }
   if (requireCompleteAppRelease) {
     if (!releaseGateEvidence) {
       throw new Error(
@@ -1751,8 +1842,6 @@ function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
     }
   }
 
-  const releaseJsonPath = join(stageDir, 'release.json')
-  const manifestJsonPath = join(stageDir, 'manifest.json')
   const stagedManifest = readReleaseManifest(stageDir)
   validatePromotableReleaseManifest(stagedManifest)
   assertPromotableDraftSource(tag, stagedManifest)
@@ -1761,303 +1850,105 @@ function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
     stagedManifest.android_release_gate.apk_path,
   )
 
-  const publishedAt = Math.floor(Date.now() / 1000)
-  for (const path of [releaseJsonPath, manifestJsonPath]) {
-    const manifest = JSON.parse(readFileSync(path, 'utf8'))
-    manifest.draft = false
-    manifest.published_at = publishedAt
-    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
-  }
-  readReleaseManifest(stageDir)
-
-  return {
-    cid: publishRelease({ stageDir, releaseTree, tag, draft: false, dryRun }),
-    stagedAndroidApkPath,
-  }
-}
-
-function publishRustCrates({ dryRun }) {
-  const script = join(repoRoot, 'scripts', 'publish.sh')
-  run('bash', dryRun ? [script, '--dry-run'] : [script], { dryRun })
-}
-
-function zapstorePublicationContext(env) {
-  const signWith = resolveZapstoreSignWith(env)
-  const zapstoreYaml = join(repoRoot, 'zapstore.yaml')
-  const configExists = existsSync(zapstoreYaml)
-  const zapstoreConfig = configExists ? readFileSync(zapstoreYaml, 'utf8') : ''
-  const publisherNpub = (
-    zapstoreConfig.match(/^\s*pubkey:\s*(\S+)\s*$/m)?.[1] || ''
-  ).trim()
-  const relayUrls = String(
-    env.RELAY_URLS || 'wss://relay.zapstore.dev',
+  const finalStageParent = mkdtempSync(
+    join(os.tmpdir(), 'nvpn-final-release-stage-'),
   )
-    .split(/[,\s]+/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-
-  return {
-    configExists,
-    publisherNpub,
-    relayUrls,
-    signWith,
-    zapstoreYaml,
-  }
-}
-
-function preflightRequiredZapstorePublication({
-  env,
-  requireApk = false,
-  apkPath = '',
-}) {
-  const {
-    configExists,
-    publisherNpub,
-    relayUrls,
-    signWith,
-  } = zapstorePublicationContext(env)
-  zapstorePublicationPrerequisites(
-    {
-      apk: !requireApk || Boolean(apkPath && existsSync(apkPath)),
-      zsp: commandExists('zsp'),
-      nak: commandExists('nak'),
-      signing: Boolean(signWith),
-      config: configExists,
-      publisher: Boolean(publisherNpub),
-      relays: relayUrls.length > 0,
-    },
-    { required: true },
-  )
-  const publisherPubkey = run('nak', ['decode', publisherNpub], {
-    capture: true,
-  }).trim()
-  if (!/^[0-9a-f]{64}$/i.test(publisherPubkey)) {
-    throw new Error('zapstore.yaml publisher pubkey could not be decoded.')
-  }
-}
-
-/**
- * Publish the Android APK for this release to Zapstore.
- *
- * Zapstore signs and uploads kind-32267 app + kind-30063 release events to
- * relay.zapstore.dev so users on Android with a Zapstore client can discover
- * + auto-update. The APK is the immutable staged copy bound to the physical
- * gate receipt — Zapstore needs the actual .apk file, not the .aab.
- *
- * Optional mode soft-skips with a warning instead of aborting when:
- *   - `zsp` is not on PATH (zapstore CLI not installed yet on this host)
- *   - No Nostr signing key is configured (`SIGN_WITH` env or
- *     `NOSTR_KEY_PATH` from .env.zapstore.local)
- *   - The staged, receipt-bound APK doesn't exist
- *
- * Required mode hard-fails on every missing prerequisite and unless the
- * published release is verifiably current after zsp returns.
- */
-function publishZapstore({
-  env,
-  tag,
-  apkPath,
-  dryRun,
-  required = false,
-}) {
-  const apkName = `nostr-vpn-${tag}-android-arm64.apk`
-  if (!apkPath) {
-    throw new Error('Zapstore publication requires an explicit staged Android APK.')
-  }
-  if (dryRun) {
-    console.log(
-      `Would ${required ? 'require, publish, and verify' : 'publish'} ${apkName} on Zapstore`,
-    )
-    return
-  }
-
-  const {
-    configExists,
-    publisherNpub,
-    relayUrls,
-    signWith,
-    zapstoreYaml,
-  } = zapstorePublicationContext(env)
-
-  const prerequisites = zapstorePublicationPrerequisites(
-    {
-      apk: existsSync(apkPath),
-      zsp: commandExists('zsp'),
-      nak: commandExists('nak'),
-      signing: Boolean(signWith),
-      config: configExists,
-      publisher: Boolean(publisherNpub),
-      relays: relayUrls.length > 0,
-    },
-    { required },
-  )
-  if (!prerequisites.available) {
-    console.warn(
-      `Skipping Zapstore publish: missing ${prerequisites.missing.join(', ')}.`,
-    )
-    return
-  }
-  const publisherPubkey = run('nak', ['decode', publisherNpub], {
-    capture: true,
-  }).trim()
-  if (!/^[0-9a-f]{64}$/i.test(publisherPubkey)) {
-    throw new Error('zapstore.yaml publisher pubkey could not be decoded.')
-  }
-
-  const inspectionDir = mkdtempSync(join(os.tmpdir(), 'nvpn-zapstore-apk-'))
-  const inspectionApk = join(inspectionDir, apkName)
-  let apkMetadata
+  const finalStageDir = join(finalStageParent, 'stage')
   try {
-    copyFileSync(apkPath, inspectionApk)
-    const metadataOutput = run('zsp', ['utils', 'extract-apk', inspectionApk], {
-      capture: true,
+    cpSync(stageDir, finalStageDir, {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
     })
-    try {
-      apkMetadata = JSON.parse(metadataOutput)
-    } catch {
-      throw new Error('zsp APK inspection did not return valid JSON.')
+    for (const name of ['release.json', 'manifest.json']) {
+      const path = join(finalStageDir, name)
+      const manifest = JSON.parse(readFileSync(path, 'utf8'))
+      manifest.draft = false
+      writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
+    }
+    const finalManifest = readReleaseManifest(finalStageDir)
+    return {
+      cid: publishRelease({
+        stageDir: finalStageDir,
+        releaseTree,
+        tag,
+        draft: false,
+        dryRun,
+      }),
+      finalManifest,
+      stagedAndroidApkPath,
     }
   } finally {
-    rmSync(inspectionDir, { recursive: true, force: true })
+    rmSync(finalStageParent, { recursive: true, force: true })
   }
-  const expectedVersion = semverFromTag(tag)
-  const androidGradle = readFileSync(
-    join(repoRoot, 'android', 'app', 'build.gradle.kts'),
-    'utf8',
-  )
-  const expectedVersionCode = Number(
-    String(env.NVPN_ANDROID_VERSION_CODE || '').trim()
-      || androidGradle.match(/\bversionCode\s*=\s*(\d+)/)?.[1]
-      || '',
-  )
-  const expectedPackageId =
-    String(env.NVPN_ANDROID_PACKAGE_ID || '').trim() || 'fi.siriusbusiness.nvpn'
-  const validatedApk = validateZapstoreApkMetadata(apkMetadata, {
-    expectedVersion,
-    expectedVersionCode,
-    expectedPackageId,
+}
+
+function releaseMutationEnvironment({
+  env,
+  options,
+  stageDir,
+  stagedManifest,
+}) {
+  const fleet = fleetPublicationPaths({ repoRoot, options, env })
+  return {
+    ...process.env,
+    ...env,
+    NVPN_RELEASE_STAGE_DIR: resolve(stageDir),
+    NVPN_RELEASE_TAG: stagedManifest.tag,
+    NVPN_FLEET_RESULT_PATH: fleet.result,
+    NVPN_FLEET_MANIFEST_PATH: fleet.manifest,
+    NVPN_FLEET_INVENTORY_PATH: fleet.inventory,
+  }
+}
+
+function publishRustCrates({
+  dryRun,
+  env,
+  options,
+  stageDir,
+  stagedManifest,
+}) {
+  const script = join(repoRoot, 'scripts', 'publish.sh')
+  assertPromotableDraftSource(stagedManifest.tag, stagedManifest)
+  const mutationEnv = releaseMutationEnvironment({
+    env,
+    options,
+    stageDir,
+    stagedManifest,
   })
-  if (validatedApk.sha256 !== sha256FileSync(apkPath)) {
-    throw new Error('Zapstore inspection hash differs from the staged Android APK.')
-  }
-
-  // Pass `zapstore.yaml` (not the APK path) so the kind-32267 app event
-  // carries the yaml's `name`, `summary`, `description`, `icon`, `tags`,
-  // `license`, `repository` (iris.to), and `url` — passing an APK file
-  // directly produces a bare event with just package id + name + arch.
-  //
-  // zsp's `release_source` glob is set to a stable filename, so copy this
-  // release's APK there. Without a stable name, the glob would pick a
-  // random (often legacy 0.3.x with an old package id)
-  // APK out of `dist/`.
-  const stableApkPath = join(distDir, 'zapstore-current-android-arm64.apk')
-  copyFileSync(apkPath, stableApkPath)
   run(
-    'zsp',
-    ['publish', '--quiet', '--check', zapstoreYaml],
-    { capture: true },
-  )
-
-  run(
-    'zsp',
-    [
-      'publish',
-      '--quiet',
-      '--skip-preview',
-      '--overwrite-release',
-      zapstoreYaml,
-    ],
+    'bash',
+    dryRun
+      ? [script, '--dry-run', '--no-allow-dirty']
+      : [script, '--no-allow-dirty'],
     {
-      env: { ...process.env, ...env, SIGN_WITH: signWith },
+      dryRun,
+      env: mutationEnv,
     },
-  )
-
-  let lastVerificationError = new Error('Zapstore release verification did not run.')
-  for (let attempt = 1; attempt <= 8; attempt += 1) {
-    try {
-      const query = (kind, filters) => {
-        const output = run(
-          'nak',
-          [
-            'req',
-            '-k',
-            String(kind),
-            '-a',
-            publisherNpub,
-            ...filters,
-            '-l',
-            '20',
-            ...relayUrls,
-          ],
-          { capture: true },
-        )
-        return output
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => {
-            try {
-              return JSON.parse(line)
-            } catch {
-              throw new Error('Zapstore relay query returned invalid event JSON.')
-            }
-          })
-      }
-      const publication = validateZapstoreRelayPublication({
-        appEvents: query(32267, ['-d', validatedApk.packageId]),
-        releaseEvents: query(30063, [
-          '-d',
-          `${validatedApk.packageId}@${validatedApk.versionName}`,
-        ]),
-        assetEvents: query(3063, [
-          '-t',
-          `i=${validatedApk.packageId}`,
-          '-t',
-          `version=${validatedApk.versionName}`,
-        ]),
-        expected: {
-          pubkey: publisherPubkey,
-          packageId: validatedApk.packageId,
-          versionName: validatedApk.versionName,
-          versionCode: validatedApk.versionCode,
-          sha256: validatedApk.sha256,
-          certificateFingerprint: validatedApk.certificateFingerprint,
-        },
-      })
-      for (const event of Object.values(publication)) {
-        run('nak', ['verify'], {
-          capture: true,
-          input: `${JSON.stringify(event)}\n`,
-        })
-      }
-      console.log(
-        `Verified Zapstore ${validatedApk.packageId} ${validatedApk.versionName} (${validatedApk.versionCode}) is current.`,
-      )
-      return
-    } catch (error) {
-      lastVerificationError =
-        error instanceof Error ? error : new Error(String(error))
-      if (attempt < 8) {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000)
-      }
-    }
-  }
-  throw new Error(
-    `Zapstore publication completed but verification failed: ${lastVerificationError.message}`,
   )
 }
 
-function resolveZapstoreSignWith(env) {
-  const fromEnv = (process.env.SIGN_WITH ?? env.SIGN_WITH ?? '').trim()
-  if (fromEnv) {
-    return fromEnv
+function preflightRustCrates({
+  dryRun,
+  env,
+  options,
+  stageDir,
+  stagedManifest,
+}) {
+  if (dryRun) {
+    return
   }
-
-  const keyPath = (process.env.NOSTR_KEY_PATH ?? env.NOSTR_KEY_PATH ?? '').trim()
-  if (keyPath && existsSync(keyPath)) {
-    return readFileSync(keyPath, 'utf8').trim()
-  }
-  return ''
+  const mutationEnv = releaseMutationEnvironment({
+    env,
+    options,
+    stageDir,
+    stagedManifest,
+  })
+  run(
+    'bash',
+    [join(repoRoot, 'scripts', 'publish.sh'), '--preflight', '--no-allow-dirty'],
+    { env: mutationEnv },
+  )
 }
 
 function resolveReleaseCommit(tag, { dryRun = false } = {}) {
@@ -2229,6 +2120,7 @@ function main() {
   const builtLines = []
   const skippedLines = []
   let androidReleaseGate = null
+  let iosAppStoreGate = null
   let releaseGateCompleted = false
   let releaseGateEvidence = null
   const artifactProofs = {}
@@ -2336,7 +2228,7 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    const fleetTargetCount = assertPassedFleetPublication({
+    const fleetValidation = assertPassedFleetPublication({
       repoRoot,
       options,
       env,
@@ -2344,7 +2236,7 @@ function main() {
       stagedManifest,
     })
     console.log(
-      `Verified passed fleet execution for ${fleetTargetCount} target(s).`,
+      `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
     )
     const cid = publishRelease({
       stageDir,
@@ -2356,14 +2248,6 @@ function main() {
     console.log(`Published staged draft ${tag} to ${releaseTree} via ${cid}`)
     return
   }
-  if (requireZapstore && !options.dryRun) {
-    preflightRequiredZapstorePublication({
-      env,
-      requireApk: options.promoteDraft,
-      apkPath: options.promoteDraft ? expectedStagedAndroidApkPath : '',
-    })
-  }
-
   if (
     options.publish
     && !options.dryRun
@@ -2401,7 +2285,7 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    const fleetTargetCount = assertPassedFleetPublication({
+    const fleetValidation = assertPassedFleetPublication({
       repoRoot,
       options,
       env,
@@ -2409,7 +2293,68 @@ function main() {
       stagedManifest,
     })
     console.log(
-      `Verified passed fleet execution for ${fleetTargetCount} target(s).`,
+      `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
+    )
+    const mutationEnv = releaseMutationEnvironment({
+      env,
+      options,
+      stageDir,
+      stagedManifest,
+    })
+    preflightHtreeRelease({
+      repoRoot,
+      env: mutationEnv,
+      dryRun: options.dryRun,
+    })
+    preflightGithubRelease({
+      repoRoot,
+      tag,
+      commit: stagedCommit,
+      dryRun: options.dryRun,
+    })
+    const iosPublication = preflightIosPublication({
+      repoRoot,
+      stagedManifest,
+      mutationEnv,
+      dryRun: options.dryRun,
+    })
+    if (!options.dryRun && !options.skipZapstore) {
+      preflightExactZapstorePublication({
+        repoRoot,
+        env,
+        mutationEnv,
+        requireApk: true,
+        apkPath: join(
+          stageDir,
+          stagedManifest.android_release_gate.apk_path,
+        ),
+        expectedApk: {
+          sha256: stagedManifest.android_release_gate.apk_sha256,
+          signerSha256:
+            stagedManifest.android_release_gate
+              .signer_certificate_sha256,
+        },
+        tag,
+      })
+    }
+    if (options.cargoPublish || !options.skipCargoPublish) {
+      preflightRustCrates({
+        dryRun: options.dryRun,
+        env,
+        options,
+        stageDir,
+        stagedManifest,
+      })
+    }
+    const apple = publishExactIosDistribution({
+      repoRoot,
+      stagedManifest,
+      mutationEnv,
+      preflight: iosPublication,
+      dryRun: options.dryRun,
+    })
+    console.log(
+      `${apple.submitted ? 'Submitted and verified' : 'Would submit'} ${tag} for internal and external TestFlight plus App Review.`,
     )
     const promoted = promoteStagedDraft({
       stageDir,
@@ -2418,17 +2363,45 @@ function main() {
       dryRun: options.dryRun,
     })
     console.log(`Promoted ${tag} to ${releaseTree} via ${promoted.cid}`)
+    const githubRelease = publishExactGithubRelease({
+      repoRoot,
+      stageDir,
+      manifest: stagedManifest,
+      tag,
+      commit: stagedCommit,
+      dryRun: options.dryRun,
+    })
+    console.log(
+      `${githubRelease.created ? 'Created and verified' : 'Verified existing'} exact GitHub release ${tag}.`,
+    )
     if (options.cargoPublish || !options.skipCargoPublish) {
-      publishRustCrates({ dryRun: options.dryRun })
+      publishRustCrates({
+        dryRun: options.dryRun,
+        env,
+        options,
+        stageDir,
+        stagedManifest,
+      })
     }
     if (!options.skipZapstore) {
-      publishZapstore({
+      const zapstore = publishExactZapstoreRelease({
+        repoRoot,
         env,
+        mutationEnv,
         tag,
         apkPath: promoted.stagedAndroidApkPath,
+        expectedApk: {
+          sha256: stagedManifest.android_release_gate.apk_sha256,
+          signerSha256:
+            stagedManifest.android_release_gate
+              .signer_certificate_sha256,
+        },
         dryRun: options.dryRun,
         required: requireZapstore,
       })
+      console.log(
+        `${zapstore.published ? 'Published and verified' : 'Would publish'} ${tag} on Zapstore.`,
+      )
     }
     return
   }
@@ -2534,12 +2507,16 @@ function main() {
     )],
     // Upload the TestFlight/App Store candidate only after every downloadable
     // platform artifact has built successfully, avoiding a partial upload.
-    ['ios', () => buildIosArtifacts({
-      tag,
-      dryRun: options.dryRun,
-      builtLines,
-      releaseGateLogDir,
-    })],
+    ['ios', () => {
+      iosAppStoreGate = buildIosArtifacts({
+        tag,
+        dryRun: options.dryRun,
+        builtLines,
+        releaseGateLogDir,
+        candidateCommit,
+        candidateTree,
+      })
+    }],
   ]
 
   for (const [name, fn] of steps) {
@@ -2596,6 +2573,7 @@ function main() {
     requireCompleteAppRelease: !allowPartial && !options.dryRun,
     draft: options.draft,
     androidReleaseGate,
+    iosAppStoreGate,
     releaseGateEvidence,
     artifactProofs,
   })

@@ -1,11 +1,10 @@
 repository: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-vpn
 pubkey: npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm
-# Points to a stable filename rather than `dist/nostr-vpn-v*-android-arm64.apk`
-# because `dist/` accumulates APKs across releases (including builds with old
-# Android package ids), and zsp picks one match
-# from the glob without a clear "latest" rule. `scripts/local-release.mjs`
-# copies the current release's APK to this stable path before invoking zsp.
-release_source: dist/zapstore-current-android-arm64.apk
+# Deliberately nonexistent in the tracked checkout. The fleet-gated local
+# release command copies the manifest-bound APK into a private immutable
+# directory and rewrites this field in a private one-shot config. Running zsp
+# directly therefore cannot accidentally publish a stale same-version APK.
+release_source: .release-gate-required/no-direct-zsp.apk
 
 name: Nostr VPN
 summary: Mesh VPN built on Nostr signaling and userspace WireGuard.
