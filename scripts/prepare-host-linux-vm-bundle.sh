@@ -8,6 +8,8 @@ cd "$ROOT"
 source "$ROOT/scripts/release_common.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-host-linux-builder-isolation.sh"
 
 load_release_env "$ROOT"
 [[ "$(uname -s)" == "Darwin" ]] || {
@@ -81,11 +83,17 @@ export SOURCE_DATE_EPOCH
 CACHE_ROOT="${NVPN_HOST_LINUX_VM_BUNDLE_CACHE_DIR:-${ARTIFACT_ROOT:-$ROOT/artifacts}/host-linux-vm-bundle}"
 mkdir -p "$CACHE_ROOT"
 CACHE_ROOT="$(cd "$CACHE_ROOT" && pwd)"
+HOST_BUILD_LOCK="$CACHE_ROOT/.host-linux-vm-bundle.lock"
 CARGO_DEB_VERSION="3.7.0"
 MUSL_TARGET="x86_64-unknown-linux-musl"
 CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package3"
 BUNDLE_DIR="$CACHE_ROOT/$CACHE_KEY"
 RECEIPT="$BUNDLE_DIR/receipt.json"
+TARGET_CACHE_GENERATION="serialized-v2-rust${RUST_TOOLCHAIN//./-}"
+TARGET_CACHE_ROOT="$CACHE_ROOT/build-cache/$TARGET_CACHE_GENERATION"
+BUILD_CACHE_ID="$(
+  printf '%s' "$CACHE_ROOT" | shasum -a 256 | awk '{ print $1 }'
+)"
 VERIFIER="$ROOT/scripts/verify-host-linux-vm-bundle.py"
 PATCH_LOCK_VERIFIER="$ROOT/scripts/verify-cargo-path-patch-lock.py"
 [[ -x "$PATCH_LOCK_VERIFIER" ]] || {
@@ -112,17 +120,35 @@ LINUX_REALIZED_CARGO_LOCK_SHA256="$(
     --expected-sha256 "$ROOT/linux/Cargo.lock" "${FIPS_PATCH_PACKAGES[@]}"
 )"
 TEMP_DIR=""
+CONTAINER_NAME="nvpn-linux-bundle-${BUILD_CACHE_ID:0:24}"
 
 cleanup() {
-  local status="$?"
-  trap - EXIT
+  local status="$?" cleanup_failed=0
+  trap - EXIT HUP INT TERM
+  host_linux_builder_stop_container \
+    "$CONTAINER_NAME" "$BUILD_CACHE_ID" \
+    || cleanup_failed=1
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
-    find "$TEMP_DIR" -xdev -depth -mindepth 1 -delete
-    rmdir "$TEMP_DIR"
+    find "$TEMP_DIR" -xdev -depth -mindepth 1 -delete || cleanup_failed=1
+    rmdir "$TEMP_DIR" || cleanup_failed=1
+  fi
+  if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+    status=1
   fi
   exit "$status"
 }
+
+terminate() {
+  local status="$1"
+  host_linux_builder_stop_container \
+    "$CONTAINER_NAME" "$BUILD_CACHE_ID" || true
+  exit "$status"
+}
+
 trap cleanup EXIT
+trap 'terminate 129' HUP
+trap 'terminate 130' INT
+trap 'terminate 143' TERM
 
 verify_bundle() {
   [[ -x "$VERIFIER" && -d "$BUNDLE_DIR" && -f "$RECEIPT" ]] || return 1
@@ -149,14 +175,34 @@ if verify_bundle; then
   exit 0
 fi
 
+[[ -x /usr/bin/lockf ]] || {
+  echo "Host Linux VM bundle builder requires macOS /usr/bin/lockf." >&2
+  exit 2
+}
+exec 9>"$HOST_BUILD_LOCK"
+chmod 0600 "$HOST_BUILD_LOCK"
+/usr/bin/lockf 9
+
+# A second process can finish the exact bundle while this process waits for
+# the kernel lock. Re-verify under the lock before spending any build work.
+if verify_bundle; then
+  printf '%s\n' "$BUNDLE_DIR"
+  exit 0
+fi
+
+# A SIGKILL cannot run a shell trap. The kernel lock is still released, so
+# remove any daemon-owned container carrying this cache identity before the
+# persistent targets can be mounted by the next build.
+host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
+
 TEMP_DIR="$(mktemp -d "$CACHE_ROOT/.host-linux-vm-bundle.XXXXXX")"
 mkdir -p \
   "$TEMP_DIR/source" \
   "$TEMP_DIR/output" \
   "$TEMP_DIR/final" \
   "$CACHE_ROOT/build-cache/cargo-home" \
-  "$CACHE_ROOT/build-cache/root-target" \
-  "$CACHE_ROOT/build-cache/linux-target"
+  "$TARGET_CACHE_ROOT/root-target" \
+  "$TARGET_CACHE_ROOT/linux-target"
 git clone --no-hardlinks --quiet "$ROOT" "$TEMP_DIR/source/app"
 git -C "$TEMP_DIR/source/app" checkout --detach --quiet "$APP_GIT_SHA"
 git -C "$TEMP_DIR/source/app" clean -ffd >/dev/null
@@ -184,14 +230,17 @@ docker build \
   >"$TEMP_DIR/docker-build.log"
 
 docker run --rm \
+  --name "$CONTAINER_NAME" \
+  --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
+  --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
   --interactive \
   --platform "$DOCKER_PLATFORM" \
   --volume "$TEMP_DIR/source/app:/workspace/app" \
   --volume "$TEMP_DIR/source/fips:/workspace/fips:ro" \
   --volume "$TEMP_DIR/output:/output" \
   --volume "$CACHE_ROOT/build-cache/cargo-home:/cargo-home" \
-  --volume "$CACHE_ROOT/build-cache/root-target:/target-root" \
-  --volume "$CACHE_ROOT/build-cache/linux-target:/target-linux" \
+  --volume "$TARGET_CACHE_ROOT/root-target:/target-root" \
+  --volume "$TARGET_CACHE_ROOT/linux-target:/target-linux" \
   --env CARGO_HOME=/cargo-home \
   --env CARGO_INCREMENTAL=0 \
   --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \

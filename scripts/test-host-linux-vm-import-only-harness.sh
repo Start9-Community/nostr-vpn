@@ -15,6 +15,8 @@ RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 DOCKERFILE="$ROOT/Dockerfile.linux-vm-gate"
 CLEANUP="$ROOT/scripts/ubuntu-vm-exact-deb-cleanup.sh"
 CLEANUP_HARNESS="$ROOT/scripts/test-ubuntu-vm-exact-deb-cleanup-harness.sh"
+ISOLATION_LIB="$ROOT/scripts/lib-host-linux-builder-isolation.sh"
+ISOLATION_HARNESS="$ROOT/scripts/test-host-linux-builder-isolation-harness.sh"
 
 fail() {
   echo "host Linux VM import-only contract failed: $*" >&2
@@ -38,12 +40,13 @@ for executable in \
   "$SERVICE" \
   "$UNDERLAY" \
   "$CLEANUP" \
-  "$CLEANUP_HARNESS"
+  "$CLEANUP_HARNESS" \
+  "$ISOLATION_HARNESS"
 do
   [[ -x "$executable" ]] || fail "$(basename "$executable") is not executable"
 done
-[[ -f "$IMPORT_LIB" && -f "$DOCKERFILE" ]] \
-  || fail "shared import helper or Ubuntu builder image is missing"
+[[ -f "$IMPORT_LIB" && -f "$DOCKERFILE" && -f "$ISOLATION_LIB" ]] \
+  || fail "shared import/build-isolation helper or Ubuntu builder image is missing"
 require_tokens "$PATCH_LOCK_VERIFIER" "fail-closed FIPS patch lock delta" \
   'REGISTRY_SOURCE' \
   'committed lock has duplicate target package' \
@@ -64,11 +67,22 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   'status --porcelain --untracked-files=all' \
   'release_join_require_clean_fips' \
   'CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package3"' \
+  'HOST_BUILD_LOCK="$CACHE_ROOT/.host-linux-vm-bundle.lock"' \
+  'exec 9>"$HOST_BUILD_LOCK"' \
+  '/usr/bin/lockf 9' \
+  'if verify_bundle; then' \
   'Dockerfile.linux-vm-gate' \
   'verify-cargo-path-patch-lock.py' \
   '--manifest-specs "$NVPN_FIPS_REPO_PATH"' \
   '--validate /output/root-Cargo.lock.committed Cargo.lock' \
   '--validate /output/linux-Cargo.lock.committed Cargo.lock' \
+  'TARGET_CACHE_GENERATION="serialized-v2-rust${RUST_TOOLCHAIN//./-}"' \
+  '"$TARGET_CACHE_ROOT/root-target:/target-root"' \
+  '"$TARGET_CACHE_ROOT/linux-target:/target-linux"' \
+  '--name "$CONTAINER_NAME"' \
+  '--label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID"' \
+  'host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"' \
+  'host_linux_builder_stop_container \' \
   '  --interactive \' \
   '  --platform "$DOCKER_PLATFORM" \' \
   'dockerPlatform": "linux/amd64"' \
@@ -90,6 +104,52 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '/output/nostr-vpn.deb' \
   '/output/nvpn-x86_64-unknown-linux-musl.tar.gz' \
   'verify-host-linux-vm-bundle.py'
+if grep -Fq '"$CACHE_ROOT/build-cache/root-target:/target-root"' "$PREPARER" \
+  || grep -Fq '"$CACHE_ROOT/build-cache/linux-target:/target-linux"' "$PREPARER"
+then
+  fail "host Linux builder still uses the unversioned, unserialized Cargo targets"
+fi
+if grep -Fq 'CONTAINER_CID_FILE' "$PREPARER"; then
+  fail "host Linux builder has two competing identities for its deterministic container"
+fi
+python3 - "$PREPARER" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+initial_verify = text.index("if verify_bundle; then")
+lock_open = text.index('exec 9>"$HOST_BUILD_LOCK"')
+lock_acquire = text.index("/usr/bin/lockf 9")
+second_verify = text.index("if verify_bundle; then", initial_verify + 1)
+temp_create = text.index('TEMP_DIR="$(mktemp -d')
+if not initial_verify < lock_open < lock_acquire < second_verify < temp_create:
+    raise SystemExit(
+        "host Linux builder does not re-verify the bundle under its kernel lock"
+    )
+container_create = text.index('--name "$CONTAINER_NAME"')
+container_cleanup = text.index("host_linux_builder_stop_container", second_verify)
+if not container_cleanup < container_create:
+    raise SystemExit(
+        "host Linux builder does not install server-side container cleanup before run"
+    )
+stale_cleanup = text.index(
+    'host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"',
+    second_verify,
+)
+target_mount = text.index('"$TARGET_CACHE_ROOT/root-target:/target-root"')
+if not stale_cleanup < target_mount:
+    raise SystemExit(
+        "host Linux builder can mount its persistent target cache before stale "
+        "server-side builders are removed"
+    )
+PY
+require_tokens "$ISOLATION_LIB" "validated exact-container cleanup" \
+  'to.nostrvpn.release-builder' \
+  'to.nostrvpn.release-builder-cache' \
+  'Refusing to remove mismatched Linux builder container' \
+  'docker rm --force "$container_id"' \
+  'docker container inspect'
+"$ISOLATION_HARNESS"
 require_tokens "$VERIFIER" "hash/size/version/source receipt validation" \
   '"builtOnHostMac": True' \
   '"builtOnRemoteVm": False' \
