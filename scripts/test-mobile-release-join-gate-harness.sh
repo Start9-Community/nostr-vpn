@@ -188,6 +188,24 @@ if ios_roster_transition.index(
 ):
     raise SystemExit("Release QR XCTest records dismissal before checking the roster")
 
+ios_qr_joiner = ios_test.split(
+    "func testShowPhysicalJoinQrAndRequireRosterCompletion()", 1
+)[1].split("func testScanPhysicalJoinQrAndRequireAdminRosterProgress()", 1)[0]
+for required in (
+    "waitForRosterBackedPendingQrDismissal",
+    "requireAcceptedRoster(",
+    "relaunch: true",
+    "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
+):
+    if required not in ios_qr_joiner:
+        raise SystemExit(
+            f"iPhone QR joiner does not prove real relaunch durability: {required}"
+        )
+if ios_qr_joiner.index("requireAcceptedRoster(") < ios_qr_joiner.index(
+    "waitForRosterBackedPendingQrDismissal"
+):
+    raise SystemExit("iPhone QR joiner relaunches before the signed roster applies")
+
 for required in (
     "phase_ios_admin_android_qr",
     "phase_android_admin_ios_qr",
@@ -199,9 +217,38 @@ for required in (
     "macos-vm-release-mobile-join-e2e.sh",
     "opticalCameraQr",
     "exactRosterOnBothSides",
+    '"androidJoinerRelaunchDurable": True',
+    '"iphoneJoinerRelaunchDurable"',
 ):
     if required not in gate:
         raise SystemExit(f"Release join orchestrator is missing {required}")
+ios_qr_joiner_phase = gate.split(
+    "phase_android_admin_ios_qr() {", 1
+)[1].split("phase_ios_admin_android_manual() {", 1)[0]
+for required in (
+    "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
+    "ios_qr_relaunch_admin",
+    '[[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
+    "RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE=1",
+    "ios_qr_relaunch_durable != \"1\"",
+):
+    if required not in gate:
+        raise SystemExit(
+            f"Mobile receipt does not validate iPhone QR relaunch proof: {required}"
+        )
+for required in (
+    "release_join_ios_finish_test",
+    "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
+    '[[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
+):
+    if required not in ios_qr_joiner_phase:
+        raise SystemExit(
+            f"iPhone QR phase does not consume exact relaunch evidence: {required}"
+        )
+if ios_qr_joiner_phase.index(
+    "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE"
+) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
+    raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
 if "NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET" not in artifacts:
     raise SystemExit("Physical app-state reset lacks an explicit destructive opt-in")
 
@@ -301,6 +348,8 @@ for source, label in (
         "minimumRequiredBasisPoints",
         "androidObservedBasisPoints",
         "iosObservedBasisPoints",
+        "androidJoinerRelaunchDurable",
+        "iphoneJoinerRelaunchDurable",
     ):
         if required not in source:
             raise SystemExit(f"{label} does not validate QR width evidence: {required}")

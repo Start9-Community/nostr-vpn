@@ -443,6 +443,8 @@ def validate_mobile_join_receipt(
         and qr.get("pendingQrBackgroundForeground") is True
         and qr.get("exactRosterOnBothSides") is True
         and qr.get("joinerRelaunchDurable") is True
+        and qr.get("androidJoinerRelaunchDurable") is True
+        and qr.get("iphoneJoinerRelaunchDurable") is True
         and isinstance(manual, dict)
         and manual.get("iphoneAdminPixelJoiner") is True
         and manual.get("pixelAdminIphoneJoiner") is True

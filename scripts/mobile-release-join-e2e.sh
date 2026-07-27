@@ -175,6 +175,7 @@ phase_ios_admin_android_qr() {
 
 phase_android_admin_ios_qr() {
   local join_log submitted completed ios_qr_content_width_bps
+  local ios_qr_relaunch_admin
   release_join_reset_ios_state
   release_join_reset_android_state
   release_join_android_create_admin
@@ -202,6 +203,13 @@ phase_android_admin_ios_qr() {
   )"
   release_join_ios_finish_test \
     || fail "iPhone stayed on QR view or lacked the exact Pixel admin roster row"
+  ios_qr_relaunch_admin="$(
+    ios_marker_value_from \
+      "$join_log" NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE
+  )"
+  [[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]] \
+    || fail "iPhone QR relaunch did not retain the exact Pixel admin roster"
+  RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE=1
   ios_qr_content_width_bps="$(
     ios_marker_value_from \
       "$join_log" NVPN_RELEASE_JOIN_QR_CONTENT_WIDTH_BPS
@@ -289,8 +297,9 @@ release_join_assert_one_android_process
 release_join_launch_ios_release
 release_join_assert_one_ios_process
 [[ "${RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
-  && "${RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ ]] \
-  || fail "mobile QR content-width evidence is incomplete"
+  && "${RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
+  && "${RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE:-}" == 1 ]] \
+  || fail "mobile QR width or relaunch evidence is incomplete"
 
 case "$MACOS_JOIN_GATE" in
   0|false|FALSE|False|no|NO|No|off|OFF|Off) ;;
@@ -313,6 +322,7 @@ python3 - \
   "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
   "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
   "$RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS" \
+  "$RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE" \
   "$MACOS_JOIN_GATE" <<'PY'
 import hashlib
 import json
@@ -332,6 +342,7 @@ import sys
     ios_receipt_path,
     android_qr_content_width_bps,
     ios_qr_content_width_bps,
+    ios_qr_relaunch_durable,
     desktop_mode,
 ) = sys.argv[1:]
 
@@ -429,6 +440,8 @@ if any(
     for observed in qr_content_width_bps.values()
 ):
     raise SystemExit("mobile join QR did not fill its content width")
+if ios_qr_relaunch_durable != "1":
+    raise SystemExit("iPhone QR joiner relaunch evidence is incomplete")
 desktop_enabled = desktop_mode.lower() not in {
     "0", "false", "no", "off",
 }
@@ -474,6 +487,8 @@ with open(path, "w", encoding="utf-8") as handle:
                 "pendingQrBackgroundForeground": True,
                 "exactRosterOnBothSides": True,
                 "joinerRelaunchDurable": True,
+                "androidJoinerRelaunchDurable": True,
+                "iphoneJoinerRelaunchDurable": ios_qr_relaunch_durable == "1",
             },
             "manual": {
                 "iphoneAdminPixelJoiner": True,

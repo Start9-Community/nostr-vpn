@@ -64,6 +64,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             ),
             "Join QR disappeared before the exact admin roster was visible"
         )
+        requireAcceptedRoster(
+            expectedAdmin,
+            relaunch: true,
+            failureMessage: "QR join did not retain the admin's signed roster"
+        )
+        emit("NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE=\(expectedAdmin)")
         emit("NVPN_RELEASE_JOIN_JOINER_LEFT_QR=1")
         emit("NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=\(expectedAdmin)")
     }

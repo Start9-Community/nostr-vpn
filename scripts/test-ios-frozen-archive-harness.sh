@@ -406,6 +406,8 @@ join = {
         "pendingQrBackgroundForeground": True,
         "exactRosterOnBothSides": True,
         "joinerRelaunchDurable": True,
+        "androidJoinerRelaunchDurable": True,
+        "iphoneJoinerRelaunchDurable": True,
     },
     "manual": {
         "iphoneAdminPixelJoiner": True,
@@ -634,8 +636,25 @@ value = json.loads(path.read_text(encoding="utf-8"))
 value["contentWidth"]["iosObservedBasisPoints"] = 7500
 path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if validate_gate >/dev/null 2>&1; then
+if seal_gate >/dev/null 2>&1; then
   echo "Frozen iOS gate accepted a non-full-width mobile QR receipt" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["qr"]["iphoneJoinerRelaunchDurable"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted QR evidence without iPhone relaunch durability" >&2
   exit 1
 fi
 cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
@@ -651,7 +670,7 @@ value = json.loads(path.read_text(encoding="utf-8"))
 del value["desktopAdminIphoneJoiner"]
 path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if validate_gate >/dev/null 2>&1; then
+if seal_gate >/dev/null 2>&1; then
   echo "Frozen iOS gate accepted desktop/mobile evidence without the iPhone joiner role" >&2
   exit 1
 fi
@@ -668,7 +687,7 @@ value = json.loads(path.read_text(encoding="utf-8"))
 value["artifact"]["ios"]["appCodeDirectoryHash"] = "0" * 40
 path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 PY
-if validate_gate >/dev/null 2>&1; then
+if seal_gate >/dev/null 2>&1; then
   echo "Frozen iOS gate accepted a different iPhone join artifact" >&2
   exit 1
 fi

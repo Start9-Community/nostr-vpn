@@ -452,6 +452,8 @@ function requireMobileJoinReceipt({
     || receipt.qr?.pendingQrBackgroundForeground !== true
     || receipt.qr?.exactRosterOnBothSides !== true
     || receipt.qr?.joinerRelaunchDurable !== true
+    || receipt.qr?.androidJoinerRelaunchDurable !== true
+    || receipt.qr?.iphoneJoinerRelaunchDurable !== true
     || receipt.manual?.iphoneAdminPixelJoiner !== true
     || receipt.manual?.pixelAdminIphoneJoiner !== true
     || receipt.manual?.exactRosterOnBothSides !== true
