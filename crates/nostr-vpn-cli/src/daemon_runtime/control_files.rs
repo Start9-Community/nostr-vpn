@@ -890,6 +890,30 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
     Ok(())
 }
 
+pub(crate) fn persist_fips_private_tunnel_start_result<T>(
+    config_path: &Path,
+    result: Result<T>,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(start_error) => match persist_fips_daemon_network_cleanup_state(config_path, None) {
+            Ok(()) => Err(start_error),
+            Err(persist_error) => Err(anyhow!(
+                "{start_error:#}; failed to persist partial FIPS startup cleanup ownership: \
+                 {persist_error:#}"
+            )),
+        },
+    }
+}
+
+pub(crate) async fn start_fips_private_tunnel_runtime(
+    config_path: &Path,
+    config: crate::fips_private_mesh::FipsPrivateTunnelConfig,
+) -> Result<crate::fips_private_mesh::FipsPrivateTunnelRuntime> {
+    let result = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await;
+    persist_fips_private_tunnel_start_result(config_path, result)
+}
+
 pub(crate) async fn stop_fips_private_tunnel_runtime(
     config_path: &Path,
     runtime: crate::fips_private_mesh::FipsPrivateTunnelRuntime,

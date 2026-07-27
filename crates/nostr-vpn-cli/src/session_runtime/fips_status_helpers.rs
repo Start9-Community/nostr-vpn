@@ -535,7 +535,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         if let Some(existing) = runtime.take() {
             stop_fips_private_tunnel_runtime(context.config_path, existing).await?;
         }
-        let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
+        let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
         eprintln!(
             "daemon: restarted FIPS private mesh on {} after {reason}",
             started.iface()
@@ -559,7 +559,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
             daemon_wall_clock_unix_milliseconds(),
         );
     } else {
-        let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
+        let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
         eprintln!("daemon: FIPS private mesh on {} after {reason}", started.iface());
         *runtime = Some(started);
     }
@@ -640,7 +640,7 @@ async fn rebuild_fips_tunnel_runtime_after_control_failure(
             .await
             .context("refusing to rebuild FIPS after incomplete prior cleanup")?;
     }
-    let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
+    let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
     eprintln!(
         "daemon: rebuilt FIPS private mesh on {} after {reason}",
         started.iface()

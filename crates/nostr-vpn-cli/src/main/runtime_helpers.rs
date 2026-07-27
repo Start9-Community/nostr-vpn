@@ -701,13 +701,13 @@ async fn sync_fips_private_runtime(
         if let Some(existing) = runtime.take() {
             stop_fips_private_tunnel_runtime(context.config_path, existing).await?;
         }
-        let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
+        let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
         eprintln!("daemon: restarted FIPS private mesh on {}", started.iface());
         *runtime = Some(started);
     } else if let Some(existing) = runtime.as_mut() {
         existing.apply_config(config).await?;
     } else {
-        let started = crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await?;
+        let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
         eprintln!("daemon: FIPS private mesh on {}", started.iface());
         *runtime = Some(started);
     }

@@ -87,7 +87,7 @@
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_failed_start_cleanup_is_persisted_without_a_live_runtime() {
+    fn linux_failed_replacement_start_cleanup_survives_process_boundary() {
         let _guard = LINUX_PENDING_CLEANUP_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -114,16 +114,28 @@
             std::env::temp_dir().join(format!("nvpn-linux-start-cleanup-test-{nonce}"));
         std::fs::create_dir_all(&directory).expect("create temp directory");
         let config_path = directory.join("config.toml");
-        crate::persist_fips_daemon_network_cleanup_state(&config_path, None)
-            .expect("persist retained failed-start ownership");
+        let error = crate::persist_fips_private_tunnel_start_result(
+            &config_path,
+            Err::<(), _>(anyhow::anyhow!("synthetic replacement start failure")),
+        )
+        .expect_err("replacement start remains failed after persisting cleanup ownership");
+        assert!(
+            format!("{error:#}").contains("synthetic replacement start failure"),
+            "the original replacement-start error must remain visible"
+        );
+
+        let pending = super::take_pending_linux_network_cleanup_state();
+        assert!(
+            pending.is_some(),
+            "the failed start must retain in-process ownership until process exit"
+        );
         let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path);
         let saved = crate::read_daemon_network_cleanup_state(&cleanup_path)
             .expect("read cleanup ownership")
-            .expect("cleanup ownership exists");
+            .expect("cleanup ownership survives process-boundary readback");
         assert_eq!(saved.iface, "nvpn-start-failure");
         assert_eq!(saved.original_default_route, Some(expected_default));
 
-        super::take_pending_linux_network_cleanup_state();
         let _ = std::fs::remove_dir_all(directory);
     }
 

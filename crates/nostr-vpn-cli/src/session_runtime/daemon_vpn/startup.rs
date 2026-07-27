@@ -228,19 +228,9 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
             let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
             let endpoint_peer_states =
                 daemon_endpoint_peer_states_from_signature(&endpoint_peer_signature);
-            let runtime = match crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config)
-                .await
-            {
+            let runtime = match start_fips_private_tunnel_runtime(&config_path, config).await {
                 Ok(runtime) => runtime,
-                Err(start_error) => {
-                    let error = match persist_fips_daemon_network_cleanup_state(&config_path, None)
-                    {
-                        Ok(()) => start_error,
-                        Err(persist_error) => anyhow!(
-                            "{start_error:#}; failed to persist partial FIPS startup cleanup \
-                                 ownership: {persist_error:#}"
-                        ),
-                    };
+                Err(error) => {
                     let network = network_snapshot.summary(network_changed_at, captive_portal);
                     let port_mapping = port_mapping_runtime.status();
                     let advertised_routes = HashMap::new();

@@ -51,22 +51,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
             },
         )?;
         let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
-        let runtime =
-            match crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config).await {
-                Ok(runtime) => runtime,
-                Err(start_error) => {
-                    return Err(match persist_fips_daemon_network_cleanup_state(
-                        &config_path,
-                        None,
-                    ) {
-                        Ok(()) => start_error,
-                        Err(persist_error) => anyhow!(
-                            "{start_error:#}; failed to persist partial FIPS startup cleanup \
-                             ownership: {persist_error:#}"
-                        ),
-                    });
-                }
-            };
+        let runtime = start_fips_private_tunnel_runtime(&config_path, config).await?;
         println!("connect: FIPS private mesh on {}", runtime.iface());
         (Some(runtime), endpoint_peer_signature)
     };
