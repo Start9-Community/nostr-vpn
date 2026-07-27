@@ -4,8 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 4.1.5 - 2026-07-27
+
+### Added
+
+- Add exact signed-release gates on physical Android and iOS for WireGuard
+  exit routing, every DNS policy, native Internet/DNS restoration, repeated
+  background/foreground and rapid start/stop, Wi-Fi/hotspot roaming, and QR
+  and manual joining in both device roles.
+- Add real macOS, Windows, and Linux gates for underlay changes, WireGuard exit
+  cleanup, native route/DNS recovery, service lifecycle, and single-listener
+  ownership.
+
 ### Fixed
 
+- Rebind FIPS underlay carriers in place across hotspot, Wi-Fi, and interface
+  changes while preserving the endpoint and authenticated sessions, carrying
+  payload through mesh fallback while direct paths recover.
+- Restore device-native routes and DNS after exit-node or private-tunnel
+  shutdown on every platform, and fail closed when owned network state cannot
+  be cleaned up.
+- Complete QR and manual joins only after the joining device applies the
+  signed roster, support both admin/joiner directions across desktop and
+  mobile, and make mobile QR codes use the available screen width.
+- Replace prior Android installs in place, reject parallel package variants,
+  and prevent duplicate VPN service/process ownership.
 - Release the iOS UI process's shared Cashu wallet and SQLite locks before
   suspension, then reopen the native core on foreground, preventing
   RunningBoard `0xDEAD10CC` terminations.
@@ -14,9 +37,20 @@ All notable changes to this project are documented in this file.
 - Release completed FIPS-TCP state-control slots promptly so periodic roster
   and capability traffic cannot starve a manual-join roster or its durable
   application receipt behind the per-peer connection budget.
+- Repair Cashu paid-exit close, settlement, and refund recovery across
+  historical or retried proofs on platforms where the feature is available.
 
 ### Changed
 
+- Build one frozen iOS archive, test an Ad Hoc export from that exact archive
+  on the physical phone, and export the App Store upload from the same sealed
+  artifact.
+- Run resource-isolated Windows, macOS, Linux, Android, Rust, and Docker lanes
+  concurrently, then keep roaming, performance, and idle-CPU measurements
+  serial for stable release results.
+- Keep the iOS wallet and paid-exit implementation out of the shipped UI and
+  runtime while retaining shared compatibility data, and prepare truthful
+  worldwide App Store metadata with every territory enabled.
 - Gate physical iOS releases with three background/foreground cycles,
   including a ten-second suspension, and verify native-core close/reopen state
   on every transition.

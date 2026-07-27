@@ -810,12 +810,13 @@ dependencies = [
 
 [[package]]
 name = "cashu-service"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30aa30e4536f6b9086484fa88a3f348410c12e942cdb0943c6256e6b60aa266f"
+checksum = "1fab47d9ad10bf5b4d8f4b50bc5ae70c09c873ad7d6ca106ace175d815359ede"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cashu",
  "cdk",
  "cdk-spilman",
  "cdk-sqlite",
@@ -999,9 +1000,9 @@ dependencies = [
 
 [[package]]
 name = "cdk-spilman"
-version = "0.17.0"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b51f09ed3c97432054d53d4aacad9cef89f503faa83eb62101a2b9dd4ce2b9"
+checksum = "7619b421495cb5fe74b60d9861072ccc8af6debd2836f3588ef2f81502c187e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1637,7 +1638,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1779,7 +1780,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1874,9 +1875,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.4.39"
+version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3ef869603f9c8a5844bdcd51527b6505101a79856d578c2b73199990647167"
+checksum = "40e5ac7fb5cef1286c402b8e84794d682e7a943ab65b510253f4a5e4d9baf83d"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -1918,9 +1919,9 @@ dependencies = [
 
 [[package]]
 name = "fips-endpoint"
-version = "0.4.39"
+version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3fda7cd4751cd6d2eb25a01087943cb22e23c0d930f8aadd69c40c9eed45281"
+checksum = "48a7bd10fd6c14b78f1969d0e15480f7637c2f8885bd4e31ae196f38dd59f727"
 dependencies = [
  "fips-core",
 ]
@@ -3837,7 +3838,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-vpn-app-core"
-version = "4.1.4"
+version = "4.1.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3868,7 +3869,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-vpn-core"
-version = "4.1.4"
+version = "4.1.5"
 dependencies = [
  "android-native-keyring-store",
  "anyhow",
@@ -3908,7 +3909,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-vpn-linux"
-version = "4.1.4"
+version = "4.1.5"
 dependencies = [
  "gio",
  "glib",
@@ -3930,7 +3931,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4574,7 +4575,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5032,7 +5033,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5781,10 +5782,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6887,7 +6888,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
