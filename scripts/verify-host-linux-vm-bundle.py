@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import tarfile
@@ -24,12 +25,14 @@ def sha256_path(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-if len(sys.argv) != 12:
+if len(sys.argv) != 17:
     fail(
         "usage: verify-host-linux-vm-bundle.py "
         "BUNDLE RECEIPT APP_SHA APP_TREE APP_VERSION "
         "FIPS_SHA FIPS_TREE FIPS_VERSION "
-        "ROOT_CARGO_LOCK_SHA256 LINUX_CARGO_LOCK_SHA256 TARGET"
+        "ROOT_CARGO_LOCK_SHA256 ROOT_REALIZED_CARGO_LOCK_SHA256 "
+        "LINUX_CARGO_LOCK_SHA256 LINUX_REALIZED_CARGO_LOCK_SHA256 TARGET "
+        "FIPS_CORE_SPEC FIPS_ENDPOINT_SPEC FIPS_IDENTITY_SPEC"
     )
 
 (
@@ -42,8 +45,13 @@ if len(sys.argv) != 12:
     fips_tree,
     fips_version,
     root_cargo_lock_sha256,
+    root_realized_cargo_lock_sha256,
     linux_cargo_lock_sha256,
+    linux_realized_cargo_lock_sha256,
     target,
+    fips_core_patch_spec,
+    fips_endpoint_patch_spec,
+    fips_identity_patch_spec,
 ) = sys.argv[1:]
 bundle = pathlib.Path(bundle_arg)
 receipt_path = pathlib.Path(receipt_arg)
@@ -60,6 +68,36 @@ try:
 except (OSError, ValueError) as error:
     fail(f"could not parse receipt: {error}")
 
+for label, value in (
+    ("root committed Cargo lock", root_cargo_lock_sha256),
+    ("root realized Cargo lock", root_realized_cargo_lock_sha256),
+    ("Linux committed Cargo lock", linux_cargo_lock_sha256),
+    ("Linux realized Cargo lock", linux_realized_cargo_lock_sha256),
+):
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        fail(f"{label} SHA-256 is invalid")
+
+fips_patch_packages: dict[str, str] = {}
+for specification in (
+    fips_core_patch_spec,
+    fips_endpoint_patch_spec,
+    fips_identity_patch_spec,
+):
+    name, separator, version = specification.partition("=")
+    if (
+        separator != "="
+        or name in fips_patch_packages
+        or re.fullmatch(r"[0-9A-Za-z_.+-]+", version) is None
+    ):
+        fail("exact FIPS patched lock package specification is invalid")
+    fips_patch_packages[name] = version
+if set(fips_patch_packages) != {
+    "fips-core",
+    "fips-endpoint",
+    "fips-identity",
+}:
+    fail("exact FIPS patched lock package set differs")
+
 expected_metadata = {
     "schema": 1,
     "builtOnHostMac": True,
@@ -71,7 +109,10 @@ expected_metadata = {
     "fipsGitTree": fips_tree,
     "fipsVersion": fips_version,
     "rootCargoLockSha256": root_cargo_lock_sha256,
+    "rootRealizedCargoLockSha256": root_realized_cargo_lock_sha256,
     "linuxCargoLockSha256": linux_cargo_lock_sha256,
+    "linuxRealizedCargoLockSha256": linux_realized_cargo_lock_sha256,
+    "fipsPatchedLockPackages": fips_patch_packages,
     "target": target,
     "dockerPlatform": "linux/amd64",
     "containerBase": "ubuntu:24.04",

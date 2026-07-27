@@ -46,7 +46,10 @@ ubuntu_vm_import_release_bundle() {
   }
   local bundle receipt app_sha app_tree app_version
   local fips_sha fips_tree fips_version target evidence_dir remote_dir
-  local root_lock_sha linux_lock_sha
+  local root_lock_sha root_realized_lock_sha
+  local linux_lock_sha linux_realized_lock_sha
+  local -a fips_patch_packages=()
+  local package
   local app_hash app_size cli_hash cli_size fixture_hash fixture_size
   local musl_hash musl_size archive_hash archive_size deb_hash deb_size
 
@@ -72,12 +75,6 @@ ubuntu_vm_import_release_bundle() {
   fips_sha="$(jq -er '.fipsGitSha' "$receipt")" || return 1
   fips_tree="$(jq -er '.fipsGitTree' "$receipt")" || return 1
   fips_version="$(jq -er '.fipsVersion' "$receipt")" || return 1
-  root_lock_sha="$(shasum -a 256 "$ROOT/Cargo.lock" | awk '{ print $1 }')" \
-    || return 1
-  linux_lock_sha="$(
-    shasum -a 256 "$ROOT/linux/Cargo.lock" | awk '{ print $1 }'
-  )" || return 1
-  target="$(jq -er '.target' "$receipt")" || return 1
   # shellcheck disable=SC1091
   source "$ROOT/scripts/release_common.sh"
   # shellcheck disable=SC1091
@@ -87,6 +84,32 @@ ubuntu_vm_import_release_bundle() {
     ubuntu_vm_import_error "exact FIPS validation failed before import"
     return 1
   }
+  while IFS= read -r package; do
+    fips_patch_packages+=("$package")
+  done < <(
+    python3 "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
+      --manifest-specs "$NVPN_FIPS_REPO_PATH"
+  )
+  [[ "${#fips_patch_packages[@]}" == 3 ]] || {
+    ubuntu_vm_import_error "exact FIPS patch package set is incomplete"
+    return 1
+  }
+  root_lock_sha="$(shasum -a 256 "$ROOT/Cargo.lock" | awk '{ print $1 }')" \
+    || return 1
+  linux_lock_sha="$(
+    shasum -a 256 "$ROOT/linux/Cargo.lock" | awk '{ print $1 }'
+  )" || return 1
+  root_realized_lock_sha="$(
+    python3 "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
+      --expected-sha256 "$ROOT/Cargo.lock" \
+      "${fips_patch_packages[@]}"
+  )" || return 1
+  linux_realized_lock_sha="$(
+    python3 "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
+      --expected-sha256 "$ROOT/linux/Cargo.lock" \
+      "${fips_patch_packages[@]}"
+  )" || return 1
+  target="$(jq -er '.target' "$receipt")" || return 1
   [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$app_sha" \
     && "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" == "$app_tree" \
     && -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
@@ -103,7 +126,9 @@ ubuntu_vm_import_release_bundle() {
     "$bundle" "$receipt" \
     "$app_sha" "$app_tree" "$app_version" \
     "$fips_sha" "$fips_tree" "$fips_version" \
-    "$root_lock_sha" "$linux_lock_sha" "$target" \
+    "$root_lock_sha" "$root_realized_lock_sha" \
+    "$linux_lock_sha" "$linux_realized_lock_sha" "$target" \
+    "${fips_patch_packages[@]}" \
     >/dev/null || {
       ubuntu_vm_import_error "host bundle verification failed"
       return 1
@@ -161,7 +186,9 @@ ubuntu_vm_import_release_bundle() {
     "$remote_dir" "$GUEST_REPO" \
     "$app_sha" "$app_tree" "$app_version" \
     "$fips_sha" "$fips_tree" "$fips_version" \
-    "$root_lock_sha" "$linux_lock_sha" "$target" \
+    "$root_lock_sha" "$root_realized_lock_sha" \
+    "$linux_lock_sha" "$linux_realized_lock_sha" "$target" \
+    "${fips_patch_packages[@]}" \
     "$app_hash" "$app_size" \
     "$cli_hash" "$cli_size" \
     "$fixture_hash" "$fixture_size" \
@@ -178,20 +205,31 @@ fips_sha="$6"
 fips_tree="$7"
 fips_version="$8"
 root_lock_sha="$9"
-linux_lock_sha="${10}"
-target="${11}"
-app_hash="${12}"
-app_size="${13}"
-cli_hash="${14}"
-cli_size="${15}"
-fixture_hash="${16}"
-fixture_size="${17}"
-musl_hash="${18}"
-musl_size="${19}"
-archive_hash="${20}"
-archive_size="${21}"
-deb_hash="${22}"
-deb_size="${23}"
+root_realized_lock_sha="${10}"
+linux_lock_sha="${11}"
+linux_realized_lock_sha="${12}"
+target="${13}"
+fips_core_patch_spec="${14}"
+fips_endpoint_patch_spec="${15}"
+fips_identity_patch_spec="${16}"
+app_hash="${17}"
+app_size="${18}"
+cli_hash="${19}"
+cli_size="${20}"
+fixture_hash="${21}"
+fixture_size="${22}"
+musl_hash="${23}"
+musl_size="${24}"
+archive_hash="${25}"
+archive_size="${26}"
+deb_hash="${27}"
+deb_size="${28}"
+[[ "$fips_core_patch_spec" == fips-core=* ]]
+[[ "$fips_endpoint_patch_spec" == fips-endpoint=* ]]
+[[ "$fips_identity_patch_spec" == fips-identity=* ]]
+fips_core_patch_version="${fips_core_patch_spec#*=}"
+fips_endpoint_patch_version="${fips_endpoint_patch_spec#*=}"
+fips_identity_patch_version="${fips_identity_patch_spec#*=}"
 case "$remote_dir" in
   /tmp/nvpn-linux-vm-release.*) ;;
   *) exit 2 ;;
@@ -232,7 +270,12 @@ jq -e \
   --arg fips_tree "$fips_tree" \
   --arg fips_version "$fips_version" \
   --arg root_lock_sha "$root_lock_sha" \
+  --arg root_realized_lock_sha "$root_realized_lock_sha" \
   --arg linux_lock_sha "$linux_lock_sha" \
+  --arg linux_realized_lock_sha "$linux_realized_lock_sha" \
+  --arg fips_core_patch_version "$fips_core_patch_version" \
+  --arg fips_endpoint_patch_version "$fips_endpoint_patch_version" \
+  --arg fips_identity_patch_version "$fips_identity_patch_version" \
   --arg target "$target" \
   --arg app_hash "$app_hash" \
   --argjson app_size "$app_size" \
@@ -256,7 +299,14 @@ jq -e \
     and .fipsGitTree == $fips_tree
     and .fipsVersion == $fips_version
     and .rootCargoLockSha256 == $root_lock_sha
+    and .rootRealizedCargoLockSha256 == $root_realized_lock_sha
     and .linuxCargoLockSha256 == $linux_lock_sha
+    and .linuxRealizedCargoLockSha256 == $linux_realized_lock_sha
+    and .fipsPatchedLockPackages == {
+      "fips-core": $fips_core_patch_version,
+      "fips-endpoint": $fips_endpoint_patch_version,
+      "fips-identity": $fips_identity_patch_version
+    }
     and .target == $target
     and .dockerPlatform == "linux/amd64"
     and .containerBase == "ubuntu:24.04"
@@ -460,7 +510,11 @@ GUEST
     printf 'fipsGitSha=%s\n' "$fips_sha"
     printf 'fipsGitTree=%s\n' "$fips_tree"
     printf 'rootCargoLockSha256=%s\n' "$root_lock_sha"
+    printf 'rootRealizedCargoLockSha256=%s\n' "$root_realized_lock_sha"
     printf 'linuxCargoLockSha256=%s\n' "$linux_lock_sha"
+    printf 'linuxRealizedCargoLockSha256=%s\n' "$linux_realized_lock_sha"
+    printf 'fipsPatchedLockPackages=%s,%s,%s\n' \
+      "${fips_patch_packages[@]}"
     printf 'target=%s\n' "$target"
     printf 'remoteSourceTreeVerified=true\n'
     printf 'remoteArtifactHashesVerified=true\n'

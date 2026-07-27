@@ -83,10 +83,34 @@ mkdir -p "$CACHE_ROOT"
 CACHE_ROOT="$(cd "$CACHE_ROOT" && pwd)"
 CARGO_DEB_VERSION="3.7.0"
 MUSL_TARGET="x86_64-unknown-linux-musl"
-CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package2"
+CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package3"
 BUNDLE_DIR="$CACHE_ROOT/$CACHE_KEY"
 RECEIPT="$BUNDLE_DIR/receipt.json"
 VERIFIER="$ROOT/scripts/verify-host-linux-vm-bundle.py"
+PATCH_LOCK_VERIFIER="$ROOT/scripts/verify-cargo-path-patch-lock.py"
+[[ -x "$PATCH_LOCK_VERIFIER" ]] || {
+  echo "Host Linux VM bundle exact FIPS lock verifier is missing" >&2
+  exit 2
+}
+FIPS_PATCH_PACKAGES=()
+while IFS= read -r package; do
+  FIPS_PATCH_PACKAGES+=("$package")
+done < <(
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --manifest-specs "$NVPN_FIPS_REPO_PATH"
+)
+[[ "${#FIPS_PATCH_PACKAGES[@]}" == 3 ]] || {
+  echo "Host Linux VM bundle lacks the three exact FIPS patch packages" >&2
+  exit 2
+}
+ROOT_REALIZED_CARGO_LOCK_SHA256="$(
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --expected-sha256 "$ROOT/Cargo.lock" "${FIPS_PATCH_PACKAGES[@]}"
+)"
+LINUX_REALIZED_CARGO_LOCK_SHA256="$(
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --expected-sha256 "$ROOT/linux/Cargo.lock" "${FIPS_PATCH_PACKAGES[@]}"
+)"
 TEMP_DIR=""
 
 cleanup() {
@@ -112,8 +136,11 @@ verify_bundle() {
     "$RELEASE_JOIN_FIPS_TREE" \
     "$RELEASE_JOIN_FIPS_VERSION" \
     "$ROOT_CARGO_LOCK_SHA256" \
+    "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
     "$LINUX_CARGO_LOCK_SHA256" \
+    "$LINUX_REALIZED_CARGO_LOCK_SHA256" \
     "$TARGET" \
+    "${FIPS_PATCH_PACKAGES[@]}" \
     >/dev/null
 }
 
@@ -168,6 +195,8 @@ docker run --rm \
   --env CARGO_HOME=/cargo-home \
   --env CARGO_INCREMENTAL=0 \
   --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
+  --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+  --env "EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256=$LINUX_REALIZED_CARGO_LOCK_SHA256" \
   --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
   --env TZ=UTC \
   --env LC_ALL=C.UTF-8 \
@@ -180,8 +209,22 @@ fips_config=(
   --config 'patch.crates-io.fips-endpoint.path="/workspace/fips/crates/fips-endpoint"'
   --config 'patch.crates-io.fips-identity.path="/workspace/fips/crates/fips-identity"'
 )
+lock_verifier=/workspace/app/scripts/verify-cargo-path-patch-lock.py
+fips_packages=()
+while IFS= read -r package; do
+  fips_packages+=("$package")
+done < <(python3 "$lock_verifier" --manifest-specs /workspace/fips)
+[[ "${#fips_packages[@]}" == 3 ]]
 
 export CARGO_TARGET_DIR=/target-root
+cp Cargo.lock /output/root-Cargo.lock.committed
+cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
+python3 "$lock_verifier" \
+  --validate /output/root-Cargo.lock.committed Cargo.lock \
+  "${fips_packages[@]}" \
+  > /output/root-realized-cargo-lock-sha256.txt
+grep -Fx "$EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256" \
+  /output/root-realized-cargo-lock-sha256.txt
 cargo "${fips_config[@]}" metadata --locked --format-version 1 --no-deps \
   >/dev/null
 cargo "${fips_config[@]}" build --locked --release -p nvpn
@@ -193,6 +236,14 @@ cargo "${fips_config[@]}" build --locked --release \
 
 cd /workspace/app/linux
 export CARGO_TARGET_DIR=/target-linux
+cp Cargo.lock /output/linux-Cargo.lock.committed
+cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
+python3 "$lock_verifier" \
+  --validate /output/linux-Cargo.lock.committed Cargo.lock \
+  "${fips_packages[@]}" \
+  > /output/linux-realized-cargo-lock-sha256.txt
+grep -Fx "$EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256" \
+  /output/linux-realized-cargo-lock-sha256.txt
 cargo "${fips_config[@]}" metadata --locked --format-version 1 --no-deps \
   >/dev/null
 cargo "${fips_config[@]}" build --locked --release
@@ -284,9 +335,13 @@ cargo --version > /output/cargo-version.txt
 CONTAINER
 
 [[ "$(shasum -a 256 "$TEMP_DIR/source/app/Cargo.lock" | awk '{ print $1 }')" \
-  == "$ROOT_CARGO_LOCK_SHA256" ]]
+  == "$ROOT_REALIZED_CARGO_LOCK_SHA256" ]]
 [[ "$(shasum -a 256 "$TEMP_DIR/source/app/linux/Cargo.lock" | awk '{ print $1 }')" \
-  == "$LINUX_CARGO_LOCK_SHA256" ]]
+  == "$LINUX_REALIZED_CARGO_LOCK_SHA256" ]]
+[[ "$(<"$TEMP_DIR/output/root-realized-cargo-lock-sha256.txt")" \
+  == "$ROOT_REALIZED_CARGO_LOCK_SHA256" ]]
+[[ "$(<"$TEMP_DIR/output/linux-realized-cargo-lock-sha256.txt")" \
+  == "$LINUX_REALIZED_CARGO_LOCK_SHA256" ]]
 for artifact in \
   nvpn \
   desktop_manual_join_e2e_fixture \
@@ -308,8 +363,11 @@ python3 - \
   "$RELEASE_JOIN_FIPS_TREE" \
   "$RELEASE_JOIN_FIPS_VERSION" \
   "$ROOT_CARGO_LOCK_SHA256" \
+  "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
   "$LINUX_CARGO_LOCK_SHA256" \
+  "$LINUX_REALIZED_CARGO_LOCK_SHA256" \
   "$TARGET" \
+  "${FIPS_PATCH_PACKAGES[@]}" \
   "$SOURCE_DATE_EPOCH" \
   "$TEMP_DIR/output/cli-short-version.txt" \
   "$TEMP_DIR/output/cli-verbose-version.txt" \
@@ -333,8 +391,13 @@ import sys
     fips_tree,
     fips_version,
     root_cargo_lock_sha256,
+    root_realized_cargo_lock_sha256,
     linux_cargo_lock_sha256,
+    linux_realized_cargo_lock_sha256,
     target,
+    fips_core_patch_spec,
+    fips_endpoint_patch_spec,
+    fips_identity_patch_spec,
     source_epoch,
     cli_short_arg,
     cli_verbose_arg,
@@ -345,6 +408,20 @@ import sys
     deb_version_arg,
 ) = sys.argv[1:]
 bundle = pathlib.Path(bundle_arg)
+fips_patch_packages = dict(
+    spec.split("=", 1)
+    for spec in (
+        fips_core_patch_spec,
+        fips_endpoint_patch_spec,
+        fips_identity_patch_spec,
+    )
+)
+if set(fips_patch_packages) != {
+    "fips-core",
+    "fips-endpoint",
+    "fips-identity",
+}:
+    raise SystemExit("unexpected exact FIPS patched lock package set")
 names = {
     "app": "nostr-vpn",
     "cli": "nvpn",
@@ -376,7 +453,10 @@ payload = {
     "fipsGitTree": fips_tree,
     "fipsVersion": fips_version,
     "rootCargoLockSha256": root_cargo_lock_sha256,
+    "rootRealizedCargoLockSha256": root_realized_cargo_lock_sha256,
     "linuxCargoLockSha256": linux_cargo_lock_sha256,
+    "linuxRealizedCargoLockSha256": linux_realized_cargo_lock_sha256,
+    "fipsPatchedLockPackages": fips_patch_packages,
     "target": target,
     "dockerPlatform": "linux/amd64",
     "containerBase": "ubuntu:24.04",
@@ -420,8 +500,11 @@ python3 "$VERIFIER" \
   "$RELEASE_JOIN_FIPS_TREE" \
   "$RELEASE_JOIN_FIPS_VERSION" \
   "$ROOT_CARGO_LOCK_SHA256" \
+  "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
   "$LINUX_CARGO_LOCK_SHA256" \
+  "$LINUX_REALIZED_CARGO_LOCK_SHA256" \
   "$TARGET" \
+  "${FIPS_PATCH_PACKAGES[@]}" \
   >/dev/null
 release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 release_join_assert_fips_unchanged

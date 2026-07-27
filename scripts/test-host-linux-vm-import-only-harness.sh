@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PREPARER="$ROOT/scripts/prepare-host-linux-vm-bundle.sh"
 VERIFIER="$ROOT/scripts/verify-host-linux-vm-bundle.py"
+PATCH_LOCK_VERIFIER="$ROOT/scripts/verify-cargo-path-patch-lock.py"
 IMPORT_LIB="$ROOT/scripts/lib-ubuntu-vm-imported-release.sh"
 MANUAL="$ROOT/scripts/ubuntu-vm-manual-join-e2e.sh"
 SERVICE="$ROOT/scripts/ubuntu-vm-service-toggle-e2e.sh"
@@ -24,7 +25,7 @@ require_tokens() {
   local file="$1" label="$2" token
   shift 2
   for token in "$@"; do
-    grep -Fq "$token" "$file" \
+    grep -Fq -- "$token" "$file" \
       || fail "$(basename "$file") lacks $label: $token"
   done
 }
@@ -32,6 +33,7 @@ require_tokens() {
 for executable in \
   "$PREPARER" \
   "$VERIFIER" \
+  "$PATCH_LOCK_VERIFIER" \
   "$MANUAL" \
   "$SERVICE" \
   "$UNDERLAY" \
@@ -42,6 +44,13 @@ do
 done
 [[ -f "$IMPORT_LIB" && -f "$DOCKERFILE" ]] \
   || fail "shared import helper or Ubuntu builder image is missing"
+require_tokens "$PATCH_LOCK_VERIFIER" "fail-closed FIPS patch lock delta" \
+  'REGISTRY_SOURCE' \
+  'committed lock has duplicate target package' \
+  'realized lock differs by more than exact target ' \
+  '"--manifest-specs"' \
+  '"--expected-sha256"' \
+  '"--validate"'
 
 require_tokens "$DOCKERFILE" "pinned Ubuntu host build environment" \
   'FROM ubuntu:24.04' \
@@ -54,8 +63,12 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '[[ "$(uname -s)" == "Darwin" ]]' \
   'status --porcelain --untracked-files=all' \
   'release_join_require_clean_fips' \
-  'CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package2"' \
+  'CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package3"' \
   'Dockerfile.linux-vm-gate' \
+  'verify-cargo-path-patch-lock.py' \
+  '--manifest-specs "$NVPN_FIPS_REPO_PATH"' \
+  '--validate /output/root-Cargo.lock.committed Cargo.lock' \
+  '--validate /output/linux-Cargo.lock.committed Cargo.lock' \
   '  --interactive \' \
   '  --platform "$DOCKER_PLATFORM" \' \
   'dockerPlatform": "linux/amd64"' \
@@ -63,7 +76,11 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '"builtOnHostMac": True' \
   '"builtOnRemoteVm": False' \
   '"rootCargoLockSha256": root_cargo_lock_sha256' \
+  '"rootRealizedCargoLockSha256": root_realized_cargo_lock_sha256' \
   '"linuxCargoLockSha256": linux_cargo_lock_sha256' \
+  '"linuxRealizedCargoLockSha256": linux_realized_cargo_lock_sha256' \
+  '"fipsPatchedLockPackages": fips_patch_packages' \
+  'metadata --format-version 1 >/dev/null' \
   'metadata --locked --format-version 1 --no-deps' \
   '/target-root/release/nvpn' \
   '/target-root/x86_64-unknown-linux-musl/release/nvpn' \
@@ -79,13 +96,17 @@ require_tokens "$VERIFIER" "hash/size/version/source receipt validation" \
   '"dockerPlatform": "linux/amd64"' \
   '"containerBase": "ubuntu:24.04"' \
   '"rootCargoLockSha256": root_cargo_lock_sha256' \
+  '"rootRealizedCargoLockSha256": root_realized_cargo_lock_sha256' \
   '"linuxCargoLockSha256": linux_cargo_lock_sha256' \
+  '"linuxRealizedCargoLockSha256": linux_realized_cargo_lock_sha256' \
+  '"fipsPatchedLockPackages": fips_patch_packages' \
   'little-endian x86_64 ELF64 executable' \
   'SHA-256 differs from receipt' \
   'size differs from receipt' \
   'CLI verbose version differs from exact FIPS revision'
 require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'prepare-host-linux-vm-bundle.sh' \
+  '--manifest-specs "$NVPN_FIPS_REPO_PATH"' \
   'mktemp -d /tmp/nvpn-linux-vm-release.XXXXXX' \
   'sha256sum "$package_root/usr/bin/nostr-vpn"' \
   'sha256sum "$package_root/usr/bin/nvpn"' \
@@ -101,7 +122,10 @@ require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'sha256sum "$guest_repo/Cargo.lock"' \
   'sha256sum "$guest_repo/linux/Cargo.lock"' \
   '.rootCargoLockSha256 == $root_lock_sha' \
+  '.rootRealizedCargoLockSha256 == $root_realized_lock_sha' \
   '.linuxCargoLockSha256 == $linux_lock_sha' \
+  '.linuxRealizedCargoLockSha256 == $linux_realized_lock_sha' \
+  '.fipsPatchedLockPackages == {' \
   '.builtOnHostMac == true' \
   '.builtOnRemoteVm == false' \
   'remoteSourceTreeVerified=true' \
@@ -172,12 +196,106 @@ fips_sha="$(printf 'c%.0s' {1..40})"
 fips_tree="$(printf 'd%.0s' {1..40})"
 root_lock_sha="$(printf 'e%.0s' {1..64})"
 linux_lock_sha="$(printf 'f%.0s' {1..64})"
+root_realized_lock_sha="$(printf '1%.0s' {1..64})"
+linux_realized_lock_sha="$(printf '2%.0s' {1..64})"
 app_version="4.1.5"
 fips_version="0.4.45"
+
+lock_test="$backup/lock-adversary"
+mkdir -p "$lock_test"
+python3 - "$lock_test" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+source = 'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+
+
+def package(name: str, version: str, checksum: str, patched: bool) -> str:
+    result = f'[[package]]\nname = "{name}"\nversion = "{version}"\n'
+    if not patched:
+        result += source + f'checksum = "{checksum}"\n'
+    return result + 'dependencies = ["stable"]\n\n'
+
+
+targets = (
+    ("fips-core", "0.4.45", "a" * 64),
+    ("fips-endpoint", "0.4.45", "b" * 64),
+    ("fips-identity", "0.3.2", "c" * 64),
+)
+unrelated = ("unrelated", "1.0.0", "d" * 64)
+prefix = "version = 4\n\n"
+committed = prefix + "".join(
+    package(name, version, checksum, False)
+    for name, version, checksum in (*targets, unrelated)
+)
+realized = prefix + "".join(
+    package(name, version, checksum, True)
+    for name, version, checksum in targets
+) + package(*unrelated, False)
+partial = prefix + package(*targets[0], True) + "".join(
+    package(name, version, checksum, False)
+    for name, version, checksum in (*targets[1:], unrelated)
+)
+extra = realized.replace(source, "", 1)
+dependency = realized.replace(
+    'dependencies = ["stable"]', 'dependencies = ["changed"]', 1
+)
+version = realized.replace(
+    'name = "fips-identity"\nversion = "0.3.2"',
+    'name = "fips-identity"\nversion = "0.3.3"',
+)
+wrong_version = committed.replace(
+    'name = "fips-identity"\nversion = "0.3.2"',
+    'name = "fips-identity"\nversion = "0.3.3"',
+)
+for name, value in (
+    ("committed.lock", committed),
+    ("realized.lock", realized),
+    ("partial.lock", partial),
+    ("extra.lock", extra),
+    ("dependency.lock", dependency),
+    ("version.lock", version),
+    ("wrong-version.lock", wrong_version),
+):
+    (root / name).write_text(value, encoding="utf-8")
+PY
+patch_specs=(
+  fips-core=0.4.45
+  fips-endpoint=0.4.45
+  fips-identity=0.3.2
+)
+expected_patch_sha="$(
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --expected-sha256 "$lock_test/committed.lock" "${patch_specs[@]}"
+)"
+[[ "$(
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --validate "$lock_test/committed.lock" "$lock_test/realized.lock" \
+    "${patch_specs[@]}"
+)" == "$expected_patch_sha" ]] \
+  || fail "exact FIPS patch lock verifier rejected the canonical delta"
+for adversary in partial.lock extra.lock dependency.lock version.lock; do
+  if python3 "$PATCH_LOCK_VERIFIER" \
+    --validate "$lock_test/committed.lock" "$lock_test/$adversary" \
+    "${patch_specs[@]}" >/dev/null 2>&1
+  then
+    fail "exact FIPS patch lock verifier accepted $adversary"
+  fi
+done
+if python3 "$PATCH_LOCK_VERIFIER" \
+  --expected-sha256 "$lock_test/wrong-version.lock" "${patch_specs[@]}" \
+  >/dev/null 2>&1
+then
+  fail "exact FIPS patch lock verifier accepted the wrong package version"
+fi
+
 python3 - \
   "$tmp" "$app_sha" "$app_tree" "$app_version" \
   "$fips_sha" "$fips_tree" "$fips_version" \
-  "$root_lock_sha" "$linux_lock_sha" <<'PY'
+  "$root_lock_sha" "$root_realized_lock_sha" \
+  "$linux_lock_sha" "$linux_realized_lock_sha" \
+  "${patch_specs[@]}" <<'PY'
 import hashlib
 import io
 import json
@@ -195,8 +313,21 @@ root = pathlib.Path(sys.argv[1])
     fips_tree,
     fips_version,
     root_lock_sha,
+    root_realized_lock_sha,
     linux_lock_sha,
+    linux_realized_lock_sha,
+    fips_core_patch_spec,
+    fips_endpoint_patch_spec,
+    fips_identity_patch_spec,
 ) = sys.argv[2:]
+fips_patch_packages = dict(
+    spec.split("=", 1)
+    for spec in (
+        fips_core_patch_spec,
+        fips_endpoint_patch_spec,
+        fips_identity_patch_spec,
+    )
+)
 executables = {
     "app": "nostr-vpn",
     "cli": "nvpn",
@@ -257,7 +388,10 @@ receipt = {
     "fipsGitTree": fips_tree,
     "fipsVersion": fips_version,
     "rootCargoLockSha256": root_lock_sha,
+    "rootRealizedCargoLockSha256": root_realized_lock_sha,
     "linuxCargoLockSha256": linux_lock_sha,
+    "linuxRealizedCargoLockSha256": linux_realized_lock_sha,
+    "fipsPatchedLockPackages": fips_patch_packages,
     "target": "x86_64-unknown-linux-gnu",
     "dockerPlatform": "linux/amd64",
     "containerBase": "ubuntu:24.04",
@@ -289,9 +423,38 @@ python3 "$VERIFIER" \
   "$tmp" "$tmp/receipt.json" \
   "$app_sha" "$app_tree" "$app_version" \
   "$fips_sha" "$fips_tree" "$fips_version" \
-  "$root_lock_sha" "$linux_lock_sha" \
-  x86_64-unknown-linux-gnu \
+  "$root_lock_sha" "$root_realized_lock_sha" \
+  "$linux_lock_sha" "$linux_realized_lock_sha" \
+  x86_64-unknown-linux-gnu "${patch_specs[@]}" \
   | grep -Fq HOST_LINUX_VM_BUNDLE_VERIFIED
+
+cp "$tmp/receipt.json" "$backup/receipt-before-realized-lock-adversary.json"
+python3 - "$tmp/receipt.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+receipt = json.loads(path.read_text(encoding="utf-8"))
+receipt["rootRealizedCargoLockSha256"] = "0" * 64
+path.write_text(
+    json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+if python3 "$VERIFIER" \
+  "$tmp" "$tmp/receipt.json" \
+  "$app_sha" "$app_tree" "$app_version" \
+  "$fips_sha" "$fips_tree" "$fips_version" \
+  "$root_lock_sha" "$root_realized_lock_sha" \
+  "$linux_lock_sha" "$linux_realized_lock_sha" \
+  x86_64-unknown-linux-gnu "${patch_specs[@]}" \
+  >/dev/null 2>&1
+then
+  fail "bundle verifier accepted a mutated realized lock hash"
+fi
+mv "$backup/receipt-before-realized-lock-adversary.json" \
+  "$tmp/receipt.json"
 
 # A correctly hashed archive is still invalid if a glibc executable is put
 # behind the public musl filename. This is the regression that allowed an
@@ -336,8 +499,9 @@ if python3 "$VERIFIER" \
   "$tmp" "$tmp/receipt.json" \
   "$app_sha" "$app_tree" "$app_version" \
   "$fips_sha" "$fips_tree" "$fips_version" \
-  "$root_lock_sha" "$linux_lock_sha" \
-  x86_64-unknown-linux-gnu \
+  "$root_lock_sha" "$root_realized_lock_sha" \
+  "$linux_lock_sha" "$linux_realized_lock_sha" \
+  x86_64-unknown-linux-gnu "${patch_specs[@]}" \
   >/dev/null 2>&1
 then
   fail "bundle verifier accepted a glibc CLI mislabeled as static musl"
@@ -352,8 +516,9 @@ if python3 "$VERIFIER" \
   "$tmp" "$tmp/receipt.json" \
   "$app_sha" "$app_tree" "$app_version" \
   "$fips_sha" "$fips_tree" "$fips_version" \
-  "$root_lock_sha" "$linux_lock_sha" \
-  x86_64-unknown-linux-gnu \
+  "$root_lock_sha" "$root_realized_lock_sha" \
+  "$linux_lock_sha" "$linux_realized_lock_sha" \
+  x86_64-unknown-linux-gnu "${patch_specs[@]}" \
   >/dev/null 2>&1
 then
   fail "bundle verifier accepted a post-receipt CLI mutation"
