@@ -22,6 +22,12 @@ for file in "${files[@]}"; do
   bash -n "$file"
 done
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-vm-imported-release.sh"
+[[ "$(macos_vm_imported_release_package "src/nostr-vpn")" \
+  == "artifacts/macos-release-mobile-join/imported" ]]
+[[ "$(macos_vm_imported_release_package "/tmp/src/nostr-vpn")" \
+  == "/tmp/src/nostr-vpn/artifacts/macos-release-mobile-join/imported" ]]
 
 python3 - "${files[@]}" "$ROOT/scripts/macos_release_join_artifact.py" \
   "$ROOT/scripts/macos-build" <<'PY'
@@ -113,6 +119,8 @@ wrapper_contracts = {
         "NVPN_MACOS_VM_IMPORT_ONLY=1",
         "NVPN_MACOS_APP_PATH=",
         "NVPN_MACOS_APP_SMOKE_BUILD=0",
+        "NVPN_MACOS_APP_IDLE_CPU_SAMPLE_SECONDS=",
+        "NVPN_MACOS_APP_IDLE_CPU_SETTLE_SECONDS=",
     ),
     "macos-vm-desktop-wireguard-exit-e2e.sh": (
         "NVPN_MACOS_VM_IMPORT_ONLY=1",

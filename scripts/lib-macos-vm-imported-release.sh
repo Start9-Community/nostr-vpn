@@ -28,5 +28,10 @@ macos_vm_prepare_or_verify_imported_release() {
 
 macos_vm_imported_release_package() {
   local guest_repo="$1"
-  printf '%s/artifacts/macos-release-mobile-join/imported\n' "$guest_repo"
+  if [[ "$guest_repo" == /* ]]; then
+    printf '%s/artifacts/macos-release-mobile-join/imported\n' "$guest_repo"
+  else
+    # Every caller changes into GUEST_REPO before invoking a gate.
+    printf 'artifacts/macos-release-mobile-join/imported\n'
+  fi
 }
