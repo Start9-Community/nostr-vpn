@@ -234,7 +234,7 @@ module.git_snapshot = lambda path: {
     "tree": "5" * 40,
     "manifest": "6" * 64,
 }
-module.fips_version = lambda path: "0.4.43"
+module.fips_version = lambda path: "0.4.44"
 
 with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
     work = pathlib.Path(tmp)
@@ -271,7 +271,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
         expected_app_tree="5" * 40,
         expected_fips_head="4" * 40,
         expected_fips_tree="5" * 40,
-        expected_fips_version="0.4.43",
+        expected_fips_version="0.4.44",
         expected_team="ABCDEFGHIJ",
         expected_identity_sha1="2" * 40,
         expected_signer_sha256="3" * 64,

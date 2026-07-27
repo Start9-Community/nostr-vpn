@@ -329,6 +329,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-idle-cpu-gate-harness.sh
   ./scripts/test-mobile-physical-device-selection-harness.sh
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
+  ./scripts/test-mobile-android-release-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-wireguard-fixture-cleanup-harness.sh
   ./scripts/test-mobile-release-provenance-harness.sh
@@ -337,6 +338,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-vm-import-only-harness.sh
   ./scripts/test-desktop-network-handoff-harness.sh
+  ./scripts/test-macos-release-fips-roaming-harness.sh
   ./scripts/test-ios-frozen-archive-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh
   cargo fmt --check
@@ -658,9 +660,28 @@ prepare_macos_platform_lane_sync() {
   MACOS_PLATFORM_LANE_PRE_SYNCED=0
   macos_platform_lane_requested || return 0
   if macos_vm_reachable; then
+    local peer_build_pid="" peer_build_status=0 artifact_status=0
+    local peer_build_log="$RELEASE_GATE_PARALLEL_LOG_DIR/macos-fips-peer-host-prep.log"
+    if ! release_gate_mode_disabled \
+      "${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E:-auto}"
+    then
+      ./scripts/prepare-macos-release-fips-peer.sh \
+        >"$peer_build_log" 2>&1 &
+      peer_build_pid="$!"
+    fi
     NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only \
       ./scripts/macos-vm-release-mobile-join-e2e.sh \
-        "${NVPN_MACOS_SSH_HOST:-}"
+        "${NVPN_MACOS_SSH_HOST:-}" \
+      || artifact_status="$?"
+    if [[ -n "$peer_build_pid" ]]; then
+      wait "$peer_build_pid" || peer_build_status="$?"
+    fi
+    if [[ "$artifact_status" -ne 0 || "$peer_build_status" -ne 0 ]]; then
+      if [[ "$peer_build_status" -ne 0 ]]; then
+        tail -n 120 "$peer_build_log" >&2 || true
+      fi
+      return 1
+    fi
     MACOS_PLATFORM_LANE_PRE_SYNCED=1
   fi
 }
@@ -1223,6 +1244,7 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.77.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.77.2 \
+      NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.77.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$port_base" \
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
@@ -1251,6 +1273,7 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2 \
+      NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.78.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios
@@ -1355,6 +1378,7 @@ run_mobile_underlay_change_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.79.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.79.2 \
+      NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.79.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$port_base" \
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
       NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=1 \
@@ -1387,6 +1411,7 @@ run_mobile_underlay_change_gates() {
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.80.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.80.2 \
+      NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.80.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=1 \
       NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))" \

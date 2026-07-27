@@ -37,9 +37,10 @@ All notable changes to this project are documented in this file.
 - Release completed FIPS-TCP state-control slots promptly so periodic roster
   and capability traffic cannot starve a manual-join roster or its durable
   application receipt behind the per-peer connection budget.
-- Upgrade FIPS to 0.4.43 so a new one-bit session-key epoch waits for the
-  previous epoch's drain to retire, preventing repeated rekeys from selecting
-  an ambiguous old key while real payload traffic continues.
+- Upgrade FIPS to 0.4.44 so a new one-bit session-key epoch waits for the
+  previous epoch's drain to retire and duplicate simultaneous connections keep
+  one canonical authenticated owner, preventing ambiguous rekeys or delivery
+  into a superseded connection while real payload traffic continues.
 - Repair Cashu paid-exit close, settlement, and refund recovery across
   historical or retried proofs on platforms where the feature is available.
 

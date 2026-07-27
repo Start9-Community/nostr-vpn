@@ -16,6 +16,7 @@ LINUX_HOST_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_GUEST="$ROOT/scripts/desktop-linux-underlay-change-e2e.sh"
 PEER="$ROOT/scripts/desktop-linux-underlay-peer-e2e.sh"
 LISTENER_AUDIT="$ROOT/scripts/lib-desktop-linux-listener-audit.sh"
+WIREGUARD_FIXTURE_LIB="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 MACOS_WIREGUARD="$ROOT/scripts/macos-vm-desktop-wireguard-exit-e2e.sh"
 MACOS_NETWORK_GUEST="$ROOT/scripts/e2e-macos-release-network.sh"
 MACOS_APP="$ROOT/scripts/macos-vm-desktop-app-launch-smoke.sh"
@@ -265,9 +266,14 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   './scripts/e2e-macos-release-network.sh' \
   'mobile_wg_fixture_wg_bytes' \
   'mobile_wg_fixture_forward_packets' \
+  'mobile_wg_fixture_dns_evidence_snapshot' \
+  'mobile_wg_fixture_assert_dns_case_evidence' \
+  'mobile_wg_fixture_cleanup'
+require_tokens "$WIREGUARD_FIXTURE_LIB" "shared positive/negative DNS counters" \
   'mobile_wg_fixture_dns_count' \
   'mobile_wg_fixture_doh_count' \
-  'mobile_wg_fixture_cleanup'
+  'mobile_wg_fixture_profile_dns_count' \
+  'mobile_wg_fixture_through_dns_count'
 for dns_case in \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
 do
@@ -284,6 +290,8 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'exit-dns-custom-doh-url' \
   'exit-dns-custom-doh-bootstrap-ips' \
   'exit-dns-through-exit-servers' \
+  'runtime_dns_state_matches' \
+  'normalize_scutil_dns_file' \
   '/etc/resolver/nvpn-secure-dns' \
   'scutil --dns' \
   'networksetup -setnetworkserviceenabled' \
@@ -297,6 +305,12 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'direct_source_ip' \
   'endpoint_route_interface' \
   'MACOS_RELEASE_NETWORK_DIRECT_OK'
+require_tokens "$WIREGUARD_FIXTURE_LIB" "independent resolver endpoints" \
+  'https://dns.google/dns-query' \
+  '8.8.8.8' \
+  'dns-through'
+require_tokens "$MACOS_WIREGUARD" "distinct through-exit DNS address" \
+  'NVPN_MACOS_WG_THROUGH_DNS_IP:-10.99.79.53'
 for forbidden in \
   'cargo build' \
   'xcodebuild' \
@@ -310,6 +324,182 @@ do
     fail "macOS guest network path can build/sign in the VM: $forbidden"
   fi
 done
+
+MACOS_DEFINITIONS="$COMBINED_DIR/macos-network-definitions.sh"
+sed '/^validate_inputs$/,$d' "$MACOS_NETWORK_GUEST" >"$MACOS_DEFINITIONS"
+
+SCUTIL_FIXTURES="$COMBINED_DIR/scutil"
+mkdir -p "$SCUTIL_FIXTURES"
+cat >"$SCUTIL_FIXTURES/baseline.txt" <<'EOF'
+DNS configuration
+
+resolver #1
+  search domain[0] : example.test
+  nameserver[0] : 192.0.2.53
+  if_index : 4 (en0)
+  flags    : Scoped, Request A records
+  reach    : 0x00000002 (Reachable)
+  order    : 200000
+
+resolver #2
+  domain   : local
+  nameserver[0] : 192.0.2.54
+  reach    : 0x00020002 (Reachable,Directly Reachable Address)
+EOF
+cat >"$SCUTIL_FIXTURES/reordered.txt" <<'EOF'
+DNS configuration
+
+resolver #9
+  domain   : local
+  nameserver[0] : 192.0.2.54
+  reach    : 0x00000000 (Not Reachable)
+  order    : 900000
+
+resolver #3
+  nameserver[0] : 192.0.2.53
+  search domain[0] : example.test
+  if_index : 99 (en0)
+  flags    : Request A records, Scoped
+  reach    : 0x00000000 (Not Reachable)
+  order    : 100
+EOF
+cat >"$SCUTIL_FIXTURES/leaked.txt" <<'EOF'
+DNS configuration
+
+resolver #1
+  search domain[0] : example.test
+  nameserver[0] : 203.0.113.53
+  if_index : 4 (en0)
+  flags    : Scoped, Request A records
+
+resolver #2
+  domain   : local
+  nameserver[0] : 192.0.2.54
+EOF
+for fixture in baseline reordered leaked; do
+  bash -s -- \
+    "$MACOS_DEFINITIONS" \
+    "$SCUTIL_FIXTURES/$fixture.txt" \
+    "$SCUTIL_FIXTURES/$fixture.json" <<'BASH'
+set -euo pipefail
+definitions="$1"
+input="$2"
+output="$3"
+set -- definitions-only
+# shellcheck disable=SC1090
+source "$definitions"
+normalize_scutil_dns_file "$input" "$output"
+BASH
+done
+cmp -s "$SCUTIL_FIXTURES/baseline.json" "$SCUTIL_FIXTURES/reordered.json" \
+  || fail "semantic scutil normalization rejects reordered equivalent resolvers"
+if cmp -s "$SCUTIL_FIXTURES/baseline.json" "$SCUTIL_FIXTURES/leaked.json"; then
+  fail "semantic scutil normalization accepted a nameserver leak"
+fi
+
+UNDERLAY_PROBE_DIR="$COMBINED_DIR/underlay-probe"
+mkdir -p "$UNDERLAY_PROBE_DIR/state/results"
+UNDERLAY_PROBE="$UNDERLAY_PROBE_DIR/e2e-macos-release-network.sh"
+cat >"$UNDERLAY_PROBE" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090
+source "$NVPN_TEST_MACOS_DEFINITIONS"
+mkdir -p "$RESULT_DIR"
+printf '0\n' >"$STATE_DIR/rebind-baseline"
+printf '%s\n' "$$" >"$STATE_DIR/underlay.pid"
+process_start_signature "$$" >"$STATE_DIR/underlay.start"
+payload_loop() {
+  while true; do
+    sleep 1
+  done
+}
+fips_payload_loop() {
+  while true; do
+    sleep 1
+  done
+}
+fips_payload_success_count() {
+  printf '1\n'
+}
+runtime_fips_peer_connected() {
+  return 0
+}
+fips_route_interface() {
+  printf 'utun8\n'
+}
+fips_route_interface_owns_tunnel_ip() {
+  return 0
+}
+wireguard_interface() {
+  printf 'utun9\n'
+}
+monotonic_ms() {
+  printf '1\n'
+}
+sudo() {
+  return 37
+}
+restore_saved_service_states() {
+  return 0
+}
+wait_for_cleanup_condition() {
+  return 0
+}
+repair_owned_network_to_direct() {
+  return 0
+}
+run_underlay_with_status
+BASH
+chmod +x "$UNDERLAY_PROBE"
+set +e
+env \
+  NVPN_TEST_MACOS_DEFINITIONS="$MACOS_DEFINITIONS" \
+  NVPN_MACOS_NETWORK_STATE_DIR="$UNDERLAY_PROBE_DIR/state" \
+  bash "$UNDERLAY_PROBE" underlay-run \
+  >"$UNDERLAY_PROBE_DIR/probe.log" 2>&1
+underlay_probe_status="$?"
+set -e
+[[ "$underlay_probe_status" -eq 37 ]] \
+  || fail "mid-gate failure escaped with status $underlay_probe_status instead of 37"
+[[ "$(<"$UNDERLAY_PROBE_DIR/state/underlay.status")" == "fail:37" ]] \
+  || fail "mid-gate failure was not recorded fail-closed"
+if grep -Fq 'MACOS_RELEASE_NETWORK_UNDERLAY_OK' "$UNDERLAY_PROBE_DIR/probe.log"; then
+  fail "mid-gate failure reached the underlay success marker"
+fi
+[[ ! -e "$UNDERLAY_PROBE_DIR/state/payload.pid" ]] \
+  || fail "mid-gate failure left its owned payload receipt/process"
+[[ ! -e "$UNDERLAY_PROBE_DIR/state/fips-payload.pid" ]] \
+  || fail "mid-gate failure left its owned private-FIPS payload receipt/process"
+
+CLEANUP_PROBE="$COMBINED_DIR/macos-cleanup-probe.sh"
+cat >"$CLEANUP_PROBE" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090
+source "$NVPN_TEST_MACOS_DEFINITIONS"
+WAIT_SECS=1
+repair_owned_network_to_direct() { return 0; }
+saved_direct_baseline_available() { return 0; }
+restore_saved_service_states() { return 0; }
+direct_state_matches() { return 1; }
+exact_direct_dns_matches() { return 0; }
+saved_service_states_match() { return 0; }
+resolver_files_absent() { return 0; }
+pgrep() { return 1; }
+cleanup_gate
+BASH
+chmod +x "$CLEANUP_PROBE"
+set +e
+env \
+  NVPN_TEST_MACOS_DEFINITIONS="$MACOS_DEFINITIONS" \
+  NVPN_MACOS_NETWORK_STATE_DIR="$COMBINED_DIR/cleanup-state" \
+  bash "$CLEANUP_PROBE" definitions-only >/dev/null 2>&1
+cleanup_probe_status="$?"
+set -e
+[[ "$cleanup_probe_status" -ne 0 ]] \
+  || fail "cleanup passed while a saved Direct route remained unrestored"
+
 if grep -Fq './scripts/e2e-wireguard-exit-host.sh' "$MACOS_WIREGUARD"; then
   fail "macOS release network gate still uses the scoped-host self-test"
 fi

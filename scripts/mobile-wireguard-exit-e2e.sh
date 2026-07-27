@@ -25,6 +25,7 @@ CONTAINER="${NVPN_MOBILE_WG_EXIT_CONTAINER:-nostr-vpn-mobile-wireguard-exit-e2e}
 HOST_PORT="${NVPN_MOBILE_WG_EXIT_HOST_PORT:-51886}"
 TUNNEL_SERVER_IP="${NVPN_MOBILE_WG_EXIT_SERVER_IP:-10.99.77.1}"
 TUNNEL_CLIENT_IP="${NVPN_MOBILE_WG_EXIT_CLIENT_IP:-10.99.77.2}"
+THROUGH_DNS_IP="${NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP:-10.99.77.53}"
 DNS_NAME="${NVPN_MOBILE_WG_EXIT_DNS_NAME:-wireguard-exit.nvpn-e2e.test}"
 HTTP_PROBE_PORT="${NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT:-8080}"
 HTTP_PROBE_TOKEN="${NVPN_MOBILE_WG_EXIT_HTTP_TOKEN:-nvpn-mobile-$PPID-$$-$RANDOM}"
@@ -135,6 +136,23 @@ for command in wg; do
     exit 1
   fi
 done
+
+python3 - "$TUNNEL_SERVER_IP" "$TUNNEL_CLIENT_IP" "$THROUGH_DNS_IP" <<'PY'
+import ipaddress
+import sys
+
+server, client, through = map(ipaddress.ip_address, sys.argv[1:])
+network = ipaddress.ip_network(f"{server}/24", strict=False)
+if (
+    any(address.version != 4 for address in (server, client, through))
+    or through not in network
+    or len({server, client, through}) != 3
+):
+    raise SystemExit(
+        "WireGuard server, client, and through-exit DNS addresses must be "
+        "distinct IPv4 addresses in one /24"
+    )
+PY
 
 if has_platform android; then
   if [[ -z "$ADB" ]]; then
@@ -286,16 +304,6 @@ forward_packets() {
   mobile_wg_fixture_forward_packets "$CONTAINER"
 }
 
-dns_query_count() {
-  local name="$1"
-  mobile_wg_fixture_dns_count "$CONTAINER" "$name"
-}
-
-doh_flow_count() {
-  local provider="$1"
-  mobile_wg_fixture_doh_count "$CONTAINER" "$provider"
-}
-
 assert_platform_traffic() {
   local platform="$1" label="$2" before_bytes="$3" before_forward="$4"
   local after_bytes after_forward before_rx before_tx after_rx after_tx
@@ -314,78 +322,24 @@ assert_platform_traffic() {
   echo "$platform $label packet path passed: transfer rx=$before_rx->$after_rx tx=$before_tx->$after_tx forwarded=$before_forward->$after_forward"
 }
 
-assert_fixture_dns_traffic() {
-  local platform="$1" label="$2" name="$3" before_dns="$4"
-  local after_dns
-  after_dns="$(dns_query_count "$name")"
-  if (( after_dns <= before_dns )); then
-    echo "$platform $label failed: fixture DNS did not receive a $name query ($before_dns->$after_dns)" >&2
-    exit 1
-  fi
-  echo "$platform $label resolver passed: fixture DNS queries=$before_dns->$after_dns"
-}
-
-assert_doh_traffic() {
-  local platform="$1" label="$2" provider="$3" before_doh="$4"
-  local after_doh
-  after_doh="$(doh_flow_count "$provider")"
-  if (( after_doh <= before_doh )); then
-    echo "$platform $label failed: no HTTPS flow reached the selected $provider DoH bootstrap address ($before_doh->$after_doh packets)" >&2
-    exit 1
-  fi
-  echo "$platform $label resolver passed: $provider DoH packets=$before_doh->$after_doh"
-}
-
-dns_case_fields() {
-  local label="$1"
-  case "$label" in
-    automatic-profile)
-      printf 'automatic|cloudflare||||%s|dns\n' "$DNS_NAME"
-      ;;
-    cloudflare-doh)
-      printf 'encrypted|cloudflare||||cloudflare.com|doh-cloudflare\n'
-      ;;
-    quad9-doh)
-      printf 'encrypted|quad9||||quad9.net|doh-quad9\n'
-      ;;
-    custom-doh)
-      printf 'encrypted|custom|https://cloudflare-dns.com/dns-query|1.1.1.1||iana.org|doh-cloudflare\n'
-      ;;
-    through-exit)
-      printf 'through_exit|cloudflare|||%s|through-exit.%s|dns\n' \
-        "$TUNNEL_SERVER_IP" "$DNS_NAME"
-      ;;
-    *)
-      echo "unknown mobile exit DNS case: $label" >&2
-      return 1
-      ;;
-  esac
-}
-
 run_android_case() {
   local label="$1" first="$2" final="$3"
-  local mode provider custom_url bootstrap_ips through_servers probe_host evidence
-  local before_bytes before_forward before_evidence expected_ip
+  local mode provider custom_url bootstrap_ips through_servers probe_host
+  local expected_ip evidence before_dns_evidence after_dns_evidence
+  local before_bytes before_forward
   local wireguard_config_file idle_gate lifecycle_gate underlay_gate switch_direct
   IFS='|' read -r \
-    mode provider custom_url bootstrap_ips through_servers probe_host evidence \
-    <<<"$(dns_case_fields "$label")"
+    mode provider custom_url bootstrap_ips through_servers probe_host \
+    expected_ip evidence \
+    <<<"$(
+      mobile_wg_dns_case_fields \
+        "$label" "$DNS_NAME" "$TUNNEL_SERVER_IP" "$THROUGH_DNS_IP"
+    )"
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
-  case "$evidence" in
-    dns)
-      before_evidence="$(dns_query_count "$probe_host")"
-      expected_ip="$TUNNEL_SERVER_IP"
-      ;;
-    doh-cloudflare)
-      before_evidence="$(doh_flow_count cloudflare)"
-      expected_ip=""
-      ;;
-    doh-quad9)
-      before_evidence="$(doh_flow_count quad9)"
-      expected_ip=""
-      ;;
-  esac
+  before_dns_evidence="$(
+    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+  )"
   local -a android_args=(
     --accept-vpn-dialog
     --vpn-cycle
@@ -461,24 +415,29 @@ run_android_case() {
     NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP="$EXPECTED_EXIT_SOURCE_IP" \
     "$ROOT/scripts/mobile-android-smoke.sh" "${android_args[@]}"
   assert_platform_traffic Android "$label" "$before_bytes" "$before_forward"
-  case "$evidence" in
-    dns) assert_fixture_dns_traffic Android "$label" "$probe_host" "$before_evidence" ;;
-    doh-cloudflare) assert_doh_traffic Android "$label" cloudflare "$before_evidence" ;;
-    doh-quad9) assert_doh_traffic Android "$label" quad9 "$before_evidence" ;;
-  esac
+  after_dns_evidence="$(
+    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+  )"
+  mobile_wg_fixture_assert_dns_case_evidence \
+    Android "$label" "$evidence" "$before_dns_evidence" "$after_dns_evidence"
 }
 
 run_ios_case() {
   local label="$1" first="$2" final="$3"
-  local mode provider custom_url bootstrap_ips through_servers probe_host evidence
-  local before_bytes before_forward before_evidence
+  local mode provider custom_url bootstrap_ips through_servers probe_host
+  local expected_ip evidence before_dns_evidence after_dns_evidence
+  local before_bytes before_forward
   local lifecycle_gate underlay_gate resolver_probe_url resolver_body
   local underlay_home_ssid underlay_home_passphrase
   local underlay_alternate_ssid underlay_alternate_passphrase
   local run_id spec_base64
   IFS='|' read -r \
-    mode provider custom_url bootstrap_ips through_servers probe_host evidence \
-    <<<"$(dns_case_fields "$label")"
+    mode provider custom_url bootstrap_ips through_servers probe_host \
+    expected_ip evidence \
+    <<<"$(
+      mobile_wg_dns_case_fields \
+        "$label" "$DNS_NAME" "$TUNNEL_SERVER_IP" "$THROUGH_DNS_IP"
+    )"
   if [[ "$first" == "1" ]]; then
     lifecycle_gate="$LIFECYCLE_GATE"
     underlay_gate="$UNDERLAY_CHANGE_GATE"
@@ -500,21 +459,29 @@ run_ios_case() {
   fi
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
+  before_dns_evidence="$(
+    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+  )"
   case "$evidence" in
-    dns)
-      before_evidence="$(dns_query_count "$probe_host")"
+    dns-profile)
       resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
       resolver_body="$HTTP_PROBE_TOKEN"
       ;;
     doh-cloudflare)
-      before_evidence="$(doh_flow_count cloudflare)"
       resolver_probe_url="$DIRECT_URL"
       resolver_body=""
       ;;
     doh-quad9)
-      before_evidence="$(doh_flow_count quad9)"
       resolver_probe_url="$DIRECT_URL"
       resolver_body=""
+      ;;
+    doh-google)
+      resolver_probe_url="$DIRECT_URL"
+      resolver_body=""
+      ;;
+    dns-through)
+      resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
+      resolver_body="$HTTP_PROBE_TOKEN"
       ;;
   esac
   run_id="ios-release-$label-$PPID-$$-$RANDOM"
@@ -610,18 +577,19 @@ PY
     "$label" "$run_id" "$spec_base64" \
     "$lifecycle_gate" "$underlay_gate" "$final" "$first"
   assert_platform_traffic iOS "$label" "$before_bytes" "$before_forward"
-  case "$evidence" in
-    dns) assert_fixture_dns_traffic iOS "$label" "$probe_host" "$before_evidence" ;;
-    doh-cloudflare) assert_doh_traffic iOS "$label" cloudflare "$before_evidence" ;;
-    doh-quad9) assert_doh_traffic iOS "$label" quad9 "$before_evidence" ;;
-  esac
+  after_dns_evidence="$(
+    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+  )"
+  mobile_wg_fixture_assert_dns_case_evidence \
+    iOS "$label" "$evidence" "$before_dns_evidence" "$after_dns_evidence"
 }
 
 DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)
 if [[ -n "${NVPN_MOBILE_WG_EXIT_DNS_CASES:-}" ]]; then
   IFS=',' read -r -a DNS_CASES <<<"$NVPN_MOBILE_WG_EXIT_DNS_CASES"
   for label in "${DNS_CASES[@]}"; do
-    dns_case_fields "$label" >/dev/null \
+    mobile_wg_dns_case_fields \
+      "$label" "$DNS_NAME" "$TUNNEL_SERVER_IP" "$THROUGH_DNS_IP" >/dev/null \
       || {
         echo "NVPN_MOBILE_WG_EXIT_DNS_CASES contains an unsupported case" >&2
         exit 2

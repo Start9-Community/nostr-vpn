@@ -13,6 +13,8 @@ source "$ROOT/scripts/mobile_env.sh"
 source "$ROOT/scripts/lib-macos-vm-imported-release.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
 
 load_release_env "$ROOT"
 load_mobile_env "$ROOT"
@@ -21,8 +23,11 @@ SSH_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 HOST_PORT="${NVPN_MACOS_WG_FIXTURE_PORT:-51889}"
+FIPS_PEER_PORT="${NVPN_MACOS_FIPS_PEER_PORT:-51989}"
+FIPS_CLIENT_LISTEN_PORT="${NVPN_MACOS_FIPS_CLIENT_LISTEN_PORT:-51990}"
 TUNNEL_SERVER_IP="${NVPN_MACOS_WG_SERVER_IP:-10.99.79.1}"
 TUNNEL_CLIENT_IP="${NVPN_MACOS_WG_CLIENT_IP:-10.99.79.2}"
+THROUGH_DNS_IP="${NVPN_MACOS_WG_THROUGH_DNS_IP:-10.99.79.53}"
 DNS_NAME="${NVPN_MACOS_WG_DNS_NAME:-macos-wireguard-exit.nvpn-e2e.test}"
 HTTP_PROBE_PORT="${NVPN_MACOS_WG_HTTP_PROBE_PORT:-8080}"
 HTTP_PROBE_TOKEN="${NVPN_MACOS_WG_HTTP_TOKEN:-nvpn-macos-$PPID-$$-$RANDOM}"
@@ -33,6 +38,7 @@ SECONDARY_SERVICE="${NVPN_MACOS_SECONDARY_NETWORK_SERVICE:-Roaming Underlay}"
 PRIMARY_IFACE="${NVPN_MACOS_PRIMARY_INTERFACE:-en0}"
 SECONDARY_IFACE="${NVPN_MACOS_SECONDARY_INTERFACE:-en2}"
 RECOVERY_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
+FIPS_NETWORK_ID="${NVPN_MACOS_FIPS_NETWORK_ID:-macos-release-roaming-$PPID-$$}"
 IMAGE="${NVPN_MACOS_WG_FIXTURE_IMAGE:-nostr-vpn-macos-wireguard-exit-e2e}"
 CONTAINER="${NVPN_MACOS_WG_FIXTURE_CONTAINER:-nostr-vpn-macos-wireguard-exit-e2e-$$}"
 FIXTURE_HOST="${NVPN_MOBILE_WG_EXIT_HOST_IP:-}"
@@ -47,10 +53,26 @@ SECONDARY_CONTROL_PATH="/tmp/nvpn-macos-network-secondary-$PPID-$$"
 MOBILE_WG_FIXTURE_REMOTE_MODE=""
 MOBILE_WG_FIXTURE_ENDPOINT_FAMILY=""
 WIREGUARD_ENDPOINT_AUTHORITY=""
+FIPS_PEER_ENDPOINT_AUTHORITY=""
+FIPS_PEER_REMOTE_DIR=""
+FIPS_PEER_TUN_IFACE="nmf${FIPS_PEER_PORT}"
+FIPS_PEER_NPUB=""
+FIPS_PEER_TUNNEL_IP=""
+MACOS_NPUB=""
+MACOS_TUNNEL_IP=""
+FIPS_PEER_BINARY=""
+FIPS_PEER_BINARY_SHA256=""
+FIPS_PEER_IMPORTED=0
+APP_GIT_SHA=""
+APP_GIT_TREE=""
 
 fail() {
   echo "macOS VM Release network gate failed: $*" >&2
   return 1
+}
+
+valid_npub() {
+  [[ "$1" =~ ^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$ ]]
 }
 
 [[ -n "$SSH_HOST" ]] \
@@ -61,6 +83,33 @@ fail() {
   || { echo "macOS Release network gate requires the native remote fixture" >&2; exit 2; }
 [[ -n "$FIXTURE_HOST" ]] \
   || { echo "macOS Release network gate requires its env-only fixture address" >&2; exit 2; }
+for port in "$HOST_PORT" "$FIPS_PEER_PORT" "$FIPS_CLIENT_LISTEN_PORT"; do
+  [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && ((port <= 65535)) \
+    || { echo "macOS Release network gate received an invalid UDP port" >&2; exit 2; }
+done
+[[ "$HOST_PORT" != "$FIPS_PEER_PORT" \
+  && "$HOST_PORT" != "$FIPS_CLIENT_LISTEN_PORT" \
+  && "$FIPS_PEER_PORT" != "$FIPS_CLIENT_LISTEN_PORT" ]] \
+  || { echo "WireGuard, remote FIPS, and local FIPS ports must be distinct" >&2; exit 2; }
+[[ "$FIPS_PEER_TUN_IFACE" =~ ^[A-Za-z][A-Za-z0-9]{1,14}$ ]] \
+  || { echo "derived FIPS peer tunnel interface name is invalid" >&2; exit 2; }
+
+python3 - "$TUNNEL_SERVER_IP" "$TUNNEL_CLIENT_IP" "$THROUGH_DNS_IP" <<'PY'
+import ipaddress
+import sys
+
+server, client, through = map(ipaddress.ip_address, sys.argv[1:])
+network = ipaddress.ip_network(f"{server}/24", strict=False)
+if (
+    any(address.version != 4 for address in (server, client, through))
+    or through not in network
+    or len({server, client, through}) != 3
+):
+    raise SystemExit(
+        "WireGuard server, client, and through-exit DNS addresses must be "
+        "distinct IPv4 addresses in one /24"
+    )
+PY
 
 ssh_args() {
   local lane="$1"
@@ -117,6 +166,12 @@ remote_phase() {
     "NVPN_MACOS_PRIMARY_INTERFACE=$PRIMARY_IFACE"
     "NVPN_MACOS_SECONDARY_INTERFACE=$SECONDARY_IFACE"
     "NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS=$RECOVERY_DEADLINE_MS"
+    "NVPN_MACOS_FIPS_NETWORK_ID=$FIPS_NETWORK_ID"
+    "NVPN_MACOS_FIPS_PEER_NPUB=$FIPS_PEER_NPUB"
+    "NVPN_MACOS_FIPS_PEER_ENDPOINT=$FIPS_PEER_ENDPOINT_AUTHORITY"
+    "NVPN_MACOS_FIPS_PEER_TUNNEL_IP=$FIPS_PEER_TUNNEL_IP"
+    "NVPN_MACOS_FIPS_CLIENT_LISTEN_PORT=$FIPS_CLIENT_LISTEN_PORT"
+    "NVPN_MACOS_FIPS_EXPECTED_REV=${RELEASE_JOIN_FIPS_SHA:0:10}"
     "NVPN_MACOS_DNS_LABEL=${DNS_CASE_LABEL:-direct-baseline}"
     "NVPN_MACOS_DNS_MODE=${DNS_CASE_MODE:-automatic}"
     "NVPN_MACOS_DNS_PROVIDER=${DNS_CASE_PROVIDER:-cloudflare}"
@@ -193,6 +248,9 @@ cleanup() {
       cleanup_failed=1
     fi
   fi
+  if ! cleanup_fips_peer; then
+    cleanup_failed=1
+  fi
   if mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"; then
     :
   else
@@ -222,41 +280,130 @@ assert_increased() {
     || fail "$label did not increase ($before->$after)"
 }
 
-dns_case_fields() {
-  case "$1" in
-    automatic-profile)
-      printf 'automatic|cloudflare||||%s|%s|dns\n' \
-        "$DNS_NAME" "$TUNNEL_SERVER_IP"
-      ;;
-    cloudflare-doh)
-      printf 'encrypted|cloudflare||||cloudflare.com||doh-cloudflare\n'
-      ;;
-    quad9-doh)
-      printf 'encrypted|quad9||||quad9.net||doh-quad9\n'
-      ;;
-    custom-doh)
-      printf 'encrypted|custom|https://cloudflare-dns.com/dns-query|1.1.1.1||iana.org||doh-cloudflare\n'
-      ;;
-    through-exit)
-      printf 'through_exit|cloudflare|||%s|through-exit.%s|%s|dns\n' \
-        "$TUNNEL_SERVER_IP" "$DNS_NAME" "$TUNNEL_SERVER_IP"
-      ;;
-    *) fail "unknown DNS case: $1" ;;
-  esac
+parse_key_value() {
+  local key="$1"
+  awk -F= -v key="$key" \
+    '$1 == key { value = substr($0, length(key) + 2) } END { print value }'
 }
 
-fixture_evidence_count() {
-  local evidence="$1" probe_host="$2"
-  case "$evidence" in
-    dns) mobile_wg_fixture_dns_count "$CONTAINER" "$probe_host" ;;
-    doh-cloudflare) mobile_wg_fixture_doh_count "$CONTAINER" cloudflare ;;
-    doh-quad9) mobile_wg_fixture_doh_count "$CONTAINER" quad9 ;;
-    *) fail "unknown fixture evidence: $evidence" ;;
-  esac
+prepare_host_fips_peer_binary() {
+  FIPS_PEER_BINARY="$("$ROOT/scripts/prepare-macos-release-fips-peer.sh")"
+  [[ "$FIPS_PEER_BINARY" == /* && -x "$FIPS_PEER_BINARY" ]] \
+    || fail "host FIPS peer cache returned no executable"
+  FIPS_PEER_BINARY_SHA256="$(
+    shasum -a 256 "$FIPS_PEER_BINARY" | awk '{ print $1 }'
+  )"
+  [[ "$FIPS_PEER_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "host FIPS peer cache returned an invalid SHA-256"
+  mkdir -p "$ARTIFACT_DIR"
+  cp "$(dirname "$FIPS_PEER_BINARY")/receipt.json" \
+    "$ARTIFACT_DIR/fips-peer-host-receipt.json"
 }
+
+fips_peer_remote() {
+  local action="$1"
+  mobile_wg_remote_exec \
+    sudo -n env \
+    "PATH=$MOBILE_WG_FIXTURE_REMOTE_PATH" \
+    "NVPN_MACOS_FIPS_PEER_STATE_DIR=$FIPS_PEER_REMOTE_DIR/state" \
+    "NVPN_MACOS_FIPS_PEER_BINARY=$FIPS_PEER_REMOTE_DIR/nvpn-peer" \
+    "NVPN_MACOS_FIPS_PEER_TUN_IFACE=$FIPS_PEER_TUN_IFACE" \
+    "NVPN_MACOS_FIPS_PEER_LISTEN_PORT=$FIPS_PEER_PORT" \
+    "NVPN_MACOS_FIPS_NETWORK_ID=$FIPS_NETWORK_ID" \
+    "NVPN_MACOS_FIPS_PEER_PUBLIC_ENDPOINT=$FIPS_PEER_ENDPOINT_AUTHORITY" \
+    "NVPN_MACOS_FIPS_TARGET_NPUB=$MACOS_NPUB" \
+    "NVPN_MACOS_FIPS_TARGET_TUNNEL_IP=$MACOS_TUNNEL_IP" \
+    "NVPN_MACOS_FIPS_PEER_BINARY_SHA256=$FIPS_PEER_BINARY_SHA256" \
+    "NVPN_MACOS_FIPS_EXPECTED_REV=${RELEASE_JOIN_FIPS_SHA:0:10}" \
+    "NVPN_MACOS_FIPS_EXPECTED_APP_SHA=$APP_GIT_SHA" \
+    "$FIPS_PEER_REMOTE_DIR/runner.sh" "$action"
+}
+
+import_host_fips_peer_binary() {
+  local fixture_ssh="${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:?}"
+  [[ -n "$MOBILE_WG_FIXTURE_REMOTE_DIR" ]] \
+    || fail "remote WireGuard fixture SSH session is not initialized"
+  FIPS_PEER_REMOTE_DIR="$(
+    mobile_wg_remote_exec mktemp -d /tmp/nvpn-macos-fips-peer.XXXXXX
+  )"
+  case "$FIPS_PEER_REMOTE_DIR" in
+    /tmp/nvpn-macos-fips-peer.*) ;;
+    *) fail "Vader returned an unsafe FIPS peer temporary directory" ;;
+  esac
+  mobile_wg_remote_exec \
+    mkdir -p "$FIPS_PEER_REMOTE_DIR/state"
+  mobile_wg_remote_exec \
+    chmod 700 "$FIPS_PEER_REMOTE_DIR" "$FIPS_PEER_REMOTE_DIR/state"
+  scp -q \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o "ControlPath=$MOBILE_WG_FIXTURE_SSH_CONTROL_PATH" \
+    "$FIPS_PEER_BINARY" \
+    "$fixture_ssh:$FIPS_PEER_REMOTE_DIR/nvpn-peer"
+  scp -q \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o "ControlPath=$MOBILE_WG_FIXTURE_SSH_CONTROL_PATH" \
+    "$ROOT/scripts/macos-release-fips-peer-remote.sh" \
+    "$fixture_ssh:$FIPS_PEER_REMOTE_DIR/runner.sh"
+  scp -q \
+    -o BatchMode=yes \
+    -o ConnectTimeout=10 \
+    -o "ControlPath=$MOBILE_WG_FIXTURE_SSH_CONTROL_PATH" \
+    "$ROOT/scripts/lib-desktop-linux-listener-audit.sh" \
+    "$fixture_ssh:$FIPS_PEER_REMOTE_DIR/lib-desktop-linux-listener-audit.sh"
+  mobile_wg_remote_exec \
+    chmod 0500 \
+    "$FIPS_PEER_REMOTE_DIR/nvpn-peer" \
+    "$FIPS_PEER_REMOTE_DIR/runner.sh"
+  mobile_wg_remote_exec \
+    chmod 0400 "$FIPS_PEER_REMOTE_DIR/lib-desktop-linux-listener-audit.sh"
+  [[ "$(
+    mobile_wg_remote_exec \
+      sha256sum "$FIPS_PEER_REMOTE_DIR/nvpn-peer" \
+      | awk '{ print $1 }'
+  )" == "$FIPS_PEER_BINARY_SHA256" ]] \
+    || fail "Vader peer binary differs from the host-built immutable artifact"
+  FIPS_PEER_IMPORTED=1
+}
+
+cleanup_fips_peer() {
+  [[ -n "$FIPS_PEER_REMOTE_DIR" ]] || return 0
+  local failed=0
+  if [[ "$FIPS_PEER_IMPORTED" -eq 1 ]]; then
+    fips_peer_remote cleanup >/dev/null 2>&1 || failed=1
+    mkdir -p "$ARTIFACT_DIR"
+    fips_peer_remote clean-audit \
+      >"$ARTIFACT_DIR/fips-peer-cleanup-audit.txt" 2>&1 || failed=1
+  fi
+  if [[ "$failed" -ne 0 ]]; then
+    echo "remote FIPS peer did not prove complete owned cleanup; preserving its state" >&2
+    return 1
+  fi
+  mobile_wg_remote_exec \
+    sudo -n find "$FIPS_PEER_REMOTE_DIR" -xdev -depth -mindepth 1 -delete \
+    >/dev/null 2>&1 || failed=1
+  mobile_wg_remote_exec sudo -n rmdir "$FIPS_PEER_REMOTE_DIR" \
+    >/dev/null 2>&1 || failed=1
+  mobile_wg_remote_exec test ! -e "$FIPS_PEER_REMOTE_DIR" \
+    >/dev/null 2>&1 || failed=1
+  if [[ "$failed" -eq 0 ]]; then
+    FIPS_PEER_IMPORTED=0
+    FIPS_PEER_REMOTE_DIR=""
+  else
+    echo "remote FIPS peer temporary directory survived cleanup" >&2
+  fi
+  return "$failed"
+}
+
+release_join_require_clean_fips
+APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 macos_vm_prepare_or_verify_imported_release "$ROOT" "$SSH_HOST"
 PACKAGE="$(macos_vm_imported_release_package "$GUEST_REPO")"
+prepare_host_fips_peer_binary
 
 ENDPOINT_FIELDS="$(
   mobile_wg_endpoint_fields "$FIXTURE_HOST" "$HOST_PORT"
@@ -267,6 +414,16 @@ IFS=$'\t' read -r \
   WIREGUARD_ENDPOINT_AUTHORITY <<<"$ENDPOINT_FIELDS"
 [[ "$MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" == "ipv6" ]] \
   || fail "macOS underlay gate requires the real IPv6 Vader endpoint"
+FIPS_ENDPOINT_FIELDS="$(
+  mobile_wg_endpoint_fields "$FIXTURE_HOST" "$FIPS_PEER_PORT"
+)" || fail "remote FIPS peer endpoint is malformed"
+IFS=$'\t' read -r \
+  fips_endpoint_family \
+  fips_endpoint_host \
+  FIPS_PEER_ENDPOINT_AUTHORITY <<<"$FIPS_ENDPOINT_FIELDS"
+[[ "$fips_endpoint_family" == "ipv6" \
+  && "$fips_endpoint_host" == "$FIXTURE_HOST" ]] \
+  || fail "remote FIPS peer must use the same real IPv6 Vader underlay"
 export NVPN_MOBILE_WG_EXIT_HOST_IP="$FIXTURE_HOST"
 export NVPN_MOBILE_WG_EXIT_REMOTE_MODE=native
 
@@ -279,6 +436,21 @@ wg genkey >"$FIXTURE_DIR/client.key"
 wg pubkey <"$FIXTURE_DIR/client.key" >"$FIXTURE_DIR/client.pub"
 
 mobile_wg_fixture_initialize "$ROOT" "$FIXTURE_DIR"
+import_host_fips_peer_binary
+mkdir -p "$ARTIFACT_DIR"
+fips_peer_initialize_output="$(fips_peer_remote initialize)"
+printf '%s\n' "$fips_peer_initialize_output" \
+  >"$ARTIFACT_DIR/fips-peer-import-provenance.txt"
+FIPS_PEER_NPUB="$(
+  parse_key_value npub <<<"$fips_peer_initialize_output"
+)"
+FIPS_PEER_TUNNEL_IP="$(
+  parse_key_value tunnel_ip <<<"$fips_peer_initialize_output"
+)"
+valid_npub "$FIPS_PEER_NPUB" \
+  || fail "imported FIPS peer returned an invalid identity"
+[[ -n "$FIPS_PEER_TUNNEL_IP" ]] \
+  || fail "imported FIPS peer returned no private tunnel address"
 mobile_wg_fixture_assert_available "$CONTAINER" "$HOST_PORT"
 EXPECTED_EXIT_SOURCE_IP="$(
   mobile_wg_remote_exec curl -4fsS --max-time 8 "$SOURCE_IP_URL"
@@ -335,9 +507,40 @@ SECONDARY_IP="$(
 remote_shell secondary 'true'
 
 mkdir -p "$ARTIFACT_DIR"
+macos_identity_output="$(remote_phase primary initialize)"
+printf '%s\n' "$macos_identity_output" \
+  >"$ARTIFACT_DIR/macos-fips-identity.txt"
+MACOS_NPUB="$(parse_key_value npub <<<"$macos_identity_output")"
+MACOS_TUNNEL_IP="$(parse_key_value tunnel_ip <<<"$macos_identity_output")"
+valid_npub "$MACOS_NPUB" \
+  || fail "macos-utm returned an invalid imported-Release identity"
+[[ -n "$MACOS_TUNNEL_IP" ]] \
+  || fail "macos-utm returned no private tunnel address"
+fips_peer_remote start
 DNS_CASE_LABEL=direct-baseline
 DNS_CASE_PROBE_HOST=example.com
 remote_phase primary prepare
+fips_peer_remote wait-ready >"$ARTIFACT_DIR/fips-peer-ready.json"
+fips_peer_remote listener-audit >"$ARTIFACT_DIR/fips-peer-listener.txt"
+python3 - "$ARTIFACT_DIR/fips-peer-ready.json" "$MACOS_NPUB" <<'PY'
+import json
+import sys
+
+path, expected = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    status = json.load(handle)
+state = status.get("daemon", {}).get("state", {})
+peers = state.get("fips_endpoint_peers", [])
+if not (
+    status.get("status_source") == "daemon"
+    and status.get("daemon", {}).get("running") is True
+    and state.get("mesh_ready") is True
+    and state.get("connected_peer_count") == 1
+    and len(peers) == 1
+    and peers[0].get("npub") == expected
+):
+    raise SystemExit("remote peer readiness did not prove one exact authenticated peer")
+PY
 
 for DNS_CASE_LABEL in \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
@@ -350,24 +553,33 @@ do
     DNS_CASE_THROUGH_SERVERS \
     DNS_CASE_PROBE_HOST \
     DNS_CASE_EXPECTED_IP \
-    evidence <<<"$(dns_case_fields "$DNS_CASE_LABEL")"
+    evidence <<<"$(
+      mobile_wg_dns_case_fields \
+        "$DNS_CASE_LABEL" "$DNS_NAME" "$TUNNEL_SERVER_IP" "$THROUGH_DNS_IP"
+    )"
   before_transfer="$(
     mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
   )"
   before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
-  before_evidence="$(fixture_evidence_count "$evidence" "$DNS_CASE_PROBE_HOST")"
+  before_evidence="$(
+    mobile_wg_fixture_dns_evidence_snapshot \
+      "$CONTAINER" "$DNS_CASE_PROBE_HOST"
+  )"
   remote_phase primary dns-case
   after_transfer="$(
     mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
   )"
   after_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
-  after_evidence="$(fixture_evidence_count "$evidence" "$DNS_CASE_PROBE_HOST")"
+  after_evidence="$(
+    mobile_wg_fixture_dns_evidence_snapshot \
+      "$CONTAINER" "$DNS_CASE_PROBE_HOST"
+  )"
   assert_increased "$DNS_CASE_LABEL WireGuard bytes" \
     "$before_transfer" "$after_transfer"
   assert_increased "$DNS_CASE_LABEL forwarded packets" \
     "$before_forward" "$after_forward"
-  assert_increased "$DNS_CASE_LABEL selected resolver traffic" \
-    "$before_evidence" "$after_evidence"
+  mobile_wg_fixture_assert_dns_case_evidence \
+    macOS "$DNS_CASE_LABEL" "$evidence" "$before_evidence" "$after_evidence"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$DNS_CASE_LABEL" \
     "$before_transfer" "$after_transfer" \
@@ -406,6 +618,9 @@ assert_increased "macOS underlay WireGuard bytes" \
   "$before_transfer" "$after_transfer"
 assert_increased "macOS underlay forwarded packets" \
   "$before_forward" "$after_forward"
+fips_peer_remote wait-ready >"$ARTIFACT_DIR/fips-peer-after-underlay.json"
+fips_peer_remote listener-audit \
+  >"$ARTIFACT_DIR/fips-peer-listener-after-underlay.txt"
 
 DNS_CASE_LABEL=direct-restore
 DNS_CASE_MODE=automatic
@@ -419,7 +634,8 @@ remote_phase secondary direct
 copy_guest_results
 remote_phase secondary cleanup
 remove_remote_dir
+cleanup_fips_peer
 mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"
 
 echo "MACOS_VM_WIREGUARD_EXIT_E2E_OK"
-echo "Real Direct -> WireGuard -> two-underlay handoff -> Direct and all five DNS modes passed"
+echo "Real Direct -> authenticated FIPS + WireGuard -> two-underlay handoff -> Direct and all five DNS modes passed"

@@ -513,11 +513,23 @@ grep -Fq 'NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$"' "$
 grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.77.1' <<<"$mobile_exit_gate_body" \
   && grep -Fq 'NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.77.2' \
     <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.77.53' \
+    <<<"$mobile_exit_gate_body" \
   || fail "parallel Android exit lane has no isolated tunnel address pair"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1' <<<"$mobile_exit_gate_body" \
   && grep -Fq 'NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2' \
     <<<"$mobile_exit_gate_body" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.78.53' \
+    <<<"$mobile_exit_gate_body" \
   || fail "parallel iOS exit lane shares the Android tunnel address pair"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.79.1' "$release_gate" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.79.2' "$release_gate" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.79.53' "$release_gate" \
+  || fail "Android underlay lane has an invalid tunnel/DNS address tuple"
+grep -Fq 'NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.80.1' "$release_gate" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.80.2' "$release_gate" \
+  && grep -Fq 'NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.80.53' "$release_gate" \
+  || fail "iOS underlay lane has an invalid tunnel/DNS address tuple"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base"' <<<"$mobile_exit_gate_body" \
   && grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))"' \
     <<<"$mobile_exit_gate_body" \

@@ -764,6 +764,36 @@ android_exit_dns_result_path() {
   printf '%s/%s\n' "$RUNTIME_STATE_RESULT_DIR" "$EXIT_DNS_RESULT_NAME"
 }
 
+android_ui_vpn_toggle_checked() {
+  local remote="/sdcard/nvpn-ui-vpn-toggle.xml"
+  local xml status=0
+  xml="$(mktemp)"
+  if ! "$ADB" -s "$serial" shell uiautomator dump "$remote" >/dev/null 2>&1 \
+    || ! "$ADB" -s "$serial" pull "$remote" "$xml" >/dev/null 2>&1
+  then
+    rm -f "$xml"
+    return 1
+  fi
+  python3 - "$xml" <<'PY' || status="$?"
+import html
+import re
+import sys
+
+raw = open(sys.argv[1], encoding="utf-8").read()
+descriptions = {
+    html.unescape(value)
+    for value in re.findall(r'content-desc="([^"]*)"', raw)
+}
+turn_off = "Turn VPN off" in descriptions
+turn_on = "Turn VPN on" in descriptions
+if turn_off == turn_on:
+    raise SystemExit(1)
+print("true" if turn_off else "false")
+PY
+  rm -f "$xml"
+  return "$status"
+}
+
 android_ui_query() {
   local selector_type="$1"
   local selector="$2"
@@ -2061,7 +2091,14 @@ PY
 cleanup_android_vpn_after_pass() {
   truthy "$cleanup_after_vpn_cycle" || return 0
   if truthy "$RELEASE_BLACKBOX_GATE"; then
-    if android_release_disconnect_ui; then
+    local expected_count=""
+    if [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" =~ ^[0-9]+$ ]]; then
+      expected_count="$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT"
+    fi
+    if android_release_disconnect_ui \
+      && android_release_wait_stable_quiescence \
+        post-pass-cleanup "$expected_count"
+    then
       vpn_cleanup_armed=0
       return 0
     fi
@@ -2079,7 +2116,7 @@ cleanup_android_vpn_after_pass() {
 }
 
 cleanup_android_vpn_on_exit() {
-  local status="$?"
+  local status="$?" cleanup_needed=0 cleanup_verified=0 release_toggle=""
   trap - EXIT
   if ! android_underlay_restore_home; then
     if [[ "$status" -eq 0 ]]; then
@@ -2100,20 +2137,47 @@ cleanup_android_vpn_on_exit() {
     find "$ANDROID_CAPTURED_PROBE_BUILD_DIR" -type f -delete
     rmdir "$ANDROID_CAPTURED_PROBE_BUILD_DIR" 2>/dev/null || true
   fi
-  if [[ -n "${ADB:-}" && -n "$serial" ]] \
-    && { [[ "$vpn_cleanup_armed" -eq 1 ]] \
-      || { truthy "$RELEASE_BLACKBOX_GATE" && vpn_state_present; }; }
-  then
+  if [[ -n "${ADB:-}" && -n "$serial" ]]; then
+    if [[ "$vpn_cleanup_armed" -eq 1 ]]; then
+      cleanup_needed=1
+    elif truthy "$RELEASE_BLACKBOX_GATE"; then
+      if vpn_state_present; then
+        cleanup_needed=1
+      else
+        release_toggle="$(
+          android_release_vpn_toggle_checked 2>/dev/null || true
+        )"
+        [[ "$release_toggle" == "true" ]] && cleanup_needed=1
+      fi
+    fi
+  fi
+  if [[ "$cleanup_needed" -eq 1 ]]; then
+    # A successful gate must have completed and disarmed its normal cleanup.
+    # Needing the EXIT path is itself a release-gate failure even when the
+    # device can be restored safely here.
+    if [[ "$status" -eq 0 ]]; then
+      status=1
+    fi
     if truthy "$RELEASE_BLACKBOX_GATE"; then
-      android_release_disconnect_ui >/dev/null 2>&1 || true
+      if android_release_emergency_cleanup; then
+        cleanup_verified=1
+      fi
     else
       start_main_activity --es "$DEBUG_ACTION_EXTRA" disconnect >/dev/null 2>&1 || true
+      if ! wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive; then
+        "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME" \
+          >/dev/null 2>&1 || true
+      fi
+      if wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive; then
+        cleanup_verified=1
+      fi
     fi
-    if ! wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive; then
-      "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME" >/dev/null 2>&1 || true
-    fi
-    if wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive; then
-      echo "Android VPN emergency cleanup verified: no active test service/network"
+    if [[ "$cleanup_verified" -eq 1 ]]; then
+      if truthy "$RELEASE_BLACKBOX_GATE"; then
+        echo "Android VPN emergency cleanup verified: OS VPN inactive, shipped toggle Off, native start count stable"
+      else
+        echo "Android VPN emergency cleanup verified: no active test service/network"
+      fi
     else
       echo "Android VPN emergency cleanup failed; disable the VPN in Android Settings before replacing the app." >&2
       if [[ "$status" -eq 0 ]]; then

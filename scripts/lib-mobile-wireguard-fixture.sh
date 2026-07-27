@@ -63,6 +63,33 @@ mobile_wg_endpoint_family() {
   printf '%s\n' "${fields%%$'\t'*}"
 }
 
+mobile_wg_dns_case_fields() {
+  local label="$1" dns_name="$2" profile_dns_ip="$3" through_dns_ip="$4"
+  case "$label" in
+    automatic-profile)
+      printf 'automatic|cloudflare||||%s|%s|dns-profile\n' \
+        "$dns_name" "$profile_dns_ip"
+      ;;
+    cloudflare-doh)
+      printf 'encrypted|cloudflare||||cloudflare.com||doh-cloudflare\n'
+      ;;
+    quad9-doh)
+      printf 'encrypted|quad9||||quad9.net||doh-quad9\n'
+      ;;
+    custom-doh)
+      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||iana.org||doh-google\n'
+      ;;
+    through-exit)
+      printf 'through_exit|cloudflare|||%s|through-exit.%s|%s|dns-through\n' \
+        "$through_dns_ip" "$dns_name" "$profile_dns_ip"
+      ;;
+    *)
+      echo "unknown WireGuard exit DNS case: $label" >&2
+      return 2
+      ;;
+  esac
+}
+
 mobile_wg_fixture_validate_ssh_host() {
   local host="$1"
   if [[ -z "$host" || "$host" == -* || "$host" =~ [[:space:]] ]]; then
@@ -360,6 +387,7 @@ mobile_wg_remote_native() {
     "NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE=$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/client.pub" \
     "NVPN_MOBILE_WG_TUNNEL_CIDR=$TUNNEL_SERVER_IP/24" \
     "NVPN_MOBILE_WG_CLIENT_IP=$TUNNEL_CLIENT_IP" \
+    "NVPN_MOBILE_WG_THROUGH_DNS_IP=$THROUGH_DNS_IP" \
     "NVPN_MOBILE_WG_LISTEN_PORT=$HOST_PORT" \
     "NVPN_MOBILE_WG_DNS_NAME=$DNS_NAME" \
     "NVPN_MOBILE_WG_HTTP_PROBE_PORT=$HTTP_PROBE_PORT" \
@@ -384,6 +412,7 @@ mobile_wg_fixture_run() {
     -v "$volume_dir:/fixture" \
     -e "NVPN_MOBILE_WG_TUNNEL_CIDR=$TUNNEL_SERVER_IP/24" \
     -e "NVPN_MOBILE_WG_CLIENT_IP=$TUNNEL_CLIENT_IP" \
+    -e "NVPN_MOBILE_WG_THROUGH_DNS_IP=$THROUGH_DNS_IP" \
     -e "NVPN_MOBILE_WG_DNS_NAME=$DNS_NAME" \
     -e "NVPN_MOBILE_WG_HTTP_PROBE_PORT=$HTTP_PROBE_PORT" \
     -e "NVPN_MOBILE_WG_HTTP_TOKEN=$HTTP_PROBE_TOKEN" \
@@ -462,10 +491,153 @@ mobile_wg_fixture_doh_count() {
   case "$provider" in
     cloudflare) chain="nvpn-wg-doh-cf" ;;
     quad9) chain="nvpn-wg-doh-q9" ;;
+    google) chain="nvpn-wg-doh-google" ;;
     *) echo "unknown DoH counter provider: $provider" >&2; return 2 ;;
   esac
   mobile_wg_fixture_docker exec "$container" iptables -L "$chain" -v -n -x \
     | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
+}
+
+mobile_wg_fixture_through_dns_count() {
+  local container="$1"
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    mobile_wg_remote_native through-dns-count
+    return
+  fi
+  mobile_wg_fixture_docker exec "$container" \
+    iptables -L nvpn-wg-dns-through -v -n -x \
+    | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
+}
+
+mobile_wg_fixture_profile_dns_count() {
+  local container="$1"
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    mobile_wg_remote_native profile-dns-count
+    return
+  fi
+  mobile_wg_fixture_docker exec "$container" \
+    iptables -L nvpn-wg-dns-profile -v -n -x \
+    | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
+}
+
+mobile_wg_fixture_forward_dns_count() {
+  local container="$1"
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    mobile_wg_remote_native forward-dns-count
+    return
+  fi
+  mobile_wg_fixture_docker exec "$container" \
+    iptables -L nvpn-wg-dns-forward -v -n -x \
+    | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
+}
+
+mobile_wg_fixture_dns_evidence_snapshot() {
+  local container="$1" probe_host="$2"
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    mobile_wg_remote_native dns-evidence-snapshot "$probe_host"
+    return
+  fi
+  mobile_wg_fixture_docker exec -i "$container" \
+    sh -s -- "$probe_host" <<'SH'
+set -eu
+probe_host="$1"
+chain_packets() {
+  iptables -L "$1" -v -n -x \
+    | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
+}
+query_count="$(grep -Fci "$probe_host" /fixture/dns.log 2>/dev/null || true)"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "$query_count" \
+  "$(chain_packets nvpn-wg-dns-profile)" \
+  "$(chain_packets nvpn-wg-doh-cf)" \
+  "$(chain_packets nvpn-wg-doh-q9)" \
+  "$(chain_packets nvpn-wg-doh-google)" \
+  "$(chain_packets nvpn-wg-dns-through)" \
+  "$(chain_packets nvpn-wg-dns-forward)"
+SH
+}
+
+mobile_wg_fixture_assert_dns_case_evidence() {
+  local platform="$1" label="$2" evidence="$3" before="$4" after="$5"
+  local b_query b_profile b_cf b_q9 b_google b_through b_forward_dns
+  local a_query a_profile a_cf a_q9 a_google a_through a_forward_dns
+  IFS=$'\t' read -r \
+    b_query b_profile b_cf b_q9 b_google b_through b_forward_dns <<<"$before"
+  IFS=$'\t' read -r \
+    a_query a_profile a_cf a_q9 a_google a_through a_forward_dns <<<"$after"
+  local value
+  for value in \
+    "$b_query" "$b_profile" "$b_cf" "$b_q9" "$b_google" "$b_through" \
+    "$b_forward_dns" \
+    "$a_query" "$a_profile" "$a_cf" "$a_q9" "$a_google" "$a_through" \
+    "$a_forward_dns"
+  do
+    [[ "$value" =~ ^[0-9]+$ ]] || {
+      echo "$platform $label returned a non-numeric DNS evidence counter" >&2
+      return 1
+    }
+  done
+
+  local -a increased=() unchanged=()
+  case "$evidence" in
+    dns-profile)
+      increased=(query profile)
+      unchanged=(cf q9 google through forward_dns)
+      ;;
+    doh-cloudflare)
+      increased=(cf)
+      unchanged=(query profile q9 google through forward_dns)
+      ;;
+    doh-quad9)
+      increased=(q9)
+      unchanged=(query profile cf google through forward_dns)
+      ;;
+    doh-google)
+      increased=(google)
+      unchanged=(query profile cf q9 through forward_dns)
+      ;;
+    dns-through)
+      increased=(query through)
+      unchanged=(profile cf q9 google forward_dns)
+      ;;
+    *)
+      echo "$platform $label has unknown DNS evidence kind: $evidence" >&2
+      return 2
+      ;;
+  esac
+
+  local counter before_value after_value
+  for counter in "${increased[@]}"; do
+    case "$counter" in
+      query) before_value="$b_query"; after_value="$a_query" ;;
+      profile) before_value="$b_profile"; after_value="$a_profile" ;;
+      cf) before_value="$b_cf"; after_value="$a_cf" ;;
+      q9) before_value="$b_q9"; after_value="$a_q9" ;;
+      google) before_value="$b_google"; after_value="$a_google" ;;
+      through) before_value="$b_through"; after_value="$a_through" ;;
+      forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
+    esac
+    if (( after_value <= before_value )); then
+      echo "$platform $label did not use required DNS path $counter ($before_value->$after_value)" >&2
+      return 1
+    fi
+  done
+  for counter in "${unchanged[@]}"; do
+    case "$counter" in
+      query) before_value="$b_query"; after_value="$a_query" ;;
+      profile) before_value="$b_profile"; after_value="$a_profile" ;;
+      cf) before_value="$b_cf"; after_value="$a_cf" ;;
+      q9) before_value="$b_q9"; after_value="$a_q9" ;;
+      google) before_value="$b_google"; after_value="$a_google" ;;
+      through) before_value="$b_through"; after_value="$a_through" ;;
+      forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
+    esac
+    if (( after_value != before_value )); then
+      echo "$platform $label leaked or fell back through forbidden DNS path $counter ($before_value->$after_value)" >&2
+      return 1
+    fi
+  done
+  echo "$platform $label DNS path passed: $before -> $after"
 }
 
 mobile_wg_fixture_cleanup() {

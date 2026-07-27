@@ -44,6 +44,15 @@ server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
 fixture_lib="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
 
+for doh_fixture in "$server" "$remote_native"; do
+  grep -Fq 'tcp flags syn' "$doh_fixture" \
+    || grep -Fq -- '--syn' "$doh_fixture" \
+    || {
+      echo "$(basename "$doh_fixture") counts pooled DoH teardown traffic as a new resolver use" >&2
+      exit 1
+    }
+done
+
 grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
   || { echo "standalone mobile gate does not initialize exact build metadata" >&2; exit 1; }
 grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
@@ -63,6 +72,90 @@ grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
 source "$fixture_lib"
 declare -F mobile_wg_endpoint_fields >/dev/null \
   || { echo "mobile fixture lacks strict endpoint rendering" >&2; exit 1; }
+declare -F mobile_wg_dns_case_fields >/dev/null \
+  && declare -F mobile_wg_fixture_dns_evidence_snapshot >/dev/null \
+  && declare -F mobile_wg_fixture_assert_dns_case_evidence >/dev/null \
+  || { echo "mobile fixture lacks the shared DNS evidence contract" >&2; exit 1; }
+
+python3 - "$fixture_lib" "$remote_native" <<'PY'
+import pathlib
+import sys
+
+fixture = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+remote = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+start = fixture.index("mobile_wg_fixture_dns_evidence_snapshot()")
+end = fixture.index("\nmobile_wg_fixture_assert_dns_case_evidence()", start)
+snapshot = fixture[start:end]
+if snapshot.count("mobile_wg_remote_native dns-evidence-snapshot") != 1:
+    raise SystemExit("native DNS evidence still uses multiple remote actions")
+if snapshot.count("mobile_wg_fixture_docker exec") != 1:
+    raise SystemExit("Docker DNS evidence still uses multiple container actions")
+for old_call in (
+    "mobile_wg_fixture_dns_count",
+    "mobile_wg_fixture_profile_dns_count",
+    "mobile_wg_fixture_doh_count",
+    "mobile_wg_fixture_through_dns_count",
+    "mobile_wg_fixture_forward_dns_count",
+):
+    if old_call in snapshot:
+        raise SystemExit(f"DNS snapshot still fans out through {old_call}")
+if "dns-evidence-snapshot)" not in remote:
+    raise SystemExit("native fixture lacks an all-counter snapshot action")
+for counter in (
+    "dns_profile",
+    "doh_cf",
+    "doh_q9",
+    "doh_google",
+    "dns_through",
+    "dns_forward",
+):
+    if counter not in remote[remote.index("dns-evidence-snapshot)") :]:
+        raise SystemExit(f"native all-counter snapshot omits {counter}")
+PY
+
+custom_fields="$(
+  mobile_wg_dns_case_fields \
+    custom-doh fixture.nvpn.test 10.99.77.1 10.99.77.53
+)"
+[[ "$custom_fields" \
+  == 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||iana.org||doh-google' ]] \
+  || { echo "custom DoH is not independently routed through Google" >&2; exit 1; }
+through_fields="$(
+  mobile_wg_dns_case_fields \
+    through-exit fixture.nvpn.test 10.99.77.1 10.99.77.53
+)"
+[[ "$through_fields" \
+  == 'through_exit|cloudflare|||10.99.77.53|through-exit.fixture.nvpn.test|10.99.77.1|dns-through' ]] \
+  || { echo "through-exit DNS is not distinct from profile DNS" >&2; exit 1; }
+mobile_wg_fixture_assert_dns_case_evidence \
+  Android cloudflare-doh doh-cloudflare \
+  $'0\t0\t0\t0\t0\t0\t0' $'0\t0\t4\t0\t0\t0\t0' >/dev/null \
+  || { echo "valid exclusive Cloudflare evidence was rejected" >&2; exit 1; }
+if mobile_wg_fixture_assert_dns_case_evidence \
+    Android cloudflare-doh doh-cloudflare \
+    $'0\t0\t0\t0\t0\t0\t0' $'1\t1\t4\t0\t0\t0\t0' >/dev/null 2>&1
+then
+  echo "encrypted DNS accepted a plaintext profile fallback" >&2
+  exit 1
+fi
+if mobile_wg_fixture_assert_dns_case_evidence \
+    Android cloudflare-doh doh-cloudflare \
+    $'0\t0\t0\t0\t0\t0\t0' $'0\t0\t4\t0\t0\t0\t1' >/dev/null 2>&1
+then
+  echo "encrypted DNS accepted a forwarded plaintext-DNS fallback" >&2
+  exit 1
+fi
+mobile_wg_fixture_assert_dns_case_evidence \
+  iOS through-exit dns-through \
+  $'0\t0\t0\t0\t0\t0\t0' $'1\t0\t0\t0\t0\t3\t0' >/dev/null \
+  || { echo "valid exclusive through-exit evidence was rejected" >&2; exit 1; }
+if mobile_wg_fixture_assert_dns_case_evidence \
+    iOS through-exit dns-through \
+    $'0\t0\t0\t0\t0\t0\t0' $'1\t2\t0\t0\t0\t3\t0' >/dev/null 2>&1
+then
+  echo "through-exit DNS accepted a profile-DNS fallback" >&2
+  exit 1
+fi
 
 assert_endpoint_fields() {
   local raw="$1" port="$2" expected="$3" actual
@@ -176,14 +269,15 @@ if grep -Fq -- '--interface=' <<<"$dnsmasq_block"; then
 fi
 
 for label in automatic-profile cloudflare-doh quad9-doh custom-doh through-exit; do
-  grep -Fq "$label" "$gate" || {
-    echo "mobile exit gate is missing the $label DNS case" >&2
+  grep -Fq "$label" "$fixture_lib" || {
+    echo "shared mobile exit contract is missing the $label DNS case" >&2
     exit 1
   }
 done
 
-grep -Fq 'doh_flow_count' "$gate" \
-  || { echo "mobile exit gate does not require resolver-specific DoH traffic" >&2; exit 1; }
+grep -Fq 'mobile_wg_fixture_dns_evidence_snapshot' "$gate" \
+  && grep -Fq 'mobile_wg_fixture_assert_dns_case_evidence' "$gate" \
+  || { echo "mobile exit gate does not require exclusive resolver evidence" >&2; exit 1; }
 grep -Fq 'switch_direct="$final"' "$gate" \
   && grep -Fq 'NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED="$switch_direct"' "$gate" \
   || { echo "Android gate does not exercise WireGuard -> Direct while connected" >&2; exit 1; }
@@ -232,10 +326,9 @@ if grep -Fq ',,' "$android_smoke"; then
   echo "Android physical smoke uses Bash-4 lowercase expansion on macOS Bash" >&2
   exit 1
 fi
-grep -Fq 'assert_doh_traffic Android "$label" cloudflare' "$gate" \
-  && grep -Fq 'assert_doh_traffic Android "$label" quad9' "$gate" \
+[[ "$(grep -Fc 'mobile_wg_fixture_assert_dns_case_evidence' "$gate")" -eq 2 ]] \
   || {
-    echo "Android Release DNS cases do not require externally observed resolver flows" >&2
+    echo "Android/iOS Release DNS cases do not require shared positive/negative evidence" >&2
     exit 1
   }
 grep -Fq 'run_ios_release_network_case' "$gate" \
@@ -1074,5 +1167,18 @@ grep -Fq 'nvpn-wg-doh-cf' "$server" \
   || { echo "WireGuard fixture does not count Cloudflare DoH traffic" >&2; exit 1; }
 grep -Fq 'nvpn-wg-doh-q9' "$server" \
   || { echo "WireGuard fixture does not count Quad9 DoH traffic" >&2; exit 1; }
+grep -Fq 'nvpn-wg-doh-google' "$server" \
+  && grep -Fq 'nvpn-wg-dns-profile' "$server" \
+  && grep -Fq 'nvpn-wg-dns-through' "$server" \
+  && grep -Fq 'nvpn-wg-dns-forward' "$server" \
+  || { echo "WireGuard fixture lacks distinct custom/profile/through counters" >&2; exit 1; }
+grep -Fq 'counter name dns_profile' "$remote_native" \
+  && grep -Fq 'counter name dns_through' "$remote_native" \
+  && grep -Fq 'counter name doh_google' "$remote_native" \
+  && grep -Fq 'counter name dns_forward' "$remote_native" \
+  && grep -Fq 'profile-dns-count' "$remote_native" \
+  && grep -Fq 'through-dns-count' "$remote_native" \
+  && grep -Fq 'forward-dns-count' "$remote_native" \
+  || { echo "native fixture lacks distinct custom/profile/through counters" >&2; exit 1; }
 
 echo "mobile WireGuard exit DNS source contract passed"

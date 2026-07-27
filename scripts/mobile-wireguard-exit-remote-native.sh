@@ -504,8 +504,9 @@ install_fixture_cleanup_trap() {
 }
 
 fixture_ready() {
-  local dns_pid echo_pid server_ip
+  local dns_pid echo_pid server_ip through_dns_ip
   server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
+  through_dns_ip="${NVPN_MOBILE_WG_THROUGH_DNS_IP:?}"
   [[ -s "$state_dir/dnsmasq.pid" \
     && -s "$state_dir/udp-echo.pid" \
     && -s "$state_dir/http-probe.pid" ]] || return 1
@@ -521,6 +522,7 @@ fixture_ready() {
     && wireguard_listener_ready \
     && nft list table inet "$nft_table" >/dev/null 2>&1 \
     && ss -H -lun | grep -Fq "$server_ip:53" \
+    && ss -H -lun | grep -Fq "$through_dns_ip:53" \
     && ss -H -lun | grep -Fq "$server_ip:9" \
     && ss -H -ltn | grep -Fq "$server_ip:$NVPN_MOBILE_WG_HTTP_PROBE_PORT"
 }
@@ -550,6 +552,7 @@ case "$action" in
     : "${NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE:?client public key is required}"
     : "${NVPN_MOBILE_WG_TUNNEL_CIDR:?tunnel CIDR is required}"
     : "${NVPN_MOBILE_WG_CLIENT_IP:?client address is required}"
+    : "${NVPN_MOBILE_WG_THROUGH_DNS_IP:?through-exit DNS address is required}"
     : "${NVPN_MOBILE_WG_LISTEN_PORT:?listen port is required}"
     : "${NVPN_MOBILE_WG_DNS_NAME:?DNS fixture name is required}"
     : "${NVPN_MOBILE_WG_HTTP_PROBE_PORT:?HTTP fixture port is required}"
@@ -575,6 +578,7 @@ case "$action" in
     : >"$system_firewall_rules"
     install_fixture_cleanup_trap
     local_server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
+    through_dns_ip="$NVPN_MOBILE_WG_THROUGH_DNS_IP"
     tunnel_subnet="$(
       python3 - "$NVPN_MOBILE_WG_TUNNEL_CIDR" <<'PY'
 import ipaddress
@@ -591,6 +595,7 @@ PY
 
     ip link add "$interface" type wireguard
     ip address add "$NVPN_MOBILE_WG_TUNNEL_CIDR" dev "$interface"
+    ip address add "$through_dns_ip/32" dev "$interface"
     wg set "$interface" \
       listen-port "$NVPN_MOBILE_WG_LISTEN_PORT" \
       private-key "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE" \
@@ -603,6 +608,10 @@ PY
     nft add counter inet "$nft_table" forward_out
     nft add counter inet "$nft_table" doh_cf
     nft add counter inet "$nft_table" doh_q9
+    nft add counter inet "$nft_table" doh_google
+    nft add counter inet "$nft_table" dns_profile
+    nft add counter inet "$nft_table" dns_through
+    nft add counter inet "$nft_table" dns_forward
     nft add counter inet "$nft_table" http_probe
     nft add chain inet "$nft_table" input \
       '{ type filter hook input priority -10; policy accept; }'
@@ -613,6 +622,18 @@ PY
     nft add rule inet "$nft_table" input \
       udp dport "$NVPN_MOBILE_WG_LISTEN_PORT" accept
     nft add rule inet "$nft_table" input \
+      iifname "$interface" ip daddr "$local_server_ip" \
+      udp dport 53 counter name dns_profile accept
+    nft add rule inet "$nft_table" input \
+      iifname "$interface" ip daddr "$local_server_ip" \
+      tcp dport 53 counter name dns_profile accept
+    nft add rule inet "$nft_table" input \
+      iifname "$interface" ip daddr "$through_dns_ip" \
+      udp dport 53 counter name dns_through accept
+    nft add rule inet "$nft_table" input \
+      iifname "$interface" ip daddr "$through_dns_ip" \
+      tcp dport 53 counter name dns_through accept
+    nft add rule inet "$nft_table" input \
       iifname "$interface" udp dport '{ 9, 53 }' accept
     nft add rule inet "$nft_table" input \
       iifname "$interface" tcp dport 53 accept
@@ -621,10 +642,17 @@ PY
       counter name http_probe accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" ip daddr '{ 1.1.1.1, 1.0.0.1 }' \
-      tcp dport 443 counter name doh_cf accept
+      tcp dport 443 tcp flags syn counter name doh_cf accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" ip daddr '{ 9.9.9.9, 149.112.112.112 }' \
-      tcp dport 443 counter name doh_q9 accept
+      tcp dport 443 tcp flags syn counter name doh_q9 accept
+    nft add rule inet "$nft_table" forward \
+      iifname "$interface" ip daddr '{ 8.8.8.8, 8.8.4.4 }' \
+      tcp dport 443 tcp flags syn counter name doh_google accept
+    nft add rule inet "$nft_table" forward \
+      iifname "$interface" udp dport 53 counter name dns_forward accept
+    nft add rule inet "$nft_table" forward \
+      iifname "$interface" tcp dport 53 counter name dns_forward accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" counter name forward_in accept
     nft add rule inet "$nft_table" forward \
@@ -680,6 +708,7 @@ PY
     dnsmasq \
       --bind-interfaces \
       --listen-address="$local_server_ip" \
+      --listen-address="$through_dns_ip" \
       --no-hosts \
       --no-resolv \
       --server=1.1.1.1 \
@@ -728,14 +757,36 @@ PY
     case "${2:-}" in
       cloudflare) counter_packets doh_cf ;;
       quad9) counter_packets doh_q9 ;;
+      google) counter_packets doh_google ;;
       *) echo "unknown remote DoH counter" >&2; exit 2 ;;
     esac
+    ;;
+  through-dns-count)
+    counter_packets dns_through
+    ;;
+  profile-dns-count)
+    counter_packets dns_profile
+    ;;
+  forward-dns-count)
+    counter_packets dns_forward
+    ;;
+  dns-evidence-snapshot)
+    probe_host="${2:?DNS name is required}"
+    query_count="$(grep -Fci "$probe_host" "$state_dir/dns.log" 2>/dev/null || true)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$query_count" \
+      "$(counter_packets dns_profile)" \
+      "$(counter_packets doh_cf)" \
+      "$(counter_packets doh_q9)" \
+      "$(counter_packets doh_google)" \
+      "$(counter_packets dns_through)" \
+      "$(counter_packets dns_forward)"
     ;;
   dns-count)
     grep -Fci "${2:?DNS name is required}" "$state_dir/dns.log" 2>/dev/null || true
     ;;
   *)
-    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|doh-count|dns-count" >&2
+    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|doh-count|dns-count|profile-dns-count|through-dns-count|forward-dns-count|dns-evidence-snapshot" >&2
     exit 2
     ;;
 esac

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -25,8 +26,10 @@ import {
   semverFromTag,
   shouldBlockLocalLinuxAmd64Qemu,
   splitCsv,
-  validatePromotableReleaseManifest,
+  validateAndroidReleaseGateReceipt,
   validateCleanReleaseSource,
+  validatePromotableReleaseManifest,
+  validatePromotableReleaseSource,
   validateReleaseAssetSet,
   validateStagedReleaseTree,
   validateZapstoreApkMetadata,
@@ -87,6 +90,114 @@ test('release source provenance rejects dirty or mismatched tagged candidates', 
       tag: 'v4.1.4+4001006',
     }),
     /points to .* not candidate HEAD/i,
+  )
+})
+
+test('draft promotion requires one clean commit across source, tag, and manifest', () => {
+  const commit = 'a'.repeat(40)
+  const manifest = {
+    id: 'v4.1.5',
+    title: 'v4.1.5',
+    tag: 'v4.1.5',
+    commit,
+    draft: true,
+  }
+  const context = {
+    manifest,
+    requestedTag: 'v4.1.5',
+    workspaceTag: 'v4.1.5',
+    status: '',
+    headCommit: commit,
+    taggedCommit: commit,
+  }
+
+  assert.equal(validatePromotableReleaseSource(context), commit)
+  for (const [override, message] of [
+    [{ status: ' M Cargo.lock' }, /source is dirty/i],
+    [{ headCommit: 'b'.repeat(40) }, /staged manifest commit/i],
+    [{ taggedCommit: '' }, /release tag .* does not exist/i],
+    [{ taggedCommit: 'c'.repeat(40) }, /release tag .* not staged commit/i],
+    [{ requestedTag: 'v4.1.6' }, /requested tag .* staged manifest/i],
+    [{ workspaceTag: 'v4.1.6' }, /workspace version .* staged manifest/i],
+    [{ manifest: { ...manifest, id: 'v4.1.4' } }, /manifest identity fields/i],
+    [{ manifest: { ...manifest, draft: false } }, /not a draft/i],
+  ]) {
+    assert.throws(
+      () => validatePromotableReleaseSource({ ...context, ...override }),
+      message,
+    )
+  }
+})
+
+test('Android publication accepts only the exact signed APK sealed by the physical gate', () => {
+  const apkSha256 = 'a'.repeat(64)
+  const pathSha256 = 'b'.repeat(64)
+  const appGitSha = 'c'.repeat(40)
+  const appGitTree = 'd'.repeat(40)
+  const packageId = 'fi.siriusbusiness.nvpn'
+  const receipt = {
+    receiptSchema: 2,
+    artifactType: 'Android Release APK',
+    apkPathSha256: pathSha256,
+    apkSha256,
+    installedApkSha256: apkSha256,
+    companySigningVerified: true,
+    signerCertificateSha256: 'e'.repeat(64),
+    appGitSha,
+    appGitTree,
+    package: packageId,
+    replacementInstall: true,
+    debuggable: false,
+  }
+  const context = {
+    apkSha256,
+    apkPathSha256: pathSha256,
+    expectedAppGitSha: appGitSha,
+    expectedAppGitTree: appGitTree,
+    expectedPackage: packageId,
+  }
+
+  assert.deepEqual(validateAndroidReleaseGateReceipt(receipt, context), {
+    receiptSchema: 2,
+    apkSha256,
+    appGitSha,
+    appGitTree,
+    package: packageId,
+    signerCertificateSha256: 'e'.repeat(64),
+  })
+  for (const [override, message] of [
+    [{ apkSha256: 'f'.repeat(64) }, /APK bytes.*physical gate/i],
+    [{ apkPathSha256: 'f'.repeat(64) }, /APK path.*physical gate/i],
+    [{ expectedAppGitSha: 'f'.repeat(40) }, /application commit/i],
+    [{ expectedAppGitTree: 'f'.repeat(40) }, /application tree/i],
+    [{ expectedPackage: 'example.invalid' }, /package/i],
+    [{}, /signed/i],
+  ]) {
+    const candidateReceipt =
+      Object.keys(override).length === 0
+        ? { ...receipt, companySigningVerified: false }
+        : receipt
+    assert.throws(
+      () => validateAndroidReleaseGateReceipt(
+        candidateReceipt,
+        { ...context, ...override },
+      ),
+      message,
+    )
+  }
+  assert.throws(
+    () => validateAndroidReleaseGateReceipt(
+      { ...receipt, installedApkSha256: 'f'.repeat(64) },
+      context,
+    ),
+    /installed APK.*tested artifact/i,
+  )
+  assert.throws(
+    () => validateAndroidReleaseGateReceipt(
+      { ...receipt, debuggable: true },
+      context,
+    ),
+    /debuggable/i,
   )
 })
 
@@ -341,7 +452,7 @@ test('final publication preflights tools and Zapstore identity before the releas
   )
   assert.match(
     localRelease,
-    /zapstorePublicationPrerequisites\([\s\S]*?apk:\s*!requireApk\s*\|\|\s*existsSync\(apkPath\)/,
+    /zapstorePublicationPrerequisites\([\s\S]*?apk:\s*!requireApk\s*\|\|\s*Boolean\(apkPath\s*&&\s*existsSync\(apkPath\)\)/,
   )
   assert.match(localRelease, /run\('nak', \['decode', publisherNpub\]/)
 })
@@ -585,6 +696,17 @@ test('validateReleaseAssetSet can require complete app release artifacts', () =>
 })
 
 test('draft promotion rejects an incomplete cross-platform artifact set', () => {
+  const commit = 'a'.repeat(40)
+  const apkSha256 = 'b'.repeat(64)
+  const androidGate = {
+    receipt_schema: 2,
+    apk_path: 'assets/nostr-vpn-v4.1.4-android-arm64.apk',
+    apk_sha256: apkSha256,
+    app_git_sha: commit,
+    app_git_tree: 'd'.repeat(40),
+    package: 'fi.siriusbusiness.nvpn',
+    signer_certificate_sha256: 'e'.repeat(64),
+  }
   assert.throws(
     () =>
       validatePromotableReleaseManifest({
@@ -596,18 +718,78 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
     /Linux x64 desktop package, Windows x64 installer, signed Android APK, StartOS x86_64 package, StartOS aarch64 package/,
   )
 
+  const completeAssets = [
+    {
+      path: 'assets/nostr-vpn-v4.1.4-android-arm64.apk',
+      sha256: apkSha256,
+    },
+    { path: 'assets/nostr-vpn-v4.1.4-linux-x64.deb' },
+    { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz' },
+    { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg' },
+    { path: 'assets/nostr-vpn-v4.1.4-startos-aarch64.s9pk' },
+    { path: 'assets/nostr-vpn-v4.1.4-startos-x86_64.s9pk' },
+    { path: 'assets/nostr-vpn-v4.1.4-windows-x64-setup.exe' },
+  ]
+  assert.throws(
+    () =>
+      validatePromotableReleaseManifest({
+        commit,
+        assets: completeAssets,
+      }),
+    /physical Android gate provenance/,
+  )
   assert.doesNotThrow(() =>
     validatePromotableReleaseManifest({
-      assets: [
-        { path: 'assets/nostr-vpn-v4.1.4-android-arm64.apk' },
-        { path: 'assets/nostr-vpn-v4.1.4-linux-x64.deb' },
-        { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz' },
-        { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg' },
-        { path: 'assets/nostr-vpn-v4.1.4-startos-aarch64.s9pk' },
-        { path: 'assets/nostr-vpn-v4.1.4-startos-x86_64.s9pk' },
-        { path: 'assets/nostr-vpn-v4.1.4-windows-x64-setup.exe' },
-      ],
+      commit,
+      assets: completeAssets,
+      android_release_gate: androidGate,
     }),
+  )
+  assert.throws(
+    () =>
+      validatePromotableReleaseManifest({
+        commit,
+        assets: completeAssets,
+        android_release_gate: {
+          ...androidGate,
+          apk_sha256: 'f'.repeat(64),
+        },
+      }),
+    /physical Android gate.*APK/i,
+  )
+})
+
+test('release script binds Android publication to the physical-gate receipt and staged APK', () => {
+  const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
+  const androidBuildStart = localRelease.indexOf('function buildAndroidArtifacts(')
+  const androidBuildEnd = localRelease.indexOf('\nfunction buildMacosArtifacts', androidBuildStart)
+  const androidBuild = localRelease.slice(androidBuildStart, androidBuildEnd)
+
+  assert.match(androidBuild, /validateAndroidReleaseGateReceipt\(/)
+  assert.match(androidBuild, /:app:bundleRelease/)
+  assert.doesNotMatch(androidBuild, /:app:assembleRelease/)
+  assert.match(androidBuild, /copyFileSync\(testedApkPath,\s*apkDest\)/)
+
+  const promoteStart = localRelease.indexOf('function promoteStagedDraft(')
+  const promoteEnd = localRelease.indexOf('\nfunction publishRustCrates', promoteStart)
+  const promote = localRelease.slice(promoteStart, promoteEnd)
+  assert.match(promote, /assertPromotableDraftSource\(tag,\s*stagedManifest\)/)
+
+  assert.match(
+    localRelease,
+    /publishZapstore\(\{[\s\S]*?apkPath:\s*promoted\.stagedAndroidApkPath/,
+  )
+  assert.match(
+    localRelease,
+    /publishZapstore\(\{[\s\S]*?apkPath:\s*stagedRelease\.stagedAndroidApkPath/,
+  )
+  assert.doesNotMatch(
+    localRelease,
+    /function publishZapstore\(\{[\s\S]*?const apkPath = join\(distDir/,
+  )
+  assert.match(
+    localRelease,
+    /validatedApk\.sha256\s*!==\s*sha256FileSync\(apkPath\)/,
   )
 })
 
@@ -819,6 +1001,10 @@ test('buildReleaseManifest records staged assets with sizes', () => {
   assert.equal(manifest.assets[0].name, 'nostr-vpn-v0.2.27-windows-x64-setup.exe')
   assert.equal(manifest.assets[1].name, 'nvpn-v0.2.27-x86_64-pc-windows-msvc.zip')
   assert.equal(manifest.assets[0].path, 'assets/nostr-vpn-v0.2.27-windows-x64-setup.exe')
+  assert.equal(
+    manifest.assets[0].sha256,
+    createHash('sha256').update('installer').digest('hex'),
+  )
 })
 
 test('buildReleaseManifestFiles writes legacy manifest alias', () => {
@@ -888,6 +1074,30 @@ test('validateStagedReleaseTree rejects staged asset size mismatches', () => {
   assert.throws(
     () => validateStagedReleaseTree(root, manifest),
     /size mismatch/,
+  )
+})
+
+test('validateStagedReleaseTree rejects same-size staged asset substitution', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nostr-vpn-release-hash-asset-test-'))
+  const assetsDir = join(root, 'assets')
+  mkdirSync(assetsDir)
+  const path = join(assetsDir, 'nostr-vpn-v4.1.5-android-arm64.apk')
+  writeFileSync(path, 'sealed')
+  const manifest = {
+    assets: [
+      {
+        name: 'nostr-vpn-v4.1.5-android-arm64.apk',
+        path: 'assets/nostr-vpn-v4.1.5-android-arm64.apk',
+        size: 6,
+        sha256: createHash('sha256').update('sealed').digest('hex'),
+      },
+    ],
+  }
+
+  writeFileSync(path, 'forged')
+  assert.throws(
+    () => validateStagedReleaseTree(root, manifest),
+    /SHA-256 mismatch/,
   )
 })
 

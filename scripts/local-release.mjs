@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   copyFileSync,
   existsSync,
@@ -8,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -31,9 +33,12 @@ import {
   parseEnvFile,
   readWorkspaceVersionTag,
   semverFromTag,
+  sha256FileSync,
   splitCsv,
-  validatePromotableReleaseManifest,
+  validateAndroidReleaseGateReceipt,
   validateCleanReleaseSource,
+  validatePromotableReleaseManifest,
+  validatePromotableReleaseSource,
   validateReleaseAssetSet,
   validateStagedReleaseTree,
   validateZapstoreApkMetadata,
@@ -256,6 +261,40 @@ function assertCleanReleaseSource(tag, expectedCommit = '') {
   return candidate
 }
 
+function gitTree(commit = 'HEAD') {
+  return run('git', ['rev-parse', `${commit}^{tree}`], { capture: true })
+}
+
+function pathSha256(path) {
+  return createHash('sha256').update(realpathSync(path)).digest('hex')
+}
+
+function assertPromotableDraftSource(tag, manifest) {
+  const status = run(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=all'],
+    { capture: true },
+  )
+  const headCommit = run('git', ['rev-parse', 'HEAD'], { capture: true })
+  const taggedResult = spawnSync(
+    'git',
+    ['rev-parse', '-q', '--verify', `${normalizeTag(tag)}^{commit}`],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    },
+  )
+  return validatePromotableReleaseSource({
+    manifest,
+    requestedTag: tag,
+    workspaceTag: readWorkspaceVersionTag(readFileSync(rootCargoToml, 'utf8')),
+    status,
+    headCommit,
+    taggedCommit: taggedResult.status === 0 ? taggedResult.stdout.trim() : '',
+  })
+}
+
 function quote(arg) {
   const value = String(arg)
   return /[^\w./:-]/.test(value) ? JSON.stringify(value) : value
@@ -346,7 +385,12 @@ function verifyHtreeReleaseCid({ cid, manifest, dryRun }) {
     return
   }
 
-  const paths = ['release.json', 'manifest.json', 'notes.md', ...manifest.assets.map((asset) => asset.path)]
+  const paths = [
+    'release.json',
+    'manifest.json',
+    'notes.md',
+    ...manifest.assets.map((asset) => asset.path),
+  ]
   for (const path of paths) {
     const result = spawnSync('htree', ['cat', `${cid}/${path}`], {
       cwd: repoRoot,
@@ -365,6 +409,12 @@ function verifyHtreeReleaseCid({ cid, manifest, dryRun }) {
       throw new Error(
         `Published htree CID size mismatch for ${path}: manifest ${asset.size} bytes, htree cat returned ${result.stdout.length} bytes.`,
       )
+    }
+    if (
+      asset
+      && createHash('sha256').update(result.stdout).digest('hex') !== asset.sha256
+    ) {
+      throw new Error(`Published htree CID SHA-256 mismatch for ${path}.`)
     }
   }
 }
@@ -792,7 +842,15 @@ function androidSigningIsComplete(env) {
   )
 }
 
-function buildAndroidArtifacts({ env, tag, dryRun, builtLines }) {
+function buildAndroidArtifacts({
+  env,
+  tag,
+  dryRun,
+  builtLines,
+  gateReceiptPath,
+  candidateCommit,
+  candidateTree,
+}) {
   const androidEnv = ensureAndroidSdkEnv(env)
   const sdkRoot = androidEnv.ANDROID_SDK_ROOT || androidEnv.ANDROID_HOME
   if (!sdkRoot) {
@@ -826,29 +884,62 @@ function buildAndroidArtifacts({ env, tag, dryRun, builtLines }) {
       )
     }
 
-    run('bash', [join(repoRoot, 'tools', 'run-android'), ':app:assembleRelease', ':app:bundleRelease'], {
+    // The release gate already installed and physically exercised this exact
+    // signed APK. Build only the Play bundle here; assembling another APK
+    // would create untested bytes after the gate.
+    run('bash', [join(repoRoot, 'tools', 'run-android'), ':app:bundleRelease'], {
       env: androidEnv,
       dryRun,
     })
 
-    const apkPath = findFirstFile(
-      join(repoRoot, 'android', 'app', 'build', 'outputs', 'apk', 'release'),
-      (entry) => entry.endsWith('.apk'),
+    const testedApkPath = join(
+      repoRoot,
+      'android',
+      'app',
+      'build',
+      'outputs',
+      'apk',
+      'release',
+      'app-release.apk',
     )
     const aabPath = findFirstFile(
       join(repoRoot, 'android', 'app', 'build', 'outputs', 'bundle', 'release'),
       (entry) => entry.endsWith('.aab'),
     )
-    if (!dryRun && (!apkPath || !aabPath)) {
-      throw new Error('Expected Android APK/AAB outputs were not produced.')
+    if (!dryRun && (!existsSync(testedApkPath) || !aabPath)) {
+      throw new Error('Expected gate-tested Android APK and signed AAB were not produced.')
     }
 
     const apkDest = join(distDir, androidReleaseAssetName(tag, { extension: 'apk', signed }))
     const aabDest = join(distDir, androidReleaseAssetName(tag, { extension: 'aab', signed }))
+    let gate
     if (!dryRun) {
+      if (!gateReceiptPath || !existsSync(gateReceiptPath)) {
+        throw new Error(
+          'Physical Android release-gate receipt is missing; refusing to publish an untested APK.',
+        )
+      }
+      let receipt
+      try {
+        receipt = JSON.parse(readFileSync(gateReceiptPath, 'utf8'))
+      } catch {
+        throw new Error('Physical Android release-gate receipt is not valid JSON.')
+      }
+      gate = validateAndroidReleaseGateReceipt(receipt, {
+        apkSha256: sha256FileSync(testedApkPath),
+        apkPathSha256: pathSha256(testedApkPath),
+        expectedAppGitSha: candidateCommit,
+        expectedAppGitTree: candidateTree,
+        expectedPackage:
+          String(androidEnv.NVPN_ANDROID_PACKAGE_ID || '').trim()
+          || 'fi.siriusbusiness.nvpn',
+      })
       mkdirSync(distDir, { recursive: true })
-      copyFileSync(apkPath, apkDest)
+      copyFileSync(testedApkPath, apkDest)
       copyFileSync(aabPath, aabDest)
+      if (sha256FileSync(apkDest) !== gate.apkSha256) {
+        throw new Error('Copied Android release APK differs from the physical-gate artifact.')
+      }
     }
 
     if (signed) {
@@ -858,7 +949,12 @@ function buildAndroidArtifacts({ env, tag, dryRun, builtLines }) {
       }
     }
 
-    builtLines.push(signed ? 'Built signed Android arm64 APK/AAB.' : 'Built unsigned Android arm64 APK/AAB.')
+    builtLines.push(
+      signed
+        ? 'Reused the physical-gate-sealed signed Android arm64 APK and built the signed AAB.'
+        : 'Reused the physical-gate-sealed Android arm64 APK and built the unsigned AAB.',
+    )
+    return dryRun ? null : gate
   } finally {
     if (wroteTempKeystore && androidEnv.ANDROID_KEYSTORE_PATH) {
       rmSync(androidEnv.ANDROID_KEYSTORE_PATH, { force: true })
@@ -959,9 +1055,10 @@ function syncPlatformVersions({ env, tag, dryRun, builtLines }) {
   }
 }
 
-function runVerify({ dryRun, builtLines }) {
+function runVerify({ dryRun, builtLines, releaseGateLogDir }) {
   const env = {
     ...process.env,
+    NVPN_RELEASE_GATE_LOG_DIR: releaseGateLogDir,
     NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E: '1',
     NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E: '1',
     NVPN_RELEASE_GATE_MOBILE_JOIN_E2E: '1',
@@ -1075,6 +1172,7 @@ function stageRelease({
   dryRun,
   requireCompleteAppRelease,
   draft,
+  androidReleaseGate,
 }) {
   const assetPaths = collectReleaseAssetPaths(tag)
   const assetNames = assetPaths.map((assetPath) => basename(assetPath))
@@ -1082,7 +1180,15 @@ function stageRelease({
 
   if (dryRun) {
     console.log(`Would stage ${assetPaths.length} currently visible asset(s) into ${stageDir}`)
-    return { assetPaths, stageDir }
+    return {
+      assetPaths,
+      stageDir,
+      stagedAndroidApkPath: join(
+        stageDir,
+        'assets',
+        androidReleaseAssetName(tag),
+      ),
+    }
   }
 
   if (assetPaths.length === 0) {
@@ -1099,6 +1205,35 @@ function stageRelease({
     stagedAssetPaths.push(stagedPath)
   }
 
+  let androidGateManifest = null
+  let stagedAndroidApkPath = null
+  if (androidReleaseGate) {
+    const apkName = androidReleaseAssetName(tag)
+    stagedAndroidApkPath = join(stageDir, 'assets', apkName)
+    if (!existsSync(stagedAndroidApkPath)) {
+      throw new Error(`Physical-gate Android APK is missing from the staged release: ${apkName}`)
+    }
+    if (
+      androidReleaseGate.appGitSha !== commit
+      || sha256FileSync(stagedAndroidApkPath) !== androidReleaseGate.apkSha256
+    ) {
+      throw new Error('Physical Android gate provenance does not match the staged source and APK.')
+    }
+    androidGateManifest = {
+      receipt_schema: androidReleaseGate.receiptSchema,
+      apk_path: `assets/${apkName}`,
+      apk_sha256: androidReleaseGate.apkSha256,
+      app_git_sha: androidReleaseGate.appGitSha,
+      app_git_tree: androidReleaseGate.appGitTree,
+      package: androidReleaseGate.package,
+      signer_certificate_sha256: androidReleaseGate.signerCertificateSha256,
+    }
+  } else if (requireCompleteAppRelease) {
+    throw new Error(
+      'Complete release staging requires physical Android gate provenance.',
+    )
+  }
+
   const createdAt = Math.floor(Date.now() / 1000)
   const manifest = buildReleaseManifest({
     tag,
@@ -1106,14 +1241,16 @@ function stageRelease({
     createdAt,
     assetPaths: stagedAssetPaths,
     draft,
+    androidReleaseGate: androidGateManifest,
   })
 
   for (const [fileName, text] of buildReleaseManifestFiles(manifest)) {
     writeFileSync(join(stageDir, fileName), text)
   }
   writeReleaseNotes({ tag, commit, stageDir, builtLines, skippedLines, dryRun })
+  validateStagedReleaseTree(stageDir, manifest)
 
-  return { assetPaths, stageDir }
+  return { assetPaths, stageDir, stagedAndroidApkPath }
 }
 
 function publishRelease({ stageDir, releaseTree, tag, draft, dryRun }) {
@@ -1143,13 +1280,25 @@ function publishRelease({ stageDir, releaseTree, tag, draft, dryRun }) {
 function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
   if (dryRun) {
     console.log(`Would promote staged draft ${tag} from ${stageDir} into ${releaseTree}`)
-    return 'dry-run'
+    return {
+      cid: 'dry-run',
+      stagedAndroidApkPath: join(
+        stageDir,
+        'assets',
+        androidReleaseAssetName(tag),
+      ),
+    }
   }
 
   const releaseJsonPath = join(stageDir, 'release.json')
   const manifestJsonPath = join(stageDir, 'manifest.json')
   const stagedManifest = readReleaseManifest(stageDir)
   validatePromotableReleaseManifest(stagedManifest)
+  assertPromotableDraftSource(tag, stagedManifest)
+  const stagedAndroidApkPath = join(
+    stageDir,
+    stagedManifest.android_release_gate.apk_path,
+  )
 
   const publishedAt = Math.floor(Date.now() / 1000)
   for (const path of [releaseJsonPath, manifestJsonPath]) {
@@ -1160,7 +1309,10 @@ function promoteStagedDraft({ stageDir, releaseTree, tag, dryRun }) {
   }
   readReleaseManifest(stageDir)
 
-  return publishRelease({ stageDir, releaseTree, tag, draft: false, dryRun })
+  return {
+    cid: publishRelease({ stageDir, releaseTree, tag, draft: false, dryRun }),
+    stagedAndroidApkPath,
+  }
 }
 
 function publishRustCrates({ dryRun }) {
@@ -1194,10 +1346,9 @@ function zapstorePublicationContext(env) {
 
 function preflightRequiredZapstorePublication({
   env,
-  tag,
   requireApk = false,
+  apkPath = '',
 }) {
-  const apkPath = join(distDir, `nostr-vpn-${tag}-android-arm64.apk`)
   const {
     configExists,
     publisherNpub,
@@ -1206,7 +1357,7 @@ function preflightRequiredZapstorePublication({
   } = zapstorePublicationContext(env)
   zapstorePublicationPrerequisites(
     {
-      apk: !requireApk || existsSync(apkPath),
+      apk: !requireApk || Boolean(apkPath && existsSync(apkPath)),
       zsp: commandExists('zsp'),
       nak: commandExists('nak'),
       signing: Boolean(signWith),
@@ -1229,23 +1380,29 @@ function preflightRequiredZapstorePublication({
  *
  * Zapstore signs and uploads kind-32267 app + kind-30063 release events to
  * relay.zapstore.dev so users on Android with a Zapstore client can discover
- * + auto-update. The APK is the one CI built and we just downloaded into
- * `dist/` — Zapstore needs the actual .apk file, not the .aab.
+ * + auto-update. The APK is the immutable staged copy bound to the physical
+ * gate receipt — Zapstore needs the actual .apk file, not the .aab.
  *
  * Optional mode soft-skips with a warning instead of aborting when:
  *   - `zsp` is not on PATH (zapstore CLI not installed yet on this host)
  *   - No Nostr signing key is configured (`SIGN_WITH` env or
  *     `NOSTR_KEY_PATH` from .env.zapstore.local)
- *   - The expected `dist/nostr-vpn-{tag}-android-arm64.apk` doesn't exist
- *     (Android build was skipped or failed; we shouldn't block the rest
- *     of the release on it)
+ *   - The staged, receipt-bound APK doesn't exist
  *
  * Required mode hard-fails on every missing prerequisite and unless the
  * published release is verifiably current after zsp returns.
  */
-function publishZapstore({ env, tag, dryRun, required = false }) {
+function publishZapstore({
+  env,
+  tag,
+  apkPath,
+  dryRun,
+  required = false,
+}) {
   const apkName = `nostr-vpn-${tag}-android-arm64.apk`
-  const apkPath = join(distDir, apkName)
+  if (!apkPath) {
+    throw new Error('Zapstore publication requires an explicit staged Android APK.')
+  }
   if (dryRun) {
     console.log(
       `Would ${required ? 'require, publish, and verify' : 'publish'} ${apkName} on Zapstore`,
@@ -1319,6 +1476,9 @@ function publishZapstore({ env, tag, dryRun, required = false }) {
     expectedVersionCode,
     expectedPackageId,
   })
+  if (validatedApk.sha256 !== sha256FileSync(apkPath)) {
+    throw new Error('Zapstore inspection hash differs from the staged Android APK.')
+  }
 
   // Pass `zapstore.yaml` (not the APK path) so the kind-32267 app event
   // carries the yaml's `name`, `summary`, `description`, `icon`, `tags`,
@@ -1471,6 +1631,25 @@ function main() {
   const releaseTree = options.releaseTree || env.NVPN_RELEASE_TREE || 'releases/nostr-vpn'
   const stageDir =
     options.stageDir || join(os.tmpdir(), `nostr-vpn-release-${tag.replace(/[^\w.-]/g, '_')}`)
+  const releaseGateLogDir = resolve(
+    env.NVPN_RELEASE_GATE_LOG_DIR
+      || join(
+        repoRoot,
+        'artifacts',
+        'release-gate-logs',
+        `local-release-${tag.replace(/[^\w.-]/g, '_')}`,
+      ),
+  )
+  const androidGateReceiptPath = join(
+    releaseGateLogDir,
+    'mobile-release-artifacts',
+    'android.json',
+  )
+  const expectedStagedAndroidApkPath = join(
+    stageDir,
+    'assets',
+    androidReleaseAssetName(tag),
+  )
   const allowPartial = options.allowPartial || envFlagEnabled(env.NVPN_RELEASE_ALLOW_PARTIAL)
   const finalPublication = options.publish && !options.draft
   const requireZapstore = zapstorePublicationRequired({
@@ -1479,6 +1658,7 @@ function main() {
   })
   const builtLines = []
   const skippedLines = []
+  let androidReleaseGate = null
 
   if (requireZapstore && options.skipZapstore) {
     throw new Error('--require-zapstore conflicts with --skip-zapstore.')
@@ -1529,8 +1709,8 @@ function main() {
   if (requireZapstore && !options.dryRun) {
     preflightRequiredZapstorePublication({
       env,
-      tag,
       requireApk: options.promoteDraft,
+      apkPath: options.promoteDraft ? expectedStagedAndroidApkPath : '',
     })
   }
 
@@ -1550,13 +1730,22 @@ function main() {
     options.dryRun || options.promoteDraft
       ? ''
       : assertCleanReleaseSource(tag)
+  const candidateTree =
+    options.dryRun || options.promoteDraft
+      ? ''
+      : gitTree(candidateCommit)
 
   if (options.promoteDraft) {
     if (!commandExists('htree')) {
       throw new Error('Missing htree; cannot promote release.')
     }
-    const cid = promoteStagedDraft({ stageDir, releaseTree, tag, dryRun: options.dryRun })
-    console.log(`Promoted ${tag} to ${releaseTree} via ${cid}`)
+    const promoted = promoteStagedDraft({
+      stageDir,
+      releaseTree,
+      tag,
+      dryRun: options.dryRun,
+    })
+    console.log(`Promoted ${tag} to ${releaseTree} via ${promoted.cid}`)
     if (options.cargoPublish || !options.skipCargoPublish) {
       publishRustCrates({ dryRun: options.dryRun })
     }
@@ -1564,6 +1753,7 @@ function main() {
       publishZapstore({
         env,
         tag,
+        apkPath: promoted.stagedAndroidApkPath,
         dryRun: options.dryRun,
         required: requireZapstore,
       })
@@ -1578,10 +1768,24 @@ function main() {
       dryRun: options.dryRun,
       builtLines,
     })],
-    ['verify', () => runVerify({ dryRun: options.dryRun, builtLines })],
+    ['verify', () => runVerify({
+      dryRun: options.dryRun,
+      builtLines,
+      releaseGateLogDir,
+    })],
     ['startos', () => buildStartosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
     ['macos', () => buildMacosArtifacts({ tag, dryRun: options.dryRun, builtLines })],
-    ['android', () => buildAndroidArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
+    ['android', () => {
+      androidReleaseGate = buildAndroidArtifacts({
+        env,
+        tag,
+        dryRun: options.dryRun,
+        builtLines,
+        gateReceiptPath: androidGateReceiptPath,
+        candidateCommit,
+        candidateTree,
+      })
+    }],
     ['linux', () => buildLinuxArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
     ['windows', () => buildWindowsArtifacts({ env, tag, dryRun: options.dryRun, builtLines })],
     // Upload the TestFlight/App Store candidate only after every downloadable
@@ -1625,7 +1829,7 @@ function main() {
   }
 
   const commit = resolveReleaseCommit(tag, { dryRun: options.dryRun })
-  stageRelease({
+  const stagedRelease = stageRelease({
     tag,
     commit,
     stageDir,
@@ -1634,6 +1838,7 @@ function main() {
     dryRun: options.dryRun,
     requireCompleteAppRelease: !allowPartial && !options.dryRun,
     draft: options.draft,
+    androidReleaseGate,
   })
 
   if (options.publish) {
@@ -1662,6 +1867,7 @@ function main() {
     publishZapstore({
       env,
       tag,
+      apkPath: stagedRelease.stagedAndroidApkPath,
       dryRun: options.dryRun,
       required: requireZapstore,
     })

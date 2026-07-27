@@ -462,17 +462,60 @@ android_release_vpn_toggle_checked() {
   start_main_activity
   local deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
   while ((SECONDS < deadline)); do
-    if android_ui_query description "Turn VPN off" center >/dev/null; then
-      printf 'true\n'
-      return
-    fi
-    if android_ui_query description "Turn VPN on" center >/dev/null; then
-      printf 'false\n'
+    if android_release_vpn_toggle_checked_now; then
       return
     fi
     sleep 0.25
   done
   return 1
+}
+
+android_release_vpn_toggle_checked_now() {
+  android_ui_vpn_toggle_checked
+}
+
+android_release_vpn_off_and_inactive() {
+  vpn_inactive || return 1
+  [[ "$(android_release_vpn_toggle_checked_now 2>/dev/null || true)" == "false" ]]
+}
+
+android_release_wait_stable_quiescence() {
+  local label="${1:-cleanup}" expected_count="${2:-}"
+  local stable_ms=1000 start_ms deadline_ms now_ms
+  local checked="" count="" stable_count="" stable_since_ms=""
+  if [[ -n "$expected_count" && ! "$expected_count" =~ ^[0-9]+$ ]]; then
+    echo "Android Release $label has no valid expected native-tunnel start count" >&2
+    return 1
+  fi
+
+  start_main_activity || return 1
+  start_ms="$(epoch_ms)"
+  deadline_ms=$((start_ms + VPN_STOP_WAIT_SECS * 1000))
+  while true; do
+    checked="$(android_release_vpn_toggle_checked_now 2>/dev/null || true)"
+    count="$(android_vpn_native_start_count 2>/dev/null || true)"
+    now_ms="$(epoch_ms)"
+    if vpn_inactive \
+      && [[ "$checked" == "false" && "$count" =~ ^[0-9]+$ ]] \
+      && { [[ -z "$expected_count" ]] || [[ "$count" == "$expected_count" ]]; }
+    then
+      if [[ "$stable_count" != "$count" || -z "$stable_since_ms" ]]; then
+        stable_count="$count"
+        stable_since_ms="$now_ms"
+      elif (( now_ms - stable_since_ms >= stable_ms )); then
+        echo "Android Release $label stable quiescence passed: VPN inactive, shipped toggle Off, native starts=$count for >=${stable_ms}ms"
+        return 0
+      fi
+    else
+      stable_count=""
+      stable_since_ms=""
+    fi
+    if (( now_ms >= deadline_ms )); then
+      echo "Android Release $label did not reach stable quiescence: vpnInactive=$(vpn_inactive && printf true || printf false) toggle=${checked:-unavailable} nativeStarts=${count:-unavailable} expected=${expected_count:-stable}" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
 }
 
 android_release_connect_ui() {
@@ -496,19 +539,33 @@ android_release_connect_ui() {
 }
 
 android_release_disconnect_ui() {
-  if ! vpn_state_present; then
-    return 0
-  fi
   local checked
-  checked="$(android_release_vpn_toggle_checked 2>/dev/null || true)"
+  checked="$(android_release_vpn_toggle_checked)" || {
+    echo "Android Release shipped VPN toggle was unavailable during disconnect" >&2
+    return 1
+  }
   if [[ "$checked" == "true" ]]; then
     tap_android_ui description "Turn VPN off" || return 1
   fi
-  wait_until "$VPN_STOP_WAIT_SECS" vpn_inactive || {
-    echo "Android Release VPN did not disconnect through the shipped toggle" >&2
+  wait_until "$VPN_STOP_WAIT_SECS" android_release_vpn_off_and_inactive || {
+    echo "Android Release VPN did not reach OS-inactive / shipped-toggle-Off state" >&2
     return 1
   }
   echo "Android Release VPN disconnected through shipped UI"
+}
+
+android_release_emergency_cleanup() {
+  if android_release_disconnect_ui \
+    && android_release_wait_stable_quiescence emergency-cleanup
+  then
+    return 0
+  fi
+  echo "Android Release shipped-UI cleanup was incomplete; force-stopping only as an emergency fallback" >&2
+  "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME" \
+    >/dev/null 2>&1 || true
+  android_release_disconnect_ui \
+    && android_release_wait_stable_quiescence \
+      emergency-cleanup-after-force-stop
 }
 
 run_android_release_direct_https_probe() {
@@ -734,7 +791,7 @@ android_release_sleep_milliseconds() {
 }
 
 android_release_rapid_cancel_once() {
-  local delay_ms="$1" point expected_pid before_count after_count check
+  local delay_ms="$1" point expected_pid before_count after_count
   vpn_inactive || {
     echo "Android Release rapid cancellation started with a live VPN" >&2
     return 1
@@ -755,6 +812,7 @@ android_release_rapid_cancel_once() {
   # Reuse the exact shipped-toggle coordinate for the second tap. The first
   # tap updates Compose state asynchronously, so querying by its new label
   # would turn a sub-second cancellation into an accessibility polling test.
+  vpn_cleanup_armed=1
   # shellcheck disable=SC2086
   "$ADB" -s "$serial" shell input tap $point || return 1
   android_release_sleep_milliseconds "$delay_ms" || return 1
@@ -779,13 +837,9 @@ android_release_rapid_cancel_once() {
       return 1
     }
 
-  for check in $(seq 1 10); do
-    vpn_inactive || {
-      echo "Android Release stale VPN resurrected after rapid cancellation (delay=${delay_ms}ms)" >&2
-      return 1
-    }
-    sleep 0.1
-  done
+  android_release_wait_stable_quiescence \
+    "rapid cancellation delay=${delay_ms}ms" "$after_count" || return 1
+  vpn_cleanup_armed=0
   echo "Android Release rapid start/cancel passed at ${delay_ms}ms"
 }
 
@@ -805,11 +859,14 @@ run_android_release_rapid_start_stop_gate() {
   run_android_release_direct_network_probe rapid-cancel-stable-direct 0 || return 1
 
   android_release_capture_native_tunnel_start_baseline || return 1
-  android_release_connect_ui || return 1
   vpn_cleanup_armed=1
+  android_release_connect_ui || return 1
   android_release_pin_native_tunnel_start_count || return 1
   run_android_release_exit_network_probe rapid-cancel-full-reconnect || return 1
   android_release_disconnect_ui || return 1
+  android_release_wait_stable_quiescence \
+    rapid-cancel-full-reconnect "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
+    || return 1
   vpn_cleanup_armed=0
   run_android_release_direct_network_probe rapid-cancel-reconnect-cleanup 0 || return 1
   android_release_assert_native_tunnel_unchanged rapid-cancel-final || return 1
@@ -826,8 +883,8 @@ run_android_release_blackbox_cycle() {
     configure_android_exit_dns_ui || return 1
   fi
   android_release_capture_native_tunnel_start_baseline || return 1
-  android_release_connect_ui || return 1
   vpn_cleanup_armed=1
+  android_release_connect_ui || return 1
   android_release_pin_native_tunnel_start_count || return 1
   run_android_release_exit_network_probe wireguard-exit || return 1
   android_release_assert_native_tunnel_unchanged initial-exit || return 1
@@ -843,6 +900,9 @@ run_android_release_blackbox_cycle() {
       connected-direct || return 1
   fi
   android_release_disconnect_ui || return 1
+  android_release_wait_stable_quiescence \
+    release-cycle-disconnect "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
+    || return 1
   vpn_cleanup_armed=0
   run_android_release_direct_network_probe after-disconnect 0 || return 1
   android_release_assert_native_tunnel_unchanged \

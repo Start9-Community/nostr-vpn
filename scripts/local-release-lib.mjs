@@ -1,5 +1,29 @@
-import { statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  closeSync,
+  openSync,
+  readSync,
+  statSync,
+} from 'node:fs'
 import { basename, join, posix as pathPosix } from 'node:path'
+
+export function sha256FileSync(path) {
+  const hash = createHash('sha256')
+  const descriptor = openSync(path, 'r')
+  const chunk = Buffer.allocUnsafe(1024 * 1024)
+  try {
+    for (;;) {
+      const bytesRead = readSync(descriptor, chunk, 0, chunk.length, null)
+      if (bytesRead === 0) {
+        break
+      }
+      hash.update(chunk.subarray(0, bytesRead))
+    }
+  } finally {
+    closeSync(descriptor)
+  }
+  return hash.digest('hex')
+}
 
 export function parseEnvFile(text) {
   const values = {}
@@ -68,6 +92,134 @@ export function validateCleanReleaseSource({
     )
   }
   return head
+}
+
+export function validatePromotableReleaseSource({
+  manifest,
+  requestedTag,
+  workspaceTag,
+  status,
+  headCommit,
+  taggedCommit,
+}) {
+  if (!manifest || typeof manifest !== 'object') {
+    throw new Error('Staged release manifest is missing.')
+  }
+  if (manifest.draft !== true) {
+    throw new Error('Staged release is not a draft and cannot be promoted.')
+  }
+
+  const requested = normalizeTag(String(requestedTag ?? ''))
+  const workspace = normalizeTag(String(workspaceTag ?? ''))
+  const manifestTags = [manifest.id, manifest.title, manifest.tag]
+    .map((value) => String(value ?? '').trim())
+  if (manifestTags.some((value) => value !== requested)) {
+    throw new Error(
+      `Requested tag ${requested} does not equal all staged manifest identity fields.`,
+    )
+  }
+  if (workspace !== requested) {
+    throw new Error(
+      `Workspace version ${workspace} does not equal staged manifest tag ${requested}.`,
+    )
+  }
+
+  const head = validateCleanReleaseSource({
+    status,
+    headCommit,
+  })
+  const stagedCommit = String(manifest.commit ?? '').trim()
+  if (!stagedCommit || stagedCommit !== head) {
+    throw new Error(
+      `Current HEAD ${head} does not equal staged manifest commit ${stagedCommit || '<missing>'}.`,
+    )
+  }
+  const tagged = String(taggedCommit ?? '').trim()
+  if (!tagged) {
+    throw new Error(`Release tag ${requested} does not exist.`)
+  }
+  if (tagged !== stagedCommit) {
+    throw new Error(
+      `Release tag ${requested} points to ${tagged}, not staged commit ${stagedCommit}.`,
+    )
+  }
+  return head
+}
+
+export function validateAndroidReleaseGateReceipt(
+  receipt,
+  {
+    apkSha256,
+    apkPathSha256,
+    expectedAppGitSha,
+    expectedAppGitTree,
+    expectedPackage,
+  } = {},
+) {
+  if (!receipt || typeof receipt !== 'object') {
+    throw new Error('Physical Android gate receipt is missing.')
+  }
+  if (receipt.receiptSchema !== 2 || receipt.artifactType !== 'Android Release APK') {
+    throw new Error('Physical Android gate receipt schema or artifact type is invalid.')
+  }
+
+  const testedApkSha = String(apkSha256 ?? '').trim().toLowerCase()
+  const testedPathSha = String(apkPathSha256 ?? '').trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(testedApkSha)) {
+    throw new Error('Current Android APK SHA-256 is invalid.')
+  }
+  if (String(receipt.apkSha256 ?? '').trim().toLowerCase() !== testedApkSha) {
+    throw new Error('Android APK bytes differ from the artifact sealed by the physical gate.')
+  }
+  if (
+    String(receipt.installedApkSha256 ?? '').trim().toLowerCase()
+    !== testedApkSha
+  ) {
+    throw new Error('Installed APK differs from the tested artifact sealed by the physical gate.')
+  }
+  if (
+    !/^[0-9a-f]{64}$/.test(testedPathSha)
+    || String(receipt.apkPathSha256 ?? '').trim().toLowerCase() !== testedPathSha
+  ) {
+    throw new Error('Android APK path differs from the artifact sealed by the physical gate.')
+  }
+  if (receipt.companySigningVerified !== true) {
+    throw new Error('Physical Android gate did not verify a signed Release APK.')
+  }
+  const signerCertificateSha256 = String(
+    receipt.signerCertificateSha256 ?? '',
+  ).trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(signerCertificateSha256)) {
+    throw new Error('Physical Android gate receipt has no valid signing certificate SHA-256.')
+  }
+
+  const appGitSha = String(receipt.appGitSha ?? '').trim()
+  const appGitTree = String(receipt.appGitTree ?? '').trim()
+  if (appGitSha !== String(expectedAppGitSha ?? '').trim()) {
+    throw new Error('Physical Android gate receipt has the wrong application commit.')
+  }
+  if (appGitTree !== String(expectedAppGitTree ?? '').trim()) {
+    throw new Error('Physical Android gate receipt has the wrong application tree.')
+  }
+  const packageId = String(receipt.package ?? '').trim()
+  if (!packageId || packageId !== String(expectedPackage ?? '').trim()) {
+    throw new Error('Physical Android gate receipt has the wrong package.')
+  }
+  if (receipt.replacementInstall !== true) {
+    throw new Error('Physical Android gate did not verify replacement installation.')
+  }
+  if (receipt.debuggable !== false) {
+    throw new Error('Physical Android gate receipt is not for a non-debuggable Release APK.')
+  }
+
+  return {
+    receiptSchema: 2,
+    apkSha256: testedApkSha,
+    appGitSha,
+    appGitTree,
+    package: packageId,
+    signerCertificateSha256,
+  }
 }
 
 export function zapstorePublicationRequired({
@@ -371,6 +523,27 @@ export function validatePromotableReleaseManifest(manifest) {
     manifest.assets.map((asset) => basename(asset.path || '')),
     { requireCompleteAppRelease: true },
   )
+  const gate = manifest.android_release_gate
+  if (!gate || typeof gate !== 'object') {
+    throw new Error('Staged release has no physical Android gate provenance.')
+  }
+  const apkAsset = manifest.assets.find((asset) => asset.path === gate.apk_path)
+  if (
+    !apkAsset
+    || !/^[0-9a-f]{64}$/.test(String(apkAsset.sha256 ?? ''))
+    || apkAsset.sha256 !== gate.apk_sha256
+  ) {
+    throw new Error('Physical Android gate APK does not match the staged release asset.')
+  }
+  if (
+    gate.receipt_schema !== 2
+    || gate.app_git_sha !== manifest.commit
+    || !/^[0-9a-f]{40,64}$/.test(String(gate.app_git_tree ?? ''))
+    || !String(gate.package ?? '').trim()
+    || !/^[0-9a-f]{64}$/.test(String(gate.signer_certificate_sha256 ?? ''))
+  ) {
+    throw new Error('Staged physical Android gate provenance is incomplete or inconsistent.')
+  }
 }
 
 export function readWorkspaceVersionTag(cargoTomlText) {
@@ -758,17 +931,25 @@ export function androidReleaseAssetName(tag, { extension = 'apk', signed = true 
   return `nostr-vpn-${normalizedTag}-android-arm64${suffix}.${extension}`
 }
 
-export function buildReleaseManifest({ tag, commit, createdAt, assetPaths, draft = false }) {
+export function buildReleaseManifest({
+  tag,
+  commit,
+  createdAt,
+  assetPaths,
+  draft = false,
+  androidReleaseGate = null,
+}) {
   const normalizedTag = normalizeTag(tag)
   const assets = [...assetPaths]
     .map((assetPath) => ({
       name: basename(assetPath),
       path: `assets/${basename(assetPath)}`,
       size: statSync(assetPath).size,
+      sha256: sha256FileSync(assetPath),
     }))
     .sort((left, right) => left.name.localeCompare(right.name))
 
-  return {
+  const manifest = {
     id: normalizedTag,
     title: normalizedTag,
     tag: normalizedTag,
@@ -780,6 +961,10 @@ export function buildReleaseManifest({ tag, commit, createdAt, assetPaths, draft
     notes_file: 'notes.md',
     assets,
   }
+  if (androidReleaseGate) {
+    manifest.android_release_gate = androidReleaseGate
+  }
+  return manifest
 }
 
 export function buildReleaseManifestFiles(manifest) {
@@ -830,6 +1015,12 @@ export function validateStagedReleaseTree(stageDir, manifest) {
       throw new Error(
         `Release manifest size mismatch for ${asset.path}: manifest ${asset.size} bytes, staged file ${stats.size} bytes.`,
       )
+    }
+    if (
+      !/^[0-9a-f]{64}$/.test(String(asset.sha256 ?? ''))
+      || sha256FileSync(assetPath) !== asset.sha256
+    ) {
+      throw new Error(`Release manifest SHA-256 mismatch for ${asset.path}.`)
     }
   }
 }

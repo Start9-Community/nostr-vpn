@@ -5,6 +5,7 @@ set -euo pipefail
 : "${NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE:=/fixture/client.pub}"
 : "${NVPN_MOBILE_WG_TUNNEL_CIDR:=10.99.77.1/24}"
 : "${NVPN_MOBILE_WG_CLIENT_IP:=10.99.77.2}"
+: "${NVPN_MOBILE_WG_THROUGH_DNS_IP:=10.99.77.53}"
 : "${NVPN_MOBILE_WG_LISTEN_PORT:=51820}"
 : "${NVPN_MOBILE_WG_DNS_NAME:=wireguard-exit.nvpn-e2e.test}"
 : "${NVPN_MOBILE_WG_HTTP_PROBE_PORT:=8080}"
@@ -18,10 +19,12 @@ for key_file in "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE" "$NVPN_MOBILE_WG_CLIEN
 done
 
 server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
+through_dns_ip="$NVPN_MOBILE_WG_THROUGH_DNS_IP"
 client_public_key="$(tr -d '\r\n' <"$NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE")"
 
 ip link add wg0 type wireguard
 ip address add "$NVPN_MOBILE_WG_TUNNEL_CIDR" dev wg0
+ip address add "$through_dns_ip/32" dev wg0
 wg set wg0 \
   listen-port "$NVPN_MOBILE_WG_LISTEN_PORT" \
   private-key "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE" \
@@ -32,27 +35,59 @@ ip link set wg0 up
 iptables -N nvpn-mobile-wg-forward 2>/dev/null || iptables -F nvpn-mobile-wg-forward
 iptables -N nvpn-wg-doh-cf 2>/dev/null || iptables -F nvpn-wg-doh-cf
 iptables -N nvpn-wg-doh-q9 2>/dev/null || iptables -F nvpn-wg-doh-q9
+iptables -N nvpn-wg-doh-google 2>/dev/null || iptables -F nvpn-wg-doh-google
+iptables -N nvpn-wg-dns-profile 2>/dev/null || iptables -F nvpn-wg-dns-profile
+iptables -N nvpn-wg-dns-through 2>/dev/null || iptables -F nvpn-wg-dns-through
+iptables -N nvpn-wg-dns-forward 2>/dev/null || iptables -F nvpn-wg-dns-forward
 iptables -A nvpn-wg-doh-cf -j ACCEPT
 iptables -A nvpn-wg-doh-q9 -j ACCEPT
+iptables -A nvpn-wg-doh-google -j ACCEPT
+iptables -A nvpn-wg-dns-profile -j ACCEPT
+iptables -A nvpn-wg-dns-through -j ACCEPT
+iptables -A nvpn-wg-dns-forward -j ACCEPT
 for resolver_ip in 1.1.1.1 1.0.0.1; do
   iptables -A nvpn-mobile-wg-forward \
-    -i wg0 -p tcp -d "$resolver_ip" --dport 443 \
+    -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
     -j nvpn-wg-doh-cf
 done
 for resolver_ip in 9.9.9.9 149.112.112.112; do
   iptables -A nvpn-mobile-wg-forward \
-    -i wg0 -p tcp -d "$resolver_ip" --dport 443 \
+    -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
     -j nvpn-wg-doh-q9
 done
+for resolver_ip in 8.8.8.8 8.8.4.4; do
+  iptables -A nvpn-mobile-wg-forward \
+    -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
+    -j nvpn-wg-doh-google
+done
+iptables -A nvpn-mobile-wg-forward \
+  -i wg0 -p udp --dport 53 \
+  -j nvpn-wg-dns-forward
+iptables -A nvpn-mobile-wg-forward \
+  -i wg0 -p tcp --dport 53 \
+  -j nvpn-wg-dns-forward
 iptables -A nvpn-mobile-wg-forward -i wg0 -j ACCEPT
 iptables -A nvpn-mobile-wg-forward -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -I FORWARD 1 -j nvpn-mobile-wg-forward
+iptables -I INPUT 1 \
+  -i wg0 -d "$server_ip" -p udp --dport 53 \
+  -j nvpn-wg-dns-profile
+iptables -I INPUT 1 \
+  -i wg0 -d "$server_ip" -p tcp --dport 53 \
+  -j nvpn-wg-dns-profile
+iptables -I INPUT 1 \
+  -i wg0 -d "$through_dns_ip" -p udp --dport 53 \
+  -j nvpn-wg-dns-through
+iptables -I INPUT 1 \
+  -i wg0 -d "$through_dns_ip" -p tcp --dport 53 \
+  -j nvpn-wg-dns-through
 iptables -t nat -A POSTROUTING -s "${NVPN_MOBILE_WG_TUNNEL_CIDR%.*}.0/24" -o eth0 -j MASQUERADE
 
 dnsmasq \
   --keep-in-foreground \
   --bind-interfaces \
   --listen-address="$server_ip" \
+  --listen-address="$through_dns_ip" \
   --no-hosts \
   --no-resolv \
   --server=1.1.1.1 \
@@ -77,6 +112,7 @@ trap cleanup EXIT INT TERM
 for _ in $(seq 1 50); do
   if wg show wg0 >/dev/null 2>&1 \
     && ss -lun | grep -Fq "$server_ip:53" \
+    && ss -lun | grep -Fq "$through_dns_ip:53" \
     && ss -lun | grep -Fq "$server_ip:9" \
     && ss -ltn | grep -Fq "$server_ip:$NVPN_MOBILE_WG_HTTP_PROBE_PORT"; then
     touch /fixture/ready
