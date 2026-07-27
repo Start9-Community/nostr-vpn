@@ -135,6 +135,29 @@ fn daemon_instance_lock_rejects_a_second_process_until_release() {
     let other_config = dir.join("other").join("config.toml");
 
     let first = acquire_daemon_instance_lock(&config).expect("acquire first daemon lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let lock_path = daemon_instance_lock_file_path(&config).expect("lock path");
+        let parent = lock_path.parent().expect("lock parent");
+        assert_eq!(
+            fs::metadata(parent)
+                .expect("lock parent metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&lock_path)
+                .expect("lock metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
     let second = acquire_daemon_instance_lock(&other_config);
     assert!(
         second.is_err(),
@@ -144,6 +167,94 @@ fn daemon_instance_lock_rejects_a_second_process_until_release() {
     acquire_daemon_instance_lock(&config).expect("released daemon lock should be reusable");
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_daemon_instance_lock_uses_a_protected_system_runtime_path() {
+    let path = production_unix_daemon_instance_lock_file_path();
+
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        path,
+        Path::new("/run/nvpn/to.nostrvpn.nvpn.daemon.instance.lock")
+    );
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(
+        path,
+        Path::new("/var/run/nvpn/to.nostrvpn.nvpn.daemon.instance.lock")
+    );
+    assert!(
+        !path.starts_with(std::env::temp_dir()),
+        "a machine-global privileged daemon lock must not live in a public temporary directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_daemon_instance_lock_refuses_a_world_writable_parent() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-hostile-lock-parent-{nonce}"));
+    fs::create_dir(&dir).expect("create hostile parent");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o777))
+        .expect("make hostile parent writable");
+    let path = dir.join("daemon.instance.lock");
+    let expected_uid = fs::metadata(&dir).expect("parent metadata").uid();
+
+    let error = match acquire_unix_daemon_instance_lock_at(&path, expected_uid) {
+        Ok(_) => panic!("world-writable parent must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("not protected"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        !path.exists(),
+        "validation must happen before creating the lock file"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_daemon_instance_lock_refuses_a_symlink_substitution() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-hostile-lock-symlink-{nonce}"));
+    fs::create_dir(&dir).expect("create protected parent");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .expect("protect parent");
+    let victim = dir.join("victim");
+    fs::write(&victim, b"must remain untouched").expect("write victim");
+    let path = dir.join("daemon.instance.lock");
+    symlink(&victim, &path).expect("substitute lock symlink");
+    let expected_uid = fs::metadata(&dir).expect("parent metadata").uid();
+
+    let error = match acquire_unix_daemon_instance_lock_at(&path, expected_uid) {
+        Ok(_) => panic!("symlink lock must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("symlink"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        fs::read(&victim).expect("read victim"),
+        b"must remain untouched"
+    );
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

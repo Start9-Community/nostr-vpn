@@ -5,20 +5,30 @@ pub(crate) fn daemon_pid_file_path(config_path: &Path) -> PathBuf {
     parent.join("daemon.pid")
 }
 
+#[cfg(unix)]
+pub(crate) fn production_unix_daemon_instance_lock_file_path() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    let runtime_dir = Path::new("/run/nvpn");
+    #[cfg(not(target_os = "linux"))]
+    let runtime_dir = Path::new("/var/run/nvpn");
+
+    runtime_dir.join("to.nostrvpn.nvpn.daemon.instance.lock")
+}
+
 pub(crate) fn daemon_instance_lock_file_path(_config_path: &Path) -> Result<PathBuf> {
     #[cfg(test)]
     {
-        Ok(std::env::temp_dir().join(format!(
-            "to.nostrvpn.nvpn.daemon-instance-test-{}.lock",
-            std::process::id()
-        )))
+        Ok(std::env::temp_dir()
+            .join(format!(
+                "to.nostrvpn.nvpn.daemon-instance-test-{}",
+                std::process::id()
+            ))
+            .join("daemon.instance.lock"))
     }
 
     #[cfg(all(not(test), unix))]
     {
-        Ok(PathBuf::from(
-            "/tmp/to.nostrvpn.nvpn.daemon.instance.lock",
-        ))
+        Ok(production_unix_daemon_instance_lock_file_path())
     }
 
     #[cfg(all(not(test), windows))]
@@ -50,6 +60,163 @@ pub(crate) struct DaemonInstanceLock {
 
 pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonInstanceLock> {
     let lock_path = daemon_instance_lock_file_path(config_path)?;
+
+    #[cfg(unix)]
+    {
+        #[cfg(test)]
+        let expected_uid = unsafe { libc::geteuid() };
+        #[cfg(not(test))]
+        let expected_uid = 0;
+        return acquire_unix_daemon_instance_lock_at(&lock_path, expected_uid);
+    }
+
+    #[cfg(windows)]
+    {
+        return acquire_windows_daemon_instance_lock_at(&lock_path);
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!(
+        "daemon instance locking is unsupported on this platform"
+    ))
+}
+
+#[cfg(unix)]
+pub(crate) fn acquire_unix_daemon_instance_lock_at(
+    lock_path: &Path,
+    expected_uid: u32,
+) -> Result<DaemonInstanceLock> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    let parent = lock_path.parent().ok_or_else(|| {
+        anyhow!(
+            "daemon instance lock has no runtime directory: {}",
+            lock_path.display()
+        )
+    })?;
+    match fs::symlink_metadata(parent) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(parent) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to create protected {}", parent.display()));
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {}", parent.display()));
+        }
+    }
+    validate_unix_daemon_lock_parent(parent, expected_uid)?;
+
+    match fs::symlink_metadata(lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow!(
+                "refusing daemon instance lock symlink {}",
+                lock_path.display()
+            ));
+        }
+        Ok(metadata) => validate_unix_daemon_lock_file(lock_path, &metadata, expected_uid)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {}", lock_path.display()));
+        }
+    }
+
+    let mut options = runtime_open_options_no_follow();
+    options.create(true).read(true).write(true).mode(0o600);
+    let file = options.open(lock_path).map_err(|error| {
+        anyhow!(
+            "daemon already running or protected instance lock {} is unavailable: {}",
+            lock_path.display(),
+            error
+        )
+    })?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect open lock {}", lock_path.display()))?;
+    validate_unix_daemon_lock_file(lock_path, &metadata, expected_uid)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .with_context(|| {
+            format!(
+                "failed to protect daemon instance lock {}",
+                lock_path.display()
+            )
+        })?;
+
+    use std::os::fd::AsRawFd as _;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        return Err(anyhow!(
+            "another nvpn daemon is already running: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(DaemonInstanceLock { _file: file })
+}
+
+#[cfg(unix)]
+fn validate_unix_daemon_lock_parent(parent: &Path, expected_uid: u32) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("failed to inspect {}", parent.display()))?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if !metadata.file_type().is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != expected_uid
+        || mode & 0o022 != 0
+    {
+        return Err(anyhow!(
+            "daemon instance lock runtime directory {} is not protected \
+             (expected directory owner uid {expected_uid} without group/other write; \
+             found uid {} mode {:03o})",
+            parent.display(),
+            metadata.uid(),
+            mode
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unix_daemon_lock_file(
+    lock_path: &Path,
+    metadata: &fs::Metadata,
+    expected_uid: u32,
+) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != expected_uid
+        || metadata.nlink() != 1
+        || mode & 0o077 != 0
+    {
+        return Err(anyhow!(
+            "daemon instance lock {} is not protected \
+             (expected regular single-link file owner uid {expected_uid} without group/other access; \
+             found uid {} mode {:03o} links {})",
+            lock_path.display(),
+            metadata.uid(),
+            mode,
+            metadata.nlink()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn acquire_windows_daemon_instance_lock_at(lock_path: &Path) -> Result<DaemonInstanceLock> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -58,13 +225,10 @@ pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonI
     let mut options = runtime_open_options_no_follow();
     options.create(true).read(true).write(true);
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // A zero share mode makes opening the same lock file fail until the
-        // first daemon drops its handle.
-        options.share_mode(0);
-    }
+    use std::os::windows::fs::OpenOptionsExt;
+    // A zero share mode makes opening the same lock file fail until the
+    // first daemon drops its handle.
+    options.share_mode(0);
 
     let file = options.open(&lock_path).map_err(|error| {
         anyhow!(
@@ -73,26 +237,6 @@ pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonI
             error
         )
     })?;
-    #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(0o666))
-        .with_context(|| {
-            format!(
-                "failed to set daemon instance lock permissions on {}",
-                lock_path.display()
-            )
-        })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            return Err(anyhow!(
-                "another nvpn daemon is already running: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
 
     Ok(DaemonInstanceLock { _file: file })
 }
