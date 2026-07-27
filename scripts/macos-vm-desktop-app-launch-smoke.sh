@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and launch the macOS app only inside the disposable VM.
+# Verify and launch the host-built, imported macOS app inside the disposable VM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
