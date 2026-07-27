@@ -444,34 +444,93 @@ function run(
   return capture ? result.stdout.trim() : ''
 }
 
-function readReleaseManifest(stageDir) {
+const htreeReleaseMetadataPaths = [
+  'release.json',
+  'manifest.json',
+  'notes.md',
+]
+
+function exactRegularFile(path, label) {
+  const metadata = lstatSync(path)
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error(`${label} must be a regular non-symlink file.`)
+  }
+}
+
+function exactContentBinding(bytes) {
+  return {
+    size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  }
+}
+
+function readValidatedReleaseStage(
+  stageDir,
+  { bindHtreeMetadata = false } = {},
+) {
   const releaseJsonPath = join(stageDir, 'release.json')
   const manifestJsonPath = join(stageDir, 'manifest.json')
   if (!existsSync(releaseJsonPath) || !existsSync(manifestJsonPath)) {
     throw new Error(`No staged release manifest found at ${stageDir}. Run the draft release first or pass --stage-dir.`)
   }
 
-  const releaseText = readFileSync(releaseJsonPath, 'utf8')
-  const manifestText = readFileSync(manifestJsonPath, 'utf8')
-  if (releaseText !== manifestText) {
+  exactRegularFile(releaseJsonPath, 'Staged release.json')
+  exactRegularFile(manifestJsonPath, 'Staged manifest.json')
+  const releaseBytes = readFileSync(releaseJsonPath)
+  const manifestBytes = readFileSync(manifestJsonPath)
+  if (!releaseBytes.equals(manifestBytes)) {
     throw new Error('release.json and manifest.json differ in the staged release tree.')
   }
 
-  const manifest = JSON.parse(releaseText)
+  const manifest = JSON.parse(releaseBytes.toString('utf8'))
   validateStagedReleaseTree(stageDir, manifest)
-  return manifest
+  if (!bindHtreeMetadata) {
+    return { manifest, metadataBindings: null }
+  }
+
+  const notesPath = join(stageDir, 'notes.md')
+  exactRegularFile(notesPath, 'Staged notes.md')
+  return {
+    manifest,
+    metadataBindings: {
+      'release.json': exactContentBinding(releaseBytes),
+      'manifest.json': exactContentBinding(manifestBytes),
+      'notes.md': exactContentBinding(readFileSync(notesPath)),
+    },
+  }
 }
 
-function verifyHtreeReleaseCid({ cid, manifest, dryRun }) {
+function readReleaseManifest(stageDir) {
+  return readValidatedReleaseStage(stageDir).manifest
+}
+
+function verifyHtreeReleaseCid({
+  cid,
+  manifest,
+  metadataBindings,
+  dryRun,
+}) {
   if (dryRun) {
     console.log(`Would verify ${manifest.assets.length} htree asset(s) from ${cid}`)
     return
   }
 
+  for (const path of htreeReleaseMetadataPaths) {
+    const binding = metadataBindings?.[path]
+    if (
+      !binding
+      || !Number.isSafeInteger(binding.size)
+      || binding.size < 0
+      || !/^[0-9a-f]{64}$/.test(binding.sha256)
+    ) {
+      throw new Error(
+        `No exact staged htree metadata binding exists for ${path}.`,
+      )
+    }
+  }
+
   const paths = [
-    'release.json',
-    'manifest.json',
-    'notes.md',
+    ...htreeReleaseMetadataPaths,
     ...manifest.assets.map((asset) => asset.path),
   ]
   for (const path of paths) {
@@ -485,6 +544,20 @@ function verifyHtreeReleaseCid({ cid, manifest, dryRun }) {
     if (result.status !== 0) {
       const stderr = result.stderr ? result.stderr.toString('utf8').trim() : ''
       throw new Error(`Published htree CID does not contain ${path}${stderr ? `: ${stderr}` : ''}`)
+    }
+
+    const metadata = metadataBindings?.[path]
+    if (metadata && result.stdout.length !== metadata.size) {
+      throw new Error(
+        `Published htree CID size mismatch for ${path}: staged ${metadata.size} bytes, htree cat returned ${result.stdout.length} bytes.`,
+      )
+    }
+    if (
+      metadata
+      && createHash('sha256').update(result.stdout).digest('hex')
+        !== metadata.sha256
+    ) {
+      throw new Error(`Published htree CID SHA-256 mismatch for ${path}.`)
     }
 
     const asset = manifest.assets.find((candidate) => candidate.path === path)
@@ -1816,7 +1889,12 @@ function publishRelease({
     return 'dry-run'
   }
 
-  const manifest = readReleaseManifest(stageDir)
+  const {
+    manifest,
+    metadataBindings,
+  } = readValidatedReleaseStage(stageDir, {
+    bindHtreeMetadata: true,
+  })
   if (!draft) {
     validatePromotableReleaseManifest(manifest)
   }
@@ -1829,7 +1907,12 @@ function publishRelease({
   const cid = match[1]
   beforeMutation()
   run('htree', ['push', '--force', cid], { dryRun })
-  verifyHtreeReleaseCid({ cid, manifest, dryRun })
+  verifyHtreeReleaseCid({
+    cid,
+    manifest,
+    metadataBindings,
+    dryRun,
+  })
   const args = ['release', 'publish', releaseTree, tag, cid]
   if (draft) {
     args.push('--draft')

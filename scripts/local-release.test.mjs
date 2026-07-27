@@ -1570,7 +1570,11 @@ case "$1" in
     ;;
   cat)
     relative="\${2#*/}"
-    exec /bin/cat "$FAKE_HTREE_STAGE/$relative"
+    if [ "\${FAKE_HTREE_MUTATE_METADATA:-}" = "$relative" ]; then
+      LC_ALL=C /usr/bin/sed '1s/^./X/' "$FAKE_HTREE_STAGE/$relative"
+    else
+      exec /bin/cat "$FAKE_HTREE_STAGE/$relative"
+    fi
     ;;
   release)
     ;;
@@ -1688,6 +1692,47 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     'release publish --help',
     `release publish releases/test v4.1.5 ${fakeCid} --draft`,
   ])
+  assert.match(
+    readFileSync(join(scripts, 'local-release.mjs'), 'utf8'),
+    /for \(const path of htreeReleaseMetadataPaths\)[\s\S]*?No exact staged htree metadata binding exists for \$\{path\}/,
+  )
+
+  for (const metadataPath of [
+    'release.json',
+    'manifest.json',
+    'notes.md',
+  ]) {
+    writeFileSync(htreeLog, '')
+    const mutatedMetadataResult = spawnSync(
+      process.execPath,
+      releaseArgs,
+      {
+        ...releaseOptions,
+        env: {
+          ...releaseOptions.env,
+          FAKE_HTREE_MUTATE_METADATA: metadataPath,
+        },
+      },
+    )
+    assert.equal(
+      mutatedMetadataResult.status,
+      1,
+      `${metadataPath}: ${mutatedMetadataResult.stderr}`,
+    )
+    assert.match(
+      mutatedMetadataResult.stderr,
+      new RegExp(
+        `Published htree CID SHA-256 mismatch for ${metadataPath.replace('.', '\\.')}`,
+        'i',
+      ),
+    )
+    assert.doesNotMatch(
+      readFileSync(htreeLog, 'utf8'),
+      new RegExp(
+        `release publish releases/test v4\\.1\\.5 ${fakeCid}`,
+      ),
+    )
+  }
 
   const staleTag = spawnSync('git', ['tag', 'v4.1.5', 'HEAD^'], {
     cwd: repo,
