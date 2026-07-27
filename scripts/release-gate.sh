@@ -338,6 +338,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-release-join-gate-harness.sh
   ./scripts/test-macos-vm-import-only-harness.sh
   ./scripts/test-desktop-network-handoff-harness.sh
+  ./scripts/test-desktop-underlay-host-peer-import-harness.sh
   ./scripts/test-macos-release-fips-roaming-harness.sh
   ./scripts/test-ios-frozen-archive-harness.sh
   ./scripts/test-macos-sdk-compat-harness.sh

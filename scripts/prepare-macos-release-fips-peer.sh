@@ -53,7 +53,7 @@ trap cleanup EXIT
 verify_artifact() {
   [[ -x "$BINARY" && -f "$RECEIPT" ]] || return 1
   file "$BINARY" | grep -Eq 'ELF 64-bit.*x86-64' || return 1
-  python3 - \
+  python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
     "$RECEIPT" \
     "$BINARY" \
     "$APP_GIT_SHA" \
@@ -61,44 +61,7 @@ verify_artifact() {
     "$RELEASE_JOIN_FIPS_SHA" \
     "$RELEASE_JOIN_FIPS_TREE" \
     "$RELEASE_JOIN_FIPS_VERSION" \
-    "$TARGET" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-(
-    receipt_path,
-    binary_path,
-    app_sha,
-    app_tree,
-    fips_sha,
-    fips_tree,
-    fips_version,
-    target,
-) = sys.argv[1:]
-binary = pathlib.Path(binary_path)
-with open(receipt_path, encoding="utf-8") as handle:
-    receipt = json.load(handle)
-expected = {
-    "schema": 1,
-    "builtOnHostMac": True,
-    "builtOnRemoteVm": False,
-    "appGitSha": app_sha,
-    "appGitTree": app_tree,
-    "fipsGitSha": fips_sha,
-    "fipsGitTree": fips_tree,
-    "fipsVersion": fips_version,
-    "target": target,
-    "binarySize": binary.stat().st_size,
-}
-for key, value in expected.items():
-    if receipt.get(key) != value:
-        raise SystemExit(f"cached FIPS peer receipt mismatch for {key}")
-digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-if receipt.get("binarySha256") != digest:
-    raise SystemExit("cached FIPS peer SHA-256 mismatch")
-PY
+    "$TARGET"
 }
 
 if verify_artifact; then

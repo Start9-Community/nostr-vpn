@@ -20,10 +20,7 @@ LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
 EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
 FIPS_SOURCE_REVISION=""
 GUEST_FIPS_REPO="$GUEST_SRC_ROOT/fips-release-gate"
-HYPERVISOR_SRC_ROOT="${NVPN_LINUX_UNDERLAY_HYPERVISOR_SRC_ROOT:-src/nvpn-desktop-underlay/linux-peer}"
-HYPERVISOR_REPO="$HYPERVISOR_SRC_ROOT/nostr-vpn-release-gate"
-HYPERVISOR_BINARY="$HYPERVISOR_REPO/target/release/nvpn"
-HYPERVISOR_FIPS_REPO="$HYPERVISOR_SRC_ROOT/fips-release-gate"
+HYPERVISOR_BINARY=""
 RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 NETWORK_ID="${NVPN_LINUX_UNDERLAY_NETWORK_ID:-desktop-underlay-linux-release-gate}"
 SECONDARY_GATEWAY="${NVPN_LINUX_UNDERLAY_SECONDARY_GATEWAY:-172.31.254.1}"
@@ -80,6 +77,7 @@ WG_ENDPOINT=""
 mkdir -p "$ARTIFACT_DIR"
 
 source "$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
+source "$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
 current_tree() {
   local repo="${1:-$ROOT}"
   local git_dir tmp_index tree
@@ -116,8 +114,8 @@ resolve_expected_fips_revision() {
 }
 
 sync_and_build_candidates() {
-  local expected_tree target_tree hypervisor_tree
-  local expected_fips_tree="" target_fips_tree="" hypervisor_fips_tree=""
+  local expected_tree target_tree
+  local expected_fips_tree="" target_fips_tree=""
   expected_tree="$(current_tree)"
   {
     printf 'nvpn_base_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"
@@ -129,12 +127,6 @@ sync_and_build_candidates() {
   } >"$ARTIFACT_DIR/source-provenance.txt"
   env NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
     "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
-  env \
-    NVPN_UBUNTU_SSH_HOST="$HYPERVISOR_SSH" \
-    NVPN_UBUNTU_SSH_PROXY_COMMAND= \
-    NVPN_UBUNTU_SSH_JUMP= \
-    NVPN_UBUNTU_GUEST_SRC_ROOT="$HYPERVISOR_SRC_ROOT" \
-    "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$HYPERVISOR_SSH"
 
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     for crate in fips-core fips-endpoint fips-identity; do
@@ -149,82 +141,19 @@ sync_and_build_candidates() {
       NVPN_UBUNTU_REPO_LABEL=fips \
       NVPN_UBUNTU_GIT_REF=refs/heads/codex/ubuntu-vm-fips-sync \
       "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
-    env \
-      NVPN_UBUNTU_SSH_HOST="$HYPERVISOR_SSH" \
-      NVPN_UBUNTU_SSH_PROXY_COMMAND= \
-      NVPN_UBUNTU_SSH_JUMP= \
-      NVPN_UBUNTU_LOCAL_REPO_PATH="$LOCAL_FIPS_REPO" \
-      NVPN_UBUNTU_GUEST_SRC_ROOT="$HYPERVISOR_SRC_ROOT" \
-      NVPN_UBUNTU_GUEST_REPO_NAME=fips-release-gate \
-      NVPN_UBUNTU_REPO_LABEL=fips \
-      NVPN_UBUNTU_GIT_REF=refs/heads/codex/ubuntu-vm-fips-sync \
-      "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$HYPERVISOR_SSH"
     run_primary \
       "git -C '$GUEST_FIPS_REPO' checkout --detach '$FIPS_SOURCE_REVISION' >/dev/null"
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "git -C '$HYPERVISOR_FIPS_REPO' checkout --detach '$FIPS_SOURCE_REVISION' >/dev/null"
   fi
 
   target_tree="$(run_primary "git -C '$GUEST_REPO' rev-parse 'HEAD^{tree}'")"
-  hypervisor_tree="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-    "git -C '$HYPERVISOR_REPO' rev-parse 'HEAD^{tree}'")"
   [[ "$target_tree" == "$expected_tree" ]] \
     || fail "Linux target tree differs from the release-gate tree"
-  [[ "$hypervisor_tree" == "$expected_tree" ]] \
-    || fail "Linux peer tree differs from the release-gate tree"
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     target_fips_tree="$(run_primary \
       "git -C '$GUEST_FIPS_REPO' rev-parse 'HEAD^{tree}'")"
-    hypervisor_fips_tree="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "git -C '$HYPERVISOR_FIPS_REPO' rev-parse 'HEAD^{tree}'")"
     [[ "$target_fips_tree" == "$expected_fips_tree" ]] \
       || fail "Linux target FIPS tree differs from the local release-gate tree"
-    [[ "$hypervisor_fips_tree" == "$expected_fips_tree" ]] \
-      || fail "Linux peer FIPS tree differs from the local release-gate tree"
   fi
-
-  local target_abi peer_abi
-  target_abi="$(run_primary \
-    '. /etc/os-release; printf "%s|%s|%s|%s|%s\n" "$ID" "$VERSION_ID" "$(uname -m)" "$(getconf GNU_LIBC_VERSION)" "$(rustc -vV | sed -n "s/^host: //p")"')"
-  peer_abi="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-    '. /etc/os-release; printf "%s|%s|%s|%s|%s\n" "$ID" "$VERSION_ID" "$(uname -m)" "$(getconf GNU_LIBC_VERSION)" "$(rustc -vV | sed -n "s/^host: //p")"')"
-  [[ "$target_abi" == "$peer_abi" ]] \
-    || fail "Linux target and peer OS, architecture, or glibc differ"
-  {
-    printf 'target=%s\n' "$target_abi"
-    printf 'peer=%s\n' "$peer_abi"
-  } >"$ARTIFACT_DIR/linux-build-abi.txt"
-
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
-    "$HYPERVISOR_REPO" \
-    "$([[ -n "$LOCAL_FIPS_REPO" ]] && echo "$HYPERVISOR_FIPS_REPO" || true)" \
-    >"$ARTIFACT_DIR/peer-build.log" 2>&1 <<'SH' &
-set -euo pipefail
-repo="$1"
-fips="${2:-}"
-cd "$repo"
-cargo_args=()
-lock_args=(--locked)
-if [[ -n "$fips" ]]; then
-  [[ "$fips" == /* ]] || fips="$HOME/$fips"
-  cargo_args=(
-    --config "patch.crates-io.fips-core.path='$fips/crates/fips-core'"
-    --config "patch.crates-io.fips-endpoint.path='$fips/crates/fips-endpoint'"
-    --config "patch.crates-io.fips-identity.path='$fips/crates/fips-identity'"
-  )
-  cargo "${cargo_args[@]}" update --offline -p fips-core -p fips-endpoint -p fips-identity
-  cargo "${cargo_args[@]}" metadata "${lock_args[@]}" --offline --format-version 1 \
-    | jq -e --arg root "$fips/" '
-        [.packages[]
-          | select(.name == "fips-core" or .name == "fips-endpoint")
-          | .manifest_path
-          | startswith($root)]
-        | length == 2 and all
-      ' >/dev/null
-fi
-cargo "${cargo_args[@]}" build "${lock_args[@]}" --release -p nvpn
-SH
-  local peer_build_pid="$!"
 
   primary_ssh_command
   "${LINUX_PRIMARY_SSH[@]}" bash -s -- \
@@ -247,22 +176,22 @@ fi
 cargo "${cargo_args[@]}" check --locked --offline
 SH
   local target_check_pid="$!"
-  local peer_build_status=0
-  local target_check_status=0
-  wait "$peer_build_pid" || peer_build_status="$?"
+  local host_peer_import_status=0 target_check_status=0
+  desktop_underlay_import_host_peer \
+    >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
+    || host_peer_import_status="$?"
   wait "$target_check_pid" || target_check_status="$?"
-  if [[ "$peer_build_status" != "0" || "$target_check_status" != "0" ]]; then
-    echo "Linux peer build status: $peer_build_status" >&2
-    tail -n 120 "$ARTIFACT_DIR/peer-build.log" >&2 || true
+  if [[ "$host_peer_import_status" != "0" \
+    || "$target_check_status" != "0" ]]
+  then
+    echo "Host peer import status: $host_peer_import_status" >&2
+    tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
     echo "Linux target GTK check status: $target_check_status" >&2
     tail -n 120 "$ARTIFACT_DIR/target-linux-check.log" >&2 || true
-    fail "parallel Linux candidate build/check failed"
+    fail "parallel host-peer import or Linux target check failed"
   fi
 
-  local copied_binary="$ARTIFACT_DIR/nvpn-linux-release"
   GUEST_BINARY_COPY_TMP="$GUEST_BINARY.copy-$RUN_TOKEN"
-  scp -q -o BatchMode=yes \
-    "$HYPERVISOR_SSH:$HYPERVISOR_BINARY" "$copied_binary"
   local -a primary_scp
   primary_scp=(scp -q -o BatchMode=yes -o ConnectTimeout=10)
   if [[ -n "$PRIMARY_PROXY" ]]; then
@@ -270,24 +199,25 @@ SH
   elif [[ -n "$LINUX_JUMP" ]]; then
     primary_scp+=(-J "$LINUX_JUMP")
   fi
-  "${primary_scp[@]}" "$copied_binary" "$LINUX_SSH:$GUEST_BINARY_COPY_TMP"
+  run_primary "mkdir -p '$(dirname "$GUEST_BINARY")'"
+  "${primary_scp[@]}" "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" \
+    "$LINUX_SSH:$GUEST_BINARY_COPY_TMP"
   run_primary \
     "chmod 0755 '$GUEST_BINARY_COPY_TMP' && mv -f '$GUEST_BINARY_COPY_TMP' '$GUEST_BINARY'"
   GUEST_BINARY_COPY_TMP=""
 
   local source_sha target_sha peer_sha
-  source_sha="$(shasum -a 256 "$copied_binary" | awk '{ print $1 }')"
+  source_sha="$DESKTOP_UNDERLAY_HOST_PEER_SHA256"
   target_sha="$(run_primary "sha256sum '$GUEST_BINARY' | cut -d ' ' -f1")"
   peer_sha="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
     "sha256sum '$HYPERVISOR_BINARY' | cut -d ' ' -f1")"
   [[ "$source_sha" == "$target_sha" && "$source_sha" == "$peer_sha" ]] \
-    || fail "Linux target and peer production binary SHA-256 receipts differ"
+    || fail "Linux target and imported peer binary SHA-256 receipts differ"
   {
     printf 'source=%s\n' "$source_sha"
     printf 'target=%s\n' "$target_sha"
     printf 'peer=%s\n' "$peer_sha"
   } >"$ARTIFACT_DIR/linux-binary-sha256.txt"
-  rm -f "$copied_binary"
 }
 
 capture_version_receipts() {
@@ -898,6 +828,8 @@ cleanup() {
     peer_command namespace-audit >"$ARTIFACT_DIR/peer-namespace-cleanup-audit.txt" 2>&1 \
       || cleanup_failed=1
   fi
+  desktop_underlay_cleanup_host_peer >/dev/null 2>&1 \
+    || cleanup_failed=1
   if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
     ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
       "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \

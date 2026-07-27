@@ -15,6 +15,8 @@ LINUX_HOST_ENTRY="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
 LINUX_HOST_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_GUEST="$ROOT/scripts/desktop-linux-underlay-change-e2e.sh"
 PEER="$ROOT/scripts/desktop-linux-underlay-peer-e2e.sh"
+HOST_PEER_IMPORT="$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
+HOST_PEER_VERIFY="$ROOT/scripts/verify-host-linux-peer-artifact.py"
 LISTENER_AUDIT="$ROOT/scripts/lib-desktop-linux-listener-audit.sh"
 WIREGUARD_FIXTURE_LIB="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 MACOS_WIREGUARD="$ROOT/scripts/macos-vm-desktop-wireguard-exit-e2e.sh"
@@ -66,6 +68,8 @@ done
 for helper in "$WINDOWS_HOST_LIB" "$WINDOWS_GUEST_LIB" "$LINUX_HOST_LIB"; do
   [[ -f "$helper" ]] || fail "$(basename "$helper") is missing"
 done
+[[ -f "$HOST_PEER_IMPORT" ]] || fail "host-built peer importer is missing"
+[[ -x "$HOST_PEER_VERIFY" ]] || fail "host-built peer verifier is missing"
 [[ -f "$WINDOWS_GUEST_ENTRY" ]] || fail "Windows guest runner is missing"
 require_tokens "$WINDOWS_HOST_ENTRY" "helper module" \
   'windows-vm-desktop-underlay-change-e2e.lib.sh'
@@ -240,7 +244,7 @@ require_tokens "$WINDOWS_HOST" "exact provenance/parallel-build contract" \
   'target-version.txt' \
   'peer-version.txt' \
   'wait "$windows_build_pid"' \
-  'wait "$peer_build_pid"'
+  'desktop_underlay_import_host_peer'
 
 require_tokens "$RELEASE_GATE" "real auto-discoverable underlay lane" \
   'windows-vm-desktop-underlay-change-e2e.sh' \
@@ -607,12 +611,28 @@ for forbidden in (
         raise SystemExit(f"release main retains forbidden host/concurrent path: {forbidden}")
 PY
 
-grep -Fq 'src/nvpn-desktop-underlay/windows-peer' "$WINDOWS_HOST" \
-  || fail "Windows and Linux peer builds are not resource-isolated"
-grep -Fq 'src/nvpn-desktop-underlay/linux-peer' "$LINUX_HOST" \
-  || fail "Windows and Linux peer builds are not resource-isolated"
-grep -Fq 'NVPN_UBUNTU_SSH_HOST="$HYPERVISOR_SSH"' "$LINUX_HOST" \
-  || fail "Linux peer sync can inherit the guest SSH target instead of the hypervisor"
+for host_gate in "$WINDOWS_HOST_ENTRY" "$LINUX_HOST_ENTRY"; do
+  require_tokens "$host_gate" "host-built peer import-only contract" \
+    'lib-desktop-underlay-host-peer.sh' \
+    'desktop_underlay_import_host_peer' \
+    'desktop_underlay_cleanup_host_peer'
+  if grep -Fq 'peer-build.log' "$host_gate"; then
+    fail "$(basename "$host_gate") still compiles its peer on Vader"
+  fi
+done
+require_tokens "$HOST_PEER_IMPORT" "immutable Mac-to-Vader peer import" \
+  'prepare-macos-release-fips-peer.sh' \
+  'verify-host-linux-peer-artifact.py' \
+  'mktemp -d /tmp/nvpn-desktop-underlay-peer.XXXXXX' \
+  'builtOnHostMac' \
+  'builtOnRemoteVm' \
+  'host-peer-import-receipt.txt' \
+  'test ! -e "$remote_dir"'
+for forbidden in 'cargo build' 'cargo check' 'cargo run' 'rustc '; do
+  if grep -Fq "$forbidden" "$HOST_PEER_IMPORT"; then
+    fail "Vader peer importer can compile: $forbidden"
+  fi
+done
 if grep -Fq 'lock_args=()' "$LINUX_HOST"; then
   fail "Linux exact-FIPS builds can silently rewrite the candidate dependency graph"
 fi
@@ -621,18 +641,15 @@ grep -Fq 'update --offline -p fips-core -p fips-endpoint -p fips-identity' "$LIN
 grep -Fq "checkout --detach '\$FIPS_SOURCE_REVISION'" "$LINUX_HOST" \
   || fail "Linux exact-FIPS build does not preserve the selected source revision"
 for evidence in \
-  'peer-build.log' \
+  'host-peer-import.log' \
   'target-linux-check.log' \
-  'linux-build-abi.txt' \
   'linux-binary-sha256.txt' \
-  'wait "$peer_build_pid"' \
+  'desktop_underlay_import_host_peer' \
   'wait "$target_check_pid"'
 do
   grep -Fq "$evidence" "$LINUX_HOST" \
-    || fail "Linux native build and target check/copy contract is missing: $evidence"
+    || fail "Linux host import and target check/copy contract is missing: $evidence"
 done
-grep -Fq '[[ "$target_abi" == "$peer_abi" ]]' "$LINUX_HOST" \
-  || fail "Linux binary copy does not require identical OS, architecture, and glibc"
 grep -Fq '[[ "$source_sha" == "$target_sha" && "$source_sha" == "$peer_sha" ]]' "$LINUX_HOST" \
   || fail "Linux copied production binaries are not SHA-256 identical"
 for evidence in \

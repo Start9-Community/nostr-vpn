@@ -25,10 +25,7 @@ GUEST_BINARY="${NVPN_WINDOWS_UNDERLAY_BINARY:-$GUEST_REPO\\target\\release\\nvpn
 LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
 EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
 FIPS_SOURCE_REVISION=""
-HYPERVISOR_SRC_ROOT="${NVPN_WINDOWS_UNDERLAY_HYPERVISOR_SRC_ROOT:-${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SRC_ROOT:-src/nvpn-desktop-underlay/windows-peer}}"
-HYPERVISOR_REPO="$HYPERVISOR_SRC_ROOT/nostr-vpn-release-gate"
-HYPERVISOR_BINARY="$HYPERVISOR_REPO/target/release/nvpn"
-HYPERVISOR_FIPS_REPO="$HYPERVISOR_SRC_ROOT/fips-release-gate"
+HYPERVISOR_BINARY=""
 RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 NETWORK_ID="${NVPN_WINDOWS_UNDERLAY_NETWORK_ID:-desktop-underlay-windows-release-gate}"
 SECONDARY_GATEWAY="${NVPN_WINDOWS_UNDERLAY_SECONDARY_GATEWAY:-172.31.253.1}"
@@ -81,6 +78,7 @@ WG_ENDPOINT=""
 mkdir -p "$ARTIFACT_DIR"
 
 source "$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
+source "$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
 current_tree() {
   local repo="${1:-$ROOT}"
   local git_dir tmp_index tree
@@ -117,8 +115,8 @@ resolve_expected_fips_revision() {
 }
 
 sync_and_build_candidates() {
-  local expected_tree candidate_source_date_epoch windows_tree hypervisor_tree
-  local expected_fips_tree="" windows_fips_tree="" hypervisor_fips_tree=""
+  local expected_tree candidate_source_date_epoch windows_tree
+  local expected_fips_tree="" windows_fips_tree=""
   expected_tree="$(current_tree)"
   candidate_source_date_epoch="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
   [[ "$candidate_source_date_epoch" =~ ^[0-9]+$ ]] \
@@ -142,51 +140,29 @@ sync_and_build_candidates() {
     NVPN_WINDOWS_SYNC_PATH_DEPS="$([[ -n "$LOCAL_FIPS_REPO" ]] && echo 1 || echo 0)" \
     "$ROOT/scripts/windows-vm-git-sync.sh" "$WINDOWS_SSH"
 
-  env \
-    NVPN_UBUNTU_GUEST_SRC_ROOT="$HYPERVISOR_SRC_ROOT" \
-    "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$HYPERVISOR_SSH"
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     for crate in fips-core fips-endpoint fips-identity; do
       [[ -f "$LOCAL_FIPS_REPO/crates/$crate/Cargo.toml" ]] \
         || fail "NVPN_FIPS_REPO_PATH is missing crates/$crate/Cargo.toml"
     done
     expected_fips_tree="$(current_tree "$LOCAL_FIPS_REPO")"
-    env \
-      NVPN_UBUNTU_SSH_PROXY_COMMAND= \
-      NVPN_UBUNTU_SSH_JUMP= \
-      NVPN_UBUNTU_LOCAL_REPO_PATH="$LOCAL_FIPS_REPO" \
-      NVPN_UBUNTU_GUEST_SRC_ROOT="$HYPERVISOR_SRC_ROOT" \
-      NVPN_UBUNTU_GUEST_REPO_NAME=fips-release-gate \
-      NVPN_UBUNTU_REPO_LABEL=fips \
-      NVPN_UBUNTU_GIT_REF=refs/heads/codex/ubuntu-vm-fips-sync \
-      "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$HYPERVISOR_SSH"
     run_ps_primary \
       "git -C $(ps_quote "$GUEST_FIPS_REPO") checkout --detach $(ps_quote "$FIPS_SOURCE_REVISION") | Out-Null"
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "git -C '$HYPERVISOR_FIPS_REPO' checkout --detach '$FIPS_SOURCE_REVISION' >/dev/null"
   fi
 
   windows_tree="$(run_ps_primary \
     "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
     | tr -d '\r' \
     | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
-  hypervisor_tree="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-    "git -C '$HYPERVISOR_REPO' rev-parse 'HEAD^{tree}'")"
   [[ "$windows_tree" == "$expected_tree" ]] \
     || fail "Windows candidate tree differs from the release-gate tree"
-  [[ "$hypervisor_tree" == "$expected_tree" ]] \
-    || fail "hypervisor candidate tree differs from the release-gate tree"
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     windows_fips_tree="$(run_ps_primary \
       "git -C $(ps_quote "$GUEST_FIPS_REPO") rev-parse 'HEAD^{tree}'" \
       | tr -d '\r' \
       | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
-    hypervisor_fips_tree="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "git -C '$HYPERVISOR_FIPS_REPO' rev-parse 'HEAD^{tree}'")"
     [[ "$windows_fips_tree" == "$expected_fips_tree" ]] \
       || fail "Windows FIPS tree differs from the local release-gate tree"
-    [[ "$hypervisor_fips_tree" == "$expected_fips_tree" ]] \
-      || fail "hypervisor FIPS tree differs from the local release-gate tree"
   fi
 
   local windows_build_script
@@ -224,45 +200,17 @@ if (\$FipsPackages.Count -ne 2 -or @(\$FipsPackages | Where-Object {
   run_ps_primary "$windows_build_script" \
     >"$ARTIFACT_DIR/windows-build.log" 2>&1 &
   local windows_build_pid="$!"
-
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
-    "$HYPERVISOR_REPO" \
-    "$([[ -n "$LOCAL_FIPS_REPO" ]] && echo "$HYPERVISOR_FIPS_REPO" || true)" \
-    >"$ARTIFACT_DIR/peer-build.log" 2>&1 <<'SH' &
-set -euo pipefail
-repo="$1"
-fips="${2:-}"
-cd "$repo"
-if [[ -n "$fips" ]]; then
-  [[ "$fips" == /* ]] || fips="$HOME/$fips"
-  cargo_args=(
-    --config "patch.crates-io.fips-core.path='$fips/crates/fips-core'"
-    --config "patch.crates-io.fips-endpoint.path='$fips/crates/fips-endpoint'"
-    --config "patch.crates-io.fips-identity.path='$fips/crates/fips-identity'"
-  )
-  cargo "${cargo_args[@]}" metadata --format-version 1 \
-    | jq -e --arg root "$fips/" '
-        [.packages[]
-          | select(.name == "fips-core" or .name == "fips-endpoint")
-          | .manifest_path
-          | startswith($root)]
-        | length == 2 and all
-      ' >/dev/null
-  cargo \
-    "${cargo_args[@]}" \
-    build --release -p nvpn
-else
-  cargo build --release --locked -p nvpn
-fi
-SH
-  local peer_build_pid="$!"
-  local windows_build_failed=0 peer_build_failed=0
+  local windows_build_failed=0 host_peer_import_failed=0
+  desktop_underlay_import_host_peer \
+    >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
+    || host_peer_import_failed=1
   wait "$windows_build_pid" || windows_build_failed=1
-  wait "$peer_build_pid" || peer_build_failed=1
-  if [[ "$windows_build_failed" == "1" || "$peer_build_failed" == "1" ]]; then
+  if [[ "$windows_build_failed" == "1" \
+    || "$host_peer_import_failed" == "1" ]]
+  then
     tail -n 120 "$ARTIFACT_DIR/windows-build.log" >&2 || true
-    tail -n 120 "$ARTIFACT_DIR/peer-build.log" >&2 || true
-    fail "parallel Windows target or Linux peer build failed"
+    tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
+    fail "parallel Windows target build or host-peer import failed"
   fi
 }
 
@@ -925,6 +873,8 @@ cleanup() {
     peer_command namespace-audit >"$ARTIFACT_DIR/peer-namespace-cleanup-audit.txt" 2>&1 \
       || cleanup_failed=1
   fi
+  desktop_underlay_cleanup_host_peer >/dev/null 2>&1 \
+    || cleanup_failed=1
   if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
     ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
       "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \
