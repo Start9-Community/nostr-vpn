@@ -230,6 +230,7 @@ ARCHIVE_CLEAN="$TMP_ROOT/archive-clean.json"
 ADHOC_CLEAN="$TMP_ROOT/adhoc-clean.json"
 MOBILE_CLEAN="$TMP_ROOT/mobile-clean.json"
 MOBILE_JOIN_CLEAN="$TMP_ROOT/mobile-join-clean.json"
+DESKTOP_MOBILE_JOIN_CLEAN="$TMP_ROOT/desktop-mobile-join-clean.json"
 
 python3 - \
   "$ARCHIVE_RECEIPT" "$ADHOC_RECEIPT" "$MOBILE_RECEIPT" \
@@ -394,6 +395,11 @@ join = {
         "iPhone-admin-to-Pixel-manual": 100,
         "Pixel-admin-to-iPhone-manual": 100,
     },
+    "contentWidth": {
+        "minimumRequiredBasisPoints": 9800,
+        "androidObservedBasisPoints": 10000,
+        "iosObservedBasisPoints": 10000,
+    },
     "qr": {
         "iphoneAdminPixelJoiner": True,
         "pixelAdminIphoneJoiner": True,
@@ -478,19 +484,31 @@ desktop_join = {
     "artifact": {
         "appGitSha": mobile["appGitSha"],
         "appGitTree": mobile["appGitTree"],
+        "ios": {
+            "artifactReceiptSha256": hashlib.sha256(
+                mobile_path.read_bytes()
+            ).hexdigest(),
+            **identity_fields,
+        },
     },
     "publicUiOnly": True,
     "privateStateRead": False,
     "fixtureInvoked": False,
+    "appLaunchArgumentsOrEnvironment": False,
     "desktopAdminAndroidJoiner": True,
     "androidAdminDesktopJoiner": True,
+    "desktopAdminIphoneJoiner": True,
+    "iphoneAdminDesktopJoiner": True,
     "acceptedRosterRetainedAcrossRelaunch": True,
     "desktopRelaunchDurability": True,
     "pixelRelaunchDurability": True,
+    "iphoneRelaunchDurability": True,
     "deliveryDeadlineMilliseconds": 15000,
     "deliveryMilliseconds": {
         "macOS-admin-to-Android-manual": 100,
         "Android-admin-to-macOS-manual": 100,
+        "macOS-admin-to-iPhone-manual": 100,
+        "iPhone-admin-to-macOS-manual": 100,
     },
 }
 for path, payload in (
@@ -507,12 +525,14 @@ cp "$ARCHIVE_RECEIPT" "$ARCHIVE_CLEAN"
 cp "$ADHOC_RECEIPT" "$ADHOC_CLEAN"
 cp "$MOBILE_RECEIPT" "$MOBILE_CLEAN"
 cp "$MOBILE_JOIN_RECEIPT" "$MOBILE_JOIN_CLEAN"
+cp "$DESKTOP_MOBILE_JOIN_RECEIPT" "$DESKTOP_MOBILE_JOIN_CLEAN"
 
 restore_receipts() {
   cp "$ARCHIVE_CLEAN" "$ARCHIVE_RECEIPT"
   cp "$ADHOC_CLEAN" "$ADHOC_RECEIPT"
   cp "$MOBILE_CLEAN" "$MOBILE_RECEIPT"
   cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+  cp "$DESKTOP_MOBILE_JOIN_CLEAN" "$DESKTOP_MOBILE_JOIN_RECEIPT"
 }
 
 GATE_ARGS=(
@@ -603,6 +623,57 @@ seal_gate
 validate_gate
 [[ "$(stat -f '%Lp' "$GATE_SEAL" 2>/dev/null || stat -c '%a' "$GATE_SEAL")" == 600 ]] \
   || { echo "Frozen iOS gate seal is not mode 0600" >&2; exit 1; }
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["contentWidth"]["iosObservedBasisPoints"] = 7500
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if validate_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted a non-full-width mobile QR receipt" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$DESKTOP_MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["desktopAdminIphoneJoiner"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if validate_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted desktop/mobile evidence without the iPhone joiner role" >&2
+  exit 1
+fi
+cp "$DESKTOP_MOBILE_JOIN_CLEAN" "$DESKTOP_MOBILE_JOIN_RECEIPT"
+seal_gate
+
+python3 - "$DESKTOP_MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["artifact"]["ios"]["appCodeDirectoryHash"] = "0" * 40
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if validate_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted a different iPhone join artifact" >&2
+  exit 1
+fi
+cp "$DESKTOP_MOBILE_JOIN_CLEAN" "$DESKTOP_MOBILE_JOIN_RECEIPT"
+seal_gate
 
 python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
 import json

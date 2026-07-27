@@ -68,7 +68,10 @@ python3 - \
   "$ROOT/crates/nostr-vpn-core/src/config/app_config_rosters.rs" \
   "$ROOT/crates/nostr-vpn-core/src/join_requests.rs" \
   "$ROOT/crates/nostr-vpn-core/tests/config_tests/defaults/roster_apply.rs" \
-  "$ROOT/scripts/release-gate.sh" <<'PY'
+  "$ROOT/scripts/release-gate.sh" \
+  "$ROOT/scripts/ios_frozen_gate.py" \
+  "$ROOT/scripts/release-artifact-provenance-lib.mjs" \
+  "$ROOT/scripts/local-release.mjs" <<'PY'
 import pathlib
 import sys
 
@@ -103,6 +106,9 @@ def read(path):
     join_requests,
     roster_apply_tests,
     release_gate,
+    ios_frozen_gate,
+    release_provenance,
+    local_release,
 ) = map(read, sys.argv[1:])
 
 runtime_gate_code = "\n".join((gate, ui, desktop, desktop_remote, ios_test))
@@ -129,6 +135,9 @@ for required in (
     'element("qr-scanner-camera")',
     "XCUIDevice.shared.press(.home)",
     "assertQrIsFullWidth(qr)",
+    'element("join-request-qr-content")',
+    "NVPN_RELEASE_JOIN_QR_CONTENT_WIDTH_BPS",
+    "qrContentWidthMinimumBasisPoints",
     "NVPN_RELEASE_JOIN_LIFECYCLE_READY=1",
     "NVPN_RELEASE_JOIN_QR_DECODED=1",
     "NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS",
@@ -254,6 +263,9 @@ for required in (
     "KEYCODE_HOME",
     "Join request QR code",
     "release_join_android_assert_qr_full_width",
+    "RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS",
+    'resource "join-request-qr-content" width',
+    "RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS",
     "release_join_android_assert_pending_qr",
     "release_join_require_fresh_ios_pending_qr",
     "roster-participant-accepted-$admin",
@@ -264,6 +276,34 @@ for required in (
 ):
     if required not in ui:
         raise SystemExit(f"Public UI driver is missing {required}")
+if "physical_width * 75" in ui or "appWidth * 0.75" in ios_test:
+    raise SystemExit("Mobile full-width QR gate still accepts a 75% screen-width QR")
+for source, label in (
+    (android_devices, "Android"),
+    (ios_devices, "iOS"),
+):
+    if "join-request-qr-content" not in source:
+        raise SystemExit(f"{label} shipped join UI lacks a content-width selector")
+for required in (
+    '"contentWidth": {',
+    "minimum_qr_content_width_bps = 9_800",
+    '"minimumRequiredBasisPoints": minimum_qr_content_width_bps',
+    '"androidObservedBasisPoints"',
+    '"iosObservedBasisPoints"',
+):
+    if required not in gate:
+        raise SystemExit(f"Mobile join receipt lacks QR width evidence: {required}")
+for source, label in (
+    (ios_frozen_gate, "frozen iOS gate"),
+    (release_provenance, "release provenance"),
+):
+    for required in (
+        "minimumRequiredBasisPoints",
+        "androidObservedBasisPoints",
+        "iosObservedBasisPoints",
+    ):
+        if required not in source:
+            raise SystemExit(f"{label} does not validate QR width evidence: {required}")
 
 for selector in (
     "network-setup-create",
@@ -405,6 +445,39 @@ for required in (
     if required not in desktop:
         raise SystemExit(f"Host-built macOS artifact path is missing {required}")
 for required in (
+    "release_join_reset_ios_state",
+    "testManualJoinAndRequireRosterCompletion",
+    "testManualAdminAddRequiresRosterProgress",
+    "macOS-admin-to-iPhone-manual",
+    "iPhone-admin-to-macOS-manual",
+    "desktopAdminIphoneJoiner",
+    "iphoneAdminDesktopJoiner",
+    "NVPN_RELEASE_JOIN_IOS_RECEIPT",
+    "release_join_validate_ios_reuse",
+):
+    if required not in desktop:
+        raise SystemExit(
+            f"macOS/iPhone frozen Release join gate is missing {required}"
+        )
+for source, label in (
+    (ios_frozen_gate, "frozen iOS gate"),
+    (release_provenance, "release provenance"),
+):
+    for required in (
+        "desktopAdminIphoneJoiner",
+        "iphoneAdminDesktopJoiner",
+        "macOS-admin-to-iPhone-manual",
+        "iPhone-admin-to-macOS-manual",
+    ):
+        if required not in source:
+            raise SystemExit(
+                f"{label} does not validate macOS/iPhone join evidence: {required}"
+            )
+if "desktop_mobile_join" not in local_release:
+    raise SystemExit(
+        "Local release platform evidence does not include the iPhone/macOS receipt"
+    )
+for required in (
     "ditto -x -k",
     "macos_release_join_artifact.py\" validate",
     "verify-import",
@@ -450,6 +523,41 @@ if "xcrun xctrace list devices" in release_gate:
 if "devicectl device info details" not in release_gate or "xcrun xcdevice list" not in release_gate:
     raise SystemExit("Release iPhone preflight does not use CoreDevice/xcdevice")
 PY
+
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  fake_qr_width=300
+  fake_content_width=400
+
+  release_join_android_dump_ui() { :; }
+  release_join_android_query_dumped() {
+    local kind="$1" expected="$2" output="$3"
+    [[ "$output" == width ]] || return 1
+    if [[ "$kind" == description && "$expected" == "Join request QR code" ]]; then
+      printf '%s\n' "$fake_qr_width"
+      return
+    fi
+    if [[ "$kind" == resource && "$expected" == join-request-qr-content ]]; then
+      printf '%s\n' "$fake_content_width"
+      return
+    fi
+    return 1
+  }
+
+  if release_join_android_assert_qr_full_width 2>/dev/null; then
+    echo "Android full-width gate accepted a 75% content-width QR" >&2
+    exit 1
+  fi
+  fake_qr_width=396
+  release_join_android_assert_qr_full_width || {
+    echo "Android full-width gate rejected a 99% content-width QR" >&2
+    exit 1
+  }
+  [[ "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" == 9900 ]] || {
+    echo "Android full-width gate did not record the observed content ratio" >&2
+    exit 1
+  }
+)
 
 (
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"

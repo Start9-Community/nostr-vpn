@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Signed macOS Release <-> physical Android manual join in both role directions.
+# Signed macOS Release <-> physical Android/iPhone manual join in both roles.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,6 +9,8 @@ source "$ROOT/scripts/release_common.sh"
 source "$ROOT/scripts/mobile_env.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 # shellcheck disable=SC1091
@@ -110,6 +112,13 @@ cleanup() {
   local status=$?
   local cleanup_status=0
   trap - EXIT
+  if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" ]] \
+      && kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null
+  then
+    kill "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
+    wait "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
+  fi
+  RELEASE_JOIN_IOS_TEST_PID=""
   if [[ -n "$remote_pid" ]] \
     && ! macos_release_stop_owned_child "$remote_pid"
   then
@@ -173,6 +182,34 @@ wait_log_marker() {
 
 marker_value() {
   sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $2=//p" "$1" | tail -n 1
+}
+
+ios_log() {
+  printf '%s/macos/%s.log\n' "$RESULT_DIR" "$1"
+}
+
+ios_marker_value_from() {
+  marker_value "$1" "$2"
+}
+
+ios_create_admin() {
+  local label="$1" log
+  log="$(ios_log "$label-create-admin")"
+  release_join_ios_run_test \
+    testCreateAdminNetworkAndReportPublicValues "$log" \
+    "NVPN_RELEASE_JOIN_NETWORK_NAME=$label"
+  RELEASE_JOIN_IOS_ADMIN_ID="$(
+    ios_marker_value_from "$log" NVPN_RELEASE_JOIN_ADMIN_ID
+  )"
+  RELEASE_JOIN_IOS_NETWORK_ID="$(
+    ios_marker_value_from "$log" NVPN_RELEASE_JOIN_NETWORK_ID
+  )"
+  release_join_valid_npub "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    || { echo "iPhone Release UI did not report a valid admin identity" >&2; return 1; }
+  [[ -n "$RELEASE_JOIN_IOS_NETWORK_ID" ]] || {
+    echo "iPhone Release UI did not report a network identity" >&2
+    return 1
+  }
 }
 
 finish_remote() {
@@ -340,6 +377,31 @@ if [[ "$ARTIFACT_ACTION" != "full" ]]; then
   exit 0
 fi
 
+for name in \
+  IOS_DEVICE \
+  RELEASE_JOIN_IOS_APP_PATH \
+  RELEASE_JOIN_IOS_DERIVED_DATA \
+  RELEASE_JOIN_IOS_XCTESTRUN \
+  RELEASE_JOIN_IOS_UDID \
+  NVPN_RELEASE_JOIN_IOS_RECEIPT
+do
+  [[ -n "${!name:-}" ]] || {
+    echo "macOS/iPhone Release join gate requires $name" >&2
+    exit 2
+  }
+done
+[[ -d "$RELEASE_JOIN_IOS_APP_PATH" \
+  && -d "$RELEASE_JOIN_IOS_DERIVED_DATA" \
+  && -s "$RELEASE_JOIN_IOS_XCTESTRUN" \
+  && -s "$NVPN_RELEASE_JOIN_IOS_RECEIPT" ]] || {
+  echo "macOS/iPhone Release join gate requires the validated iOS artifact set" >&2
+  exit 2
+}
+release_join_validate_ios_reuse || {
+  echo "macOS/iPhone Release join gate rejected the exact iOS artifact" >&2
+  exit 1
+}
+
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 [[ -n "$ANDROID_REQUESTED" ]] || {
   echo "Set NVPN_ANDROID_SERIAL to the exact physical Android phone" >&2
@@ -423,10 +485,100 @@ release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_ID" \
     exit 1
   }
 
+# macOS admin -> physical iPhone joiner. XCTest only drives the shipped
+# accessibility tree; the app receives no launch arguments or environment.
+release_join_reset_ios_state
+desktop_ios_admin_log="$RESULT_DIR/macos/desktop-ios-admin.log"
+remote create-admin "ReleaseMacIphoneAdmin" >"$desktop_ios_admin_log" 2>&1
+DESKTOP_IOS_ADMIN_ID="$(
+  marker_value "$desktop_ios_admin_log" NVPN_RELEASE_JOIN_ADMIN_ID
+)"
+DESKTOP_IOS_NETWORK_ID="$(
+  marker_value "$desktop_ios_admin_log" NVPN_RELEASE_JOIN_NETWORK_ID
+)"
+release_join_valid_npub "$DESKTOP_IOS_ADMIN_ID"
+[[ -n "$DESKTOP_IOS_NETWORK_ID" ]]
+ios_join_log="$(ios_log macos-admin-iphone-join)"
+release_join_ios_start_test \
+  testManualJoinAndRequireRosterCompletion "$ios_join_log" \
+  "NVPN_RELEASE_JOIN_ADMIN_ID=$DESKTOP_IOS_ADMIN_ID" \
+  "NVPN_RELEASE_JOIN_NETWORK_ID=$DESKTOP_IOS_NETWORK_ID"
+release_join_ios_wait_marker NVPN_RELEASE_JOIN_JOINER_ID= 10 \
+  || { echo "iPhone manual join did not expose its public identity" >&2; exit 1; }
+IOS_JOINER_ID="$(
+  ios_marker_value_from "$ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID
+)"
+release_join_valid_npub "$IOS_JOINER_ID"
+release_join_ios_wait_marker NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10 \
+  || { echo "iPhone did not submit through shipped manual-join controls" >&2; exit 1; }
+desktop_add_ios_log="$RESULT_DIR/macos/desktop-add-iphone.log"
+remote admin-add "$IOS_JOINER_ID" ReleaseGateIphone \
+  >"$desktop_add_ios_log" 2>&1 &
+remote_pid=$!
+wait_log_marker \
+  "$desktop_add_ios_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
+desktop_ios_submitted_ms="$(
+  marker_value \
+    "$desktop_add_ios_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
+)"
+wait_log_marker \
+  "$desktop_add_ios_log" "NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=$IOS_JOINER_ID"
+wait_log_marker "$desktop_add_ios_log" NVPN_MACOS_RELEASE_APP_HOLDING=1
+release_join_ios_finish_test \
+  || {
+    echo "iPhone did not receive and retain the macOS signed roster" >&2
+    exit 1
+  }
+desktop_ios_completed_ms="$(release_join_now_ms)"
+assert_delivery_deadline \
+  "$desktop_ios_submitted_ms" "$desktop_ios_completed_ms" \
+  "macOS-admin-to-iPhone-manual"
+kill "$remote_pid" >/dev/null 2>&1 || true
+wait "$remote_pid" >/dev/null 2>&1 || true
+remote_pid=""
+remote verify "$IOS_JOINER_ID" \
+  >"$RESULT_DIR/macos/desktop-ios-admin-verify.log"
+
+# Physical iPhone admin -> macOS joiner.
+release_join_reset_ios_state
+ios_create_admin "Release iPhone macOS admin"
+desktop_ios_join_log="$RESULT_DIR/macos/iphone-admin-desktop-join.log"
+remote manual-join \
+  "$RELEASE_JOIN_IOS_ADMIN_ID" "$RELEASE_JOIN_IOS_NETWORK_ID" \
+  >"$desktop_ios_join_log" 2>&1 &
+remote_pid=$!
+wait_log_marker "$desktop_ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID= 10
+DESKTOP_IOS_JOINER_ID="$(
+  marker_value "$desktop_ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID
+)"
+release_join_valid_npub "$DESKTOP_IOS_JOINER_ID"
+wait_log_marker "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
+ios_admin_log="$(ios_log iphone-admin-macos-add)"
+release_join_ios_run_test \
+  testManualAdminAddRequiresRosterProgress "$ios_admin_log" \
+  "NVPN_RELEASE_JOIN_JOINER_ID=$DESKTOP_IOS_JOINER_ID"
+ios_admin_submitted_ms="$(
+  ios_marker_value_from "$ios_admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
+)"
+finish_remote "$desktop_ios_join_log" \
+  || {
+    echo "macOS joiner did not receive the iPhone's signed roster" >&2
+    exit 1
+  }
+remote verify "$RELEASE_JOIN_IOS_ADMIN_ID" \
+  >"$RESULT_DIR/macos/desktop-ios-joiner-verify.log"
+ios_admin_completed_ms="$(release_join_now_ms)"
+assert_delivery_deadline \
+  "$ios_admin_submitted_ms" "$ios_admin_completed_ms" \
+  "iPhone-admin-to-macOS-manual"
+release_join_launch_ios_release
+release_join_assert_one_ios_process
+
 python3 - \
   "$RESULT_DIR/macos/summary.json" \
   "$RESULT_DIR/macos/delivery-times.tsv" \
   "$RESULT_DIR/macos/artifact.json" \
+  "$NVPN_RELEASE_JOIN_IOS_RECEIPT" \
   "$APP_GIT_SHA" \
   "$APP_GIT_TREE" <<'PY'
 import hashlib
@@ -441,14 +593,18 @@ for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines():
 expected_timings = {
     "macOS-admin-to-Android-manual",
     "Android-admin-to-macOS-manual",
+    "macOS-admin-to-iPhone-manual",
+    "iPhone-admin-to-macOS-manual",
 }
 if set(timings) != expected_timings or any(
     elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
 ):
-    raise SystemExit("macOS/Android join timing receipt is incomplete or slow")
+    raise SystemExit("macOS/mobile join timing receipt is incomplete or slow")
 artifact_path = pathlib.Path(sys.argv[3])
 artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-app_sha, app_tree = sys.argv[4:]
+ios_artifact_path = pathlib.Path(sys.argv[4])
+ios_artifact = json.loads(ios_artifact_path.read_text(encoding="utf-8"))
+app_sha, app_tree = sys.argv[5:]
 if (
     artifact.get("receiptSchema") != 1
     or artifact.get("appGitSha") != app_sha
@@ -457,6 +613,25 @@ if (
     or not artifact.get("appExecutableSha256")
 ):
     raise SystemExit("macOS join artifact receipt is not exact")
+ios_identity_keys = (
+    "appBundleTreeSha256",
+    "appCodeDirectoryHash",
+    "packetTunnelCodeDirectoryHash",
+    "appExecutableSha256",
+    "packetTunnelExecutableSha256",
+    "signerCertificateSha256",
+    "installedBundleIdentifier",
+)
+if (
+    ios_artifact.get("receiptSchema") != 2
+    or ios_artifact.get("artifactType")
+    != "iOS company Ad Hoc Release app"
+    or ios_artifact.get("appGitSha") != app_sha
+    or ios_artifact.get("appGitTree") != app_tree
+    or ios_artifact.get("companySigningVerified") is not True
+    or any(not ios_artifact.get(key) for key in ios_identity_keys)
+):
+    raise SystemExit("iPhone join artifact receipt is not exact")
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
@@ -470,6 +645,15 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
                     artifact_path.read_bytes()
                 ).hexdigest(),
                 "appExecutableSha256": artifact["appExecutableSha256"],
+                "ios": {
+                    "artifactReceiptSha256": hashlib.sha256(
+                        ios_artifact_path.read_bytes()
+                    ).hexdigest(),
+                    **{
+                        key: ios_artifact[key]
+                        for key in ios_identity_keys
+                    },
+                },
             },
             "builtOnHost": True,
             "builtOnTestVm": False,
@@ -482,10 +666,13 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             "acceptedSelectorSemantics": "participant-state-not-pending",
             "desktopAdminAndroidJoiner": True,
             "androidAdminDesktopJoiner": True,
+            "desktopAdminIphoneJoiner": True,
+            "iphoneAdminDesktopJoiner": True,
             "exactRosterOnBothSides": True,
             "acceptedRosterRetainedAcrossRelaunch": True,
             "desktopRelaunchDurability": True,
             "pixelRelaunchDurability": True,
+            "iphoneRelaunchDurability": True,
             "deliveryDeadlineMilliseconds": 15_000,
             "deliveryMilliseconds": timings,
         },

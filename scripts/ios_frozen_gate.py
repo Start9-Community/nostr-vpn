@@ -435,6 +435,7 @@ def validate_mobile_join_receipt(
     )
     qr = receipt.get("qr")
     manual = receipt.get("manual")
+    content_width = receipt.get("contentWidth")
     require(
         isinstance(qr, dict)
         and qr.get("iphoneAdminPixelJoiner") is True
@@ -447,7 +448,15 @@ def validate_mobile_join_receipt(
         and manual.get("pixelAdminIphoneJoiner") is True
         and manual.get("exactRosterOnBothSides") is True
         and manual.get("acceptedRosterOnly") is True
-        and manual.get("joinerRelaunchDurable") is True,
+        and manual.get("joinerRelaunchDurable") is True
+        and isinstance(content_width, dict)
+        and content_width.get("minimumRequiredBasisPoints") == 9_800
+        and isinstance(
+            content_width.get("androidObservedBasisPoints"), int
+        )
+        and content_width.get("androidObservedBasisPoints") >= 9_800
+        and isinstance(content_width.get("iosObservedBasisPoints"), int)
+        and content_width.get("iosObservedBasisPoints") >= 9_800,
         "mobile join receipt lacks strict public-UI/relaunch semantics",
     )
 
@@ -535,8 +544,10 @@ def validate_mobile_network_receipt(
 def validate_desktop_mobile_join_receipt(
     receipt: dict[str, Any],
     mobile_artifact: dict[str, Any],
+    mobile_artifact_receipt_sha256: str,
 ) -> None:
     artifact = receipt.get("artifact")
+    ios_artifact = artifact.get("ios") if isinstance(artifact, dict) else None
     timings = receipt.get("deliveryMilliseconds")
     require(
         receipt.get("schema") == 1
@@ -544,20 +555,29 @@ def validate_desktop_mobile_join_receipt(
         and receipt.get("publicUiOnly") is True
         and receipt.get("privateStateRead") is False
         and receipt.get("fixtureInvoked") is False
+        and receipt.get("appLaunchArgumentsOrEnvironment") is False
         and receipt.get("desktopAdminAndroidJoiner") is True
         and receipt.get("androidAdminDesktopJoiner") is True
+        and receipt.get("desktopAdminIphoneJoiner") is True
+        and receipt.get("iphoneAdminDesktopJoiner") is True
         and receipt.get("acceptedRosterRetainedAcrossRelaunch") is True
         and receipt.get("desktopRelaunchDurability") is True
         and receipt.get("pixelRelaunchDurability") is True
+        and receipt.get("iphoneRelaunchDurability") is True
         and receipt.get("deliveryDeadlineMilliseconds") == 15_000
         and isinstance(artifact, dict)
         and artifact.get("appGitSha") == mobile_artifact.get("appGitSha")
         and artifact.get("appGitTree") == mobile_artifact.get("appGitTree")
+        and isinstance(ios_artifact, dict)
+        and ios_artifact.get("artifactReceiptSha256")
+        == mobile_artifact_receipt_sha256
         and isinstance(timings, dict)
         and set(timings)
         == {
             "macOS-admin-to-Android-manual",
             "Android-admin-to-macOS-manual",
+            "macOS-admin-to-iPhone-manual",
+            "iPhone-admin-to-macOS-manual",
         }
         and all(
             isinstance(value, int) and 0 <= value <= 15_000
@@ -565,6 +585,20 @@ def validate_desktop_mobile_join_receipt(
         ),
         "desktop/mobile join receipt is incomplete or not source-bound",
     )
+    for field in (
+        "appBundleTreeSha256",
+        "appCodeDirectoryHash",
+        "packetTunnelCodeDirectoryHash",
+        "appExecutableSha256",
+        "packetTunnelExecutableSha256",
+        "signerCertificateSha256",
+        "installedBundleIdentifier",
+    ):
+        require(
+            ios_artifact.get(field) == mobile_artifact.get(field)
+            and bool(mobile_artifact.get(field)),
+            f"macOS/iPhone join artifact identity differs at {field}",
+        )
 
 
 def seal_gate(args: argparse.Namespace) -> None:
@@ -599,7 +633,11 @@ def seal_gate(args: argparse.Namespace) -> None:
         mobile,
         "underlay-lifecycle",
     )
-    validate_desktop_mobile_join_receipt(desktop_join, mobile)
+    validate_desktop_mobile_join_receipt(
+        desktop_join,
+        mobile,
+        sha256_file(pathlib.Path(args.mobile_receipt)),
+    )
     required_gates = sorted(set(args.required_gate))
     require(
         required_gates == REQUIRED_REAL_DEVICE_GATES,
@@ -684,7 +722,11 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         mobile,
         "underlay-lifecycle",
     )
-    validate_desktop_mobile_join_receipt(desktop_join, mobile)
+    validate_desktop_mobile_join_receipt(
+        desktop_join,
+        mobile,
+        sha256_file(sealed_mobile_receipt),
+    )
     required_hash(
         seal.get("archiveReceiptSha256"),
         "sealed archive receipt hash",

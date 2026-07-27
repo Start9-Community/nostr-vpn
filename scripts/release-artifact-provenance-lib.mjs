@@ -438,6 +438,7 @@ function requireMobileJoinReceipt({
   iosArtifact,
   iosArtifactReceiptSha256,
 }) {
+  const contentWidth = receipt.contentWidth
   if (
     receipt.schema !== 1
     || receipt.platform !== 'mobile'
@@ -456,6 +457,11 @@ function requireMobileJoinReceipt({
     || receipt.manual?.exactRosterOnBothSides !== true
     || receipt.manual?.acceptedRosterOnly !== true
     || receipt.manual?.joinerRelaunchDurable !== true
+    || contentWidth?.minimumRequiredBasisPoints !== 9800
+    || !Number.isSafeInteger(contentWidth?.androidObservedBasisPoints)
+    || contentWidth.androidObservedBasisPoints < 9800
+    || !Number.isSafeInteger(contentWidth?.iosObservedBasisPoints)
+    || contentWidth.iosObservedBasisPoints < 9800
   ) {
     throw new Error(
       'Android/iOS mobile join receipt is not strict public-UI/relaunch evidence.',
@@ -518,38 +524,61 @@ function requireMacosJoinReceipt({
   receipt,
   artifactReceipt,
   artifactReceiptSha256,
+  iosArtifact,
+  iosArtifactReceiptSha256,
   commit,
   tree,
 }) {
   requirePublicUiJoinReceipt(
     receipt,
     'macos',
-    'macOS/Pixel public-UI join receipt',
+    'macOS/mobile public-UI join receipt',
   )
   requireReceiptSource(receipt, {
     commit,
     tree,
-    label: 'macOS/Pixel public-UI join receipt',
+    label: 'macOS/mobile public-UI join receipt',
   })
   if (
     receipt.appLaunchArgumentsOrEnvironment !== false
     || receipt.desktopAdminAndroidJoiner !== true
     || receipt.androidAdminDesktopJoiner !== true
+    || receipt.desktopAdminIphoneJoiner !== true
+    || receipt.iphoneAdminDesktopJoiner !== true
     || receipt.exactRosterOnBothSides !== true
     || receipt.acceptedRosterRetainedAcrossRelaunch !== true
+    || receipt.iphoneRelaunchDurability !== true
     || receipt.artifact?.artifactReceiptSha256 !== artifactReceiptSha256
     || receipt.artifact?.appExecutableSha256
       !== artifactReceipt.appExecutableSha256
+    || receipt.artifact?.ios?.artifactReceiptSha256
+      !== iosArtifactReceiptSha256
   ) {
-    throw new Error('macOS/Pixel public-UI join receipt is incomplete.')
+    throw new Error('macOS/mobile public-UI join receipt is incomplete.')
   }
+  requireIdentityFieldsMatch(
+    receipt.artifact.ios,
+    iosArtifact,
+    [
+      'appBundleTreeSha256',
+      'appCodeDirectoryHash',
+      'packetTunnelCodeDirectoryHash',
+      'appExecutableSha256',
+      'packetTunnelExecutableSha256',
+      'signerCertificateSha256',
+      'installedBundleIdentifier',
+    ],
+    'macOS/iOS join artifact',
+  )
   requireExactDeliveryTimings(
     receipt,
     [
       'macOS-admin-to-Android-manual',
       'Android-admin-to-macOS-manual',
+      'macOS-admin-to-iPhone-manual',
+      'iPhone-admin-to-macOS-manual',
     ],
-    'macOS/Pixel public-UI join receipt',
+    'macOS/mobile public-UI join receipt',
   )
 }
 
@@ -1182,9 +1211,17 @@ export function collectReleaseGateReceipts({
     tree,
     label: 'macOS Release artifact receipt',
   })
+  if (
+    platformReceiptPaths.macos.public_ui_join
+    !== platformReceiptPaths.ios.desktop_mobile_join
+  ) {
+    throw new Error(
+      'macOS and iOS release evidence must use one exact desktop/mobile join receipt.',
+    )
+  }
   const macosJoin = readRequiredJson(
     platformReceiptPaths.macos.public_ui_join,
-    'macOS/Pixel public-UI join receipt',
+    'macOS/mobile public-UI join receipt',
   )
   requireMacosJoinReceipt({
     receipt: macosJoin,
@@ -1192,6 +1229,8 @@ export function collectReleaseGateReceipts({
     artifactReceiptSha256: sha256FileSync(
       platformReceiptPaths.macos.artifact,
     ),
+    iosArtifact,
+    iosArtifactReceiptSha256,
     commit,
     tree,
   })
@@ -1215,7 +1254,7 @@ export function collectReleaseGateReceipts({
       sha256FileSync(platformReceiptPaths.ios.mobile_join),
     ],
     'desktop-mobile-manual-join': [
-      sha256FileSync(platformReceiptPaths.macos.public_ui_join),
+      sha256FileSync(platformReceiptPaths.ios.desktop_mobile_join),
     ],
     'wifi-hotspot-underlay-roaming': [
       iosNetworkReceipts.underlay_lifecycle,

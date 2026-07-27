@@ -7,6 +7,8 @@
 RELEASE_JOIN_ANDROID_UI_XML=""
 RELEASE_JOIN_IOS_TEST_PID=""
 RELEASE_JOIN_IOS_TEST_LOG=""
+RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
+RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
 
 release_join_now_ms() {
   python3 - <<'PY'
@@ -173,18 +175,29 @@ release_join_android_show_qr() {
 }
 
 release_join_android_assert_qr_full_width() {
-  local qr_width physical_width size
+  local qr_width content_width ratio_bps
+  release_join_android_dump_ui
   qr_width="$(
-    release_join_android_query description "Join request QR code" width
+    release_join_android_query_dumped \
+      description "Join request QR code" width
   )" || return 1
-  size="$("${ADB[@]}" shell wm size | tr -d '\r' | sed -n 's/^Physical size: //p')"
-  physical_width="${size%x*}"
-  [[ "$qr_width" =~ ^[1-9][0-9]*$ && "$physical_width" =~ ^[1-9][0-9]*$ ]] \
+  content_width="$(
+    release_join_android_query_dumped \
+      resource "join-request-qr-content" width
+  )" || return 1
+  [[ "$qr_width" =~ ^[1-9][0-9]*$ \
+    && "$content_width" =~ ^[1-9][0-9]*$ ]] \
     || return 1
-  ((qr_width * 100 >= physical_width * 75)) || {
-    echo "Android join QR is not full width ($qr_width/$physical_width px)" >&2
+  ratio_bps=$((qr_width * 10000 / content_width))
+  ((ratio_bps >= RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS)) || {
+    echo "Android join QR does not fill its content width ($qr_width/$content_width px)" >&2
     return 1
   }
+  if [[ -z "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" ]] \
+      || ((ratio_bps < RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS))
+  then
+    RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS="$ratio_bps"
+  fi
 }
 
 release_join_android_assert_pending_qr() {

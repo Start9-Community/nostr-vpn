@@ -10,6 +10,7 @@ import XCTest
 final class NostrVpnReleaseJoinUITests: XCTestCase {
     private let app = XCUIApplication()
     private let environment = ProcessInfo.processInfo.environment
+    private let qrContentWidthMinimumBasisPoints = 9_800
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -39,7 +40,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
         let qr = element("join-request-qr")
         XCTAssertTrue(qr.waitForExistence(timeout: 10), "Shipped full-width join QR was not visible")
-        assertQrIsFullWidth(qr)
+        let initialQrWidthBasisPoints = assertQrIsFullWidth(qr)
         emit("NVPN_RELEASE_JOIN_QR_READY=1")
 
         XCUIDevice.shared.press(.home)
@@ -49,7 +50,11 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             qr.waitForExistence(timeout: 5),
             "Pending join QR disappeared across a real background/foreground cycle"
         )
-        assertQrIsFullWidth(qr)
+        let foregroundQrWidthBasisPoints = assertQrIsFullWidth(qr)
+        emit(
+            "NVPN_RELEASE_JOIN_QR_CONTENT_WIDTH_BPS="
+                + "\(min(initialQrWidthBasisPoints, foregroundQrWidthBasisPoints))"
+        )
         emit("NVPN_RELEASE_JOIN_LIFECYCLE_READY=1")
 
         XCTAssertTrue(
@@ -186,14 +191,24 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         }
     }
 
-    private func assertQrIsFullWidth(_ qr: XCUIElement) {
-        let appWidth = app.windows.firstMatch.frame.width
-        XCTAssertGreaterThan(appWidth, 0)
+    private func assertQrIsFullWidth(_ qr: XCUIElement) -> Int {
+        let content = element("join-request-qr-content")
+        XCTAssertTrue(
+            content.waitForExistence(timeout: 5),
+            "Join QR content-width boundary was not visible"
+        )
+        let contentWidth = content.frame.width
+        XCTAssertGreaterThan(contentWidth, 0)
+        guard contentWidth > 0 else {
+            return 0
+        }
+        let ratioBasisPoints = Int((qr.frame.width / contentWidth * 10_000).rounded(.down))
         XCTAssertGreaterThanOrEqual(
-            qr.frame.width,
-            appWidth * 0.75,
+            ratioBasisPoints,
+            qrContentWidthMinimumBasisPoints,
             "Join QR did not occupy the mobile content width"
         )
+        return ratioBasisPoints
     }
 
     private func openLinkDevice() {

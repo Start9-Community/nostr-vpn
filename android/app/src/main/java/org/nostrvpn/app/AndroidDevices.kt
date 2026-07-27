@@ -5,6 +5,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -307,11 +308,20 @@ private fun NetworkSetupCard(
                     NetworkSetupMode.Join -> {
                         SetupChoiceCard("Join Network", Color(0xFF2563EB)) {
                             if (joinRequestQrCodeOrLink.isNotBlank()) {
-                                QrCode(
-                                    text = joinRequestQrCodeOrLink,
-                                    qrJson = qrJson,
-                                    accessibilityDescription = "Join request QR code",
-                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .mobileUiSelector(
+                                            id = "join-request-qr-content",
+                                            description = "Join request QR content width",
+                                        ),
+                                ) {
+                                    QrCode(
+                                        text = joinRequestQrCodeOrLink,
+                                        qrJson = qrJson,
+                                        accessibilityDescription = "Join request QR code",
+                                    )
+                                }
                                 CopyButton(joinRequestQrCodeOrLink, "Copy request")
                             }
 

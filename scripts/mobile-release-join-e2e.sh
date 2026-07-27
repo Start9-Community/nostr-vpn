@@ -174,7 +174,7 @@ phase_ios_admin_android_qr() {
 }
 
 phase_android_admin_ios_qr() {
-  local join_log submitted completed
+  local join_log submitted completed ios_qr_content_width_bps
   release_join_reset_ios_state
   release_join_reset_android_state
   release_join_android_create_admin
@@ -202,6 +202,14 @@ phase_android_admin_ios_qr() {
   )"
   release_join_ios_finish_test \
     || fail "iPhone stayed on QR view or lacked the exact Pixel admin roster row"
+  ios_qr_content_width_bps="$(
+    ios_marker_value_from \
+      "$join_log" NVPN_RELEASE_JOIN_QR_CONTENT_WIDTH_BPS
+  )"
+  [[ "$ios_qr_content_width_bps" =~ ^[1-9][0-9]*$ ]] \
+    && ((ios_qr_content_width_bps >= RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS)) \
+    || fail "iPhone QR content-width measurement is missing or too narrow"
+  RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS="$ios_qr_content_width_bps"
   completed="$(release_join_now_ms)"
   assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-QR"
 }
@@ -280,6 +288,9 @@ release_join_assert_one_android_package
 release_join_assert_one_android_process
 release_join_launch_ios_release
 release_join_assert_one_ios_process
+[[ "${RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
+  && "${RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ ]] \
+  || fail "mobile QR content-width evidence is incomplete"
 
 case "$MACOS_JOIN_GATE" in
   0|false|FALSE|False|no|NO|No|off|OFF|Off) ;;
@@ -300,6 +311,8 @@ python3 - \
   "${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:?exact Android receipt is required}" \
   "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
   "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
+  "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
+  "$RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS" \
   "$MACOS_JOIN_GATE" <<'PY'
 import hashlib
 import json
@@ -317,6 +330,8 @@ import sys
     android_receipt_path,
     ios_app_tree,
     ios_receipt_path,
+    android_qr_content_width_bps,
+    ios_qr_content_width_bps,
     desktop_mode,
 ) = sys.argv[1:]
 
@@ -404,6 +419,16 @@ if set(timings) != expected_timings or any(
     elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
 ):
     raise SystemExit("mobile join delivery timing receipt is incomplete or slow")
+minimum_qr_content_width_bps = 9_800
+qr_content_width_bps = {
+    "androidObservedBasisPoints": int(android_qr_content_width_bps),
+    "iosObservedBasisPoints": int(ios_qr_content_width_bps),
+}
+if any(
+    observed < minimum_qr_content_width_bps
+    for observed in qr_content_width_bps.values()
+):
+    raise SystemExit("mobile join QR did not fill its content width")
 desktop_enabled = desktop_mode.lower() not in {
     "0", "false", "no", "off",
 }
@@ -439,6 +464,10 @@ with open(path, "w", encoding="utf-8") as handle:
             "privateAppStateRead": False,
             "appLaunchArgumentsOrEnvironment": False,
             "deliveryDeadlineMilliseconds": 15_000,
+            "contentWidth": {
+                "minimumRequiredBasisPoints": minimum_qr_content_width_bps,
+                **qr_content_width_bps,
+            },
             "qr": {
                 "iphoneAdminPixelJoiner": True,
                 "pixelAdminIphoneJoiner": True,

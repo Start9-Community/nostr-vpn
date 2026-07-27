@@ -244,6 +244,7 @@ struct JoinNetworkCard: View {
                     }
                     .aspectRatio(1, contentMode: .fit)
                     .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("join-request-qr-content")
                     HStack(spacing: 10) {
                         Button {
                             model.copy(joinRequestQrCodeOrLink)
