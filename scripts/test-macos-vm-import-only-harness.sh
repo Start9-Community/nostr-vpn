@@ -303,4 +303,6 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
         raise SystemExit("receipt accepted a changed imported fixture mode")
 PY
 
+"$ROOT/scripts/test-macos-release-app-ownership-harness.sh"
+
 echo "macOS VM host-build/import-only contract passed"

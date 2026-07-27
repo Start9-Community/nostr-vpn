@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-release-app-ownership.sh"
 ARTIFACT_DIR="${NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR:-$ROOT/artifacts/macos-release-mobile-join}"
 PACKAGE="$ARTIFACT_DIR/imported"
 APP_PATH="$PACKAGE/Nostr VPN.app"
@@ -23,13 +25,20 @@ EXPECTED_SIGNING_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-}"
 EXPECTED_SIGNER_CERT_SHA256="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
 APP_LOG="$ARTIFACT_DIR/app.log"
 APP_PID=""
+MACOS_RELEASE_APP_STATE_DIR="$ARTIFACT_DIR/app-ownership"
+MACOS_RELEASE_APP_INSTALLED_EXE="/Applications/Nostr VPN.app/Contents/MacOS/Nostr VPN"
+MACOS_RELEASE_APP_GATE_EXE="$APP_EXE"
+MACOS_RELEASE_APP_PROCESS_NAME="Nostr VPN"
+OWNED_PID_FILE="$MACOS_RELEASE_APP_STATE_DIR/imported.pid"
 
 mkdir -p "$ARTIFACT_DIR"
 
 stop_app() {
-  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
-    kill "$APP_PID" >/dev/null 2>&1 || true
-    wait "$APP_PID" >/dev/null 2>&1 || true
+  if [[ -n "$APP_PID" ]]; then
+    if kill -0 "$APP_PID" >/dev/null 2>&1; then
+      macos_release_app_stop_pid "$APP_PID" "$APP_EXE"
+    fi
+    rm -f "$OWNED_PID_FILE"
   fi
   APP_PID=""
 }
@@ -72,8 +81,11 @@ verify_import() {
 
 launch_app() {
   verify_import
-  pkill -x "Nostr VPN" >/dev/null 2>&1 || true
-  sleep 0.25
+  macos_release_app_acquire
+  [[ ! -f "$OWNED_PID_FILE" ]] || {
+    echo "a previous imported app launch is still owned" >&2
+    return 1
+  }
   (
     exec /usr/bin/env -i \
       HOME="$HOME" \
@@ -85,6 +97,8 @@ launch_app() {
       "$APP_EXE"
   ) >>"$APP_LOG" 2>&1 &
   APP_PID=$!
+  printf '%s\n' "$APP_PID" >"$OWNED_PID_FILE.tmp"
+  mv "$OWNED_PID_FILE.tmp" "$OWNED_PID_FILE"
   local deadline=$((SECONDS + 10))
   while ((SECONDS < deadline)); do
     kill -0 "$APP_PID" >/dev/null 2>&1 && return 0
@@ -113,6 +127,7 @@ run_driver_hold() {
 
 stage() {
   stop_app
+  macos_release_app_restore
   rm -rf "$ARTIFACT_DIR"
   mkdir -p "$ARTIFACT_DIR"
 }
@@ -168,7 +183,7 @@ case "${1:-}" in
     run_driver release-verify "$2" _
     ;;
   cleanup)
-    pkill -x "Nostr VPN" >/dev/null 2>&1 || true
+    macos_release_app_restore
     ;;
   *)
     echo "usage: $0 <stage|prepare|verify-import|create-admin|manual-join|admin-add|verify|cleanup>" >&2

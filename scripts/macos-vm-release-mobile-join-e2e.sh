@@ -105,6 +105,7 @@ APP_SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
 release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 remote_pid=""
+remote_app_ownership_armed=0
 cleanup() {
   local status=$?
   trap - EXIT
@@ -112,7 +113,9 @@ cleanup() {
     kill "$remote_pid" >/dev/null 2>&1 || true
     wait "$remote_pid" >/dev/null 2>&1 || true
   fi
-  remote cleanup >/dev/null 2>&1 || true
+  if [[ "$remote_app_ownership_armed" -eq 1 ]]; then
+    remote cleanup >/dev/null 2>&1 || true
+  fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"
 }
@@ -342,6 +345,7 @@ rm -f "$RESULT_DIR/macos/delivery-times.tsv"
 # macOS admin -> physical Android joiner.
 release_join_reset_android_state
 desktop_admin_log="$RESULT_DIR/macos/desktop-admin.log"
+remote_app_ownership_armed=1
 remote create-admin "ReleaseDesktopAdmin" >"$desktop_admin_log" 2>&1
 DESKTOP_ADMIN_ID="$(marker_value "$desktop_admin_log" NVPN_RELEASE_JOIN_ADMIN_ID)"
 DESKTOP_NETWORK_ID="$(marker_value "$desktop_admin_log" NVPN_RELEASE_JOIN_NETWORK_ID)"
