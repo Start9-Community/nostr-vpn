@@ -374,6 +374,8 @@ def validate_network_snapshot(value: Any, label: str) -> dict[str, Any]:
 def validate_probe(
     result: dict[str, Any],
     target: dict[str, Any],
+    artifact: dict[str, Any],
+    source: dict[str, str],
 ) -> dict[str, Any]:
     label = f"target {target['id']} probe evidence"
     exact(result.get("schema"), 2, f"{label} schema")
@@ -395,6 +397,101 @@ def validate_probe(
     probe_fips_version = nonempty(
         result.get("probeFipsCoreVersion"),
         f"{label} probeFipsCoreVersion",
+    )
+    oracle = mapping(result.get("identityOracle"), f"{label} identityOracle")
+    exact(
+        oracle.get("kind"),
+        "exact-candidate-read-only-status-v1",
+        f"{label} identityOracle.kind",
+    )
+    true(oracle.get("readOnly"), f"{label} identityOracle.readOnly")
+    exact(
+        oracle.get("statusDiscoverSecs"),
+        0,
+        f"{label} identityOracle.statusDiscoverSecs",
+    )
+    exact(
+        hex64(
+            oracle.get("candidateBinarySha256"),
+            f"{label} identityOracle.candidateBinarySha256",
+        ),
+        artifact["_installed_hash"],
+        f"{label} identityOracle exact candidate executable",
+    )
+    positive(
+        oracle.get("candidateBinarySize"),
+        f"{label} identityOracle.candidateBinarySize",
+    )
+    exact(
+        nonempty(
+            oracle.get("candidateAppVersion"),
+            f"{label} identityOracle.candidateAppVersion",
+        ),
+        source["appVersion"],
+        f"{label} identityOracle candidate app version",
+    )
+    exact(
+        nonempty(
+            oracle.get("candidateFipsCoreVersion"),
+            f"{label} identityOracle.candidateFipsCoreVersion",
+        ),
+        f"{source['fipsVersion']} (rev {source['fipsGitSha'][:10]})",
+        f"{label} identityOracle candidate FIPS version",
+    )
+    exact(
+        hex64(
+            oracle.get("installedObservationBinarySha256"),
+            f"{label} identityOracle.installedObservationBinarySha256",
+        ),
+        probe_binary_hash,
+        f"{label} installed observation executable",
+    )
+    for before_field, after_field, receipt_label in (
+        ("serviceBeforeSha256", "serviceAfterSha256", "service"),
+        ("configBeforeSha256", "configAfterSha256", "config"),
+        (
+            "signedRosterStoreBeforeSha256",
+            "signedRosterStoreAfterSha256",
+            "signed roster store",
+        ),
+        ("networkBeforeSha256", "networkAfterSha256", "network"),
+    ):
+        before_receipt = hex64(
+            oracle.get(before_field),
+            f"{label} identityOracle.{before_field}",
+        )
+        after_receipt = hex64(
+            oracle.get(after_field),
+            f"{label} identityOracle.{after_field}",
+        )
+        exact(
+            after_receipt,
+            before_receipt,
+            f"{label} candidate read-only {receipt_label} receipt",
+        )
+    hex64(
+        oracle.get("candidateStatusReceiptSha256"),
+        f"{label} identityOracle.candidateStatusReceiptSha256",
+    )
+    identity_input_before = hex64(
+        oracle.get("identityInputBeforeSha256"),
+        f"{label} identityOracle.identityInputBeforeSha256",
+    )
+    exact(
+        hex64(
+            oracle.get("identityInputAfterSha256"),
+            f"{label} identityOracle.identityInputAfterSha256",
+        ),
+        identity_input_before,
+        f"{label} candidate private identity inputs",
+    )
+    positive(
+        oracle.get("identityInputCount"),
+        f"{label} identityOracle.identityInputCount",
+    )
+    true(
+        oracle.get("identitySnapshotRemoved"),
+        f"{label} identityOracle.identitySnapshotRemoved",
     )
     identity = hex64(
         result.get("machineIdentitySha256"), f"{label} machineIdentitySha256"
@@ -436,6 +533,7 @@ def validate_probe(
         "probeBinarySha256": probe_binary_hash,
         "probeAppVersion": probe_app_version,
         "probeFipsCoreVersion": probe_fips_version,
+        "identityOracle": dict(oracle),
         "service": service,
         "config": config,
         "network": network,

@@ -36,6 +36,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
 from typing import Any
 
 from fleet_release_canary_evidence import (
@@ -775,12 +776,66 @@ def validate_artifacts(
     return artifacts
 
 
+def validate_inventory_freshness(inventory: dict[str, Any]) -> int:
+    freshness = inventory.get("rosterFreshness")
+    if not isinstance(freshness, dict) or set(freshness) != {
+        "maxAgeSeconds",
+        "validatedAt",
+    }:
+        fail("fleet inventory rosterFreshness fields are invalid")
+    max_age = freshness.get("maxAgeSeconds")
+    if (
+        not isinstance(max_age, int)
+        or isinstance(max_age, bool)
+        or max_age < 300
+        or max_age > 1800
+    ):
+        fail("fleet inventory max evidence age must be between 300 and 1800")
+    snapshot = inventory.get("rosterSnapshot")
+    if not isinstance(snapshot, dict):
+        fail("fleet inventory rosterSnapshot is missing")
+    timestamps: list[tuple[str, Any]] = [
+        ("rosterFreshness.validatedAt", freshness.get("validatedAt")),
+        ("rosterSnapshot.capturedAt", snapshot.get("capturedAt")),
+    ]
+    coverage = inventory.get("rosterCoverage")
+    if not isinstance(coverage, list) or not coverage:
+        fail("fleet inventory rosterCoverage is missing")
+    timestamps.extend(
+        (
+            f"rosterCoverage[{index}].observedAt",
+            row.get("observedAt") if isinstance(row, dict) else None,
+        )
+        for index, row in enumerate(coverage)
+    )
+    now = int(time.time())
+    deadline = now + max_age
+    for label, value in timestamps:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            or value > now + 300
+        ):
+            fail(f"fleet inventory {label} is invalid")
+        deadline = min(deadline, value + max_age)
+    if now > deadline:
+        fail("fleet roster evidence is stale; no target may be installed")
+    return deadline
+
+
+def require_fresh_install_authorization(deadline: int) -> None:
+    if int(time.time()) > deadline:
+        fail("fleet roster evidence expired before install; no target was installed")
+
+
 def validate_inventory(
     inventory: dict[str, Any],
     artifacts: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, int]:
     require_exact(inventory.get("schema"), 2, "fleet inventory schema")
     require_true(inventory.get("excludeCurrentHost"), "excludeCurrentHost")
+    freshness_deadline = validate_inventory_freshness(inventory)
     targets = inventory.get("targets")
     if not isinstance(targets, list) or not targets:
         fail("fleet inventory requires targets")
@@ -868,7 +923,7 @@ def validate_inventory(
         fail("parallelProbes must be an integer")
     if parallel < 1 or parallel > 16:
         fail("parallelProbes must be between 1 and 16")
-    return validated, parallel
+    return validated, parallel, freshness_deadline
 
 
 def local_machine_identity_sha256() -> str:
@@ -1019,6 +1074,33 @@ def probe_report_row(
     return row
 
 
+def build_probe_expectations(
+    evidence_dir: pathlib.Path,
+    source: dict[str, str],
+    artifact: dict[str, Any],
+    target: dict[str, Any],
+) -> pathlib.Path:
+    digest = hashlib.sha256(target["id"].encode("utf-8")).hexdigest()[:16]
+    path = evidence_dir / f"probe-expectations-{digest}.json"
+    write_json(
+        path,
+        {
+            "schema": 2,
+            "kind": "candidate-identity-probe-v1",
+            **source,
+            "probeId": secrets.token_hex(16),
+            "artifactSha256": artifact["sha256"],
+            "artifactSize": artifact["size"],
+            "installedBinarySha256": artifact["_installed_hash"],
+            "installPayload": artifact["_install_payload"],
+            "prohibitRemoteBuild": True,
+            "requireReadOnly": True,
+        },
+    )
+    path.chmod(0o600)
+    return path
+
+
 def build_expectations(
     evidence_dir: pathlib.Path,
     source: dict[str, str],
@@ -1078,6 +1160,7 @@ def prepare(
     dict[str, dict[str, Any]],
     list[dict[str, Any]],
     int,
+    int,
     str,
     str,
     pathlib.Path,
@@ -1110,13 +1193,17 @@ def prepare(
     driver, driver_hash = validate_driver(root, manifest)
     gate_evidence = validate_gate_evidence(root, manifest, source)
     artifacts = validate_artifacts(root, manifest, source, gate_evidence)
-    targets, parallel = validate_inventory(inventory, artifacts)
+    targets, parallel, freshness_deadline = validate_inventory(
+        inventory,
+        artifacts,
+    )
     return (
         root,
         source,
         artifacts,
         targets,
         parallel,
+        freshness_deadline,
         sha256_file(manifest_path),
         inventory_hash,
         driver,
@@ -1132,6 +1219,7 @@ def plan(args: argparse.Namespace) -> int:
         artifacts,
         targets,
         parallel,
+        _freshness_deadline,
         manifest_hash,
         inventory_hash,
         _driver,
@@ -1177,6 +1265,7 @@ def execute(args: argparse.Namespace) -> int:
         artifacts,
         targets,
         parallel,
+        freshness_deadline,
         manifest_hash,
         inventory_hash,
         driver,
@@ -1194,10 +1283,24 @@ def execute(args: argparse.Namespace) -> int:
     def probe_one(target: dict[str, Any]) -> tuple[str, str, Any]:
         if target["expected"]["machineIdentitySha256"] == local_identity:
             return target["id"], "skipped-current-host", None
+        artifact = artifacts[target["artifact"]]
         digest = hashlib.sha256(target["id"].encode("utf-8")).hexdigest()[:16]
         output = evidence_dir / f"probe-{digest}.json"
         output.unlink(missing_ok=True)
-        result = invoke_driver(driver, "probe", target_paths[target["id"]], output)
+        probe_expectations = build_probe_expectations(
+            evidence_dir,
+            source,
+            artifact,
+            target,
+        )
+        result = invoke_driver(
+            driver,
+            "probe",
+            target_paths[target["id"]],
+            output,
+            artifact=artifact,
+            expectations=probe_expectations,
+        )
         if result.returncode == 75:
             return target["id"], "skipped-unreachable", None
         if result.returncode == 76:
@@ -1213,6 +1316,8 @@ def execute(args: argparse.Namespace) -> int:
             snapshot = validate_probe(
                 evidence,
                 target,
+                artifact,
+                source,
             )
             snapshot["_rawReceipt"] = dict(evidence["rawReceipt"])
         except (CanaryError, EvidenceError) as error:
@@ -1287,6 +1392,7 @@ def execute(args: argparse.Namespace) -> int:
                 )
             )
             continue
+        require_fresh_install_authorization(freshness_deadline)
         artifact = artifacts[target["artifact"]]
         probe_snapshot = probe["details"]
         expectations = build_expectations(

@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 from typing import Any
@@ -368,6 +369,8 @@ def direct_mode(status: dict[str, Any]) -> bool:
 def network_snapshot(
     status: dict[str, Any],
     checks: dict[str, Any],
+    *,
+    connectivity: bool = True,
 ) -> dict[str, Any]:
     routes, route_bytes = normalized_json_command(
         ["ip", "-j", "route", "show", "table", "all"]
@@ -393,16 +396,19 @@ def network_snapshot(
             owned_resolver = 1
     dns_name = str(checks["dnsName"])
     direct_url = str(checks["directUrl"])
-    try:
-        dns_answers = socket.getaddrinfo(dns_name, None)
-    except OSError:
-        dns_answers = []
+    dns_answers: list[Any] = []
+    if connectivity:
+        try:
+            dns_answers = socket.getaddrinfo(dns_name, None)
+        except OSError:
+            dns_answers = []
     public_ok = False
-    try:
-        with urllib.request.urlopen(direct_url, timeout=10) as response:
-            public_ok = 200 <= int(response.status) < 400
-    except Exception:
-        public_ok = False
+    if connectivity:
+        try:
+            with urllib.request.urlopen(direct_url, timeout=10) as response:
+                public_ok = 200 <= int(response.status) < 400
+        except Exception:
+            public_ok = False
     return {
         "directMode": direct_mode(status),
         "wireguardExitEnabled": not direct_mode(status),
@@ -453,10 +459,95 @@ def public_network(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if not key.startswith("_")}
 
 
+def network_integrity_receipt(value: dict[str, Any]) -> str:
+    return digest_bytes(
+        canonical(
+            {
+                field: value[field]
+                for field in (
+                    "directMode",
+                    "wireguardExitEnabled",
+                    "resolverFingerprint",
+                    "defaultRouteFingerprint",
+                    "routeTableFingerprint",
+                    "ownedRouteCount",
+                    "ownedResolverArtifactCount",
+                )
+            }
+        )
+    )
+
+
+def identity_input_receipt(directory: pathlib.Path) -> tuple[str, int]:
+    values: list[dict[str, Any]] = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            fail("candidate identity snapshot contains a non-regular input")
+        values.append(
+            {
+                "name": path.name,
+                "sha256": digest_file(path),
+                "size": metadata.st_size,
+            }
+        )
+    return digest_bytes(canonical(values)), len(values)
+
+
+def prepare_identity_inputs(
+    config: pathlib.Path,
+    workspace_root: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, str, int]:
+    workspace = pathlib.Path(
+        tempfile.mkdtemp(prefix=".identity-", dir=str(workspace_root))
+    )
+    workspace.chmod(0o700)
+    snapshot_config = workspace / config.name
+    try:
+        inputs = [
+            config,
+            config.parent / "signed-rosters.json",
+            *[
+                config.parent / f".{config.name}.{suffix}.secret"
+                for suffix in (
+                    "nostr-secret-key",
+                    "wireguard-exit-private-key",
+                    "wireguard-exit-peer-preshared-key",
+                    "pending-join-request",
+                    "cashu-wallet-seed",
+                )
+            ],
+        ]
+        for source in inputs:
+            if not source.exists():
+                continue
+            metadata = source.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                fail("live candidate identity input is not a regular file")
+            destination = workspace / source.name
+            with source.open("rb") as reader, destination.open("xb") as writer:
+                shutil.copyfileobj(reader, writer)
+                writer.flush()
+                os.fsync(writer.fileno())
+            destination.chmod(0o600)
+        if not snapshot_config.is_file():
+            fail("candidate identity config snapshot is missing")
+        if not (workspace / "signed-rosters.json").is_file():
+            fail("candidate signed roster snapshot is missing")
+        receipt, count = identity_input_receipt(workspace)
+        return workspace, snapshot_config, receipt, count
+    except Exception:
+        shutil.rmtree(workspace)
+        raise
+
+
 def capture(
     target: dict[str, Any],
     *,
     checks: dict[str, Any],
+    identity_binary: pathlib.Path,
+    identity_expectations: dict[str, Any],
+    identity_workspace_root: pathlib.Path,
 ) -> dict[str, Any]:
     deployment = target["deployment"]
     unit = deployment.get("serviceName", "nvpn.service")
@@ -469,19 +560,111 @@ def capture(
     )
     if not probe_binary.is_file():
         fail(f"probe CLI does not exist: {probe_binary}")
+    if not identity_binary.is_file():
+        fail(f"candidate identity CLI does not exist: {identity_binary}")
+    candidate_hash = digest_file(identity_binary)
+    if candidate_hash != identity_expectations["installedBinarySha256"]:
+        fail("candidate identity CLI hash mismatch")
+    candidate_size = identity_binary.stat().st_size
+    if candidate_size <= 0:
+        fail("candidate identity CLI is empty")
+    candidate_version = version_json(identity_binary)
+    expected_fips = (
+        f"{identity_expectations['fipsVersion']} "
+        f"(rev {identity_expectations['fipsGitSha'][:10]})"
+    )
+    if candidate_version["version"] != identity_expectations["appVersion"]:
+        fail("candidate identity CLI app version mismatch")
+    if candidate_version["fips_core_version"] != expected_fips:
+        fail("candidate identity CLI FIPS version mismatch")
+    installed_hash_before = digest_file(probe_binary)
     probe_version = version_json(probe_binary)
-    status = status_json(probe_binary, config)
-    service = service_snapshot(unit, binary)
-    config_value = config_snapshot(config, status)
-    network = network_snapshot(status, checks)
+    installed_status_before = status_json(probe_binary, config)
+    service_before = service_snapshot(unit, binary)
+    network_before = network_snapshot(
+        installed_status_before,
+        checks,
+        connectivity=False,
+    )
+    config_hash_before = digest_file(config)
+    signed_rosters = config.parent / "signed-rosters.json"
+    if not signed_rosters.is_file():
+        fail(f"signed roster store does not exist: {signed_rosters}")
+    signed_roster_hash_before = digest_file(signed_rosters)
+    identity_workspace, identity_config, identity_inputs_before, identity_count = (
+        prepare_identity_inputs(config, identity_workspace_root)
+    )
+    try:
+        candidate_status = status_json(identity_binary, identity_config)
+        identity_inputs_after, identity_count_after = identity_input_receipt(
+            identity_workspace
+        )
+    finally:
+        shutil.rmtree(identity_workspace)
+    if identity_workspace.exists():
+        fail("candidate identity snapshot cleanup left residue")
+    if (
+        identity_inputs_after != identity_inputs_before
+        or identity_count_after != identity_count
+    ):
+        fail("candidate identity status mutated its private input snapshot")
+    config_value = config_snapshot(config, candidate_status)
+    installed_status_after = status_json(probe_binary, config)
+    service_after = service_snapshot(unit, binary)
+    network_after = network_snapshot(installed_status_after, checks)
+    installed_hash_after = digest_file(probe_binary)
+    candidate_hash_after = digest_file(identity_binary)
+    config_hash_after = digest_file(config)
+    signed_roster_hash_after = digest_file(signed_rosters)
+    service_before_receipt = digest_bytes(canonical(public_service(service_before)))
+    service_after_receipt = digest_bytes(canonical(public_service(service_after)))
+    network_before_receipt = network_integrity_receipt(network_before)
+    network_after_receipt = network_integrity_receipt(network_after)
+    if installed_hash_after != installed_hash_before:
+        fail("candidate identity status mutated the installed probe CLI")
+    if candidate_hash_after != candidate_hash:
+        fail("candidate identity CLI changed while executing status")
+    if service_after_receipt != service_before_receipt:
+        fail("candidate identity status mutated the nvpn service")
+    if config_hash_after != config_hash_before:
+        fail("candidate identity status mutated the nvpn config")
+    if signed_roster_hash_after != signed_roster_hash_before:
+        fail("candidate identity status mutated the signed roster store")
+    if network_after_receipt != network_before_receipt:
+        fail("candidate identity status mutated network state")
     return {
-        "service": service,
+        "service": service_after,
         "config": config_value,
-        "network": network,
-        "status": status,
-        "probeBinarySha256": digest_file(probe_binary),
+        "network": network_after,
+        "status": installed_status_after,
+        "probeBinarySha256": installed_hash_after,
         "probeAppVersion": probe_version["version"],
         "probeFipsCoreVersion": probe_version["fips_core_version"],
+        "identityOracle": {
+            "kind": "exact-candidate-read-only-status-v1",
+            "readOnly": True,
+            "statusDiscoverSecs": 0,
+            "candidateBinarySha256": candidate_hash_after,
+            "candidateBinarySize": candidate_size,
+            "candidateAppVersion": candidate_version["version"],
+            "candidateFipsCoreVersion": candidate_version["fips_core_version"],
+            "candidateStatusReceiptSha256": digest_bytes(
+                canonical(candidate_status)
+            ),
+            "identityInputBeforeSha256": identity_inputs_before,
+            "identityInputAfterSha256": identity_inputs_after,
+            "identityInputCount": identity_count,
+            "identitySnapshotRemoved": True,
+            "installedObservationBinarySha256": installed_hash_after,
+            "serviceBeforeSha256": service_before_receipt,
+            "serviceAfterSha256": service_after_receipt,
+            "configBeforeSha256": config_hash_before,
+            "configAfterSha256": config_hash_after,
+            "signedRosterStoreBeforeSha256": signed_roster_hash_before,
+            "signedRosterStoreAfterSha256": signed_roster_hash_after,
+            "networkBeforeSha256": network_before_receipt,
+            "networkAfterSha256": network_after_receipt,
+        },
         "binaryPath": binary,
         "configPath": config,
         "unit": unit,
@@ -552,8 +735,10 @@ def snapshot_transaction(
     state: dict[str, Any],
     target: dict[str, Any],
 ) -> dict[str, Any]:
-    transaction.mkdir(parents=True, mode=0o700)
+    transaction.mkdir(parents=True, mode=0o700, exist_ok=True)
     files = transaction / "snapshot"
+    if files.exists():
+        fail("transaction snapshot already exists")
     files.mkdir(mode=0o700)
     binary = state["binaryPath"]
     config = state["configPath"]
@@ -735,6 +920,7 @@ def restore_transaction(
     transaction: pathlib.Path,
     target: dict[str, Any],
     transaction_id: str,
+    expected: dict[str, Any],
 ) -> dict[str, Any]:
     snapshot_dir = transaction / "snapshot"
     snapshot_file = snapshot_dir / "state.json"
@@ -784,7 +970,13 @@ def restore_transaction(
         wait_service(unit, True)
     else:
         run(["systemctl", "stop", unit], check=False)
-    after = capture(target, checks=target["checks"])
+    after = capture(
+        target,
+        checks=target["checks"],
+        identity_binary=transaction / "candidate",
+        identity_expectations=expected,
+        identity_workspace_root=transaction,
+    )
     after_public = {
         "service": public_service(after["service"]),
         "config": after["config"],
@@ -871,19 +1063,30 @@ def install_staged(
         fail("staged artifact SHA-256 mismatch")
     if stage.stat().st_size != expected["artifactSize"]:
         fail("staged artifact size mismatch")
-    before = capture(target, checks=target["checks"])
-    assert_expected(before, target, expected)
-    if before["service"]["installed"]:
-        assert_service_runtime_binding(
-            before["service"],
-            before["binaryPath"],
-            before["service"]["binarySha256"],
-            require_process=before["service"]["running"],
-        )
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    snapshot = snapshot_transaction(transaction, before, target)
-    write_journal(transaction, target["id"], transaction_id, "preparing")
-    candidate, companions = extract_payload(stage, transaction, expected)
+    transaction.mkdir(mode=0o700)
+    try:
+        candidate, companions = extract_payload(stage, transaction, expected)
+        before = capture(
+            target,
+            checks=target["checks"],
+            identity_binary=candidate,
+            identity_expectations=expected,
+            identity_workspace_root=transaction,
+        )
+        assert_expected(before, target, expected)
+        if before["service"]["installed"]:
+            assert_service_runtime_binding(
+                before["service"],
+                before["binaryPath"],
+                before["service"]["binarySha256"],
+                require_process=before["service"]["running"],
+            )
+        snapshot = snapshot_transaction(transaction, before, target)
+        write_journal(transaction, target["id"], transaction_id, "preparing")
+    except Exception:
+        shutil.rmtree(transaction)
+        raise
     unit = before["unit"]
     binary = before["binaryPath"]
     config = before["configPath"]
@@ -918,7 +1121,13 @@ def install_staged(
                 timeout=30,
             )
         wait_service(unit, True)
-        first = capture(target, checks=target["checks"])
+        first = capture(
+            target,
+            checks=target["checks"],
+            identity_binary=binary,
+            identity_expectations=expected,
+            identity_workspace_root=transaction,
+        )
         first_pid = first["service"]["pid"]
         assert_service_runtime_binding(
             first["service"],
@@ -947,7 +1156,13 @@ def install_staged(
         tx_after, rx_after = aggregate_counters(status_after_payload)
         run(["systemctl", "restart", unit])
         wait_service(unit, True)
-        final = capture(target, checks=target["checks"])
+        final = capture(
+            target,
+            checks=target["checks"],
+            identity_binary=binary,
+            identity_expectations=expected,
+            identity_workspace_root=transaction,
+        )
         final_pid = final["service"]["pid"]
         runtime_binding = assert_service_runtime_binding(
             final["service"],
@@ -1135,7 +1350,7 @@ def install_staged(
         }
     except Exception:
         try:
-            restore_transaction(transaction, target, transaction_id)
+            restore_transaction(transaction, target, transaction_id, expected)
         except Exception as rollback_error:
             print(
                 f"automatic rollback also failed: {rollback_error}",
@@ -1251,6 +1466,111 @@ def finish_staged_cleanup(
         fail("staged artifact cleanup failed: " + "; ".join(cleanup_errors))
 
 
+def probe_candidate(
+    payload: dict[str, Any],
+    target: dict[str, Any],
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        fail("Linux fleet probe requires sudo")
+    if expected.get("kind") != "candidate-identity-probe-v1":
+        fail("candidate probe expectations kind is invalid")
+    if expected.get("requireReadOnly") is not True:
+        fail("candidate probe must require read-only execution")
+    stage_name = payload.get("stageName")
+    if (
+        not isinstance(stage_name, str)
+        or re.fullmatch(r"\.nvpn-fleet-[0-9a-f]{32}\.artifact", stage_name)
+        is None
+    ):
+        fail("staged candidate probe name is invalid")
+    probe_id = expected.get("probeId")
+    if (
+        not isinstance(probe_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", probe_id) is None
+    ):
+        fail("candidate probe id is invalid")
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if not sudo_user:
+        fail("Linux adapter requires sudo with SUDO_USER")
+    stage = pathlib.Path(pwd.getpwnam(sudo_user).pw_dir) / stage_name
+    if not stage.is_file():
+        fail("staged candidate probe executable is missing")
+    candidate_size = payload.get("candidateBinarySize")
+    if (
+        not isinstance(candidate_size, int)
+        or isinstance(candidate_size, bool)
+        or candidate_size <= 0
+    ):
+        fail("candidate probe executable size is invalid")
+    root = absolute_path(
+        target["deployment"].get("transactionRoot", "/var/lib/nvpn/fleet-canary"),
+        "transactionRoot",
+    )
+    private_stage: pathlib.Path | None = None
+    root_created = False
+    result: dict[str, Any] | None = None
+    primary_error: Exception | None = None
+    try:
+        private_stage, root_created = copy_staged_artifact(
+            stage,
+            root,
+            probe_id,
+        )
+        private_stage.chmod(0o700)
+        if private_stage.stat().st_size != candidate_size:
+            fail("staged candidate probe executable size mismatch")
+        if digest_file(private_stage) != expected["installedBinarySha256"]:
+            fail("staged candidate probe executable SHA-256 mismatch")
+        state = capture(
+            target,
+            checks=target["checks"],
+            identity_binary=private_stage,
+            identity_expectations=expected,
+            identity_workspace_root=root,
+        )
+        pending = pending_transactions(root)
+        result = {
+            "schema": 2,
+            "targetId": target["id"],
+            "reachable": True,
+            "platform": target["platform"],
+            "arch": target["arch"],
+            "machineIdentitySha256": machine_identity(),
+            "realChecks": True,
+            "mocked": False,
+            "remoteBuildPerformed": False,
+            "probeBinarySha256": state["probeBinarySha256"],
+            "probeAppVersion": state["probeAppVersion"],
+            "probeFipsCoreVersion": state["probeFipsCoreVersion"],
+            "identityOracle": state["identityOracle"],
+            "transaction": {
+                "recoveryRequired": bool(pending),
+                "pendingTransactionIds": pending,
+            },
+            "service": public_service(state["service"]),
+            "config": state["config"],
+            "network": public_network(state["network"]),
+        }
+    except Exception as error:
+        primary_error = error
+    cleanup_errors: list[str] = []
+    if private_stage is not None:
+        try:
+            remove_staged_path(private_stage)
+        except Exception as error:
+            cleanup_errors.append(str(error))
+    if root_created:
+        try:
+            root.rmdir()
+        except OSError as error:
+            cleanup_errors.append(f"private staging directory: {error}")
+    finish_staged_cleanup(primary_error, cleanup_errors)
+    if result is None:
+        fail("staged candidate probe returned no result")
+    return result
+
+
 def install(
     payload: dict[str, Any],
     target: dict[str, Any],
@@ -1327,29 +1647,7 @@ transaction_root = absolute_path(
     "transactionRoot",
 )
 if action == "probe":
-    state = capture(target, checks=target["checks"])
-    pending = pending_transactions(transaction_root)
-    result = {
-        "schema": 2,
-        "targetId": target["id"],
-        "reachable": True,
-        "platform": target["platform"],
-        "arch": target["arch"],
-        "machineIdentitySha256": machine_identity(),
-        "realChecks": True,
-        "mocked": False,
-        "remoteBuildPerformed": False,
-        "probeBinarySha256": state["probeBinarySha256"],
-        "probeAppVersion": state["probeAppVersion"],
-        "probeFipsCoreVersion": state["probeFipsCoreVersion"],
-        "transaction": {
-            "recoveryRequired": bool(pending),
-            "pendingTransactionIds": pending,
-        },
-        "service": public_service(state["service"]),
-        "config": state["config"],
-        "network": public_network(state["network"]),
-    }
+    result = probe_candidate(payload, target, payload["expectations"])
 elif action == "install":
     result = install(payload, target, payload["expectations"])
 elif action == "rollback":
@@ -1358,6 +1656,7 @@ elif action == "rollback":
         transaction_root / transaction_id,
         target,
         transaction_id,
+        payload["expectations"],
     )
 else:
     fail("unsupported fleet action")

@@ -284,7 +284,12 @@ def replay(
             install_path,
             f"target {target_id} install raw receipt",
         )
-        probe = validate_probe(probe_raw, target)
+        probe = validate_probe(
+            probe_raw,
+            target,
+            artifacts[target["artifact"]],
+            source,
+        )
         transaction = object_value(
             install_raw.get("transaction"),
             f"target {target_id} install transaction",

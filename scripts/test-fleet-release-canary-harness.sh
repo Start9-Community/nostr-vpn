@@ -132,6 +132,7 @@ write_inventory() {
 import hashlib
 import json
 import sys
+import time
 
 output, local_id, *targets = sys.argv[1:]
 
@@ -189,10 +190,20 @@ for target in targets:
         }
     )
 
+now = int(time.time())
 payload = {
     "schema": 2,
     "excludeCurrentHost": True,
     "parallelProbes": 4,
+    "rosterFreshness": {
+        "maxAgeSeconds": 1800,
+        "validatedAt": now,
+    },
+    "rosterSnapshot": {"capturedAt": now},
+    "rosterCoverage": [
+        {"id": target, "observedAt": now}
+        for target in targets
+    ],
     "targets": rows,
 }
 with open(output, "w", encoding="utf-8") as handle:
@@ -310,6 +321,9 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +identity = expected_target["machineIdentitySha256"]
 +
 +if args.action == "probe":
++    expectations = json.loads(
++        args.expectations.read_text(encoding="utf-8")
++    )
 +    pending = target_id == "pending"
 +    probe_hash = (
 +        service["binarySha256"]
@@ -318,6 +332,9 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +    )
 +    probe_app_version = os.environ["FAKE_PROBE_APP_VERSION"]
 +    probe_fips_version = os.environ["FAKE_PROBE_FIPS_CORE_VERSION"]
++    if target_id == "old-v413":
++        probe_app_version = "4.1.3"
++        probe_fips_version = "0.4.43 (rev 3333333333)"
 +    if exact_candidate:
 +        probe_app_version = os.environ["FAKE_CANDIDATE_APP_VERSION"]
 +        probe_fips_version = os.environ["FAKE_CANDIDATE_FIPS_CORE_VERSION"]
@@ -325,6 +342,13 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +        probe_app_version = os.environ["FAKE_CANDIDATE_APP_VERSION"]
 +    if target_id == "malformed-probe-hash":
 +        probe_hash = "not-a-sha256"
++    candidate_hash = expectations["installedBinarySha256"]
++    if target_id == "wrong-candidate-oracle":
++        candidate_hash = digest("substituted-candidate")
++    network_after_receipt = digest(f"oracle-network:{target_id}")
++    network_before_receipt = network_after_receipt
++    if target_id == "candidate-mutated-network":
++        network_after_receipt = digest("mutated-network")
 +    value = {
 +        "schema": 2,
 +        "targetId": target_id,
@@ -338,6 +362,42 @@ sed 's/^+//' >"$DRIVER" <<'DRIVER'
 +        "probeBinarySha256": probe_hash,
 +        "probeAppVersion": probe_app_version,
 +        "probeFipsCoreVersion": probe_fips_version,
++        "identityOracle": {
++            "kind": "exact-candidate-read-only-status-v1",
++            "readOnly": target_id != "candidate-not-readonly",
++            "statusDiscoverSecs": 0,
++            "candidateBinarySha256": candidate_hash,
++            "candidateBinarySize": pathlib.Path(args.artifact).stat().st_size,
++            "candidateAppVersion": expectations["appVersion"],
++            "candidateFipsCoreVersion": (
++                f"{expectations['fipsVersion']} "
++                f"(rev {expectations['fipsGitSha'][:10]})"
++            ),
++            "candidateStatusReceiptSha256": digest(
++                f"candidate-status:{target_id}"
++            ),
++            "identityInputBeforeSha256": digest(
++                f"candidate-inputs:{target_id}"
++            ),
++            "identityInputAfterSha256": digest(
++                f"candidate-inputs:{target_id}"
++            ),
++            "identityInputCount": 2,
++            "identitySnapshotRemoved": True,
++            "installedObservationBinarySha256": probe_hash,
++            "serviceBeforeSha256": digest(f"oracle-service:{target_id}"),
++            "serviceAfterSha256": digest(f"oracle-service:{target_id}"),
++            "configBeforeSha256": expected_target["configSha256"],
++            "configAfterSha256": expected_target["configSha256"],
++            "signedRosterStoreBeforeSha256": expected_target[
++                "signedRosterStoreSha256"
++            ],
++            "signedRosterStoreAfterSha256": expected_target[
++                "signedRosterStoreSha256"
++            ],
++            "networkBeforeSha256": network_before_receipt,
++            "networkAfterSha256": network_after_receipt,
++        },
 +        "transaction": {
 +            "recoveryRequired": pending,
 +            "pendingTransactionIds": ["b" * 32] if pending else [],
@@ -1074,6 +1134,10 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
                 "installedBinarySha256": candidate_sha256,
                 "installTransition": "fresh-install",
                 "preinstallProbe": preinstall_probe,
+                "installPayload": {
+                    "format": "executable",
+                    "companions": [],
+                },
                 "appVersion": "4.1.5",
                 "fipsVersion": "0.4.45",
                 "fipsGitSha": fips_sha,
@@ -1081,7 +1145,10 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
             }
             state = copy.deepcopy(base_state)
             state[field] = bad_value
-            namespace["capture"] = lambda _target, *, checks: state
+            namespace["capture"] = (
+                lambda _target, *, checks, identity_binary,
+                identity_expectations, identity_workspace_root: state
+            )
             mutations = []
 
             def snapshot(*_args):
@@ -1146,8 +1213,10 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
                 "fipsGitSha": fips_sha,
                 "expected": frozen,
             }
-            namespace["capture"] = lambda _target, *, checks: copy.deepcopy(
-                base_state
+            namespace["capture"] = (
+                lambda _target, *, checks, identity_binary,
+                identity_expectations,
+                identity_workspace_root: copy.deepcopy(base_state)
             )
             expected_error = {
                 "hash-precondition": "staged artifact SHA-256 mismatch",
@@ -1342,12 +1411,16 @@ PY
 python3 - "$ROOT/scripts/fleet_release_canary_ssh_driver.py" <<'PY'
 import base64
 import gzip
+import hashlib
 import importlib.util
+import io
 import os
 import pathlib
 import subprocess
 import sys
+import tarfile
 import tempfile
+import zipfile
 
 path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("fleet_driver", path)
@@ -1432,6 +1505,87 @@ if len(windows_source) >= len(windows_raw_source):
     raise SystemExit("Windows fleet adapter was not reduced for reliable stdin transport")
 if any("FLEET_PAYLOAD" in argument for argument in windows_command):
     raise SystemExit("private fleet payload leaked into remote argv")
+
+candidate_bytes = b"candidate executable bytes\n"
+candidate_hash = hashlib.sha256(candidate_bytes).hexdigest()
+with tempfile.TemporaryDirectory(prefix="nvpn-fleet-materialize.") as raw:
+    fixture = pathlib.Path(raw)
+    executable = fixture / "nvpn"
+    executable.write_bytes(candidate_bytes)
+    with driver.materialize_candidate_executable(
+        executable,
+        {"format": "executable", "executableMember": ""},
+        candidate_hash,
+        "linux",
+    ) as materialized:
+        if materialized.read_bytes() != candidate_bytes:
+            raise SystemExit("raw candidate materialization changed bytes")
+
+    tar_path = fixture / "candidate.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as archive:
+        info = tarfile.TarInfo("nvpn")
+        info.size = len(candidate_bytes)
+        archive.addfile(info, io.BytesIO(candidate_bytes))
+    with driver.materialize_candidate_executable(
+        tar_path,
+        {"format": "tar-gz", "executableMember": "nvpn"},
+        candidate_hash,
+        "linux",
+    ) as materialized:
+        if materialized.read_bytes() != candidate_bytes:
+            raise SystemExit("tar candidate materialization changed bytes")
+
+    duplicate_tar = fixture / "duplicate.tar.gz"
+    with tarfile.open(duplicate_tar, "w:gz") as archive:
+        for _ in range(2):
+            info = tarfile.TarInfo("nvpn")
+            info.size = len(candidate_bytes)
+            archive.addfile(info, io.BytesIO(candidate_bytes))
+    try:
+        with driver.materialize_candidate_executable(
+            duplicate_tar,
+            {"format": "tar-gz", "executableMember": "nvpn"},
+            candidate_hash,
+            "linux",
+        ):
+            pass
+    except driver.DriverError as error:
+        if "exactly once" not in str(error):
+            raise SystemExit(
+                "duplicate archive candidate returned the wrong guard"
+            ) from error
+    else:
+        raise SystemExit("duplicate archive candidate was accepted")
+
+    zip_path = fixture / "candidate.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("bin/nvpn.exe", candidate_bytes)
+    with driver.materialize_candidate_executable(
+        zip_path,
+        {"format": "zip", "executableMember": "bin/nvpn.exe"},
+        candidate_hash,
+        "windows",
+    ) as materialized:
+        if materialized.name != "nvpn.exe":
+            raise SystemExit("Windows candidate lost its executable suffix")
+        if materialized.read_bytes() != candidate_bytes:
+            raise SystemExit("zip candidate materialization changed bytes")
+
+    try:
+        with driver.materialize_candidate_executable(
+            executable,
+            {"format": "executable", "executableMember": ""},
+            "0" * 64,
+            "linux",
+        ):
+            pass
+    except driver.DriverError as error:
+        if "SHA-256 mismatch" not in str(error):
+            raise SystemExit(
+                "substituted candidate returned the wrong guard"
+            ) from error
+    else:
+        raise SystemExit("substituted candidate executable was accepted")
 
 cleanup_name = f".nvpn-fleet-{'1' * 32}.artifact"
 linux_cleanup, linux_cleanup_command = (
@@ -1551,6 +1705,9 @@ grep -Fq \
 if grep -Eq "else \\{ 'nvpn' \\}|must be nvpn" "$windows_adapter"; then
   fail "Windows fleet adapter retains the obsolete service name"
 fi
+if grep -Eiq '^[[:space:]]*\$pid[[:space:]]*=' "$windows_adapter"; then
+  fail "Windows fleet adapter overwrites PowerShell's read-only PID variable"
+fi
 python3 - "$windows_adapter" <<'PY'
 import pathlib
 import sys
@@ -1635,11 +1792,16 @@ install = text[text.index("function InstallStagedCandidate"):text.index(
     "function InstallCandidate"
 )]
 assertion = install.index("AssertExpected $before $Target $Expected")
+extraction = install.index("ExtractPayload $stage")
+capture = install.index("$before = Capture")
+identity_candidate = install.index("([string]$extracted.candidate)")
+if not extraction < capture < identity_candidate < assertion:
+    raise SystemExit(
+        "Windows preinstall identity is not decoded by the extracted candidate"
+    )
 for mutation in (
-    "[IO.Directory]::CreateDirectory($root)",
     "SnapshotTransaction $transaction",
     "WriteJournal $transaction",
-    "ExtractPayload $stage",
     "Stop-Service -Name $name",
     "AtomicInstall $extracted.candidate",
 ):
@@ -1667,6 +1829,31 @@ if "RemoveStagedArtifact $stage" in wrapper:
 cleanup = text[text.index("function RemoveStagedArtifact"):text.index(
     "function InstallStagedCandidate"
 )]
+private_directory = text[
+    text.index("function CreatePrivateAdminDirectory"):
+    text.index("function GetServiceObject")
+]
+for required in (
+    "$acl.SetAccessRuleProtection($true, $false)",
+    "[Security.Principal.SecurityIdentifier]::new('S-1-5-18')",
+    "[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')",
+    "$identity.User",
+    "[Security.AccessControl.FileSystemRights]::FullControl",
+    "Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop",
+    "AssertPrivateAdminDirectory $Path",
+):
+    if required not in private_directory:
+        raise SystemExit(
+            "Windows private stage does not install a protected admin-only ACL"
+        )
+copy_stage = text[
+    text.index("function CopyStagedArtifact"):
+    text.index("function ProbeCandidate")
+]
+if "CreatePrivateAdminDirectory $Root" not in copy_stage:
+    raise SystemExit(
+        "Windows candidate staging does not create a protected directory"
+    )
 for required in (
     "Remove-Item -LiteralPath $Path -Force -ErrorAction Stop",
     "staged artifact cleanup failed",
@@ -1737,7 +1924,7 @@ json_target_evidence_is \
 
 write_inventory \
   "$INVENTORY" \
-  good inactive absent already-exact same-version-transition \
+  good old-v413 inactive absent already-exact same-version-transition \
   unreachable noaccess report-only
 rm -rf "$EVIDENCE"
 rm -f "$DRIVER_LOG"
@@ -1746,11 +1933,31 @@ run_execute >/dev/null
 status=$?
 set -e
 [[ "$status" == 2 ]] || fail "incomplete access did not return status 2"
-for target in good inactive absent already-exact same-version-transition; do
+for target in good old-v413 inactive absent already-exact same-version-transition; do
   json_status_is "$EVIDENCE/fleet-canary-result.json" "$target" passed
   grep -Fxq "install:$target" "$DRIVER_LOG" \
     || fail "$target was not installed"
 done
+python3 - "$EVIDENCE/fleet-canary-result.json" <<'PY'
+import json
+import pathlib
+import sys
+
+result = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+row = next(value for value in result["targets"] if value["id"] == "old-v413")
+probe = json.loads(
+    pathlib.Path(row["evidence"]["probe"]["path"]).read_text(encoding="utf-8")
+)
+if probe["probeAppVersion"] != "4.1.3":
+    raise SystemExit("old installed CLI observation was replaced by candidate")
+if probe["identityOracle"]["candidateAppVersion"] != "4.1.5":
+    raise SystemExit("old install identity was not decoded by the candidate CLI")
+if (
+    probe["identityOracle"]["installedObservationBinarySha256"]
+    != probe["probeBinarySha256"]
+):
+    raise SystemExit("candidate oracle was substituted for installed evidence")
+PY
 json_target_install_transition_is \
   "$EVIDENCE/fleet-canary-result.json" good candidate-transition
 json_target_install_transition_is \
@@ -1898,6 +2105,26 @@ json_field_is \
 if grep -Fq 'install:' "$DRIVER_LOG"; then
   fail "malformed probe evidence reached install"
 fi
+
+for adversary in \
+  wrong-candidate-oracle \
+  candidate-not-readonly \
+  candidate-mutated-network
+do
+  write_inventory "$INVENTORY" "$adversary"
+  rm -rf "$EVIDENCE"
+  rm -f "$DRIVER_LOG"
+  set +e
+  run_execute >/dev/null
+  status=$?
+  set -e
+  [[ "$status" == 1 ]] || fail "$adversary probe evidence was accepted"
+  json_status_is \
+    "$EVIDENCE/fleet-canary-result.json" "$adversary" probe-failed
+  if grep -Fq 'install:' "$DRIVER_LOG"; then
+    fail "$adversary candidate probe reached install"
+  fi
+done
 
 for adversary in \
   probe-drift-hash \

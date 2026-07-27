@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import gzip
 import hashlib
 import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
+import zipfile
 from typing import Any
 
 
@@ -191,6 +196,94 @@ def require_regular(path: pathlib.Path, label: str) -> None:
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise DriverError(f"{label} must be a regular non-symlink file")
+
+
+def require_exact_archive_member(
+    names: list[str],
+    expected: str,
+    label: str,
+) -> None:
+    if names.count(expected) != 1:
+        raise DriverError(f"{label} must occur exactly once")
+
+
+@contextlib.contextmanager
+def materialize_candidate_executable(
+    artifact: pathlib.Path,
+    payload: dict[str, Any],
+    expected_sha256: str,
+    platform_name: str,
+):
+    """Materialize only the frozen executable, never an archive tree."""
+    payload_format = payload.get("format")
+    member = payload.get("executableMember")
+    with tempfile.TemporaryDirectory(prefix="nvpn-fleet-candidate.") as raw:
+        root = pathlib.Path(raw)
+        output = root / ("nvpn.exe" if platform_name == "windows" else "nvpn")
+        if payload_format == "executable":
+            shutil.copyfile(artifact, output)
+        elif payload_format == "tar-gz" and platform_name == "linux":
+            if not isinstance(member, str) or not member:
+                raise DriverError("Linux candidate executable member is invalid")
+            try:
+                with tarfile.open(artifact, "r:gz") as archive:
+                    members = archive.getmembers()
+                    require_exact_archive_member(
+                        [item.name for item in members],
+                        member,
+                        "candidate executable archive member",
+                    )
+                    selected = next(item for item in members if item.name == member)
+                    if not selected.isfile():
+                        raise DriverError(
+                            "candidate executable archive member is not a file"
+                        )
+                    source = archive.extractfile(selected)
+                    if source is None:
+                        raise DriverError(
+                            "candidate executable archive member is unreadable"
+                        )
+                    with source, output.open("xb") as destination:
+                        shutil.copyfileobj(source, destination)
+            except (tarfile.TarError, OSError) as error:
+                raise DriverError(
+                    f"candidate executable archive is invalid: {error}"
+                ) from error
+        elif payload_format == "zip" and platform_name == "windows":
+            if not isinstance(member, str) or not member:
+                raise DriverError("Windows candidate executable member is invalid")
+            try:
+                with zipfile.ZipFile(artifact) as archive:
+                    entries = archive.infolist()
+                    require_exact_archive_member(
+                        [item.filename for item in entries],
+                        member,
+                        "candidate executable archive member",
+                    )
+                    selected = next(
+                        item for item in entries if item.filename == member
+                    )
+                    if selected.is_dir():
+                        raise DriverError(
+                            "candidate executable archive member is not a file"
+                        )
+                    with archive.open(selected) as source, output.open(
+                        "xb"
+                    ) as destination:
+                        shutil.copyfileobj(source, destination)
+            except (zipfile.BadZipFile, OSError) as error:
+                raise DriverError(
+                    f"candidate executable archive is invalid: {error}"
+                ) from error
+        else:
+            raise DriverError("candidate install payload does not match the platform")
+        require_regular(output, "materialized candidate executable")
+        if output.stat().st_size <= 0:
+            raise DriverError("materialized candidate executable is empty")
+        if sha256_file(output) != expected_sha256:
+            raise DriverError("materialized candidate executable SHA-256 mismatch")
+        output.chmod(0o700)
+        yield output
 
 
 def atomic_json(path: pathlib.Path, value: dict[str, Any]) -> None:
@@ -565,28 +658,34 @@ def main() -> int:
             "action": args.action,
             "target": target,
         }
-        if args.action in {"install", "rollback"}:
+        expectations: dict[str, Any] | None = None
+        if args.action in {"probe", "install", "rollback"}:
             if args.expectations is None:
                 raise DriverError(f"{args.action} requires expectations")
             expectations = load_json(args.expectations, "expectations")
-            transaction_id = expectations.get("transactionId")
+            id_field = "probeId" if args.action == "probe" else "transactionId"
+            transaction_id = expectations.get(id_field)
             if (
                 not isinstance(transaction_id, str)
                 or TRANSACTION.fullmatch(transaction_id) is None
             ):
-                raise DriverError("expectations transactionId is invalid")
+                raise DriverError(f"expectations {id_field} is invalid")
             payload["expectations"] = expectations
-        if args.action == "install":
+        if args.action in {"probe", "install"}:
             if args.artifact is None or args.receipt is None:
-                raise DriverError("install requires artifact and receipt")
+                raise DriverError(
+                    f"{args.action} requires artifact and receipt"
+                )
             require_regular(args.artifact, "candidate artifact")
             require_regular(args.receipt, "candidate receipt")
+            assert expectations is not None
             expected_hash = expectations.get("artifactSha256")
             expected_size = expectations.get("artifactSize")
             if sha256_file(args.artifact) != expected_hash:
                 raise DriverError("local candidate artifact SHA-256 changed")
             if args.artifact.stat().st_size != expected_size:
                 raise DriverError("local candidate artifact size changed")
+        if args.action == "install":
             stage_name = f".nvpn-fleet-{transaction_id}.artifact"
             code, result, details = invoke_staged_adapter(
                 target,
@@ -594,6 +693,33 @@ def main() -> int:
                 args.artifact,
                 stage_name,
             )
+        elif args.action == "probe":
+            assert expectations is not None
+            install_payload = expectations.get("installPayload")
+            if not isinstance(install_payload, dict):
+                raise DriverError("probe expectations require installPayload")
+            expected_binary_hash = expectations.get("installedBinarySha256")
+            if (
+                not isinstance(expected_binary_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_binary_hash) is None
+            ):
+                raise DriverError(
+                    "probe expectations installedBinarySha256 is invalid"
+                )
+            stage_name = f".nvpn-fleet-{transaction_id}.artifact"
+            with materialize_candidate_executable(
+                args.artifact,
+                install_payload,
+                expected_binary_hash,
+                target.get("platform"),
+            ) as candidate:
+                payload["candidateBinarySize"] = candidate.stat().st_size
+                code, result, details = invoke_staged_adapter(
+                    target,
+                    payload,
+                    candidate,
+                    stage_name,
+                )
         else:
             code, result, details = invoke_adapter(target, payload)
         if code != 0:

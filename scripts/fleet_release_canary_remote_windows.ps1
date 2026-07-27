@@ -117,6 +117,53 @@ function AssertPrivateAdminDirectory([string]$Path) {
     }
 }
 
+function CreatePrivateAdminDirectory([string]$Path) {
+    if (Test-Path -LiteralPath $Path) {
+        AssertPrivateAdminDirectory $Path
+        return
+    }
+    $parent = Split-Path -Parent $Path
+    if (!(Test-Path -LiteralPath $parent -PathType Container)) {
+        Fail 'fleet transaction root parent does not exist'
+    }
+    [IO.Directory]::CreateDirectory($Path) | Out-Null
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetOwner($identity.User)
+        $acl.SetAccessRuleProtection($true, $false)
+        $inheritance = (
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        )
+        foreach (
+            $sid in @(
+                [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+                [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+                $identity.User
+            )
+        ) {
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                $inheritance,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+        AssertPrivateAdminDirectory $Path
+    } catch {
+        Remove-Item `
+            -LiteralPath $Path `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function GetServiceObject([string]$Name) {
     return Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
 }
@@ -183,15 +230,15 @@ function ServiceSnapshot([string]$Name, [string]$BinaryPath) {
     } else {
         $null
     })
-    $pid = $(if ($running -and [int]$service.ProcessId -gt 0) {
+    $servicePid = $(if ($running -and [int]$service.ProcessId -gt 0) {
         [int]$service.ProcessId
     } else {
         $null
     })
     $mainProcessExePath = $null
     $mainProcessExeSha256 = $null
-    if ($null -ne $pid) {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" `
+    if ($null -ne $servicePid) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$servicePid" `
             -ErrorAction SilentlyContinue
         if (
             $null -ne $process -and
@@ -210,7 +257,7 @@ function ServiceSnapshot([string]$Name, [string]$BinaryPath) {
         binarySha256 = $(if ($binaryPresent) { ShaFile $BinaryPath } else { $null })
         definitionSha256 = $(if ($installed) { ShaText (CanonicalJson $definition) } else { $null })
         processCount = [int]$processes.Count
-        pid = $pid
+        pid = $servicePid
         _definition = $definition
         _processes = $processes
         _configuredBinaryResolvedPath = $configuredResolved
@@ -378,7 +425,11 @@ function ResolverRows {
     )
 }
 
-function NetworkSnapshot($Status, $Checks) {
+function NetworkSnapshot(
+    $Status,
+    $Checks,
+    [bool]$Connectivity = $true
+) {
     $routes = @(RouteRows)
     $defaults = @($routes | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0', '::/0') })
     $resolvers = @(ResolverRows)
@@ -396,14 +447,18 @@ function NetworkSnapshot($Status, $Checks) {
         }
     )
     $dnsResolved = $false
-    try {
-        $dnsResolved = @(Resolve-DnsName -Name ([string]$Checks.dnsName) -ErrorAction Stop).Count -gt 0
-    } catch {}
+    if ($Connectivity) {
+        try {
+            $dnsResolved = @(Resolve-DnsName -Name ([string]$Checks.dnsName) -ErrorAction Stop).Count -gt 0
+        } catch {}
+    }
     $publicInternet = $false
-    try {
-        $response = Invoke-WebRequest -Uri ([string]$Checks.directUrl) -UseBasicParsing -TimeoutSec 10
-        $publicInternet = [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 400
-    } catch {}
+    if ($Connectivity) {
+        try {
+            $response = Invoke-WebRequest -Uri ([string]$Checks.directUrl) -UseBasicParsing -TimeoutSec 10
+            $publicInternet = [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 400
+        } catch {}
+    }
     $routeJson = CanonicalJson $routes
     $defaultJson = CanonicalJson $defaults
     $resolverJson = CanonicalJson $resolvers
@@ -476,6 +531,115 @@ function PublicNetwork($Value) {
     }
 }
 
+function NetworkIntegrityReceipt($Value) {
+    return ShaText (CanonicalJson ([ordered]@{
+        directMode = [bool]$Value.directMode
+        wireguardExitEnabled = [bool]$Value.wireguardExitEnabled
+        resolverFingerprint = [string]$Value.resolverFingerprint
+        defaultRouteFingerprint = [string]$Value.defaultRouteFingerprint
+        routeTableFingerprint = [string]$Value.routeTableFingerprint
+        ownedRouteCount = [int]$Value.ownedRouteCount
+        ownedResolverArtifactCount = [int]$Value.ownedResolverArtifactCount
+    }))
+}
+
+function IdentityInputReceipt([string]$Directory) {
+    $rows = @(
+        Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop |
+            Sort-Object Name |
+            ForEach-Object {
+                if (
+                    $_.PSIsContainer -or
+                    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                ) {
+                    Fail 'candidate identity snapshot contains a non-regular input'
+                }
+                [ordered]@{
+                    name = [string]$_.Name
+                    sha256 = ShaFile $_.FullName
+                    size = [int64]$_.Length
+                }
+            }
+    )
+    return [ordered]@{
+        sha256 = ShaText (CanonicalJson $rows)
+        count = [int]$rows.Count
+    }
+}
+
+function PrepareIdentityInputs(
+    [string]$ConfigPath,
+    [string]$WorkspaceRoot
+) {
+    $workspace = Join-Path $WorkspaceRoot (
+        '.identity-' + [Guid]::NewGuid().ToString('N')
+    )
+    [IO.Directory]::CreateDirectory($workspace) | Out-Null
+    $snapshotConfig = Join-Path $workspace (
+        [IO.Path]::GetFileName($ConfigPath)
+    )
+    try {
+        $parent = Split-Path -Parent $ConfigPath
+        $fileName = [IO.Path]::GetFileName($ConfigPath)
+        $inputs = @(
+            $ConfigPath,
+            (Join-Path $parent 'signed-rosters.json')
+        )
+        foreach (
+            $suffix in @(
+                'nostr-secret-key',
+                'wireguard-exit-private-key',
+                'wireguard-exit-peer-preshared-key',
+                'pending-join-request',
+                'cashu-wallet-seed'
+            )
+        ) {
+            $inputs += Join-Path $parent (
+                '.' + $fileName + '.' + $suffix + '.dpapi'
+            )
+        }
+        foreach ($source in $inputs) {
+            if (!(Test-Path -LiteralPath $source)) { continue }
+            $item = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+            if (
+                $item.PSIsContainer -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            ) {
+                Fail 'live candidate identity input is not a regular file'
+            }
+            Copy-Item `
+                -LiteralPath $source `
+                -Destination (Join-Path $workspace $item.Name) `
+                -Force `
+                -ErrorAction Stop
+        }
+        if (!(Test-Path -LiteralPath $snapshotConfig -PathType Leaf)) {
+            Fail 'candidate identity config snapshot is missing'
+        }
+        if (
+            !(Test-Path `
+                -LiteralPath (Join-Path $workspace 'signed-rosters.json') `
+                -PathType Leaf)
+        ) {
+            Fail 'candidate signed roster snapshot is missing'
+        }
+        $receipt = IdentityInputReceipt $workspace
+        return [pscustomobject]@{
+            Path = $workspace
+            Config = $snapshotConfig
+            Receipt = [string]$receipt.sha256
+            Count = [int]$receipt.count
+        }
+    } catch {
+        Remove-Item `
+            -LiteralPath $workspace `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function ResolveNvpnServiceName($Deployment) {
     $serviceName = if ($Deployment.serviceName) {
         [string]$Deployment.serviceName
@@ -488,7 +652,13 @@ function ResolveNvpnServiceName($Deployment) {
     return $serviceName
 }
 
-function Capture($Target, $Checks) {
+function Capture(
+    $Target,
+    $Checks,
+    [string]$IdentityBinary,
+    $IdentityExpectations,
+    [string]$IdentityWorkspaceRoot
+) {
     $deployment = $Target.deployment
     $serviceName = ResolveNvpnServiceName $deployment
     $binary = RequireAbsolutePath $deployment.binaryPath 'binaryPath'
@@ -497,6 +667,32 @@ function Capture($Target, $Checks) {
     if (!(Test-Path -LiteralPath $probeBinary -PathType Leaf)) {
         Fail "probe CLI does not exist: $probeBinary"
     }
+    if (!(Test-Path -LiteralPath $IdentityBinary -PathType Leaf)) {
+        Fail "candidate identity CLI does not exist: $IdentityBinary"
+    }
+    $candidateHash = ShaFile $IdentityBinary
+    if (
+        $candidateHash -ne
+        [string]$IdentityExpectations.installedBinarySha256
+    ) {
+        Fail 'candidate identity CLI hash mismatch'
+    }
+    $candidateSize = [int64](Get-Item -LiteralPath $IdentityBinary).Length
+    if ($candidateSize -le 0) {
+        Fail 'candidate identity CLI is empty'
+    }
+    $candidateVersion = InvokeNvpnJson $IdentityBinary @('version', '--json')
+    $expectedFips = "$($IdentityExpectations.fipsVersion) (rev $(([string]$IdentityExpectations.fipsGitSha).Substring(0, 10)))"
+    if (
+        [string]$candidateVersion.version -ne
+        [string]$IdentityExpectations.appVersion
+    ) {
+        Fail 'candidate identity CLI app version mismatch'
+    }
+    if ([string]$candidateVersion.fips_core_version -ne $expectedFips) {
+        Fail 'candidate identity CLI FIPS version mismatch'
+    }
+    $probeHashBefore = ShaFile $probeBinary
     $probeVersion = InvokeNvpnJson $probeBinary @('version', '--json')
     if (
         [string]::IsNullOrWhiteSpace([string]$probeVersion.version) -or
@@ -504,15 +700,104 @@ function Capture($Target, $Checks) {
     ) {
         Fail 'probe CLI version receipt is incomplete'
     }
-    $status = InvokeNvpnJson $probeBinary @('status', '--config', $config, '--json', '--discover-secs', '0')
+    $installedStatusBefore = InvokeNvpnJson $probeBinary @('status', '--config', $config, '--json', '--discover-secs', '0')
+    $serviceBefore = ServiceSnapshot $serviceName $binary
+    $networkBefore = NetworkSnapshot $installedStatusBefore $Checks $false
+    $configHashBefore = ShaFile $config
+    $signedRosters = Join-Path (Split-Path -Parent $config) 'signed-rosters.json'
+    if (!(Test-Path -LiteralPath $signedRosters -PathType Leaf)) {
+        Fail "signed roster store is missing: $signedRosters"
+    }
+    $signedRosterHashBefore = ShaFile $signedRosters
+    $identityInputs = PrepareIdentityInputs $config $IdentityWorkspaceRoot
+    try {
+        $candidateStatus = InvokeNvpnJson $IdentityBinary @(
+            'status',
+            '--config',
+            [string]$identityInputs.Config,
+            '--json',
+            '--discover-secs',
+            '0'
+        )
+        $identityInputsAfter = IdentityInputReceipt $identityInputs.Path
+    } finally {
+        Remove-Item `
+            -LiteralPath $identityInputs.Path `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $identityInputs.Path) {
+        Fail 'candidate identity snapshot cleanup left residue'
+    }
+    if (
+        [string]$identityInputsAfter.sha256 -ne
+            [string]$identityInputs.Receipt -or
+        [int]$identityInputsAfter.count -ne [int]$identityInputs.Count
+    ) {
+        Fail 'candidate identity status mutated its private input snapshot'
+    }
+    $configValue = ConfigSnapshot $config $candidateStatus
+    $installedStatusAfter = InvokeNvpnJson $probeBinary @('status', '--config', $config, '--json', '--discover-secs', '0')
+    $serviceAfter = ServiceSnapshot $serviceName $binary
+    $networkAfter = NetworkSnapshot $installedStatusAfter $Checks
+    $probeHashAfter = ShaFile $probeBinary
+    $candidateHashAfter = ShaFile $IdentityBinary
+    $configHashAfter = ShaFile $config
+    $signedRosterHashAfter = ShaFile $signedRosters
+    $serviceBeforeReceipt = ShaText (CanonicalJson (PublicService $serviceBefore))
+    $serviceAfterReceipt = ShaText (CanonicalJson (PublicService $serviceAfter))
+    $networkBeforeReceipt = NetworkIntegrityReceipt $networkBefore
+    $networkAfterReceipt = NetworkIntegrityReceipt $networkAfter
+    if ($probeHashAfter -ne $probeHashBefore) {
+        Fail 'candidate identity status mutated the installed probe CLI'
+    }
+    if ($candidateHashAfter -ne $candidateHash) {
+        Fail 'candidate identity CLI changed while executing status'
+    }
+    if ($serviceAfterReceipt -ne $serviceBeforeReceipt) {
+        Fail 'candidate identity status mutated the nvpn service'
+    }
+    if ($configHashAfter -ne $configHashBefore) {
+        Fail 'candidate identity status mutated the nvpn config'
+    }
+    if ($signedRosterHashAfter -ne $signedRosterHashBefore) {
+        Fail 'candidate identity status mutated the signed roster store'
+    }
+    if ($networkAfterReceipt -ne $networkBeforeReceipt) {
+        Fail 'candidate identity status mutated network state'
+    }
     return [ordered]@{
-        service = ServiceSnapshot $serviceName $binary
-        config = ConfigSnapshot $config $status
-        network = NetworkSnapshot $status $Checks
-        status = $status
-        probeBinarySha256 = ShaFile $probeBinary
+        service = $serviceAfter
+        config = $configValue
+        network = $networkAfter
+        status = $installedStatusAfter
+        probeBinarySha256 = $probeHashAfter
         probeAppVersion = [string]$probeVersion.version
         probeFipsCoreVersion = [string]$probeVersion.fips_core_version
+        identityOracle = [ordered]@{
+            kind = 'exact-candidate-read-only-status-v1'
+            readOnly = $true
+            statusDiscoverSecs = 0
+            candidateBinarySha256 = $candidateHashAfter
+            candidateBinarySize = $candidateSize
+            candidateAppVersion = [string]$candidateVersion.version
+            candidateFipsCoreVersion = [string]$candidateVersion.fips_core_version
+            candidateStatusReceiptSha256 = ShaText (CanonicalJson $candidateStatus)
+            identityInputBeforeSha256 = [string]$identityInputs.Receipt
+            identityInputAfterSha256 = [string]$identityInputsAfter.sha256
+            identityInputCount = [int]$identityInputs.Count
+            identitySnapshotRemoved = $true
+            installedObservationBinarySha256 = $probeHashAfter
+            serviceBeforeSha256 = $serviceBeforeReceipt
+            serviceAfterSha256 = $serviceAfterReceipt
+            configBeforeSha256 = $configHashBefore
+            configAfterSha256 = $configHashAfter
+            signedRosterStoreBeforeSha256 = $signedRosterHashBefore
+            signedRosterStoreAfterSha256 = $signedRosterHashAfter
+            networkBeforeSha256 = $networkBeforeReceipt
+            networkAfterSha256 = $networkAfterReceipt
+        }
         binaryPath = $binary
         configPath = $config
         serviceName = $serviceName
@@ -597,6 +882,9 @@ function WriteJournal([string]$Transaction, [string]$TargetId, [string]$Transact
 function SnapshotTransaction([string]$Transaction, $State, $Target) {
     [IO.Directory]::CreateDirectory($Transaction) | Out-Null
     $snapshot = Join-Path $Transaction 'snapshot'
+    if (Test-Path -LiteralPath $snapshot) {
+        Fail 'transaction snapshot already exists'
+    }
     [IO.Directory]::CreateDirectory($snapshot) | Out-Null
     Copy-Item -LiteralPath $State.configPath -Destination (Join-Path $snapshot 'config') -Force
     $signedRosterPath = Join-Path (Split-Path -Parent $State.configPath) 'signed-rosters.json'
@@ -751,7 +1039,12 @@ function DirectProbe([string]$Url) {
     }
 }
 
-function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionId) {
+function RestoreTransaction(
+    [string]$Transaction,
+    $Target,
+    [string]$TransactionId,
+    $Expected
+) {
     AssertElevated
     $snapshot = Join-Path $Transaction 'snapshot'
     $statePath = Join-Path $snapshot 'state.json'
@@ -810,7 +1103,12 @@ function RestoreTransaction([string]$Transaction, $Target, [string]$TransactionI
             Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
         }
     }
-    $after = Capture $Target $Target.checks
+    $after = Capture `
+        $Target `
+        $Target.checks `
+        (Join-Path $Transaction 'candidate.exe') `
+        $Expected `
+        $Transaction
     $afterPublic = [ordered]@{
         service = PublicService $after.service
         config = $after.config
@@ -940,10 +1238,14 @@ function RemoveStagedArtifact([string]$Path) {
 function CopyStagedArtifact(
     [string]$Stage,
     [string]$Root,
-    [string]$TransactionId
+    [string]$TransactionId,
+    [string]$Suffix = ''
 ) {
+    if ($Suffix -notin @('', '.exe')) {
+        Fail 'private staged artifact suffix is invalid'
+    }
     $rootCreated = !(Test-Path -LiteralPath $Root)
-    $private = Join-Path $Root ('.staged-' + $TransactionId)
+    $private = Join-Path $Root ('.staged-' + $TransactionId + $Suffix)
     $source = $null
     $privateWrite = $null
     $privateLock = $null
@@ -951,8 +1253,7 @@ function CopyStagedArtifact(
     $result = $null
     $primary = $null
     try {
-        [IO.Directory]::CreateDirectory($Root) | Out-Null
-        AssertPrivateAdminDirectory $Root
+        CreatePrivateAdminDirectory $Root
         $stageItem = Get-Item -LiteralPath $Stage -Force -ErrorAction Stop
         if (
             $stageItem.PSIsContainer -or
@@ -1047,6 +1348,122 @@ function CopyStagedArtifact(
     return $result
 }
 
+function ProbeCandidate($Payload, $Target, $Expected) {
+    AssertElevated
+    if ([string]$Expected.kind -ne 'candidate-identity-probe-v1') {
+        Fail 'candidate probe expectations kind is invalid'
+    }
+    if ($Expected.requireReadOnly -ne $true) {
+        Fail 'candidate probe must require read-only execution'
+    }
+    $stageName = [string]$Payload.stageName
+    if (
+        [string]::IsNullOrWhiteSpace($stageName) -or
+        $stageName -notmatch '^\.nvpn-fleet-[0-9a-f]{32}\.artifact$'
+    ) {
+        Fail 'staged candidate probe name is invalid'
+    }
+    $probeId = [string]$Expected.probeId
+    if ($probeId -notmatch '^[0-9a-f]{32}$') {
+        Fail 'candidate probe id is invalid'
+    }
+    $stage = Join-Path $HOME $stageName
+    if (!(Test-Path -LiteralPath $stage -PathType Leaf)) {
+        Fail 'staged candidate probe executable is missing'
+    }
+    $candidateSize = [int64]$Payload.candidateBinarySize
+    if ($candidateSize -le 0) {
+        Fail 'candidate probe executable size is invalid'
+    }
+    $root = RequireAbsolutePath $(if ($Target.deployment.transactionRoot) {
+        $Target.deployment.transactionRoot
+    } else {
+        Join-Path $env:ProgramData 'nvpn\fleet-canary'
+    }) 'transactionRoot'
+    $secured = $null
+    $result = $null
+    $primary = $null
+    try {
+        $secured = CopyStagedArtifact $stage $root $probeId '.exe'
+        if ((ShaFile $secured.Path) -ne [string]$Expected.installedBinarySha256) {
+            Fail 'staged candidate probe executable SHA-256 mismatch'
+        }
+        if ((Get-Item -LiteralPath $secured.Path).Length -ne $candidateSize) {
+            Fail 'staged candidate probe executable size mismatch'
+        }
+        $state = Capture `
+            $Target `
+            $Target.checks `
+            ([string]$secured.Path) `
+            $Expected `
+            $root
+        $pending = @(PendingTransactions $root)
+        $result = [ordered]@{
+            schema = 2
+            targetId = [string]$Target.id
+            reachable = $true
+            platform = [string]$Target.platform
+            arch = [string]$Target.arch
+            machineIdentitySha256 = MachineIdentity
+            realChecks = $true
+            mocked = $false
+            remoteBuildPerformed = $false
+            probeBinarySha256 = [string]$state.probeBinarySha256
+            probeAppVersion = [string]$state.probeAppVersion
+            probeFipsCoreVersion = [string]$state.probeFipsCoreVersion
+            identityOracle = $state.identityOracle
+            transaction = [ordered]@{
+                recoveryRequired = $pending.Count -gt 0
+                pendingTransactionIds = $pending
+            }
+            service = PublicService $state.service
+            config = $state.config
+            network = PublicNetwork $state.network
+        }
+    } catch {
+        $primary = $_
+    }
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    if ($null -ne $secured) {
+        try { $secured.Lock.Dispose() } catch {
+            $cleanupErrors.Add("private staging lock: $_")
+        }
+        try { RemoveStagedArtifact ([string]$secured.Path) } catch {
+            $cleanupErrors.Add([string]$_)
+        }
+        if ($secured.RootCreated) {
+            try {
+                Remove-Item -LiteralPath $root -Force -ErrorAction Stop
+                if (Test-Path -LiteralPath $root -ErrorAction Stop) {
+                    throw 'private staging directory cleanup left residue'
+                }
+            } catch {
+                $cleanupErrors.Add("private staging directory: $_")
+            }
+        }
+    }
+    if ($null -ne $primary) {
+        if ($cleanupErrors.Count -gt 0) {
+            Fail (
+                $primary.Exception.Message +
+                '; staged candidate probe cleanup also failed: ' +
+                ($cleanupErrors -join '; ')
+            )
+        }
+        throw $primary
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        Fail (
+            'staged candidate probe cleanup failed: ' +
+            ($cleanupErrors -join '; ')
+        )
+    }
+    if ($null -eq $result) {
+        Fail 'staged candidate probe returned no result'
+    }
+    return $result
+}
+
 function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
     AssertElevated
     if ($Target.deployment.authorization -ne 'install') {
@@ -1058,19 +1475,31 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
     if (Test-Path -LiteralPath $transaction) { Fail 'transaction id already exists' }
     if ((ShaFile $stage) -ne [string]$Expected.artifactSha256) { Fail 'staged artifact SHA-256 mismatch' }
     if ((Get-Item -LiteralPath $stage).Length -ne [int64]$Expected.artifactSize) { Fail 'staged artifact size mismatch' }
-    $before = Capture $Target $Target.checks
-    AssertExpected $before $Target $Expected
-    if ($before.service.installed) {
-        AssertServiceRuntimeBinding `
-            $before.service `
-            ([string]$before.binaryPath) `
-            ([string]$before.service.binarySha256) `
-            ([bool]$before.service.running) | Out-Null
-    }
     [IO.Directory]::CreateDirectory($root) | Out-Null
-    $snapshot = SnapshotTransaction $transaction $before $Target
-    WriteJournal $transaction $Target.id $transactionId 'preparing' | Out-Null
-    $extracted = ExtractPayload $stage $transaction $Expected
+    [IO.Directory]::CreateDirectory($transaction) | Out-Null
+    try {
+        $extracted = ExtractPayload $stage $transaction $Expected
+        $before = Capture `
+            $Target `
+            $Target.checks `
+            ([string]$extracted.candidate) `
+            $Expected `
+            $transaction
+        AssertExpected $before $Target $Expected
+        if ($before.service.installed) {
+            AssertServiceRuntimeBinding `
+                $before.service `
+                ([string]$before.binaryPath) `
+                ([string]$before.service.binarySha256) `
+                ([bool]$before.service.running) | Out-Null
+        }
+        $snapshot = SnapshotTransaction $transaction $before $Target
+        WriteJournal $transaction $Target.id $transactionId 'preparing' | Out-Null
+    } catch {
+        Remove-Item -LiteralPath $transaction -Recurse -Force `
+            -ErrorAction SilentlyContinue
+        throw
+    }
     $name = [string]$before.serviceName
     $binary = [string]$before.binaryPath
     $config = [string]$before.configPath
@@ -1094,7 +1523,8 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
             if ($LASTEXITCODE -ne 0) { Fail 'candidate failed to install Windows service' }
         }
         WaitService $name $true
-        $first = Capture $Target $Target.checks
+        $first = Capture `
+            $Target $Target.checks $binary $Expected $transaction
         $firstPid = [int]$first.service.pid
         AssertServiceRuntimeBinding `
             $first.service `
@@ -1111,7 +1541,8 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
         $afterCounters = AggregateCounters $statusAfterPayload
         Restart-Service -Name $name -Force
         WaitService $name $true
-        $final = Capture $Target $Target.checks
+        $final = Capture `
+            $Target $Target.checks $binary $Expected $transaction
         $finalPid = [int]$final.service.pid
         $runtimeBinding = AssertServiceRuntimeBinding `
             $final.service `
@@ -1245,7 +1676,10 @@ function InstallStagedCandidate($Payload, $Target, $Expected, [string]$Stage) {
             }
         }
     } catch {
-        try { RestoreTransaction $transaction $Target $transactionId | Out-Null } catch {
+        try {
+            RestoreTransaction `
+                $transaction $Target $transactionId $Expected | Out-Null
+        } catch {
             [Console]::Error.WriteLine("automatic rollback also failed: $_")
         }
         throw
@@ -1337,34 +1771,16 @@ try {
     $action = [string]$payload.action
     $transactionRoot = RequireAbsolutePath $(if ($target.deployment.transactionRoot) { $target.deployment.transactionRoot } else { Join-Path $env:ProgramData 'nvpn\fleet-canary' }) 'transactionRoot'
     if ($action -eq 'probe') {
-        $state = Capture $target $target.checks
-        $pending = @(PendingTransactions $transactionRoot)
-        $result = [ordered]@{
-            schema = 2
-            targetId = [string]$target.id
-            reachable = $true
-            platform = [string]$target.platform
-            arch = [string]$target.arch
-            machineIdentitySha256 = MachineIdentity
-            realChecks = $true
-            mocked = $false
-            remoteBuildPerformed = $false
-            probeBinarySha256 = [string]$state.probeBinarySha256
-            probeAppVersion = [string]$state.probeAppVersion
-            probeFipsCoreVersion = [string]$state.probeFipsCoreVersion
-            transaction = [ordered]@{
-                recoveryRequired = $pending.Count -gt 0
-                pendingTransactionIds = $pending
-            }
-            service = PublicService $state.service
-            config = $state.config
-            network = PublicNetwork $state.network
-        }
+        $result = ProbeCandidate $payload $target $payload.expectations
     } elseif ($action -eq 'install') {
         $result = InstallCandidate $payload $target $payload.expectations
     } elseif ($action -eq 'rollback') {
         $transactionId = [string]$payload.expectations.transactionId
-        $result = RestoreTransaction (Join-Path $transactionRoot $transactionId) $target $transactionId
+        $result = RestoreTransaction `
+            (Join-Path $transactionRoot $transactionId) `
+            $target `
+            $transactionId `
+            $payload.expectations
     } else {
         Fail 'unsupported fleet action'
     }
