@@ -13,6 +13,8 @@ fail() {
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-linux-builder-isolation.XXXXXX")"
 TEST_CONTAINER_NAME=""
 TEST_CACHE_ID=""
+TEST_VOLUME_NAME=""
+TEST_VOLUME_GENERATION=""
 
 cleanup() {
   local status="$?"
@@ -20,6 +22,14 @@ cleanup() {
   if [[ -n "$TEST_CONTAINER_NAME" && -n "$TEST_CACHE_ID" ]]; then
     host_linux_builder_stop_container \
       "$TEST_CONTAINER_NAME" "$TEST_CACHE_ID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$TEST_VOLUME_NAME" \
+    && -n "$TEST_CACHE_ID" \
+    && -n "$TEST_VOLUME_GENERATION" ]] \
+    && host_linux_builder_target_volume_matches \
+      "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
+  then
+    docker volume rm "$TEST_VOLUME_NAME" >/dev/null 2>&1 || true
   fi
   find "$TMP_ROOT" -xdev -depth -mindepth 1 -delete
   rmdir "$TMP_ROOT"
@@ -132,10 +142,32 @@ if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
     printf '%s' "$TMP_ROOT" | shasum -a 256 | awk '{ print $1 }'
   )"
   TEST_CONTAINER_NAME="nvpn-linux-builder-test-${TEST_CACHE_ID:0:20}"
+  TEST_VOLUME_NAME="nvpn-linux-target-test-${TEST_CACHE_ID:0:20}"
+  TEST_VOLUME_GENERATION="test-v3"
   image="${NVPN_TEST_HOST_LINUX_BUILDER_IMAGE:-ubuntu:24.04}"
   platform="${NVPN_TEST_HOST_LINUX_BUILDER_PLATFORM:-linux/amd64}"
   docker image inspect "$image" >/dev/null 2>&1 \
     || fail "real container cleanup test requires the cached image $image"
+  host_linux_builder_ensure_target_volume \
+    "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
+  host_linux_builder_ensure_target_volume \
+    "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
+  if host_linux_builder_ensure_target_volume \
+    "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" wrong-generation \
+    >/dev/null 2>&1
+  then
+    fail "mismatched persistent target volume was accepted"
+  fi
+  docker run --rm \
+    --platform "$platform" \
+    --network none \
+    --volume "$TEST_VOLUME_NAME:/target" \
+    "$image" sh -c 'printf native-volume > /target/probe'
+  docker run --rm \
+    --platform "$platform" \
+    --network none \
+    --volume "$TEST_VOLUME_NAME:/target" \
+    "$image" grep -Fx native-volume /target/probe >/dev/null
   docker run --detach \
     --platform "$platform" \
     --name "$TEST_CONTAINER_NAME" \
@@ -185,6 +217,9 @@ if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
   ! docker container inspect "$TEST_CONTAINER_NAME" >/dev/null 2>&1 \
     || fail "validated daemon-side container survived cleanup"
   TEST_CONTAINER_NAME=""
+  docker volume rm "$TEST_VOLUME_NAME" >/dev/null
+  TEST_VOLUME_NAME=""
+  TEST_VOLUME_GENERATION=""
   TEST_CACHE_ID=""
 fi
 

@@ -79,8 +79,10 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '--manifest-specs "$NVPN_FIPS_REPO_PATH"' \
   '--validate /output/root-Cargo.lock.committed Cargo.lock' \
   '--validate /output/linux-Cargo.lock.committed Cargo.lock' \
-  'TARGET_CACHE_GENERATION="serialized-v2-rust${RUST_TOOLCHAIN//./-}"' \
-  '"$TARGET_CACHE_ROOT/root-target:/target-root"' \
+  'TARGET_CACHE_GENERATION="docker-volume-v3-rust${RUST_TOOLCHAIN//./-}"' \
+  'TARGET_VOLUME_NAME="nvpn-linux-target-${TARGET_VOLUME_ID:0:24}"' \
+  '"$TARGET_VOLUME_NAME:/target-root"' \
+  'host_linux_builder_ensure_target_volume \' \
   '--name "$CONTAINER_NAME"' \
   '--label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID"' \
   'host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"' \
@@ -106,13 +108,8 @@ require_tokens "$PREPARER" "clean exact cached Mac bundle" \
   '/output/nostr-vpn.deb' \
   '/output/nvpn-x86_64-unknown-linux-musl.tar.gz' \
   'verify-host-linux-vm-bundle.py'
-if grep -Fq '"$CACHE_ROOT/build-cache/root-target:/target-root"' "$PREPARER" \
-  || grep -Fq '"$CACHE_ROOT/build-cache/linux-target:/target-linux"' "$PREPARER"
-then
-  fail "host Linux builder still uses the unversioned, unserialized Cargo targets"
-fi
-if grep -Fq '/target-linux' "$PREPARER"; then
-  fail "host Linux builder still recompiles GTK dependencies in a second target"
+if grep -Eq 'TARGET_CACHE_ROOT|build-cache/(root|linux)-target|/target-linux' "$PREPARER"; then
+  fail "host Linux builder still uses a Docker Desktop bind-mounted Cargo target"
 fi
 if grep -Fq 'CONTAINER_CID_FILE' "$PREPARER"; then
   fail "host Linux builder has two competing identities for its deterministic container"
@@ -155,11 +152,16 @@ stale_cleanup = text.index(
     'host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"',
     second_verify,
 )
-target_mount = text.index('"$TARGET_CACHE_ROOT/root-target:/target-root"')
+volume_ensure = text.index("host_linux_builder_ensure_target_volume", second_verify)
+target_mount = text.index('"$TARGET_VOLUME_NAME:/target-root"')
 if not stale_cleanup < target_mount:
     raise SystemExit(
         "host Linux builder can mount its persistent target cache before stale "
         "server-side builders are removed"
+    )
+if not stale_cleanup < volume_ensure < target_mount:
+    raise SystemExit(
+        "host Linux builder does not validate its native target volume before use"
     )
 if text.count("export CARGO_TARGET_DIR=/target-root") != 2:
     raise SystemExit(
@@ -171,7 +173,14 @@ require_tokens "$ISOLATION_LIB" "validated exact-container cleanup" \
   'to.nostrvpn.release-builder-cache' \
   'Refusing to remove mismatched Linux builder container' \
   'docker rm --force "$container_id"' \
-  'docker container inspect'
+  'docker container inspect' \
+  'host_linux_builder_ensure_target_volume' \
+  'to.nostrvpn.release-builder-generation' \
+  'Refusing mismatched Linux builder target volume' \
+  "'{{ .Driver }}'" \
+  "'{{ .Mountpoint }}'" \
+  '"$driver" == "local"' \
+  'docker volume inspect'
 "$ISOLATION_HARNESS"
 require_tokens "$VERIFIER" "hash/size/version/source receipt validation" \
   '"builtOnHostMac": True' \

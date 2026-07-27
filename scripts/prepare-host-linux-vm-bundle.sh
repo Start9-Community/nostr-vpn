@@ -89,11 +89,15 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package3"
 BUNDLE_DIR="$CACHE_ROOT/$CACHE_KEY"
 RECEIPT="$BUNDLE_DIR/receipt.json"
-TARGET_CACHE_GENERATION="serialized-v2-rust${RUST_TOOLCHAIN//./-}"
-TARGET_CACHE_ROOT="$CACHE_ROOT/build-cache/$TARGET_CACHE_GENERATION"
 BUILD_CACHE_ID="$(
   printf '%s' "$CACHE_ROOT" | shasum -a 256 | awk '{ print $1 }'
 )"
+TARGET_CACHE_GENERATION="docker-volume-v3-rust${RUST_TOOLCHAIN//./-}"
+TARGET_VOLUME_ID="$(
+  printf '%s:%s' "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION" \
+    | shasum -a 256 | awk '{ print $1 }'
+)"
+TARGET_VOLUME_NAME="nvpn-linux-target-${TARGET_VOLUME_ID:0:24}"
 VERIFIER="$ROOT/scripts/verify-host-linux-vm-bundle.py"
 PATCH_LOCK_VERIFIER="$ROOT/scripts/verify-cargo-path-patch-lock.py"
 [[ -x "$PATCH_LOCK_VERIFIER" ]] || {
@@ -200,14 +204,18 @@ fi
 # remove any daemon-owned container carrying this cache identity before the
 # persistent targets can be mounted by the next build.
 host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
+# rustc dependency outputs must stay on Docker's native Linux filesystem.
+# Docker Desktop bind mounts can expose a completed dependency to Cargo before
+# a parallel rustc can read its metadata, producing spurious E0463 failures.
+host_linux_builder_ensure_target_volume \
+  "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
 
 TEMP_DIR="$(mktemp -d "$CACHE_ROOT/.host-linux-vm-bundle.XXXXXX")"
 mkdir -p \
   "$TEMP_DIR/source" \
   "$TEMP_DIR/output" \
   "$TEMP_DIR/final" \
-  "$CACHE_ROOT/build-cache/cargo-home" \
-  "$TARGET_CACHE_ROOT/root-target"
+  "$CACHE_ROOT/build-cache/cargo-home"
 git clone --no-hardlinks --quiet "$ROOT" "$TEMP_DIR/source/app"
 git -C "$TEMP_DIR/source/app" checkout --detach --quiet "$APP_GIT_SHA"
 git -C "$TEMP_DIR/source/app" clean -ffd >/dev/null
@@ -244,7 +252,7 @@ docker run --rm \
   --volume "$TEMP_DIR/source/fips:/workspace/fips:ro" \
   --volume "$TEMP_DIR/output:/output" \
   --volume "$CACHE_ROOT/build-cache/cargo-home:/cargo-home" \
-  --volume "$TARGET_CACHE_ROOT/root-target:/target-root" \
+  --volume "$TARGET_VOLUME_NAME:/target-root" \
   --env CARGO_HOME=/cargo-home \
   --env CARGO_INCREMENTAL=0 \
   --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
