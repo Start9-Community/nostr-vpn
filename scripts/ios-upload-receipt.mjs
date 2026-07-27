@@ -11,6 +11,7 @@ import {
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 import { assertPassedFleetPublication } from './fleet-release-publication-lib.mjs'
 import { sha256FileSync } from './local-release-lib.mjs'
@@ -448,11 +449,20 @@ export function planIosUploadReconciliation({
   buildPresent,
   finalReceipt,
   pendingReceipt,
+  matchingReceiptPair = false,
 }) {
   if (finalReceipt && pendingReceipt) {
-    throw new Error(
-      'Final and pending iOS upload receipts coexist; refusing ambiguous reconciliation.',
-    )
+    if (!buildPresent) {
+      throw new Error(
+        'Final fleet-bound iOS upload receipt exists but App Store Connect has no exact build.',
+      )
+    }
+    if (!matchingReceiptPair) {
+      throw new Error(
+        'Final and pending iOS upload receipts coexist, but a matching pair was not proven.',
+      )
+    }
+    return 'cleanup-pending-use-final'
   }
   if (buildPresent && !finalReceipt && !pendingReceipt) {
     throw new Error(
@@ -504,6 +514,24 @@ export function reconcileIosUploadReceipts({
         validatePublication,
       })
     : null
+  let matchingReceiptPair = false
+  if (finalReceipt && pendingReceipt) {
+    const finalValue = exactJson(
+      paths.final,
+      'Fleet-bound iOS upload receipt',
+    )
+    const finalPendingValue = Object.fromEntries(
+      pendingKeys.map((key) => [key, finalValue[key]]),
+    )
+    finalPendingValue.schema = 1
+    finalPendingValue.kind = 'nvpn-ios-app-store-pending-upload-v1'
+    if (!isDeepStrictEqual(finalPendingValue, pendingReceipt.value)) {
+      throw new Error(
+        'Pending and final iOS upload receipts differ; refusing cleanup.',
+      )
+    }
+    matchingReceiptPair = true
+  }
   return {
     finalReceipt,
     pendingReceipt,
@@ -511,6 +539,7 @@ export function reconcileIosUploadReceipts({
       buildPresent: testflight.buildPresent === true,
       finalReceipt,
       pendingReceipt,
+      matchingReceiptPair,
     }),
   }
 }

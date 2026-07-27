@@ -262,6 +262,25 @@ export function publishExactIosDistribution({
 
   let pending = preflight.pendingReceipt
   let uploaded = preflight.testflight
+  if (preflight.uploadAction === 'cleanup-pending-use-final') {
+    const retry = reconcileIosUploadReceipts({
+      repoRoot,
+      frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
+      stagedManifest,
+      mutationEnv,
+      testflight: uploaded,
+    })
+    if (
+      retry.uploadAction !== 'cleanup-pending-use-final'
+      || !retry.pendingReceipt
+    ) {
+      throw new Error(
+        'Matching iOS upload receipt pair changed before cleanup.',
+      )
+    }
+    removeIosPendingUploadReceipt(retry.pendingReceipt)
+    pending = null
+  }
   if (preflight.uploadAction === 'upload') {
     const authorization = captureIosPendingUploadAuthorization({
       repoRoot,
@@ -292,7 +311,10 @@ export function publishExactIosDistribution({
     )
     uploaded = testflightPreflight({ repoRoot, mutationEnv })
   }
-  if (preflight.uploadAction !== 'use-final') {
+  if (
+    preflight.uploadAction !== 'use-final'
+    && preflight.uploadAction !== 'cleanup-pending-use-final'
+  ) {
     if (!pending) {
       throw new Error(
         'Visible App Store Connect build has no accepted upload receipt to finalize.',

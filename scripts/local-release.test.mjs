@@ -61,6 +61,7 @@ import {
 import {
   finalizeIosUploadReceipt,
   planIosUploadReconciliation,
+  reconcileIosUploadReceipts,
   validateHistoricalIosFleetAuthorization,
   validateIosPendingUploadReceipt,
   validateIosUploadReceipt,
@@ -740,7 +741,21 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     }),
     uploadReceiptPath,
   )
-  assert.equal(validations.length, 2)
+  const matchingPair = reconcileIosUploadReceipts({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv,
+    testflight,
+    validatePublication,
+  })
+  assert.equal(
+    matchingPair.uploadAction,
+    'cleanup-pending-use-final',
+  )
+  assert.equal(matchingPair.finalReceipt, uploadReceiptPath)
+  assert.deepEqual(matchingPair.pendingReceipt.value, pendingReceipt)
+  assert.equal(validations.length, 4)
   assert.equal(
     validations[1].options.fleetResult,
     realpathSync(historicalPaths.result),
@@ -791,6 +806,27 @@ test('existing ASC build replays its original fleet upload authorization', () =>
       }),
     /final iOS upload receipt is invalid/i,
   )
+
+  const tamperedPending = {
+    ...pendingReceipt,
+    transporterAcceptedAt: pendingReceipt.transporterAcceptedAt + 1,
+  }
+  writeFileSync(
+    accepted.path,
+    `${JSON.stringify(tamperedPending)}\n`,
+  )
+  assert.throws(
+    () =>
+      reconcileIosUploadReceipts({
+        repoRoot,
+        frozen,
+        stagedManifest,
+        mutationEnv,
+        testflight,
+        validatePublication,
+      }),
+    /pending and final iOS upload receipts differ/i,
+  )
 })
 
 test('accepted pending iOS upload waits or finalizes without duplicate upload', () => {
@@ -820,6 +856,15 @@ test('accepted pending iOS upload waits or finalizes without duplicate upload', 
       }),
     /no fleet-authorized exact upload receipt/i,
   )
+  assert.equal(
+    planIosUploadReconciliation({
+      buildPresent: true,
+      finalReceipt: '/private/final',
+      pendingReceipt: pending,
+      matchingReceiptPair: true,
+    }),
+    'cleanup-pending-use-final',
+  )
   assert.throws(
     () =>
       planIosUploadReconciliation({
@@ -827,7 +872,7 @@ test('accepted pending iOS upload waits or finalizes without duplicate upload', 
         finalReceipt: '/private/final',
         pendingReceipt: pending,
       }),
-    /final and pending .* coexist/i,
+    /matching pair was not proven/i,
   )
 
   const publisher = readFileSync(
@@ -860,6 +905,10 @@ test('accepted pending iOS upload waits or finalizes without duplicate upload', 
   assert.match(
     publisher,
     /!submittedStates\.has[\s\S]*?\) \{\s*beforeMutation\(\)\s*run\([\s\S]*?'appstore-draft'\), 'submit'/,
+  )
+  assert.match(
+    publisher,
+    /uploadAction === 'cleanup-pending-use-final'[\s\S]*?reconcileIosUploadReceipts\([\s\S]*?removeIosPendingUploadReceipt/,
   )
 })
 
