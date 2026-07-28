@@ -70,6 +70,21 @@ then
   echo "Host Linux VM bundle app tree differs from the exact candidate" >&2
   exit 2
 fi
+
+candidate_blob_sha256() {
+  git -C "$ROOT" cat-file blob "$APP_GIT_SHA:$1" \
+    | shasum -a 256 | awk '{print $1}'
+}
+
+require_exact_candidate_file() {
+  local relative="$1"
+  [[ -f "$ROOT/$relative" && ! -L "$ROOT/$relative" \
+    && "$(shasum -a 256 "$ROOT/$relative" | awk '{print $1}')" \
+      == "$(candidate_blob_sha256 "$relative")" ]] || {
+    echo "Host Linux VM bundle candidate file differs from Git: $relative" >&2
+    exit 2
+  }
+}
 APP_VERSION="$(
   awk '
     $0 == "[workspace.package]" { package = 1; next }
@@ -119,11 +134,18 @@ REMOTE_BUILDER_DRIVER="$ROOT/scripts/host-linux-native-builder-remote.sh"
   exit 2
 }
 DOCKERFILE_SHA256="$(
-  shasum -a 256 "$ROOT/Dockerfile.linux-vm-gate" | awk '{print $1}'
+  candidate_blob_sha256 Dockerfile.linux-vm-gate
 )"
 CONTAINER_PAYLOAD_SHA256="$(
-  shasum -a 256 "$CONTAINER_PAYLOAD" | awk '{print $1}'
+  candidate_blob_sha256 scripts/build-host-linux-vm-bundle-in-container.sh
 )"
+for candidate_file in \
+  Dockerfile.linux-vm-gate \
+  scripts/build-host-linux-vm-bundle-in-container.sh \
+  scripts/host-linux-native-builder-remote.sh
+do
+  require_exact_candidate_file "$candidate_file"
+done
 SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct "$APP_GIT_SHA")"
 export SOURCE_DATE_EPOCH
 
@@ -151,6 +173,7 @@ PATCH_LOCK_VERIFIER="$ROOT/scripts/verify-cargo-path-patch-lock.py"
   echo "Host Linux VM bundle exact FIPS lock verifier is missing" >&2
   exit 2
 }
+require_exact_candidate_file scripts/verify-cargo-path-patch-lock.py
 FIPS_PATCH_PACKAGES=()
 while IFS= read -r package; do
   FIPS_PATCH_PACKAGES+=("$package")
@@ -184,6 +207,16 @@ SOURCE_AUDITOR="$ROOT/scripts/verify_host_linux_build_source.py"
   echo "Host Linux VM bundle cache/source verifier is missing" >&2
   exit 2
 }
+for candidate_file in \
+  scripts/host_linux_cargo_archive_cache.py \
+  scripts/host_linux_package_content.py \
+  scripts/lib-host-linux-builder-isolation.sh \
+  scripts/lib-host-linux-native-builder.sh \
+  scripts/verify-host-linux-vm-bundle.py \
+  scripts/verify_host_linux_build_source.py
+do
+  require_exact_candidate_file "$candidate_file"
+done
 TEMP_DIR=""
 CONTAINER_NAME="nvpn-linux-bundle-${BUILD_CACHE_ID:0:24}"
 HOST_BUILD_LOCK_HELD=0
@@ -317,16 +350,15 @@ chmod 0700 \
   "$DOWNLOAD_CACHE_PARENT"
 git clone --no-hardlinks --quiet "$ROOT" "$TEMP_DIR/source/app"
 git -C "$TEMP_DIR/source/app" checkout --detach --quiet "$APP_GIT_SHA"
-git -C "$TEMP_DIR/source/app" clean -ffd >/dev/null
+git -C "$TEMP_DIR/source/app" clean -ffdx >/dev/null
 git clone --no-hardlinks --quiet "$NVPN_FIPS_REPO_PATH" "$TEMP_DIR/source/fips"
 git -C "$TEMP_DIR/source/fips" checkout --detach --quiet "$RELEASE_JOIN_FIPS_SHA"
-git -C "$TEMP_DIR/source/fips" clean -ffd >/dev/null
-[[ -z "$(git -C "$TEMP_DIR/source/app" status --porcelain --untracked-files=all)" \
-  && "$(git -C "$TEMP_DIR/source/app" rev-parse HEAD)" == "$APP_GIT_SHA" \
-  && "$(git -C "$TEMP_DIR/source/app" rev-parse 'HEAD^{tree}')" == "$APP_GIT_TREE" ]]
-[[ -z "$(git -C "$TEMP_DIR/source/fips" status --porcelain --untracked-files=all)" \
-  && "$(git -C "$TEMP_DIR/source/fips" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \
-  && "$(git -C "$TEMP_DIR/source/fips" rev-parse 'HEAD^{tree}')" == "$RELEASE_JOIN_FIPS_TREE" ]]
+git -C "$TEMP_DIR/source/fips" clean -ffdx >/dev/null
+python3 "$SOURCE_AUDITOR" --exact \
+  "$TEMP_DIR/source/app" "$APP_GIT_SHA" "$APP_GIT_TREE" >/dev/null
+python3 "$SOURCE_AUDITOR" --exact \
+  "$TEMP_DIR/source/fips" \
+  "$RELEASE_JOIN_FIPS_SHA" "$RELEASE_JOIN_FIPS_TREE" >/dev/null
 [[ "$(shasum -a 256 "$TEMP_DIR/source/app/Cargo.lock" | awk '{ print $1 }')" \
   == "$ROOT_CARGO_LOCK_SHA256" ]]
 [[ "$(shasum -a 256 "$TEMP_DIR/source/app/linux/Cargo.lock" | awk '{ print $1 }')" \
@@ -348,7 +380,9 @@ else
   git clone --no-hardlinks --quiet \
     "$TEMP_DIR/source/app" "$TEMP_DIR/build/app"
   git -C "$TEMP_DIR/build/app" checkout --detach --quiet "$APP_GIT_SHA"
-  git -C "$TEMP_DIR/build/app" clean -ffd >/dev/null
+  git -C "$TEMP_DIR/build/app" clean -ffdx >/dev/null
+  python3 "$SOURCE_AUDITOR" --exact \
+    "$TEMP_DIR/build/app" "$APP_GIT_SHA" "$APP_GIT_TREE" >/dev/null
   python3 "$PATCH_LOCK_VERIFIER" \
     --materialize "$ROOT/Cargo.lock" "$TEMP_DIR/root-realized.lock" \
     "${FIPS_PATCH_PACKAGES[@]}" >/dev/null
@@ -362,7 +396,7 @@ else
   docker build \
     --platform "$DOCKER_PLATFORM" \
     --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
-    --file "$ROOT/Dockerfile.linux-vm-gate" \
+    --file "$TEMP_DIR/source/app/Dockerfile.linux-vm-gate" \
     --tag "$IMAGE_TAG" \
     "$TEMP_DIR/docker-context" \
     >"$TEMP_DIR/docker-build.log"
@@ -497,12 +531,11 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
 PY
 fi
 
-[[ -z "$(git -C "$TEMP_DIR/source/app" status --porcelain --untracked-files=all)" \
-  && "$(git -C "$TEMP_DIR/source/app" rev-parse HEAD)" == "$APP_GIT_SHA" \
-  && "$(git -C "$TEMP_DIR/source/app" rev-parse 'HEAD^{tree}')" == "$APP_GIT_TREE" ]]
-[[ -z "$(git -C "$TEMP_DIR/source/fips" status --porcelain --untracked-files=all)" \
-  && "$(git -C "$TEMP_DIR/source/fips" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \
-  && "$(git -C "$TEMP_DIR/source/fips" rev-parse 'HEAD^{tree}')" == "$RELEASE_JOIN_FIPS_TREE" ]]
+python3 "$SOURCE_AUDITOR" --exact \
+  "$TEMP_DIR/source/app" "$APP_GIT_SHA" "$APP_GIT_TREE" >/dev/null
+python3 "$SOURCE_AUDITOR" --exact \
+  "$TEMP_DIR/source/fips" \
+  "$RELEASE_JOIN_FIPS_SHA" "$RELEASE_JOIN_FIPS_TREE" >/dev/null
 [[ "$(shasum -a 256 "$TEMP_DIR/output/root-Cargo.lock.committed" \
   | awk '{ print $1 }')" == "$ROOT_CARGO_LOCK_SHA256" ]]
 [[ "$(shasum -a 256 "$TEMP_DIR/output/linux-Cargo.lock.committed" \

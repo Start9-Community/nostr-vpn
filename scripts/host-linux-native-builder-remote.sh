@@ -179,19 +179,13 @@ done
 
 git clone --no-hardlinks --quiet "$APP_BUNDLE" "$REMOTE_ROOT/app"
 git -C "$REMOTE_ROOT/app" checkout --detach --quiet "$APP_GIT_SHA"
-git -C "$REMOTE_ROOT/app" clean -ffd >/dev/null
+git -C "$REMOTE_ROOT/app" clean -ffdx >/dev/null
 git clone --no-hardlinks --quiet "$FIPS_BUNDLE" "$REMOTE_ROOT/fips"
 git -C "$REMOTE_ROOT/fips" checkout --detach --quiet "$FIPS_GIT_SHA"
-git -C "$REMOTE_ROOT/fips" clean -ffd >/dev/null
-[[ "$(git -C "$REMOTE_ROOT/app" rev-parse HEAD)" == "$APP_GIT_SHA" \
-  && "$(git -C "$REMOTE_ROOT/app" rev-parse 'HEAD^{tree}')" == "$APP_GIT_TREE" \
-  && -z "$(git -C "$REMOTE_ROOT/app" status --porcelain --untracked-files=all)" ]]
-[[ "$(git -C "$REMOTE_ROOT/fips" rev-parse HEAD)" == "$FIPS_GIT_SHA" \
-  && "$(git -C "$REMOTE_ROOT/fips" rev-parse 'HEAD^{tree}')" == "$FIPS_GIT_TREE" \
-  && -z "$(git -C "$REMOTE_ROOT/fips" status --porcelain --untracked-files=all)" ]]
+git -C "$REMOTE_ROOT/fips" clean -ffdx >/dev/null
 git clone --no-hardlinks --quiet "$REMOTE_ROOT/app" "$REMOTE_ROOT/build-app"
 git -C "$REMOTE_ROOT/build-app" checkout --detach --quiet "$APP_GIT_SHA"
-git -C "$REMOTE_ROOT/build-app" clean -ffd >/dev/null
+git -C "$REMOTE_ROOT/build-app" clean -ffdx >/dev/null
 
 DOCKERFILE="$REMOTE_ROOT/app/Dockerfile.linux-vm-gate"
 PAYLOAD="$REMOTE_ROOT/app/scripts/build-host-linux-vm-bundle-in-container.sh"
@@ -207,6 +201,19 @@ SOURCE_AUDITOR="$REMOTE_ROOT/app/scripts/verify_host_linux_build_source.py"
   == "$EXPECTED_DOCKERFILE_SHA256" ]]
 [[ "$(sha256sum "$PAYLOAD" | awk '{print $1}')" \
   == "$EXPECTED_PAYLOAD_SHA256" ]]
+EXPECTED_SOURCE_AUDITOR_SHA256="$(
+  git -C "$REMOTE_ROOT/app" cat-file blob \
+    "$APP_GIT_SHA:scripts/verify_host_linux_build_source.py" \
+    | sha256sum | awk '{print $1}'
+)"
+[[ "$(sha256sum "$SOURCE_AUDITOR" | awk '{print $1}')" \
+  == "$EXPECTED_SOURCE_AUDITOR_SHA256" ]]
+python3 "$SOURCE_AUDITOR" --exact \
+  "$REMOTE_ROOT/app" "$APP_GIT_SHA" "$APP_GIT_TREE" >/dev/null
+python3 "$SOURCE_AUDITOR" --exact \
+  "$REMOTE_ROOT/build-app" "$APP_GIT_SHA" "$APP_GIT_TREE" >/dev/null
+python3 "$SOURCE_AUDITOR" --exact \
+  "$REMOTE_ROOT/fips" "$FIPS_GIT_SHA" "$FIPS_GIT_TREE" >/dev/null
 
 STATE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/nostr-vpn-linux-release-builder"
 mkdir -p "$STATE_ROOT/cargo-archives"
@@ -351,9 +358,8 @@ python3 "$SOURCE_AUDITOR" \
   "$APP_GIT_SHA" "$APP_GIT_TREE" \
   "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
   "$LINUX_REALIZED_CARGO_LOCK_SHA256"
-[[ "$(git -C "$REMOTE_ROOT/fips" rev-parse HEAD)" == "$FIPS_GIT_SHA" \
-  && "$(git -C "$REMOTE_ROOT/fips" rev-parse 'HEAD^{tree}')" == "$FIPS_GIT_TREE" \
-  && -z "$(git -C "$REMOTE_ROOT/fips" status --porcelain --untracked-files=all)" ]]
+python3 "$SOURCE_AUDITOR" --exact \
+  "$REMOTE_ROOT/fips" "$FIPS_GIT_SHA" "$FIPS_GIT_TREE" >/dev/null
 host_linux_builder_remove_target_volume \
   "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
 TARGET_VOLUME_OWNED=0

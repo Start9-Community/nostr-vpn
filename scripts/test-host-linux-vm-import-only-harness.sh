@@ -234,10 +234,10 @@ require_tokens "$REMOTE_BUILDER" "exact native remote build and cleanup" \
   '[[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]' \
   'sha256sum "$APP_BUNDLE"' \
   'sha256sum "$FIPS_BUNDLE"' \
-  'git -C "$REMOTE_ROOT/app" rev-parse HEAD' \
-  'git -C "$REMOTE_ROOT/app" rev-parse '\''HEAD^{tree}'\''' \
-  'git -C "$REMOTE_ROOT/fips" rev-parse HEAD' \
-  'git -C "$REMOTE_ROOT/fips" rev-parse '\''HEAD^{tree}'\''' \
+  'git -C "$REMOTE_ROOT/app" clean -ffdx' \
+  'git -C "$REMOTE_ROOT/fips" clean -ffdx' \
+  'cat-file blob' \
+  'python3 "$SOURCE_AUDITOR" --exact' \
   'EXPECTED_DOCKERFILE_SHA256' \
   'EXPECTED_PAYLOAD_SHA256' \
   '[[ -z "${DOCKER_HOST:-}" && -z "${DOCKER_CONTEXT:-}" ]]' \
@@ -268,8 +268,9 @@ require_tokens "$CARGO_CACHE_VERIFIER" "archive-only Cargo download cache" \
 require_tokens "$SOURCE_AUDITOR" "post-build exact source audit" \
   'Cargo.lock' \
   'linux/Cargo.lock' \
-  'unexpected build-source change' \
-  'rev-parse'
+  'source file set differs from exact Git tree' \
+  'source bytes differ from exact Git blob' \
+  'ls-tree'
 require_tokens "$PACKAGE_VERIFIER" "complete non-executing package validation" \
   'control.tar.xz' \
   'data.tar.xz' \
@@ -675,8 +676,9 @@ git -C "$source_audit_test/pristine" init -q
 printf 'committed root\n' >"$source_audit_test/pristine/Cargo.lock"
 printf 'committed linux\n' >"$source_audit_test/pristine/linux/Cargo.lock"
 printf 'exact source\n' >"$source_audit_test/pristine/source.txt"
+printf '*.ignored\n' >"$source_audit_test/pristine/.gitignore"
 git -C "$source_audit_test/pristine" add \
-  Cargo.lock linux/Cargo.lock source.txt
+  .gitignore Cargo.lock linux/Cargo.lock source.txt
 git -C "$source_audit_test/pristine" \
   -c user.name=test -c user.email=test@example.invalid \
   commit -qm exact
@@ -697,6 +699,42 @@ python3 "$SOURCE_AUDITOR" \
   "$source_audit_test/pristine" "$source_audit_test/build" \
   "$source_audit_sha" "$source_audit_tree" \
   "$source_audit_root_lock" "$source_audit_linux_lock" >/dev/null
+printf 'ignored source injection\n' \
+  >"$source_audit_test/pristine/injected.ignored"
+printf 'ignored source injection\n' \
+  >"$source_audit_test/build/injected.ignored"
+if python3 "$SOURCE_AUDITOR" \
+  "$source_audit_test/pristine" "$source_audit_test/build" \
+  "$source_audit_sha" "$source_audit_tree" \
+  "$source_audit_root_lock" "$source_audit_linux_lock" \
+  >/dev/null 2>&1
+then
+  fail "post-build source audit accepted identical ignored source injection"
+fi
+rm \
+  "$source_audit_test/pristine/injected.ignored" \
+  "$source_audit_test/build/injected.ignored"
+for checkout in pristine build; do
+  git -C "$source_audit_test/$checkout" \
+    update-index --assume-unchanged source.txt
+  printf 'status-hidden source injection\n' \
+    >"$source_audit_test/$checkout/source.txt"
+done
+[[ -z "$(git -C "$source_audit_test/pristine" \
+  status --porcelain --untracked-files=all)" ]]
+if python3 "$SOURCE_AUDITOR" \
+  "$source_audit_test/pristine" "$source_audit_test/build" \
+  "$source_audit_sha" "$source_audit_tree" \
+  "$source_audit_root_lock" "$source_audit_linux_lock" \
+  >/dev/null 2>&1
+then
+  fail "post-build source audit trusted status-hidden transformed source"
+fi
+for checkout in pristine build; do
+  git -C "$source_audit_test/$checkout" \
+    update-index --no-assume-unchanged source.txt
+  git -C "$source_audit_test/$checkout" checkout -- source.txt
+done
 printf 'forged output\n' >"$source_audit_test/build/target-forged"
 if python3 "$SOURCE_AUDITOR" \
   "$source_audit_test/pristine" "$source_audit_test/build" \
