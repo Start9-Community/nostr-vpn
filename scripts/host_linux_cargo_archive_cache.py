@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -215,61 +216,22 @@ def cargo_archives(
     return found
 
 
-def audit_extracted_sources(
-    cargo_home: pathlib.Path, expected: dict[str, str]
-) -> None:
+def purge_extracted_sources(cargo_home: pathlib.Path) -> None:
     source_root = cargo_home / "registry/src"
     if not source_root.exists():
+        if source_root.is_symlink():
+            fail("fresh Cargo home registry source root is a symlink")
         return
-    if not source_root.is_dir() or source_root.is_symlink():
+    try:
+        metadata = source_root.lstat()
+    except OSError as error:
+        fail(f"could not stat fresh Cargo registry source root: {error}")
+    if not stat.S_ISDIR(metadata.st_mode) or source_root.is_symlink():
         fail("fresh Cargo home registry source root is unsafe")
-    expected_directories = {name.removesuffix(".crate") for name in expected}
-    for index_dir in source_root.iterdir():
-        if not index_dir.is_dir() or index_dir.is_symlink():
-            fail("fresh Cargo home registry source contains an unsafe entry")
-        for package_dir in index_dir.iterdir():
-            if (
-                package_dir.name not in expected_directories
-                or not package_dir.is_dir()
-                or package_dir.is_symlink()
-            ):
-                fail("fresh Cargo home extracted an unexpected package")
-            checksum_path = package_dir / ".cargo-checksum.json"
-            try:
-                checksum_document = json.loads(
-                    read_regular_bytes(
-                        checksum_path, "extracted crate checksum manifest"
-                    ).decode("utf-8")
-                )
-                checksums = checksum_document["files"]
-            except (OSError, KeyError, TypeError, ValueError) as error:
-                fail(f"extracted crate checksum manifest is invalid: {error}")
-            if not isinstance(checksums, dict):
-                fail("extracted crate checksum file map is invalid")
-            actual_files: set[str] = set()
-            for current, directories, files in os.walk(
-                package_dir, followlinks=False
-            ):
-                current_path = pathlib.Path(current)
-                for directory in directories:
-                    path = current_path / directory
-                    if path.is_symlink() or not path.is_dir():
-                        fail("extracted crate contains an unsafe directory")
-                for filename in files:
-                    path = current_path / filename
-                    relative = path.relative_to(package_dir).as_posix()
-                    if relative in {".cargo-checksum.json", ".cargo-ok"}:
-                        sha256_regular(path)
-                        continue
-                    actual_files.add(relative)
-                    expected_checksum = checksums.get(relative)
-                    if (
-                        not isinstance(expected_checksum, str)
-                        or sha256_regular(path) != expected_checksum
-                    ):
-                        fail("extracted crate source differs from archive checksum")
-            if actual_files != set(checksums):
-                fail("extracted crate source file set differs from checksum manifest")
+    try:
+        shutil.rmtree(source_root)
+    except OSError as error:
+        fail(f"could not purge realized Cargo registry sources: {error}")
 
 
 def audit(cargo_home: pathlib.Path, expected: dict[str, str]) -> None:
@@ -285,7 +247,6 @@ def audit(cargo_home: pathlib.Path, expected: dict[str, str]) -> None:
         if (cargo_home / name).exists() or (cargo_home / name).is_symlink():
             fail(f"fresh Cargo home contains forbidden executable/config surface: {name}")
     cargo_archives(cargo_home, expected)
-    audit_extracted_sources(cargo_home, expected)
 
 
 def store(
@@ -355,6 +316,7 @@ def main() -> None:
     else:
         audit(cargo_home, expected)
         store(cargo_home, cache_dir, expected)
+        purge_extracted_sources(cargo_home)
 
 
 if __name__ == "__main__":

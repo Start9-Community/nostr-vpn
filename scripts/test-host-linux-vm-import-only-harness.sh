@@ -622,10 +622,17 @@ checksum = "$cargo_cache_checksum"
 EOF
 cp "$cargo_cache_test/exact-1.0.0.crate" \
   "$cargo_cache_test/home/registry/cache/index.crates.io-1949cf8c6b5b557f/"
+mkdir -p \
+  "$cargo_cache_test/home/registry/src/index.crates.io-1949cf8c6b5b557f/exact-1.0.0"
+printf 'Cargo 1.95 extracted source without a legacy checksum manifest\n' \
+  >"$cargo_cache_test/home/registry/src/index.crates.io-1949cf8c6b5b557f/exact-1.0.0/lib.rs"
 python3 "$CARGO_CACHE_VERIFIER" store \
   "$cargo_cache_test/cache-parent/exact" \
   "$cargo_cache_test/home" \
   "$cargo_cache_test/Cargo.lock" "$cargo_cache_test/Cargo.lock"
+[[ ! -e "$cargo_cache_test/home/registry/src" \
+  && ! -L "$cargo_cache_test/home/registry/src" ]] \
+  || fail "Cargo download cache retained realized registry sources"
 cache_manifest="$cargo_cache_test/cache-parent/exact/manifest.json"
 cache_manifest_real="$cargo_cache_test/cache-parent/manifest.json.real"
 mv "$cache_manifest" "$cache_manifest_real"
