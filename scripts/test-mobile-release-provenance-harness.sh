@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This harness builds standalone Git fixtures. Do not let the enclosing
+# release gate's temporary local-FIPS session make those fixtures look like
+# the real checkout (or require its Cargo.toml/Cargo.lock receipts).
+unset NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED
+unset NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256
+unset NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256
+unset NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256
+unset NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD
+unset NVPN_LOCAL_FIPS_SESSION_FIPS_TREE
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-provenance.XXXXXX")"
 APP_ROOT="$TMP_ROOT/app"
