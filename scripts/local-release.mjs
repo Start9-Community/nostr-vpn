@@ -60,7 +60,8 @@ import {
 } from './release-artifact-provenance-lib.mjs'
 import { inspectStartosReleasePackage } from './startos-release.mjs'
 import {
-  assertPassedFleetPublication,
+  assertAuthorizedFleetPublication,
+  authorizeFreshFleetPublication,
   fleetPublicationPaths,
 } from './fleet-release-publication-lib.mjs'
 import {
@@ -111,6 +112,7 @@ Options:
   --fleet-result <path>     Exact fleet-canary-result.json from execute mode
   --fleet-manifest <path>   Frozen fleet manifest used by that execution
   --fleet-inventory <path>  Frozen authoritative-roster inventory used by it
+  --fleet-proof <path>      Private immutable fleet authorization proof
   --cargo-publish           Publish Rust crates during an exact fleet-gated
                             --promote-draft operation
   --skip-cargo-publish      With --promote-draft, don't push Rust crates
@@ -145,6 +147,7 @@ function parseArgs(argv) {
     fleetResult: null,
     fleetManifest: null,
     fleetInventory: null,
+    fleetProof: null,
     cargoPublish: false,
     skipCargoPublish: false,
     skipZapstore: false,
@@ -194,6 +197,9 @@ function parseArgs(argv) {
         break
       case '--fleet-inventory':
         options.fleetInventory = resolve(repoRoot, argv[++index] ?? '')
+        break
+      case '--fleet-proof':
+        options.fleetProof = resolve(repoRoot, argv[++index] ?? '')
         break
       case '--cargo-publish':
         options.cargoPublish = true
@@ -1998,6 +2004,7 @@ function releaseMutationEnvironment({
     NVPN_FLEET_RESULT_PATH: fleet.result,
     NVPN_FLEET_MANIFEST_PATH: fleet.manifest,
     NVPN_FLEET_INVENTORY_PATH: fleet.inventory,
+    NVPN_FLEET_PROOF_PATH: fleet.proof,
   }
 }
 
@@ -2014,6 +2021,7 @@ function replayCanonicalMutationGate({
     fleetResult: fleet.result,
     fleetManifest: fleet.manifest,
     fleetInventory: fleet.inventory,
+    fleetProof: fleet.proof,
     expectedTag: tag,
     requireTag,
     env,
@@ -2264,7 +2272,8 @@ function main() {
   const hasFleetPublicationPaths = Boolean(
     options.fleetResult
     || options.fleetManifest
-    || options.fleetInventory,
+    || options.fleetInventory
+    || options.fleetProof,
   )
   if (
     hasFleetPublicationPaths
@@ -2347,7 +2356,7 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    const fleetValidation = assertPassedFleetPublication({
+    const fleetValidation = authorizeFreshFleetPublication({
       repoRoot,
       options,
       env,
@@ -2429,7 +2438,7 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    const fleetValidation = assertPassedFleetPublication({
+    const fleetValidation = assertAuthorizedFleetPublication({
       repoRoot,
       options,
       env,

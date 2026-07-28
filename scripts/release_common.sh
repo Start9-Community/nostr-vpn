@@ -409,11 +409,14 @@ require_release_mutation_gate() {
   require_var NVPN_FLEET_RESULT_PATH
   require_var NVPN_FLEET_MANIFEST_PATH
   require_var NVPN_FLEET_INVENTORY_PATH
+  require_var NVPN_FLEET_PROOF_PATH
   args=(
     --stage-dir "$NVPN_RELEASE_STAGE_DIR"
     --fleet-result "$NVPN_FLEET_RESULT_PATH"
     --fleet-manifest "$NVPN_FLEET_MANIFEST_PATH"
     --fleet-inventory "$NVPN_FLEET_INVENTORY_PATH"
+    --fleet-proof "$NVPN_FLEET_PROOF_PATH"
+    --require-tag
   )
   if [[ -n "${NVPN_RELEASE_TAG:-}" ]]; then
     args+=(--tag "$NVPN_RELEASE_TAG")

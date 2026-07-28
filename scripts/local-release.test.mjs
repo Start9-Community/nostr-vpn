@@ -629,16 +629,20 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     result: join(currentFleetDir, 'result.json'),
     manifest: join(currentFleetDir, 'manifest.json'),
     inventory: join(currentFleetDir, 'inventory.json'),
+    proof: join(currentFleetDir, 'proof.json'),
   }
   const historicalPaths = {
     result: join(historicalFleetDir, 'result.json'),
     manifest: join(historicalFleetDir, 'manifest.json'),
     inventory: join(historicalFleetDir, 'inventory.json'),
+    proof: join(historicalFleetDir, 'proof.json'),
   }
   for (const [name, path] of Object.entries(currentPaths)) {
+    if (name === 'proof') continue
     writeFileSync(path, `current ${name}\n`)
   }
   for (const [name, path] of Object.entries(historicalPaths)) {
+    if (name === 'proof') continue
     writeFileSync(path, `historical ${name}\n`)
   }
   const mutationEnv = {
@@ -646,6 +650,7 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     NVPN_FLEET_RESULT_PATH: currentPaths.result,
     NVPN_FLEET_MANIFEST_PATH: currentPaths.manifest,
     NVPN_FLEET_INVENTORY_PATH: currentPaths.inventory,
+    NVPN_FLEET_PROOF_PATH: currentPaths.proof,
   }
   const testflight = {
     buildPresent: true,
@@ -669,11 +674,17 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     size: statSync(path).size,
   })
   const authorizedAt = Math.floor(Date.now() / 1000) - 10
+  writeFileSync(
+    historicalPaths.proof,
+    `${JSON.stringify({ validatedAt: authorizedAt })}\n`,
+  )
+  chmodSync(historicalPaths.proof, 0o600)
   const fleetAuthorization = {
     authorizedAt,
     result: binding(historicalPaths.result),
     manifest: binding(historicalPaths.manifest),
     inventory: binding(historicalPaths.inventory),
+    proof: binding(historicalPaths.proof),
   }
   const uploadReceiptPath = join(
     frozenDir,
@@ -682,7 +693,7 @@ test('existing ASC build replays its original fleet upload authorization', () =>
   const validations = []
   const validatePublication = (value) => {
     validations.push(value)
-    return { targetCount: 1 }
+    return { targetCount: 1, validatedAt: authorizedAt }
   }
   const pendingReceipt = {
     schema: 1,
@@ -764,7 +775,29 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     validations[1].options.fleetResult,
     realpathSync(currentPaths.result),
   )
-  assert.equal(validations[1].validationTimeSeconds, authorizedAt)
+  assert.equal(
+    validations[1].options.fleetProof,
+    realpathSync(historicalPaths.proof),
+  )
+  assert.equal(
+    Object.hasOwn(validations[1], 'validationTimeSeconds'),
+    false,
+  )
+  assert.throws(
+    () =>
+      validateHistoricalIosFleetAuthorization({
+        repoRoot,
+        authorization: {
+          ...fleetAuthorization,
+          authorizedAt: authorizedAt - 1,
+        },
+        stageDir,
+        stagedManifest,
+        env: mutationEnv,
+        validatePublication,
+      }),
+    /time differs from its exact proof/i,
+  )
 
   writeFileSync(historicalPaths.result, 'tampered historical result\n')
   assert.throws(
@@ -780,6 +813,23 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     /differs from its upload authorization binding/i,
   )
   writeFileSync(historicalPaths.result, 'historical result\n')
+  writeFileSync(historicalPaths.proof, '{"validatedAt":1}\n')
+  assert.throws(
+    () =>
+      validateHistoricalIosFleetAuthorization({
+        repoRoot,
+        authorization: fleetAuthorization,
+        stageDir,
+        stagedManifest,
+        env: mutationEnv,
+        validatePublication,
+      }),
+    /differs from its upload authorization binding/i,
+  )
+  writeFileSync(
+    historicalPaths.proof,
+    `${JSON.stringify({ validatedAt: authorizedAt })}\n`,
+  )
   unlinkSync(historicalPaths.inventory)
   assert.throws(
     () =>
@@ -1031,7 +1081,7 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   const staged = source.slice(stagedStart, stagedEnd)
   assert.ok(stagedStart >= 0 && stagedEnd > stagedStart)
   assert.ok(
-    staged.indexOf('assertPassedFleetPublication({')
+    staged.indexOf('authorizeFreshFleetPublication({')
     < staged.indexOf('publishRelease({'),
   )
   assert.ok(
@@ -1048,7 +1098,9 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   )
   const promoteEnd = source.indexOf('\n  const steps = [', promoteStart)
   const promote = source.slice(promoteStart, promoteEnd)
-  const fleetValidation = promote.indexOf('assertPassedFleetPublication({')
+  const fleetValidation = promote.indexOf(
+    'assertAuthorizedFleetPublication({',
+  )
   assert.ok(promoteStart >= 0 && promoteEnd > promoteStart)
   assert.ok(fleetValidation >= 0)
   for (const publisher of [
@@ -1304,7 +1356,7 @@ test('staged draft publication publishes only the already validated bytes', () =
 
   const fleetDir = join(root, 'fleet')
   mkdirSync(fleetDir)
-  const fleetObservedAt = Math.floor(Date.now() / 1000)
+  const fleetObservedAt = Math.floor(Date.now() / 1000) - 7_200
   const fleetBound = (path) => {
     const canonicalPath = realpathSync(path)
     const bytes = readFileSync(canonicalPath)
@@ -1616,6 +1668,8 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     fleetManifestPath,
     '--fleet-inventory',
     inventoryPath,
+    '--fleet-proof',
+    join(fleetDir, 'fleet-publication-proof.json'),
   ]
   const releaseOptions = {
     cwd: repo,
@@ -1646,7 +1700,38 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
   assert.equal(readFileSync(htreeLog, 'utf8'), '')
   unlinkSync(unexpectedStagePath)
 
-  const result = spawnSync(process.execPath, releaseArgs, releaseOptions)
+  const staleInitialDraft = spawnSync(
+    process.execPath,
+    releaseArgs,
+    releaseOptions,
+  )
+  assert.equal(staleInitialDraft.status, 1)
+  assert.match(staleInitialDraft.stderr, /roster snapshot.*stale/i)
+  assert.equal(readFileSync(htreeLog, 'utf8'), '')
+
+  const clockOverride = join(root, 'fleet-authorization-clock.cjs')
+  writeFileSync(
+    clockOverride,
+    'Date.now = () => Number(process.env.NVPN_TEST_NOW_MILLISECONDS)\n',
+  )
+  const authorizationOptions = {
+    ...releaseOptions,
+    env: {
+      ...releaseOptions.env,
+      NODE_OPTIONS: [
+        process.env.NODE_OPTIONS,
+        `--require=${clockOverride}`,
+      ].filter(Boolean).join(' '),
+      NVPN_TEST_NOW_MILLISECONDS: String(
+        (fleetObservedAt + 60) * 1_000,
+      ),
+    },
+  }
+  const result = spawnSync(
+    process.execPath,
+    releaseArgs,
+    authorizationOptions,
+  )
   assert.equal(result.status, 0, result.stderr)
   assert.match(
     result.stdout,
@@ -1665,6 +1750,212 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     statSync(fleetProofPath).mode & 0o777,
     0o600,
   )
+  const proofBeforeReplay = readFileSync(fleetProofPath)
+  const proofStatBeforeReplay = statSync(fleetProofPath)
+  const htreeLogAfterInitialDraft = readFileSync(htreeLog, 'utf8')
+  const durableDraftRetry = spawnSync(
+    process.execPath,
+    releaseArgs,
+    releaseOptions,
+  )
+  assert.equal(
+    durableDraftRetry.status,
+    0,
+    durableDraftRetry.stderr,
+  )
+  assert.deepEqual(readFileSync(fleetProofPath), proofBeforeReplay)
+  const proofStatAfterDraftRetry = statSync(fleetProofPath)
+  assert.equal(
+    proofStatAfterDraftRetry.ino,
+    proofStatBeforeReplay.ino,
+  )
+  assert.equal(
+    proofStatAfterDraftRetry.mtimeMs,
+    proofStatBeforeReplay.mtimeMs,
+  )
+  assert.equal(
+    proofStatAfterDraftRetry.mode,
+    proofStatBeforeReplay.mode,
+  )
+  writeFileSync(htreeLog, htreeLogAfterInitialDraft)
+  const mutationGateArgs = [
+    realpathSync(join(scripts, 'release-mutation-gate.mjs')),
+    '--stage-dir',
+    stage,
+    '--fleet-result',
+    fleetResultPath,
+    '--fleet-manifest',
+    fleetManifestPath,
+    '--fleet-inventory',
+    inventoryPath,
+    '--fleet-proof',
+    fleetProofPath,
+    '--tag',
+    'v4.1.5',
+  ]
+  for (let replay = 0; replay < 2; replay += 1) {
+    const replayResult = spawnSync(
+      process.execPath,
+      mutationGateArgs,
+      {
+        cwd: repo,
+        encoding: 'utf8',
+        env: releaseOptions.env,
+      },
+    )
+    assert.equal(replayResult.status, 0, replayResult.stderr)
+  }
+  assert.deepEqual(readFileSync(fleetProofPath), proofBeforeReplay)
+  const proofStatAfterReplay = statSync(fleetProofPath)
+  assert.equal(proofStatAfterReplay.ino, proofStatBeforeReplay.ino)
+  assert.equal(
+    proofStatAfterReplay.mtimeMs,
+    proofStatBeforeReplay.mtimeMs,
+  )
+  assert.equal(proofStatAfterReplay.mode, proofStatBeforeReplay.mode)
+
+  const missingProof = spawnSync(
+    process.execPath,
+    mutationGateArgs.map((argument) =>
+      argument === fleetProofPath
+        ? join(fleetDir, 'missing-proof.json')
+        : argument,
+    ),
+    {
+      cwd: repo,
+      encoding: 'utf8',
+      env: releaseOptions.env,
+    },
+  )
+  assert.equal(
+    missingProof.status,
+    1,
+    `${missingProof.stdout}\n${missingProof.stderr}`,
+  )
+  assert.match(missingProof.stderr, /authorization proof.*missing/i)
+
+  const proof = JSON.parse(proofBeforeReplay)
+  assert.deepEqual(proof.evidence, {
+    result: fleetBound(fleetResultPath),
+    manifest: fleetBound(fleetManifestPath),
+    inventory: fleetBound(inventoryPath),
+    release: fleetBound(join(stage, 'release.json')),
+    driver: fleetBound(fleetDriverPath),
+  })
+  const symlinkProofPath = join(fleetDir, 'symlink-proof.json')
+  symlinkSync(fleetProofPath, symlinkProofPath)
+  const symlinkProof = spawnSync(
+    process.execPath,
+    mutationGateArgs.map((argument) =>
+      argument === fleetProofPath ? symlinkProofPath : argument,
+    ),
+    {
+      cwd: repo,
+      encoding: 'utf8',
+      env: releaseOptions.env,
+    },
+  )
+  assert.equal(symlinkProof.status, 1)
+  assert.match(symlinkProof.stderr, /regular non-symlink file/i)
+
+  const permissiveProofPath = join(fleetDir, 'permissive-proof.json')
+  copyFileSync(fleetProofPath, permissiveProofPath)
+  chmodSync(permissiveProofPath, 0o644)
+  const permissiveProof = spawnSync(
+    process.execPath,
+    mutationGateArgs.map((argument) =>
+      argument === fleetProofPath ? permissiveProofPath : argument,
+    ),
+    {
+      cwd: repo,
+      encoding: 'utf8',
+      env: releaseOptions.env,
+    },
+  )
+  assert.equal(permissiveProof.status, 1)
+  assert.match(permissiveProof.stderr, /mode must be 0600/i)
+
+  for (const [name, mutate, message] of [
+    [
+      'tampered',
+      () => '{',
+      /authorization proof.*invalid json/i,
+    ],
+    [
+      'substituted-result',
+      () => JSON.stringify({
+        ...proof,
+        evidence: {
+          ...proof.evidence,
+          result: {
+            ...proof.evidence.result,
+            sha256: '0'.repeat(64),
+          },
+        },
+      }),
+      /result.*authorization proof binding/i,
+    ],
+    [
+      'substituted-tag',
+      () => JSON.stringify({ ...proof, releaseTag: 'v4.1.6' }),
+      /release tag.*authorization proof/i,
+    ],
+    [
+      'substituted-source',
+      () => JSON.stringify({
+        ...proof,
+        source: {
+          ...proof.source,
+          appGitSha: '0'.repeat(40),
+        },
+      }),
+      /source.*authorization proof/i,
+    ],
+    [
+      'substituted-driver',
+      () => JSON.stringify({
+        ...proof,
+        evidence: {
+          ...proof.evidence,
+          driver: {
+            ...proof.evidence.driver,
+            sha256: '0'.repeat(64),
+          },
+        },
+      }),
+      /fleet evidence differs from the exact authorization proof/i,
+    ],
+    [
+      'rebased-time',
+      () => JSON.stringify({
+        ...proof,
+        validatedAt: proof.validatedAt + 7_200,
+      }),
+      /roster snapshot.*stale/i,
+    ],
+    [
+      'schema-extension',
+      () => JSON.stringify({ ...proof, extra: true }),
+      /authorization proof fields are not exact/i,
+    ],
+  ]) {
+    const path = join(fleetDir, `${name}-proof.json`)
+    writeFileSync(path, `${mutate()}\n`)
+    chmodSync(path, 0o600)
+    const rejected = spawnSync(
+      process.execPath,
+      mutationGateArgs.map((argument) =>
+        argument === fleetProofPath ? path : argument,
+      ),
+      {
+        cwd: repo,
+        encoding: 'utf8',
+        env: releaseOptions.env,
+      },
+    )
+    assert.equal(rejected.status, 1, name)
+    assert.match(rejected.stderr, message, name)
+  }
   assert.equal(
     spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
       cwd: repo,
@@ -1707,9 +1998,9 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
       process.execPath,
       releaseArgs,
       {
-        ...releaseOptions,
+        ...authorizationOptions,
         env: {
-          ...releaseOptions.env,
+          ...authorizationOptions.env,
           FAKE_HTREE_MUTATE_METADATA: metadataPath,
         },
       },
@@ -1733,6 +2024,20 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
       ),
     )
   }
+  const proofStatAfterDraftRetries = statSync(fleetProofPath)
+  assert.deepEqual(readFileSync(fleetProofPath), proofBeforeReplay)
+  assert.equal(
+    proofStatAfterDraftRetries.ino,
+    proofStatBeforeReplay.ino,
+  )
+  assert.equal(
+    proofStatAfterDraftRetries.mtimeMs,
+    proofStatBeforeReplay.mtimeMs,
+  )
+  assert.equal(
+    proofStatAfterDraftRetries.mode,
+    proofStatBeforeReplay.mode,
+  )
 
   const staleTag = spawnSync('git', ['tag', 'v4.1.5', 'HEAD^'], {
     cwd: repo,
@@ -1740,7 +2045,11 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
   })
   assert.equal(staleTag.status, 0, staleTag.stderr)
   const logBeforeStaleTagAttempt = readFileSync(htreeLog, 'utf8')
-  const staleTagResult = spawnSync(process.execPath, releaseArgs, releaseOptions)
+  const staleTagResult = spawnSync(
+    process.execPath,
+    releaseArgs,
+    authorizationOptions,
+  )
   assert.equal(staleTagResult.status, 1)
   assert.match(staleTagResult.stderr, /release tag .* not staged commit/i)
   assert.equal(readFileSync(htreeLog, 'utf8'), logBeforeStaleTagAttempt)
@@ -2318,7 +2627,7 @@ test('promotion preflights and publishes exact iOS to both TestFlight lanes and 
       < promote.indexOf('promoteStagedDraft({'),
   )
   assert.ok(
-    promote.indexOf('assertPassedFleetPublication({')
+    promote.indexOf('assertAuthorizedFleetPublication({')
       < promote.indexOf('preflightIosPublication({'),
   )
   for (const preflight of [
@@ -2369,7 +2678,14 @@ test('promotion preflights and publishes exact iOS to both TestFlight lanes and 
   )
   assert.match(uploadReceipts, /fleetAuthorization/)
   assert.match(uploadReceipts, /authorizedAt/)
-  assert.match(uploadReceipts, /validationTimeSeconds:\s*authorization\.authorizedAt/)
+  assert.match(
+    uploadReceipts,
+    /fleetProof:\s*authorization\.proof\.path/,
+  )
+  assert.doesNotMatch(
+    uploadReceipts,
+    /validationTimeSeconds:\s*authorization\.authorizedAt/,
+  )
 
   const promoteFunctionStart = localRelease.indexOf(
     'function promoteStagedDraft(',
@@ -2404,6 +2720,16 @@ test('htree promotion requires an exact private publisher identity pin', () => {
 })
 
 test('every mutating Apple distribution entry point requires the canonical fleet gate', () => {
+  const releaseCommon = readFileSync(
+    join(process.cwd(), 'scripts/release_common.sh'),
+    'utf8',
+  )
+  assert.match(releaseCommon, /require_var NVPN_FLEET_PROOF_PATH/)
+  assert.match(
+    releaseCommon,
+    /--fleet-proof "\$NVPN_FLEET_PROOF_PATH"[\s\S]*?--require-tag/,
+  )
+
   const iosBuild = readFileSync(
     join(process.cwd(), 'scripts/ios-build'),
     'utf8',
@@ -2764,7 +3090,7 @@ test('Actions cannot mutate public releases and local promotion is fleet-gated',
     promoteStart,
     localRelease.indexOf('\n  const steps = [', promoteStart),
   )
-  const fleet = promote.indexOf('assertPassedFleetPublication({')
+  const fleet = promote.indexOf('assertAuthorizedFleetPublication({')
   const preflight = promote.indexOf('preflightGithubRelease({')
   const publish = promote.indexOf('publishExactGithubRelease({')
   assert.ok(fleet >= 0 && preflight > fleet && publish > preflight)

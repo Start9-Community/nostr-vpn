@@ -10,7 +10,9 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { assertPassedFleetPublication } from './fleet-release-publication-lib.mjs'
+import {
+  assertAuthorizedFleetPublication,
+} from './fleet-release-publication-lib.mjs'
 import {
   normalizeTag,
   validatePromotableReleaseManifest,
@@ -116,6 +118,7 @@ export function validateReleaseMutationGate({
   fleetResult,
   fleetManifest,
   fleetInventory,
+  fleetProof,
   expectedTag = '',
   requireTag = false,
   env = process.env,
@@ -125,6 +128,7 @@ export function validateReleaseMutationGate({
     ['fleet result', fleetResult],
     ['fleet manifest', fleetManifest],
     ['fleet inventory', fleetInventory],
+    ['fleet authorization proof', fleetProof],
   ]) {
     if (!value || !isAbsolute(value)) {
       fail(`${label} requires an exact absolute path`)
@@ -135,12 +139,13 @@ export function validateReleaseMutationGate({
     expectedTag,
     requireTag,
   })
-  const fleet = assertPassedFleetPublication({
+  const fleet = assertAuthorizedFleetPublication({
     repoRoot,
     options: {
       fleetResult,
       fleetManifest,
       fleetInventory,
+      fleetProof,
     },
     env,
     stageDir,
@@ -161,6 +166,7 @@ function parseArgs(argv) {
     fleetResult: process.env.NVPN_FLEET_RESULT_PATH || '',
     fleetManifest: process.env.NVPN_FLEET_MANIFEST_PATH || '',
     fleetInventory: process.env.NVPN_FLEET_INVENTORY_PATH || '',
+    fleetProof: process.env.NVPN_FLEET_PROOF_PATH || '',
     expectedTag: process.env.NVPN_RELEASE_TAG || '',
     requireTag: false,
   }
@@ -178,6 +184,9 @@ function parseArgs(argv) {
         break
       case '--fleet-inventory':
         values.fleetInventory = argv[++index] ?? ''
+        break
+      case '--fleet-proof':
+        values.fleetProof = argv[++index] ?? ''
         break
       case '--tag':
         values.expectedTag = argv[++index] ?? ''
@@ -197,6 +206,7 @@ Options:
   --fleet-result JSON
   --fleet-manifest JSON
   --fleet-inventory JSON
+  --fleet-proof JSON
   --tag TAG
   --require-tag`)
         process.exit(0)

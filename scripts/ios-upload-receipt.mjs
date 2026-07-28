@@ -13,7 +13,9 @@ import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
-import { assertPassedFleetPublication } from './fleet-release-publication-lib.mjs'
+import {
+  assertAuthorizedFleetPublication,
+} from './fleet-release-publication-lib.mjs'
 import { sha256FileSync } from './local-release-lib.mjs'
 
 function exactKeys(value, keys, label) {
@@ -141,9 +143,17 @@ function uploadIdentity({ frozen, stagedManifest, mutationEnv }) {
   }
 }
 
-function fleetAuthorization(mutationEnv, authorizedAt) {
+function fleetAuthorization(mutationEnv) {
+  const proof = exactFileBinding(
+    mutationEnv.NVPN_FLEET_PROOF_PATH,
+    'Historical fleet authorization proof',
+  )
+  const authorization = exactJson(
+    proof.path,
+    'Historical fleet authorization proof',
+  )
   return {
-    authorizedAt,
+    authorizedAt: authorization.validatedAt,
     result: exactFileBinding(
       mutationEnv.NVPN_FLEET_RESULT_PATH,
       'Historical fleet result',
@@ -156,6 +166,7 @@ function fleetAuthorization(mutationEnv, authorizedAt) {
       mutationEnv.NVPN_FLEET_INVENTORY_PATH,
       'Historical fleet inventory',
     ),
+    proof,
   }
 }
 
@@ -165,11 +176,11 @@ export function validateHistoricalIosFleetAuthorization({
   stageDir,
   stagedManifest,
   env,
-  validatePublication = assertPassedFleetPublication,
+  validatePublication = assertAuthorizedFleetPublication,
 }) {
   exactKeys(
     authorization,
-    ['authorizedAt', 'inventory', 'manifest', 'result'],
+    ['authorizedAt', 'inventory', 'manifest', 'proof', 'result'],
     'Historical iOS fleet authorization',
   )
   if (
@@ -183,21 +194,27 @@ export function validateHistoricalIosFleetAuthorization({
     ['result', 'Historical fleet result'],
     ['manifest', 'Historical fleet manifest'],
     ['inventory', 'Historical fleet inventory'],
+    ['proof', 'Historical fleet authorization proof'],
   ]) {
     validateFileBinding(authorization[name], label)
   }
-  validatePublication({
+  const validation = validatePublication({
     repoRoot,
     options: {
       fleetResult: authorization.result.path,
       fleetManifest: authorization.manifest.path,
       fleetInventory: authorization.inventory.path,
+      fleetProof: authorization.proof.path,
     },
     env,
     stageDir,
     stagedManifest,
-    validationTimeSeconds: authorization.authorizedAt,
   })
+  if (validation.validatedAt !== authorization.authorizedAt) {
+    throw new Error(
+      'Historical iOS fleet authorization time differs from its exact proof.',
+    )
+  }
   return authorization
 }
 
@@ -355,14 +372,13 @@ export function captureIosPendingUploadAuthorization({
   frozen,
   stagedManifest,
   mutationEnv,
-  authorizedAt = Math.floor(Date.now() / 1000),
   validatePublication,
 }) {
   const value = {
     schema: 1,
     kind: 'nvpn-ios-app-store-pending-upload-v1',
     ...uploadIdentity({ frozen, stagedManifest, mutationEnv }),
-    fleetAuthorization: fleetAuthorization(mutationEnv, authorizedAt),
+    fleetAuthorization: fleetAuthorization(mutationEnv),
   }
   validateHistoricalIosFleetAuthorization({
     repoRoot,

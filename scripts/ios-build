@@ -77,7 +77,8 @@ env (read from .env.release.local or shell):
                                   exact Ad Hoc profiles for ios-release-testing
   NVPN_IOS_FROZEN_DEVICE_UDID    physical device required in those profiles
   NVPN_RELEASE_STAGE_DIR, NVPN_FLEET_RESULT_PATH,
-  NVPN_FLEET_MANIFEST_PATH, NVPN_FLEET_INVENTORY_PATH
+  NVPN_FLEET_MANIFEST_PATH, NVPN_FLEET_INVENTORY_PATH,
+  NVPN_FLEET_PROOF_PATH
                                   exact passed release gate for upload actions
 EOF
 }
