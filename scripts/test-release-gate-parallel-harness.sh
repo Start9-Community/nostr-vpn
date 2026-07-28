@@ -13,9 +13,42 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-release-gate-parallel.XXXXXX")"
 trap 'release_gate_parallel_cancel_all; rm -rf "$tmp"' EXIT
 release_gate_parallel_init "$tmp/logs"
 
-grep -Fq ') </dev/null >"$log_path" 2>&1 &' \
-  "$ROOT_DIR/scripts/lib-release-gate-parallel.sh" \
-  || fail "parallel lanes inherit the controller terminal as stdin"
+if ! stdin_probe_output="$(
+  printf 'controller-sentinel\n' \
+    | /bin/bash -c '
+        set -euo pipefail
+        root_dir="$1"
+        log_dir="$2"
+        source "$root_dir/scripts/lib-release-gate-parallel.sh"
+        trap "release_gate_parallel_cancel_all" EXIT
+        release_gate_parallel_init "$log_dir"
+        lane_reads_stdin() {
+          local value
+          if IFS= read -r value; then
+            printf "lane read controller input: %s\n" "$value"
+            return 1
+          fi
+          printf "lane stdin reached EOF\n"
+        }
+        release_gate_parallel_start "stdin isolation" lane_reads_stdin >/dev/null
+        lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+        release_gate_parallel_wait "$lane"
+      ' _ "$ROOT_DIR" "$tmp/stdin-logs" 2>&1
+)"; then
+  fail "parallel lane inherited controller stdin: $stdin_probe_output"
+fi
+[[ "$stdin_probe_output" == *"lane stdin reached EOF"* ]] \
+  || fail "parallel stdin probe did not observe EOF"
+
+if ! (
+  ps() {
+    printf '424242 S\n'
+    awk 'BEGIN { for (row = 0; row < 100000; row += 1) print "1 S" }'
+  }
+  release_gate_parallel_group_alive 424242
+); then
+  fail "process-group probe stopped reading ps output under pipefail"
+fi
 
 lane_waits_for_peer() {
   local peer_marker="$1"
@@ -157,6 +190,10 @@ done
   || fail "orphaning cancellation peer did not start"
 orphan_child="$(<"$tmp/orphan-child.pid")"
 orphan_external="$(<"$tmp/orphan-external.pid")"
+release_gate_parallel_pid_live_in_group "$orphan_child" "$orphan_pgid" \
+  || fail "TERM-ignoring child escaped its lane process group"
+release_gate_parallel_pid_live_in_group "$orphan_external" "$orphan_pgid" \
+  || fail "external descendant escaped its lane process group"
 release_gate_parallel_start "orphaning peer failure" lane_fails
 orphan_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 set +e
@@ -164,15 +201,25 @@ release_gate_parallel_wait_group "$orphaning" "$orphan_failure" >/dev/null 2>&1
 status=$?
 set -e
 [[ "$status" == "7" ]] || fail "orphaning cancellation group returned $status"
-if release_gate_parallel_pid_live "$orphan_child"; then
+if release_gate_parallel_pid_live_in_group "$orphan_child" "$orphan_pgid"; then
   fail "TERM-ignoring child survived after its wrapper exited"
 fi
-if release_gate_parallel_pid_live "$orphan_external"; then
+if release_gate_parallel_pid_live_in_group "$orphan_external" "$orphan_pgid"; then
   fail "external TERM-ignoring descendant survived lane cancellation"
 fi
 if release_gate_parallel_group_alive "$orphan_pgid"; then
   fail "cancelled lane process group still has live descendants"
 fi
+
+sleep 10 &
+unrelated_pid="$!"
+if release_gate_parallel_pid_live_in_group "$unrelated_pid" "$orphan_pgid"; then
+  kill "$unrelated_pid" >/dev/null 2>&1 || true
+  wait "$unrelated_pid" >/dev/null 2>&1 || true
+  fail "unrelated live PID was mistaken for a cancelled lane descendant"
+fi
+kill "$unrelated_pid" >/dev/null 2>&1 || true
+wait "$unrelated_pid" >/dev/null 2>&1 || true
 
 successful_orphan_lane() {
   local ready_marker="$1"
@@ -210,6 +257,9 @@ done
   && -f "$tmp/successful-orphan-ready" ]] \
   || fail "successful orphan fixture did not start its descendant"
 successful_orphan_child="$(<"$tmp/successful-orphan-child.pid")"
+release_gate_parallel_pid_live_in_group \
+  "$successful_orphan_child" "$successful_orphan_pgid" \
+  || fail "successful orphan escaped its lane process group"
 set +e
 release_gate_parallel_wait "$successful_orphan" >/dev/null 2>&1
 status=$?
@@ -218,7 +268,9 @@ set -e
   || fail "successful lane with an orphan returned $status instead of failing closed"
 [[ -f "$tmp/successful-orphan-term" ]] \
   || fail "successful lane orphan did not receive TERM before escalation"
-if release_gate_parallel_pid_live "$successful_orphan_child"; then
+if release_gate_parallel_pid_live_in_group \
+  "$successful_orphan_child" "$successful_orphan_pgid"
+then
   fail "successful lane orphan survived TERM/KILL cleanup"
 fi
 if release_gate_parallel_group_alive "$successful_orphan_pgid"; then

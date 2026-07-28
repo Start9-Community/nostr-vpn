@@ -78,15 +78,15 @@ release_gate_parallel_start() {
   printf 'Started release-gate lane: %s (log: %s)\n' "$label" "$log_path"
 }
 
-release_gate_parallel_pid_live() {
+release_gate_parallel_pid_live_in_group() {
   local pid="$1"
-  local state
-  [[ -n "$pid" ]] || return 1
-  state="$(
-    ps -o stat= -p "$pid" 2>/dev/null \
-      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*$//'
-  )"
-  [[ -n "$state" && "$state" != Z* ]]
+  local expected_pgid="$2"
+  [[ -n "$pid" && -n "$expected_pgid" ]] || return 1
+  ps -o pgid=,stat= -p "$pid" 2>/dev/null \
+    | awk -v expected="$expected_pgid" '
+        $1 == expected && $2 !~ /^Z/ { found = 1 }
+        END { exit !found }
+      '
 }
 
 release_gate_parallel_group_alive() {
@@ -94,7 +94,7 @@ release_gate_parallel_group_alive() {
   [[ -n "$pgid" ]] || return 1
   ps -axo pgid=,stat= 2>/dev/null \
     | awk -v expected="$pgid" '
-        $1 == expected && $2 !~ /^Z/ { found = 1; exit }
+        $1 == expected && $2 !~ /^Z/ { found = 1 }
         END { exit !found }
       '
 }
