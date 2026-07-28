@@ -341,7 +341,7 @@ fn resolve_windows_interface_identity(interface_index: u32) -> Result<String> {
            throw \"expected one adapter for interface index {interface_index}, got \
                   $($adapters.Count)\" \
          }}; \
-         $adapters[0].InterfaceGuid.ToString('D').ToLowerInvariant()"
+         ([guid]([string]$adapters[0].InterfaceGuid)).ToString('D').ToLowerInvariant()"
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
