@@ -79,6 +79,11 @@ for required in (
     "main-AppWindow-1",
     "func blockingModalText(",
     "func pressSidebar(",
+    "func pressAndWaitForSaveCompletion(",
+    "try pressAndWaitForSaveCompletion(application)",
+    "Exit DNS save never entered the in-flight state",
+    "Exit DNS save did not complete",
+    "Date().addingTimeInterval(75)",
     "let actionDeadline = Date().addingTimeInterval(20)",
     "findNow(window, identifier: identifier)",
     "kAXEnabledAttribute",
@@ -90,6 +95,14 @@ for required in (
 ):
     if required not in driver:
         raise SystemExit(f"macOS DNS AX driver lacks {required}")
+if "Thread.sleep(forTimeInterval: 1)" in driver:
+    raise SystemExit(
+        "macOS DNS AX driver uses a fixed delay instead of observing save completion"
+    )
+if 'try press(application, "exit-dns-save")' in driver:
+    raise SystemExit("macOS DNS AX driver bypasses the save-completion handshake")
+if driver.count("try pressAndWaitForSaveCompletion(application)") != 1:
+    raise SystemExit("macOS DNS AX driver does not use exactly one save handshake")
 press_body = driver[
     driver.index("func press(") : driver.index("func pressSidebar(")
 ]

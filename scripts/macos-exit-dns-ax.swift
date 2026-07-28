@@ -243,6 +243,59 @@ func press(
     throw DriverError.missing(successIdentifier ?? identifier)
 }
 
+func pressAndWaitForSaveCompletion(
+    _ application: AXUIElement
+) throws {
+    let identifier = "exit-dns-save"
+    let save = try find(application, identifier: identifier)
+    guard boolAttribute(save, kAXEnabledAttribute) == true else {
+        throw DriverError.invalidState("Exit DNS save was not actionable")
+    }
+    try pressElement(save, label: identifier)
+
+    let inFlightDeadline = Date().addingTimeInterval(5)
+    var observedInFlight = false
+    repeat {
+        if let modalText = blockingModalText(application) {
+            throw DriverError.invalidState(
+                "Exit DNS save was blocked: \(modalText)"
+            )
+        }
+        if let current = findNow(application, identifier: identifier),
+           boolAttribute(current, kAXEnabledAttribute) == false {
+            observedInFlight = true
+            break
+        }
+        Thread.sleep(forTimeInterval: 0.02)
+    } while Date() < inFlightDeadline
+    guard observedInFlight else {
+        throw DriverError.invalidState(
+            "Exit DNS save never entered the in-flight state"
+        )
+    }
+
+    let completedDeadline = Date().addingTimeInterval(75)
+    repeat {
+        if let modalText = blockingModalText(application) {
+            throw DriverError.invalidState(
+                "Exit DNS save failed: \(modalText)"
+            )
+        }
+        if let current = findNow(application, identifier: identifier),
+           boolAttribute(current, kAXEnabledAttribute) == true {
+            Thread.sleep(forTimeInterval: 0.15)
+            if let modalText = blockingModalText(application) {
+                throw DriverError.invalidState(
+                    "Exit DNS save failed: \(modalText)"
+                )
+            }
+            return
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    } while Date() < completedDeadline
+    throw DriverError.invalidState("Exit DNS save did not complete")
+}
+
 func blockingModalText(_ application: AXUIElement) -> String? {
     guard let modal = descendants(application).first(where: { element in
         let role = stringAttribute(element, kAXRoleAttribute)
@@ -694,8 +747,7 @@ func run() throws {
             )
         }
         try assertConditionalControls(application, spec: spec, pid: pid)
-        try press(application, "exit-dns-save")
-        Thread.sleep(forTimeInterval: 1)
+        try pressAndWaitForSaveCompletion(application)
     }
     let receipt = try observe(
         application,
