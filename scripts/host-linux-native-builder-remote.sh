@@ -40,6 +40,9 @@ EXPECTED_PAYLOAD_SHA256="${17}"
   echo "remote native builder root must have mode 0700" >&2
   exit 2
 }
+# Git does not record directory modes. Normalize them so exact-tree auditing is
+# independent of the remote login account's umask.
+umask 022
 for value in \
   "$APP_BUNDLE_SHA256" \
   "$APP_GIT_SHA" \
