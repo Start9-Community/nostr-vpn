@@ -135,10 +135,13 @@ require_tokens "$WINDOWS" "Windows native build ownership" \
   'native Windows Release build failed'
 require_tokens "$LINUX" "Linux exact host artifact reuse" \
   'TARGET_RELEASE_BINARY="$TARGET_RELEASE_BUNDLE/nvpn"' \
-  'host-built Linux release bundle receipt differs' \
+  'receipt.get("schema") != 2' \
+  'mode == "remote-native"' \
+  'receipt.get("builtOnRemoteVm") is True' \
+  'exact Linux release bundle receipt differs' \
   '"${primary_scp[@]}" "$TARGET_RELEASE_BINARY"' \
-  'Linux target differs from the exact host-built release CLI' \
-  'Linux fixture peer differs from its exact host-built receipt' \
+  'Linux target differs from the exact release CLI' \
+  'Linux fixture peer differs from its exact release receipt' \
   'tested-artifact-receipt.json' \
   'tested-artifact.json'
 
