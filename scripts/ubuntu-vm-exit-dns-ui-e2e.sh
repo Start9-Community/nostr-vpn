@@ -8,6 +8,7 @@ SSH_HOST="${NVPN_UBUNTU_SSH_HOST:-${1:-}}"
 GUEST_SRC_ROOT="${NVPN_UBUNTU_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn-release-gate"
 LOCAL_ARTIFACT_DIR="${NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR:-$ROOT/artifacts/desktop-dns-ui/linux}"
+REMOTE_ARTIFACT="$GUEST_REPO/artifacts/linux-exit-dns-ui"
 [[ -n "$SSH_HOST" ]] || {
   echo "set NVPN_UBUNTU_SSH_HOST or pass the Linux VM SSH target" >&2
   exit 2
@@ -17,9 +18,31 @@ LOCAL_ARTIFACT_DIR="${NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR:-$ROOT/artifacts/desktop-
 source "$ROOT/scripts/lib-ubuntu-vm-imported-release.sh"
 export NVPN_UBUNTU_IMPORT_EVIDENCE_DIR="$LOCAL_ARTIFACT_DIR/import"
 
+cleanup_remote_dns_state() {
+  ubuntu_vm_import_ssh_command
+  "${NVPN_UBUNTU_IMPORT_SSH[@]}" bash -s -- "$GUEST_REPO" <<'GUEST'
+set -euo pipefail
+guest_repo="$1"
+case_root="/tmp/nvpn-linux-exit-dns-ui"
+if [[ -d "$guest_repo" ]]; then
+  guest_repo="$(cd "$guest_repo" && pwd -P)"
+  artifact_root="$guest_repo/artifacts/linux-exit-dns-ui"
+  [[ "$artifact_root" == */nostr-vpn-release-gate/artifacts/linux-exit-dns-ui ]]
+  rm -rf "$artifact_root"
+  test ! -e "$artifact_root"
+fi
+[[ "$case_root" == "/tmp/nvpn-linux-exit-dns-ui" ]]
+rm -rf "$case_root"
+test ! -e "$case_root"
+GUEST
+}
+
 cleanup() {
   local status="$?"
   trap - EXIT
+  if ! cleanup_remote_dns_state; then
+    status=1
+  fi
   if ! ubuntu_vm_cleanup_imported_release_bundle; then
     status=1
   fi
@@ -34,13 +57,12 @@ esac
 ubuntu_vm_import_release_bundle
 ubuntu_vm_import_ssh_command
 
-remote_artifact="$GUEST_REPO/artifacts/linux-exit-dns-ui"
 "${NVPN_UBUNTU_IMPORT_SSH[@]}" bash -s -- \
   "$GUEST_REPO" \
   "$NVPN_UBUNTU_IMPORTED_APP" \
   "$NVPN_UBUNTU_IMPORTED_CLI" \
   "$NVPN_UBUNTU_IMPORTED_RECEIPT" \
-  "$remote_artifact" <<'GUEST'
+  "$REMOTE_ARTIFACT" <<'GUEST'
 set -euo pipefail
 repo="$1"
 app="$2"
@@ -167,6 +189,6 @@ rm -rf "$LOCAL_ARTIFACT_DIR"
 mkdir -p "$LOCAL_ARTIFACT_DIR"
 ubuntu_vm_import_scp_command
 "${NVPN_UBUNTU_IMPORT_SCP[@]}" -r \
-  "$SSH_HOST:$remote_artifact/." "$LOCAL_ARTIFACT_DIR/"
+  "$SSH_HOST:$REMOTE_ARTIFACT/." "$LOCAL_ARTIFACT_DIR/"
 
 echo "UBUNTU_VM_EXIT_DNS_UI_E2E_OK"

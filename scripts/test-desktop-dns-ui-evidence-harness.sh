@@ -44,6 +44,54 @@ if canonical_handoff not in script:
         "repository and artifact directory before handing them to the nested "
         "Xvfb/DBus shell"
     )
+for required in (
+    "cleanup_remote_dns_state()",
+    'case_root="/tmp/nvpn-linux-exit-dns-ui"',
+    'artifact_root="$guest_repo/artifacts/linux-exit-dns-ui"',
+    '[[ "$artifact_root" == */nostr-vpn-release-gate/artifacts/linux-exit-dns-ui ]]',
+    'test ! -e "$artifact_root"',
+    'test ! -e "$case_root"',
+):
+    if required not in script:
+        raise SystemExit(
+            "Linux Exit DNS UI wrapper does not clean exact remote state "
+            f"after cancellation: {required}"
+        )
+cleanup = script[
+    script.index("cleanup() {") : script.index("trap cleanup EXIT")
+]
+dns_cleanup = cleanup.find("cleanup_remote_dns_state")
+bundle_cleanup = cleanup.find("ubuntu_vm_cleanup_imported_release_bundle")
+if dns_cleanup < 0 or bundle_cleanup < 0 or dns_cleanup > bundle_cleanup:
+    raise SystemExit(
+        "Linux Exit DNS UI wrapper does not remove exact DNS state before "
+        "the slower imported-package cleanup"
+    )
+PY
+
+python3 - "$ROOT/linux/src/main/saved_networks.rs" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for variable, label in (
+    ("mode", "nvpn-exit-dns-mode"),
+    ("provider", "nvpn-exit-dns-provider"),
+):
+    if source.count(f'set_dropdown_accessible_label(dropdown, "{label}")') != 2:
+        raise SystemExit(
+            f"Linux Exit DNS dropdown does not preserve {label} across map "
+            "and selection changes"
+        )
+    selected = source.find(f"{variable}.set_selected(")
+    initial = source.find(
+        f'set_dropdown_accessible_label(&{variable}, "{label}")'
+    )
+    if selected < 0 or initial < selected:
+        raise SystemExit(
+            "Linux Exit DNS dropdown labels are assigned before GTK selects "
+            "the value that overwrites them"
+        )
 PY
 
 python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'

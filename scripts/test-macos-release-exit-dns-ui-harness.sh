@@ -77,9 +77,31 @@ for required in (
     "network-setup-create",
     "network-create-submit",
     "main-AppWindow-1",
+    "func pressSidebar(",
+    "let actionDeadline = Date().addingTimeInterval(20)",
+    "kAXMainAttribute",
+    "kAXFocusedAttribute",
+    "kAXEnabledAttribute",
+    "error != .failure",
+    "error != .cannotComplete",
+    "error != .invalidUIElement",
 ):
     if required not in driver:
         raise SystemExit(f"macOS DNS AX driver lacks {required}")
+press_body = driver[
+    driver.index("func press(") : driver.index("func pressSidebar(")
+]
+if ".failure" in press_body or "actionDeadline" in press_body:
+    raise SystemExit("macOS DNS AX driver retries non-idempotent generic presses")
+sidebar_calls = re.findall(
+    r'try pressSidebar\(application, "([^"]+)", pid: pid\)',
+    driver,
+)
+if sidebar_calls != ["sidebar-internet", "sidebar-devices", "sidebar-internet"]:
+    raise SystemExit(
+        "macOS DNS AX sidebar retry is not limited to the three idempotent "
+        f"navigation actions: {sidebar_calls}"
+    )
 for required in (
     '"publicUiOnly": true',
     '"privateStateRead": false',

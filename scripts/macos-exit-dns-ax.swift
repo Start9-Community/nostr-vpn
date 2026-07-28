@@ -243,6 +243,47 @@ func press(
     throw DriverError.missing(successIdentifier ?? identifier)
 }
 
+func pressSidebar(
+    _ application: AXUIElement,
+    _ identifier: String,
+    pid: pid_t
+) throws {
+    let actionDeadline = Date().addingTimeInterval(20)
+    var lastError = AXError.cannotComplete
+    repeat {
+        NSRunningApplication(processIdentifier: pid)?.activate(
+            options: [.activateAllWindows]
+        )
+        if let window = findNow(
+            application,
+            identifier: "main-AppWindow-1"
+        ),
+           boolAttribute(window, kAXMainAttribute) == true,
+           boolAttribute(window, kAXFocusedAttribute) == true,
+           let element = findNow(application, identifier: identifier),
+           boolAttribute(element, kAXEnabledAttribute) == true,
+           let target = actionableElement(element),
+           boolAttribute(target, kAXEnabledAttribute) == true {
+            let error = AXUIElementPerformAction(
+                target,
+                kAXPressAction as CFString
+            )
+            if error == .success {
+                Thread.sleep(forTimeInterval: 0.2)
+                return
+            }
+            if error != .failure,
+               error != .cannotComplete,
+               error != .invalidUIElement {
+                throw DriverError.action(identifier, error)
+            }
+            lastError = error
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    } while Date() < actionDeadline
+    throw DriverError.action(identifier, lastError)
+}
+
 func postKey(
     to pid: pid_t,
     keyCode: CGKeyCode,
@@ -377,7 +418,7 @@ func createNetworkIfNeeded(
     _ application: AXUIElement,
     pid: pid_t
 ) throws -> Bool {
-    try press(application, "sidebar-internet")
+    try pressSidebar(application, "sidebar-internet", pid: pid)
     for _ in 0..<10 {
         if findNow(application, identifier: "exit-dns-mode") != nil {
             return false
@@ -385,7 +426,7 @@ func createNetworkIfNeeded(
         postKey(to: pid, keyCode: 121) // Page Down.
         Thread.sleep(forTimeInterval: 0.15)
     }
-    try press(application, "sidebar-devices")
+    try pressSidebar(application, "sidebar-devices", pid: pid)
     guard findNow(application, identifier: "network-setup-create") != nil else {
         throw DriverError.invalidState(
             "Exit DNS controls are absent, but the shipped UI is not in first-run network setup"
@@ -404,7 +445,7 @@ func createNetworkIfNeeded(
     )
     try press(application, "network-create-submit")
     _ = try find(application, identifier: "sidebar-internet")
-    try press(application, "sidebar-internet")
+    try pressSidebar(application, "sidebar-internet", pid: pid)
     _ = try reveal(application, identifier: "exit-dns-mode", pid: pid)
     return true
 }

@@ -61,6 +61,10 @@ fn build_wireguard_settings_card(app: &AppRef, page: &gtk::Box, state: &NativeAp
     page.append(&card);
 }
 
+fn set_dropdown_accessible_label(dropdown: &gtk::DropDown, label: &'static str) {
+    dropdown.update_property(&[gtk::accessible::Property::Label(label)]);
+}
+
 fn build_exit_dns_settings_card(app: &AppRef, page: &gtk::Box) {
     const MODES: [&str; 3] = ["automatic", "encrypted", "through_exit"];
     const MODE_LABELS: [&str; 3] = [
@@ -83,28 +87,30 @@ fn build_exit_dns_settings_card(app: &AppRef, page: &gtk::Box) {
 
     let drafts = app.borrow().drafts.clone();
     let mode = gtk::DropDown::from_strings(&MODE_LABELS);
-    mode.update_property(&[gtk::accessible::Property::Label(
-        "nvpn-exit-dns-mode",
-    )]);
     mode.set_selected(
         MODES
             .iter()
             .position(|value| *value == drafts.exit_dns_mode)
             .unwrap_or_default() as u32,
     );
+    set_dropdown_accessible_label(&mode, "nvpn-exit-dns-mode");
+    mode.connect_map(|dropdown| {
+        set_dropdown_accessible_label(dropdown, "nvpn-exit-dns-mode");
+    });
     card.append(&mode);
 
     let encrypted = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let provider = gtk::DropDown::from_strings(&PROVIDER_LABELS);
-    provider.update_property(&[gtk::accessible::Property::Label(
-        "nvpn-exit-dns-provider",
-    )]);
     provider.set_selected(
         PROVIDERS
             .iter()
             .position(|value| *value == drafts.exit_dns_doh_provider)
             .unwrap_or_default() as u32,
     );
+    set_dropdown_accessible_label(&provider, "nvpn-exit-dns-provider");
+    provider.connect_map(|dropdown| {
+        set_dropdown_accessible_label(dropdown, "nvpn-exit-dns-provider");
+    });
     encrypted.append(&provider);
     let custom = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let custom_url = entry("HTTPS DoH URL", &drafts.exit_dns_custom_doh_url);
@@ -152,6 +158,7 @@ fn build_exit_dns_settings_card(app: &AppRef, page: &gtk::Box) {
         let encrypted = encrypted.clone();
         let through = through.clone();
         mode.connect_selected_notify(move |dropdown| {
+            set_dropdown_accessible_label(dropdown, "nvpn-exit-dns-mode");
             let Some(value) = MODES.get(dropdown.selected() as usize) else {
                 return;
             };
@@ -164,6 +171,7 @@ fn build_exit_dns_settings_card(app: &AppRef, page: &gtk::Box) {
         let app = app.clone();
         let custom = custom.clone();
         provider.connect_selected_notify(move |dropdown| {
+            set_dropdown_accessible_label(dropdown, "nvpn-exit-dns-provider");
             let Some(value) = PROVIDERS.get(dropdown.selected() as usize) else {
                 return;
             };
