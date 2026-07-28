@@ -14,6 +14,144 @@ import testflight_export_compliance as export_compliance
 
 
 class AppStoreDraftMetadataTests(unittest.TestCase):
+    @staticmethod
+    def _screenshot_set(display_type, resource_id):
+        return {
+            "type": "appScreenshotSets",
+            "id": resource_id,
+            "attributes": {"screenshotDisplayType": display_type},
+        }
+
+    @staticmethod
+    def _screenshots(prefix, count=3, state="COMPLETE"):
+        return [
+            {
+                "type": "appScreenshots",
+                "id": f"{prefix}-{index}",
+                "attributes": {
+                    "fileName": f"{index:02d}.png",
+                    "assetDeliveryState": {"state": state},
+                },
+            }
+            for index in range(1, count + 1)
+        ]
+
+    def test_existing_complete_screenshot_sets_are_reused_without_mutation(self):
+        sets = [
+            self._screenshot_set("APP_IPHONE_67", "iphone-set"),
+            self._screenshot_set("APP_IPAD_PRO_3GEN_129", "ipad-set"),
+        ]
+        screenshots = {
+            "iphone-set": self._screenshots("iphone"),
+            "ipad-set": self._screenshots("ipad"),
+        }
+
+        mode, reused = metadata.reconcile_appstore_screenshots(
+            environ={},
+            screenshot_sets=lambda: sets,
+            screenshots_for_set=lambda set_id: screenshots[set_id],
+            replace_screenshots=lambda: self.fail(
+                "default screenshot reuse must perform zero mutation"
+            ),
+        )
+
+        self.assertEqual(mode, "reused")
+        self.assertEqual(len(reused), 6)
+
+    def test_existing_screenshot_reuse_fails_closed_for_missing_set(self):
+        sets = [self._screenshot_set("APP_IPHONE_67", "iphone-set")]
+
+        with self.assertRaisesRegex(ValueError, "required screenshot sets"):
+            metadata.reconcile_appstore_screenshots(
+                environ={},
+                screenshot_sets=lambda: sets,
+                screenshots_for_set=lambda _set_id: self._screenshots("iphone"),
+                replace_screenshots=lambda: self.fail(
+                    "incomplete screenshots must not trigger replacement"
+                ),
+            )
+
+    def test_existing_screenshot_reuse_fails_closed_for_incomplete_asset(self):
+        sets = [
+            self._screenshot_set("APP_IPHONE_67", "iphone-set"),
+            self._screenshot_set("APP_IPAD_PRO_3GEN_129", "ipad-set"),
+        ]
+        screenshots = {
+            "iphone-set": self._screenshots("iphone"),
+            "ipad-set": self._screenshots("ipad", state="PROCESSING"),
+        }
+
+        with self.assertRaisesRegex(ValueError, "not COMPLETE"):
+            metadata.reconcile_appstore_screenshots(
+                environ={},
+                screenshot_sets=lambda: sets,
+                screenshots_for_set=lambda set_id: screenshots[set_id],
+                replace_screenshots=lambda: self.fail(
+                    "incomplete screenshots must not trigger replacement"
+                ),
+            )
+
+    def test_existing_screenshot_reuse_requires_exact_asset_counts(self):
+        sets = [
+            self._screenshot_set("APP_IPHONE_67", "iphone-set"),
+            self._screenshot_set("APP_IPAD_PRO_3GEN_129", "ipad-set"),
+        ]
+        screenshots = {
+            "iphone-set": self._screenshots("iphone", count=2),
+            "ipad-set": self._screenshots("ipad"),
+        }
+
+        with self.assertRaisesRegex(ValueError, "exactly 3 screenshots"):
+            metadata.reconcile_appstore_screenshots(
+                environ={},
+                screenshot_sets=lambda: sets,
+                screenshots_for_set=lambda set_id: screenshots[set_id],
+                replace_screenshots=lambda: self.fail(
+                    "wrong screenshot counts must not trigger replacement"
+                ),
+            )
+
+    def test_screenshot_replacement_requires_explicit_opt_in_and_revalidation(self):
+        sets = [
+            self._screenshot_set("APP_IPHONE_67", "iphone-set"),
+            self._screenshot_set("APP_IPAD_PRO_3GEN_129", "ipad-set"),
+        ]
+        screenshots = {
+            "iphone-set": self._screenshots("iphone"),
+            "ipad-set": self._screenshots("ipad"),
+        }
+        replacements = []
+
+        mode, replaced = metadata.reconcile_appstore_screenshots(
+            environ={"NVPN_APPSTORE_REPLACE_SCREENSHOTS": "1"},
+            screenshot_sets=lambda: sets,
+            screenshots_for_set=lambda set_id: screenshots[set_id],
+            replace_screenshots=lambda: replacements.append(True),
+        )
+
+        self.assertEqual(replacements, [True])
+        self.assertEqual(mode, "replaced")
+        self.assertEqual(len(replaced), 6)
+
+    def test_appstore_draft_wires_reuse_as_the_only_default_screenshot_path(self):
+        draft = (ROOT / "scripts" / "appstore-draft").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "screenshot_mode, screenshots = reconcile_screenshots(",
+            draft,
+        )
+        self.assertIn(
+            "replace_screenshots=lambda: upload_screenshots(localization_id)",
+            draft,
+        )
+        self.assertEqual(draft.count("upload_screenshots("), 2)
+        self.assertNotIn(
+            "screenshots = upload_screenshots(localization[\"id\"])",
+            draft,
+        )
+
     def test_repo_defaults_replace_stale_existing_version_metadata(self):
         existing = {
             "attributes": {

@@ -9,7 +9,7 @@ repository default.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 import os
 import re
 
@@ -27,6 +27,105 @@ DEFAULT_WHATS_NEW = """Improves device joining, VPN lifecycle reliability, DNS a
 DEFAULT_KEYWORDS = "VPN,mesh,WireGuard,Nostr,private network,LAN,peer-to-peer,DNS"
 DEFAULT_SUPPORT_URL = "https://nostrvpn.org/support/"
 DEFAULT_MARKETING_URL = "https://nostrvpn.org/"
+REQUIRED_APPSTORE_SCREENSHOT_COUNTS = {
+    "APP_IPAD_PRO_3GEN_129": 3,
+    "APP_IPHONE_67": 3,
+}
+
+
+def _explicit_boolean(
+    environ: Mapping[str, str],
+    name: str,
+) -> bool:
+    value = str(environ.get(name, "")).strip().lower()
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(f"{name} must be an explicit boolean")
+
+
+def reconcile_appstore_screenshots(
+    *,
+    screenshot_sets: Callable[[], Sequence[Mapping[str, object]]],
+    screenshots_for_set: Callable[
+        [str],
+        Sequence[Mapping[str, object]],
+    ],
+    replace_screenshots: Callable[[], object],
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, tuple[Mapping[str, object], ...]]:
+    """Reuse exact complete App Store screenshots unless replacement is explicit."""
+
+    source = os.environ if environ is None else environ
+    replace = _explicit_boolean(
+        source,
+        "NVPN_APPSTORE_REPLACE_SCREENSHOTS",
+    )
+    if replace:
+        replace_screenshots()
+
+    observed: dict[str, Sequence[Mapping[str, object]]] = {}
+    for screenshot_set in screenshot_sets():
+        resource_id = str(screenshot_set.get("id", "")).strip()
+        attributes = screenshot_set.get("attributes")
+        if not resource_id or not isinstance(attributes, Mapping):
+            raise ValueError("App Store screenshot set is malformed")
+        display_type = str(
+            attributes.get("screenshotDisplayType", "")
+        ).strip()
+        if display_type not in REQUIRED_APPSTORE_SCREENSHOT_COUNTS:
+            raise ValueError(
+                f"Unexpected App Store screenshot set: {display_type or '<empty>'}"
+            )
+        if display_type in observed:
+            raise ValueError(
+                f"Duplicate App Store screenshot set: {display_type}"
+            )
+        observed[display_type] = tuple(screenshots_for_set(resource_id))
+
+    if set(observed) != set(REQUIRED_APPSTORE_SCREENSHOT_COUNTS):
+        raise ValueError(
+            "App Store draft does not contain exactly the required screenshot sets"
+        )
+
+    reusable: list[Mapping[str, object]] = []
+    screenshot_ids: set[str] = set()
+    for display_type, required_count in (
+        REQUIRED_APPSTORE_SCREENSHOT_COUNTS.items()
+    ):
+        screenshots = observed[display_type]
+        if len(screenshots) != required_count:
+            raise ValueError(
+                f"{display_type} must contain exactly {required_count} screenshots"
+            )
+        for screenshot in screenshots:
+            resource_id = str(screenshot.get("id", "")).strip()
+            attributes = screenshot.get("attributes")
+            if (
+                not resource_id
+                or resource_id in screenshot_ids
+                or not isinstance(attributes, Mapping)
+                or not str(attributes.get("fileName", "")).strip()
+            ):
+                raise ValueError(
+                    f"{display_type} contains a malformed screenshot resource"
+                )
+            delivery = attributes.get("assetDeliveryState")
+            if (
+                not isinstance(delivery, Mapping)
+                or delivery.get("state") != "COMPLETE"
+            ):
+                raise ValueError(
+                    f"{display_type} screenshot {resource_id} is not COMPLETE"
+                )
+            screenshot_ids.add(resource_id)
+            reusable.append(screenshot)
+
+    return (
+        "replaced" if replace else "reused",
+        tuple(reusable),
+    )
 
 
 def _value(

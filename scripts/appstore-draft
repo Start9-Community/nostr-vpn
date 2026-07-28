@@ -32,6 +32,9 @@ Environment:
                               ios/app-store-build-number
   NVPN_ASC_APP_PRIMARY_LOCALE locale (default en-US)
   NVPN_IOS_SCREENSHOT_DIR     screenshot root (default artifacts/appstore-screenshots)
+  NVPN_APPSTORE_REPLACE_SCREENSHOTS
+                              explicit true opt-in to replace inherited screenshots;
+                              default verifies and reuses the existing draft assets
   NVPN_APPSTORE_DESCRIPTION   optional App Store description override
   NVPN_APPSTORE_KEYWORDS      optional keywords override
   NVPN_APPSTORE_PROMOTIONAL_TEXT
@@ -1310,6 +1313,18 @@ def upload_screenshots(localization_id):
     return uploaded
 
 
+def reconcile_screenshots(localization_id):
+    try:
+        return draft_metadata.reconcile_appstore_screenshots(
+            environ=os.environ,
+            screenshot_sets=lambda: screenshot_sets(localization_id),
+            screenshots_for_set=screenshots_for_set,
+            replace_screenshots=lambda: upload_screenshots(localization_id),
+        )
+    except ValueError as error:
+        fail(str(error))
+
+
 app = find_app()
 if app is None:
     fail(f"No App Store Connect app found for bundle {BUNDLE_ID}")
@@ -1422,7 +1437,7 @@ review_detail = ensure_review_detail(
     encryption_compliance,
 )
 link_build(version["id"], build)
-screenshots = upload_screenshots(localization["id"])
+screenshot_mode, screenshots = reconcile_screenshots(localization["id"])
 submission = None
 if ACTION == "submit":
     submission = submit_review_submission(app["id"], version["id"])
@@ -1448,7 +1463,7 @@ print(
 )
 print(f"Current App Store territories available: {len(worldwide_territories)}")
 print(f"Build: {BUILD_NUMBER} [{build['id']}]")
-print(f"Screenshots uploaded: {len(screenshots)}")
+print(f"Screenshots {screenshot_mode}: {len(screenshots)}")
 if submission:
     print(
         "App Store review submission: "
