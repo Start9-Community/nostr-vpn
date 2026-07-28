@@ -91,7 +91,11 @@ func press(
     _ identifier: String,
     successIdentifier: String? = nil
 ) throws {
-    let deadline = Date().addingTimeInterval(5)
+    // A freshly imported bundle can take longer than five seconds to finish
+    // its first LaunchServices registration and expose the SwiftUI AX tree.
+    // Ready controls still return immediately; this only extends cold-start
+    // polling before reporting a real missing/action failure.
+    let deadline = Date().addingTimeInterval(20)
     var lastError = AXError.actionUnsupported
     var attempted = false
     repeat {

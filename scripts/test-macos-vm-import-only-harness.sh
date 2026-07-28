@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANUAL_JOIN_DRIVER="$ROOT/scripts/desktop-manual-join-ax.swift"
 
 files=(
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
@@ -45,7 +46,7 @@ EOF
 unset -f ps
 
 python3 - "${files[@]}" "$ROOT/scripts/macos_release_join_artifact.py" \
-  "$ROOT/scripts/macos-build" <<'PY'
+  "$ROOT/scripts/macos-build" "$MANUAL_JOIN_DRIVER" <<'PY'
 import pathlib
 import sys
 
@@ -206,6 +207,7 @@ for name in (
             raise SystemExit(f"{name} lacks exact imported-app cleanup: {required}")
 
 manual_join = texts["e2e-macos-manual-join-ui.sh"]
+manual_join_driver = texts["desktop-manual-join-ax.swift"]
 launch = manual_join.split("launch_app() {", 1)[1].split(
     "\n}\n\nlaunch_app", 1
 )[0]
@@ -221,6 +223,8 @@ for required in (
         )
 if launch.index("open -n -F") > launch.index("macos_exact_executable_pids"):
     raise SystemExit("manual-join VM looks for its exact PID before launching")
+if "Date().addingTimeInterval(20)" not in manual_join_driver:
+    raise SystemExit("manual-join AX driver lacks a bounded cold-import readiness window")
 
 if 'pgrep -f "$APP_EXE"' in texts["e2e-macos-service-toggle.sh"]:
     raise SystemExit("service-toggle gate still uses substring process matching")

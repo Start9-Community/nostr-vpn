@@ -368,6 +368,10 @@ for wrapper in "$MANUAL" "$SERVICE"; do
     'NVPN_LINUX_NVPN_PATH="$cli"' \
     'NVPN_LINUX_FIXTURE_PATH="$fixture"'
 done
+require_tokens "$MANUAL" "absolute guest repository handoff" \
+  'cd "$repo"' \
+  'repo="$(pwd -P)"' \
+  'NVPN_REPO_ROOT="$repo"'
 require_tokens "$MANUAL_GUEST" "explicit immutable artifact paths" \
   'cd "${NVPN_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/../..}"' \
   'pwd -P' \

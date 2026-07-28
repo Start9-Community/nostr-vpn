@@ -43,6 +43,7 @@ app="$2"
 cli="$3"
 fixture="$4"
 cd "$repo"
+repo="$(pwd -P)"
 env \
   NVPN_REPO_ROOT="$repo" \
   NVPN_LINUX_APP_PATH="$app" \
