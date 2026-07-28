@@ -57,21 +57,20 @@ from pathlib import Path
 artifact = Path("artifacts/linux-manual-join-ui")
 result = json.loads((artifact / "result.json").read_text(encoding="utf-8"))
 required = {
-    "phase": "runtime-verified",
-    "exactSignedRosterDurablyApplied": True,
-    "adminOutboxConsumedByExactJoinRosterAck": True,
-    "publicFipsCrossSeedRouteOnly": True,
+    "ok": True,
+    "phase": "ui-verified",
+    "transportMode": "public-websocket",
+    "ambientDiscoveryDisabled": True,
+    "directPeerConfigAbsent": True,
+    "adminOutboxQueuedBeforeRuntime": True,
+    "adminOutboxAttemptsBeforeRuntime": 0,
+    "adminOutboxLastAttemptAtBeforeRuntime": 0,
+    "deliveryCompletedDuringUi": False,
 }
 for key, expected in required.items():
     if result.get(key) != expected:
         raise SystemExit(f"Linux manual-join result lacks {key}={expected!r}")
-for name in (
-    "admin-daemon.log",
-    "joiner-daemon.log",
-    "admin-status.json",
-    "joiner-status.json",
-    "timings.json",
-):
+for name in ("joiner.png", "admin.png"):
     if not (artifact / name).is_file():
         raise SystemExit(f"Linux manual-join artifact missing: {name}")
 PY

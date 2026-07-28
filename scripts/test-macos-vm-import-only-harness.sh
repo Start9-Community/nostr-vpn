@@ -9,6 +9,7 @@ files=(
   "$ROOT/scripts/macos-release-mobile-join-remote.sh"
   "$ROOT/scripts/macos-vm-manual-join-e2e.sh"
   "$ROOT/scripts/macos-vm-service-toggle-e2e.sh"
+  "$ROOT/scripts/macos-vm-release-exit-dns-ui-e2e.sh"
   "$ROOT/scripts/macos-vm-desktop-app-launch-smoke.sh"
   "$ROOT/scripts/macos-vm-desktop-wireguard-exit-e2e.sh"
   "$ROOT/scripts/macos-vm-desktop-daemon-idle-e2e.sh"
@@ -58,6 +59,7 @@ remote = texts["macos-release-mobile-join-remote.sh"]
 artifact = texts["macos_release_join_artifact.py"]
 macos_build = texts["macos-build"]
 release_gate = texts["release-gate.sh"]
+exit_dns = texts["macos-vm-release-exit-dns-ui-e2e.sh"]
 
 for required in (
     'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
@@ -242,6 +244,11 @@ for required in (
 ):
     if required not in release_gate:
         raise SystemExit(f"release gate does not wire imported macOS artifacts: {required}")
+
+if 'IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$RESULT_DIR/import}"' not in exit_dns:
+    raise SystemExit("macOS Exit DNS UI gate cannot reuse the prepared exact app")
+if "NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=0" in exit_dns:
+    raise SystemExit("macOS Exit DNS UI gate forces a duplicate signed app build")
 
 for wrapper in wrapper_contracts:
     text = texts[wrapper]

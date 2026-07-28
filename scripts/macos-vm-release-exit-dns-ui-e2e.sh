@@ -26,7 +26,7 @@ GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 REMOTE_SCRIPT="./scripts/macos-release-exit-dns-ui-remote.sh"
 RESULT_DIR="${NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR:-$ROOT/artifacts/desktop-dns-ui/macos}"
-IMPORT_RESULT="$RESULT_DIR/import"
+IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$RESULT_DIR/import}"
 PRIVATE_DIR="$RESULT_DIR/.private-$$"
 HOST_DRIVER="$PRIVATE_DIR/macos-exit-dns-ax"
 HOST_DRIVER_RECEIPT="$PRIVATE_DIR/driver-receipt.json"
@@ -106,7 +106,6 @@ chmod 700 "$PRIVATE_DIR"
 
 # The shared importer builds the signed Release app on this host and copies
 # that exact bundle to the VM. It never builds application code on the VM.
-NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=0 \
 NVPN_RELEASE_JOIN_RESULT_DIR="$IMPORT_RESULT" \
   macos_vm_prepare_or_verify_imported_release "$ROOT" "$MAC_HOST"
 

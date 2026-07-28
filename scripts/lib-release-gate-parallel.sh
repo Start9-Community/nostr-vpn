@@ -78,14 +78,41 @@ release_gate_parallel_start() {
   printf 'Started release-gate lane: %s (log: %s)\n' "$label" "$log_path"
 }
 
+release_gate_parallel_pid_live() {
+  local pid="$1"
+  local state
+  [[ -n "$pid" ]] || return 1
+  state="$(
+    ps -o stat= -p "$pid" 2>/dev/null \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*$//'
+  )"
+  [[ -n "$state" && "$state" != Z* ]]
+}
+
 release_gate_parallel_group_alive() {
   local pgid="$1"
-  [[ -n "$pgid" ]] && kill -0 -- "-$pgid" >/dev/null 2>&1
+  [[ -n "$pgid" ]] || return 1
+  ps -axo pgid=,stat= 2>/dev/null \
+    | awk -v expected="$pgid" '
+        $1 == expected && $2 !~ /^Z/ { found = 1; exit }
+        END { exit !found }
+      '
+}
+
+release_gate_parallel_wait_group_gone() {
+  local pgid="$1"
+  local attempts=0
+  while ((attempts < 100)); do
+    release_gate_parallel_group_alive "$pgid" || return 0
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  ! release_gate_parallel_group_alive "$pgid"
 }
 
 release_gate_parallel_terminate_group() {
   local pgid="$1"
-  local attempts deadline
+  local deadline
   [[ -n "$pgid" ]] || return 0
 
   if release_gate_parallel_group_alive "$pgid"; then
@@ -100,19 +127,12 @@ release_gate_parallel_terminate_group() {
     kill -s KILL -- "-$pgid" >/dev/null 2>&1 || true
   fi
   # Descendants are no longer our direct children after their lane wrapper is
-  # reaped. Give their parent a bounded opportunity to reap them so callers do
-  # not observe a just-killed process group as an escaped live lane.
-  attempts=0
-  while ((attempts < 50)); do
-    release_gate_parallel_group_alive "$pgid" || return 0
-    sleep 0.02
-    attempts=$((attempts + 1))
-  done
-  ! release_gate_parallel_group_alive "$pgid"
+  # reaped. Do not let callers observe a just-killed group as an escaped lane.
+  release_gate_parallel_wait_group_gone "$pgid"
 }
 
 release_gate_parallel_cancel_all() {
-  local index pid pgid deadline any_running
+  local index pid pgid deadline any_running cleanup_failed=0
   for index in "${!RELEASE_GATE_PARALLEL_PIDS[@]}"; do
     pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
     if release_gate_parallel_group_alive "$pgid"; then
@@ -144,8 +164,19 @@ release_gate_parallel_cancel_all() {
       wait "$pid" >/dev/null 2>&1 || true
       RELEASE_GATE_PARALLEL_PIDS[$index]=""
     fi
+  done
+  for index in "${!RELEASE_GATE_PARALLEL_PGIDS[@]}"; do
+    pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
+    if [[ -n "$pgid" ]] \
+      && ! release_gate_parallel_wait_group_gone "$pgid"
+    then
+      printf 'release gate parallel cleanup failed: process group %s survived TERM/KILL\n' \
+        "$pgid" >&2
+      cleanup_failed=1
+    fi
     RELEASE_GATE_PARALLEL_PGIDS[$index]=""
   done
+  return "$cleanup_failed"
 }
 
 release_gate_parallel_wait() {

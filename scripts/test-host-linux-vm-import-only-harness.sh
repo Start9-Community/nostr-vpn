@@ -371,7 +371,13 @@ done
 require_tokens "$MANUAL" "absolute guest repository handoff" \
   'cd "$repo"' \
   'repo="$(pwd -P)"' \
-  'NVPN_REPO_ROOT="$repo"'
+  'NVPN_REPO_ROOT="$repo"' \
+  '"phase": "ui-verified"' \
+  '"adminOutboxQueuedBeforeRuntime": True' \
+  '"deliveryCompletedDuringUi": False'
+if grep -Fq '"phase": "runtime-verified"' "$MANUAL"; then
+  fail "Linux native UI gate still tries to run two machine-global daemons on one VM"
+fi
 require_tokens "$MANUAL_GUEST" "explicit immutable artifact paths" \
   'cd "${NVPN_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/../..}"' \
   'pwd -P' \
@@ -379,6 +385,9 @@ require_tokens "$MANUAL_GUEST" "explicit immutable artifact paths" \
   'NVPN_LINUX_NVPN_PATH' \
   'NVPN_LINUX_FIXTURE_PATH' \
   'Set all three explicit Linux app, CLI, and fixture paths together.'
+if grep -Fq 'start_runtime "$ADMIN_DATA_DIR"' "$MANUAL_GUEST"; then
+  fail "Linux native UI gate still bypasses the production daemon singleton topology"
+fi
 require_tokens "$RELEASE_GATE" "one cached bundle shared by both UI gates" \
   'prepare_host_linux_vm_bundle_and_record' \
   './scripts/prepare-host-linux-vm-bundle.sh' \

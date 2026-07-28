@@ -2027,10 +2027,41 @@ run_docker_perf_gate() {
   esac
 }
 
+release_gate_cleanup_private_build_dirs() {
+  local result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-}"
+  local path
+  [[ -n "$result_dir" ]] || return 0
+  [[ "$result_dir" == /* && "$result_dir" != "/" && ! -L "$result_dir" ]] || {
+    echo "Refusing private build cleanup for unsafe release join directory." >&2
+    return 1
+  }
+  [[ ! -e "$result_dir" || -d "$result_dir" ]] || {
+    echo "Release join result path is not a directory." >&2
+    return 1
+  }
+  [[ -d "$result_dir" ]] || return 0
+
+  for path in "$result_dir"/.desktop-private-*; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    [[ -d "$path" && ! -L "$path" ]] || {
+      echo "Refusing unexpected private build path: $path" >&2
+      return 1
+    }
+    rm -rf -- "$path"
+  done
+  for path in "$result_dir"/.desktop-private-*; do
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+      echo "Private build path survived release-gate cleanup: $path" >&2
+      return 1
+    }
+  done
+}
+
 release_gate_cleanup() {
   local status="$?" cleanup_failed=0
   trap - EXIT
-  release_gate_parallel_cancel_all
+  release_gate_parallel_cancel_all || cleanup_failed=1
+  release_gate_cleanup_private_build_dirs || cleanup_failed=1
   restore_release_cargo_lock || cleanup_failed=1
   if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
     status=1

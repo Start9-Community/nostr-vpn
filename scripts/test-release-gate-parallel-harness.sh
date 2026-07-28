@@ -160,19 +160,10 @@ release_gate_parallel_wait_group "$orphaning" "$orphan_failure" >/dev/null 2>&1
 status=$?
 set -e
 [[ "$status" == "7" ]] || fail "orphaning cancellation group returned $status"
-for _ in $(seq 1 50); do
-  if ! kill -0 "$orphan_child" >/dev/null 2>&1 \
-    && ! kill -0 "$orphan_external" >/dev/null 2>&1 \
-    && ! release_gate_parallel_group_alive "$orphan_pgid"
-  then
-    break
-  fi
-  sleep 0.02
-done
-if kill -0 "$orphan_child" >/dev/null 2>&1; then
+if release_gate_parallel_pid_live "$orphan_child"; then
   fail "TERM-ignoring child survived after its wrapper exited"
 fi
-if kill -0 "$orphan_external" >/dev/null 2>&1; then
+if release_gate_parallel_pid_live "$orphan_external"; then
   fail "external TERM-ignoring descendant survived lane cancellation"
 fi
 if release_gate_parallel_group_alive "$orphan_pgid"; then
@@ -223,15 +214,7 @@ set -e
   || fail "successful lane with an orphan returned $status instead of failing closed"
 [[ -f "$tmp/successful-orphan-term" ]] \
   || fail "successful lane orphan did not receive TERM before escalation"
-for _ in $(seq 1 50); do
-  if ! kill -0 "$successful_orphan_child" >/dev/null 2>&1 \
-    && ! release_gate_parallel_group_alive "$successful_orphan_pgid"
-  then
-    break
-  fi
-  sleep 0.02
-done
-if kill -0 "$successful_orphan_child" >/dev/null 2>&1; then
+if release_gate_parallel_pid_live "$successful_orphan_child"; then
   fail "successful lane orphan survived TERM/KILL cleanup"
 fi
 if release_gate_parallel_group_alive "$successful_orphan_pgid"; then
@@ -268,6 +251,12 @@ set -e
   || fail "fully drained parallel group did not finish its join"
 
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
+grep -Fq 'release_gate_parallel_cancel_all || cleanup_failed=1' "$release_gate" \
+  || fail "release cleanup ignores a surviving parallel process group"
+grep -Fq 'release_gate_cleanup_private_build_dirs || cleanup_failed=1' "$release_gate" \
+  || fail "release cleanup does not sweep private builds after lane reaping"
+grep -Fq 'for path in "$result_dir"/.desktop-private-*' "$release_gate" \
+  || fail "release cleanup does not scope private build cleanup to the exact join directory"
 required_modes_lib="$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
 [[ -f "$required_modes_lib" ]] \
   || fail "release gate has no final-release required-mode policy"
