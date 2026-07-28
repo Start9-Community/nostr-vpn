@@ -493,7 +493,8 @@ prepare_windows_platform_lane_sync() {
 
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
-    ./scripts/windows-vm-git-sync.sh "$host"
+    NVPN_WINDOWS_FIPS_REPO_PATH="$release_fips_path" \
+      ./scripts/windows-vm-git-sync.sh "$host"
     WINDOWS_LANE_PRE_SYNCED=1
   fi
 }

@@ -90,8 +90,12 @@ require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
   'NVPN_UBUNTU_GUEST_REPO_NAME' \
   'NVPN_UBUNTU_REPO_LABEL'
 require_tokens "$WINDOWS_SYNC" "isolated exact-FIPS sync support" \
+  'FIPS_REPO="${NVPN_WINDOWS_FIPS_REPO_PATH:-${NVPN_FIPS_REPO_PATH:-$SRC_ROOT/fips}}"' \
   'NVPN_WINDOWS_GUEST_FIPS_REPO_PATH' \
   'NVPN_WINDOWS_FIPS_GIT_BARE_PATH'
+require_tokens "$RELEASE_GATE" "exact release-FIPS Windows lane binding" \
+  'NVPN_WINDOWS_FIPS_REPO_PATH="$release_fips_path"' \
+  './scripts/windows-vm-git-sync.sh "$host"'
 
 listener_fixture_device="nvln0"
 listener_fixture_port="45820"
