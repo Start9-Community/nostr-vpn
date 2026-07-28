@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-owned-test-app.sh"
 IMPORT_DIR="${NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR:-$ROOT/artifacts/macos-release-mobile-join}"
 PACKAGE="$IMPORT_DIR/imported"
 APP_PATH="$PACKAGE/Nostr VPN.app"
@@ -27,36 +29,33 @@ EXPECTED_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-}"
 EXPECTED_SIGNER="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
 CANONICAL_DATA="$HOME/Library/Application Support/nvpn"
 BACKUP_ROOT="/tmp/nvpn-macos-exit-dns-profile-backup"
+INSTALLED_APP_PATH="/Applications/Nostr VPN.app"
 INSTALLED_APP="/Applications/Nostr VPN.app/Contents/MacOS/Nostr VPN"
 APP_PID=""
 
+macos_open() {
+  /usr/bin/env -i \
+    HOME="$HOME" \
+    USER="${USER:-dev}" \
+    LOGNAME="${LOGNAME:-${USER:-dev}}" \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    LANG="${LANG:-en_US.UTF-8}" \
+    /usr/bin/open "$@"
+}
+
 stop_gate_app() {
-  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
-    kill "$APP_PID" >/dev/null 2>&1 || true
-    local deadline=$((SECONDS + 5))
-    while kill -0 "$APP_PID" >/dev/null 2>&1 && ((SECONDS < deadline)); do
-      sleep 0.1
-    done
-    kill -9 "$APP_PID" >/dev/null 2>&1 || true
-    wait "$APP_PID" >/dev/null 2>&1 || true
-  fi
+  macos_stop_exact_test_app "$APP_EXE"
   APP_PID=""
 }
 
 stop_all_apps() {
   stop_gate_app
-  pkill -x "Nostr VPN" >/dev/null 2>&1 || true
-  local deadline=$((SECONDS + 5))
-  while pgrep -x "Nostr VPN" >/dev/null 2>&1 && ((SECONDS < deadline)); do
-    sleep 0.1
-  done
-  pkill -9 -x "Nostr VPN" >/dev/null 2>&1 || true
-  ! pgrep -x "Nostr VPN" >/dev/null 2>&1
+  macos_stop_exact_test_app "$INSTALLED_APP"
 }
 
 installed_app_running() {
-  ps ax -o command= \
-    | grep -Fq -- "/Applications/Nostr VPN.app/Contents/MacOS/Nostr VPN"
+  [[ -n "$(macos_exact_executable_pids "$INSTALLED_APP")" ]]
 }
 
 restore_profile() {
@@ -78,16 +77,7 @@ restore_profile() {
   fi
   local relaunched=false
   if [[ -f "$BACKUP_ROOT/installed-was-running" && -x "$INSTALLED_APP" ]]; then
-    (
-      exec /usr/bin/env -i \
-        HOME="$HOME" \
-        USER="${USER:-dev}" \
-        LOGNAME="${LOGNAME:-${USER:-dev}}" \
-        PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-        TMPDIR="${TMPDIR:-/tmp}" \
-        LANG="${LANG:-en_US.UTF-8}" \
-        "$INSTALLED_APP" --hidden
-    ) >/dev/null 2>&1 &
+    macos_open -n -F -j "$INSTALLED_APP_PATH" --args --hidden
     local deadline=$((SECONDS + 5))
     while ((SECONDS < deadline)); do
       if installed_app_running; then
@@ -138,23 +128,19 @@ launch_app() {
     return 1
   }
   codesign --verify --deep --strict "$APP_PATH"
-  (
-    exec /usr/bin/env -i \
-      HOME="$HOME" \
-      USER="${USER:-dev}" \
-      LOGNAME="${LOGNAME:-${USER:-dev}}" \
-      PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-      TMPDIR="${TMPDIR:-/tmp}" \
-      LANG="${LANG:-en_US.UTF-8}" \
-      "$APP_EXE"
-  ) >>"$ARTIFACT_DIR/app.log" 2>&1 &
-  APP_PID=$!
-  local deadline=$((SECONDS + 10))
+  macos_open -n -F \
+    --stdout "$ARTIFACT_DIR/app.log" \
+    --stderr "$ARTIFACT_DIR/app.log" \
+    "$APP_PATH"
+  local deadline=$((SECONDS + 20))
   while ((SECONDS < deadline)); do
-    kill -0 "$APP_PID" >/dev/null 2>&1 && return 0
+    APP_PID="$(macos_exact_executable_pids "$APP_EXE" | tail -n 1)"
+    if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
+      return 0
+    fi
     sleep 0.1
   done
-  echo "exact imported macOS Release app did not stay running" >&2
+  echo "exact imported macOS Release app did not launch through LaunchServices" >&2
   return 1
 }
 

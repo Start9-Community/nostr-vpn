@@ -571,7 +571,11 @@ func run() throws {
         )
     }
     NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
-    Thread.sleep(forTimeInterval: 0.3)
+    _ = try find(
+        application,
+        identifier: "main-AppWindow-1",
+        timeout: 20
+    )
     let networkCreated = try createNetworkIfNeeded(application, pid: pid)
     _ = try reveal(application, identifier: "exit-dns-mode", pid: pid)
     if phase == "apply" {

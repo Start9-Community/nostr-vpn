@@ -93,7 +93,9 @@ run_case() {
       --app-git-tree "$app_tree"
 }
 
+artifact_root="$(cd "$artifact_root" && pwd -P)"
 cd "$repo"
+repo="$(pwd -P)"
 export GDK_BACKEND=x11
 export GTK_A11Y=atspi
 export NO_AT_BRIDGE=0

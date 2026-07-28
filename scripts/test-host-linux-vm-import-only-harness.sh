@@ -388,6 +388,20 @@ require_tokens "$MANUAL_GUEST" "explicit immutable artifact paths" \
 if grep -Fq 'start_runtime "$ADMIN_DATA_DIR"' "$MANUAL_GUEST"; then
   fail "Linux native UI gate still bypasses the production daemon singleton topology"
 fi
+python3 - "$MANUAL_GUEST" <<'PY'
+import pathlib
+import sys
+
+calls = [
+    line.strip()
+    for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.lstrip().startswith('"$FIXTURE" ')
+]
+if not calls or not calls[-1].startswith('"$FIXTURE" capture-delivery '):
+    raise SystemExit(
+        "Linux manual-join UI gate overwrites its terminal signed delivery receipt"
+    )
+PY
 require_tokens "$RELEASE_GATE" "one cached bundle shared by both UI gates" \
   'prepare_host_linux_vm_bundle_and_record' \
   './scripts/prepare-host-linux-vm-bundle.sh' \

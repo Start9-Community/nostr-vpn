@@ -17,6 +17,7 @@ xcrun swiftc -typecheck \
 
 python3 - "$HOST" "$REMOTE" "$DRIVER" "$RECEIPT" <<'PY'
 import pathlib
+import re
 import sys
 
 host, remote, driver, receipt = [
@@ -36,7 +37,11 @@ for prohibited in ("ssh macos-build", "ssh xcodebuild", "NVPN_APP_DATA_DIR="):
         raise SystemExit(f"macOS DNS host orchestrator contains {prohibited}")
 for required in (
     '"$APP_EXE"',
-    "exec /usr/bin/env -i",
+    "lib-macos-owned-test-app.sh",
+    "macos_open -n -F",
+    '--args --hidden',
+    "/usr/bin/open",
+    "macos_exact_executable_pids",
     "stop_gate_app",
     'apply "$case"',
     'readback "$case"',
@@ -49,9 +54,16 @@ for required in (
 ):
     if required not in remote:
         raise SystemExit(f"macOS DNS VM runner lacks {required}")
-for prohibited in ("NVPN_APP_DATA_DIR=", "cat \"$CANONICAL_DATA", "grep \"$CANONICAL_DATA"):
+for prohibited in (
+    "NVPN_APP_DATA_DIR=",
+    "cat \"$CANONICAL_DATA",
+    "grep \"$CANONICAL_DATA",
+    'pkill -x "Nostr VPN"',
+):
     if prohibited in remote:
         raise SystemExit(f"macOS DNS VM runner reads/injects private state: {prohibited}")
+if re.search(r'(?m)^\s*"\$APP_EXE"(?:\s|$)', remote):
+    raise SystemExit("macOS DNS VM runner executes the bundle binary directly")
 for required in (
     "exit-dns-mode",
     "exit-dns-provider",
@@ -64,6 +76,7 @@ for required in (
     "10.99.79.53",
     "network-setup-create",
     "network-create-submit",
+    "main-AppWindow-1",
 ):
     if required not in driver:
         raise SystemExit(f"macOS DNS AX driver lacks {required}")

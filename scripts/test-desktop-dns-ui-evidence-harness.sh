@@ -14,6 +14,8 @@ required_source=(
   'scripts/desktop-mobile-manual-join-atspi.py:uiRestartReadback'
   'scripts/desktop-mobile-manual-join-windows-ui.ps1:uiRestartReadback'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:DnsPolicy'
+  'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:artifact_root="$(cd "$artifact_root" && pwd -P)"'
+  'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:repo="$(pwd -P)"'
   'scripts/windows-vm-exit-dns-ui-e2e.sh:DnsPolicy'
 )
 for entry in "${required_source[@]}"; do
@@ -24,6 +26,25 @@ for entry in "${required_source[@]}"; do
     exit 1
   }
 done
+
+python3 - "$ROOT/scripts/ubuntu-vm-exit-dns-ui-e2e.sh" <<'PY'
+import pathlib
+import sys
+
+script = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+canonical_handoff = (
+    'artifact_root="$(cd "$artifact_root" && pwd -P)"\n'
+    'cd "$repo"\n'
+    'repo="$(pwd -P)"\n'
+    'export GDK_BACKEND=x11'
+)
+if canonical_handoff not in script:
+    raise SystemExit(
+        "Linux Exit DNS UI wrapper does not canonicalize its relative guest "
+        "repository and artifact directory before handing them to the nested "
+        "Xvfb/DBus shell"
+    )
+PY
 
 python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
 import importlib.util
