@@ -38,6 +38,85 @@ function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
+const fipsPackages = {
+  'fips-core': '0.4.45',
+  'fips-endpoint': '0.4.45',
+  'fips-identity': '0.3.2',
+}
+const fipsSpecs = Object.entries(fipsPackages).map(
+  ([name, version]) => `${name}=${version}`,
+)
+const committedLockPaths = new Set(['Cargo.lock', 'linux/Cargo.lock'])
+
+function trackedFixtureInput(sourceRoot, relative) {
+  const result = spawnSync('git', ['show', `HEAD:${relative}`], {
+    cwd: sourceRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  assert.equal(
+    result.status,
+    0,
+    result.stderr.toString() || `could not read tracked ${relative}`,
+  )
+  return result.stdout
+}
+
+function copyFixtureInput(sourceRoot, relative, destination) {
+  // A release-gate local-FIPS session may legitimately realize Cargo.lock in
+  // place. Locks model committed source, while all other inputs intentionally
+  // exercise current TDD edits and retain their copied file modes.
+  if (committedLockPaths.has(relative)) {
+    writeFileSync(destination, trackedFixtureInput(sourceRoot, relative))
+    return
+  }
+  copyFileSync(join(sourceRoot, relative), destination)
+}
+
+test('publication fixture reads committed lock while the worktree uses exact local FIPS', (context) => {
+  const sourceRoot = mkdtempSync(
+    join(tmpdir(), 'nvpn-publication-source-lock-'),
+  )
+  context.after(() => rmSync(sourceRoot, { recursive: true, force: true }))
+  const committedLock = trackedFixtureInput(process.cwd(), 'Cargo.lock')
+  const sourceLock = join(sourceRoot, 'Cargo.lock')
+  writeFileSync(sourceLock, committedLock)
+  capture('git', ['init', '--quiet'], sourceRoot)
+  capture('git', ['add', 'Cargo.lock'], sourceRoot)
+  capture(
+    'git',
+    [
+      '-c',
+      'user.name=Release Test',
+      '-c',
+      'user.email=release-test@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'committed lock fixture',
+    ],
+    sourceRoot,
+  )
+  const realizedLock = join(sourceRoot, 'Cargo.realized.lock')
+  capture(
+    'python3',
+    [
+      join(process.cwd(), 'scripts', 'verify-cargo-path-patch-lock.py'),
+      '--materialize',
+      sourceLock,
+      realizedLock,
+      ...fipsSpecs,
+    ],
+    sourceRoot,
+  )
+  copyFileSync(realizedLock, sourceLock)
+  assert.equal(capture('git', ['diff', '--name-only'], sourceRoot), 'Cargo.lock')
+  assert.notDeepEqual(readFileSync(sourceLock), committedLock)
+
+  const copiedLock = join(sourceRoot, 'fixture-Cargo.lock')
+  copyFixtureInput(sourceRoot, 'Cargo.lock', copiedLock)
+  assert.deepEqual(readFileSync(copiedLock), committedLock)
+})
+
 test('Linux publication derives verifier inputs and rejects self-consistent receipt forgeries', (context) => {
   const sourceRoot = process.cwd()
   const temporaryRoot = mkdtempSync(
@@ -57,7 +136,7 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
   ]) {
     const destination = join(root, relative)
     mkdirSync(dirname(destination), { recursive: true })
-    copyFileSync(join(sourceRoot, relative), destination)
+    copyFixtureInput(sourceRoot, relative, destination)
   }
   capture('git', ['init', '--quiet'], root)
   capture('git', ['add', '.'], root)
@@ -77,11 +156,6 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
   )
 
   const fipsRoot = join(temporaryRoot, 'fips')
-  const fipsPackages = {
-    'fips-core': '0.4.45',
-    'fips-endpoint': '0.4.45',
-    'fips-identity': '0.3.2',
-  }
   for (const [name, version] of Object.entries(fipsPackages)) {
     const crate = join(fipsRoot, 'crates', name)
     mkdirSync(crate, { recursive: true })
@@ -113,9 +187,6 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
   const fipsGitTree = capture('git', ['rev-parse', 'HEAD^{tree}'], fipsRoot)
   const sourceDateEpoch = Number(
     capture('git', ['log', '-1', '--format=%ct', candidateCommit], root),
-  )
-  const fipsSpecs = Object.entries(fipsPackages).map(
-    ([name, version]) => `${name}=${version}`,
   )
   const lockVerifier = join(root, 'scripts', 'verify-cargo-path-patch-lock.py')
   const rootLock = join(root, 'Cargo.lock')
