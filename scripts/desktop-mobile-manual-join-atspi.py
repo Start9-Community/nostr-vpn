@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -23,6 +24,18 @@ import pyatspi
 NPUB = re.compile(r"npub1[023456789acdefghjklmnpqrstuvwxyz]{58}")
 TARGET_PID = 0
 TARGET_WINDOW = 0
+DNS_DROPDOWN_LABELS = {
+    "nvpn-exit-dns-mode": (
+        "Automatic (recommended)",
+        "Encrypted DNS",
+        "DNS through exit",
+    ),
+    "nvpn-exit-dns-provider": (
+        "Cloudflare",
+        "Quad9",
+        "Custom DoH",
+    ),
+}
 
 
 def now_ms() -> int:
@@ -93,6 +106,20 @@ def matching_nodes(name: str) -> list[Any]:
     return matches
 
 
+def ancestor_with_accessible_id(node: Any, accessible_id: str) -> Any | None:
+    current = node
+    for _ in range(16):
+        try:
+            if current.get_accessible_id() == accessible_id:
+                return current
+            current = current.parent
+        except Exception:
+            return None
+        if current is None:
+            return None
+    return None
+
+
 def has_action(node: Any) -> bool:
     try:
         return node.queryAction().nActions > 0
@@ -140,12 +167,40 @@ def focus_named_with_keyboard(name: str, max_tabs: int = 100) -> Any:
     )
     focused_names = []
     for _ in range(max_tabs):
-        for node in matching_nodes(name):
-            try:
-                if node.getState().contains(pyatspi.STATE_FOCUSED):
-                    return node
-            except Exception:
-                continue
+        if not target_window_has_focus():
+            subprocess.run(
+                ["xdotool", "windowfocus", "--sync", str(TARGET_WINDOW)],
+                check=True,
+            )
+            time.sleep(0.1)
+        pyatspi.Registry.pumpQueuedEvents()
+        if name.startswith("nvpn-exit-dns-"):
+            for candidate in walk(pyatspi.Registry.getDesktop(0)):
+                try:
+                    if (
+                        candidate.get_process_id() == TARGET_PID
+                        and candidate.getState().contains(pyatspi.STATE_FOCUSED)
+                    ):
+                        target = ancestor_with_accessible_id(candidate, name)
+                        if target is not None and visible(target):
+                            time.sleep(0.1)
+                            pyatspi.Registry.pumpQueuedEvents()
+                            if (
+                                target_window_has_focus()
+                                and candidate.getState().contains(
+                                    pyatspi.STATE_FOCUSED
+                                )
+                            ):
+                                return target
+                except Exception:
+                    continue
+        else:
+            for node in matching_nodes(name):
+                try:
+                    if node.getState().contains(pyatspi.STATE_FOCUSED):
+                        return node
+                except Exception:
+                    continue
         subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "Tab"],
             check=True,
@@ -169,26 +224,18 @@ def focus_named_with_keyboard(name: str, max_tabs: int = 100) -> Any:
     )
 
 
+def target_window_has_focus() -> bool:
+    focused = subprocess.run(
+        ["xdotool", "getwindowfocus"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return focused.returncode == 0 and focused.stdout.strip() == str(TARGET_WINDOW)
+
+
 def invoke(name: str) -> None:
-    node = find_named(name, actionable=True)
-    try:
-        action = node.queryAction()
-        if action.nActions > 0 and action.doAction(0):
-            time.sleep(0.25)
-            return
-    except Exception:
-        pass
-    try:
-        component = node.queryComponent()
-        if component.grabFocus():
-            subprocess.run(
-                ["xdotool", "key", "--clearmodifiers", "space"],
-                check=True,
-            )
-            time.sleep(0.25)
-            return
-    except Exception:
-        pass
+    find_named(name, actionable=True)
     focus_named_with_keyboard(name)
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "space"],
@@ -254,6 +301,18 @@ def read_network_id(name: str) -> str:
     return normalized
 
 
+def canonical_ip_csv(value: str) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                str(ipaddress.ip_address(part.strip()))
+                for part in value.split(",")
+                if part.strip()
+            }
+        )
+    )
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -262,55 +321,119 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def select_index(name: str, index: int) -> None:
-    node = find_named(name)
-    try:
-        selection = node.querySelection()
-        if selection.selectChild(index):
-            time.sleep(0.25)
-            if selected_index(name) == index:
-                return
-    except Exception:
-        pass
+def select_dns_index(name: str, index: int) -> None:
+    if name not in DNS_DROPDOWN_LABELS:
+        raise RuntimeError(f"unsupported DNS dropdown: {name}")
+    find_named(name)
     focus_named_with_keyboard(name)
+    subprocess.run(
+        ["xdotool", "key", "--clearmodifiers", "Escape"],
+        check=True,
+    )
+    wait_dropdown_expanded(name, False)
+    focus_named_with_keyboard(name)
+    subprocess.run(
+        ["xdotool", "key", "--clearmodifiers", "space"],
+        check=True,
+    )
+    wait_dropdown_expanded(name, True)
+    wait_dropdown_popup_ready(name)
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "Home"],
         check=True,
     )
+    time.sleep(0.15)
     for _ in range(index):
         subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "Down"],
             check=True,
         )
+        time.sleep(0.15)
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "Return"],
         check=True,
     )
-    deadline = time.monotonic() + 3
+    wait_dropdown_expanded(name, False)
+    selected_dns_index(name, expected=index)
+
+
+def selected_dns_index(
+    name: str,
+    *,
+    expected: int | None = None,
+    timeout: float = 3,
+) -> int:
+    try:
+        labels = DNS_DROPDOWN_LABELS[name]
+    except KeyError as error:
+        raise RuntimeError(f"unsupported DNS dropdown: {name}") from error
+    deadline = time.monotonic() + timeout
+    label = ""
     while time.monotonic() < deadline:
-        if selected_index(name) == index:
-            return
-        time.sleep(0.05)
-    raise RuntimeError(f"AT-SPI failed to select index {index} on {name}")
-
-
-def selected_index(name: str) -> int:
-    node = find_named(name)
-    try:
-        value = node.queryValue().currentValue
-        return int(round(float(value)))
-    except Exception:
-        pass
-    try:
-        selected = node.querySelection().getSelectedChild(0)
-        if selected is not None:
-            parent = selected.parent
-            for index, child in enumerate(parent):
-                if child == selected:
+        for node in matching_nodes(name):
+            label = node.name.strip()
+            if label in labels:
+                index = labels.index(label)
+                if expected is None or index == expected:
                     return index
-    except Exception:
-        pass
-    raise RuntimeError(f"AT-SPI could not read the selected index from {name}")
+        pyatspi.Registry.pumpQueuedEvents()
+        time.sleep(0.05)
+    target = "" if expected is None else f", expected index {expected}"
+    raise RuntimeError(
+        f"AT-SPI exposed an unexpected selected label for {name}: "
+        f"{label!r}{target}"
+    )
+
+
+def wait_dropdown_expanded(name: str, expected: bool, timeout: float = 3) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pyatspi.Registry.pumpQueuedEvents()
+        for node in matching_nodes(name):
+            try:
+                expanded = node.getState().contains(pyatspi.STATE_EXPANDED)
+                if expanded == expected:
+                    return
+            except Exception:
+                continue
+        time.sleep(0.05)
+    state = "open" if expected else "close"
+    raise RuntimeError(f"AT-SPI dropdown did not {state}: {name}")
+
+
+def wait_dropdown_popup_ready(name: str, timeout: float = 3) -> None:
+    expected_items = len(DNS_DROPDOWN_LABELS[name])
+    deadline = time.monotonic() + timeout
+    observed = 0
+    while time.monotonic() < deadline:
+        pyatspi.Registry.pumpQueuedEvents()
+        matches = 0
+        for node in walk(pyatspi.Registry.getDesktop(0)):
+            try:
+                if (
+                    node.get_process_id() != TARGET_PID
+                    or node.getRoleName() != "list box"
+                    or not visible(node)
+                ):
+                    continue
+                observed = sum(
+                    1
+                    for child in walk(node)
+                    if child is not node and child.getRoleName() == "list item"
+                )
+                if observed == expected_items:
+                    matches += 1
+            except Exception:
+                continue
+        if matches == 1:
+            return
+        if matches > 1:
+            raise RuntimeError(f"AT-SPI exposed ambiguous dropdown popups: {name}")
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"AT-SPI dropdown popup exposed {observed} items, "
+        f"expected {expected_items}: {name}"
+    )
 
 
 def screenshot(root: pathlib.Path, label: str) -> None:
@@ -610,12 +733,12 @@ class Driver:
             find_named("nvpn-exit-dns-mode")
 
         open_dns()
-        select_index(
+        select_dns_index(
             "nvpn-exit-dns-mode",
             mode_indexes[self.args.dns_mode],
         )
         if self.args.dns_mode == "encrypted":
-            select_index(
+            select_dns_index(
                 "nvpn-exit-dns-provider",
                 provider_indexes[self.args.dns_provider],
             )
@@ -640,25 +763,26 @@ class Driver:
 
         open_dns()
         if (
-            selected_index("nvpn-exit-dns-mode")
+            selected_dns_index("nvpn-exit-dns-mode")
             != mode_indexes[self.args.dns_mode]
         ):
             raise RuntimeError("relaunch changed the saved DNS mode")
         if self.args.dns_mode == "encrypted":
             if (
-                selected_index("nvpn-exit-dns-provider")
+                selected_dns_index("nvpn-exit-dns-provider")
                 != provider_indexes[self.args.dns_provider]
             ):
                 raise RuntimeError("relaunch changed the saved DNS provider")
             if self.args.dns_provider == "custom":
-                if (
-                    read_text("nvpn-exit-dns-custom-url")
-                    != self.args.dns_custom_url
-                    or read_text("nvpn-exit-dns-bootstrap-ips")
-                    != self.args.dns_bootstrap_ips
-                ):
+                observed_url = read_text("nvpn-exit-dns-custom-url")
+                observed_bootstrap = read_text("nvpn-exit-dns-bootstrap-ips")
+                if observed_url != self.args.dns_custom_url or canonical_ip_csv(
+                    observed_bootstrap
+                ) != canonical_ip_csv(self.args.dns_bootstrap_ips):
                     raise RuntimeError(
-                        "relaunch changed the custom DoH UI fields"
+                        "relaunch changed the custom DoH UI fields: "
+                        f"url={observed_url!r}, "
+                        f"bootstrap={observed_bootstrap!r}"
                     )
         elif self.args.dns_mode == "through_exit":
             if (

@@ -96,11 +96,55 @@ if "set_dropdown_accessible_label" in source:
 for required in (
     'name.startswith("nvpn-exit-dns-")',
     "node.get_accessible_id() == name",
+    "ancestor_with_accessible_id(candidate, name)",
+    '"nvpn-exit-dns-mode": (',
+    '"Automatic (recommended)"',
+    '"Encrypted DNS"',
+    '"DNS through exit"',
+    '"nvpn-exit-dns-provider": (',
+    '"Cloudflare"',
+    '"Quad9"',
+    '"Custom DoH"',
+    "def select_dns_index(name: str, index: int)",
+    "def selected_dns_index(",
+    "labels = DNS_DROPDOWN_LABELS[name]",
+    "selected_dns_index(name, expected=index)",
+    "canonical_ip_csv(",
+    "observed_bootstrap",
+    "self.args.dns_bootstrap_ips",
+    "wait_dropdown_expanded(name, False)",
+    "wait_dropdown_expanded(name, True)",
+    "pyatspi.STATE_EXPANDED",
+    "wait_dropdown_popup_ready(name)",
+    "expected_items = len(DNS_DROPDOWN_LABELS[name])",
+    'node.getRoleName() != "list box"',
 ):
     if required not in driver:
         raise SystemExit(
             "Linux Exit DNS AT-SPI driver does not match exact stable "
             f"accessible IDs: {required}"
+        )
+
+for forbidden in ("doAction(", "grabFocus(", "querySelection(", "selectChild("):
+    if forbidden in driver:
+        raise SystemExit(
+            f"Linux Exit DNS driver retains a fallback path: {forbidden}"
+        )
+PY
+
+python3 - "$ROOT/scripts/macos-exit-dns-ax.swift" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for required in (
+    "func canonicalCSV(_ value: String) -> String",
+    "canonicalCSV(observedBootstrap) == canonicalCSV(bootstrapIPs)",
+    'values["bootstrapIps"] = bootstrapIPs',
+):
+    if required not in source:
+        raise SystemExit(
+            f"macOS Exit DNS driver lacks canonical CSV readback: {required}"
         )
 PY
 

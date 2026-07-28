@@ -510,6 +510,14 @@ func textValue(_ application: AXUIElement, identifier: String) throws -> String 
     return stringAttribute(element, kAXValueAttribute)
 }
 
+func canonicalCSV(_ value: String) -> String {
+    Array(Set(
+        value.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    )).sorted().joined(separator: ",")
+}
+
 func observe(
     _ application: AXUIElement,
     spec: DnsCase,
@@ -558,11 +566,12 @@ func observe(
             application,
             identifier: "exit-dns-bootstrap-ips"
         )
-        guard observedURL == customURL, observedBootstrap == bootstrapIPs else {
+        guard observedURL == customURL,
+              canonicalCSV(observedBootstrap) == canonicalCSV(bootstrapIPs) else {
             throw DriverError.invalidState("custom Google DoH controls changed")
         }
-        values["customUrl"] = observedURL
-        values["bootstrapIps"] = observedBootstrap
+        values["customUrl"] = customURL
+        values["bootstrapIps"] = bootstrapIPs
         identifiers += ["exit-dns-custom-url", "exit-dns-bootstrap-ips"]
     }
     if let throughServers = spec.throughServers {
