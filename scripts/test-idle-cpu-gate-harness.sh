@@ -295,6 +295,16 @@ for forbidden in ("cargo build", "windows-build.ps1"):
 PY
 grep -Fq 'NVPN_WINDOWS_SKIP_GIT_SYNC' "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh" \
   || fail "Windows VM app smoke cannot reuse a release-gate candidate sync"
+for exact_fips_token in \
+  'NVPN_FIPS_REPO_PATH' \
+  'fipsGitSha' \
+  'fipsGitTree' \
+  'version --verbose' \
+  'Windows installer payload does not embed the exact FIPS revision'
+do
+  grep -Fq "$exact_fips_token" "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh" \
+    || fail "Windows VM app smoke lacks exact FIPS provenance: $exact_fips_token"
+done
 grep -Fq 'NVPN_WINDOWS_SKIP_GIT_SYNC' "$ROOT_DIR/scripts/windows-vm-wireguard-exit-e2e.sh" \
   || fail "Windows WG smoke cannot reuse a release-gate candidate sync"
 if [[ "$(grep -Fc 'if (\$LASTEXITCODE -ne 0)' "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh")" -lt 3 ]]; then

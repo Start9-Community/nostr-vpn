@@ -4,6 +4,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/release_common.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/mobile_env.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+load_release_env "$ROOT"
+load_mobile_env "$ROOT"
+release_join_require_clean_fips
+release_join_assert_fips_unchanged
+EXPECTED_FIPS_SHA="$RELEASE_JOIN_FIPS_SHA"
+EXPECTED_FIPS_TREE="$RELEASE_JOIN_FIPS_TREE"
+EXPECTED_FIPS_VERSION="$RELEASE_JOIN_FIPS_VERSION"
 SSH_HOST="${NVPN_WINDOWS_SSH_HOST:-${1:-win11-dev}}"
 SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
@@ -77,6 +90,16 @@ New-Item -ItemType Directory -Force -Path '$GUEST_ARTIFACT_ROOT' | Out-Null
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '$REMOTE_GATE_DIR'
 New-Item -ItemType Directory -Force -Path '$REMOTE_GATE_DIR' | Out-Null
 if ('${NVPN_FIPS_REPO_PATH:-}' -ne '') { \$env:NVPN_FIPS_REPO_PATH = '$GUEST_FIPS_REPO' }
+\$fipsHead = (git -C '$GUEST_FIPS_REPO' rev-parse HEAD).Trim()
+\$fipsTree = (git -C '$GUEST_FIPS_REPO' rev-parse 'HEAD^{tree}').Trim()
+\$fipsStatus = (git -C '$GUEST_FIPS_REPO' status --porcelain --untracked-files=all | Out-String).Trim()
+if (
+  \$fipsHead -ne '$EXPECTED_FIPS_SHA' -or
+  \$fipsTree -ne '$EXPECTED_FIPS_TREE' -or
+  \$fipsStatus
+) {
+  throw 'Windows installer build FIPS checkout differs from the exact release candidate'
+}
 \$env:CARGO_TARGET_DIR = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-smoke-cargo'
 \$targetPrefix = [IO.Path]::GetFullPath(\$env:CARGO_TARGET_DIR).TrimEnd([char]92) + [char]92
 Get-CimInstance Win32_Process -Filter \"Name = 'nvpn.exe'\" |
@@ -93,6 +116,13 @@ if (!(Test-Path \$installer)) { throw ('Windows installer was not created: {0}' 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-installer-smoke.ps1 -InstallerPath \$installer -ArtifactRoot (Join-Path '$REMOTE_GATE_DIR' 'smoke')
 if (\$LASTEXITCODE -ne 0) { throw ('windows-installer-smoke.ps1 failed with exit code {0}' -f \$LASTEXITCODE) }
 \$candidate = Join-Path \$env:CARGO_TARGET_DIR 'release\\nvpn.exe'
+\$embeddedFips = (& \$candidate version --verbose | Out-String)
+if (\$LASTEXITCODE -ne 0) {
+  throw ('nvpn version --verbose failed with exit code {0}' -f \$LASTEXITCODE)
+}
+if (!\$embeddedFips.Contains('(rev ${EXPECTED_FIPS_SHA:0:10})')) {
+  throw 'Windows installer payload does not embed the exact FIPS revision'
+}
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-daemon-idle-cpu.ps1 -Bin \$candidate -ArtifactRoot (Join-Path '$REMOTE_GATE_DIR' 'daemon-idle')
 if (\$LASTEXITCODE -ne 0) { throw ('windows-daemon-idle-cpu.ps1 failed with exit code {0}' -f \$LASTEXITCODE) }
 \$smokePath = Join-Path '$REMOTE_GATE_DIR' 'smoke\\windows-app-launch-smoke.json'
@@ -125,6 +155,9 @@ foreach (\$entry in \$payloadFiles.GetEnumerator()) {
   artifactType = 'exact installed Windows Release setup'
   appGitSha = \$head
   appGitTree = \$tree
+  fipsGitSha = \$fipsHead
+  fipsGitTree = \$fipsTree
+  fipsVersion = '$EXPECTED_FIPS_VERSION'
   tag = '$SMOKE_TAG'
   installerName = (Split-Path -Leaf \$installer)
   installerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$installer).Hash.ToLowerInvariant()
@@ -154,6 +187,9 @@ python3 - \
   "$LOCAL_GATE_DIR/nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe" \
   "$(git -C "$ROOT" rev-parse HEAD)" \
   "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "$EXPECTED_FIPS_SHA" \
+  "$EXPECTED_FIPS_TREE" \
+  "$EXPECTED_FIPS_VERSION" \
   "$SMOKE_TAG" <<'PY'
 import hashlib
 import json
@@ -163,7 +199,7 @@ import sys
 
 receipt_path = pathlib.Path(sys.argv[1])
 installer_path = pathlib.Path(sys.argv[2])
-commit, tree, tag = sys.argv[3:]
+commit, tree, fips_commit, fips_tree, fips_version, tag = sys.argv[3:]
 receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
 digest = hashlib.sha256(installer_path.read_bytes()).hexdigest()
 if not (
@@ -172,6 +208,9 @@ if not (
     and receipt.get("artifactType") == "exact installed Windows Release setup"
     and receipt.get("appGitSha") == commit
     and receipt.get("appGitTree") == tree
+    and receipt.get("fipsGitSha") == fips_commit
+    and receipt.get("fipsGitTree") == fips_tree
+    and receipt.get("fipsVersion") == fips_version
     and receipt.get("tag") == tag
     and receipt.get("installerName") == installer_path.name
     and receipt.get("installerSha256") == digest
@@ -195,4 +234,5 @@ for name, value in payloads.items():
         raise SystemExit(f"Windows installer receipt has invalid {name} payload")
 PY
 
+release_join_assert_fips_unchanged
 echo "WINDOWS_VM_APP_LAUNCH_SMOKE_OK"
