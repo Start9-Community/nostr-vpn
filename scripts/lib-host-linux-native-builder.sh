@@ -62,7 +62,10 @@ host_linux_native_builder_cleanup_remote() {
   local remote_dir="${NVPN_HOST_LINUX_NATIVE_REMOTE_DIR:-}"
   [[ -n "$remote_dir" ]] || return 0
   [[ "$remote_dir" \
-    =~ ^/tmp/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] || {
+    =~ ^/[A-Za-z0-9._/-]+/\.cache/nostr-vpn-linux-release-builder/runs/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ \
+    && "$remote_dir" != *"/../"* \
+    && "$remote_dir" != *"/./"* \
+    && "$remote_dir" != *"//"* ]] || {
     echo "Refusing unsafe remote native builder cleanup" >&2
     return 1
   }
@@ -72,8 +75,11 @@ host_linux_native_builder_cleanup_remote() {
   "${NVPN_HOST_LINUX_NATIVE_SSH[@]}" bash -s -- "$remote_dir" <<'REMOTE'
 set -euo pipefail
 root="$1"
-[[ "$root" =~ ^/tmp/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] \
-  || exit 2
+runs="$HOME/.cache/nostr-vpn-linux-release-builder/runs"
+[[ -d "$runs" && -O "$runs" && ! -L "$runs" ]] || exit 2
+[[ "$root" == "$runs"/nvpn-linux-native-builder.* \
+  && "${root##*/}" =~ ^nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] \
+    || exit 2
 if [[ -d "$root" && ! -L "$root" ]]; then
   find "$root" -xdev -depth -mindepth 1 -delete
   rmdir "$root"
@@ -190,10 +196,24 @@ host_linux_native_builder_run() {
 
   remote_dir="$(
     "${NVPN_HOST_LINUX_NATIVE_SSH[@]}" \
-      'umask 077; mktemp -d /tmp/nvpn-linux-native-builder.XXXXXX'
+      'set -euo pipefail
+umask 077
+cache="$HOME/.cache"
+state="$cache/nostr-vpn-linux-release-builder"
+runs="$state/runs"
+[[ -d "$cache" && -O "$cache" && ! -L "$cache" ]]
+if [[ ! -e "$state" && ! -L "$state" ]]; then mkdir -m 0700 "$state"; fi
+[[ -d "$state" && -O "$state" && ! -L "$state" ]]
+if [[ ! -e "$runs" && ! -L "$runs" ]]; then mkdir -m 0700 "$runs"; fi
+[[ -d "$runs" && -O "$runs" && ! -L "$runs" ]]
+chmod 0700 "$state" "$runs"
+mktemp -d "$runs/nvpn-linux-native-builder.XXXXXX"'
   )"
   [[ "$remote_dir" \
-    =~ ^/tmp/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] || {
+    =~ ^/[A-Za-z0-9._/-]+/\.cache/nostr-vpn-linux-release-builder/runs/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ \
+    && "$remote_dir" != *"/../"* \
+    && "$remote_dir" != *"/./"* \
+    && "$remote_dir" != *"//"* ]] || {
     echo "Remote native Linux builder returned an unsafe root" >&2
     return 2
   }
@@ -217,8 +237,11 @@ set -euo pipefail
 root="$1"
 expected_driver_sha="$2"
 shift 2
-[[ "$root" =~ ^/tmp/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] \
-  || exit 2
+runs="$HOME/.cache/nostr-vpn-linux-release-builder/runs"
+[[ -d "$runs" && -O "$runs" && ! -L "$runs" ]] || exit 2
+[[ "$root" == "$runs"/nvpn-linux-native-builder.* \
+  && "${root##*/}" =~ ^nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] \
+    || exit 2
 driver="$root/remote-driver"
 [[ -f "$driver" && -O "$driver" && ! -L "$driver" ]]
 chmod 0500 "$driver"

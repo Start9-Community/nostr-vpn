@@ -27,8 +27,13 @@ SOURCE_DATE_EPOCH="${15}"
 EXPECTED_DOCKERFILE_SHA256="${16}"
 EXPECTED_PAYLOAD_SHA256="${17}"
 
-[[ "$REMOTE_ROOT" \
-  =~ ^/tmp/nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] || {
+EXPECTED_RUNS_ROOT="$HOME/.cache/nostr-vpn-linux-release-builder/runs"
+[[ -d "$EXPECTED_RUNS_ROOT" \
+  && -O "$EXPECTED_RUNS_ROOT" \
+  && ! -L "$EXPECTED_RUNS_ROOT" \
+  && "$REMOTE_ROOT" == "$EXPECTED_RUNS_ROOT"/nvpn-linux-native-builder.* \
+  && "${REMOTE_ROOT##*/}" \
+    =~ ^nvpn-linux-native-builder\.[A-Za-z0-9]{6}$ ]] || {
   echo "remote native builder received an unsafe root" >&2
   exit 2
 }

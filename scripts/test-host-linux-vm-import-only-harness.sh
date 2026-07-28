@@ -223,7 +223,8 @@ require_tokens "$NATIVE_BUILDER_LIB" "fail-closed Mac orchestration" \
   'git -C "$temp_dir/source/app" bundle create "$app_bundle" HEAD' \
   'git -C "$temp_dir/source/fips" bundle create "$fips_bundle" HEAD' \
   'git bundle verify "$app_bundle"' \
-  'mktemp -d /tmp/nvpn-linux-native-builder.XXXXXX' \
+  'mktemp -d "$runs/nvpn-linux-native-builder.XXXXXX"' \
+  '.cache/nostr-vpn-linux-release-builder/runs' \
   'sha256sum "$driver"' \
   'host_linux_native_builder_extract_output' \
   'member.issym()' \
