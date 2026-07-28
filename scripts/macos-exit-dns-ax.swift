@@ -253,34 +253,33 @@ func pressAndWaitForSaveCompletion(
     }
     try pressElement(save, label: identifier)
 
-    let inFlightDeadline = Date().addingTimeInterval(5)
+    let inFlightProbeDeadline = Date().addingTimeInterval(5)
     var observedInFlight = false
     repeat {
-        if let modalText = blockingModalText(application) {
-            throw DriverError.invalidState(
-                "Exit DNS save was blocked: \(modalText)"
-            )
-        }
         if let current = findNow(application, identifier: identifier),
            boolAttribute(current, kAXEnabledAttribute) == false {
             observedInFlight = true
             break
         }
         Thread.sleep(forTimeInterval: 0.02)
-    } while Date() < inFlightDeadline
-    guard observedInFlight else {
-        throw DriverError.invalidState(
-            "Exit DNS save never entered the in-flight state"
-        )
-    }
-
-    let completedDeadline = Date().addingTimeInterval(75)
-    repeat {
+    } while Date() < inFlightProbeDeadline
+    if !observedInFlight {
+        guard let current = findNow(application, identifier: identifier),
+              boolAttribute(current, kAXEnabledAttribute) == true else {
+            throw DriverError.invalidState(
+                "Exit DNS save was not actionable after the completion probe"
+            )
+        }
         if let modalText = blockingModalText(application) {
             throw DriverError.invalidState(
                 "Exit DNS save failed: \(modalText)"
             )
         }
+        return
+    }
+
+    let completedDeadline = Date().addingTimeInterval(75)
+    repeat {
         if let current = findNow(application, identifier: identifier),
            boolAttribute(current, kAXEnabledAttribute) == true {
             Thread.sleep(forTimeInterval: 0.15)
