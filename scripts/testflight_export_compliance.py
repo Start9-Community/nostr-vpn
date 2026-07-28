@@ -158,6 +158,7 @@ def select_exact_app(
     expected = str(bundle_id).strip()
     if not expected:
         raise ValueError("bundle_id is required")
+    matches = []
     for app in apps:
         attributes = app.get("attributes")
         if (
@@ -165,8 +166,12 @@ def select_exact_app(
             and isinstance(attributes, Mapping)
             and attributes.get("bundleId") == expected
         ):
-            return app
-    return None
+            matches.append(app)
+    if len(matches) > 1:
+        raise ExportComplianceError(
+            f"App Store Connect returned multiple exact apps for {expected}"
+        )
+    return matches[0] if matches else None
 
 
 def select_exact_build(
@@ -178,6 +183,7 @@ def select_exact_build(
     expected = str(build_number).strip()
     if not expected:
         raise ValueError("build_number is required")
+    matches = []
     for build in builds:
         attributes = build.get("attributes")
         if (
@@ -185,8 +191,52 @@ def select_exact_build(
             and isinstance(attributes, Mapping)
             and str(attributes.get("version", "")).strip() == expected
         ):
-            return build
-    return None
+            matches.append(build)
+    if len(matches) > 1:
+        raise ExportComplianceError(
+            f"App Store Connect returned multiple exact builds for {expected}"
+        )
+    return matches[0] if matches else None
+
+
+def select_unique_build_for_marketing_version(
+    builds: Iterable[Mapping[str, object]],
+    build_number: str,
+    marketing_version: str,
+    live_marketing_version: Callable[[str], str | None],
+) -> Mapping[str, object] | None:
+    """Bind one build number to its live pre-release marketing version."""
+
+    expected_build = str(build_number).strip()
+    expected_marketing = str(marketing_version).strip()
+    if not expected_build:
+        raise ValueError("build_number is required")
+    if not expected_marketing:
+        raise ValueError("marketing_version is required")
+
+    matches = []
+    for build in builds:
+        attributes = build.get("attributes")
+        build_id = strict_resource_id(build, "builds")
+        if (
+            build_id is None
+            or not isinstance(attributes, Mapping)
+            or str(attributes.get("version", "")).strip() != expected_build
+        ):
+            continue
+        observed_marketing = live_marketing_version(build_id)
+        if observed_marketing != expected_marketing:
+            continue
+        selected = dict(build)
+        selected["_nvpnMarketingVersion"] = observed_marketing
+        matches.append(selected)
+
+    if len(matches) > 1:
+        raise ExportComplianceError(
+            "App Store Connect returned multiple exact builds for "
+            f"{expected_marketing} ({expected_build})"
+        )
+    return matches[0] if matches else None
 
 
 def declaration_answers_policy(declaration: Mapping[str, object]) -> bool:

@@ -8,12 +8,12 @@ import {
 import { join } from 'node:path'
 
 import {
-  captureIosPendingUploadAuthorization,
+  captureIosUploadIntent,
   finalizeIosUploadReceipt,
   reconcileIosUploadReceipts,
-  removeIosPendingUploadReceipt,
   validateIosUploadReceipt,
   writeAcceptedIosPendingUpload,
+  writeIosUploadIntent,
 } from './ios-upload-receipt.mjs'
 import {
   semverFromTag,
@@ -185,6 +185,7 @@ export function preflightIosPublication({
   stagedManifest,
   mutationEnv,
   dryRun = false,
+  validatePublication,
 }) {
   const frozen = validateFrozenIosPublication({
     repoRoot,
@@ -228,6 +229,7 @@ export function preflightIosPublication({
     stagedManifest,
     mutationEnv,
     testflight,
+    validatePublication,
   })
   return {
     ...frozen,
@@ -246,8 +248,9 @@ export function publishExactIosDistribution({
   preflight,
   beforeMutation = () => {},
   dryRun = false,
+  validatePublication,
 }) {
-  validateFrozenIosPublication({ repoRoot, stagedManifest })
+  const frozen = validateFrozenIosPublication({ repoRoot, stagedManifest })
   if (dryRun) {
     return { submitted: false, verified: true }
   }
@@ -260,49 +263,64 @@ export function publishExactIosDistribution({
     throw new Error('iOS publication preflight does not bind exact staging.')
   }
 
-  let pending = preflight.pendingReceipt
   let uploaded = preflight.testflight
-  if (preflight.uploadAction === 'cleanup-pending-use-final') {
-    const retry = reconcileIosUploadReceipts({
+  let receipts = {
+    finalReceipt: preflight.finalReceipt,
+    intentReceipt: preflight.intentReceipt,
+    pendingReceipt: preflight.pendingReceipt,
+    uploadAction: preflight.uploadAction,
+  }
+  const reconcile = () =>
+    reconcileIosUploadReceipts({
       repoRoot,
-      frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
+      frozen,
       stagedManifest,
       mutationEnv,
       testflight: uploaded,
+      validatePublication,
     })
-    if (
-      retry.uploadAction !== 'cleanup-pending-use-final'
-      || !retry.pendingReceipt
-    ) {
-      throw new Error(
-        'Matching iOS upload receipt pair changed before cleanup.',
-      )
-    }
-    removeIosPendingUploadReceipt(retry.pendingReceipt)
-    pending = null
-  }
-  if (preflight.uploadAction === 'upload') {
-    const authorization = captureIosPendingUploadAuthorization({
+
+  if (receipts.uploadAction === 'create-intent') {
+    const authorization = captureIosUploadIntent({
       repoRoot,
-      frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
+      frozen,
       stagedManifest,
       mutationEnv,
+      validatePublication,
     })
     beforeMutation()
-    run(
-      'bash',
-      [join(repoRoot, 'scripts', 'ios-build'), 'ios-upload'],
-      { cwd: repoRoot, env: mutationEnv },
-    )
-    pending = writeAcceptedIosPendingUpload({
+    const intent = writeIosUploadIntent({
       repoRoot,
+      frozen,
+      stagedManifest,
       mutationEnv,
-      authorization,
+      intent: authorization,
+      validatePublication,
     })
+    if (intent.created) {
+      run(
+        'bash',
+        [join(repoRoot, 'scripts', 'ios-build'), 'ios-upload'],
+        { cwd: repoRoot, env: mutationEnv },
+      )
+      writeAcceptedIosPendingUpload({
+        repoRoot,
+        frozen,
+        stagedManifest,
+        mutationEnv,
+        intentReceipt: intent,
+        acceptanceSource: 'transporter-returned',
+        validatePublication,
+      })
+    } else {
+      uploaded = testflightPreflight({ repoRoot, mutationEnv })
+    }
+    receipts = reconcile()
   }
+
   if (
-    preflight.uploadAction === 'upload'
-    || preflight.uploadAction === 'wait-pending'
+    receipts.uploadAction === 'wait-intent'
+    || receipts.uploadAction === 'wait-pending'
   ) {
     run(
       'bash',
@@ -310,35 +328,51 @@ export function publishExactIosDistribution({
       { cwd: repoRoot, env: mutationEnv },
     )
     uploaded = testflightPreflight({ repoRoot, mutationEnv })
+    receipts = reconcile()
   }
-  if (
-    preflight.uploadAction !== 'use-final'
-    && preflight.uploadAction !== 'cleanup-pending-use-final'
-  ) {
-    if (!pending) {
-      throw new Error(
-        'Visible App Store Connect build has no accepted upload receipt to finalize.',
-      )
-    }
-    finalizeIosUploadReceipt({
+
+  if (receipts.uploadAction === 'recover-intent') {
+    writeAcceptedIosPendingUpload({
       repoRoot,
-      mutationEnv,
-      pendingReceipt: pending,
-      testflight: uploaded,
-    })
-    validateIosUploadReceipt({
-      repoRoot,
-      frozen: validateFrozenIosPublication({ repoRoot, stagedManifest }),
+      frozen,
       stagedManifest,
       mutationEnv,
-      testflight: uploaded,
+      intentReceipt: receipts.intentReceipt,
+      acceptanceSource: 'app-store-connect-visible',
+      validatePublication,
     })
-    removeIosPendingUploadReceipt(pending)
+    receipts = reconcile()
   }
+  if (receipts.uploadAction === 'finalize-pending') {
+    finalizeIosUploadReceipt({
+      repoRoot,
+      frozen,
+      stagedManifest,
+      mutationEnv,
+      pendingReceipt: receipts.pendingReceipt,
+      testflight: uploaded,
+      validatePublication,
+    })
+    receipts = reconcile()
+  }
+  if (receipts.uploadAction !== 'use-final') {
+    throw new Error(
+      'iOS upload journal did not reconcile to one exact VALID ASC build.',
+    )
+  }
+
   for (const [script, action] of [
     ['testflight-internal', 'put'],
     ['testflight-internal', 'public'],
   ]) {
+    validateIosUploadReceipt({
+      repoRoot,
+      frozen,
+      stagedManifest,
+      mutationEnv,
+      testflight: uploaded,
+      validatePublication,
+    })
     beforeMutation()
     run(
       'bash',

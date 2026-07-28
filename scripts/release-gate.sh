@@ -319,6 +319,7 @@ run_release_gate_static_preflight() {
   npm run check
   npm run build
   node --test \
+    scripts/ios-upload-journal.test.mjs \
     scripts/local-release.test.mjs \
     scripts/release-artifact-provenance-lib.test.mjs \
     scripts/release-publication-bundle.test.mjs \

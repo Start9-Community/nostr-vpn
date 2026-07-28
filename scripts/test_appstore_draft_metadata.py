@@ -276,6 +276,13 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
 
         self.assertIn("testflight_review_notes(", shipper)
         self.assertIn("require_testflight_external_review_material(", shipper)
+        self.assertIn(
+            "select_unique_build_for_marketing_version(",
+            shipper,
+        )
+        self.assertIn("builds/{build_id}/preReleaseVersion", shipper)
+        self.assertIn('"version": live_marketing_version', shipper)
+        self.assertNotIn('"version": VERSION_NAME,', shipper)
         proof = shipper.index("encryption_compliance = ensure_export_compliance(build)")
         gate = shipper.index(
             "require_review_submission_encryption_compliance(",
@@ -896,6 +903,61 @@ class TestFlightExportComplianceTests(unittest.TestCase):
         self.assertIsNone(
             export_compliance.select_exact_build([malformed], "4001007")
         )
+        duplicate = dict(exact)
+        duplicate["id"] = "duplicate-build"
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "multiple exact builds",
+        ):
+            export_compliance.select_exact_build(
+                [exact, duplicate],
+                "4001007",
+            )
+
+    def test_live_marketing_version_selects_one_exact_build(self):
+        older = self._build(True)
+        older["id"] = "older-build"
+        older["attributes"]["version"] = "4001007"
+        exact = self._build(True)
+        exact["id"] = "exact-build"
+        exact["attributes"]["version"] = "4001007"
+        live_versions = {
+            "older-build": "4.1.4",
+            "exact-build": "4.1.5",
+        }
+
+        selected = (
+            export_compliance.select_unique_build_for_marketing_version(
+                [older, exact],
+                "4001007",
+                "4.1.5",
+                lambda build_id: live_versions[build_id],
+            )
+        )
+
+        self.assertEqual(selected["id"], "exact-build")
+        self.assertEqual(selected["_nvpnMarketingVersion"], "4.1.5")
+        self.assertIsNone(
+            export_compliance.select_unique_build_for_marketing_version(
+                [older],
+                "4001007",
+                "4.1.5",
+                lambda build_id: live_versions[build_id],
+            )
+        )
+        duplicate = dict(exact)
+        duplicate["id"] = "duplicate-build"
+        live_versions["duplicate-build"] = "4.1.5"
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "multiple exact builds",
+        ):
+            export_compliance.select_unique_build_for_marketing_version(
+                [exact, duplicate],
+                "4001007",
+                "4.1.5",
+                lambda build_id: live_versions[build_id],
+            )
         malformed = dict(exact)
         malformed["id"] = 123
         self.assertIsNone(
@@ -932,6 +994,16 @@ class TestFlightExportComplianceTests(unittest.TestCase):
                 [malformed], "fi.siriusbusiness.nvpn"
             )
         )
+        duplicate = dict(exact)
+        duplicate["id"] = "duplicate-app"
+        with self.assertRaisesRegex(
+            export_compliance.ExportComplianceError,
+            "multiple exact apps",
+        ):
+            export_compliance.select_exact_app(
+                [exact, duplicate],
+                "fi.siriusbusiness.nvpn",
+            )
 
     def test_compliance_rejects_build_resource_without_jsonapi_type(self):
         malformed = self._build(True)

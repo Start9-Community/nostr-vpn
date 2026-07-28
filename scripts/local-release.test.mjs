@@ -59,6 +59,7 @@ import {
   validateFrozenIosPublication,
 } from './ios-release-publication.mjs'
 import {
+  captureIosUploadIntent,
   finalizeIosUploadReceipt,
   planIosUploadReconciliation,
   reconcileIosUploadReceipts,
@@ -66,6 +67,7 @@ import {
   validateIosPendingUploadReceipt,
   validateIosUploadReceipt,
   writeAcceptedIosPendingUpload,
+  writeIosUploadIntent,
 } from './ios-upload-receipt.mjs'
 import {
   assertRealStageDirectory,
@@ -652,10 +654,22 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     NVPN_FLEET_INVENTORY_PATH: currentPaths.inventory,
     NVPN_FLEET_PROOF_PATH: currentPaths.proof,
   }
+  const historicalMutationEnv = {
+    ...mutationEnv,
+    NVPN_FLEET_RESULT_PATH: historicalPaths.result,
+    NVPN_FLEET_MANIFEST_PATH: historicalPaths.manifest,
+    NVPN_FLEET_INVENTORY_PATH: historicalPaths.inventory,
+    NVPN_FLEET_PROOF_PATH: historicalPaths.proof,
+  }
+  const now = Math.floor(Date.now() / 1000)
   const testflight = {
     buildPresent: true,
     buildId: 'asc-build-id',
-    uploadedDate: '2026-07-27T10:00:00Z',
+    uploadedDate: new Date(now * 1_000).toISOString(),
+    processingState: 'VALID',
+    bundleId: frozen.gate.bundle_id,
+    version: frozen.gate.marketing_version,
+    buildNumber: frozen.gate.build_number,
   }
   assert.throws(
     () =>
@@ -673,7 +687,7 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
     size: statSync(path).size,
   })
-  const authorizedAt = Math.floor(Date.now() / 1000) - 10
+  const authorizedAt = now - 10
   writeFileSync(
     historicalPaths.proof,
     `${JSON.stringify({ validatedAt: authorizedAt })}\n`,
@@ -695,31 +709,29 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     validations.push(value)
     return { targetCount: 1, validatedAt: authorizedAt }
   }
-  const pendingReceipt = {
-    schema: 1,
-    kind: 'nvpn-ios-app-store-pending-upload-v1',
-    appGitSha: commit,
-    appGitTree: tree,
-    releaseTag: 'v4.1.5',
-    stageRelease: binding(currentPaths.stage),
-    ipa: binding(frozen.ipaPath),
-    fleetAuthorization,
-    transporterAcceptedAt: authorizedAt + 1,
-    ipaSha256: frozen.gate.ipa_sha256,
-    ipaSize: frozen.gate.ipa_size,
-    bundleId: frozen.gate.bundle_id,
-    version: frozen.gate.marketing_version,
-    buildNumber: frozen.gate.build_number,
-  }
-  const {
-    transporterAcceptedAt,
-    ...authorization
-  } = pendingReceipt
+  const authorization = captureIosUploadIntent({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv: historicalMutationEnv,
+    validatePublication,
+  })
+  const intent = writeIosUploadIntent({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv: historicalMutationEnv,
+    intent: authorization,
+    validatePublication,
+  })
   const accepted = writeAcceptedIosPendingUpload({
     repoRoot,
-    mutationEnv,
-    authorization,
-    transporterAcceptedAt,
+    frozen,
+    stagedManifest,
+    mutationEnv: historicalMutationEnv,
+    intentReceipt: intent,
+    acceptanceSource: 'transporter-returned',
+    validatePublication,
   })
   assert.equal(statSync(accepted.path).mode & 0o777, 0o600)
   assert.deepEqual(
@@ -730,18 +742,20 @@ test('existing ASC build replays its original fleet upload authorization', () =>
       mutationEnv,
       validatePublication,
     }).value,
-    pendingReceipt,
+    accepted.value,
   )
   const finalized = finalizeIosUploadReceipt({
     repoRoot,
-    mutationEnv,
+    frozen,
+    stagedManifest,
+    mutationEnv: historicalMutationEnv,
     pendingReceipt: accepted,
     testflight,
-    createdAt: authorizedAt + 2,
+    validatePublication,
   })
-  assert.equal(finalized.path, uploadReceiptPath)
+  assert.equal(finalized.path, realpathSync(uploadReceiptPath))
   assert.equal(statSync(finalized.path).mode & 0o777, 0o600)
-  assert.equal(
+  assert.deepEqual(
     validateIosUploadReceipt({
       repoRoot,
       frozen,
@@ -749,8 +763,8 @@ test('existing ASC build replays its original fleet upload authorization', () =>
       mutationEnv,
       testflight,
       validatePublication,
-    }),
-    uploadReceiptPath,
+    }).value,
+    finalized.value,
   )
   const matchingPair = reconcileIosUploadReceipts({
     repoRoot,
@@ -762,25 +776,34 @@ test('existing ASC build replays its original fleet upload authorization', () =>
   })
   assert.equal(
     matchingPair.uploadAction,
-    'cleanup-pending-use-final',
+    'use-final',
   )
-  assert.equal(matchingPair.finalReceipt, uploadReceiptPath)
-  assert.deepEqual(matchingPair.pendingReceipt.value, pendingReceipt)
-  assert.equal(validations.length, 4)
   assert.equal(
-    validations[1].options.fleetResult,
+    matchingPair.finalReceipt.path,
+    realpathSync(uploadReceiptPath),
+  )
+  assert.deepEqual(matchingPair.pendingReceipt.value, accepted.value)
+  assert.ok(validations.length >= 4)
+  const historicalValidation = validations.find(
+    (validation) =>
+      validation.options.fleetResult
+      === realpathSync(historicalPaths.result),
+  )
+  assert.ok(historicalValidation)
+  assert.equal(
+    historicalValidation.options.fleetResult,
     realpathSync(historicalPaths.result),
   )
   assert.notEqual(
-    validations[1].options.fleetResult,
+    historicalValidation.options.fleetResult,
     realpathSync(currentPaths.result),
   )
   assert.equal(
-    validations[1].options.fleetProof,
+    historicalValidation.options.fleetProof,
     realpathSync(historicalPaths.proof),
   )
   assert.equal(
-    Object.hasOwn(validations[1], 'validationTimeSeconds'),
+    Object.hasOwn(historicalValidation, 'validationTimeSeconds'),
     false,
   )
   assert.throws(
@@ -858,8 +881,8 @@ test('existing ASC build replays its original fleet upload authorization', () =>
   )
 
   const tamperedPending = {
-    ...pendingReceipt,
-    transporterAcceptedAt: pendingReceipt.transporterAcceptedAt + 1,
+    ...accepted.value,
+    attemptId: '00000000-0000-4000-8000-000000000000',
   }
   writeFileSync(
     accepted.path,
@@ -875,16 +898,18 @@ test('existing ASC build replays its original fleet upload authorization', () =>
         testflight,
         validatePublication,
       }),
-    /pending and final iOS upload receipts differ/i,
+    /pending iOS upload receipt is invalid|binding/i,
   )
 })
 
 test('accepted pending iOS upload waits or finalizes without duplicate upload', () => {
+  const intent = { path: '/private/intent', value: {} }
   const pending = { path: '/private/pending', value: {} }
   assert.equal(
     planIosUploadReconciliation({
       buildPresent: false,
       finalReceipt: null,
+      intentReceipt: intent,
       pendingReceipt: pending,
     }),
     'wait-pending',
@@ -893,6 +918,7 @@ test('accepted pending iOS upload waits or finalizes without duplicate upload', 
     planIosUploadReconciliation({
       buildPresent: true,
       finalReceipt: null,
+      intentReceipt: intent,
       pendingReceipt: pending,
     }),
     'finalize-pending',
@@ -902,64 +928,63 @@ test('accepted pending iOS upload waits or finalizes without duplicate upload', 
       planIosUploadReconciliation({
         buildPresent: true,
         finalReceipt: null,
+        intentReceipt: null,
         pendingReceipt: null,
       }),
-    /no fleet-authorized exact upload receipt/i,
+    /orphan app store connect build/i,
   )
   assert.equal(
     planIosUploadReconciliation({
       buildPresent: true,
       finalReceipt: '/private/final',
+      intentReceipt: intent,
       pendingReceipt: pending,
-      matchingReceiptPair: true,
     }),
-    'cleanup-pending-use-final',
+    'use-final',
   )
   assert.throws(
     () =>
       planIosUploadReconciliation({
         buildPresent: true,
         finalReceipt: '/private/final',
-        pendingReceipt: pending,
+        intentReceipt: intent,
+        pendingReceipt: null,
       }),
-    /matching pair was not proven/i,
+    /without every predecessor/i,
   )
 
   const publisher = readFileSync(
     join(process.cwd(), 'scripts/ios-release-publication.mjs'),
     'utf8',
   )
-  const upload = publisher.indexOf("'ios-upload'")
+  const intentWrite = publisher.indexOf('writeIosUploadIntent({')
+  const upload = publisher.indexOf("'ios-upload'", intentWrite)
   const pendingWrite = publisher.indexOf(
     'writeAcceptedIosPendingUpload({',
     upload,
   )
-  const wait = publisher.indexOf("'wait'", pendingWrite)
-  assert.ok(upload >= 0 && pendingWrite > upload && wait > pendingWrite)
+  assert.ok(intentWrite >= 0 && upload > intentWrite && pendingWrite > upload)
   assert.match(
     publisher,
-    /preflight\.uploadAction === 'upload'[\s\S]*?ios-upload[\s\S]*?writeAcceptedIosPendingUpload/,
+    /if \(intent\.created\) \{[\s\S]*?ios-upload[\s\S]*?writeAcceptedIosPendingUpload/,
   )
   assert.match(
     publisher,
-    /captureIosPendingUploadAuthorization\(\{[\s\S]*?beforeMutation\(\)\s*run\([\s\S]*?'ios-upload'/,
+    /captureIosUploadIntent\(\{[\s\S]*?beforeMutation\(\)\s*const intent = writeIosUploadIntent\(/,
   )
   assert.match(
     publisher,
-    /preflight\.uploadAction === 'wait-pending'[\s\S]*?testflight-internal'\), 'wait'/,
+    /receipts\.uploadAction === 'wait-intent'[\s\S]*?receipts\.uploadAction === 'wait-pending'[\s\S]*?testflight-internal'\), 'wait'/,
   )
   assert.match(
     publisher,
-    /for \(const \[script, action\] of \[[\s\S]*?'put'[\s\S]*?'public'[\s\S]*?\]\) \{\s*beforeMutation\(\)\s*run\(/,
+    /for \(const \[script, action\] of \[[\s\S]*?'put'[\s\S]*?'public'[\s\S]*?\]\) \{[\s\S]*?validateIosUploadReceipt\([\s\S]*?beforeMutation\(\)\s*run\(/,
   )
   assert.match(
     publisher,
     /!submittedStates\.has[\s\S]*?\) \{\s*beforeMutation\(\)\s*run\([\s\S]*?'appstore-draft'\), 'submit'/,
   )
-  assert.match(
-    publisher,
-    /uploadAction === 'cleanup-pending-use-final'[\s\S]*?reconcileIosUploadReceipts\([\s\S]*?removeIosPendingUploadReceipt/,
-  )
+  assert.doesNotMatch(publisher, /removeIosPendingUploadReceipt|unlinkSync/)
 })
 
 test('local release CLI and environment enforce required Zapstore mode', () => {

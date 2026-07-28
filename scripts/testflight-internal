@@ -126,7 +126,7 @@ from testflight_export_compliance import (
     ExportComplianceError,
     prepare_build_compliance_for_submission,
     select_exact_app,
-    select_exact_build,
+    select_unique_build_for_marketing_version,
 )
 
 try:
@@ -273,7 +273,10 @@ def get_all(path, params=None):
 
 def find_app():
     apps = get_all("apps", {"filter[bundleId]": BUNDLE_ID, "limit": "10"})
-    return select_exact_app(apps, BUNDLE_ID)
+    try:
+        return select_exact_app(apps, BUNDLE_ID)
+    except ExportComplianceError as error:
+        fail(str(error))
 
 
 def exact_bundle_id():
@@ -334,6 +337,35 @@ if ACTION == "ensure-app":
     raise SystemExit(0)
 
 
+def live_build_marketing_version(build_id):
+    status, body = request(
+        "GET",
+        f"builds/{build_id}/preReleaseVersion",
+        {"fields[preReleaseVersions]": "version"},
+    )
+    data = require_ok(
+        status,
+        body,
+        f"GET builds/{build_id}/preReleaseVersion",
+    ).get("data")
+    attributes = data.get("attributes") if isinstance(data, dict) else None
+    version = attributes.get("version") if isinstance(attributes, dict) else None
+    if (
+        not isinstance(data, dict)
+        or data.get("type") != "preReleaseVersions"
+        or not isinstance(data.get("id"), str)
+        or not data["id"]
+        or not isinstance(version, str)
+        or not version
+        or version.strip() != version
+    ):
+        fail(
+            "App Store Connect returned an invalid live marketing version "
+            f"for build {build_id}"
+        )
+    return version
+
+
 def find_build():
     builds = get_all(
         "builds",
@@ -343,7 +375,15 @@ def find_build():
             "limit": "10",
         },
     )
-    return select_exact_build(builds, BUILD_NUMBER)
+    try:
+        return select_unique_build_for_marketing_version(
+            builds,
+            BUILD_NUMBER,
+            VERSION_NAME,
+            live_build_marketing_version,
+        )
+    except ExportComplianceError as error:
+        fail(str(error))
 
 
 def get_build(build_id):
@@ -1028,6 +1068,9 @@ def submit_beta_review(build):
 
 if ACTION == "preflight":
     build = find_build()
+    live_marketing_version = (
+        build.get("_nvpnMarketingVersion") if build else VERSION_NAME
+    )
     if build:
         build = get_build(build["id"])
     attributes = build.get("attributes", {}) if build else {}
@@ -1037,7 +1080,7 @@ if ACTION == "preflight":
                 "schema": 1,
                 "status": "passed",
                 "bundleId": BUNDLE_ID,
-                "version": VERSION_NAME,
+                "version": live_marketing_version,
                 "buildNumber": BUILD_NUMBER,
                 "buildPresent": build is not None,
                 "buildId": build.get("id") if build else None,
