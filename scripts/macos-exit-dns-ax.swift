@@ -243,24 +243,43 @@ func press(
     throw DriverError.missing(successIdentifier ?? identifier)
 }
 
+func blockingModalText(_ application: AXUIElement) -> String? {
+    guard let modal = descendants(application).first(where: { element in
+        let role = stringAttribute(element, kAXRoleAttribute)
+        return visible(element) && (role == kAXSheetRole || role == "AXDialog")
+    }) else {
+        return nil
+    }
+    var seen = Set<String>()
+    let text = descendants(modal)
+        .flatMap(textCandidates)
+        .filter { seen.insert($0).inserted }
+        .joined(separator: " — ")
+    return text.isEmpty ? "unknown app error" : text
+}
+
 func pressSidebar(
     _ application: AXUIElement,
     _ identifier: String,
     pid: pid_t
 ) throws {
+    NSRunningApplication(processIdentifier: pid)?.activate(
+        options: [.activateAllWindows]
+    )
+    Thread.sleep(forTimeInterval: 0.15)
     let actionDeadline = Date().addingTimeInterval(20)
-    var lastError = AXError.cannotComplete
+    var lastActionError: AXError?
     repeat {
-        NSRunningApplication(processIdentifier: pid)?.activate(
-            options: [.activateAllWindows]
-        )
+        if let modalText = blockingModalText(application) {
+            throw DriverError.invalidState(
+                "app modal blocked \(identifier): \(modalText)"
+            )
+        }
         if let window = findNow(
             application,
             identifier: "main-AppWindow-1"
         ),
-           boolAttribute(window, kAXMainAttribute) == true,
-           boolAttribute(window, kAXFocusedAttribute) == true,
-           let element = findNow(application, identifier: identifier),
+           let element = findNow(window, identifier: identifier),
            boolAttribute(element, kAXEnabledAttribute) == true,
            let target = actionableElement(element),
            boolAttribute(target, kAXEnabledAttribute) == true {
@@ -277,11 +296,16 @@ func pressSidebar(
                error != .invalidUIElement {
                 throw DriverError.action(identifier, error)
             }
-            lastError = error
+            lastActionError = error
         }
         Thread.sleep(forTimeInterval: 0.1)
     } while Date() < actionDeadline
-    throw DriverError.action(identifier, lastError)
+    if let lastActionError {
+        throw DriverError.action(identifier, lastActionError)
+    }
+    throw DriverError.invalidState(
+        "sidebar control never became actionable: \(identifier)"
+    )
 }
 
 func postKey(

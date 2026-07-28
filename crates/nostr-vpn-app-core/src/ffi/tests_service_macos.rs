@@ -199,6 +199,91 @@ exit 0
             "{error:#}"
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(
+            !runtime.config_path.exists(),
+            "failed daemon apply unexpectedly wrote the config directly"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_disabled_service_saves_config_directly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_service_test_dir("nvpn-app-core-disabled-service-config");
+        let calls_path = dir.join("calls.txt");
+        let script_path = dir.join("nvpn");
+        let calls_literal = calls_path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let script = format!(
+            r#"#!/bin/sh
+CALLS="{calls_literal}"
+printf '%s\n' "$*" >> "$CALLS"
+if [ "$1" = "service" ] && [ "$2" = "status" ]; then
+  cat <<'JSON'
+{{"supported":true,"installed":true,"disabled":true,"loaded":false,"running":false,"pid":null,"label":"fi.siriusbusiness.nvpn.test","binary_version":"test"}}
+JSON
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  cat <<'JSON'
+{{"daemon":{{"running":false,"state":null}}}}
+JSON
+  exit 0
+fi
+exit 42
+"#
+        );
+        fs::write(&script_path, script).expect("write fake nvpn");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake nvpn metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("make fake nvpn executable");
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.config_path = dir.join("config.toml");
+        runtime.nvpn_bin = Some(script_path);
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("save initial config");
+
+        runtime.dispatch(NativeAppAction::GetState);
+        assert!(runtime.service_installed);
+        assert!(runtime.service_disabled);
+        assert!(!runtime.service_running);
+        assert!(!runtime.daemon_running);
+        runtime.dispatch(NativeAppAction::UpdateSettings {
+            patch: SettingsPatch {
+                node_name: Some("Disabled service edit".to_string()),
+                ..SettingsPatch::default()
+            },
+        });
+
+        let saved = AppConfig::load(&runtime.config_path).expect("load directly saved config");
+        assert_eq!(saved.node_name, "Disabled service edit");
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
+        assert!(
+            !calls
+                .lines()
+                .any(|line| line.starts_with("apply-config-daemon ")),
+            "disabled service config save invoked the daemon:\n{calls}"
+        );
+        assert!(
+            fs::read_dir(&dir)
+                .expect("read test directory")
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".apply-")),
+            "disabled service config save left a daemon apply source"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -78,9 +78,13 @@ def matching_nodes(name: str) -> list[Any]:
     desktop = pyatspi.Registry.getDesktop(0)
     for node in walk(desktop):
         try:
+            if name.startswith("nvpn-exit-dns-"):
+                selector_matches = node.get_accessible_id() == name
+            else:
+                selector_matches = node.name == name
             if (
                 node.get_process_id() == TARGET_PID
-                and node.name == name
+                and selector_matches
                 and visible(node)
             ):
                 matches.append(node)
@@ -112,12 +116,14 @@ def find_named(
     visible_nodes = []
     for node in walk(pyatspi.Registry.getDesktop(0)):
         try:
+            accessible_id = node.get_accessible_id()
             if (
                 node.get_process_id() == TARGET_PID
                 and visible(node)
-                and node.name
+                and (node.name or accessible_id)
             ):
-                visible_nodes.append(f"{node.getRoleName()}:{node.name}")
+                suffix = f"#{accessible_id}" if accessible_id else ""
+                visible_nodes.append(f"{node.getRoleName()}:{node.name}{suffix}")
         except Exception:
             continue
     print(

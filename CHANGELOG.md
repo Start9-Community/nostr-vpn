@@ -43,6 +43,8 @@ All notable changes to this project are documented in this file.
   unrelated underlay event.
 - Replace prior Android installs in place, reject parallel package variants,
   and prevent duplicate VPN service/process ownership.
+- Keep macOS configuration editable while an installed background service is
+  disabled or stopped, without bypassing daemon-owned saves while it is active.
 - Release the iOS UI process's shared Cashu wallet and SQLite locks before
   suspension, then reopen the native core on foreground, preventing
   RunningBoard `0xDEAD10CC` terminations.

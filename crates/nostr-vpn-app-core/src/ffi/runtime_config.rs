@@ -633,7 +633,7 @@ impl NativeAppRuntime {
                 .ensure_pending_nostr_join_request(unix_timestamp())?;
         }
 
-        if self.service_installed || self.service_running || self.daemon_running {
+        if self.service_running || self.daemon_running {
             return self.save_config_via_macos_service();
         }
 
@@ -663,7 +663,7 @@ impl NativeAppRuntime {
             .to_str()
             .ok_or_else(|| anyhow!("config apply source path is not valid UTF-8"))?;
         let config_arg = self.config_path_str()?;
-        let daemon_result = self
+        let output = self
             .run_nvpn([
                 "apply-config-daemon",
                 "--source",
@@ -671,19 +671,10 @@ impl NativeAppRuntime {
                 "--config",
                 config_arg,
             ])
-            .and_then(|output| ensure_success("nvpn apply-config-daemon", &output));
-
-        match daemon_result {
-            Ok(()) => return Ok(()),
-            Err(error) if self.service_installed || self.service_running => {
-                return Err(error).context(
-                    "background service could not apply the configuration; restart or update the service and retry",
-                );
-            }
-            Err(_) => {}
-        }
-
-        self.config.save(&self.config_path)
+            .context("background service is unavailable")?;
+        ensure_success("nvpn apply-config-daemon", &output).context(
+            "background service could not apply the configuration; restart or update the service and retry",
+        )
     }
 
     #[cfg(target_os = "macos")]

@@ -69,28 +69,38 @@ if dns_cleanup < 0 or bundle_cleanup < 0 or dns_cleanup > bundle_cleanup:
     )
 PY
 
-python3 - "$ROOT/linux/src/main/saved_networks.rs" <<'PY'
+python3 - \
+  "$ROOT/linux/src/main/saved_networks.rs" \
+  "$ROOT/scripts/desktop-mobile-manual-join-atspi.py" <<'PY'
 import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-for variable, label in (
+driver = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+for variable, selector in (
     ("mode", "nvpn-exit-dns-mode"),
     ("provider", "nvpn-exit-dns-provider"),
+    ("custom_url", "nvpn-exit-dns-custom-url"),
+    ("bootstrap_ips", "nvpn-exit-dns-bootstrap-ips"),
+    ("through_servers", "nvpn-exit-dns-through-servers"),
+    ("save", "nvpn-exit-dns-save"),
 ):
-    if source.count(f'set_dropdown_accessible_label(dropdown, "{label}")') != 2:
+    exposure = f'selectors.expose_object("{selector}", &{variable});'
+    if source.count(exposure) != 1:
         raise SystemExit(
-            f"Linux Exit DNS dropdown does not preserve {label} across map "
-            "and selection changes"
+            f"Linux Exit DNS control does not expose the exact stable GTK "
+            f"buildable ID {selector}"
         )
-    selected = source.find(f"{variable}.set_selected(")
-    initial = source.find(
-        f'set_dropdown_accessible_label(&{variable}, "{label}")'
-    )
-    if selected < 0 or initial < selected:
+if "set_dropdown_accessible_label" in source:
+    raise SystemExit("Linux Exit DNS still duplicates selectors as dynamic labels")
+for required in (
+    'name.startswith("nvpn-exit-dns-")',
+    "node.get_accessible_id() == name",
+):
+    if required not in driver:
         raise SystemExit(
-            "Linux Exit DNS dropdown labels are assigned before GTK selects "
-            "the value that overwrites them"
+            "Linux Exit DNS AT-SPI driver does not match exact stable "
+            f"accessible IDs: {required}"
         )
 PY
 

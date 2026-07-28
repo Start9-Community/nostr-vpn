@@ -77,11 +77,13 @@ for required in (
     "network-setup-create",
     "network-create-submit",
     "main-AppWindow-1",
+    "func blockingModalText(",
     "func pressSidebar(",
     "let actionDeadline = Date().addingTimeInterval(20)",
-    "kAXMainAttribute",
-    "kAXFocusedAttribute",
+    "findNow(window, identifier: identifier)",
     "kAXEnabledAttribute",
+    "var lastActionError: AXError?",
+    "if let lastActionError",
     "error != .failure",
     "error != .cannotComplete",
     "error != .invalidUIElement",
@@ -93,6 +95,24 @@ press_body = driver[
 ]
 if ".failure" in press_body or "actionDeadline" in press_body:
     raise SystemExit("macOS DNS AX driver retries non-idempotent generic presses")
+sidebar_body = driver[
+    driver.index("func pressSidebar(") : driver.index("func postKey(")
+]
+activation = sidebar_body.index(
+    "NSRunningApplication(processIdentifier: pid)?.activate"
+)
+retry_loop = sidebar_body.index("repeat {")
+if activation > retry_loop or sidebar_body.count(
+    "NSRunningApplication(processIdentifier: pid)?.activate"
+) != 1:
+    raise SystemExit(
+        "macOS DNS AX sidebar retry repeatedly activates the app instead of "
+        "reacquiring controls within the exact window"
+    )
+if "kAXMainAttribute" in sidebar_body or "kAXFocusedAttribute" in sidebar_body:
+    raise SystemExit(
+        "macOS DNS AX sidebar retry passively blocks on fragile main/focused state"
+    )
 sidebar_calls = re.findall(
     r'try pressSidebar\(application, "([^"]+)", pid: pid\)',
     driver,

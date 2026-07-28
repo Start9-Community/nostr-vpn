@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This harness creates and validates its own isolated FIPS session. A release
+# gate may already have an exact session configured for the real checkout, and
+# those credentials must not be applied to the temporary fixture below.
+unset NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED
+unset NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256
+unset NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256
+unset NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256
+unset NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD
+unset NVPN_LOCAL_FIPS_SESSION_FIPS_TREE
+unset NVPN_LOCAL_FIPS_PREPARED
+unset NVPN_LOCAL_FIPS_ROOT
+unset NVPN_LOCAL_FIPS_LOCK_DIR
+unset NVPN_LOCAL_FIPS_LOCK_TOKEN
+unset NVPN_LOCAL_FIPS_LOCK_SNAPSHOT
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="$ROOT/scripts/local-fips-workspace.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-local-fips-harness.XXXXXX")"
