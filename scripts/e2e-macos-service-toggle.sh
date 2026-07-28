@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-owned-test-app.sh"
 ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT/artifacts/macos-service-toggle}"
 DATA_ROOT="$ARTIFACT_DIR/app-data"
 ADMIN_DATA_DIR="$DATA_ROOT/admin"
@@ -16,6 +18,7 @@ DRIVER="${NVPN_DESKTOP_SERVICE_TOGGLE_DRIVER:-}"
 VM_IMPORT_ONLY="${NVPN_MACOS_VM_IMPORT_ONLY:-0}"
 TIMEOUT_SECS="${NVPN_DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS:-30}"
 app_pid=""
+APP_EXE=""
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "macOS service-toggle UI e2e requires macOS." >&2
@@ -46,8 +49,16 @@ stop_app() {
     wait "$app_pid" >/dev/null 2>&1 || true
   fi
   app_pid=""
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      [[ -z "$APP_EXE" ]] || macos_stop_exact_test_app "$APP_EXE"
+      ;;
+  esac
 }
 trap stop_app EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 rm -rf "$DATA_ROOT"
 mkdir -p "$ARTIFACT_DIR" "$DATA_ROOT"
@@ -81,9 +92,20 @@ if [[ -z "$NVPN" ]]; then
   echo "macOS release app has no bundled nvpn executable: $APP_PATH" >&2
   exit 1
 fi
-if pgrep -f "$APP_EXE" >/dev/null 2>&1; then
-  echo "Close the existing $APP_PATH instance before the isolated UI e2e." >&2
-  exit 1
+existing_app_pids="$(macos_exact_executable_pids "$APP_EXE")"
+if [[ -n "$existing_app_pids" ]]; then
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      macos_stop_exact_test_app "$APP_EXE" || {
+        echo "Could not stop the stale imported $APP_PATH instance." >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "Close the existing $APP_PATH instance before the isolated UI e2e." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 service_status() {

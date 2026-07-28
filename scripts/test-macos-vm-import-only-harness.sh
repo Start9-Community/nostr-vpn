@@ -17,6 +17,7 @@ files=(
   "$ROOT/scripts/macos-app-launch-smoke.sh"
   "$ROOT/scripts/e2e-wireguard-exit-host.sh"
   "$ROOT/scripts/e2e-macos-service.sh"
+  "$ROOT/scripts/lib-macos-owned-test-app.sh"
   "$ROOT/scripts/release-gate.sh"
 )
 for file in "${files[@]}"; do
@@ -29,6 +30,19 @@ source "$ROOT/scripts/lib-macos-vm-imported-release.sh"
   == "artifacts/macos-release-mobile-join/imported" ]]
 [[ "$(macos_vm_imported_release_package "/tmp/src/nostr-vpn")" \
   == "/tmp/src/nostr-vpn/artifacts/macos-release-mobile-join/imported" ]]
+
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-owned-test-app.sh"
+ps() {
+  cat <<'EOF'
+ 101 /Applications/Nostr VPN.app/Contents/MacOS/Nostr VPN
+ 202 /tmp/imported/Nostr VPN.app/Contents/MacOS/Nostr VPN
+ 303 /tmp/imported/Nostr VPN.app/Contents/MacOS/Nostr VPN Helper
+EOF
+}
+[[ "$(macos_exact_executable_pids \
+  "/tmp/imported/Nostr VPN.app/Contents/MacOS/Nostr VPN")" == "202" ]]
+unset -f ps
 
 python3 - "${files[@]}" "$ROOT/scripts/macos_release_join_artifact.py" \
   "$ROOT/scripts/macos-build" <<'PY'
@@ -180,6 +194,15 @@ for name in (
 ):
     if "--check-accessibility" not in texts[name]:
         raise SystemExit(f"{name} does not use its imported AX driver for preflight")
+    for required in (
+        "macos_exact_executable_pids",
+        "macos_stop_exact_test_app",
+        "trap 'exit 129' HUP",
+        "trap 'exit 130' INT",
+        "trap 'exit 143' TERM",
+    ):
+        if required not in texts[name]:
+            raise SystemExit(f"{name} lacks exact imported-app cleanup: {required}")
 
 if "codesign --force" in texts["e2e-macos-service-toggle.sh"]:
     raise SystemExit("service-toggle gate still re-signs a VM-side app copy")
