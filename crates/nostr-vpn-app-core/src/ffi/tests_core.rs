@@ -445,11 +445,20 @@
             network_id: saved_id.clone(),
             enabled: true,
         });
+        assert!(
+            runtime.daemon_running,
+            "mobile join listening should activate the mobile tunnel"
+        );
         runtime.dispatch(NativeAppAction::AddParticipant {
             network_id: saved_id.clone(),
             npub: peer_npub.clone(),
             alias: Some("Desk Peer".to_string()),
         });
+        assert!(
+            runtime.last_error.is_empty(),
+            "active mobile tunnel save used the desktop service: {}",
+            runtime.last_error
+        );
         runtime.dispatch(NativeAppAction::AddAdmin {
             network_id: saved_id.clone(),
             npub: admin_one_npub.clone(),

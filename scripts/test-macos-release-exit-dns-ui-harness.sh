@@ -77,6 +77,8 @@ for required in (
     "network-setup-create",
     "network-create-submit",
     "main-AppWindow-1",
+    "timeout: 60",
+    "let finalElements = descendants(application)",
     "func blockingModalText(",
     "func pressSidebar(",
     "func pressAndWaitForSaveCompletion(",

@@ -154,7 +154,13 @@ func find(
         }
         Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline
-    let identifiers = descendants(application).compactMap { element -> String? in
+    let finalElements = descendants(application)
+    if let element = finalElements.first(where: {
+        stringAttribute($0, kAXIdentifierAttribute) == identifier && visible($0)
+    }) {
+        return element
+    }
+    let identifiers = finalElements.compactMap { element -> String? in
         let identifier = stringAttribute(element, kAXIdentifierAttribute)
         guard !identifier.isEmpty, visible(element) else { return nil }
         return "\(stringAttribute(element, kAXRoleAttribute)):\(identifier)"
@@ -693,7 +699,7 @@ func run() throws {
     _ = try find(
         application,
         identifier: "main-AppWindow-1",
-        timeout: 20
+        timeout: 60
     )
     let networkCreated = try createNetworkIfNeeded(application, pid: pid)
     _ = try reveal(application, identifier: "exit-dns-mode", pid: pid)

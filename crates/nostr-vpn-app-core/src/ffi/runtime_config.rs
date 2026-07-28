@@ -631,6 +631,7 @@ impl NativeAppRuntime {
         if self.mobile_runtime {
             self.config
                 .ensure_pending_nostr_join_request(unix_timestamp())?;
+            return self.config.save(&self.config_path);
         }
 
         if self.service_running || self.daemon_running {
