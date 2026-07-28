@@ -195,6 +195,7 @@ for name in (
     if "--check-accessibility" not in texts[name]:
         raise SystemExit(f"{name} does not use its imported AX driver for preflight")
     for required in (
+        'APP_PATH="$(cd "$(dirname "$APP_PATH")" && pwd -P)/$(basename "$APP_PATH")"',
         "macos_exact_executable_pids",
         "macos_stop_exact_test_app",
         "trap 'exit 129' HUP",

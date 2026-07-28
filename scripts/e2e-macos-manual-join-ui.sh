@@ -79,6 +79,7 @@ if [[ ! -d "$APP_PATH" ]]; then
   echo "macOS release app not found: $APP_PATH" >&2
   exit 1
 fi
+APP_PATH="$(cd "$(dirname "$APP_PATH")" && pwd -P)/$(basename "$APP_PATH")"
 codesign --verify --deep --strict "$APP_PATH"
 
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"

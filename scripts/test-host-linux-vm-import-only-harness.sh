@@ -314,6 +314,10 @@ require_tokens "$VERIFIER" "hash/size/version/source receipt validation" \
   'CLI verbose version differs from exact FIPS revision'
 require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'prepare-host-linux-vm-bundle.sh' \
+  'assert_release_checkout_state' \
+  'git -C "$root" show "${app_sha}:Cargo.lock"' \
+  'git -C "$root" show "${app_sha}:linux/Cargo.lock"' \
+  'ubuntu_vm_committed_lock_evidence' \
   '--manifest-specs "$NVPN_FIPS_REPO_PATH"' \
   'mktemp -d /tmp/nvpn-linux-vm-release.XXXXXX' \
   'sha256sum "$package_root/usr/bin/nostr-vpn"' \

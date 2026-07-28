@@ -35,6 +35,30 @@ ubuntu_vm_import_scp_command() {
   fi
 }
 
+ubuntu_vm_committed_lock_evidence() (
+  set -euo pipefail
+  local root="$1" app_sha="$2" verifier="$3"
+  shift 3
+  local temp root_lock linux_lock root_sha linux_sha
+  local root_realized_sha linux_realized_sha
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-committed-locks.XXXXXX")"
+  trap 'rm -rf "$temp"' EXIT
+  root_lock="$temp/Cargo.lock"
+  linux_lock="$temp/linux-Cargo.lock"
+  git -C "$root" show "${app_sha}:Cargo.lock" >"$root_lock"
+  git -C "$root" show "${app_sha}:linux/Cargo.lock" >"$linux_lock"
+  root_sha="$(shasum -a 256 "$root_lock" | awk '{ print $1 }')"
+  linux_sha="$(shasum -a 256 "$linux_lock" | awk '{ print $1 }')"
+  root_realized_sha="$(
+    python3 "$verifier" --expected-sha256 "$root_lock" "$@"
+  )"
+  linux_realized_sha="$(
+    python3 "$verifier" --expected-sha256 "$linux_lock" "$@"
+  )"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$root_sha" "$root_realized_sha" "$linux_sha" "$linux_realized_sha"
+)
+
 ubuntu_vm_import_release_bundle() {
   [[ -n "${ROOT:-}" && -n "${SSH_HOST:-}" && -n "${GUEST_REPO:-}" ]] || {
     ubuntu_vm_import_error "ROOT, SSH_HOST, and GUEST_REPO are required"
@@ -46,7 +70,7 @@ ubuntu_vm_import_release_bundle() {
   }
   local bundle receipt app_sha app_tree app_version
   local fips_sha fips_tree fips_version target evidence_dir remote_dir
-  local root_lock_sha root_realized_lock_sha
+  local lock_evidence root_lock_sha root_realized_lock_sha
   local linux_lock_sha linux_realized_lock_sha
   local builder_mode rust_toolchain dockerfile_sha payload_sha
   local -a fips_patch_packages=()
@@ -82,6 +106,11 @@ ubuntu_vm_import_release_bundle() {
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
   load_release_env "$ROOT"
+  assert_release_checkout_state \
+    "$ROOT" "$app_sha" "$app_tree" "Ubuntu VM host bundle" || {
+    ubuntu_vm_import_error "host bundle differs from the exact app checkout"
+    return 1
+  }
   release_join_require_clean_fips || {
     ubuntu_vm_import_error "exact FIPS validation failed before import"
     return 1
@@ -96,21 +125,15 @@ ubuntu_vm_import_release_bundle() {
     ubuntu_vm_import_error "exact FIPS patch package set is incomplete"
     return 1
   }
-  root_lock_sha="$(shasum -a 256 "$ROOT/Cargo.lock" | awk '{ print $1 }')" \
-    || return 1
-  linux_lock_sha="$(
-    shasum -a 256 "$ROOT/linux/Cargo.lock" | awk '{ print $1 }'
-  )" || return 1
-  root_realized_lock_sha="$(
-    python3 "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
-      --expected-sha256 "$ROOT/Cargo.lock" \
+  lock_evidence="$(
+    ubuntu_vm_committed_lock_evidence \
+      "$ROOT" "$app_sha" \
+      "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
       "${fips_patch_packages[@]}"
   )" || return 1
-  linux_realized_lock_sha="$(
-    python3 "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
-      --expected-sha256 "$ROOT/linux/Cargo.lock" \
-      "${fips_patch_packages[@]}"
-  )" || return 1
+  IFS=$'\t' read -r \
+    root_lock_sha root_realized_lock_sha \
+    linux_lock_sha linux_realized_lock_sha <<<"$lock_evidence"
   target="$(jq -er '.target' "$receipt")" || return 1
   rust_toolchain="${NVPN_HOST_LINUX_VM_RUST_TOOLCHAIN:-1.95.0}"
   dockerfile_sha="$(
@@ -121,12 +144,6 @@ ubuntu_vm_import_release_bundle() {
       "$ROOT/scripts/build-host-linux-vm-bundle-in-container.sh" \
       | awk '{print $1}'
   )" || return 1
-  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$app_sha" \
-    && "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" == "$app_tree" \
-    && -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
-    ubuntu_vm_import_error "host bundle differs from the clean app checkout"
-    return 1
-  }
   [[ "$fips_sha" == "$RELEASE_JOIN_FIPS_SHA" \
     && "$fips_tree" == "$RELEASE_JOIN_FIPS_TREE" \
     && "$fips_version" == "$RELEASE_JOIN_FIPS_VERSION" ]] || {
