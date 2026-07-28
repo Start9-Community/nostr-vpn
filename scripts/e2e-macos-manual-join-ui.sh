@@ -194,13 +194,33 @@ wait_for_fixture() {
 
 launch_app() {
   local data_dir="$1"
-  NVPN_APP_DATA_DIR="$data_dir" \
-    NVPN_CLI_PATH="$NVPN" \
-    "$APP_EXE" >>"$APP_LOG" 2>&1 &
-  app_pid=$!
+  case "$VM_IMPORT_ONLY" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      # Launch through LaunchServices so SwiftUI materializes the initial
+      # WindowGroup in the active GUI session. Executing the bundle binary
+      # directly over SSH starts the process and menu bar but no app window.
+      open -n -F \
+        --env "NVPN_APP_DATA_DIR=$data_dir" \
+        --env "NVPN_CLI_PATH=$NVPN" \
+        --stdout "$APP_LOG" \
+        --stderr "$APP_LOG" \
+        "$APP_PATH"
+      ;;
+    *)
+      NVPN_APP_DATA_DIR="$data_dir" \
+        NVPN_CLI_PATH="$NVPN" \
+        "$APP_EXE" >>"$APP_LOG" 2>&1 &
+      app_pid=$!
+      ;;
+  esac
   local deadline=$((SECONDS + TIMEOUT_SECS))
   while ((SECONDS < deadline)); do
-    if kill -0 "$app_pid" >/dev/null 2>&1; then
+    case "$VM_IMPORT_ONLY" in
+      1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+        app_pid="$(macos_exact_executable_pids "$APP_EXE" | tail -n 1)"
+        ;;
+    esac
+    if [[ -n "$app_pid" ]] && kill -0 "$app_pid" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1

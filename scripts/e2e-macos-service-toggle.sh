@@ -165,7 +165,7 @@ open -n -F \
 
 deadline=$((SECONDS + TIMEOUT_SECS))
 while ((SECONDS < deadline)); do
-  app_pid="$(pgrep -f "$APP_EXE" | tail -n 1 || true)"
+  app_pid="$(macos_exact_executable_pids "$APP_EXE" | tail -n 1)"
   if [[ -n "$app_pid" ]] && kill -0 "$app_pid" >/dev/null 2>&1; then
     break
   fi

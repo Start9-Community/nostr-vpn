@@ -205,6 +205,26 @@ for name in (
         if required not in texts[name]:
             raise SystemExit(f"{name} lacks exact imported-app cleanup: {required}")
 
+manual_join = texts["e2e-macos-manual-join-ui.sh"]
+launch = manual_join.split("launch_app() {", 1)[1].split(
+    "\n}\n\nlaunch_app", 1
+)[0]
+for required in (
+    "open -n -F",
+    '--env "NVPN_APP_DATA_DIR=$data_dir"',
+    '--env "NVPN_CLI_PATH=$NVPN"',
+    "macos_exact_executable_pids",
+):
+    if required not in launch:
+        raise SystemExit(
+            f"manual-join VM launch bypasses LaunchServices or exact PID ownership: {required}"
+        )
+if launch.index("open -n -F") > launch.index("macos_exact_executable_pids"):
+    raise SystemExit("manual-join VM looks for its exact PID before launching")
+
+if 'pgrep -f "$APP_EXE"' in texts["e2e-macos-service-toggle.sh"]:
+    raise SystemExit("service-toggle gate still uses substring process matching")
+
 if "codesign --force" in texts["e2e-macos-service-toggle.sh"]:
     raise SystemExit("service-toggle gate still re-signs a VM-side app copy")
 
