@@ -90,9 +90,15 @@ windows = {
     },
 }
 linux = {
-    "schema": 1,
-    "builtOnHostMac": True,
-    "builtOnRemoteVm": False,
+    "schema": 2,
+    "builderMode": "remote-native",
+    "builtOnHostMac": False,
+    "builtOnRemoteVm": True,
+    "builderHostOs": "Linux",
+    "builderHostArchitecture": "x86_64",
+    "containerImageId": f"sha256:{'1' * 64}",
+    "dockerfileSha256": "2" * 64,
+    "containerPayloadSha256": "3" * 64,
     "dockerPlatform": "linux/amd64",
     "target": "x86_64-unknown-linux-gnu",
     "appGitSha": app_sha,

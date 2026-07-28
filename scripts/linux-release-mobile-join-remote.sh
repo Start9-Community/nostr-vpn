@@ -47,10 +47,36 @@ assert_imported_artifacts() {
     && "$cli_hash" =~ ^[0-9a-f]{64}$ \
     && "$(sha256sum "$APP" | awk '{ print $1 }')" == "$app_hash" \
     && "$(sha256sum "$CLI" | awk '{ print $1 }')" == "$cli_hash" \
-    && "$(jq -er '.builtOnHostMac' "$RECEIPT")" == true \
-    && "$(jq -er '.builtOnRemoteVm' "$RECEIPT")" == false \
     && "$(jq -er '.dockerPlatform' "$RECEIPT")" == linux/amd64 ]] || {
     echo "Linux desktop/mobile imported artifact receipt did not verify" >&2
+    return 1
+  }
+  jq -e '
+    .schema == 2
+    and (
+      (
+        .builderMode == "local-docker"
+        and .builtOnHostMac == true
+        and .builtOnRemoteVm == false
+        and .builderHostOs == "Darwin"
+        and (
+          .builderHostArchitecture == "arm64"
+          or .builderHostArchitecture == "x86_64"
+        )
+      )
+      or (
+        .builderMode == "remote-native"
+        and .builtOnHostMac == false
+        and .builtOnRemoteVm == true
+        and .builderHostOs == "Linux"
+        and .builderHostArchitecture == "x86_64"
+      )
+    )
+    and (.containerImageId | test("^sha256:[0-9a-f]{64}$"))
+    and (.dockerfileSha256 | test("^[0-9a-f]{64}$"))
+    and (.containerPayloadSha256 | test("^[0-9a-f]{64}$"))
+  ' "$RECEIPT" >/dev/null || {
+    echo "Linux desktop/mobile imported builder provenance did not verify" >&2
     return 1
   }
 }

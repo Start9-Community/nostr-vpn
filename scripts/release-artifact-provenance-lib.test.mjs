@@ -542,9 +542,21 @@ test('release receipt collection requires exact source and strict public UI gate
     for (const platform of ['linux', 'windows']) {
       const desktopArtifact = {
         ...source,
-        schema: 1,
+        schema: platform === 'linux' ? 2 : 1,
         fipsVersion: '0.4.45',
         appVersion: '4.1.5',
+        ...(platform === 'linux'
+          ? {
+              builderMode: 'remote-native',
+              builtOnHostMac: false,
+              builtOnRemoteVm: true,
+              builderHostOs: 'Linux',
+              builderHostArchitecture: 'x86_64',
+              containerImageId: `sha256:${'1'.repeat(64)}`,
+              dockerfileSha256: '2'.repeat(64),
+              containerPayloadSha256: '3'.repeat(64),
+            }
+          : {}),
         artifacts: {
           app: { sha256: 'a'.repeat(64), size: 100 },
           cli: { sha256: 'b'.repeat(64), size: 200 },
@@ -595,12 +607,19 @@ test('release receipt collection requires exact source and strict public UI gate
       if (platform === 'linux') {
         writeFileSync(paths.linux.package_install, JSON.stringify({
           ...source,
-          schema: 1,
+          schema: 2,
           artifactType:
-            'host-built exact Debian package installed on Ubuntu VM',
+            'exact Debian package installed on Ubuntu VM',
           appVersion: desktopArtifact.appVersion,
-          builtOnHostMac: true,
-          builtOnRemoteVm: false,
+          builderMode: desktopArtifact.builderMode,
+          builtOnHostMac: desktopArtifact.builtOnHostMac,
+          builtOnRemoteVm: desktopArtifact.builtOnRemoteVm,
+          builderHostOs: desktopArtifact.builderHostOs,
+          builderHostArchitecture: desktopArtifact.builderHostArchitecture,
+          containerImageId: desktopArtifact.containerImageId,
+          dockerfileSha256: desktopArtifact.dockerfileSha256,
+          containerPayloadSha256:
+            desktopArtifact.containerPayloadSha256,
           package: 'nostr-vpn',
           packageArchitecture: 'amd64',
           packageInstalledByDpkg: true,
@@ -1025,7 +1044,15 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
     const testedCliSha256 = 'c'.repeat(64)
     const testedCliSize = 123
     const testedArtifactReceipt = JSON.stringify({
-      schema: 1,
+      schema: 2,
+      builderMode: 'remote-native',
+      builtOnHostMac: false,
+      builtOnRemoteVm: true,
+      builderHostOs: 'Linux',
+      builderHostArchitecture: 'x86_64',
+      containerImageId: `sha256:${'1'.repeat(64)}`,
+      dockerfileSha256: '2'.repeat(64),
+      containerPayloadSha256: '3'.repeat(64),
       appGitSha: commit,
       appGitTree: tree,
       artifacts: {

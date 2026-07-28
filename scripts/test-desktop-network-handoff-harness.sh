@@ -750,8 +750,9 @@ for evidence in \
   'TARGET_RELEASE_SIZE' \
   'tested-artifact-receipt.json' \
   'tested-artifact.json' \
-  'builtOnHostMac=true' \
-  'builtOnRemoteVm=false' \
+  'builderMode=%s' \
+  'builtOnHostMac=%s' \
+  'builtOnRemoteVm=%s' \
   'targetImportDirectoryUnique=true' \
   'cleanup_guest_import' \
   'target-import-cleanup-audit.txt'

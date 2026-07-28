@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the immutable host-built bundle imported by Ubuntu VM gates."""
+"""Verify the immutable exact bundle imported by Ubuntu VM gates."""
 
 from __future__ import annotations
 
@@ -25,13 +25,14 @@ def sha256_path(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-if len(sys.argv) != 17:
+if len(sys.argv) != 21:
     fail(
         "usage: verify-host-linux-vm-bundle.py "
         "BUNDLE RECEIPT APP_SHA APP_TREE APP_VERSION "
         "FIPS_SHA FIPS_TREE FIPS_VERSION "
         "ROOT_CARGO_LOCK_SHA256 ROOT_REALIZED_CARGO_LOCK_SHA256 "
         "LINUX_CARGO_LOCK_SHA256 LINUX_REALIZED_CARGO_LOCK_SHA256 TARGET "
+        "BUILDER_MODE RUST_TOOLCHAIN DOCKERFILE_SHA256 PAYLOAD_SHA256 "
         "FIPS_CORE_SPEC FIPS_ENDPOINT_SPEC FIPS_IDENTITY_SPEC"
     )
 
@@ -49,6 +50,10 @@ if len(sys.argv) != 17:
     linux_cargo_lock_sha256,
     linux_realized_cargo_lock_sha256,
     target,
+    builder_mode,
+    rust_toolchain,
+    dockerfile_sha256,
+    container_payload_sha256,
     fips_core_patch_spec,
     fips_endpoint_patch_spec,
     fips_identity_patch_spec,
@@ -73,9 +78,13 @@ for label, value in (
     ("root realized Cargo lock", root_realized_cargo_lock_sha256),
     ("Linux committed Cargo lock", linux_cargo_lock_sha256),
     ("Linux realized Cargo lock", linux_realized_cargo_lock_sha256),
+    ("Dockerfile", dockerfile_sha256),
+    ("container payload", container_payload_sha256),
 ):
     if re.fullmatch(r"[0-9a-f]{64}", value) is None:
         fail(f"{label} SHA-256 is invalid")
+if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", rust_toolchain) is None:
+    fail("Rust toolchain version is invalid")
 
 fips_patch_packages: dict[str, str] = {}
 for specification in (
@@ -99,9 +108,8 @@ if set(fips_patch_packages) != {
     fail("exact FIPS patched lock package set differs")
 
 expected_metadata = {
-    "schema": 1,
-    "builtOnHostMac": True,
-    "builtOnRemoteVm": False,
+    "schema": 2,
+    "builderMode": builder_mode,
     "appGitSha": app_sha,
     "appGitTree": app_tree,
     "appVersion": app_version,
@@ -116,16 +124,52 @@ expected_metadata = {
     "target": target,
     "dockerPlatform": "linux/amd64",
     "containerBase": "ubuntu:24.04",
+    "dockerfileSha256": dockerfile_sha256,
+    "containerPayloadSha256": container_payload_sha256,
 }
 for key, expected in expected_metadata.items():
     if receipt.get(key) != expected:
         fail(f"receipt {key} differs from the exact candidate")
+
+builder_modes = {
+    "local-docker": {
+        "builtOnHostMac": True,
+        "builtOnRemoteVm": False,
+        "builderHostOs": "Darwin",
+        "builderHostArchitectures": {"arm64", "x86_64"},
+    },
+    "remote-native": {
+        "builtOnHostMac": False,
+        "builtOnRemoteVm": True,
+        "builderHostOs": "Linux",
+        "builderHostArchitectures": {"x86_64"},
+    },
+}
+if builder_mode not in builder_modes:
+    fail("builder mode is not one of the two exact supported modes")
+builder = builder_modes[builder_mode]
+for key in ("builtOnHostMac", "builtOnRemoteVm", "builderHostOs"):
+    if receipt.get(key) != builder[key]:
+        fail(f"receipt {key} conflicts with builder mode")
+if receipt.get("builderHostArchitecture") not in builder[
+    "builderHostArchitectures"
+]:
+    fail("receipt builder architecture conflicts with builder mode")
+if (
+    re.fullmatch(r"sha256:[0-9a-f]{64}", receipt.get("containerImageId", ""))
+    is None
+):
+    fail("receipt container image identity is invalid")
 
 if not isinstance(receipt.get("sourceDateEpoch"), int) or receipt["sourceDateEpoch"] <= 0:
     fail("receipt lacks a positive sourceDateEpoch")
 for key in ("rustcVersion", "cargoVersion"):
     if not isinstance(receipt.get(key), str) or not receipt[key].strip():
         fail(f"receipt lacks {key}")
+if not receipt["rustcVersion"].startswith(f"rustc {rust_toolchain} "):
+    fail("receipt rustc version differs from the pinned toolchain")
+if not receipt["cargoVersion"].startswith(f"cargo {rust_toolchain} "):
+    fail("receipt cargo version differs from the pinned toolchain")
 
 artifacts = receipt.get("artifacts")
 expected_artifacts = {

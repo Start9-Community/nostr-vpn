@@ -141,17 +141,17 @@ sync_and_import_candidates() {
   if [[ "$host_peer_import_status" != "0" ]]; then
     echo "Host peer import status: $host_peer_import_status" >&2
     tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
-    fail "host-built Linux candidate import failed"
+    fail "exact Linux candidate import failed"
   fi
 
   [[ -n "$TARGET_RELEASE_BUNDLE" \
     && "$TARGET_RELEASE_BUNDLE" == /* \
     && -d "$TARGET_RELEASE_BUNDLE" ]] \
-    || fail "Linux underlay gate requires the host-built release bundle"
+    || fail "Linux underlay gate requires the exact release bundle"
   TARGET_RELEASE_BINARY="$TARGET_RELEASE_BUNDLE/nvpn"
   TARGET_RELEASE_RECEIPT="$TARGET_RELEASE_BUNDLE/receipt.json"
   [[ -x "$TARGET_RELEASE_BINARY" && -f "$TARGET_RELEASE_RECEIPT" ]] \
-    || fail "host-built Linux release bundle is incomplete"
+    || fail "exact Linux release bundle is incomplete"
   python3 - \
     "$TARGET_RELEASE_RECEIPT" \
     "$TARGET_RELEASE_BINARY" \
@@ -161,6 +161,7 @@ sync_and_import_candidates() {
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 receipt_path, binary_path, app_sha, app_tree, fips_sha = sys.argv[1:]
@@ -169,17 +170,40 @@ binary = pathlib.Path(binary_path)
 receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
 digest = hashlib.sha256(binary.read_bytes()).hexdigest()
 cli = receipt.get("artifacts", {}).get("cli", {})
+mode = receipt.get("builderMode")
+builder_valid = (
+    mode == "local-docker"
+    and receipt.get("builtOnHostMac") is True
+    and receipt.get("builtOnRemoteVm") is False
+    and receipt.get("builderHostOs") == "Darwin"
+    and receipt.get("builderHostArchitecture") in {"arm64", "x86_64"}
+) or (
+    mode == "remote-native"
+    and receipt.get("builtOnHostMac") is False
+    and receipt.get("builtOnRemoteVm") is True
+    and receipt.get("builderHostOs") == "Linux"
+    and receipt.get("builderHostArchitecture") == "x86_64"
+)
 if (
-    receipt.get("schema") != 1
-    or receipt.get("builtOnHostMac") is not True
-    or receipt.get("builtOnRemoteVm") is not False
+    receipt.get("schema") != 2
+    or not builder_valid
+    or re.fullmatch(
+        r"sha256:[0-9a-f]{64}", receipt.get("containerImageId", "")
+    )
+    is None
+    or re.fullmatch(r"[0-9a-f]{64}", receipt.get("dockerfileSha256", ""))
+    is None
+    or re.fullmatch(
+        r"[0-9a-f]{64}", receipt.get("containerPayloadSha256", "")
+    )
+    is None
     or receipt.get("appGitSha") != app_sha
     or receipt.get("appGitTree") != app_tree
     or receipt.get("fipsGitSha") != fips_sha
     or cli.get("sha256") != digest
     or cli.get("size") != binary.stat().st_size
 ):
-    raise SystemExit("host-built Linux release bundle receipt differs")
+    raise SystemExit("exact Linux release bundle receipt differs")
 PY
   TARGET_RELEASE_SHA256="$(
     shasum -a 256 "$TARGET_RELEASE_BINARY" | awk '{ print $1 }'
@@ -232,15 +256,19 @@ GUEST
   peer_sha="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
     "sha256sum '$HYPERVISOR_BINARY' | cut -d ' ' -f1")"
   [[ "$source_sha" == "$target_sha" ]] \
-    || fail "Linux target differs from the exact host-built release CLI"
+    || fail "Linux target differs from the exact release CLI"
   [[ "$peer_sha" == "$DESKTOP_UNDERLAY_HOST_PEER_SHA256" ]] \
-    || fail "Linux fixture peer differs from its exact host-built receipt"
+    || fail "Linux fixture peer differs from its exact release receipt"
   {
     printf 'source=%s\n' "$source_sha"
     printf 'target=%s\n' "$target_sha"
     printf 'peer=%s\n' "$peer_sha"
-    printf 'builtOnHostMac=true\n'
-    printf 'builtOnRemoteVm=false\n'
+    printf 'builderMode=%s\n' \
+      "$(jq -er '.builderMode' "$TARGET_RELEASE_RECEIPT")"
+    printf 'builtOnHostMac=%s\n' \
+      "$(jq -er '.builtOnHostMac' "$TARGET_RELEASE_RECEIPT")"
+    printf 'builtOnRemoteVm=%s\n' \
+      "$(jq -er '.builtOnRemoteVm' "$TARGET_RELEASE_RECEIPT")"
     printf 'targetImportSize=%s\n' "$TARGET_RELEASE_SIZE"
     printf 'targetImportDirectoryUnique=true\n'
   } >"$ARTIFACT_DIR/linux-binary-sha256.txt"

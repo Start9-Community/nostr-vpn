@@ -887,15 +887,46 @@ def build_desktop(args: argparse.Namespace) -> None:
             tested_receipt_path = root / "tested-artifact-receipt.json"
             tested_receipt = load_json(tested_receipt_path)
             cli = tested_receipt.get("artifacts", {}).get("cli", {})
+            mode = tested_receipt.get("builderMode")
+            builder_valid = (
+                mode == "local-docker"
+                and tested_receipt.get("builtOnHostMac") is True
+                and tested_receipt.get("builtOnRemoteVm") is False
+                and tested_receipt.get("builderHostOs") == "Darwin"
+                and tested_receipt.get("builderHostArchitecture")
+                in {"arm64", "x86_64"}
+            ) or (
+                mode == "remote-native"
+                and tested_receipt.get("builtOnHostMac") is False
+                and tested_receipt.get("builtOnRemoteVm") is True
+                and tested_receipt.get("builderHostOs") == "Linux"
+                and tested_receipt.get("builderHostArchitecture") == "x86_64"
+            )
             require(
-                tested_receipt.get("schema") == 1
+                tested_receipt.get("schema") == 2
+                and builder_valid
+                and re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    tested_receipt.get("containerImageId", ""),
+                )
+                is not None
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    tested_receipt.get("dockerfileSha256", ""),
+                )
+                is not None
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    tested_receipt.get("containerPayloadSha256", ""),
+                )
+                is not None
                 and tested_receipt.get("appGitSha") == app_sha
                 and tested_receipt.get("appGitTree") == app_tree
                 and cli.get("sha256") == tested_cli_sha
                 and cli.get("size") == tested_cli_size
                 and tested.get("artifactReceiptSha256")
                 == sha256(tested_receipt_path),
-                "Linux tested CLI is not bound to its host-built artifact receipt",
+                "Linux tested CLI is not bound to its exact artifact receipt",
             )
             summary["artifactReceiptSha256"] = sha256(tested_receipt_path)
             paths.append(tested_receipt_path)

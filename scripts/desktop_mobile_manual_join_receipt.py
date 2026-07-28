@@ -95,7 +95,7 @@ def validate_desktop_receipt(
     fips_version: str,
 ) -> dict[str, Any]:
     label = f"{platform} desktop artifact receipt"
-    require_exact(receipt, "schema", 1, label)
+    require_exact(receipt, "schema", 2 if platform == "linux" else 1, label)
     require_exact(receipt, "appGitSha", app_sha, label)
     require_exact(receipt, "appGitTree", app_tree, label)
     require_exact(receipt, "fipsGitSha", fips_sha, label)
@@ -121,8 +121,30 @@ def validate_desktop_receipt(
         if not isinstance(verbose, str) or f"(rev {fips_sha[:10]})" not in verbose:
             fail(f"{label} CLI does not bind the exact FIPS revision")
     else:
-        require_exact(receipt, "builtOnHostMac", True, label)
-        require_exact(receipt, "builtOnRemoteVm", False, label)
+        mode = receipt.get("builderMode")
+        if mode == "local-docker":
+            require_exact(receipt, "builtOnHostMac", True, label)
+            require_exact(receipt, "builtOnRemoteVm", False, label)
+            require_exact(receipt, "builderHostOs", "Darwin", label)
+            if receipt.get("builderHostArchitecture") not in {"arm64", "x86_64"}:
+                fail(f"{label} has invalid local Docker host architecture")
+        elif mode == "remote-native":
+            require_exact(receipt, "builtOnHostMac", False, label)
+            require_exact(receipt, "builtOnRemoteVm", True, label)
+            require_exact(receipt, "builderHostOs", "Linux", label)
+            require_exact(receipt, "builderHostArchitecture", "x86_64", label)
+        else:
+            fail(f"{label} has unsupported builderMode")
+        require_sha256(receipt.get("dockerfileSha256"), f"{label} Dockerfile hash")
+        require_sha256(
+            receipt.get("containerPayloadSha256"),
+            f"{label} container payload hash",
+        )
+        image_id = receipt.get("containerImageId")
+        if not isinstance(image_id, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", image_id
+        ):
+            fail(f"{label} has invalid container image identity")
         require_exact(receipt, "dockerPlatform", "linux/amd64", label)
         require_exact(receipt, "target", "x86_64-unknown-linux-gnu", label)
         app_core = None

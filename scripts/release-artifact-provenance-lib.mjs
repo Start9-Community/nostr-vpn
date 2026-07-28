@@ -1300,15 +1300,50 @@ export function collectReleaseGateReceipts({
       const muslCli = artifact.artifacts?.muslCli
       const muslArchive = artifact.artifacts?.muslCliArchive
       if (
-        packageInstall.schema !== 1
+        artifact.schema !== 2
+        || !['local-docker', 'remote-native'].includes(artifact.builderMode)
+        || (
+          artifact.builderMode === 'local-docker'
+          && (
+            artifact.builtOnHostMac !== true
+            || artifact.builtOnRemoteVm !== false
+            || artifact.builderHostOs !== 'Darwin'
+            || !['arm64', 'x86_64'].includes(
+              artifact.builderHostArchitecture,
+            )
+          )
+        )
+        || (
+          artifact.builderMode === 'remote-native'
+          && (
+            artifact.builtOnHostMac !== false
+            || artifact.builtOnRemoteVm !== true
+            || artifact.builderHostOs !== 'Linux'
+            || artifact.builderHostArchitecture !== 'x86_64'
+          )
+        )
+        || !/^sha256:[0-9a-f]{64}$/.test(artifact.containerImageId ?? '')
+        || !/^[0-9a-f]{64}$/.test(artifact.dockerfileSha256 ?? '')
+        || !/^[0-9a-f]{64}$/.test(
+          artifact.containerPayloadSha256 ?? '',
+        )
+        || packageInstall.schema !== 2
         || packageInstall.artifactType
-          !== 'host-built exact Debian package installed on Ubuntu VM'
+          !== 'exact Debian package installed on Ubuntu VM'
         || packageInstall.appGitSha !== commit
         || packageInstall.appGitTree !== tree
         || packageInstall.fipsGitSha !== artifact.fipsGitSha
         || packageInstall.fipsGitTree !== artifact.fipsGitTree
-        || packageInstall.builtOnHostMac !== true
-        || packageInstall.builtOnRemoteVm !== false
+        || packageInstall.builderMode !== artifact.builderMode
+        || packageInstall.builtOnHostMac !== artifact.builtOnHostMac
+        || packageInstall.builtOnRemoteVm !== artifact.builtOnRemoteVm
+        || packageInstall.builderHostOs !== artifact.builderHostOs
+        || packageInstall.builderHostArchitecture
+          !== artifact.builderHostArchitecture
+        || packageInstall.containerImageId !== artifact.containerImageId
+        || packageInstall.dockerfileSha256 !== artifact.dockerfileSha256
+        || packageInstall.containerPayloadSha256
+          !== artifact.containerPayloadSha256
         || packageInstall.package !== 'nostr-vpn'
         || packageInstall.packageArchitecture !== 'amd64'
         || packageInstall.packageInstalledByDpkg !== true

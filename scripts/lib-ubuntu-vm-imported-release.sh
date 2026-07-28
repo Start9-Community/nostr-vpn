@@ -48,6 +48,7 @@ ubuntu_vm_import_release_bundle() {
   local fips_sha fips_tree fips_version target evidence_dir remote_dir
   local root_lock_sha root_realized_lock_sha
   local linux_lock_sha linux_realized_lock_sha
+  local builder_mode rust_toolchain dockerfile_sha payload_sha
   local -a fips_patch_packages=()
   local package
   local app_hash app_size cli_hash cli_size fixture_hash fixture_size
@@ -75,6 +76,7 @@ ubuntu_vm_import_release_bundle() {
   fips_sha="$(jq -er '.fipsGitSha' "$receipt")" || return 1
   fips_tree="$(jq -er '.fipsGitTree' "$receipt")" || return 1
   fips_version="$(jq -er '.fipsVersion' "$receipt")" || return 1
+  builder_mode="$(jq -er '.builderMode' "$receipt")" || return 1
   # shellcheck disable=SC1091
   source "$ROOT/scripts/release_common.sh"
   # shellcheck disable=SC1091
@@ -110,6 +112,15 @@ ubuntu_vm_import_release_bundle() {
       "${fips_patch_packages[@]}"
   )" || return 1
   target="$(jq -er '.target' "$receipt")" || return 1
+  rust_toolchain="${NVPN_HOST_LINUX_VM_RUST_TOOLCHAIN:-1.95.0}"
+  dockerfile_sha="$(
+    shasum -a 256 "$ROOT/Dockerfile.linux-vm-gate" | awk '{print $1}'
+  )" || return 1
+  payload_sha="$(
+    shasum -a 256 \
+      "$ROOT/scripts/build-host-linux-vm-bundle-in-container.sh" \
+      | awk '{print $1}'
+  )" || return 1
   [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$app_sha" \
     && "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" == "$app_tree" \
     && -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
@@ -128,6 +139,7 @@ ubuntu_vm_import_release_bundle() {
     "$fips_sha" "$fips_tree" "$fips_version" \
     "$root_lock_sha" "$root_realized_lock_sha" \
     "$linux_lock_sha" "$linux_realized_lock_sha" "$target" \
+    "$builder_mode" "$rust_toolchain" "$dockerfile_sha" "$payload_sha" \
     "${fips_patch_packages[@]}" \
     >/dev/null || {
       ubuntu_vm_import_error "host bundle verification failed"
@@ -194,7 +206,8 @@ ubuntu_vm_import_release_bundle() {
     "$fixture_hash" "$fixture_size" \
     "$musl_hash" "$musl_size" \
     "$archive_hash" "$archive_size" \
-    "$deb_hash" "$deb_size" <<'GUEST'
+    "$deb_hash" "$deb_size" \
+    "$builder_mode" "$dockerfile_sha" "$payload_sha" <<'GUEST'
 set -euo pipefail
 remote_dir="$1"
 guest_repo="$2"
@@ -224,6 +237,9 @@ archive_hash="${25}"
 archive_size="${26}"
 deb_hash="${27}"
 deb_size="${28}"
+builder_mode="${29}"
+dockerfile_sha="${30}"
+payload_sha="${31}"
 [[ "$fips_core_patch_spec" == fips-core=* ]]
 [[ "$fips_endpoint_patch_spec" == fips-endpoint=* ]]
 [[ "$fips_identity_patch_spec" == fips-identity=* ]]
@@ -277,6 +293,9 @@ jq -e \
   --arg fips_endpoint_patch_version "$fips_endpoint_patch_version" \
   --arg fips_identity_patch_version "$fips_identity_patch_version" \
   --arg target "$target" \
+  --arg builder_mode "$builder_mode" \
+  --arg dockerfile_sha "$dockerfile_sha" \
+  --arg payload_sha "$payload_sha" \
   --arg app_hash "$app_hash" \
   --argjson app_size "$app_size" \
   --arg cli_hash "$cli_hash" \
@@ -289,9 +308,30 @@ jq -e \
   --argjson archive_size "$archive_size" \
   --arg deb_hash "$deb_hash" \
   --argjson deb_size "$deb_size" '
-    .schema == 1
-    and .builtOnHostMac == true
-    and .builtOnRemoteVm == false
+    .schema == 2
+    and .builderMode == $builder_mode
+    and (
+      (
+        $builder_mode == "local-docker"
+        and .builtOnHostMac == true
+        and .builtOnRemoteVm == false
+        and .builderHostOs == "Darwin"
+        and (
+          .builderHostArchitecture == "arm64"
+          or .builderHostArchitecture == "x86_64"
+        )
+      )
+      or (
+        $builder_mode == "remote-native"
+        and .builtOnHostMac == false
+        and .builtOnRemoteVm == true
+        and .builderHostOs == "Linux"
+        and .builderHostArchitecture == "x86_64"
+      )
+    )
+    and (.containerImageId | test("^sha256:[0-9a-f]{64}$"))
+    and .dockerfileSha256 == $dockerfile_sha
+    and .containerPayloadSha256 == $payload_sha
     and .appGitSha == $app_sha
     and .appGitTree == $app_tree
     and .appVersion == $app_version
@@ -437,16 +477,25 @@ import tempfile
 ) = sys.argv[1:]
 bundle_receipt = pathlib.Path(bundle_receipt_arg)
 output = pathlib.Path(output_arg)
+bundle_payload = json.loads(bundle_receipt.read_text(encoding="utf-8"))
+if bundle_payload.get("schema") != 2:
+    raise SystemExit("installed package receipt requires bundle schema 2")
 payload = {
-    "schema": 1,
-    "artifactType": "host-built exact Debian package installed on Ubuntu VM",
+    "schema": 2,
+    "artifactType": "exact Debian package installed on Ubuntu VM",
     "appGitSha": app_sha,
     "appGitTree": app_tree,
     "fipsGitSha": fips_sha,
     "fipsGitTree": fips_tree,
     "appVersion": app_version,
-    "builtOnHostMac": True,
-    "builtOnRemoteVm": False,
+    "builderMode": bundle_payload["builderMode"],
+    "builtOnHostMac": bundle_payload["builtOnHostMac"],
+    "builtOnRemoteVm": bundle_payload["builtOnRemoteVm"],
+    "builderHostOs": bundle_payload["builderHostOs"],
+    "builderHostArchitecture": bundle_payload["builderHostArchitecture"],
+    "containerImageId": bundle_payload["containerImageId"],
+    "dockerfileSha256": bundle_payload["dockerfileSha256"],
+    "containerPayloadSha256": bundle_payload["containerPayloadSha256"],
     "package": "nostr-vpn",
     "packageArchitecture": "amd64",
     "packageInstalledByDpkg": True,
@@ -503,8 +552,12 @@ GUEST
     "$SSH_HOST:$remote_dir/debian-package-install.json" \
     "$evidence_dir/debian-package-install.json"
   {
-    printf 'builtOnHostMac=true\n'
-    printf 'builtOnRemoteVm=false\n'
+    printf 'builderMode=%s\n' "$(jq -er '.builderMode' "$receipt")"
+    printf 'builtOnHostMac=%s\n' "$(jq -er '.builtOnHostMac' "$receipt")"
+    printf 'builtOnRemoteVm=%s\n' "$(jq -er '.builtOnRemoteVm' "$receipt")"
+    printf 'builderHostOs=%s\n' "$(jq -er '.builderHostOs' "$receipt")"
+    printf 'builderHostArchitecture=%s\n' \
+      "$(jq -er '.builderHostArchitecture' "$receipt")"
     printf 'appGitSha=%s\n' "$app_sha"
     printf 'appGitTree=%s\n' "$app_tree"
     printf 'fipsGitSha=%s\n' "$fips_sha"
