@@ -1041,6 +1041,7 @@ PY
 python3 - "$ROOT/scripts/fleet_release_canary_remote_linux.py" <<'PY'
 import copy
 import hashlib
+import json
 import os
 import pathlib
 import sys
@@ -1229,6 +1230,89 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
                     f"{field} drift mutated install state or user stage"
                 )
 
+        stage = work / "config-binding.artifact"
+        stage.write_bytes(candidate)
+        transaction_root = work / "config-binding-transactions"
+        transaction_root.mkdir(mode=0o700)
+        target = {
+            "id": "config-binding",
+            "deployment": {
+                "authorization": "install",
+                "binaryPath": "/usr/local/bin/nvpn",
+                "configPath": "/etc/nvpn/config.toml",
+                "transactionRoot": str(transaction_root),
+            },
+            "expected": frozen,
+            "checks": {},
+        }
+        expected = {
+            "transactionId": "4" * 32,
+            "rosterFreshnessDeadline": 4_000_000_000,
+            "artifactSha256": candidate_sha256,
+            "artifactSize": len(candidate),
+            "installedBinarySha256": candidate_sha256,
+            "installTransition": "candidate-transition",
+            "preinstallProbe": preinstall_probe,
+            "installPayload": {"format": "executable", "companions": []},
+            "appVersion": "4.1.5",
+            "fipsVersion": "0.4.45",
+            "fipsGitSha": fips_sha,
+            "expected": frozen,
+        }
+        state = copy.deepcopy(base_state)
+        state.update(
+            {
+                "unit": "nvpn.service",
+                "binaryPath": pathlib.Path("/usr/local/bin/nvpn"),
+                "configPath": pathlib.Path("/etc/nvpn/config.toml"),
+            }
+        )
+        state["service"] = {
+            "installed": True,
+            "enabled": True,
+            "running": False,
+            "binaryPresent": True,
+            "binarySha256": preinstall_binary_sha256,
+            "_configuredBinaryResolvedPath": "/usr/local/bin/nvpn",
+            "_execStartPath": "/usr/local/bin/nvpn",
+            "_execStartResolvedPath": "/usr/local/bin/nvpn",
+            "_execStartArgv": [
+                "/usr/local/bin/nvpn",
+                "daemon",
+                "--service",
+                "--config",
+                "/etc/nvpn/other.toml",
+            ],
+            "_mainProcessExePath": None,
+            "_mainProcessExeSha256": None,
+        }
+        original_capture = namespace["capture"]
+        original_snapshot = namespace["snapshot_transaction"]
+        mutations = []
+        namespace["capture"] = (
+            lambda _target, *, checks, identity_binary,
+            identity_expectations, identity_workspace_root: state
+        )
+        namespace["snapshot_transaction"] = (
+            lambda *_args: mutations.append("snapshot")
+        )
+        try:
+            namespace["install_staged"]({}, target, expected, stage)
+        except RuntimeError as error:
+            if "config does not match" not in str(error):
+                raise SystemExit(
+                    f"config binding drift returned the wrong guard: {error}"
+                ) from error
+        else:
+            raise SystemExit("config binding drift was accepted")
+        finally:
+            namespace["capture"] = original_capture
+            namespace["snapshot_transaction"] = original_snapshot
+        if mutations or list(transaction_root.iterdir()) or not stage.is_file():
+            raise SystemExit(
+                "config binding drift reached the mutation boundary"
+            )
+
         for index, failure in enumerate(
             ("hash-precondition", "snapshot", "extraction"),
             start=10,
@@ -1367,21 +1451,107 @@ with tempfile.TemporaryDirectory(prefix="nvpn-linux-probe-drift.") as raw:
         else:
             os.environ["SUDO_USER"] = old_sudo_user
 
+def exec_start_property(arguments):
+    return json.dumps(
+        {
+            "type": "a(sasbttttuii)",
+            "data": [
+                [
+                    arguments[0],
+                    arguments,
+                    False,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+            ],
+        }
+    )
+
+
+exec_start_forms = (
+    (
+        [
+            "/usr/local/bin/nvpn",
+            "daemon",
+            "--service",
+            "--config",
+            "/home/dev/.config/nvpn/config.toml",
+            "--iface",
+            "nvpn0",
+        ],
+        "/home/dev/.config/nvpn/config.toml",
+    ),
+    (
+        [
+            "/usr/local/bin/nvpn",
+            "daemon",
+            "--service",
+            "--config",
+            "/home/dev/Nostr VPN/config.toml",
+            "--iface",
+            "nvpn0",
+        ],
+        "/home/dev/Nostr VPN/config.toml",
+    ),
+    (
+        [
+            "/usr/local/bin/nvpn",
+            "daemon",
+            "--service",
+            r"--config=/home/dev/Nostr\x20VPN/config.toml",
+            "--iface",
+            "nvpn0",
+        ],
+        r"/home/dev/Nostr\x20VPN/config.toml",
+    ),
+)
+for expected_argv, expected_config in exec_start_forms:
+    executable, argv = namespace["parse_systemd_exec_start_property"](
+        exec_start_property(expected_argv)
+    )
+    if executable != pathlib.Path("/usr/local/bin/nvpn") or argv != expected_argv:
+        raise SystemExit("Linux systemd argv parser changed the executable")
+    if (
+        namespace["systemd_exec_start_config_path"](argv)
+        != pathlib.Path(expected_config)
+    ):
+        raise SystemExit("Linux systemd argv parser changed the config path")
+
 runtime_state = {
     "_configuredBinaryResolvedPath": "/usr/local/bin/nvpn",
     "_execStartPath": "/usr/local/bin/nvpn",
     "_execStartResolvedPath": "/usr/local/bin/nvpn",
+    "_execStartArgv": [
+        "/usr/local/bin/nvpn",
+        "daemon",
+        "--service",
+        "--config",
+        "/etc/nvpn/config.toml",
+        "--iface",
+        "nvpn0",
+    ],
     "_mainProcessExePath": "/usr/local/bin/nvpn",
     "_mainProcessExeSha256": candidate_sha256,
 }
 runtime = namespace["assert_service_runtime_binding"](
     runtime_state,
     pathlib.Path("/usr/local/bin/nvpn"),
+    pathlib.Path("/etc/nvpn/config.toml"),
     candidate_sha256,
 )
 if (
     runtime["configuredBinaryResolvedPath"] != "/usr/local/bin/nvpn"
     or runtime["execStartResolvedPath"] != "/usr/local/bin/nvpn"
+    or runtime["configBindingVerified"] is not True
+    or runtime["configuredConfigPathSha256"]
+    != hashlib.sha256(b"/etc/nvpn/config.toml").hexdigest()
+    or runtime["execStartConfigPathSha256"]
+    != hashlib.sha256(b"/etc/nvpn/config.toml").hexdigest()
     or runtime["mainProcessExePath"] != "/usr/local/bin/nvpn"
     or runtime["mainProcessExeSha256"] != candidate_sha256
 ):
@@ -1409,6 +1579,7 @@ for field, bad_value, expected_error in (
         namespace["assert_service_runtime_binding"](
             stale,
             pathlib.Path("/usr/local/bin/nvpn"),
+            pathlib.Path("/etc/nvpn/config.toml"),
             candidate_sha256,
         )
     except RuntimeError as error:
@@ -1418,12 +1589,88 @@ for field, bad_value, expected_error in (
             ) from error
     else:
         raise SystemExit(f"Linux {field} drift was accepted")
+for argv, expected_error in (
+    (
+        [
+            "/usr/local/bin/nvpn",
+            "daemon",
+            "--service",
+            "--iface",
+            "nvpn0",
+        ],
+        "systemd ExecStart requires exactly one --config argument",
+    ),
+    (
+        [
+            "/usr/local/bin/nvpn",
+            "daemon",
+            "--service",
+            "--config",
+            "/etc/nvpn/config.toml",
+            "--config=/etc/nvpn/config.toml",
+        ],
+        "systemd ExecStart requires exactly one --config argument",
+    ),
+    (
+        [
+            "/usr/local/bin/nvpn",
+            "daemon",
+            "--service",
+            "--config",
+            "/etc/nvpn/other.toml",
+        ],
+        "systemd ExecStart config does not match the configured config",
+    ),
+):
+    stale = copy.deepcopy(runtime_state)
+    stale["_execStartArgv"] = argv
+    try:
+        namespace["assert_service_runtime_binding"](
+            stale,
+            pathlib.Path("/usr/local/bin/nvpn"),
+            pathlib.Path("/etc/nvpn/config.toml"),
+            candidate_sha256,
+        )
+    except RuntimeError as error:
+        if expected_error not in str(error):
+            raise SystemExit(
+                f"Linux config binding drift returned the wrong guard: {error}"
+            ) from error
+    else:
+        raise SystemExit("Linux config binding drift was accepted")
+with tempfile.TemporaryDirectory(prefix="nvpn-config-binding.") as raw:
+    config_root = pathlib.Path(raw)
+    canonical_config = config_root / "config.toml"
+    canonical_config.write_text("fixture\n", encoding="utf-8")
+    config_alias = config_root / "config-alias.toml"
+    config_alias.symlink_to(canonical_config)
+    aliased = copy.deepcopy(runtime_state)
+    aliased["_execStartArgv"] = [
+        "/usr/local/bin/nvpn",
+        "daemon",
+        "--service",
+        "--config",
+        str(config_alias),
+    ]
+    try:
+        namespace["assert_service_config_binding"](
+            aliased,
+            canonical_config,
+        )
+    except RuntimeError as error:
+        if "config does not match" not in str(error):
+            raise SystemExit(
+                f"Linux config symlink returned the wrong guard: {error}"
+            ) from error
+    else:
+        raise SystemExit("Linux config binding accepted a symlink substitution")
 stopped = copy.deepcopy(runtime_state)
 stopped["_mainProcessExePath"] = None
 stopped["_mainProcessExeSha256"] = None
 stopped_runtime = namespace["assert_service_runtime_binding"](
     stopped,
     pathlib.Path("/usr/local/bin/nvpn"),
+    pathlib.Path("/etc/nvpn/config.toml"),
     candidate_sha256,
     require_process=False,
 )
@@ -1437,6 +1684,7 @@ try:
     namespace["assert_service_runtime_binding"](
         stopped,
         pathlib.Path("/usr/local/bin/nvpn"),
+        pathlib.Path("/etc/nvpn/config.toml"),
         candidate_sha256,
         require_process=False,
     )

@@ -99,7 +99,7 @@ def service_properties(unit: str) -> dict[str, str]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,UnitFileState,ActiveState,MainPID,FragmentPath,ExecStart",
+            "--property=LoadState,UnitFileState,ActiveState,MainPID,FragmentPath",
             "--no-pager",
         ],
         check=False,
@@ -112,13 +112,74 @@ def service_properties(unit: str) -> dict[str, str]:
     return values
 
 
-def systemd_exec_start_path(value: str) -> pathlib.Path:
-    matches = re.findall(r"(?:^|[{\s;])path=([^ ;}]+)", value)
-    if len(matches) != 1:
-        fail("systemd service does not expose one exact ExecStart path")
-    path = pathlib.Path(matches[0])
-    if not path.is_absolute():
+def parse_systemd_exec_start_property(value: str) -> tuple[pathlib.Path, list[str]]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        fail(f"systemd ExecStart D-Bus property is invalid JSON: {error}")
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("type") != "a(sasbttttuii)"
+        or not isinstance(parsed.get("data"), list)
+        or len(parsed["data"]) != 1
+    ):
+        fail("systemd service does not expose one exact ExecStart command")
+    command = parsed["data"][0]
+    if (
+        not isinstance(command, list)
+        or len(command) != 10
+        or not isinstance(command[0], str)
+        or not isinstance(command[1], list)
+        or not command[1]
+        or not all(isinstance(argument, str) for argument in command[1])
+        or command[1][0] != command[0]
+    ):
+        fail("systemd service ExecStart command is invalid")
+    executable = pathlib.Path(command[0])
+    if not executable.is_absolute():
         fail("systemd ExecStart path is not absolute")
+    return executable, command[1]
+
+
+def systemd_exec_start_command(unit: str) -> tuple[pathlib.Path, list[str]]:
+    if unit != "nvpn.service":
+        fail("Linux fleet serviceName must be nvpn.service")
+    # `systemctl show` renders argv as a human-oriented escaped string. Read
+    # systemd's typed D-Bus property so quoted/C-escaped unit values are already
+    # decoded into their exact process arguments before enforcing the binding.
+    result = run(
+        [
+            "busctl",
+            "--json=short",
+            "get-property",
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1/unit/nvpn_2eservice",
+            "org.freedesktop.systemd1.Service",
+            "ExecStart",
+        ]
+    )
+    return parse_systemd_exec_start_property(result.stdout)
+
+
+def systemd_exec_start_config_path(arguments: list[str]) -> pathlib.Path:
+    values: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--config":
+            if index + 1 >= len(arguments):
+                fail("systemd ExecStart requires exactly one --config argument")
+            values.append(arguments[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--config="):
+            values.append(argument.removeprefix("--config="))
+        index += 1
+    if len(values) != 1 or not values[0]:
+        fail("systemd ExecStart requires exactly one --config argument")
+    path = pathlib.Path(values[0])
+    if not path.is_absolute():
+        fail("systemd ExecStart config path is not absolute")
     return path
 
 
@@ -164,8 +225,9 @@ def service_snapshot(
     )
     exec_start_path = None
     exec_start_resolved = None
+    exec_start_argv = None
     if installed:
-        exec_start = systemd_exec_start_path(properties.get("ExecStart", ""))
+        exec_start, exec_start_argv = systemd_exec_start_command(unit)
         exec_start_path = str(exec_start)
         try:
             exec_start_resolved = str(exec_start.resolve(strict=True))
@@ -194,18 +256,42 @@ def service_snapshot(
         "_configuredBinaryResolvedPath": configured_resolved,
         "_execStartPath": exec_start_path,
         "_execStartResolvedPath": exec_start_resolved,
+        "_execStartArgv": exec_start_argv,
         "_mainProcessExePath": main_process_exe_path,
         "_mainProcessExeSha256": main_process_exe_sha256,
+    }
+
+
+def assert_service_config_binding(
+    service: dict[str, Any],
+    config_path: pathlib.Path,
+) -> dict[str, Any]:
+    arguments = service.get("_execStartArgv")
+    if not isinstance(arguments, list) or not all(
+        isinstance(argument, str) for argument in arguments
+    ):
+        fail("systemd service lacks an exact ExecStart argv")
+    exec_start_config = systemd_exec_start_config_path(arguments)
+    if exec_start_config != config_path:
+        fail("systemd ExecStart config does not match the configured config")
+    configured_receipt = digest_bytes(str(config_path).encode())
+    exec_start_receipt = digest_bytes(str(exec_start_config).encode())
+    return {
+        "configBindingVerified": True,
+        "configuredConfigPathSha256": configured_receipt,
+        "execStartConfigPathSha256": exec_start_receipt,
     }
 
 
 def assert_service_runtime_binding(
     service: dict[str, Any],
     binary_path: pathlib.Path,
+    config_path: pathlib.Path,
     installed_binary_sha256: str,
     *,
     require_process: bool = True,
 ) -> dict[str, Any]:
+    config_binding = assert_service_config_binding(service, config_path)
     configured_resolved = service.get("_configuredBinaryResolvedPath")
     if not isinstance(configured_resolved, str) or not configured_resolved:
         fail("configured binary does not resolve to an installed executable")
@@ -231,6 +317,7 @@ def assert_service_runtime_binding(
         "execStartResolvedPath": exec_start_resolved,
         "mainProcessExePath": main_process_path,
         "mainProcessExeSha256": main_process_hash,
+        **config_binding,
     }
 
 
@@ -585,6 +672,10 @@ def capture(
     probe_version = version_json(probe_binary)
     installed_status_before = status_json(probe_binary, config)
     service_before = service_snapshot(unit, binary)
+    if service_before["installed"]:
+        service_before.update(
+            assert_service_config_binding(service_before, config)
+        )
     network_before = network_snapshot(
         installed_status_before,
         checks,
@@ -615,6 +706,10 @@ def capture(
     config_value = config_snapshot(config, candidate_status)
     installed_status_after = status_json(probe_binary, config)
     service_after = service_snapshot(unit, binary)
+    if service_after["installed"]:
+        service_after.update(
+            assert_service_config_binding(service_after, config)
+        )
     network_after = network_snapshot(installed_status_after, checks)
     installed_hash_after = digest_file(probe_binary)
     candidate_hash_after = digest_file(identity_binary)
@@ -1012,6 +1107,7 @@ def restore_transaction(
         runtime_binding = assert_service_runtime_binding(
             after["service"],
             binary,
+            config,
             prior["binarySha256"],
             require_process=prior["running"],
         )
@@ -1083,6 +1179,7 @@ def install_staged(
             assert_service_runtime_binding(
                 before["service"],
                 before["binaryPath"],
+                before["configPath"],
                 before["service"]["binarySha256"],
                 require_process=before["service"]["running"],
             )
@@ -1149,6 +1246,7 @@ def install_staged(
         assert_service_runtime_binding(
             first["service"],
             binary,
+            config,
             expected["installedBinarySha256"],
         )
         status_before = first["status"]
@@ -1184,6 +1282,7 @@ def install_staged(
         runtime_binding = assert_service_runtime_binding(
             final["service"],
             binary,
+            config,
             expected["installedBinarySha256"],
         )
         final_answers, final_dns_receipt = dns_probe(str(target["checks"]["dnsName"]))
