@@ -241,6 +241,32 @@ fi
   && -z "${RELEASE_GATE_PARALLEL_PGIDS[$successful_orphan]:-}" ]] \
   || fail "successful lane orphan wrapper/process group was not reaped"
 
+release_gate_parallel_wait_group \
+  || fail "empty parallel group did not complete successfully"
+
+set +e
+fully_drained_output="$(
+  /bin/bash -c '
+    set -euo pipefail
+    root_dir="$1"
+    log_dir="$2"
+    source "$root_dir/scripts/lib-release-gate-parallel.sh"
+    release_gate_parallel_init "$log_dir"
+    release_gate_parallel_start "fully drained first lane" true >/dev/null
+    first="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    release_gate_parallel_start "fully drained second lane" true >/dev/null
+    second="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    release_gate_parallel_wait_group "$first" "$second" >/dev/null
+    printf "fully drained join passed\n"
+  ' _ "$ROOT_DIR" "$tmp/fully-drained-logs" 2>&1
+)"
+fully_drained_status=$?
+set -e
+[[ "$fully_drained_status" == "0" ]] \
+  || fail "fully drained parallel group failed under nounset: $fully_drained_output"
+[[ "$fully_drained_output" == *"fully drained join passed"* ]] \
+  || fail "fully drained parallel group did not finish its join"
+
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
 required_modes_lib="$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
 [[ -f "$required_modes_lib" ]] \

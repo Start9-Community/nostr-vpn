@@ -232,7 +232,13 @@ release_gate_parallel_wait_group() {
         return "$status"
       fi
     done
-    remaining=("${pending[@]}")
+    # Bash 3 treats "${pending[@]}" as an unbound expansion under `set -u`
+    # when every lane was reaped in this poll.
+    if ((${#pending[@]})); then
+      remaining=("${pending[@]}")
+    else
+      remaining=()
+    fi
     if ((${#remaining[@]})); then
       sleep 0.1
     fi
