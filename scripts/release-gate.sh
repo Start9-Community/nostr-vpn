@@ -2076,10 +2076,10 @@ main() {
   # overlap work on resource-isolated remote hosts.
   run_release_gate_candidate_preflight
 
-  # These preparation lanes read or snapshot the tracked candidate. They may
-  # overlap the non-mutating static preflight, but all must finish before the
-  # shared local-FIPS session realizes Cargo.lock. The already-synced VM
-  # verification lanes start again below and overlap Rust/Docker validation.
+  # These preparation lanes read or snapshot the tracked candidate. Join all
+  # of them before any Cargo command: an ignored user Cargo patch config can
+  # make even a nominally static check realize Cargo.lock. The already-synced
+  # VM verification lanes start again below and overlap host validation.
   local platform_preparation_lanes=()
   local windows_platform_requested_for_gate=0
   if windows_platform_lane_requested; then
@@ -2112,13 +2112,6 @@ main() {
       prepare_host_linux_vm_bundle_and_record
     platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
-
-  run_release_gate_static_preflight
-
-  release_gate_parallel_start \
-    "Android compile, unit tests, and lint" \
-    run_android_static_validation_lane
-  local android_static_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 
   release_gate_parallel_wait_group "${platform_preparation_lanes[@]}"
   if [[ -e "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" ]]; then
@@ -2170,9 +2163,15 @@ main() {
     linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
   fi
 
-  # The remote Windows lane and the shared Docker image build do not consume
-  # measurement devices. Build them alongside host Rust validation, then join
-  # the image before any Docker functional/performance test starts.
+  # Android static checks do not build Rust, and the Docker builder owns an
+  # isolated context/cache. Start both immediately beside the remote platform
+  # lanes; host Rust waits until synchronous static checks finish so Cargo
+  # commands never race each other over the shared realized lock.
+  release_gate_parallel_start \
+    "Android compile, unit tests, and lint" \
+    run_android_static_validation_lane
+  local android_static_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+
   local docker_build_lane=""
   if docker_release_gates_enabled; then
     export NVPN_E2E_NODE_IMAGE="${NVPN_RELEASE_GATE_E2E_NODE_IMAGE:-${NVPN_E2E_NODE_IMAGE:-nostr-vpn-e2e-node}}"
@@ -2181,6 +2180,7 @@ main() {
     docker_build_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
   fi
 
+  run_release_gate_static_preflight
   run_rust_validation_lane
   release_gate_parallel_wait "$android_static_lane"
 

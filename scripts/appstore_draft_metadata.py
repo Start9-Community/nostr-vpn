@@ -132,22 +132,45 @@ Before first VPN activation, the app explains the connection data needed for con
 
 def _claims_unverified_french_approval(notes: str) -> bool:
     normalized = re.sub(r"\s+", " ", notes.lower())
-    claims_approval_or_link = (
-        "approv" in normalized
-        or "attach" in normalized
-        or "link" in normalized
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", normalized)
+        if sentence.strip()
+    ]
+    subject = re.compile(
+        r"(?:\b(?:french|france)\b.*\b(?:encryption|export[ -]compliance)\b"
+        r"|\b(?:encryption|export[ -]compliance)\b.*\bdeclaration\b)"
     )
-    identifies_french_export_compliance = (
-        ("french" in normalized or "france" in normalized)
-        and (
-            "encryption" in normalized
-            or "export-compliance" in normalized
-            or "export compliance" in normalized
+    positive = re.compile(
+        r"\b(?:approval|approved|accepted|granted|cleared|attached|linked|"
+        r"associated|assigned)\b"
+    )
+    pending_or_negated = re.compile(
+        r"\b(?:no|not|never|without|pending|awaiting|unapproved|rejected|denied)\b"
+    )
+    referential = re.compile(r"\b(?:it|this|that|declaration|approval|apple|build)\b")
+
+    def positive_claim(sentence: str) -> bool:
+        clauses = re.split(
+            r"[,;:]|\b(?:but|however|although)\b",
+            sentence,
         )
-    )
-    return claims_approval_or_link and (
-        "declaration" in normalized or identifies_french_export_compliance
-    )
+        return any(
+            positive.search(clause) and not pending_or_negated.search(clause)
+            for clause in clauses
+        )
+
+    for index, sentence in enumerate(sentences):
+        if not subject.search(sentence):
+            continue
+        if positive_claim(sentence):
+            return True
+        if index + 1 >= len(sentences):
+            continue
+        following = sentences[index + 1]
+        if referential.search(following) and positive_claim(following):
+            return True
+    return False
 
 
 def _review_notes_value(

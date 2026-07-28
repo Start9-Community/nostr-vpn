@@ -142,6 +142,76 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                         environ={"NVPN_APPSTORE_REVIEW_NOTES": claim},
                     )
 
+    def test_unproved_override_allows_unrelated_purchase_link_and_france(self):
+        notes = (
+            "The iOS target contains no wallet or paid-exit UI/runtime, "
+            "purchase path, or external purchase link. "
+            "It uses NEPacketTunnelProvider plus app-implemented WireGuard "
+            "and encrypted FIPS/Nostr transport and is declared as non-exempt "
+            "encryption. Availability is worldwide, including France and China."
+        )
+
+        self.assertEqual(
+            metadata.review_notes(
+                "4.1.5",
+                None,
+                environ={"NVPN_APPSTORE_REVIEW_NOTES": notes},
+            ),
+            notes,
+        )
+        self.assertEqual(
+            metadata.testflight_review_notes(
+                "4.1.5",
+                None,
+                environ={"NVPN_TESTFLIGHT_REVIEW_NOTES": notes},
+            ),
+            notes,
+        )
+
+    def test_unproved_override_may_truthfully_say_declaration_is_not_approved(self):
+        for notes in (
+            (
+                "The French-store encryption declaration is not yet approved "
+                "or linked to this build."
+            ),
+            "Approval for the French encryption declaration remains pending.",
+        ):
+            with self.subTest(notes=notes):
+                self.assertEqual(
+                    metadata.review_notes(
+                        "4.1.5",
+                        None,
+                        environ={"NVPN_APPSTORE_REVIEW_NOTES": notes},
+                    ),
+                    notes,
+                )
+
+    def test_unproved_override_cannot_hide_positive_claim_after_negation(self):
+        notes = (
+            "The French-store encryption declaration is not approved, but is "
+            "attached to this build."
+        )
+
+        with self.assertRaisesRegex(ValueError, "verified live build"):
+            metadata.review_notes(
+                "4.1.5",
+                None,
+                environ={"NVPN_APPSTORE_REVIEW_NOTES": notes},
+            )
+
+    def test_unproved_override_rejects_positive_approval_synonyms(self):
+        notes = (
+            "The French encryption declaration was accepted and associated "
+            "with this build."
+        )
+
+        with self.assertRaisesRegex(ValueError, "verified live build"):
+            metadata.review_notes(
+                "4.1.5",
+                None,
+                environ={"NVPN_APPSTORE_REVIEW_NOTES": notes},
+            )
+
     def test_boolean_cannot_stand_in_for_live_build_compliance_proof(self):
         with self.assertRaisesRegex(ValueError, "live build compliance proof"):
             metadata.review_notes(

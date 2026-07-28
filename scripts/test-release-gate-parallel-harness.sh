@@ -313,10 +313,6 @@ static_preflight_line="$(
   && -n "$windows_dispatch_line" \
   && -n "$static_preflight_line" ]] \
   || fail "release gate preflight/remote overlap markers are incomplete"
-(( candidate_preflight_line < windows_preparation_line \
-  && windows_preparation_line < static_preflight_line \
-  && static_preflight_line < windows_dispatch_line )) \
-  || fail "remote preparation does not overlap static preflight before platform verification"
 platform_preparation_wait_line="$(
   grep -nF 'release_gate_parallel_wait_group "${platform_preparation_lanes[@]}"' \
     "$release_gate" | cut -d: -f1 || true
@@ -328,9 +324,28 @@ local_fips_preparation_line="$(
 [[ -n "$platform_preparation_wait_line" \
   && -n "$local_fips_preparation_line" ]] \
   || fail "release gate local-FIPS ordering markers are incomplete"
-(( platform_preparation_wait_line < local_fips_preparation_line \
-  && local_fips_preparation_line < windows_dispatch_line )) \
-  || fail "candidate consumers can overlap shared local-FIPS Cargo.lock realization"
+(( candidate_preflight_line < windows_preparation_line \
+  && windows_preparation_line < platform_preparation_wait_line \
+  && platform_preparation_wait_line < local_fips_preparation_line \
+  && local_fips_preparation_line < windows_dispatch_line \
+  && windows_dispatch_line < static_preflight_line )) \
+  || fail "source preparation/static Cargo checks are not isolated around FIPS realization"
+android_static_dispatch_line="$(
+  grep -n '"Android compile, unit tests, and lint"' "$release_gate" \
+    | tail -1 | cut -d: -f1 || true
+)"
+docker_build_dispatch_line="$(
+  grep -n 'release_gate_parallel_start "Docker node image build"' \
+    "$release_gate" | tail -1 | cut -d: -f1 || true
+)"
+[[ -n "$android_static_dispatch_line" \
+  && -n "$docker_build_dispatch_line" ]] \
+  || fail "post-FIPS independent lane markers are incomplete"
+(( local_fips_preparation_line < android_static_dispatch_line \
+  && android_static_dispatch_line < static_preflight_line \
+  && local_fips_preparation_line < docker_build_dispatch_line \
+  && docker_build_dispatch_line < static_preflight_line )) \
+  || fail "independent Android/Docker work does not overlap stable-session static checks"
 preparation_receipt_writes="$(
   grep -A1 'write_platform_preparation_receipt \\' "$release_gate"
 )"
