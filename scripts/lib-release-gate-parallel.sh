@@ -53,7 +53,7 @@ release_gate_parallel_start() {
     set +m
     set -euo pipefail
     "$@"
-  ) >"$log_path" 2>&1 &
+  ) </dev/null >"$log_path" 2>&1 &
   pid=$!
   ((monitor_was_enabled)) || set +m
 

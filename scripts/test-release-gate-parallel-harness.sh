@@ -13,6 +13,10 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-release-gate-parallel.XXXXXX")"
 trap 'release_gate_parallel_cancel_all; rm -rf "$tmp"' EXIT
 release_gate_parallel_init "$tmp/logs"
 
+grep -Fq ') </dev/null >"$log_path" 2>&1 &' \
+  "$ROOT_DIR/scripts/lib-release-gate-parallel.sh" \
+  || fail "parallel lanes inherit the controller terminal as stdin"
+
 lane_waits_for_peer() {
   local peer_marker="$1"
   local own_marker="$2"
