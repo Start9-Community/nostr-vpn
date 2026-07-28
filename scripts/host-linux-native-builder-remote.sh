@@ -85,6 +85,7 @@ exec 3>&1
 exec 1>&2
 CONTAINER_OWNED=0
 OWNER_CONTAINER_OWNED=0
+TARGET_VOLUME_OWNED=0
 OWNER_CONTAINER_NAME="${CONTAINER_NAME}-owner"
 
 cleanup() {
@@ -101,6 +102,11 @@ cleanup() {
     fi
     host_linux_builder_stop_container \
       "$CONTAINER_NAME" "$BUILD_CACHE_ID" || cleanup_failed=1
+    if [[ "$TARGET_VOLUME_OWNED" == "1" ]]; then
+      host_linux_builder_remove_target_volume \
+        "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" \
+        "$TARGET_CACHE_GENERATION" || cleanup_failed=1
+    fi
   fi
   if [[ -d "$REMOTE_ROOT" && ! -L "$REMOTE_ROOT" ]]; then
     find "$REMOTE_ROOT" -xdev -depth -mindepth 1 -delete \
@@ -132,8 +138,14 @@ DOCKER_ENDPOINT="$(
   docker context inspect \
     --format '{{.Endpoints.docker.Host}}' "$(docker context show)"
 )"
-[[ "$DOCKER_ENDPOINT" == unix://* ]] || {
-  echo "remote native builder requires a local Unix Docker daemon" >&2
+[[ "$(docker context show)" == "default" \
+  && "$DOCKER_ENDPOINT" == "unix:///var/run/docker.sock" ]] || {
+  echo "remote native builder requires the exact default local Docker socket" >&2
+  exit 2
+}
+[[ -S /var/run/docker.sock && ! -L /var/run/docker.sock \
+  && "$(stat -c '%U:%G:%a' /var/run/docker.sock)" == "root:docker:660" ]] || {
+  echo "remote native builder Docker socket metadata differs" >&2
   exit 2
 }
 DOCKER_SERVER_PLATFORM="$(
@@ -177,21 +189,31 @@ git -C "$REMOTE_ROOT/fips" clean -ffd >/dev/null
 [[ "$(git -C "$REMOTE_ROOT/fips" rev-parse HEAD)" == "$FIPS_GIT_SHA" \
   && "$(git -C "$REMOTE_ROOT/fips" rev-parse 'HEAD^{tree}')" == "$FIPS_GIT_TREE" \
   && -z "$(git -C "$REMOTE_ROOT/fips" status --porcelain --untracked-files=all)" ]]
+git clone --no-hardlinks --quiet "$REMOTE_ROOT/app" "$REMOTE_ROOT/build-app"
+git -C "$REMOTE_ROOT/build-app" checkout --detach --quiet "$APP_GIT_SHA"
+git -C "$REMOTE_ROOT/build-app" clean -ffd >/dev/null
 
 DOCKERFILE="$REMOTE_ROOT/app/Dockerfile.linux-vm-gate"
 PAYLOAD="$REMOTE_ROOT/app/scripts/build-host-linux-vm-bundle-in-container.sh"
+PATCH_LOCK_VERIFIER="$REMOTE_ROOT/app/scripts/verify-cargo-path-patch-lock.py"
+CARGO_CACHE_VERIFIER="$REMOTE_ROOT/app/scripts/host_linux_cargo_archive_cache.py"
+SOURCE_AUDITOR="$REMOTE_ROOT/app/scripts/verify_host_linux_build_source.py"
 [[ -f "$DOCKERFILE" && ! -L "$DOCKERFILE" \
-  && -x "$PAYLOAD" && ! -L "$PAYLOAD" ]]
+  && -x "$PAYLOAD" && ! -L "$PAYLOAD" \
+  && -x "$PATCH_LOCK_VERIFIER" && ! -L "$PATCH_LOCK_VERIFIER" \
+  && -x "$CARGO_CACHE_VERIFIER" && ! -L "$CARGO_CACHE_VERIFIER" \
+  && -x "$SOURCE_AUDITOR" && ! -L "$SOURCE_AUDITOR" ]]
 [[ "$(sha256sum "$DOCKERFILE" | awk '{print $1}')" \
   == "$EXPECTED_DOCKERFILE_SHA256" ]]
 [[ "$(sha256sum "$PAYLOAD" | awk '{print $1}')" \
   == "$EXPECTED_PAYLOAD_SHA256" ]]
 
 STATE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/nostr-vpn-linux-release-builder"
-mkdir -p "$STATE_ROOT/cargo-home"
+mkdir -p "$STATE_ROOT/cargo-archives"
 [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" \
-  && -d "$STATE_ROOT/cargo-home" && ! -L "$STATE_ROOT/cargo-home" ]]
-chmod 0700 "$STATE_ROOT" "$STATE_ROOT/cargo-home"
+  && -d "$STATE_ROOT/cargo-archives" \
+  && ! -L "$STATE_ROOT/cargo-archives" ]]
+chmod 0700 "$STATE_ROOT" "$STATE_ROOT/cargo-archives"
 exec 9>"$STATE_ROOT/builder.lock"
 chmod 0600 "$STATE_ROOT/builder.lock"
 flock 9
@@ -200,12 +222,40 @@ flock 9
 source "$REMOTE_ROOT/app/scripts/lib-host-linux-builder-isolation.sh"
 host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
 host_linux_builder_stop_container "$OWNER_CONTAINER_NAME" "$BUILD_CACHE_ID"
-host_linux_builder_ensure_target_volume \
+host_linux_builder_create_fresh_target_volume \
   "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
 CONTAINER_OWNED=1
+TARGET_VOLUME_OWNED=1
 
 mkdir -m 0700 "$REMOTE_ROOT/output"
 mkdir -m 0700 "$REMOTE_ROOT/docker-context"
+mkdir -m 0700 "$REMOTE_ROOT/cargo-home"
+mkdir -m 0700 "$REMOTE_ROOT/package-root-target"
+mkdir -m 0700 "$REMOTE_ROOT/package-linux-target"
+fips_packages=()
+while IFS= read -r package; do
+  fips_packages+=("$package")
+done < <(python3 "$PATCH_LOCK_VERIFIER" --manifest-specs "$REMOTE_ROOT/fips")
+[[ "${#fips_packages[@]}" == 3 ]]
+python3 "$PATCH_LOCK_VERIFIER" \
+  --materialize "$REMOTE_ROOT/app/Cargo.lock" \
+  "$REMOTE_ROOT/root-realized.lock" \
+  "${fips_packages[@]}" >/dev/null
+python3 "$PATCH_LOCK_VERIFIER" \
+  --materialize "$REMOTE_ROOT/app/linux/Cargo.lock" \
+  "$REMOTE_ROOT/linux-realized.lock" \
+  "${fips_packages[@]}" >/dev/null
+DOWNLOAD_CACHE_ID="$(
+  printf '%s:%s\n' \
+    "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    "$LINUX_REALIZED_CARGO_LOCK_SHA256" \
+    | sha256sum | awk '{print $1}'
+)"
+DOWNLOAD_CACHE_DIR="$STATE_ROOT/cargo-archives/$DOWNLOAD_CACHE_ID"
+python3 "$CARGO_CACHE_VERIFIER" seed \
+  "$DOWNLOAD_CACHE_DIR" "$REMOTE_ROOT/cargo-home" \
+  "$REMOTE_ROOT/root-realized.lock" \
+  "$REMOTE_ROOT/linux-realized.lock"
 IMAGE_TAG="nostr-vpn-linux-vm-gate:ubuntu24.04-rust${RUST_TOOLCHAIN//./-}-${BUILD_CACHE_ID:0:12}"
 docker build \
   --platform linux/amd64 \
@@ -218,64 +268,95 @@ CONTAINER_IMAGE_ID="$(
 )"
 [[ "$CONTAINER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
 
-# A named Docker volume is root-owned when first created. Give the serialized
-# build identity ownership before dropping privileges. The root-owned marker
-# makes the recursive migration a one-time operation for this exact cache,
-# generation, uid, and gid; subsequent builds only validate it.
-OWNER_CONTAINER_OWNED=1
-docker run --rm \
-  --name "$OWNER_CONTAINER_NAME" \
-  --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
-  --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
-  --platform linux/amd64 \
-  --volume "$TARGET_VOLUME_NAME:/target-root" \
-  "$CONTAINER_IMAGE_ID" \
-  sh -ceu '
-    marker=/target-root/.nvpn-release-builder-owner
-    expected="$1:$2:$3:$4"
-    if [ -e "$marker" ] || [ -L "$marker" ]; then
-      [ -f "$marker" ] && [ ! -L "$marker" ]
-      [ "$(cat "$marker")" = "$expected" ]
-      [ "$(stat -c "%u:%g:%a" "$marker")" = "0:0:444" ]
-      [ "$(stat -c "%u:%g" /target-root)" = "$1:$2" ]
-      exit 0
-    fi
-    chown -R "$1:$2" /target-root
-    temporary="$marker.tmp"
-    rm -f "$temporary"
-    printf "%s\n" "$expected" >"$temporary"
-    chown 0:0 "$temporary"
-    chmod 0444 "$temporary"
-    mv -T "$temporary" "$marker"
-  ' sh \
-  "$BUILDER_UID" "$BUILDER_GID" \
-  "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
-host_linux_builder_stop_container "$OWNER_CONTAINER_NAME" "$BUILD_CACHE_ID"
-OWNER_CONTAINER_OWNED=0
+# A fresh named Docker volume is root-owned. Prove it is empty, then give the
+# unprivileged build identity ownership before either Cargo phase can mount it.
+own_fresh_target_volume() {
+  OWNER_CONTAINER_OWNED=1
+  docker run --rm \
+    --name "$OWNER_CONTAINER_NAME" \
+    --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
+    --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
+    --platform linux/amd64 \
+    --volume "$TARGET_VOLUME_NAME:/target-root" \
+    "$CONTAINER_IMAGE_ID" \
+    sh -ceu '
+      [ -z "$(find /target-root -mindepth 1 -print -quit)" ]
+      chown "$1:$2" /target-root
+    ' sh \
+    "$BUILDER_UID" "$BUILDER_GID"
+  host_linux_builder_stop_container "$OWNER_CONTAINER_NAME" "$BUILD_CACHE_ID"
+  OWNER_CONTAINER_OWNED=0
+}
+own_fresh_target_volume
 
-docker run --rm \
-  --name "$CONTAINER_NAME" \
-  --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
-  --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
-  --platform linux/amd64 \
-  --user "$BUILDER_UID:$BUILDER_GID" \
-  --volume "$REMOTE_ROOT/app:/workspace/app" \
-  --volume "$REMOTE_ROOT/fips:/workspace/fips:ro" \
-  --volume "$REMOTE_ROOT/output:/output" \
-  --volume "$STATE_ROOT/cargo-home:/cargo-home" \
-  --volume "$TARGET_VOLUME_NAME:/target-root" \
-  --env CARGO_HOME=/cargo-home \
-  --env HOME=/cargo-home \
-  --env CARGO_INCREMENTAL=0 \
-  --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
-  --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
-  --env "EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256=$LINUX_REALIZED_CARGO_LOCK_SHA256" \
-  --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-  --env TZ=UTC \
-  --env LC_ALL=C.UTF-8 \
-  "$CONTAINER_IMAGE_ID" \
-  /workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh
-host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
+run_builder_phase() {
+  local phase="$1"
+  local app_mount="$REMOTE_ROOT/build-app:/workspace/app"
+  local -a package_mounts=()
+  if [[ "$phase" == "build" ]]; then
+    app_mount="$app_mount:ro"
+    package_mounts=(
+      --volume "$REMOTE_ROOT/package-root-target:/workspace/app/target"
+      --volume "$REMOTE_ROOT/package-linux-target:/workspace/app/linux/target"
+    )
+  fi
+  docker run --rm \
+    --name "$CONTAINER_NAME" \
+    --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
+    --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
+    --platform linux/amd64 \
+    --user "$BUILDER_UID:$BUILDER_GID" \
+    --volume "$app_mount" \
+    --volume "$REMOTE_ROOT/fips:/workspace/fips:ro" \
+    --volume "$REMOTE_ROOT/output:/output" \
+    --volume "$REMOTE_ROOT/cargo-home:/cargo-home" \
+    --volume "$TARGET_VOLUME_NAME:/target-root" \
+    "${package_mounts[@]}" \
+    --env CARGO_HOME=/cargo-home \
+    --env HOME=/cargo-home \
+    --env CARGO_INCREMENTAL=0 \
+    --env CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
+    --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    --env "EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256=$LINUX_REALIZED_CARGO_LOCK_SHA256" \
+    --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+    --env TZ=UTC \
+    --env LC_ALL=C.UTF-8 \
+    "$CONTAINER_IMAGE_ID" \
+    /workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh \
+    "$phase"
+  host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
+}
+
+run_builder_phase realize
+python3 "$SOURCE_AUDITOR" \
+  "$REMOTE_ROOT/app" "$REMOTE_ROOT/build-app" \
+  "$APP_GIT_SHA" "$APP_GIT_TREE" \
+  "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+  "$LINUX_REALIZED_CARGO_LOCK_SHA256"
+python3 "$CARGO_CACHE_VERIFIER" store \
+  "$DOWNLOAD_CACHE_DIR" "$REMOTE_ROOT/cargo-home" \
+  "$REMOTE_ROOT/build-app/Cargo.lock" \
+  "$REMOTE_ROOT/build-app/linux/Cargo.lock"
+host_linux_builder_remove_target_volume \
+  "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+host_linux_builder_create_fresh_target_volume \
+  "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+own_fresh_target_volume
+mkdir "$REMOTE_ROOT/build-app/target" "$REMOTE_ROOT/build-app/linux/target"
+run_builder_phase build
+rmdir "$REMOTE_ROOT/build-app/linux/target" "$REMOTE_ROOT/build-app/target"
+python3 "$SOURCE_AUDITOR" \
+  "$REMOTE_ROOT/app" "$REMOTE_ROOT/build-app" \
+  "$APP_GIT_SHA" "$APP_GIT_TREE" \
+  "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+  "$LINUX_REALIZED_CARGO_LOCK_SHA256"
+[[ "$(git -C "$REMOTE_ROOT/fips" rev-parse HEAD)" == "$FIPS_GIT_SHA" \
+  && "$(git -C "$REMOTE_ROOT/fips" rev-parse 'HEAD^{tree}')" == "$FIPS_GIT_TREE" \
+  && -z "$(git -C "$REMOTE_ROOT/fips" status --porcelain --untracked-files=all)" ]]
+host_linux_builder_remove_target_volume \
+  "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+TARGET_VOLUME_OWNED=0
 CONTAINER_OWNED=0
 
 [[ "$(<"$REMOTE_ROOT/output/root-realized-cargo-lock-sha256.txt")" \

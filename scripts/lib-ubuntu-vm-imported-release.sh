@@ -316,10 +316,7 @@ jq -e \
         and .builtOnHostMac == true
         and .builtOnRemoteVm == false
         and .builderHostOs == "Darwin"
-        and (
-          .builderHostArchitecture == "arm64"
-          or .builderHostArchitecture == "x86_64"
-        )
+        and .builderHostArchitecture == "x86_64"
       )
       or (
         $builder_mode == "remote-native"
@@ -363,10 +360,16 @@ jq -e \
     and .artifacts.debianPackage.sha256 == $deb_hash
     and .artifacts.debianPackage.size == $deb_size
   ' "$remote_dir/receipt.json.copy" >/dev/null
+python3 "$guest_repo/scripts/host_linux_package_content.py" \
+  "$guest_repo" \
+  "$remote_dir/nostr-vpn.deb.copy" \
+  "$remote_dir/nvpn-x86_64-unknown-linux-musl.tar.gz.copy" \
+  "$remote_dir/receipt.json.copy" \
+  | grep -Fx HOST_LINUX_PACKAGE_CONTENT_VERIFIED >/dev/null
 sed -n '1p' "$remote_dir/nostr-vpn.deb.copy" >/dev/null
 [[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Package)" == "nostr-vpn" ]]
-[[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Version)" == "$app_version" \
-  || "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Version)" == "$app_version-1" ]]
+[[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Version)" \
+  == "$app_version-1" ]]
 [[ "$(dpkg-deb -f "$remote_dir/nostr-vpn.deb.copy" Architecture)" == "amd64" ]]
 package_root="$remote_dir/package-root"
 mkdir -m 0700 "$package_root"

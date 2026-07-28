@@ -148,11 +148,9 @@ if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
   platform="${NVPN_TEST_HOST_LINUX_BUILDER_PLATFORM:-linux/amd64}"
   docker image inspect "$image" >/dev/null 2>&1 \
     || fail "real container cleanup test requires the cached image $image"
-  host_linux_builder_ensure_target_volume \
+  host_linux_builder_create_fresh_target_volume \
     "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
-  host_linux_builder_ensure_target_volume \
-    "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
-  if host_linux_builder_ensure_target_volume \
+  if host_linux_builder_create_fresh_target_volume \
     "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" wrong-generation \
     >/dev/null 2>&1
   then
@@ -163,11 +161,14 @@ if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
     --network none \
     --volume "$TEST_VOLUME_NAME:/target" \
     "$image" sh -c 'printf native-volume > /target/probe'
+  host_linux_builder_create_fresh_target_volume \
+    "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
   docker run --rm \
     --platform "$platform" \
     --network none \
     --volume "$TEST_VOLUME_NAME:/target" \
-    "$image" grep -Fx native-volume /target/probe >/dev/null
+    "$image" test ! -e /target/probe \
+    || fail "fresh target volume retained a forged compiler output"
   docker run --detach \
     --platform "$platform" \
     --name "$TEST_CONTAINER_NAME" \
@@ -217,7 +218,8 @@ if [[ "${NVPN_TEST_HOST_LINUX_BUILDER_DOCKER:-0}" == "1" ]]; then
   ! docker container inspect "$TEST_CONTAINER_NAME" >/dev/null 2>&1 \
     || fail "validated daemon-side container survived cleanup"
   TEST_CONTAINER_NAME=""
-  docker volume rm "$TEST_VOLUME_NAME" >/dev/null
+  host_linux_builder_remove_target_volume \
+    "$TEST_VOLUME_NAME" "$TEST_CACHE_ID" "$TEST_VOLUME_GENERATION"
   TEST_VOLUME_NAME=""
   TEST_VOLUME_GENERATION=""
   TEST_CACHE_ID=""

@@ -72,21 +72,38 @@ host_linux_builder_target_volume_matches() {
     && "$mountpoint" == /* ]]
 }
 
-host_linux_builder_ensure_target_volume() {
+host_linux_builder_remove_target_volume() {
   local volume_name="$1"
   local expected_cache_id="$2"
   local expected_generation="$3"
   if ! docker volume inspect "$volume_name" >/dev/null 2>&1; then
-    docker volume create \
-      --label "to.nostrvpn.release-builder=host-linux-vm-bundle-target" \
-      --label "to.nostrvpn.release-builder-cache=$expected_cache_id" \
-      --label "to.nostrvpn.release-builder-generation=$expected_generation" \
-      "$volume_name" >/dev/null
+    return 0
   fi
   if ! host_linux_builder_target_volume_matches \
     "$volume_name" "$expected_cache_id" "$expected_generation"
   then
     echo "Refusing mismatched Linux builder target volume: $volume_name" >&2
+    return 1
+  fi
+  docker volume rm "$volume_name" >/dev/null
+  ! docker volume inspect "$volume_name" >/dev/null 2>&1
+}
+
+host_linux_builder_create_fresh_target_volume() {
+  local volume_name="$1"
+  local expected_cache_id="$2"
+  local expected_generation="$3"
+  host_linux_builder_remove_target_volume \
+    "$volume_name" "$expected_cache_id" "$expected_generation"
+  docker volume create \
+    --label "to.nostrvpn.release-builder=host-linux-vm-bundle-target" \
+    --label "to.nostrvpn.release-builder-cache=$expected_cache_id" \
+    --label "to.nostrvpn.release-builder-generation=$expected_generation" \
+    "$volume_name" >/dev/null
+  if ! host_linux_builder_target_volume_matches \
+    "$volume_name" "$expected_cache_id" "$expected_generation"
+  then
+    echo "Fresh Linux builder target volume is invalid: $volume_name" >&2
     return 1
   fi
 }

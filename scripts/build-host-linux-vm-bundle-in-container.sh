@@ -4,6 +4,11 @@
 # the source-bound environment validated by prepare-host-linux-vm-bundle.sh.
 set -euo pipefail
 
+[[ "$#" == 1 && ( "$1" == "realize" || "$1" == "build" ) ]] || {
+  echo "usage: $0 realize|build" >&2
+  exit 2
+}
+PHASE="$1"
 cd /workspace/app
 fips_config=(
   --config 'patch.crates-io.fips-core.path="/workspace/fips/crates/fips-core"'
@@ -11,6 +16,7 @@ fips_config=(
   --config 'patch.crates-io.fips-identity.path="/workspace/fips/crates/fips-identity"'
 )
 lock_verifier=/workspace/app/scripts/verify-cargo-path-patch-lock.py
+cargo_cache_verifier=/workspace/app/scripts/host_linux_cargo_archive_cache.py
 fips_packages=()
 while IFS= read -r package; do
   fips_packages+=("$package")
@@ -18,36 +24,73 @@ done < <(python3 "$lock_verifier" --manifest-specs /workspace/fips)
 [[ "${#fips_packages[@]}" == 3 ]]
 
 export CARGO_TARGET_DIR=/target-root
-cp Cargo.lock /output/root-Cargo.lock.committed
-cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
-python3 "$lock_verifier" \
-  --validate /output/root-Cargo.lock.committed Cargo.lock \
-  "${fips_packages[@]}" \
-  > /output/root-realized-cargo-lock-sha256.txt
-grep -Fx "$EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256" \
-  /output/root-realized-cargo-lock-sha256.txt
-cargo "${fips_config[@]}" metadata --locked --format-version 1 --no-deps \
-  >/dev/null
-cargo "${fips_config[@]}" build --locked --release -p nvpn
-cargo "${fips_config[@]}" build --locked --release \
+[[ "$CARGO_HOME" == /cargo-home && "$HOME" == /cargo-home ]]
+for variable in \
+  CARGO_BUILD_RUSTC_WRAPPER \
+  CARGO_ENCODED_RUSTFLAGS \
+  RUSTC_WRAPPER \
+  RUSTC_WORKSPACE_WRAPPER \
+  RUSTFLAGS
+do
+  [[ -z "${!variable:-}" ]] || {
+    echo "Linux release builder refuses an injected compiler environment" >&2
+    exit 2
+  }
+done
+if find /workspace/app /workspace/fips \
+  \( -path '*/.cargo/config' -o -path '*/.cargo/config.toml' \) \
+  -print -quit | grep -q .
+then
+  echo "Linux release builder refuses source-local Cargo configuration" >&2
+  exit 2
+fi
+
+if [[ "$PHASE" == "realize" ]]; then
+  cp Cargo.lock /output/root-Cargo.lock.committed
+  cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
+  python3 "$lock_verifier" \
+    --validate /output/root-Cargo.lock.committed Cargo.lock \
+    "${fips_packages[@]}" \
+    > /output/root-realized-cargo-lock-sha256.txt
+  grep -Fx "$EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    /output/root-realized-cargo-lock-sha256.txt
+  cargo "${fips_config[@]}" fetch --locked
+
+  cd /workspace/app/linux
+  cp Cargo.lock /output/linux-Cargo.lock.committed
+  cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
+  python3 "$lock_verifier" \
+    --validate /output/linux-Cargo.lock.committed Cargo.lock \
+    "${fips_packages[@]}" \
+    > /output/linux-realized-cargo-lock-sha256.txt
+  grep -Fx "$EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256" \
+    /output/linux-realized-cargo-lock-sha256.txt
+  cargo "${fips_config[@]}" fetch --locked
+  python3 "$cargo_cache_verifier" audit \
+    /cargo-download-cache /cargo-home \
+    /workspace/app/Cargo.lock /workspace/app/linux/Cargo.lock
+  exit 0
+fi
+
+[[ "$(sha256sum /workspace/app/Cargo.lock | awk '{print $1}')" \
+  == "$EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256" ]]
+[[ "$(sha256sum /workspace/app/linux/Cargo.lock | awk '{print $1}')" \
+  == "$EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256" ]]
+python3 "$cargo_cache_verifier" audit \
+  /cargo-download-cache /cargo-home \
+  /workspace/app/Cargo.lock /workspace/app/linux/Cargo.lock
+export CARGO_NET_OFFLINE=true
+
+cd /workspace/app
+cargo "${fips_config[@]}" build --frozen --release -p nvpn
+cargo "${fips_config[@]}" build --frozen --release \
   --target x86_64-unknown-linux-musl \
   -p nvpn
-cargo "${fips_config[@]}" build --locked --release \
+cargo "${fips_config[@]}" build --frozen --release \
   -p nostr-vpn-core --example desktop_manual_join_e2e_fixture
 
 cd /workspace/app/linux
-export CARGO_TARGET_DIR=/target-root
-cp Cargo.lock /output/linux-Cargo.lock.committed
-cargo "${fips_config[@]}" metadata --format-version 1 >/dev/null
-python3 "$lock_verifier" \
-  --validate /output/linux-Cargo.lock.committed Cargo.lock \
-  "${fips_packages[@]}" \
-  > /output/linux-realized-cargo-lock-sha256.txt
-grep -Fx "$EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256" \
-  /output/linux-realized-cargo-lock-sha256.txt
-cargo "${fips_config[@]}" metadata --locked --format-version 1 --no-deps \
-  >/dev/null
-cargo "${fips_config[@]}" build --locked --release
+cargo "${fips_config[@]}" build --frozen --release
 
 install -m 0555 /target-root/release/nvpn /output/nvpn
 install -m 0555 \
@@ -89,7 +132,44 @@ install -m 0555 /output/nostr-vpn \
 cd /workspace/app/linux
 unset CARGO_TARGET_DIR
 rm -rf target/debian
-cargo deb --no-build --no-strip
+# cargo-deb invokes Cargo metadata internally and cannot receive Cargo's
+# command-line --config values. Create its one exact, fresh packaging-only
+# config after compilation, with no persistent or executable config surface.
+python3 - /cargo-home/config.toml <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+content = (
+    '[patch.crates-io]\n'
+    'fips-core = { path = "/workspace/fips/crates/fips-core" }\n'
+    'fips-endpoint = { path = "/workspace/fips/crates/fips-endpoint" }\n'
+    'fips-identity = { path = "/workspace/fips/crates/fips-identity" }\n'
+).encode()
+descriptor = os.open(
+    path,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+    0o400,
+)
+with os.fdopen(descriptor, "wb") as output:
+    output.write(content)
+    output.flush()
+    os.fsync(output.fileno())
+PY
+cargo deb --frozen --offline --no-build --no-strip
+python3 - /cargo-home/config.toml <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("packaging-only Cargo config changed")
+path.unlink()
+PY
+python3 "$cargo_cache_verifier" audit \
+  /cargo-download-cache /cargo-home \
+  /workspace/app/Cargo.lock /workspace/app/linux/Cargo.lock
 deb="$(find target/debian -maxdepth 1 -type f -name '*.deb' -print)"
 [[ "$(printf '%s\n' "$deb" | sed '/^$/d' | wc -l)" == "1" ]]
 install -m 0444 "$deb" /output/nostr-vpn.deb

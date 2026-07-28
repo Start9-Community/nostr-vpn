@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 import re
 import sys
@@ -162,24 +163,35 @@ def main() -> None:
         return
     if len(sys.argv) < 4 or sys.argv[1] not in {
         "--expected-sha256",
+        "--materialize",
         "--validate",
     }:
         fail(
             "usage: verify-cargo-path-patch-lock.py "
             "--manifest-specs FIPS_ROOT | "
             "--expected-sha256 COMMITTED_LOCK NAME=VERSION [...] | "
+            "--materialize COMMITTED_LOCK OUTPUT NAME=VERSION [...] | "
             "--validate COMMITTED_LOCK REALIZED_LOCK NAME=VERSION [...]"
         )
     mode = sys.argv[1]
     if mode == "--expected-sha256":
         committed_arg = sys.argv[2]
         realized_arg = None
+        output_arg = None
         specs = sys.argv[3:]
+    elif mode == "--materialize":
+        if len(sys.argv) < 5:
+            fail("materialize mode requires committed and output locks")
+        committed_arg = sys.argv[2]
+        realized_arg = None
+        output_arg = sys.argv[3]
+        specs = sys.argv[4:]
     else:
         if len(sys.argv) < 5:
             fail("validate mode requires committed and realized locks")
         committed_arg = sys.argv[2]
         realized_arg = sys.argv[3]
+        output_arg = None
         specs = sys.argv[4:]
 
     try:
@@ -197,6 +209,20 @@ def main() -> None:
                 "realized lock differs by more than exact target "
                 "source/checksum removal"
             )
+    if output_arg is not None:
+        output = pathlib.Path(output_arg)
+        try:
+            descriptor = os.open(
+                output,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o400,
+            )
+        except OSError as error:
+            fail(f"could not create materialized lock output: {error}")
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(expected)
+            destination.flush()
+            os.fsync(destination.fileno())
     print(hashlib.sha256(expected).hexdigest())
 
 

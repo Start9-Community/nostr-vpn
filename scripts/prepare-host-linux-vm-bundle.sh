@@ -21,10 +21,30 @@ load_mobile_env "$ROOT"
   echo "Linux release artifacts must be orchestrated by the controlling Mac" >&2
   exit 2
 }
-BUILDER_MODE="local-docker"
-if host_linux_native_builder_configured; then
-  BUILDER_MODE="remote-native"
-else
+BUILDER_MODE="${NVPN_HOST_LINUX_VM_BUILDER_MODE:-}"
+case "$BUILDER_MODE" in
+  remote-native)
+    host_linux_native_builder_configured || {
+      echo "remote-native Linux release building requires an explicit host" >&2
+      exit 2
+    }
+    ;;
+  local-docker)
+    [[ "$(uname -m)" == "x86_64" ]] || {
+      echo "local-docker Linux release building requires a native x86_64 Mac" >&2
+      exit 2
+    }
+    [[ -z "${NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST:-}" ]] || {
+      echo "local-docker Linux release building conflicts with a remote host" >&2
+      exit 2
+    }
+    ;;
+  *)
+    echo "NVPN_HOST_LINUX_VM_BUILDER_MODE must explicitly select remote-native or local-docker" >&2
+    exit 2
+    ;;
+esac
+if [[ "$BUILDER_MODE" == "local-docker" ]]; then
   command -v docker >/dev/null 2>&1 || {
     echo "Local Linux release building requires Docker on the controlling Mac" >&2
     exit 2
@@ -113,13 +133,13 @@ CACHE_ROOT="$(cd "$CACHE_ROOT" && pwd)"
 HOST_BUILD_LOCK="$CACHE_ROOT/.host-linux-vm-bundle.lock"
 CARGO_DEB_VERSION="3.7.0"
 MUSL_TARGET="x86_64-unknown-linux-musl"
-CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package4-$BUILDER_MODE"
+CACHE_KEY="$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$TARGET-ubuntu24.04-rust$RUST_TOOLCHAIN-cargo-deb$CARGO_DEB_VERSION-package5-$BUILDER_MODE"
 BUNDLE_DIR="$CACHE_ROOT/$CACHE_KEY"
 RECEIPT="$BUNDLE_DIR/receipt.json"
 BUILD_CACHE_ID="$(
   printf '%s' "$CACHE_ROOT" | shasum -a 256 | awk '{ print $1 }'
 )"
-TARGET_CACHE_GENERATION="docker-volume-v4-rust${RUST_TOOLCHAIN//./-}"
+TARGET_CACHE_GENERATION="fresh-docker-volume-v5-rust${RUST_TOOLCHAIN//./-}"
 TARGET_VOLUME_ID="$(
   printf '%s:%s' "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION" \
     | shasum -a 256 | awk '{ print $1 }'
@@ -150,9 +170,24 @@ LINUX_REALIZED_CARGO_LOCK_SHA256="$(
   python3 "$PATCH_LOCK_VERIFIER" \
     --expected-sha256 "$ROOT/linux/Cargo.lock" "${FIPS_PATCH_PACKAGES[@]}"
 )"
+DOWNLOAD_CACHE_ID="$(
+  printf '%s:%s\n' \
+    "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    "$LINUX_REALIZED_CARGO_LOCK_SHA256" \
+    | shasum -a 256 | awk '{print $1}'
+)"
+DOWNLOAD_CACHE_PARENT="$CACHE_ROOT/build-cache/cargo-archives"
+DOWNLOAD_CACHE_DIR="$DOWNLOAD_CACHE_PARENT/$DOWNLOAD_CACHE_ID"
+CARGO_CACHE_VERIFIER="$ROOT/scripts/host_linux_cargo_archive_cache.py"
+SOURCE_AUDITOR="$ROOT/scripts/verify_host_linux_build_source.py"
+[[ -x "$CARGO_CACHE_VERIFIER" && -x "$SOURCE_AUDITOR" ]] || {
+  echo "Host Linux VM bundle cache/source verifier is missing" >&2
+  exit 2
+}
 TEMP_DIR=""
 CONTAINER_NAME="nvpn-linux-bundle-${BUILD_CACHE_ID:0:24}"
 HOST_BUILD_LOCK_HELD=0
+TARGET_VOLUME_OWNED=0
 
 cleanup() {
   local status="$?" cleanup_failed=0
@@ -163,6 +198,11 @@ cleanup() {
     host_linux_builder_stop_container \
       "$CONTAINER_NAME" "$BUILD_CACHE_ID" \
       || cleanup_failed=1
+    if [[ "$TARGET_VOLUME_OWNED" == "1" ]]; then
+      host_linux_builder_remove_target_volume \
+        "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" \
+        "$TARGET_CACHE_GENERATION" || cleanup_failed=1
+    fi
   fi
   host_linux_native_builder_cleanup_remote || cleanup_failed=1
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
@@ -182,6 +222,11 @@ terminate() {
   then
     host_linux_builder_stop_container \
       "$CONTAINER_NAME" "$BUILD_CACHE_ID" || true
+    if [[ "$TARGET_VOLUME_OWNED" == "1" ]]; then
+      host_linux_builder_remove_target_volume \
+        "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" \
+        "$TARGET_CACHE_GENERATION" || true
+    fi
   fi
   host_linux_native_builder_cleanup_remote || true
   exit "$status"
@@ -245,17 +290,31 @@ if [[ "$BUILDER_MODE" == "local-docker" ]]; then
   # rustc dependency outputs must stay on Docker's native Linux filesystem.
   # Docker Desktop bind mounts can expose a completed dependency to Cargo
   # before a parallel rustc can read its metadata.
-  host_linux_builder_ensure_target_volume \
+  host_linux_builder_create_fresh_target_volume \
     "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+  TARGET_VOLUME_OWNED=1
 fi
 
 TEMP_DIR="$(mktemp -d "$CACHE_ROOT/.host-linux-vm-bundle.XXXXXX")"
 mkdir -p \
   "$TEMP_DIR/source" \
+  "$TEMP_DIR/build" \
   "$TEMP_DIR/output" \
   "$TEMP_DIR/final" \
   "$TEMP_DIR/docker-context" \
-  "$CACHE_ROOT/build-cache/cargo-home"
+  "$TEMP_DIR/cargo-home" \
+  "$TEMP_DIR/package-root-target" \
+  "$TEMP_DIR/package-linux-target" \
+  "$DOWNLOAD_CACHE_PARENT"
+[[ -d "$DOWNLOAD_CACHE_PARENT" && ! -L "$DOWNLOAD_CACHE_PARENT" ]] || {
+  echo "Host Linux Cargo archive cache parent is unsafe" >&2
+  exit 2
+}
+chmod 0700 \
+  "$TEMP_DIR/cargo-home" \
+  "$TEMP_DIR/package-root-target" \
+  "$TEMP_DIR/package-linux-target" \
+  "$DOWNLOAD_CACHE_PARENT"
 git clone --no-hardlinks --quiet "$ROOT" "$TEMP_DIR/source/app"
 git -C "$TEMP_DIR/source/app" checkout --detach --quiet "$APP_GIT_SHA"
 git -C "$TEMP_DIR/source/app" clean -ffd >/dev/null
@@ -286,6 +345,19 @@ if [[ "$BUILDER_MODE" == "remote-native" ]]; then
     "$SOURCE_DATE_EPOCH" \
     "$DOCKERFILE_SHA256" "$CONTAINER_PAYLOAD_SHA256"
 else
+  git clone --no-hardlinks --quiet \
+    "$TEMP_DIR/source/app" "$TEMP_DIR/build/app"
+  git -C "$TEMP_DIR/build/app" checkout --detach --quiet "$APP_GIT_SHA"
+  git -C "$TEMP_DIR/build/app" clean -ffd >/dev/null
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --materialize "$ROOT/Cargo.lock" "$TEMP_DIR/root-realized.lock" \
+    "${FIPS_PATCH_PACKAGES[@]}" >/dev/null
+  python3 "$PATCH_LOCK_VERIFIER" \
+    --materialize "$ROOT/linux/Cargo.lock" "$TEMP_DIR/linux-realized.lock" \
+    "${FIPS_PATCH_PACKAGES[@]}" >/dev/null
+  python3 "$CARGO_CACHE_VERIFIER" seed \
+    "$DOWNLOAD_CACHE_DIR" "$TEMP_DIR/cargo-home" \
+    "$TEMP_DIR/root-realized.lock" "$TEMP_DIR/linux-realized.lock"
   IMAGE_TAG="nostr-vpn-linux-vm-gate:ubuntu24.04-rust${RUST_TOOLCHAIN//./-}-${BUILD_CACHE_ID:0:12}"
   docker build \
     --platform "$DOCKER_PLATFORM" \
@@ -299,19 +371,33 @@ else
   )"
   [[ "$CONTAINER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
 
+  assert_local_target_empty() {
+    docker run --rm \
+      --name "$CONTAINER_NAME" \
+      --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
+      --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
+      --platform "$DOCKER_PLATFORM" \
+      --volume "$TARGET_VOLUME_NAME:/target-root" \
+      "$CONTAINER_IMAGE_ID" \
+      sh -ceu '[ -z "$(find /target-root -mindepth 1 -print -quit)" ]'
+    host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
+  }
+  assert_local_target_empty
   docker run --rm \
     --name "$CONTAINER_NAME" \
     --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
     --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
     --interactive \
     --platform "$DOCKER_PLATFORM" \
-    --volume "$TEMP_DIR/source/app:/workspace/app" \
+    --volume "$TEMP_DIR/build/app:/workspace/app" \
     --volume "$TEMP_DIR/source/fips:/workspace/fips:ro" \
     --volume "$TEMP_DIR/output:/output" \
-    --volume "$CACHE_ROOT/build-cache/cargo-home:/cargo-home" \
+    --volume "$TEMP_DIR/cargo-home:/cargo-home" \
     --volume "$TARGET_VOLUME_NAME:/target-root" \
     --env CARGO_HOME=/cargo-home \
+    --env HOME=/cargo-home \
     --env CARGO_INCREMENTAL=0 \
+    --env CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
     --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
     --env "EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256=$LINUX_REALIZED_CARGO_LOCK_SHA256" \
@@ -319,12 +405,58 @@ else
     --env TZ=UTC \
     --env LC_ALL=C.UTF-8 \
     "$CONTAINER_IMAGE_ID" \
-    /workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh
-
-  [[ "$(shasum -a 256 "$TEMP_DIR/source/app/Cargo.lock" | awk '{ print $1 }')" \
-    == "$ROOT_REALIZED_CARGO_LOCK_SHA256" ]]
-  [[ "$(shasum -a 256 "$TEMP_DIR/source/app/linux/Cargo.lock" | awk '{ print $1 }')" \
-    == "$LINUX_REALIZED_CARGO_LOCK_SHA256" ]]
+    /workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh \
+    realize
+  python3 "$SOURCE_AUDITOR" \
+    "$TEMP_DIR/source/app" "$TEMP_DIR/build/app" \
+    "$APP_GIT_SHA" "$APP_GIT_TREE" \
+    "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    "$LINUX_REALIZED_CARGO_LOCK_SHA256"
+  python3 "$CARGO_CACHE_VERIFIER" store \
+    "$DOWNLOAD_CACHE_DIR" "$TEMP_DIR/cargo-home" \
+    "$TEMP_DIR/build/app/Cargo.lock" \
+    "$TEMP_DIR/build/app/linux/Cargo.lock"
+  host_linux_builder_remove_target_volume \
+    "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+  host_linux_builder_create_fresh_target_volume \
+    "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+  assert_local_target_empty
+  mkdir "$TEMP_DIR/build/app/target" "$TEMP_DIR/build/app/linux/target"
+  docker run --rm \
+    --name "$CONTAINER_NAME" \
+    --label "to.nostrvpn.release-builder=host-linux-vm-bundle" \
+    --label "to.nostrvpn.release-builder-cache=$BUILD_CACHE_ID" \
+    --interactive \
+    --platform "$DOCKER_PLATFORM" \
+    --volume "$TEMP_DIR/build/app:/workspace/app:ro" \
+    --volume "$TEMP_DIR/source/fips:/workspace/fips:ro" \
+    --volume "$TEMP_DIR/output:/output" \
+    --volume "$TEMP_DIR/cargo-home:/cargo-home" \
+    --volume "$TARGET_VOLUME_NAME:/target-root" \
+    --volume "$TEMP_DIR/package-root-target:/workspace/app/target" \
+    --volume "$TEMP_DIR/package-linux-target:/workspace/app/linux/target" \
+    --env CARGO_HOME=/cargo-home \
+    --env HOME=/cargo-home \
+    --env CARGO_INCREMENTAL=0 \
+    --env CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
+    --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    --env "EXPECTED_LINUX_REALIZED_CARGO_LOCK_SHA256=$LINUX_REALIZED_CARGO_LOCK_SHA256" \
+    --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+    --env TZ=UTC \
+    --env LC_ALL=C.UTF-8 \
+    "$CONTAINER_IMAGE_ID" \
+    /workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh \
+    build
+  rmdir "$TEMP_DIR/build/app/linux/target" "$TEMP_DIR/build/app/target"
+  python3 "$SOURCE_AUDITOR" \
+    "$TEMP_DIR/source/app" "$TEMP_DIR/build/app" \
+    "$APP_GIT_SHA" "$APP_GIT_TREE" \
+    "$ROOT_REALIZED_CARGO_LOCK_SHA256" \
+    "$LINUX_REALIZED_CARGO_LOCK_SHA256"
+  host_linux_builder_remove_target_volume \
+    "$TARGET_VOLUME_NAME" "$BUILD_CACHE_ID" "$TARGET_CACHE_GENERATION"
+  TARGET_VOLUME_OWNED=0
   python3 - \
     "$TEMP_DIR/output/builder-provenance.json" \
     "$CONTAINER_IMAGE_ID" \
@@ -365,6 +497,12 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
 PY
 fi
 
+[[ -z "$(git -C "$TEMP_DIR/source/app" status --porcelain --untracked-files=all)" \
+  && "$(git -C "$TEMP_DIR/source/app" rev-parse HEAD)" == "$APP_GIT_SHA" \
+  && "$(git -C "$TEMP_DIR/source/app" rev-parse 'HEAD^{tree}')" == "$APP_GIT_TREE" ]]
+[[ -z "$(git -C "$TEMP_DIR/source/fips" status --porcelain --untracked-files=all)" \
+  && "$(git -C "$TEMP_DIR/source/fips" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \
+  && "$(git -C "$TEMP_DIR/source/fips" rev-parse 'HEAD^{tree}')" == "$RELEASE_JOIN_FIPS_TREE" ]]
 [[ "$(shasum -a 256 "$TEMP_DIR/output/root-Cargo.lock.committed" \
   | awk '{ print $1 }')" == "$ROOT_CARGO_LOCK_SHA256" ]]
 [[ "$(shasum -a 256 "$TEMP_DIR/output/linux-Cargo.lock.committed" \
@@ -479,7 +617,7 @@ if builder_mode == "local-docker":
     built_on_remote_vm = False
     if (
         builder.get("builderHostOs") != "Darwin"
-        or builder.get("builderHostArchitecture") not in {"arm64", "x86_64"}
+        or builder.get("builderHostArchitecture") != "x86_64"
     ):
         raise SystemExit("invalid local Docker Linux builder provenance")
 elif builder_mode == "remote-native":

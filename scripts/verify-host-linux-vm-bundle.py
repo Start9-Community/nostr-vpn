@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import pathlib
 import re
 import stat
 import sys
-import tarfile
+
+from host_linux_package_content import (
+    PackageVerificationError,
+    verify_debian_package,
+    verify_musl_archive,
+)
 
 
 def fail(message: str) -> "NoReturn":
@@ -156,6 +160,11 @@ if receipt.get("builderHostArchitecture") not in builder[
 ]:
     fail("receipt builder architecture conflicts with builder mode")
 if (
+    builder_mode == "local-docker"
+    and receipt.get("builderHostArchitecture") != "x86_64"
+):
+    fail("local-docker amd64 release builds require a native x86_64 Mac")
+if (
     re.fullmatch(r"sha256:[0-9a-f]{64}", receipt.get("containerImageId", ""))
     is None
 ):
@@ -200,8 +209,9 @@ for label, filename in expected_artifacts.items():
         fail(f"could not stat {filename}: {error}")
     if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
         fail(f"{filename} is not a regular non-symlink artifact")
-    if label in executable_labels and not os.access(path, os.X_OK):
-        fail(f"{filename} is not executable")
+    expected_mode = 0o555 if label in executable_labels else 0o444
+    if stat.S_IMODE(metadata.st_mode) != expected_mode:
+        fail(f"{filename} mode differs from the immutable bundle contract")
     if label in executable_labels:
         with path.open("rb") as artifact:
             header = artifact.read(20)
@@ -243,33 +253,28 @@ package = receipt.get("debianPackage")
 if (
     not isinstance(package, dict)
     or package.get("package") != "nostr-vpn"
-    or package.get("version") not in {app_version, f"{app_version}-1"}
+    or package.get("version") != f"{app_version}-1"
     or package.get("architecture") != "amd64"
     or package.get("appPath") != "usr/bin/nostr-vpn"
     or package.get("cliPath") != "usr/bin/nvpn"
 ):
     fail("receipt Debian package metadata differs from the candidate")
-with (bundle / expected_artifacts["debianPackage"]).open("rb") as artifact:
-    if artifact.read(8) != b"!<arch>\n":
-        fail("Debian package is not an ar archive")
-
-archive_path = bundle / expected_artifacts["muslCliArchive"]
 try:
-    with tarfile.open(archive_path, "r:gz") as archive:
-        members = archive.getmembers()
-        names = [member.name for member in members]
-        if names != ["nvpn/README.txt", "nvpn/install.sh", "nvpn/nvpn"]:
-            fail("static Linux CLI archive has the wrong member set")
-        for member in members:
-            if not member.isfile() or member.issym() or member.islnk():
-                fail("static Linux CLI archive contains a non-regular member")
-        cli_member = archive.extractfile("nvpn/nvpn")
-        if cli_member is None:
-            fail("static Linux CLI archive lacks its executable")
-        archived_cli = cli_member.read()
-except (OSError, tarfile.TarError) as error:
-    fail(f"static Linux CLI archive could not be read: {error}")
-if hashlib.sha256(archived_cli).hexdigest() != artifacts["muslCli"]["sha256"]:
-    fail("static Linux CLI archive payload differs from its target receipt")
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    verify_debian_package(
+        repo_root=repo_root,
+        deb_path=bundle / expected_artifacts["debianPackage"],
+        app_version=app_version,
+        source_date_epoch=receipt["sourceDateEpoch"],
+        app_sha256=artifacts["app"]["sha256"],
+        cli_sha256=artifacts["cli"]["sha256"],
+    )
+    verify_musl_archive(
+        archive_path=bundle / expected_artifacts["muslCliArchive"],
+        source_date_epoch=receipt["sourceDateEpoch"],
+        musl_cli_sha256=artifacts["muslCli"]["sha256"],
+    )
+except (OSError, PackageVerificationError) as error:
+    fail(str(error))
 
 print("HOST_LINUX_VM_BUNDLE_VERIFIED")
