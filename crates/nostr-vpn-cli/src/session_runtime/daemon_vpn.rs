@@ -909,11 +909,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             false
                         }
                     };
-                    if (!fips_sync_succeeded || !secure_exit_dns_required(&app))
-                        && magic_dns_runtime.is_none()
-                    {
-                        magic_dns_runtime = ConnectMagicDnsRuntime::start(&app);
-                    }
+                    refresh_or_start_split_magic_dns(&mut magic_dns_runtime, &app);
                     if publish_fips_roster_after_control
                         && let Some(runtime) = fips_tunnel_runtime.as_ref()
                     {

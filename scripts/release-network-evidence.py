@@ -29,13 +29,19 @@ DNS_COUNTERS_INCREASED = {
     "dns-through": {"query", "through"},
 }
 DESKTOP_DNS_COUNTERS = {
-    "automatic": "cloudflare",
+    "automatic": "profile_dns",
     "cloudflare": "cloudflare",
     "quad9": "quad9",
     "custom": "google",
     "through-exit": "fixture_dns",
 }
-DESKTOP_DNS_COUNTER_NAMES = ("cloudflare", "quad9", "google", "fixture_dns")
+DESKTOP_DNS_COUNTER_NAMES = (
+    "profile_dns",
+    "cloudflare",
+    "quad9",
+    "google",
+    "fixture_dns",
+)
 DESKTOP_DNS_UI_SETTINGS = {
     "automatic": ("automatic", "cloudflare", "", "", ""),
     "cloudflare": ("encrypted", "cloudflare", "", "", ""),
@@ -467,7 +473,8 @@ def validate_android_support(
     cases: list[str],
     mode: str,
 ) -> tuple[dict[str, Any], list[pathlib.Path]]:
-    paths = validate_android_dns_ui_receipts(root, cases)
+    state_paths = validate_android_dns_ui_receipts(root, cases)
+    paths = list(state_paths)
     app_probe_paths = list(root.glob("mobile-android-app-network-*.json"))
     for path in app_probe_paths:
         probe = load_json(path)

@@ -114,6 +114,16 @@ fn daemon_control_readiness_is_bound_to_the_current_process() {
     write_daemon_control_ready(&config, 42).expect("write current ready marker");
     wait_for_daemon_control_ready(&config, 42, Duration::from_millis(20))
         .expect("current daemon should be ready");
+    let status = DaemonStatus {
+        running: true,
+        pid: Some(42),
+        pid_file: dir.join("daemon.pid"),
+        log_file: dir.join("daemon.log"),
+        state_file: dir.join("daemon.state.json"),
+        state: None,
+    };
+    crate::wait_for_running_daemon_control_ready(&config, &status)
+        .expect("production control path should accept the current PID marker");
     clear_daemon_control_ready(&config);
     assert!(
         !daemon_control_ready_file_path(&config).exists(),
@@ -397,6 +407,14 @@ fn daemon_control_timeout_errors_use_generic_service_wording() {
 
 #[test]
 fn daemon_control_wait_timeouts_allow_longer_mac_recovery_windows() {
+    assert_eq!(
+        crate::daemon_control_startup_ready_timeout(),
+        Duration::from_secs(30)
+    );
+    assert!(
+        crate::daemon_control_startup_ready_timeout()
+            > crate::daemon_control_ack_timeout(crate::DaemonControlRequest::Reload)
+    );
     assert_eq!(
         crate::daemon_control_ack_timeout(crate::DaemonControlRequest::Reload),
         Duration::from_secs(10)

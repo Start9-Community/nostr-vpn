@@ -332,15 +332,26 @@ start_services() {
     exit 2
   }
   wait_for_peer_tun
-  local peer_tunnel_ip
+  local peer_tunnel_ip wg_server_ip
   peer_tunnel_ip="$("$BINARY" ip --config "$CONFIG")"
+  wg_server_ip="${WG_SERVER_ADDRESS%/*}"
 
   remove_counter_chain
   iptables -t mangle -N "$CHAIN"
+  for protocol in udp tcp; do
+    for ip in 1.1.1.1 1.0.0.1; do
+      iptables -t mangle -A "$CHAIN" -p "$protocol" -d "$ip" --dport 53 -j RETURN
+    done
+    iptables -t mangle -A "$CHAIN" \
+      -p "$protocol" -d "$wg_server_ip" --dport 53 -j RETURN
+  done
   for ip in 1.1.1.1 1.0.0.1; do
     iptables -t mangle -A "$CHAIN" -p tcp -d "$ip" --dport 443 -j RETURN
   done
   for ip in 9.9.9.9 149.112.112.112; do
+    iptables -t mangle -A "$CHAIN" -p tcp -d "$ip" --dport 443 -j RETURN
+  done
+  for ip in 8.8.8.8 8.8.4.4; do
     iptables -t mangle -A "$CHAIN" -p tcp -d "$ip" --dport 443 -j RETURN
   done
   iptables -t mangle -A "$CHAIN" -j RETURN
@@ -352,6 +363,7 @@ start_services() {
     --no-daemon \
     --bind-interfaces \
     --listen-address="$peer_tunnel_ip" \
+    --listen-address="$wg_server_ip" \
     --no-hosts \
     --no-resolv \
     --server=1.1.1.1 \
@@ -390,7 +402,17 @@ counter_for_destinations() {
   local second="$2"
   iptables -t mangle -L "$CHAIN" -v -n -x 2>/dev/null \
     | awk -v first="$first" -v second="$second" '
-        $9 == first || $9 == second { packets += $1 }
+        ($9 == first || $9 == second) && /tcp dpt:443/ { packets += $1 }
+        END { print packets + 0 }
+      '
+}
+
+counter_for_dns_destinations() {
+  local first="$1"
+  local second="${2:-$first}"
+  iptables -t mangle -L "$CHAIN" -v -n -x 2>/dev/null \
+    | awk -v first="$first" -v second="$second" '
+        ($9 == first || $9 == second) && /dpt:53/ { packets += $1 }
         END { print packets + 0 }
       '
 }
@@ -474,12 +496,12 @@ case "$ACTION" in
     ;;
   counters)
     require_root
+    printf 'profile_dns=%s\n' "$(counter_for_dns_destinations 1.1.1.1 1.0.0.1)"
     printf 'cloudflare=%s\n' "$(counter_for_destinations 1.1.1.1 1.0.0.1)"
     printf 'quad9=%s\n' "$(counter_for_destinations 9.9.9.9 149.112.112.112)"
     printf 'google=%s\n' "$(counter_for_destinations 8.8.8.8 8.8.4.4)"
-    printf 'fixture_dns=%s\n' "$(
-      grep -Fci "query[A-Z]* $FIXTURE_DNS_NAME" "$STATE_DIR/dns.log" 2>/dev/null || true
-    )"
+    printf 'fixture_dns=%s\n' \
+      "$(counter_for_dns_destinations "${WG_SERVER_ADDRESS%/*}")"
     ;;
   wireguard-setup)
     require_root

@@ -20,6 +20,7 @@ param(
   [string]$WireGuardPeerPublicKey,
   [string]$WireGuardEndpoint,
   [string]$WireGuardClientAddress = "10.232.0.2/32",
+  [string]$WireGuardServerIp,
   [string]$WireGuardInterface = "nvpn-wg-exit",
   [string]$FixtureDnsName = "underlay-gate.nvpn.test",
   [string]$ProbeUrl = "https://example.com/",
@@ -693,6 +694,7 @@ switch ($Action) {
       $WireGuardPeerPublicKey,
       $WireGuardEndpoint,
       $WireGuardClientAddress,
+      $WireGuardServerIp,
       $WireGuardInterface,
       $ExpectedFipsRevision
     )) {
@@ -740,7 +742,7 @@ switch ($Action) {
         "--wireguard-exit-enabled", "true",
         "--exit-node-leak-protection", "true",
         "--exit-dns-mode", "through_exit",
-        "--exit-dns-through-exit-servers", $PeerTunnelIp,
+        "--exit-dns-through-exit-servers", $WireGuardServerIp,
         "--autoconnect", "true"
       )
 
@@ -832,7 +834,7 @@ switch ($Action) {
       ) "iana.org" $daemonPid ([int]$primary.ifIndex)
       Run-DnsSettingCase "through-exit" @(
         "--exit-dns-mode", "through_exit",
-        "--exit-dns-through-exit-servers", $PeerTunnelIp
+        "--exit-dns-through-exit-servers", $WireGuardServerIp
       ) $FixtureDnsName $daemonPid ([int]$primary.ifIndex)
 
       Wait-ForFile "select-direct"

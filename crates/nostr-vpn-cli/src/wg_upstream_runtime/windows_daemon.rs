@@ -55,6 +55,8 @@ async fn apply_daemon_wg_upstream_native(
     cleanup_journal_config_path: &Path,
 ) -> Result<DaemonWgUpstream> {
     let tools = resolve_windows_wireguard_tools()?;
+    retry_pending_windows_native_cleanup_journaled(cleanup_journal_config_path)
+        .context("clean up pending native WireGuard before startup")?;
     let fingerprint = WireGuardExitFingerprint::from_config(config);
     let tunnel_name = windows_native_wireguard_tunnel_name(config);
     let owner_token = windows_native_wireguard_owner_token();

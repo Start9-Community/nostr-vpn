@@ -190,6 +190,7 @@ Idx     Met         MTU          State                Name
     fn windows_daemon_uses_only_native_owned_tunnel_state() {
         let source = include_str!("windows_daemon.rs");
         let config_source = include_str!("windows_native_config.rs");
+        let route_source = include_str!("windows_system_routes.rs");
         let cleanup_source = include_str!("windows_native_ownership.rs");
         assert!(
             !source.contains("apply_daemon_wg_upstream_userspace"),
@@ -271,6 +272,104 @@ Idx     Met         MTU          State                Name
             !startup.contains("resolve_windows_wireguard_endpoint"),
             "an independent DNS answer cannot define the native service's endpoint route"
         );
+        assert!(
+            config_source.contains("windows_native_wireguard_config_text(config)")
+                && config_source.contains(
+                    "\"[Interface]\\nTable = off\\n{interface}\\n\\n[Peer]\\n{peer}\""
+                ),
+            "native WireGuard must not install AllowedIPs routes before the verified handshake"
+        );
+        let route_apply = route_source
+            .split("fn apply_windows_endpoint_bypass_route")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"windows\")]").next())
+            .expect("native WireGuard route apply");
+        assert!(
+            route_apply.contains("true,\n        cleanup_journal_config_path"),
+            "nVPN must install and journal the default route after handshake"
+        );
+    }
+
+    #[test]
+    fn windows_native_wireguard_disables_automatic_routes() {
+        let config = WireGuardExitConfig {
+            address: "10.64.70.195/32".to_string(),
+            private_key: "private-key".to_string(),
+            peer_public_key: "peer-key".to_string(),
+            endpoint: "198.51.100.20:51820".to_string(),
+            ..WireGuardExitConfig::default()
+        };
+        let mut config = config;
+        config.dns = vec!["10.64.0.1".to_string()];
+        let text = windows_native_wireguard_config_text(&config)
+            .expect("render managed native WireGuard config");
+        assert!(text.starts_with("[Interface]\nTable = off\n"));
+        assert_eq!(text.matches("Table = off").count(), 1);
+        assert!(
+            !text.contains("DNS ="),
+            "nVPN applies provider DNS only after the verified handshake"
+        );
+        assert!(text.contains("[Peer]\n"));
+        assert!(text.contains("AllowedIPs = 0.0.0.0/0"));
+        assert!(
+            windows_native_wireguard_config_text(&WireGuardExitConfig::default()).is_err(),
+            "an unexpected core config shape must fail closed"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn journaled_pending_cleanup_retry_retires_exact_durable_entries() {
+        assert!(pending_windows_native_cleanup_snapshot().is_empty());
+        assert!(pending_windows_route_cleanup_snapshot().is_empty());
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nvpn-journaled-pending-cleanup-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let config_path = dir.join("config.toml");
+        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path);
+        let owner_token = format!("nvpn-test-{nonce:032x}");
+        let native = WindowsNativeWireGuardCleanupState {
+            name: format!("nvpn-test-{:08x}", std::process::id()),
+            config_path: windows_native_wireguard_config_path("nvpn-wg-exit", &owner_token),
+            wireguard_exe: PathBuf::from(r"C:\Program Files\WireGuard\wireguard.exe"),
+            owner_token,
+            service_owned: true,
+            config_owned: true,
+        };
+        let routes = WindowsRouteCleanupSnapshot::from_owned_routes(vec![WindowsRouteSpec {
+            prefix: "203.0.113.254/32".to_string(),
+            interface_index: 1,
+            next_hop: "0.0.0.0".to_string(),
+            metric: 1,
+            interface_identity: Some("nvpn-test-route-does-not-exist".to_string()),
+        }]);
+
+        crate::persist_windows_native_wireguard_cleanup_intent(&config_path, &native)
+            .expect("persist native ownership");
+        crate::persist_windows_route_cleanup_intent(&config_path, &routes, true)
+            .expect("persist route ownership");
+        retain_pending_windows_native_cleanup(native);
+        retain_pending_windows_route_cleanup(routes);
+
+        retry_pending_windows_native_cleanup_journaled(&config_path)
+            .expect("retire absent native ownership");
+        retry_pending_windows_route_cleanup_journaled(&config_path)
+            .expect("retire absent route ownership");
+        crate::persist_fips_daemon_network_cleanup_state(&config_path, None)
+            .expect("periodic persist after exact retirement");
+        assert!(
+            !cleanup_path.exists(),
+            "successful journal-aware retries must leave no durable ownership"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

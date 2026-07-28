@@ -46,6 +46,7 @@ WG_LISTEN_PORT="$((51000 + RANDOM % 1000))"
 WG_PEER_IFACE="nvwg${RANDOM}"
 WG_CLIENT_ADDRESS="${NVPN_WINDOWS_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.1.2/32}"
 WG_SERVER_ADDRESS="${NVPN_WINDOWS_UNDERLAY_WG_SERVER_ADDRESS:-10.232.1.1/24}"
+WG_SERVER_IP="${WG_SERVER_ADDRESS%/*}"
 WG_TARGET_INTERFACE="${NVPN_WINDOWS_UNDERLAY_WG_INTERFACE:-nvpn-wg-exit}"
 COUNTER_CHAIN="nvu-$((RANDOM % 100000))"
 PEER_NETNS="nvw$((RANDOM % 100000))"
@@ -445,6 +446,7 @@ start_windows_runner() {
 -WireGuardPeerPublicKey $(ps_quote "$WG_SERVER_PUBLIC_KEY") \
 -WireGuardEndpoint $(ps_quote "$WG_ENDPOINT") \
 -WireGuardClientAddress $(ps_quote "$WG_CLIENT_ADDRESS") \
+-WireGuardServerIp $(ps_quote "$WG_SERVER_IP") \
 -WireGuardInterface $(ps_quote "$WG_TARGET_INTERFACE") \
 -FixtureDnsName $(ps_quote "$FIXTURE_DNS_NAME") \
 -ProbeUrl $(ps_quote "$PROBE_URL") \
@@ -630,7 +632,7 @@ run_dns_case() {
   local name="$1"
   local counter="$2"
   local before after key before_value after_value
-  local -a counters=(cloudflare quad9 google fixture_dns)
+  local -a counters=(profile_dns cloudflare quad9 google fixture_dns)
   before="$(stable_dns_counters)"
   signal_guest "dns-$name.go"
   wait_for_guest_marker "dns-$name.receipt" 35
@@ -658,7 +660,7 @@ run_dns_case() {
 }
 
 run_dns_matrix_and_crash_restore() {
-  run_dns_case automatic cloudflare
+  run_dns_case automatic profile_dns
   run_dns_case cloudflare cloudflare
   run_dns_case quad9 quad9
   run_dns_case custom google

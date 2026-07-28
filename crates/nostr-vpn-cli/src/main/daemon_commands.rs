@@ -347,6 +347,7 @@ fn reload_daemon(args: ReloadArgs) -> Result<()> {
         return Ok(());
     }
 
+    wait_for_running_daemon_control_ready(&config_path, &status)?;
     request_daemon_reload(&config_path)?;
     wait_for_daemon_control_ack(
         &config_path,
@@ -387,6 +388,23 @@ pub(crate) fn daemon_control_result_timeout(request: DaemonControlRequest) -> Du
     Duration::from_secs(15)
 }
 
+pub(crate) fn daemon_control_startup_ready_timeout() -> Duration {
+    // SCM/launchd can report the process before FIPS, tunnel, and control-loop
+    // initialization completes. This is a readiness deadline, not a sleep:
+    // the PID-specific marker returns immediately in the usual case.
+    Duration::from_secs(30)
+}
+
+pub(crate) fn wait_for_running_daemon_control_ready(
+    config_path: &Path,
+    status: &DaemonStatus,
+) -> Result<()> {
+    let pid = status
+        .pid
+        .ok_or_else(|| anyhow!("daemon: running process has no pid"))?;
+    wait_for_daemon_control_ready(config_path, pid, daemon_control_startup_ready_timeout())
+}
+
 #[cfg(test)]
 pub(crate) fn daemon_control_vpn_transition_timeout(request: DaemonControlRequest) -> Duration {
     if matches!(
@@ -416,6 +434,7 @@ fn control_daemon(args: ControlArgs, request: DaemonControlRequest) -> Result<()
         return Ok(());
     }
 
+    wait_for_running_daemon_control_ready(&config_path, &status)?;
     write_daemon_control_request(&config_path, request)?;
     match request {
         DaemonControlRequest::Pause | DaemonControlRequest::Resume => {}

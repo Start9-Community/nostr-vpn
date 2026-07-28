@@ -220,12 +220,28 @@ require_tokens "$PEER" "reverse payload and physical source capture" \
 require_tokens "$PEER" "WireGuard/DNS responder evidence" \
   'ip link add dev "$WG_IFACE" type wireguard' \
   'allowed-ips "$WG_CLIENT_ADDRESS"' \
+  'listen-address="$wg_server_ip"' \
   '"udp port $WG_LISTEN_PORT"' \
   'wireguard-underlay.pcap.txt' \
   'wg show "$WG_IFACE" latest-handshakes' \
   'wg show "$WG_IFACE" transfer' \
   'iptables -t mangle -I PREROUTING' \
+  'profile_dns=' \
+  '8.8.8.8' \
+  '8.8.4.4' \
+  'counter_for_dns_destinations "${WG_SERVER_ADDRESS%/*}"' \
   'fixture_dns='
+for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
+  require_tokens "$host_gate" "exclusive desktop DNS path mapping" \
+    'counters=(profile_dns cloudflare quad9 google fixture_dns)' \
+    'run_dns_case automatic profile_dns'
+done
+require_tokens "$WINDOWS_GUEST" "WireGuard-side through-exit DNS" \
+  'WireGuardServerIp' \
+  'exit-dns-through-exit-servers", $WireGuardServerIp'
+require_tokens "$LINUX_GUEST" "WireGuard-side through-exit DNS" \
+  'NVPN_UNDERLAY_WG_SERVER_IP' \
+  'exit-dns-through-exit-servers "$WG_SERVER_IP"'
 require_tokens "$WINDOWS_HOST" "provenance/diagnostic evidence" \
   'manifest_path) -replace' 'collect_failure_artifacts'
 require_tokens "$WINDOWS_HOST_LIB" "bounded out-of-band marker probes" \

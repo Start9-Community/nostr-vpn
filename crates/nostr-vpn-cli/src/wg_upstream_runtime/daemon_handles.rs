@@ -453,10 +453,14 @@ impl DaemonWgUpstream {
                 }
             }
         }
-        if let Err(error) = retry_pending_windows_route_cleanup() {
+        if let Err(error) = retry_pending_windows_route_cleanup_journaled(
+            &self.tunnel.cleanup_journal_config_path,
+        ) {
             failures.push(format!("retry pending Windows route cleanup: {error:#}"));
         }
-        if let Err(error) = retry_pending_windows_native_cleanup() {
+        if let Err(error) = retry_pending_windows_native_cleanup_journaled(
+            &self.tunnel.cleanup_journal_config_path,
+        ) {
             failures.push(format!("retry pending native WireGuard cleanup: {error:#}"));
         }
         if let Err(error) = self.tunnel.cleanup() {

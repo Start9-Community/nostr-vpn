@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.5 - 2026-07-27
+## 4.1.5 - 2026-07-28
 
 ### Added
 
@@ -26,6 +26,9 @@ All notable changes to this project are documented in this file.
 - Restore device-native routes and DNS after exit-node or private-tunnel
   shutdown on every platform, and fail closed when owned network state cannot
   be cleaned up.
+- Wait for the exact Windows daemon process to become control-ready, then own
+  native WireGuard routes and DNS only after a verified handshake while
+  preserving crash-cleanup obligations until Direct restoration completes.
 - Bind macOS WireGuard UDP sockets to the selected physical interface before
   the first handshake, then rebind and prove a fresh handshake across
   Wi-Fi/hotspot changes while the split-default kill switch stays installed.

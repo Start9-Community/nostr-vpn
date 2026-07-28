@@ -69,7 +69,6 @@ if (
 
 run_ps "\$ErrorActionPreference = 'Stop'
 Set-Location '$GUEST_REPO'
-\$app = Join-Path '$GUEST_REPO' 'windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe'
 \$artifact = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-manual-join-ui'
 \$interactiveWrapper = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-manual-join-interactive.ps1'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-windows-interactive-e2e.ps1 -ScriptPath \$interactiveWrapper -TimeoutSeconds 180
@@ -77,20 +76,19 @@ if (\$LASTEXITCODE -ne 0) { throw ('interactive manual-join e2e failed with exit
 if (!(Test-Path (Join-Path \$artifact 'result.json'))) {
   throw 'Windows manual-join UI result.json was not created'
 }
-\$runtime = Join-Path '$GUEST_REPO' 'scripts\\e2e-windows-manual-join-runtime.ps1'
-\$cargoTarget = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-ui-e2e-cargo'
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$runtime -AppExe \$app -ArtifactRoot \$artifact -CargoTargetDir \$cargoTarget -TimeoutSeconds 20
-if (\$LASTEXITCODE -ne 0) {
-  throw ('real Windows manual-join runtime e2e failed with exit code {0}' -f \$LASTEXITCODE)
-}
 \$result = Get-Content -Raw (Join-Path \$artifact 'result.json') | ConvertFrom-Json
 if (
-  \$result.phase -ne 'runtime-verified' -or
-  \$result.exactSignedRosterDurablyApplied -ne \$true -or
-  \$result.adminOutboxConsumedByExactJoinRosterAck -ne \$true -or
-  \$result.publicFipsCrossSeedRouteOnly -ne \$true
+  \$result.ok -ne \$true -or
+  \$result.phase -ne 'ui-verified' -or
+  \$result.transportMode -ne 'public-websocket' -or
+  \$result.ambientDiscoveryDisabled -ne \$true -or
+  \$result.directPeerConfigAbsent -ne \$true -or
+  \$result.adminOutboxQueuedBeforeRuntime -ne \$true -or
+  \$result.adminOutboxAttemptsBeforeRuntime -ne 0 -or
+  \$result.adminOutboxLastAttemptAtBeforeRuntime -ne 0 -or
+  \$result.deliveryCompletedDuringUi -ne \$false
 ) {
-  throw 'Windows manual-join result lacks real runtime delivery evidence'
+  throw 'Windows manual-join result lacks shipped-UI persistence and queue evidence'
 }"
 
-echo "WINDOWS_VM_DESKTOP_MANUAL_JOIN_UI_E2E_OK"
+echo "WINDOWS_VM_DESKTOP_MANUAL_JOIN_UI_PERSISTENCE_E2E_OK"

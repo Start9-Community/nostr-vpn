@@ -279,6 +279,20 @@ struct ConnectMagicDnsRuntime {
     server: MagicDnsServer,
 }
 
+fn split_magic_dns_bind_fallback_port() -> Option<u16> {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows split-DNS installation only supports a resolver on port 53.
+        // A random listener cannot serve the system and would also suppress a
+        // later legitimate retry after the port owner exits.
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Some(0)
+    }
+}
+
 impl ConnectMagicDnsRuntime {
     fn start(app: &AppConfig) -> Option<Self> {
         let records = build_magic_dns_records(app);
@@ -293,11 +307,17 @@ impl ConnectMagicDnsRuntime {
         ) {
             Ok(server) => server,
             Err(error) => {
+                let Some(fallback_port) = split_magic_dns_bind_fallback_port() else {
+                    eprintln!(
+                        "magicdns: required port {MAGIC_DNS_PORT} unavailable ({error}); split DNS not started"
+                    );
+                    return None;
+                };
                 eprintln!(
                     "magicdns: preferred port {MAGIC_DNS_PORT} unavailable ({error}); trying random local port"
                 );
                 match MagicDnsServer::start(
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, fallback_port)),
                     records.clone(),
                 ) {
                     Ok(server) => server,
@@ -358,6 +378,16 @@ impl ConnectMagicDnsRuntime {
                 })
             }
             Err(error) => {
+                #[cfg(target_os = "windows")]
+                {
+                    eprintln!(
+                        "magicdns: system resolver install failed ({error}); split DNS not started"
+                    );
+                    drop(server);
+                    return None;
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
                 eprintln!(
                     "magicdns: system resolver install failed ({error}); local dns remains on {local_addr}"
                 );
@@ -366,6 +396,7 @@ impl ConnectMagicDnsRuntime {
                     resolver_installed: false,
                     server,
                 })
+                }
             }
         }
     }
@@ -395,8 +426,12 @@ fn secure_exit_dns_required(app: &AppConfig) -> bool {
     !app.internet_source.is_direct()
 }
 
+fn split_magic_dns_should_start(app: &AppConfig, runtime_present: bool) -> bool {
+    !secure_exit_dns_required(app) && !runtime_present
+}
+
 fn start_split_magic_dns(app: &AppConfig) -> Option<ConnectMagicDnsRuntime> {
-    if secure_exit_dns_required(app) {
+    if !split_magic_dns_should_start(app, false) {
         None
     } else {
         ConnectMagicDnsRuntime::start(app)
@@ -407,6 +442,10 @@ fn refresh_or_start_split_magic_dns(
     runtime: &mut Option<ConnectMagicDnsRuntime>,
     app: &AppConfig,
 ) {
+    if secure_exit_dns_required(app) {
+        runtime.take();
+        return;
+    }
     if let Some(runtime) = runtime.as_ref() {
         runtime.refresh_records(app);
     } else {

@@ -133,6 +133,24 @@ pub(crate) fn persist_windows_route_cleanup_intent(
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn persist_windows_route_cleanup_result(
+    config_path: &Path,
+    attempted: &crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot,
+    remaining: &crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot,
+) -> Result<()> {
+    let _journal_lock = windows_network_cleanup_journal_lock();
+    let path = daemon_network_cleanup_file_path(config_path);
+    let mut state = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
+    state.routes.remove(attempted);
+    state.routes.merge(remaining.clone());
+    if state.is_empty() {
+        remove_runtime_file_if_exists(&path)
+    } else {
+        write_daemon_network_cleanup_state(&path, &state)
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn persist_windows_native_wireguard_cleanup_intent(
     config_path: &Path,
     cleanup: &crate::wg_upstream_runtime::WindowsNativeWireGuardCleanupState,
@@ -189,7 +207,23 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
     {
         let _journal_lock = windows_network_cleanup_journal_lock();
         let path = daemon_network_cleanup_file_path(config_path);
-        let state = WindowsNetworkCleanupState::from_runtime_and_pending(runtime);
+        let durable = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
+        let mut state = WindowsNetworkCleanupState::from_runtime_and_pending(runtime);
+        state.routes.merge(durable.routes);
+        for cleanup in durable.native_wireguard {
+            if let Some(existing) = state
+                .native_wireguard
+                .iter_mut()
+                .find(|existing| existing.same_owner(&cleanup))
+            {
+                existing.merge_ownership(&cleanup);
+            } else {
+                state.native_wireguard.push(cleanup);
+            }
+        }
+        // Secure DNS teardown records failures in the pending registry. A
+        // successful teardown deliberately disappears from the current
+        // runtime/pending snapshot, so do not resurrect its durable entry.
         if state.is_empty() {
             remove_runtime_file_if_exists(&path)?;
         } else {
@@ -476,5 +510,98 @@ mod started_runtime_journal_tests {
         let message = error.to_string();
         assert!(message.contains("journal unavailable"));
         assert!(message.contains("route cleanup failed"));
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_network_cleanup_journal_tests {
+    use super::*;
+
+    fn native_cleanup(
+        owner_token: &str,
+        service_owned: bool,
+        config_owned: bool,
+    ) -> crate::wg_upstream_runtime::WindowsNativeWireGuardCleanupState {
+        serde_json::from_value(serde_json::json!({
+            "name": "nvpn-wg-exit",
+            "config_path": r"C:\ProgramData\nostr-vpn\wireguard\owner\nvpn-wg-exit.conf",
+            "wireguard_exe": r"C:\Program Files\WireGuard\wireguard.exe",
+            "owner_token": owner_token,
+            "service_owned": service_owned,
+            "config_owned": config_owned,
+        }))
+        .expect("native cleanup fixture")
+    }
+
+    #[test]
+    fn periodic_persist_retains_inflight_native_intent_but_not_completed_dns() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nvpn-windows-cleanup-journal-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create test directory");
+        let config_path = dir.join("config.toml");
+        let cleanup_path = daemon_network_cleanup_file_path(&config_path);
+        let owner_token = "nvpn-test-periodic-persist";
+        let owned = native_cleanup(owner_token, true, true);
+        let routes: crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "owned_routes": [{
+                    "prefix": "198.51.100.20/32",
+                    "interface_index": 4,
+                    "next_hop": "192.0.2.1",
+                    "metric": 1,
+                    "interface_identity": "test-interface"
+                }]
+            }))
+            .expect("route cleanup fixture");
+
+        persist_windows_native_wireguard_cleanup_intent(&config_path, &owned)
+            .expect("persist native intent");
+        persist_windows_route_cleanup_intent(&config_path, &routes, true)
+            .expect("persist route intent");
+        persist_fips_secure_dns_cleanup_intent(
+            &config_path,
+            &crate::secure_dns_runtime::SystemDnsCleanupIntent::WindowsInterface(47),
+        )
+        .expect("persist secure DNS intent");
+
+        // Native startup has not yet installed the handle in
+        // runtime.wg_upstream. Periodic state persistence must retain its
+        // write-ahead ownership while retiring successfully-cleaned DNS.
+        persist_fips_daemon_network_cleanup_state(&config_path, None)
+            .expect("periodic persist");
+        let retained = read_daemon_network_cleanup_state(&cleanup_path)
+            .expect("read retained state")
+            .expect("native ownership remains");
+        assert_eq!(retained.native_wireguard.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&retained.native_wireguard[0])
+                .expect("serialize retained native state")["owner_token"],
+            owner_token
+        );
+        assert!(
+            !retained.routes.is_empty(),
+            "periodic persistence must retain write-ahead route ownership"
+        );
+        assert!(retained.secure_dns_interface_indexes.is_empty());
+
+        let completed = native_cleanup(owner_token, false, false);
+        persist_windows_native_wireguard_cleanup_intent(&config_path, &completed)
+            .expect("remove exact completed native intent");
+        persist_windows_route_cleanup_intent(&config_path, &routes, false)
+            .expect("remove exact completed route intent");
+        persist_fips_daemon_network_cleanup_state(&config_path, None)
+            .expect("periodic persist after cleanup");
+        assert!(
+            !cleanup_path.exists(),
+            "successful exact native cleanup must not be resurrected"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

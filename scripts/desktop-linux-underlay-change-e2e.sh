@@ -27,6 +27,7 @@ WG_IFACE="${NVPN_UNDERLAY_WG_INTERFACE:-nvpn-wg-exit}"
 WG_PEER_PUBLIC_KEY="${NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY:-}"
 WG_ENDPOINT="${NVPN_UNDERLAY_WG_ENDPOINT:-}"
 WG_CLIENT_ADDRESS="${NVPN_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.0.2/32}"
+WG_SERVER_IP="${NVPN_UNDERLAY_WG_SERVER_IP:-}"
 WG_PRIVATE_KEY_FILE="$STATE_DIR/wg-client-private.key"
 WG_CONFIG_FILE="$STATE_DIR/wg-client.conf"
 CLEANUP_JOURNAL="$STATE_DIR/.nvpn-network-cleanup/daemon.cleanup.json"
@@ -793,7 +794,7 @@ run_gate() {
     "$PRIMARY_MAC" "$SECONDARY_MAC" "$SECONDARY_ADDRESS" "$SECONDARY_GATEWAY" \
     "$NETWORK_ID" "$PEER_NPUB" \
     "$PEER_ENDPOINT" "$PEER_TUNNEL_IP" "$EXPECTED_FIPS_REV" \
-    "$WG_PEER_PUBLIC_KEY" "$WG_ENDPOINT" "$WG_CLIENT_ADDRESS"
+    "$WG_PEER_PUBLIC_KEY" "$WG_ENDPOINT" "$WG_CLIENT_ADDRESS" "$WG_SERVER_IP"
   do
     [[ -n "$value" ]] || fail "Run is missing a required peer/underlay argument"
   done
@@ -830,7 +831,7 @@ run_gate() {
     --wireguard-exit-enabled true \
     --exit-node-leak-protection true \
     --exit-dns-mode through_exit \
-    --exit-dns-through-exit-servers "$PEER_TUNNEL_IP" \
+    --exit-dns-through-exit-servers "$WG_SERVER_IP" \
     --autoconnect true \
     >/dev/null
   ORIGINAL_NPUB="$(read_npub)"
@@ -889,7 +890,7 @@ run_gate() {
     --exit-dns-custom-doh-bootstrap-ips 8.8.8.8,8.8.4.4
   run_dns_case through-exit "$FIXTURE_DNS_NAME" "$daemon_process" "$primary_iface" \
     --exit-dns-mode through_exit \
-    --exit-dns-through-exit-servers "$PEER_TUNNEL_IP"
+    --exit-dns-through-exit-servers "$WG_SERVER_IP"
 
   wait_for_marker select-direct
   "$BINARY" set \
@@ -954,7 +955,7 @@ crash_repair_gate() {
   for value in \
     "$PRIMARY_MAC" "$NETWORK_ID" "$PEER_NPUB" "$PEER_ENDPOINT" \
     "$PEER_TUNNEL_IP" "$EXPECTED_FIPS_REV" "$WG_PEER_PUBLIC_KEY" \
-    "$WG_ENDPOINT" "$WG_CLIENT_ADDRESS"
+    "$WG_ENDPOINT" "$WG_CLIENT_ADDRESS" "$WG_SERVER_IP"
   do
     [[ -n "$value" ]] || fail "Crash repair is missing a required peer/underlay argument"
   done
@@ -986,7 +987,7 @@ crash_repair_gate() {
     --wireguard-exit-enabled true \
     --exit-node-leak-protection true \
     --exit-dns-mode through_exit \
-    --exit-dns-through-exit-servers "$PEER_TUNNEL_IP" \
+    --exit-dns-through-exit-servers "$WG_SERVER_IP" \
     --autoconnect false \
     >/dev/null
   crash_started="$(date +%s)"

@@ -567,10 +567,48 @@ pub(crate) fn retry_windows_route_cleanup_snapshot(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn retry_pending_windows_route_cleanup() -> Result<()> {
+    retry_pending_windows_route_cleanup_with_journal(None)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn retry_pending_windows_route_cleanup_journaled(
+    config_path: &std::path::Path,
+) -> Result<()> {
+    retry_pending_windows_route_cleanup_with_journal(Some(config_path))
+}
+
+#[cfg(target_os = "windows")]
+fn retry_pending_windows_route_cleanup_with_journal(
+    config_path: Option<&std::path::Path>,
+) -> Result<()> {
     let mut cleanup = take_pending_windows_route_cleanup();
+    let attempted = cleanup.clone();
     let result = retry_windows_route_cleanup_snapshot(&mut cleanup);
-    retain_pending_windows_route_cleanup(cleanup);
-    result
+    let persist_result = config_path.map_or(Ok(()), |config_path| {
+        crate::daemon_runtime::persist_windows_route_cleanup_result(
+            config_path,
+            &attempted,
+            &cleanup,
+        )
+    });
+    match (result, persist_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => {
+            retain_pending_windows_route_cleanup(cleanup);
+            Err(error)
+        }
+        (Ok(()), Err(error)) => {
+            retain_pending_windows_route_cleanup(attempted);
+            Err(error.context("persist pending Windows route cleanup result"))
+        }
+        (Err(cleanup_error), Err(persist_error)) => {
+            retain_pending_windows_route_cleanup(attempted);
+            Err(anyhow!(
+                "{cleanup_error:#}; persist pending Windows route cleanup result: \
+                 {persist_error:#}"
+            ))
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -580,7 +618,7 @@ impl WindowsManagedEndpointRoutes {
         excluded_tunnel_interfaces: &[u32],
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<Option<Self>> {
-        retry_pending_windows_route_cleanup()?;
+        retry_pending_windows_route_cleanup_journaled(cleanup_journal_config_path)?;
         let targets = windows_endpoint_target_ips(targets)?;
         if targets.is_empty() {
             return Ok(None);
@@ -615,7 +653,11 @@ impl WindowsManagedEndpointRoutes {
         targets: &[String],
         excluded_tunnel_interfaces: &[u32],
     ) -> Result<bool> {
-        retry_pending_windows_route_cleanup()?;
+        if let Some(config_path) = self.cleanup_journal_config_path.as_deref() {
+            retry_pending_windows_route_cleanup_journaled(config_path)?;
+        } else {
+            retry_pending_windows_route_cleanup()?;
+        }
         let targets = windows_endpoint_target_ips(targets)?;
         let underlay = if targets.is_empty() {
             self.underlay.clone()
@@ -668,7 +710,7 @@ impl WindowsManagedInterfaceRoutes {
         targets: &[String],
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<Self> {
-        retry_pending_windows_route_cleanup()?;
+        retry_pending_windows_route_cleanup_journaled(cleanup_journal_config_path)?;
         let mut runner =
             SystemWindowsRouteCommandRunner::journaled(cleanup_journal_config_path);
         match Self::apply_with(
@@ -693,7 +735,11 @@ impl WindowsManagedInterfaceRoutes {
     }
 
     pub(crate) fn reconcile(&mut self, targets: &[String]) -> Result<bool> {
-        retry_pending_windows_route_cleanup()?;
+        if let Some(config_path) = self.cleanup_journal_config_path.as_deref() {
+            retry_pending_windows_route_cleanup_journaled(config_path)?;
+        } else {
+            retry_pending_windows_route_cleanup()?;
+        }
         let mut runner = self.system_runner();
         self.reconcile_with(&mut runner, targets)
     }

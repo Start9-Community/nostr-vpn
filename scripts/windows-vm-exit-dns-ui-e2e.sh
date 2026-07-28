@@ -113,23 +113,22 @@ foreach (\$item in \$cases) {
     throw ('exact nvpn config bootstrap failed for ' + \$item.Case)
   }
   \$marker = Join-Path \$artifact (\$item.Case + '.json')
-  \$driverArguments = @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', \$driver,
-    '-Mode', 'DnsPolicy',
-    '-AppExe', \$app,
-    '-CliExe', \$cli,
-    '-DataDir', \$data,
-    '-MarkerPath', \$marker,
-    '-Case', \$item.Case,
-    '-DnsMode', \$item.Mode,
-    '-DnsProvider', \$item.Provider,
-    '-DnsCustomUrl', \$item.Url,
-    '-DnsBootstrapIps', \$item.Bootstrap,
-    '-DnsThroughServers', \$item.Through,
-    '-AppGitSha', \$appSha,
-    '-AppGitTree', \$appTree
-  )
-  & powershell.exe @driverArguments
+  \$driverArguments = @{
+    Mode = 'DnsPolicy'
+    AppExe = \$app
+    CliExe = \$cli
+    DataDir = \$data
+    MarkerPath = \$marker
+    Case = \$item.Case
+    DnsMode = \$item.Mode
+    DnsProvider = \$item.Provider
+    DnsCustomUrl = [string]\$item.Url
+    DnsBootstrapIps = [string]\$item.Bootstrap
+    DnsThroughServers = [string]\$item.Through
+    AppGitSha = \$appSha
+    AppGitTree = \$appTree
+  }
+  & \$driver @driverArguments
   if (\$LASTEXITCODE -ne 0) {
     throw ('shipped Windows DNS UI failed for ' + \$item.Case)
   }

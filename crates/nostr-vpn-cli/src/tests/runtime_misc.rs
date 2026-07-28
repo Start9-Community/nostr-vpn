@@ -15,6 +15,8 @@ fn daemon_vpn_requires_remote_participants_to_be_active() {
 fn split_magic_dns_yields_port_53_to_secure_dns_for_every_exit_source() {
     let mut app = AppConfig::generated();
     assert!(!secure_exit_dns_required(&app));
+    assert!(split_magic_dns_should_start(&app, false));
+    assert!(!split_magic_dns_should_start(&app, true));
     for source in [
         InternetSource::PrivateVpn,
         InternetSource::PaidAutomatic,
@@ -23,7 +25,19 @@ fn split_magic_dns_yields_port_53_to_secure_dns_for_every_exit_source() {
     ] {
         app.set_internet_source(source);
         assert!(secure_exit_dns_required(&app), "source={source:?}");
+        assert!(
+            !split_magic_dns_should_start(&app, false),
+            "a failed exit sync must not start competing split DNS; source={source:?}"
+        );
     }
+}
+
+#[test]
+fn split_magic_dns_never_uses_an_unusable_windows_random_port() {
+    #[cfg(target_os = "windows")]
+    assert_eq!(split_magic_dns_bind_fallback_port(), None);
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(split_magic_dns_bind_fallback_port(), Some(0));
 }
 
 #[test]

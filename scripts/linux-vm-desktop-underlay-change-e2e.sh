@@ -41,6 +41,7 @@ WG_LISTEN_PORT="$((50000 + RANDOM % 1000))"
 WG_PEER_IFACE="nvwg${RANDOM}"
 WG_CLIENT_ADDRESS="${NVPN_LINUX_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.0.2/32}"
 WG_SERVER_ADDRESS="${NVPN_LINUX_UNDERLAY_WG_SERVER_ADDRESS:-10.232.0.1/24}"
+WG_SERVER_IP="${WG_SERVER_ADDRESS%/*}"
 COUNTER_CHAIN="nvu-$((RANDOM % 100000))"
 PEER_NETNS="nvl$((RANDOM % 100000))"
 PEER_HOST_VETH="nvlh$((RANDOM % 100000))"
@@ -492,7 +493,8 @@ start_linux_runner() {
       "NVPN_UNDERLAY_LISTEN_PORT=$TARGET_LISTEN_PORT" \
       "NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY=$WG_SERVER_PUBLIC_KEY" \
       "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
-      "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS"
+      "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
+      "NVPN_UNDERLAY_WG_SERVER_IP=$WG_SERVER_IP"
   ) >"$ARTIFACT_DIR/linux-run.log" 2>&1 &
   LINUX_RUN_PID="$!"
   wait_for_guest_marker ready 35
@@ -669,7 +671,7 @@ run_dns_case() {
   local name="$1"
   local counter="$2"
   local before after key before_value after_value
-  local -a counters=(cloudflare quad9 google fixture_dns)
+  local -a counters=(profile_dns cloudflare quad9 google fixture_dns)
   before="$(stable_dns_counters)"
   signal_guest "dns-$name.go"
   wait_for_guest_marker "dns-$name.receipt" 30
@@ -697,7 +699,7 @@ run_dns_case() {
 }
 
 run_dns_matrix_and_direct_restore() {
-  run_dns_case automatic cloudflare
+  run_dns_case automatic profile_dns
   run_dns_case cloudflare cloudflare
   run_dns_case quad9 quad9
   run_dns_case custom google
@@ -728,6 +730,7 @@ run_sigkill_restart_recovery() {
     "NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY=$WG_SERVER_PUBLIC_KEY" \
     "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
     "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
+    "NVPN_UNDERLAY_WG_SERVER_IP=$WG_SERVER_IP" \
     >"$ARTIFACT_DIR/crash-repair.log"
   run_primary sudo -n cat "$GUEST_STATE_DIR/crash-repair.receipt.json" \
     >"$ARTIFACT_DIR/crash-repair-receipt.json"
@@ -782,6 +785,7 @@ run_cleanup_fault_regression() {
     "NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY=$WG_SERVER_PUBLIC_KEY" \
     "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
     "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
+    "NVPN_UNDERLAY_WG_SERVER_IP=$WG_SERVER_IP" \
     >"$ARTIFACT_DIR/cleanup-fault.log"
   run_primary sudo -n cat "$GUEST_STATE_DIR/cleanup-fault.receipt.json" \
     >"$ARTIFACT_DIR/cleanup-fault-receipt.json"

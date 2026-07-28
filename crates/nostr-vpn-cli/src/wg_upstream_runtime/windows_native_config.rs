@@ -195,7 +195,7 @@ fn write_windows_native_wireguard_config(
         ));
     }
 
-    let config_text = nostr_vpn_core::config::wireguard_exit_config_text(config);
+    let config_text = windows_native_wireguard_config_text(config)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -264,6 +264,37 @@ fn write_windows_native_wireguard_config(
         ));
     }
     Ok(owned)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_native_wireguard_config_text(config: &WireGuardExitConfig) -> Result<String> {
+    let config_text = nostr_vpn_core::config::wireguard_exit_config_text(config);
+    let rest = config_text
+        .strip_prefix("[Interface]\n")
+        .ok_or_else(|| anyhow!("unexpected native WireGuard config: missing [Interface] header"))?;
+    let (interface, peer) = rest
+        .split_once("\n[Peer]\n")
+        .ok_or_else(|| anyhow!("unexpected native WireGuard config: missing [Peer] section"))?;
+    if peer.contains("\n[Peer]\n") {
+        return Err(anyhow!(
+            "unexpected native WireGuard config: multiple [Peer] sections"
+        ));
+    }
+    let interface = interface
+        .lines()
+        .filter(|line| {
+            line.split_once('=')
+                .is_none_or(|(key, _)| !key.trim().eq_ignore_ascii_case("dns"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The Windows daemon owns route installation and durable cleanup. Without
+    // this, WireGuardNT applies AllowedIPs=/0 (including its firewall policy)
+    // and provider DNS as soon as the service starts, before the target
+    // handshake is verified.
+    Ok(format!(
+        "[Interface]\nTable = off\n{interface}\n\n[Peer]\n{peer}"
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -543,7 +574,9 @@ pub(crate) fn pending_windows_native_cleanup_snapshot() -> Vec<WindowsNativeWire
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn retry_pending_windows_native_cleanup() -> Result<()> {
+pub(crate) fn retry_pending_windows_native_cleanup_journaled(
+    config_path: &Path,
+) -> Result<()> {
     let pending = {
         let mut guard = pending_windows_native_cleanup()
             .lock()
@@ -553,9 +586,29 @@ pub(crate) fn retry_pending_windows_native_cleanup() -> Result<()> {
     let mut remaining = Vec::new();
     let mut failures = Vec::new();
     for mut cleanup in pending {
-        if let Err(error) = cleanup_windows_native_wireguard_state(&mut cleanup) {
+        let before = cleanup.clone();
+        let cleanup_result = cleanup_windows_native_wireguard_state(&mut cleanup);
+        let persist_result =
+            crate::daemon_runtime::persist_windows_native_wireguard_cleanup_intent(
+                config_path,
+                &cleanup,
+            );
+        if let Err(error) = cleanup_result {
             failures.push(format!("{error:#}"));
-            remaining.push(cleanup);
+            remaining.push(cleanup.clone());
+        }
+        if let Err(error) = persist_result {
+            failures.push(format!(
+                "persist pending native WireGuard cleanup result: {error:#}"
+            ));
+            if cleanup.is_empty() {
+                remaining.push(before);
+            } else if !remaining
+                .iter()
+                .any(|existing| existing.same_owner(&cleanup))
+            {
+                remaining.push(cleanup);
+            }
         }
     }
     for cleanup in remaining {

@@ -127,6 +127,11 @@ with tempfile.TemporaryDirectory() as temporary:
             encoding="utf-8",
         )
     module.validate_android_dns_ui_receipts(root, list(cases))
+    support, evidence_paths = module.validate_android_support(
+        root, list(cases), "settings-only"
+    )
+    assert support["dnsSettingsReceiptCount"] == len(cases)
+    assert len(evidence_paths) == len(cases)
     custom = root / "mobile-android-exit-dns-state-3.json"
     payload = json.loads(custom.read_text(encoding="utf-8"))
     payload["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"

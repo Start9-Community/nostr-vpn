@@ -9,7 +9,7 @@ fn apply_windows_endpoint_bypass_route(
         wg_iface_index,
         upstream,
         excluded_tunnel_interfaces,
-        false,
+        true,
         cleanup_journal_config_path,
     )
 }
@@ -22,7 +22,7 @@ fn apply_windows_managed_default_routes(
     manage_default: bool,
     cleanup_journal_config_path: &Path,
 ) -> Result<WindowsFullDefaultRoute> {
-    retry_pending_windows_route_cleanup()?;
+    retry_pending_windows_route_cleanup_journaled(cleanup_journal_config_path)?;
     let upstream_ip = match upstream.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => {

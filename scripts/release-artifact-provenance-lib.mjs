@@ -57,13 +57,14 @@ const mobileDnsCounters = [
   'forward',
 ]
 const desktopDnsCounters = {
-  automatic: 'cloudflare',
+  automatic: 'profile_dns',
   cloudflare: 'cloudflare',
   custom: 'google',
   quad9: 'quad9',
   'through-exit': 'fixture_dns',
 }
 const desktopDnsCounterNames = [
+  'profile_dns',
   'cloudflare',
   'quad9',
   'google',

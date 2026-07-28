@@ -29,6 +29,7 @@ function write(path, value) {
 }
 
 const desktopDnsCounterNames = [
+  'profile_dns',
   'cloudflare',
   'quad9',
   'google',
@@ -705,7 +706,7 @@ test('release receipt collection requires exact source and strict public UI gate
             desktopArtifact.artifacts.cli.sha256,
           ),
           dnsCases: {
-            automatic: desktopDnsCase('cloudflare'),
+            automatic: desktopDnsCase('profile_dns'),
             cloudflare: desktopDnsCase('cloudflare'),
             custom: desktopDnsCase('google'),
             quad9: desktopDnsCase('quad9'),
@@ -1088,7 +1089,7 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
     write(
       join(root, 'dns-matrix.txt'),
       [
-        ['automatic', 'cloudflare'],
+        ['automatic', 'profile_dns'],
         ['cloudflare', 'cloudflare'],
         ['quad9', 'quad9'],
         ['custom', 'google'],

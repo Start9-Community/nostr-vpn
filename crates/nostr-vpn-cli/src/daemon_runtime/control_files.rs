@@ -761,18 +761,11 @@ pub(crate) fn apply_config_via_running_daemon(
 
         return Err(anyhow!("daemon: not running"));
     }
-    let pid = status
-        .pid
-        .ok_or_else(|| anyhow!("daemon: running process has no pid"))?;
     // A service process is visible to launchd/process scans before its config,
     // tunnel, and control loop are initialized. Waiting for this pid-specific
     // marker prevents a startup request from being mistaken for stale state
     // and deleted by daemon initialization.
-    wait_for_daemon_control_ready(
-        config_path,
-        pid,
-        crate::daemon_control_ack_timeout(DaemonControlRequest::Reload),
-    )?;
+    crate::wait_for_running_daemon_control_ready(config_path, &status)?;
 
     clear_daemon_control_result(config_path);
     stage_daemon_config_apply(config_path, source_path)?;

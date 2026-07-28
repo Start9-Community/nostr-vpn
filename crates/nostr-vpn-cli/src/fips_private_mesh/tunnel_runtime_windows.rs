@@ -4,6 +4,7 @@ impl FipsPrivateTunnelRuntime {
         config: FipsPrivateTunnelConfig,
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<Self> {
+        validate_windows_wireguard_config(&config.wireguard_exit, &config.exit_dns)?;
         crate::pipeline_profile::maybe_spawn_reporter();
         let mesh = bind_fips_private_mesh(&config).await?;
         #[cfg(feature = "paid-exit")]
@@ -175,6 +176,7 @@ impl FipsPrivateTunnelRuntime {
         config: FipsPrivateTunnelConfig,
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<()> {
+        validate_windows_wireguard_config(&config.wireguard_exit, &config.exit_dns)?;
         self.mesh.replace_peers(
             config.peers.clone(),
             config.local_allowed_ips(),
@@ -213,6 +215,11 @@ impl FipsPrivateTunnelRuntime {
                 config.exit_dns_resolver_config(false)?,
             )?;
         }
+        // Verify and install the desired WireGuard upstream before changing
+        // FIPS routes. A failed handshake leaves the existing route set
+        // untouched while secure exit DNS remains fail-closed.
+        self.reconcile_windows_wg_upstream(&config.wireguard_exit)
+            .await?;
         self.apply_windows_route_config(&config)?;
         if !config.secure_dns_required()
             && let Some(secure_dns) = self.secure_dns.as_mut()
@@ -225,8 +232,6 @@ impl FipsPrivateTunnelRuntime {
             cleanup?;
             self.secure_dns.take();
         }
-        self.reconcile_windows_wg_upstream(&config.wireguard_exit)
-            .await?;
         let wireguard_interface = self
             .wg_upstream
             .as_ref()
@@ -324,7 +329,27 @@ impl FipsPrivateTunnelRuntime {
             self.wg_upstream = None;
         }
         if !want_up {
-            return Ok(());
+            let native_cleanup =
+                crate::wg_upstream_runtime::retry_pending_windows_native_cleanup_journaled(
+                    &self.cleanup_journal_config_path,
+                );
+            let route_cleanup =
+                crate::wg_upstream_runtime::retry_pending_windows_route_cleanup_journaled(
+                    &self.cleanup_journal_config_path,
+                );
+            return match (native_cleanup, route_cleanup) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(native), Ok(())) => {
+                    Err(native.context("clean up pending native WireGuard before Direct"))
+                }
+                (Ok(()), Err(routes)) => {
+                    Err(routes.context("clean up pending WireGuard routes before Direct"))
+                }
+                (Err(native), Err(routes)) => Err(anyhow!(
+                    "clean up pending native WireGuard before Direct: {native:#}; \
+                     clean up pending WireGuard routes before Direct: {routes:#}"
+                )),
+            };
         }
         let handle = crate::wg_upstream_runtime::apply_daemon_wg_upstream_for_fips(
             wg_config,
@@ -382,7 +407,9 @@ impl FipsPrivateTunnelRuntime {
         windows_fips_record_cleanup(
             &mut failures,
             "pending Windows route obligations",
-            crate::wg_upstream_runtime::retry_pending_windows_route_cleanup(),
+            crate::wg_upstream_runtime::retry_pending_windows_route_cleanup_journaled(
+                &runtime.cleanup_journal_config_path,
+            ),
         );
         let mut secure_dns_cleanup_succeeded = false;
         if let Some(secure_dns) = runtime.secure_dns.as_mut() {
@@ -450,6 +477,43 @@ fn windows_fips_with_cleanup_error(
         Ok(()) => error,
         Err(cleanup_error) => anyhow!("{error:#}; {operation}: {cleanup_error:#}"),
     }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn validate_windows_wireguard_config(
+    config: &WireGuardExitConfig,
+    exit_dns: &ExitDnsConfig,
+) -> Result<()> {
+    if !config.enabled || !config.configured() {
+        return Ok(());
+    }
+    match config.endpoint.parse::<SocketAddr>() {
+        Ok(endpoint) if !endpoint.is_ipv4() => {
+            return Err(anyhow!(
+                "Windows WireGuard exit does not yet support an IPv6 endpoint"
+            ));
+        }
+        Err(_) if exit_dns.mode == nostr_vpn_core::config::ExitDnsMode::ThroughExit => {
+            return Err(anyhow!(
+                "Windows WireGuard exit with DNS-through-exit requires a literal IPv4 \
+                 endpoint with port; hostname DNS is fail-closed until the tunnel connects"
+            ));
+        }
+        Ok(_) | Err(_) => {}
+    }
+    if config.allowed_ips.iter().any(|route| {
+        route
+            .split_once('/')
+            .map_or(route.as_str(), |(address, _)| address)
+            .trim()
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok()
+    }) {
+        return Err(anyhow!(
+            "Windows WireGuard exit does not yet support IPv6 AllowedIPs"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -542,6 +606,48 @@ mod windows_endpoint_bypass_tests {
     }
 
     #[test]
+    fn windows_wireguard_rejects_only_unsupported_pre_dns_configs() {
+        let mut config = WireGuardExitConfig {
+            enabled: true,
+            address: "10.64.70.195/32".to_string(),
+            private_key: "private-key".to_string(),
+            peer_public_key: "peer-key".to_string(),
+            endpoint: "vpn.example:51820".to_string(),
+            ..WireGuardExitConfig::default()
+        };
+        let mut exit_dns = ExitDnsConfig {
+            mode: nostr_vpn_core::config::ExitDnsMode::ThroughExit,
+            ..ExitDnsConfig::default()
+        };
+        assert!(
+            validate_windows_wireguard_config(&config, &exit_dns)
+                .expect_err("hostname must fail before secure DNS")
+                .to_string()
+                .contains("literal IPv4 endpoint")
+        );
+        exit_dns.mode = nostr_vpn_core::config::ExitDnsMode::Automatic;
+        validate_windows_wireguard_config(&config, &exit_dns)
+            .expect("bootstrap DoH can resolve a hostname endpoint");
+        config.endpoint = "[2001:db8::20]:51820".to_string();
+        assert!(
+            validate_windows_wireguard_config(&config, &exit_dns)
+                .expect_err("IPv6 endpoint is unsupported")
+                .to_string()
+                .contains("does not yet support an IPv6 endpoint")
+        );
+        config.endpoint = "198.51.100.20:51820".to_string();
+        config.allowed_ips.push("::/0".to_string());
+        assert!(
+            validate_windows_wireguard_config(&config, &exit_dns)
+                .expect_err("IPv6 AllowedIPs are unsupported")
+                .to_string()
+                .contains("does not yet support IPv6 AllowedIPs")
+        );
+        config.allowed_ips.retain(|route| route != "::/0");
+        validate_windows_wireguard_config(&config, &exit_dns).expect("literal IPv4-only config");
+    }
+
+    #[test]
     fn windows_runtime_does_not_swallow_wg_or_stop_cleanup_failures() {
         let source = include_str!("tunnel_runtime_windows.rs");
         let production = source
@@ -559,6 +665,43 @@ mod windows_endpoint_bypass_tests {
         assert!(
             production.contains("windows_fips_finish_cleanup"),
             "stop must aggregate route, service, config, session, and endpoint failures"
+        );
+    }
+
+    #[test]
+    fn windows_reload_verifies_wireguard_before_routes_and_direct_dns_teardown() {
+        let source = include_str!("tunnel_runtime_windows.rs");
+        let apply = source
+            .split("pub(crate) async fn apply_config")
+            .nth(1)
+            .and_then(|tail| tail.split("pub(crate) async fn refresh_peer_dependent_routes").next())
+            .expect("Windows apply_config source");
+        let wireguard = apply
+            .find("self.reconcile_windows_wg_upstream")
+            .expect("WireGuard reconcile");
+        let routes = apply
+            .find("self.apply_windows_route_config")
+            .expect("FIPS route reconcile");
+        let secure_dns_stop = apply
+            .find("let cleanup = secure_dns.stop().await")
+            .expect("direct DNS teardown");
+        assert!(
+            wireguard < routes && routes < secure_dns_stop,
+            "failed WG must leave routes untouched, while Direct cleans WG before restoring DNS"
+        );
+        let reconcile = source
+            .split("async fn reconcile_windows_wg_upstream")
+            .nth(1)
+            .and_then(|tail| tail.split("pub(crate) async fn stop").next())
+            .expect("Windows WireGuard reconcile source");
+        let direct_cleanup = reconcile
+            .split("if !want_up")
+            .nth(1)
+            .expect("Direct cleanup branch");
+        assert!(
+            direct_cleanup.contains("retry_pending_windows_native_cleanup_journaled")
+                && direct_cleanup.contains("retry_pending_windows_route_cleanup_journaled"),
+            "Direct must not restore DNS while orphaned native WG or routes remain"
         );
     }
 }

@@ -122,7 +122,11 @@ fn windows_wireguard_policy_uses_provider_dns_and_keeps_magic_dns_local() {
     assert!(script.contains("-Namespace '.nvpn'"));
     assert!(script.contains("-Namespace '.fips'"));
     assert!(script.contains("-Namespace '.' -NameServers @('10.99.99.1')"));
-    assert!(!script.contains("-Namespace '.' -NameServers '127.0.0.1'"));
+    assert!(script.contains("try {"));
+    assert!(script.contains("catch {"));
+    assert!(script.contains("$originalError = $_"));
+    assert!(script.contains("-Namespace '.' -NameServers '127.0.0.1'"));
+    assert!(script.contains("throw $originalError"));
 }
 
 #[test]

@@ -23,6 +23,10 @@ pub(crate) fn maybe_reload_running_daemon(config_path: &Path) {
     if !status.running {
         return;
     }
+    if let Err(error) = crate::wait_for_running_daemon_control_ready(config_path, &status) {
+        eprintln!("config: daemon did not become ready after save: {error}");
+        return;
+    }
     clear_daemon_control_result(config_path);
     if let Err(error) = request_daemon_reload(config_path) {
         eprintln!("config: failed to request daemon reload after save: {error}");
