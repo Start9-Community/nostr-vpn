@@ -369,6 +369,8 @@ for wrapper in "$MANUAL" "$SERVICE"; do
     'NVPN_LINUX_FIXTURE_PATH="$fixture"'
 done
 require_tokens "$MANUAL_GUEST" "explicit immutable artifact paths" \
+  'cd "${NVPN_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/../..}"' \
+  'pwd -P' \
   'NVPN_LINUX_APP_PATH' \
   'NVPN_LINUX_NVPN_PATH' \
   'NVPN_LINUX_FIXTURE_PATH' \
@@ -402,8 +404,9 @@ for wrapper in "$MANUAL" "$SERVICE"; do
   fi
 done
 
-"$CLEANUP_HARNESS" \
-  | grep -Fq UBUNTU_EXACT_DEB_PURGE_FAILURE_RESTORE_OK
+cleanup_harness_output="$("$CLEANUP_HARNESS")"
+grep -Fq UBUNTU_EXACT_DEB_PURGE_FAILURE_RESTORE_OK \
+  <<<"$cleanup_harness_output"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-host-linux-bundle-contract.XXXXXX")"
 backup="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-host-linux-bundle-backup.XXXXXX")"

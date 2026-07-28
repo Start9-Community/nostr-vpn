@@ -3,7 +3,10 @@
 # crosses the deployed public FIPS transit service and is durably acknowledged.
 set -euo pipefail
 
-ROOT_DIR="${NVPN_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+ROOT_DIR="$(
+  cd "${NVPN_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/../..}"
+  pwd -P
+)"
 LINUX_DIR="$ROOT_DIR/linux"
 ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT_DIR/artifacts/linux-manual-join-ui}"
 E2E_ROOT="/tmp/nostr-vpn-linux-manual-join-ui"
