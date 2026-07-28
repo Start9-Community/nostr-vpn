@@ -52,6 +52,38 @@ release_fips_path=""
 release_cargo_lock_original_sha256=""
 release_cargo_manifest_original_sha256=""
 HOST_LINUX_VM_BUNDLE_PATH_RECEIPT=""
+WINDOWS_PLATFORM_PREPARATION_RECEIPT=""
+MACOS_PLATFORM_PREPARATION_RECEIPT=""
+LINUX_PLATFORM_PREPARATION_RECEIPT=""
+
+write_platform_preparation_receipt() {
+  local receipt="$1" platform="$2" temporary app_head app_tree
+  [[ -n "$receipt" && -n "$platform" ]] || return 2
+  app_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  app_tree="$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')"
+  assert_release_checkout_state \
+    "$ROOT_DIR" "$app_head" "$app_tree" \
+    "$platform platform preparation" || return 1
+  temporary="${receipt}.tmp.$$"
+  (
+    umask 077
+    printf '%s\t%s\t%s\n' "$platform" "$app_head" "$app_tree" >"$temporary"
+  )
+  mv -f "$temporary" "$receipt"
+}
+
+platform_preparation_receipt_valid() {
+  local receipt="$1" expected_platform="$2"
+  local platform app_head app_tree extra line_count
+  [[ -f "$receipt" && ! -L "$receipt" ]] || return 1
+  line_count="$(wc -l <"$receipt" | tr -d '[:space:]')"
+  [[ "$line_count" == "1" ]] || return 1
+  IFS=$'\t' read -r platform app_head app_tree extra <"$receipt"
+  [[ "$platform" == "$expected_platform" \
+    && -z "$extra" \
+    && "$app_head" == "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+    && "$app_tree" == "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" ]]
+}
 
 restore_release_cargo_lock() {
   local cleanup_failed=0
@@ -497,6 +529,8 @@ prepare_windows_platform_lane_sync() {
   if windows_vm_reachable "$host"; then
     NVPN_WINDOWS_FIPS_REPO_PATH="$release_fips_path" \
       ./scripts/windows-vm-git-sync.sh "$host"
+    write_platform_preparation_receipt \
+      "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" windows
     WINDOWS_LANE_PRE_SYNCED=1
   fi
 }
@@ -703,7 +737,9 @@ run_windows_underlay_network_change_gate() {
 }
 
 run_windows_platform_lane() {
-  prepare_windows_platform_lane_sync
+  if [[ "${WINDOWS_LANE_PRE_SYNCED:-0}" != "1" ]]; then
+    prepare_windows_platform_lane_sync
+  fi
   if [[ "${WINDOWS_LANE_PRE_SYNCED:-0}" == "1" ]]; then
     export NVPN_WINDOWS_SKIP_GIT_SYNC=1
   fi
@@ -754,7 +790,10 @@ prepare_macos_platform_lane_sync() {
       fi
       return 1
     fi
+    write_platform_preparation_receipt \
+      "$MACOS_PLATFORM_PREPARATION_RECEIPT" macos
     MACOS_PLATFORM_LANE_PRE_SYNCED=1
+    export NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=1
   fi
 }
 
@@ -860,7 +899,9 @@ run_macos_exit_dns_ui_gate() {
 }
 
 run_macos_platform_lane() {
-  prepare_macos_platform_lane_sync
+  if [[ "${MACOS_PLATFORM_LANE_PRE_SYNCED:-0}" != "1" ]]; then
+    prepare_macos_platform_lane_sync
+  fi
   run_macos_manual_join_ui_gate
   run_macos_exit_dns_ui_gate
   run_macos_service_toggle_gate
@@ -918,6 +959,8 @@ prepare_linux_platform_lane_sync() {
     prepare_host_linux_vm_bundle_and_record
     ./scripts/ubuntu-vm-git-sync.sh \
       "${NVPN_UBUNTU_SSH_HOST:-}"
+    write_platform_preparation_receipt \
+      "$LINUX_PLATFORM_PREPARATION_RECEIPT" linux
     LINUX_PLATFORM_LANE_PRE_SYNCED=1
   fi
 }
@@ -1101,7 +1144,9 @@ run_linux_underlay_network_change_gate() {
 }
 
 run_linux_platform_lane() {
-  prepare_linux_platform_lane_sync
+  if [[ "${LINUX_PLATFORM_LANE_PRE_SYNCED:-0}" != "1" ]]; then
+    prepare_linux_platform_lane_sync
+  fi
   run_linux_manual_join_ui_gate
   run_linux_exit_dns_ui_gate
   run_linux_service_toggle_gate
@@ -2001,6 +2046,20 @@ main() {
   HOST_LINUX_VM_BUNDLE_PATH_RECEIPT="$log_dir/host-linux-vm-bundle-path.txt"
   export HOST_LINUX_VM_BUNDLE_PATH_RECEIPT
   rm -f "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT"
+  WINDOWS_PLATFORM_PREPARATION_RECEIPT="$log_dir/windows-platform-prepared.txt"
+  MACOS_PLATFORM_PREPARATION_RECEIPT="$log_dir/macos-platform-prepared.txt"
+  LINUX_PLATFORM_PREPARATION_RECEIPT="$log_dir/linux-platform-prepared.txt"
+  export WINDOWS_PLATFORM_PREPARATION_RECEIPT
+  export MACOS_PLATFORM_PREPARATION_RECEIPT
+  export LINUX_PLATFORM_PREPARATION_RECEIPT
+  rm -f \
+    "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" \
+    "$MACOS_PLATFORM_PREPARATION_RECEIPT" \
+    "$LINUX_PLATFORM_PREPARATION_RECEIPT"
+  export WINDOWS_LANE_PRE_SYNCED=0
+  export MACOS_PLATFORM_LANE_PRE_SYNCED=0
+  export LINUX_PLATFORM_LANE_PRE_SYNCED=0
+  export NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=0
   local mobile_artifact_receipt_dir="$log_dir/mobile-release-artifacts"
   mkdir -p "$mobile_artifact_receipt_dir"
   export NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$mobile_artifact_receipt_dir/android.json"
@@ -2017,29 +2076,41 @@ main() {
   # overlap work on resource-isolated remote hosts.
   run_release_gate_candidate_preflight
 
-  local windows_lane=""
+  # These preparation lanes read or snapshot the tracked candidate. They may
+  # overlap the non-mutating static preflight, but all must finish before the
+  # shared local-FIPS session realizes Cargo.lock. The already-synced VM
+  # verification lanes start again below and overlap Rust/Docker validation.
+  local platform_preparation_lanes=()
+  local windows_platform_requested_for_gate=0
   if windows_platform_lane_requested; then
-    release_gate_parallel_start "Windows platform" run_windows_platform_lane
-    windows_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    windows_platform_requested_for_gate=1
+    release_gate_parallel_start \
+      "Windows platform preparation" \
+      prepare_windows_platform_lane_sync
+    platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
-  local macos_platform_lane=""
+  local macos_platform_requested_for_gate=0
   if macos_platform_lane_requested; then
-    export NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=1
-    release_gate_parallel_start "macOS platform UI" run_macos_platform_lane
-    macos_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    macos_platform_requested_for_gate=1
+    release_gate_parallel_start \
+      "macOS platform preparation" \
+      prepare_macos_platform_lane_sync
+    platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
-  local linux_platform_lane=""
-  local linux_bundle_lane=""
+  local linux_platform_requested_for_gate=0
   if linux_platform_lane_requested; then
-    release_gate_parallel_start "Linux platform UI" run_linux_platform_lane
-    linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    linux_platform_requested_for_gate=1
+    release_gate_parallel_start \
+      "Linux platform preparation" \
+      prepare_linux_platform_lane_sync
+    platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   elif linux_underlay_gate_reachable; then
     release_gate_parallel_start \
       "Linux host-built release bundle" \
       prepare_host_linux_vm_bundle_and_record
-    linux_bundle_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
   run_release_gate_static_preflight
@@ -2049,7 +2120,55 @@ main() {
     run_android_static_validation_lane
   local android_static_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 
+  release_gate_parallel_wait_group "${platform_preparation_lanes[@]}"
+  if [[ -e "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" ]]; then
+    platform_preparation_receipt_valid \
+      "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" windows || {
+      echo "Windows platform preparation receipt is invalid." >&2
+      return 1
+    }
+    export WINDOWS_LANE_PRE_SYNCED=1
+  fi
+  if [[ -e "$MACOS_PLATFORM_PREPARATION_RECEIPT" ]]; then
+    platform_preparation_receipt_valid \
+      "$MACOS_PLATFORM_PREPARATION_RECEIPT" macos || {
+      echo "macOS platform preparation receipt is invalid." >&2
+      return 1
+    }
+    export MACOS_PLATFORM_LANE_PRE_SYNCED=1
+    export NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=1
+  fi
+  if [[ -e "$LINUX_PLATFORM_PREPARATION_RECEIPT" ]]; then
+    platform_preparation_receipt_valid \
+      "$LINUX_PLATFORM_PREPARATION_RECEIPT" linux || {
+      echo "Linux platform preparation receipt is invalid." >&2
+      return 1
+    }
+    export LINUX_PLATFORM_LANE_PRE_SYNCED=1
+  fi
+  if [[ -e "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT" ]]; then
+    load_host_linux_vm_bundle_path_receipt
+  fi
+
   prepare_release_cargo_config
+
+  local windows_lane=""
+  if [[ "$windows_platform_requested_for_gate" == "1" ]]; then
+    release_gate_parallel_start "Windows platform" run_windows_platform_lane
+    windows_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  fi
+
+  local macos_platform_lane=""
+  if [[ "$macos_platform_requested_for_gate" == "1" ]]; then
+    release_gate_parallel_start "macOS platform UI" run_macos_platform_lane
+    macos_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  fi
+
+  local linux_platform_lane=""
+  if [[ "$linux_platform_requested_for_gate" == "1" ]]; then
+    release_gate_parallel_start "Linux platform UI" run_linux_platform_lane
+    linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  fi
 
   # The remote Windows lane and the shared Docker image build do not consume
   # measurement devices. Build them alongside host Rust validation, then join
@@ -2081,13 +2200,6 @@ main() {
   if [[ -n "$linux_platform_lane" ]]; then
     release_gate_parallel_wait "$linux_platform_lane"
     linux_platform_lane=""
-  fi
-  if [[ -n "$linux_bundle_lane" ]]; then
-    release_gate_parallel_wait "$linux_bundle_lane"
-    linux_bundle_lane=""
-  fi
-  if [[ -f "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT" ]]; then
-    load_host_linux_vm_bundle_path_receipt
   fi
   if [[ -n "$macos_platform_lane" ]]; then
     release_gate_parallel_wait "$macos_platform_lane"

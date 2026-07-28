@@ -172,9 +172,9 @@ release_join_require_device_mutation_allowed() {
 
 release_join_assert_app_unchanged() {
   local expected_sha="$1" expected_tree="$2"
-  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$expected_sha" \
-    && "$(git -C "$ROOT" rev-parse HEAD^{tree})" == "$expected_tree" \
-    && -z "$(git -C "$ROOT" status --porcelain)" ]] || {
+  assert_release_checkout_state \
+    "$ROOT" "$expected_sha" "$expected_tree" \
+    "Application Release artifact build" || {
     echo "Application candidate changed while building Release join artifacts" >&2
     return 1
   }

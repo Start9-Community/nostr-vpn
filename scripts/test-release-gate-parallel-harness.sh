@@ -296,6 +296,10 @@ candidate_preflight_line="$(
   grep -n '^  run_release_gate_candidate_preflight$' "$release_gate" \
     | cut -d: -f1 || true
 )"
+windows_preparation_line="$(
+  grep -n '"Windows platform preparation"' "$release_gate" \
+    | tail -1 | cut -d: -f1 || true
+)"
 windows_dispatch_line="$(
   grep -n 'release_gate_parallel_start "Windows platform"' "$release_gate" \
     | tail -1 | cut -d: -f1 || true
@@ -305,12 +309,53 @@ static_preflight_line="$(
     | cut -d: -f1 || true
 )"
 [[ -n "$candidate_preflight_line" \
+  && -n "$windows_preparation_line" \
   && -n "$windows_dispatch_line" \
   && -n "$static_preflight_line" ]] \
   || fail "release gate preflight/remote overlap markers are incomplete"
-(( candidate_preflight_line < windows_dispatch_line \
-  && windows_dispatch_line < static_preflight_line )) \
-  || fail "remote platform lanes do not overlap the non-mutating static preflight"
+(( candidate_preflight_line < windows_preparation_line \
+  && windows_preparation_line < static_preflight_line \
+  && static_preflight_line < windows_dispatch_line )) \
+  || fail "remote preparation does not overlap static preflight before platform verification"
+platform_preparation_wait_line="$(
+  grep -nF 'release_gate_parallel_wait_group "${platform_preparation_lanes[@]}"' \
+    "$release_gate" | cut -d: -f1 || true
+)"
+local_fips_preparation_line="$(
+  grep -n '^  prepare_release_cargo_config$' "$release_gate" \
+    | cut -d: -f1 || true
+)"
+[[ -n "$platform_preparation_wait_line" \
+  && -n "$local_fips_preparation_line" ]] \
+  || fail "release gate local-FIPS ordering markers are incomplete"
+(( platform_preparation_wait_line < local_fips_preparation_line \
+  && local_fips_preparation_line < windows_dispatch_line )) \
+  || fail "candidate consumers can overlap shared local-FIPS Cargo.lock realization"
+preparation_receipt_writes="$(
+  grep -A1 'write_platform_preparation_receipt \\' "$release_gate"
+)"
+for preparation_receipt in \
+  WINDOWS_PLATFORM_PREPARATION_RECEIPT \
+  MACOS_PLATFORM_PREPARATION_RECEIPT \
+  LINUX_PLATFORM_PREPARATION_RECEIPT
+do
+  grep -Fq "\"\$$preparation_receipt\"" <<<"$preparation_receipt_writes" \
+    || fail "$preparation_receipt is not written after successful preparation"
+  grep -Fq "if [[ -e \"\$$preparation_receipt\" ]]; then" "$release_gate" \
+    || fail "$preparation_receipt is not required before reusing prepared state"
+done
+for prepared_flag in \
+  WINDOWS_LANE_PRE_SYNCED \
+  MACOS_PLATFORM_LANE_PRE_SYNCED \
+  LINUX_PLATFORM_LANE_PRE_SYNCED
+do
+  grep -Fq "export $prepared_flag=0" "$release_gate" \
+    || fail "$prepared_flag can inherit stale prepared state"
+done
+grep -Fq 'platform_preparation_receipt_valid \' "$release_gate" \
+  || fail "platform preparation receipts are not tied to the exact candidate"
+grep -Fq 'if [[ -e "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT" ]]; then' "$release_gate" \
+  || fail "Linux bundle state is loaded without a successful bundle receipt"
 grep -Fq 'release_gate_parallel_start "Docker node image build"' "$release_gate" \
   || fail "release gate does not overlap the reusable Docker build with host validation"
 grep -Fq '"Android compile, unit tests, and lint"' "$release_gate" \
@@ -450,16 +495,13 @@ for preparation in \
   prepare_linux_platform_lane_sync
 do
   definition_line="$(grep -n "^${preparation}()" "$release_gate" | cut -d: -f1)"
-  invocation_line="$(grep -n "^  ${preparation}$" "$release_gate" | cut -d: -f1)"
+  invocation_line="$(
+    grep -n "      ${preparation}$" "$release_gate" \
+      | tail -1 | cut -d: -f1 || true
+  )"
   [[ -n "$definition_line" && -n "$invocation_line" ]] \
-    || fail "$preparation is not invoked inside its parallel platform lane"
+    || fail "$preparation is not dispatched in a parallel preparation lane"
 done
-main_line="$(grep -n '^main()' "$release_gate" | cut -d: -f1)"
-if tail -n "+$main_line" "$release_gate" \
-  | grep -Eq '^  prepare_(windows|macos|linux)_platform_lane_sync$'
-then
-  fail "remote platform syncs still serialize in main before lane dispatch"
-fi
 for platform in WINDOWS MACOS LINUX; do
   grep -Fq "NVPN_RELEASE_GATE_${platform}_MANUAL_JOIN_UI_E2E:-required" "$release_gate" \
     || fail "$platform manual-join native UI gate is not required by default"

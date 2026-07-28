@@ -289,6 +289,27 @@ function Read-ControlValue {
   return $Pattern.Current.Value
 }
 
+function ConvertTo-CanonicalIpCsv {
+  param(
+    [AllowEmptyString()]
+    [string]$Value
+  )
+  $Canonical = @(
+    ($Value -split '[,\s]+') |
+      ForEach-Object { $_.Trim() } |
+      Where-Object { ![string]::IsNullOrWhiteSpace($_) } |
+      ForEach-Object {
+        [System.Net.IPAddress]$Parsed = $null
+        if (![System.Net.IPAddress]::TryParse($_, [ref]$Parsed)) {
+          throw "Windows DNS UI returned an invalid IP address: $_"
+        }
+        $Parsed.ToString().ToLowerInvariant()
+      } |
+      Sort-Object -Unique
+  )
+  return [string]::Join(",", [string[]]$Canonical)
+}
+
 function Read-PublicText {
   param(
     [Parameter(Mandatory = $true)]
@@ -502,7 +523,11 @@ try {
           $DnsProvider -eq "custom" -and
           (
             (Read-ControlValue "ExitDnsCustomUrl") -ne $DnsCustomUrl -or
-            (Read-ControlValue "ExitDnsBootstrapIps") -ne $DnsBootstrapIps
+            (
+              ConvertTo-CanonicalIpCsv (
+                Read-ControlValue "ExitDnsBootstrapIps"
+              )
+            ) -ne (ConvertTo-CanonicalIpCsv $DnsBootstrapIps)
           )
         ) {
           throw "Windows relaunch changed the custom DoH fields"

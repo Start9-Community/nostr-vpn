@@ -49,6 +49,18 @@ grep -Fq 'publicUiOnly = $true' "$DRIVER" \
   || fail "Windows action evidence is not public-UI-only"
 grep -Fq 'privateStateRead = $false' "$DRIVER" \
   || fail "Windows action evidence does not reject private readback"
+for canonical_readback_contract in \
+  'function ConvertTo-CanonicalIpCsv' \
+  "(\$Value -split '[,\\s]+')" \
+  '[System.Net.IPAddress]::TryParse' \
+  'Sort-Object -Unique' \
+  'ConvertTo-CanonicalIpCsv (' \
+  'Read-ControlValue "ExitDnsBootstrapIps"' \
+  'ConvertTo-CanonicalIpCsv $DnsBootstrapIps'
+do
+  grep -Fq "$canonical_readback_contract" "$DRIVER" \
+    || fail "Windows custom DoH relaunch readback is not canonical IP-set evidence"
+done
 
 grep -Fq 'windows-release-artifact.json' "$REMOTE" \
   || fail "Windows remote wrapper has no artifact receipt"
