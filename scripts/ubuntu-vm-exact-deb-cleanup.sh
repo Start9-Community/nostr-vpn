@@ -35,10 +35,19 @@ if [[ -d "$package_root" && ! -L "$package_root" ]]; then
       cleanup_status=1
       continue
     fi
+    if sudo -n test ! -e "$relative" && sudo -n test ! -L "$relative"; then
+      continue
+    fi
     if ! sudo -n find "$relative" -maxdepth 0 \
       \( -type f -o -type l \) -delete
     then
+      if sudo -n test ! -e "$relative" && sudo -n test ! -L "$relative"; then
+        continue
+      fi
       echo "Could not remove candidate package path: $relative" >&2
+      cleanup_status=1
+    elif sudo -n test -e "$relative" || sudo -n test -L "$relative"; then
+      echo "Unexpected candidate package path type: $relative" >&2
       cleanup_status=1
     fi
   done < <(
