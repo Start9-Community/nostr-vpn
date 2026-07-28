@@ -11,6 +11,7 @@ source "$ROOT_DIR/scripts/lib-release-gate-timeout.sh"
 source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
 source "$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
 source "$ROOT_DIR/scripts/lib-macos-vm-identity.sh"
+source "$ROOT_DIR/scripts/lib-ubuntu-vm-imported-release.sh"
 source "$ROOT_DIR/scripts/mobile_env.sh"
 load_mobile_env "$ROOT_DIR"
 enable_deterministic_build_env "$ROOT_DIR"
@@ -956,9 +957,14 @@ prepare_linux_platform_lane_sync() {
   LINUX_PLATFORM_LANE_PRE_SYNCED=0
   linux_platform_lane_requested || return 0
   if ubuntu_vm_reachable; then
-    prepare_host_linux_vm_bundle_and_record
     ./scripts/ubuntu-vm-git-sync.sh \
       "${NVPN_UBUNTU_SSH_HOST:-}"
+    local ROOT="$ROOT_DIR"
+    local SSH_HOST="${NVPN_UBUNTU_SSH_HOST:-}"
+    local GUEST_SRC_ROOT="${NVPN_UBUNTU_GUEST_SRC_ROOT:-src}"
+    local GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn-release-gate"
+    ubuntu_vm_recover_stale_imported_release_bundle
+    prepare_host_linux_vm_bundle_and_record
     write_platform_preparation_receipt \
       "$LINUX_PLATFORM_PREPARATION_RECEIPT" linux
     LINUX_PLATFORM_LANE_PRE_SYNCED=1
@@ -2061,6 +2067,15 @@ release_gate_cleanup() {
   local status="$?" cleanup_failed=0
   trap - EXIT
   release_gate_parallel_cancel_all || cleanup_failed=1
+  if [[ "${LINUX_PLATFORM_LANE_PRE_SYNCED:-0}" == "1" ]] \
+    && ubuntu_vm_reachable
+  then
+    local ROOT="$ROOT_DIR"
+    local SSH_HOST="${NVPN_UBUNTU_SSH_HOST:-}"
+    local GUEST_SRC_ROOT="${NVPN_UBUNTU_GUEST_SRC_ROOT:-src}"
+    local GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn-release-gate"
+    ubuntu_vm_recover_stale_imported_release_bundle || cleanup_failed=1
+  fi
   release_gate_cleanup_private_build_dirs || cleanup_failed=1
   restore_release_cargo_lock || cleanup_failed=1
   if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then

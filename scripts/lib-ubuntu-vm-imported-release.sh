@@ -11,6 +11,8 @@ NVPN_UBUNTU_IMPORTED_DEB=""
 NVPN_UBUNTU_IMPORTED_RECEIPT=""
 NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT=""
 NVPN_UBUNTU_IMPORTED=0
+NVPN_UBUNTU_IMPORT_LOCK_PID=""
+NVPN_UBUNTU_IMPORT_LOCK_TEMP=""
 
 ubuntu_vm_import_error() {
   echo "Ubuntu VM imported release failed: $*" >&2
@@ -32,6 +34,142 @@ ubuntu_vm_import_scp_command() {
     NVPN_UBUNTU_IMPORT_SCP+=(-o "ProxyCommand=$NVPN_UBUNTU_SSH_PROXY_COMMAND")
   elif [[ -n "${NVPN_UBUNTU_SSH_JUMP:-}" ]]; then
     NVPN_UBUNTU_IMPORT_SCP+=(-J "$NVPN_UBUNTU_SSH_JUMP")
+  fi
+}
+
+ubuntu_vm_import_lock_holder_alive() {
+  local pid="${1:-}"
+  local state
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  state="$(
+    ps -o stat= -p "$pid" 2>/dev/null \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*$//'
+  )"
+  [[ -n "$state" && "$state" != Z* ]]
+}
+
+ubuntu_vm_acquire_import_lock() {
+  if [[ -n "$NVPN_UBUNTU_IMPORT_LOCK_PID" ]]; then
+    if ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"; then
+      return 0
+    fi
+    ubuntu_vm_import_error "recorded VM import lock holder is no longer alive"
+    return 1
+  fi
+  [[ ! -e /dev/fd/8 ]] || {
+    ubuntu_vm_import_error "host file descriptor 8 is already in use"
+    return 1
+  }
+  ubuntu_vm_import_ssh_command
+  local temp fifo ready error pid
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ubuntu-import-lock.XXXXXX")" \
+    || return 1
+  fifo="$temp/hold"
+  ready="$temp/ready"
+  error="$temp/error"
+  mkfifo "$fifo" || {
+    rm -rf "$temp"
+    return 1
+  }
+  exec 8<>"$fifo"
+  (
+    exec 8>&-
+    exec "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
+      bash "$GUEST_REPO/scripts/ubuntu-vm-import-lock-holder.sh" \
+      <"$fifo" >"$ready" 2>"$error"
+  ) &
+  pid="$!"
+  local attempt=0
+  while ((attempt < 300)); do
+    if grep -Fxq UBUNTU_IMPORT_LIFECYCLE_LOCK_READY "$ready" 2>/dev/null \
+      && ubuntu_vm_import_lock_holder_alive "$pid"
+    then
+      NVPN_UBUNTU_IMPORT_LOCK_PID="$pid"
+      NVPN_UBUNTU_IMPORT_LOCK_TEMP="$temp"
+      return 0
+    fi
+    ubuntu_vm_import_lock_holder_alive "$pid" || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  printf 'x' >&8 || true
+  exec 8>&-
+  if ubuntu_vm_import_lock_holder_alive "$pid"; then
+    kill -s TERM "$pid" >/dev/null 2>&1 || true
+    attempt=0
+    while ((attempt < 20)) \
+      && ubuntu_vm_import_lock_holder_alive "$pid"
+    do
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+    if ubuntu_vm_import_lock_holder_alive "$pid"; then
+      kill -s KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  fi
+  wait "$pid" >/dev/null 2>&1 || true
+  [[ ! -s "$error" ]] || cat "$error" >&2
+  rm -rf "$temp"
+  ubuntu_vm_import_error "could not acquire the VM import lifecycle lock"
+  return 1
+}
+
+ubuntu_vm_release_import_lock() {
+  local status=0
+  local attempt
+  if [[ -n "$NVPN_UBUNTU_IMPORT_LOCK_PID" ]]; then
+    if ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"; then
+      printf 'x' >&8 || status=1
+    else
+      status=1
+    fi
+    exec 8>&-
+    attempt=0
+    while ((attempt < 100)) \
+      && ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"
+    do
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+    if ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"; then
+      kill -s TERM "$NVPN_UBUNTU_IMPORT_LOCK_PID" >/dev/null 2>&1 || true
+      attempt=0
+      while ((attempt < 20)) \
+        && ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"
+      do
+        sleep 0.05
+        attempt=$((attempt + 1))
+      done
+      if ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"; then
+        kill -s KILL "$NVPN_UBUNTU_IMPORT_LOCK_PID" >/dev/null 2>&1 || true
+      fi
+      status=1
+    fi
+    wait "$NVPN_UBUNTU_IMPORT_LOCK_PID" || status=1
+  fi
+  if [[ -n "$NVPN_UBUNTU_IMPORT_LOCK_TEMP" ]]; then
+    rm -rf "$NVPN_UBUNTU_IMPORT_LOCK_TEMP" || status=1
+  fi
+  NVPN_UBUNTU_IMPORT_LOCK_PID=""
+  NVPN_UBUNTU_IMPORT_LOCK_TEMP=""
+  return "$status"
+}
+
+ubuntu_vm_recover_stale_imported_release_bundle() {
+  ubuntu_vm_import_ssh_command
+  if [[ -n "$NVPN_UBUNTU_IMPORT_LOCK_PID" ]]; then
+    if ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"; then
+      "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
+        env NVPN_UBUNTU_IMPORT_LOCK_HELD=1 \
+        bash "$GUEST_REPO/scripts/ubuntu-vm-recover-stale-import.sh"
+    else
+      ubuntu_vm_import_error \
+        "refusing stale recovery after losing the VM import lifecycle lock"
+      return 1
+    fi
+  else
+    "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
+      bash "$GUEST_REPO/scripts/ubuntu-vm-recover-stale-import.sh"
   fi
 }
 
@@ -176,10 +314,24 @@ ubuntu_vm_import_release_bundle() {
   deb_hash="$(jq -er '.artifacts.debianPackage.sha256' "$receipt")"
   deb_size="$(jq -er '.artifacts.debianPackage.size' "$receipt")"
 
+  ubuntu_vm_acquire_import_lock || return 1
+  ubuntu_vm_recover_stale_imported_release_bundle || {
+    ubuntu_vm_release_import_lock || true
+    ubuntu_vm_import_error "stale exact-package recovery failed"
+    return 1
+  }
   ubuntu_vm_import_ssh_command
   remote_dir="$(
-    "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
-      mktemp -d /tmp/nvpn-linux-vm-release.XXXXXX
+    "${NVPN_UBUNTU_IMPORT_SSH[@]}" bash -s <<'GUEST'
+set -euo pipefail
+remote_dir="$(mktemp -d /tmp/nvpn-linux-vm-release.XXXXXX)"
+chmod 0700 "$remote_dir"
+phase_temp="$(mktemp "$remote_dir/.nvpn-deb-phase.XXXXXX")"
+printf 'copying\n' >"$phase_temp"
+chmod 0400 "$phase_temp"
+mv "$phase_temp" "$remote_dir/.nvpn-deb-installed"
+printf '%s\n' "$remote_dir"
+GUEST
   )" || {
     ubuntu_vm_import_error "could not create the unique VM import directory"
     return 1
@@ -257,6 +409,14 @@ deb_size="${28}"
 builder_mode="${29}"
 dockerfile_sha="${30}"
 payload_sha="${31}"
+write_import_phase() {
+  local phase="$1"
+  local phase_temp
+  phase_temp="$(mktemp "$remote_dir/.nvpn-deb-phase.XXXXXX")"
+  printf '%s\n' "$phase" >"$phase_temp"
+  chmod 0400 "$phase_temp"
+  mv "$phase_temp" "$remote_dir/.nvpn-deb-installed"
+}
 [[ "$fips_core_patch_spec" == fips-core=* ]]
 [[ "$fips_endpoint_patch_spec" == fips-endpoint=* ]]
 [[ "$fips_identity_patch_spec" == fips-identity=* ]]
@@ -451,14 +611,6 @@ while IFS= read -r candidate; do
   printf '%s|%s|%s\n' "$candidate" "$metadata" "$digest"
 done <"$preexisting_paths" >"$preexisting_manifest"
 
-touch "$remote_dir/.nvpn-deb-installed"
-sudo -n dpkg --install "$remote_dir/nostr-vpn.deb.copy" >/dev/null
-[[ "$(dpkg-query -W -f='${db:Status-Status}' nostr-vpn)" == "installed" ]]
-[[ "$(sha256sum /usr/bin/nostr-vpn | awk '{ print $1 }')" == "$app_hash" ]]
-[[ "$(sha256sum /usr/bin/nvpn | awk '{ print $1 }')" == "$cli_hash" ]]
-[[ "$(/usr/bin/nvpn --version)" == "nvpn $app_version" ]]
-/usr/bin/nvpn version --verbose | grep -Fq "(rev ${fips_sha:0:10})"
-
 mv "$remote_dir/desktop_manual_join_e2e_fixture.copy" \
   "$remote_dir/desktop_manual_join_e2e_fixture"
 mv "$remote_dir/nvpn-x86_64-unknown-linux-musl.copy" \
@@ -550,6 +702,14 @@ try:
 finally:
     temporary.unlink(missing_ok=True)
 PY
+write_import_phase installing
+sudo -n dpkg --install "$remote_dir/nostr-vpn.deb" >/dev/null
+[[ "$(dpkg-query -W -f='${db:Status-Status}' nostr-vpn)" == "installed" ]]
+[[ "$(sha256sum /usr/bin/nostr-vpn | awk '{ print $1 }')" == "$app_hash" ]]
+[[ "$(sha256sum /usr/bin/nvpn | awk '{ print $1 }')" == "$cli_hash" ]]
+[[ "$(/usr/bin/nvpn --version)" == "nvpn $app_version" ]]
+/usr/bin/nvpn version --verbose | grep -Fq "(rev ${fips_sha:0:10})"
+write_import_phase installed
 GUEST
   then
     ubuntu_vm_import_error "VM hash/version/source verification failed"
@@ -602,23 +762,38 @@ GUEST
 
 ubuntu_vm_cleanup_imported_release_bundle() {
   local remote_dir="${NVPN_UBUNTU_IMPORTED_DIR:-}"
-  [[ -n "$remote_dir" ]] || return 0
+  local cleanup_status=0
+  if [[ -z "$remote_dir" ]]; then
+    ubuntu_vm_release_import_lock
+    return $?
+  fi
   case "$remote_dir" in
     /tmp/nvpn-linux-vm-release.*) ;;
     *)
       ubuntu_vm_import_error "refusing unsafe VM import cleanup path"
+      ubuntu_vm_release_import_lock || true
       return 1
       ;;
   esac
+  if [[ -z "$NVPN_UBUNTU_IMPORT_LOCK_PID" ]] \
+    || ! ubuntu_vm_import_lock_holder_alive "$NVPN_UBUNTU_IMPORT_LOCK_PID"
+  then
+    ubuntu_vm_import_error \
+      "refusing imported release cleanup after losing its lifecycle lock"
+    ubuntu_vm_release_import_lock || true
+    return 1
+  fi
   ubuntu_vm_import_ssh_command
   local cleanup_script="$GUEST_REPO/scripts/ubuntu-vm-exact-deb-cleanup.sh"
   "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
     bash "$cleanup_script" "$remote_dir" || {
     ubuntu_vm_import_error \
       "exact Debian package cleanup failed; preserving $remote_dir for repair"
-    return 1
+    cleanup_status=1
   }
-  "${NVPN_UBUNTU_IMPORT_SSH[@]}" bash -s -- "$remote_dir" <<'GUEST'
+  if ((cleanup_status == 0)); then
+    if ! "${NVPN_UBUNTU_IMPORT_SSH[@]}" \
+      bash -s -- "$remote_dir" <<'GUEST'
 set -euo pipefail
 remote_dir="$1"
 case "$remote_dir" in
@@ -629,9 +804,15 @@ find "$remote_dir" -xdev -depth -mindepth 1 -delete
 rmdir "$remote_dir"
 test ! -e "$remote_dir"
 GUEST
-  local evidence_dir="${NVPN_UBUNTU_IMPORT_EVIDENCE_DIR:-$ROOT/artifacts/ubuntu-vm-import}"
-  mkdir -p "$evidence_dir"
-  printf 'remoteArtifactRemoved=true\n' >"$evidence_dir/cleanup-audit.txt"
+    then
+      cleanup_status=1
+    fi
+  fi
+  if ((cleanup_status == 0)); then
+    local evidence_dir="${NVPN_UBUNTU_IMPORT_EVIDENCE_DIR:-$ROOT/artifacts/ubuntu-vm-import}"
+    mkdir -p "$evidence_dir"
+    printf 'remoteArtifactRemoved=true\n' >"$evidence_dir/cleanup-audit.txt"
+  fi
   NVPN_UBUNTU_IMPORTED_DIR=""
   NVPN_UBUNTU_IMPORTED_APP=""
   NVPN_UBUNTU_IMPORTED_CLI=""
@@ -642,4 +823,6 @@ GUEST
   NVPN_UBUNTU_IMPORTED_RECEIPT=""
   NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT=""
   NVPN_UBUNTU_IMPORTED=0
+  ubuntu_vm_release_import_lock || cleanup_status=1
+  return "$cleanup_status"
 }

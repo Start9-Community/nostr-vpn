@@ -15,6 +15,9 @@ RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 DOCKERFILE="$ROOT/Dockerfile.linux-vm-gate"
 CLEANUP="$ROOT/scripts/ubuntu-vm-exact-deb-cleanup.sh"
 CLEANUP_HARNESS="$ROOT/scripts/test-ubuntu-vm-exact-deb-cleanup-harness.sh"
+RECOVERY="$ROOT/scripts/ubuntu-vm-recover-stale-import.sh"
+RECOVERY_HARNESS="$ROOT/scripts/test-ubuntu-vm-stale-import-recovery-harness.sh"
+IMPORT_LOCK_HOLDER="$ROOT/scripts/ubuntu-vm-import-lock-holder.sh"
 ISOLATION_LIB="$ROOT/scripts/lib-host-linux-builder-isolation.sh"
 ISOLATION_HARNESS="$ROOT/scripts/test-host-linux-builder-isolation-harness.sh"
 CONTAINER_PAYLOAD="$ROOT/scripts/build-host-linux-vm-bundle-in-container.sh"
@@ -47,6 +50,9 @@ for executable in \
   "$UNDERLAY" \
   "$CLEANUP" \
   "$CLEANUP_HARNESS" \
+  "$RECOVERY" \
+  "$RECOVERY_HARNESS" \
+  "$IMPORT_LOCK_HOLDER" \
   "$ISOLATION_HARNESS" \
   "$CONTAINER_PAYLOAD" \
   "$REMOTE_BUILDER" \
@@ -325,7 +331,7 @@ require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'sha256sum "$remote_dir/desktop_manual_join_e2e_fixture.copy"' \
   'sha256sum "$remote_dir/nostr-vpn.deb.copy"' \
   'sha256sum "$remote_dir/nvpn-x86_64-unknown-linux-musl.copy"' \
-  'sudo -n dpkg --install "$remote_dir/nostr-vpn.deb.copy"' \
+  'sudo -n dpkg --install "$remote_dir/nostr-vpn.deb"' \
   'host_linux_package_content.py' \
   'NVPN_UBUNTU_IMPORTED_APP="/usr/bin/nostr-vpn"' \
   'NVPN_UBUNTU_IMPORTED_CLI="/usr/bin/nvpn"' \
@@ -356,9 +362,33 @@ require_tokens "$CLEANUP" "always-attempt transactional Debian cleanup" \
   'if ! sudo -n dpkg --purge nostr-vpn' \
   'cleanup_status=1' \
   'Remove only regular' \
-  'sudo -n cp -a "$preexisting_root/." /' \
+  'sudo -n cp -a -- "$source_path" "$candidate"' \
+  'sudo -n cp -a -- "$source_path" "$target_path"' \
   'Pre-gate package-owned paths were not restored byte-for-byte.' \
   'exit "$cleanup_status"'
+require_tokens "$RECOVERY" "receipt-bound interrupted-gate recovery" \
+  'candidate_dirs=(/tmp/nvpn-linux-vm-release.*)' \
+  '(( ${#marked_dirs[@]} == 1 ))' \
+  'unmarked nostr-vpn package state is present' \
+  'multiple marked nVPN import directories are present' \
+  'install receipt does not match its exact bundle receipt' \
+  'Debian metadata differs from the exact stale package' \
+  'captured package tree differs from the exact stale Debian package' \
+  'automatic recovery requires empty preexisting backup trees' \
+  'bash "$CLEANUP" "$stale_dir"' \
+  'UBUNTU_STALE_IMPORT_RECOVERY_OK'
+require_tokens "$IMPORT_LIB" "pre-import interrupted-gate recovery" \
+  'ubuntu_vm_acquire_import_lock' \
+  'ubuntu_vm_release_import_lock' \
+  'ubuntu-vm-import-lock-holder.sh' \
+  'ubuntu_vm_recover_stale_imported_release_bundle' \
+  'write_import_phase installing' \
+  'write_import_phase installed' \
+  'stale exact-package recovery failed'
+require_tokens "$IMPORT_LOCK_HOLDER" "disconnect-safe import lifecycle lock" \
+  'flock -w 30 9' \
+  'UBUNTU_IMPORT_LIFECYCLE_LOCK_READY' \
+  'IFS= read -r -n 1 _ || true'
 for wrapper in "$MANUAL" "$SERVICE"; do
   require_tokens "$wrapper" "shared direct-artifact import" \
     'lib-ubuntu-vm-imported-release.sh' \
@@ -432,8 +462,50 @@ for wrapper in "$MANUAL" "$SERVICE"; do
 done
 
 cleanup_harness_output="$("$CLEANUP_HARNESS")"
-grep -Fq UBUNTU_EXACT_DEB_PURGE_FAILURE_RESTORE_OK \
+grep -Fq UBUNTU_EXACT_DEB_PURGE_FAILURE_RETRY_OK \
   <<<"$cleanup_harness_output"
+recovery_harness_output="$("$RECOVERY_HARNESS")"
+grep -Fq UBUNTU_STALE_IMPORT_RECOVERY_HARNESS_OK \
+  <<<"$recovery_harness_output"
+
+python3 - "$IMPORT_LIB" "$RELEASE_GATE" <<'PY'
+import pathlib
+import sys
+
+import_text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+gate_text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+
+import_start = import_text.index("ubuntu_vm_import_release_bundle()")
+recover = import_text.index(
+    "ubuntu_vm_recover_stale_imported_release_bundle", import_start
+)
+create = import_text.index(
+    "mktemp -d /tmp/nvpn-linux-vm-release.XXXXXX", import_start
+)
+if not recover < create:
+    raise SystemExit("Ubuntu stale recovery does not precede a new import")
+
+prepare_start = gate_text.index("prepare_linux_platform_lane_sync()")
+prepare_end = gate_text.index("run_linux_manual_join_ui_gate()", prepare_start)
+prepare = gate_text[prepare_start:prepare_end]
+sync = prepare.index("./scripts/ubuntu-vm-git-sync.sh")
+recover = prepare.index("ubuntu_vm_recover_stale_imported_release_bundle")
+build = prepare.index("prepare_host_linux_vm_bundle_and_record")
+if not sync < recover < build:
+    raise SystemExit(
+        "Ubuntu stale recovery does not run before the expensive Linux build"
+    )
+
+cleanup_start = gate_text.index("release_gate_cleanup()")
+cleanup_end = gate_text.index("\nmain()", cleanup_start)
+cleanup = gate_text[cleanup_start:cleanup_end]
+cancel = cleanup.index("release_gate_parallel_cancel_all")
+recover = cleanup.index("ubuntu_vm_recover_stale_imported_release_bundle")
+if not cancel < recover:
+    raise SystemExit(
+        "release cleanup does not recover Ubuntu after lane cancellation"
+    )
+PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-host-linux-bundle-contract.XXXXXX")"
 backup="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-host-linux-bundle-backup.XXXXXX")"

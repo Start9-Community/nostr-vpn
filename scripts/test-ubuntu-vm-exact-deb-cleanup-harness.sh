@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Adversarially prove that a dpkg purge failure cannot skip restoration of the
-# Ubuntu VM's pre-gate package-owned files.
+# Adversarially prove that a dpkg purge failure stops before filesystem
+# mutation, and that a later serialized retry restores the exact pre-gate
+# package-owned files.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,6 +64,12 @@ chmod 0755 /usr/bin/nostr-vpn
 printf 'candidate-package-app\n' \
   >"$remote_dir/package-root/usr/bin/nostr-vpn"
 chmod 0755 "$remote_dir/package-root/usr/bin/nostr-vpn"
+chmod 0700 "$remote_dir/preexisting-root"
+chown 1234:1234 "$remote_dir/preexisting-root"
+chmod 0700 "$remote_dir/preexisting-dpkg-info"
+chown 1234:1234 "$remote_dir/preexisting-dpkg-info"
+root_metadata="$(stat -c '%a|%u|%g' /)"
+dpkg_info_metadata="$(stat -c '%a|%u|%g' /var/lib/dpkg/info)"
 touch "$remote_dir/.nvpn-deb-installed"
 
 set +e
@@ -71,12 +78,30 @@ PATH="/shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
 status="$?"
 set -e
 [[ "$status" != 0 ]]
+grep -Fxq candidate-package-app /usr/bin/nostr-vpn
+grep -Fxq candidate-info /var/lib/dpkg/info/nostr-vpn.list
+grep -Fxq cleaning "$remote_dir/.nvpn-deb-installed"
+[[ ! -e "$remote_dir/restored-manifest.txt" ]]
+[[ "$(stat -c '%a|%u|%g' /)" == "$root_metadata" ]]
+[[ "$(stat -c '%a|%u|%g' /var/lib/dpkg/info)" == "$dpkg_info_metadata" ]]
+
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [[ "${1:-}" == "--purge" && "${2:-}" == "nostr-vpn" ]]; then' \
+  '  rm -f /usr/bin/nostr-vpn /var/lib/dpkg/info/nostr-vpn.list' \
+  '  exit 0' \
+  'fi' \
+  'exec /usr/bin/dpkg "$@"' \
+  >/shim/dpkg
+PATH="/shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  bash /cleanup.sh "$remote_dir"
 grep -Fxq old-pre-gate-app /usr/bin/nostr-vpn
 grep -Fxq old-orphan-info /var/lib/dpkg/info/nostr-vpn.list
 cmp -s \
   "$remote_dir/preexisting-manifest.txt" \
   "$remote_dir/restored-manifest.txt"
-echo UBUNTU_EXACT_DEB_PURGE_FAILURE_RESTORE_OK
+echo UBUNTU_EXACT_DEB_PURGE_FAILURE_RETRY_OK
 
 # A successful purge normally removes package files before the exact cleanup
 # walks the captured package tree. Already-absent paths are therefore success,
