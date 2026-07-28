@@ -1,5 +1,8 @@
 name: Release
 
+run-name: >-
+  Release ${{ inputs.tag }} @ ${{ inputs.locally_attested_commit }} from ${{ inputs.locally_gated_release_cid }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -29,7 +32,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Require the exact locally gated commit
         shell: bash
@@ -167,7 +170,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -293,7 +296,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -415,7 +418,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -487,7 +490,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -541,7 +544,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -690,7 +693,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Install StartOS developer signing key
         shell: bash
@@ -736,7 +739,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.locally_attested_commit }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

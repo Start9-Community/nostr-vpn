@@ -3070,7 +3070,18 @@ test('Actions cannot mutate public releases and local promotion is fleet-gated',
   assert.doesNotMatch(trigger, /^\s+push:/m)
   assert.match(trigger, /locally_attested_commit:\n\s+description:[^\n]+\n\s+required: true/)
   assert.match(trigger, /locally_gated_release_cid:\n\s+description:[^\n]+\n\s+required: true/)
-  assert.match(workflow, /ref: \$\{\{ github\.event\.inputs\.tag \}\}/)
+  assert.doesNotMatch(
+    workflow,
+    /ref: \$\{\{ github\.event\.inputs\.tag \}\}/,
+  )
+  assert.equal(
+    (
+      workflow.match(
+        /ref: \$\{\{ github\.event\.inputs\.locally_attested_commit \}\}/g,
+      ) ?? []
+    ).length,
+    (workflow.match(/uses: actions\/checkout@/g) ?? []).length,
+  )
   assert.match(
     workflow,
     /LOCALLY_ATTESTED_COMMIT: \$\{\{ github\.event\.inputs\.locally_attested_commit \}\}/,

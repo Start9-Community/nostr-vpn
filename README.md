@@ -206,7 +206,23 @@ Docker e2e and desktop updater scripts live under [`scripts`](scripts). The most
    The first successful draft authorization creates the proof as a private
    mode-`0600` file without replacing any existing proof.
 
-7. Create the lightweight `vX.Y.Z` tag at the staged commit. Push that exact commit as `master` and the tag to `github`, and push the same `master` to htree `origin`. Dispatch `.github/workflows/release.yml` with the tag, attested commit, and immutable draft CID; require it to pass.
+7. Publish the exact refs and wait for the immutable-draft workflow:
+
+   ```bash
+   node scripts/publish-release-refs.mjs \
+     --stage-dir <stage-dir> \
+     --fleet-result <fleet-dir>/evidence/fleet-canary-result.json \
+     --fleet-manifest <fleet-dir>/manifest.json \
+     --fleet-inventory <fleet-dir>/inventory.json \
+     --fleet-proof <fleet-dir>/fleet-publication-proof.json \
+     --tag vX.Y.Z \
+     --draft-cid <immutable-draft-cid>
+   ```
+
+   This creates or verifies the lightweight local tag, rejects conflicting
+   remote refs, replays the canonical mutation gate before each external
+   phase, pushes without force, resumes an already visible exact GitHub Actions
+   run on retry, and fails closed if duplicate exact runs exist.
 8. Promote the same staged bytes and fleet evidence with `scripts/local-release.mjs --promote-draft` plus the four paths above. Promotion preflights and publishes Apple distribution, htree, the exact GitHub release, crates.io packages, and Zapstore.
 
 Direct `--publish` and `--final` modes are intentionally disabled. Every external release mutation must replay the exact staged-source and passed-fleet gates.
