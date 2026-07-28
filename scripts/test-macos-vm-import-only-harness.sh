@@ -271,8 +271,11 @@ PY
 
 python3 - "$ROOT" <<'PY'
 import argparse
+import hashlib
 import importlib.util
+import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -284,6 +287,47 @@ spec = importlib.util.spec_from_file_location(
 )
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory(prefix="nvpn-macos-git-snapshot.") as tmp:
+    checkout = pathlib.Path(tmp)
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(checkout), "config", "user.name", "Release Harness"],
+        check=True,
+    )
+    manifest = checkout / "Cargo.toml"
+    lock = checkout / "Cargo.lock"
+    tracked = checkout / "tracked.txt"
+    manifest.write_text("[workspace]\n", encoding="utf-8")
+    lock.write_text("committed\n", encoding="utf-8")
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "commit", "-qm", "fixture"], check=True
+    )
+    module.git_snapshot(checkout)
+    lock.write_text("realized local FIPS lock\n", encoding="utf-8")
+    os.environ["NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256"] = hashlib.sha256(
+        manifest.read_bytes()
+    ).hexdigest()
+    os.environ["NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256"] = hashlib.sha256(
+        lock.read_bytes()
+    ).hexdigest()
+    module.git_snapshot(checkout)
+    tracked.write_text("dirty\n", encoding="utf-8")
+    try:
+        module.git_snapshot(checkout)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("git snapshot accepted unrelated release checkout changes")
+    finally:
+        os.environ.pop("NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256", None)
+        os.environ.pop("NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256", None)
 
 signature = {
     "authority": "Developer ID Application: Test (ABCDEFGHIJ)",

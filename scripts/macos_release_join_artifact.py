@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import ssl
@@ -38,8 +39,28 @@ def git_text(root: pathlib.Path, *arguments: str) -> str:
 
 
 def git_snapshot(root: pathlib.Path) -> dict[str, str]:
-    if git_text(root, "status", "--porcelain", "--untracked-files=all"):
-        raise ValueError(f"source checkout is dirty: {root}")
+    status = git_text(root, "status", "--porcelain", "--untracked-files=all")
+    if status:
+        expected_manifest = os.environ.get(
+            "NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256", ""
+        )
+        expected_lock = os.environ.get(
+            "NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256", ""
+        )
+        manifest = root / "Cargo.toml"
+        lock = root / "Cargo.lock"
+        session_matches = (
+            status.splitlines() == ["M Cargo.lock"]
+            and re.fullmatch(r"[0-9a-f]{64}", expected_manifest) is not None
+            and re.fullmatch(r"[0-9a-f]{64}", expected_lock) is not None
+            and manifest.is_file()
+            and lock.is_file()
+            and hashlib.sha256(manifest.read_bytes()).hexdigest()
+            == expected_manifest
+            and hashlib.sha256(lock.read_bytes()).hexdigest() == expected_lock
+        )
+        if not session_matches:
+            raise ValueError(f"source checkout is dirty: {root}")
     index = run(["git", "-C", str(root), "ls-files", "-s", "-z"])
     return {
         "head": git_text(root, "rev-parse", "HEAD"),

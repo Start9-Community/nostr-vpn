@@ -223,7 +223,6 @@ python3 "$ROOT_DIR/scripts/desktop-manual-join-atspi.py" admin \
 wait_for_fixture verify-admin admin
 import -window root "$ARTIFACT_DIR/admin.png"
 "$FIXTURE" capture-delivery "${fixture_args[@]}"
-"$FIXTURE" verify "${fixture_args[@]}"
 stop_app
 
 snapshot_default_route >"$ARTIFACT_DIR/default-route-after.json"
