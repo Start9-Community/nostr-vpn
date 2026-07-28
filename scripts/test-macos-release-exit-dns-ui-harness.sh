@@ -105,6 +105,22 @@ if 'try press(application, "exit-dns-save")' in driver:
     raise SystemExit("macOS DNS AX driver bypasses the save-completion handshake")
 if driver.count("try pressAndWaitForSaveCompletion(application)") != 1:
     raise SystemExit("macOS DNS AX driver does not use exactly one save handshake")
+set_text_body = driver[
+    driver.index("func setText(") : driver.index("func selectPicker(")
+]
+for required in (
+    "kAXFocusedAttribute",
+    "postKey(to: pid, keyCode: 0, flags: .maskCommand)",
+    "keyboardSetUnicodeString",
+):
+    if required not in set_text_body:
+        raise SystemExit(
+            f"macOS DNS AX text entry lacks user-like input step: {required}"
+        )
+if "let directError" in set_text_body:
+    raise SystemExit(
+        "macOS DNS AX text entry bypasses SwiftUI bindings with a direct AX value write"
+    )
 press_body = driver[
     driver.index("func press(") : driver.index("func pressSidebar(")
 ]

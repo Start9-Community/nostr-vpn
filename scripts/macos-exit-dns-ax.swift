@@ -384,37 +384,30 @@ func setText(
     pid: pid_t
 ) throws {
     let element = try find(application, identifier: identifier)
-    let directError = AXUIElementSetAttributeValue(
+    let focusError = AXUIElementSetAttributeValue(
         element,
-        kAXValueAttribute as CFString,
-        value as CFTypeRef
+        kAXFocusedAttribute as CFString,
+        kCFBooleanTrue
     )
-    if directError != .success {
-        let focusError = AXUIElementSetAttributeValue(
-            element,
-            kAXFocusedAttribute as CFString,
-            kCFBooleanTrue
-        )
-        guard focusError == .success else {
-            throw DriverError.value(identifier, focusError)
-        }
-        postKey(to: pid, keyCode: 0, flags: .maskCommand)
-        let utf16 = Array(value.utf16)
-        let source = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-        utf16.withUnsafeBufferPointer { buffer in
-            down?.keyboardSetUnicodeString(
-                stringLength: buffer.count,
-                unicodeString: buffer.baseAddress
-            )
-        }
-        down?.postToPid(pid)
-        CGEvent(
-            keyboardEventSource: source,
-            virtualKey: 0,
-            keyDown: false
-        )?.postToPid(pid)
+    guard focusError == .success else {
+        throw DriverError.value(identifier, focusError)
     }
+    postKey(to: pid, keyCode: 0, flags: .maskCommand)
+    let utf16 = Array(value.utf16)
+    let source = CGEventSource(stateID: .hidSystemState)
+    let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+    utf16.withUnsafeBufferPointer { buffer in
+        down?.keyboardSetUnicodeString(
+            stringLength: buffer.count,
+            unicodeString: buffer.baseAddress
+        )
+    }
+    down?.postToPid(pid)
+    CGEvent(
+        keyboardEventSource: source,
+        virtualKey: 0,
+        keyDown: false
+    )?.postToPid(pid)
     let deadline = Date().addingTimeInterval(3)
     repeat {
         if stringAttribute(element, kAXValueAttribute) == value {
