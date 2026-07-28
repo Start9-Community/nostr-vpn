@@ -14,6 +14,8 @@ required_source=(
   'scripts/desktop-mobile-manual-join-atspi.py:uiRestartReadback'
   'scripts/desktop-mobile-manual-join-windows-ui.ps1:uiRestartReadback'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:DnsPolicy'
+  'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:source "$repo/scripts/lib-linux-owned-test-app.sh"'
+  'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:"$repo/scripts/test-linux-owned-test-app-harness.sh"'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:artifact_root="$(cd "$artifact_root" && pwd -P)"'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:repo="$(pwd -P)"'
   'scripts/windows-vm-exit-dns-ui-e2e.sh:DnsPolicy'
@@ -27,11 +29,14 @@ for entry in "${required_source[@]}"; do
   }
 done
 
-python3 - "$ROOT/scripts/ubuntu-vm-exit-dns-ui-e2e.sh" <<'PY'
+python3 - \
+  "$ROOT/scripts/ubuntu-vm-exit-dns-ui-e2e.sh" \
+  "$ROOT/scripts/lib-linux-owned-test-app.sh" <<'PY'
 import pathlib
 import sys
 
 script = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+helper = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 canonical_handoff = (
     'artifact_root="$(cd "$artifact_root" && pwd -P)"\n'
     'cd "$repo"\n'
@@ -51,12 +56,32 @@ for required in (
     '[[ "$artifact_root" == */nostr-vpn-release-gate/artifacts/linux-exit-dns-ui ]]',
     'test ! -e "$artifact_root"',
     'test ! -e "$case_root"',
+    'linux_stop_exact_test_app "$app"',
 ):
     if required not in script:
         raise SystemExit(
             "Linux Exit DNS UI wrapper does not clean exact remote state "
             f"after cancellation: {required}"
         )
+for required in (
+    "linux_exact_executable_records()",
+    "linux_exact_executable_pids()",
+    "linux_signal_exact_executable()",
+    "linux_stop_exact_test_app()",
+    'for proc in /proc/[0-9]*',
+    'readlink -f -- "$proc/exe"',
+    'start_time="${20:-}"',
+    'current_start="${20:-}"',
+):
+    if required not in helper:
+        raise SystemExit(
+            f"Linux exact-app cleanup helper lacks {required}"
+        )
+if 'pkill -f' in script or 'pkill -f' in helper:
+    raise SystemExit(
+        "Linux Exit DNS UI wrapper can kill its own SSH shell by matching "
+        "the imported app path in argv"
+    )
 cleanup = script[
     script.index("cleanup() {") : script.index("trap cleanup EXIT")
 ]
@@ -67,6 +92,24 @@ if dns_cleanup < 0 or bundle_cleanup < 0 or dns_cleanup > bundle_cleanup:
         "Linux Exit DNS UI wrapper does not remove exact DNS state before "
         "the slower imported-package cleanup"
     )
+guest_cleanup_start = script.index(
+    "cleanup() {",
+    script.index('mkdir -p "$case_root" "$artifact_root"'),
+)
+guest_cleanup = script[
+    guest_cleanup_start : script.index("trap cleanup EXIT", guest_cleanup_start)
+]
+for required in (
+    'local status="$?"',
+    'if ! linux_stop_exact_test_app "$app"; then',
+    "status=1",
+    'exit "$status"',
+):
+    if required not in guest_cleanup:
+        raise SystemExit(
+            "Linux Exit DNS UI guest cleanup does not preserve failures: "
+            f"{required}"
+        )
 PY
 
 python3 - \

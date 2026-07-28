@@ -72,10 +72,16 @@ artifact_root="$5"
 case_root="/tmp/nvpn-linux-exit-dns-ui"
 rm -rf "$case_root" "$artifact_root"
 mkdir -p "$case_root" "$artifact_root"
+# shellcheck disable=SC1091
+source "$repo/scripts/lib-linux-owned-test-app.sh"
+"$repo/scripts/test-linux-owned-test-app-harness.sh"
+
 cleanup() {
   local status="$?"
   trap - EXIT
-  pkill -f "$app" >/dev/null 2>&1 || true
+  if ! linux_stop_exact_test_app "$app"; then
+    status=1
+  fi
   rm -rf "$case_root"
   exit "$status"
 }
