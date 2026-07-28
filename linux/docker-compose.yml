@@ -8,7 +8,7 @@ services:
       cache_to:
         - type=local,dest=${NVPN_LINUX_BUILDX_CACHE_DIR:-../.buildx-cache/linux-gui},mode=max
     image: nostr-vpn-linux-dev
-    container_name: nostr-vpn-linux-dev
+    container_name: ${NVPN_LINUX_CONTAINER_NAME:-nostr-vpn-linux-dev}
     command: ["sleep", "infinity"]
     environment:
       DISPLAY: :99
@@ -20,6 +20,8 @@ services:
       - "5902:5900"
     volumes:
       - ..:/workspace/nostr-vpn
+      - ${NVPN_LINUX_ROOT_CARGO_LOCK_PATH:-../Cargo.lock}:/workspace/nostr-vpn/Cargo.lock
+      - ${NVPN_LINUX_DESKTOP_CARGO_LOCK_PATH:-./Cargo.lock}:/workspace/nostr-vpn/linux/Cargo.lock
       - ${NVPN_LINUX_FIPS_REPO_PATH:-../../fips}:/workspace/fips
       - nostr_vpn_linux_cargo_registry:/root/.cargo/registry
       - nostr_vpn_linux_cargo_git:/root/.cargo/git

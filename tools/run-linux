@@ -9,21 +9,143 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 
-docker compose up -d --build
-
 container_name="${NVPN_LINUX_CONTAINER_NAME:-nostr-vpn-linux-dev}"
+isolate_lockfiles=0
+case "${NVPN_LINUX_ISOLATE_LOCKFILES:-0}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+        isolate_lockfiles=1
+        ;;
+    0|false|FALSE|False|no|NO|No|off|OFF|Off|"")
+        ;;
+    *)
+        echo "Unsupported NVPN_LINUX_ISOLATE_LOCKFILES=${NVPN_LINUX_ISOLATE_LOCKFILES}" >&2
+        exit 2
+        ;;
+esac
+if [ -n "${NVPN_LINUX_FIPS_REPO_PATH:-}" ]; then
+    isolate_lockfiles=1
+fi
+
+compose=(docker compose)
+run_lock_file=""
+lock_overlay_dir=""
+compose_up_pid=""
+docker_probe_pid=""
+docker_exec_pid=""
+teardown_container="$isolate_lockfiles"
+
+cleanup_run() {
+    local status=$? cleanup_failed=0
+    trap - EXIT HUP INT TERM
+    set +e
+
+    if [ -n "$compose_up_pid" ]; then
+        kill "$compose_up_pid" >/dev/null 2>&1 || true
+        wait "$compose_up_pid" >/dev/null 2>&1 || true
+        compose_up_pid=""
+    fi
+    if [ -n "$docker_probe_pid" ]; then
+        kill "$docker_probe_pid" >/dev/null 2>&1 || true
+        wait "$docker_probe_pid" >/dev/null 2>&1 || true
+        docker_probe_pid=""
+    fi
+    if [ -n "$docker_exec_pid" ]; then
+        kill "$docker_exec_pid" >/dev/null 2>&1 || true
+        wait "$docker_exec_pid" >/dev/null 2>&1 || true
+        docker_exec_pid=""
+    fi
+    if [ "$teardown_container" -eq 1 ]; then
+        "${compose[@]}" kill nostr-vpn-linux 9>&- >/dev/null 2>&1 || true
+    fi
+    if [ "$teardown_container" -eq 0 ] \
+        || "${compose[@]}" down --remove-orphans --timeout 2 \
+            9>&- >/dev/null 2>&1
+    then
+        if [ -n "$lock_overlay_dir" ]; then
+            rm -rf "$lock_overlay_dir" || cleanup_failed=1
+        fi
+        lock_overlay_dir=""
+    else
+        echo "Could not remove the isolated Linux desktop container; retaining its lock overlays." >&2
+        cleanup_failed=1
+    fi
+
+    if [ "$status" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then
+        status=1
+    fi
+    exit "$status"
+}
+
+run_lock_file="${NVPN_LINUX_RUN_LOCK_FILE:-/tmp/nvpn-linux-compose.lock}"
+mkdir -p "$(dirname "$run_lock_file")"
+exec 9>>"$run_lock_file"
+if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || {
+        echo "Another Linux desktop run owns $run_lock_file" >&2
+        exit 1
+    }
+elif command -v lockf >/dev/null 2>&1; then
+    lockf -t 0 9 || {
+        echo "Another Linux desktop run owns $run_lock_file" >&2
+        exit 1
+    }
+else
+    echo "Linux runner requires flock or lockf for resource isolation." >&2
+    exit 1
+fi
+
+trap cleanup_run EXIT
+trap 'teardown_container=1; exit 129' HUP
+trap 'teardown_container=1; exit 130' INT
+trap 'teardown_container=1; exit 143' TERM
+
+if [ "$isolate_lockfiles" -eq 1 ]; then
+    lock_overlay_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-linux-locks.XXXXXX")"
+    mkdir -p "$lock_overlay_dir/linux"
+    cp -p "$ROOT/Cargo.lock" "$lock_overlay_dir/Cargo.lock"
+    cp -p "$ROOT/linux/Cargo.lock" "$lock_overlay_dir/linux/Cargo.lock"
+    export NVPN_LINUX_ROOT_CARGO_LOCK_PATH="$lock_overlay_dir/Cargo.lock"
+    export NVPN_LINUX_DESKTOP_CARGO_LOCK_PATH="$lock_overlay_dir/linux/Cargo.lock"
+    export NVPN_LINUX_CONTAINER_NAME="$container_name"
+fi
+
+if [ "$isolate_lockfiles" -eq 1 ]; then
+    "${compose[@]}" up -d --build 9>&- &
+    compose_up_pid=$!
+    set +e
+    wait "$compose_up_pid"
+    compose_status=$?
+    set -e
+    compose_up_pid=""
+    if [ "$compose_status" -ne 0 ]; then
+        teardown_container=1
+        exit "$compose_status"
+    fi
+else
+    "${compose[@]}" up -d --build 9>&-
+fi
+
 container_ready=0
 for _ in $(seq 1 20); do
-    if docker exec "$container_name" test -f /tmp/nostr-vpn-dev-ready >/dev/null 2>&1; then
+    docker exec "$container_name" test -f /tmp/nostr-vpn-dev-ready \
+        9>&- >/dev/null 2>&1 &
+    docker_probe_pid=$!
+    set +e
+    wait "$docker_probe_pid"
+    probe_status=$?
+    set -e
+    docker_probe_pid=""
+    if [ "$probe_status" -eq 0 ]; then
         container_ready=1
         break
     fi
-    sleep 0.25
+    sleep 0.25 9>&-
 done
 if [ "$container_ready" -ne 1 ]; then
+    teardown_container=1
     echo "Linux desktop container did not complete desktop service initialization." >&2
-    docker compose ps >&2 || true
-    docker compose logs --no-color --tail 200 nostr-vpn-linux >&2 || true
+    docker compose ps 9>&- >&2 || true
+    docker compose logs --no-color --tail 200 nostr-vpn-linux 9>&- >&2 || true
     exit 1
 fi
 
@@ -32,6 +154,9 @@ if [ "$#" -eq 0 ]; then
 fi
 
 container_exec=(docker exec)
+if [ "$isolate_lockfiles" -eq 1 ]; then
+    container_exec+=(-e NVPN_LINUX_LOCKFILE_OVERLAY_ACTIVE=1)
+fi
 if [ "${NVPN_LINUX_NONINTERACTIVE:-0}" != "1" ]; then
     container_exec+=(-i)
     if [ -t 0 ]; then
@@ -40,7 +165,13 @@ if [ "${NVPN_LINUX_NONINTERACTIVE:-0}" != "1" ]; then
 fi
 
 status=0
-"${container_exec[@]}" "$container_name" /usr/local/bin/dev-entrypoint "$@" || status=$?
+"${container_exec[@]}" "$container_name" /usr/local/bin/dev-entrypoint "$@" 9>&- &
+docker_exec_pid=$!
+set +e
+wait "$docker_exec_pid"
+status=$?
+set -e
+docker_exec_pid=""
 
 if [ "${CI:-}" = "true" ] && command -v sudo >/dev/null 2>&1; then
     # Docker creates these bind-mount subdirectories as root on GitHub runners.

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="/workspace/nostr-vpn"
 LINUX_DIR="$ROOT_DIR/linux"
 ARTIFACT_DIR="$ROOT_DIR/artifacts/linux-gui-e2e"
-E2E_ROOT="/tmp/nostr-vpn-linux-gui-e2e"
+E2E_ROOT="/tmp/nostr-vpn-linux-gui-e2e-$$"
 DATA_HOME="$E2E_ROOT/data"
 CONFIG_HOME="$E2E_ROOT/config"
 CONFIG_PATH="$DATA_HOME/nostr-vpn/config.toml"
@@ -17,13 +17,19 @@ IDLE_CPU_MAX_PERCENT="${NVPN_LINUX_GUI_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_LINUX_GUI_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-10}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_LINUX_GUI_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-3}}"
 cargo_config_args=()
+cargo_lock_args=(--locked)
 
 if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
+  if [[ "${NVPN_LINUX_LOCKFILE_OVERLAY_ACTIVE:-0}" != "1" ]]; then
+    echo "Local-FIPS Linux GUI smoke requires isolated Cargo.lock overlays." >&2
+    exit 2
+  fi
   cargo_config_args+=(
     --config "patch.crates-io.fips-core.path=\"$NVPN_FIPS_REPO_PATH/crates/fips-core\""
     --config "patch.crates-io.fips-endpoint.path=\"$NVPN_FIPS_REPO_PATH/crates/fips-endpoint\""
     --config "patch.crates-io.fips-identity.path=\"$NVPN_FIPS_REPO_PATH/crates/fips-identity\""
   )
+  cargo_lock_args=()
 fi
 
 cargo_run() {
@@ -39,7 +45,7 @@ mkdir -p "$ARTIFACT_DIR" "$(dirname "$CONFIG_PATH")" "$CONFIG_HOME"
 rm -f "$SCREENSHOT"
 
 cd "$ROOT_DIR"
-cargo_run build -p nvpn >/dev/null
+cargo_run build "${cargo_lock_args[@]}" -p nvpn >/dev/null
 "$ROOT_DIR/target/debug/nvpn" init --config "$CONFIG_PATH" --force >/dev/null
 "$ROOT_DIR/target/debug/nvpn" init --config "$BOB_CONFIG" --force >/dev/null
 
@@ -219,7 +225,7 @@ SH
 chmod +x "$FAKE_NVPN"
 
 cd "$LINUX_DIR"
-cargo_run build >/dev/null
+cargo_run build "${cargo_lock_args[@]}" >/dev/null
 
 export XDG_DATA_HOME="$DATA_HOME"
 export XDG_CONFIG_HOME="$CONFIG_HOME"
