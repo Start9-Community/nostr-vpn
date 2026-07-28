@@ -78,6 +78,11 @@ import {
   preflightRequiredZapstorePublication as preflightExactZapstorePublication,
   publishExactZapstoreRelease,
 } from './zapstore-release-publication.mjs'
+import {
+  exactFipsPublicationCandidate,
+  linuxPublicationVerificationPlan,
+  validateWindowsPublicationFipsReceipts,
+} from './release-source-verification.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -792,6 +797,16 @@ function buildWindowsArtifacts({
     installerReceiptPath,
     'Windows exact installer gate receipt',
   )
+  const exactWindowsFips = exactFipsPublicationCandidate({
+    env,
+    candidateRoot: repoRoot,
+    label: 'Windows publication',
+  })
+  validateWindowsPublicationFipsReceipts({
+    artifactReceipt: receipt,
+    installerReceipt,
+    expectedFips: exactWindowsFips,
+  })
   const sealedInstaller = validateWindowsInstallerGateReceipt({
     receipt: installerReceipt,
     artifactReceipt: receipt,
@@ -905,10 +920,6 @@ function buildLinuxArtifacts({
   testedPackageInstallReceiptPath,
   gatedBundlePathReceipt,
 }) {
-  if (!commandExists('docker')) {
-    throw new SkipStepError('Skipping Linux artifacts because docker is not on PATH.')
-  }
-
   const platform = env.NVPN_LINUX_DOCKER_PLATFORM || 'linux/amd64'
   const { linuxArchSuffix, muslTriple } = linuxReleaseTargetsForDockerPlatform(platform)
   if (platform !== 'linux/amd64') {
@@ -922,6 +933,8 @@ function buildLinuxArtifacts({
   let gateReceiptPath = ''
   let gateReceipt = null
   let packageInstallReceipt = null
+  let bundleReceiptPath = ''
+  let bundleReceiptSha256 = ''
   if (!dryRun) {
     if (!existsSync(gatedBundlePathReceipt)) {
       throw new Error(
@@ -947,9 +960,10 @@ function buildLinuxArtifacts({
         'Linux exact host-bundle path receipt points to an invalid directory.',
       )
     }
-    const bundleReceiptPath = join(gatedBundle, 'receipt.json')
+    bundleReceiptPath = join(gatedBundle, 'receipt.json')
+    bundleReceiptSha256 = sha256FileSync(bundleReceiptPath)
     if (
-      sha256FileSync(bundleReceiptPath)
+      bundleReceiptSha256
       !== sha256FileSync(testedReceiptPath)
     ) {
       throw new Error(
@@ -970,7 +984,7 @@ function buildLinuxArtifacts({
       testedPackageInstallReceiptPath,
       'Linux exact Debian package install receipt',
     )
-    const expectedBundleReceiptSha256 = sha256FileSync(testedReceiptPath)
+    const expectedBundleReceiptSha256 = bundleReceiptSha256
     if (
       packageInstallReceipt.appGitSha !== candidateCommit
       || packageInstallReceipt.appGitTree !== candidateTree
@@ -990,7 +1004,6 @@ function buildLinuxArtifacts({
     return {}
   }
 
-  mkdirSync(distDir, { recursive: true })
   const debPath = join(distDir, linuxDebName)
   const cliAssets = [
     join(distDir, `nvpn-${muslTriple}.tar.gz`),
@@ -1029,8 +1042,30 @@ function buildLinuxArtifacts({
     gatedBundle,
     'nvpn-x86_64-unknown-linux-musl.tar.gz',
   )
+  const verificationPlan = linuxPublicationVerificationPlan({
+    env,
+    tag,
+    candidateCommit,
+    candidateTree,
+    gateReceipt,
+    packageInstallReceipt,
+    bundlePath: gatedBundle,
+    bundleReceiptPath,
+    bundleReceiptSha256,
+  })
+  run(
+    'python3',
+    [verificationPlan.verifierPath, ...verificationPlan.verifierArgs],
+    {
+      cwd: verificationPlan.candidateRoot,
+      env,
+    },
+  )
   if (
-    sha256FileSync(gatedDebPath) !== expectedDeb
+    sha256FileSync(bundleReceiptPath) !== bundleReceiptSha256
+    || sha256FileSync(testedReceiptPath) !== bundleReceiptSha256
+    || packageInstallReceipt.bundleReceiptSha256 !== bundleReceiptSha256
+    || sha256FileSync(gatedDebPath) !== expectedDeb
     || statSync(gatedDebPath).size !== expectedDebSize
     || sha256FileSync(gatedMuslArchivePath) !== expectedMuslArchive
     || statSync(gatedMuslArchivePath).size !== expectedMuslArchiveSize
@@ -1039,6 +1074,7 @@ function buildLinuxArtifacts({
       'Linux sealed publication artifacts changed after their Ubuntu VM gate.',
     )
   }
+  mkdirSync(distDir, { recursive: true })
   copyFileSync(gatedDebPath, debPath)
   for (const cliAsset of cliAssets) {
     copyFileSync(gatedMuslArchivePath, cliAsset)

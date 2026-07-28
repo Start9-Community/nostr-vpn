@@ -323,6 +323,7 @@ run_release_gate_static_preflight() {
     scripts/local-release.test.mjs \
     scripts/release-artifact-provenance-lib.test.mjs \
     scripts/release-publication-bundle.test.mjs \
+    scripts/release-source-verification.test.mjs \
     scripts/startos-release.test.mjs
   python3 scripts/test_appstore_draft_metadata.py
   if [[ "$(uname -s)" == "Darwin" ]]; then

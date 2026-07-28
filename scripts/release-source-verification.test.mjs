@@ -1,0 +1,368 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+
+import {
+  linuxPublicationVerificationPlan,
+  validateWindowsPublicationFipsReceipts,
+} from './release-source-verification.mjs'
+
+function capture(command, args, cwd) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: 'pipe',
+  })
+  assert.equal(
+    result.status,
+    0,
+    result.stderr || `${command} failed with ${result.status}`,
+  )
+  return result.stdout.trim()
+}
+
+function sha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+test('Linux publication derives verifier inputs and rejects self-consistent receipt forgeries', (context) => {
+  const sourceRoot = process.cwd()
+  const temporaryRoot = mkdtempSync(
+    join(tmpdir(), 'nvpn-linux-publication-verifier-'),
+  )
+  context.after(() => rmSync(temporaryRoot, { recursive: true, force: true }))
+
+  const root = join(temporaryRoot, 'candidate')
+  for (const relative of [
+    'Cargo.toml',
+    'Cargo.lock',
+    'linux/Cargo.lock',
+    'Dockerfile.linux-vm-gate',
+    'scripts/build-host-linux-vm-bundle-in-container.sh',
+    'scripts/verify-cargo-path-patch-lock.py',
+    'scripts/verify-host-linux-vm-bundle.py',
+  ]) {
+    const destination = join(root, relative)
+    mkdirSync(dirname(destination), { recursive: true })
+    copyFileSync(join(sourceRoot, relative), destination)
+  }
+  capture('git', ['init', '--quiet'], root)
+  capture('git', ['add', '.'], root)
+  capture(
+    'git',
+    [
+      '-c',
+      'user.name=Release Test',
+      '-c',
+      'user.email=release-test@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'candidate fixture',
+    ],
+    root,
+  )
+
+  const fipsRoot = join(temporaryRoot, 'fips')
+  const fipsPackages = {
+    'fips-core': '0.4.45',
+    'fips-endpoint': '0.4.45',
+    'fips-identity': '0.3.2',
+  }
+  for (const [name, version] of Object.entries(fipsPackages)) {
+    const crate = join(fipsRoot, 'crates', name)
+    mkdirSync(crate, { recursive: true })
+    writeFileSync(
+      join(crate, 'Cargo.toml'),
+      `[package]\nname = "${name}"\nversion = "${version}"\n`,
+    )
+  }
+  capture('git', ['init', '--quiet'], fipsRoot)
+  capture('git', ['add', '.'], fipsRoot)
+  capture(
+    'git',
+    [
+      '-c',
+      'user.name=Release Test',
+      '-c',
+      'user.email=release-test@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'fixture',
+    ],
+    fipsRoot,
+  )
+
+  const candidateCommit = capture('git', ['rev-parse', 'HEAD'], root)
+  const candidateTree = capture('git', ['rev-parse', 'HEAD^{tree}'], root)
+  const fipsGitSha = capture('git', ['rev-parse', 'HEAD'], fipsRoot)
+  const fipsGitTree = capture('git', ['rev-parse', 'HEAD^{tree}'], fipsRoot)
+  const sourceDateEpoch = Number(
+    capture('git', ['log', '-1', '--format=%ct', candidateCommit], root),
+  )
+  const fipsSpecs = Object.entries(fipsPackages).map(
+    ([name, version]) => `${name}=${version}`,
+  )
+  const lockVerifier = join(root, 'scripts', 'verify-cargo-path-patch-lock.py')
+  const rootLock = join(root, 'Cargo.lock')
+  const linuxLock = join(root, 'linux', 'Cargo.lock')
+  const rootRealizedCargoLockSha256 = capture(
+    'python3',
+    [lockVerifier, '--expected-sha256', rootLock, ...fipsSpecs],
+    root,
+  )
+  const linuxRealizedCargoLockSha256 = capture(
+    'python3',
+    [lockVerifier, '--expected-sha256', linuxLock, ...fipsSpecs],
+    root,
+  )
+  const bundlePath = join(temporaryRoot, 'bundle')
+  mkdirSync(bundlePath)
+  const bundleReceiptPath = join(bundlePath, 'receipt.json')
+  const exactGateReceipt = {
+    schema: 2,
+    builderMode: 'remote-native',
+    builtOnHostMac: false,
+    builtOnRemoteVm: true,
+    builderHostOs: 'Linux',
+    builderHostArchitecture: 'x86_64',
+    containerImageId: `sha256:${'a'.repeat(64)}`,
+    dockerfileSha256: sha256(join(root, 'Dockerfile.linux-vm-gate')),
+    containerPayloadSha256: sha256(
+      join(root, 'scripts', 'build-host-linux-vm-bundle-in-container.sh'),
+    ),
+    appGitSha: candidateCommit,
+    appGitTree: candidateTree,
+    appVersion: '4.1.5',
+    fipsGitSha,
+    fipsGitTree,
+    fipsVersion: fipsPackages['fips-core'],
+    rootCargoLockSha256: sha256(rootLock),
+    rootRealizedCargoLockSha256,
+    linuxCargoLockSha256: sha256(linuxLock),
+    linuxRealizedCargoLockSha256,
+    fipsPatchedLockPackages: fipsPackages,
+    target: 'x86_64-unknown-linux-gnu',
+    dockerPlatform: 'linux/amd64',
+    containerBase: 'ubuntu:24.04',
+    sourceDateEpoch,
+    rustcVersion: 'rustc 1.95.0 (fixture 2026-01-01)',
+    cargoVersion: 'cargo 1.95.0 (fixture 2026-01-01)',
+  }
+  const exactPackageReceipt = {
+    schema: 2,
+    artifactType: 'exact Debian package installed on Ubuntu VM',
+    appGitSha: candidateCommit,
+    appGitTree: candidateTree,
+    fipsGitSha,
+    fipsGitTree,
+    appVersion: '4.1.5',
+    builderMode: exactGateReceipt.builderMode,
+    builtOnHostMac: exactGateReceipt.builtOnHostMac,
+    builtOnRemoteVm: exactGateReceipt.builtOnRemoteVm,
+    builderHostOs: exactGateReceipt.builderHostOs,
+    builderHostArchitecture: exactGateReceipt.builderHostArchitecture,
+    containerImageId: exactGateReceipt.containerImageId,
+    dockerfileSha256: exactGateReceipt.dockerfileSha256,
+    containerPayloadSha256: exactGateReceipt.containerPayloadSha256,
+  }
+  const exactEnv = {
+    ...process.env,
+    NVPN_EXPECTED_FIPS_GIT_SHA: fipsGitSha,
+    NVPN_FIPS_REPO_PATH: fipsRoot,
+    NVPN_HOST_LINUX_VM_BUILDER_MODE: 'remote-native',
+    NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST: 'fixture-builder',
+    NVPN_HOST_LINUX_VM_RUST_TOOLCHAIN: '1.95.0',
+  }
+  const planFor = ({
+    gateReceipt = exactGateReceipt,
+    packageInstallReceipt = exactPackageReceipt,
+    env = exactEnv,
+    hostPlatform = 'darwin',
+    hostArch = 'arm64',
+  } = {}) => {
+    writeFileSync(
+      bundleReceiptPath,
+      `${JSON.stringify(gateReceipt, null, 2)}\n`,
+    )
+    const receiptSha256 = sha256(bundleReceiptPath)
+    return linuxPublicationVerificationPlan({
+      env,
+      tag: 'v4.1.5',
+      candidateCommit,
+      candidateTree,
+      gateReceipt,
+      packageInstallReceipt: {
+        ...packageInstallReceipt,
+        bundleReceiptSha256: receiptSha256,
+      },
+      bundlePath,
+      bundleReceiptPath,
+      bundleReceiptSha256: receiptSha256,
+      candidateRoot: root,
+      hostPlatform,
+      hostArch,
+    })
+  }
+
+  const plan = planFor()
+  assert.equal(
+    plan.verifierPath,
+    join(realpathSync(root), 'scripts', 'verify-host-linux-vm-bundle.py'),
+  )
+  assert.equal(plan.verifierArgs.length, 20)
+  assert.deepEqual(plan.verifierArgs.slice(0, 3), [
+    realpathSync(bundlePath),
+    realpathSync(bundleReceiptPath),
+    candidateCommit,
+  ])
+  assert.equal(plan.verifierArgs[12], 'x86_64-unknown-linux-gnu')
+  assert.equal(plan.verifierArgs[13], 'remote-native')
+  assert.equal(plan.verifierArgs[14], '1.95.0')
+  assert.deepEqual(plan.verifierArgs.slice(17), fipsSpecs)
+
+  const dirtyPath = join(root, 'untracked-publication-input')
+  writeFileSync(dirtyPath, 'dirty\n')
+  assert.throws(() => planFor(), /worktree.*dirty/i)
+  unlinkSync(dirtyPath)
+
+  const dirtyFipsPath = join(fipsRoot, 'untracked-publication-input')
+  writeFileSync(dirtyFipsPath, 'dirty\n')
+  assert.throws(() => planFor(), /FIPS.*dirty/i)
+  unlinkSync(dirtyFipsPath)
+
+  for (const [field, replacement, message] of [
+    ['dockerfileSha256', 'b'.repeat(64), /dockerfileSha256/i],
+    ['containerPayloadSha256', 'c'.repeat(64), /containerPayloadSha256/i],
+    ['fipsGitSha', 'd'.repeat(40), /fipsGitSha/i],
+    ['fipsGitTree', 'e'.repeat(40), /fipsGitTree/i],
+    [
+      'rootRealizedCargoLockSha256',
+      'f'.repeat(64),
+      /rootRealizedCargoLockSha256/i,
+    ],
+    ['linuxCargoLockSha256', '1'.repeat(64), /linuxCargoLockSha256/i],
+    ['sourceDateEpoch', sourceDateEpoch + 1, /sourceDateEpoch/i],
+    ['rustcVersion', 'rustc 1.94.0 (forged 2026-01-01)', /Rust toolchain/i],
+  ]) {
+    const forgedGate = structuredClone(exactGateReceipt)
+    const forgedPackage = structuredClone(exactPackageReceipt)
+    forgedGate[field] = replacement
+    if (field in forgedPackage) {
+      forgedPackage[field] = replacement
+    }
+    assert.throws(
+      () =>
+        planFor({
+          gateReceipt: forgedGate,
+          packageInstallReceipt: forgedPackage,
+        }),
+      message,
+    )
+  }
+
+  assert.throws(
+    () =>
+      planFor({
+        env: {
+          ...exactEnv,
+          NVPN_HOST_LINUX_VM_BUILDER_MODE: '',
+        },
+      }),
+    /explicit.*builder mode/i,
+  )
+  assert.throws(
+    () =>
+      planFor({
+        env: {
+          ...exactEnv,
+          NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST: '',
+        },
+      }),
+    /explicit native builder host/i,
+  )
+
+  const localGate = {
+    ...exactGateReceipt,
+    builderMode: 'local-docker',
+    builtOnHostMac: true,
+    builtOnRemoteVm: false,
+    builderHostOs: 'Darwin',
+    builderHostArchitecture: 'x86_64',
+  }
+  assert.throws(
+    () =>
+      planFor({
+        gateReceipt: localGate,
+        packageInstallReceipt: {
+          ...exactPackageReceipt,
+          builderMode: localGate.builderMode,
+          builtOnHostMac: localGate.builtOnHostMac,
+          builtOnRemoteVm: localGate.builtOnRemoteVm,
+          builderHostOs: localGate.builderHostOs,
+          builderHostArchitecture: localGate.builderHostArchitecture,
+        },
+        env: {
+          ...exactEnv,
+          NVPN_HOST_LINUX_VM_BUILDER_MODE: 'local-docker',
+          NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST: '',
+        },
+      }),
+    /arm64.*remote-native|remote-native.*arm64/i,
+  )
+})
+
+test('Windows publication requires installer and artifact receipts to bind exact FIPS', () => {
+  const expectedFips = {
+    fipsGitSha: 'a'.repeat(40),
+    fipsGitTree: 'b'.repeat(40),
+    fipsVersion: '0.4.45',
+  }
+  const artifactReceipt = { ...expectedFips }
+  const installerReceipt = { ...expectedFips }
+  assert.deepEqual(
+    validateWindowsPublicationFipsReceipts({
+      artifactReceipt,
+      installerReceipt,
+      expectedFips,
+    }),
+    expectedFips,
+  )
+
+  for (const [receiptName, field, value] of [
+    ['artifactReceipt', 'fipsGitSha', 'c'.repeat(40)],
+    ['artifactReceipt', 'fipsGitTree', undefined],
+    ['installerReceipt', 'fipsGitSha', undefined],
+    ['installerReceipt', 'fipsGitTree', 'd'.repeat(40)],
+    ['installerReceipt', 'fipsVersion', '0.4.44'],
+  ]) {
+    const candidate = {
+      artifactReceipt: { ...artifactReceipt },
+      installerReceipt: { ...installerReceipt },
+      expectedFips,
+    }
+    if (value === undefined) {
+      delete candidate[receiptName][field]
+    } else {
+      candidate[receiptName][field] = value
+    }
+    assert.throws(
+      () => validateWindowsPublicationFipsReceipts(candidate),
+      new RegExp(`${field}.*exact candidate`, 'i'),
+    )
+  }
+})

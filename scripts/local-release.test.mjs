@@ -1222,6 +1222,7 @@ test('staged draft publication publishes only the already validated bytes', () =
   for (const name of [
     'local-release.mjs',
     'local-release-lib.mjs',
+    'release-source-verification.mjs',
     'release-artifact-provenance-lib.mjs',
     'fleet-release-publication-lib.mjs',
     'fleet-release-preparer-lib.mjs',
@@ -2858,7 +2859,23 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   assert.match(linuxBuild, /nvpn-x86_64-unknown-linux-musl\.tar\.gz/)
   assert.match(linuxBuild, /packageInstalledByDpkg/)
   assert.match(linuxBuild, /copyFileSync\(gatedDebPath, debPath\)/)
+  const verificationPlan = linuxBuild.indexOf(
+    'linuxPublicationVerificationPlan({',
+  )
+  const canonicalVerifier = linuxBuild.indexOf(
+    '[verificationPlan.verifierPath, ...verificationPlan.verifierArgs]',
+  )
+  const publicationCopy = linuxBuild.indexOf(
+    'copyFileSync(gatedDebPath, debPath)',
+  )
+  assert.ok(
+    verificationPlan >= 0
+    && canonicalVerifier > verificationPlan
+    && publicationCopy > canonicalVerifier,
+  )
+  assert.match(linuxBuild, /cwd:\s*verificationPlan\.candidateRoot/)
   assert.match(linuxBuild, /musl_archive: expectedMuslArchive/)
+  assert.doesNotMatch(linuxBuild, /commandExists\('docker'\)/)
   assert.doesNotMatch(linuxBuild, /cargo deb/)
   assert.doesNotMatch(
     linuxBuild,
@@ -2886,6 +2903,8 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
   const build = localRelease.slice(buildStart, buildEnd)
 
   assert.match(build, /validateWindowsInstallerGateReceipt\(/)
+  assert.match(build, /exactFipsPublicationCandidate\(/)
+  assert.match(build, /validateWindowsPublicationFipsReceipts\(/)
   assert.match(
     build,
     /copyFileSync\(installerArtifactPath,\s*installerPath\)/,
