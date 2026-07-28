@@ -9,6 +9,7 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/release_common.sh"
 source "$ROOT_DIR/scripts/lib-release-gate-timeout.sh"
 source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
+source "$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
 source "$ROOT_DIR/scripts/lib-macos-vm-identity.sh"
 source "$ROOT_DIR/scripts/mobile_env.sh"
 load_mobile_env "$ROOT_DIR"
@@ -2008,6 +2009,8 @@ main() {
     "$NVPN_MOBILE_ANDROID_RELEASE_RECEIPT" \
     "$NVPN_MOBILE_IOS_RELEASE_RECEIPT"
   trap release_gate_cleanup EXIT
+
+  release_gate_enforce_complete_real_network_modes
 
   # Validate generated version metadata before any remote lane snapshots the
   # candidate. The remaining preflight leaves tracked source unchanged and can

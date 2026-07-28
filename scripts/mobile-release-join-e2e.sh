@@ -151,6 +151,7 @@ phase_ios_admin_android_qr() {
   release_join_reset_android_state
   ios_create_admin "Release QR iPhone admin"
   release_join_android_show_qr
+  release_join_android_background_foreground_pending_qr
   scan_log="$(ios_log ios-admin-android-qr)"
   release_join_ios_start_test \
     testScanPhysicalJoinQrAndRequireAdminRosterProgress "$scan_log" \
@@ -336,6 +337,7 @@ python3 - \
   "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
   "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
   "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
+  "${RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY:-0}" \
   "$RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS" \
   "$RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE" \
   "$RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE" \
@@ -358,6 +360,7 @@ import sys
     ios_app_tree,
     ios_receipt_path,
     android_qr_content_width_bps,
+    android_pending_qr_lifecycle_ready,
     ios_qr_content_width_bps,
     ios_qr_relaunch_durable,
     ios_admin_manual_relaunch_durable,
@@ -462,11 +465,14 @@ if any(
 ):
     raise SystemExit("mobile join QR did not fill its content width")
 if (
-    ios_qr_relaunch_durable != "1"
+    android_pending_qr_lifecycle_ready != "1"
+    or ios_qr_relaunch_durable != "1"
     or ios_admin_manual_relaunch_durable != "1"
     or ios_joiner_manual_relaunch_durable != "1"
 ):
-    raise SystemExit("iPhone directional relaunch evidence is incomplete")
+    raise SystemExit(
+        "mobile QR lifecycle or iPhone directional relaunch evidence is incomplete"
+    )
 desktop_enabled = desktop_mode.lower() not in {
     "0", "false", "no", "off",
 }
@@ -510,7 +516,8 @@ with open(path, "w", encoding="utf-8") as handle:
             "qr": {
                 "iphoneAdminPixelJoiner": True,
                 "pixelAdminIphoneJoiner": True,
-                "pendingQrBackgroundForeground": True,
+                "pendingQrBackgroundForeground":
+                    android_pending_qr_lifecycle_ready == "1",
                 "exactRosterOnBothSides": True,
                 "joinerRelaunchDurable": True,
                 "androidJoinerRelaunchDurable": True,

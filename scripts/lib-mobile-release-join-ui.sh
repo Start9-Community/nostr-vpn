@@ -166,13 +166,29 @@ release_join_android_show_qr() {
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_android_scroll_to description "Join request QR code"
   release_join_android_assert_qr_full_width
+  export RELEASE_JOIN_ANDROID_JOINER_ID
+}
+
+release_join_android_background_foreground_pending_qr() {
+  local expected_joiner="$RELEASE_JOIN_ANDROID_JOINER_ID"
+  local foreground_joiner
   "${ADB[@]}" shell input keyevent KEYCODE_HOME
   sleep 1
   release_join_android_launch
   release_join_android_scroll_to description "Join request QR code"
+  release_join_android_assert_pending_qr
+  foreground_joiner="$(
+    release_join_android_public_value \
+      joiner-device-id-value "Joiner Device ID value"
+  )"
+  [[ "$foreground_joiner" == "$expected_joiner" ]] || {
+    echo "Android foregrounded a different pending join request" >&2
+    return 1
+  }
   release_join_android_assert_qr_full_width
-  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_LIFECYCLE_READY=1"
-  export RELEASE_JOIN_ANDROID_JOINER_ID
+  RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY=1
+  export RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY=1"
 }
 
 release_join_android_assert_qr_full_width() {

@@ -242,8 +242,51 @@ fi
   || fail "successful lane orphan wrapper/process group was not reaped"
 
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
+required_modes_lib="$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
+[[ -f "$required_modes_lib" ]] \
+  || fail "release gate has no final-release required-mode policy"
+# shellcheck disable=SC1090
+source "$required_modes_lib"
+complete_network_modes=(
+  NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E
+  NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E
+  NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E
+  NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E
+  NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E
+  NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E
+)
+for name in "${complete_network_modes[@]}"; do
+  unset "$name"
+done
+NVPN_RELEASE_GATE_REQUIRE_COMPLETE=0
+release_gate_enforce_complete_real_network_modes
+for name in "${complete_network_modes[@]}"; do
+  [[ -z "${!name:-}" ]] \
+    || fail "developer release gate unexpectedly forced $name"
+done
+NVPN_RELEASE_GATE_REQUIRE_COMPLETE=1
+for name in "${complete_network_modes[@]}"; do
+  printf -v "$name" '%s' auto
+  export "$name"
+done
+release_gate_enforce_complete_real_network_modes
+for name in "${complete_network_modes[@]}"; do
+  [[ "${!name:-}" == required ]] \
+    || fail "complete release gate did not force $name to required"
+done
+NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=0
+if release_gate_enforce_complete_real_network_modes >/dev/null 2>&1; then
+  fail "complete release gate accepted an explicitly disabled real network mode"
+fi
+NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=required
+
 grep -Fq 'node scripts/sync-versions.mjs --check' "$release_gate" \
   || fail "release gate mutates generated versions before candidate snapshot"
+grep -Fq 'release_gate_enforce_complete_real_network_modes' "$release_gate" \
+  || fail "release gate does not enforce final real-network modes"
+local_release="$ROOT_DIR/scripts/local-release.mjs"
+grep -Fq "NVPN_RELEASE_GATE_REQUIRE_COMPLETE: '1'" "$local_release" \
+  || fail "full local release does not fail closed on real-network auto modes"
 if grep -Fxq '  node scripts/sync-versions.mjs' "$release_gate"; then
   fail "release gate still rewrites generated versions during preflight"
 fi

@@ -207,6 +207,28 @@ if ios_qr_joiner.index("requireAcceptedRoster(") < ios_qr_joiner.index(
 ):
     raise SystemExit("iPhone QR joiner relaunches before the signed roster applies")
 
+android_qr_lifecycle = ui.split(
+    "release_join_android_background_foreground_pending_qr() {", 1
+)[1].split("release_join_android_assert_qr_full_width() {", 1)[0]
+for required in (
+    'local expected_joiner="$RELEASE_JOIN_ANDROID_JOINER_ID"',
+    "KEYCODE_HOME",
+    "release_join_android_launch",
+    "release_join_android_assert_pending_qr",
+    "release_join_android_assert_qr_full_width",
+    '[[ "$foreground_joiner" == "$expected_joiner" ]]',
+    "RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY=1",
+):
+    if required not in android_qr_lifecycle:
+        raise SystemExit(
+            "Pixel pending QR lifecycle does not prove the same public request "
+            f"after foregrounding: {required}"
+        )
+if android_qr_lifecycle.index("KEYCODE_HOME") > android_qr_lifecycle.index(
+    "release_join_android_assert_pending_qr"
+):
+    raise SystemExit("Pixel pending QR is checked before the real Home lifecycle")
+
 for required in (
     "phase_ios_admin_android_qr",
     "phase_android_admin_ios_qr",
@@ -223,6 +245,38 @@ for required in (
 ):
     if required not in gate:
         raise SystemExit(f"Release join orchestrator is missing {required}")
+android_qr_joiner_phase = gate.split(
+    "phase_ios_admin_android_qr() {", 1
+)[1].split("phase_android_admin_ios_qr() {", 1)[0]
+for required in (
+    "release_join_android_show_qr",
+    "release_join_android_background_foreground_pending_qr",
+    "release_join_ios_start_test",
+):
+    if required not in android_qr_joiner_phase:
+        raise SystemExit(
+            f"Pixel QR joiner phase lacks real lifecycle sequencing: {required}"
+        )
+if not (
+    android_qr_joiner_phase.index("release_join_android_show_qr")
+    < android_qr_joiner_phase.index(
+        "release_join_android_background_foreground_pending_qr"
+    )
+    < android_qr_joiner_phase.index("release_join_ios_start_test")
+):
+    raise SystemExit(
+        "Pixel pending QR lifecycle must finish before iPhone approval starts"
+    )
+for required in (
+    "RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY",
+    'android_pending_qr_lifecycle_ready != "1"',
+    '"pendingQrBackgroundForeground":',
+    'android_pending_qr_lifecycle_ready == "1"',
+):
+    if required not in gate:
+        raise SystemExit(
+            f"Mobile receipt is not bound to the Pixel pending-QR lifecycle: {required}"
+        )
 ios_qr_joiner_phase = gate.split(
     "phase_android_admin_ios_qr() {", 1
 )[1].split("phase_ios_admin_android_manual() {", 1)[0]

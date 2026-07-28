@@ -1650,6 +1650,7 @@ function runVerify({ dryRun, builtLines, releaseGateLogDir, tag }) {
   const env = {
     ...process.env,
     NVPN_RELEASE_GATE_LOG_DIR: releaseGateLogDir,
+    NVPN_RELEASE_GATE_REQUIRE_COMPLETE: '1',
     NVPN_RELEASE_GATE_MOBILE_WG_EXIT_E2E: '1',
     NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E: '1',
     NVPN_RELEASE_GATE_MOBILE_JOIN_E2E: '1',
