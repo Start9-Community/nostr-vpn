@@ -175,6 +175,61 @@ for forbidden in ("doAction(", "grabFocus(", "querySelection(", "selectChild("):
         )
 PY
 
+python3 - \
+  "$ROOT/scripts/desktop-mobile-manual-join-windows-ui.ps1" \
+  "$ROOT/scripts/windows-vm-exit-dns-ui-e2e.sh" <<'PY'
+import pathlib
+import sys
+
+driver = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+matrix = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+start = driver.index("function Select-ComboItem {")
+end = driver.index("function Read-ComboItem {", start)
+selector = driver[start:end]
+
+for required in (
+    "[System.Windows.Automation.ItemContainerPattern]::Pattern",
+    "$Container.FindItemByProperty(",
+    "$null,",
+    "[System.Windows.Automation.AutomationElement]::NameProperty,",
+    "$Name",
+    "[System.Windows.Automation.SelectionItemPattern]::Pattern",
+    "$Pattern.Select()",
+    "(Read-ComboItem $AutomationId) -ne $Name",
+):
+    if required not in selector:
+        raise SystemExit(
+            "Windows Exit DNS ComboBox selection is not canonical: "
+            f"{required}"
+        )
+
+for forbidden in (
+    ".FindAll(",
+    "TreeScope]::Descendants",
+    "SendKeys",
+    "mouse_event",
+    "SetCursorPos",
+    "catch {",
+    "continue",
+):
+    if forbidden in selector:
+        raise SystemExit(
+            "Windows Exit DNS ComboBox selection retains a fallback path: "
+            f"{forbidden}"
+        )
+
+for required in (
+    "@{ Case='cloudflare'; Mode='encrypted'; Provider='cloudflare';",
+    "@{ Case='quad9'; Mode='encrypted'; Provider='quad9';",
+    "@{ Case='custom'; Mode='encrypted'; Provider='custom';",
+):
+    if required not in matrix:
+        raise SystemExit(
+            "Windows Exit DNS real UI matrix lost provider transition: "
+            f"{required}"
+        )
+PY
+
 python3 - "$ROOT/scripts/macos-exit-dns-ax.swift" <<'PY'
 import pathlib
 import sys
