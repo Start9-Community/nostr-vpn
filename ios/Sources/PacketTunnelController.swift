@@ -44,6 +44,11 @@ enum PacketTunnelControllerError: LocalizedError {
     }
 }
 
+struct PacketTunnelRouteState: Equatable {
+    let hasDefaultRoute: Bool
+    let hasWireGuardExit: Bool
+}
+
 final class PacketTunnelController {
     private static let preferencesOperationTimeoutSeconds: TimeInterval = 10
     private static let providerMessageTimeoutSeconds: TimeInterval = 1
@@ -59,8 +64,10 @@ final class PacketTunnelController {
         tunnelConfigJson: String,
         providerOptionsConfigJson: String
     ) async throws {
+        try Task.checkCancellation()
         debugLog("PacketTunnelController.start begin")
         let manager = try await loadOrCreateManager()
+        try Task.checkCancellation()
         activeManager = manager
         switch manager.connection.status {
         case .invalid, .disconnected:
@@ -99,47 +106,52 @@ final class PacketTunnelController {
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Nostr VPN"
         manager.isEnabled = true
+        try Task.checkCancellation()
         debugLog("saving preferences")
         try await save(manager)
+        try Task.checkCancellation()
         debugLog("reloading preferences")
         try await reload(manager)
+        try Task.checkCancellation()
         debugLog("calling startVPNTunnel status=\(manager.connection.status.rawValue)")
         // Keep providerConfiguration redacted in VPN preferences; the full
         // config is delivered only to this start attempt.
         let options: [String: NSObject] = [
             "mobileTunnelConfigJson": providerOptionsConfigJson as NSString,
         ]
+        try Task.checkCancellation()
         try manager.connection.startVPNTunnel(options: options)
         debugLog("startVPNTunnel returned status=\(manager.connection.status.rawValue)")
     }
 
     private static func hasDefaultRoute(in configJson: String) -> Bool {
-        guard let data = configJson.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let routes = object["routeTargets"] as? [String]
-        else {
-            return false
-        }
-        return routes.contains("0.0.0.0/0")
+        routeState(in: configJson)?.hasDefaultRoute == true
     }
 
-    func stop() async throws {
-        debugLog("PacketTunnelController.stop begin")
-        guard let manager = try await loadExistingManager() else {
-            debugLog("stop skipped: no existing manager")
-            return
+    static func routeState(in configJson: String) -> PacketTunnelRouteState? {
+        guard let data = configJson.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
         }
-        activeManager = manager
-        manager.connection.stopVPNTunnel()
-        debugLog("stopVPNTunnel returned status=\(manager.connection.status.rawValue)")
+        let tunnel = object["tunnel"] as? [String: Any] ?? object
+        guard let routes = tunnel["routeTargets"] as? [String] else {
+            return nil
+        }
+        return PacketTunnelRouteState(
+            hasDefaultRoute: routes.contains("0.0.0.0/0"),
+            hasWireGuardExit: tunnel["wireguardExit"] is [String: Any]
+        )
     }
 
     func stopAndWaitForDisconnected() async throws -> Int {
+        try Task.checkCancellation()
         debugLog("PacketTunnelController.stopAndWaitForDisconnected begin")
         guard let manager = try await loadExistingManager() else {
             debugLog("confirmed disconnected: no existing manager")
             return NEVPNStatus.invalid.rawValue
         }
+        try Task.checkCancellation()
         activeManager = manager
         manager.connection.stopVPNTunnel()
         return try await waitForDisconnected(manager)
@@ -171,22 +183,15 @@ final class PacketTunnelController {
         }
     }
 
-    func installedRouteState() async -> (hasDefaultRoute: Bool, hasWireGuardExit: Bool)? {
+    func installedRouteState() async -> PacketTunnelRouteState? {
         do {
             guard let manager = try await loadExistingManager(),
                   let proto = manager.protocolConfiguration as? NETunnelProviderProtocol,
-                  let configJson = proto.providerConfiguration?["mobileTunnelConfigJson"] as? String,
-                  let data = configJson.data(using: .utf8),
-                  let launch = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                  let configJson = proto.providerConfiguration?["mobileTunnelConfigJson"] as? String
             else {
                 return nil
             }
-            let tunnel = launch["tunnel"] as? [String: Any] ?? launch
-            let routes = tunnel["routeTargets"] as? [String] ?? []
-            return (
-                hasDefaultRoute: routes.contains("0.0.0.0/0"),
-                hasWireGuardExit: tunnel["wireguardExit"] is [String: Any]
-            )
+            return Self.routeState(in: configJson)
         } catch {
             debugLog("installed route state failed: \(String(describing: error))")
             return nil
@@ -319,10 +324,18 @@ final class PacketTunnelController {
     private func loadExistingManager() async throws -> NETunnelProviderManager? {
         let managers = try await loadAllManagers()
         debugLog("loaded managers count=\(managers.count)")
-        return managers.first(where: { manager in
+        let matching = managers.filter { manager in
             (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
                 == providerBundleIdentifier
-        })
+        }
+        return matching.first(where: { manager in
+            switch manager.connection.status {
+            case .invalid, .disconnected:
+                return false
+            default:
+                return true
+            }
+        }) ?? matching.first
     }
 
     private func loadAllManagers() async throws -> [NETunnelProviderManager] {

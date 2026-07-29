@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Network
 
 enum NostrVpnReleaseNetworkProbe {
@@ -96,6 +97,24 @@ enum NostrVpnReleaseNetworkProbe {
         let receipt = try https(rawURL)
         guard (200..<400).contains(receipt.statusCode) else {
             throw probeError("Public HTTPS returned \(receipt.statusCode)")
+        }
+    }
+
+    static func requireDNSResolution(_ rawURL: String) throws {
+        guard let host = URL(string: rawURL)?.host, !host.isEmpty else {
+            throw probeError("DNS probe URL has no host")
+        }
+        var hints = addrinfo()
+        hints.ai_flags = AI_ADDRCONFIG
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &result)
+        defer { freeaddrinfo(result) }
+        guard status == 0, result != nil else {
+            let message = gai_strerror(status).map(String.init(cString:))
+                ?? "getaddrinfo failed"
+            throw probeError("Native DNS failed for \(host): \(message)")
         }
     }
 

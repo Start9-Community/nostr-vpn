@@ -34,7 +34,12 @@ final class AppModel: ObservableObject {
     let fixtureMode: Bool
     private var refreshTask: Task<Void, Never>?
     var copyClearTask: Task<Void, Never>?
-    private var tunnelConfigSyncTask: Task<Void, Never>?
+    var tunnelConfigSyncTask: Task<Void, Never>?
+    var packetTunnelTransitionTask: Task<Void, Never>?
+    var packetTunnelTransitionGeneration: UInt64 = 0
+    var pendingVpnTransitionEnabled: Bool?
+    var startupTunnelReconciliationTask: Task<Void, Never>?
+    var startupTunnelReconciliationGeneration: UInt64 = 0
     private var sceneIsActive = false
     private var pendingOpenURLs: [URL] = []
     private var restartJoinRequestBroadcastOnForeground = false
@@ -50,6 +55,11 @@ final class AppModel: ObservableObject {
     var lifecycleProbeTransition = 0
     var lifecycleProbeHistory: [[String: Any]] = []
     #endif
+
+    enum PacketTunnelOperation {
+        case setEnabled(Bool, force: Bool)
+        case syncConfig(reason: String, force: Bool)
+    }
 
     init() {
         fixtureMode = Self.fixtureModeRequested()
@@ -103,6 +113,8 @@ final class AppModel: ObservableObject {
     deinit {
         refreshTask?.cancel()
         tunnelConfigSyncTask?.cancel()
+        packetTunnelTransitionTask?.cancel()
+        startupTunnelReconciliationTask?.cancel()
         core?.close()
     }
 
@@ -114,7 +126,8 @@ final class AppModel: ObservableObject {
         guard !fixtureMode else {
             return
         }
-        reconcileAppStoreTunnelAfterSanitization(reason: "startup")
+        let appStoreReconciliationScheduled =
+            reconcileAppStoreTunnelAfterSanitization(reason: "startup")
         guard refreshTask == nil else {
             return
         }
@@ -133,12 +146,13 @@ final class AppModel: ObservableObject {
         }
         let launchAutomationHandled = runLaunchAutomationIfRequested()
         if !launchAutomationHandled {
-            // A running unjoined tunnel may already hold a completed approval
-            // that the app has not copied back yet. Do not restart it from the
-            // stale QR-side config on every UI-process launch; the sidecar poll
-            // below consumes the completed config first. A disconnected tunnel
-            // is still started normally.
-            ensureAutoconnectPacketTunnel(reason: "startup")
+            if let pendingVpnTransitionEnabled {
+                enqueuePacketTunnelOperation(
+                    .setEnabled(pendingVpnTransitionEnabled, force: true)
+                )
+            } else if !appStoreReconciliationScheduled {
+                reconcilePacketTunnelAtStartup()
+            }
         }
     }
 
@@ -169,6 +183,13 @@ final class AppModel: ObservableObject {
         refreshTask = nil
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = nil
+        packetTunnelTransitionGeneration &+= 1
+        packetTunnelTransitionTask?.cancel()
+        packetTunnelTransitionTask = nil
+        startupTunnelReconciliationGeneration &+= 1
+        startupTunnelReconciliationTask?.cancel()
+        startupTunnelReconciliationTask = nil
+        actionInFlight = false
         // A provider-message task can be frozen while iOS suspends the app.
         // Invalidate it so foregrounding can immediately pull transactional
         // state (notably a join approval) from the still-running packet tunnel.
@@ -307,25 +328,26 @@ final class AppModel: ObservableObject {
         state = compatibility.state
         if compatibility.removedPaidConfiguration && compatibility.vpnWasRunning {
             appStoreTunnelRefreshPending = true
-            reconcileAppStoreTunnelAfterSanitization(reason: reason)
+            _ = reconcileAppStoreTunnelAfterSanitization(reason: reason)
         }
         return compatibility.removedPaidConfiguration
     }
 
-    private func reconcileAppStoreTunnelAfterSanitization(reason: String) {
+    private func reconcileAppStoreTunnelAfterSanitization(reason: String) -> Bool {
         guard appStoreTunnelRefreshPending else {
-            return
+            return false
         }
         appStoreTunnelRefreshPending = false
         guard UserDefaults.standard.bool(forKey: Self.vpnDisclosureAcceptedKey) else {
             requireVpnDisclosureReview()
             setVpnEnabled(false, force: true)
-            return
+            return true
         }
         schedulePacketTunnelConfigSync(
             reason: "removed unavailable paid configuration during \(reason)",
             force: true
         )
+        return true
     }
 
     func toggleVpn() {
@@ -353,7 +375,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func ensureAutoconnectPacketTunnel(reason: String) {
+    static func packetTunnelMayOwnRoutes(statusRawValue: Int?) -> Bool {
+        guard let statusRawValue else {
+            return false
+        }
+        return statusRawValue > 1
+    }
+
+    func ensureAutoconnectPacketTunnel(reason: String) {
         let canReceiveDeviceApproval = !state.joinRequestQrCodeOrLink.isEmpty
         guard state.autoconnect, activeNetwork != nil || canReceiveDeviceApproval else {
             return
@@ -362,9 +391,16 @@ final class AppModel: ObservableObject {
             requireVpnDisclosureReview()
             return
         }
+        let transitionGeneration = packetTunnelTransitionGeneration
         Task { [weak self] in
             guard let self else { return }
             let status = await vpnController.statusRawValue()
+            guard packetTunnelTransitionGeneration == transitionGeneration,
+                  pendingVpnTransitionEnabled != false,
+                  state.autoconnect
+            else {
+                return
+            }
             guard Self.packetTunnelNeedsStart(statusRawValue: status) else {
                 debugLog("autoconnect skipped reason=\(reason) tunnelStatus=\(status ?? -1)")
                 return
@@ -405,62 +441,12 @@ final class AppModel: ObservableObject {
             requireVpnDisclosureReview()
             return
         }
-        guard let core else {
+        guard core != nil else {
             statusMessage = "Native core unavailable"
             return
         }
-        Task {
-            if enabled {
-                guard force || !state.vpnEnabled else {
-                    debugLog("connect skipped: already enabled")
-                    return
-                }
-                if state.vpnEnabled {
-                    statusMessage = "Turning VPN on"
-                } else {
-                    dispatch(NativeActions.connectVpn(), status: "Turning VPN on")
-                }
-                guard state.error.isEmpty, state.vpnEnabled else {
-                    debugLog("connect aborted after native enable error=\(state.error)")
-                    return
-                }
-                let tunnelConfigJson = core.mobileTunnelConfigJson()
-                let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
-                debugLog("mobileTunnelConfigJson len=\(tunnelConfigJson.count)")
-                debugLog("starting PacketTunnel stateEnabled=\(state.vpnEnabled) network=\(activeNetwork?.id ?? "nil")")
-                do {
-                    try await vpnController.start(
-                        state: state,
-                        network: activeNetwork,
-                        tunnelConfigJson: tunnelConfigJson,
-                        providerOptionsConfigJson: providerOptionsConfigJson
-                    )
-                    if statusMessage == "Turning VPN on" {
-                        statusMessage = state.error
-                    }
-                    debugLog("PacketTunnel start returned success")
-                } catch {
-                    dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")
-                    statusMessage = error.localizedDescription
-                    debugLog("PacketTunnel start failed: \(String(describing: error))")
-                }
-            } else {
-                guard force || state.vpnEnabled else {
-                    debugLog("disconnect skipped: already disabled")
-                    return
-                }
-                if state.vpnEnabled {
-                    dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")
-                }
-                do {
-                    try await vpnController.stop()
-                    debugLog("PacketTunnel stop returned success")
-                } catch {
-                    statusMessage = error.localizedDescription
-                    debugLog("PacketTunnel stop failed: \(String(describing: error))")
-                }
-            }
-        }
+        pendingVpnTransitionEnabled = enabled
+        enqueuePacketTunnelOperation(.setEnabled(enabled, force: force))
     }
 
     func schedulePacketTunnelConfigSync(reason: String, force: Bool = false) {
@@ -475,6 +461,10 @@ final class AppModel: ObservableObject {
             debugLog("PacketTunnel config sync skipped reason=\(reason) vpn off")
             return
         }
+        guard pendingVpnTransitionEnabled == nil else {
+            debugLog("PacketTunnel config sync skipped reason=\(reason) VPN transition pending")
+            return
+        }
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = Task { [weak self] in
             do {
@@ -482,11 +472,21 @@ final class AppModel: ObservableObject {
             } catch {
                 return
             }
-            await self?.syncPacketTunnelConfig(reason: reason, force: force)
+            guard let self, pendingVpnTransitionEnabled == nil else {
+                return
+            }
+            enqueuePacketTunnelOperation(
+                .syncConfig(reason: reason, force: force)
+            )
         }
     }
 
-    private func syncPacketTunnelConfig(reason: String, force: Bool) async {
+    func syncPacketTunnelConfig(
+        reason: String,
+        force: Bool,
+        generation: UInt64
+    ) async throws {
+        try requirePacketTunnelTransition(generation)
         guard let core else {
             statusMessage = "Native core unavailable"
             return
@@ -501,29 +501,16 @@ final class AppModel: ObservableObject {
             "PacketTunnel config sync begin reason=\(reason) configLen=\(tunnelConfigJson.count) network=\(activeNetwork?.id ?? "nil")"
         )
         statusMessage = "Updating VPN"
-        do {
-            let status = try await vpnController.stopAndWaitForDisconnected()
-            debugLog("PacketTunnel config sync confirmed disconnected status=\(status)")
-        } catch {
-            statusMessage = error.localizedDescription
-            debugLog("PacketTunnel config sync stop failed: \(String(describing: error))")
-            return
-        }
-        do {
-            try await vpnController.start(
-                state: state,
-                network: activeNetwork,
-                tunnelConfigJson: tunnelConfigJson,
-                providerOptionsConfigJson: providerOptionsConfigJson
-            )
-            debugLog("PacketTunnel config sync start returned")
-            refresh()
-            statusMessage = state.error
-        } catch {
-            dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")
-            statusMessage = error.localizedDescription
-            debugLog("PacketTunnel config sync start failed: \(String(describing: error))")
-        }
+        try await vpnController.start(
+            state: state,
+            network: activeNetwork,
+            tunnelConfigJson: tunnelConfigJson,
+            providerOptionsConfigJson: providerOptionsConfigJson
+        )
+        try requirePacketTunnelTransition(generation)
+        debugLog("PacketTunnel config sync start returned")
+        refresh()
+        statusMessage = state.error
     }
 
     private func actionRequiresPacketTunnelConfigSync(

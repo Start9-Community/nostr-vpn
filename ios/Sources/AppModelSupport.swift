@@ -153,52 +153,80 @@ extension AppModel {
         }
         tunnelAppConfigRefreshInFlight = true
         Task { [weak self] in
-            let appConfigToml = await self?.vpnController.takeAppConfigToml()
-            let acceptance = await MainActor.run {
-                guard let self,
-                      self.tunnelStateRefreshGeneration == refreshGeneration
-                else {
-                    return (accepted: false, networkChanged: false)
-                }
-                let previousNetworkId = self.activeNetwork?.networkId ?? ""
-                var wrote = false
-                var appConfigAccepted = false
-                if let appConfigToml {
-                    let result = self.acceptTunnelAppConfig(appConfigToml)
-                    appConfigAccepted = result.accepted
-                    wrote = result.wrote
-                }
-                if wrote, let core = self.core {
-                    self.adoptAppStoreCompatibleState(
-                        core.refresh(),
-                        core: core,
-                        reason: "packet tunnel config"
-                    )
-                }
-                let currentNetworkId = self.activeNetwork?.networkId ?? ""
-                return (
-                    accepted: appConfigAccepted,
-                    networkChanged: wrote && previousNetworkId != currentNetworkId
-                )
+            guard let self else {
+                return
             }
-            if acceptance.accepted {
-                _ = await self?.vpnController.acknowledgeAppConfigToml()
+            let networkChanged = await self.reconcileTunnelAppConfig(
+                generation: refreshGeneration
+            )
+            guard self.tunnelStateRefreshGeneration == refreshGeneration else {
+                return
             }
-            await MainActor.run {
-                guard let self,
-                      self.tunnelStateRefreshGeneration == refreshGeneration
-                else {
-                    return
-                }
-                self.tunnelAppConfigRefreshInFlight = false
-                if acceptance.networkChanged {
-                    // A FIPS endpoint's discovery scope is bound to its network
-                    // id. Restart exactly once after a join so the accepted
-                    // roster does not remain on its QR/onboarding scope.
-                    self.schedulePacketTunnelConfigSync(reason: "network joined", force: true)
-                }
+            self.tunnelAppConfigRefreshInFlight = false
+            if networkChanged {
+                // A FIPS endpoint's discovery scope is bound to its network id.
+                // Restart once after a join so the accepted roster does not
+                // remain on its QR/onboarding scope.
+                self.schedulePacketTunnelConfigSync(reason: "network joined", force: true)
             }
         }
+    }
+
+    func reconcilePendingJoinTunnelSidecarAtStartup() async {
+        guard !state.joinRequestQrCodeOrLink.isEmpty,
+              !tunnelAppConfigRefreshInFlight
+        else {
+            return
+        }
+        let refreshGeneration = tunnelStateRefreshGeneration
+        tunnelAppConfigRefreshInFlight = true
+        let networkChanged = await reconcileTunnelAppConfig(
+            generation: refreshGeneration
+        )
+        guard tunnelStateRefreshGeneration == refreshGeneration else {
+            return
+        }
+        tunnelAppConfigRefreshInFlight = false
+        if networkChanged {
+            schedulePacketTunnelConfigSync(reason: "network joined", force: true)
+        }
+    }
+
+    private func reconcileTunnelAppConfig(generation refreshGeneration: UInt64) async -> Bool {
+        guard !Task.isCancelled else {
+            return false
+        }
+        let appConfigToml = await vpnController.takeAppConfigToml()
+        guard !Task.isCancelled,
+              tunnelStateRefreshGeneration == refreshGeneration
+        else {
+            return false
+        }
+        let previousNetworkId = activeNetwork?.networkId ?? ""
+        var result = (accepted: false, wrote: false)
+        if let appConfigToml {
+            result = acceptTunnelAppConfig(appConfigToml)
+        }
+        if result.wrote, let core {
+            adoptAppStoreCompatibleState(
+                core.refresh(),
+                core: core,
+                reason: "packet tunnel config"
+            )
+        }
+        if result.accepted {
+            guard !Task.isCancelled else {
+                return false
+            }
+            _ = await vpnController.acknowledgeAppConfigToml()
+        }
+        guard !Task.isCancelled,
+              tunnelStateRefreshGeneration == refreshGeneration
+        else {
+            return false
+        }
+        return result.wrote
+            && previousNetworkId != (activeNetwork?.networkId ?? "")
     }
 
     private func refreshTunnelRuntimeState(generation refreshGeneration: UInt64) {

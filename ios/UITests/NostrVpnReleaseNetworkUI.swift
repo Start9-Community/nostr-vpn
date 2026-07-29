@@ -65,6 +65,31 @@ extension NostrVpnReleaseNetworkUITests {
             || value.split(separator: " ").contains("1")
     }
 
+    @discardableResult
+    func setStartVpnAutomatically(_ enabled: Bool) throws -> Bool {
+        let settings = app.tabBars.buttons["Settings"]
+        guard settings.waitForExistence(timeout: 8), settings.isHittable else {
+            throw gateError("Shipped Settings tab was unavailable")
+        }
+        settings.tap()
+        let toggle = scrollToElement("autoconnect-toggle")
+        let wasEnabled = toggleIsOn(toggle)
+        if wasEnabled != enabled {
+            toggle.tap()
+            waitForActionToSettle()
+            guard toggleIsOn(scrollToElement("autoconnect-toggle")) == enabled else {
+                throw gateError("Start VPN automatically did not save through its shipped control")
+            }
+        }
+        return wasEnabled
+    }
+
+    func toggleIsOn(_ element: XCUIElement) -> Bool {
+        let value = "\(element.value as? String ?? "") \(element.label)".lowercased()
+        let tokens = value.split(separator: " ")
+        return tokens.contains("on") || tokens.contains("1")
+    }
+
     func acknowledgeVPNPrompts(timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")

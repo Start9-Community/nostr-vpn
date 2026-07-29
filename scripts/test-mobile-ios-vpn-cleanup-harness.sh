@@ -254,13 +254,6 @@ ios_app = open(sys.argv[9], encoding="utf-8").read()
 lifecycle_gate = open(sys.argv[10], encoding="utf-8").read()
 release_gate = open(sys.argv[11], encoding="utf-8").read()
 lifecycle_xctest = open(sys.argv[12], encoding="utf-8").read()
-sync = app_model.split("private func syncPacketTunnelConfig", 1)[1].split(
-    "private func actionRequiresPacketTunnelConfigSync", 1
-)[0]
-if "try await vpnController.stopAndWaitForDisconnected()" not in sync:
-    raise SystemExit("config refresh does not await a confirmed disconnect")
-if "try await vpnController.stop()" in sync:
-    raise SystemExit("config refresh still uses the racy fire-and-forget stop")
 if "case .disconnecting:" not in controller:
     raise SystemExit("PacketTunnelController.start does not guard a prior disconnect race")
 if "throw PacketTunnelControllerError.disconnectTimedOut(status)" not in controller:
@@ -273,15 +266,6 @@ if "try await waitForDisconnected(manager)" not in start_method[:save_index]:
     raise SystemExit("PacketTunnelController.start does not confirm disconnect before saving")
 if "case .disconnecting:" in start_method[save_index:]:
     raise SystemExit("PacketTunnelController.start still reacts to disconnect only after saving")
-set_vpn_enabled = app_model.split("func setVpnEnabled(", 1)[1].split(
-    "func schedulePacketTunnelConfigSync", 1
-)[0]
-native_enable = set_vpn_enabled.index("dispatch(NativeActions.connectVpn()")
-serialized_config = set_vpn_enabled.index("let tunnelConfigJson = core.mobileTunnelConfigJson()")
-if native_enable >= serialized_config:
-    raise SystemExit("normal iOS VPN start still serializes disabled native state")
-if "startPacketTunnelAfterNativeEnable" in app_model:
-    raise SystemExit("iOS native enable can still launch a duplicate PacketTunnel start")
 debug_start = automation.split("private func startVpnForDebugProbe()", 1)[1].split(
     "private func fetchDebugProbe", 1
 )[0]

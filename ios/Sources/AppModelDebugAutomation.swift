@@ -627,15 +627,9 @@ extension AppModel {
         }
         dispatch(NativeActions.disconnectVpn())
         do {
-            try await vpnController.stop()
+            _ = try await vpnController.stopAndWaitForDisconnected()
         } catch {
             debugLog("debug probe stop failed: \(String(describing: error))")
-        }
-        for _ in 0..<20 {
-            if let status = await vpnController.statusRawValue(), status <= 1 {
-                break
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
         }
         refresh()
     }
@@ -645,7 +639,7 @@ extension AppModel {
             dispatch(NativeActions.disconnectVpn())
         }
         do {
-            try await vpnController.stop()
+            _ = try await vpnController.stopAndWaitForDisconnected()
         } catch {
             debugLog("debug probe failed-state stop failed: \(String(describing: error))")
         }

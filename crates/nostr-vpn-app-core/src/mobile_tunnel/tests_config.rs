@@ -776,6 +776,15 @@
             provider_config.config_path.is_empty(),
             "packet tunnel extension must not read the containing app's private config path"
         );
+        assert_eq!(
+            provider_config.route_targets, launch_config.route_targets,
+            "saved and start-option configs must describe the same routes"
+        );
+        assert_eq!(
+            provider_config.wireguard_exit.is_some(),
+            launch_config.wireguard_exit.is_some(),
+            "saved and start-option configs must agree on WireGuard exit state"
+        );
 
         let provider_loaded =
             mobile_app_config(&provider_config).expect("load app config from embedded toml");

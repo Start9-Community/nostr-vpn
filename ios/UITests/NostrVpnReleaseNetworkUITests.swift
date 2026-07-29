@@ -59,6 +59,11 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 5))
         try ensureNetwork(spec)
+        let autoconnectWasEnabled = try setStartVpnAutomatically(false)
+        addTeardownBlock { [weak self] in
+            guard let self else { return }
+            _ = try self.setStartVpnAutomatically(autoconnectWasEnabled)
+        }
         try turnVPNOffIfNeeded()
 
         try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(spec.publicHttpsUrl)
@@ -103,7 +108,12 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         // sampler records the final active-session checkpoint.
         Thread.sleep(forTimeInterval: 6)
         try turnVPNOffIfNeeded()
+        relaunch()
+        guard waitForVPNState(on: false, timeout: 15) else {
+            throw gateError("Release app relaunched with a stale packet tunnel after VPN off")
+        }
         try proveDirect(spec, expectedSource: directSource)
+        _ = try setStartVpnAutomatically(autoconnectWasEnabled)
         emit("NVPN_IOS_RELEASE_DIRECT_AFTER_PASSED=1")
         emit("NVPN_IOS_RELEASE_NETWORK_PASSED=\(spec.caseName)")
     }
@@ -392,6 +402,13 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                     "Rapid start/stop cycle \(cycle) did not stop in time"
                 )
             }
+            if stopDelay == 0 {
+                relaunch()
+                guard waitForVPNState(on: false, timeout: 5) else {
+                    throw gateError("A zero-delay stop resurrected after relaunch")
+                }
+                emit("NVPN_IOS_RELEASE_ZERO_DELAY_RELAUNCH_PASSED=1")
+            }
             try requireStableDirectSource(
                 spec.sourceIpUrl,
                 expected: directSource,
@@ -452,6 +469,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
     }
 
     private func proveDirect(_ spec: Spec, expectedSource: String) throws {
+        try NostrVpnReleaseNetworkProbe.requireDNSResolution(spec.publicHttpsUrl)
         try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(spec.publicHttpsUrl)
         try waitForSourceIP(
             spec.sourceIpUrl,
@@ -496,13 +514,20 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         directSource: String
     ) throws {
         openInternetTab()
-        selectMenu(
-            picker: "internet-source-picker",
-            option: "internet-source-direct"
-        )
+        scrollToElement("internet-source-picker").tap()
+        let direct = element("internet-source-direct")
+        guard direct.waitForExistence(timeout: 3), direct.isHittable else {
+            throw gateError("Shipped This device choice was unavailable")
+        }
+        direct.tap()
+        // Interrupt the scheduled stop/restart immediately after the desired
+        // Direct setting is persisted. Cold startup must compare the installed
+        // manager's route shape with the desired provider configuration.
+        relaunch()
+        openInternetTab()
         assertPicker("internet-source-picker", contains: "This device")
         guard waitForVPNState(on: true, timeout: 8) else {
-            throw gateError("Selecting This device stopped the OS packet tunnel")
+            throw gateError("This device relaunch stopped the private-mesh packet tunnel")
         }
         try proveDirect(spec, expectedSource: directSource)
         emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
