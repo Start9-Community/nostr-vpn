@@ -177,6 +177,18 @@ impl FipsPrivateTunnelRuntime {
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<()> {
         validate_windows_wireguard_config(&config.wireguard_exit, &config.exit_dns)?;
+        let existing_wireguard_upstream_matches = config.wireguard_exit.enabled
+            && config.wireguard_exit.configured()
+            && self
+                .wg_upstream
+                .as_ref()
+                .is_some_and(|existing| existing.matches(&config.wireguard_exit));
+        if existing_wireguard_upstream_matches {
+            // Moving an existing endpoint bypass is independent of peer control
+            // and must not wait behind its reconnect work after an underlay change.
+            self.reconcile_windows_wg_upstream(&config.wireguard_exit)
+                .await?;
+        }
         self.mesh.replace_peers(
             config.peers.clone(),
             config.local_allowed_ips(),
@@ -218,8 +230,10 @@ impl FipsPrivateTunnelRuntime {
         // Verify and install the desired WireGuard upstream before changing
         // FIPS routes. A failed handshake leaves the existing route set
         // untouched while secure exit DNS remains fail-closed.
-        self.reconcile_windows_wg_upstream(&config.wireguard_exit)
-            .await?;
+        if !existing_wireguard_upstream_matches {
+            self.reconcile_windows_wg_upstream(&config.wireguard_exit)
+                .await?;
+        }
         self.apply_windows_route_config(&config)?;
         if !config.secure_dns_required()
             && let Some(secure_dns) = self.secure_dns.as_mut()
@@ -679,6 +693,9 @@ mod windows_endpoint_bypass_tests {
         let wireguard = apply
             .find("self.reconcile_windows_wg_upstream")
             .expect("WireGuard reconcile");
+        let peer_update = apply
+            .find("self.mesh.update_peers")
+            .expect("FIPS peer update");
         let routes = apply
             .find("self.apply_windows_route_config")
             .expect("FIPS route reconcile");
@@ -686,8 +703,9 @@ mod windows_endpoint_bypass_tests {
             .find("let cleanup = secure_dns.stop().await")
             .expect("direct DNS teardown");
         assert!(
-            wireguard < routes && routes < secure_dns_stop,
-            "failed WG must leave routes untouched, while Direct cleans WG before restoring DNS"
+            wireguard < peer_update && peer_update < routes && routes < secure_dns_stop,
+            "refresh matching WG underlay before awaited peer control; failed WG must leave routes \
+             untouched, while Direct cleans WG before restoring DNS"
         );
         let reconcile = source
             .split("async fn reconcile_windows_wg_upstream")
