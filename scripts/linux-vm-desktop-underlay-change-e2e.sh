@@ -503,7 +503,9 @@ start_linux_runner() {
   jq -e '
     .carrier == true
     and .active_profile == true
-    and .default_route == true
+    and .default_route == false
+    and .durable_default_route == true
+    and .strict_exit_physical_defaults_absent == true
   ' "$ARTIFACT_DIR/secondary-underlay-ready.json" >/dev/null
   peer_command wait-ready >"$ARTIFACT_DIR/peer-ready.json"
   jq -e . "$ARTIFACT_DIR/peer-ready.json" >/dev/null

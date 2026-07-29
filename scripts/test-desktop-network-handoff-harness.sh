@@ -1052,6 +1052,62 @@ grep -Fq 'dump_recovery_failure' "$LINUX_GUEST" \
 if grep -Fq 'physical_default_route_dev' "$LINUX_GUEST"; then
   fail "Linux exit recovery incorrectly requires an absent physical default route"
 fi
+python3 - "$LINUX_GUEST" "$LINUX_HOST_ENTRY" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+ready = source[
+    source.index("assert_secondary_underlay_ready() {"):
+    source.index("\nrun_gate() {")
+]
+if 'route show table main default dev "$interface"' in ready:
+    raise SystemExit(
+        "Linux pre-cut readiness incorrectly requires a live physical default under strict exit"
+    )
+for token in (
+    "previous_main_default_routes",
+    "strict exit retained an unmanaged physical default before the host cut",
+    "durable_default_route: true",
+    'defaults_json="$(ip -j -4 route show table main default)"',
+    "length >= 1 and all(.[]; .dev == $wireguard)",
+):
+    if token not in ready:
+        raise SystemExit(
+            f"Linux pre-cut readiness lacks strict-exit ownership evidence: {token}"
+        )
+endpoint_route = source[
+    source.index("assert_wireguard_endpoint_route() {"):
+    source.index("\nmonotonic_milliseconds() {")
+]
+if 'route show default dev "$expected_iface"' in endpoint_route:
+    raise SystemExit(
+        "Linux endpoint proof incorrectly derives its gateway from an absent physical default"
+    )
+for token in ("$CLEANUP_JOURNAL", "previous_main_default_routes"):
+    if token not in endpoint_route:
+        raise SystemExit(
+            f"Linux endpoint proof lacks durable underlay ownership: {token}"
+        )
+host = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+runner = host[
+    host.index("start_linux_runner() {"):
+    host.index("\nset_primary_link() {")
+]
+if ".default_route == true" in runner:
+    raise SystemExit(
+        "Linux host wrapper still requires a live physical default under strict exit"
+    )
+for token in (
+    ".default_route == false",
+    ".durable_default_route == true",
+    ".strict_exit_physical_defaults_absent == true",
+):
+    if token not in runner:
+        raise SystemExit(
+            f"Linux host wrapper lacks strict-exit pre-cut evidence: {token}"
+        )
+PY
 grep -Fq 'route_dev "$(endpoint_host)"' "$LINUX_GUEST" \
   || fail "Linux recovery clock does not wait for the physical endpoint route"
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_HOST" \

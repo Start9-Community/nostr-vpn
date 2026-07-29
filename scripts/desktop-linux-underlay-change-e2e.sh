@@ -177,9 +177,22 @@ assert_wireguard_endpoint_route() {
   local expected_iface="$1"
   local host expected_gateway expected_source
   host="$(endpoint_host)"
+  [[ -s "$CLEANUP_JOURNAL" ]] || return 1
   expected_gateway="$(
-    ip -j -4 route show default dev "$expected_iface" \
-      | jq -er 'sort_by(.metric // 0) | .[0].gateway'
+    jq -er --arg interface "$expected_iface" '
+      first(
+        .exit_node_runtime.wireguard_exit.previous_main_default_routes[]
+        | (split(" ")) as $tokens
+        | ($tokens | index("dev")) as $dev_index
+        | ($tokens | index("via")) as $via_index
+        | select(
+            $dev_index != null
+            and $via_index != null
+            and $tokens[$dev_index + 1] == $interface
+          )
+        | $tokens[$via_index + 1]
+      )
+    ' "$CLEANUP_JOURNAL"
   )"
   expected_source="$(
     ip -j -4 address show dev "$expected_iface" scope global \
@@ -742,7 +755,7 @@ initialize() {
 
 assert_secondary_underlay_ready() {
   local interface="$1"
-  local profile_uuid active_uuid
+  local profile_uuid active_uuid defaults_json
   [[ -s "$SECONDARY_PROFILE_UUID_FILE" ]] \
     || fail "secondary NetworkManager profile receipt is missing"
   profile_uuid="$(<"$SECONDARY_PROFILE_UUID_FILE")"
@@ -761,11 +774,29 @@ assert_secondary_underlay_ready() {
         )
       ' >/dev/null \
     || fail "secondary global IPv4 address is missing before the host cut"
-  ip -j -4 route show table main default dev "$interface" \
-    | jq -e --arg gateway "$SECONDARY_GATEWAY" '
-        any(.[]; .gateway == $gateway)
-      ' >/dev/null \
-    || fail "secondary default route is missing before the host cut"
+  [[ -s "$CLEANUP_JOURNAL" ]] \
+    || fail "strict exit cleanup ownership is missing before the host cut"
+  jq -e \
+    --arg interface "$interface" \
+    --arg gateway "$SECONDARY_GATEWAY" '
+      any(
+        .exit_node_runtime.wireguard_exit.previous_main_default_routes[];
+        (split(" ")) as $tokens
+        | ($tokens | index("dev")) as $dev_index
+        | ($tokens | index("via")) as $via_index
+        | $dev_index != null
+        and $via_index != null
+        and $tokens[$dev_index + 1] == $interface
+        and $tokens[$via_index + 1] == $gateway
+      )
+    ' "$CLEANUP_JOURNAL" >/dev/null \
+    || fail "secondary default route lacks durable cleanup ownership before the host cut"
+  defaults_json="$(ip -j -4 route show table main default)" \
+    || fail "could not inspect strict-exit defaults before the host cut"
+  jq -e --arg wireguard "$WG_IFACE" '
+    length >= 1 and all(.[]; .dev == $wireguard)
+  ' <<<"$defaults_json" >/dev/null \
+    || fail "strict exit retained an unmanaged physical default before the host cut"
   jq -cn \
     --arg interface "$interface" \
     --arg profile_uuid "$profile_uuid" \
@@ -778,7 +809,9 @@ assert_secondary_underlay_ready() {
       gateway: $gateway,
       carrier: true,
       active_profile: true,
-      default_route: true
+      default_route: false,
+      durable_default_route: true,
+      strict_exit_physical_defaults_absent: true
     }' >"$STATE_DIR/secondary-underlay-ready.json"
 }
 
