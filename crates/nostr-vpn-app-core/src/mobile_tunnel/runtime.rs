@@ -265,6 +265,9 @@ impl MobileTunnel {
             .then(|| SecureDnsResolver::from_resolver_config(&exit_dns_resolver_config))
             .transpose()
             .context("failed to initialize mobile secure DNS")?;
+        let secure_dns_dispatch = secure_dns
+            .as_ref()
+            .map(|resolver| MobileSecureDnsDispatch::new(resolver.clone()));
         let send_task = {
             let endpoint = Arc::clone(&endpoint);
             let mesh = Arc::clone(&mesh);
@@ -275,7 +278,7 @@ impl MobileTunnel {
             let inbound_tx_for_dns = inbound_tx.clone();
             let app_config_for_dns = Arc::clone(&app_config);
             let outbound_exit_dns_nat = exit_dns_nat.clone();
-            let secure_dns = secure_dns.clone();
+            let mut secure_dns_dispatch = secure_dns_dispatch;
             tokio::spawn(async move {
                 while let Some(packets) = outbound_rx.recv().await {
                     if !dispatch_mobile_outbound_packets(
@@ -287,7 +290,7 @@ impl MobileTunnel {
                         mesh_addr,
                         &inbound_tx_for_dns,
                         &app_config_for_dns,
-                        secure_dns.as_ref(),
+                        &mut secure_dns_dispatch,
                         magic_dns_server,
                         outbound_exit_dns_nat.as_deref(),
                         packets,

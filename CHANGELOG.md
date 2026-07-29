@@ -47,6 +47,9 @@ All notable changes to this project are documented in this file.
   unrelated underlay event.
 - Replace prior Android installs in place, reject parallel package variants,
   and prevent duplicate VPN service/process ownership.
+- Route Android's embedded encrypted DNS through an active WireGuard exit,
+  and cancel in-flight resolver work when the tunnel stops so it cannot fall
+  through to restored device Internet.
 - Keep macOS configuration editable while an installed background service is
   disabled or stopped, without bypassing daemon-owned saves while it is active.
 - Release the iOS UI process's shared Cashu wallet and SQLite locks before

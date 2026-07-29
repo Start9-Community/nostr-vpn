@@ -610,6 +610,48 @@ impl MobileEndpointSendRun {
     }
 }
 
+struct MobileSecureDnsDispatch {
+    resolver: Arc<dyn SecureDnsLookup>,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl MobileSecureDnsDispatch {
+    fn new(resolver: impl SecureDnsLookup + 'static) -> Self {
+        Self {
+            resolver: Arc::new(resolver),
+            tasks: tokio::task::JoinSet::new(),
+        }
+    }
+
+    fn try_spawn_response(
+        &mut self,
+        packet: Vec<u8>,
+        app_config: Arc<RwLock<AppConfig>>,
+        magic_dns_server: Ipv4Addr,
+        inbound_tx: tokio_mpsc::Sender<Vec<Vec<u8>>>,
+    ) -> bool {
+        while self.tasks.try_join_next().is_some() {}
+        if self.tasks.len() >= MOBILE_SECURE_DNS_MAX_IN_FLIGHT {
+            return false;
+        }
+        let resolver = Arc::clone(&self.resolver);
+        self.tasks.spawn(async move {
+            if let Some(MobileDnsPacketAction::Respond(response)) = mobile_dns_packet_action(
+                &packet,
+                &app_config,
+                Some(resolver.as_ref()),
+                magic_dns_server,
+                false,
+            )
+            .await
+            {
+                let _ = inbound_tx.send(vec![response]).await;
+            }
+        });
+        true
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_mobile_outbound_packets(
     endpoint: &FipsEndpoint,
@@ -620,7 +662,7 @@ async fn dispatch_mobile_outbound_packets(
     mesh_addr: Option<Ipv4Addr>,
     inbound_tx_for_dns: &tokio_mpsc::Sender<Vec<Vec<u8>>>,
     app_config_for_dns: &Arc<RwLock<AppConfig>>,
-    secure_dns: Option<&SecureDnsResolver>,
+    secure_dns: &mut Option<MobileSecureDnsDispatch>,
     magic_dns_server: Option<Ipv4Addr>,
     exit_dns_nat: Option<&MobileExitDnsNat>,
     packets: Vec<Vec<u8>>,
@@ -630,6 +672,24 @@ async fn dispatch_mobile_outbound_packets(
     let mut pending_wg_packets = Vec::new();
     let mesh = mesh.read().ok().map(|mesh| Arc::clone(&*mesh));
     for mut packet in packets {
+        // With the Android app UID captured, reqwest's DoH connection returns
+        // through this same TUN. Resolve off-loop so its TCP packets can reach
+        // WG. The tunnel-owned JoinSet bounds work, aborts it on tunnel stop,
+        // and lets saturation fall through to the SERVFAIL path below.
+        if let (Some(secure_dns), Some(magic_dns_server)) =
+            (secure_dns.as_mut(), magic_dns_server)
+            && exit_dns_nat.is_none()
+            && parse_mobile_magic_dns_query(&packet, magic_dns_server).is_some()
+            && secure_dns.try_spawn_response(
+                packet.clone(),
+                Arc::clone(app_config_for_dns),
+                magic_dns_server,
+                inbound_tx_for_dns.clone(),
+            )
+        {
+            continue;
+        }
+
         // Local MagicDNS responder. The well-known DNS address is owned by this
         // tunnel instance, so answer before mesh/WG routing and never treat it
         // as a remote nvpn node.
@@ -637,7 +697,7 @@ async fn dispatch_mobile_outbound_packets(
             && let Some(action) = mobile_dns_packet_action(
                 &packet,
                 app_config_for_dns,
-                secure_dns.map(|resolver| resolver as &dyn SecureDnsLookup),
+                None,
                 magic_dns_server,
                 exit_dns_nat.is_some(),
             )

@@ -7,6 +7,22 @@ import org.junit.Test
 
 class AndroidVpnRoutingPolicyTest {
     @Test
+    fun wireGuardExitIncludesOwnProcessSoAppTrafficEntersTunnel() {
+        assertFalse(AndroidVpnRoutingPolicy.excludesOwnProcess(wireGuardExitActive = true))
+    }
+
+    @Test
+    fun fipsExitExcludesOwnProcessEvenThoughItHasDefaultRoute() {
+        assertFalse(AndroidVpnRoutingPolicy.requiresBypass(listOf("0.0.0.0/0")))
+        assertTrue(AndroidVpnRoutingPolicy.excludesOwnProcess(wireGuardExitActive = false))
+    }
+
+    @Test
+    fun directAndSplitModesExcludeOwnProcess() {
+        assertTrue(AndroidVpnRoutingPolicy.excludesOwnProcess(wireGuardExitActive = false))
+    }
+
+    @Test
     fun splitTunnelPermitsUnmatchedTrafficToUseDeviceInternet() {
         val routes = listOf("10.44.0.0/16", "10.72.0.9/32")
         assertTrue(AndroidVpnRoutingPolicy.requiresBypass(routes))

@@ -274,7 +274,13 @@ class NostrVpnService : VpnService() {
         if (underlyingNetworks.isNotEmpty()) {
             builder.setUnderlyingNetworks(underlyingNetworks)
         }
-        excludeOwnProcess(builder)
+        // The WG transport socket is protected after native startup. Keeping
+        // this process inside the VPN lets app-owned secure DNS use the exit;
+        // FIPS/direct/split transports still need the process-level escape.
+        val wireGuardExitActive = config.optJSONObject("wireguardExit") != null
+        if (AndroidVpnRoutingPolicy.excludesOwnProcess(wireGuardExitActive)) {
+            excludeOwnProcess(builder)
+        }
 
         val local = parseCidr(config.optString("localAddress", "10.44.0.1/32")) ?: return null
         builder.addAddress(local.address, local.prefix)

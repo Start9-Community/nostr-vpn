@@ -1,4 +1,6 @@
     use super::*;
+    use hickory_proto::op::{Message, MessageType};
+    use hickory_proto::serialize::binary::{BinEncodable as _, BinEncoder};
     use nostr_sdk::prelude::{Keys, ToBech32};
     use nostr_vpn_core::config::{NetworkConfig, PendingOutboundJoinRequest};
 
@@ -36,6 +38,51 @@
         bytes.extend_from_slice(&query_type.to_be_bytes());
         bytes.extend_from_slice(&1_u16.to_be_bytes());
         bytes
+    }
+
+    fn fixture_authenticated_dns_response(query: &[u8]) -> Vec<u8> {
+        let request = Message::from_vec(query).expect("fixture query");
+        let mut response = Message::new(
+            request.id,
+            MessageType::Response,
+            request.metadata.op_code,
+        );
+        response.metadata.recursion_available = true;
+        for query in request.queries {
+            response.add_query(query);
+        }
+        let mut packet = Vec::new();
+        response
+            .emit(&mut BinEncoder::new(&mut packet))
+            .expect("fixture response");
+        packet
+    }
+
+    struct FixtureSecureDns;
+
+    #[async_trait::async_trait]
+    impl SecureDnsLookup for FixtureSecureDns {
+        async fn resolve(
+            &self,
+            query: &[u8],
+        ) -> std::result::Result<Vec<u8>, nostr_vpn_core::secure_dns::SecureDnsError> {
+            Ok(fixture_authenticated_dns_response(query))
+        }
+    }
+
+    struct ForwardDependentSecureDns {
+        packet_forwarded: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl SecureDnsLookup for ForwardDependentSecureDns {
+        async fn resolve(
+            &self,
+            query: &[u8],
+        ) -> std::result::Result<Vec<u8>, nostr_vpn_core::secure_dns::SecureDnsError> {
+            self.packet_forwarded.notified().await;
+            Ok(fixture_authenticated_dns_response(query))
+        }
     }
 
     fn ipv4_udp_packet(
@@ -523,35 +570,6 @@
 
     #[test]
     fn mobile_public_dns_uses_authenticated_resolver_response() {
-        struct FixtureSecureDns;
-
-        #[async_trait::async_trait]
-        impl SecureDnsLookup for FixtureSecureDns {
-            async fn resolve(
-                &self,
-                query: &[u8],
-            ) -> std::result::Result<Vec<u8>, nostr_vpn_core::secure_dns::SecureDnsError> {
-                use hickory_proto::op::{Message, MessageType};
-                use hickory_proto::serialize::binary::{BinEncodable as _, BinEncoder};
-
-                let request = Message::from_vec(query).expect("fixture query");
-                let mut response = Message::new(
-                    request.id,
-                    MessageType::Response,
-                    request.metadata.op_code,
-                );
-                response.metadata.recursion_available = true;
-                for query in request.queries {
-                    response.add_query(query);
-                }
-                let mut packet = Vec::new();
-                response
-                    .emit(&mut BinEncoder::new(&mut packet))
-                    .expect("fixture response");
-                Ok(packet)
-            }
-        }
-
         let mut app = AppConfig::generated();
         app.ensure_defaults();
         let app = Arc::new(RwLock::new(app));
@@ -587,6 +605,159 @@
             hickory_proto::op::MessageType::Response
         );
         assert_eq!(dns.queries[0].name.to_ascii(), "example.com.");
+    }
+
+    #[test]
+    fn mobile_secure_dns_can_wait_for_packet_forwarded_by_same_dispatcher() {
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("mobile DNS dispatch test runtime");
+        runtime.block_on(async {
+            let keys = Keys::generate();
+            let mobile = MobileTunnelConfig {
+                identity_nsec: keys.secret_key().to_bech32().expect("mobile nsec"),
+                network_id: "secure-dns-dispatch".to_string(),
+                local_address: "10.44.206.222/32".to_string(),
+                listen_port: available_udp_port(),
+                ..empty_config()
+            };
+            let endpoint =
+                bind_local_mobile_endpoint("nostr-vpn:secure-dns-dispatch", &mobile).await;
+            let mesh =
+                new_mobile_mesh(FipsMeshRuntime::with_local_routes(Vec::new(), Vec::new()));
+            let peer_identities = Arc::new(RwLock::new(MobilePeerIdentityMap::default()));
+            let app = Arc::new(RwLock::new(AppConfig::generated()));
+            let dns_server =
+                parse_ipv4(nostr_vpn_core::MESH_MAGIC_DNS_SERVER).expect("local DNS server");
+            let dns_packet = ipv4_udp_packet(
+                Ipv4Addr::new(10, 44, 206, 222),
+                dns_server,
+                53000,
+                53,
+                &dns_query("example.com", 1),
+            );
+            let doh_packet = test_ipv4_packet(
+                Ipv4Addr::new(10, 44, 206, 222),
+                Ipv4Addr::new(1, 1, 1, 1),
+            );
+            let (wg_tx, mut wg_rx) = tokio_mpsc::channel(1);
+            let (inbound_tx, mut inbound_rx) = tokio_mpsc::channel(1);
+            let packet_forwarded = Arc::new(tokio::sync::Notify::new());
+            let mut secure_dns = Some(MobileSecureDnsDispatch::new(ForwardDependentSecureDns {
+                packet_forwarded: Arc::clone(&packet_forwarded),
+            }));
+            let expected_doh_packet = doh_packet.clone();
+            let forwarded_task = tokio::spawn(async move {
+                let batch = tokio::time::timeout(Duration::from_secs(1), wg_rx.recv())
+                    .await
+                    .expect("dispatcher stalled before forwarding resolver traffic")
+                    .expect("WG packet channel closed");
+                assert_eq!(batch, vec![expected_doh_packet]);
+                packet_forwarded.notify_one();
+            });
+
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    dispatch_mobile_outbound_packets(
+                        &endpoint,
+                        &mesh,
+                        &peer_identities,
+                        Some(&wg_tx),
+                        None,
+                        None,
+                        &inbound_tx,
+                        &app,
+                        &mut secure_dns,
+                        Some(dns_server),
+                        None,
+                        vec![dns_packet, doh_packet],
+                    ),
+                )
+                .await
+                .expect("mobile dispatcher deadlocked on secure DNS")
+            );
+            forwarded_task.await.expect("forwarded packet task");
+            let responses = tokio::time::timeout(Duration::from_secs(1), inbound_rx.recv())
+                .await
+                .expect("secure DNS response timed out")
+                .expect("inbound response channel closed");
+            assert_eq!(responses.len(), 1);
+            let dns =
+                hickory_proto::op::Message::from_vec(&responses[0][28..]).expect("DNS response");
+            assert_eq!(dns.id, 0x1234);
+
+            endpoint.shutdown().await.expect("shutdown mobile endpoint");
+        });
+    }
+
+    #[test]
+    fn dropping_mobile_secure_dns_dispatch_aborts_in_flight_resolution() {
+        struct ResolutionGuard(Arc<AtomicBool>);
+
+        impl Drop for ResolutionGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        struct PendingSecureDns {
+            started: tokio_mpsc::UnboundedSender<()>,
+            dropped: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl SecureDnsLookup for PendingSecureDns {
+            async fn resolve(
+                &self,
+                _query: &[u8],
+            ) -> std::result::Result<Vec<u8>, nostr_vpn_core::secure_dns::SecureDnsError> {
+                let _guard = ResolutionGuard(Arc::clone(&self.dropped));
+                let _ = self.started.send(());
+                std::future::pending().await
+            }
+        }
+
+        let runtime = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("mobile DNS lifecycle test runtime");
+        runtime.block_on(async {
+            let (started_tx, mut started_rx) = tokio_mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut secure_dns = MobileSecureDnsDispatch::new(PendingSecureDns {
+                started: started_tx,
+                dropped: Arc::clone(&dropped),
+            });
+            let app = Arc::new(RwLock::new(AppConfig::generated()));
+            let dns_server =
+                parse_ipv4(nostr_vpn_core::MESH_MAGIC_DNS_SERVER).expect("local DNS server");
+            let packet = ipv4_udp_packet(
+                Ipv4Addr::new(10, 44, 206, 222),
+                dns_server,
+                53000,
+                53,
+                &dns_query("example.com", 1),
+            );
+            let (inbound_tx, _inbound_rx) = tokio_mpsc::channel(1);
+            assert!(secure_dns.try_spawn_response(packet, app, dns_server, inbound_tx));
+            tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+                .await
+                .expect("resolver task did not start")
+                .expect("resolver start channel closed");
+
+            drop(secure_dns);
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !dropped.load(Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropping secure DNS dispatch did not abort resolver task");
+        });
     }
 
     #[test]
