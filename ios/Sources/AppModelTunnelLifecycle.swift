@@ -62,28 +62,28 @@ extension AppModel {
     private func reconcileStartupTunnelRoutes(generation: UInt64) async throws -> Bool {
         let status = await vpnController.statusRawValue()
         try requireStartupTunnelReconciliation(generation)
-        guard Self.packetTunnelMayOwnRoutes(statusRawValue: status) else {
-            return true
-        }
+        let needsStart = Self.packetTunnelNeedsStart(statusRawValue: status)
         guard let core else {
             statusMessage = "Native core unavailable"
             return false
         }
         let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
-        guard let desired = PacketTunnelController.routeState(
-            in: providerOptionsConfigJson
-        ) else {
-            statusMessage = "VPN route configuration is unavailable"
-            debugLog("startup route reconciliation rejected invalid desired config")
-            return false
-        }
-        let installed = await vpnController.installedRouteState()
-        try requireStartupTunnelReconciliation(generation)
-        guard installed != desired else {
-            return true
+        if !needsStart {
+            guard let desired = PacketTunnelController.routeState(
+                in: providerOptionsConfigJson
+            ) else {
+                statusMessage = "VPN route configuration is unavailable"
+                debugLog("startup route reconciliation rejected invalid desired config")
+                return false
+            }
+            let installed = await vpnController.installedRouteState()
+            try requireStartupTunnelReconciliation(generation)
+            guard installed != desired else {
+                return true
+            }
         }
 
-        statusMessage = "Updating VPN routes"
+        statusMessage = needsStart ? "Restoring VPN" : "Updating VPN routes"
         try await vpnController.start(
             state: state,
             network: activeNetwork,
@@ -91,7 +91,7 @@ extension AppModel {
             providerOptionsConfigJson: providerOptionsConfigJson
         )
         try requireStartupTunnelReconciliation(generation)
-        debugLog("startup route reconciliation restarted PacketTunnel")
+        debugLog("startup reconciled PacketTunnel status=\(status ?? -1)")
         return true
     }
 

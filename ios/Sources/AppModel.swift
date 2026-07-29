@@ -375,13 +375,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    static func packetTunnelMayOwnRoutes(statusRawValue: Int?) -> Bool {
-        guard let statusRawValue else {
-            return false
-        }
-        return statusRawValue > 1
-    }
-
     func ensureAutoconnectPacketTunnel(reason: String) {
         let canReceiveDeviceApproval = !state.joinRequestQrCodeOrLink.isEmpty
         guard state.autoconnect, activeNetwork != nil || canReceiveDeviceApproval else {

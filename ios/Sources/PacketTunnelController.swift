@@ -98,7 +98,8 @@ final class PacketTunnelController {
         // VPN status badge stays hidden).
         proto.enforceRoutes = true
         if #available(iOS 14.0, *) {
-            proto.includeAllNetworks = Self.hasDefaultRoute(in: providerOptionsConfigJson)
+            proto.includeAllNetworks =
+                Self.routeState(in: providerOptionsConfigJson)?.hasDefaultRoute == true
         }
         // Don't tear the tunnel down when the screen locks — for a
         // utility VPN we want it to keep running.
@@ -122,10 +123,6 @@ final class PacketTunnelController {
         try Task.checkCancellation()
         try manager.connection.startVPNTunnel(options: options)
         debugLog("startVPNTunnel returned status=\(manager.connection.status.rawValue)")
-    }
-
-    private static func hasDefaultRoute(in configJson: String) -> Bool {
-        routeState(in: configJson)?.hasDefaultRoute == true
     }
 
     static func routeState(in configJson: String) -> PacketTunnelRouteState? {
