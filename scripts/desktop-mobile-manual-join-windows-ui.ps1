@@ -230,31 +230,21 @@ function Select-ComboItem {
   )
   $Expand.Expand()
   Start-Sleep -Milliseconds 150
-  $NameCondition = New-Object System.Windows.Automation.PropertyCondition(
+  $Container = $Combo.GetCurrentPattern(
+    [System.Windows.Automation.ItemContainerPattern]::Pattern
+  )
+  $Item = $Container.FindItemByProperty(
+    $null,
     [System.Windows.Automation.AutomationElement]::NameProperty,
     $Name
   )
-  $Items = $Combo.FindAll(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    $NameCondition
-  )
-  $Selected = $false
-  foreach ($Item in $Items) {
-    try {
-      $Pattern = $Item.GetCurrentPattern(
-        [System.Windows.Automation.SelectionItemPattern]::Pattern
-      )
-      $Pattern.Select()
-      $Selected = $true
-      break
-    }
-    catch {
-      continue
-    }
-  }
-  if (!$Selected) {
+  if ($null -eq $Item) {
     throw "Windows UI Automation could not select $Name in $AutomationId"
   }
+  $Pattern = $Item.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  )
+  $Pattern.Select()
   Start-Sleep -Milliseconds 200
   if ((Read-ComboItem $AutomationId) -ne $Name) {
     throw "Windows UI Automation did not retain $Name in $AutomationId"
