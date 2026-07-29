@@ -4,6 +4,11 @@
 set -uo pipefail
 
 remote_dir="${1:-}"
+serialized_dpkg="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ubuntu-vm-serialized-dpkg.sh"
+[[ -x "$serialized_dpkg" ]] || {
+  echo "Ubuntu serialized dpkg helper is unavailable." >&2
+  exit 2
+}
 case "$remote_dir" in
   /tmp/nvpn-linux-vm-release.*) ;;
   *)
@@ -54,7 +59,7 @@ write_phase cleaning || {
   echo "Could not journal Ubuntu exact-package cleanup." >&2
   exit 2
 }
-if ! sudo -n dpkg --purge nostr-vpn >/dev/null; then
+if ! "$serialized_dpkg" purge >/dev/null; then
   echo "dpkg could not serialize and purge the exact nVPN gate package." >&2
   exit 1
 fi

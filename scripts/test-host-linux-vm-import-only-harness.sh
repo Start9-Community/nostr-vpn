@@ -14,6 +14,7 @@ MANUAL_GUEST="$ROOT/linux/scripts/e2e-manual-join-ui.sh"
 RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 DOCKERFILE="$ROOT/Dockerfile.linux-vm-gate"
 CLEANUP="$ROOT/scripts/ubuntu-vm-exact-deb-cleanup.sh"
+SERIALIZED_DPKG="$ROOT/scripts/ubuntu-vm-serialized-dpkg.sh"
 CLEANUP_HARNESS="$ROOT/scripts/test-ubuntu-vm-exact-deb-cleanup-harness.sh"
 RECOVERY="$ROOT/scripts/ubuntu-vm-recover-stale-import.sh"
 RECOVERY_HARNESS="$ROOT/scripts/test-ubuntu-vm-stale-import-recovery-harness.sh"
@@ -49,6 +50,7 @@ for executable in \
   "$SERVICE" \
   "$UNDERLAY" \
   "$CLEANUP" \
+  "$SERIALIZED_DPKG" \
   "$CLEANUP_HARNESS" \
   "$RECOVERY" \
   "$RECOVERY_HARNESS" \
@@ -331,7 +333,8 @@ require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'sha256sum "$remote_dir/desktop_manual_join_e2e_fixture.copy"' \
   'sha256sum "$remote_dir/nostr-vpn.deb.copy"' \
   'sha256sum "$remote_dir/nvpn-x86_64-unknown-linux-musl.copy"' \
-  'sudo -n dpkg --install "$remote_dir/nostr-vpn.deb"' \
+  'ubuntu-vm-serialized-dpkg.sh" \' \
+  'install "$remote_dir/nostr-vpn.deb" >/dev/null' \
   'host_linux_package_content.py' \
   'NVPN_UBUNTU_IMPORTED_APP="/usr/bin/nostr-vpn"' \
   'NVPN_UBUNTU_IMPORTED_CLI="/usr/bin/nvpn"' \
@@ -359,13 +362,20 @@ require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'find "$remote_dir" -xdev -depth -mindepth 1 -delete' \
   'remoteArtifactRemoved=true'
 require_tokens "$CLEANUP" "always-attempt transactional Debian cleanup" \
-  'if ! sudo -n dpkg --purge nostr-vpn' \
+  'if ! "$serialized_dpkg" purge >/dev/null' \
   'cleanup_status=1' \
   'Remove only regular' \
   'sudo -n cp -a -- "$source_path" "$candidate"' \
   'sudo -n cp -a -- "$source_path" "$target_path"' \
   'Pre-gate package-owned paths were not restored byte-for-byte.' \
   'exit "$cleanup_status"'
+require_tokens "$SERIALIZED_DPKG" "bounded exact dpkg serialization" \
+  'deadline=$((SECONDS + 300))' \
+  'LC_ALL=C sudo -n dpkg "${DPKG_ARGS[@]}"' \
+  'dpkg (frontend |database )?lock was locked by' \
+  'timed out waiting for the Ubuntu package-manager lock' \
+  'install "$PACKAGE"' \
+  'DPKG_ARGS=(--purge nostr-vpn)'
 require_tokens "$RECOVERY" "receipt-bound interrupted-gate recovery" \
   'candidate_dirs=(/tmp/nvpn-linux-vm-release.*)' \
   '(( ${#marked_dirs[@]} == 1 ))' \

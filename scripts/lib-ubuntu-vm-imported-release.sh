@@ -703,7 +703,8 @@ finally:
     temporary.unlink(missing_ok=True)
 PY
 write_import_phase installing
-sudo -n dpkg --install "$remote_dir/nostr-vpn.deb" >/dev/null
+"$guest_repo/scripts/ubuntu-vm-serialized-dpkg.sh" \
+  install "$remote_dir/nostr-vpn.deb" >/dev/null
 [[ "$(dpkg-query -W -f='${db:Status-Status}' nostr-vpn)" == "installed" ]]
 [[ "$(sha256sum /usr/bin/nostr-vpn | awk '{ print $1 }')" == "$app_hash" ]]
 [[ "$(sha256sum /usr/bin/nvpn | awk '{ print $1 }')" == "$cli_hash" ]]

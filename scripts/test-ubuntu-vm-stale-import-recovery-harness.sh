@@ -6,9 +6,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RECOVERY="$ROOT/scripts/ubuntu-vm-recover-stale-import.sh"
 CLEANUP="$ROOT/scripts/ubuntu-vm-exact-deb-cleanup.sh"
+SERIALIZED_DPKG="$ROOT/scripts/ubuntu-vm-serialized-dpkg.sh"
 IMPORT_LIB="$ROOT/scripts/lib-ubuntu-vm-imported-release.sh"
 LOCK_HOLDER="$ROOT/scripts/ubuntu-vm-import-lock-holder.sh"
-[[ -x "$RECOVERY" && -x "$CLEANUP" && -f "$IMPORT_LIB" \
+[[ -x "$RECOVERY" && -x "$CLEANUP" && -x "$SERIALIZED_DPKG" && -f "$IMPORT_LIB" \
   && -x "$LOCK_HOLDER" ]] || {
   echo "Ubuntu stale import recovery harness scripts are unavailable." >&2
   exit 1
@@ -23,6 +24,7 @@ docker run --rm \
   --platform linux/amd64 \
   --volume "$RECOVERY:/repo/scripts/ubuntu-vm-recover-stale-import.sh:ro" \
   --volume "$CLEANUP:/repo/scripts/ubuntu-vm-exact-deb-cleanup.sh:ro" \
+  --volume "$SERIALIZED_DPKG:/repo/scripts/ubuntu-vm-serialized-dpkg.sh:ro" \
   --volume "$IMPORT_LIB:/repo/scripts/lib-ubuntu-vm-imported-release.sh:ro" \
   --volume "$LOCK_HOLDER:/repo/scripts/ubuntu-vm-import-lock-holder.sh:ro" \
   ubuntu:24.04 \

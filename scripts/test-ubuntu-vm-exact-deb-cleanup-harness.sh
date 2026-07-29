@@ -6,8 +6,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLEANUP="$ROOT/scripts/ubuntu-vm-exact-deb-cleanup.sh"
-[[ -x "$CLEANUP" ]] || {
-  echo "Ubuntu exact-package cleanup script is not executable." >&2
+SERIALIZED_DPKG="$ROOT/scripts/ubuntu-vm-serialized-dpkg.sh"
+[[ -x "$CLEANUP" && -x "$SERIALIZED_DPKG" ]] || {
+  echo "Ubuntu exact-package cleanup scripts are not executable." >&2
   exit 1
 }
 command -v docker >/dev/null 2>&1 || {
@@ -19,6 +20,7 @@ docker run --rm \
   --interactive \
   --platform linux/amd64 \
   --volume "$CLEANUP:/cleanup.sh:ro" \
+  --volume "$SERIALIZED_DPKG:/ubuntu-vm-serialized-dpkg.sh:ro" \
   ubuntu:24.04 \
   bash -se <<'CONTAINER'
 set -euo pipefail
@@ -89,6 +91,14 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'if [[ "${1:-}" == "--purge" && "${2:-}" == "nostr-vpn" ]]; then' \
+  '  counter=/tmp/dpkg-lock-attempts' \
+  '  attempt=1' \
+  '  [[ ! -f "$counter" ]] || attempt=$(( $(<"$counter") + 1 ))' \
+  '  printf "%s\n" "$attempt" >"$counter"' \
+  '  if [[ "$attempt" == 1 ]]; then' \
+  '    echo "dpkg: error: dpkg frontend lock was locked by another process with pid 1234" >&2' \
+  '    exit 2' \
+  '  fi' \
   '  rm -f /usr/bin/nostr-vpn /var/lib/dpkg/info/nostr-vpn.list' \
   '  exit 0' \
   'fi' \
@@ -96,12 +106,14 @@ printf '%s\n' \
   >/shim/dpkg
 PATH="/shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   bash /cleanup.sh "$remote_dir"
+[[ "$(< /tmp/dpkg-lock-attempts)" == 2 ]]
 grep -Fxq old-pre-gate-app /usr/bin/nostr-vpn
 grep -Fxq old-orphan-info /var/lib/dpkg/info/nostr-vpn.list
 cmp -s \
   "$remote_dir/preexisting-manifest.txt" \
   "$remote_dir/restored-manifest.txt"
 echo UBUNTU_EXACT_DEB_PURGE_FAILURE_RETRY_OK
+echo UBUNTU_EXACT_DEB_LOCK_SERIALIZATION_OK
 
 # A successful purge normally removes package files before the exact cleanup
 # walks the captured package tree. Already-absent paths are therefore success,
