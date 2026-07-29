@@ -365,11 +365,10 @@ impl WindowsManagedDefaultRoutes {
         let mut excluded = excluded_tunnel_interfaces.to_vec();
         excluded.push(self.wg_iface_index);
         validate_windows_underlay(&fresh_underlay, &excluded)?;
-        let repaired = self
-            .repair_current_routes_with(runner)
-            .context("repair tracked WireGuard routes before underlay refresh")?;
         if self.underlay == fresh_underlay && self.bypass_target == fresh_target {
-            return Ok(repaired);
+            return self
+                .repair_current_routes_with(runner)
+                .context("repair tracked WireGuard routes");
         }
 
         let stale_bypass = self.bypass_route_spec();
@@ -381,14 +380,39 @@ impl WindowsManagedDefaultRoutes {
             // A DHCP renewal can replace only the local source address while
             // retaining the interface/gateway tuple. The existing owned route
             // is still the exact desired bypass and must retain its ownership.
+            self.repair_current_routes_with(runner)
+                .context("repair tracked WireGuard routes after address renewal")?;
             self.underlay = fresh_underlay;
             return Ok(true);
         }
 
         // The replacement bypass must be usable before the old bypass is
-        // removed, otherwise the WireGuard transport can be routed into itself.
+        // audited or removed. Cold PowerShell route queries take hundreds of
+        // milliseconds each, so checking a stale bypass first needlessly keeps
+        // WireGuard offline during a physical handoff.
         let fresh_owned = ensure_windows_route(runner, &fresh_bypass)
             .context("install fresh WireGuard endpoint bypass route")?;
+        if self.manage_default {
+            let route = self.default_route_spec();
+            match ensure_tracked_windows_route(runner, &route, self.default_owned) {
+                Ok(true) => self.default_owned = true,
+                Ok(false) => {}
+                Err(error) => {
+                    let rollback = if fresh_owned {
+                        delete_windows_route_with_retry(runner, &fresh_bypass)
+                    } else {
+                        Ok(())
+                    };
+                    if fresh_owned && rollback.is_err() {
+                        self.orphaned_bypass_routes.push(fresh_bypass);
+                    }
+                    return Err(with_windows_route_rollback(
+                        error.context("repair WireGuard default route after underlay refresh"),
+                        rollback,
+                    ));
+                }
+            }
+        }
         if self.bypass_owned
             && let Err(error) = delete_windows_route_with_retry(runner, &stale_bypass)
         {

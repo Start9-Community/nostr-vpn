@@ -141,9 +141,25 @@ fn windows_wg_underlay_refresh_installs_fresh_bypass_before_removing_stale() {
         .iter()
         .position(|event| event == &FakeWindowsRouteEvent::Delete(stale_bypass.clone()))
         .expect("stale bypass delete");
+    let stale_audit_index = runner
+        .events
+        .iter()
+        .position(|event| event == &FakeWindowsRouteEvent::Exists(stale_bypass.clone()))
+        .expect("stale bypass audit");
+    let default_audit_index = runner
+        .events
+        .iter()
+        .position(|event| {
+            event == &FakeWindowsRouteEvent::Exists(WindowsRouteSpec::wireguard_default(77))
+        })
+        .expect("WireGuard default audit");
     assert!(
         add_index < delete_index,
         "fresh physical bypass must exist before stale bypass removal"
+    );
+    assert!(
+        add_index < stale_audit_index && add_index < default_audit_index,
+        "handoff must make the fresh physical bypass usable before auditing old/default routes"
     );
     assert!(runner.routes.contains(&fresh_bypass));
     assert!(!runner.routes.contains(&stale_bypass));
@@ -155,6 +171,38 @@ fn windows_wg_underlay_refresh_installs_fresh_bypass_before_removing_stale() {
 
     guard.revert_with(&mut runner).expect("cleanup");
     assert_eq!(runner.routes, HashSet::from([foreign]));
+}
+
+#[test]
+fn windows_wg_underlay_refresh_repairs_default_after_fresh_bypass() {
+    let endpoint = "203.0.113.8".parse().expect("endpoint");
+    let old_underlay = windows_underlay(11, "192.0.2.1", "192.0.2.44");
+    let fresh_underlay = windows_underlay(22, "198.51.100.1", "198.51.100.77");
+    let fresh_bypass = WindowsRouteSpec::endpoint(endpoint, &fresh_underlay);
+    let default = WindowsRouteSpec::wireguard_default(77);
+    let mut runner = FakeWindowsRouteRunner::default();
+    let mut guard =
+        WindowsManagedDefaultRoutes::apply_with(&mut runner, 77, endpoint, old_underlay, true)
+            .expect("initial routes");
+    runner.routes.remove(&default);
+    runner.events.clear();
+
+    guard
+        .refresh_with(&mut runner, fresh_underlay, &[88])
+        .expect("underlay refresh");
+
+    let fresh_add = runner
+        .events
+        .iter()
+        .position(|event| event == &FakeWindowsRouteEvent::Add(fresh_bypass.clone()))
+        .expect("fresh bypass add");
+    let default_add = runner
+        .events
+        .iter()
+        .position(|event| event == &FakeWindowsRouteEvent::Add(default.clone()))
+        .expect("default route repair");
+    assert!(fresh_add < default_add);
+    assert!(runner.routes.contains(&default));
 }
 
 #[test]
