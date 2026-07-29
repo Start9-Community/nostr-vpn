@@ -72,8 +72,11 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     #[cfg(not(unix))]
     let _join_request_ipc_keepalive = join_request_ipc_tx;
     loop {
-        let background_ready =
-            platform_network_background_maintenance_enabled(&intervals.network_deadline);
+        let control_request_waiting = daemon_control_file_path(&config_path).exists();
+        let background_ready = daemon_state_background_maintenance_enabled(
+            &intervals.network_deadline,
+            control_request_waiting,
+        );
         tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => {
@@ -87,7 +90,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     network_event_pending,
                     network_settle_rechecks,
                     &intervals.network_deadline,
-                ) => {
+                ) && !control_request_waiting => {
                 if platform_network_change.is_none() {
                     platform_network_change_rx = None;
                     continue;
@@ -104,7 +107,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     &mut network_settle_rechecks,
                 );
             }
-            Some(request) = join_request_ipc_rx.recv() => {
+            Some(request) = join_request_ipc_rx.recv(), if !control_request_waiting => {
                 respond_to_join_request(&mut app, request);
             }
             _ = announce_interval.tick(), if background_ready => {
@@ -190,7 +193,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
             network_trigger = next_daemon_network_trigger(
                 &mut intervals.network_deadline,
                 &mut intervals.network,
-            ) => {
+            ), if !control_request_waiting => {
                 let event_driven_sample = daemon_network_trigger_is_event_driven(
                     network_trigger,
                     intervals.runtime_resume_pending,

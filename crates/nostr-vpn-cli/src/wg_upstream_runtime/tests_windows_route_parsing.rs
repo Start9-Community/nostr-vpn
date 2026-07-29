@@ -461,7 +461,11 @@ Idx     Met         MTU          State                Name
                 && include_str!("windows_native_ownership.rs")
                     .contains("$service.PathName -cne $expectedPath")
                 && include_str!("windows_native_ownership.rs")
-                    .contains("windows_native_wireguard_service_is_owned"),
+                    .contains("windows_native_wireguard_service_is_owned")
+                && include_str!("windows_native_ownership.rs")
+                    .contains("windows_powershell_literal(&format!(\"Name='{escaped_service_name}'\"))")
+                && !include_str!("windows_native_ownership.rs")
+                    .contains("-Filter \\\"Name='{escaped_service_name}'\\\""),
             "service cleanup must verify its exact binary path and durable owner token"
         );
         let cleanup_source = include_str!("windows_native_ownership.rs");

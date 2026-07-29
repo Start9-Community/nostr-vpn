@@ -560,6 +560,10 @@ async fn ready_state_work_preserves_join_control_and_absolute_network_deadline()
     let mut control_handled = false;
     let mut background_runs = 0;
 
+    assert!(
+        !daemon_state_background_maintenance_enabled(&event_deadline, true),
+        "a queued daemon control request must suppress competing background work"
+    );
     schedule_platform_network_event_sampling(&mut event_deadline, &mut settle_rechecks_remaining);
     join_tx.send(()).expect("queue join work");
     control_tx.send(()).expect("queue control work");

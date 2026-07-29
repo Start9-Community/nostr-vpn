@@ -1,19 +1,45 @@
 #[cfg(target_os = "windows")]
-fn run_windows_wireguard_command(exe: &Path, args: &[&str]) -> Result<()> {
-    let output = ProcessCommand::new(exe)
-        .args(args)
-        .bounded_output(&format!("{} {}", exe.display(), args.join(" ")))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{} {} failed with {}\nstdout: {}\nstderr: {}",
-            exe.display(),
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+fn stop_and_delete_windows_native_wireguard_service(service_name: &str) -> Result<()> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("connect to the Windows service manager")?;
+    let service = manager
+        .open_service(
+            service_name,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+        )
+        .with_context(|| format!("open owned native WireGuard service {service_name}"))?;
+    let mut status = service
+        .query_status()
+        .with_context(|| format!("query owned native WireGuard service {service_name}"))?;
+    if status.current_state != ServiceState::Stopped {
+        if status.current_state != ServiceState::StopPending {
+            service
+                .stop()
+                .with_context(|| format!("stop owned native WireGuard service {service_name}"))?;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            status = service.query_status().with_context(|| {
+                format!("wait for owned native WireGuard service {service_name} to stop")
+            })?;
+            if status.current_state == ServiceState::Stopped {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "owned native WireGuard service {service_name} did not stop within 5s"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-    Ok(())
+    service
+        .delete()
+        .with_context(|| format!("delete stopped native WireGuard service {service_name}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -22,13 +48,15 @@ fn windows_native_wireguard_service_is_owned(
 ) -> Result<bool> {
     let service_name = format!("WireGuardTunnel${}", cleanup.name);
     let escaped_service_name = service_name.replace('\'', "''");
+    let service_filter =
+        windows_powershell_literal(&format!("Name='{escaped_service_name}'"));
     let expected_binary_path =
         windows_native_wireguard_service_binary_path(&cleanup.wireguard_exe, &cleanup.config_path);
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
          $expectedPath = {}; \
          $service = Get-CimInstance Win32_Service \
-           -Filter \"Name='{escaped_service_name}'\"; \
+           -Filter {service_filter}; \
          if ($null -eq $service) {{ 'absent' }} \
          elseif ($service.PathName -cne $expectedPath) {{ 'foreign' }} \
          elseif ($service.Description -ceq {}) {{ 'owned' }} \
@@ -133,12 +161,12 @@ pub(crate) fn cleanup_windows_native_wireguard_state(
     if cleanup.service_owned {
         match windows_native_wireguard_service_is_owned(cleanup) {
             Ok(false) => cleanup.service_owned = false,
-            Ok(true) => match run_windows_wireguard_command(
-                &cleanup.wireguard_exe,
-                &["/uninstalltunnelservice", &cleanup.name],
-            ) {
+            Ok(true) => match stop_and_delete_windows_native_wireguard_service(&format!(
+                "WireGuardTunnel${}",
+                cleanup.name
+            )) {
                 Ok(()) => cleanup.service_owned = false,
-                Err(error) => failures.push(format!("uninstall owned tunnel service: {error:#}")),
+                Err(error) => failures.push(format!("stop and delete owned tunnel service: {error:#}")),
             },
             Err(error) => failures.push(format!("{error:#}")),
         }

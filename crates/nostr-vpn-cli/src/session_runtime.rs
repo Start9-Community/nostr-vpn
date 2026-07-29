@@ -38,7 +38,6 @@ pub(crate) fn platform_network_background_maintenance_enabled(
     !event_deadline.blocks_background_maintenance()
 }
 
-#[cfg(test)]
 pub(crate) fn daemon_state_background_maintenance_enabled(
     event_deadline: &PlatformNetworkSampleDeadline,
     has_pending_control_request: bool,
