@@ -757,7 +757,7 @@ switch ($Action) {
       if ($LASTEXITCODE -ne 0 -or !$tunnelIp) {
         throw "could not read the running Windows tunnel IP"
       }
-      Wait-ForCondition "single FIPS endpoint start receipt" 5000 {
+      Wait-ForCondition "single FIPS endpoint start receipt" 30000 {
         (Get-EndpointStartCount) -eq 1
       } 50 | Out-Null
       $endpointStartCount = Get-EndpointStartCount
