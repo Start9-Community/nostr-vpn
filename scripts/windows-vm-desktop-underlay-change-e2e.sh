@@ -770,7 +770,10 @@ if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \"\$endpointHost/32\" 
   throw 'WireGuard endpoint bypass remains after cleanup'
 }
 foreach (\$ownedPath in @($(ps_quote "$CANDIDATE_NATIVE_CONFIG_PATH"), $(ps_quote "$CANDIDATE_NATIVE_MARKER_PATH"), $(ps_quote "$CANDIDATE_NATIVE_OWNER_DIR"))) {
-  if (Test-Path -LiteralPath \$ownedPath) {
+  if (
+    ![string]::IsNullOrWhiteSpace(\$ownedPath) -and
+    (Test-Path -LiteralPath \$ownedPath)
+  ) {
     throw ('candidate-owned native WireGuard artifact remains after cleanup: ' + \$ownedPath)
   }
 }
