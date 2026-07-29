@@ -762,18 +762,15 @@ fn configure_and_start_windows_native_wireguard_service(tunnel_name: &str) -> Re
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; Start-Service -Name {}",
-        windows_powershell_literal(&service_name)
-    );
-    let output = ProcessCommand::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    let output = ProcessCommand::new("sc.exe")
+        .args(["start", &service_name])
         .bounded_output(&format!("start native WireGuard service {service_name}"))?;
     if output.status.success() {
         return Ok(());
     }
     Err(anyhow!(
-        "failed to start native WireGuard service {service_name}: {}",
+        "sc.exe start failed for {service_name}: stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout).trim(),
         String::from_utf8_lossy(&output.stderr).trim()
     ))
 }
