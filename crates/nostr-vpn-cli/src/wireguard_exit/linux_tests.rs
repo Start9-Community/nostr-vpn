@@ -1,7 +1,5 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Mutex;
 
@@ -25,6 +23,7 @@ struct FakeNetworkState {
 struct FakeRunner {
     state: FakeNetworkState,
     commands: Vec<(String, Vec<String>)>,
+    stdin_commands: Vec<(String, Vec<String>, Vec<u8>)>,
     table_missing_when_empty: bool,
     table_error: Option<String>,
     fail_route_cache_once: bool,
@@ -33,7 +32,6 @@ struct FakeRunner {
     fail_restore_endpoint: bool,
     fail_after_mutation: Option<usize>,
     mutation_count: usize,
-    secret_paths: Vec<String>,
     link_add_journal_ready: Option<Rc<Cell<bool>>>,
 }
 
@@ -63,6 +61,7 @@ impl FakeRunner {
                 policy_rule_present: true,
             },
             commands: Vec::new(),
+            stdin_commands: Vec::new(),
             table_missing_when_empty: false,
             table_error: None,
             fail_route_cache_once: false,
@@ -71,7 +70,6 @@ impl FakeRunner {
             fail_restore_endpoint: false,
             fail_after_mutation: None,
             mutation_count: 0,
-            secret_paths: Vec::new(),
             link_add_journal_ready: None,
         }
     }
@@ -151,15 +149,7 @@ impl LinuxCommandRunner for FakeRunner {
             return Ok(Self::success(self.state.wireguard_config.clone()));
         }
         if program == "wg" && args.first().is_some_and(|arg| arg == "set") {
-            if let Some(index) = args.iter().position(|arg| arg == "private-key") {
-                self.secret_paths.push(args[index + 1].clone());
-            }
             self.state.wireguard_config = "[Interface]\nPrivateKey = managed\n".to_string();
-            return Ok(self.mutation_result());
-        }
-        if program == "wg" && args.first().is_some_and(|arg| arg == "setconf") {
-            self.secret_paths.push(args[2].clone());
-            self.state.wireguard_config = fs::read_to_string(&args[2])?;
             return Ok(self.mutation_result());
         }
 
@@ -324,6 +314,25 @@ impl LinuxCommandRunner for FakeRunner {
             format!("unhandled fake command: {program} {joined}"),
         ))
     }
+
+    fn output_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &[u8],
+    ) -> Result<LinuxCommandOutput> {
+        self.commands.push((program.to_string(), args.to_vec()));
+        self.stdin_commands
+            .push((program.to_string(), args.to_vec(), stdin.to_vec()));
+        if program == "wg" && args == strings(&["setconf", "nvwg0", "/dev/stdin"]) {
+            self.state.wireguard_config = std::str::from_utf8(stdin)?.to_string();
+            return Ok(self.mutation_result());
+        }
+        Ok(Self::failure(
+            127,
+            format!("unhandled fake stdin command: {program} {}", args.join(" ")),
+        ))
+    }
 }
 
 fn replace_route(routes: &mut Vec<String>, route: String) {
@@ -410,12 +419,6 @@ fn failed_apply_restores_exact_state_and_address_before_via_routes() {
         ),
         "old prefix must be restored before its dependent via route"
     );
-    assert!(
-        runner
-            .secret_paths
-            .iter()
-            .all(|path| !Path::new(path).exists())
-    );
 }
 
 #[test]
@@ -456,13 +459,6 @@ fn failure_after_each_apply_mutation_restores_exact_existing_state() {
         assert_eq!(
             runner.state, initial,
             "state drift after mutation {fail_after}"
-        );
-        assert!(
-            runner
-                .secret_paths
-                .iter()
-                .all(|path| !Path::new(path).exists()),
-            "secret remained after mutation {fail_after}"
         );
     }
 }
@@ -661,6 +657,106 @@ PersistentKeepalive = 55
 }
 
 #[test]
+fn wireguard_apply_and_rollback_stream_exact_configs_over_stdin() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    runner.state.wireguard_config = "\
+[Interface]
+PrivateKey = old-private
+ListenPort = 41194
+
+[Peer]
+PublicKey = old-peer
+PresharedKey = old-preshared
+AllowedIPs = 10.99.0.0/16
+"
+    .to_string();
+    let initial_config = runner.state.wireguard_config.clone();
+    let desired = config();
+    let desired_config = linux_wireguard_kernel_config(&desired);
+    runner.fail_route_cache_once = true;
+
+    apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &desired,
+        "10.44.0.0/16",
+        None,
+        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+    )
+    .expect_err("final apply failure must stream the exact rollback config");
+
+    let setconf_calls = runner
+        .stdin_commands
+        .iter()
+        .filter(|(program, args, _)| {
+            program == "wg" && args == &strings(&["setconf", "nvwg0", "/dev/stdin"])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        setconf_calls.len(),
+        2,
+        "apply and rollback must each use wg setconf /dev/stdin"
+    );
+    assert_eq!(
+        setconf_calls[0].2,
+        desired_config.as_bytes(),
+        "apply must stream the desired config without rewriting it"
+    );
+    assert_eq!(
+        setconf_calls[1].2,
+        initial_config.as_bytes(),
+        "rollback must stream the captured config byte-for-byte"
+    );
+    assert_eq!(runner.state.wireguard_config, initial_config);
+    let setconf_commands = runner
+        .commands
+        .iter()
+        .filter(|(program, args)| {
+            program == "wg" && args.first().is_some_and(|arg| arg == "setconf")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(setconf_commands.len(), 2);
+    for (_, args) in setconf_commands {
+        assert_eq!(
+            args,
+            &strings(&["setconf", "nvwg0", "/dev/stdin"]),
+            "setconf must never receive a config file path"
+        );
+    }
+    for (_, args) in &runner.commands {
+        assert!(
+            args.iter().all(|arg| ![
+                "private-key",
+                "peer-key",
+                "old-private",
+                "old-peer",
+                "old-preshared"
+            ]
+            .iter()
+            .any(|secret| arg.contains(secret))),
+            "WireGuard secrets must never appear in command arguments: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn system_stdin_runner_reaps_early_failure_and_preserves_stderr() {
+    let mut runner = SystemLinuxCommandRunner;
+    let stdin = vec![b'x'; 1024 * 1024];
+    let output = runner
+        .output_with_stdin(
+            "sh",
+            &strings(&["-c", "printf 'setconf rejected' >&2; exit 23"]),
+            &stdin,
+        )
+        .expect("child failure remains a command result even when stdin closes early");
+
+    assert!(!output.success);
+    assert_eq!(output.code, Some(23));
+    assert_eq!(output.stderr, "setconf rejected");
+}
+
+#[test]
 fn absent_policy_table_is_empty_but_other_route_errors_are_fatal() {
     let _guard = lock_tests();
     let missing = LinuxCommandOutput {
@@ -705,13 +801,11 @@ fn absent_policy_table_is_empty_but_other_route_errors_are_fatal() {
 }
 
 #[test]
-fn capture_failure_after_link_creation_removes_link_and_temp_secrets() {
+fn capture_failure_after_link_creation_removes_link() {
     let _guard = lock_tests();
-    let iface = "nvwg0";
     let mut runner = FakeRunner::existing();
     runner.state.link_exists = false;
     runner.fail_showconf = true;
-    let before = temp_secret_paths(iface);
     let error = apply_linux_wireguard_exit_upstream_with(
         &mut runner,
         &config(),
@@ -722,7 +816,6 @@ fn capture_failure_after_link_creation_removes_link_and_temp_secrets() {
     .expect_err("capture failure");
     assert!(error.to_string().contains("Unable to access interface"));
     assert!(!runner.state.link_exists);
-    assert_eq!(temp_secret_paths(iface), before);
 }
 
 #[test]
@@ -822,11 +915,9 @@ fn failed_transaction_retains_exact_rollback_until_retry_succeeds() {
 #[test]
 fn failed_link_creation_never_deletes_an_uncertain_same_name_interface() {
     let _guard = lock_tests();
-    let iface = "nvwg0";
     let mut runner = FakeRunner::existing();
     runner.state.link_exists = false;
     runner.fail_after_mutation = Some(1);
-    let before = temp_secret_paths(iface);
     let error = apply_linux_wireguard_exit_upstream_with(
         &mut runner,
         &config(),
@@ -840,21 +931,4 @@ fn failed_link_creation_never_deletes_an_uncertain_same_name_interface() {
         runner.state.link_exists,
         "a same-name interface observed after a failed add is not proven owned"
     );
-    assert_eq!(temp_secret_paths(iface), before);
-}
-
-fn temp_secret_paths(iface: &str) -> Vec<PathBuf> {
-    let prefix = format!("nvpn-{iface}-");
-    let mut paths = fs::read_dir(std::env::temp_dir())
-        .expect("temp dir")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&prefix))
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths
 }

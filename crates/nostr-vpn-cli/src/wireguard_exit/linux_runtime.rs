@@ -1,8 +1,6 @@
 #[path = "linux_commands.rs"]
 mod commands;
 
-use std::path::Path;
-
 use anyhow::{Context, Result, anyhow};
 use nostr_vpn_core::config::WireGuardExitConfig;
 
@@ -185,8 +183,6 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
     )
     .map_err(apply_failure)?;
     let kernel_config = linux_wireguard_kernel_config(config);
-    let kernel_config_file =
-        write_temp_secret_file(&iface, "setconf", &kernel_config).map_err(apply_failure)?;
 
     let created_interface = !linux_wireguard_link_exists(runner, &iface).map_err(apply_failure)?;
     if created_interface {
@@ -288,7 +284,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         config,
         &iface,
         source_cidr,
-        kernel_config_file.path(),
+        &kernel_config,
         &endpoint_specs,
         previous_runtime,
         &snapshot,
@@ -548,7 +544,7 @@ fn apply_snapshot_mutations(
     config: &WireGuardExitConfig,
     iface: &str,
     source_cidr: &str,
-    kernel_config_file: &Path,
+    kernel_config: &str,
     endpoint_specs: &[crate::LinuxEndpointBypassRoute],
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     snapshot: &ApplySnapshot,
@@ -573,7 +569,7 @@ fn apply_snapshot_mutations(
     }
 
     progress.wireguard_started = true;
-    set_linux_wireguard_config(runner, iface, kernel_config_file)?;
+    set_linux_wireguard_config(runner, iface, kernel_config)?;
 
     progress.link_started = true;
     set_linux_wireguard_link(runner, iface, config.mtu)?;

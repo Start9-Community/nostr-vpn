@@ -168,6 +168,12 @@ sync_and_build_candidates() {
     [[ "$windows_fips_tree" == "$expected_fips_tree" ]] \
       || fail "Windows FIPS tree differs from the local release-gate tree"
   fi
+  run_ps_primary \
+    "& $(ps_quote "$GUEST_REPO\\scripts\\test-desktop-windows-wireguard-ownership.ps1")" \
+    >"$ARTIFACT_DIR/windows-wireguard-ownership-harness.log"
+  grep -Fq 'WINDOWS_NATIVE_WIREGUARD_OWNERSHIP_HARNESS_OK' \
+    "$ARTIFACT_DIR/windows-wireguard-ownership-harness.log" \
+    || fail "Windows native WireGuard ownership regression harness failed"
 
   local windows_build_script
   windows_build_script="\$ErrorActionPreference = 'Stop'

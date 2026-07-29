@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.5 - 2026-07-28
+## 4.1.5 - 2026-07-29
 
 ### Added
 
@@ -29,6 +29,9 @@ All notable changes to this project are documented in this file.
 - Wait for the exact Windows daemon process to become control-ready, then own
   native WireGuard routes and DNS only after a verified handshake while
   preserving crash-cleanup obligations until Direct restoration completes.
+- Stream Linux WireGuard apply and rollback configuration directly to `wg`
+  without filesystem secret files, so exit nodes work under the stock
+  enforced Ubuntu AppArmor policy.
 - Bind macOS WireGuard UDP sockets to the selected physical interface before
   the first handshake, then rebind and prove a fresh handshake across
   Wi-Fi/hotspot changes while the split-default kill switch stays installed.

@@ -181,46 +181,45 @@ function Get-WireGuardAdapter {
   return $matches[0]
 }
 
-function Assert-NativeWireGuardSecretAcl {
-  $path = Join-Path $env:ProgramData `
-    "nostr-vpn\wireguard\$WireGuardInterface.conf"
-  $directory = Split-Path -Parent $path
-  foreach ($candidate in @($directory, $path)) {
-    $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-      throw "native WireGuard secret path is a reparse point: $candidate"
+function Assert-NativeWireGuardSecretPathAcl {
+  param([string]$Path)
+  $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+  if (!$acl.AreAccessRulesProtected) {
+    throw "native WireGuard secret ACL inherits permissions: $Path"
+  }
+  $allowed = @("S-1-5-18", "S-1-5-32-544")
+  $seen = @{}
+  foreach ($rule in $acl.Access) {
+    $sid = $rule.IdentityReference.Translate(
+      [Security.Principal.SecurityIdentifier]
+    ).Value
+    $full = [Security.AccessControl.FileSystemRights]::FullControl
+    if (
+      $allowed -notcontains $sid -or
+      $rule.AccessControlType -ne
+        [Security.AccessControl.AccessControlType]::Allow -or
+      ($rule.FileSystemRights -band $full) -ne $full
+    ) {
+      throw "unexpected native WireGuard ACL entry on ${Path}: $sid"
     }
-    $acl = Get-Acl -LiteralPath $candidate -ErrorAction Stop
-    if (!$acl.AreAccessRulesProtected) {
-      throw "native WireGuard secret ACL inherits permissions: $candidate"
-    }
-    $allowed = @("S-1-5-18", "S-1-5-32-544")
-    $seen = @{}
-    foreach ($rule in $acl.Access) {
-      $sid = $rule.IdentityReference.Translate(
-        [Security.Principal.SecurityIdentifier]
-      ).Value
-      $full = [Security.AccessControl.FileSystemRights]::FullControl
-      if (
-        $allowed -notcontains $sid -or
-        $rule.AccessControlType -ne
-          [Security.AccessControl.AccessControlType]::Allow -or
-        ($rule.FileSystemRights -band $full) -ne $full
-      ) {
-        throw "unexpected native WireGuard ACL entry on ${candidate}: $sid"
-      }
-      $seen[$sid] = $true
-    }
-    foreach ($sid in $allowed) {
-      if (!$seen.ContainsKey($sid)) {
-        throw "missing native WireGuard ACL entry $sid on $candidate"
-      }
+    $seen[$sid] = $true
+  }
+  foreach ($sid in $allowed) {
+    if (!$seen.ContainsKey($sid)) {
+      throw "missing native WireGuard ACL entry $sid on $Path"
     }
   }
-  $owner = Get-Content -Raw -LiteralPath "${path}:nvpn-owner" `
-    -ErrorAction Stop
-  if (!$owner.StartsWith("nvpn-")) {
-    throw "native WireGuard config has no valid durable owner marker"
+}
+
+function Assert-NativeWireGuardSecretAcl {
+  Read-CandidateNativeWireGuardOwnership
+  foreach ($candidate in @(
+    $script:CandidateNativeWireGuardConfigRootPath,
+    $script:CandidateNativeWireGuardOwnerDirectoryPath,
+    $script:CandidateNativeWireGuardConfigPath,
+    $script:CandidateNativeWireGuardOwnerMarkerPath
+  )) {
+    Assert-NativeWireGuardSecretPathAcl $candidate
   }
 }
 

@@ -1,9 +1,5 @@
-use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command as ProcessCommand, Output as ProcessOutput, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 use nostr_vpn_core::config::WireGuardExitConfig;
@@ -28,22 +24,6 @@ pub(super) struct LinuxRouteRestore {
     pub(super) previous_routes: Vec<String>,
 }
 
-pub(super) struct TempSecretFile {
-    path: PathBuf,
-}
-
-impl TempSecretFile {
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempSecretFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct LinuxCommandOutput {
     pub(super) success: bool,
@@ -54,6 +34,13 @@ pub(super) struct LinuxCommandOutput {
 
 pub(super) trait LinuxCommandRunner {
     fn output(&mut self, program: &str, args: &[String]) -> Result<LinuxCommandOutput>;
+
+    fn output_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &[u8],
+    ) -> Result<LinuxCommandOutput>;
 }
 
 pub(super) struct SystemLinuxCommandRunner;
@@ -65,12 +52,46 @@ impl LinuxCommandRunner for SystemLinuxCommandRunner {
             .args(args)
             .output()
             .with_context(|| format!("failed to execute {display}"))?;
-        Ok(LinuxCommandOutput {
-            success: output.status.success(),
-            code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        Ok(linux_command_output(output))
+    }
+
+    fn output_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &[u8],
+    ) -> Result<LinuxCommandOutput> {
+        let display = command_display(program, args);
+        let mut child = ProcessCommand::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute {display}"))?;
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to open stdin for {display}"))?;
+        let write_result = child_stdin.write_all(stdin);
+        drop(child_stdin);
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for {display}"))?;
+        let output = linux_command_output(output);
+        if output.success {
+            write_result.with_context(|| format!("failed to write stdin for {display}"))?;
+        }
+        Ok(output)
+    }
+}
+
+fn linux_command_output(output: ProcessOutput) -> LinuxCommandOutput {
+    LinuxCommandOutput {
+        success: output.status.success(),
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
 }
 
@@ -84,6 +105,19 @@ pub(super) fn command_output_checked(
     args: &[String],
 ) -> Result<String> {
     let output = runner.output(program, args)?;
+    if output.success {
+        return Ok(output.stdout);
+    }
+    Err(command_failed(program, args, &output))
+}
+
+fn command_output_checked_with_stdin(
+    runner: &mut impl LinuxCommandRunner,
+    program: &str,
+    args: &[String],
+    stdin: &[u8],
+) -> Result<String> {
+    let output = runner.output_with_stdin(program, args, stdin)?;
     if output.success {
         return Ok(output.stdout);
     }
@@ -335,13 +369,17 @@ pub(super) fn linux_wireguard_kernel_config(config: &WireGuardExitConfig) -> Str
 pub(super) fn set_linux_wireguard_config(
     runner: &mut impl LinuxCommandRunner,
     iface: &str,
-    kernel_config_file: &Path,
+    kernel_config: &str,
 ) -> Result<()> {
-    run_checked(
+    // Ubuntu confines `wg` to a small set of readable paths. An inherited
+    // pipe works under that policy and avoids persisting key material.
+    command_output_checked_with_stdin(
         runner,
         "wg",
-        &strings(&["setconf", iface, &kernel_config_file.display().to_string()]),
+        &strings(&["setconf", iface, "/dev/stdin"]),
+        kernel_config.as_bytes(),
     )
+    .map(drop)
 }
 
 pub(super) fn set_linux_wireguard_link(
@@ -436,13 +474,8 @@ pub(super) fn restore_linux_wireguard_config(
     iface: &str,
     config: &str,
 ) -> Result<()> {
-    let file = write_temp_secret_file(iface, "rollback", config)?;
-    run_checked(
-        runner,
-        "wg",
-        &strings(&["setconf", iface, &file.path().display().to_string()]),
-    )
-    .with_context(|| format!("failed to restore pre-WireGuard configuration on {iface}"))
+    set_linux_wireguard_config(runner, iface, config)
+        .with_context(|| format!("failed to restore pre-WireGuard configuration on {iface}"))
 }
 
 pub(super) fn restore_linux_address(
@@ -654,43 +687,4 @@ pub(super) fn linux_wireguard_exit_policy_rule_exists(
             && line.contains(source_cidr)
             && line.contains(&table_lookup)
     })
-}
-
-pub(super) fn write_temp_secret_file(
-    iface: &str,
-    suffix: &str,
-    secret: &str,
-) -> Result<TempSecretFile> {
-    let temp_dir = std::env::temp_dir();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    for attempt in 0..128u32 {
-        let path = temp_dir.join(format!(
-            "nvpn-{iface}-{suffix}-{}-{nonce}-{attempt}",
-            std::process::id()
-        ));
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true).mode(0o600);
-        let mut file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to create {}", path.display()));
-            }
-        };
-        let secret_file = TempSecretFile { path };
-        file.write_all(secret.trim().as_bytes())
-            .with_context(|| format!("failed to write {}", secret_file.path.display()))?;
-        file.write_all(b"\n")
-            .with_context(|| format!("failed to write {}", secret_file.path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed to flush {}", secret_file.path.display()))?;
-        fs::set_permissions(&secret_file.path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to restrict {}", secret_file.path.display()))?;
-        return Ok(secret_file);
-    }
-    Err(anyhow!(
-        "failed to allocate unique temp secret file for {iface}"
-    ))
 }

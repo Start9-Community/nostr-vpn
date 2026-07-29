@@ -12,6 +12,7 @@ WINDOWS_HOST_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 WINDOWS_GUEST_ENTRY="$ROOT/scripts/desktop-windows-underlay-change-e2e.ps1"
 WINDOWS_GUEST_LIB="$ROOT/scripts/desktop-windows-underlay-change-e2e.lib.ps1"
 WINDOWS_GUEST_CRASH_LIB="$ROOT/scripts/desktop-windows-underlay-crash-recovery.lib.ps1"
+WINDOWS_OWNERSHIP_HARNESS="$ROOT/scripts/test-desktop-windows-wireguard-ownership.ps1"
 LINUX_HOST_ENTRY="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
 LINUX_HOST_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_GUEST="$ROOT/scripts/desktop-linux-underlay-change-e2e.sh"
@@ -69,7 +70,7 @@ do
 done
 for helper in \
   "$WINDOWS_HOST_LIB" "$WINDOWS_GUEST_LIB" "$WINDOWS_GUEST_CRASH_LIB" \
-  "$LINUX_HOST_LIB"
+  "$LINUX_HOST_LIB" "$WINDOWS_OWNERSHIP_HARNESS"
 do
   [[ -f "$helper" ]] || fail "$(basename "$helper") is missing"
 done
@@ -81,6 +82,19 @@ require_tokens "$WINDOWS_HOST_ENTRY" "helper module" \
 require_tokens "$WINDOWS_GUEST_ENTRY" "helper module" \
   'desktop-windows-underlay-change-e2e.lib.ps1' \
   'desktop-windows-underlay-crash-recovery.lib.ps1'
+require_tokens "$WINDOWS_HOST_ENTRY" "native WireGuard ownership regression harness" \
+  'test-desktop-windows-wireguard-ownership.ps1' \
+  'windows-wireguard-ownership-harness.log'
+require_tokens "$WINDOWS_OWNERSHIP_HARNESS" "fail-closed owner-token fixtures" \
+  'current owner-token layout' \
+  'legacy flat config path' \
+  'wrong owner directory' \
+  'missing config' \
+  'missing owner marker' \
+  'mismatched owner marker' \
+  'multiple journal owners' \
+  'inheriting secret ACL' \
+  'WINDOWS_NATIVE_WIREGUARD_OWNERSHIP_HARNESS_OK'
 require_tokens "$LINUX_HOST_ENTRY" "helper module" \
   'linux-vm-desktop-underlay-change-e2e.lib.sh'
 require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
@@ -288,6 +302,76 @@ require_tokens "$WINDOWS_GUEST" "power-loss startup recovery evidence" \
   'Assert-SingleExactCandidateDaemon' \
   'daemon_process_count = 1' \
   'crash-recovery.receipt.json'
+require_tokens "$WINDOWS_GUEST_LIB" "current native WireGuard secret ownership audit" \
+  'Read-CandidateNativeWireGuardOwnership' \
+  '$script:CandidateNativeWireGuardConfigRootPath' \
+  '$script:CandidateNativeWireGuardOwnerDirectoryPath' \
+  '$script:CandidateNativeWireGuardConfigPath' \
+  '$script:CandidateNativeWireGuardOwnerMarkerPath' \
+  'Assert-NativeWireGuardSecretPathAcl' \
+  'AreAccessRulesProtected' \
+  'S-1-5-18' \
+  'S-1-5-32-544'
+if grep -Fq '"nostr-vpn\wireguard\$WireGuardInterface.conf"' \
+  "$WINDOWS_GUEST_LIB"
+then
+  fail "Windows secret ACL gate still guesses the legacy flat config path"
+fi
+if grep -Fq '"${path}:nvpn-owner"' "$WINDOWS_GUEST_LIB"; then
+  fail "Windows secret ACL gate still guesses the legacy owner ADS"
+fi
+python3 - "$WINDOWS_GUEST_LIB" "$WINDOWS_GUEST_CRASH_LIB" <<'PY'
+import pathlib
+import sys
+
+common = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+crash = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+acl = common[
+    common.index("function Assert-NativeWireGuardSecretAcl {"):
+    common.index("\nfunction Assert-NativeNetworkRestoredBeforeRepair {")
+]
+required_paths = (
+    "$script:CandidateNativeWireGuardConfigRootPath",
+    "$script:CandidateNativeWireGuardOwnerDirectoryPath",
+    "$script:CandidateNativeWireGuardConfigPath",
+    "$script:CandidateNativeWireGuardOwnerMarkerPath",
+)
+if "Read-CandidateNativeWireGuardOwnership" not in acl:
+    raise SystemExit(
+        "Windows live secret ACL audit does not resolve the cleanup journal"
+    )
+for path in required_paths:
+    if path not in acl:
+        raise SystemExit(
+            f"Windows live secret ACL audit omits exact owned path: {path}"
+        )
+resolver = crash[
+    crash.index("function Read-CandidateNativeWireGuardOwnership {"):
+    crash.index(
+        "\nfunction Assert-CandidateNativeWireGuardOwnershipPresent {"
+    )
+]
+for evidence in (
+    "$CleanupJournalPath",
+    "$native.config_path",
+    "$native.owner_token",
+    '"$configPath.nvpn-owner"',
+    "native WireGuard config is not in its exact owner directory",
+    "native WireGuard owner marker does not match the cleanup journal",
+):
+    if evidence not in resolver:
+        raise SystemExit(
+            f"Windows native ownership resolver lost fail-closed evidence: {evidence}"
+        )
+for forbidden in (
+    r"nostr-vpn\wireguard\$WireGuardInterface.conf",
+    "${path}:nvpn-owner",
+):
+    if forbidden in acl:
+        raise SystemExit(
+            f"Windows live secret ACL audit retained a stale path: {forbidden}"
+        )
+PY
 require_tokens "$WINDOWS_HOST" "power-loss receipt enforcement" \
   'wait_for_guest_marker crash-recovery.receipt.json 45' \
   'crash-recovery-receipt.json' \

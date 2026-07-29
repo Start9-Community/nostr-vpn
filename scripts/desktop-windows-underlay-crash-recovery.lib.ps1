@@ -4,6 +4,7 @@
 $script:CandidateNativeWireGuardConfigPath = ""
 $script:CandidateNativeWireGuardOwnerMarkerPath = ""
 $script:CandidateNativeWireGuardOwnerDirectoryPath = ""
+$script:CandidateNativeWireGuardConfigRootPath = ""
 $script:CandidateNativeWireGuardOwnerToken = ""
 
 function Start-CandidateDaemon {
@@ -99,9 +100,21 @@ function Read-CandidateNativeWireGuardOwnership {
     throw "native WireGuard config is not in its exact owner directory"
   }
   $markerPath = "$configPath.nvpn-owner"
-  foreach ($path in @($ownerDirectory, $configPath, $markerPath)) {
+  foreach ($path in @($configRoot, $ownerDirectory)) {
     $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    if (
+      !$item.PSIsContainer -or
+      ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+      throw "native WireGuard ownership traverses a reparse point: $path"
+    }
+  }
+  foreach ($path in @($configPath, $markerPath)) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if (
+      $item.PSIsContainer -or
+      ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
       throw "native WireGuard ownership traverses a reparse point: $path"
     }
   }
@@ -112,6 +125,7 @@ function Read-CandidateNativeWireGuardOwnership {
     throw "native WireGuard owner marker does not match the cleanup journal"
   }
 
+  $script:CandidateNativeWireGuardConfigRootPath = $configRoot
   $script:CandidateNativeWireGuardConfigPath = $configPath
   $script:CandidateNativeWireGuardOwnerMarkerPath = $markerPath
   $script:CandidateNativeWireGuardOwnerDirectoryPath = $ownerDirectory
