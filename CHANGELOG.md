@@ -62,6 +62,9 @@ All notable changes to this project are documented in this file.
   into a superseded connection while real payload traffic continues.
 - Repair Cashu paid-exit close, settlement, and refund recovery across
   historical or retried proofs on platforms where the feature is available.
+- Update the Nostr and Linux property-list parser locks to reject malformed
+  NIP-04 initialization vectors and adversarial XML without panicking or
+  unbounded parser work.
 
 ### Changed
 
