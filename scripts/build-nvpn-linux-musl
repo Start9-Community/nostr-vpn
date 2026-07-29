@@ -154,10 +154,12 @@ fi
 perl -0pi -e 's#exclude = \["linux"\]#exclude = ["linux", ".fips-patch", ".nostr-pubsub-patch", ".cashu-service-patch", "cashu_spilman_channels"]#' \
   "$WORK_DIR/Cargo.toml"
 
+mkdir -p "$TARGET_DIR/$TARGET/release"
+rm -f "$TARGET_DIR/$TARGET/release/nvpn"
 run_builder_docker run --rm -i \
   -u "$(id -u):$(id -g)" \
   -v "$WORK_DIR":/home/rust/src \
-  -v "$TARGET_DIR":/home/rust/src/target \
+  -v "$TARGET_DIR":/home/rust/output \
   -e CARGO_HOME=/home/rust/src/.cargo-docker \
   -e HOME=/home/rust/src \
   -e SOURCE_DATE_EPOCH \
@@ -172,6 +174,12 @@ set -euo pipefail
 
 TARGET=$1
 cd /home/rust/src
+# Rust dependency metadata must remain on the container's native filesystem.
+# Docker Desktop bind mounts can expose a just-renamed rmeta file before its
+# contents are readable by another parallel rustc process. Only copy the
+# completed binary through the host bind mount.
+export CARGO_TARGET_DIR=/tmp/nvpn-target
+OUTPUT_ROOT=/home/rust/output
 
 cargo_config_args=()
 cargo_lock_args=(--locked)
@@ -318,8 +326,11 @@ fi
 cargo "${cargo_config_args[@]}" build "${cargo_lock_args[@]}" \
   -p nvpn --bin nvpn --release --target "$TARGET"
 if [[ ${NVPN_LINUX_MUSL_STRIP:-0} == 1 ]]; then
-  "${TARGET}-strip" "target/$TARGET/release/nvpn"
+  "${TARGET}-strip" "$CARGO_TARGET_DIR/$TARGET/release/nvpn"
 fi
+install -D -m 0755 \
+  "$CARGO_TARGET_DIR/$TARGET/release/nvpn" \
+  "$OUTPUT_ROOT/$TARGET/release/nvpn"
 CONTAINER
 
 BIN="$TARGET_DIR/$TARGET/release/nvpn"

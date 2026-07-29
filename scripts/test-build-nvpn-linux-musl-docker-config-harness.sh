@@ -37,12 +37,16 @@ if [[ ${1:-} == --config ]]; then
 fi
 [[ ${1:-} == run ]] || exit 97
 
-target_mount=""
+output_mount=""
+bound_target=0
 image=""
 previous=""
 for argument in "$@"; do
   if [[ "$previous" == -v && "$argument" == *:/home/rust/src/target ]]; then
-    target_mount="${argument%:/home/rust/src/target}"
+    bound_target=1
+  fi
+  if [[ "$previous" == -v && "$argument" == *:/home/rust/output ]]; then
+    output_mount="${argument%:/home/rust/output}"
   fi
   if [[ "$argument" == messense/rust-musl-cross:* \
     || "$argument" == registry.invalid/* ]]; then
@@ -69,11 +73,18 @@ case "$image" in
     ;;
 esac
 
-[[ -n "$target_mount" ]] || exit 93
-mkdir -p "$target_mount/$NVPN_TEST_TARGET/release"
-printf '#!/bin/sh\nexit 0\n' >"$target_mount/$NVPN_TEST_TARGET/release/nvpn"
-chmod +x "$target_mount/$NVPN_TEST_TARGET/release/nvpn"
-cat >/dev/null
+[[ "$bound_target" == 0 ]] || exit 93
+[[ -n "$output_mount" ]] || exit 94
+cat >"$NVPN_TEST_STATE_DIR/container-script"
+grep -Fq 'export CARGO_TARGET_DIR=/tmp/nvpn-target' \
+  "$NVPN_TEST_STATE_DIR/container-script" || exit 95
+grep -Fq '"$CARGO_TARGET_DIR/$TARGET/release/nvpn"' \
+  "$NVPN_TEST_STATE_DIR/container-script" || exit 96
+grep -Fq '"$OUTPUT_ROOT/$TARGET/release/nvpn"' \
+  "$NVPN_TEST_STATE_DIR/container-script" || exit 97
+mkdir -p "$output_mount/$NVPN_TEST_TARGET/release"
+printf '#!/bin/sh\nexit 0\n' >"$output_mount/$NVPN_TEST_TARGET/release/nvpn"
+chmod +x "$output_mount/$NVPN_TEST_TARGET/release/nvpn"
 SH
 chmod +x "$TMP_ROOT/bin/docker"
 
