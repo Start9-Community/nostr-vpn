@@ -69,6 +69,7 @@ GUEST_BINARY_COPY_TMP=""
 NETWORK_CREATED=0
 NIC_ATTACHED=0
 PEER_INITIALIZED=0
+GUEST_INITIALIZED=0
 PEER_NAMESPACE_ATTEMPTED=0
 TARGET_NPUB=""
 TARGET_TUNNEL_IP=""
@@ -250,7 +251,7 @@ GUEST
   local source_sha target_sha peer_sha
   source_sha="$TARGET_RELEASE_SHA256"
   target_sha="$(run_primary "sha256sum '$GUEST_BINARY' | cut -d ' ' -f1")"
-  peer_sha="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  peer_sha="$(run_hypervisor \
     "sha256sum '$HYPERVISOR_BINARY' | cut -d ' ' -f1")"
   [[ "$source_sha" == "$target_sha" ]] \
     || fail "Linux target differs from the exact release CLI"
@@ -303,7 +304,7 @@ capture_version_receipts() {
   local target_version peer_version expected
   expected="(rev $EXPECTED_FIPS_REV)"
   target_version="$(run_primary "$GUEST_BINARY version --verbose")"
-  peer_version="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  peer_version="$(run_hypervisor \
     "$HYPERVISOR_BINARY version --verbose")"
   grep -Fq "$expected" <<<"$target_version" \
     || fail "Linux target binary does not contain the expected FIPS revision"
@@ -322,7 +323,7 @@ random_mac() {
 
 discover_primary_interface() {
   local row_count rows
-  rows="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  rows="$(run_hypervisor \
     "virsh domiflist '$VM_NAME' | awk '\$2 == \"network\" { print \$1 \"|\" \$3 \"|\" \$5 }'")"
   row_count="$(grep -c . <<<"$rows" || true)"
   [[ "$row_count" == "1" ]] \
@@ -330,11 +331,11 @@ discover_primary_interface() {
   IFS='|' read -r PRIMARY_IFACE PRIMARY_SOURCE PRIMARY_MAC <<<"$rows"
   [[ -n "$PRIMARY_IFACE" && -n "$PRIMARY_SOURCE" && -n "$PRIMARY_MAC" ]]
 
-  PRIMARY_ADDRESS="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  PRIMARY_ADDRESS="$(run_hypervisor \
     "virsh domifaddr '$VM_NAME' --source lease | awk '\$2 == \"$PRIMARY_MAC\" && \$3 == \"ipv4\" { sub(/\\/.*/, \"\", \$4); print \$4; exit }'")"
   [[ -n "$PRIMARY_ADDRESS" ]] \
     || fail "could not resolve the Linux VM primary address from libvirt"
-  HYPERVISOR_UPLINK="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  HYPERVISOR_UPLINK="$(run_hypervisor \
     "ip -4 route get 1.1.1.1 | awk '{ for (i = 1; i <= NF; i++) if (\$i == \"dev\") { print \$(i + 1); exit } }'")"
   [[ -n "$HYPERVISOR_UPLINK" ]] \
     || fail "could not resolve the hypervisor physical uplink"
@@ -342,7 +343,7 @@ discover_primary_interface() {
 
 attach_secondary_network() {
   SECONDARY_MAC="$(random_mac)"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  run_hypervisor bash -s -- \
     "$VM_NAME" "$NETWORK_NAME" "$SECONDARY_GATEWAY" "$SECONDARY_NETMASK" "$SECONDARY_MAC" <<'SH'
 set -euo pipefail
 vm="$1"
@@ -442,6 +443,7 @@ guest_initialize() {
     && -n "$TARGET_PRIMARY_GATEWAY" \
     && -n "$TARGET_PRIMARY_ADDRESS" \
     && -n "$TARGET_WG_PUBLIC_KEY" ]]
+  GUEST_INITIALIZED=1
   run_primary sudo -n cat "$GUEST_STATE_DIR/platform-network-monitor-probe.log" \
     >"$ARTIFACT_DIR/platform-network-monitor-probe.log"
   grep -Fq 'daemon: platform network change event; sampling physical route' \
@@ -509,7 +511,7 @@ start_linux_runner() {
 
 set_primary_link() {
   local state="$1"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  run_hypervisor \
     "date +%s.%N; virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' '$state' >/dev/null"
 }
 
@@ -517,7 +519,7 @@ assert_peer_recovered_from_source() {
   local cut_timestamp="$1"
   local expected_source="$2"
   local label="$3"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  run_hypervisor bash -s -- \
     "$PEER_STATE_DIR" "$cut_timestamp" "$expected_source" \
     "$((RECOVERY_DEADLINE_MS / 1000))" "$label" <<'SH'
 set -euo pipefail
@@ -824,7 +826,7 @@ crash-connect.stderr.log crash-restart-daemon.stderr.log"
 }
 
 capture_peer_state() {
-  ssh "${SSH_LIVENESS_OPTIONS[@]}" "$HYPERVISOR_SSH" \
+  run_hypervisor_bounded 30 \
     "sudo -n tar --ignore-failed-read -C '$PEER_STATE_DIR' -cf - \
       daemon.state.json daemon.stderr.log daemon.stdout.log signed-rosters.json \
       dns.log dnsmasq.log fips-underlay.pcap.txt wireguard-underlay.pcap.txt \
@@ -833,8 +835,11 @@ capture_peer_state() {
 }
 
 capture_remote_state() {
+  local guest_capture_required="$GUEST_INITIALIZED"
+  local peer_capture_required="$PEER_INITIALIZED"
   local guest_capture_succeeded=0
   local peer_capture_succeeded=0
+  local capture_failed=0
   mkdir -p "$ARTIFACT_DIR/guest-state" "$ARTIFACT_DIR/peer-state"
   if [[ -n "$SECONDARY_PROXY" ]] \
     && run_secondary_bounded 8 \
@@ -848,21 +853,38 @@ capture_remote_state() {
     capture_guest_state primary && guest_capture_succeeded=1
   fi
   if [[ "$PEER_INITIALIZED" == "1" ]] \
-    && ssh "${SSH_LIVENESS_OPTIONS[@]}" "$HYPERVISOR_SSH" \
+    && run_hypervisor_bounded 8 \
       "sudo -n test -d '$PEER_STATE_DIR'" >/dev/null 2>&1
   then
     capture_peer_state && peer_capture_succeeded=1
   fi
   find "$ARTIFACT_DIR/guest-state" "$ARTIFACT_DIR/peer-state" \
     -type f \( -iname '*secret*' -o -name 'config.toml' \) -delete
-  [[ "$guest_capture_succeeded" == "1" || "$peer_capture_succeeded" == "1" ]] \
-    || return 0
+  if [[ "$guest_capture_required" == "1" && "$guest_capture_succeeded" != "1" ]]; then
+    capture_failed=1
+  fi
+  if [[ "$peer_capture_required" == "1" && "$peer_capture_succeeded" != "1" ]]; then
+    capture_failed=1
+  fi
+  if [[ "$guest_capture_required" == "0" \
+    && "$peer_capture_required" == "0" \
+    && "$guest_capture_succeeded" == "0" \
+    && "$peer_capture_succeeded" == "0" ]]
+  then
+    return 0
+  fi
   {
+    printf 'guest_capture_required=%s\n' "$guest_capture_required"
     printf 'guest_capture_succeeded=%s\n' "$guest_capture_succeeded"
+    printf 'peer_capture_required=%s\n' "$peer_capture_required"
     printf 'peer_capture_succeeded=%s\n' "$peer_capture_succeeded"
+    printf 'capture_failed=%s\n' "$capture_failed"
   } >"$ARTIFACT_DIR/runtime-evidence-capture.txt"
-  echo "REMOTE_RUNTIME_EVIDENCE_CAPTURED" \
-    >>"$ARTIFACT_DIR/runtime-evidence-capture.txt"
+  if [[ "$capture_failed" == "0" ]]; then
+    echo "REMOTE_RUNTIME_EVIDENCE_CAPTURED" \
+      >>"$ARTIFACT_DIR/runtime-evidence-capture.txt"
+  fi
+  [[ "$capture_failed" == "0" ]]
 }
 
 audit_guest_cleanup() {
@@ -944,7 +966,7 @@ SH
 }
 
 audit_hypervisor_cleanup() {
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  run_hypervisor_bounded 30 bash -s -- \
     "$VM_NAME" "$NETWORK_NAME" "$PRIMARY_IFACE" "$PRIMARY_MAC" \
     "$PEER_TUN_IFACE" "$PEER_STATE_DIR" "$COUNTER_CHAIN" \
     "$PEER_NETNS" "$PEER_HOST_VETH" "$PEER_ENDPOINT_HOST" \
@@ -1024,7 +1046,7 @@ cleanup() {
   set +e
   set +u
   if [[ -n "$PRIMARY_IFACE" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    run_hypervisor_bounded 30 \
       "virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' up" >/dev/null 2>&1 \
       || cleanup_failed=1
   fi
@@ -1053,12 +1075,12 @@ cleanup() {
   desktop_underlay_cleanup_host_peer >/dev/null 2>&1 \
     || cleanup_failed=1
   if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    run_hypervisor_bounded 30 \
       "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \
       >/dev/null 2>&1 || cleanup_failed=1
   fi
   if [[ "$NETWORK_CREATED" == "1" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    run_hypervisor_bounded 30 \
       "virsh net-destroy '$NETWORK_NAME'" >/dev/null 2>&1 || cleanup_failed=1
   fi
   if [[ "$NIC_ATTACHED" == "1" ]]; then

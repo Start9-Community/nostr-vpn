@@ -194,7 +194,8 @@ desktop_underlay_import_host_peer() {
   }
 
   remote_dir="$(
-    ssh -o BatchMode=yes -o ConnectTimeout=10 "$HYPERVISOR_SSH" \
+    ssh -o BatchMode=yes -o ConnectionAttempts=1 -o ConnectTimeout=10 \
+      -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$HYPERVISOR_SSH" \
       mktemp -d /tmp/nvpn-desktop-underlay-peer.XXXXXX
   )" || {
     desktop_underlay_host_peer_error "could not create remote import directory"
@@ -234,7 +235,9 @@ desktop_underlay_import_host_peer() {
       return 1
     }
 
-  if ! ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  if ! ssh -o BatchMode=yes -o ConnectionAttempts=1 -o ConnectTimeout=10 \
+    -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+    "$HYPERVISOR_SSH" bash -s -- \
     "$remote_dir" \
     "$DESKTOP_UNDERLAY_HOST_PEER_SHA256" \
     "$DESKTOP_UNDERLAY_HOST_PEER_SIZE" \
@@ -357,7 +360,14 @@ desktop_underlay_cleanup_host_peer() {
       return 1
       ;;
   esac
-  if ! ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- "$remote_dir" <<'SH'
+  if ! perl -e '
+    my $seconds = shift @ARGV;
+    alarm $seconds;
+    exec @ARGV;
+    die "exec failed: $!\n";
+  ' 30 ssh -o BatchMode=yes -o ConnectionAttempts=1 -o ConnectTimeout=10 \
+    -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+    "$HYPERVISOR_SSH" bash -s -- "$remote_dir" <<'SH'
 set -euo pipefail
 remote_dir="$1"
 case "$remote_dir" in

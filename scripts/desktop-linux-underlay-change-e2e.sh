@@ -415,8 +415,10 @@ observe_recovery() {
     fi
     sleep 0.025
   done
-  [[ "$(<"/sys/class/net/$expected_carrier_iface/carrier")" == "$expected_carrier" ]] \
-    || fail "$label physical carrier did not reach its expected state"
+  if [[ "$(<"/sys/class/net/$expected_carrier_iface/carrier")" != "$expected_carrier" ]]; then
+    dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
+    fail "$label physical carrier did not reach its expected state"
+  fi
 
   local route_deadline="$((SECONDS + 15))"
   while ((SECONDS < route_deadline)); do

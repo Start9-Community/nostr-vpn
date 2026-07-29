@@ -999,6 +999,7 @@ grep -Fq 'capture_remote_state' "$LINUX_HOST" \
   || fail "Linux failure cleanup does not preserve guest and peer evidence"
 require_tokens "$LINUX_HOST_LIB" "bounded guest-runner failure detection" \
   'run_secondary_bounded()' \
+  'run_hypervisor_bounded()' \
   'reap_linux_guest_runner_if_exited()' \
   'ConnectionAttempts=1' \
   'ServerAliveInterval=2' \
@@ -1025,8 +1026,12 @@ PY
 require_tokens "$LINUX_HOST" "fail-closed runtime evidence capture" \
   'capture_guest_state secondary' \
   'capture_guest_state primary' \
+  'guest_capture_required=' \
   'guest_capture_succeeded=1' \
+  'peer_capture_required=' \
   'peer_capture_succeeded=1'
+grep -Fq 'capture_failed=1' "$LINUX_HOST" \
+  || fail "Linux evidence capture does not fail when required runtime evidence is missing"
 if grep -Fq 'captured=1' "$LINUX_HOST"; then
   fail "Linux evidence capture can report success after a failed tar pipeline"
 fi

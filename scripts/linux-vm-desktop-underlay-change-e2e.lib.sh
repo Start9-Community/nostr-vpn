@@ -37,6 +37,31 @@ SSH_LIVENESS_OPTIONS=(
   -o ServerAliveCountMax=2
 )
 
+hypervisor_ssh_command() {
+  LINUX_HYPERVISOR_SSH=(
+    ssh
+    "${SSH_LIVENESS_OPTIONS[@]}"
+    "$HYPERVISOR_SSH"
+  )
+}
+
+run_hypervisor() {
+  hypervisor_ssh_command
+  "${LINUX_HYPERVISOR_SSH[@]}" "$@"
+}
+
+run_hypervisor_bounded() {
+  local timeout_secs="$1"
+  shift
+  hypervisor_ssh_command
+  perl -e '
+    my $seconds = shift @ARGV;
+    alarm $seconds;
+    exec @ARGV;
+    die "exec failed: $!\n";
+  ' "$timeout_secs" "${LINUX_HYPERVISOR_SSH[@]}" "$@"
+}
+
 primary_ssh_command() {
   LINUX_PRIMARY_SSH=(ssh "${SSH_LIVENESS_OPTIONS[@]}")
   if [[ -n "$PRIMARY_PROXY" ]]; then
@@ -202,12 +227,12 @@ peer_command() {
   )
   case "$action" in
     namespace-setup|namespace-cleanup|namespace-audit)
-      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      run_hypervisor_bounded 60 \
         sudo -n env "${peer_env[@]}" "$@" \
         "$DESKTOP_UNDERLAY_HOST_PEER_RUNNER" "$action"
       ;;
     *)
-      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      run_hypervisor_bounded 60 \
         sudo -n ip netns exec "$PEER_NETNS" env "${peer_env[@]}" "$@" \
         "$DESKTOP_UNDERLAY_HOST_PEER_RUNNER" "$action"
       ;;
