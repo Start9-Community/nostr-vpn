@@ -235,7 +235,7 @@ pub struct FullDefaultRoute {
     reverted: bool,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn macos_wg_endpoint_bypass_route(
     endpoint: IpAddr,
     underlay: &crate::MacosRouteSpec,
