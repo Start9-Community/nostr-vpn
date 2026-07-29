@@ -498,7 +498,10 @@ final class AppModel: ObservableObject {
             state: state,
             network: activeNetwork,
             tunnelConfigJson: tunnelConfigJson,
-            providerOptionsConfigJson: providerOptionsConfigJson
+            providerOptionsConfigJson: providerOptionsConfigJson,
+            onActiveTunnelDisconnected: { [weak self] in
+                self?.statusMessage = "Reconnecting VPN"
+            }
         )
         try requirePacketTunnelTransition(generation)
         debugLog("PacketTunnel config sync start returned")

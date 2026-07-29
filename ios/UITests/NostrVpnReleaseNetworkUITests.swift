@@ -98,7 +98,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
         if spec.exerciseLifecycle {
             try driveBackgroundForeground(spec)
-            try driveConfigSyncBackgroundForeground(spec)
+            try driveConfigSyncBackgroundForeground(spec, directSource: directSource)
         }
         if spec.switchToDirect {
             try selectDirectWhileConnected(spec, directSource: directSource)
@@ -509,7 +509,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
     }
 
-    private func driveConfigSyncBackgroundForeground(_ spec: Spec) throws {
+    private func driveConfigSyncBackgroundForeground(
+        _ spec: Spec,
+        directSource: String
+    ) throws {
         openInternetTab()
         let save = scrollToElement("wireguard-save")
         guard save.isEnabled, save.isHittable else {
@@ -517,24 +520,41 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
 
         // Autoconnect is disabled through the shipped Settings toggle in test
-        // setup. Saving the active WireGuard profile must therefore recover
-        // solely from the persisted VPN-on intent if iOS backgrounds the app
-        // while PacketTunnelController is replacing the live configuration.
+        // setup. The Reconnecting phase is emitted by production code only
+        // after the old PacketTunnel has confirmed it is disconnected.
         save.tap()
         let status = element("internet-settings-status")
         let deadline = Date().addingTimeInterval(4)
         while Date() < deadline,
-              !status.label.localizedCaseInsensitiveContains("Updating VPN")
+              !status.label.localizedCaseInsensitiveContains("Reconnecting VPN")
         {
             Thread.sleep(forTimeInterval: 0.02)
         }
-        guard status.label.localizedCaseInsensitiveContains("Updating VPN") else {
-            throw gateError("Live WireGuard save did not start PacketTunnel reconciliation")
+        guard status.label.localizedCaseInsensitiveContains("Reconnecting VPN") else {
+            throw gateError("Live WireGuard replacement did not confirm disconnection")
         }
 
         emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_REQUESTED_MS=\(millisecondsSinceEpoch())")
         XCUIDevice.shared.press(.home)
-        Thread.sleep(forTimeInterval: 1)
+        let backgroundDeadline = Date().addingTimeInterval(4)
+        while Date() < backgroundDeadline,
+              app.state != .runningBackground,
+              app.state != .runningBackgroundSuspended
+        {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        guard app.state == .runningBackground
+                || app.state == .runningBackgroundSuspended
+        else {
+            throw gateError("Release app did not enter the background during config sync")
+        }
+        try waitForSourceIP(
+            spec.sourceIpUrl,
+            expected: directSource,
+            timeout: 15
+        )
+        emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_DIRECT=1")
+
         app.activate()
         guard waitForApplicationState(.runningForeground, timeout: 10),
               waitForVPNState(on: true, timeout: 10)

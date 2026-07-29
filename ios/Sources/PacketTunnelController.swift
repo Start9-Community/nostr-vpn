@@ -62,26 +62,25 @@ final class PacketTunnelController {
         state: AppState,
         network: NetworkState?,
         tunnelConfigJson: String,
-        providerOptionsConfigJson: String
+        providerOptionsConfigJson: String,
+        onActiveTunnelDisconnected: (@MainActor () -> Void)? = nil
     ) async throws {
         try Task.checkCancellation()
         debugLog("PacketTunnelController.start begin")
         let manager = try await loadOrCreateManager()
         try Task.checkCancellation()
         activeManager = manager
-        switch manager.connection.status {
-        case .invalid, .disconnected:
-            break
-        case .disconnecting:
-            let status = try await waitForDisconnected(manager)
-            debugLog("start confirmed prior disconnect status=\(status)")
-        default:
+        if manager.connection.status != .invalid,
+           manager.connection.status != .disconnected
+        {
             debugLog(
                 "stopping active tunnel before preferences update status=\(manager.connection.status.rawValue)"
             )
-            manager.connection.stopVPNTunnel()
-            let status = try await waitForDisconnected(manager)
+            let status = try await stopAndWaitForDisconnected(manager)
             debugLog("start confirmed active tunnel stopped status=\(status)")
+            try Task.checkCancellation()
+            await onActiveTunnelDisconnected?()
+            try Task.checkCancellation()
         }
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
@@ -150,7 +149,15 @@ final class PacketTunnelController {
         }
         try Task.checkCancellation()
         activeManager = manager
-        manager.connection.stopVPNTunnel()
+        return try await stopAndWaitForDisconnected(manager)
+    }
+
+    private func stopAndWaitForDisconnected(
+        _ manager: NETunnelProviderManager
+    ) async throws -> Int {
+        if manager.connection.status != .disconnecting {
+            manager.connection.stopVPNTunnel()
+        }
         return try await waitForDisconnected(manager)
     }
 

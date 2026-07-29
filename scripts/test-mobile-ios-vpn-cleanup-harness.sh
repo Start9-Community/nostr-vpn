@@ -254,18 +254,21 @@ ios_app = open(sys.argv[9], encoding="utf-8").read()
 lifecycle_gate = open(sys.argv[10], encoding="utf-8").read()
 release_gate = open(sys.argv[11], encoding="utf-8").read()
 lifecycle_xctest = open(sys.argv[12], encoding="utf-8").read()
-if "case .disconnecting:" not in controller:
-    raise SystemExit("PacketTunnelController.start does not guard a prior disconnect race")
 if "throw PacketTunnelControllerError.disconnectTimedOut(status)" not in controller:
     raise SystemExit("disconnect timeout does not fail closed")
-start_method = controller.split("func start(", 1)[1].split("private static func hasDefaultRoute", 1)[0]
+start_method = controller.split("func start(", 1)[1].split("static func routeState", 1)[0]
+disconnect_index = start_method.index("try await stopAndWaitForDisconnected(manager)")
+phase_index = start_method.index("await onActiveTunnelDisconnected?()")
 save_index = start_method.index("try await save(manager)")
-if "manager.connection.stopVPNTunnel()" not in start_method[:save_index]:
-    raise SystemExit("PacketTunnelController.start can save preferences while the tunnel is active")
-if "try await waitForDisconnected(manager)" not in start_method[:save_index]:
-    raise SystemExit("PacketTunnelController.start does not confirm disconnect before saving")
-if "case .disconnecting:" in start_method[save_index:]:
-    raise SystemExit("PacketTunnelController.start still reacts to disconnect only after saving")
+if not disconnect_index < phase_index < save_index:
+    raise SystemExit("PacketTunnel replacement phase is not bounded by disconnect and save")
+disconnect_helper = controller.split(
+    "private func stopAndWaitForDisconnected(", 1
+)[1].split("private func waitForDisconnected", 1)[0]
+if "manager.connection.stopVPNTunnel()" not in disconnect_helper:
+    raise SystemExit("PacketTunnel replacement cannot stop the active tunnel")
+if "return try await waitForDisconnected(manager)" not in disconnect_helper:
+    raise SystemExit("PacketTunnel replacement does not confirm disconnect")
 debug_start = automation.split("private func startVpnForDebugProbe()", 1)[1].split(
     "private func fetchDebugProbe", 1
 )[0]
