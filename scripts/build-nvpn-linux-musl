@@ -47,6 +47,20 @@ case "$TARGET" in
 esac
 
 IMAGE=${NVPN_LINUX_MUSL_IMAGE:-$DEFAULT_IMAGE}
+PUBLIC_DOCKER_CONFIG=""
+if [[ "$IMAGE" == "$DEFAULT_IMAGE" ]]; then
+  PUBLIC_DOCKER_CONFIG="$WORK_DIR/.docker-public"
+  mkdir -p "$PUBLIC_DOCKER_CONFIG"
+fi
+
+run_builder_docker() {
+  if [[ -n "$PUBLIC_DOCKER_CONFIG" ]]; then
+    docker --config "$PUBLIC_DOCKER_CONFIG" "$@"
+  else
+    docker "$@"
+  fi
+}
+
 BINDGEN_ENV_NAME="BINDGEN_EXTRA_CLANG_ARGS_$(printf '%s' "$TARGET" | tr '-' '_')"
 LINKER_ENV_NAME="CARGO_TARGET_$(printf '%s' "$TARGET" | tr '[:lower:]-' '[:upper:]_')_LINKER"
 DOCKER_ENV+=(-e "$BINDGEN_ENV_NAME=-I$BINDGEN_INCLUDE")
@@ -140,7 +154,7 @@ fi
 perl -0pi -e 's#exclude = \["linux"\]#exclude = ["linux", ".fips-patch", ".nostr-pubsub-patch", ".cashu-service-patch", "cashu_spilman_channels"]#' \
   "$WORK_DIR/Cargo.toml"
 
-docker run --rm -i \
+run_builder_docker run --rm -i \
   -u "$(id -u):$(id -g)" \
   -v "$WORK_DIR":/home/rust/src \
   -v "$TARGET_DIR":/home/rust/src/target \

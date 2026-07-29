@@ -370,6 +370,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-release-gate-parallel-harness.sh
   ./scripts/test-publish-preflight-harness.sh
   ./scripts/test-local-fips-workspace-harness.sh
+  ./scripts/test-build-nvpn-linux-musl-docker-config-harness.sh
   ./scripts/test-idle-cpu-gate-harness.sh
   ./scripts/test-linux-gui-e2e-lockfile-harness.sh
   ./scripts/test-mobile-physical-device-selection-harness.sh
