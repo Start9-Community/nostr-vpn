@@ -200,27 +200,19 @@ pub(super) fn lowest_metric_default_route(output: &str) -> Option<(String, Strin
         .map(|(_, line, dev)| (line, dev))
 }
 
-pub(super) fn linux_wireguard_exit_endpoint_specs(
+pub(super) fn linux_wireguard_exit_endpoint_spec(
     runner: &mut impl LinuxCommandRunner,
-    config: &WireGuardExitConfig,
+    endpoint: std::net::SocketAddrV4,
     iface: &str,
     previous_default_route: Option<&str>,
-) -> Result<Vec<crate::LinuxEndpointBypassRoute>> {
-    let mut routes = Vec::new();
-    for host in super::super::wireguard_exit_endpoint_ipv4_hosts(&config.endpoint) {
-        let output = command_output_checked(
-            runner,
-            "ip",
-            &strings(&["-4", "route", "get", &host.to_string()]),
-        )?;
-        routes.push(crate::linux_endpoint_bypass_route_from_output(
-            host,
-            &output,
-            iface,
-            previous_default_route,
-        )?);
-    }
-    Ok(routes)
+) -> Result<crate::LinuxEndpointBypassRoute> {
+    let host = *endpoint.ip();
+    let output = command_output_checked(
+        runner,
+        "ip",
+        &strings(&["-4", "route", "get", &host.to_string()]),
+    )?;
+    crate::linux_endpoint_bypass_route_from_output(host, &output, iface, previous_default_route)
 }
 
 pub(super) fn linux_wireguard_link_exists(
@@ -339,7 +331,10 @@ pub(super) fn replace_linux_address(
     )
 }
 
-pub(super) fn linux_wireguard_kernel_config(config: &WireGuardExitConfig) -> String {
+pub(super) fn linux_wireguard_kernel_config(
+    config: &WireGuardExitConfig,
+    endpoint: std::net::SocketAddrV4,
+) -> String {
     let mut lines = vec![
         "[Interface]".to_string(),
         format!("PrivateKey = {}", config.private_key.trim()),
@@ -355,7 +350,7 @@ pub(super) fn linux_wireguard_kernel_config(config: &WireGuardExitConfig) -> Str
     }
     lines.extend([
         format!("AllowedIPs = {}", config.allowed_ips.join(", ")),
-        format!("Endpoint = {}", config.endpoint.trim()),
+        format!("Endpoint = {endpoint}"),
     ]);
     if config.persistent_keepalive_secs > 0 {
         lines.push(format!(

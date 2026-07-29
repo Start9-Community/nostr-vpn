@@ -1,9 +1,9 @@
 #[path = "wireguard_exit/linux_runtime.rs"]
 mod linux_runtime;
 
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, ToSocketAddrs};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use nostr_vpn_core::config::WireGuardExitConfig;
 
 pub(crate) use linux_runtime::{
@@ -83,31 +83,27 @@ pub(crate) fn select_linux_wireguard_underlay_default_route(
         .find_map(|route| validated_linux_wireguard_underlay_default_route(route, wireguard_iface))
 }
 
-pub(super) fn wireguard_exit_endpoint_ipv4_hosts(endpoint: &str) -> Vec<Ipv4Addr> {
-    let Some((host, port)) = crate::split_host_port(endpoint, 51820) else {
-        return Vec::new();
-    };
+pub(super) fn resolve_linux_wireguard_exit_endpoint(endpoint: &str) -> Result<SocketAddrV4> {
+    let (host, port) = crate::split_host_port(endpoint.trim(), 51820)
+        .ok_or_else(|| anyhow!("invalid WireGuard exit endpoint '{endpoint}'"))?;
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
-        return vec![ip];
+        return Ok(SocketAddrV4::new(ip, port));
     }
     if host.parse::<IpAddr>().is_ok() {
-        return Vec::new();
+        return Err(anyhow!(
+            "Linux WireGuard exit endpoint '{endpoint}' must resolve to IPv4"
+        ));
     }
-
-    let mut hosts = (host.as_str(), port)
+    (host.as_str(), port)
         .to_socket_addrs()
-        .map(|addrs| {
-            addrs
-                .filter_map(|addr| match addr.ip() {
-                    IpAddr::V4(ip) => Some(ip),
-                    IpAddr::V6(_) => None,
-                })
-                .collect::<Vec<_>>()
+        .with_context(|| format!("resolve WireGuard exit endpoint '{endpoint}'"))?
+        .find_map(|addr| match addr.ip() {
+            IpAddr::V4(ip) => Some(SocketAddrV4::new(ip, addr.port())),
+            IpAddr::V6(_) => None,
         })
-        .unwrap_or_default();
-    hosts.sort_unstable();
-    hosts.dedup();
-    hosts
+        .ok_or_else(|| {
+            anyhow!("WireGuard exit endpoint '{endpoint}' resolved to no supported IPv4 address")
+        })
 }
 
 fn linux_iface_name_is_safe(iface: &str) -> bool {
@@ -120,18 +116,25 @@ fn linux_iface_name_is_safe(iface: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, SocketAddrV4};
 
     use super::{
-        select_linux_wireguard_underlay_default_route, wireguard_exit_endpoint_ipv4_hosts,
+        resolve_linux_wireguard_exit_endpoint, select_linux_wireguard_underlay_default_route,
     };
 
     #[test]
-    fn endpoint_bypass_hosts_parse_ipv4_endpoint() {
+    fn endpoint_resolver_pins_ipv4_endpoint_and_default_port() {
         assert_eq!(
-            wireguard_exit_endpoint_ipv4_hosts("198.51.100.20:51830"),
-            vec!["198.51.100.20".parse::<Ipv4Addr>().unwrap()]
+            resolve_linux_wireguard_exit_endpoint("198.51.100.20:51830").expect("explicit port"),
+            SocketAddrV4::new("198.51.100.20".parse::<Ipv4Addr>().unwrap(), 51830)
         );
+        assert_eq!(
+            resolve_linux_wireguard_exit_endpoint("198.51.100.20").expect("default port"),
+            SocketAddrV4::new("198.51.100.20".parse::<Ipv4Addr>().unwrap(), 51820)
+        );
+        let ipv6_error = resolve_linux_wireguard_exit_endpoint("[2001:db8::1]:51820")
+            .expect_err("IPv6-only endpoint must fail closed");
+        assert!(format!("{ipv6_error:#}").contains("must resolve to IPv4"));
     }
 
     #[test]

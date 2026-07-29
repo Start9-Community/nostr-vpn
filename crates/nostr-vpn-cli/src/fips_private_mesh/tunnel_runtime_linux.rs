@@ -94,6 +94,19 @@ fn linux_exit_node_runtime_is_inactive(runtime: &crate::LinuxExitNodeRuntime) ->
         && runtime.pending_wireguard_exit_cleanup.is_empty()
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn retain_linux_wireguard_apply_cleanup(
+    runtime: &mut crate::LinuxExitNodeRuntime,
+    previous_runtime: Option<&crate::LinuxWireGuardExitRuntime>,
+    obligation: &crate::LinuxWireGuardExitCleanupObligation,
+) {
+    runtime.wireguard_exit = previous_runtime.cloned();
+    runtime.pending_wireguard_exit_cleanup.clear();
+    runtime
+        .pending_wireguard_exit_cleanup
+        .push(obligation.clone());
+}
+
 impl FipsPrivateTunnelRuntime {
     #[cfg(target_os = "linux")]
     async fn apply_linux_network_state(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
@@ -669,13 +682,18 @@ impl FipsPrivateTunnelRuntime {
     ) -> Result<()> {
         self.cleanup_pending_linux_wireguard_exit_obligations()
             .context("retry incomplete prior WireGuard apply cleanup")?;
-        let mut previous_runtime = self.exit_node_runtime.wireguard_exit.take();
+        let mut previous_runtime = self.exit_node_runtime.wireguard_exit.clone();
         if previous_runtime.as_ref().is_some_and(|runtime| {
             runtime.interface != config.interface.trim()
                 || runtime.managed_address != config.address.trim()
                 || runtime.source_cidr != source_cidr
         }) {
-            let runtime = previous_runtime.take().expect("checked WireGuard runtime");
+            let runtime = self
+                .exit_node_runtime
+                .wireguard_exit
+                .take()
+                .expect("checked WireGuard runtime");
+            previous_runtime = None;
             if let Err(error) = self.cleanup_detached_linux_wireguard_exit_upstream(&runtime) {
                 self.exit_node_runtime.wireguard_exit = Some(runtime);
                 return Err(error);
@@ -695,12 +713,11 @@ impl FipsPrivateTunnelRuntime {
         let apply_result = {
             let mut persist_cleanup_intent =
                 |obligation: &crate::LinuxWireGuardExitCleanupObligation| {
-                    self.exit_node_runtime
-                        .pending_wireguard_exit_cleanup
-                        .clear();
-                    self.exit_node_runtime
-                        .pending_wireguard_exit_cleanup
-                        .push(obligation.clone());
+                    retain_linux_wireguard_apply_cleanup(
+                        &mut self.exit_node_runtime,
+                        previous_runtime.as_ref(),
+                        obligation,
+                    );
                     self.persist_network_cleanup_ownership()
                 };
             crate::apply_linux_wireguard_exit_upstream(
@@ -735,6 +752,7 @@ impl FipsPrivateTunnelRuntime {
                     .pending_wireguard_exit_cleanup
                     .clear();
                 if let Some(runtime) = previous_runtime.take() {
+                    self.exit_node_runtime.wireguard_exit = None;
                     if let Err(cleanup) =
                         self.cleanup_detached_linux_wireguard_exit_upstream(&runtime)
                     {

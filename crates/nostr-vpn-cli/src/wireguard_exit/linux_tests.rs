@@ -1,4 +1,6 @@
 use std::cell::Cell;
+#[cfg(target_os = "linux")]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -291,6 +293,10 @@ impl LinuxCommandRunner for FakeRunner {
                 self.state.mtu = 1380;
                 return Ok(self.mutation_result());
             }
+            "link set dev nvwg0 mtu 1420" => {
+                self.state.mtu = 1420;
+                return Ok(self.mutation_result());
+            }
             "link set up dev nvwg0" => {
                 self.state.up = true;
                 return Ok(self.mutation_result());
@@ -433,6 +439,203 @@ fn command_index(runner: &FakeRunner, needle: &[&str]) -> usize {
         .iter()
         .position(|(_, args)| args == &strings(needle))
         .unwrap_or_else(|| panic!("missing command: {needle:?}"))
+}
+
+#[test]
+fn endpoint_resolution_is_pinned_once_for_kernel_and_bypass_ownership() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let initial = runner.state.clone();
+    let mut desired = config();
+    desired.endpoint = "vpn.example.test:51820".to_string();
+    let resolver_calls = Cell::new(0);
+
+    let runtime = apply_linux_wireguard_exit_upstream_with_journal(
+        &mut runner,
+        &desired,
+        "10.44.0.0/16",
+        None,
+        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+        |_| {
+            let call = resolver_calls.get();
+            resolver_calls.set(call + 1);
+            Ok(if call == 0 {
+                "198.51.100.20:51820".parse().expect("first DNS answer")
+            } else {
+                "203.0.113.20:51820"
+                    .parse()
+                    .expect("alternating DNS answer")
+            })
+        },
+        |_| Ok(()),
+    )
+    .expect("pinned endpoint apply");
+
+    assert_eq!(
+        resolver_calls.get(),
+        1,
+        "endpoint DNS must run exactly once"
+    );
+    assert!(
+        runner
+            .state
+            .wireguard_config
+            .contains("Endpoint = 198.51.100.20:51820")
+    );
+    assert!(!runner.state.wireguard_config.contains("vpn.example.test"));
+    assert!(
+        runner
+            .state
+            .endpoint_routes
+            .contains_key("198.51.100.20/32")
+    );
+    assert!(!runner.state.endpoint_routes.contains_key("203.0.113.20/32"));
+
+    cleanup_linux_wireguard_exit_upstream_with(&mut runner, &runtime).expect("exact cleanup");
+    assert_eq!(runner.state, initial);
+}
+
+#[test]
+fn endpoint_resolution_failure_precedes_every_kernel_mutation() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let initial = runner.state.clone();
+    let mut desired = config();
+    desired.endpoint = "unresolvable.example.test:51820".to_string();
+
+    let error = apply_linux_wireguard_exit_upstream_with_journal(
+        &mut runner,
+        &desired,
+        "10.44.0.0/16",
+        None,
+        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+        |_| Err(anyhow!("synthetic endpoint resolution failure")),
+        |_| Ok(()),
+    )
+    .expect_err("resolver failure");
+
+    assert!(format!("{error:#}").contains("synthetic endpoint resolution failure"));
+    assert!(runner.commands.is_empty());
+    assert!(runner.stdin_commands.is_empty());
+    assert_eq!(runner.mutation_count, 0);
+    assert_eq!(runner.state, initial);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn serialized_reapply_crash_repairs_rollback_before_prior_runtime_cleanup() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    runner
+        .state
+        .table_routes
+        .retain(|route| !route.starts_with("default "));
+    let initial = runner.state.clone();
+    let previous_runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+    )
+    .expect("initial WireGuard apply");
+    let mut durable = crate::LinuxNetworkCleanupState {
+        iface: "nvpn0".to_string(),
+        exit_node_runtime: crate::LinuxExitNodeRuntime {
+            wireguard_exit: Some(previous_runtime.clone()),
+            ..crate::LinuxExitNodeRuntime::default()
+        },
+        ..crate::LinuxNetworkCleanupState::default()
+    };
+    let mut replacement = config();
+    replacement.peer_public_key = "replacement-peer-key".to_string();
+    let mut serialized = None;
+
+    let failure = apply_linux_wireguard_exit_upstream_with_journal(
+        &mut runner,
+        &replacement,
+        "10.44.0.0/16",
+        Some(&previous_runtime),
+        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+        super::super::resolve_linux_wireguard_exit_endpoint,
+        |obligation| {
+            crate::fips_private_mesh::retain_linux_wireguard_apply_cleanup(
+                &mut durable.exit_node_runtime,
+                Some(&previous_runtime),
+                obligation,
+            );
+            serialized = Some(serde_json::to_vec(&durable)?);
+            Err(anyhow!("synthetic process crash after durable write-ahead"))
+        },
+    )
+    .expect_err("simulated crash boundary");
+    assert!(format!("{failure:#}").contains("synthetic process crash"));
+
+    let mut repaired: crate::LinuxNetworkCleanupState = serde_json::from_slice(
+        serialized
+            .as_deref()
+            .expect("write-ahead state was serialized"),
+    )
+    .expect("deserialize process-boundary cleanup state");
+    assert_eq!(
+        repaired
+            .exit_node_runtime
+            .pending_wireguard_exit_cleanup
+            .len(),
+        1
+    );
+    assert!(
+        repaired.exit_node_runtime.wireguard_exit.is_some(),
+        "the prior active runtime must be durable beside the apply rollback"
+    );
+
+    let runtime_cleanup_calls = Cell::new(0);
+    crate::fips_private_mesh::cleanup_linux_wireguard_state_with(
+        &mut repaired.exit_node_runtime,
+        |_| Err(anyhow!("synthetic first rollback failure")),
+        |_| {
+            runtime_cleanup_calls.set(runtime_cleanup_calls.get() + 1);
+            Ok(())
+        },
+    )
+    .expect_err("failed transaction rollback remains pending");
+    assert_eq!(runtime_cleanup_calls.get(), 0);
+    assert!(repaired.exit_node_runtime.wireguard_exit.is_some());
+    assert_eq!(
+        repaired
+            .exit_node_runtime
+            .pending_wireguard_exit_cleanup
+            .len(),
+        1
+    );
+
+    let runner = RefCell::new(runner);
+    crate::fips_private_mesh::cleanup_linux_wireguard_state_with(
+        &mut repaired.exit_node_runtime,
+        |obligation| {
+            cleanup_linux_wireguard_exit_obligation_with(&mut *runner.borrow_mut(), obligation)
+        },
+        |runtime| cleanup_linux_wireguard_exit_upstream_with(&mut *runner.borrow_mut(), runtime),
+    )
+    .expect("retry rolls back the transaction before cleaning the prior runtime");
+    let runner = runner.into_inner();
+
+    assert!(
+        repaired
+            .exit_node_runtime
+            .pending_wireguard_exit_cleanup
+            .is_empty()
+    );
+    assert!(repaired.exit_node_runtime.wireguard_exit.is_none());
+    assert_eq!(runner.state, initial);
+    assert!(
+        !runner
+            .state
+            .main_routes
+            .iter()
+            .any(|route| route == "default dev nvwg0 src 10.77.0.2"),
+        "crash repair must not leave the restored old WireGuard default active"
+    );
 }
 
 #[test]
@@ -1061,7 +1264,11 @@ AllowedIPs = 10.99.0.0/16
     .to_string();
     let initial_config = runner.state.wireguard_config.clone();
     let desired = config();
-    let desired_config = linux_wireguard_kernel_config(&desired);
+    let desired_config = linux_wireguard_kernel_config(
+        &desired,
+        super::super::resolve_linux_wireguard_exit_endpoint(&desired.endpoint)
+            .expect("numeric endpoint"),
+    );
     runner.fail_route_cache_once = true;
 
     apply_linux_wireguard_exit_upstream_with(
@@ -1222,6 +1429,7 @@ fn new_interface_cleanup_intent_precedes_link_creation() {
         "10.44.0.0/16",
         None,
         None,
+        super::super::resolve_linux_wireguard_exit_endpoint,
         |obligation| {
             first_obligation.get_or_insert_with(|| obligation.clone());
             if matches!(

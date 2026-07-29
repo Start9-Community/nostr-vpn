@@ -134,6 +134,7 @@ pub(crate) fn apply_linux_wireguard_exit_upstream(
         source_cidr,
         previous_runtime,
         previous_default_route_hint,
+        super::resolve_linux_wireguard_exit_endpoint,
         persist_cleanup_intent,
     )
 }
@@ -152,6 +153,7 @@ fn apply_linux_wireguard_exit_upstream_with(
         source_cidr,
         previous_runtime,
         previous_default_route_hint,
+        super::resolve_linux_wireguard_exit_endpoint,
         |_| Ok(()),
     )
 }
@@ -162,6 +164,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
     source_cidr: &str,
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     previous_default_route_hint: Option<&str>,
+    mut resolve_endpoint: impl FnMut(&str) -> Result<std::net::SocketAddrV4>,
     mut persist_cleanup_intent: impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
 ) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
     let iface = super::validate_linux_wireguard_exit_config(config).map_err(apply_failure)?;
@@ -172,6 +175,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
             "WireGuard exit runtime identity changed without cleanup"
         )));
     }
+    let resolved_endpoint = resolve_endpoint(&config.endpoint).map_err(apply_failure)?;
 
     let current_default_route = current_linux_default_route(runner).map_err(apply_failure)?;
     let mut previous_default_route = super::select_linux_wireguard_underlay_default_route(
@@ -180,14 +184,16 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         current_default_route.as_deref(),
         &iface,
     );
-    let initial_endpoint_specs = linux_wireguard_exit_endpoint_specs(
-        runner,
-        config,
-        &iface,
-        previous_default_route.as_deref(),
-    )
-    .map_err(apply_failure)?;
-    let kernel_config = linux_wireguard_kernel_config(config);
+    let initial_endpoint_specs = vec![
+        linux_wireguard_exit_endpoint_spec(
+            runner,
+            resolved_endpoint,
+            &iface,
+            previous_default_route.as_deref(),
+        )
+        .map_err(apply_failure)?,
+    ];
+    let kernel_config = linux_wireguard_kernel_config(config, resolved_endpoint);
 
     let created_interface = !linux_wireguard_link_exists(runner, &iface).map_err(apply_failure)?;
     if created_interface {

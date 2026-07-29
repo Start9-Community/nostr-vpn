@@ -338,28 +338,51 @@ fn cleanup_linux_wireguard_inbound_guard(
 
 #[cfg(target_os = "linux")]
 fn cleanup_linux_wireguard_state(iface: &str, state: &mut LinuxExitNodeRuntime) -> Result<()> {
+    cleanup_linux_wireguard_state_with(
+        state,
+        crate::cleanup_linux_wireguard_exit_obligation,
+        |runtime| {
+            let guard = cleanup_linux_wireguard_inbound_guard(iface, runtime);
+            let network = crate::cleanup_linux_wireguard_exit_upstream(runtime);
+            match (guard, network) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(guard), Ok(())) => Err(guard),
+                (Ok(()), Err(network)) => Err(network),
+                (Err(guard), Err(network)) => Err(anyhow!(
+                    "inbound guard cleanup failed ({guard:#}); network cleanup failed ({network:#})"
+                )),
+            }
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn cleanup_linux_wireguard_state_with(
+    state: &mut LinuxExitNodeRuntime,
+    mut cleanup_obligation: impl FnMut(&mut crate::LinuxWireGuardExitCleanupObligation) -> Result<()>,
+    mut cleanup_runtime: impl FnMut(&LinuxWireGuardExitRuntime) -> Result<()>,
+) -> Result<()> {
     let pending = std::mem::take(&mut state.pending_wireguard_exit_cleanup);
     let mut remaining = Vec::new();
     let mut failures = Vec::new();
     for mut obligation in pending {
-        if let Err(error) = crate::cleanup_linux_wireguard_exit_obligation(&mut obligation) {
+        if let Err(error) = cleanup_obligation(&mut obligation) {
             failures.push(format!("retained apply rollback: {error:#}"));
             remaining.push(obligation);
         }
     }
     state.pending_wireguard_exit_cleanup = remaining;
 
+    if !state.pending_wireguard_exit_cleanup.is_empty() {
+        return Err(anyhow!(
+            "Linux WireGuard cleanup incomplete: {}",
+            failures.join("; ")
+        ));
+    }
+
     if let Some(runtime) = state.wireguard_exit.take() {
-        let guard = cleanup_linux_wireguard_inbound_guard(iface, &runtime);
-        let network = crate::cleanup_linux_wireguard_exit_upstream(&runtime);
-        if guard.is_ok() && network.is_ok() {
-        } else {
-            if let Err(error) = guard {
-                failures.push(format!("inbound guard: {error:#}"));
-            }
-            if let Err(error) = network {
-                failures.push(format!("WireGuard network state: {error:#}"));
-            }
+        if let Err(error) = cleanup_runtime(&runtime) {
+            failures.push(format!("WireGuard runtime: {error:#}"));
             state.wireguard_exit = Some(runtime);
         }
     }
