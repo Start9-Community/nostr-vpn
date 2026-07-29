@@ -43,6 +43,11 @@ assert_status 3 "disabled timeout still propagates command status" \
 assert_status 2 "invalid timeout" \
   release_gate_run_with_timeout "invalid command" bananas bash -c 'exit 0'
 
+assert_status 2 "invalid termination grace" \
+  env NVPN_RELEASE_GATE_TIMEOUT_KILL_AFTER_SECS=zero \
+  bash -c 'source "$1"; release_gate_run_with_timeout "invalid grace" 5 bash -c "exit 0"' \
+  _ "$ROOT_DIR/scripts/lib-release-gate-timeout.sh"
+
 assert_status 124 "sleep timeout" \
   release_gate_run_with_timeout "sleep command" 1 bash -c 'sleep 10'
 

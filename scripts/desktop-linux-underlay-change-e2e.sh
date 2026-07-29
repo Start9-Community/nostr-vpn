@@ -357,7 +357,8 @@ wait_initial_ready() {
   while ((SECONDS < deadline)); do
     if assert_active_exit "$primary_iface" "$expected_pid" 1 \
       && (( $(payload_success_count) > 2 )) \
-      && (( $(wireguard_payload_success_count) > 1 )); then
+      && (( $(wireguard_payload_success_count) > 1 )) \
+      && (( $(rebind_count) == 0 )); then
       return 0
     fi
     sleep 0.25
@@ -373,6 +374,24 @@ wait_initial_ready() {
     tail -n 80 "$STATE_DIR/daemon.stderr.log" 2>/dev/null || true
   } >&2
   fail "initial FIPS exit, DNS, HTTPS, and payload did not become ready"
+}
+
+dump_recovery_failure() {
+  local label="$1"
+  local expected_iface="$2"
+  local expected_carrier_iface="$3"
+  {
+    echo "recovery_label=$label"
+    echo "expected_interface=$expected_iface"
+    echo "last_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
+    echo "last_carrier=$(<"/sys/class/net/$expected_carrier_iface/carrier")"
+    echo "last_payload_successes=$(payload_success_count)"
+    echo "last_wireguard_payload_successes=$(wireguard_payload_success_count)"
+    echo "last_rebind_receipts=$(rebind_count)"
+    ip -4 route show
+    status_summary || true
+    tail -n 120 "$STATE_DIR/daemon.stderr.log" 2>/dev/null || true
+  } >&2
 }
 
 observe_recovery() {
@@ -406,8 +425,10 @@ observe_recovery() {
     fi
     sleep 0.025
   done
-  [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$expected_iface" ]] \
-    || fail "$label physical endpoint route did not become usable within 15s"
+  if [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" != "$expected_iface" ]]; then
+    dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
+    fail "$label physical endpoint route did not become usable within 15s"
+  fi
 
   route_usable_at="$(unix_milliseconds)"
   route_usable_monotonic="$(monotonic_milliseconds)"
@@ -418,22 +439,13 @@ observe_recovery() {
     now="$(monotonic_milliseconds)"
     elapsed="$((now - started))"
     if ((elapsed > RECOVERY_DEADLINE_MS)); then
+      dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
       {
-        echo "recovery_label=$label"
-        echo "expected_interface=$expected_iface"
-        echo "last_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
-        echo "last_carrier=$(<"/sys/class/net/$expected_carrier_iface/carrier")"
-        echo "last_payload_successes=$(payload_success_count)"
         echo "payload_successes_before=$probe_before"
-        echo "last_wireguard_payload_successes=$(wireguard_payload_success_count)"
         echo "wireguard_payload_successes_before=$wg_probe_before"
-        echo "last_rebind_receipts=$(rebind_count)"
         echo "rebind_receipts_before=$rebind_before"
         echo "route_usable_unix_milliseconds=$route_usable_at"
         echo "route_usable_monotonic_milliseconds=$route_usable_monotonic"
-        ip -4 route show
-        status_summary || true
-        tail -n 120 "$STATE_DIR/daemon.stderr.log" 2>/dev/null || true
       } >&2
       fail "$label payload/route/FIPS rebind exceeded ${RECOVERY_DEADLINE_MS}ms"
     fi

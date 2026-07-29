@@ -382,7 +382,9 @@ virsh attach-interface \
 SH
   NETWORK_CREATED=1
   NIC_ATTACHED=1
-  SECONDARY_PROXY="ssh -o BatchMode=yes $HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
+  SECONDARY_PROXY="ssh -o BatchMode=yes -o ConnectionAttempts=1 \
+-o ConnectTimeout=10 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+$HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
 }
 
 wait_for_secondary_adapter() {
@@ -579,6 +581,8 @@ guest_receipt() {
 
 run_underlay_switches() {
   local cut receipt
+  peer_command initial-source-audit \
+    >"$ARTIFACT_DIR/initial-source-audit.txt"
   signal_guest arm-secondary
   wait_for_guest_marker armed-secondary 30
   cut="$(set_primary_link down)"
@@ -793,41 +797,72 @@ run_cleanup_fault_regression() {
     ' "$ARTIFACT_DIR/cleanup-fault-receipt.json" >/dev/null
 }
 
+capture_guest_state() {
+  local transport="$1"
+  local remote_command
+  remote_command="sudo -n tar --ignore-failed-read -C '$GUEST_STATE_DIR' -cf - \
+identity.json daemon.state.json daemon.stderr.log daemon.stdout.log \
+payload.log platform-network-monitor-probe.log signed-rosters.json \
+secondary-underlay-ready.json secondary.nm-uuid \
+secondary.receipt.json primary.receipt.json direct.receipt.json \
+crash-repair.receipt.json crash-journal-ownership.json \
+crash-connect.stderr.log crash-restart-daemon.stderr.log"
+  case "$transport" in
+    secondary)
+      run_secondary_bounded 30 "$remote_command" \
+        | tar -C "$ARTIFACT_DIR/guest-state" -xf -
+      ;;
+    primary)
+      primary_ssh_command
+      "${LINUX_PRIMARY_SSH[@]}" "$remote_command" \
+        | tar -C "$ARTIFACT_DIR/guest-state" -xf -
+      ;;
+    *)
+      fail "unsupported guest evidence transport: $transport"
+      ;;
+  esac
+}
+
+capture_peer_state() {
+  ssh "${SSH_LIVENESS_OPTIONS[@]}" "$HYPERVISOR_SSH" \
+    "sudo -n tar --ignore-failed-read -C '$PEER_STATE_DIR' -cf - \
+      daemon.state.json daemon.stderr.log daemon.stdout.log signed-rosters.json \
+      dns.log dnsmasq.log fips-underlay.pcap.txt wireguard-underlay.pcap.txt \
+      peer-payload.log tcpdump.log wg-tcpdump.log" \
+    | tar -C "$ARTIFACT_DIR/peer-state" -xf -
+}
+
 capture_remote_state() {
-  local captured=0
+  local guest_capture_succeeded=0
+  local peer_capture_succeeded=0
   mkdir -p "$ARTIFACT_DIR/guest-state" "$ARTIFACT_DIR/peer-state"
   if [[ -n "$SECONDARY_PROXY" ]] \
+    && run_secondary_bounded 8 \
+      sudo -n test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
+  then
+    capture_guest_state secondary && guest_capture_succeeded=1
+  fi
+  if [[ "$guest_capture_succeeded" == "0" ]] \
     && run_primary sudo -n test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
   then
-    primary_ssh_command
-    "${LINUX_PRIMARY_SSH[@]}" \
-      "sudo -n tar --ignore-failed-read -C '$GUEST_STATE_DIR' -cf - \
-        identity.json daemon.state.json daemon.stderr.log daemon.stdout.log \
-        payload.log platform-network-monitor-probe.log signed-rosters.json \
-        secondary-underlay-ready.json secondary.nm-uuid \
-        secondary.receipt.json primary.receipt.json direct.receipt.json \
-        crash-repair.receipt.json crash-journal-ownership.json \
-        crash-connect.stderr.log crash-restart-daemon.stderr.log" \
-      | tar -C "$ARTIFACT_DIR/guest-state" -xf -
-    captured=1
+    capture_guest_state primary && guest_capture_succeeded=1
   fi
   if [[ "$PEER_INITIALIZED" == "1" ]] \
-    && ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    && ssh "${SSH_LIVENESS_OPTIONS[@]}" "$HYPERVISOR_SSH" \
       "sudo -n test -d '$PEER_STATE_DIR'" >/dev/null 2>&1
   then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "sudo -n tar --ignore-failed-read -C '$PEER_STATE_DIR' -cf - \
-        daemon.state.json daemon.stderr.log daemon.stdout.log signed-rosters.json \
-        dns.log dnsmasq.log fips-underlay.pcap.txt wireguard-underlay.pcap.txt \
-        peer-payload.log tcpdump.log wg-tcpdump.log" \
-      | tar -C "$ARTIFACT_DIR/peer-state" -xf -
-    captured=1
+    capture_peer_state && peer_capture_succeeded=1
   fi
   find "$ARTIFACT_DIR/guest-state" "$ARTIFACT_DIR/peer-state" \
     -type f \( -iname '*secret*' -o -name 'config.toml' \) -delete
-  [[ "$captured" == "1" ]] || return 0
+  [[ "$guest_capture_succeeded" == "1" || "$peer_capture_succeeded" == "1" ]] \
+    || return 0
+  {
+    printf 'guest_capture_succeeded=%s\n' "$guest_capture_succeeded"
+    printf 'peer_capture_succeeded=%s\n' "$peer_capture_succeeded"
+  } >"$ARTIFACT_DIR/runtime-evidence-capture.txt"
   echo "REMOTE_RUNTIME_EVIDENCE_CAPTURED" \
-    >"$ARTIFACT_DIR/runtime-evidence-capture.txt"
+    >>"$ARTIFACT_DIR/runtime-evidence-capture.txt"
 }
 
 audit_guest_cleanup() {

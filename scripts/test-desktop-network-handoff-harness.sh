@@ -997,6 +997,39 @@ grep -Fq "virsh domif-getlink \"\$vm\" \"\$primary_iface\" | awk '{ print \$NF }
   || fail "Linux cleanup audit compares the unparsed virsh link row"
 grep -Fq 'capture_remote_state' "$LINUX_HOST" \
   || fail "Linux failure cleanup does not preserve guest and peer evidence"
+require_tokens "$LINUX_HOST_LIB" "bounded guest-runner failure detection" \
+  'run_secondary_bounded()' \
+  'reap_linux_guest_runner_if_exited()' \
+  'ConnectionAttempts=1' \
+  'ServerAliveInterval=2' \
+  'ServerAliveCountMax=2'
+python3 - "$LINUX_HOST_LIB" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+wait = source[
+    source.index("wait_for_guest_marker() {"):
+    source.index("\nsignal_guest() {")
+]
+first_reap = wait.index("reap_linux_guest_runner_if_exited")
+probe = wait.index("guest_marker_exists")
+second_reap = wait.index("reap_linux_guest_runner_if_exited", first_reap + 1)
+if not first_reap < probe < second_reap:
+    raise SystemExit(
+        "Linux marker wait does not inspect the guest runner before and after its bounded probe"
+    )
+if 'LINUX_RUN_PID=""' not in wait or "runner_status=" not in wait:
+    raise SystemExit("Linux marker wait does not clear/report the completed guest runner")
+PY
+require_tokens "$LINUX_HOST" "fail-closed runtime evidence capture" \
+  'capture_guest_state secondary' \
+  'capture_guest_state primary' \
+  'guest_capture_succeeded=1' \
+  'peer_capture_succeeded=1'
+if grep -Fq 'captured=1' "$LINUX_HOST"; then
+  fail "Linux evidence capture can report success after a failed tar pipeline"
+fi
 if grep -Fq "tar --ignore-failed-read -C '\$GUEST_STATE_DIR' -cf - ." "$LINUX_HOST" \
   || grep -Fq "tar --ignore-failed-read -C '\$PEER_STATE_DIR' -cf - ." "$LINUX_HOST"
 then
@@ -1009,6 +1042,8 @@ if grep -Eq 'Copy-Item.+StateDir|Get-ChildItem.+StateDir' "$WINDOWS_HOST"; then
 fi
 grep -Fq 'last_route=' "$LINUX_GUEST" \
   || fail "Linux recovery failure omits its last route condition"
+grep -Fq 'dump_recovery_failure' "$LINUX_GUEST" \
+  || fail "Linux pre-receipt recovery failure does not surface daemon/network diagnostics"
 if grep -Fq 'physical_default_route_dev' "$LINUX_GUEST"; then
   fail "Linux exit recovery incorrectly requires an absent physical default route"
 fi
@@ -1061,6 +1096,16 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
 done
 grep -Fq 'last_rebind_receipts=' "$LINUX_GUEST" \
   || fail "Linux recovery failure omits its rebind evidence"
+require_tokens "$LINUX_GUEST" "pre-cut stable primary assertion" \
+  '$(rebind_count) == 0' \
+  'initial FIPS exit, DNS, HTTPS, and payload did not become ready'
+require_tokens "$PEER" "pre-cut physical-source audit" \
+  'initial-source-audit)' \
+  'fips-underlay.pcap.txt' \
+  'wireguard-underlay.pcap.txt' \
+  'unexpected secondary-source traffic before the physical cut'
+grep -Fq 'peer_command initial-source-audit' "$LINUX_HOST" \
+  || fail "Linux host does not reject a self-induced underlay switch before the physical cut"
 grep -Fq '172.31.253.1' "$WINDOWS_HOST" \
   || fail "Windows transient network has no isolated subnet"
 grep -Fq '172.31.254.1' "$LINUX_HOST" \

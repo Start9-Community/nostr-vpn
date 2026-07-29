@@ -14,6 +14,7 @@ release_gate_timeout_is_disabled() {
 release_gate_run_with_timeout() {
   local label="$1"
   local timeout_secs="$2"
+  local kill_after_secs="${NVPN_RELEASE_GATE_TIMEOUT_KILL_AFTER_SECS:-5}"
   shift 2
 
   if (($# == 0)); then
@@ -30,6 +31,11 @@ release_gate_run_with_timeout() {
     printf 'release gate timeout failed: %s timeout must be seconds or off, got %s\n' "$label" "$timeout_secs" >&2
     return 2
   fi
+  if [[ ! "$kill_after_secs" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'release gate timeout failed: %s termination grace must be positive seconds, got %s\n' \
+      "$label" "$kill_after_secs" >&2
+    return 2
+  fi
 
   printf 'Running %s with %ss timeout\n' "$label" "$timeout_secs"
 
@@ -43,10 +49,10 @@ release_gate_run_with_timeout() {
 
   local status
   if command -v timeout >/dev/null 2>&1; then
-    timeout --kill-after=5s "$timeout_secs" "$@"
+    timeout --kill-after="${kill_after_secs}s" "$timeout_secs" "$@"
     status=$?
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout --kill-after=5s "$timeout_secs" "$@"
+    gtimeout --kill-after="${kill_after_secs}s" "$timeout_secs" "$@"
     status=$?
   else
     local marker watchdog pid
@@ -70,7 +76,7 @@ release_gate_run_with_timeout() {
         printf '%s timed out after %ss\n' "$label" "$timeout_secs" >&2
         : >"$marker"
         kill "$pid" >/dev/null 2>&1 || true
-        sleep 5
+        sleep "$kill_after_secs"
         kill -9 "$pid" >/dev/null 2>&1 || true
       fi
     ) &

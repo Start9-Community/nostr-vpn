@@ -241,6 +241,25 @@ wireguard_audit() {
   echo "WIREGUARD_RESPONDER_TRAFFIC_OK"
 }
 
+initial_source_audit() {
+  local capture
+  for capture in fips-underlay.pcap.txt wireguard-underlay.pcap.txt; do
+    [[ -s "$STATE_DIR/$capture" ]] || {
+      echo "initial source audit is missing $capture" >&2
+      exit 1
+    }
+    grep -Fq " IP $TARGET_PRIMARY_ADDRESS." "$STATE_DIR/$capture" || {
+      echo "$capture has no primary-source traffic before the physical cut" >&2
+      exit 1
+    }
+    if grep -Fq " IP $TARGET_SECONDARY_ADDRESS." "$STATE_DIR/$capture"; then
+      echo "$capture has unexpected secondary-source traffic before the physical cut" >&2
+      exit 1
+    fi
+  done
+  echo "INITIAL_PRIMARY_SOURCE_AUDIT_OK"
+}
+
 cleanup() {
   stop_pid_file "$STATE_DIR/ping.pid"
   stop_pid_file "$STATE_DIR/tcpdump.pid"
@@ -511,6 +530,10 @@ case "$ACTION" in
     require_root
     wireguard_audit
     ;;
+  initial-source-audit)
+    require_root
+    initial_source_audit
+    ;;
   cleanup)
     require_root
     cleanup
@@ -530,7 +553,7 @@ case "$ACTION" in
     namespace_audit
     ;;
   *)
-    echo "usage: $0 {namespace-setup|initialize|start|listener-audit|services|wait-ready|counters|wireguard-setup|wireguard-audit|cleanup|namespace-cleanup|namespace-audit}" >&2
+    echo "usage: $0 {namespace-setup|initialize|start|listener-audit|services|wait-ready|counters|wireguard-setup|wireguard-audit|initial-source-audit|cleanup|namespace-cleanup|namespace-audit}" >&2
     exit 2
     ;;
 esac

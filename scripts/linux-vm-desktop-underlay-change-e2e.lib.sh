@@ -24,13 +24,21 @@ do
   validate_simple_value "${pair%%:*}" "${pair#*:}"
 done
 
-for command in git ssh jq awk; do
+for command in git ssh jq awk perl; do
   command -v "$command" >/dev/null 2>&1 \
     || fail "required command is missing: $command"
 done
 
+SSH_LIVENESS_OPTIONS=(
+  -o BatchMode=yes
+  -o ConnectionAttempts=1
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=2
+  -o ServerAliveCountMax=2
+)
+
 primary_ssh_command() {
-  LINUX_PRIMARY_SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
+  LINUX_PRIMARY_SSH=(ssh "${SSH_LIVENESS_OPTIONS[@]}")
   if [[ -n "$PRIMARY_PROXY" ]]; then
     LINUX_PRIMARY_SSH+=(-o "ProxyCommand=$PRIMARY_PROXY")
   elif [[ -n "$LINUX_JUMP" ]]; then
@@ -42,8 +50,7 @@ primary_ssh_command() {
 secondary_ssh_command() {
   LINUX_SECONDARY_SSH=(
     ssh
-    -o BatchMode=yes
-    -o ConnectTimeout=10
+    "${SSH_LIVENESS_OPTIONS[@]}"
     -o "ProxyCommand=$SECONDARY_PROXY"
     "$LINUX_SSH"
   )
@@ -57,6 +64,18 @@ run_primary() {
 run_secondary() {
   secondary_ssh_command
   "${LINUX_SECONDARY_SSH[@]}" "$@"
+}
+
+run_secondary_bounded() {
+  local timeout_secs="$1"
+  shift
+  secondary_ssh_command
+  perl -e '
+    my $seconds = shift @ARGV;
+    alarm $seconds;
+    exec @ARGV;
+    die "exec failed: $!\n";
+  ' "$timeout_secs" "${LINUX_SECONDARY_SSH[@]}" "$@"
 }
 
 run_guest_primary() {
@@ -104,26 +123,47 @@ run_guest_secondary() {
 }
 
 guest_marker_exists() {
-  run_secondary sudo -n test -e "$GUEST_STATE_DIR/$1" >/dev/null 2>&1
+  run_secondary_bounded 8 \
+    sudo -n test -e "$GUEST_STATE_DIR/$1" >/dev/null 2>&1
+}
+
+reap_linux_guest_runner_if_exited() {
+  local marker="$1"
+  local runner_status
+  [[ -n "$LINUX_RUN_PID" ]] || return 0
+  kill -0 "$LINUX_RUN_PID" 2>/dev/null && return 0
+  set +e
+  wait "$LINUX_RUN_PID"
+  runner_status=$?
+  set -e
+  LINUX_RUN_PID=""
+  tail -n 160 "$ARTIFACT_DIR/linux-run.log" >&2 || true
+  fail "Linux guest runner exited with status=$runner_status before $marker"
 }
 
 wait_for_guest_marker() {
   local name="$1"
   local timeout_secs="${2:-30}"
   local started="$SECONDS"
+  local runner_status="not-running"
   while ((SECONDS - started < timeout_secs)); do
+    reap_linux_guest_runner_if_exited "$name"
     if guest_marker_exists "$name"; then
       return 0
     fi
-    if [[ -n "$LINUX_RUN_PID" ]] && ! kill -0 "$LINUX_RUN_PID" 2>/dev/null; then
-      wait "$LINUX_RUN_PID" || true
-      tail -n 160 "$ARTIFACT_DIR/linux-run.log" >&2 || true
-      fail "Linux guest runner exited before $name"
-    fi
+    reap_linux_guest_runner_if_exited "$name"
     sleep 0.1
   done
+  if [[ -n "$LINUX_RUN_PID" ]]; then
+    kill "$LINUX_RUN_PID" >/dev/null 2>&1 || true
+    set +e
+    wait "$LINUX_RUN_PID"
+    runner_status=$?
+    set -e
+    LINUX_RUN_PID=""
+  fi
   tail -n 160 "$ARTIFACT_DIR/linux-run.log" >&2 || true
-  fail "timed out waiting for Linux guest marker $name"
+  fail "timed out waiting for Linux guest marker $name; runner_status=$runner_status"
 }
 
 signal_guest() {

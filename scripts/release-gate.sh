@@ -1212,7 +1212,8 @@ run_linux_underlay_network_change_gate() {
       ;;
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
       require_linux_underlay_gate
-      release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
+      NVPN_RELEASE_GATE_TIMEOUT_KILL_AFTER_SECS=90 \
+        release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
         "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
         env NVPN_LINUX_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
         ./scripts/linux-vm-desktop-underlay-change-e2e.sh
@@ -1220,7 +1221,8 @@ run_linux_underlay_network_change_gate() {
       ;;
     auto|AUTO|Auto|"")
       if linux_underlay_gate_reachable; then
-        release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
+        NVPN_RELEASE_GATE_TIMEOUT_KILL_AFTER_SECS=90 \
+          release_gate_run_with_timeout "Linux real underlay network-change and DNS e2e" \
           "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
           env NVPN_LINUX_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
           ./scripts/linux-vm-desktop-underlay-change-e2e.sh
