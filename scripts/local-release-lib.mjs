@@ -830,6 +830,11 @@ export function describeAsset(name) {
   if (/^nvpn-.*-aarch64-unknown-linux-musl\.tar\.gz$/.test(name)) {
     return name.startsWith('nvpn-v') ? 'Linux ARM64 CLI (versioned)' : 'Linux ARM64 CLI'
   }
+  if (/^nvpn-.*-arm-unknown-linux-musleabihf\.tar\.gz$/.test(name)) {
+    return name.startsWith('nvpn-v')
+      ? 'Linux ARMv6/ARMv7 CLI (versioned)'
+      : 'Linux ARMv6/ARMv7 CLI'
+  }
   if (/^nvpn-.*-x86_64-pc-windows-msvc\.zip$/.test(name)) {
     return 'Windows x64 CLI'
   }
@@ -940,6 +945,10 @@ function pushDownloadSections(lines, assetNames, assetBaseUrl = '') {
     /^nvpn-aarch64-unknown-linux-musl\.tar\.gz$/,
     /^nvpn-v.*-aarch64-unknown-linux-musl\.tar\.gz$/,
   ], [/^nvpn(?:-v.*)?-aarch64-unknown-linux-musl\.tar\.gz$/])
+  addCliAsset('Linux ARMv6/ARMv7 CLI', [
+    /^nvpn-arm-unknown-linux-musleabihf\.tar\.gz$/,
+    /^nvpn-v.*-arm-unknown-linux-musleabihf\.tar\.gz$/,
+  ], [/^nvpn(?:-v.*)?-arm-unknown-linux-musleabihf\.tar\.gz$/])
   addCliAsset('Windows x64 CLI', [/^nvpn-v.*-x86_64-pc-windows-msvc\.zip$/])
   addCliAsset('Windows ARM64 CLI', [/^nvpn-v.*-aarch64-pc-windows-msvc\.zip$/])
 

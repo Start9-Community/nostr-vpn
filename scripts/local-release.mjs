@@ -94,6 +94,7 @@ const versionlessCliAssets = new Map([
   ['nvpn-aarch64-apple-darwin.tar.gz', 'nvpn-{tag}-aarch64-apple-darwin.tar.gz'],
   ['nvpn-x86_64-unknown-linux-musl.tar.gz', 'nvpn-{tag}-x86_64-unknown-linux-musl.tar.gz'],
   ['nvpn-aarch64-unknown-linux-musl.tar.gz', 'nvpn-{tag}-aarch64-unknown-linux-musl.tar.gz'],
+  ['nvpn-arm-unknown-linux-musleabihf.tar.gz', 'nvpn-{tag}-arm-unknown-linux-musleabihf.tar.gz'],
 ])
 
 class SkipStepError extends Error {}
@@ -909,6 +910,145 @@ $ErrorActionPreference = 'Stop'
   }
 }
 
+function exactLinuxArmv6PublicationArtifact({
+  artifactPathReceipt,
+  testedReceiptPath,
+  candidateCommit,
+  candidateTree,
+  linuxGateReceipt,
+}) {
+  if (!existsSync(artifactPathReceipt)) {
+    throw new Error(
+      `Linux ARMv6 exact artifact path receipt is missing: ${artifactPathReceipt}`,
+    )
+  }
+  const pathLines = readFileSync(artifactPathReceipt, 'utf8')
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0)
+  if (pathLines.length !== 1) {
+    throw new Error(
+      'Linux ARMv6 exact artifact path receipt must contain one path.',
+    )
+  }
+  const artifactDir = pathLines[0]
+  if (
+    resolve(artifactDir) !== artifactDir
+    || !existsSync(artifactDir)
+    || lstatSync(artifactDir).isSymbolicLink()
+    || !statSync(artifactDir).isDirectory()
+  ) {
+    throw new Error(
+      'Linux ARMv6 exact artifact path receipt points to an invalid directory.',
+    )
+  }
+  if (
+    sha256FileSync(join(artifactDir, 'receipt.json'))
+    !== sha256FileSync(testedReceiptPath)
+  ) {
+    throw new Error(
+      'Linux ARMv6 cached receipt differs from the exact release-gate receipt.',
+    )
+  }
+  const receipt = readRequiredJson(
+    testedReceiptPath,
+    'Linux ARMv6 exact-artifact gate receipt',
+  )
+  requireReceiptSource(receipt, {
+    commit: candidateCommit,
+    tree: candidateTree,
+    label: 'Linux ARMv6 exact-artifact gate receipt',
+  })
+  const expectedMembers = [
+    'nvpn/README.txt',
+    'nvpn/install.sh',
+    'nvpn/nvpn',
+  ]
+  if (
+    receipt.schema !== 1
+    || receipt.artifactType !== 'sealed Linux ARMv6 static-musl CLI'
+    || receipt.appVersion !== linuxGateReceipt.appVersion
+    || receipt.fipsGitSha !== linuxGateReceipt.fipsGitSha
+    || receipt.fipsGitTree !== linuxGateReceipt.fipsGitTree
+    || receipt.fipsVersion !== linuxGateReceipt.fipsVersion
+    || receipt.target !== 'arm-unknown-linux-musleabihf'
+    || receipt.fleetArch !== 'armv6'
+    || receipt.builderImage !== 'messense/rust-musl-cross:arm-musleabihf'
+    || !/^sha256:[0-9a-f]{64}$/.test(receipt.builderImageId ?? '')
+    || receipt.archive?.file
+      !== 'nvpn-arm-unknown-linux-musleabihf.tar.gz'
+    || JSON.stringify(receipt.archive?.members)
+      !== JSON.stringify(expectedMembers)
+    || receipt.binary?.member !== 'nvpn/nvpn'
+    || !/^[0-9a-f]{64}$/.test(receipt.archive?.sha256 ?? '')
+    || !Number.isSafeInteger(receipt.archive?.size)
+    || receipt.archive.size <= 0
+    || !/^[0-9a-f]{64}$/.test(receipt.binary?.sha256 ?? '')
+    || !Number.isSafeInteger(receipt.binary?.size)
+    || receipt.binary.size <= 0
+    || receipt.smoke?.realChecks !== true
+    || receipt.smoke?.mocked !== false
+    || receipt.smoke?.installPerformed !== false
+    || receipt.smoke?.networkMutated !== false
+    || receipt.smoke?.hostArchitecture !== 'armv6l'
+    || receipt.smoke?.remoteBinarySha256 !== receipt.binary.sha256
+    || receipt.smoke?.version?.version !== linuxGateReceipt.appVersion
+    || receipt.smoke?.version?.fips_core_version
+      !== `${linuxGateReceipt.fipsVersion} (rev ${linuxGateReceipt.fipsGitSha.slice(0, 10)})`
+    || typeof receipt.smoke?.verboseVersion !== 'string'
+    || !receipt.smoke.verboseVersion.includes(
+      `fips_core_version: ${linuxGateReceipt.fipsVersion} (rev ${linuxGateReceipt.fipsGitSha.slice(0, 10)})`,
+    )
+    || receipt.smoke?.cleaned !== true
+  ) {
+    throw new Error('Linux ARMv6 release-gate receipt is incomplete.')
+  }
+  const archivePath = join(artifactDir, receipt.archive.file)
+  if (
+    sha256FileSync(archivePath) !== receipt.archive.sha256
+    || statSync(archivePath).size !== receipt.archive.size
+  ) {
+    throw new Error(
+      'Linux ARMv6 sealed archive changed after its real Zero gate.',
+    )
+  }
+  const sourceDateEpoch = run(
+    'git',
+    ['log', '-1', '--format=%ct', candidateCommit],
+    { capture: true },
+  )
+  run('python3', [
+    join(repoRoot, 'scripts', 'linux_armv6_release_artifact.py'),
+    'verify',
+    '--directory',
+    artifactDir,
+    '--app-sha',
+    candidateCommit,
+    '--app-tree',
+    candidateTree,
+    '--app-version',
+    linuxGateReceipt.appVersion,
+    '--fips-sha',
+    linuxGateReceipt.fipsGitSha,
+    '--fips-tree',
+    linuxGateReceipt.fipsGitTree,
+    '--fips-version',
+    linuxGateReceipt.fipsVersion,
+    '--builder-image',
+    receipt.builderImage,
+    '--builder-image-id',
+    receipt.builderImageId,
+    '--epoch',
+    sourceDateEpoch,
+    '--require-smoke',
+  ])
+  return {
+    archivePath,
+    archiveSha256: receipt.archive.sha256,
+    archiveSize: receipt.archive.size,
+    binarySha256: receipt.binary.sha256,
+  }
+}
+
 function buildLinuxArtifacts({
   env,
   tag,
@@ -918,7 +1058,9 @@ function buildLinuxArtifacts({
   candidateTree,
   testedReceiptPath,
   testedPackageInstallReceiptPath,
+  armv6TestedReceiptPath,
   gatedBundlePathReceipt,
+  armv6ArtifactPathReceipt,
 }) {
   const platform = env.NVPN_LINUX_DOCKER_PLATFORM || 'linux/amd64'
   const { linuxArchSuffix, muslTriple } = linuxReleaseTargetsForDockerPlatform(platform)
@@ -935,6 +1077,7 @@ function buildLinuxArtifacts({
   let packageInstallReceipt = null
   let bundleReceiptPath = ''
   let bundleReceiptSha256 = ''
+  let armv6Artifact = null
   if (!dryRun) {
     if (!existsSync(gatedBundlePathReceipt)) {
       throw new Error(
@@ -997,10 +1140,18 @@ function buildLinuxArtifacts({
         'Linux Debian package install receipt differs from the exact release candidate.',
       )
     }
+
+    armv6Artifact = exactLinuxArmv6PublicationArtifact({
+      artifactPathReceipt: armv6ArtifactPathReceipt,
+      testedReceiptPath: armv6TestedReceiptPath,
+      candidateCommit,
+      candidateTree,
+      linuxGateReceipt: gateReceipt,
+    })
   }
 
   if (dryRun) {
-    builtLines.push('Reused the exact gate-tested Linux x64 Debian package and static-musl CLI archive.')
+    builtLines.push('Reused the exact gate-tested Linux x64 and ARMv6 release artifacts.')
     return {}
   }
 
@@ -1009,6 +1160,16 @@ function buildLinuxArtifacts({
     join(distDir, `nvpn-${muslTriple}.tar.gz`),
     join(distDir, `nvpn-${tag}-${muslTriple}.tar.gz`),
   ]
+  const armv6CliAssets = [
+    join(distDir, 'nvpn-arm-unknown-linux-musleabihf.tar.gz'),
+    join(distDir, `nvpn-${tag}-arm-unknown-linux-musleabihf.tar.gz`),
+  ]
+  const {
+    archivePath: armv6ArchivePath,
+    archiveSha256: armv6ArchiveSha256,
+    archiveSize: armv6ArchiveSize,
+    binarySha256: armv6BinarySha256,
+  } = armv6Artifact
   const expectedApp = gateReceipt.artifacts?.app?.sha256
   const expectedCli = gateReceipt.artifacts?.cli?.sha256
   const expectedDeb = gateReceipt.artifacts?.debianPackage?.sha256
@@ -1079,6 +1240,9 @@ function buildLinuxArtifacts({
   for (const cliAsset of cliAssets) {
     copyFileSync(gatedMuslArchivePath, cliAsset)
   }
+  for (const cliAsset of armv6CliAssets) {
+    copyFileSync(armv6ArchivePath, cliAsset)
+  }
   if (
     sha256FileSync(debPath) !== expectedDeb
     || statSync(debPath).size !== expectedDebSize
@@ -1086,6 +1250,11 @@ function buildLinuxArtifacts({
       (path) =>
         sha256FileSync(path) !== expectedMuslArchive
         || statSync(path).size !== expectedMuslArchiveSize,
+    )
+    || armv6CliAssets.some(
+      (path) =>
+        sha256FileSync(path) !== armv6ArchiveSha256
+        || statSync(path).size !== armv6ArchiveSize,
     )
   ) {
     throw new Error(
@@ -1115,7 +1284,18 @@ function buildLinuxArtifacts({
       },
     })
   }
-  builtLines.push('Reused the exact Linux x64 Debian package and static-musl CLI archive exercised by the Ubuntu VM gate.')
+  for (const cliAsset of armv6CliAssets) {
+    proofs[basename(cliAsset)] = exactArtifactProof({
+      artifactPath: cliAsset,
+      platform: 'linux',
+      gateReceiptPath: armv6TestedReceiptPath,
+      payloads: {
+        armv6_musl_archive: armv6ArchiveSha256,
+        nvpn_armv6_musl: armv6BinarySha256,
+      },
+    })
+  }
+  builtLines.push('Reused the exact Linux x64 Debian/static-musl artifacts and ARMv6 static-musl archive exercised by their real gates.')
   return proofs
 }
 
@@ -1673,6 +1853,7 @@ function runVerify({ dryRun, builtLines, releaseGateLogDir, tag }) {
     NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E: '1',
     NVPN_RELEASE_GATE_LINUX_UNDERLAY_NETWORK_CHANGE_E2E: '1',
     NVPN_RELEASE_GATE_LINUX_MOBILE_JOIN_E2E: '1',
+    NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT: '1',
     NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E: '1',
     NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
   }
@@ -2229,6 +2410,10 @@ function main() {
         'import',
         'host-bundle-receipt.json',
       ),
+      armv6_artifact: join(
+        releaseGateLogDir,
+        'linux-armv6-release-artifact.json',
+      ),
       public_ui_join: join(releaseJoinResultDir, 'linux', 'summary.json'),
       package_install: join(
         releaseJoinResultDir,
@@ -2707,9 +2892,15 @@ function main() {
         testedReceiptPath: platformReceiptPaths.linux.artifact,
         testedPackageInstallReceiptPath:
           platformReceiptPaths.linux.package_install,
+        armv6TestedReceiptPath:
+          platformReceiptPaths.linux.armv6_artifact,
         gatedBundlePathReceipt: join(
           releaseGateLogDir,
           'host-linux-vm-bundle-path.txt',
+        ),
+        armv6ArtifactPathReceipt: join(
+          releaseGateLogDir,
+          'host-linux-armv6-artifact-path.txt',
         ),
       }),
     )],

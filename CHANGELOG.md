@@ -82,6 +82,9 @@ All notable changes to this project are documented in this file.
   and Windows network gates while keeping the Windows release build native.
 - Pin every macOS release gate to the disposable UTM guest identity so a
   misconfigured SSH alias cannot change the release Mac's routes or DNS.
+- Build and seal the ARMv6 static CLI in a parallel release lane, execute its
+  exact bytes read-only on the Pi Zero, and reuse that artifact for the
+  transactional fleet rollout and public release.
 
 ## 4.1.4 - 2026-07-22
 

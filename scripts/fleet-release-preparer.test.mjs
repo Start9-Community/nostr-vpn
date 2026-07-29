@@ -510,21 +510,35 @@ test('private roster catalog rejects omissions, fake evidence, staleness, and un
   }
 })
 
-test('private roster can represent unsupported armv6 and armv7 Linux machines', () => {
-  for (const arch of ['armv6', 'armv7']) {
-    const snapshot = rosterSnapshot()
-    const catalog = rosterCatalog(snapshot)
-    const role = catalog.roles.find(({ id }) => id === 'unsupported-mac')
-    role.platform = 'linux'
-    role.arch = arch
-    role.capability.reason = `no staged ${arch} release artifact`
-    const snapshotRole = snapshot.roles.find(
-      ({ id }) => id === 'unsupported-mac',
-    )
-    snapshotRole.reason = role.capability.reason
-    const args = inventoryArgs(snapshot, catalog)
-    assert.doesNotThrow(() => buildFrozenFleetInventory(args))
-  }
+test('private roster derives a supported ARMv6 Linux install target', () => {
+  const snapshot = rosterSnapshot()
+  const role = snapshot.roles[0]
+  role.id = 'armv6-edge'
+  role.target.id = role.id
+  role.target.arch = 'armv6'
+  const catalog = rosterCatalog(snapshot)
+  const inventory = buildFrozenFleetInventory(
+    inventoryArgs(snapshot, catalog),
+  )
+  assert.deepEqual(
+    inventory.targets.map(({ id, artifact }) => ({ id, artifact })),
+    [{ id: 'armv6-edge', artifact: 'linux-armv6' }],
+  )
+})
+
+test('private roster can represent an unsupported armv7 Linux machine', () => {
+  const snapshot = rosterSnapshot()
+  const catalog = rosterCatalog(snapshot)
+  const role = catalog.roles.find(({ id }) => id === 'unsupported-mac')
+  role.platform = 'linux'
+  role.arch = 'armv7'
+  role.capability.reason = 'no staged armv7 release artifact'
+  const snapshotRole = snapshot.roles.find(
+    ({ id }) => id === 'unsupported-mac',
+  )
+  snapshotRole.reason = role.capability.reason
+  const args = inventoryArgs(snapshot, catalog)
+  assert.doesNotThrow(() => buildFrozenFleetInventory(args))
 })
 
 test('publication accepts only exact executed all-passed fleet evidence', () => {
@@ -643,87 +657,104 @@ test('publication rejects forged hashes, source, target sets, and raw evidence',
   }
 })
 
-test('preparer derives artifact receipts and payload labels from archive bytes', () => {
+test('preparer derives x86_64 and ARMv6 receipts from archive bytes', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-fleet-preparer-'))
   try {
     const stageDir = join(root, 'stage')
     const assetsDir = join(stageDir, 'assets')
     const bundleDir = join(root, 'bundle', 'nvpn')
-    const receiptDir = join(root, 'receipts')
     mkdirSync(assetsDir, { recursive: true })
     mkdirSync(bundleDir, { recursive: true })
-    mkdirSync(receiptDir)
     const executable = join(bundleDir, 'nvpn')
     writeFileSync(executable, 'exact candidate binary\n')
-    const assetName =
-      'nvpn-v4.1.5-x86_64-unknown-linux-musl.tar.gz'
-    const assetPath = join(assetsDir, assetName)
-    const archived = spawnSync(
-      'tar',
-      ['-czf', assetPath, '-C', join(root, 'bundle'), 'nvpn/nvpn'],
-      { encoding: 'utf8' },
-    )
-    assert.equal(archived.status, 0, archived.stderr)
-    const assetSha256 = sha256(readFileSync(assetPath))
     const payloadSha256 = sha256(readFileSync(executable))
-    const release = {
-      tag: 'v4.1.5',
-      assets: [
-        {
-          name: assetName,
-          path: `assets/${assetName}`,
-          sha256: assetSha256,
-          size: statSync(assetPath).size,
-        },
-      ],
-      release_gate_attestation: {
-        asset_proofs: {
-          [`assets/${assetName}`]: {
-            platform: 'linux',
-            artifact_sha256: assetSha256,
-            payloads: {
-              nvpn_musl: payloadSha256,
+    const source = publicationFixture().source
+
+    for (const { arch, assetName, payloadLabel } of [
+      {
+        arch: 'x86_64',
+        assetName: 'nvpn-v4.1.5-x86_64-unknown-linux-musl.tar.gz',
+        payloadLabel: 'nvpn_musl',
+      },
+      {
+        arch: 'armv6',
+        assetName: 'nvpn-v4.1.5-arm-unknown-linux-musleabihf.tar.gz',
+        payloadLabel: 'nvpn_armv6_musl',
+      },
+    ]) {
+      const receiptDir = join(root, `receipts-${arch}`)
+      mkdirSync(receiptDir)
+      const assetPath = join(assetsDir, assetName)
+      const archived = spawnSync(
+        'tar',
+        ['-czf', assetPath, '-C', join(root, 'bundle'), 'nvpn/nvpn'],
+        { encoding: 'utf8' },
+      )
+      assert.equal(archived.status, 0, archived.stderr)
+      const assetSha256 = sha256(readFileSync(assetPath))
+      const release = {
+        tag: 'v4.1.5',
+        assets: [
+          {
+            name: assetName,
+            path: `assets/${assetName}`,
+            sha256: assetSha256,
+            size: statSync(assetPath).size,
+          },
+        ],
+        release_gate_attestation: {
+          asset_proofs: {
+            [`assets/${assetName}`]: {
+              platform: 'linux',
+              artifact_sha256: assetSha256,
+              payloads: {
+                [payloadLabel]: payloadSha256,
+              },
             },
           },
         },
-      },
-    }
-    const inventory = buildFrozenFleetInventory(inventoryArgs())
-    const source = publicationFixture().source
-    const prepared = deriveFleetArtifacts({
-      stageDir,
-      release,
-      inventory,
-      receiptDir,
-      source,
-    })
-    assert.equal(prepared.artifacts.length, 1)
-    assert.equal(
-      prepared.artifacts[0].installPayload.executableMember,
-      'nvpn/nvpn',
-    )
-    const receipt = JSON.parse(
-      readFileSync(prepared.artifacts[0].receipt.path, 'utf8'),
-    )
-    assert.equal(receipt.installedBinarySha256, payloadSha256)
-    assert.deepEqual(receipt.releasePayloadLabels, {
-      'nvpn/nvpn': 'nvpn_musl',
-    })
+      }
+      const snapshot = rosterSnapshot()
+      snapshot.roles[0].target.arch = arch
+      const inventory = buildFrozenFleetInventory(
+        inventoryArgs(snapshot, rosterCatalog(snapshot)),
+      )
+      const prepared = deriveFleetArtifacts({
+        stageDir,
+        release,
+        inventory,
+        receiptDir,
+        source,
+      })
+      assert.equal(prepared.artifacts.length, 1)
+      assert.equal(prepared.artifacts[0].id, `linux-${arch}`)
+      assert.equal(
+        prepared.artifacts[0].installPayload.executableMember,
+        'nvpn/nvpn',
+      )
+      const receipt = JSON.parse(
+        readFileSync(prepared.artifacts[0].receipt.path, 'utf8'),
+      )
+      assert.equal(receipt.installedBinarySha256, payloadSha256)
+      assert.deepEqual(receipt.releasePayloadLabels, {
+        'nvpn/nvpn': payloadLabel,
+      })
 
-    release.release_gate_attestation.asset_proofs[
-      `assets/${assetName}`
-    ].payloads.ambiguous = payloadSha256
-    assert.throws(
-      () =>
-        deriveFleetArtifacts({
-          stageDir,
-          release,
-          inventory,
-          receiptDir,
-          source,
-        }),
-      /exactly one staged payload proof/i,
-    )
+      release.release_gate_attestation.asset_proofs[
+        `assets/${assetName}`
+      ].payloads.ambiguous = payloadSha256
+      assert.throws(
+        () =>
+          deriveFleetArtifacts({
+            stageDir,
+            release,
+            inventory,
+            receiptDir,
+            source,
+          }),
+        /exactly one staged payload proof/i,
+      )
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

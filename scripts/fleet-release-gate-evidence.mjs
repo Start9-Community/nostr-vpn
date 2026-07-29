@@ -39,7 +39,13 @@ const platformReceiptKeys = {
     'underlay_lifecycle',
     'wireguard_dns',
   ],
-  linux: ['artifact', 'network', 'package_install', 'public_ui_join'],
+  linux: [
+    'armv6_artifact',
+    'artifact',
+    'network',
+    'package_install',
+    'public_ui_join',
+  ],
   macos: ['artifact', 'network', 'public_ui_join'],
   windows: ['artifact', 'installer', 'network', 'public_ui_join'],
 }
@@ -143,6 +149,7 @@ function requireCoreArtifactFipsSource(platformReceiptPaths, source) {
     ['android', 'physical', 'fipsCoreVersion'],
     ['ios', 'mobile_artifact', 'fipsCoreVersion'],
     ['macos', 'artifact', 'fipsCoreVersion'],
+    ['linux', 'armv6_artifact', 'fipsVersion'],
     ['linux', 'artifact', 'fipsVersion'],
     ['windows', 'artifact', 'fipsVersion'],
   ]) {

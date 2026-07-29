@@ -25,7 +25,13 @@ const platforms = {
     'underlay_lifecycle',
     'wireguard_dns',
   ],
-  linux: ['artifact', 'network', 'package_install', 'public_ui_join'],
+  linux: [
+    'armv6_artifact',
+    'artifact',
+    'network',
+    'package_install',
+    'public_ui_join',
+  ],
   macos: ['artifact', 'network', 'public_ui_join'],
   windows: ['artifact', 'installer', 'network', 'public_ui_join'],
 }
@@ -77,6 +83,7 @@ function fixture(root) {
     ['android', 'physical', 'fipsCoreVersion'],
     ['ios', 'mobile_artifact', 'fipsCoreVersion'],
     ['macos', 'artifact', 'fipsCoreVersion'],
+    ['linux', 'armv6_artifact', 'fipsVersion'],
     ['linux', 'artifact', 'fipsVersion'],
     ['windows', 'artifact', 'fipsVersion'],
   ]) {
@@ -270,6 +277,7 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
       ['android', 'physical', 'fipsCoreVersion'],
       ['ios', 'mobile_artifact', 'fipsCoreVersion'],
       ['macos', 'artifact', 'fipsCoreVersion'],
+      ['linux', 'armv6_artifact', 'fipsVersion'],
       ['linux', 'artifact', 'fipsVersion'],
       ['windows', 'artifact', 'fipsVersion'],
     ]) {
@@ -305,9 +313,9 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
         ...attestation,
         platform_gate_receipts: {
           ...attestation.platform_gate_receipts,
-          android: {
-            ...attestation.platform_gate_receipts.android,
-            mobile_join: '0'.repeat(64),
+          linux: {
+            ...attestation.platform_gate_receipts.linux,
+            armv6_artifact: '0'.repeat(64),
           },
         },
       },
@@ -323,9 +331,9 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
         ...attestation,
         platform_gate_receipts: {
           ...attestation.platform_gate_receipts,
-          android: Object.fromEntries(
-            Object.entries(attestation.platform_gate_receipts.android).filter(
-              ([name]) => name !== 'replacement_singleton',
+          linux: Object.fromEntries(
+            Object.entries(attestation.platform_gate_receipts.linux).filter(
+              ([name]) => name !== 'armv6_artifact',
             ),
           ),
         },
@@ -337,6 +345,23 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
     )
     json(releasePath, release)
 
+    const { armv6_artifact: omitted, ...linuxWithoutArmv6 } =
+      receiptPaths.linux
+    assert.ok(omitted)
+    assert.throws(
+      () =>
+        validateFleetReleaseGateEvidence({
+          ...request,
+          receiptPaths: {
+            ...request.receiptPaths,
+            platforms: {
+              ...receiptPaths,
+              linux: linuxWithoutArmv6,
+            },
+          },
+        }),
+      /linux receipt paths must contain exactly/i,
+    )
     assert.throws(
       () =>
         validateFleetReleaseGateEvidence({
