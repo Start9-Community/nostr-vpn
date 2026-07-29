@@ -723,7 +723,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 if let Some(request) = pending_control_request {
                     let publish_fips_roster_after_control =
                         matches!(request, DaemonControlRequest::Reload | DaemonControlRequest::Resume);
-                    let control_result = match request {
+                    let mut control_result = match request {
                         DaemonControlRequest::Stop => break,
                         DaemonControlRequest::Pause => {
                             vpn_enabled = false;
@@ -889,7 +889,6 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             }
                         }
                     };
-                    let _ = write_daemon_control_result(&config_path, request, control_result);
                     let pre_sync_fips_roster_recipients = if publish_fips_roster_after_control {
                         fips_tunnel_runtime
                             .as_ref()
@@ -933,6 +932,10 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         Ok(()) => true,
                         Err(error) => {
                             vpn_status = format!("FIPS private mesh update failed ({error})");
+                            if control_result.is_ok() {
+                                control_result =
+                                    Err(error.context("apply FIPS tunnel, routes, and DNS"));
+                            }
                             false
                         }
                     };
@@ -949,7 +952,8 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         )
                         .await;
                     }
-                    if persist_current_daemon_state(DaemonStatePersistContext {
+                    let state_persisted =
+                        persist_current_daemon_state(DaemonStatePersistContext {
                         state_file: &state_file,
                         config_path: &config_path,
                         app: &app,
@@ -964,10 +968,15 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         captive_portal,
                         port_mapping_runtime: &port_mapping_runtime,
                     })
-                    .await
-                    {
+                    .await;
+                    if state_persisted {
                         last_state_persisted_at = Instant::now();
+                    } else if control_result.is_ok() {
+                        control_result = Err(anyhow!(
+                            "failed to persist daemon state after applying control request"
+                        ));
                     }
+                    let _ = write_daemon_control_result(&config_path, request, control_result);
                 }
                 if !state_background_ready {
                     continue;

@@ -808,9 +808,15 @@ impl Drop for SystemDnsGuard {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run_checked(command: &mut Command) -> Result<()> {
+    #[cfg(target_os = "linux")]
     let output = command
         .output()
         .context("failed to execute DNS configuration command")?;
+    #[cfg(target_os = "windows")]
+    let output = crate::wg_upstream_runtime::run_windows_command(
+        command,
+        "Windows DNS configuration command",
+    )?;
     if output.status.success() {
         return Ok(());
     }

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use nostr_vpn_core::config::{maybe_autoconfigure_node, normalize_nostr_pubkey};
 use nostr_vpn_core::join_delivery::queue_join_roster;
 use nostr_vpn_core::join_requests::prepare_manual_join_delivery;
@@ -12,38 +12,32 @@ use super::{
     wait_for_daemon_control_ack, wait_for_daemon_control_result,
 };
 
-pub(crate) fn maybe_reload_running_daemon(config_path: &Path) {
-    let status = match daemon_status(config_path) {
-        Ok(status) => status,
-        Err(error) => {
-            eprintln!("config: failed to inspect daemon status after save: {error}");
-            return;
-        }
-    };
+pub(crate) fn reload_running_daemon_after_save(config_path: &Path) -> Result<()> {
+    let status = daemon_status(config_path)
+        .context("failed to inspect daemon status after saving configuration")?;
     if !status.running {
-        return;
+        return Ok(());
     }
-    if let Err(error) = crate::wait_for_running_daemon_control_ready(config_path, &status) {
-        eprintln!("config: daemon did not become ready after save: {error}");
-        return;
-    }
+    crate::wait_for_running_daemon_control_ready(config_path, &status)
+        .context("daemon did not become ready after saving configuration")?;
     clear_daemon_control_result(config_path);
-    if let Err(error) = request_daemon_reload(config_path) {
-        eprintln!("config: failed to request daemon reload after save: {error}");
-        return;
-    }
-    if let Err(error) = wait_for_daemon_control_ack(
+    request_daemon_reload(config_path)
+        .context("failed to request daemon reload after saving configuration")?;
+    wait_for_daemon_control_ack(
         config_path,
         crate::daemon_control_ack_timeout(DaemonControlRequest::Reload),
-    ) {
-        eprintln!("config: daemon did not acknowledge reload after save: {error}");
-        return;
-    }
-    if let Err(error) = wait_for_daemon_control_result(
+    )
+    .context("daemon did not acknowledge reload after saving configuration")?;
+    wait_for_daemon_control_result(
         config_path,
         DaemonControlRequest::Reload,
         crate::daemon_control_result_timeout(DaemonControlRequest::Reload),
-    ) {
+    )
+    .context("daemon failed to apply saved configuration")
+}
+
+pub(crate) fn maybe_reload_running_daemon(config_path: &Path) {
+    if let Err(error) = reload_running_daemon_after_save(config_path) {
         eprintln!("config: daemon reload after save failed: {error}");
     }
 }
@@ -99,7 +93,7 @@ pub(crate) async fn update_active_network_roster(
         }
     }
     app.save(&config_path)?;
-    maybe_reload_running_daemon(&config_path);
+    reload_running_daemon_after_save(&config_path)?;
 
     let published = 0usize;
 

@@ -6,6 +6,9 @@
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
+const WINDOWS_NATIVE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[cfg(target_os = "windows")]
 pub async fn apply_daemon_wg_upstream(
     config: &WireGuardExitConfig,
     handshake_timeout: Duration,
@@ -38,13 +41,23 @@ async fn apply_daemon_wg_upstream_excluding(
     excluded_tunnel_interfaces: &[u32],
     cleanup_journal_config_path: &Path,
 ) -> Result<DaemonWgUpstream> {
-    apply_daemon_wg_upstream_native(
-        config,
-        handshake_timeout,
-        excluded_tunnel_interfaces,
-        cleanup_journal_config_path,
+    match tokio::time::timeout(
+        WINDOWS_NATIVE_RECONCILE_TIMEOUT,
+        apply_daemon_wg_upstream_native(
+            config,
+            handshake_timeout,
+            excluded_tunnel_interfaces,
+            cleanup_journal_config_path,
+        ),
     )
     .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!(
+            "native Windows WireGuard reconcile timed out after {}s; owned-resource rollback was triggered",
+            WINDOWS_NATIVE_RECONCILE_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -335,8 +348,7 @@ fn resolve_windows_wireguard_tool(name: &str) -> Result<PathBuf> {
 
     let output = ProcessCommand::new("where")
         .arg(name)
-        .output()
-        .with_context(|| format!("search PATH for {name}"))?;
+        .bounded_output(&format!("search PATH for {name}"))?;
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(path) = stdout.lines().map(str::trim).find(|line| !line.is_empty()) {
@@ -491,7 +503,10 @@ fn restrict_and_verify_windows_native_wireguard_acl(path: &Path, directory: bool
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output();
+        .bounded_output(&format!(
+            "restrict and audit Windows ACL for {}",
+            path.display()
+        ));
     match output {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
@@ -544,8 +559,9 @@ fn windows_native_wireguard_has_handshake(
 ) -> Result<bool> {
     let output = ProcessCommand::new(wg_exe)
         .args(["show", tunnel_name, "latest-handshakes"])
-        .output()
-        .with_context(|| format!("query native WireGuard handshakes for {tunnel_name}"))?;
+        .bounded_output(&format!(
+            "query native WireGuard handshakes for {tunnel_name}"
+        ))?;
     if !output.status.success() {
         return Err(anyhow!(
             "wg.exe show {tunnel_name} latest-handshakes failed with {}: {}",
@@ -588,8 +604,9 @@ fn windows_native_wireguard_peer_endpoint(
 ) -> Result<SocketAddr> {
     let output = ProcessCommand::new(wg_exe)
         .args(["show", tunnel_name, "endpoints"])
-        .output()
-        .with_context(|| format!("query native WireGuard endpoint for {tunnel_name}"))?;
+        .bounded_output(&format!(
+            "query native WireGuard endpoint for {tunnel_name}"
+        ))?;
     if !output.status.success() {
         return Err(anyhow!(
             "wg.exe show {tunnel_name} endpoints failed with {}: {}",
@@ -662,8 +679,7 @@ fn ensure_windows_native_wireguard_service_absent(
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .with_context(|| format!("audit native WireGuard service {service_name}"))?;
+        .bounded_output(&format!("audit native WireGuard service {service_name}"))?;
     if !output.status.success() {
         return Err(anyhow!(
             "failed to audit native WireGuard service {service_name}: {}",
@@ -724,8 +740,7 @@ fn create_windows_native_wireguard_service(
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .with_context(|| format!("create native WireGuard service {service_name}"))?;
+        .bounded_output(&format!("create native WireGuard service {service_name}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -740,8 +755,7 @@ fn configure_and_start_windows_native_wireguard_service(tunnel_name: &str) -> Re
     let service_name = format!("WireGuardTunnel${tunnel_name}");
     let output = ProcessCommand::new("sc.exe")
         .args(["sidtype", &service_name, "unrestricted"])
-        .output()
-        .with_context(|| format!("set unrestricted SID type on {service_name}"))?;
+        .bounded_output(&format!("set unrestricted SID type on {service_name}"))?;
     if !output.status.success() {
         return Err(anyhow!(
             "sc.exe sidtype failed for {service_name}: {}",
@@ -754,8 +768,7 @@ fn configure_and_start_windows_native_wireguard_service(tunnel_name: &str) -> Re
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .with_context(|| format!("start native WireGuard service {service_name}"))?;
+        .bounded_output(&format!("start native WireGuard service {service_name}"))?;
     if output.status.success() {
         return Ok(());
     }

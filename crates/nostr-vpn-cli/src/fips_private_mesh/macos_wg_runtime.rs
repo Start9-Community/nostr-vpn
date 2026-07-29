@@ -105,17 +105,31 @@ impl FipsPrivateTunnelRuntime {
                 .is_some_and(|existing| existing.config_matches(wg_config))
             {
                 let underlay_interface = selected_macos_wg_underlay_interface(config)?;
-                let existing = self
+                let desired_endpoint_bypass = self
                     .wg_upstream
                     .as_mut()
-                    .expect("config-matching WG handle checked above");
-                existing
+                    .expect("config-matching WG handle checked above")
+                    .prepare_underlay_route(&underlay_interface)?;
+                if let Err(error) = self.persist_network_cleanup_ownership() {
+                    let cleanup = self.cleanup_owned_macos_wg_upstream().await;
+                    return match cleanup {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(error.context(format!(
+                            "clean up WireGuard routes after journal failure: {cleanup:#}"
+                        ))),
+                    };
+                }
+                self.wg_upstream
+                    .as_mut()
+                    .expect("prepared WG handle remains installed")
                     .rebind_underlay(
                         wg_config,
                         &underlay_interface,
                         crate::wg_upstream_runtime::DAEMON_WG_UPSTREAM_HANDSHAKE_TIMEOUT,
+                        desired_endpoint_bypass,
                     )
                     .await?;
+                self.persist_network_cleanup_ownership()?;
                 return Ok(());
             }
         }
@@ -136,6 +150,15 @@ impl FipsPrivateTunnelRuntime {
             handle.iface, handle.upstream, underlay_interface
         );
         self.wg_upstream = Some(handle);
+        if let Err(error) = self.persist_network_cleanup_ownership() {
+            let cleanup = self.cleanup_owned_macos_wg_upstream().await;
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!(
+                    "clean up WireGuard routes after journal failure: {cleanup:#}"
+                ))),
+            };
+        }
         Ok(())
     }
 
@@ -154,13 +177,19 @@ impl FipsPrivateTunnelRuntime {
 
         let underlay_interface = selected_macos_wg_underlay_interface(config)?;
         let previous_underlay = existing.underlay_interface().to_string();
-        existing
+        let desired_endpoint_bypass = existing.prepare_underlay_route(&underlay_interface)?;
+        self.persist_network_cleanup_ownership()?;
+        self.wg_upstream
+            .as_mut()
+            .expect("prepared WG handle remains installed")
             .rebind_underlay(
                 wg_config,
                 &underlay_interface,
                 MACOS_WG_HANDOFF_HANDSHAKE_TIMEOUT,
+                desired_endpoint_bypass,
             )
             .await?;
+        self.persist_network_cleanup_ownership()?;
         eprintln!(
             "fips: WG upstream rebound {} -> {} with a fresh handshake",
             previous_underlay, underlay_interface
@@ -194,15 +223,7 @@ impl FipsPrivateTunnelRuntime {
                 }),
         );
         if let Some(wg_upstream) = self.wg_upstream.as_ref() {
-            managed_routes.extend(
-                crate::macos_network::macos_tunnel_default_route_targets()
-                    .iter()
-                    .map(|target| crate::MacosManagedRoute {
-                        target: (*target).to_string(),
-                        gateway: None,
-                        interface: Some(wg_upstream.iface.clone()),
-                    }),
-            );
+            managed_routes.extend(wg_upstream.macos_managed_routes());
         }
         managed_routes.sort_by(|left, right| {
             (

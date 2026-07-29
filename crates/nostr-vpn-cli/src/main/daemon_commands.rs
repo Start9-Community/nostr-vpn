@@ -348,12 +348,18 @@ fn reload_daemon(args: ReloadArgs) -> Result<()> {
     }
 
     wait_for_running_daemon_control_ready(&config_path, &status)?;
+    clear_daemon_control_result(&config_path);
     request_daemon_reload(&config_path)?;
     wait_for_daemon_control_ack(
         &config_path,
         daemon_control_ack_timeout(DaemonControlRequest::Reload),
     )?;
-    println!("daemon reload requested");
+    wait_for_daemon_control_result(
+        &config_path,
+        DaemonControlRequest::Reload,
+        daemon_control_result_timeout(DaemonControlRequest::Reload),
+    )?;
+    println!("daemon reloaded");
     Ok(())
 }
 
@@ -375,6 +381,14 @@ pub(crate) fn daemon_control_ack_timeout(request: DaemonControlRequest) -> Durat
 }
 
 pub(crate) fn daemon_control_result_timeout(request: DaemonControlRequest) -> Duration {
+    #[cfg(target_os = "windows")]
+    if matches!(request, DaemonControlRequest::Reload) {
+        // A reload is complete only after native WireGuard, routes, and DNS
+        // have applied. The handshake watchdog is 10s; leave bounded cleanup
+        // room while keeping a stuck transition well below a minute.
+        return Duration::from_secs(30);
+    }
+
     if matches!(
         request,
         DaemonControlRequest::Pause | DaemonControlRequest::Resume

@@ -421,7 +421,11 @@ fn daemon_control_wait_timeouts_allow_longer_mac_recovery_windows() {
     );
     assert_eq!(
         crate::daemon_control_result_timeout(crate::DaemonControlRequest::Reload),
-        Duration::from_secs(15)
+        if cfg!(target_os = "windows") {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(15)
+        }
     );
     assert_eq!(
         crate::daemon_control_vpn_transition_timeout(crate::DaemonControlRequest::Reload),

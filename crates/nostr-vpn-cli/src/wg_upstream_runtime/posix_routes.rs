@@ -104,9 +104,9 @@ pub struct ScopedHostRoute {
 
 /// Full default-route replacement: bring up the userspace WG tun and
 /// route **all** outbound traffic through it (Mullvad/Proton-style).
-/// Linux installs a bypass /32 route for the WG endpoint. macOS binds
-/// the encrypted UDP socket directly to the selected physical interface,
-/// so no endpoint route is created or carried across underlay changes.
+/// Linux and macOS install a bypass /32 route for an IPv4 WG endpoint.
+/// The macOS route is scoped to the selected physical interface because
+/// binding the UDP socket alone does not override the two covering /1s.
 ///
 /// **This is the dangerous mode** — if the WG handshake fails after
 /// this call returns, the host has lost its way to the internet
@@ -127,6 +127,7 @@ pub fn apply_full_default_route(
     address: &str,
     upstream_endpoint: SocketAddr,
     mtu: u16,
+    _underlay_interface: Option<&str>,
 ) -> Result<FullDefaultRoute> {
     let address_ip = address
         .split('/')
@@ -173,9 +174,9 @@ pub fn apply_full_default_route(
         )?;
     }
 
-    // Linux replaces its default, so capture it and install an endpoint
-    // bypass before touching routes. macOS keeps its physical default and
-    // relies on the interface-bound UDP socket instead.
+    // Capture and install the endpoint bypass before touching the default
+    // routes. macOS keeps its physical default but still needs a more-specific
+    // /32 because the encrypted socket otherwise follows the WG /1 routes.
     #[cfg(target_os = "linux")]
     let original_default = capture_default_route()?;
     #[cfg(target_os = "linux")]
@@ -188,11 +189,16 @@ pub fn apply_full_default_route(
         install_endpoint_bypass(target, &original_default)?;
     }
     #[cfg(target_os = "macos")]
-    let _ = upstream_endpoint;
+    let endpoint_bypass_routes =
+        install_macos_wg_endpoint_bypass(upstream_endpoint.ip(), _underlay_interface)?
+            .into_iter()
+            .collect();
 
     let mut full_route = FullDefaultRoute {
         #[cfg(target_os = "macos")]
         iface: iface.to_string(),
+        #[cfg(target_os = "macos")]
+        endpoint_bypass_routes,
         #[cfg(target_os = "linux")]
         bypass_target,
         #[cfg(target_os = "linux")]
@@ -220,11 +226,56 @@ pub fn apply_full_default_route(
 pub struct FullDefaultRoute {
     #[cfg(target_os = "macos")]
     iface: String,
+    #[cfg(target_os = "macos")]
+    endpoint_bypass_routes: Vec<crate::MacosManagedRoute>,
     #[cfg(target_os = "linux")]
     bypass_target: Option<IpAddr>,
     #[cfg(target_os = "linux")]
     original_default: CapturedDefaultRoute,
     reverted: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_wg_endpoint_bypass_route(
+    endpoint: IpAddr,
+    underlay: &crate::MacosRouteSpec,
+) -> Option<crate::MacosManagedRoute> {
+    let IpAddr::V4(endpoint) = endpoint else {
+        return None;
+    };
+    Some(crate::MacosManagedRoute {
+        target: format!("{endpoint}/32"),
+        gateway: underlay.gateway.clone(),
+        interface: Some(underlay.interface.clone()),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_wg_endpoint_bypass(
+    endpoint: IpAddr,
+    preferred_interface: Option<&str>,
+) -> Result<Option<crate::MacosManagedRoute>> {
+    if !endpoint.is_ipv4() {
+        return Ok(None);
+    }
+    let underlay =
+        crate::macos_network::macos_underlay_default_route_from_system_for_interface(
+            preferred_interface,
+        )?
+        .ok_or_else(|| {
+            anyhow!(
+                "no physical macOS underlay route is available for WireGuard endpoint {endpoint}"
+            )
+        })?;
+    let route = macos_wg_endpoint_bypass_route(endpoint, &underlay)
+        .expect("IPv4 endpoint produces an endpoint bypass");
+    crate::macos_network::apply_macos_route_spec(
+        &route.target,
+        route.gateway.as_deref(),
+        route.interface.as_deref(),
+    )
+    .with_context(|| format!("install macOS WireGuard endpoint bypass {}", route.target))?;
+    Ok(Some(route))
 }
 
 /// Captured underlay default route, used to restore on Drop. The
@@ -353,10 +404,94 @@ impl FullDefaultRoute {
         }
         #[cfg(target_os = "macos")]
         {
-            crate::macos_network::delete_macos_default_route_for_interface(&self.iface)?;
+            let mut failures = Vec::new();
+            if let Err(error) =
+                crate::macos_network::delete_macos_default_route_for_interface(&self.iface)
+            {
+                failures.push(format!(
+                    "remove WireGuard split-default routes on {}: {error:#}",
+                    self.iface
+                ));
+            }
+            for route in &self.endpoint_bypass_routes {
+                if let Err(error) = crate::macos_network::delete_macos_managed_route(
+                    &route.target,
+                    route.gateway.as_deref(),
+                    route.interface.as_deref(),
+                ) {
+                    failures.push(format!(
+                        "remove WireGuard endpoint bypass {}: {error:#}",
+                        route.target
+                    ));
+                }
+            }
+            if !failures.is_empty() {
+                return Err(anyhow!(failures.join("; ")));
+            }
         }
         self.reverted = true;
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn prepare_macos_endpoint_bypass(
+        &mut self,
+        endpoint: IpAddr,
+        underlay_interface: &str,
+    ) -> Result<Option<crate::MacosManagedRoute>> {
+        let route = install_macos_wg_endpoint_bypass(endpoint, Some(underlay_interface))?;
+        if let Some(route) = route.as_ref()
+            && !self.endpoint_bypass_routes.contains(route)
+        {
+            self.endpoint_bypass_routes.push(route.clone());
+        }
+        Ok(route)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn commit_macos_endpoint_bypass(
+        &mut self,
+        desired: Option<&crate::MacosManagedRoute>,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        let stale = self
+            .endpoint_bypass_routes
+            .iter()
+            .filter(|route| desired != Some(*route))
+            .cloned()
+            .collect::<Vec<_>>();
+        for route in &stale {
+            if let Err(error) = crate::macos_network::delete_macos_managed_route(
+                &route.target,
+                route.gateway.as_deref(),
+                route.interface.as_deref(),
+            ) {
+                failures.push(format!(
+                    "remove stale WireGuard endpoint bypass {}: {error:#}",
+                    route.target
+                ));
+            }
+        }
+        if failures.is_empty() {
+            self.endpoint_bypass_routes
+                .retain(|route| desired == Some(route));
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn macos_managed_routes(&self) -> Vec<crate::MacosManagedRoute> {
+        let mut routes = self.endpoint_bypass_routes.clone();
+        routes.extend(MACOS_WG_DEFAULT_ROUTE_TARGETS.iter().map(|target| {
+            crate::MacosManagedRoute {
+                target: (*target).to_string(),
+                gateway: None,
+                interface: Some(self.iface.clone()),
+            }
+        }));
+        routes
     }
 }
 

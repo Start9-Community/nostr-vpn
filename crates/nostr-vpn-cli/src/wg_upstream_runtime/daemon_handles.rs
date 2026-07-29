@@ -216,7 +216,13 @@ pub async fn apply_daemon_wg_upstream(
     }
 
     let mtu = if config.mtu > 0 { config.mtu } else { 1420 };
-    let full_route = match apply_full_default_route(&actual_iface, &config.address, upstream, mtu) {
+    let full_route = match apply_full_default_route(
+        &actual_iface,
+        &config.address,
+        upstream,
+        mtu,
+        Some(underlay_interface),
+    ) {
         Ok(route) => route,
         Err(error) => {
             runtime.shutdown().await;
@@ -257,6 +263,16 @@ impl DaemonWgUpstream {
         &self.underlay_interface
     }
 
+    pub(crate) fn prepare_underlay_route(
+        &mut self,
+        underlay_interface: &str,
+    ) -> Result<Option<crate::MacosManagedRoute>> {
+        self.full_route
+            .as_mut()
+            .ok_or_else(|| anyhow!("macOS WireGuard route guard is missing"))?
+            .prepare_macos_endpoint_bypass(self.upstream.ip(), underlay_interface)
+    }
+
     /// Move the live encrypted UDP socket to the newly selected physical
     /// interface, force a fresh handshake, and keep the split-default kill
     /// switch installed throughout. A stalled pump gets one bounded restart
@@ -267,6 +283,7 @@ impl DaemonWgUpstream {
         config: &WireGuardExitConfig,
         underlay_interface: &str,
         handshake_timeout: Duration,
+        desired_endpoint_bypass: Option<crate::MacosManagedRoute>,
     ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + handshake_timeout;
         let interface_index = macos_interface_index(underlay_interface)?;
@@ -331,9 +348,12 @@ impl DaemonWgUpstream {
                     ));
                 }
             }
-        } else {
-            self.underlay_interface = underlay_interface.to_string();
         }
+        self.full_route
+            .as_mut()
+            .ok_or_else(|| anyhow!("macOS WireGuard route guard is missing"))?
+            .commit_macos_endpoint_bypass(desired_endpoint_bypass.as_ref())?;
+        self.underlay_interface = underlay_interface.to_string();
         Ok(())
     }
 
@@ -399,6 +419,12 @@ impl DaemonWgUpstream {
         } else {
             Err(anyhow!(failures.join("; ")))
         }
+    }
+
+    pub(crate) fn macos_managed_routes(&self) -> Vec<crate::MacosManagedRoute> {
+        self.full_route
+            .as_ref()
+            .map_or_else(Vec::new, FullDefaultRoute::macos_managed_routes)
     }
 }
 

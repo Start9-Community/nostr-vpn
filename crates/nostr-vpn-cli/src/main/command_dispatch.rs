@@ -107,7 +107,7 @@ async fn run_command(command: Command) -> Result<()> {
             app.ensure_defaults();
             maybe_autoconfigure_node(&mut app);
             app.save(&config_path)?;
-            maybe_reload_running_daemon(&config_path);
+            reload_running_daemon_after_save(&config_path)?;
 
             let own_device_id = app.nostr.public_key.clone();
             let admin_device_id = normalize_nostr_pubkey(&args.admin_device_id)?;
@@ -621,7 +621,7 @@ async fn run_command(command: Command) -> Result<()> {
             app.ensure_defaults();
             maybe_autoconfigure_node(&mut app);
             app.save(&config_path)?;
-            maybe_reload_running_daemon(&config_path);
+            reload_running_daemon_after_save(&config_path)?;
 
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&app)?);

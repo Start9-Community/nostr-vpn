@@ -26,15 +26,16 @@ All notable changes to this project are documented in this file.
 - Restore device-native routes and DNS after exit-node or private-tunnel
   shutdown on every platform, and fail closed when owned network state cannot
   be cleaned up.
-- Wait for the exact Windows daemon process to become control-ready, then own
-  native WireGuard routes and DNS only after a verified handshake while
-  preserving crash-cleanup obligations until Direct restoration completes.
+- Wait for the exact Windows daemon process to become control-ready, report a
+  reload successful only after WireGuard routes and DNS are active, and bound
+  native operations with owned rollback so Direct restoration cannot hang.
 - Stream Linux WireGuard apply and rollback configuration directly to `wg`
   without filesystem secret files, so exit nodes work under the stock
   enforced Ubuntu AppArmor policy.
-- Bind macOS WireGuard UDP sockets to the selected physical interface before
-  the first handshake, then rebind and prove a fresh handshake across
-  Wi-Fi/hotspot changes while the split-default kill switch stays installed.
+- Bind macOS WireGuard UDP sockets to the selected physical interface and
+  install an exact endpoint bypass before the first handshake, then migrate
+  both across Wi-Fi/hotspot changes while the split-default kill switch stays
+  installed.
 - Track exact macOS route ownership, preserve foreign routes, and retain the
   cleanup journal whenever route, DNS, forwarding, or WireGuard teardown is
   incomplete.

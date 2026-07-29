@@ -1,4 +1,76 @@
 #[cfg(target_os = "windows")]
+const WINDOWS_CHILD_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(any(test, target_os = "windows"))]
+fn run_windows_command_with_timeout(
+    command: &mut ProcessCommand,
+    operation: &str,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawn {operation}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .with_context(|| format!("collect output from {operation}"));
+            }
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let kill_error = child.kill().err();
+                let wait_error = child.wait().err();
+                let cleanup_error = match (kill_error, wait_error) {
+                    (None, None) => String::new(),
+                    (kill, wait) => format!(
+                        "; process cleanup failed (kill={:?}, wait={:?})",
+                        kill.map(|error| error.to_string()),
+                        wait.map(|error| error.to_string())
+                    ),
+                };
+                return Err(anyhow!(
+                    "{operation} timed out after {}s{cleanup_error}",
+                    timeout.as_secs_f64()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).with_context(|| format!("wait for {operation}"));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn run_windows_command(
+    command: &mut ProcessCommand,
+    operation: &str,
+) -> Result<std::process::Output> {
+    run_windows_command_with_timeout(command, operation, WINDOWS_CHILD_COMMAND_TIMEOUT)
+}
+
+#[cfg(target_os = "windows")]
+trait WindowsCommandTimeoutExt {
+    fn bounded_output(&mut self, operation: &str) -> Result<std::process::Output>;
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCommandTimeoutExt for ProcessCommand {
+    fn bounded_output(&mut self, operation: &str) -> Result<std::process::Output> {
+        run_windows_command(self, operation)
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn apply_windows_endpoint_bypass_route(
     wg_iface_index: u32,
     upstream: SocketAddr,
@@ -105,9 +177,10 @@ impl WindowsFullDefaultRoute {
     }
 
     pub fn revert(&mut self) -> Result<()> {
-        self.routes.revert_with(&mut SystemWindowsRouteCommandRunner::journaled(
-            &self.cleanup_journal_config_path,
-        ))
+        self.routes
+            .revert_with(&mut SystemWindowsRouteCommandRunner::journaled(
+                &self.cleanup_journal_config_path,
+            ))
     }
 
     pub(crate) fn cleanup_snapshot(&self) -> WindowsRouteCleanupSnapshot {
@@ -120,10 +193,7 @@ impl Drop for WindowsFullDefaultRoute {
     fn drop(&mut self) {
         let mut runner =
             SystemWindowsRouteCommandRunner::journaled(&self.cleanup_journal_config_path);
-        if let Err(error) = self
-            .routes
-            .revert_retaining_pending_with(&mut runner)
-        {
+        if let Err(error) = self.routes.revert_retaining_pending_with(&mut runner) {
             eprintln!(
                 "wg-upstream: WARNING — Windows route revert failed: {error}. \
                  You may need to run `netsh interface ipv4 delete route 0.0.0.0/0 \
@@ -143,11 +213,8 @@ pub(crate) fn capture_windows_default_route_excluding(
     //   Network Destination | Netmask | Gateway | Interface | Metric
     //   0.0.0.0             | 0.0.0.0 | 192.168.1.1 | 192.168.1.42 | 25
     let output = ProcessCommand::new("route")
-        .arg("print")
-        .arg("-4")
-        .arg("0.0.0.0")
-        .output()
-        .context("spawn `route print -4 0.0.0.0`")?;
+        .args(["print", "-4", "0.0.0.0"])
+        .bounded_output("`route print -4 0.0.0.0`")?;
     if !output.status.success() {
         return Err(anyhow!("route print failed: {}", output.status));
     }
@@ -210,8 +277,7 @@ fn select_windows_default_route_candidate(
 pub(crate) fn capture_windows_ipv6_default_routes() -> Result<Vec<WindowsIpv6DefaultRoute>> {
     let output = ProcessCommand::new("route")
         .args(["print", "-6", "::/0"])
-        .output()
-        .context("spawn `route print -6 ::/0`")?;
+        .bounded_output("`route print -6 ::/0`")?;
     if !output.status.success() {
         return Err(anyhow!("IPv6 route print failed: {}", output.status));
     }
@@ -301,8 +367,7 @@ fn resolve_windows_interface_index_for_address(interface_ip: &str) -> Result<u32
     // could use the IpHelper API but that's a bigger crate dep.
     let output = ProcessCommand::new("netsh")
         .args(["interface", "ipv4", "show", "ipaddresses", "level=verbose"])
-        .output()
-        .context("spawn `netsh interface ipv4 show ipaddresses`")?;
+        .bounded_output("`netsh interface ipv4 show ipaddresses level=verbose`")?;
     if !output.status.success() {
         return Err(anyhow!("netsh show ipaddresses failed: {}", output.status));
     }
@@ -312,8 +377,7 @@ fn resolve_windows_interface_index_for_address(interface_ip: &str) -> Result<u32
         Some(WindowsAddressInterface::Alias(alias)) => {
             let output = ProcessCommand::new("netsh")
                 .args(["interface", "ipv4", "show", "interfaces"])
-                .output()
-                .context("spawn `netsh interface ipv4 show interfaces`")?;
+                .bounded_output("`netsh interface ipv4 show interfaces`")?;
             if !output.status.success() {
                 return Err(anyhow!("netsh show interfaces failed: {}", output.status));
             }
@@ -345,10 +409,9 @@ fn resolve_windows_interface_identity(interface_index: u32) -> Result<String> {
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .with_context(|| {
-            format!("resolve stable Windows identity for interface {interface_index}")
-        })?;
+        .bounded_output(&format!(
+            "resolve stable Windows identity for interface {interface_index}"
+        ))?;
     if !output.status.success() {
         return Err(anyhow!(
             "Get-NetAdapter identity query failed for interface {interface_index}: {}",
@@ -438,8 +501,7 @@ fn parse_windows_interface_index_for_alias(output: &str, alias: &str) -> Option<
 fn resolve_windows_interface_index_for_alias_name(alias: &str) -> Result<u32> {
     let output = ProcessCommand::new("netsh")
         .args(["interface", "ipv4", "show", "interfaces"])
-        .output()
-        .context("spawn `netsh interface ipv4 show interfaces`")?;
+        .bounded_output("`netsh interface ipv4 show interfaces`")?;
     if !output.status.success() {
         return Err(anyhow!("netsh show interfaces failed: {}", output.status));
     }
@@ -506,8 +568,7 @@ fn windows_route_exists(route: &WindowsRouteSpec, exact_attributes: bool) -> Res
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .context("query exact Windows route ownership state")?;
+        .bounded_output("query exact Windows route ownership state")?;
     if !output.status.success() {
         return Err(anyhow!(
             "Get-NetRoute query failed: {}",
@@ -531,8 +592,7 @@ fn windows_route_exists(route: &WindowsRouteSpec, exact_attributes: bool) -> Res
 fn run_windows_netsh(args: &[String]) -> Result<()> {
     let output = ProcessCommand::new("netsh")
         .args(args)
-        .output()
-        .with_context(|| format!("spawn `netsh {}`", args.join(" ")))?;
+        .bounded_output(&format!("`netsh {}`", args.join(" ")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -544,4 +604,43 @@ fn run_windows_netsh(args: &[String]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod windows_command_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn timed_out_child_is_terminated_and_reported() {
+        let mut command = ProcessCommand::new(if cfg!(target_os = "windows") {
+            "powershell"
+        } else {
+            "sleep"
+        });
+        if cfg!(target_os = "windows") {
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 5",
+            ]);
+        } else {
+            command.arg("5");
+        }
+
+        let started = std::time::Instant::now();
+        let error = run_windows_command_with_timeout(
+            &mut command,
+            "deliberately slow child",
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("slow child must time out");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            error
+                .to_string()
+                .contains("deliberately slow child timed out")
+        );
+    }
 }

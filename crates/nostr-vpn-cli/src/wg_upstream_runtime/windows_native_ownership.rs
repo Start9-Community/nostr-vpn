@@ -2,8 +2,7 @@
 fn run_windows_wireguard_command(exe: &Path, args: &[&str]) -> Result<()> {
     let output = ProcessCommand::new(exe)
         .args(args)
-        .output()
-        .with_context(|| format!("spawn {} {}", exe.display(), args.join(" ")))?;
+        .bounded_output(&format!("{} {}", exe.display(), args.join(" ")))?;
     if !output.status.success() {
         return Err(anyhow!(
             "{} {} failed with {}\nstdout: {}\nstderr: {}",
@@ -23,10 +22,8 @@ fn windows_native_wireguard_service_is_owned(
 ) -> Result<bool> {
     let service_name = format!("WireGuardTunnel${}", cleanup.name);
     let escaped_service_name = service_name.replace('\'', "''");
-    let expected_binary_path = windows_native_wireguard_service_binary_path(
-        &cleanup.wireguard_exe,
-        &cleanup.config_path,
-    );
+    let expected_binary_path =
+        windows_native_wireguard_service_binary_path(&cleanup.wireguard_exe, &cleanup.config_path);
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
          $expectedPath = {}; \
@@ -42,8 +39,9 @@ fn windows_native_wireguard_service_is_owned(
     );
     let output = ProcessCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .with_context(|| format!("audit native WireGuard service ownership {service_name}"))?;
+        .bounded_output(&format!(
+            "audit native WireGuard service ownership {service_name}"
+        ))?;
     if !output.status.success() {
         return Err(anyhow!(
             "native WireGuard service ownership audit failed for {service_name}: {}",
@@ -57,10 +55,8 @@ fn windows_native_wireguard_service_is_owned(
     {
         "owned" => Ok(true),
         "path-owned" => {
-            if windows_native_wireguard_config_is_owned(
-                &cleanup.config_path,
-                &cleanup.owner_token,
-            )? {
+            if windows_native_wireguard_config_is_owned(&cleanup.config_path, &cleanup.owner_token)?
+            {
                 Ok(true)
             } else {
                 Err(anyhow!(
@@ -80,10 +76,7 @@ fn windows_native_wireguard_service_is_owned(
 }
 
 #[cfg(target_os = "windows")]
-fn cleanup_windows_native_wireguard_config(
-    path: &Path,
-    owner_token: &str,
-) -> Result<()> {
+fn cleanup_windows_native_wireguard_config(path: &Path, owner_token: &str) -> Result<()> {
     let legacy_layout = matches!(
         windows_native_wireguard_config_layout(path, owner_token)?,
         WindowsNativeWireGuardConfigLayout::Legacy
@@ -145,18 +138,13 @@ pub(crate) fn cleanup_windows_native_wireguard_state(
                 &["/uninstalltunnelservice", &cleanup.name],
             ) {
                 Ok(()) => cleanup.service_owned = false,
-                Err(error) => {
-                    failures.push(format!("uninstall owned tunnel service: {error:#}"))
-                }
+                Err(error) => failures.push(format!("uninstall owned tunnel service: {error:#}")),
             },
             Err(error) => failures.push(format!("{error:#}")),
         }
     }
     if cleanup.config_owned && !cleanup.service_owned {
-        match cleanup_windows_native_wireguard_config(
-            &cleanup.config_path,
-            &cleanup.owner_token,
-        ) {
+        match cleanup_windows_native_wireguard_config(&cleanup.config_path, &cleanup.owner_token) {
             Ok(()) => cleanup.config_owned = false,
             Err(error) => failures.push(format!("{error:#}")),
         }
@@ -179,11 +167,10 @@ impl WindowsNativeWireGuardTunnel {
         let cleanup_result = cleanup_windows_native_wireguard_state(&mut cleanup);
         self.service_owned = cleanup.service_owned;
         self.config_owned = cleanup.config_owned;
-        let persist_result =
-            crate::daemon_runtime::persist_windows_native_wireguard_cleanup_intent(
-                &self.cleanup_journal_config_path,
-                &cleanup,
-            );
+        let persist_result = crate::daemon_runtime::persist_windows_native_wireguard_cleanup_intent(
+            &self.cleanup_journal_config_path,
+            &cleanup,
+        );
         match (cleanup_result, persist_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),
@@ -205,9 +192,7 @@ impl Drop for WindowsNativeWireGuardTunnel {
             if let Some(cleanup) = self.cleanup_state() {
                 retain_pending_windows_native_cleanup(cleanup);
             }
-            eprintln!(
-                "wg-upstream: WARNING — owned native WireGuard cleanup retained: {error:#}"
-            );
+            eprintln!("wg-upstream: WARNING — owned native WireGuard cleanup retained: {error:#}");
         }
     }
 }
