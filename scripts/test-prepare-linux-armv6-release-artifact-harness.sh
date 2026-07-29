@@ -153,6 +153,8 @@ write_env() {
     printf 'NVPN_LINUX_ARMV6_ARTIFACT_CACHE_DIR=%s\n' "$CACHE"
     if [[ "$include_host" == yes ]]; then
       printf 'NVPN_LINUX_ARMV6_SMOKE_HOST=zero\n'
+    else
+      printf 'NVPN_LINUX_ARMV6_SMOKE_HOST=\n'
     fi
   } >"$path"
 }
