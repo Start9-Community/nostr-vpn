@@ -108,25 +108,6 @@ route_dev() {
   ip -j -4 route get "$1" | jq -er '.[0].dev'
 }
 
-physical_default_route_dev() {
-  local iface
-  while IFS= read -r iface; do
-    [[ "$iface" == "$TUN_IFACE" ]] && continue
-    [[ -r "/sys/class/net/$iface/carrier" ]] || continue
-    [[ "$(<"/sys/class/net/$iface/carrier")" == "1" ]] || continue
-    ip -j -4 address show dev "$iface" scope global \
-      | jq -e 'any(.[].addr_info[]?; .scope == "global")' >/dev/null \
-      || continue
-    printf '%s\n' "$iface"
-    return 0
-  done < <(
-    ip -j -4 route show table main default \
-      | jq -r 'sort_by(.metric // 0) | .[].dev' \
-      | awk '!seen[$0]++'
-  )
-  return 1
-}
-
 endpoint_host() {
   printf '%s\n' "${PEER_ENDPOINT%:*}"
 }
@@ -420,13 +401,13 @@ observe_recovery() {
 
   local route_deadline="$((SECONDS + 15))"
   while ((SECONDS < route_deadline)); do
-    if [[ "$(physical_default_route_dev 2>/dev/null || true)" == "$expected_iface" ]]; then
+    if [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$expected_iface" ]]; then
       break
     fi
     sleep 0.025
   done
-  [[ "$(physical_default_route_dev 2>/dev/null || true)" == "$expected_iface" ]] \
-    || fail "$label physical default route did not become usable within 15s"
+  [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$expected_iface" ]] \
+    || fail "$label physical endpoint route did not become usable within 15s"
 
   route_usable_at="$(unix_milliseconds)"
   route_usable_monotonic="$(monotonic_milliseconds)"
@@ -441,7 +422,6 @@ observe_recovery() {
         echo "recovery_label=$label"
         echo "expected_interface=$expected_iface"
         echo "last_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
-        echo "last_physical_default=$(physical_default_route_dev 2>/dev/null || echo unavailable)"
         echo "last_carrier=$(<"/sys/class/net/$expected_carrier_iface/carrier")"
         echo "last_payload_successes=$(payload_success_count)"
         echo "payload_successes_before=$probe_before"

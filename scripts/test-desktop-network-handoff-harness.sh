@@ -1009,8 +1009,11 @@ if grep -Eq 'Copy-Item.+StateDir|Get-ChildItem.+StateDir' "$WINDOWS_HOST"; then
 fi
 grep -Fq 'last_route=' "$LINUX_GUEST" \
   || fail "Linux recovery failure omits its last route condition"
-grep -Fq 'physical_default_route_dev()' "$LINUX_GUEST" \
-  || fail "Linux recovery clock does not wait for a usable OS underlay route"
+if grep -Fq 'physical_default_route_dev' "$LINUX_GUEST"; then
+  fail "Linux exit recovery incorrectly requires an absent physical default route"
+fi
+grep -Fq 'route_dev "$(endpoint_host)"' "$LINUX_GUEST" \
+  || fail "Linux recovery clock does not wait for the physical endpoint route"
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_HOST" \
   || fail "Linux host does not enforce the guest monotonic recovery receipt"
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_GUEST" \
