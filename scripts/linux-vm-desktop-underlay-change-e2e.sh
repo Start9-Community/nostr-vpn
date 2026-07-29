@@ -84,19 +84,6 @@ mkdir -p "$ARTIFACT_DIR"
 
 source "$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 source "$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
-current_tree() {
-  local repo="${1:-$ROOT}"
-  local git_dir tmp_index tree
-  git_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-dir)"
-  tmp_index="$(mktemp "$git_dir/desktop-underlay-linux-index.XXXXXX")"
-  (
-    export GIT_INDEX_FILE="$tmp_index"
-    git -C "$repo" read-tree HEAD
-    git -C "$repo" add -A
-    git -C "$repo" write-tree
-  )
-  rm -f "$tmp_index"
-}
 
 resolve_expected_fips_revision() {
   local local_revision
@@ -120,22 +107,31 @@ resolve_expected_fips_revision() {
 }
 
 sync_and_import_candidates() {
-  local expected_tree target_tree
+  local app_sha expected_tree target_head target_tree
   local host_peer_import_status=0
-  expected_tree="$(current_tree)"
+  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
+  expected_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  [[ "$app_sha" == "${NVPN_EXPECTED_APP_GIT_SHA:-}" ]] \
+    || fail "Linux underlay app revision differs from the release candidate"
+  desktop_underlay_assert_app_candidate "$app_sha" "$expected_tree" \
+    || fail "Linux underlay app checkout is not the exact release candidate"
   {
-    printf 'nvpn_base_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"
+    printf 'nvpn_base_commit=%s\n' "$app_sha"
     printf 'nvpn_tree=%s\n' "$expected_tree"
     printf 'fips_commit=%s\n' "$FIPS_SOURCE_REVISION"
     if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-      printf 'fips_tree=%s\n' "$(current_tree "$LOCAL_FIPS_REPO")"
+      printf 'fips_tree=%s\n' \
+        "$(git -C "$LOCAL_FIPS_REPO" rev-parse 'HEAD^{tree}')"
     fi
   } >"$ARTIFACT_DIR/source-provenance.txt"
-  env NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
+  env \
+    NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
+    NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$app_sha" \
     "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
+  target_head="$(run_primary "git -C '$GUEST_REPO' rev-parse HEAD")"
   target_tree="$(run_primary "git -C '$GUEST_REPO' rev-parse 'HEAD^{tree}'")"
-  [[ "$target_tree" == "$expected_tree" ]] \
-    || fail "Linux target tree differs from the release-gate tree"
+  [[ "$target_head" == "$app_sha" && "$target_tree" == "$expected_tree" ]] \
+    || fail "Linux target revision/tree differs from the release candidate"
   desktop_underlay_import_host_peer \
     >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
     || host_peer_import_status="$?"
@@ -156,7 +152,7 @@ sync_and_import_candidates() {
   python3 - \
     "$TARGET_RELEASE_RECEIPT" \
     "$TARGET_RELEASE_BINARY" \
-    "$(git -C "$ROOT" rev-parse HEAD)" \
+    "$app_sha" \
     "$expected_tree" \
     "$FIPS_SOURCE_REVISION" <<'PY'
 import hashlib

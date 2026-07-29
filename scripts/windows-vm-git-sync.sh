@@ -11,6 +11,7 @@ SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
 GUEST_BARE_REPO="${NVPN_WINDOWS_GIT_BARE_PATH:-${GUEST_REPO}.git}"
 REMOTE_REF="${NVPN_WINDOWS_GIT_REF:-refs/heads/codex/windows-vm-sync}"
+EXACT_APP_COMMIT="${NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT:-}"
 REMOTE_URL="${NVPN_WINDOWS_GIT_REMOTE_URL:-${SSH_HOST}:${GUEST_BARE_REPO//\\//}}"
 FIPS_REPO="${NVPN_WINDOWS_FIPS_REPO_PATH:-${NVPN_FIPS_REPO_PATH:-$SRC_ROOT/fips}}"
 GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\fips}"
@@ -120,8 +121,10 @@ sync_repo() {
   local worktree="$3"
   local bare_repo="$4"
   local remote_ref="$5"
+  local exact_commit="${6:-}"
   local remote_url="${SSH_HOST}:${bare_repo//\\//}"
   local sync_commit
+  local resolved_commit
   local local_tree
   local local_clean
   local remote_commit
@@ -129,17 +132,42 @@ sync_repo() {
   local git_ssh
 
   if ! git -C "$local_repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -n "$exact_commit" ]]; then
+      echo "exact Windows sync checkout for $label is unavailable: $local_repo" >&2
+      return 2
+    fi
     echo "Skipping Windows VM git sync for $label; local checkout not found at $local_repo"
     return
   fi
 
-  ensure_remote_bare_repo "$bare_repo"
-  if [[ -z "$(git -C "$local_repo" status --porcelain)" ]]; then
+  if [[ -n "$exact_commit" ]]; then
+    [[ "$exact_commit" =~ ^[0-9a-f]{40}$ ]] || {
+      echo "exact Windows sync commit for $label must be a lowercase Git commit" >&2
+      return 2
+    }
+    resolved_commit="$(
+      git -C "$local_repo" rev-parse "$exact_commit^{commit}" 2>/dev/null
+    )" || {
+      echo "exact Windows sync commit for $label is unavailable locally" >&2
+      return 2
+    }
+    [[ "$resolved_commit" == "$exact_commit" ]] || {
+      echo "exact Windows sync commit for $label is unavailable locally" >&2
+      return 2
+    }
     local_clean=1
-    sync_commit="$(git -C "$local_repo" rev-parse HEAD)"
-  else
-    local_clean=0
-    sync_commit="$(make_sync_commit "$local_repo")"
+    sync_commit="$resolved_commit"
+  fi
+
+  ensure_remote_bare_repo "$bare_repo"
+  if [[ -z "$exact_commit" ]]; then
+    if [[ -z "$(git -C "$local_repo" status --porcelain)" ]]; then
+      local_clean=1
+      sync_commit="$(git -C "$local_repo" rev-parse HEAD)"
+    else
+      local_clean=0
+      sync_commit="$(make_sync_commit "$local_repo")"
+    fi
   fi
   local_tree="$(git -C "$local_repo" rev-parse "$sync_commit^{tree}")"
   git_ssh="$(git_ssh_command)"
@@ -158,7 +186,9 @@ sync_repo() {
   echo "WINDOWS_VM_GIT_SYNC_OK $label"
 }
 
-sync_repo "nostr-vpn" "$ROOT" "$GUEST_REPO" "$GUEST_BARE_REPO" "$REMOTE_REF"
+sync_repo \
+  "nostr-vpn" "$ROOT" "$GUEST_REPO" "$GUEST_BARE_REPO" "$REMOTE_REF" \
+  "$EXACT_APP_COMMIT"
 
 case "${NVPN_WINDOWS_SYNC_PATH_DEPS:-1}" in
   0|false|FALSE|False|no|NO|No|off|OFF|Off)

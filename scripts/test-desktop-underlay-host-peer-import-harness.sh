@@ -7,6 +7,8 @@ HELPER="$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
 VERIFIER="$ROOT/scripts/verify-host-linux-peer-artifact.py"
 WINDOWS="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.sh"
 LINUX="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
+WINDOWS_SYNC="$ROOT/scripts/windows-vm-git-sync.sh"
+LINUX_SYNC="$ROOT/scripts/ubuntu-vm-git-sync.sh"
 WINDOWS_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-underlay-peer-import.XXXXXX")"
@@ -31,7 +33,10 @@ require_tokens() {
   done
 }
 
-for path in "$HELPER" "$WINDOWS" "$LINUX" "$WINDOWS_LIB" "$LINUX_LIB"; do
+for path in \
+  "$HELPER" "$WINDOWS" "$LINUX" "$WINDOWS_SYNC" "$LINUX_SYNC" \
+  "$WINDOWS_LIB" "$LINUX_LIB"
+do
   bash -n "$path"
 done
 PYTHONPYCACHEPREFIX="$TMP_ROOT/pycache" python3 -m py_compile "$VERIFIER"
@@ -39,6 +44,8 @@ PYTHONPYCACHEPREFIX="$TMP_ROOT/pycache" python3 -m py_compile "$VERIFIER"
 require_tokens "$HELPER" "shared host-peer importer" \
   '[[ "$(uname -s)" == "Darwin" ]]' \
   'desktop_underlay_app_version' \
+  'desktop_underlay_assert_app_candidate' \
+  'assert_release_checkout_state' \
   '$0 == "[workspace.package]"' \
   'prepare-macos-release-fips-peer.sh' \
   'verify-host-linux-peer-artifact.py' \
@@ -70,6 +77,79 @@ source "$HELPER"
 [[ "$(desktop_underlay_app_version "$workspace_manifest")" == "4.1.5" ]] \
   || fail "shared host-peer importer cannot derive the workspace package version"
 
+validation_root="$TMP_ROOT/release-session-validation"
+mkdir -p "$validation_root/scripts"
+cp "$ROOT/scripts/release_common.sh" "$validation_root/scripts/release_common.sh"
+printf '%s\n' \
+  '[workspace]' \
+  'members = []' \
+  '[workspace.package]' \
+  'version = "4.1.5"' \
+  >"$validation_root/Cargo.toml"
+printf '%s\n' 'version = 4' >"$validation_root/Cargo.lock"
+printf '%s\n' exact >"$validation_root/source.txt"
+git -C "$validation_root" init -q
+git -C "$validation_root" add -A
+git -C "$validation_root" \
+  -c user.name=Gate \
+  -c user.email=gate.invalid \
+  commit -qm fixture
+(
+  set -euo pipefail
+  ROOT="$validation_root"
+  source "$HELPER"
+  head="$(git -C "$ROOT" rev-parse HEAD)"
+  tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  desktop_underlay_assert_app_candidate "$head" "$tree"
+
+  printf '%s\n' 'version = 4' '# exact local-FIPS realization' \
+    >"$ROOT/Cargo.lock"
+  export NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256="$(
+    shasum -a 256 "$ROOT/Cargo.toml" | awk '{print tolower($1)}'
+  )"
+  export NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$(
+    shasum -a 256 "$ROOT/Cargo.lock" | awk '{print tolower($1)}'
+  )"
+  desktop_underlay_assert_app_candidate "$head" "$tree"
+
+  saved_lock_sha="$NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256"
+  NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$(
+    printf 'f%.0s' {1..64}
+  )"
+  if desktop_underlay_assert_app_candidate "$head" "$tree" >/dev/null 2>&1; then
+    fail "host-peer importer accepted a stale local-FIPS lock receipt"
+  fi
+  NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$saved_lock_sha"
+
+  printf '%s\n' changed >"$ROOT/source.txt"
+  if desktop_underlay_assert_app_candidate "$head" "$tree" >/dev/null 2>&1; then
+    fail "host-peer importer accepted an unrelated tracked change"
+  fi
+  git -C "$ROOT" restore source.txt
+  printf '%s\n' unrelated >"$ROOT/untracked.txt"
+  if desktop_underlay_assert_app_candidate "$head" "$tree" >/dev/null 2>&1; then
+    fail "host-peer importer accepted an unrelated untracked file"
+  fi
+)
+git -C "$validation_root" reset --hard -q HEAD
+git -C "$validation_root" clean -fdq
+(
+  set -euo pipefail
+  ROOT="$validation_root"
+  source "$HELPER"
+  head="$(git -C "$ROOT" rev-parse HEAD)"
+  tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  git() {
+    if [[ "$*" == *"status --porcelain --untracked-files=all"* ]]; then
+      return 73
+    fi
+    command git "$@"
+  }
+  if desktop_underlay_assert_app_candidate "$head" "$tree" >/dev/null 2>&1; then
+    fail "host-peer importer accepted a failed Git cleanliness inspection"
+  fi
+)
+
 for forbidden in \
   'cargo build' \
   'cargo check' \
@@ -84,6 +164,81 @@ do
     fail "Vader host-peer importer can compile or install: $forbidden"
   fi
 done
+
+require_tokens "$WINDOWS_SYNC" "exact Windows app sync" \
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT' \
+  'rev-parse "$exact_commit^{commit}"'
+require_tokens "$LINUX_SYNC" "exact Linux app sync" \
+  'NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT' \
+  'rev-parse "$EXACT_COMMIT^{commit}"'
+require_tokens "$WINDOWS" "exact Windows underlay candidate" \
+  'desktop_underlay_assert_app_candidate' \
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$app_sha"' \
+  'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"'
+require_tokens "$LINUX" "exact Linux underlay candidate" \
+  'desktop_underlay_assert_app_candidate' \
+  'NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$app_sha"' \
+  'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"'
+if grep -Fq 'git -C "$repo" add -A' "$WINDOWS" "$LINUX"; then
+  fail "desktop underlay provenance still snapshots the realized Cargo.lock"
+fi
+
+no_remote_bin="$TMP_ROOT/no-remote-bin"
+no_remote_marker="$TMP_ROOT/unexpected-remote-call"
+mkdir -p "$no_remote_bin"
+cat >"$no_remote_bin/ssh" <<'SH'
+#!/usr/bin/env bash
+: >"$NVPN_TEST_UNEXPECTED_REMOTE_MARKER"
+exit 99
+SH
+chmod 0755 "$no_remote_bin/ssh"
+if env \
+  PATH="$no_remote_bin:$PATH" \
+  NVPN_TEST_UNEXPECTED_REMOTE_MARKER="$no_remote_marker" \
+  NVPN_UBUNTU_LOCAL_REPO_PATH="$validation_root" \
+  NVPN_UBUNTU_SSH_HOST=must-not-be-called \
+  NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT=invalid \
+  "$LINUX_SYNC" >/dev/null 2>&1
+then
+  fail "Linux exact sync accepted an invalid commit"
+fi
+[[ ! -e "$no_remote_marker" ]] \
+  || fail "Linux exact sync touched the remote before commit validation"
+missing_commit="$(printf '0%.0s' {1..40})"
+if env \
+  PATH="$no_remote_bin:$PATH" \
+  NVPN_TEST_UNEXPECTED_REMOTE_MARKER="$no_remote_marker" \
+  NVPN_UBUNTU_LOCAL_REPO_PATH="$validation_root" \
+  NVPN_UBUNTU_SSH_HOST=must-not-be-called \
+  NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$missing_commit" \
+  "$LINUX_SYNC" >/dev/null 2>&1
+then
+  fail "Linux exact sync accepted an unavailable commit"
+fi
+[[ ! -e "$no_remote_marker" ]] \
+  || fail "Linux unavailable-commit validation touched the remote"
+if env \
+  PATH="$no_remote_bin:$PATH" \
+  NVPN_TEST_UNEXPECTED_REMOTE_MARKER="$no_remote_marker" \
+  NVPN_WINDOWS_SSH_HOST=must-not-be-called \
+  NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT=invalid \
+  "$WINDOWS_SYNC" >/dev/null 2>&1
+then
+  fail "Windows exact sync accepted an invalid app commit"
+fi
+[[ ! -e "$no_remote_marker" ]] \
+  || fail "Windows exact sync touched the remote before commit validation"
+if env \
+  PATH="$no_remote_bin:$PATH" \
+  NVPN_TEST_UNEXPECTED_REMOTE_MARKER="$no_remote_marker" \
+  NVPN_WINDOWS_SSH_HOST=must-not-be-called \
+  NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$missing_commit" \
+  "$WINDOWS_SYNC" >/dev/null 2>&1
+then
+  fail "Windows exact sync accepted an unavailable app commit"
+fi
+[[ ! -e "$no_remote_marker" ]] \
+  || fail "Windows unavailable-commit validation touched the remote"
 
 for controller in "$WINDOWS" "$LINUX"; do
   require_tokens "$controller" "desktop underlay controller" \

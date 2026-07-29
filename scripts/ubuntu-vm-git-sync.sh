@@ -13,10 +13,29 @@ SYNC_LABEL="${NVPN_UBUNTU_REPO_LABEL:-nostr-vpn}"
 GUEST_REPO="$GUEST_SRC_ROOT/$GUEST_REPO_NAME"
 GUEST_BARE="$GUEST_SRC_ROOT/$GUEST_REPO_NAME.git"
 REMOTE_REF="${NVPN_UBUNTU_GIT_REF:-refs/heads/codex/ubuntu-vm-sync}"
+EXACT_COMMIT="${NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT:-}"
 [[ -n "$SSH_HOST" ]] || {
   echo "set NVPN_UBUNTU_SSH_HOST or pass the Linux VM SSH target" >&2
   exit 2
 }
+sync_commit=""
+if [[ -n "$EXACT_COMMIT" ]]; then
+  [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT must be an exact lowercase Git commit" >&2
+    exit 2
+  }
+  resolved_commit="$(
+    git -C "$LOCAL_REPO" rev-parse "$EXACT_COMMIT^{commit}" 2>/dev/null
+  )" || {
+    echo "NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT is unavailable in the local checkout" >&2
+    exit 2
+  }
+  [[ "$resolved_commit" == "$EXACT_COMMIT" ]] || {
+    echo "NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT is unavailable in the local checkout" >&2
+    exit 2
+  }
+  sync_commit="$resolved_commit"
+fi
 
 ssh_command() {
   SSH_CMD=(ssh -o BatchMode=yes)
@@ -64,14 +83,16 @@ make_sync_commit() {
   rm -f "$tmp_index"
 }
 
+if [[ -z "$sync_commit" ]]; then
+  if [[ -z "$(git -C "$LOCAL_REPO" status --porcelain)" ]]; then
+    sync_commit="$(git -C "$LOCAL_REPO" rev-parse HEAD)"
+  else
+    sync_commit="$(make_sync_commit)"
+  fi
+fi
 ssh_command
 "${SSH_CMD[@]}" \
   "mkdir -p '$GUEST_SRC_ROOT'; test -d '$GUEST_BARE' || git init --bare '$GUEST_BARE'"
-if [[ -z "$(git -C "$LOCAL_REPO" status --porcelain)" ]]; then
-  sync_commit="$(git -C "$LOCAL_REPO" rev-parse HEAD)"
-else
-  sync_commit="$(make_sync_commit)"
-fi
 git_ssh="$(git_ssh_command)"
 GIT_SSH_COMMAND="$git_ssh" \
   git -C "$LOCAL_REPO" push --force "$SSH_HOST:$GUEST_BARE" "$sync_commit:$REMOTE_REF"

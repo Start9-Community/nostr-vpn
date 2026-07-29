@@ -83,19 +83,6 @@ mkdir -p "$ARTIFACT_DIR"
 
 source "$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 source "$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
-current_tree() {
-  local repo="${1:-$ROOT}"
-  local git_dir tmp_index tree
-  git_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-dir)"
-  tmp_index="$(mktemp "$git_dir/desktop-underlay-index.XXXXXX")"
-  (
-    export GIT_INDEX_FILE="$tmp_index"
-    git -C "$repo" read-tree HEAD
-    git -C "$repo" add -A
-    git -C "$repo" write-tree
-  )
-  rm -f "$tmp_index"
-}
 
 resolve_expected_fips_revision() {
   local local_revision
@@ -119,18 +106,24 @@ resolve_expected_fips_revision() {
 }
 
 sync_and_build_candidates() {
-  local expected_tree candidate_source_date_epoch windows_tree
+  local app_sha expected_tree candidate_source_date_epoch windows_head windows_tree
   local expected_fips_tree="" windows_fips_tree=""
-  expected_tree="$(current_tree)"
+  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
+  expected_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  [[ "$app_sha" == "${NVPN_EXPECTED_APP_GIT_SHA:-}" ]] \
+    || fail "Windows underlay app revision differs from the release candidate"
+  desktop_underlay_assert_app_candidate "$app_sha" "$expected_tree" \
+    || fail "Windows underlay app checkout is not the exact release candidate"
   candidate_source_date_epoch="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
   [[ "$candidate_source_date_epoch" =~ ^[0-9]+$ ]] \
     || fail "could not derive deterministic candidate source date"
   {
-    printf 'nvpn_base_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"
+    printf 'nvpn_base_commit=%s\n' "$app_sha"
     printf 'nvpn_tree=%s\n' "$expected_tree"
     printf 'fips_commit=%s\n' "$FIPS_SOURCE_REVISION"
     if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-      printf 'fips_tree=%s\n' "$(current_tree "$LOCAL_FIPS_REPO")"
+      printf 'fips_tree=%s\n' \
+        "$(git -C "$LOCAL_FIPS_REPO" rev-parse 'HEAD^{tree}')"
     fi
   } >"$ARTIFACT_DIR/source-provenance.txt"
 
@@ -142,6 +135,7 @@ sync_and_build_candidates() {
     NVPN_WINDOWS_GUEST_FIPS_REPO_PATH="$GUEST_FIPS_REPO" \
     NVPN_WINDOWS_FIPS_REPO_PATH="${LOCAL_FIPS_REPO:-$ROOT/../fips}" \
     NVPN_WINDOWS_SYNC_PATH_DEPS="$([[ -n "$LOCAL_FIPS_REPO" ]] && echo 1 || echo 0)" \
+    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$app_sha" \
     "$ROOT/scripts/windows-vm-git-sync.sh" "$WINDOWS_SSH"
 
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
@@ -149,17 +143,23 @@ sync_and_build_candidates() {
       [[ -f "$LOCAL_FIPS_REPO/crates/$crate/Cargo.toml" ]] \
         || fail "NVPN_FIPS_REPO_PATH is missing crates/$crate/Cargo.toml"
     done
-    expected_fips_tree="$(current_tree "$LOCAL_FIPS_REPO")"
+    expected_fips_tree="$(
+      git -C "$LOCAL_FIPS_REPO" rev-parse 'HEAD^{tree}'
+    )"
     run_ps_primary \
       "git -C $(ps_quote "$GUEST_FIPS_REPO") checkout --detach $(ps_quote "$FIPS_SOURCE_REVISION") | Out-Null"
   fi
 
+  windows_head="$(run_ps_primary \
+    "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse HEAD" \
+    | tr -d '\r' \
+    | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
   windows_tree="$(run_ps_primary \
     "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
     | tr -d '\r' \
     | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
-  [[ "$windows_tree" == "$expected_tree" ]] \
-    || fail "Windows candidate tree differs from the release-gate tree"
+  [[ "$windows_head" == "$app_sha" && "$windows_tree" == "$expected_tree" ]] \
+    || fail "Windows candidate revision/tree differs from the release candidate"
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     windows_fips_tree="$(run_ps_primary \
       "git -C $(ps_quote "$GUEST_FIPS_REPO") rev-parse 'HEAD^{tree}'" \

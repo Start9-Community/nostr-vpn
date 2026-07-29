@@ -28,6 +28,26 @@ desktop_underlay_app_version() {
   ' "$manifest"
 }
 
+desktop_underlay_assert_app_candidate() {
+  local app_sha="$1" app_tree="$2"
+  [[ -n "${ROOT:-}" && -f "$ROOT/scripts/release_common.sh" ]] || {
+    desktop_underlay_host_peer_error "release checkout validation is unavailable"
+    return 1
+  }
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/release_common.sh" || {
+    desktop_underlay_host_peer_error "could not load release checkout validation"
+    return 1
+  }
+  assert_release_checkout_state \
+    "$ROOT" "$app_sha" "$app_tree" \
+    "Desktop underlay host-peer import" || {
+      desktop_underlay_host_peer_error \
+        "app checkout differs from the exact release candidate"
+      return 1
+    }
+}
+
 desktop_underlay_import_host_peer() {
   [[ -n "${ROOT:-}" && -n "${HYPERVISOR_SSH:-}" && -n "${ARTIFACT_DIR:-}" ]] || {
     desktop_underlay_host_peer_error "ROOT, HYPERVISOR_SSH, and ARTIFACT_DIR are required"
@@ -42,7 +62,7 @@ desktop_underlay_import_host_peer() {
     return 1
   }
 
-  local app_sha app_tree app_status app_version
+  local app_sha app_tree app_version
   local fips_sha fips_tree fips_version target receipt
   local peer_runner peer_runner_sha listener_audit listener_audit_sha remote_dir
   app_sha="$(git -C "$ROOT" rev-parse HEAD)" || {
@@ -57,12 +77,7 @@ desktop_underlay_import_host_peer() {
     desktop_underlay_host_peer_error "app checkout differs from NVPN_EXPECTED_APP_GIT_SHA"
     return 1
   }
-  app_status="$(git -C "$ROOT" status --porcelain --untracked-files=all)" || {
-    desktop_underlay_host_peer_error "could not inspect app checkout"
-    return 1
-  }
-  [[ -z "$app_status" ]] || {
-    desktop_underlay_host_peer_error "dirty app checkout is not importable"
+  desktop_underlay_assert_app_candidate "$app_sha" "$app_tree" || {
     return 1
   }
   app_version="$(desktop_underlay_app_version "$ROOT/Cargo.toml")" || {

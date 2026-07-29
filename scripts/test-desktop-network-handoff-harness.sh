@@ -88,11 +88,13 @@ require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
   'NVPN_UBUNTU_SSH_JUMP' \
   'NVPN_UBUNTU_SSH_PROXY_COMMAND' \
   'NVPN_UBUNTU_GUEST_REPO_NAME' \
-  'NVPN_UBUNTU_REPO_LABEL'
+  'NVPN_UBUNTU_REPO_LABEL' \
+  'NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT'
 require_tokens "$WINDOWS_SYNC" "isolated exact-FIPS sync support" \
   'FIPS_REPO="${NVPN_WINDOWS_FIPS_REPO_PATH:-${NVPN_FIPS_REPO_PATH:-$SRC_ROOT/fips}}"' \
   'NVPN_WINDOWS_GUEST_FIPS_REPO_PATH' \
-  'NVPN_WINDOWS_FIPS_GIT_BARE_PATH'
+  'NVPN_WINDOWS_FIPS_GIT_BARE_PATH' \
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT'
 require_tokens "$RELEASE_GATE" "exact release-FIPS Windows lane binding" \
   'NVPN_WINDOWS_FIPS_REPO_PATH="$release_fips_path"' \
   './scripts/windows-vm-git-sync.sh "$host"'
@@ -144,10 +146,16 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
   grep -Fq 'RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"' \
     "$host_gate" \
     || fail "$(basename "$host_gate") does not enforce the four-second bound"
-  grep -Fq "current_tree" "$host_gate" \
-    || fail "$(basename "$host_gate") does not snapshot the exact candidate tree"
-  grep -Fq 'tree differs from the release-gate tree' "$host_gate" \
-    || fail "$(basename "$host_gate") does not reject a mismatched candidate tree"
+  grep -Fq 'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
+    "$host_gate" \
+    || fail "$(basename "$host_gate") does not pin the committed candidate tree"
+  grep -Fq 'revision/tree differs from the release candidate' "$host_gate" \
+    || fail "$(basename "$host_gate") does not reject mismatched revision/tree"
+  if grep -Fq "current_tree" "$host_gate" \
+    || grep -Fq 'git -C "$repo" add -A' "$host_gate"
+  then
+    fail "$(basename "$host_gate") can snapshot a realized working-tree lock"
+  fi
   if grep -Eq '\b(networksetup|scutil|route -n add|ifconfig en[0-9])\b' "$host_gate"; then
     fail "$(basename "$host_gate") can mutate the controlling Mac network"
   fi

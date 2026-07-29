@@ -179,15 +179,26 @@ require_exact_release_fips_revision() {
 
 assert_release_checkout_state() {
   local root="$1" expected_head="$2" expected_tree="$3" label="$4"
-  local status manifest_sha lock_sha unexpected
-  if [[ "$(git -C "$root" rev-parse HEAD)" != "$expected_head" \
-    || "$(git -C "$root" rev-parse 'HEAD^{tree}')" != "$expected_tree" ]]
+  local observed_head observed_tree status manifest_sha lock_sha
+  observed_head="$(git -C "$root" rev-parse HEAD)" || {
+    echo "$label could not inspect the source revision" >&2
+    return 1
+  }
+  observed_tree="$(git -C "$root" rev-parse 'HEAD^{tree}')" || {
+    echo "$label could not inspect the source tree" >&2
+    return 1
+  }
+  if [[ "$observed_head" != "$expected_head" \
+    || "$observed_tree" != "$expected_tree" ]]
   then
     echo "$label source revision/tree changed" >&2
     return 1
   fi
 
-  status="$(git -C "$root" status --porcelain --untracked-files=all)"
+  status="$(git -C "$root" status --porcelain --untracked-files=all)" || {
+    echo "$label could not inspect source checkout cleanliness" >&2
+    return 1
+  }
   if [[ -z "${NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256:-}" ]]; then
     [[ -z "$status" ]] || {
       echo "$label source checkout is dirty" >&2
@@ -196,8 +207,14 @@ assert_release_checkout_state() {
     return 0
   fi
 
-  manifest_sha="$(release_file_sha256 "$root/Cargo.toml")"
-  lock_sha="$(release_file_sha256 "$root/Cargo.lock")"
+  manifest_sha="$(release_file_sha256 "$root/Cargo.toml")" || {
+    echo "$label could not hash Cargo.toml" >&2
+    return 1
+  }
+  lock_sha="$(release_file_sha256 "$root/Cargo.lock")" || {
+    echo "$label could not hash Cargo.lock" >&2
+    return 1
+  }
   [[ "$manifest_sha" == "${NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256:-}" ]] || {
     echo "$label Cargo.toml differs from the release-gate session" >&2
     return 1
@@ -206,15 +223,14 @@ assert_release_checkout_state() {
     echo "$label Cargo.lock differs from the release-gate session" >&2
     return 1
   }
-  unexpected="$(
-    printf '%s\n' "$status" \
-      | awk 'NF && $0 != " M Cargo.lock" { print }'
-  )"
-  [[ -z "$unexpected" ]] || {
-    echo "$label source checkout has unrelated changes:" >&2
-    printf '%s\n' "$unexpected" >&2
-    return 1
-  }
+  case "$status" in
+    ""|" M Cargo.lock") ;;
+    *)
+      echo "$label source checkout has unrelated changes:" >&2
+      printf '%s\n' "$status" >&2
+      return 1
+      ;;
+  esac
 }
 
 resolve_source_date_epoch() {
