@@ -371,6 +371,26 @@ candidate_preflight_line="$(
   grep -n '^  run_release_gate_candidate_preflight$' "$release_gate" \
     | cut -d: -f1 || true
 )"
+candidate_armv6_harness_line="$(
+  grep -n '^  ./scripts/test-prepare-linux-armv6-release-artifact-harness.sh$' \
+    "$release_gate" | cut -d: -f1 || true
+)"
+candidate_linux_gui_harness_line="$(
+  grep -n '^  ./scripts/test-linux-gui-e2e-lockfile-harness.sh$' \
+    "$release_gate" | cut -d: -f1 || true
+)"
+candidate_preflight_end_line="$(
+  awk '
+    $0 == "run_release_gate_candidate_preflight() {" {
+      in_candidate_preflight = 1
+      next
+    }
+    in_candidate_preflight && /^}$/ {
+      print NR
+      exit
+    }
+  ' "$release_gate"
+)"
 windows_preparation_line="$(
   grep -n '"Windows platform preparation"' "$release_gate" \
     | tail -1 | cut -d: -f1 || true
@@ -388,6 +408,9 @@ armv6_preparation_line="$(
     "$release_gate" | tail -1 | cut -d: -f1 || true
 )"
 [[ -n "$candidate_preflight_line" \
+  && -n "$candidate_armv6_harness_line" \
+  && -n "$candidate_linux_gui_harness_line" \
+  && -n "$candidate_preflight_end_line" \
   && -n "$windows_preparation_line" \
   && -n "$armv6_preparation_line" \
   && -n "$windows_dispatch_line" \
@@ -405,6 +428,8 @@ local_fips_preparation_line="$(
   && -n "$local_fips_preparation_line" ]] \
   || fail "release gate local-FIPS ordering markers are incomplete"
 (( candidate_preflight_line < windows_preparation_line \
+  && candidate_armv6_harness_line < candidate_linux_gui_harness_line \
+  && candidate_linux_gui_harness_line < candidate_preflight_end_line \
   && candidate_preflight_line < armv6_preparation_line \
   && armv6_preparation_line < platform_preparation_wait_line \
   && windows_preparation_line < platform_preparation_wait_line \

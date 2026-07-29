@@ -352,6 +352,7 @@ run_release_gate_candidate_preflight() {
   # Fail fast before any remote artifact build. This fake-checkout harness
   # also injects the local-FIPS session variables used later by the full gate.
   ./scripts/test-prepare-linux-armv6-release-artifact-harness.sh
+  ./scripts/test-linux-gui-e2e-lockfile-harness.sh
 }
 
 run_release_gate_static_preflight() {
@@ -378,7 +379,6 @@ run_release_gate_static_preflight() {
   ./scripts/test-local-fips-workspace-harness.sh
   ./scripts/test-build-nvpn-linux-musl-docker-config-harness.sh
   ./scripts/test-idle-cpu-gate-harness.sh
-  ./scripts/test-linux-gui-e2e-lockfile-harness.sh
   ./scripts/test-mobile-physical-device-selection-harness.sh
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
   ./scripts/test-mobile-android-release-cleanup-harness.sh

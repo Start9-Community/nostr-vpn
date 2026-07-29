@@ -10,10 +10,13 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-linux-gui-overlay-harness.XXXXXX")"
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
 ROOT_LOCK_SNAPSHOT="$TMP_ROOT/root-Cargo.lock.expected"
 LINUX_LOCK_SNAPSHOT="$TMP_ROOT/linux-Cargo.lock.expected"
+LOCK_STATUS_SNAPSHOT="$TMP_ROOT/lockfiles.git-status.expected"
 FAILURES=0
 
 cp -p "$ROOT/Cargo.lock" "$ROOT_LOCK_SNAPSHOT"
 cp -p "$ROOT/linux/Cargo.lock" "$LINUX_LOCK_SNAPSHOT"
+git -C "$ROOT" status --porcelain=v1 -- Cargo.lock linux/Cargo.lock \
+  >"$LOCK_STATUS_SNAPSHOT"
 
 cleanup() {
   local pid_file pid
@@ -326,8 +329,10 @@ assert_host_locks_unchanged() {
     || record_failure "$label mutated the host root Cargo.lock"
   cmp -s "$LINUX_LOCK_SNAPSHOT" "$ROOT/linux/Cargo.lock" \
     || record_failure "$label mutated the host Linux Cargo.lock"
-  if [[ -n "$(git -C "$ROOT" status --porcelain -- Cargo.lock linux/Cargo.lock)" ]]; then
-    record_failure "$label left a tracked host lockfile dirty"
+  if ! git -C "$ROOT" status --porcelain=v1 -- Cargo.lock linux/Cargo.lock \
+      | cmp -s "$LOCK_STATUS_SNAPSHOT" -
+  then
+    record_failure "$label changed the tracked host lockfile status"
   fi
 }
 
