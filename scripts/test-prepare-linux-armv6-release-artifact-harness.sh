@@ -166,8 +166,23 @@ write_env "$ENV_OK" "$APP_SHA" "$FIPS_SHA" yes
 write_env "$ENV_NO_HOST" "$APP_SHA" "$FIPS_SHA" no
 write_env "$ENV_BAD_FIPS" "$APP_SHA" "$(printf 'b%.0s' {1..40})" yes
 
+# The complete release gate owns a temporary local-FIPS Cargo session in the
+# real checkout. Fake checkouts must never inherit those real-tree pins.
+export NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED=1
+export NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256=outer-session
+export NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256=outer-session
+export NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256=outer-session
+export NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD=outer-session
+export NVPN_LOCAL_FIPS_SESSION_FIPS_TREE=outer-session
+
 run_lane() {
   env \
+    -u NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED \
+    -u NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256 \
+    -u NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256 \
+    -u NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256 \
+    -u NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD \
+    -u NVPN_LOCAL_FIPS_SESSION_FIPS_TREE \
     PATH="$TOOLS:$PATH" \
     FAKE_STATE="$STATE" \
     FAKE_FIPS_SHA="$FIPS_SHA" \
