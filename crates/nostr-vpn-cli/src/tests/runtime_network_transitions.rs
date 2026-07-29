@@ -132,16 +132,35 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
         "config/apply retry tried to rebind an already-committed generation"
     );
     assert!(
-        !failed_completion.is_superseded_by(&new_snapshot, false),
+        !failed_completion.is_superseded_by(&new_snapshot, false, false),
         "the exact committed snapshot lost its carrier completion marker"
     );
     assert!(
-        failed_completion.is_superseded_by(&old_snapshot, false),
+        failed_completion.is_superseded_by(&old_snapshot, false, false),
         "a newer physical snapshot did not reset staged carrier state"
     );
     assert!(
-        failed_completion.is_superseded_by(&new_snapshot, true),
+        failed_completion.is_superseded_by(&new_snapshot, true, false),
         "sleep/wake did not reset staged carrier state"
+    );
+
+    let peer_only = PlatformNetworkRefreshAttempt::new(
+        new_snapshot.clone(),
+        FipsLinkEventRefresh::UpdatePeersAndRefreshPaths,
+        "endpoint change",
+    );
+    assert!(
+        peer_only.is_superseded_by(&new_snapshot, false, true),
+        "WireGuard route drift must upgrade a staged peer-only refresh"
+    );
+    let network_reconcile = PlatformNetworkRefreshAttempt::new(
+        new_snapshot,
+        FipsLinkEventRefresh::ReconcileNetworkState,
+        "WireGuard route drift",
+    );
+    assert!(
+        !network_reconcile.is_superseded_by(&network_reconcile.parameters(true).2, false, true),
+        "an active network reconciliation already owns the same route drift"
     );
 }
 
@@ -182,12 +201,18 @@ async fn back_to_back_network_roam_is_not_delayed_by_prior_refresh() {
     let network_changed = after_roam.changed_since(&previous);
     assert!(network_changed, "the new IP and gateway must be observed");
     assert_eq!(
-        fips_link_event_refresh(false, network_changed, false, false),
+        fips_link_event_refresh(false, network_changed, false, false, false),
         FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
         "same-interface address changes must rebind underlay sockets without discarding established sessions"
     );
     assert_eq!(
-        fips_link_event_refresh(false, previous.changed_since(&previous), false, false),
+        fips_link_event_refresh(
+            false,
+            previous.changed_since(&previous),
+            false,
+            false,
+            false,
+        ),
         FipsLinkEventRefresh::None,
         "nvpn-only route notifications must remain a no-op"
     );

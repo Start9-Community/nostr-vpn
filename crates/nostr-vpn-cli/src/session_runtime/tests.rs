@@ -193,27 +193,32 @@ mod tests {
     }
     #[test]
     fn link_event_refresh_classifies_restarts_and_path_refreshes() {
-        let idle = fips_link_event_refresh(false, false, false, false);
+        let idle = fips_link_event_refresh(false, false, false, false, false);
         assert_eq!(idle, FipsLinkEventRefresh::None);
 
         assert_eq!(
-            fips_link_event_refresh(false, false, false, true),
+            fips_link_event_refresh(false, false, false, false, true),
             FipsLinkEventRefresh::RestartEndpoint
         );
         assert_eq!(
-            fips_link_event_refresh(false, true, false, false),
+            fips_link_event_refresh(false, true, false, false, false),
             FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
             "an address/route handoff must rebind carriers while preserving sessions unless runtime config requires replacement"
         );
 
         assert_eq!(
-            fips_link_event_refresh(true, false, false, false),
+            fips_link_event_refresh(true, false, false, false, false),
             FipsLinkEventRefresh::None,
             "a route notification only wakes the underlay snapshot comparison; unchanged state must not force healthy peer rekeys"
         );
         assert_eq!(
-            fips_link_event_refresh(false, false, true, false),
+            fips_link_event_refresh(false, false, false, true, false),
             FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+        );
+        assert_eq!(
+            fips_link_event_refresh(true, false, true, false, false),
+            FipsLinkEventRefresh::ReconcileNetworkState,
+            "an unmanaged physical default must reconcile strict WireGuard state even when the selected underlay fingerprint is unchanged"
         );
     }
     #[test]

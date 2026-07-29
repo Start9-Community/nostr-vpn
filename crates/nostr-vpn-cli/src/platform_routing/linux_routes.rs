@@ -28,17 +28,10 @@ pub(crate) struct LinuxManagedEndpointBypassRoute {
 pub(crate) struct LinuxDefaultRouteSpec {
     pub(crate) line: String,
     pub(crate) dev: String,
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn linux_default_route_device_from_output(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let tokens = line.split_whitespace().collect::<Vec<_>>();
-        tokens
-            .windows(2)
-            .find(|window| window[0] == "dev")
-            .map(|window| window[1].to_string())
-    })
+    pub(crate) gateway: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) metric: u32,
+    pub(crate) on_link: bool,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -82,30 +75,154 @@ fn linux_default_route_from_output_for_interface(
     output: &str,
     interface: Option<&str>,
 ) -> Option<LinuxDefaultRouteSpec> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let dev = linux_default_route_device_from_output(line)?;
-            if interface.is_some_and(|interface| interface != dev) {
+    linux_default_route_specs_from_output(output)
+        .filter_map(|route| {
+            if interface.is_some_and(|interface| interface != route.dev) {
                 return None;
             }
-            let tokens = line.split_whitespace().collect::<Vec<_>>();
-            let metric = tokens
-                .windows(2)
-                .find(|window| window[0] == "metric")
-                .and_then(|window| window[1].parse::<u32>().ok())
-                .unwrap_or(0);
-            Some((
-                metric,
-                LinuxDefaultRouteSpec {
-                    line: line.to_string(),
-                    dev,
-                },
-            ))
+            Some((route.metric, route))
         })
         .min_by_key(|(metric, _)| *metric)
         .map(|(_, route)| route)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_default_route_spec_from_line(line: &str) -> Option<LinuxDefaultRouteSpec> {
+    let line = line.trim();
+    if line.split_whitespace().next() != Some("default") {
+        return None;
+    }
+    let route = linux_route_get_spec_from_output(line)?;
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let metric = tokens
+        .windows(2)
+        .find(|window| window[0] == "metric")
+        .and_then(|window| window[1].parse::<u32>().ok())
+        .unwrap_or(0);
+    Some(LinuxDefaultRouteSpec {
+        line: line.to_string(),
+        dev: route.dev,
+        gateway: route.gateway,
+        source: route.src,
+        metric,
+        on_link: tokens.contains(&"onlink"),
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_default_route_specs_from_output(
+    output: &str,
+) -> impl Iterator<Item = LinuxDefaultRouteSpec> + '_ {
+    output.lines().filter_map(linux_default_route_spec_from_line)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_ipv4_default_route_matches_interface(
+    route: &LinuxDefaultRouteSpec,
+    interface: &netdev::Interface,
+) -> bool {
+    let source = match route.source.as_deref() {
+        Some(source) => match source.parse::<Ipv4Addr>() {
+            Ok(source) => Some(source),
+            Err(_) => return false,
+        },
+        None => None,
+    };
+    let gateway = match route.gateway.as_deref() {
+        Some(gateway) => match gateway.parse::<Ipv4Addr>() {
+            Ok(gateway) => Some(gateway),
+            Err(_) => return false,
+        },
+        None => None,
+    };
+    linux_ipv4_route_fields_match_interface(gateway, source, route.on_link, interface)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_ipv4_route_fields_match_interface(
+    gateway: Option<Ipv4Addr>,
+    source: Option<Ipv4Addr>,
+    on_link: bool,
+    interface: &netdev::Interface,
+) -> bool {
+    let networks = interface
+        .ipv4
+        .iter()
+        .filter(|network| {
+            let address = network.addr();
+            !address.is_loopback()
+                && !address.is_link_local()
+                && source.is_none_or(|source| address == source)
+        })
+        .collect::<Vec<_>>();
+    if networks.is_empty() {
+        return false;
+    }
+    match gateway {
+        Some(gateway) => {
+            on_link || networks.iter().any(|network| network.contains(&gateway))
+        }
+        None => true,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn linux_ipv4_default_route_primary_address(
+    route: &LinuxDefaultRouteSpec,
+    interface: &netdev::Interface,
+) -> Option<Ipv4Addr> {
+    let source = route
+        .source
+        .as_deref()
+        .and_then(|source| source.parse().ok());
+    let gateway = route
+        .gateway
+        .as_deref()
+        .and_then(|gateway| gateway.parse().ok());
+    linux_ipv4_route_primary_address(source, gateway, route.on_link, interface)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_ipv4_route_primary_address(
+    source: Option<Ipv4Addr>,
+    gateway: Option<Ipv4Addr>,
+    on_link: bool,
+    interface: &netdev::Interface,
+) -> Option<Ipv4Addr> {
+    if let Some(source) = source.filter(|source| interface.ipv4_addrs().contains(source)) {
+        return Some(source);
+    }
+    let usable = interface
+        .ipv4
+        .iter()
+        .filter(|network| {
+            let address = network.addr();
+            !address.is_loopback() && !address.is_link_local()
+        })
+        .collect::<Vec<_>>();
+    if let Some(gateway) = gateway
+        && let Some(network) = usable.iter().find(|network| network.contains(&gateway))
+    {
+        return Some(network.addr());
+    }
+    if gateway.is_none() || (on_link && usable.len() == 1) {
+        usable.first().map(|network| network.addr())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_ipv4_default_route_is_usable(route: &LinuxDefaultRouteSpec) -> bool {
+    get_interfaces()
+        .iter()
+        .find(|interface| interface.name == route.dev)
+        .is_some_and(|interface| {
+            interface.is_oper_up()
+                && fs::read_to_string(format!("/sys/class/net/{}/carrier", interface.name))
+                    .is_ok_and(|carrier| carrier.trim() == "1")
+                && linux_ipv4_default_route_matches_interface(route, interface)
+        })
 }
 
 #[cfg(target_os = "linux")]

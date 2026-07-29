@@ -270,6 +270,10 @@ default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
         let new_physical = LinuxDefaultRouteSpec {
             line: "default via 198.51.100.1 dev enp7s0 metric 100".to_string(),
             dev: "enp7s0".to_string(),
+            gateway: Some("198.51.100.1".to_string()),
+            source: None,
+            metric: 100,
+            on_link: false,
         };
         let owned = vec!["nvpn0".to_string(), "nvwg0".to_string()];
         assert!(!linux_saved_default_restore_required(
@@ -285,10 +289,18 @@ default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
         let overlay = LinuxDefaultRouteSpec {
             line: "default dev nvwg0 metric 5".to_string(),
             dev: "nvwg0".to_string(),
+            gateway: None,
+            source: None,
+            metric: 5,
+            on_link: false,
         };
         let already_restored = LinuxDefaultRouteSpec {
             line: saved.to_string(),
             dev: "enp1s0".to_string(),
+            gateway: Some("192.0.2.1".to_string()),
+            source: None,
+            metric: 100,
+            on_link: false,
         };
         let owned = vec!["nvpn0".to_string(), "nvwg0".to_string()];
         assert!(linux_saved_default_restore_required(

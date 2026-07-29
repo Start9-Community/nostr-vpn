@@ -1,5 +1,7 @@
 use super::*;
 use std::net::{Ipv4Addr, Ipv6Addr};
+#[cfg(target_os = "linux")]
+use std::process::Command as ProcessCommand;
 
 #[cfg(not(target_os = "windows"))]
 use netdev::get_default_interface;
@@ -106,6 +108,7 @@ fn network_snapshot_fingerprint_id(snapshot: &NetworkSnapshot) -> String {
 pub(crate) struct NetworkSnapshotSample {
     pub(crate) snapshot: NetworkSnapshot,
     pub(crate) diagnostic: String,
+    pub(crate) live_unmanaged_ipv4_default_present: bool,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -115,6 +118,7 @@ struct LinuxIpv4DefaultRoute {
     gateway: Ipv4Addr,
     source: Option<Ipv4Addr>,
     metric: u32,
+    on_link: bool,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -161,27 +165,33 @@ fn merge_linux_ipv4_default_routes(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_linux_ipv4_default_routes(route_table: &str) -> Vec<LinuxIpv4DefaultRoute> {
-    route_table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 8
-                || fields[1] != "00000000"
-                || fields[7] != "00000000"
-                || u16::from_str_radix(fields[3], 16).ok()? & 1 == 0
-            {
-                return None;
-            }
-            let gateway = u32::from_str_radix(fields[2], 16).ok()?;
-            Some(LinuxIpv4DefaultRoute {
-                interface: fields[0].to_string(),
-                gateway: Ipv4Addr::from(gateway.to_le_bytes()),
-                source: None,
-                metric: fields[6].parse().ok()?,
-            })
-        })
+fn linux_live_unmanaged_ipv4_default_present(
+    live_routes: &[LinuxIpv4DefaultRoute],
+    excluded_interfaces: &[&str],
+) -> bool {
+    live_routes
+        .iter()
+        .any(|route| !excluded_interfaces.contains(&route.interface.as_str()))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_ipv4_default_route_from_spec(spec: crate::LinuxDefaultRouteSpec) -> LinuxIpv4DefaultRoute {
+    LinuxIpv4DefaultRoute {
+        interface: spec.dev,
+        gateway: spec
+            .gateway
+            .and_then(|gateway| gateway.parse().ok())
+            .unwrap_or(Ipv4Addr::UNSPECIFIED),
+        source: spec.source.and_then(|source| source.parse().ok()),
+        metric: spec.metric,
+        on_link: spec.on_link,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_ipv4_default_route_lines(routes: &str) -> Vec<LinuxIpv4DefaultRoute> {
+    crate::linux_default_route_specs_from_output(routes)
+        .map(linux_ipv4_default_route_from_spec)
         .collect()
 }
 
@@ -189,29 +199,22 @@ fn parse_linux_ipv4_default_routes(route_table: &str) -> Vec<LinuxIpv4DefaultRou
 fn parse_linux_ipv4_default_route_hints(routes: &[String]) -> Vec<LinuxIpv4DefaultRoute> {
     routes
         .iter()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.split_whitespace().next() != Some("default") {
-                return None;
-            }
-            let spec = crate::linux_route_get_spec_from_output(line)?;
-            let tokens = line.split_whitespace().collect::<Vec<_>>();
-            let metric = tokens
-                .windows(2)
-                .find(|window| window[0] == "metric")
-                .and_then(|window| window[1].parse::<u32>().ok())
-                .unwrap_or(0);
-            Some(LinuxIpv4DefaultRoute {
-                interface: spec.dev,
-                gateway: spec
-                    .gateway
-                    .and_then(|gateway| gateway.parse().ok())
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
-                source: spec.src.and_then(|source| source.parse().ok()),
-                metric,
-            })
-        })
+        .filter_map(|line| crate::linux_default_route_spec_from_line(line))
+        .map(linux_ipv4_default_route_from_spec)
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn capture_linux_ipv4_default_routes() -> Vec<LinuxIpv4DefaultRoute> {
+    ProcessCommand::new("ip")
+        .args(["-4", "route", "show", "default"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            parse_linux_ipv4_default_route_lines(&String::from_utf8_lossy(&output.stdout))
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -275,13 +278,13 @@ fn capture_linux_underlay_network_snapshot_sample(
     excluded_interfaces: &[&str],
     default_route_hints: &[String],
 ) -> NetworkSnapshotSample {
-    let ipv4_routes = fs::read_to_string("/proc/net/route")
-        .map(|table| parse_linux_ipv4_default_routes(&table))
-        .unwrap_or_default();
+    let ipv4_routes = capture_linux_ipv4_default_routes();
     let ipv6_routes = fs::read_to_string("/proc/net/ipv6_route")
         .map(|table| parse_linux_ipv6_default_routes(&table))
         .unwrap_or_default();
     let cached_ipv4_routes = parse_linux_ipv4_default_route_hints(default_route_hints);
+    let live_unmanaged_ipv4_default_present =
+        linux_live_unmanaged_ipv4_default_present(&ipv4_routes, excluded_interfaces);
     let merged_ipv4_routes = merge_linux_ipv4_default_routes(&ipv4_routes, &cached_ipv4_routes);
     let interfaces = get_interfaces();
     let ipv4_route = select_linux_underlay_default_route(
@@ -295,9 +298,12 @@ fn capture_linux_underlay_network_snapshot_sample(
                 .find(|interface| interface.name == route.interface)
                 .is_some_and(|interface| {
                     linux_interface_usable(interface, false)
-                        && route
-                            .source
-                            .is_none_or(|source| interface.ipv4_addrs().contains(&source))
+                        && crate::linux_ipv4_route_fields_match_interface(
+                            (!route.gateway.is_unspecified()).then_some(route.gateway),
+                            route.source,
+                            route.on_link,
+                            interface,
+                        )
                 })
         },
     );
@@ -344,6 +350,7 @@ fn capture_linux_underlay_network_snapshot_sample(
                 network_snapshot_fingerprint_id(&snapshot)
             ),
             snapshot,
+            live_unmanaged_ipv4_default_present,
         };
     };
     let Some(interface) = interfaces
@@ -355,7 +362,12 @@ fn capture_linux_underlay_network_snapshot_sample(
     let snapshot = NetworkSnapshot {
         default_interface: Some(interface.name.clone()),
         default_interface_mtu: interface.mtu,
-        primary_ipv4: usable_ipv4(interface),
+        primary_ipv4: crate::linux_ipv4_route_primary_address(
+            ipv4_route.and_then(|route| route.source),
+            ipv4_route.and_then(|route| (!route.gateway.is_unspecified()).then_some(route.gateway)),
+            ipv4_route.is_some_and(|route| route.on_link),
+            interface,
+        ),
         primary_ipv6: usable_ipv6(interface),
         gateway_ipv4,
         gateway_ipv6,
@@ -372,6 +384,7 @@ fn capture_linux_underlay_network_snapshot_sample(
             network_snapshot_fingerprint_id(&snapshot)
         ),
         snapshot,
+        live_unmanaged_ipv4_default_present,
     }
 }
 
@@ -515,6 +528,7 @@ pub(crate) fn capture_network_snapshot_sample_excluding_interfaces(
                 network_snapshot_fingerprint_id(&snapshot)
             ),
             snapshot,
+            live_unmanaged_ipv4_default_present: false,
         }
     }
 }
@@ -632,18 +646,21 @@ mod tests {
                 gateway: Ipv4Addr::UNSPECIFIED,
                 source: None,
                 metric: 0,
+                on_link: false,
             },
             LinuxIpv4DefaultRoute {
                 interface: "enp1s0".to_string(),
                 gateway: Ipv4Addr::new(192, 168, 122, 1),
                 source: Some(Ipv4Addr::new(192, 168, 122, 147)),
                 metric: 100,
+                on_link: false,
             },
             LinuxIpv4DefaultRoute {
                 interface: "enp7s0".to_string(),
                 gateway: Ipv4Addr::new(172, 31, 254, 1),
                 source: Some(Ipv4Addr::new(172, 31, 254, 2)),
                 metric: 600,
+                on_link: false,
             },
         ];
         let selected = select_linux_underlay_default_route(
@@ -665,12 +682,14 @@ mod tests {
                 gateway: Ipv4Addr::UNSPECIFIED,
                 source: None,
                 metric: 0,
+                on_link: false,
             },
             LinuxIpv4DefaultRoute {
                 interface: "enp7s0".to_string(),
                 gateway: Ipv4Addr::new(172, 31, 254, 9),
                 source: Some(Ipv4Addr::new(172, 31, 254, 9)),
                 metric: 600,
+                on_link: false,
             },
         ];
         let cached_routes = parse_linux_ipv4_default_route_hints(&[
@@ -696,6 +715,29 @@ mod tests {
     }
 
     #[test]
+    fn linux_new_live_onlink_default_keeps_current_source_and_wins_selection() {
+        let live_routes = parse_linux_ipv4_default_route_lines(
+            "default via 198.51.100.1 dev wlan0 src 10.42.0.20 metric 50 onlink",
+        );
+        let cached_routes = parse_linux_ipv4_default_route_hints(&[
+            "default via 192.0.2.1 dev eth0 src 192.0.2.20 metric 100".to_string(),
+        ]);
+
+        let merged = merge_linux_ipv4_default_routes(&live_routes, &cached_routes);
+        let selected = select_linux_underlay_default_route(
+            &merged,
+            |route| route.interface.as_str(),
+            |route| route.metric,
+            &[],
+            |route| route.interface == "wlan0",
+        )
+        .expect("new onlink carrier");
+
+        assert_eq!(selected.source, Some(Ipv4Addr::new(10, 42, 0, 20)));
+        assert!(selected.on_link);
+    }
+
+    #[test]
     fn linux_underlay_selection_does_not_rebind_before_primary_carrier_loss() {
         let live_routes = vec![
             LinuxIpv4DefaultRoute {
@@ -703,12 +745,14 @@ mod tests {
                 gateway: Ipv4Addr::UNSPECIFIED,
                 source: None,
                 metric: 0,
+                on_link: false,
             },
             LinuxIpv4DefaultRoute {
                 interface: "enp7s0".to_string(),
                 gateway: Ipv4Addr::new(172, 31, 254, 1),
                 source: Some(Ipv4Addr::new(172, 31, 254, 2)),
                 metric: 600,
+                on_link: false,
             },
         ];
         let cached_routes = parse_linux_ipv4_default_route_hints(&[
@@ -758,6 +802,7 @@ mod tests {
             gateway: Ipv4Addr::new(10, 42, 0, 1),
             source: Some(Ipv4Addr::new(10, 42, 0, 20)),
             metric: 50,
+            on_link: false,
         }];
         let cached_routes = parse_linux_ipv4_default_route_hints(&[
             "default via 192.168.122.1 dev enp1s0 src 192.168.122.147 metric 100".to_string(),
@@ -778,6 +823,123 @@ mod tests {
     }
 
     #[test]
+    fn linux_cached_default_requires_its_gateway_on_the_current_interface_network() {
+        let mut interface = netdev::Interface::dummy();
+        interface.name = "enp1s0".to_string();
+        interface.ipv4 = vec!["10.42.0.20/24".parse().expect("current address")];
+        let stale = crate::linux_default_route_spec_from_line(
+            "default via 192.168.122.1 dev enp1s0 src 192.168.122.147 metric 100",
+        )
+        .expect("stale route");
+        let current = crate::linux_default_route_spec_from_line(
+            "default via 10.42.0.1 dev enp1s0 src 10.42.0.20 metric 100",
+        )
+        .expect("current route");
+
+        assert!(!crate::linux_ipv4_default_route_matches_interface(
+            &stale, &interface
+        ));
+        assert!(crate::linux_ipv4_default_route_matches_interface(
+            &current, &interface
+        ));
+    }
+
+    #[test]
+    fn linux_cached_default_prefers_its_route_source_on_a_multi_address_interface() {
+        let mut interface = netdev::Interface::dummy();
+        interface.name = "enp1s0".to_string();
+        interface.ipv4 = vec![
+            "10.42.0.20/24".parse().expect("first address"),
+            "192.0.2.44/24".parse().expect("preferred address"),
+        ];
+        let route = crate::linux_default_route_spec_from_line(
+            "default via 192.0.2.1 dev enp1s0 src 192.0.2.44 metric 100",
+        )
+        .expect("route with preferred source");
+
+        assert!(crate::linux_ipv4_default_route_matches_interface(
+            &route, &interface
+        ));
+        assert_eq!(
+            crate::linux_ipv4_default_route_primary_address(&route, &interface),
+            Some(Ipv4Addr::new(192, 0, 2, 44))
+        );
+    }
+
+    #[test]
+    fn linux_default_without_prefsrc_uses_the_address_on_the_gateway_network() {
+        let mut interface = netdev::Interface::dummy();
+        interface.name = "enp1s0".to_string();
+        interface.ipv4 = vec![
+            "10.42.0.20/24".parse().expect("unrelated first address"),
+            "192.0.2.44/24".parse().expect("gateway-network address"),
+        ];
+        let route = crate::linux_default_route_spec_from_line(
+            "default via 192.0.2.1 dev enp1s0 metric 100",
+        )
+        .expect("route without preferred source");
+
+        assert_eq!(
+            crate::linux_ipv4_default_route_primary_address(&route, &interface),
+            Some(Ipv4Addr::new(192, 0, 2, 44))
+        );
+    }
+
+    #[test]
+    fn linux_onlink_default_is_valid_but_does_not_guess_between_multiple_sources() {
+        let mut interface = netdev::Interface::dummy();
+        interface.name = "enp1s0".to_string();
+        interface.ipv4 = vec![
+            "10.42.0.20/24".parse().expect("first address"),
+            "192.0.2.44/24".parse().expect("second address"),
+        ];
+        let route = crate::linux_default_route_spec_from_line(
+            "default via 198.51.100.1 dev enp1s0 onlink metric 100",
+        )
+        .expect("onlink route");
+
+        assert!(crate::linux_ipv4_default_route_matches_interface(
+            &route, &interface
+        ));
+        assert_eq!(
+            crate::linux_ipv4_default_route_primary_address(&route, &interface),
+            None,
+            "without prefsrc or a matching subnet, guessing the first address can bind FIPS to the wrong network"
+        );
+    }
+
+    #[test]
+    fn linux_live_default_audit_ignores_cached_only_and_managed_routes() {
+        let managed = LinuxIpv4DefaultRoute {
+            interface: "nvwg0".to_string(),
+            gateway: Ipv4Addr::UNSPECIFIED,
+            source: None,
+            metric: 0,
+            on_link: false,
+        };
+        let physical = LinuxIpv4DefaultRoute {
+            interface: "enp1s0".to_string(),
+            gateway: Ipv4Addr::new(192, 0, 2, 1),
+            source: None,
+            metric: 100,
+            on_link: false,
+        };
+
+        assert!(linux_live_unmanaged_ipv4_default_present(
+            &[managed.clone(), physical],
+            &["nvwg0"]
+        ));
+        assert!(!linux_live_unmanaged_ipv4_default_present(
+            &[managed],
+            &["nvwg0"]
+        ));
+        assert!(
+            !linux_live_unmanaged_ipv4_default_present(&[], &["nvwg0"]),
+            "cached physical defaults are deliberately outside the raw live-route audit"
+        );
+    }
+
+    #[test]
     fn linux_ipv6_default_route_parser_preserves_physical_fallback() {
         let routes = parse_linux_ipv6_default_routes(
             "00000000000000000000000000000000 00 00000000000000000000000000000000 00 \
@@ -789,24 +951,6 @@ mod tests {
                 interface: "enp7s0".to_string(),
                 gateway: "fe80::1".parse().expect("gateway"),
                 metric: 100,
-            }]
-        );
-    }
-
-    #[test]
-    fn linux_ipv4_default_route_parser_requires_up_default_route() {
-        let routes = parse_linux_ipv4_default_routes(
-            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
-             enp7s0 00000000 01FE1FAC 0003 0 0 600 00000000 0 0 0\n\
-             down0 00000000 0100000A 0000 0 0 50 00000000 0 0 0\n",
-        );
-        assert_eq!(
-            routes,
-            vec![LinuxIpv4DefaultRoute {
-                interface: "enp7s0".to_string(),
-                gateway: Ipv4Addr::new(172, 31, 254, 1),
-                source: None,
-                metric: 600,
             }]
         );
     }

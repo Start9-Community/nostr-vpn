@@ -555,7 +555,7 @@ fn wall_time_jump_detection_does_not_treat_runtime_stalls_as_sleep() {
 #[test]
 fn fips_link_events_preserve_sessions_across_network_handoffs() {
     assert_eq!(
-        fips_link_event_refresh(false, true, false, false),
+        fips_link_event_refresh(false, true, false, false, false),
         FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
     );
 }
@@ -563,25 +563,25 @@ fn fips_link_events_preserve_sessions_across_network_handoffs() {
 #[test]
 fn fips_link_events_restart_endpoint_after_sleep() {
     assert_eq!(
-        fips_link_event_refresh(false, false, false, true),
+        fips_link_event_refresh(false, false, false, false, true),
         FipsLinkEventRefresh::RestartEndpoint
     );
 }
 #[test]
 fn fips_link_events_refresh_paths_for_endpoint_only_changes() {
     assert_eq!(
-        fips_link_event_refresh(false, false, true, false),
+        fips_link_event_refresh(false, false, false, true, false),
         FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
     );
     assert_eq!(
-        fips_link_event_refresh(false, false, false, false),
+        fips_link_event_refresh(false, false, false, false, false),
         FipsLinkEventRefresh::None
     );
 }
 #[test]
 fn fips_link_events_ignore_route_notifications_without_state_change() {
     assert_eq!(
-        fips_link_event_refresh(true, false, false, false),
+        fips_link_event_refresh(true, false, false, false, false),
         FipsLinkEventRefresh::None
     );
 }

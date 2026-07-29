@@ -174,13 +174,13 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
     }
 
     let current_default_route = current_linux_default_route(runner).map_err(apply_failure)?;
-    let previous_default_route = super::select_linux_wireguard_underlay_default_route(
+    let mut previous_default_route = super::select_linux_wireguard_underlay_default_route(
         previous_default_route_hint,
         previous_runtime.and_then(|runtime| runtime.previous_default_route.as_deref()),
         current_default_route.as_deref(),
         &iface,
     );
-    let endpoint_specs = linux_wireguard_exit_endpoint_specs(
+    let initial_endpoint_specs = linux_wireguard_exit_endpoint_specs(
         runner,
         config,
         &iface,
@@ -227,12 +227,12 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
             return Err(apply_failure(error));
         }
     }
-    let snapshot = match capture_apply_snapshot(
+    let mut snapshot = match capture_apply_snapshot(
         runner,
         config,
         &iface,
         source_cidr,
-        &endpoint_specs,
+        &initial_endpoint_specs,
         previous_runtime,
     ) {
         Ok(snapshot) => snapshot,
@@ -254,6 +254,29 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
             return Err(apply_failure(error));
         }
     };
+
+    let fresh_default_route = previous_default_route
+        .as_deref()
+        .and_then(crate::linux_default_route_spec_from_line)
+        .map(|route| route.dev)
+        .and_then(|interface| {
+            crate::linux_default_route_from_lines_for_interface(
+                &snapshot.main_default_routes,
+                &interface,
+            )
+        })
+        .filter(|route| route.dev != iface);
+    if let Some(current) = fresh_default_route.as_ref() {
+        previous_default_route = Some(current.line.clone());
+    }
+    let mut endpoint_specs = initial_endpoint_specs;
+    if let Some(default) = fresh_default_route {
+        for route in &mut endpoint_specs {
+            route.gateway = default.gateway.clone();
+            route.dev = default.dev.clone();
+            route.src = default.source.clone();
+        }
+    }
 
     let conservative_progress =
         conservative_apply_progress(&endpoint_specs, previous_runtime, &snapshot);
@@ -292,8 +315,10 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         &kernel_config,
         &endpoint_specs,
         previous_runtime,
-        &snapshot,
+        &mut snapshot,
         &mut progress,
+        created_interface,
+        &mut persist_cleanup_intent,
     ) {
         let mut obligation = LinuxWireGuardExitCleanupObligation::ApplyRollback(
             LinuxWireGuardExitRollbackObligation {
@@ -408,8 +433,8 @@ fn build_runtime(
     );
     if previous_runtime.is_some() {
         for route in &snapshot.main_default_routes {
-            let is_managed_default = crate::linux_default_route_device_from_output(route)
-                .is_some_and(|interface| interface == iface);
+            let is_managed_default = crate::linux_default_route_spec_from_line(route)
+                .is_some_and(|route| route.dev == iface);
             if !is_managed_default {
                 upsert_runtime_underlay_route(&mut previous_main_default_routes, route);
             }
@@ -444,13 +469,14 @@ fn upsert_runtime_underlay_route(routes: &mut Vec<String>, route: &str) {
     if routes.iter().any(|candidate| candidate == route) {
         return;
     }
-    let Some(interface) = crate::linux_default_route_device_from_output(route) else {
+    let Some(interface) = crate::linux_default_route_spec_from_line(route).map(|route| route.dev)
+    else {
         routes.push(route.to_string());
         return;
     };
     routes.retain(|candidate| {
-        crate::linux_default_route_device_from_output(candidate)
-            .is_none_or(|candidate_interface| candidate_interface != interface)
+        crate::linux_default_route_spec_from_line(candidate)
+            .is_none_or(|candidate| candidate.dev != interface)
     });
     routes.push(route.to_string());
 }
@@ -560,8 +586,10 @@ fn apply_snapshot_mutations(
     kernel_config: &str,
     endpoint_specs: &[crate::LinuxEndpointBypassRoute],
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
-    snapshot: &ApplySnapshot,
+    snapshot: &mut ApplySnapshot,
     progress: &mut ApplyProgress,
+    created_interface: bool,
+    persist_cleanup_intent: &mut impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
 ) -> Result<()> {
     progress.address_started = true;
     replace_linux_address(runner, iface, config.address.trim())?;
@@ -596,11 +624,28 @@ fn apply_snapshot_mutations(
     }
 
     progress.main_default_started = true;
+    let captured_default_routes = snapshot.main_default_routes.clone();
     apply_linux_wireguard_exit_default_route(
         runner,
         iface,
         config.address.trim(),
-        &snapshot.main_default_routes,
+        &captured_default_routes,
+        |discovered| {
+            for route in discovered {
+                if !snapshot.main_default_routes.contains(route) {
+                    snapshot.main_default_routes.push(route.clone());
+                }
+            }
+            persist_cleanup_intent(&LinuxWireGuardExitCleanupObligation::ApplyRollback(
+                LinuxWireGuardExitRollbackObligation {
+                    interface: iface.to_string(),
+                    source_cidr: source_cidr.to_string(),
+                    snapshot: snapshot.clone(),
+                    progress: progress.clone(),
+                    created_interface,
+                },
+            ))
+        },
     )?;
     flush_linux_route_cache(runner)
 }

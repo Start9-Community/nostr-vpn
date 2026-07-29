@@ -140,6 +140,7 @@ pub(crate) enum FipsLinkEventRefresh {
     None,
     RestartEndpoint,
     RebindUnderlayAndRefreshPaths,
+    ReconcileNetworkState,
     UpdatePeersAndRefreshPaths,
 }
 #[derive(Debug, Default)]
@@ -150,6 +151,7 @@ pub(crate) struct FipsPendingRosterRestartState {
 pub(crate) fn fips_link_event_refresh(
     _platform_network_event: bool,
     network_changed: bool,
+    network_state_drift: bool,
     endpoint_changed: bool,
     resumed_after_sleep: bool,
 ) -> FipsLinkEventRefresh {
@@ -162,6 +164,8 @@ pub(crate) fn fips_link_event_refresh(
         // comparison below still replaces the endpoint when its physical
         // interface, bind, MTU, or transport configuration actually changed.
         FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+    } else if network_state_drift {
+        FipsLinkEventRefresh::ReconcileNetworkState
     } else if endpoint_changed {
         FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
     } else {
@@ -542,13 +546,19 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         );
         *runtime = Some(started);
     } else if let Some(existing) = runtime.as_mut() {
-        if matches!(refresh, FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths) {
-            // Reconcile routes, DNS, and the cached runtime config only after
-            // the live carrier has accepted the new physical interface.
+        if matches!(
+            refresh,
+            FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+                | FipsLinkEventRefresh::ReconcileNetworkState
+        ) {
+            // Apply the canonical route, DNS, and runtime config for both
+            // accepted carrier changes and same-carrier route drift.
             #[cfg(target_os = "macos")]
-            existing
-                .rebind_macos_wg_upstream_after_link_event(&config)
-                .await?;
+            if matches!(refresh, FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths) {
+                existing
+                    .rebind_macos_wg_upstream_after_link_event(&config)
+                    .await?;
+            }
             apply_fips_private_tunnel_runtime_config(context.config_path, existing, config).await?;
         } else if matches!(
             refresh,
@@ -556,12 +566,20 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         ) {
             existing.update_peers(&endpoint_peers).await?;
         }
-        let refreshed = existing.refresh_peer_paths(&endpoint_peers).await?;
-        eprintln!(
-            "daemon: refreshed FIPS private mesh paths on {} after {reason} ({refreshed} direct probe(s) started); refreshed_unix_ms={}",
-            existing.iface(),
-            daemon_wall_clock_unix_milliseconds(),
-        );
+        if matches!(refresh, FipsLinkEventRefresh::ReconcileNetworkState) {
+            eprintln!(
+                "daemon: reconciled FIPS network state on {} after {reason}; refreshed_unix_ms={}",
+                existing.iface(),
+                daemon_wall_clock_unix_milliseconds(),
+            );
+        } else {
+            let refreshed = existing.refresh_peer_paths(&endpoint_peers).await?;
+            eprintln!(
+                "daemon: refreshed FIPS private mesh paths on {} after {reason} ({refreshed} direct probe(s) started); refreshed_unix_ms={}",
+                existing.iface(),
+                daemon_wall_clock_unix_milliseconds(),
+            );
+        }
     } else {
         let started = start_fips_private_tunnel_runtime(context.config_path, config).await?;
         eprintln!("daemon: FIPS private mesh on {} after {reason}", started.iface());
@@ -880,6 +898,7 @@ async fn capture_network_snapshot_for_daemon(
             crate::diagnostics::NetworkSnapshotSample {
                 diagnostic: "selected=none reason=snapshot-task-failed".to_string(),
                 snapshot,
+                live_unmanaged_ipv4_default_present: false,
             }
         }
     }

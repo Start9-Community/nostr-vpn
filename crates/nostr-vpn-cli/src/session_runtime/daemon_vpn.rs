@@ -226,6 +226,10 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     &sampled_network,
                     &mut last_network_sample_diagnostic,
                 );
+                let wireguard_network_state_drift =
+                    app.wireguard_exit.enabled
+                        && app.wireguard_exit.configured()
+                        && sampled_network.live_unmanaged_ipv4_default_present;
                 let latest_snapshot = prefer_nonself_tunnel_snapshot(
                     &tunnel_runtime,
                     wireguard_exit_interface,
@@ -240,7 +244,11 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     sampled_network.snapshot,
                 );
                 if network_refresh_attempt.as_ref().is_some_and(|attempt| {
-                    attempt.is_superseded_by(&latest_snapshot, resumed_after_sleep)
+                    attempt.is_superseded_by(
+                        &latest_snapshot,
+                        resumed_after_sleep,
+                        wireguard_network_state_drift,
+                    )
                 }) {
                     eprintln!("daemon: physical route changed during staged refresh");
                     network_refresh_attempt = None;
@@ -272,6 +280,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 if network_refresh_attempt.is_none()
                     && !platform_network_event
                     && !network_changed
+                    && !wireguard_network_state_drift
                     && !endpoint_changed
                     && !resumed_after_sleep
                 {
@@ -285,6 +294,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     let refresh = fips_link_event_refresh(
                         platform_network_event,
                         network_changed,
+                        wireguard_network_state_drift,
                         endpoint_changed,
                         resumed_after_sleep,
                     );
@@ -300,6 +310,8 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         "network change"
                     } else if resumed_after_sleep {
                         "sleep/wake"
+                    } else if wireguard_network_state_drift {
+                        "WireGuard route drift"
                     } else {
                         "endpoint change"
                     };
@@ -307,6 +319,10 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         eprintln!("daemon: network change detected; refreshing FIPS endpoint state");
                     } else if resumed_after_sleep {
                         eprintln!("daemon: sleep/wake detected; refreshing FIPS endpoint state");
+                    } else if wireguard_network_state_drift {
+                        eprintln!(
+                            "daemon: unmanaged Linux default route detected; reconciling WireGuard network state"
+                        );
                     } else {
                         eprintln!("daemon: endpoint changed; refreshing FIPS endpoint state");
                     }

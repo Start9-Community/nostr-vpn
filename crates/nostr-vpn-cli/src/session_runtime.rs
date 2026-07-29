@@ -112,8 +112,17 @@ impl PlatformNetworkRefreshAttempt {
         &self,
         latest_snapshot: &crate::diagnostics::NetworkSnapshot,
         resumed_after_sleep: bool,
+        network_state_drift: bool,
     ) -> bool {
-        resumed_after_sleep || self.target_snapshot != *latest_snapshot
+        resumed_after_sleep
+            || self.target_snapshot != *latest_snapshot
+            || (network_state_drift
+                && !matches!(
+                    self.refresh,
+                    FipsLinkEventRefresh::RestartEndpoint
+                        | FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+                        | FipsLinkEventRefresh::ReconcileNetworkState
+                ))
     }
 
     pub(crate) fn needs_carrier_rebind(&self, runtime_present: bool) -> bool {

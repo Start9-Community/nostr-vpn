@@ -41,6 +41,8 @@ pub(super) trait LinuxCommandRunner {
         args: &[String],
         stdin: &[u8],
     ) -> Result<LinuxCommandOutput>;
+
+    fn ipv4_default_route_is_usable(&mut self, route: &crate::LinuxDefaultRouteSpec) -> bool;
 }
 
 pub(super) struct SystemLinuxCommandRunner;
@@ -83,6 +85,18 @@ impl LinuxCommandRunner for SystemLinuxCommandRunner {
             write_result.with_context(|| format!("failed to write stdin for {display}"))?;
         }
         Ok(output)
+    }
+
+    fn ipv4_default_route_is_usable(&mut self, route: &crate::LinuxDefaultRouteSpec) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux_ipv4_default_route_is_usable(route)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = route;
+            false
+        }
     }
 }
 
@@ -180,22 +194,8 @@ pub(super) fn current_linux_default_route(
 }
 
 pub(super) fn lowest_metric_default_route(output: &str) -> Option<(String, String)> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.split_whitespace().next() != Some("default") {
-                return None;
-            }
-            let dev = crate::linux_default_route_device_from_output(line)?;
-            let tokens = line.split_whitespace().collect::<Vec<_>>();
-            let metric = tokens
-                .windows(2)
-                .find(|window| window[0] == "metric")
-                .and_then(|window| window[1].parse::<u32>().ok())
-                .unwrap_or(0);
-            Some((metric, line.to_string(), dev))
-        })
+    crate::linux_default_route_specs_from_output(output)
+        .map(|route| (route.metric, route.line, route.dev))
         .min_by_key(|(metric, _, _)| *metric)
         .map(|(_, line, dev)| (line, dev))
 }
@@ -455,9 +455,11 @@ pub(super) fn apply_linux_wireguard_exit_default_route(
     iface: &str,
     address: &str,
     previous_routes: &[String],
+    mut retain_discovered_routes: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<()> {
     for route in previous_routes {
-        let route_interface = crate::linux_default_route_device_from_output(route)
+        let route_interface = crate::linux_default_route_spec_from_line(route)
+            .map(|route| route.dev)
             .ok_or_else(|| anyhow!("captured default route has no interface: {route}"))?;
         if route_interface == iface {
             continue;
@@ -471,7 +473,58 @@ pub(super) fn apply_linux_wireguard_exit_default_route(
     if let Ok(source) = crate::strip_cidr(address).parse::<std::net::Ipv4Addr>() {
         args.extend(strings(&["src", &source.to_string()]));
     }
-    run_checked(runner, "ip", &args)
+    run_checked(runner, "ip", &args)?;
+
+    let mut retained_routes = previous_routes
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut last_delete_error = None;
+    for _ in 0..3 {
+        let current =
+            command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
+        let physical_routes = crate::linux_default_route_specs_from_output(&current)
+            .filter(|route| route.dev != iface)
+            .map(|route| route.line)
+            .collect::<Vec<_>>();
+        if physical_routes.is_empty() {
+            return Ok(());
+        }
+        let discovered = physical_routes
+            .iter()
+            .filter(|route| !retained_routes.contains(*route))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !discovered.is_empty() {
+            retain_discovered_routes(&discovered)
+                .context("failed to retain reasserted physical defaults before deletion")?;
+            retained_routes.extend(discovered);
+        }
+        for route in physical_routes {
+            let mut delete_args = strings(&["-4", "route", "del"]);
+            delete_args.extend(route.split_whitespace().map(ToOwned::to_owned));
+            if let Err(error) = run_checked_allow_absent(runner, "ip", &delete_args) {
+                last_delete_error = Some(error);
+            }
+        }
+    }
+    let current =
+        command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
+    let remaining = crate::linux_default_route_specs_from_output(&current)
+        .filter(|route| route.dev != iface)
+        .map(|route| route.line)
+        .collect::<Vec<_>>();
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "unmanaged IPv4 defaults remain after three strict-exit reconciliation attempts: {}{}",
+            remaining.join("; "),
+            last_delete_error.map_or_else(String::new, |error| format!(
+                "; last delete error: {error:#}"
+            ))
+        ))
+    }
 }
 
 pub(super) fn restore_linux_wireguard_config(
@@ -567,16 +620,25 @@ pub(super) fn restore_linux_route_snapshot(
     routes: &[String],
     table: Option<u32>,
 ) -> Result<()> {
+    let mut failures = Vec::new();
     for route in routes {
         let mut args = strings(&["-4", "route", "replace"]);
         args.extend(route.split_whitespace().map(ToOwned::to_owned));
         if let Some(table) = table {
             args.extend(strings(&["table", &table.to_string()]));
         }
-        run_checked(runner, "ip", &args)
-            .with_context(|| format!("failed to restore pre-WireGuard route '{route}'"))?;
+        if let Err(error) = run_checked(runner, "ip", &args) {
+            failures.push(format!("'{route}': {error:#}"));
+        }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "failed to restore pre-WireGuard routes: {}",
+            failures.join("; ")
+        ))
+    }
 }
 
 pub(super) fn restore_linux_table_snapshot(
@@ -607,24 +669,30 @@ pub(super) fn restore_linux_main_default_snapshot(
     .context("failed to remove managed WireGuard default route")?;
     let current =
         command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
-    let has_live_physical_default = current.lines().any(|line| {
-        line.split_whitespace().next() == Some("default")
-            && crate::linux_default_route_device_from_output(line)
-                .is_some_and(|device| device != iface)
-    });
+    let has_live_physical_default = crate::linux_default_route_specs_from_output(&current)
+        .any(|route| route.dev != iface && runner.ipv4_default_route_is_usable(&route));
     if has_live_physical_default {
         let managed_interface_snapshot = routes
             .iter()
             .filter(|route| {
-                crate::linux_default_route_device_from_output(route)
-                    .is_some_and(|device| device == iface)
+                crate::linux_default_route_spec_from_line(route)
+                    .is_some_and(|route| route.dev == iface)
             })
             .cloned()
             .collect::<Vec<_>>();
         return restore_linux_route_snapshot(runner, &managed_interface_snapshot, None)
             .context("failed to restore preexisting defaults on the managed WireGuard interface");
     }
-    restore_linux_route_snapshot(runner, routes, None)
+    let usable_routes = routes
+        .iter()
+        .filter(|route| {
+            crate::linux_default_route_spec_from_line(route).is_some_and(|route| {
+                route.dev == iface || runner.ipv4_default_route_is_usable(&route)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    restore_linux_route_snapshot(runner, &usable_routes, None)
         .context("failed to restore pre-WireGuard default routes")
 }
 
