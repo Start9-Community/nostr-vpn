@@ -34,17 +34,22 @@ pub(crate) struct LinuxWireGuardExitRuntime {
 
 impl LinuxWireGuardExitRuntime {
     pub(crate) fn refresh_underlay_default_route(&mut self, route: String) {
-        if let Some(previous) = self.previous_default_route.as_deref()
-            && let Some(index) = self
-                .previous_main_default_routes
-                .iter()
-                .position(|candidate| candidate == previous)
-        {
-            self.previous_main_default_routes[index] = route.clone();
-        } else if !self.previous_main_default_routes.contains(&route) {
-            self.previous_main_default_routes.push(route.clone());
-        }
+        upsert_runtime_underlay_route(&mut self.previous_main_default_routes, &route);
         self.previous_default_route = Some(route);
+    }
+
+    pub(crate) fn underlay_default_route_hints(&self) -> &[String] {
+        &self.previous_main_default_routes
+    }
+
+    pub(crate) fn underlay_default_route_for_interface(
+        &self,
+        interface: &str,
+    ) -> Option<crate::LinuxDefaultRouteSpec> {
+        crate::linux_default_route_from_lines_for_interface(
+            &self.previous_main_default_routes,
+            interface,
+        )
     }
 }
 
@@ -401,14 +406,17 @@ fn build_runtime(
         || snapshot.main_default_routes.clone(),
         |runtime| runtime.previous_main_default_routes.clone(),
     );
-    if let (Some(runtime), Some(route)) = (previous_runtime, previous_default_route.as_ref())
-        && runtime.previous_default_route.as_deref() != Some(route)
-    {
-        replace_runtime_underlay_route(
-            &mut previous_main_default_routes,
-            runtime.previous_default_route.as_deref(),
-            route,
-        );
+    if previous_runtime.is_some() {
+        for route in &snapshot.main_default_routes {
+            let is_managed_default = crate::linux_default_route_device_from_output(route)
+                .is_some_and(|interface| interface == iface);
+            if !is_managed_default {
+                upsert_runtime_underlay_route(&mut previous_main_default_routes, route);
+            }
+        }
+    }
+    if let Some(route) = previous_default_route.as_ref() {
+        upsert_runtime_underlay_route(&mut previous_main_default_routes, route);
     }
 
     LinuxWireGuardExitRuntime {
@@ -430,6 +438,21 @@ fn build_runtime(
             || previous_runtime.is_some_and(|runtime| runtime.policy_rule_owned),
         interface_restore,
     }
+}
+
+fn upsert_runtime_underlay_route(routes: &mut Vec<String>, route: &str) {
+    if routes.iter().any(|candidate| candidate == route) {
+        return;
+    }
+    let Some(interface) = crate::linux_default_route_device_from_output(route) else {
+        routes.push(route.to_string());
+        return;
+    };
+    routes.retain(|candidate| {
+        crate::linux_default_route_device_from_output(candidate)
+            .is_none_or(|candidate_interface| candidate_interface != interface)
+    });
+    routes.push(route.to_string());
 }
 
 fn merge_interface_restore(
@@ -454,16 +477,6 @@ fn merge_interface_restore(
         restore.addresses.push(address.clone());
     }
     restore
-}
-
-fn replace_runtime_underlay_route(routes: &mut Vec<String>, previous: Option<&str>, fresh: &str) {
-    if let Some(index) =
-        previous.and_then(|previous| routes.iter().position(|candidate| candidate == previous))
-    {
-        routes[index] = fresh.to_string();
-    } else if !routes.iter().any(|candidate| candidate == fresh) {
-        routes.push(fresh.to_string());
-    }
 }
 
 fn capture_apply_snapshot(

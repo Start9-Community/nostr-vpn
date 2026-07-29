@@ -45,6 +45,7 @@
     };
     use super::{
         linux_endpoint_bypass_hosts_unchanged, linux_interface_state_matches_json,
+        linux_ipv4_underlay_capture_requested, linux_ipv4_underlay_restore_due,
         linux_strict_exit_requested,
     };
     #[cfg(target_os = "linux")]
@@ -244,6 +245,18 @@
             &["0.0.0.0/0".to_string()],
             false,
         ));
+    }
+
+    #[test]
+    fn linux_wireguard_only_exit_keeps_underlay_capture_active() {
+        assert!(linux_ipv4_underlay_capture_requested(&[], true));
+        assert!(!linux_ipv4_underlay_restore_due(true, false, true, false));
+        assert!(linux_ipv4_underlay_capture_requested(
+            &["0.0.0.0/0".to_string()],
+            false,
+        ));
+        assert!(linux_ipv4_underlay_restore_due(true, false, false, false));
+        assert!(!linux_ipv4_underlay_capture_requested(&[], false));
     }
 
     #[test]

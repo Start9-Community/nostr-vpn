@@ -275,6 +275,22 @@ impl LinuxCommandRunner for FakeRunner {
                     .retain(|route| !route.contains("dev nvwg0"));
                 return Ok(self.mutation_result());
             }
+            route if route.starts_with("-4 route del default ") => {
+                let route = args[3..].join(" ");
+                let existed = self
+                    .state
+                    .main_routes
+                    .iter()
+                    .any(|candidate| candidate == &route);
+                self.state
+                    .main_routes
+                    .retain(|candidate| candidate != &route);
+                return Ok(if existed {
+                    self.mutation_result()
+                } else {
+                    Self::failure(2, "RTNETLINK answers: No such process")
+                });
+            }
             "-4 route flush default" => {
                 self.state.main_routes.clear();
                 return Ok(self.mutation_result());
@@ -495,6 +511,168 @@ fn post_apply_cleanup_restores_existing_interface_and_unowned_state() {
             ])
         }),
         "a preexisting exact policy rule is not owned"
+    );
+}
+
+#[test]
+fn already_active_alternate_underlay_refresh_preserves_all_cleanup_defaults() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let initial = runner.state.clone();
+    let primary = initial.main_routes[0].clone();
+    let secondary = initial.main_routes[1].clone();
+    let mut runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some(&primary),
+    )
+    .expect("initial primary apply");
+    assert!(
+        runner
+            .state
+            .main_routes
+            .iter()
+            .all(|route| route.contains("dev nvwg0")),
+        "strict exit must remove every physical main default"
+    );
+
+    runtime.refresh_underlay_default_route(secondary.clone());
+    let runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        Some(&runtime),
+        Some(&secondary),
+    )
+    .expect("refresh onto already-active secondary");
+
+    assert_eq!(
+        runner.state.endpoint_routes["198.51.100.20/32"],
+        vec!["198.51.100.20/32 via 203.0.113.1 dev eth1 src 203.0.113.10".to_string()],
+        "the endpoint bypass must move to the selected alternate underlay"
+    );
+    assert_eq!(
+        runtime.previous_main_default_routes, initial.main_routes,
+        "choosing an already-cached route must not discard another cleanup default"
+    );
+    cleanup_linux_wireguard_exit_upstream_with(&mut runner, &runtime).expect("cleanup");
+    assert_eq!(runner.state, initial);
+}
+
+#[test]
+fn strict_default_apply_tolerates_a_disappeared_captured_underlay() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let captured = runner.state.main_routes.clone();
+    runner.state.main_routes.clear();
+
+    apply_linux_wireguard_exit_default_route(&mut runner, "nvwg0", "10.77.0.2/32", &captured)
+        .expect("a route disappearing between capture and delete is already invalidated");
+
+    assert_eq!(
+        runner.state.main_routes,
+        vec!["default dev nvwg0 src 10.77.0.2".to_string()]
+    );
+}
+
+#[test]
+fn refreshed_underlay_details_replace_only_the_same_interface() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let primary = runner.state.main_routes[0].clone();
+    let secondary = runner.state.main_routes[1].clone();
+    let mut runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some(&primary),
+    )
+    .expect("initial apply");
+    let refreshed_primary = "default via 192.0.2.254 dev eth0 src 192.0.2.44 metric 25".to_string();
+
+    runtime.refresh_underlay_default_route(refreshed_primary.clone());
+
+    assert!(!runtime.previous_main_default_routes.contains(&primary));
+    assert!(runtime.previous_main_default_routes.contains(&secondary));
+    assert!(
+        runtime
+            .previous_main_default_routes
+            .contains(&refreshed_primary)
+    );
+    assert_eq!(
+        runtime
+            .underlay_default_route_for_interface("eth0")
+            .expect("refreshed primary")
+            .line,
+        refreshed_primary
+    );
+}
+
+#[test]
+fn new_underlay_is_cached_without_losing_switch_back_route() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let initial_defaults = runner.state.main_routes.clone();
+    let primary = initial_defaults[0].clone();
+    let new_underlay = "default via 10.42.0.1 dev wlan0 src 10.42.0.20 metric 700".to_string();
+    let mut runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some(&primary),
+    )
+    .expect("initial primary apply");
+
+    runner.state.main_routes.push(new_underlay.clone());
+    runtime.refresh_underlay_default_route(new_underlay.clone());
+    let mut runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        Some(&runtime),
+        Some(&new_underlay),
+    )
+    .expect("refresh onto newly activated underlay");
+    assert!(
+        runner
+            .state
+            .main_routes
+            .iter()
+            .all(|route| route.contains("dev nvwg0")),
+        "a newly appearing physical default must be cached then removed under strict exit"
+    );
+
+    assert!(
+        initial_defaults
+            .iter()
+            .chain(std::iter::once(&new_underlay))
+            .all(|route| runtime.previous_main_default_routes.contains(route)),
+        "runtime must retain old defaults for switch-back and add the new cleanup route"
+    );
+
+    runtime.refresh_underlay_default_route(primary.clone());
+    let runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        Some(&runtime),
+        Some(&primary),
+    )
+    .expect("switch back to original underlay");
+    assert_eq!(
+        runtime.previous_default_route.as_deref(),
+        Some(primary.as_str())
+    );
+    assert!(
+        initial_defaults
+            .iter()
+            .chain(std::iter::once(&new_underlay))
+            .all(|route| runtime.previous_main_default_routes.contains(route)),
+        "switch-back must not forget any captured physical default"
     );
 }
 

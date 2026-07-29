@@ -12,6 +12,27 @@ fn linux_strict_exit_requested(route_targets: &[String], exit_node_leak_protecti
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn linux_ipv4_underlay_capture_requested(
+    route_targets: &[String],
+    wireguard_exit_enabled: bool,
+) -> bool {
+    wireguard_exit_enabled || route_targets.iter().any(|route| route == "0.0.0.0/0")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_ipv4_underlay_restore_due(
+    requested_ipv4_exit: bool,
+    active_mesh_ipv4_exit: bool,
+    wireguard_exit_enabled: bool,
+    strict_exit: bool,
+) -> bool {
+    requested_ipv4_exit
+        && !active_mesh_ipv4_exit
+        && !wireguard_exit_enabled
+        && !strict_exit
+}
+
+#[cfg(any(target_os = "linux", test))]
 trait LinuxEndpointBypassTarget {
     fn endpoint_bypass_target(&self) -> &str;
 }
@@ -76,11 +97,11 @@ fn linux_exit_node_runtime_is_inactive(runtime: &crate::LinuxExitNodeRuntime) ->
 impl FipsPrivateTunnelRuntime {
     #[cfg(target_os = "linux")]
     async fn apply_linux_network_state(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
-        let requested_ipv4_exit = config
-            .route_targets
-            .iter()
-            .any(|route| route == "0.0.0.0/0");
-        let requested_ipv6_exit = config.route_targets.iter().any(|route| route == "::/0");
+        let requested_ipv4_exit =
+            linux_ipv4_underlay_capture_requested(&config.route_targets, config.wireguard_exit.enabled);
+        let requested_ipv6_exit = config.route_targets.iter().any(|route| route == "::/0")
+            || (config.wireguard_exit.enabled
+                && crate::linux_wireguard_exit_ipv6_default(&config.wireguard_exit));
         let mut route_targets = effective_fips_route_targets(config, &self.mesh.peer_statuses());
         let strict_exit =
             linux_strict_exit_requested(&route_targets, config.exit_node_leak_protection);
@@ -112,13 +133,20 @@ impl FipsPrivateTunnelRuntime {
         } else {
             self.restore_linux_original_default_ipv6_route();
         }
-        if !strict_exit {
-            if requested_ipv4_exit && !active_ipv4_exit {
-                self.restore_linux_original_default_route();
-            }
-            if requested_ipv6_exit && !active_ipv6_exit {
-                self.restore_linux_original_default_ipv6_route();
-            }
+        if linux_ipv4_underlay_restore_due(
+            requested_ipv4_exit,
+            active_ipv4_exit,
+            config.wireguard_exit.enabled,
+            strict_exit,
+        ) {
+            self.restore_linux_original_default_route();
+        }
+        if !strict_exit
+            && requested_ipv6_exit
+            && !active_ipv6_exit
+            && !crate::linux_wireguard_exit_ipv6_default(&config.wireguard_exit)
+        {
+            self.restore_linux_original_default_ipv6_route();
         }
         // The saved physical defaults are the only information that can
         // restore native internet after a hard crash. Fsync them before any
@@ -206,8 +234,24 @@ impl FipsPrivateTunnelRuntime {
             return Ok(());
         }
         let route = match underlay_interface {
-            Some(interface) => crate::linux_default_route_for_interface(interface)
-                .with_context(|| format!("failed to refresh IPv4 underlay route on {interface}"))?,
+            Some(interface) => {
+                match crate::linux_current_default_route_for_interface(interface)
+                    .with_context(|| {
+                        format!("failed to inspect IPv4 underlay route on {interface}")
+                    })? {
+                    Some(route) => route,
+                    None => self
+                        .exit_node_runtime
+                        .wireguard_exit
+                        .as_ref()
+                        .and_then(|runtime| {
+                            runtime.underlay_default_route_for_interface(interface)
+                        })
+                        .ok_or_else(|| {
+                            anyhow!("failed to resolve IPv4 underlay route on {interface}")
+                        })?,
+                }
+            }
             None => match crate::linux_default_route() {
                 Ok(route) => route,
                 Err(error) => {
@@ -222,6 +266,14 @@ impl FipsPrivateTunnelRuntime {
             &self.iface,
         )
         .context("failed to update cached IPv4 underlay route")
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_underlay_default_route_hints(&self) -> Vec<String> {
+        if let Some(runtime) = self.exit_node_runtime.wireguard_exit.as_ref() {
+            return runtime.underlay_default_route_hints().to_vec();
+        }
+        self.original_default_route.iter().cloned().collect()
     }
 
     #[cfg(target_os = "linux")]

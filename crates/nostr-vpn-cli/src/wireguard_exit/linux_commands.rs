@@ -456,11 +456,16 @@ pub(super) fn apply_linux_wireguard_exit_default_route(
     address: &str,
     previous_routes: &[String],
 ) -> Result<()> {
-    if lowest_metric_default_route(&previous_routes.join("\n"))
-        .is_some_and(|(_, current)| current != iface)
-    {
-        run_checked(runner, "ip", &strings(&["-4", "route", "del", "default"]))
-            .context("failed to invalidate the underlay default route")?;
+    for route in previous_routes {
+        let route_interface = crate::linux_default_route_device_from_output(route)
+            .ok_or_else(|| anyhow!("captured default route has no interface: {route}"))?;
+        if route_interface == iface {
+            continue;
+        }
+        let mut args = strings(&["-4", "route", "del"]);
+        args.extend(route.split_whitespace().map(ToOwned::to_owned));
+        run_checked_allow_absent(runner, "ip", &args)
+            .with_context(|| format!("failed to invalidate underlay default route '{route}'"))?;
     }
     let mut args = strings(&["-4", "route", "replace", "default", "dev", iface]);
     if let Ok(source) = crate::strip_cidr(address).parse::<std::net::Ipv4Addr>() {

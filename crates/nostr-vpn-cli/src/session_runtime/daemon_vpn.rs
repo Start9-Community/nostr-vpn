@@ -207,9 +207,18 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                 let wireguard_exit_interface =
                     (app.wireguard_exit.enabled && app.wireguard_exit.configured())
                         .then_some(app.wireguard_exit.interface.trim());
+                #[cfg(target_os = "linux")]
+                let default_route_hints = fips_tunnel_runtime
+                    .as_ref()
+                    .map_or_else(Vec::new, |runtime| {
+                        runtime.linux_underlay_default_route_hints()
+                    });
+                #[cfg(not(target_os = "linux"))]
+                let default_route_hints = Vec::new();
                 let sampled_network = capture_network_snapshot_for_daemon(
                     &iface,
                     wireguard_exit_interface,
+                    default_route_hints,
                 )
                 .await;
                 log_event_driven_network_sample(

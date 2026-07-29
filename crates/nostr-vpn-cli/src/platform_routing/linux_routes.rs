@@ -108,6 +108,14 @@ fn linux_default_route_from_output_for_interface(
         .map(|(_, route)| route)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_default_route_from_lines_for_interface(
+    routes: &[String],
+    interface: &str,
+) -> Option<LinuxDefaultRouteSpec> {
+    linux_default_route_from_output_for_interface(&routes.join("\n"), Some(interface))
+}
+
 #[cfg(test)]
 fn linux_default_route_from_output(output: &str) -> Option<LinuxDefaultRouteSpec> {
     linux_default_route_from_output_for_interface(output, None)
@@ -169,10 +177,10 @@ pub(crate) fn linux_current_default_ipv6_route() -> Result<Option<LinuxDefaultRo
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn linux_default_route_for_interface(
+pub(crate) fn linux_current_default_route_for_interface(
     interface: &str,
-) -> Result<LinuxDefaultRouteSpec> {
-    linux_default_route_for_family("-4", "IPv4", Some(interface))
+) -> Result<Option<LinuxDefaultRouteSpec>> {
+    linux_current_default_route_for_family("-4", Some(interface))
 }
 
 #[cfg(target_os = "linux")]

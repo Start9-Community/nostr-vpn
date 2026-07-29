@@ -855,6 +855,7 @@ fn prefer_nonself_tunnel_snapshot(
 async fn capture_network_snapshot_for_daemon(
     tunnel_interface: &str,
     wireguard_exit_interface: Option<&str>,
+    default_route_hints: Vec<String>,
 ) -> crate::diagnostics::NetworkSnapshotSample {
     let mut excluded_interfaces = vec![tunnel_interface.to_string()];
     if let Some(interface) = wireguard_exit_interface {
@@ -867,6 +868,7 @@ async fn capture_network_snapshot_for_daemon(
             .collect::<Vec<_>>();
         crate::diagnostics::capture_network_snapshot_sample_excluding_interfaces(
             &excluded_interfaces,
+            &default_route_hints,
         )
     })
     .await
