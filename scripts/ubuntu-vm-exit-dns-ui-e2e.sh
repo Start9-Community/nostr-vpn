@@ -104,7 +104,8 @@ run_case() {
   mkdir -p "$data" "$artifact_root/$label"
   "$cli" init --config "$data/config.toml"
   "$cli" set --config "$data/config.toml" --autoconnect false >/dev/null
-  XDG_DATA_HOME="$xdg" \
+  xvfb-run -a dbus-run-session -- env \
+    XDG_DATA_HOME="$xdg" \
     python3 "$repo/scripts/desktop-mobile-manual-join-atspi.py" \
       DnsPolicy \
       --app "$app" \
@@ -127,22 +128,11 @@ repo="$(pwd -P)"
 export GDK_BACKEND=x11
 export GTK_A11Y=atspi
 export NO_AT_BRIDGE=0
-xvfb-run -a dbus-run-session -- bash -s <<RUNS
-set -euo pipefail
-$(declare -f run_case)
-app=$(printf '%q' "$app")
-cli=$(printf '%q' "$cli")
-repo=$(printf '%q' "$repo")
-case_root=$(printf '%q' "$case_root")
-artifact_root=$(printf '%q' "$artifact_root")
-app_sha=$(printf '%q' "$app_sha")
-app_tree=$(printf '%q' "$app_tree")
 run_case automatic automatic cloudflare "" "" ""
 run_case cloudflare encrypted cloudflare "" "" ""
 run_case quad9 encrypted quad9 "" "" ""
 run_case custom encrypted custom "https://dns.google/dns-query" "8.8.8.8,8.8.4.4" ""
 run_case through-exit through_exit cloudflare "" "" "10.99.79.53"
-RUNS
 
 python3 - "$artifact_root" "$app_sha" "$app_tree" \
   "$expected_app_hash" "$expected_cli_hash" <<'PY'

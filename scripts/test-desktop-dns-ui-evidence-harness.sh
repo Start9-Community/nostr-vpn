@@ -16,6 +16,7 @@ required_source=(
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:DnsPolicy'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:source "$repo/scripts/lib-linux-owned-test-app.sh"'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:"$repo/scripts/test-linux-owned-test-app-harness.sh"'
+  'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:xvfb-run -a dbus-run-session -- env'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:artifact_root="$(cd "$artifact_root" && pwd -P)"'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:repo="$(pwd -P)"'
   'scripts/windows-vm-exit-dns-ui-e2e.sh:DnsPolicy'
@@ -57,12 +58,29 @@ for required in (
     'test ! -e "$artifact_root"',
     'test ! -e "$case_root"',
     'linux_stop_exact_test_app "$app"',
+    "xvfb-run -a dbus-run-session -- env",
 ):
     if required not in script:
         raise SystemExit(
             "Linux Exit DNS UI wrapper does not clean exact remote state "
             f"after cancellation: {required}"
         )
+run_case_start = script.index("run_case() {")
+run_case_end = script.index(
+    'artifact_root="$(cd "$artifact_root" && pwd -P)"',
+    run_case_start,
+)
+run_case = script[run_case_start:run_case_end]
+if run_case.count("xvfb-run -a dbus-run-session -- env") != 1:
+    raise SystemExit(
+        "Linux Exit DNS UI wrapper does not isolate every DNS case in a "
+        "fresh Xvfb/DBus accessibility session"
+    )
+matrix = script[run_case_end:]
+if "xvfb-run -a dbus-run-session -- bash -s" in matrix:
+    raise SystemExit(
+        "Linux Exit DNS UI matrix still reuses one accessibility session"
+    )
 for required in (
     "linux_exact_executable_records()",
     "linux_exact_executable_pids()",
