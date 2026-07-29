@@ -363,8 +363,7 @@ fn resolve_windows_interface_index_for_address(interface_ip: &str) -> Result<u32
         .with_context(|| format!("invalid IPv4 interface address {interface_ip}"))?;
 
     // `netsh interface ipv4 show ipaddresses level=verbose` enumerates
-    // every IPv4 address with its interface index. Cheap parse; we
-    // could use the IpHelper API but that's a bigger crate dep.
+    // every IPv4 address with its interface index in one bounded query.
     let output = ProcessCommand::new("netsh")
         .args(["interface", "ipv4", "show", "ipaddresses", "level=verbose"])
         .bounded_output("`netsh interface ipv4 show ipaddresses level=verbose`")?;
@@ -398,35 +397,35 @@ fn resolve_windows_interface_index_for_address(interface_ip: &str) -> Result<u32
 
 #[cfg(target_os = "windows")]
 fn resolve_windows_interface_identity(interface_index: u32) -> Result<String> {
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; \
-         $adapters = @(Get-NetAdapter -IncludeHidden -InterfaceIndex {interface_index}); \
-         if ($adapters.Count -ne 1) {{ \
-           throw \"expected one adapter for interface index {interface_index}, got \
-                  $($adapters.Count)\" \
-         }}; \
-         ([guid]([string]$adapters[0].InterfaceGuid)).ToString('D').ToLowerInvariant()"
-    );
-    let output = ProcessCommand::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .bounded_output(&format!(
-            "resolve stable Windows identity for interface {interface_index}"
-        ))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Get-NetAdapter identity query failed for interface {interface_index}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    // This is on the underlay-handoff hot path; avoid a PowerShell startup.
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
+
+    let mut row = MIB_IF_ROW2::default();
+    row.InterfaceIndex = interface_index;
+    let status = unsafe { GetIfEntry2(&mut row) };
+    if status != ERROR_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(status as i32)).with_context(|| {
+            format!("resolve stable Windows identity for interface {interface_index}")
+        });
     }
-    let identity = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_ascii_lowercase();
-    if identity.is_empty() {
-        return Err(anyhow!(
-            "Get-NetAdapter returned an empty identity for interface {interface_index}"
-        ));
-    }
-    Ok(identity)
+    let guid = row.InterfaceGuid;
+    Ok(format_windows_interface_guid(
+        guid.data1, guid.data2, guid.data3, guid.data4,
+    ))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn format_windows_interface_guid(
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+) -> String {
+    format!(
+        "{data1:08x}-{data2:04x}-{data3:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        data4[0], data4[1], data4[2], data4[3], data4[4], data4[5], data4[6], data4[7]
+    )
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -552,39 +551,67 @@ fn windows_route_delete_args(route: &WindowsRouteSpec) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_route_exists(route: &WindowsRouteSpec, exact_attributes: bool) -> Result<bool> {
-    let prefix = route.prefix.replace('\'', "''");
-    let next_hop = route.next_hop.replace('\'', "''");
-    let metric_filter = if exact_attributes {
-        format!(" -and $_.RouteMetric -eq {}", route.metric)
-    } else {
-        String::new()
+    // Reconciliation performs several ownership probes, so query IpHelper
+    // directly instead of starting PowerShell for each one.
+    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetIpForwardEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
     };
-    let script = format!(
-        "$route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '{prefix}' \
-         -InterfaceIndex {} -ErrorAction SilentlyContinue | \
-         Where-Object {{ $_.NextHop -eq '{next_hop}'{metric_filter} }} | \
-         Select-Object -First 1; if ($null -eq $route) {{ 'false' }} else {{ 'true' }}",
-        route.interface_index
-    );
-    let output = ProcessCommand::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .bounded_output("query exact Windows route ownership state")?;
-    if !output.status.success() {
+
+    let (destination, prefix_length) = route
+        .prefix
+        .split_once('/')
+        .ok_or_else(|| anyhow!("Windows route prefix must be IPv4 CIDR: {}", route.prefix))?;
+    let destination = destination
+        .parse()
+        .with_context(|| format!("invalid Windows route IPv4 address {destination}"))?;
+    let prefix_length = prefix_length
+        .parse::<u8>()
+        .with_context(|| format!("invalid Windows route prefix length {prefix_length}"))?;
+    if prefix_length > 32 {
         return Err(anyhow!(
-            "Get-NetRoute query failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "invalid Windows route prefix length {prefix_length}"
         ));
     }
-    match String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        output => Err(anyhow!(
-            "unexpected Get-NetRoute existence response {output:?}"
-        )),
+    let next_hop = route
+        .next_hop
+        .parse()
+        .with_context(|| format!("invalid Windows route next hop {}", route.next_hop))?;
+    let mut row = MIB_IPFORWARD_ROW2::default();
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceIndex = route.interface_index;
+    row.DestinationPrefix.Prefix = windows_sockaddr_for_ipv4(destination);
+    row.DestinationPrefix.PrefixLength = prefix_length;
+    row.NextHop = windows_sockaddr_for_ipv4(next_hop);
+    let status = unsafe { GetIpForwardEntry2(&mut row) };
+    match status {
+        ERROR_SUCCESS => Ok(!exact_attributes || row.Metric == route.metric),
+        ERROR_NOT_FOUND => Ok(false),
+        status => Err(std::io::Error::from_raw_os_error(status as i32))
+            .context("query native Windows route ownership state"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_sockaddr_for_ipv4(
+    address: std::net::Ipv4Addr,
+) -> windows_sys::Win32::Networking::WinSock::SOCKADDR_INET {
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, IN_ADDR, IN_ADDR_0, SOCKADDR_IN, SOCKADDR_INET,
+    };
+
+    SOCKADDR_INET {
+        Ipv4: SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: 0,
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    // `S_addr` stores network-order bytes in native memory.
+                    S_addr: u32::from_ne_bytes(address.octets()),
+                },
+            },
+            sin_zero: [0; 8],
+        },
     }
 }
 
@@ -609,6 +636,29 @@ fn run_windows_netsh(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod windows_command_timeout_tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_queries_find_the_physical_default_route() {
+        let default =
+            capture_windows_default_route_excluding(&[]).expect("capture physical default route");
+        let route = WindowsRouteSpec {
+            prefix: "0.0.0.0/0".to_string(),
+            interface_index: default.interface_index,
+            next_hop: default.gateway,
+            metric: u32::MAX,
+            interface_identity: None,
+        };
+        assert!(
+            windows_route_exists(&route, false).expect("query native route identity"),
+            "native lookup must find the default route regardless of metric"
+        );
+        assert!(
+            !resolve_windows_interface_identity(route.interface_index)
+                .expect("resolve native interface identity")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn timed_out_child_is_terminated_and_reported() {

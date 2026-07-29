@@ -1,4 +1,17 @@
     #[test]
+    fn formats_native_windows_interface_guid_like_get_netadapter() {
+        assert_eq!(
+            format_windows_interface_guid(
+                0x12345678,
+                0x9abc,
+                0xdef0,
+                [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0],
+            ),
+            "12345678-9abc-def0-1234-56789abcdef0"
+        );
+    }
+
+    #[test]
     fn parses_windows_default_route_from_route_print() {
         // Synthetic `route print -4 0.0.0.0` output. Only the
         // 0.0.0.0/0.0.0.0 row matters; all other content is meant to
