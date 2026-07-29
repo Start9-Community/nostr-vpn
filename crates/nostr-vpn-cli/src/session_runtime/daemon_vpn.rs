@@ -381,6 +381,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             own_pubkey: own_pubkey.as_deref(),
                             recent_peers: Some(&recent_peers),
                             ethernet_underlay: ethernet_underlay.as_ref(),
+                            client_dataplane_enabled: vpn_enabled,
                             last_endpoint_peer_signature: &mut last_fips_endpoint_peer_signature,
                         },
                         refresh_reason,
@@ -565,6 +566,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                             own_pubkey: own_pubkey.as_deref(),
                                             recent_peers: Some(&recent_peers),
                                             ethernet_underlay: ethernet_underlay.as_ref(),
+                                            client_dataplane_enabled: vpn_enabled,
                                             last_endpoint_peer_signature:
                                                 &mut last_fips_endpoint_peer_signature,
                                         },

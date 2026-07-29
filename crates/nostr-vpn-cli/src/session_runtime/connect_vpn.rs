@@ -146,6 +146,7 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                                             own_pubkey: own_pubkey.as_deref(),
                                             recent_peers: None,
                                             ethernet_underlay: None,
+                                            client_dataplane_enabled: true,
                                             last_endpoint_peer_signature:
                                                 &mut last_fips_endpoint_peer_signature,
                                         },

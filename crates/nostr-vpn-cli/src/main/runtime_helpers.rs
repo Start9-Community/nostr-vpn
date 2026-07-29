@@ -407,7 +407,7 @@ async fn refresh_fips_tunnel_config(
 ) -> Result<()> {
     let ethernet_underlay = runtime.ethernet_underlay().cloned();
     let live_peer_endpoints = runtime.peer_endpoint_hints();
-    let config = fips_tunnel_config_from_app_async(FipsTunnelConfigInput {
+    let mut config = fips_tunnel_config_from_app_async(FipsTunnelConfigInput {
         app,
         config_path,
         network_id,
@@ -420,6 +420,9 @@ async fn refresh_fips_tunnel_config(
         ethernet_underlay: ethernet_underlay.as_ref(),
     })
     .await?;
+    if !runtime.client_dataplane_enabled() {
+        config.disable_client_dataplane();
+    }
     apply_fips_private_tunnel_runtime_config(config_path, runtime, config).await
 }
 
@@ -675,7 +678,7 @@ async fn sync_fips_private_runtime(
         .as_ref()
         .and_then(crate::fips_private_mesh::FipsPrivateTunnelRuntime::ethernet_underlay)
         .or(context.ethernet_underlay);
-    let config = fips_tunnel_config_from_app_async(FipsTunnelConfigInput {
+    let mut config = fips_tunnel_config_from_app_async(FipsTunnelConfigInput {
         app: context.app,
         config_path: context.config_path,
         network_id: context.network_id,
@@ -693,6 +696,9 @@ async fn sync_fips_private_runtime(
         ethernet_underlay,
     })
     .await?;
+    if !context.vpn_enabled {
+        config.disable_client_dataplane();
+    }
 
     let restart = runtime
         .as_ref()

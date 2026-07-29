@@ -804,6 +804,10 @@ impl FipsPrivateTunnelRuntime {
         &self.iface
     }
 
+    pub(crate) fn client_dataplane_enabled(&self) -> bool {
+        self.config.client_dataplane_enabled
+    }
+
     pub(crate) fn ethernet_underlay(&self) -> Option<&FipsEthernetUnderlayConfig> {
         self.config.ethernet_underlay.as_ref()
     }

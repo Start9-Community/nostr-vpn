@@ -371,6 +371,7 @@ impl FipsPrivateTunnelConfig {
             share_local_candidates: app.lan_discovery_enabled,
             peers,
             endpoint_peers,
+            client_dataplane_enabled: true,
             route_targets,
             secure_dns_requested: !app.internet_source.is_direct()
                 && (!local_identity_confirmation_pending
@@ -444,6 +445,18 @@ impl FipsPrivateTunnelConfig {
             clamp_mesh_mtu_to_underlay_interface_mtu(self.mesh_mtu, underlay_interface_mtu);
     }
 
+    pub(crate) fn disable_client_dataplane(&mut self) {
+        self.client_dataplane_enabled = false;
+        self.route_targets.clear();
+        for peer in &mut self.peers {
+            peer.allowed_ips.clear();
+        }
+        self.secure_dns_requested = false;
+        self.public_paid_exit_waiting_for_admission = false;
+        self.wireguard_exit.enabled = false;
+        self.exit_node_leak_protection = false;
+    }
+
     fn local_allowed_ips(&self) -> Vec<String> {
         let mut routes = vec![self.local_address.clone()];
         routes.extend(self.local_advertised_routes.iter().cloned());
@@ -500,13 +513,14 @@ impl FipsPrivateTunnelConfig {
     }
 
     fn secure_dns_required(&self) -> bool {
-        self.secure_dns_requested
+        let active_client_path = self.secure_dns_requested
             || self.fips_host_enabled()
             || (self.wireguard_exit.enabled && self.wireguard_exit.configured())
             || self
                 .route_targets
                 .iter()
-                .any(|route| matches!(route.trim(), "0.0.0.0/0" | "::/0"))
+                .any(|route| matches!(route.trim(), "0.0.0.0/0" | "::/0"));
+        self.client_dataplane_enabled && active_client_path
     }
 
     fn fips_host_enabled(&self) -> bool {
@@ -524,7 +538,7 @@ impl FipsPrivateTunnelConfig {
         &self,
         wireguard_active: bool,
     ) -> Result<ExitDnsResolverConfig> {
-        if !self.secure_dns_requested {
+        if !self.client_dataplane_enabled || !self.secure_dns_requested {
             return ExitDnsConfig::default().resolver_config(None);
         }
         if self.exit_dns.mode == nostr_vpn_core::config::ExitDnsMode::ThroughExit

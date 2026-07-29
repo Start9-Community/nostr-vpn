@@ -660,6 +660,9 @@ pub(crate) struct FipsPrivateTunnelConfig {
     pub(crate) share_local_candidates: bool,
     pub(crate) peers: Vec<FipsMeshPeerConfig>,
     pub(crate) endpoint_peers: Vec<FipsEndpointPeerTransportConfig>,
+    /// Keep the authenticated FIPS control plane alive while the local VPN is
+    /// paused without installing peer/default routes or taking over DNS.
+    pub(crate) client_dataplane_enabled: bool,
     pub(crate) route_targets: Vec<String>,
     /// The selected internet source owns system DNS even while its default
     /// route is pending. This keeps roster MagicDNS alive during exit setup.

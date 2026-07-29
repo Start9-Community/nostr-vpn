@@ -16,6 +16,10 @@ impl FipsPrivateTunnelRuntime {
         ""
     }
 
+    pub(crate) fn client_dataplane_enabled(&self) -> bool {
+        false
+    }
+
     pub(crate) fn ethernet_underlay(&self) -> Option<&FipsEthernetUnderlayConfig> {
         None
     }

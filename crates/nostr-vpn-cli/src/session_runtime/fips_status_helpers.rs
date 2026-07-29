@@ -119,6 +119,7 @@ struct FipsRestartContext<'a> {
     own_pubkey: Option<&'a str>,
     recent_peers: Option<&'a nostr_vpn_core::recent_peers::RecentPeerEndpoints>,
     ethernet_underlay: Option<&'a crate::fips_private_mesh::FipsEthernetUnderlayConfig>,
+    client_dataplane_enabled: bool,
     last_endpoint_peer_signature: &'a mut EndpointPeerSignature,
 }
 struct FipsLinkRefreshCompletion<'a> {
@@ -514,7 +515,7 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
     // Do not carry learned endpoint hints across link changes. They may belong
     // to a previous underlay or NAT mapping.
     let live_peer_endpoints = Vec::new();
-    let config = fips_tunnel_config_for_link_event(
+    let mut config = fips_tunnel_config_for_link_event(
         FipsTunnelConfigInput {
             app: context.app,
             config_path: context.config_path,
@@ -529,6 +530,9 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
         },
     )
     .await?;
+    if !context.client_dataplane_enabled {
+        config.disable_client_dataplane();
+    }
     let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
     let endpoint_peers = config.endpoint_peers.clone();
     if matches!(refresh, FipsLinkEventRefresh::RestartEndpoint)
@@ -703,6 +707,7 @@ async fn restart_fips_tunnel_runtime_after_stale_participants(
             own_pubkey: context.own_pubkey,
             recent_peers: context.recent_peers,
             ethernet_underlay: context.ethernet_underlay,
+            client_dataplane_enabled: context.client_dataplane_enabled,
             last_endpoint_peer_signature: &mut *context.last_endpoint_peer_signature,
         },
         &stale_participants,
@@ -749,7 +754,7 @@ async fn refresh_fips_tunnel_runtime_peer_paths_in_place(
     reason: &str,
 ) -> Result<()> {
     let live_peer_endpoints = current.peer_endpoint_hints();
-    let config = fips_tunnel_config_from_app_async(
+    let mut config = fips_tunnel_config_from_app_async(
         FipsTunnelConfigInput {
             app: context.app,
             config_path: context.config_path,
@@ -764,6 +769,9 @@ async fn refresh_fips_tunnel_runtime_peer_paths_in_place(
         },
     )
     .await?;
+    if !context.client_dataplane_enabled {
+        config.disable_client_dataplane();
+    }
     let endpoint_peer_signature = endpoint_peer_signature(&config.endpoint_peers);
     let outcome = current.update_peers(&config.endpoint_peers).await?;
     let refresh_endpoint_peers =

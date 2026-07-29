@@ -383,6 +383,58 @@
     }
 
     #[test]
+    fn paused_background_tunnel_keeps_control_paths_without_client_network_ownership() {
+        let own = Keys::generate();
+        let peer = Keys::generate();
+        let own_pubkey = own.public_key().to_hex();
+        let peer_pubkey = peer.public_key().to_hex();
+        let mut app = AppConfig::default();
+        app.nostr.secret_key = own.secret_key().to_bech32().expect("nsec");
+        app.networks[0].enabled = true;
+        app.networks[0].network_id = "paused-control-only".to_string();
+        app.networks[0].devices = vec![own_pubkey.clone(), peer_pubkey];
+        app.set_internet_source(InternetSource::WireGuard);
+        app.wireguard_exit.enabled = true;
+        app.wireguard_exit.address = "10.64.70.195/32".to_string();
+        app.wireguard_exit.private_key =
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".to_string();
+        app.wireguard_exit.peer_public_key =
+            "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=".to_string();
+        app.wireguard_exit.endpoint = "198.51.100.20:51820".to_string();
+        app.wireguard_exit.allowed_ips = vec!["0.0.0.0/0".to_string()];
+        app.exit_node_leak_protection = true;
+
+        let mut config = FipsPrivateTunnelConfig::from_app(
+            &app,
+            "paused-control-only",
+            "utun-paused",
+            Some(&own_pubkey),
+            None,
+            &[],
+        )
+        .expect("active tunnel config");
+        let control_peers = config.endpoint_peers.clone();
+        assert!(config.wireguard_exit.enabled);
+        assert!(config.secure_dns_required());
+        assert!(
+            config
+                .peers
+                .iter()
+                .any(|peer| !peer.allowed_ips.is_empty())
+        );
+
+        config.disable_client_dataplane();
+
+        assert!(!config.client_dataplane_enabled);
+        assert!(config.route_targets.is_empty());
+        assert!(config.peers.iter().all(|peer| peer.allowed_ips.is_empty()));
+        assert!(!config.wireguard_exit.enabled);
+        assert!(!config.exit_node_leak_protection);
+        assert!(!config.secure_dns_required());
+        assert_eq!(config.endpoint_peers, control_peers);
+    }
+
+    #[test]
     fn dns_through_wireguard_fails_closed_until_wireguard_is_active() {
         let keys = Keys::generate();
         let own_pubkey = keys.public_key().to_hex();

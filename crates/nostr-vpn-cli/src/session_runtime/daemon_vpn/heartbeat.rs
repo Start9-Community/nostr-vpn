@@ -41,6 +41,9 @@ pub(super) async fn maintain_fips_heartbeat(context: FipsHeartbeatContext<'_>) {
         join_request_sends,
     } = context;
     let now = unix_timestamp();
+    let client_dataplane_enabled = runtime
+        .as_ref()
+        .is_some_and(crate::fips_private_mesh::FipsPrivateTunnelRuntime::client_dataplane_enabled);
 
     if let Some(current) = runtime.as_ref() {
         if let Err(error) = current.ping_peers(network_id, now).await {
@@ -65,6 +68,7 @@ pub(super) async fn maintain_fips_heartbeat(context: FipsHeartbeatContext<'_>) {
                             own_pubkey,
                             recent_peers: Some(recent_peers),
                             ethernet_underlay,
+                            client_dataplane_enabled,
                             last_endpoint_peer_signature,
                         },
                         "local endpoint control timeout",
@@ -98,6 +102,7 @@ pub(super) async fn maintain_fips_heartbeat(context: FipsHeartbeatContext<'_>) {
             own_pubkey,
             recent_peers: Some(recent_peers),
             ethernet_underlay,
+            client_dataplane_enabled,
             last_endpoint_peer_signature,
         },
         last_stale_participant_restart_at,
@@ -122,6 +127,7 @@ pub(super) async fn maintain_fips_heartbeat(context: FipsHeartbeatContext<'_>) {
             own_pubkey,
             recent_peers: Some(recent_peers),
             ethernet_underlay,
+            client_dataplane_enabled,
             last_endpoint_peer_signature,
         },
         expected_peers,

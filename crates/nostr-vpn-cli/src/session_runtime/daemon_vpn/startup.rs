@@ -181,7 +181,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     }
     let (fips_tunnel_runtime, last_fips_endpoint_peer_signature) =
         if fips_private_runtime_active(&app, vpn_enabled, expected_peers) {
-            let config = match fips_tunnel_config_from_app(FipsTunnelConfigInput {
+            let mut config = match fips_tunnel_config_from_app(FipsTunnelConfigInput {
                 app: &app,
                 config_path: &config_path,
                 network_id: &network_id,
@@ -219,6 +219,9 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
                     return Err(error);
                 }
             };
+            if !vpn_enabled {
+                config.disable_client_dataplane();
+            }
             let seeded_endpoint_count = config
                 .endpoint_peers
                 .iter()
