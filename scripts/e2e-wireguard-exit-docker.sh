@@ -30,6 +30,7 @@ CONFIG_PATH="/root/.config/nvpn/config.toml"
 TARGET_IP="${NVPN_WG_EXIT_TARGET_IP:-203.0.113.100}"
 WG_UPSTREAM_IP="${NVPN_WG_EXIT_UPSTREAM_IP:-10.203.0.20}"
 WG_UPSTREAM_PUBLIC_IP="${NVPN_WG_EXIT_UPSTREAM_PUBLIC_IP:-203.0.113.20}"
+NETWORK_ID="${NVPN_WG_EXIT_NETWORK_ID:-docker-wireguard-exit}"
 NODE_A_IP="${NVPN_WG_EXIT_NODE_A_IP:-10.203.0.10}"
 WG_LISTEN_PORT="51820"
 WG_TUNNEL_NET="10.99.99.0/24"
@@ -212,6 +213,7 @@ PersistentKeepalive = 25
 "${COMPOSE[@]}" exec -T node-a sh -lc 'cat > /tmp/wg-upstream.conf' <<<"$WG_CONFIG"
 
 "${COMPOSE[@]}" exec -T node-a nvpn set \
+  --network-id "$NETWORK_ID" \
   --participant "$BOB_NPUB" \
   --endpoint "${NODE_A_IP}:51820" \
   --listen-port 51820 \
@@ -222,6 +224,7 @@ PersistentKeepalive = 25
   --wireguard-exit-config-file /tmp/wg-upstream.conf \
   --wireguard-exit-enabled true >/dev/null
 "${COMPOSE[@]}" exec -T node-b nvpn set \
+  --network-id "$NETWORK_ID" \
   --participant "$ALICE_NPUB" \
   --endpoint "10.203.0.11:51820" \
   --listen-port 51820 \
@@ -300,13 +303,11 @@ if [[ -z "$BOB_TUNNEL_IP" ]]; then
   exit 1
 fi
 
-FIPS_IFACE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
-  "ip -4 route get '$BOB_TUNNEL_IP' | awk '{ for (i = 1; i <= NF; i++) if (\$i == \"dev\") { print \$(i + 1); exit } }'" \
-  | tr -d '\r')"
-MESH_POLICY_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
-  "ip -4 route show table 51888 exact '$MESH_TUNNEL_NET'" | tr -d '\r')"
 MESH_REPLY_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
   "ip -4 route get '$BOB_TUNNEL_IP' from '$ALICE_TUNNEL_IP'" | tr -d '\r')"
+FIPS_IFACE="$(awk '{ for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }' <<<"$MESH_REPLY_ROUTE")"
+MESH_POLICY_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
+  "ip -4 route show table 51888 exact '$MESH_TUNNEL_NET'" | tr -d '\r')"
 if [[ -z "$FIPS_IFACE" ]] \
   || ! grep -Fq "$MESH_TUNNEL_NET dev $FIPS_IFACE" <<<"$MESH_POLICY_ROUTE" \
   || ! grep -Fq "dev $FIPS_IFACE" <<<"$MESH_REPLY_ROUTE"; then
