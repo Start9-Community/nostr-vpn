@@ -35,10 +35,6 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         let lifecycleCycles: Int
         let backgroundDwellSeconds: Int
         let underlayAssociationTimeoutSeconds: Int
-        let underlayHomeSsid: String
-        let underlayHomePassphrase: String
-        let underlayAlternateSsid: String
-        let underlayAlternatePassphrase: String
     }
 
     let app = XCUIApplication()
@@ -128,18 +124,18 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
         if let spec = optionalReleaseSpec(), spec.exerciseUnderlay {
-            _ = try selectWiFiNetwork(
-                ssid: spec.underlayHomeSsid,
-                passphrase: spec.underlayHomePassphrase,
-                timeout: TimeInterval(spec.underlayAssociationTimeoutSeconds)
-            )
+            let originalSsid = try originalWiFiForCleanup()
+            try setWiFiEnabled(true)
             guard waitForPhysicalPath(
                 required: .wifi,
-                excluded: nil,
+                excluded: .cellular,
                 timeout: TimeInterval(spec.underlayAssociationTimeoutSeconds)
-            ) != nil else {
-                throw gateError("Cleanup did not restore the original Wi-Fi path")
+            ) != nil,
+                try selectedWiFiSSID() == originalSsid
+            else {
+                throw gateError("Cleanup did not restore the exact original Wi-Fi")
             }
+            try clearOriginalWiFiCleanup()
             app.activate()
             XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
             emit("NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1")
@@ -651,14 +647,6 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
               (5...45).contains(spec.underlayAssociationTimeoutSeconds)
         else {
             throw gateError("Release lifecycle or underlay bounds were invalid")
-        }
-        if spec.exerciseUnderlay {
-            guard !spec.underlayHomeSsid.isEmpty,
-                  !spec.underlayAlternateSsid.isEmpty,
-                  spec.underlayHomeSsid != spec.underlayAlternateSsid
-            else {
-                throw gateError("Release physical Wi-Fi topology was incomplete")
-            }
         }
         if spec.mode == "encrypted", spec.provider == "custom" {
             guard spec.customUrl.hasPrefix("https://"), !spec.bootstrapIps.isEmpty else {

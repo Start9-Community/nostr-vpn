@@ -10,8 +10,10 @@ All notable changes to this project are documented in this file.
 
 - Add exact signed-release gates on physical Android and iOS for WireGuard
   exit routing, every DNS policy, native Internet/DNS restoration, repeated
-  background/foreground and rapid start/stop, Wi-Fi/hotspot roaming, and QR
-  and manual joining in both device roles.
+  background/foreground and rapid start/stop, real Wi-Fi radio OFF→ON recovery
+  with no physical fallback, exact original-Wi-Fi restoration, fresh DNS,
+  WireGuard and reverse-payload recovery within four seconds, and QR and manual
+  joining in both device roles.
 - Add real macOS, Windows, and Linux gates for underlay changes, WireGuard exit
   cleanup, native route/DNS recovery, service lifecycle, and single-listener
   ownership.

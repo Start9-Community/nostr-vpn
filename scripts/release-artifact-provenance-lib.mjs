@@ -22,7 +22,7 @@ const requiredFrozenIosRealDeviceGates = [
   'background-foreground-and-rapid-start-stop',
   'bidirectional-mobile-qr-and-manual-join',
   'desktop-mobile-manual-join',
-  'wifi-hotspot-underlay-roaming',
+  'wifi-radio-off-on-recovery',
   'wireguard-exit-and-five-dns-policies',
 ]
 const mobileDnsEvidence = {
@@ -801,15 +801,56 @@ function requireMobileNetworkReceipt({
   ) {
     throw new Error('Android WireGuard/DNS receipt lacks Direct restoration evidence.')
   }
-  if (
-    mode === 'underlay-lifecycle'
-    && (
+  if (mode === 'underlay-lifecycle') {
+    const cycles = receipt.support?.underlayCycles
+    const cycle = Array.isArray(cycles) ? cycles[0] : undefined
+    const processCounts = cycle?.processIdentifierCounts
+    const evidencePaths = Object.keys(receipt.evidenceFiles ?? {})
+    const requiredEvidence = platform === 'android'
+      ? [
+          /underlay-.*-summary\.json$/,
+          /underlay-.*-markers\.tsv$/,
+          /underlay-.*-continuity\.log$/,
+          /underlay-fresh-dns-fixture\.json$/,
+          /radio-bounce-dns-.*\.log$/,
+          /radio-bounce-udp-.*\.log$/,
+        ]
+      : [
+          /continuity\.json$/,
+          /host-markers\.tsv$/,
+          /processes\.json$/,
+          /reverse-payload\.log$/,
+          /runner-markers\.log$/,
+          /underlay-fresh-dns-fixture\.json$/,
+        ]
+    if (
       receipt.support?.lifecycleCycles !== 3
-      || !Array.isArray(receipt.support?.underlayCycles)
-      || receipt.support.underlayCycles.length !== 2
-    )
-  ) {
-    throw new Error(`${platform} underlay/lifecycle receipt is incomplete.`)
+      || !Array.isArray(cycles)
+      || cycles.length !== 1
+      || cycle?.gate !== 'wifi-radio-off-on-recovery'
+      || cycle?.outageReversePayloads !== 0
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\..+$/
+        .test(String(cycle?.freshDnsQueryHost ?? ''))
+      || !Number.isSafeInteger(cycle?.freshDnsFixtureExactQueryCount)
+      || cycle.freshDnsFixtureExactQueryCount < 1
+      || ![cycle?.dnsAndWireGuardRecoveryMilliseconds,
+        cycle?.firstReversePayloadRecoveryMilliseconds].every(
+        (value) => Number.isSafeInteger(value) && value >= 0 && value <= 4000,
+      )
+      || !Number.isSafeInteger(
+        cycle?.noValidatedPhysicalFallbackEvidenceCount,
+      )
+      || cycle.noValidatedPhysicalFallbackEvidenceCount
+        < (platform === 'android' ? 2 : 1)
+      || cycle?.originalWifiRestoredEvidenceCount !== 1
+      || processCounts?.app !== 1
+      || ![processCounts?.packetTunnel, processCounts?.nativeTunnel].includes(1)
+      || requiredEvidence.some(
+        (pattern) => !evidencePaths.some((path) => pattern.test(path)),
+      )
+    ) {
+      throw new Error(`${platform} underlay/lifecycle receipt is incomplete.`)
+    }
   }
   if (
     mode === 'underlay-lifecycle'
@@ -1265,7 +1306,7 @@ export function collectReleaseGateReceipts({
     'desktop-mobile-manual-join': [
       sha256FileSync(platformReceiptPaths.ios.desktop_mobile_join),
     ],
-    'wifi-hotspot-underlay-roaming': [
+    'wifi-radio-off-on-recovery': [
       iosNetworkReceipts.underlay_lifecycle,
     ],
     'wireguard-exit-and-five-dns-policies': [

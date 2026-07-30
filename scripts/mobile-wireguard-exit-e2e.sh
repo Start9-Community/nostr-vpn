@@ -9,13 +9,9 @@ source "$ROOT/scripts/mobile_env.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 # shellcheck disable=SC1091
-source "$ROOT/scripts/lib-mobile-android-managed-ap.sh"
-# shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-underlay-change.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
-# shellcheck disable=SC1091
-source "$ROOT/scripts/lib-mobile-ios-hotspot.sh"
 load_release_env "$ROOT"
 load_appstoreconnect_defaults
 load_mobile_env "$ROOT"
@@ -68,16 +64,15 @@ environment-selected remote Linux fixture, then proves on physical devices that:
   - native device DNS and Internet still work after disconnect.
 
 The default local fixture requires the host and devices to share a LAN.
-For cellular/hotspot coverage, set NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST,
+For a remote fixture, set NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST,
 NVPN_MOBILE_WG_EXIT_HOST_IP, and optionally NVPN_MOBILE_WG_EXIT_REMOTE_MODE
 (native by default). No remote host, address, or credential is built in.
 Set NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID=0 to exercise an already-installed
 canonical company-signed debug build without replacing it.
-Set NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 for the physical two-underlay
-gate. Android then requires env-only home/alternate Wi-Fi credentials. iOS
-requires env-only home/Pixel-hotspot Wi-Fi credentials and uses the production
-Settings UIs on both phones to switch real SSIDs and control the hotspot.
-The fixture endpoint must be reachable through both physical underlays.
+Set NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 for one physical Wi-Fi radio
+OFF→ON cycle. Each phone must start on validated Wi-Fi. The gate proves a real
+outage without another validated physical fallback, restores the same Wi-Fi, and requires DNS
+and WireGuard payload recovery within four seconds without process recreation.
 NVPN_MOBILE_WG_EXIT_DNS_CASES accepts a comma-separated subset for a focused
 failure retry; the release gate leaves it unset and always runs all five.
 EOF
@@ -107,12 +102,6 @@ cleanup() {
     fi
   fi
   if ! ios_release_network_cleanup_private_artifacts; then
-    cleanup_failed=1
-  fi
-  if ! mobile_ios_hotspot_cleanup; then
-    cleanup_failed=1
-  fi
-  if ! mobile_android_managed_ap_cleanup; then
     cleanup_failed=1
   fi
   if ! mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"; then
@@ -282,25 +271,6 @@ if ! mobile_wg_fixture_ready "$CONTAINER" >/dev/null 2>&1; then
   exit 1
 fi
 
-if has_platform android && bool_is_true "$UNDERLAY_CHANGE_GATE" \
-  && [[ -n "${NVPN_ANDROID_UNDERLAY_MANAGED_AP_SSH_HOST:-}" ]]
-then
-  if [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SSID:-}" ]]; then
-    NVPN_ANDROID_UNDERLAY_HOME_SSID="$(
-      adb -s "$ANDROID_DEVICE_SERIAL" shell cmd wifi status 2>/dev/null \
-        | tr -d '\r' \
-        | sed -n 's/^Wifi is connected to "\(.*\)"$/\1/p' \
-        | head -n 1
-    )"
-    export NVPN_ANDROID_UNDERLAY_HOME_SSID
-  fi
-  [[ -n "$NVPN_ANDROID_UNDERLAY_HOME_SSID" ]] || {
-    echo "Android managed AP gate could not identify the current saved home Wi-Fi" >&2
-    exit 1
-  }
-  mobile_android_managed_ap_start
-fi
-
 wg_bytes() {
   mobile_wg_fixture_wg_bytes "$CONTAINER"
 }
@@ -356,6 +326,71 @@ record_case_evidence() {
     "$before_forward" "$after_forward" >>"$ledger"
   printf '\t%s' "${before_dns_values[@]}" "${after_dns_values[@]}" >>"$ledger"
   printf '\n' >>"$ledger"
+}
+
+write_underlay_fresh_dns_fixture_proof() {
+  local platform="$1" artifact_dir="$2" query_host count output
+  local -a sources=()
+  case "$platform" in
+    Android)
+      sources=("$artifact_dir"/mobile-android-underlay-*-markers.tsv)
+      [[ "${#sources[@]}" -eq 1 && -f "${sources[0]}" ]] || {
+        echo "Android underlay gate lacks one marker proof" >&2
+        return 1
+      }
+      query_host="$(
+        sed -n 's/^proof_fresh_dns_query	//p' "${sources[0]}"
+      )"
+      output="$artifact_dir/mobile-android-underlay-fresh-dns-fixture.json"
+      ;;
+    iOS)
+      sources=("$artifact_dir"/mobile-ios-release-network-automatic-profile-*-runner-markers.log)
+      [[ "${#sources[@]}" -eq 1 && -f "${sources[0]}" ]] || {
+        echo "iOS underlay gate lacks one runner marker receipt" >&2
+        return 1
+      }
+      query_host="$(
+        sed -n \
+          's/^NVPN_IOS_UNDERLAY_SWITCH_1_FRESH_DNS_QUERY=//p' \
+          "${sources[0]}"
+      )"
+      output="$artifact_dir/mobile-ios-underlay-fresh-dns-fixture.json"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+  [[ "$query_host" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\..+ ]] || {
+    echo "$platform underlay fresh DNS query receipt is invalid" >&2
+    return 1
+  }
+  count="$(mobile_wg_fixture_dns_count "$CONTAINER" "$query_host")" || return 1
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
+    echo "$platform underlay fresh DNS query did not reach the exact fixture" >&2
+    return 1
+  }
+  python3 - "$output" "$platform" "$query_host" "$count" <<'PY'
+import json
+import pathlib
+import sys
+
+output, platform, query_host, count = sys.argv[1:]
+pathlib.Path(output).write_text(
+    json.dumps(
+        {
+            "exactQueryCount": int(count),
+            "gate": "wifi-radio-off-on-recovery",
+            "platform": platform,
+            "queryHost": query_host,
+            "schemaVersion": 1,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
 }
 
 run_android_case() {
@@ -450,6 +485,10 @@ run_android_case() {
     NVPN_ANDROID_EXIT_SOURCE_PROBE_URL="$EXIT_SOURCE_PROBE_URL" \
     NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP="$EXPECTED_EXIT_SOURCE_IP" \
     "$ROOT/scripts/mobile-android-smoke.sh" "${android_args[@]}"
+  if bool_is_true "$underlay_gate"; then
+    write_underlay_fresh_dns_fixture_proof \
+      Android "${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
+  fi
   assert_platform_traffic Android "$label" "$before_bytes" "$before_forward"
   after_dns_evidence="$(
     mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
@@ -469,8 +508,6 @@ run_ios_case() {
   local expected_ip evidence before_dns_evidence after_dns_evidence
   local before_bytes before_forward
   local lifecycle_gate underlay_gate resolver_probe_url resolver_body
-  local underlay_home_ssid underlay_home_passphrase
-  local underlay_alternate_ssid underlay_alternate_passphrase
   local run_id spec_base64
   IFS='|' read -r \
     mode provider custom_url bootstrap_ips through_servers probe_host \
@@ -485,18 +522,6 @@ run_ios_case() {
   else
     lifecycle_gate=false
     underlay_gate=false
-  fi
-  underlay_home_ssid="${NVPN_IOS_UNDERLAY_HOME_SSID:-}"
-  underlay_home_passphrase="${NVPN_IOS_UNDERLAY_HOME_PASSPHRASE:-}"
-  underlay_alternate_ssid="${NVPN_IOS_UNDERLAY_ALTERNATE_SSID:-}"
-  underlay_alternate_passphrase="${NVPN_IOS_UNDERLAY_ALTERNATE_PASSPHRASE:-}"
-  if bool_is_true "$underlay_gate"; then
-    [[ -n "$underlay_home_ssid" \
-      && -n "$underlay_alternate_ssid" \
-      && "$underlay_home_ssid" != "$underlay_alternate_ssid" ]] || {
-      echo "iOS physical underlay gate requires distinct private home/hotspot SSIDs" >&2
-      return 1
-    }
   fi
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
@@ -535,9 +560,7 @@ run_ios_case() {
       "$first" "$underlay_gate" "$lifecycle_gate" "$final" \
       "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" \
       "${NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS:-20}" \
-      "${NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS:-30}" \
-      "$underlay_home_ssid" "$underlay_home_passphrase" \
-      "$underlay_alternate_ssid" "$underlay_alternate_passphrase" <<'PY'
+      "${NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS:-30}" <<'PY'
 import base64
 import json
 import sys
@@ -565,10 +588,6 @@ import sys
     cycles,
     dwell,
     association_timeout,
-    underlay_home_ssid,
-    underlay_home_passphrase,
-    underlay_alternate_ssid,
-    underlay_alternate_passphrase,
 ) = sys.argv[1:]
 payload = {
     "runId": run_id,
@@ -596,10 +615,6 @@ payload = {
     "lifecycleCycles": int(cycles),
     "backgroundDwellSeconds": int(dwell),
     "underlayAssociationTimeoutSeconds": int(association_timeout),
-    "underlayHomeSsid": underlay_home_ssid,
-    "underlayHomePassphrase": underlay_home_passphrase,
-    "underlayAlternateSsid": underlay_alternate_ssid,
-    "underlayAlternatePassphrase": underlay_alternate_passphrase,
 }
 print(
     base64.b64encode(
@@ -617,6 +632,10 @@ PY
   run_ios_release_network_case \
     "$label" "$run_id" "$spec_base64" \
     "$lifecycle_gate" "$underlay_gate" "$final" "$first"
+  if bool_is_true "$underlay_gate"; then
+    write_underlay_fresh_dns_fixture_proof \
+      iOS "${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
+  fi
   assert_platform_traffic iOS "$label" "$before_bytes" "$before_forward"
   after_dns_evidence="$(
     mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
@@ -708,13 +727,6 @@ if has_platform ios; then
   }
   IOS_CLEANUP_ARMED=1
   ios_release_network_prepare "$IOS_DEVICE_SELECTED"
-  if bool_is_true "$UNDERLAY_CHANGE_GATE"; then
-    [[ -n "$ADB" ]] || {
-      echo "iOS physical hotspot gate requires adb for the Pixel host" >&2
-      exit 1
-    }
-    mobile_ios_hotspot_prepare
-  fi
   for index in "${!DNS_CASES[@]}"; do
     final=0
     [[ "$index" -eq "$((${#DNS_CASES[@]} - 1))" ]] && final=1
@@ -725,7 +737,6 @@ if has_platform ios; then
   write_network_evidence ios
   ios_release_network_disconnect_cleanup
   IOS_CLEANUP_ARMED=0
-  mobile_ios_hotspot_cleanup
 fi
 
 echo "Mobile WireGuard exit e2e passed for: $PLATFORMS"

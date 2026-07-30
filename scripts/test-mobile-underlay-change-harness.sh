@@ -6,51 +6,33 @@ continuity="$ROOT/scripts/validate-mobile-underlay-continuity.py"
 ios_output_capture="$ROOT/scripts/capture-mobile-ios-underlay-output.py"
 android_lib="$ROOT/scripts/lib-mobile-android-underlay.sh"
 android_release_lib="$ROOT/scripts/lib-mobile-android-release-gate.sh"
-android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
 ios_test="$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift"
 ios_underlay="$ROOT/ios/UITests/NostrVpnReleaseNetworkUnderlay.swift"
-ios_hotspot="$ROOT/scripts/lib-mobile-ios-hotspot.sh"
+network_evidence="$ROOT/scripts/release-network-evidence.py"
 mobile_exit_gate="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
 release_gate="$ROOT/scripts/release-gate.sh"
-fixture="$ROOT/Dockerfile.mobile-wireguard-exit-e2e"
-remote_fixture="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
 temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-underlay-harness.XXXXXX")"
 trap 'rm -rf "$temp"' EXIT
 
 write_ping_fixture() {
-  local second_recovery="$1"
-  cat >"$temp/ping.log" <<EOF
+  cat >"$temp/ping.log" <<'EOF'
 [1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
 [1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
 [1001.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
-[1002.000] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
-[$second_recovery] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1001.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
+[1001.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1001.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
 EOF
-  if [[ "$second_recovery" == "1003.100" ]]; then
-    cat >>"$temp/ping.log" <<'EOF'
-[1005.000] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
-[1007.000] 64 bytes from 10.0.0.2: icmp_seq=7 ttl=64 time=1 ms
-[1008.000] 64 bytes from 10.0.0.2: icmp_seq=8 ttl=64 time=1 ms
-EOF
-  else
-    cat >>"$temp/ping.log" <<'EOF'
-[1007.300] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
-[1008.000] 64 bytes from 10.0.0.2: icmp_seq=7 ttl=64 time=1 ms
-EOF
-  fi
 }
 
 cat >"$temp/markers.tsv" <<'EOF'
 switch_1_requested	1000500
-switch_1_available	1001000
+switch_1_outage	1000700
+switch_1_recovery_requested	1001000
 switch_1_payload_recovery	200
 switch_1_verified	1001900
-switch_2_requested	1002000
-switch_2_available	1003000
-switch_2_payload_recovery	100
-switch_2_verified	1007900
 EOF
-write_ping_fixture 1003.100
+write_ping_fixture
 python3 "$continuity" \
   "$temp/ping.log" "$temp/markers.tsv" "$temp/continuity.json" Android 4000 \
   >/dev/null
@@ -60,7 +42,20 @@ import sys
 
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 assert receipt["passed"] is True
-assert [cycle["recoveryMilliseconds"] for cycle in receipt["cycles"]] == [200, 100]
+assert [cycle["recoveryMilliseconds"] for cycle in receipt["cycles"]] == [200]
+cycle = receipt["cycles"][0]
+assert cycle["outageReversePayloads"] == 0
+assert cycle["firstReversePayloadRecoveryMilliseconds"] == 200
+assert cycle["dnsAndWireGuardRecoveryMilliseconds"] == 200
+for fabricated in (
+    "appProcessContinuity",
+    "outageObserved",
+    "noCellularFallback",
+    "originalValidatedWifiRestored",
+    "dnsAndWireGuardPayloadRecovery",
+    "tunnelProcessContinuity",
+):
+    assert fabricated not in cycle
 assert receipt["bidirectionalPayload"].startswith("wireguard-server-icmp")
 PY
 
@@ -72,13 +67,13 @@ import sys
 path = pathlib.Path(sys.argv[1])
 path.write_text(
     path.read_text(encoding="utf-8").replace(
-        "switch_2_payload_recovery\t100\n",
-        "switch_2_payload_recovery\t4100\n",
+        "switch_1_payload_recovery\t200\n",
+        "switch_1_payload_recovery\t4100\n",
     ),
     encoding="utf-8",
 )
 PY
-write_ping_fixture 1003.100
+write_ping_fixture
 if python3 "$continuity" \
   "$temp/ping.log" "$temp/slow-markers.tsv" "$temp/slow.json" iOS 4000 \
   >"$temp/slow.out" 2>"$temp/slow.err"
@@ -88,35 +83,96 @@ then
 fi
 grep -Fq "payload recovery was 4100ms" "$temp/slow.err"
 
-cat >"$temp/ping.log" <<'EOF'
-[1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
-[1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
-[1001.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
-[1002.000] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
-[1003.100] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
-[1007.500] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
-[1008.000] 64 bytes from 10.0.0.2: icmp_seq=7 ttl=64 time=1 ms
-EOF
+cp "$temp/markers.tsv" "$temp/no-outage.tsv"
+sed -i '' '/switch_1_outage/d' "$temp/no-outage.tsv"
 if python3 "$continuity" \
-  "$temp/ping.log" "$temp/markers.tsv" "$temp/post-recovery-gap.json" Android 4000 \
-  >"$temp/post-recovery-gap.out" 2>"$temp/post-recovery-gap.err"
+  "$temp/ping.log" "$temp/no-outage.tsv" "$temp/no-outage.json" Android 4000 \
+  >"$temp/no-outage.out" 2>"$temp/no-outage.err"
 then
-  echo "continuity validator accepted a post-recovery payload outage" >&2
+  echo "continuity validator accepted a radio bounce without observed outage" >&2
   exit 1
 fi
-grep -Fq "payload gap after recovery was 4400ms" \
-  "$temp/post-recovery-gap.err"
+grep -Fq "missing marker switch_1_outage" "$temp/no-outage.err"
+
+sed 's/switch_1_outage	1000700/switch_1_outage	1001000/' \
+  "$temp/markers.tsv" >"$temp/zero-outage-window.tsv"
+if python3 "$continuity" \
+  "$temp/ping.log" "$temp/zero-outage-window.tsv" \
+  "$temp/zero-outage-window.json" Android 4000 \
+  >"$temp/zero-outage-window.out" 2>"$temp/zero-outage-window.err"
+then
+  echo "continuity validator accepted a zero-duration outage window" >&2
+  exit 1
+fi
+grep -Fq "request <= outage < recovery-requested <= verified" \
+  "$temp/zero-outage-window.err"
+
+cp "$temp/ping.log" "$temp/outage-reply.log"
+printf '%s\n' \
+  '[1000.800] 64 bytes from 10.0.0.2: icmp_seq=99 ttl=64 time=1 ms' \
+  >>"$temp/outage-reply.log"
+if python3 "$continuity" \
+  "$temp/outage-reply.log" "$temp/markers.tsv" \
+  "$temp/outage-reply.json" Android 4000 \
+  >"$temp/outage-reply.out" 2>"$temp/outage-reply.err"
+then
+  echo "continuity validator accepted reverse payload during the outage" >&2
+  exit 1
+fi
+grep -Fq "reverse payloads between outage and recovery request" \
+  "$temp/outage-reply.err"
+
+python3 - \
+  "$network_evidence" "$temp/continuity.json" \
+  "$temp/outage-reply.log" "$temp/markers.tsv" \
+  "$temp/ping.log" "$temp/zero-outage-window.tsv" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("network_evidence", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+summary = pathlib.Path(sys.argv[2])
+for ping, markers in ((sys.argv[3], sys.argv[4]), (sys.argv[5], sys.argv[6])):
+    try:
+        module.validate_underlay_continuity(
+            summary, "Android", pathlib.Path(ping), pathlib.Path(markers)
+        )
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("evidence builder accepted raw data that contradicts summary")
+PY
+
+cat >"$temp/late-reverse.log" <<'EOF'
+[1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
+[1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
+[1005.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
+[1005.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
+[1005.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1005.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
+EOF
+sed 's/switch_1_verified	1001900/switch_1_verified	1005900/' \
+  "$temp/markers.tsv" >"$temp/late-reverse-markers.tsv"
+if python3 "$continuity" \
+  "$temp/late-reverse.log" "$temp/late-reverse-markers.tsv" \
+  "$temp/late-reverse.json" iOS 4000 \
+  >"$temp/late-reverse.out" 2>"$temp/late-reverse.err"
+then
+  echo "continuity validator accepted a late first reverse payload" >&2
+  exit 1
+fi
+grep -Fq "first reverse payload recovery was 4200ms" \
+  "$temp/late-reverse.err"
 
 printf '%s\n' \
   'NVPN_IOS_UNDERLAY_SWITCH_1_REQUESTED_MS=1' \
   'ordinary xcodebuild output' \
-  'NVPN_IOS_UNDERLAY_SWITCH_1_AVAILABLE_MS=2' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_OUTAGE_MS=2' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_RECOVERY_REQUESTED_MS=2' \
   'NVPN_IOS_UNDERLAY_SWITCH_1_PAYLOAD_RECOVERY_MS=200' \
   'NVPN_IOS_UNDERLAY_SWITCH_1_VERIFIED_MS=3' \
-  'NVPN_IOS_UNDERLAY_SWITCH_2_REQUESTED_MS=4' \
-  'NVPN_IOS_UNDERLAY_SWITCH_2_AVAILABLE_MS=5' \
-  'NVPN_IOS_UNDERLAY_SWITCH_2_PAYLOAD_RECOVERY_MS=100' \
-  'NVPN_IOS_UNDERLAY_SWITCH_2_VERIFIED_MS=6' \
   | python3 "$ios_output_capture" \
     "$temp/xcode.log" "$temp/ios-host-markers.tsv"
 grep -Fxq 'ordinary xcodebuild output' "$temp/xcode.log"
@@ -129,18 +185,14 @@ rows = [
 ]
 assert [row[0] for row in rows] == [
     "switch_1_requested",
-    "switch_1_available",
+    "switch_1_outage",
+    "switch_1_recovery_requested",
     "switch_1_payload_recovery",
     "switch_1_verified",
-    "switch_2_requested",
-    "switch_2_available",
-    "switch_2_payload_recovery",
-    "switch_2_verified",
 ]
 assert all(value.isdigit() for _, value in rows)
 values = dict(rows)
 assert values["switch_1_payload_recovery"] == "200"
-assert values["switch_2_payload_recovery"] == "100"
 timeline = [
     row for row in rows
     if not row[0].endswith("_payload_recovery")
@@ -150,6 +202,19 @@ assert all(
     for previous, current in zip(timeline, timeline[1:])
 )
 PY
+
+if printf '%s\n' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_REQUESTED_MS=1' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_REQUESTED_MS=2' \
+  | python3 "$ios_output_capture" \
+    "$temp/duplicate-xcode.log" "$temp/duplicate-ios-host-markers.tsv" \
+    >"$temp/duplicate.out" 2>"$temp/duplicate.err"
+then
+  echo "iOS underlay capture accepted a duplicate timeline marker" >&2
+  exit 1
+fi
+grep -Fq 'duplicate iOS underlay markers: switch_1_requested' \
+  "$temp/duplicate.err"
 
 cat >"$temp/adb" <<'SH'
 #!/usr/bin/env bash
@@ -174,24 +239,69 @@ bash -eu -o pipefail -c '
   ADB="$2"
   serial="physical-device"
   [[ "$(android_vpn_native_start_count)" == 2 ]]
-  [[ "$(android_underlay_rebind_count)" == 1 ]]
-  android_underlay_assert_exact_rebind_after 0 first-switch
-  android_underlay_rebind_count() { printf "%s\n" 2; }
-  if android_underlay_assert_rebind_count \
-      1 "before switch 2 after delayed duplicate"
-  then
-    echo "Android underlay absorbed a delayed duplicate into switch 2" >&2
-    exit 1
-  fi
-  if android_underlay_assert_exact_rebind_after 0 duplicate-switch; then
-    echo "Android underlay accepted duplicate native refreshes" >&2
-    exit 1
-  fi
-  if android_underlay_wait_for_rebind_after 0; then
-    echo "Android underlay wait accepted duplicate native refreshes" >&2
-    exit 1
-  fi
 ' _ "$android_lib" "$temp/adb"
+
+cat >"$temp/adb-connectivity" <<'SH'
+#!/usr/bin/env bash
+case "${ADB_CONNECTIVITY_MODE:-none}" in
+  fallback)
+    cat <<'EOF'
+Active default network: 102
+Current Networks:
+NetworkAgentInfo{ network{101} ni{WIFI CONNECTED} NOT_VPN VALIDATED LinkProperties{Routes: [0.0.0.0/0 -> 192.0.2.1]}}
+NetworkAgentInfo{ network{102} ni{VPN CONNECTED} VALIDATED}
+Status for known UIDs:
+EOF
+    ;;
+  none)
+    cat <<'EOF'
+Active default network: 102
+Current Networks:
+NetworkAgentInfo{ network{102} ni{VPN CONNECTED} VALIDATED LinkProperties{Routes: [0.0.0.0/0 -> 10.0.0.1]}}
+Status for known UIDs:
+EOF
+    ;;
+  malformed)
+    printf 'connectivity service returned no parseable network records\n'
+    ;;
+  truncated)
+    printf '%s\n' \
+      'Active default network: 102' \
+      'Current Networks:' \
+      'NetworkAgentInfo{ network{102} ni{VPN CONNECTED} VALIDATED' \
+      'Status for known UIDs:'
+    ;;
+  failure)
+    exit 17
+    ;;
+esac
+SH
+chmod +x "$temp/adb-connectivity"
+bash -eu -o pipefail -c '
+  source "$1"
+  ADB="$2"
+  serial="physical-device"
+  ADB_CONNECTIVITY_MODE=fallback
+  export ADB_CONNECTIVITY_MODE
+  android_underlay_has_validated_physical_fallback
+  ADB_CONNECTIVITY_MODE=none
+  export ADB_CONNECTIVITY_MODE
+  status=0
+  android_underlay_has_validated_physical_fallback || status=$?
+  [[ "$status" -eq 1 ]]
+  for mode in malformed truncated failure; do
+    ADB_CONNECTIVITY_MODE="$mode"
+    export ADB_CONNECTIVITY_MODE
+    status=0
+    android_underlay_has_validated_physical_fallback || status=$?
+    [[ "$status" -eq 2 ]]
+  done
+  android_underlay_has_validated_physical_fallback() { return 2; }
+  if android_underlay_wait_offline /dev/null; then
+    echo "Android offline gate accepted an inspection error" >&2
+    exit 1
+  fi
+' _ "$android_lib" "$temp/adb-connectivity"
 
 bash -eu -o pipefail -c '
   source "$1"
@@ -218,172 +328,99 @@ bash -eu -o pipefail -c '
   fi
 ' _ "$android_lib" "$android_release_lib"
 
-bash -eu -o pipefail -c '
-  source "$1"
-  state="$2"
-  calls="$3"
-  ADB="$4"
-  TMPDIR="$(dirname "$state")"
-  select_physical_android_serial() { printf "%s\n" physical-device; }
-  mobile_ios_hotspot_read_existing_config() {
-    local enabled=false
-    [[ ! -s "$state" ]] || enabled="$(<"$state")"
-    printf "%s|%s|%s\n" \
-      dGVzdC1ob3RzcG90 "$enabled" dGVzdC1wYXNzd29yZA==
-  }
-  mobile_ios_hotspot_probe_pixel_native() { return 0; }
-  mobile_ios_home_wifi_from_host() { printf "%s\n" test-home; }
-  mobile_ios_hotspot_set_enabled() {
-    printf "%s\n" "$1" >"$state"
-    printf "%s\n" "$1" >>"$calls"
-  }
-  mobile_ios_hotspot_is_serving() {
-    [[ -s "$state" && "$(<"$state")" == true ]]
-  }
-  mobile_ios_hotspot_prepare
-  private_state="$MOBILE_IOS_HOTSPOT_STATE_FILE"
-  [[ "$(stat -f %Lp "$private_state")" == 600 ]]
-  mobile_ios_hotspot_cleanup
-  [[ "$(<"$calls")" == $'\''true\nfalse'\'' ]]
-  [[ "$(<"$state")" == false ]]
-  [[ ! -e "$private_state" ]]
-  [[ "$MOBILE_IOS_HOTSPOT_CLEANUP_ARMED" -eq 0 ]]
-' _ "$ios_hotspot" "$temp/hotspot-state" "$temp/hotspot-calls" "$temp/adb"
-
-for required in \
-  NVPN_ANDROID_UNDERLAY_HOME_SSID \
-  NVPN_ANDROID_UNDERLAY_ALTERNATE_SSID \
-  android_underlay_wait_for_rebind_after \
-  run_android_tun_packet_probe \
-  run_android_exit_network_probe
-do
-  grep -Fq "$required" "$android_lib" \
-    || { echo "Android underlay gate is missing $required" >&2; exit 1; }
-done
-python3 - "$android_lib" <<'PY'
+cat >"$temp/android-marker-proof.tsv" <<'EOF'
+proof_app_radio-bounce-start	123
+proof_app_radio-off	123
+proof_app_radio-on	123
+proof_app_background	123
+proof_app_foreground	123
+proof_native_radio-bounce-start	7
+proof_native_radio-off	7
+proof_native_radio-on	7
+proof_no_validated_physical_fallback_inspections	2
+proof_original_wifi_fingerprint	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+proof_restored_wifi_fingerprint	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+proof_fresh_dns_query	12345678-1234-1234-1234-123456789abc.wireguard-exit.nvpn-e2e.test
+proof_wireguard_payload_label	radio-on
+EOF
+python3 - "$network_evidence" "$temp/android-marker-proof.tsv" <<'PY'
+import importlib.util
 import pathlib
 import sys
 
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-start = text.index("run_android_underlay_network_change_gate()")
-body = text[start:]
-for required in (
-    'initial_rebind="$(android_underlay_rebind_count)"',
-    "baseline_rebind=$((initial_rebind + cycle - 1))",
-    '"before underlay switch $cycle"',
-    '"$((initial_rebind + 2))" "after both underlay switches"',
+spec = importlib.util.spec_from_file_location("network_evidence", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+path = pathlib.Path(sys.argv[2])
+proof = module.validate_android_underlay_markers(path)
+assert proof["noValidatedPhysicalFallbackEvidenceCount"] == 2
+for old, new in (
+    ("proof_no_validated_physical_fallback_inspections\t2",
+     "proof_no_validated_physical_fallback_inspections\t1"),
+    ("proof_restored_wifi_fingerprint\taaaa",
+     "proof_restored_wifi_fingerprint\tbbbb"),
+    ("proof_app_radio-off\t123", "proof_app_radio-off\t0"),
+    ("proof_native_radio-off\t7\n", ""),
+    ("12345678-1234-1234-1234-123456789abc.",
+     "------------------------------------."),
 ):
-    if required not in body:
-        raise SystemExit(
-            f"Android underlay gate lacks fixed-baseline checkpoint: {required}"
-        )
-if 'baseline_rebind="$(android_underlay_rebind_count)"' in body:
-    raise SystemExit("Android underlay gate can absorb a late duplicate into a new baseline")
+    invalid_path = path.with_name("invalid-proof.tsv")
+    invalid_path.write_text(
+        path.read_text(encoding="utf-8").replace(old, new),
+        encoding="utf-8",
+    )
+    try:
+        module.validate_android_underlay_markers(invalid_path)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("Android marker proof accepted invalid evidence")
+missing = path.with_name("missing-proof.tsv")
+try:
+    module.validate_android_underlay_markers(missing)
+except ValueError:
+    pass
+else:
+    raise SystemExit("Android platform proof accepted a missing receipt")
 PY
-grep -Fq 'run_android_underlay_network_change_gate' "$android_smoke" \
-  || { echo "Android smoke does not execute its physical underlay gate" >&2; exit 1; }
-for selector in vpn-toggle wireguard-enabled wireguard-config wireguard-save; do
-  grep -Fq "id = \"$selector\"" \
-    "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
-    "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidShell.kt" \
-    || {
-      echo "Android production UI is missing release-gate selector $selector" >&2
-      exit 1
-    }
-  grep -Fq ".accessibilityIdentifier(\"$selector\")" \
-    "$ROOT/ios/Sources/DevicesViews.swift" \
-    "$ROOT/ios/Sources/SettingsViews.swift" \
-    || {
-      echo "iOS production UI is missing release-gate selector $selector" >&2
-      exit 1
-    }
-done
-if grep -Fq 'cmd wifi force-reconnect' "$android_lib"; then
-  echo "Android underlay restore uses an unsupported Pixel Wi-Fi shell command" >&2
-  exit 1
-fi
-grep -Fq 'shell svc wifi disable' "$android_lib" \
-  && grep -Fq 'shell svc wifi enable' "$android_lib" \
-  || { echo "Android saved-home restore does not force a real Wi-Fi reassociation" >&2; exit 1; }
-grep -Fq 'selectWiFiNetwork(' "$ios_underlay" \
-  && grep -Fq 'ssid: spec.underlayAlternateSsid' "$ios_underlay" \
-  && grep -Fq 'ssid: spec.underlayHomeSsid' "$ios_underlay" \
-  && grep -Fq 'try selectedWiFiSSID() == spec.underlayHomeSsid' "$ios_underlay" \
-  || { echo "iOS underlay XCTest does not select both exact real SSIDs" >&2; exit 1; }
-if grep -Fq 'tapControlCenterWiFi' "$ios_test" "$ios_underlay"; then
-  echo "iOS underlay XCTest still substitutes a radio toggle for a real SSID change" >&2
-  exit 1
-fi
-grep -Fq 'waitForPhysicalPath' "$ios_underlay" \
-  || { echo "iOS underlay XCTest does not prove the replacement path is available" >&2; exit 1; }
-grep -Fq 'ProcessInfo.processInfo.systemUptime' \
-  "$ios_underlay" \
-  && grep -Fq 'PAYLOAD_RECOVERY_MS=' \
-    "$ios_underlay" \
-  || {
-    echo "iOS Release underlay XCTest lacks same-clock payload recovery evidence" >&2
-    exit 1
-  }
-for required in \
-  'android.settings.TETHER_SETTINGS' \
-  'Hotspot password' \
-  'chmod 600 "$MOBILE_IOS_HOTSPOT_STATE_FILE"' \
-  'mCurrentSoftApInfoMap' \
-  'mobile_ios_hotspot_probe_pixel_native' \
-  'mobile_ios_home_wifi_from_host' \
-  'mobile_ios_hotspot_set_enabled "$previous_enabled"'
-do
-  grep -Fq "$required" "$ios_hotspot" \
-    || { echo "iOS Pixel-hotspot lifecycle is missing $required" >&2; exit 1; }
-done
-grep -Fq 'source "$ROOT/scripts/lib-mobile-ios-hotspot.sh"' "$mobile_exit_gate" \
-  && grep -Fq 'mobile_ios_hotspot_prepare' "$mobile_exit_gate" \
-  && grep -Fq 'mobile_ios_hotspot_cleanup' "$mobile_exit_gate" \
-  || {
-    echo "iOS physical gate does not own the Pixel hotspot lifecycle" >&2
-    exit 1
-  }
-if grep -Eq '(echo|printf).*(PASSPHRASE|expected_passphrase)' "$ios_hotspot"; then
-  echo "iOS Pixel-hotspot lifecycle could expose a private credential" >&2
-  exit 1
-fi
-grep -Fq 'last_failed_lower_bound_ms="$check_started_ms"' "$android_lib" \
-  && grep -Fq 'android_underlay_unique_udp_echo' "$android_lib" \
-  && grep -Fq 'switch_%s_payload_recovery' "$android_lib" \
-  || {
-    echo "Android Release underlay gate lacks conservative unique-payload timing" >&2
-    exit 1
-  }
-grep -Fq 'iputils-ping' "$fixture" \
-  || { echo "mobile fixture cannot generate continuous bidirectional payload" >&2; exit 1; }
-grep -Fq 'add_system_firewall_rule' "$remote_fixture" \
-  && grep -Fq 'remove_system_firewall_rules' "$remote_fixture" \
-  && grep -Fq 'iifname "$interface" accept' "$remote_fixture" \
-  || {
-    echo "remote native fixture cannot cross a host policy-drop firewall safely" >&2
-    exit 1
-  }
 
-android_position="$(grep -n 'Android physical Wi-Fi underlay change' "$release_gate" | head -n1 | cut -d: -f1)"
-ios_position="$(grep -n 'iOS physical Wi-Fi/Pixel-hotspot underlay change' "$release_gate" | head -n1 | cut -d: -f1)"
-if [[ -z "$android_position" || -z "$ios_position" ]] \
-  || (( android_position >= ios_position ))
+python3 - "$android_lib" "$ios_underlay" "$ios_test" <<'PY'
+import pathlib
+import sys
+
+android, ios, ios_test = (
+    pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
+)
+for forbidden in (
+    "ALTERNATE_SSID",
+    "ALTERNATE_SECURITY",
+    "connect-network",
+    "managed_ap",
+    "for cycle in 1 2",
+):
+    if forbidden in android + ios + ios_test:
+        raise SystemExit(f"Android radio-bounce gate retained obsolete topology: {forbidden}")
+for required in (
+    "shell svc wifi disable",
+    "shell svc wifi enable",
+    "try setWiFiEnabled(false)",
+    "try setWiFiEnabled(true)",
+    "persistOriginalWiFiForCleanup(originalSsid)",
+    "originalWiFiForCleanup()",
+):
+    if required not in android + ios + ios_test:
+        raise SystemExit(f"radio-bounce implementation is missing {required}")
+PY
+[[ ! -e "$ROOT/scripts/lib-mobile-ios-hotspot.sh" ]] \
+  && [[ ! -e "$ROOT/scripts/lib-mobile-android-managed-ap.sh" ]] \
+  || { echo "obsolete hotspot/managed-AP libraries still exist" >&2; exit 1; }
+if grep -Eq 'hotspot|ALTERNATE_(SSID|SECURITY|PASSPHRASE)|managed_ap' \
+    "$mobile_exit_gate" "$release_gate" "$android_lib" "$ios_underlay"
 then
-  echo "release gate does not isolate the two physical underlay lanes serially" >&2
+  echo "mobile radio-bounce gate retained alternate-network/hotspot machinery" >&2
   exit 1
 fi
-grep -Fq 'NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=1' "$release_gate" \
-  && grep -Fq 'NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=1' "$release_gate" \
-  || {
-    echo "release underlay gates do not reuse the exact signed DNS artifacts" >&2
-    exit 1
-  }
-grep -Fq 'xcrun devicectl device info details' "$release_gate" \
-  && grep -Fq 'xcrun xcdevice list --timeout 5' "$release_gate" \
-  && ! grep -Fq 'xcrun xctrace list devices' "$release_gate" \
-  || {
-    echo "release iOS preflight still trusts stale xctrace device state" >&2
-    exit 1
-  }
+grep -Fq 'wifi-radio-off-on-recovery' "$release_gate" \
+  || { echo "release gate does not require the honest radio-bounce label" >&2; exit 1; }
 
-echo "Mobile physical underlay-change harness passed"
+echo "Mobile physical Wi-Fi radio off/on harness passed"

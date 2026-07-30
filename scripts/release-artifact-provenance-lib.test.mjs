@@ -310,12 +310,47 @@ test('release receipt collection requires exact source and strict public UI gate
           }
         : {
             lifecycleCycles: 3,
-            underlayCycles: [{}, {}],
+            underlayCycles: [{
+              dnsAndWireGuardRecoveryMilliseconds: 200,
+              firstReversePayloadRecoveryMilliseconds: 200,
+              freshDnsFixtureExactQueryCount: 1,
+              freshDnsQueryHost:
+                '12345678-1234-1234-1234-123456789abc.fixture.test',
+              gate: 'wifi-radio-off-on-recovery',
+              noValidatedPhysicalFallbackEvidenceCount:
+                platform === 'android' ? 2 : 1,
+              originalWifiRestoredEvidenceCount: 1,
+              outageReversePayloads: 0,
+              processIdentifierCounts: platform === 'android'
+                ? { app: 1, nativeTunnel: 1 }
+                : { app: 1, packetTunnel: 1 },
+            }],
             ...(platform === 'android'
               ? { postForegroundDnsHttpsAndTunnelCycles: 3 }
               : {}),
           },
-      evidenceFiles: { 'receipt.json': 'e'.repeat(64) },
+      evidenceFiles: mode === 'wireguard-dns'
+        ? { 'receipt.json': 'e'.repeat(64) }
+        : Object.fromEntries(
+            (platform === 'android'
+              ? [
+                  'mobile-android-underlay-1-summary.json',
+                  'mobile-android-underlay-1-markers.tsv',
+                  'mobile-android-underlay-1-continuity.log',
+                  'mobile-android-underlay-fresh-dns-fixture.json',
+                  'mobile-android-radio-bounce-dns-1.log',
+                  'mobile-android-radio-bounce-udp-1.log',
+                ]
+              : [
+                  'mobile-ios-release-network-automatic-profile-1-continuity.json',
+                  'mobile-ios-release-network-automatic-profile-1-host-markers.tsv',
+                  'mobile-ios-release-network-automatic-profile-1-processes.json',
+                  'mobile-ios-release-network-automatic-profile-1-reverse-payload.log',
+                  'mobile-ios-release-network-automatic-profile-1-runner-markers.log',
+                  'mobile-ios-underlay-fresh-dns-fixture.json',
+                ])
+              .map((path) => [path, 'e'.repeat(64)]),
+          ),
     })
     writeFileSync(
       paths.android.wireguard_dns,
@@ -527,7 +562,7 @@ test('release receipt collection requires exact source and strict public UI gate
         'background-foreground-and-rapid-start-stop',
         'bidirectional-mobile-qr-and-manual-join',
         'desktop-mobile-manual-join',
-        'wifi-hotspot-underlay-roaming',
+        'wifi-radio-off-on-recovery',
         'wireguard-exit-and-five-dns-policies',
       ],
       realDeviceGateReceiptSha256: {
@@ -537,7 +572,7 @@ test('release receipt collection requires exact source and strict public UI gate
         ],
         'bidirectional-mobile-qr-and-manual-join': [mobileJoinSha],
         'desktop-mobile-manual-join': [macosJoinSha],
-        'wifi-hotspot-underlay-roaming': [iosUnderlaySha],
+        'wifi-radio-off-on-recovery': [iosUnderlaySha],
         'wireguard-exit-and-five-dns-policies': [iosWgSha],
       },
     }))
@@ -853,6 +888,51 @@ test('release receipt collection requires exact source and strict public UI gate
       },
       /ARMv6 artifact lacks exact real Zero execution evidence/,
     )
+    for (const platform of ['android', 'ios']) {
+      assertRejectedReceiptMutation(
+        paths[platform].underlay_lifecycle,
+        (receipt) => {
+          receipt.support.underlayCycles.push({
+            ...receipt.support.underlayCycles[0],
+          })
+        },
+        /underlay\/lifecycle receipt is incomplete/,
+      )
+      assertRejectedReceiptMutation(
+        paths[platform].underlay_lifecycle,
+        (receipt) => {
+          receipt.support.underlayCycles[0]
+            .noValidatedPhysicalFallbackEvidenceCount = 0
+        },
+        /underlay\/lifecycle receipt is incomplete/,
+      )
+      assertRejectedReceiptMutation(
+        paths[platform].underlay_lifecycle,
+        (receipt) => {
+          const path = Object.keys(receipt.evidenceFiles)
+            .find((name) => name.endsWith(
+              platform === 'android' ? '-summary.json' : 'continuity.json',
+            ))
+          delete receipt.evidenceFiles[path]
+        },
+        /underlay\/lifecycle receipt is incomplete/,
+      )
+      assertRejectedReceiptMutation(
+        paths[platform].underlay_lifecycle,
+        (receipt) => {
+          receipt.support.underlayCycles[0]
+            .processIdentifierCounts.app = 2
+        },
+        /underlay\/lifecycle receipt is incomplete/,
+      )
+      assertRejectedReceiptMutation(
+        paths[platform].underlay_lifecycle,
+        (receipt) => {
+          receipt.support.underlayCycles[0].freshDnsFixtureExactQueryCount = 0
+        },
+        /underlay\/lifecycle receipt is incomplete/,
+      )
+    }
 
     if (fixtureRoot) {
       const artifactSha256 =

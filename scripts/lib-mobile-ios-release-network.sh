@@ -510,11 +510,7 @@ needles = {
     hashlib.sha256(raw).hexdigest().encode(),
     hashlib.sha256(encoded.encode()).hexdigest().encode(),
 }
-for key in (
-    "wireGuardConfig",
-    "underlayHomePassphrase",
-    "underlayAlternatePassphrase",
-):
+for key in ("wireGuardConfig",):
     value = spec.get(key)
     if isinstance(value, str) and value:
         needles.add(value.encode())
@@ -617,19 +613,51 @@ ios_release_network_validate_markers() {
     fi
   done
   if bool_is_true "$underlay"; then
-    local cycle recovery
-    for cycle in 1 2; do
-      recovery="$(
-        sed -n \
-          "s/^NVPN_IOS_UNDERLAY_SWITCH_${cycle}_PAYLOAD_RECOVERY_MS=//p" \
-          "$markers"
-      )"
-      [[ "$recovery" =~ ^[0-9]+$ ]] \
-        && (( recovery <= ${NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS:-4000} )) || {
-        echo "iOS switch $cycle has no valid <=4s same-clock recovery receipt" >&2
+    local fresh_dns_host phase recovery
+    for phase in \
+      REQUESTED OUTAGE RECOVERY_REQUESTED PAYLOAD_RECOVERY VERIFIED
+    do
+      [[ "$(grep -Fc \
+        "NVPN_IOS_UNDERLAY_SWITCH_1_${phase}_MS=" \
+        "$markers")" -eq 1 ]] || {
+        echo "iOS Wi-Fi radio cycle has no unique $phase receipt" >&2
         return 1
       }
     done
+    [[ "$(grep -Fxc \
+      "NVPN_IOS_UNDERLAY_SWITCH_1_NO_VALIDATED_PHYSICAL_FALLBACK=1" \
+      "$markers")" -eq 1 ]] || {
+      echo "iOS Wi-Fi radio-off phase lacks no-fallback proof" >&2
+      return 1
+    }
+    [[ "$(grep -Fxc \
+      "NVPN_IOS_UNDERLAY_SWITCH_1_ORIGINAL_WIFI_RESTORED=1" \
+      "$markers")" -eq 1 ]] || {
+      echo "iOS radio-on phase did not restore the original Wi-Fi" >&2
+      return 1
+    }
+    fresh_dns_host="$(
+      sed -n \
+        's/^NVPN_IOS_UNDERLAY_SWITCH_1_FRESH_DNS_QUERY=//p' \
+        "$markers"
+    )"
+    [[ "$(grep -Fc \
+      "NVPN_IOS_UNDERLAY_SWITCH_1_FRESH_DNS_QUERY=" \
+      "$markers")" -eq 1 \
+      && "$fresh_dns_host" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\..+ ]] || {
+      echo "iOS radio-on phase lacks a unique non-cacheable DNS query" >&2
+      return 1
+    }
+    recovery="$(
+      sed -n \
+        's/^NVPN_IOS_UNDERLAY_SWITCH_1_PAYLOAD_RECOVERY_MS=//p' \
+        "$markers"
+    )"
+    [[ "$recovery" =~ ^[0-9]+$ ]] \
+      && (( recovery <= ${NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS:-4000} )) || {
+      echo "iOS radio-on phase has no valid <=4s DNS/WireGuard recovery receipt" >&2
+      return 1
+    }
   fi
   if bool_is_true "$lifecycle"; then
     local cycle
@@ -749,14 +777,14 @@ if receipt.get("passed") is not True:
     raise SystemExit("iOS Release process continuity receipt did not pass")
 expected = {"active-session-begin", "active-session-end"}
 if truthy(sys.argv[2]):
-    for cycle in (1, 2):
-        for phase in (
-            "requested",
-            "available",
-            "payload_recovery",
-            "verified",
-        ):
-            expected.add(f"underlay_switch_{cycle}_{phase}")
+    for phase in (
+        "requested",
+        "outage",
+        "recovery_requested",
+        "payload_recovery",
+        "verified",
+    ):
+        expected.add(f"underlay_switch_1_{phase}")
 if truthy(sys.argv[3]):
     for cycle in range(1, int(sys.argv[5]) + 1):
         expected.add(f"release_background_{cycle}_requested")

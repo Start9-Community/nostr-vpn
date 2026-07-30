@@ -8,6 +8,12 @@ enum NostrVpnReleaseNetworkProbe {
         let body: String
     }
 
+    struct FreshDNSReceipt {
+        let answers: [String]
+        let completedUptime: TimeInterval
+        let queryHost: String
+    }
+
     private final class ResultBox<Value>: @unchecked Sendable {
         private let lock = NSLock()
         private var result: Result<Value, Error>?
@@ -164,55 +170,55 @@ enum NostrVpnReleaseNetworkProbe {
         }
     }
 
+    @discardableResult
     static func exerciseFreshDNSQuery(
         baseHost: String,
-        timeout: TimeInterval = 6
-    ) throws {
+        expectedAddress: String? = nil
+    ) throws -> FreshDNSReceipt {
         let normalized = baseHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, !normalized.contains("/") else {
             throw probeError("Resolver query host is invalid")
         }
-        let nonce = UUID().uuidString.lowercased()
-        let connection = NWConnection(
-            host: NWEndpoint.Host("\(nonce).\(normalized)"),
-            port: 443,
-            using: .tcp
-        )
-        let queue = DispatchQueue(label: "fi.siriusbusiness.nvpn.release-probe.dns")
-        let finished = DispatchSemaphore(value: 0)
-        let receipt = ResultBox<Bool>()
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                if receipt.complete(.success(true)) {
-                    finished.signal()
-                }
-            case .failed:
-                // A unique, intentionally non-existent subdomain is expected
-                // to fail after resolution. Fixture-side resolver counters are
-                // the authoritative receipt that the query used the selected
-                // DNS policy rather than the underlay resolver.
-                if receipt.complete(.success(true)) {
-                    finished.signal()
-                }
-            case .cancelled:
-                if receipt.complete(.failure(probeError("DNS query was cancelled"))) {
-                    finished.signal()
-                }
-            default:
-                break
+        let queryHost = "\(UUID().uuidString.lowercased()).\(normalized)"
+        var hints = addrinfo()
+        hints.ai_flags = AI_ADDRCONFIG
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(queryHost, nil, &hints, &result)
+        defer { freeaddrinfo(result) }
+        guard status == 0 || (status == EAI_NONAME && expectedAddress == nil) else {
+            let message = gai_strerror(status).map(String.init(cString:))
+                ?? "getaddrinfo failed"
+            throw probeError("Fresh DNS failed for \(queryHost): \(message)")
+        }
+        var answers: [String] = []
+        var cursor = result
+        while let current = cursor {
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(
+                current.pointee.ai_addr,
+                current.pointee.ai_addrlen,
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 {
+                answers.append(String(cString: host))
             }
+            cursor = current.pointee.ai_next
         }
-        connection.start(queue: queue)
-        guard finished.wait(timeout: .now() + timeout) == .success else {
-            connection.cancel()
-            throw probeError("Fresh DNS query timed out")
+        guard expectedAddress == nil || answers.contains(expectedAddress!) else {
+            throw probeError(
+                "Fresh DNS answer \(answers) did not contain \(expectedAddress!)"
+            )
         }
-        connection.cancel()
-        guard let resolved = receipt.resolved() else {
-            throw probeError("Fresh DNS query emitted no result")
-        }
-        _ = try resolved.get()
+        return FreshDNSReceipt(
+            answers: answers,
+            completedUptime: ProcessInfo.processInfo.systemUptime,
+            queryHost: queryHost
+        )
     }
 
     /// Returns the runner process' monotonic uptime when the exact echoed

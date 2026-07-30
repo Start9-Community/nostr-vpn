@@ -15,8 +15,8 @@ from pathlib import Path
 
 
 MARKER = re.compile(
-    r"NVPN_IOS_UNDERLAY_SWITCH_(?P<cycle>[12])_"
-    r"(?P<phase>REQUESTED|AVAILABLE|PAYLOAD_RECOVERY|VERIFIED)_MS="
+    r"NVPN_IOS_UNDERLAY_SWITCH_(?P<cycle>1)_"
+    r"(?P<phase>REQUESTED|OUTAGE|RECOVERY_REQUESTED|PAYLOAD_RECOVERY|VERIFIED)_MS="
     r"(?P<value>\d+)"
 )
 ACTIVE = re.compile(
@@ -24,7 +24,7 @@ ACTIVE = re.compile(
 )
 CHECKPOINT = re.compile(
     r"NVPN_IOS_(?P<name>"
-    r"UNDERLAY_SWITCH_[12]_(?:REQUESTED|AVAILABLE|PAYLOAD_RECOVERY|VERIFIED)"
+    r"UNDERLAY_SWITCH_1_(?:REQUESTED|OUTAGE|RECOVERY_REQUESTED|PAYLOAD_RECOVERY|VERIFIED)"
     r"|RELEASE_BACKGROUND_\d+_REQUESTED"
     r"|RELEASE_FOREGROUND_\d+_VERIFIED"
     r"|RELEASE_CONNECTED_DIRECT_PASSED"
@@ -295,6 +295,7 @@ def main() -> int:
     if sampler:
         sampler.start()
     seen: set[str] = set()
+    duplicates: set[str] = set()
     with (
         log_path.open("w", encoding="utf-8", buffering=1) as log,
         marker_path.open("w", encoding="utf-8", buffering=1) as markers,
@@ -319,7 +320,7 @@ def main() -> int:
                 f"{match.group('phase').lower()}"
             )
             if name in seen:
-                continue
+                duplicates.add(name)
             seen.add(name)
             value = (
                 match.group("value")
@@ -327,7 +328,14 @@ def main() -> int:
                 else str(received_ms)
             )
             markers.write(f"{name}\t{value}\n")
-    return sampler.finish() if sampler else 0
+    sampler_status = sampler.finish() if sampler else 0
+    if duplicates:
+        print(
+            "duplicate iOS underlay markers: " + ", ".join(sorted(duplicates)),
+            file=sys.stderr,
+        )
+        return 1
+    return sampler_status
 
 
 if __name__ == "__main__":

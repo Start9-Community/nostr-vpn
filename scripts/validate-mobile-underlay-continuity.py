@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate continuous server-to-mobile WireGuard payload across two underlay changes."""
+"""Validate WireGuard recovery across one physical Wi-Fi radio off/on cycle."""
 
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ def parse_markers(path: Path) -> tuple[dict[str, int], dict[str, int]]:
     markers: dict[str, int] = {}
     counts: dict[str, int] = {}
     ios_pattern = re.compile(
-        r"^NVPN_IOS_UNDERLAY_SWITCH_(?P<cycle>[12])_"
-        r"(?P<phase>REQUESTED|AVAILABLE|PAYLOAD_RECOVERY|VERIFIED)_MS="
+        r"^NVPN_IOS_UNDERLAY_SWITCH_(?P<cycle>1)_"
+        r"(?P<phase>REQUESTED|OUTAGE|RECOVERY_REQUESTED|PAYLOAD_RECOVERY|VERIFIED)_MS="
         r"(?P<value>\d+)$"
     )
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -44,13 +44,10 @@ def parse_markers(path: Path) -> tuple[dict[str, int], dict[str, int]]:
         fields = line.split("\t")
         if len(fields) == 2 and fields[0] in {
             "switch_1_requested",
-            "switch_1_available",
+            "switch_1_outage",
+            "switch_1_recovery_requested",
             "switch_1_payload_recovery",
             "switch_1_verified",
-            "switch_2_requested",
-            "switch_2_available",
-            "switch_2_payload_recovery",
-            "switch_2_verified",
         }:
             try:
                 counts[fields[0]] = counts.get(fields[0], 0) + 1
@@ -79,13 +76,10 @@ def main() -> int:
     errors: list[str] = []
     required_markers = [
         "switch_1_requested",
-        "switch_1_available",
+        "switch_1_outage",
+        "switch_1_recovery_requested",
         "switch_1_payload_recovery",
         "switch_1_verified",
-        "switch_2_requested",
-        "switch_2_available",
-        "switch_2_payload_recovery",
-        "switch_2_verified",
     ]
     for name in required_markers:
         if name not in markers:
@@ -102,38 +96,51 @@ def main() -> int:
 
     cycles: list[dict[str, int | bool]] = []
     if not errors:
-        previous_available = 0
-        for cycle in (1, 2):
+        for cycle in (1,):
             requested = markers[f"switch_{cycle}_requested"]
-            available = markers[f"switch_{cycle}_available"]
+            outage = markers[f"switch_{cycle}_outage"]
+            recovery_requested = markers[f"switch_{cycle}_recovery_requested"]
             recovery_ms = markers[f"switch_{cycle}_payload_recovery"]
             verified = markers[f"switch_{cycle}_verified"]
-            if requested > available or available > verified:
+            if (
+                requested > outage
+                or outage >= recovery_requested
+                or recovery_requested > verified
+            ):
                 errors.append(
-                    f"switch {cycle} markers are not request <= available <= verified"
+                    f"switch {cycle} markers are not "
+                    "request <= outage < recovery-requested <= verified"
                 )
                 continue
-            if requested < previous_available:
-                errors.append(f"switch {cycle} markers overlap the previous switch")
-                continue
-            previous_available = verified
             before = [
                 timestamp
                 for timestamp, _ in replies
                 if requested - 5_000 <= timestamp <= requested
             ]
+            during_outage = [
+                timestamp
+                for timestamp, _ in replies
+                if outage <= timestamp < recovery_requested
+            ]
             after = [
                 timestamp
                 for timestamp, _ in replies
-                if available <= timestamp <= verified
+                if recovery_requested <= timestamp <= verified
             ]
             if not before:
                 errors.append(
                     f"switch {cycle} had no successful payload in the five seconds before it"
                 )
                 continue
+            if during_outage:
+                errors.append(
+                    f"switch {cycle} had {len(during_outage)} reverse payloads "
+                    "between outage and recovery request"
+                )
             if not after:
-                errors.append(f"switch {cycle} had no successful payload after availability")
+                errors.append(
+                    f"switch {cycle} had no successful payload after recovery request"
+                )
                 continue
             if recovery_ms < 0:
                 errors.append(f"switch {cycle} payload recovery was negative")
@@ -143,7 +150,13 @@ def main() -> int:
                     f"switch {cycle} payload recovery was {recovery_ms}ms "
                     f"(limit {max_recovery_ms}ms)"
                 )
-            recovered = available + recovery_ms
+            first_reverse_recovery_ms = after[0] - recovery_requested
+            if first_reverse_recovery_ms > max_recovery_ms:
+                errors.append(
+                    f"switch {cycle} first reverse payload recovery was "
+                    f"{first_reverse_recovery_ms}ms "
+                    f"(limit {max_recovery_ms}ms)"
+                )
             post_recovery_gaps = [
                 current - previous
                 for previous, current in zip(after, after[1:])
@@ -161,16 +174,17 @@ def main() -> int:
                 )
             cycles.append(
                 {
-                    "associationMilliseconds": available - requested,
-                    "payloadBeforeSwitch": True,
-                    "payloadRecoveryEvidence": (
-                        "same-clock-unique-udp-echo-completion"
+                    "dnsAndWireGuardRecoveryMilliseconds": recovery_ms,
+                    "firstReversePayloadRecoveryMilliseconds": (
+                        first_reverse_recovery_ms
                     ),
-                    "reversePayloadAfterAvailability": True,
-                    "recoveredAtMilliseconds": recovered,
+                    "outageAtMilliseconds": outage,
+                    "outageReversePayloads": len(during_outage),
+                    "payloadBeforeSwitch": True,
+                    "reversePayloadAfterRecoveryRequest": True,
                     "recoveryMilliseconds": recovery_ms,
+                    "recoveryRequestedAtMilliseconds": recovery_requested,
                     "requestedAtMilliseconds": requested,
-                    "underlayAvailableAtMilliseconds": available,
                     "verifiedAtMilliseconds": verified,
                 }
             )
@@ -195,8 +209,7 @@ def main() -> int:
     print(
         f"{platform} underlay continuity passed: "
         + ", ".join(
-            f"switch {index} recovery={cycle['recoveryMilliseconds']}ms "
-            f"association={cycle['associationMilliseconds']}ms"
+            f"switch {index} recovery={cycle['recoveryMilliseconds']}ms"
             for index, cycle in enumerate(cycles, start=1)
         )
         + f"; receipt={summary_path}"

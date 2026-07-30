@@ -24,7 +24,6 @@ ios_packet_tunnel="$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift"
 ios_packet_flow_bridge="$ROOT/ios/PacketTunnel/PacketFlowBridge.swift"
 ios_project_file="$ROOT/ios/NostrVpnIos.xcodeproj/project.pbxproj"
 ios_release_binary_audit="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
-ios_hotspot="$ROOT/scripts/lib-mobile-ios-hotspot.sh"
 local_fips="$ROOT/scripts/local-fips-workspace.sh"
 fips_c_abi="$ROOT/crates/nostr-vpn-app-core/src/c_abi.rs"
 mobile_packet_flow="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/ios_packet_flow.rs"
@@ -285,9 +284,6 @@ grep -Fq 'WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
   && grep -Fq 'Endpoint = $WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
   && grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"' "$gate" \
   || { echo "mobile gate does not separate raw host from endpoint authority" >&2; exit 1; }
-grep -Fq 'mobile_wg_endpoint_family "$fixture_host"' "$ios_hotspot" \
-  && grep -Fq 'ping6' "$ios_hotspot" \
-  || { echo "Pixel fixture reachability is not IP-family aware" >&2; exit 1; }
 grep -Fq 'Self.endpointHost(from: endpoint)' "$ios_packet_tunnel" \
   || { echo "iOS packet tunnel does not parse bracketed WireGuard endpoints" >&2; exit 1; }
 grep -Fq 'packetFlow.readPackets' "$ios_packet_flow_bridge" \
@@ -539,8 +535,6 @@ import json
 
 payload = {
     "wireGuardConfig": "[Interface]\nPrivateKey = fake-private-key-material\n",
-    "underlayHomePassphrase": "",
-    "underlayAlternatePassphrase": "fake-hotspot-password",
 }
 print(base64.b64encode(json.dumps(payload).encode()).decode())
 PY
@@ -550,11 +544,11 @@ printf '%s\n' '{"passed":true}' >"$secret_temp/safe.json"
 source "$ios_release_gate"
 ios_release_network_assert_retained_no_secrets \
   "$secret_spec" "$secret_temp/safe.json"
-printf '%s\n' 'fake-hotspot-password' >"$secret_temp/unsafe.log"
+printf '%s\n' 'fake-private-key-material' >"$secret_temp/unsafe.log"
 if ios_release_network_assert_retained_no_secrets \
   "$secret_spec" "$secret_temp/unsafe.log" 2>/dev/null
 then
-  echo "iOS retained-artifact scan accepted a private hotspot password" >&2
+  echo "iOS retained-artifact scan accepted a WireGuard private key" >&2
   exit 1
 fi
 IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$secret_temp/private.xctestrun"
@@ -615,11 +609,15 @@ grep -Fq 'WG upstream socket fd from native runtime:' "$android_vpn_service" \
     echo "Android Release gate does not pin native-tunnel continuity from production logs" >&2
     exit 1
   }
-grep -Fq 'android_underlay_assert_exact_rebind_after' "$android_underlay" \
-  && grep -Fq 'count == expected' "$android_underlay" \
-  && grep -Fq 'count > expected' "$android_underlay" \
+grep -Fq 'android_underlay_wait_offline' "$android_underlay" \
+  && grep -Fq 'android_underlay_recovery_payloads' "$android_underlay" \
+  && grep -Fq 'android_underlay_assert_process_and_vpn' "$android_underlay" \
+  && grep -Fq 'android_underlay_assert_native_tunnel_unchanged radio-off' \
+    "$android_underlay" \
+  && grep -Fq 'android_underlay_assert_native_tunnel_unchanged radio-on' \
+    "$android_underlay" \
   || {
-    echo "Android underlay gate does not require exactly one native refresh per switch" >&2
+    echo "Android radio-bounce gate lacks outage/recovery/process continuity" >&2
     exit 1
   }
 python3 - "$android_release_gate" <<'PY'

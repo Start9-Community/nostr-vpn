@@ -362,7 +362,7 @@ frozen_gate_arguments() {
   FROZEN_GATE_ARGS=(
     --required-gate wireguard-exit-and-five-dns-policies
     --required-gate background-foreground-and-rapid-start-stop
-    --required-gate wifi-hotspot-underlay-roaming
+    --required-gate wifi-radio-off-on-recovery
     --required-gate bidirectional-mobile-qr-and-manual-join
     --required-gate desktop-mobile-manual-join
   )

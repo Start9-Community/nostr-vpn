@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
 
 ANDROID_UNDERLAY_HOME_RESTORE_ARMED=0
-ANDROID_UNDERLAY_AVAILABLE_LOWER_BOUND_MS=""
+ANDROID_UNDERLAY_ORIGINAL_SSID=""
+ANDROID_UNDERLAY_OUTAGE_MS=""
 ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS=""
 ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS=""
+ANDROID_UNDERLAY_FRESH_DNS_HOST=""
+ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS=0
+ANDROID_UNDERLAY_PROCESS_CHECKPOINTS=()
+ANDROID_UNDERLAY_NATIVE_CHECKPOINTS=()
 ANDROID_VPN_NATIVE_START_LOG="WG upstream socket fd from native runtime:"
-ANDROID_VPN_UNDERLAY_REFRESH_LOG="Physical network changed; live FIPS carriers refreshed"
 
 android_underlay_require_environment() {
   local name
   for name in \
-    NVPN_ANDROID_UNDERLAY_HOME_SSID \
-    NVPN_ANDROID_UNDERLAY_ALTERNATE_SSID \
-    NVPN_ANDROID_UNDERLAY_ALTERNATE_SECURITY \
     NVPN_ANDROID_UNDERLAY_UDP_ECHO_HOST \
     NVPN_ANDROID_UNDERLAY_UDP_ECHO_PORT \
     NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER \
-    NVPN_MOBILE_UNDERLAY_CONTINUITY_CLIENT_IP
+    NVPN_MOBILE_UNDERLAY_CONTINUITY_CLIENT_IP \
+    NVPN_ANDROID_EXIT_PROBE_HOST \
+    NVPN_ANDROID_EXIT_PROBE_EXPECTED_IP
   do
     if [[ -z "${!name:-}" ]]; then
-      echo "Android physical underlay gate requires $name" >&2
+      echo "Android physical radio-bounce gate requires $name" >&2
       return 1
     fi
   done
@@ -27,89 +30,8 @@ android_underlay_require_environment() {
     || (( NVPN_ANDROID_UNDERLAY_UDP_ECHO_PORT < 1 \
       || NVPN_ANDROID_UNDERLAY_UDP_ECHO_PORT > 65535 ))
   then
-    echo "Android physical underlay gate requires a valid UDP echo port" >&2
+    echo "Android physical radio-bounce gate requires a valid UDP echo port" >&2
     return 1
-  fi
-  case "${NVPN_ANDROID_UNDERLAY_HOME_RECONNECT:-credentials}" in
-    saved)
-      ;;
-    credentials)
-      if [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SECURITY:-}" ]]; then
-        echo "Android physical underlay gate requires NVPN_ANDROID_UNDERLAY_HOME_SECURITY" >&2
-        return 1
-      fi
-      android_underlay_validate_network_credentials \
-        home \
-        "$NVPN_ANDROID_UNDERLAY_HOME_SECURITY" \
-        "${NVPN_ANDROID_UNDERLAY_HOME_PASSPHRASE:-}" \
-        || return 1
-      ;;
-    *)
-      echo "NVPN_ANDROID_UNDERLAY_HOME_RECONNECT must be credentials or saved" >&2
-      return 1
-      ;;
-  esac
-  if [[ "$NVPN_ANDROID_UNDERLAY_HOME_SSID" == \
-    "$NVPN_ANDROID_UNDERLAY_ALTERNATE_SSID" ]]
-  then
-    echo "Android physical underlay gate requires two different Wi-Fi networks" >&2
-    return 1
-  fi
-  android_underlay_validate_network_credentials \
-    alternate \
-    "$NVPN_ANDROID_UNDERLAY_ALTERNATE_SECURITY" \
-    "${NVPN_ANDROID_UNDERLAY_ALTERNATE_PASSPHRASE:-}"
-}
-
-android_underlay_stop_managed_ap() {
-  local host="${NVPN_ANDROID_UNDERLAY_MANAGED_AP_SSH_HOST:-}"
-  local connection="${NVPN_ANDROID_UNDERLAY_MANAGED_AP_CONNECTION:-}"
-  [[ -n "$host" || -n "$connection" ]] || return 0
-  if [[ -z "$host" || -z "$connection" \
-    || "$host" == -* || "$connection" == -* \
-    || "$host" =~ [[:space:]] || "$connection" =~ [[:space:]] ]]
-  then
-    echo "Android managed AP cleanup target is invalid" >&2
-    return 1
-  fi
-  if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-      sudo -n nmcli -g NAME connection show \
-      | grep -Fxq "$connection"
-  then
-    return 0
-  fi
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-    sudo -n nmcli connection down "$connection" >/dev/null 2>&1 || true
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-    sudo -n nmcli connection delete "$connection" >/dev/null
-  if ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-      sudo -n nmcli -g NAME connection show \
-      | grep -Fxq "$connection"
-  then
-    echo "Android managed AP still exists after its exact delete request" >&2
-    return 1
-  fi
-}
-
-android_underlay_reconnect_home() {
-  if [[ "${NVPN_ANDROID_UNDERLAY_HOME_RECONNECT:-credentials}" == "saved" ]]; then
-    android_underlay_stop_managed_ap || return 1
-    "$ADB" -s "$serial" shell svc wifi disable >/dev/null
-    if ! android_underlay_wait_wifi_radio disabled 5; then
-      echo "Android Wi-Fi radio did not turn off before saved-home restore" >&2
-      return 1
-    fi
-    "$ADB" -s "$serial" shell svc wifi enable >/dev/null
-    if ! android_underlay_wait_wifi_radio enabled 5; then
-      echo "Android Wi-Fi radio did not turn on for saved-home restore" >&2
-      return 1
-    fi
-    "$ADB" -s "$serial" shell cmd wifi start-scan >/dev/null 2>&1 || true
-  else
-    android_underlay_connect_network \
-      "$NVPN_ANDROID_UNDERLAY_HOME_SSID" \
-      "$NVPN_ANDROID_UNDERLAY_HOME_SECURITY" \
-      "${NVPN_ANDROID_UNDERLAY_HOME_PASSPHRASE:-}"
   fi
 }
 
@@ -128,42 +50,11 @@ android_underlay_wait_wifi_radio() {
   return 1
 }
 
-android_underlay_validate_network_credentials() {
-  local label="$1" security="$2" passphrase="$3"
-  case "$security" in
-    open|owe)
-      if [[ -n "$passphrase" ]]; then
-        echo "Android $label $security Wi-Fi must not provide a passphrase" >&2
-        return 1
-      fi
-      ;;
-    wpa2|wpa3|wep)
-      if [[ -z "$passphrase" ]]; then
-        echo "Android $label $security Wi-Fi requires its env-only passphrase" >&2
-        return 1
-      fi
-      ;;
-    *)
-      echo "Android $label Wi-Fi security must be open, owe, wpa2, wpa3, or wep" >&2
-      return 1
-      ;;
-  esac
-}
-
-android_underlay_connect_network() {
-  local ssid="$1" security="$2" passphrase="$3"
-  local ssid_base64 passphrase_base64 command
-  ssid_base64="$(printf '%s' "$ssid" | base64 | tr -d '\n')"
-  passphrase_base64="$(printf '%s' "$passphrase" | base64 | tr -d '\n')"
-  command="ssid=\$(printf %s '$ssid_base64' | base64 -d); "
-  if [[ "$security" == "open" || "$security" == "owe" ]]; then
-    command+="cmd wifi connect-network \"\$ssid\" '$security'"
-  else
-    command+="pass=\$(printf %s '$passphrase_base64' | base64 -d); "
-    command+="cmd wifi connect-network \"\$ssid\" '$security' \"\$pass\""
-  fi
-  { set +x; } 2>/dev/null
-  "$ADB" -s "$serial" shell "$command" >/dev/null
+android_underlay_original_ssid() {
+  "$ADB" -s "$serial" shell cmd wifi status 2>/dev/null \
+    | tr -d '\r' \
+    | sed -n 's/^Wifi is connected to "\(.*\)"$/\1/p' \
+    | head -n 1
 }
 
 android_underlay_network_is_validated() {
@@ -192,55 +83,151 @@ PY
 }
 
 android_underlay_wait_validated() {
-  local ssid="$1" timeout_secs="$2" initial_lower_bound_ms="${3:-}"
-  local deadline check_started_ms last_failed_lower_bound_ms
+  local ssid="$1" timeout_secs="$2" deadline
   deadline=$((SECONDS + timeout_secs))
-  ANDROID_UNDERLAY_AVAILABLE_LOWER_BOUND_MS=""
-  last_failed_lower_bound_ms="$initial_lower_bound_ms"
-  [[ -n "$last_failed_lower_bound_ms" ]] \
-    || last_failed_lower_bound_ms="$(mobile_underlay_now_ms)"
   while ((SECONDS < deadline)); do
-    # Timestamp before each potentially slow adb/dumpsys check. If the check
-    # fails, this is guaranteed to be no later than the last known-unavailable
-    # observation, so using it as the eventual availability bound can only make
-    # the measured recovery interval longer.
-    check_started_ms="$(mobile_underlay_now_ms)"
     if android_underlay_network_is_validated "$ssid"; then
-      ANDROID_UNDERLAY_AVAILABLE_LOWER_BOUND_MS="$last_failed_lower_bound_ms"
       return 0
     fi
-    last_failed_lower_bound_ms="$check_started_ms"
     sleep 0.2
   done
   return 1
 }
 
-android_underlay_unique_udp_echo() {
-  local cycle="$1" available_lower_bound_ms="$2" recovery_max_ms="$3"
-  local result_path completion_ms recovery_ms
+android_underlay_has_validated_physical_fallback() {
+  local connectivity
+  connectivity="$(
+    "$ADB" -s "$serial" shell dumpsys connectivity 2>/dev/null \
+      | tr -d '\r'
+  )" || return 2
+  python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+lines = text.splitlines()
+try:
+    active = next(i for i, line in enumerate(lines) if line.startswith("Active default network:"))
+    current = next(i for i, line in enumerate(lines) if line.startswith("Current Networks:"))
+    status = next(i for i, line in enumerate(lines) if line.startswith("Status for known UIDs:"))
+except StopIteration:
+    raise SystemExit(2)
+blocks = [line.strip() for line in lines[current + 1 : status] if "NetworkAgentInfo{" in line]
+if not (active < current < status and blocks):
+    raise SystemExit(2)
+if any(not block.endswith("}") for block in blocks):
+    raise SystemExit(2)
+if not any("ni{VPN CONNECTED" in block for block in blocks):
+    raise SystemExit(2)
+for block in blocks:
+    if "NOT_VPN" not in block or "VALIDATED" not in block:
+        continue
+    if re.search(r"(?<![0-9.])0\.0\.0\.0/0(?![0-9])|(?<!\S)::/0", block):
+        raise SystemExit(0)
+raise SystemExit(1)
+' <<<"$connectivity"
+}
+
+android_underlay_wait_offline() {
+  local ping_log="$1" deadline=$((SECONDS + 8)) observation_ms replies
+  local inspection_status
+  ANDROID_UNDERLAY_OUTAGE_MS=""
+  while ((SECONDS < deadline)); do
+    inspection_status=0
+    android_underlay_has_validated_physical_fallback \
+      || inspection_status=$?
+    if (( inspection_status == 2 )); then
+      echo "Android Wi-Fi-off fallback inspection failed" >&2
+      return 1
+    fi
+    if (( inspection_status == 1 )); then
+      ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS=$((ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS + 1))
+      observation_ms="$(mobile_underlay_now_ms)"
+      sleep 0.8
+      replies="$(mobile_continuity_reply_count_after "$ping_log" "$observation_ms")"
+      inspection_status=0
+      android_underlay_has_validated_physical_fallback \
+        || inspection_status=$?
+      if (( inspection_status == 2 )); then
+        echo "Android Wi-Fi-off fallback reinspection failed" >&2
+        return 1
+      fi
+      if [[ "$replies" == "0" ]] && (( inspection_status == 1 )); then
+        ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS=$((ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS + 1))
+        ANDROID_UNDERLAY_OUTAGE_MS="$observation_ms"
+        return 0
+      fi
+    fi
+    sleep 0.1
+  done
+  echo "Android Wi-Fi-off phase never produced a real no-fallback payload outage" >&2
+  return 1
+}
+
+android_underlay_recovery_payloads() {
+  local recovery_requested_ms="$1" recovery_max_ms="$2"
+  local result_dir result_path dns_path completion_ms recovery_ms
+  local dns_servers fresh_dns_base fresh_dns_host
+  result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
+  result_path="$result_dir/mobile-android-radio-bounce-udp-$$.log"
+  dns_path="$result_dir/mobile-android-radio-bounce-dns-$$.log"
   ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS=""
   ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS=""
-  result_path="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}/mobile-android-underlay-udp-$cycle-$$.log"
-  android_build_captured_network_probe || return 1
+  ANDROID_UNDERLAY_FRESH_DNS_HOST=""
+  dns_servers="$(android_vpn_dns_servers)" || {
+    echo "Android post-radio-on VPN DNS policy was unavailable" >&2
+    return 1
+  }
+  grep -Fxq "$EXPECTED_VPN_DNS" <<<"$dns_servers" || {
+    echo "Android post-radio-on VPN DNS was not the production local stub" >&2
+    return 1
+  }
+  fresh_dns_base="${EXIT_PROBE_HOST%.}"
+  if ! {
+    printf 'vpnDnsServers=%s\n' \
+      "$(tr '\n' ',' <<<"$dns_servers" | sed 's/,$//')"
+    "$ADB" -s "$serial" shell \
+      env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
+      app_process /system/bin MobileAndroidCapturedNetworkProbe \
+      --fresh-dns "$fresh_dns_base" "$EXIT_PROBE_EXPECTED_IP" radio-on
+  } >"$dns_path" 2>&1
+  then
+    echo "Android first post-radio-on VPN DNS payload failed: $dns_path" >&2
+    return 1
+  fi
+  fresh_dns_host="$(
+    sed -n 's/.* queryHost=\([^ ]*\) .*/\1/p' "$dns_path" | head -n 1
+  )"
+  if ! [[ "$fresh_dns_host" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\..+ ]] \
+    || ! grep -Fq "expectedAddress=$EXIT_PROBE_EXPECTED_IP" "$dns_path" \
+    || ! grep -Eq \
+      "answers=([^ ]*,)?${EXIT_PROBE_EXPECTED_IP//./\\.}(,| )" \
+      "$dns_path"
+  then
+    echo "Android post-radio-on DNS receipt was not fresh and exact" >&2
+    return 1
+  fi
+  ANDROID_UNDERLAY_FRESH_DNS_HOST="$fresh_dns_host"
+
   if ! "$ADB" -s "$serial" shell \
       env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
       app_process /system/bin MobileAndroidCapturedNetworkProbe \
       --udp-echo \
       "$NVPN_ANDROID_UNDERLAY_UDP_ECHO_HOST" \
       "$NVPN_ANDROID_UNDERLAY_UDP_ECHO_PORT" \
-      "switch-$cycle" >"$result_path" 2>&1
+      radio-on >"$result_path" 2>&1
   then
-    echo "Android switch $cycle unique post-validation UDP echo failed: $result_path" >&2
+    echo "Android first post-radio-on WireGuard payload failed: $result_path" >&2
     return 1
   fi
-  completion_ms="$(mobile_underlay_now_ms)"
-  grep -Fq "udpEchoLabel=switch-$cycle " "$result_path" || {
-    echo "Android switch $cycle UDP echo did not return its exact payload receipt" >&2
+  grep -Fq "udpEchoLabel=radio-on " "$result_path" || {
+    echo "Android post-radio-on UDP echo did not return its exact payload" >&2
     return 1
   }
-  recovery_ms=$((completion_ms - available_lower_bound_ms))
+  completion_ms="$(mobile_underlay_now_ms)"
+  recovery_ms=$((completion_ms - recovery_requested_ms))
   if (( recovery_ms < 0 || recovery_ms > recovery_max_ms )); then
-    echo "Android switch $cycle unique payload recovery was ${recovery_ms}ms (limit ${recovery_max_ms}ms)" >&2
+    echo "Android DNS/WireGuard recovery was ${recovery_ms}ms (limit ${recovery_max_ms}ms)" >&2
     return 1
   fi
   ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS="$completion_ms"
@@ -260,72 +247,32 @@ android_vpn_native_start_count() {
   android_vpn_service_log_count "$ANDROID_VPN_NATIVE_START_LOG"
 }
 
-android_underlay_rebind_count() {
-  android_vpn_service_log_count "$ANDROID_VPN_UNDERLAY_REFRESH_LOG"
-}
-
-android_underlay_assert_rebind_count() {
-  local expected="$1" label="$2" count
-  [[ "$expected" =~ ^[0-9]+$ ]] || {
-    echo "Android $label has no valid expected native refresh count" >&2
-    return 1
-  }
-  count="$(android_underlay_rebind_count)" || return 1
-  if [[ ! "$count" =~ ^[0-9]+$ || "$count" -ne "$expected" ]]; then
-    echo "Android $label expected native refresh total $expected, observed ${count:-invalid}" >&2
-    return 1
-  fi
-}
-
-android_underlay_assert_exact_rebind_after() {
-  local baseline="$1" label="$2" expected
-  [[ "$baseline" =~ ^[0-9]+$ ]] || {
-    echo "Android $label has no valid native refresh baseline" >&2
-    return 1
-  }
-  expected=$((baseline + 1))
-  android_underlay_assert_rebind_count "$expected" "$label" || return 1
-}
-
 android_underlay_assert_native_tunnel_unchanged() {
-  local label="$1"
+  local label="$1" count
   truthy "${RELEASE_BLACKBOX_GATE:-0}" || return 0
   if ! declare -F android_release_assert_native_tunnel_unchanged >/dev/null; then
     echo "Android Release $label cannot audit native-tunnel continuity" >&2
     return 1
   fi
-  android_release_assert_native_tunnel_unchanged "$label"
-}
-
-android_underlay_wait_for_rebind_after() {
-  local baseline="$1" deadline=$((SECONDS + 8)) expected count
-  [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
-  expected=$((baseline + 1))
-  while ((SECONDS < deadline)); do
-    count="$(android_underlay_rebind_count)" || return 1
-    if [[ "$count" =~ ^[0-9]+$ ]] && (( count == expected )); then
-      return 0
-    fi
-    if [[ "$count" =~ ^[0-9]+$ ]] && (( count > expected )); then
-      echo "Android physical switch emitted more than one native refresh ($baseline->$count)" >&2
-      return 1
-    fi
-    sleep 0.1
-  done
-  echo "Android production service did not log exactly one live FIPS carrier refresh" >&2
-  return 1
+  android_release_assert_native_tunnel_unchanged "$label" || return 1
+  count="$(android_vpn_native_start_count)" || return 1
+  [[ "$count" =~ ^[0-9]+$ ]] || return 1
+  ANDROID_UNDERLAY_NATIVE_CHECKPOINTS+=("$label=$count")
 }
 
 android_underlay_assert_process_and_vpn() {
-  local expected_pid="$1" current_pid
+  local expected_pid="$1" label="${2:-}" current_pid
   current_pid="$(android_app_pid)"
   if [[ "$current_pid" != "$expected_pid" ]]; then
-    echo "Android app/VPN process changed during the physical underlay gate" >&2
+    echo "Android app/VPN process changed during the Wi-Fi radio bounce" >&2
     return 1
   fi
   if ! vpn_active || ! assert_single_android_app_process; then
     echo "Android VPN did not remain active in one canonical process" >&2
     return 1
+  fi
+  if [[ -n "$label" ]]; then
+    ANDROID_UNDERLAY_PROCESS_CHECKPOINTS+=("$label=$current_pid")
   fi
 }
 
@@ -333,27 +280,53 @@ android_underlay_background_foreground() {
   local expected_pid="$1"
   "$ADB" -s "$serial" shell input keyevent KEYCODE_HOME
   sleep 2
-  android_underlay_assert_process_and_vpn "$expected_pid" || return 1
+  android_underlay_assert_process_and_vpn "$expected_pid" background || return 1
   start_main_activity
   if ! wait_until 5 android_activity_resumed; then
-    echo "Android Activity did not foreground after the underlay switch" >&2
+    echo "Android Activity did not foreground after the Wi-Fi radio bounce" >&2
     return 1
   fi
-  android_underlay_assert_process_and_vpn "$expected_pid"
+  android_underlay_assert_process_and_vpn "$expected_pid" foreground
+}
+
+android_underlay_append_proof() {
+  local markers="$1" restored_ssid="$2" row fingerprints original_fp restored_fp
+  truthy "${RELEASE_BLACKBOX_GATE:-0}" || return 0
+  fingerprints="$(
+    python3 -c \
+      'import hashlib,secrets,sys;s=secrets.token_bytes(32);print(*(hashlib.sha256(s+x.encode()).hexdigest() for x in sys.argv[1:]))' \
+      "$ANDROID_UNDERLAY_ORIGINAL_SSID" "$restored_ssid"
+  )" || return 1
+  read -r original_fp restored_fp <<<"$fingerprints"
+  for row in "${ANDROID_UNDERLAY_PROCESS_CHECKPOINTS[@]}"; do
+    printf 'proof_app_%s\t%s\n' "${row%%=*}" "${row#*=}" >>"$markers"
+  done
+  for row in "${ANDROID_UNDERLAY_NATIVE_CHECKPOINTS[@]}"; do
+    printf 'proof_native_%s\t%s\n' "${row%%=*}" "${row#*=}" >>"$markers"
+  done
+  printf '%s\t%s\n' \
+    proof_no_validated_physical_fallback_inspections \
+    "$ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS" \
+    proof_original_wifi_fingerprint "$original_fp" \
+    proof_restored_wifi_fingerprint "$restored_fp" \
+    proof_fresh_dns_query "$ANDROID_UNDERLAY_FRESH_DNS_HOST" \
+    proof_wireguard_payload_label radio-on >>"$markers"
 }
 
 android_underlay_restore_home() {
   [[ "$ANDROID_UNDERLAY_HOME_RESTORE_ARMED" -eq 1 ]] || return 0
   local timeout="${NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS:-30}"
-  if android_underlay_reconnect_home \
-    && android_underlay_wait_validated \
-      "$NVPN_ANDROID_UNDERLAY_HOME_SSID" "$timeout"
+  "$ADB" -s "$serial" shell svc wifi enable >/dev/null 2>&1 || return 1
+  android_underlay_wait_wifi_radio enabled 5 || return 1
+  "$ADB" -s "$serial" shell cmd wifi start-scan >/dev/null 2>&1 || true
+  if android_underlay_wait_validated \
+      "$ANDROID_UNDERLAY_ORIGINAL_SSID" "$timeout"
   then
     ANDROID_UNDERLAY_HOME_RESTORE_ARMED=0
-    echo "Android emergency underlay cleanup restored the original validated Wi-Fi"
+    echo "Android cleanup restored the original validated Wi-Fi"
     return 0
   fi
-  echo "Android emergency underlay cleanup could not restore the original Wi-Fi" >&2
+  echo "Android cleanup could not restore the original validated Wi-Fi" >&2
   return 1
 }
 
@@ -369,151 +342,131 @@ run_android_underlay_network_change_gate() {
     NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS "$recovery_max_ms" \
     || return 1
   if (( recovery_max_ms > 4000 )); then
-    echo "Android underlay recovery budget cannot exceed 4000ms" >&2
+    echo "Android radio-on recovery budget cannot exceed 4000ms" >&2
     return 1
   fi
-  if ! android_underlay_network_is_validated \
-      "$NVPN_ANDROID_UNDERLAY_HOME_SSID"
-  then
-    echo "Android underlay gate requires the configured home Wi-Fi to be active and validated" >&2
-    return 1
-  fi
+
+  ANDROID_UNDERLAY_ORIGINAL_SSID="$(android_underlay_original_ssid)"
+  [[ -n "$ANDROID_UNDERLAY_ORIGINAL_SSID" ]] \
+    && android_underlay_network_is_validated "$ANDROID_UNDERLAY_ORIGINAL_SSID" \
+    || {
+      echo "Android radio-bounce gate requires an active validated Wi-Fi" >&2
+      return 1
+    }
 
   local artifact_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
   local stem="mobile-android-underlay-$$"
   local ping_log="$artifact_dir/$stem-continuity.log"
   local markers="$artifact_dir/$stem-markers.tsv"
   local summary="$artifact_dir/$stem-summary.json"
-  local expected_pid initial_rebind baseline_rebind
-  local available_ms requested_ms recovery_ms cycle
+  local expected_pid requested_ms recovery_requested_ms recovery_ms restored_ssid
   mkdir -p "$artifact_dir"
   : >"$markers"
+  ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS=0
+  ANDROID_UNDERLAY_PROCESS_CHECKPOINTS=()
+  ANDROID_UNDERLAY_NATIVE_CHECKPOINTS=()
   expected_pid="$(android_app_pid)"
-  android_underlay_assert_process_and_vpn "$expected_pid" || return 1
-  android_underlay_assert_native_tunnel_unchanged underlay-start || return 1
-  initial_rebind="$(android_underlay_rebind_count)" || return 1
-  [[ "$initial_rebind" =~ ^[0-9]+$ ]] || {
-    echo "Android underlay gate could not pin the initial native refresh total" >&2
-    return 1
-  }
+  android_underlay_assert_process_and_vpn \
+    "$expected_pid" radio-bounce-start || return 1
+  android_underlay_assert_native_tunnel_unchanged radio-bounce-start || return 1
   android_build_captured_network_probe || return 1
   mobile_continuity_start \
     "$NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER" \
     "$NVPN_MOBILE_UNDERLAY_CONTINUITY_CLIENT_IP" \
     "$ping_log" \
     || return 1
-  ANDROID_UNDERLAY_HOME_RESTORE_ARMED=1
-
-  for cycle in 1 2; do
-    local ssid security passphrase label
-    if [[ "$cycle" -eq 1 ]]; then
-      ssid="$NVPN_ANDROID_UNDERLAY_ALTERNATE_SSID"
-      security="$NVPN_ANDROID_UNDERLAY_ALTERNATE_SECURITY"
-      passphrase="${NVPN_ANDROID_UNDERLAY_ALTERNATE_PASSPHRASE:-}"
-      label="alternate"
-    else
-      ssid="$NVPN_ANDROID_UNDERLAY_HOME_SSID"
-      security="${NVPN_ANDROID_UNDERLAY_HOME_SECURITY:-saved}"
-      passphrase="${NVPN_ANDROID_UNDERLAY_HOME_PASSPHRASE:-}"
-      label="home"
-    fi
-    baseline_rebind=$((initial_rebind + cycle - 1))
-    if ! android_underlay_assert_rebind_count \
-        "$baseline_rebind" "before underlay switch $cycle"
-    then
-      mobile_continuity_stop
-      return 1
-    fi
-    requested_ms="$(mobile_underlay_now_ms)"
-    printf 'switch_%s_requested\t%s\n' \
-      "$cycle" "$requested_ms" >>"$markers"
-    if [[ "$cycle" -eq 2 ]]; then
-      if ! android_underlay_reconnect_home; then
-        echo "Android could not reconnect its saved $label Wi-Fi underlay" >&2
-        mobile_continuity_stop
-        return 1
-      fi
-    elif ! android_underlay_connect_network "$ssid" "$security" "$passphrase"; then
-      echo "Android could not request the $label Wi-Fi underlay" >&2
-      mobile_continuity_stop
-      return 1
-    fi
-    if ! android_underlay_wait_validated \
-        "$ssid" "$association_timeout" "$requested_ms"
-    then
-      echo "Android $label Wi-Fi did not become validated in ${association_timeout}s" >&2
-      mobile_continuity_stop
-      return 1
-    fi
-    available_ms="$ANDROID_UNDERLAY_AVAILABLE_LOWER_BOUND_MS"
-    [[ "$available_ms" =~ ^[0-9]+$ ]] || {
-      echo "Android $label Wi-Fi had no conservative availability bound" >&2
+  mobile_continuity_wait_for_reply_count_after \
+    "$ping_log" "$(mobile_underlay_now_ms)" 2 2000 || {
       mobile_continuity_stop
       return 1
     }
-    printf 'switch_%s_available\t%s\n' "$cycle" "$available_ms" >>"$markers"
-    if ! android_underlay_wait_for_rebind_after "$baseline_rebind"; then
+  ANDROID_UNDERLAY_HOME_RESTORE_ARMED=1
+
+  requested_ms="$(mobile_underlay_now_ms)"
+  printf 'switch_1_requested\t%s\n' "$requested_ms" >>"$markers"
+  "$ADB" -s "$serial" shell svc wifi disable >/dev/null
+  android_underlay_wait_wifi_radio disabled 5 || {
+    echo "Android Wi-Fi radio did not turn off" >&2
+    mobile_continuity_stop
+    return 1
+  }
+  android_underlay_wait_offline "$ping_log" || {
+    mobile_continuity_stop
+    return 1
+  }
+  printf 'switch_1_outage\t%s\n' "$ANDROID_UNDERLAY_OUTAGE_MS" >>"$markers"
+  android_underlay_assert_process_and_vpn "$expected_pid" radio-off \
+    && android_underlay_assert_native_tunnel_unchanged radio-off \
+    || {
       mobile_continuity_stop
       return 1
-    fi
-    if ! android_underlay_unique_udp_echo \
-        "$cycle" "$available_ms" "$recovery_max_ms"
-    then
+    }
+
+  recovery_requested_ms="$(mobile_underlay_now_ms)"
+  printf 'switch_1_recovery_requested\t%s\n' \
+    "$recovery_requested_ms" >>"$markers"
+  "$ADB" -s "$serial" shell svc wifi enable >/dev/null
+  android_underlay_wait_wifi_radio enabled 5 || {
+    echo "Android Wi-Fi radio did not turn on" >&2
+    mobile_continuity_stop
+    return 1
+  }
+  "$ADB" -s "$serial" shell cmd wifi start-scan >/dev/null 2>&1 || true
+  android_underlay_wait_validated \
+    "$ANDROID_UNDERLAY_ORIGINAL_SSID" "$association_timeout" \
+    || {
+      echo "Android original Wi-Fi did not return validated" >&2
       mobile_continuity_stop
       return 1
-    fi
-    recovery_ms="$ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS"
-    printf 'switch_%s_payload_recovery\t%s\n' \
-      "$cycle" "$recovery_ms" >>"$markers"
-    if ! mobile_continuity_wait_for_reply_count_after \
-        "$ping_log" "$ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS" 2 2000 \
-      || ! android_underlay_assert_process_and_vpn "$expected_pid"
-    then
+    }
+  android_underlay_recovery_payloads \
+    "$recovery_requested_ms" "$recovery_max_ms" || {
+    mobile_continuity_stop
+    return 1
+  }
+  recovery_ms="$ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS"
+  printf 'switch_%s_payload_recovery\t%s\n' 1 "$recovery_ms" >>"$markers"
+  mobile_continuity_wait_for_reply_count_after \
+    "$ping_log" "$ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS" 2 2000 \
+    && android_underlay_assert_process_and_vpn "$expected_pid" radio-on \
+    && android_underlay_assert_native_tunnel_unchanged radio-on \
+    || {
       mobile_continuity_stop
       return 1
-    fi
-    if [[ "$cycle" -eq 1 ]]; then
-      android_underlay_background_foreground "$expected_pid" || {
+    }
+  android_underlay_background_foreground "$expected_pid" || {
+    mobile_continuity_stop
+    return 1
+  }
+  if truthy "${RELEASE_BLACKBOX_GATE:-0}"; then
+    run_android_release_exit_network_probe wireguard-exit-after-radio-on || {
+      mobile_continuity_stop
+      return 1
+    }
+  else
+    run_android_tun_packet_probe \
+      && run_android_exit_network_probe wireguard-exit-after-radio-on || {
         mobile_continuity_stop
         return 1
       }
-    fi
-    if truthy "${RELEASE_BLACKBOX_GATE:-0}"; then
-      run_android_release_exit_network_probe \
-        "wireguard-exit-after-underlay-$label" || {
-          mobile_continuity_stop
-          return 1
-        }
-    else
-      run_android_tun_packet_probe || {
-        mobile_continuity_stop
-        return 1
-      }
-      run_android_exit_network_probe "wireguard-exit-after-underlay-$label" || {
-        mobile_continuity_stop
-        return 1
-      }
-    fi
-    if ! android_underlay_assert_exact_rebind_after \
-        "$baseline_rebind" "underlay switch $cycle" \
-      || ! android_underlay_assert_native_tunnel_unchanged \
-        "underlay switch $cycle"
-    then
-      mobile_continuity_stop
-      return 1
-    fi
-    printf 'switch_%s_verified\t%s\n' \
-      "$cycle" "$(mobile_underlay_now_ms)" >>"$markers"
-  done
+  fi
+  printf 'switch_1_verified\t%s\n' "$(mobile_underlay_now_ms)" >>"$markers"
+  restored_ssid="$(android_underlay_original_ssid)"
+  [[ "$restored_ssid" == "$ANDROID_UNDERLAY_ORIGINAL_SSID" ]] || {
+    echo "Android radio bounce did not restore the original Wi-Fi" >&2
+    mobile_continuity_stop
+    return 1
+  }
+  android_underlay_append_proof "$markers" "$restored_ssid" || {
+    mobile_continuity_stop
+    return 1
+  }
 
   ANDROID_UNDERLAY_HOME_RESTORE_ARMED=0
   mobile_continuity_stop
-  android_underlay_assert_rebind_count \
-    "$((initial_rebind + 2))" "after both underlay switches" \
-    || return 1
   mobile_continuity_validate \
     "$ROOT" "$ping_log" "$markers" "$summary" Android "$recovery_max_ms" \
     || return 1
   android_underlay_assert_process_and_vpn "$expected_pid" || return 1
-  echo "Android real Wi-Fi underlay-change gate passed without restarting the app/VPN"
+  echo "Android real Wi-Fi radio off/on gate passed without restarting the app/VPN"
 }

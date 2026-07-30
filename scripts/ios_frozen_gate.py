@@ -19,7 +19,7 @@ REQUIRED_REAL_DEVICE_GATES = [
     "background-foreground-and-rapid-start-stop",
     "bidirectional-mobile-qr-and-manual-join",
     "desktop-mobile-manual-join",
-    "wifi-hotspot-underlay-roaming",
+    "wifi-radio-off-on-recovery",
     "wireguard-exit-and-five-dns-policies",
 ]
 
@@ -539,11 +539,52 @@ def validate_mobile_network_receipt(
             "iOS WireGuard/DNS receipt lacks eight rapid start/stop cycles",
         )
     else:
+        cycles = support.get("underlayCycles")
+        cycle = cycles[0] if isinstance(cycles, list) and len(cycles) == 1 else {}
+        process_counts = cycle.get("processIdentifierCounts", {})
+        evidence_paths = receipt.get("evidenceFiles", {})
+        required_suffixes = (
+            "continuity.json",
+            "host-markers.tsv",
+            "processes.json",
+            "reverse-payload.log",
+            "runner-markers.log",
+            "underlay-fresh-dns-fixture.json",
+        )
         require(
             support.get("lifecycleCycles") == 3
-            and isinstance(support.get("underlayCycles"), list)
-            and len(support["underlayCycles"]) == 2,
-            "iOS underlay receipt lacks lifecycle/roaming counters",
+            and isinstance(cycles, list)
+            and len(cycles) == 1
+            and cycle.get("gate") == "wifi-radio-off-on-recovery"
+            and cycle.get("outageReversePayloads") == 0
+            and isinstance(
+                cycle.get("dnsAndWireGuardRecoveryMilliseconds"), int
+            )
+            and 0 <= cycle["dnsAndWireGuardRecoveryMilliseconds"] <= 4_000
+            and isinstance(
+                cycle.get("firstReversePayloadRecoveryMilliseconds"), int
+            )
+            and 0
+            <= cycle["firstReversePayloadRecoveryMilliseconds"]
+            <= 4_000
+            and isinstance(cycle.get("freshDnsQueryHost"), str)
+            and re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12}\..+",
+                cycle["freshDnsQueryHost"],
+            )
+            and isinstance(cycle.get("freshDnsFixtureExactQueryCount"), int)
+            and cycle["freshDnsFixtureExactQueryCount"] > 0
+            and cycle.get("noValidatedPhysicalFallbackEvidenceCount") == 1
+            and cycle.get("originalWifiRestoredEvidenceCount") == 1
+            and process_counts.get("app") == 1
+            and process_counts.get("packetTunnel") == 1
+            and isinstance(evidence_paths, dict)
+            and all(
+                any(path.endswith(suffix) for path in evidence_paths)
+                for suffix in required_suffixes
+            ),
+            "iOS radio-bounce receipt lacks lifecycle/recovery counters",
         )
 
 
@@ -676,7 +717,7 @@ def seal_gate(args: argparse.Namespace) -> None:
             "desktop-mobile-manual-join": [
                 sha256_file(desktop_join_receipt)
             ],
-            "wifi-hotspot-underlay-roaming": [
+            "wifi-radio-off-on-recovery": [
                 sha256_file(mobile_underlay_receipt)
             ],
             "wireguard-exit-and-five-dns-policies": [
@@ -827,7 +868,7 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         "desktop-mobile-manual-join": [
             sha256_file(desktop_join_receipt)
         ],
-        "wifi-hotspot-underlay-roaming": [
+        "wifi-radio-off-on-recovery": [
             sha256_file(mobile_underlay_receipt)
         ],
         "wireguard-exit-and-five-dns-policies": [

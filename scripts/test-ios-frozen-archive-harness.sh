@@ -476,10 +476,32 @@ underlay = {
     **base_network,
     "artifactType": "physical ios Release underlay-lifecycle gate",
     "mode": "underlay-lifecycle",
+    "evidenceFiles": {
+        path: "a" * 64
+        for path in (
+            "case-continuity.json",
+            "case-host-markers.tsv",
+            "case-processes.json",
+            "case-reverse-payload.log",
+            "case-runner-markers.log",
+            "mobile-ios-underlay-fresh-dns-fixture.json",
+        )
+    },
     "dnsCases": {"automatic-profile": counter_case()},
     "support": {
         "lifecycleCycles": 3,
-        "underlayCycles": [{}, {}],
+        "underlayCycles": [{
+            "dnsAndWireGuardRecoveryMilliseconds": 200,
+            "firstReversePayloadRecoveryMilliseconds": 200,
+            "freshDnsFixtureExactQueryCount": 1,
+            "freshDnsQueryHost":
+                "12345678-1234-1234-1234-123456789abc.fixture.test",
+            "gate": "wifi-radio-off-on-recovery",
+            "noValidatedPhysicalFallbackEvidenceCount": 1,
+            "originalWifiRestoredEvidenceCount": 1,
+            "outageReversePayloads": 0,
+            "processIdentifierCounts": {"app": 1, "packetTunnel": 1},
+        }],
     },
 }
 desktop_join = {
@@ -543,7 +565,7 @@ restore_receipts() {
 GATE_ARGS=(
   --required-gate wireguard-exit-and-five-dns-policies
   --required-gate background-foreground-and-rapid-start-stop
-  --required-gate wifi-hotspot-underlay-roaming
+  --required-gate wifi-radio-off-on-recovery
   --required-gate bidirectional-mobile-qr-and-manual-join
   --required-gate desktop-mobile-manual-join
 )

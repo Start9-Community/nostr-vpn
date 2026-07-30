@@ -55,6 +55,10 @@ public final class MobileAndroidCapturedNetworkProbe {
             udpEcho(args[1], Integer.parseInt(args[2]), args[3]);
             return;
         }
+        if (args.length == 4 && args[0].equals("--fresh-dns")) {
+            freshDns(args[1], args[2], args[3]);
+            return;
+        }
         if (args.length == 1) {
             Response direct = fetch(args[0], true);
             if (direct.status < 200 || direct.status >= 400) {
@@ -92,6 +96,37 @@ public final class MobileAndroidCapturedNetworkProbe {
                 + " capturedHttpsStatus=" + secure.status
                 + " exitSourceIp=" + exitSourceIp
                 + " token=" + args[1]
+        );
+    }
+
+    private static void freshDns(
+        String baseHost,
+        String expectedAddress,
+        String label
+    ) throws Exception {
+        if (baseHost.isEmpty() || expectedAddress.isEmpty() || label.isEmpty()) {
+            throw new IllegalArgumentException("invalid fresh DNS arguments");
+        }
+        String queryHost = UUID.randomUUID().toString().toLowerCase()
+            + "." + baseHost;
+        InetAddress[] addresses = InetAddress.getAllByName(queryHost);
+        boolean expectedFound = false;
+        String[] observed = new String[addresses.length];
+        for (int index = 0; index < addresses.length; index += 1) {
+            observed[index] = addresses[index].getHostAddress();
+            expectedFound |= observed[index].equals(expectedAddress);
+        }
+        if (!expectedFound) {
+            throw new IllegalStateException(
+                "fresh DNS answer did not contain " + expectedAddress
+            );
+        }
+        System.out.println(
+            "freshDnsLabel=" + label
+                + " queryHost=" + queryHost
+                + " expectedAddress=" + expectedAddress
+                + " answers=" + String.join(",", observed)
+                + " completionNanos=" + System.nanoTime()
         );
     }
 

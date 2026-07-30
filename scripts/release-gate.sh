@@ -1652,12 +1652,6 @@ run_mobile_wireguard_exit_gates() {
 
 run_mobile_underlay_change_gates() {
   local mode="${NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E:-auto}"
-  local managed_ap_configured=0
-  if [[ -n "${NVPN_ANDROID_UNDERLAY_MANAGED_AP_SSH_HOST:-}" \
-    && -n "${NVPN_ANDROID_UNDERLAY_MANAGED_AP_INTERFACE:-}" ]]
-  then
-    managed_ap_configured=1
-  fi
   case "$mode" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping physical mobile underlay-change e2e because NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=$mode"
@@ -1666,14 +1660,8 @@ run_mobile_underlay_change_gates() {
     1|true|TRUE|True|yes|YES|Yes|on|ON|On)
       ;;
     auto|AUTO|Auto|"")
-      if [[ -z "${NVPN_MOBILE_WG_EXIT_HOST_IP:-}" ]] \
-        || { [[ "$managed_ap_configured" -eq 0 ]] \
-          && { [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SSID:-}" ]] \
-            || [[ -z "${NVPN_ANDROID_UNDERLAY_HOME_SECURITY:-}" ]] \
-            || [[ -z "${NVPN_ANDROID_UNDERLAY_ALTERNATE_SSID:-}" ]] \
-            || [[ -z "${NVPN_ANDROID_UNDERLAY_ALTERNATE_SECURITY:-}" ]]; }; }
-      then
-        echo "Skipping physical mobile underlay-change e2e because its env-only two-network fixture is not configured."
+      if [[ -z "${NVPN_MOBILE_WG_EXIT_HOST_IP:-}" ]]; then
+        echo "Skipping physical mobile Wi-Fi radio off/on e2e because its reachable fixture address is not configured."
         return
       fi
       ;;
@@ -1723,11 +1711,10 @@ run_mobile_underlay_change_gates() {
   fi
   local port_base="$((55000 + $$ % 500 * 2))"
 
-  # Keep both physical-device switches serial and isolated from all other phone
-  # lanes. The iOS lane controls the Pixel hotspot only after the Android DUT
-  # lane has completed.
+  # Keep each phone's physical radio mutation isolated from every other phone
+  # lane so cleanup always restores the original validated Wi-Fi.
   release_gate_run_with_timeout \
-    "Android physical Wi-Fi underlay change" \
+    "Android physical Wi-Fi radio off/on recovery" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env NVPN_IDLE_CPU_GATE=0 \
       NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
@@ -1761,7 +1748,7 @@ run_mobile_underlay_change_gates() {
   MOBILE_ANDROID_APP_READY=1
 
   release_gate_run_with_timeout \
-    "iOS physical Wi-Fi/Pixel-hotspot underlay change" \
+    "iOS physical Wi-Fi radio off/on recovery" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env NVPN_IDLE_CPU_GATE=0 \
       NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
@@ -2017,7 +2004,7 @@ seal_frozen_ios_release_gate() {
     --output "$ROOT_DIR/dist/ios/frozen/physical-gate-seal.json" \
     --required-gate wireguard-exit-and-five-dns-policies \
     --required-gate background-foreground-and-rapid-start-stop \
-    --required-gate wifi-hotspot-underlay-roaming \
+    --required-gate wifi-radio-off-on-recovery \
     --required-gate bidirectional-mobile-qr-and-manual-join \
     --required-gate desktop-mobile-manual-join
   echo "Sealed the real-device gates to the frozen iOS archive."

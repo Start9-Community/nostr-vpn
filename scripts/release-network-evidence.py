@@ -9,7 +9,9 @@ import ipaddress
 import json
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 from typing import Any
 
 
@@ -41,6 +43,10 @@ DESKTOP_DNS_COUNTER_NAMES = (
     "quad9",
     "google",
     "fixture_dns",
+)
+UUID_SUBDOMAIN_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}\..+"
 )
 DESKTOP_DNS_UI_SETTINGS = {
     "automatic": ("automatic", "cloudflare", "", "", ""),
@@ -231,6 +237,166 @@ def exactly_one(root: pathlib.Path, pattern: str, label: str) -> pathlib.Path:
     return matches[0]
 
 
+def validate_underlay_continuity(
+    path: pathlib.Path,
+    platform: str,
+    ping_path: pathlib.Path,
+    marker_path: pathlib.Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    receipt = load_json(path)
+    with tempfile.NamedTemporaryFile(suffix=".json") as recomputed:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(pathlib.Path(__file__).with_name(
+                    "validate-mobile-underlay-continuity.py"
+                )),
+                str(ping_path),
+                str(marker_path),
+                recomputed.name,
+                platform,
+                "4000",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        require(
+            completed.returncode == 0,
+            f"{platform} raw underlay evidence failed validation",
+        )
+        require(
+            receipt == load_json(pathlib.Path(recomputed.name)),
+            f"{platform} underlay summary differs from its raw evidence",
+        )
+    cycles = receipt.get("cycles")
+    require(
+        receipt.get("passed") is True
+        and receipt.get("platform") == platform
+        and receipt.get("maxRecoveryMilliseconds") == 4_000
+        and isinstance(receipt.get("successfulPayloads"), int)
+        and receipt["successfulPayloads"] > 0
+        and isinstance(cycles, list)
+        and len(cycles) == 1,
+        f"{platform} underlay continuity receipt is incomplete",
+    )
+    cycle = cycles[0]
+    requested = cycle.get("requestedAtMilliseconds")
+    outage = cycle.get("outageAtMilliseconds")
+    recovery_requested = cycle.get("recoveryRequestedAtMilliseconds")
+    verified = cycle.get("verifiedAtMilliseconds")
+    recovery = cycle.get("recoveryMilliseconds")
+    require(
+        all(
+            isinstance(value, int)
+            for value in (
+                requested,
+                outage,
+                recovery_requested,
+                verified,
+                recovery,
+            )
+        )
+        and requested <= outage < recovery_requested <= verified
+        and 0 <= recovery <= 4_000
+        and cycle.get("dnsAndWireGuardRecoveryMilliseconds") == recovery
+        and cycle.get("outageReversePayloads") == 0
+        and isinstance(cycle.get("firstReversePayloadRecoveryMilliseconds"), int)
+        and 0 <= cycle["firstReversePayloadRecoveryMilliseconds"] <= 4_000
+        and cycle.get("payloadBeforeSwitch") is True
+        and cycle.get("reversePayloadAfterRecoveryRequest") is True,
+        f"{platform} underlay continuity measurements are incomplete",
+    )
+    return receipt, cycle
+
+
+def underlay_marker_values(path: pathlib.Path) -> dict[str, str]:
+    require(
+        path.is_file() and not path.is_symlink(),
+        f"missing regular underlay markers: {path}",
+    )
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = line.split("\t")
+        require(len(fields) == 2, f"invalid underlay marker row in {path.name}")
+        require(fields[0] not in values, f"duplicate underlay marker {fields[0]}")
+        values[fields[0]] = fields[1]
+    return values
+
+
+def validate_android_underlay_markers(path: pathlib.Path) -> dict[str, Any]:
+    markers = underlay_marker_values(path)
+    app_ids = {
+        markers.get(f"proof_app_{label}")
+        for label in (
+            "radio-bounce-start",
+            "radio-off",
+            "radio-on",
+            "background",
+            "foreground",
+        )
+    }
+    native_counts = {
+        markers.get(f"proof_native_{label}")
+        for label in ("radio-bounce-start", "radio-off", "radio-on")
+    }
+    app_id = next(iter(app_ids), None)
+    native_count = next(iter(native_counts), None)
+    try:
+        no_fallback = int(
+            markers["proof_no_validated_physical_fallback_inspections"]
+        )
+    except (KeyError, ValueError) as error:
+        raise ValueError("Android underlay no-fallback proof is invalid") from error
+    fresh_dns_host = markers.get("proof_fresh_dns_query", "")
+    require(
+        len(app_ids) == 1
+        and isinstance(app_id, str)
+        and app_id.isdigit()
+        and int(app_id) > 0
+        and len(native_counts) == 1
+        and isinstance(native_count, str)
+        and native_count.isdigit()
+        and int(native_count) > 0
+        and no_fallback >= 2
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            markers.get("proof_original_wifi_fingerprint", ""),
+        )
+        is not None
+        and markers.get("proof_restored_wifi_fingerprint")
+        == markers.get("proof_original_wifi_fingerprint")
+        and UUID_SUBDOMAIN_RE.fullmatch(fresh_dns_host) is not None
+        and markers.get("proof_wireguard_payload_label") == "radio-on",
+        "Android underlay marker proof is incomplete",
+    )
+    return {
+        "appIdentifierCount": len(app_ids),
+        "freshDnsQueryHost": fresh_dns_host,
+        "nativeTunnelIdentifierCount": len(native_counts),
+        "noValidatedPhysicalFallbackEvidenceCount": no_fallback,
+    }
+
+
+def validate_fresh_dns_fixture_proof(
+    path: pathlib.Path,
+    platform: str,
+    query_host: str,
+) -> dict[str, Any]:
+    proof = load_json(path)
+    require(
+        proof.get("schemaVersion") == 1
+        and proof.get("platform") == platform
+        and proof.get("gate") == "wifi-radio-off-on-recovery"
+        and proof.get("queryHost") == query_host
+        and isinstance(proof.get("exactQueryCount"), int)
+        and proof["exactQueryCount"] > 0,
+        f"{platform} fresh DNS query lacks exact fixture evidence",
+    )
+    return proof
+
+
 def validate_ios_support(
     root: pathlib.Path,
     cases: list[str],
@@ -321,6 +487,21 @@ def validate_ios_support(
             "mobile-ios-release-network-automatic-profile-*-processes.json",
             "iOS underlay/lifecycle process",
         )
+        runner_markers_path = exactly_one(
+            root,
+            "mobile-ios-release-network-automatic-profile-*-runner-markers.log",
+            "iOS underlay/lifecycle runner markers",
+        )
+        host_markers_path = exactly_one(
+            root,
+            "mobile-ios-release-network-automatic-profile-*-host-markers.tsv",
+            "iOS underlay/lifecycle host markers",
+        )
+        reverse_ping_path = exactly_one(
+            root,
+            "mobile-ios-release-network-automatic-profile-*-reverse-payload.log",
+            "iOS underlay/lifecycle reverse payload",
+        )
         process = load_json(process_path)
         required = set(process["requiredCheckpoints"])
         for cycle in range(1, 4):
@@ -329,37 +510,78 @@ def validate_ios_support(
                 and f"release_foreground_{cycle}_verified" in required,
                 f"iOS lifecycle cycle {cycle} is missing",
             )
-        for cycle in (1, 2):
-            for phase in ("requested", "available", "payload_recovery", "verified"):
-                require(
-                    f"underlay_switch_{cycle}_{phase}" in required,
-                    f"iOS underlay cycle {cycle} {phase} is missing",
-                )
+        for phase in (
+            "requested",
+            "outage",
+            "recovery_requested",
+            "payload_recovery",
+            "verified",
+        ):
+            require(
+                f"underlay_switch_1_{phase}" in required,
+                f"iOS Wi-Fi radio bounce {phase} is missing",
+            )
         continuity_path = exactly_one(
             root,
             "mobile-ios-release-network-automatic-profile-*-continuity.json",
             "iOS underlay continuity",
         )
-        continuity = load_json(continuity_path)
+        continuity, cycle = validate_underlay_continuity(
+            continuity_path,
+            "iOS",
+            reverse_ping_path,
+            host_markers_path,
+        )
+        runner_markers = runner_markers_path.read_text(encoding="utf-8").splitlines()
+        fresh_dns_rows = [
+            line.partition("=")[2]
+            for line in runner_markers
+            if line.startswith("NVPN_IOS_UNDERLAY_SWITCH_1_FRESH_DNS_QUERY=")
+        ]
         require(
-            continuity.get("passed") is True
-            and continuity.get("platform") == "iOS"
-            and continuity.get("maxRecoveryMilliseconds") == 4_000
-            and continuity.get("successfulPayloads", 0) > 0
-            and isinstance(continuity.get("cycles"), list)
-            and len(continuity["cycles"]) == 2
-            and all(
-                isinstance(cycle.get("recoveryMilliseconds"), int)
-                and 0 <= cycle["recoveryMilliseconds"] <= 4_000
-                and cycle.get("payloadBeforeSwitch") is True
-                and cycle.get("reversePayloadAfterAvailability") is True
-                for cycle in continuity["cycles"]
-            ),
-            "iOS underlay continuity receipt is incomplete",
+            runner_markers.count(
+                "NVPN_IOS_UNDERLAY_SWITCH_1_NO_VALIDATED_PHYSICAL_FALLBACK=1"
+            )
+            == 1
+            and runner_markers.count(
+                "NVPN_IOS_UNDERLAY_SWITCH_1_ORIGINAL_WIFI_RESTORED=1"
+            )
+            == 1
+            and len(fresh_dns_rows) == 1
+            and UUID_SUBDOMAIN_RE.fullmatch(fresh_dns_rows[0]) is not None,
+            "iOS underlay platform proof is incomplete",
+        )
+        fixture_dns_path = exactly_one(
+            root,
+            "mobile-ios-underlay-fresh-dns-fixture.json",
+            "iOS underlay fresh DNS fixture",
+        )
+        fixture_dns = validate_fresh_dns_fixture_proof(
+            fixture_dns_path,
+            "iOS",
+            fresh_dns_rows[0],
         )
         summaries["lifecycleCycles"] = 3
-        summaries["underlayCycles"] = continuity["cycles"]
-        paths.append(continuity_path)
+        summaries["underlayCycles"] = [{
+            **cycle,
+            "freshDnsQueryHost": fresh_dns_rows[0],
+            "freshDnsFixtureExactQueryCount": fixture_dns["exactQueryCount"],
+            "gate": "wifi-radio-off-on-recovery",
+            "noValidatedPhysicalFallbackEvidenceCount": 1,
+            "originalWifiRestoredEvidenceCount": 1,
+            "processIdentifierCounts": {
+                "app": len(process["appProcessIdentifiers"]),
+                "packetTunnel": len(process["packetTunnelProcessIdentifiers"]),
+            },
+        }]
+        paths.extend(
+            (
+                continuity_path,
+                fixture_dns_path,
+                host_markers_path,
+                reverse_ping_path,
+            )
+        )
     return summaries, paths
 
 
@@ -571,22 +793,56 @@ def validate_android_support(
             "mobile-android-underlay-*-summary.json",
             "Android underlay continuity",
         )
-        underlay = load_json(underlay_path)
+        markers_path = exactly_one(
+            root,
+            "mobile-android-underlay-*-markers.tsv",
+            "Android underlay markers",
+        )
+        reverse_ping_path = exactly_one(
+            root,
+            "mobile-android-underlay-*-continuity.log",
+            "Android underlay reverse payload",
+        )
+        dns_path = exactly_one(
+            root,
+            "mobile-android-radio-bounce-dns-*.log",
+            "Android underlay fresh DNS",
+        )
+        udp_path = exactly_one(
+            root,
+            "mobile-android-radio-bounce-udp-*.log",
+            "Android underlay WireGuard UDP",
+        )
+        underlay, measured_cycle = validate_underlay_continuity(
+            underlay_path,
+            "Android",
+            reverse_ping_path,
+            markers_path,
+        )
+        marker_proof = validate_android_underlay_markers(markers_path)
+        fresh_dns_host = marker_proof["freshDnsQueryHost"]
+        fixture_dns_path = exactly_one(
+            root,
+            "mobile-android-underlay-fresh-dns-fixture.json",
+            "Android underlay fresh DNS fixture",
+        )
+        fixture_dns = validate_fresh_dns_fixture_proof(
+            fixture_dns_path,
+            "Android",
+            fresh_dns_host,
+        )
+        dns_text = dns_path.read_text(encoding="utf-8")
+        udp_text = udp_path.read_text(encoding="utf-8")
+        dns_match = re.search(
+            r"expectedAddress=(\S+) answers=(\S+)",
+            dns_text,
+        )
         require(
-            underlay.get("passed") is True
-            and underlay.get("platform") == "Android"
-            and underlay.get("maxRecoveryMilliseconds") == 4_000
-            and underlay.get("successfulPayloads", 0) > 0
-            and isinstance(underlay.get("cycles"), list)
-            and len(underlay["cycles"]) == 2
-            and all(
-                isinstance(cycle.get("recoveryMilliseconds"), int)
-                and 0 <= cycle["recoveryMilliseconds"] <= 4_000
-                and cycle.get("payloadBeforeSwitch") is True
-                and cycle.get("reversePayloadAfterAvailability") is True
-                for cycle in underlay["cycles"]
-            ),
-            "Android underlay continuity receipt is incomplete",
+            fresh_dns_host in dns_text
+            and dns_match is not None
+            and dns_match.group(1) in dns_match.group(2).split(",")
+            and "udpEchoLabel=radio-on " in udp_text,
+            "Android underlay raw DNS/WireGuard proof is incomplete",
         )
         lifecycle_ledger = exactly_one(
             root,
@@ -605,25 +861,49 @@ def validate_android_support(
             "Android lifecycle lacks three same-process/tunnel receipts",
         )
         lifecycle_paths = []
-        for cycle in range(1, 4):
+        for lifecycle_cycle in range(1, 4):
             for phase in ("background", "foreground"):
                 path = exactly_one(
                     root,
-                    f"mobile-android-network-release-{phase}-cycle-{cycle}-*.txt",
-                    f"Android release {phase} cycle {cycle}",
+                    f"mobile-android-network-release-{phase}-cycle-{lifecycle_cycle}-*.txt",
+                    f"Android release {phase} cycle {lifecycle_cycle}",
                 )
                 text = path.read_text(encoding="utf-8")
                 require(
                     "capturedHttpStatus=200" in text
                     and re.search(r"capturedHttpsStatus=[23][0-9][0-9]", text)
                     and "exitSourceIp=" in text,
-                    f"Android release {phase} cycle {cycle} lacks DNS/HTTP/HTTPS packet evidence",
+                    f"Android release {phase} cycle {lifecycle_cycle} lacks DNS/HTTP/HTTPS packet evidence",
                 )
                 lifecycle_paths.append(path)
         summary["lifecycleCycles"] = 3
-        summary["underlayCycles"] = underlay["cycles"]
+        summary["underlayCycles"] = [{
+            **measured_cycle,
+            "freshDnsQueryHost": fresh_dns_host,
+            "freshDnsFixtureExactQueryCount": fixture_dns["exactQueryCount"],
+            "gate": "wifi-radio-off-on-recovery",
+            "noValidatedPhysicalFallbackEvidenceCount": marker_proof[
+                "noValidatedPhysicalFallbackEvidenceCount"
+            ],
+            "originalWifiRestoredEvidenceCount": 1,
+            "processIdentifierCounts": {
+                "app": marker_proof["appIdentifierCount"],
+                "nativeTunnel": marker_proof["nativeTunnelIdentifierCount"],
+            },
+        }]
         summary["postForegroundDnsHttpsAndTunnelCycles"] = 3
-        paths.extend((underlay_path, lifecycle_ledger, *lifecycle_paths))
+        paths.extend(
+            (
+                underlay_path,
+                markers_path,
+                reverse_ping_path,
+                fixture_dns_path,
+                dns_path,
+                udp_path,
+                lifecycle_ledger,
+                *lifecycle_paths,
+            )
+        )
     return summary, paths
 
 
