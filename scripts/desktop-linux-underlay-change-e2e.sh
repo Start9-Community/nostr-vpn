@@ -35,6 +35,8 @@ ORIGINAL_NPUB=""
 ORIGINAL_TUNNEL_IP=""
 CRASH_CONNECT_PID=""
 CRASH_RESTART_PID=""
+RECOVERY_NETWORK_PROBE_PID=""
+RECOVERY_NETWORK_PROBE_ARM=""
 
 fail() {
   echo "Linux underlay network-change e2e failed: $*" >&2
@@ -369,11 +371,9 @@ assert_secure_dns() {
 
 ACTIVE_EXIT_LAST_PREDICATE=not_started
 
-assert_active_exit() {
+assert_active_exit_state() {
   local expected_iface="$1"
   local expected_pid="$2"
-  local require_fixture="${3:-1}"
-  local https_already_passed="${4:-0}"
   ACTIVE_EXIT_LAST_PREDICATE=daemon_identity
   assert_same_daemon_ready "$expected_pid" || return 1
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_default_route
@@ -386,20 +386,22 @@ assert_active_exit() {
   wireguard_handshake_active || return 1
   ACTIVE_EXIT_LAST_PREDICATE=secure_dns
   assert_secure_dns || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=active_exit_state_ready
+}
+
+assert_active_exit() {
+  local expected_iface="$1"
+  local expected_pid="$2"
+  local require_fixture="${3:-1}"
+  assert_active_exit_state "$expected_iface" "$expected_pid" || return 1
   if [[ "$require_fixture" == "1" ]]; then
     ACTIVE_EXIT_LAST_PREDICATE=fixture_dns
     resolve_fixture || return 1
   fi
   ACTIVE_EXIT_LAST_PREDICATE=public_dns
-  if [[ "$https_already_passed" == "1" ]]; then
-    resolve_name_without_flush "$(probe_host)" || return 1
-  else
-    resolve_name "$(probe_host)" || return 1
-  fi
-  if [[ "$https_already_passed" != "1" ]]; then
-    ACTIVE_EXIT_LAST_PREDICATE=https
-    test_https || return 1
-  fi
+  resolve_name "$(probe_host)" || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=https
+  test_https || return 1
   ACTIVE_EXIT_LAST_PREDICATE=active_exit_ready
 }
 
@@ -482,14 +484,52 @@ recovery_command() {
   timeout --foreground --signal=KILL "$duration" "$@"
 }
 
-assert_active_exit_for_recovery() {
-  local expected_iface="$1"
-  local expected_pid="$2"
-  local started="$3"
+recovery_network_probe() (
+  local arm="$1"
+  local receipt="$2"
+  local started=""
+  local https_at now
+  local temporary="$receipt.tmp.$$"
+  cleanup_recovery_network_probe_worker() {
+    rm -f "$temporary"
+  }
+  probe_once() {
+    resolve_fixture || return 1
+    resolve_name_without_flush "$(probe_host)" || return 1
+    test_https || return 1
+    https_at="$(monotonic_milliseconds)"
+  }
+  trap cleanup_recovery_network_probe_worker EXIT
+
+  while [[ ! -s "$arm" ]]; do
+    sleep 0.005
+  done
+  read -r started <"$arm"
+  [[ "$started" =~ ^[0-9]+$ ]] || return 1
   local RECOVERY_STARTED_MS="$started"
-  # The fixture lookup just flushed the cache, while wireguard_payload_loop
-  # already proved HTTPS; retain a fresh public DNS query without a second flush.
-  assert_active_exit "$expected_iface" "$expected_pid" 1 1
+
+  while :; do
+    if probe_once && ((https_at - started <= RECOVERY_DEADLINE_MS)); then
+      printf '%s\n' "$https_at" >"$temporary"
+      mv "$temporary" "$receipt"
+      return 0
+    fi
+    now="$(monotonic_milliseconds)"
+    ((now - started < RECOVERY_DEADLINE_MS)) || return 1
+    sleep 0.025
+  done
+)
+
+stop_recovery_network_probe() {
+  if [[ -n "$RECOVERY_NETWORK_PROBE_PID" ]]; then
+    kill "$RECOVERY_NETWORK_PROBE_PID" >/dev/null 2>&1 || true
+    wait "$RECOVERY_NETWORK_PROBE_PID" >/dev/null 2>&1 || true
+    RECOVERY_NETWORK_PROBE_PID=""
+  fi
+  if [[ -n "$RECOVERY_NETWORK_PROBE_ARM" ]]; then
+    rm -f "$RECOVERY_NETWORK_PROBE_ARM"
+    RECOVERY_NETWORK_PROBE_ARM=""
+  fi
 }
 
 observe_recovery() {
@@ -498,14 +538,26 @@ observe_recovery() {
   local expected_carrier_iface="$3"
   local expected_carrier="$4"
   local expected_pid="$5"
-  local probe_before wg_probe_before rebind_before endpoint_starts_before route_usable_at
-  local route_usable_monotonic started now elapsed recovered_at recovered_monotonic
-  local endpoint_route
-  local recovery_last_predicate=active_exit_dns_https
+  local probe_before wg_probe_before rebind_before endpoint_starts_before
+  local route_usable_at route_usable_monotonic started now
+  local rebind_at="" payload_at="" wg_payload_at="" network_at=""
+  local rebind_after payload_after wg_payload_after endpoint_starts_after
+  local recovered_elapsed recovered_at recovered_monotonic endpoint_route evidence_at
+  local deadline_edge_read=0
+  local recovery_last_predicate=timestamped_recovery_evidence
+  local network_probe_arm network_probe_receipt
   rebind_before="$(rebind_count)"
   endpoint_starts_before="$(endpoint_start_count)"
   [[ "$endpoint_starts_before" == "1" ]] \
     || fail "$label expected exactly one original FIPS endpoint start"
+
+  network_probe_arm="$(marker_path "$label.network-probe.arm")"
+  network_probe_receipt="$(marker_path "$label.network-probe.receipt.json")"
+  rm -f "$network_probe_arm" "$network_probe_receipt"
+  recovery_network_probe "$network_probe_arm" "$network_probe_receipt" &
+  RECOVERY_NETWORK_PROBE_PID="$!"
+  RECOVERY_NETWORK_PROBE_ARM="$network_probe_arm"
+  write_marker "armed-$label"
 
   local carrier_deadline="$((SECONDS + 30))"
   while ((SECONDS < carrier_deadline)); do
@@ -536,39 +588,92 @@ observe_recovery() {
   probe_before="$(payload_success_count)"
   wg_probe_before="$(wireguard_payload_success_count)"
   started="$route_usable_monotonic"
+  printf '%s\n' "$started" >"$network_probe_arm"
+
   while :; do
+    rebind_after="$(rebind_count)"
+    payload_after="$(payload_success_count)"
+    wg_payload_after="$(wireguard_payload_success_count)"
+    endpoint_starts_after="$(endpoint_start_count)"
     now="$(monotonic_milliseconds)"
-    elapsed="$((now - started))"
-    if ((elapsed > RECOVERY_DEADLINE_MS)); then
-      dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
-      {
-        echo "payload_successes_before=$probe_before"
-        echo "wireguard_payload_successes_before=$wg_probe_before"
-        echo "rebind_receipts_before=$rebind_before"
-        echo "route_usable_unix_milliseconds=$route_usable_at"
-        echo "route_usable_monotonic_milliseconds=$route_usable_monotonic"
-        echo "recovery_last_predicate=$recovery_last_predicate"
-        echo "recovery_elapsed_milliseconds=$elapsed"
-      } >&2
-      fail "$label recovery predicate $recovery_last_predicate exceeded ${RECOVERY_DEADLINE_MS}ms"
+    if ((rebind_after > rebind_before + 1)); then
+      recovery_last_predicate=single_rebind
+      break
     fi
-    if (( $(payload_success_count) > probe_before )) \
-      && (( $(wireguard_payload_success_count) > wg_probe_before )) \
-      && (( $(rebind_count) == rebind_before + 1 )) \
-      && [[ "$(endpoint_start_count)" == "$endpoint_starts_before" ]]
+    if [[ "$endpoint_starts_after" != "$endpoint_starts_before" ]]; then
+      recovery_last_predicate=endpoint_continuity
+      break
+    fi
+    [[ -n "$rebind_at" || "$rebind_after" -ne $((rebind_before + 1)) ]] \
+      || rebind_at="$now"
+    [[ -n "$payload_at" || "$payload_after" -le "$probe_before" ]] \
+      || payload_at="$now"
+    [[ -n "$wg_payload_at" || "$wg_payload_after" -le "$wg_probe_before" ]] \
+      || wg_payload_at="$now"
+    if [[ -z "$network_at" && -s "$network_probe_receipt" ]]; then
+      read -r network_at <"$network_probe_receipt"
+      [[ "$network_at" =~ ^[0-9]+$ && "$network_at" -ge "$started" ]] \
+        || network_at=""
+    fi
+    if [[ -n "$rebind_at" && -n "$payload_at" \
+      && -n "$wg_payload_at" && -n "$network_at" ]]
     then
-      if assert_active_exit_for_recovery "$expected_iface" "$expected_pid" "$started"; then
-        # Sample after DNS and HTTPS so their recovery is part of the receipt.
-        now="$(monotonic_milliseconds)"
-        elapsed="$((now - started))"
-        if ((elapsed <= RECOVERY_DEADLINE_MS)); then
-          break
-        fi
-        recovery_last_predicate=all_predicates_completed_late
-      fi
+      recovered_monotonic="$started"
+      for evidence_at in \
+        "$rebind_at" "$payload_at" "$wg_payload_at" "$network_at"
+      do
+        ((evidence_at > recovered_monotonic)) \
+          && recovered_monotonic="$evidence_at"
+      done
+      recovered_elapsed="$((recovered_monotonic - started))"
+      ((recovered_elapsed <= RECOVERY_DEADLINE_MS)) \
+        || recovery_last_predicate=timestamped_recovery_completed_late
+      break
     fi
-    sleep 0.025
+    if ((deadline_edge_read == 1)); then
+      break
+    fi
+    now="$(monotonic_milliseconds)"
+    if ((now - started >= RECOVERY_DEADLINE_MS)); then
+      # Permit one last read: log/receipt writes may trail evidence whose own
+      # timestamp was within the product deadline.
+      deadline_edge_read=1
+    else
+      sleep 0.025
+    fi
   done
+
+  if [[ -z "$recovered_elapsed" ]] \
+    || ((recovered_elapsed > RECOVERY_DEADLINE_MS))
+  then
+    dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
+    {
+      echo "payload_successes_before=$probe_before"
+      echo "wireguard_payload_successes_before=$wg_probe_before"
+      echo "rebind_receipts_before=$rebind_before"
+      echo "route_usable_unix_milliseconds=$route_usable_at"
+      echo "route_usable_monotonic_milliseconds=$route_usable_monotonic"
+      echo "rebind_observed_monotonic_milliseconds=${rebind_at:-missing}"
+      echo "payload_success_observed_monotonic_milliseconds=${payload_at:-missing}"
+      echo "wireguard_payload_success_monotonic_milliseconds=${wg_payload_at:-missing}"
+      echo "network_probe_success_monotonic_milliseconds=${network_at:-missing}"
+      echo "recovery_last_predicate=$recovery_last_predicate"
+      echo "recovery_elapsed_milliseconds=${recovered_elapsed:-missing}"
+    } >&2
+    fail "$label recovery predicate $recovery_last_predicate exceeded ${RECOVERY_DEADLINE_MS}ms"
+  fi
+  wait "$RECOVERY_NETWORK_PROBE_PID" \
+    || fail "$label fresh DNS and HTTPS recovery probe failed"
+  RECOVERY_NETWORK_PROBE_PID=""
+  rm -f "$RECOVERY_NETWORK_PROBE_ARM"
+  RECOVERY_NETWORK_PROBE_ARM=""
+
+  # Stable state is audited after all timestamped recovery evidence is sealed;
+  # subprocess latency here is not product recovery latency.
+  if ! assert_active_exit_state "$expected_iface" "$expected_pid"; then
+    dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
+    fail "$label stable active-exit audit failed at $ACTIVE_EXIT_LAST_PREDICATE"
+  fi
   [[ "$(endpoint_start_count)" == "$endpoint_starts_before" ]] \
     || fail "$label restarted the FIPS endpoint"
   (( $(rebind_count) == rebind_before + 1 )) \
@@ -576,19 +681,18 @@ observe_recovery() {
   ! grep -Eq 'daemon: (restarted|rebuilt) FIPS private mesh on' \
     "$STATE_DIR/daemon.stderr.log" \
     || fail "$label replaced the FIPS endpoint"
-  now="$(monotonic_milliseconds)"
-  elapsed="$((now - started))"
-  ((elapsed <= RECOVERY_DEADLINE_MS)) \
-    || fail "$label stable recovery exceeded ${RECOVERY_DEADLINE_MS}ms"
-  recovered_at="$(unix_milliseconds)"
-  recovered_monotonic="$now"
+  recovered_at="$((route_usable_at + recovered_elapsed))"
   endpoint_route="$(ip -j -4 route show exact "$(endpoint_host)/32")"
   jq -cn \
-    --argjson recovery_milliseconds "$elapsed" \
+    --argjson recovery_milliseconds "$recovered_elapsed" \
     --argjson route_usable_unix_milliseconds "$route_usable_at" \
     --argjson route_usable_monotonic_milliseconds "$route_usable_monotonic" \
     --argjson recovered_unix_milliseconds "$recovered_at" \
     --argjson recovered_monotonic_milliseconds "$recovered_monotonic" \
+    --argjson rebind_observed_monotonic_milliseconds "$rebind_at" \
+    --argjson payload_success_observed_monotonic_milliseconds "$payload_at" \
+    --argjson wireguard_payload_success_monotonic_milliseconds "$wg_payload_at" \
+    --argjson network_probe_success_monotonic_milliseconds "$network_at" \
     --argjson daemon_pid "$expected_pid" \
     --arg physical_interface "$expected_iface" \
     --argjson payload_successes_before "$probe_before" \
@@ -609,6 +713,14 @@ observe_recovery() {
       route_usable_monotonic_milliseconds: $route_usable_monotonic_milliseconds,
       recovered_unix_milliseconds: $recovered_unix_milliseconds,
       recovered_monotonic_milliseconds: $recovered_monotonic_milliseconds,
+      rebind_observed_monotonic_milliseconds:
+        $rebind_observed_monotonic_milliseconds,
+      payload_success_observed_monotonic_milliseconds:
+        $payload_success_observed_monotonic_milliseconds,
+      wireguard_payload_success_monotonic_milliseconds:
+        $wireguard_payload_success_monotonic_milliseconds,
+      network_probe_success_monotonic_milliseconds:
+        $network_probe_success_monotonic_milliseconds,
       daemon_pid: $daemon_pid,
       physical_interface: $physical_interface,
       payload_successes_before: $payload_successes_before,
@@ -670,6 +782,7 @@ stop_pid_file() {
 
 restore_network() {
   local failed=0
+  stop_recovery_network_probe
   if [[ -x "$BINARY" && -e "$CONFIG" ]]; then
     "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >/dev/null 2>&1 \
       || failed=1
@@ -984,11 +1097,9 @@ run_gate() {
   write_marker ready "$daemon_process"
 
   wait_for_marker arm-secondary
-  write_marker armed-secondary
   observe_recovery secondary "$secondary_iface" "$primary_iface" 0 "$daemon_process"
 
   wait_for_marker arm-primary
-  write_marker armed-primary
   observe_recovery primary "$primary_iface" "$primary_iface" 1 "$daemon_process"
 
   run_dns_case automatic example.com "$daemon_process" "$primary_iface" \

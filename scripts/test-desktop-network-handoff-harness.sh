@@ -1375,29 +1375,58 @@ do
 done
 recovery_contract="$COMBINED_DIR/linux-recovery-public-probe.sh"
 sed -n \
-  '/^assert_active_exit() {$/,/^}$/p; /^assert_active_exit_for_recovery() {$/,/^}$/p' \
+  '/^assert_active_exit() {$/,/^}$/p; /^recovery_network_probe() ($/,/^)/p' \
   "$LINUX_GUEST" >"$recovery_contract"
-require_tokens "$recovery_contract" "artifact-preserving recovery probe" \
-  'local https_already_passed="${4:-0}"' \
-  'if [[ "$https_already_passed" == "1" ]]; then' \
+require_tokens "$recovery_contract" "fresh concurrent recovery probe" \
+  'local RECOVERY_STARTED_MS="$started"' \
+  'resolve_fixture || return 1' \
   'resolve_name_without_flush "$(probe_host)" || return 1' \
-  'resolve_name "$(probe_host)" || return 1' \
-  'if [[ "$https_already_passed" != "1" ]]; then' \
   'test_https || return 1' \
-  'assert_active_exit "$expected_iface" "$expected_pid" 1 1'
+  'https_at="$(monotonic_milliseconds)"' \
+  'printf '\''%s\n'\'' "$https_at" >"$temporary"'
 https_counter_line="$(grep -nF 'monotonic_milliseconds >>"$STATE_DIR/wireguard-payload.log"' \
   "$LINUX_GUEST" | cut -d: -f1)"
-recovery_probe_line="$(grep -nF '$(wireguard_payload_success_count) > wg_probe_before' \
+recovery_probe_launch_line="$(grep -nF 'recovery_network_probe "$network_probe_arm" "$network_probe_receipt" &' \
   "$LINUX_GUEST" | cut -d: -f1)"
-recovery_audit_line="$(grep -nF 'if assert_active_exit_for_recovery ' \
+recovery_cut_arm_line="$(grep -nF 'write_marker "armed-$label"' \
   "$LINUX_GUEST" | cut -d: -f1)"
-[[ -n "$https_counter_line" && -n "$recovery_probe_line" && -n "$recovery_audit_line" ]] \
-  || fail "Linux recovery lacks continuous public-name HTTPS evidence"
-((https_counter_line < recovery_probe_line && recovery_probe_line < recovery_audit_line)) \
-  || fail "Linux recovery audits readiness before the HTTPS counter advances"
+recovery_route_line="$(grep -nF 'route_usable_monotonic="$(monotonic_milliseconds)"' \
+  "$LINUX_GUEST" | cut -d: -f1)"
+recovery_probe_arm_line="$(grep -nF 'printf '\''%s\n'\'' "$started" >"$network_probe_arm"' \
+  "$LINUX_GUEST" | cut -d: -f1)"
+recovery_evidence_line="$(grep -nF 'recovered_elapsed="$((recovered_monotonic - started))"' \
+  "$LINUX_GUEST" | cut -d: -f1)"
+recovery_audit_line="$(grep -nF 'assert_active_exit_state "$expected_iface" "$expected_pid"' \
+  "$LINUX_GUEST" | tail -n 1 | cut -d: -f1)"
+[[ -n "$https_counter_line" && -n "$recovery_probe_launch_line" \
+  && -n "$recovery_cut_arm_line" && -n "$recovery_route_line" \
+  && -n "$recovery_probe_arm_line" && -n "$recovery_evidence_line" \
+  && -n "$recovery_audit_line" ]] \
+  || fail "Linux recovery lacks pre-armed timestamped DNS/HTTPS evidence"
+((https_counter_line < recovery_probe_launch_line \
+  && recovery_probe_launch_line < recovery_cut_arm_line \
+  && recovery_cut_arm_line < recovery_route_line \
+  && recovery_route_line < recovery_probe_arm_line \
+  && recovery_probe_arm_line < recovery_evidence_line \
+  && recovery_evidence_line < recovery_audit_line)) \
+  || fail "Linux recovery probe/evidence/stable-audit ordering is unsafe"
 grep -Fq 'route_dev "$(endpoint_host)"' "$LINUX_GUEST" \
   || fail "Linux recovery clock does not wait for the physical endpoint route"
-require_tokens "$LINUX_GUEST" "Linux bounded recovery short-circuit" \
+require_tokens "$LINUX_GUEST" "Linux independently timestamped recovery evidence" \
+  'rebind_at="$now"' \
+  'payload_at="$now"' \
+  'wg_payload_at="$now"' \
+  'read -r network_at <"$network_probe_receipt"' \
+  'for evidence_at in \' \
+  '((evidence_at > recovered_monotonic))' \
+  'recovered_elapsed="$((recovered_monotonic - started))"' \
+  '((recovered_elapsed <= RECOVERY_DEADLINE_MS))' \
+  'deadline_edge_read=1' \
+  'rebind_observed_monotonic_milliseconds' \
+  'payload_success_observed_monotonic_milliseconds' \
+  'wireguard_payload_success_monotonic_milliseconds' \
+  'network_probe_success_monotonic_milliseconds'
+require_tokens "$LINUX_GUEST" "Linux post-measurement stable-state audit" \
   'assert_same_daemon_ready "$expected_pid" || return 1' \
   'assert_wireguard_endpoint_route "$expected_iface" || return 1' \
   'wireguard_handshake_active || return 1' \
@@ -1405,6 +1434,8 @@ require_tokens "$LINUX_GUEST" "Linux bounded recovery short-circuit" \
   'resolve_fixture || return 1' \
   'resolve_name "$(probe_host)" || return 1' \
   'test_https || return 1'
+grep -Fq 'stop_recovery_network_probe' "$LINUX_GUEST" \
+  || fail "Linux cleanup does not stop the pre-armed recovery probe"
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_HOST" \
   || fail "Linux host does not enforce the guest monotonic recovery receipt"
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_GUEST" \
@@ -1414,15 +1445,9 @@ grep -Fq '10#$nanoseconds / 1000000' "$LINUX_GUEST" \
 if grep -Fq 'date +%s%3N' "$LINUX_GUEST"; then
   fail "Linux guest relies on unsupported date field-width semantics for milliseconds"
 fi
-final_status_line="$(grep -n 'if assert_active_exit_for_recovery ' "$LINUX_GUEST" | cut -d: -f1)"
-final_clock_line="$(grep -n 'now="$(monotonic_milliseconds)"' "$LINUX_GUEST" | tail -n 1 | cut -d: -f1)"
-receipt_clock_line="$(grep -n 'recovered_monotonic="$now"' "$LINUX_GUEST" | cut -d: -f1)"
-[[ -n "$final_status_line" && -n "$final_clock_line" && -n "$receipt_clock_line" ]] \
-  || fail "Linux guest recovery receipt lacks final post-predicate monotonic evidence"
-((final_status_line < final_clock_line && final_clock_line < receipt_clock_line)) \
-  || fail "Linux guest samples its recovery receipt before the final success predicate"
-grep -Fq 'if ((elapsed <= RECOVERY_DEADLINE_MS)); then' "$LINUX_GUEST" \
-  || fail "Linux guest does not re-enforce the deadline after final success predicates"
+grep -Fq 'RECOVERY_DEADLINE_MS="${NVPN_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"' \
+  "$LINUX_GUEST" \
+  || fail "Linux guest changed the four-second product recovery bound"
 [[ "$(grep -Fc 'assert_peer_recovered_from_source "$cut"' "$LINUX_HOST")" -eq 2 ]] \
   || fail "Linux peer evidence is not clocked from each hypervisor link cut"
 for evidence in \
