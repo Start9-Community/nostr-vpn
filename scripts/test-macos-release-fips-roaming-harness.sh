@@ -63,6 +63,8 @@ require_tokens "$CONTROLLER" "host import and exact receipts" \
   'mktemp -d /tmp/nvpn-macos-fips-peer.XXXXXX' \
   'Vader peer binary differs from the host-built immutable artifact' \
   'NVPN_MACOS_FIPS_PEER_BINARY_SHA256' \
+  '"NVPN_MACOS_FIPS_PEER_BINARY=$FIPS_PEER_REMOTE_DIR/nvpn"' \
+  '"$fixture_ssh:$FIPS_PEER_REMOTE_DIR/nvpn"' \
   'fips_peer_remote clean-audit' \
   'preserving its state' \
   'test ! -e "$FIPS_PEER_REMOTE_DIR"' \
@@ -74,6 +76,7 @@ require_tokens "$REMOTE_PEER" "owned unique production peer" \
   'EXPECTED_APP_SHA' \
   'DAEMON_PID_FILE="$STATE_DIR/fixture-daemon.pid"' \
   'DAEMON_START_FILE="$STATE_DIR/fixture-daemon.start"' \
+  '[[ "$BINARY" == "${STATE_DIR%/state}/nvpn" ]]' \
   'process_start_signature' \
   'daemon_pid_owned' \
   'nvpn_require_single_udp_listener' \
@@ -88,6 +91,11 @@ require_tokens "$REMOTE_PEER" "owned unique production peer" \
   'ip -4 route get "$TARGET_TUNNEL_IP"' \
   '" dev $TUN_IFACE "' \
   'built_on_remote_vm=false'
+if grep -Fq 'nvpn-peer' "$CONTROLLER" \
+  || grep -Fq 'nvpn-peer' "$REMOTE_PEER"
+then
+  fail "remote peer fixture renames nvpn and breaks production daemon discovery"
+fi
 if grep -Fq 'DAEMON_PID_FILE="$STATE_DIR/daemon.pid"' "$REMOTE_PEER"; then
   fail "remote peer fixture overwrites nvpn's production JSON daemon PID record"
 fi
@@ -211,7 +219,6 @@ fi
 
 DEFINITIONS="$TMP_ROOT/definitions.sh"
 sed '/^validate_inputs$/,$d' "$GUEST" >"$DEFINITIONS"
-
 bash -s -- "$DEFINITIONS" <<'BASH'
 set -euo pipefail
 definitions="$1"
@@ -282,17 +289,22 @@ if wireguard_endpoint_route_state_valid utun9; then
 fi
 BASH
 
+REMOTE_DEFINITIONS="$TMP_ROOT/remote-definitions.sh"
+sed -n '/^peer_status_is_ready() {/,/^}/p' "$REMOTE_PEER" \
+  >"$REMOTE_DEFINITIONS"
 EXPECTED_PEER="npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
 STATUS_GOOD="$TMP_ROOT/status-good.json"
 STATUS_WRONG="$TMP_ROOT/status-wrong.json"
 STATUS_ZERO="$TMP_ROOT/status-zero.json"
 STATUS_TWO="$TMP_ROOT/status-two.json"
+STATUS_NULL="$TMP_ROOT/status-null.json"
 python3 - \
-  "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" "$EXPECTED_PEER" <<'PY'
+  "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" \
+  "$STATUS_NULL" "$EXPECTED_PEER" <<'PY'
 import json
 import sys
 
-good, wrong, zero, two, expected = sys.argv[1:]
+good, wrong, zero, two, null, expected = sys.argv[1:]
 
 def payload(count, peers):
     return {
@@ -320,6 +332,7 @@ fixtures = {
     wrong: payload(1, ["npub1wrong"]),
     zero: payload(0, [expected]),
     two: payload(2, [expected, "npub1other"]),
+    null: {"status_source": "config", "daemon": {"running": False, "state": None}},
 }
 for path, value in fixtures.items():
     with open(path, "w", encoding="utf-8") as handle:
@@ -328,17 +341,20 @@ for path, value in fixtures.items():
 PY
 
 bash -s -- \
-  "$DEFINITIONS" "$TMP_ROOT" "$EXPECTED_PEER" \
-  "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" <<'BASH'
+  "$DEFINITIONS" "$REMOTE_DEFINITIONS" "$TMP_ROOT" "$EXPECTED_PEER" \
+  "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" \
+  "$STATUS_NULL" <<'BASH'
 set -euo pipefail
 definitions="$1"
-state="$2"
-expected="$3"
-shift 3
+remote_definitions="$2"
+state="$3"
+expected="$4"
+shift 4
 good="$1"
 wrong="$2"
 zero="$3"
 two="$4"
+null="$5"
 set -- definitions-only
 # shellcheck disable=SC1090
 source "$definitions"
@@ -382,6 +398,25 @@ for STATUS_FIXTURE in "$wrong" "$zero" "$two"; do
     exit 1
   fi
 done
+
+BINARY="$state/nvpn"
+TARGET_NPUB="$expected"
+LISTEN_PORT=51990
+cat >"$BINARY" <<'FAKE'
+#!/usr/bin/env bash
+cat "$NVPN_FAKE_STATUS"
+FAKE
+chmod +x "$BINARY"
+# shellcheck disable=SC1090
+source "$remote_definitions"
+NVPN_FAKE_STATUS="$good" peer_status_is_ready
+if NVPN_FAKE_STATUS="$null" peer_status_is_ready \
+  2>"$state/null-status.err" \
+  || [[ -s "$state/null-status.err" ]]
+then
+  echo "remote readiness did not cleanly reject a null daemon state" >&2
+  exit 1
+fi
 
 cat >"$state/daemon.cleanup.json" <<'EOF'
 {

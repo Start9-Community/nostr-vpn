@@ -327,7 +327,7 @@ fips_peer_remote() {
     sudo -n env \
     "PATH=$MOBILE_WG_FIXTURE_REMOTE_PATH" \
     "NVPN_MACOS_FIPS_PEER_STATE_DIR=$FIPS_PEER_REMOTE_DIR/state" \
-    "NVPN_MACOS_FIPS_PEER_BINARY=$FIPS_PEER_REMOTE_DIR/nvpn-peer" \
+    "NVPN_MACOS_FIPS_PEER_BINARY=$FIPS_PEER_REMOTE_DIR/nvpn" \
     "NVPN_MACOS_FIPS_PEER_TUN_IFACE=$FIPS_PEER_TUN_IFACE" \
     "NVPN_MACOS_FIPS_PEER_LISTEN_PORT=$FIPS_PEER_PORT" \
     "NVPN_MACOS_FIPS_NETWORK_ID=$FIPS_NETWORK_ID" \
@@ -360,7 +360,7 @@ import_host_fips_peer_binary() {
     -o ConnectTimeout=10 \
     -o "ControlPath=$MOBILE_WG_FIXTURE_SSH_CONTROL_PATH" \
     "$FIPS_PEER_BINARY" \
-    "$fixture_ssh:$FIPS_PEER_REMOTE_DIR/nvpn-peer"
+    "$fixture_ssh:$FIPS_PEER_REMOTE_DIR/nvpn"
   scp -q \
     -o BatchMode=yes \
     -o ConnectTimeout=10 \
@@ -375,13 +375,13 @@ import_host_fips_peer_binary() {
     "$fixture_ssh:$FIPS_PEER_REMOTE_DIR/lib-desktop-linux-listener-audit.sh"
   mobile_wg_remote_exec \
     chmod 0500 \
-    "$FIPS_PEER_REMOTE_DIR/nvpn-peer" \
+    "$FIPS_PEER_REMOTE_DIR/nvpn" \
     "$FIPS_PEER_REMOTE_DIR/runner.sh"
   mobile_wg_remote_exec \
     chmod 0400 "$FIPS_PEER_REMOTE_DIR/lib-desktop-linux-listener-audit.sh"
   [[ "$(
     mobile_wg_remote_exec \
-      sha256sum "$FIPS_PEER_REMOTE_DIR/nvpn-peer" \
+      sha256sum "$FIPS_PEER_REMOTE_DIR/nvpn" \
       | awk '{ print $1 }'
   )" == "$FIPS_PEER_BINARY_SHA256" ]] \
     || fail "Vader peer binary differs from the host-built immutable artifact"

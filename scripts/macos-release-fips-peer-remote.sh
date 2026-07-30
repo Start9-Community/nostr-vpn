@@ -39,7 +39,7 @@ require_root() {
 validate_inputs() {
   [[ "$STATE_DIR" =~ ^/tmp/nvpn-macos-fips-peer\.[A-Za-z0-9._-]+/state$ ]] \
     || fail "peer state directory is outside the owned fixture path"
-  [[ "$BINARY" == "${STATE_DIR%/state}/nvpn-peer" ]] \
+  [[ "$BINARY" == "${STATE_DIR%/state}/nvpn" ]] \
     || fail "peer binary is outside the owned fixture path"
   [[ "$TUN_IFACE" =~ ^[A-Za-z][A-Za-z0-9]{1,14}$ ]] \
     || fail "peer tunnel interface name is invalid"
@@ -211,7 +211,7 @@ import sys
 path, target, listen_port, revision = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     status = json.load(handle)
-state = status.get("daemon", {}).get("state", {})
+state = status.get("daemon", {}).get("state") or {}
 peers = state.get("fips_endpoint_peers", [])
 if (
     status.get("status_source") == "daemon"
