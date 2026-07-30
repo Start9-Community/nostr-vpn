@@ -349,6 +349,7 @@ run_release_gate_candidate_preflight() {
     return 1
   fi
   node scripts/sync-versions.mjs --check
+  ./scripts/check-source-file-lines.sh
   # Fail fast before any remote artifact build. This fake-checkout harness
   # also injects the local-FIPS session variables used later by the full gate.
   ./scripts/test-prepare-linux-armv6-release-artifact-harness.sh
@@ -373,7 +374,6 @@ run_release_gate_static_preflight() {
   else
     echo "Skipping iOS App Store binary-policy gate on this non-Apple host."
   fi
-  ./scripts/check-source-file-lines.sh
   ./scripts/test-release-gate-parallel-harness.sh
   ./scripts/test-publish-preflight-harness.sh
   ./scripts/test-local-fips-workspace-harness.sh
@@ -448,6 +448,7 @@ run_android_static_validation_lane() {
   # Rust shared library. Keep this lane independent from Cargo so it can overlap
   # the longer Rust validation lane without sharing build outputs.
   gradle -p android \
+    "-Pkotlin.project.persistent.dir=$RELEASE_GATE_PARALLEL_LOG_DIR/android-kotlin-project" \
     :app:lintDebug \
     :app:testDebugUnitTest \
     -x buildRustArm64

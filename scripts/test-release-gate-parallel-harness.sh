@@ -379,6 +379,10 @@ candidate_linux_gui_harness_line="$(
   grep -n '^  ./scripts/test-linux-gui-e2e-lockfile-harness.sh$' \
     "$release_gate" | cut -d: -f1 || true
 )"
+candidate_source_line_gate="$(
+  grep -n '^  ./scripts/check-source-file-lines.sh$' \
+    "$release_gate" | cut -d: -f1 || true
+)"
 candidate_preflight_end_line="$(
   awk '
     $0 == "run_release_gate_candidate_preflight() {" {
@@ -410,6 +414,7 @@ armv6_preparation_line="$(
 [[ -n "$candidate_preflight_line" \
   && -n "$candidate_armv6_harness_line" \
   && -n "$candidate_linux_gui_harness_line" \
+  && -n "$candidate_source_line_gate" \
   && -n "$candidate_preflight_end_line" \
   && -n "$windows_preparation_line" \
   && -n "$armv6_preparation_line" \
@@ -430,6 +435,7 @@ local_fips_preparation_line="$(
 (( candidate_preflight_line < windows_preparation_line \
   && candidate_armv6_harness_line < candidate_linux_gui_harness_line \
   && candidate_linux_gui_harness_line < candidate_preflight_end_line \
+  && candidate_source_line_gate < candidate_preflight_end_line \
   && candidate_preflight_line < armv6_preparation_line \
   && armv6_preparation_line < platform_preparation_wait_line \
   && windows_preparation_line < platform_preparation_wait_line \
@@ -437,6 +443,10 @@ local_fips_preparation_line="$(
   && local_fips_preparation_line < windows_dispatch_line \
   && windows_dispatch_line < static_preflight_line )) \
   || fail "source preparation/static Cargo checks are not isolated around FIPS realization"
+grep -Fq 'kotlin.project.persistent.dir=' "$release_gate" \
+  || fail "Android static lane leaves Kotlin persistent state in the candidate"
+grep -Fxq 'android/.kotlin/' "$ROOT_DIR/.gitignore" \
+  || fail "Kotlin project state is not ignored"
 android_static_dispatch_line="$(
   grep -n '"Android compile, unit tests, and lint"' "$release_gate" \
     | tail -1 | cut -d: -f1 || true
