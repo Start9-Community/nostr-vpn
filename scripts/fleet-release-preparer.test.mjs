@@ -510,35 +510,34 @@ test('private roster catalog rejects omissions, fake evidence, staleness, and un
   }
 })
 
-test('private roster derives a supported ARMv6 Linux install target', () => {
+test('public release roster rejects ARMv6 as an install target', () => {
   const snapshot = rosterSnapshot()
   const role = snapshot.roles[0]
   role.id = 'armv6-edge'
   role.target.id = role.id
   role.target.arch = 'armv6'
   const catalog = rosterCatalog(snapshot)
-  const inventory = buildFrozenFleetInventory(
-    inventoryArgs(snapshot, catalog),
-  )
-  assert.deepEqual(
-    inventory.targets.map(({ id, artifact }) => ({ id, artifact })),
-    [{ id: 'armv6-edge', artifact: 'linux-armv6' }],
+  assert.throws(
+    () => buildFrozenFleetInventory(inventoryArgs(snapshot, catalog)),
+    /architecture is unsupported/,
   )
 })
 
-test('private roster can represent an unsupported armv7 Linux machine', () => {
-  const snapshot = rosterSnapshot()
-  const catalog = rosterCatalog(snapshot)
-  const role = catalog.roles.find(({ id }) => id === 'unsupported-mac')
-  role.platform = 'linux'
-  role.arch = 'armv7'
-  role.capability.reason = 'no staged armv7 release artifact'
-  const snapshotRole = snapshot.roles.find(
-    ({ id }) => id === 'unsupported-mac',
-  )
-  snapshotRole.reason = role.capability.reason
-  const args = inventoryArgs(snapshot, catalog)
-  assert.doesNotThrow(() => buildFrozenFleetInventory(args))
+test('private roster can represent fleet-only ARMv6 and unsupported ARMv7 as coverage', () => {
+  for (const arch of ['armv6', 'armv7']) {
+    const snapshot = rosterSnapshot()
+    const catalog = rosterCatalog(snapshot)
+    const role = catalog.roles.find(({ id }) => id === 'unsupported-mac')
+    role.platform = 'linux'
+    role.arch = arch
+    role.capability.reason = `no staged ${arch} public release artifact`
+    const snapshotRole = snapshot.roles.find(
+      ({ id }) => id === 'unsupported-mac',
+    )
+    snapshotRole.reason = role.capability.reason
+    const args = inventoryArgs(snapshot, catalog)
+    assert.doesNotThrow(() => buildFrozenFleetInventory(args))
+  }
 })
 
 test('publication accepts only exact executed all-passed fleet evidence', () => {

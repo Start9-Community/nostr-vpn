@@ -123,7 +123,7 @@ function requireFleetInstallTarget(target, role) {
   }
   const arches = target.platform === 'windows'
     ? ['x86_64']
-    : ['x86_64', 'aarch64', 'armv6', 'armv7']
+    : ['x86_64', 'aarch64']
   if (!arches.includes(target.arch)) {
     throw new Error(`Roster role ${role.id} target architecture is unsupported.`)
   }
