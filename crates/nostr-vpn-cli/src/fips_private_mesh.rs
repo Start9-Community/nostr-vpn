@@ -259,6 +259,7 @@ include!("fips_private_mesh/mesh_bind.rs");
 include!("fips_private_mesh/macos_bypass_reconcile.rs");
 include!("fips_private_mesh/macos_wg_runtime.rs");
 include!("fips_private_mesh/tunnel_runtime_unix_core.rs");
+include!("fips_private_mesh/tunnel_runtime_unix_workers.rs");
 include!("fips_private_mesh/linux_interface_state.rs");
 include!("fips_private_mesh/linux_cleanup.rs");
 include!("fips_private_mesh/tunnel_runtime_linux.rs");
