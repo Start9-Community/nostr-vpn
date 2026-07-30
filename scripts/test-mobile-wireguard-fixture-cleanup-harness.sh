@@ -10,6 +10,13 @@ REMOTE_STATE="$(mktemp -d /tmp/nvpn-mobile-wg-exit.cleanup-harness.XXXXXX)"
 CALLS="$TMP_ROOT/calls"
 trap 'rm -rf "$TMP_ROOT" "$REMOTE_STATE" "${LEASE_A:-}" "${LEASE_B:-}" "${LEASE_C:-}" "${LEASE_HUP:-}"' EXIT
 
+grep -Fq 'private-key /dev/stdin' "$REMOTE_NATIVE" \
+  && grep -Fq 'cat "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE"' "$REMOTE_NATIVE" \
+  || {
+    echo "native fixture does not inherit its ephemeral key past wg AppArmor" >&2
+    exit 1
+  }
+
 listeners=$'UNCONN 0 0 0.0.0.0:51886 0.0.0.0:*\nLISTEN 0 5 0.0.0.0:53000 0.0.0.0:*'
 mobile_wg_listener_port_in_use 51886 "$listeners"
 mobile_wg_listener_port_in_use 53000 "$listeners"

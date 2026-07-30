@@ -596,11 +596,12 @@ PY
     ip link add "$interface" type wireguard
     ip address add "$NVPN_MOBILE_WG_TUNNEL_CIDR" dev "$interface"
     ip address add "$through_dns_ip/32" dev "$interface"
-    wg set "$interface" \
-      listen-port "$NVPN_MOBILE_WG_LISTEN_PORT" \
-      private-key "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE" \
-      peer "$(tr -d '\r\n' <"$NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE")" \
-      allowed-ips "$NVPN_MOBILE_WG_CLIENT_IP/32"
+    cat "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE" \
+      | wg set "$interface" \
+        listen-port "$NVPN_MOBILE_WG_LISTEN_PORT" \
+        private-key /dev/stdin \
+        peer "$(tr -d '\r\n' <"$NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE")" \
+        allowed-ips "$NVPN_MOBILE_WG_CLIENT_IP/32"
     ip link set "$interface" up
 
     nft add table inet "$nft_table"
