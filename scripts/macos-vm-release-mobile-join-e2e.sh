@@ -112,10 +112,24 @@ chmod 700 "$PRIVATE_DIR"
 export RESULT_DIR PRIVATE_DIR RELEASE_JOIN_UI_WAIT_SECS
 export RELEASE_JOIN_DELIVERY_WAIT_SECS RELEASE_JOIN_CAMERA_WAIT_SECS
 release_join_require_clean_fips
-APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+HARNESS_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+HARNESS_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+APP_GIT_SHA="$HARNESS_GIT_SHA"
+APP_GIT_TREE="$HARNESS_GIT_TREE"
+if [[ -n "${NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA:-}" \
+  || -n "${NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE:-}" ]]
+then
+  [[ "$ARTIFACT_ACTION" == "verify-only" \
+    && "${NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
+    && "${NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE:-}" =~ ^[0-9a-f]{40}$ ]] || {
+      echo "Imported macOS product override is valid only for verify-only" >&2
+      exit 2
+    }
+  APP_GIT_SHA="$NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA"
+  APP_GIT_TREE="$NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE"
+fi
 APP_SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
-release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
+release_join_assert_app_unchanged "$HARNESS_GIT_SHA" "$HARNESS_GIT_TREE"
 
 remote_pid=""
 remote_app_ownership_armed=0

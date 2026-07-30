@@ -373,6 +373,14 @@ clean_audit() {
   printf 'peer_tunnel_clean=true\n'
 }
 
+log_tails() {
+  local name
+  for name in daemon.stdout.log daemon.stderr.log daemon.log private-payload.log; do
+    printf '===== %s =====\n' "$name"
+    tail -n 160 "$STATE_DIR/$name" 2>&1 || true
+  done
+}
+
 require_root
 validate_inputs
 case "$ACTION" in
@@ -381,10 +389,11 @@ case "$ACTION" in
   wait-ready) wait_ready ;;
   listener-audit) listener_audit ;;
   status) "$BINARY" status --config "$CONFIG" --json --discover-secs 0 ;;
+  log-tails) log_tails ;;
   cleanup) cleanup_peer ;;
   clean-audit) clean_audit ;;
   *)
-    echo "usage: $0 {initialize|start|wait-ready|listener-audit|payload-count|status|cleanup|clean-audit}" >&2
+    echo "usage: $0 {initialize|start|wait-ready|listener-audit|status|log-tails|cleanup|clean-audit}" >&2
     exit 2
     ;;
 esac

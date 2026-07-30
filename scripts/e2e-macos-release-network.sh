@@ -329,6 +329,18 @@ capture_wireguard_readiness_failure() {
     >"$RESULT_DIR/wireguard-readiness-daemon.log" 2>&1 || true
 }
 
+capture_fips_peer_readiness_failure() {
+  if [[ -f "$STATE_DIR/status-fips-peer.json" ]]; then
+    cp "$STATE_DIR/status-fips-peer.json" \
+      "$RESULT_DIR/fips-peer-readiness-status.json"
+  else
+    printf '{"error":"client status was not written"}\n' \
+      >"$RESULT_DIR/fips-peer-readiness-status.json"
+  fi
+  tail -n 240 "$STATE_DIR/daemon.log" \
+    >"$RESULT_DIR/fips-peer-readiness-daemon.log" 2>&1 || true
+}
+
 wait_until() {
   local description="$1"
   shift
@@ -728,8 +740,12 @@ prepare_gate() {
   fi
   wait_until "the daemon runtime/status WireGuard state" \
     runtime_wireguard_state_is true true
-  wait_until "one exact authenticated FIPS peer session" \
+  if ! wait_until "one exact authenticated FIPS peer session" \
     runtime_fips_peer_connected
+  then
+    capture_fips_peer_readiness_failure
+    return 1
+  fi
   runtime_fips_peer_connected "$RESULT_DIR/fips-peer-initial.json" \
     || fail "authenticated FIPS peer disappeared after initial readiness"
   [[ -s "$STATE_DIR/daemon.log" ]] \

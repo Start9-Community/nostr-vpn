@@ -66,6 +66,10 @@ require_tokens "$CONTROLLER" "host import and exact receipts" \
   '"NVPN_MACOS_FIPS_PEER_BINARY=$FIPS_PEER_REMOTE_DIR/nvpn"' \
   '"$fixture_ssh:$FIPS_PEER_REMOTE_DIR/nvpn"' \
   'fips_peer_remote clean-audit' \
+  'capture_fips_peer_failure' \
+  'fips-peer-failure-status.json' \
+  'fips-peer-failure-listener.txt' \
+  'fips-peer-failure-logs.txt' \
   'preserving its state' \
   'test ! -e "$FIPS_PEER_REMOTE_DIR"' \
   'remote_phase secondary crash-restart' \
@@ -91,6 +95,11 @@ require_tokens "$REMOTE_PEER" "owned unique production peer" \
   'ip -4 route get "$TARGET_TUNNEL_IP"' \
   '" dev $TUN_IFACE "' \
   'built_on_remote_vm=false'
+require_tokens "$REMOTE_PEER" "pre-cleanup peer log retention" \
+  'log_tails' \
+  'daemon.stderr.log' \
+  'private-payload.log' \
+  'log-tails) log_tails'
 if grep -Fq 'nvpn-peer' "$CONTROLLER" \
   || grep -Fq 'nvpn-peer' "$REMOTE_PEER"
 then
@@ -165,12 +174,21 @@ require_tokens "$GUEST" "production daemon PID record ownership" \
   'ps -ww -p "$pid" -o command='
 require_tokens "$GUEST" "failure diagnostics survive cleanup" \
   'capture_wireguard_readiness_failure' \
+  'capture_fips_peer_readiness_failure' \
+  'fips-peer-readiness-status.json' \
+  'fips-peer-readiness-daemon.log' \
   'endpoint_route_state_valid=' \
   'wireguard-readiness-failure.txt' \
   'wireguard-readiness-routes.txt' \
   'wireguard-readiness-dns.txt' \
   'wireguard-readiness-status.json' \
   'wireguard-readiness-daemon.log'
+require_tokens "$CONTROLLER" "frozen product and clean harness separation" \
+  'NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA' \
+  'NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE' \
+  'HARNESS_GIT_SHA' \
+  'release_join_assert_app_unchanged "$HARNESS_GIT_SHA" "$HARNESS_GIT_TREE"' \
+  'imported macOS product override crosses non-harness change'
 require_tokens "$GUEST" "wall-clock-bounded readiness waits" \
   'local WAIT_DEADLINE_SECONDS="$((SECONDS + WAIT_SECS))"' \
   'while ((SECONDS < WAIT_DEADLINE_SECONDS)); do' \
