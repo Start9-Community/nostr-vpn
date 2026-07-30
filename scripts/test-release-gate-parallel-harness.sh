@@ -78,6 +78,11 @@ lane_fails() {
   return 7
 }
 
+lane_fails_before_followup() {
+  lane_fails
+  : >"$tmp/continued-after-failure"
+}
+
 release_gate_parallel_start "failing lane" lane_fails
 failing="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 set +e
@@ -98,7 +103,7 @@ collect_peer() {
 release_gate_parallel_start \
   "independent collection peer" collect_peer "$tmp/collect-complete"
 collect_peer_index="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-release_gate_parallel_start "collected group failure" lane_fails
+release_gate_parallel_start "collected group failure" lane_fails_before_followup
 collected_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 set +e
 release_gate_parallel_wait_group \
@@ -109,6 +114,8 @@ set -e
   || fail "parallel group returned $status instead of the collected failure"
 [[ -f "$tmp/collect-complete" ]] \
   || fail "a failed lane cancelled its independent peer"
+[[ ! -e "$tmp/continued-after-failure" ]] \
+  || fail "a collected lane continued after its first failure"
 [[ -z "${RELEASE_GATE_PARALLEL_PIDS[$collect_peer_index]:-}" ]] \
   || fail "parallel group did not reap its completed peer"
 grep -Fq 'independent lane completed' \
@@ -289,9 +296,9 @@ windows_dispatch_line="$(
   grep -n 'release_gate_parallel_start "Windows platform"' "$release_gate" \
     | tail -1 | cut -d: -f1 || true
 )"
-static_preflight_line="$(
-  grep -n '^  run_release_gate_static_preflight ' "$release_gate" \
-    | cut -d: -f1 || true
+host_validation_dispatch_line="$(
+  grep -n '"Host static and Rust validation"' "$release_gate" \
+    | tail -1 | cut -d: -f1 || true
 )"
 [[ -n "$candidate_preflight_line" \
   && -n "$candidate_linux_gui_harness_line" \
@@ -299,7 +306,7 @@ static_preflight_line="$(
   && -n "$candidate_preflight_end_line" \
   && -n "$windows_preparation_line" \
   && -n "$windows_dispatch_line" \
-  && -n "$static_preflight_line" ]] \
+  && -n "$host_validation_dispatch_line" ]] \
   || fail "release gate preflight/remote overlap markers are incomplete"
 platform_preparation_wait_line="$(
   grep -nF 'release_gate_parallel_wait_group "${platform_preparation_lanes[@]}"' \
@@ -318,7 +325,7 @@ local_fips_preparation_line="$(
   && windows_preparation_line < platform_preparation_wait_line \
   && platform_preparation_wait_line < local_fips_preparation_line \
   && local_fips_preparation_line < windows_dispatch_line \
-  && windows_dispatch_line < static_preflight_line )) \
+  && windows_dispatch_line < host_validation_dispatch_line )) \
   || fail "source preparation/static Cargo checks are not isolated around FIPS realization"
 grep -Fq 'kotlin.project.persistent.dir=' "$release_gate" \
   || fail "Android static lane leaves Kotlin persistent state in the candidate"
@@ -336,9 +343,9 @@ docker_build_dispatch_line="$(
   && -n "$docker_build_dispatch_line" ]] \
   || fail "post-FIPS independent lane markers are incomplete"
 (( local_fips_preparation_line < android_static_dispatch_line \
-  && android_static_dispatch_line < static_preflight_line \
+  && android_static_dispatch_line < host_validation_dispatch_line \
   && local_fips_preparation_line < docker_build_dispatch_line \
-  && docker_build_dispatch_line < static_preflight_line )) \
+  && docker_build_dispatch_line < host_validation_dispatch_line )) \
   || fail "independent Android/Docker work does not overlap stable-session static checks"
 preparation_receipt_writes="$(
   grep -A1 'write_platform_preparation_receipt \\' "$release_gate"
@@ -367,6 +374,23 @@ grep -Fq 'if [[ -e "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT" ]]; then' "$release_gate
   || fail "Linux bundle state is loaded without a successful bundle receipt"
 grep -Fq 'release_gate_parallel_start "Docker node image build"' "$release_gate" \
   || fail "release gate does not overlap the reusable Docker build with host validation"
+grep -Fq \
+  'release_gate_parallel_start "Host static and Rust validation" run_host_validation_lane' \
+  "$release_gate" \
+  || fail "host validation is not a fail-fast collected parallel lane"
+host_validation_body="$(
+  sed -n '/^run_host_validation_lane() {$/,/^}$/p' "$release_gate"
+)"
+[[ "$host_validation_body" == *$'  run_release_gate_static_preflight\n  run_rust_validation_lane'* ]] \
+  || fail "host validation does not stop before Rust when static checks fail"
+if grep -Fq 'run_release_gate_static_preflight ||' "$release_gate"; then
+  fail "host static preflight still runs in a conditional that disables errexit"
+fi
+if grep -Fq 'run_rust_validation_lane ||' "$release_gate" \
+  || grep -Fq 'host_validation_status' "$release_gate"
+then
+  fail "host validation still bypasses fail-fast lane status propagation"
+fi
 grep -Fq '"Android compile, unit tests, and lint"' "$release_gate" \
   || fail "release gate does not dispatch Android static validation"
 grep -Fq ':app:lintDebug' "$release_gate" \

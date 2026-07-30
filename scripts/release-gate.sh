@@ -435,6 +435,11 @@ run_rust_validation_lane() {
   ./scripts/e2e-update-cli.sh
 }
 
+run_host_validation_lane() {
+  run_release_gate_static_preflight
+  run_rust_validation_lane
+}
+
 run_android_static_validation_lane() {
   command -v gradle >/dev/null 2>&1 || {
     echo "Android static validation requires Gradle on PATH." >&2
@@ -2220,16 +2225,12 @@ main() {
     docker_build_requested=1
   fi
 
-  local host_validation_status=0 concurrent_validation_status=0
-  run_release_gate_static_preflight || host_validation_status=$?
-  if ((host_validation_status == 0)); then
-    run_rust_validation_lane || host_validation_status=$?
-  fi
+  release_gate_parallel_start "Host static and Rust validation" run_host_validation_lane
+  concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
+
+  local concurrent_validation_status=0
   release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}" \
     || concurrent_validation_status=$?
-  if ((host_validation_status != 0)); then
-    return "$host_validation_status"
-  fi
   if ((concurrent_validation_status != 0)); then
     return "$concurrent_validation_status"
   fi
