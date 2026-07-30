@@ -47,15 +47,15 @@ pub(crate) fn macos_cleanup_managed_routes(
 }
 
 #[cfg(target_os = "macos")]
-fn cleanup_owned_macos_secure_dns_resolver_files() -> Result<bool> {
-    crate::secure_dns_runtime::cleanup_owned_macos_secure_dns_resolver_files()
+fn cleanup_owned_macos_secure_dns_state() -> Result<bool> {
+    crate::secure_dns_runtime::cleanup_owned_macos_secure_dns_state()
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn repair_legacy_macos_network_state(config_path: &Path) -> Result<bool> {
     let app = load_or_default_config(config_path)?;
-    let mut repaired = cleanup_owned_macos_secure_dns_resolver_files()
-        .context("remove legacy secure DNS resolver files")?;
+    let mut repaired =
+        cleanup_owned_macos_secure_dns_state().context("remove legacy secure DNS state")?;
 
     if let Ok(tunnel_ip) = strip_cidr(&app.node.tunnel_ip).parse::<Ipv4Addr>() {
         let default_routes = macos_default_routes()?;
@@ -195,9 +195,9 @@ pub(crate) fn repair_saved_network_state(config_path: &Path) -> Result<bool> {
         }
 
         if state.secure_dns_resolver_files
-            && let Err(error) = cleanup_owned_macos_secure_dns_resolver_files()
+            && let Err(error) = cleanup_owned_macos_secure_dns_state()
         {
-            failures.push(format!("remove secure DNS resolver files: {error}"));
+            failures.push(format!("remove secure DNS state: {error}"));
         }
 
         if using_legacy_route_cleanup

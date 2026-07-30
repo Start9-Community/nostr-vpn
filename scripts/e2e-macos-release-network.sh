@@ -40,6 +40,7 @@ FIPS_CLIENT_LISTEN_PORT="${NVPN_MACOS_FIPS_CLIENT_LISTEN_PORT:-}"
 EXPECTED_FIPS_REV="${NVPN_MACOS_FIPS_EXPECTED_REV:-}"
 SECURE_RESOLVER="/etc/resolver/nvpn-secure-dns"
 MAGIC_RESOLVER="/etc/resolver/nvpn"
+SECURE_DNS_STORE_KEY="State:/Network/Service/to.nostrvpn.nvpn-secure-dns/DNS"
 
 truthy() {
   case "${1:-}" in
@@ -182,18 +183,47 @@ wireguard_endpoint_route_state_valid() {
         '
 }
 
+secure_dns_store_state() {
+  /usr/sbin/scutil <<EOF
+show $SECURE_DNS_STORE_KEY
+EOF
+}
+
+secure_dns_store_owned() {
+  local state expected
+  state="$(secure_dns_store_state 2>/dev/null | sed 's/[[:space:]]*$//')" \
+    || return 1
+  expected='<dictionary> {
+  ServerAddresses : <array> {
+    0 : 127.0.0.1
+  }
+  ServerPort : 1053
+  SupplementalMatchDomains : <array> {
+    0 :
+  }
+  SupplementalMatchOrders : <array> {
+    0 : 1
+  }
+}'
+  [[ "$state" == "$expected" ]]
+}
+
+secure_dns_store_absent() {
+  local state
+  state="$(secure_dns_store_state 2>/dev/null)" || return 1
+  [[ "$state" == *"No such key"* ]]
+}
+
 secure_dns_owned() {
-  local dns
-  [[ -f "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
-    && grep -Fq 'Managed by nvpn' "$SECURE_RESOLVER" \
-    && grep -Fq 'nameserver 127.0.0.1' "$SECURE_RESOLVER" \
-    && dns="$(/usr/sbin/scutil --dns 2>/dev/null)" \
-    && grep -Eq \
-      'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1' <<<"$dns"
+  [[ ! -e "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
+    && grep -Fq 'Managed by nvpn secure DNS' "$MAGIC_RESOLVER" \
+    && grep -Fq 'nameserver 127.0.0.1' "$MAGIC_RESOLVER" \
+    && secure_dns_store_owned
 }
 
 resolver_files_absent() {
-  [[ ! -e "$SECURE_RESOLVER" && ! -e "$MAGIC_RESOLVER" ]]
+  [[ ! -e "$SECURE_RESOLVER" && ! -e "$MAGIC_RESOLVER" ]] \
+    && secure_dns_store_absent
 }
 
 flush_dns_cache() {
@@ -1152,7 +1182,8 @@ run_crash_restart_gate() {
     && fail "SIGKILLed production daemon is still alive"
   cleanup_journal_owns_wireguard_and_dns \
     || fail "SIGKILL lost the persisted WireGuard route or DNS ownership"
-  [[ -f "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
+  [[ ! -e "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
+    && secure_dns_store_owned \
     || fail "SIGKILL did not leave the real secure-DNS state for startup repair"
   runtime_wireguard_state_is true false \
     || fail "stopped status did not distinguish the crashed daemon"
@@ -1326,7 +1357,7 @@ select_direct_and_stop() {
     printf 'direct_interface=%s\n' "$(route_value default interface)"
     printf 'direct_gateway=%s\n' "$(route_value default gateway)"
     printf 'direct_source_ip=%s\n' "$(source_ip)"
-    printf 'resolver_files_absent=true\n'
+    printf 'resolver_state_absent=true\n'
   } >"$RESULT_DIR/direct.txt"
   echo "MACOS_RELEASE_NETWORK_DIRECT_OK"
 }
@@ -1374,7 +1405,7 @@ cleanup_gate() {
     cleanup_failed=1
   fi
   if ! resolver_files_absent; then
-    echo "nvpn resolver files survived production cleanup" >&2
+    echo "nvpn resolver state survived production cleanup" >&2
     cleanup_failed=1
   fi
   return "$cleanup_failed"

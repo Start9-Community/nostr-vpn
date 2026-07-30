@@ -42,10 +42,11 @@ use linux::{
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::cleanup_owned_macos_secure_dns_resolver_files;
+pub(crate) use macos::cleanup_owned_macos_secure_dns_state;
 #[cfg(target_os = "macos")]
 use macos::{
-    macos_resolver_configs, remove_owned_macos_resolver_file, write_macos_resolver_atomically,
+    install_macos_secure_dns_store, macos_resolver_configs, remove_owned_macos_resolver_file,
+    remove_owned_macos_secure_dns_store, write_macos_resolver_atomically,
 };
 
 #[cfg(target_os = "macos")]
@@ -407,6 +408,8 @@ struct SystemDnsGuard {
     linux: LinuxSecureDnsCleanupState,
     #[cfg(target_os = "macos")]
     resolver_paths: Vec<PathBuf>,
+    #[cfg(target_os = "macos")]
+    secure_dns_store: bool,
     #[cfg(target_os = "windows")]
     interface_index: u32,
     active: bool,
@@ -540,6 +543,7 @@ impl SystemDnsGuard {
                             ),
                             Self {
                                 resolver_paths,
+                                secure_dns_store: false,
                                 active: true,
                             },
                         ));
@@ -551,8 +555,36 @@ impl SystemDnsGuard {
                 }
                 resolver_paths.push(resolver_path);
             }
+            if let Err(error) = install_macos_secure_dns_store() {
+                let mut rollback_failures = Vec::new();
+                for installed_path in &resolver_paths {
+                    if let Err(rollback_error) = remove_owned_macos_resolver_file(installed_path) {
+                        rollback_failures.push(format!(
+                            "remove {}: {rollback_error}",
+                            installed_path.display()
+                        ));
+                    }
+                }
+                if !rollback_failures.is_empty() {
+                    return Err(SystemDnsInstallFailure::cleanup_pending(
+                        anyhow!(
+                            "failed to install macOS secure DNS: {error}; rollback failed: {}",
+                            rollback_failures.join("; ")
+                        ),
+                        Self {
+                            resolver_paths,
+                            secure_dns_store: false,
+                            active: true,
+                        },
+                    ));
+                }
+                return Err(SystemDnsInstallFailure::rolled_back(
+                    anyhow!(error).context("failed to install macOS secure DNS"),
+                ));
+            }
             return Ok(Self {
                 resolver_paths,
+                secure_dns_store: true,
                 active: true,
             });
         }
@@ -633,6 +665,14 @@ impl SystemDnsGuard {
         #[cfg(target_os = "macos")]
         {
             let mut failures = Vec::new();
+            if self.secure_dns_store {
+                match remove_owned_macos_secure_dns_store() {
+                    Ok(_) => self.secure_dns_store = false,
+                    Err(error) => failures.push(format!(
+                        "remove macOS secure DNS dynamic-store state: {error}"
+                    )),
+                }
+            }
             let mut remaining = Vec::new();
             for resolver_path in std::mem::take(&mut self.resolver_paths) {
                 match remove_owned_macos_resolver_file(&resolver_path) {
@@ -644,7 +684,7 @@ impl SystemDnsGuard {
                 }
             }
             self.resolver_paths = remaining;
-            self.active = !self.resolver_paths.is_empty();
+            self.active = self.secure_dns_store || !self.resolver_paths.is_empty();
             return if failures.is_empty() {
                 Ok(())
             } else {

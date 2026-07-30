@@ -187,26 +187,24 @@ if grep -Fq 'wait_for_cleanup_condition' "$GUEST"; then
   fail "macOS cleanup retains a second attempt-count wait implementation"
 fi
 require_tokens "$GUEST" "SIGPIPE-safe secure DNS ownership" \
-  'dns="$(/usr/sbin/scutil --dns 2>/dev/null)"' \
-  '<<<"$dns"'
+  'secure_dns_store_state' \
+  'SECURE_DNS_STORE_KEY=' \
+  'SupplementalMatchDomains : <array>' \
+  '[[ "$state" == "$expected" ]]'
 secure_dns_source="$(sed -n '/^secure_dns_owned() {/,/^}/p' "$GUEST")"
 if [[ "$secure_dns_source" == *'| grep'* ]]; then
   fail "macOS secure-DNS ownership can misread scutil SIGPIPE as resolver loss"
 fi
+require_tokens "$GUEST" "global secure DNS replaces the suffix-only resolver" \
+  '[[ ! -e "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]]' \
+  'secure_dns_store_owned' \
+  'secure_dns_store_absent'
 require_tokens "$GUEST" "process-stable macOS monotonic clock" \
   'mach_continuous_time' \
   'mach_timebase_info' \
   'failed to read the macOS monotonic clock timebase'
 if grep -Fq 'time.monotonic()' "$GUEST"; then
   fail "macOS recovery timing still uses Python's process-relative monotonic origin"
-fi
-printf 'nameserver[0] : 127.0.0.1\n' \
-  | grep -Eq 'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1' \
-  || fail "macOS secure-DNS resolver pattern rejects captured scutil output"
-if printf 'nameserver[0] : 127x0x0x1\n' \
-  | grep -Eq 'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1'
-then
-  fail "macOS secure-DNS resolver pattern accepts non-dot separators"
 fi
 if grep -Fq "tr -d '[:space:]' <\"\$STATE_DIR/daemon.pid\"" "$GUEST"; then
   fail "macOS guest still treats nvpn's JSON daemon PID record as plain digits"
