@@ -124,6 +124,13 @@ pub(crate) fn acquire_unix_daemon_instance_lock_at(
         }
         Ok(metadata) => validate_unix_daemon_lock_file(lock_path, &metadata, expected_uid)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(anyhow!(
+                "daemon already running or protected instance lock {} is unavailable: {}",
+                lock_path.display(),
+                error
+            ));
+        }
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("failed to inspect {}", lock_path.display()));

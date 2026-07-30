@@ -55,16 +55,6 @@ impl FipsPrivateTunnelRuntime {
         let tun_fd = BorrowedTunFd::new(tun.as_raw_fd());
 
         let (event_tx, event_rx) = mpsc::channel::<FipsPrivateMeshEvent>(1024);
-        let tun_send_worker = spawn_tun_send_worker(
-            Arc::clone(&tun),
-            Arc::clone(&mesh),
-            config.fips_host.is_some(),
-        );
-        let mesh_recv_worker = spawn_mesh_recv_worker(Arc::clone(&mesh), tun_fd, event_tx);
-        let fips_host_recv_worker = config
-            .fips_host
-            .as_ref()
-            .map(|_| spawn_fips_host_recv_worker(Arc::clone(mesh.endpoint()), tun_fd));
         let exit_route_ready = fips_exit_route_ready(&config, &mesh.peer_statuses());
 
         let mut runtime = Self {
@@ -79,9 +69,9 @@ impl FipsPrivateTunnelRuntime {
             _tun: tun,
             fips_host: None,
             fips_host_disabled_artifacts_cleaned: false,
-            tun_send_worker,
-            mesh_recv_worker,
-            fips_host_recv_worker,
+            tun_send_worker: None,
+            mesh_recv_worker: None,
+            fips_host_recv_worker: None,
             event_rx,
             exit_route_ready,
             endpoint_bypass_routes: Vec::new(),
@@ -110,7 +100,8 @@ impl FipsPrivateTunnelRuntime {
             runtime.finish_secure_dns(&config).await?;
             runtime
                 .reconcile_fips_host_runtime(config.fips_host.clone())
-                .await
+                .await?;
+            runtime.start_packet_workers(tun_fd, event_tx, config.fips_host.is_some())
         }
         .await;
         if let Err(error) = startup {
@@ -123,6 +114,27 @@ impl FipsPrivateTunnelRuntime {
             });
         }
         Ok(runtime)
+    }
+
+    fn start_packet_workers(
+        &mut self,
+        tun_fd: BorrowedTunFd,
+        event_tx: mpsc::Sender<FipsPrivateMeshEvent>,
+        fips_host_enabled: bool,
+    ) -> Result<()> {
+        self.tun_send_worker = Some(spawn_tun_send_worker(
+            Arc::clone(&self._tun),
+            Arc::clone(&self.mesh),
+            fips_host_enabled,
+        )?);
+        self.mesh_recv_worker = Some(spawn_mesh_recv_worker(
+            Arc::clone(&self.mesh),
+            tun_fd,
+            event_tx,
+        )?);
+        self.fips_host_recv_worker = fips_host_enabled
+            .then(|| spawn_fips_host_recv_worker(Arc::clone(self.mesh.endpoint()), tun_fd));
+        Ok(())
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -284,11 +296,15 @@ impl FipsPrivateTunnelRuntime {
         }
         runtime.state_control.stop().await;
         runtime.event_rx.close();
-        stop_tun_send_worker(runtime.tun_send_worker).await;
+        if let Some(worker) = runtime.tun_send_worker.take() {
+            stop_tun_send_worker(worker).await;
+        }
         if let Some(worker) = runtime.fips_host_recv_worker.take() {
             stop_fips_host_recv_worker(worker).await;
         }
-        stop_mesh_recv_worker(runtime.mesh_recv_worker, &runtime.mesh).await;
+        if let Some(worker) = runtime.mesh_recv_worker.take() {
+            stop_mesh_recv_worker(worker, &runtime.mesh).await;
+        }
         let endpoint_cleanup = runtime
             .mesh
             .endpoint()

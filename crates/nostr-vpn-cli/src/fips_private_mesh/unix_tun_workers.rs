@@ -2,7 +2,7 @@ fn spawn_tun_send_worker(
     tun: Arc<SystemTun>,
     mesh: Arc<FipsPrivateMeshRuntime>,
     fips_host_enabled: bool,
-) -> FipsTunSendWorker {
+) -> Result<FipsTunSendWorker> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread = std::thread::Builder::new()
@@ -84,8 +84,8 @@ fn spawn_tun_send_worker(
                 }
             }
         })
-        .expect("failed to spawn FIPS TUN send worker");
-    FipsTunSendWorker { stop, thread }
+        .context("failed to spawn FIPS TUN send worker")?;
+    Ok(FipsTunSendWorker { stop, thread })
 }
 
 async fn stop_tun_send_worker(worker: FipsTunSendWorker) {
@@ -226,7 +226,7 @@ fn spawn_mesh_recv_worker(
     mesh: Arc<FipsPrivateMeshRuntime>,
     tun_fd: BorrowedTunFd,
     event_tx: mpsc::Sender<FipsPrivateMeshEvent>,
-) -> FipsMeshRecvWorker {
+) -> Result<FipsMeshRecvWorker> {
     spawn_blocking_mesh_recv_worker(mesh, tun_fd, event_tx)
 }
 
@@ -245,7 +245,7 @@ fn spawn_blocking_mesh_recv_worker(
     mesh: Arc<FipsPrivateMeshRuntime>,
     tun_fd: BorrowedTunFd,
     event_tx: mpsc::Sender<FipsPrivateMeshEvent>,
-) -> FipsMeshRecvWorker {
+) -> Result<FipsMeshRecvWorker> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread = std::thread::Builder::new()
@@ -331,7 +331,7 @@ fn spawn_blocking_mesh_recv_worker(
                     }
                 }
             }
-            })
-        .expect("failed to spawn FIPS mesh receive worker");
-    FipsMeshRecvWorker { stop, thread }
+        })
+        .context("failed to spawn FIPS mesh receive worker")?;
+    Ok(FipsMeshRecvWorker { stop, thread })
 }

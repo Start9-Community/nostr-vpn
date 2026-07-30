@@ -267,6 +267,49 @@ fn unix_daemon_instance_lock_refuses_a_symlink_substitution() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn unix_daemon_instance_lock_reports_a_protected_lock_as_already_running() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-protected-daemon-lock-{nonce}"));
+    fs::create_dir(&dir).expect("create protected parent");
+    let path = dir.join("daemon.instance.lock");
+    fs::write(&path, b"").expect("create protected lock");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("protect lock");
+    let expected_uid = fs::metadata(&dir).expect("parent metadata").uid();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o000))
+        .expect("make the protected parent non-traversable");
+
+    let error = match acquire_unix_daemon_instance_lock_at(&path, expected_uid) {
+        Ok(_) => panic!("a non-traversable protected lock must not be acquired"),
+        Err(error) => error,
+    };
+
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .expect("restore parent permissions for cleanup");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("daemon already running or protected instance lock"),
+        "a client must receive the safe singleton result, not a raw inspection error: {message}"
+    );
+    assert!(
+        !message.contains("failed to inspect"),
+        "the protected singleton case must not be reported as an unexpected inspection failure: \
+         {message}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn update_daemon_config_from_staged_request_replaces_target_and_cleans_up() {
     let nonce = SystemTime::now()
