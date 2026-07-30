@@ -606,23 +606,67 @@ pub(crate) fn linux_endpoint_bypass_route_from_output(
     tunnel_iface: &str,
     original_default_route: Option<&str>,
 ) -> Result<LinuxEndpointBypassRoute> {
+    #[cfg(target_os = "linux")]
+    let interfaces = get_interfaces();
+    #[cfg(not(target_os = "linux"))]
+    let interfaces = Vec::new();
+    linux_endpoint_bypass_route_from_output_with_interfaces(
+        host,
+        route_get_output,
+        tunnel_iface,
+        original_default_route,
+        &interfaces,
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_endpoint_bypass_route_from_output_with_interfaces(
+    host: Ipv4Addr,
+    route_get_output: &str,
+    tunnel_iface: &str,
+    original_default_route: Option<&str>,
+    interfaces: &[netdev::Interface],
+) -> Result<LinuxEndpointBypassRoute> {
     let underlay = original_default_route
-        .and_then(linux_route_get_spec_from_output)
-        .filter(|spec| spec.dev != tunnel_iface);
+        .and_then(|line| {
+            linux_route_get_spec_from_output(line).map(|spec| {
+                let on_link =
+                    linux_default_route_spec_from_line(line).is_some_and(|route| route.on_link);
+                (spec, on_link)
+            })
+        })
+        .filter(|(spec, _)| spec.dev != tunnel_iface);
     let spec = linux_route_get_spec_from_output(route_get_output)
         .filter(|spec| spec.dev != tunnel_iface)
         .filter(|spec| {
             underlay
                 .as_ref()
-                .is_none_or(|underlay| linux_route_get_uses_underlay_interface(spec, underlay))
+                .is_none_or(|(underlay, _)| {
+                    linux_route_get_uses_underlay_interface(spec, underlay)
+                })
         })
+        .map(|spec| (spec, false))
         .or(underlay)
         .ok_or_else(|| anyhow!("failed to resolve bypass route for {host}"))?;
+    let (spec, on_link) = spec;
+    let src = spec.src.or_else(|| {
+        let gateway = spec
+            .gateway
+            .as_deref()
+            .and_then(|gateway| gateway.parse().ok());
+        interfaces
+            .iter()
+            .find(|interface| interface.name == spec.dev)
+            .and_then(|interface| {
+                linux_ipv4_route_primary_address(None, gateway, on_link, interface)
+            })
+            .map(|source| source.to_string())
+    });
     Ok(LinuxEndpointBypassRoute {
         target: format!("{host}/32"),
         gateway: spec.gateway,
         dev: spec.dev,
-        src: spec.src,
+        src,
     })
 }
 

@@ -265,6 +265,28 @@ default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
     }
 
     #[test]
+    fn linux_endpoint_bypass_derives_source_when_default_has_no_prefsrc() {
+        let mut interface = netdev::Interface::dummy();
+        interface.name = "enp7s0".to_string();
+        interface.ipv4 = vec![
+            "10.42.0.20/24".parse().expect("unrelated address"),
+            "172.31.254.10/24".parse().expect("underlay address"),
+        ];
+        let route = linux_endpoint_bypass_route_from_output_with_interfaces(
+            "10.231.254.2".parse().expect("endpoint"),
+            "10.231.254.2 via 192.168.122.1 dev enp1s0 src 192.168.122.103",
+            "nvpn-wg-exit",
+            Some("default via 172.31.254.1 dev enp7s0 metric 600"),
+            &[interface],
+        )
+        .expect("replacement endpoint route");
+
+        assert_eq!(route.dev, "enp7s0");
+        assert_eq!(route.gateway.as_deref(), Some("172.31.254.1"));
+        assert_eq!(route.src.as_deref(), Some("172.31.254.10"));
+    }
+
+    #[test]
     fn linux_saved_default_never_overwrites_a_new_physical_underlay() {
         let saved = "default via 192.0.2.1 dev enp1s0 metric 100";
         let new_physical = LinuxDefaultRouteSpec {
