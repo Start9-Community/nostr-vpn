@@ -124,6 +124,7 @@ impl std::error::Error for LinuxWireGuardExitApplyFailure {}
 pub(crate) fn apply_linux_wireguard_exit_upstream(
     config: &WireGuardExitConfig,
     source_cidr: &str,
+    mesh_iface: &str,
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     previous_default_route_hint: Option<&str>,
     persist_cleanup_intent: impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
@@ -132,6 +133,7 @@ pub(crate) fn apply_linux_wireguard_exit_upstream(
         &mut SystemLinuxCommandRunner,
         config,
         source_cidr,
+        mesh_iface,
         previous_runtime,
         previous_default_route_hint,
         super::resolve_linux_wireguard_exit_endpoint,
@@ -151,6 +153,7 @@ fn apply_linux_wireguard_exit_upstream_with(
         runner,
         config,
         source_cidr,
+        "nvpn0",
         previous_runtime,
         previous_default_route_hint,
         super::resolve_linux_wireguard_exit_endpoint,
@@ -162,6 +165,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
     runner: &mut impl LinuxCommandRunner,
     config: &WireGuardExitConfig,
     source_cidr: &str,
+    mesh_iface: &str,
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     previous_default_route_hint: Option<&str>,
     mut resolve_endpoint: impl FnMut(&str) -> Result<std::net::SocketAddrV4>,
@@ -318,6 +322,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         config,
         &iface,
         source_cidr,
+        mesh_iface,
         &kernel_config,
         &endpoint_specs,
         previous_runtime,
@@ -589,6 +594,7 @@ fn apply_snapshot_mutations(
     config: &WireGuardExitConfig,
     iface: &str,
     source_cidr: &str,
+    mesh_iface: &str,
     kernel_config: &str,
     endpoint_specs: &[crate::LinuxEndpointBypassRoute],
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
@@ -622,6 +628,7 @@ fn apply_snapshot_mutations(
     set_linux_wireguard_link(runner, iface, config.mtu)?;
 
     progress.table_started = true;
+    replace_linux_policy_mesh_route(runner, source_cidr, mesh_iface)?;
     replace_linux_policy_default_route(runner, iface)?;
 
     if !snapshot.policy_rule_existed {

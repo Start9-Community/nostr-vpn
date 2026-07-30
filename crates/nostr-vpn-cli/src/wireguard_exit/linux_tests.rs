@@ -448,6 +448,47 @@ fn config() -> WireGuardExitConfig {
     }
 }
 
+#[test]
+fn wireguard_policy_table_keeps_private_mesh_on_the_fips_tunnel() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    let initial = runner.state.clone();
+
+    let runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+    )
+    .expect("WireGuard exit apply");
+
+    assert!(
+        runner
+            .state
+            .table_routes
+            .iter()
+            .any(|route| route == "10.44.0.0/16 dev nvpn0"),
+        "mesh-sourced replies to another private peer must take the FIPS tunnel, \
+         not the policy table's WireGuard default"
+    );
+    assert!(
+        runner
+            .state
+            .table_routes
+            .iter()
+            .any(|route| route == "default dev nvwg0"),
+        "ordinary mesh-sourced exit traffic must still take WireGuard"
+    );
+
+    cleanup_linux_wireguard_exit_upstream_with(&mut runner, &runtime)
+        .expect("WireGuard exit cleanup");
+    assert_eq!(
+        runner.state, initial,
+        "cleanup must restore the exact preexisting policy table"
+    );
+}
+
 fn command_index(runner: &FakeRunner, needle: &[&str]) -> usize {
     runner
         .commands
@@ -469,6 +510,7 @@ fn endpoint_resolution_is_pinned_once_for_kernel_and_bypass_ownership() {
         &mut runner,
         &desired,
         "10.44.0.0/16",
+        "nvpn0",
         None,
         Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
         |_| {
@@ -522,6 +564,7 @@ fn endpoint_resolution_failure_precedes_every_kernel_mutation() {
         &mut runner,
         &desired,
         "10.44.0.0/16",
+        "nvpn0",
         None,
         Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
         |_| Err(anyhow!("synthetic endpoint resolution failure")),
@@ -570,6 +613,7 @@ fn serialized_reapply_crash_repairs_rollback_before_prior_runtime_cleanup() {
         &mut runner,
         &replacement,
         "10.44.0.0/16",
+        "nvpn0",
         Some(&previous_runtime),
         Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
         super::super::resolve_linux_wireguard_exit_endpoint,
@@ -1476,6 +1520,7 @@ fn new_interface_cleanup_intent_precedes_link_creation() {
         &mut runner,
         &config(),
         "10.44.0.0/16",
+        "nvpn0",
         None,
         None,
         super::super::resolve_linux_wireguard_exit_endpoint,

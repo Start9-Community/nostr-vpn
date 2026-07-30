@@ -710,6 +710,7 @@ impl FipsPrivateTunnelRuntime {
             runtime.refresh_underlay_default_route(refreshed_default);
         }
         let original_default_route = self.original_default_route.clone();
+        let mesh_iface = self.iface.clone();
         let apply_result = {
             let mut persist_cleanup_intent =
                 |obligation: &crate::LinuxWireGuardExitCleanupObligation| {
@@ -723,6 +724,7 @@ impl FipsPrivateTunnelRuntime {
             crate::apply_linux_wireguard_exit_upstream(
                 config,
                 source_cidr,
+                &mesh_iface,
                 previous_runtime.as_ref(),
                 original_default_route.as_deref(),
                 &mut persist_cleanup_intent,

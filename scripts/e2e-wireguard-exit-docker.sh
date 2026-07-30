@@ -13,6 +13,8 @@
 # traffic is going through the WG upstream tunnel.
 #
 # Pass criteria:
+#   - private-mesh traffic remains bidirectional while node-a uses the WG exit.
+#   - node-a's source-policy table keeps the mesh CIDR on its FIPS tunnel.
 #   - pings from node-a to internet-target arrive with source IP =
 #     wg-upstream's public-side IP (after MASQUERADE), not node-a's bridge IP.
 #   - a hostile/permissive upstream cannot initiate packets into node-b's
@@ -259,12 +261,14 @@ fi
 
 ALICE_STATUS=""
 BOB_STATUS=""
+ALICE_TUNNEL_IP=""
 BOB_TUNNEL_IP=""
 for _ in $(seq 1 80); do
   ALICE_STATUS="$("${COMPOSE[@]}" exec -T node-a nvpn status --json --discover-secs 0 | tr -d '\r')"
   BOB_STATUS="$("${COMPOSE[@]}" exec -T node-b nvpn status --json --discover-secs 0 | tr -d '\r')"
   ALICE_COMPACT="$(printf '%s' "$ALICE_STATUS" | compact_json)"
   BOB_COMPACT="$(printf '%s' "$BOB_STATUS" | compact_json)"
+  ALICE_TUNNEL_IP="$("${COMPOSE[@]}" exec -T node-a nvpn ip | tr -d '\r')"
   BOB_TUNNEL_IP="$("${COMPOSE[@]}" exec -T node-b nvpn ip | tr -d '\r')"
 
   if grep -q '"status_source":"daemon"' <<<"$ALICE_COMPACT" \
@@ -273,6 +277,7 @@ for _ in $(seq 1 80); do
     && grep -q '"running":true' <<<"$BOB_COMPACT" \
     && grep -q '"mesh_ready":true' <<<"$ALICE_COMPACT" \
     && grep -q '"mesh_ready":true' <<<"$BOB_COMPACT" \
+    && [[ -n "$ALICE_TUNNEL_IP" ]] \
     && [[ -n "$BOB_TUNNEL_IP" ]]; then
     break
   fi
@@ -292,6 +297,35 @@ grep -q '"mesh_ready":true' <<<"$ALICE_COMPACT"
 grep -q '"mesh_ready":true' <<<"$BOB_COMPACT"
 if [[ -z "$BOB_TUNNEL_IP" ]]; then
   echo "wireguard-exit e2e failed: unable to resolve node-b tunnel IP" >&2
+  exit 1
+fi
+
+FIPS_IFACE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
+  "ip -4 route get '$BOB_TUNNEL_IP' | awk '{ for (i = 1; i <= NF; i++) if (\$i == \"dev\") { print \$(i + 1); exit } }'" \
+  | tr -d '\r')"
+MESH_POLICY_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
+  "ip -4 route show table 51888 exact '$MESH_TUNNEL_NET'" | tr -d '\r')"
+MESH_REPLY_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc \
+  "ip -4 route get '$BOB_TUNNEL_IP' from '$ALICE_TUNNEL_IP'" | tr -d '\r')"
+if [[ -z "$FIPS_IFACE" ]] \
+  || ! grep -Fq "$MESH_TUNNEL_NET dev $FIPS_IFACE" <<<"$MESH_POLICY_ROUTE" \
+  || ! grep -Fq "dev $FIPS_IFACE" <<<"$MESH_REPLY_ROUTE"; then
+  echo "wireguard-exit e2e failed: mesh-sourced replies do not stay on the FIPS tunnel" >&2
+  echo "FIPS interface: ${FIPS_IFACE:-unavailable}" >&2
+  echo "policy-table mesh route: ${MESH_POLICY_ROUTE:-unavailable}" >&2
+  echo "mesh reply route: ${MESH_REPLY_ROUTE:-unavailable}" >&2
+  exit 1
+fi
+if ! "${COMPOSE[@]}" exec -T node-a ping -I "$ALICE_TUNNEL_IP" -c 5 -W 2 "$BOB_TUNNEL_IP" \
+  >/tmp/nvpn-wg-exit-mesh-a-to-b.log; then
+  echo "wireguard-exit e2e failed: node-a could not reach node-b while the WG exit was active" >&2
+  cat /tmp/nvpn-wg-exit-mesh-a-to-b.log >&2 || true
+  exit 1
+fi
+if ! "${COMPOSE[@]}" exec -T node-b ping -I "$BOB_TUNNEL_IP" -c 5 -W 2 "$ALICE_TUNNEL_IP" \
+  >/tmp/nvpn-wg-exit-mesh-b-to-a.log; then
+  echo "wireguard-exit e2e failed: node-b could not reach node-a while the WG exit was active" >&2
+  cat /tmp/nvpn-wg-exit-mesh-b-to-a.log >&2 || true
   exit 1
 fi
 
@@ -336,6 +370,13 @@ echo "--- node-a default route ---"
 echo "$DEFAULT_ROUTE"
 echo "--- node-a route to ${TARGET_IP} ---"
 echo "$PUBLIC_ROUTE"
+echo "--- node-a mesh policy route ---"
+echo "$MESH_POLICY_ROUTE"
+echo "--- node-a mesh reply route ---"
+echo "$MESH_REPLY_ROUTE"
+echo "--- bidirectional mesh pings with WG exit active ---"
+cat /tmp/nvpn-wg-exit-mesh-a-to-b.log
+cat /tmp/nvpn-wg-exit-mesh-b-to-a.log
 echo "--- ping log ---"
 cat /tmp/nvpn-wg-exit-ping.log
 echo "--- ICMP packet counts at internet-target ---"
@@ -393,4 +434,4 @@ if [[ "$COUNT_UPSTREAM_TO_B" != "0" ]]; then
   exit 1
 fi
 
-echo "wireguard-exit docker e2e passed: node-a egressed via WG (${COUNT_VIA_WG} icmp pkts), and WG upstream ingress could not reach node-b"
+echo "wireguard-exit docker e2e passed: private mesh remained bidirectional, node-a egressed via WG (${COUNT_VIA_WG} icmp pkts), and WG upstream ingress could not reach node-b"

@@ -424,6 +424,27 @@ pub(super) fn replace_linux_policy_default_route(
     )
 }
 
+pub(super) fn replace_linux_policy_mesh_route(
+    runner: &mut impl LinuxCommandRunner,
+    mesh_cidr: &str,
+    mesh_iface: &str,
+) -> Result<()> {
+    run_checked(
+        runner,
+        "ip",
+        &strings(&[
+            "-4",
+            "route",
+            "replace",
+            mesh_cidr,
+            "dev",
+            mesh_iface,
+            "table",
+            &WIREGUARD_EXIT_TABLE.to_string(),
+        ]),
+    )
+}
+
 pub(super) fn add_linux_wireguard_exit_policy_rule(
     runner: &mut impl LinuxCommandRunner,
     source_cidr: &str,
