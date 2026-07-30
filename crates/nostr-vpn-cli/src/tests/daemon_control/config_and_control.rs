@@ -357,6 +357,37 @@ fn daemon_control_stop_request_roundtrip() {
 }
 
 #[test]
+fn daemon_control_result_preserves_the_full_error_chain() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-control-result-chain-test-{nonce}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let config = dir.join("config.toml");
+
+    let error = anyhow::anyhow!("PowerShell command timed out")
+        .context("install secure Windows DNS")
+        .context("apply FIPS tunnel, routes, and DNS");
+    write_daemon_control_result(&config, crate::DaemonControlRequest::Reload, Err(error))
+        .expect("write failed reload result");
+
+    let returned = crate::wait_for_daemon_control_result(
+        &config,
+        crate::DaemonControlRequest::Reload,
+        Duration::from_millis(20),
+    )
+    .expect_err("failed daemon reload must be returned to its caller");
+    assert_eq!(
+        returned.to_string(),
+        "apply FIPS tunnel, routes, and DNS: install secure Windows DNS: PowerShell command timed out",
+        "the control result must retain the actionable inner failure"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn daemon_control_timeout_errors_use_generic_service_wording() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -422,7 +453,7 @@ fn daemon_control_wait_timeouts_allow_longer_mac_recovery_windows() {
     assert_eq!(
         crate::daemon_control_result_timeout(crate::DaemonControlRequest::Reload),
         if cfg!(target_os = "windows") {
-            Duration::from_secs(30)
+            Duration::from_secs(45)
         } else {
             Duration::from_secs(15)
         }

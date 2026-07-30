@@ -384,9 +384,10 @@ pub(crate) fn daemon_control_result_timeout(request: DaemonControlRequest) -> Du
     #[cfg(target_os = "windows")]
     if matches!(request, DaemonControlRequest::Reload) {
         // A reload is complete only after native WireGuard, routes, and DNS
-        // have applied. The handshake watchdog is 10s; leave bounded cleanup
-        // room while keeping a stuck transition well below a minute.
-        return Duration::from_secs(30);
+        // have applied. Cold DnsClient PowerShell gets 10s and the handshake
+        // watchdog gets 10s; leave bounded route/cleanup room while keeping a
+        // stuck transition below a minute.
+        return Duration::from_secs(45);
     }
 
     if matches!(

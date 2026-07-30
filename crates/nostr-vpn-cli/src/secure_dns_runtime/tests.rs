@@ -129,6 +129,16 @@ fn windows_wireguard_policy_uses_provider_dns_and_keeps_magic_dns_local() {
     assert!(script.contains("throw $originalError"));
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_dns_command_budget_is_operation_specific() {
+    assert_eq!(WINDOWS_DNS_COMMAND_TIMEOUT, Duration::from_secs(10));
+    assert!(
+        WINDOWS_DNS_COMMAND_TIMEOUT > crate::wg_upstream_runtime::WINDOWS_CHILD_COMMAND_TIMEOUT,
+        "cold DnsClient PowerShell needs a larger bound than hot route/native commands"
+    );
+}
+
 #[test]
 fn direct_resolv_conf_is_limited_to_containers_and_openrc_hosts() {
     assert!(linux_direct_resolv_conf_allowed(true, false));

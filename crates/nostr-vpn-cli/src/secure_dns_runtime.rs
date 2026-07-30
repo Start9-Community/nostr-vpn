@@ -38,6 +38,8 @@ const SECURE_DNS_BIND: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SECURE_DNS_PORT));
 const SECURE_DNS_MAX_IN_FLIGHT: usize = 64;
 const SECURE_DNS_CLIENT_IDLE: Duration = Duration::from_secs(10);
+#[cfg(target_os = "windows")]
+const WINDOWS_DNS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 type SharedResolver = Arc<dyn SecureDnsLookup>;
 type ResolverState = Arc<RwLock<SharedResolver>>;
 type FipsDnsEndpoint = Option<Arc<FipsEndpoint>>;
@@ -697,9 +699,11 @@ impl SystemDnsGuard {
             let SystemDnsCleanupIntent::WindowsInterface(interface_index) = cleanup_intent;
             if let Err(install_error) =
                 run_windows_powershell(&windows_secure_dns_install_script(interface_index))
+                    .context("install Windows secure DNS policy")
             {
                 let rollback =
-                    run_windows_powershell(&windows_secure_dns_uninstall_script(interface_index));
+                    run_windows_powershell(&windows_secure_dns_uninstall_script(interface_index))
+                        .context("roll back Windows secure DNS policy");
                 crate::fips_private_mesh::record_windows_secure_dns_cleanup(
                     interface_index,
                     &rollback,
@@ -739,9 +743,11 @@ impl SystemDnsGuard {
         match interface.filter(|_| !servers.is_empty()) {
             Some(interface) => {
                 run_windows_powershell(&windows_wireguard_dns_script(interface, servers))
+                    .context("set Windows WireGuard DNS policy")
             }
             None => {
                 run_windows_powershell(&windows_secure_dns_install_script(self.interface_index))
+                    .context("restore Windows secure DNS policy")
             }
         }
     }
@@ -786,7 +792,8 @@ impl SystemDnsGuard {
         #[cfg(target_os = "windows")]
         {
             let result =
-                run_windows_powershell(&windows_secure_dns_uninstall_script(self.interface_index));
+                run_windows_powershell(&windows_secure_dns_uninstall_script(self.interface_index))
+                    .context("remove Windows secure DNS policy");
             if result.is_ok() {
                 self.active = false;
             }
@@ -806,17 +813,11 @@ impl Drop for SystemDnsGuard {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn run_checked(command: &mut Command) -> Result<()> {
-    #[cfg(target_os = "linux")]
     let output = command
         .output()
         .context("failed to execute DNS configuration command")?;
-    #[cfg(target_os = "windows")]
-    let output = crate::wg_upstream_runtime::run_windows_command(
-        command,
-        "Windows DNS configuration command",
-    )?;
     if output.status.success() {
         return Ok(());
     }
@@ -839,6 +840,7 @@ pub(crate) fn repair_windows_secure_dns(_interface_index: u32) -> Result<()> {
     // Live cleanup uses `windows_secure_dns_uninstall_script` while the
     // runtime still owns the exact adapter.
     run_windows_powershell(&windows_secure_dns_repair_script())
+        .context("repair Windows secure DNS policy")
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -922,12 +924,23 @@ fn windows_wireguard_dns_script(interface: &str, servers: &[IpAddr]) -> String {
 
 #[cfg(target_os = "windows")]
 fn run_windows_powershell(script: &str) -> Result<()> {
-    run_checked(Command::new("powershell").args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-    ]))
+    let output = crate::wg_upstream_runtime::run_windows_command_with_timeout(
+        Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]),
+        "Windows DNS configuration command",
+        WINDOWS_DNS_COMMAND_TIMEOUT,
+    )?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let details = if output.stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout)
+    } else {
+        String::from_utf8_lossy(&output.stderr)
+    };
+    Err(anyhow!(
+        "DNS configuration command failed: {}",
+        details.trim()
+    ))
 }
 
 #[cfg(test)]

@@ -647,7 +647,7 @@ pub(crate) fn write_daemon_control_result(
         Err(error) => DaemonControlResult {
             request: request.as_str().to_string(),
             ok: false,
-            error: Some(error.to_string()),
+            error: Some(format!("{error:#}")),
         },
     };
     let raw = serde_json::to_vec_pretty(&payload)?;
