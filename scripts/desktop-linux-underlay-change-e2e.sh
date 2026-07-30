@@ -356,17 +356,17 @@ assert_active_exit() {
   local expected_iface="$1"
   local expected_pid="$2"
   local require_fixture="${3:-1}"
-  assert_same_daemon_ready "$expected_pid"
-  [[ "$(route_dev 1.1.1.1)" == "$WG_IFACE" ]]
-  [[ "$(route_dev "$(endpoint_host)")" == "$expected_iface" ]]
-  assert_wireguard_endpoint_route "$expected_iface"
-  wireguard_handshake_active
-  assert_secure_dns
+  assert_same_daemon_ready "$expected_pid" || return 1
+  [[ "$(route_dev 1.1.1.1)" == "$WG_IFACE" ]] || return 1
+  [[ "$(route_dev "$(endpoint_host)")" == "$expected_iface" ]] || return 1
+  assert_wireguard_endpoint_route "$expected_iface" || return 1
+  wireguard_handshake_active || return 1
+  assert_secure_dns || return 1
   if [[ "$require_fixture" == "1" ]]; then
-    resolve_fixture
+    resolve_fixture || return 1
   fi
-  resolve_name "$(probe_host)"
-  test_https
+  resolve_name "$(probe_host)" || return 1
+  test_https || return 1
 }
 
 assert_single_nvpn_process() {

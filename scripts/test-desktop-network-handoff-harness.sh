@@ -195,14 +195,15 @@ for guest_gate in "$WINDOWS_GUEST" "$LINUX_GUEST"; do
     'select-direct' \
     'verified_https'
 done
-grep -Fq '(Get-RebindReceiptCount) -eq ($rebindBefore + 1)' "$WINDOWS_GUEST" \
+grep -Fq '$rebindAfter -ne ($rebindBefore + 1)' "$WINDOWS_GUEST" \
   || fail "Windows guest does not require exactly one rebind per physical switch"
 grep -Fq '$(rebind_count) == rebind_before + 1' "$LINUX_GUEST" \
   || fail "Linux guest does not require exactly one rebind per physical switch"
-for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
-  [[ "$(grep -Fc '.rebind_receipts_after == (.rebind_receipts_before + 1)' "$host_gate")" -eq 2 ]] \
-    || fail "$(basename "$host_gate") does not independently require one rebind for both switches"
-done
+[[ "$(grep -Fc '.rebind_receipts_after == (.rebind_receipts_before + 1)' "$WINDOWS_HOST")" -eq 1 \
+  && "$(grep -Fc '  validate_guest_recovery_receipt \' "$WINDOWS_HOST")" -eq 2 ]] \
+  || fail "Windows host does not apply one canonical rebind check to both switches"
+[[ "$(grep -Fc '.rebind_receipts_after == (.rebind_receipts_before + 1)' "$LINUX_HOST")" -eq 2 ]] \
+  || fail "Linux host does not independently require one rebind for both switches"
 
 require_tokens "$WINDOWS_GUEST" "PID-bound continuous payload" \
   'Get-DaemonPid' '[Net.NetworkInformation.Ping]::new()'
@@ -405,7 +406,90 @@ if not (
     raise SystemExit(
         "Windows cleanup can repair the network before the exact daemon exits"
     )
+owned = text[
+    text.index("function Invoke-OwnedNetworkCleanup {"):
+    text.index("\nAssert-Administrator")
+]
+if not (
+    owned.index('"cleanup-owned"')
+    < owned.index("[IO.File]::Open")
+    < owned.index("[IO.FileMode]::OpenOrCreate")
+    < owned.index("Stop-Process -Id $RunnerPidToStop")
+    < owned.index("Invoke-IsolatedNetworkCleanup")
+):
+    raise SystemExit(
+        "Windows cleanup is not preflight-authorized and atomically claimed"
+    )
+if "[IO.FileShare]::None" not in owned:
+    raise SystemExit("Windows cleanup lock is not process-exclusive")
+if '"cleanup.lock"' not in owned or '"cleanup-owner"' in text:
+    raise SystemExit("Windows cleanup retains a stale permanent owner record")
+if text.count("Invoke-IsolatedNetworkCleanup -EmergencyRepair") != 1:
+    raise SystemExit("Windows retains more than one direct cleanup path")
+
+initialize = text[text.index('  "Initialize" {'):text.index('  "Probe" {')]
+if not (
+    initialize.index("adapter-state.json")
+    < initialize.index("Assert-IsolatedNetworkPreflight")
+    < initialize.index('Write-Marker "cleanup-owned"')
+    < initialize.index("Enable-NetAdapter")
+):
+    raise SystemExit(
+        "Windows initialization mutates before clean preflight ownership"
+    )
+preflight = text[
+    text.index("function Assert-IsolatedNetworkPreflight {"):
+    text.index("\nfunction Invoke-IsolatedNetworkCleanup {")
+]
+for fixed_resource in (
+    '"NvpnService"',
+    '"nvpn"',
+    "$TunnelInterface",
+    "$WireGuardInterface",
+    "Get-SecureDnsRules",
+    '"nostr-vpn\\wireguard"',
+):
+    if fixed_resource not in preflight:
+        raise SystemExit(
+            f"Windows clean preflight omits fixed resource: {fixed_resource}"
+        )
+
+watchdog = text[text.index('  "Watchdog" {'):text.index('  "Run" {')]
 run = text[text.index('  "Run" {'):text.index('  "Cleanup" {')]
+host_cleanup = text[text.index('  "Cleanup" {'):]
+for section, owner in (
+    (watchdog, "watchdog"),
+    (run, "runner"),
+    (host_cleanup, "host"),
+):
+    if f'Invoke-OwnedNetworkCleanup -Owner "{owner}"' not in section:
+        raise SystemExit(f"Windows {owner} does not use claimed cleanup")
+    if "Invoke-IsolatedNetworkCleanup" in section:
+        raise SystemExit(f"Windows {owner} bypasses claimed cleanup")
+if "-RunnerPidToStop $RunnerPid" not in watchdog:
+    raise SystemExit("Windows watchdog cleanup does not first stop its runner")
+if "-RunnerPidToStop $RunnerPid" not in host_cleanup:
+    raise SystemExit("Windows host cleanup does not stop only after winning")
+for proof in (
+    'AddSeconds(90)',
+    'timed out waiting for the active cleanup owner',
+    '"probe.pid"',
+    '"wireguard-probe.pid"',
+    '"watchdog.pid"',
+):
+    if proof not in owned:
+        raise SystemExit(f"Windows claimed cleanup lost bounded ownership proof: {proof}")
+descendants = owned.index('foreach ($marker in @("probe.pid"')
+native_cleanup = owned.index("Invoke-IsolatedNetworkCleanup", descendants)
+complete = owned.index('Write-Marker "cleanup.complete"', native_cleanup)
+release = owned.index("$lock.Dispose()", complete)
+if not descendants < native_cleanup < complete < release:
+    raise SystemExit("Windows cleanup completes before owned descendants stop")
+if "runner-cleanup." in text:
+    raise SystemExit("Windows retains duplicate runner cleanup markers")
+for marker in ("probe.pid", "wireguard-probe.pid"):
+    if f'Write-Marker "{marker}"' not in text:
+        raise SystemExit(f"Windows runner does not record cleanup child: {marker}")
 if run.index("throw $runError") > run.index("throw $cleanupError"):
     raise SystemExit("Windows cleanup error can mask the original run failure")
 crash = text[text.index("function Invoke-CrashRecovery {"):]
@@ -433,24 +517,132 @@ for evidence in \
   '.wireguard_endpoint_route.next_hop == $gateway' \
   '.wireguard_endpoint_route.source_address == $source'
 do
-  [[ "$(grep -Fc "$evidence" "$WINDOWS_HOST")" -eq 2 ]] \
-    || fail "Windows host does not verify both complete endpoint-route tuples: $evidence"
+  [[ "$(grep -Fc "$evidence" "$WINDOWS_HOST")" -eq 1 ]] \
+    || fail "Windows host lacks canonical endpoint-route validation: $evidence"
 done
-require_tokens "$WINDOWS_GUEST" "stable monotonic recovery receipt" \
-  'route_usable_unix_milliseconds' \
-  'route_usable_monotonic_milliseconds' \
-  'source_address = [string]$routeDecision.source_address' \
-  'if ($elapsed -gt $RecoveryDeadlineMilliseconds)'
-python3 - "$WINDOWS_GUEST" <<'PY'
+require_tokens "$WINDOWS_GUEST" "timestamped recovery receipt" \
+  'One deadline-edge read accepts a delayed log write' \
+  'source_address = [string]$routeDecision.source_address'
+python3 - "$WINDOWS_GUEST" "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" <<'PY'
 import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+host = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+host_lib = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 observe = text[text.index("function Observe-Recovery {"):text.index("function Run-DnsSettingCase {")]
-checkpoint = observe.index("Assert-SessionContinuity")
-recovered = observe.index("$recoveredMonotonicMilliseconds = [Environment]::TickCount64")
-if recovered <= checkpoint:
-    raise SystemExit("Windows recovery clock stops before session/DNS/HTTPS/route assertions")
+evidence = observe.index("$evidence = Wait-ForRecoveryEvidence")
+audit = observe.index("Assert-ActiveExit")
+elapsed = observe.index("$elapsed = [long]$evidence.recovered_unix_milliseconds")
+if not evidence < audit < elapsed:
+    raise SystemExit(
+        "Windows recovery evidence and slower stable-state audit are not separated"
+    )
+if "Stopwatch]::StartNew()" in observe:
+    raise SystemExit("Windows product recovery is still measured by harness wall time")
+freshness = text[
+    text.index("function Wait-ForRecoveryEvidence {"):
+    text.index("\nfunction Observe-Recovery {")
+]
+for proof in (
+    "$ObservationStartedUnixMilliseconds",
+    "$RouteUsableUnixMilliseconds",
+    "$deadlineUnixMilliseconds =",
+    "$RouteUsableUnixMilliseconds + $RecoveryDeadlineMilliseconds",
+    "$RebindBefore $ObservationStartedUnixMilliseconds",
+    "$ProbeBefore $RouteUsableUnixMilliseconds",
+    "$WireGuardProbeBefore $RouteUsableUnixMilliseconds",
+):
+    if proof not in freshness:
+        raise SystemExit(
+            f"Windows recovery accepts stale timestamp evidence: {proof}"
+        )
+if "[Math]::Max(\n          0," in freshness or "[Math]::Max(\n    0," in observe:
+    raise SystemExit("Windows recovery still zero-clamps stale evidence")
+validator = host[
+    host.index("validate_guest_recovery_receipt() {"):
+    host.index("\nrun_underlay_switches() {")
+]
+for proof in (
+    ".observation_started_unix_milliseconds > 0",
+    ".rebind_unix_milliseconds\n        >= .observation_started_unix_milliseconds",
+    ".payload_success_unix_milliseconds\n        >= .route_usable_unix_milliseconds",
+    ".wireguard_payload_success_unix_milliseconds\n        >= .route_usable_unix_milliseconds",
+    "== (.recovered_unix_milliseconds - .route_usable_unix_milliseconds)",
+):
+    if proof not in validator:
+        raise SystemExit(
+            f"Windows host does not reject stale recovery evidence: {proof}"
+        )
+if ",\n          0\n        ] | max" in validator:
+    raise SystemExit("Windows host still zero-clamps stale recovery evidence")
+
+run = text[text.index('  "Run" {'):text.index('  "Cleanup" {')]
+for label in ("secondary", "primary"):
+    start = run.index(f"${label}ObservationStarted")
+    rebind = run.index(f"${label}RebindBefore", start)
+    armed = run.index(f'Write-Marker "armed-{label}"', rebind)
+    observation = run.index(f'Observe-Recovery "{label}"', armed)
+    if not start < rebind < armed < observation:
+        raise SystemExit(
+            f"Windows {label} freshness baseline is not captured before the cut"
+        )
+
+cleanup = host[host.index("cleanup() {"):host.index("trap cleanup EXIT INT TERM")]
+for marker in (
+    "arm-secondary",
+    "arm-primary",
+    "dns-automatic.go",
+    "select-direct",
+):
+    if marker in cleanup:
+        raise SystemExit(
+            f"Windows teardown still unlocks a future mutation stage: {marker}"
+        )
+if cleanup.count("-Action Cleanup") != 1:
+    raise SystemExit("Windows teardown must have exactly one fallback Cleanup call")
+for obsolete in (
+    "wait_for_windows_runner_cleanup",
+    "stop_windows_runner_for_fallback",
+    "guest_cleanup_marker_exists",
+    "GUEST_INITIALIZATION_ATTEMPTED",
+):
+    if obsolete in host:
+        raise SystemExit(f"Windows teardown retains obsolete ownership path: {obsolete}")
+ownership = cleanup.index('ownership_state="$(guest_cleanup_ownership_state)"')
+owned_case = cleanup.index("owned)", ownership)
+runner_pid = cleanup.index("$GUEST_STATE_DIR\\\\runner.pid", owned_case)
+fallback = cleanup.index("-Action Cleanup", runner_pid)
+runner_argument = cleanup.index("-RunnerPid \\$runnerPid", fallback)
+audit = cleanup.index("audit_guest_cleanup", runner_argument)
+if not ownership < owned_case < runner_pid < fallback < runner_argument < audit:
+    raise SystemExit("Windows host does not pass the recorded runner into claimed cleanup")
+management = host[
+    host.index("run_ps_cleanup_management() {"):
+    host.index("\ncleanup() {")
+]
+for proof in (
+    'run_ps_with secondary "$script" "$channel_timeout"',
+    'run_ps_with primary "$script" "$channel_timeout"',
+    "guest_cleanup_ownership_state",
+    'echo "unknown"',
+):
+    if proof not in management:
+        raise SystemExit(f"Windows cleanup management lost tri-state proof: {proof}")
+if 'run_ps_cleanup_management \\\n' not in cleanup or " 180 " not in cleanup:
+    raise SystemExit("Windows claimed cleanup lacks a bounded management channel")
+quarantine = cleanup.index("QUARANTINE_GUEST_NETWORK=1", ownership)
+detach_guard = cleanup.index('if [[ "$QUARANTINE_GUEST_NETWORK" == "0" ]]')
+detach = cleanup.index("virsh detach-interface", detach_guard)
+destroy = cleanup.index("virsh net-destroy", detach)
+if not ownership < quarantine < detach_guard < detach < destroy:
+    raise SystemExit("Windows unknown cleanup proof can still destroy its management path")
+if "NVPN_WINDOWS_UNDERLAY_WG_INTERFACE" in host:
+    raise SystemExit("Windows gate retains a partially propagated WireGuard knob")
+if 'primary_ssh_command "$channel_timeout"' not in host_lib:
+    raise SystemExit("Windows partial-init cleanup transport is unbounded")
+if "\\$processMarkers = @('probe.pid', 'wireguard-probe.pid', 'watchdog.pid')" not in host:
+    raise SystemExit("Windows cleanup audit omits recorded child processes")
 PY
 [[ "$(grep -Fc 'assert_peer_recovered_from_source "$cut"' "$WINDOWS_HOST")" -eq 2 ]] \
   || fail "Windows peer evidence is not clocked from each hypervisor link cut"
@@ -1130,6 +1322,14 @@ for token in (
 PY
 grep -Fq 'route_dev "$(endpoint_host)"' "$LINUX_GUEST" \
   || fail "Linux recovery clock does not wait for the physical endpoint route"
+require_tokens "$LINUX_GUEST" "Linux bounded recovery short-circuit" \
+  'assert_same_daemon_ready "$expected_pid" || return 1' \
+  'assert_wireguard_endpoint_route "$expected_iface" || return 1' \
+  'wireguard_handshake_active || return 1' \
+  'assert_secure_dns || return 1' \
+  'resolve_fixture || return 1' \
+  'resolve_name "$(probe_host)" || return 1' \
+  'test_https || return 1'
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_HOST" \
   || fail "Linux host does not enforce the guest monotonic recovery receipt"
 grep -Fq 'route_usable_monotonic_milliseconds' "$LINUX_GUEST" \

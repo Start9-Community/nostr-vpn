@@ -160,7 +160,12 @@ require_tokens "$GUEST" "failure diagnostics survive cleanup" \
 require_tokens "$GUEST" "wall-clock-bounded readiness waits" \
   'local WAIT_DEADLINE_SECONDS="$((SECONDS + WAIT_SECS))"' \
   'while ((SECONDS < WAIT_DEADLINE_SECONDS)); do' \
+  'local limit="$1"' \
+  'local remaining="$limit"' \
   'timeout="$(wait_budget_seconds 8)"'
+if grep -Fq 'local limit="$1" remaining="$limit"' "$GUEST"; then
+  fail "macOS wait budget expands a same-declaration local before assignment"
+fi
 if grep -Fq 'local attempts=$((WAIT_SECS * 5))' "$GUEST"; then
   fail "macOS readiness multiplies blocking network probes by an attempt count"
 fi

@@ -34,11 +34,20 @@ ps_quote() {
 }
 
 primary_ssh_command() {
-  WINDOWS_PRIMARY_SSH=(ssh -o BatchMode=yes)
+  local channel_timeout="${1:-}"
+  WINDOWS_PRIMARY_SSH=(
+    ssh
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o ConnectionAttempts=1
+  )
   if [[ -n "$PRIMARY_PROXY" ]]; then
     WINDOWS_PRIMARY_SSH+=(-o "ProxyCommand=$PRIMARY_PROXY")
   elif [[ -n "$WINDOWS_JUMP" ]]; then
     WINDOWS_PRIMARY_SSH+=(-J "$WINDOWS_JUMP")
+  fi
+  if [[ -n "$channel_timeout" ]]; then
+    WINDOWS_PRIMARY_SSH+=(-o "ChannelTimeout=session=${channel_timeout}s")
   fi
   WINDOWS_PRIMARY_SSH+=("$WINDOWS_SSH")
 }
@@ -66,7 +75,7 @@ run_ps_with() {
   encoded="$(printf '%s' "$script" | iconv -t UTF-16LE | base64 | tr -d '\n')"
   case "$transport" in
     primary)
-      primary_ssh_command
+      primary_ssh_command "$channel_timeout"
       "${WINDOWS_PRIMARY_SSH[@]}" \
         powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
           -EncodedCommand "$encoded"

@@ -184,7 +184,8 @@ flush_dns_cache() {
 }
 
 wait_budget_seconds() {
-  local limit="$1" remaining="$limit"
+  local limit="$1"
+  local remaining="$limit"
   if (( ${WAIT_DEADLINE_SECONDS:-0} > 0 )); then
     remaining="$((WAIT_DEADLINE_SECONDS - SECONDS))"
     ((remaining > 0)) || return 1

@@ -61,6 +61,10 @@ for proof in \
   'mobile_wg_fixture_wg_bytes "$CONTAINER"' \
   'mobile_wg_fixture_forward_packets "$CONTAINER"' \
   'mobile_wg_fixture_dns_count "$CONTAINER" "$DNS_PROBE_NAME"' \
+  'capture_fixture_failure_evidence' \
+  'fixture_wg_bytes=' \
+  'fixture_forward_packets=' \
+  'fixture_dns_queries=' \
   'Windows WireGuard fixture transfer counter did not increase' \
   'Windows WireGuard fixture Internet-forward counter did not increase' \
   'Windows WireGuard fixture DNS query counter did not increase' \
@@ -110,6 +114,9 @@ for guest_proof in \
   'Test-WireGuardDns' \
   'public Internet did not use the real WireGuard exit source' \
   'Get-WindowsWireGuardExitDnsRules' \
+  'Write-WindowsWireGuardFailureEvidence' \
+  'latest_handshakes' \
+  'endpoint_routes' \
   'Invoke-WindowsWireGuardDirectCleanup' \
   'WINDOWS_WG_DIRECT_E2E_OK'
 do
@@ -123,9 +130,13 @@ for lifecycle_proof in \
   'Join-Path $env:ProgramData "nostr-vpn\wireguard"' \
   'Get-WindowsWireGuardEndpointRoutes $EndpointHost' \
   'Get-WindowsWireGuardNativeArtifacts' \
+  'Get-WindowsWireGuardTunnelServices' \
+  'Get-WindowsWireGuardTunnelAdapters' \
+  '(Get-WindowsWireGuardTunnelServices).Count -ne 0' \
+  '(Get-WindowsWireGuardTunnelAdapters).Count -ne 0' \
   '@(Get-WindowsWireGuardNativeArtifacts).Count -ne 0' \
   '@(Get-WindowsWireGuardEndpointRoutes $EndpointHost).Count -ne 0' \
-  'Windows WireGuard lane requires no pre-existing native service' \
+  'Windows WireGuard lane requires no pre-existing WireGuard service' \
   'Stop-Service -Name $serviceName -Force' \
   '& sc.exe delete $serviceName' \
   'Remove-NetRoute -Confirm:$false' \
@@ -167,12 +178,41 @@ if "-AllowOwnedRepair" in normal_cleanup:
 finally_block = text[text.index("finally {") :]
 if "-AllowOwnedRepair" not in finally_block:
     raise SystemExit("failed product transition lacks owned-resource emergency cleanup")
+failure_capture = text.index("Write-WindowsWireGuardFailureEvidence $runFailure")
+failure_catch = text.index("catch {", text.index('Write-Output "WINDOWS_WG_DIRECT_E2E_OK"'))
+failure_cleanup = text.index("finally {", failure_catch)
+if not failure_catch < failure_capture < failure_cleanup:
+    raise SystemExit(
+        "guest failure evidence is not captured before native cleanup"
+    )
+if "show all dump" in text:
+    raise SystemExit("Windows WireGuard failure evidence can expose private keys")
 
 preflight = outer.index("Save-WindowsWireGuardDirectBaseline")
 ownership = outer.index("REMOTE_SERVICE_OWNED=1")
 mutation = outer.index("& \\$Bin service install --force")
 if not preflight < ownership < mutation:
     raise SystemExit("outer lane does not prove a clean Direct baseline before ownership/mutation")
+fixture_branch = outer.index("capture_fixture_failure_evidence", mutation)
+failure_exit = outer.index("exit 1", fixture_branch)
+if not mutation < fixture_branch < failure_exit:
+    raise SystemExit(
+        "standalone lane does not preserve fixture evidence before exit cleanup"
+    )
+for counter_failure in (
+    "Windows WireGuard fixture transfer counter did not increase",
+    "Windows WireGuard fixture Internet-forward counter did not increase",
+    "Windows WireGuard fixture DNS query counter did not increase",
+):
+    failure_message = outer.index(counter_failure, mutation)
+    failure_exit = outer.index("exit 1", failure_message)
+    failure_capture = outer.index(
+        "capture_fixture_failure_evidence", failure_message
+    )
+    if not failure_message < failure_capture < failure_exit:
+        raise SystemExit(
+            f"fixture counter failure exits without evidence: {counter_failure}"
+        )
 outer_cleanup = outer.index("cleanup_remote_service()")
 outer_invoke = outer.index("Invoke-WindowsWireGuardDirectCleanup", outer_cleanup)
 outer_assert = outer.index("Assert-WindowsWireGuardDirectRestored", outer_invoke)
@@ -193,6 +233,21 @@ if "& $Binary set --config $Config --exit-node= 2>$null" in cleanup_body:
 provider_cleanup = outer[outer.index("cleanup_remote_provider_config()") : outer.index("cleanup_remote_service()")]
 if "--exit-node=" in provider_cleanup:
     raise SystemExit("provider-file cleanup still duplicates the canonical Direct restore")
+
+preflight_body = lifecycle[
+    lifecycle.index("function Save-WindowsWireGuardDirectBaseline"):
+    lifecycle.index("function Read-WindowsWireGuardDirectBaseline")
+]
+for stale_resource in (
+    "Get-WindowsWireGuardTunnelServices",
+    "Get-WindowsWireGuardTunnelAdapters",
+    "Get-WindowsWireGuardNativeArtifacts",
+    "Get-WindowsWireGuardEndpointRoutes",
+):
+    if stale_resource not in preflight_body:
+        raise SystemExit(
+            f"Windows preflight does not reject stale resource: {stale_resource}"
+        )
 PY
 
 python3 - "$RELEASE_GATE" <<'PY'

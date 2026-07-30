@@ -226,6 +226,34 @@ function Get-WireGuardProbeSuccessCount {
   ).Count
 }
 
+function Get-FirstTimestampedReceipt {
+  param(
+    [string]$LogName,
+    [string]$Pattern,
+    [int]$PriorCount,
+    [long]$NotBeforeUnixMilliseconds
+  )
+  $log = Join-Path $StateDir $LogName
+  if (!(Test-Path -LiteralPath $log)) { return 0 }
+  $timestamps = @(
+    Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+      ForEach-Object {
+        if ($_ -match $Pattern) {
+          [long]$Matches[1]
+        }
+      }
+  )
+  if ($timestamps.Count -le $PriorCount) { return 0 }
+  $receipt = @(
+    $timestamps |
+      Select-Object -Skip $PriorCount |
+      Where-Object { $_ -ge $NotBeforeUnixMilliseconds } |
+      Select-Object -First 1
+  )
+  if ($receipt.Count -eq 0) { return 0 }
+  [long]$receipt[0]
+}
+
 function Get-EndpointStartCount {
   $log = Join-Path $StateDir "daemon.stderr.log"
   if (!(Test-Path -LiteralPath $log)) {
@@ -294,22 +322,48 @@ function Wait-ForCondition {
     [string]$Description,
     [int]$TimeoutMilliseconds,
     [scriptblock]$Condition,
-    [int]$PollMilliseconds = 50
+    [int]$PollMilliseconds = 50,
+    [bool]$CancelAware = $false
   )
   $timer = [Diagnostics.Stopwatch]::StartNew()
   while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+    if ($CancelAware) {
+      Assert-NotCancelled
+    }
     if (& $Condition) {
       return $timer.ElapsedMilliseconds
     }
     Start-Sleep -Milliseconds $PollMilliseconds
   }
+  if ($CancelAware) {
+    Assert-NotCancelled
+  }
+  # A receipt written at the deadline must not be lost between the last poll
+  # and the elapsed-time check.
+  if (& $Condition) {
+    return $timer.ElapsedMilliseconds
+  }
   throw "timed out after ${TimeoutMilliseconds}ms waiting for $Description"
+}
+
+function Test-CancelRequested {
+  Test-Path -LiteralPath (Join-Path $StateDir "cancel")
+}
+
+function Assert-NotCancelled {
+  if (Test-CancelRequested) {
+    throw [OperationCanceledException]::new(
+      "Windows underlay runner was cancelled by its host owner"
+    )
+  }
 }
 
 function Wait-ForFile {
   param([string]$Name)
   $path = Join-Path $StateDir $Name
-  Wait-ForCondition "host signal $Name" 30000 { Test-Path -LiteralPath $path } 100 |
+  Wait-ForCondition "host signal $Name" 30000 {
+    Test-Path -LiteralPath $path
+  } 100 $true |
     Out-Null
 }
 
@@ -369,6 +423,72 @@ function Assert-ActiveExit {
   }
 }
 
+function Wait-ForRecoveryEvidence {
+  param(
+    [string]$Label,
+    [long]$ObservationStartedUnixMilliseconds,
+    [long]$RouteUsableUnixMilliseconds,
+    [int]$RebindBefore,
+    [int]$ProbeBefore,
+    [int]$WireGuardProbeBefore
+  )
+  $deadlineUnixMilliseconds =
+    $RouteUsableUnixMilliseconds + $RecoveryDeadlineMilliseconds
+  $deadlineEdgeRead = $false
+  while ($true) {
+    Assert-NotCancelled
+    $rebindAfter = Get-RebindReceiptCount
+    if ($rebindAfter -gt ($RebindBefore + 1)) {
+      throw "$Label produced more than one FIPS carrier rebind"
+    }
+    if ($rebindAfter -eq ($RebindBefore + 1)) {
+      $rebindAt = Get-FirstTimestampedReceipt "daemon.stderr.log" `
+        "underlay carrier\(s\) rebound.*refreshed_unix_ms=([0-9]+)" `
+        $RebindBefore $ObservationStartedUnixMilliseconds
+      $payloadAt = Get-FirstTimestampedReceipt "payload.log" `
+        "^OK ([0-9]+)$" $ProbeBefore $RouteUsableUnixMilliseconds
+      $wireGuardPayloadAt = Get-FirstTimestampedReceipt `
+        "wireguard-payload.log" "^OK ([0-9]+)$" `
+        $WireGuardProbeBefore $RouteUsableUnixMilliseconds
+      if ($rebindAt -gt 0 -and $payloadAt -gt 0 -and $wireGuardPayloadAt -gt 0) {
+        $recoveredAt = [Math]::Max(
+          $rebindAt,
+          [Math]::Max($payloadAt, $wireGuardPayloadAt)
+        )
+        $elapsed = $recoveredAt - $RouteUsableUnixMilliseconds
+        if ($recoveredAt -gt $deadlineUnixMilliseconds) {
+          throw "$Label recovery exceeded ${RecoveryDeadlineMilliseconds}ms ($elapsed ms)"
+        }
+        return [PSCustomObject]@{
+          rebind_unix_milliseconds = $rebindAt
+          payload_success_unix_milliseconds = $payloadAt
+          wireguard_payload_success_unix_milliseconds = $wireGuardPayloadAt
+          recovered_unix_milliseconds = $recoveredAt
+          rebind_receipts_after = $rebindAfter
+        }
+      }
+    }
+    if ($deadlineEdgeRead) {
+      break
+    }
+    if (
+      [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge
+        $deadlineUnixMilliseconds
+    ) {
+      # One deadline-edge read accepts a delayed log write only when the
+      # timestamped product evidence itself met the deadline.
+      $deadlineEdgeRead = $true
+    }
+    else {
+      Start-Sleep -Milliseconds 25
+    }
+  }
+  throw (
+    "timed out after ${RecoveryDeadlineMilliseconds}ms waiting for " +
+    "$Label timestamped payload/FIPS recovery evidence"
+  )
+}
+
 function Observe-Recovery {
   param(
     [string]$Label,
@@ -377,33 +497,27 @@ function Observe-Recovery {
     [int]$ExpectedDaemonPid,
     [int]$ExpectedEndpointStartCount,
     [string]$ExpectedNpub,
-    [string]$ExpectedTunnelIp
+    [string]$ExpectedTunnelIp,
+    [long]$ObservationStartedUnixMilliseconds,
+    [int]$RebindBefore
   )
-  $rebindBefore = Get-RebindReceiptCount
-  Wait-ForCondition "$Label physical underlay to become usable" 30000 $NewUnderlayAvailable 25 |
+  Wait-ForCondition "$Label physical underlay to become usable" `
+    30000 $NewUnderlayAvailable 25 $true |
     Out-Null
   $routeUsableUnixMilliseconds = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-  $routeUsableMonotonicMilliseconds = [Environment]::TickCount64
   $probeBefore = Get-ProbeSuccessCount
   $wireGuardProbeBefore = Get-WireGuardProbeSuccessCount
 
-  $timer = [Diagnostics.Stopwatch]::StartNew()
-  Wait-ForCondition "$Label payload/route/FIPS rebind recovery" `
-    $RecoveryDeadlineMilliseconds {
-      $endpointHost = Get-WireGuardEndpointHost
-      $endpointRoute = Get-BestRoute $endpointHost
-      $status = Read-Status
-      return (
-        [int]$endpointRoute.InterfaceIndex -eq $ExpectedPhysicalIndex -and
-        (Get-ProbeSuccessCount) -gt $probeBefore -and
-        (Get-WireGuardProbeSuccessCount) -gt $wireGuardProbeBefore -and
-        (Get-RebindReceiptCount) -eq ($rebindBefore + 1) -and
-        $status.daemon.running -and
-        [int]$status.daemon.pid -eq $ExpectedDaemonPid -and
-        $status.daemon.state.mesh_ready
-      )
-  } 25 | Out-Null
+  $evidence = Wait-ForRecoveryEvidence `
+    $Label `
+    $ObservationStartedUnixMilliseconds `
+    $routeUsableUnixMilliseconds `
+    $rebindBefore `
+    $probeBefore `
+    $wireGuardProbeBefore
 
+  # Stable state is still audited, but audit latency is deliberately excluded
+  # from the product recovery measurement above.
   Assert-ActiveExit $ExpectedPhysicalIndex $ExpectedDaemonPid
   Assert-SessionContinuity `
     $ExpectedDaemonPid `
@@ -415,17 +529,20 @@ function Observe-Recovery {
     throw "$Label did not produce exactly one FIPS carrier rebind"
   }
   $wireGuardEndpointRoute = Assert-WireGuardEndpointRoute $ExpectedPhysicalIndex
-  $elapsed = [int]$timer.ElapsedMilliseconds
-  if ($elapsed -gt $RecoveryDeadlineMilliseconds) {
-    throw "$Label stable recovery exceeded ${RecoveryDeadlineMilliseconds}ms ($elapsed ms)"
-  }
-  $recoveredMonotonicMilliseconds = [Environment]::TickCount64
+  $elapsed = [long]$evidence.recovered_unix_milliseconds -
+    $routeUsableUnixMilliseconds
   Write-Marker "$Label.receipt.json" (
     [PSCustomObject]@{
       recovery_milliseconds = $elapsed
+      observation_started_unix_milliseconds =
+        $ObservationStartedUnixMilliseconds
       route_usable_unix_milliseconds = $routeUsableUnixMilliseconds
-      route_usable_monotonic_milliseconds = $routeUsableMonotonicMilliseconds
-      recovered_monotonic_milliseconds = $recoveredMonotonicMilliseconds
+      recovered_unix_milliseconds = $evidence.recovered_unix_milliseconds
+      rebind_unix_milliseconds = $evidence.rebind_unix_milliseconds
+      payload_success_unix_milliseconds =
+        $evidence.payload_success_unix_milliseconds
+      wireguard_payload_success_unix_milliseconds =
+        $evidence.wireguard_payload_success_unix_milliseconds
       daemon_pid = $ExpectedDaemonPid
       physical_interface_index = $ExpectedPhysicalIndex
       identity_npub = $ExpectedNpub
@@ -438,7 +555,7 @@ function Observe-Recovery {
       wireguard_payload_successes_after = Get-WireGuardProbeSuccessCount
       wireguard_endpoint_route = $wireGuardEndpointRoute
       rebind_receipts_before = $rebindBefore
-      rebind_receipts_after = $rebindAfter
+      rebind_receipts_after = $evidence.rebind_receipts_after
     } | ConvertTo-Json -Compress
   )
 }
@@ -467,7 +584,7 @@ function Run-DnsSettingCase {
     catch {
       return $false
     }
-  } 250 | Out-Null
+  } 250 $true | Out-Null
   Write-Marker "dns-$Name.receipt" $LookupName
 }
 
@@ -513,10 +630,35 @@ function Remove-ExitWireGuardService {
     -Force -ErrorAction SilentlyContinue
 }
 
+function Assert-IsolatedNetworkPreflight {
+  $wireGuardService = 'WireGuardTunnel$' + $WireGuardInterface
+  $nativeWireGuardRoot = Join-Path $env:ProgramData "nostr-vpn\wireguard"
+  $stale = @(
+    if (Get-Service -Name "NvpnService" -ErrorAction SilentlyContinue) {
+      "NvpnService"
+    }
+    if (Get-Process -Name "nvpn" -ErrorAction SilentlyContinue) { "nvpn process" }
+    Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -in @($TunnelInterface, $WireGuardInterface) } |
+      ForEach-Object { "network adapter $($_.Name)" }
+    if (Get-Service -Name $wireGuardService -ErrorAction SilentlyContinue) {
+      "WireGuard service $wireGuardService"
+    }
+    if ((Get-SecureDnsRules).Count -ne 0) { "nvpn secure DNS policy" }
+    if (Test-Path -LiteralPath $nativeWireGuardRoot) {
+      Get-ChildItem -LiteralPath $nativeWireGuardRoot -Force -ErrorAction Stop |
+        Select-Object -First 1 |
+        ForEach-Object { "native WireGuard artifact root" }
+    }
+  )
+  if ($stale.Count -ne 0) {
+    throw ("Windows isolated network preflight found: " + ($stale -join "; "))
+  }
+}
+
 function Invoke-IsolatedNetworkCleanup {
   param([switch]$EmergencyRepair, [int]$DaemonPid = 0)
   New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-  Write-Marker "stop-probe"
   if ($DaemonPid -le 0) {
     try { $DaemonPid = Get-DaemonPid } catch { $DaemonPid = 0 }
   }
@@ -552,6 +694,79 @@ function Invoke-IsolatedNetworkCleanup {
   }
 }
 
+function Invoke-OwnedNetworkCleanup {
+  param(
+    [string]$Owner,
+    [int]$DaemonPid = 0,
+    [int]$RunnerPidToStop = 0
+  )
+  if (!(Test-Path -LiteralPath (Join-Path $StateDir "cleanup-owned"))) {
+    throw "guest cleanup was not authorized by a clean preflight"
+  }
+  $lock = $null
+  $deadline = [DateTimeOffset]::UtcNow.AddSeconds(90)
+  while (!$lock) {
+    try {
+      $lock = [IO.File]::Open(
+        (Join-Path $StateDir "cleanup.lock"),
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+      )
+    }
+    catch [IO.IOException] {
+      if ([DateTimeOffset]::UtcNow -ge $deadline) {
+        throw "timed out waiting for the active cleanup owner"
+      }
+      Start-Sleep -Milliseconds 100
+    }
+  }
+  try {
+    $failurePath = Join-Path $StateDir "cleanup.failed"
+    if (Test-Path -LiteralPath $failurePath) {
+      throw ("the prior cleanup owner failed: " +
+        (Get-Content -Raw -LiteralPath $failurePath))
+    }
+    if (Test-Path -LiteralPath (Join-Path $StateDir "cleanup.complete")) {
+      return
+    }
+    try {
+      if (
+        $RunnerPidToStop -gt 0 -and
+        (Get-Process -Id $RunnerPidToStop -ErrorAction SilentlyContinue)
+      ) {
+        Stop-Process -Id $RunnerPidToStop -Force -ErrorAction Stop
+        Wait-Process -Id $RunnerPidToStop -Timeout 5 -ErrorAction SilentlyContinue
+        if (Get-Process -Id $RunnerPidToStop -ErrorAction SilentlyContinue) {
+          throw "cleanup owner could not stop the Windows guest runner"
+        }
+      }
+      Write-Marker "stop-probe"
+      Write-Marker "watchdog.complete"
+      foreach ($marker in @("probe.pid", "wireguard-probe.pid", "watchdog.pid")) {
+        $processPath = Join-Path $StateDir $marker
+        if (!(Test-Path -LiteralPath $processPath)) { continue }
+        $processId = [int](Get-Content -Raw -LiteralPath $processPath)
+        if ($processId -eq $PID) { continue }
+        Wait-Process -Id $processId -Timeout 3 -ErrorAction SilentlyContinue
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+          throw "cleanup owner could not stop recorded process $marker"
+        }
+      }
+      Invoke-IsolatedNetworkCleanup -EmergencyRepair -DaemonPid $DaemonPid
+      Write-Marker "cleanup.complete" $Owner
+    }
+    catch {
+      Write-Marker "cleanup.failed" ($Owner + ": " + $_.Exception.Message)
+      throw
+    }
+  }
+  finally {
+    $lock.Dispose()
+  }
+}
+
 Assert-Administrator
 
 switch ($Action) {
@@ -570,17 +785,12 @@ switch ($Action) {
     if (!(Test-Path -LiteralPath $Binary -PathType Leaf)) {
       throw "candidate nvpn binary does not exist"
     }
-    if (Get-Process nvpn -ErrorAction SilentlyContinue) {
-      throw "another nvpn process is already running before the isolated gate"
-    }
-
     New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
     Get-ChildItem -LiteralPath $StateDir -Force -ErrorAction SilentlyContinue |
       Remove-Item -Recurse -Force
 
     $primary = Get-AdapterByMac $PrimaryMac
     $secondary = Get-AdapterByMac $SecondaryMac
-    Enable-NetAdapter -Name $secondary.Name -Confirm:$false
     $primaryIp = Get-NetIPInterface -InterfaceIndex $primary.ifIndex `
       -AddressFamily IPv4 -ErrorAction Stop
     [PSCustomObject]@{
@@ -592,6 +802,10 @@ switch ($Action) {
       Set-Content -LiteralPath (Join-Path $StateDir "adapter-state.json") `
         -Encoding ASCII
 
+    Assert-IsolatedNetworkPreflight
+    Write-Marker "cleanup-owned" "clean preflight"
+
+    Enable-NetAdapter -Name $secondary.Name -Confirm:$false
     Set-NetIPInterface -InterfaceIndex $primary.ifIndex -AddressFamily IPv4 `
       -AutomaticMetric Disabled -InterfaceMetric 10
     Set-NetIPInterface -InterfaceIndex $secondary.ifIndex -AddressFamily IPv4 `
@@ -633,6 +847,7 @@ switch ($Action) {
   }
 
   "Probe" {
+    Write-Marker "probe.pid" "$PID"
     if ([string]::IsNullOrWhiteSpace($PeerTunnelIp)) {
       throw "Probe requires PeerTunnelIp"
     }
@@ -640,40 +855,45 @@ switch ($Action) {
     $ping = [Net.NetworkInformation.Ping]::new()
     $log = Join-Path $StateDir "payload.log"
     while (!(Test-Path -LiteralPath (Join-Path $StateDir "stop-probe"))) {
-      $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       try {
         $reply = $ping.Send($PeerTunnelIp, 750, $payload)
+        $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         if ($reply.Status -eq [Net.NetworkInformation.IPStatus]::Success) {
-          Add-Content -LiteralPath $log -Value "OK $now" -Encoding ASCII
+          Add-Content -LiteralPath $log -Value "OK $completedAt" -Encoding ASCII
         }
         else {
-          Add-Content -LiteralPath $log -Value "FAIL $now $($reply.Status)" -Encoding ASCII
+          Add-Content -LiteralPath $log `
+            -Value "FAIL $completedAt $($reply.Status)" -Encoding ASCII
         }
       }
       catch {
-        Add-Content -LiteralPath $log -Value "FAIL $now exception" -Encoding ASCII
+        $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        Add-Content -LiteralPath $log `
+          -Value "FAIL $completedAt exception" -Encoding ASCII
       }
       Start-Sleep -Milliseconds 100
     }
   }
 
   "WireGuardProbe" {
+    Write-Marker "wireguard-probe.pid" "$PID"
     $log = Join-Path $StateDir "wireguard-payload.log"
     while (!(Test-Path -LiteralPath (Join-Path $StateDir "stop-probe"))) {
-      $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       & curl.exe -4 --ssl-revoke-best-effort --fail --silent `
         --max-time 2 --output NUL $ProbeUrl
+      $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       if ($LASTEXITCODE -eq 0) {
-        Add-Content -LiteralPath $log -Value "OK $now" -Encoding ASCII
+        Add-Content -LiteralPath $log -Value "OK $completedAt" -Encoding ASCII
       }
       else {
-        Add-Content -LiteralPath $log -Value "FAIL $now" -Encoding ASCII
+        Add-Content -LiteralPath $log -Value "FAIL $completedAt" -Encoding ASCII
       }
       Start-Sleep -Milliseconds 100
     }
   }
 
   "Watchdog" {
+    Write-Marker "watchdog.pid" "$PID"
     if ($RunnerPid -le 0) {
       throw "Watchdog requires RunnerPid"
     }
@@ -687,12 +907,14 @@ switch ($Action) {
       Start-Sleep -Milliseconds 500
     }
     if (!(Test-Path -LiteralPath $complete)) {
-      Invoke-IsolatedNetworkCleanup -EmergencyRepair
-      Write-Marker "watchdog-fired"
+      Invoke-OwnedNetworkCleanup -Owner "watchdog" `
+        -RunnerPidToStop $RunnerPid
     }
   }
 
   "Run" {
+    Write-Marker "runner.pid" "$PID"
+    Assert-NotCancelled
     foreach ($value in @(
       $PrimaryMac,
       $SecondaryMac,
@@ -760,7 +982,7 @@ switch ($Action) {
 
       Wait-ForCondition "candidate daemon PID file" 30000 {
         try { (Get-DaemonPid) -eq $daemon.Id } catch { $false }
-      } 100 | Out-Null
+      } 100 $true | Out-Null
       $daemonPid = Get-DaemonPid
       $identityNpub = Read-Npub
       $tunnelIp = (& $Binary ip --config $Config).Trim()
@@ -769,7 +991,7 @@ switch ($Action) {
       }
       Wait-ForCondition "single FIPS endpoint start receipt" 30000 {
         (Get-EndpointStartCount) -eq 1
-      } 50 | Out-Null
+      } 50 $true | Out-Null
       $endpointStartCount = Get-EndpointStartCount
 
       $probeArgs = @(
@@ -808,22 +1030,32 @@ switch ($Action) {
           Write-Marker "last-condition-error.txt" $_.Exception.Message
           return $false
         }
-      } 250 | Out-Null
+      } 250 $true | Out-Null
       Assert-NativeWireGuardSecretAcl
       Write-Marker "ready" "$daemonPid"
 
       Wait-ForFile "arm-secondary"
+      $secondaryObservationStarted =
+        [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      $secondaryRebindBefore = Get-RebindReceiptCount
       Write-Marker "armed-secondary"
       Observe-Recovery "secondary" {
         (Get-AdapterByIndex ([int]$primary.ifIndex)).Status -ne "Up" -and
         (Test-PhysicalUnderlay ([int]$secondary.ifIndex))
-      } ([int]$secondary.ifIndex) $daemonPid $endpointStartCount $identityNpub $tunnelIp
+      } ([int]$secondary.ifIndex) $daemonPid $endpointStartCount `
+        $identityNpub $tunnelIp $secondaryObservationStarted `
+        $secondaryRebindBefore
 
       Wait-ForFile "arm-primary"
+      $primaryObservationStarted =
+        [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      $primaryRebindBefore = Get-RebindReceiptCount
       Write-Marker "armed-primary"
       Observe-Recovery "primary" {
         Test-PhysicalUnderlay ([int]$primary.ifIndex)
-      } ([int]$primary.ifIndex) $daemonPid $endpointStartCount $identityNpub $tunnelIp
+      } ([int]$primary.ifIndex) $daemonPid $endpointStartCount `
+        $identityNpub $tunnelIp $primaryObservationStarted `
+        $primaryRebindBefore
 
       Run-DnsSettingCase "automatic" @(
         "--exit-dns-mode", "automatic"
@@ -859,22 +1091,13 @@ switch ($Action) {
     finally {
       $cleanupDaemonPid = if ($daemon) { [int]$daemon.Id } else { 0 }
       try {
-        Invoke-IsolatedNetworkCleanup -EmergencyRepair `
+        Invoke-OwnedNetworkCleanup -Owner "runner" `
           -DaemonPid $cleanupDaemonPid
-      } catch { $cleanupError = $_ }
-      if ($probe) {
-        Wait-Process -Id $probe.Id -Timeout 3 -ErrorAction SilentlyContinue
-        Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+      } catch {
+        $cleanupError = $_
       }
-      if ($wireGuardProbe) {
-        Wait-Process -Id $wireGuardProbe.Id -Timeout 3 -ErrorAction SilentlyContinue
-        Stop-Process -Id $wireGuardProbe.Id -Force -ErrorAction SilentlyContinue
-      }
-      Write-Marker "watchdog.complete"
-      if ($watchdog) {
-        Wait-Process -Id $watchdog.Id -Timeout 3 -ErrorAction SilentlyContinue
-        Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue
-      }
+      Remove-Item -LiteralPath (Join-Path $StateDir "runner.pid") `
+        -Force -ErrorAction SilentlyContinue
     }
     if ($runError) {
       if ($cleanupError) {
@@ -887,12 +1110,7 @@ switch ($Action) {
   }
 
   "Cleanup" {
-    Invoke-IsolatedNetworkCleanup -EmergencyRepair
-    Write-Marker "watchdog.complete"
-    $watchdogPath = Join-Path $StateDir "watchdog.pid"
-    if (Test-Path -LiteralPath $watchdogPath) {
-      $watchdogPid = [int](Get-Content -Raw -LiteralPath $watchdogPath)
-      Stop-Process -Id $watchdogPid -Force -ErrorAction SilentlyContinue
-    }
+    Invoke-OwnedNetworkCleanup -Owner "host" `
+      -RunnerPidToStop $RunnerPid
   }
 }

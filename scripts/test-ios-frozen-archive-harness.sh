@@ -945,6 +945,20 @@ if archive.index("prepare_frozen_revision_args") > archive.index(
     "run_ios_rust"
 ):
     raise SystemExit("frozen archive builds before pinning the full Git SHA")
+recovery = (
+    'if [[ -d "$ARCHIVE_PATH" '
+    '&& ! -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then'
+)
+if recovery not in archive or "write_frozen_archive_receipt" not in (
+    archive.split(recovery, 1)[1].split("\n  fi", 1)[0]
+):
+    raise SystemExit("archive-only recovery does not validate and freeze")
+if (
+    archive.index(recovery) > archive.index("ensure_profiles")
+    or 'if [[ -e "$ARCHIVE_PATH" || -e "$FROZEN_ARCHIVE_RECEIPT" ]]'
+    not in archive
+):
+    raise SystemExit("archive-only recovery can rebuild before validation")
 if 'BUNDLE_ID" == "$NVPN_BUILTIN_IOS_BUNDLE_ID' not in ios_build:
     raise SystemExit("frozen archive permits non-production app identifiers")
 if 'NVPN_APP_VERSION_NAME" == "$source_version' not in ios_build:
@@ -1023,6 +1037,55 @@ for required in (
         raise SystemExit(f"xctestrun rewriter omits {required}")
 if "from ios_xctestrun import rewrite_xctestrun" not in tool:
     raise SystemExit("frozen archive CLI does not expose the xctestrun rewriter")
+PY
+
+python3 - "$TOOL" "$TMP_ROOT/dirty-policy" <<'PY'
+import os
+import pathlib
+import runpy
+import sys
+
+tool = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(tool.parent))
+module = runpy.run_path(tool)
+require_clean = module["require_clean_checkout"]
+digest, run = module["sha256_file"], module["run"]
+
+
+def rejects(repo, label="application"):
+    try:
+        require_clean(repo, label)
+    except ValueError:
+        return
+    raise SystemExit(f"{label} dirty-checkout policy accepted invalid state")
+
+
+repo = pathlib.Path(sys.argv[2])
+repo.mkdir()
+manifest, lock = repo / "Cargo.toml", repo / "Cargo.lock"
+manifest.write_text("[package]\nname = \"fixture\"\n", encoding="utf-8")
+lock.write_text("version = 3\n", encoding="utf-8")
+run(["git", "-C", str(repo), "init", "-q"])
+run(["git", "-C", str(repo), "add", "Cargo.toml", "Cargo.lock"])
+run(["git", "-C", str(repo), "-c", "user.name=Harness",
+     "-c", "user.email=harness.invalid", "commit", "-qm", "fixture"])
+lock.write_text("version = 4\n", encoding="utf-8")
+os.environ.update({
+    "NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED": "1",
+    "NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256": digest(manifest),
+    "NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256": digest(lock),
+})
+require_clean(repo, "application")
+os.environ["NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256"] = "0" * 64
+rejects(repo)
+os.environ["NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256"] = digest(lock)
+(repo / "extra").write_text("dirty\n", encoding="utf-8")
+rejects(repo)
+(repo / "extra").unlink()
+run(["git", "-C", str(repo), "add", "Cargo.lock"])
+rejects(repo)
+run(["git", "-C", str(repo), "reset", "-q", "HEAD", "Cargo.lock"])
+rejects(repo, "FIPS")
 PY
 
 echo "Frozen iOS archive fail-closed harness passed"

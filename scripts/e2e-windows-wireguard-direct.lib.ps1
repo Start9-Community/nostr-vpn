@@ -54,6 +54,20 @@ function Get-WindowsWireGuardExitDnsRules {
   )
 }
 
+function Get-WindowsWireGuardTunnelServices {
+  @(
+    Get-Service -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "WireGuardTunnel`$*" }
+  )
+}
+
+function Get-WindowsWireGuardTunnelAdapters {
+  @(
+    Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+      Where-Object { $_.InterfaceDescription -like "*WireGuard*" }
+  )
+}
+
 function Get-WindowsWireGuardNativeArtifacts {
   $root = Join-Path $env:ProgramData "nostr-vpn\wireguard"
   if (!(Test-Path -LiteralPath $root -PathType Container)) { return @() }
@@ -83,11 +97,9 @@ function Test-WindowsWireGuardResourcesRestored {
     [string]$WireGuardInterface,
     [string]$EndpointHost
   )
-  $serviceName = "WireGuardTunnel`$$WireGuardInterface"
   if (
-    (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) -or
-    (Get-NetAdapter -Name $WireGuardInterface -IncludeHidden `
-      -ErrorAction SilentlyContinue) -or
+    (Get-WindowsWireGuardTunnelServices).Count -ne 0 -or
+    (Get-WindowsWireGuardTunnelAdapters).Count -ne 0 -or
     (Get-WindowsWireGuardExitDnsRules).Count -ne 0 -or
     @(Get-WindowsWireGuardNativeArtifacts).Count -ne 0 -or
     @(Get-WindowsWireGuardEndpointRoutes $EndpointHost).Count -ne 0
@@ -168,18 +180,16 @@ function Save-WindowsWireGuardDirectBaseline {
   ) {
     throw "Direct DNS, HTTPS, or public IPv4 source failed before the test"
   }
-  $serviceName = "WireGuardTunnel`$$WireGuardInterface"
   if (
-    (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) -or
-    (Get-NetAdapter -Name $WireGuardInterface -IncludeHidden `
-      -ErrorAction SilentlyContinue) -or
+    (Get-WindowsWireGuardTunnelServices).Count -ne 0 -or
+    (Get-WindowsWireGuardTunnelAdapters).Count -ne 0 -or
     (Get-WindowsWireGuardExitDnsRules).Count -ne 0 -or
     @(Get-WindowsWireGuardNativeArtifacts).Count -ne 0 -or
     @(Get-WindowsWireGuardEndpointRoutes $EndpointHost).Count -ne 0
   ) {
     throw (
-      "Windows WireGuard lane requires no pre-existing native service, " +
-      "adapter, artifact, endpoint bypass route, or exit DNS policy"
+      "Windows WireGuard lane requires no pre-existing WireGuard service, " +
+      "adapter, native artifact, endpoint bypass route, or exit DNS policy"
     )
   }
   $baseline = [PSCustomObject]@{

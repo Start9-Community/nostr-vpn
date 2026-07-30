@@ -328,15 +328,21 @@ async fn run(
 ) {
     let mut outbound = HashMap::<ConnectionId, OutboundRecord>::new();
     let mut inbound = HashMap::<ConnectionId, InboundRecord>::new();
-    let mut tick = tokio::time::interval(DRIVE_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut drive_delay = next_drive_delay(false);
+    let drive = tokio::time::sleep(drive_delay);
+    tokio::pin!(drive);
 
     loop {
-        let now = now_ms();
-        tokio::select! {
+        // `receive_report` snapshots the TCP clock before awaiting a packet.
+        // Retaining the close-retention deadline while quiet bounds that clock
+        // staleness and retires closed tuples without waking at the active
+        // 20 ms retransmission cadence.
+        let receive_now = now_ms();
+        let (now, drive_fired) = tokio::select! {
             _ = &mut shutdown => break,
             command = commands.recv() => {
                 let Some(command) = command else { break; };
+                let now = now_ms();
                 match tcp.connect(command.peer, now).await {
                     Ok(id) => {
                         outbound.insert(id, OutboundRecord {
@@ -354,14 +360,18 @@ async fn run(
                         }
                     }
                 }
+                (now, false)
             }
-            result = tcp.receive_report(now) => {
+            result = tcp.receive_report(receive_now) => {
                 if result.is_err() { break; }
+                (now_ms(), false)
             }
-            _ = tick.tick() => {
+            () = &mut drive => {
+                let now = now_ms();
                 if tcp.poll(now).await.is_err() { break; }
+                (now, true)
             }
-        }
+        };
         drive_ready(
             &mut tcp,
             &received,
@@ -371,12 +381,28 @@ async fn run(
             now,
         )
         .await;
+
+        let next_delay = next_drive_delay(!outbound.is_empty() || !inbound.is_empty());
+        if drive_fired || next_delay != drive_delay {
+            drive_delay = next_delay;
+            drive
+                .as_mut()
+                .reset(tokio::time::Instant::now() + drive_delay);
+        }
     }
 
     for (_, mut record) in outbound {
         if let Some(response) = record.response.take() {
             let _ = response.send(Err("FIPS-TCP state-control runtime stopped".to_string()));
         }
+    }
+}
+
+fn next_drive_delay(has_open_record: bool) -> Duration {
+    if has_open_record {
+        DRIVE_INTERVAL
+    } else {
+        Duration::from_millis(CONTROL_CLOSE_RETENTION_MS)
     }
 }
 

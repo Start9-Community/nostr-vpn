@@ -399,3 +399,20 @@ fn route_discovery_time_does_not_consume_the_stream_delivery_window() {
         Some("FIPS-TCP state-control connection timed out")
     );
 }
+
+#[test]
+fn idle_control_runtime_uses_only_the_close_retention_deadline() {
+    assert_eq!(
+        next_drive_delay(false),
+        Duration::from_millis(CONTROL_CLOSE_RETENTION_MS)
+    );
+    assert!(
+        next_drive_delay(false) > DRIVE_INTERVAL * 10,
+        "quiet control must not retain the 20 ms active wake cadence"
+    );
+}
+
+#[test]
+fn active_control_work_keeps_the_fast_deadline() {
+    assert_eq!(next_drive_delay(true), DRIVE_INTERVAL);
+}

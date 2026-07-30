@@ -71,6 +71,44 @@ function Wait-ForCondition {
   throw "timed out after ${WaitSeconds}s waiting for $Description"
 }
 
+function Write-WindowsWireGuardFailureEvidence {
+  param([System.Management.Automation.ErrorRecord]$Failure)
+  $wg = @(
+    (Get-Command wg.exe -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty Source -First 1)
+    (Join-Path $env:ProgramFiles "WireGuard\wg.exe")
+  ) | Where-Object {
+    ![string]::IsNullOrWhiteSpace($_) -and
+    (Test-Path -LiteralPath $_ -PathType Leaf)
+  } | Select-Object -First 1
+  @(
+    "failure=$($Failure.Exception.Message)"
+    "captured_unix_milliseconds=$(
+      [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    )"
+    "### latest_handshakes"
+    if ($wg) { & $wg show all latest-handshakes 2>&1 } else { "wg.exe missing" }
+    "### transfer"
+    if ($wg) { & $wg show all transfer 2>&1 } else { "wg.exe missing" }
+    "### endpoints"
+    if ($wg) { & $wg show all endpoints 2>&1 } else { "wg.exe missing" }
+    "### services"
+    Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "WireGuardTunnel`$*" } |
+      Format-Table Name, State, ProcessId, PathName -AutoSize | Out-String
+    "### adapters"
+    Get-WindowsWireGuardTunnelAdapters |
+      Format-Table Name, InterfaceDescription, ifIndex, Status -AutoSize |
+      Out-String
+    "### endpoint_routes"
+    Get-WindowsWireGuardEndpointRoutes $WireGuardEndpointHost |
+      Format-Table DestinationPrefix, InterfaceIndex, InterfaceAlias,
+        NextHop, RouteMetric -AutoSize | Out-String
+    "### best_internet_route"
+    Get-WindowsWireGuardBestInternetRoute | Format-List | Out-String
+  )
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
   [Security.Principal.WindowsBuiltInRole]::Administrator
 )
@@ -200,6 +238,16 @@ try {
   Write-Output "WINDOWS_WG_DIRECT_E2E_OK"
   Write-Output "WireGuard route, source, DNS, and HTTPS stable after ${wireGuardElapsed}s"
   Write-Output "Direct route, source, DNS, and HTTPS restored on $directInterfaceAlias after ${directElapsed}s"
+}
+catch {
+  $runFailure = $_
+  try {
+    Write-WindowsWireGuardFailureEvidence $runFailure
+  }
+  catch {
+    Write-Warning "could not preserve Windows WireGuard failure evidence: $($_.Exception.Message)"
+  }
+  throw $runFailure
 }
 finally {
   if (!$directCleanupComplete) {

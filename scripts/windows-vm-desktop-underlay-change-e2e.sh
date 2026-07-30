@@ -47,7 +47,7 @@ WG_PEER_IFACE="nvwg${RANDOM}"
 WG_CLIENT_ADDRESS="${NVPN_WINDOWS_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.1.2/32}"
 WG_SERVER_ADDRESS="${NVPN_WINDOWS_UNDERLAY_WG_SERVER_ADDRESS:-10.232.1.1/24}"
 WG_SERVER_IP="${WG_SERVER_ADDRESS%/*}"
-WG_TARGET_INTERFACE="${NVPN_WINDOWS_UNDERLAY_WG_INTERFACE:-nvpn-wg-exit}"
+WG_TARGET_INTERFACE="nvpn-wg-exit"
 COUNTER_CHAIN="nvu-$((RANDOM % 100000))"
 PEER_NETNS="nvw$((RANDOM % 100000))"
 PEER_HOST_VETH="nvwh$((RANDOM % 100000))"
@@ -66,6 +66,8 @@ PRIMARY_ADDRESS=""
 HYPERVISOR_UPLINK=""
 SECONDARY_PROXY=""
 WINDOWS_RUN_PID=""
+GUEST_INITIALIZED=0
+QUARANTINE_GUEST_NETWORK=0
 NETWORK_CREATED=0
 NIC_ATTACHED=0
 PEER_INITIALIZED=0
@@ -406,6 +408,7 @@ guest_initialize() {
   for _ in $(seq 1 40); do
     if secondary_ssh_command \
       && "${WINDOWS_SECONDARY_SSH[@]}" hostname >/dev/null 2>&1; then
+      GUEST_INITIALIZED=1
       return 0
     fi
     sleep 0.25
@@ -544,6 +547,40 @@ guest_receipt() {
     | awk '/^\{.*\}$/ { value = $0 } END { print value }'
 }
 
+validate_guest_recovery_receipt() {
+  local receipt="$1" interface_index="$2" gateway="$3" source="$4"
+  jq -e \
+    --argjson deadline "$RECOVERY_DEADLINE_MS" \
+    --argjson interface_index "$interface_index" \
+    --arg gateway "$gateway" \
+    --arg source "$source" \
+    '.recovery_milliseconds <= $deadline
+      and .observation_started_unix_milliseconds > 0
+      and .rebind_unix_milliseconds
+        >= .observation_started_unix_milliseconds
+      and .payload_success_unix_milliseconds
+        >= .route_usable_unix_milliseconds
+      and .wireguard_payload_success_unix_milliseconds
+        >= .route_usable_unix_milliseconds
+      and .recovered_unix_milliseconds
+        == ([
+          .rebind_unix_milliseconds,
+          .payload_success_unix_milliseconds,
+          .wireguard_payload_success_unix_milliseconds
+        ] | max)
+      and .recovery_milliseconds
+        == (.recovered_unix_milliseconds - .route_usable_unix_milliseconds)
+      and .payload_successes_after > .payload_successes_before
+      and .wireguard_payload_successes_after
+        > .wireguard_payload_successes_before
+      and .wireguard_endpoint_route.destination_prefix != null
+      and .wireguard_endpoint_route.interface_index == $interface_index
+      and .wireguard_endpoint_route.next_hop == $gateway
+      and .wireguard_endpoint_route.source_address == $source
+      and .rebind_receipts_after == (.rebind_receipts_before + 1)' \
+    <<<"$receipt" >/dev/null
+}
+
 run_underlay_switches() {
   local cut receipt
   signal_guest arm-secondary
@@ -554,24 +591,8 @@ run_underlay_switches() {
   receipt="$(guest_receipt secondary.receipt.json)"
   receipt="$(jq --argjson link_changed "$cut" \
     '. + {host_link_change_unix_seconds: $link_changed}' <<<"$receipt")"
-  jq -e \
-    --argjson deadline "$RECOVERY_DEADLINE_MS" \
-    --argjson interface_index "$SECONDARY_INDEX" \
-    --arg gateway "$SECONDARY_GATEWAY" \
-    --arg source "$SECONDARY_ADDRESS" \
-    '.recovery_milliseconds <= $deadline
-      and .route_usable_monotonic_milliseconds > 0
-      and .recovered_monotonic_milliseconds
-        >= .route_usable_monotonic_milliseconds
-      and .payload_successes_after > .payload_successes_before
-      and .wireguard_payload_successes_after
-        > .wireguard_payload_successes_before
-      and .wireguard_endpoint_route.destination_prefix != null
-      and .wireguard_endpoint_route.interface_index == $interface_index
-      and .wireguard_endpoint_route.next_hop == $gateway
-      and .wireguard_endpoint_route.source_address == $source
-      and .rebind_receipts_after == (.rebind_receipts_before + 1)' \
-    <<<"$receipt" >/dev/null
+  validate_guest_recovery_receipt \
+    "$receipt" "$SECONDARY_INDEX" "$SECONDARY_GATEWAY" "$SECONDARY_ADDRESS"
   printf '%s\n' "$receipt" >"$ARTIFACT_DIR/secondary-receipt.json"
   jq -e . "$ARTIFACT_DIR/secondary-receipt.json" >/dev/null
   assert_peer_recovered_from_source "$cut" "$SECONDARY_ADDRESS" secondary \
@@ -585,24 +606,8 @@ run_underlay_switches() {
   receipt="$(guest_receipt primary.receipt.json)"
   receipt="$(jq --argjson link_changed "$cut" \
     '. + {host_link_change_unix_seconds: $link_changed}' <<<"$receipt")"
-  jq -e \
-    --argjson deadline "$RECOVERY_DEADLINE_MS" \
-    --argjson interface_index "$PRIMARY_INDEX" \
-    --arg gateway "$TARGET_PRIMARY_GATEWAY" \
-    --arg source "$TARGET_PRIMARY_ADDRESS" \
-    '.recovery_milliseconds <= $deadline
-      and .route_usable_monotonic_milliseconds > 0
-      and .recovered_monotonic_milliseconds
-        >= .route_usable_monotonic_milliseconds
-      and .payload_successes_after > .payload_successes_before
-      and .wireguard_payload_successes_after
-        > .wireguard_payload_successes_before
-      and .wireguard_endpoint_route.destination_prefix != null
-      and .wireguard_endpoint_route.interface_index == $interface_index
-      and .wireguard_endpoint_route.next_hop == $gateway
-      and .wireguard_endpoint_route.source_address == $source
-      and .rebind_receipts_after == (.rebind_receipts_before + 1)' \
-    <<<"$receipt" >/dev/null
+  validate_guest_recovery_receipt \
+    "$receipt" "$PRIMARY_INDEX" "$TARGET_PRIMARY_GATEWAY" "$TARGET_PRIMARY_ADDRESS"
   printf '%s\n' "$receipt" >"$ARTIFACT_DIR/primary-receipt.json"
   jq -e . "$ARTIFACT_DIR/primary-receipt.json" >/dev/null
   assert_peer_recovered_from_source "$cut" "$PRIMARY_ADDRESS" primary \
@@ -777,11 +782,14 @@ foreach (\$ownedPath in @($(ps_quote "$CANDIDATE_NATIVE_CONFIG_PATH"), $(ps_quot
     throw ('candidate-owned native WireGuard artifact remains after cleanup: ' + \$ownedPath)
   }
 }
-\$watchdogPath = $(ps_quote "$GUEST_STATE_DIR\\watchdog.pid")
-if (Test-Path -LiteralPath \$watchdogPath) {
-  \$watchdogPid = [int](Get-Content -Raw -LiteralPath \$watchdogPath)
-  if (Get-Process -Id \$watchdogPid -ErrorAction SilentlyContinue) {
-    throw 'independent cleanup watchdog remains after cleanup'
+\$processMarkers = @('probe.pid', 'wireguard-probe.pid', 'watchdog.pid')
+foreach (\$marker in \$processMarkers) {
+  \$processPath = Join-Path $(ps_quote "$GUEST_STATE_DIR") \$marker
+  if (Test-Path -LiteralPath \$processPath) {
+    \$processId = [int](Get-Content -Raw -LiteralPath \$processPath)
+    if (Get-Process -Id \$processId -ErrorAction SilentlyContinue) {
+      throw (\"recorded cleanup process remains after cleanup: \$marker\")
+    }
   }
 }
 if (Get-NetAdapter -Name $(ps_quote "nvpn-underlay-gate") -ErrorAction SilentlyContinue) {
@@ -819,7 +827,7 @@ if (Test-Path -LiteralPath \$emergencyRepair) {
 Remove-Item -Recurse -Force -LiteralPath $(ps_quote "$GUEST_STATE_DIR") -ErrorAction SilentlyContinue
 if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR")) { throw 'guest gate state remains after cleanup' }
 Write-Output 'WINDOWS_GUEST_CLEANUP_AUDIT_OK'"
-  run_ps_secondary "$script"
+  run_ps_cleanup_management "$script" 120
 }
 
 audit_hypervisor_cleanup() {
@@ -873,13 +881,14 @@ collect_failure_artifacts() {
     do
       {
         printf '### %s\n' "$name"
-        run_ps_secondary \
-          "if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name")) { Get-Content -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name") -Tail 500 } else { Write-Output '<missing>' }"
+        run_ps_cleanup_management \
+          "if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name")) { Get-Content -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\$name") -Tail 500 } else { Write-Output '<missing>' }" \
+          10
       } >>"$guest_log" 2>&1 || true
     done
     {
       printf '### nvpn-status\n'
-      run_ps_secondary \
+      run_ps_cleanup_management \
         "\$raw = & $(ps_quote "$GUEST_BINARY") status --config $(ps_quote "$GUEST_CONFIG") --json --discover-secs 0
 \$status = \$raw | ConvertFrom-Json
 [pscustomobject]@{
@@ -896,10 +905,11 @@ collect_failure_artifacts() {
       network = \$status.daemon.state.network
     }
   }
-} | ConvertTo-Json -Depth 6"
+} | ConvertTo-Json -Depth 6" 10
       printf '### adapters-and-routes\n'
-      run_ps_secondary \
-        "Get-NetAdapter -IncludeHidden | Format-Table -AutoSize; Get-NetRoute -AddressFamily IPv4 | Sort-Object RouteMetric,InterfaceMetric | Format-Table -AutoSize"
+      run_ps_cleanup_management \
+        "Get-NetAdapter -IncludeHidden | Format-Table -AutoSize; Get-NetRoute -AddressFamily IPv4 | Sort-Object RouteMetric,InterfaceMetric | Format-Table -AutoSize" \
+        10
     } >>"$guest_log" 2>&1 || true
   fi
 
@@ -939,6 +949,31 @@ SH
   fi
 }
 
+run_ps_cleanup_management() {
+  local script="$1" channel_timeout="${2:-5}"
+  if [[ "$GUEST_INITIALIZED" == "1" ]]; then
+    run_ps_with secondary "$script" "$channel_timeout"
+  else
+    run_ps_with primary "$script" "$channel_timeout"
+  fi
+}
+
+guest_cleanup_ownership_state() {
+  local output
+  if ! output="$(run_ps_cleanup_management \
+    "if (Test-Path -LiteralPath $(ps_quote "$GUEST_STATE_DIR\\cleanup-owned")) { Write-Output 'owned' } else { Write-Output 'unowned' }" \
+    5 2>/dev/null)"
+  then
+    echo "unknown"
+    return
+  fi
+  output="$(tr -d '\r' <<<"$output" | awk 'NF { value = $0 } END { print value }')"
+  case "$output" in
+    owned|unowned) echo "$output" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
 cleanup() {
   local status="$?"
   local cleanup_failed=0
@@ -950,31 +985,46 @@ cleanup() {
     ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
       "virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' up" >/dev/null 2>&1 || true
   fi
+
+  if [[ -n "$SECONDARY_PROXY" && -n "$WINDOWS_RUN_PID" ]]; then
+    run_ps_cleanup_management \
+      "[IO.File]::WriteAllText($(ps_quote "$GUEST_STATE_DIR\\cancel"), 'cancel', [Text.UTF8Encoding]::new(\$false))" \
+      5 >/dev/null 2>&1 || true
+  fi
   if [[ "$status" -ne 0 ]]; then
     collect_failure_artifacts
   fi
   if [[ -n "$SECONDARY_PROXY" ]]; then
-    for marker in \
-      arm-secondary arm-primary \
-      dns-automatic.go dns-cloudflare.go dns-quad9.go dns-custom.go dns-through-exit.go \
-      select-direct
-    do
-      signal_guest "$marker" >/dev/null 2>&1 || true
-    done
-    run_ps_secondary \
-      "& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") -Action Cleanup -Binary $(ps_quote "$GUEST_BINARY") -Config $(ps_quote "$GUEST_CONFIG") -StateDir $(ps_quote "$GUEST_STATE_DIR")" \
-      >/dev/null 2>&1 || cleanup_failed=1
-  fi
-  if [[ -n "$WINDOWS_RUN_PID" ]]; then
-    kill "$WINDOWS_RUN_PID" >/dev/null 2>&1 || true
-    wait "$WINDOWS_RUN_PID" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "$SECONDARY_PROXY" ]]; then
-    run_ps_secondary \
-      "& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") -Action Cleanup -Binary $(ps_quote "$GUEST_BINARY") -Config $(ps_quote "$GUEST_CONFIG") -StateDir $(ps_quote "$GUEST_STATE_DIR")" \
-      >/dev/null 2>&1 || cleanup_failed=1
-    audit_guest_cleanup >"$ARTIFACT_DIR/guest-cleanup-audit.txt" 2>&1 \
-      || cleanup_failed=1
+    local ownership_state
+    ownership_state="$(guest_cleanup_ownership_state)"
+    printf '%s\n' "$ownership_state" >"$ARTIFACT_DIR/guest-cleanup-ownership.txt"
+    case "$ownership_state" in
+      owned)
+        if run_ps_cleanup_management \
+          "\$runnerPid = 0
+\$runnerPath = $(ps_quote "$GUEST_STATE_DIR\\runner.pid")
+if (Test-Path -LiteralPath \$runnerPath) {
+  \$runnerPid = [int](Get-Content -Raw -LiteralPath \$runnerPath)
+}
+& $(ps_quote "$GUEST_REPO\\scripts\\desktop-windows-underlay-change-e2e.ps1") -Action Cleanup -Binary $(ps_quote "$GUEST_BINARY") -Config $(ps_quote "$GUEST_CONFIG") -StateDir $(ps_quote "$GUEST_STATE_DIR") -RunnerPid \$runnerPid" \
+          180 >"$ARTIFACT_DIR/guest-cleanup-command.txt" 2>&1
+        then
+          audit_guest_cleanup >"$ARTIFACT_DIR/guest-cleanup-audit.txt" 2>&1 \
+            || {
+              cleanup_failed=1
+              QUARANTINE_GUEST_NETWORK=1
+            }
+        else
+          cleanup_failed=1
+          QUARANTINE_GUEST_NETWORK=1
+        fi
+        ;;
+      unowned) ;;
+      *)
+        cleanup_failed=1
+        QUARANTINE_GUEST_NETWORK=1
+        ;;
+    esac
   fi
   if [[ "$PEER_INITIALIZED" == "1" ]]; then
     peer_command cleanup >/dev/null 2>&1 || cleanup_failed=1
@@ -986,19 +1036,23 @@ cleanup() {
   fi
   desktop_underlay_cleanup_host_peer >/dev/null 2>&1 \
     || cleanup_failed=1
-  if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \
-      >/dev/null 2>&1 || true
-  fi
-  if [[ "$NETWORK_CREATED" == "1" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      "virsh net-destroy '$NETWORK_NAME'" >/dev/null 2>&1 || cleanup_failed=1
-  fi
-
-  if [[ "$NIC_ATTACHED" == "1" ]]; then
-    audit_hypervisor_cleanup >"$ARTIFACT_DIR/hypervisor-cleanup-audit.txt" 2>&1 \
-      || cleanup_failed=1
+  if [[ "$QUARANTINE_GUEST_NETWORK" == "0" ]]; then
+    if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
+      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+        "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \
+        >/dev/null 2>&1 || true
+    fi
+    if [[ "$NETWORK_CREATED" == "1" ]]; then
+      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+        "virsh net-destroy '$NETWORK_NAME'" >/dev/null 2>&1 || cleanup_failed=1
+    fi
+    if [[ "$NIC_ATTACHED" == "1" ]]; then
+      audit_hypervisor_cleanup >"$ARTIFACT_DIR/hypervisor-cleanup-audit.txt" 2>&1 \
+        || cleanup_failed=1
+    fi
+  else
+    echo "Windows guest cleanup is unproven; secondary network retained for quarantine" \
+      >"$ARTIFACT_DIR/guest-network-quarantine.txt"
   fi
   if [[ "$cleanup_failed" == "1" ]]; then
     echo "Windows underlay cleanup audit failed; inspect $ARTIFACT_DIR" >&2

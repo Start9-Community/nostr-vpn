@@ -57,10 +57,12 @@ gradle_args=()
 if [[ -n "${NVPN_FIPS_REPO_PATH:-}" ]]; then
   local_fips_cargo="$(command -v cargo)"
   local_fips_cargo_ndk="$(command -v cargo-ndk)"
-  [[ "$local_fips_cargo" == "$NVPN_LOCAL_FIPS_LOCK_DIR/cargo-wrapper/cargo" ]] || {
-    echo "local FIPS Android build did not resolve the owned Cargo wrapper" >&2
-    exit 1
-  }
+  if [[ "${NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED:-0}" != "1" ]]; then
+    [[ "$local_fips_cargo" == "$NVPN_LOCAL_FIPS_LOCK_DIR/cargo-wrapper/cargo" ]] || {
+      echo "local FIPS Android build did not resolve the owned Cargo wrapper" >&2
+      exit 1
+    }
+  fi
   [[ -x "$local_fips_cargo_ndk" ]] || {
     echo "local FIPS Android build could not resolve cargo-ndk" >&2
     exit 1

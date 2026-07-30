@@ -512,8 +512,25 @@ def require_clean_checkout(root: pathlib.Path, label: str) -> None:
             "--porcelain",
             "--untracked-files=all",
         ]
-    ).decode()
-    require(not status, f"{label} checkout is dirty")
+    ).decode().splitlines()
+    if not status:
+        return
+    require(
+        label == "application"
+        and os.environ.get("NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED") == "1"
+        and status == [" M Cargo.lock"],
+        f"{label} checkout is dirty",
+    )
+    for path, variable in (
+        ("Cargo.toml", "NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256"),
+        ("Cargo.lock", "NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256"),
+    ):
+        expected = os.environ.get(variable, "")
+        require(
+            re.fullmatch(r"[0-9a-f]{64}", expected) is not None
+            and sha256_file(root / path) == expected,
+            f"application {path} changed outside the exact FIPS session",
+        )
 
 
 def validate_source_and_fips(args: argparse.Namespace) -> None:

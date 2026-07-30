@@ -94,6 +94,20 @@ copy_to_guest() {
   "${SCP_CMD[@]}" "$source" "${SSH_HOST}:${destination//\\//}"
 }
 
+capture_fixture_failure_evidence() {
+  [[ "$FIXTURE_ACTIVE" -eq 1 ]] || return 0
+  printf 'fixture_wg_bytes=%s -> %s\n' "$WG_BEFORE" \
+    "$(mobile_wg_fixture_wg_bytes "$CONTAINER" 2>/dev/null || echo unavailable)"
+  printf 'fixture_forward_packets=%s -> %s\n' "$FORWARD_BEFORE" \
+    "$(mobile_wg_fixture_forward_packets "$CONTAINER" 2>/dev/null || echo unavailable)"
+  printf 'fixture_dns_queries=%s -> %s\n' "$DNS_BEFORE" \
+    "$(mobile_wg_fixture_dns_count "$CONTAINER" "$DNS_PROBE_NAME" 2>/dev/null || echo unavailable)"
+  mobile_wg_remote_exec sudo -n env \
+    "PATH=$MOBILE_WG_FIXTURE_REMOTE_PATH" \
+    wg show "$MOBILE_WG_FIXTURE_REMOTE_INTERFACE" 2>&1 || true
+  mobile_wg_fixture_logs "$CONTAINER" 2>&1 || true
+}
+
 provider_e2e_required() {
   case "$REQUIRE_PROVIDER_E2E" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
@@ -464,7 +478,7 @@ if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
 fi
 
 REMOTE_SERVICE_OWNED=1
-run_ps "\$ErrorActionPreference = 'Stop'
+if ! run_ps "\$ErrorActionPreference = 'Stop'
 \$ProviderConfig = $(ps_quote "$REMOTE_PROVIDER_CONFIG")
 \$Acl = New-Object System.Security.AccessControl.FileSecurity
 \$Acl.SetAccessRuleProtection(\$true, \$false)
@@ -526,6 +540,11 @@ finally {
   . \$LifecycleLibrary
   Invoke-WindowsWireGuardDirectCleanup -Binary \$Bin -Config \$Config -StatePath $(ps_quote "$REMOTE_DIRECT_STATE") -WireGuardInterface $(ps_quote "$WIREGUARD_INTERFACE") -EndpointHost $(ps_quote "$ENDPOINT_HOST") -ProbeUrl $(ps_quote "$PROBE_URL") -SourceIpUrl $(ps_quote "$SOURCE_IP_URL") -WaitSeconds 20 -AllowOwnedRepair | Out-Null
 }"
+then
+  capture_fixture_failure_evidence
+  echo "Windows WireGuard transition failed; evidence is above" >&2
+  exit 1
+fi
 
 if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
   WG_AFTER="$(mobile_wg_fixture_wg_bytes "$CONTAINER" | awk '{ print ($1 + 0) + ($2 + 0) }')"
@@ -533,13 +552,25 @@ if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
   DNS_AFTER="$(mobile_wg_fixture_dns_count "$CONTAINER" "$DNS_PROBE_NAME")"
   [[ "$WG_BEFORE" =~ ^[0-9]+$ && "$WG_AFTER" =~ ^[0-9]+$ \
     && "$WG_AFTER" -gt "$WG_BEFORE" ]] \
-    || { echo "Windows WireGuard fixture transfer counter did not increase" >&2; exit 1; }
+    || {
+      echo "Windows WireGuard fixture transfer counter did not increase" >&2
+      capture_fixture_failure_evidence
+      exit 1
+    }
   [[ "$FORWARD_BEFORE" =~ ^[0-9]+$ && "$FORWARD_AFTER" =~ ^[0-9]+$ \
     && "$FORWARD_AFTER" -gt "$FORWARD_BEFORE" ]] \
-    || { echo "Windows WireGuard fixture Internet-forward counter did not increase" >&2; exit 1; }
+    || {
+      echo "Windows WireGuard fixture Internet-forward counter did not increase" >&2
+      capture_fixture_failure_evidence
+      exit 1
+    }
   [[ "$DNS_BEFORE" =~ ^[0-9]+$ && "$DNS_AFTER" =~ ^[0-9]+$ \
     && "$DNS_AFTER" -gt "$DNS_BEFORE" ]] \
-    || { echo "Windows WireGuard fixture DNS query counter did not increase" >&2; exit 1; }
+    || {
+      echo "Windows WireGuard fixture DNS query counter did not increase" >&2
+      capture_fixture_failure_evidence
+      exit 1
+    }
   echo "WINDOWS_EPHEMERAL_WG_SOURCE_TRAFFIC_DNS_OK"
 fi
 echo "WINDOWS_WIREGUARD_EXIT_E2E_OK"

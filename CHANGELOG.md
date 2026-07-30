@@ -63,10 +63,13 @@ All notable changes to this project are documented in this file.
 - Release completed FIPS-TCP state-control slots promptly so periodic roster
   and capability traffic cannot starve a manual-join roster or its durable
   application receipt behind the per-peer connection budget.
-- Upgrade FIPS to 0.4.45 so a new one-bit session-key epoch waits for the
-  previous epoch's drain to retire and duplicate simultaneous connections keep
-  one canonical authenticated owner, preventing ambiguous rekeys or delivery
-  into a superseded connection while real payload traffic continues.
+- Pace the quiet FIPS-TCP control loop at its close-retention deadline instead
+  of the active retransmission cadence, while keeping commands, packets, and
+  open records immediately responsive.
+- Upgrade FIPS to 0.4.47 so repeated direct-to-mesh-to-direct transitions
+  retain the last authenticated fallback until direct payload validates, while
+  preserving the bounded rekey and canonical-owner fixes from earlier 0.4.x
+  releases.
 - Repair Cashu paid-exit close, settlement, and refund recovery across
   historical or retried proofs on platforms where the feature is available.
 - Update the Nostr and Linux property-list parser locks to reject malformed

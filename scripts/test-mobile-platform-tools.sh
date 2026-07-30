@@ -111,7 +111,7 @@ EOF
 }
 
 test_run_android_restores_lock_after_failed_local_fips_gradle() {
-  local dir stubbin fips
+  local dir stubbin fips manifest_sha lock_sha fips_path_sha fips_head fips_tree rc
   dir="$(mktemp -d)"
   stubbin="$dir/bin"
   fips="$dir/fips"
@@ -121,11 +121,21 @@ test_run_android_restores_lock_after_failed_local_fips_gradle() {
   cat >"$stubbin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${NVPN_TEST_PRECONFIGURED:-0}" == "1" ]]; then
+  manifest="$(cd "$NVPN_TEST_FIPS_REPO_PATH/crates/fips-core" && pwd -P)/Cargo.toml"
+  python3 -c 'import json,sys
+m=sys.argv[1]; i=f"path+file://{m}#fips-core@0.0.0"
+json.dump({"packages":[{"id":i,"manifest_path":m,"name":"fips-core",
+"source":None,"version":"0.0.0"}],"resolve":{"nodes":[{"id":i}]}},sys.stdout)' \
+    "$manifest"
+  exit
+fi
 printf '%s\n' "$*" \
   | grep -Fq "patch.crates-io.fips-core.path=\"$NVPN_TEST_FIPS_REPO_PATH/crates/fips-core\""
 printf '\n# mutated by fake Android cargo\n' >> "$NVPN_TEST_CARGO_LOCK"
 exit 42
 EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$stubbin/cargo-ndk"
   cat >"$stubbin/gradle" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -141,13 +151,17 @@ for argument in "$@"; do
       ;;
   esac
 done
+if [[ "${NVPN_TEST_PRECONFIGURED:-0}" == "1" ]]; then
+  printf '%s\n' "$@" >"$NVPN_TEST_GRADLE_ARGS"
+  exit 43
+fi
 [[ -n "$cargo_executable" ]]
 [[ "$cargo_executable" == */cargo-wrapper/cargo ]]
 [[ -x "$cargo_ndk_executable" ]]
 "$cargo_executable" metadata
 exit 43
 EOF
-  chmod +x "$stubbin/cargo" "$stubbin/gradle"
+  chmod +x "$stubbin/cargo" "$stubbin/cargo-ndk" "$stubbin/gradle"
 
   assert_failed_run_restores_lock \
     "run-android local-FIPS Gradle failure" \
@@ -159,6 +173,36 @@ EOF
       NVPN_TEST_FIPS_REPO_PATH="$fips" \
       NVPN_FIPS_REPO_PATH="$fips" \
       "$ROOT/tools/run-android" build
+
+  manifest_sha="$(shasum -a 256 "$ROOT/Cargo.toml" | awk '{print $1}')"
+  lock_sha="$(shasum -a 256 "$ROOT/Cargo.lock" | awk '{print $1}')"
+  fips_path_sha="$(
+    printf '%s' "$(cd "$fips" && pwd -P)" | shasum -a 256 | awk '{print $1}'
+  )"
+  fips_head="$(git -C "$fips" rev-parse HEAD)"
+  fips_tree="$(git -C "$fips" rev-parse 'HEAD^{tree}')"
+
+  rc=0
+  env -u NVPN_LOCAL_FIPS_LOCK_DIR \
+    PATH="$stubbin:$PATH" \
+    HOME="$dir/home" \
+    NVPN_FIPS_REPO_PATH="$fips" \
+    NVPN_LOCAL_FIPS_PATCH_PRECONFIGURED=1 \
+    NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256="$manifest_sha" \
+    NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256="$lock_sha" \
+    NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256="$fips_path_sha" \
+    NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD="$fips_head" \
+    NVPN_LOCAL_FIPS_SESSION_FIPS_TREE="$fips_tree" \
+    NVPN_ANDROID_FIPS_METADATA_RECEIPT="$dir/fips-linkage.json" \
+    NVPN_TEST_FIPS_REPO_PATH="$fips" \
+    NVPN_TEST_PRECONFIGURED=1 \
+    NVPN_TEST_GRADLE_ARGS="$dir/gradle-args" \
+    "$ROOT/tools/run-android" build >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -eq 43 && -s "$dir/fips-linkage.json" ]] \
+    && grep -Fxq -- "-PnvpnCargoExecutable=$stubbin/cargo" "$dir/gradle-args" \
+    && grep -Fxq -- "-PnvpnCargoNdkExecutable=$stubbin/cargo-ndk" "$dir/gradle-args" \
+    && ! grep -Fq '/cargo-wrapper/cargo' "$dir/gradle-args" \
+    || fail "run-android rejected the preconfigured session Cargo"
 
   rm -rf "$dir"
 }
