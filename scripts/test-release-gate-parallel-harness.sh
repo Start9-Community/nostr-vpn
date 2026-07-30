@@ -88,138 +88,32 @@ set -e
 grep -Fq 'intentional lane failure' "$tmp/logs/failing-lane-2.log" \
   || fail "failing lane log was not preserved"
 
-slow_lane() {
-  local ready_marker="$1"
-  trap 'printf "slow lane cancelled\n"; exit 0' TERM
-  printf 'slow lane started\n'
-  : >"$ready_marker"
-  sleep 10
-}
-
-release_gate_parallel_start "slow cancellation peer" slow_lane "$tmp/slow-ready"
-slow="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-slow_log="${RELEASE_GATE_PARALLEL_LOGS[$slow]}"
-for _ in $(seq 1 50); do
-  [[ -f "$tmp/slow-ready" ]] && break
-  sleep 0.02
-done
-[[ -f "$tmp/slow-ready" ]] || fail "slow cancellation peer did not start"
-release_gate_parallel_start "fast group failure" lane_fails
-fast_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-group_started="$(date +%s)"
-set +e
-release_gate_parallel_wait_group "$slow" "$fast_failure" >/dev/null 2>&1
-status=$?
-set -e
-group_elapsed=$(( $(date +%s) - group_started ))
-[[ "$status" == "7" ]] \
-  || fail "parallel group returned $status instead of the early lane failure"
-(( group_elapsed < 5 )) \
-  || fail "parallel group waited ${group_elapsed}s behind an earlier slow lane"
-[[ -z "${RELEASE_GATE_PARALLEL_PIDS[$slow]:-}" ]] \
-  || fail "parallel group did not reap its cancelled peer"
-grep -Fq 'slow lane started' "$slow_log" \
-  || fail "cancelled peer log was not preserved"
-
-stubborn_lane() {
-  local ready_marker="$1"
-  trap '' TERM
-  : >"$ready_marker"
-  sleep 4
-}
-
-release_gate_parallel_start "stubborn cancellation peer" stubborn_lane "$tmp/stubborn-ready"
-stubborn="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-for _ in $(seq 1 50); do
-  [[ -f "$tmp/stubborn-ready" ]] && break
-  sleep 0.02
-done
-[[ -f "$tmp/stubborn-ready" ]] || fail "stubborn cancellation peer did not start"
-release_gate_parallel_start "stubborn peer failure" lane_fails
-stubborn_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-stubborn_started="$(date +%s)"
-set +e
-release_gate_parallel_wait_group "$stubborn" "$stubborn_failure" >/dev/null 2>&1
-status=$?
-set -e
-stubborn_elapsed=$(( $(date +%s) - stubborn_started ))
-[[ "$status" == "7" ]] || fail "stubborn cancellation group returned $status"
-(( stubborn_elapsed < 4 )) \
-  || fail "TERM-ignoring lane was not escalated to KILL (${stubborn_elapsed}s)"
-[[ -z "${RELEASE_GATE_PARALLEL_PIDS[$stubborn]:-}" ]] \
-  || fail "stubborn cancellation peer was not reaped"
-grep -Fq 'RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS' \
-  "$ROOT_DIR/scripts/lib-release-gate-parallel.sh" \
-  || fail "parallel cancellation has no bounded TERM grace"
-grep -Fq 'RELEASE_GATE_PARALLEL_PGIDS' \
-  "$ROOT_DIR/scripts/lib-release-gate-parallel.sh" \
-  || fail "parallel lanes do not retain a dedicated process-group identity"
-
-orphaning_lane() {
-  local ready_marker="$1"
-  local child_pid_file="$2"
-  local external_pid_file="$3"
-  (
-    trap '' TERM
-    while :; do
-      sleep 10 &
-      printf '%s\n' "$!" >"$external_pid_file"
-      wait "$!" || true
-    done
-  ) &
-  printf '%s\n' "$!" >"$child_pid_file"
-  : >"$ready_marker"
-  wait
+collect_peer() {
+  local complete_marker="$1"
+  sleep 1
+  printf 'independent lane completed\n'
+  : >"$complete_marker"
 }
 
 release_gate_parallel_start \
-  "orphaning cancellation peer" \
-  orphaning_lane \
-  "$tmp/orphan-ready" "$tmp/orphan-child.pid" "$tmp/orphan-external.pid"
-orphaning="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-orphan_pgid="${RELEASE_GATE_PARALLEL_PGIDS[$orphaning]}"
-for _ in $(seq 1 50); do
-  [[ -f "$tmp/orphan-ready" \
-    && -s "$tmp/orphan-child.pid" \
-    && -s "$tmp/orphan-external.pid" ]] && break
-  sleep 0.02
-done
-[[ -f "$tmp/orphan-ready" \
-  && -s "$tmp/orphan-child.pid" \
-  && -s "$tmp/orphan-external.pid" ]] \
-  || fail "orphaning cancellation peer did not start"
-orphan_child="$(<"$tmp/orphan-child.pid")"
-orphan_external="$(<"$tmp/orphan-external.pid")"
-release_gate_parallel_pid_live_in_group "$orphan_child" "$orphan_pgid" \
-  || fail "TERM-ignoring child escaped its lane process group"
-release_gate_parallel_pid_live_in_group "$orphan_external" "$orphan_pgid" \
-  || fail "external descendant escaped its lane process group"
-release_gate_parallel_start "orphaning peer failure" lane_fails
-orphan_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  "independent collection peer" collect_peer "$tmp/collect-complete"
+collect_peer_index="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+release_gate_parallel_start "collected group failure" lane_fails
+collected_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 set +e
-release_gate_parallel_wait_group "$orphaning" "$orphan_failure" >/dev/null 2>&1
+release_gate_parallel_wait_group \
+  "$collect_peer_index" "$collected_failure" >/dev/null 2>&1
 status=$?
 set -e
-[[ "$status" == "7" ]] || fail "orphaning cancellation group returned $status"
-if release_gate_parallel_pid_live_in_group "$orphan_child" "$orphan_pgid"; then
-  fail "TERM-ignoring child survived after its wrapper exited"
-fi
-if release_gate_parallel_pid_live_in_group "$orphan_external" "$orphan_pgid"; then
-  fail "external TERM-ignoring descendant survived lane cancellation"
-fi
-if release_gate_parallel_group_alive "$orphan_pgid"; then
-  fail "cancelled lane process group still has live descendants"
-fi
-
-sleep 10 &
-unrelated_pid="$!"
-if release_gate_parallel_pid_live_in_group "$unrelated_pid" "$orphan_pgid"; then
-  kill "$unrelated_pid" >/dev/null 2>&1 || true
-  wait "$unrelated_pid" >/dev/null 2>&1 || true
-  fail "unrelated live PID was mistaken for a cancelled lane descendant"
-fi
-kill "$unrelated_pid" >/dev/null 2>&1 || true
-wait "$unrelated_pid" >/dev/null 2>&1 || true
+[[ "$status" == "7" ]] \
+  || fail "parallel group returned $status instead of the collected failure"
+[[ -f "$tmp/collect-complete" ]] \
+  || fail "a failed lane cancelled its independent peer"
+[[ -z "${RELEASE_GATE_PARALLEL_PIDS[$collect_peer_index]:-}" ]] \
+  || fail "parallel group did not reap its completed peer"
+grep -Fq 'independent lane completed' \
+  "${RELEASE_GATE_PARALLEL_LOGS[$collect_peer_index]}" \
+  || fail "independent peer log was not preserved"
 
 successful_orphan_lane() {
   local ready_marker="$1"
@@ -396,7 +290,7 @@ windows_dispatch_line="$(
     | tail -1 | cut -d: -f1 || true
 )"
 static_preflight_line="$(
-  grep -n '^  run_release_gate_static_preflight$' "$release_gate" \
+  grep -n '^  run_release_gate_static_preflight ' "$release_gate" \
     | cut -d: -f1 || true
 )"
 [[ -n "$candidate_preflight_line" \
@@ -479,8 +373,9 @@ grep -Fq ':app:lintDebug' "$release_gate" \
   || fail "release gate does not run Android lint"
 grep -Fq ':app:testDebugUnitTest' "$release_gate" \
   || fail "release gate does not run Android unit tests"
-grep -Fq 'release_gate_parallel_wait "$android_static_lane"' "$release_gate" \
-  || fail "release gate does not join Android static validation"
+grep -Fq 'concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")' \
+  "$release_gate" \
+  || fail "release gate does not collect Android/platform validation"
 grep -Fq ':app:lintRelease' "$ROOT_DIR/.github/workflows/release.yml" \
   || fail "hosted Android release build does not run release lint"
 grep -Fq 'export NVPN_E2E_SKIP_NODE_BUILD=1' "$release_gate" \
@@ -502,7 +397,10 @@ grep -Fq 'test -f /tmp/nostr-vpn-dev-ready' "$ROOT_DIR/tools/run-linux" \
 grep -Fq 'touch /tmp/nostr-vpn-dev-ready' "$ROOT_DIR/linux/scripts/dev-entrypoint.sh" \
   || fail "Linux GUI container does not publish completed desktop initialization"
 
-docker_wait_line="$(grep -n 'release_gate_parallel_wait "$docker_build_lane"' "$release_gate" | cut -d: -f1)"
+docker_wait_line="$(
+  grep -nF 'release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}"' \
+    "$release_gate" | cut -d: -f1
+)"
 signal_line="$(grep -n '^  run_docker_signal_gates$' "$release_gate" | cut -d: -f1)"
 functional_line="$(grep -n '^  run_docker_isolated_functional_gates$' "$release_gate" | cut -d: -f1)"
 perf_line="$(grep -n '^  run_docker_perf_gate$' "$release_gate" | cut -d: -f1)"
@@ -517,7 +415,7 @@ grep -Fq 'release_gate_parallel_start "Docker kernel WireGuard exit"' "$release_
 grep -Fq 'release_gate_parallel_start "Docker userspace WireGuard exit"' "$release_gate" \
   || fail "release gate does not dispatch the isolated userspace WireGuard lane"
 grep -Fq 'release_gate_parallel_wait_group "${lanes[@]}"' "$release_gate" \
-  || fail "parallel Docker lane failures wait behind earlier slow lanes"
+  || fail "parallel Docker lanes are not joined as one collected result set"
 grep -Fq 'NVPN_WG_EXIT_USERSPACE_INTERNET_SUBNET' "$release_gate" \
   || fail "parallel userspace WireGuard fixture has no isolated subnet"
 grep -Fq 'Release gate test selector matched no passing test' "$release_gate" \
@@ -559,7 +457,7 @@ linux_mobile_join_line="$(
     "$release_gate" | cut -d: -f1
 )"
 macos_vm_join_line="$(
-  grep -nF '    release_gate_parallel_wait "$macos_platform_lane"' \
+  grep -nF '  release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}"' \
     "$release_gate" | cut -d: -f1 || true
 )"
 [[ -n "$mobile_join_line" \

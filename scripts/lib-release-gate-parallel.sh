@@ -214,9 +214,14 @@ release_gate_parallel_wait() {
   printf '===== end release-gate lane: %s =====\n\n' "$label"
 
   if ((status != 0)); then
+    if release_gate_parallel_group_alive "$pgid"; then
+      release_gate_parallel_terminate_group "$pgid" \
+        || orphan_cleanup_failed=1
+    fi
+    RELEASE_GATE_PARALLEL_PGIDS[$index]=""
     printf 'Release-gate lane failed: %s (exit %s, log: %s)\n' \
       "$label" "$status" "$log_path" >&2
-    release_gate_parallel_cancel_all
+    ((orphan_cleanup_failed == 0)) || return 1
     return "$status"
   fi
   if ((orphaned_group)); then
@@ -227,7 +232,7 @@ release_gate_parallel_wait() {
       printf 'Release-gate lane failed: %s exited successfully with orphaned process-group descendants (log: %s)\n' \
         "$label" "$log_path" >&2
     fi
-    release_gate_parallel_cancel_all
+    RELEASE_GATE_PARALLEL_PGIDS[$index]=""
     return 1
   fi
   RELEASE_GATE_PARALLEL_PGIDS[$index]=""
@@ -236,21 +241,25 @@ release_gate_parallel_wait() {
 
 release_gate_parallel_wait_group() {
   local remaining=("$@")
+  local first_failure=0
   if ((${#remaining[@]} == 0)); then
     return 0
   fi
 
   # Bash 3 has no `wait -n`. Poll only the lane wrapper PIDs, then reap and
-  # report each lane as soon as it finishes. This prevents an early failure in
-  # a later-started lane from sitting unnoticed behind a slow first lane.
+  # report each lane as soon as it finishes. A failed lane cleans only its own
+  # process group; independent peers finish so the gate reports their complete
+  # result set instead of throwing away useful builds and diagnostics.
   while ((${#remaining[@]})); do
     local pending=()
     local index pid status
     for index in "${remaining[@]}"; do
       pid="${RELEASE_GATE_PARALLEL_PIDS[$index]:-}"
       if [[ -z "$pid" ]]; then
-        release_gate_parallel_wait "$index"
-        return $?
+        if ((first_failure == 0)); then
+          first_failure=2
+        fi
+        continue
       fi
       if kill -0 "$pid" >/dev/null 2>&1; then
         pending+=("$index")
@@ -260,7 +269,9 @@ release_gate_parallel_wait_group() {
         :
       else
         status=$?
-        return "$status"
+        if ((first_failure == 0)); then
+          first_failure="$status"
+        fi
       fi
     done
     # Bash 3 treats "${pending[@]}" as an unbound expansion under `set -u`
@@ -274,4 +285,5 @@ release_gate_parallel_wait_group() {
       sleep 0.1
     fi
   done
+  return "$first_failure"
 }

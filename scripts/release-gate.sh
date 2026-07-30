@@ -2186,22 +2186,20 @@ main() {
   fi
   prepare_release_cargo_config
 
-  local windows_lane=""
+  local concurrent_validation_lanes=()
   if [[ "$windows_platform_requested_for_gate" == "1" ]]; then
     release_gate_parallel_start "Windows platform" run_windows_platform_lane
-    windows_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
-  local macos_platform_lane=""
   if [[ "$macos_platform_requested_for_gate" == "1" ]]; then
     release_gate_parallel_start "macOS platform UI" run_macos_platform_lane
-    macos_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
-  local linux_platform_lane=""
   if [[ "$linux_platform_requested_for_gate" == "1" ]]; then
     release_gate_parallel_start "Linux platform UI" run_linux_platform_lane
-    linux_platform_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
   # Android static checks do not build Rust, and the Docker builder owns an
@@ -2211,22 +2209,32 @@ main() {
   release_gate_parallel_start \
     "Android compile, unit tests, and lint" \
     run_android_static_validation_lane
-  local android_static_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+  concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
-  local docker_build_lane=""
+  local docker_build_requested=0
   if docker_release_gates_enabled; then
     export NVPN_E2E_NODE_IMAGE="${NVPN_RELEASE_GATE_E2E_NODE_IMAGE:-${NVPN_E2E_NODE_IMAGE:-nostr-vpn-e2e-node}}"
     export NVPN_EXIT_NODE_E2E_IMAGE="$NVPN_E2E_NODE_IMAGE"
     release_gate_parallel_start "Docker node image build" build_release_gate_docker_node_image
-    docker_build_lane="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+    concurrent_validation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
+    docker_build_requested=1
   fi
 
-  run_release_gate_static_preflight
-  run_rust_validation_lane
-  release_gate_parallel_wait "$android_static_lane"
+  local host_validation_status=0 concurrent_validation_status=0
+  run_release_gate_static_preflight || host_validation_status=$?
+  if ((host_validation_status == 0)); then
+    run_rust_validation_lane || host_validation_status=$?
+  fi
+  release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}" \
+    || concurrent_validation_status=$?
+  if ((host_validation_status != 0)); then
+    return "$host_validation_status"
+  fi
+  if ((concurrent_validation_status != 0)); then
+    return "$concurrent_validation_status"
+  fi
 
-  if [[ -n "$docker_build_lane" ]]; then
-    release_gate_parallel_wait "$docker_build_lane"
+  if ((docker_build_requested)); then
     export NVPN_E2E_SKIP_NODE_BUILD=1
     export NVPN_PERF_SKIP_BUILD=1
   fi
@@ -2234,18 +2242,6 @@ main() {
   # The real desktop network proofs own their target VM and hypervisor
   # topology. Join every parallel UI/build lane before changing links, routes,
   # or entering any latency/performance/device measurement.
-  if [[ -n "$windows_lane" ]]; then
-    release_gate_parallel_wait "$windows_lane"
-    windows_lane=""
-  fi
-  if [[ -n "$linux_platform_lane" ]]; then
-    release_gate_parallel_wait "$linux_platform_lane"
-    linux_platform_lane=""
-  fi
-  if [[ -n "$macos_platform_lane" ]]; then
-    release_gate_parallel_wait "$macos_platform_lane"
-    macos_platform_lane=""
-  fi
   run_desktop_app_launch_smokes
   run_linux_exclusive_desktop_gates
   run_windows_exclusive_desktop_gates
