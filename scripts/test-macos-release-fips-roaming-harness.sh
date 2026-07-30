@@ -183,12 +183,6 @@ require_tokens "$GUEST" "failure diagnostics survive cleanup" \
   'wireguard-readiness-dns.txt' \
   'wireguard-readiness-status.json' \
   'wireguard-readiness-daemon.log'
-require_tokens "$CONTROLLER" "frozen product and clean harness separation" \
-  'NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA' \
-  'NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE' \
-  'HARNESS_GIT_SHA' \
-  'release_join_assert_app_unchanged "$HARNESS_GIT_SHA" "$HARNESS_GIT_TREE"' \
-  'imported macOS product override crosses non-harness change'
 require_tokens "$GUEST" "wall-clock-bounded readiness waits" \
   'local WAIT_DEADLINE_SECONDS="$((SECONDS + WAIT_SECS))"' \
   'while ((SECONDS < WAIT_DEADLINE_SECONDS)); do' \

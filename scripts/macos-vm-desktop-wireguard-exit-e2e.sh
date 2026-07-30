@@ -73,9 +73,6 @@ FIPS_PEER_BINARY_SHA256=""
 FIPS_PEER_IMPORTED=0
 APP_GIT_SHA=""
 APP_GIT_TREE=""
-HARNESS_GIT_SHA=""
-HARNESS_GIT_TREE=""
-IMPORTED_PRODUCT_OVERRIDE=0
 
 fail() {
   echo "macOS VM Release network gate failed: $*" >&2
@@ -314,25 +311,7 @@ discover_remote_fixture_ipv4() {
 }
 
 prepare_host_fips_peer_binary() {
-  if [[ "$IMPORTED_PRODUCT_OVERRIDE" -eq 1 ]]; then
-    local target=x86_64-unknown-linux-musl
-    local cache_root artifact_dir receipt
-    cache_root="${NVPN_MACOS_FIPS_PEER_CACHE_DIR:-${ARTIFACT_ROOT:-$ROOT/artifacts}/macos-release-fips-peer}"
-    artifact_dir="$cache_root/$APP_GIT_SHA-$RELEASE_JOIN_FIPS_SHA-$target"
-    FIPS_PEER_BINARY="$artifact_dir/nvpn"
-    receipt="$artifact_dir/receipt.json"
-    python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
-      "$receipt" \
-      "$FIPS_PEER_BINARY" \
-      "$APP_GIT_SHA" \
-      "$APP_GIT_TREE" \
-      "$RELEASE_JOIN_FIPS_SHA" \
-      "$RELEASE_JOIN_FIPS_TREE" \
-      "$RELEASE_JOIN_FIPS_VERSION" \
-      "$target"
-  else
-    FIPS_PEER_BINARY="$("$ROOT/scripts/prepare-macos-release-fips-peer.sh")"
-  fi
+  FIPS_PEER_BINARY="$("$ROOT/scripts/prepare-macos-release-fips-peer.sh")"
   [[ "$FIPS_PEER_BINARY" == /* && -x "$FIPS_PEER_BINARY" ]] \
     || fail "host FIPS peer cache returned no executable"
   FIPS_PEER_BINARY_SHA256="$(
@@ -454,29 +433,9 @@ cleanup_fips_peer() {
 }
 
 release_join_require_clean_fips
-HARNESS_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-HARNESS_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
-release_join_assert_app_unchanged "$HARNESS_GIT_SHA" "$HARNESS_GIT_TREE"
-APP_GIT_SHA="${NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA:-$HARNESS_GIT_SHA}"
-APP_GIT_TREE="${NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE:-$HARNESS_GIT_TREE}"
-if [[ "$APP_GIT_SHA" != "$HARNESS_GIT_SHA" \
-  || "$APP_GIT_TREE" != "$HARNESS_GIT_TREE" ]]
-then
-  [[ "$APP_GIT_SHA" =~ ^[0-9a-f]{40}$ \
-    && "$APP_GIT_TREE" =~ ^[0-9a-f]{40}$ \
-    && "$(git -C "$ROOT" rev-parse "$APP_GIT_SHA^{tree}")" == "$APP_GIT_TREE" ]] \
-    || fail "imported macOS product revision/tree override is invalid"
-  git -C "$ROOT" merge-base --is-ancestor \
-    "$APP_GIT_SHA" "$HARNESS_GIT_SHA" \
-    || fail "imported macOS product revision is not a harness ancestor"
-  while IFS= read -r path; do
-    [[ "$path" == scripts/* ]] \
-      || fail "imported macOS product override crosses non-harness change: $path"
-  done < <(git -C "$ROOT" diff --name-only "$APP_GIT_SHA..$HARNESS_GIT_SHA")
-  IMPORTED_PRODUCT_OVERRIDE=1
-fi
-export NVPN_MACOS_IMPORTED_PRODUCT_GIT_SHA="$APP_GIT_SHA"
-export NVPN_MACOS_IMPORTED_PRODUCT_GIT_TREE="$APP_GIT_TREE"
+APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 macos_vm_prepare_or_verify_imported_release "$ROOT" "$SSH_HOST"
 PACKAGE="$(macos_vm_imported_release_package "$GUEST_REPO")"
