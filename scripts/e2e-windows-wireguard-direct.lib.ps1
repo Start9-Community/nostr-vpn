@@ -131,6 +131,26 @@ function Assert-WindowsWireGuardDirectRestored {
   }
 }
 
+function Assert-WindowsWireGuardDirectConfig {
+  param([string]$Binary, [string]$Config)
+  $raw = & $Binary status --config $Config --json --discover-secs 0
+  if ($LASTEXITCODE -ne 0) {
+    throw "nvpn could not verify the persisted Direct configuration"
+  }
+  $status = $raw | ConvertFrom-Json
+  $source = [regex]::Match(
+    (Get-Content -Raw -LiteralPath $Config),
+    '(?m)^\s*internet_source\s*=\s*"([^"]+)"'
+  )
+  if (
+    ($source.Success -and $source.Groups[1].Value -ne "direct") -or
+    $null -ne $status.exit_node -or
+    $status.wireguard_exit.enabled -ne $false
+  ) {
+    throw "persisted nvpn configuration did not return to Direct"
+  }
+}
+
 function Save-WindowsWireGuardDirectBaseline {
   param(
     [string]$StatePath,
@@ -255,7 +275,7 @@ function Invoke-WindowsWireGuardDirectCleanup {
   $baseline = Read-WindowsWireGuardDirectBaseline `
     $StatePath $WireGuardInterface $EndpointHost
   try {
-    & $Binary set --config $Config --exit-node= 2>$null | Out-Null
+    & $Binary set --config $Config --exit-node= | Out-Null
     $normalCleanupFailed = $LASTEXITCODE -ne 0
   } catch {
     $normalCleanupFailed = $true
@@ -283,6 +303,7 @@ function Invoke-WindowsWireGuardDirectCleanup {
       $WireGuardInterface $EndpointHost
   }
 
+  Assert-WindowsWireGuardDirectConfig $Binary $Config
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   do {
     try {

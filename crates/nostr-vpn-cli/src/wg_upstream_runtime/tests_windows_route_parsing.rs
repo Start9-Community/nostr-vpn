@@ -264,6 +264,12 @@ Idx     Met         MTU          State                Name
         let handshake = startup
             .find("wait_windows_native_wireguard_handshake")
             .expect("target-scoped handshake");
+        let handshake_stimulus = startup
+            .find("begin_windows_native_wireguard_handshake")
+            .expect("native handshake stimulus");
+        let keepalive_restore = startup
+            .find("restore_windows_native_wireguard_keepalive")
+            .expect("configured keepalive restore");
         let concrete_endpoint = startup
             .find("windows_native_wireguard_peer_endpoint")
             .expect("concrete target endpoint query");
@@ -271,8 +277,11 @@ Idx     Met         MTU          State                Name
             .find("apply_windows_endpoint_bypass_route")
             .expect("endpoint route installation");
         assert!(
-            handshake < concrete_endpoint && concrete_endpoint < route,
-            "route ownership must use the concrete endpoint reported after target handshake"
+            handshake_stimulus < handshake
+                && handshake < keepalive_restore
+                && keepalive_restore < concrete_endpoint
+                && concrete_endpoint < route,
+            "the already-up adapter must be stimulated, verified, and restored before route ownership"
         );
         assert!(
             startup

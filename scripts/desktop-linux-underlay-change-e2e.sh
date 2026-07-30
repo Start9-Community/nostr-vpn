@@ -81,7 +81,15 @@ read_npub() {
 }
 
 status_json() {
-  "$BINARY" status --config "$CONFIG" --json --discover-secs 0
+  gate_command "$BINARY" status --config "$CONFIG" --json --discover-secs 0
+}
+
+gate_command() {
+  if [[ -n "${RECOVERY_STARTED_MS:-}" ]]; then
+    recovery_command "$RECOVERY_STARTED_MS" "$@"
+  else
+    "$@"
+  fi
 }
 
 status_summary() {
@@ -105,7 +113,7 @@ daemon_pid() {
 }
 
 route_dev() {
-  ip -j -4 route get "$1" | jq -er '.[0].dev'
+  gate_command ip -j -4 route get "$1" | jq -er '.[0].dev'
 }
 
 endpoint_host() {
@@ -155,7 +163,7 @@ wireguard_payload_success_count() {
 }
 
 wireguard_handshake_active() {
-  wg show "$WG_IFACE" latest-handshakes 2>/dev/null \
+  gate_command wg show "$WG_IFACE" latest-handshakes 2>/dev/null \
     | awk 'NF == 2 && $2 + 0 > 0 { found = 1 } END { exit !found }'
 }
 
@@ -195,11 +203,11 @@ assert_wireguard_endpoint_route() {
     ' "$CLEANUP_JOURNAL"
   )"
   expected_source="$(
-    ip -j -4 address show dev "$expected_iface" scope global \
+    gate_command ip -j -4 address show dev "$expected_iface" scope global \
       | jq -er '.[].addr_info[] | select(.family == "inet" and .scope == "global") | .local' \
       | head -n1
   )"
-  ip -j -4 route show exact "$host/32" \
+  gate_command ip -j -4 route show exact "$host/32" \
     | jq -e \
       --arg dev "$expected_iface" \
       --arg gateway "$expected_gateway" \
@@ -225,26 +233,31 @@ unix_milliseconds() {
 }
 
 flush_dns_cache() {
-  resolvectl flush-caches >/dev/null
+  gate_command resolvectl flush-caches >/dev/null
 }
 
 resolve_name() {
   local name="$1"
   flush_dns_cache
-  resolvectl query --type=A "$name" >/dev/null 2>&1 \
-    && getent ahostsv4 "$name" >/dev/null 2>&1
+  gate_command resolvectl query --type=A "$name" >/dev/null 2>&1 \
+    && gate_command getent ahostsv4 "$name" >/dev/null 2>&1
 }
 
 resolve_fixture() {
   local addresses
   flush_dns_cache
-  resolvectl query --type=A "$FIXTURE_DNS_NAME" >/dev/null 2>&1 || return 1
-  addresses="$(getent ahostsv4 "$FIXTURE_DNS_NAME" 2>/dev/null | awk '{ print $1 }')"
+  gate_command resolvectl query --type=A "$FIXTURE_DNS_NAME" \
+    >/dev/null 2>&1 || return 1
+  addresses="$(
+    gate_command getent ahostsv4 "$FIXTURE_DNS_NAME" 2>/dev/null \
+      | awk '{ print $1 }'
+  )"
   grep -Fxq "$PEER_TUNNEL_IP" <<<"$addresses"
 }
 
 test_https() {
-  curl -4 --fail --silent --show-error --max-time 8 --output /dev/null "$PROBE_URL"
+  gate_command curl -4 --fail --silent --show-error --max-time 8 \
+    --output /dev/null "$PROBE_URL"
 }
 
 probe_production_platform_network_monitor() (
@@ -313,29 +326,30 @@ assert_same_daemon_ready() {
   local current_status
   [[ -n "$ORIGINAL_NPUB" && -n "$ORIGINAL_TUNNEL_IP" ]] \
     || fail "original daemon identity receipt is missing"
-  [[ "$(read_npub)" == "$ORIGINAL_NPUB" ]] \
-    || fail "daemon identity npub changed"
-  [[ "$("$BINARY" ip --config "$CONFIG")" == "$ORIGINAL_TUNNEL_IP" ]] \
-    || fail "daemon tunnel IP changed"
   current_status="$(status_json)"
-  jq -e --argjson pid "$expected_pid" --arg rev "$EXPECTED_FIPS_REV" '
+  jq -e \
+    --argjson pid "$expected_pid" \
+    --arg rev "$EXPECTED_FIPS_REV" \
+    --arg npub "$ORIGINAL_NPUB" \
+    --arg tunnel_ip "$ORIGINAL_TUNNEL_IP" \
+    --arg peer "$PEER_NPUB" '
     .status_source == "daemon"
+    and .device_id == $npub
+    and .tunnel_ip == $tunnel_ip
     and .daemon.running == true
     and .daemon.pid == $pid
     and .daemon.state.mesh_ready == true
     and .daemon.state.connected_peer_count >= 1
     and (.daemon.state.fips_core_version | endswith("(rev " + $rev + ")"))
-  ' <<<"$current_status" >/dev/null \
-    && jq -e --arg peer "$PEER_NPUB" '
-      (.daemon.state.fips_endpoint_peers // []) as $peers
-      | ($peers | length) == 1
-        and $peers[0].npub == $peer
-    ' <<<"$current_status" >/dev/null
+    and ((.daemon.state.fips_endpoint_peers // []) as $peers
+      | ($peers | length) == 1 and $peers[0].npub == $peer)
+  ' <<<"$current_status" >/dev/null
 }
 
 assert_secure_dns() {
-  resolvectl dns "$TUN_IFACE" | grep -Eq '(^|[[:space:]])127\.0\.0\.1([[:space:]]|$)'
-  resolvectl domain "$TUN_IFACE" | grep -Fq '~.'
+  gate_command resolvectl dns "$TUN_IFACE" \
+    | grep -Eq '(^|[[:space:]])127\.0\.0\.1([[:space:]]|$)'
+  gate_command resolvectl domain "$TUN_IFACE" | grep -Fq '~.'
 }
 
 assert_active_exit() {
@@ -407,6 +421,26 @@ dump_recovery_failure() {
   } >&2
 }
 
+recovery_command() {
+  local started="$1"
+  shift
+  local now remaining duration
+  now="$(monotonic_milliseconds)"
+  remaining="$((RECOVERY_DEADLINE_MS - (now - started)))"
+  ((remaining > 0)) || return 124
+  duration="$(awk -v milliseconds="$remaining" \
+    'BEGIN { printf "%.3fs", milliseconds / 1000 }')"
+  timeout --foreground --signal=KILL "$duration" "$@"
+}
+
+assert_active_exit_for_recovery() {
+  local expected_iface="$1"
+  local expected_pid="$2"
+  local started="$3"
+  local RECOVERY_STARTED_MS="$started"
+  assert_active_exit "$expected_iface" "$expected_pid" 1
+}
+
 observe_recovery() {
   local label="$1"
   local expected_iface="$2"
@@ -416,6 +450,7 @@ observe_recovery() {
   local probe_before wg_probe_before rebind_before endpoint_starts_before route_usable_at
   local route_usable_monotonic started now elapsed recovered_at recovered_monotonic
   local endpoint_route
+  local recovery_last_predicate=active_exit_dns_https
   rebind_before="$(rebind_count)"
   endpoint_starts_before="$(endpoint_start_count)"
   [[ "$endpoint_starts_before" == "1" ]] \
@@ -461,23 +496,24 @@ observe_recovery() {
         echo "rebind_receipts_before=$rebind_before"
         echo "route_usable_unix_milliseconds=$route_usable_at"
         echo "route_usable_monotonic_milliseconds=$route_usable_monotonic"
+        echo "recovery_last_predicate=$recovery_last_predicate"
+        echo "recovery_elapsed_milliseconds=$elapsed"
       } >&2
-      fail "$label payload/route/FIPS rebind exceeded ${RECOVERY_DEADLINE_MS}ms"
+      fail "$label recovery predicate $recovery_last_predicate exceeded ${RECOVERY_DEADLINE_MS}ms"
     fi
-    if [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$expected_iface" ]] \
-      && (( $(payload_success_count) > probe_before )) \
+    if (( $(payload_success_count) > probe_before )) \
       && (( $(wireguard_payload_success_count) > wg_probe_before )) \
       && (( $(rebind_count) == rebind_before + 1 )) \
-      && [[ "$(endpoint_start_count)" == "$endpoint_starts_before" ]] \
-      && assert_same_daemon_ready "$expected_pid"
+      && [[ "$(endpoint_start_count)" == "$endpoint_starts_before" ]]
     then
-      # The final status assertion can perform real daemon IPC. Sample again
-      # after every success predicate so a slow final check cannot underreport
-      # the enforced recovery duration.
-      now="$(monotonic_milliseconds)"
-      elapsed="$((now - started))"
-      if ((elapsed <= RECOVERY_DEADLINE_MS)); then
-        break
+      if assert_active_exit_for_recovery "$expected_iface" "$expected_pid" "$started"; then
+        # Sample after DNS and HTTPS so their recovery is part of the receipt.
+        now="$(monotonic_milliseconds)"
+        elapsed="$((now - started))"
+        if ((elapsed <= RECOVERY_DEADLINE_MS)); then
+          break
+        fi
+        recovery_last_predicate=all_predicates_completed_late
       fi
     fi
     sleep 0.025
@@ -489,7 +525,6 @@ observe_recovery() {
   ! grep -Eq 'daemon: (restarted|rebuilt) FIPS private mesh on' \
     "$STATE_DIR/daemon.stderr.log" \
     || fail "$label replaced the FIPS endpoint"
-  assert_active_exit "$expected_iface" "$expected_pid" 1
   now="$(monotonic_milliseconds)"
   elapsed="$((now - started))"
   ((elapsed <= RECOVERY_DEADLINE_MS)) \
@@ -533,6 +568,9 @@ observe_recovery() {
       rebind_receipts_after: $rebind_receipts_after,
       endpoint_starts_before: $endpoint_starts_before,
       endpoint_starts_after: $endpoint_starts_after,
+      fixture_dns_recovered: true,
+      public_dns_recovered: true,
+      verified_https: true,
       identity_npub: $identity_npub,
       tunnel_ip: $tunnel_ip,
       participant_npub: $participant_npub,

@@ -1139,7 +1139,7 @@ grep -Fq '10#$nanoseconds / 1000000' "$LINUX_GUEST" \
 if grep -Fq 'date +%s%3N' "$LINUX_GUEST"; then
   fail "Linux guest relies on unsupported date field-width semantics for milliseconds"
 fi
-final_status_line="$(grep -n '&& assert_same_daemon_ready "$expected_pid"' "$LINUX_GUEST" | cut -d: -f1)"
+final_status_line="$(grep -n 'if assert_active_exit_for_recovery ' "$LINUX_GUEST" | cut -d: -f1)"
 final_clock_line="$(grep -n 'now="$(monotonic_milliseconds)"' "$LINUX_GUEST" | tail -n 1 | cut -d: -f1)"
 receipt_clock_line="$(grep -n 'recovered_monotonic="$now"' "$LINUX_GUEST" | cut -d: -f1)"
 [[ -n "$final_status_line" && -n "$final_clock_line" && -n "$receipt_clock_line" ]] \

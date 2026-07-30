@@ -136,6 +136,9 @@ for lifecycle_proof in \
   '[string]$route.NextHop -eq [string]$Baseline.direct_next_hop' \
   '$sourceIp -ne [string]$Baseline.direct_source_ip' \
   'original Direct public source was not restored' \
+  'Assert-WindowsWireGuardDirectConfig $Binary $Config' \
+  'status --config $Config --json --discover-secs 0' \
+  'persisted nvpn configuration did not return to Direct' \
   '[switch]$AllowOwnedRepair'
 do
   grep -Fq "$lifecycle_proof" "$LIFECYCLE" \
@@ -183,6 +186,13 @@ repair_gate = lifecycle.index("if (!$AllowOwnedRepair)")
 repair_call = lifecycle.index("Repair-WindowsWireGuardOwnedResources", repair_gate)
 if repair_call < repair_gate:
     raise SystemExit("emergency resource deletion is not ownership-gated")
+
+cleanup_body = lifecycle[lifecycle.index("function Invoke-WindowsWireGuardDirectCleanup") :]
+if "& $Binary set --config $Config --exit-node= 2>$null" in cleanup_body:
+    raise SystemExit("canonical Direct restore still suppresses command failure")
+provider_cleanup = outer[outer.index("cleanup_remote_provider_config()") : outer.index("cleanup_remote_service()")]
+if "--exit-node=" in provider_cleanup:
+    raise SystemExit("provider-file cleanup still duplicates the canonical Direct restore")
 PY
 
 python3 - "$RELEASE_GATE" <<'PY'

@@ -36,10 +36,9 @@ All notable changes to this project are documented in this file.
 - Stream Linux WireGuard apply and rollback configuration directly to `wg`
   without filesystem secret files, so exit nodes work under the stock
   enforced Ubuntu AppArmor policy.
-- Bind macOS WireGuard UDP sockets to the selected physical interface and
-  install an exact endpoint bypass before the first handshake, then migrate
-  both across Wi-Fi/hotspot changes while the split-default kill switch stays
-  installed.
+- Bind macOS WireGuard UDP sockets to the selected physical interface before
+  the first handshake, then migrate that binding across Wi-Fi/hotspot changes
+  while the split-default kill switch stays installed.
 - Track exact macOS route ownership, preserve foreign routes, and retain the
   cleanup journal whenever route, DNS, forwarding, or WireGuard teardown is
   incomplete.

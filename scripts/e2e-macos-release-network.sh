@@ -183,6 +183,16 @@ flush_dns_cache() {
   /usr/bin/dscacheutil -flushcache >/dev/null 2>&1 || true
 }
 
+wait_budget_seconds() {
+  local limit="$1" remaining="$limit"
+  if (( ${WAIT_DEADLINE_SECONDS:-0} > 0 )); then
+    remaining="$((WAIT_DEADLINE_SECONDS - SECONDS))"
+    ((remaining > 0)) || return 1
+    ((remaining < limit)) || remaining="$limit"
+  fi
+  printf '%s\n' "$remaining"
+}
+
 dns_query_works() {
   local output
   [[ -n "$DNS_PROBE_HOST" ]] || return 1
@@ -197,17 +207,22 @@ dns_query_works() {
 }
 
 https_works() {
-  curl -4fsS --max-time 8 "$INTERNET_URL" >/dev/null
+  local timeout
+  timeout="$(wait_budget_seconds 8)" || return 1
+  curl -4fsS --max-time "$timeout" "$INTERNET_URL" >/dev/null
 }
 
 captured_probe_works() {
-  local payload
-  payload="$(curl -4fsS --max-time 5 "$CAPTURED_PROBE_URL")" || return 1
+  local payload timeout
+  timeout="$(wait_budget_seconds 5)" || return 1
+  payload="$(curl -4fsS --max-time "$timeout" "$CAPTURED_PROBE_URL")" || return 1
   grep -Fq "$CAPTURED_PROBE_TOKEN" <<<"$payload"
 }
 
 source_ip() {
-  curl -4fsS --max-time 8 "$SOURCE_IP_URL" | tr -d '[:space:]'
+  local timeout
+  timeout="$(wait_budget_seconds 8)" || return 1
+  curl -4fsS --max-time "$timeout" "$SOURCE_IP_URL" | tr -d '[:space:]'
 }
 
 exit_source_is_expected() {
@@ -233,6 +248,9 @@ capture_wireguard_readiness_failure() {
     printf 'wireguard_interface=%s\n' "${interface:-unavailable}"
     printf 'endpoint_route_interface=%s\n' \
       "${endpoint_interface:-unavailable}"
+    printf 'endpoint_route_state_valid=%s\n' \
+      "$(wireguard_endpoint_route_state_valid \
+        && printf true || printf false)"
     printf 'secure_dns_owned=%s\n' \
       "$(secure_dns_owned && printf true || printf false)"
     printf 'captured_probe_works=%s\n' \
@@ -266,10 +284,12 @@ capture_wireguard_readiness_failure() {
 wait_until() {
   local description="$1"
   shift
-  local attempts=$((WAIT_SECS * 5)) ignored
-  for ignored in $(seq 1 "$attempts"); do
+  local deadline="${WAIT_DEADLINE_SECONDS:-$((SECONDS + WAIT_SECS))}"
+  local WAIT_DEADLINE_SECONDS="$deadline"
+  while ((SECONDS < WAIT_DEADLINE_SECONDS)); do
     if "$@"; then
-      return 0
+      ((SECONDS <= WAIT_DEADLINE_SECONDS)) && return 0
+      break
     fi
     sleep 0.2
   done
@@ -1039,7 +1059,7 @@ record_underlay_status_on_exit() {
   stop_owned_payload "$$" || cleanup_failed=1
   stop_owned_fips_payload "$$" || cleanup_failed=1
   restore_saved_service_states || cleanup_failed=1
-  wait_for_cleanup_condition \
+  wait_until \
     "both original network-service states" saved_service_states_match \
     || cleanup_failed=1
   if [[ "$status" -ne 0 ]]; then
@@ -1250,30 +1270,17 @@ repair_owned_network_to_direct() {
   return "$failed"
 }
 
-wait_for_cleanup_condition() {
-  local description="$1"
-  shift
-  local ignored attempts=$((WAIT_SECS * 5))
-  for ignored in $(seq 1 "$attempts"); do
-    if "$@"; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  echo "cleanup did not restore $description" >&2
-  return 1
-}
-
 wait_for_saved_direct_restore() {
+  local WAIT_DEADLINE_SECONDS="$((SECONDS + WAIT_SECS))"
   saved_direct_baseline_available || {
     echo "saved Direct baseline is incomplete" >&2
     return 1
   }
-  wait_for_cleanup_condition \
+  wait_until \
     "the original route, source IP, DNS, and HTTPS" direct_state_matches \
-    && wait_for_cleanup_condition \
+    && wait_until \
       "the original semantic and per-service DNS state" exact_direct_dns_matches \
-    && wait_for_cleanup_condition \
+    && wait_until \
       "both original network-service states" saved_service_states_match
 }
 

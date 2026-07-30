@@ -156,5 +156,14 @@ if sed -n '/ios_release_network_test_command()/,/^}/p' "$RUNNER" \
 then
   fail "physical xcodebuild runner still hides exact launch diagnostics"
 fi
+diagnostics="$(
+  sed -n \
+    '/ios_release_network_write_runner_diagnostics()/,/^}/p' "$RUNNER"
+)"
+grep -Fq '"testBundleHostedByDebuggableRunner": true' <<<"$diagnostics" \
+  || fail "iOS runner receipt does not describe the hosted test bundle"
+if grep -Eq 'test_entitlements|"testBundleDebuggable": true' <<<"$diagnostics"; then
+  fail "nested iOS test bundle still requires a debug entitlement"
+fi
 
 echo "MOBILE_IOS_RELEASE_RUNNER_HARNESS_OK"

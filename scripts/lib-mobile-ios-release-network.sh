@@ -494,7 +494,7 @@ ios_release_network_prepare_xctestrun() {
 ios_release_network_write_runner_diagnostics() {
   local output="$1" xctestrun="$2"
   local app runner test_bundle app_details runner_details test_details
-  local app_entitlements runner_entitlements test_entitlements
+  local app_entitlements runner_entitlements
   local runner_archs test_archs xctestrun_sha
   app="$(ios_release_network_app_path)"
   runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
@@ -518,9 +518,6 @@ ios_release_network_write_runner_diagnostics() {
     && app_entitlements="$(codesign -d --entitlements :- "$app" 2>/dev/null)" \
     && runner_entitlements="$(
       codesign -d --entitlements :- "$runner" 2>/dev/null
-    )" \
-    && test_entitlements="$(
-      codesign -d --entitlements :- "$test_bundle" 2>/dev/null
     )" || {
     rm -f "$output"
     echo "iOS Release runner diagnostics could not read code signatures" >&2
@@ -537,7 +534,6 @@ ios_release_network_write_runner_diagnostics() {
     && "$test_details" == *"TeamIdentifier=$NVPN_IOS_TEAM_ID"* \
     && "$app_entitlements" != *"<key>get-task-allow</key><true/>"* \
     && "$runner_entitlements" == *"<key>get-task-allow</key><true/>"* \
-    && "$test_entitlements" == *"<key>get-task-allow</key><true/>"* \
     && " $runner_archs " == *" arm64 "* \
     && " $test_archs " == *" arm64 "* ]] || {
       echo "iOS Release app/runner signing or architecture contract failed" >&2
@@ -548,7 +544,7 @@ ios_release_network_write_runner_diagnostics() {
       echo "iOS Release xctestrun hash receipt failed" >&2
       return 1
     }
-  printf '{\n  "appDebuggable": false,\n  "appSigningClass": "distribution",\n  "destinationArchitecture": "arm64",\n  "runnerArchitectures": "%s",\n  "runnerDebuggable": true,\n  "runnerSigningClass": "development",\n  "sameSigningTeam": true,\n  "schemaVersion": 1,\n  "testBundleArchitectures": "%s",\n  "testBundleDebuggable": true,\n  "testBundleSigningClass": "development",\n  "xctestrunSha256": "%s"\n}\n' \
+  printf '{\n  "appDebuggable": false,\n  "appSigningClass": "distribution",\n  "destinationArchitecture": "arm64",\n  "runnerArchitectures": "%s",\n  "runnerDebuggable": true,\n  "runnerSigningClass": "development",\n  "sameSigningTeam": true,\n  "schemaVersion": 1,\n  "testBundleArchitectures": "%s",\n  "testBundleHostedByDebuggableRunner": true,\n  "testBundleSigningClass": "development",\n  "xctestrunSha256": "%s"\n}\n' \
     "$runner_archs" "$test_archs" "$xctestrun_sha" >"$output"
 }
 

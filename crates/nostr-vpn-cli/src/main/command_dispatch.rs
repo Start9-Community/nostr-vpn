@@ -394,6 +394,7 @@ async fn run_command(command: Command) -> Result<()> {
         Command::Set(args) => {
             let config_path = args.config.unwrap_or_else(default_config_path);
             let mut app = load_or_default_config(&config_path)?;
+            let previous_app = app.clone();
 
             if let Some(value) = args.network_id {
                 app.set_active_network_id(&value)?;
@@ -620,8 +621,7 @@ async fn run_command(command: Command) -> Result<()> {
             apply_devices_override(&mut app, args.devices)?;
             app.ensure_defaults();
             maybe_autoconfigure_node(&mut app);
-            app.save(&config_path)?;
-            reload_running_daemon_after_save(&config_path)?;
+            save_config_and_reload_transactionally(&config_path, &previous_app, &app)?;
 
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&app)?);

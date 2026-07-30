@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use nostr_vpn_core::config::{maybe_autoconfigure_node, normalize_nostr_pubkey};
+use nostr_vpn_core::config::{AppConfig, maybe_autoconfigure_node, normalize_nostr_pubkey};
 use nostr_vpn_core::join_delivery::queue_join_roster;
 use nostr_vpn_core::join_requests::prepare_manual_join_delivery;
 use serde_json::json;
@@ -34,6 +34,42 @@ pub(crate) fn reload_running_daemon_after_save(config_path: &Path) -> Result<()>
         crate::daemon_control_result_timeout(DaemonControlRequest::Reload),
     )
     .context("daemon failed to apply saved configuration")
+}
+
+pub(crate) fn save_config_and_reload_transactionally(
+    config_path: &Path,
+    previous: &AppConfig,
+    desired: &AppConfig,
+) -> Result<()> {
+    save_config_and_reload_with(
+        config_path,
+        previous,
+        desired,
+        reload_running_daemon_after_save,
+    )
+}
+
+fn save_config_and_reload_with(
+    config_path: &Path,
+    previous: &AppConfig,
+    desired: &AppConfig,
+    mut reload: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    let apply_error = match desired.save(config_path).and_then(|_| reload(config_path)) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if let Err(rollback_error) = previous.save(config_path) {
+        return Err(anyhow!(
+            "configuration apply failed: {apply_error:#}; durable rollback failed: {rollback_error:#}"
+        ));
+    }
+    if let Err(rollback_error) = reload(config_path) {
+        return Err(anyhow!(
+            "configuration apply failed: {apply_error:#}; previous configuration was restored but runtime rollback failed: {rollback_error:#}"
+        ));
+    }
+    Err(apply_error.context("configuration apply failed; previous configuration was restored"))
 }
 
 pub(crate) fn maybe_reload_running_daemon(config_path: &Path) {
@@ -131,10 +167,76 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use nostr_sdk::Keys;
-    use nostr_vpn_core::config::AppConfig;
+    use nostr_vpn_core::config::{AppConfig, InternetSource};
     use nostr_vpn_core::join_delivery::{join_roster_outbox_directory, load_join_rosters};
 
     use super::*;
+
+    fn transactional_config_path(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "nvpn-cli-{name}-{}-{nonce}.toml",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn failed_reload_restores_durable_previous_config_and_runtime() {
+        let config_path = transactional_config_path("transactional-set");
+        let mut previous = AppConfig::generated();
+        previous.set_internet_source(InternetSource::Direct);
+        let mut desired = previous.clone();
+        desired.set_internet_source(InternetSource::WireGuard);
+        desired.wireguard_exit.enabled = true;
+        let mut reloads = 0;
+
+        let error = save_config_and_reload_with(&config_path, &previous, &desired, |_| {
+            reloads += 1;
+            if reloads == 1 {
+                Err(anyhow!("simulated apply failure"))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("failed runtime apply must fail the set command");
+
+        assert!(format!("{error:#}").contains("simulated apply failure"));
+        assert_eq!(reloads, 2, "rollback must reload the previous runtime");
+        let restored = AppConfig::load(&config_path).expect("load restored config");
+        assert_eq!(restored.internet_source, InternetSource::Direct);
+        assert!(!restored.wireguard_exit.enabled);
+        AppConfig::delete_persisted_secrets_for_path(&config_path).expect("remove secrets");
+        fs::remove_file(config_path).expect("remove config");
+    }
+
+    #[test]
+    fn failed_reload_reports_apply_and_rollback_failures_without_config_data() {
+        let config_path = transactional_config_path("transactional-set-double-failure");
+        let previous = AppConfig::generated();
+        let mut desired = previous.clone();
+        desired.node_name = "must-not-appear-in-error".to_owned();
+        let mut reloads = 0;
+
+        let error = save_config_and_reload_with(&config_path, &previous, &desired, |_| {
+            reloads += 1;
+            Err(if reloads == 1 {
+                anyhow!("apply-sentinel")
+            } else {
+                anyhow!("rollback-sentinel")
+            })
+        })
+        .expect_err("double failure must be reported");
+        let message = format!("{error:#}");
+        assert!(message.contains("apply-sentinel"));
+        assert!(message.contains("rollback-sentinel"));
+        assert!(!message.contains("must-not-appear-in-error"));
+        assert_eq!(reloads, 2);
+        AppConfig::delete_persisted_secrets_for_path(&config_path).expect("remove secrets");
+        fs::remove_file(config_path).expect("remove config");
+    }
 
     #[tokio::test]
     async fn add_device_queues_receipt_backed_manual_join_roster() {

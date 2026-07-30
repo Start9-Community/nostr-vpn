@@ -151,11 +151,22 @@ require_tokens "$GUEST" "production daemon PID record ownership" \
   'ps -ww -p "$pid" -o command='
 require_tokens "$GUEST" "failure diagnostics survive cleanup" \
   'capture_wireguard_readiness_failure' \
+  'endpoint_route_state_valid=' \
   'wireguard-readiness-failure.txt' \
   'wireguard-readiness-routes.txt' \
   'wireguard-readiness-dns.txt' \
   'wireguard-readiness-status.json' \
   'wireguard-readiness-daemon.log'
+require_tokens "$GUEST" "wall-clock-bounded readiness waits" \
+  'local WAIT_DEADLINE_SECONDS="$((SECONDS + WAIT_SECS))"' \
+  'while ((SECONDS < WAIT_DEADLINE_SECONDS)); do' \
+  'timeout="$(wait_budget_seconds 8)"'
+if grep -Fq 'local attempts=$((WAIT_SECS * 5))' "$GUEST"; then
+  fail "macOS readiness multiplies blocking network probes by an attempt count"
+fi
+if grep -Fq 'wait_for_cleanup_condition' "$GUEST"; then
+  fail "macOS cleanup retains a second attempt-count wait implementation"
+fi
 require_tokens "$GUEST" "SIGPIPE-safe secure DNS ownership" \
   'dns="$(/usr/sbin/scutil --dns 2>/dev/null)"' \
   '<<<"$dns"'

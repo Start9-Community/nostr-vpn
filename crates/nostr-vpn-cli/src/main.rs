@@ -200,7 +200,7 @@ use crate::diagnostics::{
 };
 use crate::network_signaling::{
     RosterEditAction, maybe_reload_running_daemon, reload_running_daemon_after_save,
-    update_active_network_roster,
+    save_config_and_reload_transactionally, update_active_network_roster,
 };
 #[cfg(any(test, not(target_os = "windows")))]
 pub(crate) use crate::platform_routing::*;

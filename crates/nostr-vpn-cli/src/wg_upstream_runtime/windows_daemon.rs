@@ -179,16 +179,42 @@ async fn apply_daemon_wg_upstream_native(
     // service is alive. `WindowsNativeWireGuardTunnel::cleanup` removes
     // it after uninstalling the service.
 
+    let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
+    if let Err(error) = begin_windows_native_wireguard_handshake(
+        &tools.wg_exe,
+        &tunnel_name,
+        &config.peer_public_key,
+        handshake_deadline,
+    )
+    .await
+    {
+        return Err(with_windows_native_cleanup_error(
+            error.context("stimulate native WireGuardNT handshake"),
+            "clean up native WireGuard after handshake stimulus failure",
+            tunnel.cleanup(),
+        ));
+    }
     let handshake_completed = match wait_windows_native_wireguard_handshake(
         &tools.wg_exe,
         &tunnel_name,
         &config.peer_public_key,
-        handshake_timeout,
+        handshake_deadline,
     )
     .await
     {
         Ok(completed) => completed,
         Err(error) => {
+            let error = match restore_windows_native_wireguard_keepalive(
+                &tools.wg_exe,
+                &tunnel_name,
+                &config.peer_public_key,
+                config.persistent_keepalive_secs,
+            ) {
+                Ok(()) => error,
+                Err(restore_error) => anyhow!(
+                    "{error:#}; configured keepalive restore also failed: {restore_error:#}"
+                ),
+            };
             return Err(with_windows_native_cleanup_error(
                 error.context("query native WireGuardNT handshake"),
                 "clean up native WireGuard after handshake query failure",
@@ -196,6 +222,18 @@ async fn apply_daemon_wg_upstream_native(
             ));
         }
     };
+    if let Err(error) = restore_windows_native_wireguard_keepalive(
+        &tools.wg_exe,
+        &tunnel_name,
+        &config.peer_public_key,
+        config.persistent_keepalive_secs,
+    ) {
+        return Err(with_windows_native_cleanup_error(
+            error.context("restore configured native WireGuardNT keepalive"),
+            "clean up native WireGuard after keepalive restore failure",
+            tunnel.cleanup(),
+        ));
+    }
     if !handshake_completed {
         let error = anyhow!(
             "native WireGuardNT handshake to {} did not complete within {}s",
@@ -524,13 +562,86 @@ fn restrict_and_verify_windows_native_wireguard_acl(path: &Path, directory: bool
 }
 
 #[cfg(target_os = "windows")]
+async fn begin_windows_native_wireguard_handshake(
+    wg_exe: &Path,
+    tunnel_name: &str,
+    peer_public_key: &str,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    loop {
+        match windows_native_wireguard_has_handshake(wg_exe, tunnel_name, peer_public_key) {
+            Ok(_) => break,
+            Err(error) if tokio::time::Instant::now() >= deadline => {
+                return Err(error.context(format!(
+                    "native WireGuard interface {tunnel_name} never became queryable"
+                )));
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+    for keepalive in [0, 1] {
+        set_windows_native_wireguard_peer_keepalive(
+            wg_exe,
+            tunnel_name,
+            peer_public_key,
+            keepalive,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn restore_windows_native_wireguard_keepalive(
+    wg_exe: &Path,
+    tunnel_name: &str,
+    peer_public_key: &str,
+    configured_keepalive: u16,
+) -> Result<()> {
+    set_windows_native_wireguard_peer_keepalive(
+        wg_exe,
+        tunnel_name,
+        peer_public_key,
+        configured_keepalive,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_native_wireguard_peer_keepalive(
+    wg_exe: &Path,
+    tunnel_name: &str,
+    peer_public_key: &str,
+    keepalive: u16,
+) -> Result<()> {
+    let keepalive = keepalive.to_string();
+    let output = ProcessCommand::new(wg_exe)
+        .args([
+            "set",
+            tunnel_name,
+            "peer",
+            peer_public_key,
+            "persistent-keepalive",
+            &keepalive,
+        ])
+        .bounded_output(&format!(
+            "set native WireGuard keepalive on {tunnel_name}"
+        ))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "wg.exe keepalive update failed for {tunnel_name} with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+#[cfg(target_os = "windows")]
 async fn wait_windows_native_wireguard_handshake(
     wg_exe: &Path,
     tunnel_name: &str,
     peer_public_key: &str,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
 ) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let query_error =
             match windows_native_wireguard_has_handshake(wg_exe, tunnel_name, peer_public_key) {

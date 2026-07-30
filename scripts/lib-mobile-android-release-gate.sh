@@ -19,12 +19,9 @@ android_release_require_inputs() {
     "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" \
     "$EXPECTED_ANDROID_APP_GIT_TREE" "Android Release black-box gate" \
     || return 1
-  if [[ -n "${NVPN_BUILD_GIT_SHA:-}" \
-    && "$NVPN_BUILD_GIT_SHA" != "$EXPECTED_ANDROID_APP_GIT_HEAD" ]]
-  then
-    echo "Android Release build revision does not match the exact app checkout" >&2
-    return 1
-  fi
+  pin_exact_release_build_git_sha \
+    "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" "Android Release" \
+    || return 1
   local name
   for name in \
     ANDROID_KEYSTORE_PATH \

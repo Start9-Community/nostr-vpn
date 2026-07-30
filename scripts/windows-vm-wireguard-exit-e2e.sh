@@ -109,12 +109,7 @@ cleanup_remote_provider_config() {
   if [[ -z "$REMOTE_PROVIDER_CONFIG" ]]; then
     return
   fi
-  run_ps "\$Bin = $(ps_quote "${GUEST_BINARY:-}")
-\$Config = $(ps_quote "$GUEST_CONFIG")
-if ((Test-Path -LiteralPath \$Bin -PathType Leaf) -and (Test-Path -LiteralPath \$Config -PathType Leaf)) {
-  & \$Bin set --config \$Config '--exit-node=' 2>\$null | Out-Null
-}
-Remove-Item -Force -LiteralPath $(ps_quote "$REMOTE_PROVIDER_CONFIG") -ErrorAction SilentlyContinue" \
+  run_ps "Remove-Item -Force -LiteralPath $(ps_quote "$REMOTE_PROVIDER_CONFIG") -ErrorAction SilentlyContinue" \
     >/dev/null 2>&1 || true
 }
 
