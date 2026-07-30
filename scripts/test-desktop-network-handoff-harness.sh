@@ -1374,9 +1374,11 @@ sed -n \
   '/^assert_active_exit() {$/,/^}$/p; /^assert_active_exit_for_recovery() {$/,/^}$/p' \
   "$LINUX_GUEST" >"$recovery_contract"
 require_tokens "$recovery_contract" "artifact-preserving recovery probe" \
-  'local public_probe_already_passed="${4:-0}"' \
-  'if [[ "$public_probe_already_passed" != "1" ]]; then' \
+  'local https_already_passed="${4:-0}"' \
+  'if [[ "$https_already_passed" == "1" ]]; then' \
+  'resolve_name_without_flush "$(probe_host)" || return 1' \
   'resolve_name "$(probe_host)" || return 1' \
+  'if [[ "$https_already_passed" != "1" ]]; then' \
   'test_https || return 1' \
   'assert_active_exit "$expected_iface" "$expected_pid" 1 1'
 https_counter_line="$(grep -nF 'monotonic_milliseconds >>"$STATE_DIR/wireguard-payload.log"' \

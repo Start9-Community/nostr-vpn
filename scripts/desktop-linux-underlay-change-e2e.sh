@@ -249,6 +249,11 @@ flush_dns_cache() {
 resolve_name() {
   local name="$1"
   flush_dns_cache
+  resolve_name_without_flush "$name"
+}
+
+resolve_name_without_flush() {
+  local name="$1"
   gate_command resolvectl query --type=A "$name" >/dev/null 2>&1 \
     && gate_command getent ahostsv4 "$name" >/dev/null 2>&1
 }
@@ -368,7 +373,7 @@ assert_active_exit() {
   local expected_iface="$1"
   local expected_pid="$2"
   local require_fixture="${3:-1}"
-  local public_probe_already_passed="${4:-0}"
+  local https_already_passed="${4:-0}"
   ACTIVE_EXIT_LAST_PREDICATE=daemon_identity
   assert_same_daemon_ready "$expected_pid" || return 1
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_default_route
@@ -385,9 +390,13 @@ assert_active_exit() {
     ACTIVE_EXIT_LAST_PREDICATE=fixture_dns
     resolve_fixture || return 1
   fi
-  if [[ "$public_probe_already_passed" != "1" ]]; then
-    ACTIVE_EXIT_LAST_PREDICATE=public_dns
+  ACTIVE_EXIT_LAST_PREDICATE=public_dns
+  if [[ "$https_already_passed" == "1" ]]; then
+    resolve_name_without_flush "$(probe_host)" || return 1
+  else
     resolve_name "$(probe_host)" || return 1
+  fi
+  if [[ "$https_already_passed" != "1" ]]; then
     ACTIVE_EXIT_LAST_PREDICATE=https
     test_https || return 1
   fi
@@ -478,8 +487,8 @@ assert_active_exit_for_recovery() {
   local expected_pid="$2"
   local started="$3"
   local RECOVERY_STARTED_MS="$started"
-  # The recovery caller has already observed a successful public-name HTTPS
-  # request in wireguard_payload_loop, so only recheck exit DNS ownership here.
+  # The fixture lookup just flushed the cache, while wireguard_payload_loop
+  # already proved HTTPS; retain a fresh public DNS query without a second flush.
   assert_active_exit "$expected_iface" "$expected_pid" 1 1
 }
 
