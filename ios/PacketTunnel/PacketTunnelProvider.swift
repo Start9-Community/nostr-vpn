@@ -661,8 +661,19 @@ private struct MobileTunnelConfig {
 
     private static func endpointHost(from value: String) -> String? {
         var endpoint = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if endpoint.hasPrefix("tcp:") || endpoint.hasPrefix("udp:") {
+        if endpoint.hasPrefix("websocket:") {
+            endpoint = String(endpoint.dropFirst("websocket:".count))
+        } else if endpoint.hasPrefix("tcp:") || endpoint.hasPrefix("udp:") {
             endpoint = String(endpoint.dropFirst(4))
+        } else if endpoint.hasPrefix("tor:") || endpoint.hasPrefix("webrtc:") {
+            return nil
+        }
+        if endpoint.contains("://"),
+           let components = URLComponents(string: endpoint),
+           let host = components.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !host.isEmpty
+        {
+            return host
         }
         if endpoint.hasPrefix("["),
            let close = endpoint.firstIndex(of: "]") {
@@ -670,7 +681,7 @@ private struct MobileTunnelConfig {
             return host.isEmpty ? nil : String(host)
         }
         guard let colon = endpoint.lastIndex(of: ":") else {
-            return nil
+            return endpoint.isEmpty ? nil : endpoint
         }
         let host = endpoint[..<colon]
         return host.isEmpty ? nil : String(host)
