@@ -36,12 +36,21 @@ All notable changes to this project are documented in this file.
 - Stream Linux WireGuard apply and rollback configuration directly to `wg`
   without filesystem secret files, so exit nodes work under the stock
   enforced Ubuntu AppArmor policy.
+- Derive and pin the Linux endpoint-bypass source address when a replacement
+  default route omits `prefsrc`, keeping FIPS, WireGuard, DNS, and HTTPS on the
+  new underlay.
 - Bind macOS WireGuard UDP sockets to the selected physical interface before
   the first handshake, then migrate that binding across Wi-Fi/hotspot changes
   while the split-default kill switch stays installed.
+- Route macOS exit DNS through an owned System Configuration resolver state
+  so ordinary system lookups use the secure local stub, with transactional
+  rollback and crash cleanup.
 - Track exact macOS route ownership, preserve foreign routes, and retain the
   cleanup journal whenever route, DNS, forwarding, or WireGuard teardown is
   incomplete.
+- Parse transport-tagged FIPS WebSocket endpoints into a valid iOS Packet
+  Tunnel remote host instead of passing the transport prefix to Network
+  Extension.
 - Complete QR and manual joins only after the joining device applies the
   signed roster, support both admin/joiner directions across desktop and
   mobile, and make mobile QR codes use the available screen width.
