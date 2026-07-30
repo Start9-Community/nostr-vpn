@@ -12,6 +12,7 @@ param(
   [string]$ExpectedDnsProbeIp = "",
   [string]$WireGuardEndpointHost = "",
   [string]$WireGuardInterface = "nvpn-wg-exit",
+  [string]$DirectStatePath = "",
   [int]$WaitSeconds = 60,
   [int]$SettleSeconds = 3
 )
@@ -20,6 +21,12 @@ param(
 # Run only on a disposable elevated VM. The profile remains external to the
 # repository and this script never prints its contents.
 $ErrorActionPreference = "Stop"
+$lifecycleLibrary = Join-Path `
+  $PSScriptRoot "e2e-windows-wireguard-direct.lib.ps1"
+if (!(Test-Path -LiteralPath $lifecycleLibrary -PathType Leaf)) {
+  throw "Windows WireGuard lifecycle library is missing"
+}
+. $lifecycleLibrary
 
 function Invoke-Nvpn {
   param([string[]]$Arguments)
@@ -27,55 +34,6 @@ function Invoke-Nvpn {
   if ($LASTEXITCODE -ne 0) {
     throw "nvpn $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
   }
-}
-
-function Get-BestInternetRoute {
-  $route = Find-NetRoute -RemoteIPAddress "1.1.1.1" -ErrorAction Stop |
-    Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" } |
-    Select-Object -First 1
-  if (!$route) {
-    throw "Windows has no best IPv4 Internet route"
-  }
-  $route
-}
-
-function Test-ExternalHttps {
-  # Windows' built-in curl uses Schannel. Its strict certificate-revocation
-  # fetch can stall behind a privacy VPN even when TCP, DNS, and verified TLS
-  # are healthy. Best-effort still verifies the certificate and fails real
-  # routing/TLS errors without turning an unreachable CRL into a false outage.
-  & curl.exe -4 --ssl-revoke-best-effort --fail --silent `
-    --max-time 12 --output NUL $ProbeUrl
-  $LASTEXITCODE -eq 0
-}
-
-function Test-ExternalDns {
-  try {
-    $hostName = ([Uri]$ProbeUrl).DnsSafeHost
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-    $addresses = [Net.Dns]::GetHostAddresses($hostName) |
-      Where-Object { $_.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork }
-    @($addresses).Count -gt 0
-  }
-  catch {
-    $false
-  }
-}
-
-function Get-PublicIpv4 {
-  $value = [string](& curl.exe -4 --fail --silent --show-error `
-    --max-time 12 $SourceIpUrl)
-  if ($LASTEXITCODE -ne 0) {
-    return $null
-  }
-  $parsed = $null
-  if (
-    ![Net.IPAddress]::TryParse($value.Trim(), [ref]$parsed) -or
-    $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork
-  ) {
-    return $null
-  }
-  $parsed.ToString()
 }
 
 function Test-WireGuardDns {
@@ -96,58 +54,6 @@ function Test-WireGuardDns {
   catch {
     $false
   }
-}
-
-function Get-NvpnExitDnsRules {
-  @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.DisplayName -eq "nostr-vpn secure DNS" -or
-      $_.Comment -eq "nostr-vpn authenticated DNS-over-HTTPS stub"
-    })
-}
-
-function Get-NativeWireGuardArtifacts {
-  $root = Join-Path $env:ProgramData "nostr-vpn\wireguard"
-  if (!(Test-Path -LiteralPath $root -PathType Container)) {
-    return @()
-  }
-  @(
-    Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop |
-      ForEach-Object { $_.FullName }
-  )
-}
-
-function Get-EndpointBypassRoutes {
-  if ([string]::IsNullOrWhiteSpace($WireGuardEndpointHost)) {
-    return @()
-  }
-  $address = $null
-  if (![Net.IPAddress]::TryParse($WireGuardEndpointHost, [ref]$address)) {
-    throw "WireGuard fixture endpoint must be a literal IP address"
-  }
-  $family = if (
-    $address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork
-  ) {
-    "IPv4"
-  } else {
-    "IPv6"
-  }
-  $prefix = if ($family -eq "IPv4") {
-    "$($address.ToString())/32"
-  } else {
-    "$($address.ToString())/128"
-  }
-  @(
-    Get-NetRoute -AddressFamily $family -DestinationPrefix $prefix `
-      -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
-      ForEach-Object {
-        "{0}|{1}|{2}|{3}" -f `
-          $_.DestinationPrefix,
-          $_.InterfaceIndex,
-          $_.NextHop,
-          $_.RouteMetric
-      }
-  )
 }
 
 function Wait-ForCondition {
@@ -177,36 +83,36 @@ foreach ($path in @($Binary, $Config, $WireGuardConfig)) {
   }
 }
 
-$directRoute = Get-BestInternetRoute
-$directInterfaceIndex = [uint32]$directRoute.InterfaceIndex
-$directInterfaceAlias = [string]$directRoute.InterfaceAlias
-$directNextHop = [string]$directRoute.NextHop
-if (!(Test-ExternalDns) -or !(Test-ExternalHttps)) {
-  throw "external DNS or HTTPS does not work before the test on Direct"
+$ownsDirectState = [string]::IsNullOrWhiteSpace($DirectStatePath)
+if ($ownsDirectState) {
+  $DirectStatePath = Join-Path `
+    $env:TEMP `
+    ("nvpn-wg-direct-{0}-{1}.json" -f $PID, [Guid]::NewGuid().ToString("N"))
+  $directBaseline = Save-WindowsWireGuardDirectBaseline `
+    $DirectStatePath `
+    $WireGuardInterface `
+    $WireGuardEndpointHost `
+    $ProbeUrl `
+    $SourceIpUrl
+} else {
+  $directBaseline = Read-WindowsWireGuardDirectBaseline `
+    $DirectStatePath `
+    $WireGuardInterface `
+    $WireGuardEndpointHost
+  Assert-WindowsWireGuardDirectRestored `
+    $directBaseline `
+    $WireGuardInterface `
+    $WireGuardEndpointHost `
+    $ProbeUrl `
+    $SourceIpUrl
 }
-$directSourceIp = Get-PublicIpv4
-if ([string]::IsNullOrWhiteSpace($directSourceIp)) {
-  throw "Direct did not return a valid public IPv4 source"
-}
-if ((Get-NvpnExitDnsRules).Count -ne 0) {
-  throw "nostr-vpn exit DNS policy already exists before the WireGuard test"
-}
-$wireGuardServiceName = "WireGuardTunnel`$$WireGuardInterface"
-if (
-  Get-Service -Name $wireGuardServiceName -ErrorAction SilentlyContinue
-) {
-  throw "candidate WireGuard service already exists before the test"
-}
-if (
-  Get-NetAdapter -Name $WireGuardInterface -IncludeHidden `
-    -ErrorAction SilentlyContinue
-) {
-  throw "candidate WireGuard adapter already exists before the test"
-}
-$baselineNativeArtifacts = @(Get-NativeWireGuardArtifacts)
-$baselineEndpointRoutes = @(Get-EndpointBypassRoutes)
+$directInterfaceIndex = [uint32]$directBaseline.direct_interface_index
+$directInterfaceAlias = [string]$directBaseline.direct_interface_alias
+$directNextHop = [string]$directBaseline.direct_next_hop
+$directSourceIp = [string]$directBaseline.direct_source_ip
 
 $wireGuardInterfaceIndex = $null
+$directCleanupComplete = $false
 try {
   $wireGuardTimer = [Diagnostics.Stopwatch]::StartNew()
   Invoke-Nvpn @(
@@ -215,8 +121,8 @@ try {
     "--wireguard-exit-enabled", "true"
   )
   Wait-ForCondition "WireGuard to own the best route with external DNS and HTTPS working" {
-    $route = Get-BestInternetRoute
-    $sourceIp = Get-PublicIpv4
+    $route = Get-WindowsWireGuardBestInternetRoute
+    $sourceIp = Get-WindowsWireGuardPublicIpv4 $SourceIpUrl
     $sourceMatches = if (
       [string]::IsNullOrWhiteSpace($ExpectedExitSourceIp)
     ) {
@@ -226,26 +132,26 @@ try {
       $sourceIp -eq $ExpectedExitSourceIp
     }
     $route.InterfaceIndex -ne $directInterfaceIndex -and
-      (Test-ExternalDns) -and
-      (Test-ExternalHttps) -and
+      (Test-WindowsWireGuardExternalDns $ProbeUrl) -and
+      (Test-WindowsWireGuardExternalHttps $ProbeUrl) -and
       (Test-WireGuardDns) -and
       $sourceMatches
   }
-  $wireGuardRoute = Get-BestInternetRoute
+  $wireGuardRoute = Get-WindowsWireGuardBestInternetRoute
   $wireGuardInterfaceIndex = [uint32]$wireGuardRoute.InterfaceIndex
 
   # Catch delayed route reconciliation that used to invalidate a live tunnel.
   Start-Sleep -Seconds $SettleSeconds
-  $settledRoute = Get-BestInternetRoute
+  $settledRoute = Get-WindowsWireGuardBestInternetRoute
   if (
     $settledRoute.InterfaceIndex -ne $wireGuardInterfaceIndex -or
-    !(Test-ExternalDns) -or
-    !(Test-ExternalHttps) -or
+    !(Test-WindowsWireGuardExternalDns $ProbeUrl) -or
+    !(Test-WindowsWireGuardExternalHttps $ProbeUrl) -or
     !(Test-WireGuardDns)
   ) {
     throw "WireGuard route, source, DNS, or HTTPS failed after the settle interval"
   }
-  $wireGuardSourceIp = Get-PublicIpv4
+  $wireGuardSourceIp = Get-WindowsWireGuardPublicIpv4 $SourceIpUrl
   if (
     (![string]::IsNullOrWhiteSpace($ExpectedExitSourceIp) -and
       $wireGuardSourceIp -ne $ExpectedExitSourceIp) -or
@@ -254,7 +160,7 @@ try {
   ) {
     throw "public Internet did not use the real WireGuard exit source"
   }
-  if ((Get-NvpnExitDnsRules).Count -eq 0) {
+  if ((Get-WindowsWireGuardExitDnsRules).Count -eq 0) {
     throw "nostr-vpn exit DNS policy was not installed during WireGuard"
   }
   $wireGuardElapsed = [Math]::Round($wireGuardTimer.Elapsed.TotalSeconds, 2)
@@ -264,12 +170,12 @@ try {
   # --option=value form to express Direct reliably.
   Invoke-Nvpn @("set", "--config", $Config, "--exit-node=")
   Wait-ForCondition "the original Direct route with external DNS and HTTPS" {
-    $route = Get-BestInternetRoute
+    $route = Get-WindowsWireGuardBestInternetRoute
       $route.InterfaceIndex -eq $directInterfaceIndex -and
       $route.NextHop -eq $directNextHop -and
-      (Test-ExternalDns) -and
-      (Test-ExternalHttps) -and
-      (Get-PublicIpv4) -eq $directSourceIp
+      (Test-WindowsWireGuardExternalDns $ProbeUrl) -and
+      (Test-WindowsWireGuardExternalHttps $ProbeUrl) -and
+      (Get-WindowsWireGuardPublicIpv4 $SourceIpUrl) -eq $directSourceIp
   }
   if ($wireGuardInterfaceIndex) {
     $staleDefault = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" `
@@ -279,25 +185,16 @@ try {
       throw "WireGuard default route remains after switching back to Direct"
     }
   }
-  Wait-ForCondition "nostr-vpn exit DNS policy cleanup" {
-    (Get-NvpnExitDnsRules).Count -eq 0
-  }
-  Wait-ForCondition "native WireGuard service and adapter cleanup" {
-    !(Get-Service -Name $wireGuardServiceName -ErrorAction SilentlyContinue) -and
-      !(Get-NetAdapter -Name $WireGuardInterface -IncludeHidden `
-        -ErrorAction SilentlyContinue)
-  }
-  $remainingArtifacts = @(Get-NativeWireGuardArtifacts)
-  if (@(Compare-Object $baselineNativeArtifacts $remainingArtifacts).Count -ne 0) {
-    throw "native WireGuard config or ownership artifact leaked after Direct"
-  }
-  $remainingEndpointRoutes = @(Get-EndpointBypassRoutes)
-  if (
-    @(Compare-Object $baselineEndpointRoutes $remainingEndpointRoutes).Count `
-      -ne 0
-  ) {
-    throw "WireGuard endpoint bypass route leaked after Direct"
-  }
+  Invoke-WindowsWireGuardDirectCleanup `
+    $Binary `
+    $Config `
+    $DirectStatePath `
+    $WireGuardInterface `
+    $WireGuardEndpointHost `
+    $ProbeUrl `
+    $SourceIpUrl `
+    $WaitSeconds | Out-Null
+  $directCleanupComplete = $true
   $directElapsed = [Math]::Round($directTimer.Elapsed.TotalSeconds, 2)
 
   Write-Output "WINDOWS_WG_DIRECT_E2E_OK"
@@ -305,6 +202,21 @@ try {
   Write-Output "Direct route, source, DNS, and HTTPS restored on $directInterfaceAlias after ${directElapsed}s"
 }
 finally {
-  # Best-effort fail-safe. This changes only the disposable test VM.
-  & $Binary set --config $Config --exit-node= 2>$null | Out-Null
+  if (!$directCleanupComplete) {
+    Invoke-WindowsWireGuardDirectCleanup `
+      $Binary `
+      $Config `
+      $DirectStatePath `
+      $WireGuardInterface `
+      $WireGuardEndpointHost `
+      $ProbeUrl `
+      $SourceIpUrl `
+      $WaitSeconds `
+      -AllowOwnedRepair | Out-Null
+    $directCleanupComplete = $true
+  }
+  if ($ownsDirectState -and $directCleanupComplete) {
+    Remove-Item -Force -LiteralPath $DirectStatePath `
+      -ErrorAction SilentlyContinue
+  }
 }

@@ -30,7 +30,9 @@ SOURCE_IP_URL="${NVPN_WINDOWS_E2E_SOURCE_IP_URL:-https://api.ipify.org}"
 WAIT_SECS="${NVPN_WINDOWS_E2E_WAIT_SECS:-60}"
 SETTLE_SECS="${NVPN_WINDOWS_E2E_SETTLE_SECS:-3}"
 REMOTE_PROVIDER_CONFIG=""
+REMOTE_DIRECT_STATE=""
 REMOTE_SERVICE_OWNED=0
+WIREGUARD_INTERFACE="nvpn-wg-exit"
 FIXTURE_HOST="${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-}"
 HOST_PORT="${NVPN_WINDOWS_WG_FIXTURE_PORT:-51893}"
 TUNNEL_SERVER_IP="${NVPN_WINDOWS_WG_SERVER_IP:-10.99.89.1}"
@@ -124,12 +126,24 @@ cleanup_remote_service() {
   if ! run_ps "\$ErrorActionPreference = 'Stop'
 \$Bin = $(ps_quote "$GUEST_BINARY")
 \$Config = $(ps_quote "$GUEST_CONFIG")
+\$StatePath = $(ps_quote "$REMOTE_DIRECT_STATE")
+\$WireGuardInterface = $(ps_quote "$WIREGUARD_INTERFACE")
+\$EndpointHost = $(ps_quote "$ENDPOINT_HOST")
+\$LifecycleLibrary = Join-Path $(ps_quote "$GUEST_REPO") 'scripts\\e2e-windows-wireguard-direct.lib.ps1'
 if (!(Test-Path -LiteralPath \$Bin -PathType Leaf)) {
   throw \"exact Windows cleanup binary is missing: \$Bin\"
 }
-if (Test-Path -LiteralPath \$Config -PathType Leaf) {
-  & \$Bin set --config \$Config '--exit-node=' 2>\$null | Out-Null
+if (
+  [string]::IsNullOrWhiteSpace(\$StatePath) -or
+  !(Test-Path -LiteralPath \$StatePath -PathType Leaf)
+) {
+  throw 'owned Windows WireGuard cleanup lost its Direct baseline'
 }
+if (!(Test-Path -LiteralPath \$LifecycleLibrary -PathType Leaf)) {
+  throw 'canonical Windows WireGuard cleanup library is missing'
+}
+. \$LifecycleLibrary
+Invoke-WindowsWireGuardDirectCleanup -Binary \$Bin -Config \$Config -StatePath \$StatePath -WireGuardInterface \$WireGuardInterface -EndpointHost \$EndpointHost -ProbeUrl $(ps_quote "$PROBE_URL") -SourceIpUrl $(ps_quote "$SOURCE_IP_URL") -WaitSeconds 20 -AllowOwnedRepair | Out-Null
 if (Get-Service -Name 'NvpnService' -ErrorAction SilentlyContinue) {
   & \$Bin service uninstall
   if (\$LASTEXITCODE -ne 0) { throw 'exact Windows service uninstall failed' }
@@ -140,7 +154,7 @@ do {
   \$Processes = @(Get-Process -Name 'nvpn' -ErrorAction SilentlyContinue)
   \$Adapters = @(
     Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
-      Where-Object { \$_.Name -eq 'nvpn' -and \$_.Status -eq 'Up' }
+      Where-Object { \$_.Name -eq 'nvpn' }
   )
   if (!\$Service -and \$Processes.Count -eq 0 -and \$Adapters.Count -eq 0) { break }
   Start-Sleep -Milliseconds 250
@@ -160,14 +174,13 @@ if (
 ) {
   throw 'Windows release lane did not restore its service, process, adapter, and NRPT baseline'
 }
-Resolve-DnsName example.com -Type A -ErrorAction Stop | Out-Null
-\$Response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 $(ps_quote "$PROBE_URL")
-if ([int]\$Response.StatusCode -ne 200) {
-  throw \"Windows direct HTTPS did not recover: \$([int]\$Response.StatusCode)\"
-}" >/dev/null
+\$Baseline = Read-WindowsWireGuardDirectBaseline \$StatePath \$WireGuardInterface \$EndpointHost
+Assert-WindowsWireGuardDirectRestored \$Baseline \$WireGuardInterface \$EndpointHost $(ps_quote "$PROBE_URL") $(ps_quote "$SOURCE_IP_URL")
+Remove-Item -Force -LiteralPath \$StatePath" >/dev/null
   then
     return 1
   fi
+  REMOTE_DIRECT_STATE=""
   REMOTE_SERVICE_OWNED=0
 }
 
@@ -177,6 +190,17 @@ cleanup() {
   if ! cleanup_remote_service; then
     echo "Windows exact service/network baseline cleanup failed" >&2
     cleanup_failed=1
+  fi
+  if [[ -n "$REMOTE_DIRECT_STATE" && "$REMOTE_SERVICE_OWNED" -eq 0 ]]; then
+    if run_ps "Remove-Item -Force -LiteralPath $(ps_quote "$REMOTE_DIRECT_STATE") -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $(ps_quote "$REMOTE_DIRECT_STATE")) { exit 1 }" \
+      >/dev/null 2>&1
+    then
+      REMOTE_DIRECT_STATE=""
+    else
+      echo "Windows Direct baseline state survived cleanup" >&2
+      cleanup_failed=1
+    fi
   fi
   if [[ -n "$REMOTE_PROVIDER_CONFIG" ]]; then
     cleanup_remote_provider_config
@@ -376,7 +400,7 @@ run_ps "\$ErrorActionPreference = 'Stop'
 \$Processes = @(Get-Process -Name 'nvpn' -ErrorAction SilentlyContinue)
 \$Adapters = @(
   Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
-    Where-Object { \$_.Name -eq 'nvpn' -and \$_.Status -eq 'Up' }
+    Where-Object { \$_.Name -eq 'nvpn' }
 )
 \$Rules = @(
   Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
@@ -427,6 +451,15 @@ fi
 
 REMOTE_PROVIDER_CONFIG="C:\\Windows\\Temp\\nvpn-provider-wg-e2e-$$-$RANDOM.conf"
 copy_to_guest "$PROVIDER_CONFIG" "$REMOTE_PROVIDER_CONFIG"
+REMOTE_DIRECT_STATE="C:\\Windows\\Temp\\nvpn-wg-direct-state-$$-$RANDOM.json"
+
+run_ps "\$ErrorActionPreference = 'Stop'
+\$LifecycleLibrary = Join-Path $(ps_quote "$GUEST_REPO") 'scripts\\e2e-windows-wireguard-direct.lib.ps1'
+if (!(Test-Path -LiteralPath \$LifecycleLibrary -PathType Leaf)) {
+  throw 'canonical Windows WireGuard preflight library is missing'
+}
+. \$LifecycleLibrary
+Save-WindowsWireGuardDirectBaseline -StatePath $(ps_quote "$REMOTE_DIRECT_STATE") -WireGuardInterface $(ps_quote "$WIREGUARD_INTERFACE") -EndpointHost $(ps_quote "$ENDPOINT_HOST") -ProbeUrl $(ps_quote "$PROBE_URL") -SourceIpUrl $(ps_quote "$SOURCE_IP_URL") | Out-Null"
 
 if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
   WG_BEFORE="$(mobile_wg_fixture_wg_bytes "$CONTAINER" | awk '{ print ($1 + 0) + ($2 + 0) }')"
@@ -486,12 +519,16 @@ try {
     -DnsProbeName $(ps_quote "$DNS_PROBE_NAME") \
     -ExpectedDnsProbeIp $(ps_quote "$EXPECTED_DNS_IP") \
     -WireGuardEndpointHost $(ps_quote "$ENDPOINT_HOST") \
+    -WireGuardInterface $(ps_quote "$WIREGUARD_INTERFACE") \
+    -DirectStatePath $(ps_quote "$REMOTE_DIRECT_STATE") \
     -WaitSeconds $WAIT_SECS \
     -SettleSeconds $SETTLE_SECS
   if (\$LASTEXITCODE -ne 0) { throw 'Windows Direct/WireGuard/Direct e2e failed' }
 }
 finally {
-  & \$Bin set --config \$Config '--exit-node=' 2>\$null | Out-Null
+  \$LifecycleLibrary = Join-Path $(ps_quote "$GUEST_REPO") 'scripts\\e2e-windows-wireguard-direct.lib.ps1'
+  . \$LifecycleLibrary
+  Invoke-WindowsWireGuardDirectCleanup -Binary \$Bin -Config \$Config -StatePath $(ps_quote "$REMOTE_DIRECT_STATE") -WireGuardInterface $(ps_quote "$WIREGUARD_INTERFACE") -EndpointHost $(ps_quote "$ENDPOINT_HOST") -ProbeUrl $(ps_quote "$PROBE_URL") -SourceIpUrl $(ps_quote "$SOURCE_IP_URL") -WaitSeconds 20 -AllowOwnedRepair | Out-Null
 }"
 
 if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
