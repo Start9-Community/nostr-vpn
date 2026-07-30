@@ -771,16 +771,14 @@ prep = [
     '"Linux platform UI"',
 ]
 prep_positions = [main.index(item) for item in prep]
-static_preflight = main.index("run_release_gate_static_preflight")
-if any(position >= static_preflight for position in prep_positions):
-    raise SystemExit("an isolated desktop prep lane starts after static preflight")
-
-joins = [
-    'release_gate_parallel_wait "$windows_lane"',
-    'release_gate_parallel_wait "$linux_platform_lane"',
-    'release_gate_parallel_wait "$macos_platform_lane"',
+host_validation = main.index('"Host static and Rust validation"')
+if any(position >= host_validation for position in prep_positions):
+    raise SystemExit("an isolated desktop lane starts after host validation")
+join_positions = [
+    main.index(
+        'release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}"'
+    )
 ]
-join_positions = [main.index(item) for item in joins]
 order = [
     "run_desktop_app_launch_smokes",
     "run_linux_exclusive_desktop_gates",
