@@ -1177,31 +1177,38 @@ program = section.split('awk -v marker="$marker" \'\n', 1)[1].split(
 
 
 def accepts(*lines):
-    result = subprocess.run(
+    return subprocess.run(
         ["awk", "-v", "marker=fixture-cut", program],
         input="\n".join(lines) + "\n",
         text=True,
         check=False,
-    )
-    return result.returncode == 0
+    ).returncode == 0
 
 
 marker = "NVPN_E2E_MARKER fixture-cut"
-change = "network change detected; refreshing FIPS endpoint state"
-rebound = "fips: 1 underlay carrier(s) rebound"
-refreshed = "fips: refreshed FIPS private mesh paths"
-restart = "fips: restarted FIPS private mesh"
+change = "daemon: network change detected; refreshing FIPS endpoint state"
+rebound = (
+    "daemon: FIPS underlay carrier(s) rebound on utun100 "
+    "after network change (2)"
+)
+refresh = (
+    "daemon: refreshed FIPS private mesh paths on utun100 "
+    "after network change (2 direct probe(s) started)"
+)
+restart = "daemon: restarted FIPS private mesh on utun100"
 
-if not accepts(marker, change, rebound, refreshed):
-    raise SystemExit("separate carrier-rebound and path-refresh receipts were rejected")
-if accepts(marker, change, refreshed):
-    raise SystemExit("network-change refresh passed without a carrier rebound")
-if accepts(marker, change, rebound):
-    raise SystemExit("network-change refresh passed without a path refresh")
-if accepts(marker, change, rebound, refreshed, restart):
-    raise SystemExit("network-change refresh accepted an endpoint restart")
-if accepts(change, rebound, refreshed, marker):
-    raise SystemExit("network-change refresh accepted receipts before its marker")
+if not accepts(marker, change, rebound, refresh):
+    raise SystemExit("ordered nonzero rebind and refresh receipts were rejected")
+for invalid in (
+    (marker, change, refresh, rebound),
+    (marker, change, rebound.replace("(2)", "(0)"), refresh),
+    (marker, change, rebound, refresh.replace("(2 direct", "(0 direct")),
+    (marker, change, rebound),
+    (marker, change, rebound, refresh, restart),
+    (change, rebound, refresh, marker),
+):
+    if accepts(*invalid):
+        raise SystemExit(f"invalid network-change receipts were accepted: {invalid}")
 PY
 }
 

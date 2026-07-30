@@ -181,9 +181,27 @@ wireguard_payload_loop() {
   done
 }
 
+wireguard_endpoint_route_matches() {
+  local route_json="$1"
+  local expected_iface="$2"
+  local expected_gateway="$3"
+  local expected_source="$4"
+  local host="$5"
+  jq -e \
+    --arg dev "$expected_iface" \
+    --arg gateway "$expected_gateway" \
+    --arg source "$expected_source" \
+    --arg host "$host" \
+    'length == 1
+     and (.[0].dst == $host or .[0].dst == ($host + "/32"))
+     and .[0].dev == $dev
+     and .[0].gateway == $gateway
+     and .[0].prefsrc == $source' <<<"$route_json" >/dev/null
+}
+
 assert_wireguard_endpoint_route() {
   local expected_iface="$1"
-  local host expected_gateway expected_source
+  local host expected_gateway expected_source route_json
   host="$(endpoint_host)"
   [[ -s "$CLEANUP_JOURNAL" ]] || return 1
   expected_gateway="$(
@@ -207,17 +225,9 @@ assert_wireguard_endpoint_route() {
       | jq -er '.[].addr_info[] | select(.family == "inet" and .scope == "global") | .local' \
       | head -n1
   )"
-  gate_command ip -j -4 route show exact "$host/32" \
-    | jq -e \
-      --arg dev "$expected_iface" \
-      --arg gateway "$expected_gateway" \
-      --arg source "$expected_source" \
-      --arg host "$host" \
-      'length == 1
-       and (.[0].dst == $host or .[0].dst == ($host + "/32"))
-       and .[0].dev == $dev
-       and .[0].gateway == $gateway
-       and .[0].prefsrc == $source' >/dev/null
+  route_json="$(gate_command ip -j -4 route show exact "$host/32")"
+  wireguard_endpoint_route_matches \
+    "$route_json" "$expected_iface" "$expected_gateway" "$expected_source" "$host"
 }
 
 monotonic_milliseconds() {
@@ -335,7 +345,7 @@ assert_same_daemon_ready() {
     --arg peer "$PEER_NPUB" '
     .status_source == "daemon"
     and .device_id == $npub
-    and .tunnel_ip == $tunnel_ip
+    and (.tunnel_ip | split("/")[0]) == $tunnel_ip
     and .daemon.running == true
     and .daemon.pid == $pid
     and .daemon.state.mesh_ready == true
@@ -352,21 +362,33 @@ assert_secure_dns() {
   gate_command resolvectl domain "$TUN_IFACE" | grep -Fq '~.'
 }
 
+ACTIVE_EXIT_LAST_PREDICATE=not_started
+
 assert_active_exit() {
   local expected_iface="$1"
   local expected_pid="$2"
   local require_fixture="${3:-1}"
+  ACTIVE_EXIT_LAST_PREDICATE=daemon_identity
   assert_same_daemon_ready "$expected_pid" || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=wireguard_default_route
   [[ "$(route_dev 1.1.1.1)" == "$WG_IFACE" ]] || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=wireguard_endpoint_interface
   [[ "$(route_dev "$(endpoint_host)")" == "$expected_iface" ]] || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=wireguard_endpoint_tuple
   assert_wireguard_endpoint_route "$expected_iface" || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=wireguard_handshake
   wireguard_handshake_active || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=secure_dns
   assert_secure_dns || return 1
   if [[ "$require_fixture" == "1" ]]; then
+    ACTIVE_EXIT_LAST_PREDICATE=fixture_dns
     resolve_fixture || return 1
   fi
+  ACTIVE_EXIT_LAST_PREDICATE=public_dns
   resolve_name "$(probe_host)" || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=https
   test_https || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=active_exit_ready
 }
 
 assert_single_nvpn_process() {
@@ -377,22 +399,37 @@ assert_single_nvpn_process() {
     || fail "expected exactly one nvpn process ($expected_pid), found: ${processes:-none}"
 }
 
+initial_ready() {
+  local primary_iface="$1"
+  local expected_pid="$2"
+  assert_active_exit "$primary_iface" "$expected_pid" 1 || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=fips_payload_progress
+  (( $(payload_success_count) > 2 )) || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=wireguard_payload_progress
+  (( $(wireguard_payload_success_count) > 1 )) || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=unexpected_pre_cut_rebind
+  (( $(rebind_count) == 0 )) || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=ready
+}
+
 wait_initial_ready() {
   local primary_iface="$1"
   local expected_pid="$2"
   local deadline="$((SECONDS + 30))"
   while ((SECONDS < deadline)); do
-    if assert_active_exit "$primary_iface" "$expected_pid" 1 \
-      && (( $(payload_success_count) > 2 )) \
-      && (( $(wireguard_payload_success_count) > 1 )) \
-      && (( $(rebind_count) == 0 )); then
+    if initial_ready "$primary_iface" "$expected_pid"; then
       return 0
     fi
     sleep 0.25
   done
   {
+    echo "initial_last_predicate=$ACTIVE_EXIT_LAST_PREDICATE"
     echo "initial_route=$(route_dev 1.1.1.1 2>/dev/null || echo unavailable)"
     echo "initial_endpoint_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
+    echo "initial_endpoint_route_json=$(
+      gate_command ip -j -4 route show exact "$(endpoint_host)/32" 2>/dev/null \
+        | jq -c . 2>/dev/null || echo unavailable
+    )"
     echo "initial_payload_successes=$(payload_success_count)"
     echo "initial_wireguard_payload_successes=$(wireguard_payload_success_count)"
     echo "initial_rebind_receipts=$(rebind_count)"

@@ -1307,10 +1307,19 @@ for token in ("$CLEANUP_JOURNAL", "previous_main_default_routes"):
         raise SystemExit(
             f"Linux endpoint proof lacks durable underlay ownership: {token}"
         )
-if '.[0].dst == $host or .[0].dst == ($host + "/32")' not in endpoint_route:
-    raise SystemExit(
-        "Linux endpoint proof rejects iproute2's canonical bare-host /32 destination"
-    )
+for token in (
+    'wireguard_endpoint_route_matches',
+    'initial_last_predicate=',
+    'ACTIVE_EXIT_LAST_PREDICATE=wireguard_endpoint_tuple',
+    'ACTIVE_EXIT_LAST_PREDICATE=fixture_dns',
+    'ACTIVE_EXIT_LAST_PREDICATE=public_dns',
+    'ACTIVE_EXIT_LAST_PREDICATE=https',
+    '(.tunnel_ip | split("/")[0]) == $tunnel_ip',
+):
+    if token not in source:
+        raise SystemExit(
+            f"Linux pre-cut readiness lacks focused failure observability: {token}"
+        )
 host = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 runner = host[
     host.index("start_linux_runner() {"):
@@ -1330,6 +1339,34 @@ for token in (
             f"Linux host wrapper lacks strict-exit pre-cut evidence: {token}"
         )
 PY
+jq -en \
+  --arg status_ip "10.44.0.2/32" \
+  --arg identity_ip "10.44.0.2" \
+  '($status_ip | split("/")[0]) == $identity_ip' >/dev/null \
+  || fail "Linux daemon identity rejects equivalent CIDR and bare tunnel IPs"
+route_matcher="$COMBINED_DIR/wireguard-endpoint-route-matches.sh"
+sed -n \
+  '/^wireguard_endpoint_route_matches() {$/,/^}$/p' \
+  "$LINUX_GUEST" >"$route_matcher"
+# shellcheck source=/dev/null
+source "$route_matcher"
+for dst in "203.0.113.10" "203.0.113.10/32"; do
+  wireguard_endpoint_route_matches \
+    "[{\"dst\":\"$dst\",\"dev\":\"eth0\",\"gateway\":\"192.0.2.1\",\"prefsrc\":\"192.0.2.10\"}]" \
+    eth0 192.0.2.1 192.0.2.10 203.0.113.10 \
+    || fail "Linux endpoint route rejected the valid $dst kernel spelling"
+done
+for invalid_route in \
+  '[{"dst":"203.0.113.10","dev":"eth1","gateway":"192.0.2.1","prefsrc":"192.0.2.10"}]' \
+  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.2","prefsrc":"192.0.2.10"}]' \
+  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.1","prefsrc":"192.0.2.11"}]'
+do
+  if wireguard_endpoint_route_matches \
+    "$invalid_route" eth0 192.0.2.1 192.0.2.10 203.0.113.10
+  then
+    fail "Linux endpoint route accepted a wrong ownership tuple"
+  fi
+done
 grep -Fq 'route_dev "$(endpoint_host)"' "$LINUX_GUEST" \
   || fail "Linux recovery clock does not wait for the physical endpoint route"
 require_tokens "$LINUX_GUEST" "Linux bounded recovery short-circuit" \
