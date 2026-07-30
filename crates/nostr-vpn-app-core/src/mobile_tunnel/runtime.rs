@@ -68,6 +68,7 @@ impl MobileTunnel {
             outbound_tx: started.outbound_tx,
             inbound_rx: Some(started.inbound_rx),
             tasks: started.tasks,
+            runtime_state_path: started.runtime_state_path,
             wg_upstream: started.wg_upstream,
             #[cfg(target_os = "android")]
             native_tun: None,
@@ -101,6 +102,9 @@ impl MobileTunnel {
         let config_path = non_empty_path(&config.config_path);
         let private_state_config_path =
             private_state_config_path.or_else(|| config_path.clone());
+        let runtime_state_path = private_state_config_path
+            .as_deref()
+            .and_then(mobile_runtime_state_path);
         let local_capability_hints = mobile_endpoint_hints(&config);
         mobile_debug_log(format!(
             "MobileTunnel::start_async binding FIPS endpoint scope={} peers={} hints={}",
@@ -374,7 +378,7 @@ impl MobileTunnel {
             }));
         }
 
-        if let Some(status_path) = config_path.as_deref().and_then(mobile_runtime_state_path) {
+        if let Some(status_path) = runtime_state_path.clone() {
             let endpoint = Arc::clone(&endpoint);
             let mesh = Arc::clone(&mesh);
             let presence = Arc::clone(&presence);
@@ -558,6 +562,7 @@ impl MobileTunnel {
             outbound_tx,
             inbound_rx,
             tasks,
+            runtime_state_path,
             wg_upstream: wg_runtime,
             #[cfg(target_os = "android")]
             wg_upstream_socket_fd: wg_socket_fd,
@@ -679,6 +684,18 @@ impl MobileTunnel {
                 wireguard_handshake_initiated,
             })
         })
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn handle_wireguard_underlay_ready(&self) -> Result<()> {
+        let wg_upstream = self
+            .wg_upstream
+            .as_ref()
+            .ok_or_else(|| anyhow!("mobile WireGuard upstream stopped"))?;
+        self.runtime
+            .block_on(wg_upstream.force_handshake())
+            .context("mobile WireGuard handshake after underlay binding")?;
+        Ok(())
     }
 
     pub(crate) fn wg_upstream_excluded_route(&self) -> Option<String> {

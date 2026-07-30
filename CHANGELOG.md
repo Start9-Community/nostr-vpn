@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.5 - 2026-07-30
+## 4.1.5 - 2026-07-31
 
 ### Added
 
@@ -62,11 +62,17 @@ All notable changes to this project are documented in this file.
 - Route Android's embedded encrypted DNS through an active WireGuard exit,
   and cancel in-flight resolver work when the tunnel stops so it cannot fall
   through to restored device Internet.
+- Avoid treating Android's first VPN-service network snapshot as a roam, so
+  startup performs the required underlay handshake without unnecessarily
+  resetting established FIPS sessions.
 - Keep macOS configuration editable while an installed background service is
   disabled or stopped, without bypassing daemon-owned saves while it is active.
 - Release the iOS UI process's shared Cashu wallet and SQLite locks before
   suspension, then reopen the native core on foreground, preventing
   RunningBoard `0xDEAD10CC` terminations.
+- Keep the iOS packet tunnel's runtime-state sidecar anchored to its private
+  configuration after launch, so background operation remains fresh and
+  foregrounding cannot stop a healthy tunnel based on stale state.
 - Resolve Ad Hoc signing from the exact selected CoreDevice instead of a stale
   environment UDID when multiple iPhones are connected.
 - Release completed FIPS-TCP state-control slots promptly so periodic roster
@@ -75,10 +81,10 @@ All notable changes to this project are documented in this file.
 - Pace the quiet FIPS-TCP control loop at its close-retention deadline instead
   of the active retransmission cadence, while keeping commands, packets, and
   open records immediately responsive.
-- Upgrade FIPS to 0.4.47 so repeated direct-to-mesh-to-direct transitions
-  retain the last authenticated fallback until direct payload validates, while
-  preserving the bounded rekey and canonical-owner fixes from earlier 0.4.x
-  releases.
+- Upgrade FIPS to 0.4.48 so repeated direct-to-mesh-to-direct transitions
+  retain the last authenticated fallback until direct payload validates, and
+  network changes invalidate stale route activity for every rebuilt carrier
+  while preserving the endpoint and active sessions.
 - Repair Cashu paid-exit close, settlement, and refund recovery across
   historical or retried proofs on platforms where the feature is available.
 - Update the Nostr and Linux property-list parser locks to reject malformed

@@ -1,6 +1,12 @@
 package org.nostrvpn.app.vpn
 
 internal object AndroidVpnRoutingPolicy {
+    fun isPhysicalNetworkChange(
+        previousFingerprint: String?,
+        currentFingerprint: String,
+    ): Boolean =
+        previousFingerprint != null && previousFingerprint != currentFingerprint
+
     fun excludesOwnProcess(wireGuardExitActive: Boolean): Boolean =
         !wireGuardExitActive
 

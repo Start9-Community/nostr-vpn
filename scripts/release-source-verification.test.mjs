@@ -39,8 +39,8 @@ function sha256(path) {
 }
 
 const fipsPackages = {
-  'fips-core': '0.4.47',
-  'fips-endpoint': '0.4.47',
+  'fips-core': '0.4.48',
+  'fips-endpoint': '0.4.48',
   'fips-identity': '0.3.2',
 }
 const fipsSpecs = Object.entries(fipsPackages).map(

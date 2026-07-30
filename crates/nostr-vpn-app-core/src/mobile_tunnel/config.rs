@@ -202,8 +202,8 @@ struct MobileTunnelLaunchConfig {
     #[serde(default, rename = "signedRoster", skip_serializing_if = "Option::is_none")]
     signed_roster: Option<SignedRoster>,
     // The detached iOS provider must not load or save AppConfig here. This
-    // anchor is used only to derive the private receipt sidecar and approval
-    // outbox paths that have to survive a packet-tunnel restart.
+    // anchor derives only private runtime-state, receipt, and approval-outbox
+    // sidecars that have to survive app suspension or a packet-tunnel restart.
     #[serde(default, rename = "privateStateConfigPath")]
     private_state_config_path: String,
 }
@@ -701,6 +701,7 @@ pub(crate) struct MobileTunnel {
     outbound_tx: tokio_mpsc::Sender<Vec<Vec<u8>>>,
     inbound_rx: Option<tokio_mpsc::Receiver<Vec<Vec<u8>>>>,
     tasks: Vec<JoinHandle<()>>,
+    runtime_state_path: Option<PathBuf>,
     wg_upstream: Option<WgUpstreamRuntime>,
     #[cfg(target_os = "android")]
     native_tun: Option<NativeTunRuntime>,

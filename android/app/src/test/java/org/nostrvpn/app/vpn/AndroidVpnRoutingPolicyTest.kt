@@ -47,4 +47,26 @@ class AndroidVpnRoutingPolicyTest {
         assertTrue(AndroidVpnRoutingPolicy.supportsAlwaysOn(listOf("0.0.0.0/0")))
         assertTrue(AndroidVpnRoutingPolicy.installsVpnDns(listOf("0.0.0.0/0")))
     }
+
+    @Test
+    fun onlyAChangedEstablishedFingerprintIsAPhysicalNetworkChange() {
+        assertFalse(
+            AndroidVpnRoutingPolicy.isPhysicalNetworkChange(
+                previousFingerprint = null,
+                currentFingerprint = "wifi",
+            ),
+        )
+        assertFalse(
+            AndroidVpnRoutingPolicy.isPhysicalNetworkChange(
+                previousFingerprint = "wifi",
+                currentFingerprint = "wifi",
+            ),
+        )
+        assertTrue(
+            AndroidVpnRoutingPolicy.isPhysicalNetworkChange(
+                previousFingerprint = "wifi",
+                currentFingerprint = "ethernet",
+            ),
+        )
+    }
 }

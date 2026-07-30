@@ -533,10 +533,15 @@ class NostrVpnService : VpnService() {
                 candidates
             }
         val fingerprint = currentUnderlyingNetworkFingerprint(reportedNetworks)
-        if (fingerprint == underlyingNetworkFingerprint) {
+        val previousFingerprint = underlyingNetworkFingerprint
+        if (fingerprint == previousFingerprint) {
             clearUnderlyingNetworkRetry()
             return
         }
+        val physicalNetworkChanged = AndroidVpnRoutingPolicy.isPhysicalNetworkChange(
+            previousFingerprint = previousFingerprint,
+            currentFingerprint = fingerprint,
+        )
         if (resetRetryBudget || retryUnderlyingNetworkFingerprint != fingerprint) {
             retryUnderlyingNetworkFingerprint = fingerprint
             underlyingNetworkRetryCount = 0
@@ -563,6 +568,19 @@ class NostrVpnService : VpnService() {
                 markUnderlyingNetworkApplied(fingerprint)
                 return
             }
+        }
+
+        if (!physicalNetworkChanged) {
+            if (!NativeCore.mobileTunnelWireGuardUnderlayReady(handle)) {
+                Log.w(
+                    "NostrVpnService",
+                    "Initial WireGuard underlay handshake refresh failed",
+                )
+                scheduleNativeNetworkPathRetry(fingerprint)
+                return
+            }
+            markUnderlyingNetworkApplied(fingerprint)
+            return
         }
 
         if (!NativeCore.mobileTunnelNetworkChanged(handle)) {

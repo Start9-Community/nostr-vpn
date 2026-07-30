@@ -127,6 +127,7 @@ struct MobileTunnelStarted {
     outbound_tx: tokio_mpsc::Sender<Vec<Vec<u8>>>,
     inbound_rx: tokio_mpsc::Receiver<Vec<Vec<u8>>>,
     tasks: Vec<JoinHandle<()>>,
+    runtime_state_path: Option<PathBuf>,
     wg_upstream: Option<WgUpstreamRuntime>,
     #[cfg(target_os = "android")]
     wg_upstream_socket_fd: c_int,
@@ -328,6 +329,12 @@ impl Drop for MobileTunnel {
         #[cfg(target_os = "android")]
         if let Some(mut tun) = native_tun {
             tun.join();
+        }
+        if let Some(path) = self.runtime_state_path.take()
+            && let Err(error) = fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(?error, "mobile: failed to remove runtime state");
         }
     }
 }

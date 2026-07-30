@@ -806,6 +806,70 @@
     }
 
     #[test]
+    fn provider_launch_persists_fresh_runtime_state_via_private_anchor() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nvpn-provider-runtime-state-{nonce}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.toml");
+        let runtime_state_path = dir.join(MOBILE_RUNTIME_STATE_FILE);
+
+        let mut app = AppConfig::generated_without_networks();
+        app.ensure_defaults();
+        app.fips_nostr_discovery_enabled = false;
+        app.fips_webrtc_enabled = false;
+        app.lan_discovery_enabled = false;
+        app.nostr.relays.clear();
+        app.save(&config_path).expect("save provider fixture");
+
+        let provider_json =
+            tunnel_provider_options_config_json(dir.to_str().expect("utf8 temp dir"));
+        let launch: MobileTunnelLaunchConfig =
+            serde_json::from_str(&provider_json).expect("provider launch config");
+        assert!(launch.tunnel.config_path.is_empty());
+        assert_eq!(
+            PathBuf::from(&launch.private_state_config_path),
+            config_path
+        );
+
+        let tunnel = MobileTunnel::start(&provider_json).expect("start provider tunnel");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let runtime_state = loop {
+            if let Ok(bytes) = fs::read(&runtime_state_path)
+                && let Ok(state) = serde_json::from_slice::<DaemonRuntimeState>(&bytes)
+            {
+                break state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "provider launch did not persist runtime state through its private anchor"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        assert!(runtime_state.vpn_enabled);
+        assert!(runtime_state.vpn_active);
+        assert!(
+            unix_timestamp().saturating_sub(runtime_state.updated_at) <= 1,
+            "provider runtime state was not fresh"
+        );
+
+        drop(tunnel);
+        let stopped_runtime_state = fs::read(&runtime_state_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<DaemonRuntimeState>(&bytes).ok());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            stopped_runtime_state
+                .as_ref()
+                .is_none_or(|state| !state.vpn_enabled && !state.vpn_active),
+            "provider teardown left fresh active runtime state"
+        );
+    }
+
+    #[test]
     fn mobile_config_json_reports_errors_as_json() {
         let json = tunnel_config_json("\0/not-a-path");
         let value: serde_json::Value = serde_json::from_str(&json).expect("json");
