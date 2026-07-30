@@ -258,7 +258,7 @@ default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
             );
         }
         assert_eq!(
-            linux_default_route_replace_args(&cached).join(" "),
+            linux_route_replay_args(&cached).join(" "),
             cached,
             "Direct/cleanup restore must preserve the exact replacement route"
         );

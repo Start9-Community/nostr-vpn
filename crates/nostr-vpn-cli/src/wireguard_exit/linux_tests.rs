@@ -165,6 +165,13 @@ impl LinuxCommandRunner for FakeRunner {
         self.commands.push((program.to_string(), args.to_vec()));
         let joined = args.join(" ");
 
+        if program == "ip" && args.iter().any(|arg| arg == "linkdown") {
+            return Ok(Self::failure(
+                2,
+                r#"Error: either "to" is duplicate, or "linkdown" is garbage."#,
+            ));
+        }
+
         if program == "wg" && args.first().is_some_and(|arg| arg == "showconf") {
             if self.fail_showconf {
                 return Ok(Self::failure(1, "Unable to access interface"));
@@ -317,10 +324,10 @@ impl LinuxCommandRunner for FakeRunner {
                     .state
                     .main_routes
                     .iter()
-                    .any(|candidate| candidate == &route);
+                    .any(|candidate| kernel_route_identity(candidate) == route);
                 self.state
                     .main_routes
-                    .retain(|candidate| candidate != &route);
+                    .retain(|candidate| kernel_route_identity(candidate) != route);
                 return Ok(if existed {
                     self.mutation_result()
                 } else {
@@ -411,6 +418,14 @@ fn route_identity(route: &str) -> (Option<&str>, Option<&str>) {
         .find(|window| window[0] == "metric")
         .map(|window| window[1]);
     (tokens.first().copied(), metric)
+}
+
+fn kernel_route_identity(route: &str) -> String {
+    route
+        .split_whitespace()
+        .filter(|token| *token != "linkdown")
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
@@ -824,6 +839,40 @@ fn strict_default_apply_tolerates_a_disappeared_captured_underlay() {
     assert_eq!(
         runner.state.main_routes,
         vec!["default dev nvwg0 src 10.77.0.2".to_string()]
+    );
+}
+
+#[test]
+fn linkdown_route_annotations_are_never_replayed_to_iproute2() {
+    let _guard = lock_tests();
+    let mut runner = FakeRunner::existing();
+    runner.state.main_routes[0].push_str(" linkdown");
+    let annotated_primary = runner.state.main_routes[0].clone();
+    let expected_defaults = runner
+        .state
+        .main_routes
+        .iter()
+        .map(|route| kernel_route_identity(route))
+        .collect::<Vec<_>>();
+
+    let runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some(&annotated_primary),
+    )
+    .expect("strict exit accepts an operational linkdown route annotation");
+    cleanup_linux_wireguard_exit_upstream_with(&mut runner, &runtime)
+        .expect("cleanup accepts a persisted linkdown route annotation");
+
+    assert_eq!(runner.state.main_routes, expected_defaults);
+    assert!(
+        runner
+            .commands
+            .iter()
+            .all(|(_, args)| args.iter().all(|arg| arg != "linkdown")),
+        "display-only route state must never be passed back to iproute2"
     );
 }
 

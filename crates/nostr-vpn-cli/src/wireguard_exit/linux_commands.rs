@@ -460,7 +460,11 @@ pub(super) fn apply_linux_wireguard_exit_default_route(
             continue;
         }
         let mut args = strings(&["-4", "route", "del"]);
-        args.extend(route.split_whitespace().map(ToOwned::to_owned));
+        args.extend(
+            crate::linux_route_replay_args(route)
+                .into_iter()
+                .map(ToOwned::to_owned),
+        );
         run_checked_allow_absent(runner, "ip", &args)
             .with_context(|| format!("failed to invalidate underlay default route '{route}'"))?;
     }
@@ -497,7 +501,11 @@ pub(super) fn apply_linux_wireguard_exit_default_route(
         }
         for route in physical_routes {
             let mut delete_args = strings(&["-4", "route", "del"]);
-            delete_args.extend(route.split_whitespace().map(ToOwned::to_owned));
+            delete_args.extend(
+                crate::linux_route_replay_args(&route)
+                    .into_iter()
+                    .map(ToOwned::to_owned),
+            );
             if let Err(error) = run_checked_allow_absent(runner, "ip", &delete_args) {
                 last_delete_error = Some(error);
             }
@@ -618,7 +626,11 @@ pub(super) fn restore_linux_route_snapshot(
     let mut failures = Vec::new();
     for route in routes {
         let mut args = strings(&["-4", "route", "replace"]);
-        args.extend(route.split_whitespace().map(ToOwned::to_owned));
+        args.extend(
+            crate::linux_route_replay_args(route)
+                .into_iter()
+                .map(ToOwned::to_owned),
+        );
         if let Some(table) = table {
             args.extend(strings(&["table", &table.to_string()]));
         }

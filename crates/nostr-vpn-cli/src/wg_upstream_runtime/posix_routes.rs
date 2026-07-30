@@ -329,7 +329,7 @@ fn install_endpoint_bypass(target: &IpAddr, original: &CapturedDefaultRoute) -> 
         .arg("route")
         .arg("replace")
         .arg(format!("{target_str}/32"));
-    for arg in after_default.split_whitespace() {
+    for arg in crate::linux_route_replay_args(after_default) {
         command.arg(arg);
     }
     run_checked(&mut command)
@@ -390,7 +390,7 @@ impl FullDefaultRoute {
             // iface>").
             let mut command = ProcessCommand::new("ip");
             command.arg("route").arg("replace");
-            for arg in self.original_default.line.split_whitespace() {
+            for arg in crate::linux_route_replay_args(&self.original_default.line) {
                 command.arg(arg);
             }
             run_checked(&mut command)?;

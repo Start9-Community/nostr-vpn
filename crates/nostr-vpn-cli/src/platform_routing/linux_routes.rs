@@ -367,15 +367,18 @@ pub(crate) fn restore_linux_default_ipv6_route(route: &str) -> Result<()> {
 fn restore_linux_default_route_for_family(family_flag: &str, route: &str) -> Result<()> {
     let mut command = ProcessCommand::new("ip");
     command.arg(family_flag).arg("route").arg("replace");
-    for token in linux_default_route_replace_args(route) {
+    for token in linux_route_replay_args(route) {
         command.arg(token);
     }
     run_checked(&mut command)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_default_route_replace_args(route: &str) -> Vec<&str> {
-    route.split_whitespace().collect()
+pub(crate) fn linux_route_replay_args(route: &str) -> Vec<&str> {
+    route
+        .split_whitespace()
+        .filter(|token| *token != "linkdown")
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -744,7 +747,7 @@ pub(crate) fn restore_linux_managed_endpoint_bypass_route(
     for route in &managed.previous_routes {
         let mut restore = ProcessCommand::new("ip");
         restore.arg("-4").arg("route").arg("replace");
-        restore.args(route.split_whitespace());
+        restore.args(linux_route_replay_args(route));
         run_checked(&mut restore).with_context(|| {
             format!(
                 "restore preexisting endpoint bypass identity {}",
