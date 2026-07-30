@@ -241,6 +241,26 @@ final class NostrVpnLifecycleUITests: XCTestCase {
             let allow = springboard.alerts.buttons["Allow"]
             if allow.exists {
                 allow.tap()
+                // SpringBoard replaces the VPN alert with the passcode sheet.
+                // Start a fresh query cycle instead of reusing the disappearing
+                // alert hierarchy for the passcode lookup below.
+                Thread.sleep(forTimeInterval: 0.25)
+                continue
+            }
+            if springboard.staticTexts["Enter iPhone Passcode"].exists {
+                emit("NVPN_IOS_VPN_APPROVAL_PASSCODE_REQUIRED_MS=\(millisecondsSinceEpoch())")
+                let approvalDeadline = Date().addingTimeInterval(30)
+                while Date() < approvalDeadline,
+                      springboard.staticTexts["Enter iPhone Passcode"].exists
+                {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                if springboard.staticTexts["Enter iPhone Passcode"].exists {
+                    XCTFail(
+                        "Enter the iPhone passcode once to approve the new VPN configuration."
+                    )
+                    return false
+                }
             }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline

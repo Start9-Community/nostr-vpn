@@ -39,7 +39,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let joiner = try publicValue("joiner-device-id-value", kind: .npub)
         emit("NVPN_RELEASE_JOIN_JOINER_ID=\(joiner)")
 
-        let qr = element("join-request-qr")
+        let qr = element("join-request-qr-content")
         XCTAssertTrue(qr.waitForExistence(timeout: 10), "Shipped full-width join QR was not visible")
         let initialQrWidthBasisPoints = assertQrIsFullWidth(qr)
         emit("NVPN_RELEASE_JOIN_QR_READY=1")
@@ -205,12 +205,19 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     private func assertQrIsFullWidth(_ qr: XCUIElement) -> Int {
-        let content = element("join-request-qr-content")
+        let copyRequest = app.buttons["Copy Request"]
+        let share = app.buttons["Share"]
         XCTAssertTrue(
-            content.waitForExistence(timeout: 5),
-            "Join QR content-width boundary was not visible"
+            copyRequest.waitForExistence(timeout: 5),
+            "Copy Request content boundary was not visible"
         )
-        let contentWidth = content.frame.width
+        XCTAssertTrue(
+            share.waitForExistence(timeout: 5),
+            "Share content boundary was not visible"
+        )
+        let contentLeft = min(copyRequest.frame.minX, share.frame.minX)
+        let contentRight = max(copyRequest.frame.maxX, share.frame.maxX)
+        let contentWidth = contentRight - contentLeft
         XCTAssertGreaterThan(contentWidth, 0)
         guard contentWidth > 0 else {
             return 0

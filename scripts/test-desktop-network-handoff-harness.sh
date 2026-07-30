@@ -646,6 +646,12 @@ if "\\$processMarkers = @('probe.pid', 'wireguard-probe.pid', 'watchdog.pid')" n
 PY
 [[ "$(grep -Fc 'assert_peer_recovered_from_source "$cut"' "$WINDOWS_HOST")" -eq 2 ]] \
   || fail "Windows peer evidence is not clocked from each hypervisor link cut"
+require_tokens "$WINDOWS_HOST_ENTRY" "full timestamp-bound peer evidence" \
+  'flush_end="$(awk -v end="$end" '\''BEGIN { print end + 2 }'\'')"' \
+  'fips-cut <= d && wg-cut <= d && reverse-cut <= d && reverse-fips <= d' \
+  '_peer_timestamps=cut:' \
+  '_first_matches=fips:<' \
+  '_missing_predicates='
 grep -Fq 'wait_for_guest_marker ready 35' "$WINDOWS_HOST" \
   || fail "Windows runtime readiness still has an unreasonable host-side wait"
 if grep -Fq '90000' "$WINDOWS_GUEST" \
@@ -1301,6 +1307,10 @@ for token in ("$CLEANUP_JOURNAL", "previous_main_default_routes"):
         raise SystemExit(
             f"Linux endpoint proof lacks durable underlay ownership: {token}"
         )
+if '.[0].dst == $host or .[0].dst == ($host + "/32")' not in endpoint_route:
+    raise SystemExit(
+        "Linux endpoint proof rejects iproute2's canonical bare-host /32 destination"
+    )
 host = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 runner = host[
     host.index("start_linux_runner() {"):
@@ -1372,8 +1382,13 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
     || fail "$(basename "$host_gate") lacks same-clock reverse-payload timing"
   grep -Fq 'while :; do' "$host_gate" \
     || fail "$(basename "$host_gate") can skip already-recorded boundary evidence"
-  grep -Fq 'at - cut > deadline' "$host_gate" \
-    || fail "$(basename "$host_gate") does not keep reverse payload inside the total bound"
+  if [[ "$host_gate" == "$WINDOWS_HOST" ]]; then
+    grep -Fq 'reverse-cut <= d && reverse-fips <= d' "$host_gate" \
+      || fail "Windows host does not keep reverse payload inside the total bound"
+  else
+    grep -Fq 'at - cut > deadline' "$host_gate" \
+      || fail "$(basename "$host_gate") does not keep reverse payload inside the total bound"
+  fi
 done
 grep -Fq 'last_rebind_receipts=' "$LINUX_GUEST" \
   || fail "Linux recovery failure omits its rebind evidence"

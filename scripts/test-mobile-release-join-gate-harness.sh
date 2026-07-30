@@ -129,6 +129,27 @@ if "run-as" in artifacts:
 for forbidden in (".launchArguments =", ".launchEnvironment ="):
     if forbidden in ios_test:
         raise SystemExit(f"Release join XCTest injects app state through {forbidden}")
+if 'element("join-request-qr")' in ios_test:
+    raise SystemExit("Release join XCTest still targets the collapsed QR element")
+qr_width_check = ios_test.split(
+    "private func assertQrIsFullWidth", 1
+)[1].split("private func openLinkDevice", 1)[0]
+if 'element("join-request-qr-content")' in qr_width_check:
+    raise SystemExit("Release join XCTest compares QR content width with itself")
+for required in (
+    'app.buttons["Copy Request"]',
+    'app.buttons["Share"]',
+    "copyRequest.waitForExistence",
+    "share.waitForExistence",
+    "min(copyRequest.frame.minX, share.frame.minX)",
+    "max(copyRequest.frame.maxX, share.frame.maxX)",
+    "let contentWidth = contentRight - contentLeft",
+):
+    if required not in qr_width_check:
+        raise SystemExit(
+            "Release join XCTest lacks a distinct shipped content boundary: "
+            + required
+        )
 for required in (
     "app.launchArguments.isEmpty",
     "app.launchEnvironment.isEmpty",

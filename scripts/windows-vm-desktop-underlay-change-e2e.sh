@@ -485,56 +485,61 @@ assert_peer_recovered_from_source() {
     "$PEER_STATE_DIR" "$cut_timestamp" "$expected_source" \
     "$((RECOVERY_DEADLINE_MS / 1000))" "$label" <<'SH'
 set -euo pipefail
-state="$1"
-cut="$2"
-source_ip="$3"
-deadline="$4"
-label="$5"
-end="$(awk -v cut="$cut" -v deadline="$deadline" 'BEGIN { print cut + deadline }')"
+state="$1"; cut="$2"; source_ip="$3"; deadline="$4"; label="$5"
+end="$(awk -v cut="$cut" -v d="$deadline" 'BEGIN { print cut + d }')"
+flush_end="$(awk -v end="$end" 'BEGIN { print end + 2 }')"
 while :; do
-  fips_underlay_at="$(awk -v cut="$cut" -v ip="$source_ip" '
-    $1 + 0 >= cut && index($0, "IP " ip ".") { print $1; exit }
-  ' "$state/fips-underlay.pcap.txt" 2>/dev/null || true)"
-  wireguard_underlay_at="$(awk -v cut="$cut" -v ip="$source_ip" '
-    $1 + 0 >= cut && index($0, "IP " ip ".") { print $1; exit }
-  ' "$state/wireguard-underlay.pcap.txt" 2>/dev/null || true)"
-  reverse_at="$(awk -v underlay="$fips_underlay_at" '
+  fips_line="$(awk -v cut="$cut" -v ip="$source_ip" \
+    '$1 + 0 >= cut && index($0, "IP " ip ".") { print; exit }' \
+    "$state/fips-underlay.pcap.txt" 2>/dev/null || true)"
+  wireguard_line="$(awk -v cut="$cut" -v ip="$source_ip" \
+    '$1 + 0 >= cut && index($0, "IP " ip ".") { print; exit }' \
+    "$state/wireguard-underlay.pcap.txt" 2>/dev/null || true)"
+  fips_at="${fips_line%% *}"
+  wireguard_at="${wireguard_line%% *}"
+  reverse_line="$(awk -v underlay="$fips_at" '
     /^\[[0-9]/ {
-      timestamp = $1
-      gsub(/^\[/, "", timestamp)
-      gsub(/\]$/, "", timestamp)
-      if (underlay != "" && timestamp + 0 >= underlay && /bytes from/) {
-        print timestamp
-        exit
-      }
-    }
-  ' "$state/peer-payload.log" 2>/dev/null || true)"
-  if [[ -n "$fips_underlay_at" \
-    && -n "$wireguard_underlay_at" \
-    && -n "$reverse_at" ]]
+      at=$1; gsub(/^\[/, "", at); gsub(/\]$/, "", at)
+      if (underlay != "" && at + 0 >= underlay && /bytes from/) { print; exit }
+    }' "$state/peer-payload.log" 2>/dev/null || true)"
+  reverse_at="${reverse_line%% *}"
+  reverse_at="${reverse_at#[}"; reverse_at="${reverse_at%]}"
+  if [[ -n "$fips_at" && -n "$wireguard_at" && -n "$reverse_at" ]] \
+    && awk -v cut="$cut" -v fips="$fips_at" -v wg="$wireguard_at" \
+      -v reverse="$reverse_at" -v d="$deadline" \
+      'BEGIN { exit !(fips-cut <= d && wg-cut <= d && reverse-cut <= d && reverse-fips <= d) }'
   then
-    awk -v cut="$cut" -v at="$fips_underlay_at" -v deadline="$deadline" \
-      'BEGIN { if (at - cut > deadline) exit 1 }'
-    awk -v cut="$cut" -v at="$wireguard_underlay_at" -v deadline="$deadline" \
-      'BEGIN { if (at - cut > deadline) exit 1 }'
-    awk -v underlay="$fips_underlay_at" -v at="$reverse_at" -v deadline="$deadline" \
-      'BEGIN { if (at - underlay > deadline) exit 1 }'
-    awk -v cut="$cut" -v at="$reverse_at" -v deadline="$deadline" \
-      'BEGIN { if (at - cut > deadline) exit 1 }'
     printf '%s_fips_expected_source_after_cut_seconds=%.3f\n' "$label" \
-      "$(awk -v cut="$cut" -v at="$fips_underlay_at" 'BEGIN { print at - cut }')"
+      "$(awk -v cut="$cut" -v at="$fips_at" 'BEGIN { print at-cut }')"
     printf '%s_wireguard_expected_source_after_cut_seconds=%.3f\n' "$label" \
-      "$(awk -v cut="$cut" -v at="$wireguard_underlay_at" 'BEGIN { print at - cut }')"
+      "$(awk -v cut="$cut" -v at="$wireguard_at" 'BEGIN { print at-cut }')"
     printf '%s_reverse_payload_after_expected_source_seconds=%.3f\n' "$label" \
-      "$(awk -v underlay="$fips_underlay_at" -v at="$reverse_at" \
-        'BEGIN { print at - underlay }')"
+      "$(awk -v underlay="$fips_at" -v at="$reverse_at" 'BEGIN { print at-underlay }')"
     exit 0
   fi
-  awk -v now="$(date +%s.%N)" -v end="$end" \
+  awk -v now="$(date +%s.%N)" -v end="$flush_end" \
     'BEGIN { exit !(now < end) }' || break
   sleep 0.05
 done
-echo "$label did not produce new-source FIPS/WireGuard traffic and reverse payload within ${deadline}s" >&2
+missing=()
+[[ -n "$fips_at" ]] || missing+=(fips-source)
+[[ -n "$wireguard_at" ]] || missing+=(wireguard-source)
+[[ -n "$reverse_at" ]] || missing+=(reverse-payload)
+[[ -z "$fips_at" ]] || awk -v cut="$cut" -v at="$fips_at" -v d="$deadline" \
+  'BEGIN { exit !(at-cut <= d) }' || missing+=(fips-deadline)
+[[ -z "$wireguard_at" ]] || awk -v cut="$cut" -v at="$wireguard_at" -v d="$deadline" \
+  'BEGIN { exit !(at-cut <= d) }' || missing+=(wireguard-deadline)
+[[ -z "$reverse_at" ]] || awk -v cut="$cut" -v fips="$fips_at" \
+  -v at="$reverse_at" -v d="$deadline" \
+  'BEGIN { exit !(fips != "" && at-cut <= d && at-fips <= d) }' \
+  || missing+=(reverse-deadline)
+printf '%s_peer_timestamps=cut:%s deadline:%s fips:%s wireguard:%s reverse:%s\n' \
+  "$label" "$cut" "$end" "${fips_at:-missing}" \
+  "${wireguard_at:-missing}" "${reverse_at:-missing}" >&2
+printf '%s_first_matches=fips:<%s> wireguard:<%s> reverse:<%s>\n' \
+  "$label" "${fips_line:-missing}" "${wireguard_line:-missing}" \
+  "${reverse_line:-missing}" >&2
+printf '%s_missing_predicates=%s\n' "$label" "$(IFS=,; echo "${missing[*]}")" >&2
 exit 1
 SH
 }

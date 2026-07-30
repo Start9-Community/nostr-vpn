@@ -281,7 +281,7 @@ PY
 
   if ! NSUnbufferedIO=YES "${command[@]}" >"$log" 2>&1; then
     tail -n 120 "$log" >&2
-    echo "Enable Settings > Developer > Enable UI Automation on the unlocked iPhone, then retry." >&2
+    echo "The iOS lifecycle runner failed; enter the VPN-approval passcode if shown, otherwise verify UI Automation." >&2
     echo "iOS $gate_description XCTest failed: $xcresult" >&2
     return 1
   fi

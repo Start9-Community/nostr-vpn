@@ -134,6 +134,12 @@ require_tokens "$GUEST" "per-transition authenticated FIPS evidence" \
   'primary_to_secondary_fips_pings=' \
   'secondary_to_primary_fips_pings=' \
   'RECOVERY_DEADLINE_MS'
+require_tokens "$GUEST" "exact IPv4 WireGuard endpoint route evidence" \
+  'ipv4_route_table' \
+  '"$endpoint_iface" == "$wg_iface"' \
+  '"$physical_default_iface" == "$expected_underlay"' \
+  '$2 == gateway && $4 == interface' \
+  'routes == 1 && matching == 1'
 require_tokens "$GUEST" "real crash/restart cleanup evidence" \
   'run_crash_restart_gate' \
   'cleanup_journal_owns_wireguard_and_dns' \
@@ -205,6 +211,77 @@ fi
 
 DEFINITIONS="$TMP_ROOT/definitions.sh"
 sed '/^validate_inputs$/,$d' "$GUEST" >"$DEFINITIONS"
+
+bash -s -- "$DEFINITIONS" <<'BASH'
+set -euo pipefail
+definitions="$1"
+set -- definitions-only
+# shellcheck disable=SC1090
+source "$definitions"
+ENDPOINT_FAMILY=ipv4
+ENDPOINT_HOST=65.109.48.91
+PRIMARY_IFACE=en0
+SECONDARY_IFACE=en2
+GLOBAL_ENDPOINT_IFACE=utun9
+PHYSICAL_DEFAULT_IFACE=en0
+PHYSICAL_DEFAULT_GATEWAY=192.168.64.1
+ROUTE_TABLE='65.109.48.91 192.168.64.1 UGHS en0'
+
+endpoint_route_interface() {
+  printf '%s\n' "$GLOBAL_ENDPOINT_IFACE"
+}
+wireguard_interface() {
+  printf 'utun9\n'
+}
+route_value() {
+  case "$1:$2" in
+    default:interface) printf '%s\n' "$PHYSICAL_DEFAULT_IFACE" ;;
+    default:gateway) printf '%s\n' "$PHYSICAL_DEFAULT_GATEWAY" ;;
+    *) return 1 ;;
+  esac
+}
+ipv4_route_table() {
+  printf '%s\n' "$ROUTE_TABLE"
+}
+
+wireguard_endpoint_route_state_valid
+
+PHYSICAL_DEFAULT_IFACE=en2
+PHYSICAL_DEFAULT_GATEWAY=10.0.2.1
+ROUTE_TABLE='65.109.48.91 10.0.2.1 UGHS en2'
+wireguard_endpoint_route_state_valid en2
+
+PHYSICAL_DEFAULT_IFACE=en0
+PHYSICAL_DEFAULT_GATEWAY=192.168.64.1
+for ROUTE_TABLE in \
+  '65.109.48.91 192.168.64.254 UGHS en0' \
+  '65.109.48.91 192.168.64.1 UGHS en2' \
+  $'65.109.48.91 192.168.64.1 UGHS en0\n65.109.48.91 192.168.64.1 UGHS en0'
+do
+  if wireguard_endpoint_route_state_valid; then
+    echo "invalid macOS endpoint /32 tuple was accepted: $ROUTE_TABLE" >&2
+    exit 1
+  fi
+done
+
+ROUTE_TABLE='65.109.48.91 192.168.64.1 UGHS en0'
+GLOBAL_ENDPOINT_IFACE=en0
+if wireguard_endpoint_route_state_valid; then
+  echo "global endpoint lookup escaped the WireGuard split default" >&2
+  exit 1
+fi
+GLOBAL_ENDPOINT_IFACE=utun9
+PHYSICAL_DEFAULT_IFACE=en2
+if wireguard_endpoint_route_state_valid; then
+  echo "endpoint /32 on a stale physical underlay was accepted" >&2
+  exit 1
+fi
+if wireguard_endpoint_route_state_valid utun9; then
+  echo "tunnel interface was accepted as a physical endpoint underlay" >&2
+  exit 1
+fi
+BASH
+
 EXPECTED_PEER="npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
 STATUS_GOOD="$TMP_ROOT/status-good.json"
 STATUS_WRONG="$TMP_ROOT/status-wrong.json"

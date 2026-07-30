@@ -128,6 +128,10 @@ endpoint_route_interface() {
   endpoint_route_value interface
 }
 
+ipv4_route_table() {
+  /usr/sbin/netstat -rn -f inet
+}
+
 split_default_interface() {
   local target="$1" mask
   mask="$(route_value "$target" mask)"
@@ -144,25 +148,38 @@ wireguard_interface() {
 }
 
 wireguard_endpoint_route_state_valid() {
-  local expected_underlay="${1:-}" endpoint_iface wg_iface
+  local expected_underlay="${1:-$PRIMARY_IFACE}"
+  local endpoint_iface expected_gateway physical_default_iface wg_iface
+  [[ "$expected_underlay" == "$PRIMARY_IFACE" \
+    || "$expected_underlay" == "$SECONDARY_IFACE" ]] \
+    || return 1
   endpoint_iface="$(endpoint_route_interface)" || return 1
   if [[ "$ENDPOINT_FAMILY" == "ipv6" ]]; then
-    if [[ -n "$expected_underlay" ]]; then
-      [[ "$endpoint_iface" == "$expected_underlay" ]]
-      return
-    fi
-    [[ "$endpoint_iface" == "$PRIMARY_IFACE" \
-      || "$endpoint_iface" == "$SECONDARY_IFACE" ]]
+    [[ "$endpoint_iface" == "$expected_underlay" ]]
     return
   fi
   wg_iface="$(wireguard_interface)" || return 1
-  # IPv4 follows the global split default. The encrypted UDP escapes because
-  # nvpn binds its socket to the selected Apple interface, never via a global
-  # endpoint host-route fallback.
-  [[ "$endpoint_iface" == "$wg_iface" ]] \
-    && ! /usr/sbin/netstat -rn -f inet \
-      | awk -v endpoint="$ENDPOINT_HOST" \
-        '$1 == endpoint { found = 1 } END { exit found ? 0 : 1 }'
+  physical_default_iface="$(route_value default interface)" || return 1
+  expected_gateway="$(route_value default gateway)" || return 1
+  # The global lookup remains covered by the WireGuard /1s, while exactly
+  # one interface-scoped /32 keeps encrypted UDP on the selected underlay.
+  [[ "$endpoint_iface" == "$wg_iface" \
+    && "$physical_default_iface" == "$expected_underlay" \
+    && -n "$expected_gateway" \
+    && "$expected_gateway" != link#* ]] \
+    && ipv4_route_table \
+      | awk \
+        -v endpoint="$ENDPOINT_HOST" \
+        -v gateway="$expected_gateway" \
+        -v interface="$expected_underlay" '
+          $1 == endpoint {
+            routes += 1
+            if ($2 == gateway && $4 == interface) {
+              matching += 1
+            }
+          }
+          END { exit (routes == 1 && matching == 1) ? 0 : 1 }
+        '
 }
 
 secure_dns_owned() {

@@ -54,7 +54,10 @@ if grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_IP:-' "$ORCHESTRATOR"; then
 fi
 
 for proof in \
-  'EXPECTED_TREE="$(current_tree)"' \
+  'EXPECTED_HEAD="$(git -C "$ROOT" rev-parse HEAD)"' \
+  'EXPECTED_TREE="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$EXPECTED_HEAD"' \
+  '[[ "$REMOTE_HEAD" == "$EXPECTED_HEAD" && "$REMOTE_TREE" == "$EXPECTED_TREE" ]]' \
   'Windows WG e2e checkout differs from the exact candidate tree' \
   'Get-FileHash -Algorithm SHA256 -LiteralPath \$Process.ExecutablePath' \
   'NvpnService is not running the exact candidate binary' \
@@ -73,6 +76,13 @@ do
   grep -Fq "$proof" "$ORCHESTRATOR" \
     || fail "orchestrator lost exact candidate/fixture proof: $proof"
 done
+if grep -Fq 'current_tree()' "$ORCHESTRATOR" \
+  || grep -Fq 'git -C "$ROOT" add -A' "$ORCHESTRATOR" \
+  || grep -Fq 'git reset --hard' "$ORCHESTRATOR" \
+  || grep -Fq 'git clean -ffd' "$ORCHESTRATOR"
+then
+  fail "Windows WG exact-tree preparation is destructive or includes temporary source"
+fi
 
 for cleanup_proof in \
   'Windows WireGuard source config survived cleanup' \

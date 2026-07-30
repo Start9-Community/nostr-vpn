@@ -1159,6 +1159,52 @@ test_start_compose_services_supports_skip_build() {
   rm -f "$calls"
 }
 
+test_roaming_network_change_refresh_log_contract() {
+  python3 - "$ROOT_DIR/scripts/e2e-fips-roaming-docker.sh" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+section = source[
+    source.index("wait_for_network_change_refresh_after_marker() {"):
+    source.index("\nmark_daemon_log() {")
+]
+program = section.split('awk -v marker="$marker" \'\n', 1)[1].split(
+    "\n' /root/.config/nvpn/daemon.log",
+    1,
+)[0]
+
+
+def accepts(*lines):
+    result = subprocess.run(
+        ["awk", "-v", "marker=fixture-cut", program],
+        input="\n".join(lines) + "\n",
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+marker = "NVPN_E2E_MARKER fixture-cut"
+change = "network change detected; refreshing FIPS endpoint state"
+rebound = "fips: 1 underlay carrier(s) rebound"
+refreshed = "fips: refreshed FIPS private mesh paths"
+restart = "fips: restarted FIPS private mesh"
+
+if not accepts(marker, change, rebound, refreshed):
+    raise SystemExit("separate carrier-rebound and path-refresh receipts were rejected")
+if accepts(marker, change, refreshed):
+    raise SystemExit("network-change refresh passed without a carrier rebound")
+if accepts(marker, change, rebound):
+    raise SystemExit("network-change refresh passed without a path refresh")
+if accepts(marker, change, rebound, refreshed, restart):
+    raise SystemExit("network-change refresh accepted an endpoint restart")
+if accepts(change, rebound, refreshed, marker):
+    raise SystemExit("network-change refresh accepted receipts before its marker")
+PY
+}
+
 test_dockerfile_supports_local_base_images() {
   local dockerfile="$ROOT_DIR/Dockerfile.e2e"
   local compose
@@ -1516,6 +1562,7 @@ test_rx_maintenance_priority_queue_wait_threshold
 test_phase_argument_selection
 test_phase_summary_pipeline_columns
 test_start_compose_services_supports_skip_build
+test_roaming_network_change_refresh_log_contract
 test_dockerfile_supports_local_base_images
 test_perf_harness_supports_cpu_stress
 test_perf_metadata_maps_e2e_env

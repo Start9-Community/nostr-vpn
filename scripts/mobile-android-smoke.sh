@@ -880,6 +880,13 @@ for attributes in nodes:
         if len(values) != 1:
             continue
         print(values[0])
+    elif attribute == "selected":
+        print(
+            "true"
+            if attributes.get("selected") == "true"
+            or attributes.get("checked") == "true"
+            else "false"
+        )
     else:
         print(attributes.get(attribute, ""))
     raise SystemExit(0)

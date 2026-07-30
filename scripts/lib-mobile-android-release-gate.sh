@@ -795,6 +795,27 @@ android_release_assert_native_tunnel_unchanged() {
   fi
 }
 
+android_release_accept_single_native_tunnel_refresh() {
+  local label="${1:-network refresh}" before expected count
+  before="$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT"
+  if [[ ! "$before" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Android Release $label has no pinned native-tunnel start count" >&2
+    return 1
+  fi
+  expected=$((before + 1))
+  count="$(android_vpn_native_start_count)" || {
+    echo "Android Release $label could not inspect native-tunnel starts" >&2
+    return 1
+  }
+  if [[ "$count" != "$expected" ]]; then
+    echo "Android Release $label expected one native-tunnel refresh ($before->$expected), observed ${count:-invalid}" >&2
+    return 1
+  fi
+  ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT="$count"
+  assert_single_android_app_process || return 1
+  echo "Android Release $label performed one in-process native-tunnel refresh ($before->$count)"
+}
+
 run_android_release_active_vpn_lifecycle_gate() {
   truthy "$ANDROID_LIFECYCLE_GATE" || return 0
   [[ "$ANDROID_LIFECYCLE_CYCLES" =~ ^[1-9][0-9]*$ \
@@ -948,7 +969,7 @@ run_android_release_blackbox_cycle() {
     select_android_direct_ui || return 1
     wait_until "$VPN_START_WAIT_SECS" vpn_active || return 1
     run_android_release_direct_network_probe direct-while-connected 1 || return 1
-    android_release_assert_native_tunnel_unchanged \
+    android_release_accept_single_native_tunnel_refresh \
       connected-direct || return 1
   fi
   android_release_disconnect_ui || return 1

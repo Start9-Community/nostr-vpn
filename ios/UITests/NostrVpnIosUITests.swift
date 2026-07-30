@@ -24,7 +24,7 @@ final class NostrVpnIosUITests: XCTestCase {
         acknowledgeVpnPromptsIfPresent()
         openJoinNetworkPage()
 
-        let qr = app.descendants(matching: .any)["join-request-qr"]
+        let qr = app.descendants(matching: .any)["join-request-qr-content"]
         XCTAssertTrue(qr.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(qr.frame.width, app.frame.width * 0.75)
 

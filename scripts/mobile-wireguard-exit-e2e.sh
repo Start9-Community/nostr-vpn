@@ -33,6 +33,7 @@ PLATFORMS="${NVPN_MOBILE_WG_EXIT_PLATFORMS:-android,ios}"
 INSTALL_ANDROID="${NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID:-1}"
 LIFECYCLE_GATE="${NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE:-1}"
 UNDERLAY_CHANGE_GATE="${NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE:-0}"
+RAPID_START_STOP_GATE="${NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE:-auto}"
 RELEASE_BLACKBOX_GATE="${NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX:-1}"
 REUSE_ANDROID_BUILD="${NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD:-0}"
 IOS_BUNDLE_ID="${NVPN_IOS_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
@@ -398,7 +399,8 @@ run_android_case() {
   local mode provider custom_url bootstrap_ips through_servers probe_host
   local expected_ip evidence before_dns_evidence after_dns_evidence
   local before_bytes before_forward
-  local wireguard_config_file idle_gate lifecycle_gate underlay_gate switch_direct
+  local wireguard_config_file idle_gate lifecycle_gate underlay_gate
+  local rapid_start_stop_gate switch_direct
   IFS='|' read -r \
     mode provider custom_url bootstrap_ips through_servers probe_host \
     expected_ip evidence \
@@ -435,6 +437,11 @@ run_android_case() {
       esac
     elif bool_is_true "$REUSE_ANDROID_BUILD"; then
       android_args=(--no-build "${android_args[@]}")
+      case "$INSTALL_ANDROID" in
+        0|false|FALSE|False|no|NO|No|off|OFF|Off)
+          android_args=(--no-install "${android_args[@]}")
+          ;;
+      esac
     fi
   else
     android_args=(--no-build --no-install "${android_args[@]}")
@@ -442,6 +449,19 @@ run_android_case() {
     lifecycle_gate=false
     underlay_gate=false
   fi
+  case "$RAPID_START_STOP_GATE" in
+    auto) rapid_start_stop_gate="$first" ;;
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      rapid_start_stop_gate=0
+      ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      rapid_start_stop_gate=1
+      ;;
+    *)
+      echo "Unsupported NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE=$RAPID_START_STOP_GATE" >&2
+      return 2
+      ;;
+  esac
   switch_direct="$final"
   if bool_is_true "$underlay_gate"; then
     # The active lifecycle runs after this transition in the Android driver.
@@ -456,7 +476,7 @@ run_android_case() {
     NVPN_ANDROID_WIREGUARD_CONFIG_FILE="$wireguard_config_file" \
     NVPN_ANDROID_DEBUG_WIREGUARD_CONFIG_FILE="$wireguard_config_file" \
     NVPN_ANDROID_LIFECYCLE_GATE="$lifecycle_gate" \
-    NVPN_ANDROID_RAPID_START_STOP_GATE="$first" \
+    NVPN_ANDROID_RAPID_START_STOP_GATE="$rapid_start_stop_gate" \
     NVPN_ANDROID_UNDERLAY_CHANGE_GATE="$underlay_gate" \
     NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER="$CONTAINER" \
     NVPN_MOBILE_UNDERLAY_CONTINUITY_CLIENT_IP="$TUNNEL_CLIENT_IP" \

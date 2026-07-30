@@ -409,9 +409,10 @@ marker="$1"
 awk -v marker="$marker" '
   $0 ~ "NVPN_E2E_MARKER " marker { seen = 1; next }
   seen && /network change detected; refreshing FIPS endpoint state/ { changed = 1 }
-  changed && /refreshed FIPS private mesh paths/ && /[1-9][0-9]* underlay carrier\(s\) rebound/ { refreshed = 1 }
+  changed && /[1-9][0-9]* underlay carrier\(s\) rebound/ { rebound = 1 }
+  changed && /refreshed FIPS private mesh paths/ { refreshed = 1 }
   changed && /restarted FIPS private mesh/ { restarted = 1 }
-  END { exit (changed && refreshed && !restarted) ? 0 : 1 }
+  END { exit (changed && rebound && refreshed && !restarted) ? 0 : 1 }
 ' /root/.config/nvpn/daemon.log
 SH
     then

@@ -248,19 +248,6 @@ if (Test-Path -LiteralPath $(ps_quote "$REMOTE_DIRECT_STATE")) { exit 1 }" \
 }
 trap cleanup EXIT INT TERM
 
-current_tree() {
-  local git_dir tmp_index
-  git_dir="$(git -C "$ROOT" rev-parse --path-format=absolute --git-dir)"
-  tmp_index="$(mktemp "$git_dir/windows-wg-index.XXXXXX")"
-  (
-    export GIT_INDEX_FILE="$tmp_index"
-    git -C "$ROOT" read-tree HEAD
-    git -C "$ROOT" add -A
-    git -C "$ROOT" write-tree
-  )
-  rm -f "$tmp_index"
-}
-
 prepare_ephemeral_fixture() {
   [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" && -n "$FIXTURE_HOST" ]] \
     || return 1
@@ -385,22 +372,29 @@ if [[ -z "$PROVIDER_CONFIG" ]]; then
   fi
 fi
 
+EXPECTED_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+EXPECTED_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
     echo "Skipping Windows VM git sync; release-gate lane already synced the candidate."
     ;;
   *)
-    "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST"
+    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$EXPECTED_HEAD" \
+      "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST"
     ;;
 esac
 
-EXPECTED_TREE="$(current_tree)"
+REMOTE_HEAD="$(
+  run_ps "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse HEAD" \
+    | tr -d '\r' \
+    | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }'
+)"
 REMOTE_TREE="$(
   run_ps "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
     | tr -d '\r' \
     | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }'
 )"
-[[ "$REMOTE_TREE" == "$EXPECTED_TREE" ]] || {
+[[ "$REMOTE_HEAD" == "$EXPECTED_HEAD" && "$REMOTE_TREE" == "$EXPECTED_TREE" ]] || {
   echo "Windows WG e2e checkout differs from the exact candidate tree" >&2
   exit 1
 }

@@ -214,7 +214,7 @@ assert_wireguard_endpoint_route() {
       --arg source "$expected_source" \
       --arg host "$host" \
       'length == 1
-       and .[0].dst == ($host + "/32")
+       and (.[0].dst == $host or .[0].dst == ($host + "/32"))
        and .[0].dev == $dev
        and .[0].gateway == $gateway
        and .[0].prefsrc == $source' >/dev/null

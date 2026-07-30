@@ -67,6 +67,45 @@ grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
     echo "Android Release gate does not read the shipped picker label" >&2
     exit 1
   }
+grep -Fq 'attribute == "selected"' "$android_smoke" \
+  && grep -Fq 'attributes.get("selected") == "true"' "$android_smoke" \
+  && grep -Fq 'attributes.get("checked") == "true"' "$android_smoke" \
+  || {
+    echo "Android Release UI selected readback ignores UIAutomator checked state" >&2
+    exit 1
+  }
+python3 - "$android_smoke" <<'PY'
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+function = source.split("android_ui_query() {", 1)[1].split(
+    "\nandroid_ui_swipe() {", 1
+)[0]
+query = function.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+with tempfile.TemporaryDirectory() as directory:
+    xml = pathlib.Path(directory) / "ui.xml"
+    for selector in (
+        "exit-dns-mode-encrypted",
+        "exit-dns-provider-cloudflare",
+    ):
+        xml.write_text(
+            f'<hierarchy><node resource-id="{selector}" '
+            'selected="false" checked="true" bounds="[0,0][10,10]" />'
+            "</hierarchy>",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", query, str(xml), "resource", selector, "selected"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip() != "true":
+            raise SystemExit(f"checked UIAutomator node was not selected: {selector}")
+PY
 grep -Fq 'write_android_exit_dns_ui_receipt' "$android_smoke" \
   && grep -Fq '"evidenceSource": "shipped-ui-restart-readback"' "$android_smoke" \
   || {
@@ -287,6 +326,9 @@ grep -Fq 'WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
   || { echo "mobile gate does not separate raw host from endpoint authority" >&2; exit 1; }
 grep -Fq 'Self.endpointHost(from: endpoint)' "$ios_packet_tunnel" \
   || { echo "iOS packet tunnel does not parse bracketed WireGuard endpoints" >&2; exit 1; }
+grep -Fq 'endpoint.hasPrefix("websocket:")' "$ios_packet_tunnel" \
+  && grep -Fq 'URLComponents(string: endpoint)' "$ios_packet_tunnel" \
+  || { echo "iOS packet tunnel does not lower WebSocket hints to a valid remote host" >&2; exit 1; }
 grep -Fq 'packetFlow.readPackets' "$ios_packet_flow_bridge" \
   && grep -Fq 'packetFlow.writePackets' "$ios_packet_flow_bridge" \
   && grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_start' "$ios_packet_flow_bridge" \
@@ -389,6 +431,13 @@ grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"
   || { echo "Android mobile exit cases do not pin the expected WireGuard endpoint" >&2; exit 1; }
 grep -Fq 'NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1' "$gate" \
   || { echo "Android physical DNS cases do not require the shipped UI driver" >&2; exit 1; }
+grep -Fq 'android_release_accept_single_native_tunnel_refresh' "$android_release_gate" \
+  && grep -Fq 'expected=$((before + 1))' "$android_release_gate" \
+  && grep -Fq 'assert_single_android_app_process || return 1' "$android_release_gate" \
+  || {
+    echo "Android WireGuard-to-Direct transition does not require exactly one in-process tunnel refresh" >&2
+    exit 1
+  }
 grep -Fq 'RELEASE_BLACKBOX_GATE="${NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX:-1}"' "$gate" \
   && grep -Fq -- '--release-network-gate' "$gate" \
   && grep -Fq 'NVPN_ANDROID_WIREGUARD_CONFIG_FILE="$wireguard_config_file"' "$gate" \
@@ -422,7 +471,9 @@ grep -Fq 'driveRapidStartStopStress' "$ios_release_ui" \
     echo "iOS signed Release gate lacks rapid cancel-during-start recovery coverage" >&2
     exit 1
   }
-grep -Fq 'NVPN_ANDROID_RAPID_START_STOP_GATE="$first"' "$gate" \
+grep -Fq 'RAPID_START_STOP_GATE="${NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE:-auto}"' "$gate" \
+  && grep -Fq 'auto) rapid_start_stop_gate="$first"' "$gate" \
+  && grep -Fq 'NVPN_ANDROID_RAPID_START_STOP_GATE="$rapid_start_stop_gate"' "$gate" \
   && grep -Fq 'run_android_release_rapid_start_stop_gate' "$android_release_gate" \
   && grep -Fq '0 10 30 80 160 320 640 1000' "$android_release_gate" \
   && grep -Fq 'android_release_rapid_cancel_once' "$android_release_gate" \
