@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.5 - 2026-07-29
+## 4.1.5 - 2026-07-30
 
 ### Added
 
@@ -22,6 +22,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Prevent libc/NSS DNS from bypassing nVPN on systemd-resolved uplink-mode
+  hosts, with token-owned resolver paths and crash-safe restoration.
 - Rebind FIPS underlay carriers in place across hotspot, Wi-Fi, and interface
   changes while preserving the endpoint and authenticated sessions, carrying
   payload through mesh fallback while direct paths recover.

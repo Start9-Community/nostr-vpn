@@ -5,6 +5,8 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use hickory_proto::serialize::binary::{BinEncodable as _, BinEncoder};
 use nostr_vpn_core::secure_dns::SecureDnsResolver;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 struct FixtureResolver {
     fail: bool,
@@ -109,6 +111,539 @@ fn direct_resolv_conf_crash_repair_only_restores_owned_content() {
         b"nameserver 203.0.113.53\n",
         previous
     ));
+}
+
+#[cfg(unix)]
+fn resolved_resolv_conf_fixture(
+    name: &str,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let root = std::env::temp_dir().join(format!(
+        "nvpn-resolved-resolv-conf-{name}-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("remove stale resolver fixture");
+    }
+    let etc = root.join("etc");
+    let run = root.join("run/systemd/resolve");
+    std::fs::create_dir_all(&etc).expect("create fixture etc");
+    std::fs::create_dir_all(&run).expect("create fixture resolved run directory");
+    let uplink = run.join("resolv.conf");
+    let stub = run.join("stub-resolv.conf");
+    std::fs::write(&uplink, b"nameserver 192.0.2.53\n").expect("write uplink resolv.conf");
+    std::fs::write(&stub, b"nameserver 127.0.0.53\n").expect("write stub resolv.conf");
+    (root, etc.join("resolv.conf"), uplink, stub)
+}
+
+#[cfg(unix)]
+fn resolved_paths(
+    resolv_conf: &std::path::Path,
+    cleanup: &linux::LinuxResolvedResolvConfCleanupState,
+) -> LinuxResolvedPaths {
+    linux_resolved_paths(resolv_conf, cleanup).expect("derive resolver ownership paths")
+}
+
+#[cfg(unix)]
+fn resolved_marker_target(paths: &LinuxResolvedPaths) -> std::path::PathBuf {
+    std::path::PathBuf::from(paths.marker.file_name().expect("resolver marker file name"))
+}
+
+#[cfg(unix)]
+fn assert_resolver_path_missing(path: &std::path::Path) {
+    let error = std::fs::symlink_metadata(path).expect_err("resolver path must be absent");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_uplink_symlink_is_switched_and_exactly_restored() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("switch-and-restore");
+    let prior_target = std::path::PathBuf::from("../run/systemd/resolve/resolv.conf");
+    symlink(&prior_target, &resolv_conf).expect("install fixture uplink symlink");
+
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    let marker_target = resolved_marker_target(&paths);
+    assert_eq!(cleanup.ownership_token.len(), 32);
+    assert!(
+        cleanup
+            .ownership_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+    let mut invalid_token = cleanup.clone();
+    invalid_token.ownership_token = "abcd-efgh".to_string();
+    assert!(linux_resolved_paths(&resolv_conf, &invalid_token).is_err());
+    assert_eq!(cleanup.previous_target, prior_target);
+    install_linux_resolved_resolv_conf(&resolv_conf, &cleanup).expect("switch to resolved stub");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read installed symlink"),
+        marker_target
+    );
+    assert_eq!(
+        std::fs::read_link(&paths.marker).expect("read resolver marker"),
+        stub
+    );
+    assert_eq!(
+        std::fs::read_link(&paths.backup).expect("read resolver backup"),
+        prior_target
+    );
+
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect("restore exact uplink target");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read restored symlink"),
+        prior_target
+    );
+    assert_resolver_path_missing(&paths.marker);
+    assert_resolver_path_missing(&paths.backup);
+    assert_resolver_path_missing(&paths.candidate);
+    assert_resolver_path_missing(&paths.active);
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_stub_symlink_needs_no_nvpn_ownership() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("already-stub");
+    symlink(&stub, &resolv_conf).expect("install fixture stub symlink");
+
+    assert_eq!(
+        linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+            .expect("classify stub symlink"),
+        None
+    );
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_stub_noop_rejects_stale_reserved_paths() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("stale-reserved");
+    symlink(&stub, &resolv_conf).expect("install fixture stub symlink");
+    let stale_path = resolv_conf
+        .parent()
+        .expect("resolver parent")
+        .join(".nvpn-resolv-deadbeef.stub");
+    symlink(&stub, &stale_path).expect("install stale resolver marker");
+    let stale_marker = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect_err("stale marker must fail before native-stub classification");
+    assert!(format!("{stale_marker:#}").contains("stale"));
+
+    std::fs::remove_file(&stale_path).expect("remove stale marker");
+    std::fs::remove_file(&resolv_conf).expect("remove native stub link");
+    symlink(".nvpn-resolv-deadbeef.stub", &resolv_conf).expect("install stale main target");
+    let stale_main = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect_err("raw reserved main target must fail closed");
+    assert!(format!("{stale_main:#}").contains("reserved"));
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_mode_rejects_resolv_conf_that_can_bypass_the_stub() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("foreign");
+    let foreign = root.join("foreign-resolv.conf");
+    std::fs::write(&foreign, b"nameserver 203.0.113.53\n").expect("write foreign resolver");
+    symlink(&foreign, &resolv_conf).expect("install foreign resolver symlink");
+
+    let error = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect_err("foreign resolver must fail closed");
+    assert!(format!("{error:#}").contains("unsupported"));
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_mode_rejects_missing_or_regular_resolv_conf() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("missing-or-regular");
+    let missing = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect_err("missing resolv.conf must fail closed");
+    assert!(format!("{missing:#}").contains("requires"));
+
+    std::fs::write(&resolv_conf, b"nameserver 203.0.113.53\n").expect("write regular resolv.conf");
+    let regular = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect_err("regular resolv.conf must fail closed");
+    assert!(format!("{regular:#}").contains("requires"));
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_cleanup_does_not_clobber_an_external_resolv_conf_change() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("external-change");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    install_linux_resolved_resolv_conf(&resolv_conf, &cleanup).expect("switch to resolved stub");
+
+    std::fs::remove_file(&resolv_conf).expect("remove nVPN symlink");
+    let external = root.join("external-resolv.conf");
+    std::fs::write(&external, b"nameserver 198.51.100.53\n").expect("write external resolver");
+    symlink(&external, &resolv_conf).expect("install external resolver symlink");
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect("newer external resolver wins cleanup");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read external symlink"),
+        external
+    );
+    assert_resolver_path_missing(&paths.backup);
+    assert_resolver_path_missing(&paths.marker);
+    assert_resolver_path_missing(&paths.candidate);
+    assert_resolver_path_missing(&paths.active);
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_cleanup_preserves_an_externally_changed_ownership_marker() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("marker-takeover");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    let marker_target = resolved_marker_target(&paths);
+    install_linux_resolved_resolv_conf(&resolv_conf, &cleanup).expect("switch to resolved stub");
+
+    let marker_path = paths.marker;
+    std::fs::remove_file(&marker_path).expect("remove nVPN marker");
+    let external = root.join("external-resolv.conf");
+    std::fs::write(&external, b"nameserver 198.51.100.53\n").expect("write external resolver");
+    symlink(&external, &marker_path).expect("take over resolver marker");
+    let error = restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect_err("external marker ownership must fail closed");
+    assert!(format!("{error:#}").contains("preserving resolver state"));
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read nVPN resolver link"),
+        marker_target
+    );
+    assert_eq!(
+        std::fs::read_link(&marker_path).expect("read external marker"),
+        external
+    );
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_install_capture_preserves_a_preexisting_takeover() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("pre-capture-takeover");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    std::fs::remove_file(&resolv_conf).expect("remove original resolver symlink");
+    let external = root.join("external-resolv.conf");
+    std::fs::write(&external, b"nameserver 198.51.100.53\n").expect("write external resolver");
+    symlink(&external, &resolv_conf).expect("install external resolver symlink");
+
+    install_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect_err("captured external resolver must be detected and restored");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read preserved external symlink"),
+        external
+    );
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup).expect("remove only nVPN artifacts");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read preserved external symlink after cleanup"),
+        external
+    );
+    assert_resolver_path_missing(&paths.marker);
+    assert_resolver_path_missing(&paths.backup);
+    assert_resolver_path_missing(&paths.candidate);
+    assert_resolver_path_missing(&paths.active);
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_install_noreplace_preserves_a_gap_takeover() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("install-gap-takeover");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    let external = root.join("external-resolv.conf");
+    std::fs::write(&external, b"nameserver 198.51.100.53\n").expect("write external resolver");
+
+    install_linux_resolved_resolv_conf_with_hook(&resolv_conf, &cleanup, || {
+        symlink(&external, &resolv_conf).expect("claim resolver during install gap");
+        Ok(())
+    })
+    .expect_err("gap takeover must win without replacement");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read preserved external symlink"),
+        external
+    );
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect("external main wins and token-owned artifacts are removed");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read preserved external symlink after cleanup"),
+        external
+    );
+    assert_resolver_path_missing(&paths.backup);
+    assert_resolver_path_missing(&paths.candidate);
+    assert_resolver_path_missing(&paths.marker);
+    assert_resolver_path_missing(&paths.active);
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_cleanup_noreplace_preserves_a_gap_takeover() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("cleanup-takeover");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    install_linux_resolved_resolv_conf(&resolv_conf, &cleanup).expect("switch to resolved stub");
+    let external = root.join("external-resolv.conf");
+    std::fs::write(&external, b"nameserver 198.51.100.53\n").expect("write external resolver");
+
+    restore_linux_resolved_resolv_conf_with_hook(&resolv_conf, &cleanup, || {
+        symlink(&external, &resolv_conf).expect("claim resolver during cleanup gap");
+        Ok(())
+    })
+    .expect("cleanup gap takeover wins without being replaced");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read preserved external symlink"),
+        external
+    );
+    assert_resolver_path_missing(&paths.backup);
+    assert_resolver_path_missing(&paths.active);
+    assert_resolver_path_missing(&paths.candidate);
+    assert_resolver_path_missing(&paths.marker);
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect("idempotent retry sees no owned artifacts");
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_install_and_cleanup_preserve_regular_file_takeovers() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("regular-takeover");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+
+    install_linux_resolved_resolv_conf_with_hook(&resolv_conf, &cleanup, || {
+        std::fs::write(&resolv_conf, b"nameserver 198.51.100.53\n")
+            .expect("claim install gap with regular resolver");
+        Ok(())
+    })
+    .expect_err("regular install-gap takeover must win");
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect("remove token artifacts around regular takeover");
+    assert_eq!(
+        std::fs::read(&resolv_conf).expect("read preserved regular resolver"),
+        b"nameserver 198.51.100.53\n"
+    );
+    for path in [
+        &paths.marker,
+        &paths.backup,
+        &paths.candidate,
+        &paths.active,
+    ] {
+        assert_resolver_path_missing(path);
+    }
+
+    std::fs::remove_file(&resolv_conf).expect("remove first regular takeover");
+    symlink(&uplink, &resolv_conf).expect("restore fixture uplink symlink");
+    let second = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read second cleanup intent")
+        .expect("second uplink switch cleanup intent");
+    let second_paths = resolved_paths(&resolv_conf, &second);
+    install_linux_resolved_resolv_conf(&resolv_conf, &second).expect("install second secure DNS");
+    restore_linux_resolved_resolv_conf_with_hook(&resolv_conf, &second, || {
+        std::fs::write(&resolv_conf, b"nameserver 203.0.113.53\n")
+            .expect("claim cleanup gap with regular resolver");
+        Ok(())
+    })
+    .expect("regular cleanup-gap takeover must win");
+    assert_eq!(
+        std::fs::read(&resolv_conf).expect("read second preserved regular resolver"),
+        b"nameserver 203.0.113.53\n"
+    );
+    for path in [
+        &second_paths.marker,
+        &second_paths.backup,
+        &second_paths.candidate,
+        &second_paths.active,
+    ] {
+        assert_resolver_path_missing(path);
+    }
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_cleanup_rejects_reserved_main_without_artifacts() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("reserved-main-only");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    std::fs::remove_file(&resolv_conf).expect("remove fixture uplink");
+    symlink(resolved_marker_target(&paths), &resolv_conf).expect("simulate dangling reserved main");
+
+    let error = restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect_err("reserved main cannot clear the journal");
+    assert!(format!("{error:#}").contains("reserved nVPN path"));
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_cleanup_retains_journal_when_main_is_missing_without_artifacts() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("missing-main-only");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    std::fs::remove_file(&resolv_conf).expect("simulate external main removal");
+
+    let error = restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect_err("missing main cannot clear the journal");
+    assert!(format!("{error:#}").contains("main resolver is missing"));
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_cleanup_restores_main_missing_crash_phases() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("missing-main-phases");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    let marker_target = resolved_marker_target(&paths);
+    symlink(&cleanup.stub_target, &paths.marker).expect("prepare marker");
+    symlink(&marker_target, &paths.candidate).expect("prepare candidate");
+    std::fs::rename(&resolv_conf, &paths.backup).expect("simulate crash after backup capture");
+
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup)
+        .expect("restore main after interrupted install");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("restored main"),
+        uplink
+    );
+    for path in [
+        &paths.marker,
+        &paths.backup,
+        &paths.candidate,
+        &paths.active,
+    ] {
+        assert_resolver_path_missing(path);
+    }
+
+    std::fs::remove_file(&resolv_conf).expect("remove first restored main");
+    symlink(&uplink, &resolv_conf).expect("restore fixture uplink");
+    let second = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read second cleanup intent")
+        .expect("second uplink switch cleanup intent");
+    let second_paths = resolved_paths(&resolv_conf, &second);
+    install_linux_resolved_resolv_conf(&resolv_conf, &second).expect("install secure DNS");
+    std::fs::rename(&resolv_conf, &second_paths.active)
+        .expect("simulate crash after active capture");
+    restore_linux_resolved_resolv_conf(&resolv_conf, &second)
+        .expect("restore main after interrupted cleanup");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("restored main"),
+        uplink
+    );
+    for path in [
+        &second_paths.marker,
+        &second_paths.backup,
+        &second_paths.candidate,
+        &second_paths.active,
+    ] {
+        assert_resolver_path_missing(path);
+    }
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_crash_cleanup_removes_prepared_unique_links() {
+    let (root, resolv_conf, uplink, stub) = resolved_resolv_conf_fixture("crash-window");
+    symlink(&uplink, &resolv_conf).expect("install fixture uplink symlink");
+    let cleanup = linux_resolved_resolv_conf_cleanup_intent(&resolv_conf, &uplink, &stub)
+        .expect("read cleanup intent")
+        .expect("uplink switch cleanup intent");
+    let paths = resolved_paths(&resolv_conf, &cleanup);
+    let marker_target = resolved_marker_target(&paths);
+    symlink(&cleanup.stub_target, &paths.marker).expect("simulate prepared marker creation");
+    symlink(&marker_target, &paths.candidate).expect("simulate prepared candidate creation");
+
+    restore_linux_resolved_resolv_conf(&resolv_conf, &cleanup).expect("repair interrupted install");
+    assert_eq!(
+        std::fs::read_link(&resolv_conf).expect("read untouched uplink symlink"),
+        uplink
+    );
+    assert_resolver_path_missing(&paths.marker);
+    assert_resolver_path_missing(&paths.backup);
+    assert_resolver_path_missing(&paths.candidate);
+    assert_resolver_path_missing(&paths.active);
+    std::fs::remove_dir_all(root).expect("remove resolver fixture");
+}
+
+#[test]
+fn old_resolved_cleanup_journal_defaults_to_no_resolv_conf_ownership() {
+    let cleanup: LinuxSecureDnsCleanupState =
+        serde_json::from_str(r#"{"Resolved":{"interface":"nvpn0","interface_index":42}}"#)
+            .expect("deserialize old cleanup journal");
+    assert_eq!(
+        cleanup,
+        LinuxSecureDnsCleanupState::Resolved {
+            interface: "nvpn0".to_string(),
+            interface_index: Some(42),
+            resolv_conf: None,
+        }
+    );
+}
+
+#[test]
+fn resolved_cleanup_attempts_link_and_resolv_conf_rollback() {
+    let order = std::cell::RefCell::new(Vec::new());
+    let link_called = std::cell::Cell::new(false);
+    let resolv_conf_called = std::cell::Cell::new(false);
+    let error = restore_linux_resolved_components(
+        || {
+            order.borrow_mut().push("resolv_conf");
+            resolv_conf_called.set(true);
+            Err(anyhow!("resolv.conf rollback"))
+        },
+        || {
+            order.borrow_mut().push("link");
+            link_called.set(true);
+            Err(anyhow!("link rollback"))
+        },
+    )
+    .expect_err("both rollback failures");
+
+    assert_eq!(&*order.borrow(), &["resolv_conf", "link"]);
+    assert!(link_called.get());
+    assert!(resolv_conf_called.get());
+    let message = format!("{error:#}");
+    assert!(message.contains("link rollback"));
+    assert!(message.contains("resolv.conf rollback"));
 }
 
 #[test]

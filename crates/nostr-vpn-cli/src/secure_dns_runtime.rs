@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -21,6 +21,24 @@ use tokio::task::{JoinHandle, JoinSet};
 
 mod resolver;
 use resolver::{current_resolver, dns_resolver, resolve_fips_dns_if_handled};
+#[cfg(any(target_os = "linux", test))]
+mod linux;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use linux::LinuxSecureDnsCleanupState;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::repair_linux_secure_dns_cleanup_state;
+#[cfg(test)]
+use linux::{
+    LINUX_DIRECT_RESOLV_CONF, linux_direct_resolv_conf_allowed,
+    linux_direct_resolv_conf_needs_restore, restore_linux_resolved_components,
+};
+#[cfg(all(test, unix))]
+use linux::{
+    LinuxResolvedPaths, install_linux_resolved_resolv_conf,
+    install_linux_resolved_resolv_conf_with_hook, linux_resolved_paths,
+    linux_resolved_resolv_conf_cleanup_intent, restore_linux_resolved_resolv_conf,
+    restore_linux_resolved_resolv_conf_with_hook,
+};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -44,10 +62,6 @@ type SharedResolver = Arc<dyn SecureDnsLookup>;
 type ResolverState = Arc<RwLock<SharedResolver>>;
 type FipsDnsEndpoint = Option<Arc<FipsEndpoint>>;
 const FIPS_DNS_TTL_SECS: u32 = 30;
-#[cfg(any(target_os = "linux", test))]
-const LINUX_DIRECT_RESOLV_CONF: &[u8] = b"# Managed by nvpn secure DNS\n\
-nameserver 127.0.0.1\n\
-options timeout:1 attempts:1\n";
 
 pub(crate) struct SecureDnsRuntime {
     udp_task: Option<JoinHandle<()>>,
@@ -420,22 +434,9 @@ fn system_dns_cleanup_intent(
     #[cfg(target_os = "linux")]
     {
         let _ = interface_index;
-        let direct_resolv_conf = linux_direct_resolv_conf_allowed(
-            std::path::Path::new("/.dockerenv").exists(),
-            std::path::Path::new("/run/openrc").exists()
-                || std::path::Path::new("/sbin/openrc").exists(),
-        );
-        let state = if direct_resolv_conf {
-            LinuxSecureDnsCleanupState::DirectResolvConf {
-                previous: read_linux_resolv_conf(std::path::Path::new("/etc/resolv.conf"))?,
-            }
-        } else {
-            LinuxSecureDnsCleanupState::Resolved {
-                interface: interface.to_string(),
-                interface_index: read_linux_interface_index(interface)?,
-            }
-        };
-        return Ok(SystemDnsCleanupIntent::Linux(state));
+        return Ok(SystemDnsCleanupIntent::Linux(linux::cleanup_intent(
+            interface,
+        )?));
     }
 
     #[cfg(target_os = "macos")]
@@ -472,134 +473,6 @@ impl SystemDnsInstallFailure {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum LinuxSecureDnsCleanupState {
-    Resolved {
-        interface: String,
-        #[serde(default)]
-        interface_index: Option<u32>,
-    },
-    DirectResolvConf {
-        previous: Vec<u8>,
-    },
-}
-
-#[cfg(target_os = "linux")]
-fn restore_linux_secure_dns(state: &LinuxSecureDnsCleanupState) -> Result<()> {
-    match state {
-        LinuxSecureDnsCleanupState::Resolved {
-            interface,
-            interface_index,
-        } => {
-            if !linux_resolved_link_is_owned(interface, *interface_index)? {
-                return Ok(());
-            }
-            run_checked(Command::new("resolvectl").args(["revert", interface]))
-        }
-        LinuxSecureDnsCleanupState::DirectResolvConf { previous } => {
-            let current = read_linux_resolv_conf(std::path::Path::new("/etc/resolv.conf"))?;
-            if linux_direct_resolv_conf_needs_restore(&current, previous) {
-                return write_linux_resolv_conf(previous)
-                    .context("failed to restore and sync /etc/resolv.conf");
-            }
-            Ok(())
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn linux_direct_resolv_conf_needs_restore(current: &[u8], previous: &[u8]) -> bool {
-    current != previous
-        && (current == LINUX_DIRECT_RESOLV_CONF
-            || LINUX_DIRECT_RESOLV_CONF.starts_with(current)
-            || previous.starts_with(current))
-}
-
-#[cfg(target_os = "linux")]
-fn write_linux_resolv_conf(contents: &[u8]) -> Result<()> {
-    std::fs::write("/etc/resolv.conf", contents).context("write /etc/resolv.conf")?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open("/etc/resolv.conf")
-        .and_then(|file| file.sync_all())
-        .context("sync /etc/resolv.conf")
-}
-
-#[cfg(target_os = "linux")]
-fn read_linux_interface_index(interface: &str) -> Result<Option<u32>> {
-    let path = std::path::Path::new("/sys/class/net")
-        .join(interface)
-        .join("ifindex");
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => Ok(Some(raw.trim().parse().with_context(|| {
-            format!("parse Linux interface index from {}", path.display())
-        })?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error)
-            .with_context(|| format!("read Linux interface index from {}", path.display())),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_resolved_link_is_owned(interface: &str, expected_index: Option<u32>) -> Result<bool> {
-    let interface_root = std::path::Path::new("/sys/class/net").join(interface);
-    if !interface_root.exists() {
-        return Ok(false);
-    }
-    if let Some(expected_index) = expected_index
-        && read_linux_interface_index(interface)? != Some(expected_index)
-    {
-        return Ok(false);
-    }
-    if !interface_root.join("tun_flags").exists() {
-        return Ok(false);
-    }
-    let output = Command::new("resolvectl")
-        .args(["dns", interface])
-        .output()
-        .context("query Linux per-link DNS ownership")?;
-    if !output.status.success() {
-        if !interface_root.exists() {
-            return Ok(false);
-        }
-        return Err(anyhow!(
-            "failed to query DNS for Linux link {interface}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split_ascii_whitespace()
-        .any(|token| token == "127.0.0.1"))
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn repair_linux_secure_dns_cleanup_state(
-    state: &mut Option<LinuxSecureDnsCleanupState>,
-) -> Result<()> {
-    let Some(restore) = state.as_ref() else {
-        return Ok(());
-    };
-    restore_linux_secure_dns(restore)?;
-    state.take();
-    let _ = Command::new("resolvectl").arg("flush-caches").status();
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn linux_direct_resolv_conf_allowed(container: bool, openrc: bool) -> bool {
-    container || openrc
-}
-
-#[cfg(target_os = "linux")]
-fn read_linux_resolv_conf(path: &std::path::Path) -> Result<Vec<u8>> {
-    match std::fs::read(path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
-    }
-}
-
 impl SystemDnsGuard {
     fn install(
         cleanup_intent: SystemDnsCleanupIntent,
@@ -607,19 +480,9 @@ impl SystemDnsGuard {
         #[cfg(target_os = "linux")]
         {
             let SystemDnsCleanupIntent::Linux(cleanup_state) = cleanup_intent;
-            let install = match &cleanup_state {
-                LinuxSecureDnsCleanupState::Resolved { interface, .. } => (|| -> Result<()> {
-                    run_checked(Command::new("resolvectl").args(["dns", interface, "127.0.0.1"]))?;
-                    run_checked(Command::new("resolvectl").args(["domain", interface, "~."]))?;
-                    Ok(())
-                })(),
-                LinuxSecureDnsCleanupState::DirectResolvConf { .. } => {
-                    write_linux_resolv_conf(LINUX_DIRECT_RESOLV_CONF)
-                        .context("failed to install direct secure DNS resolver")
-                }
-            };
+            let install = linux::install(&cleanup_state);
             if let Err(install_error) = install {
-                let rollback = restore_linux_secure_dns(&cleanup_state);
+                let rollback = linux::restore(&cleanup_state);
                 crate::fips_private_mesh::record_linux_secure_dns_cleanup(
                     cleanup_state.clone(),
                     &rollback,
@@ -638,7 +501,7 @@ impl SystemDnsGuard {
                     )),
                 };
             }
-            let _ = Command::new("resolvectl").arg("flush-caches").status();
+            linux::flush_caches();
             return Ok(Self {
                 linux: cleanup_state,
                 active: true,
@@ -759,10 +622,10 @@ impl SystemDnsGuard {
 
         #[cfg(target_os = "linux")]
         {
-            let result = restore_linux_secure_dns(&self.linux);
+            let result = linux::restore(&self.linux);
             if result.is_ok() {
                 self.active = false;
-                let _ = Command::new("resolvectl").arg("flush-caches").status();
+                linux::flush_caches();
             }
             return result;
         }
@@ -811,25 +674,6 @@ impl Drop for SystemDnsGuard {
             eprintln!("secure DNS: cleanup failed: {error:#}");
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn run_checked(command: &mut Command) -> Result<()> {
-    let output = command
-        .output()
-        .context("failed to execute DNS configuration command")?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let details = if output.stderr.is_empty() {
-        String::from_utf8_lossy(&output.stdout)
-    } else {
-        String::from_utf8_lossy(&output.stderr)
-    };
-    Err(anyhow!(
-        "DNS configuration command failed: {}",
-        details.trim()
-    ))
 }
 
 #[cfg(target_os = "windows")]
