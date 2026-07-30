@@ -64,7 +64,7 @@ PRIMARY_SOURCE=""
 PRIMARY_ADDRESS=""
 HYPERVISOR_UPLINK=""
 SECONDARY_PROXY=""
-LINUX_RUN_PID=""
+LINUX_RUN_UNIT=""
 GUEST_BINARY_COPY_TMP=""
 NETWORK_CREATED=0
 NIC_ATTACHED=0
@@ -129,6 +129,7 @@ sync_and_import_candidates() {
     NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
     NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$app_sha" \
     "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
+  GUEST_REPO="$(run_primary "realpath '$GUEST_REPO'")"
   target_head="$(run_primary "git -C '$GUEST_REPO' rev-parse HEAD")"
   target_tree="$(run_primary "git -C '$GUEST_REPO' rev-parse 'HEAD^{tree}'")"
   [[ "$target_head" == "$app_sha" && "$target_tree" == "$expected_tree" ]] \
@@ -485,18 +486,17 @@ initialize_and_start_peer() {
 }
 
 start_linux_runner() {
-  (
-    run_guest_secondary run \
-      "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
-      "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
-      "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
-      "NVPN_UNDERLAY_LISTEN_PORT=$TARGET_LISTEN_PORT" \
-      "NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY=$WG_SERVER_PUBLIC_KEY" \
-      "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
-      "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
-      "NVPN_UNDERLAY_WG_SERVER_IP=$WG_SERVER_IP"
-  ) >"$ARTIFACT_DIR/linux-run.log" 2>&1 &
-  LINUX_RUN_PID="$!"
+  LINUX_RUN_UNIT="nvpn-underlay-$RUN_TOKEN.service"
+  start_guest_secondary_unit run \
+    "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
+    "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
+    "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
+    "NVPN_UNDERLAY_LISTEN_PORT=$TARGET_LISTEN_PORT" \
+    "NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY=$WG_SERVER_PUBLIC_KEY" \
+    "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
+    "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
+    "NVPN_UNDERLAY_WG_SERVER_IP=$WG_SERVER_IP" \
+    >"$ARTIFACT_DIR/linux-run.log" 2>&1
   wait_for_guest_marker ready 35
   guest_receipt secondary-underlay-ready.json \
     >"$ARTIFACT_DIR/secondary-underlay-ready.json"
@@ -721,8 +721,9 @@ run_dns_matrix_and_direct_restore() {
     and .wireguard_policy_table_empty == true
     and .verified_https == true
   ' "$ARTIFACT_DIR/direct-receipt.json" >/dev/null
-  wait "$LINUX_RUN_PID"
-  LINUX_RUN_PID=""
+  wait_for_guest_runner_success \
+    >"$ARTIFACT_DIR/linux-run-unit-receipt.txt"
+  stop_guest_runner_unit
 }
 
 run_sigkill_restart_recovery() {
@@ -807,6 +808,7 @@ capture_guest_state() {
   remote_command="sudo -n tar --ignore-failed-read -C '$GUEST_STATE_DIR' -cf - \
 identity.json daemon.state.json daemon.stderr.log daemon.stdout.log \
 payload.log platform-network-monitor-probe.log signed-rosters.json \
+runner.stdout.log runner.stderr.log \
 secondary-underlay-ready.json secondary.nm-uuid \
 secondary.receipt.json primary.receipt.json direct.receipt.json \
 crash-repair.receipt.json crash-journal-ownership.json \
@@ -1059,12 +1061,13 @@ cleanup() {
     run_primary "rm -f '$GUEST_BINARY_COPY_TMP'" >/dev/null 2>&1 || cleanup_failed=1
   fi
   capture_remote_state || cleanup_failed=1
+  if [[ -n "$LINUX_RUN_UNIT" ]]; then
+    run_primary sudo -n systemctl status --no-pager "$LINUX_RUN_UNIT" \
+      >"$ARTIFACT_DIR/linux-run-unit-cleanup-state.txt" 2>&1 || true
+    stop_guest_runner_unit >/dev/null 2>&1 || cleanup_failed=1
+  fi
   if [[ "$NIC_ATTACHED" == "1" ]]; then
     run_guest_primary cleanup >/dev/null 2>&1 || cleanup_failed=1
-  fi
-  if [[ -n "$LINUX_RUN_PID" ]]; then
-    kill "$LINUX_RUN_PID" >/dev/null 2>&1 || true
-    wait "$LINUX_RUN_PID" >/dev/null 2>&1 || true
   fi
   if [[ "$PEER_INITIALIZED" == "1" ]]; then
     peer_command cleanup >/dev/null 2>&1 || cleanup_failed=1

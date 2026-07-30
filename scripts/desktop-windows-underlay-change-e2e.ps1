@@ -514,11 +514,20 @@ function Remove-ExitWireGuardService {
 }
 
 function Invoke-IsolatedNetworkCleanup {
-  param([switch]$EmergencyRepair)
+  param([switch]$EmergencyRepair, [int]$DaemonPid = 0)
   New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
   Write-Marker "stop-probe"
+  if ($DaemonPid -le 0) {
+    try { $DaemonPid = Get-DaemonPid } catch { $DaemonPid = 0 }
+  }
   & $Binary stop --config $Config --timeout-secs 5 --force 2>$null | Out-Null
   $stopExitCode = $LASTEXITCODE
+  if ($DaemonPid -gt 0) {
+    Stop-Process -Id $DaemonPid -Force -ErrorAction SilentlyContinue
+    Wait-ForCondition "exact candidate daemon termination" 5000 {
+      !(Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue)
+    } 50 | Out-Null
+  }
   $failures = @()
   if ($stopExitCode -ne 0) {
     $failures += "normal nvpn stop failed with exit code $stopExitCode"
@@ -708,6 +717,7 @@ switch ($Action) {
     $probe = $null
     $wireGuardProbe = $null
     $watchdog = $null
+    $runError = $cleanupError = $null
     try {
       Remove-Item -LiteralPath (Join-Path $StateDir "watchdog.complete") `
         -Force -ErrorAction SilentlyContinue
@@ -845,8 +855,13 @@ switch ($Action) {
         $tunnelIp
       Write-Marker "done"
     }
+    catch { $runError = $_ }
     finally {
-      Invoke-IsolatedNetworkCleanup -EmergencyRepair
+      $cleanupDaemonPid = if ($daemon) { [int]$daemon.Id } else { 0 }
+      try {
+        Invoke-IsolatedNetworkCleanup -EmergencyRepair `
+          -DaemonPid $cleanupDaemonPid
+      } catch { $cleanupError = $_ }
       if ($probe) {
         Wait-Process -Id $probe.Id -Timeout 3 -ErrorAction SilentlyContinue
         Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
@@ -855,16 +870,20 @@ switch ($Action) {
         Wait-Process -Id $wireGuardProbe.Id -Timeout 3 -ErrorAction SilentlyContinue
         Stop-Process -Id $wireGuardProbe.Id -Force -ErrorAction SilentlyContinue
       }
-      if ($daemon) {
-        Wait-Process -Id $daemon.Id -Timeout 5 -ErrorAction SilentlyContinue
-        Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
-      }
       Write-Marker "watchdog.complete"
       if ($watchdog) {
         Wait-Process -Id $watchdog.Id -Timeout 3 -ErrorAction SilentlyContinue
         Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue
       }
     }
+    if ($runError) {
+      if ($cleanupError) {
+        [Console]::Error.WriteLine("cleanup also failed: " +
+          $cleanupError.Exception.Message)
+      }
+      throw $runError
+    }
+    if ($cleanupError) { throw $cleanupError }
   }
 
   "Cleanup" {

@@ -166,11 +166,13 @@ wireguard_endpoint_route_state_valid() {
 }
 
 secure_dns_owned() {
+  local dns
   [[ -f "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
     && grep -Fq 'Managed by nvpn' "$SECURE_RESOLVER" \
     && grep -Fq 'nameserver 127.0.0.1' "$SECURE_RESOLVER" \
-    && /usr/sbin/scutil --dns 2>/dev/null \
-      | grep -Eq 'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1'
+    && dns="$(/usr/sbin/scutil --dns 2>/dev/null)" \
+    && grep -Eq \
+      'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1' <<<"$dns"
 }
 
 resolver_files_absent() {

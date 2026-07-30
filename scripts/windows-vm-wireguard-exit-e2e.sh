@@ -83,7 +83,8 @@ run_ps() {
   local encoded
   encoded="$(printf '%s' "$script" | iconv -t UTF-16LE | base64 | tr -d '\n')"
   ssh_command
-  "${SSH_CMD[@]}" powershell.exe -NoProfile -EncodedCommand "$encoded"
+  "${SSH_CMD[@]}" powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -EncodedCommand "$encoded"
 }
 
 copy_to_guest() {

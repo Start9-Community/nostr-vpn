@@ -103,48 +103,80 @@ run_secondary_bounded() {
   ' "$timeout_secs" "${LINUX_SECONDARY_SSH[@]}" "$@"
 }
 
+linux_guest_env() {
+  LINUX_GUEST_ENV=(
+    "NVPN_UNDERLAY_BINARY=$GUEST_BINARY" \
+    "NVPN_UNDERLAY_STATE_DIR=$GUEST_STATE_DIR" \
+    "NVPN_UNDERLAY_PRIMARY_MAC=$PRIMARY_MAC" \
+    "NVPN_UNDERLAY_SECONDARY_MAC=$SECONDARY_MAC" \
+    "NVPN_UNDERLAY_SECONDARY_ADDRESS=$SECONDARY_ADDRESS" \
+    "NVPN_UNDERLAY_SECONDARY_PREFIX=$SECONDARY_PREFIX" \
+    "NVPN_UNDERLAY_SECONDARY_GATEWAY=$SECONDARY_GATEWAY" \
+    "NVPN_UNDERLAY_NETWORK_ID=$NETWORK_ID" \
+    "NVPN_UNDERLAY_FIXTURE_DNS_NAME=$FIXTURE_DNS_NAME" \
+    "NVPN_UNDERLAY_PROBE_URL=$PROBE_URL" \
+    "NVPN_UNDERLAY_TUN_IFACE=$TARGET_TUN_IFACE" \
+    "NVPN_UNDERLAY_RECOVERY_DEADLINE_MS=$RECOVERY_DEADLINE_MS" \
+    "NVPN_UNDERLAY_EXPECTED_FIPS_REV=$EXPECTED_FIPS_REV"
+  )
+}
+
 run_guest_primary() {
   local action="$1"
   shift
+  linux_guest_env
   primary_ssh_command
-  "${LINUX_PRIMARY_SSH[@]}" sudo -n env \
-    "NVPN_UNDERLAY_BINARY=$GUEST_BINARY" \
-    "NVPN_UNDERLAY_STATE_DIR=$GUEST_STATE_DIR" \
-    "NVPN_UNDERLAY_PRIMARY_MAC=$PRIMARY_MAC" \
-    "NVPN_UNDERLAY_SECONDARY_MAC=$SECONDARY_MAC" \
-    "NVPN_UNDERLAY_SECONDARY_ADDRESS=$SECONDARY_ADDRESS" \
-    "NVPN_UNDERLAY_SECONDARY_PREFIX=$SECONDARY_PREFIX" \
-    "NVPN_UNDERLAY_SECONDARY_GATEWAY=$SECONDARY_GATEWAY" \
-    "NVPN_UNDERLAY_NETWORK_ID=$NETWORK_ID" \
-    "NVPN_UNDERLAY_FIXTURE_DNS_NAME=$FIXTURE_DNS_NAME" \
-    "NVPN_UNDERLAY_PROBE_URL=$PROBE_URL" \
-    "NVPN_UNDERLAY_TUN_IFACE=$TARGET_TUN_IFACE" \
-    "NVPN_UNDERLAY_RECOVERY_DEADLINE_MS=$RECOVERY_DEADLINE_MS" \
-    "NVPN_UNDERLAY_EXPECTED_FIPS_REV=$EXPECTED_FIPS_REV" \
-    "$@" \
-    "$GUEST_REPO/scripts/desktop-linux-underlay-change-e2e.sh" "$action"
+  "${LINUX_PRIMARY_SSH[@]}" sudo -n env "${LINUX_GUEST_ENV[@]}" \
+    "$@" "$GUEST_REPO/scripts/desktop-linux-underlay-change-e2e.sh" "$action"
 }
 
-run_guest_secondary() {
+start_guest_secondary_unit() {
   local action="$1"
   shift
+  [[ -n "$LINUX_RUN_UNIT" && "$GUEST_REPO" == /* ]] \
+    || fail "Linux detached guest runner is not initialized"
+  linux_guest_env
   secondary_ssh_command
-  "${LINUX_SECONDARY_SSH[@]}" sudo -n env \
-    "NVPN_UNDERLAY_BINARY=$GUEST_BINARY" \
-    "NVPN_UNDERLAY_STATE_DIR=$GUEST_STATE_DIR" \
-    "NVPN_UNDERLAY_PRIMARY_MAC=$PRIMARY_MAC" \
-    "NVPN_UNDERLAY_SECONDARY_MAC=$SECONDARY_MAC" \
-    "NVPN_UNDERLAY_SECONDARY_ADDRESS=$SECONDARY_ADDRESS" \
-    "NVPN_UNDERLAY_SECONDARY_PREFIX=$SECONDARY_PREFIX" \
-    "NVPN_UNDERLAY_SECONDARY_GATEWAY=$SECONDARY_GATEWAY" \
-    "NVPN_UNDERLAY_NETWORK_ID=$NETWORK_ID" \
-    "NVPN_UNDERLAY_FIXTURE_DNS_NAME=$FIXTURE_DNS_NAME" \
-    "NVPN_UNDERLAY_PROBE_URL=$PROBE_URL" \
-    "NVPN_UNDERLAY_TUN_IFACE=$TARGET_TUN_IFACE" \
-    "NVPN_UNDERLAY_RECOVERY_DEADLINE_MS=$RECOVERY_DEADLINE_MS" \
-    "NVPN_UNDERLAY_EXPECTED_FIPS_REV=$EXPECTED_FIPS_REV" \
-    "$@" \
-    "$GUEST_REPO/scripts/desktop-linux-underlay-change-e2e.sh" "$action"
+  "${LINUX_SECONDARY_SSH[@]}" sudo -n systemd-run \
+    "--unit=$LINUX_RUN_UNIT" --collect --quiet \
+    --property=Type=exec --property=RemainAfterExit=yes \
+    --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 \
+    --property=KillMode=mixed \
+    "--property=StandardOutput=append:$GUEST_STATE_DIR/runner.stdout.log" \
+    "--property=StandardError=append:$GUEST_STATE_DIR/runner.stderr.log" \
+    /usr/bin/env "${LINUX_GUEST_ENV[@]}" \
+    "$@" "$GUEST_REPO/scripts/desktop-linux-underlay-change-e2e.sh" "$action"
+}
+
+wait_for_guest_runner_success() {
+  local deadline="$((SECONDS + 30))"
+  local state
+  while ((SECONDS < deadline)); do
+    state="$(run_primary sudo -n systemctl show "$LINUX_RUN_UNIT" \
+      --property=ActiveState --property=SubState \
+      --property=Result --property=ExecMainStatus 2>/dev/null)" || {
+      sleep 0.1
+      continue
+    }
+    if grep -Fqx 'ActiveState=active' <<<"$state" \
+      && grep -Fqx 'SubState=exited' <<<"$state" \
+      && grep -Fqx 'Result=success' <<<"$state" \
+      && grep -Fqx 'ExecMainStatus=0' <<<"$state"
+    then
+      printf '%s\n' "$state"
+      return 0
+    fi
+    grep -Eq '^ActiveState=(activating|active)$' <<<"$state" || break
+    sleep 0.1
+  done
+  printf '%s\n' "${state:-unit state unavailable}" >&2
+  fail "detached Linux guest runner did not exit successfully"
+}
+
+stop_guest_runner_unit() {
+  [[ -n "$LINUX_RUN_UNIT" ]] || return 0
+  run_primary sudo -n systemctl stop "$LINUX_RUN_UNIT"
+  LINUX_RUN_UNIT=""
 }
 
 guest_marker_exists() {
@@ -152,43 +184,22 @@ guest_marker_exists() {
     sudo -n test -e "$GUEST_STATE_DIR/$1" >/dev/null 2>&1
 }
 
-reap_linux_guest_runner_if_exited() {
-  local marker="$1"
-  local runner_status
-  [[ -n "$LINUX_RUN_PID" ]] || return 0
-  kill -0 "$LINUX_RUN_PID" 2>/dev/null && return 0
-  set +e
-  wait "$LINUX_RUN_PID"
-  runner_status=$?
-  set -e
-  LINUX_RUN_PID=""
-  tail -n 160 "$ARTIFACT_DIR/linux-run.log" >&2 || true
-  fail "Linux guest runner exited with status=$runner_status before $marker"
-}
-
 wait_for_guest_marker() {
   local name="$1"
   local timeout_secs="${2:-30}"
   local started="$SECONDS"
-  local runner_status="not-running"
+  local state
   while ((SECONDS - started < timeout_secs)); do
-    reap_linux_guest_runner_if_exited "$name"
     if guest_marker_exists "$name"; then
       return 0
     fi
-    reap_linux_guest_runner_if_exited "$name"
+    state="$(run_secondary_bounded 8 sudo -n systemctl show "$LINUX_RUN_UNIT" \
+      --property=ActiveState --value 2>/dev/null)" || state=""
+    [[ -z "$state" || "$state" == "active" ]] \
+      || fail "Linux guest runner exited before $name"
     sleep 0.1
   done
-  if [[ -n "$LINUX_RUN_PID" ]]; then
-    kill "$LINUX_RUN_PID" >/dev/null 2>&1 || true
-    set +e
-    wait "$LINUX_RUN_PID"
-    runner_status=$?
-    set -e
-    LINUX_RUN_PID=""
-  fi
-  tail -n 160 "$ARTIFACT_DIR/linux-run.log" >&2 || true
-  fail "timed out waiting for Linux guest marker $name; runner_status=$runner_status"
+  fail "timed out waiting for Linux guest marker $name"
 }
 
 signal_guest() {

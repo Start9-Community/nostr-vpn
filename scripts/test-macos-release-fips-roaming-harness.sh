@@ -156,6 +156,13 @@ require_tokens "$GUEST" "failure diagnostics survive cleanup" \
   'wireguard-readiness-dns.txt' \
   'wireguard-readiness-status.json' \
   'wireguard-readiness-daemon.log'
+require_tokens "$GUEST" "SIGPIPE-safe secure DNS ownership" \
+  'dns="$(/usr/sbin/scutil --dns 2>/dev/null)"' \
+  '<<<"$dns"'
+secure_dns_source="$(sed -n '/^secure_dns_owned() {/,/^}/p' "$GUEST")"
+if [[ "$secure_dns_source" == *'| grep'* ]]; then
+  fail "macOS secure-DNS ownership can misread scutil SIGPIPE as resolver loss"
+fi
 require_tokens "$GUEST" "process-stable macOS monotonic clock" \
   'mach_continuous_time' \
   'mach_timebase_info' \

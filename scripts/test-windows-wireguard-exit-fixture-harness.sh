@@ -26,6 +26,11 @@ do
     || fail "orchestrator lost production fixture step: $source"
 done
 
+run_ps_source="$(sed -n '/^run_ps() {/,/^}/p' "$ORCHESTRATOR")"
+[[ "$run_ps_source" == *'powershell.exe -NoProfile -ExecutionPolicy Bypass'* \
+  && "$run_ps_source" == *'-EncodedCommand "$encoded"'* ]] \
+  || fail "encoded lifecycle commands do not bypass policy process-locally"
+
 for profile_line in \
   'Address = $TUNNEL_CLIENT_IP/32' \
   'DNS = $TUNNEL_SERVER_IP' \

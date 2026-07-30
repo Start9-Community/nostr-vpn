@@ -46,7 +46,7 @@ require_tokens() {
   local file="$1" label="$2" token
   shift 2
   for token in "$@"; do
-    grep -Fq "$token" "$file" \
+    grep -Fq -- "$token" "$file" \
       || fail "$(basename "$file") lacks $label: $token"
   done
 }
@@ -392,6 +392,22 @@ import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+cleanup = text[
+    text.index("function Invoke-IsolatedNetworkCleanup {"):
+    text.index("\nAssert-Administrator")
+]
+if not (
+    cleanup.index("& $Binary stop")
+    < cleanup.index("Stop-Process -Id $DaemonPid")
+    < cleanup.index('Wait-ForCondition "exact candidate daemon termination"')
+    < cleanup.index("& $Binary repair-network")
+):
+    raise SystemExit(
+        "Windows cleanup can repair the network before the exact daemon exits"
+    )
+run = text[text.index('  "Run" {'):text.index('  "Cleanup" {')]
+if run.index("throw $runError") > run.index("throw $cleanupError"):
+    raise SystemExit("Windows cleanup error can mask the original run failure")
 crash = text[text.index("function Invoke-CrashRecovery {"):]
 ownership = crash.index("Read-CandidateNativeWireGuardOwnership")
 termination = crash.index("Stop-Process -Id $crashedPid -Force")
@@ -980,9 +996,11 @@ for value in \
   NVPN_UNDERLAY_SECONDARY_PREFIX \
   NVPN_UNDERLAY_SECONDARY_GATEWAY
 do
-  [[ "$(grep -Fc "\"$value=" "$LINUX_HOST")" -ge 2 ]] \
-    || fail "Linux primary/secondary guest actions do not both receive $value"
+  grep -Fq "\"$value=" "$LINUX_HOST" \
+    || fail "Linux guest environment does not receive $value"
 done
+[[ "$(grep -Fc 'linux_guest_env' "$LINUX_HOST")" -eq 3 ]] \
+  || fail "Linux primary and detached guest actions do not share one environment"
 grep -Fq '"$SECONDARY_ADDRESS" "$SECONDARY_GATEWAY"' "$LINUX_GUEST" \
   || fail "Linux run action does not require the initialized secondary values"
 grep -Fq 'nmcli device set "$secondary_iface" managed no' "$LINUX_GUEST" \
@@ -995,32 +1013,36 @@ grep -Fq "virsh domif-getlink \"\$vm\" \"\$primary_iface\" | awk '{ print \$NF }
   || fail "Linux cleanup audit compares the unparsed virsh link row"
 grep -Fq 'capture_remote_state' "$LINUX_HOST" \
   || fail "Linux failure cleanup does not preserve guest and peer evidence"
-require_tokens "$LINUX_HOST_LIB" "bounded guest-runner failure detection" \
+require_tokens "$LINUX_HOST_LIB" "detached fail-closed guest-runner supervision" \
   'run_secondary_bounded()' \
   'run_hypervisor_bounded()' \
-  'reap_linux_guest_runner_if_exited()' \
+  'start_guest_secondary_unit()' \
+  'systemd-run' \
+  '--collect' \
+  '--property=Type=exec' \
+  '--property=RemainAfterExit=yes' \
+  '--property=RuntimeMaxSec=600' \
+  '--property=StandardOutput=append:' \
+  '--property=StandardError=append:' \
+  '--property=ActiveState' \
+  '--property=Result' \
+  '--property=ExecMainStatus' \
+  'wait_for_guest_runner_success()' \
+  'systemctl stop' \
   'ConnectionAttempts=1' \
   'ServerAliveInterval=2' \
   'ServerAliveCountMax=2'
-python3 - "$LINUX_HOST_LIB" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-wait = source[
-    source.index("wait_for_guest_marker() {"):
-    source.index("\nsignal_guest() {")
-]
-first_reap = wait.index("reap_linux_guest_runner_if_exited")
-probe = wait.index("guest_marker_exists")
-second_reap = wait.index("reap_linux_guest_runner_if_exited", first_reap + 1)
-if not first_reap < probe < second_reap:
-    raise SystemExit(
-        "Linux marker wait does not inspect the guest runner before and after its bounded probe"
-    )
-if 'LINUX_RUN_PID=""' not in wait or "runner_status=" not in wait:
-    raise SystemExit("Linux marker wait does not clear/report the completed guest runner")
-PY
+if grep -Fq 'LINUX_RUN_PID' "$LINUX_HOST" "$LINUX_HOST_LIB" \
+  || grep -Fq 'reap_linux_guest_runner_if_exited' "$LINUX_HOST_LIB"
+then
+  fail "Linux gate still couples the guest runner to a long SSH process"
+fi
+require_tokens "$LINUX_HOST" "detached guest-runner lifecycle" \
+  'realpath' \
+  'LINUX_RUN_UNIT=' \
+  'start_guest_secondary_unit run' \
+  'wait_for_guest_runner_success' \
+  'stop_guest_runner_unit'
 require_tokens "$LINUX_HOST" "fail-closed runtime evidence capture" \
   'capture_guest_state secondary' \
   'capture_guest_state primary' \
