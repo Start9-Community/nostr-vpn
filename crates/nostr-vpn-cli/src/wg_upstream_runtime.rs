@@ -36,7 +36,7 @@ use tokio::task::JoinHandle;
 const WG_TUN_PACKET_QUEUE_CAPACITY: usize = 1024;
 const WG_TUN_BATCH_CAPACITY: usize = 64;
 const WG_TUN_BATCH_CHANNEL_CAPACITY: usize = WG_TUN_PACKET_QUEUE_CAPACITY / WG_TUN_BATCH_CAPACITY;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 const MACOS_WG_DEFAULT_ROUTE_TARGETS: &[&str] = &["0.0.0.0/1", "128.0.0.0/1"];
 
 include!("wg_upstream_runtime/tun_io.rs");

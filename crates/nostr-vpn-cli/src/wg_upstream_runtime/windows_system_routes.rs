@@ -1,4 +1,4 @@
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(target_os = "windows")]
 pub(crate) const WINDOWS_CHILD_COMMAND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(3);
 
