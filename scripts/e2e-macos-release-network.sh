@@ -160,6 +160,16 @@ wireguard_interface() {
   '
 }
 
+wireguard_split_defaults_absent() {
+  ipv4_route_table | awk '
+    $1 == "0/1" || $1 == "0.0.0.0/1" \
+      || $1 == "128/1" || $1 == "128.0/1" || $1 == "128.0.0.0/1" {
+      split_default = 1
+    }
+    END { exit split_default ? 1 : 0 }
+  '
+}
+
 wireguard_endpoint_route_state_valid() {
   local expected_underlay="${1:-$PRIMARY_IFACE}"
   local endpoint_iface expected_gateway physical_default_iface wg_iface
@@ -1272,12 +1282,11 @@ direct_state_matches() {
   expected_iface="$(cat "$STATE_DIR/direct-interface")"
   expected_gateway="$(cat "$STATE_DIR/direct-gateway")"
   expected_source="$(cat "$STATE_DIR/direct-source-ip")"
-  [[ -z "$(split_default_interface 1.0.0.1 2>/dev/null || true)" \
-    && -z "$(split_default_interface 129.0.0.1 2>/dev/null || true)" \
-    && "$(route_value default interface)" == "$expected_iface" \
+  [[ "$(route_value default interface)" == "$expected_iface" \
     && "$(route_value default gateway)" == "$expected_gateway" \
     && "$(endpoint_route_interface)" == "$expected_iface" \
     && "$(source_ip)" == "$expected_source" ]] \
+    && wireguard_split_defaults_absent \
     && resolver_files_absent \
     && direct_dns_query_works \
     && https_works

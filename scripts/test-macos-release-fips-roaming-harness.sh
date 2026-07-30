@@ -317,6 +317,7 @@ STATUS_NULL="$TMP_ROOT/status-null.json"
 ROUTES_WASCLONED="$TMP_ROOT/routes-wascloned.txt"
 ROUTES_MIXED="$TMP_ROOT/routes-mixed.txt"
 ROUTES_WRONG="$TMP_ROOT/routes-wrong.txt"
+ROUTES_DIRECT="$TMP_ROOT/routes-direct.txt"
 cat >"$ROUTES_WASCLONED" <<'EOF'
 Routing tables
 
@@ -333,6 +334,15 @@ awk '
   { print }
 ' "$ROUTES_WASCLONED" >"$ROUTES_MIXED"
 sed 's/utun5/en0/g' "$ROUTES_WASCLONED" >"$ROUTES_WRONG"
+cat >"$ROUTES_DIRECT" <<'EOF'
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.168.64.1       UGScg                 en0
+1.0.0.1            192.168.64.1       UGHWIi                en0
+192.168.178.91     192.168.64.1       UGHSI                 en0
+EOF
 python3 - \
   "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" \
   "$STATUS_NULL" "$EXPECTED_PEER" <<'PY'
@@ -378,7 +388,8 @@ PY
 bash -s -- \
   "$DEFINITIONS" "$REMOTE_DEFINITIONS" "$TMP_ROOT" "$EXPECTED_PEER" \
   "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" \
-  "$STATUS_NULL" "$ROUTES_WASCLONED" "$ROUTES_MIXED" "$ROUTES_WRONG" <<'BASH'
+  "$STATUS_NULL" "$ROUTES_WASCLONED" "$ROUTES_MIXED" "$ROUTES_WRONG" \
+  "$ROUTES_DIRECT" <<'BASH'
 set -euo pipefail
 definitions="$1"
 remote_definitions="$2"
@@ -393,6 +404,7 @@ null="$5"
 wascloned="$6"
 mixed="$7"
 wrong_route="$8"
+direct_route="$9"
 set -- definitions-only
 # shellcheck disable=SC1090
 source "$definitions"
@@ -414,6 +426,16 @@ for ROUTE_FIXTURE in "$mixed" "$wrong_route"; do
     exit 1
   fi
 done
+ROUTE_FIXTURE="$wascloned"
+if wireguard_split_defaults_absent; then
+  echo "Direct cleanup accepted surviving WireGuard split defaults" >&2
+  exit 1
+fi
+ROUTE_FIXTURE="$direct_route"
+wireguard_split_defaults_absent || {
+  echo "Direct cleanup rejected a route table without split defaults" >&2
+  exit 1
+}
 STATE_DIR="$state"
 CONFIG="$state/config.toml"
 FIPS_PEER_NPUB="$expected"
