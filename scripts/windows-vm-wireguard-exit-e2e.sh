@@ -30,7 +30,8 @@ SOURCE_IP_URL="${NVPN_WINDOWS_E2E_SOURCE_IP_URL:-https://api.ipify.org}"
 WAIT_SECS="${NVPN_WINDOWS_E2E_WAIT_SECS:-60}"
 SETTLE_SECS="${NVPN_WINDOWS_E2E_SETTLE_SECS:-3}"
 REMOTE_PROVIDER_CONFIG=""
-FIXTURE_HOST="${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-${NVPN_MOBILE_WG_EXIT_HOST_IP:-}}"
+REMOTE_SERVICE_OWNED=0
+FIXTURE_HOST="${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-}"
 HOST_PORT="${NVPN_WINDOWS_WG_FIXTURE_PORT:-51893}"
 TUNNEL_SERVER_IP="${NVPN_WINDOWS_WG_SERVER_IP:-10.99.89.1}"
 TUNNEL_CLIENT_IP="${NVPN_WINDOWS_WG_CLIENT_IP:-10.99.89.2}"
@@ -114,9 +115,69 @@ Remove-Item -Force -LiteralPath $(ps_quote "$REMOTE_PROVIDER_CONFIG") -ErrorActi
     >/dev/null 2>&1 || true
 }
 
+cleanup_remote_service() {
+  [[ "$REMOTE_SERVICE_OWNED" -eq 1 ]] || return 0
+  [[ -n "${GUEST_BINARY:-}" ]] || {
+    echo "Windows cleanup lost the exact candidate binary path" >&2
+    return 1
+  }
+  if ! run_ps "\$ErrorActionPreference = 'Stop'
+\$Bin = $(ps_quote "$GUEST_BINARY")
+\$Config = $(ps_quote "$GUEST_CONFIG")
+if (!(Test-Path -LiteralPath \$Bin -PathType Leaf)) {
+  throw \"exact Windows cleanup binary is missing: \$Bin\"
+}
+if (Test-Path -LiteralPath \$Config -PathType Leaf) {
+  & \$Bin set --config \$Config '--exit-node=' 2>\$null | Out-Null
+}
+if (Get-Service -Name 'NvpnService' -ErrorAction SilentlyContinue) {
+  & \$Bin service uninstall
+  if (\$LASTEXITCODE -ne 0) { throw 'exact Windows service uninstall failed' }
+}
+\$Deadline = (Get-Date).AddSeconds(20)
+do {
+  \$Service = Get-Service -Name 'NvpnService' -ErrorAction SilentlyContinue
+  \$Processes = @(Get-Process -Name 'nvpn' -ErrorAction SilentlyContinue)
+  \$Adapters = @(
+    Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+      Where-Object { \$_.Name -eq 'nvpn' -and \$_.Status -eq 'Up' }
+  )
+  if (!\$Service -and \$Processes.Count -eq 0 -and \$Adapters.Count -eq 0) { break }
+  Start-Sleep -Milliseconds 250
+} while ((Get-Date) -lt \$Deadline)
+\$Rules = @(
+  Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object {
+      \$_.DisplayName -eq 'nostr-vpn secure DNS' -or
+      \$_.Comment -eq 'nostr-vpn authenticated DNS-over-HTTPS stub'
+    }
+)
+if (
+  \$Service -or
+  \$Processes.Count -ne 0 -or
+  \$Adapters.Count -ne 0 -or
+  \$Rules.Count -ne 0
+) {
+  throw 'Windows release lane did not restore its service, process, adapter, and NRPT baseline'
+}
+Resolve-DnsName example.com -Type A -ErrorAction Stop | Out-Null
+\$Response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 $(ps_quote "$PROBE_URL")
+if ([int]\$Response.StatusCode -ne 200) {
+  throw \"Windows direct HTTPS did not recover: \$([int]\$Response.StatusCode)\"
+}" >/dev/null
+  then
+    return 1
+  fi
+  REMOTE_SERVICE_OWNED=0
+}
+
 cleanup() {
   local status="$?" cleanup_failed=0
   trap - EXIT INT TERM
+  if ! cleanup_remote_service; then
+    echo "Windows exact service/network baseline cleanup failed" >&2
+    cleanup_failed=1
+  fi
   if [[ -n "$REMOTE_PROVIDER_CONFIG" ]]; then
     cleanup_remote_provider_config
     if ! run_ps "if (Test-Path -LiteralPath $(ps_quote "$REMOTE_PROVIDER_CONFIG")) { exit 1 }" \
@@ -205,6 +266,10 @@ PY
     }
   IFS=$'\t' read -r endpoint_family ENDPOINT_HOST endpoint_authority \
     <<<"$endpoint_fields"
+  [[ "$endpoint_family" == "ipv4" ]] || {
+    echo "Windows WireGuard fixture requires NVPN_WINDOWS_WG_FIXTURE_HOST_IP to be a reachable literal IPv4 address" >&2
+    return 2
+  }
   export NVPN_MOBILE_WG_EXIT_HOST_IP="$ENDPOINT_HOST"
   export NVPN_MOBILE_WG_EXIT_REMOTE_MODE=native
 
@@ -306,6 +371,29 @@ REMOTE_TREE="$(
   exit 1
 }
 
+run_ps "\$ErrorActionPreference = 'Stop'
+\$Service = Get-Service -Name 'NvpnService' -ErrorAction SilentlyContinue
+\$Processes = @(Get-Process -Name 'nvpn' -ErrorAction SilentlyContinue)
+\$Adapters = @(
+  Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+    Where-Object { \$_.Name -eq 'nvpn' -and \$_.Status -eq 'Up' }
+)
+\$Rules = @(
+  Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object {
+      \$_.DisplayName -eq 'nostr-vpn secure DNS' -or
+      \$_.Comment -eq 'nostr-vpn authenticated DNS-over-HTTPS stub'
+    }
+)
+if (
+  \$Service -or
+  \$Processes.Count -ne 0 -or
+  \$Adapters.Count -ne 0 -or
+  \$Rules.Count -ne 0
+) {
+  throw 'Windows WireGuard lane requires a clean service, process, adapter, and NRPT baseline'
+}"
+
 BUILD_CONFIGURATION="Debug"
 BUILD_PROFILE="debug"
 if [[ -n "$PROVIDER_CONFIG" ]]; then
@@ -319,28 +407,8 @@ GUEST_BINARY="$GUEST_REPO\\target\\$BUILD_PROFILE\\nvpn.exe"
 run_ps "\$ErrorActionPreference = 'Stop'
 Set-Location $(ps_quote "$GUEST_REPO")
 if ($(ps_quote "${NVPN_FIPS_REPO_PATH:-}") -ne '') { \$env:NVPN_FIPS_REPO_PATH = $(ps_quote "$GUEST_FIPS_REPO") }
-\$Service = Get-Service -Name 'NvpnService' -ErrorAction SilentlyContinue
-\$RestartService = \$Service -and \$Service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped
-try {
-  if (\$RestartService) {
-    Stop-Service -Name 'NvpnService' -Force
-    (Get-Service -Name 'NvpnService').WaitForStatus(
-      [System.ServiceProcess.ServiceControllerStatus]::Stopped,
-      [TimeSpan]::FromSeconds(15)
-    )
-  }
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration $BUILD_CONFIGURATION -DaemonOnly
-  if (\$LASTEXITCODE -ne 0) { throw 'Windows WG e2e daemon build failed' }
-}
-finally {
-  if (\$RestartService) {
-    Start-Service -Name 'NvpnService'
-    (Get-Service -Name 'NvpnService').WaitForStatus(
-      [System.ServiceProcess.ServiceControllerStatus]::Running,
-      [TimeSpan]::FromSeconds(15)
-    )
-  }
-}
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration $BUILD_CONFIGURATION -DaemonOnly
+if (\$LASTEXITCODE -ne 0) { throw 'Windows WG e2e daemon build failed' }
 \$Bin = $(ps_quote "$GUEST_BINARY")
 if (!(Test-Path \$Bin)) { throw \"Missing nvpn.exe: \$Bin\" }
 \$ExpectedBinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash
@@ -366,6 +434,7 @@ if [[ "$FIXTURE_ACTIVE" -eq 1 ]]; then
   DNS_BEFORE="$(mobile_wg_fixture_dns_count "$CONTAINER" "$DNS_PROBE_NAME")"
 fi
 
+REMOTE_SERVICE_OWNED=1
 run_ps "\$ErrorActionPreference = 'Stop'
 \$ProviderConfig = $(ps_quote "$REMOTE_PROVIDER_CONFIG")
 \$Acl = New-Object System.Security.AccessControl.FileSecurity

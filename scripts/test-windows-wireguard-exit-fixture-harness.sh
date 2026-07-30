@@ -35,6 +35,18 @@ do
     || fail "ephemeral client profile lost: $profile_line"
 done
 
+for ipv4_proof in \
+  'FIXTURE_HOST="${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-}"' \
+  '[[ "$endpoint_family" == "ipv4" ]]' \
+  'requires NVPN_WINDOWS_WG_FIXTURE_HOST_IP to be a reachable literal IPv4 address'
+do
+  grep -Fq "$ipv4_proof" "$ORCHESTRATOR" \
+    || fail "Windows fixture is not pinned to a literal IPv4 endpoint: $ipv4_proof"
+done
+if grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_IP:-' "$ORCHESTRATOR"; then
+  fail "Windows fixture still falls back to the mobile IPv6-capable endpoint"
+fi
+
 for proof in \
   'EXPECTED_TREE="$(current_tree)"' \
   'Windows WG e2e checkout differs from the exact candidate tree' \
@@ -59,6 +71,19 @@ for cleanup_proof in \
 do
   grep -Fq "$cleanup_proof" "$ORCHESTRATOR" \
     || fail "orchestrator lost cleanup proof: $cleanup_proof"
+done
+
+for baseline_proof in \
+  'cleanup_remote_service' \
+  'REMOTE_SERVICE_OWNED=1' \
+  'Windows exact service/network baseline cleanup failed' \
+  'Windows WireGuard lane requires a clean service, process, adapter, and NRPT baseline' \
+  'Windows release lane did not restore its service, process, adapter, and NRPT baseline' \
+  '& \$Bin service uninstall' \
+  'Invoke-WebRequest -UseBasicParsing -TimeoutSec 10'
+do
+  grep -Fq "$baseline_proof" "$ORCHESTRATOR" \
+    || fail "Windows fixture lacks fail-closed outer cleanup: $baseline_proof"
 done
 
 for guest_proof in \

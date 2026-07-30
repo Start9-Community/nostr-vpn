@@ -156,6 +156,21 @@ require_tokens "$GUEST" "failure diagnostics survive cleanup" \
   'wireguard-readiness-dns.txt' \
   'wireguard-readiness-status.json' \
   'wireguard-readiness-daemon.log'
+require_tokens "$GUEST" "process-stable macOS monotonic clock" \
+  'mach_continuous_time' \
+  'mach_timebase_info' \
+  'failed to read the macOS monotonic clock timebase'
+if grep -Fq 'time.monotonic()' "$GUEST"; then
+  fail "macOS recovery timing still uses Python's process-relative monotonic origin"
+fi
+printf 'nameserver[0] : 127.0.0.1\n' \
+  | grep -Eq 'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1' \
+  || fail "macOS secure-DNS resolver pattern rejects captured scutil output"
+if printf 'nameserver[0] : 127x0x0x1\n' \
+  | grep -Eq 'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1'
+then
+  fail "macOS secure-DNS resolver pattern accepts non-dot separators"
+fi
 if grep -Fq "tr -d '[:space:]' <\"\$STATE_DIR/daemon.pid\"" "$GUEST"; then
   fail "macOS guest still treats nvpn's JSON daemon PID record as plain digits"
 fi

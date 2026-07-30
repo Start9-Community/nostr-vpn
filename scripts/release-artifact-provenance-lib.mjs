@@ -116,7 +116,6 @@ function releaseAssetPlatform(path) {
   if (
     /-linux-x64\.(deb|AppImage)$/.test(name)
     || /-x86_64-unknown-linux-musl\.tar\.gz$/.test(name)
-    || /-arm-unknown-linux-musleabihf\.tar\.gz$/.test(name)
   ) {
     return 'linux'
   }
@@ -1333,64 +1332,6 @@ export function collectReleaseGateReceipts({
       label: `${platform} exact desktop artifact receipt`,
     })
     if (platform === 'linux') {
-      const armv6 = readRequiredJson(
-        platformReceiptPaths.linux.armv6_artifact,
-        'Linux ARMv6 exact-artifact gate receipt',
-      )
-      const armv6Archive = armv6.archive
-      const armv6Binary = armv6.binary
-      const armv6Smoke = armv6.smoke
-      const expectedMembers = [
-        'nvpn/README.txt',
-        'nvpn/install.sh',
-        'nvpn/nvpn',
-      ]
-      if (
-        armv6.schema !== 1
-        || armv6.artifactType !== 'sealed Linux ARMv6 static-musl CLI'
-        || armv6.appGitSha !== commit
-        || armv6.appGitTree !== tree
-        || armv6.appVersion !== artifact.appVersion
-        || armv6.fipsGitSha !== artifact.fipsGitSha
-        || armv6.fipsGitTree !== artifact.fipsGitTree
-        || armv6.fipsVersion !== artifact.fipsVersion
-        || armv6.target !== 'arm-unknown-linux-musleabihf'
-        || armv6.fleetArch !== 'armv6'
-        || armv6.builderImage
-          !== 'messense/rust-musl-cross:arm-musleabihf'
-        || !/^sha256:[0-9a-f]{64}$/.test(armv6.builderImageId ?? '')
-        || !Number.isSafeInteger(armv6.sourceDateEpoch)
-        || armv6.sourceDateEpoch <= 0
-        || armv6Archive?.file
-          !== 'nvpn-arm-unknown-linux-musleabihf.tar.gz'
-        || !/^[0-9a-f]{64}$/.test(armv6Archive?.sha256 ?? '')
-        || !Number.isSafeInteger(armv6Archive?.size)
-        || armv6Archive.size <= 0
-        || JSON.stringify(armv6Archive.members)
-          !== JSON.stringify(expectedMembers)
-        || armv6Binary?.member !== 'nvpn/nvpn'
-        || !/^[0-9a-f]{64}$/.test(armv6Binary?.sha256 ?? '')
-        || !Number.isSafeInteger(armv6Binary?.size)
-        || armv6Binary.size <= 0
-        || armv6Smoke?.realChecks !== true
-        || armv6Smoke?.mocked !== false
-        || armv6Smoke?.installPerformed !== false
-        || armv6Smoke?.networkMutated !== false
-        || armv6Smoke?.hostArchitecture !== 'armv6l'
-        || armv6Smoke?.remoteBinarySha256 !== armv6Binary.sha256
-        || armv6Smoke?.version?.version !== artifact.appVersion
-        || armv6Smoke?.version?.fips_core_version
-          !== `${artifact.fipsVersion} (rev ${artifact.fipsGitSha.slice(0, 10)})`
-        || typeof armv6Smoke?.verboseVersion !== 'string'
-        || !armv6Smoke.verboseVersion.includes(
-          `fips_core_version: ${artifact.fipsVersion} (rev ${artifact.fipsGitSha.slice(0, 10)})`,
-        )
-        || armv6Smoke?.cleaned !== true
-      ) {
-        throw new Error(
-          'Linux ARMv6 artifact lacks exact real Zero execution evidence.',
-        )
-      }
       const packageInstall = readRequiredJson(
         platformReceiptPaths.linux.package_install,
         'Linux exact Debian package install receipt',
@@ -1655,18 +1596,6 @@ export function buildReleaseGateAttestation({
         `Release asset ${asset.path} proof is not linked to its platform gate.`,
       )
     }
-    if (
-      /-arm-unknown-linux-musleabihf\.tar\.gz$/.test(
-        basename(asset.path),
-      )
-      && proof.gate_receipt_sha256
-        !== receipts.linux?.armv6_artifact
-    ) {
-      throw new Error(
-        `Linux ARMv6 release asset ${asset.path} is not linked to its exact ARMv6 gate receipt.`,
-      )
-    }
-
     const payloads = Object.fromEntries(
       Object.entries(proof.payloads ?? {})
         .sort(([left], [right]) => left.localeCompare(right)),

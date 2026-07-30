@@ -657,7 +657,7 @@ test('publication rejects forged hashes, source, target sets, and raw evidence',
   }
 })
 
-test('preparer derives x86_64 and ARMv6 receipts from archive bytes', () => {
+test('preparer derives x86_64 receipts from public release archive bytes', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-fleet-preparer-'))
   try {
     const stageDir = join(root, 'stage')
@@ -675,11 +675,6 @@ test('preparer derives x86_64 and ARMv6 receipts from archive bytes', () => {
         arch: 'x86_64',
         assetName: 'nvpn-v4.1.5-x86_64-unknown-linux-musl.tar.gz',
         payloadLabel: 'nvpn_musl',
-      },
-      {
-        arch: 'armv6',
-        assetName: 'nvpn-v4.1.5-arm-unknown-linux-musleabihf.tar.gz',
-        payloadLabel: 'nvpn_armv6_musl',
       },
     ]) {
       const receiptDir = join(root, `receipts-${arch}`)

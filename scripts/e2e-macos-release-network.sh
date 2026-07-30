@@ -170,7 +170,7 @@ secure_dns_owned() {
     && grep -Fq 'Managed by nvpn' "$SECURE_RESOLVER" \
     && grep -Fq 'nameserver 127.0.0.1' "$SECURE_RESOLVER" \
     && /usr/sbin/scutil --dns 2>/dev/null \
-      | grep -Eq 'nameserver\\[[0-9]+\\][[:space:]]*:[[:space:]]*127\\.0\\.0\\.1'
+      | grep -Eq 'nameserver\[[0-9]+\][[:space:]]*:[[:space:]]*127\.0\.0\.1'
 }
 
 resolver_files_absent() {
@@ -291,7 +291,23 @@ set_service_state() {
 }
 
 monotonic_ms() {
-  /usr/bin/python3 -c 'import time; print(int(time.monotonic() * 1000))'
+  /usr/bin/python3 - <<'PY'
+import ctypes
+
+libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+libsystem.mach_continuous_time.restype = ctypes.c_uint64
+
+
+class MachTimebaseInfo(ctypes.Structure):
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+timebase = MachTimebaseInfo()
+if libsystem.mach_timebase_info(ctypes.byref(timebase)) != 0 or timebase.denom == 0:
+    raise SystemExit("failed to read the macOS monotonic clock timebase")
+ticks = libsystem.mach_continuous_time()
+print((ticks * timebase.numer) // timebase.denom // 1_000_000)
+PY
 }
 
 rebind_count() {

@@ -53,12 +53,9 @@ release_fips_path=""
 release_cargo_lock_original_sha256=""
 release_cargo_manifest_original_sha256=""
 HOST_LINUX_VM_BUNDLE_PATH_RECEIPT=""
-HOST_LINUX_ARMV6_ARTIFACT_PATH_RECEIPT=""
 WINDOWS_PLATFORM_PREPARATION_RECEIPT=""
 MACOS_PLATFORM_PREPARATION_RECEIPT=""
 LINUX_PLATFORM_PREPARATION_RECEIPT=""
-LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT=""
-LINUX_ARMV6_GATE_RECEIPT=""
 
 write_platform_preparation_receipt() {
   local receipt="$1" platform="$2" temporary app_head app_tree
@@ -352,7 +349,6 @@ run_release_gate_candidate_preflight() {
   ./scripts/check-source-file-lines.sh
   # Fail fast before any remote artifact build. This fake-checkout harness
   # also injects the local-FIPS session variables used later by the full gate.
-  ./scripts/test-prepare-linux-armv6-release-artifact-harness.sh
   ./scripts/test-linux-gui-e2e-lockfile-harness.sh
 }
 
@@ -960,94 +956,6 @@ load_host_linux_vm_bundle_path_receipt() {
     || { echo "Host Linux VM bundle path receipt is invalid." >&2; return 1; }
   NVPN_HOST_LINUX_VM_BUNDLE_DIR="$bundle"
   export NVPN_HOST_LINUX_VM_BUNDLE_DIR
-}
-
-linux_armv6_artifact_requested() {
-  case "${NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT:-auto}" in
-    0|false|FALSE|False|no|NO|No|off|OFF|Off)
-      return 1
-      ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)
-      return 0
-      ;;
-    auto|AUTO|Auto|"")
-      [[ -n "${NVPN_LINUX_ARMV6_SMOKE_HOST:-}" ]]
-      ;;
-    *)
-      echo "Unsupported NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT=${NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT}" >&2
-      return 2
-      ;;
-  esac
-}
-
-release_gate_enforce_linux_armv6_artifact_mode() {
-  [[ "${NVPN_RELEASE_GATE_REQUIRE_COMPLETE:-0}" == "1" ]] || return 0
-  case "${NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT:-auto}" in
-    0|false|FALSE|False|no|NO|No|off|OFF|Off)
-      echo "Complete release gate requires the real Linux ARMv6 artifact/Zero lane." >&2
-      return 1
-      ;;
-    auto|AUTO|Auto|"")
-      export NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT=required
-      ;;
-  esac
-}
-
-prepare_host_linux_armv6_artifact_and_record() {
-  local artifact_dir path_receipt path_temporary receipt_temporary
-  artifact_dir="$(./scripts/prepare-linux-armv6-release-artifact.sh)"
-  [[ "$artifact_dir" == /* && -d "$artifact_dir" && ! -L "$artifact_dir" \
-    && -f "$artifact_dir/receipt.json" \
-    && ! -L "$artifact_dir/receipt.json" ]] || {
-    echo "Linux ARMv6 artifact preparer returned an invalid path." >&2
-    return 1
-  }
-
-  path_receipt="${HOST_LINUX_ARMV6_ARTIFACT_PATH_RECEIPT:-}"
-  [[ -n "$path_receipt" && -n "${LINUX_ARMV6_GATE_RECEIPT:-}" ]] || {
-    echo "Linux ARMv6 gate receipt paths are not configured." >&2
-    return 1
-  }
-  path_temporary="${path_receipt}.tmp.$$"
-  receipt_temporary="${LINUX_ARMV6_GATE_RECEIPT}.tmp.$$"
-  (
-    umask 077
-    printf '%s\n' "$artifact_dir" >"$path_temporary"
-    cp "$artifact_dir/receipt.json" "$receipt_temporary"
-  )
-  mv -f "$path_temporary" "$path_receipt"
-  mv -f "$receipt_temporary" "$LINUX_ARMV6_GATE_RECEIPT"
-  write_platform_preparation_receipt \
-    "$LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT" linux-armv6
-}
-
-load_host_linux_armv6_artifact_path_receipt() {
-  local path_receipt artifact_dir line_count
-  path_receipt="${HOST_LINUX_ARMV6_ARTIFACT_PATH_RECEIPT:-}"
-  [[ -n "$path_receipt" && -f "$path_receipt" && ! -L "$path_receipt" ]] || {
-    echo "Linux ARMv6 artifact path receipt is missing." >&2
-    return 1
-  }
-  line_count="$(wc -l <"$path_receipt" | tr -d '[:space:]')"
-  [[ "$line_count" == "1" ]] || {
-    echo "Linux ARMv6 artifact path receipt is invalid." >&2
-    return 1
-  }
-  IFS= read -r artifact_dir <"$path_receipt"
-  [[ "$artifact_dir" == /* && -d "$artifact_dir" && ! -L "$artifact_dir" \
-    && -f "$artifact_dir/receipt.json" \
-    && ! -L "$artifact_dir/receipt.json" \
-    && -f "$LINUX_ARMV6_GATE_RECEIPT" \
-    && ! -L "$LINUX_ARMV6_GATE_RECEIPT" ]] || {
-    echo "Linux ARMv6 artifact path receipt is invalid." >&2
-    return 1
-  }
-  cmp -s "$artifact_dir/receipt.json" "$LINUX_ARMV6_GATE_RECEIPT" || {
-    echo "Linux ARMv6 cached and gate receipts differ." >&2
-    return 1
-  }
-  NVPN_LINUX_ARMV6_ARTIFACT_DIR="$artifact_dir"
-  export NVPN_LINUX_ARMV6_ARTIFACT_DIR
 }
 
 prepare_linux_platform_lane_sync() {
@@ -2180,26 +2088,16 @@ main() {
   HOST_LINUX_VM_BUNDLE_PATH_RECEIPT="$log_dir/host-linux-vm-bundle-path.txt"
   export HOST_LINUX_VM_BUNDLE_PATH_RECEIPT
   rm -f "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT"
-  HOST_LINUX_ARMV6_ARTIFACT_PATH_RECEIPT="$log_dir/host-linux-armv6-artifact-path.txt"
-  LINUX_ARMV6_GATE_RECEIPT="$log_dir/linux-armv6-release-artifact.json"
-  export HOST_LINUX_ARMV6_ARTIFACT_PATH_RECEIPT
-  export LINUX_ARMV6_GATE_RECEIPT
-  rm -f \
-    "$HOST_LINUX_ARMV6_ARTIFACT_PATH_RECEIPT" \
-    "$LINUX_ARMV6_GATE_RECEIPT"
   WINDOWS_PLATFORM_PREPARATION_RECEIPT="$log_dir/windows-platform-prepared.txt"
   MACOS_PLATFORM_PREPARATION_RECEIPT="$log_dir/macos-platform-prepared.txt"
   LINUX_PLATFORM_PREPARATION_RECEIPT="$log_dir/linux-platform-prepared.txt"
-  LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT="$log_dir/linux-armv6-platform-prepared.txt"
   export WINDOWS_PLATFORM_PREPARATION_RECEIPT
   export MACOS_PLATFORM_PREPARATION_RECEIPT
   export LINUX_PLATFORM_PREPARATION_RECEIPT
-  export LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT
   rm -f \
     "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" \
     "$MACOS_PLATFORM_PREPARATION_RECEIPT" \
-    "$LINUX_PLATFORM_PREPARATION_RECEIPT" \
-    "$LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT"
+    "$LINUX_PLATFORM_PREPARATION_RECEIPT"
   export WINDOWS_LANE_PRE_SYNCED=0
   export MACOS_PLATFORM_LANE_PRE_SYNCED=0
   export LINUX_PLATFORM_LANE_PRE_SYNCED=0
@@ -2214,7 +2112,6 @@ main() {
   trap release_gate_cleanup EXIT
 
   release_gate_enforce_complete_real_network_modes
-  release_gate_enforce_linux_armv6_artifact_mode
 
   # Validate generated version metadata before any remote lane snapshots the
   # candidate. The remaining preflight leaves tracked source unchanged and can
@@ -2258,17 +2155,6 @@ main() {
     platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
   fi
 
-  local linux_armv6_artifact_requested_for_gate=0
-  if linux_armv6_artifact_requested; then
-    linux_armv6_artifact_requested_for_gate=1
-    release_gate_parallel_start \
-      "Linux ARMv6 artifact preparation and real Zero smoke" \
-      prepare_host_linux_armv6_artifact_and_record
-    platform_preparation_lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
-  elif [[ "$?" -ne 1 ]]; then
-    return 2
-  fi
-
   release_gate_parallel_wait_group "${platform_preparation_lanes[@]}"
   if [[ -e "$WINDOWS_PLATFORM_PREPARATION_RECEIPT" ]]; then
     platform_preparation_receipt_valid \
@@ -2298,15 +2184,6 @@ main() {
   if [[ -e "$HOST_LINUX_VM_BUNDLE_PATH_RECEIPT" ]]; then
     load_host_linux_vm_bundle_path_receipt
   fi
-  if [[ "$linux_armv6_artifact_requested_for_gate" == "1" ]]; then
-    platform_preparation_receipt_valid \
-      "$LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT" linux-armv6 || {
-      echo "Linux ARMv6 artifact preparation receipt is invalid." >&2
-      return 1
-    }
-    load_host_linux_armv6_artifact_path_receipt
-  fi
-
   prepare_release_cargo_config
 
   local windows_lane=""

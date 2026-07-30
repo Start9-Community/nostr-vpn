@@ -92,7 +92,6 @@ GATE_RECEIPT_KEYS = {
         "underlay_lifecycle",
     },
     "linux": {
-        "armv6_artifact",
         "artifact",
         "public_ui_join",
         "package_install",

@@ -355,13 +355,9 @@ grep -Fq 'node scripts/sync-versions.mjs --check' "$release_gate" \
   || fail "release gate mutates generated versions before candidate snapshot"
 grep -Fq 'release_gate_enforce_complete_real_network_modes' "$release_gate" \
   || fail "release gate does not enforce final real-network modes"
-grep -Fq 'release_gate_enforce_linux_armv6_artifact_mode' "$release_gate" \
-  || fail "complete release gate does not enforce the real ARMv6/Zero lane"
 local_release="$ROOT_DIR/scripts/local-release.mjs"
 grep -Fq "NVPN_RELEASE_GATE_REQUIRE_COMPLETE: '1'" "$local_release" \
   || fail "full local release does not fail closed on real-network auto modes"
-grep -Fq "NVPN_RELEASE_GATE_LINUX_ARMV6_ARTIFACT: '1'" "$local_release" \
-  || fail "full local release does not require the sealed ARMv6 artifact lane"
 if grep -Fxq '  node scripts/sync-versions.mjs' "$release_gate"; then
   fail "release gate still rewrites generated versions during preflight"
 fi
@@ -370,10 +366,6 @@ grep -Fq 'release_gate_parallel_start "Windows platform"' "$release_gate" \
 candidate_preflight_line="$(
   grep -n '^  run_release_gate_candidate_preflight$' "$release_gate" \
     | cut -d: -f1 || true
-)"
-candidate_armv6_harness_line="$(
-  grep -n '^  ./scripts/test-prepare-linux-armv6-release-artifact-harness.sh$' \
-    "$release_gate" | cut -d: -f1 || true
 )"
 candidate_linux_gui_harness_line="$(
   grep -n '^  ./scripts/test-linux-gui-e2e-lockfile-harness.sh$' \
@@ -407,17 +399,11 @@ static_preflight_line="$(
   grep -n '^  run_release_gate_static_preflight$' "$release_gate" \
     | cut -d: -f1 || true
 )"
-armv6_preparation_line="$(
-  grep -n '"Linux ARMv6 artifact preparation and real Zero smoke"' \
-    "$release_gate" | tail -1 | cut -d: -f1 || true
-)"
 [[ -n "$candidate_preflight_line" \
-  && -n "$candidate_armv6_harness_line" \
   && -n "$candidate_linux_gui_harness_line" \
   && -n "$candidate_source_line_gate" \
   && -n "$candidate_preflight_end_line" \
   && -n "$windows_preparation_line" \
-  && -n "$armv6_preparation_line" \
   && -n "$windows_dispatch_line" \
   && -n "$static_preflight_line" ]] \
   || fail "release gate preflight/remote overlap markers are incomplete"
@@ -433,11 +419,8 @@ local_fips_preparation_line="$(
   && -n "$local_fips_preparation_line" ]] \
   || fail "release gate local-FIPS ordering markers are incomplete"
 (( candidate_preflight_line < windows_preparation_line \
-  && candidate_armv6_harness_line < candidate_linux_gui_harness_line \
   && candidate_linux_gui_harness_line < candidate_preflight_end_line \
   && candidate_source_line_gate < candidate_preflight_end_line \
-  && candidate_preflight_line < armv6_preparation_line \
-  && armv6_preparation_line < platform_preparation_wait_line \
   && windows_preparation_line < platform_preparation_wait_line \
   && platform_preparation_wait_line < local_fips_preparation_line \
   && local_fips_preparation_line < windows_dispatch_line \
@@ -476,14 +459,6 @@ do
   grep -Fq "if [[ -e \"\$$preparation_receipt\" ]]; then" "$release_gate" \
     || fail "$preparation_receipt is not required before reusing prepared state"
 done
-grep -Fq '"$LINUX_ARMV6_PLATFORM_PREPARATION_RECEIPT" linux-armv6' \
-  "$release_gate" \
-  || fail "ARMv6 preparation is not tied to the exact candidate"
-grep -Fq 'load_host_linux_armv6_artifact_path_receipt' "$release_gate" \
-  || fail "ARMv6 prepared state is not revalidated before reuse"
-grep -Fq 'cmp -s "$artifact_dir/receipt.json" "$LINUX_ARMV6_GATE_RECEIPT"' \
-  "$release_gate" \
-  || fail "ARMv6 gate receipt is not bound to the cached exact artifact"
 for prepared_flag in \
   WINDOWS_LANE_PRE_SYNCED \
   MACOS_PLATFORM_LANE_PRE_SYNCED \

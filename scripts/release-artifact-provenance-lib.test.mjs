@@ -168,7 +168,6 @@ test('release receipt collection requires exact source and strict public UI gate
       },
       linux: {
         artifact: join(root, 'linux-artifact.json'),
-        armv6_artifact: join(root, 'linux-armv6-artifact.json'),
         package_install: join(root, 'linux-package-install.json'),
         public_ui_join: join(root, 'linux-join.json'),
         network: join(root, 'linux-network.json'),
@@ -642,47 +641,6 @@ test('release receipt collection requires exact source and strict public UI gate
         }))
       }
       if (platform === 'linux') {
-        writeFileSync(paths.linux.armv6_artifact, JSON.stringify({
-          ...source,
-          schema: 1,
-          artifactType: 'sealed Linux ARMv6 static-musl CLI',
-          target: 'arm-unknown-linux-musleabihf',
-          fleetArch: 'armv6',
-          builderImage: 'messense/rust-musl-cross:arm-musleabihf',
-          builderImageId: `sha256:${'4'.repeat(64)}`,
-          sourceDateEpoch: 1_700_000_000,
-          archive: {
-            file: 'nvpn-arm-unknown-linux-musleabihf.tar.gz',
-            sha256: '5'.repeat(64),
-            size: 500,
-            members: [
-              'nvpn/README.txt',
-              'nvpn/install.sh',
-              'nvpn/nvpn',
-            ],
-          },
-          binary: {
-            member: 'nvpn/nvpn',
-            sha256: '6'.repeat(64),
-            size: 400,
-          },
-          smoke: {
-            realChecks: true,
-            mocked: false,
-            installPerformed: false,
-            networkMutated: false,
-            hostArchitecture: 'armv6l',
-            remoteBinarySha256: '6'.repeat(64),
-            version: {
-              version: source.appVersion,
-              fips_core_version:
-                `${source.fipsVersion} (rev ${source.fipsGitSha.slice(0, 10)})`,
-            },
-            verboseVersion:
-              `${source.appVersion}\nfips_core_version: ${source.fipsVersion} (rev ${source.fipsGitSha.slice(0, 10)})`,
-            cleaned: true,
-          },
-        }))
         writeFileSync(paths.linux.package_install, JSON.stringify({
           ...source,
           schema: 2,
@@ -880,13 +838,6 @@ test('release receipt collection requires exact source and strict public UI gate
         receipt.iphoneAdminDesktopJoinerRelaunchDurable = false
       },
       /macOS\/mobile public-UI join receipt is incomplete/,
-    )
-    assertRejectedReceiptMutation(
-      paths.linux.armv6_artifact,
-      (receipt) => {
-        receipt.smoke.cleaned = false
-      },
-      /ARMv6 artifact lacks exact real Zero execution evidence/,
     )
     for (const platform of ['android', 'ios']) {
       assertRejectedReceiptMutation(
@@ -1384,49 +1335,4 @@ test('StartOS post-build proof requires the real exact-package inspector result'
     }),
     /lacks a real exact-package StartOS validation/,
   )
-})
-
-test('Linux ARMv6 release proof is bound to its exact physical gate receipt', () => {
-  const asset = {
-    path: 'assets/nvpn-v4.1.5-arm-unknown-linux-musleabihf.tar.gz',
-    sha256: 'a'.repeat(64),
-    size: 42,
-  }
-  const receipts = Object.fromEntries(
-    ['android', 'ios', 'macos', 'windows'].map((platform, index) => [
-      platform,
-      { gate: String(index + 1).padStart(64, '0') },
-    ]),
-  )
-  receipts.linux = {
-    artifact: '5'.repeat(64),
-    armv6_artifact: '6'.repeat(64),
-  }
-  const proof = {
-    platform: 'linux',
-    verification: 'gate-payload-identity',
-    artifact_sha256: asset.sha256,
-    gate_receipt_sha256: receipts.linux.artifact,
-    payloads: {
-      armv6_musl_archive: asset.sha256,
-      nvpn_armv6_musl: 'b'.repeat(64),
-    },
-  }
-  const build = (value) => buildReleaseGateAttestation({
-    commit: 'c'.repeat(40),
-    tree: 'd'.repeat(40),
-    assets: [asset],
-    releaseGateSummarySha256: 'f'.repeat(64),
-    platformGateReceipts: receipts,
-    assetProofs: { [asset.path]: value },
-  })
-
-  assert.throws(
-    () => build(proof),
-    /ARMv6.*exact ARMv6 gate receipt/,
-  )
-  assert.doesNotThrow(() => build({
-    ...proof,
-    gate_receipt_sha256: receipts.linux.armv6_artifact,
-  }))
 })

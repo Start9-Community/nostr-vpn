@@ -248,10 +248,6 @@ function receiptPaths({ root, gateDir, joinDir }) {
       ),
     },
     linux: {
-      armv6_artifact: join(
-        gateDir,
-        'linux-armv6-release-artifact.json',
-      ),
       artifact: join(
         joinDir,
         'linux',
@@ -318,14 +314,6 @@ function payloadLabel(proof, digest, label) {
 }
 
 function artifactShape(platform, arch, tag) {
-  if (platform === 'linux' && arch === 'armv6') {
-    return {
-      name: `nvpn-${tag}-arm-unknown-linux-musleabihf.tar.gz`,
-      format: 'tar-gz',
-      executableMember: 'nvpn/nvpn',
-      companionMembers: [],
-    }
-  }
   if (platform === 'linux' && ['x86_64', 'aarch64'].includes(arch)) {
     return {
       name: `nvpn-${tag}-${arch}-unknown-linux-musl.tar.gz`,

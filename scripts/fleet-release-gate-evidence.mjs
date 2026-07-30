@@ -40,7 +40,6 @@ const platformReceiptKeys = {
     'wireguard_dns',
   ],
   linux: [
-    'armv6_artifact',
     'artifact',
     'network',
     'package_install',
@@ -149,7 +148,6 @@ function requireCoreArtifactFipsSource(platformReceiptPaths, source) {
     ['android', 'physical', 'fipsCoreVersion'],
     ['ios', 'mobile_artifact', 'fipsCoreVersion'],
     ['macos', 'artifact', 'fipsCoreVersion'],
-    ['linux', 'armv6_artifact', 'fipsVersion'],
     ['linux', 'artifact', 'fipsVersion'],
     ['windows', 'artifact', 'fipsVersion'],
   ]) {

@@ -157,9 +157,6 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             cross: true
-          - os: ubuntu-latest
-            target: arm-unknown-linux-musleabihf
-            cross: true
           - os: macos-14
             target: aarch64-apple-darwin
             cross: false

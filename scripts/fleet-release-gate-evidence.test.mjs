@@ -26,7 +26,6 @@ const platforms = {
     'wireguard_dns',
   ],
   linux: [
-    'armv6_artifact',
     'artifact',
     'network',
     'package_install',
@@ -83,7 +82,6 @@ function fixture(root) {
     ['android', 'physical', 'fipsCoreVersion'],
     ['ios', 'mobile_artifact', 'fipsCoreVersion'],
     ['macos', 'artifact', 'fipsCoreVersion'],
-    ['linux', 'armv6_artifact', 'fipsVersion'],
     ['linux', 'artifact', 'fipsVersion'],
     ['windows', 'artifact', 'fipsVersion'],
   ]) {
@@ -277,7 +275,6 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
       ['android', 'physical', 'fipsCoreVersion'],
       ['ios', 'mobile_artifact', 'fipsCoreVersion'],
       ['macos', 'artifact', 'fipsCoreVersion'],
-      ['linux', 'armv6_artifact', 'fipsVersion'],
       ['linux', 'artifact', 'fipsVersion'],
       ['windows', 'artifact', 'fipsVersion'],
     ]) {
@@ -315,14 +312,14 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
           ...attestation.platform_gate_receipts,
           linux: {
             ...attestation.platform_gate_receipts.linux,
-            armv6_artifact: '0'.repeat(64),
+            artifact: '0'.repeat(64),
           },
         },
       },
     })
     assert.throws(
       () => validateFleetReleaseGateEvidence(request),
-      /receipt hash differs/i,
+      /not linked to its platform gate|receipt hash differs/i,
     )
 
     json(releasePath, {
@@ -333,7 +330,7 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
           ...attestation.platform_gate_receipts,
           linux: Object.fromEntries(
             Object.entries(attestation.platform_gate_receipts.linux).filter(
-              ([name]) => name !== 'armv6_artifact',
+              ([name]) => name !== 'package_install',
             ),
           ),
         },
@@ -345,7 +342,7 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
     )
     json(releasePath, release)
 
-    const { armv6_artifact: omitted, ...linuxWithoutArmv6 } =
+    const { package_install: omitted, ...linuxWithoutPackageInstall } =
       receiptPaths.linux
     assert.ok(omitted)
     assert.throws(
@@ -356,7 +353,7 @@ test('rejects wrong source, FIPS receipts, schema, hashes, and key sets', () => 
             ...request.receiptPaths,
             platforms: {
               ...receiptPaths,
-              linux: linuxWithoutArmv6,
+              linux: linuxWithoutPackageInstall,
             },
           },
         }),

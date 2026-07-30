@@ -2857,7 +2857,6 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   assert.match(linuxBuild, /host-bundle path receipt/)
   assert.match(linuxBuild, /nostr-vpn\.deb/)
   assert.match(linuxBuild, /nvpn-x86_64-unknown-linux-musl\.tar\.gz/)
-  assert.match(linuxBuild, /nvpn-arm-unknown-linux-musleabihf\.tar\.gz/)
   assert.match(linuxBuild, /packageInstalledByDpkg/)
   assert.match(linuxBuild, /copyFileSync\(gatedDebPath, debPath\)/)
   const verificationPlan = linuxBuild.indexOf(
@@ -2876,11 +2875,9 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   )
   assert.match(linuxBuild, /cwd:\s*verificationPlan\.candidateRoot/)
   assert.match(linuxBuild, /musl_archive: expectedMuslArchive/)
-  assert.match(linuxBuild, /armv6_musl_archive: armv6ArchiveSha256/)
-  assert.match(linuxBuild, /nvpn_armv6_musl: armv6BinarySha256/)
-  assert.match(localRelease, /function exactLinuxArmv6PublicationArtifact\(/)
-  assert.match(localRelease, /linux_armv6_release_artifact\.py/)
-  assert.match(localRelease, /--require-smoke/)
+  assert.doesNotMatch(linuxBuild, /arm-unknown-linux-musleabihf/)
+  assert.doesNotMatch(localRelease, /exactLinuxArmv6PublicationArtifact/)
+  assert.doesNotMatch(githubRelease, /arm-unknown-linux-musleabihf/)
   assert.doesNotMatch(linuxBuild, /commandExists\('docker'\)/)
   assert.doesNotMatch(linuxBuild, /cargo deb/)
   assert.doesNotMatch(
@@ -3271,10 +3268,6 @@ test('describeAsset maps release filenames to readable labels', () => {
     describeAsset('nvpn-v0.3.23-aarch64-unknown-linux-musl.tar.gz'),
     'Linux ARM64 CLI (versioned)',
   )
-  assert.equal(
-    describeAsset('nvpn-v4.1.5-arm-unknown-linux-musleabihf.tar.gz'),
-    'Linux ARMv6/ARMv7 CLI (versioned)',
-  )
 })
 
 test('androidReleaseAssetName formats signed and unsigned Android asset names', () => {
@@ -3538,8 +3531,6 @@ test('renderReleaseNotes groups common app downloads before advanced files', () 
       'nvpn-v0.3.23-x86_64-pc-windows-msvc.zip',
       'nvpn-v0.3.23-x86_64-unknown-linux-musl.tar.gz',
       'nvpn-x86_64-unknown-linux-musl.tar.gz',
-      'nvpn-v0.3.23-arm-unknown-linux-musleabihf.tar.gz',
-      'nvpn-arm-unknown-linux-musleabihf.tar.gz',
     ],
   })
 
@@ -3555,7 +3546,6 @@ test('renderReleaseNotes groups common app downloads before advanced files', () 
   assert.match(notes, /Server One and Server Pure use x86_64/)
   assert.match(notes, /### Command Line[\s\S]*macOS Apple Silicon CLI: \[nvpn-aarch64-apple-darwin\.tar\.gz\]\(assets\/nvpn-aarch64-apple-darwin\.tar\.gz\)/)
   assert.match(notes, /### Command Line[\s\S]*Linux x64 CLI: \[nvpn-x86_64-unknown-linux-musl\.tar\.gz\]\(assets\/nvpn-x86_64-unknown-linux-musl\.tar\.gz\)/)
-  assert.match(notes, /Linux ARMv6\/ARMv7 CLI: \[nvpn-arm-unknown-linux-musleabihf\.tar\.gz\]\(assets\/nvpn-arm-unknown-linux-musleabihf\.tar\.gz\)/)
   assert.match(notes, /### Other Files[\s\S]*Android arm64 AAB/)
   assert.match(notes, /### Other Files[\s\S]*macOS Apple Silicon updater archive/)
   assert.doesNotMatch(notes, /nvpn-v0\.3\.23-aarch64-apple-darwin\.tar\.gz/)
