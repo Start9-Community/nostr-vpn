@@ -15,10 +15,52 @@ RECEIPT="$BUNDLE_DIR/physical-gate-artifact.json"
 CACHE_DIR="${NVPN_BUNDLETOOL_CACHE_DIR:-$HOME/.cache/nvpn/bundletool}"
 BUNDLETOOL_JAR="${NVPN_BUNDLETOOL_JAR:-$CACHE_DIR/bundletool-all-${BUNDLETOOL_VERSION}.jar}"
 TEMP_DIR=""
+APK_STAGE=""
+RECEIPT_STAGE=""
+ARTIFACTS_COMMITTED=0
+LOCK_DIR="$BUNDLE_DIR/.physical-gate-artifact.lock"
+LOCK_OWNED=0
 
 fail() {
   echo "Android AAB-derived Release APK failed: $*" >&2
   exit 1
+}
+
+invalidate_gate_artifacts() {
+  rm -f "$APK" "$RECEIPT"
+}
+
+acquire_gate_lock() {
+  local owner attempt
+  for attempt in 1 2; do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      LOCK_OWNED=1
+      printf '%s\n' "$$" >"$LOCK_DIR/owner" \
+        || fail "could not record the Android gate artifact lock owner"
+      return 0
+    fi
+    [[ -d "$LOCK_DIR" && ! -L "$LOCK_DIR" ]] \
+      || fail "Android gate artifact lock path is unsafe"
+    owner="$(cat "$LOCK_DIR/owner" 2>/dev/null || true)"
+    [[ "$owner" =~ ^[1-9][0-9]*$ ]] \
+      || fail "Android gate artifact lock has no owner"
+    kill -0 "$owner" >/dev/null 2>&1 \
+      && fail "another Android gate artifact builder is active"
+    rm -f "$LOCK_DIR/owner"
+    rmdir "$LOCK_DIR" \
+      || fail "stale Android gate artifact lock is not empty"
+  done
+  fail "could not acquire the Android gate artifact lock"
+}
+
+extract_single_universal_apk() {
+  local archive="$1" output="$2"
+  [[ -f "$archive" && ! -L "$archive" ]] \
+    || fail "bundletool output archive is missing or is a symlink"
+  [[ "$(unzip -Z1 "$archive" | grep -Fxc 'universal.apk')" == "1" ]] \
+    || fail "bundletool output lacks one universal APK"
+  unzip -p "$archive" universal.apk >"$output"
+  [[ -s "$output" ]] || fail "bundletool produced an empty universal APK"
 }
 
 cleanup() {
@@ -27,10 +69,26 @@ cleanup() {
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
     rm -rf "$TEMP_DIR"
   fi
+  [[ -z "$APK_STAGE" ]] || rm -f "$APK_STAGE"
+  [[ -z "$RECEIPT_STAGE" ]] || rm -f "$RECEIPT_STAGE"
+  if [[ "$LOCK_OWNED" -eq 1 && "$ARTIFACTS_COMMITTED" -ne 1 ]]; then
+    invalidate_gate_artifacts
+  fi
+  if [[ "$LOCK_OWNED" -eq 1 ]]; then
+    rm -f "$LOCK_DIR/owner" && rmdir "$LOCK_DIR" || status=1
+    LOCK_OWNED=0
+  fi
   exit "$status"
 }
+
+if [[ "${NVPN_ANDROID_BUNDLE_LIBRARY_ONLY:-0}" == "1" ]]; then
+  return 0
+fi
 trap cleanup EXIT
 
+mkdir -p "$APK_DIR"
+acquire_gate_lock
+invalidate_gate_artifacts
 for name in \
   ANDROID_KEYSTORE_PATH \
   ANDROID_KEYSTORE_PASSWORD \
@@ -86,11 +144,8 @@ java -jar "$BUNDLETOOL_JAR" build-apks \
   --ks-key-alias="$ANDROID_KEY_ALIAS" \
   --key-pass="file:$TEMP_DIR/key-password" \
   --overwrite
-[[ "$(unzip -Z1 "$TEMP_DIR/release.apks" | grep -c '^universal\\.apk$')" \
-  == "1" ]] || fail "bundletool output lacks one universal APK"
-unzip -p "$TEMP_DIR/release.apks" universal.apk >"$TEMP_DIR/app-release.apk"
-[[ -s "$TEMP_DIR/app-release.apk" ]] \
-  || fail "bundletool produced an empty universal APK"
+extract_single_universal_apk \
+  "$TEMP_DIR/release.apks" "$TEMP_DIR/app-release.apk"
 
 sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 [[ -n "$sdk" ]] || fail "Android SDK root is unavailable"
@@ -103,15 +158,18 @@ apksigner="$(
 "$apksigner" verify --verbose "$TEMP_DIR/app-release.apk" >/dev/null \
   || fail "AAB-derived universal APK signature verification failed"
 
-mkdir -p "$APK_DIR"
-chmod 0644 "$TEMP_DIR/app-release.apk"
-mv -f "$TEMP_DIR/app-release.apk" "$APK"
+APK_STAGE="$(mktemp "$APK_DIR/.app-release.apk.XXXXXX")"
+RECEIPT_STAGE="$(
+  mktemp "$BUNDLE_DIR/.physical-gate-artifact.json.XXXXXX"
+)"
+cp "$TEMP_DIR/app-release.apk" "$APK_STAGE"
+chmod 0644 "$APK_STAGE"
 app_sha="$(git -C "$ROOT" rev-parse HEAD)"
 app_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 aab_sha="$(shasum -a 256 "$AAB" | awk '{ print $1 }')"
-apk_sha="$(shasum -a 256 "$APK" | awk '{ print $1 }')"
+apk_sha="$(shasum -a 256 "$APK_STAGE" | awk '{ print $1 }')"
 python3 - \
-  "$RECEIPT" \
+  "$RECEIPT_STAGE" \
   "$app_sha" \
   "$app_tree" \
   "$AAB" \
@@ -161,5 +219,14 @@ temporary.write_text(
 )
 temporary.replace(path)
 PY
-chmod 0444 "$RECEIPT"
+chmod 0444 "$RECEIPT_STAGE"
+[[ "$(shasum -a 256 "$APK_STAGE" | awk '{ print $1 }')" == "$apk_sha" ]] \
+  || fail "staged universal APK changed before publication"
+mv -f "$APK_STAGE" "$APK"
+APK_STAGE=""
+mv -f "$RECEIPT_STAGE" "$RECEIPT"
+RECEIPT_STAGE=""
+[[ -s "$APK" && -s "$RECEIPT" && ! -L "$APK" && ! -L "$RECEIPT" ]] \
+  || fail "atomic Android gate artifact promotion was incomplete"
+ARTIFACTS_COMMITTED=1
 printf '%s\n' "$APK"

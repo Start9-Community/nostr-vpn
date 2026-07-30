@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$ROOT/scripts/test-ios-packet-flow-lifecycle.sh"
+"$ROOT/scripts/test-mobile-ios-release-runner-harness.sh"
 gate="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
 android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
 android_release_gate="$ROOT/scripts/lib-mobile-android-release-gate.sh"
@@ -521,11 +522,14 @@ fi
 grep -Fq 'IOS_CLEANUP_ARMED=1' "$gate" \
   || { echo "iOS physical DNS gate never arms emergency tunnel cleanup" >&2; exit 1; }
 grep -Fq 'ios_release_network_delete_private_test_products' "$ios_release_gate" \
+  && grep -Fq 'ios_release_network_preserve_diagnostics' "$ios_release_gate" \
   && grep -Fq 'ios_release_network_assert_retained_no_secrets' "$ios_release_gate" \
   && grep -Fq 'NVPN_PRIVATE_RELEASE_SPEC_BASE64' "$ios_release_gate" \
-  && grep -Fq 'rm -rf "$xcresult"' "$ios_release_gate" \
+  && grep -Fq 'retainedFullXcresult' "$ios_release_gate" \
+  && grep -Fq 'runnerSigningClass": "development"' "$ios_release_gate" \
+  && grep -Fq 'appSigningClass": "distribution"' "$ios_release_gate" \
   && ! grep -Fq 'tail -n 160 "$log"' "$ios_release_gate" \
-  || { echo "iOS Release runner can retain or print private xctestrun diagnostics" >&2; exit 1; }
+  || { echo "iOS Release runner does not retain safe exact launch diagnostics" >&2; exit 1; }
 secret_temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-secret-scan.XXXXXX")"
 trap 'rm -rf "$secret_temp"' EXIT
 secret_spec="$(
@@ -555,14 +559,15 @@ IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$secret_temp/private.xctestrun"
 printf '%s\n' "$secret_spec" >"$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
 mkdir -p "$secret_temp/private.xcresult"
 printf '%s\n' "$secret_spec" >"$secret_temp/private.log"
-ios_release_network_delete_private_test_products \
-  "$secret_temp/private.xcresult" "$secret_temp/private.log"
+ios_release_network_delete_private_test_products
 [[ ! -e "$secret_temp/private.xctestrun" \
-  && ! -e "$secret_temp/private.xcresult" \
-  && ! -e "$secret_temp/private.log" ]] || {
-  echo "iOS private test products survived explicit cleanup" >&2
+  && -e "$secret_temp/private.xcresult" \
+  && -e "$secret_temp/private.log" ]] || {
+  echo "iOS private xctestrun cleanup deleted retained evidence" >&2
   exit 1
 }
+rm -rf "$secret_temp/private.xcresult"
+rm -f "$secret_temp/private.log"
 grep -Fq 'ios_release_network_disconnect_cleanup' "$gate" "$ios_release_gate" \
   || { echo "iOS physical DNS gate cannot confirm Release disconnect after failure" >&2; exit 1; }
 python3 - "$gate" "$ios_release_gate" <<'PY'

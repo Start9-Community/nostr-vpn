@@ -25,9 +25,15 @@ IOS_RELEASE_NETWORK_APP_HEAD=""
 IOS_RELEASE_NETWORK_APP_TREE=""
 IOS_RELEASE_NETWORK_FROZEN_APP=""
 IOS_RELEASE_NETWORK_XCODE_COMMAND=()
+IOS_RELEASE_NETWORK_ACTIVE_PGID=""
+IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE=""
+IOS_RELEASE_NETWORK_PENDING_SPEC_BASE64=""
+IOS_RELEASE_NETWORK_PENDING_LOG=""
+IOS_RELEASE_NETWORK_PENDING_XCRESULT=""
 
 ios_release_network_cleanup_private_artifacts() {
   local cleanup_failed=0 signing_removed=1
+  ios_release_network_abort_active_run || cleanup_failed=1
   ios_release_network_delete_private_test_products || cleanup_failed=1
   if [[ -n "$IOS_RELEASE_NETWORK_SIGNING_DIR" ]]; then
     case "$(basename "$IOS_RELEASE_NETWORK_SIGNING_DIR")" in
@@ -48,6 +54,7 @@ ios_release_network_cleanup_private_artifacts() {
     IOS_RELEASE_NETWORK_SIGNING_DIR=""
     IOS_RELEASE_NETWORK_SIGNING_ENV=""
     IOS_RELEASE_NETWORK_DEVICE_RECEIPT=""
+    IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE=""
     unset NVPN_IOS_CODE_SIGN_IDENTITY
     unset NVPN_IOS_PROVISIONING_PROFILE_UUID
     unset NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
@@ -204,6 +211,7 @@ ios_release_network_prepare() {
     ios_release_network_prepare_abort
     return
   fi
+  IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE="$IOS_RELEASE_NETWORK_SIGNING_DIR/active-xcode.pgid"
   IOS_RELEASE_NETWORK_SIGNING_ENV="$IOS_RELEASE_NETWORK_SIGNING_DIR/provisioning.env"
   IOS_RELEASE_NETWORK_DERIVED_DATA="$ROOT/ios/.build/ReleaseNetworkDerivedData"
   if ! mkdir -p "${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"; then
@@ -272,7 +280,10 @@ PY
     return
   }
   IOS_RELEASE_NETWORK_DEVICE="$device_udid"
-  IOS_RELEASE_NETWORK_DESTINATION="platform=iOS,id=$device_udid"
+  # Xcode 26 advertises the same arm64e phone twice (arm64e and compatible
+  # arm64). The test products are arm64, so select that exact destination
+  # instead of allowing xcodebuild to choose the arm64e variant.
+  IOS_RELEASE_NETWORK_DESTINATION="platform=iOS,id=$device_udid,arch=arm64"
 
   local profile_log="$IOS_RELEASE_NETWORK_SIGNING_DIR/ios-profiles.log"
   if ! NVPN_IOS_PROFILE_TYPE=IOS_APP_ADHOC \
@@ -393,6 +404,12 @@ PY
     ios_release_network_prepare_abort
     return
   }
+  ios_release_network_write_runner_diagnostics \
+    "$result_dir/mobile-ios-release-runner-diagnostics.json" \
+    "$IOS_RELEASE_NETWORK_XCTESTRUN" || {
+    ios_release_network_prepare_abort
+    return
+  }
   IOS_RELEASE_NETWORK_PREPARED=1
   if bool_is_true "$reuse_build"; then
     echo "iOS company-signed Release network gate reused its preserved build"
@@ -474,8 +491,68 @@ ios_release_network_prepare_xctestrun() {
   fi
 }
 
+ios_release_network_write_runner_diagnostics() {
+  local output="$1" xctestrun="$2"
+  local app runner test_bundle app_details runner_details test_details
+  local app_entitlements runner_entitlements test_entitlements
+  local runner_archs test_archs xctestrun_sha
+  app="$(ios_release_network_app_path)"
+  runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  test_bundle="$runner/PlugIns/NostrVpnIosUITests.xctest"
+  [[ -d "$app" && -d "$runner" \
+    && -x "$test_bundle/NostrVpnIosUITests" \
+    && -s "$xctestrun" ]] || {
+    echo "iOS Release runner diagnostics found incomplete test products" >&2
+    return 1
+  }
+  if ! codesign --verify --deep --strict "$app" >/dev/null 2>&1 \
+    || ! codesign --verify --deep --strict "$runner" >/dev/null 2>&1 \
+    || ! codesign --verify --strict "$test_bundle" >/dev/null 2>&1
+  then
+    echo "iOS Release runner diagnostics rejected a test product signature" >&2
+    return 1
+  fi
+  app_details="$(codesign -dvvv "$app" 2>&1)" \
+    && runner_details="$(codesign -dvvv "$runner" 2>&1)" \
+    && test_details="$(codesign -dvvv "$test_bundle" 2>&1)" \
+    && app_entitlements="$(codesign -d --entitlements :- "$app" 2>/dev/null)" \
+    && runner_entitlements="$(
+      codesign -d --entitlements :- "$runner" 2>/dev/null
+    )" \
+    && test_entitlements="$(
+      codesign -d --entitlements :- "$test_bundle" 2>/dev/null
+    )" || {
+    rm -f "$output"
+    echo "iOS Release runner diagnostics could not read code signatures" >&2
+    return 1
+  }
+  runner_archs="$(lipo -archs "$runner/NostrVpnIosUITests-Runner")"
+  test_archs="$(lipo -archs "$test_bundle/NostrVpnIosUITests")"
+  [[ "$app_details" == *"Authority=Apple Distribution: ${NVPN_IOS_EXPECTED_SIGNER_ORGANIZATION:-Sirius Business Oy}"* \
+      || "$app_details" == *"Authority=iPhone Distribution: ${NVPN_IOS_EXPECTED_SIGNER_ORGANIZATION:-Sirius Business Oy}"* ]] \
+    && [[ "$app_details" == *"TeamIdentifier=$NVPN_IOS_TEAM_ID"* \
+    && "$runner_details" == *"Authority=Apple Development:"* \
+    && "$runner_details" == *"TeamIdentifier=$NVPN_IOS_TEAM_ID"* \
+    && "$test_details" == *"Authority=Apple Development:"* \
+    && "$test_details" == *"TeamIdentifier=$NVPN_IOS_TEAM_ID"* \
+    && "$app_entitlements" != *"<key>get-task-allow</key><true/>"* \
+    && "$runner_entitlements" == *"<key>get-task-allow</key><true/>"* \
+    && "$test_entitlements" == *"<key>get-task-allow</key><true/>"* \
+    && " $runner_archs " == *" arm64 "* \
+    && " $test_archs " == *" arm64 "* ]] || {
+      echo "iOS Release app/runner signing or architecture contract failed" >&2
+      return 1
+    }
+  xctestrun_sha="$(shasum -a 256 "$xctestrun" | awk '{print $1}')" \
+    && [[ "$xctestrun_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "iOS Release xctestrun hash receipt failed" >&2
+      return 1
+    }
+  printf '{\n  "appDebuggable": false,\n  "appSigningClass": "distribution",\n  "destinationArchitecture": "arm64",\n  "runnerArchitectures": "%s",\n  "runnerDebuggable": true,\n  "runnerSigningClass": "development",\n  "sameSigningTeam": true,\n  "schemaVersion": 1,\n  "testBundleArchitectures": "%s",\n  "testBundleDebuggable": true,\n  "testBundleSigningClass": "development",\n  "xctestrunSha256": "%s"\n}\n' \
+    "$runner_archs" "$test_archs" "$xctestrun_sha" >"$output"
+}
+
 ios_release_network_delete_private_test_products() {
-  local xcresult="${1:-}" log="${2:-}"
   local cleanup_failed=0
   if [[ -n "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" ]]; then
     if rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"; then
@@ -484,16 +561,19 @@ ios_release_network_delete_private_test_products() {
       cleanup_failed=1
     fi
   fi
-  [[ -z "$xcresult" ]] || rm -rf "$xcresult" || cleanup_failed=1
-  [[ -z "$log" ]] || rm -f "$log" || cleanup_failed=1
   return "$cleanup_failed"
 }
 
-ios_release_network_assert_retained_no_secrets() {
-  local spec_base64="$1"
-  shift
-  [[ -n "$spec_base64" ]] || return 0
-  NVPN_PRIVATE_RELEASE_SPEC_BASE64="$spec_base64" python3 - "$@" <<'PY'
+ios_release_network_private_data() {
+  local mode="$1" spec_base64="$2"
+  shift 2
+  [[ "$mode" == "assert" || "$mode" == "redact" ]] || return 2
+  if [[ -z "$spec_base64" ]]; then
+    [[ "$mode" != "redact" ]] || echo false
+    return 0
+  fi
+  NVPN_PRIVATE_RELEASE_SPEC_BASE64="$spec_base64" \
+    python3 - "$mode" "$@" <<'PY'
 import base64
 import hashlib
 import json
@@ -501,6 +581,7 @@ import os
 import pathlib
 import sys
 
+mode = sys.argv[1]
 encoded = os.environ["NVPN_PRIVATE_RELEASE_SPEC_BASE64"]
 raw = base64.b64decode(encoded, validate=True)
 spec = json.loads(raw)
@@ -510,36 +591,303 @@ needles = {
     hashlib.sha256(raw).hexdigest().encode(),
     hashlib.sha256(encoded.encode()).hexdigest().encode(),
 }
-for key in ("wireGuardConfig",):
-    value = spec.get(key)
-    if isinstance(value, str) and value:
-        needles.add(value.encode())
-wireguard = spec.get("wireGuardConfig", "")
+wireguard = spec.get("wireGuardConfig")
+if isinstance(wireguard, str) and wireguard:
+    needles.add(wireguard.encode())
+else:
+    wireguard = ""
 for line in wireguard.splitlines():
     if line.strip().lower().startswith("privatekey"):
         _, _, value = line.partition("=")
         if value.strip():
             needles.add(value.strip().encode())
-for raw_path in sys.argv[1:]:
+needles = sorted(
+    (needle for needle in needles if len(needle) >= 8),
+    key=len,
+    reverse=True,
+)
+changed = False
+for raw_path in sys.argv[2:]:
     path = pathlib.Path(raw_path)
-    if not path.is_file():
-        continue
-    data = path.read_bytes()
-    if any(len(needle) >= 8 and needle in data for needle in needles):
-        raise SystemExit("retained iOS artifact contains private gate input")
+    candidates = [path] if path.is_file() else (
+        sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+        if path.is_dir()
+        else []
+    )
+    for candidate in candidates:
+        data = candidate.read_bytes()
+        if mode == "assert":
+            if any(needle in data for needle in needles):
+                raise SystemExit(
+                    "retained iOS artifact contains private gate input"
+                )
+            continue
+        redacted = data
+        for needle in needles:
+            redacted = redacted.replace(
+                needle, b"<redacted-private-gate-input>"
+            )
+        if redacted != data:
+            candidate.write_bytes(redacted)
+            changed = True
+if mode == "redact":
+    print("true" if changed else "false")
 PY
+}
+
+ios_release_network_assert_retained_no_secrets() {
+  local spec_base64="$1"
+  shift
+  ios_release_network_private_data assert "$spec_base64" "$@"
+}
+
+ios_release_network_preserve_diagnostics() {
+  local spec_base64="$1" log="$2" xcresult="$3"
+  local base="${xcresult%.xcresult}"
+  local summary="$base-xcresult-summary.json"
+  local redaction="$base-diagnostic-redaction.json"
+  local log_redacted summary_redacted=false retained_xcresult=false
+  local xcresult_redacted=false
+  mkdir -p "$(dirname "$log")"
+  [[ -e "$log" ]] || : >"$log"
+  if [[ -d "$xcresult" ]]; then
+    if ! xcrun xcresulttool get test-results summary \
+      --path "$xcresult" >"$summary.tmp" 2>/dev/null
+    then
+      printf '{\n  "result": "xcresult-summary-unavailable"\n}\n' \
+        >"$summary.tmp"
+    fi
+    mv -f "$summary.tmp" "$summary"
+    if ios_release_network_assert_retained_no_secrets \
+      "$spec_base64" "$xcresult" 2>/dev/null
+    then
+      retained_xcresult=true
+    else
+      rm -rf "$xcresult"
+      xcresult_redacted=true
+    fi
+  else
+    printf '{\n  "result": "xcresult-not-created"\n}\n' >"$summary"
+  fi
+  log_redacted="$(
+    ios_release_network_private_data redact "$spec_base64" "$log"
+  )"
+  summary_redacted="$(
+    ios_release_network_private_data redact "$spec_base64" "$summary"
+  )"
+  ios_release_network_assert_retained_no_secrets \
+    "$spec_base64" "$log" "$xcresult" "$summary"
+  printf '{\n  "logRedacted": %s,\n  "retainedFullXcresult": %s,\n  "summaryRedacted": %s,\n  "xcresultRedactedToSummary": %s\n}\n' \
+    "$log_redacted" "$retained_xcresult" "$summary_redacted" \
+    "$xcresult_redacted" >"$redaction.tmp"
+  mv -f "$redaction.tmp" "$redaction"
+}
+
+ios_release_network_register_diagnostics() {
+  IOS_RELEASE_NETWORK_PENDING_SPEC_BASE64="$1"
+  IOS_RELEASE_NETWORK_PENDING_LOG="$2"
+  IOS_RELEASE_NETWORK_PENDING_XCRESULT="$3"
+}
+
+ios_release_network_clear_pending_diagnostics() {
+  IOS_RELEASE_NETWORK_PENDING_SPEC_BASE64=""
+  IOS_RELEASE_NETWORK_PENDING_LOG=""
+  IOS_RELEASE_NETWORK_PENDING_XCRESULT=""
+}
+
+ios_release_network_delete_pending_diagnostics() {
+  local xcresult="$IOS_RELEASE_NETWORK_PENDING_XCRESULT"
+  local cleanup_failed=0
+  [[ -z "$IOS_RELEASE_NETWORK_PENDING_LOG" ]] \
+    || rm -f "$IOS_RELEASE_NETWORK_PENDING_LOG" || cleanup_failed=1
+  if [[ -n "$xcresult" ]]; then
+    rm -rf "$xcresult" || cleanup_failed=1
+    rm -f "${xcresult%.xcresult}-xcresult-summary.json" \
+      "${xcresult%.xcresult}-diagnostic-redaction.json" || cleanup_failed=1
+  fi
+  ((cleanup_failed)) || ios_release_network_clear_pending_diagnostics
+  return "$cleanup_failed"
+}
+
+ios_release_network_preserve_pending_diagnostics() {
+  [[ -n "$IOS_RELEASE_NETWORK_PENDING_LOG" \
+    && -n "$IOS_RELEASE_NETWORK_PENDING_XCRESULT" ]] || return 2
+  ios_release_network_preserve_diagnostics \
+    "$IOS_RELEASE_NETWORK_PENDING_SPEC_BASE64" \
+    "$IOS_RELEASE_NETWORK_PENDING_LOG" \
+    "$IOS_RELEASE_NETWORK_PENDING_XCRESULT" || return 1
+  ios_release_network_clear_pending_diagnostics
 }
 
 ios_release_network_test_command() {
   local xctestrun="$1"
   IOS_RELEASE_NETWORK_XCODE_COMMAND=(
     xcodebuild
-    -quiet
     -xctestrun "$xctestrun"
     -destination "$IOS_RELEASE_NETWORK_DESTINATION"
     -destination-timeout 60
     -collect-test-diagnostics never
+    -parallel-testing-enabled NO
   )
+}
+
+ios_release_network_process_group_alive() {
+  local pgid="$1"
+  [[ -n "$pgid" ]] || return 1
+  ps -axo pgid=,stat= 2>/dev/null \
+    | awk -v expected="$pgid" '
+        $1 == expected && $2 !~ /^Z/ { found = 1 }
+        END { exit !found }
+      '
+}
+
+ios_release_network_terminate_process_group() {
+  local pgid="$1"
+  local grace="${NVPN_IOS_XCTEST_TERM_GRACE_SECS:-5}"
+  local signal deadline
+  [[ "$grace" =~ ^[1-9][0-9]*$ ]] || {
+    echo "iOS XCTest termination grace must be positive seconds" >&2
+    return 2
+  }
+  for signal in TERM KILL; do
+    ios_release_network_process_group_alive "$pgid" || return 0
+    kill -s "$signal" -- "-$pgid" >/dev/null 2>&1 || true
+    deadline=$((SECONDS + grace))
+    while ((SECONDS < deadline)); do
+      ios_release_network_process_group_alive "$pgid" || return 0
+      sleep 0.05
+    done
+  done
+  ! ios_release_network_process_group_alive "$pgid"
+}
+
+ios_release_network_stop_active_processes() {
+  local cleanup_failed=0
+  local pgid="$IOS_RELEASE_NETWORK_ACTIVE_PGID"
+  if [[ -z "$pgid" && -s "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]]; then
+    pgid="$(<"$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE")"
+  fi
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ ]]; then
+    ios_release_network_terminate_process_group "$pgid" || cleanup_failed=1
+  fi
+  IOS_RELEASE_NETWORK_ACTIVE_PGID=""
+  [[ -z "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]] \
+    || rm -f "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" || cleanup_failed=1
+  return "$cleanup_failed"
+}
+
+ios_release_network_abort_active_run() {
+  local cleanup_failed=0
+  ios_release_network_stop_active_processes || cleanup_failed=1
+  ios_release_network_delete_pending_diagnostics || cleanup_failed=1
+  return "$cleanup_failed"
+}
+
+ios_release_network_run_bounded_xcode() {
+  local label="$1" timeout_secs="$2" launch_timeout_secs="$3"
+  local first_marker="$4" log="$5" host_markers="$6"
+  local device="$7" process_summary="$8"
+  shift 8
+  local pid pgid actual_pgid caller_pgid started
+  local reason="" status=0 monitor_was_enabled=0
+  [[ "$timeout_secs" =~ ^[1-9][0-9]*$ ]] || {
+    echo "iOS $label timeout must be positive seconds" >&2
+    return 2
+  }
+  [[ "$launch_timeout_secs" =~ ^[1-9][0-9]*$ ]] || {
+    echo "iOS $label launch timeout must be positive seconds" >&2
+    return 2
+  }
+  (($# > 0)) || {
+    echo "iOS $label has no xcodebuild command" >&2
+    return 2
+  }
+  local -a capture_command=(
+    python3 "$ROOT/scripts/capture-mobile-ios-underlay-output.py"
+    "$log" "$host_markers"
+  )
+  if [[ -n "$device" && -n "$process_summary" ]]; then
+    capture_command+=("$device" "$process_summary")
+  fi
+
+  [[ "$-" == *m* ]] && monitor_was_enabled=1
+  set -m
+  (
+    set +m
+    set +e
+    NSUnbufferedIO=YES "$@" 2>&1 | "${capture_command[@]}"
+    local -a pipe_status=("${PIPESTATUS[@]}")
+    ((pipe_status[0] == 0)) || exit "${pipe_status[0]}"
+    exit "${pipe_status[1]}"
+  ) &
+  pid=$!
+  ((monitor_was_enabled)) || set +m
+  pgid="$pid"
+  actual_pgid="$(
+    ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true
+  )"
+  caller_pgid="$(
+    ps -o pgid= -p "$$" 2>/dev/null \
+      | tr -d '[:space:]' \
+      || true
+  )"
+  if [[ -n "$actual_pgid" && "$actual_pgid" != "$pgid" ]] \
+    || [[ -n "$caller_pgid" && "$pgid" == "$caller_pgid" ]]
+  then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+    echo "iOS $label did not receive an isolated process group" >&2
+    return 2
+  fi
+  IOS_RELEASE_NETWORK_ACTIVE_PGID="$pgid"
+  if [[ -n "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]]; then
+    printf '%s\n' "$pgid" >"$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE"
+  fi
+  started=$SECONDS
+  while ios_release_network_process_group_alive "$pgid"; do
+    if [[ -n "$first_marker" \
+      && $SECONDS -ge $((started + launch_timeout_secs)) ]] \
+      && ! grep -Fq -- "$first_marker" "$log" 2>/dev/null
+    then
+      reason="launch"
+      break
+    fi
+    if ((SECONDS >= started + timeout_secs)); then
+      reason="total"
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ -n "$reason" ]]; then
+    ios_release_network_terminate_process_group "$pgid" || status=1
+  fi
+  if wait "$pid" 2>/dev/null; then
+    :
+  else
+    status=$?
+  fi
+  if ios_release_network_process_group_alive "$pgid"; then
+    echo "iOS $label left a process-group descendant" >&2
+    ios_release_network_terminate_process_group "$pgid" || status=1
+  fi
+  IOS_RELEASE_NETWORK_ACTIVE_PGID=""
+  [[ -z "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]] \
+    || rm -f "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" || status=1
+  if [[ "$reason" == "total" ]]; then
+    echo "iOS $label exceeded its ${timeout_secs}s total deadline" >&2
+    return 124
+  fi
+  if [[ "$reason" == "launch" ]]; then
+    echo "iOS $label emitted no first test-method marker within ${launch_timeout_secs}s" >&2
+    return 125
+  fi
+  if [[ -n "$first_marker" ]] \
+    && ! grep -Fq -- "$first_marker" "$log" 2>/dev/null
+  then
+    echo "iOS $label exited before emitting its first test-method marker" >&2
+    return 125
+  fi
+  return "$status"
 }
 
 ios_release_network_require_unlocked() {
@@ -708,13 +1056,17 @@ run_ios_release_network_case() {
   local ping_log="$result_dir/$stem-reverse-payload.log"
   local continuity_summary="$result_dir/$stem-continuity.json"
   local xcresult="$result_dir/$stem.xcresult"
+  local xctest_timeout="${NVPN_IOS_XCTEST_CASE_TIMEOUT_SECS:-600}"
+  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-45}"
   mkdir -p "$result_dir"
   if bool_is_true "$underlay"; then
     IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64="$spec_base64"
   fi
   rm -rf "$xcresult"
   rm -f "$log" "$host_markers" "$markers" "$process_summary" \
-    "$ping_log" "$continuity_summary"
+    "$ping_log" "$continuity_summary" \
+    "${xcresult%.xcresult}-xcresult-summary.json" \
+    "${xcresult%.xcresult}-diagnostic-redaction.json"
   if bool_is_true "$underlay"; then
     mobile_continuity_start \
       "$NVPN_MOBILE_UNDERLAY_CONTINUITY_CONTAINER" \
@@ -733,28 +1085,34 @@ run_ios_release_network_case() {
     "-only-testing:NostrVpnIosUITests/NostrVpnReleaseNetworkUITests/testReleaseNetworkLifecycle"
     test-without-building
   )
+  ios_release_network_register_diagnostics "$spec_base64" "$log" "$xcresult"
   local command_status=0
-  set +e
-  NSUnbufferedIO=YES "${command[@]}" 2>&1 \
-    | python3 "$ROOT/scripts/capture-mobile-ios-underlay-output.py" \
-      "$log" "$host_markers" \
-      "$IOS_RELEASE_NETWORK_DEVICE" "$process_summary"
-  local -a pipeline_status=("${PIPESTATUS[@]}")
-  set -e
-  command_status="${pipeline_status[0]}"
-  if [[ "$command_status" -eq 0 && "${pipeline_status[1]}" -ne 0 ]]; then
-    command_status="${pipeline_status[1]}"
+  if ios_release_network_run_bounded_xcode \
+    "Release network case $label" \
+    "$xctest_timeout" "$launch_timeout" \
+    "NVPN_IOS_RELEASE_RUN_ID=$run_id" \
+    "$log" "$host_markers" \
+    "$IOS_RELEASE_NETWORK_DEVICE" "$process_summary" \
+    "${command[@]}"
+  then
+    command_status=0
+  else
+    command_status=$?
   fi
   mobile_continuity_stop
-  ios_release_network_delete_private_test_products "$xcresult" "$log" || {
-    echo "iOS Release gate could not delete private test diagnostics" >&2
+  ios_release_network_delete_private_test_products || {
+    echo "iOS Release gate could not delete its private xctestrun" >&2
+    return 1
+  }
+  ios_release_network_preserve_pending_diagnostics || {
+    echo "iOS Release gate could not retain safe test diagnostics" >&2
     return 1
   }
   if [[ "$command_status" -ne 0 ]]; then
     ios_release_network_assert_retained_no_secrets \
-      "$spec_base64" "$host_markers" "$process_summary" "$ping_log" \
-      "$continuity_summary" || return 1
-    echo "iOS company-signed Release network case failed; private diagnostics were deleted" >&2
+      "$spec_base64" "$host_markers" \
+      "$process_summary" "$ping_log" "$continuity_summary" || return 1
+    echo "iOS company-signed Release network case failed; safe diagnostics retained at $result_dir" >&2
     return 1
   fi
 
@@ -810,8 +1168,8 @@ PY
   fi
   ios_release_network_audit_artifact "$label" "$result_dir" || return 1
   ios_release_network_assert_retained_no_secrets \
-    "$spec_base64" "$host_markers" "$markers" "$process_summary" \
-    "$ping_log" "$continuity_summary" \
+    "$spec_base64" "$host_markers" "$markers" "$process_summary" "$ping_log" \
+    "$continuity_summary" \
     "${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$result_dir/mobile-ios-release-artifact.json}" \
     || return 1
   echo "iOS Release real-network case passed: $label"
@@ -819,9 +1177,20 @@ PY
 
 ios_release_network_disconnect_cleanup_inner() {
   local result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
-  local log="$result_dir/mobile-ios-release-cleanup-$$.log"
-  local markers="$result_dir/mobile-ios-release-cleanup-markers-$$.log"
+  local stem="${1:-mobile-ios-release-cleanup-$$-$RANDOM}"
+  local log="$result_dir/$stem-xcodebuild.log"
+  local host_markers="$result_dir/$stem-host-markers.tsv"
+  local markers="$result_dir/$stem-runner-markers.log"
+  local xcresult="$result_dir/$stem.xcresult"
+  local cleanup_timeout="${NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS:-75}"
+  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-45}"
   local -a command=()
+  local command_status=0
+  mkdir -p "$result_dir"
+  rm -rf "$xcresult"
+  rm -f "$log" "$host_markers" "$markers" \
+    "${xcresult%.xcresult}-xcresult-summary.json" \
+    "${xcresult%.xcresult}-diagnostic-redaction.json"
   ios_release_network_require_unlocked "$IOS_RELEASE_NETWORK_DEVICE" || return 1
   ios_release_network_delete_private_test_products || return 1
   ios_release_network_prepare_xctestrun \
@@ -829,32 +1198,112 @@ ios_release_network_disconnect_cleanup_inner() {
   ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
   command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
   command+=(
+    -resultBundlePath "$xcresult"
     "-only-testing:NostrVpnIosUITests/NostrVpnReleaseNetworkUITests/testReleaseDisconnectCleanup"
     test-without-building
   )
-  if ! NSUnbufferedIO=YES "${command[@]}" >"$log" 2>&1; then
-    if ! ios_release_network_delete_private_test_products "" "$log"; then
-      echo "iOS Release cleanup failed and private diagnostics could not be deleted" >&2
-      return 1
-    fi
-    echo "iOS Release cleanup failed; private diagnostics were deleted" >&2
+  ios_release_network_register_diagnostics \
+    "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" "$log" "$xcresult"
+  if ios_release_network_run_bounded_xcode \
+    "Release disconnect cleanup" \
+    "$cleanup_timeout" "$launch_timeout" "NVPN_XCUITEST_STARTED=1" \
+    "$log" "$host_markers" "" "" \
+    "${command[@]}"
+  then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  ios_release_network_delete_private_test_products || {
+    echo "iOS Release cleanup could not delete its private xctestrun" >&2
+    return 1
+  }
+  ios_release_network_preserve_pending_diagnostics || {
+    echo "iOS Release cleanup could not retain safe diagnostics" >&2
+    return 1
+  }
+  if [[ "$command_status" -ne 0 ]]; then
+    echo "iOS Release cleanup failed; safe diagnostics retained at $result_dir" >&2
     return 1
   fi
-  ios_release_network_delete_private_test_products "" "$log" || return 1
-  ios_release_network_copy_markers "$markers" \
-    && grep -Fxq "NVPN_IOS_RELEASE_DISCONNECT_PASSED=1" "$markers" \
+  ios_release_network_copy_markers "$markers" || return 1
+  grep -Fxq "NVPN_IOS_RELEASE_DISCONNECT_PASSED=1" "$markers" \
     && {
       [[ -z "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" ]] \
         || grep -Fxq "NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1" "$markers"
     } \
     && ios_release_network_assert_retained_no_secrets \
-      "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" "$markers"
+      "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
+      "$host_markers" "$markers"
 }
 
 ios_release_network_disconnect_cleanup() {
   local cleanup_failed=0
+  ios_release_network_abort_active_run || cleanup_failed=1
   if [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 1 ]]; then
-    ios_release_network_disconnect_cleanup_inner || cleanup_failed=1
+    local timeout="${NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS:-90}"
+    local grace="${NVPN_IOS_XCTEST_TERM_GRACE_SECS:-5}"
+    local result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
+    local stem="mobile-ios-release-cleanup-$$-$RANDOM"
+    local xcresult="$result_dir/$stem.xcresult"
+    local marker pid watchdog status=0 monitor_was_enabled=0 actual_pgid
+    [[ "$timeout" =~ ^[1-9][0-9]*$ \
+      && "$grace" =~ ^[1-9][0-9]*$ ]] || {
+      echo "iOS disconnect cleanup deadlines must be positive seconds" >&2
+      return 2
+    }
+    marker="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-cleanup-active.XXXXXX")"
+    ios_release_network_register_diagnostics \
+      "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
+      "$result_dir/$stem-xcodebuild.log" "$xcresult"
+    [[ "$-" == *m* ]] && monitor_was_enabled=1
+    set -m
+    (
+      set +m
+      trap 'ios_release_network_abort_active_run; ios_release_network_delete_private_test_products; rm -f "$marker"; exit 124' TERM INT
+      trap 'rm -f "$marker"' EXIT
+      ios_release_network_disconnect_cleanup_inner "$stem"
+    ) &
+    pid=$!
+    ((monitor_was_enabled)) || set +m
+    actual_pgid="$(
+      ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true
+    )"
+    if [[ -n "$actual_pgid" && "$actual_pgid" != "$pid" ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      rm -f "$marker"
+      ios_release_network_delete_pending_diagnostics || true
+      echo "iOS disconnect cleanup received no isolated process group" >&2
+      return 2
+    fi
+    (
+      sleep "$timeout"
+      [[ -e "$marker" ]] || exit 0
+      kill -s TERM -- "-$pid" >/dev/null 2>&1 || true
+      sleep "$grace"
+      [[ -e "$marker" ]] || exit 0
+      kill -s KILL -- "-$pid" >/dev/null 2>&1 || true
+    ) &
+    watchdog=$!
+    if wait "$pid" 2>/dev/null; then
+      :
+    else
+      status=$?
+    fi
+    kill "$watchdog" >/dev/null 2>&1 || true
+    wait "$watchdog" >/dev/null 2>&1 || true
+    rm -f "$marker"
+    ios_release_network_stop_active_processes || cleanup_failed=1
+    if [[ -s "${xcresult%.xcresult}-diagnostic-redaction.json" ]]; then
+      ios_release_network_clear_pending_diagnostics
+    else
+      ios_release_network_delete_pending_diagnostics || cleanup_failed=1
+    fi
+    if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+      echo "iOS disconnect cleanup exceeded its ${timeout}s total deadline" >&2
+    fi
+    [[ "$status" -eq 0 ]] || cleanup_failed=1
   fi
   ios_release_network_cleanup_private_artifacts || cleanup_failed=1
   return "$cleanup_failed"
