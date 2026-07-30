@@ -1367,6 +1367,26 @@ do
     fail "Linux endpoint route accepted a wrong ownership tuple"
   fi
 done
+recovery_contract="$COMBINED_DIR/linux-recovery-public-probe.sh"
+sed -n \
+  '/^assert_active_exit() {$/,/^}$/p; /^assert_active_exit_for_recovery() {$/,/^}$/p' \
+  "$LINUX_GUEST" >"$recovery_contract"
+require_tokens "$recovery_contract" "artifact-preserving recovery probe" \
+  'local public_probe_already_passed="${4:-0}"' \
+  'if [[ "$public_probe_already_passed" != "1" ]]; then' \
+  'resolve_name "$(probe_host)" || return 1' \
+  'test_https || return 1' \
+  'assert_active_exit "$expected_iface" "$expected_pid" 1 1'
+https_counter_line="$(grep -nF 'monotonic_milliseconds >>"$STATE_DIR/wireguard-payload.log"' \
+  "$LINUX_GUEST" | cut -d: -f1)"
+recovery_probe_line="$(grep -nF '$(wireguard_payload_success_count) > wg_probe_before' \
+  "$LINUX_GUEST" | cut -d: -f1)"
+recovery_audit_line="$(grep -nF 'if assert_active_exit_for_recovery ' \
+  "$LINUX_GUEST" | cut -d: -f1)"
+[[ -n "$https_counter_line" && -n "$recovery_probe_line" && -n "$recovery_audit_line" ]] \
+  || fail "Linux recovery lacks continuous public-name HTTPS evidence"
+((https_counter_line < recovery_probe_line && recovery_probe_line < recovery_audit_line)) \
+  || fail "Linux recovery audits readiness before the HTTPS counter advances"
 grep -Fq 'route_dev "$(endpoint_host)"' "$LINUX_GUEST" \
   || fail "Linux recovery clock does not wait for the physical endpoint route"
 require_tokens "$LINUX_GUEST" "Linux bounded recovery short-circuit" \
