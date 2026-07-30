@@ -133,19 +133,31 @@ ipv4_route_table() {
   /usr/sbin/netstat -rn -f inet
 }
 
-split_default_interface() {
-  local target="$1" mask
-  mask="$(route_value "$target" mask)"
-  [[ "$mask" == "128.0.0.0" ]] || return 1
-  route_value "$target" interface
-}
-
 wireguard_interface() {
-  local low high
-  low="$(split_default_interface 1.0.0.1)" || return 1
-  high="$(split_default_interface 129.0.0.1)" || return 1
-  [[ -n "$low" && "$low" == "$high" && "$low" == utun* ]] || return 1
-  printf '%s\n' "$low"
+  ipv4_route_table | awk '
+    $1 == "Destination" {
+      for (field = 1; field <= NF; field++) {
+        if ($field == "Netif") netif = field
+      }
+      next
+    }
+    netif && ($1 == "0/1" || $1 == "0.0.0.0/1") {
+      low += 1
+      low_interface = $netif
+    }
+    netif && ($1 == "128/1" || $1 == "128.0/1" || $1 == "128.0.0.0/1") {
+      high += 1
+      high_interface = $netif
+    }
+    END {
+      if (low == 1 && high == 1 && low_interface == high_interface \
+          && low_interface ~ /^utun/) {
+        print low_interface
+        exit 0
+      }
+      exit 1
+    }
+  '
 }
 
 wireguard_endpoint_route_state_valid() {

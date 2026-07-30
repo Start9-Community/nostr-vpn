@@ -314,6 +314,25 @@ STATUS_WRONG="$TMP_ROOT/status-wrong.json"
 STATUS_ZERO="$TMP_ROOT/status-zero.json"
 STATUS_TWO="$TMP_ROOT/status-two.json"
 STATUS_NULL="$TMP_ROOT/status-null.json"
+ROUTES_WASCLONED="$TMP_ROOT/routes-wascloned.txt"
+ROUTES_MIXED="$TMP_ROOT/routes-mixed.txt"
+ROUTES_WRONG="$TMP_ROOT/routes-wrong.txt"
+cat >"$ROUTES_WASCLONED" <<'EOF'
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.168.64.1       UGScg                 en0
+0/1                utun5              USc                 utun5
+1.0.0.1            utun5              UHWIi               utun5
+128.0/1            utun5              USc                 utun5
+192.168.178.91     192.168.64.1       UGHSI                 en0
+EOF
+awk '
+  $1 == "128.0/1" { $2 = "utun6"; $4 = "utun6" }
+  { print }
+' "$ROUTES_WASCLONED" >"$ROUTES_MIXED"
+sed 's/utun5/en0/g' "$ROUTES_WASCLONED" >"$ROUTES_WRONG"
 python3 - \
   "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" \
   "$STATUS_NULL" "$EXPECTED_PEER" <<'PY'
@@ -359,7 +378,7 @@ PY
 bash -s -- \
   "$DEFINITIONS" "$REMOTE_DEFINITIONS" "$TMP_ROOT" "$EXPECTED_PEER" \
   "$STATUS_GOOD" "$STATUS_WRONG" "$STATUS_ZERO" "$STATUS_TWO" \
-  "$STATUS_NULL" <<'BASH'
+  "$STATUS_NULL" "$ROUTES_WASCLONED" "$ROUTES_MIXED" "$ROUTES_WRONG" <<'BASH'
 set -euo pipefail
 definitions="$1"
 remote_definitions="$2"
@@ -371,9 +390,30 @@ wrong="$2"
 zero="$3"
 two="$4"
 null="$5"
+wascloned="$6"
+mixed="$7"
+wrong_route="$8"
 set -- definitions-only
 # shellcheck disable=SC1090
 source "$definitions"
+ROUTE_FIXTURE="$wascloned"
+ipv4_route_table() {
+  cat "$ROUTE_FIXTURE"
+}
+actual_interface="$(wireguard_interface)" || {
+  echo "split default rejected a normal WASCLONED host route" >&2
+  exit 1
+}
+[[ "$actual_interface" == "utun5" ]] || {
+  echo "split default returned the wrong interface: $actual_interface" >&2
+  exit 1
+}
+for ROUTE_FIXTURE in "$mixed" "$wrong_route"; do
+  if wireguard_interface >/dev/null; then
+    echo "split default accepted mixed or non-utun route ownership" >&2
+    exit 1
+  fi
+done
 STATE_DIR="$state"
 CONFIG="$state/config.toml"
 FIPS_PEER_NPUB="$expected"
