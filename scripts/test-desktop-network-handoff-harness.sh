@@ -9,6 +9,7 @@ RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 LOCAL_RELEASE="$ROOT/scripts/local-release.mjs"
 WINDOWS_HOST_ENTRY="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.sh"
 WINDOWS_HOST_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
+WINDOWS_PEER_OBSERVER="$ROOT/scripts/desktop-underlay-peer-recovery-observer.sh"
 WINDOWS_GUEST_ENTRY="$ROOT/scripts/desktop-windows-underlay-change-e2e.ps1"
 WINDOWS_GUEST_LIB="$ROOT/scripts/desktop-windows-underlay-change-e2e.lib.ps1"
 WINDOWS_GUEST_CRASH_LIB="$ROOT/scripts/desktop-windows-underlay-crash-recovery.lib.ps1"
@@ -32,7 +33,8 @@ trap 'rm -rf "$COMBINED_DIR"' EXIT
 WINDOWS_HOST="$COMBINED_DIR/windows-host.sh"
 WINDOWS_GUEST="$COMBINED_DIR/windows-guest.ps1"
 LINUX_HOST="$COMBINED_DIR/linux-host.sh"
-cat "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" >"$WINDOWS_HOST"
+cat "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" "$WINDOWS_PEER_OBSERVER" \
+  >"$WINDOWS_HOST"
 cat "$WINDOWS_GUEST_ENTRY" "$WINDOWS_GUEST_LIB" "$WINDOWS_GUEST_CRASH_LIB" \
   >"$WINDOWS_GUEST"
 cat "$LINUX_HOST_ENTRY" "$LINUX_HOST_LIB" >"$LINUX_HOST"
@@ -646,12 +648,12 @@ if "\\$processMarkers = @('probe.pid', 'wireguard-probe.pid', 'watchdog.pid')" n
 PY
 [[ "$(grep -Fc 'assert_peer_recovered_from_source "$cut"' "$WINDOWS_HOST")" -eq 2 ]] \
   || fail "Windows peer evidence is not clocked from each hypervisor link cut"
-require_tokens "$WINDOWS_HOST_ENTRY" "full timestamp-bound peer evidence" \
-  'flush_end="$(awk -v end="$end" '\''BEGIN { print end + 2 }'\'')"' \
-  'fips-cut <= d && wg-cut <= d && reverse-cut <= d && reverse-fips <= d' \
-  '_peer_timestamps=cut:' \
-  '_first_matches=fips:<' \
-  '_missing_predicates='
+require_tokens "$WINDOWS_HOST" "root-readable exact peer observation" \
+  'sudo -n bash -s --' \
+  '"$RECOVERY_DEADLINE_MS" "$label" <"$observer"' \
+  'decimal_seconds_to_ns' \
+  'evidence_deadline_ns="$((cut_ns + deadline_ns))"' \
+  'flush_deadline_ns="$((evidence_deadline_ns + FLUSH_GRACE_MS * 1000000))"'
 grep -Fq 'wait_for_guest_marker ready 35' "$WINDOWS_HOST" \
   || fail "Windows runtime readiness still has an unreasonable host-side wait"
 if grep -Fq '90000' "$WINDOWS_GUEST" \
@@ -1440,8 +1442,11 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
   grep -Fq 'while :; do' "$host_gate" \
     || fail "$(basename "$host_gate") can skip already-recorded boundary evidence"
   if [[ "$host_gate" == "$WINDOWS_HOST" ]]; then
-    grep -Fq 'reverse-cut <= d && reverse-fips <= d' "$host_gate" \
-      || fail "Windows host does not keep reverse payload inside the total bound"
+    require_tokens "$host_gate" "exact integer evidence bounds" \
+      'fips_ns <= evidence_deadline_ns' \
+      'wireguard_ns <= evidence_deadline_ns' \
+      'reverse_ns <= evidence_deadline_ns' \
+      'reverse_ns - fips_ns <= deadline_ns'
   else
     grep -Fq 'at - cut > deadline' "$host_gate" \
       || fail "$(basename "$host_gate") does not keep reverse payload inside the total bound"
@@ -1482,4 +1487,5 @@ for name in sys.argv[1:]:
         )
 PY
 
+"$ROOT/scripts/test-desktop-underlay-peer-recovery-observer.sh"
 echo "DESKTOP_UNDERLAY_NETWORK_CHANGE_SOURCE_CONTRACT_OK"
