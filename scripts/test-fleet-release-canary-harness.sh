@@ -13,6 +13,14 @@ WINDOWS_HELPER="$APP/scripts/fleet_release_canary_remote_windows.ps1"
 GATE_VALIDATOR="$APP/scripts/fleet-release-gate-evidence.mjs"
 PROVENANCE_LIB="$APP/scripts/release-artifact-provenance-lib.mjs"
 DRIVER_LOG="$WORK/driver.log"
+PYTHONPATH="$ROOT/scripts" python3 - <<'PY'
+from fleet_release_canary import ARCHES
+
+assert ARCHES == {
+    "linux": {"x86_64", "aarch64"},
+    "windows": {"x86_64"},
+}
+PY
 LOCAL_ID="$(
   PYTHONPATH="$ROOT/scripts" python3 - <<'PY'
 from fleet_release_canary import local_machine_identity_sha256

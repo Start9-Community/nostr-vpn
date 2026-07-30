@@ -59,7 +59,7 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 PLATFORMS = {"linux", "windows"}
 ARCHES = {
-    "linux": {"x86_64", "aarch64", "armv6", "armv7"},
+    "linux": {"x86_64", "aarch64"},
     "windows": {"x86_64"},
 }
 DRIVER_RELATIVE_PATH = pathlib.Path("scripts/fleet_release_canary_ssh_driver.py")
