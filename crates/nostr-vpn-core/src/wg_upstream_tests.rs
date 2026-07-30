@@ -203,10 +203,10 @@ mod tests {
     }
 
     /// Stand up a paired Tunn on a real UDP port acting as the upstream
-    /// "server"; verifies the boringtun pump's handshake state machine
-    /// drives `wait_for_handshake` to true.
+    /// "server"; verifies both the initial and forced handshakes complete
+    /// without replacing the live runtime or its UDP socket.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn handshake_completes_against_paired_responder() {
+    async fn handshake_refreshes_without_runtime_or_socket_restart() {
         let (_, _client_pub, client_priv_b64, _) = random_keypair();
         let (server_priv_obj, _, _, server_pub_b64) = random_keypair();
 
@@ -271,6 +271,27 @@ mod tests {
         assert!(
             ok,
             "expected handshake to complete against the paired responder"
+        );
+
+        let original_socket_fd = runtime.udp_socket_fd();
+        let receiver_index = runtime
+            .force_handshake()
+            .await
+            .expect("force a fresh handshake without restarting the WG runtime");
+        assert_eq!(
+            runtime.udp_socket_fd(),
+            original_socket_fd,
+            "underlay refresh must preserve the live WG socket"
+        );
+        assert!(
+            runtime.is_running(),
+            "underlay refresh must preserve the live WG runtime"
+        );
+        assert!(
+            runtime
+                .wait_for_handshake_response(receiver_index, Duration::from_secs(10))
+                .await,
+            "expected the exact forced handshake response on the live WG socket"
         );
 
         #[cfg(target_os = "macos")]

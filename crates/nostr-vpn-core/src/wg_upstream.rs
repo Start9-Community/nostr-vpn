@@ -35,7 +35,6 @@ use base64::engine::general_purpose::STANDARD;
 use boringtun::noise::{Packet, Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::net::UdpSocket;
-#[cfg(target_os = "macos")]
 use tokio::sync::oneshot;
 use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::task::JoinHandle;
@@ -105,6 +104,9 @@ struct HandshakeState {
 }
 
 enum WgUpstreamCommand {
+    ForceHandshake {
+        response: oneshot::Sender<Result<u32>>,
+    },
     #[cfg(target_os = "macos")]
     RebindInterface {
         interface_index: u32,
@@ -295,6 +297,19 @@ impl WgUpstreamRuntime {
         raw_udp_socket_fd(&self.udp)
     }
 
+    /// Actively initiate a fresh authenticated handshake on the live UDP
+    /// socket. Mobile platforms use this immediately after the OS migrates
+    /// that socket to a new physical underlay.
+    pub async fn force_handshake(&self) -> Result<u32> {
+        let (response, result) = oneshot::channel();
+        self._control_tx
+            .send(WgUpstreamCommand::ForceHandshake { response })
+            .map_err(|_| anyhow!("WG upstream pump stopped before forced handshake"))?;
+        result
+            .await
+            .context("WG upstream pump stopped while forcing handshake")?
+    }
+
     /// Rebind encrypted WG UDP traffic to a new macOS underlay and
     /// actively initiate a fresh handshake on it. The returned receiver index
     /// identifies the exact forced initiation whose response must complete.
@@ -315,7 +330,6 @@ impl WgUpstreamRuntime {
     /// Wait for the authenticated response to one exact locally initiated
     /// WireGuard handshake. Delayed responses to older initiations and cookie
     /// challenges cannot satisfy this proof.
-    #[cfg(target_os = "macos")]
     pub async fn wait_for_handshake_response(
         &self,
         receiver_index: u32,
@@ -366,7 +380,6 @@ async fn wait_for_handshake(handshake: &Arc<HandshakeState>, timeout: Duration) 
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn wait_for_handshake_response(
     handshake: &Arc<HandshakeState>,
     receiver_index: u32,
@@ -649,8 +662,13 @@ async fn run_pump(
                 }
             }
             Some(command) = control_rx.recv() => {
-                #[cfg(target_os = "macos")]
                 match command {
+                    WgUpstreamCommand::ForceHandshake { response } => {
+                        let result =
+                            force_new_handshake(&mut tunn, &udp, upstream, &mut out).await;
+                        let _ = response.send(result);
+                    }
+                    #[cfg(target_os = "macos")]
                     WgUpstreamCommand::RebindInterface {
                         interface_index,
                         response,
@@ -665,8 +683,6 @@ async fn run_pump(
                         let _ = response.send(result);
                     }
                 }
-                #[cfg(not(target_os = "macos"))]
-                match command {}
             }
         }
     }
@@ -684,7 +700,6 @@ async fn rebind_and_force_new_handshake(
     force_new_handshake(tunn, udp, upstream, out).await
 }
 
-#[cfg(target_os = "macos")]
 async fn force_new_handshake(
     tunn: &mut Tunn,
     udp: &UdpSocket,
@@ -762,7 +777,6 @@ fn completed_handshake_receiver_index(incoming: &[u8], result: &TunnResult<'_>) 
     .then_some(receiver_index)
 }
 
-#[cfg(any(target_os = "macos", test))]
 fn handshake_initiation_sender_index(packet: &[u8]) -> Option<u32> {
     if !matches!(
         Tunn::parse_incoming_packet(packet),

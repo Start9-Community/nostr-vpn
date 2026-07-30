@@ -2,6 +2,7 @@
 pub(crate) struct MobileNetworkChangeOutcome {
     pub(crate) rebound_transports: usize,
     pub(crate) refreshed_peers: usize,
+    pub(crate) wireguard_handshake_initiated: bool,
 }
 
 impl MobileTunnel {
@@ -651,7 +652,12 @@ impl MobileTunnel {
                 PeerIdentity::from_npub(&normalize_mobile_endpoint_npub(&peer.endpoint_npub)).ok()
             })
             .collect::<Vec<_>>();
+        let wg_upstream = self.wg_upstream.as_ref();
         self.runtime.block_on(async move {
+            let wireguard_refresh = match wg_upstream {
+                Some(runtime) => Some(runtime.force_handshake().await),
+                None => None,
+            };
             let rebound_transports = endpoint
                 .rebind_network_transports(None)
                 .await
@@ -660,9 +666,17 @@ impl MobileTunnel {
                 .refresh_peer_paths(peers)
                 .await
                 .context("mobile FIPS peer path refresh after network change")?;
+            let wireguard_handshake_initiated = match wireguard_refresh {
+                Some(result) => {
+                    result.context("mobile WireGuard handshake after network change")?;
+                    true
+                }
+                None => false,
+            };
             Ok(MobileNetworkChangeOutcome {
                 rebound_transports,
                 refreshed_peers,
+                wireguard_handshake_initiated,
             })
         })
     }

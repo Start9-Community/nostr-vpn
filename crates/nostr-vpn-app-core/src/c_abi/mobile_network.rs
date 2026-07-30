@@ -1,6 +1,6 @@
-/// Rebinds the live FIPS carriers after the containing OS reports that its
-/// physical underlay changed. The mobile tunnel and its authenticated
-/// end-to-end sessions stay alive.
+/// Refreshes the live `WireGuard` upstream and FIPS carriers after the containing
+/// OS reports that its physical underlay changed. The mobile tunnel and its
+/// authenticated end-to-end sessions stay alive.
 ///
 /// # Safety
 ///
@@ -16,15 +16,16 @@ pub unsafe extern "C" fn nostr_vpn_mobile_tunnel_network_changed(
     match tunnel.tunnel.handle_underlay_network_change() {
         Ok(outcome) => {
             mobile_debug_log(format!(
-                "mobile: network change rebound {} FIPS carrier(s), refreshed {} peer path(s)",
-                outcome.rebound_transports, outcome.refreshed_peers
+                "mobile: network change rebound {} FIPS carrier(s), refreshed {} peer path(s), \
+                 WireGuard handshake initiated={}",
+                outcome.rebound_transports,
+                outcome.refreshed_peers,
+                outcome.wireguard_handshake_initiated
             ));
             true
         }
         Err(error) => {
-            mobile_debug_log(format!(
-                "mobile: network change FIPS refresh failed: {error:#}"
-            ));
+            mobile_debug_log(format!("mobile: network path refresh failed: {error:#}"));
             false
         }
     }

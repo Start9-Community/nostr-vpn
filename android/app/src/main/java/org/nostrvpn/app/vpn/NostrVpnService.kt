@@ -41,17 +41,13 @@ class NostrVpnService : VpnService() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private val underlyingNetworkHandler = Handler(Looper.getMainLooper())
     private var underlyingNetworkFingerprint: String? = null
+    private var retryUnderlyingNetworkFingerprint: String? = null
+    private var underlyingNetworkRetryCount = 0
     private val refreshUnderlyingNetworksRunnable = Runnable {
-        refreshUnderlyingNetworks(notifyNative = true)
+        refreshUnderlyingNetworks(resetRetryBudget = true)
     }
-    private val refreshNativeFipsPathsRunnable = Runnable {
-        val handle = tunnelHandle
-        if (!running.get() || handle == 0L) return@Runnable
-        if (NativeCore.mobileTunnelNetworkChanged(handle)) {
-            Log.i("NostrVpnService", "Physical network changed; live FIPS carriers refreshed")
-        } else {
-            Log.w("NostrVpnService", "Physical network changed; live FIPS carrier refresh failed")
-        }
+    private val refreshNativeNetworkPathsRunnable = Runnable {
+        refreshUnderlyingNetworks(resetRetryBudget = false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -270,14 +266,14 @@ class NostrVpnService : VpnService() {
             builder.setMetered(false)
         }
 
+        val wireGuardExitActive = config.optJSONObject("wireguardExit") != null
         val underlyingNetworks = currentUnderlyingNetworks()
-        if (underlyingNetworks.isNotEmpty()) {
+        if (!wireGuardExitActive && underlyingNetworks.isNotEmpty()) {
             builder.setUnderlyingNetworks(underlyingNetworks)
         }
         // The WG transport socket is protected after native startup. Keeping
         // this process inside the VPN lets app-owned secure DNS use the exit;
         // FIPS/direct/split transports still need the process-level escape.
-        val wireGuardExitActive = config.optJSONObject("wireguardExit") != null
         if (AndroidVpnRoutingPolicy.excludesOwnProcess(wireGuardExitActive)) {
             excludeOwnProcess(builder)
         }
@@ -446,7 +442,7 @@ class NostrVpnService : VpnService() {
             }
         }
         try {
-            refreshUnderlyingNetworks(notifyNative = false)
+            refreshUnderlyingNetworks(resetRetryBudget = true)
             val request = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
@@ -455,14 +451,14 @@ class NostrVpnService : VpnService() {
             networkCallback = callback
         } catch (_: RuntimeException) {
             networkCallback = null
-            underlyingNetworkFingerprint = null
+            resetUnderlyingNetworkRefreshState()
         }
     }
 
     private fun unregisterUnderlyingNetworkUpdates() {
         underlyingNetworkHandler.removeCallbacks(refreshUnderlyingNetworksRunnable)
-        underlyingNetworkHandler.removeCallbacks(refreshNativeFipsPathsRunnable)
-        underlyingNetworkFingerprint = null
+        underlyingNetworkHandler.removeCallbacks(refreshNativeNetworkPathsRunnable)
+        resetUnderlyingNetworkRefreshState()
         val callback = networkCallback ?: return
         networkCallback = null
         val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
@@ -519,17 +515,144 @@ class NostrVpnService : VpnService() {
         )
     }
 
-    private fun refreshUnderlyingNetworks(notifyNative: Boolean) {
-        val networks = currentUnderlyingNetworks()
-        val fingerprint = currentUnderlyingNetworkFingerprint(networks)
-        val changed =
-            underlyingNetworkFingerprint != null && underlyingNetworkFingerprint != fingerprint
-        underlyingNetworkFingerprint = fingerprint
-        setUnderlyingNetworks(networks.takeIf { it.isNotEmpty() })
-        if (notifyNative && changed && running.get()) {
-            underlyingNetworkHandler.removeCallbacks(refreshNativeFipsPathsRunnable)
-            underlyingNetworkHandler.post(refreshNativeFipsPathsRunnable)
+    private fun refreshUnderlyingNetworks(resetRetryBudget: Boolean) {
+        val handle = tunnelHandle
+        if (!running.get() || handle == 0L) return
+        val wireGuardSocketFd = NativeCore.mobileTunnelWgSocketFd(handle)
+        val candidates = currentUnderlyingNetworks()
+        val wireGuardNetwork =
+            if (wireGuardSocketFd >= 0) {
+                orderedValidatedUnderlyingNetworks(candidates).firstOrNull()
+            } else {
+                null
+            }
+        val reportedNetworks =
+            if (wireGuardSocketFd >= 0) {
+                wireGuardNetwork?.let { arrayOf(it) } ?: emptyArray()
+            } else {
+                candidates
+            }
+        val fingerprint = currentUnderlyingNetworkFingerprint(reportedNetworks)
+        if (fingerprint == underlyingNetworkFingerprint) {
+            clearUnderlyingNetworkRetry()
+            return
         }
+        if (resetRetryBudget || retryUnderlyingNetworkFingerprint != fingerprint) {
+            retryUnderlyingNetworkFingerprint = fingerprint
+            underlyingNetworkRetryCount = 0
+        }
+
+        if (wireGuardSocketFd >= 0) {
+            if (wireGuardNetwork == null) {
+                if (setUnderlyingNetworks(emptyArray())) {
+                    markUnderlyingNetworkApplied(fingerprint)
+                }
+                return
+            }
+            if (!bindWireGuardUpstreamToNetwork(wireGuardSocketFd, wireGuardNetwork)) {
+                scheduleNativeNetworkPathRetry(fingerprint)
+                return
+            }
+            if (!setUnderlyingNetworks(arrayOf(wireGuardNetwork))) {
+                scheduleNativeNetworkPathRetry(fingerprint)
+                return
+            }
+        } else {
+            setUnderlyingNetworks(reportedNetworks.takeIf { it.isNotEmpty() })
+            if (underlyingNetworkFingerprint == null) {
+                markUnderlyingNetworkApplied(fingerprint)
+                return
+            }
+        }
+
+        if (!NativeCore.mobileTunnelNetworkChanged(handle)) {
+            Log.w("NostrVpnService", "Physical network changed; live network-path refresh failed")
+            if (wireGuardNetwork != null) scheduleNativeNetworkPathRetry(fingerprint)
+            return
+        }
+
+        markUnderlyingNetworkApplied(fingerprint)
+        val wg = if (wireGuardSocketFd >= 0) "; WireGuard refreshed fd=$wireGuardSocketFd" else ""
+        Log.i(
+            "NostrVpnService",
+            "Physical network changed; live FIPS carriers refreshed$wg",
+        )
+    }
+
+    private fun markUnderlyingNetworkApplied(fingerprint: String) {
+        underlyingNetworkFingerprint = fingerprint
+        clearUnderlyingNetworkRetry()
+    }
+
+    private fun scheduleNativeNetworkPathRetry(fingerprint: String) {
+        if (retryUnderlyingNetworkFingerprint != fingerprint) {
+            retryUnderlyingNetworkFingerprint = fingerprint
+            underlyingNetworkRetryCount = 0
+        }
+        if (underlyingNetworkRetryCount >= UNDERLAY_NETWORK_MAX_RETRIES) return
+        underlyingNetworkRetryCount += 1
+        underlyingNetworkHandler.removeCallbacks(refreshNativeNetworkPathsRunnable)
+        underlyingNetworkHandler.postDelayed(
+            refreshNativeNetworkPathsRunnable, UNDERLAY_NETWORK_RETRY_MILLIS,
+        )
+    }
+
+    private fun clearUnderlyingNetworkRetry() {
+        retryUnderlyingNetworkFingerprint = null
+        underlyingNetworkRetryCount = 0
+        underlyingNetworkHandler.removeCallbacks(refreshNativeNetworkPathsRunnable)
+    }
+
+    private fun resetUnderlyingNetworkRefreshState() {
+        underlyingNetworkFingerprint = null
+        clearUnderlyingNetworkRetry()
+    }
+
+    private fun bindWireGuardUpstreamToNetwork(
+        socketFd: Int,
+        network: Network,
+    ): Boolean {
+        return try {
+            ParcelFileDescriptor.fromFd(socketFd).use { network.bindSocket(it.fileDescriptor) }
+            Log.i(
+                "NostrVpnService",
+                "WireGuard upstream socket fd=$socketFd rebound to network ${network.networkHandle}",
+            )
+            true
+        } catch (error: Exception) {
+            Log.w(
+                "NostrVpnService",
+                "Failed to bind WireGuard upstream to network ${network.networkHandle}",
+                error,
+            )
+            false
+        }
+    }
+
+    private fun orderedValidatedUnderlyingNetworks(
+        candidates: Array<Network>,
+    ): List<Network> {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+        val activeNetwork = connectivity.activeNetwork
+        return candidates
+            .filter {
+                connectivity.getNetworkCapabilities(it)
+                    ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+            }
+            .sortedWith(
+                compareBy<Network>(
+                    { if (it == activeNetwork) 0 else 1 },
+                    { underlayTransportPreference(connectivity.getNetworkCapabilities(it)) },
+                    Network::getNetworkHandle,
+                ),
+            )
+    }
+
+    private fun underlayTransportPreference(capabilities: NetworkCapabilities?): Int = when {
+        capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> 0
+        capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> 1
+        capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> 2
+        else -> 3
     }
 
     private fun currentUnderlyingNetworkFingerprint(networks: Array<Network>): String {
@@ -555,6 +678,8 @@ class NostrVpnService : VpnService() {
                         NetworkCapabilities.TRANSPORT_ETHERNET,
                     ).filter { capabilities?.hasTransport(it) == true }.joinToString(","),
                 )
+                append(";validated=")
+                append(capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true)
                 append(";interface=")
                 append(properties?.interfaceName.orEmpty())
                 append(";addresses=")
@@ -747,6 +872,8 @@ class NostrVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL_ID = "vpn"
         private const val NOTIFICATION_ID = 7001
         private const val UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS = 250L
+        private const val UNDERLAY_NETWORK_RETRY_MILLIS = 250L
+        private const val UNDERLAY_NETWORK_MAX_RETRIES = 2
 
         fun startRestore(context: Context) {
             val intent = Intent(context, NostrVpnService::class.java)
