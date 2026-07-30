@@ -261,6 +261,10 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
     'counters=(profile_dns cloudflare quad9 google fixture_dns)' \
     'run_dns_case automatic profile_dns'
 done
+require_tokens "$WINDOWS_GUEST_ENTRY" "applied Windows DNS configuration barrier" \
+  $'Invoke-Nvpn (@("set", "--config", $Config) + $SetArguments)\n  Write-Marker "dns-$Name.configured" "ok"\n  Wait-ForFile "dns-$Name.query"'
+require_tokens "$WINDOWS_HOST_ENTRY" "post-configuration Windows DNS counter baseline" \
+  $'  signal_guest "dns-$name.go"\n  wait_for_guest_marker "dns-$name.configured" 35\n  before="$(stable_dns_counters)"\n  signal_guest "dns-$name.query"'
 require_tokens "$WINDOWS_GUEST" "WireGuard-side through-exit DNS" \
   'WireGuardServerIp' \
   'exit-dns-through-exit-servers", $WireGuardServerIp'

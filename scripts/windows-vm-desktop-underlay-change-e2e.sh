@@ -593,8 +593,10 @@ run_dns_case() {
   local counter="$2"
   local before after key before_value after_value
   local -a counters=(profile_dns cloudflare quad9 google fixture_dns)
-  before="$(stable_dns_counters)"
   signal_guest "dns-$name.go"
+  wait_for_guest_marker "dns-$name.configured" 35
+  before="$(stable_dns_counters)"
+  signal_guest "dns-$name.query"
   wait_for_guest_marker "dns-$name.receipt" 35
   after="$(stable_dns_counters)"
   for key in "${counters[@]}"; do

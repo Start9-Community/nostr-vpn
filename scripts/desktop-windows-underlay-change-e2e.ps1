@@ -570,6 +570,8 @@ function Run-DnsSettingCase {
   )
   Wait-ForFile "dns-$Name.go"
   Invoke-Nvpn (@("set", "--config", $Config) + $SetArguments)
+  Write-Marker "dns-$Name.configured" "ok"
+  Wait-ForFile "dns-$Name.query"
   Wait-ForCondition "real $Name DNS lookup through the active exit" 30000 {
     try {
       $lookupOk = if ($LookupName -eq $FixtureDnsName) {
