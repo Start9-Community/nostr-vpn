@@ -21,6 +21,41 @@ nvpn_restore_local_fips_lock_snapshot() {
   fi
 }
 
+nvpn_local_fips_remove_lock_atomically() {
+  local lock="$1" label="$2" expected_token="${3:-}" observed_token=""
+  local retired="${lock}.${label}.$$.$RANDOM"
+  if [[ ! -d "$lock" ]]; then
+    echo "local-FIPS workspace lock disappeared before atomic removal" >&2
+    return 1
+  fi
+  if [[ -n "$expected_token" ]] \
+    && { [[ ! -f "$lock/token" ]] \
+      || ! IFS= read -r observed_token <"$lock/token" \
+      || [[ "$observed_token" != "$expected_token" ]]; }
+  then
+    echo "local-FIPS workspace lock ownership changed before atomic removal" >&2
+    return 1
+  fi
+  if [[ -e "$retired" ]] || ! mv "$lock" "$retired"; then
+    echo "could not atomically retire local-FIPS workspace lock" >&2
+    return 1
+  fi
+  if [[ -n "$expected_token" ]]; then
+    observed_token=""
+    if [[ ! -f "$retired/token" ]] \
+      || ! IFS= read -r observed_token <"$retired/token" \
+      || [[ "$observed_token" != "$expected_token" ]]
+    then
+      echo "local-FIPS workspace lock ownership changed during atomic removal" >&2
+      return 2
+    fi
+  fi
+  if ! rm -rf "$retired" || [[ -e "$retired" ]]; then
+    echo "could not remove retired local-FIPS workspace lock" >&2
+    return 2
+  fi
+}
+
 nvpn_local_fips_lock_path() {
   local root="$1" lock_root key
   if ! root="$(cd "$root" && pwd -P)"; then
@@ -90,7 +125,7 @@ nvpn_local_fips_recover_stale_lock() {
       return 1
     fi
   fi
-  if ! rm -rf "$lock"; then
+  if ! nvpn_local_fips_remove_lock_atomically "$lock" recovery; then
     echo "could not remove stale local-FIPS workspace lock" >&2
     return 1
   fi
@@ -132,7 +167,7 @@ nvpn_acquire_local_fips_lock() {
     || ! printf '%s\n' "$token" >"$lock/token" \
     || ! cp -p "$root/Cargo.lock" "$lock/Cargo.lock.snapshot"
   then
-    if ! rm -rf "$lock" || [[ -e "$lock" ]]; then
+    if ! nvpn_local_fips_remove_lock_atomically "$lock" incomplete; then
       echo "could not remove incomplete local-FIPS workspace lock" >&2
     fi
     echo "could not initialize local-FIPS workspace lock" >&2
@@ -144,7 +179,7 @@ nvpn_acquire_local_fips_lock() {
     || ! printf '%s\n' "$release_manifest_sha" >"$lock/Cargo.toml.sha256" \
     || ! : >"$lock/ready"
   then
-    if ! rm -rf "$lock" || [[ -e "$lock" ]]; then
+    if ! nvpn_local_fips_remove_lock_atomically "$lock" incomplete; then
       echo "could not remove incomplete local-FIPS workspace lock" >&2
     fi
     echo "could not finalize local-FIPS workspace lock" >&2
@@ -163,6 +198,7 @@ nvpn_restore_local_fips_workspace() {
   local lock="${NVPN_LOCAL_FIPS_LOCK_DIR:-}" token="${NVPN_LOCAL_FIPS_LOCK_TOKEN:-}"
   local root="${NVPN_LOCAL_FIPS_ROOT:-}" owned_token=""
   local cleanup_failed=0 expected_manifest_sha="" observed_manifest_sha=""
+  local lock_removal_status=-1
   if [[ -n "$lock" ]]; then
     if [[ ! -d "$lock" ]]; then
       echo "owned local-FIPS workspace lock disappeared before cleanup" >&2
@@ -221,12 +257,18 @@ nvpn_restore_local_fips_workspace() {
     then
       echo "local-FIPS workspace lock ownership changed during cleanup" >&2
       cleanup_failed=1
-    elif ! rm -rf "$lock" || [[ -e "$lock" ]]; then
-      echo "could not remove owned local-FIPS workspace lock" >&2
-      cleanup_failed=1
+    else
+      lock_removal_status=0
+      nvpn_local_fips_remove_lock_atomically "$lock" release "$token" \
+        || lock_removal_status=$?
+      if [[ "$lock_removal_status" -ne 0 ]]; then
+        cleanup_failed=1
+      fi
     fi
   fi
-  if [[ "$cleanup_failed" -eq 0 ]]; then
+  if [[ "$lock_removal_status" -eq 0 || "$lock_removal_status" -eq 2 ]] \
+    || { [[ -z "$lock" ]] && [[ "$cleanup_failed" -eq 0 ]]; }
+  then
     NVPN_LOCAL_FIPS_LOCK_DIR=""
     NVPN_LOCAL_FIPS_LOCK_TOKEN=""
     NVPN_LOCAL_FIPS_LOCK_SNAPSHOT=""

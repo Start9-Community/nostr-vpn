@@ -10,6 +10,7 @@ import pyatspi
 
 target_pid = 0
 target_window = 0
+component_refind_attempts = 4
 
 
 def walk(node):
@@ -104,36 +105,62 @@ def focus_named_with_keyboard(name, max_tabs=80):
     )
 
 
+def try_component_focus(name):
+    last_error = None
+    for attempt in range(component_refind_attempts):
+        node = find_named(name, timeout=15 if attempt == 0 else 2)
+        try:
+            component = node.queryComponent()
+            if component is None:
+                raise RuntimeError("AT-SPI returned no Component object")
+            return bool(component.grabFocus())
+        except Exception as error:
+            last_error = error
+            if attempt + 1 == component_refind_attempts:
+                break
+            print(
+                f"retry AT-SPI Component for {name}: "
+                f"attempt={attempt + 1} error={error}",
+                file=sys.stderr,
+            )
+            pyatspi.Registry.pumpQueuedEvents()
+            time.sleep(0.1)
+    raise RuntimeError(
+        f"AT-SPI Component remained unavailable for {name} after "
+        f"{component_refind_attempts} fresh lookups: {last_error}"
+    )
+
+
 def invoke(name):
-    node = find_named(name)
-    component = node.queryComponent()
-    extents = component.getExtents(pyatspi.DESKTOP_COORDS)
-    if extents.width <= 0 or extents.height <= 0:
-        raise RuntimeError(f"{name} has no clickable visible bounds: {extents}")
     geometry = subprocess.run(
         ["xdotool", "getwindowgeometry", "--shell", str(target_window)],
         check=True,
         text=True,
         capture_output=True,
     ).stdout.strip().replace("\n", " ")
-    print(f"click {name}: extents={extents}; {geometry}", file=sys.stderr)
+    print(f"activate {name} through AT-SPI; {geometry}", file=sys.stderr)
     subprocess.run(
         ["xdotool", "windowfocus", "--sync", str(target_window)],
         check=True,
     )
     try:
-        if component.grabFocus():
+        if try_component_focus(name):
             subprocess.run(
                 ["xdotool", "key", "--clearmodifiers", "space"],
                 check=True,
             )
             time.sleep(0.25)
             return
-    except Exception:
-        # GTK4's X11 AT-SPI bridge can expose valid controls while rejecting
-        # Component.grabFocus. Traverse the real focus chain with keyboard
-        # events instead of trusting the bridge's broken (0, 0) bounds.
-        pass
+    except Exception as component_error:
+        # GTK4's X11 AT-SPI bridge can expose a named control while its
+        # Component object is stale or while rejecting Component.grabFocus.
+        # Traverse the verified accessibility focus chain after bounded fresh
+        # Component lookups instead of clicking unverified screen coordinates.
+        print(
+            f"AT-SPI Component focus unavailable for {name}: "
+            f"{component_error}",
+            file=sys.stderr,
+        )
     try:
         focus_named_with_keyboard(name)
         subprocess.run(
@@ -143,19 +170,9 @@ def invoke(name):
         time.sleep(0.25)
         return
     except Exception as keyboard_error:
-        print(f"keyboard activation failed for {name}: {keyboard_error}", file=sys.stderr)
-    subprocess.run(
-        [
-            "xdotool",
-            "mousemove",
-            str(extents.x + extents.width // 2),
-            str(extents.y + extents.height // 2),
-            "click",
-            "1",
-        ],
-        check=True,
-    )
-    time.sleep(0.25)
+        raise RuntimeError(
+            f"AT-SPI keyboard activation failed for {name}: {keyboard_error}"
+        ) from keyboard_error
 
 
 def set_text(name, value):

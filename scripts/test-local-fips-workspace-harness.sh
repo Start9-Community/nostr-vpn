@@ -24,7 +24,21 @@ FIPS_ROOT="$TMP_ROOT/fips"
 LOCK_ROOT="$TMP_ROOT/locks"
 ACTIVE="$TMP_ROOT/active"
 READY="$TMP_ROOT/stale-ready"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+releasing_pid=""
+new_owner_pid=""
+
+cleanup() {
+  local status="$?" pid
+  trap - EXIT INT TERM
+  for pid in "$releasing_pid" "$new_owner_pid"; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  rm -rf "$TMP_ROOT"
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
 
 mkdir -p "$APP_ROOT" "$LOCK_ROOT"
 for crate in fips-core fips-endpoint fips-identity; do
@@ -69,6 +83,84 @@ second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
 cmp -s "$APP_ROOT/Cargo.toml" "$TMP_ROOT/Cargo.toml.expected"
+cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
+[[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+
+RELEASE_READY="$TMP_ROOT/release-ready"
+RELEASE_CONTINUE="$TMP_ROOT/release-continue"
+RELEASE_DONE="$TMP_ROOT/release-done"
+NEW_OWNER_READY="$TMP_ROOT/new-owner-ready"
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" LOCK_ROOT="$LOCK_ROOT" \
+  RELEASE_READY="$RELEASE_READY" RELEASE_CONTINUE="$RELEASE_CONTINUE" \
+  RELEASE_DONE="$RELEASE_DONE" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_acquire_local_fips_lock "$APP_ROOT"
+    NVPN_LOCAL_FIPS_ROOT="$APP_ROOT"
+    owned_lock="$NVPN_LOCAL_FIPS_LOCK_DIR"
+    printf "# retiring owner\n" >"$APP_ROOT/Cargo.lock"
+    rm() {
+      if [[ "$1" == "-rf" ]]; then
+        case "${2:-}" in
+          "$owned_lock")
+            command rm -rf "$owned_lock"
+            : >"$RELEASE_READY"
+            while [[ ! -f "$RELEASE_CONTINUE" ]]; do sleep 0.01; done
+            command rm -rf "$owned_lock"
+            return
+            ;;
+          "$owned_lock".release.*)
+            : >"$RELEASE_READY"
+            while [[ ! -f "$RELEASE_CONTINUE" ]]; do sleep 0.01; done
+            command rm -rf "${2}"
+            return
+            ;;
+        esac
+      fi
+      command rm "$@"
+    }
+    nvpn_restore_local_fips_workspace
+    : >"$RELEASE_DONE"
+  ' &
+releasing_pid=$!
+for _ in $(seq 1 500); do
+  [[ -f "$RELEASE_READY" ]] && break
+  sleep 0.01
+done
+[[ -f "$RELEASE_READY" ]]
+
+env \
+  LIB="$LIB" APP_ROOT="$APP_ROOT" LOCK_ROOT="$LOCK_ROOT" \
+  RELEASE_DONE="$RELEASE_DONE" NEW_OWNER_READY="$NEW_OWNER_READY" \
+  bash -c '
+    set -euo pipefail
+    source "$LIB"
+    export NVPN_LOCAL_FIPS_LOCK_ROOT="$LOCK_ROOT"
+    nvpn_acquire_local_fips_lock "$APP_ROOT"
+    NVPN_LOCAL_FIPS_ROOT="$APP_ROOT"
+    : >"$NEW_OWNER_READY"
+    while [[ ! -f "$RELEASE_DONE" ]]; do sleep 0.01; done
+    [[ -d "$NVPN_LOCAL_FIPS_LOCK_DIR" ]]
+    [[ "$(<"$NVPN_LOCAL_FIPS_LOCK_DIR/token")" == "$NVPN_LOCAL_FIPS_LOCK_TOKEN" ]]
+    nvpn_restore_local_fips_workspace
+  ' &
+new_owner_pid=$!
+for _ in $(seq 1 500); do
+  [[ -f "$NEW_OWNER_READY" ]] && break
+  sleep 0.01
+done
+[[ -f "$NEW_OWNER_READY" ]]
+: >"$RELEASE_CONTINUE"
+wait_status=0
+wait "$releasing_pid" || wait_status=$?
+releasing_pid=""
+[[ "$wait_status" -eq 0 ]] || exit "$wait_status"
+wait "$new_owner_pid" || wait_status=$?
+new_owner_pid=""
+[[ "$wait_status" -eq 0 ]] || exit "$wait_status"
 cmp -s "$APP_ROOT/Cargo.lock" "$TMP_ROOT/Cargo.lock.expected"
 [[ -z "$(find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 
@@ -143,8 +235,10 @@ env \
     NVPN_LOCAL_FIPS_ROOT="$APP_ROOT"
     owned_lock="$NVPN_LOCAL_FIPS_LOCK_DIR"
     rm() {
-      if [[ "$1" == "-rf" && "${2:-}" == "$owned_lock" ]]; then
-        return 73
+      if [[ "$1" == "-rf" ]]; then
+        case "${2:-}" in
+          "$owned_lock".release.*) return 73 ;;
+        esac
       fi
       command rm "$@"
     }
@@ -152,9 +246,15 @@ env \
       echo "local-FIPS cleanup ignored lock removal failure" >&2
       exit 1
     fi
-    [[ -d "$owned_lock" ]]
+    [[ ! -e "$owned_lock" ]]
+    retired_lock="$(
+      find "$LOCK_ROOT" -mindepth 1 -maxdepth 1 -type d \
+        -name "$(basename "$owned_lock").release.*" -print -quit
+    )"
+    [[ -n "$retired_lock" && -d "$retired_lock" ]]
+    [[ -z "${NVPN_LOCAL_FIPS_LOCK_DIR:-}" ]]
     unset -f rm
-    command rm -rf "$owned_lock"
+    command rm -rf "$retired_lock"
   '
 
 env \

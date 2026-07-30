@@ -13,6 +13,15 @@ WINDOWS_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-underlay-peer-import.XXXXXX")"
 
+# Synthetic repositories below must not inherit the enclosing release gate's
+# exact local-FIPS receipt. Each fixture establishes any receipt it needs.
+unset \
+  NVPN_LOCAL_FIPS_SESSION_CARGO_LOCK_SHA256 \
+  NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256 \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_HEAD \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_PATH_SHA256 \
+  NVPN_LOCAL_FIPS_SESSION_FIPS_TREE
+
 cleanup() {
   rm -rf "$TMP_ROOT"
 }
