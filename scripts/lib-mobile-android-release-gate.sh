@@ -796,7 +796,12 @@ android_release_assert_native_tunnel_unchanged() {
 }
 
 android_release_accept_single_native_tunnel_refresh() {
-  local label="${1:-network refresh}" before expected count
+  local label="${1:-network refresh}" expected_pid="${2:-}"
+  local before expected count
+  [[ "$expected_pid" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Android Release $label has no pinned canonical app process" >&2
+    return 1
+  }
   before="$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT"
   if [[ ! "$before" =~ ^[1-9][0-9]*$ ]]; then
     echo "Android Release $label has no pinned native-tunnel start count" >&2
@@ -812,7 +817,11 @@ android_release_accept_single_native_tunnel_refresh() {
     return 1
   fi
   ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT="$count"
-  assert_single_android_app_process || return 1
+  [[ "$(android_app_pid)" == "$expected_pid" ]] \
+    && assert_single_android_app_process || {
+      echo "Android Release $label changed the canonical app process" >&2
+      return 1
+    }
   echo "Android Release $label performed one in-process native-tunnel refresh ($before->$count)"
 }
 
@@ -948,6 +957,7 @@ run_android_release_rapid_start_stop_gate() {
 }
 
 run_android_release_blackbox_cycle() {
+  local direct_transition_pid
   android_release_ensure_network_ui || return 1
   android_release_disconnect_ui || return 1
   run_android_release_direct_network_probe before-connect 0 || return 1
@@ -966,11 +976,14 @@ run_android_release_blackbox_cycle() {
   android_release_assert_native_tunnel_unchanged \
     before-direct-selection || return 1
   if truthy "$SWITCH_TO_DIRECT_WHILE_CONNECTED"; then
+    direct_transition_pid="$(android_app_pid)"
+    [[ -n "$direct_transition_pid" ]] \
+      && assert_single_android_app_process || return 1
     select_android_direct_ui || return 1
     wait_until "$VPN_START_WAIT_SECS" vpn_active || return 1
     run_android_release_direct_network_probe direct-while-connected 1 || return 1
     android_release_accept_single_native_tunnel_refresh \
-      connected-direct || return 1
+      connected-direct "$direct_transition_pid" || return 1
   fi
   android_release_disconnect_ui || return 1
   android_release_wait_stable_quiescence \

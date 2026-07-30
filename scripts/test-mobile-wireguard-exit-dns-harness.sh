@@ -328,6 +328,8 @@ grep -Fq 'Self.endpointHost(from: endpoint)' "$ios_packet_tunnel" \
   || { echo "iOS packet tunnel does not parse bracketed WireGuard endpoints" >&2; exit 1; }
 grep -Fq 'endpoint.hasPrefix("websocket:")' "$ios_packet_tunnel" \
   && grep -Fq 'URLComponents(string: endpoint)' "$ios_packet_tunnel" \
+  && grep -Fq 'host.hasPrefix("["), host.hasSuffix("]")' "$ios_packet_tunnel" \
+  && grep -Fq 'String(host.dropFirst().dropLast())' "$ios_packet_tunnel" \
   || { echo "iOS packet tunnel does not lower WebSocket hints to a valid remote host" >&2; exit 1; }
 grep -Fq 'packetFlow.readPackets' "$ios_packet_flow_bridge" \
   && grep -Fq 'packetFlow.writePackets' "$ios_packet_flow_bridge" \
@@ -433,7 +435,9 @@ grep -Fq 'NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1' "$gate" \
   || { echo "Android physical DNS cases do not require the shipped UI driver" >&2; exit 1; }
 grep -Fq 'android_release_accept_single_native_tunnel_refresh' "$android_release_gate" \
   && grep -Fq 'expected=$((before + 1))' "$android_release_gate" \
-  && grep -Fq 'assert_single_android_app_process || return 1' "$android_release_gate" \
+  && grep -Fq 'direct_transition_pid="$(android_app_pid)"' "$android_release_gate" \
+  && grep -Fq '[[ "$(android_app_pid)" == "$expected_pid" ]]' "$android_release_gate" \
+  && grep -Fq 'connected-direct "$direct_transition_pid"' "$android_release_gate" \
   || {
     echo "Android WireGuard-to-Direct transition does not require exactly one in-process tunnel refresh" >&2
     exit 1

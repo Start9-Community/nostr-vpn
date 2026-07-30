@@ -673,6 +673,9 @@ private struct MobileTunnelConfig {
            let host = components.host?.trimmingCharacters(in: .whitespacesAndNewlines),
            !host.isEmpty
         {
+            if host.hasPrefix("["), host.hasSuffix("]") {
+                return String(host.dropFirst().dropLast())
+            }
             return host
         }
         if endpoint.hasPrefix("["),

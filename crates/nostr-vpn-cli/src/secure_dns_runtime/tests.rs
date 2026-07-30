@@ -74,6 +74,18 @@ fn macos_secure_dns_uses_system_configuration_default_routing() {
     assert!(!magic_dns_resolver.contains("domain .\n"));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_failed_store_install_keeps_the_stub_for_owned_or_unknown_cleanup() {
+    let absent: std::io::Result<bool> = Ok(false);
+    let owned: std::io::Result<bool> = Ok(true);
+    let unknown: std::io::Result<bool> = Err(std::io::Error::other("dynamic store unavailable"));
+
+    assert!(!macos_secure_dns_store_cleanup_may_be_pending(&absent));
+    assert!(macos_secure_dns_store_cleanup_may_be_pending(&owned));
+    assert!(macos_secure_dns_store_cleanup_may_be_pending(&unknown));
+}
+
 #[test]
 fn windows_policy_forces_all_dns_to_local_authenticated_stub() {
     let script = windows_secure_dns_install_script(42);

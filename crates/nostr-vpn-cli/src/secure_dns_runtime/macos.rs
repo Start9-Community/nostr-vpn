@@ -221,6 +221,11 @@ pub(super) fn remove_owned_macos_secure_dns_store() -> std::io::Result<bool> {
     }
 }
 
+pub(super) fn macos_secure_dns_store_is_owned() -> std::io::Result<bool> {
+    Ok(read_macos_secure_dns_store()?
+        .is_some_and(|contents| macos_secure_dns_store_contents_owned(&contents)))
+}
+
 fn remove_macos_secure_dns_store() -> std::io::Result<()> {
     let output = run_scutil(&format!("remove {MACOS_SECURE_DNS_STORE_KEY}\n"))?;
     if output.trim().is_empty() {

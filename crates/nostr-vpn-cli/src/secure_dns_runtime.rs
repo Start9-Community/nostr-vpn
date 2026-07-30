@@ -45,8 +45,9 @@ mod macos;
 pub(crate) use macos::cleanup_owned_macos_secure_dns_state;
 #[cfg(target_os = "macos")]
 use macos::{
-    install_macos_secure_dns_store, macos_resolver_configs, remove_owned_macos_resolver_file,
-    remove_owned_macos_secure_dns_store, write_macos_resolver_atomically,
+    install_macos_secure_dns_store, macos_resolver_configs, macos_secure_dns_store_is_owned,
+    remove_owned_macos_resolver_file, remove_owned_macos_secure_dns_store,
+    write_macos_resolver_atomically,
 };
 
 #[cfg(target_os = "macos")]
@@ -476,6 +477,14 @@ impl SystemDnsInstallFailure {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_secure_dns_store_cleanup_may_be_pending(ownership: &std::io::Result<bool>) -> bool {
+    match ownership {
+        Ok(owned) => *owned,
+        Err(_) => true,
+    }
+}
+
 impl SystemDnsGuard {
     fn install(
         cleanup_intent: SystemDnsCleanupIntent,
@@ -556,6 +565,7 @@ impl SystemDnsGuard {
                 resolver_paths.push(resolver_path);
             }
             if let Err(error) = install_macos_secure_dns_store() {
+                let install_error = anyhow!(error).context("failed to install macOS secure DNS");
                 let mut rollback_failures = Vec::new();
                 for installed_path in &resolver_paths {
                     if let Err(rollback_error) = remove_owned_macos_resolver_file(installed_path) {
@@ -565,22 +575,32 @@ impl SystemDnsGuard {
                         ));
                     }
                 }
-                if !rollback_failures.is_empty() {
+                let store_ownership = macos_secure_dns_store_is_owned();
+                let secure_dns_store =
+                    macos_secure_dns_store_cleanup_may_be_pending(&store_ownership);
+                match store_ownership {
+                    Ok(true) => rollback_failures
+                        .push("owned macOS secure DNS dynamic-store state remains".to_string()),
+                    Ok(false) => {}
+                    Err(ownership_error) => rollback_failures.push(format!(
+                        "could not verify macOS secure DNS dynamic-store cleanup: \
+                         {ownership_error}"
+                    )),
+                }
+                if secure_dns_store || !rollback_failures.is_empty() {
                     return Err(SystemDnsInstallFailure::cleanup_pending(
                         anyhow!(
-                            "failed to install macOS secure DNS: {error}; rollback failed: {}",
+                            "{install_error:#}; rollback incomplete: {}",
                             rollback_failures.join("; ")
                         ),
                         Self {
                             resolver_paths,
-                            secure_dns_store: false,
+                            secure_dns_store,
                             active: true,
                         },
                     ));
                 }
-                return Err(SystemDnsInstallFailure::rolled_back(
-                    anyhow!(error).context("failed to install macOS secure DNS"),
-                ));
+                return Err(SystemDnsInstallFailure::rolled_back(install_error));
             }
             return Ok(Self {
                 resolver_paths,
