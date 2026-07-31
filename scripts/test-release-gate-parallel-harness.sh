@@ -758,8 +758,8 @@ grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_PORT="$port_base"' <<<"$mobile_exit_gate_body
 if grep -Fq 'signed-debug' "$release_gate"; then
   fail "signed Release join lane can select a debug Android artifact"
 fi
-grep -Fq 'NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET=YES' "$release_gate" \
-  || fail "signed Release join lane does not opt into its explicit physical reset"
+grep -Fq 'NVPN_RELEASE_JOIN_ALLOW_ANDROID_DATA_CLEAR=YES' "$release_gate" \
+  || fail "signed Release join lane does not opt into Android app-data clearing"
 grep -Fq 'NVPN_IDLE_CPU_GATE=0' "$release_gate" \
   || fail "mobile WireGuard exit lane repeats the dedicated physical idle CPU samples"
 grep -Fq 'NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=0' "$release_gate" \

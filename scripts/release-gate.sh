@@ -1789,7 +1789,7 @@ run_mobile_join_e2e_gate() {
   release_gate_run_with_timeout \
     "Signed Release public-UI cross-platform join e2e" \
     "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
-    env NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET=YES \
+    env NVPN_RELEASE_JOIN_ALLOW_ANDROID_DATA_CLEAR=YES \
     NVPN_RELEASE_JOIN_DESKTOP_MOBILE=1 \
     NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1 \
     NVPN_RELEASE_JOIN_ANDROID_APK="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk" \

@@ -164,19 +164,31 @@ if "run-as" in artifacts:
 
 install_ios = artifacts[
     artifacts.index("release_join_install_ios_release()"):
-    artifacts.index("release_join_reset_ios_state()")
+    artifacts.index("release_join_restart_ios_in_place()")
 ]
-reset_ios = artifacts[
-    artifacts.index("release_join_reset_ios_state()"):
+restart_ios = artifacts[
+    artifacts.index("release_join_restart_ios_in_place()"):
     artifacts.index("release_join_assert_one_ios_process()")
 ]
-if "device uninstall app" in install_ios or "device uninstall app" in reset_ios:
+if "device uninstall app" in install_ios or "device uninstall app" in restart_ios:
     raise SystemExit("iOS join phases revoke the already-approved VPN manager")
 if "device install app" not in install_ios:
     raise SystemExit("iOS join preparation no longer installs the exact artifact")
 for required in ("--terminate-existing", "--no-activate"):
-    if required not in reset_ios:
-        raise SystemExit(f"iOS join reset does not preserve state via {required}")
+    if required not in restart_ios:
+        raise SystemExit(f"iOS join restart does not preserve state via {required}")
+for forbidden in (
+    "NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET",
+    "NVPN_RELEASE_JOIN_ALLOW_ANDROID_DATA_CLEAR",
+    "destructive",
+    "reset",
+):
+    if forbidden in restart_ios:
+        raise SystemExit(
+            f"Preserved iOS in-place restart is mislabeled as {forbidden}"
+        )
+if "fresh network ID" not in restart_ios:
+    raise SystemExit("iOS in-place restart does not document fresh-network isolation")
 
 for forbidden in (".launchArguments =", ".launchEnvironment ="):
     if forbidden in ios_test:
@@ -199,6 +211,27 @@ for required in (
 ):
     if required not in ios_test:
         raise SystemExit(f"Release join XCTest does not clear permission UI: {required}")
+prompt_handler = ios_test.split(
+    "private func dismissSystemPromptsIfPresent() throws", 1
+)[1].split("private func emit", 1)[0]
+for required in (
+    'springboard.staticTexts["Enter iPhone Passcode"].exists',
+    'emit("NVPN_RELEASE_JOIN_VPN_APPROVAL_PASSCODE_REQUIRED=1")',
+    "throw GateError.vpnApprovalPasscodeRequired",
+    "springboard.state == .runningForeground",
+    "app.state != .runningForeground",
+    'emit("NVPN_RELEASE_JOIN_SYSTEM_UI_COVERING_APP=1")',
+    "throw GateError.systemUICoveringApp",
+    "springboardCoverSince == nil, let clearSince",
+):
+    if required not in prompt_handler:
+        raise SystemExit(
+            f"Release join XCTest can misclassify blocking Apple UI: {required}"
+        )
+if "allow.tap()" not in prompt_handler or "continue" not in prompt_handler:
+    raise SystemExit("Release join XCTest reuses the disappearing Apple Allow hierarchy")
+if ios_test.count("try dismissSystemPromptsIfPresent()") != 4:
+    raise SystemExit("Release join XCTest does not propagate every system-prompt failure")
 for required in (
     "ShippedUIInteraction.reveal(nameField, byTapping: create)",
     "let retained = ShippedUIInteraction.replaceText(field, with: value, in: app)",
@@ -487,8 +520,13 @@ for required in (
         raise SystemExit(
             f"macOS/iPhone gate does not consume iPhone-admin relaunch proof: {required}"
         )
-if "NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET" not in artifacts:
-    raise SystemExit("Physical app-state reset lacks an explicit destructive opt-in")
+android_clear = artifacts.split(
+    "release_join_reset_android_state()", 1
+)[1].split("release_join_prepare_android_release()", 1)[0]
+if "NVPN_RELEASE_JOIN_ALLOW_ANDROID_DATA_CLEAR" not in android_clear:
+    raise SystemExit("Android app-data clearing lacks an explicit destructive opt-in")
+if "NVPN_RELEASE_JOIN_ALLOW_DEVICE_RESET" in artifacts:
+    raise SystemExit("Ambiguous cross-platform device-reset flag remains")
 
 macos_pixel_admin_phase = desktop.split(
     "# Physical Android admin -> macOS joiner.", 1
@@ -743,7 +781,7 @@ for required in (
     if required not in desktop:
         raise SystemExit(f"Host-built macOS artifact path is missing {required}")
 for required in (
-    "release_join_reset_ios_state",
+    "release_join_restart_ios_in_place",
     "release_join_reuse_artifacts",
     "testManualJoinAndRequireRosterCompletion",
     "testManualAdminAddRequiresRosterProgress",
@@ -767,7 +805,7 @@ desktop_arm = desktop.index(
 )
 desktop_first_reset = min(
     desktop.index("release_join_reset_android_state", desktop_arm),
-    desktop.index("release_join_reset_ios_state", desktop_arm),
+    desktop.index("release_join_restart_ios_in_place", desktop_arm),
 )
 if not desktop_reuse_required < desktop_validation < desktop_arm < desktop_first_reset:
     raise SystemExit(

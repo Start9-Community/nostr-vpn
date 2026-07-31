@@ -494,7 +494,7 @@ release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_ID" \
 
 # macOS admin -> physical iPhone joiner. XCTest only drives the shipped
 # accessibility tree; the app receives no launch arguments or environment.
-release_join_reset_ios_state
+release_join_restart_ios_in_place
 desktop_ios_admin_log="$RESULT_DIR/macos/desktop-ios-admin.log"
 remote create-admin "ReleaseMacIphoneAdmin" >"$desktop_ios_admin_log" 2>&1
 DESKTOP_IOS_ADMIN_ID="$(
@@ -557,7 +557,7 @@ remote verify "$IOS_JOINER_ID" \
   >"$RESULT_DIR/macos/desktop-ios-admin-verify.log"
 
 # Physical iPhone admin -> macOS joiner.
-release_join_reset_ios_state
+release_join_restart_ios_in_place
 ios_create_admin "Release iPhone macOS admin"
 desktop_ios_join_log="$RESULT_DIR/macos/iphone-admin-desktop-join.log"
 remote manual-join \

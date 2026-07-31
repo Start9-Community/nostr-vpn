@@ -19,7 +19,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         XCTAssertTrue(app.launchArguments.isEmpty, "Release join gate must not pass app arguments")
         XCTAssertTrue(app.launchEnvironment.isEmpty, "Release join gate must not pass app environment")
         app.launch()
-        dismissSystemPromptsIfPresent()
+        try dismissSystemPromptsIfPresent()
     }
 
     func testCreateAdminNetworkAndReportPublicValues() throws {
@@ -65,7 +65,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             ),
             "Join QR disappeared before the exact admin roster was visible"
         )
-        requireAcceptedRoster(
+        try requireAcceptedRoster(
             expectedAdmin,
             relaunch: true,
             failureMessage: "QR join did not retain the admin's signed roster"
@@ -118,7 +118,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         replaceText(element("manual-join-network-id"), with: network)
         let submit = scrollTo("manual-join-submit")
         submit.tap()
-        dismissSystemPromptsIfPresent()
+        try dismissSystemPromptsIfPresent()
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
 
         XCTAssertTrue(
@@ -128,7 +128,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Manual join did not leave the first-run join screen"
         )
         openDevicesTab()
-        requireAcceptedRoster(
+        try requireAcceptedRoster(
             admin,
             relaunch: true,
             failureMessage: "Manual join did not receive and retain the admin's signed roster"
@@ -156,7 +156,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Manual admin add did not produce an exact roster row"
         )
         XCTAssertGreaterThanOrEqual(rosterParticipantCount(), before + 1)
-        requireAcceptedRoster(
+        try requireAcceptedRoster(
             joiner,
             relaunch: true,
             failureMessage: "Manual admin add did not retain the joining device's signed roster"
@@ -262,7 +262,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             ShippedUIInteraction.reveal(nameField, byTapping: create),
             "Shipped Create Network control did not reveal the network-name field"
         )
-        dismissSystemPromptsIfPresent()
+        try dismissSystemPromptsIfPresent()
         app.activate()
         replaceText(element("network-create-name"), with: name)
         scrollTo("network-create-submit").tap()
@@ -370,7 +370,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         _ participant: String,
         relaunch: Bool,
         failureMessage: String
-    ) {
+    ) throws {
         let identifier = "roster-participant-accepted-\(participant)"
         XCTAssertTrue(
             element(identifier).waitForExistence(timeout: deliveryTimeout),
@@ -381,7 +381,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         }
         app.terminate()
         app.launch()
-        dismissSystemPromptsIfPresent()
+        try dismissSystemPromptsIfPresent()
         openDevicesTab()
         XCTAssertTrue(
             element(identifier).waitForExistence(timeout: deliveryTimeout),
@@ -436,33 +436,62 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         }
     }
 
-    private func dismissSystemPromptsIfPresent() {
+    private func dismissSystemPromptsIfPresent() throws {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let deadline = Date().addingTimeInterval(5)
         var clearSince: Date?
+        var springboardCoverSince: Date?
         repeat {
+            if springboard.staticTexts["Enter iPhone Passcode"].exists {
+                emit("NVPN_RELEASE_JOIN_VPN_APPROVAL_PASSCODE_REQUIRED=1")
+                throw GateError.vpnApprovalPasscodeRequired
+            }
+
             var handledPrompt = false
             let allow = springboard.alerts.buttons["Allow"]
             if allow.exists, allow.isHittable {
                 allow.tap()
-                handledPrompt = true
+                // The VPN alert can be replaced by Apple's passcode sheet.
+                // Re-query SpringBoard on the next cycle instead of treating
+                // the disappearing Allow hierarchy as successful dismissal.
+                Thread.sleep(forTimeInterval: 0.25)
+                clearSince = nil
+                springboardCoverSince = nil
+                continue
             }
             let disclosure = app.navigationBars["VPN Data Use"].buttons["Continue"]
             if disclosure.exists, disclosure.isHittable {
                 disclosure.tap()
                 handledPrompt = true
             }
+            if springboard.state == .runningForeground,
+               app.state != .runningForeground
+            {
+                if let springboardCoverSince {
+                    if Date().timeIntervalSince(springboardCoverSince) >= 0.5 {
+                        emit("NVPN_RELEASE_JOIN_SYSTEM_UI_COVERING_APP=1")
+                        throw GateError.systemUICoveringApp
+                    }
+                } else {
+                    springboardCoverSince = Date()
+                }
+                clearSince = nil
+            } else {
+                springboardCoverSince = nil
+            }
             if handledPrompt {
                 clearSince = nil
-            } else if let clearSince {
+            } else if springboardCoverSince == nil, let clearSince {
                 if Date().timeIntervalSince(clearSince) >= 0.5 {
                     return
                 }
-            } else {
+            } else if springboardCoverSince == nil {
                 clearSince = Date()
             }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline
+        emit("NVPN_RELEASE_JOIN_SYSTEM_PROMPT_TIMEOUT=1")
+        throw GateError.systemPromptTimeout
     }
 
     private func emit(_ marker: String) {
@@ -477,6 +506,9 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     private enum GateError: LocalizedError {
         case missingEnvironment(String)
         case invalidPublicValue(String)
+        case vpnApprovalPasscodeRequired
+        case systemUICoveringApp
+        case systemPromptTimeout
 
         var errorDescription: String? {
             switch self {
@@ -484,6 +516,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
                 return "Release join gate did not provide \(name)"
             case .invalidPublicValue(let name):
                 return "Release UI did not expose a valid public value for \(name)"
+            case .vpnApprovalPasscodeRequired:
+                return "Enter the iPhone passcode once to approve the VPN configuration."
+            case .systemUICoveringApp:
+                return "Apple system UI still covers the app; unlock or finish VPN approval."
+            case .systemPromptTimeout:
+                return "Apple system prompts did not clear before the Release join phase."
             }
         }
     }

@@ -154,7 +154,7 @@ assert_delivery_deadline() {
 
 phase_ios_admin_android_qr() {
   local scan_log submitted completed
-  release_join_reset_ios_state
+  release_join_restart_ios_in_place
   release_join_reset_android_state
   ios_create_admin "Release QR iPhone admin"
   release_join_android_show_qr
@@ -184,7 +184,7 @@ phase_ios_admin_android_qr() {
 phase_android_admin_ios_qr() {
   local join_log submitted completed ios_qr_content_width_bps
   local ios_qr_relaunch_admin
-  release_join_reset_ios_state
+  release_join_restart_ios_in_place
   release_join_reset_android_state
   release_join_android_create_admin
   join_log="$(ios_log android-admin-ios-qr)"
@@ -232,7 +232,7 @@ phase_android_admin_ios_qr() {
 
 phase_ios_admin_android_manual() {
   local admin_log ios_admin_relaunch_joiner submitted completed
-  release_join_reset_ios_state
+  release_join_restart_ios_in_place
   release_join_reset_android_state
   ios_create_admin "Release manual iPhone admin"
   release_join_android_manual_submit \
@@ -262,7 +262,7 @@ phase_ios_admin_android_manual() {
 
 phase_android_admin_ios_manual() {
   local join_log ios_joiner_relaunch_admin android_admin_log submitted completed
-  release_join_reset_ios_state
+  release_join_restart_ios_in_place
   release_join_reset_android_state
   release_join_android_create_admin
   join_log="$(ios_log android-admin-ios-manual)"
