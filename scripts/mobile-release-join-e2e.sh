@@ -86,6 +86,7 @@ export NVPN_ANDROID_SERIAL="$ANDROID_SERIAL_SELECTED"
 export IOS_DEVICE RESULT_DIR PRIVATE_DIR
 export RELEASE_JOIN_UI_WAIT_SECS RELEASE_JOIN_DELIVERY_WAIT_SECS
 export RELEASE_JOIN_CAMERA_WAIT_SECS
+RELEASE_JOIN_IOS_NETWORK_IDS=()
 
 cleanup() {
   local status=$?
@@ -133,6 +134,12 @@ ios_create_admin() {
     || fail "iOS Release UI did not report a valid admin identity"
   [[ -n "$RELEASE_JOIN_IOS_NETWORK_ID" ]] \
     || fail "iOS Release UI did not report a network identity"
+  local existing
+  for existing in "${RELEASE_JOIN_IOS_NETWORK_IDS[@]}"; do
+    [[ "$existing" != "$RELEASE_JOIN_IOS_NETWORK_ID" ]] \
+      || fail "iOS join phase reused a retained network"
+  done
+  RELEASE_JOIN_IOS_NETWORK_IDS+=("$RELEASE_JOIN_IOS_NETWORK_ID")
 }
 
 assert_delivery_deadline() {

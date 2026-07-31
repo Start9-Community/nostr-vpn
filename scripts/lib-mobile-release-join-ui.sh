@@ -10,6 +10,7 @@ RELEASE_JOIN_IOS_TEST_LOG=""
 RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
 RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
+RELEASE_JOIN_ANDROID_NETWORK_IDS=()
 
 release_join_now_ms() {
   python3 - <<'PY'
@@ -150,6 +151,14 @@ release_join_android_create_admin() {
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_ADMIN_ID"
   [[ -n "$RELEASE_JOIN_ANDROID_NETWORK_ID" ]]
+  local existing
+  for existing in "${RELEASE_JOIN_ANDROID_NETWORK_IDS[@]}"; do
+    [[ "$existing" != "$RELEASE_JOIN_ANDROID_NETWORK_ID" ]] || {
+      echo "Android join phase reused a retained network" >&2
+      return 1
+    }
+  done
+  RELEASE_JOIN_ANDROID_NETWORK_IDS+=("$RELEASE_JOIN_ANDROID_NETWORK_ID")
   export RELEASE_JOIN_ANDROID_ADMIN_ID RELEASE_JOIN_ANDROID_NETWORK_ID
 }
 

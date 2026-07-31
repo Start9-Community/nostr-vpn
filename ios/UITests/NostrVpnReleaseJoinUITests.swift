@@ -79,6 +79,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         openLinkDevice()
         let before = rosterParticipantCount()
+        XCTAssertEqual(before, 0, "New admin network already contained a roster participant")
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))
         scan.tap()
@@ -140,6 +141,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let joiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         openLinkDevice()
         let before = rosterParticipantCount()
+        XCTAssertEqual(before, 0, "New admin network already contained a roster participant")
         replaceText(scrollTo("manual-admin-joiner-id"), with: joiner)
         let alias = element("manual-admin-alias")
         if alias.exists {
@@ -436,14 +438,27 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     private func dismissSystemPromptsIfPresent() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let deadline = Date().addingTimeInterval(5)
+        var clearSince: Date?
         repeat {
+            var handledPrompt = false
             let allow = springboard.alerts.buttons["Allow"]
             if allow.exists, allow.isHittable {
                 allow.tap()
+                handledPrompt = true
             }
             let disclosure = app.navigationBars["VPN Data Use"].buttons["Continue"]
             if disclosure.exists, disclosure.isHittable {
                 disclosure.tap()
+                handledPrompt = true
+            }
+            if handledPrompt {
+                clearSince = nil
+            } else if let clearSince {
+                if Date().timeIntervalSince(clearSince) >= 0.5 {
+                    return
+                }
+            } else {
+                clearSince = Date()
             }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline
