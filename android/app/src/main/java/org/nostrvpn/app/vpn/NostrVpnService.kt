@@ -49,7 +49,9 @@ class NostrVpnService : VpnService() {
     private var underlyingNetworkFingerprint: String? = null
     private var retryUnderlyingNetworkFingerprint: String? = null
     private var underlyingNetworkRetryCount = 0
+    private var pendingUnderlyingNetworkRefreshDelayMillis: Long? = null
     private val refreshUnderlyingNetworksRunnable = Runnable {
+        pendingUnderlyingNetworkRefreshDelayMillis = null
         refreshUnderlyingNetworks(resetRetryBudget = true)
     }
     private val refreshNativeNetworkPathsRunnable = Runnable {
@@ -479,7 +481,7 @@ class NostrVpnService : VpnService() {
         val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                scheduleUnderlyingNetworkRefresh()
+                scheduleUnderlyingNetworkRefresh(immediate = true)
             }
 
             override fun onLost(network: Network) {
@@ -497,7 +499,11 @@ class NostrVpnService : VpnService() {
                 network: Network,
                 linkProperties: LinkProperties,
             ) {
-                scheduleUnderlyingNetworkRefresh()
+                scheduleUnderlyingNetworkRefresh(
+                    immediate = linkProperties.routes.any { it.isDefaultRoute } &&
+                        connectivity.getNetworkCapabilities(network)
+                            ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) != true,
+                )
             }
         }
         try {
@@ -566,12 +572,25 @@ class NostrVpnService : VpnService() {
         }
     }
 
-    private fun scheduleUnderlyingNetworkRefresh() {
-        underlyingNetworkHandler.removeCallbacks(refreshUnderlyingNetworksRunnable)
-        underlyingNetworkHandler.postDelayed(
-            refreshUnderlyingNetworksRunnable,
-            UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS,
-        )
+    private fun scheduleUnderlyingNetworkRefresh(immediate: Boolean = false) {
+        val pendingDelayMillis = pendingUnderlyingNetworkRefreshDelayMillis
+        val delayMillis = AndroidVpnRoutingPolicy.nextUnderlayRefreshDelay(
+            pendingDelay = pendingDelayMillis,
+            immediate = immediate,
+            delayedRefresh = UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS,
+        ) ?: return
+        if (pendingUnderlyingNetworkRefreshDelayMillis != null) {
+            underlyingNetworkHandler.removeCallbacks(refreshUnderlyingNetworksRunnable)
+        }
+        pendingUnderlyingNetworkRefreshDelayMillis = delayMillis
+        if (delayMillis == 0L) {
+            underlyingNetworkHandler.post(refreshUnderlyingNetworksRunnable)
+        } else {
+            underlyingNetworkHandler.postDelayed(
+                refreshUnderlyingNetworksRunnable,
+                delayMillis,
+            )
+        }
     }
 
     private fun refreshUnderlyingNetworks(resetRetryBudget: Boolean) {
@@ -581,7 +600,7 @@ class NostrVpnService : VpnService() {
         val candidates = currentUnderlyingNetworks()
         val wireGuardNetwork =
             if (wireGuardSocketFd >= 0) {
-                orderedValidatedUnderlyingNetworks(candidates).firstOrNull()
+                preferredWireGuardUnderlyingNetwork(candidates)
             } else {
                 null
             }
@@ -681,6 +700,7 @@ class NostrVpnService : VpnService() {
     }
 
     private fun resetUnderlyingNetworkRefreshState() {
+        pendingUnderlyingNetworkRefreshDelayMillis = null
         underlyingNetworkFingerprint = null
         clearUnderlyingNetworkRetry()
     }
@@ -706,23 +726,17 @@ class NostrVpnService : VpnService() {
         }
     }
 
-    private fun orderedValidatedUnderlyingNetworks(
+    private fun preferredWireGuardUnderlyingNetwork(
         candidates: Array<Network>,
-    ): List<Network> {
-        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+    ): Network? {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return null
         val activeNetwork = connectivity.activeNetwork
-        return candidates
-            .filter {
-                connectivity.getNetworkCapabilities(it)
-                    ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-            }
-            .sortedWith(
-                compareBy<Network>(
-                    { if (it == activeNetwork) 0 else 1 },
-                    { underlayTransportPreference(connectivity.getNetworkCapabilities(it)) },
-                    Network::getNetworkHandle,
-                ),
-            )
+        val preferredHandle = AndroidVpnRoutingPolicy.preferredWireGuardUnderlay(
+            candidates.map { network ->
+                underlyingNetworkCandidate(connectivity, network, activeNetwork)
+            },
+        ) ?: return null
+        return candidates.firstOrNull { it.networkHandle == preferredHandle }
     }
 
     private fun underlayTransportPreference(capabilities: NetworkCapabilities?): Int = when {
@@ -755,8 +769,6 @@ class NostrVpnService : VpnService() {
                         NetworkCapabilities.TRANSPORT_ETHERNET,
                     ).filter { capabilities?.hasTransport(it) == true }.joinToString(","),
                 )
-                append(";validated=")
-                append(capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true)
                 append(";interface=")
                 append(properties?.interfaceName.orEmpty())
                 append(";addresses=")
@@ -785,6 +797,25 @@ class NostrVpnService : VpnService() {
                 )
             }
         }
+    }
+
+    private fun underlyingNetworkCandidate(
+        connectivity: ConnectivityManager,
+        network: Network,
+        activeNetwork: Network?,
+    ): AndroidVpnRoutingPolicy.UnderlayNetworkCandidate {
+        val capabilities = connectivity.getNetworkCapabilities(network)
+        val properties = connectivity.getLinkProperties(network)
+        return AndroidVpnRoutingPolicy.UnderlayNetworkCandidate(
+            handle = network.networkHandle,
+            active = network == activeNetwork,
+            validated = capabilities
+                ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
+            usable = properties?.routes?.any { it.isDefaultRoute } == true &&
+                capabilities
+                    ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) != true,
+            transportPreference = underlayTransportPreference(capabilities),
+        )
     }
 
     private fun stopTunnel() {
