@@ -818,9 +818,50 @@ grep -Fq 'scalar(wireguard, "endpoint") != expected_endpoint' "$android_smoke" \
 grep -Fq 'Android active-VPN background/foreground lifecycle gate passed' "$android_smoke" \
   || { echo "Android active lifecycle does not emit a distinct proof receipt" >&2; exit 1; }
 python3 - "$android_smoke" <<'PY'
+import re
+import subprocess
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
+truthy = text.index("truthy() {")
+reuse_guard = text.index(
+    "if android_release_reuse_verified_artifact \\\n  && ! truthy"
+)
+if truthy > reuse_guard:
+    raise SystemExit("Android reuse guard calls truthy before it is defined")
+permission = text.split("maybe_accept_vpn_dialog() {", 1)[1].split(
+    "base64_no_wrap() {", 1
+)[0]
+required = (
+    "com.android.permissioncontroller/.permission.ui.GrantPermissionsActivity",
+    "com.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity",
+    "com.android.permissioncontroller:id/permission_allow_button",
+    "com.android.permissioncontroller/*)",
+    'android:id/button1" "com.android.vpndialogs',
+    "Unknown Android system prompt",
+)
+if any(token not in permission for token in required):
+    raise SystemExit("Android VPN consent driver lacks the local-network prompt contract")
+if permission.index("permission_allow_button") > permission.index("com.android.vpndialogs"):
+    raise SystemExit("Android VPN consent is attempted before local-network permission")
+if any(token in permission for token in ("pm grant", "DEBUG_ACTION", "permission_deny_button")):
+    raise SystemExit("Android permission driver bypasses the shipped system UI")
+fixture = (
+    "topResumedActivity=ActivityRecord{233924169 u0 "
+    "com.android.permissioncontroller/"
+    "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t12452}"
+)
+top_activity = text.split("android_top_activity() {", 1)[1].split("\n}", 1)[0]
+pattern = re.search(r"\| sed -nE \\\n\s+'([^']+)'", top_activity)
+component = subprocess.run(
+    ["sed", "-nE", pattern.group(1)],
+    input=fixture,
+    text=True,
+    capture_output=True,
+    check=True,
+).stdout.strip() if pattern else ""
+if component not in permission:
+    raise SystemExit("Android permission driver rejects the real full activity rendering")
 start = text.index('if [[ "$vpn_cycle" -eq 1 ]]; then', text.index("wait_for_android_build_metadata"))
 body = text[start:]
 connected = body.index('wait_until "$VPN_START_WAIT_SECS" vpn_active')

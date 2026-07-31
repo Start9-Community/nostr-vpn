@@ -2403,28 +2403,68 @@ PY
   "$ADB" -s "$serial" shell input tap $point
 }
 
+android_top_activity() {
+  "$ADB" -s "$serial" shell dumpsys activity activities 2>/dev/null \
+    | tr -d '\r' \
+    | sed -nE \
+      's/.*(topResumedActivity|mResumedActivity).* u[0-9]+ ([^ ]+\/[^ ]+) .*/\2/p' \
+    | head -n 1
+}
+
 maybe_accept_vpn_dialog() {
   [[ "$accept_vpn_dialog" == "1" || "$accept_vpn_dialog" == "true" ]] || return 0
-  local start now tapped
+  local start now activity pending_prompt vpn_tapped
   start="$(date +%s)"
-  tapped=0
+  pending_prompt=""
+  vpn_tapped=0
   while true; do
     if vpn_active; then
       return 0
     fi
-    if tap_ui_resource "android:id/button1" "com.android.vpndialogs"; then
-      tapped=1
-      sleep 1
-      continue
-    fi
-    if [[ "$tapped" -eq 1 ]]; then
-      return 0
-    fi
+    activity="$(android_top_activity)"
+    case "$activity" in
+      com.android.permissioncontroller/.permission.ui.GrantPermissionsActivity|\
+      com.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity)
+        pending_prompt="local-network permission"
+        if tap_ui_resource \
+          "com.android.permissioncontroller:id/permission_allow_button" \
+          "com.android.permissioncontroller"
+        then
+          pending_prompt=""
+        fi
+        ;;
+      com.android.permissioncontroller/*)
+        echo "Unknown Android system prompt: $activity" >&2
+        return 1
+        ;;
+      com.android.vpndialogs/*)
+        pending_prompt="VPN confirmation"
+        if tap_ui_resource "android:id/button1" "com.android.vpndialogs"; then
+          vpn_tapped=1
+          pending_prompt=""
+        fi
+        ;;
+      "$PACKAGE_NAME"/*|"")
+        if [[ -n "$pending_prompt" ]]; then
+          echo "Android $pending_prompt was denied or had no known affirmative control" >&2
+          return 1
+        fi
+        [[ "$vpn_tapped" -eq 0 ]] || return 0
+        ;;
+      *)
+        echo "Unknown Android system prompt: $activity" >&2
+        return 1
+        ;;
+    esac
     now="$(date +%s)"
     if (( now - start >= 8 )); then
+      if [[ -n "$pending_prompt" ]]; then
+        echo "Android $pending_prompt prompt had no known affirmative control" >&2
+        return 1
+      fi
       return 0
     fi
-    sleep 1
+    sleep 0.5
   done
 }
 
