@@ -28,6 +28,7 @@ function captureRequired(command, args, { cwd, env, label }) {
     env,
     encoding: 'utf8',
     stdio: 'pipe',
+    maxBuffer: 16 * 1024 * 1024,
   })
   if (result.status !== 0) {
     const stderr = String(result.stderr ?? '').trim()
@@ -759,8 +760,12 @@ if (
     )
   }
   const result = validateWindowsCratesIoFipsProvenance({
-    sourceReceipt: JSON.parse(readFileSync(sourceReceiptPath, 'utf8')),
-    artifactReceipt: JSON.parse(readFileSync(artifactReceiptPath, 'utf8')),
+    sourceReceipt: JSON.parse(
+      readFileSync(sourceReceiptPath, 'utf8').replace(/^\uFEFF/, ''),
+    ),
+    artifactReceipt: JSON.parse(
+      readFileSync(artifactReceiptPath, 'utf8').replace(/^\uFEFF/, ''),
+    ),
     expectedAppGitSha,
     expectedAppGitTree,
     fipsRoot,
