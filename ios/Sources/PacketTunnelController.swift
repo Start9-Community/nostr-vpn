@@ -67,7 +67,7 @@ final class PacketTunnelController {
     ) async throws {
         try Task.checkCancellation()
         debugLog("PacketTunnelController.start begin")
-        let manager = try await loadOrCreateManager()
+        let (manager, managerIsNew) = try await loadOrCreateManager()
         try Task.checkCancellation()
         activeManager = manager
         if manager.connection.status != .invalid,
@@ -108,7 +108,7 @@ final class PacketTunnelController {
         manager.isEnabled = true
         try Task.checkCancellation()
         debugLog("saving preferences")
-        try await save(manager)
+        try await save(manager, waitsForUserApproval: managerIsNew)
         try Task.checkCancellation()
         debugLog("reloading preferences")
         try await reload(manager)
@@ -316,13 +316,13 @@ final class PacketTunnelController {
         }
     }
 
-    private func loadOrCreateManager() async throws -> NETunnelProviderManager {
+    private func loadOrCreateManager() async throws -> (NETunnelProviderManager, Bool) {
         if let existing = try await loadExistingManager() {
             debugLog("using existing manager status=\(existing.connection.status.rawValue)")
-            return existing
+            return (existing, false)
         }
         debugLog("creating new manager")
-        return NETunnelProviderManager()
+        return (NETunnelProviderManager(), true)
     }
 
     private func loadExistingManager() async throws -> NETunnelProviderManager? {
@@ -362,8 +362,14 @@ final class PacketTunnelController {
         }
     }
 
-    private func save(_ manager: NETunnelProviderManager) async throws {
-        try await withPreferencesTimeout(operation: "save") { finish in
+    private func save(
+        _ manager: NETunnelProviderManager,
+        waitsForUserApproval: Bool
+    ) async throws {
+        try await withPreferencesCompletion(
+            operation: "save",
+            timeoutSeconds: waitsForUserApproval ? nil : Self.preferencesOperationTimeoutSeconds
+        ) { finish in
             manager.saveToPreferences { error in
                 finish(error)
             }
@@ -371,20 +377,23 @@ final class PacketTunnelController {
     }
 
     private func reload(_ manager: NETunnelProviderManager) async throws {
-        try await withPreferencesTimeout(operation: "reload") { finish in
+        try await withPreferencesCompletion(
+            operation: "reload",
+            timeoutSeconds: Self.preferencesOperationTimeoutSeconds
+        ) { finish in
             manager.loadFromPreferences { error in
                 finish(error)
             }
         }
     }
 
-    private func withPreferencesTimeout(
+    private func withPreferencesCompletion(
         operation: String,
+        timeoutSeconds: TimeInterval?,
         start: (@escaping (Error?) -> Void) -> Void
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let completion = PreferenceOperationCompletion(continuation)
-            let timeoutSeconds = Self.preferencesOperationTimeoutSeconds
             start { error in
                 if let error {
                     _ = completion.resume(throwing: error)
@@ -392,11 +401,13 @@ final class PacketTunnelController {
                     _ = completion.resume(returning: ())
                 }
             }
-            Task.detached(priority: .utility) {
-                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                _ = completion.resume(
-                    throwing: PacketTunnelControllerError.preferencesTimedOut(operation)
-                )
+            if let timeoutSeconds {
+                Task.detached(priority: .utility) {
+                    try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                    _ = completion.resume(
+                        throwing: PacketTunnelControllerError.preferencesTimedOut(operation)
+                    )
+                }
             }
         }
     }

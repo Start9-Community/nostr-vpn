@@ -259,9 +259,23 @@ if "throw PacketTunnelControllerError.disconnectTimedOut(status)" not in control
 start_method = controller.split("func start(", 1)[1].split("static func routeState", 1)[0]
 disconnect_index = start_method.index("try await stopAndWaitForDisconnected(manager)")
 phase_index = start_method.index("await onActiveTunnelDisconnected?()")
-save_index = start_method.index("try await save(manager)")
+save_index = start_method.index("try await save(manager,")
 if not disconnect_index < phase_index < save_index:
     raise SystemExit("PacketTunnel replacement phase is not bounded by disconnect and save")
+if "let (manager, managerIsNew) = try await loadOrCreateManager()" not in start_method:
+    raise SystemExit("PacketTunnel start does not identify the first interactive manager save")
+if "try await save(manager, waitsForUserApproval: managerIsNew)" not in start_method:
+    raise SystemExit("PacketTunnel start does not preserve the first approval attempt")
+save_helper = controller.split("private func save(", 1)[1].split(
+    "private func reload", 1
+)[0]
+if "waitsForUserApproval ? nil : Self.preferencesOperationTimeoutSeconds" not in save_helper:
+    raise SystemExit("first interactive VPN approval still has a hard preference timeout")
+reload_helper = controller.split("private func reload(", 1)[1].split(
+    "private func withPreferencesCompletion", 1
+)[0]
+if "timeoutSeconds: Self.preferencesOperationTimeoutSeconds" not in reload_helper:
+    raise SystemExit("noninteractive VPN preference reload lost its bounded timeout")
 disconnect_helper = controller.split(
     "private func stopAndWaitForDisconnected(", 1
 )[1].split("private func waitForDisconnected", 1)[0]
