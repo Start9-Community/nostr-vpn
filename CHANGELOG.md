@@ -65,6 +65,10 @@ All notable changes to this project are documented in this file.
 - Avoid treating Android's first VPN-service network snapshot as a roam, so
   startup performs the required underlay handshake without unnecessarily
   resetting established FIPS sessions.
+- Serialize Android native tunnel startup and cancel obsolete generations,
+  preventing rapid connect/disconnect from reviving or leaking a stopped VPN.
+- Expose the iOS VPN switch as one accessible control while retaining its
+  native action, enabled state, label, and value.
 - Keep macOS configuration editable while an installed background service is
   disabled or stopped, without bypassing daemon-owned saves while it is active.
 - Release the iOS UI process's shared Cashu wallet and SQLite locks before
@@ -81,10 +85,10 @@ All notable changes to this project are documented in this file.
 - Pace the quiet FIPS-TCP control loop at its close-retention deadline instead
   of the active retransmission cadence, while keeping commands, packets, and
   open records immediately responsive.
-- Upgrade FIPS to 0.4.48 so repeated direct-to-mesh-to-direct transitions
-  retain the last authenticated fallback until direct payload validates, and
-  network changes invalidate stale route activity for every rebuilt carrier
-  while preserving the endpoint and active sessions.
+- Upgrade FIPS to 0.4.49 so physical-interface changes reauthenticate UDP
+  peers at the safe handshake interval, stale WebSocket carriers are replaced
+  immediately, and only correlated discovery replies may repin established
+  routes, while preserving end-to-end sessions and wire compatibility.
 - Repair Cashu paid-exit close, settlement, and refund recovery across
   historical or retried proofs on platforms where the feature is available.
 - Update the Nostr and Linux property-list parser locks to reject malformed
