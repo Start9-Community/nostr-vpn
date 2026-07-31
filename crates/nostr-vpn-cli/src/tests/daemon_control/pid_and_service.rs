@@ -107,6 +107,36 @@ fn windows_daemon_pid_scan_accepts_single_process_object() {
 }
 
 #[test]
+fn windows_daemon_pid_record_requires_same_pid_and_config() {
+    let config_path = Path::new("C:\\Users\\Example\\AppData\\Roaming\\nvpn\\config.toml");
+    let exact_daemon = r#"{"ProcessId":1736,"CommandLine":"\"C:\\Program Files\\Nostr VPN\\nvpn.exe\" daemon --config \"C:\\Users\\Example\\AppData\\Roaming\\nvpn\\config.toml\" --iface NostrVPN"}"#;
+    let reused_pid = r#"{"ProcessId":1736,"CommandLine":"\"C:\\Windows\\System32\\notepad.exe\""}"#;
+    let other_config = r#"{"ProcessId":1736,"CommandLine":"\"C:\\Program Files\\Nostr VPN\\nvpn.exe\" daemon --config \"C:\\temp\\other.toml\" --iface NostrVPN"}"#;
+    let other_pid = r#"{"ProcessId":42063,"CommandLine":"\"C:\\Program Files\\Nostr VPN\\nvpn.exe\" daemon --config \"C:\\Users\\Example\\AppData\\Roaming\\nvpn\\config.toml\" --iface NostrVPN"}"#;
+
+    assert!(crate::windows_daemon_pid_record_matches_cim(
+        1736,
+        exact_daemon,
+        config_path
+    ));
+    assert!(!crate::windows_daemon_pid_record_matches_cim(
+        1736,
+        reused_pid,
+        config_path
+    ));
+    assert!(!crate::windows_daemon_pid_record_matches_cim(
+        1736,
+        other_config,
+        config_path
+    ));
+    assert!(!crate::windows_daemon_pid_record_matches_cim(
+        1736,
+        other_pid,
+        config_path
+    ));
+}
+
+#[test]
 fn windows_service_bin_path_runs_hidden_service_daemon_with_same_config() {
     let executable = Path::new("C:\\Program Files\\Nostr VPN\\nvpn.exe");
     let config_path = Path::new("C:\\Users\\Example\\AppData\\Roaming\\nvpn\\config.toml");

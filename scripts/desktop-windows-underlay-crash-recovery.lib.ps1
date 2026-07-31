@@ -276,6 +276,21 @@ function Invoke-CrashRecovery {
   $recoveryTimer = [Diagnostics.Stopwatch]::StartNew()
   $replacement = Start-CandidateDaemon "daemon.restart"
   Wait-ForCondition "power-loss startup recovery to native Direct" 30000 {
+    if ($replacement.HasExited) {
+      $restartErrorPath = Join-Path $StateDir "daemon.restart.stderr.log"
+      $restartError = if (Test-Path -LiteralPath $restartErrorPath) {
+        (Get-Content -Raw -LiteralPath $restartErrorPath).Trim()
+      } else {
+        "<missing restart stderr>"
+      }
+      $message = (
+        "replacement daemon exited with code {0}: {1}" -f
+        $replacement.ExitCode,
+        $restartError
+      )
+      Write-Marker "last-crash-recovery-error.txt" $message
+      throw $message
+    }
     try {
       Assert-CrashRecoveredDirectState `
         $ExpectedPhysicalIndex `

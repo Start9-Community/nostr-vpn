@@ -86,8 +86,30 @@ pub(crate) fn daemon_pid_record_counts_as_running(pid: u32, config_path: &Path) 
 }
 
 #[cfg(windows)]
-pub(crate) fn daemon_pid_record_counts_as_running(pid: u32, _config_path: &Path) -> bool {
-    is_process_running(pid)
+pub(crate) fn daemon_pid_record_counts_as_running(pid: u32, config_path: &Path) -> bool {
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    );
+    let output = ProcessCommand::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script.as_str(),
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    windows_daemon_pid_record_matches_cim(
+        pid,
+        &String::from_utf8_lossy(&output.stdout),
+        config_path,
+    )
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -466,4 +488,13 @@ pub(crate) fn daemon_pids_from_windows_cim_json(cim_json: &str, config_path: &Pa
     pids.sort_unstable();
     pids.dedup();
     pids
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_daemon_pid_record_matches_cim(
+    pid: u32,
+    cim_json: &str,
+    config_path: &Path,
+) -> bool {
+    daemon_pids_from_windows_cim_json(cim_json, config_path).contains(&pid)
 }

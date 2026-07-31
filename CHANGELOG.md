@@ -32,7 +32,8 @@ All notable changes to this project are documented in this file.
   be cleaned up.
 - Wait for the exact Windows daemon process to become control-ready, report a
   reload successful only after WireGuard routes and DNS are active, and bound
-  native operations with owned rollback so Direct restoration cannot hang.
+  native operations with owned rollback so Direct restoration cannot hang;
+  ignore stale daemon PID records reused by unrelated processes.
 - Stream Linux WireGuard apply and rollback configuration directly to `wg`
   without filesystem secret files, so exit nodes work under the stock
   enforced Ubuntu AppArmor policy.

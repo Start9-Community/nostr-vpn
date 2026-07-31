@@ -825,8 +825,11 @@ collect_failure_artifacts() {
     : >"$guest_log"
     for name in \
       last-condition-error.txt \
+      last-crash-recovery-error.txt \
       daemon.stderr.log \
       daemon.stdout.log \
+      daemon.restart.stderr.log \
+      daemon.restart.stdout.log \
       payload.log \
       wireguard-payload.log
     do
