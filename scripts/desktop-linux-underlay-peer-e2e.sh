@@ -310,7 +310,7 @@ wait_for_peer_tun() {
 }
 
 listener_audit() {
-  local default_iface expected_pid listener_row rows
+  local default_iface expected_pid listener_rows rows
   default_iface="$(
     ip -4 route get 1.1.1.1 \
       | awk '{ for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
@@ -326,22 +326,22 @@ listener_audit() {
   expected_pid="$(<"$STATE_DIR/peer-process.pid")"
   for _ in $(seq 1 50); do
     rows="$(ss -H -lunp "sport = :$LISTEN_PORT" 2>/dev/null || true)"
-    if listener_row="$(
-      nvpn_require_single_udp_listener \
+    if listener_rows="$(
+      nvpn_require_dual_family_udp_listeners \
         "$rows" "$default_iface" "$LISTEN_PORT" "$expected_pid" 2>/dev/null
     )"; then
       printf 'default_interface=%s\n' "$default_iface"
       printf 'daemon_pid=%s\n' "$expected_pid"
-      printf 'listener=%s\n' "$listener_row"
+      printf 'listeners=%s\n' "$listener_rows"
       echo "production_device_bind=true"
       return 0
     fi
     sleep 0.1
   done
-  nvpn_require_single_udp_listener \
+  nvpn_require_dual_family_udp_listeners \
     "$rows" "$default_iface" "$LISTEN_PORT" "$expected_pid" >/dev/null || true
   ss -lunp 2>/dev/null || true
-  echo "peer FIPS listener is not the sole daemon-owned socket on $default_iface" >&2
+  echo "peer FIPS listeners are not the exact daemon-owned IPv4/IPv6 pair on $default_iface" >&2
   exit 1
 }
 

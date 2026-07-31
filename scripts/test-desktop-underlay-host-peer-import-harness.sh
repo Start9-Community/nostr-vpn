@@ -190,7 +190,7 @@ require_tokens "$WINDOWS" "exact Windows underlay candidate" \
   'NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH' \
   'windows-cratesio-provenance' \
   '\$Receipt.fipsGitSha -ne $(ps_quote "$EXPECTED_FIPS_SHA")' \
-  'target_expected="fips_core_version: $EXPECTED_FIPS_VERSION"' \
+  'expected="fips_core_version: $EXPECTED_FIPS_VERSION (rev $EXPECTED_FIPS_REV)"' \
   'WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=' \
   '\$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256")' \
   'Windows underlay CLI differs from the exact installed-and-launched installer payload'

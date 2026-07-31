@@ -193,10 +193,29 @@ three_listener_rows="$dual_family_listener_rows"$'\n'"$listener_fixture_row"
 reject_dual_listener_fixture "extra third listener row" \
   "$three_listener_rows" "$listener_fixture_device" \
   "$listener_fixture_port" "$listener_fixture_pid"
+listener_audit_body="$(sed -n '/^listener_audit() {$/,/^}$/p' "$PEER")"
+grep -Fq 'nvpn_require_dual_family_udp_listeners' <<<"$listener_audit_body" \
+  || fail "peer listener audit does not require the exact IPv4/IPv6 pair"
+if grep -Fq 'nvpn_require_single_udp_listener' <<<"$listener_audit_body"; then
+  fail "peer listener audit still accepts a single UDP listener"
+fi
 require_tokens "$PEER" "listener ownership integration" \
   'lib-desktop-linux-listener-audit.sh' \
-  'nvpn_require_single_udp_listener' \
   '"$STATE_DIR/peer-process.pid"'
+require_tokens "$WINDOWS_HOST_ENTRY" "exact Windows FIPS provenance" \
+  'expected="fips_core_version: $EXPECTED_FIPS_VERSION (rev $EXPECTED_FIPS_REV)"' \
+  '-ExpectedFipsRevision $(ps_quote "$EXPECTED_FIPS_REV")'
+require_tokens "$WINDOWS_GUEST_ENTRY" "exact Windows FIPS runtime identity" \
+  '[string]$ExpectedFipsRevision' \
+  '[string]$Value -eq "$ExpectedFipsVersion (rev $ExpectedFipsRevision)"' \
+  '!(Test-ExpectedFipsCoreVersion $status.daemon.state.fips_core_version)'
+require_tokens "$WINDOWS_GUEST_CRASH_LIB" "exact restarted Windows FIPS identity" \
+  '!(Test-ExpectedFipsCoreVersion $status.daemon.state.fips_core_version)'
+if grep -Fq \
+  '[string]$status.daemon.state.fips_core_version -ne $ExpectedFipsVersion' \
+  "$WINDOWS_GUEST_ENTRY" "$WINDOWS_GUEST_CRASH_LIB"; then
+  fail "Windows runtime still compares verbose FIPS identity to a bare version"
+fi
 require_tokens "$ROOT/scripts/macos-release-fips-peer-remote.sh" \
   "macOS/Vader dual-family listener ownership integration" \
   'nvpn_require_dual_family_udp_listeners'

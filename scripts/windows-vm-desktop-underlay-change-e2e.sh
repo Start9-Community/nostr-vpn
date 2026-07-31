@@ -241,18 +241,18 @@ Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$CliHash\"" \
 }
 
 capture_version_receipts() {
-  local target_expected="fips_core_version: $EXPECTED_FIPS_VERSION"
-  local peer_expected="(rev $EXPECTED_FIPS_REV)" target_sha target_size
+  local expected="fips_core_version: $EXPECTED_FIPS_VERSION (rev $EXPECTED_FIPS_REV)"
+  local target_sha target_size
   run_ps_primary \
     "& $(ps_quote "$GUEST_BINARY") version --verbose" \
     | tr -d '\r' >"$ARTIFACT_DIR/target-version.txt"
   ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
     "'$HYPERVISOR_BINARY' version --verbose" \
     >"$ARTIFACT_DIR/peer-version.txt"
-  grep -Fxq "$target_expected" "$ARTIFACT_DIR/target-version.txt" \
-    || fail "Windows target binary does not report exact FIPS version $EXPECTED_FIPS_VERSION"
-  grep -Fq "$peer_expected" "$ARTIFACT_DIR/peer-version.txt" \
-    || fail "Windows peer binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
+  grep -Fxq "$expected" "$ARTIFACT_DIR/target-version.txt" \
+    || fail "Windows target binary does not report exact FIPS version/revision $EXPECTED_FIPS_VERSION/$EXPECTED_FIPS_REV"
+  grep -Fxq "$expected" "$ARTIFACT_DIR/peer-version.txt" \
+    || fail "Windows peer binary does not report exact FIPS version/revision $EXPECTED_FIPS_VERSION/$EXPECTED_FIPS_REV"
   target_sha="$(
     run_ps_primary \
       "(Get-FileHash -Algorithm SHA256 -LiteralPath $(ps_quote "$GUEST_BINARY")).Hash.ToLowerInvariant()" \
@@ -475,6 +475,7 @@ start_windows_runner() {
 -FixtureDnsName $(ps_quote "$FIXTURE_DNS_NAME") \
 -ProbeUrl $(ps_quote "$PROBE_URL") \
 -ExpectedFipsVersion $(ps_quote "$EXPECTED_FIPS_VERSION") \
+-ExpectedFipsRevision $(ps_quote "$EXPECTED_FIPS_REV") \
 -ListenPort $TARGET_LISTEN_PORT \
 -RecoveryDeadlineMilliseconds $RECOVERY_DEADLINE_MS"
   (

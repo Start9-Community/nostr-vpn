@@ -51,7 +51,7 @@ function Assert-SingleExactCandidateDaemon {
     [int]$status.daemon.pid -ne $ExpectedPid -or
     !$status.daemon.state.mesh_ready -or
     [int]$status.daemon.state.connected_peer_count -lt 1 -or
-    [string]$status.daemon.state.fips_core_version -ne $ExpectedFipsVersion
+    !(Test-ExpectedFipsCoreVersion $status.daemon.state.fips_core_version)
   ) {
     throw "the exact restarted candidate daemon/FIPS session is not ready"
   }

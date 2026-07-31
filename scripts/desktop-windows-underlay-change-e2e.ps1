@@ -25,6 +25,7 @@ param(
   [string]$FixtureDnsName = "underlay-gate.nvpn.test",
   [string]$ProbeUrl = "https://example.com/",
   [string]$ExpectedFipsVersion,
+  [string]$ExpectedFipsRevision,
   [string]$TunnelInterface = "nvpn-underlay-gate",
   [int]$ListenPort = 45821,
   [int]$RecoveryDeadlineMilliseconds = 4000,
@@ -376,6 +377,13 @@ function Write-Marker {
   )
 }
 
+function Test-ExpectedFipsCoreVersion {
+  param([object]$Value)
+  return (
+    [string]$Value -eq "$ExpectedFipsVersion (rev $ExpectedFipsRevision)"
+  )
+}
+
 function Assert-ActiveExit {
   param(
     [int]$ExpectedPhysicalIndex,
@@ -389,7 +397,7 @@ function Assert-ActiveExit {
     [int]$status.daemon.pid -ne $ExpectedDaemonPid -or
     !$status.daemon.state.mesh_ready -or
     [int]$status.daemon.state.connected_peer_count -lt 1 -or
-    [string]$status.daemon.state.fips_core_version -ne $ExpectedFipsVersion
+    !(Test-ExpectedFipsCoreVersion $status.daemon.state.fips_core_version)
   ) {
     throw "nvpn daemon/mesh status is not ready or its PID changed"
   }
@@ -927,7 +935,8 @@ switch ($Action) {
       $WireGuardClientAddress,
       $WireGuardServerIp,
       $WireGuardInterface,
-      $ExpectedFipsVersion
+      $ExpectedFipsVersion,
+      $ExpectedFipsRevision
     )) {
       if ([string]::IsNullOrWhiteSpace($value)) {
         throw "Run is missing a required peer/underlay argument"
