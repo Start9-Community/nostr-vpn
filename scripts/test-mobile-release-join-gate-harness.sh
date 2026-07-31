@@ -498,6 +498,9 @@ for required in (
     "roster-participant-accepted-$admin",
     "roster-participant-accepted-$joiner",
     "release_join_android_wait_accepted_participant",
+    "release_join_android_query resource manual-join-submit center",
+    "Android manual join submit did not change the shipped UI",
+    "safe-center",
     "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS",
     "test-without-building",
 ):
@@ -955,9 +958,12 @@ fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
 trap 'rm -f "$fixture"' EXIT
 printf '%s\n' \
   '<hierarchy>' \
+  '  <node bounds="[0,0][1080,2410]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/admin-device-id-value" content-desc="Admin Device ID value: npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" bounds="[10,20][110,80]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-pending-a" content-desc="Roster participant pending a" bounds="[0,100][100,200]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-accepted-b" content-desc="Roster participant accepted b" bounds="[0,200][100,300]" />' \
+  '  <node resource-id="manual-join-submit-clipped" bounds="[89,2369][991,2410]" />' \
+  '  <node resource-id="manual-join-submit-safe" bounds="[89,1800][991,1900]" />' \
   '</hierarchy>' >"$fixture"
 
 description="$(
@@ -987,5 +993,15 @@ fi
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource admin-device-id-value width
 )" == "100" ]]
+if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" resource manual-join-submit-clipped safe-center >/dev/null 2>&1
+then
+  echo "Clipped Android control was treated as safely tappable" >&2
+  exit 1
+fi
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" resource manual-join-submit-safe safe-center
+)" == "540 1850" ]]
 
 echo "Signed Release public-UI join gate contract passed"

@@ -51,7 +51,7 @@ release_join_android_wait_query() {
 
 release_join_android_tap() {
   local kind="$1" expected="$2" point
-  point="$(release_join_android_query "$kind" "$expected" center)" || return 1
+  point="$(release_join_android_query "$kind" "$expected" safe-center)" || return 1
   # shellcheck disable=SC2086
   "${ADB[@]}" shell input tap $point
 }
@@ -70,7 +70,7 @@ release_join_android_scroll_to() {
   local kind="$1" expected="$2"
   local attempts
   for attempts in $(seq 1 12); do
-    if release_join_android_query "$kind" "$expected" center >/dev/null 2>&1; then
+    if release_join_android_query "$kind" "$expected" safe-center >/dev/null 2>&1; then
       return 0
     fi
     release_join_android_scroll >/dev/null
@@ -351,8 +351,17 @@ release_join_android_manual_submit() {
   release_join_android_enter manual-join-network-id "$network"
   release_join_android_scroll_to resource manual-join-submit
   release_join_android_tap resource manual-join-submit
-  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1"
-  export RELEASE_JOIN_ANDROID_JOINER_ID
+  local deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    if ! release_join_android_query resource manual-join-submit center >/dev/null 2>&1; then
+      echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1"
+      export RELEASE_JOIN_ANDROID_JOINER_ID
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Android manual join submit did not change the shipped UI" >&2
+  return 1
 }
 
 release_join_android_manual_admin_add() {

@@ -490,7 +490,8 @@ public sealed class NativeParticipantState
     public string SelectionKey => string.IsNullOrWhiteSpace(PubkeyHex) ? Npub : PubkeyHex;
     [System.Text.Json.Serialization.JsonIgnore]
     public string AcceptedRosterAutomationId =>
-        string.Equals(State, "pending", StringComparison.OrdinalIgnoreCase)
+        string.Equals(StatusText, "waiting for admin", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(StatusText, "join request sent", StringComparison.OrdinalIgnoreCase)
             ? ""
             : $"RosterParticipantAccepted-{Npub}";
     public string DisplayName => FirstNonEmpty(

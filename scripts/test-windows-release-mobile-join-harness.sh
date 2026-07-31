@@ -30,8 +30,15 @@ do
 done
 grep -Fq 'AcceptedRosterAutomationId' "$XAML" \
   || fail "Windows roster UI does not bind its accepted-only selector"
-grep -Fq 'string.Equals(State, "pending"' "$MODELS" \
-  || fail "Windows accepted selector is not withheld while join is pending"
+if sed -n '/AcceptedRosterAutomationId/,/DisplayName/p' "$MODELS" \
+  | grep -Fq 'State'; then
+  fail "Windows roster membership selector still depends on transport state"
+fi
+for pending_status in 'waiting for admin' 'join request sent'; do
+  sed -n '/AcceptedRosterAutomationId/,/DisplayName/p' "$MODELS" \
+    | grep -Fq "$pending_status" \
+    || fail "Windows selector accepts an unconfirmed $pending_status roster"
+done
 grep -Fq 'RosterParticipantAccepted-' "$MODELS" \
   || fail "Windows model has no dynamic accepted roster identifier"
 

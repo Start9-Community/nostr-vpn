@@ -15,7 +15,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("expected")
     result.add_argument(
         "output",
-        choices=("center", "description", "text", "count", "width"),
+        choices=("center", "safe-center", "description", "text", "count", "width"),
     )
     return result
 
@@ -60,7 +60,19 @@ def main() -> int:
     if not found:
         return 1
     node = found[0]
-    if args.output == "center":
+    if args.output in ("center", "safe-center"):
+        if args.output == "safe-center":
+            viewport_bottom = 0
+            for candidate in root.iter("node"):
+                try:
+                    box = bounds(candidate)
+                except ValueError:
+                    continue
+                if box[:2] == (0, 0):
+                    viewport_bottom = max(viewport_bottom, box[3])
+            viewport_bottom = viewport_bottom or 2400
+            if bounds(node)[3] > viewport_bottom - 300:
+                return 1
         print(center(node))
     elif args.output == "width":
         left, _, right, _ = bounds(node)

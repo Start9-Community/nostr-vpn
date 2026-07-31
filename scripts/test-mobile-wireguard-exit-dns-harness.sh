@@ -61,6 +61,12 @@ grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
     echo "Android multiline UI entry lets adb consume the remaining config" >&2
     exit 1
   }
+grep -Fq 'for focus_attempt in 1 2' "$android_smoke" \
+  && grep -Fq 'Android shipped multiline field did not gain focus' "$android_smoke" \
+  || {
+    echo "Android multiline UI entry lacks one bounded focus retry and readback" >&2
+    exit 1
+  }
 grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
   && grep -Fq 'internet-source-picker descendant-text' "$android_smoke" \
   || {

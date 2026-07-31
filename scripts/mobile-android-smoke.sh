@@ -995,14 +995,17 @@ replace_android_ui_text() {
 replace_android_ui_multiline_text() {
   local selector="$1"
   local value="$2"
-  android_ui_scroll_to resource "$selector" || return 1
-  tap_android_ui resource "$selector" || return 1
-  local deadline=$((SECONDS + 3))
-  while ((SECONDS < deadline)); do
-    if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" == "true" ]]; then
-      break
-    fi
-    sleep 0.25
+  local deadline focus_attempt
+  for focus_attempt in 1 2; do
+    android_ui_scroll_to resource "$selector" || return 1
+    tap_android_ui resource "$selector" || return 1
+    deadline=$((SECONDS + 3))
+    while ((SECONDS < deadline)); do
+      if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" == "true" ]]; then
+        break 2
+      fi
+      sleep 0.25
+    done
   done
   if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" != "true" ]]; then
     echo "Android shipped multiline field did not gain focus: $selector" >&2
