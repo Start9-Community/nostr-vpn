@@ -60,6 +60,7 @@ payload = {
         "[Interface]\n"
         "PrivateKey = fake-private-key-material\n"
         "[Peer]\n"
+        "pReShArEdKeY = fake-preshared-key-material\n"
     )
 }
 print(base64.b64encode(json.dumps(payload).encode()).decode())
@@ -99,6 +100,19 @@ if payload.get("retainedFullXcresult") is not False:
 PY
 ios_release_network_assert_retained_no_secrets \
   "$spec" "$private_log" "$private_summary" "$private_redaction"
+
+isolated_psk="$TEMP_ROOT/isolated-preshared-key.log"
+printf '%s\n' 'fake-preshared-key-material' >"$isolated_psk"
+if ios_release_network_assert_retained_no_secrets \
+    "$spec" "$isolated_psk" 2>/dev/null
+then
+  fail "isolated WireGuard PresharedKey survived the retained-artifact scan"
+fi
+[[ "$(ios_release_network_private_data redact "$spec" "$isolated_psk")" == true ]] \
+  || fail "isolated WireGuard PresharedKey was not redacted"
+grep -Fq '<redacted-private-gate-input>' "$isolated_psk" \
+  || fail "isolated WireGuard PresharedKey redaction was not persisted"
+ios_release_network_assert_retained_no_secrets "$spec" "$isolated_psk"
 
 visual_result="$TEMP_ROOT/visual-only.xcresult"
 visual_log="$TEMP_ROOT/visual-only.log"
@@ -166,6 +180,7 @@ for token in \
   'runnerSigningClass": "development"' \
   'ios_release_network_write_runner_diagnostics' \
   'ios_release_network_preserve_diagnostics' \
+  'ios_release_network_validate_disconnect_markers' \
   'NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS' \
   'NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS' \
   'NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS'
@@ -173,6 +188,37 @@ do
   grep -Fq -- "$token" "$RUNNER" \
     || fail "runner contract lacks: $token"
 done
+
+disconnect="$TEMP_ROOT/disconnect-markers.log"
+printf '%s\n' 'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' >"$disconnect"
+ios_release_network_validate_disconnect_markers "$disconnect" ""
+if ios_release_network_validate_disconnect_markers \
+    "$disconnect" "$spec" 2>/dev/null
+then
+  fail "underlay cleanup accepted no Wi-Fi restoration marker"
+fi
+printf '%s\n' \
+  'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' \
+  'NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1' >"$disconnect"
+ios_release_network_validate_disconnect_markers "$disconnect" "$spec"
+if ios_release_network_validate_disconnect_markers \
+    "$disconnect" "" 2>/dev/null
+then
+  fail "non-underlay cleanup accepted a Wi-Fi restoration marker"
+fi
+printf '%s\n' \
+  'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' \
+  'NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1' >"$disconnect"
+ios_release_network_validate_disconnect_markers "$disconnect" "$spec"
+printf '%s\n' \
+  'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' \
+  'NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1' \
+  'NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1' >"$disconnect"
+if ios_release_network_validate_disconnect_markers \
+    "$disconnect" "$spec" 2>/dev/null
+then
+  fail "disconnect cleanup accepted conflicting Wi-Fi restoration markers"
+fi
 if sed -n '/ios_release_network_test_command()/,/^}/p' "$RUNNER" \
   | grep -Fq -- '-quiet'
 then

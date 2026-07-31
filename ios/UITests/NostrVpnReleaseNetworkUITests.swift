@@ -125,23 +125,27 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         XCTAssertTrue(app.launchEnvironment.isEmpty)
         app.launch()
         XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
-        if let spec = optionalReleaseSpec(),
-           spec.exerciseUnderlay && hasOriginalWiFiForCleanup() {
-            let originalSsid = try originalWiFiForCleanup()
+        if let spec = optionalReleaseSpec(), spec.exerciseUnderlay {
             try setWiFiEnabled(true)
             guard waitForPhysicalPath(
                 required: .wifi,
                 excluded: .cellular,
                 timeout: TimeInterval(spec.underlayAssociationTimeoutSeconds)
-            ) != nil,
-                try selectedWiFiSSID() == originalSsid
-            else {
-                throw gateError("Cleanup did not restore the exact original Wi-Fi")
+            ) != nil else {
+                throw gateError("Cleanup did not restore a non-cellular Wi-Fi path")
             }
-            try clearOriginalWiFiCleanup()
+            if hasOriginalWiFiForCleanup() {
+                let originalSsid = try originalWiFiForCleanup()
+                guard try selectedWiFiSSID() == originalSsid else {
+                    throw gateError("Cleanup did not restore the exact original Wi-Fi")
+                }
+                try clearOriginalWiFiCleanup()
+                emit("NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1")
+            } else {
+                emit("NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1")
+            }
             app.activate()
             XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
-            emit("NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1")
         }
         if app.tabBars.buttons["Devices"].waitForExistence(timeout: 3) {
             try turnVPNOffIfNeeded()

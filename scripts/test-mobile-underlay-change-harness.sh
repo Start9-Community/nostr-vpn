@@ -433,8 +433,22 @@ for required in (
     if required not in android + ios + ios_test:
         raise SystemExit(f"radio-bounce implementation is missing {required}")
 cleanup = ios_test[ios_test.index("func testReleaseDisconnectCleanup()") :]
-if "spec.exerciseUnderlay && hasOriginalWiFiForCleanup()" not in cleanup:
-    raise SystemExit("iOS cleanup requires underlay state that may never have been created")
+for required in (
+    "if let spec = optionalReleaseSpec(), spec.exerciseUnderlay",
+    "try setWiFiEnabled(true)",
+    "waitForPhysicalPath(",
+    "if hasOriginalWiFiForCleanup()",
+    "NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1",
+    "NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1",
+):
+    if required not in cleanup:
+        raise SystemExit(f"iOS cleanup lacks safe underlay restoration: {required}")
+if "spec.exerciseUnderlay && hasOriginalWiFiForCleanup()" in cleanup:
+    raise SystemExit("iOS cleanup skips Wi-Fi restoration without a saved SSID")
+if cleanup.index("try setWiFiEnabled(true)") > cleanup.index(
+    "if hasOriginalWiFiForCleanup()"
+):
+    raise SystemExit("iOS cleanup checks saved state before enabling Wi-Fi")
 gate = android[android.index("run_android_underlay_network_change_gate()") :]
 ordered = [gate.index(needle) for needle in (
     'recovery_requested_ms="$(mobile_underlay_now_ms)"',

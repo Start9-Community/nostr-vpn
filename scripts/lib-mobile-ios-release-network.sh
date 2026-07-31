@@ -597,8 +597,8 @@ else:
 if mode == "private-visual":
     raise SystemExit(0 if wireguard else 1)
 for line in wireguard.splitlines():
-    if line.strip().lower().startswith("privatekey"):
-        _, _, value = line.partition("=")
+    name, separator, value = line.partition("=")
+    if separator and name.strip().casefold() in {"privatekey", "presharedkey"}:
         if value.strip():
             needles.add(value.strip().encode())
 needles = sorted(
@@ -1186,6 +1186,26 @@ PY
   echo "iOS Release real-network case passed: $label"
 }
 
+ios_release_network_validate_disconnect_markers() {
+  local markers="$1" underlay_spec="$2"
+  local restored enabled_without_saved marker_count
+  grep -Fxq "NVPN_IOS_RELEASE_DISCONNECT_PASSED=1" "$markers" || return 1
+  restored="$(
+    grep -Fxc "NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1" "$markers" || true
+  )"
+  enabled_without_saved="$(
+    grep -Fxc \
+      "NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1" \
+      "$markers" || true
+  )"
+  marker_count=$((restored + enabled_without_saved))
+  if [[ -n "$underlay_spec" ]]; then
+    ((marker_count == 1))
+  else
+    ((marker_count == 0))
+  fi
+}
+
 ios_release_network_disconnect_cleanup_inner() {
   local result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
   local stem="${1:-mobile-ios-release-cleanup-$$-$RANDOM}"
@@ -1238,11 +1258,8 @@ ios_release_network_disconnect_cleanup_inner() {
     return 1
   fi
   ios_release_network_copy_markers "$markers" || return 1
-  grep -Fxq "NVPN_IOS_RELEASE_DISCONNECT_PASSED=1" "$markers" \
-    && {
-      [[ -z "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" ]] \
-        || grep -Fxq "NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1" "$markers"
-    } \
+  ios_release_network_validate_disconnect_markers \
+      "$markers" "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
     && ios_release_network_assert_retained_no_secrets \
       "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
       "$host_markers" "$markers"
