@@ -591,6 +591,13 @@ grep -Fq '"NVPN_IOS_RELEASE_RUN_ID=$run_id"' "$ios_release_gate" \
 grep -Fq 'XCTAssertTrue(app.launchArguments.isEmpty)' "$ios_release_ui" \
   && grep -Fq 'XCTAssertTrue(app.launchEnvironment.isEmpty)' "$ios_release_ui" \
   || { echo "iOS Release black-box runner permits app test mutation" >&2; exit 1; }
+grep -Fq '@FocusState private var configFocused: Bool' "$ios_settings" \
+  && grep -Fq '.focused($configFocused)' "$ios_settings" \
+  && grep -Fq '.accessibilityIdentifier("wireguard-keyboard-done")' "$ios_settings" \
+  && grep -Fq 'finishTextEntry(' "$ios_release_ui" "$ios_release_ui_support" \
+  && ! grep -Fq 'typeKey(.escape' "$ios_release_ui" "$ios_release_ui_support" \
+  && ! grep -Fq 'XCUIDevice.shared.press(.home)' "$ios_release_ui_support" \
+  || { echo "iOS WireGuard editor lacks its shipped keyboard Done path" >&2; exit 1; }
 for selector in \
   internet-source-wireguard \
   exit-dns-mode-automatic \

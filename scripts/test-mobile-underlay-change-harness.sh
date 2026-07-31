@@ -427,10 +427,14 @@ for required in (
     "try setWiFiEnabled(false)",
     "try setWiFiEnabled(true)",
     "persistOriginalWiFiForCleanup(originalSsid)",
+    "hasOriginalWiFiForCleanup()",
     "originalWiFiForCleanup()",
 ):
     if required not in android + ios + ios_test:
         raise SystemExit(f"radio-bounce implementation is missing {required}")
+cleanup = ios_test[ios_test.index("func testReleaseDisconnectCleanup()") :]
+if "spec.exerciseUnderlay && hasOriginalWiFiForCleanup()" not in cleanup:
+    raise SystemExit("iOS cleanup requires underlay state that may never have been created")
 gate = android[android.index("run_android_underlay_network_change_gate()") :]
 ordered = [gate.index(needle) for needle in (
     'recovery_requested_ms="$(mobile_underlay_now_ms)"',

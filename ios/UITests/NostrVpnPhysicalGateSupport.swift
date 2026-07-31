@@ -116,6 +116,21 @@ enum ShippedUIInteraction {
         return false
     }
 
+    static func finishTextEntry(
+        _ field: XCUIElement,
+        byTapping control: XCUIElement
+    ) -> Bool {
+        guard control.waitForExistence(timeout: 3), control.isHittable else {
+            return false
+        }
+        control.tap()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, hasKeyboardFocus(field) {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !hasKeyboardFocus(field)
+    }
+
     private static func hasKeyboardFocus(_ field: XCUIElement) -> Bool {
         (field.value(forKey: "hasKeyboardFocus") as? Bool) == true
     }

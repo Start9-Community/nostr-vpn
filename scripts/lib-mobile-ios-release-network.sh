@@ -563,10 +563,12 @@ ios_release_network_delete_private_test_products() {
 ios_release_network_private_data() {
   local mode="$1" spec_base64="$2"
   shift 2
-  [[ "$mode" == "assert" || "$mode" == "redact" ]] || return 2
+  [[ "$mode" == "assert" || "$mode" == "redact" \
+    || "$mode" == "private-visual" ]] || return 2
   if [[ -z "$spec_base64" ]]; then
     [[ "$mode" != "redact" ]] || echo false
-    return 0
+    [[ "$mode" != "private-visual" ]]
+    return
   fi
   NVPN_PRIVATE_RELEASE_SPEC_BASE64="$spec_base64" \
     python3 - "$mode" "$@" <<'PY'
@@ -592,6 +594,8 @@ if isinstance(wireguard, str) and wireguard:
     needles.add(wireguard.encode())
 else:
     wireguard = ""
+if mode == "private-visual":
+    raise SystemExit(0 if wireguard else 1)
 for line in wireguard.splitlines():
     if line.strip().lower().startswith("privatekey"):
         _, _, value = line.partition("=")
@@ -637,13 +641,20 @@ ios_release_network_assert_retained_no_secrets() {
   ios_release_network_private_data assert "$spec_base64" "$@"
 }
 
+ios_release_network_spec_has_private_visual_input() {
+  ios_release_network_private_data private-visual "$1"
+}
+
 ios_release_network_preserve_diagnostics() {
   local spec_base64="$1" log="$2" xcresult="$3"
   local base="${xcresult%.xcresult}"
   local summary="$base-xcresult-summary.json"
   local redaction="$base-diagnostic-redaction.json"
   local log_redacted summary_redacted=false retained_xcresult=false
-  local xcresult_redacted=false
+  local xcresult_redacted=false private_visual_input=false
+  if ios_release_network_spec_has_private_visual_input "$spec_base64"; then
+    private_visual_input=true
+  fi
   mkdir -p "$(dirname "$log")"
   [[ -e "$log" ]] || : >"$log"
   if [[ -d "$xcresult" ]]; then
@@ -654,7 +665,10 @@ ios_release_network_preserve_diagnostics() {
         >"$summary.tmp"
     fi
     mv -f "$summary.tmp" "$summary"
-    if ios_release_network_assert_retained_no_secrets \
+    if [[ "$private_visual_input" == true ]]; then
+      rm -rf "$xcresult"
+      xcresult_redacted=true
+    elif ios_release_network_assert_retained_no_secrets \
       "$spec_base64" "$xcresult" 2>/dev/null
     then
       retained_xcresult=true
@@ -673,9 +687,9 @@ ios_release_network_preserve_diagnostics() {
   )"
   ios_release_network_assert_retained_no_secrets \
     "$spec_base64" "$log" "$xcresult" "$summary"
-  printf '{\n  "logRedacted": %s,\n  "retainedFullXcresult": %s,\n  "summaryRedacted": %s,\n  "xcresultRedactedToSummary": %s\n}\n' \
-    "$log_redacted" "$retained_xcresult" "$summary_redacted" \
-    "$xcresult_redacted" >"$redaction.tmp"
+  printf '{\n  "logRedacted": %s,\n  "privateVisualInputForcedSummaryOnly": %s,\n  "retainedFullXcresult": %s,\n  "summaryRedacted": %s,\n  "xcresultRedactedToSummary": %s\n}\n' \
+    "$log_redacted" "$private_visual_input" "$retained_xcresult" \
+    "$summary_redacted" "$xcresult_redacted" >"$redaction.tmp"
   mv -f "$redaction.tmp" "$redaction"
 }
 

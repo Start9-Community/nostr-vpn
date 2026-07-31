@@ -125,7 +125,8 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         XCTAssertTrue(app.launchEnvironment.isEmpty)
         app.launch()
         XCTAssertTrue(waitForApplicationState(.runningForeground, timeout: 10))
-        if let spec = optionalReleaseSpec(), spec.exerciseUnderlay {
+        if let spec = optionalReleaseSpec(),
+           spec.exerciseUnderlay && hasOriginalWiFiForCleanup() {
             let originalSsid = try originalWiFiForCleanup()
             try setWiFiEnabled(true)
             guard waitForPhysicalPath(
@@ -197,6 +198,12 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
 
         let editor = scrollToElement("wireguard-config")
         replaceText(editor, with: spec.wireGuardConfig)
+        guard ShippedUIInteraction.finishTextEntry(
+            editor,
+            byTapping: app.buttons["wireguard-keyboard-done"]
+        ) else {
+            throw gateError("Shipped WireGuard keyboard Done control was unavailable")
+        }
         let save = scrollToElement("wireguard-save")
         guard save.isEnabled, save.isHittable else {
             throw gateError("Shipped WireGuard Save button was disabled")

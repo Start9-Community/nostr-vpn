@@ -100,6 +100,28 @@ PY
 ios_release_network_assert_retained_no_secrets \
   "$spec" "$private_log" "$private_summary" "$private_redaction"
 
+visual_result="$TEMP_ROOT/visual-only.xcresult"
+visual_log="$TEMP_ROOT/visual-only.log"
+visual_redaction="$TEMP_ROOT/visual-only-diagnostic-redaction.json"
+printf '%s\n' 'ordinary xcode output' >"$visual_log"
+mkdir -p "$visual_result/Data"
+printf '%s\n' 'rendered screenshot bytes without searchable input text' \
+  >"$visual_result/Data/screenshot"
+ios_release_network_preserve_diagnostics \
+  "$spec" "$visual_log" "$visual_result"
+[[ ! -e "$visual_result" ]] \
+  || fail "WireGuard UI xcresult was retained despite visual secret exposure"
+python3 - "$visual_redaction" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+if payload.get("privateVisualInputForcedSummaryOnly") is not True:
+    raise SystemExit("redaction receipt omitted the visual-input policy")
+if payload.get("retainedFullXcresult") is not False:
+    raise SystemExit("redaction receipt claims WireGuard UI xcresult retention")
+PY
+
 pending_log="$TEMP_ROOT/interrupted.log"
 pending_result="$TEMP_ROOT/interrupted.xcresult"
 printf '%s\n' "$spec" >"$pending_log"

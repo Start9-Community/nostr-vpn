@@ -721,6 +721,7 @@ struct WireGuardSettingsCard: View {
     @State private var config = ""
     @State private var lastSyncedConfig: String?
     @State private var importingConfig = false
+    @FocusState private var configFocused: Bool
 
     var body: some View {
         AppCard {
@@ -746,12 +747,22 @@ struct WireGuardSettingsCard: View {
                 .font(.system(.body, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused($configFocused)
                 .frame(minHeight: 180)
                 .accessibilityIdentifier("wireguard-config")
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.secondary.opacity(0.25))
                 )
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button("Done") {
+                            configFocused = false
+                        }
+                        .accessibilityIdentifier("wireguard-keyboard-done")
+                    }
+                }
             HStack {
                 Button("Import File") {
                     importingConfig = true

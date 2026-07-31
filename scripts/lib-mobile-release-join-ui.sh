@@ -7,6 +7,7 @@
 RELEASE_JOIN_ANDROID_UI_XML=""
 RELEASE_JOIN_IOS_TEST_PID=""
 RELEASE_JOIN_IOS_TEST_LOG=""
+RELEASE_JOIN_IOS_TEST_NAME=""
 RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
 RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
@@ -449,7 +450,7 @@ release_join_ios_test_command() {
       xcodebuild
       -quiet
       -xctestrun "$case_xctestrun"
-      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID"
+      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
       -destination-timeout 60
       -collect-test-diagnostics never
       -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
@@ -463,7 +464,7 @@ release_join_ios_test_command() {
       -scheme NostrVpnIos
       -configuration Release
       -derivedDataPath "$RELEASE_JOIN_IOS_DERIVED_DATA"
-      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID"
+      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
       -destination-timeout 60
       -collect-test-diagnostics never
       -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
@@ -501,6 +502,16 @@ release_join_ios_start_test() {
   "${command[@]}" >"$log" 2>&1 &
   RELEASE_JOIN_IOS_TEST_PID=$!
   RELEASE_JOIN_IOS_TEST_LOG="$log"
+  RELEASE_JOIN_IOS_TEST_NAME="$test_name"
+}
+
+release_join_ios_assert_selected_test_started() {
+  local expected="Test Case '-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests $RELEASE_JOIN_IOS_TEST_NAME]' started."
+  grep -Fq "$expected" "$RELEASE_JOIN_IOS_TEST_LOG" || {
+    echo "iOS join xcodebuild selected zero tests: $RELEASE_JOIN_IOS_TEST_NAME" >&2
+    tail -n 120 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
+    return 1
+  }
 }
 
 release_join_ios_wait_marker() {
@@ -534,9 +545,14 @@ release_join_ios_finish_test() {
   local status=0
   wait "$RELEASE_JOIN_IOS_TEST_PID" || status=$?
   RELEASE_JOIN_IOS_TEST_PID=""
+  if [[ "$status" -eq 0 ]] \
+      && ! release_join_ios_assert_selected_test_started; then
+    status=1
+  fi
   if [[ "$status" -ne 0 ]]; then
     tail -n 120 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
   fi
+  RELEASE_JOIN_IOS_TEST_NAME=""
   return "$status"
 }
 

@@ -307,6 +307,10 @@ extension NostrVpnReleaseNetworkUITests {
         return ssid
     }
 
+    func hasOriginalWiFiForCleanup() -> Bool {
+        FileManager.default.fileExists(atPath: originalWiFiCleanupURL.path)
+    }
+
     func clearOriginalWiFiCleanup() throws {
         if FileManager.default.fileExists(atPath: originalWiFiCleanupURL.path) {
             try FileManager.default.removeItem(at: originalWiFiCleanupURL)

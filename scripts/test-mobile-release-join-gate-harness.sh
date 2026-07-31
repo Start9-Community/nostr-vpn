@@ -14,6 +14,13 @@ FILES=(
 for file in "${FILES[@]}"; do
   bash -n "$file"
 done
+join_ui="$ROOT/scripts/lib-mobile-release-join-ui.sh"
+grep -Fq -- '-destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"' \
+  "$join_ui" \
+  || { echo "iOS join runner does not pin the built test architecture" >&2; exit 1; }
+grep -Fq 'RELEASE_JOIN_IOS_TEST_NAME="$test_name"' "$join_ui" \
+  && grep -Fq 'release_join_ios_assert_selected_test_started' "$join_ui" \
+  || { echo "iOS join runner accepts a zero-selected-test success" >&2; exit 1; }
 for file in \
   "$ROOT/scripts/lib-mobile-ios-release-artifact.sh" \
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
@@ -44,6 +51,28 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
   fi
   FAKE_ANDROID_PACKAGES='package:fi.siriusbusiness.nvpn'
   release_join_assert_one_android_package
+)
+
+(
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  log="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-join-selection.XXXXXX")"
+  trap 'rm -f "$log"' EXIT
+  RELEASE_JOIN_IOS_TEST_LOG="$log"
+  RELEASE_JOIN_IOS_TEST_NAME="testSelectedMethod"
+  true &
+  RELEASE_JOIN_IOS_TEST_PID=$!
+  if release_join_ios_finish_test >/dev/null 2>&1; then
+    echo "iOS join runner accepted an exit-0 zero-test run" >&2
+    exit 1
+  fi
+  printf '%s\n' \
+    "Test Case '-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests testSelectedMethod]' started." \
+    >"$log"
+  RELEASE_JOIN_IOS_TEST_NAME="testSelectedMethod"
+  true &
+  RELEASE_JOIN_IOS_TEST_PID=$!
+  release_join_ios_finish_test
 )
 
 for obsolete in \
