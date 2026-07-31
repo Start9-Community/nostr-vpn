@@ -655,6 +655,97 @@ raise SystemExit(1)
 PY
 }
 
+wait_for_crash_ownership_precondition() {
+  local deadline="$((SECONDS + WAIT_SECS))" polls=0
+  while ((SECONDS < deadline)); do
+    polls=$((polls + 1))
+    if cleanup_journal_owns_wireguard_and_dns; then
+      {
+        printf 'polls=%s\n' "$polls"
+        printf 'required_secure_dns_resolver_files=true\n'
+        printf 'required_managed_routes=0.0.0.0/1,128.0.0.0/1\n'
+      } >"$RESULT_DIR/crash-ownership-precondition.txt"
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+capture_crash_ownership_resolver_state() {
+  {
+    printf '%s\n' '--- resolver files ---'
+    ls -ld "$SECURE_RESOLVER" "$MAGIC_RESOLVER" 2>&1 || true
+    printf '%s\n' '--- secure resolver file ---'
+    if [[ -f "$SECURE_RESOLVER" ]]; then
+      cat "$SECURE_RESOLVER" 2>&1 || true
+    else
+      printf 'absent\n'
+    fi
+    printf '%s\n' '--- magic resolver file ---'
+    if [[ -f "$MAGIC_RESOLVER" ]]; then
+      cat "$MAGIC_RESOLVER" 2>&1 || true
+    else
+      printf 'absent\n'
+    fi
+    printf '%s\n' '--- secure DNS dynamic store ---'
+    secure_dns_store_state 2>&1 || true
+    printf '%s\n' '--- effective resolver state ---'
+    /usr/sbin/scutil --dns 2>&1 || true
+  }
+}
+
+capture_crash_ownership_failure() {
+  local journal="$STATE_DIR/daemon.cleanup.json"
+  local snapshot="$RESULT_DIR/crash-ownership-daemon.cleanup.json"
+  if [[ -f "$journal" ]]; then
+    cp -p "$journal" "$snapshot" 2>/dev/null || true
+  fi
+  /usr/bin/python3 - "$snapshot" \
+    >"$RESULT_DIR/crash-ownership-required-fields.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+result = {
+    "snapshot_present": False,
+    "secure_dns_resolver_files": None,
+    "required_managed_routes": {
+        "0.0.0.0/1": [],
+        "128.0.0.0/1": [],
+    },
+}
+try:
+    with open(path, encoding="utf-8") as handle:
+        state = json.load(handle)
+except FileNotFoundError:
+    result["snapshot_error"] = "missing"
+except (OSError, ValueError) as error:
+    result["snapshot_error"] = f"{type(error).__name__}: {error}"
+else:
+    result["snapshot_present"] = True
+    result["secure_dns_resolver_files"] = state.get(
+        "secure_dns_resolver_files"
+    )
+    for route in state.get("managed_routes", []):
+        if not isinstance(route, dict):
+            continue
+        target = route.get("target")
+        if target in result["required_managed_routes"]:
+            result["required_managed_routes"][target].append(route)
+json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"))
+sys.stdout.write("\n")
+PY
+  capture_underlay_routes \
+    >"$RESULT_DIR/crash-ownership-live-routes.txt" 2>&1 || true
+  capture_crash_ownership_resolver_state \
+    >"$RESULT_DIR/crash-ownership-live-resolver-state.txt" 2>&1 || true
+  nvpn status --config "$CONFIG" --json --discover-secs 0 \
+    >"$RESULT_DIR/crash-ownership-daemon-status.json" 2>&1 || true
+  cp -p "$STATE_DIR/daemon.log" \
+    "$RESULT_DIR/crash-ownership-daemon.log" 2>/dev/null || true
+}
+
 no_nvpn_processes() {
   ! pgrep -x nvpn >/dev/null 2>&1
 }
@@ -1204,8 +1295,10 @@ run_crash_restart_gate() {
   local bind_receipts
   assert_single_owned_daemon \
     || fail "SIGKILL gate did not start with exactly one owned daemon"
-  cleanup_journal_owns_wireguard_and_dns \
-    || fail "SIGKILL gate lacks persisted WireGuard route and DNS ownership"
+  if ! wait_for_crash_ownership_precondition; then
+    capture_crash_ownership_failure
+    fail "SIGKILL gate lacks persisted WireGuard route and DNS ownership"
+  fi
   old_pid="$(owned_daemon_pid)"
   bind_baseline="$(
     grep -Fc \
