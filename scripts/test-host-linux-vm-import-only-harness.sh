@@ -324,6 +324,9 @@ require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   'prepare-host-linux-vm-bundle.sh' \
   'release_root="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"' \
   'assert_release_checkout_state' \
+  'harness_sha="$(git -C "$ROOT" rev-parse HEAD)"' \
+  'harness_tree="$(git -C "$ROOT" rev-parse' \
+  '"$ROOT" "$harness_sha" "$harness_tree" "Ubuntu VM guest harness"' \
   'git -C "$root" show "${app_sha}:Cargo.lock"' \
   'git -C "$root" show "${app_sha}:linux/Cargo.lock"' \
   'ubuntu_vm_committed_lock_evidence' \
@@ -356,7 +359,8 @@ require_tokens "$IMPORT_LIB" "unique verified VM import lifecycle" \
   '.builtOnRemoteVm == false' \
   '.builtOnHostMac == false' \
   '.builtOnRemoteVm == true' \
-  'remoteSourceTreeVerified=true' \
+  'artifactProductSourceVerified=true' \
+  'remoteHarnessSourceVerified=true' \
   'remoteArtifactHashesVerified=true' \
   'remoteArtifactSizesVerified=true' \
   'remoteArtifactVersionsVerified=true' \
@@ -515,6 +519,48 @@ recover = cleanup.index("ubuntu_vm_recover_stale_imported_release_bundle")
 if not cancel < recover:
     raise SystemExit(
         "release cleanup does not recover Ubuntu after lane cancellation"
+    )
+PY
+
+python3 - "$IMPORT_LIB" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("ubuntu_vm_import_release_bundle()")
+end = text.index("ubuntu_vm_cleanup_imported_release_bundle()", start)
+importer = text[start:end]
+guest = importer
+
+required = (
+    'harness_sha="${32}"',
+    'harness_tree="${33}"',
+    'rev-parse HEAD)" == "$harness_sha"',
+    'rev-parse \'HEAD^{tree}\')" == "$harness_tree"',
+)
+for token in required:
+    if token not in guest:
+        raise SystemExit(f"guest harness source check lacks {token!r}")
+for forbidden in (
+    'rev-parse HEAD)" == "$app_sha"',
+    'rev-parse \'HEAD^{tree}\')" == "$app_tree"',
+):
+    if forbidden in guest:
+        raise SystemExit(
+            "guest harness source is still compared to frozen product identity"
+        )
+
+product_check = importer.index(
+    '"$release_root" "$app_sha" "$app_tree" "Ubuntu VM host bundle"'
+)
+harness_check = importer.index(
+    '"$ROOT" "$harness_sha" "$harness_tree" "Ubuntu VM guest harness"'
+)
+artifact_verify = importer.index('verify-host-linux-vm-bundle.py')
+guest_verify = importer.index('rev-parse HEAD)" == "$harness_sha"')
+if not product_check < harness_check < artifact_verify < guest_verify:
+    raise SystemExit(
+        "product receipt and guest harness are not verified independently in order"
     )
 PY
 

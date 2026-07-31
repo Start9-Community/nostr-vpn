@@ -207,6 +207,7 @@ ubuntu_vm_import_release_bundle() {
     return 1
   }
   local release_root bundle receipt app_sha app_tree app_version
+  local harness_sha harness_tree
   local fips_sha fips_tree fips_version target evidence_dir remote_dir
   local lock_evidence root_lock_sha root_realized_lock_sha
   local linux_lock_sha linux_realized_lock_sha
@@ -252,6 +253,13 @@ ubuntu_vm_import_release_bundle() {
   assert_release_checkout_state \
     "$release_root" "$app_sha" "$app_tree" "Ubuntu VM host bundle" || {
     ubuntu_vm_import_error "host bundle differs from the exact app checkout"
+    return 1
+  }
+  harness_sha="$(git -C "$ROOT" rev-parse HEAD)" || return 1
+  harness_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" || return 1
+  assert_release_checkout_state \
+    "$ROOT" "$harness_sha" "$harness_tree" "Ubuntu VM guest harness" || {
+    ubuntu_vm_import_error "guest harness checkout is not committed and clean"
     return 1
   }
   release_join_require_clean_fips || {
@@ -381,7 +389,8 @@ GUEST
     "$musl_hash" "$musl_size" \
     "$archive_hash" "$archive_size" \
     "$deb_hash" "$deb_size" \
-    "$builder_mode" "$dockerfile_sha" "$payload_sha" <<'GUEST'
+    "$builder_mode" "$dockerfile_sha" "$payload_sha" \
+    "$harness_sha" "$harness_tree" <<'GUEST'
 set -euo pipefail
 remote_dir="$1"
 guest_repo="$2"
@@ -414,6 +423,8 @@ deb_size="${28}"
 builder_mode="${29}"
 dockerfile_sha="${30}"
 payload_sha="${31}"
+harness_sha="${32}"
+harness_tree="${33}"
 write_import_phase() {
   local phase="$1"
   local phase_temp
@@ -434,8 +445,8 @@ case "$remote_dir" in
 esac
 [[ -d "$remote_dir" && -O "$remote_dir" && ! -L "$remote_dir" ]]
 chmod 0700 "$remote_dir"
-[[ "$(git -C "$guest_repo" rev-parse HEAD)" == "$app_sha" ]]
-[[ "$(git -C "$guest_repo" rev-parse 'HEAD^{tree}')" == "$app_tree" ]]
+[[ "$(git -C "$guest_repo" rev-parse HEAD)" == "$harness_sha" ]]
+[[ "$(git -C "$guest_repo" rev-parse 'HEAD^{tree}')" == "$harness_tree" ]]
 [[ -z "$(git -C "$guest_repo" status --porcelain --untracked-files=all)" ]]
 [[ "$(sha256sum "$guest_repo/Cargo.lock" | awk '{ print $1 }')" == "$root_lock_sha" ]]
 [[ "$(sha256sum "$guest_repo/linux/Cargo.lock" | awk '{ print $1 }')" == "$linux_lock_sha" ]]
@@ -748,6 +759,8 @@ GUEST
     printf 'appGitTree=%s\n' "$app_tree"
     printf 'fipsGitSha=%s\n' "$fips_sha"
     printf 'fipsGitTree=%s\n' "$fips_tree"
+    printf 'harnessGitSha=%s\n' "$harness_sha"
+    printf 'harnessGitTree=%s\n' "$harness_tree"
     printf 'rootCargoLockSha256=%s\n' "$root_lock_sha"
     printf 'rootRealizedCargoLockSha256=%s\n' "$root_realized_lock_sha"
     printf 'linuxCargoLockSha256=%s\n' "$linux_lock_sha"
@@ -755,7 +768,8 @@ GUEST
     printf 'fipsPatchedLockPackages=%s,%s,%s\n' \
       "${fips_patch_packages[@]}"
     printf 'target=%s\n' "$target"
-    printf 'remoteSourceTreeVerified=true\n'
+    printf 'artifactProductSourceVerified=true\n'
+    printf 'remoteHarnessSourceVerified=true\n'
     printf 'remoteArtifactHashesVerified=true\n'
     printf 'remoteArtifactSizesVerified=true\n'
     printf 'remoteArtifactVersionsVerified=true\n'
