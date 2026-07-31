@@ -313,7 +313,7 @@ release_join_prepare_android_release() {
       | sed -n 's/^package://p' \
       | head -n 1
   )"
-  pulled="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-installed.XXXXXX.apk")"
+  pulled="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-installed.XXXXXX")"
   "${ADB[@]}" pull "$remote_path" "$pulled" >/dev/null
   apk_sha="$(release_join_sha256 "$apk")"
   installed_sha="$(release_join_sha256 "$pulled")"

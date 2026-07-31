@@ -233,7 +233,7 @@ verify_android_release_install() {
     echo "Android Release install has no canonical package path" >&2
     return 1
   }
-  pulled="$(mktemp "${TMPDIR:-/tmp}/nvpn-installed-release.XXXXXX.apk")"
+  pulled="$(mktemp "${TMPDIR:-/tmp}/nvpn-installed-release.XXXXXX")"
   if ! "$ADB" -s "$serial" pull "$remote_path" "$pulled" >/dev/null 2>&1; then
     rm -f "$pulled"
     echo "Android Release installed APK could not be copied for exact comparison" >&2

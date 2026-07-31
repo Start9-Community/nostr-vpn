@@ -14,12 +14,42 @@ fail() {
 # shellcheck disable=SC1090
 source "$RUNNER"
 NVPN_IOS_XCTEST_TERM_GRACE_SECS=1
+IOS_BUNDLE_ID=fi.siriusbusiness.nvpn
+
+python3 - \
+  "$ROOT/scripts/lib-mobile-android-release-gate.sh" \
+  "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" \
+  "$RUNNER" <<'PY'
+import pathlib
+import re
+import sys
+
+contracts = (
+    (sys.argv[1], "nvpn-installed-release"),
+    (sys.argv[2], "nvpn-release-installed"),
+    (sys.argv[3], "NostrVpnIos-$label.xctestrun"),
+)
+for source_path, stem in contracts:
+    source = pathlib.Path(source_path).read_text(encoding="utf-8")
+    match = re.search(rf'mktemp "([^"\n]*{re.escape(stem)}[^"\n]*)"', source)
+    if match is None:
+        raise SystemExit(f"missing exact temporary-file contract for {stem}")
+    if not match.group(1).endswith("XXXXXX"):
+        raise SystemExit(f"BSD mktemp template has a suffix after XXXXXX: {stem}")
+PY
+for stem in nvpn-installed-release nvpn-release-installed NostrVpnIos-case.xctestrun; do
+  first="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"
+  second="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"
+  [[ "$first" != "$second" && -f "$first" && -f "$second" ]] \
+    || fail "two consecutive BSD-style mktemp calls collided for $stem"
+  rm -f "$first" "$second"
+done
 
 run_bounded() {
   local name="$1" timeout="$2" launch_timeout="$3" marker="$4"
   shift 4
   ios_release_network_run_bounded_xcode \
-    "$name" "$timeout" "$launch_timeout" "$marker" \
+    "$name" "$timeout" "$launch_timeout" "$marker" "" \
     "$TEMP_ROOT/$name.log" "$TEMP_ROOT/$name-markers.tsv" "" "" \
     "$@"
 }
@@ -28,6 +58,67 @@ run_bounded success 5 2 FIRST \
   bash -c 'printf "FIRST\nordinary output\n"'
 grep -Fxq FIRST "$TEMP_ROOT/success.log" \
   || fail "bounded runner did not retain command output"
+
+device_marker="$TEMP_ROOT/device-marker.log"
+printf '%s\n' \
+  'NVPN_XCUITEST_RUN_ID=device-marker' \
+  'NVPN_XCUITEST_STARTED=1' >"$device_marker"
+(
+  ios_release_network_copy_runner_markers() {
+    cp "$device_marker" "$2"
+  }
+  ios_release_network_clear_forced_xctrunner() {
+    fail "device marker success unexpectedly cleared the XCTest runner"
+  }
+  ios_release_network_run_bounded_xcode \
+    device-marker 5 1 NVPN_XCUITEST_STARTED=1 device-marker \
+    "$TEMP_ROOT/device-marker.log.output" \
+    "$TEMP_ROOT/device-marker-host-markers.tsv" \
+    fixture-device "" \
+    bash -c 'printf "Running tests...\n"; sleep 2'
+)
+grep -Fq 'Running tests...' "$TEMP_ROOT/device-marker.log.output" \
+  || fail "device-marker fixture did not retain runner launch output"
+if grep -Fq NVPN_XCUITEST_STARTED=1 "$TEMP_ROOT/device-marker.log.output"; then
+  fail "device-marker fixture accidentally streamed the first marker"
+fi
+
+scoped_cleanup_log="$TEMP_ROOT/scoped-cleanup.log"
+stale_device_marker="$TEMP_ROOT/stale-device-marker.log"
+printf '%s\n' \
+  'NVPN_XCUITEST_RUN_ID=stale-run' \
+  'NVPN_XCUITEST_STARTED=1' >"$stale_device_marker"
+set +e
+(
+  ios_release_network_copy_runner_markers() {
+    cp "$stale_device_marker" "$2"
+  }
+  ios_release_network_xctrunner_installed() {
+    printf '%s\n' installation-probe >>"$scoped_cleanup_log"
+    return 1
+  }
+  xcrun() {
+    printf 'xcrun %s\n' "$*" >>"$scoped_cleanup_log"
+  }
+  ios_release_network_run_bounded_xcode \
+    device-no-marker 5 1 NVPN_XCUITEST_STARTED=1 device-no-marker \
+    "$TEMP_ROOT/device-no-marker.log" \
+    "$TEMP_ROOT/device-no-marker-host-markers.tsv" \
+    fixture-device "" \
+    bash -c 'sleep 10'
+)
+device_no_marker_status=$?
+set -e
+[[ "$device_no_marker_status" -eq 125 ]] \
+  || fail "device no-marker timeout returned $device_no_marker_status instead of 125"
+grep -Fxq \
+  'xcrun devicectl device uninstall app --device fixture-device fi.siriusbusiness.nvpn.UITests.xctrunner --quiet' \
+  "$scoped_cleanup_log" \
+  || fail "forced launch timeout did not uninstall only the nVPN XCTest runner"
+[[ "$(grep -Fxc installation-probe "$scoped_cleanup_log")" -eq 1 ]] \
+  || fail "forced launch timeout did not wait for scoped runner absence"
+[[ "$(grep -c '^xcrun ' "$scoped_cleanup_log")" -eq 1 ]] \
+  || fail "forced launch timeout performed broad or repeated device cleanup"
 
 set +e
 run_bounded missing-marker 5 2 NEVER \
@@ -181,6 +272,7 @@ for token in \
   'ios_release_network_write_runner_diagnostics' \
   'ios_release_network_preserve_diagnostics' \
   'ios_release_network_validate_disconnect_markers' \
+  'NVPN_XCUITEST_RUN_ID=$runner_run_id' \
   'NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS' \
   'NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS' \
   'NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS'
