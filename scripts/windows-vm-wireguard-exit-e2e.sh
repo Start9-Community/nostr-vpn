@@ -26,6 +26,11 @@ GUEST_ARTIFACT_ROOT="${GUEST_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts}"
 GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:-$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\nvpn.exe}"
 GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:-$GUEST_ARTIFACT_ROOT\\windows-installer-gate\\installer-receipt.json}"
 HOST_INSTALLER_RECEIPT="${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH to the host-copied installer receipt}"
+HOST_SOURCE_FIPS_RECEIPT="${NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH to the host-copied crates.io source receipt}"
+LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:?set NVPN_FIPS_REPO_PATH to the exact FIPS release checkout}"
+EXPECTED_FIPS_SHA="${NVPN_EXPECTED_FIPS_GIT_SHA:?set NVPN_EXPECTED_FIPS_GIT_SHA}"
+EXPECTED_FIPS_TREE="${NVPN_EXPECTED_FIPS_GIT_TREE:?set NVPN_EXPECTED_FIPS_GIT_TREE}"
+EXPECTED_FIPS_VERSION="${NVPN_EXPECTED_FIPS_VERSION:?set NVPN_EXPECTED_FIPS_VERSION}"
 PROVIDER_CONFIG="${NVPN_WINDOWS_WG_EXIT_CONFIG_FILE:-${NVPN_WG_EXIT_CONFIG_FILE:-}}"
 REQUIRE_PROVIDER_E2E="${NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E:-0}"
 PROBE_URL="${NVPN_WINDOWS_E2E_INTERNET_URL:-https://example.com/}"
@@ -47,6 +52,7 @@ HTTP_PROBE_TOKEN="${NVPN_WINDOWS_WG_HTTP_TOKEN:-nvpn-windows-$PPID-$$-$RANDOM}"
 IMAGE="${NVPN_WINDOWS_WG_FIXTURE_IMAGE:-nostr-vpn-windows-wireguard-exit-e2e}"
 CONTAINER="${NVPN_WINDOWS_WG_FIXTURE_CONTAINER:-nostr-vpn-windows-wireguard-exit-e2e-$$}"
 FIXTURE_DIR=""
+ARTIFACT_DIR="${NVPN_WINDOWS_WG_ARTIFACT_DIR:-$ROOT/artifacts/windows-wireguard-exit-$$}"
 FIXTURE_ACTIVE=0
 FIXTURE_INITIALIZED=0
 EXPECTED_EXIT_SOURCE_IP=""
@@ -366,6 +372,11 @@ fi
   echo "host-copied Windows installer receipt is unreadable: $HOST_INSTALLER_RECEIPT" >&2
   exit 2
 }
+[[ -f "$HOST_SOURCE_FIPS_RECEIPT" && -r "$HOST_SOURCE_FIPS_RECEIPT" ]] || {
+  echo "host-copied Windows crates.io source receipt is unreadable: $HOST_SOURCE_FIPS_RECEIPT" >&2
+  exit 2
+}
+mkdir -p "$ARTIFACT_DIR"
 EXPECTED_INSTALLER_RECEIPT_SHA256="$(shasum -a 256 "$HOST_INSTALLER_RECEIPT" | awk '{ print $1 }')"
 [[ "$EXPECTED_INSTALLER_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
   echo "host-copied Windows installer receipt has no SHA-256" >&2
@@ -386,16 +397,29 @@ fi
 
 EXPECTED_HEAD="${NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA:-${NVPN_EXPECTED_APP_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD)}}"
 EXPECTED_TREE="${NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE:-${NVPN_EXPECTED_APP_GIT_TREE:-$(git -C "$ROOT" rev-parse "$EXPECTED_HEAD^{tree}")}}"
+HARNESS_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+HARNESS_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ && "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]] || {
   echo "Windows WG e2e requires an exact packaged app revision and tree" >&2
   exit 2
 }
+node "$ROOT/scripts/release-source-verification.mjs" \
+  windows-cratesio-provenance \
+  "$HOST_SOURCE_FIPS_RECEIPT" \
+  "$HOST_INSTALLER_RECEIPT" \
+  "$EXPECTED_HEAD" \
+  "$EXPECTED_TREE" \
+  "$LOCAL_FIPS_REPO" \
+  "$EXPECTED_FIPS_SHA" \
+  "$EXPECTED_FIPS_TREE" \
+  "$EXPECTED_FIPS_VERSION" \
+  >"$ARTIFACT_DIR/cratesio-provenance-validation.json"
 case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
     echo "Skipping Windows VM git sync; release-gate lane already synced the candidate."
     ;;
   *)
-    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$EXPECTED_HEAD" \
+    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$HARNESS_HEAD" \
       "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST"
     ;;
 esac
@@ -410,8 +434,8 @@ REMOTE_TREE="$(
     | tr -d '\r' \
     | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }'
 )"
-[[ "$REMOTE_HEAD" == "$EXPECTED_HEAD" && "$REMOTE_TREE" == "$EXPECTED_TREE" ]] || {
-  echo "Windows WG e2e checkout differs from the exact candidate tree" >&2
+[[ "$REMOTE_HEAD" == "$HARNESS_HEAD" && "$REMOTE_TREE" == "$HARNESS_TREE" ]] || {
+  echo "Windows WG e2e checkout differs from the exact harness tree" >&2
   exit 1
 }
 
@@ -456,6 +480,9 @@ if (
   \$Receipt.artifactType -ne 'exact installed Windows Release setup' -or
   \$Receipt.appGitSha -ne $(ps_quote "$EXPECTED_HEAD") -or
   \$Receipt.appGitTree -ne $(ps_quote "$EXPECTED_TREE") -or
+  \$Receipt.fipsGitSha -ne $(ps_quote "$EXPECTED_FIPS_SHA") -or
+  \$Receipt.fipsGitTree -ne $(ps_quote "$EXPECTED_FIPS_TREE") -or
+  \$Receipt.fipsVersion -ne $(ps_quote "$EXPECTED_FIPS_VERSION") -or
   \$Receipt.installerInstalledAndLaunched -ne \$true -or
   \$Receipt.installedAppStayedAlive -ne \$true -or
   \$Receipt.payloads.cli.sha256 -ne \$ExpectedBinarySha256.ToLowerInvariant() -or

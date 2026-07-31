@@ -56,11 +56,14 @@ fi
 for proof in \
   'NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA' \
   'NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE' \
-  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$EXPECTED_HEAD"' \
-  '[[ "$REMOTE_HEAD" == "$EXPECTED_HEAD" && "$REMOTE_TREE" == "$EXPECTED_TREE" ]]' \
-  'Windows WG e2e checkout differs from the exact candidate tree' \
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$HARNESS_HEAD"' \
+  '[[ "$REMOTE_HEAD" == "$HARNESS_HEAD" && "$REMOTE_TREE" == "$HARNESS_TREE" ]]' \
+  'Windows WG e2e checkout differs from the exact harness tree' \
   'exact installed Windows Release setup' \
   'NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH' \
+  'NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH' \
+  'windows-cratesio-provenance' \
+  '\$Receipt.fipsGitSha -ne $(ps_quote "$EXPECTED_FIPS_SHA")' \
   'WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=' \
   '\$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256")' \
   'Windows WG e2e CLI differs from the exact installed-and-launched installer payload' \

@@ -13,6 +13,7 @@ import {
 const scriptsDir = dirname(fileURLToPath(import.meta.url))
 const defaultCandidateRoot = resolve(scriptsDir, '..')
 const fipsPackageNames = ['fips-core', 'fips-endpoint', 'fips-identity']
+const cratesIoSource = 'registry+https://github.com/rust-lang/crates.io-index'
 
 function requireRegularFile(path, label) {
   const metadata = lstatSync(path)
@@ -52,6 +53,218 @@ function requireExactFields(receipt, expected, label) {
       throw new Error(`${label} ${field} differs from the exact candidate.`)
     }
   }
+}
+
+function cargoLockRegistryPackage(lock, name, version) {
+  const matches = lock
+    .split(/^\[\[package\]\]\s*$/m)
+    .slice(1)
+    .filter((block) =>
+      new RegExp(`^name = "${name}"$`, 'm').test(block)
+      && new RegExp(`^version = "${version.replaceAll('.', '\\.')}"$`, 'm')
+        .test(block),
+    )
+  if (matches.length !== 1) {
+    throw new Error(
+      `Cargo.lock must contain exactly one ${name} ${version} package.`,
+    )
+  }
+  const source = matches[0].match(/^source = "([^"]+)"$/m)?.[1] ?? ''
+  const checksum = matches[0].match(/^checksum = "([0-9a-f]{64})"$/m)?.[1] ?? ''
+  if (source !== cratesIoSource || !/^[0-9a-f]{64}$/.test(checksum)) {
+    throw new Error(
+      `Cargo.lock does not bind ${name} ${version} to an exact crates.io checksum.`,
+    )
+  }
+  return { source, checksum }
+}
+
+function requireFilePayload(receipt, name, label) {
+  const payload = receipt?.payloads?.[name]
+  if (
+    !/^[0-9a-f]{64}$/.test(String(payload?.sha256 ?? ''))
+    || !Number.isSafeInteger(payload?.size)
+    || payload.size <= 0
+  ) {
+    throw new Error(`${label} has an invalid ${name} payload.`)
+  }
+  return payload
+}
+
+export function validateWindowsCratesIoReceipts({
+  sourceReceipt,
+  artifactReceipt,
+  exactPackages,
+  expectedAppGitSha,
+  expectedAppGitTree,
+  expectedFipsGitSha,
+  expectedFipsGitTree,
+  expectedFipsVersion,
+}) {
+  requireExactFields(
+    sourceReceipt,
+    {
+      receiptSchema: 1,
+      platform: 'windows',
+      appGitSha: expectedAppGitSha,
+      appGitTree: expectedAppGitTree,
+      sourceClean: true,
+      fipsReleaseGitSha: expectedFipsGitSha,
+      fipsReleaseGitTree: expectedFipsGitTree,
+      fipsReleaseTag: `v${expectedFipsVersion}`,
+      fipsVersion: expectedFipsVersion,
+    },
+    'Windows exact crates.io source receipt',
+  )
+  if (
+    JSON.stringify(sourceReceipt.fipsCrates)
+    !== JSON.stringify(exactPackages)
+  ) {
+    throw new Error(
+      'Windows exact crates.io source receipt package checksums/VCS differ from Cargo.',
+    )
+  }
+  requireExactFields(
+    artifactReceipt,
+    {
+      receiptSchema: 1,
+      platform: 'windows',
+      artifactType: 'exact installed Windows Release setup',
+      appGitSha: expectedAppGitSha,
+      appGitTree: expectedAppGitTree,
+      fipsGitSha: expectedFipsGitSha,
+      fipsGitTree: expectedFipsGitTree,
+      fipsVersion: expectedFipsVersion,
+      installerInstalledAndLaunched: true,
+      installedAppStayedAlive: true,
+      builtOnWindowsVm: true,
+      builtOnHostMac: false,
+    },
+    'Windows exact installed-artifact receipt',
+  )
+  const payloadNames = ['app', 'appCore', 'cli', 'wintun']
+  if (
+    JSON.stringify(Object.keys(artifactReceipt.payloads ?? {}).sort())
+    !== JSON.stringify([...payloadNames].sort())
+  ) {
+    throw new Error('Windows exact installed-artifact receipt has the wrong payload set.')
+  }
+  const payloads = Object.fromEntries(
+    payloadNames.map((name) => [
+      name,
+      requireFilePayload(
+        artifactReceipt,
+        name,
+        'Windows exact installed-artifact receipt',
+      ),
+    ]),
+  )
+  return {
+    expectedFipsVersion,
+    cliSha256: payloads.cli.sha256,
+    cliSize: payloads.cli.size,
+    exactPackages,
+  }
+}
+
+export function validateWindowsCratesIoFipsProvenance({
+  sourceReceipt,
+  artifactReceipt,
+  candidateRoot = defaultCandidateRoot,
+  expectedAppGitSha,
+  expectedAppGitTree,
+  fipsRoot,
+  expectedFipsGitSha,
+  expectedFipsGitTree,
+  expectedFipsVersion,
+}) {
+  const exactCandidateRoot = realpathSync(candidateRoot)
+  const exactFipsRoot = realpathSync(fipsRoot)
+  const appTree = captureRequired(
+    'git',
+    ['rev-parse', `${expectedAppGitSha}^{tree}`],
+    {
+      cwd: exactCandidateRoot,
+      env: process.env,
+      label: 'Windows packaged app tree',
+    },
+  )
+  if (appTree !== expectedAppGitTree) {
+    throw new Error('Windows packaged app commit/tree differs from the receipt.')
+  }
+  exactCleanGitCheckout({
+    root: exactFipsRoot,
+    env: process.env,
+    label: 'Windows crates.io provenance FIPS',
+    expectedCommit: expectedFipsGitSha,
+    expectedTree: expectedFipsGitTree,
+  })
+
+  const lock = readFileSync(join(exactCandidateRoot, 'Cargo.lock'), 'utf8')
+  const metadata = JSON.parse(captureRequired(
+    'cargo',
+    ['metadata', '--locked', '--format-version', '1'],
+    {
+      cwd: exactCandidateRoot,
+      env: { ...process.env, NVPN_FIPS_REPO_PATH: '' },
+      label: 'Windows crates.io provenance metadata',
+    },
+  ))
+  const expectedVersions = {
+    'fips-core': expectedFipsVersion,
+    'fips-endpoint': expectedFipsVersion,
+    'fips-identity': '0.3.2',
+  }
+  const exactPackages = {}
+  for (const name of fipsPackageNames) {
+    const version = expectedVersions[name]
+    const matches = metadata.packages.filter(
+      (item) => item.name === name && item.version === version,
+    )
+    if (matches.length !== 1 || matches[0].source !== cratesIoSource) {
+      throw new Error(
+        `Cargo metadata does not resolve exact crates.io ${name} ${version}.`,
+      )
+    }
+    const lockPackage = cargoLockRegistryPackage(lock, name, version)
+    const vcsPath = join(dirname(matches[0].manifest_path), '.cargo_vcs_info.json')
+    requireRegularFile(vcsPath, `${name} crates.io VCS receipt`)
+    let vcs
+    try {
+      vcs = JSON.parse(readFileSync(vcsPath, 'utf8'))
+    } catch {
+      throw new Error(`${name} crates.io VCS receipt is invalid.`)
+    }
+    const packageVcsSha = String(vcs?.git?.sha1 ?? '')
+    const pathInVcs = String(vcs?.path_in_vcs ?? '')
+    if (!/^[0-9a-f]{40}$/.test(packageVcsSha) || !pathInVcs) {
+      throw new Error(`${name} crates.io VCS receipt is incomplete.`)
+    }
+    if (
+      (name === 'fips-core' || name === 'fips-endpoint')
+      && packageVcsSha !== expectedFipsGitSha
+    ) {
+      throw new Error(`${name} was not packaged from the exact FIPS release.`)
+    }
+    exactPackages[name] = {
+      version,
+      source: lockPackage.source,
+      cargoLockChecksum: lockPackage.checksum,
+      packageVcsSha,
+      pathInVcs,
+    }
+  }
+
+  return validateWindowsCratesIoReceipts({
+    sourceReceipt,
+    artifactReceipt,
+    exactPackages,
+    expectedAppGitSha,
+    expectedAppGitTree,
+    expectedFipsGitSha,
+    expectedFipsGitTree,
+    expectedFipsVersion,
+  })
 }
 
 function exactCleanGitCheckout({
@@ -511,4 +724,49 @@ export function linuxPublicationVerificationPlan({
       ...fips.fipsSpecifications,
     ],
   }
+}
+
+if (
+  process.argv[1]
+  && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const [
+    command,
+    sourceReceiptPath,
+    artifactReceiptPath,
+    expectedAppGitSha,
+    expectedAppGitTree,
+    fipsRoot,
+    expectedFipsGitSha,
+    expectedFipsGitTree,
+    expectedFipsVersion,
+  ] = process.argv.slice(2)
+  if (
+    command !== 'windows-cratesio-provenance'
+    || !sourceReceiptPath
+    || !artifactReceiptPath
+    || !expectedAppGitSha
+    || !expectedAppGitTree
+    || !fipsRoot
+    || !expectedFipsGitSha
+    || !expectedFipsGitTree
+    || !expectedFipsVersion
+  ) {
+    throw new Error(
+      'Usage: release-source-verification.mjs windows-cratesio-provenance ' +
+      '<source-receipt> <artifact-receipt> <app-sha> <app-tree> ' +
+      '<fips-root> <fips-sha> <fips-tree> <fips-version>',
+    )
+  }
+  const result = validateWindowsCratesIoFipsProvenance({
+    sourceReceipt: JSON.parse(readFileSync(sourceReceiptPath, 'utf8')),
+    artifactReceipt: JSON.parse(readFileSync(artifactReceiptPath, 'utf8')),
+    expectedAppGitSha,
+    expectedAppGitTree,
+    fipsRoot,
+    expectedFipsGitSha,
+    expectedFipsGitTree,
+    expectedFipsVersion,
+  })
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
 }

@@ -24,10 +24,14 @@ GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\nvpn-desktop-unde
 GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:?set NVPN_WINDOWS_EXACT_CLI_PATH to the packaged Windows CLI}"
 GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_INSTALLER_RECEIPT_PATH to its installer receipt}"
 HOST_INSTALLER_RECEIPT="${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH to the host-copied installer receipt}"
+HOST_SOURCE_FIPS_RECEIPT="${NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH to the host-copied crates.io source receipt}"
 ARTIFACT_APP_SHA="${NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA:-${NVPN_EXPECTED_APP_GIT_SHA:-}}"
 ARTIFACT_APP_TREE="${NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE:-${NVPN_EXPECTED_APP_GIT_TREE:-}}"
 LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
-EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
+EXPECTED_FIPS_SHA="${NVPN_EXPECTED_FIPS_GIT_SHA:?set NVPN_EXPECTED_FIPS_GIT_SHA}"
+EXPECTED_FIPS_TREE="${NVPN_EXPECTED_FIPS_GIT_TREE:?set NVPN_EXPECTED_FIPS_GIT_TREE}"
+EXPECTED_FIPS_VERSION="${NVPN_EXPECTED_FIPS_VERSION:?set NVPN_EXPECTED_FIPS_VERSION}"
+EXPECTED_FIPS_REV=""
 FIPS_SOURCE_REVISION=""
 HYPERVISOR_BINARY=""
 RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
@@ -92,29 +96,22 @@ source "$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
 
 [[ -f "$HOST_INSTALLER_RECEIPT" && -r "$HOST_INSTALLER_RECEIPT" ]] \
   || fail "host-copied Windows installer receipt is unreadable: $HOST_INSTALLER_RECEIPT"
+[[ -f "$HOST_SOURCE_FIPS_RECEIPT" && -r "$HOST_SOURCE_FIPS_RECEIPT" ]] \
+  || fail "host-copied Windows crates.io source receipt is unreadable: $HOST_SOURCE_FIPS_RECEIPT"
 EXPECTED_INSTALLER_RECEIPT_SHA256="$(shasum -a 256 "$HOST_INSTALLER_RECEIPT" | awk '{ print $1 }')"
 [[ "$EXPECTED_INSTALLER_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || fail "host-copied Windows installer receipt has no SHA-256"
 
 resolve_expected_fips_revision() {
-  local local_revision
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    [[ -z "$(git -C "$LOCAL_FIPS_REPO" status --porcelain --untracked-files=all)" ]] \
-      || fail "the exact FIPS release-gate checkout must be committed and clean"
-    local_revision="$(git -C "$LOCAL_FIPS_REPO" rev-parse HEAD)"
-    if [[ -n "$EXPECTED_FIPS_REV" \
-      && "$local_revision" != "$EXPECTED_FIPS_REV"* \
-      && "$EXPECTED_FIPS_REV" != "$local_revision"* ]]
-    then
-      fail "NVPN_EXPECTED_FIPS_REV differs from the local FIPS candidate"
-    fi
-    FIPS_SOURCE_REVISION="$local_revision"
-    EXPECTED_FIPS_REV="${local_revision:0:10}"
-  else
-    EXPECTED_FIPS_REV="${EXPECTED_FIPS_REV:0:10}"
-  fi
-  [[ "$EXPECTED_FIPS_REV" =~ ^[0-9a-f]{10}$ ]] \
-    || fail "set NVPN_EXPECTED_FIPS_REV to the intended FIPS Git revision"
+  [[ -n "$LOCAL_FIPS_REPO" ]] \
+    || fail "set NVPN_FIPS_REPO_PATH to the exact FIPS release checkout"
+  [[ -z "$(git -C "$LOCAL_FIPS_REPO" status --porcelain --untracked-files=all)" ]] \
+    || fail "the exact FIPS release-gate checkout must be committed and clean"
+  FIPS_SOURCE_REVISION="$(git -C "$LOCAL_FIPS_REPO" rev-parse HEAD)"
+  [[ "$FIPS_SOURCE_REVISION" == "$EXPECTED_FIPS_SHA" \
+    && "$(git -C "$LOCAL_FIPS_REPO" rev-parse 'HEAD^{tree}')" == "$EXPECTED_FIPS_TREE" ]] \
+    || fail "local FIPS checkout differs from the exact crates.io release"
+  EXPECTED_FIPS_REV="${EXPECTED_FIPS_SHA:0:10}"
 }
 
 sync_and_import_candidates() {
@@ -129,6 +126,17 @@ sync_and_import_candidates() {
   harness_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
   desktop_underlay_assert_app_candidate "$harness_sha" "$harness_tree" \
     || fail "Windows underlay harness checkout is not committed and clean"
+  node "$ROOT/scripts/release-source-verification.mjs" \
+    windows-cratesio-provenance \
+    "$HOST_SOURCE_FIPS_RECEIPT" \
+    "$HOST_INSTALLER_RECEIPT" \
+    "$ARTIFACT_APP_SHA" \
+    "$ARTIFACT_APP_TREE" \
+    "$LOCAL_FIPS_REPO" \
+    "$EXPECTED_FIPS_SHA" \
+    "$EXPECTED_FIPS_TREE" \
+    "$EXPECTED_FIPS_VERSION" \
+    >"$ARTIFACT_DIR/cratesio-provenance-validation.json"
   {
     printf 'nvpn_base_commit=%s\n' "$ARTIFACT_APP_SHA"
     printf 'nvpn_tree=%s\n' "$ARTIFACT_APP_TREE"
@@ -149,7 +157,7 @@ sync_and_import_candidates() {
     NVPN_WINDOWS_GUEST_FIPS_REPO_PATH="$GUEST_FIPS_REPO" \
     NVPN_WINDOWS_FIPS_REPO_PATH="${LOCAL_FIPS_REPO:-$ROOT/../fips}" \
     NVPN_WINDOWS_SYNC_PATH_DEPS="$([[ -n "$LOCAL_FIPS_REPO" ]] && echo 1 || echo 0)" \
-    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$ARTIFACT_APP_SHA" \
+    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$harness_sha" \
     "$ROOT/scripts/windows-vm-git-sync.sh" "$WINDOWS_SSH"
 
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
@@ -172,9 +180,9 @@ sync_and_import_candidates() {
     "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
     | tr -d '\r' \
     | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
-  [[ "$windows_head" == "$ARTIFACT_APP_SHA" \
-    && "$windows_tree" == "$ARTIFACT_APP_TREE" ]] \
-    || fail "Windows checkout differs from the packaged app revision/tree"
+  [[ "$windows_head" == "$harness_sha" \
+    && "$windows_tree" == "$harness_tree" ]] \
+    || fail "Windows checkout differs from the exact harness revision/tree"
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     windows_fips_tree="$(run_ps_primary \
       "git -C $(ps_quote "$GUEST_FIPS_REPO") rev-parse 'HEAD^{tree}'" \
@@ -208,6 +216,9 @@ if (
   \$Receipt.artifactType -ne 'exact installed Windows Release setup' -or
   \$Receipt.appGitSha -ne $(ps_quote "$ARTIFACT_APP_SHA") -or
   \$Receipt.appGitTree -ne $(ps_quote "$ARTIFACT_APP_TREE") -or
+  \$Receipt.fipsGitSha -ne $(ps_quote "$EXPECTED_FIPS_SHA") -or
+  \$Receipt.fipsGitTree -ne $(ps_quote "$EXPECTED_FIPS_TREE") -or
+  \$Receipt.fipsVersion -ne $(ps_quote "$EXPECTED_FIPS_VERSION") -or
   \$Receipt.installerInstalledAndLaunched -ne \$true -or
   \$Receipt.installedAppStayedAlive -ne \$true -or
   \$Receipt.payloads.cli.sha256 -ne \$CliHash -or
@@ -230,16 +241,17 @@ Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$CliHash\"" \
 }
 
 capture_version_receipts() {
-  local expected="(rev $EXPECTED_FIPS_REV)" target_sha target_size
+  local target_expected="fips_core_version: $EXPECTED_FIPS_VERSION"
+  local peer_expected="(rev $EXPECTED_FIPS_REV)" target_sha target_size
   run_ps_primary \
     "& $(ps_quote "$GUEST_BINARY") version --verbose" \
     | tr -d '\r' >"$ARTIFACT_DIR/target-version.txt"
   ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
     "'$HYPERVISOR_BINARY' version --verbose" \
     >"$ARTIFACT_DIR/peer-version.txt"
-  grep -Fq "$expected" "$ARTIFACT_DIR/target-version.txt" \
-    || fail "Windows target binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
-  grep -Fq "$expected" "$ARTIFACT_DIR/peer-version.txt" \
+  grep -Fxq "$target_expected" "$ARTIFACT_DIR/target-version.txt" \
+    || fail "Windows target binary does not report exact FIPS version $EXPECTED_FIPS_VERSION"
+  grep -Fq "$peer_expected" "$ARTIFACT_DIR/peer-version.txt" \
     || fail "Windows peer binary does not embed exact FIPS revision $EXPECTED_FIPS_REV"
   target_sha="$(
     run_ps_primary \
@@ -462,7 +474,7 @@ start_windows_runner() {
 -WireGuardInterface $(ps_quote "$WG_TARGET_INTERFACE") \
 -FixtureDnsName $(ps_quote "$FIXTURE_DNS_NAME") \
 -ProbeUrl $(ps_quote "$PROBE_URL") \
--ExpectedFipsRevision $(ps_quote "$EXPECTED_FIPS_REV") \
+-ExpectedFipsVersion $(ps_quote "$EXPECTED_FIPS_VERSION") \
 -ListenPort $TARGET_LISTEN_PORT \
 -RecoveryDeadlineMilliseconds $RECOVERY_DEADLINE_MS"
   (

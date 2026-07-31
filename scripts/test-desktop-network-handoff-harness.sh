@@ -176,8 +176,11 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
     require_tokens "$host_gate" "packaged Windows candidate pin" \
       'ARTIFACT_APP_SHA=' \
       'ARTIFACT_APP_TREE=' \
+      'NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH' \
+      'windows-cratesio-provenance' \
+      'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$harness_sha"' \
       'Windows packaged app revision/tree is unavailable or inconsistent' \
-      'Windows checkout differs from the packaged app revision/tree'
+      'Windows checkout differs from the exact harness revision/tree'
   else
     grep -Fq \
       'expected_tree="$(git -C "$RELEASE_APP_ROOT" rev-parse '\''HEAD^{tree}'\'')"' \

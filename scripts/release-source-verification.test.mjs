@@ -17,8 +17,145 @@ import { dirname, join } from 'node:path'
 
 import {
   linuxPublicationVerificationPlan,
+  validateWindowsCratesIoReceipts,
   validateWindowsPublicationFipsReceipts,
 } from './release-source-verification.mjs'
+
+function exactWindowsCratesIoFixture() {
+  const appGitSha = 'a'.repeat(40)
+  const appGitTree = 'b'.repeat(40)
+  const fipsGitSha = 'c'.repeat(40)
+  const fipsGitTree = 'd'.repeat(40)
+  const exactPackages = {
+    'fips-core': {
+      version: '0.4.50',
+      source: 'registry+https://github.com/rust-lang/crates.io-index',
+      cargoLockChecksum: '1'.repeat(64),
+      packageVcsSha: fipsGitSha,
+      pathInVcs: 'crates/fips-core',
+    },
+    'fips-endpoint': {
+      version: '0.4.50',
+      source: 'registry+https://github.com/rust-lang/crates.io-index',
+      cargoLockChecksum: '2'.repeat(64),
+      packageVcsSha: fipsGitSha,
+      pathInVcs: 'crates/fips-endpoint',
+    },
+    'fips-identity': {
+      version: '0.3.2',
+      source: 'registry+https://github.com/rust-lang/crates.io-index',
+      cargoLockChecksum: '3'.repeat(64),
+      packageVcsSha: 'e'.repeat(40),
+      pathInVcs: 'crates/fips-identity',
+    },
+  }
+  const sourceReceipt = {
+    receiptSchema: 1,
+    platform: 'windows',
+    appGitSha,
+    appGitTree,
+    sourceClean: true,
+    fipsReleaseGitSha: fipsGitSha,
+    fipsReleaseGitTree: fipsGitTree,
+    fipsReleaseTag: 'v0.4.50',
+    fipsVersion: '0.4.50',
+    fipsCrates: structuredClone(exactPackages),
+  }
+  const payloads = Object.fromEntries(
+    ['app', 'appCore', 'cli', 'wintun'].map((name, index) => [
+      name,
+      { sha256: String(index + 4).repeat(64), size: index + 1 },
+    ]),
+  )
+  const artifactReceipt = {
+    receiptSchema: 1,
+    platform: 'windows',
+    artifactType: 'exact installed Windows Release setup',
+    appGitSha,
+    appGitTree,
+    fipsGitSha,
+    fipsGitTree,
+    fipsVersion: '0.4.50',
+    installerInstalledAndLaunched: true,
+    installedAppStayedAlive: true,
+    builtOnWindowsVm: true,
+    builtOnHostMac: false,
+    payloads,
+  }
+  return {
+    sourceReceipt,
+    artifactReceipt,
+    exactPackages,
+    expectedAppGitSha: appGitSha,
+    expectedAppGitTree: appGitTree,
+    expectedFipsGitSha: fipsGitSha,
+    expectedFipsGitTree: fipsGitTree,
+    expectedFipsVersion: '0.4.50',
+  }
+}
+
+test('Windows crates.io receipts accept the exact sealed source and payloads', () => {
+  const fixture = exactWindowsCratesIoFixture()
+  assert.deepEqual(validateWindowsCratesIoReceipts(fixture), {
+    expectedFipsVersion: '0.4.50',
+    cliSha256: '6'.repeat(64),
+    cliSize: 3,
+    exactPackages: fixture.exactPackages,
+  })
+})
+
+test('Windows crates.io receipts reject source, VCS, and artifact drift', () => {
+  for (const [label, mutate, error] of [
+    [
+      'lock checksum',
+      (fixture) => { fixture.sourceReceipt.fipsCrates['fips-core'].cargoLockChecksum = '9'.repeat(64) },
+      /package checksums\/VCS differ/,
+    ],
+    [
+      'package VCS',
+      (fixture) => { fixture.sourceReceipt.fipsCrates['fips-core'].packageVcsSha = '9'.repeat(40) },
+      /package checksums\/VCS differ/,
+    ],
+    [
+      'registry source',
+      (fixture) => { fixture.sourceReceipt.fipsCrates['fips-core'].source = 'path+file:///tmp/fips' },
+      /package checksums\/VCS differ/,
+    ],
+    [
+      'package set',
+      (fixture) => { delete fixture.sourceReceipt.fipsCrates['fips-identity'] },
+      /package checksums\/VCS differ/,
+    ],
+    [
+      'artifact FIPS SHA',
+      (fixture) => { fixture.artifactReceipt.fipsGitSha = '9'.repeat(40) },
+      /fipsGitSha differs/,
+    ],
+    [
+      'artifact version',
+      (fixture) => { fixture.artifactReceipt.fipsVersion = '0.4.49' },
+      /fipsVersion differs/,
+    ],
+    [
+      'invalid CLI payload',
+      (fixture) => { fixture.artifactReceipt.payloads.cli.sha256 = 'nope' },
+      /invalid cli payload/,
+    ],
+    [
+      'not installed',
+      (fixture) => { fixture.artifactReceipt.installerInstalledAndLaunched = false },
+      /installerInstalledAndLaunched differs/,
+    ],
+  ]) {
+    const fixture = exactWindowsCratesIoFixture()
+    mutate(fixture)
+    assert.throws(
+      () => validateWindowsCratesIoReceipts(fixture),
+      error,
+      label,
+    )
+  }
+})
 
 function capture(command, args, cwd) {
   const result = spawnSync(command, args, {

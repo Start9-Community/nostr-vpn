@@ -183,10 +183,14 @@ require_tokens "$LINUX_SYNC" "exact Linux app sync" \
   'rev-parse "$EXACT_COMMIT^{commit}"'
 require_tokens "$WINDOWS" "exact Windows underlay candidate" \
   'desktop_underlay_assert_app_candidate' \
-  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$ARTIFACT_APP_SHA"' \
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$harness_sha"' \
   'NVPN_WINDOWS_EXACT_CLI_PATH' \
   'NVPN_WINDOWS_INSTALLER_RECEIPT_PATH' \
   'NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH' \
+  'NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH' \
+  'windows-cratesio-provenance' \
+  '\$Receipt.fipsGitSha -ne $(ps_quote "$EXPECTED_FIPS_SHA")' \
+  'target_expected="fips_core_version: $EXPECTED_FIPS_VERSION"' \
   'WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=' \
   '\$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256")' \
   'Windows underlay CLI differs from the exact installed-and-launched installer payload'
