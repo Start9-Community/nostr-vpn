@@ -30,6 +30,7 @@ desktop_underlay_app_version() {
 
 desktop_underlay_assert_app_candidate() {
   local app_sha="$1" app_tree="$2"
+  local app_root="${3:-$ROOT}"
   [[ -n "${ROOT:-}" && -f "$ROOT/scripts/release_common.sh" ]] || {
     desktop_underlay_host_peer_error "release checkout validation is unavailable"
     return 1
@@ -40,7 +41,7 @@ desktop_underlay_assert_app_candidate() {
     return 1
   }
   assert_release_checkout_state \
-    "$ROOT" "$app_sha" "$app_tree" \
+    "$app_root" "$app_sha" "$app_tree" \
     "Desktop underlay host-peer import" || {
       desktop_underlay_host_peer_error \
         "app checkout differs from the exact release candidate"
@@ -62,14 +63,19 @@ desktop_underlay_import_host_peer() {
     return 1
   }
 
-  local app_sha app_tree app_version
+  local app_root app_sha app_tree app_version
   local fips_sha fips_tree fips_version target receipt
   local peer_runner peer_runner_sha listener_audit listener_audit_sha remote_dir
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)" || {
+  app_root="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"
+  app_root="$(cd "$app_root" && pwd -P)" || {
+    desktop_underlay_host_peer_error "could not resolve release app checkout"
+    return 1
+  }
+  app_sha="$(git -C "$app_root" rev-parse HEAD)" || {
     desktop_underlay_host_peer_error "could not resolve app Git SHA"
     return 1
   }
-  app_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" || {
+  app_tree="$(git -C "$app_root" rev-parse 'HEAD^{tree}')" || {
     desktop_underlay_host_peer_error "could not resolve app Git tree"
     return 1
   }
@@ -77,10 +83,10 @@ desktop_underlay_import_host_peer() {
     desktop_underlay_host_peer_error "app checkout differs from NVPN_EXPECTED_APP_GIT_SHA"
     return 1
   }
-  desktop_underlay_assert_app_candidate "$app_sha" "$app_tree" || {
+  desktop_underlay_assert_app_candidate "$app_sha" "$app_tree" "$app_root" || {
     return 1
   }
-  app_version="$(desktop_underlay_app_version "$ROOT/Cargo.toml")" || {
+  app_version="$(desktop_underlay_app_version "$app_root/Cargo.toml")" || {
     desktop_underlay_host_peer_error "could not read app version"
     return 1
   }
@@ -112,7 +118,7 @@ desktop_underlay_import_host_peer() {
   target="x86_64-unknown-linux-musl"
 
   DESKTOP_UNDERLAY_HOST_PEER_BINARY="$(
-    "$ROOT/scripts/prepare-macos-release-fips-peer.sh"
+    "$app_root/scripts/prepare-macos-release-fips-peer.sh"
   )" || {
     desktop_underlay_host_peer_error "host Linux peer preparation failed"
     return 1

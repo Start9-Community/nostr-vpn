@@ -176,11 +176,47 @@ wireguard_latest_handshake() {
 
 wireguard_payload_loop() {
   while :; do
+    if [[ -e "$STATE_DIR/wireguard-payload.pause" ]]; then
+      : >"$STATE_DIR/wireguard-payload.paused"
+      while [[ -e "$STATE_DIR/wireguard-payload.pause" ]]; do
+        sleep 0.05
+      done
+      rm -f "$STATE_DIR/wireguard-payload.paused"
+      continue
+    fi
     if curl -4 --fail --silent --max-time 2 --output /dev/null "$PROBE_URL"; then
       monotonic_milliseconds >>"$STATE_DIR/wireguard-payload.log"
     fi
     sleep 0.1
   done
+}
+
+pause_wireguard_payload_loop() {
+  local pid deadline
+  [[ -s "$STATE_DIR/wireguard-probe.pid" ]] \
+    || fail "WireGuard payload loop has no PID receipt"
+  pid="$(<"$STATE_DIR/wireguard-probe.pid")"
+  kill -0 "$pid" >/dev/null 2>&1 \
+    || fail "WireGuard payload loop exited before the DNS matrix"
+  : >"$STATE_DIR/wireguard-payload.pause"
+  deadline="$((SECONDS + 5))"
+  while ((SECONDS < deadline)); do
+    [[ -e "$STATE_DIR/wireguard-payload.paused" ]] && return 0
+    kill -0 "$pid" >/dev/null 2>&1 \
+      || fail "WireGuard payload loop exited while pausing"
+    sleep 0.05
+  done
+  fail "WireGuard payload loop did not pause before DNS evidence"
+}
+
+resume_wireguard_payload_loop() {
+  local deadline="$((SECONDS + 5))"
+  rm -f "$STATE_DIR/wireguard-payload.pause"
+  while ((SECONDS < deadline)); do
+    [[ ! -e "$STATE_DIR/wireguard-payload.paused" ]] && return 0
+    sleep 0.05
+  done
+  fail "WireGuard payload loop did not resume after DNS evidence"
 }
 
 wireguard_endpoint_route_matches() {
@@ -748,7 +784,10 @@ run_dns_case() {
   local expected_iface="$4"
   shift 4
   wait_for_marker "dns-$name.go"
+  pause_wireguard_payload_loop
   "$BINARY" set --config "$CONFIG" "$@" >/dev/null
+  write_marker "dns-$name.configured"
+  wait_for_marker "dns-$name.query"
 
   local deadline="$((SECONDS + 30))"
   while ((SECONDS < deadline)); do
@@ -764,6 +803,9 @@ run_dns_case() {
   done
   ((SECONDS < deadline)) || fail "real $name DNS lookup did not succeed"
   write_marker "dns-$name.receipt" "$lookup_name"
+  wait_for_marker "dns-$name.snapshotted"
+  resume_wireguard_payload_loop
+  write_marker "dns-$name.resumed"
 }
 
 stop_pid_file() {

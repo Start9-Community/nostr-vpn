@@ -127,7 +127,7 @@ run_guest_primary() {
   linux_guest_env
   primary_ssh_command
   "${LINUX_PRIMARY_SSH[@]}" sudo -n env "${LINUX_GUEST_ENV[@]}" \
-    "$@" "$GUEST_REPO/scripts/desktop-linux-underlay-change-e2e.sh" "$action"
+    "$@" "$GUEST_RUNNER" "$action"
 }
 
 start_guest_secondary_unit() {
@@ -145,7 +145,7 @@ start_guest_secondary_unit() {
     "--property=StandardOutput=append:$GUEST_STATE_DIR/runner.stdout.log" \
     "--property=StandardError=append:$GUEST_STATE_DIR/runner.stderr.log" \
     /usr/bin/env "${LINUX_GUEST_ENV[@]}" \
-    "$@" "$GUEST_REPO/scripts/desktop-linux-underlay-change-e2e.sh" "$action"
+    "$@" "$GUEST_RUNNER" "$action"
 }
 
 wait_for_guest_runner_success() {

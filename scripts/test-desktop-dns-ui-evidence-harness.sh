@@ -12,6 +12,8 @@ required_source=(
   'windows/NostrVpn.Windows/MainWindow.xaml:AutomationProperties.AutomationId="ExitDnsMode"'
   'windows/NostrVpn.Windows/MainWindow.xaml:AutomationProperties.AutomationId="ExitDnsSave"'
   'scripts/desktop-mobile-manual-join-atspi.py:uiRestartReadback'
+  'scripts/desktop-mobile-manual-join-atspi.py:invoke("Internet", stable_focus=0.5)'
+  'scripts/desktop-mobile-manual-join-atspi.py:find_named("nvpn-exit-dns-mode")'
   'scripts/desktop-mobile-manual-join-windows-ui.ps1:uiRestartReadback'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:DnsPolicy'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:source "$repo/scripts/lib-linux-owned-test-app.sh"'

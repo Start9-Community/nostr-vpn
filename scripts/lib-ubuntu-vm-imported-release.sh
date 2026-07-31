@@ -206,7 +206,7 @@ ubuntu_vm_import_release_bundle() {
     ubuntu_vm_import_error "bundle import must be controlled by the host Mac"
     return 1
   }
-  local bundle receipt app_sha app_tree app_version
+  local release_root bundle receipt app_sha app_tree app_version
   local fips_sha fips_tree fips_version target evidence_dir remote_dir
   local lock_evidence root_lock_sha root_realized_lock_sha
   local linux_lock_sha linux_realized_lock_sha
@@ -216,9 +216,14 @@ ubuntu_vm_import_release_bundle() {
   local app_hash app_size cli_hash cli_size fixture_hash fixture_size
   local musl_hash musl_size archive_hash archive_size deb_hash deb_size
 
+  release_root="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"
+  release_root="$(cd "$release_root" && pwd -P)" || {
+    ubuntu_vm_import_error "release app checkout is unavailable"
+    return 1
+  }
   bundle="${NVPN_HOST_LINUX_VM_BUNDLE_DIR:-}"
   if [[ -z "$bundle" ]]; then
-    bundle="$("$ROOT/scripts/prepare-host-linux-vm-bundle.sh")" || {
+    bundle="$("$release_root/scripts/prepare-host-linux-vm-bundle.sh")" || {
       ubuntu_vm_import_error "host bundle preparation failed"
       return 1
     }
@@ -240,12 +245,12 @@ ubuntu_vm_import_release_bundle() {
   fips_version="$(jq -er '.fipsVersion' "$receipt")" || return 1
   builder_mode="$(jq -er '.builderMode' "$receipt")" || return 1
   # shellcheck disable=SC1091
-  source "$ROOT/scripts/release_common.sh"
+  source "$release_root/scripts/release_common.sh"
   # shellcheck disable=SC1091
-  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
-  load_release_env "$ROOT"
+  source "$release_root/scripts/lib-mobile-release-join-artifacts.sh"
+  load_release_env "$release_root"
   assert_release_checkout_state \
-    "$ROOT" "$app_sha" "$app_tree" "Ubuntu VM host bundle" || {
+    "$release_root" "$app_sha" "$app_tree" "Ubuntu VM host bundle" || {
     ubuntu_vm_import_error "host bundle differs from the exact app checkout"
     return 1
   }
@@ -256,7 +261,7 @@ ubuntu_vm_import_release_bundle() {
   while IFS= read -r package; do
     fips_patch_packages+=("$package")
   done < <(
-    python3 "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
+    python3 "$release_root/scripts/verify-cargo-path-patch-lock.py" \
       --manifest-specs "$NVPN_FIPS_REPO_PATH"
   )
   [[ "${#fips_patch_packages[@]}" == 3 ]] || {
@@ -265,8 +270,8 @@ ubuntu_vm_import_release_bundle() {
   }
   lock_evidence="$(
     ubuntu_vm_committed_lock_evidence \
-      "$ROOT" "$app_sha" \
-      "$ROOT/scripts/verify-cargo-path-patch-lock.py" \
+      "$release_root" "$app_sha" \
+      "$release_root/scripts/verify-cargo-path-patch-lock.py" \
       "${fips_patch_packages[@]}"
   )" || return 1
   IFS=$'\t' read -r \
@@ -275,11 +280,11 @@ ubuntu_vm_import_release_bundle() {
   target="$(jq -er '.target' "$receipt")" || return 1
   rust_toolchain="${NVPN_HOST_LINUX_VM_RUST_TOOLCHAIN:-1.95.0}"
   dockerfile_sha="$(
-    shasum -a 256 "$ROOT/Dockerfile.linux-vm-gate" | awk '{print $1}'
+    shasum -a 256 "$release_root/Dockerfile.linux-vm-gate" | awk '{print $1}'
   )" || return 1
   payload_sha="$(
     shasum -a 256 \
-      "$ROOT/scripts/build-host-linux-vm-bundle-in-container.sh" \
+      "$release_root/scripts/build-host-linux-vm-bundle-in-container.sh" \
       | awk '{print $1}'
   )" || return 1
   [[ "$fips_sha" == "$RELEASE_JOIN_FIPS_SHA" \
@@ -288,7 +293,7 @@ ubuntu_vm_import_release_bundle() {
     ubuntu_vm_import_error "host bundle differs from the exact FIPS checkout"
     return 1
   }
-  python3 "$ROOT/scripts/verify-host-linux-vm-bundle.py" \
+  python3 "$release_root/scripts/verify-host-linux-vm-bundle.py" \
     "$bundle" "$receipt" \
     "$app_sha" "$app_tree" "$app_version" \
     "$fips_sha" "$fips_tree" "$fips_version" \

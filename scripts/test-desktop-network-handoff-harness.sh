@@ -37,7 +37,8 @@ cat "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" "$WINDOWS_PEER_OBSERVER" \
   >"$WINDOWS_HOST"
 cat "$WINDOWS_GUEST_ENTRY" "$WINDOWS_GUEST_LIB" "$WINDOWS_GUEST_CRASH_LIB" \
   >"$WINDOWS_GUEST"
-cat "$LINUX_HOST_ENTRY" "$LINUX_HOST_LIB" >"$LINUX_HOST"
+cat "$LINUX_HOST_ENTRY" "$LINUX_HOST_LIB" "$WINDOWS_PEER_OBSERVER" \
+  >"$LINUX_HOST"
 
 fail() {
   echo "desktop underlay source contract failed: $*" >&2
@@ -99,6 +100,15 @@ require_tokens "$WINDOWS_OWNERSHIP_HARNESS" "fail-closed owner-token fixtures" \
   'WINDOWS_NATIVE_WIREGUARD_OWNERSHIP_HARNESS_OK'
 require_tokens "$LINUX_HOST_ENTRY" "helper module" \
   'linux-vm-desktop-underlay-change-e2e.lib.sh'
+require_tokens "$LINUX_HOST_ENTRY" "artifact-bound product/harness separation" \
+  'RELEASE_APP_ROOT="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"' \
+  'app_sha="$(git -C "$RELEASE_APP_ROOT" rev-parse HEAD)"' \
+  'harness_sha="$(git -C "$ROOT" rev-parse HEAD)"' \
+  'NVPN_UBUNTU_LOCAL_REPO_PATH="$RELEASE_APP_ROOT"' \
+  'GUEST_RUNNER="$GUEST_IMPORT_DIR/desktop-linux-underlay-change-e2e.sh"' \
+  'harnessRunnerSha256=%s'
+require_tokens "$LINUX_HOST_LIB" "imported versioned guest harness" \
+  '"$@" "$GUEST_RUNNER" "$action"'
 require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
   'NVPN_UBUNTU_LOCAL_REPO_PATH' \
   'NVPN_UBUNTU_SSH_JUMP' \
@@ -162,9 +172,16 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
   grep -Fq 'RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"' \
     "$host_gate" \
     || fail "$(basename "$host_gate") does not enforce the four-second bound"
-  grep -Fq 'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
-    "$host_gate" \
-    || fail "$(basename "$host_gate") does not pin the committed candidate tree"
+  if [[ "$host_gate" == "$LINUX_HOST" ]]; then
+    grep -Fq \
+      'expected_tree="$(git -C "$RELEASE_APP_ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
+      "$host_gate" \
+      || fail "$(basename "$host_gate") does not pin the product candidate tree"
+  else
+    grep -Fq 'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
+      "$host_gate" \
+      || fail "$(basename "$host_gate") does not pin the committed candidate tree"
+  fi
   grep -Fq 'revision/tree differs from the release candidate' "$host_gate" \
     || fail "$(basename "$host_gate") does not reject mismatched revision/tree"
   if grep -Fq "current_tree" "$host_gate" \
@@ -271,6 +288,32 @@ require_tokens "$WINDOWS_GUEST" "WireGuard-side through-exit DNS" \
 require_tokens "$LINUX_GUEST" "WireGuard-side through-exit DNS" \
   'NVPN_UNDERLAY_WG_SERVER_IP' \
   'exit-dns-through-exit-servers "$WG_SERVER_IP"'
+require_tokens "$LINUX_GUEST" "quiet exclusive DNS counter window" \
+  'pause_wireguard_payload_loop' \
+  'write_marker "dns-$name.configured"' \
+  'wait_for_marker "dns-$name.query"' \
+  'wait_for_marker "dns-$name.snapshotted"' \
+  'resume_wireguard_payload_loop'
+require_tokens "$LINUX_HOST_ENTRY" "host-coordinated DNS counter snapshot" \
+  'signal_guest "dns-$name.go"' \
+  'wait_for_guest_marker "dns-$name.configured" 30' \
+  'before="$(stable_dns_counters)"' \
+  'signal_guest "dns-$name.query"' \
+  'wait_for_guest_marker "dns-$name.receipt" 30' \
+  'after="$(stable_dns_counters)"' \
+  'signal_guest "dns-$name.snapshotted"' \
+  'wait_for_guest_marker "dns-$name.resumed" 30'
+direct_restore="$(
+  sed -n '/^run_dns_matrix_and_direct_restore() {$/,/^}$/p' "$LINUX_HOST_ENTRY"
+)"
+grep -Fq 'wait_for_guest_runner_success' <<<"$direct_restore" \
+  || fail "Linux Direct restoration does not wait for runner success"
+grep -Fq 'run_primary sudo -n cat "$GUEST_STATE_DIR/direct.receipt.json"' \
+  <<<"$direct_restore" \
+  || fail "Linux Direct receipt is not collected over its restored primary path"
+if grep -Fq 'wait_for_guest_marker' <<<"$direct_restore"; then
+  fail "Linux host polls post-Direct evidence over the retired secondary path"
+fi
 require_tokens "$WINDOWS_HOST" "provenance/diagnostic evidence" \
   'manifest_path) -replace' 'collect_failure_artifacts'
 require_tokens "$WINDOWS_HOST_LIB" "bounded out-of-band marker probes" \
@@ -1472,16 +1515,11 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
     || fail "$(basename "$host_gate") lacks same-clock reverse-payload timing"
   grep -Fq 'while :; do' "$host_gate" \
     || fail "$(basename "$host_gate") can skip already-recorded boundary evidence"
-  if [[ "$host_gate" == "$WINDOWS_HOST" ]]; then
-    require_tokens "$host_gate" "exact integer evidence bounds" \
-      'fips_ns <= evidence_deadline_ns' \
-      'wireguard_ns <= evidence_deadline_ns' \
-      'reverse_ns <= evidence_deadline_ns' \
-      'reverse_ns - fips_ns <= deadline_ns'
-  else
-    grep -Fq 'at - cut > deadline' "$host_gate" \
-      || fail "$(basename "$host_gate") does not keep reverse payload inside the total bound"
-  fi
+  require_tokens "$host_gate" "exact integer evidence bounds" \
+    'fips_ns <= evidence_deadline_ns' \
+    'wireguard_ns <= evidence_deadline_ns' \
+    'reverse_ns <= evidence_deadline_ns' \
+    'reverse_ns - fips_ns <= deadline_ns'
 done
 grep -Fq 'last_rebind_receipts=' "$LINUX_GUEST" \
   || fail "Linux recovery failure omits its rebind evidence"

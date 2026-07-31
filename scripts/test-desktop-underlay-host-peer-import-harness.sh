@@ -54,6 +54,7 @@ require_tokens "$HELPER" "shared host-peer importer" \
   '[[ "$(uname -s)" == "Darwin" ]]' \
   'desktop_underlay_app_version' \
   'desktop_underlay_assert_app_candidate' \
+  'app_root="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"' \
   'assert_release_checkout_state' \
   '$0 == "[workspace.package]"' \
   'prepare-macos-release-fips-peer.sh' \
@@ -187,7 +188,8 @@ require_tokens "$WINDOWS" "exact Windows underlay candidate" \
 require_tokens "$LINUX" "exact Linux underlay candidate" \
   'desktop_underlay_assert_app_candidate' \
   'NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$app_sha"' \
-  'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"'
+  'expected_tree="$(git -C "$RELEASE_APP_ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
+  'NVPN_UBUNTU_LOCAL_REPO_PATH="$RELEASE_APP_ROOT"'
 if grep -Fq 'git -C "$repo" add -A' "$WINDOWS" "$LINUX"; then
   fail "desktop underlay provenance still snapshots the realized Cargo.lock"
 fi

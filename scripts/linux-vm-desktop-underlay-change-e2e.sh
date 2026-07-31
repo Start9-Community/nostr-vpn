@@ -4,6 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_APP_ROOT="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"
 HYPERVISOR_SSH="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:?set NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH}"
 VM_NAME="${NVPN_LINUX_UNDERLAY_VM_NAME:-${NVPN_UBUNTU_VM_NAME:-}}"
 [[ -n "$VM_NAME" ]] || {
@@ -18,6 +19,8 @@ GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn-release-gate"
 RUN_TOKEN="linux-$$-$RANDOM"
 GUEST_IMPORT_DIR="/tmp/nvpn-linux-underlay-release-$RUN_TOKEN"
 GUEST_BINARY="$GUEST_IMPORT_DIR/nvpn"
+GUEST_RUNNER="$GUEST_IMPORT_DIR/desktop-linux-underlay-change-e2e.sh"
+GUEST_CLEANUP_FAULT_RUNNER="$GUEST_IMPORT_DIR/desktop-linux-cleanup-fault-e2e.sh"
 LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
 EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
 FIPS_SOURCE_REVISION=""
@@ -108,17 +111,25 @@ resolve_expected_fips_revision() {
 }
 
 sync_and_import_candidates() {
-  local app_sha expected_tree target_head target_tree
+  local app_sha expected_tree harness_sha harness_tree target_head target_tree
+  local guest_runner_sha cleanup_fault_runner_sha
   local host_peer_import_status=0
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  expected_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  RELEASE_APP_ROOT="$(cd "$RELEASE_APP_ROOT" && pwd -P)"
+  export NVPN_RELEASE_APP_REPO_PATH="$RELEASE_APP_ROOT"
+  app_sha="$(git -C "$RELEASE_APP_ROOT" rev-parse HEAD)"
+  expected_tree="$(git -C "$RELEASE_APP_ROOT" rev-parse 'HEAD^{tree}')"
+  harness_sha="$(git -C "$ROOT" rev-parse HEAD)"
+  harness_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
   [[ "$app_sha" == "${NVPN_EXPECTED_APP_GIT_SHA:-}" ]] \
     || fail "Linux underlay app revision differs from the release candidate"
-  desktop_underlay_assert_app_candidate "$app_sha" "$expected_tree" \
+  desktop_underlay_assert_app_candidate \
+    "$app_sha" "$expected_tree" "$RELEASE_APP_ROOT" \
     || fail "Linux underlay app checkout is not the exact release candidate"
   {
     printf 'nvpn_base_commit=%s\n' "$app_sha"
     printf 'nvpn_tree=%s\n' "$expected_tree"
+    printf 'harness_commit=%s\n' "$harness_sha"
+    printf 'harness_tree=%s\n' "$harness_tree"
     printf 'fips_commit=%s\n' "$FIPS_SOURCE_REVISION"
     if [[ -n "$LOCAL_FIPS_REPO" ]]; then
       printf 'fips_tree=%s\n' \
@@ -126,6 +137,7 @@ sync_and_import_candidates() {
     fi
   } >"$ARTIFACT_DIR/source-provenance.txt"
   env \
+    NVPN_UBUNTU_LOCAL_REPO_PATH="$RELEASE_APP_ROOT" \
     NVPN_UBUNTU_GUEST_SRC_ROOT="$GUEST_SRC_ROOT" \
     NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$app_sha" \
     "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$LINUX_SSH"
@@ -223,22 +235,44 @@ PY
     "test ! -e '$GUEST_IMPORT_DIR' && install -d -m 0700 '$GUEST_IMPORT_DIR'"
   "${primary_scp[@]}" "$TARGET_RELEASE_BINARY" \
     "$LINUX_SSH:$GUEST_BINARY_COPY_TMP"
+  guest_runner_sha="$(
+    shasum -a 256 "$ROOT/scripts/desktop-linux-underlay-change-e2e.sh" \
+      | awk '{ print $1 }'
+  )"
+  cleanup_fault_runner_sha="$(
+    shasum -a 256 "$ROOT/scripts/desktop-linux-cleanup-fault-e2e.sh" \
+      | awk '{ print $1 }'
+  )"
+  "${primary_scp[@]}" \
+    "$ROOT/scripts/desktop-linux-underlay-change-e2e.sh" \
+    "$LINUX_SSH:$GUEST_RUNNER.copy"
+  "${primary_scp[@]}" \
+    "$ROOT/scripts/desktop-linux-cleanup-fault-e2e.sh" \
+    "$LINUX_SSH:$GUEST_CLEANUP_FAULT_RUNNER.copy"
   run_primary bash -s -- \
     "$GUEST_IMPORT_DIR" \
     "$TARGET_RELEASE_SHA256" \
     "$TARGET_RELEASE_SIZE" \
-    "$EXPECTED_FIPS_REV" <<'GUEST'
+    "$EXPECTED_FIPS_REV" \
+    "$guest_runner_sha" \
+    "$cleanup_fault_runner_sha" <<'GUEST'
 set -euo pipefail
 import_dir="$1"
 expected_sha="$2"
 expected_size="$3"
 expected_fips_rev="$4"
+expected_runner_sha="$5"
+expected_cleanup_fault_runner_sha="$6"
 case "$import_dir" in
   /tmp/nvpn-linux-underlay-release-linux-*) ;;
   *) exit 2 ;;
 esac
 [[ -d "$import_dir" && -O "$import_dir" && ! -L "$import_dir" ]]
 [[ -f "$import_dir/nvpn.copy" && ! -L "$import_dir/nvpn.copy" ]]
+[[ -f "$import_dir/desktop-linux-underlay-change-e2e.sh.copy" \
+  && ! -L "$import_dir/desktop-linux-underlay-change-e2e.sh.copy" ]]
+[[ -f "$import_dir/desktop-linux-cleanup-fault-e2e.sh.copy" \
+  && ! -L "$import_dir/desktop-linux-cleanup-fault-e2e.sh.copy" ]]
 chmod 0500 "$import_dir/nvpn.copy"
 [[ "$(sha256sum "$import_dir/nvpn.copy" | awk '{ print $1 }')" == "$expected_sha" ]]
 [[ "$(stat -c '%s' "$import_dir/nvpn.copy")" == "$expected_size" ]]
@@ -246,6 +280,17 @@ file "$import_dir/nvpn.copy" | grep -Eq 'ELF 64-bit.*x86-64'
 "$import_dir/nvpn.copy" version --verbose \
   | grep -Fq "(rev $expected_fips_rev)"
 mv "$import_dir/nvpn.copy" "$import_dir/nvpn"
+[[ "$(sha256sum "$import_dir/desktop-linux-underlay-change-e2e.sh.copy" \
+  | awk '{ print $1 }')" == "$expected_runner_sha" ]]
+[[ "$(sha256sum "$import_dir/desktop-linux-cleanup-fault-e2e.sh.copy" \
+  | awk '{ print $1 }')" == "$expected_cleanup_fault_runner_sha" ]]
+chmod 0500 \
+  "$import_dir/desktop-linux-underlay-change-e2e.sh.copy" \
+  "$import_dir/desktop-linux-cleanup-fault-e2e.sh.copy"
+mv "$import_dir/desktop-linux-underlay-change-e2e.sh.copy" \
+  "$import_dir/desktop-linux-underlay-change-e2e.sh"
+mv "$import_dir/desktop-linux-cleanup-fault-e2e.sh.copy" \
+  "$import_dir/desktop-linux-cleanup-fault-e2e.sh"
 GUEST
   GUEST_BINARY_COPY_TMP=""
 
@@ -270,6 +315,8 @@ GUEST
       "$(jq -er '.builtOnRemoteVm' "$TARGET_RELEASE_RECEIPT")"
     printf 'targetImportSize=%s\n' "$TARGET_RELEASE_SIZE"
     printf 'targetImportDirectoryUnique=true\n'
+    printf 'harnessRunnerSha256=%s\n' "$guest_runner_sha"
+    printf 'cleanupFaultRunnerSha256=%s\n' "$cleanup_fault_runner_sha"
   } >"$ARTIFACT_DIR/linux-binary-sha256.txt"
   python3 - \
     "$ARTIFACT_DIR/tested-artifact.json" \
@@ -625,10 +672,14 @@ run_dns_case() {
   local counter="$2"
   local before after key before_value after_value
   local -a counters=(profile_dns cloudflare quad9 google fixture_dns)
-  before="$(stable_dns_counters)"
   signal_guest "dns-$name.go"
+  wait_for_guest_marker "dns-$name.configured" 30
+  before="$(stable_dns_counters)"
+  signal_guest "dns-$name.query"
   wait_for_guest_marker "dns-$name.receipt" 30
   after="$(stable_dns_counters)"
+  signal_guest "dns-$name.snapshotted"
+  wait_for_guest_marker "dns-$name.resumed" 30
   for key in "${counters[@]}"; do
     before_value="$(counter_value "$key" <<<"$before")"
     after_value="$(counter_value "$key" <<<"$after")"
@@ -659,9 +710,10 @@ run_dns_matrix_and_direct_restore() {
   run_dns_case through-exit fixture_dns
 
   signal_guest select-direct
-  wait_for_guest_marker direct.receipt.json 30
-  wait_for_guest_marker done 10
-  guest_receipt direct.receipt.json >"$ARTIFACT_DIR/direct-receipt.json"
+  wait_for_guest_runner_success \
+    >"$ARTIFACT_DIR/linux-run-unit-receipt.txt"
+  run_primary sudo -n cat "$GUEST_STATE_DIR/direct.receipt.json" \
+    >"$ARTIFACT_DIR/direct-receipt.json"
   jq -e . "$ARTIFACT_DIR/direct-receipt.json" >/dev/null
   jq -e '
     .wireguard_interface_removed == true
@@ -670,8 +722,6 @@ run_dns_matrix_and_direct_restore() {
     and .wireguard_policy_table_empty == true
     and .verified_https == true
   ' "$ARTIFACT_DIR/direct-receipt.json" >/dev/null
-  wait_for_guest_runner_success \
-    >"$ARTIFACT_DIR/linux-run-unit-receipt.txt"
   stop_guest_runner_unit
 }
 

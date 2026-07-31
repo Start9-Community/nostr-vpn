@@ -234,9 +234,37 @@ def target_window_has_focus() -> bool:
     return focused.returncode == 0 and focused.stdout.strip() == str(TARGET_WINDOW)
 
 
-def invoke(name: str) -> None:
+def invoke(name: str, *, stable_focus: float = 0) -> None:
     find_named(name, actionable=True)
     focus_named_with_keyboard(name)
+    if stable_focus > 0:
+        deadline = time.monotonic() + 5
+        stable_since: float | None = None
+        while time.monotonic() < deadline:
+            pyatspi.Registry.pumpQueuedEvents()
+            focused = False
+            if target_window_has_focus():
+                for node in matching_nodes(name):
+                    try:
+                        if (
+                            has_action(node)
+                            and node.getState().contains(pyatspi.STATE_FOCUSED)
+                        ):
+                            focused = True
+                            break
+                    except Exception:
+                        continue
+            if focused:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= stable_focus:
+                    break
+            else:
+                stable_since = None
+                focus_named_with_keyboard(name)
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"keyboard focus did not stabilize on {name}")
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "space"],
         check=True,
@@ -729,7 +757,7 @@ class Driver:
 
         def open_dns() -> None:
             self.launch()
-            invoke("Internet")
+            invoke("Internet", stable_focus=0.5)
             find_named("nvpn-exit-dns-mode")
 
         open_dns()
