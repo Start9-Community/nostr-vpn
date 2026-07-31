@@ -499,6 +499,7 @@ struct GeneralSettingsCard: View {
                     model.dispatch(NativeActions.updateSettings(["autoconnect": value]), status: "Saving")
                 }
             ))
+            .disabled(model.actionInFlight)
             .accessibilityIdentifier("autoconnect-toggle")
             .accessibilityValue(model.state.autoconnect ? "On" : "Off")
         }

@@ -45,7 +45,7 @@ extension NostrVpnReleaseNetworkUITests {
     }
 
     private func vpnControl(label: String) throws -> XCUIElement? {
-        let matches = app.descendants(matching: .any).matching(
+        let matches = app.buttons.matching(
             NSPredicate(
                 format: "identifier == %@ AND label == %@",
                 "vpn-toggle",
@@ -56,12 +56,10 @@ extension NostrVpnReleaseNetworkUITests {
         guard count > 0 else {
             return nil
         }
-        guard count <= 2 else {
-            throw gateError("Shipped VPN control had unexpected duplicates")
+        guard count == 1 else {
+            throw gateError("Shipped VPN control was not unique")
         }
-        // SwiftUI exposes the semantic wrapper and its nested actionable node
-        // with the same identifier on iOS 26. The deeper match owns the tap.
-        return matches.element(boundBy: count - 1)
+        return matches.firstMatch
     }
 
     func waitForVPNState(on: Bool, timeout: TimeInterval) -> Bool {
@@ -103,6 +101,15 @@ extension NostrVpnReleaseNetworkUITests {
         }
         settings.tap()
         let toggle = scrollToElement("autoconnect-toggle")
+        let readyDeadline = Date().addingTimeInterval(12)
+        while !(toggle.exists && toggle.isHittable && toggle.isEnabled),
+              Date() < readyDeadline
+        {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard toggle.exists, toggle.isHittable, toggle.isEnabled else {
+            throw gateError("Start VPN automatically remained busy")
+        }
         let wasEnabled = toggleIsOn(toggle)
         if wasEnabled != enabled {
             toggle.tap()

@@ -606,8 +606,9 @@ do
     || { echo "iOS Release runner omits shipped selector $selector" >&2; exit 1; }
 done
 grep -Fq 'for label in ["Turn VPN off", "Turn VPN on"]' "$ios_release_ui_support" \
-  && grep -Fq 'app.descendants(matching: .any).matching(' "$ios_release_ui_support" \
-  && grep -Fq 'matches.element(boundBy: count - 1)' "$ios_release_ui_support" \
+  && grep -Fq 'app.buttons.matching(' "$ios_release_ui_support" \
+  && grep -Fq 'guard count == 1 else' "$ios_release_ui_support" \
+  && grep -Fq 'return matches.firstMatch' "$ios_release_ui_support" \
   && ! grep -Fq 'element("vpn-toggle")' "$ios_release_ui_support" \
   || { echo "iOS Release runner does not select the unique shipped VPN button" >&2; exit 1; }
 grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
