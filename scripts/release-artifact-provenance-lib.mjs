@@ -303,6 +303,18 @@ export function requireReceiptSource(receipt, { commit, tree, label }) {
   }
 }
 
+function requireReceiptComponentSource(receipt, label) {
+  const appGitSha = String(receipt?.appGitSha ?? '')
+  const appGitTree = String(receipt?.appGitTree ?? '')
+  if (
+    !/^[0-9a-f]{40}$/.test(appGitSha)
+    || !/^[0-9a-f]{40}$/.test(appGitTree)
+  ) {
+    throw new Error(`${label} lacks an exact component-origin SHA/tree.`)
+  }
+  return { commit: appGitSha, tree: appGitTree }
+}
+
 export function validateWindowsInstallerGateReceipt({
   receipt,
   artifactReceipt,
@@ -608,6 +620,8 @@ function requireDesktopMobileJoinReceipt({
   desktopArtifactReceiptSha256,
   androidArtifact,
   androidArtifactReceiptSha256,
+  androidInstallReceiptSha256,
+  androidInstallReceiptSize,
 }) {
   const label = `${platform} / Pixel public-UI join receipt`
   requirePublicUiJoinReceipt(receipt, platform, label, 2)
@@ -669,7 +683,8 @@ function requireDesktopMobileJoinReceipt({
     || android.package !== androidArtifact.package
     || android.signerCertificateSha256
       !== androidArtifact.signerCertificateSha256
-    || !/^[0-9a-f]{64}$/.test(android.installReceiptSha256 ?? '')
+    || android.installReceiptSha256 !== androidInstallReceiptSha256
+    || android.installReceiptSize !== androidInstallReceiptSize
   ) {
     throw new Error(`${label} is not bound to the exact desktop/Android artifacts.`)
   }
@@ -681,6 +696,31 @@ function requireDesktopMobileJoinReceipt({
     )
   ) {
     throw new Error(`${label} is not bound to the exact Windows app core.`)
+  }
+}
+
+function requireAndroidInstallReceipt(receipt, artifact) {
+  if (
+    receipt.artifact !== 'Android Release APK'
+    || receipt.apkSha256 !== artifact.apkSha256
+    || receipt.installedApkSha256 !== artifact.installedApkSha256
+    || receipt.signerCertificateSha256
+      !== artifact.signerCertificateSha256
+    || receipt.appGitSha !== artifact.appGitSha
+    || receipt.appGitTree !== artifact.appGitTree
+    || receipt.fipsGitSha !== artifact.fipsGitSha
+    || receipt.fipsGitTree !== artifact.fipsGitTree
+    || receipt.package !== artifact.package
+    || typeof receipt.preexistingCanonicalPackage !== 'boolean'
+    || receipt.replacementInstall !== true
+    || receipt.replacementInstallVerified !== true
+    || receipt.debuggable !== false
+    || receipt.canonicalPackageCount !== 1
+    || receipt.canonicalProcessCount !== 1
+  ) {
+    throw new Error(
+      'Android install receipt is not bound to the exact physical artifact.',
+    )
   }
 }
 
@@ -1110,11 +1150,10 @@ export function collectReleaseGateReceipts({
     platformReceiptPaths.android.physical,
     'Physical Android artifact receipt',
   )
-  requireReceiptSource(android, {
-    commit,
-    tree,
-    label: 'Physical Android artifact receipt',
-  })
+  const androidSource = requireReceiptComponentSource(
+    android,
+    'Physical Android artifact receipt',
+  )
   if (
     android.receiptSchema !== 2
     || android.artifactType !== 'Android Release APK'
@@ -1132,6 +1171,17 @@ export function collectReleaseGateReceipts({
   const androidReceiptSha256 = sha256FileSync(
     platformReceiptPaths.android.physical,
   )
+  const androidInstall = readRequiredJson(
+    platformReceiptPaths.android.install,
+    'Canonical Android Release install receipt',
+  )
+  requireAndroidInstallReceipt(androidInstall, android)
+  const androidInstallReceiptSha256 = sha256FileSync(
+    platformReceiptPaths.android.install,
+  )
+  const androidInstallReceiptSize = readFileSync(
+    platformReceiptPaths.android.install,
+  ).byteLength
   for (const [name, mode] of [
     ['wireguard_dns', 'wireguard-dns'],
     ['underlay_lifecycle', 'underlay-lifecycle'],
@@ -1146,8 +1196,7 @@ export function collectReleaseGateReceipts({
       mode,
       artifact: android,
       artifactReceiptSha256: androidReceiptSha256,
-      commit,
-      tree,
+      ...androidSource,
     })
   }
   const androidReplacement = readRequiredJson(
@@ -1158,8 +1207,8 @@ export function collectReleaseGateReceipts({
     androidReplacement.receiptSchema !== 1
     || androidReplacement.artifactType
       !== 'Android Release replacement/singleton gate'
-    || androidReplacement.appGitSha !== commit
-    || androidReplacement.appGitTree !== tree
+    || androidReplacement.appGitSha !== androidSource.commit
+    || androidReplacement.appGitTree !== androidSource.tree
     || androidReplacement.artifactReceiptSha256 !== androidReceiptSha256
     || androidReplacement.apkSha256 !== android.apkSha256
     || androidReplacement.installedApkSha256 !== android.installedApkSha256
@@ -1454,6 +1503,8 @@ export function collectReleaseGateReceipts({
       ),
       androidArtifact: android,
       androidArtifactReceiptSha256: androidReceiptSha256,
+      androidInstallReceiptSha256,
+      androidInstallReceiptSize,
     })
     const network = readRequiredJson(
       platformReceiptPaths[platform].network,

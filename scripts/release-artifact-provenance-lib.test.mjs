@@ -152,6 +152,7 @@ test('release receipt collection requires exact source and strict public UI gate
     const macosJoinPath = join(root, 'macos-join.json')
     const paths = {
       android: {
+        install: join(root, 'android-install.json'),
         physical: join(root, 'android.json'),
         mobile_join: mobileJoinPath,
         wireguard_dns: join(root, 'android-wg.json'),
@@ -194,8 +195,13 @@ test('release receipt collection requires exact source and strict public UI gate
           ? 'missed'
           : 'met',
     }))
+    const androidComponentSource = {
+      appGitSha: 'e'.repeat(40),
+      appGitTree: 'f'.repeat(40),
+    }
     const androidArtifact = {
       ...source,
+      ...androidComponentSource,
       receiptSchema: 2,
       artifactType: 'Android Release APK',
       apkSha256: '1'.repeat(64),
@@ -226,11 +232,34 @@ test('release receipt collection requires exact source and strict public UI gate
       fipsCoreVersion: source.fipsVersion,
     }
     const androidText = JSON.stringify(androidArtifact)
+    const androidInstall = {
+      artifact: 'Android Release APK',
+      apkSha256: androidArtifact.apkSha256,
+      installedApkSha256: androidArtifact.installedApkSha256,
+      signerCertificateSha256: androidArtifact.signerCertificateSha256,
+      appGitSha: androidArtifact.appGitSha,
+      appGitTree: androidArtifact.appGitTree,
+      fipsGitSha: androidArtifact.fipsGitSha,
+      fipsGitTree: androidArtifact.fipsGitTree,
+      package: androidArtifact.package,
+      preexistingCanonicalPackage: true,
+      replacementInstall: true,
+      replacementInstallVerified: true,
+      debuggable: false,
+      canonicalPackageCount: 1,
+      canonicalProcessCount: 1,
+    }
+    const androidInstallText = JSON.stringify(androidInstall)
     const iosText = JSON.stringify(iosArtifact)
     writeFileSync(paths.android.physical, androidText)
+    writeFileSync(paths.android.install, androidInstallText)
     writeFileSync(paths.ios.mobile_artifact, iosText)
     const networkReceipt = (platform, mode, artifact, artifactText) => ({
       ...source,
+      appGitSha: artifact.appGitSha,
+      appGitTree: artifact.appGitTree,
+      fipsGitSha: artifact.fipsGitSha,
+      fipsGitTree: artifact.fipsGitTree,
       receiptSchema: 1,
       artifactType: `physical ${platform} Release ${mode} gate`,
       platform,
@@ -372,6 +401,7 @@ test('release receipt collection requires exact source and strict public UI gate
     )
     writeFileSync(paths.android.replacement_singleton, JSON.stringify({
       ...source,
+      ...androidComponentSource,
       receiptSchema: 1,
       artifactType: 'Android Release replacement/singleton gate',
       artifactReceiptSha256: sha256(androidText),
@@ -725,8 +755,8 @@ test('release receipt collection requires exact source and strict public UI gate
               androidArtifact.fipsCargoMetadataReceiptSha256,
             artifactReceiptSha256: sha256(androidText),
             artifactReceiptSize: Buffer.byteLength(androidText),
-            installReceiptSha256: 'b'.repeat(64),
-            installReceiptSize: 100,
+            installReceiptSha256: sha256(androidInstallText),
+            installReceiptSize: Buffer.byteLength(androidInstallText),
             apkSha256: androidArtifact.apkSha256,
             apkSize: 400,
             signerCertificateSha256:
@@ -876,6 +906,27 @@ test('release receipt collection requires exact source and strict public UI gate
       /not bound to the exact desktop\/Android artifacts/,
     )
     assertRejectedReceiptMutation(
+      paths.android.install,
+      (receipt) => {
+        receipt.preexistingCanonicalPackage = false
+      },
+      /not bound to the exact desktop\/Android artifacts/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.install,
+      (receipt) => {
+        receipt.appGitTree = tree
+      },
+      /install receipt is not bound to the exact physical artifact/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.wireguard_dns,
+      (receipt) => {
+        receipt.appGitSha = commit
+      },
+      /not exact source\/artifact evidence/,
+    )
+    assertRejectedReceiptMutation(
       paths.linux.public_ui_join,
       (receipt) => {
         receipt.artifact.desktop.appGitTree = '0'.repeat(40)
@@ -974,6 +1025,16 @@ test('release receipt collection requires exact source and strict public UI gate
         commit,
         draft: process.env.NVPN_FLEET_GATE_DRAFT !== 'false',
         assets,
+        android_release_gate: {
+          receipt_schema: androidArtifact.receiptSchema,
+          apk_path: 'assets/nostr-vpn-v4.1.5-android-arm64.apk',
+          apk_sha256: androidArtifact.apkSha256,
+          app_git_sha: androidArtifact.appGitSha,
+          app_git_tree: androidArtifact.appGitTree,
+          package: androidArtifact.package,
+          signer_certificate_sha256:
+            androidArtifact.signerCertificateSha256,
+        },
         release_gate_attestation: releaseGateAttestation,
       }))
       writeFileSync(

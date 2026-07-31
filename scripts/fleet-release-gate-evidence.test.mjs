@@ -11,6 +11,7 @@ import { buildReleaseGateAttestation } from './release-artifact-provenance-lib.m
 
 const platforms = {
   android: [
+    'install',
     'mobile_join',
     'physical',
     'replacement_singleton',
@@ -224,6 +225,17 @@ test('accepts real collector evidence through the function and CLI', () => {
       assert.equal(cli.status, 0, cli.stderr)
       assert.deepEqual(JSON.parse(cli.stdout), validated)
     }
+    json(value.request.releasePath, {
+      ...release,
+      android_release_gate: {
+        ...release.android_release_gate,
+        app_git_tree: '0'.repeat(40),
+      },
+    })
+    assert.throws(
+      () => validateFleetReleaseGateEvidence(value.request),
+      /Android release gate does not match the physical component receipt/,
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -391,7 +403,7 @@ test('allows missed target and either draft value before the real oracle', () =>
         json(releasePath, { ...release, draft })
         assert.throws(
           () => validateFleetReleaseGateEvidence(request),
-          /Physical Android artifact receipt is not for/i,
+          /Physical Android artifact receipt lacks an exact component-origin/i,
         )
       }
 

@@ -279,6 +279,13 @@ test('Android publication accepts only the exact signed APK sealed by the physic
     ),
     /debuggable/i,
   )
+  assert.throws(
+    () => validateAndroidReleaseGateReceipt(
+      { ...receipt, appGitSha: 'not-a-commit' },
+      { ...context, expectedAppGitSha: 'not-a-commit' },
+    ),
+    /component-origin SHA\/tree/i,
+  )
 })
 
 test('Zapstore publication can be made mandatory by CLI or release environment', () => {
@@ -2475,6 +2482,18 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
       commit,
       assets: completeAssets,
       android_release_gate: androidGate,
+      release_gate_attestation: releaseGateAttestation,
+    }),
+  )
+  assert.doesNotThrow(() =>
+    validatePromotableReleaseManifest({
+      commit,
+      assets: completeAssets,
+      android_release_gate: {
+        ...androidGate,
+        app_git_sha: '1'.repeat(40),
+        app_git_tree: '2'.repeat(40),
+      },
       release_gate_attestation: releaseGateAttestation,
     }),
   )

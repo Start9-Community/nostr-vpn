@@ -216,6 +216,14 @@ export function validateAndroidReleaseGateReceipt(
 
   const appGitSha = String(receipt.appGitSha ?? '').trim()
   const appGitTree = String(receipt.appGitTree ?? '').trim()
+  if (
+    !/^[0-9a-f]{40}$/.test(appGitSha)
+    || !/^[0-9a-f]{40}$/.test(appGitTree)
+  ) {
+    throw new Error(
+      'Physical Android gate receipt lacks an exact component-origin SHA/tree.',
+    )
+  }
   if (appGitSha !== String(expectedAppGitSha ?? '').trim()) {
     throw new Error('Physical Android gate receipt has the wrong application commit.')
   }
@@ -571,8 +579,8 @@ export function validatePromotableReleaseManifest(manifest) {
   }
   if (
     gate.receipt_schema !== 2
-    || gate.app_git_sha !== manifest.commit
-    || !/^[0-9a-f]{40,64}$/.test(String(gate.app_git_tree ?? ''))
+    || !/^[0-9a-f]{40}$/.test(String(gate.app_git_sha ?? ''))
+    || !/^[0-9a-f]{40}$/.test(String(gate.app_git_tree ?? ''))
     || !String(gate.package ?? '').trim()
     || !/^[0-9a-f]{64}$/.test(String(gate.signer_certificate_sha256 ?? ''))
   ) {

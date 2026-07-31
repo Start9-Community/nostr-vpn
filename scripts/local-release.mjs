@@ -1185,8 +1185,6 @@ function buildAndroidArtifacts({
   dryRun,
   builtLines,
   gateReceiptPath,
-  candidateCommit,
-  candidateTree,
 }) {
   const androidEnv = ensureAndroidSdkEnv(env)
   const sdkRoot = androidEnv.ANDROID_SDK_ROOT || androidEnv.ANDROID_HOME
@@ -1285,13 +1283,15 @@ function buildAndroidArtifacts({
       }
       const aabSha256 = sha256FileSync(aabPath)
       const apkSha256 = sha256FileSync(testedApkPath)
+      const componentCommit = String(receipt.appGitSha ?? '').trim()
+      const componentTree = String(receipt.appGitTree ?? '').trim()
       if (
         sha256FileSync(bundleReceiptPath) !== receipt.bundleReceiptSha256
         || bundleReceipt.schema !== 1
         || bundleReceipt.relationship
           !== 'universal-apk-derived-from-exact-aab'
-        || bundleReceipt.appGitSha !== candidateCommit
-        || bundleReceipt.appGitTree !== candidateTree
+        || bundleReceipt.appGitSha !== componentCommit
+        || bundleReceipt.appGitTree !== componentTree
         || bundleReceipt.aabSha256 !== aabSha256
         || bundleReceipt.apkSha256 !== apkSha256
         || bundleReceipt.aabPathSha256 !== pathSha256(aabPath)
@@ -1305,8 +1305,8 @@ function buildAndroidArtifacts({
         apkSha256,
         aabSha256,
         apkPathSha256: pathSha256(testedApkPath),
-        expectedAppGitSha: candidateCommit,
-        expectedAppGitTree: candidateTree,
+        expectedAppGitSha: componentCommit,
+        expectedAppGitTree: componentTree,
         expectedPackage:
           String(androidEnv.NVPN_ANDROID_PACKAGE_ID || '').trim()
           || 'fi.siriusbusiness.nvpn',
@@ -1850,7 +1850,8 @@ function stageRelease({
       throw new Error(`Physical-gate Android APK is missing from the staged release: ${apkName}`)
     }
     if (
-      androidReleaseGate.appGitSha !== commit
+      !/^[0-9a-f]{40}$/.test(androidReleaseGate.appGitSha)
+      || !/^[0-9a-f]{40}$/.test(androidReleaseGate.appGitTree)
       || sha256FileSync(stagedAndroidApkPath) !== androidReleaseGate.apkSha256
     ) {
       throw new Error('Physical Android gate provenance does not match the staged source and APK.')
@@ -2172,6 +2173,7 @@ function main() {
   )
   const platformReceiptPaths = {
     android: {
+      install: join(releaseJoinResultDir, 'android-release-install.json'),
       physical: androidGateReceiptPath,
       mobile_join: join(releaseJoinResultDir, 'summary.json'),
       wireguard_dns: join(
@@ -2690,8 +2692,6 @@ function main() {
         dryRun: options.dryRun,
         builtLines,
         gateReceiptPath: androidGateReceiptPath,
-        candidateCommit,
-        candidateTree,
       })
       androidReleaseGate = android.gate
       mergeArtifactProofs(artifactProofs, android.proofs)
