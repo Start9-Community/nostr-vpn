@@ -32,10 +32,16 @@ import org.nostrvpn.app.appCoreDataDir
 import org.nostrvpn.app.core.NativeCore
 import org.nostrvpn.app.seedMobileConfig
 import java.net.InetAddress
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class NostrVpnService : VpnService() {
     private val running = AtomicBoolean(false)
+    private val tunnelStartGeneration = AtomicLong()
+    private val tunnelStartExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "nvpn-mobile-start")
+    }
     private var tunnelHandle: Long = 0
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -60,6 +66,7 @@ class NostrVpnService : VpnService() {
                         conflicts.joinToString(),
                 )
                 VpnStartState.setUserWantsVpn(this, false)
+                tunnelStartGeneration.incrementAndGet()
                 stopTunnel()
                 stopServiceForeground()
                 stopSelf(startId)
@@ -69,6 +76,7 @@ class NostrVpnService : VpnService() {
         return when (intent?.action) {
             ACTION_DISCONNECT -> {
                 VpnStartState.setUserWantsVpn(this, false)
+                tunnelStartGeneration.incrementAndGet()
                 stopTunnel()
                 stopServiceForeground()
                 stopSelf()
@@ -76,7 +84,7 @@ class NostrVpnService : VpnService() {
             }
             ACTION_CONNECT -> {
                 VpnStartState.setUserWantsVpn(this, true)
-                startTunnel(
+                startTunnelAsync(
                     intent.getStringExtra(EXTRA_CONFIG_JSON).orEmpty(),
                     foregroundRequired = true,
                 ).stickyResult()
@@ -86,7 +94,7 @@ class NostrVpnService : VpnService() {
                     stopSelf()
                     START_NOT_STICKY
                 } else {
-                    startTunnel(
+                    startTunnelAsync(
                         persistedTunnelConfigJson(),
                         foregroundRequired = true,
                     ).stickyResult()
@@ -97,19 +105,20 @@ class NostrVpnService : VpnService() {
                 val configJson = persistedTunnelConfigJson()
                 if (!configJson.supportsAlwaysOnVpn()) {
                     VpnStartState.setUserWantsVpn(this, false)
+                    tunnelStartGeneration.incrementAndGet()
                     publishAlwaysOnSplitUnsupportedNotification()
                     stopSelf()
                     return START_NOT_STICKY
                 }
                 VpnStartState.setUserWantsVpn(this, true)
-                startTunnel(
+                startTunnelAsync(
                     configJson,
                     foregroundRequired = false,
                 ).stickyResult()
             }
             else -> {
                 if (VpnStartState.userWantsVpn(this)) {
-                    startTunnel(
+                    startTunnelAsync(
                         persistedTunnelConfigJson(),
                         foregroundRequired = true,
                     ).stickyResult()
@@ -121,6 +130,8 @@ class NostrVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        tunnelStartGeneration.incrementAndGet()
+        tunnelStartExecutor.shutdownNow()
         stopTunnel()
         stopServiceForeground()
         super.onDestroy()
@@ -128,12 +139,13 @@ class NostrVpnService : VpnService() {
 
     override fun onRevoke() {
         VpnStartState.setUserWantsVpn(this, false)
+        tunnelStartGeneration.incrementAndGet()
         stopTunnel()
         stopServiceForeground()
         super.onRevoke()
     }
 
-    private fun startTunnel(configJson: String, foregroundRequired: Boolean): Boolean {
+    private fun startTunnelAsync(configJson: String, foregroundRequired: Boolean): Boolean {
         val foregroundStarted = if (foregroundRequired) {
             startServiceForeground()
         } else {
@@ -168,20 +180,66 @@ class NostrVpnService : VpnService() {
         val tunnelConfigJson = config.toString()
 
         stopTunnel()
+        val generation = tunnelStartGeneration.incrementAndGet()
+        return runCatching {
+            tunnelStartExecutor.execute {
+                val handle = NativeCore.mobileTunnelNew(tunnelConfigJson)
+                if (
+                    generation != tunnelStartGeneration.get() ||
+                    !VpnStartState.userWantsVpn(this)
+                ) {
+                    if (handle != 0L) {
+                        NativeCore.mobileTunnelFree(handle)
+                    }
+                    return@execute
+                }
+                if (!underlyingNetworkHandler.post {
+                        finishTunnelStart(
+                            generation = generation,
+                            handle = handle,
+                            config = config,
+                            foregroundStarted = foregroundStarted,
+                        )
+                    }
+                ) {
+                    if (handle != 0L) {
+                        NativeCore.mobileTunnelFree(handle)
+                    }
+                }
+            }
+        }.onFailure { error ->
+            failStart(foregroundStarted, "Android VPN startup worker failed", error)
+        }.isSuccess
+    }
+
+    private fun finishTunnelStart(
+        generation: Long,
+        handle: Long,
+        config: JSONObject,
+        foregroundStarted: Boolean,
+    ) {
+        if (
+            generation != tunnelStartGeneration.get() ||
+            !VpnStartState.userWantsVpn(this)
+        ) {
+            if (handle != 0L) {
+                NativeCore.mobileTunnelFree(handle)
+            }
+            return
+        }
+        if (handle == 0L) {
+            failStart(foregroundStarted, "Native mobile tunnel failed to start")
+            return
+        }
         if (!foregroundStarted) {
             publishTunnelNotification()
         }
         reconcileMulticastLock(config)
-
         val descriptor = buildVpnInterface(config) ?: run {
+            NativeCore.mobileTunnelFree(handle)
             releaseMulticastLock()
-            return failStart(foregroundStarted, "Android VPN interface could not be established")
-        }
-        val handle = NativeCore.mobileTunnelNew(tunnelConfigJson)
-        if (handle == 0L) {
-            descriptor.close()
-            releaseMulticastLock()
-            return failStart(foregroundStarted, "Native mobile tunnel failed to start")
+            failStart(foregroundStarted, "Android VPN interface could not be established")
+            return
         }
 
         // If the user has WG upstream enabled, the boringtun runtime
@@ -206,10 +264,11 @@ class NostrVpnService : VpnService() {
                 descriptor.close()
                 NativeCore.mobileTunnelFree(handle)
                 releaseMulticastLock()
-                return failStart(
+                failStart(
                     foregroundStarted,
                     "VpnService.protect(wgSocketFd=$wgSocketFd) failed; aborting VPN start",
                 )
+                return
             }
         }
 
@@ -217,13 +276,13 @@ class NostrVpnService : VpnService() {
         if (!NativeCore.mobileTunnelAttachTunFd(handle, tunFd)) {
             NativeCore.mobileTunnelFree(handle)
             releaseMulticastLock()
-            return failStart(foregroundStarted, "Native mobile tunnel rejected Android TUN fd")
+            failStart(foregroundStarted, "Native mobile tunnel rejected Android TUN fd")
+            return
         }
 
         tunnelHandle = handle
         running.set(true)
         registerUnderlyingNetworkUpdates()
-        return true
     }
 
     private fun Boolean.stickyResult(): Int =
