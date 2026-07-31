@@ -345,6 +345,21 @@ prepare_host_sources() {
   }
 }
 
+if [[ "$ARTIFACT_ACTION" == "full" ]]; then
+  [[ -n "${IOS_DEVICE:-}" ]] || {
+    echo "macOS/mobile Release join gate requires IOS_DEVICE" >&2
+    exit 2
+  }
+  release_join_reuse_artifacts || {
+    echo "macOS/mobile Release join gate requires exact artifact reuse" >&2
+    exit 2
+  }
+  release_join_validate_reused_artifacts || {
+    echo "macOS/mobile Release join gate rejected the exact mobile artifacts" >&2
+    exit 1
+  }
+fi
+
 if [[ "$ARTIFACT_ACTION" != "verify-only" ]]; then
   prepare_host_sources
 fi
@@ -388,31 +403,6 @@ if [[ "$ARTIFACT_ACTION" != "full" ]]; then
   exit 0
 fi
 
-for name in \
-  IOS_DEVICE \
-  RELEASE_JOIN_IOS_APP_PATH \
-  RELEASE_JOIN_IOS_DERIVED_DATA \
-  RELEASE_JOIN_IOS_XCTESTRUN \
-  RELEASE_JOIN_IOS_UDID \
-  NVPN_RELEASE_JOIN_IOS_RECEIPT
-do
-  [[ -n "${!name:-}" ]] || {
-    echo "macOS/iPhone Release join gate requires $name" >&2
-    exit 2
-  }
-done
-[[ -d "$RELEASE_JOIN_IOS_APP_PATH" \
-  && -d "$RELEASE_JOIN_IOS_DERIVED_DATA" \
-  && -s "$RELEASE_JOIN_IOS_XCTESTRUN" \
-  && -s "$NVPN_RELEASE_JOIN_IOS_RECEIPT" ]] || {
-  echo "macOS/iPhone Release join gate requires the validated iOS artifact set" >&2
-  exit 2
-}
-release_join_validate_ios_reuse || {
-  echo "macOS/iPhone Release join gate rejected the exact iOS artifact" >&2
-  exit 1
-}
-
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 [[ -n "$ANDROID_REQUESTED" ]] || {
   echo "Set NVPN_ANDROID_SERIAL to the exact physical Android phone" >&2
@@ -424,6 +414,12 @@ ANDROID_SERIAL_SELECTED="$(
     "$ANDROID_REQUESTED"
 )"
 ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
+release_join_assert_one_android_package || {
+  echo "macOS/mobile Release join gate requires the prepared Android app" >&2
+  exit 1
+}
+RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
+export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 rm -f "$RESULT_DIR/macos/delivery-times.tsv"
 
 # macOS admin -> physical Android joiner.

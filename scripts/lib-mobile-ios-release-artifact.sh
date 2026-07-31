@@ -435,9 +435,9 @@ ios_release_network_audit_artifact() {
     || ! security cms -D -i "$appex/embedded.mobileprovision" >"$tunnel_profile" \
     || ! codesign -d --entitlements :- "$app" >"$app_entitlements" 2>/dev/null \
     || ! codesign -d --entitlements :- "$appex" >"$tunnel_entitlements" 2>/dev/null \
-    || ! codesign -d --extract-certificates "$certificate_prefix" "$app" \
+    || ! codesign -d --extract-certificates="$certificate_prefix" "$app" \
       >/dev/null 2>&1 \
-    || ! codesign -d --extract-certificates "$tunnel_certificate_prefix" "$appex" \
+    || ! codesign -d --extract-certificates="$tunnel_certificate_prefix" "$appex" \
       >/dev/null 2>&1
   then
     rm -rf "$audit_dir"

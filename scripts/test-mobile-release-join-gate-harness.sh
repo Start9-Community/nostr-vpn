@@ -7,11 +7,22 @@ FILES=(
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
   "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
   "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  "$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
   "$ROOT/scripts/macos-release-mobile-join-remote.sh"
 )
 for file in "${FILES[@]}"; do
   bash -n "$file"
+done
+for file in \
+  "$ROOT/scripts/lib-mobile-ios-release-artifact.sh" \
+  "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+do
+  grep -Fq -- '--extract-certificates=' "$file" \
+    && ! grep -Eq -- '--extract-certificates[[:space:]]' "$file" || {
+    echo "$(basename "$file") uses invalid codesign certificate extraction syntax" >&2
+    exit 1
+  }
 done
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 
@@ -709,6 +720,7 @@ for required in (
         raise SystemExit(f"Host-built macOS artifact path is missing {required}")
 for required in (
     "release_join_reset_ios_state",
+    "release_join_reuse_artifacts",
     "testManualJoinAndRequireRosterCompletion",
     "testManualAdminAddRequiresRosterProgress",
     "macOS-admin-to-iPhone-manual",
@@ -718,12 +730,27 @@ for required in (
     "desktopAdminIphoneJoinerRelaunchDurable",
     "iphoneAdminDesktopJoinerRelaunchDurable",
     "NVPN_RELEASE_JOIN_IOS_RECEIPT",
-    "release_join_validate_ios_reuse",
+    "release_join_validate_reused_artifacts",
 ):
     if required not in desktop:
         raise SystemExit(
             f"macOS/iPhone frozen Release join gate is missing {required}"
         )
+desktop_reuse_required = desktop.index("release_join_reuse_artifacts")
+desktop_validation = desktop.index("release_join_validate_reused_artifacts")
+desktop_arm = desktop.index(
+    "RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1", desktop_validation
+)
+desktop_first_reset = min(
+    desktop.index("release_join_reset_android_state", desktop_arm),
+    desktop.index("release_join_reset_ios_state", desktop_arm),
+)
+if not desktop_reuse_required < desktop_validation < desktop_arm < desktop_first_reset:
+    raise SystemExit(
+        "macOS/mobile join does not validate exact artifacts before arming mutation"
+    )
+if "RELEASE_JOIN_ARTIFACTS_VALIDATED=1" in desktop:
+    raise SystemExit("macOS/mobile join bypasses exact artifact validation")
 for source, label in (
     (ios_frozen_gate, "frozen iOS gate"),
     (release_provenance, "release provenance"),

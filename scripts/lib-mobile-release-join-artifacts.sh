@@ -392,7 +392,7 @@ release_join_codesign_certificate_sha256() {
   local bundle="$1" certificate_dir prefix certificate
   certificate_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-signing-cert.XXXXXX")"
   prefix="$certificate_dir/certificate"
-  codesign -d --extract-certificates "$prefix" "$bundle" >/dev/null 2>&1
+  codesign -d --extract-certificates="$prefix" "$bundle" >/dev/null 2>&1
   certificate="${prefix}0"
   [[ -f "$certificate" ]] || {
     rm -rf "$certificate_dir"
