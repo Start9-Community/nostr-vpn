@@ -375,9 +375,9 @@ export function validateWindowsInstallerGateReceipt({
   }
 }
 
-function requirePublicUiJoinReceipt(receipt, platform, label) {
+function requirePublicUiJoinReceipt(receipt, platform, label, schema = 1) {
   if (
-    receipt.schema !== 1
+    receipt.schema !== schema
     || receipt.platform !== platform
     || receipt.publicUiOnly !== true
     || receipt.privateStateRead !== false
@@ -605,13 +605,12 @@ function requireDesktopMobileJoinReceipt({
   receipt,
   platform,
   desktopArtifact,
+  desktopArtifactReceiptSha256,
   androidArtifact,
-  commit,
-  tree,
+  androidArtifactReceiptSha256,
 }) {
   const label = `${platform} / Pixel public-UI join receipt`
-  requirePublicUiJoinReceipt(receipt, platform, label)
-  requireReceiptSource(receipt, { commit, tree, label })
+  requirePublicUiJoinReceipt(receipt, platform, label, 2)
   if (
     receipt.appLaunchArgumentsOrEnvironment !== false
     || !Number.isSafeInteger(receipt.completionDeadlineSeconds)
@@ -645,22 +644,32 @@ function requireDesktopMobileJoinReceipt({
   const android = evidence?.android
   const artifacts = desktopArtifact.artifacts
   if (
-    evidence?.appGitSha !== commit
-    || evidence?.appGitTree !== tree
-    || evidence?.fipsGitSha !== desktopArtifact.fipsGitSha
-    || evidence?.fipsGitTree !== desktopArtifact.fipsGitTree
-    || evidence?.fipsVersion !== desktopArtifact.fipsVersion
-    || !desktop
+    !desktop
+    || desktop.artifactReceiptSha256 !== desktopArtifactReceiptSha256
+    || desktop.appGitSha !== desktopArtifact.appGitSha
+    || desktop.appGitTree !== desktopArtifact.appGitTree
+    || desktop.fipsGitSha !== desktopArtifact.fipsGitSha
+    || desktop.fipsGitTree !== desktopArtifact.fipsGitTree
+    || desktop.fipsVersion !== desktopArtifact.fipsVersion
     || desktop.appSha256 !== artifacts?.app?.sha256
     || desktop.appSize !== artifacts?.app?.size
     || desktop.cliSha256 !== artifacts?.cli?.sha256
     || desktop.cliSize !== artifacts?.cli?.size
     || desktop.appVersion !== desktopArtifact.appVersion
     || !android
+    || android.artifactReceiptSha256 !== androidArtifactReceiptSha256
+    || android.appGitSha !== androidArtifact.appGitSha
+    || android.appGitTree !== androidArtifact.appGitTree
+    || android.fipsGitSha !== androidArtifact.fipsGitSha
+    || android.fipsGitTree !== androidArtifact.fipsGitTree
+    || android.fipsVersion !== androidArtifact.fipsCoreVersion
+    || android.fipsMetadataReceiptSha256
+      !== androidArtifact.fipsCargoMetadataReceiptSha256
     || android.apkSha256 !== androidArtifact.apkSha256
     || android.package !== androidArtifact.package
     || android.signerCertificateSha256
       !== androidArtifact.signerCertificateSha256
+    || !/^[0-9a-f]{64}$/.test(android.installReceiptSha256 ?? '')
   ) {
     throw new Error(`${label} is not bound to the exact desktop/Android artifacts.`)
   }
@@ -1439,10 +1448,12 @@ export function collectReleaseGateReceipts({
     requireDesktopMobileJoinReceipt({
       receipt,
       platform,
-      commit,
-      tree,
       desktopArtifact: artifact,
+      desktopArtifactReceiptSha256: sha256FileSync(
+        platformReceiptPaths[platform].artifact,
+      ),
       androidArtifact: android,
+      androidArtifactReceiptSha256: androidReceiptSha256,
     })
     const network = readRequiredJson(
       platformReceiptPaths[platform].network,

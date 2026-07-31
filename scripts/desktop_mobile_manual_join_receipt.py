@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Validate and bind real desktop↔Pixel manual-join Release evidence."""
+"""Validate and bind real desktop↔Pixel manual-join Release evidence.
+
+Desktop and Android artifacts are independently versioned components.  Their
+source identities may legitimately differ when an unchanged sealed artifact is
+reused, so this verifier binds each component to its own source, FIPS linkage,
+artifact receipt, and payload digest instead of inventing a shared repository
+identity.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +55,11 @@ def sha256_file(path: pathlib.Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def require_regular_file(path: pathlib.Path, label: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        fail(f"{label} is not a regular non-symlink file")
 
 
 def require_exact(value: dict[str, Any], key: str, expected: Any, label: str) -> None:
@@ -155,6 +167,13 @@ def validate_desktop_receipt(
             fail(f"{label} CLI does not bind the exact FIPS revision")
 
     result: dict[str, Any] = {
+        "artifactReceiptSha256": "",
+        "artifactReceiptSize": 0,
+        "appGitSha": app_sha,
+        "appGitTree": app_tree,
+        "fipsGitSha": fips_sha,
+        "fipsGitTree": fips_tree,
+        "fipsVersion": fips_version,
         "appSha256": app["sha256"],
         "appSize": app["size"],
         "cliSha256": cli["sha256"],
@@ -167,21 +186,74 @@ def validate_desktop_receipt(
     return result
 
 
-def validate_android_receipt(
+def validate_android_artifact_receipt(
     receipt: dict[str, Any],
     apk: pathlib.Path,
     app_sha: str,
     app_tree: str,
     fips_sha: str,
     fips_tree: str,
+    fips_version: str,
 ) -> dict[str, Any]:
-    label = "Android Release install receipt"
-    if not apk.is_file() or apk.is_symlink():
-        fail("Android APK is not a regular non-symlink file")
+    label = "Android Release artifact receipt"
+    require_regular_file(apk, "Android APK")
     apk_hash = sha256_file(apk)
+    require_exact(receipt, "receiptSchema", 2, label)
+    require_exact(receipt, "artifactType", "Android Release APK", label)
+    require_exact(receipt, "apkDerivedFromAab", True, label)
+    require_sha256(receipt.get("aabSha256"), "Android sealed AAB hash")
+    require_sha256(
+        receipt.get("bundleReceiptSha256"),
+        "Android AAB derivation receipt hash",
+    )
+    require_sha256(
+        receipt.get("bundletoolSha256"), "Android bundletool hash"
+    )
+    if not isinstance(receipt.get("bundletoolVersion"), str):
+        fail("Android bundletool version is missing")
+    require_exact(receipt, "apkSha256", apk_hash, label)
+    require_exact(receipt, "installedApkSha256", apk_hash, label)
+    require_exact(receipt, "appGitSha", app_sha, label)
+    require_exact(receipt, "appGitTree", app_tree, label)
+    require_exact(receipt, "fipsGitSha", fips_sha, label)
+    require_exact(receipt, "fipsGitTree", fips_tree, label)
+    require_exact(receipt, "fipsCoreVersion", fips_version, label)
+    require_exact(receipt, "package", "fi.siriusbusiness.nvpn", label)
+    require_exact(receipt, "replacementInstall", True, label)
+    require_exact(receipt, "companySigningVerified", True, label)
+    require_exact(receipt, "debuggable", False, label)
+    signer = require_sha256(
+        receipt.get("signerCertificateSha256"),
+        "Android Release signer certificate",
+    )
+    metadata_hash = require_sha256(
+        receipt.get("fipsCargoMetadataReceiptSha256"),
+        "Android FIPS metadata receipt hash",
+    )
+    return {
+        "apkSha256": apk_hash,
+        "apkSize": apk.stat().st_size,
+        "signerCertificateSha256": signer,
+        "package": receipt["package"],
+        "fipsMetadataReceiptSha256": metadata_hash,
+    }
+
+
+def validate_android_install_receipt(
+    receipt: dict[str, Any],
+    *,
+    apk_hash: str,
+    signer: str,
+    app_sha: str,
+    app_tree: str,
+    fips_sha: str,
+    fips_tree: str,
+) -> None:
+    label = "Android Release install receipt"
     require_exact(receipt, "artifact", "Android Release APK", label)
     require_exact(receipt, "apkSha256", apk_hash, label)
     require_exact(receipt, "installedApkSha256", apk_hash, label)
+    require_exact(receipt, "signerCertificateSha256", signer, label)
     require_exact(receipt, "appGitSha", app_sha, label)
     require_exact(receipt, "appGitTree", app_tree, label)
     require_exact(receipt, "fipsGitSha", fips_sha, label)
@@ -192,16 +264,6 @@ def validate_android_receipt(
     require_exact(receipt, "debuggable", False, label)
     require_exact(receipt, "canonicalPackageCount", 1, label)
     require_exact(receipt, "canonicalProcessCount", 1, label)
-    signer = require_sha256(
-        receipt.get("signerCertificateSha256"),
-        "Android Release signer certificate",
-    )
-    return {
-        "apkSha256": apk_hash,
-        "apkSize": apk.stat().st_size,
-        "signerCertificateSha256": signer,
-        "package": receipt["package"],
-    }
 
 
 def validate_phase_evidence(
@@ -270,18 +332,33 @@ def write_json_atomically(path: pathlib.Path, value: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def create_receipt(args: argparse.Namespace) -> None:
+def validate_component_arguments(args: argparse.Namespace) -> None:
     for value, label in (
-        (args.expected_app_sha, "expected app SHA"),
-        (args.expected_app_tree, "expected app tree"),
-        (args.expected_fips_sha, "expected FIPS SHA"),
-        (args.expected_fips_tree, "expected FIPS tree"),
+        (args.expected_desktop_app_sha, "expected desktop app SHA"),
+        (args.expected_desktop_app_tree, "expected desktop app tree"),
+        (args.expected_desktop_fips_sha, "expected desktop FIPS SHA"),
+        (args.expected_desktop_fips_tree, "expected desktop FIPS tree"),
+        (args.expected_android_app_sha, "expected Android app SHA"),
+        (args.expected_android_app_tree, "expected Android app tree"),
+        (args.expected_android_fips_sha, "expected Android FIPS SHA"),
+        (args.expected_android_fips_tree, "expected Android FIPS tree"),
     ):
         require_git_sha(value, label)
-    if not VERSION.fullmatch(args.expected_fips_version):
-        fail("expected FIPS version is invalid")
+    for value, label in (
+        (args.expected_desktop_fips_version, "expected desktop FIPS version"),
+        (args.expected_android_fips_version, "expected Android FIPS version"),
+    ):
+        if not VERSION.fullmatch(value):
+            fail(f"{label} is invalid")
+
+
+def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
+    validate_component_arguments(args)
 
     desktop_source = load_json(args.desktop_receipt, "desktop artifact receipt")
+    android_artifact_source = load_json(
+        args.android_artifact_receipt, "Android artifact receipt"
+    )
     android_source = load_json(
         args.android_install_receipt, "Android install receipt"
     )
@@ -289,32 +366,66 @@ def create_receipt(args: argparse.Namespace) -> None:
     desktop = validate_desktop_receipt(
         desktop_source,
         args.platform,
-        args.expected_app_sha,
-        args.expected_app_tree,
-        args.expected_fips_sha,
-        args.expected_fips_tree,
-        args.expected_fips_version,
+        args.expected_desktop_app_sha,
+        args.expected_desktop_app_tree,
+        args.expected_desktop_fips_sha,
+        args.expected_desktop_fips_tree,
+        args.expected_desktop_fips_version,
     )
-    android = validate_android_receipt(
-        android_source,
+    desktop["artifactReceiptSha256"] = sha256_file(args.desktop_receipt)
+    desktop["artifactReceiptSize"] = args.desktop_receipt.stat().st_size
+    android = validate_android_artifact_receipt(
+        android_artifact_source,
         args.android_apk,
-        args.expected_app_sha,
-        args.expected_app_tree,
-        args.expected_fips_sha,
-        args.expected_fips_tree,
+        args.expected_android_app_sha,
+        args.expected_android_app_tree,
+        args.expected_android_fips_sha,
+        args.expected_android_fips_tree,
+        args.expected_android_fips_version,
+    )
+    validate_android_install_receipt(
+        android_source,
+        apk_hash=android["apkSha256"],
+        signer=android["signerCertificateSha256"],
+        app_sha=args.expected_android_app_sha,
+        app_tree=args.expected_android_app_tree,
+        fips_sha=args.expected_android_fips_sha,
+        fips_tree=args.expected_android_fips_tree,
+    )
+    require_regular_file(
+        args.android_fips_metadata_receipt,
+        "Android FIPS metadata receipt",
+    )
+    require_exact(
+        android,
+        "fipsMetadataReceiptSha256",
+        sha256_file(args.android_fips_metadata_receipt),
+        "Android Release artifact receipt",
+    )
+    android.update(
+        {
+            "artifactReceiptSha256": sha256_file(
+                args.android_artifact_receipt
+            ),
+            "artifactReceiptSize": (
+                args.android_artifact_receipt.stat().st_size
+            ),
+            "installReceiptSha256": sha256_file(args.android_install_receipt),
+            "installReceiptSize": args.android_install_receipt.stat().st_size,
+            "appGitSha": args.expected_android_app_sha,
+            "appGitTree": args.expected_android_app_tree,
+            "fipsGitSha": args.expected_android_fips_sha,
+            "fipsGitTree": args.expected_android_fips_tree,
+            "fipsVersion": args.expected_android_fips_version,
+        }
     )
     phases = validate_phase_evidence(phase_source, args.platform)
-    output = {
-        "schema": 1,
+    return {
+        "schema": 2,
         "platform": args.platform,
         "artifact": {
             "desktop": desktop,
             "android": android,
-            "appGitSha": args.expected_app_sha,
-            "appGitTree": args.expected_app_tree,
-            "fipsGitSha": args.expected_fips_sha,
-            "fipsGitTree": args.expected_fips_tree,
-            "fipsVersion": args.expected_fips_version,
         },
         "publicUiOnly": True,
         "privateStateRead": False,
@@ -325,45 +436,84 @@ def create_receipt(args: argparse.Namespace) -> None:
         "pixelRelaunchDurability": True,
         **phases,
     }
+
+
+def create_receipt(args: argparse.Namespace) -> None:
+    output = build_receipt(args)
     write_json_atomically(args.output, output)
 
 
 def validate_receipt(args: argparse.Namespace) -> None:
     receipt = load_json(args.receipt, "desktop↔Pixel receipt")
-    require_exact(receipt, "schema", 1, "desktop↔Pixel receipt")
-    require_exact(receipt, "platform", args.platform, "desktop↔Pixel receipt")
-    require_exact(receipt, "publicUiOnly", True, "desktop↔Pixel receipt")
-    require_exact(receipt, "privateStateRead", False, "desktop↔Pixel receipt")
-    require_exact(receipt, "fixtureInvoked", False, "desktop↔Pixel receipt")
-    require_exact(
-        receipt,
-        "acceptedSelectorSemantics",
-        "participant-state-not-pending",
-        "desktop↔Pixel receipt",
-    )
-    require_exact(receipt, "desktopRelaunchDurability", True, "desktop↔Pixel receipt")
-    require_exact(receipt, "pixelRelaunchDurability", True, "desktop↔Pixel receipt")
-    validate_phase_evidence(receipt, args.platform)
+    expected = build_receipt(args)
+    if receipt != expected:
+        fail("desktop↔Pixel receipt differs from its bound artifact evidence")
 
 
 def validate_android_only(args: argparse.Namespace) -> None:
     for value, label in (
-        (args.expected_app_sha, "expected app SHA"),
-        (args.expected_app_tree, "expected app tree"),
-        (args.expected_fips_sha, "expected FIPS SHA"),
-        (args.expected_fips_tree, "expected FIPS tree"),
+        (args.expected_android_app_sha, "expected Android app SHA"),
+        (args.expected_android_app_tree, "expected Android app tree"),
+        (args.expected_android_fips_sha, "expected Android FIPS SHA"),
+        (args.expected_android_fips_tree, "expected Android FIPS tree"),
     ):
         require_git_sha(value, label)
-    receipt = load_json(args.receipt, "Android install receipt")
-    validated = validate_android_receipt(
-        receipt,
+    if not VERSION.fullmatch(args.expected_android_fips_version):
+        fail("expected Android FIPS version is invalid")
+    artifact_receipt = load_json(
+        args.android_artifact_receipt, "Android artifact receipt"
+    )
+    install_receipt = load_json(args.receipt, "Android install receipt")
+    validated = validate_android_artifact_receipt(
+        artifact_receipt,
         args.apk,
-        args.expected_app_sha,
-        args.expected_app_tree,
-        args.expected_fips_sha,
-        args.expected_fips_tree,
+        args.expected_android_app_sha,
+        args.expected_android_app_tree,
+        args.expected_android_fips_sha,
+        args.expected_android_fips_tree,
+        args.expected_android_fips_version,
+    )
+    validate_android_install_receipt(
+        install_receipt,
+        apk_hash=validated["apkSha256"],
+        signer=validated["signerCertificateSha256"],
+        app_sha=args.expected_android_app_sha,
+        app_tree=args.expected_android_app_tree,
+        fips_sha=args.expected_android_fips_sha,
+        fips_tree=args.expected_android_fips_tree,
+    )
+    require_regular_file(
+        args.android_fips_metadata_receipt,
+        "Android FIPS metadata receipt",
+    )
+    require_exact(
+        validated,
+        "fipsMetadataReceiptSha256",
+        sha256_file(args.android_fips_metadata_receipt),
+        "Android Release artifact receipt",
     )
     print(validated["apkSha256"])
+
+
+def add_component_binding_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--desktop-receipt", type=pathlib.Path, required=True)
+    command.add_argument(
+        "--android-artifact-receipt", type=pathlib.Path, required=True
+    )
+    command.add_argument(
+        "--android-install-receipt", type=pathlib.Path, required=True
+    )
+    command.add_argument(
+        "--android-fips-metadata-receipt", type=pathlib.Path, required=True
+    )
+    command.add_argument("--android-apk", type=pathlib.Path, required=True)
+    command.add_argument("--phase-evidence", type=pathlib.Path, required=True)
+    for component in ("desktop", "android"):
+        command.add_argument(f"--expected-{component}-app-sha", required=True)
+        command.add_argument(f"--expected-{component}-app-tree", required=True)
+        command.add_argument(f"--expected-{component}-fips-sha", required=True)
+        command.add_argument(f"--expected-{component}-fips-tree", required=True)
+        command.add_argument(f"--expected-{component}-fips-version", required=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -371,32 +521,30 @@ def parser() -> argparse.ArgumentParser:
     subcommands = root.add_subparsers(dest="command", required=True)
     create = subcommands.add_parser("create")
     create.add_argument("--platform", choices=PLATFORMS, required=True)
-    create.add_argument("--desktop-receipt", type=pathlib.Path, required=True)
-    create.add_argument(
-        "--android-install-receipt", type=pathlib.Path, required=True
-    )
-    create.add_argument("--android-apk", type=pathlib.Path, required=True)
-    create.add_argument("--phase-evidence", type=pathlib.Path, required=True)
-    create.add_argument("--expected-app-sha", required=True)
-    create.add_argument("--expected-app-tree", required=True)
-    create.add_argument("--expected-fips-sha", required=True)
-    create.add_argument("--expected-fips-tree", required=True)
-    create.add_argument("--expected-fips-version", required=True)
+    add_component_binding_arguments(create)
     create.add_argument("--output", type=pathlib.Path, required=True)
     create.set_defaults(function=create_receipt)
 
     validate = subcommands.add_parser("validate")
     validate.add_argument("--platform", choices=PLATFORMS, required=True)
     validate.add_argument("--receipt", type=pathlib.Path, required=True)
+    add_component_binding_arguments(validate)
     validate.set_defaults(function=validate_receipt)
 
     android = subcommands.add_parser("validate-android")
     android.add_argument("--receipt", type=pathlib.Path, required=True)
+    android.add_argument(
+        "--android-artifact-receipt", type=pathlib.Path, required=True
+    )
+    android.add_argument(
+        "--android-fips-metadata-receipt", type=pathlib.Path, required=True
+    )
     android.add_argument("--apk", type=pathlib.Path, required=True)
-    android.add_argument("--expected-app-sha", required=True)
-    android.add_argument("--expected-app-tree", required=True)
-    android.add_argument("--expected-fips-sha", required=True)
-    android.add_argument("--expected-fips-tree", required=True)
+    android.add_argument("--expected-android-app-sha", required=True)
+    android.add_argument("--expected-android-app-tree", required=True)
+    android.add_argument("--expected-android-fips-sha", required=True)
+    android.add_argument("--expected-android-fips-tree", required=True)
+    android.add_argument("--expected-android-fips-version", required=True)
     android.set_defaults(function=validate_android_only)
     return root
 

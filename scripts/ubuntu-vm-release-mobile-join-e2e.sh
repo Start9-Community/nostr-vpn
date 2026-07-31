@@ -564,20 +564,32 @@ finally:
     temporary.unlink(missing_ok=True)
 PY
 
+receipt_binding_args=(
+  --desktop-receipt "$RESULT_DIR/import/host-bundle-receipt.json"
+  --android-artifact-receipt "$NVPN_RELEASE_JOIN_ANDROID_RECEIPT"
+  --android-install-receipt "$RESULT_DIR/android-release-install.json"
+  --android-fips-metadata-receipt \
+    "$NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT"
+  --android-apk "$RELEASE_JOIN_ANDROID_APK"
+  --phase-evidence "$PHASE_EVIDENCE"
+  --expected-desktop-app-sha "$APP_GIT_SHA"
+  --expected-desktop-app-tree "$APP_GIT_TREE"
+  --expected-desktop-fips-sha "$RELEASE_JOIN_FIPS_SHA"
+  --expected-desktop-fips-tree "$RELEASE_JOIN_FIPS_TREE"
+  --expected-desktop-fips-version "$RELEASE_JOIN_FIPS_VERSION"
+  --expected-android-app-sha "$RELEASE_JOIN_ANDROID_APP_SHA"
+  --expected-android-app-tree "$RELEASE_JOIN_ANDROID_APP_TREE"
+  --expected-android-fips-sha "$RELEASE_JOIN_FIPS_SHA"
+  --expected-android-fips-tree "$RELEASE_JOIN_FIPS_TREE"
+  --expected-android-fips-version "$RELEASE_JOIN_FIPS_VERSION"
+)
 python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" create \
   --platform linux \
-  --desktop-receipt "$RESULT_DIR/import/host-bundle-receipt.json" \
-  --android-install-receipt "$RESULT_DIR/android-release-install.json" \
-  --android-apk "$RELEASE_JOIN_ANDROID_APK" \
-  --phase-evidence "$PHASE_EVIDENCE" \
-  --expected-app-sha "$APP_GIT_SHA" \
-  --expected-app-tree "$APP_GIT_TREE" \
-  --expected-fips-sha "$RELEASE_JOIN_FIPS_SHA" \
-  --expected-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
-  --expected-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
+  "${receipt_binding_args[@]}" \
   --output "$SUMMARY"
 python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" validate \
   --platform linux \
-  --receipt "$SUMMARY"
+  --receipt "$SUMMARY" \
+  "${receipt_binding_args[@]}"
 
 echo "SIGNED_RELEASE_PUBLIC_UI_LINUX_PIXEL_MANUAL_JOIN_E2E_OK $SUMMARY"

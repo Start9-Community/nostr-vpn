@@ -16,27 +16,57 @@ root = pathlib.Path(sys.argv[1])
 apk = root / "app-release.apk"
 apk.write_bytes(b"exact signed APK test bytes")
 apk_hash = hashlib.sha256(apk.read_bytes()).hexdigest()
-app_sha = "a" * 40
-app_tree = "b" * 40
-fips_sha = "c" * 40
-fips_tree = "d" * 40
-version = "0.4.45"
+metadata = root / "android-fips-metadata.json"
+metadata.write_bytes(b'{"exact":"android FIPS linkage"}\n')
+metadata_hash = hashlib.sha256(metadata.read_bytes()).hexdigest()
+desktop_app_sha = "a" * 40
+desktop_app_tree = "b" * 40
+desktop_fips_sha = "c" * 40
+desktop_fips_tree = "d" * 40
+desktop_fips_version = "0.4.45"
+android_app_sha = "6" * 40
+android_app_tree = "7" * 40
+android_fips_sha = "8" * 40
+android_fips_tree = "9" * 40
+android_fips_version = "0.4.49"
 
-android = {
+android_install = {
     "artifact": "Android Release APK",
     "apkSha256": apk_hash,
     "installedApkSha256": apk_hash,
     "signerCertificateSha256": "e" * 64,
-    "appGitSha": app_sha,
-    "appGitTree": app_tree,
-    "fipsGitSha": fips_sha,
-    "fipsGitTree": fips_tree,
+    "appGitSha": android_app_sha,
+    "appGitTree": android_app_tree,
+    "fipsGitSha": android_fips_sha,
+    "fipsGitTree": android_fips_tree,
     "package": "fi.siriusbusiness.nvpn",
     "replacementInstall": True,
     "replacementInstallVerified": True,
     "debuggable": False,
     "canonicalPackageCount": 1,
     "canonicalProcessCount": 1,
+}
+android_artifact = {
+    "receiptSchema": 2,
+    "artifactType": "Android Release APK",
+    "aabSha256": "a" * 64,
+    "apkDerivedFromAab": True,
+    "bundleReceiptSha256": "b" * 64,
+    "bundletoolSha256": "c" * 64,
+    "bundletoolVersion": "1.18.3",
+    "apkSha256": apk_hash,
+    "installedApkSha256": apk_hash,
+    "signerCertificateSha256": "e" * 64,
+    "appGitSha": android_app_sha,
+    "appGitTree": android_app_tree,
+    "fipsGitSha": android_fips_sha,
+    "fipsGitTree": android_fips_tree,
+    "fipsCoreVersion": android_fips_version,
+    "fipsCargoMetadataReceiptSha256": metadata_hash,
+    "package": "fi.siriusbusiness.nvpn",
+    "replacementInstall": True,
+    "companySigningVerified": True,
+    "debuggable": False,
 }
 phase = {
     "schema": 1,
@@ -67,12 +97,12 @@ windows = {
     "platform": "windows",
     "configuration": "Release",
     "builtOnWindowsVm": True,
-    "appGitSha": app_sha,
-    "appGitTree": app_tree,
+    "appGitSha": desktop_app_sha,
+    "appGitTree": desktop_app_tree,
     "appVersion": "4.1.5",
-    "fipsGitSha": fips_sha,
-    "fipsGitTree": fips_tree,
-    "fipsVersion": version,
+    "fipsGitSha": desktop_fips_sha,
+    "fipsGitTree": desktop_fips_tree,
+    "fipsVersion": desktop_fips_version,
     "artifacts": {
         "app": {"file": "NostrVpn.Windows.exe", "sha256": "1" * 64, "size": 10},
         "appCore": {
@@ -85,7 +115,10 @@ windows = {
             "sha256": "3" * 64,
             "size": 30,
             "shortVersion": "nvpn 4.1.5",
-            "verboseVersion": f"nvpn 4.1.5; fips 0.4.45 (rev {fips_sha[:10]})",
+            "verboseVersion": (
+                "nvpn 4.1.5; fips 0.4.45 "
+                f"(rev {desktop_fips_sha[:10]})"
+            ),
         },
     },
 }
@@ -101,21 +134,25 @@ linux = {
     "containerPayloadSha256": "3" * 64,
     "dockerPlatform": "linux/amd64",
     "target": "x86_64-unknown-linux-gnu",
-    "appGitSha": app_sha,
-    "appGitTree": app_tree,
+    "appGitSha": desktop_app_sha,
+    "appGitTree": desktop_app_tree,
     "appVersion": "4.1.5",
-    "fipsGitSha": fips_sha,
-    "fipsGitTree": fips_tree,
-    "fipsVersion": version,
+    "fipsGitSha": desktop_fips_sha,
+    "fipsGitTree": desktop_fips_tree,
+    "fipsVersion": desktop_fips_version,
     "cliShortVersion": "nvpn 4.1.5",
-    "cliVerboseVersion": f"nvpn 4.1.5; fips 0.4.45 (rev {fips_sha[:10]})",
+    "cliVerboseVersion": (
+        "nvpn 4.1.5; fips 0.4.45 "
+        f"(rev {desktop_fips_sha[:10]})"
+    ),
     "artifacts": {
         "app": {"file": "nostr-vpn", "sha256": "4" * 64, "size": 40},
         "cli": {"file": "nvpn", "sha256": "5" * 64, "size": 50},
     },
 }
 for name, value in (
-    ("android.json", android),
+    ("android-install.json", android_install),
+    ("android-artifact.json", android_artifact),
     ("phase-windows.json", phase),
     ("windows.json", windows),
     ("linux.json", linux),
@@ -132,13 +169,20 @@ phase["platform"] = "linux"
 PY
 
 common=(
-  --android-install-receipt "$WORK/android.json"
+  --android-artifact-receipt "$WORK/android-artifact.json"
+  --android-install-receipt "$WORK/android-install.json"
+  --android-fips-metadata-receipt "$WORK/android-fips-metadata.json"
   --android-apk "$WORK/app-release.apk"
-  --expected-app-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  --expected-app-tree bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  --expected-fips-sha cccccccccccccccccccccccccccccccccccccccc
-  --expected-fips-tree dddddddddddddddddddddddddddddddddddddddd
-  --expected-fips-version 0.4.45
+  --expected-desktop-app-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  --expected-desktop-app-tree bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  --expected-desktop-fips-sha cccccccccccccccccccccccccccccccccccccccc
+  --expected-desktop-fips-tree dddddddddddddddddddddddddddddddddddddddd
+  --expected-desktop-fips-version 0.4.45
+  --expected-android-app-sha 6666666666666666666666666666666666666666
+  --expected-android-app-tree 7777777777777777777777777777777777777777
+  --expected-android-fips-sha 8888888888888888888888888888888888888888
+  --expected-android-fips-tree 9999999999999999999999999999999999999999
+  --expected-android-fips-version 0.4.49
 )
 
 python3 "$VERIFIER" create \
@@ -149,7 +193,10 @@ python3 "$VERIFIER" create \
   --output "$WORK/windows-summary.json"
 python3 "$VERIFIER" validate \
   --platform windows \
-  --receipt "$WORK/windows-summary.json"
+  --receipt "$WORK/windows-summary.json" \
+  --desktop-receipt "$WORK/windows.json" \
+  --phase-evidence "$WORK/phase-windows.json" \
+  "${common[@]}"
 
 python3 "$VERIFIER" create \
   --platform linux \
@@ -159,7 +206,10 @@ python3 "$VERIFIER" create \
   --output "$WORK/linux-summary.json"
 python3 "$VERIFIER" validate \
   --platform linux \
-  --receipt "$WORK/linux-summary.json"
+  --receipt "$WORK/linux-summary.json" \
+  --desktop-receipt "$WORK/linux.json" \
+  --phase-evidence "$WORK/phase-linux.json" \
+  "${common[@]}"
 
 expect_rejected() {
   local label="$1" phase="$2"
@@ -208,14 +258,57 @@ expect_rejected "missing relaunch acceptance" "$WORK/no-relaunch.json"
 expect_rejected "delivery over 15 seconds" "$WORK/slow.json"
 expect_rejected "fixture acceptance" "$WORK/fixture.json"
 
+python3 - "$WORK/windows-summary.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+assert value["schema"] == 2
+assert value["artifact"]["desktop"]["appGitSha"] == "a" * 40
+assert value["artifact"]["android"]["appGitSha"] == "6" * 40
+assert value["artifact"]["desktop"]["fipsGitSha"] == "c" * 40
+assert value["artifact"]["android"]["fipsGitSha"] == "8" * 40
+assert value["artifact"]["desktop"]["artifactReceiptSha256"]
+assert value["artifact"]["android"]["artifactReceiptSha256"]
+assert value["artifact"]["android"]["installReceiptSha256"]
+PY
+
+cp "$WORK/android-artifact.json" "$WORK/android-artifact.original.json"
+python3 - "$WORK/android-artifact.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["aabSha256"] = "0" * 64
+path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+PY
+if python3 "$VERIFIER" validate \
+  --platform windows \
+  --receipt "$WORK/windows-summary.json" \
+  --desktop-receipt "$WORK/windows.json" \
+  --phase-evidence "$WORK/phase-windows.json" \
+  "${common[@]}" >/dev/null 2>&1
+then
+  echo "receipt verifier accepted a changed Android artifact receipt digest" >&2
+  exit 1
+fi
+mv "$WORK/android-artifact.original.json" "$WORK/android-artifact.json"
+
 printf 'tamper' >>"$WORK/app-release.apk"
 if python3 "$VERIFIER" validate-android \
-  --receipt "$WORK/android.json" \
+  --receipt "$WORK/android-install.json" \
+  --android-artifact-receipt "$WORK/android-artifact.json" \
+  --android-fips-metadata-receipt "$WORK/android-fips-metadata.json" \
   --apk "$WORK/app-release.apk" \
-  --expected-app-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  --expected-app-tree bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  --expected-fips-sha cccccccccccccccccccccccccccccccccccccccc \
-  --expected-fips-tree dddddddddddddddddddddddddddddddddddddddd \
+  --expected-android-app-sha 6666666666666666666666666666666666666666 \
+  --expected-android-app-tree 7777777777777777777777777777777777777777 \
+  --expected-android-fips-sha 8888888888888888888888888888888888888888 \
+  --expected-android-fips-tree 9999999999999999999999999999999999999999 \
+  --expected-android-fips-version 0.4.49 \
   >/dev/null 2>&1
 then
   echo "receipt verifier accepted a changed APK" >&2

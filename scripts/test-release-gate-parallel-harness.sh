@@ -502,6 +502,10 @@ do
 done
 grep -Fq 'NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT=' "$release_gate" \
   || fail "Windows/Pixel join does not reuse the exact physical Android install receipt"
+grep -Fq 'NVPN_RELEASE_JOIN_ANDROID_RECEIPT=' "$release_gate" \
+  || fail "desktop/Pixel join does not bind the sealed Android receipt"
+grep -Fq 'NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT=' "$release_gate" \
+  || fail "desktop/Pixel join does not bind Android FIPS provenance"
 grep -Fq 'NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1' "$release_gate" \
   || fail "Linux/Pixel join does not reuse the exact physical Android artifact"
 if grep -Fq 'run_desktop_mobile_manual_join_e2e_gate' "$release_gate" \

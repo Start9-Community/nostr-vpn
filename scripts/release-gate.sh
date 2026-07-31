@@ -1830,11 +1830,16 @@ run_windows_release_mobile_join_e2e_gate() {
   esac
 
   local result_dir android_apk android_install_receipt
+  local android_result_dir android_receipt android_fips_metadata
   result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
+  android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
+  android_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$android_result_dir/mobile-android-release-artifact.json}"
+  android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
   android_apk="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
   android_install_receipt="$result_dir/android-release-install.json"
-  [[ -f "$android_apk" && -f "$android_install_receipt" ]] || {
-    echo "Windows/Pixel join requires the exact APK and install receipt from the mobile join lane." >&2
+  [[ -f "$android_apk" && -f "$android_install_receipt" \
+    && -f "$android_receipt" && -f "$android_fips_metadata" ]] || {
+    echo "Windows/Pixel join requires the exact APK, artifact/FIPS receipts, and install receipt from the mobile join lane." >&2
     return 1
   }
   release_gate_run_with_timeout \
@@ -1842,6 +1847,8 @@ run_windows_release_mobile_join_e2e_gate() {
     "$MOBILE_JOIN_E2E_TIMEOUT_SECS" \
     env \
       NVPN_RELEASE_JOIN_ANDROID_APK="$android_apk" \
+      NVPN_RELEASE_JOIN_ANDROID_RECEIPT="$android_receipt" \
+      NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT="$android_fips_metadata" \
       NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT="$android_install_receipt" \
       NVPN_RELEASE_JOIN_RESULT_DIR="$result_dir" \
       ./scripts/windows-vm-release-mobile-join-e2e.sh "$host"

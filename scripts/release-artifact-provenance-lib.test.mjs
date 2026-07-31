@@ -210,6 +210,7 @@ test('release receipt collection requires exact source and strict public UI gate
       signerCertificateSha256: '2'.repeat(64),
       companySigningVerified: true,
       fipsCoreVersion: source.fipsVersion,
+      fipsCargoMetadataReceiptSha256: 'd'.repeat(64),
     }
     const iosArtifact = {
       ...source,
@@ -690,13 +691,17 @@ test('release receipt collection requires exact source and strict public UI gate
         }))
       }
       writeFileSync(paths[platform].public_ui_join, JSON.stringify({
-        ...source,
-        schema: 1,
+        schema: 2,
         platform,
         artifact: {
-          ...source,
-          fipsVersion: desktopArtifact.fipsVersion,
           desktop: {
+            appGitSha: desktopArtifact.appGitSha,
+            appGitTree: desktopArtifact.appGitTree,
+            fipsGitSha: desktopArtifact.fipsGitSha,
+            fipsGitTree: desktopArtifact.fipsGitTree,
+            fipsVersion: desktopArtifact.fipsVersion,
+            artifactReceiptSha256: sha256(desktopArtifactText),
+            artifactReceiptSize: Buffer.byteLength(desktopArtifactText),
             appSha256: desktopArtifact.artifacts.app.sha256,
             appSize: desktopArtifact.artifacts.app.size,
             cliSha256: desktopArtifact.artifacts.cli.sha256,
@@ -711,6 +716,17 @@ test('release receipt collection requires exact source and strict public UI gate
               : {}),
           },
           android: {
+            appGitSha: androidArtifact.appGitSha,
+            appGitTree: androidArtifact.appGitTree,
+            fipsGitSha: androidArtifact.fipsGitSha,
+            fipsGitTree: androidArtifact.fipsGitTree,
+            fipsVersion: androidArtifact.fipsCoreVersion,
+            fipsMetadataReceiptSha256:
+              androidArtifact.fipsCargoMetadataReceiptSha256,
+            artifactReceiptSha256: sha256(androidText),
+            artifactReceiptSize: Buffer.byteLength(androidText),
+            installReceiptSha256: 'b'.repeat(64),
+            installReceiptSize: 100,
             apkSha256: androidArtifact.apkSha256,
             apkSize: 400,
             signerCertificateSha256:
@@ -851,6 +867,20 @@ test('release receipt collection requires exact source and strict public UI gate
         receipt.iphoneAdminDesktopJoinerRelaunchDurable = false
       },
       /macOS\/mobile public-UI join receipt is incomplete/,
+    )
+    assertRejectedReceiptMutation(
+      paths.windows.public_ui_join,
+      (receipt) => {
+        receipt.artifact.android.artifactReceiptSha256 = '0'.repeat(64)
+      },
+      /not bound to the exact desktop\/Android artifacts/,
+    )
+    assertRejectedReceiptMutation(
+      paths.linux.public_ui_join,
+      (receipt) => {
+        receipt.artifact.desktop.appGitTree = '0'.repeat(40)
+      },
+      /not bound to the exact desktop\/Android artifacts/,
     )
     for (const platform of ['android', 'ios']) {
       assertRejectedReceiptMutation(

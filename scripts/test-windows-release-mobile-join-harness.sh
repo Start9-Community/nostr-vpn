@@ -102,6 +102,17 @@ do
   grep -Fq "$evidence" "$HOST" \
     || fail "Windows/Pixel orchestrator lacks $evidence"
 done
+for component_binding in \
+  --android-artifact-receipt \
+  --android-fips-metadata-receipt \
+  --expected-desktop-app-sha \
+  --expected-android-app-sha \
+  --expected-desktop-fips-sha \
+  --expected-android-fips-sha
+do
+  grep -Fq -- "$component_binding" "$HOST" \
+    || fail "Windows/Pixel receipt lacks $component_binding"
+done
 if grep -Fq 'desktop_manual_join_e2e_fixture' "$DRIVER" "$REMOTE" "$HOST"; then
   fail "Windows/Pixel acceptance invokes the private manual-join fixture"
 fi

@@ -55,6 +55,8 @@ RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}
 PLATFORM_RESULT="$RESULT_DIR/windows"
 PRIVATE_DIR="$PLATFORM_RESULT/.private-$$"
 ANDROID_INSTALL_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT:-$RESULT_DIR/android-release-install.json}"
+ANDROID_ARTIFACT_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:-}"
+ANDROID_FIPS_METADATA_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT:-}"
 DESKTOP_RECEIPT="$PLATFORM_RESULT/windows-release-artifact.json"
 PHASE_EVIDENCE="$PLATFORM_RESULT/phase-evidence.json"
 SUMMARY="$PLATFORM_RESULT/summary.json"
@@ -79,16 +81,32 @@ release_join_require_clean_fips
   || fail "exact Android Release APK is not inherited from the mobile artifact lane"
 [[ -f "$ANDROID_INSTALL_RECEIPT" ]] \
   || fail "Android Release install receipt is missing"
+[[ -f "$ANDROID_ARTIFACT_RECEIPT" ]] \
+  || fail "Android Release artifact receipt is missing"
+[[ -f "$ANDROID_FIPS_METADATA_RECEIPT" ]] \
+  || fail "Android FIPS metadata receipt is missing"
+ANDROID_APP_SHA="$(jq -er '.appGitSha' "$ANDROID_ARTIFACT_RECEIPT")"
+ANDROID_APP_TREE="$(jq -er '.appGitTree' "$ANDROID_ARTIFACT_RECEIPT")"
+ANDROID_FIPS_SHA="$(jq -er '.fipsGitSha' "$ANDROID_ARTIFACT_RECEIPT")"
+ANDROID_FIPS_TREE="$(jq -er '.fipsGitTree' "$ANDROID_ARTIFACT_RECEIPT")"
+ANDROID_FIPS_VERSION="$(jq -er '.fipsCoreVersion' "$ANDROID_ARTIFACT_RECEIPT")"
 ANDROID_APK_SHA="$(
   python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" \
     validate-android \
     --receipt "$ANDROID_INSTALL_RECEIPT" \
+    --android-artifact-receipt "$ANDROID_ARTIFACT_RECEIPT" \
+    --android-fips-metadata-receipt "$ANDROID_FIPS_METADATA_RECEIPT" \
     --apk "$RELEASE_JOIN_ANDROID_APK" \
-    --expected-app-sha "$APP_GIT_SHA" \
-    --expected-app-tree "$APP_GIT_TREE" \
-    --expected-fips-sha "$RELEASE_JOIN_FIPS_SHA" \
-    --expected-fips-tree "$RELEASE_JOIN_FIPS_TREE"
+    --expected-android-app-sha "$ANDROID_APP_SHA" \
+    --expected-android-app-tree "$ANDROID_APP_TREE" \
+    --expected-android-fips-sha "$ANDROID_FIPS_SHA" \
+    --expected-android-fips-tree "$ANDROID_FIPS_TREE" \
+    --expected-android-fips-version "$ANDROID_FIPS_VERSION"
 )" || fail "Android artifact provenance validation failed"
+[[ "$ANDROID_FIPS_SHA" == "$RELEASE_JOIN_FIPS_SHA" \
+  && "$ANDROID_FIPS_TREE" == "$RELEASE_JOIN_FIPS_TREE" \
+  && "$ANDROID_FIPS_VERSION" == "$RELEASE_JOIN_FIPS_VERSION" ]] \
+  || fail "Android artifact uses a different FIPS component"
 [[ "$ANDROID_APK_SHA" =~ ^[0-9a-f]{64}$ ]] \
   || fail "Android artifact verifier returned an invalid hash"
 if [[ -n "${RELEASE_JOIN_ANDROID_APK_SHA:-}" \
@@ -434,20 +452,31 @@ finally:
     temporary.unlink(missing_ok=True)
 PY
 
+receipt_binding_args=(
+  --desktop-receipt "$DESKTOP_RECEIPT"
+  --android-artifact-receipt "$ANDROID_ARTIFACT_RECEIPT"
+  --android-install-receipt "$ANDROID_INSTALL_RECEIPT"
+  --android-fips-metadata-receipt "$ANDROID_FIPS_METADATA_RECEIPT"
+  --android-apk "$RELEASE_JOIN_ANDROID_APK"
+  --phase-evidence "$PHASE_EVIDENCE"
+  --expected-desktop-app-sha "$APP_GIT_SHA"
+  --expected-desktop-app-tree "$APP_GIT_TREE"
+  --expected-desktop-fips-sha "$RELEASE_JOIN_FIPS_SHA"
+  --expected-desktop-fips-tree "$RELEASE_JOIN_FIPS_TREE"
+  --expected-desktop-fips-version "$RELEASE_JOIN_FIPS_VERSION"
+  --expected-android-app-sha "$ANDROID_APP_SHA"
+  --expected-android-app-tree "$ANDROID_APP_TREE"
+  --expected-android-fips-sha "$ANDROID_FIPS_SHA"
+  --expected-android-fips-tree "$ANDROID_FIPS_TREE"
+  --expected-android-fips-version "$ANDROID_FIPS_VERSION"
+)
 python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" create \
   --platform windows \
-  --desktop-receipt "$DESKTOP_RECEIPT" \
-  --android-install-receipt "$ANDROID_INSTALL_RECEIPT" \
-  --android-apk "$RELEASE_JOIN_ANDROID_APK" \
-  --phase-evidence "$PHASE_EVIDENCE" \
-  --expected-app-sha "$APP_GIT_SHA" \
-  --expected-app-tree "$APP_GIT_TREE" \
-  --expected-fips-sha "$RELEASE_JOIN_FIPS_SHA" \
-  --expected-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
-  --expected-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
+  "${receipt_binding_args[@]}" \
   --output "$SUMMARY"
 python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" validate \
   --platform windows \
-  --receipt "$SUMMARY"
+  --receipt "$SUMMARY" \
+  "${receipt_binding_args[@]}"
 
 echo "SIGNED_RELEASE_PUBLIC_UI_WINDOWS_PIXEL_MANUAL_JOIN_E2E_OK $SUMMARY"
