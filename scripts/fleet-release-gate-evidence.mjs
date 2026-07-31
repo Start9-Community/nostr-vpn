@@ -165,7 +165,11 @@ function requireCoreArtifactFipsSource(platformReceiptPaths, source) {
   }
 }
 
-function requireAndroidGateComponentSource(manifest, platformReceiptPaths) {
+function requireAndroidGateComponentSource(
+  manifest,
+  platformReceiptPaths,
+  source,
+) {
   const gate = requireObject(
     manifest.android_release_gate,
     'Staged Android release gate',
@@ -176,6 +180,8 @@ function requireAndroidGateComponentSource(manifest, platformReceiptPaths) {
   )
   if (
     gate.receipt_schema !== physical.receiptSchema
+    || gate.app_git_sha !== source.appGitSha
+    || gate.app_git_tree !== source.appGitTree
     || gate.app_git_sha !== physical.appGitSha
     || gate.app_git_tree !== physical.appGitTree
     || gate.apk_sha256 !== physical.apkSha256
@@ -184,7 +190,7 @@ function requireAndroidGateComponentSource(manifest, platformReceiptPaths) {
       !== physical.signerCertificateSha256
   ) {
     throw new Error(
-      'Staged Android release gate does not match the physical component receipt.',
+      'Staged Android release gate does not match the release candidate and physical receipt.',
     )
   }
 }
@@ -297,7 +303,7 @@ export function validateFleetReleaseGateEvidence(request) {
     releaseGateSummaryPath: receiptPaths.releaseGateSummary,
     platformReceiptPaths: receiptPaths.platforms,
   })
-  requireAndroidGateComponentSource(manifest, receiptPaths.platforms)
+  requireAndroidGateComponentSource(manifest, receiptPaths.platforms, source)
   if (
     collected.releaseGateSummarySha256 !==
       canonical.release_gate_summary_sha256 ||

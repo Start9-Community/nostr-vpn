@@ -2485,8 +2485,8 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
       release_gate_attestation: releaseGateAttestation,
     }),
   )
-  assert.doesNotThrow(() =>
-    validatePromotableReleaseManifest({
+  assert.throws(
+    () => validatePromotableReleaseManifest({
       commit,
       assets: completeAssets,
       android_release_gate: {
@@ -2496,6 +2496,7 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
       },
       release_gate_attestation: releaseGateAttestation,
     }),
+    /Android gate.*release candidate/i,
   )
   assert.throws(
     () =>
@@ -2586,6 +2587,10 @@ test('release script binds Android publication to the physical-gate receipt and 
   const androidBuild = localRelease.slice(androidBuildStart, androidBuildEnd)
 
   assert.match(androidBuild, /validateAndroidReleaseGateReceipt\(/)
+  assert.match(androidBuild, /candidateCommit/)
+  assert.match(androidBuild, /candidateTree/)
+  assert.doesNotMatch(androidBuild, /const componentCommit/)
+  assert.doesNotMatch(androidBuild, /const componentTree/)
   assert.doesNotMatch(androidBuild, /:app:(?:assemble|bundle)Release/)
   assert.match(androidBuild, /copyFileSync\(testedApkPath,\s*apkDest\)/)
   assert.match(

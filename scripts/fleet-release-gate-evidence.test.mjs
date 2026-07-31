@@ -234,7 +234,7 @@ test('accepts real collector evidence through the function and CLI', () => {
     })
     assert.throws(
       () => validateFleetReleaseGateEvidence(value.request),
-      /Android release gate does not match the physical component receipt/,
+      /Android release gate does not match the release candidate and physical receipt/,
     )
   } finally {
     rmSync(root, { recursive: true, force: true })

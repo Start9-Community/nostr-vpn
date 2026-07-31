@@ -195,13 +195,8 @@ test('release receipt collection requires exact source and strict public UI gate
           ? 'missed'
           : 'met',
     }))
-    const androidComponentSource = {
-      appGitSha: 'e'.repeat(40),
-      appGitTree: 'f'.repeat(40),
-    }
     const androidArtifact = {
       ...source,
-      ...androidComponentSource,
       receiptSchema: 2,
       artifactType: 'Android Release APK',
       apkSha256: '1'.repeat(64),
@@ -401,7 +396,6 @@ test('release receipt collection requires exact source and strict public UI gate
     )
     writeFileSync(paths.android.replacement_singleton, JSON.stringify({
       ...source,
-      ...androidComponentSource,
       receiptSchema: 1,
       artifactType: 'Android Release replacement/singleton gate',
       artifactReceiptSha256: sha256(androidText),
@@ -863,6 +857,56 @@ test('release receipt collection requires exact source and strict public UI gate
       )
       writeFileSync(path, original)
     }
+    const androidIdentityPaths = [
+      paths.android.physical,
+      paths.android.install,
+      paths.android.wireguard_dns,
+      paths.android.underlay_lifecycle,
+      paths.android.replacement_singleton,
+    ]
+    const originalAndroidIdentityFiles = new Map(
+      androidIdentityPaths.map((path) => [path, readFileSync(path, 'utf8')]),
+    )
+    const oldCommit = 'e'.repeat(40)
+    const oldTree = 'f'.repeat(40)
+    for (const path of androidIdentityPaths) {
+      const receipt = JSON.parse(originalAndroidIdentityFiles.get(path))
+      receipt.appGitSha = oldCommit
+      receipt.appGitTree = oldTree
+      writeFileSync(path, JSON.stringify(receipt))
+    }
+    const originalMobileJoin = readFileSync(mobileJoinPath, 'utf8')
+    const oldMobileJoin = JSON.parse(originalMobileJoin)
+    oldMobileJoin.artifact.android.appGitSha = oldCommit
+    oldMobileJoin.artifact.android.appGitTree = oldTree
+    writeFileSync(mobileJoinPath, JSON.stringify(oldMobileJoin))
+    const originalDesktopJoinFiles = new Map()
+    for (const platform of ['linux', 'windows']) {
+      const path = paths[platform].public_ui_join
+      const original = readFileSync(path, 'utf8')
+      originalDesktopJoinFiles.set(path, original)
+      const receipt = JSON.parse(original)
+      receipt.artifact.android.appGitSha = oldCommit
+      receipt.artifact.android.appGitTree = oldTree
+      writeFileSync(path, JSON.stringify(receipt))
+    }
+    assert.throws(
+      () => collectReleaseGateReceipts({
+        commit,
+        tree,
+        releaseGateSummaryPath: summary,
+        platformReceiptPaths: paths,
+      }),
+      /Physical Android artifact receipt.*release candidate/i,
+      'a self-consistent signed old Android component must not be promotable',
+    )
+    for (const [path, original] of originalAndroidIdentityFiles) {
+      writeFileSync(path, original)
+    }
+    writeFileSync(mobileJoinPath, originalMobileJoin)
+    for (const [path, original] of originalDesktopJoinFiles) {
+      writeFileSync(path, original)
+    }
     assertRejectedReceiptMutation(
       mobileJoinPath,
       (receipt) => {
@@ -915,14 +959,14 @@ test('release receipt collection requires exact source and strict public UI gate
     assertRejectedReceiptMutation(
       paths.android.install,
       (receipt) => {
-        receipt.appGitTree = tree
+        receipt.appGitTree = '0'.repeat(40)
       },
       /install receipt is not bound to the exact physical artifact/,
     )
     assertRejectedReceiptMutation(
       paths.android.wireguard_dns,
       (receipt) => {
-        receipt.appGitSha = commit
+        receipt.appGitSha = '0'.repeat(40)
       },
       /not exact source\/artifact evidence/,
     )

@@ -577,16 +577,18 @@ export function validatePromotableReleaseManifest(manifest) {
   ) {
     throw new Error('Physical Android gate APK does not match the staged release asset.')
   }
+  const attestation = validateReleaseGateAttestation(manifest)
   if (
     gate.receipt_schema !== 2
-    || !/^[0-9a-f]{40}$/.test(String(gate.app_git_sha ?? ''))
-    || !/^[0-9a-f]{40}$/.test(String(gate.app_git_tree ?? ''))
+    || gate.app_git_sha !== manifest.commit
+    || gate.app_git_tree !== attestation.app_git_tree
     || !String(gate.package ?? '').trim()
     || !/^[0-9a-f]{64}$/.test(String(gate.signer_certificate_sha256 ?? ''))
   ) {
-    throw new Error('Staged physical Android gate provenance is incomplete or inconsistent.')
+    throw new Error(
+      'Staged physical Android gate does not match the current release candidate.',
+    )
   }
-  validateReleaseGateAttestation(manifest)
 }
 
 export function readWorkspaceVersionTag(cargoTomlText) {

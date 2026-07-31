@@ -1154,6 +1154,11 @@ export function collectReleaseGateReceipts({
     android,
     'Physical Android artifact receipt',
   )
+  if (androidSource.commit !== commit || androidSource.tree !== tree) {
+    throw new Error(
+      'Physical Android artifact receipt does not match the current release candidate SHA/tree.',
+    )
+  }
   if (
     android.receiptSchema !== 2
     || android.artifactType !== 'Android Release APK'
