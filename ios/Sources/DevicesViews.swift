@@ -138,6 +138,7 @@ struct ToolbarVpnSwitch: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
+        .accessibilityElement(children: .ignore)
         .accessibilityIdentifier("vpn-toggle")
         .accessibilityLabel(model.state.vpnEnabled ? "Turn VPN off" : "Turn VPN on")
         .accessibilityValue(model.state.vpnEnabled ? "On" : "Off")
