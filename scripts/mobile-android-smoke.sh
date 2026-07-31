@@ -276,13 +276,6 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if android_release_reuse_verified_artifact \
-  && ! truthy "$RELEASE_BLACKBOX_GATE"
-then
-  echo "Android verified-artifact reuse requires --release-network-gate" >&2
-  exit 2
-fi
-
 sdk_from_local_properties() {
   local file="$ROOT/android/local.properties"
   if [[ -f "$file" ]]; then
@@ -426,6 +419,13 @@ vpn_inactive() {
 truthy() {
   [[ "$1" == "1" || "$1" == "true" || "$1" == "yes" ]]
 }
+
+if android_release_reuse_verified_artifact \
+  && ! truthy "$RELEASE_BLACKBOX_GATE"
+then
+  echo "Android verified-artifact reuse requires --release-network-gate" >&2
+  exit 2
+fi
 
 epoch_ms() {
   python3 -c 'import time; print(int(time.time() * 1000))'
