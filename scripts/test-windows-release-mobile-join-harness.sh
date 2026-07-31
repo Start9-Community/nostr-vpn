@@ -70,6 +70,17 @@ for artifact in nostr_vpn_app_core.dll nvpn.exe; do
   grep -Fq "$artifact" "$REMOTE" \
     || fail "Windows artifact receipt does not bind $artifact"
 done
+for service_contract in \
+  '$ServiceName = "NvpnService"' \
+  'Get-Service -Name $ServiceName' \
+  'Stop-Service -Name $ServiceName'
+do
+  grep -Fq "$service_contract" "$REMOTE" \
+    || fail "Windows wrapper does not use the production service name"
+done
+if grep -Eq '(Get|Stop)-Service -Name "nvpn"' "$REMOTE"; then
+  fail "Windows wrapper still queries the obsolete service name"
+fi
 if grep -Eq 'cargo (build|run)|dotnet (build|publish)|windows-build\\.ps1' "$REMOTE" "$HOST"; then
   fail "physical Windows/Pixel phase compiles instead of reusing Release artifacts"
 fi

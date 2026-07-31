@@ -124,6 +124,17 @@ spec = importlib.util.spec_from_file_location("network_evidence", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
+if "strict=True" in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"):
+    raise SystemExit("release network evidence still requires Python 3.10 zip(strict=)")
+before, after = module.split_dns_counters(list(range(14)), "fixture")
+assert list(before.values()) == list(range(7))
+assert list(after.values()) == list(range(7, 14))
+try:
+    module.split_dns_counters(list(range(13)), "short-fixture")
+except ValueError as error:
+    assert "wrong width" in str(error)
+else:
+    raise SystemExit("release network evidence accepted a short DNS counter row")
 cases = {
     "automatic-profile": ("automatic", "cloudflare", "", "", ""),
     "cloudflare-doh": ("encrypted", "cloudflare", "", "", ""),

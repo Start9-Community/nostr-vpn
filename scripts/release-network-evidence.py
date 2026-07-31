@@ -178,6 +178,17 @@ def validate_dns_path_counters(
             )
 
 
+def split_dns_counters(
+    values: list[int], label: str
+) -> tuple[dict[str, int], dict[str, int]]:
+    require(
+        len(values) == 2 * len(COUNTERS),
+        f"{label} DNS counter row has the wrong width",
+    )
+    width = len(COUNTERS)
+    return dict(zip(COUNTERS, values[:width])), dict(zip(COUNTERS, values[width:]))
+
+
 def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[str, Any]:
     require(path.is_file() and not path.is_symlink(), "mobile counter ledger is missing")
     rows: dict[str, Any] = {}
@@ -202,8 +213,7 @@ def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[
             and after_forward > before_forward,
             f"{label} lacks increasing WireGuard/forward counters",
         )
-        before_dns = dict(zip(COUNTERS, dns_values[:7], strict=True))
-        after_dns = dict(zip(COUNTERS, dns_values[7:], strict=True))
+        before_dns, after_dns = split_dns_counters(dns_values, label)
         validate_dns_path_counters(label, evidence, before_dns, after_dns)
         rows[label] = {
             "dnsEvidence": evidence,
@@ -1341,8 +1351,7 @@ def build_desktop(args: argparse.Namespace) -> None:
         )
         for row in rows:
             dns_values = [int(value) for value in row[5:]]
-            before_dns = dict(zip(COUNTERS, dns_values[:7], strict=True))
-            after_dns = dict(zip(COUNTERS, dns_values[7:], strict=True))
+            before_dns, after_dns = split_dns_counters(dns_values, row[0])
             require(
                 len(row) == 19
                 and int(row[2]) > int(row[1])

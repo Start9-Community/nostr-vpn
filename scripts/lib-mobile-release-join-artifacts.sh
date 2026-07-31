@@ -193,10 +193,8 @@ release_join_assert_one_android_package() {
     "${ADB[@]}" shell pm list packages \
       | tr -d '\r' \
       | sed -n 's/^package://p' \
-      | awk -v canonical="$package" '
-          $0 == "org.nostrvpn.app"
-          || ($0 ~ /^fi\.siriusbusiness\.nvpn(\.|$)/ && $0 != canonical)
-        '
+      | awk -v canonical="$package" \
+          '$0 == "org.nostrvpn.app" || ($0 ~ /^fi\.siriusbusiness\.nvpn(\.|$)/ && $0 != canonical)'
   )"
   [[ -z "$unexpected" ]] || {
     echo "Parallel/stale Android nVPN package remains installed" >&2

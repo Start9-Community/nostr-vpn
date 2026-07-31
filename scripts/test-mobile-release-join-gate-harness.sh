@@ -15,6 +15,26 @@ for file in "${FILES[@]}"; do
 done
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 
+(
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  fake_adb() {
+    case "$*" in
+      "shell pm list packages") printf '%s\n' "$FAKE_ANDROID_PACKAGES" ;;
+      "shell pm path fi.siriusbusiness.nvpn") return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  ADB=(fake_adb)
+  FAKE_ANDROID_PACKAGES=$'package:fi.siriusbusiness.nvpn\npackage:fi.siriusbusiness.nvpn.debug'
+  if release_join_assert_one_android_package >/dev/null 2>&1; then
+    echo "Android one-package check accepted a stale package" >&2
+    exit 1
+  fi
+  FAKE_ANDROID_PACKAGES='package:fi.siriusbusiness.nvpn'
+  release_join_assert_one_android_package
+)
+
 for obsolete in \
   "$ROOT/scripts/mobile-ios-android-join-e2e.sh" \
   "$ROOT/scripts/test-mobile-real-qr-join-harness.sh" \

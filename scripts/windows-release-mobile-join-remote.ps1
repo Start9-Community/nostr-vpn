@@ -43,6 +43,7 @@ $StopPath = Join-Path $ArtifactRoot "stop"
 $ReceiptPath = Join-Path $ArtifactRoot "windows-release-artifact.json"
 $WrapperPath = Join-Path $ArtifactRoot "interactive-action.ps1"
 $CliExe = Join-Path (Split-Path -Parent $AppExe) "nvpn.exe"
+$ServiceName = "NvpnService"
 $AppCoreDll = Join-Path (Split-Path -Parent $AppExe) "nostr_vpn_app_core.dll"
 $WintunDll = Join-Path (Split-Path -Parent $AppExe) "binaries\wintun.dll"
 
@@ -319,7 +320,7 @@ switch ($Mode) {
     if ($LASTEXITCODE -ne 0) {
       throw "exact Windows candidate service installation failed"
     }
-    $Service = Get-Service -Name "nvpn" -ErrorAction Stop
+    $Service = Get-Service -Name $ServiceName -ErrorAction Stop
     if ($Service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
       $Service.WaitForStatus(
         [System.ServiceProcess.ServiceControllerStatus]::Running,
@@ -330,7 +331,7 @@ switch ($Mode) {
   }
   "Reset" {
     Assert-PreparedReceipt
-    Stop-Service -Name "nvpn" -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
     Invoke-InteractiveAction "Reset"
   }
   "Bootstrap" {
