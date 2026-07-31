@@ -58,6 +58,8 @@ impl FipsEthernetUnderlayConfig {
 const FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY: u8 = 10;
 const FIPS_DYNAMIC_PEER_ENDPOINT_PRIORITY: u8 = 100;
 const FIPS_PRIVATE_DYNAMIC_PEER_ENDPOINT_PRIORITY: u8 = 200;
+const FIPS_UDP_IPV4_TRANSPORT: &str = "ipv4";
+const FIPS_UDP_IPV6_TRANSPORT: &str = "ipv6";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FipsPeerAddressHint {
@@ -254,7 +256,6 @@ fn fips_endpoint_config_with_open_discovery_limit(
     // hashed per-network LAN discovery scope separately; that scope is carried
     // only in mDNS TXT records on the local link, while the private data plane
     // still enforces roster ownership before packets reach the tun.
-    let bind_addr = transport.map(fips_udp_bind_addr);
     let external_addr = transport
         .filter(|_| advertise_public_endpoint)
         .and_then(|transport| fips_udp_external_addr(&transport.advertised_endpoint));
@@ -279,12 +280,19 @@ fn fips_endpoint_config_with_open_discovery_limit(
                 TransportInstances::Single(transport.websocket.clone());
         }
     }
-    config.transports.udp = TransportInstances::Single(UdpConfig {
-        bind_addr,
+    let listen_port = transport.map_or(0, |transport| transport.listen_port);
+    let advertised_family = external_addr
+        .as_deref()
+        .and_then(|addr| addr.parse::<SocketAddr>().ok())
+        .map(|addr| addr.is_ipv6());
+    let (ipv4_external_addr, ipv6_external_addr) = match advertised_family {
+        Some(false) => (external_addr, None),
+        Some(true) => (None, external_addr),
+        None => (None, None),
+    };
+    let udp = UdpConfig {
         bind_interface: transport.and_then(|transport| transport.bind_interface.clone()),
-        advertise_on_nostr: Some(advertise_on_nostr),
         public: Some(advertise_public_endpoint),
-        external_addr,
         outbound_only: Some(transport.is_none()),
         accept_connections: Some(transport.is_some()),
         // The safe default remains IPv6-minimum sized for NAT traversal and
@@ -293,7 +301,19 @@ fn fips_endpoint_config_with_open_discovery_limit(
         mtu: Some(mesh_mtu.underlay_udp),
         send_buf_size: fips_udp_send_buf_size(),
         ..UdpConfig::default()
-    });
+    };
+    let mut ipv4 = udp.clone();
+    ipv4.bind_addr = Some(format!("0.0.0.0:{listen_port}"));
+    ipv4.advertise_on_nostr = Some(advertise_on_nostr && advertised_family != Some(true));
+    ipv4.external_addr = ipv4_external_addr;
+    let mut ipv6 = udp;
+    ipv6.bind_addr = Some(format!("[::]:{listen_port}"));
+    ipv6.advertise_on_nostr = Some(advertise_on_nostr && advertised_family == Some(true));
+    ipv6.external_addr = ipv6_external_addr;
+    config.transports.udp = TransportInstances::Named(HashMap::from([
+        (FIPS_UDP_IPV4_TRANSPORT.to_string(), ipv4),
+        (FIPS_UDP_IPV6_TRANSPORT.to_string(), ipv6),
+    ]));
     // Outbound TCP transport so peers reachable only over tcp:443 (e.g. on
     // networks that block UDP outright) can still be dialed. bind_addr=None keeps
     // it outbound-only — no listener.
@@ -593,14 +613,6 @@ fn participant_pubkey_bytes(value: &str) -> Option<ParticipantPubkeyBytes> {
     PublicKey::parse(value.trim())
         .ok()
         .map(|pubkey| *pubkey.as_bytes())
-}
-
-fn fips_udp_bind_addr(transport: &FipsEndpointTransportConfig) -> String {
-    SocketAddr::V4(SocketAddrV4::new(
-        std::net::Ipv4Addr::UNSPECIFIED,
-        transport.listen_port,
-    ))
-    .to_string()
 }
 
 fn fips_udp_external_addr(advertised_endpoint: &str) -> Option<String> {

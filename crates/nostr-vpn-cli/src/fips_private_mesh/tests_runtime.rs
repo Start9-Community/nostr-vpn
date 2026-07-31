@@ -16,6 +16,14 @@
             .port()
     }
 
+    fn udp_carriers(config: &Config) -> &HashMap<String, UdpConfig> {
+        let TransportInstances::Named(udp) = &config.transports.udp else {
+            panic!("expected named IPv4 and IPv6 UDP transports");
+        };
+        assert_eq!(udp.len(), 2);
+        udp
+    }
+
     #[test]
     fn tunnel_config_routes_default_through_selected_exit_peer() {
         let alice_keys = Keys::generate();
@@ -619,14 +627,15 @@
         assert!(!config.node.discovery.lan.enabled);
         // The mesh id must NOT appear in the publicly visible relay app tag.
         assert_eq!(config.node.discovery.nostr.app, FIPS_NOSTR_DISCOVERY_APP);
-        let udp = match config.transports.udp {
-            fips_endpoint::TransportInstances::Single(udp) => udp,
-            _ => panic!("expected one UDP transport"),
-        };
-        assert!(udp.outbound_only());
-        assert!(!udp.advertise_on_nostr());
-        assert!(!udp.accept_connections());
-        assert_eq!(udp.send_buf_size, super::DEFAULT_FIPS_UDP_SEND_BUF_SIZE);
+        let udp = udp_carriers(&config);
+        assert_eq!(udp[FIPS_UDP_IPV4_TRANSPORT].bind_addr(), "0.0.0.0:0");
+        assert_eq!(udp[FIPS_UDP_IPV6_TRANSPORT].bind_addr(), "[::]:0");
+        for udp in udp.values() {
+            assert!(udp.outbound_only());
+            assert!(!udp.advertise_on_nostr());
+            assert!(!udp.accept_connections());
+            assert_eq!(udp.send_buf_size, super::DEFAULT_FIPS_UDP_SEND_BUF_SIZE);
+        }
         assert_eq!(config.peers.len(), 1);
         assert!(config.peers[0].addresses.is_empty());
     }
@@ -666,13 +675,11 @@
         assert!(!config.node.discovery.nostr.advertise);
         assert!(!config.node.discovery.nostr.share_local_candidates);
         assert!(!config.node.discovery.lan.enabled);
-        let udp = match config.transports.udp {
-            fips_endpoint::TransportInstances::Single(udp) => udp,
-            _ => panic!("expected one UDP transport"),
-        };
-        assert!(!udp.outbound_only());
-        assert!(!udp.advertise_on_nostr());
-        assert!(udp.accept_connections());
+        for udp in udp_carriers(&config).values() {
+            assert!(!udp.outbound_only());
+            assert!(!udp.advertise_on_nostr());
+            assert!(udp.accept_connections());
+        }
     }
 
     #[test]
@@ -744,10 +751,7 @@
             config.node.discovery.nostr.advert_relays,
             vec!["wss://relay.example.org".to_string()]
         );
-        let udp = match config.transports.udp {
-            fips_endpoint::TransportInstances::Single(udp) => udp,
-            _ => panic!("expected one UDP transport"),
-        };
+        let udp = &udp_carriers(&config)[FIPS_UDP_IPV4_TRANSPORT];
         assert_eq!(udp.bind_addr.as_deref(), Some("0.0.0.0:51820"));
         assert!(!udp.outbound_only());
         assert!(udp.advertise_on_nostr());
@@ -780,10 +784,7 @@
             NostrDiscoveryPolicy::Open,
             FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
         );
-        let udp = match config.transports.udp {
-            fips_endpoint::TransportInstances::Single(udp) => udp,
-            _ => panic!("expected one UDP transport"),
-        };
+        let udp = &udp_carriers(&config)[FIPS_UDP_IPV4_TRANSPORT];
 
         assert!(udp.advertise_on_nostr());
         assert!(udp.is_public());
@@ -826,12 +827,10 @@
         // directly so static/bootstrap connectivity keeps working.
         assert!(!config.node.discovery.nostr.enabled);
         assert!(!config.node.discovery.nostr.advertise);
-        let udp = match config.transports.udp {
-            fips_endpoint::TransportInstances::Single(udp) => udp,
-            _ => panic!("expected one UDP transport"),
-        };
-        assert!(!udp.advertise_on_nostr());
-        assert!(udp.accept_connections());
+        for udp in udp_carriers(&config).values() {
+            assert!(!udp.advertise_on_nostr());
+            assert!(udp.accept_connections());
+        }
         assert_eq!(config.peers.len(), 1);
     }
 
@@ -874,10 +873,7 @@
         assert!(config.node.discovery.nostr.enabled);
         assert!(config.node.discovery.nostr.advertise);
         assert!(!config.node.discovery.lan.enabled);
-        let udp = match &config.transports.udp {
-            fips_endpoint::TransportInstances::Single(udp) => udp,
-            _ => panic!("expected one UDP transport"),
-        };
+        let udp = &udp_carriers(&config)[FIPS_UDP_IPV4_TRANSPORT];
         assert!(udp.advertise_on_nostr());
         assert!(!udp.is_public());
         assert_eq!(udp.external_addr.as_deref(), None);

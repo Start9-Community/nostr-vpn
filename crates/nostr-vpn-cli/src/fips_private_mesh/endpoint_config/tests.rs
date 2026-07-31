@@ -45,6 +45,14 @@ mod endpoint_config_tests {
         }
     }
 
+    fn udp_carriers(config: &Config) -> &HashMap<String, UdpConfig> {
+        let TransportInstances::Named(udp) = &config.transports.udp else {
+            panic!("expected named IPv4 and IPv6 UDP transports");
+        };
+        assert_eq!(udp.len(), 2);
+        udp
+    }
+
     #[test]
     fn fresh_joiner_routes_by_known_npub_without_publishing_an_advert() {
         let transport = test_transport(true, false);
@@ -64,10 +72,11 @@ mod endpoint_config_tests {
             !config.node.discovery.nostr.advertise,
             "the signed join request already supplies the joiner's npub"
         );
-        let TransportInstances::Single(udp) = &config.transports.udp else {
-            panic!("expected one UDP transport");
-        };
-        assert!(!udp.advertise_on_nostr());
+        assert!(
+            udp_carriers(&config)
+                .values()
+                .all(|udp| !udp.advertise_on_nostr())
+        );
     }
 
     #[test]
@@ -85,10 +94,11 @@ mod endpoint_config_tests {
 
         assert!(config.node.discovery.nostr.enabled);
         assert!(!config.node.discovery.nostr.advertise);
-        let TransportInstances::Single(udp) = &config.transports.udp else {
-            panic!("expected one UDP transport");
-        };
-        assert!(!udp.advertise_on_nostr());
+        assert!(
+            udp_carriers(&config)
+                .values()
+                .all(|udp| !udp.advertise_on_nostr())
+        );
     }
 
     #[test]
@@ -139,14 +149,62 @@ mod endpoint_config_tests {
             FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
         );
 
-        let TransportInstances::Single(udp) = &config.transports.udp else {
-            panic!("expected one UDP transport");
-        };
-        assert_eq!(udp.bind_interface.as_deref(), Some("en0"));
+        assert!(
+            udp_carriers(&config)
+                .values()
+                .all(|udp| udp.bind_interface.as_deref() == Some("en0"))
+        );
         assert_eq!(
             config.node.discovery.nostr.bind_interface.as_deref(),
             Some("en0"),
             "STUN and direct-traversal sockets must use the carrier underlay"
+        );
+    }
+
+    #[test]
+    fn endpoint_config_binds_ipv4_and_ipv6_on_the_same_port() {
+        let transport = test_transport(false, false);
+        let config = fips_endpoint_config_with_open_discovery_limit(
+            &[],
+            Some(&transport),
+            resolve_private_mesh_mtu(None, None, None),
+            NostrDiscoveryPolicy::ConfiguredOnly,
+            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
+        );
+        let udp = udp_carriers(&config);
+
+        assert_eq!(
+            udp[FIPS_UDP_IPV4_TRANSPORT].bind_addr.as_deref(),
+            Some("0.0.0.0:51820")
+        );
+        assert_eq!(
+            udp[FIPS_UDP_IPV6_TRANSPORT].bind_addr.as_deref(),
+            Some("[::]:51820")
+        );
+    }
+
+    #[test]
+    fn public_ipv6_endpoint_is_advertised_by_the_ipv6_carrier() {
+        let mut transport = test_transport(true, false);
+        transport.advertise_public_endpoint = true;
+        transport.advertised_endpoint = "[2001:4860:4860::8888]:51820".to_string();
+        let config = fips_endpoint_config_with_open_discovery_limit(
+            &[websocket_peer(Keys::generate().public_key().to_bech32().unwrap())],
+            Some(&transport),
+            resolve_private_mesh_mtu(None, None, None),
+            NostrDiscoveryPolicy::Open,
+            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
+        );
+        let udp = udp_carriers(&config);
+        let ipv4 = &udp[FIPS_UDP_IPV4_TRANSPORT];
+        let ipv6 = &udp[FIPS_UDP_IPV6_TRANSPORT];
+
+        assert!(!ipv4.advertise_on_nostr());
+        assert_eq!(ipv4.external_addr, None);
+        assert!(ipv6.advertise_on_nostr());
+        assert_eq!(
+            ipv6.external_addr.as_deref(),
+            Some("[2001:4860:4860::8888]:51820")
         );
     }
 
