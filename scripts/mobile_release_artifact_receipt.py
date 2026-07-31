@@ -101,6 +101,216 @@ def require_equal(
         )
 
 
+def require_lower_hash(value: Any, name: str, length: int) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} is not a lowercase {length}-character hash")
+    return value
+
+
+def artifact_source(args: argparse.Namespace) -> None:
+    receipt = load_json(pathlib.Path(args.receipt))
+    require_equal(receipt, "receiptSchema", 2)
+    require_equal(receipt, "artifactType", args.artifact_type)
+    head = require_lower_hash(receipt.get("appGitSha"), "appGitSha", 40)
+    tree = require_lower_hash(receipt.get("appGitTree"), "appGitTree", 40)
+    print(f"{head}\t{tree}")
+
+
+def build_join_summary(args: argparse.Namespace) -> None:
+    harness_head = require_lower_hash(
+        args.harness_head, "harness commit", 40
+    )
+    harness_tree = require_lower_hash(args.harness_tree, "harness tree", 40)
+    android_app_head = require_lower_hash(
+        args.android_app_head, "Android application commit", 40
+    )
+    android_app_tree = require_lower_hash(
+        args.android_app_tree, "Android application tree", 40
+    )
+    ios_app_head = require_lower_hash(
+        args.ios_app_head, "iOS application commit", 40
+    )
+    ios_app_git_tree = require_lower_hash(
+        args.ios_app_git_tree, "iOS application tree", 40
+    )
+    fips_head = require_lower_hash(args.fips_head, "FIPS commit", 40)
+    fips_tree = require_lower_hash(args.fips_tree, "FIPS tree", 40)
+    apk_sha = require_lower_hash(args.android_apk_sha, "Android APK", 64)
+    ios_app_bundle_tree_sha = require_lower_hash(
+        args.ios_app_bundle_tree_sha, "iOS app bundle tree", 64
+    )
+
+    android_receipt_path = pathlib.Path(args.android_receipt)
+    ios_receipt_path = pathlib.Path(args.ios_receipt)
+    android = load_json(android_receipt_path)
+    ios = load_json(ios_receipt_path)
+    android_expected = {
+        "receiptSchema": 2,
+        "artifactType": "Android Release APK",
+        "appGitSha": android_app_head,
+        "appGitTree": android_app_tree,
+        "fipsGitSha": fips_head,
+        "fipsGitTree": fips_tree,
+        "apkSha256": apk_sha,
+        "installedApkSha256": apk_sha,
+        "companySigningVerified": True,
+    }
+    ios_expected = {
+        "receiptSchema": 2,
+        "artifactType": "iOS company Ad Hoc Release app",
+        "appGitSha": ios_app_head,
+        "appGitTree": ios_app_git_tree,
+        "fipsGitSha": fips_head,
+        "fipsGitTree": fips_tree,
+        "appBundleTreeSha256": ios_app_bundle_tree_sha,
+        "companySigningVerified": True,
+    }
+    for name, value in android_expected.items():
+        require_equal(android, name, value)
+    for name, value in ios_expected.items():
+        require_equal(ios, name, value)
+
+    android_identity_keys = (
+        "apkSha256",
+        "installedApkSha256",
+        "package",
+        "signerCertificateSha256",
+    )
+    ios_identity_keys = (
+        "appBundleTreeSha256",
+        "appCodeDirectoryHash",
+        "packetTunnelCodeDirectoryHash",
+        "appExecutableSha256",
+        "packetTunnelExecutableSha256",
+        "signerCertificateSha256",
+        "installedBundleIdentifier",
+    )
+    for key in android_identity_keys:
+        if not android.get(key):
+            raise ValueError(f"Android join artifact lacks {key}")
+    for key in ios_identity_keys:
+        if not ios.get(key):
+            raise ValueError(f"iOS join artifact lacks {key}")
+
+    timings = {}
+    for line in pathlib.Path(args.timings).read_text(
+        encoding="utf-8"
+    ).splitlines():
+        label, elapsed = line.split("\t")
+        timings[label] = int(elapsed)
+    expected_timings = {
+        "iPhone-admin-to-Pixel-QR",
+        "Pixel-admin-to-iPhone-QR",
+        "iPhone-admin-to-Pixel-manual",
+        "Pixel-admin-to-iPhone-manual",
+    }
+    if set(timings) != expected_timings or any(
+        elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
+    ):
+        raise ValueError(
+            "mobile join delivery timing receipt is incomplete or slow"
+        )
+    minimum_width = 9_800
+    maximum_width = 10_000
+    widths = {
+        "androidObservedBasisPoints": int(args.android_qr_width_bps),
+        "iosObservedBasisPoints": int(args.ios_qr_width_bps),
+    }
+    if any(
+        observed < minimum_width or observed > maximum_width
+        for observed in widths.values()
+    ):
+        raise ValueError("mobile join QR did not fill its content width")
+    lifecycle_values = (
+        args.android_pending_qr_lifecycle_ready,
+        args.ios_qr_relaunch_durable,
+        args.ios_admin_manual_relaunch_durable,
+        args.ios_joiner_manual_relaunch_durable,
+    )
+    if any(value != "1" for value in lifecycle_values):
+        raise ValueError(
+            "mobile QR lifecycle or iPhone directional relaunch evidence "
+            "is incomplete"
+        )
+    desktop_enabled = args.desktop_mode.lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not desktop_enabled:
+        raise ValueError(
+            "complete mobile release join requires desktop/mobile coverage"
+        )
+
+    result = {
+        "schema": 1,
+        "platform": "mobile",
+        "harnessGitSha": harness_head,
+        "harnessGitTree": harness_tree,
+        "artifact": {
+            "fipsGitSha": fips_head,
+            "fipsGitTree": fips_tree,
+            "androidBuildType": "Release",
+            "iosBuildType": "Release",
+            "iosDistribution": "Ad Hoc",
+            "android": {
+                "artifactReceiptSha256": sha256_file(android_receipt_path),
+                "appGitSha": android_app_head,
+                "appGitTree": android_app_tree,
+                "fipsGitSha": fips_head,
+                "fipsGitTree": fips_tree,
+                **{key: android[key] for key in android_identity_keys},
+            },
+            "ios": {
+                "artifactReceiptSha256": sha256_file(ios_receipt_path),
+                "appGitSha": ios_app_head,
+                "appGitTree": ios_app_git_tree,
+                "fipsGitSha": fips_head,
+                "fipsGitTree": fips_tree,
+                **{key: ios[key] for key in ios_identity_keys},
+            },
+        },
+        "publicUiOnly": True,
+        "opticalCameraQr": True,
+        "privateAppStateRead": False,
+        "appLaunchArgumentsOrEnvironment": False,
+        "deliveryDeadlineMilliseconds": 15_000,
+        "contentWidth": {
+            "minimumRequiredBasisPoints": minimum_width,
+            "maximumAllowedBasisPoints": maximum_width,
+            **widths,
+        },
+        "qr": {
+            "iphoneAdminPixelJoiner": True,
+            "pixelAdminIphoneJoiner": True,
+            "pendingQrBackgroundForeground": True,
+            "exactRosterOnBothSides": True,
+            "joinerRelaunchDurable": True,
+            "androidJoinerRelaunchDurable": True,
+            "iphoneJoinerRelaunchDurable": True,
+        },
+        "manual": {
+            "iphoneAdminPixelJoiner": True,
+            "pixelAdminIphoneJoiner": True,
+            "exactRosterOnBothSides": True,
+            "acceptedRosterOnly": True,
+            "iphoneAdminPixelJoinerRelaunchDurable": True,
+            "pixelAdminIphoneJoinerRelaunchDurable": True,
+        },
+        "deliveryMilliseconds": timings,
+        "desktopMobileManual": desktop_enabled,
+    }
+    pathlib.Path(args.summary).write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def validate_fips_metadata(
     path: pathlib.Path,
     checkout: pathlib.Path,
@@ -334,6 +544,36 @@ def parser() -> argparse.ArgumentParser:
     tree = subparsers.add_parser("tree-sha")
     tree.add_argument("path")
 
+    source = subparsers.add_parser("artifact-source")
+    source.add_argument("--receipt", required=True)
+    source.add_argument("--artifact-type", required=True)
+
+    summary = subparsers.add_parser("join-summary")
+    for name in (
+        "summary",
+        "timings",
+        "harness_head",
+        "harness_tree",
+        "android_app_head",
+        "android_app_tree",
+        "ios_app_head",
+        "ios_app_git_tree",
+        "fips_head",
+        "fips_tree",
+        "android_apk_sha",
+        "android_receipt",
+        "ios_app_bundle_tree_sha",
+        "ios_receipt",
+        "android_qr_width_bps",
+        "android_pending_qr_lifecycle_ready",
+        "ios_qr_width_bps",
+        "ios_qr_relaunch_durable",
+        "ios_admin_manual_relaunch_durable",
+        "ios_joiner_manual_relaunch_durable",
+        "desktop_mode",
+    ):
+        summary.add_argument(f"--{name.replace('_', '-')}", required=True)
+
     android = subparsers.add_parser("validate-android")
     for name in (
         "receipt",
@@ -382,6 +622,10 @@ def main() -> int:
     try:
         if args.command == "tree-sha":
             print(tree_sha256(pathlib.Path(args.path)))
+        elif args.command == "artifact-source":
+            artifact_source(args)
+        elif args.command == "join-summary":
+            build_join_summary(args)
         elif args.command == "validate-android":
             validate_android(args)
         elif args.command == "validate-ios":

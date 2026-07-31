@@ -407,9 +407,14 @@ test('release receipt collection requires exact source and strict public UI gate
     writeFileSync(mobileJoinPath, JSON.stringify({
       schema: 1,
       platform: 'mobile',
+      harnessGitSha: '8'.repeat(40),
+      harnessGitTree: '9'.repeat(40),
       artifact: {
-        ...source,
         android: {
+          appGitSha: androidArtifact.appGitSha,
+          appGitTree: androidArtifact.appGitTree,
+          fipsGitSha: androidArtifact.fipsGitSha,
+          fipsGitTree: androidArtifact.fipsGitTree,
           artifactReceiptSha256: sha256(androidText),
           apkSha256: androidArtifact.apkSha256,
           installedApkSha256: androidArtifact.installedApkSha256,
@@ -418,6 +423,10 @@ test('release receipt collection requires exact source and strict public UI gate
             androidArtifact.signerCertificateSha256,
         },
         ios: {
+          appGitSha: iosArtifact.appGitSha,
+          appGitTree: iosArtifact.appGitTree,
+          fipsGitSha: iosArtifact.fipsGitSha,
+          fipsGitTree: iosArtifact.fipsGitTree,
           artifactReceiptSha256: sha256(iosText),
           appBundleTreeSha256: iosArtifact.appBundleTreeSha256,
           appCodeDirectoryHash: iosArtifact.appCodeDirectoryHash,
@@ -487,6 +496,10 @@ test('release receipt collection requires exact source and strict public UI gate
         artifactReceiptSha256: sha256(macosText),
         appExecutableSha256: macosArtifact.appExecutableSha256,
         ios: {
+          appGitSha: iosArtifact.appGitSha,
+          appGitTree: iosArtifact.appGitTree,
+          fipsGitSha: iosArtifact.fipsGitSha,
+          fipsGitTree: iosArtifact.fipsGitTree,
           artifactReceiptSha256: sha256(iosText),
           appBundleTreeSha256: iosArtifact.appBundleTreeSha256,
           appCodeDirectoryHash: iosArtifact.appCodeDirectoryHash,

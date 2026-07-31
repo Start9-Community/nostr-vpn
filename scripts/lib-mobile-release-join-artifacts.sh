@@ -240,8 +240,8 @@ release_join_prepare_android_release() {
       return 1
     }
     apk="$RELEASE_JOIN_ANDROID_APK"
-    app_sha="$RELEASE_JOIN_APP_SHA"
-    app_tree="$RELEASE_JOIN_APP_TREE"
+    app_sha="$RELEASE_JOIN_ANDROID_APP_SHA"
+    app_tree="$RELEASE_JOIN_ANDROID_APP_TREE"
     cert_sha_lower="$RELEASE_JOIN_ANDROID_SIGNER_SHA"
   else
     for name in ANDROID_KEYSTORE_PATH ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
@@ -333,7 +333,11 @@ release_join_prepare_android_release() {
   sleep 1
   release_join_assert_one_android_process
   release_join_assert_fips_unchanged
-  release_join_assert_app_unchanged "$app_sha" "$app_tree"
+  if release_join_reuse_artifacts; then
+    release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
+  else
+    release_join_assert_app_unchanged "$app_sha" "$app_tree"
+  fi
 
   RELEASE_JOIN_ANDROID_APK="$apk"
   RELEASE_JOIN_ANDROID_APK_SHA="$apk_sha"
@@ -549,8 +553,8 @@ release_join_prepare_ios_release() {
     )"
     release_join_install_ios_release \
       "$RELEASE_JOIN_IOS_APP_PATH" \
-      "$RELEASE_JOIN_APP_SHA" \
-      "$RELEASE_JOIN_APP_TREE" \
+      "$RELEASE_JOIN_IOS_APP_SHA" \
+      "$RELEASE_JOIN_IOS_APP_TREE" \
       "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
       "$team_hash" \
       "$RELEASE_JOIN_IOS_APP_CERT" \

@@ -657,6 +657,10 @@ if (
 ):
     raise SystemExit("macOS join artifact receipt is not exact")
 ios_identity_keys = (
+    "appGitSha",
+    "appGitTree",
+    "fipsGitSha",
+    "fipsGitTree",
     "appBundleTreeSha256",
     "appCodeDirectoryHash",
     "packetTunnelCodeDirectoryHash",
@@ -669,8 +673,6 @@ if (
     ios_artifact.get("receiptSchema") != 2
     or ios_artifact.get("artifactType")
     != "iOS company Ad Hoc Release app"
-    or ios_artifact.get("appGitSha") != app_sha
-    or ios_artifact.get("appGitTree") != app_tree
     or ios_artifact.get("companySigningVerified") is not True
     or any(not ios_artifact.get(key) for key in ios_identity_keys)
 ):

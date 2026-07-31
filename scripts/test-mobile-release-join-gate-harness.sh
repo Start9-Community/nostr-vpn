@@ -68,6 +68,7 @@ grep -Fq 'DEBUG_ACTION_EXTRA" add_network' "$ROOT/scripts/mobile-android-smoke.s
 
 python3 - \
   "$ROOT/scripts/mobile-release-join-e2e.sh" \
+  "$ROOT/scripts/mobile_release_artifact_receipt.py" \
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" \
   "$ROOT/scripts/lib-mobile-release-join-ui.sh" \
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
@@ -106,6 +107,7 @@ def read(path):
 
 (
     gate,
+    summary_builder,
     artifacts,
     ui,
     desktop,
@@ -134,6 +136,7 @@ def read(path):
 ) = map(read, sys.argv[1:])
 
 runtime_gate_code = "\n".join((gate, ui, desktop, desktop_remote, ios_test))
+join_receipt_code = "\n".join((gate, summary_builder))
 for forbidden in (
     "run-as",
     "--nvpn-debug",
@@ -299,13 +302,17 @@ for required in (
     "release_join_android_wait_join_complete",
     "release_join_android_relaunch_and_wait_accepted",
     "macos-vm-release-mobile-join-e2e.sh",
+):
+    if required not in gate:
+        raise SystemExit(f"Release join orchestrator is missing {required}")
+for required in (
     "opticalCameraQr",
     "exactRosterOnBothSides",
     '"androidJoinerRelaunchDurable": True',
     '"iphoneJoinerRelaunchDurable"',
 ):
-    if required not in gate:
-        raise SystemExit(f"Release join orchestrator is missing {required}")
+    if required not in summary_builder:
+        raise SystemExit(f"Release join summary is missing {required}")
 android_qr_joiner_phase = gate.split(
     "phase_ios_admin_android_qr() {", 1
 )[1].split("phase_android_admin_ios_qr() {", 1)[0]
@@ -330,11 +337,10 @@ if not (
     )
 for required in (
     "RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY",
-    'android_pending_qr_lifecycle_ready != "1"',
-    '"pendingQrBackgroundForeground":',
-    'android_pending_qr_lifecycle_ready == "1"',
+    "args.android_pending_qr_lifecycle_ready",
+    '"pendingQrBackgroundForeground": True',
 ):
-    if required not in gate:
+    if required not in join_receipt_code:
         raise SystemExit(
             f"Mobile receipt is not bound to the Pixel pending-QR lifecycle: {required}"
         )
@@ -346,9 +352,9 @@ for required in (
     "ios_qr_relaunch_admin",
     '[[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
     "RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE=1",
-    "ios_qr_relaunch_durable != \"1\"",
+    "args.ios_qr_relaunch_durable",
 ):
-    if required not in gate:
+    if required not in join_receipt_code:
         raise SystemExit(
             f"Mobile receipt does not validate iPhone QR relaunch proof: {required}"
         )
@@ -400,14 +406,12 @@ if android_admin_ios_manual_phase.index(
 ) < android_admin_ios_manual_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone-joiner relaunch evidence is read before XCTest completes")
 for required in (
-    "ios_admin_manual_relaunch_durable != \"1\"",
-    "ios_joiner_manual_relaunch_durable != \"1\"",
-    '"iphoneAdminPixelJoinerRelaunchDurable":',
-    "ios_admin_manual_relaunch_durable == \"1\"",
-    '"pixelAdminIphoneJoinerRelaunchDurable":',
-    "ios_joiner_manual_relaunch_durable == \"1\"",
+    "args.ios_admin_manual_relaunch_durable",
+    "args.ios_joiner_manual_relaunch_durable",
+    '"iphoneAdminPixelJoinerRelaunchDurable": True',
+    '"pixelAdminIphoneJoinerRelaunchDurable": True',
 ):
-    if required not in gate:
+    if required not in join_receipt_code:
         raise SystemExit(
             f"Mobile receipt is not bound to directional manual relaunch proof: {required}"
         )
@@ -536,14 +540,14 @@ for source, label in (
         raise SystemExit(f"{label} shipped join UI lacks a content-width selector")
 for required in (
     '"contentWidth": {',
-    "minimum_qr_content_width_bps = 9_800",
-    "maximum_qr_content_width_bps = 10_000",
-    '"minimumRequiredBasisPoints": minimum_qr_content_width_bps',
-    '"maximumAllowedBasisPoints": maximum_qr_content_width_bps',
+    "minimum_width = 9_800",
+    "maximum_width = 10_000",
+    '"minimumRequiredBasisPoints": minimum_width',
+    '"maximumAllowedBasisPoints": maximum_width',
     '"androidObservedBasisPoints"',
     '"iosObservedBasisPoints"',
 ):
-    if required not in gate:
+    if required not in summary_builder:
         raise SystemExit(f"Mobile join receipt lacks QR width evidence: {required}")
 for source, label in (
     (ios_frozen_gate, "frozen iOS gate"),

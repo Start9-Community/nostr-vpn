@@ -432,8 +432,6 @@ function requireIdentityFieldsMatch(
 
 function requireMobileJoinReceipt({
   receipt,
-  commit,
-  tree,
   androidArtifact,
   androidArtifactReceiptSha256,
   iosArtifact,
@@ -474,11 +472,12 @@ function requireMobileJoinReceipt({
       'Android/iOS mobile join receipt is not strict public-UI/relaunch evidence.',
     )
   }
-  requireReceiptSource(receipt, {
-    commit,
-    tree,
-    label: 'Android/iOS mobile join receipt',
-  })
+  if (
+    !/^[0-9a-f]{40}$/.test(String(receipt.harnessGitSha ?? ''))
+    || !/^[0-9a-f]{40}$/.test(String(receipt.harnessGitTree ?? ''))
+  ) {
+    throw new Error('Android/iOS mobile join receipt lacks its harness identity.')
+  }
   requireExactDeliveryTimings(
     receipt,
     [
@@ -504,6 +503,10 @@ function requireMobileJoinReceipt({
     artifact.android,
     androidArtifact,
     [
+      'appGitSha',
+      'appGitTree',
+      'fipsGitSha',
+      'fipsGitTree',
       'apkSha256',
       'installedApkSha256',
       'package',
@@ -515,6 +518,10 @@ function requireMobileJoinReceipt({
     artifact.ios,
     iosArtifact,
     [
+      'appGitSha',
+      'appGitTree',
+      'fipsGitSha',
+      'fipsGitTree',
       'appBundleTreeSha256',
       'appCodeDirectoryHash',
       'packetTunnelCodeDirectoryHash',
@@ -568,6 +575,10 @@ function requireMacosJoinReceipt({
     receipt.artifact.ios,
     iosArtifact,
     [
+      'appGitSha',
+      'appGitTree',
+      'fipsGitSha',
+      'fipsGitTree',
       'appBundleTreeSha256',
       'appCodeDirectoryHash',
       'packetTunnelCodeDirectoryHash',

@@ -398,12 +398,14 @@ def validate_mobile_join_receipt(
     )
     require(
         isinstance(artifact, dict)
-        and artifact.get("appGitSha") == mobile_artifact.get("appGitSha")
-        and artifact.get("appGitTree") == mobile_artifact.get("appGitTree")
         and isinstance(ios, dict),
         "mobile join receipt is not source-bound to the iOS artifact",
     )
     for field in (
+        "appGitSha",
+        "appGitTree",
+        "fipsGitSha",
+        "fipsGitTree",
         "appBundleTreeSha256",
         "appCodeDirectoryHash",
         "packetTunnelCodeDirectoryHash",
@@ -614,8 +616,6 @@ def validate_desktop_mobile_join_receipt(
         and receipt.get("iphoneAdminDesktopJoinerRelaunchDurable") is True
         and receipt.get("deliveryDeadlineMilliseconds") == 15_000
         and isinstance(artifact, dict)
-        and artifact.get("appGitSha") == mobile_artifact.get("appGitSha")
-        and artifact.get("appGitTree") == mobile_artifact.get("appGitTree")
         and isinstance(ios_artifact, dict)
         and ios_artifact.get("artifactReceiptSha256")
         == mobile_artifact_receipt_sha256
@@ -634,6 +634,10 @@ def validate_desktop_mobile_join_receipt(
         "desktop/mobile join receipt is incomplete or not source-bound",
     )
     for field in (
+        "appGitSha",
+        "appGitTree",
+        "fipsGitSha",
+        "fipsGitTree",
         "appBundleTreeSha256",
         "appCodeDirectoryHash",
         "packetTunnelCodeDirectoryHash",

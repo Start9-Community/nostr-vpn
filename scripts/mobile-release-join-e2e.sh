@@ -325,222 +325,32 @@ case "$MACOS_JOIN_GATE" in
     ;;
 esac
 
-python3 - \
-  "$SUMMARY" \
-  "$RESULT_DIR/delivery-times.tsv" \
-  "$APP_GIT_SHA" \
-  "$APP_GIT_TREE" \
-  "$RELEASE_JOIN_FIPS_SHA" \
-  "$RELEASE_JOIN_FIPS_TREE" \
-  "$RELEASE_JOIN_ANDROID_APK_SHA" \
-  "${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:?exact Android receipt is required}" \
-  "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
-  "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
-  "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
-  "${RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY:-0}" \
-  "$RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS" \
-  "$RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE" \
-  "$RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE" \
-  "$RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE" \
-  "$MACOS_JOIN_GATE" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-(
-    path,
-    timing_path,
-    app_sha,
-    app_tree,
-    fips_sha,
-    fips_tree,
-    apk_sha,
-    android_receipt_path,
-    ios_app_tree,
-    ios_receipt_path,
-    android_qr_content_width_bps,
-    android_pending_qr_lifecycle_ready,
-    ios_qr_content_width_bps,
-    ios_qr_relaunch_durable,
-    ios_admin_manual_relaunch_durable,
-    ios_joiner_manual_relaunch_durable,
-    desktop_mode,
-) = sys.argv[1:]
-
-
-def load_receipt(receipt_path):
-    value = pathlib.Path(receipt_path)
-    payload = json.loads(value.read_text(encoding="utf-8"))
-    return payload, hashlib.sha256(value.read_bytes()).hexdigest()
-
-
-def require_hash(value, label, length=64):
-    if (
-        not isinstance(value, str)
-        or len(value) != length
-        or any(char not in "0123456789abcdef" for char in value)
-    ):
-        raise SystemExit(f"{label} is not a lowercase hash")
-
-
-require_hash(app_sha, "application commit", 40)
-require_hash(app_tree, "application tree", 40)
-require_hash(fips_sha, "FIPS commit", 40)
-require_hash(fips_tree, "FIPS tree", 40)
-require_hash(apk_sha, "Android APK")
-require_hash(ios_app_tree, "iOS app bundle tree")
-android, android_receipt_sha = load_receipt(android_receipt_path)
-ios, ios_receipt_sha = load_receipt(ios_receipt_path)
-if (
-    android.get("receiptSchema") != 2
-    or android.get("artifactType") != "Android Release APK"
-    or android.get("appGitSha") != app_sha
-    or android.get("appGitTree") != app_tree
-    or android.get("fipsGitSha") != fips_sha
-    or android.get("fipsGitTree") != fips_tree
-    or android.get("apkSha256") != apk_sha
-    or android.get("installedApkSha256") != apk_sha
-    or android.get("companySigningVerified") is not True
-):
-    raise SystemExit("Android join artifact receipt is not exact")
-if (
-    ios.get("receiptSchema") != 2
-    or ios.get("artifactType") != "iOS company Ad Hoc Release app"
-    or ios.get("appGitSha") != app_sha
-    or ios.get("appGitTree") != app_tree
-    or ios.get("fipsGitSha") != fips_sha
-    or ios.get("fipsGitTree") != fips_tree
-    or ios.get("appBundleTreeSha256") != ios_app_tree
-    or ios.get("companySigningVerified") is not True
-):
-    raise SystemExit("iOS join artifact receipt is not exact")
-
-android_identity_keys = (
-    "apkSha256",
-    "installedApkSha256",
-    "package",
-    "signerCertificateSha256",
-)
-ios_identity_keys = (
-    "appBundleTreeSha256",
-    "appCodeDirectoryHash",
-    "packetTunnelCodeDirectoryHash",
-    "appExecutableSha256",
-    "packetTunnelExecutableSha256",
-    "signerCertificateSha256",
-    "installedBundleIdentifier",
-)
-for key in android_identity_keys:
-    if not android.get(key):
-        raise SystemExit(f"Android join artifact lacks {key}")
-for key in ios_identity_keys:
-    if not ios.get(key):
-        raise SystemExit(f"iOS join artifact lacks {key}")
-
-timings = {}
-for line in pathlib.Path(timing_path).read_text(encoding="utf-8").splitlines():
-    label, elapsed = line.split("\t")
-    timings[label] = int(elapsed)
-expected_timings = {
-    "iPhone-admin-to-Pixel-QR",
-    "Pixel-admin-to-iPhone-QR",
-    "iPhone-admin-to-Pixel-manual",
-    "Pixel-admin-to-iPhone-manual",
-}
-if set(timings) != expected_timings or any(
-    elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
-):
-    raise SystemExit("mobile join delivery timing receipt is incomplete or slow")
-minimum_qr_content_width_bps = 9_800
-maximum_qr_content_width_bps = 10_000
-qr_content_width_bps = {
-    "androidObservedBasisPoints": int(android_qr_content_width_bps),
-    "iosObservedBasisPoints": int(ios_qr_content_width_bps),
-}
-if any(
-    observed < minimum_qr_content_width_bps
-    or observed > maximum_qr_content_width_bps
-    for observed in qr_content_width_bps.values()
-):
-    raise SystemExit("mobile join QR did not fill its content width")
-if (
-    android_pending_qr_lifecycle_ready != "1"
-    or ios_qr_relaunch_durable != "1"
-    or ios_admin_manual_relaunch_durable != "1"
-    or ios_joiner_manual_relaunch_durable != "1"
-):
-    raise SystemExit(
-        "mobile QR lifecycle or iPhone directional relaunch evidence is incomplete"
-    )
-desktop_enabled = desktop_mode.lower() not in {
-    "0", "false", "no", "off",
-}
-if not desktop_enabled:
-    raise SystemExit("complete mobile release join requires desktop/mobile coverage")
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(
-        {
-            "schema": 1,
-            "platform": "mobile",
-            "artifact": {
-                "appGitSha": app_sha,
-                "appGitTree": app_tree,
-                "fipsGitSha": fips_sha,
-                "fipsGitTree": fips_tree,
-                "androidBuildType": "Release",
-                "iosBuildType": "Release",
-                "iosDistribution": "Ad Hoc",
-                "android": {
-                    "artifactReceiptSha256": android_receipt_sha,
-                    **{
-                        key: android[key]
-                        for key in android_identity_keys
-                    },
-                },
-                "ios": {
-                    "artifactReceiptSha256": ios_receipt_sha,
-                    **{key: ios[key] for key in ios_identity_keys},
-                },
-            },
-            "publicUiOnly": True,
-            "opticalCameraQr": True,
-            "privateAppStateRead": False,
-            "appLaunchArgumentsOrEnvironment": False,
-            "deliveryDeadlineMilliseconds": 15_000,
-            "contentWidth": {
-                "minimumRequiredBasisPoints": minimum_qr_content_width_bps,
-                "maximumAllowedBasisPoints": maximum_qr_content_width_bps,
-                **qr_content_width_bps,
-            },
-            "qr": {
-                "iphoneAdminPixelJoiner": True,
-                "pixelAdminIphoneJoiner": True,
-                "pendingQrBackgroundForeground":
-                    android_pending_qr_lifecycle_ready == "1",
-                "exactRosterOnBothSides": True,
-                "joinerRelaunchDurable": True,
-                "androidJoinerRelaunchDurable": True,
-                "iphoneJoinerRelaunchDurable": ios_qr_relaunch_durable == "1",
-            },
-            "manual": {
-                "iphoneAdminPixelJoiner": True,
-                "pixelAdminIphoneJoiner": True,
-                "exactRosterOnBothSides": True,
-                "acceptedRosterOnly": True,
-                "iphoneAdminPixelJoinerRelaunchDurable":
-                    ios_admin_manual_relaunch_durable == "1",
-                "pixelAdminIphoneJoinerRelaunchDurable":
-                    ios_joiner_manual_relaunch_durable == "1",
-            },
-            "deliveryMilliseconds": timings,
-            "desktopMobileManual": desktop_enabled,
-        },
-        handle,
-        indent=2,
-        sort_keys=True,
-    )
-    handle.write("\n")
-PY
+python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" join-summary \
+  --summary "$SUMMARY" \
+  --timings "$RESULT_DIR/delivery-times.tsv" \
+  --harness-head "$APP_GIT_SHA" \
+  --harness-tree "$APP_GIT_TREE" \
+  --android-app-head "$RELEASE_JOIN_ANDROID_APP_SHA" \
+  --android-app-tree "$RELEASE_JOIN_ANDROID_APP_TREE" \
+  --ios-app-head "$RELEASE_JOIN_IOS_APP_SHA" \
+  --ios-app-git-tree "$RELEASE_JOIN_IOS_APP_TREE" \
+  --fips-head "$RELEASE_JOIN_FIPS_SHA" \
+  --fips-tree "$RELEASE_JOIN_FIPS_TREE" \
+  --android-apk-sha "$RELEASE_JOIN_ANDROID_APK_SHA" \
+  --android-receipt \
+    "${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:?exact Android receipt is required}" \
+  --ios-app-bundle-tree-sha "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
+  --ios-receipt \
+    "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
+  --android-qr-width-bps "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
+  --android-pending-qr-lifecycle-ready \
+    "${RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY:-0}" \
+  --ios-qr-width-bps "$RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS" \
+  --ios-qr-relaunch-durable "$RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE" \
+  --ios-admin-manual-relaunch-durable \
+    "$RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE" \
+  --ios-joiner-manual-relaunch-durable \
+    "$RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE" \
+  --desktop-mode "$MACOS_JOIN_GATE"
 
 echo "SIGNED_RELEASE_PUBLIC_UI_MOBILE_JOIN_E2E_OK $SUMMARY"

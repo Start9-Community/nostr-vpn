@@ -29,8 +29,10 @@ printf 'app profile\n' >"$IOS_APP/embedded.mobileprovision"
 printf 'tunnel profile\n' >"$IOS_TUNNEL/embedded.mobileprovision"
 printf 'runner product\n' >"$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/runner"
 
-APP_HEAD=1111111111111111111111111111111111111111
-APP_TREE=2222222222222222222222222222222222222222
+ANDROID_APP_HEAD=1111111111111111111111111111111111111111
+ANDROID_APP_TREE=2222222222222222222222222222222222222222
+IOS_APP_HEAD=5555555555555555555555555555555555555555
+IOS_APP_TREE=6666666666666666666666666666666666666666
 FIPS_HEAD=3333333333333333333333333333333333333333
 FIPS_TREE=4444444444444444444444444444444444444444
 FIPS_VERSION=1.2.3
@@ -50,7 +52,9 @@ python3 - \
   "$ANDROID_DIR/app-release.apk" "$ANDROID_DIR/app-release.aab" \
   "$ANDROID_METADATA" "$ANDROID_RECEIPT" "$ANDROID_BUNDLE_RECEIPT" \
   "$IOS_APP" "$IOS_DERIVED" "$IOS_XCTESTRUN" "$IOS_METADATA" "$IOS_RECEIPT" \
-  "$APP_HEAD" "$APP_TREE" "$FIPS_HEAD" "$FIPS_TREE" "$FIPS_VERSION" \
+  "$ANDROID_APP_HEAD" "$ANDROID_APP_TREE" \
+  "$IOS_APP_HEAD" "$IOS_APP_TREE" \
+  "$FIPS_HEAD" "$FIPS_TREE" "$FIPS_VERSION" \
   "$SIGNER_SHA" "$APP_CDHASH" "$TUNNEL_CDHASH" "$DEVICE_SHA" "$PACKAGE" <<'PY'
 import importlib.util
 import json
@@ -72,8 +76,10 @@ import sys
     ios_xctestrun,
     ios_metadata,
     ios_receipt,
-    app_head,
-    app_tree,
+    android_app_head,
+    android_app_tree,
+    ios_app_head,
+    ios_app_tree,
     fips_head,
     fips_tree,
     fips_version,
@@ -122,8 +128,8 @@ android = {
     "apkDerivedFromAab": True,
     "companySigningVerified": True,
     "signerCertificateSha256": signer,
-    "appGitSha": app_head,
-    "appGitTree": app_tree,
+    "appGitSha": android_app_head,
+    "appGitTree": android_app_tree,
     "fipsGitSha": fips_head,
     "fipsGitTree": fips_tree,
     "fipsCoreVersion": fips_version,
@@ -138,8 +144,8 @@ android = {
 android_bundle = {
     "schema": 1,
     "relationship": "universal-apk-derived-from-exact-aab",
-    "appGitSha": app_head,
-    "appGitTree": app_tree,
+    "appGitSha": android_app_head,
+    "appGitTree": android_app_tree,
     "aabSha256": module.sha256_file(aab),
     "aabPathSha256": module.path_sha256(aab),
     "apkSha256": module.sha256_file(apk),
@@ -192,8 +198,8 @@ ios = {
     "packetTunnelExecutableSha256": module.sha256_file(
         ios_app / "PlugIns" / "Nostr VPN Tunnel.appex" / "Nostr VPN Tunnel"
     ),
-    "appGitSha": app_head,
-    "appGitTree": app_tree,
+    "appGitSha": ios_app_head,
+    "appGitTree": ios_app_tree,
     "appPathSha256": module.path_sha256(ios_app),
     "appBundleTreeSha256": module.tree_sha256(ios_app),
     "treeSha256": module.tree_sha256(ios_app),
@@ -245,8 +251,8 @@ validate_android() {
     --fips-metadata "$ANDROID_METADATA" \
     --app-root "$APP_ROOT" \
     --fips-root "$FIPS_ROOT" \
-    --app-head "$APP_HEAD" \
-    --app-tree "$APP_TREE" \
+    --app-head "$ANDROID_APP_HEAD" \
+    --app-tree "$ANDROID_APP_TREE" \
     --fips-head "$FIPS_HEAD" \
     --fips-tree "$FIPS_TREE" \
     --fips-version "$FIPS_VERSION" \
@@ -263,8 +269,8 @@ validate_ios() {
     --xctestrun "$IOS_XCTESTRUN" \
     --fips-metadata "$IOS_METADATA" \
     --fips-root "$FIPS_ROOT" \
-    --app-head "$APP_HEAD" \
-    --app-tree "$APP_TREE" \
+    --app-head "$IOS_APP_HEAD" \
+    --app-tree "$IOS_APP_TREE" \
     --fips-head "$FIPS_HEAD" \
     --fips-tree "$FIPS_TREE" \
     --fips-version "$FIPS_VERSION" \
@@ -277,6 +283,74 @@ validate_ios() {
 
 validate_android
 validate_ios
+
+JOIN_TIMINGS="$TMP_ROOT/join-timings.tsv"
+JOIN_SUMMARY="$TMP_ROOT/join-summary.json"
+printf '%s\t100\n' \
+  iPhone-admin-to-Pixel-QR \
+  Pixel-admin-to-iPhone-QR \
+  iPhone-admin-to-Pixel-manual \
+  Pixel-admin-to-iPhone-manual >"$JOIN_TIMINGS"
+ANDROID_APK_SHA="$(shasum -a 256 "$ANDROID_DIR/app-release.apk" | awk '{print $1}')"
+IOS_BUNDLE_TREE_SHA="$(
+  python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["appBundleTreeSha256"])' \
+    "$IOS_RECEIPT"
+)"
+HARNESS_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+HARNESS_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+python3 "$VALIDATOR" join-summary \
+  --summary "$JOIN_SUMMARY" \
+  --timings "$JOIN_TIMINGS" \
+  --harness-head "$HARNESS_HEAD" \
+  --harness-tree "$HARNESS_TREE" \
+  --android-app-head "$ANDROID_APP_HEAD" \
+  --android-app-tree "$ANDROID_APP_TREE" \
+  --ios-app-head "$IOS_APP_HEAD" \
+  --ios-app-git-tree "$IOS_APP_TREE" \
+  --fips-head "$FIPS_HEAD" \
+  --fips-tree "$FIPS_TREE" \
+  --android-apk-sha "$ANDROID_APK_SHA" \
+  --android-receipt "$ANDROID_RECEIPT" \
+  --ios-app-bundle-tree-sha "$IOS_BUNDLE_TREE_SHA" \
+  --ios-receipt "$IOS_RECEIPT" \
+  --android-qr-width-bps 10000 \
+  --android-pending-qr-lifecycle-ready 1 \
+  --ios-qr-width-bps 10000 \
+  --ios-qr-relaunch-durable 1 \
+  --ios-admin-manual-relaunch-durable 1 \
+  --ios-joiner-manual-relaunch-durable 1 \
+  --desktop-mode 1
+python3 - "$JOIN_SUMMARY" \
+  "$HARNESS_HEAD" "$ANDROID_APP_TREE" "$IOS_APP_TREE" \
+  "$IOS_BUNDLE_TREE_SHA" <<'PY'
+import json
+import sys
+
+path, harness_head, android_git_tree, ios_git_tree, ios_bundle_tree = sys.argv[1:]
+summary = json.load(open(path, encoding="utf-8"))
+assert summary["harnessGitSha"] == harness_head
+assert summary["artifact"]["android"]["appGitTree"] == android_git_tree
+assert summary["artifact"]["ios"]["appGitTree"] == ios_git_tree
+assert summary["artifact"]["ios"]["appBundleTreeSha256"] == ios_bundle_tree
+assert len(summary["artifact"]["ios"]["appGitTree"]) == 40
+assert len(summary["artifact"]["ios"]["appBundleTreeSha256"]) == 64
+PY
+
+(
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
+  NVPN_RELEASE_JOIN_ANDROID_RECEIPT="$ANDROID_RECEIPT"
+  NVPN_RELEASE_JOIN_IOS_RECEIPT="$IOS_RECEIPT"
+  release_join_load_reused_artifact_sources
+  [[ "$RELEASE_JOIN_ANDROID_APP_SHA" == "$ANDROID_APP_HEAD" ]]
+  [[ "$RELEASE_JOIN_ANDROID_APP_TREE" == "$ANDROID_APP_TREE" ]]
+  [[ "$RELEASE_JOIN_IOS_APP_SHA" == "$IOS_APP_HEAD" ]]
+  [[ "$RELEASE_JOIN_IOS_APP_TREE" == "$IOS_APP_TREE" ]]
+  [[ "$RELEASE_JOIN_ANDROID_APP_SHA" != "$RELEASE_JOIN_IOS_APP_SHA" ]]
+  [[ "$RELEASE_JOIN_ANDROID_APP_SHA" != "$(git -C "$ROOT" rev-parse HEAD)" ]]
+  [[ "$RELEASE_JOIN_IOS_APP_SHA" != "$(git -C "$ROOT" rev-parse HEAD)" ]]
+)
 
 reject_android_file_tamper() {
   local path="$1" label="$2" backup
@@ -497,6 +571,7 @@ for required in (
     "validate-ios",
     "release_join_validate_android_reuse",
     "release_join_validate_ios_reuse",
+    "release_join_load_reused_artifact_sources",
     "selected phone",
 ):
     if required not in reuse:
@@ -506,6 +581,14 @@ reuse_identity = android_release.split(
 )[1].split("android_release_require_inputs()", 1)[0]
 if 'git -C "$ROOT" rev-parse' in reuse_identity:
     raise SystemExit("Android sealed-artifact reuse binds the current checkout")
+for required in (
+    "RELEASE_JOIN_ANDROID_APP_SHA",
+    "RELEASE_JOIN_ANDROID_APP_TREE",
+    "RELEASE_JOIN_IOS_APP_SHA",
+    "RELEASE_JOIN_IOS_APP_TREE",
+):
+    if required not in reuse or required not in gate:
+        raise SystemExit(f"mixed-source join contract omits {required}")
 reuse_branch = android_release.split(
     "if android_release_reuse_verified_artifact; then", 2
 )[2]

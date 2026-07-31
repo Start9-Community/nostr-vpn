@@ -10,6 +10,41 @@ release_join_android_apkanalyzer() {
     | tail -n 1
 }
 
+release_join_load_reused_artifact_sources() {
+  local android_source ios_source extra
+  for name in \
+    NVPN_RELEASE_JOIN_ANDROID_RECEIPT \
+    NVPN_RELEASE_JOIN_IOS_RECEIPT
+  do
+    [[ -s "${!name:-}" ]] || {
+      echo "Strict Release join artifact reuse requires $name" >&2
+      return 1
+    }
+  done
+  android_source="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+      artifact-source \
+      --receipt "$NVPN_RELEASE_JOIN_ANDROID_RECEIPT" \
+      --artifact-type "Android Release APK"
+  )" || return 1
+  ios_source="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+      artifact-source \
+      --receipt "$NVPN_RELEASE_JOIN_IOS_RECEIPT" \
+      --artifact-type "iOS company Ad Hoc Release app"
+  )" || return 1
+  IFS=$'\t' read -r \
+    RELEASE_JOIN_ANDROID_APP_SHA RELEASE_JOIN_ANDROID_APP_TREE extra \
+    <<<"$android_source"
+  [[ -z "${extra:-}" ]] || return 1
+  IFS=$'\t' read -r \
+    RELEASE_JOIN_IOS_APP_SHA RELEASE_JOIN_IOS_APP_TREE extra \
+    <<<"$ios_source"
+  [[ -z "${extra:-}" ]] || return 1
+  export RELEASE_JOIN_ANDROID_APP_SHA RELEASE_JOIN_ANDROID_APP_TREE
+  export RELEASE_JOIN_IOS_APP_SHA RELEASE_JOIN_IOS_APP_TREE
+}
+
 release_join_validate_android_reuse() {
   local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
   local apk="${NVPN_RELEASE_JOIN_ANDROID_APK:-}"
@@ -26,9 +61,11 @@ release_join_validate_android_reuse() {
       return 1
     }
   done
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
-  release_join_assert_app_unchanged "$app_sha" "$app_tree" || return 1
+  [[ -n "${RELEASE_JOIN_ANDROID_APP_SHA:-}" \
+    && -n "${RELEASE_JOIN_ANDROID_APP_TREE:-}" ]] \
+    || release_join_load_reused_artifact_sources || return 1
+  app_sha="$RELEASE_JOIN_ANDROID_APP_SHA"
+  app_tree="$RELEASE_JOIN_ANDROID_APP_TREE"
   apksigner="$(release_join_android_apksigner)"
   apkanalyzer="$(release_join_android_apkanalyzer)"
   [[ -x "$apksigner" && -x "$apkanalyzer" ]] || {
@@ -83,11 +120,8 @@ release_join_validate_android_reuse() {
   RELEASE_JOIN_ANDROID_APK="$apk"
   RELEASE_JOIN_ANDROID_APK_SHA="$(release_join_sha256 "$apk")"
   RELEASE_JOIN_ANDROID_SIGNER_SHA="$cert_sha"
-  RELEASE_JOIN_APP_SHA="$app_sha"
-  RELEASE_JOIN_APP_TREE="$app_tree"
   export RELEASE_JOIN_ANDROID_APK RELEASE_JOIN_ANDROID_APK_SHA
-  export RELEASE_JOIN_ANDROID_SIGNER_SHA RELEASE_JOIN_APP_SHA
-  export RELEASE_JOIN_APP_TREE
+  export RELEASE_JOIN_ANDROID_SIGNER_SHA
 }
 
 release_join_codesign_cdhash() {
@@ -211,9 +245,11 @@ PY
     return 1
   fi
   rm -rf "$audit_dir"
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
-  release_join_assert_app_unchanged "$app_sha" "$app_tree" || return 1
+  [[ -n "${RELEASE_JOIN_IOS_APP_SHA:-}" \
+    && -n "${RELEASE_JOIN_IOS_APP_TREE:-}" ]] \
+    || release_join_load_reused_artifact_sources || return 1
+  app_sha="$RELEASE_JOIN_IOS_APP_SHA"
+  app_tree="$RELEASE_JOIN_IOS_APP_TREE"
   if ! python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
     validate-ios \
     --receipt "$receipt" \
@@ -255,11 +291,16 @@ PY
 
 release_join_validate_reused_artifacts() {
   release_join_reuse_artifacts || return 0
+  release_join_load_reused_artifact_sources || return 1
   release_join_validate_android_reuse || return 1
   release_join_validate_ios_reuse || return 1
   release_join_assert_fips_unchanged || return 1
+  [[ -n "${APP_GIT_SHA:-}" && -n "${APP_GIT_TREE:-}" ]] || {
+    echo "Release join harness source identity is missing" >&2
+    return 1
+  }
   release_join_assert_app_unchanged \
-    "$RELEASE_JOIN_APP_SHA" "$RELEASE_JOIN_APP_TREE" || return 1
+    "$APP_GIT_SHA" "$APP_GIT_TREE" || return 1
   RELEASE_JOIN_ARTIFACTS_VALIDATED=1
   export RELEASE_JOIN_ARTIFACTS_VALIDATED
   echo "Exact Android and iOS Release artifacts validated before device mutation"

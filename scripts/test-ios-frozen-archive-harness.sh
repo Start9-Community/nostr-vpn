@@ -367,20 +367,26 @@ for path, payload in ((adhoc_path, adhoc), (mobile_path, mobile)):
 join = {
     "schema": 1,
     "platform": "mobile",
+    "harnessGitSha": "8" * 40,
+    "harnessGitTree": "9" * 40,
     "artifact": {
-        "appGitSha": mobile["appGitSha"],
-        "appGitTree": mobile["appGitTree"],
         "ios": {
-            key: mobile[key]
-            for key in (
-                "appBundleTreeSha256",
-                "appCodeDirectoryHash",
-                "packetTunnelCodeDirectoryHash",
-                "appExecutableSha256",
-                "packetTunnelExecutableSha256",
-                "signerCertificateSha256",
-                "installedBundleIdentifier",
-            )
+            **{
+                key: mobile[key]
+                for key in (
+                    "appGitSha",
+                    "appGitTree",
+                    "fipsGitSha",
+                    "fipsGitTree",
+                    "appBundleTreeSha256",
+                    "appCodeDirectoryHash",
+                    "packetTunnelCodeDirectoryHash",
+                    "appExecutableSha256",
+                    "packetTunnelExecutableSha256",
+                    "signerCertificateSha256",
+                    "installedBundleIdentifier",
+                )
+            },
         },
     },
     "publicUiOnly": True,
@@ -514,6 +520,10 @@ desktop_join = {
             "artifactReceiptSha256": hashlib.sha256(
                 mobile_path.read_bytes()
             ).hexdigest(),
+            "appGitSha": mobile["appGitSha"],
+            "appGitTree": mobile["appGitTree"],
+            "fipsGitSha": mobile["fipsGitSha"],
+            "fipsGitTree": mobile["fipsGitTree"],
             **identity_fields,
         },
     },
