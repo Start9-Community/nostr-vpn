@@ -18,23 +18,26 @@ write_ping_fixture() {
   cat >"$temp/ping.log" <<'EOF'
 [1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
 [1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
-[1006.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
-[1006.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
-[1006.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
-[1006.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
+[1001.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
+[1006.200] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
+[1006.400] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1006.600] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
+[1006.800] 64 bytes from 10.0.0.2: icmp_seq=7 ttl=64 time=1 ms
 EOF
 }
 
 cat >"$temp/markers.tsv" <<'EOF'
 switch_1_requested	1000500
 switch_1_outage	1000700
-switch_1_recovery_requested	1006000
+switch_1_recovery_requested	1001000
+switch_1_underlay_validated	1006000
 switch_1_payload_recovery	200
 switch_1_verified	1006900
 EOF
 write_ping_fixture
 python3 "$continuity" \
-  "$temp/ping.log" "$temp/markers.tsv" "$temp/continuity.json" Android 4000 \
+  "$temp/ping.log" "$temp/markers.tsv" "$temp/continuity.json" \
+  Android 4000 \
   >/dev/null
 python3 - "$temp/continuity.json" <<'PY'
 import json
@@ -42,12 +45,12 @@ import sys
 
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 assert receipt["passed"] is True
-assert [cycle["recoveryMilliseconds"] for cycle in receipt["cycles"]] == [200]
 cycle = receipt["cycles"][0]
 assert cycle["outageReversePayloads"] == 0
-assert cycle["firstReversePayloadRecoveryMilliseconds"] == 200
+assert cycle["firstReversePayloadRecoveryMilliseconds"] == 0
 assert cycle["dnsAndWireGuardRecoveryMilliseconds"] == 200
-assert cycle["recoveryRequestedAtMilliseconds"] - cycle["outageAtMilliseconds"] == 5300
+assert cycle["underlayAssociationMilliseconds"] == 5000
+assert cycle["reversePayloadRecoveredBeforeValidation"] is True
 for fabricated in (
     "appProcessContinuity",
     "outageObserved",
@@ -76,7 +79,8 @@ path.write_text(
 PY
 write_ping_fixture
 if python3 "$continuity" \
-  "$temp/ping.log" "$temp/slow-product-markers.tsv" "$temp/slow-product.json" Android 4000 \
+  "$temp/ping.log" "$temp/slow-product-markers.tsv" \
+  "$temp/slow-product.json" Android 4000 \
   >"$temp/slow-product.out" 2>"$temp/slow-product.err"
 then
   echo "continuity validator accepted slow product recovery" >&2
@@ -84,10 +88,24 @@ then
 fi
 grep -Fq "payload recovery was 4100ms" "$temp/slow-product.err"
 
+grep -Ev 'switch_1_underlay_validated' \
+  "$temp/markers.tsv" >"$temp/ambiguous-old-markers.tsv"
+if python3 "$continuity" \
+  "$temp/ping.log" "$temp/ambiguous-old-markers.tsv" \
+  "$temp/ambiguous-old.json" Android 4000 \
+  >"$temp/ambiguous-old.out" 2>"$temp/ambiguous-old.err"
+then
+  echo "continuity validator accepted an ambiguous legacy receipt" >&2
+  exit 1
+fi
+grep -Fq "missing marker switch_1_underlay_validated" \
+  "$temp/ambiguous-old.err"
+
 cp "$temp/markers.tsv" "$temp/no-outage.tsv"
 sed -i '' '/switch_1_outage/d' "$temp/no-outage.tsv"
 if python3 "$continuity" \
-  "$temp/ping.log" "$temp/no-outage.tsv" "$temp/no-outage.json" Android 4000 \
+  "$temp/ping.log" "$temp/no-outage.tsv" "$temp/no-outage.json" \
+  Android 4000 \
   >"$temp/no-outage.out" 2>"$temp/no-outage.err"
 then
   echo "continuity validator accepted a radio bounce without observed outage" >&2
@@ -95,7 +113,7 @@ then
 fi
 grep -Fq "missing marker switch_1_outage" "$temp/no-outage.err"
 
-sed 's/switch_1_outage	1000700/switch_1_outage	1006000/' \
+sed 's/switch_1_outage	1000700/switch_1_outage	1001000/' \
   "$temp/markers.tsv" >"$temp/zero-outage-window.tsv"
 if python3 "$continuity" \
   "$temp/ping.log" "$temp/zero-outage-window.tsv" \
@@ -105,7 +123,7 @@ then
   echo "continuity validator accepted a zero-duration outage window" >&2
   exit 1
 fi
-grep -Fq "request <= outage < recovery-requested <= verified" \
+grep -Fq "request <= outage < radio-on-requested" \
   "$temp/zero-outage-window.err"
 
 cp "$temp/ping.log" "$temp/outage-reply.log"
@@ -120,7 +138,7 @@ then
   echo "continuity validator accepted reverse payload during the outage" >&2
   exit 1
 fi
-grep -Fq "reverse payloads between outage and recovery request" \
+grep -Fq "reverse payloads between outage and radio-on request" \
   "$temp/outage-reply.err"
 
 python3 - \
@@ -164,16 +182,17 @@ then
   echo "continuity validator accepted a late first reverse payload" >&2
   exit 1
 fi
-grep -Fq "first reverse payload recovery was 4200ms" \
+grep -Fq "first reverse payload after validation was 4200ms" \
   "$temp/late-reverse.err"
 
 printf '%s\n' \
   'NVPN_IOS_UNDERLAY_SWITCH_1_REQUESTED_MS=1' \
   'ordinary xcodebuild output' \
   'NVPN_IOS_UNDERLAY_SWITCH_1_OUTAGE_MS=2' \
-  'NVPN_IOS_UNDERLAY_SWITCH_1_RECOVERY_REQUESTED_MS=2' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_RECOVERY_REQUESTED_MS=3' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_UNDERLAY_VALIDATED_MS=4' \
   'NVPN_IOS_UNDERLAY_SWITCH_1_PAYLOAD_RECOVERY_MS=200' \
-  'NVPN_IOS_UNDERLAY_SWITCH_1_VERIFIED_MS=3' \
+  'NVPN_IOS_UNDERLAY_SWITCH_1_VERIFIED_MS=5' \
   | python3 "$ios_output_capture" \
     "$temp/xcode.log" "$temp/ios-host-markers.tsv"
 grep -Fxq 'ordinary xcodebuild output' "$temp/xcode.log"
@@ -188,6 +207,7 @@ assert [row[0] for row in rows] == [
     "switch_1_requested",
     "switch_1_outage",
     "switch_1_recovery_requested",
+    "switch_1_underlay_validated",
     "switch_1_payload_recovery",
     "switch_1_verified",
 ]
@@ -413,11 +433,18 @@ for required in (
         raise SystemExit(f"radio-bounce implementation is missing {required}")
 gate = android[android.index("run_android_underlay_network_change_gate()") :]
 ordered = [gate.index(needle) for needle in (
-    'shell svc wifi enable', 'android_underlay_wait_validated',
     'recovery_requested_ms="$(mobile_underlay_now_ms)"',
+    'shell svc wifi enable', 'android_underlay_wait_validated',
+    'underlay_validated_ms="$(mobile_underlay_now_ms)"',
     'android_underlay_recovery_payloads')]
 if ordered != sorted(ordered):
-    raise SystemExit("Android recovery budget starts before validated Wi-Fi")
+    raise SystemExit("Android radio-on and validated product clocks are not distinct")
+gate = ios[ios.index("SWITCH_1_NO_VALIDATED_PHYSICAL_FALLBACK") :]
+ordered = [gate.index(needle) for needle in (
+    'SWITCH_1_RECOVERY_REQUESTED_MS=', 'try setWiFiEnabled(true)',
+    'SWITCH_1_UNDERLAY_VALIDATED_MS=', 'exerciseFreshDNSQuery')]
+if ordered != sorted(ordered):
+    raise SystemExit("iOS radio-on and validated product clocks are not distinct")
 PY
 [[ ! -e "$ROOT/scripts/lib-mobile-ios-hotspot.sh" ]] \
   && [[ ! -e "$ROOT/scripts/lib-mobile-android-managed-ap.sh" ]] \

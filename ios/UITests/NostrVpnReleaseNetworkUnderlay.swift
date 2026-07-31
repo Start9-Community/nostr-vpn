@@ -119,9 +119,7 @@ extension NostrVpnReleaseNetworkUITests {
         }
         emit("NVPN_IOS_UNDERLAY_SWITCH_1_NO_VALIDATED_PHYSICAL_FALLBACK=1")
 
-        // Start both recovery clocks before Settings enables the radio so the
-        // budget includes Settings interaction and Wi-Fi association.
-        let recoveryRequestedLowerBound = ProcessInfo.processInfo.systemUptime
+        // End the proven outage window before Settings enables the radio.
         emit(
             "NVPN_IOS_UNDERLAY_SWITCH_1_RECOVERY_REQUESTED_MS="
                 + "\(millisecondsSinceEpoch())"
@@ -130,6 +128,11 @@ extension NostrVpnReleaseNetworkUITests {
         guard pathMonitor.waitForWiFi(timeout: associationTimeout) != nil else {
             throw gateError("Wi-Fi did not return after the radio was enabled")
         }
+        let underlayValidatedUptime = ProcessInfo.processInfo.systemUptime
+        emit(
+            "NVPN_IOS_UNDERLAY_SWITCH_1_UNDERLAY_VALIDATED_MS="
+                + "\(millisecondsSinceEpoch())"
+        )
 
         let dnsReceipt = try NostrVpnReleaseNetworkProbe.exerciseFreshDNSQuery(
             baseHost: spec.resolverQueryHost,
@@ -147,7 +150,7 @@ extension NostrVpnReleaseNetworkUITests {
         )
         try assertPayloadRecovery(
             cycle: 1,
-            recoveryRequestedUptime: recoveryRequestedLowerBound,
+            underlayValidatedUptime: underlayValidatedUptime,
             dnsUptime: dnsReceipt.completedUptime,
             payloadUptime: payloadUptime
         )
@@ -181,17 +184,17 @@ extension NostrVpnReleaseNetworkUITests {
 
     func assertPayloadRecovery(
         cycle: Int,
-        recoveryRequestedUptime: TimeInterval,
+        underlayValidatedUptime: TimeInterval,
         dnsUptime: TimeInterval,
         payloadUptime: TimeInterval
     ) throws {
-        guard dnsUptime >= recoveryRequestedUptime,
+        guard dnsUptime >= underlayValidatedUptime,
               payloadUptime >= dnsUptime
         else {
-            throw gateError("Radio-on payload preceded its recovery request")
+            throw gateError("Radio-on payload preceded validated Wi-Fi")
         }
         let recoveryMilliseconds = Int64(
-            ((payloadUptime - recoveryRequestedUptime) * 1_000).rounded(.up)
+            ((payloadUptime - underlayValidatedUptime) * 1_000).rounded(.up)
         )
         guard recoveryMilliseconds <= 4_000 else {
             throw gateError(

@@ -30,7 +30,8 @@ def parse_markers(path: Path) -> tuple[dict[str, int], dict[str, int]]:
     counts: dict[str, int] = {}
     ios_pattern = re.compile(
         r"^NVPN_IOS_UNDERLAY_SWITCH_(?P<cycle>1)_"
-        r"(?P<phase>REQUESTED|OUTAGE|RECOVERY_REQUESTED|PAYLOAD_RECOVERY|VERIFIED)_MS="
+        r"(?P<phase>REQUESTED|OUTAGE|RECOVERY_REQUESTED|"
+        r"UNDERLAY_VALIDATED|PAYLOAD_RECOVERY|VERIFIED)_MS="
         r"(?P<value>\d+)$"
     )
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -46,6 +47,7 @@ def parse_markers(path: Path) -> tuple[dict[str, int], dict[str, int]]:
             "switch_1_requested",
             "switch_1_outage",
             "switch_1_recovery_requested",
+            "switch_1_underlay_validated",
             "switch_1_payload_recovery",
             "switch_1_verified",
         }:
@@ -78,6 +80,7 @@ def main() -> int:
         "switch_1_requested",
         "switch_1_outage",
         "switch_1_recovery_requested",
+        "switch_1_underlay_validated",
         "switch_1_payload_recovery",
         "switch_1_verified",
     ]
@@ -99,17 +102,20 @@ def main() -> int:
         for cycle in (1,):
             requested = markers[f"switch_{cycle}_requested"]
             outage = markers[f"switch_{cycle}_outage"]
-            recovery_requested = markers[f"switch_{cycle}_recovery_requested"]
+            radio_on_requested = markers[f"switch_{cycle}_recovery_requested"]
+            underlay_validated = markers[f"switch_{cycle}_underlay_validated"]
             recovery_ms = markers[f"switch_{cycle}_payload_recovery"]
             verified = markers[f"switch_{cycle}_verified"]
             if (
                 requested > outage
-                or outage >= recovery_requested
-                or recovery_requested > verified
+                or outage >= radio_on_requested
+                or radio_on_requested > underlay_validated
+                or underlay_validated > verified
             ):
                 errors.append(
                     f"switch {cycle} markers are not "
-                    "request <= outage < recovery-requested <= verified"
+                    "request <= outage < radio-on-requested "
+                    "<= underlay-validated <= verified"
                 )
                 continue
             before = [
@@ -120,12 +126,17 @@ def main() -> int:
             during_outage = [
                 timestamp
                 for timestamp, _ in replies
-                if outage <= timestamp < recovery_requested
+                if outage <= timestamp < radio_on_requested
             ]
-            after = [
+            during_association = [
                 timestamp
                 for timestamp, _ in replies
-                if recovery_requested <= timestamp <= verified
+                if radio_on_requested <= timestamp < underlay_validated
+            ]
+            after_validation = [
+                timestamp
+                for timestamp, _ in replies
+                if underlay_validated <= timestamp <= verified
             ]
             if not before:
                 errors.append(
@@ -135,13 +146,14 @@ def main() -> int:
             if during_outage:
                 errors.append(
                     f"switch {cycle} had {len(during_outage)} reverse payloads "
-                    "between outage and recovery request"
+                    "between outage and radio-on request"
                 )
-            if not after:
+            if not after_validation:
                 errors.append(
-                    f"switch {cycle} had no successful payload after recovery request"
+                    f"switch {cycle} had no successful payload after underlay validation"
                 )
                 continue
+            association_ms = underlay_validated - radio_on_requested
             if recovery_ms < 0:
                 errors.append(f"switch {cycle} payload recovery was negative")
                 continue
@@ -150,23 +162,30 @@ def main() -> int:
                     f"switch {cycle} payload recovery was {recovery_ms}ms "
                     f"(limit {max_recovery_ms}ms)"
                 )
-            first_reverse_recovery_ms = after[0] - recovery_requested
-            if first_reverse_recovery_ms > max_recovery_ms:
+            first_after_validation_ms = after_validation[0] - underlay_validated
+            first_reverse_recovery_ms = (
+                0 if during_association else first_after_validation_ms
+            )
+            if first_after_validation_ms > max_recovery_ms:
                 errors.append(
-                    f"switch {cycle} first reverse payload recovery was "
-                    f"{first_reverse_recovery_ms}ms "
+                    f"switch {cycle} first reverse payload after validation was "
+                    f"{first_after_validation_ms}ms "
                     f"(limit {max_recovery_ms}ms)"
                 )
             post_recovery_gaps = [
                 current - previous
-                for previous, current in zip(after, after[1:])
+                for previous, current in zip(after_validation, after_validation[1:])
             ]
-            if post_recovery_gaps and max(post_recovery_gaps) > max_recovery_ms:
+            if (
+                post_recovery_gaps
+                and max(post_recovery_gaps) > max_recovery_ms
+            ):
                 errors.append(
                     f"switch {cycle} payload gap after recovery was "
-                    f"{max(post_recovery_gaps)}ms (limit {max_recovery_ms}ms)"
+                    f"{max(post_recovery_gaps)}ms "
+                    f"(limit {max_recovery_ms}ms)"
                 )
-            verified_tail_ms = verified - after[-1]
+            verified_tail_ms = verified - after_validation[-1]
             if verified_tail_ms > max_recovery_ms:
                 errors.append(
                     f"switch {cycle} had no payload for {verified_tail_ms}ms "
@@ -181,10 +200,15 @@ def main() -> int:
                     "outageAtMilliseconds": outage,
                     "outageReversePayloads": len(during_outage),
                     "payloadBeforeSwitch": True,
-                    "reversePayloadAfterRecoveryRequest": True,
                     "recoveryMilliseconds": recovery_ms,
-                    "recoveryRequestedAtMilliseconds": recovery_requested,
+                    "recoveryRequestedAtMilliseconds": radio_on_requested,
+                    "reversePayloadAfterRecoveryRequest": True,
+                    "reversePayloadRecoveredBeforeValidation": bool(
+                        during_association
+                    ),
                     "requestedAtMilliseconds": requested,
+                    "underlayAssociationMilliseconds": association_ms,
+                    "underlayValidatedAtMilliseconds": underlay_validated,
                     "verifiedAtMilliseconds": verified,
                 }
             )

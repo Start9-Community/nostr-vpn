@@ -959,7 +959,7 @@ ios_release_network_validate_markers() {
   if bool_is_true "$underlay"; then
     local fresh_dns_host phase recovery
     for phase in \
-      REQUESTED OUTAGE RECOVERY_REQUESTED PAYLOAD_RECOVERY VERIFIED
+      REQUESTED OUTAGE RECOVERY_REQUESTED UNDERLAY_VALIDATED PAYLOAD_RECOVERY VERIFIED
     do
       [[ "$(grep -Fc \
         "NVPN_IOS_UNDERLAY_SWITCH_1_${phase}_MS=" \
@@ -1135,6 +1135,7 @@ if truthy(sys.argv[2]):
         "requested",
         "outage",
         "recovery_requested",
+        "underlay_validated",
         "payload_recovery",
         "verified",
     ):

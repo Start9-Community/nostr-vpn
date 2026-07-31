@@ -70,7 +70,8 @@ def main() -> int:
                     continue
                 if box[:2] == (0, 0):
                     viewport_bottom = max(viewport_bottom, box[3])
-            viewport_bottom = viewport_bottom or 2400
+            if viewport_bottom == 0:
+                return 1
             if bounds(node)[3] > viewport_bottom - 300:
                 return 1
         print(center(node))

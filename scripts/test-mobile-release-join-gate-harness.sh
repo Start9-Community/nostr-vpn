@@ -955,7 +955,8 @@ PY
 )
 
 fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
-trap 'rm -f "$fixture"' EXIT
+no_viewport_fixture="${fixture%.xml}-no-viewport.xml"
+trap 'rm -f "$fixture" "$no_viewport_fixture"' EXIT
 printf '%s\n' \
   '<hierarchy>' \
   '  <node bounds="[0,0][1080,2410]" />' \
@@ -1003,5 +1004,14 @@ fi
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource manual-join-submit-safe safe-center
 )" == "540 1850" ]]
+sed '/bounds="\[0,0\]\[1080,2410\]"/d' \
+  "$fixture" >"$no_viewport_fixture"
+if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$no_viewport_fixture" resource manual-join-submit-safe safe-center \
+    >/dev/null 2>&1
+then
+  echo "Android safe-center accepted a hierarchy without viewport bounds" >&2
+  exit 1
+fi
 
 echo "Signed Release public-UI join gate contract passed"

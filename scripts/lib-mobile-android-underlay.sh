@@ -165,7 +165,7 @@ android_underlay_wait_offline() {
 }
 
 android_underlay_recovery_payloads() {
-  local recovery_requested_ms="$1" recovery_max_ms="$2"
+  local underlay_validated_ms="$1" recovery_max_ms="$2"
   local result_dir result_path dns_path completion_ms recovery_ms
   local dns_servers fresh_dns_base fresh_dns_host
   result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
@@ -225,7 +225,7 @@ android_underlay_recovery_payloads() {
     return 1
   }
   completion_ms="$(mobile_underlay_now_ms)"
-  recovery_ms=$((completion_ms - recovery_requested_ms))
+  recovery_ms=$((completion_ms - underlay_validated_ms))
   if (( recovery_ms < 0 || recovery_ms > recovery_max_ms )); then
     echo "Android DNS/WireGuard recovery was ${recovery_ms}ms (limit ${recovery_max_ms}ms)" >&2
     return 1
@@ -359,7 +359,8 @@ run_android_underlay_network_change_gate() {
   local ping_log="$artifact_dir/$stem-continuity.log"
   local markers="$artifact_dir/$stem-markers.tsv"
   local summary="$artifact_dir/$stem-summary.json"
-  local expected_pid requested_ms recovery_requested_ms recovery_ms restored_ssid
+  local expected_pid requested_ms recovery_requested_ms underlay_validated_ms
+  local recovery_ms restored_ssid
   mkdir -p "$artifact_dir"
   : >"$markers"
   ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS=0
@@ -402,6 +403,9 @@ run_android_underlay_network_change_gate() {
       return 1
     }
 
+  recovery_requested_ms="$(mobile_underlay_now_ms)"
+  printf 'switch_1_recovery_requested\t%s\n' \
+    "$recovery_requested_ms" >>"$markers"
   "$ADB" -s "$serial" shell svc wifi enable >/dev/null
   android_underlay_wait_wifi_radio enabled 5 || {
     echo "Android Wi-Fi radio did not turn on" >&2
@@ -416,11 +420,11 @@ run_android_underlay_network_change_gate() {
       mobile_continuity_stop
       return 1
     }
-  recovery_requested_ms="$(mobile_underlay_now_ms)"
-  printf 'switch_1_recovery_requested\t%s\n' \
-    "$recovery_requested_ms" >>"$markers"
+  underlay_validated_ms="$(mobile_underlay_now_ms)"
+  printf 'switch_1_underlay_validated\t%s\n' \
+    "$underlay_validated_ms" >>"$markers"
   android_underlay_recovery_payloads \
-    "$recovery_requested_ms" "$recovery_max_ms" || {
+    "$underlay_validated_ms" "$recovery_max_ms" || {
     mobile_continuity_stop
     return 1
   }

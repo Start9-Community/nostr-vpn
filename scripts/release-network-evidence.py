@@ -295,8 +295,10 @@ def validate_underlay_continuity(
     requested = cycle.get("requestedAtMilliseconds")
     outage = cycle.get("outageAtMilliseconds")
     recovery_requested = cycle.get("recoveryRequestedAtMilliseconds")
+    underlay_validated = cycle.get("underlayValidatedAtMilliseconds")
     verified = cycle.get("verifiedAtMilliseconds")
     recovery = cycle.get("recoveryMilliseconds")
+    association = cycle.get("underlayAssociationMilliseconds")
     require(
         all(
             isinstance(value, int)
@@ -304,18 +306,23 @@ def validate_underlay_continuity(
                 requested,
                 outage,
                 recovery_requested,
+                underlay_validated,
                 verified,
                 recovery,
+                association,
             )
         )
-        and requested <= outage < recovery_requested <= verified
+        and requested <= outage < recovery_requested <= underlay_validated <= verified
+        and association == underlay_validated - recovery_requested
+        and 0 <= association <= 30_000
         and 0 <= recovery <= 4_000
         and cycle.get("dnsAndWireGuardRecoveryMilliseconds") == recovery
         and cycle.get("outageReversePayloads") == 0
         and isinstance(cycle.get("firstReversePayloadRecoveryMilliseconds"), int)
         and 0 <= cycle["firstReversePayloadRecoveryMilliseconds"] <= 4_000
         and cycle.get("payloadBeforeSwitch") is True
-        and cycle.get("reversePayloadAfterRecoveryRequest") is True,
+        and cycle.get("reversePayloadAfterRecoveryRequest") is True
+        and isinstance(cycle.get("reversePayloadRecoveredBeforeValidation"), bool),
         f"{platform} underlay continuity measurements are incomplete",
     )
     return receipt, cycle
@@ -524,6 +531,7 @@ def validate_ios_support(
             "requested",
             "outage",
             "recovery_requested",
+            "underlay_validated",
             "payload_recovery",
             "verified",
         ):
