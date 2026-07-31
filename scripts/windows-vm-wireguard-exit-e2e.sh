@@ -25,6 +25,7 @@ GUEST_CONFIG="${NVPN_WINDOWS_E2E_CONFIG:-C:\\ProgramData\\Nostr VPN\\config.toml
 GUEST_ARTIFACT_ROOT="${GUEST_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts}"
 GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:-$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\nvpn.exe}"
 GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:-$GUEST_ARTIFACT_ROOT\\windows-installer-gate\\installer-receipt.json}"
+HOST_INSTALLER_RECEIPT="${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH to the host-copied installer receipt}"
 PROVIDER_CONFIG="${NVPN_WINDOWS_WG_EXIT_CONFIG_FILE:-${NVPN_WG_EXIT_CONFIG_FILE:-}}"
 REQUIRE_PROVIDER_E2E="${NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E:-0}"
 PROBE_URL="${NVPN_WINDOWS_E2E_INTERNET_URL:-https://example.com/}"
@@ -361,6 +362,15 @@ if [[ -n "$PROVIDER_CONFIG" && ! -r "$PROVIDER_CONFIG" ]]; then
   echo "NVPN_WINDOWS_WG_EXIT_CONFIG_FILE must name a readable WireGuard config" >&2
   exit 2
 fi
+[[ -f "$HOST_INSTALLER_RECEIPT" && -r "$HOST_INSTALLER_RECEIPT" ]] || {
+  echo "host-copied Windows installer receipt is unreadable: $HOST_INSTALLER_RECEIPT" >&2
+  exit 2
+}
+EXPECTED_INSTALLER_RECEIPT_SHA256="$(shasum -a 256 "$HOST_INSTALLER_RECEIPT" | awk '{ print $1 }')"
+[[ "$EXPECTED_INSTALLER_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "host-copied Windows installer receipt has no SHA-256" >&2
+  exit 2
+}
 if [[ -z "$PROVIDER_CONFIG" ]]; then
   if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
     && -n "$FIXTURE_HOST" ]]
@@ -439,8 +449,10 @@ if (!(Test-Path -LiteralPath \$Bin -PathType Leaf)) {
   throw \"exact packaged nvpn.exe is missing: \$Bin\"
 }
 \$Receipt = Get-Content -Raw -LiteralPath \$ReceiptPath | ConvertFrom-Json
+\$ReceiptHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$ReceiptPath).Hash.ToLowerInvariant()
 \$ExpectedBinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash
 if (
+  \$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256") -or
   \$Receipt.artifactType -ne 'exact installed Windows Release setup' -or
   \$Receipt.appGitSha -ne $(ps_quote "$EXPECTED_HEAD") -or
   \$Receipt.appGitTree -ne $(ps_quote "$EXPECTED_TREE") -or
@@ -451,6 +463,7 @@ if (
 ) {
   throw 'Windows WG e2e CLI differs from the exact installed-and-launched installer payload'
 }
+Write-Host "WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=\$ReceiptHash"
 \$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (!\$IsAdmin) { throw 'Windows WG exit e2e requires an elevated/Admin SSH session for Wintun and route changes' }
 & \$Bin wg-upstream-test --self-test --timeout-secs 15 --scoped-host 10.99.99.1 --ping-count 3

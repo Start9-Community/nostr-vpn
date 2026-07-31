@@ -186,6 +186,9 @@ require_tokens "$WINDOWS" "exact Windows underlay candidate" \
   'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$ARTIFACT_APP_SHA"' \
   'NVPN_WINDOWS_EXACT_CLI_PATH' \
   'NVPN_WINDOWS_INSTALLER_RECEIPT_PATH' \
+  'NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH' \
+  'WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=' \
+  '\$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256")' \
   'Windows underlay CLI differs from the exact installed-and-launched installer payload'
 if grep -Fq 'windows-build.ps1' "$WINDOWS"; then
   fail "Windows underlay release lane still rebuilds instead of using the installer payload"

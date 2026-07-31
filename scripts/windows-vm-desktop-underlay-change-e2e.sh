@@ -23,6 +23,7 @@ GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\wind
 GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\fips-release-gate}"
 GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:?set NVPN_WINDOWS_EXACT_CLI_PATH to the packaged Windows CLI}"
 GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_INSTALLER_RECEIPT_PATH to its installer receipt}"
+HOST_INSTALLER_RECEIPT="${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH to the host-copied installer receipt}"
 ARTIFACT_APP_SHA="${NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA:-${NVPN_EXPECTED_APP_GIT_SHA:-}}"
 ARTIFACT_APP_TREE="${NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE:-${NVPN_EXPECTED_APP_GIT_TREE:-}}"
 LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
@@ -88,6 +89,12 @@ mkdir -p "$ARTIFACT_DIR"
 
 source "$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 source "$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
+
+[[ -f "$HOST_INSTALLER_RECEIPT" && -r "$HOST_INSTALLER_RECEIPT" ]] \
+  || fail "host-copied Windows installer receipt is unreadable: $HOST_INSTALLER_RECEIPT"
+EXPECTED_INSTALLER_RECEIPT_SHA256="$(shasum -a 256 "$HOST_INSTALLER_RECEIPT" | awk '{ print $1 }')"
+[[ "$EXPECTED_INSTALLER_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || fail "host-copied Windows installer receipt has no SHA-256"
 
 resolve_expected_fips_revision() {
   local local_revision
@@ -193,9 +200,11 @@ if (!(Test-Path -LiteralPath \$Bin -PathType Leaf)) {
   throw \"exact packaged nvpn.exe is missing: \$Bin\"
 }
 \$Receipt = Get-Content -Raw -LiteralPath \$ReceiptPath | ConvertFrom-Json
+\$ReceiptHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$ReceiptPath).Hash.ToLowerInvariant()
 \$CliHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash.ToLowerInvariant()
 \$CliSize = (Get-Item -LiteralPath \$Bin).Length
 if (
+  \$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256") -or
   \$Receipt.artifactType -ne 'exact installed Windows Release setup' -or
   \$Receipt.appGitSha -ne $(ps_quote "$ARTIFACT_APP_SHA") -or
   \$Receipt.appGitTree -ne $(ps_quote "$ARTIFACT_APP_TREE") -or
@@ -207,6 +216,7 @@ if (
   throw 'Windows underlay CLI differs from the exact installed-and-launched installer payload'
 }
 Get-Content -Raw -LiteralPath \$ReceiptPath
+Write-Host \"WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=\$ReceiptHash\"
 Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$CliHash\"" \
     >"$ARTIFACT_DIR/exact-artifact-validation.log"
 

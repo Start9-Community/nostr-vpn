@@ -60,6 +60,9 @@ for proof in \
   '[[ "$REMOTE_HEAD" == "$EXPECTED_HEAD" && "$REMOTE_TREE" == "$EXPECTED_TREE" ]]' \
   'Windows WG e2e checkout differs from the exact candidate tree' \
   'exact installed Windows Release setup' \
+  'NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH' \
+  'WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=' \
+  '\$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256")' \
   'Windows WG e2e CLI differs from the exact installed-and-launched installer payload' \
   'WINDOWS_EXACT_INSTALLER_CLI_SHA256=' \
   'Get-FileHash -Algorithm SHA256 -LiteralPath \$Process.ExecutablePath' \
