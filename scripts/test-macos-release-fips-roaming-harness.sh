@@ -159,14 +159,26 @@ require_tokens "$GUEST" "exact IPv4 WireGuard endpoint route evidence" \
   'routes == 1 && matching == 1'
 require_tokens "$GUEST" "real crash/restart cleanup evidence" \
   'run_crash_restart_gate' \
-  'cleanup_journal_owns_wireguard_and_dns' \
+  'wait_for_crash_live_precondition' \
+  'wireguard_routes_live' \
+  'runtime_dns_state_matches' \
+  'runtime_fips_peer_connected' \
+  'crash_startup_log_order_is_valid' \
+  'crash_residue_after_sigkill' \
+  'record_crash_external_audit after-sigkill' \
   'sudo -n /bin/kill -KILL "$old_pid"' \
   'runtime_wireguard_state_is true false' \
   'privileged_nvpn start --config "$CONFIG" --connect --daemon' \
   'restart did not converge to exactly one owned daemon' \
   'restart did not produce exactly one fresh WireGuard bind receipt' \
-  'daemon.cleanup.json' \
+  'startup_persist_path_completed=true' \
+  'sigkill_route_dns_residue_seen=true' \
   'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK'
+if grep -Eq 'sudo -n /(bin/cat|usr/bin/stat)' "$GUEST" \
+  || grep -Fq 'daemon.cleanup.json' "$GUEST"
+then
+  fail "crash evidence inspects the daemon's private cleanup journal"
+fi
 require_tokens "$GUEST" "production daemon PID record ownership" \
   'json.load(handle)' \
   'record.get("config_path") != config_path' \
@@ -490,27 +502,17 @@ then
   exit 1
 fi
 
-privileged_cleanup_journal_bytes() {
-  cat "$STATE_DIR/daemon.cleanup.json"
-}
-privileged_cleanup_journal_stat() {
-  printf 'mode=-rw------- user=root group=wheel\n'
-}
-
-cat >"$state/daemon.cleanup.json" <<'EOF'
-{
-  "managed_routes": [
-    {"target": "0.0.0.0/1", "interface": "utun9"},
-    {"target": "128.0.0.0/1", "interface": "utun9"}
-  ],
-  "secure_dns_resolver_files": true
-}
+cat >"$state/daemon.log" <<'EOF'
+fips: WG upstream up on utun9 via 192.0.2.1 bound to en0 (split-default kill switch installed)
+daemon: FIPS private mesh on utun8
 EOF
-cleanup_journal_owns_wireguard_and_dns
-printf '{"managed_routes":[],"secure_dns_resolver_files":true}\n' \
-  >"$state/daemon.cleanup.json"
-if cleanup_journal_owns_wireguard_and_dns; then
-  echo "crash journal accepted without both WireGuard split defaults" >&2
+crash_startup_log_order_is_valid
+cat >"$state/daemon.log" <<'EOF'
+daemon: FIPS private mesh on utun8
+fips: WG upstream up on utun9 via 192.0.2.1 bound to en0 (split-default kill switch installed)
+EOF
+if crash_startup_log_order_is_valid; then
+  echo "crash precondition accepted reversed startup persistence ordering" >&2
   exit 1
 fi
 

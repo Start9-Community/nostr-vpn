@@ -631,82 +631,100 @@ assert_single_owned_daemon() {
     && "$command" == *" --config $CONFIG"* ]]
 }
 
-cleanup_journal_owns_wireguard_and_dns() {
-  cleanup_journal_sanitized_audit >/dev/null
+crash_startup_log_order_is_valid() {
+  local wireguard_line fips_line
+  wireguard_line="$({
+    grep -nF 'fips: WG upstream up on ' "$STATE_DIR/daemon.log" \
+      || true
+  } | tail -n 1 | cut -d: -f1)"
+  fips_line="$({
+    grep -nF 'daemon: FIPS private mesh on ' "$STATE_DIR/daemon.log" \
+      || true
+  } | tail -n 1 | cut -d: -f1)"
+  [[ "$wireguard_line" =~ ^[1-9][0-9]*$ \
+    && "$fips_line" =~ ^[1-9][0-9]*$ \
+    && "$wireguard_line" -lt "$fips_line" ]]
 }
 
-privileged_cleanup_journal_bytes() {
-  local journal="$STATE_DIR/daemon.cleanup.json"
-  [[ "$journal" == /tmp/nvpn-macos-release-network.*/daemon.cleanup.json ]] \
-    || return 1
-  sudo -n /bin/cat -- "$journal"
+capture_crash_startup_log_order() {
+  {
+    printf '%s\n' '--- WireGuard startup receipts ---'
+    grep -nF 'fips: WG upstream up on ' "$STATE_DIR/daemon.log" || true
+    printf '%s\n' '--- FIPS startup completion receipts ---'
+    grep -nF 'daemon: FIPS private mesh on ' "$STATE_DIR/daemon.log" || true
+  }
 }
 
-privileged_cleanup_journal_stat() {
-  local journal="$STATE_DIR/daemon.cleanup.json"
-  [[ "$journal" == /tmp/nvpn-macos-release-network.*/daemon.cleanup.json ]] \
-    || return 1
-  sudo -n /usr/bin/stat -f \
-    'file=%N type=%HT mode=%Sp mode_octal=%OLp uid=%u user=%Su gid=%g group=%Sg size=%z modified_epoch=%m' \
-    "$journal"
+crash_live_precondition() {
+  # The FIPS-on receipt is emitted only after mandatory cleanup ownership
+  # persistence returns successfully. Keep that ordered production log plus
+  # externally observable network state; the root-only journal is deliberately
+  # not part of this unprivileged release harness's interface.
+  wireguard_routes_live \
+    && runtime_wireguard_state_is true true \
+    && runtime_dns_state_matches \
+    && runtime_fips_peer_connected \
+    && fips_host_tunnel_route_live \
+    && crash_startup_log_order_is_valid
 }
 
-cleanup_journal_sanitized_audit() {
-  privileged_cleanup_journal_bytes 2>/dev/null \
-    | /usr/bin/python3 -c '
-import json
-import sys
-
-try:
-    state = json.load(sys.stdin)
-except (OSError, ValueError) as error:
-    print(json.dumps({
-        "journal_readable": False,
-        "parse_error_type": type(error).__name__,
-    }, sort_keys=True, separators=(",", ":")))
-    raise SystemExit(1)
-targets = [
-    route.get("target")
-    for route in state.get("managed_routes", [])
-    if isinstance(route, dict)
-]
-required = {
-    "0.0.0.0/1": targets.count("0.0.0.0/1"),
-    "128.0.0.0/1": targets.count("128.0.0.0/1"),
-}
-dns = state.get("secure_dns_resolver_files") is True
-owns_required = dns and all(count > 0 for count in required.values())
-print(json.dumps({
-    "journal_readable": True,
-    "owns_required_wireguard_and_dns": owns_required,
-    "required_managed_route_counts": required,
-    "secure_dns_resolver_files": dns,
-}, sort_keys=True, separators=(",", ":")))
-raise SystemExit(0 if owns_required else 1)
-'
+crash_residue_after_sigkill() {
+  no_nvpn_processes \
+    && wireguard_endpoint_route_state_valid "$PRIMARY_IFACE" \
+    && wireguard_interface >/dev/null \
+    && secure_dns_owned
 }
 
-record_cleanup_journal_audit() {
-  local label="$1"
+record_crash_external_audit() {
+  local label="$1" mode predicates
   case "$label" in
-    precondition|after-sigkill|after-stopped-status|after-restart) ;;
+    precondition|after-restart) mode=live ;;
+    after-sigkill|after-stopped-status) mode=residue ;;
     *) return 1 ;;
   esac
-  privileged_cleanup_journal_stat \
-    >"$RESULT_DIR/crash-ownership-$label-stat.txt" 2>&1 \
-    || return 1
-  cleanup_journal_sanitized_audit \
-    >"$RESULT_DIR/crash-ownership-$label.json"
+  predicates="$RESULT_DIR/crash-external-$label-predicates.txt"
+  : >"$predicates"
+  snapshot_predicate "$predicates" wireguard_interface wireguard_interface
+  snapshot_predicate "$predicates" endpoint_route_bypass \
+    wireguard_endpoint_route_state_valid "$PRIMARY_IFACE"
+  snapshot_predicate "$predicates" secure_dns_owned secure_dns_owned
+  if [[ "$mode" == live ]]; then
+    snapshot_predicate "$predicates" wireguard_routes_live wireguard_routes_live
+    snapshot_predicate "$predicates" runtime_wireguard_live \
+      runtime_wireguard_state_is true true
+    snapshot_predicate "$predicates" runtime_dns_state_matches \
+      runtime_dns_state_matches
+    snapshot_predicate "$predicates" authenticated_fips_peer \
+      runtime_fips_peer_connected
+    snapshot_predicate "$predicates" fips_host_tunnel_route_live \
+      fips_host_tunnel_route_live
+    snapshot_predicate "$predicates" startup_log_order \
+      crash_startup_log_order_is_valid
+    crash_live_precondition || return 1
+  else
+    snapshot_predicate "$predicates" daemon_absent no_nvpn_processes
+    crash_residue_after_sigkill || return 1
+  fi
+  capture_underlay_routes \
+    >"$RESULT_DIR/crash-external-$label-routes.txt" 2>&1 || true
+  capture_crash_ownership_resolver_state \
+    >"$RESULT_DIR/crash-external-$label-resolver-state.txt" 2>&1 || true
+  capture_crash_startup_log_order \
+    >"$RESULT_DIR/crash-external-$label-startup-order.txt" 2>&1 || true
+  nvpn status --config "$CONFIG" --json --discover-secs 0 \
+    >"$RESULT_DIR/crash-external-$label-status.json" 2>&1 || true
+  cp -p "$STATE_DIR/daemon.log" \
+    "$RESULT_DIR/crash-external-$label-daemon.log" 2>/dev/null || true
 }
 
-wait_for_crash_ownership_precondition() {
+wait_for_crash_live_precondition() {
   local deadline="$((SECONDS + WAIT_SECS))" polls=0
   while ((SECONDS < deadline)); do
     polls=$((polls + 1))
-    if cleanup_journal_owns_wireguard_and_dns; then
+    if crash_live_precondition; then
       printf 'polls=%s\n' "$polls" \
-        >"$RESULT_DIR/crash-ownership-precondition.txt"
-      record_cleanup_journal_audit precondition
+        >"$RESULT_DIR/crash-external-precondition.txt"
+      record_crash_external_audit precondition
       return 0
     fi
     sleep 0.2
@@ -737,19 +755,30 @@ capture_crash_ownership_resolver_state() {
   }
 }
 
-capture_crash_ownership_failure() {
-  privileged_cleanup_journal_stat \
-    >"$RESULT_DIR/crash-ownership-source-stat.txt" 2>&1 || true
-  cleanup_journal_sanitized_audit \
-    >"$RESULT_DIR/crash-ownership-required-fields.json" 2>&1 || true
+capture_crash_external_failure() {
+  local predicates="$RESULT_DIR/crash-external-failure-predicates.txt"
+  : >"$predicates"
+  snapshot_predicate "$predicates" wireguard_routes_live wireguard_routes_live
+  snapshot_predicate "$predicates" runtime_wireguard_live \
+    runtime_wireguard_state_is true true
+  snapshot_predicate "$predicates" runtime_dns_state_matches \
+    runtime_dns_state_matches
+  snapshot_predicate "$predicates" authenticated_fips_peer \
+    runtime_fips_peer_connected
+  snapshot_predicate "$predicates" fips_host_tunnel_route_live \
+    fips_host_tunnel_route_live
+  snapshot_predicate "$predicates" startup_log_order \
+    crash_startup_log_order_is_valid
   capture_underlay_routes \
-    >"$RESULT_DIR/crash-ownership-live-routes.txt" 2>&1 || true
+    >"$RESULT_DIR/crash-external-failure-routes.txt" 2>&1 || true
   capture_crash_ownership_resolver_state \
-    >"$RESULT_DIR/crash-ownership-live-resolver-state.txt" 2>&1 || true
+    >"$RESULT_DIR/crash-external-failure-resolver-state.txt" 2>&1 || true
+  capture_crash_startup_log_order \
+    >"$RESULT_DIR/crash-external-failure-startup-order.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
-    >"$RESULT_DIR/crash-ownership-daemon-status.json" 2>&1 || true
+    >"$RESULT_DIR/crash-external-failure-status.json" 2>&1 || true
   cp -p "$STATE_DIR/daemon.log" \
-    "$RESULT_DIR/crash-ownership-daemon.log" 2>/dev/null || true
+    "$RESULT_DIR/crash-external-failure-daemon.log" 2>/dev/null || true
 }
 
 no_nvpn_processes() {
@@ -1301,9 +1330,9 @@ run_crash_restart_gate() {
   local bind_receipts
   assert_single_owned_daemon \
     || fail "SIGKILL gate did not start with exactly one owned daemon"
-  if ! wait_for_crash_ownership_precondition; then
-    capture_crash_ownership_failure
-    fail "SIGKILL gate lacks persisted WireGuard route and DNS ownership"
+  if ! wait_for_crash_live_precondition; then
+    capture_crash_external_failure
+    fail "SIGKILL gate lacks live WireGuard, DNS, HTTPS, and FIPS state"
   fi
   old_pid="$(owned_daemon_pid)"
   bind_baseline="$(
@@ -1319,15 +1348,12 @@ run_crash_restart_gate() {
   wait_until "the SIGKILLed production daemon to exit" no_nvpn_processes
   daemon_process_alive "$old_pid" \
     && fail "SIGKILLed production daemon is still alive"
-  record_cleanup_journal_audit after-sigkill \
-    || fail "SIGKILL lost the persisted WireGuard route or DNS ownership"
-  [[ ! -e "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
-    && secure_dns_store_owned \
-    || fail "SIGKILL did not leave the real secure-DNS state for startup repair"
+  record_crash_external_audit after-sigkill \
+    || fail "SIGKILL lost the live WireGuard route or secure DNS residue"
   runtime_wireguard_state_is true false \
     || fail "stopped status did not distinguish the crashed daemon"
-  record_cleanup_journal_audit after-stopped-status \
-    || fail "status inspection repaired or discarded the crash journal"
+  record_crash_external_audit after-stopped-status \
+    || fail "status inspection repaired or discarded the crash residue"
 
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
     >"$RESULT_DIR/daemon-start-after-sigkill.txt"
@@ -1352,8 +1378,8 @@ run_crash_restart_gate() {
   new_pid="$(owned_daemon_pid)"
   [[ "$new_pid" != "$old_pid" ]] \
     || fail "restart reused the SIGKILLed daemon PID"
-  record_cleanup_journal_audit after-restart \
-    || fail "restarted daemon did not persist fresh network ownership"
+  record_crash_external_audit after-restart \
+    || fail "restarted daemon did not restore the full external network state"
   bind_receipts="$(
     grep -Fc \
       " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
@@ -1363,7 +1389,8 @@ run_crash_restart_gate() {
     || fail "restart did not produce exactly one fresh WireGuard bind receipt"
 
   {
-    printf 'sigkill_journal_seen=true\n'
+    printf 'startup_persist_path_completed=true\n'
+    printf 'sigkill_route_dns_residue_seen=true\n'
     printf 'old_pid=%s\n' "$old_pid"
     printf 'new_pid=%s\n' "$new_pid"
     printf 'restart_payload_ms=%s\n' "$restart_elapsed_ms"
@@ -1485,8 +1512,6 @@ select_direct_and_stop() {
   if pgrep -x nvpn >/dev/null 2>&1; then
     fail "owned nvpn daemon survived Direct cleanup"
   fi
-  [[ ! -e "$STATE_DIR/daemon.cleanup.json" ]] \
-    || fail "Direct cleanup retained the network ownership journal"
   saved_service_states_match \
     || fail "guest network-service state was not restored"
   wait_until "the exact effective and per-service Direct DNS baseline" \
