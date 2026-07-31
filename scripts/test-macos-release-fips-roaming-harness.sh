@@ -490,6 +490,13 @@ then
   exit 1
 fi
 
+privileged_cleanup_journal_bytes() {
+  cat "$STATE_DIR/daemon.cleanup.json"
+}
+privileged_cleanup_journal_stat() {
+  printf 'mode=-rw------- user=root group=wheel\n'
+}
+
 cat >"$state/daemon.cleanup.json" <<'EOF'
 {
   "managed_routes": [

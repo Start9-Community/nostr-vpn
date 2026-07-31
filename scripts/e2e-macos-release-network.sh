@@ -632,27 +632,71 @@ assert_single_owned_daemon() {
 }
 
 cleanup_journal_owns_wireguard_and_dns() {
-  /usr/bin/python3 - "$STATE_DIR/daemon.cleanup.json" <<'PY'
+  cleanup_journal_sanitized_audit >/dev/null
+}
+
+privileged_cleanup_journal_bytes() {
+  local journal="$STATE_DIR/daemon.cleanup.json"
+  [[ "$journal" == /tmp/nvpn-macos-release-network.*/daemon.cleanup.json ]] \
+    || return 1
+  sudo -n /bin/cat -- "$journal"
+}
+
+privileged_cleanup_journal_stat() {
+  local journal="$STATE_DIR/daemon.cleanup.json"
+  [[ "$journal" == /tmp/nvpn-macos-release-network.*/daemon.cleanup.json ]] \
+    || return 1
+  sudo -n /usr/bin/stat -f \
+    'file=%N type=%HT mode=%Sp mode_octal=%OLp uid=%u user=%Su gid=%g group=%Sg size=%z modified_epoch=%m' \
+    "$journal"
+}
+
+cleanup_journal_sanitized_audit() {
+  privileged_cleanup_journal_bytes 2>/dev/null \
+    | /usr/bin/python3 -c '
 import json
 import sys
 
 try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        state = json.load(handle)
-except (OSError, ValueError):
+    state = json.load(sys.stdin)
+except (OSError, ValueError) as error:
+    print(json.dumps({
+        "journal_readable": False,
+        "parse_error_type": type(error).__name__,
+    }, sort_keys=True, separators=(",", ":")))
     raise SystemExit(1)
-targets = {
+targets = [
     route.get("target")
     for route in state.get("managed_routes", [])
     if isinstance(route, dict)
+]
+required = {
+    "0.0.0.0/1": targets.count("0.0.0.0/1"),
+    "128.0.0.0/1": targets.count("128.0.0.0/1"),
 }
-if (
-    state.get("secure_dns_resolver_files") is True
-    and {"0.0.0.0/1", "128.0.0.0/1"}.issubset(targets)
-):
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
+dns = state.get("secure_dns_resolver_files") is True
+owns_required = dns and all(count > 0 for count in required.values())
+print(json.dumps({
+    "journal_readable": True,
+    "owns_required_wireguard_and_dns": owns_required,
+    "required_managed_route_counts": required,
+    "secure_dns_resolver_files": dns,
+}, sort_keys=True, separators=(",", ":")))
+raise SystemExit(0 if owns_required else 1)
+'
+}
+
+record_cleanup_journal_audit() {
+  local label="$1"
+  case "$label" in
+    precondition|after-sigkill|after-stopped-status|after-restart) ;;
+    *) return 1 ;;
+  esac
+  privileged_cleanup_journal_stat \
+    >"$RESULT_DIR/crash-ownership-$label-stat.txt" 2>&1 \
+    || return 1
+  cleanup_journal_sanitized_audit \
+    >"$RESULT_DIR/crash-ownership-$label.json"
 }
 
 wait_for_crash_ownership_precondition() {
@@ -660,11 +704,9 @@ wait_for_crash_ownership_precondition() {
   while ((SECONDS < deadline)); do
     polls=$((polls + 1))
     if cleanup_journal_owns_wireguard_and_dns; then
-      {
-        printf 'polls=%s\n' "$polls"
-        printf 'required_secure_dns_resolver_files=true\n'
-        printf 'required_managed_routes=0.0.0.0/1,128.0.0.0/1\n'
-      } >"$RESULT_DIR/crash-ownership-precondition.txt"
+      printf 'polls=%s\n' "$polls" \
+        >"$RESULT_DIR/crash-ownership-precondition.txt"
+      record_cleanup_journal_audit precondition
       return 0
     fi
     sleep 0.2
@@ -696,46 +738,10 @@ capture_crash_ownership_resolver_state() {
 }
 
 capture_crash_ownership_failure() {
-  local journal="$STATE_DIR/daemon.cleanup.json"
-  local snapshot="$RESULT_DIR/crash-ownership-daemon.cleanup.json"
-  if [[ -f "$journal" ]]; then
-    cp -p "$journal" "$snapshot" 2>/dev/null || true
-  fi
-  /usr/bin/python3 - "$snapshot" \
-    >"$RESULT_DIR/crash-ownership-required-fields.json" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-result = {
-    "snapshot_present": False,
-    "secure_dns_resolver_files": None,
-    "required_managed_routes": {
-        "0.0.0.0/1": [],
-        "128.0.0.0/1": [],
-    },
-}
-try:
-    with open(path, encoding="utf-8") as handle:
-        state = json.load(handle)
-except FileNotFoundError:
-    result["snapshot_error"] = "missing"
-except (OSError, ValueError) as error:
-    result["snapshot_error"] = f"{type(error).__name__}: {error}"
-else:
-    result["snapshot_present"] = True
-    result["secure_dns_resolver_files"] = state.get(
-        "secure_dns_resolver_files"
-    )
-    for route in state.get("managed_routes", []):
-        if not isinstance(route, dict):
-            continue
-        target = route.get("target")
-        if target in result["required_managed_routes"]:
-            result["required_managed_routes"][target].append(route)
-json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"))
-sys.stdout.write("\n")
-PY
+  privileged_cleanup_journal_stat \
+    >"$RESULT_DIR/crash-ownership-source-stat.txt" 2>&1 || true
+  cleanup_journal_sanitized_audit \
+    >"$RESULT_DIR/crash-ownership-required-fields.json" 2>&1 || true
   capture_underlay_routes \
     >"$RESULT_DIR/crash-ownership-live-routes.txt" 2>&1 || true
   capture_crash_ownership_resolver_state \
@@ -1313,14 +1319,14 @@ run_crash_restart_gate() {
   wait_until "the SIGKILLed production daemon to exit" no_nvpn_processes
   daemon_process_alive "$old_pid" \
     && fail "SIGKILLed production daemon is still alive"
-  cleanup_journal_owns_wireguard_and_dns \
+  record_cleanup_journal_audit after-sigkill \
     || fail "SIGKILL lost the persisted WireGuard route or DNS ownership"
   [[ ! -e "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]] \
     && secure_dns_store_owned \
     || fail "SIGKILL did not leave the real secure-DNS state for startup repair"
   runtime_wireguard_state_is true false \
     || fail "stopped status did not distinguish the crashed daemon"
-  cleanup_journal_owns_wireguard_and_dns \
+  record_cleanup_journal_audit after-stopped-status \
     || fail "status inspection repaired or discarded the crash journal"
 
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
@@ -1346,7 +1352,7 @@ run_crash_restart_gate() {
   new_pid="$(owned_daemon_pid)"
   [[ "$new_pid" != "$old_pid" ]] \
     || fail "restart reused the SIGKILLed daemon PID"
-  cleanup_journal_owns_wireguard_and_dns \
+  record_cleanup_journal_audit after-restart \
     || fail "restarted daemon did not persist fresh network ownership"
   bind_receipts="$(
     grep -Fc \
