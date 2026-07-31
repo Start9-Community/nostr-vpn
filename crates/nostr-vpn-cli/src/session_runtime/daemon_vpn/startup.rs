@@ -83,6 +83,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     }
     #[cfg(any(target_os = "macos", test))]
     crate::ensure_macos_connect_privileges(&config_path)?;
+    #[cfg(not(target_os = "windows"))]
     ensure_no_other_daemon_processes_for_config(&config_path, std::process::id())?;
     clear_daemon_control_ready(&config_path);
     if repair_saved_network_state(&config_path)
