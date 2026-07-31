@@ -179,7 +179,7 @@ listener_audit() {
   for _ in $(seq 1 50); do
     rows="$(listener_rows)"
     if row="$(
-      nvpn_require_single_udp_listener \
+      nvpn_require_dual_family_udp_listeners \
         "$rows" "$interface" "$LISTEN_PORT" "$pid" 2>/dev/null
     )" && peer_tunnel_route_live; then
       printf 'underlay_interface=%s\n' "$interface"
@@ -192,7 +192,7 @@ listener_audit() {
     fi
     sleep 0.1
   done
-  nvpn_require_single_udp_listener \
+  nvpn_require_dual_family_udp_listeners \
     "$rows" "$interface" "$LISTEN_PORT" "$pid" >/dev/null || true
   ss -lunp 2>/dev/null >&2 || true
   ip -4 route get "$TARGET_TUNNEL_IP" >&2 || true

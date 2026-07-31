@@ -62,6 +62,14 @@ reject_listener_fixture() {
   fi
 }
 
+reject_dual_listener_fixture() {
+  local label="$1"
+  shift
+  if nvpn_require_dual_family_udp_listeners "$@" >/dev/null 2>&1; then
+    fail "$label passed the dual-family listener audit"
+  fi
+}
+
 [[ -f "$LISTENER_AUDIT" ]] || fail "Linux UDP listener audit helper is missing"
 source "$LISTENER_AUDIT"
 
@@ -138,8 +146,31 @@ validated_listener="$(
 )" || fail "valid exact-device daemon listener fixture was rejected"
 [[ "$validated_listener" == "$listener_fixture_row" ]] \
   || fail "listener helper did not return the exact validated row"
+ipv6_listener_fixture_row='UNCONN 0 0 [::]%nvln0:45820 [::]:* users:(("nvpn",pid=4242,fd=12))'
+dual_family_listener_rows="$listener_fixture_row"$'\n'"$ipv6_listener_fixture_row"
+validated_dual_listeners="$(
+  nvpn_require_dual_family_udp_listeners \
+    "$dual_family_listener_rows" \
+    "$listener_fixture_device" \
+    "$listener_fixture_port" \
+    "$listener_fixture_pid"
+)" || fail "valid same-port IPv4/IPv6 listener pair was rejected"
+[[ "$validated_dual_listeners" == "$dual_family_listener_rows" ]] \
+  || fail "listener helper did not return the exact validated dual-family rows"
+validated_legacy_ipv6_listener="$(
+  nvpn_require_single_udp_listener \
+    "$ipv6_listener_fixture_row" \
+    "$listener_fixture_device" \
+    "$listener_fixture_port" \
+    "$listener_fixture_pid"
+)" || fail "valid legacy single IPv6 listener fixture was rejected"
+[[ "$validated_legacy_ipv6_listener" == "$ipv6_listener_fixture_row" ]] \
+  || fail "listener helper did not return the exact legacy IPv6 row"
 reuseport_compatible_rows="$listener_fixture_row"$'\n''UNCONN 0 0 0.0.0.0%nvln0:45820 0.0.0.0:* users:(("nvpn",pid=4242,fd=12))'
 reject_listener_fixture "duplicate SO_REUSEPORT-compatible rows" \
+  "$reuseport_compatible_rows" "$listener_fixture_device" \
+  "$listener_fixture_port" "$listener_fixture_pid"
+reject_dual_listener_fixture "duplicate IPv4 rows masquerading as dual-family" \
   "$reuseport_compatible_rows" "$listener_fixture_device" \
   "$listener_fixture_port" "$listener_fixture_pid"
 reject_listener_fixture "listener on the wrong device" \
@@ -150,10 +181,25 @@ shared_listener_row='UNCONN 0 0 0.0.0.0%nvln0:45820 0.0.0.0:* users:(("other",pi
 reject_listener_fixture "listener row shared with a foreign PID" \
   "$shared_listener_row" "$listener_fixture_device" \
   "$listener_fixture_port" "$listener_fixture_pid"
+dual_family_foreign_owner_rows="$listener_fixture_row"$'\n''UNCONN 0 0 [::]%nvln0:45820 [::]:* users:(("other",pid=9999,fd=12))'
+reject_dual_listener_fixture "dual-family row owned by a foreign PID" \
+  "$dual_family_foreign_owner_rows" "$listener_fixture_device" \
+  "$listener_fixture_port" "$listener_fixture_pid"
+dual_family_wrong_interface_rows="$listener_fixture_row"$'\n''UNCONN 0 0 [::]%wrong0:45820 [::]:* users:(("nvpn",pid=4242,fd=12))'
+reject_dual_listener_fixture "dual-family row on the wrong device" \
+  "$dual_family_wrong_interface_rows" "$listener_fixture_device" \
+  "$listener_fixture_port" "$listener_fixture_pid"
+three_listener_rows="$dual_family_listener_rows"$'\n'"$listener_fixture_row"
+reject_dual_listener_fixture "extra third listener row" \
+  "$three_listener_rows" "$listener_fixture_device" \
+  "$listener_fixture_port" "$listener_fixture_pid"
 require_tokens "$PEER" "listener ownership integration" \
   'lib-desktop-linux-listener-audit.sh' \
   'nvpn_require_single_udp_listener' \
   '"$STATE_DIR/peer-process.pid"'
+require_tokens "$ROOT/scripts/macos-release-fips-peer-remote.sh" \
+  "macOS/Vader dual-family listener ownership integration" \
+  'nvpn_require_dual_family_udp_listeners'
 
 for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
   require_tokens "$host_gate" "real topology/cleanup evidence" \

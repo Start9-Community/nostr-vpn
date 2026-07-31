@@ -65,3 +65,44 @@ nvpn_require_single_udp_listener() {
 
   printf '%s\n' "$row"
 }
+
+# Validate the named dual-family FIPS listener set used by the macOS/Vader
+# gate: exactly one IPv4 and one IPv6 wildcard on the same device/port, both
+# owned exclusively by the expected daemon.
+nvpn_require_dual_family_udp_listeners() {
+  local rows="$1" expected_device="$2" expected_port="$3" expected_pid="$4"
+  local row row_count endpoint_suffix
+
+  row_count="$(printf '%s\n' "$rows" | awk 'NF { count += 1 } END { print count + 0 }')"
+  [[ "$row_count" == "2" ]] || {
+    printf 'expected exactly two dual-family UDP listener rows, found %s\n' \
+      "$row_count" >&2
+    return 1
+  }
+  endpoint_suffix="%$expected_device:$expected_port"
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    nvpn_require_single_udp_listener \
+      "$row" "$expected_device" "$expected_port" "$expected_pid" \
+      >/dev/null || return
+  done <<<"$rows"
+
+  if ! printf '%s\n' "$rows" | awk -v suffix="$endpoint_suffix" '
+    {
+      for (field = 1; field <= NF; field += 1) {
+        if (length($field) >= length(suffix) && substr($field, length($field) - length(suffix) + 1) == suffix) {
+          address = substr($field, 1, length($field) - length(suffix))
+          ipv4 += address == "0.0.0.0"
+          ipv6 += address == "[::]"
+        }
+      }
+    }
+    END { exit !(ipv4 == 1 && ipv6 == 1) }
+  '; then
+    echo "dual-family UDP listeners must be one IPv4 and one IPv6 wildcard" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$rows" | awk 'NF'
+}
