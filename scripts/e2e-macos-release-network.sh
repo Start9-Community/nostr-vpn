@@ -1035,6 +1035,7 @@ wait_for_underlay_recovery() {
       elapsed=$((now - requested_ms))
       if (( elapsed < 0 || elapsed > RECOVERY_DEADLINE_MS )); then
         fail "$label recovered in ${elapsed}ms (limit ${RECOVERY_DEADLINE_MS}ms)"
+        return 1
       fi
       printf '%s\n' "$elapsed"
       return 0
@@ -1042,6 +1043,7 @@ wait_for_underlay_recovery() {
     now="$(monotonic_ms)"
     if (( now - requested_ms > RECOVERY_DEADLINE_MS )); then
       fail "$label did not restore WireGuard + authenticated private-FIPS payload, route, FIPS carrier rebind, and fresh WireGuard handshake on $expected_iface in ${RECOVERY_DEADLINE_MS}ms"
+      return 1
     fi
     sleep 0.1
   done

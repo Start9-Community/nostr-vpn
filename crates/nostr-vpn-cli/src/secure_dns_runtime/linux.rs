@@ -751,7 +751,7 @@ pub(crate) fn repair_linux_secure_dns_cleanup_state(
 }
 
 #[cfg(target_os = "linux")]
-fn read_linux_resolv_conf(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn read_linux_resolv_conf(path: &Path) -> Result<Vec<u8>> {
     match std::fs::read(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),

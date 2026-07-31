@@ -521,62 +521,11 @@ assert_peer_recovered_from_source() {
   local cut_timestamp="$1"
   local expected_source="$2"
   local label="$3"
-  run_hypervisor bash -s -- \
+  local observer="$ROOT/scripts/desktop-underlay-peer-recovery-observer.sh"
+  [[ -r "$observer" ]] || fail "peer recovery observer is missing"
+  run_hypervisor sudo -n bash -s -- \
     "$PEER_STATE_DIR" "$cut_timestamp" "$expected_source" \
-    "$((RECOVERY_DEADLINE_MS / 1000))" "$label" <<'SH'
-set -euo pipefail
-state="$1"
-cut="$2"
-source_ip="$3"
-deadline="$4"
-label="$5"
-end="$(awk -v cut="$cut" -v deadline="$deadline" 'BEGIN { print cut + deadline }')"
-while :; do
-  fips_underlay_at="$(awk -v cut="$cut" -v ip="$source_ip" '
-    $1 + 0 >= cut && index($0, "IP " ip ".") { print $1; exit }
-  ' "$state/fips-underlay.pcap.txt" 2>/dev/null || true)"
-  wireguard_underlay_at="$(awk -v cut="$cut" -v ip="$source_ip" '
-    $1 + 0 >= cut && index($0, "IP " ip ".") { print $1; exit }
-  ' "$state/wireguard-underlay.pcap.txt" 2>/dev/null || true)"
-  reverse_at="$(awk -v underlay="$fips_underlay_at" '
-    /^\[[0-9]/ {
-      timestamp = $1
-      gsub(/^\[/, "", timestamp)
-      gsub(/\]$/, "", timestamp)
-      if (underlay != "" && timestamp + 0 >= underlay && /bytes from/) {
-        print timestamp
-        exit
-      }
-    }
-  ' "$state/peer-payload.log" 2>/dev/null || true)"
-  if [[ -n "$fips_underlay_at" \
-    && -n "$wireguard_underlay_at" \
-    && -n "$reverse_at" ]]
-  then
-    awk -v cut="$cut" -v at="$fips_underlay_at" -v deadline="$deadline" \
-      'BEGIN { if (at - cut > deadline) exit 1 }'
-    awk -v cut="$cut" -v at="$wireguard_underlay_at" -v deadline="$deadline" \
-      'BEGIN { if (at - cut > deadline) exit 1 }'
-    awk -v underlay="$fips_underlay_at" -v at="$reverse_at" -v deadline="$deadline" \
-      'BEGIN { if (at - underlay > deadline) exit 1 }'
-    awk -v cut="$cut" -v at="$reverse_at" -v deadline="$deadline" \
-      'BEGIN { if (at - cut > deadline) exit 1 }'
-    printf '%s_fips_expected_source_after_cut_seconds=%.3f\n' "$label" \
-      "$(awk -v cut="$cut" -v at="$fips_underlay_at" 'BEGIN { print at - cut }')"
-    printf '%s_wireguard_expected_source_after_cut_seconds=%.3f\n' "$label" \
-      "$(awk -v cut="$cut" -v at="$wireguard_underlay_at" 'BEGIN { print at - cut }')"
-    printf '%s_reverse_payload_after_expected_source_seconds=%.3f\n' "$label" \
-      "$(awk -v underlay="$fips_underlay_at" -v at="$reverse_at" \
-        'BEGIN { print at - underlay }')"
-    exit 0
-  fi
-  awk -v now="$(date +%s.%N)" -v end="$end" \
-    'BEGIN { exit !(now < end) }' || break
-  sleep 0.05
-done
-echo "$label did not produce new-source FIPS/WireGuard traffic and reverse payload within ${deadline}s" >&2
-exit 1
-SH
+    "$RECOVERY_DEADLINE_MS" "$label" <"$observer"
 }
 
 guest_receipt() {

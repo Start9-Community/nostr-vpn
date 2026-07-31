@@ -108,6 +108,8 @@ Get-CimInstance Win32_Process -Filter \"Name = 'nvpn.exe'\" |
     [IO.Path]::GetFullPath(\$_.ExecutablePath).StartsWith(\$targetPrefix, [StringComparison]::OrdinalIgnoreCase)
   } |
   ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction Stop }
+Get-Process -Name NostrVpn.Windows -ErrorAction SilentlyContinue |
+  Stop-Process -Force -ErrorAction Stop
 \$installer = Join-Path '$REMOTE_GATE_DIR' 'nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe'
 Remove-Item -Force \$installer -ErrorAction SilentlyContinue
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration Release -Installer -Tag '$SMOKE_TAG' -OutputDir '$REMOTE_GATE_DIR'

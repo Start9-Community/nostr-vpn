@@ -25,6 +25,8 @@ use resolver::{current_resolver, dns_resolver, resolve_fips_dns_if_handled};
 mod linux;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use linux::LinuxSecureDnsCleanupState;
+#[cfg(all(test, target_os = "linux"))]
+use linux::read_linux_resolv_conf;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::repair_linux_secure_dns_cleanup_state;
 #[cfg(test)]
