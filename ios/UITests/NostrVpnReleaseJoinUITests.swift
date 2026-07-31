@@ -260,7 +260,8 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             ShippedUIInteraction.reveal(nameField, byTapping: create),
             "Shipped Create Network control did not reveal the network-name field"
         )
-        replaceText(nameField, with: name)
+        dismissSystemPromptsIfPresent()
+        replaceText(element("network-create-name"), with: name)
         scrollTo("network-create-submit").tap()
         XCTAssertTrue(app.tabBars.buttons["Devices"].waitForExistence(timeout: 10))
     }
@@ -292,7 +293,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         for _ in 0..<12 where !target.isHittable {
             app.swipeUp()
         }
-        XCTAssertTrue(target.waitForExistence(timeout: 5), "\(identifier) was not visible")
+        XCTAssertTrue(
+            target.waitForExistence(timeout: 5) && target.isHittable,
+            "\(identifier) was not visible"
+        )
         return target
     }
 
@@ -430,15 +434,19 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     private func dismissSystemPromptsIfPresent() {
-        let disclosure = app.buttons["Continue"]
-        if disclosure.waitForExistence(timeout: 2) {
-            disclosure.tap()
-        }
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let allow = springboard.alerts.buttons["Allow"]
-        if allow.waitForExistence(timeout: 2) {
-            allow.tap()
-        }
+        let deadline = Date().addingTimeInterval(5)
+        repeat {
+            let allow = springboard.alerts.buttons["Allow"]
+            if allow.exists, allow.isHittable {
+                allow.tap()
+            }
+            let disclosure = app.navigationBars["VPN Data Use"].buttons["Continue"]
+            if disclosure.exists, disclosure.isHittable {
+                disclosure.tap()
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
     }
 
     private func emit(_ marker: String) {

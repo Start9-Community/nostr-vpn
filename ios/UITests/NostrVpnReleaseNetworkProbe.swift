@@ -170,6 +170,26 @@ enum NostrVpnReleaseNetworkProbe {
         }
     }
 
+    static func requireControlledHTTPUnavailable(
+        _ rawURL: String,
+        timeout: TimeInterval = 1
+    ) throws {
+        guard let url = URL(string: rawURL), url.scheme?.lowercased() == "http" else {
+            throw probeError("Controlled tunnel-only probe must use HTTP")
+        }
+        do {
+            let receipt = try plainHTTP(url, timeout: timeout)
+            throw probeError(
+                "Controlled tunnel-only probe remained reachable with status \(receipt.statusCode)"
+            )
+        } catch let error as NSError
+            where error.domain != "NostrVpnReleaseNetworkProbe"
+                || !error.localizedDescription.contains("remained reachable")
+        {
+            return
+        }
+    }
+
     @discardableResult
     static func exerciseFreshDNSQuery(
         baseHost: String,

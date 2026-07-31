@@ -87,16 +87,17 @@ enum ShippedUIInteraction {
     static func replaceText(
         _ field: XCUIElement,
         with value: String,
-        in app: XCUIApplication
+        in _: XCUIApplication
     ) -> Bool {
-        guard field.waitForExistence(timeout: 5), field.isHittable else {
+        let readyDeadline = Date().addingTimeInterval(5)
+        while Date() < readyDeadline, !(field.exists && field.isHittable) {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        guard field.exists, field.isHittable else {
             return false
         }
         for _ in 0..<maximumAttempts {
             field.tap()
-            guard app.keyboards.firstMatch.waitForExistence(timeout: 1) else {
-                continue
-            }
             field.typeKey("a", modifierFlags: .command)
             field.typeKey(.delete, modifierFlags: [])
             field.typeText(value)

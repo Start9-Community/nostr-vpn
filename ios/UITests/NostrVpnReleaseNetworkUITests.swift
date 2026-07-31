@@ -65,8 +65,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(spec.publicHttpsUrl)
         let directSource = try waitForSourceIP(
             spec.sourceIpUrl,
-            rejecting: spec.expectedExitSourceIp,
             timeout: 15
+        )
+        try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
+            spec.resolverProbeUrl
         )
         emit("NVPN_IOS_RELEASE_DIRECT_BEFORE_PASSED=1")
 
@@ -147,8 +149,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(spec.publicHttpsUrl)
             _ = try waitForSourceIP(
                 spec.sourceIpUrl,
-                rejecting: spec.expectedExitSourceIp,
                 timeout: 15
+            )
+            try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
+                spec.resolverProbeUrl
             )
         }
         emit("NVPN_IOS_RELEASE_DISCONNECT_PASSED=1")
@@ -172,9 +176,8 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             )
         }
         replaceText(name, with: spec.networkName)
-        dismissKeyboard()
         let submit = scrollToElement("network-create-submit")
-        guard submit.isEnabled else {
+        guard submit.isEnabled, submit.isHittable else {
             throw gateError("Shipped Create button was disabled")
         }
         submit.tap()
@@ -194,9 +197,8 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
 
         let editor = scrollToElement("wireguard-config")
         replaceText(editor, with: spec.wireGuardConfig)
-        dismissKeyboard()
         let save = scrollToElement("wireguard-save")
-        guard save.isEnabled else {
+        guard save.isEnabled, save.isHittable else {
             throw gateError("Shipped WireGuard Save button was disabled")
         }
         save.tap()
@@ -262,7 +264,6 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                     scrollToElement("exit-dns-custom-bootstrap-ips"),
                     with: spec.bootstrapIps
                 )
-                dismissKeyboard()
             default:
                 throw gateError("Unsupported encrypted DNS provider")
             }
@@ -275,13 +276,14 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                 scrollToElement("exit-dns-through-exit-servers"),
                 with: spec.throughExitServers
             )
-            dismissKeyboard()
         default:
             throw gateError("Unsupported Exit DNS mode")
         }
 
         let save = scrollToElement("exit-dns-save")
-        guard save.isEnabled, !element("exit-dns-validation-error").exists else {
+        guard save.isEnabled, save.isHittable,
+              !element("exit-dns-validation-error").exists
+        else {
             throw gateError("Shipped Exit DNS controls rejected the case")
         }
         save.tap()
@@ -411,6 +413,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                 expected: directSource,
                 duration: 1
             )
+            try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
+                spec.resolverProbeUrl
+            )
             emit(
                 "NVPN_IOS_RELEASE_RAPID_STOPPED_\(cycle)_MS="
                     + "\(millisecondsSinceEpoch())"
@@ -472,6 +477,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             spec.sourceIpUrl,
             expected: expectedSource,
             timeout: 15
+        )
+        try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
+            spec.resolverProbeUrl
         )
     }
 
@@ -549,6 +557,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             spec.sourceIpUrl,
             expected: directSource,
             timeout: 15
+        )
+        try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
+            spec.resolverProbeUrl
         )
         emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_DIRECT=1")
 

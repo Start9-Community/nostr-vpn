@@ -112,7 +112,7 @@ extension NostrVpnReleaseNetworkUITests {
         }
         let wasEnabled = toggleIsOn(toggle)
         if wasEnabled != enabled {
-            toggle.tap()
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
             waitForActionToSettle()
             guard toggleIsOn(scrollToElement("autoconnect-toggle")) == enabled else {
                 throw gateError("Start VPN automatically did not save through its shipped control")
@@ -223,7 +223,10 @@ extension NostrVpnReleaseNetworkUITests {
                 app.swipeUp()
             }
         }
-        XCTAssertTrue(target.waitForExistence(timeout: 3), "\(identifier) was unavailable")
+        XCTAssertTrue(
+            target.waitForExistence(timeout: 3) && target.isHittable,
+            "\(identifier) was unavailable"
+        )
         return target
     }
 
@@ -239,15 +242,4 @@ extension NostrVpnReleaseNetworkUITests {
         return value == field.placeholderValue ? "" : value
     }
 
-    func dismissKeyboard() {
-        guard app.keyboards.firstMatch.exists else {
-            return
-        }
-        let done = app.keyboards.buttons["Done"]
-        if done.exists, done.isHittable {
-            done.tap()
-            return
-        }
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap()
-    }
 }

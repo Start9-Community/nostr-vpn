@@ -183,14 +183,21 @@ for forbidden in (".launchArguments =", ".launchEnvironment ="):
         raise SystemExit(f"Release join XCTest injects app state through {forbidden}")
 for required in (
     "private static let maximumAttempts = 2",
-    "app.keyboards.firstMatch.waitForExistence",
     "field.typeKey(.delete",
     "if waitForValue(value, in: field)",
 ):
     if required not in ios_interaction:
         raise SystemExit(f"Release join XCTest lacks bounded verified text entry: {required}")
+if "app.keyboards.firstMatch.waitForExistence" in ios_interaction:
+    raise SystemExit("Release join XCTest still requires a software keyboard")
 if ".coordinate(" in ios_interaction:
     raise SystemExit("Release join XCTest text entry uses coordinate tapping")
+for required in (
+    'app.navigationBars["VPN Data Use"].buttons["Continue"]',
+    'springboard.alerts.buttons["Allow"]',
+):
+    if required not in ios_test:
+        raise SystemExit(f"Release join XCTest does not clear permission UI: {required}")
 for required in (
     "ShippedUIInteraction.reveal(nameField, byTapping: create)",
     "let retained = ShippedUIInteraction.replaceText(field, with: value, in: app)",
