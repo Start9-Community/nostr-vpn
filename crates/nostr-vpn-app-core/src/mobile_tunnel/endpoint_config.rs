@@ -275,29 +275,7 @@ pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> 
             ..WebSocketConfig::default()
         });
     }
-    let udp = UdpConfig {
-        outbound_only: Some(false),
-        accept_connections: Some(true),
-        advertise_on_nostr: Some(nostr_enabled),
-        public: Some(false),
-        ..UdpConfig::default()
-    };
-    config.transports.udp = TransportInstances::Named(HashMap::from([
-        (
-            MOBILE_UDP_IPV4_TRANSPORT.to_string(),
-            UdpConfig {
-                bind_addr: Some(format!("0.0.0.0:{}", mobile.listen_port)),
-                ..udp.clone()
-            },
-        ),
-        (
-            MOBILE_UDP_IPV6_TRANSPORT.to_string(),
-            UdpConfig {
-                bind_addr: Some(format!("[::]:{}", mobile.listen_port)),
-                ..udp
-            },
-        ),
-    ]));
+    config.transports.udp = mobile_udp_transports(mobile.listen_port, nostr_enabled);
     config.peers = fips_peer_configs_from_mesh(
         &mobile.peers,
         &mobile.peer_hints,
@@ -321,6 +299,36 @@ pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> 
         }
     }
     config
+}
+
+fn mobile_udp_transports(
+    listen_port: u16,
+    advertise_on_nostr: bool,
+) -> TransportInstances<UdpConfig> {
+    let udp = UdpConfig {
+        outbound_only: Some(false),
+        accept_connections: Some(true),
+        advertise_on_nostr: Some(false),
+        public: Some(false),
+        ..UdpConfig::default()
+    };
+    TransportInstances::Named(HashMap::from([
+        (
+            MOBILE_UDP_IPV4_TRANSPORT.to_string(),
+            UdpConfig {
+                bind_addr: Some(format!("0.0.0.0:{listen_port}")),
+                advertise_on_nostr: Some(advertise_on_nostr),
+                ..udp.clone()
+            },
+        ),
+        (
+            MOBILE_UDP_IPV6_TRANSPORT.to_string(),
+            UdpConfig {
+                bind_addr: Some(format!("[::]:{listen_port}")),
+                ..udp
+            },
+        ),
+    ]))
 }
 
 fn mobile_join_request_pending(mobile: &MobileTunnelConfig) -> bool {

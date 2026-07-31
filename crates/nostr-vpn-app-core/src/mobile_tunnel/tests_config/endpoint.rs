@@ -85,9 +85,10 @@
         for udp in udp.values() {
             assert!(!udp.outbound_only());
             assert!(udp.accept_connections());
-            assert!(udp.advertise_on_nostr());
             assert!(!udp.is_public());
         }
+        assert!(udp[MOBILE_UDP_IPV4_TRANSPORT].advertise_on_nostr());
+        assert!(!udp[MOBILE_UDP_IPV6_TRANSPORT].advertise_on_nostr());
         assert_eq!(
             mobile_endpoint_hints_with_candidates(&mobile, Vec::new()),
             vec![PeerEndpointHint::udp("192.168.50.22:51820")]
