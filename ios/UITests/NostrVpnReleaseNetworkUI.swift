@@ -26,19 +26,49 @@ extension NostrVpnReleaseNetworkUITests {
     }
 
     func vpnToggle() throws -> XCUIElement {
-        let toggle = element("vpn-toggle")
-        guard toggle.waitForExistence(timeout: 8), toggle.isEnabled else {
-            throw gateError("Shipped VPN toggle was unavailable")
+        let deadline = Date().addingTimeInterval(8)
+        repeat {
+            for label in ["Turn VPN off", "Turn VPN on"] {
+                if let toggle = try vpnControl(label: label),
+                   toggle.exists, toggle.isEnabled {
+                    return toggle
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        throw gateError("Shipped VPN toggle was unavailable")
+    }
+
+    func vpnButton(forState on: Bool) -> XCUIElement? {
+        let label = on ? "Turn VPN off" : "Turn VPN on"
+        return try? vpnControl(label: label)
+    }
+
+    private func vpnControl(label: String) throws -> XCUIElement? {
+        let matches = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier == %@ AND label == %@",
+                "vpn-toggle",
+                label
+            )
+        )
+        let count = matches.count
+        guard count > 0 else {
+            return nil
         }
-        return toggle
+        guard count <= 2 else {
+            throw gateError("Shipped VPN control had unexpected duplicates")
+        }
+        // SwiftUI exposes the semantic wrapper and its nested actionable node
+        // with the same identifier on iOS 26. The deeper match owns the tap.
+        return matches.element(boundBy: count - 1)
     }
 
     func waitForVPNState(on: Bool, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             acknowledgeVPNPrompts(timeout: 0)
-            let toggle = element("vpn-toggle")
-            if toggle.exists, vpnIsOn(toggle) == on {
+            if let toggle = vpnButton(forState: on), toggle.exists {
                 return true
             }
             Thread.sleep(forTimeInterval: 0.1)
