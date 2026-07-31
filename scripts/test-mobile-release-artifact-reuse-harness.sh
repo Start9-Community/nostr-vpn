@@ -22,6 +22,7 @@ mkdir -p \
   "$IOS_PRODUCTS/Release-iphoneos/NostrVpnIosUITests-Runner.app/PlugIns/NostrVpnIosUITests.xctest"
 
 printf 'apk fixture\n' >"$ANDROID_DIR/app-release.apk"
+printf 'aab fixture\n' >"$ANDROID_DIR/app-release.aab"
 printf 'app executable\n' >"$IOS_APP/Nostr VPN"
 printf 'tunnel executable\n' >"$IOS_TUNNEL/Nostr VPN Tunnel"
 printf 'app profile\n' >"$IOS_APP/embedded.mobileprovision"
@@ -40,12 +41,14 @@ DEVICE_SHA=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 PACKAGE=fi.siriusbusiness.nvpn
 ANDROID_METADATA="$ANDROID_DIR/fips-linkage.json"
 ANDROID_RECEIPT="$ANDROID_DIR/mobile-android-release-artifact.json"
+ANDROID_BUNDLE_RECEIPT="$ANDROID_DIR/physical-gate-artifact.json"
 IOS_METADATA="$TMP_ROOT/ios-fips-linkage.json"
 IOS_RECEIPT="$TMP_ROOT/mobile-ios-release-artifact.json"
 
 python3 - \
   "$VALIDATOR" "$APP_ROOT" "$FIPS_ROOT" \
-  "$ANDROID_DIR/app-release.apk" "$ANDROID_METADATA" "$ANDROID_RECEIPT" \
+  "$ANDROID_DIR/app-release.apk" "$ANDROID_DIR/app-release.aab" \
+  "$ANDROID_METADATA" "$ANDROID_RECEIPT" "$ANDROID_BUNDLE_RECEIPT" \
   "$IOS_APP" "$IOS_DERIVED" "$IOS_XCTESTRUN" "$IOS_METADATA" "$IOS_RECEIPT" \
   "$APP_HEAD" "$APP_TREE" "$FIPS_HEAD" "$FIPS_TREE" "$FIPS_VERSION" \
   "$SIGNER_SHA" "$APP_CDHASH" "$TUNNEL_CDHASH" "$DEVICE_SHA" "$PACKAGE" <<'PY'
@@ -60,8 +63,10 @@ import sys
     app_root,
     fips_root,
     apk,
+    aab,
     android_metadata,
     android_receipt,
+    android_bundle_receipt,
     ios_app,
     ios_derived,
     ios_xctestrun,
@@ -85,8 +90,10 @@ spec.loader.exec_module(module)
 app_root = pathlib.Path(app_root)
 fips_root = pathlib.Path(fips_root)
 apk = pathlib.Path(apk)
+aab = pathlib.Path(aab)
 android_metadata = pathlib.Path(android_metadata)
 android_receipt = pathlib.Path(android_receipt)
+android_bundle_receipt = pathlib.Path(android_bundle_receipt)
 ios_app = pathlib.Path(ios_app)
 ios_derived = pathlib.Path(ios_derived)
 ios_xctestrun = pathlib.Path(ios_xctestrun)
@@ -111,6 +118,8 @@ android = {
     "apkPathSha256": module.path_sha256(apk),
     "apkSha256": module.sha256_file(apk),
     "installedApkSha256": module.sha256_file(apk),
+    "aabSha256": module.sha256_file(aab),
+    "apkDerivedFromAab": True,
     "companySigningVerified": True,
     "signerCertificateSha256": signer,
     "appGitSha": app_head,
@@ -126,6 +135,29 @@ android = {
     "replacementInstall": True,
     "debuggable": False,
 }
+android_bundle = {
+    "schema": 1,
+    "relationship": "universal-apk-derived-from-exact-aab",
+    "appGitSha": app_head,
+    "appGitTree": app_tree,
+    "aabSha256": module.sha256_file(aab),
+    "aabPathSha256": module.path_sha256(aab),
+    "apkSha256": module.sha256_file(apk),
+    "apkPathSha256": module.path_sha256(apk),
+    "bundletoolVersion": "1.18.3",
+    "bundletoolSha256": "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29",
+}
+android_bundle_receipt.write_text(
+    json.dumps(android_bundle, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+android.update(
+    {
+        "bundleReceiptSha256": module.sha256_file(android_bundle_receipt),
+        "bundletoolVersion": android_bundle["bundletoolVersion"],
+        "bundletoolSha256": android_bundle["bundletoolSha256"],
+    }
+)
 android_receipt.write_text(
     json.dumps(android, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 )
@@ -208,6 +240,8 @@ validate_android() {
   python3 "$VALIDATOR" validate-android \
     --receipt "$ANDROID_RECEIPT" \
     --apk "$ANDROID_DIR/app-release.apk" \
+    --aab "$ANDROID_DIR/app-release.aab" \
+    --bundle-receipt "$ANDROID_BUNDLE_RECEIPT" \
     --fips-metadata "$ANDROID_METADATA" \
     --app-root "$APP_ROOT" \
     --fips-root "$FIPS_ROOT" \
@@ -244,13 +278,45 @@ validate_ios() {
 validate_android
 validate_ios
 
-cp "$ANDROID_DIR/app-release.apk" "$TMP_ROOT/app-release.clean.apk"
-printf 'tamper\n' >>"$ANDROID_DIR/app-release.apk"
-if validate_android >"$TMP_ROOT/android-apk-tamper.log" 2>&1; then
-  echo "Android artifact receipt accepted tampered APK bytes" >&2
+reject_android_file_tamper() {
+  local path="$1" label="$2" backup
+  backup="$TMP_ROOT/android-$label.clean"
+  cp "$path" "$backup"
+  printf 'tamper\n' >>"$path"
+  if validate_android >"$TMP_ROOT/android-$label-tamper.log" 2>&1; then
+    echo "Android artifact receipt accepted tampered $label bytes" >&2
+    exit 1
+  fi
+  mv "$backup" "$path"
+}
+reject_android_file_tamper "$ANDROID_DIR/app-release.apk" apk
+reject_android_file_tamper "$ANDROID_DIR/app-release.aab" aab
+reject_android_file_tamper "$ANDROID_BUNDLE_RECEIPT" relationship-receipt
+
+mv "$ANDROID_RECEIPT" "$TMP_ROOT/android-receipt.missing.json"
+if validate_android >"$TMP_ROOT/android-receipt-missing.log" 2>&1; then
+  echo "Android artifact reuse accepted a missing schema-2 receipt" >&2
   exit 1
 fi
-mv "$TMP_ROOT/app-release.clean.apk" "$ANDROID_DIR/app-release.apk"
+mv "$TMP_ROOT/android-receipt.missing.json" "$ANDROID_RECEIPT"
+
+reject_android_receipt_field() {
+  local field="$1" value="$2" label="$3"
+  cp "$ANDROID_RECEIPT" "$TMP_ROOT/android-receipt.clean.json"
+  python3 -c \
+    'import json,sys; p,f,v=sys.argv[1:]; r=json.load(open(p)); r[f]=v; json.dump(r,open(p,"w"))' \
+    "$ANDROID_RECEIPT" "$field" "$value"
+  if validate_android >"$TMP_ROOT/android-$label.log" 2>&1; then
+    echo "Android artifact receipt accepted tampered $field" >&2
+    exit 1
+  fi
+  mv "$TMP_ROOT/android-receipt.clean.json" "$ANDROID_RECEIPT"
+}
+
+reject_android_receipt_field installedApkSha256 "$(printf '0%.0s' {1..64})" installed-hash
+reject_android_receipt_field signerCertificateSha256 "$(printf '0%.0s' {1..64})" signer
+reject_android_receipt_field fipsGitSha "$(printf '0%.0s' {1..40})" fips
+reject_android_receipt_field bundletoolVersion 0.0.0 bundletool
 
 cp "$ANDROID_RECEIPT" "$TMP_ROOT/android-receipt.clean.json"
 python3 - "$ANDROID_RECEIPT" <<'PY'
@@ -267,6 +333,32 @@ if validate_android >"$TMP_ROOT/android-tree-mismatch.log" 2>&1; then
   exit 1
 fi
 mv "$TMP_ROOT/android-receipt.clean.json" "$ANDROID_RECEIPT"
+
+# The opt-in is rejected before any build/install path or device lookup.
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-android-release-gate.sh"
+assert_reuse_input_rejected() {
+  local label="$1" expected="$2" log
+  log="$TMP_ROOT/android-$label.log"
+  if android_release_require_inputs >"$log" 2>&1; then
+    echo "Android artifact reuse accepted $label" >&2
+    exit 1
+  fi
+  grep -Fq "$expected" "$log"
+}
+export NVPN_ANDROID_RELEASE_REUSE_VERIFIED_ARTIFACT=1
+PACKAGE_NAME="$PACKAGE"
+CANONICAL_PACKAGE_NAME="$PACKAGE"
+build=1 install=0
+assert_reuse_input_rejected build 'requires --no-build and --no-install'
+build=0 install=1
+assert_reuse_input_rejected install 'requires --no-build and --no-install'
+build=0 install=0
+NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$TMP_ROOT/missing.json"
+NVPN_ANDROID_RELEASE_REUSE_AAB_PATH="$ANDROID_DIR/app-release.aab"
+NVPN_ANDROID_RELEASE_REUSE_BUNDLE_RECEIPT="$ANDROID_BUNDLE_RECEIPT"
+assert_reuse_input_rejected missing-receipt \
+  'requires regular file ANDROID_RELEASE_REUSE_RECEIPT'
 
 cp "$IOS_XCTESTRUN" "$TMP_ROOT/ios-xctestrun.clean"
 printf 'tamper\n' >>"$IOS_XCTESTRUN"
@@ -353,11 +445,13 @@ python3 - \
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" \
   "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh" \
   "$ROOT/scripts/lib-mobile-release-join-ui.sh" \
-  "$ROOT/scripts/release-gate.sh" <<'PY'
+  "$ROOT/scripts/release-gate.sh" \
+  "$ROOT/scripts/lib-mobile-android-release-gate.sh" \
+  "$ROOT/scripts/mobile-android-smoke.sh" <<'PY'
 import pathlib
 import sys
 
-gate, artifacts, reuse, ui, release = [
+gate, artifacts, reuse, ui, release, android_release, android_smoke = [
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 ]
 validation = gate.index("release_join_validate_reused_artifacts")
@@ -407,6 +501,22 @@ for required in (
 ):
     if required not in reuse:
         raise SystemExit(f"strict artifact validator is missing {required}")
+reuse_identity = android_release.split(
+    "android_release_require_reuse_inputs()", 1
+)[1].split("android_release_require_inputs()", 1)[0]
+if 'git -C "$ROOT" rev-parse' in reuse_identity:
+    raise SystemExit("Android sealed-artifact reuse binds the current checkout")
+reuse_branch = android_release.split(
+    "if android_release_reuse_verified_artifact; then", 2
+)[2]
+if reuse_branch.index("return 0") > reuse_branch.index("json.dump("):
+    raise SystemExit("Android sealed-artifact reuse reaches the receipt writer")
+require = android_smoke.index(
+    "android_release_require_inputs", android_smoke.index('ADB="$(resolve_adb)"')
+)
+build = android_smoke.index('if [[ "$build" -eq 1 ]]', require)
+if require > build:
+    raise SystemExit("Android sealed-artifact guard runs after the build path")
 PY
 
 echo "mobile Release exact-artifact reuse/tamper harness passed"

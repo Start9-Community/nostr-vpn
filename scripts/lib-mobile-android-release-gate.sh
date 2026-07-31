@@ -8,20 +8,66 @@
 ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT=""
 ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE=""
 
+android_release_reuse_verified_artifact() {
+  case "${NVPN_ANDROID_RELEASE_REUSE_VERIFIED_ARTIFACT:-0}" in
+    1|true|TRUE|True|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+android_release_require_reuse_inputs() {
+  [[ "${build:-1}" -eq 0 && "${install:-1}" -eq 0 ]] || {
+    echo "Android verified-artifact reuse requires --no-build and --no-install" >&2
+    return 1
+  }
+  ANDROID_RELEASE_REUSE_RECEIPT="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-}"
+  ANDROID_RELEASE_REUSE_AAB="${NVPN_ANDROID_RELEASE_REUSE_AAB_PATH:-}"
+  ANDROID_RELEASE_REUSE_BUNDLE_RECEIPT="${NVPN_ANDROID_RELEASE_REUSE_BUNDLE_RECEIPT:-}"
+  local name path identity
+  for name in \
+    ANDROID_RELEASE_REUSE_RECEIPT \
+    ANDROID_RELEASE_REUSE_AAB \
+    ANDROID_RELEASE_REUSE_BUNDLE_RECEIPT
+  do
+    path="${!name:-}"
+    [[ -n "$path" && -f "$path" && ! -L "$path" ]] || {
+      echo "Android verified-artifact reuse requires regular file $name" >&2
+      return 1
+    }
+  done
+  identity="$(python3 -c '
+import json, re, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+h, t = r.get("appGitSha", ""), r.get("appGitTree", "")
+if r.get("receiptSchema") != 2 or r.get("artifactType") != "Android Release APK": raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}", h) or not re.fullmatch(r"[0-9a-f]{40}", t): raise SystemExit(1)
+print(h, t)
+' "$ANDROID_RELEASE_REUSE_RECEIPT")" || {
+    echo "Android verified-artifact reuse requires an exact schema-2 receipt" >&2
+    return 1
+  }
+  read -r EXPECTED_ANDROID_APP_GIT_HEAD EXPECTED_ANDROID_APP_GIT_TREE \
+    <<<"$identity"
+}
+
 android_release_require_inputs() {
   [[ "$PACKAGE_NAME" == "$CANONICAL_PACKAGE_NAME" ]] || {
     echo "Android Release black-box gate requires canonical package $CANONICAL_PACKAGE_NAME" >&2
     return 1
   }
-  EXPECTED_ANDROID_APP_GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
-  EXPECTED_ANDROID_APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
-  assert_release_checkout_state \
-    "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" \
-    "$EXPECTED_ANDROID_APP_GIT_TREE" "Android Release black-box gate" \
-    || return 1
-  pin_exact_release_build_git_sha \
-    "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" "Android Release" \
-    || return 1
+  if android_release_reuse_verified_artifact; then
+    android_release_require_reuse_inputs || return 1
+  else
+    EXPECTED_ANDROID_APP_GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+    EXPECTED_ANDROID_APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+    assert_release_checkout_state \
+      "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" \
+      "$EXPECTED_ANDROID_APP_GIT_TREE" "Android Release black-box gate" \
+      || return 1
+    pin_exact_release_build_git_sha \
+      "$ROOT" "$EXPECTED_ANDROID_APP_GIT_HEAD" "Android Release" \
+      || return 1
+  fi
   local name
   for name in \
     ANDROID_KEYSTORE_PATH \
@@ -137,6 +183,32 @@ android_release_apksigner() {
     | tail -n 1
 }
 
+android_release_validate_reused_artifact() {
+  local metadata_receipt
+  metadata_receipt="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT/artifacts/mobile-android/fips-linkage.json}"
+  [[ -f "$metadata_receipt" && ! -L "$metadata_receipt" ]] || {
+    echo "Android verified-artifact reuse lacks its FIPS metadata receipt" >&2
+    return 1
+  }
+  python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" validate-android \
+    --receipt "$ANDROID_RELEASE_REUSE_RECEIPT" \
+    --apk "$APK_PATH" \
+    --aab "$ANDROID_RELEASE_REUSE_AAB" \
+    --bundle-receipt "$ANDROID_RELEASE_REUSE_BUNDLE_RECEIPT" \
+    --fips-metadata "$metadata_receipt" \
+    --app-root "$ROOT" \
+    --fips-root "$NVPN_FIPS_REPO_PATH" \
+    --app-head "$EXPECTED_ANDROID_APP_GIT_HEAD" \
+    --app-tree "$EXPECTED_ANDROID_APP_GIT_TREE" \
+    --fips-head "$EXPECTED_FIPS_GIT_SHA" \
+    --fips-tree "$EXPECTED_FIPS_GIT_TREE" \
+    --fips-version "$EXPECTED_FIPS_VERSION" \
+    --package "$CANONICAL_PACKAGE_NAME" \
+    --actual-package "$PACKAGE_NAME" \
+    --signer-sha "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" \
+    || return 1
+}
+
 verify_android_release_install() {
   local apksigner remote_path pulled apk_sha installed_sha cert_sha receipt
   local native_lib native_strings target_root metadata_receipt rebuild_marker
@@ -194,6 +266,11 @@ verify_android_release_install() {
   if [[ "$normalized_cert_sha" != "$EXPECTED_ANDROID_SIGNER_CERT_SHA256" ]]; then
     echo "Android Release APK is not signed by the configured company keystore" >&2
     return 1
+  fi
+  if android_release_reuse_verified_artifact; then
+    android_release_validate_reused_artifact || return 1
+    echo "Android exact sealed Release artifact verified without rebuild, install, or receipt rewrite"
+    return 0
   fi
   native_lib="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-release-native.XXXXXX.so")"
   if ! unzip -p "$APK_PATH" \

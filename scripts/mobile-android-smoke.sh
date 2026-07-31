@@ -139,6 +139,11 @@ uses only shipped UI controls plus external OS/device traffic probes. Debug
 actions, app-sandbox reads, config seeding, and synthetic app probe actions are
 forbidden in this mode.
 
+NVPN_ANDROID_RELEASE_REUSE_VERIFIED_ARTIFACT=1 permits a focused Release retry
+without rebuilding or reinstalling only when both --no-build and --no-install
+are present and the sealed APK, AAB, schema-2 receipt, and physical-gate
+relationship receipt all validate exactly.
+
 First-run Android VPN permission prompts may need manual approval before
 --vpn-cycle can run unattended.
 
@@ -271,6 +276,13 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if android_release_reuse_verified_artifact \
+  && ! truthy "$RELEASE_BLACKBOX_GATE"
+then
+  echo "Android verified-artifact reuse requires --release-network-gate" >&2
+  exit 2
+fi
+
 sdk_from_local_properties() {
   local file="$ROOT/android/local.properties"
   if [[ -f "$file" ]]; then
@@ -334,6 +346,13 @@ remove_stale_nvpn_packages() {
   stale="$(printf '%s\n' "$installed" \
     | awk -v canonical="$CANONICAL_PACKAGE_NAME" -v legacy="$LEGACY_PACKAGE_NAME" \
       '$0 == legacy || (index($0, canonical ".") == 1 && $0 != canonical)')"
+  if android_release_reuse_verified_artifact; then
+    [[ -z "$stale" ]] && grep -Fxq "$CANONICAL_PACKAGE_NAME" <<<"$installed" || {
+      echo "Android verified-artifact reuse requires only canonical package $CANONICAL_PACKAGE_NAME" >&2
+      return 1
+    }
+    return 0
+  fi
   while IFS= read -r package; do
     [[ -n "$package" ]] || continue
     "$ADB" -s "$serial" shell am force-stop "$package" >/dev/null 2>&1 || true

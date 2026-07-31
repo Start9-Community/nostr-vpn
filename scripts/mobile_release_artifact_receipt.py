@@ -125,12 +125,13 @@ def validate_android(args: argparse.Namespace) -> None:
         if not path.is_file():
             raise ValueError(f"required Android artifact is missing: {path}")
     receipt = load_json(receipt_path)
+    apk_sha = sha256_file(apk)
     expected = {
         "receiptSchema": 2,
         "artifactType": "Android Release APK",
         "apkPathSha256": path_sha256(apk),
-        "apkSha256": sha256_file(apk),
-        "installedApkSha256": sha256_file(apk),
+        "apkSha256": apk_sha,
+        "installedApkSha256": apk_sha,
         "companySigningVerified": True,
         "signerCertificateSha256": args.signer_sha,
         "appGitSha": args.app_head,
@@ -148,6 +149,50 @@ def validate_android(args: argparse.Namespace) -> None:
     }
     for name, value in expected.items():
         require_equal(receipt, name, value)
+    aab_value = getattr(args, "aab", None)
+    bundle_value = getattr(args, "bundle_receipt", None)
+    if bool(aab_value) != bool(bundle_value):
+        raise ValueError(
+            "Android AAB and physical-gate receipt must be supplied together"
+        )
+    if aab_value:
+        aab = pathlib.Path(aab_value)
+        bundle_path = pathlib.Path(bundle_value)
+        for path in (receipt_path, apk, aab, bundle_path):
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(
+                    f"exact Android artifact must be a regular file: {path}"
+                )
+        bundle = load_json(bundle_path)
+        aab_sha = sha256_file(aab)
+        bundle_sha = sha256_file(bundle_path)
+        bundletool_version = "1.18.3"
+        bundletool_sha = (
+            "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+        )
+        bundle_expected = {
+            "schema": 1,
+            "relationship": "universal-apk-derived-from-exact-aab",
+            "appGitSha": args.app_head,
+            "appGitTree": args.app_tree,
+            "aabPathSha256": path_sha256(aab),
+            "aabSha256": aab_sha,
+            "apkPathSha256": path_sha256(apk),
+            "apkSha256": apk_sha,
+            "bundletoolVersion": bundletool_version,
+            "bundletoolSha256": bundletool_sha,
+        }
+        for name, value in bundle_expected.items():
+            require_equal(bundle, name, value)
+        relationship_expected = {
+            "aabSha256": aab_sha,
+            "apkDerivedFromAab": True,
+            "bundleReceiptSha256": bundle_sha,
+            "bundletoolVersion": bundletool_version,
+            "bundletoolSha256": bundletool_sha,
+        }
+        for name, value in relationship_expected.items():
+            require_equal(receipt, name, value)
     if args.actual_package != args.package:
         raise ValueError(
             "Android APK package mismatch: "
@@ -306,6 +351,8 @@ def parser() -> argparse.ArgumentParser:
         "signer_sha",
     ):
         android.add_argument(f"--{name.replace('_', '-')}", required=True)
+    android.add_argument("--aab")
+    android.add_argument("--bundle-receipt")
 
     ios = subparsers.add_parser("validate-ios")
     for name in (
