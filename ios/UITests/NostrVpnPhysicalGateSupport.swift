@@ -87,7 +87,7 @@ enum ShippedUIInteraction {
     static func replaceText(
         _ field: XCUIElement,
         with value: String,
-        in _: XCUIApplication
+        in app: XCUIApplication
     ) -> Bool {
         let readyDeadline = Date().addingTimeInterval(5)
         while Date() < readyDeadline, !(field.exists && field.isHittable) {
@@ -97,7 +97,15 @@ enum ShippedUIInteraction {
             return false
         }
         for _ in 0..<maximumAttempts {
+            app.activate()
             field.tap()
+            let focusDeadline = Date().addingTimeInterval(1)
+            while Date() < focusDeadline, !hasKeyboardFocus(field) {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            guard hasKeyboardFocus(field) else {
+                continue
+            }
             field.typeKey("a", modifierFlags: .command)
             field.typeKey(.delete, modifierFlags: [])
             field.typeText(value)
@@ -106,6 +114,10 @@ enum ShippedUIInteraction {
             }
         }
         return false
+    }
+
+    private static func hasKeyboardFocus(_ field: XCUIElement) -> Bool {
+        (field.value(forKey: "hasKeyboardFocus") as? Bool) == true
     }
 
     private static func waitForValue(

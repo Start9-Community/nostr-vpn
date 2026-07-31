@@ -183,6 +183,7 @@ for forbidden in (".launchArguments =", ".launchEnvironment ="):
         raise SystemExit(f"Release join XCTest injects app state through {forbidden}")
 for required in (
     "private static let maximumAttempts = 2",
+    'field.value(forKey: "hasKeyboardFocus")',
     "field.typeKey(.delete",
     "if waitForValue(value, in: field)",
 ):

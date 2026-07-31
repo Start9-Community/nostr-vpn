@@ -263,6 +263,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Shipped Create Network control did not reveal the network-name field"
         )
         dismissSystemPromptsIfPresent()
+        app.activate()
         replaceText(element("network-create-name"), with: name)
         scrollTo("network-create-submit").tap()
         XCTAssertTrue(app.tabBars.buttons["Devices"].waitForExistence(timeout: 10))
