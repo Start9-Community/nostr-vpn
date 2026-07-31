@@ -146,11 +146,11 @@ final class AppModel: ObservableObject {
         }
         let launchAutomationHandled = runLaunchAutomationIfRequested()
         if !launchAutomationHandled {
-            if let pendingVpnTransitionEnabled {
+            if let pendingVpnTransitionEnabled, packetTunnelTransitionTask == nil {
                 enqueuePacketTunnelOperation(
                     .setEnabled(pendingVpnTransitionEnabled, force: true)
                 )
-            } else if !appStoreReconciliationScheduled {
+            } else if pendingVpnTransitionEnabled == nil && !appStoreReconciliationScheduled {
                 reconcilePacketTunnelAtStartup()
             }
         }
@@ -183,9 +183,13 @@ final class AppModel: ObservableObject {
         refreshTask = nil
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = nil
-        packetTunnelTransitionGeneration &+= 1
-        packetTunnelTransitionTask?.cancel()
-        packetTunnelTransitionTask = nil
+        let preservePendingVpnStart = pendingVpnTransitionEnabled == true
+            && packetTunnelTransitionTask != nil
+        if !preservePendingVpnStart {
+            packetTunnelTransitionGeneration &+= 1
+            packetTunnelTransitionTask?.cancel()
+            packetTunnelTransitionTask = nil
+        }
         startupTunnelReconciliationGeneration &+= 1
         startupTunnelReconciliationTask?.cancel()
         startupTunnelReconciliationTask = nil
