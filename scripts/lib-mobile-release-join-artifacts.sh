@@ -451,8 +451,10 @@ release_join_install_ios_release() {
   local installed_receipt="$RESULT_DIR/ios-release-install.json"
   release_join_require_device_mutation_allowed || return 1
   RELEASE_JOIN_DEVICE_MUTATED=1
-  xcrun devicectl device uninstall app \
-    --device "$IOS_DEVICE" "$bundle" --quiet >/dev/null 2>&1 || true
+  # Installing the exact verified bundle in place replaces its executable but
+  # preserves the app container and the user's already-approved VPN manager.
+  # Uninstalling here needlessly revokes that approval and forces a passcode
+  # prompt before every physical gate retry.
   xcrun devicectl device install app \
     --device "$IOS_DEVICE" "$app_path" --quiet
   xcrun devicectl device info apps \
@@ -667,14 +669,18 @@ release_join_reset_ios_state() {
     return 1
   }
   [[ -d "$RELEASE_JOIN_IOS_APP_PATH" ]] || {
-    echo "Exact iOS Release artifact is unavailable for a clean reinstall" >&2
+    echo "Exact iOS Release artifact is unavailable" >&2
     return 1
   }
   RELEASE_JOIN_DEVICE_MUTATED=1
-  xcrun devicectl device uninstall app \
-    --device "$IOS_DEVICE" "$bundle" --quiet >/dev/null 2>&1 || true
-  xcrun devicectl device install app \
-    --device "$IOS_DEVICE" "$RELEASE_JOIN_IOS_APP_PATH" --quiet
+  # Each phase creates or joins a distinct network through shipped controls.
+  # Restart the same installed binary while retaining its VPN approval and
+  # container; reinstalling cannot improve isolation and triggers passcode UI.
+  xcrun devicectl device process launch \
+    --device "$IOS_DEVICE" \
+    --terminate-existing \
+    --no-activate \
+    "$bundle" >/dev/null
 }
 
 release_join_assert_one_ios_process() {

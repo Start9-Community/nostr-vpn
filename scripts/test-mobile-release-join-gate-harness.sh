@@ -162,6 +162,22 @@ for forbidden in (
 if "run-as" in artifacts:
     raise SystemExit("Release artifact validation still invokes run-as")
 
+install_ios = artifacts[
+    artifacts.index("release_join_install_ios_release()"):
+    artifacts.index("release_join_reset_ios_state()")
+]
+reset_ios = artifacts[
+    artifacts.index("release_join_reset_ios_state()"):
+    artifacts.index("release_join_assert_one_ios_process()")
+]
+if "device uninstall app" in install_ios or "device uninstall app" in reset_ios:
+    raise SystemExit("iOS join phases revoke the already-approved VPN manager")
+if "device install app" not in install_ios:
+    raise SystemExit("iOS join preparation no longer installs the exact artifact")
+for required in ("--terminate-existing", "--no-activate"):
+    if required not in reset_ios:
+        raise SystemExit(f"iOS join reset does not preserve state via {required}")
+
 for forbidden in (".launchArguments =", ".launchEnvironment ="):
     if forbidden in ios_test:
         raise SystemExit(f"Release join XCTest injects app state through {forbidden}")
