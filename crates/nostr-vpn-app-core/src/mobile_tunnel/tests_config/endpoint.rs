@@ -1,3 +1,11 @@
+    fn mobile_udp_carriers(config: &FipsConfig) -> &HashMap<String, UdpConfig> {
+        let TransportInstances::Named(udp) = &config.transports.udp else {
+            panic!("expected named IPv4 and IPv6 UDP transports");
+        };
+        assert_eq!(udp.len(), 2);
+        udp
+    }
+
     #[test]
     fn mobile_fips_config_uses_discovery_for_roster_peers() {
         let peer = FipsMeshPeerConfig::from_participant_pubkey(
@@ -71,14 +79,15 @@
             config.node.discovery.nostr.stun_servers,
             vec!["stun:stun.example:3478".to_string()]
         );
-        let TransportInstances::Single(udp) = &config.transports.udp else {
-            panic!("expected single udp transport");
-        };
-        assert_eq!(udp.bind_addr(), "0.0.0.0:51820");
-        assert!(!udp.outbound_only());
-        assert!(udp.accept_connections());
-        assert!(udp.advertise_on_nostr());
-        assert!(!udp.is_public());
+        let udp = mobile_udp_carriers(&config);
+        assert_eq!(udp[MOBILE_UDP_IPV4_TRANSPORT].bind_addr(), "0.0.0.0:51820");
+        assert_eq!(udp[MOBILE_UDP_IPV6_TRANSPORT].bind_addr(), "[::]:51820");
+        for udp in udp.values() {
+            assert!(!udp.outbound_only());
+            assert!(udp.accept_connections());
+            assert!(udp.advertise_on_nostr());
+            assert!(!udp.is_public());
+        }
         assert_eq!(
             mobile_endpoint_hints_with_candidates(&mobile, Vec::new()),
             vec![PeerEndpointHint::udp("192.168.50.22:51820")]
@@ -257,11 +266,10 @@
         assert!(!config.node.discovery.nostr.enabled);
         assert!(!config.node.discovery.nostr.advertise);
         assert!(!config.node.discovery.lan.enabled);
-        let TransportInstances::Single(udp) = &config.transports.udp else {
-            panic!("expected single udp transport");
-        };
-        assert!(!udp.advertise_on_nostr());
-        assert!(udp.accept_connections());
+        for udp in mobile_udp_carriers(&config).values() {
+            assert!(!udp.advertise_on_nostr());
+            assert!(udp.accept_connections());
+        }
         assert!(config.peers.is_empty());
     }
 

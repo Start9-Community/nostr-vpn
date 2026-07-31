@@ -275,14 +275,29 @@ pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> 
             ..WebSocketConfig::default()
         });
     }
-    config.transports.udp = TransportInstances::Single(UdpConfig {
-        bind_addr: Some(mobile_udp_bind_addr(mobile.listen_port)),
+    let udp = UdpConfig {
         outbound_only: Some(false),
         accept_connections: Some(true),
         advertise_on_nostr: Some(nostr_enabled),
         public: Some(false),
         ..UdpConfig::default()
-    });
+    };
+    config.transports.udp = TransportInstances::Named(HashMap::from([
+        (
+            MOBILE_UDP_IPV4_TRANSPORT.to_string(),
+            UdpConfig {
+                bind_addr: Some(format!("0.0.0.0:{}", mobile.listen_port)),
+                ..udp.clone()
+            },
+        ),
+        (
+            MOBILE_UDP_IPV6_TRANSPORT.to_string(),
+            UdpConfig {
+                bind_addr: Some(format!("[::]:{}", mobile.listen_port)),
+                ..udp
+            },
+        ),
+    ]));
     config.peers = fips_peer_configs_from_mesh(
         &mobile.peers,
         &mobile.peer_hints,
@@ -347,10 +362,6 @@ fn local_interface_address_for_tunnel(tunnel_ip: &str) -> String {
         return tunnel_ip.to_string();
     }
     format!("{}/32", strip_cidr(tunnel_ip))
-}
-
-fn mobile_udp_bind_addr(listen_port: u16) -> String {
-    format!("0.0.0.0:{listen_port}")
 }
 
 fn endpoint_with_listen_port(endpoint: &str, listen_port: u16) -> String {

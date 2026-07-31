@@ -7,6 +7,8 @@ const FIPS_DISCOVERY_BACKOFF_MAX_SECS: u64 = 300;
 const FIPS_DISCOVERY_FORWARD_MIN_INTERVAL_SECS: u64 = 2;
 const MOBILE_NOSTR_OPEN_DISCOVERY_MAX_PENDING: usize = 4;
 const MOBILE_NOSTR_FAILURE_STREAK_THRESHOLD: u32 = 2;
+const MOBILE_UDP_IPV4_TRANSPORT: &str = "ipv4";
+const MOBILE_UDP_IPV6_TRANSPORT: &str = "ipv6";
 const FIPS_NOSTR_STARTUP_SWEEP_MAX_AGE_SECS: u64 = 300;
 
 /// Authenticated FIPS peer cap on mobile. fips's default is 128, which is
