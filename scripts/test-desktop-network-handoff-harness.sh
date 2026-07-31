@@ -257,6 +257,16 @@ require_tokens "$LINUX_HOST" "mandatory SIGKILL/startup-repair receipt" \
   '.startup_repair_without_explicit_command == true' \
   '.restart_daemon_count == 1' \
   '.restart_repair_milliseconds <= $deadline'
+require_tokens "$LINUX_HOST" "cleanup-fault failure evidence before teardown" \
+  '>"$ARTIFACT_DIR/cleanup-fault.log" 2>&1' \
+  'cleanup-fault-command-status.txt' \
+  'capture_cleanup_fault_diagnostics' \
+  'cleanup-fault.receipt.json' \
+  'xtables-stop.log' \
+  'fault-daemon.stdout.log' \
+  'fault-daemon.stderr.log' \
+  'xtables-lock-held' \
+  'xtables-lock-release'
 require_tokens "$PEER" "reverse payload and physical source capture" \
   'ping -D -n -i 0.1' 'tcpdump -n -tt -l -i any'
 require_tokens "$PEER" "WireGuard/DNS responder evidence" \

@@ -781,7 +781,8 @@ run_sigkill_restart_recovery() {
 }
 
 run_cleanup_fault_regression() {
-  run_guest_primary cleanup-fault \
+  local command_status=0
+  if run_guest_primary cleanup-fault \
     "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
     "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
     "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
@@ -790,15 +791,52 @@ run_cleanup_fault_regression() {
     "NVPN_UNDERLAY_WG_ENDPOINT=$WG_ENDPOINT" \
     "NVPN_UNDERLAY_WG_CLIENT_ADDRESS=$WG_CLIENT_ADDRESS" \
     "NVPN_UNDERLAY_WG_SERVER_IP=$WG_SERVER_IP" \
-    >"$ARTIFACT_DIR/cleanup-fault.log"
-  run_primary sudo -n cat "$GUEST_STATE_DIR/cleanup-fault.receipt.json" \
-    >"$ARTIFACT_DIR/cleanup-fault-receipt.json"
+    >"$ARTIFACT_DIR/cleanup-fault.log" 2>&1
+  then
+    :
+  else
+    command_status=$?
+  fi
+  printf 'exitStatus=%s\n' "$command_status" \
+    >"$ARTIFACT_DIR/cleanup-fault-command-status.txt"
+  capture_cleanup_fault_diagnostics
+  ((command_status == 0)) || return "$command_status"
   jq -e '
       .xtables_retries_exhausted == true
       and .normal_stop_failed == true
       and .physical_network_restored_before_repair == true
       and .repair_transitioned_to_disconnected == true
     ' "$ARTIFACT_DIR/cleanup-fault-receipt.json" >/dev/null
+}
+
+capture_cleanup_fault_diagnostics() {
+  local name destination
+  local diagnostics_dir="$ARTIFACT_DIR/cleanup-fault-diagnostics"
+  local -a diagnostics=(
+    cleanup-fault.receipt.json
+    xtables-stop.log
+    fault-daemon.stdout.log
+    fault-daemon.stderr.log
+    xtables-lock-held
+    xtables-lock-release
+  )
+  mkdir -p "$diagnostics_dir"
+  : >"$ARTIFACT_DIR/cleanup-fault-diagnostics.txt"
+  for name in "${diagnostics[@]}"; do
+    destination="$diagnostics_dir/$name"
+    if run_primary sudo -n test -f "$GUEST_STATE_DIR/$name"; then
+      run_primary sudo -n cat "$GUEST_STATE_DIR/$name" >"$destination"
+      printf '%s=present\n' "$name" \
+        >>"$ARTIFACT_DIR/cleanup-fault-diagnostics.txt"
+    else
+      printf '%s=missing\n' "$name" \
+        >>"$ARTIFACT_DIR/cleanup-fault-diagnostics.txt"
+    fi
+  done
+  if [[ -f "$diagnostics_dir/cleanup-fault.receipt.json" ]]; then
+    cp "$diagnostics_dir/cleanup-fault.receipt.json" \
+      "$ARTIFACT_DIR/cleanup-fault-receipt.json"
+  fi
 }
 
 capture_guest_state() {
@@ -811,7 +849,10 @@ runner.stdout.log runner.stderr.log \
 secondary-underlay-ready.json secondary.nm-uuid \
 secondary.receipt.json primary.receipt.json direct.receipt.json \
 crash-repair.receipt.json crash-journal-ownership.json \
-crash-connect.stderr.log crash-restart-daemon.stderr.log"
+crash-connect.stderr.log crash-restart-daemon.stderr.log \
+cleanup-fault.receipt.json xtables-stop.log \
+fault-daemon.stdout.log fault-daemon.stderr.log \
+xtables-lock-held xtables-lock-release"
   case "$transport" in
     secondary)
       run_secondary_bounded 30 "$remote_command" \

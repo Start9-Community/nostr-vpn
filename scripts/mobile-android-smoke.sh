@@ -1016,6 +1016,10 @@ replace_android_ui_multiline_text() {
   local value="$2"
   local deadline focus_attempt
   for focus_attempt in 1 2; do
+    if [[ "$focus_attempt" -gt 1 ]]; then
+      "$ADB" -s "$serial" shell input keyevent KEYCODE_BACK
+      android_ui_reset_scroll
+    fi
     android_ui_scroll_to resource "$selector" || return 1
     tap_android_ui resource "$selector" || return 1
     deadline=$((SECONDS + 3))

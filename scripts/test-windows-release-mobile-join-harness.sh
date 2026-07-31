@@ -91,6 +91,16 @@ fi
 if grep -Eq 'cargo (build|run)|dotnet (build|publish)|windows-build\\.ps1' "$REMOTE" "$HOST"; then
   fail "physical Windows/Pixel phase compiles instead of reusing Release artifacts"
 fi
+grep -Fq -- '-NoProfile -NonInteractive -ExecutionPolicy Bypass' "$HOST" \
+  || fail "Windows/Pixel runner lacks bounded script execution-policy bypass"
+for stderr_log in \
+  'remote Prepare 2>&1 | tee' \
+  'remote Verify >"$PLATFORM_RESULT/$label-relaunch.log" 2>&1' \
+  'remote Reset >"$PLATFORM_RESULT/desktop-admin-reset.log" 2>&1'
+do
+  grep -Fq -- "$stderr_log" "$HOST" \
+    || fail "Windows/Pixel runner does not retain stderr: $stderr_log"
+done
 
 for evidence in \
   release_join_android_wait_accepted_participant \

@@ -8,10 +8,11 @@ ARTIFACT_ROOT="${2:-}"
 APP="${3:-}"
 CLI="${4:-}"
 RECEIPT="${5:-}"
-shift $(( $# >= 5 ? 5 : $# ))
+PACKAGE_RECEIPT="${6:-}"
+shift $(( $# >= 6 ? 6 : $# ))
 
 usage() {
-  echo "usage: $0 <Reset|Bootstrap|CreateAdmin|AdminAdd|ManualJoin|Verify|ReadMarker|ReadReceipt|Stop|NowMs|Cleanup> <artifact-root> <app> <cli> <receipt> [arguments]" >&2
+  echo "usage: $0 <Reset|Bootstrap|CreateAdmin|AdminAdd|ManualJoin|Verify|ReadMarker|ReadReceipt|Stop|NowMs|Cleanup> <artifact-root> <app> <cli> <receipt> <package-receipt> [arguments]" >&2
   exit 2
 }
 
@@ -23,14 +24,16 @@ esac
   echo "Linux desktop/mobile join requires the unique imported artifact root" >&2
   exit 2
 }
-[[ "$APP" == /tmp/nvpn-linux-vm-release.*/nostr-vpn \
-  && "$CLI" == /tmp/nvpn-linux-vm-release.*/nvpn \
-  && "$RECEIPT" == /tmp/nvpn-linux-vm-release.*/receipt.json ]] || {
-  echo "Linux desktop/mobile join refuses non-imported executables" >&2
+[[ "$APP" == /usr/bin/nostr-vpn \
+  && "$CLI" == /usr/bin/nvpn \
+  && "$RECEIPT" == /tmp/nvpn-linux-vm-release.*/receipt.json \
+  && "$PACKAGE_RECEIPT" == /tmp/nvpn-linux-vm-release.*/debian-package-install.json ]] || {
+  echo "Linux desktop/mobile join requires exact DEB-installed executables" >&2
   exit 2
 }
 [[ -x "$APP" && ! -L "$APP" && -x "$CLI" && ! -L "$CLI" \
-  && -f "$RECEIPT" && ! -L "$RECEIPT" ]] || {
+  && -f "$RECEIPT" && ! -L "$RECEIPT" \
+  && -f "$PACKAGE_RECEIPT" && ! -L "$PACKAGE_RECEIPT" ]] || {
   echo "Linux desktop/mobile join imported artifact set is incomplete" >&2
   exit 2
 }
@@ -49,6 +52,23 @@ assert_imported_artifacts() {
     && "$(sha256sum "$CLI" | awk '{ print $1 }')" == "$cli_hash" \
     && "$(jq -er '.dockerPlatform' "$RECEIPT")" == linux/amd64 ]] || {
     echo "Linux desktop/mobile imported artifact receipt did not verify" >&2
+    return 1
+  }
+  jq -e \
+    --arg app "$APP" \
+    --arg cli "$CLI" \
+    --arg app_hash "$app_hash" \
+    --arg cli_hash "$cli_hash" '
+      .schema == 2
+      and .package == "nostr-vpn"
+      and .packageInstalledByDpkg == true
+      and .installedStatus == "installed"
+      and .installedAppPath == $app
+      and .installedCliPath == $cli
+      and .installedAppSha256 == $app_hash
+      and .installedCliSha256 == $cli_hash
+    ' "$PACKAGE_RECEIPT" >/dev/null || {
+    echo "Linux desktop/mobile DEB install receipt did not verify" >&2
     return 1
   }
   jq -e '

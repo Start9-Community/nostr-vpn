@@ -104,14 +104,15 @@ remote() {
   local remote_command argument
   ubuntu_vm_import_ssh_command
   printf -v remote_command \
-    'cd %q && %q %q %q %q %q %q' \
+    'cd %q && %q %q %q %q %q %q %q' \
     "$GUEST_REPO" \
     "$REMOTE_SCRIPT" \
     "$mode" \
     "$NVPN_UBUNTU_IMPORTED_DIR/mobile-join" \
     "$NVPN_UBUNTU_IMPORTED_APP" \
     "$NVPN_UBUNTU_IMPORTED_CLI" \
-    "$NVPN_UBUNTU_IMPORTED_RECEIPT"
+    "$NVPN_UBUNTU_IMPORTED_RECEIPT" \
+    "$NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT"
   for argument in "$@"; do
     printf -v remote_command '%s %q' "$remote_command" "$argument"
   done

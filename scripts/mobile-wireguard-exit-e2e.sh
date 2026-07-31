@@ -698,6 +698,7 @@ write_network_evidence() {
   python3 "$ROOT/scripts/release-network-evidence.py" mobile \
     --platform "$platform" \
     --mode "$mode" \
+    --dns-cases "$(IFS=,; echo "${DNS_CASES[*]}")" \
     --artifact-receipt "$artifact_receipt" \
     --artifact-dir "$artifact_dir" \
     --counter-ledger "$ledger" \

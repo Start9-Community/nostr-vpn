@@ -150,7 +150,9 @@ run_ps() {
       | tr -d '\n'
   )"
   ssh_command
-  "${SSH_CMD[@]}" powershell.exe -NoProfile -EncodedCommand "$encoded"
+  "${SSH_CMD[@]}" powershell.exe \
+    -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -EncodedCommand "$encoded"
 }
 
 ps_quote() {
@@ -211,7 +213,7 @@ case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
     ;;
 esac
 
-remote Prepare | tee "$PLATFORM_RESULT/prepare.log"
+remote Prepare 2>&1 | tee "$PLATFORM_RESULT/prepare.log"
 remote ReadReceipt >"$DESKTOP_RECEIPT"
 
 read_marker() {
@@ -266,7 +268,7 @@ assert_elapsed() {
 verify_desktop_relaunch() {
   local participant="$1" label="$2" marker
   REMOTE_PARTICIPANT_NPUB="$participant"
-  remote Verify >"$PLATFORM_RESULT/$label-relaunch.log"
+  remote Verify >"$PLATFORM_RESULT/$label-relaunch.log" 2>&1
   marker="$(read_marker)"
   jq -e \
     --arg participant "$participant" \
@@ -290,9 +292,9 @@ verify_pixel_relaunch() {
 
 # Windows admin -> Pixel joiner.
 release_join_reset_android_state
-remote Reset >"$PLATFORM_RESULT/desktop-admin-reset.log"
+remote Reset >"$PLATFORM_RESULT/desktop-admin-reset.log" 2>&1
 REMOTE_NETWORK_NAME="Release Windows admin"
-remote CreateAdmin >"$PLATFORM_RESULT/desktop-admin-create.log"
+remote CreateAdmin >"$PLATFORM_RESULT/desktop-admin-create.log" 2>&1
 admin_marker="$(read_marker)"
 WINDOWS_ADMIN_ID="$(jq -er '.adminNpub' <<<"$admin_marker")"
 WINDOWS_NETWORK_ID="$(jq -er '.networkId' <<<"$admin_marker")"
@@ -300,7 +302,7 @@ release_join_valid_npub "$WINDOWS_ADMIN_ID" \
   || fail "Windows UI did not expose a valid admin Device ID"
 [[ -n "$WINDOWS_NETWORK_ID" ]] \
   || fail "Windows UI did not expose a Network ID"
-remote InstallService >"$PLATFORM_RESULT/desktop-admin-service.log"
+remote InstallService >"$PLATFORM_RESULT/desktop-admin-service.log" 2>&1
 
 release_join_android_manual_submit "$WINDOWS_ADMIN_ID" "$WINDOWS_NETWORK_ID"
 REMOTE_PARTICIPANT_NPUB="$RELEASE_JOIN_ANDROID_JOINER_ID"
@@ -342,9 +344,9 @@ verify_pixel_relaunch "$WINDOWS_ADMIN_ID" "desktop-admin"
 # Pixel admin -> Windows joiner.
 release_join_reset_android_state
 REMOTE_PARTICIPANT_NPUB=""
-remote Reset >"$PLATFORM_RESULT/desktop-joiner-reset.log"
-remote Bootstrap >"$PLATFORM_RESULT/desktop-joiner-bootstrap.log"
-remote InstallService >"$PLATFORM_RESULT/desktop-joiner-service.log"
+remote Reset >"$PLATFORM_RESULT/desktop-joiner-reset.log" 2>&1
+remote Bootstrap >"$PLATFORM_RESULT/desktop-joiner-bootstrap.log" 2>&1
+remote InstallService >"$PLATFORM_RESULT/desktop-joiner-service.log" 2>&1
 release_join_android_create_admin
 
 REMOTE_ADMIN_NPUB="$RELEASE_JOIN_ANDROID_ADMIN_ID"

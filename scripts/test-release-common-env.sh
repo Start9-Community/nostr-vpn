@@ -5,6 +5,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/release_common.sh"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/mobile_env.sh"
 
 fail() {
   printf 'release_common env test failed: %s\n' "$*" >&2
@@ -61,6 +63,20 @@ env | grep -q '^INVALID-KEY=' && fail "invalid env key was exported"
 assert_eq "${NVPN_ASC_AUTH_KEY_PATH:-}" "$tmp_dir/asc/private_keys/AuthKey_TESTKEY123.p8" "derives ASC key path"
 assert_eq "${NVPN_ASC_AUTH_KEY_ID:-}" "TESTKEY123" "derives ASC key id"
 assert_eq "${NVPN_ASC_AUTH_KEY_ISSUER_ID:-}" "test-issuer-id" "loads ASC issuer id"
+
+cat >"$tmp_dir/.env.mobile.local" <<'EOF'
+NVPN_RELEASE_JOIN_RESULT_DIR=/stale/mobile-evidence
+NVPN_MOBILE_ENV_DEFAULT=from-mobile-file
+EOF
+export NVPN_RELEASE_JOIN_RESULT_DIR=/caller/mobile-evidence
+unset NVPN_MOBILE_ENV_DEFAULT
+load_mobile_env "$tmp_dir"
+assert_eq \
+  "${NVPN_RELEASE_JOIN_RESULT_DIR:-}" "/caller/mobile-evidence" \
+  "keeps caller mobile evidence path precedence"
+assert_eq \
+  "${NVPN_MOBILE_ENV_DEFAULT:-}" "from-mobile-file" \
+  "loads unset mobile env defaults"
 
 fips_head=0123456789abcdef0123456789abcdef01234567
 unset NVPN_EXPECTED_FIPS_GIT_SHA

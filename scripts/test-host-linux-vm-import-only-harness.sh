@@ -10,6 +10,8 @@ IMPORT_LIB="$ROOT/scripts/lib-ubuntu-vm-imported-release.sh"
 MANUAL="$ROOT/scripts/ubuntu-vm-manual-join-e2e.sh"
 SERVICE="$ROOT/scripts/ubuntu-vm-service-toggle-e2e.sh"
 UNDERLAY="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
+RELEASE_JOIN="$ROOT/scripts/ubuntu-vm-release-mobile-join-e2e.sh"
+RELEASE_JOIN_GUEST="$ROOT/scripts/linux-release-mobile-join-remote.sh"
 MANUAL_GUEST="$ROOT/linux/scripts/e2e-manual-join-ui.sh"
 RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 DOCKERFILE="$ROOT/Dockerfile.linux-vm-gate"
@@ -49,6 +51,8 @@ for executable in \
   "$MANUAL" \
   "$SERVICE" \
   "$UNDERLAY" \
+  "$RELEASE_JOIN" \
+  "$RELEASE_JOIN_GUEST" \
   "$CLEANUP" \
   "$SERIALIZED_DPKG" \
   "$CLEANUP_HARNESS" \
@@ -130,6 +134,18 @@ require_tokens "$PREPARER" "clean exact cached Linux bundle" \
   'host_linux_native_builder_run \' \
   '/workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh' \
   'verify-host-linux-vm-bundle.py'
+require_tokens "$RELEASE_JOIN" "exact installed Release join paths" \
+  '"$NVPN_UBUNTU_IMPORTED_APP"' \
+  '"$NVPN_UBUNTU_IMPORTED_CLI"' \
+  '"$NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT"'
+require_tokens "$RELEASE_JOIN_GUEST" "DEB-installed binary verification" \
+  '[[ "$APP" == /usr/bin/nostr-vpn' \
+  '&& "$CLI" == /usr/bin/nvpn' \
+  '.packageInstalledByDpkg == true' \
+  '.installedAppSha256 == $app_hash' \
+  '.installedCliSha256 == $cli_hash' \
+  '"$(sha256sum "$APP"' \
+  '"$(sha256sum "$CLI"'
 require_tokens "$CONTAINER_PAYLOAD" "one canonical container build payload" \
   'host_linux_cargo_archive_cache.py' \
   'CARGO_NET_OFFLINE=true' \

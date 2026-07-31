@@ -62,9 +62,16 @@ grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
     exit 1
   }
 grep -Fq 'for focus_attempt in 1 2' "$android_smoke" \
+  && grep -Fq 'android_ui_reset_scroll' "$android_smoke" \
   && grep -Fq 'Android shipped multiline field did not gain focus' "$android_smoke" \
   || {
     echo "Android multiline UI entry lacks one bounded focus retry and readback" >&2
+    exit 1
+  }
+grep -Fq -- '--dns-cases "$(IFS=,; echo "${DNS_CASES[*]}")"' "$gate" \
+  && grep -Fq 'mobile.add_argument("--dns-cases")' "$ROOT/scripts/release-network-evidence.py" \
+  || {
+    echo "focused Android DNS retries are not bound to their requested case receipts" >&2
     exit 1
   }
 grep -Fq 'attribute == "descendant-text"' "$android_smoke" \

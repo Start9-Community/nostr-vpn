@@ -4,12 +4,11 @@ load_mobile_env() {
   local root="$1"
   local env_file="${NVPN_MOBILE_ENV_FILE:-$root/.env.mobile.local}"
 
-  if [[ -f "$env_file" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$env_file"
-    set +a
-  fi
+  declare -F load_env_file_defaults >/dev/null || {
+    echo "load_mobile_env requires release_common.sh" >&2
+    return 1
+  }
+  load_env_file_defaults "$env_file"
 }
 
 select_physical_android_serial() {
