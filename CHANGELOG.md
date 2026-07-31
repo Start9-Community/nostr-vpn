@@ -87,10 +87,10 @@ All notable changes to this project are documented in this file.
 - Pace the quiet FIPS-TCP control loop at its close-retention deadline instead
   of the active retransmission cadence, while keeping commands, packets, and
   open records immediately responsive.
-- Upgrade FIPS to 0.4.49 so physical-interface changes reauthenticate UDP
-  peers at the safe handshake interval, stale WebSocket carriers are replaced
-  immediately, and only correlated discovery replies may repin established
-  routes, while preserving end-to-end sessions and wire compatibility.
+- Upgrade FIPS to 0.4.50 so physical-interface changes reauthenticate UDP
+  peers at the safe handshake interval, replace stale WebSocket carriers
+  immediately without ordinary reconnect backoff, reject pre-rebind handshakes,
+  and preserve routed npub sessions and wire compatibility across recovery.
 - Repair Cashu paid-exit close, settlement, and refund recovery across
   historical or retried proofs on platforms where the feature is available.
 - Update the Nostr and Linux property-list parser locks to reject malformed

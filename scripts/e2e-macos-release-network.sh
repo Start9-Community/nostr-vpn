@@ -631,6 +631,35 @@ assert_single_owned_daemon() {
     && "$command" == *" --config $CONFIG"* ]]
 }
 
+snapshot_predicate() {
+  local output="$1" name="$2"
+  shift 2
+  if "$@" >/dev/null 2>&1; then
+    printf '%s=true\n' "$name" >>"$output"
+  else
+    printf '%s=false\n' "$name" >>"$output"
+  fi
+}
+
+capture_underlay_routes() {
+  {
+    printf '%s\n' '--- default route ---'
+    /sbin/route -n get default 2>&1 || true
+    printf '%s\n' '--- WireGuard low split route ---'
+    /sbin/route -n get 1.0.0.1 2>&1 || true
+    printf '%s\n' '--- WireGuard high split route ---'
+    /sbin/route -n get 129.0.0.1 2>&1 || true
+    printf '%s\n' '--- WireGuard endpoint route ---'
+    if [[ "$ENDPOINT_FAMILY" == "ipv6" ]]; then
+      /sbin/route -n get -inet6 "$ENDPOINT_HOST" 2>&1 || true
+    else
+      /sbin/route -n get "$ENDPOINT_HOST" 2>&1 || true
+    fi
+    printf '%s\n' '--- FIPS peer tunnel route ---'
+    /sbin/route -n get "$FIPS_PEER_TUNNEL_IP" 2>&1 || true
+  }
+}
+
 crash_startup_log_order_is_valid() {
   local wireguard_line fips_line
   wireguard_line="$({
