@@ -172,18 +172,20 @@ for host_gate in "$WINDOWS_HOST" "$LINUX_HOST"; do
   grep -Fq 'RECOVERY_DEADLINE_MS="${NVPN_DESKTOP_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"' \
     "$host_gate" \
     || fail "$(basename "$host_gate") does not enforce the four-second bound"
-  if [[ "$host_gate" == "$LINUX_HOST" ]]; then
+  if [[ "$host_gate" == "$WINDOWS_HOST" ]]; then
+    require_tokens "$host_gate" "packaged Windows candidate pin" \
+      'ARTIFACT_APP_SHA=' \
+      'ARTIFACT_APP_TREE=' \
+      'Windows packaged app revision/tree is unavailable or inconsistent' \
+      'Windows checkout differs from the packaged app revision/tree'
+  else
     grep -Fq \
       'expected_tree="$(git -C "$RELEASE_APP_ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
       "$host_gate" \
       || fail "$(basename "$host_gate") does not pin the product candidate tree"
-  else
-    grep -Fq 'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
-      "$host_gate" \
-      || fail "$(basename "$host_gate") does not pin the committed candidate tree"
+    grep -Fq 'revision/tree differs from the release candidate' "$host_gate" \
+      || fail "$(basename "$host_gate") does not reject mismatched revision/tree"
   fi
-  grep -Fq 'revision/tree differs from the release candidate' "$host_gate" \
-    || fail "$(basename "$host_gate") does not reject mismatched revision/tree"
   if grep -Fq "current_tree" "$host_gate" \
     || grep -Fq 'git -C "$repo" add -A' "$host_gate"
   then
@@ -325,7 +327,9 @@ if grep -Fq 'wait_for_guest_marker' <<<"$direct_restore"; then
   fail "Linux host polls post-Direct evidence over the retired secondary path"
 fi
 require_tokens "$WINDOWS_HOST" "provenance/diagnostic evidence" \
-  'manifest_path) -replace' 'collect_failure_artifacts'
+  'exact-artifact-validation.log' \
+  'payloads.cli.sha256' \
+  'collect_failure_artifacts'
 require_tokens "$WINDOWS_HOST_LIB" "bounded out-of-band marker probes" \
   'run_ps_secondary_bounded' \
   'ChannelTimeout=session=${channel_timeout}s'
@@ -719,12 +723,13 @@ if grep -Fq '90000' "$WINDOWS_GUEST" \
 then
   fail "Windows runtime readiness retains a 90/120-second fallback window"
 fi
-require_tokens "$WINDOWS_HOST" "exact provenance/parallel-build contract" \
+require_tokens "$WINDOWS_HOST" "exact provenance/artifact-import contract" \
   'the exact FIPS release-gate checkout must be committed and clean' \
   'checkout --detach' \
   'target-version.txt' \
   'peer-version.txt' \
-  'wait "$windows_build_pid"' \
+  'Windows underlay CLI differs from the exact installed-and-launched installer payload' \
+  'WINDOWS_EXACT_INSTALLER_CLI_SHA256=' \
   'desktop_underlay_import_host_peer'
 
 require_tokens "$RELEASE_GATE" "real auto-discoverable underlay lane" \

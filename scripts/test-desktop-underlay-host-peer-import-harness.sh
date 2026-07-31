@@ -183,8 +183,13 @@ require_tokens "$LINUX_SYNC" "exact Linux app sync" \
   'rev-parse "$EXACT_COMMIT^{commit}"'
 require_tokens "$WINDOWS" "exact Windows underlay candidate" \
   'desktop_underlay_assert_app_candidate' \
-  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$app_sha"' \
-  'expected_tree="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"'
+  'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$ARTIFACT_APP_SHA"' \
+  'NVPN_WINDOWS_EXACT_CLI_PATH' \
+  'NVPN_WINDOWS_INSTALLER_RECEIPT_PATH' \
+  'Windows underlay CLI differs from the exact installed-and-launched installer payload'
+if grep -Fq 'windows-build.ps1' "$WINDOWS"; then
+  fail "Windows underlay release lane still rebuilds instead of using the installer payload"
+fi
 require_tokens "$LINUX" "exact Linux underlay candidate" \
   'desktop_underlay_assert_app_candidate' \
   'NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$app_sha"' \
@@ -296,9 +301,11 @@ done
   source "$LINUX_LIB"
 )
 
-require_tokens "$WINDOWS" "Windows native build ownership" \
-  'windows-build.ps1 -Configuration Release -DaemonOnly' \
-  'native Windows Release build failed'
+require_tokens "$WINDOWS" "Windows exact installer artifact reuse" \
+  'exact installed Windows Release setup' \
+  'installerInstalledAndLaunched' \
+  'installedAppStayedAlive' \
+  'WINDOWS_EXACT_INSTALLER_CLI_SHA256='
 require_tokens "$LINUX" "Linux exact host artifact reuse" \
   'TARGET_RELEASE_BINARY="$TARGET_RELEASE_BUNDLE/nvpn"' \
   'receipt.get("schema") != 2' \

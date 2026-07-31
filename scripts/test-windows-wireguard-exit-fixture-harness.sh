@@ -54,11 +54,14 @@ if grep -Fq 'NVPN_MOBILE_WG_EXIT_HOST_IP:-' "$ORCHESTRATOR"; then
 fi
 
 for proof in \
-  'EXPECTED_HEAD="$(git -C "$ROOT" rev-parse HEAD)"' \
-  'EXPECTED_TREE="$(git -C "$ROOT" rev-parse '\''HEAD^{tree}'\'')"' \
+  'NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA' \
+  'NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE' \
   'NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$EXPECTED_HEAD"' \
   '[[ "$REMOTE_HEAD" == "$EXPECTED_HEAD" && "$REMOTE_TREE" == "$EXPECTED_TREE" ]]' \
   'Windows WG e2e checkout differs from the exact candidate tree' \
+  'exact installed Windows Release setup' \
+  'Windows WG e2e CLI differs from the exact installed-and-launched installer payload' \
+  'WINDOWS_EXACT_INSTALLER_CLI_SHA256=' \
   'Get-FileHash -Algorithm SHA256 -LiteralPath \$Process.ExecutablePath' \
   'NvpnService is not running the exact candidate binary' \
   'mobile_wg_fixture_wg_bytes "$CONTAINER"' \
@@ -76,6 +79,9 @@ do
   grep -Fq "$proof" "$ORCHESTRATOR" \
     || fail "orchestrator lost exact candidate/fixture proof: $proof"
 done
+if grep -Fq 'windows-build.ps1' "$ORCHESTRATOR"; then
+  fail "Windows WG release lane still rebuilds instead of using the installer payload"
+fi
 if grep -Fq 'current_tree()' "$ORCHESTRATOR" \
   || grep -Fq 'git -C "$ROOT" add -A' "$ORCHESTRATOR" \
   || grep -Fq 'git reset --hard' "$ORCHESTRATOR" \

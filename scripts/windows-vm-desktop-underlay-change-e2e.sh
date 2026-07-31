@@ -21,7 +21,10 @@ PRIMARY_PROXY="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 WINDOWS_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\nostr-vpn-release-gate}"
 GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\fips-release-gate}"
-GUEST_BINARY="${NVPN_WINDOWS_UNDERLAY_BINARY:-$GUEST_REPO\\target\\release\\nvpn.exe}"
+GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:?set NVPN_WINDOWS_EXACT_CLI_PATH to the packaged Windows CLI}"
+GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_INSTALLER_RECEIPT_PATH to its installer receipt}"
+ARTIFACT_APP_SHA="${NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA:-${NVPN_EXPECTED_APP_GIT_SHA:-}}"
+ARTIFACT_APP_TREE="${NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE:-${NVPN_EXPECTED_APP_GIT_TREE:-}}"
 LOCAL_FIPS_REPO="${NVPN_FIPS_REPO_PATH:-}"
 EXPECTED_FIPS_REV="${NVPN_EXPECTED_FIPS_REV:-}"
 FIPS_SOURCE_REVISION=""
@@ -107,21 +110,23 @@ resolve_expected_fips_revision() {
     || fail "set NVPN_EXPECTED_FIPS_REV to the intended FIPS Git revision"
 }
 
-sync_and_build_candidates() {
-  local app_sha expected_tree candidate_source_date_epoch windows_head windows_tree
+sync_and_import_candidates() {
+  local harness_sha harness_tree windows_head windows_tree
   local expected_fips_tree="" windows_fips_tree=""
-  app_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  expected_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
-  [[ "$app_sha" == "${NVPN_EXPECTED_APP_GIT_SHA:-}" ]] \
-    || fail "Windows underlay app revision differs from the release candidate"
-  desktop_underlay_assert_app_candidate "$app_sha" "$expected_tree" \
-    || fail "Windows underlay app checkout is not the exact release candidate"
-  candidate_source_date_epoch="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
-  [[ "$candidate_source_date_epoch" =~ ^[0-9]+$ ]] \
-    || fail "could not derive deterministic candidate source date"
+  [[ "$ARTIFACT_APP_SHA" =~ ^[0-9a-f]{40}$ \
+    && "$ARTIFACT_APP_TREE" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "Windows underlay requires an exact packaged app revision and tree"
+  [[ "$(git -C "$ROOT" rev-parse "$ARTIFACT_APP_SHA^{tree}")" == "$ARTIFACT_APP_TREE" ]] \
+    || fail "Windows packaged app revision/tree is unavailable or inconsistent"
+  harness_sha="$(git -C "$ROOT" rev-parse HEAD)"
+  harness_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+  desktop_underlay_assert_app_candidate "$harness_sha" "$harness_tree" \
+    || fail "Windows underlay harness checkout is not committed and clean"
   {
-    printf 'nvpn_base_commit=%s\n' "$app_sha"
-    printf 'nvpn_tree=%s\n' "$expected_tree"
+    printf 'nvpn_base_commit=%s\n' "$ARTIFACT_APP_SHA"
+    printf 'nvpn_tree=%s\n' "$ARTIFACT_APP_TREE"
+    printf 'harness_commit=%s\n' "$harness_sha"
+    printf 'harness_tree=%s\n' "$harness_tree"
     printf 'fips_commit=%s\n' "$FIPS_SOURCE_REVISION"
     if [[ -n "$LOCAL_FIPS_REPO" ]]; then
       printf 'fips_tree=%s\n' \
@@ -137,7 +142,7 @@ sync_and_build_candidates() {
     NVPN_WINDOWS_GUEST_FIPS_REPO_PATH="$GUEST_FIPS_REPO" \
     NVPN_WINDOWS_FIPS_REPO_PATH="${LOCAL_FIPS_REPO:-$ROOT/../fips}" \
     NVPN_WINDOWS_SYNC_PATH_DEPS="$([[ -n "$LOCAL_FIPS_REPO" ]] && echo 1 || echo 0)" \
-    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$app_sha" \
+    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$ARTIFACT_APP_SHA" \
     "$ROOT/scripts/windows-vm-git-sync.sh" "$WINDOWS_SSH"
 
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
@@ -160,8 +165,9 @@ sync_and_build_candidates() {
     "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse 'HEAD^{tree}'" \
     | tr -d '\r' \
     | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
-  [[ "$windows_head" == "$app_sha" && "$windows_tree" == "$expected_tree" ]] \
-    || fail "Windows candidate revision/tree differs from the release candidate"
+  [[ "$windows_head" == "$ARTIFACT_APP_SHA" \
+    && "$windows_tree" == "$ARTIFACT_APP_TREE" ]] \
+    || fail "Windows checkout differs from the packaged app revision/tree"
   if [[ -n "$LOCAL_FIPS_REPO" ]]; then
     windows_fips_tree="$(run_ps_primary \
       "git -C $(ps_quote "$GUEST_FIPS_REPO") rev-parse 'HEAD^{tree}'" \
@@ -177,53 +183,40 @@ sync_and_build_candidates() {
     "$ARTIFACT_DIR/windows-wireguard-ownership-harness.log" \
     || fail "Windows native WireGuard ownership regression harness failed"
 
-  local windows_build_script
-  windows_build_script="\$ErrorActionPreference = 'Stop'
-Set-Location $(ps_quote "$GUEST_REPO")
-\$env:SOURCE_DATE_EPOCH = $(ps_quote "$candidate_source_date_epoch")"
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    windows_build_script+="
-\$env:NVPN_FIPS_REPO_PATH = $(ps_quote "$GUEST_FIPS_REPO")"
-  fi
-  windows_build_script+="
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration Release -DaemonOnly
-if (\$LASTEXITCODE -ne 0) { throw 'native Windows Release build failed' }"
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    windows_build_script+="
-\$FipsCargo = ((Resolve-Path $(ps_quote "$GUEST_FIPS_REPO")).Path -replace '\\\\', '/')
-\$MetadataArgs = @(
-  '--config', \"patch.crates-io.fips-core.path='\$FipsCargo/crates/fips-core'\",
-  '--config', \"patch.crates-io.fips-endpoint.path='\$FipsCargo/crates/fips-endpoint'\",
-  '--config', \"patch.crates-io.fips-identity.path='\$FipsCargo/crates/fips-identity'\",
-  'metadata', '--format-version', '1'
-)
-\$Metadata = & cargo @MetadataArgs | ConvertFrom-Json
-if (\$LASTEXITCODE -ne 0) { throw 'Windows local-FIPS metadata failed' }
-\$Expected = (\$FipsCargo + '/').ToLowerInvariant()
-\$FipsPackages = @(\$Metadata.packages | Where-Object {
-  \$_.name -eq 'fips-core' -or \$_.name -eq 'fips-endpoint'
-})
-if (\$FipsPackages.Count -ne 2 -or @(\$FipsPackages | Where-Object {
-  !((((([string]\$_.manifest_path) -replace '\\\\', '/').ToLowerInvariant()).StartsWith(\$Expected)))
-}).Count -ne 0) {
-  throw 'Windows build did not resolve the exact synced local FIPS crates'
-}"
-  fi
-  run_ps_primary "$windows_build_script" \
-    >"$ARTIFACT_DIR/windows-build.log" 2>&1 &
-  local windows_build_pid="$!"
-  local windows_build_failed=0 host_peer_import_failed=0
-  desktop_underlay_import_host_peer \
-    >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
-    || host_peer_import_failed=1
-  wait "$windows_build_pid" || windows_build_failed=1
-  if [[ "$windows_build_failed" == "1" \
-    || "$host_peer_import_failed" == "1" ]]
-  then
-    tail -n 120 "$ARTIFACT_DIR/windows-build.log" >&2 || true
-    tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
-    fail "parallel Windows target build or host-peer import failed"
-  fi
+  run_ps_primary "\$ErrorActionPreference = 'Stop'
+\$Bin = $(ps_quote "$GUEST_BINARY")
+\$ReceiptPath = $(ps_quote "$GUEST_INSTALLER_RECEIPT")
+if (!(Test-Path -LiteralPath \$ReceiptPath -PathType Leaf)) {
+  throw \"exact Windows installer receipt is missing: \$ReceiptPath\"
+}
+if (!(Test-Path -LiteralPath \$Bin -PathType Leaf)) {
+  throw \"exact packaged nvpn.exe is missing: \$Bin\"
+}
+\$Receipt = Get-Content -Raw -LiteralPath \$ReceiptPath | ConvertFrom-Json
+\$CliHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash.ToLowerInvariant()
+\$CliSize = (Get-Item -LiteralPath \$Bin).Length
+if (
+  \$Receipt.artifactType -ne 'exact installed Windows Release setup' -or
+  \$Receipt.appGitSha -ne $(ps_quote "$ARTIFACT_APP_SHA") -or
+  \$Receipt.appGitTree -ne $(ps_quote "$ARTIFACT_APP_TREE") -or
+  \$Receipt.installerInstalledAndLaunched -ne \$true -or
+  \$Receipt.installedAppStayedAlive -ne \$true -or
+  \$Receipt.payloads.cli.sha256 -ne \$CliHash -or
+  [int64]\$Receipt.payloads.cli.size -ne \$CliSize
+) {
+  throw 'Windows underlay CLI differs from the exact installed-and-launched installer payload'
+}
+Get-Content -Raw -LiteralPath \$ReceiptPath
+Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$CliHash\"" \
+    >"$ARTIFACT_DIR/exact-artifact-validation.log"
+
+  NVPN_EXPECTED_APP_GIT_SHA="$harness_sha" \
+    desktop_underlay_import_host_peer \
+      >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
+    || {
+      tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
+      fail "Windows underlay host-peer import failed"
+    }
 }
 
 capture_version_receipts() {
@@ -1017,7 +1010,7 @@ if (Test-Path -LiteralPath \$runnerPath) {
 trap cleanup EXIT INT TERM
 
 resolve_expected_fips_revision
-sync_and_build_candidates
+sync_and_import_candidates
 capture_version_receipts
 discover_primary_interface
 attach_secondary_network

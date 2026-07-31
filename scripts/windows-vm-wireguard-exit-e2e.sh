@@ -21,8 +21,10 @@ SSH_HOST="${NVPN_WINDOWS_SSH_HOST:-${1:-win11-dev}}"
 SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
-GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\fips}"
 GUEST_CONFIG="${NVPN_WINDOWS_E2E_CONFIG:-C:\\ProgramData\\Nostr VPN\\config.toml}"
+GUEST_ARTIFACT_ROOT="${GUEST_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts}"
+GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:-$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\nvpn.exe}"
+GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:-$GUEST_ARTIFACT_ROOT\\windows-installer-gate\\installer-receipt.json}"
 PROVIDER_CONFIG="${NVPN_WINDOWS_WG_EXIT_CONFIG_FILE:-${NVPN_WG_EXIT_CONFIG_FILE:-}}"
 REQUIRE_PROVIDER_E2E="${NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E:-0}"
 PROBE_URL="${NVPN_WINDOWS_E2E_INTERNET_URL:-https://example.com/}"
@@ -372,8 +374,12 @@ if [[ -z "$PROVIDER_CONFIG" ]]; then
   fi
 fi
 
-EXPECTED_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
-EXPECTED_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+EXPECTED_HEAD="${NVPN_WINDOWS_ARTIFACT_APP_GIT_SHA:-${NVPN_EXPECTED_APP_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD)}}"
+EXPECTED_TREE="${NVPN_WINDOWS_ARTIFACT_APP_GIT_TREE:-${NVPN_EXPECTED_APP_GIT_TREE:-$(git -C "$ROOT" rev-parse "$EXPECTED_HEAD^{tree}")}}"
+[[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ && "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "Windows WG e2e requires an exact packaged app revision and tree" >&2
+  exit 2
+}
 case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On)
     echo "Skipping Windows VM git sync; release-gate lane already synced the candidate."
@@ -422,29 +428,34 @@ if (
   throw 'Windows WireGuard lane requires a clean service, process, adapter, and NRPT baseline'
 }"
 
-BUILD_CONFIGURATION="Debug"
-BUILD_PROFILE="debug"
-if [[ -n "$PROVIDER_CONFIG" ]]; then
-  # The production route transition must use the optimized daemon. Debug
-  # builds are not representative and can exhaust their stack on a real config.
-  BUILD_CONFIGURATION="Release"
-  BUILD_PROFILE="release"
-fi
-GUEST_BINARY="$GUEST_REPO\\target\\$BUILD_PROFILE\\nvpn.exe"
-
 run_ps "\$ErrorActionPreference = 'Stop'
 Set-Location $(ps_quote "$GUEST_REPO")
-if ($(ps_quote "${NVPN_FIPS_REPO_PATH:-}") -ne '') { \$env:NVPN_FIPS_REPO_PATH = $(ps_quote "$GUEST_FIPS_REPO") }
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-build.ps1 -Configuration $BUILD_CONFIGURATION -DaemonOnly
-if (\$LASTEXITCODE -ne 0) { throw 'Windows WG e2e daemon build failed' }
 \$Bin = $(ps_quote "$GUEST_BINARY")
-if (!(Test-Path \$Bin)) { throw \"Missing nvpn.exe: \$Bin\" }
+\$ReceiptPath = $(ps_quote "$GUEST_INSTALLER_RECEIPT")
+if (!(Test-Path -LiteralPath \$ReceiptPath -PathType Leaf)) {
+  throw \"exact Windows installer receipt is missing: \$ReceiptPath\"
+}
+if (!(Test-Path -LiteralPath \$Bin -PathType Leaf)) {
+  throw \"exact packaged nvpn.exe is missing: \$Bin\"
+}
+\$Receipt = Get-Content -Raw -LiteralPath \$ReceiptPath | ConvertFrom-Json
 \$ExpectedBinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$Bin).Hash
+if (
+  \$Receipt.artifactType -ne 'exact installed Windows Release setup' -or
+  \$Receipt.appGitSha -ne $(ps_quote "$EXPECTED_HEAD") -or
+  \$Receipt.appGitTree -ne $(ps_quote "$EXPECTED_TREE") -or
+  \$Receipt.installerInstalledAndLaunched -ne \$true -or
+  \$Receipt.installedAppStayedAlive -ne \$true -or
+  \$Receipt.payloads.cli.sha256 -ne \$ExpectedBinarySha256.ToLowerInvariant() -or
+  [int64]\$Receipt.payloads.cli.size -ne (Get-Item -LiteralPath \$Bin).Length
+) {
+  throw 'Windows WG e2e CLI differs from the exact installed-and-launched installer payload'
+}
 \$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (!\$IsAdmin) { throw 'Windows WG exit e2e requires an elevated/Admin SSH session for Wintun and route changes' }
 & \$Bin wg-upstream-test --self-test --timeout-secs 15 --scoped-host 10.99.99.1 --ping-count 3
 if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
-Write-Host \"WINDOWS_EXACT_CANDIDATE_SHA256=\$ExpectedBinarySha256\"
+Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$ExpectedBinarySha256\"
 Write-Host 'WINDOWS_WIREGUARD_SCOPED_E2E_OK'"
 
 if [[ -z "$PROVIDER_CONFIG" ]]; then
