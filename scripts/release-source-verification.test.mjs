@@ -28,14 +28,14 @@ function exactWindowsCratesIoFixture() {
   const fipsGitTree = 'd'.repeat(40)
   const exactPackages = {
     'fips-core': {
-      version: '0.4.50',
+      version: '0.4.51',
       source: 'registry+https://github.com/rust-lang/crates.io-index',
       cargoLockChecksum: '1'.repeat(64),
       packageVcsSha: fipsGitSha,
       pathInVcs: 'crates/fips-core',
     },
     'fips-endpoint': {
-      version: '0.4.50',
+      version: '0.4.51',
       source: 'registry+https://github.com/rust-lang/crates.io-index',
       cargoLockChecksum: '2'.repeat(64),
       packageVcsSha: fipsGitSha,
@@ -57,8 +57,8 @@ function exactWindowsCratesIoFixture() {
     sourceClean: true,
     fipsReleaseGitSha: fipsGitSha,
     fipsReleaseGitTree: fipsGitTree,
-    fipsReleaseTag: 'v0.4.50',
-    fipsVersion: '0.4.50',
+    fipsReleaseTag: 'v0.4.51',
+    fipsVersion: '0.4.51',
     fipsCrates: structuredClone(exactPackages),
   }
   const payloads = Object.fromEntries(
@@ -75,7 +75,7 @@ function exactWindowsCratesIoFixture() {
     appGitTree,
     fipsGitSha,
     fipsGitTree,
-    fipsVersion: '0.4.50',
+    fipsVersion: '0.4.51',
     installerInstalledAndLaunched: true,
     installedAppStayedAlive: true,
     builtOnWindowsVm: true,
@@ -90,14 +90,14 @@ function exactWindowsCratesIoFixture() {
     expectedAppGitTree: appGitTree,
     expectedFipsGitSha: fipsGitSha,
     expectedFipsGitTree: fipsGitTree,
-    expectedFipsVersion: '0.4.50',
+    expectedFipsVersion: '0.4.51',
   }
 }
 
 test('Windows crates.io receipts accept the exact sealed source and payloads', () => {
   const fixture = exactWindowsCratesIoFixture()
   assert.deepEqual(validateWindowsCratesIoReceipts(fixture), {
-    expectedFipsVersion: '0.4.50',
+    expectedFipsVersion: '0.4.51',
     cliSha256: '6'.repeat(64),
     cliSize: 3,
     exactPackages: fixture.exactPackages,
@@ -176,8 +176,8 @@ function sha256(path) {
 }
 
 const fipsPackages = {
-  'fips-core': '0.4.50',
-  'fips-endpoint': '0.4.50',
+  'fips-core': '0.4.51',
+  'fips-endpoint': '0.4.51',
   'fips-identity': '0.3.2',
 }
 const fipsSpecs = Object.entries(fipsPackages).map(
