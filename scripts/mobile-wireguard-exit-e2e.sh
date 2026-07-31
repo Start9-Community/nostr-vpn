@@ -691,6 +691,12 @@ write_network_evidence() {
       ;;
   esac
   [[ -n "$output" ]] || return 0
+  if [[ "$mode" == wireguard-dns ]] \
+    && ! mobile_wg_dns_cases_are_complete "${DNS_CASES[@]}"
+  then
+    echo "$platform focused DNS retry skips canonical network evidence" >&2
+    return 0
+  fi
   [[ -n "$artifact_receipt" ]] || {
     echo "$platform network evidence requires an exact artifact receipt" >&2
     return 1
@@ -698,7 +704,6 @@ write_network_evidence() {
   python3 "$ROOT/scripts/release-network-evidence.py" mobile \
     --platform "$platform" \
     --mode "$mode" \
-    --dns-cases "$(IFS=,; echo "${DNS_CASES[*]}")" \
     --artifact-receipt "$artifact_receipt" \
     --artifact-dir "$artifact_dir" \
     --counter-ledger "$ledger" \

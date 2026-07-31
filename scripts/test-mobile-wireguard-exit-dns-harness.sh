@@ -68,12 +68,6 @@ grep -Fq 'for focus_attempt in 1 2' "$android_smoke" \
     echo "Android multiline UI entry lacks one bounded focus retry and readback" >&2
     exit 1
   }
-grep -Fq -- '--dns-cases "$(IFS=,; echo "${DNS_CASES[*]}")"' "$gate" \
-  && grep -Fq 'mobile.add_argument("--dns-cases")' "$ROOT/scripts/release-network-evidence.py" \
-  || {
-    echo "focused Android DNS retries are not bound to their requested case receipts" >&2
-    exit 1
-  }
 grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
   && grep -Fq 'internet-source-picker descendant-text' "$android_smoke" \
   || {
@@ -246,6 +240,44 @@ declare -F mobile_wg_dns_case_fields >/dev/null \
   && declare -F mobile_wg_fixture_dns_evidence_snapshot >/dev/null \
   && declare -F mobile_wg_fixture_assert_dns_case_evidence >/dev/null \
   || { echo "mobile fixture lacks the shared DNS evidence contract" >&2; exit 1; }
+mobile_wg_dns_cases_are_complete \
+  automatic-profile cloudflare-doh quad9-doh custom-doh through-exit \
+  || { echo "complete DNS matrix was rejected" >&2; exit 1; }
+if mobile_wg_dns_cases_are_complete custom-doh; then
+  echo "focused DNS retry was accepted as a complete matrix" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$ROOT/scripts/release_common.sh"
+eval "$(sed -n '/^write_network_evidence() {/,/^}$/p' "$gate")"
+canonical_builder_calls=0
+canonical_builder_arguments=""
+python3() {
+  canonical_builder_calls=$((canonical_builder_calls + 1))
+  canonical_builder_arguments="$*"
+}
+UNDERLAY_CHANGE_GATE=0
+NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT=/unused/canonical.json
+NVPN_MOBILE_ANDROID_RELEASE_RECEIPT=/unused/artifact.json
+NVPN_ANDROID_RESULT_DIR=/unused/artifacts
+ANDROID_COUNTER_LEDGER=/unused/counters.tsv
+DNS_CASES=(custom-doh)
+write_network_evidence android
+[[ "$canonical_builder_calls" -eq 0 ]] || {
+  echo "focused DNS retry invoked the canonical receipt builder" >&2
+  exit 1
+}
+DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)
+write_network_evidence android
+[[ "$canonical_builder_calls" -eq 1 ]] || {
+  echo "complete DNS matrix skipped the canonical receipt builder" >&2
+  exit 1
+}
+[[ "$canonical_builder_arguments" != *--dns-cases* ]] || {
+  echo "canonical receipt builder accepted a focused DNS case selector" >&2
+  exit 1
+}
+unset -f python3 write_network_evidence
 
 python3 - "$fixture_lib" "$remote_native" <<'PY'
 import pathlib

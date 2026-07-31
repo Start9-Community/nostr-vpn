@@ -90,6 +90,15 @@ mobile_wg_dns_case_fields() {
   esac
 }
 
+mobile_wg_dns_cases_are_complete() {
+  [[ "$#" -eq 5 \
+    && "$1" == automatic-profile \
+    && "$2" == cloudflare-doh \
+    && "$3" == quad9-doh \
+    && "$4" == custom-doh \
+    && "$5" == through-exit ]]
+}
+
 mobile_wg_fixture_validate_ssh_host() {
   local host="$1"
   if [[ -z "$host" || "$host" == -* || "$host" =~ [[:space:]] ]]; then

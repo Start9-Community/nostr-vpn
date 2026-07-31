@@ -928,16 +928,7 @@ def validate_android_support(
 def build_mobile(args: argparse.Namespace) -> None:
     platform = args.platform
     mode = args.mode
-    if mode == "wireguard-dns":
-        cases = args.dns_cases.split(",") if args.dns_cases else list(DNS_CASES)
-        require(
-            bool(cases)
-            and len(cases) == len(set(cases))
-            and all(case in DNS_CASES for case in cases),
-            "mobile DNS case selection is empty, duplicated, or unsupported",
-        )
-    else:
-        cases = ["automatic-profile"]
+    cases = list(DNS_CASES) if mode == "wireguard-dns" else ["automatic-profile"]
     artifact_path = pathlib.Path(args.artifact_receipt).resolve()
     root = pathlib.Path(args.artifact_dir).resolve()
     artifact = load_json(artifact_path)
@@ -1452,7 +1443,6 @@ def parser() -> argparse.ArgumentParser:
     mobile.add_argument("--artifact-receipt", required=True)
     mobile.add_argument("--artifact-dir", required=True)
     mobile.add_argument("--counter-ledger", required=True)
-    mobile.add_argument("--dns-cases")
     mobile.add_argument("--output", required=True)
     desktop = commands.add_parser("desktop")
     desktop.add_argument(
