@@ -594,9 +594,17 @@ def validate_desktop_mobile_join_receipt(
     receipt: dict[str, Any],
     mobile_artifact: dict[str, Any],
     mobile_artifact_receipt_sha256: str,
+    mobile_join: dict[str, Any],
 ) -> None:
     artifact = receipt.get("artifact")
     ios_artifact = artifact.get("ios") if isinstance(artifact, dict) else None
+    android = artifact.get("android") if isinstance(artifact, dict) else None
+    mobile_join_artifact = mobile_join.get("artifact")
+    mobile_android = (
+        mobile_join_artifact.get("android")
+        if isinstance(mobile_join_artifact, dict)
+        else None
+    )
     timings = receipt.get("deliveryMilliseconds")
     require(
         receipt.get("schema") == 1
@@ -617,6 +625,16 @@ def validate_desktop_mobile_join_receipt(
         and receipt.get("deliveryDeadlineMilliseconds") == 15_000
         and isinstance(artifact, dict)
         and isinstance(ios_artifact, dict)
+        and isinstance(android, dict)
+        and isinstance(mobile_android, dict)
+        and android.get("artifactReceiptSha256")
+        == mobile_android.get("artifactReceiptSha256")
+        and re.fullmatch(
+            r"[0-9a-f]{64}", android.get("installReceiptSha256", "")
+        )
+        is not None
+        and isinstance(android.get("installReceiptSize"), int)
+        and android["installReceiptSize"] > 0
         and ios_artifact.get("artifactReceiptSha256")
         == mobile_artifact_receipt_sha256
         and isinstance(timings, dict)
@@ -633,6 +651,21 @@ def validate_desktop_mobile_join_receipt(
         ),
         "desktop/mobile join receipt is incomplete or not source-bound",
     )
+    for field in (
+        "appGitSha",
+        "appGitTree",
+        "fipsGitSha",
+        "fipsGitTree",
+        "apkSha256",
+        "installedApkSha256",
+        "package",
+        "signerCertificateSha256",
+    ):
+        require(
+            android.get(field) == mobile_android.get(field)
+            and bool(mobile_android.get(field)),
+            f"macOS/Android join artifact identity differs at {field}",
+        )
     for field in (
         "appGitSha",
         "appGitTree",
@@ -689,6 +722,7 @@ def seal_gate(args: argparse.Namespace) -> None:
         desktop_join,
         mobile,
         sha256_file(pathlib.Path(args.mobile_receipt)),
+        mobile_join,
     )
     required_gates = sorted(set(args.required_gate))
     require(
@@ -778,6 +812,7 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         desktop_join,
         mobile,
         sha256_file(sealed_mobile_receipt),
+        mobile_join,
     )
     required_hash(
         seal.get("archiveReceiptSha256"),

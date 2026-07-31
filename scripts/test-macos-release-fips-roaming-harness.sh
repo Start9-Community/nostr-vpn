@@ -192,19 +192,31 @@ require_tokens "$GUEST" "real crash/restart cleanup evidence" \
   'runtime_dns_state_matches' \
   'runtime_fips_peer_connected' \
   'crash_startup_log_order_is_valid' \
-  'crash_residue_after_sigkill' \
+  'crash_fail_closed_after_sigkill' \
+  'wireguard_interface_absent' \
+  'wireguard_endpoint_route_absent' \
   'record_crash_external_audit after-sigkill' \
   'sudo -n /bin/kill -KILL "$old_pid"' \
   'runtime_wireguard_state_is true false' \
   'privileged_nvpn start --config "$CONFIG" --connect --daemon' \
+  'wait_for_crash_restart_recovery' \
+  'crash_restart_state_live' \
+  'fips_payload_works' \
   'restart did not converge to exactly one owned daemon' \
   'restart did not produce exactly one fresh WireGuard bind receipt' \
   'startup_persist_path_completed=true' \
-  'sigkill_route_dns_residue_seen=true' \
+  'sigkill_tunnel_routes_absent=true' \
+  'sigkill_secure_dns_ownership_seen=true' \
   'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK'
 require_tokens "$NETWORK_EVIDENCE" "truthful crash receipt validation" \
   'crash.get("startup_persist_path_completed") == "true"' \
-  'crash.get("sigkill_route_dns_residue_seen") == "true"'
+  'crash.get("sigkill_tunnel_routes_absent") == "true"' \
+  'crash.get("sigkill_secure_dns_ownership_seen") == "true"'
+if grep -Fq 'sigkill_route_dns_residue_seen' "$GUEST" \
+  || grep -Fq 'sigkill_route_dns_residue_seen' "$NETWORK_EVIDENCE"
+then
+  fail "crash receipt still accepts the contradictory live-route residue"
+fi
 if grep -Eq 'sudo -n /(bin/cat|usr/bin/stat)' "$GUEST" \
   || grep -Fq 'daemon.cleanup.json' "$GUEST"
 then

@@ -170,6 +170,19 @@ wireguard_split_defaults_absent() {
   '
 }
 
+wireguard_interface_absent() {
+  ! wireguard_interface >/dev/null 2>&1
+}
+
+wireguard_endpoint_route_absent() {
+  local family=inet
+  [[ "$ENDPOINT_FAMILY" == "ipv6" ]] && family=inet6
+  /usr/sbin/netstat -rn -f "$family" | awk -v endpoint="$ENDPOINT_HOST" '
+    $1 == endpoint { found = 1 }
+    END { exit found ? 1 : 0 }
+  '
+}
+
 wireguard_endpoint_route_state_valid() {
   local expected_underlay="${1:-$PRIMARY_IFACE}"
   local endpoint_iface expected_gateway physical_default_iface wg_iface
@@ -697,10 +710,11 @@ crash_live_precondition() {
     && crash_startup_log_order_is_valid
 }
 
-crash_residue_after_sigkill() {
+crash_fail_closed_after_sigkill() {
   no_nvpn_processes \
-    && wireguard_endpoint_route_state_valid "$PRIMARY_IFACE" \
-    && wireguard_interface >/dev/null \
+    && wireguard_interface_absent \
+    && wireguard_split_defaults_absent \
+    && wireguard_endpoint_route_absent \
     && secure_dns_owned
 }
 
@@ -713,11 +727,11 @@ record_crash_external_audit() {
   esac
   predicates="$RESULT_DIR/crash-external-$label-predicates.txt"
   : >"$predicates"
-  snapshot_predicate "$predicates" wireguard_interface wireguard_interface
-  snapshot_predicate "$predicates" endpoint_route_bypass \
-    wireguard_endpoint_route_state_valid "$PRIMARY_IFACE"
   snapshot_predicate "$predicates" secure_dns_owned secure_dns_owned
   if [[ "$mode" == live ]]; then
+    snapshot_predicate "$predicates" wireguard_interface wireguard_interface
+    snapshot_predicate "$predicates" endpoint_route_bypass \
+      wireguard_endpoint_route_state_valid "$PRIMARY_IFACE"
     snapshot_predicate "$predicates" wireguard_routes_live wireguard_routes_live
     snapshot_predicate "$predicates" runtime_wireguard_live \
       runtime_wireguard_state_is true true
@@ -732,7 +746,13 @@ record_crash_external_audit() {
     crash_live_precondition || return 1
   else
     snapshot_predicate "$predicates" daemon_absent no_nvpn_processes
-    crash_residue_after_sigkill || return 1
+    snapshot_predicate "$predicates" wireguard_interface_absent \
+      wireguard_interface_absent
+    snapshot_predicate "$predicates" wireguard_split_defaults_absent \
+      wireguard_split_defaults_absent
+    snapshot_predicate "$predicates" endpoint_route_absent \
+      wireguard_endpoint_route_absent
+    crash_fail_closed_after_sigkill || return 1
   fi
   capture_underlay_routes \
     >"$RESULT_DIR/crash-external-$label-routes.txt" 2>&1 || true
@@ -1012,6 +1032,11 @@ fips_payload_after() {
   awk -F '\t' -v lower="$lower_bound_ms" -v peer="$FIPS_PEER_NPUB" \
     '$1 >= lower && $2 == peer { found=1 } END { exit found ? 0 : 1 }' \
     "$STATE_DIR/underlay-fips-payload.tsv"
+}
+
+fips_payload_works() {
+  /sbin/ping -n -c 1 -W 700 "$FIPS_PEER_TUNNEL_IP" \
+    >/dev/null 2>&1
 }
 
 fips_payload_success_count() {
@@ -1354,9 +1379,56 @@ start_underlay_gate() {
   echo "MACOS_RELEASE_NETWORK_UNDERLAY_STARTED"
 }
 
+wireguard_bind_receipt_count() {
+  grep -Fc \
+    " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
+    "$STATE_DIR/daemon.log" 2>/dev/null || true
+}
+
+crash_restart_state_live() {
+  local expected_bind_receipts="$1" old_pid="$2" new_pid
+  assert_single_owned_daemon || return 1
+  new_pid="$(owned_daemon_pid)" || return 1
+  [[ "$new_pid" != "$old_pid" \
+    && "$(wireguard_bind_receipt_count)" == "$expected_bind_receipts" ]] \
+    && runtime_wireguard_state_is true true \
+    && runtime_dns_state_matches \
+    && runtime_fips_peer_connected \
+    && wireguard_routes_live \
+    && fips_host_tunnel_route_live \
+    && fips_payload_works
+}
+
+wait_for_crash_restart_recovery() {
+  local requested_ms="$1" expected_bind_receipts="$2" old_pid="$3"
+  local now elapsed wait_seconds
+  wait_seconds=$(((RECOVERY_DEADLINE_MS + 999) / 1000))
+  local WAIT_DEADLINE_SECONDS="$((SECONDS + wait_seconds))"
+  while true; do
+    now="$(monotonic_ms)"
+    if ((now - requested_ms > RECOVERY_DEADLINE_MS)); then
+      fail "crash restart did not restore one fresh daemon, tunnel, routes, DNS, authenticated FIPS payload, and WireGuard payload in ${RECOVERY_DEADLINE_MS}ms"
+      return 1
+    fi
+    if crash_restart_state_live \
+      "$expected_bind_receipts" "$old_pid"
+    then
+      now="$(monotonic_ms)"
+      elapsed=$((now - requested_ms))
+      if ((elapsed < 0 || elapsed > RECOVERY_DEADLINE_MS)); then
+        fail "crash restart recovered in ${elapsed}ms (limit ${RECOVERY_DEADLINE_MS}ms)"
+        return 1
+      fi
+      printf '%s\n' "$elapsed"
+      return 0
+    fi
+    sleep 0.1
+  done
+}
+
 run_crash_restart_gate() {
-  local old_pid new_pid killed_ms ready_ms restart_elapsed_ms bind_baseline
-  local bind_receipts
+  local old_pid new_pid killed_ms restart_elapsed_ms bind_baseline
+  local bind_receipts expected_bind_receipts
   assert_single_owned_daemon \
     || fail "SIGKILL gate did not start with exactly one owned daemon"
   if ! wait_for_crash_live_precondition; then
@@ -1364,11 +1436,7 @@ run_crash_restart_gate() {
     fail "SIGKILL gate lacks live WireGuard, DNS, HTTPS, and FIPS state"
   fi
   old_pid="$(owned_daemon_pid)"
-  bind_baseline="$(
-    grep -Fc \
-      " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
-      "$STATE_DIR/daemon.log" 2>/dev/null || true
-  )"
+  bind_baseline="$(wireguard_bind_receipt_count)"
   [[ "$bind_baseline" =~ ^[1-9][0-9]*$ ]] \
     || fail "SIGKILL gate has no initial WireGuard bind receipt"
 
@@ -1377,8 +1445,10 @@ run_crash_restart_gate() {
   wait_until "the SIGKILLed production daemon to exit" no_nvpn_processes
   daemon_process_alive "$old_pid" \
     && fail "SIGKILLed production daemon is still alive"
+  wait_until "fail-closed WireGuard route teardown after SIGKILL" \
+    crash_fail_closed_after_sigkill
   record_crash_external_audit after-sigkill \
-    || fail "SIGKILL lost the live WireGuard route or secure DNS residue"
+    || fail "SIGKILL did not remove the tunnel/routes or retain secure-DNS repair ownership"
   runtime_wireguard_state_is true false \
     || fail "stopped status did not distinguish the crashed daemon"
   record_crash_external_audit after-stopped-status \
@@ -1386,22 +1456,16 @@ run_crash_restart_gate() {
 
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
     >"$RESULT_DIR/daemon-start-after-sigkill.txt"
-  if ! wait_until \
-    "automatic startup repair and a fresh production WireGuard payload" \
-    wireguard_routes_live
+  expected_bind_receipts="$((bind_baseline + 1))"
+  if ! restart_elapsed_ms="$(
+    wait_for_crash_restart_recovery \
+      "$killed_ms" "$expected_bind_receipts" "$old_pid"
+  )"
   then
     capture_wireguard_readiness_failure
+    capture_fips_peer_readiness_failure
     return 1
   fi
-  ready_ms="$(monotonic_ms)"
-  restart_elapsed_ms=$((ready_ms - killed_ms))
-  wait_until "the restarted daemon runtime/status WireGuard state" \
-    runtime_wireguard_state_is true true
-  wait_until "the restarted configured DNS state" runtime_dns_state_matches
-  wait_until "the restarted exact authenticated FIPS peer" \
-    runtime_fips_peer_connected
-  fips_host_tunnel_route_live \
-    || fail "restarted private-FIPS payload is not on its host tunnel"
   assert_single_owned_daemon \
     || fail "restart did not converge to exactly one owned daemon"
   new_pid="$(owned_daemon_pid)"
@@ -1409,17 +1473,14 @@ run_crash_restart_gate() {
     || fail "restart reused the SIGKILLed daemon PID"
   record_crash_external_audit after-restart \
     || fail "restarted daemon did not restore the full external network state"
-  bind_receipts="$(
-    grep -Fc \
-      " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
-      "$STATE_DIR/daemon.log" 2>/dev/null || true
-  )"
-  [[ "$bind_receipts" == "$((bind_baseline + 1))" ]] \
+  bind_receipts="$(wireguard_bind_receipt_count)"
+  [[ "$bind_receipts" == "$expected_bind_receipts" ]] \
     || fail "restart did not produce exactly one fresh WireGuard bind receipt"
 
   {
     printf 'startup_persist_path_completed=true\n'
-    printf 'sigkill_route_dns_residue_seen=true\n'
+    printf 'sigkill_tunnel_routes_absent=true\n'
+    printf 'sigkill_secure_dns_ownership_seen=true\n'
     printf 'old_pid=%s\n' "$old_pid"
     printf 'new_pid=%s\n' "$new_pid"
     printf 'restart_payload_ms=%s\n' "$restart_elapsed_ms"

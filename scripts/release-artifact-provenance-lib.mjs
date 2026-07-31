@@ -550,6 +550,10 @@ function requireMacosJoinReceipt({
   receipt,
   artifactReceipt,
   artifactReceiptSha256,
+  androidArtifact,
+  androidArtifactReceiptSha256,
+  androidInstallReceiptSha256,
+  androidInstallReceiptSize,
   iosArtifact,
   iosArtifactReceiptSha256,
   commit,
@@ -565,6 +569,7 @@ function requireMacosJoinReceipt({
     tree,
     label: 'macOS/mobile public-UI join receipt',
   })
+  const android = receipt.artifact?.android
   if (
     receipt.appLaunchArgumentsOrEnvironment !== false
     || receipt.desktopAdminAndroidJoiner !== true
@@ -578,11 +583,29 @@ function requireMacosJoinReceipt({
     || receipt.artifact?.artifactReceiptSha256 !== artifactReceiptSha256
     || receipt.artifact?.appExecutableSha256
       !== artifactReceipt.appExecutableSha256
+    || android?.artifactReceiptSha256 !== androidArtifactReceiptSha256
+    || android?.installReceiptSha256 !== androidInstallReceiptSha256
+    || android?.installReceiptSize !== androidInstallReceiptSize
     || receipt.artifact?.ios?.artifactReceiptSha256
       !== iosArtifactReceiptSha256
   ) {
     throw new Error('macOS/mobile public-UI join receipt is incomplete.')
   }
+  requireIdentityFieldsMatch(
+    android,
+    androidArtifact,
+    [
+      'appGitSha',
+      'appGitTree',
+      'fipsGitSha',
+      'fipsGitTree',
+      'apkSha256',
+      'installedApkSha256',
+      'package',
+      'signerCertificateSha256',
+    ],
+    'macOS/Android join artifact',
+  )
   requireIdentityFieldsMatch(
     receipt.artifact.ios,
     iosArtifact,
@@ -1352,6 +1375,10 @@ export function collectReleaseGateReceipts({
     artifactReceiptSha256: sha256FileSync(
       platformReceiptPaths.macos.artifact,
     ),
+    androidArtifact: android,
+    androidArtifactReceiptSha256: androidReceiptSha256,
+    androidInstallReceiptSha256,
+    androidInstallReceiptSize,
     iosArtifact,
     iosArtifactReceiptSha256,
     commit,

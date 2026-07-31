@@ -364,12 +364,24 @@ for path, payload in ((adhoc_path, adhoc), (mobile_path, mobile)):
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+android_identity = {
+    "artifactReceiptSha256": "a" * 64,
+    "appGitSha": mobile["appGitSha"],
+    "appGitTree": mobile["appGitTree"],
+    "fipsGitSha": mobile["fipsGitSha"],
+    "fipsGitTree": mobile["fipsGitTree"],
+    "apkSha256": "b" * 64,
+    "installedApkSha256": "b" * 64,
+    "package": "fi.siriusbusiness.nvpn",
+    "signerCertificateSha256": "c" * 64,
+}
 join = {
     "schema": 1,
     "platform": "mobile",
     "harnessGitSha": "8" * 40,
     "harnessGitTree": "9" * 40,
     "artifact": {
+        "android": android_identity,
         "ios": {
             **{
                 key: mobile[key]
@@ -516,6 +528,11 @@ desktop_join = {
     "artifact": {
         "appGitSha": mobile["appGitSha"],
         "appGitTree": mobile["appGitTree"],
+        "android": {
+            **android_identity,
+            "installReceiptSha256": "d" * 64,
+            "installReceiptSize": 1024,
+        },
         "ios": {
             "artifactReceiptSha256": hashlib.sha256(
                 mobile_path.read_bytes()

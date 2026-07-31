@@ -358,6 +358,26 @@ if [[ "$ARTIFACT_ACTION" == "full" ]]; then
     echo "macOS/mobile Release join gate rejected the exact mobile artifacts" >&2
     exit 1
   }
+  ANDROID_ARTIFACT_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:-}"
+  ANDROID_INSTALL_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT:-$RESULT_DIR/android-release-install.json}"
+  [[ -s "$ANDROID_ARTIFACT_RECEIPT" \
+    && -s "$ANDROID_INSTALL_RECEIPT" ]] || {
+    echo "macOS/mobile Release join gate requires the exact Android artifact and install receipts" >&2
+    exit 1
+  }
+  python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" \
+    validate-android \
+    --receipt "$ANDROID_INSTALL_RECEIPT" \
+    --android-artifact-receipt "$ANDROID_ARTIFACT_RECEIPT" \
+    --android-fips-metadata-receipt \
+      "${NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT:?exact Android FIPS receipt is required}" \
+    --apk "$RELEASE_JOIN_ANDROID_APK" \
+    --expected-android-app-sha "$RELEASE_JOIN_ANDROID_APP_SHA" \
+    --expected-android-app-tree "$RELEASE_JOIN_ANDROID_APP_TREE" \
+    --expected-android-fips-sha "$RELEASE_JOIN_FIPS_SHA" \
+    --expected-android-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
+    --expected-android-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
+    >/dev/null
 fi
 
 if [[ "$ARTIFACT_ACTION" != "verify-only" ]]; then
@@ -609,7 +629,9 @@ python3 - \
   "$DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE" \
   "$IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE" \
   "$APP_GIT_SHA" \
-  "$APP_GIT_TREE" <<'PY'
+  "$APP_GIT_TREE" \
+  "$ANDROID_ARTIFACT_RECEIPT" \
+  "$ANDROID_INSTALL_RECEIPT" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -638,7 +660,17 @@ ios_artifact = json.loads(ios_artifact_path.read_text(encoding="utf-8"))
     iphone_admin_desktop_joiner_relaunch,
     app_sha,
     app_tree,
+    android_artifact_receipt_name,
+    android_install_receipt_name,
 ) = sys.argv[5:]
+android_artifact_receipt = pathlib.Path(android_artifact_receipt_name)
+android_install_receipt = pathlib.Path(android_install_receipt_name)
+android_artifact = json.loads(
+    android_artifact_receipt.read_text(encoding="utf-8")
+)
+android_install = json.loads(
+    android_install_receipt.read_text(encoding="utf-8")
+)
 if (
     desktop_admin_iphone_joiner_relaunch != "1"
     or iphone_admin_desktop_joiner_relaunch != "1"
@@ -673,6 +705,26 @@ if (
     or any(not ios_artifact.get(key) for key in ios_identity_keys)
 ):
     raise SystemExit("iPhone join artifact receipt is not exact")
+android_identity_keys = (
+    "appGitSha",
+    "appGitTree",
+    "fipsGitSha",
+    "fipsGitTree",
+    "apkSha256",
+    "installedApkSha256",
+    "package",
+    "signerCertificateSha256",
+)
+if (
+    android_artifact.get("receiptSchema") != 2
+    or android_artifact.get("artifactType") != "Android Release APK"
+    or any(not android_artifact.get(key) for key in android_identity_keys)
+    or any(
+        android_install.get(key) != android_artifact.get(key)
+        for key in android_identity_keys
+    )
+):
+    raise SystemExit("Android join artifact/install receipt pair is not exact")
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
@@ -686,6 +738,20 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
                     artifact_path.read_bytes()
                 ).hexdigest(),
                 "appExecutableSha256": artifact["appExecutableSha256"],
+                "android": {
+                    "artifactReceiptSha256": hashlib.sha256(
+                        android_artifact_receipt.read_bytes()
+                    ).hexdigest(),
+                    "artifactReceiptSize": android_artifact_receipt.stat().st_size,
+                    "installReceiptSha256": hashlib.sha256(
+                        android_install_receipt.read_bytes()
+                    ).hexdigest(),
+                    "installReceiptSize": android_install_receipt.stat().st_size,
+                    **{
+                        key: android_artifact[key]
+                        for key in android_identity_keys
+                    },
+                },
                 "ios": {
                     "artifactReceiptSha256": hashlib.sha256(
                         ios_artifact_path.read_bytes()

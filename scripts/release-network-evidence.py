@@ -1386,7 +1386,8 @@ def build_desktop(args: argparse.Namespace) -> None:
         crash = key_values(crash_path)
         require(
             crash.get("startup_persist_path_completed") == "true"
-            and crash.get("sigkill_route_dns_residue_seen") == "true"
+            and crash.get("sigkill_tunnel_routes_absent") == "true"
+            and crash.get("sigkill_secure_dns_ownership_seen") == "true"
             and crash.get("old_pid") != crash.get("new_pid")
             and 0 <= int(crash.get("restart_payload_ms", "4001")) <= 4_000
             and crash.get("connected_peer_count") == "1",

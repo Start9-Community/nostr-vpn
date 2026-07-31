@@ -520,6 +520,21 @@ test('release receipt collection requires exact source and strict public UI gate
         ...source,
         artifactReceiptSha256: sha256(macosText),
         appExecutableSha256: macosArtifact.appExecutableSha256,
+        android: {
+          appGitSha: androidArtifact.appGitSha,
+          appGitTree: androidArtifact.appGitTree,
+          fipsGitSha: androidArtifact.fipsGitSha,
+          fipsGitTree: androidArtifact.fipsGitTree,
+          artifactReceiptSha256: sha256(androidText),
+          artifactReceiptSize: Buffer.byteLength(androidText),
+          installReceiptSha256: sha256(androidInstallText),
+          installReceiptSize: Buffer.byteLength(androidInstallText),
+          apkSha256: androidArtifact.apkSha256,
+          installedApkSha256: androidArtifact.installedApkSha256,
+          package: androidArtifact.package,
+          signerCertificateSha256:
+            androidArtifact.signerCertificateSha256,
+        },
         ios: {
           appGitSha: iosArtifact.appGitSha,
           appGitTree: iosArtifact.appGitTree,
@@ -954,7 +969,7 @@ test('release receipt collection requires exact source and strict public UI gate
       (receipt) => {
         receipt.preexistingCanonicalPackage = false
       },
-      /not bound to the exact desktop\/Android artifacts/,
+      /macOS\/mobile public-UI join receipt is incomplete/,
     )
     assertRejectedReceiptMutation(
       paths.android.install,

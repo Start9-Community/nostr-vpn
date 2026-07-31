@@ -864,9 +864,10 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'runtime_wireguard_state_is false true' \
   'runtime_wireguard_state_is false false' \
   'wait_for_crash_live_precondition' \
-  'crash_residue_after_sigkill' \
+  'crash_fail_closed_after_sigkill' \
   'startup_persist_path_completed=true' \
-  'sigkill_route_dns_residue_seen=true' \
+  'sigkill_tunnel_routes_absent=true' \
+  'sigkill_secure_dns_ownership_seen=true' \
   'sudo -n /bin/kill -KILL "$old_pid"' \
   'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK' \
   'select-direct' \

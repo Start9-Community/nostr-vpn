@@ -51,13 +51,29 @@ MAGIC_RESOLVER="$STATE_DIR/nvpn"
 printf 'config\n' >"$CONFIG"
 printf 'Managed by nvpn secure DNS\nnameserver 127.0.0.1\n' >"$MAGIC_RESOLVER"
 
-wireguard_interface() { printf 'utun9\n'; }
+WIREGUARD_INTERFACE_STATUS=0
+ENDPOINT_ROUTE_ABSENT_STATUS=1
+SECURE_DNS_STATUS=0
+RESTART_STATE_STATUS=0
+wireguard_interface() {
+  ((WIREGUARD_INTERFACE_STATUS == 0)) || return 1
+  printf 'utun9\n'
+}
 wireguard_endpoint_route_state_valid() { [[ "$1" == en0 ]]; }
-secure_dns_owned() { return 0; }
-wireguard_routes_live() { return 0; }
-runtime_wireguard_state_is() { [[ "$1 $2" == 'true true' ]]; }
-runtime_dns_state_matches() { return 0; }
-runtime_fips_peer_connected() { return 0; }
+wireguard_split_defaults_absent() {
+  ((WIREGUARD_INTERFACE_STATUS != 0))
+}
+wireguard_endpoint_route_absent() {
+  return "$ENDPOINT_ROUTE_ABSENT_STATUS"
+}
+secure_dns_owned() { return "$SECURE_DNS_STATUS"; }
+wireguard_routes_live() { return "$RESTART_STATE_STATUS"; }
+runtime_wireguard_state_is() {
+  [[ "$1 $2" == 'true true' ]] && return "$RESTART_STATE_STATUS"
+  return 1
+}
+runtime_dns_state_matches() { return "$RESTART_STATE_STATUS"; }
+runtime_fips_peer_connected() { return "$RESTART_STATE_STATUS"; }
 capture_fips_host_tunnel_route() { printf 'utun8\n'; }
 no_nvpn_processes() { return 0; }
 capture_underlay_routes() { printf 'route snapshot\n'; }
@@ -93,6 +109,70 @@ grep -Fq 'WG upstream up on utun9' \
 grep -Fq 'FIPS private mesh on utun8' \
   "$RESULT_DIR/crash-external-precondition-startup-order.txt" \
   || fail "post-persistence FIPS startup receipt was not retained"
+
+# SIGKILL must fail closed: the daemon, WireGuard utun/split defaults, and
+# endpoint bypass route are gone. The secure-DNS ownership state deliberately
+# remains so the next daemon can repair it before restoring traffic.
+WIREGUARD_INTERFACE_STATUS=1
+ENDPOINT_ROUTE_ABSENT_STATUS=0
+crash_fail_closed_after_sigkill \
+  || fail "fail-closed SIGKILL state was rejected"
+record_crash_external_audit after-sigkill \
+  || fail "fail-closed SIGKILL audit was rejected"
+grep -Fxq 'daemon_absent=true' \
+  "$RESULT_DIR/crash-external-after-sigkill-predicates.txt" \
+  || fail "SIGKILL audit omitted daemon absence"
+grep -Fxq 'wireguard_interface_absent=true' \
+  "$RESULT_DIR/crash-external-after-sigkill-predicates.txt" \
+  || fail "SIGKILL audit omitted WireGuard interface absence"
+grep -Fxq 'endpoint_route_absent=true' \
+  "$RESULT_DIR/crash-external-after-sigkill-predicates.txt" \
+  || fail "SIGKILL audit omitted endpoint-route absence"
+grep -Fxq 'secure_dns_owned=true' \
+  "$RESULT_DIR/crash-external-after-sigkill-predicates.txt" \
+  || fail "SIGKILL audit omitted secure-DNS repair ownership"
+
+WIREGUARD_INTERFACE_STATUS=0
+if crash_fail_closed_after_sigkill; then
+  fail "SIGKILL state accepted a surviving WireGuard utun"
+fi
+WIREGUARD_INTERFACE_STATUS=1
+ENDPOINT_ROUTE_ABSENT_STATUS=1
+if crash_fail_closed_after_sigkill; then
+  fail "SIGKILL state accepted a surviving endpoint bypass route"
+fi
+ENDPOINT_ROUTE_ABSENT_STATUS=0
+SECURE_DNS_STATUS=1
+if crash_fail_closed_after_sigkill; then
+  fail "SIGKILL state accepted lost secure-DNS repair ownership"
+fi
+SECURE_DNS_STATUS=0
+
+# Restart acceptance is one atomic production-state predicate: a fresh PID and
+# bind, tunnel/routes/DNS, authenticated peer, private payload, and WG payload.
+assert_single_owned_daemon() { return "$RESTART_STATE_STATUS"; }
+owned_daemon_pid() { printf '%s\n' "${RESTART_PID:-202}"; }
+wireguard_bind_receipt_count() { printf '%s\n' "${RESTART_BINDS:-2}"; }
+fips_host_tunnel_route_live() { return "$RESTART_STATE_STATUS"; }
+fips_payload_works() { return "$RESTART_STATE_STATUS"; }
+WIREGUARD_INTERFACE_STATUS=0
+crash_restart_state_live 2 101 \
+  || fail "complete fresh crash recovery was rejected"
+RESTART_PID=101
+if crash_restart_state_live 2 101; then
+  fail "crash recovery accepted the killed daemon PID"
+fi
+RESTART_PID=202
+RESTART_BINDS=3
+if crash_restart_state_live 2 101; then
+  fail "crash recovery accepted more than one fresh WireGuard bind"
+fi
+RESTART_BINDS=2
+RESTART_STATE_STATUS=1
+if crash_restart_state_live 2 101; then
+  fail "crash recovery accepted missing tunnel/DNS/FIPS/WG state"
+fi
+RESTART_STATE_STATUS=0
 
 # A stable externally visible failure must retain predicate, route, resolver,
 # status, and daemon-log evidence without inspecting the private journal.

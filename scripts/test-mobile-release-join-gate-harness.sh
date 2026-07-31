@@ -571,6 +571,47 @@ for required in (
         )
 
 for required in (
+    "NVPN_RELEASE_JOIN_ANDROID_RECEIPT",
+    "NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT",
+    "desktop_mobile_manual_join_receipt.py",
+    "validate-android",
+    '"artifactReceiptSha256"',
+    '"installReceiptSha256"',
+    '"installReceiptSize"',
+):
+    if required not in desktop:
+        raise SystemExit(
+            f"macOS/Pixel join summary does not bind the exact Android install: {required}"
+        )
+for source, label, required_tokens in (
+    (
+        ios_frozen_gate,
+        "frozen iOS gate",
+        (
+            'artifact.get("android")',
+            'android.get("artifactReceiptSha256")',
+            'android.get("installReceiptSha256"',
+            'android.get("installReceiptSize")',
+        ),
+    ),
+    (
+        release_provenance,
+        "release provenance",
+        (
+            "receipt.artifact?.android",
+            "android?.artifactReceiptSha256",
+            "android?.installReceiptSha256",
+            "android?.installReceiptSize",
+        ),
+    ),
+):
+    for required in required_tokens:
+        if required not in source:
+            raise SystemExit(
+                f"{label} does not validate macOS/Pixel Android binding: {required}"
+            )
+
+for required in (
     "-configuration Release",
     "build-for-testing",
     "NVPN_IOS_PROFILE_TYPE=IOS_APP_ADHOC",
