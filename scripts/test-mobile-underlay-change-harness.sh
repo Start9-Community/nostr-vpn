@@ -18,19 +18,19 @@ write_ping_fixture() {
   cat >"$temp/ping.log" <<'EOF'
 [1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
 [1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
-[1001.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
-[1001.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
-[1001.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
-[1001.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
+[1006.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
+[1006.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
+[1006.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1006.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
 EOF
 }
 
 cat >"$temp/markers.tsv" <<'EOF'
 switch_1_requested	1000500
 switch_1_outage	1000700
-switch_1_recovery_requested	1001000
+switch_1_recovery_requested	1006000
 switch_1_payload_recovery	200
-switch_1_verified	1001900
+switch_1_verified	1006900
 EOF
 write_ping_fixture
 python3 "$continuity" \
@@ -47,6 +47,7 @@ cycle = receipt["cycles"][0]
 assert cycle["outageReversePayloads"] == 0
 assert cycle["firstReversePayloadRecoveryMilliseconds"] == 200
 assert cycle["dnsAndWireGuardRecoveryMilliseconds"] == 200
+assert cycle["recoveryRequestedAtMilliseconds"] - cycle["outageAtMilliseconds"] == 5300
 for fabricated in (
     "appProcessContinuity",
     "outageObserved",
@@ -59,8 +60,8 @@ for fabricated in (
 assert receipt["bidirectionalPayload"].startswith("wireguard-server-icmp")
 PY
 
-cp "$temp/markers.tsv" "$temp/slow-markers.tsv"
-python3 - "$temp/slow-markers.tsv" <<'PY'
+cp "$temp/markers.tsv" "$temp/slow-product-markers.tsv"
+python3 - "$temp/slow-product-markers.tsv" <<'PY'
 import pathlib
 import sys
 
@@ -75,13 +76,13 @@ path.write_text(
 PY
 write_ping_fixture
 if python3 "$continuity" \
-  "$temp/ping.log" "$temp/slow-markers.tsv" "$temp/slow.json" iOS 4000 \
-  >"$temp/slow.out" 2>"$temp/slow.err"
+  "$temp/ping.log" "$temp/slow-product-markers.tsv" "$temp/slow-product.json" Android 4000 \
+  >"$temp/slow-product.out" 2>"$temp/slow-product.err"
 then
-  echo "continuity validator accepted recovery slower than four seconds" >&2
+  echo "continuity validator accepted slow product recovery" >&2
   exit 1
 fi
-grep -Fq "payload recovery was 4100ms" "$temp/slow.err"
+grep -Fq "payload recovery was 4100ms" "$temp/slow-product.err"
 
 cp "$temp/markers.tsv" "$temp/no-outage.tsv"
 sed -i '' '/switch_1_outage/d' "$temp/no-outage.tsv"
@@ -94,7 +95,7 @@ then
 fi
 grep -Fq "missing marker switch_1_outage" "$temp/no-outage.err"
 
-sed 's/switch_1_outage	1000700/switch_1_outage	1001000/' \
+sed 's/switch_1_outage	1000700/switch_1_outage	1006000/' \
   "$temp/markers.tsv" >"$temp/zero-outage-window.tsv"
 if python3 "$continuity" \
   "$temp/ping.log" "$temp/zero-outage-window.tsv" \
@@ -148,12 +149,12 @@ PY
 cat >"$temp/late-reverse.log" <<'EOF'
 [1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
 [1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
-[1005.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
-[1005.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
-[1005.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
-[1005.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
+[1010.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
+[1010.400] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
+[1010.600] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1010.800] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
 EOF
-sed 's/switch_1_verified	1001900/switch_1_verified	1005900/' \
+sed 's/switch_1_verified	1006900/switch_1_verified	1010900/' \
   "$temp/markers.tsv" >"$temp/late-reverse-markers.tsv"
 if python3 "$continuity" \
   "$temp/late-reverse.log" "$temp/late-reverse-markers.tsv" \
@@ -410,6 +411,13 @@ for required in (
 ):
     if required not in android + ios + ios_test:
         raise SystemExit(f"radio-bounce implementation is missing {required}")
+gate = android[android.index("run_android_underlay_network_change_gate()") :]
+ordered = [gate.index(needle) for needle in (
+    'shell svc wifi enable', 'android_underlay_wait_validated',
+    'recovery_requested_ms="$(mobile_underlay_now_ms)"',
+    'android_underlay_recovery_payloads')]
+if ordered != sorted(ordered):
+    raise SystemExit("Android recovery budget starts before validated Wi-Fi")
 PY
 [[ ! -e "$ROOT/scripts/lib-mobile-ios-hotspot.sh" ]] \
   && [[ ! -e "$ROOT/scripts/lib-mobile-android-managed-ap.sh" ]] \

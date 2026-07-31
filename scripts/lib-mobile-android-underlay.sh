@@ -402,9 +402,6 @@ run_android_underlay_network_change_gate() {
       return 1
     }
 
-  recovery_requested_ms="$(mobile_underlay_now_ms)"
-  printf 'switch_1_recovery_requested\t%s\n' \
-    "$recovery_requested_ms" >>"$markers"
   "$ADB" -s "$serial" shell svc wifi enable >/dev/null
   android_underlay_wait_wifi_radio enabled 5 || {
     echo "Android Wi-Fi radio did not turn on" >&2
@@ -419,6 +416,9 @@ run_android_underlay_network_change_gate() {
       mobile_continuity_stop
       return 1
     }
+  recovery_requested_ms="$(mobile_underlay_now_ms)"
+  printf 'switch_1_recovery_requested\t%s\n' \
+    "$recovery_requested_ms" >>"$markers"
   android_underlay_recovery_payloads \
     "$recovery_requested_ms" "$recovery_max_ms" || {
     mobile_continuity_stop
