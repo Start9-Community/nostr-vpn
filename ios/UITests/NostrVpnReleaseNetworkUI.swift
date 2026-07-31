@@ -191,13 +191,9 @@ extension NostrVpnReleaseNetworkUITests {
     }
 
     func replaceText(_ field: XCUIElement, with value: String) {
-        field.tap()
-        field.typeKey("a", modifierFlags: .command)
-        field.typeKey(.delete, modifierFlags: [])
-        field.typeText(value)
         XCTAssertTrue(
-            enteredText(field) == value,
-            "Shipped text control did not accept the exact supplied value"
+            ShippedUIInteraction.replaceText(field, with: value, in: app),
+            "Shipped text control did not retain the exact supplied value"
         )
     }
 

@@ -165,10 +165,11 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         guard createChoice.waitForExistence(timeout: 8), createChoice.isHittable else {
             throw gateError("Shipped Create Network control was unavailable")
         }
-        createChoice.tap()
         let name = element("network-create-name")
-        guard name.waitForExistence(timeout: 5) else {
-            throw gateError("Shipped network-name field was unavailable")
+        guard ShippedUIInteraction.reveal(name, byTapping: createChoice) else {
+            throw gateError(
+                "Shipped Create Network control did not reveal the network-name field"
+            )
         }
         replaceText(name, with: spec.networkName)
         dismissKeyboard()

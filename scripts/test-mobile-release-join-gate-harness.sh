@@ -75,6 +75,7 @@ python3 - \
   "$ROOT/scripts/desktop-manual-join-ax.swift" \
   "$ROOT/scripts/macos_release_join_artifact.py" \
   "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift" \
+  "$ROOT/ios/UITests/NostrVpnPhysicalGateSupport.swift" \
   "$ROOT/ios/project.yml" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDevices.kt" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
@@ -112,6 +113,7 @@ def read(path):
     desktop_ui_driver,
     desktop_artifact,
     ios_test,
+    ios_interaction,
     ios_project,
     android_devices,
     android_components,
@@ -149,6 +151,24 @@ if "run-as" in artifacts:
 for forbidden in (".launchArguments =", ".launchEnvironment ="):
     if forbidden in ios_test:
         raise SystemExit(f"Release join XCTest injects app state through {forbidden}")
+for required in (
+    "private static let maximumAttempts = 2",
+    "app.keyboards.firstMatch.waitForExistence",
+    "field.typeKey(.delete",
+    "if waitForValue(value, in: field)",
+):
+    if required not in ios_interaction:
+        raise SystemExit(f"Release join XCTest lacks bounded verified text entry: {required}")
+if ".coordinate(" in ios_interaction:
+    raise SystemExit("Release join XCTest text entry uses coordinate tapping")
+for required in (
+    "ShippedUIInteraction.reveal(nameField, byTapping: create)",
+    "let retained = ShippedUIInteraction.replaceText(field, with: value, in: app)",
+    "if retained {",
+    "field.typeKey(.return",
+):
+    if required not in ios_test:
+        raise SystemExit(f"Release join XCTest bypasses verified interaction: {required}")
 if 'element("join-request-qr")' in ios_test:
     raise SystemExit("Release join XCTest still targets the collapsed QR element")
 qr_width_check = ios_test.split(

@@ -61,3 +61,64 @@ enum PhysicalGateTimeouts {
         return min(requested, defaultValue)
     }
 }
+
+enum ShippedUIInteraction {
+    private static let maximumAttempts = 2
+
+    static func reveal(
+        _ target: XCUIElement,
+        byTapping control: XCUIElement
+    ) -> Bool {
+        if target.exists {
+            return true
+        }
+        for _ in 0..<maximumAttempts {
+            guard control.waitForExistence(timeout: 2), control.isHittable else {
+                return false
+            }
+            control.tap()
+            if target.waitForExistence(timeout: 3) {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func replaceText(
+        _ field: XCUIElement,
+        with value: String,
+        in app: XCUIApplication
+    ) -> Bool {
+        guard field.waitForExistence(timeout: 5), field.isHittable else {
+            return false
+        }
+        for _ in 0..<maximumAttempts {
+            field.tap()
+            guard app.keyboards.firstMatch.waitForExistence(timeout: 1) else {
+                continue
+            }
+            field.typeKey("a", modifierFlags: .command)
+            field.typeKey(.delete, modifierFlags: [])
+            field.typeText(value)
+            if waitForValue(value, in: field) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func waitForValue(
+        _ expected: String,
+        in field: XCUIElement
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            let actual = field.value as? String ?? ""
+            if actual != field.placeholderValue, actual == expected {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while Date() < deadline
+        return false
+    }
+}

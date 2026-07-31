@@ -255,8 +255,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         }
         let create = element("network-setup-create")
         XCTAssertTrue(create.waitForExistence(timeout: 5))
-        create.tap()
-        replaceText(element("network-create-name"), with: name)
+        let nameField = element("network-create-name")
+        XCTAssertTrue(
+            ShippedUIInteraction.reveal(nameField, byTapping: create),
+            "Shipped Create Network control did not reveal the network-name field"
+        )
+        replaceText(nameField, with: name)
         scrollTo("network-create-submit").tap()
         XCTAssertTrue(app.tabBars.buttons["Devices"].waitForExistence(timeout: 10))
     }
@@ -293,13 +297,14 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     private func replaceText(_ field: XCUIElement, with value: String) {
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
-        field.tap()
-        if let current = field.value as? String, !current.isEmpty {
-            field.typeKey("a", modifierFlags: .command)
+        let retained = ShippedUIInteraction.replaceText(field, with: value, in: app)
+        XCTAssertTrue(
+            retained,
+            "Shipped text control did not retain the exact supplied value"
+        )
+        if retained {
+            field.typeKey(.return, modifierFlags: [])
         }
-        field.typeText(value)
-        field.typeKey(.return, modifierFlags: [])
     }
 
     private func publicValue(
