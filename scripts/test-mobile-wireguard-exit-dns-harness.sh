@@ -188,6 +188,36 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     assert support["dnsSettingsReceiptCount"] == len(cases)
     assert len(evidence_paths) == len(cases)
+    rapid_delays = (0, 10, 30, 80, 160, 320, 640, 1000)
+    (root / "mobile-android-release-rapid-start-stop-123.tsv").write_text(
+        "".join(f"{delay}\t{index + 1}\t0\n" for index, delay in enumerate(rapid_delays)),
+        encoding="utf-8",
+    )
+    for label in (
+        "before-connect",
+        "direct-while-connected",
+        "after-disconnect",
+        "rapid-cancel-stable-direct",
+        "rapid-cancel-reconnect-cleanup",
+    ):
+        (root / f"mobile-android-network-{label}-123.txt").write_text(
+            f"label={label}\n0% packet loss\n",
+            encoding="utf-8",
+        )
+        (root / f"mobile-android-network-{label}-direct-https-123.txt").write_text(
+            "directHttpsStatus=200\n",
+            encoding="utf-8",
+        )
+    (root / "mobile-android-network-rapid-cancel-full-reconnect-123.txt").write_text(
+        "capturedHttpStatus=200\ncapturedHttpsStatus=200\nexitSourceIp=192.0.2.1\n",
+        encoding="utf-8",
+    )
+    support, evidence_paths = module.validate_android_support(
+        root, list(cases), "wireguard-dns"
+    )
+    assert support["rapidStartStopCycles"] == len(rapid_delays)
+    assert support["directBeforeConnectedAfter"] is True
+    assert len(evidence_paths) == len(cases) + 12
     custom = root / "mobile-android-exit-dns-state-3.json"
     payload = json.loads(custom.read_text(encoding="utf-8"))
     payload["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"

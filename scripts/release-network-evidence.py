@@ -767,7 +767,7 @@ def validate_android_support(
         for label in direct_labels:
             ping_path = exactly_one(
                 root,
-                f"mobile-android-network-{label}-*.txt",
+                f"mobile-android-network-{label}-[0-9]*.txt",
                 f"Android {label} Direct DNS",
             )
             https_path = exactly_one(
