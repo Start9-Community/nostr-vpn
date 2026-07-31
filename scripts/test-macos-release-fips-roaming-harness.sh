@@ -8,6 +8,7 @@ GUEST="$ROOT/scripts/e2e-macos-release-network.sh"
 REMOTE_PEER="$ROOT/scripts/macos-release-fips-peer-remote.sh"
 HOST_PREP="$ROOT/scripts/prepare-macos-release-fips-peer.sh"
 RELEASE_GATE="$ROOT/scripts/release-gate.sh"
+NETWORK_EVIDENCE="$ROOT/scripts/release-network-evidence.py"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-fips-roaming.XXXXXX")"
 
 cleanup() {
@@ -174,6 +175,9 @@ require_tokens "$GUEST" "real crash/restart cleanup evidence" \
   'startup_persist_path_completed=true' \
   'sigkill_route_dns_residue_seen=true' \
   'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK'
+require_tokens "$NETWORK_EVIDENCE" "truthful crash receipt validation" \
+  'crash.get("startup_persist_path_completed") == "true"' \
+  'crash.get("sigkill_route_dns_residue_seen") == "true"'
 if grep -Eq 'sudo -n /(bin/cat|usr/bin/stat)' "$GUEST" \
   || grep -Fq 'daemon.cleanup.json' "$GUEST"
 then

@@ -664,7 +664,7 @@ crash_live_precondition() {
     && runtime_wireguard_state_is true true \
     && runtime_dns_state_matches \
     && runtime_fips_peer_connected \
-    && fips_host_tunnel_route_live \
+    && capture_fips_host_tunnel_route >/dev/null \
     && crash_startup_log_order_is_valid
 }
 
@@ -697,7 +697,7 @@ record_crash_external_audit() {
     snapshot_predicate "$predicates" authenticated_fips_peer \
       runtime_fips_peer_connected
     snapshot_predicate "$predicates" fips_host_tunnel_route_live \
-      fips_host_tunnel_route_live
+      capture_fips_host_tunnel_route
     snapshot_predicate "$predicates" startup_log_order \
       crash_startup_log_order_is_valid
     crash_live_precondition || return 1
@@ -766,7 +766,7 @@ capture_crash_external_failure() {
   snapshot_predicate "$predicates" authenticated_fips_peer \
     runtime_fips_peer_connected
   snapshot_predicate "$predicates" fips_host_tunnel_route_live \
-    fips_host_tunnel_route_live
+    capture_fips_host_tunnel_route
   snapshot_predicate "$predicates" startup_log_order \
     crash_startup_log_order_is_valid
   capture_underlay_routes \

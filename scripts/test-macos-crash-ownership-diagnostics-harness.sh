@@ -58,7 +58,7 @@ wireguard_routes_live() { return 0; }
 runtime_wireguard_state_is() { [[ "$1 $2" == 'true true' ]]; }
 runtime_dns_state_matches() { return 0; }
 runtime_fips_peer_connected() { return 0; }
-fips_host_tunnel_route_live() { return 0; }
+capture_fips_host_tunnel_route() { printf 'utun8\n'; }
 no_nvpn_processes() { return 0; }
 capture_underlay_routes() { printf 'route snapshot\n'; }
 secure_dns_store_state() { printf 'dynamic resolver snapshot\n'; }
