@@ -201,6 +201,19 @@ remote_phase() {
   ssh "${options[@]}" "$SSH_HOST" "$remote_command"
 }
 
+poll_remote_underlay_status() {
+  remote_shell secondary "
+    for ignored in {1..300}; do
+      phase_result=\$(cat '$REMOTE_DIR/underlay.status' 2>/dev/null || true)
+      case \"\$phase_result\" in
+        pass|fail:*) printf '%s\\n' \"\$phase_result\"; exit 0 ;;
+      esac
+      sleep 0.1
+    done
+    echo timeout
+  "
+}
+
 copy_guest_results() {
   [[ -n "$REMOTE_DIR" ]] || return 0
   mkdir -p "$ARTIFACT_DIR"
@@ -633,18 +646,7 @@ before_transfer="$(
 )"
 before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
 remote_phase primary underlay-start
-underlay_status="$(
-  remote_shell secondary "
-    for ignored in \$(seq 1 300); do
-      status=\$(cat '$REMOTE_DIR/underlay.status' 2>/dev/null || true)
-      case \"\$status\" in
-        pass|fail:*) printf '%s\\n' \"\$status\"; exit 0 ;;
-      esac
-      sleep 0.1
-    done
-    echo timeout
-  "
-)"
+underlay_status="$(poll_remote_underlay_status)"
 if [[ "$underlay_status" != "pass" ]]; then
   remote_shell secondary \
     "tail -n 120 '$REMOTE_DIR/results/underlay-run.log'" >&2 || true

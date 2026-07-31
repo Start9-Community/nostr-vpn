@@ -35,6 +35,32 @@ for path in "$CONTROLLER" "$GUEST" "$REMOTE_PEER" "$HOST_PREP"; do
   bash -n "$path"
 done
 
+POLL_DEFINITION="$TMP_ROOT/poll-remote-underlay-status.sh"
+sed -n '/^poll_remote_underlay_status() {/,/^}/p' \
+  "$CONTROLLER" >"$POLL_DEFINITION"
+[[ -s "$POLL_DEFINITION" ]] \
+  || fail "remote underlay status poll helper is missing"
+if grep -Eq '(^|[^A-Za-z0-9_])status=' "$POLL_DEFINITION"; then
+  fail "remote underlay poll assigns zsh's read-only status parameter"
+fi
+grep -Fq 'for ignored in {1..300}; do' "$POLL_DEFINITION" \
+  || fail "remote underlay poll depends on a non-shell sequence helper"
+POLL_STATE_DIR="$TMP_ROOT/poll-state"
+mkdir -p "$POLL_STATE_DIR"
+bash -s -- "$POLL_DEFINITION" "$POLL_STATE_DIR" <<'BASH'
+set -euo pipefail
+source "$1"
+REMOTE_DIR="$2"
+remote_shell() {
+  [[ "$1" == "secondary" ]]
+  zsh -f -c "$2"
+}
+printf 'pass\n' >"$REMOTE_DIR/underlay.status"
+[[ "$(poll_remote_underlay_status)" == "pass" ]]
+printf 'fail:37\n' >"$REMOTE_DIR/underlay.status"
+[[ "$(poll_remote_underlay_status)" == "fail:37" ]]
+BASH
+
 require_tokens "$HOST_PREP" "host-only immutable peer preparation" \
   '[[ "$(uname -s)" == "Darwin" ]]' \
   'x86_64-unknown-linux-musl' \
@@ -74,6 +100,7 @@ require_tokens "$CONTROLLER" "host import and exact receipts" \
   'preserving its state' \
   'test ! -e "$FIPS_PEER_REMOTE_DIR"' \
   'remote_phase secondary crash-restart' \
+  'poll_remote_underlay_status' \
   'macOS SIGKILL/restart WireGuard bytes' \
   'fips-peer-after-crash-restart.json'
 require_tokens "$REMOTE_PEER" "owned unique production peer" \
@@ -84,7 +111,7 @@ require_tokens "$REMOTE_PEER" "owned unique production peer" \
   '[[ "$BINARY" == "${STATE_DIR%/state}/nvpn" ]]' \
   'process_start_signature' \
   'daemon_pid_owned' \
-  'nvpn_require_single_udp_listener' \
+  'nvpn_require_dual_family_udp_listeners' \
   'so_reuseport_ambiguity=false' \
   '--fips-advertise-public-endpoint false' \
   '--fips-nostr-discovery-enabled false' \
