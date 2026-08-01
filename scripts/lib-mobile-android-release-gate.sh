@@ -658,29 +658,13 @@ android_release_connect_ui() {
 }
 
 android_release_disconnect_ui() {
-  local checked attempts=0
+  local checked
   checked="$(android_release_vpn_toggle_checked)" || {
     echo "Android Release shipped VPN toggle was unavailable during disconnect" >&2
     return 1
   }
   if [[ "$checked" == "true" ]]; then
-    while ((attempts < 2)); do
-      ((attempts += 1))
-      tap_android_ui description "Turn VPN off" || {
-        echo "Android Release shipped Off tap failed: attempt=$attempts" >&2
-        return 1
-      }
-      if android_release_wait_vpn_toggle_state false 2; then
-        break
-      fi
-      checked="$(android_release_vpn_toggle_checked_now 2>/dev/null || true)"
-      [[ "$checked" == "false" ]] && break
-      [[ "$checked" == "true" && "$attempts" -eq 1 ]] || {
-        echo "Android Release shipped Off action was not acknowledged: attempt=$attempts toggle=${checked:-unavailable}" >&2
-        return 1
-      }
-    done
-    echo "Android Release shipped Off action acknowledged attempts=$attempts"
+    tap_android_ui description "Turn VPN off" || return 1
   fi
   wait_until "$VPN_STOP_WAIT_SECS" android_release_vpn_off_and_inactive || {
     echo "Android Release VPN did not reach OS-inactive / shipped-toggle-Off state" >&2
@@ -958,17 +942,6 @@ android_release_sleep_milliseconds() {
   [[ "$milliseconds" =~ ^[0-9]+$ ]] || return 1
   (( milliseconds == 0 )) && return 0
   sleep "$(printf '%d.%03d' "$((milliseconds / 1000))" "$((milliseconds % 1000))")"
-}
-
-android_release_wait_vpn_toggle_state() {
-  local expected="$1" wait_seconds="${2:-$ANDROID_UI_WAIT_SECS}" checked=""
-  local deadline=$((SECONDS + wait_seconds))
-  while ((SECONDS < deadline)); do
-    checked="$(android_release_vpn_toggle_checked_now 2>/dev/null || true)"
-    [[ "$checked" == "$expected" ]] && return 0
-    sleep 0.1
-  done
-  return 1
 }
 
 android_release_rapid_cancel_once() {
