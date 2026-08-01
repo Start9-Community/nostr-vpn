@@ -1246,9 +1246,10 @@ export function collectReleaseGateReceipts({
     || androidReplacement.canonicalPackageCount !== 1
     || androidReplacement.retiredPackageCount !== 0
     || androidReplacement.canonicalMainProcessCount !== 1
-    || androidReplacement.canonicalUpdatePreservedData !== true
+    || androidReplacement.canonicalReplacementInstallVerified !== true
+    || androidReplacement.sealedReleaseNonDebuggable !== true
     || androidReplacement.shippedRemovalPrompt !== true
-    || androidReplacement.vpnStartBlockedBeforeCleanup !== true
+    || androidReplacement.vpnServiceInactiveWhilePromptShown !== true
     || androidReplacement.systemUninstallConfirmed !== true
   ) {
     throw new Error(

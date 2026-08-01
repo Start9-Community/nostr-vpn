@@ -27,7 +27,6 @@ WAIT_SECS="${NVPN_ANDROID_LEGACY_WAIT_SECS:-15}"
 ADB="${ADB:-adb}"
 serial=""
 work_dir=""
-logcat_pid=""
 retired_fixture_total_bytes=0
 
 select_device() {
@@ -49,10 +48,6 @@ cleanup() {
   local status="$?"
   local package
   trap - EXIT
-  if [[ -n "$logcat_pid" ]]; then
-    kill "$logcat_pid" >/dev/null 2>&1 || true
-    wait "$logcat_pid" >/dev/null 2>&1 || true
-  fi
   if [[ -n "$serial" ]]; then
     for package in "${RETIRED_PACKAGES[@]}"; do
       package_installed "$package" \
@@ -229,47 +224,28 @@ install_retired_fixture_apks() {
   done
 }
 
-assert_canonical_update_preserved_data() {
-  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" mkdir -p files
-  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
-    touch files/nvpn-replacement-marker
-  "$ADB" -s "$serial" install -r "$work_dir/canonical.apk" >/dev/null
-  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
-    test -f files/nvpn-replacement-marker
-  "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
-    rm -f files/nvpn-replacement-marker
+assert_canonical_is_nondebuggable() {
+  ! "$ADB" -s "$serial" shell dumpsys package "$CANONICAL_PACKAGE" \
+    | tr -d '\r' \
+    | grep -Eq '(^|[[:space:]])DEBUGGABLE([[:space:]]|$)'
 }
 
-assert_vpn_start_blocked() {
-  local android_user service_component
-  android_user="$("$ADB" -s "$serial" shell am get-current-user | tr -d '\r')"
-  [[ "$android_user" =~ ^[0-9]+$ ]] || return 1
-  service_component="$CANONICAL_PACKAGE/org.nostrvpn.app.vpn.NostrVpnService"
-  "$ADB" -s "$serial" logcat -v brief -s NostrVpnService:E '*:S' \
-    >"$work_dir/vpn-start-guard.log" &
-  logcat_pid="$!"
-  sleep 0.25
-  if ! "$ADB" -s "$serial" shell run-as "$CANONICAL_PACKAGE" \
-    am start-foreground-service \
-    --user "$android_user" \
-    -n "$service_component" \
-    -a fi.siriusbusiness.nvpn.vpn.CONNECT \
-    --es configJson '{}' >/dev/null
-  then
-    kill "$logcat_pid" >/dev/null 2>&1 || true
-    wait "$logcat_pid" >/dev/null 2>&1 || true
-    logcat_pid=""
-    return 1
-  fi
-  sleep 1
-  kill "$logcat_pid" >/dev/null 2>&1 || true
-  wait "$logcat_pid" >/dev/null 2>&1 || true
-  logcat_pid=""
-  grep -Fq 'Refusing Android VPN start while conflicting nVPN packages remain:' \
-    "$work_dir/vpn-start-guard.log" \
-    || return 1
+assert_vpn_inactive_while_removal_prompt_is_shown() {
   ! "$ADB" -s "$serial" shell dumpsys activity services "$CANONICAL_PACKAGE" \
     | grep -Fq 'NostrVpnService'
+}
+
+installed_canonical_apk_sha256() {
+  local package_path
+  package_path="$(
+    "$ADB" -s "$serial" shell pm path "$CANONICAL_PACKAGE" \
+      | tr -d '\r' \
+      | sed -n 's/^package://p'
+  )"
+  [[ -n "$package_path" && "$package_path" != *$'\n'* ]] || return 1
+  "$ADB" -s "$serial" exec-out sh -c "cat '$package_path'" \
+    | shasum -a 256 \
+    | awk '{print $1}'
 }
 
 for command in "$ADB" gradle unzip; do
@@ -304,8 +280,8 @@ fi
 cp "$CANONICAL_APK" "$work_dir/canonical.apk"
 
 "$ADB" -s "$serial" install -r "$work_dir/canonical.apk" >/dev/null
-assert_canonical_update_preserved_data \
-  || { echo "Canonical Android update did not preserve app data in place" >&2; exit 1; }
+assert_canonical_is_nondebuggable \
+  || { echo "Android replacement e2e requires the sealed nondebuggable Release app" >&2; exit 1; }
 "$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE"
 build_retired_fixture_apks
 install_retired_fixture_apks
@@ -315,12 +291,8 @@ assert_no_retired_processes \
 "$ADB" -s "$serial" shell monkey -p "$CANONICAL_PACKAGE" 1 >/dev/null
 wait_for_ui description "Remove older Nostr VPN installation" \
   || { echo "Canonical Android migration prompt did not reach the foreground" >&2; exit 1; }
-assert_vpn_start_blocked \
-  || { echo "Canonical Android VPN service started before retired apps were removed" >&2; exit 1; }
-"$ADB" -s "$serial" shell am force-stop "$CANONICAL_PACKAGE"
-"$ADB" -s "$serial" shell monkey -p "$CANONICAL_PACKAGE" 1 >/dev/null
-wait_for_ui description "Remove older Nostr VPN installation" \
-  || { echo "Canonical Android migration prompt did not recover after guarded VPN start" >&2; exit 1; }
+assert_vpn_inactive_while_removal_prompt_is_shown \
+  || { echo "Canonical Android VPN service was active behind the removal prompt" >&2; exit 1; }
 
 for package in "${RETIRED_PACKAGES[@]}"; do
   tap_ui description "Remove older Nostr VPN installation" \
@@ -346,12 +318,18 @@ process_count="$("$ADB" -s "$serial" shell pidof "$CANONICAL_PACKAGE" 2>/dev/nul
   | tr -d ' ')"
 [[ "$process_count" == "1" ]] \
   || { echo "Canonical Android app has $process_count main processes after replacement" >&2; exit 1; }
+installed_apk_sha="$(installed_canonical_apk_sha256)" \
+  || { echo "Could not hash the installed canonical Android APK" >&2; exit 1; }
+canonical_apk_sha="$(shasum -a 256 "$work_dir/canonical.apk" | awk '{print $1}')"
+[[ "$installed_apk_sha" == "$canonical_apk_sha" ]] \
+  || { echo "Installed canonical Android APK differs from the sealed artifact" >&2; exit 1; }
 
 mkdir -p "$RESULT_DIR"
 python3 - \
   "$RESULT_DIR/mobile-android-legacy-replacement.json" \
   "$work_dir/canonical.apk" \
   "$ARTIFACT_RECEIPT" \
+  "$installed_apk_sha" \
   "$(git -C "$ROOT" rev-parse HEAD)" \
   "$(git -C "$ROOT" rev-parse HEAD^{tree})" <<'PY'
 import hashlib
@@ -359,7 +337,7 @@ import json
 import pathlib
 import sys
 
-output, apk_path, receipt_path, app_sha, app_tree = sys.argv[1:]
+output, apk_path, receipt_path, installed_apk_sha, app_sha, app_tree = sys.argv[1:]
 apk = pathlib.Path(apk_path)
 receipt_file = pathlib.Path(receipt_path)
 if not receipt_path or not receipt_file.is_file():
@@ -374,6 +352,9 @@ if (
     or receipt.get("apkSha256") != apk_sha
     or receipt.get("installedApkSha256") != apk_sha
     or receipt.get("companySigningVerified") is not True
+    or receipt.get("replacementInstall") is not True
+    or receipt.get("debuggable") is not False
+    or installed_apk_sha != apk_sha
 ):
     raise SystemExit("Android replacement gate artifact identity differs")
 with open(output, "w", encoding="utf-8") as handle:
@@ -395,9 +376,10 @@ with open(output, "w", encoding="utf-8") as handle:
             "canonicalPackageCount": 1,
             "retiredPackageCount": 0,
             "canonicalMainProcessCount": 1,
-            "canonicalUpdatePreservedData": True,
+            "canonicalReplacementInstallVerified": True,
+            "sealedReleaseNonDebuggable": True,
             "shippedRemovalPrompt": True,
-            "vpnStartBlockedBeforeCleanup": True,
+            "vpnServiceInactiveWhilePromptShown": True,
             "systemUninstallConfirmed": True,
         },
         handle,

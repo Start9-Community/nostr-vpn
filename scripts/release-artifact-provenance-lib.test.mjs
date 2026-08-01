@@ -406,9 +406,10 @@ test('release receipt collection requires exact source and strict public UI gate
       canonicalPackageCount: 1,
       retiredPackageCount: 0,
       canonicalMainProcessCount: 1,
-      canonicalUpdatePreservedData: true,
+      canonicalReplacementInstallVerified: true,
+      sealedReleaseNonDebuggable: true,
       shippedRemovalPrompt: true,
-      vpnStartBlockedBeforeCleanup: true,
+      vpnServiceInactiveWhilePromptShown: true,
       systemUninstallConfirmed: true,
     }))
     writeFileSync(
