@@ -366,6 +366,9 @@ class MainActivity : ComponentActivity() {
                     qrJson = { text -> core.qrMatrix(text) },
                     scanDeviceQr = { networkId -> requestDeviceQrScan(networkId) },
                     dispatch = dispatch,
+                    toggleVpn = {
+                        dispatch(nextVpnToggleAction(state.vpnEnabled))
+                    },
                     selfUpdateState = selfUpdateState,
                     selfUpdateActions = updateActions,
                     importWireGuardConfigFile = { importWireGuardConfigFile() },
@@ -523,3 +526,6 @@ class MainActivity : ComponentActivity() {
     }
 
 }
+
+internal fun nextVpnToggleAction(vpnEnabled: Boolean): JSONObject =
+    if (vpnEnabled) NativeActions.disconnectVpn() else NativeActions.connectVpn()

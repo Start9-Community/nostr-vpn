@@ -61,6 +61,12 @@ class TunnelRefreshPolicyTest {
     }
 
     @Test
+    fun rapidToggleReadsAuthoritativeStateInsteadOfAStaleComposeValue() {
+        assertEquals("connect_vpn", nextVpnToggleAction(vpnEnabled = false).getString("type"))
+        assertEquals("disconnect_vpn", nextVpnToggleAction(vpnEnabled = true).getString("type"))
+    }
+
+    @Test
     fun tunnelTransitionsAndRefreshesSelectTheExpectedServiceCommand() {
         assertEquals(
             TunnelServiceCommand.CONNECT,

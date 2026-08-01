@@ -125,6 +125,7 @@ internal fun NostrVpnApp(
     qrJson: (String) -> JSONObject,
     scanDeviceQr: (String) -> Unit,
     dispatch: (JSONObject) -> Unit,
+    toggleVpn: () -> Unit,
     selfUpdateState: AndroidSelfUpdateState,
     selfUpdateActions: SelfUpdateActions,
     importWireGuardConfigFile: () -> Unit,
@@ -158,7 +159,7 @@ internal fun NostrVpnApp(
                     state = state,
                     network = network,
                     activeNetwork = activeNetwork,
-                    dispatch = dispatch,
+                    toggleVpn = toggleVpn,
                     onSelectNetwork = { shownNetworkId = it },
                     onAddNetwork = { showAddNetwork = true },
                 )
@@ -280,7 +281,7 @@ private fun MobileTopBar(
     state: AppState,
     network: NetworkState?,
     activeNetwork: NetworkState?,
-    dispatch: (JSONObject) -> Unit,
+    toggleVpn: () -> Unit,
     onSelectNetwork: (String) -> Unit,
     onAddNetwork: () -> Unit,
 ) {
@@ -347,15 +348,7 @@ private fun MobileTopBar(
         Switch(
             checked = state.vpnEnabled,
             enabled = state.vpnControlSupported && activeNetwork != null,
-            onCheckedChange = { enabled ->
-                dispatch(
-                    if (enabled) {
-                        NativeActions.connectVpn()
-                    } else {
-                        NativeActions.disconnectVpn()
-                    },
-                )
-            },
+            onCheckedChange = { toggleVpn() },
             modifier = Modifier.mobileUiSelector(
                 id = "vpn-toggle",
                 description = if (state.vpnEnabled) "Turn VPN off" else "Turn VPN on",
