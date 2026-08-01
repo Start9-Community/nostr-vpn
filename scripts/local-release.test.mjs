@@ -1286,6 +1286,8 @@ test('staged draft publication publishes only the already validated bytes', () =
   const assetNames = [
     'nostr-vpn-v4.1.5-android-arm64.apk',
     'nostr-vpn-v4.1.5-linux-x64.deb',
+    'nvpn-v4.1.5-x86_64-unknown-linux-musl.tar.gz',
+    'nvpn-v4.1.5-aarch64-unknown-linux-musl.tar.gz',
     'nostr-vpn-v4.1.5-macos-arm64.app.tar.gz',
     'nostr-vpn-v4.1.5-macos-arm64.dmg',
     'nostr-vpn-v4.1.5-startos-aarch64.s9pk',
@@ -2361,7 +2363,7 @@ test('validateReleaseAssetSet can require complete app release artifacts', () =>
         'nostr-vpn-v4.0.1-macos-arm64.app.tar.gz',
         'nostr-vpn-v4.0.1-macos-arm64.dmg',
       ], { requireCompleteAppRelease: true }),
-    /Linux x64 desktop package, Windows x64 installer, signed Android APK, StartOS x86_64 package, StartOS aarch64 package/,
+    /Linux x64 desktop package, Linux x64 CLI, Linux ARM64 CLI, Windows x64 installer/,
   )
 
   assert.doesNotThrow(() =>
@@ -2369,12 +2371,18 @@ test('validateReleaseAssetSet can require complete app release artifacts', () =>
       'nostr-vpn-v4.0.1-android-arm64.aab',
       'nostr-vpn-v4.0.1-android-arm64.apk',
       'nostr-vpn-v4.0.1-linux-x64.deb',
+      'nvpn-v4.0.1-x86_64-unknown-linux-musl.tar.gz',
+      'nvpn-v4.0.1-aarch64-unknown-linux-musl.tar.gz',
       'nostr-vpn-v4.0.1-macos-arm64.app.tar.gz',
       'nostr-vpn-v4.0.1-macos-arm64.dmg',
       'nostr-vpn-v4.0.1-startos-aarch64.s9pk',
       'nostr-vpn-v4.0.1-startos-x86_64.s9pk',
       'nostr-vpn-v4.0.1-windows-x64-setup.exe',
     ], { requireCompleteAppRelease: true }),
+  )
+  assert.throws(
+    () => validateReleaseAssetSet(['nvpn-arm-unknown-linux-musleabihf.tar.gz']),
+    /private-fleet ARMv6/,
   )
 })
 
@@ -2398,7 +2406,7 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
           { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg' },
         ],
       }),
-    /Linux x64 desktop package, Windows x64 installer, signed Android APK, StartOS x86_64 package, StartOS aarch64 package/,
+    /Linux x64 desktop package, Linux x64 CLI, Linux ARM64 CLI, Windows x64 installer/,
   )
 
   const completeAssets = [
@@ -2408,6 +2416,8 @@ test('draft promotion rejects an incomplete cross-platform artifact set', () => 
       size: 1,
     },
     { path: 'assets/nostr-vpn-v4.1.4-linux-x64.deb', size: 1 },
+    { path: 'assets/nvpn-v4.1.4-x86_64-unknown-linux-musl.tar.gz', size: 1 },
+    { path: 'assets/nvpn-v4.1.4-aarch64-unknown-linux-musl.tar.gz', size: 1 },
     { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.app.tar.gz', size: 1 },
     { path: 'assets/nostr-vpn-v4.1.4-macos-arm64.dmg', size: 1 },
     { path: 'assets/nostr-vpn-v4.1.4-startos-aarch64.s9pk', size: 1 },

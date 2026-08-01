@@ -503,6 +503,12 @@ export function validateReleaseAssetSet(
   const hasUnsignedAndroid = names.some((name) => /^nostr-vpn-.*-android-arm64-unsigned\.(apk|aab)$/.test(name))
   const hasStartosX86 = names.some((name) => /^nostr-vpn-.*-startos-x86_64\.s9pk$/.test(name))
   const hasStartosArm = names.some((name) => /^nostr-vpn-.*-startos-aarch64\.s9pk$/.test(name))
+  const hasLinuxX64Cli = names.some((name) => /-x86_64-unknown-linux-musl\.tar\.gz$/.test(name))
+  const hasLinuxArm64Cli = names.some((name) => /-aarch64-unknown-linux-musl\.tar\.gz$/.test(name))
+
+  if (names.some((name) => /(?:armv6|arm-unknown-linux-musleabihf)/.test(name))) {
+    throw new Error('Public releases must not contain private-fleet ARMv6 artifacts.')
+  }
 
   if (hasMacosZip) {
     throw new Error(
@@ -538,6 +544,12 @@ export function validateReleaseAssetSet(
     }
     if (!hasLinuxX64Desktop) {
       missing.push('Linux x64 desktop package')
+    }
+    if (!hasLinuxX64Cli) {
+      missing.push('Linux x64 CLI')
+    }
+    if (!hasLinuxArm64Cli) {
+      missing.push('Linux ARM64 CLI')
     }
     if (!hasWindowsX64Setup) {
       missing.push('Windows x64 installer')

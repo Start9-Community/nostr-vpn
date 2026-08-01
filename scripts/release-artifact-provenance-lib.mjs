@@ -117,7 +117,7 @@ function releaseAssetPlatform(path) {
   }
   if (
     /-linux-x64\.(deb|AppImage)$/.test(name)
-    || /-x86_64-unknown-linux-musl\.tar\.gz$/.test(name)
+    || /-(?:x86_64|aarch64)-unknown-linux-musl\.tar\.gz$/.test(name)
   ) {
     return 'linux'
   }
@@ -320,6 +320,44 @@ export function requireReceiptSource(receipt, {
     candidateCommit: commit,
     candidateTree: tree,
   })
+}
+
+export function validateLinuxArm64CliReceipt({
+  receipt, archivePath, candidateRoot, commit, tree, expectedVersion,
+}) {
+  requireReceiptSource(receipt, {
+    commit, tree, candidateRoot, platform: 'linux',
+    label: 'Linux ARM64 CLI receipt',
+  })
+  const archiveSha256 = sha256FileSync(archivePath)
+  const cliSha256 = commandOutputSha256(
+    'tar', ['-xOzf', archivePath, 'nvpn/nvpn'],
+  )
+  if (
+    receipt.receiptSchema !== 1
+    || receipt.artifactType !== 'exact native-smoked Linux ARM64 static CLI'
+    || receipt.target !== 'aarch64-unknown-linux-musl'
+    || receipt.buildMethod !== 'repository Docker cross-build'
+    || receipt.nativeSmokeHostOs !== 'Linux'
+    || !['aarch64', 'arm64'].includes(receipt.nativeSmokeHostArchitecture)
+    || receipt.nativeArchitectureVerified !== true
+    || receipt.nativeCliSmokePassed !== true
+    || receipt.nativeStatusSmokePassed !== true
+    || receipt.armv6Build !== false
+    || receipt.sourceClean !== true
+    || receipt.archiveSha256 !== archiveSha256
+    || receipt.nativeSmokeArchiveSha256 !== archiveSha256
+    || receipt.archiveSize !== readFileSync(archivePath).byteLength
+    || receipt.cliSha256 !== cliSha256
+    || receipt.nativeSmokeCliSha256 !== cliSha256
+    || receipt.shortVersion !== `nvpn ${expectedVersion}`
+    || !/^\d+\.\d+\.\d+$/.test(String(receipt.fipsVersion ?? ''))
+    || !String(receipt.verboseVersion).startsWith(`${expectedVersion}\n`)
+    || !String(receipt.verboseVersion).includes(receipt.fipsVersion)
+  ) {
+    throw new Error('Linux ARM64 CLI receipt is incomplete or differs from its native artifact.')
+  }
+  return { archiveSha256, cliSha256 }
 }
 
 function requireReceiptComponentSource(receipt, label) {

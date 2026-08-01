@@ -56,6 +56,7 @@ import {
   readRequiredJson,
   requireReceiptSource,
   startosExactPackageValidator,
+  validateLinuxArm64CliReceipt,
   validateWindowsInstallerGateReceipt,
 } from './release-artifact-provenance-lib.mjs'
 import { inspectStartosReleasePackage } from './startos-release.mjs'
@@ -662,7 +663,10 @@ function packageUnixCliTarball({ binaryPath, targetTriple, tag, dryRun }) {
   const unversioned = join(distDir, `nvpn-${targetTriple}.tar.gz`)
   const versioned = join(distDir, `nvpn-${tag}-${targetTriple}.tar.gz`)
   const tarPath = unversioned.replace(/\.gz$/, '')
-  run('tar', ['-cf', tarPath, '-C', distDir, 'nvpn/README.txt', 'nvpn/install.sh', 'nvpn/nvpn'], { dryRun })
+  run('tar', ['--no-xattrs', '-cf', tarPath, '-C', distDir, 'nvpn/README.txt', 'nvpn/install.sh', 'nvpn/nvpn'], {
+    dryRun,
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+  })
   run('gzip', ['-n', '-f', tarPath], { dryRun })
   if (!dryRun) {
     copyFileSync(unversioned, versioned)
@@ -921,6 +925,8 @@ function buildLinuxArtifacts({
   testedReceiptPath,
   testedPackageInstallReceiptPath,
   gatedBundlePathReceipt,
+  arm64CliArchivePath,
+  arm64CliReceiptPath,
 }) {
   const platform = env.NVPN_LINUX_DOCKER_PLATFORM || 'linux/amd64'
   const { linuxArchSuffix, muslTriple } = linuxReleaseTargetsForDockerPlatform(platform)
@@ -1005,7 +1011,7 @@ function buildLinuxArtifacts({
   }
 
   if (dryRun) {
-    builtLines.push('Reused the exact gate-tested Linux x64 release artifacts.')
+    builtLines.push('Reused exact-gated Linux x64 and native-smoked ARM64 artifacts.')
     return {}
   }
 
@@ -1120,7 +1126,38 @@ function buildLinuxArtifacts({
       },
     })
   }
-  builtLines.push('Reused the exact Linux x64 Debian/static-musl artifacts exercised by their real gates.')
+  const arm64Receipt = readRequiredJson(arm64CliReceiptPath, 'Linux ARM64 CLI receipt')
+  const arm64 = validateLinuxArm64CliReceipt({
+    receipt: arm64Receipt,
+    archivePath: arm64CliArchivePath,
+    candidateRoot: repoRoot,
+    commit: candidateCommit,
+    tree: candidateTree,
+    expectedVersion: tag.replace(/^v/, '').split('+')[0],
+  })
+  if (
+    arm64Receipt.appGitSha !== gateReceipt.appGitSha
+    || arm64Receipt.appGitTree !== gateReceipt.appGitTree
+  ) {
+    throw new Error('Linux x64 and ARM64 artifacts have different product sources.')
+  }
+  for (const name of [
+    'nvpn-aarch64-unknown-linux-musl.tar.gz',
+    `nvpn-${tag}-aarch64-unknown-linux-musl.tar.gz`,
+  ]) {
+    const asset = join(distDir, name)
+    copyFileSync(arm64CliArchivePath, asset)
+    if (sha256FileSync(asset) !== arm64.archiveSha256) {
+      throw new Error('Linux ARM64 publication copy changed.')
+    }
+    proofs[name] = exactArtifactProof({
+      artifactPath: asset,
+      platform: 'linux',
+      gateReceiptPath: arm64CliReceiptPath,
+      payloads: { musl_archive: arm64.archiveSha256, nvpn_musl: arm64.cliSha256 },
+    })
+  }
+  builtLines.push('Reused exact-gated Linux x64 and native-smoked ARM64 artifacts.')
   return proofs
 }
 
@@ -2273,6 +2310,10 @@ function main() {
         'desktop-network',
         'linux.json',
       ),
+      arm64_cli: resolve(
+        env.NVPN_LINUX_ARM64_CLI_RECEIPT
+          || join(releaseGateLogDir, 'linux-arm64-cli', 'receipt.json'),
+      ),
     },
     macos: {
       artifact: join(releaseJoinResultDir, 'macos', 'artifact.json'),
@@ -2743,6 +2784,11 @@ function main() {
         gatedBundlePathReceipt: join(
           releaseGateLogDir,
           'host-linux-vm-bundle-path.txt',
+        ),
+        arm64CliReceiptPath: platformReceiptPaths.linux.arm64_cli,
+        arm64CliArchivePath: resolve(
+          env.NVPN_LINUX_ARM64_CLI_ARCHIVE
+            || join(dirname(platformReceiptPaths.linux.arm64_cli), 'nvpn-aarch64-unknown-linux-musl.tar.gz'),
         ),
       }),
     )],
