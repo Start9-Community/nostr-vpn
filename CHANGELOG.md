@@ -67,6 +67,9 @@ All notable changes to this project are documented in this file.
 - Avoid treating Android's first VPN-service network snapshot as a roam, so
   startup performs the required underlay handshake without unnecessarily
   resetting established FIPS sessions.
+- Refresh Android's WireGuard path again when a newly available Wi-Fi network
+  becomes Internet-validated, avoiding timer-delayed recovery after Wi-Fi
+  OFF→ON transitions.
 - Serialize Android native tunnel startup and cancel obsolete generations,
   preventing rapid connect/disconnect from reviving or leaking a stopped VPN.
 - Expose the iOS VPN switch as one accessible control while retaining its
