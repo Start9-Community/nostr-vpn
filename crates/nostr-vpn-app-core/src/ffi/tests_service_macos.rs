@@ -304,6 +304,12 @@ exit 42
             r#"#!/bin/sh
 CALLS="{calls_literal}"
 printf '%s\n' "$*" >> "$CALLS"
+if [ "$1" = "service" ] && [ "$2" = "status" ]; then
+  cat <<'JSON'
+{{"supported":true,"installed":true,"disabled":false,"loaded":true,"running":true,"pid":123,"label":"fi.siriusbusiness.nvpn.test","binary_version":"test"}}
+JSON
+  exit 0
+fi
 if [ "$1" = "status" ]; then
   cat <<'JSON'
 {{"daemon":{{"running":true,"state":{{"updated_at":1,"binary_version":"test","local_endpoint":"","advertised_endpoint":"","listen_port":0,"vpn_enabled":true,"vpn_active":true,"vpn_status":"VPN on","expected_peer_count":0,"connected_peer_count":0,"mesh_ready":true,"peers":[]}}}}}}
@@ -330,15 +336,16 @@ exit 0
             .save(&runtime.config_path)
             .expect("save initial config");
         runtime.nvpn_bin = Some(script_path);
-        runtime.service_installed = true;
-        runtime.service_running = true;
-        runtime.daemon_running = true;
+        runtime.service_installed = false;
+        runtime.service_running = false;
+        runtime.daemon_running = false;
 
         runtime
             .save_reload_and_refresh()
             .expect("save config through running service");
 
         let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
+        assert!(calls.lines().any(|line| line.starts_with("service status ")));
         assert_eq!(calls.lines().filter(|line| line.starts_with("apply-config-daemon ")).count(), 1);
         assert!(
             !calls.lines().any(|line| line.starts_with("reload ")),

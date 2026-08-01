@@ -541,6 +541,30 @@ impl NativeAppRuntime {
     }
 
     fn save_reload_and_refresh(&mut self) -> Result<()> {
+        let status_result = if self.mobile_runtime {
+            Ok(())
+        } else {
+            let pending_config = self.config.clone();
+            let cached_service_running = self.service_running;
+            let cached_daemon_running = self.daemon_running;
+            self.invalidate_service_status();
+            let service_error = self.refresh_service_status().err();
+            let mut result = self.refresh_status();
+            self.config = pending_config;
+            if result.is_err() {
+                self.service_running |= cached_service_running;
+                self.daemon_running |= cached_daemon_running;
+            }
+            if let Some(error) = service_error {
+                self.service_running |= cached_service_running;
+                if !self.daemon_running {
+                    result = Err(error);
+                }
+            }
+            result
+        };
+        #[cfg(target_os = "macos")]
+        let applied_by_running_daemon = self.service_running || self.daemon_running;
         self.save_config()?;
         if self.mobile_runtime {
             self.refresh_mobile_status()
@@ -551,11 +575,30 @@ impl NativeAppRuntime {
             // second reload here tears down/reconfigures the peer set twice for
             // one UI edit.
             #[cfg(not(target_os = "macos"))]
-            if self.daemon_running {
-                let output = self.run_nvpn(["reload", "--config", self.config_path_str()?])?;
-                ensure_success("nvpn reload", &output)?;
+            {
+                if self.daemon_running {
+                    let output =
+                        self.run_nvpn(["reload", "--config", self.config_path_str()?])?;
+                    ensure_success("nvpn reload", &output)?;
+                    return self.refresh_status();
+                }
+                if self.service_running {
+                    let message =
+                        "background service is running but daemon status is unavailable; configuration was saved but not applied";
+                    return match status_result {
+                        Ok(()) => Err(anyhow!(message)),
+                        Err(error) => Err(error.context(message)),
+                    };
+                }
+                return status_result;
             }
-            self.refresh_status()
+            #[cfg(target_os = "macos")]
+            {
+                if applied_by_running_daemon {
+                    return self.refresh_status();
+                }
+                status_result
+            }
         }
     }
 

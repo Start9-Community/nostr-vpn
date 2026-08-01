@@ -280,6 +280,120 @@ exit 0
         assert_failed_join_start_was_durable(&runtime, &fixture, &joiner_pubkey);
     }
 
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn manual_admin_add_reloads_live_service_when_cached_runtime_state_is_off() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nvpn-app-core-live-service-join-{nonce}"));
+        fs::create_dir_all(&dir).expect("create test dir");
+        let config_path = dir.join("config.toml");
+        let outbox_path = nostr_vpn_core::join_delivery::join_roster_outbox_directory(&config_path);
+        let reload_path = dir.join("reload-applied");
+        let start_path = dir.join("unexpected-start");
+        let script_path = dir.join("nvpn");
+        let shell_literal = |path: &Path| {
+            path.to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        };
+        let script = format!(
+            r#"#!/bin/sh
+CONFIG="{}"
+OUTBOX="{}"
+RELOADED="{}"
+STARTED="{}"
+JOINER="{}"
+if [ "$1" = "service" ] && [ "$2" = "status" ]; then
+  cat <<'JSON'
+{{"supported":true,"installed":true,"disabled":false,"loaded":true,"running":true,"pid":123,"label":"fi.siriusbusiness.nvpn.test","binary_version":"test"}}
+JSON
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  if [ -f "$RELOADED" ]; then
+    cat <<'JSON'
+{{"daemon":{{"running":true,"state":{{"updated_at":2,"binary_version":"test","local_endpoint":"","advertised_endpoint":"","listen_port":0,"vpn_enabled":true,"vpn_active":false,"vpn_status":"Waiting for participants","expected_peer_count":1,"connected_peer_count":0,"mesh_ready":false,"peers":[]}}}}}}
+JSON
+  else
+    cat <<'JSON'
+{{"daemon":{{"running":true,"state":{{"updated_at":1,"binary_version":"test","local_endpoint":"","advertised_endpoint":"","listen_port":0,"vpn_enabled":true,"vpn_active":false,"vpn_status":"Waiting for participants","expected_peer_count":0,"connected_peer_count":0,"mesh_ready":false,"peers":[]}}}}}}
+JSON
+  fi
+  exit 0
+fi
+if [ "$1" = "reload" ]; then
+  grep -q "$JOINER" "$CONFIG" || {{ printf '%s\n' 'joiner missing before reload' >&2; exit 18; }}
+  find "$OUTBOX" -type f -name '*.json' | grep -q . || {{ printf '%s\n' 'outbox missing before reload' >&2; exit 19; }}
+  touch "$RELOADED"
+  exit 0
+fi
+if [ "$1" = "start" ]; then
+  touch "$STARTED"
+  exit 20
+fi
+exit 0
+"#,
+            shell_literal(&config_path),
+            shell_literal(&outbox_path),
+            shell_literal(&reload_path),
+            shell_literal(&start_path),
+            "__JOINER__",
+        );
+        fs::write(&script_path, script).expect("write fake nvpn");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake nvpn metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("make fake nvpn executable");
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.mobile_runtime = false;
+        runtime.config_path = config_path.clone();
+        runtime.nvpn_bin = Some(script_path);
+        let network_id = create_test_network(&mut runtime, "Home");
+        let admin = runtime.config.own_nostr_pubkey_hex().expect("admin pubkey");
+        runtime.config.networks[0].admins = vec![admin];
+        runtime.config.save(&config_path).expect("save admin config");
+        runtime.service_running = false;
+        runtime.daemon_running = false;
+
+        let joiner = Keys::generate();
+        let joiner_npub = joiner.public_key().to_bech32().expect("joiner npub");
+        let joiner_hex = joiner.public_key().to_hex();
+        let script = fs::read_to_string(runtime.nvpn_bin.as_ref().expect("fake nvpn path"))
+            .expect("read fake nvpn")
+            .replace("__JOINER__", &joiner_npub);
+        fs::write(runtime.nvpn_bin.as_ref().expect("fake nvpn path"), script)
+            .expect("update fake nvpn joiner");
+
+        runtime.dispatch(NativeAppAction::AddParticipant {
+            network_id,
+            npub: joiner_npub,
+            alias: Some("Pixel".to_string()),
+        });
+
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert!(reload_path.exists(), "live service was not reloaded");
+        assert!(!start_path.exists(), "join approval attempted a duplicate daemon start");
+        let persisted = AppConfig::load(&config_path).expect("load persisted admin config");
+        assert!(persisted.participant_pubkeys_hex().contains(&joiner_hex));
+        assert_eq!(
+            nostr_vpn_core::join_delivery::load_join_rosters(&config_path).len(),
+            1,
+            "delivery must remain queued for the live daemon"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn qr_join_approval_surfaces_start_failure_after_durable_roster_is_queued() {

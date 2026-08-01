@@ -67,6 +67,87 @@ exit 0
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn config_edit_does_not_treat_starting_service_as_reloaded() {
+        let dir = unique_service_test_dir("nvpn-app-core-config-while-starting");
+        let script_path = write_starting_service_fake_nvpn(&dir);
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.config_path = dir.join("config.toml");
+        create_test_network(&mut runtime, "Home");
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("save test config");
+        runtime.nvpn_bin = Some(script_path);
+        runtime.daemon_status_grace_until = Some(Instant::now() + DAEMON_STARTUP_STATUS_GRACE);
+        runtime.config.node_name = "Pending edit".to_string();
+
+        let error = runtime
+            .save_reload_and_refresh()
+            .expect_err("starting service must not report an unapplied edit as reloaded");
+
+        assert!(error.to_string().contains("daemon status is unavailable"));
+        assert_eq!(
+            AppConfig::load(&runtime.config_path)
+                .expect("load saved config")
+                .node_name,
+            "Pending edit"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn config_edit_preserves_cached_live_service_when_service_query_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_service_test_dir("nvpn-app-core-config-service-query-failure");
+        let script_path = dir.join("nvpn");
+        fs::write(
+            &script_path,
+            r#"#!/bin/sh
+if [ "$1" = "service" ] && [ "$2" = "status" ]; then
+  echo "service status unavailable" >&2
+  exit 7
+fi
+if [ "$1" = "status" ]; then
+  printf '%s\n' '{"daemon":{"running":false,"state":null}}'
+  exit 0
+fi
+exit 0
+"#,
+        )
+        .expect("write fake nvpn");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake nvpn metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("make fake nvpn executable");
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.config_path = dir.join("config.toml");
+        create_test_network(&mut runtime, "Home");
+        runtime.config.save(&runtime.config_path).expect("save config");
+        runtime.nvpn_bin = Some(script_path);
+        runtime.service_running = true;
+        runtime.config.node_name = "Pending edit".to_string();
+
+        let error = runtime
+            .save_reload_and_refresh()
+            .expect_err("failed live-service query must not report the edit as applied");
+
+        assert!(runtime.service_running, "cached live state was discarded");
+        assert!(error.to_string().contains("configuration was saved but not applied"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn daemon_status_failure_after_startup_grace_surfaces_error() {
