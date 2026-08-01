@@ -189,9 +189,7 @@ impl NativeAppRuntime {
                 }
                 self.save_reload_and_refresh()?;
                 if should_start_networking && !self.vpn_enabled {
-                    // The approval and delivery outbox are already durable.
-                    // Start networking now, but leave a failed start retryable.
-                    let _ = self.connect_vpn();
+                    self.connect_vpn()?;
                 }
                 Ok(())
             }
@@ -437,10 +435,7 @@ impl NativeAppRuntime {
         // same control transaction instead of waiting for its next heartbeat.
         self.save_reload_and_refresh()?;
         if self.config.autoconnect && !self.vpn_enabled {
-            // Approval and its durable roster outbox are already committed.
-            // Failure to auto-start networking must not report the approval
-            // itself as failed; the queued delivery remains retryable.
-            let _ = self.connect_vpn();
+            self.connect_vpn()?;
         }
         Ok(())
     }

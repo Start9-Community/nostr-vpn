@@ -120,23 +120,38 @@
     }
 
     #[cfg(unix)]
-    #[test]
-    fn manual_admin_add_attempts_runtime_start_after_durable_roster_is_queued() {
+    struct FailingJoinStartFixture {
+        dir: std::path::PathBuf,
+        config_path: std::path::PathBuf,
+        calls_path: std::path::PathBuf,
+        start_attempted_path: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Drop for FailingJoinStartFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    fn runtime_with_failing_join_start(
+        joiner_npub: &str,
+        autoconnect: bool,
+    ) -> (NativeAppRuntime, String, FailingJoinStartFixture) {
         use std::os::unix::fs::PermissionsExt;
 
         let nonce = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock is after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("nvpn-app-core-manual-start-{nonce}"));
+        let dir = std::env::temp_dir().join(format!("nvpn-app-core-join-start-{nonce}"));
         fs::create_dir_all(&dir).expect("create test dir");
         let config_path = dir.join("config.toml");
         let outbox_path = nostr_vpn_core::join_delivery::join_roster_outbox_directory(&config_path);
         let calls_path = dir.join("calls.txt");
         let start_attempted_path = dir.join("start-attempted");
         let script_path = dir.join("nvpn");
-        let joiner = Keys::generate();
-        let joiner_npub = joiner.public_key().to_bech32().expect("joiner npub");
         let shell_literal = |path: &Path| {
             path.to_string_lossy()
                 .replace('\\', "\\\\")
@@ -161,8 +176,8 @@ if [ "$1" = "status" ]; then
   exit 0
 fi
 if [ "$1" = "start" ]; then
-  grep -q "$JOINER" "$CONFIG" || exit 18
-  find "$OUTBOX" -type f -name '*.json' | grep -q . || exit 19
+  grep -q "$JOINER" "$CONFIG" || {{ printf '%s\n' 'joiner missing before start' >&2; exit 18; }}
+  find "$OUTBOX" -type f -name '*.json' | grep -q . || {{ printf '%s\n' 'outbox missing before start' >&2; exit 19; }}
   touch "$START_ATTEMPTED"
   exit 17
 fi
@@ -191,8 +206,70 @@ exit 0
         let network_id = create_test_network(&mut runtime, "Home");
         let admin = runtime.config.own_nostr_pubkey_hex().expect("admin pubkey");
         runtime.config.networks[0].admins = vec![admin];
-        runtime.config.autoconnect = false;
+        runtime.config.autoconnect = autoconnect;
         runtime.config.save(&config_path).expect("save admin config");
+
+        (
+            runtime,
+            network_id,
+            FailingJoinStartFixture {
+                dir,
+                config_path,
+                calls_path,
+                start_attempted_path,
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    fn assert_failed_join_start_was_durable(
+        runtime: &NativeAppRuntime,
+        fixture: &FailingJoinStartFixture,
+        joiner_pubkey: &str,
+    ) {
+        assert!(
+            runtime.last_error.contains("nvpn start failed"),
+            "{}",
+            runtime.last_error
+        );
+        assert!(
+            fixture.start_attempted_path.exists(),
+            "join approval did not reach the intentional start failure: {}",
+            runtime.last_error
+        );
+        assert_eq!(
+            nostr_vpn_core::join_delivery::load_join_rosters(&fixture.config_path).len(),
+            1,
+            "join approval must remain exactly once in the durable delivery outbox"
+        );
+        let persisted = AppConfig::load(&fixture.config_path).expect("load persisted admin config");
+        assert!(
+            persisted.networks[0].devices.contains(&joiner_pubkey.to_string()),
+            "joiner must remain in the persisted participant roster"
+        );
+        assert!(
+            persisted.autoconnect,
+            "join approval must persist its networking intent"
+        );
+        let calls = fs::read_to_string(&fixture.calls_path).expect("read fake nvpn calls");
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("start "))
+                .count(),
+            1,
+            "join approval must make one start attempt: {calls}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manual_admin_add_surfaces_start_failure_after_durable_roster_is_queued() {
+        let joiner = Keys::generate();
+        let joiner_npub = joiner.public_key().to_bech32().expect("joiner npub");
+        let joiner_pubkey = joiner.public_key().to_hex();
+        let (mut runtime, network_id, fixture) =
+            runtime_with_failing_join_start(&joiner_npub, false);
 
         runtime.dispatch(NativeAppAction::AddParticipant {
             network_id,
@@ -200,26 +277,27 @@ exit 0
             alias: Some("Pixel".to_string()),
         });
 
-        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
-        assert!(
-            start_attempted_path.exists(),
-            "manual approval did not attempt to start networking"
-        );
-        assert_eq!(
-            nostr_vpn_core::join_delivery::load_join_rosters(&config_path).len(),
-            1,
-            "manual approval must remain durably queued for receipt-backed delivery"
-        );
-        assert!(
-            AppConfig::load(&config_path)
-                .expect("load persisted admin config")
-                .autoconnect,
-            "manual approval must persist its explicit networking intent"
-        );
-        let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
-        assert!(calls.contains("start --daemon --connect --config"), "{calls}");
+        assert_failed_join_start_was_durable(&runtime, &fixture, &joiner_pubkey);
+    }
 
-        let _ = fs::remove_dir_all(&dir);
+    #[cfg(unix)]
+    #[test]
+    fn qr_join_approval_surfaces_start_failure_after_durable_roster_is_queued() {
+        let mut joiner = AppConfig::generated_without_networks();
+        joiner
+            .ensure_pending_nostr_join_request(unix_timestamp())
+            .expect("pending join request");
+        let joiner_pubkey = joiner.own_nostr_pubkey_hex().expect("joiner pubkey");
+        let joiner_npub = npub_for_pubkey_hex(&joiner_pubkey);
+        let request = joiner
+            .pending_nostr_join_request_link(crate::join_request_link::JOIN_REQUEST_LINK_PREFIX)
+            .expect("join request link");
+        let (mut runtime, _network_id, fixture) =
+            runtime_with_failing_join_start(&joiner_npub, true);
+
+        runtime.dispatch(NativeAppAction::ImportJoinRequest { request });
+
+        assert_failed_join_start_was_durable(&runtime, &fixture, &joiner_pubkey);
     }
 
     #[test]
