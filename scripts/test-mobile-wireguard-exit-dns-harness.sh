@@ -810,14 +810,49 @@ grep -Fq 'android_underlay_wait_offline' "$android_underlay" \
     echo "Android radio-bounce gate lacks outage/recovery/process continuity" >&2
     exit 1
   }
-python3 - "$android_release_gate" <<'PY'
+python3 - "$android_release_gate" "$android_smoke" <<'PY'
 import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+smoke = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 wireguard_start = text.index("configure_android_release_wireguard_ui()")
 wireguard_end = text.index("\nandroid_release_vpn_toggle_checked()", wireguard_start)
 wireguard = text[wireguard_start:wireguard_end]
+if "android_release_open_internet_settings" not in wireguard:
+    raise SystemExit(
+        "Android Release WireGuard gate does not verify Internet-screen navigation"
+    )
+helper_start = smoke.index("android_open_internet_settings_ui()")
+helper_end = smoke.index("\nreplace_android_ui_text()", helper_start)
+helper = smoke[helper_start:helper_end]
+tap = helper.index('tap_android_ui description "Internet tab"')
+destination = helper.index(
+    'wait_for_android_ui resource internet-source-picker'
+)
+if tap >= destination:
+    raise SystemExit(
+        "Android Release Internet navigation does not verify its destination after tapping"
+    )
+if "did not reach the Internet settings screen" not in helper:
+    raise SystemExit(
+        "Android Release Internet navigation failure has no actionable diagnostic"
+    )
+if 'tap_android_ui description "Internet tab"' in helper[tap + 1:]:
+    raise SystemExit(
+        "Android Release Internet navigation retries the tab tap instead of failing closed"
+    )
+if "android_capture_internet_navigation_failure" not in helper:
+    raise SystemExit("Android Release Internet navigation does not retain failure UI")
+for function in (
+    "assert_android_exit_dns_ui_reloaded()",
+    "configure_android_exit_dns_ui()",
+    "select_android_direct_ui()",
+):
+    start = smoke.index(function)
+    body = smoke[start:smoke.find("\n}\n", start) + 3]
+    if "android_open_internet_settings_ui" not in body:
+        raise SystemExit(f"{function} bypasses verified Internet navigation")
 reset = wireguard.index("android_ui_reset_scroll")
 selector = wireguard.index("android_ui_scroll_to resource wireguard-enabled")
 checked = wireguard.index("android_ui_query resource wireguard-enabled checked")

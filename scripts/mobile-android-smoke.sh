@@ -980,6 +980,57 @@ wait_for_android_ui() {
   return 1
 }
 
+android_capture_internet_navigation_failure() {
+  local context="$1" remote="/sdcard/nvpn-ui-navigation-failure.xml"
+  local slug result
+  slug="$(tr -cs '[:alnum:]' '-' <<<"$context" | sed 's/^-//; s/-$//')"
+  result="$RUNTIME_STATE_RESULT_DIR/mobile-android-${slug:-internet}-navigation-$$.xml"
+  mkdir -p "$RUNTIME_STATE_RESULT_DIR"
+  if "$ADB" -s "$serial" shell uiautomator dump "$remote" >/dev/null 2>&1 \
+    && "$ADB" -s "$serial" pull "$remote" "$result" >/dev/null 2>&1
+  then
+    echo "Android $context UI state saved for diagnosis: $result" >&2
+  else
+    echo "Android $context UI state could not be captured" >&2
+  fi
+}
+
+android_open_internet_settings_ui() {
+  local context="${1:-Internet configuration}"
+  start_main_activity || {
+    echo "Android $context could not launch the shipped app" >&2
+    return 1
+  }
+  wait_until 5 android_activity_resumed || {
+    echo "Android $context did not resume the shipped MainActivity" >&2
+    android_capture_internet_navigation_failure "$context"
+    return 1
+  }
+  if android_ui_query resource internet-source-picker center >/dev/null 2>&1; then
+    return 0
+  fi
+  wait_for_android_ui description "Internet tab" || {
+    echo "Android $context could not find the Internet tab in the shipped app shell" >&2
+    android_capture_internet_navigation_failure "$context"
+    return 1
+  }
+  tap_android_ui description "Internet tab" || {
+    echo "Android $context could not tap the Internet tab" >&2
+    android_capture_internet_navigation_failure "$context"
+    return 1
+  }
+  android_ui_reset_scroll || {
+    echo "Android $context could not reset the Internet settings scroll position" >&2
+    android_capture_internet_navigation_failure "$context"
+    return 1
+  }
+  wait_for_android_ui resource internet-source-picker || {
+    echo "Android $context tapped the Internet tab but did not reach the Internet settings screen (missing internet-source-picker)" >&2
+    android_capture_internet_navigation_failure "$context"
+    return 1
+  }
+}
+
 replace_android_ui_text() {
   local selector="$1"
   local value="$2"
@@ -1237,13 +1288,7 @@ PY
 
 assert_android_exit_dns_ui_reloaded() {
   "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME"
-  start_main_activity
-  wait_for_android_ui description "Internet tab" || {
-    echo "Android Exit DNS restart readback could not open the shipped Internet tab" >&2
-    return 1
-  }
-  tap_android_ui description "Internet tab" || return 1
-  sleep 0.5
+  android_open_internet_settings_ui "Exit DNS restart readback" || return 1
   android_ui_reset_scroll
 
   local source mode_selector selected
@@ -1299,13 +1344,7 @@ assert_android_exit_dns_ui_reloaded() {
 }
 
 configure_android_exit_dns_ui() {
-  start_main_activity
-  wait_for_android_ui description "Internet tab" || {
-    echo "Android shipped Internet tab was unavailable" >&2
-    return 1
-  }
-  tap_android_ui description "Internet tab" || return 1
-  sleep 0.5
+  android_open_internet_settings_ui "Exit DNS configuration" || return 1
   android_ui_reset_scroll
 
   android_ui_scroll_to resource internet-source-picker || return 1
@@ -1411,13 +1450,7 @@ sys.exit(
 }
 
 select_android_direct_ui() {
-  start_main_activity
-  wait_for_android_ui description "Internet tab" || {
-    echo "Android shipped Internet tab was unavailable for Direct transition" >&2
-    return 1
-  }
-  tap_android_ui description "Internet tab" || return 1
-  sleep 0.5
+  android_open_internet_settings_ui "Direct Internet transition" || return 1
   android_ui_reset_scroll
   android_ui_scroll_to resource internet-source-picker || return 1
   tap_android_ui resource internet-source-picker || return 1

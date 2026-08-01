@@ -526,6 +526,10 @@ android_release_ensure_network_ui() {
   echo "Android Release network created through shipped UI"
 }
 
+android_release_open_internet_settings() {
+  android_open_internet_settings_ui "Release WireGuard configuration"
+}
+
 configure_android_release_wireguard_ui() {
   local config
   config="$(wireguard_config)"
@@ -533,31 +537,54 @@ configure_android_release_wireguard_ui() {
     echo "Android Release WireGuard config is empty" >&2
     return 1
   }
-  start_main_activity
-  wait_for_android_ui description "Internet tab" || return 1
-  tap_android_ui description "Internet tab" || return 1
-  sleep 0.5
+  android_release_open_internet_settings || return 1
   android_ui_reset_scroll
-  android_ui_scroll_to resource internet-source-picker || return 1
-  tap_android_ui resource internet-source-picker || return 1
-  wait_for_android_ui description "Internet source WireGuard VPN" || return 1
-  tap_android_ui description "Internet source WireGuard VPN" || return 1
+  tap_android_ui resource internet-source-picker || {
+    echo "Android Release could not open the Internet source picker" >&2
+    return 1
+  }
+  wait_for_android_ui description "Internet source WireGuard VPN" || {
+    echo "Android Release Internet source picker did not show WireGuard VPN" >&2
+    return 1
+  }
+  tap_android_ui description "Internet source WireGuard VPN" || {
+    echo "Android Release could not select WireGuard VPN as the Internet source" >&2
+    return 1
+  }
   sleep 0.5
-  replace_android_ui_multiline_text wireguard-config "$config" || return 1
-  android_ui_scroll_to resource wireguard-save || return 1
-  tap_android_ui resource wireguard-save || return 1
+  replace_android_ui_multiline_text wireguard-config "$config" || {
+    echo "Android Release could not enter the WireGuard config through shipped UI" >&2
+    return 1
+  }
+  android_ui_scroll_to resource wireguard-save || {
+    echo "Android Release could not find the WireGuard Save control" >&2
+    return 1
+  }
+  tap_android_ui resource wireguard-save || {
+    echo "Android Release could not tap the WireGuard Save control" >&2
+    return 1
+  }
   sleep 1
   # Multiline entry leaves this card scrolled below its Enabled switch.
   # Return to the top before inspecting the switch; the generic scroll helper
   # only searches downward and would otherwise spend its full timeout moving
   # away from the control.
   android_ui_reset_scroll
-  android_ui_scroll_to resource wireguard-enabled || return 1
+  android_ui_scroll_to resource wireguard-enabled || {
+    echo "Android Release could not return to the WireGuard Enabled control" >&2
+    return 1
+  }
   local checked
-  checked="$(android_ui_query resource wireguard-enabled checked)" || return 1
+  checked="$(android_ui_query resource wireguard-enabled checked)" || {
+    echo "Android Release could not read the WireGuard Enabled control" >&2
+    return 1
+  }
   case "$checked" in
     false)
-      tap_android_ui resource wireguard-enabled || return 1
+      tap_android_ui resource wireguard-enabled || {
+        echo "Android Release could not enable the saved WireGuard config" >&2
+        return 1
+      }
       ;;
     true) ;;
     *)
