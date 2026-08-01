@@ -14,7 +14,7 @@ jobs:
       contents: read
     steps:
       - name: Stage exact frozen payload
-        shell: pwsh
+        shell: powershell
         run: >-
           & $env:NVPN_SIGN_HELPER
           -Mode stage
@@ -39,7 +39,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Verify payload signatures and repackage
-        shell: pwsh
+        shell: powershell
         run: >-
           & $env:NVPN_SIGN_HELPER
           -Mode verify-inner-package
@@ -60,7 +60,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Verify outer signature and seal local receipt
-        shell: pwsh
+        shell: powershell
         run: >-
           & $env:NVPN_SIGN_HELPER
           -Mode verify-outer
@@ -68,7 +68,7 @@ jobs:
 
       - name: Seal local failure receipt when needed
         if: always()
-        shell: pwsh
+        shell: powershell
         run: >-
           & $env:NVPN_SIGN_HELPER
           -Mode seal
