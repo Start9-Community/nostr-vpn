@@ -251,7 +251,8 @@ extension NostrVpnReleaseNetworkUITests {
     }
 
     func openWiFiSettings(_ settings: XCUIApplication) throws {
-        if settings.navigationBars["Wi-Fi"].exists {
+        let toggle = settings.switches["Wi-Fi"].firstMatch
+        if toggle.exists {
             return
         }
         for _ in 0..<5 {
@@ -261,7 +262,7 @@ extension NostrVpnReleaseNetworkUITests {
             ).firstMatch
             if row.waitForExistence(timeout: 1), row.isHittable {
                 row.tap()
-                guard settings.navigationBars["Wi-Fi"].waitForExistence(timeout: 5) else {
+                guard toggle.waitForExistence(timeout: 5) else {
                     throw gateError("Settings did not open the Wi-Fi page")
                 }
                 return

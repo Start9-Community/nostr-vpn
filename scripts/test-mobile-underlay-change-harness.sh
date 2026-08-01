@@ -521,12 +521,15 @@ for required in (
     "shell svc wifi enable",
     "try setWiFiEnabled(false)",
     "try setWiFiEnabled(true)",
+    'settings.switches["Wi-Fi"].firstMatch',
     "persistOriginalWiFiForCleanup(originalSsid)",
     "hasOriginalWiFiForCleanup()",
     "originalWiFiForCleanup()",
 ):
     if required not in android + ios + ios_test:
         raise SystemExit(f"radio-bounce implementation is missing {required}")
+if 'navigationBars["Wi-Fi"]' in ios:
+    raise SystemExit("iOS Wi-Fi navigation still depends on a localized page title")
 cleanup = ios_test[ios_test.index("func testReleaseDisconnectCleanup()") :]
 for required in (
     "if let spec = optionalReleaseSpec(), spec.exerciseUnderlay",
