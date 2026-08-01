@@ -74,8 +74,10 @@ mobile_wg_remote_exec() {
       ;;
     "find $MOBILE_WG_FIXTURE_REMOTE_DIR -mindepth 1 -maxdepth 1 -print -quit")
       [[ "$stale_owner_state" != absent ]] || return 1
-      [[ "$stale_owner_state" != empty ]] && printf '%s\n' \
-        "$MOBILE_WG_FIXTURE_REMOTE_DIR/entry"
+      if [[ "$stale_owner_state" != empty ]]; then
+        printf '%s\n' "$MOBILE_WG_FIXTURE_REMOTE_DIR/entry"
+      fi
+      return 0
       ;;
     "test -f $MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner"|\
     "test ! -L $MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner"|\
