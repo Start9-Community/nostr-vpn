@@ -714,7 +714,6 @@ crash_fail_closed_after_sigkill() {
   no_nvpn_processes \
     && wireguard_interface_absent \
     && wireguard_split_defaults_absent \
-    && wireguard_endpoint_route_absent \
     && secure_dns_owned
 }
 
@@ -729,7 +728,12 @@ snapshot_crash_fail_closed_after_sigkill() {
   snapshot_predicate "$predicates" endpoint_route_absent \
     wireguard_endpoint_route_absent
   snapshot_predicate "$predicates" secure_dns_owned secure_dns_owned
-  ! grep -Fq '=false' "$predicates"
+  # SIGKILL cannot execute userspace cleanup. The persisted, interface-scoped
+  # endpoint /32 may remain until the next daemon repairs its cleanup journal;
+  # without the utun and split defaults it cannot carry ordinary traffic.
+  ! grep -Eq \
+    '^(daemon_absent|wireguard_interface_absent|wireguard_split_defaults_absent|secure_dns_owned)=false$' \
+    "$predicates"
 }
 
 record_crash_external_audit() {

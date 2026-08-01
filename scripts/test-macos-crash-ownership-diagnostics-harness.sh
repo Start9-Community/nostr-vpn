@@ -152,9 +152,13 @@ do
 done
 WIREGUARD_INTERFACE_STATUS=1
 ENDPOINT_ROUTE_ABSENT_STATUS=1
-if crash_fail_closed_after_sigkill; then
-  fail "SIGKILL state accepted a surviving endpoint bypass route"
-fi
+crash_fail_closed_after_sigkill \
+  || fail "SIGKILL state rejected a journal-owned endpoint bypass route"
+retained_route_predicates="$RESULT_DIR/crash-external-retained-route.txt"
+snapshot_crash_fail_closed_after_sigkill "$retained_route_predicates" \
+  || fail "SIGKILL snapshot rejected a journal-owned endpoint bypass route"
+grep -Fxq 'endpoint_route_absent=false' "$retained_route_predicates" \
+  || fail "SIGKILL snapshot hid the retained endpoint bypass route"
 ENDPOINT_ROUTE_ABSENT_STATUS=0
 SECURE_DNS_STATUS=1
 if crash_fail_closed_after_sigkill; then
