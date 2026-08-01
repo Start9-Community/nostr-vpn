@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.5 - 2026-07-31
+## 4.1.5 - 2026-08-01
 
 ### Added
 
@@ -55,7 +55,8 @@ All notable changes to this project are documented in this file.
   Extension.
 - Complete QR and manual joins only after the joining device applies the
   signed roster, support both admin/joiner directions across desktop and
-  mobile, and make mobile QR codes use the available screen width.
+  mobile, surface delivery-start failures without losing the durable approval,
+  and make mobile QR codes use the available screen width.
 - Keep join, roster, and control delivery progressing during network-settle
   sampling so a scanned or manually entered phone join cannot stall behind an
   unrelated underlay event.
