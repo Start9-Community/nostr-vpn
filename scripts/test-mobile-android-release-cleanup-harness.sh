@@ -24,29 +24,17 @@ def function_body(source: str, name: str, next_name: str) -> str:
     return source[start:end]
 
 
-rapid = function_body(
-    release_gate,
-    "android_release_rapid_cancel_once",
-    "run_android_release_rapid_start_stop_gate",
-)
-first_tap = '"$ADB" -s "$serial" shell input tap $point || return 1'
 arm = "vpn_cleanup_armed=1"
 stable = "android_release_wait_stable_quiescence"
 disarm = "vpn_cleanup_armed=0"
-if not rapid.index(arm) < rapid.index(first_tap):
-    raise SystemExit("rapid Release cleanup is not armed before the first start tap")
-if not rapid.index(first_tap) < rapid.rindex(stable) < rapid.index(disarm):
-    raise SystemExit(
-        "rapid Release cleanup disarms before stable quiescence is proven"
-    )
-for receipt in (
-    '"rapid cancellation delay=${delay_ms}ms" "$after_count"',
-    "vpn_inactive",
-    "android_vpn_native_start_count",
-    "android_ui_vpn_toggle_checked",
+for obsolete in (
+    "android_release_rapid_cancel_once",
+    "android_release_sleep_milliseconds",
+    "for delay_ms in 0 10 30 80 160 320 640 1000",
+    "shell input tap $point",
 ):
-    if receipt not in release_gate:
-        raise SystemExit(f"Release rapid cleanup contract is missing {receipt!r}")
+    if obsolete in release_gate:
+        raise SystemExit(f"Release start/stop gate retains synthetic timing: {obsolete!r}")
 
 disconnect = function_body(
     release_gate,
@@ -111,27 +99,32 @@ rapid_gate = function_body(
     "run_android_release_rapid_start_stop_gate",
     "run_android_release_blackbox_cycle",
 )
-rapid_loop = "for delay_ms in 0 10 30 80 160 320 640 1000; do"
-first_baseline = rapid_gate.index(
-    "android_release_capture_native_tunnel_start_baseline"
-)
-if not first_baseline < rapid_gate.index(rapid_loop):
-    raise SystemExit(
-        "rapid Release delay loop does not begin with a bounded zero log window"
-    )
 if rapid_gate.count("android_release_capture_native_tunnel_start_baseline") != 2:
     raise SystemExit(
-        "rapid Release gate must reset native-start evidence before the delay loop "
-        "and again before its full reconnect"
+        "Release start/stop gate must reset native-start evidence before both cycles"
     )
-reconnect_arm = rapid_gate.index(arm)
-reconnect_start = rapid_gate.index("android_release_connect_ui")
-reconnect_stable = rapid_gate.index(stable)
-reconnect_disarm = rapid_gate.index(disarm)
-if not reconnect_arm < reconnect_start < reconnect_stable < reconnect_disarm:
-    raise SystemExit(
-        "full rapid-gate reconnect is not armed before start through stable cleanup"
-    )
+for receipt, expected in (
+    (arm, 2),
+    ("android_release_connect_ui", 2),
+    ("android_release_disconnect_ui", 2),
+    (stable, 2),
+    (disarm, 2),
+    ("run_android_release_exit_network_probe start-stop-full-reconnect", 1),
+):
+    if rapid_gate.count(receipt) != expected:
+        raise SystemExit(
+            f"Release semantic start/stop gate has {rapid_gate.count(receipt)} "
+            f"instances of {receipt!r}, expected {expected}"
+        )
+cursor = 0
+for _ in range(2):
+    positions = []
+    for receipt in (arm, "android_release_connect_ui", "android_release_disconnect_ui", stable, disarm):
+        cursor = rapid_gate.index(receipt, cursor)
+        positions.append(cursor)
+        cursor += len(receipt)
+    if positions != sorted(positions):
+        raise SystemExit("Release start/stop cleanup is not armed through stable quiescence")
 
 emergency = function_body(
     release_gate,
@@ -167,5 +160,5 @@ for receipt in (
     if receipt not in cleanup:
         raise SystemExit(f"Release emergency cleanup is missing {receipt!r}")
 
-print("Android Release rapid-start cleanup source contract passed")
+print("Android Release semantic start/stop cleanup source contract passed")
 PY

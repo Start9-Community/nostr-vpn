@@ -482,10 +482,12 @@ test('release receipt collection requires exact source and strict public UI gate
       ),
       support: mode === 'wireguard-dns'
         ? {
-            rapidStartStopCycles: 8,
             ...(platform === 'android'
-              ? { directBeforeConnectedAfter: true }
-              : {}),
+              ? {
+                  startStopCycles: 2,
+                  directBeforeConnectedAfter: true,
+                }
+              : { rapidStartStopCycles: 8 }),
           }
         : {
             lifecycleCycles: 3,

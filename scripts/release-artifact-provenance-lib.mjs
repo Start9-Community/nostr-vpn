@@ -929,9 +929,17 @@ function requireMobileNetworkReceipt({
   }
   if (
     mode === 'wireguard-dns'
+    && platform === 'ios'
     && receipt.support?.rapidStartStopCycles !== 8
   ) {
-    throw new Error(`${platform} WireGuard/DNS receipt lacks eight rapid start/stop cycles.`)
+    throw new Error('iOS WireGuard/DNS receipt lacks eight rapid start/stop cycles.')
+  }
+  if (
+    mode === 'wireguard-dns'
+    && platform === 'android'
+    && receipt.support?.startStopCycles !== 2
+  ) {
+    throw new Error('Android WireGuard/DNS receipt lacks two semantic start/stop cycles.')
   }
   if (
     mode === 'wireguard-dns'

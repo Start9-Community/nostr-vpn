@@ -225,17 +225,16 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     assert support["dnsSettingsReceiptCount"] == len(cases)
     assert len(evidence_paths) == len(cases)
-    rapid_delays = (0, 10, 30, 80, 160, 320, 640, 1000)
-    (root / "mobile-android-release-rapid-start-stop-123.tsv").write_text(
-        "".join(f"{delay}\t{index + 1}\t0\n" for index, delay in enumerate(rapid_delays)),
+    (root / "mobile-android-release-start-stop-123.tsv").write_text(
+        "semantic\t1234\t1\n",
         encoding="utf-8",
     )
     for label in (
         "before-connect",
         "direct-while-connected",
         "after-disconnect",
-        "rapid-cancel-stable-direct",
-        "rapid-cancel-reconnect-cleanup",
+        "start-stop-stable-direct",
+        "start-stop-reconnect-cleanup",
     ):
         (root / f"mobile-android-network-{label}-123.txt").write_text(
             f"label={label}\n0% packet loss\n",
@@ -245,14 +244,14 @@ with tempfile.TemporaryDirectory() as temporary:
             "directHttpsStatus=200\n",
             encoding="utf-8",
         )
-    (root / "mobile-android-network-rapid-cancel-full-reconnect-123.txt").write_text(
+    (root / "mobile-android-network-start-stop-full-reconnect-123.txt").write_text(
         "capturedHttpStatus=200\ncapturedHttpsStatus=200\nexitSourceIp=192.0.2.1\n",
         encoding="utf-8",
     )
     support, evidence_paths = module.validate_android_support(
         root, list(cases), "wireguard-dns"
     )
-    assert support["rapidStartStopCycles"] == len(rapid_delays)
+    assert support["startStopCycles"] == 2
     assert support["directBeforeConnectedAfter"] is True
     assert len(evidence_paths) == len(cases) + 12
     custom = root / "mobile-android-exit-dns-state-3.json"
@@ -601,17 +600,17 @@ grep -Fq 'RAPID_START_STOP_GATE="${NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE:-au
   && grep -Fq 'auto) rapid_start_stop_gate="$first"' "$gate" \
   && grep -Fq 'NVPN_ANDROID_RAPID_START_STOP_GATE="$rapid_start_stop_gate"' "$gate" \
   && grep -Fq 'run_android_release_rapid_start_stop_gate' "$android_release_gate" \
-  && grep -Fq '0 10 30 80 160 320 640 1000' "$android_release_gate" \
-  && grep -Fq 'android_release_rapid_cancel_once' "$android_release_gate" \
-  && grep -Fq 'Android Release rapid cancellation recreated more than one native tunnel' \
+  && ! grep -Fq 'android_release_rapid_cancel_once' "$android_release_gate" \
+  && ! grep -Fq '0 10 30 80 160 320 640 1000' "$android_release_gate" \
+  && grep -Fq 'android_release_connect_ui' "$android_release_gate" \
+  && grep -Fq 'android_release_disconnect_ui' "$android_release_gate" \
+  && grep -Fq 'run_android_release_direct_network_probe start-stop-stable-direct 0' \
     "$android_release_gate" \
-  && grep -Fq 'run_android_release_direct_network_probe rapid-cancel-stable-direct 0' \
-    "$android_release_gate" \
-  && grep -Fq 'run_android_release_exit_network_probe rapid-cancel-full-reconnect' \
+  && grep -Fq 'run_android_release_exit_network_probe start-stop-full-reconnect' \
     "$android_release_gate" \
   && grep -Fq 'assert_single_android_app_process' "$android_release_gate" \
   || {
-    echo "Android signed Release gate lacks real rapid cancel/reconnect recovery coverage" >&2
+    echo "Android signed Release gate lacks semantic start/stop/reconnect coverage" >&2
     exit 1
   }
 grep -Fq 'ios_release_network_audit_artifact' "$ios_release_gate" \

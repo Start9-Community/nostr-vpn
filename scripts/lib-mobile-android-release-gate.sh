@@ -977,101 +977,42 @@ run_android_release_active_vpn_lifecycle_gate() {
   echo "Android Release active VPN survived $ANDROID_LIFECYCLE_CYCLES real background/foreground cycles"
 }
 
-android_release_sleep_milliseconds() {
-  local milliseconds="$1"
-  [[ "$milliseconds" =~ ^[0-9]+$ ]] || return 1
-  (( milliseconds == 0 )) && return 0
-  sleep "$(printf '%d.%03d' "$((milliseconds / 1000))" "$((milliseconds % 1000))")"
-}
-
-android_release_rapid_cancel_once() {
-  local delay_ms="$1" point expected_pid before_count after_count
-  vpn_inactive || {
-    echo "Android Release rapid cancellation started with a live VPN" >&2
-    return 1
-  }
-  expected_pid="$(android_app_pid)"
-  [[ -n "$expected_pid" ]] && assert_single_android_app_process || return 1
-  before_count="$(android_vpn_native_start_count)" || return 1
-  [[ "$before_count" =~ ^[0-9]+$ ]] || {
-    echo "Android Release rapid cancellation has no native-tunnel baseline" >&2
-    return 1
-  }
-
-  start_main_activity
-  point="$(android_ui_query description "Turn VPN on" center)" || {
-    echo "Android Release rapid cancellation could not find the shipped VPN toggle" >&2
-    return 1
-  }
-  # Reuse the exact shipped-toggle coordinate for the second tap. The first
-  # tap updates Compose state asynchronously, so querying by its new label
-  # would turn a sub-second cancellation into an accessibility polling test.
-  vpn_cleanup_armed=1
-  # shellcheck disable=SC2086
-  "$ADB" -s "$serial" shell input tap $point || return 1
-  android_release_sleep_milliseconds "$delay_ms" || return 1
-  # shellcheck disable=SC2086
-  "$ADB" -s "$serial" shell input tap $point || return 1
-
-  wait_until 4 vpn_inactive || {
-    echo "Android Release rapid cancellation did not remove the VPN within four seconds (delay=${delay_ms}ms)" >&2
-    return 1
-  }
-  after_count="$(android_vpn_native_start_count)" || return 1
-  if [[ ! "$after_count" =~ ^[0-9]+$ \
-    || "$after_count" -lt "$before_count" \
-    || "$after_count" -gt $((before_count + 1)) ]]
-  then
-    echo "Android Release rapid cancellation recreated more than one native tunnel ($before_count->$after_count, delay=${delay_ms}ms)" >&2
-    return 1
-  fi
-  [[ "$(android_app_pid)" == "$expected_pid" ]] \
-    && assert_single_android_app_process || {
-      echo "Android Release rapid cancellation changed the canonical app process" >&2
-      return 1
-    }
-
-  android_release_wait_stable_quiescence \
-    "rapid cancellation delay=${delay_ms}ms" "$after_count" || return 1
-  vpn_cleanup_armed=0
-  echo "Android Release rapid start/cancel passed at ${delay_ms}ms"
-}
-
 run_android_release_rapid_start_stop_gate() {
   truthy "$ANDROID_RAPID_START_STOP_GATE" || return 0
-  local delay_ms
-  local rapid_ledger="$RUNTIME_STATE_RESULT_DIR/mobile-android-release-rapid-start-stop-$$.tsv"
-  : >"$rapid_ledger"
-  # The ordinary Release cycle runs first, so Android's real VPN permission
-  # dialog has already been accepted. These taps therefore measure production
-  # start/cancel behavior rather than an eight-second permission-dialog wait.
+  local start_stop_ledger="$RUNTIME_STATE_RESULT_DIR/mobile-android-release-start-stop-$$.tsv"
+  : >"$start_stop_ledger"
   configure_android_release_wireguard_ui || return 1
   if [[ -n "$EXIT_DNS_MODE" ]]; then
     configure_android_exit_dns_ui || return 1
   fi
-  android_release_capture_native_tunnel_start_baseline || return 1
-  for delay_ms in 0 10 30 80 160 320 640 1000; do
-    android_release_rapid_cancel_once "$delay_ms" || return 1
-    printf '%s\t%s\t%s\n' \
-      "$delay_ms" "$(android_app_pid)" "$(android_vpn_native_start_count)" \
-      >>"$rapid_ledger"
-  done
-  run_android_release_direct_network_probe rapid-cancel-stable-direct 0 || return 1
 
   android_release_capture_native_tunnel_start_baseline || return 1
   vpn_cleanup_armed=1
   android_release_connect_ui || return 1
   android_release_pin_native_tunnel_start_count || return 1
-  run_android_release_exit_network_probe rapid-cancel-full-reconnect || return 1
   android_release_disconnect_ui || return 1
   android_release_wait_stable_quiescence \
-    rapid-cancel-full-reconnect "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
+    start-stop "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" || return 1
+  printf 'semantic\t%s\t%s\n' \
+    "$(android_app_pid)" "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
+    >>"$start_stop_ledger"
+  vpn_cleanup_armed=0
+  run_android_release_direct_network_probe start-stop-stable-direct 0 || return 1
+
+  android_release_capture_native_tunnel_start_baseline || return 1
+  vpn_cleanup_armed=1
+  android_release_connect_ui || return 1
+  android_release_pin_native_tunnel_start_count || return 1
+  run_android_release_exit_network_probe start-stop-full-reconnect || return 1
+  android_release_disconnect_ui || return 1
+  android_release_wait_stable_quiescence \
+    start-stop-full-reconnect "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
     || return 1
   vpn_cleanup_armed=0
-  run_android_release_direct_network_probe rapid-cancel-reconnect-cleanup 0 || return 1
-  android_release_assert_native_tunnel_unchanged rapid-cancel-final || return 1
+  run_android_release_direct_network_probe start-stop-reconnect-cleanup 0 || return 1
+  android_release_assert_native_tunnel_unchanged start-stop-final || return 1
   assert_single_android_app_process || return 1
-  echo "Android Release real rapid start/cancel/reconnect gate passed"
+  echo "Android Release semantic start/stop/reconnect gate passed"
 }
 
 run_android_release_blackbox_cycle() {

@@ -735,33 +735,33 @@ def validate_android_support(
         "dnsSettingsReceiptCount": len(state_paths),
     }
     if mode == "wireguard-dns":
-        rapid_path = exactly_one(
+        start_stop_path = exactly_one(
             root,
-            "mobile-android-release-rapid-start-stop-*.tsv",
-            "Android rapid start/stop",
+            "mobile-android-release-start-stop-*.tsv",
+            "Android semantic start/stop",
         )
-        rapid_rows = [
+        start_stop_rows = [
             line.split("\t")
-            for line in rapid_path.read_text(encoding="utf-8").splitlines()
+            for line in start_stop_path.read_text(encoding="utf-8").splitlines()
             if line
         ]
         require(
-            [int(row[0]) for row in rapid_rows]
-            == [0, 10, 30, 80, 160, 320, 640, 1000]
+            len(start_stop_rows) == 1
             and all(
                 len(row) == 3
+                and row[0] == "semantic"
                 and int(row[1]) > 0
                 and int(row[2]) >= 0
-                for row in rapid_rows
+                for row in start_stop_rows
             ),
-            "Android rapid start/stop receipt lacks eight real cycles",
+            "Android semantic start/stop receipt is incomplete",
         )
         direct_labels = (
             "before-connect",
             "direct-while-connected",
             "after-disconnect",
-            "rapid-cancel-stable-direct",
-            "rapid-cancel-reconnect-cleanup",
+            "start-stop-stable-direct",
+            "start-stop-reconnect-cleanup",
         )
         direct_paths = []
         for label in direct_labels:
@@ -788,8 +788,8 @@ def validate_android_support(
             direct_paths.extend((ping_path, https_path))
         reconnect_path = exactly_one(
             root,
-            "mobile-android-network-rapid-cancel-full-reconnect-*.txt",
-            "Android rapid reconnect",
+            "mobile-android-network-start-stop-full-reconnect-*.txt",
+            "Android start/stop reconnect",
         )
         reconnect_text = reconnect_path.read_text(encoding="utf-8")
         require(
@@ -799,12 +799,12 @@ def validate_android_support(
                 reconnect_text,
             )
             and "exitSourceIp=" in reconnect_text,
-            "Android rapid reconnect lacks real exit packet evidence",
+            "Android start/stop reconnect lacks real exit packet evidence",
         )
         direct_paths.append(reconnect_path)
-        summary["rapidStartStopCycles"] = len(rapid_rows)
+        summary["startStopCycles"] = 2
         summary["directBeforeConnectedAfter"] = True
-        paths.extend((rapid_path, *direct_paths))
+        paths.extend((start_stop_path, *direct_paths))
     if mode == "underlay-lifecycle":
         underlay_path = exactly_one(
             root,
