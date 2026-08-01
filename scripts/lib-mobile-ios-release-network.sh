@@ -18,6 +18,7 @@ IOS_RELEASE_NETWORK_BASE_TREE_SHA=""
 IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA=""
 IOS_RELEASE_NETWORK_XCTESTRUN=""
 IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
+IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR=""
 IOS_RELEASE_NETWORK_DEVICE_RECEIPT=""
 IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64=""
 IOS_RELEASE_NETWORK_FIPS_TREE=""
@@ -461,9 +462,10 @@ ios_release_network_prepare_xctestrun() {
     echo "iOS Release base xctestrun is missing" >&2
     return 1
   }
-  IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$(
-    mktemp "$IOS_RELEASE_NETWORK_SIGNING_DIR/NostrVpnIos-$label.xctestrun.XXXXXX"
-  )"
+  IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR="$(
+    mktemp -d "$IOS_RELEASE_NETWORK_SIGNING_DIR/NostrVpnIos-$label.XXXXXX"
+  )" || return 1
+  IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR/NostrVpnIos-$label.xctestrun"
   rewrite_command=(
     python3 "$ROOT/scripts/ios_frozen_archive.py"
     rewrite-xctestrun
@@ -488,8 +490,7 @@ ios_release_network_prepare_xctestrun() {
   if ! printf '%s\0' "${runner_environment[@]}" \
     | "${rewrite_command[@]}"
   then
-    rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-    IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
+    ios_release_network_delete_private_test_products
     return 1
   fi
 }
@@ -556,6 +557,13 @@ ios_release_network_delete_private_test_products() {
   if [[ -n "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" ]]; then
     if rm -f "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"; then
       IOS_RELEASE_NETWORK_CASE_XCTESTRUN=""
+    else
+      cleanup_failed=1
+    fi
+  fi
+  if [[ -n "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR" ]]; then
+    if rmdir "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR"; then
+      IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR=""
     else
       cleanup_failed=1
     fi

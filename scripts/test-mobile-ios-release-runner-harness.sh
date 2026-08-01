@@ -24,18 +24,30 @@ import pathlib
 import re
 import sys
 
-contracts = (
+temporary_file_contracts = (
     (sys.argv[1], "nvpn-installed-release"),
     (sys.argv[2], "nvpn-release-installed"),
-    (sys.argv[3], "NostrVpnIos-$label.xctestrun"),
 )
-for source_path, stem in contracts:
+for source_path, stem in temporary_file_contracts:
     source = pathlib.Path(source_path).read_text(encoding="utf-8")
     match = re.search(rf'mktemp "([^"\n]*{re.escape(stem)}[^"\n]*)"', source)
     if match is None:
         raise SystemExit(f"missing exact temporary-file contract for {stem}")
     if not match.group(1).endswith("XXXXXX"):
         raise SystemExit(f"BSD mktemp template has a suffix after XXXXXX: {stem}")
+
+ios_source = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+required_ios_fragments = (
+    'mktemp -d "$IOS_RELEASE_NETWORK_SIGNING_DIR/NostrVpnIos-$label.XXXXXX"',
+    'IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR/NostrVpnIos-$label.xctestrun"',
+    'rmdir "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR"',
+)
+for fragment in required_ios_fragments:
+    if fragment not in ios_source:
+        raise SystemExit(
+            "private XCTest plan does not preserve a real .xctestrun suffix: "
+            + fragment
+        )
 PY
 for stem in nvpn-installed-release nvpn-release-installed NostrVpnIos-case.xctestrun; do
   first="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"
