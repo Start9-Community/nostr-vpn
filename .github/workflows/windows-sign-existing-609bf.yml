@@ -1,0 +1,75 @@
+name: Sign frozen Windows installer payload
+
+on:
+  push:
+    branches:
+      - codex/windows-sign-609bf
+
+jobs:
+  sign-existing-installer:
+    if: github.repository == 'mmalmi/nostr-vpn'
+    runs-on: [self-hosted, Windows, X64, nvpn-signing-609bf]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Stage exact frozen payload
+        shell: pwsh
+        run: >-
+          & $env:NVPN_SIGN_HELPER
+          -Mode stage
+          -RunnerTemp '${{ runner.temp }}'
+
+      - name: Sign company-owned payload files
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files: |
+            ${{ runner.temp }}\nvpn-sign\publish\NostrVpn.Windows.exe
+            ${{ runner.temp }}\nvpn-sign\publish\NostrVpn.Windows.dll
+            ${{ runner.temp }}\nvpn-sign\publish\nvpn.exe
+            ${{ runner.temp }}\nvpn-sign\publish\nostr_vpn_app_core.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify payload signatures and repackage
+        shell: pwsh
+        run: >-
+          & $env:NVPN_SIGN_HELPER
+          -Mode verify-inner-package
+          -RunnerTemp '${{ runner.temp }}'
+
+      - name: Sign canonical outer installer
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files: ${{ runner.temp }}\nvpn-sign\output\nostr-vpn-v4.1.5-windows-x64-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify outer signature and seal local receipt
+        shell: pwsh
+        run: >-
+          & $env:NVPN_SIGN_HELPER
+          -Mode verify-outer
+          -RunnerTemp '${{ runner.temp }}'
+
+      - name: Seal local failure receipt when needed
+        if: always()
+        shell: pwsh
+        run: >-
+          & $env:NVPN_SIGN_HELPER
+          -Mode seal
+          -RunnerTemp '${{ runner.temp }}'
