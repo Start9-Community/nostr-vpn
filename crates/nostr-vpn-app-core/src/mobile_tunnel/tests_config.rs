@@ -625,8 +625,8 @@
             .expect("live mobile FIPS endpoint should accept an underlay change");
 
         assert_eq!(
-            outcome.rebound_transports, 2,
-            "one underlay-change transaction must refresh the configured UDP and WebSocket carriers exactly once each"
+            outcome.rebound_transports, 3,
+            "one underlay-change transaction must refresh the configured IPv4 UDP, IPv6 UDP, and WebSocket carriers exactly once each"
         );
         assert_eq!(
             tunnel.endpoint.as_ref().expect("live endpoint").npub(),
