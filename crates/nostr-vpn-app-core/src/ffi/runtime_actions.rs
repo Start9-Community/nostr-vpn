@@ -183,7 +183,13 @@ impl NativeAppRuntime {
                         prepare_manual_join_delivery(&self.config, &network_id, &normalized)?;
                     self.queue_join_roster_delivery_to(&normalized, &delivery)?;
                 }
-                self.save_reload_and_refresh()
+                self.save_reload_and_refresh()?;
+                if !was_participant && !self.vpn_enabled {
+                    // The approval and delivery outbox are already durable.
+                    // Start networking now, but leave a failed start retryable.
+                    let _ = self.connect_vpn();
+                }
+                Ok(())
             }
             NativeAppAction::AddAdmin { network_id, npub } => {
                 self.config.add_admin_to_network(&network_id, &npub)?;
