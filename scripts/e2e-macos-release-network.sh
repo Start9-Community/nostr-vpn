@@ -1468,7 +1468,10 @@ run_crash_restart_gate() {
   restart_requested_ms="$(monotonic_ms)"
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
     >"$RESULT_DIR/daemon-start-after-sigkill.txt"
-  expected_bind_receipts="$((bind_baseline + 1))"
+  # spawn_daemon_process intentionally truncates daemon.log for every fresh
+  # daemon. The restarted log must therefore contain exactly one new bind
+  # receipt; the pre-crash count is retained separately below.
+  expected_bind_receipts=1
   if ! restart_elapsed_ms="$(
     wait_for_crash_restart_recovery \
       "$restart_requested_ms" "$expected_bind_receipts" "$old_pid"
@@ -1493,6 +1496,8 @@ run_crash_restart_gate() {
     printf 'startup_persist_path_completed=true\n'
     printf 'sigkill_tunnel_routes_absent=true\n'
     printf 'sigkill_secure_dns_ownership_seen=true\n'
+    printf 'pre_crash_wireguard_bind_receipts=%s\n' "$bind_baseline"
+    printf 'restart_wireguard_bind_receipts=%s\n' "$bind_receipts"
     printf 'old_pid=%s\n' "$old_pid"
     printf 'new_pid=%s\n' "$new_pid"
     printf 'restart_payload_ms=%s\n' "$restart_elapsed_ms"
