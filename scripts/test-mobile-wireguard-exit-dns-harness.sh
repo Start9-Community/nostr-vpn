@@ -44,6 +44,12 @@ server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
 fixture_lib="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
 
+grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$ROOT/.dockerignore" \
+  || {
+    echo "mobile WireGuard Docker context omits its HTTP probe" >&2
+    exit 1
+  }
+
 for doh_fixture in "$server" "$remote_native"; do
   grep -Fq 'tcp flags syn' "$doh_fixture" \
     || grep -Fq -- '--syn' "$doh_fixture" \
