@@ -70,13 +70,27 @@ ios_release_network_prepare_abort() {
 
 ios_release_network_company_signing() {
   local organization="$1"
+  local expected_certificate_sha256="$2"
   security find-identity -v -p codesigning \
     | python3 -c '
 import re
+import subprocess
 import sys
 
 organization = sys.argv[1]
-matches = []
+expected_sha256 = sys.argv[2].lower()
+certificate_inventory = subprocess.check_output(
+    ["security", "find-certificate", "-a", "-c", organization, "-Z"],
+    text=True,
+)
+sha256_by_sha1 = {
+    match.group(2).upper(): match.group(1).lower()
+    for match in re.finditer(
+        r"SHA-256 hash: ([0-9A-Fa-f]{64})\nSHA-1 hash: ([0-9A-Fa-f]{40})",
+        certificate_inventory,
+    )
+}
+matches = set()
 for line in sys.stdin:
     match = re.search(r"\b([0-9A-Fa-f]{40})\s+\"([^\"]+)\"", line)
     if not match:
@@ -90,13 +104,17 @@ for line in sys.stdin:
         or label.startswith("iPhone Distribution:")
     ):
         continue
-    matches.append((identity, team_match.group(1)))
+    identity = identity.upper()
+    if sha256_by_sha1.get(identity) != expected_sha256:
+        continue
+    matches.add((identity, team_match.group(1)))
 if len(matches) != 1:
     raise SystemExit(
-        f"expected one company distribution identity, observed {len(matches)}"
+        f"expected pinned company distribution identity, observed {len(matches)}"
     )
-print(f"{matches[0][0]}|{matches[0][1]}")
-' "$organization"
+identity, team = next(iter(matches))
+print(f"{identity}|{team}")
+' "$organization" "$expected_certificate_sha256"
 }
 
 ios_release_network_prepare() {
@@ -143,7 +161,8 @@ ios_release_network_prepare() {
   export NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256
   local company_signing company_identity team
   company_signing="$(
-    ios_release_network_company_signing "$signer_organization"
+    ios_release_network_company_signing \
+      "$signer_organization" "$expected_cert"
   )" || {
     echo "iOS Release gate could not select the exact company distribution identity" >&2
     return 1
