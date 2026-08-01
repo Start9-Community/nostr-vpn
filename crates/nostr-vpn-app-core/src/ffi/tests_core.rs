@@ -115,7 +115,17 @@
         let error = NativeAppRuntime::new(data_dir, String::new())
             .expect_err("second runtime must not open the same wallet");
 
-        assert!(error.to_string().contains("already in use"));
+        let wallet_lock_contended = error.to_string().contains("already in use");
+        #[cfg(windows)]
+        let wallet_lock_contended = {
+            const ERROR_LOCK_VIOLATION: i32 = 33;
+            wallet_lock_contended || error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.raw_os_error() == Some(ERROR_LOCK_VIOLATION))
+            })
+        };
+        assert!(wallet_lock_contended, "{error:#}");
         drop(first);
         let reopened =
             NativeAppRuntime::new(data_dir, String::new()).expect("wallet reopens after drop");
