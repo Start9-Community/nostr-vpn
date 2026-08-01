@@ -807,12 +807,20 @@ run_android_release_exit_network_probe() {
 
 android_release_capture_native_tunnel_start_baseline() {
   local count
+  android_vpn_begin_log_window || {
+    echo "Android Release could not begin a bounded native-tunnel log window" >&2
+    return 1
+  }
   count="$(android_vpn_native_start_count)" || {
     echo "Android Release could not inspect native-tunnel starts" >&2
     return 1
   }
   if [[ ! "$count" =~ ^[0-9]+$ ]]; then
     echo "Android Release native-tunnel start baseline is invalid" >&2
+    return 1
+  fi
+  if [[ "$count" != 0 ]]; then
+    echo "Android Release observed an unexpected native-tunnel start while establishing its pre-connect log window" >&2
     return 1
   fi
   ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE="$count"

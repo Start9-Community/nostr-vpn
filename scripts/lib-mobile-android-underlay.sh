@@ -10,6 +10,7 @@ ANDROID_UNDERLAY_NO_FALLBACK_INSPECTIONS=0
 ANDROID_UNDERLAY_PROCESS_CHECKPOINTS=()
 ANDROID_UNDERLAY_NATIVE_CHECKPOINTS=()
 ANDROID_VPN_NATIVE_START_LOG="WG upstream socket fd from native runtime:"
+ANDROID_VPN_LOG_MARKER=""
 
 android_underlay_require_environment() {
   local name
@@ -235,16 +236,60 @@ android_underlay_recovery_payloads() {
 }
 
 android_vpn_service_log_count() {
-  local needle="$1" logs
+  local needle="$1" logs window
   logs="$(
     "$ADB" -s "$serial" logcat -d -v brief \
       -s NostrVpnService:I '*:S' 2>/dev/null
   )" || return 1
+  if [[ -n "$ANDROID_VPN_LOG_MARKER" ]]; then
+    if ! window="$(awk -v marker="$ANDROID_VPN_LOG_MARKER" '
+      index($0, marker) { found = 1; next }
+      found { print }
+      END { if (!found) exit 42 }
+    ' <<<"$logs")"
+    then
+      echo "Android native-start log marker is no longer present; logcat continuity cannot be proven" >&2
+      return 1
+    fi
+    logs="$window"
+  fi
   grep -Fc "$needle" <<<"$logs" || true
 }
 
 android_vpn_native_start_count() {
   android_vpn_service_log_count "$ANDROID_VPN_NATIVE_START_LOG"
+}
+
+android_vpn_begin_log_window() {
+  local marker deadline logs
+  marker="NVPN_RELEASE_LOG_WINDOW_$(date +%s)_$$_$RANDOM"
+  if ! "$ADB" -s "$serial" logcat -c >/dev/null 2>&1; then
+    echo "Android could not clear stale logcat history before the native-start gate" >&2
+    return 1
+  fi
+  if ! "$ADB" -s "$serial" shell log -p i -t NostrVpnService "$marker" \
+      >/dev/null 2>&1
+  then
+    echo "Android could not emit the native-start log marker" >&2
+    return 1
+  fi
+  deadline=$((SECONDS + 2))
+  while ((SECONDS < deadline)); do
+    logs="$(
+      "$ADB" -s "$serial" logcat -d -v brief \
+        -s NostrVpnService:I '*:S' 2>/dev/null
+    )" || {
+      echo "Android could not inspect the native-start log marker" >&2
+      return 1
+    }
+    if grep -Fq "$marker" <<<"$logs"; then
+      ANDROID_VPN_LOG_MARKER="$marker"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Android native-start log marker was not observable within two seconds" >&2
+  return 1
 }
 
 android_underlay_assert_native_tunnel_unchanged() {

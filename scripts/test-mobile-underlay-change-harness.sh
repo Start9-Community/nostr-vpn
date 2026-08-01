@@ -365,25 +365,79 @@ bash -eu -o pipefail -c '
   fi
 ' _ "$android_lib" "$temp/adb-connectivity"
 
+cat >"$temp/adb-logcat" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${3:-}" == "logcat" ]]; then
+  cat "$ANDROID_LOGCAT_FIXTURE"
+  exit 0
+fi
+exit 2
+SH
+chmod +x "$temp/adb-logcat"
+cat >"$temp/native-start-window-full.log" <<'EOF'
+I/NostrVpnService( 100): WG upstream socket fd from native runtime: 41
+I/NostrVpnService( 100): NVPN_RELEASE_LOG_WINDOW_test-marker
+I/NostrVpnService( 100): WG upstream socket fd from native runtime: 42
+EOF
+cat >"$temp/native-start-window-truncated.log" <<'EOF'
+I/NostrVpnService( 100): NVPN_RELEASE_LOG_WINDOW_test-marker
+I/NostrVpnService( 100): WG upstream socket fd from native runtime: 42
+EOF
+cat >"$temp/native-start-window-marker-lost.log" <<'EOF'
+I/NostrVpnService( 100): WG upstream socket fd from native runtime: 42
+EOF
+bash -eu -o pipefail -c '
+  source "$1"
+  ADB="$2"
+  serial="physical-device"
+  ANDROID_VPN_LOG_MARKER="NVPN_RELEASE_LOG_WINDOW_test-marker"
+  ANDROID_LOGCAT_FIXTURE="$3"
+  export ANDROID_LOGCAT_FIXTURE
+  [[ "$(android_vpn_native_start_count)" == 1 ]]
+  ANDROID_LOGCAT_FIXTURE="$4"
+  export ANDROID_LOGCAT_FIXTURE
+  [[ "$(android_vpn_native_start_count)" == 1 ]]
+  ANDROID_LOGCAT_FIXTURE="$5"
+  export ANDROID_LOGCAT_FIXTURE
+  if android_vpn_native_start_count >"$6" 2>"$7"; then
+    echo "Android native-start count accepted a lost log marker" >&2
+    exit 1
+  fi
+  grep -Fq "native-start log marker is no longer present" "$7"
+' _ "$android_lib" "$temp/adb-logcat" \
+  "$temp/native-start-window-full.log" \
+  "$temp/native-start-window-truncated.log" \
+  "$temp/native-start-window-marker-lost.log" \
+  "$temp/native-start-window-marker-lost.out" \
+  "$temp/native-start-window-marker-lost.err"
+
 bash -eu -o pipefail -c '
   source "$1"
   source "$2"
   native_starts=3
+  log_window_resets=0
+  android_vpn_begin_log_window() {
+    log_window_resets=$((log_window_resets + 1))
+    native_starts=0
+  }
   android_vpn_native_start_count() { printf "%s\n" "$native_starts"; }
   android_release_capture_native_tunnel_start_baseline
-  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE" == 3 ]]
-  native_starts=4
+  [[ "$log_window_resets" == 1 ]]
+  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_BASELINE" == 0 ]]
+  native_starts=1
   android_release_pin_native_tunnel_start_count
-  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" == 4 ]]
+  [[ "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" == 1 ]]
   android_release_assert_native_tunnel_unchanged stable-network-phase
-  native_starts=5
+  native_starts=2
   if android_release_assert_native_tunnel_unchanged recreated-network-phase; then
     echo "Android Release gate accepted native-tunnel recreation" >&2
     exit 1
   fi
-  native_starts=10
+  native_starts=9
   android_release_capture_native_tunnel_start_baseline
-  native_starts=12
+  [[ "$log_window_resets" == 2 ]]
+  native_starts=2
   if android_release_pin_native_tunnel_start_count; then
     echo "Android Release gate accepted duplicate starts from one UI connect" >&2
     exit 1
