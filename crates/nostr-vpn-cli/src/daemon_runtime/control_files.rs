@@ -475,6 +475,7 @@ pub(crate) struct DaemonControlResult {
     error: Option<String>,
 }
 
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn ensure_no_other_daemon_processes_for_config(
     config_path: &Path,
     current_pid: u32,

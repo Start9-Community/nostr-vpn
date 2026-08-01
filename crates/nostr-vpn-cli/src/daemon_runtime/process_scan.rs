@@ -36,21 +36,6 @@ pub(crate) fn is_process_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(windows)]
-pub(crate) fn is_process_running(pid: u32) -> bool {
-    let output = ProcessCommand::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output();
-    let Ok(output) = output else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-
-    tasklist_pids_from_output(&String::from_utf8_lossy(&output.stdout)).contains(&pid)
-}
-
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn is_process_running(_pid: u32) -> bool {
     false
