@@ -35,6 +35,9 @@ All notable changes to this project are documented in this file.
   native operations with owned rollback so Direct restoration cannot hang;
   ignore stale daemon PID records reused by unrelated processes and keep the
   exclusive singleton lock authoritative during startup.
+- Keep the Windows UDP DNS stub alive when a late reply to an expired client
+  port produces `WSAECONNRESET`, so switching encrypted DNS providers cannot
+  silently stop subsequent lookups.
 - Stream Linux WireGuard apply and rollback configuration directly to `wg`
   without filesystem secret files, so exit nodes work under the stock
   enforced Ubuntu AppArmor policy.
