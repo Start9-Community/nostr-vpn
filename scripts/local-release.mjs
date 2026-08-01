@@ -1433,7 +1433,6 @@ function buildMacosArtifacts({
     gatedAppPath,
     'Contents',
     'Resources',
-    'binaries',
     'nvpn',
   )
   const cliAssets = packageUnixCliTarball({

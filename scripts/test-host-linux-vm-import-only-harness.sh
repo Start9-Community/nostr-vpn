@@ -135,6 +135,7 @@ require_tokens "$PREPARER" "clean exact cached Linux bundle" \
   '/workspace/app/scripts/build-host-linux-vm-bundle-in-container.sh' \
   'verify-host-linux-vm-bundle.py'
 require_tokens "$RELEASE_JOIN" "exact installed Release join paths" \
+  'source "$ROOT/scripts/lib-mobile-release-join-ui.sh"' \
   '"$NVPN_UBUNTU_IMPORTED_APP"' \
   '"$NVPN_UBUNTU_IMPORTED_CLI"' \
   '"$NVPN_UBUNTU_IMPORTED_PACKAGE_RECEIPT"'

@@ -11,6 +11,8 @@ source "$ROOT/scripts/mobile_env.sh"
 source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 
 load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"

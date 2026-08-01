@@ -2913,6 +2913,25 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   assert.match(githubRelease, /cargo build --release --locked -p nvpn/)
 })
 
+test('macOS publication packages the canonical CLI from the app bundle', () => {
+  const localRelease = readFileSync(
+    join(process.cwd(), 'scripts/local-release.mjs'),
+    'utf8',
+  )
+  const buildStart = localRelease.indexOf('function buildMacosArtifacts(')
+  const buildEnd = localRelease.indexOf(
+    '\nfunction buildIosArtifacts',
+    buildStart,
+  )
+  const build = localRelease.slice(buildStart, buildEnd)
+
+  assert.match(
+    build,
+    /const gatedCli = join\(\s*gatedAppPath,\s*'Contents',\s*'Resources',\s*'nvpn',?\s*\)/,
+  )
+  assert.doesNotMatch(build, /'Resources',\s*'binaries',\s*'nvpn'/)
+})
+
 test('Windows publication reuses the exact installer that passed the VM smoke gate', () => {
   const localRelease = readFileSync(
     join(process.cwd(), 'scripts/local-release.mjs'),
