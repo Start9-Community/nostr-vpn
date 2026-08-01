@@ -37,7 +37,7 @@ try {
         MainBinaryName = 'nostr-vpn-gui.exe'
     })
     $current = Resolve-NvpnOwnedRegistration -Kind current -RegistryPath 'current-key' -Values ([pscustomobject]@{
-        DisplayName = 'Nostr VPN'
+        DisplayName = 'Nostr VPN version 4.1.5'
         InstallLocation = $currentDir
         UninstallString = '"' + (Join-Path $currentDir 'unins000.exe') + '" /SILENT'
     })
@@ -70,9 +70,17 @@ try {
         })
     } 'An outside legacy uninstaller was accepted.'
 
+    Assert-Throws {
+        Resolve-NvpnOwnedRegistration -Kind current -RegistryPath 'bad-current-key' -Values ([pscustomobject]@{
+            DisplayName = 'Other VPN version 4.1.5'
+            InstallLocation = $currentDir
+            UninstallString = '"' + (Join-Path $currentDir 'unins000.exe') + '"'
+        })
+    } 'An unowned current installer registration was accepted.'
+
     New-Item -ItemType File -Force -Path (Join-Path $currentDir 'unins000.exe'), (Join-Path $currentDir 'NostrVpn.Windows.exe') | Out-Null
     $current = Resolve-NvpnOwnedRegistration -Kind current -RegistryPath 'failed-key' -Values ([pscustomobject]@{
-        DisplayName = 'Nostr VPN'
+        DisplayName = 'Nostr VPN version 4.1.5'
         InstallLocation = $currentDir
         UninstallString = '"' + (Join-Path $currentDir 'unins000.exe') + '"'
     })

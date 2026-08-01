@@ -54,7 +54,13 @@ function Resolve-NvpnOwnedRegistration {
         [Parameter(Mandatory)] $Values
     )
 
-    if ([string]$Values.DisplayName -cne 'Nostr VPN') {
+    $displayName = [string]$Values.DisplayName
+    $displayNameOwned = if ($Kind -eq 'legacy') {
+        $displayName -ceq 'Nostr VPN'
+    } else {
+        $displayName -cmatch '^Nostr VPN version [0-9]+(?:\.[0-9]+){2,3}(?:[-+][0-9A-Za-z.-]+)?$'
+    }
+    if (!$displayNameOwned) {
         throw "Refusing an unowned registration at $RegistryPath."
     }
 
