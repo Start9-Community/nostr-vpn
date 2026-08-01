@@ -112,7 +112,8 @@ impl NativeAppRuntime {
                 self.refresh_service_status()
             }
             NativeAppAction::AddNetwork { name } => {
-                self.config.add_owned_network(&name);
+                let network_id = self.config.add_owned_network(&name);
+                self.config.set_network_enabled(&network_id, true)?;
                 self.save_reload_and_refresh()
             }
             NativeAppAction::RenameNetwork { network_id, name } => {

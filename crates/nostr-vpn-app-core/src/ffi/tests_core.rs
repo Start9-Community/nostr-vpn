@@ -334,6 +334,42 @@
     }
 
     #[test]
+    fn creating_another_network_activates_the_new_network() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nvpn-app-core-switch-created-network-{nonce}"));
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.mobile_runtime = true;
+        runtime.config_path = dir.join("config.toml");
+
+        runtime.dispatch(NativeAppAction::AddNetwork {
+            name: "Home".to_string(),
+        });
+        let home_id = runtime.config.active_network().id.clone();
+        runtime.dispatch(NativeAppAction::AddNetwork {
+            name: "Work".to_string(),
+        });
+
+        let state = runtime.state();
+        assert!(state.error.is_empty(), "{}", state.error);
+        assert_eq!(runtime.config.networks.len(), 2);
+        assert_eq!(runtime.config.enabled_network_count(), 1);
+        assert_eq!(runtime.config.active_network().name, "Work");
+        assert!(!runtime.config.network_by_id(&home_id).expect("Home").enabled);
+
+        let saved = AppConfig::load(&runtime.config_path).expect("load persisted config");
+        assert_eq!(saved.active_network().name, "Work");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn remove_network_allows_returning_to_setup() {
         let nonce = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
