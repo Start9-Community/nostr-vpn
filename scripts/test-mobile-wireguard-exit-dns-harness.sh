@@ -663,6 +663,30 @@ grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
   && grep -Fq 'NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1' "$ios_release_ui" \
   && grep -Fq 'requireUDPEcho' "$ios_release_probe" \
   || { echo "iOS Release runner omits underlay/lifecycle/Direct packet proof" >&2; exit 1; }
+python3 - "$ios_release_ui" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split("private func driveBackgroundForeground", 1)[1].split(
+    "private func driveConfigSyncBackgroundForeground", 1
+)[0]
+required = (
+    "app.activate()",
+    "app.windows.firstMatch.waitForExistence(timeout: 10)",
+    "Release app UI was unavailable after lifecycle cycle",
+    "waitForVPNState(on: true, timeout: 8)",
+    "Release VPN UI was not on after lifecycle cycle",
+)
+if any(token not in body for token in required):
+    raise SystemExit(
+        "iOS Release lifecycle gate does not independently prove foreground UI and VPN state"
+    )
+if "waitForApplicationState(.runningForeground" in body:
+    raise SystemExit(
+        "iOS Release lifecycle gate trusts stale XCUIApplication.state after activation"
+    )
+PY
 if grep -Fq -- '--nvpn-debug-' \
   "$ios_release_gate" "$ios_release_ui" "$ios_release_ui_support" "$ios_release_underlay"
 then

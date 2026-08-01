@@ -515,10 +515,15 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: remaining)
             }
             app.activate()
-            guard waitForApplicationState(.runningForeground, timeout: 10),
-                  waitForVPNState(on: true, timeout: 8)
-            else {
-                throw gateError("Release app/VPN did not survive lifecycle cycle \(cycle)")
+            guard app.windows.firstMatch.waitForExistence(timeout: 10) else {
+                throw gateError(
+                    "Release app UI was unavailable after lifecycle cycle \(cycle)"
+                )
+            }
+            guard waitForVPNState(on: true, timeout: 8) else {
+                throw gateError(
+                    "Release VPN UI was not on after lifecycle cycle \(cycle)"
+                )
             }
             try proveExit(spec, label: "foreground-\(cycle)")
             emit("NVPN_IOS_RELEASE_FOREGROUND_\(cycle)_VERIFIED_MS=\(millisecondsSinceEpoch())")
