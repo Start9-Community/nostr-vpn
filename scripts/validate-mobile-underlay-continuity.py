@@ -73,7 +73,7 @@ def main() -> int:
     if not 1 <= max_recovery_ms <= 10_000:
         raise SystemExit("maximum recovery must be 1-10000ms")
 
-    replies = parse_ping_replies(ping_path)
+    raw_replies = parse_ping_replies(ping_path)
     markers, marker_counts = parse_markers(marker_path)
     errors: list[str] = []
     required_markers = [
@@ -91,11 +91,16 @@ def main() -> int:
             errors.append(
                 f"marker {name} occurred {marker_counts.get(name, 0)} times"
             )
-    sequences = [sequence for _, sequence in replies]
+    replies: list[tuple[int, int]] = []
+    seen_sequences: set[int] = set()
+    for reply in raw_replies:
+        if reply[1] in seen_sequences:
+            continue
+        seen_sequences.add(reply[1])
+        replies.append(reply)
+    duplicate_payloads = len(raw_replies) - len(replies)
     if len(replies) < 6:
-        errors.append(f"only {len(replies)} successful bidirectional payloads")
-    if any(current <= previous for previous, current in zip(sequences, sequences[1:])):
-        errors.append("successful ICMP sequence numbers are not strictly increasing")
+        errors.append(f"only {len(replies)} unique bidirectional payloads")
 
     cycles: list[dict[str, int | bool]] = []
     if not errors:
@@ -216,6 +221,7 @@ def main() -> int:
     summary = {
         "bidirectionalPayload": "wireguard-server-icmp-request-and-mobile-reply",
         "cycles": cycles,
+        "duplicatePayloads": duplicate_payloads,
         "maxRecoveryMilliseconds": max_recovery_ms,
         "passed": not errors,
         "platform": platform,

@@ -63,6 +63,46 @@ for fabricated in (
 assert receipt["bidirectionalPayload"].startswith("wireguard-server-icmp")
 PY
 
+# ICMP replies can legitimately arrive out of sequence after an underlay
+# outage. Arrival timestamps and unique payloads, not sequence ordering, prove
+# that this is live continuity evidence.
+sed \
+  -e 's/icmp_seq=6 ttl/icmp_seq=TEMP ttl/' \
+  -e 's/icmp_seq=7 ttl/icmp_seq=6 ttl/' \
+  -e 's/icmp_seq=TEMP ttl/icmp_seq=7 ttl/' \
+  "$temp/ping.log" >"$temp/reordered-replies.log"
+python3 "$continuity" \
+  "$temp/reordered-replies.log" "$temp/markers.tsv" \
+  "$temp/reordered-replies.json" Android 4000 \
+  >/dev/null
+jq -e '.passed == true and .successfulPayloads == 7' \
+  "$temp/reordered-replies.json" >/dev/null
+
+cp "$temp/ping.log" "$temp/duplicate-reply.log"
+printf '%s\n' \
+  '[1006.850] 64 bytes from 10.0.0.2: icmp_seq=7 ttl=64 time=1 ms (DUP!)' \
+  >>"$temp/duplicate-reply.log"
+python3 "$continuity" \
+  "$temp/duplicate-reply.log" "$temp/markers.tsv" \
+  "$temp/duplicate-reply.json" Android 4000 \
+  >/dev/null
+jq -e \
+  '.passed == true and .successfulPayloads == 7 and .duplicatePayloads == 1' \
+  "$temp/duplicate-reply.json" >/dev/null
+
+head -n 5 "$temp/ping.log" >"$temp/too-few-unique-replies.log"
+if python3 "$continuity" \
+  "$temp/too-few-unique-replies.log" "$temp/markers.tsv" \
+  "$temp/too-few-unique-replies.json" Android 4000 \
+  >"$temp/too-few-unique-replies.out" \
+  2>"$temp/too-few-unique-replies.err"
+then
+  echo "continuity validator accepted fewer than six unique replies" >&2
+  exit 1
+fi
+grep -Fq "only 5 unique bidirectional payloads" \
+  "$temp/too-few-unique-replies.err"
+
 cp "$temp/markers.tsv" "$temp/slow-product-markers.tsv"
 python3 - "$temp/slow-product-markers.tsv" <<'PY'
 import pathlib
