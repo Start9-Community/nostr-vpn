@@ -1396,6 +1396,34 @@ wireguard_bind_receipt_count() {
     "$STATE_DIR/daemon.log" 2>/dev/null || true
 }
 
+record_crash_restart_probe() {
+  local label="$1" probe="$2"
+  local receipt_dir="$RESULT_DIR/crash-restart-probes"
+  [[ ! -s "$receipt_dir/$label.pass" ]] || return 0
+  "$probe" >/dev/null 2>&1 || return 1
+  monotonic_ms >"$receipt_dir/$label.pass"
+}
+
+crash_restart_payloads_live() {
+  local pid pids=()
+  record_crash_restart_probe captured-http captured_probe_works &
+  pids+=("$!")
+  record_crash_restart_probe public-https https_works &
+  pids+=("$!")
+  record_crash_restart_probe exit-source exit_source_is_expected &
+  pids+=("$!")
+  record_crash_restart_probe private-fips fips_payload_works &
+  pids+=("$!")
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
+  local receipt_dir="$RESULT_DIR/crash-restart-probes"
+  [[ -s "$receipt_dir/captured-http.pass" \
+    && -s "$receipt_dir/public-https.pass" \
+    && -s "$receipt_dir/exit-source.pass" \
+    && -s "$receipt_dir/private-fips.pass" ]]
+}
+
 crash_restart_state_live() {
   local expected_bind_receipts="$1" old_pid="$2" new_pid
   assert_single_owned_daemon || return 1
@@ -1404,10 +1432,11 @@ crash_restart_state_live() {
     && "$(wireguard_bind_receipt_count)" == "$expected_bind_receipts" ]] \
     && runtime_wireguard_state_is true true \
     && runtime_dns_state_matches \
-    && runtime_fips_peer_connected \
-    && wireguard_routes_live \
+    && wireguard_interface >/dev/null \
+    && wireguard_endpoint_route_state_valid \
+    && secure_dns_owned \
     && fips_host_tunnel_route_live \
-    && fips_payload_works
+    && crash_restart_payloads_live
 }
 
 wait_for_crash_restart_recovery() {
@@ -1440,6 +1469,8 @@ wait_for_crash_restart_recovery() {
 run_crash_restart_gate() {
   local old_pid new_pid restart_requested_ms restart_elapsed_ms bind_baseline
   local bind_receipts expected_bind_receipts
+  rm -rf "$RESULT_DIR/crash-restart-probes"
+  mkdir -p "$RESULT_DIR/crash-restart-probes"
   assert_single_owned_daemon \
     || fail "SIGKILL gate did not start with exactly one owned daemon"
   if ! wait_for_crash_live_precondition; then
@@ -1448,8 +1479,8 @@ run_crash_restart_gate() {
   fi
   old_pid="$(owned_daemon_pid)"
   bind_baseline="$(wireguard_bind_receipt_count)"
-  [[ "$bind_baseline" =~ ^[1-9][0-9]*$ ]] \
-    || fail "SIGKILL gate has no initial WireGuard bind receipt"
+  [[ "$bind_baseline" == 1 ]] \
+    || fail "SIGKILL gate did not start with one WireGuard bind receipt"
 
   sudo -n /bin/kill -KILL "$old_pid"
   wait_until "the SIGKILLed production daemon to exit" no_nvpn_processes
@@ -1468,7 +1499,9 @@ run_crash_restart_gate() {
   restart_requested_ms="$(monotonic_ms)"
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
     >"$RESULT_DIR/daemon-start-after-sigkill.txt"
-  expected_bind_receipts="$((bind_baseline + 1))"
+  # `nvpn start` intentionally truncates its runtime log, so the fresh daemon
+  # must own exactly one fresh bind receipt rather than a cumulative count.
+  expected_bind_receipts=1
   if ! restart_elapsed_ms="$(
     wait_for_crash_restart_recovery \
       "$restart_requested_ms" "$expected_bind_receipts" "$old_pid"

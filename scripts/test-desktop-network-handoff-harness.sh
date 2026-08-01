@@ -871,6 +871,10 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'runtime_wireguard_state_is false false' \
   'wait_for_crash_live_precondition' \
   'crash_fail_closed_after_sigkill' \
+  'crash_restart_payloads_live' \
+  'record_crash_restart_probe' \
+  'crash-restart-probes' \
+  'expected_bind_receipts=1' \
   'startup_persist_path_completed=true' \
   'sigkill_tunnel_routes_absent=true' \
   'sigkill_secure_dns_ownership_seen=true' \
