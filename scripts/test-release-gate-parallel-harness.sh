@@ -442,8 +442,36 @@ grep -Fq 'release_gate_parallel_wait_group "${lanes[@]}"' "$release_gate" \
   || fail "parallel Docker lanes are not joined as one collected result set"
 grep -Fq 'NVPN_WG_EXIT_USERSPACE_INTERNET_SUBNET' "$release_gate" \
   || fail "parallel userspace WireGuard fixture has no isolated subnet"
-grep -Fq 'Release gate test selector matched no passing test' "$release_gate" \
-  || fail "focused release-gate tests can pass with an empty selector"
+selector_function="$tmp/release-gate-test-selector.sh"
+sed -n '/^release_gate_cargo_test_filter() (/ , /^)/p' \
+  "$release_gate" >"$selector_function"
+# shellcheck disable=SC1090
+source "$selector_function"
+zero_match_output="$tmp/zero-match.log"
+if release_gate_cargo_test_filter fips-core stale_selector \
+  printf '%s\n' 'running 0 tests' \
+  'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured' \
+  >"$zero_match_output" 2>&1
+then
+  fail "focused release-gate tests can pass with an empty selector"
+fi
+grep -Fq 'Release gate test selector matched no passing test: stale_selector (fips-core)' \
+  "$zero_match_output" \
+  || fail "zero-match FIPS selector did not explain its failure"
+release_gate_cargo_test_filter fips-core current_regression \
+  printf '%s\n' 'running 1 test' \
+  'test module::current_regression ... ok' \
+  'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured' \
+  >/dev/null \
+  || fail "focused release-gate selector rejected a matching passing test"
+grep -Fq 'fresh_control_with_unreturned_endpoint_data_keeps_direct_without_fallback_peer' \
+  "$release_gate" \
+  || fail "release gate does not run the current no-fallback direct-path regression"
+if grep -Fq 'fresh_control_with_unreturned_endpoint_data_blocks_direct_without_known_fallback' \
+  "$release_gate"
+then
+  fail "release gate still selects the removed pre-packet-mover regression name"
+fi
 grep -Fq -- '--skip websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin' "$release_gate" \
   || fail "the strict QR-join latency gate still runs during the cold Docker build"
 for durable_receipt_test in \
@@ -608,6 +636,14 @@ if "SetThreadExecutionState(2147483651)" not in text:
 if "$Screenshot.GetPixel(" not in text:
     raise SystemExit(
         "Windows service-toggle evidence accepts an unpainted blank WPF frame"
+    )
+if "SetCursorPos" not in text or "mouse_event(2" not in text or "mouse_event(4" not in text:
+    raise SystemExit(
+        "Windows service-toggle gate does not click the shipped control asynchronously"
+    )
+if "$Invoke.Invoke()" in text:
+    raise SystemExit(
+        "Windows service-toggle gate blocks inside InvokePattern while UAC is visible"
     )
 PY
 grep -Fq 'macos-vm-service-toggle-e2e.sh' "$release_gate" \

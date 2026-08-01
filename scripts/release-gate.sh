@@ -292,20 +292,30 @@ run_local_fips_regression_tests() {
 
   (
     cd "$release_fips_path"
-    cargo test -p fips-core overlay_adverts -- --nocapture
-    cargo test -p fips-core update_peers -- --nocapture
-    cargo test -p fips-core test_reply_learned_moves_configured_static_direct_peer_when_session_degraded -- --nocapture
-    cargo test -p fips-core traversal_path_liveness_keeps_mobile_safe_floor -- --nocapture
-    cargo test -p fips-core poll_nostr_discovery_configured_only_drops_nonconfigured_handoff -- --nocapture
-    cargo test -p fips-core fresh_control_with_unreturned_endpoint_data_blocks_direct_without_known_fallback -- --nocapture
-    cargo test -p fips-core outbound_fmp_send_does_not_refresh_direct_path_liveness -- --nocapture
-    cargo test -p fips-core \
+    local_test() {
+      local filter="$1"
+      shift
+      release_gate_cargo_test_filter fips-core "$filter" cargo test -p fips-core "$@"
+    }
+    local filter
+    for filter in \
+      overlay_adverts \
+      update_peers \
+      test_reply_learned_moves_configured_static_direct_peer_when_session_degraded \
+      traversal_path_liveness_keeps_mobile_safe_floor \
+      poll_nostr_discovery_configured_only_drops_nonconfigured_handoff \
+      fresh_control_with_unreturned_endpoint_data_keeps_direct_without_fallback_peer \
+      outbound_fmp_send_does_not_refresh_direct_path_liveness
+    do
+      local_test "$filter" "$filter" -- --nocapture
+    done
+    local_test initiate_reply_learned_keeps_configured_transit_inside_fanout_budget \
       proto::lookup::tests::initiate_reply_learned_keeps_configured_transit_inside_fanout_budget \
       -- --exact --nocapture
-    cargo test -p fips-core \
+    local_test forward_reply_learned_keeps_configured_transit_inside_fanout_budget \
       proto::lookup::tests::forward_reply_learned_keeps_configured_transit_inside_fanout_budget \
       -- --exact --nocapture
-    cargo test -p fips-core \
+    local_test persistent_two_seed_websocket_transit_survives_client_churn \
       --test public_websocket_transit \
       persistent_two_seed_websocket_transit_survives_client_churn \
       -- --exact --nocapture
@@ -320,18 +330,22 @@ release_cargo() {
   fi
 }
 
-release_cargo_test_filter() (
+release_gate_cargo_test_filter() (
   set -o pipefail
   local package="$1"
   local filter="$2"
+  shift 2
   local output
   output="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-gate-test.XXXXXX")"
-  if ! release_cargo test "${release_cargo_lock_args[@]}" -p "$package" "$filter" 2>&1 \
-    | tee "$output"; then
+  if ! "$@" 2>&1 | tee "$output"; then
     rm -f "$output"
     return 1
   fi
-  if ! grep -E "^test .*${filter} .*\\.\\.\\. ok$" "$output" >/dev/null; then
+  if ! awk -v filter="$filter" '
+      $1 == "test" && index($0, filter) > 0 && $NF == "ok" { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "$output"
+  then
     printf 'Release gate test selector matched no passing test: %s (%s)\n' \
       "$filter" "$package" >&2
     rm -f "$output"
@@ -339,6 +353,13 @@ release_cargo_test_filter() (
   fi
   rm -f "$output"
 )
+
+release_cargo_test_filter() {
+  local package="$1"
+  local filter="$2"
+  release_gate_cargo_test_filter "$package" "$filter" \
+    release_cargo test "${release_cargo_lock_args[@]}" -p "$package" "$filter"
+}
 
 run_release_gate_candidate_preflight() {
   if ! command -v rg >/dev/null 2>&1; then
