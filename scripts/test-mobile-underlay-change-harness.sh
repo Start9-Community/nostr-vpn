@@ -6,6 +6,7 @@ continuity="$ROOT/scripts/validate-mobile-underlay-continuity.py"
 ios_output_capture="$ROOT/scripts/capture-mobile-ios-underlay-output.py"
 android_lib="$ROOT/scripts/lib-mobile-android-underlay.sh"
 android_release_lib="$ROOT/scripts/lib-mobile-android-release-gate.sh"
+android_service="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt"
 ios_test="$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift"
 ios_underlay="$ROOT/ios/UITests/NostrVpnReleaseNetworkUnderlay.swift"
 network_evidence="$ROOT/scripts/release-network-evidence.py"
@@ -445,11 +446,11 @@ else:
     raise SystemExit("Android platform proof accepted a missing receipt")
 PY
 
-python3 - "$android_lib" "$ios_underlay" "$ios_test" <<'PY'
+python3 - "$android_lib" "$android_service" "$ios_underlay" "$ios_test" <<'PY'
 import pathlib
 import sys
 
-android, ios, ios_test = (
+android, android_service, ios, ios_test = (
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 )
 for forbidden in (
@@ -497,6 +498,14 @@ ordered = [gate.index(needle) for needle in (
     'android_underlay_recovery_payloads')]
 if ordered != sorted(ordered):
     raise SystemExit("Android radio-on and validated product clocks are not distinct")
+fingerprint = android_service[
+    android_service.index("private fun currentUnderlyingNetworkFingerprint("):
+    android_service.index("private fun underlyingNetworkCandidate(")
+]
+if "NET_CAPABILITY_VALIDATED" not in fingerprint:
+    raise SystemExit(
+        "Android underlay fingerprint suppresses the route-ready to validated refresh"
+    )
 gate = ios[ios.index("SWITCH_1_NO_VALIDATED_PHYSICAL_FALLBACK") :]
 ordered = [gate.index(needle) for needle in (
     'SWITCH_1_RECOVERY_REQUESTED_MS=', 'try setWiFiEnabled(true)',

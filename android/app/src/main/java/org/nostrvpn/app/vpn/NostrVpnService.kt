@@ -769,6 +769,11 @@ class NostrVpnService : VpnService() {
                         NetworkCapabilities.TRANSPORT_ETHERNET,
                     ).filter { capabilities?.hasTransport(it) == true }.joinToString(","),
                 )
+                append(";validated=")
+                append(
+                    capabilities
+                        ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
+                )
                 append(";interface=")
                 append(properties?.interfaceName.orEmpty())
                 append(";addresses=")
