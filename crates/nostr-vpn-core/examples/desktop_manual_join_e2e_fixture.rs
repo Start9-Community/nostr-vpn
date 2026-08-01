@@ -541,6 +541,9 @@ fn verify_direct_runtime_state(
     {
         bail!("web/StartOS manual-join runtime escaped its isolated direct transport config");
     }
+    if !config.autoconnect {
+        bail!("web/StartOS manual-join runtime did not persist enabled intent");
+    }
 
     let state_path = data_dir.join("daemon.state.json");
     let state: Value = serde_json::from_slice(

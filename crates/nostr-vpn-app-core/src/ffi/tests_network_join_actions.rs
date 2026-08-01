@@ -210,6 +210,12 @@ exit 0
             1,
             "manual approval must remain durably queued for receipt-backed delivery"
         );
+        assert!(
+            AppConfig::load(&config_path)
+                .expect("load persisted admin config")
+                .autoconnect,
+            "manual approval must persist its explicit networking intent"
+        );
         let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
         assert!(calls.contains("start --daemon --connect --config"), "{calls}");
 

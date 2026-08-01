@@ -183,8 +183,12 @@ impl NativeAppRuntime {
                         prepare_manual_join_delivery(&self.config, &network_id, &normalized)?;
                     self.queue_join_roster_delivery_to(&normalized, &delivery)?;
                 }
+                let should_start_networking = !was_participant && !self.vpn_enabled;
+                if should_start_networking {
+                    self.config.autoconnect = true;
+                }
                 self.save_reload_and_refresh()?;
-                if !was_participant && !self.vpn_enabled {
+                if should_start_networking && !self.vpn_enabled {
                     // The approval and delivery outbox are already durable.
                     // Start networking now, but leave a failed start retryable.
                     let _ = self.connect_vpn();

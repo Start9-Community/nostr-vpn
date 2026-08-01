@@ -203,11 +203,15 @@ run_direction() {
   joiner_hex="$(read_result "$result" joinerHex)"
   local started_ms finished_ms elapsed_ms
   started_ms="$(python3 -c 'import time; print(time.time_ns() // 1_000_000)')"
-  "${COMPOSE[@]}" exec -T "$joiner_daemon" \
-    /usr/local/bin/nvpn resume --config /data/config/nvpn/config.toml
-  "${COMPOSE[@]}" exec -T "$admin_daemon" \
-    /usr/local/bin/nvpn resume --config /data/config/nvpn/config.toml
   wait_for_runtime_receipt "$fixture" "$result" "$admin_data" "$joiner_data"
+  "${COMPOSE[@]}" exec -T "$joiner_daemon" \
+    /usr/local/bin/nvpn reload --config /data/config/nvpn/config.toml
+  "${COMPOSE[@]}" exec -T "$admin_daemon" \
+    /usr/local/bin/nvpn reload --config /data/config/nvpn/config.toml
+  "$fixture" verify-runtime \
+    --admin-data-dir "$admin_data" \
+    --joiner-data-dir "$joiner_data" \
+    --result "$result"
   finished_ms="$(python3 -c 'import time; print(time.time_ns() // 1_000_000)')"
   elapsed_ms=$((finished_ms - started_ms))
   if ((elapsed_ms > RUNTIME_TIMEOUT_SECS * 1000)); then
@@ -236,7 +240,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
             "direction": sys.argv[2],
-            "runtimeResumeToDurableAckMs": int(sys.argv[3]),
+            "uiCompletionToDurableAckMs": int(sys.argv[3]),
             "ceilingMs": int(sys.argv[4]),
         },
         handle,
@@ -246,7 +250,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
 
   "${COMPOSE[@]}" down -v --remove-orphans
-  echo "$direction real web/StartOS manual join passed in ${elapsed_ms}ms"
+  echo "$direction real web/StartOS automatic manual join passed in ${elapsed_ms}ms"
 }
 
 grep -Fq "dockerfile: './umbrel/Dockerfile'" "$ROOT_DIR/startos/manifest/index.ts" || {
