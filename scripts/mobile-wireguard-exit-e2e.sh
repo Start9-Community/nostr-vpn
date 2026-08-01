@@ -76,9 +76,6 @@ outage without another validated physical fallback, restores the same Wi-Fi, and
 and WireGuard payload recovery within four seconds without process recreation.
 NVPN_MOBILE_WG_EXIT_DNS_CASES accepts a comma-separated subset for a focused
 failure retry; the release gate leaves it unset and always runs all five.
-A combined underlay/full-DNS run requires an explicit companion receipt path in
-NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT or
-NVPN_MOBILE_IOS_WIREGUARD_DNS_EVIDENCE_OUTPUT.
 EOF
 }
 
@@ -683,7 +680,6 @@ PY
 
 write_network_evidence() {
   local platform="$1" output artifact_receipt artifact_dir ledger mode
-  local wireguard_output durable_ledger combined_evidence=0
   if bool_is_true "$UNDERLAY_CHANGE_GATE"; then
     mode=underlay-lifecycle
   else
@@ -692,14 +688,12 @@ write_network_evidence() {
   case "$platform" in
     android)
       output="${NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT:-}"
-      wireguard_output="${NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT:-}"
       artifact_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-}"
       artifact_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
       ledger="$ANDROID_COUNTER_LEDGER"
       ;;
     ios)
       output="${NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT:-}"
-      wireguard_output="${NVPN_MOBILE_IOS_WIREGUARD_DNS_EVIDENCE_OUTPUT:-}"
       artifact_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-}"
       artifact_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
       ledger="$IOS_COUNTER_LEDGER"
@@ -716,42 +710,6 @@ write_network_evidence() {
     echo "$platform network evidence requires an exact artifact receipt" >&2
     return 1
   }
-  if bool_is_true "$UNDERLAY_CHANGE_GATE"; then
-    if mobile_wg_dns_cases_are_complete "${DNS_CASES[@]}"; then
-      combined_evidence=1
-      [[ -n "$wireguard_output" && "$wireguard_output" != "$output" ]] || {
-        echo "$platform combined network evidence requires a distinct explicit" \
-          "WireGuard/DNS output" >&2
-        return 1
-      }
-    elif [[ "${#DNS_CASES[@]}" -ne 1 \
-      || "${DNS_CASES[0]}" != automatic-profile ]]
-    then
-      echo "$platform underlay evidence requires automatic-profile alone or" \
-        "the exact five-case matrix" >&2
-      return 1
-    fi
-  fi
-  [[ -d "$artifact_dir" && ! -L "$artifact_dir" ]] || {
-    echo "$platform network evidence requires a regular artifact directory" >&2
-    return 1
-  }
-  [[ -f "$ledger" && ! -L "$ledger" ]] || {
-    echo "$platform network evidence requires a regular counter ledger" >&2
-    return 1
-  }
-  durable_ledger="$artifact_dir/mobile-$platform-network-counter-ledger.tsv"
-  install -m 0600 "$ledger" "$durable_ledger"
-  ledger="$durable_ledger"
-  if [[ "$combined_evidence" == 1 ]]; then
-    python3 "$ROOT/scripts/release-network-evidence.py" mobile \
-      --platform "$platform" \
-      --mode wireguard-dns \
-      --artifact-receipt "$artifact_receipt" \
-      --artifact-dir "$artifact_dir" \
-      --counter-ledger "$ledger" \
-      --output "$wireguard_output"
-  fi
   python3 "$ROOT/scripts/release-network-evidence.py" mobile \
     --platform "$platform" \
     --mode "$mode" \
