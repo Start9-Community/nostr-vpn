@@ -61,14 +61,20 @@ function exactWindowsCratesIoFixture() {
     fipsVersion: '0.4.51',
     fipsCrates: structuredClone(exactPackages),
   }
+  const payloadFiles = {
+    app: 'NostrVpn.Windows.exe',
+    appCore: 'nostr_vpn_app_core.dll',
+    cli: 'nvpn.exe',
+    wintun: 'binaries\\wintun.dll',
+  }
   const payloads = Object.fromEntries(
-    ['app', 'appCore', 'cli', 'wintun'].map((name, index) => [
+    Object.entries(payloadFiles).map(([name, file], index) => [
       name,
-      { sha256: String(index + 4).repeat(64), size: index + 1 },
+      { file, sha256: String(index + 4).repeat(64), size: index + 1 },
     ]),
   )
   const artifactReceipt = {
-    receiptSchema: 1,
+    receiptSchema: 2,
     platform: 'windows',
     artifactType: 'exact installed Windows Release setup',
     appGitSha,
@@ -140,6 +146,11 @@ test('Windows crates.io receipts reject source, VCS, and artifact drift', () => 
       'invalid CLI payload',
       (fixture) => { fixture.artifactReceipt.payloads.cli.sha256 = 'nope' },
       /invalid cli payload/,
+    ],
+    [
+      'mislabeled app-core payload',
+      (fixture) => { fixture.artifactReceipt.payloads.appCore.file = 'NostrVpn.Windows.dll' },
+      /invalid appCore payload/,
     ],
     [
       'not installed',

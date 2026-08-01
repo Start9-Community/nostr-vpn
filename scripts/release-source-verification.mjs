@@ -80,10 +80,11 @@ function cargoLockRegistryPackage(lock, name, version) {
   return { source, checksum }
 }
 
-function requireFilePayload(receipt, name, label) {
+function requireFilePayload(receipt, name, expectedFile, label) {
   const payload = receipt?.payloads?.[name]
   if (
-    !/^[0-9a-f]{64}$/.test(String(payload?.sha256 ?? ''))
+    payload?.file !== expectedFile
+    || !/^[0-9a-f]{64}$/.test(String(payload?.sha256 ?? ''))
     || !Number.isSafeInteger(payload?.size)
     || payload.size <= 0
   ) {
@@ -128,7 +129,7 @@ export function validateWindowsCratesIoReceipts({
   requireExactFields(
     artifactReceipt,
     {
-      receiptSchema: 1,
+      receiptSchema: 2,
       platform: 'windows',
       artifactType: 'exact installed Windows Release setup',
       appGitSha: expectedAppGitSha,
@@ -143,7 +144,13 @@ export function validateWindowsCratesIoReceipts({
     },
     'Windows exact installed-artifact receipt',
   )
-  const payloadNames = ['app', 'appCore', 'cli', 'wintun']
+  const payloadFiles = {
+    app: 'NostrVpn.Windows.exe',
+    appCore: 'nostr_vpn_app_core.dll',
+    cli: 'nvpn.exe',
+    wintun: 'binaries\\wintun.dll',
+  }
+  const payloadNames = Object.keys(payloadFiles)
   if (
     JSON.stringify(Object.keys(artifactReceipt.payloads ?? {}).sort())
     !== JSON.stringify([...payloadNames].sort())
@@ -156,6 +163,7 @@ export function validateWindowsCratesIoReceipts({
       requireFilePayload(
         artifactReceipt,
         name,
+        payloadFiles[name],
         'Windows exact installed-artifact receipt',
       ),
     ]),
