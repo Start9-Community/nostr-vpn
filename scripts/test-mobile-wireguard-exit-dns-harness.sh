@@ -38,6 +38,7 @@ ios_underlay_capture="$ROOT/scripts/capture-mobile-ios-underlay-output.py"
 ios_project="$ROOT/ios/project.yml"
 ios_internet="$ROOT/ios/Sources/InternetViews.swift"
 ios_settings="$ROOT/ios/Sources/SettingsViews.swift"
+ios_exit_dns_settings="$ROOT/ios/Sources/ExitDnsSettingsCard.swift"
 android_internet="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidInternet.kt"
 android_dns="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidExitDns.kt"
 server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
@@ -1444,7 +1445,7 @@ for selector in \
   exit-dns-through-exit-servers \
   exit-dns-save
 do
-  grep -Fq "$selector" "$ios_internet" "$ios_settings" \
+  grep -Fq "$selector" "$ios_internet" "$ios_settings" "$ios_exit_dns_settings" \
     || { echo "iOS DNS UI is missing selector $selector" >&2; exit 1; }
 done
 grep -Fq 'testConfigureExitDnsForPhysicalPacketProbe' "$ios_ui" \
