@@ -1,26 +1,48 @@
-name: Sign frozen Windows installer payload
+name: Sign frozen Windows native executable retry
 
 on:
   push:
     branches:
-      - codex/windows-sign-609bf
+      - codex/windows-sign-609bf-retry
 
 jobs:
-  sign-existing-installer:
+  sign-frozen-native-executable:
     if: github.repository == 'mmalmi/nostr-vpn'
     runs-on: [self-hosted, Windows, X64, nvpn-signing-609bf]
-    timeout-minutes: 20
+    timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      NVPN_SOURCE: C:\Users\dev\release\nvpn-609bf555-win-build-20260801T064800Z\windows\NostrVpn.Windows\bin\Release\net8.0-windows\win-x64\publish\nvpn.exe
+      NVPN_SOURCE_SHA256: f1b93cad95ff45e00e87581e73000d32918dbd86d354365da7a3670c22860b34
+      NVPN_OUTPUT: C:\Users\dev\release-artifacts\nvpn-609bf555-windows-sign-native-retry-20260801
     steps:
-      - name: Stage exact frozen payload
+      - name: Assert toolchain and stage exact frozen executable copy
         shell: powershell
-        run: >-
-          & $env:NVPN_SIGN_HELPER
-          -Mode stage
-          -RunnerTemp '${{ runner.temp }}'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'C:\dotnet\dotnet.exe')) { throw '.NET 8 installation missing' }
+          $runtime = & 'C:\dotnet\dotnet.exe' --list-runtimes
+          if (-not ($runtime -match '^Microsoft\.NETCore\.App 8\.')) { throw '.NET 8 runtime missing' }
+          $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:NVPN_SOURCE).Hash.ToLowerInvariant()
+          if ($sourceHash -ne $env:NVPN_SOURCE_SHA256) { throw "Frozen source hash mismatch: $sourceHash" }
+          $stage = Join-Path $env:RUNNER_TEMP 'nvpn-sign-native-retry'
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item -LiteralPath $env:NVPN_SOURCE -Destination (Join-Path $stage 'nvpn.exe')
+          $stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'nvpn.exe')).Hash.ToLowerInvariant()
+          if ($stagedHash -ne $env:NVPN_SOURCE_SHA256) { throw "Staged copy hash mismatch: $stagedHash" }
+          Remove-Item -Recurse -Force $env:NVPN_OUTPUT -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $env:NVPN_OUTPUT | Out-Null
+          [ordered]@{
+            status = 'staged'
+            source = $env:NVPN_SOURCE
+            sourceSha256 = $sourceHash
+            staged = (Join-Path $stage 'nvpn.exe')
+            dotnetRuntimes = @($runtime)
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $env:NVPN_OUTPUT 'receipt.json')
 
-      - name: Sign company-owned payload files
+      - name: Sign exact frozen native executable copy
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -29,47 +51,66 @@ jobs:
           endpoint: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
-          files: |
-            ${{ runner.temp }}\nvpn-sign\publish\NostrVpn.Windows.exe
-            ${{ runner.temp }}\nvpn-sign\publish\NostrVpn.Windows.dll
-            ${{ runner.temp }}\nvpn-sign\publish\nvpn.exe
-            ${{ runner.temp }}\nvpn-sign\publish\nostr_vpn_app_core.dll
+          files: ${{ runner.temp }}\nvpn-sign-native-retry\nvpn.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+          batch-size: 0
+          trace: true
+          cache-dependencies: false
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
 
-      - name: Verify payload signatures and repackage
+      - name: Verify Authenticode and preserve signed copy
         shell: powershell
-        run: >-
-          & $env:NVPN_SIGN_HELPER
-          -Mode verify-inner-package
-          -RunnerTemp '${{ runner.temp }}'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'nvpn-sign-native-retry'
+          $signed = Join-Path $stage 'nvpn.exe'
+          $signtool = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
+          if (-not (Test-Path $signtool)) { throw 'signtool.exe missing' }
+          & $signtool verify /pa /all /v $signed 2>&1 | Tee-Object -FilePath (Join-Path $env:NVPN_OUTPUT 'signtool-verify.log')
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed: $LASTEXITCODE" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          if ($signature.Status -ne 'Valid') { throw "Authenticode status is $($signature.Status)" }
+          $sourceHashAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:NVPN_SOURCE).Hash.ToLowerInvariant()
+          if ($sourceHashAfter -ne $env:NVPN_SOURCE_SHA256) { throw "Original frozen artifact mutated: $sourceHashAfter" }
+          $outputExe = Join-Path $env:NVPN_OUTPUT 'nvpn.exe'
+          Copy-Item -LiteralPath $signed -Destination $outputExe
+          [ordered]@{
+            status = 'signed-and-verified'
+            source = $env:NVPN_SOURCE
+            sourceSha256 = $sourceHashAfter
+            signedCopy = $outputExe
+            signedSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputExe).Hash.ToLowerInvariant()
+            authenticodeStatus = [string]$signature.Status
+            signerSubject = $signature.SignerCertificate.Subject
+            signerThumbprint = $signature.SignerCertificate.Thumbprint
+            timestampSubject = $signature.TimeStamperCertificate.Subject
+            timestampThumbprint = $signature.TimeStamperCertificate.Thumbprint
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $env:NVPN_OUTPUT 'receipt.json')
 
-      - name: Sign canonical outer installer
-        uses: azure/artifact-signing-action@v2
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
-          files: ${{ runner.temp }}\nvpn-sign\output\nostr-vpn-v4.1.5-windows-x64-setup.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
-      - name: Verify outer signature and seal local receipt
-        shell: powershell
-        run: >-
-          & $env:NVPN_SIGN_HELPER
-          -Mode verify-outer
-          -RunnerTemp '${{ runner.temp }}'
-
-      - name: Seal local failure receipt when needed
+      - name: Record bounded-attempt failure and clean staging
         if: always()
         shell: powershell
-        run: >-
-          & $env:NVPN_SIGN_HELPER
-          -Mode seal
-          -RunnerTemp '${{ runner.temp }}'
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'nvpn-sign-native-retry'
+          $receipt = Join-Path $env:NVPN_OUTPUT 'receipt.json'
+          if ('${{ job.status }}' -ne 'success') {
+            [ordered]@{
+              status = 'failed'
+              jobStatus = '${{ job.status }}'
+              source = $env:NVPN_SOURCE
+              expectedSourceSha256 = $env:NVPN_SOURCE_SHA256
+              sourceSha256After = if (Test-Path $env:NVPN_SOURCE) { (Get-FileHash -Algorithm SHA256 -LiteralPath $env:NVPN_SOURCE).Hash.ToLowerInvariant() } else { $null }
+            } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $receipt
+          }
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
