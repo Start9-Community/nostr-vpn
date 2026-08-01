@@ -7,6 +7,9 @@ const sharedFiles = [
   'Cargo.lock', 'Cargo.toml', 'build.rs', 'rust-toolchain',
   'rust-toolchain.toml', 'scripts/sync-versions.mjs',
 ]
+const harnessOnlyScripts = new Set([
+  'scripts/lib-mobile-ios-release-network.sh',
+])
 const buildScripts = {
   android: [/prepare-android-release-from-bundle/, /lib-mobile-android-release-gate/],
   ios: [/scripts\/ios-build$/, /lib-mobile-ios-release-artifact/],
@@ -34,6 +37,7 @@ function isProductInput(path, platform) {
     return root === platform && !/\/(?:UI)?Tests?\//.test(`/${path}/`)
   }
   if (path.startsWith('scripts/')) {
+    if (harnessOnlyScripts.has(path)) return false
     for (const [owner, patterns] of Object.entries(buildScripts)) {
       if (patterns.some((pattern) => pattern.test(path))) return owner === platform
     }

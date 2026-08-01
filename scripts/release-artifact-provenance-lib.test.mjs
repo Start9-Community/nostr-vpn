@@ -68,6 +68,57 @@ test('component proof retains only unchanged platform product inputs', () => {
   }
 })
 
+test('component proof treats the iOS physical gate as harness-only', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-ios-harness-proof-'))
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  const changedPaths = [
+    'android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt',
+    'scripts/lib-mobile-android-release-gate.sh',
+    'scripts/lib-mobile-ios-release-network.sh',
+    'scripts/test-mobile-android-release-cleanup-harness.sh',
+    'scripts/test-mobile-underlay-change-harness.sh',
+  ]
+  try {
+    git('init', '-q')
+    git('config', 'user.name', 'Release Test')
+    git('config', 'user.email', 'release@example.invalid')
+    for (const path of changedPaths) write(join(root, path), 'base\n')
+    git('add', '.')
+    git('commit', '-qm', 'base')
+    const receiptCommit = git('rev-parse', 'HEAD')
+    const receiptTree = git('rev-parse', 'HEAD^{tree}')
+
+    for (const path of changedPaths) write(join(root, path), 'changed\n')
+    git('add', '.')
+    git('commit', '-qm', 'candidate')
+    const candidateCommit = git('rev-parse', 'HEAD')
+    const candidateTree = git('rev-parse', 'HEAD^{tree}')
+    const args = {
+      candidateRoot: root,
+      receiptCommit,
+      receiptTree,
+      candidateCommit,
+      candidateTree,
+    }
+
+    assert.throws(
+      () => proveUnchangedPlatformInputs({ ...args, platform: 'android' }),
+      /changed product\/build input android\/app\/src\/main\/java\/org\/nostrvpn\/app\/vpn\/NostrVpnService\.kt/,
+    )
+    const expectedDelta = sha256(`${changedPaths.sort().join('\0')}\0`)
+    for (const platform of ['ios', 'linux', 'macos', 'windows']) {
+      const proof = proveUnchangedPlatformInputs({ ...args, platform })
+      assert.equal(proof.changed_paths_sha256, expectedDelta)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 const desktopDnsCounterNames = [
   'profile_dns',
   'cloudflare',
