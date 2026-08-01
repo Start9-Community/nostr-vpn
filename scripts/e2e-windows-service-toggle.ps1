@@ -78,6 +78,10 @@ public static class NvpnServiceToggleInput {
   public static extern bool GetWindowRect(IntPtr handle, out Rect rect);
   [DllImport("user32.dll")]
   public static extern bool SetForegroundWindow(IntPtr handle);
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
   [DllImport("kernel32.dll")]
   public static extern uint SetThreadExecutionState(uint flags);
 }
@@ -166,8 +170,20 @@ public static class NvpnServiceToggleInput {
   if (!$ScreenshotCaptured) {
     throw "could not capture the painted visible WPF window after 20 attempts: $ScreenshotError"
   }
-  $Invoke = $Toggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-  $Invoke.Invoke()
+  $ToggleRect = $Toggle.Current.BoundingRectangle
+  if ($ToggleRect.IsEmpty) {
+    throw "Windows VPN toggle has no clickable screen bounds"
+  }
+  $ToggleX = [int][Math]::Floor(($ToggleRect.Left + $ToggleRect.Right) / 2)
+  $ToggleY = [int][Math]::Floor(($ToggleRect.Top + $ToggleRect.Bottom) / 2)
+  if (![NvpnServiceToggleInput]::SetCursorPos($ToggleX, $ToggleY)) {
+    throw "could not move the real pointer to the Windows VPN toggle"
+  }
+  # InvokePattern waits for the synchronous RunAs handler and therefore cannot
+  # observe or cancel the consent prompt it opened. A real pointer click returns
+  # immediately while exercising the same shipped control and production path.
+  [NvpnServiceToggleInput]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+  [NvpnServiceToggleInput]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 
   $PromptDeadline = (Get-Date).AddSeconds(20)
   $ConsentObserved = $false
@@ -193,6 +209,13 @@ public static class NvpnServiceToggleInput {
   # driver owns consent.exe cleanup because the intentionally limited GUI task
   # cannot terminate the secure-desktop process itself.
   Stop-Process -Id $ElevationProcess.ProcessId -Force -ErrorAction Stop
+  $ConsentCloseDeadline = (Get-Date).AddSeconds(5)
+  while ((Get-Date) -lt $ConsentCloseDeadline -and (Get-Process consent -ErrorAction SilentlyContinue)) {
+    Start-Sleep -Milliseconds 100
+  }
+  if (Get-Process consent -ErrorAction SilentlyContinue) {
+    throw "Windows UAC consent prompt survived requester cancellation"
+  }
   if (Get-Service NvpnService -ErrorAction SilentlyContinue) {
     throw "service-toggle prompt test unexpectedly installed the nvpn service"
   }

@@ -17,6 +17,7 @@ WINDOWS_OWNERSHIP_HARNESS="$ROOT/scripts/test-desktop-windows-wireguard-ownershi
 LINUX_HOST_ENTRY="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.sh"
 LINUX_HOST_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_GUEST="$ROOT/scripts/desktop-linux-underlay-change-e2e.sh"
+LINUX_CLEANUP_FAULT="$ROOT/scripts/desktop-linux-cleanup-fault-e2e.sh"
 PEER="$ROOT/scripts/desktop-linux-underlay-peer-e2e.sh"
 HOST_PEER_IMPORT="$ROOT/scripts/lib-desktop-underlay-host-peer.sh"
 HOST_PEER_VERIFY="$ROOT/scripts/verify-host-linux-peer-artifact.py"
@@ -74,7 +75,8 @@ reject_dual_listener_fixture() {
 source "$LISTENER_AUDIT"
 
 for script in \
-  "$WINDOWS_HOST_ENTRY" "$LINUX_HOST_ENTRY" "$LINUX_GUEST" "$PEER" \
+  "$WINDOWS_HOST_ENTRY" "$LINUX_HOST_ENTRY" "$LINUX_GUEST" \
+  "$LINUX_CLEANUP_FAULT" "$PEER" \
   "$MACOS_WIREGUARD" "$MACOS_NETWORK_GUEST" "$MACOS_APP" "$MACOS_IDLE"
 do
   [[ -x "$script" ]] || fail "$(basename "$script") is missing or not executable"
@@ -117,6 +119,10 @@ require_tokens "$LINUX_HOST_ENTRY" "artifact-bound product/harness separation" \
   'harnessRunnerSha256=%s'
 require_tokens "$LINUX_HOST_LIB" "imported versioned guest harness" \
   '"$@" "$GUEST_RUNNER" "$action"'
+require_tokens "$LINUX_CLEANUP_FAULT" "successful interface lookup status" \
+  'basename "$(dirname "$path")"' \
+  'return 0' \
+  'return 1'
 require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
   'NVPN_UBUNTU_LOCAL_REPO_PATH' \
   'NVPN_UBUNTU_SSH_JUMP' \

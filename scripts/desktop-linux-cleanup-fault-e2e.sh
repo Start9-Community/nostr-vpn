@@ -23,8 +23,12 @@ fail() {
 iface_for_mac() {
   local wanted="${1,,}" path
   for path in /sys/class/net/*/address; do
-    [[ "$(<"$path")" == "$wanted" ]] && basename "$(dirname "$path")"
+    if [[ "$(<"$path")" == "$wanted" ]]; then
+      basename "$(dirname "$path")"
+      return 0
+    fi
   done
+  return 1
 }
 
 route_dev() {
