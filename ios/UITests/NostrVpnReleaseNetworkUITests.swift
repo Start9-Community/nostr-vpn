@@ -38,9 +38,11 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
     }
 
     let app = XCUIApplication()
+    private var shippedUIVPNOffCleanupArmed = false
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        shippedUIVPNOffCleanupArmed = false
         PhysicalGateMarker.reset()
     }
 
@@ -60,6 +62,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             guard let self else { return }
             _ = try self.setStartVpnAutomatically(autoconnectWasEnabled)
         }
+        addTeardownBlock { [weak self] in
+            guard let self, self.shippedUIVPNOffCleanupArmed else { return }
+            try self.turnVPNOffIfNeeded()
+        }
         try turnVPNOffIfNeeded()
 
         try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(spec.publicHttpsUrl)
@@ -78,6 +84,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         if spec.exerciseStartStopStress {
             try driveRapidStartStopStress(spec, directSource: directSource)
         }
+        shippedUIVPNOffCleanupArmed = true
         try turnVPNOn()
         try waitForSourceIP(
             spec.sourceIpUrl,
@@ -107,6 +114,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         // sampler records the final active-session checkpoint.
         Thread.sleep(forTimeInterval: 6)
         try turnVPNOffIfNeeded()
+        shippedUIVPNOffCleanupArmed = false
         relaunch()
         guard waitForVPNState(on: false, timeout: 15) else {
             throw gateError("Release app relaunched with a stale packet tunnel after VPN off")

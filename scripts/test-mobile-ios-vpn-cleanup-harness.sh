@@ -227,6 +227,35 @@ grep -Fq 'source "$ROOT/scripts/lib-mobile-ios-release-network.sh"' \
   "$ROOT/scripts/mobile-wireguard-exit-e2e.sh" \
   || fail "mobile WireGuard gate bypasses the audited Release iOS driver"
 
+python3 - "$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+lifecycle = source.split("func testReleaseNetworkLifecycle() throws {", 1)[1].split(
+    "func testReleaseDisconnectCleanup() throws {", 1
+)[0]
+teardown_blocks = lifecycle.split("addTeardownBlock", 2)
+if len(teardown_blocks) != 3:
+    raise SystemExit("Release XCTest has no dedicated VPN-off teardown")
+if re.search(
+    r"addTeardownBlock\s*\{\s*\[weak self\]\s*in\s*"
+    r"guard let self, self\.shippedUIVPNOffCleanupArmed else \{ return \}\s*"
+    r"try self\.turnVPNOffIfNeeded\(\)\s*\}",
+    lifecycle,
+) is None:
+    raise SystemExit("Release XCTest teardown bypasses the shipped VPN-off UI")
+arm = lifecycle.index("shippedUIVPNOffCleanupArmed = true")
+connect = lifecycle.index("try turnVPNOn()")
+normal_disconnect = lifecycle.rindex("try turnVPNOffIfNeeded()")
+disarm = lifecycle.index("shippedUIVPNOffCleanupArmed = false", normal_disconnect)
+if not arm < connect < normal_disconnect < disarm:
+    raise SystemExit("Release XCTest VPN-off teardown has unsafe arm/disarm ordering")
+if "shippedUIVPNOffCleanupArmed = false" in lifecycle[arm:normal_disconnect]:
+    raise SystemExit("mid-test failure could disarm the VPN-off teardown")
+PY
+
 python3 - \
   "$ROOT/ios/Sources/AppModel.swift" \
   "$ROOT/ios/Sources/PacketTunnelController.swift" \
