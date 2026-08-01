@@ -718,6 +718,20 @@ crash_fail_closed_after_sigkill() {
     && secure_dns_owned
 }
 
+snapshot_crash_fail_closed_after_sigkill() {
+  local predicates="$1"
+  : >"$predicates"
+  snapshot_predicate "$predicates" daemon_absent no_nvpn_processes
+  snapshot_predicate "$predicates" wireguard_interface_absent \
+    wireguard_interface_absent
+  snapshot_predicate "$predicates" wireguard_split_defaults_absent \
+    wireguard_split_defaults_absent
+  snapshot_predicate "$predicates" endpoint_route_absent \
+    wireguard_endpoint_route_absent
+  snapshot_predicate "$predicates" secure_dns_owned secure_dns_owned
+  ! grep -Fq '=false' "$predicates"
+}
+
 record_crash_external_audit() {
   local label="$1" mode predicates
   case "$label" in
@@ -726,9 +740,9 @@ record_crash_external_audit() {
     *) return 1 ;;
   esac
   predicates="$RESULT_DIR/crash-external-$label-predicates.txt"
-  : >"$predicates"
-  snapshot_predicate "$predicates" secure_dns_owned secure_dns_owned
   if [[ "$mode" == live ]]; then
+    : >"$predicates"
+    snapshot_predicate "$predicates" secure_dns_owned secure_dns_owned
     snapshot_predicate "$predicates" wireguard_interface wireguard_interface
     snapshot_predicate "$predicates" endpoint_route_bypass \
       wireguard_endpoint_route_state_valid "$PRIMARY_IFACE"
@@ -745,14 +759,7 @@ record_crash_external_audit() {
       crash_startup_log_order_is_valid
     crash_live_precondition || return 1
   else
-    snapshot_predicate "$predicates" daemon_absent no_nvpn_processes
-    snapshot_predicate "$predicates" wireguard_interface_absent \
-      wireguard_interface_absent
-    snapshot_predicate "$predicates" wireguard_split_defaults_absent \
-      wireguard_split_defaults_absent
-    snapshot_predicate "$predicates" endpoint_route_absent \
-      wireguard_endpoint_route_absent
-    crash_fail_closed_after_sigkill || return 1
+    snapshot_crash_fail_closed_after_sigkill "$predicates" || return 1
   fi
   capture_underlay_routes \
     >"$RESULT_DIR/crash-external-$label-routes.txt" 2>&1 || true
@@ -1446,7 +1453,8 @@ run_crash_restart_gate() {
   daemon_process_alive "$old_pid" \
     && fail "SIGKILLed production daemon is still alive"
   wait_until "fail-closed WireGuard route teardown after SIGKILL" \
-    crash_fail_closed_after_sigkill
+    snapshot_crash_fail_closed_after_sigkill \
+    "$RESULT_DIR/crash-external-after-sigkill-predicates.txt"
   record_crash_external_audit after-sigkill \
     || fail "SIGKILL did not remove the tunnel/routes or retain secure-DNS repair ownership"
   runtime_wireguard_state_is true false \

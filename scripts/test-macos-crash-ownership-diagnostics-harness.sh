@@ -136,6 +136,20 @@ WIREGUARD_INTERFACE_STATUS=0
 if crash_fail_closed_after_sigkill; then
   fail "SIGKILL state accepted a surviving WireGuard utun"
 fi
+failed_predicates="$RESULT_DIR/crash-external-after-sigkill-last-poll.txt"
+if snapshot_crash_fail_closed_after_sigkill "$failed_predicates"; then
+  fail "SIGKILL predicate snapshot accepted a surviving WireGuard utun"
+fi
+for predicate in \
+  daemon_absent=true \
+  wireguard_interface_absent=false \
+  wireguard_split_defaults_absent=false \
+  endpoint_route_absent=true \
+  secure_dns_owned=true
+do
+  grep -Fxq "$predicate" "$failed_predicates" \
+    || fail "SIGKILL last-poll evidence omitted $predicate"
+done
 WIREGUARD_INTERFACE_STATUS=1
 ENDPOINT_ROUTE_ABSENT_STATUS=1
 if crash_fail_closed_after_sigkill; then
