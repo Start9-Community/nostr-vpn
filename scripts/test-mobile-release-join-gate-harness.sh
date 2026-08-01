@@ -75,6 +75,31 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
   release_join_ios_finish_test
 )
 
+(
+  set -u
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  release_join_android_launch() { :; }
+  release_join_android_wait_query() { :; }
+  release_join_android_tap() { :; }
+  release_join_android_open_link_device() { :; }
+  release_join_valid_npub() { :; }
+  release_join_android_public_value() {
+    case "$1" in
+      admin-device-id-value) printf '%s\n' npub1admin ;;
+      admin-network-id-value) printf '%s\n' network-1 ;;
+      *) return 1 ;;
+    esac
+  }
+  release_join_android_create_admin
+  [[ "$RELEASE_JOIN_ANDROID_ADMIN_ID" == npub1admin ]]
+  [[ "$RELEASE_JOIN_ANDROID_NETWORK_ID" == network-1 ]]
+  ((${#RELEASE_JOIN_ANDROID_NETWORK_IDS[@]} == 1))
+) || {
+  echo "Android first network creation failed under Bash nounset" >&2
+  exit 1
+}
+
 for obsolete in \
   "$ROOT/scripts/mobile-ios-android-join-e2e.sh" \
   "$ROOT/scripts/test-mobile-real-qr-join-harness.sh" \

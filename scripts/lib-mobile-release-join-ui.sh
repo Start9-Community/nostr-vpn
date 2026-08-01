@@ -152,13 +152,15 @@ release_join_android_create_admin() {
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_ADMIN_ID"
   [[ -n "$RELEASE_JOIN_ANDROID_NETWORK_ID" ]]
-  local existing
-  for existing in "${RELEASE_JOIN_ANDROID_NETWORK_IDS[@]}"; do
-    [[ "$existing" != "$RELEASE_JOIN_ANDROID_NETWORK_ID" ]] || {
-      echo "Android join phase reused a retained network" >&2
-      return 1
-    }
-  done
+  if ((${#RELEASE_JOIN_ANDROID_NETWORK_IDS[@]} > 0)); then
+    local existing
+    for existing in "${RELEASE_JOIN_ANDROID_NETWORK_IDS[@]}"; do
+      [[ "$existing" != "$RELEASE_JOIN_ANDROID_NETWORK_ID" ]] || {
+        echo "Android join phase reused a retained network" >&2
+        return 1
+      }
+    done
+  fi
   RELEASE_JOIN_ANDROID_NETWORK_IDS+=("$RELEASE_JOIN_ANDROID_NETWORK_ID")
   export RELEASE_JOIN_ANDROID_ADMIN_ID RELEASE_JOIN_ANDROID_NETWORK_ID
 }
