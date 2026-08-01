@@ -823,6 +823,29 @@ if "android_release_open_internet_settings" not in wireguard:
     raise SystemExit(
         "Android Release WireGuard gate does not verify Internet-screen navigation"
     )
+source_select = wireguard.index(
+    'tap_android_ui description "Internet source WireGuard VPN"'
+)
+config_ready = wireguard.index(
+    "wait_for_android_ui resource wireguard-config"
+)
+config_entry = wireguard.index(
+    "replace_android_ui_multiline_text wireguard-config"
+)
+if not source_select < config_ready < config_entry:
+    raise SystemExit(
+        "Android Release WireGuard gate does not wait for the shipped config field"
+    )
+if wireguard.count(
+    'tap_android_ui description "Internet source WireGuard VPN"'
+) != 1:
+    raise SystemExit(
+        "Android Release WireGuard readiness path retries source selection"
+    )
+if "WireGuard config field did not appear after source selection" not in wireguard:
+    raise SystemExit(
+        "Android Release WireGuard config readiness timeout lacks a diagnostic"
+    )
 helper_start = smoke.index("android_open_internet_settings_ui()")
 helper_end = smoke.index("\nreplace_android_ui_text()", helper_start)
 helper = smoke[helper_start:helper_end]

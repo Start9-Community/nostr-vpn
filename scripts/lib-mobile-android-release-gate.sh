@@ -551,7 +551,12 @@ configure_android_release_wireguard_ui() {
     echo "Android Release could not select WireGuard VPN as the Internet source" >&2
     return 1
   }
-  sleep 0.5
+  wait_for_android_ui resource wireguard-config || {
+    echo "Android Release WireGuard config field did not appear after source selection" >&2
+    android_capture_internet_navigation_failure \
+      "Release WireGuard config readiness"
+    return 1
+  }
   replace_android_ui_multiline_text wireguard-config "$config" || {
     echo "Android Release could not enter the WireGuard config through shipped UI" >&2
     return 1
