@@ -30,6 +30,8 @@ DNS_COUNTERS_INCREASED = {
     "doh-google": {"google"},
     "dns-through": {"query", "through"},
 }
+UNDERLAY_DNS_CASES = frozenset(("automatic-profile",))
+FULL_DNS_CASES = frozenset(DNS_CASES)
 DESKTOP_DNS_COUNTERS = {
     "automatic": "profile_dns",
     "cloudflare": "cloudflare",
@@ -189,6 +191,16 @@ def split_dns_counters(
     return dict(zip(COUNTERS, values[:width])), dict(zip(COUNTERS, values[width:]))
 
 
+def allowed_mobile_evidence_case_sets(
+    expected_cases: list[str],
+) -> set[frozenset[str]]:
+    expected = frozenset(expected_cases)
+    allowed = {expected}
+    if expected == UNDERLAY_DNS_CASES:
+        allowed.add(FULL_DNS_CASES)
+    return allowed
+
+
 def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[str, Any]:
     require(path.is_file() and not path.is_symlink(), "mobile counter ledger is missing")
     rows: dict[str, Any] = {}
@@ -226,7 +238,10 @@ def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[
             "forwardedPacketsBefore": before_forward,
             "forwardedPacketsAfter": after_forward,
         }
-    require(set(rows) == set(expected_cases), "mobile counter ledger has the wrong DNS cases")
+    require(
+        frozenset(rows) in allowed_mobile_evidence_case_sets(expected_cases),
+        "mobile counter ledger has the wrong DNS cases",
+    )
     return {label: rows[label] for label in expected_cases}
 
 
@@ -608,8 +623,10 @@ def validate_android_dns_ui_receipts(
     cases: list[str],
 ) -> list[pathlib.Path]:
     state_paths = list(root.glob("mobile-android-exit-dns-state-*.json"))
+    allowed_case_sets = allowed_mobile_evidence_case_sets(cases)
+    allowed_cases = set().union(*allowed_case_sets)
     require(
-        len(state_paths) == len(cases),
+        len(state_paths) in {len(case_set) for case_set in allowed_case_sets},
         "Android DNS settings receipts do not cover every requested case",
     )
     expected_settings = {
@@ -672,7 +689,10 @@ def validate_android_dns_ui_receipts(
             str(state.get("exitDnsDohProvider")),
         )
         case = case_by_mode_provider.get(key)
-        require(case in cases and case not in observed, "Android DNS settings case is wrong or duplicated")
+        require(
+            case in allowed_cases and case not in observed,
+            "Android DNS settings case is wrong or duplicated",
+        )
         expected = expected_settings[case]
         require(
             state.get("exitDnsCustomDohUrl") == expected["customUrl"]
@@ -702,7 +722,7 @@ def validate_android_dns_ui_receipts(
             )
         observed.add(case)
     require(
-        observed == set(cases),
+        frozenset(observed) in allowed_case_sets,
         "Android DNS settings receipts have the wrong requested policy values",
     )
     return state_paths
@@ -933,11 +953,13 @@ def build_mobile(args: argparse.Namespace) -> None:
     root = pathlib.Path(args.artifact_dir).resolve()
     artifact = load_json(artifact_path)
     identity = artifact_identity(platform, artifact)
-    counter_cases = parse_counter_ledger(pathlib.Path(args.counter_ledger), cases)
+    counter_path = pathlib.Path(args.counter_ledger).resolve()
+    counter_cases = parse_counter_ledger(counter_path, cases)
     if platform == "ios":
         support, paths = validate_ios_support(root, cases, mode)
     else:
         support, paths = validate_android_support(root, cases, mode)
+    paths.append(counter_path)
     atomic_json(
         pathlib.Path(args.output),
         {

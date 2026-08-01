@@ -131,8 +131,11 @@ spec = importlib.util.spec_from_file_location("network_evidence", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
-if "strict=True" in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"):
+evidence_source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if "strict=True" in evidence_source:
     raise SystemExit("release network evidence still requires Python 3.10 zip(strict=)")
+if "paths.append(counter_path)" not in evidence_source:
+    raise SystemExit("mobile receipt does not hash its preserved counter ledger")
 before, after = module.split_dns_counters(list(range(14)), "fixture")
 assert list(before.values()) == list(range(7))
 assert list(after.values()) == list(range(7, 14))
@@ -161,29 +164,136 @@ cases = {
         "10.99.77.53",
     ),
 }
+
+
+def counter_row(label, *, corrupt=False):
+    evidence = module.DNS_CASES[label]
+    before = [0] * len(module.COUNTERS)
+    after = list(before)
+    for counter in module.DNS_COUNTERS_INCREASED[evidence]:
+        after[module.COUNTERS.index(counter)] = 1
+    if corrupt:
+        forbidden = next(
+            counter
+            for counter in module.COUNTERS
+            if counter not in module.DNS_COUNTERS_INCREASED[evidence]
+        )
+        after[module.COUNTERS.index(forbidden)] = 1
+    values = [0, 1, 0, 1, 0, 1, *before, *after]
+    return "\t".join((label, evidence, *(str(value) for value in values))) + "\n"
+
+
+def write_counter_ledger(path, labels, *, corrupt_label=None):
+    path.write_text(
+        "".join(
+            counter_row(label, corrupt=label == corrupt_label)
+            for label in labels
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_dns_state(root, index, label):
+    mode, provider, custom_url, bootstrap, through = cases[label]
+    payload = {
+        "receiptSchema": 1,
+        "evidenceSource": "shipped-ui-restart-readback",
+        "uiRestartReadback": True,
+        "releaseBlackbox": True,
+        "exitDnsMode": mode,
+        "exitDnsDohProvider": provider,
+        "exitDnsCustomDohUrl": custom_url,
+        "exitDnsCustomDohBootstrapIps": bootstrap,
+        "exitDnsThroughExitServers": through,
+        "internetSource": "wireguard",
+        "wireguardExitEnabled": True,
+        "error": "",
+    }
+    (root / f"mobile-android-exit-dns-state-{index}.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
+def expect_rejection(action, fragment, accepted_message):
+    try:
+        action()
+    except ValueError as error:
+        if fragment not in str(error):
+            raise
+    else:
+        raise SystemExit(accepted_message)
+
+
 with tempfile.TemporaryDirectory() as temporary:
     root = pathlib.Path(temporary)
-    for index, (label, values) in enumerate(cases.items()):
-        mode, provider, custom_url, bootstrap, through = values
-        payload = {
-            "receiptSchema": 1,
-            "evidenceSource": "shipped-ui-restart-readback",
-            "uiRestartReadback": True,
-            "releaseBlackbox": True,
-            "exitDnsMode": mode,
-            "exitDnsDohProvider": provider,
-            "exitDnsCustomDohUrl": custom_url,
-            "exitDnsCustomDohBootstrapIps": bootstrap,
-            "exitDnsThroughExitServers": through,
-            "internetSource": "wireguard",
-            "wireguardExitEnabled": True,
-            "error": "",
-        }
-        (root / f"mobile-android-exit-dns-state-{index}.json").write_text(
-            json.dumps(payload),
-            encoding="utf-8",
-        )
+    full_ledger = root / "full.tsv"
+    write_counter_ledger(full_ledger, cases)
+    assert module.evidence_hashes(root, [full_ledger])["full.tsv"] == module.sha256(
+        full_ledger
+    )
+    selected = module.parse_counter_ledger(full_ledger, ["automatic-profile"])
+    assert list(selected) == ["automatic-profile"]
+    assert set(module.parse_counter_ledger(full_ledger, list(cases))) == set(cases)
+    one_ledger = root / "one.tsv"
+    write_counter_ledger(one_ledger, ["automatic-profile"])
+    assert list(module.parse_counter_ledger(one_ledger, ["automatic-profile"])) == [
+        "automatic-profile"
+    ]
+    partial_ledger = root / "partial.tsv"
+    write_counter_ledger(
+        partial_ledger,
+        ["automatic-profile", "cloudflare-doh"],
+    )
+    expect_rejection(
+        lambda: module.parse_counter_ledger(
+            partial_ledger,
+            ["automatic-profile"],
+        ),
+        "wrong DNS cases",
+        "underlay evidence accepted a partial DNS matrix",
+    )
+    unknown_ledger = root / "unknown.tsv"
+    unknown_ledger.write_text(
+        counter_row("automatic-profile")
+        + counter_row("cloudflare-doh").replace(
+            "cloudflare-doh\tdoh-cloudflare",
+            "unknown-dns\tunknown-evidence",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    expect_rejection(
+        lambda: module.parse_counter_ledger(
+            unknown_ledger,
+            ["automatic-profile"],
+        ),
+        "wrong DNS evidence kind",
+        "underlay evidence accepted an unknown DNS case",
+    )
+    corrupt_ledger = root / "corrupt-full.tsv"
+    write_counter_ledger(
+        corrupt_ledger,
+        cases,
+        corrupt_label="cloudflare-doh",
+    )
+    expect_rejection(
+        lambda: module.parse_counter_ledger(
+            corrupt_ledger,
+            ["automatic-profile"],
+        ),
+        "forbidden",
+        "underlay evidence did not validate every full-matrix row",
+    )
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    for index, label in enumerate(cases):
+        write_dns_state(root, index, label)
     module.validate_android_dns_ui_receipts(root, list(cases))
+    assert len(
+        module.validate_android_dns_ui_receipts(root, ["automatic-profile"])
+    ) == len(cases)
     support, evidence_paths = module.validate_android_support(
         root, list(cases), "settings-only"
     )
@@ -223,13 +333,55 @@ with tempfile.TemporaryDirectory() as temporary:
     payload = json.loads(custom.read_text(encoding="utf-8"))
     payload["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"
     custom.write_text(json.dumps(payload), encoding="utf-8")
-    try:
-        module.validate_android_dns_ui_receipts(root, list(cases))
-    except ValueError as error:
-        if "custom DoH values" not in str(error):
-            raise
-    else:
-        raise SystemExit("Android Release UI evidence accepted wrong custom bootstrap")
+    expect_rejection(
+        lambda: module.validate_android_dns_ui_receipts(root, list(cases)),
+        "custom DoH values",
+        "Android Release UI evidence accepted wrong custom bootstrap",
+    )
+    expect_rejection(
+        lambda: module.validate_android_dns_ui_receipts(
+            root,
+            ["automatic-profile"],
+        ),
+        "custom DoH values",
+        "underlay evidence did not validate every full-matrix UI receipt",
+    )
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    write_dns_state(root, 0, "automatic-profile")
+    assert len(
+        module.validate_android_dns_ui_receipts(root, ["automatic-profile"])
+    ) == 1
+    write_dns_state(root, 1, "cloudflare-doh")
+    expect_rejection(
+        lambda: module.validate_android_dns_ui_receipts(
+            root,
+            ["automatic-profile"],
+        ),
+        "every requested case",
+        "underlay evidence accepted partial DNS UI receipts",
+    )
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    write_dns_state(root, 0, "automatic-profile")
+    unknown = json.loads(
+        (root / "mobile-android-exit-dns-state-0.json").read_text(encoding="utf-8")
+    )
+    unknown["exitDnsMode"] = "unknown"
+    (root / "mobile-android-exit-dns-state-0.json").write_text(
+        json.dumps(unknown),
+        encoding="utf-8",
+    )
+    expect_rejection(
+        lambda: module.validate_android_dns_ui_receipts(
+            root,
+            ["automatic-profile"],
+        ),
+        "wrong or duplicated",
+        "underlay evidence accepted an unknown DNS UI receipt",
+    )
 PY
 
 # shellcheck disable=SC1090
@@ -254,13 +406,17 @@ canonical_builder_calls=0
 canonical_builder_arguments=""
 python3() {
   canonical_builder_calls=$((canonical_builder_calls + 1))
-  canonical_builder_arguments="$*"
+  canonical_builder_arguments="${canonical_builder_arguments}${canonical_builder_arguments:+
+}$*"
 }
+network_evidence_temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-network-evidence-test.XXXXXX")"
 UNDERLAY_CHANGE_GATE=0
-NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT=/unused/canonical.json
-NVPN_MOBILE_ANDROID_RELEASE_RECEIPT=/unused/artifact.json
-NVPN_ANDROID_RESULT_DIR=/unused/artifacts
-ANDROID_COUNTER_LEDGER=/unused/counters.tsv
+NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$network_evidence_temp/wireguard.json"
+NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$network_evidence_temp/artifact.json"
+NVPN_ANDROID_RESULT_DIR="$network_evidence_temp/wireguard-artifacts"
+ANDROID_COUNTER_LEDGER="$network_evidence_temp/counters.tsv"
+mkdir -p "$NVPN_ANDROID_RESULT_DIR"
+printf '%s\n' preserved-ledger >"$ANDROID_COUNTER_LEDGER"
 DNS_CASES=(custom-doh)
 write_network_evidence android
 [[ "$canonical_builder_calls" -eq 0 ]] || {
@@ -273,10 +429,74 @@ write_network_evidence android
   echo "complete DNS matrix skipped the canonical receipt builder" >&2
   exit 1
 }
-[[ "$canonical_builder_arguments" != *--dns-cases* ]] || {
+[[ "$canonical_builder_arguments" == *"--mode wireguard-dns"* \
+  && "$canonical_builder_arguments" == *"--output $NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT"* \
+  && "$canonical_builder_arguments" != *--dns-cases* ]] || {
   echo "canonical receipt builder accepted a focused DNS case selector" >&2
   exit 1
 }
+durable_ledger="$NVPN_ANDROID_RESULT_DIR/mobile-android-network-counter-ledger.tsv"
+cmp -s "$ANDROID_COUNTER_LEDGER" "$durable_ledger" || {
+  echo "canonical network receipt did not preserve the exact counter ledger" >&2
+  exit 1
+}
+rm -f "$ANDROID_COUNTER_LEDGER"
+[[ -f "$durable_ledger" ]] || {
+  echo "gate cleanup removed the durable counter ledger" >&2
+  exit 1
+}
+
+UNDERLAY_CHANGE_GATE=1
+NVPN_ANDROID_RESULT_DIR="$network_evidence_temp/combined-artifacts"
+ANDROID_COUNTER_LEDGER="$network_evidence_temp/combined-counters.tsv"
+NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$network_evidence_temp/underlay.json"
+NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT="$network_evidence_temp/combined-wireguard.json"
+mkdir -p "$NVPN_ANDROID_RESULT_DIR"
+printf '%s\n' combined-ledger >"$ANDROID_COUNTER_LEDGER"
+unset NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT
+if write_network_evidence android 2>/dev/null; then
+  echo "combined physical gate accepted a missing WireGuard/DNS receipt output" >&2
+  exit 1
+fi
+[[ "$canonical_builder_calls" -eq 1 ]] || {
+  echo "missing combined output invoked the receipt builder" >&2
+  exit 1
+}
+NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT="$network_evidence_temp/combined-wireguard.json"
+write_network_evidence android
+[[ "$canonical_builder_calls" -eq 3 \
+  && "$canonical_builder_arguments" == *"--mode wireguard-dns"* \
+  && "$canonical_builder_arguments" == *"--output $NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT"* \
+  && "$canonical_builder_arguments" == *"--mode underlay-lifecycle"* \
+  && "$canonical_builder_arguments" == *"--output $NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT"* ]] || {
+  echo "combined physical gate did not emit both canonical receipt modes" >&2
+  exit 1
+}
+
+NVPN_ANDROID_RESULT_DIR="$network_evidence_temp/underlay-artifacts"
+ANDROID_COUNTER_LEDGER="$network_evidence_temp/underlay-counters.tsv"
+NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$network_evidence_temp/underlay-only.json"
+unset NVPN_MOBILE_ANDROID_WIREGUARD_DNS_EVIDENCE_OUTPUT
+mkdir -p "$NVPN_ANDROID_RESULT_DIR"
+printf '%s\n' underlay-ledger >"$ANDROID_COUNTER_LEDGER"
+DNS_CASES=(automatic-profile)
+write_network_evidence android
+[[ "$canonical_builder_calls" -eq 4 \
+  && "$canonical_builder_arguments" == *"--output $NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT"* ]] || {
+  echo "single-case underlay gate did not emit its canonical receipt" >&2
+  exit 1
+}
+
+DNS_CASES=(automatic-profile cloudflare-doh)
+if write_network_evidence android 2>/dev/null; then
+  echo "underlay receipt accepted a partial DNS matrix" >&2
+  exit 1
+fi
+[[ "$canonical_builder_calls" -eq 4 ]] || {
+  echo "partial underlay matrix invoked the receipt builder" >&2
+  exit 1
+}
+rm -rf "$network_evidence_temp"
 unset -f python3 write_network_evidence
 
 python3 - "$fixture_lib" "$remote_native" <<'PY'
