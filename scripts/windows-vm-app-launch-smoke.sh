@@ -100,6 +100,8 @@ if (
 ) {
   throw 'Windows installer build FIPS checkout differs from the exact release candidate'
 }
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\installer\windows-installer-migrate.tests.ps1
+if (\$LASTEXITCODE -ne 0) { throw ('Windows installer migration unit test failed with exit code {0}' -f \$LASTEXITCODE) }
 \$env:CARGO_TARGET_DIR = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-smoke-cargo'
 \$targetPrefix = [IO.Path]::GetFullPath(\$env:CARGO_TARGET_DIR).TrimEnd([char]92) + [char]92
 Get-CimInstance Win32_Process -Filter \"Name = 'nvpn.exe'\" |

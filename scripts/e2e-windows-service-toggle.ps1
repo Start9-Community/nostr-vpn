@@ -12,7 +12,6 @@ if (!$AppExe) {
   $AppExe = Join-Path $Root "windows\NostrVpn.Windows\bin\Debug\net8.0-windows\NostrVpn.Windows.exe"
 }
 $DataDir = Join-Path $ArtifactRoot "app-data"
-$FixtureResult = Join-Path $ArtifactRoot "fixture.json"
 $Process = $null
 $ElevationProcess = $null
 
@@ -24,18 +23,7 @@ if (Get-Service NvpnService -ErrorAction SilentlyContinue) {
 
 New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $DataDir
-Remove-Item -Force -ErrorAction SilentlyContinue $FixtureResult
-
-& cargo build -q -p nostr-vpn-app-core --example desktop_roster_e2e_fixture
-if ($LASTEXITCODE -ne 0) {
-  throw "desktop roster fixture build failed"
-}
-$CargoTarget = (& cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
-$Fixture = Join-Path $CargoTarget "debug\examples\desktop_roster_e2e_fixture.exe"
-& $Fixture prepare --data-dir $DataDir --result $FixtureResult
-if ($LASTEXITCODE -ne 0) {
-  throw "desktop roster fixture preparation failed"
-}
+New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 if (!(Test-Path $AppExe)) {
   throw "Windows app executable not found: $AppExe"
 }
@@ -123,6 +111,9 @@ public static class NvpnServiceToggleInput {
   if (!$Toggle) {
     $ButtonNames = @($Buttons | ForEach-Object { $_.Current.Name }) -join ", "
     throw "Windows VPN toggle button was not found after input idle; buttons: $ButtonNames"
+  }
+  if (!$Toggle.Current.IsEnabled) {
+    throw "Windows VPN toggle is disabled with no network while the supported service is missing"
   }
   [NvpnServiceToggleInput]::SetForegroundWindow($Process.MainWindowHandle) | Out-Null
   Start-Sleep -Milliseconds 250

@@ -20,11 +20,14 @@ WizardStyle=modern
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 PrivilegesRequired=lowest
+CloseApplications=yes
+CloseApplicationsFilter=NostrVpn.Windows.exe,nostr-vpn-gui.exe
 SetupIconFile={#ProjectRoot}\windows\NostrVpn.Windows\Assets\nostr-vpn.ico
 UninstallDisplayIcon={app}\NostrVpn.Windows.exe
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#ProjectRoot}\windows\installer\windows-installer-migrate.ps1"; Flags: dontcopy
 
 [Icons]
 Name: "{autoprograms}\Nostr VPN"; Filename: "{app}\NostrVpn.Windows.exe"; IconFilename: "{app}\Assets\nostr-vpn.ico"
@@ -35,3 +38,28 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Run]
 Filename: "{app}\NostrVpn.Windows.exe"; Description: "Launch Nostr VPN"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  MigrationScript: String;
+  ResultCode: Integer;
+begin
+  ExtractTemporaryFile('windows-installer-migrate.ps1');
+  MigrationScript := ExpandConstant('{tmp}\windows-installer-migrate.ps1');
+  if not Exec(
+    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + MigrationScript + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+  then
+  begin
+    Result := 'Nostr VPN could not inspect the existing Windows installation. Setup stopped before copying files.';
+    exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    Result := 'Nostr VPN could not safely replace an existing installation. Setup stopped to avoid installing a second copy.';
+    exit;
+  end;
+  Result := '';
+end;

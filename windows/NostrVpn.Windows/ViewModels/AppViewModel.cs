@@ -116,7 +116,14 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         ShowSellAccessCommand = new RelayCommand(_ => Page = AppPage.SellAccess, _ => PaidExitSellerVisible);
         ShowSettingsCommand = new RelayCommand(_ => Page = AppPage.Settings);
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync(), _ => !ActionInFlight);
-        ToggleVpnCommand = new AsyncRelayCommand(_ => ToggleVpnAsync(), _ => !ActionInFlight && State.VpnControlSupported && RuntimeActiveNetwork is not null);
+        ToggleVpnCommand = new AsyncRelayCommand(
+            _ => ToggleVpnAsync(),
+            _ => CanToggleVpn(
+                ActionInFlight,
+                State.VpnControlSupported,
+                RuntimeActiveNetwork is not null,
+                State.ServiceSupported,
+                State.ServiceInstalled));
         CopyThisDeviceCommand = new RelayCommand(_ => CopyText(ThisDeviceCopyValue), _ => !string.IsNullOrWhiteSpace(ThisDeviceCopyValue));
         CopyPeerCommand = new RelayCommand(parameter => CopyText(parameter as string ?? ""));
         ImportJoinRequestQrImageCommand = new AsyncRelayCommand(_ => ImportJoinRequestQrImageAsync(), _ => !ActionInFlight && ActiveNetwork?.LocalIsAdmin == true);
@@ -716,6 +723,16 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
             State.VpnEnabled ? NativeActions.DisconnectVpn() : NativeActions.ConnectVpn(),
             State.VpnEnabled ? "Turning VPN off" : "Turning VPN on");
     }
+
+    internal static bool CanToggleVpn(
+        bool actionInFlight,
+        bool vpnControlSupported,
+        bool hasRuntimeActiveNetwork,
+        bool serviceSupported,
+        bool serviceInstalled) =>
+        !actionInFlight
+        && vpnControlSupported
+        && (hasRuntimeActiveNetwork || (serviceSupported && !serviceInstalled));
 
     public Task SetLaunchOnStartupAsync(bool enabled)
     {

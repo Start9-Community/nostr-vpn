@@ -401,6 +401,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-mobile-android-release-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-wireguard-fixture-cleanup-harness.sh
+  ./scripts/test-windows-installer-migration-harness.sh
   ./scripts/test-windows-wireguard-exit-fixture-harness.sh
   ./scripts/test-mobile-release-provenance-harness.sh
   ./scripts/test-android-aab-derived-release-harness.sh
