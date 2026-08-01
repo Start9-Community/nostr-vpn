@@ -60,10 +60,15 @@ if "if ! vpn_state_present" in disconnect:
 for receipt in (
     "android_release_vpn_toggle_checked",
     'tap_android_ui description "Turn VPN off"',
+    "android_release_wait_vpn_toggle_state false 2",
+    '[[ "$checked" == "true" && "$attempts" -eq 1 ]]',
+    "Off action acknowledged attempts=$attempts",
     "android_release_vpn_off_and_inactive",
 ):
     if receipt not in disconnect:
         raise SystemExit(f"Release disconnect is missing {receipt!r}")
+if disconnect.count('tap_android_ui description "Turn VPN off"') != 1:
+    raise SystemExit("ordinary disconnect does not bound its re-resolved Off tap")
 
 quiescence = function_body(
     release_gate,
