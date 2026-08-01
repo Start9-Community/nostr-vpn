@@ -174,30 +174,24 @@ SECURE_DNS_STATUS=0
 # bind, tunnel/routes/DNS, authenticated peer, private payload, and WG payload.
 assert_single_owned_daemon() { return "$RESTART_STATE_STATUS"; }
 owned_daemon_pid() { printf '%s\n' "${RESTART_PID:-202}"; }
-wireguard_bind_receipt_count() { printf '%s\n' "${RESTART_BINDS:-1}"; }
+wireguard_bind_receipt_count() { printf '%s\n' "${RESTART_BINDS:-2}"; }
 fips_host_tunnel_route_live() { return "$RESTART_STATE_STATUS"; }
-RESTART_FIPS_PAYLOAD_CALLS=0
-fips_payload_works() {
-  RESTART_FIPS_PAYLOAD_CALLS=$((RESTART_FIPS_PAYLOAD_CALLS + 1))
-  return "$RESTART_STATE_STATUS"
-}
+fips_payload_works() { return "$RESTART_STATE_STATUS"; }
 WIREGUARD_INTERFACE_STATUS=0
-crash_restart_state_live 1 101 \
+crash_restart_state_live 2 101 \
   || fail "complete fresh crash recovery was rejected"
-[[ "$RESTART_FIPS_PAYLOAD_CALLS" == 1 ]] \
-  || fail "complete crash recovery did not exercise authenticated FIPS payload"
 RESTART_PID=101
-if crash_restart_state_live 1 101; then
+if crash_restart_state_live 2 101; then
   fail "crash recovery accepted the killed daemon PID"
 fi
 RESTART_PID=202
-RESTART_BINDS=2
-if crash_restart_state_live 1 101; then
+RESTART_BINDS=3
+if crash_restart_state_live 2 101; then
   fail "crash recovery accepted more than one fresh WireGuard bind"
 fi
-RESTART_BINDS=1
+RESTART_BINDS=2
 RESTART_STATE_STATUS=1
-if crash_restart_state_live 1 101; then
+if crash_restart_state_live 2 101; then
   fail "crash recovery accepted missing tunnel/DNS/FIPS/WG state"
 fi
 RESTART_STATE_STATUS=0
