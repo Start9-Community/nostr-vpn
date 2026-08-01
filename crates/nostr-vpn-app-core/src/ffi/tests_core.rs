@@ -362,6 +362,16 @@
         assert_eq!(runtime.config.enabled_network_count(), 1);
         assert_eq!(runtime.config.active_network().name, "Work");
         assert!(!runtime.config.network_by_id(&home_id).expect("Home").enabled);
+        assert_eq!(
+            state.networks.iter().find(|network| network.enabled).map(|network| network.name.as_str()),
+            Some("Work")
+        );
+        assert!(!state
+            .networks
+            .iter()
+            .find(|network| network.id == home_id)
+            .expect("Home state")
+            .enabled);
 
         let saved = AppConfig::load(&runtime.config_path).expect("load persisted config");
         assert_eq!(saved.active_network().name, "Work");

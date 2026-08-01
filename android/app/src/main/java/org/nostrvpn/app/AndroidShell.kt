@@ -126,6 +126,7 @@ internal fun NostrVpnApp(
     scanDeviceQr: (String) -> Unit,
     dispatch: (JSONObject) -> Unit,
     dispatchSucceeded: (JSONObject) -> Boolean,
+    currentActiveNetworkId: () -> String?,
     deviceAddCompletionNonce: Long,
     toggleVpn: () -> Unit,
     selfUpdateState: AndroidSelfUpdateState,
@@ -260,6 +261,7 @@ internal fun NostrVpnApp(
                 // dialog and reset the nav to Devices in case the user
                 // was on another page when they tapped Add
                 // network.
+                shownNetworkId = currentActiveNetworkId()
                 showAddNetwork = false
                 page = Page.Devices
             },

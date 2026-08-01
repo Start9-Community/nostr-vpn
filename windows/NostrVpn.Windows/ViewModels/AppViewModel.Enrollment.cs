@@ -158,9 +158,13 @@ public sealed partial class AppViewModel
         }
     }
 
-    private Task AddNetworkAsync()
+    private async Task AddNetworkAsync()
     {
-        return DispatchAsync(NativeActions.AddNetwork(NetworkNameInput.Trim()), "Adding network");
+        if (await DispatchAsync(NativeActions.AddNetwork(NetworkNameInput.Trim()), "Adding network")
+            && RuntimeActiveNetwork is { } network)
+        {
+            SelectShownNetwork(network.Id);
+        }
     }
 
     private async Task ManualAddNetworkAsync()
@@ -171,9 +175,12 @@ public sealed partial class AppViewModel
         {
             return;
         }
-        await DispatchAsync(NativeActions.ManualAddNetwork(admin, mesh), "Adding network");
-        if (string.IsNullOrWhiteSpace(State.Error))
+        if (await DispatchAsync(NativeActions.ManualAddNetwork(admin, mesh), "Adding network"))
         {
+            if (RuntimeActiveNetwork is { } network)
+            {
+                SelectShownNetwork(network.Id);
+            }
             ManualJoinAdminId = "";
             ManualJoinMeshId = "";
             SetNetworkSetupMode("");
@@ -184,8 +191,15 @@ public sealed partial class AppViewModel
     private async Task CreateNetworkAsync()
     {
         var name = string.IsNullOrWhiteSpace(NetworkNameInput) ? "My Network" : NetworkNameInput.Trim();
+        if (!await DispatchAsync(NativeActions.AddNetwork(name), "Creating network"))
+        {
+            return;
+        }
         NetworkNameInput = "";
-        await DispatchAsync(NativeActions.AddNetwork(name), "Creating network");
+        if (RuntimeActiveNetwork is { } network)
+        {
+            SelectShownNetwork(network.Id);
+        }
         // Land on the new network's Devices view. Add Network may have
         // been the active page (or we may have been showing the
         // pre-network setup card); either way, Devices is the next

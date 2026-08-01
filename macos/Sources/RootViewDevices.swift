@@ -502,12 +502,18 @@ extension RootView {
                 TextField("Network name", text: $networkNameInput)
                     .accessibilityIdentifier("network-create-name")
                     .onSubmit {
-                        addNetwork()
-                        finishCreateNetwork()
+                        addNetwork { added in
+                            if added {
+                                finishCreateNetwork()
+                            }
+                        }
                     }
                 Button {
-                    addNetwork(defaultName: "My Network")
-                    finishCreateNetwork()
+                    addNetwork(defaultName: "My Network") { added in
+                        if added {
+                            finishCreateNetwork()
+                        }
+                    }
                 } label: {
                     Label("Create", systemImage: "plus")
                 }
@@ -522,6 +528,7 @@ extension RootView {
     /// sheet we also have to dismiss. Both are no-ops if already in the
     /// target state.
     func finishCreateNetwork() {
+        shownNetworkId = manager.activeNetwork?.id
         addNetworkPresented = false
         selectedSidebarItem = .devices
     }

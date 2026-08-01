@@ -65,7 +65,8 @@ struct RootView: View {
             NavigationStack {
                 AddNetworkPage(
                     model: model,
-                    onCreated: {
+                    onCreated: { networkId in
+                        shownNetworkId = networkId
                         addNetworkPresented = false
                         selectedTab = .devices
                     },
@@ -230,7 +231,7 @@ private struct AddNetworkPage: View {
     /// presentation to dismiss itself so the underlying Devices tab is
     /// visible. The setup case (no active network) doesn't pass this:
     /// the root view's `if activeNetwork == nil` flips on its own.
-    var onCreated: (() -> Void)? = nil
+    var onCreated: ((String) -> Void)? = nil
     var showsWelcomeHeader = false
     var onReviewVpnDisclosure: () -> Void = {}
     @State private var mode: AddNetworkMode?

@@ -370,6 +370,7 @@ class MainActivity : ComponentActivity() {
                     scanDeviceQr = { networkId -> requestDeviceQrScan(networkId) },
                     dispatch = dispatch,
                     dispatchSucceeded = dispatchSucceeded,
+                    currentActiveNetworkId = { state.activeNetwork?.id },
                     deviceAddCompletionNonce = deviceAddCompletionNonce,
                     toggleVpn = {
                         dispatch(nextVpnToggleAction(state.vpnEnabled))

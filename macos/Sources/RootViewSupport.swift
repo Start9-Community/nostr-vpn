@@ -92,10 +92,15 @@ extension RootView {
             .filter { !$0.isEmpty }
     }
 
-    func addNetwork(defaultName: String = "") {
+    func addNetwork(defaultName: String = "", completion: ((Bool) -> Void)? = nil) {
         let name = networkNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        manager.addNetwork(name.isEmpty ? defaultName : name)
-        networkNameInput = ""
+        manager.addNetwork(name.isEmpty ? defaultName : name) { added in
+            if added {
+                networkNameInput = ""
+                shownNetworkId = manager.activeNetwork?.id
+            }
+            completion?(added)
+        }
     }
 
     func syncDrafts() {

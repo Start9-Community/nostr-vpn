@@ -179,7 +179,7 @@ struct VpnDisclosureSheet: View {
 
 struct CreateNetworkCard: View {
     @ObservedObject var model: AppModel
-    var onCreated: (() -> Void)? = nil
+    var onCreated: ((String) -> Void)? = nil
     @State private var networkName = "My Network"
 
     var body: some View {
@@ -190,12 +190,14 @@ struct CreateNetworkCard: View {
                     .accessibilityIdentifier("network-create-name")
                 Button {
                     let name = networkName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    model.dispatch(
+                    let created = model.dispatch(
                         NativeActions.addNetwork(name.isEmpty ? "My Network" : name),
                         status: "Creating network"
                     )
-                    networkName = "My Network"
-                    onCreated?()
+                    if created, let networkId = model.activeNetwork?.id {
+                        networkName = "My Network"
+                        onCreated?(networkId)
+                    }
                 } label: {
                     Label("Create", systemImage: "plus")
                         .frame(maxWidth: .infinity)
@@ -210,7 +212,7 @@ struct CreateNetworkCard: View {
 
 struct JoinNetworkCard: View {
     @ObservedObject var model: AppModel
-    var onCreated: (() -> Void)? = nil
+    var onCreated: ((String) -> Void)? = nil
     @State private var manualExpanded = false
     @State private var manualAdminId = ""
     @State private var manualNetworkId = ""
@@ -302,7 +304,9 @@ struct JoinNetworkCard: View {
                             manualAdminId = ""
                             manualNetworkId = ""
                             manualExpanded = false
-                            onCreated?()
+                            if let networkId = model.activeNetwork?.id {
+                                onCreated?(networkId)
+                            }
                         }
                     }
                     .buttonStyle(.borderedProminent)

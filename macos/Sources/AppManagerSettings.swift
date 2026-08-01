@@ -210,8 +210,12 @@ extension AppManager {
         dispatch(.removeParticipant(networkId: networkId, npub: npub), status: "Removing device")
     }
 
-    func addNetwork(_ name: String) {
-        dispatch(.addNetwork(name: name.trimmingCharacters(in: .whitespacesAndNewlines)), status: "Adding network")
+    func addNetwork(_ name: String, completion: ((Bool) -> Void)? = nil) {
+        dispatch(
+            .addNetwork(name: name.trimmingCharacters(in: .whitespacesAndNewlines)),
+            status: "Adding network",
+            completion: completion
+        )
     }
 
     func removeNetwork(_ networkId: String) {
