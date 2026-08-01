@@ -14,6 +14,7 @@ tests = (root / "windows/installer/windows-installer-migrate.tests.ps1").read_te
 view_model = (root / "windows/NostrVpn.Windows/ViewModels/AppViewModel.cs").read_text(encoding="utf-8")
 service_e2e = (root / "scripts/e2e-windows-service-toggle.ps1").read_text(encoding="utf-8")
 windows_smoke = (root / "scripts/windows-vm-app-launch-smoke.sh").read_text(encoding="utf-8")
+installer_smoke = (root / "scripts/windows-installer-smoke.ps1").read_text(encoding="utf-8")
 
 required_installer = (
     "CloseApplicationsFilter=NostrVpn.Windows.exe,nostr-vpn-gui.exe",
@@ -92,6 +93,22 @@ for value in (
 
 if "windows-installer-migrate.tests.ps1" not in windows_smoke:
     raise SystemExit("Windows artifact lane does not run the migration unit test")
+
+for value in (
+    "installedPayloads",
+    "nostr_vpn_app_core.dll",
+    "Get-FileHash -Algorithm SHA256",
+):
+    if value not in installer_smoke:
+        raise SystemExit(f"installer smoke does not receipt installed payload: {value}")
+for value in (
+    "receiptSchema = 2",
+    "Windows installer smoke mislabeled its installed payload",
+    "Sealed Windows installer payload differs from the publish directory",
+    '"appCore": "nostr_vpn_app_core.dll"',
+):
+    if value not in windows_smoke:
+        raise SystemExit(f"Windows artifact receipt is not sealed-payload-bound: {value}")
 
 print("WINDOWS_INSTALLER_MIGRATION_SOURCE_HARNESS_OK")
 PY

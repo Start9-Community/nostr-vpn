@@ -139,22 +139,38 @@ if (\$status) { throw 'Windows installer build changed the exact source checkout
 \$publish = Join-Path '$GUEST_REPO' 'windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish'
 \$payloads = [ordered]@{}
 \$payloadFiles = [ordered]@{
-  app = (Join-Path \$publish 'NostrVpn.Windows.exe')
-  appCore = (Join-Path \$publish 'nostr_vpn_app_core.dll')
-  cli = (Join-Path \$publish 'nvpn.exe')
-  wintun = (Join-Path \$publish 'binaries\\wintun.dll')
+  app = [ordered]@{ file = 'NostrVpn.Windows.exe'; path = (Join-Path \$publish 'NostrVpn.Windows.exe') }
+  appCore = [ordered]@{ file = 'nostr_vpn_app_core.dll'; path = (Join-Path \$publish 'nostr_vpn_app_core.dll') }
+  cli = [ordered]@{ file = 'nvpn.exe'; path = (Join-Path \$publish 'nvpn.exe') }
+  wintun = [ordered]@{ file = 'binaries\\wintun.dll'; path = (Join-Path \$publish 'binaries\\wintun.dll') }
 }
 foreach (\$entry in \$payloadFiles.GetEnumerator()) {
-  if (!(Test-Path -LiteralPath \$entry.Value -PathType Leaf)) {
+  if (!(Test-Path -LiteralPath \$entry.Value.path -PathType Leaf)) {
     throw ('Windows installer payload is missing: ' + \$entry.Key)
   }
+  \$installed = \$smoke.installedPayloads.(\$entry.Key)
+  if (
+    \$null -eq \$installed -or
+    \$installed.file -cne \$entry.Value.file
+  ) {
+    throw ('Windows installer smoke mislabeled its installed payload: ' + \$entry.Key)
+  }
+  \$publishHash = (Get-FileHash -Algorithm SHA256 -LiteralPath \$entry.Value.path).Hash.ToLowerInvariant()
+  \$publishSize = (Get-Item -LiteralPath \$entry.Value.path).Length
+  if (
+    \$installed.sha256 -ne \$publishHash -or
+    [long]\$installed.size -ne [long]\$publishSize
+  ) {
+    throw ('Sealed Windows installer payload differs from the publish directory: ' + \$entry.Key)
+  }
   \$payloads[\$entry.Key] = [ordered]@{
-    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath \$entry.Value).Hash.ToLowerInvariant()
-    size = (Get-Item -LiteralPath \$entry.Value).Length
+    file = \$installed.file
+    sha256 = \$installed.sha256
+    size = [long]\$installed.size
   }
 }
 \$receipt = [ordered]@{
-  receiptSchema = 1
+  receiptSchema = 2
   platform = 'windows'
   artifactType = 'exact installed Windows Release setup'
   appGitSha = \$head
@@ -207,7 +223,7 @@ commit, tree, fips_commit, fips_tree, fips_version, tag = sys.argv[3:]
 receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
 digest = hashlib.sha256(installer_path.read_bytes()).hexdigest()
 if not (
-    receipt.get("receiptSchema") == 1
+    receipt.get("receiptSchema") == 2
     and receipt.get("platform") == "windows"
     and receipt.get("artifactType") == "exact installed Windows Release setup"
     and receipt.get("appGitSha") == commit
@@ -229,8 +245,16 @@ if not (
 payloads = receipt.get("payloads", {})
 if set(payloads) != {"app", "appCore", "cli", "wintun"}:
     raise SystemExit("Windows installer receipt has the wrong payload set")
+expected_files = {
+    "app": "NostrVpn.Windows.exe",
+    "appCore": "nostr_vpn_app_core.dll",
+    "cli": "nvpn.exe",
+    "wintun": r"binaries\wintun.dll",
+}
 for name, value in payloads.items():
     if not (
+        value.get("file") == expected_files[name]
+        and
         re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256", "")))
         and isinstance(value.get("size"), int)
         and value["size"] > 0

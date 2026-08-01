@@ -46,6 +46,41 @@ try {
   }
 
   & (Join-Path $PSScriptRoot "windows-app-launch-smoke.ps1") -AppExe $appExe -ArtifactRoot $ArtifactRoot -NoWindowRequired
+
+  $payloadFiles = [ordered]@{
+    app = [ordered]@{ File = 'NostrVpn.Windows.exe'; Path = $appExe }
+    appCore = [ordered]@{
+      File = 'nostr_vpn_app_core.dll'
+      Path = Join-Path $InstallDir 'nostr_vpn_app_core.dll'
+    }
+    cli = [ordered]@{
+      File = 'nvpn.exe'
+      Path = Join-Path $InstallDir 'nvpn.exe'
+    }
+    wintun = [ordered]@{
+      File = 'binaries\wintun.dll'
+      Path = Join-Path $InstallDir 'binaries\wintun.dll'
+    }
+  }
+  $installedPayloads = [ordered]@{}
+  foreach ($entry in $payloadFiles.GetEnumerator()) {
+    if (!(Test-Path -LiteralPath $entry.Value.Path -PathType Leaf)) {
+      throw "Installed Windows payload is missing: $($entry.Value.File)"
+    }
+    $installedPayloads[$entry.Key] = [ordered]@{
+      file = $entry.Value.File
+      sha256 = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Value.Path
+      ).Hash.ToLowerInvariant()
+      size = (Get-Item -LiteralPath $entry.Value.Path).Length
+    }
+  }
+  $smokePath = Join-Path $ArtifactRoot 'windows-app-launch-smoke.json'
+  $smokeResult = Get-Content -Raw -LiteralPath $smokePath | ConvertFrom-Json
+  $smokeResult | Add-Member -NotePropertyName installedPayloads `
+    -NotePropertyValue ([pscustomobject]$installedPayloads)
+  $smokeResult | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 `
+    -LiteralPath $smokePath
   Write-Host "WINDOWS_INSTALLER_SMOKE_OK"
 } finally {
   $uninstaller = Join-Path $InstallDir "unins000.exe"
