@@ -257,7 +257,18 @@ async fn run_udp(
                 }
             }
             received = socket.recv_from(&mut packet) => {
-                let Ok((length, peer)) = received else { break; };
+                let (length, peer) = match received {
+                    Ok(received) => received,
+                    #[cfg(target_os = "windows")]
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                        tracing::debug!(%error, "secure DNS ignored expired UDP client");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "secure DNS UDP receive failed");
+                        break;
+                    }
+                };
                 let query = packet[..length].to_vec();
                 let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                     if let Some(response) = build_servfail_response(&query) {

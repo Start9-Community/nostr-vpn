@@ -781,6 +781,61 @@ async fn local_stub_serves_udp_and_fails_closed() {
     assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
 }
 
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn windows_udp_stub_survives_port_unreachable_from_expired_client() {
+    let server = Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("UDP server"),
+    );
+    let address = server.local_addr().expect("UDP address");
+    let resolver: ResolverState = Arc::new(RwLock::new(
+        dns_resolver(&ExitDnsResolverConfig::FailClosed).expect("fail-closed resolver"),
+    ));
+    let records = Arc::new(RwLock::new(HashMap::from([(
+        "alive.nvpn".to_string(),
+        Ipv4Addr::new(10, 44, 1, 9),
+    )])));
+    let task = tokio::spawn(run_udp(Arc::clone(&server), resolver, records, None));
+
+    // A DNS client can abandon its ephemeral UDP port before a delayed
+    // response is sent. Windows reports the resulting local ICMP Port
+    // Unreachable as WSAECONNRESET on the server's next receive.
+    let expired_client = std::net::UdpSocket::bind("127.0.0.1:0").expect("expired UDP client");
+    let expired_address = expired_client.local_addr().expect("expired client address");
+    drop(expired_client);
+    server
+        .send_to(b"expired DNS response", expired_address)
+        .await
+        .expect("send to expired UDP client");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("live UDP client");
+    client
+        .send_to(&query_packet("alive.nvpn.", 83), address)
+        .await
+        .expect("live UDP query");
+    let mut response = [0_u8; 512];
+    let (length, _) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut response))
+        .await
+        .expect("UDP task stopped after transient Windows receive error")
+        .expect("UDP response");
+    task.abort();
+
+    let response = Message::from_vec(&response[..length]).expect("DNS response");
+    assert_eq!(response.id, 83);
+    assert!(response.answers.iter().any(|answer| {
+        matches!(
+            &answer.data,
+            RData::A(hickory_proto::rr::rdata::A(address))
+                if *address == Ipv4Addr::new(10, 44, 1, 9)
+        )
+    }));
+}
+
 #[tokio::test]
 async fn local_stub_serves_framed_tcp_dns() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
