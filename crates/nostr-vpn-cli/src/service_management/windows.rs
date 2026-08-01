@@ -1,3 +1,25 @@
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsServiceState {
+    Stopped,
+    StartPending,
+    StopPending,
+    Running,
+    ContinuePending,
+    PausePending,
+    Paused,
+    Unknown(u32),
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsServiceStopAction {
+    Complete,
+    Wait,
+    RequestStop,
+    Unsupported,
+}
+
 #[cfg(target_os = "windows")]
 fn windows_install_service(
     executable: &Path,
@@ -60,6 +82,7 @@ fn windows_install_service(
 fn windows_uninstall_service() -> Result<()> {
     windows_stop_service(true)?;
     windows_delete_service(true)?;
+    windows_wait_for_service_deleted(Duration::from_secs(10))?;
     println!("removed system service: {}", WINDOWS_SERVICE_NAME);
     Ok(())
 }
@@ -264,24 +287,72 @@ fn windows_wait_for_service_running(timeout: Duration) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn windows_stop_service(ignore_missing: bool) -> Result<()> {
-    let output = run_sc_raw(&["stop", WINDOWS_SERVICE_NAME], "stop service")?;
-    if output.status.success() {
-        return Ok(());
+    let started = Instant::now();
+    let mut service_was_installed = false;
+    let mut stop_requested = false;
+
+    loop {
+        let state = windows_query_service_lifecycle_state()?;
+        if state.is_some() {
+            service_was_installed = true;
+        }
+
+        match windows_service_stop_action(state) {
+            WindowsServiceStopAction::Complete => {
+                if state.is_some() || service_was_installed || ignore_missing {
+                    return Ok(());
+                }
+                return Err(anyhow!("system service is not installed"));
+            }
+            WindowsServiceStopAction::Wait => {}
+            WindowsServiceStopAction::RequestStop if stop_requested => {}
+            WindowsServiceStopAction::RequestStop => {
+                let output = run_sc_raw(&["stop", WINDOWS_SERVICE_NAME], "stop service")?;
+                if output.status.success() {
+                    stop_requested = true;
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let observed = windows_query_service_lifecycle_state()?;
+                    if !windows_service_stop_failure_is_joinable(observed) {
+                        return Err(anyhow!(
+                            "sc stop failed\nstdout: {}\nstderr: {}",
+                            stdout.trim(),
+                            stderr.trim()
+                        ));
+                    }
+                    if windows_service_stop_action(observed)
+                        == WindowsServiceStopAction::Complete
+                    {
+                        return Ok(());
+                    }
+                    stop_requested = true;
+                }
+            }
+            WindowsServiceStopAction::Unsupported => {
+                return Err(anyhow!("system service reported unsupported state {state:?}"));
+            }
+        }
+
+        if started.elapsed() >= WINDOWS_SERVICE_STOP_TIMEOUT {
+            return Err(anyhow!(
+                "system service did not reach stopped or missing state within {}s (last state: {state:?})",
+                WINDOWS_SERVICE_STOP_TIMEOUT.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+}
+
+#[cfg(target_os = "windows")]
+fn windows_query_service_lifecycle_state() -> Result<Option<WindowsServiceState>> {
+    let Some(output) = windows_service_query()? else {
+        return Ok(None);
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let details = format!("{}\n{}", stdout.trim(), stderr.trim());
-    if ignore_missing
-        && (windows_service_missing_message(&details)
-            || windows_service_not_active_message(&details))
-    {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "sc stop failed\nstdout: {}\nstderr: {}",
-        stdout.trim(),
-        stderr.trim()
-    ))
+    windows_service_state_from_query_output(&stdout)
+        .map(Some)
+        .ok_or_else(|| anyhow!("sc query output did not contain a service state"))
 }
 
 #[cfg(target_os = "windows")]
@@ -350,12 +421,6 @@ fn windows_service_missing_message(details: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_service_not_active_message(details: &str) -> bool {
-    let lowered = details.to_ascii_lowercase();
-    lowered.contains("failed 1062") || lowered.contains("service has not been started")
-}
-
-#[cfg(target_os = "windows")]
 fn windows_service_already_running_message(details: &str) -> bool {
     let lowered = details.to_ascii_lowercase();
     lowered.contains("failed 1056")
@@ -363,14 +428,62 @@ fn windows_service_already_running_message(details: &str) -> bool {
 }
 
 #[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_service_state_from_query_output(
+    output: &str,
+) -> Option<WindowsServiceState> {
+    let value = output.lines().map(str::trim).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case("STATE").then_some(value)
+    })?;
+    let code = value.split_whitespace().next()?.parse::<u32>().ok()?;
+    Some(match code {
+        1 => WindowsServiceState::Stopped,
+        2 => WindowsServiceState::StartPending,
+        3 => WindowsServiceState::StopPending,
+        4 => WindowsServiceState::Running,
+        5 => WindowsServiceState::ContinuePending,
+        6 => WindowsServiceState::PausePending,
+        7 => WindowsServiceState::Paused,
+        other => WindowsServiceState::Unknown(other),
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_service_stop_action(
+    state: Option<WindowsServiceState>,
+) -> WindowsServiceStopAction {
+    match state {
+        None | Some(WindowsServiceState::Stopped) => WindowsServiceStopAction::Complete,
+        Some(
+            WindowsServiceState::StartPending
+            | WindowsServiceState::StopPending
+            | WindowsServiceState::ContinuePending
+            | WindowsServiceState::PausePending,
+        ) => WindowsServiceStopAction::Wait,
+        Some(WindowsServiceState::Running | WindowsServiceState::Paused) => {
+            WindowsServiceStopAction::RequestStop
+        }
+        Some(WindowsServiceState::Unknown(_)) => WindowsServiceStopAction::Unsupported,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_service_stop_failure_is_joinable(
+    observed: Option<WindowsServiceState>,
+) -> bool {
+    matches!(
+        observed,
+        None | Some(WindowsServiceState::Stopped | WindowsServiceState::StopPending)
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_service_status_from_query_output(output: &str) -> (bool, Option<u32>) {
-    let mut running = false;
+    let running = windows_service_state_from_query_output(output) == Some(WindowsServiceState::Running);
     let mut pid = None;
 
     for line in output.lines().map(str::trim) {
-        if line.contains("STATE") && line.to_ascii_uppercase().contains("RUNNING") {
-            running = true;
-        } else if let Some((key, value)) = line.split_once(':')
+        if let Some((key, value)) = line.split_once(':')
             && key.trim().eq_ignore_ascii_case("PID")
         {
             pid = parse_nonzero_pid(value);

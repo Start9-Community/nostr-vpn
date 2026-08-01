@@ -161,24 +161,44 @@ pub(crate) fn run_windows_service() -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow!("windows service launched without daemon arguments"))?;
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
+    let status_handle_cell = std::sync::Arc::new(OnceLock::new());
     let status_handle = service_control_handler::register(WINDOWS_SERVICE_NAME, {
         let config_path = config_path.clone();
+        let status_handle_cell = std::sync::Arc::clone(&status_handle_cell);
         move |control_event| match control_event {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             ServiceControl::Stop | ServiceControl::Shutdown => {
-                let _ = request_daemon_stop(&config_path);
+                if let Some(status_handle) = status_handle_cell.get()
+                    && let Err(error) = set_windows_service_status(
+                        status_handle,
+                        ServiceState::StopPending,
+                        ServiceControlAccept::empty(),
+                        ServiceExitCode::Win32(0),
+                        1,
+                        WINDOWS_SERVICE_STOP_TIMEOUT,
+                    )
+                {
+                    eprintln!("windows service failed to report stop pending: {error}");
+                }
+                if let Err(error) = request_daemon_stop(&config_path) {
+                    eprintln!("windows service failed to request daemon stop: {error}");
+                }
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     })
     .context("failed to register Windows service control handler")?;
+    status_handle_cell
+        .set(status_handle)
+        .map_err(|_| anyhow!("windows service status handle already initialized"))?;
 
     set_windows_service_status(
         &status_handle,
         ServiceState::StartPending,
         ServiceControlAccept::empty(),
         ServiceExitCode::Win32(0),
+        1,
         Duration::from_secs(10),
     )?;
 
@@ -192,6 +212,7 @@ pub(crate) fn run_windows_service() -> Result<()> {
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         ServiceExitCode::Win32(0),
+        0,
         Duration::default(),
     )?;
 
@@ -206,6 +227,7 @@ pub(crate) fn run_windows_service() -> Result<()> {
         ServiceState::Stopped,
         ServiceControlAccept::empty(),
         exit_code,
+        0,
         Duration::default(),
     )?;
     result
@@ -217,6 +239,7 @@ pub(crate) fn set_windows_service_status(
     state: ServiceState,
     controls_accepted: ServiceControlAccept,
     exit_code: ServiceExitCode,
+    checkpoint: u32,
     wait_hint: Duration,
 ) -> Result<()> {
     status_handle
@@ -225,7 +248,7 @@ pub(crate) fn set_windows_service_status(
             current_state: state,
             controls_accepted,
             exit_code,
-            checkpoint: 0,
+            checkpoint,
             wait_hint,
             process_id: None,
         })

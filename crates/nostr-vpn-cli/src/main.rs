@@ -210,13 +210,15 @@ pub(crate) use crate::service_management::parse_nonzero_pid;
 pub(crate) use crate::service_management::windows_should_apply_config_via_service;
 #[cfg(test)]
 pub(crate) use crate::service_management::{
-    linux_service_binary_path, linux_service_executable_path_from_unit_contents,
-    linux_service_status_from_show_output, linux_service_unit_content,
+    WindowsServiceState, WindowsServiceStopAction, windows_service_bin_path,
+    windows_service_binary_path_from_sc_qc_output, windows_service_disabled_from_qc_output,
+    windows_service_state_from_query_output, windows_service_status_from_query_output,
+    windows_service_stop_action, windows_service_stop_failure_is_joinable,
 };
 #[cfg(test)]
 pub(crate) use crate::service_management::{
-    windows_service_bin_path, windows_service_binary_path_from_sc_qc_output,
-    windows_service_disabled_from_qc_output, windows_service_status_from_query_output,
+    linux_service_binary_path, linux_service_executable_path_from_unit_contents,
+    linux_service_status_from_show_output, linux_service_unit_content,
 };
 #[cfg(any(target_os = "macos", test))]
 pub(crate) use crate::service_management::{xml_escape, xml_unescape};
@@ -263,6 +265,8 @@ const WINDOWS_SERVICE_NAME: &str = "NvpnService";
 const WINDOWS_SERVICE_DISPLAY_NAME: &str = "Nostr VPN";
 #[cfg(target_os = "windows")]
 const WINDOWS_SERVICE_DESCRIPTION: &str = "Nostr VPN background mesh and tunnel service";
+#[cfg(target_os = "windows")]
+const WINDOWS_SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "windows")]
 static WINDOWS_SERVICE_DAEMON_ARGS: OnceLock<DaemonArgs> = OnceLock::new();
 #[cfg(target_os = "windows")]

@@ -317,6 +317,86 @@ fn windows_service_query_parser_extracts_running_state() {
 }
 
 #[test]
+fn windows_service_query_parser_extracts_exact_lifecycle_state() {
+    for (raw_state, expected) in [
+        ("1  STOPPED", WindowsServiceState::Stopped),
+        ("2  START_PENDING", WindowsServiceState::StartPending),
+        ("3  STOP_PENDING", WindowsServiceState::StopPending),
+        ("4  RUNNING", WindowsServiceState::Running),
+        ("5  CONTINUE_PENDING", WindowsServiceState::ContinuePending),
+        ("6  PAUSE_PENDING", WindowsServiceState::PausePending),
+        ("7  PAUSED", WindowsServiceState::Paused),
+    ] {
+        let query =
+            format!("SERVICE_NAME: NvpnService\n        STATE              : {raw_state}\n");
+        assert_eq!(
+            windows_service_state_from_query_output(&query),
+            Some(expected)
+        );
+    }
+
+    assert_eq!(
+        windows_service_state_from_query_output(
+            "SERVICE_NAME: NvpnService\n        STATE : 99 VENDOR_STATE\n"
+        ),
+        Some(WindowsServiceState::Unknown(99))
+    );
+    assert_eq!(
+        windows_service_state_from_query_output("SERVICE_NAME: NvpnService\n"),
+        None
+    );
+}
+
+#[test]
+fn windows_service_stop_state_machine_waits_for_pending_states() {
+    assert_eq!(
+        windows_service_stop_action(None),
+        WindowsServiceStopAction::Complete
+    );
+    assert_eq!(
+        windows_service_stop_action(Some(WindowsServiceState::Stopped)),
+        WindowsServiceStopAction::Complete
+    );
+    assert_eq!(
+        windows_service_stop_action(Some(WindowsServiceState::StopPending)),
+        WindowsServiceStopAction::Wait
+    );
+    assert_eq!(
+        windows_service_stop_action(Some(WindowsServiceState::StartPending)),
+        WindowsServiceStopAction::Wait
+    );
+    assert_eq!(
+        windows_service_stop_action(Some(WindowsServiceState::Running)),
+        WindowsServiceStopAction::RequestStop
+    );
+    assert_eq!(
+        windows_service_stop_action(Some(WindowsServiceState::Paused)),
+        WindowsServiceStopAction::RequestStop
+    );
+    assert_eq!(
+        windows_service_stop_action(Some(WindowsServiceState::Unknown(99))),
+        WindowsServiceStopAction::Unsupported
+    );
+}
+
+#[test]
+fn windows_stop_failure_is_joined_only_after_observing_stop_completion() {
+    assert!(windows_service_stop_failure_is_joinable(None));
+    assert!(windows_service_stop_failure_is_joinable(Some(
+        WindowsServiceState::Stopped
+    )));
+    assert!(windows_service_stop_failure_is_joinable(Some(
+        WindowsServiceState::StopPending
+    )));
+    assert!(!windows_service_stop_failure_is_joinable(Some(
+        WindowsServiceState::Running
+    )));
+    assert!(!windows_service_stop_failure_is_joinable(Some(
+        WindowsServiceState::StartPending
+    )));
+}
+
+#[test]
 fn windows_service_config_parser_extracts_disabled_state() {
     let query = "SERVICE_NAME: NvpnService\n        TYPE               : 10  WIN32_OWN_PROCESS\n        START_TYPE         : 4   DISABLED\n        ERROR_CONTROL      : 1   NORMAL\n        BINARY_PATH_NAME   : \"C:\\Program Files\\Nostr VPN\\nvpn.exe\" daemon --service --config \"C:\\Users\\Example\\AppData\\Roaming\\nvpn\\config.toml\"\n";
     assert!(windows_service_disabled_from_qc_output(query));
