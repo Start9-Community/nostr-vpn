@@ -2,105 +2,7 @@
 
 # Caller-owned values:
 # MACOS_RELEASE_APP_STATE_DIR, MACOS_RELEASE_APP_INSTALLED_EXE,
-# MACOS_RELEASE_APP_GATE_EXE, MACOS_RELEASE_APP_PROCESS_NAME, and optionally
-# MACOS_RELEASE_APP_SUPPORT_DIR.
-
-macos_release_app_support_acquire() {
-  : "${MACOS_RELEASE_APP_SUPPORT_DIR:?missing app-support path}"
-  local marker="$MACOS_RELEASE_APP_STATE_DIR/app-support-acquired"
-  local backup="$MACOS_RELEASE_APP_STATE_DIR/app-support-prior"
-  local state
-  [[ "$MACOS_RELEASE_APP_SUPPORT_DIR" == /* \
-    && "$MACOS_RELEASE_APP_SUPPORT_DIR" != / ]] || {
-    echo "refusing unsafe app-support path" >&2
-    return 1
-  }
-  if [[ -f "$marker" ]]; then
-    state="$(<"$marker")"
-    [[ "$state" == absent && ! -e "$backup" \
-      || "$state" == present && -d "$backup" && ! -L "$backup" ]]
-    return
-  fi
-  [[ ! -e "$backup" ]] || {
-    echo "incomplete app-support isolation state exists" >&2
-    return 1
-  }
-  [[ ! -L "$MACOS_RELEASE_APP_SUPPORT_DIR" ]] || {
-    echo "refusing to isolate a symlinked app-support directory" >&2
-    return 1
-  }
-  [[ ! -e "$MACOS_RELEASE_APP_SUPPORT_DIR" \
-    || -d "$MACOS_RELEASE_APP_SUPPORT_DIR" ]] || {
-    echo "app-support path is not a directory" >&2
-    return 1
-  }
-
-  state=absent
-  [[ ! -d "$MACOS_RELEASE_APP_SUPPORT_DIR" ]] || state=present
-  mkdir -p "$MACOS_RELEASE_APP_STATE_DIR"
-  [[ "$state" == absent ]] || state=pending
-  printf '%s\n' "$state" >"$marker.tmp"
-  mv "$marker.tmp" "$marker"
-  if [[ "$state" == pending ]]; then
-    mv "$MACOS_RELEASE_APP_SUPPORT_DIR" "$backup"
-    printf 'present\n' >"$marker.tmp"
-    mv "$marker.tmp" "$marker"
-  fi
-}
-
-macos_release_app_support_restore() {
-  : "${MACOS_RELEASE_APP_SUPPORT_DIR:?missing app-support path}"
-  local marker="$MACOS_RELEASE_APP_STATE_DIR/app-support-acquired"
-  local backup="$MACOS_RELEASE_APP_STATE_DIR/app-support-prior"
-  local state
-  if [[ ! -f "$marker" ]]; then
-    [[ ! -e "$backup" ]] || {
-      echo "incomplete app-support isolation state exists" >&2
-      return 1
-    }
-    return 0
-  fi
-  state="$(<"$marker")"
-  if [[ "$state" == pending ]]; then
-    if [[ -d "$backup" && ! -L "$backup" ]]; then
-      state=present
-    elif [[ -d "$MACOS_RELEASE_APP_SUPPORT_DIR" ]]; then
-      rm -f "$marker"
-      return 0
-    else
-      echo "incomplete app-support isolation state cannot be restored" >&2
-      return 1
-    fi
-  fi
-  if [[ "$state" == present ]]; then
-    [[ -d "$backup" && ! -L "$backup" ]] || {
-      echo "retained app-support backup is missing" >&2
-      return 1
-    }
-    rm -rf "$MACOS_RELEASE_APP_SUPPORT_DIR"
-    printf 'restoring\n' >"$marker.tmp"
-    mv "$marker.tmp" "$marker"
-    mv "$backup" "$MACOS_RELEASE_APP_SUPPORT_DIR"
-  elif [[ "$state" == restoring ]]; then
-    if [[ -d "$backup" && ! -L "$backup" ]]; then
-      rm -rf "$MACOS_RELEASE_APP_SUPPORT_DIR"
-      mv "$backup" "$MACOS_RELEASE_APP_SUPPORT_DIR"
-    elif [[ ! -d "$MACOS_RELEASE_APP_SUPPORT_DIR" ]]; then
-      echo "retained app-support restoration is incomplete" >&2
-      return 1
-    fi
-  elif [[ "$state" == absent ]]; then
-    [[ ! -e "$backup" ]] || {
-      echo "unexpected app-support backup exists for absent prior state" >&2
-      return 1
-    }
-    rm -rf "$MACOS_RELEASE_APP_SUPPORT_DIR"
-  else
-    echo "invalid prior app-support state" >&2
-    return 1
-  fi
-  rm -f "$marker"
-}
+# MACOS_RELEASE_APP_GATE_EXE, and MACOS_RELEASE_APP_PROCESS_NAME.
 
 macos_release_app_process_args() {
   ps -ww -p "$1" -o args= 2>/dev/null \
@@ -254,10 +156,6 @@ macos_release_app_restore() {
     [[ "$pid" =~ ^[1-9][0-9]*$ ]]
     macos_release_app_stop_pid "$pid" "$MACOS_RELEASE_APP_GATE_EXE"
     rm -f "$owned"
-  fi
-
-  if [[ -n "${MACOS_RELEASE_APP_SUPPORT_DIR:-}" ]]; then
-    macos_release_app_support_restore
   fi
 
   pids="$(pgrep -x "$MACOS_RELEASE_APP_PROCESS_NAME" 2>/dev/null || true)"

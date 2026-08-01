@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Signed macOS Release <-> physical Android/iPhone manual join in both roles.
 set -euo pipefail
-exec </dev/null
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
@@ -174,7 +173,7 @@ remote() {
   for argument in "$@"; do
     printf -v remote_command '%s %q' "$remote_command" "$argument"
   done
-  ssh -o BatchMode=yes "$MAC_HOST" "$remote_command" </dev/null
+  ssh -o BatchMode=yes "$MAC_HOST" "$remote_command"
 }
 
 wait_log_marker() {

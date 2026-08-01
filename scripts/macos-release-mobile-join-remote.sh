@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # macOS VM half of the Release desktop <-> mobile manual-join gate.
 set -euo pipefail
-exec </dev/null
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
@@ -30,7 +29,6 @@ MACOS_RELEASE_APP_STATE_DIR="$ARTIFACT_DIR/app-ownership"
 MACOS_RELEASE_APP_INSTALLED_EXE="/Applications/Nostr VPN.app/Contents/MacOS/Nostr VPN"
 MACOS_RELEASE_APP_GATE_EXE="$APP_EXE"
 MACOS_RELEASE_APP_PROCESS_NAME="Nostr VPN"
-MACOS_RELEASE_APP_SUPPORT_DIR="${NVPN_MACOS_RELEASE_APP_SUPPORT_DIR:-$HOME/Library/Application Support/nvpn}"
 OWNED_PID_FILE="$MACOS_RELEASE_APP_STATE_DIR/imported.pid"
 
 mkdir -p "$ARTIFACT_DIR"
@@ -84,7 +82,6 @@ verify_import() {
 launch_app() {
   verify_import
   macos_release_app_acquire
-  macos_release_app_support_acquire
   [[ ! -f "$OWNED_PID_FILE" ]] || {
     echo "a previous imported app launch is still owned" >&2
     return 1

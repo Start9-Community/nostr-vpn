@@ -86,46 +86,6 @@ func containsVisible(_ application: AXUIElement, identifier: String) -> Bool {
     }
 }
 
-func findUniqueEnabled(
-    _ application: AXUIElement,
-    identifier: String
-) -> AXUIElement? {
-    let matches = descendants(application).filter {
-        stringAttribute($0, kAXIdentifierAttribute) == identifier
-            && boolAttribute($0, kAXHiddenAttribute) != true
-            && boolAttribute($0, kAXEnabledAttribute) == true
-    }
-    return matches.count == 1 ? matches[0] : nil
-}
-
-func pressStableUniqueEnabled(
-    _ application: AXUIElement,
-    identifier: String
-) throws {
-    let deadline = Date().addingTimeInterval(20)
-    var lastError = AXError.cannotComplete
-    var stableSamples = 0
-    repeat {
-        if let element = findUniqueEnabled(application, identifier: identifier) {
-            stableSamples += 1
-            if stableSamples < 3 {
-                Thread.sleep(forTimeInterval: 0.1)
-                continue
-            }
-            let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
-            if error == .success {
-                Thread.sleep(forTimeInterval: 0.25)
-                return
-            }
-            lastError = error
-        } else {
-            stableSamples = 0
-        }
-        Thread.sleep(forTimeInterval: 0.1)
-    } while Date() < deadline
-    throw DriverError.action(identifier, lastError)
-}
-
 func press(
     _ application: AXUIElement,
     _ identifier: String,
@@ -255,39 +215,6 @@ func publicValue(
     throw DriverError.value(identifier, .cannotComplete)
 }
 
-func stablePublicValue(
-    _ application: AXUIElement,
-    identifier: String,
-    validator: (String) -> Bool
-) throws -> String {
-    let deadline = Date().addingTimeInterval(5)
-    var previous: String?
-    var stableSamples = 0
-    repeat {
-        do {
-            let candidate = try publicValue(
-                application,
-                identifier: identifier,
-                validator: validator
-            )
-            if candidate == previous {
-                stableSamples += 1
-            } else {
-                previous = candidate
-                stableSamples = 1
-            }
-            if stableSamples >= 3 {
-                return candidate
-            }
-        } catch {
-            previous = nil
-            stableSamples = 0
-        }
-        Thread.sleep(forTimeInterval: 0.1)
-    } while Date() < deadline
-    throw DriverError.value(identifier, .cannotComplete)
-}
-
 func validNpub(_ value: String) -> Bool {
     let allowed = Set("023456789acdefghjklmnpqrstuvwxyz")
     return value.count == 63
@@ -383,16 +310,17 @@ func run() throws {
             "network-create-submit",
             successIdentifier: "manual-join-admin-open"
         )
-        try pressStableUniqueEnabled(
+        try press(
             application,
-            identifier: "manual-join-admin-open"
+            "manual-join-admin-open",
+            successIdentifier: "admin-device-id-value"
         )
-        let admin = try stablePublicValue(
+        let admin = try publicValue(
             application,
             identifier: "admin-device-id-value",
             validator: validNpub
         )
-        let network = try stablePublicValue(
+        let network = try publicValue(
             application,
             identifier: "admin-network-id-value"
         ) { !$0.isEmpty && $0 != "-" }
