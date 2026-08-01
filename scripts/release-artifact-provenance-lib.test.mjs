@@ -18,6 +18,7 @@ import {
   collectReleaseGateReceipts,
   startosExactPackageValidator,
 } from './release-artifact-provenance-lib.mjs'
+import { proveUnchangedPlatformInputs } from './release-component-source.mjs'
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
@@ -27,6 +28,45 @@ function write(path, value) {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, value)
 }
+
+test('component proof retains only unchanged platform product inputs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-component-proof-'))
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  const commit = (path, value) => {
+    write(join(root, path), value)
+    git('add', path)
+    git('commit', '-qm', path)
+    return { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') }
+  }
+  try {
+    git('init', '-q')
+    git('config', 'user.name', 'Release Test')
+    git('config', 'user.email', 'release@example.invalid')
+    const receipt = commit('android/App.kt', 'base')
+    commit('ios/Sources/App.swift', 'ios')
+    const candidate = commit('scripts/test-release-harness.sh', 'test')
+    const args = {
+      candidateRoot: root, platform: 'android',
+      receiptCommit: receipt.commit, receiptTree: receipt.tree,
+      candidateCommit: candidate.commit, candidateTree: candidate.tree,
+    }
+    assert.match(proveUnchangedPlatformInputs(args).changed_paths_sha256, /^[0-9a-f]{64}$/)
+    const android = commit('android/App.kt', 'product change')
+    assert.throws(() => proveUnchangedPlatformInputs({
+      ...args, candidateCommit: android.commit, candidateTree: android.tree,
+    }), /changed product\/build input android\/App.kt/)
+    const changed = commit('Cargo.lock', 'shared')
+    assert.throws(() => proveUnchangedPlatformInputs({
+      ...args, candidateCommit: changed.commit, candidateTree: changed.tree,
+    }), /changed product\/build input Cargo.lock/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 const desktopDnsCounterNames = [
   'profile_dns',

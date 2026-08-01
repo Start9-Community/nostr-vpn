@@ -578,10 +578,21 @@ export function validatePromotableReleaseManifest(manifest) {
     throw new Error('Physical Android gate APK does not match the staged release asset.')
   }
   const attestation = validateReleaseGateAttestation(manifest)
+  const androidSourceMatches =
+    gate.app_git_sha === manifest.commit
+    && gate.app_git_tree === attestation.app_git_tree
+  const androidSourceProof = attestation.platform_source_equivalence?.android
   if (
     gate.receipt_schema !== 2
-    || gate.app_git_sha !== manifest.commit
-    || gate.app_git_tree !== attestation.app_git_tree
+    || (
+      !androidSourceMatches
+      && (
+        gate.source_equivalence?.changed_paths_sha256
+          !== androidSourceProof?.changed_paths_sha256
+        || gate.app_git_sha !== androidSourceProof?.receipt_app_git_sha
+        || gate.app_git_tree !== androidSourceProof?.receipt_app_git_tree
+      )
+    )
     || !String(gate.package ?? '').trim()
     || !/^[0-9a-f]{64}$/.test(String(gate.signer_certificate_sha256 ?? ''))
   ) {

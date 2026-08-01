@@ -9,6 +9,8 @@ import {
 } from 'node:fs'
 import { basename } from 'node:path'
 
+import { proveUnchangedPlatformInputs } from './release-component-source.mjs'
+
 const requiredReleaseGatePlatforms = [
   'android',
   'ios',
@@ -291,16 +293,33 @@ export function readRequiredJson(path, label) {
   return value
 }
 
-export function requireReceiptSource(receipt, { commit, tree, label }) {
+export function requireReceiptSource(receipt, {
+  commit,
+  tree,
+  label,
+  candidateRoot,
+  platform,
+}) {
   const source = receipt.artifact && typeof receipt.artifact === 'object'
     ? receipt.artifact
     : receipt.mobileArtifactEvidence
       && typeof receipt.mobileArtifactEvidence === 'object'
       ? receipt.mobileArtifactEvidence
       : receipt
-  if (source.appGitSha !== commit || source.appGitTree !== tree) {
+  if (source.appGitSha === commit && source.appGitTree === tree) {
+    return null
+  }
+  if (!candidateRoot || !platform) {
     throw new Error(`${label} is not for the exact clean release candidate.`)
   }
+  return proveUnchangedPlatformInputs({
+    candidateRoot,
+    platform,
+    receiptCommit: String(source.appGitSha ?? ''),
+    receiptTree: String(source.appGitTree ?? ''),
+    candidateCommit: commit,
+    candidateTree: tree,
+  })
 }
 
 function requireReceiptComponentSource(receipt, label) {
@@ -1152,9 +1171,19 @@ function requireDesktopNetworkReceipt({
 export function collectReleaseGateReceipts({
   commit,
   tree,
+  candidateRoot,
   releaseGateSummaryPath,
   platformReceiptPaths,
 }) {
+  const platformSourceEquivalence = {}
+  const platformSource = (platform, receipt, label) => {
+    const source = requireReceiptComponentSource(receipt, label)
+    const proof = requireReceiptSource(receipt, {
+      commit, tree, candidateRoot, platform, label,
+    })
+    if (proof) platformSourceEquivalence[platform] = proof
+    return source
+  }
   const summary = readRequiredJson(
     releaseGateSummaryPath,
     'Release-gate completion receipt',
@@ -1173,15 +1202,9 @@ export function collectReleaseGateReceipts({
     platformReceiptPaths.android.physical,
     'Physical Android artifact receipt',
   )
-  const androidSource = requireReceiptComponentSource(
-    android,
-    'Physical Android artifact receipt',
+  const androidSource = platformSource(
+    'android', android, 'Physical Android artifact receipt',
   )
-  if (androidSource.commit !== commit || androidSource.tree !== tree) {
-    throw new Error(
-      'Physical Android artifact receipt does not match the current release candidate SHA/tree.',
-    )
-  }
   if (
     android.receiptSchema !== 2
     || android.artifactType !== 'Android Release APK'
@@ -1273,19 +1296,17 @@ export function collectReleaseGateReceipts({
   ) {
     throw new Error('Frozen iOS physical-gate seal is incomplete.')
   }
-  requireReceiptSource(ios, {
-    commit,
-    tree,
-    label: 'Frozen iOS physical-gate seal',
-  })
   const iosArtifact = readRequiredJson(
     platformReceiptPaths.ios.mobile_artifact,
     'Sealed physical iOS artifact receipt',
   )
-  requireReceiptSource(iosArtifact, {
-    commit,
-    tree,
-    label: 'Sealed physical iOS artifact receipt',
+  const iosSource = platformSource(
+    'ios', iosArtifact, 'Sealed physical iOS artifact receipt',
+  )
+  requireReceiptSource(ios, {
+    commit: iosSource.commit,
+    tree: iosSource.tree,
+    label: 'Frozen iOS physical-gate seal',
   })
   const iosArtifactReceiptSha256 = sha256FileSync(
     platformReceiptPaths.ios.mobile_artifact,
@@ -1312,8 +1333,8 @@ export function collectReleaseGateReceipts({
       mode,
       artifact: iosArtifact,
       artifactReceiptSha256: iosArtifactReceiptSha256,
-      commit,
-      tree,
+      commit: iosSource.commit,
+      tree: iosSource.tree,
     })
     iosNetworkReceipts[name] = sha256FileSync(path)
   }
@@ -1353,11 +1374,9 @@ export function collectReleaseGateReceipts({
   ) {
     throw new Error('macOS Release artifact receipt is incomplete.')
   }
-  requireReceiptSource(macosArtifact, {
-    commit,
-    tree,
-    label: 'macOS Release artifact receipt',
-  })
+  const macosSource = platformSource(
+    'macos', macosArtifact, 'macOS Release artifact receipt',
+  )
   if (
     platformReceiptPaths.macos.public_ui_join
     !== platformReceiptPaths.ios.desktop_mobile_join
@@ -1382,8 +1401,8 @@ export function collectReleaseGateReceipts({
     androidInstallReceiptSize,
     iosArtifact,
     iosArtifactReceiptSha256,
-    commit,
-    tree,
+    commit: macosSource.commit,
+    tree: macosSource.tree,
   })
   const macosNetwork = readRequiredJson(
     platformReceiptPaths.macos.network,
@@ -1392,8 +1411,8 @@ export function collectReleaseGateReceipts({
   requireDesktopNetworkReceipt({
     receipt: macosNetwork,
     platform: 'macos',
-    commit,
-    tree,
+    commit: macosSource.commit,
+    tree: macosSource.tree,
     artifactReceiptPath: platformReceiptPaths.macos.artifact,
   })
   const expectedIosGateReceipts = {
@@ -1428,11 +1447,9 @@ export function collectReleaseGateReceipts({
       platformReceiptPaths[platform].artifact,
       `${platform} exact desktop artifact receipt`,
     )
-    requireReceiptSource(artifact, {
-      commit,
-      tree,
-      label: `${platform} exact desktop artifact receipt`,
-    })
+    const source = platformSource(
+      platform, artifact, `${platform} exact desktop artifact receipt`,
+    )
     if (platform === 'linux') {
       const packageInstall = readRequiredJson(
         platformReceiptPaths.linux.package_install,
@@ -1474,8 +1491,8 @@ export function collectReleaseGateReceipts({
         || packageInstall.schema !== 2
         || packageInstall.artifactType
           !== 'exact Debian package installed on Ubuntu VM'
-        || packageInstall.appGitSha !== commit
-        || packageInstall.appGitTree !== tree
+        || packageInstall.appGitSha !== source.commit
+        || packageInstall.appGitTree !== source.tree
         || packageInstall.fipsGitSha !== artifact.fipsGitSha
         || packageInstall.fipsGitTree !== artifact.fipsGitTree
         || packageInstall.builderMode !== artifact.builderMode
@@ -1519,8 +1536,8 @@ export function collectReleaseGateReceipts({
       validateWindowsInstallerGateReceipt({
         receipt: installer,
         artifactReceipt: artifact,
-        commit,
-        tree,
+        commit: source.commit,
+        tree: source.tree,
       })
     }
     const receipt = readRequiredJson(
@@ -1546,8 +1563,8 @@ export function collectReleaseGateReceipts({
     requireDesktopNetworkReceipt({
       receipt: network,
       platform,
-      commit,
-      tree,
+      commit: source.commit,
+      tree: source.tree,
       artifactReceiptPath: platformReceiptPaths[platform].artifact,
     })
   }
@@ -1565,6 +1582,7 @@ export function collectReleaseGateReceipts({
         ),
       ]),
     ),
+    platformSourceEquivalence,
   }
 }
 
@@ -1600,6 +1618,7 @@ export function buildReleaseGateAttestation({
   assets,
   releaseGateSummarySha256,
   platformGateReceipts,
+  platformSourceEquivalence = {},
   assetProofs,
 }) {
   const normalizedCommit = String(commit ?? '').trim()
@@ -1639,6 +1658,26 @@ export function buildReleaseGateAttestation({
       requireSha256(digest, `Release-gate ${name}.${label} receipt`)
     }
     receipts[name] = digests
+  }
+
+  const sourceEquivalence = {}
+  for (const platform of Object.keys(platformSourceEquivalence).sort()) {
+    if (!requiredReleaseGatePlatforms.includes(platform)) {
+      throw new Error(`Release-gate source equivalence has unknown platform ${platform}.`)
+    }
+    const proof = platformSourceEquivalence[platform]
+    if (
+      proof?.policy !== 'unchanged-platform-product-inputs-v1'
+      || proof.platform !== platform
+      || proof.candidate_app_git_sha !== normalizedCommit
+      || proof.candidate_app_git_tree !== normalizedTree
+      || !/^[0-9a-f]{40}$/.test(String(proof.receipt_app_git_sha ?? ''))
+      || !/^[0-9a-f]{40}$/.test(String(proof.receipt_app_git_tree ?? ''))
+      || !/^[0-9a-f]{64}$/.test(String(proof.changed_paths_sha256 ?? ''))
+    ) {
+      throw new Error(`Release-gate ${platform} source-equivalence proof is invalid.`)
+    }
+    sourceEquivalence[platform] = proof
   }
 
   const expectedAssetPaths = [...assets]
@@ -1751,6 +1790,7 @@ export function buildReleaseGateAttestation({
     app_git_tree: normalizedTree,
     release_gate_summary_sha256: releaseGateSummarySha256,
     platform_gate_receipts: receipts,
+    platform_source_equivalence: sourceEquivalence,
     asset_proofs: proofs,
     asset_set_sha256: releaseAssetSetSha256(assets),
   }
@@ -1783,6 +1823,7 @@ export function validateReleaseGateAttestation(manifest) {
     assets: manifest.assets,
     releaseGateSummarySha256: attestation.release_gate_summary_sha256,
     platformGateReceipts: attestation.platform_gate_receipts,
+    platformSourceEquivalence: attestation.platform_source_equivalence,
     assetProofs: attestation.asset_proofs,
   })
   if (attestation.asset_set_sha256 !== expected.asset_set_sha256) {

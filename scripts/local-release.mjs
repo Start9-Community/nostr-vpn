@@ -791,6 +791,8 @@ function buildWindowsArtifacts({
   requireReceiptSource(receipt, {
     commit: candidateCommit,
     tree: candidateTree,
+    candidateRoot: repoRoot,
+    platform: 'windows',
     label: 'Windows exact-artifact gate receipt',
   })
   const installerReceipt = readRequiredJson(
@@ -810,8 +812,8 @@ function buildWindowsArtifacts({
   const sealedInstaller = validateWindowsInstallerGateReceipt({
     receipt: installerReceipt,
     artifactReceipt: receipt,
-    commit: candidateCommit,
-    tree: candidateTree,
+    commit: receipt.appGitSha,
+    tree: receipt.appGitTree,
     expectedTag: tag,
   })
   if (
@@ -839,8 +841,8 @@ function buildWindowsArtifacts({
 $ErrorActionPreference = 'Stop'
 & ${psQuote(`${guestRepo}\\scripts\\windows-release-publication-proof.ps1`)} \`
   -RepoPath ${psQuote(guestRepo)} \`
-  -ExpectedCommit ${psQuote(candidateCommit)} \`
-  -ExpectedTree ${psQuote(candidateTree)} \`
+  -ExpectedCommit ${psQuote(receipt.appGitSha)} \`
+  -ExpectedTree ${psQuote(receipt.appGitTree)} \`
   -PublishDir ${psQuote(guestPublishDir)} \`
   -InstallerPath ${psQuote(guestInstaller)} \`
   -ArtifactRoot ${psQuote(guestArtifactRoot)} \`
@@ -978,6 +980,8 @@ function buildLinuxArtifacts({
     requireReceiptSource(gateReceipt, {
       commit: candidateCommit,
       tree: candidateTree,
+      candidateRoot: repoRoot,
+      platform: 'linux',
       label: 'Linux exact-artifact gate receipt',
     })
     packageInstallReceipt = readRequiredJson(
@@ -986,8 +990,8 @@ function buildLinuxArtifacts({
     )
     const expectedBundleReceiptSha256 = bundleReceiptSha256
     if (
-      packageInstallReceipt.appGitSha !== candidateCommit
-      || packageInstallReceipt.appGitTree !== candidateTree
+      packageInstallReceipt.appGitSha !== gateReceipt.appGitSha
+      || packageInstallReceipt.appGitTree !== gateReceipt.appGitTree
       || packageInstallReceipt.packageInstalledByDpkg !== true
       || packageInstallReceipt.installedStatus !== 'installed'
       || packageInstallReceipt.bundleReceiptSha256
@@ -1046,8 +1050,8 @@ function buildLinuxArtifacts({
   const verificationPlan = linuxPublicationVerificationPlan({
     env,
     tag,
-    candidateCommit,
-    candidateTree,
+    candidateCommit: gateReceipt.appGitSha,
+    candidateTree: gateReceipt.appGitTree,
     gateReceipt,
     packageInstallReceipt,
     bundlePath: gatedBundle,
@@ -1285,13 +1289,20 @@ function buildAndroidArtifacts({
       }
       const aabSha256 = sha256FileSync(aabPath)
       const apkSha256 = sha256FileSync(testedApkPath)
+      const sourceEquivalence = requireReceiptSource(receipt, {
+        commit: candidateCommit,
+        tree: candidateTree,
+        candidateRoot: repoRoot,
+        platform: 'android',
+        label: 'Physical Android release-gate receipt',
+      })
       if (
         sha256FileSync(bundleReceiptPath) !== receipt.bundleReceiptSha256
         || bundleReceipt.schema !== 1
         || bundleReceipt.relationship
           !== 'universal-apk-derived-from-exact-aab'
-        || bundleReceipt.appGitSha !== candidateCommit
-        || bundleReceipt.appGitTree !== candidateTree
+        || bundleReceipt.appGitSha !== receipt.appGitSha
+        || bundleReceipt.appGitTree !== receipt.appGitTree
         || bundleReceipt.aabSha256 !== aabSha256
         || bundleReceipt.apkSha256 !== apkSha256
         || bundleReceipt.aabPathSha256 !== pathSha256(aabPath)
@@ -1305,12 +1316,15 @@ function buildAndroidArtifacts({
         apkSha256,
         aabSha256,
         apkPathSha256: pathSha256(testedApkPath),
-        expectedAppGitSha: candidateCommit,
-        expectedAppGitTree: candidateTree,
+        expectedAppGitSha: receipt.appGitSha,
+        expectedAppGitTree: receipt.appGitTree,
         expectedPackage:
           String(androidEnv.NVPN_ANDROID_PACKAGE_ID || '').trim()
           || 'fi.siriusbusiness.nvpn',
       })
+      if (sourceEquivalence) {
+        gate.sourceEquivalence = sourceEquivalence
+      }
       mkdirSync(distDir, { recursive: true })
       copyFileSync(testedApkPath, apkDest)
       copyFileSync(aabPath, aabDest)
@@ -1388,9 +1402,24 @@ function buildMacosArtifacts({
     NVPN_MACOS_REQUIRE_SIGNING: '1',
     NVPN_MACOS_REQUIRE_NOTARIZATION: '1',
   }
+  let gateSource = { commit: candidateCommit, tree: candidateTree }
   if (!dryRun) {
     rmSync(join(distDir, `nostr-vpn-${tag}-macos-arm64.zip`), { force: true })
-    readRequiredJson(gateReceiptPath, 'macOS exact-artifact gate receipt')
+    const gateReceipt = readRequiredJson(
+      gateReceiptPath,
+      'macOS exact-artifact gate receipt',
+    )
+    requireReceiptSource(gateReceipt, {
+      commit: candidateCommit,
+      tree: candidateTree,
+      candidateRoot: repoRoot,
+      platform: 'macos',
+      label: 'macOS exact-artifact gate receipt',
+    })
+    gateSource = {
+      commit: gateReceipt.appGitSha,
+      tree: gateReceipt.appGitTree,
+    }
     if (!existsSync(gatedAppPath)) {
       throw new Error(
         `Gate-tested macOS Release app is missing: ${gatedAppPath}`,
@@ -1410,9 +1439,9 @@ function buildMacosArtifacts({
         '--app',
         releaseApp,
         '--expected-app-head',
-        candidateCommit,
+        gateSource.commit,
         '--expected-app-tree',
-        candidateTree,
+        gateSource.tree,
         '--require-gate-bundle-tree',
       ],
     )
@@ -1465,8 +1494,8 @@ function buildMacosArtifacts({
       releaseApp,
       updater,
       dmg,
-      candidateCommit,
-      candidateTree,
+      gateSource.commit,
+      gateSource.tree,
       join(repoRoot, 'scripts', 'macos_release_join_artifact.py'),
     ],
   )
@@ -1849,11 +1878,9 @@ function stageRelease({
       throw new Error(`Physical-gate Android APK is missing from the staged release: ${apkName}`)
     }
     if (
-      androidReleaseGate.appGitSha !== commit
-      || androidReleaseGate.appGitTree !== tree
-      || sha256FileSync(stagedAndroidApkPath) !== androidReleaseGate.apkSha256
+      sha256FileSync(stagedAndroidApkPath) !== androidReleaseGate.apkSha256
     ) {
-      throw new Error('Physical Android gate provenance does not match the staged source and APK.')
+      throw new Error('Physical Android gate provenance does not match the staged APK.')
     }
     androidGateManifest = {
       receipt_schema: androidReleaseGate.receiptSchema,
@@ -1863,6 +1890,9 @@ function stageRelease({
       app_git_tree: androidReleaseGate.appGitTree,
       package: androidReleaseGate.package,
       signer_certificate_sha256: androidReleaseGate.signerCertificateSha256,
+      ...(androidReleaseGate.sourceEquivalence
+        ? { source_equivalence: androidReleaseGate.sourceEquivalence }
+        : {}),
     }
   } else if (requireCompleteAppRelease) {
     throw new Error(
@@ -2653,6 +2683,7 @@ function main() {
         releaseGateEvidence = collectReleaseGateReceipts({
           commit: candidateCommit,
           tree: candidateTree,
+          candidateRoot: repoRoot,
           releaseGateSummaryPath,
           platformReceiptPaths,
         })

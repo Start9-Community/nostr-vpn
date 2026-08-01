@@ -1231,6 +1231,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     'local-release-lib.mjs',
     'release-source-verification.mjs',
     'release-artifact-provenance-lib.mjs',
+    'release-component-source.mjs',
     'fleet-release-publication-lib.mjs',
     'fleet-release-preparer-lib.mjs',
     'fleet-roster-catalog-lib.mjs',
