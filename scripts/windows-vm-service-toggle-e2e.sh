@@ -8,8 +8,14 @@ SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
 GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\fips}"
 GUEST_ARTIFACT_ROOT="${GUEST_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts}"
+HYPERVISOR_SSH="${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}"
+VM_NAME="${NVPN_WINDOWS_UNDERLAY_VM_NAME:-${NVPN_WINDOWS_VM_NAME:-}}"
 [[ -n "$SSH_HOST" ]] || {
   echo "set NVPN_WINDOWS_SSH_HOST or pass the Windows VM SSH target" >&2
+  exit 2
+}
+[[ -n "$HYPERVISOR_SSH" && -n "$VM_NAME" ]] || {
+  echo "Windows service-toggle UAC e2e requires its VM console." >&2
   exit 2
 }
 
@@ -74,6 +80,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-windows-
 if (\$LASTEXITCODE -ne 0) { throw ('interactive service-toggle e2e failed with exit code {0}' -f \$LASTEXITCODE) }
 if (!(Test-Path (Join-Path \$artifact 'window.png'))) {
   throw 'Windows service-toggle UI window artifact was not created'
-}"
+}" &
+interactive_pid="$!"
+while kill -0 "$interactive_pid" >/dev/null 2>&1; do
+  if run_ps "if (Get-Process consent -ErrorAction SilentlyContinue) { exit 0 }; exit 1" \
+    >/dev/null 2>&1
+  then
+    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      virsh send-key "$VM_NAME" KEY_ESC
+    break
+  fi
+  sleep 0.1
+done
+wait "$interactive_pid"
 
 echo "WINDOWS_VM_SERVICE_TOGGLE_E2E_OK"

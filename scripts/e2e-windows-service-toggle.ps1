@@ -204,10 +204,9 @@ public static class NvpnServiceToggleInput {
     throw "VPN toggle did not open a Windows UAC consent prompt"
   }
 
-  # Cancelling the unelevated PowerShell requester closes the secure-desktop
-  # request without approving or installing anything. The elevated outer
-  # driver owns consent.exe cleanup because the intentionally limited GUI task
-  # cannot terminate the secure-desktop process itself.
+  # Kill the unelevated requester without approving or installing anything.
+  # The VM host runner owns secure-desktop cancellation because the
+  # intentionally limited GUI task cannot send input to that desktop itself.
   Stop-Process -Id $ElevationProcess.ProcessId -Force -ErrorAction Stop
   $ConsentCloseDeadline = (Get-Date).AddSeconds(5)
   while ((Get-Date) -lt $ConsentCloseDeadline -and (Get-Process consent -ErrorAction SilentlyContinue)) {
