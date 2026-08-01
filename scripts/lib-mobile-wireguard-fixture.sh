@@ -12,6 +12,11 @@ MOBILE_WG_FIXTURE_STARTED=0
 MOBILE_WG_FIXTURE_REMOTE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 MOBILE_WG_FIXTURE_SSH_CONTROL_PATH="/tmp/nvpn-wg-fixture-$PPID-$$"
 
+mobile_wg_fixture_begin_cleanup() {
+  trap - EXIT
+  trap '' HUP INT TERM
+}
+
 mobile_wg_endpoint_fields() {
   local raw_host="${1:-}" raw_port="${2:-}"
   python3 - "$raw_host" "$raw_port" <<'PY'
@@ -110,6 +115,12 @@ mobile_wg_fixture_validate_ssh_host() {
 mobile_wg_remote_exec() {
   local host="${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}"
   local command="" quoted argument
+  local -a control_options=(-o ControlMaster=auto -o ControlPersist=60 \
+    -o "ControlPath=$MOBILE_WG_FIXTURE_SSH_CONTROL_PATH")
+  if [[ "${1:-}" == "--fresh" ]]; then
+    shift
+    control_options=(-o ControlMaster=no -o ControlPath=none)
+  fi
   mobile_wg_fixture_validate_ssh_host "$host" || return 1
   for argument in "$@"; do
     printf -v quoted '%q' "$argument"
@@ -121,10 +132,36 @@ mobile_wg_remote_exec() {
     -o ConnectionAttempts=1 \
     -o ServerAliveInterval=3 \
     -o ServerAliveCountMax=2 \
-    -o ControlMaster=auto \
-    -o ControlPersist=60 \
-    -o "ControlPath=$MOBILE_WG_FIXTURE_SSH_CONTROL_PATH" \
+    "${control_options[@]}" \
     "$host" "$command"
+}
+
+mobile_wg_fixture_recover_inactive_remote_dir() {
+  local first_entry="" marker="$MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner"
+  mobile_wg_remote_exec test ! -e "$MOBILE_WG_FIXTURE_REMOTE_DIR" && return 0
+  mobile_wg_remote_exec test -d "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+    && mobile_wg_remote_exec test ! -L "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+    && mobile_wg_remote_exec test -O "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+    || return 1
+  first_entry="$(mobile_wg_remote_exec find "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+    -mindepth 1 -maxdepth 1 -print -quit)" || return 1
+  if [[ -n "$first_entry" ]] \
+    && ! mobile_wg_remote_native clean >/dev/null 2>&1
+  then
+    mobile_wg_remote_exec test -f "$marker" \
+      && mobile_wg_remote_exec test ! -L "$marker" \
+      && mobile_wg_remote_exec test -O "$marker" \
+      && mobile_wg_remote_exec test ! -e \
+        "$MOBILE_WG_FIXTURE_REMOTE_DIR/mobile-wireguard-exit-remote-native.sh" \
+      || return 1
+  fi
+  mobile_wg_remote_exec sudo -n rm -f \
+    "$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/server.key" \
+    "$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/client.key" \
+    && mobile_wg_remote_exec sudo -n find "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+      -xdev -depth -mindepth 1 -delete \
+    && mobile_wg_remote_exec sudo -n rmdir "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+    && mobile_wg_remote_exec --fresh test ! -e "$MOBILE_WG_FIXTURE_REMOTE_DIR"
 }
 
 mobile_wg_remote_close_control() {
@@ -237,9 +274,23 @@ mobile_wg_fixture_initialize() {
       return 2
       ;;
   esac
-  MOBILE_WG_FIXTURE_REMOTE_DIR="$(
-    mobile_wg_remote_exec mktemp -d /tmp/nvpn-mobile-wg-exit.XXXXXX
-  )"
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    MOBILE_WG_FIXTURE_REMOTE_INTERFACE="nwg$HOST_PORT"
+    MOBILE_WG_FIXTURE_REMOTE_NFT_TABLE="nvpnwg$HOST_PORT"
+    MOBILE_WG_FIXTURE_REMOTE_DIR="/tmp/nvpn-mobile-wg-exit.port-$HOST_PORT"
+    mobile_wg_fixture_recover_inactive_remote_dir || {
+      echo "remote mobile WireGuard fixture found active or foreign same-port state" >&2
+      return 1
+    }
+    mobile_wg_remote_exec mkdir -m 700 "$MOBILE_WG_FIXTURE_REMOTE_DIR" \
+      || return 1
+    mobile_wg_remote_exec install -m 600 /dev/null \
+      "$MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner" || return 1
+  else
+    MOBILE_WG_FIXTURE_REMOTE_DIR="$(
+      mobile_wg_remote_exec mktemp -d /tmp/nvpn-mobile-wg-exit.XXXXXX
+    )"
+  fi
   case "$MOBILE_WG_FIXTURE_REMOTE_DIR" in
     /tmp/nvpn-mobile-wg-exit.*) ;;
     *)
@@ -267,8 +318,6 @@ mobile_wg_fixture_initialize() {
       "$root/scripts/mobile-wireguard-http-probe.py" \
       "$remote_host:$MOBILE_WG_FIXTURE_REMOTE_DIR/" \
       || return 1
-    MOBILE_WG_FIXTURE_REMOTE_INTERFACE="nwg$HOST_PORT"
-    MOBILE_WG_FIXTURE_REMOTE_NFT_TABLE="nvpnwg$HOST_PORT"
     mobile_wg_remote_exec \
       chmod 700 \
       "$MOBILE_WG_FIXTURE_REMOTE_DIR/mobile-wireguard-exit-remote-native.sh"
@@ -653,6 +702,15 @@ mobile_wg_fixture_cleanup() {
   local container="$1" image="$2"
   local cleanup_failed=0 inspect_status=0 remote_dir=""
   local native_stop_failed=0 native_clean_failed=0
+  if [[ -n "$MOBILE_WG_FIXTURE_REMOTE_DIR" ]]; then
+    remote_dir="$MOBILE_WG_FIXTURE_REMOTE_DIR"
+    if ! mobile_wg_remote_exec sudo -n rm -f \
+      "$remote_dir/fixture/server.key" \
+      "$remote_dir/fixture/client.key" >/dev/null 2>&1
+    then
+      cleanup_failed=1
+    fi
+  fi
   if [[ "$MOBILE_WG_FIXTURE_STARTED" -eq 1 ]]; then
     if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
       mobile_wg_remote_native stop >/dev/null 2>&1 \
@@ -696,11 +754,7 @@ mobile_wg_fixture_cleanup() {
       cleanup_failed=1
     fi
   fi
-  if [[ -n "$MOBILE_WG_FIXTURE_REMOTE_DIR" ]]; then
-    remote_dir="$MOBILE_WG_FIXTURE_REMOTE_DIR"
-    mobile_wg_remote_exec sudo -n rm -f \
-      "$remote_dir/fixture/server.key" \
-      "$remote_dir/fixture/client.key" >/dev/null 2>&1 || true
+  if [[ -n "$remote_dir" ]]; then
     if ! mobile_wg_remote_exec test ! -e \
       "$remote_dir/fixture/server.key" >/dev/null 2>&1
     then
@@ -714,16 +768,13 @@ mobile_wg_fixture_cleanup() {
       cleanup_failed=1
     fi
     if [[ "$MOBILE_WG_FIXTURE_STARTED" -eq 0 ]]; then
-      mobile_wg_remote_exec \
+      if ! mobile_wg_remote_exec \
         sudo -n find "$remote_dir" \
         -xdev -depth -mindepth 1 -delete \
-        >/dev/null 2>&1 || true
-      mobile_wg_remote_exec sudo -n rmdir "$remote_dir" \
-        >/dev/null 2>&1 || true
-      if mobile_wg_remote_exec test ! -e "$remote_dir" >/dev/null 2>&1; then
-        MOBILE_WG_FIXTURE_REMOTE_DIR=""
-      else
-        echo "remote WireGuard fixture directory survived cleanup or could not be verified" >&2
+        >/dev/null 2>&1 \
+        || ! mobile_wg_remote_exec sudo -n rmdir "$remote_dir" \
+          >/dev/null 2>&1
+      then
         cleanup_failed=1
       fi
     else
@@ -731,5 +782,14 @@ mobile_wg_fixture_cleanup() {
     fi
   fi
   mobile_wg_remote_close_control
+  if [[ -n "$remote_dir" ]]; then
+    if mobile_wg_remote_exec --fresh test ! -e "$remote_dir" >/dev/null 2>&1
+    then
+      MOBILE_WG_FIXTURE_REMOTE_DIR=""
+    else
+      echo "remote WireGuard fixture directory survived fresh-session cleanup verification" >&2
+      cleanup_failed=1
+    fi
+  fi
   return "$cleanup_failed"
 }

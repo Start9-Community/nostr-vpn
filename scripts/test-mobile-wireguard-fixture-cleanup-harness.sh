@@ -10,6 +10,37 @@ REMOTE_STATE="$(mktemp -d /tmp/nvpn-mobile-wg-exit.cleanup-harness.XXXXXX)"
 CALLS="$TMP_ROOT/calls"
 trap 'rm -rf "$TMP_ROOT" "$REMOTE_STATE" "${LEASE_A:-}" "${LEASE_B:-}" "${LEASE_C:-}" "${LEASE_HUP:-}"' EXIT
 
+SIGNAL_PROBE="$TMP_ROOT/signal-probe"
+mkdir -p "$SIGNAL_PROBE"
+(
+  cleanup_probe() {
+    mobile_wg_fixture_begin_cleanup
+    touch "$SIGNAL_PROBE/entered"
+    sleep 0.2
+    touch "$SIGNAL_PROBE/completed"
+    exit 143
+  }
+  trap cleanup_probe TERM
+  touch "$SIGNAL_PROBE/ready"
+  while true; do sleep 1; done
+) &
+signal_pid="$!"
+for _ in $(seq 1 50); do
+  [[ -f "$SIGNAL_PROBE/ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$SIGNAL_PROBE/ready" ]]
+kill -TERM "$signal_pid"
+for _ in $(seq 1 50); do
+  [[ -f "$SIGNAL_PROBE/entered" ]] && break
+  sleep 0.02
+done
+[[ -f "$SIGNAL_PROBE/entered" ]]
+kill -HUP "$signal_pid"
+signal_status=0
+wait "$signal_pid" || signal_status="$?"
+[[ "$signal_status" -eq 143 && -f "$SIGNAL_PROBE/completed" ]]
+
 grep -Fq 'private-key /dev/stdin' "$REMOTE_NATIVE" \
   && grep -Fq 'cat "$NVPN_MOBILE_WG_SERVER_PRIVATE_KEY_FILE"' "$REMOTE_NATIVE" \
   || {
@@ -24,6 +55,58 @@ if mobile_wg_listener_port_in_use 53001 "$listeners"; then
   echo "fixture listener parser reported an unused port as occupied" >&2
   exit 1
 fi
+
+MOBILE_WG_FIXTURE_REMOTE_DIR=/tmp/nvpn-mobile-wg-exit.port-53000
+stale_owner_state=present
+mobile_wg_remote_native() {
+  [[ "$1" == clean && "$stale_owner_state" == present ]]
+}
+mobile_wg_remote_exec() {
+  [[ "${1:-}" == --fresh ]] && shift
+  case "$*" in
+    "test ! -e $MOBILE_WG_FIXTURE_REMOTE_DIR")
+      [[ "$stale_owner_state" == absent ]]
+      ;;
+    "test -d $MOBILE_WG_FIXTURE_REMOTE_DIR"|\
+    "test ! -L $MOBILE_WG_FIXTURE_REMOTE_DIR"|\
+    "test -O $MOBILE_WG_FIXTURE_REMOTE_DIR")
+      [[ "$stale_owner_state" != absent ]]
+      ;;
+    "find $MOBILE_WG_FIXTURE_REMOTE_DIR -mindepth 1 -maxdepth 1 -print -quit")
+      [[ "$stale_owner_state" != absent ]] || return 1
+      [[ "$stale_owner_state" != empty ]] && printf '%s\n' \
+        "$MOBILE_WG_FIXTURE_REMOTE_DIR/entry"
+      ;;
+    "test -f $MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner"|\
+    "test ! -L $MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner"|\
+    "test -O $MOBILE_WG_FIXTURE_REMOTE_DIR/.nvpn-fixture-owner"|\
+    "test ! -e $MOBILE_WG_FIXTURE_REMOTE_DIR/mobile-wireguard-exit-remote-native.sh")
+      [[ "$stale_owner_state" == partial ]]
+      ;;
+    "sudo -n rm -f $MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/server.key $MOBILE_WG_FIXTURE_REMOTE_DIR/fixture/client.key"|\
+    "sudo -n find $MOBILE_WG_FIXTURE_REMOTE_DIR -xdev -depth -mindepth 1 -delete")
+      [[ "$stale_owner_state" != absent ]]
+      ;;
+    "sudo -n rmdir $MOBILE_WG_FIXTURE_REMOTE_DIR")
+      stale_owner_state=absent
+      ;;
+    *) return 1 ;;
+  esac
+}
+mobile_wg_fixture_recover_inactive_remote_dir
+[[ "$stale_owner_state" == absent ]]
+stale_owner_state=empty
+mobile_wg_fixture_recover_inactive_remote_dir
+[[ "$stale_owner_state" == absent ]]
+stale_owner_state=partial
+mobile_wg_fixture_recover_inactive_remote_dir
+[[ "$stale_owner_state" == absent ]]
+stale_owner_state=active
+if mobile_wg_fixture_recover_inactive_remote_dir; then
+  echo "fixture recovery removed active same-owner state" >&2
+  exit 1
+fi
+[[ "$stale_owner_state" == active ]]
 
 mobile_wg_remote_close_control() {
   printf 'close\n' >>"$CALLS"
@@ -55,7 +138,7 @@ for expected in \
   'docker container inspect fixture' \
   'docker image rm image' \
   'docker image inspect image' \
-  'remote test ! -e /tmp/nvpn-mobile-wg-exit.success' \
+  'remote --fresh test ! -e /tmp/nvpn-mobile-wg-exit.success' \
   close
 do
   grep -Fqx "$expected" "$CALLS"

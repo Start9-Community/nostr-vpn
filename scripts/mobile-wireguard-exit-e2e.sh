@@ -92,9 +92,9 @@ has_platform() {
 }
 
 cleanup() {
-  local status="$?"
+  local status="${1:-$?}"
   local cleanup_failed=0
-  trap - EXIT INT TERM
+  mobile_wg_fixture_begin_cleanup
   mobile_continuity_stop
   if [[ "$IOS_CLEANUP_ARMED" == "1" && -n "$IOS_DEVICE_SELECTED" ]]; then
     if ! ios_release_network_disconnect_cleanup; then
@@ -104,6 +104,12 @@ cleanup() {
   fi
   if ! ios_release_network_cleanup_private_artifacts; then
     cleanup_failed=1
+  fi
+  if [[ -n "$FIXTURE_DIR" ]]; then
+    rm -f \
+      "$FIXTURE_DIR/server.key" \
+      "$FIXTURE_DIR/client.key" \
+      || cleanup_failed=1
   fi
   if ! mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"; then
     echo "WireGuard exit fixture cleanup left a managed resource behind" >&2
@@ -123,7 +129,10 @@ cleanup() {
   fi
   exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup $?' EXIT
+trap 'cleanup 129' HUP
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 for command in wg; do
   if ! command -v "$command" >/dev/null 2>&1; then
