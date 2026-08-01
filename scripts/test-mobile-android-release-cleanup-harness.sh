@@ -111,6 +111,19 @@ rapid_gate = function_body(
     "run_android_release_rapid_start_stop_gate",
     "run_android_release_blackbox_cycle",
 )
+rapid_loop = "for delay_ms in 0 10 30 80 160 320 640 1000; do"
+first_baseline = rapid_gate.index(
+    "android_release_capture_native_tunnel_start_baseline"
+)
+if not first_baseline < rapid_gate.index(rapid_loop):
+    raise SystemExit(
+        "rapid Release delay loop does not begin with a bounded zero log window"
+    )
+if rapid_gate.count("android_release_capture_native_tunnel_start_baseline") != 2:
+    raise SystemExit(
+        "rapid Release gate must reset native-start evidence before the delay loop "
+        "and again before its full reconnect"
+    )
 reconnect_arm = rapid_gate.index(arm)
 reconnect_start = rapid_gate.index("android_release_connect_ui")
 reconnect_stable = rapid_gate.index(stable)

@@ -1044,6 +1044,7 @@ run_android_release_rapid_start_stop_gate() {
   if [[ -n "$EXIT_DNS_MODE" ]]; then
     configure_android_exit_dns_ui || return 1
   fi
+  android_release_capture_native_tunnel_start_baseline || return 1
   for delay_ms in 0 10 30 80 160 320 640 1000; do
     android_release_rapid_cancel_once "$delay_ms" || return 1
     printf '%s\t%s\t%s\n' \
