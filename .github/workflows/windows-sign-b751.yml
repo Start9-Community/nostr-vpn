@@ -1,0 +1,130 @@
+name: Sign b751 Windows candidate
+
+on:
+  push:
+    branches:
+      - codex/windows-sign-b751
+
+jobs:
+  sign-windows-candidate:
+    if: github.repository == 'mmalmi/nostr-vpn'
+    runs-on: [self-hosted, Windows, X64, nvpn-signing-b751]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      NVPN_PUBLISH_DIR: C:\Users\dev\src\nostr-vpn\windows\NostrVpn.Windows\bin\Release\net8.0-windows\win-x64\publish
+      NVPN_SOURCE_SHA256: 242a7fdb3488068f27dddd57e02fb381dd8002fad87f850aa2b821f241e9fa10
+      NVPN_OUTPUT: C:\Users\dev\release-artifacts\nvpn-4.1.5-b751-signed
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Stage exact candidate publish tree
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:NVPN_PUBLISH_DIR 'nvpn.exe'
+          $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()
+          if ($sourceHash -ne $env:NVPN_SOURCE_SHA256) { throw "Source hash mismatch: $sourceHash" }
+          $stage = Join-Path $env:RUNNER_TEMP 'nvpn-b751-publish'
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $env:NVPN_PUBLISH_DIR '*') $stage
+          $stageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage 'nvpn.exe')).Hash.ToLowerInvariant()
+          if ($stageHash -ne $env:NVPN_SOURCE_SHA256) { throw "Staged hash mismatch: $stageHash" }
+          Remove-Item -Recurse -Force $env:NVPN_OUTPUT -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $env:NVPN_OUTPUT | Out-Null
+
+      - name: Sign native executable
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files: ${{ runner.temp }}\nvpn-b751-publish\nvpn.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          batch-size: 0
+          trace: true
+          cache-dependencies: false
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Build installer around signed executable
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:NVPN_RELEASE_VERSION = '4.1.5'
+          $env:NVPN_WINDOWS_PUBLISH_DIR = Join-Path $env:RUNNER_TEMP 'nvpn-b751-publish'
+          $env:NVPN_WINDOWS_INSTALLER_OUTPUT_DIR = $env:NVPN_OUTPUT
+          $env:NVPN_WINDOWS_INSTALLER_BASENAME = 'nostr-vpn-v4.1.5-windows-x64-setup'
+          $env:NVPN_PROJECT_ROOT = $env:GITHUB_WORKSPACE
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          & $iscc (Join-Path $env:GITHUB_WORKSPACE 'scripts\windows-installer.iss')
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+
+      - name: Sign installer
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files: C:\Users\dev\release-artifacts\nvpn-4.1.5-b751-signed\nostr-vpn-v4.1.5-windows-x64-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          batch-size: 0
+          trace: true
+          cache-dependencies: false
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify signatures and record receipt
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $native = Join-Path (Join-Path $env:RUNNER_TEMP 'nvpn-b751-publish') 'nvpn.exe'
+          $installer = Join-Path $env:NVPN_OUTPUT 'nostr-vpn-v4.1.5-windows-x64-setup.exe'
+          foreach ($path in @($native, $installer)) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne 'Valid') { throw "$path signature is $($signature.Status)" }
+          }
+          $original = Join-Path $env:NVPN_PUBLISH_DIR 'nvpn.exe'
+          $originalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $original).Hash.ToLowerInvariant()
+          if ($originalHash -ne $env:NVPN_SOURCE_SHA256) { throw "Original mutated: $originalHash" }
+          Copy-Item -Force $native (Join-Path $env:NVPN_OUTPUT 'nvpn.exe')
+          [ordered]@{
+            status = 'signed-and-verified'
+            candidate = 'b751cd1a9'
+            originalNativeSha256 = $originalHash
+            signedNativeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $native).Hash.ToLowerInvariant()
+            signedInstallerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $env:NVPN_OUTPUT 'receipt.json')
+
+      - name: Clean staging
+        if: always()
+        shell: powershell
+        run: Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP 'nvpn-b751-publish') -ErrorAction SilentlyContinue
