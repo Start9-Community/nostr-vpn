@@ -5,16 +5,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
 REMOTE="$ROOT/scripts/macos-release-mobile-join-remote.sh"
 HELPER="$ROOT/scripts/lib-macos-release-app-ownership.sh"
+DRIVER="$ROOT/scripts/desktop-manual-join-ax.swift"
 trap 'echo "macOS app ownership harness failed at line $LINENO" >&2' ERR
 
 bash -n "$HOST" "$REMOTE" "$HELPER"
-python3 - "$HOST" "$REMOTE" "$HELPER" <<'PY'
+python3 - "$HOST" "$REMOTE" "$HELPER" "$DRIVER" <<'PY'
 import pathlib
 import sys
 
 host = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 remote = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 helper = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+driver = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 
 for required in (
     "remote_app_ownership_armed=0",
@@ -39,6 +41,8 @@ for required in (
     "MACOS_RELEASE_APP_STATE_DIR",
     "MACOS_RELEASE_APP_INSTALLED_EXE",
     "MACOS_RELEASE_APP_GATE_EXE",
+    "MACOS_RELEASE_APP_SUPPORT_DIR",
+    "macos_release_app_support_acquire",
 ):
     if required not in remote:
         raise SystemExit(f"VM importer lacks app ownership contract: {required}")
@@ -50,6 +54,12 @@ if stage.index("macos_release_app_restore") > stage.index('rm -rf "$ARTIFACT_DIR
 launch = remote.split("launch_app() {", 1)[1].split("run_driver() {", 1)[0]
 if launch.index("macos_release_app_acquire") > launch.index('"$APP_EXE"'):
     raise SystemExit("VM importer launches before acquiring app ownership")
+if launch.index("macos_release_app_support_acquire") > launch.index('"$APP_EXE"'):
+    raise SystemExit("VM importer launches before isolating persisted app state")
+if launch.index("macos_release_app_acquire") > launch.index(
+    "macos_release_app_support_acquire"
+):
+    raise SystemExit("VM importer isolates state before stopping the prior app")
 cleanup_case = remote.split("  cleanup)", 1)[1].split("    ;;", 1)[0]
 if "macos_release_app_restore" not in cleanup_case:
     raise SystemExit("VM cleanup does not restore the displaced installed app")
@@ -61,6 +71,9 @@ for required in (
     "absent",
     "hidden",
     "visible",
+    "app-support-acquired",
+    "app-support-prior",
+    "macos_release_app_support_restore",
 ):
     if required not in helper:
         raise SystemExit(f"ownership helper lacks {required}")
@@ -78,6 +91,38 @@ if stop.count("macos_release_app_poll_pid_gone") < 2 or "wait " in stop:
     raise SystemExit("bounded stop helper does not poll twice without blocking wait")
 if "macos_release_stop_owned_child" not in helper:
     raise SystemExit("host remote child has no shared bounded stop helper")
+restore = helper.split("macos_release_app_restore() {", 1)[1]
+if restore.index("macos_release_app_support_restore") > restore.index(
+    "macos_release_app_launch_installed"
+):
+    raise SystemExit("prior app is relaunched before its state is restored")
+
+host_prefix = host.split("ROOT=", 1)[0]
+remote_prefix = remote.split("ROOT=", 1)[0]
+if "exec </dev/null" not in host_prefix:
+    raise SystemExit("host join orchestrator does not own stdin before children start")
+if "exec </dev/null" not in remote_prefix:
+    raise SystemExit("remote join orchestrator does not own stdin before children start")
+remote_function = host.split("remote() {", 1)[1].split("\n}", 1)[0]
+if "</dev/null" not in remote_function:
+    raise SystemExit("host SSH child can consume orchestration stdin")
+
+for required in (
+    "findUniqueEnabled",
+    "pressStableUniqueEnabled",
+    "stablePublicValue",
+):
+    if required not in driver:
+        raise SystemExit(f"macOS AX driver lacks stable target guard: {required}")
+create = driver.split('case "release-create-admin":', 1)[1].split(
+    'case "release-manual-join":', 1
+)[0]
+if "try pressStableUniqueEnabled(" not in create:
+    raise SystemExit("AX driver does not press a stable unique Link device target")
+if create.count("stablePublicValue") < 2:
+    raise SystemExit("AX driver does not stabilize both new-network public values")
+if "mouseEventSource" in driver or "mouseMoved" in driver or "leftMouse" in driver:
+    raise SystemExit("AX driver added a coordinate/mouse fallback")
 PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-app-owner.XXXXXX")"
@@ -89,6 +134,60 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+
+# A retained app-support directory must be moved opaquely out of the way for
+# the gate, then restored byte-for-byte while all gate-created state disappears.
+(
+  # shellcheck disable=SC1090
+  source "$HELPER"
+  MACOS_RELEASE_APP_STATE_DIR="$tmp/support-owner"
+  MACOS_RELEASE_APP_SUPPORT_DIR="$tmp/app-support"
+  mkdir -p "$MACOS_RELEASE_APP_SUPPORT_DIR"
+  printf 'retained\n' >"$MACOS_RELEASE_APP_SUPPORT_DIR/original"
+  macos_release_app_support_acquire
+  [[ ! -e "$MACOS_RELEASE_APP_SUPPORT_DIR" ]]
+  [[ -f "$MACOS_RELEASE_APP_STATE_DIR/app-support-prior/original" ]]
+  mkdir -p "$MACOS_RELEASE_APP_SUPPORT_DIR"
+  printf 'gate\n' >"$MACOS_RELEASE_APP_SUPPORT_DIR/gate-created"
+  macos_release_app_support_restore
+  [[ "$(<"$MACOS_RELEASE_APP_SUPPORT_DIR/original")" == retained ]]
+  [[ ! -e "$MACOS_RELEASE_APP_SUPPORT_DIR/gate-created" ]]
+  [[ ! -e "$MACOS_RELEASE_APP_STATE_DIR/app-support-acquired" ]]
+)
+
+# A machine with no prior state must return to no state after cleanup.
+(
+  # shellcheck disable=SC1090
+  source "$HELPER"
+  MACOS_RELEASE_APP_STATE_DIR="$tmp/absent-support-owner"
+  MACOS_RELEASE_APP_SUPPORT_DIR="$tmp/absent-app-support"
+  macos_release_app_support_acquire
+  mkdir -p "$MACOS_RELEASE_APP_SUPPORT_DIR"
+  : >"$MACOS_RELEASE_APP_SUPPORT_DIR/gate-created"
+  macos_release_app_support_restore
+  [[ ! -e "$MACOS_RELEASE_APP_SUPPORT_DIR" ]]
+  [[ ! -e "$MACOS_RELEASE_APP_STATE_DIR/app-support-acquired" ]]
+)
+
+# Restoration fails closed and retains its recovery metadata when the opaque
+# prior-state backup is unexpectedly missing.
+(
+  # shellcheck disable=SC1090
+  source "$HELPER"
+  MACOS_RELEASE_APP_STATE_DIR="$tmp/broken-support-owner"
+  MACOS_RELEASE_APP_SUPPORT_DIR="$tmp/broken-app-support"
+  mkdir -p "$MACOS_RELEASE_APP_SUPPORT_DIR"
+  : >"$MACOS_RELEASE_APP_SUPPORT_DIR/original"
+  macos_release_app_support_acquire
+  rm -rf "$MACOS_RELEASE_APP_STATE_DIR/app-support-prior"
+  mkdir -p "$MACOS_RELEASE_APP_SUPPORT_DIR"
+  : >"$MACOS_RELEASE_APP_SUPPORT_DIR/gate-created"
+  if macos_release_app_support_restore >/dev/null 2>&1; then
+    echo "app-support cleanup accepted a missing retained-state backup" >&2
+    exit 1
+  fi
+  [[ -f "$MACOS_RELEASE_APP_STATE_DIR/app-support-acquired" ]]
+)
 
 python3 - "$HOST" "$tmp/host-cleanup.sh" <<'PY'
 import pathlib
