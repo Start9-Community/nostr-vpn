@@ -725,14 +725,14 @@ for selector in (
         raise SystemExit(f"iOS shipped UI lacks {selector}")
     if selector not in macos_devices:
         raise SystemExit(f"macOS shipped UI lacks {selector}")
-for source, label, interpolation in (
-    (android_components, "Android", "${participant.npub}"),
-    (ios_participants, "iOS", "\\(participant.npub)"),
-    (macos_devices, "macOS", "\\(participant.npub)"),
+for source, label, interpolation, accepted_flag in (
+    (android_components, "Android", "${participant.npub}", "participant.rosterAccepted"),
+    (ios_participants, "iOS", "\\(participant.npub)", "participant.rosterAccepted"),
+    (macos_devices, "macOS", "\\(participant.npub)", "participant.rosterAccepted"),
 ):
     if "roster-participant-" not in source or interpolation not in source:
         raise SystemExit(f"{label} Release UI lacks exact roster participant identity")
-    if "participant.state == \"pending\"" not in source:
+    if accepted_flag not in source:
         raise SystemExit(f"{label} Release UI does not distinguish pending from accepted rows")
     if "accepted" not in source or "pending" not in source:
         raise SystemExit(f"{label} Release UI lacks explicit accepted/pending selectors")

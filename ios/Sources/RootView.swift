@@ -65,7 +65,10 @@ struct RootView: View {
             NavigationStack {
                 AddNetworkPage(
                     model: model,
-                    onCreated: { addNetworkPresented = false },
+                    onCreated: {
+                        addNetworkPresented = false
+                        selectedTab = .devices
+                    },
                     onReviewVpnDisclosure: {
                         presentVpnDisclosure(startVpnAfterAccept: true)
                     }
@@ -260,7 +263,7 @@ private struct AddNetworkPage: View {
                     CreateNetworkCard(model: model, onCreated: onCreated)
                 case .join:
                     AddNetworkBackButton(mode: $mode)
-                    JoinNetworkCard(model: model)
+                    JoinNetworkCard(model: model, onCreated: onCreated)
                     AdvertiseJoinRequestCard(model: model)
                 }
             }

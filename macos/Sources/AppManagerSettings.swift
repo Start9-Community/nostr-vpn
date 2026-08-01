@@ -144,21 +144,34 @@ extension AppManager {
         dispatch(.updateSettings(patch: settingsPatch(exitNodeLeakProtection: enabled)), status: "Saving exit protection")
     }
 
-    func addParticipant(networkId: String, npub: String, alias: String? = nil) {
+    func addParticipant(
+        networkId: String,
+        npub: String,
+        alias: String? = nil,
+        completion: ((Bool) -> Void)? = nil
+    ) {
         let trimmed = npub.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             let trimmedAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
             dispatch(
                 .addParticipant(networkId: networkId, npub: trimmed, alias: trimmedAlias?.isEmpty == false ? trimmedAlias : nil),
-                status: "Adding participant"
+                status: "Adding participant",
+                completion: completion
             )
+        } else {
+            completion?(false)
         }
     }
 
-    func manualAddNetwork(adminNpub: String, meshNetworkId: String) {
+    func manualAddNetwork(
+        adminNpub: String,
+        meshNetworkId: String,
+        completion: ((Bool) -> Void)? = nil
+    ) {
         dispatch(
             .manualAddNetwork(adminNpub: adminNpub, meshNetworkId: meshNetworkId),
-            status: "Adding network"
+            status: "Adding network",
+            completion: completion
         )
     }
 

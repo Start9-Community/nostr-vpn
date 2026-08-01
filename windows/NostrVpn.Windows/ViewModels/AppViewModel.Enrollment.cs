@@ -136,16 +136,26 @@ public sealed partial class AppViewModel
         }
     }
 
-    private Task AddParticipantAsync()
+    private async Task AddParticipantAsync()
     {
         var network = ActiveNetwork;
         if (network?.LocalIsAdmin != true)
         {
-            return Task.CompletedTask;
+            return;
         }
-        return DispatchAsync(
-            NativeActions.AddParticipant(network.Id, ParticipantInput.Trim(), string.IsNullOrWhiteSpace(ParticipantAliasInput) ? null : ParticipantAliasInput.Trim()),
+        var participant = ParticipantInput.Trim();
+        var added = await DispatchAsync(
+            NativeActions.AddParticipant(network.Id, participant, string.IsNullOrWhiteSpace(ParticipantAliasInput) ? null : ParticipantAliasInput.Trim()),
             "Adding device");
+        if (added && ActiveNetwork?.Participants.Any(item =>
+                item.RosterAccepted
+                && string.Equals(item.Npub, participant, StringComparison.Ordinal)) == true)
+        {
+            ParticipantInput = "";
+            ParticipantAliasInput = "";
+            Page = AppPage.Devices;
+            Notice = "Device added";
+        }
     }
 
     private Task AddNetworkAsync()

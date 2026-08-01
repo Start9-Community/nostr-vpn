@@ -255,9 +255,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func dispatch(_ action: [String: Any], status: String = "") {
+    @discardableResult
+    func dispatch(_ action: [String: Any], status: String = "") -> Bool {
         guard !actionInFlight else {
-            return
+            return false
         }
         let actionType = action["type"] as? String ?? ""
         if AppStorePolicy.blocks(action) {
@@ -265,7 +266,7 @@ final class AppModel: ObservableObject {
             unavailable.error = "Cashu wallet and paid exit-node features are unavailable in the iOS build."
             state = unavailable
             statusMessage = unavailable.error
-            return
+            return false
         }
         actionInFlight = true
         statusMessage = status
@@ -295,6 +296,7 @@ final class AppModel: ObservableObject {
                 && !state.joinRequestQrCodeOrLink.isEmpty
             schedulePacketTunnelConfigSync(reason: actionType, force: force)
         }
+        return state.error.isEmpty
     }
 
     private struct AppStoreCompatibleStateResult {

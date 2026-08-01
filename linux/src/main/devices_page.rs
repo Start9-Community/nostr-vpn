@@ -219,7 +219,13 @@ fn scan_join_request_qr(app: &AppRef, button: &gtk::Button) {
     qr_scan::open_scanner(
         parent.as_ref(),
         move |request| {
-            dispatch(&app_for_result, NativeAppAction::ImportJoinRequest { request });
+            let state = dispatch(
+                &app_for_result,
+                NativeAppAction::ImportJoinRequest { request },
+            );
+            if state.error.trim().is_empty() {
+                set_page(&app_for_result, Page::Devices);
+            }
         },
         move |error| set_notice(&app_for_error, error),
     );

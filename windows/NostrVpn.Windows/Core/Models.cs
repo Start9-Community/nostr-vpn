@@ -458,6 +458,7 @@ public sealed class NativeParticipantState
     public string MagicDnsName { get; set; } = "";
     public string TunnelIp { get; set; } = "";
     public bool IsAdmin { get; set; }
+    public bool RosterAccepted { get; set; }
     public bool Reachable { get; set; }
     public ulong TxBytes { get; set; }
     public ulong RxBytes { get; set; }
@@ -490,10 +491,7 @@ public sealed class NativeParticipantState
     public string SelectionKey => string.IsNullOrWhiteSpace(PubkeyHex) ? Npub : PubkeyHex;
     [System.Text.Json.Serialization.JsonIgnore]
     public string AcceptedRosterAutomationId =>
-        string.Equals(StatusText, "waiting for admin", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(StatusText, "join request sent", StringComparison.OrdinalIgnoreCase)
-            ? ""
-            : $"RosterParticipantAccepted-{Npub}";
+        RosterAccepted ? $"RosterParticipantAccepted-{Npub}" : "";
     public string DisplayName => FirstNonEmpty(
         MagicDnsName,
         Alias,

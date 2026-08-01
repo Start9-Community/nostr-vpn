@@ -90,7 +90,7 @@ struct ParticipantRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(
-            "roster-participant-\(participant.state == "pending" ? "pending" : "accepted")-\(participant.npub)"
+            "roster-participant-\(participant.rosterAccepted ? "accepted" : "pending")-\(participant.npub)"
         )
         .sheet(isPresented: $detailPresented) {
             NavigationStack {
@@ -300,7 +300,7 @@ struct DeviceDetailSheet: View {
 
 struct AddDeviceCard: View {
     let network: NetworkState
-    let add: (String, String) -> Void
+    let add: (String, String) -> Bool
     @State private var deviceId = ""
     @State private var alias = ""
 
@@ -329,9 +329,10 @@ struct AddDeviceCard: View {
             TextField("Name", text: $alias)
                 .textFieldStyle(.roundedBorder)
             Button("Add") {
-                add(trimmedDeviceId, alias)
-                deviceId = ""
-                alias = ""
+                if add(trimmedDeviceId, alias) {
+                    deviceId = ""
+                    alias = ""
+                }
             }
             .buttonStyle(.borderedProminent)
             .disabled(trimmedDeviceId.isEmpty || deviceIdInvalid)

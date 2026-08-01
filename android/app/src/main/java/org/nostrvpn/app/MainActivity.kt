@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
             var showQrScanner by remember { mutableStateOf(false) }
             var qrScanNetworkId by remember { mutableStateOf("") }
             var pendingScannedJoinRequest by remember { mutableStateOf<String?>(null) }
+            var deviceAddCompletionNonce by remember { mutableStateOf(0L) }
             var observedTunnelConfigJson by remember {
                 mutableStateOf(core.mobileTunnelConfigJson())
             }
@@ -178,13 +179,13 @@ class MainActivity : ComponentActivity() {
                 return TunnelRefreshPolicy.requiresTunnelRefresh(type, patchKeys)
             }
 
-            fun dispatchNow(action: JSONObject) {
+            fun dispatchNow(action: JSONObject): Boolean {
                 val actionType = action.optString("type")
                 if (
                     actionType == "connect_vpn" &&
                     vpnStartBlockedByRetiredPackage()
                 ) {
-                    return
+                    return false
                 }
                 val wasEnabled = state.vpnEnabled
                 var actionSucceeded = false
@@ -196,7 +197,7 @@ class MainActivity : ComponentActivity() {
                     showAndroidError(error, "Android action failed")
                 }
                 if (!actionSucceeded) {
-                    return
+                    return false
                 }
                 when (
                     TunnelServiceCommandPolicy.commandAfterAction(
@@ -215,6 +216,7 @@ class MainActivity : ComponentActivity() {
                     }
                     TunnelServiceCommand.NONE -> Unit
                 }
+                return true
             }
             fun requiredLocalNetworkPermission(): String? =
                 when {
@@ -260,6 +262,7 @@ class MainActivity : ComponentActivity() {
                     dispatchNow(action)
                 }
             }
+            val dispatchSucceeded: (JSONObject) -> Boolean = { action -> dispatchNow(action) }
             val wireGuardConfigFileLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument(),
             ) { uri ->
@@ -366,6 +369,8 @@ class MainActivity : ComponentActivity() {
                     qrJson = { text -> core.qrMatrix(text) },
                     scanDeviceQr = { networkId -> requestDeviceQrScan(networkId) },
                     dispatch = dispatch,
+                    dispatchSucceeded = dispatchSucceeded,
+                    deviceAddCompletionNonce = deviceAddCompletionNonce,
                     toggleVpn = {
                         dispatch(nextVpnToggleAction(state.vpnEnabled))
                     },
@@ -387,13 +392,15 @@ class MainActivity : ComponentActivity() {
                                     "Not a Nostr VPN joiner QR."
                                 } else {
                                     showQrScanner = false
-                                    dispatch(
+                                    if (dispatchSucceeded(
                                         NativeActions.addParticipant(
                                             qrScanNetworkId,
                                             scanned.deviceId,
                                             scanned.alias,
                                         ),
-                                    )
+                                    )) {
+                                        deviceAddCompletionNonce += 1
+                                    }
                                     null
                                 }
                             }
@@ -413,8 +420,10 @@ class MainActivity : ComponentActivity() {
                         confirmButton = {
                             Button(
                                 onClick = {
-                                    dispatch(NativeActions.importJoinRequest(request))
-                                    pendingScannedJoinRequest = null
+                                    if (dispatchSucceeded(NativeActions.importJoinRequest(request))) {
+                                        pendingScannedJoinRequest = null
+                                        deviceAddCompletionNonce += 1
+                                    }
                                 },
                                 modifier = Modifier.mobileUiSelector(
                                     id = "join-request-confirm-add",

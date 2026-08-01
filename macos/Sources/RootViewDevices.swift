@@ -233,7 +233,7 @@ extension RootView {
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier(
-            "roster-participant-\(participant.state == "pending" ? "pending" : "accepted")-\(participant.npub)"
+            "roster-participant-\(participant.rosterAccepted ? "accepted" : "pending")-\(participant.npub)"
         )
         .buttonStyle(.plain)
     }
@@ -599,11 +599,13 @@ extension RootView {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("manual-join-network-id")
             Button("Add manually") {
-                manager.manualAddNetwork(adminNpub: admin, meshNetworkId: mesh)
-                manualJoinAdminId = ""
-                manualJoinMeshId = ""
-                manualJoinExpanded = false
-                finishCreateNetwork()
+                manager.manualAddNetwork(adminNpub: admin, meshNetworkId: mesh) { added in
+                    guard added else { return }
+                    manualJoinAdminId = ""
+                    manualJoinMeshId = ""
+                    manualJoinExpanded = false
+                    finishCreateNetwork()
+                }
             }
             .accessibilityIdentifier("manual-join-submit")
             .disabled(admin.isEmpty || mesh.isEmpty || invalid || manager.actionInFlight)
@@ -645,9 +647,13 @@ extension RootView {
                     networkId: network.id,
                     npub: deviceId,
                     alias: manualJoinDeviceName
-                )
-                manualJoinDeviceId = ""
-                manualJoinDeviceName = ""
+                ) { added in
+                    guard added else { return }
+                    manualJoinDeviceId = ""
+                    manualJoinDeviceName = ""
+                    addDevicePresented = false
+                    selectedSidebarItem = .devices
+                }
             }
             .accessibilityIdentifier("manual-join-admin-submit")
             .disabled(deviceId.isEmpty || invalid || manager.actionInFlight)

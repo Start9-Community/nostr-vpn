@@ -125,6 +125,8 @@ internal fun NostrVpnApp(
     qrJson: (String) -> JSONObject,
     scanDeviceQr: (String) -> Unit,
     dispatch: (JSONObject) -> Unit,
+    dispatchSucceeded: (JSONObject) -> Boolean,
+    deviceAddCompletionNonce: Long,
     toggleVpn: () -> Unit,
     selfUpdateState: AndroidSelfUpdateState,
     selfUpdateActions: SelfUpdateActions,
@@ -148,6 +150,12 @@ internal fun NostrVpnApp(
     }
     LaunchedEffect(state.paidRouteMarket.supported) {
         if (!page.visibleIn(state)) {
+            page = Page.Devices
+        }
+    }
+    LaunchedEffect(deviceAddCompletionNonce) {
+        if (deviceAddCompletionNonce > 0) {
+            showAddDevice = false
             page = Page.Devices
         }
     }
@@ -214,7 +222,7 @@ internal fun NostrVpnApp(
                 item { Notice(state.error) }
             }
             if (network == null) {
-                addNetworkBody(state, qrJson, dispatch, showWelcomeHeader = true)
+                addNetworkBody(state, qrJson, dispatchSucceeded, showWelcomeHeader = true)
             } else {
                 when (effectivePage) {
                     Page.Devices -> devicesPage(
@@ -237,6 +245,7 @@ internal fun NostrVpnApp(
             network = network,
             scanDeviceQr = scanDeviceQr,
             dispatch = dispatch,
+            dispatchSucceeded = dispatchSucceeded,
             onDismiss = { showAddDevice = false },
         )
     }
@@ -244,7 +253,7 @@ internal fun NostrVpnApp(
         AddNetworkDialog(
             state = state,
             qrJson = qrJson,
-            dispatch = dispatch,
+            dispatchSucceeded = dispatchSucceeded,
             onDismiss = { showAddNetwork = false },
             onCreated = {
                 // Land on the new network's Devices view: dismiss the

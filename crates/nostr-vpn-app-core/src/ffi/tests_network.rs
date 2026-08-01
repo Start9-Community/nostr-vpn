@@ -301,6 +301,41 @@
             "8d4f34f5425bc50e"
         );
 
+        joiner.config = persisted_joiner;
+        joiner.vpn_enabled = true;
+        joiner.vpn_active = true;
+        joiner.daemon_state = Some(DaemonRuntimeState {
+            vpn_enabled: true,
+            vpn_active: true,
+            expected_peer_count: 1,
+            connected_peer_count: 0,
+            mesh_ready: false,
+            peers: vec![DaemonPeerState {
+                participant_pubkey: admin_pubkey.clone(),
+                last_fips_seen_at: Some(unix_timestamp()),
+                reachable: false,
+                ..DaemonPeerState::default()
+            }],
+            ..DaemonRuntimeState::default()
+        });
+        let reloaded_admin = joiner
+            .state()
+            .networks
+            .into_iter()
+            .find(|network| network.network_id == "8d4f34f5425bc50e")
+            .and_then(|network| {
+                network
+                    .participants
+                    .into_iter()
+                    .find(|participant| participant.pubkey_hex == admin_pubkey)
+            })
+            .expect("persisted accepted admin participant");
+        assert_eq!(reloaded_admin.state, "pending");
+        assert!(
+            reloaded_admin.roster_accepted,
+            "transient FIPS reconnection must not undo durable signed-roster acceptance"
+        );
+
         let _ = fs::remove_dir_all(&admin_dir);
         let _ = fs::remove_dir_all(&joiner_dir);
     }
@@ -533,6 +568,7 @@ exit 0
         assert!(admin.reachable);
         assert_eq!(admin.state, "pending");
         assert_eq!(admin.status_text, "join request sent");
+        assert!(!admin.roster_accepted);
     }
 
     #[test]

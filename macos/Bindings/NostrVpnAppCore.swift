@@ -4617,6 +4617,7 @@ public struct NativeParticipantState {
     public var magicDnsName: String
     public var tunnelIp: String
     public var isAdmin: Bool
+    public var rosterAccepted: Bool
     public var reachable: Bool
     public var txBytes: UInt64
     public var rxBytes: UInt64
@@ -4646,7 +4647,7 @@ public struct NativeParticipantState {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(npub: String, pubkeyHex: String, alias: String, magicDnsAlias: String, magicDnsName: String, tunnelIp: String, isAdmin: Bool, reachable: Bool, txBytes: UInt64, rxBytes: UInt64, advertisedRoutes: [String], offersExitNode: Bool, fipsEndpointNpub: String, fipsEndpointHints: [String], fipsTransportAddr: String, fipsTransportType: String, fipsSrttMs: UInt64, fipsSrttAgeMs: UInt64, fipsPacketsSent: UInt64, fipsPacketsRecv: UInt64, fipsBytesSent: UInt64, fipsBytesRecv: UInt64, fipsDirectProbePending: Bool, fipsDirectProbeAfterMs: UInt64, fipsDirectProbeRetryCount: UInt32, fipsDirectProbeAutoReconnect: Bool, fipsDirectProbeExpiresAtMs: UInt64, state: String, meshState: String, statusText: String, lastFipsControlSeenText: String, lastFipsDataSeenText: String, lastSeenText: String) {
+    public init(npub: String, pubkeyHex: String, alias: String, magicDnsAlias: String, magicDnsName: String, tunnelIp: String, isAdmin: Bool, rosterAccepted: Bool, reachable: Bool, txBytes: UInt64, rxBytes: UInt64, advertisedRoutes: [String], offersExitNode: Bool, fipsEndpointNpub: String, fipsEndpointHints: [String], fipsTransportAddr: String, fipsTransportType: String, fipsSrttMs: UInt64, fipsSrttAgeMs: UInt64, fipsPacketsSent: UInt64, fipsPacketsRecv: UInt64, fipsBytesSent: UInt64, fipsBytesRecv: UInt64, fipsDirectProbePending: Bool, fipsDirectProbeAfterMs: UInt64, fipsDirectProbeRetryCount: UInt32, fipsDirectProbeAutoReconnect: Bool, fipsDirectProbeExpiresAtMs: UInt64, state: String, meshState: String, statusText: String, lastFipsControlSeenText: String, lastFipsDataSeenText: String, lastSeenText: String) {
         self.npub = npub
         self.pubkeyHex = pubkeyHex
         self.alias = alias
@@ -4654,6 +4655,7 @@ public struct NativeParticipantState {
         self.magicDnsName = magicDnsName
         self.tunnelIp = tunnelIp
         self.isAdmin = isAdmin
+        self.rosterAccepted = rosterAccepted
         self.reachable = reachable
         self.txBytes = txBytes
         self.rxBytes = rxBytes
@@ -4709,6 +4711,9 @@ extension NativeParticipantState: Equatable, Hashable {
             return false
         }
         if lhs.isAdmin != rhs.isAdmin {
+            return false
+        }
+        if lhs.rosterAccepted != rhs.rosterAccepted {
             return false
         }
         if lhs.reachable != rhs.reachable {
@@ -4800,6 +4805,7 @@ extension NativeParticipantState: Equatable, Hashable {
         hasher.combine(magicDnsName)
         hasher.combine(tunnelIp)
         hasher.combine(isAdmin)
+        hasher.combine(rosterAccepted)
         hasher.combine(reachable)
         hasher.combine(txBytes)
         hasher.combine(rxBytes)
@@ -4845,6 +4851,7 @@ public struct FfiConverterTypeNativeParticipantState: FfiConverterRustBuffer {
                 magicDnsName: FfiConverterString.read(from: &buf),
                 tunnelIp: FfiConverterString.read(from: &buf),
                 isAdmin: FfiConverterBool.read(from: &buf),
+                rosterAccepted: FfiConverterBool.read(from: &buf),
                 reachable: FfiConverterBool.read(from: &buf),
                 txBytes: FfiConverterUInt64.read(from: &buf),
                 rxBytes: FfiConverterUInt64.read(from: &buf),
@@ -4882,6 +4889,7 @@ public struct FfiConverterTypeNativeParticipantState: FfiConverterRustBuffer {
         FfiConverterString.write(value.magicDnsName, into: &buf)
         FfiConverterString.write(value.tunnelIp, into: &buf)
         FfiConverterBool.write(value.isAdmin, into: &buf)
+        FfiConverterBool.write(value.rosterAccepted, into: &buf)
         FfiConverterBool.write(value.reachable, into: &buf)
         FfiConverterUInt64.write(value.txBytes, into: &buf)
         FfiConverterUInt64.write(value.rxBytes, into: &buf)

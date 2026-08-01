@@ -886,12 +886,13 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         _core.Dispose();
     }
 
-    private async Task DispatchAsync(string actionJson, string status)
+    private async Task<bool> DispatchAsync(string actionJson, string status)
     {
         if (ActionInFlight)
         {
-            return;
+            return false;
         }
+        var succeeded = false;
         ActionInFlight = true;
         // Defer the in-progress notice so fast actions (broadcast/listen toggle,
         // copy, etc.) never flash the notice card. The card collapses when empty,
@@ -915,6 +916,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
             noticeCts.Cancel();
             ApplyState(state, syncDrafts: true);
             Notice = string.IsNullOrWhiteSpace(state.Error) ? "" : state.Error;
+            succeeded = string.IsNullOrWhiteSpace(state.Error);
         }
         catch (Exception error)
         {
@@ -928,6 +930,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         {
             ActionInFlight = false;
         }
+        return succeeded;
     }
 
 

@@ -178,8 +178,9 @@ impl NativeAppRuntime {
             })
         });
         let is_local = participant == own_pubkey_hex;
+        let roster_accepted = !self.network_access_pending(network, own_pubkey_hex);
         let reachable = vpn_active && (is_local || daemon_peer.is_some_and(|peer| peer.reachable));
-        let access_pending = self.network_access_pending(network, own_pubkey_hex) && !is_local;
+        let access_pending = !roster_accepted && !is_local;
         let assigned_magic_dns_alias = self.config.peer_alias(participant).unwrap_or_default();
         let magic_dns_alias = if assigned_magic_dns_alias.is_empty() && is_local {
             self.config.self_magic_dns_label().unwrap_or_default()
@@ -243,6 +244,7 @@ impl NativeAppRuntime {
             magic_dns_name,
             tunnel_ip,
             is_admin: network.admins.iter().any(|admin| admin == participant),
+            roster_accepted,
             reachable,
             tx_bytes: daemon_peer.map_or(0, |peer| peer.tx_bytes),
             rx_bytes: daemon_peer.map_or(0, |peer| peer.rx_bytes),

@@ -103,13 +103,15 @@ mod tests {
     fn accepted_roster_selector_is_absent_while_manual_join_is_pending() {
         let pending = NativeParticipantState {
             npub: "npub1pending".to_string(),
-            state: "pending".to_string(),
+            roster_accepted: false,
+            state: "online".to_string(),
             ..NativeParticipantState::default()
         };
         assert_eq!(accepted_roster_accessibility_label(&pending), None);
 
         let accepted = NativeParticipantState {
-            state: "offline".to_string(),
+            roster_accepted: true,
+            state: "pending".to_string(),
             ..pending
         };
         assert_eq!(
@@ -223,7 +225,7 @@ fn participant_key(participant: &NativeParticipantState) -> String {
 }
 
 fn accepted_roster_accessibility_label(participant: &NativeParticipantState) -> Option<String> {
-    (!participant.npub.trim().is_empty() && !participant.state.eq_ignore_ascii_case("pending"))
+    (!participant.npub.trim().is_empty() && participant.roster_accepted)
         .then(|| format!("nvpn-roster-participant-accepted-{}", participant.npub))
 }
 

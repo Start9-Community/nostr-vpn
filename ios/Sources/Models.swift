@@ -250,6 +250,7 @@ struct ParticipantState: Decodable, Identifiable {
     var magicDnsName = ""
     var tunnelIp = ""
     var isAdmin = false
+    var rosterAccepted = false
     var reachable = false
     var offersExitNode = false
     var fipsEndpointNpub = ""
@@ -282,7 +283,7 @@ struct ParticipantState: Decodable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case npub, pubkeyHex, alias, magicDnsAlias, magicDnsName, tunnelIp
-        case isAdmin, reachable, offersExitNode
+        case isAdmin, rosterAccepted, reachable, offersExitNode
         case fipsEndpointNpub, fipsEndpointHints, fipsTransportAddr, fipsTransportType, fipsSrttMs
         case fipsSrttAgeMs
         case fipsPacketsSent, fipsPacketsRecv, fipsBytesSent, fipsBytesRecv
@@ -303,6 +304,7 @@ struct ParticipantState: Decodable, Identifiable {
         magicDnsName = container.string(.magicDnsName)
         tunnelIp = container.string(.tunnelIp)
         isAdmin = container.bool(.isAdmin)
+        rosterAccepted = container.bool(.rosterAccepted)
         reachable = container.bool(.reachable)
         offersExitNode = container.bool(.offersExitNode)
         fipsEndpointNpub = container.string(.fipsEndpointNpub)

@@ -260,16 +260,15 @@ final class AppManager: ObservableObject {
         _ action: NativeAppAction,
         status: String = "",
         successStatus: String = "",
-        settleService: Bool = false
+        settleService: Bool = false,
+        completion: ((Bool) -> Void)? = nil
     ) {
         guard !actionInFlight else {
+            completion?(false)
             return
         }
         guard let app else {
-            actionStatus = successStatus
-            if !successStatus.isEmpty {
-                clearActionStatus(after: 3)
-            }
+            completion?(false)
             return
         }
         actionStatusClearTask?.cancel()
@@ -292,6 +291,7 @@ final class AppManager: ObservableObject {
                 if settleService {
                     self.startServiceSettlementPolling()
                 }
+                completion?(nextState.error.isEmpty)
             }
         }
     }

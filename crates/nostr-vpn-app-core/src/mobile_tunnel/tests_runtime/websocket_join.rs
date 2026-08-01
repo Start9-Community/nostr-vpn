@@ -435,6 +435,12 @@
         joined_app
             .save(&guest_config_path)
             .expect("host durably persists joined guest config");
+        let reloaded_joined_app =
+            AppConfig::load(&guest_config_path).expect("reload transit-delivered signed roster");
+        assert!(
+            reloaded_joined_app.active_network_has_confirmed_local_identity(),
+            "npub-only transit delivery must durably confirm the joining identity"
+        );
         if receipt_failure == JoinReceiptFailure::AcrossRestart {
             guest
                 .endpoint

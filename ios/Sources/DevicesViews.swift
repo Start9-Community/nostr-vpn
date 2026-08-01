@@ -210,6 +210,7 @@ struct CreateNetworkCard: View {
 
 struct JoinNetworkCard: View {
     @ObservedObject var model: AppModel
+    var onCreated: (() -> Void)? = nil
     @State private var manualExpanded = false
     @State private var manualAdminId = ""
     @State private var manualNetworkId = ""
@@ -290,16 +291,19 @@ struct JoinNetworkCard: View {
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("manual-join-network-id")
                     Button("Add manually") {
-                        model.dispatch(
+                        let added = model.dispatch(
                             NativeActions.manualAddNetwork(
                                 adminNpub: manualAdminId.trimmingCharacters(in: .whitespacesAndNewlines),
                                 meshNetworkId: normalizeNetworkIdInput(manualNetworkId)
                             ),
                             status: "Adding network"
                         )
-                        manualAdminId = ""
-                        manualNetworkId = ""
-                        manualExpanded = false
+                        if added {
+                            manualAdminId = ""
+                            manualNetworkId = ""
+                            manualExpanded = false
+                            onCreated?()
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("manual-join-submit")
@@ -332,6 +336,9 @@ struct AddDeviceSheet: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
+                if !model.state.error.isEmpty {
+                    NoticeCard(text: model.state.error)
+                }
                 ScanJoinerDeviceCard(
                     requestInput: $joinRequestInput,
                     scanError: scanError,
@@ -348,10 +355,14 @@ struct AddDeviceSheet: View {
                 NearbyCard(model: model)
                 ManualPairingInfoCard(model: model, network: network)
                 AddDeviceCard(network: network) { npub, alias in
-                    model.dispatch(
+                    let added = model.dispatch(
                         NativeActions.addParticipant(networkId: network.id, npub: npub, alias: alias),
                         status: "Adding device"
                     )
+                    if added {
+                        dismiss()
+                    }
+                    return added
                 }
             }
             .padding()
@@ -369,10 +380,11 @@ struct AddDeviceSheet: View {
                 pendingJoinRequest = nil
             }
             Button("Add") {
-                model.dispatch(NativeActions.importJoinRequest(pending.request), status: "Adding device")
-                joinRequestInput = ""
-                pendingJoinRequest = nil
-                dismiss()
+                if model.dispatch(NativeActions.importJoinRequest(pending.request), status: "Adding device") {
+                    joinRequestInput = ""
+                    pendingJoinRequest = nil
+                    dismiss()
+                }
             }
             .accessibilityIdentifier("join-request-confirm-add")
         } message: { pending in

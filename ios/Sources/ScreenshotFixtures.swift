@@ -249,6 +249,7 @@ enum ScreenshotFixtures {
         participant.magicDnsName = magicDns
         participant.tunnelIp = ip
         participant.isAdmin = isAdmin
+        participant.rosterAccepted = true
         participant.reachable = reachable
         participant.offersExitNode = offersExitNode
         participant.fipsEndpointNpub = fakeNpub("s")

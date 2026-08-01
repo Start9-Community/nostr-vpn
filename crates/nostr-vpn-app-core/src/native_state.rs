@@ -13,6 +13,7 @@ pub struct NativeParticipantState {
     pub magic_dns_name: String,
     pub tunnel_ip: String,
     pub is_admin: bool,
+    pub roster_accepted: bool,
     pub reachable: bool,
     pub tx_bytes: u64,
     pub rx_bytes: u64,

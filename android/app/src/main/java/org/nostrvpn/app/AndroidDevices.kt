@@ -197,7 +197,7 @@ private fun deviceCountText(network: NetworkState): String {
 private fun NetworkSetupCard(
     state: AppState,
     qrJson: (String) -> JSONObject,
-    dispatch: (JSONObject) -> Unit,
+    dispatchSucceeded: (JSONObject) -> Boolean,
     onCreated: (() -> Unit)? = null,
     showWelcomeHeader: Boolean = false,
 ) {
@@ -290,9 +290,10 @@ private fun NetworkSetupCard(
                             )
                             Button(
                                 onClick = {
-                                    dispatch(NativeActions.addNetwork(networkName.trim().ifBlank { "My Network" }))
-                                    networkName = "My Network"
-                                    onCreated?.invoke()
+                                    if (dispatchSucceeded(NativeActions.addNetwork(networkName.trim().ifBlank { "My Network" }))) {
+                                        networkName = "My Network"
+                                        onCreated?.invoke()
+                                    }
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -381,11 +382,12 @@ private fun NetworkSetupCard(
                                 Button(
                                     enabled = admin.isNotEmpty() && mesh.isNotEmpty() && !adminInvalid,
                                     onClick = {
-                                        dispatch(NativeActions.manualAddNetwork(admin, mesh))
-                                        manualAdminId = ""
-                                        manualNetworkId = ""
-                                        manualExpanded = false
-                                        onCreated?.invoke()
+                                        if (dispatchSucceeded(NativeActions.manualAddNetwork(admin, mesh))) {
+                                            manualAdminId = ""
+                                            manualNetworkId = ""
+                                            manualExpanded = false
+                                            onCreated?.invoke()
+                                        }
                                     },
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -399,7 +401,10 @@ private fun NetworkSetupCard(
                             }
 
                         }
-                        AdvertiseJoinRequestCard(state, dispatch)
+                        AdvertiseJoinRequestCard(state) { action ->
+                            dispatchSucceeded(action)
+                            Unit
+                        }
                     }
                 }
             }
@@ -456,17 +461,17 @@ private fun SetupChoiceCard(
 internal fun androidx.compose.foundation.lazy.LazyListScope.addNetworkBody(
     state: AppState,
     qrJson: (String) -> JSONObject,
-    dispatch: (JSONObject) -> Unit,
+    dispatchSucceeded: (JSONObject) -> Boolean,
     showWelcomeHeader: Boolean = false,
 ) {
-    item { NetworkSetupCard(state, qrJson, dispatch, showWelcomeHeader = showWelcomeHeader) }
+    item { NetworkSetupCard(state, qrJson, dispatchSucceeded, showWelcomeHeader = showWelcomeHeader) }
 }
 
 @Composable
 internal fun AddNetworkDialog(
     state: AppState,
     qrJson: (String) -> JSONObject,
-    dispatch: (JSONObject) -> Unit,
+    dispatchSucceeded: (JSONObject) -> Boolean,
     onDismiss: () -> Unit,
     onCreated: () -> Unit,
 ) {
@@ -481,7 +486,7 @@ internal fun AddNetworkDialog(
                 if (state.error.isNotBlank()) {
                     Notice(state.error)
                 }
-                NetworkSetupCard(state, qrJson, dispatch, onCreated = onCreated)
+                NetworkSetupCard(state, qrJson, dispatchSucceeded, onCreated = onCreated)
             }
         },
         confirmButton = {
@@ -497,6 +502,7 @@ internal fun AddDevicesDialog(
     network: NetworkState,
     scanDeviceQr: (String) -> Unit,
     dispatch: (JSONObject) -> Unit,
+    dispatchSucceeded: (JSONObject) -> Boolean,
     onDismiss: () -> Unit,
 ) {
     var joinRequestInput by remember(network.id) { mutableStateOf("") }
@@ -519,6 +525,9 @@ internal fun AddDevicesDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (state.error.isNotBlank()) {
+                    Notice(state.error)
+                }
                 Text("Add join request", style = MaterialTheme.typography.titleMedium)
                 Text(
                     "Scan or paste the joiner's join request. Valid links open confirmation automatically.",
@@ -584,7 +593,7 @@ internal fun AddDevicesDialog(
                     selectorDescription = "Admin Network ID value",
                 )
                 Text("Add by Device ID", style = MaterialTheme.typography.titleMedium)
-                AddParticipantForm(network, dispatch)
+                AddParticipantForm(network, dispatchSucceeded, onAdded = onDismiss)
             }
         },
         confirmButton = {
@@ -601,10 +610,11 @@ internal fun AddDevicesDialog(
             confirmButton = {
                 Button(
                     onClick = {
-                        dispatch(NativeActions.importJoinRequest(request))
-                        joinRequestInput = ""
-                        pendingJoinRequest = null
-                        onDismiss()
+                        if (dispatchSucceeded(NativeActions.importJoinRequest(request))) {
+                            joinRequestInput = ""
+                            pendingJoinRequest = null
+                            onDismiss()
+                        }
                     },
                 ) {
                     Text("Add")

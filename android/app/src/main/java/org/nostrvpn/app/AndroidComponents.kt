@@ -68,7 +68,7 @@ internal fun ParticipantRow(
     dispatch: ((JSONObject) -> Unit)? = null,
 ) {
     val isSelf = participant.isSelf(state)
-    val rosterAcceptance = if (participant.state == "pending") "pending" else "accepted"
+    val rosterAcceptance = rosterAcceptance(participant)
     var detailOpen by remember { mutableStateOf(false) }
     AppCard {
         Row(
@@ -117,6 +117,9 @@ internal fun ParticipantRow(
         )
     }
 }
+
+internal fun rosterAcceptance(participant: ParticipantState): String =
+    if (participant.rosterAccepted) "accepted" else "pending"
 
 @Composable
 private fun DeviceDetailDialog(
@@ -249,7 +252,11 @@ private fun DeviceDetailDialog(
 }
 
 @Composable
-internal fun AddParticipantForm(network: NetworkState, dispatch: (JSONObject) -> Unit) {
+internal fun AddParticipantForm(
+    network: NetworkState,
+    dispatchSucceeded: (JSONObject) -> Boolean,
+    onAdded: () -> Unit,
+) {
     var deviceId by remember(network.id) { mutableStateOf("") }
     var alias by remember(network.id) { mutableStateOf("") }
     val trimmedDeviceId = deviceId.trim()
@@ -284,15 +291,18 @@ internal fun AddParticipantForm(network: NetworkState, dispatch: (JSONObject) ->
         Button(
             enabled = trimmedDeviceId.isNotEmpty() && !showError,
             onClick = {
-                dispatch(
+                val added = dispatchSucceeded(
                     NativeActions.addParticipant(
                         network.id,
                         trimmedDeviceId,
                         alias.trim().ifBlank { null },
                     ),
                 )
-                deviceId = ""
-                alias = ""
+                if (added) {
+                    deviceId = ""
+                    alias = ""
+                    onAdded()
+                }
             },
             modifier = Modifier.mobileUiSelector(
                 id = "manual-admin-submit",
