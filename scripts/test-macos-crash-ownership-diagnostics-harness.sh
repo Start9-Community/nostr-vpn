@@ -18,6 +18,10 @@ fail() {
 }
 
 bash -n "$GUEST"
+grep -Fq 'restart_requested_ms="$(monotonic_ms)"' "$GUEST" \
+  || fail "crash recovery budget does not begin at the restart request"
+grep -Fq '"$restart_requested_ms" "$expected_bind_receipts" "$old_pid"' "$GUEST" \
+  || fail "crash recovery wait does not use the restart request clock"
 if grep -Eq 'sudo -n /(bin/cat|usr/bin/stat)' "$GUEST"; then
   fail "the guest harness uses unapproved privileged file inspection"
 fi

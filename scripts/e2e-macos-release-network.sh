@@ -1438,7 +1438,7 @@ wait_for_crash_restart_recovery() {
 }
 
 run_crash_restart_gate() {
-  local old_pid new_pid killed_ms restart_elapsed_ms bind_baseline
+  local old_pid new_pid restart_requested_ms restart_elapsed_ms bind_baseline
   local bind_receipts expected_bind_receipts
   assert_single_owned_daemon \
     || fail "SIGKILL gate did not start with exactly one owned daemon"
@@ -1451,7 +1451,6 @@ run_crash_restart_gate() {
   [[ "$bind_baseline" =~ ^[1-9][0-9]*$ ]] \
     || fail "SIGKILL gate has no initial WireGuard bind receipt"
 
-  killed_ms="$(monotonic_ms)"
   sudo -n /bin/kill -KILL "$old_pid"
   wait_until "the SIGKILLed production daemon to exit" no_nvpn_processes
   daemon_process_alive "$old_pid" \
@@ -1466,12 +1465,13 @@ run_crash_restart_gate() {
   record_crash_external_audit after-stopped-status \
     || fail "status inspection repaired or discarded the crash residue"
 
+  restart_requested_ms="$(monotonic_ms)"
   privileged_nvpn start --config "$CONFIG" --connect --daemon \
     >"$RESULT_DIR/daemon-start-after-sigkill.txt"
   expected_bind_receipts="$((bind_baseline + 1))"
   if ! restart_elapsed_ms="$(
     wait_for_crash_restart_recovery \
-      "$killed_ms" "$expected_bind_receipts" "$old_pid"
+      "$restart_requested_ms" "$expected_bind_receipts" "$old_pid"
   )"
   then
     capture_wireguard_readiness_failure
