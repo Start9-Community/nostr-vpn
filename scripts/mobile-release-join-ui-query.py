@@ -15,7 +15,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("expected")
     result.add_argument(
         "output",
-        choices=("center", "safe-center", "description", "text", "count", "width"),
+        choices=(
+            "center",
+            "safe-center",
+            "visible-center",
+            "description",
+            "text",
+            "count",
+            "width",
+        ),
     )
     return result
 
@@ -60,8 +68,9 @@ def main() -> int:
     if not found:
         return 1
     node = found[0]
-    if args.output in ("center", "safe-center"):
-        if args.output == "safe-center":
+    if args.output in ("center", "safe-center", "visible-center"):
+        if args.output in ("safe-center", "visible-center"):
+            viewport_right = 0
             viewport_bottom = 0
             for candidate in root.iter("node"):
                 try:
@@ -69,10 +78,20 @@ def main() -> int:
                 except ValueError:
                     continue
                 if box[:2] == (0, 0):
+                    viewport_right = max(viewport_right, box[2])
                     viewport_bottom = max(viewport_bottom, box[3])
-            if viewport_bottom == 0:
+            if viewport_right == 0 or viewport_bottom == 0:
                 return 1
-            if bounds(node)[3] > viewport_bottom - 300:
+            left, top, right, bottom = bounds(node)
+            if args.output == "visible-center":
+                left, top = max(left, 0), max(top, 200)
+                right = min(right, viewport_right)
+                bottom = min(bottom, viewport_bottom - 300)
+                if right <= left or bottom - top < 48:
+                    return 1
+                print(f"{(left + right) // 2} {(top + bottom) // 2}")
+                return 0
+            if bottom > viewport_bottom - 300:
                 return 1
         print(center(node))
     elif args.output == "width":

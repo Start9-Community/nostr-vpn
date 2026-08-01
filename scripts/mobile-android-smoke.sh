@@ -818,7 +818,7 @@ android_ui_query() {
   local selector="$2"
   local attribute="$3"
   local remote="/sdcard/nvpn-ui-smoke.xml"
-  local xml
+  local xml status=0
   xml="$(mktemp)"
   if ! "$ADB" -s "$serial" shell uiautomator dump "$remote" >/dev/null 2>&1 \
     || ! "$ADB" -s "$serial" pull "$remote" "$xml" >/dev/null 2>&1
@@ -826,7 +826,12 @@ android_ui_query() {
     rm -f "$xml"
     return 1
   fi
-  local status=0
+  if [[ "$attribute" == "visible-center" ]]; then
+    "$ROOT/scripts/mobile-release-join-ui-query.py" \
+      "$xml" "$selector_type" "$selector" visible-center || status="$?"
+    rm -f "$xml"
+    return "$status"
+  fi
   python3 - "$xml" "$selector_type" "$selector" "$attribute" <<'PY' || status="$?"
 import html
 import re
@@ -967,6 +972,23 @@ tap_android_ui() {
   "$ADB" -s "$serial" shell input tap $point
 }
 
+tap_android_ui_visible() {
+  local selector_type="$1"
+  local selector="$2"
+  local ignored point
+  for ignored in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if point="$(
+      android_ui_query "$selector_type" "$selector" visible-center
+    )"; then
+      # shellcheck disable=SC2086
+      "$ADB" -s "$serial" shell input tap $point
+      return
+    fi
+    android_ui_swipe up >/dev/null
+  done
+  return 1
+}
+
 wait_for_android_ui() {
   local selector_type="$1"
   local selector="$2"
@@ -1065,21 +1087,14 @@ replace_android_ui_text() {
 replace_android_ui_multiline_text() {
   local selector="$1"
   local value="$2"
-  local deadline focus_attempt
-  for focus_attempt in 1 2; do
-    if [[ "$focus_attempt" -gt 1 ]]; then
-      "$ADB" -s "$serial" shell input keyevent KEYCODE_BACK
-      android_ui_reset_scroll
+  local deadline
+  tap_android_ui_visible resource "$selector" || return 1
+  deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" == "true" ]]; then
+      break
     fi
-    android_ui_scroll_to resource "$selector" || return 1
-    tap_android_ui resource "$selector" || return 1
-    deadline=$((SECONDS + 3))
-    while ((SECONDS < deadline)); do
-      if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" == "true" ]]; then
-        break 2
-      fi
-      sleep 0.25
-    done
+    sleep 0.25
   done
   if [[ "$(android_ui_query resource "$selector" focused 2>/dev/null || true)" != "true" ]]; then
     echo "Android shipped multiline field did not gain focus: $selector" >&2

@@ -44,6 +44,9 @@ android_dns="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidExitDns.kt"
 server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
 fixture_lib="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
+android_visible_center="$ROOT/scripts/mobile-release-join-ui-query.py"
+android_wireguard_geometry="$ROOT/scripts/fixtures/android-wireguard-config-partially-visible.xml"
+android_wireguard_sliver="$ROOT/scripts/fixtures/android-wireguard-config-one-pixel-visible.xml"
 
 grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$ROOT/.dockerignore" \
   || {
@@ -68,13 +71,39 @@ grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
     echo "Android multiline UI entry lets adb consume the remaining config" >&2
     exit 1
   }
-grep -Fq 'for focus_attempt in 1 2' "$android_smoke" \
-  && grep -Fq 'android_ui_reset_scroll' "$android_smoke" \
+grep -Fq 'tap_android_ui_visible resource "$selector"' "$android_smoke" \
   && grep -Fq 'Android shipped multiline field did not gain focus' "$android_smoke" \
   || {
-    echo "Android multiline UI entry lacks one bounded focus retry and readback" >&2
+    echo "Android multiline UI entry lacks one clipped visible tap and readback" >&2
     exit 1
   }
+python3 - "$android_smoke" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("replace_android_ui_multiline_text()")
+end = text.index("\nassert_android_ui_validation()", start)
+body = text[start:end]
+if "android_ui_reset_scroll" in body or "focus_attempt" in body:
+    raise SystemExit("Android multiline focus still retries by resetting scroll")
+if body.count("KEYCODE_BACK") != 1:
+    raise SystemExit("Android multiline entry must only dismiss the keyboard once")
+PY
+[[ "$(
+  "$android_visible_center" \
+    "$android_wireguard_geometry" resource wireguard-config visible-center
+)" == "540 1945" ]] || {
+  echo "Android visible-center did not intersect the real WireGuard field geometry" >&2
+  exit 1
+}
+if "$android_visible_center" \
+  "$android_wireguard_sliver" resource wireguard-config visible-center \
+  >/dev/null 2>&1
+then
+  echo "Android visible-center accepted a one-pixel WireGuard field sliver" >&2
+  exit 1
+fi
 grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
   && grep -Fq 'internet-source-picker descendant-text' "$android_smoke" \
   || {
