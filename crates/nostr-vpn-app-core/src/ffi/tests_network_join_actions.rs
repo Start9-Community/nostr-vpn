@@ -157,6 +157,8 @@
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
         };
+        let service_running = cfg!(target_os = "macos");
+        let service_pid = if service_running { "123" } else { "null" };
         let script = format!(
             r#"#!/bin/sh
 CALLS="{}"
@@ -167,8 +169,12 @@ JOINER="{}"
 printf '%s\n' "$*" >> "$CALLS"
 if [ "$1" = "service" ] && [ "$2" = "status" ]; then
   cat <<'JSON'
-{{"supported":true,"installed":true,"disabled":false,"loaded":true,"running":true,"pid":123,"label":"fi.siriusbusiness.nvpn.test","binary_version":"test"}}
+{{"supported":true,"installed":true,"disabled":false,"loaded":{service_running},"running":{service_running},"pid":{service_pid},"label":"fi.siriusbusiness.nvpn.test","binary_version":"test"}}
 JSON
+  exit 0
+fi
+if [ "$1" = "apply-config-daemon" ]; then
+  cp "$3" "$5"
   exit 0
 fi
 if [ "$1" = "status" ]; then
