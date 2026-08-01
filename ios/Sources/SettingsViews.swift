@@ -831,6 +831,12 @@ struct WireGuardSettingsCard: View {
 }
 
 struct ExitDnsSettingsCard: View {
+    private enum FocusedField: Hashable {
+        case customUrl
+        case bootstrapIps
+        case throughExitServers
+    }
+
     @ObservedObject var model: AppModel
     @State private var mode = "automatic"
     @State private var provider = "cloudflare"
@@ -839,6 +845,8 @@ struct ExitDnsSettingsCard: View {
     @State private var throughExitServers = ""
     @State private var lastSyncedRev: UInt64?
     @State private var hasUnsavedChanges = false
+    @State private var saveAcknowledgement = ""
+    @FocusState private var focusedField: FocusedField?
 
     private var validationError: String? {
         if mode == "encrypted" && provider == "custom" {
@@ -870,8 +878,9 @@ struct ExitDnsSettingsCard: View {
             Picker("Mode", selection: Binding(
                 get: { mode },
                 set: {
+                    focusedField = nil
                     mode = $0
-                    hasUnsavedChanges = true
+                    markUnsaved()
                 }
             )) {
                 Text("Automatic (recommended)").tag("automatic")
@@ -888,8 +897,9 @@ struct ExitDnsSettingsCard: View {
                 Picker("Provider", selection: Binding(
                     get: { provider },
                     set: {
+                        focusedField = nil
                         provider = $0
-                        hasUnsavedChanges = true
+                        markUnsaved()
                     }
                 )) {
                     Text("Cloudflare").tag("cloudflare")
@@ -906,21 +916,27 @@ struct ExitDnsSettingsCard: View {
                         get: { customUrl },
                         set: {
                             customUrl = $0
-                            hasUnsavedChanges = true
+                            markUnsaved()
                         }
                     ))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .customUrl)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                         .accessibilityIdentifier("exit-dns-custom-url")
                     TextField("Bootstrap IPs (comma separated)", text: Binding(
                         get: { bootstrapIps },
                         set: {
                             bootstrapIps = $0
-                            hasUnsavedChanges = true
+                            markUnsaved()
                         }
                     ))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .bootstrapIps)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                         .accessibilityIdentifier("exit-dns-custom-bootstrap-ips")
                 }
             } else if mode == "through_exit" {
@@ -928,11 +944,14 @@ struct ExitDnsSettingsCard: View {
                     get: { throughExitServers },
                     set: {
                         throughExitServers = $0
-                        hasUnsavedChanges = true
+                        markUnsaved()
                     }
                 ))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .throughExitServers)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
                     .accessibilityIdentifier("exit-dns-through-exit-servers")
                 Text("These DNS packets are sent only through the selected exit.")
                     .font(.footnote)
@@ -955,21 +974,48 @@ struct ExitDnsSettingsCard: View {
             }
 
             Button("Save Exit DNS") {
-                hasUnsavedChanges = false
-                model.dispatch(NativeActions.updateSettings([
+                let patch: [String: Any] = [
                     "exitDnsMode": mode,
                     "exitDnsDohProvider": provider,
                     "exitDnsCustomDohUrl": customUrl,
                     "exitDnsCustomDohBootstrapIps": bootstrapIps,
                     "exitDnsThroughExitServers": throughExitServers,
-                ]), status: "Saving DNS")
+                ]
+                focusedField = nil
+                if model.dispatch(NativeActions.updateSettings(patch), status: "Saving DNS") {
+                    hasUnsavedChanges = false
+                    syncFromState(force: true)
+                    saveAcknowledgement = "Exit DNS saved"
+                }
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.actionInFlight || validationError != nil)
             .accessibilityIdentifier("exit-dns-save")
+
+            if !saveAcknowledgement.isEmpty {
+                Text(saveAcknowledgement)
+                    .font(.footnote)
+                    .foregroundStyle(.green)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("exit-dns-save-acknowledgement")
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    focusedField = nil
+                }
+                .accessibilityIdentifier("exit-dns-keyboard-done")
+            }
         }
         .onAppear { syncFromState(force: true) }
         .onChange(of: model.state.rev) { _, _ in syncFromState() }
+    }
+
+    private func markUnsaved() {
+        hasUnsavedChanges = true
+        saveAcknowledgement = ""
     }
 
     private func syncFromState(force: Bool = false) {

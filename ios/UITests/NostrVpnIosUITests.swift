@@ -143,10 +143,7 @@ final class NostrVpnIosUITests: XCTestCase {
         throughExitServers.tap()
         throughExitServers.typeText("9.9.9.9")
         dismissKeyboardIfPresent()
-        let throughExitSave = scrollToElement("exit-dns-save")
-        XCTAssertTrue(throughExitSave.isEnabled)
-        throughExitSave.tap()
-        relaunchInternet()
+        saveExitDnsAndRelaunch()
         assertPicker("exit-dns-mode-picker", contains: "DNS through exit")
         XCTAssertEqual(
             scrollToElement("exit-dns-through-exit-servers").value as? String,
@@ -184,10 +181,7 @@ final class NostrVpnIosUITests: XCTestCase {
         bootstrapIps.typeText("192.0.2.53")
         dismissKeyboardIfPresent()
 
-        let save = scrollToElement("exit-dns-save")
-        XCTAssertTrue(save.isEnabled)
-        save.tap()
-        relaunchInternet()
+        saveExitDnsAndRelaunch()
         assertPicker("exit-dns-mode-picker", contains: "Encrypted DNS")
         assertPicker("exit-dns-provider-picker", contains: "Custom DoH")
         XCTAssertEqual(
@@ -356,10 +350,7 @@ final class NostrVpnIosUITests: XCTestCase {
             return
         }
 
-        let save = scrollToElement("exit-dns-save")
-        XCTAssertTrue(save.isEnabled)
-        save.tap()
-        relaunchInternet()
+        saveExitDnsAndRelaunch()
         switch spec.mode {
         case "automatic":
             assertPicker("exit-dns-mode-picker", contains: "Automatic")
@@ -511,9 +502,13 @@ final class NostrVpnIosUITests: XCTestCase {
     }
 
     private func saveExitDnsAndRelaunch() {
+        dismissKeyboardIfPresent()
         let save = scrollToElement("exit-dns-save")
         XCTAssertTrue(save.isEnabled)
+        XCTAssertTrue(save.isHittable)
         save.tap()
+        let acknowledgement = scrollToElement("exit-dns-save-acknowledgement")
+        XCTAssertEqual(acknowledgement.label, "Exit DNS saved")
         relaunchInternet()
     }
 
@@ -539,7 +534,16 @@ final class NostrVpnIosUITests: XCTestCase {
     private func dismissKeyboardIfPresent() {
         let keyboard = app.keyboards.firstMatch
         if keyboard.exists {
-            keyboard.typeKey(.return, modifierFlags: [])
+            let done = app.buttons["exit-dns-keyboard-done"]
+            XCTAssertTrue(done.waitForExistence(timeout: 2))
+            XCTAssertTrue(done.isHittable)
+            done.tap()
+            let dismissed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == false"),
+                object: keyboard
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 2), .completed)
+            XCTAssertFalse(keyboard.exists)
         }
     }
 
