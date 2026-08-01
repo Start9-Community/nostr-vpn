@@ -68,6 +68,70 @@ test('component proof retains only unchanged platform product inputs', () => {
   }
 })
 
+test('Android artifact survives the 8618306d8 harness delta but not a service change', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-android-harness-proof-'))
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  const harnessDelta = [
+    'CHANGELOG.md',
+    'scripts/lib-mobile-android-release-gate.sh',
+    'scripts/lib-mobile-android-underlay.sh',
+    'scripts/mobile-android-smoke.sh',
+    'scripts/release-artifact-provenance-lib.test.mjs',
+    'scripts/release-component-source.mjs',
+    'scripts/test-mobile-android-release-cleanup-harness.sh',
+    'scripts/test-mobile-underlay-change-harness.sh',
+    'scripts/test-mobile-wireguard-exit-dns-harness.sh',
+  ]
+  const service = 'android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt'
+  try {
+    git('init', '-q')
+    git('config', 'user.name', 'Release Test')
+    git('config', 'user.email', 'release@example.invalid')
+    for (const path of [...harnessDelta, service]) write(join(root, path), 'base\n')
+    git('add', '.')
+    git('commit', '-qm', '8618306d8 artifact source')
+    const receiptCommit = git('rev-parse', 'HEAD')
+    const receiptTree = git('rev-parse', 'HEAD^{tree}')
+
+    for (const path of harnessDelta) write(join(root, path), 'changed\n')
+    git('add', '.')
+    git('commit', '-qm', '1296447e7 harness delta')
+    const candidateCommit = git('rev-parse', 'HEAD')
+    const candidateTree = git('rev-parse', 'HEAD^{tree}')
+    const args = {
+      candidateRoot: root,
+      platform: 'android',
+      receiptCommit,
+      receiptTree,
+      candidateCommit,
+      candidateTree,
+    }
+    const proof = proveUnchangedPlatformInputs(args)
+    assert.equal(
+      proof.changed_paths_sha256,
+      sha256(`${harnessDelta.sort().join('\0')}\0`),
+    )
+
+    write(join(root, service), 'product change\n')
+    git('add', service)
+    git('commit', '-qm', 'change Android VPN service')
+    assert.throws(
+      () => proveUnchangedPlatformInputs({
+        ...args,
+        candidateCommit: git('rev-parse', 'HEAD'),
+        candidateTree: git('rev-parse', 'HEAD^{tree}'),
+      }),
+      /changed product\/build input android\/app\/src\/main\/java\/org\/nostrvpn\/app\/vpn\/NostrVpnService\.kt/,
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('component proof treats the iOS physical gate as harness-only', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-ios-harness-proof-'))
   const git = (...args) => {

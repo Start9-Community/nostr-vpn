@@ -8,10 +8,13 @@ const sharedFiles = [
   'rust-toolchain.toml', 'scripts/sync-versions.mjs',
 ]
 const harnessOnlyScripts = new Set([
+  'scripts/lib-mobile-android-release-gate.sh',
+  'scripts/lib-mobile-android-underlay.sh',
   'scripts/lib-mobile-ios-release-network.sh',
+  'scripts/mobile-android-smoke.sh',
 ])
 const buildScripts = {
-  android: [/prepare-android-release-from-bundle/, /lib-mobile-android-release-gate/],
+  android: [/prepare-android-release-from-bundle/],
   ios: [/scripts\/ios-build$/, /lib-mobile-ios-release-artifact/],
   linux: [/build-host-linux-/, /build-nvpn-linux-musl$/, /host-linux-native-builder-/, /host_linux_package_content/, /lib-host-linux-/],
   macos: [/build-.*macos/, /scripts\/macos-build$/, /lib-macos-release-app-ownership/, /verify-macos-release-publication-artifacts/],
