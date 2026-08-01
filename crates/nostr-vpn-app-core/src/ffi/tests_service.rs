@@ -398,7 +398,7 @@ exit 0
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     #[allow(clippy::too_many_lines)]
     fn install_service_restores_vpn_after_refreshing_stale_state() {
