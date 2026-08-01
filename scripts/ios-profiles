@@ -82,7 +82,7 @@ export NVPN_IOS_PROFILES_ENV_PATH="$IOS_PROFILES_ENV_PATH"
 export NVPN_IOS_DEVICE_UDIDS="${NVPN_IOS_DEVICE_UDIDS:-}"
 export NVPN_IOS_TEAM_ID="${NVPN_IOS_TEAM_ID:-}"
 
-python3 <<'PY'
+python3 - "$ROOT/scripts" <<'PY'
 import base64
 import datetime as dt
 import json
@@ -94,6 +94,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, sys.argv[1])
+from ios_profile_certificate import select_certificate_id
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -252,34 +255,34 @@ def exact_bundle_id(identifier):
 
 def select_certificate():
     configured = os.environ.get("NVPN_ASC_CERTIFICATE_ID", "").strip()
-    if configured:
-        return configured
-
     required_type = "DEVELOPMENT" if "DEVELOPMENT" in PROFILE_TYPE else "DISTRIBUTION"
-    certificates, _ = get_all("certificates", {"limit": "200"})
-    candidates = []
-    for certificate in certificates:
-        attrs = certificate.get("attributes", {})
-        certificate_type = attrs.get("certificateType", "")
-        if required_type not in certificate_type:
-            continue
-        expiration = parse_time(attrs.get("expirationDate"))
-        if expiration <= dt.datetime.now(dt.timezone.utc):
-            continue
-        candidates.append((expiration, certificate))
-
-    if not candidates:
-        fail(f"No non-expired {required_type.lower()} certificate found in App Store Connect")
-
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    certificate = candidates[0][1]
-    attrs = certificate.get("attributes", {})
-    print(
-        f"Using {required_type.lower()} certificate "
-        f"{attrs.get('displayName', certificate['id'])} [{certificate['id']}]",
-        file=sys.stderr,
+    certificates, _ = get_all(
+        "certificates",
+        {
+            "fields[certificates]": (
+                "certificateType,expirationDate,certificateContent"
+            ),
+            "limit": "200",
+        },
     )
-    return certificate["id"]
+    expected_sha256 = ""
+    if required_type == "DISTRIBUTION":
+        expected_sha256 = os.environ.get(
+            "NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256", ""
+        ).strip()
+    try:
+        selected = select_certificate_id(
+            certificates,
+            required_type=required_type,
+            now=dt.datetime.now(dt.timezone.utc),
+            expected_sha256=expected_sha256,
+            configured_id=configured,
+        )
+    except ValueError as error:
+        fail(str(error))
+    qualifier = "pinned" if expected_sha256 else "configured" if configured else "newest valid"
+    print(f"Using {qualifier} {required_type.lower()} certificate", file=sys.stderr)
+    return selected
 
 
 def profile_requires_devices():
