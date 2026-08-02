@@ -487,7 +487,9 @@ def validate_ios_support(
         )
         if case == "through-exit":
             require(
-                "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1" in markers,
+                "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1" in markers
+                and "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1"
+                in markers,
                 "iOS through-exit case lacks connected Direct restoration",
             )
         summaries[case] = {

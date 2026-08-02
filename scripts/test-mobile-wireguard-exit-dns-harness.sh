@@ -788,7 +788,7 @@ grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
   && grep -Fq 'NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1' "$ios_release_ui" \
   && grep -Fq 'requireUDPEcho' "$ios_release_probe" \
   || { echo "iOS Release runner omits underlay/lifecycle/Direct packet proof" >&2; exit 1; }
-python3 - "$ios_release_ui" <<'PY'
+python3 - "$ios_release_ui" "$ios_underlay_capture" <<'PY'
 import pathlib
 import sys
 
@@ -817,6 +817,42 @@ if "driveConfigSyncBackgroundForeground" in source:
     raise SystemExit(
         "iOS Release gate includes timing-dependent config-sync interruption coverage"
     )
+
+direct = source.split("private func selectDirectWhileConnected", 1)[1].split(
+    "private func releaseSpec", 1
+)[0]
+offset = -1
+for token in (
+    "direct.tap()",
+    "waitForVPNState(on: true",
+    "try proveDirect",
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
+    "relaunch()",
+    'assertPicker("internet-source-picker", contains: "This device")',
+    "waitForVPNState(on: true",
+    "try proveDirect",
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1",
+):
+    offset = direct.find(token, offset + 1)
+    if offset < 0:
+        raise SystemExit(
+            "iOS Direct transition does not settle before its persistence relaunch"
+        )
+if "Interrupt the scheduled stop/restart" in direct:
+    raise SystemExit("iOS Direct gate still force-kills an in-flight tunnel update")
+
+test_body = source.split("func testReleaseNetworkLifecycle", 1)[1].split(
+    "private func configureWireGuard", 1
+)[0]
+active_end = test_body.index("NVPN_IOS_RELEASE_ACTIVE_SESSION_END_MS")
+direct_call = test_body.index("try selectDirectWhileConnected")
+if active_end > direct_call:
+    raise SystemExit(
+        "iOS process-continuity sampling includes an intentional app relaunch"
+    )
+capture = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+if "RELEASE_CONNECTED_DIRECT_PASSED" in capture:
+    raise SystemExit("iOS process continuity still spans the Direct route restart")
 PY
 if grep -Fq -- '--nvpn-debug-' \
   "$ios_release_gate" "$ios_release_ui" "$ios_release_ui_support" "$ios_release_underlay"

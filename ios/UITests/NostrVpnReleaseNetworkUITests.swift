@@ -114,14 +114,13 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         if spec.exerciseLifecycle {
             try driveBackgroundForeground(spec)
         }
-        if spec.switchToDirect {
-            try selectDirectWhileConnected(spec, directSource: directSource)
-        }
-
         emit("NVPN_IOS_RELEASE_ACTIVE_SESSION_END_MS=\(millisecondsSinceEpoch())")
         // Keep the production packet tunnel alive while the external process
         // sampler records the final active-session checkpoint.
         Thread.sleep(forTimeInterval: 6)
+        if spec.switchToDirect {
+            try selectDirectWhileConnected(spec, directSource: directSource)
+        }
         try turnVPNOffIfNeeded()
         shippedUIVPNOffCleanupArmed = false
         relaunch()
@@ -583,9 +582,12 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("Shipped This device choice was unavailable")
         }
         direct.tap()
-        // Interrupt the scheduled stop/restart immediately after the desired
-        // Direct setting is persisted. Cold startup must compare the installed
-        // manager's route shape with the desired provider configuration.
+        guard waitForVPNState(on: true, timeout: 8) else {
+            throw gateError("This device transition turned the private-mesh VPN off")
+        }
+        try proveDirect(spec, expectedSource: directSource)
+        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
+
         relaunch()
         openInternetTab()
         assertPicker("internet-source-picker", contains: "This device")
@@ -593,10 +595,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("This device relaunch stopped the private-mesh packet tunnel")
         }
         try proveDirect(spec, expectedSource: directSource)
-        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
-        // The external black-box sampler must observe the unchanged extension
-        // process after Direct has taken effect while the OS VPN stays active.
-        Thread.sleep(forTimeInterval: 6)
+        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1")
     }
 
     private func releaseSpec() throws -> Spec {

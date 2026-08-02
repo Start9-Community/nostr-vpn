@@ -1198,7 +1198,9 @@ ios_release_network_validate_markers() {
     done
   fi
   if bool_is_true "$direct"; then
-    grep -Fxq "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1" "$markers" || {
+    grep -Fxq "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1" "$markers" \
+      && grep -Fxq \
+        "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1" "$markers" || {
       echo "iOS Release connected Direct receipt is missing" >&2
       return 1
     }
