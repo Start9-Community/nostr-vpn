@@ -94,6 +94,10 @@ final class PacketFlowBridge {
                 guard let self, self.lifecycle.isReading else {
                     return
                 }
+                if packets.isEmpty, protocols.isEmpty {
+                    _ = self.readNextBatch()
+                    return
+                }
                 guard let batch = self.validatedBatch(
                     packets: packets,
                     protocols: protocols
