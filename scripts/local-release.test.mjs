@@ -39,6 +39,7 @@ import {
   splitCsv,
   validateAndroidReleaseGateReceipt,
   validateCleanReleaseSource,
+  validateMacosGateSigningIdentity,
   validatePromotableReleaseManifest,
   validatePromotableReleaseSource,
   validateReleaseAssetSet,
@@ -285,6 +286,54 @@ test('Android publication accepts only the exact signed APK sealed by the physic
       { ...context, expectedAppGitSha: 'not-a-commit' },
     ),
     /component-origin SHA\/tree/i,
+  )
+})
+
+test('macOS publication selects the exact gated leaf when another Developer ID identity is first', () => {
+  const signingIdentitySha1 = 'a'.repeat(40)
+  const signingTeam = 'ABCDEFGHIJ'
+  const signerCertificateSha256 = 'b'.repeat(64)
+  const receipt = {
+    receiptSchema: 1,
+    artifactType: 'macOS company Developer ID Release gate package',
+    companySigningVerified: true,
+    signingIdentitySha1,
+    signingTeam,
+    signerCertificateSha256,
+  }
+  const identities = [
+    `  1) ${'C'.repeat(40)} "Developer ID Application: Unrelated (KLMNOPQRST)"`,
+    `  2) ${signingIdentitySha1.toUpperCase()} "Developer ID Application: Expected (${signingTeam})"`,
+    '     2 valid identities found',
+  ].join('\n')
+
+  assert.deepEqual(
+    validateMacosGateSigningIdentity({
+      receipt,
+      codesigningIdentities: identities,
+      resolvedCertificateSha256: signerCertificateSha256,
+    }),
+    {
+      identitySha1: signingIdentitySha1.toUpperCase(),
+      signingTeam,
+      signerCertificateSha256,
+    },
+  )
+  assert.throws(
+    () => validateMacosGateSigningIdentity({
+      receipt,
+      codesigningIdentities: identities,
+      resolvedCertificateSha256: 'd'.repeat(64),
+    }),
+    /certificate differs from the gate receipt/i,
+  )
+  assert.throws(
+    () => validateMacosGateSigningIdentity({
+      receipt: { ...receipt, signingTeam: 'KLMNOPQRST' },
+      codesigningIdentities: identities,
+      resolvedCertificateSha256: signerCertificateSha256,
+    }),
+    /team differs from the gate receipt/i,
   )
 })
 
@@ -2986,6 +3035,10 @@ test('macOS publication packages the canonical CLI from the app bundle', () => {
     /const gatedCli = join\(\s*gatedAppPath,\s*'Contents',\s*'Resources',\s*'nvpn',?\s*\)/,
   )
   assert.doesNotMatch(build, /'Resources',\s*'binaries',\s*'nvpn'/)
+  const identityValidation = build.indexOf('validateMacosGateSigningIdentity({')
+  const packaging = build.indexOf("'macos-release-artifacts'")
+  assert.ok(identityValidation >= 0 && packaging > identityValidation)
+  assert.match(build, /env\.MACOS_SIGNING_IDENTITY = gateSigning\.identitySha1/)
 })
 
 test('Windows publication reuses the exact installer that passed the VM smoke gate', () => {

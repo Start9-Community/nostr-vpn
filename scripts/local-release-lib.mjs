@@ -252,6 +252,62 @@ export function validateAndroidReleaseGateReceipt(
   }
 }
 
+export function validateMacosGateSigningIdentity({
+  receipt,
+  codesigningIdentities,
+  resolvedCertificateSha256,
+} = {}) {
+  if (
+    receipt?.receiptSchema !== 1
+    || receipt.artifactType !== 'macOS company Developer ID Release gate package'
+    || receipt.companySigningVerified !== true
+  ) {
+    throw new Error('macOS publication received the wrong gate receipt.')
+  }
+  const identitySha1 = String(receipt.signingIdentitySha1 ?? '').trim().toLowerCase()
+  const signingTeam = String(receipt.signingTeam ?? '').trim()
+  const signerCertificateSha256 = String(
+    receipt.signerCertificateSha256 ?? '',
+  ).trim().toLowerCase()
+  if (!/^[0-9a-f]{40}$/.test(identitySha1)) {
+    throw new Error('macOS gate receipt has no valid signing identity SHA-1.')
+  }
+  if (!/^[A-Z0-9]{10}$/.test(signingTeam)) {
+    throw new Error('macOS gate receipt has no valid signing team.')
+  }
+  if (!/^[0-9a-f]{64}$/.test(signerCertificateSha256)) {
+    throw new Error('macOS gate receipt has no valid signer certificate SHA-256.')
+  }
+  const matchingTeams = String(codesigningIdentities ?? '')
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const match = line.match(
+        /^\s*\d+\)\s+([0-9a-f]{40})\s+"(Developer ID Application: .+)"\s*$/i,
+      )
+      if (!match || match[1].toLowerCase() !== identitySha1) return []
+      return [match[2].match(/\(([A-Z0-9]{10})\)$/)?.[1] ?? '']
+    })
+  if (matchingTeams.length !== 1) {
+    throw new Error(
+      'macOS gate signing identity does not resolve to exactly one valid Developer ID identity.',
+    )
+  }
+  if (matchingTeams[0] !== signingTeam) {
+    throw new Error('Resolved macOS signing identity team differs from the gate receipt.')
+  }
+  if (
+    String(resolvedCertificateSha256 ?? '').trim().toLowerCase()
+    !== signerCertificateSha256
+  ) {
+    throw new Error('Resolved macOS signing certificate differs from the gate receipt.')
+  }
+  return {
+    identitySha1: identitySha1.toUpperCase(),
+    signingTeam,
+    signerCertificateSha256,
+  }
+}
+
 export function zapstorePublicationRequired({
   cliRequired = false,
   envValue = '',

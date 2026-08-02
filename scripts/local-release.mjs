@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, X509Certificate } from 'node:crypto'
 import {
   cpSync,
   copyFileSync,
@@ -39,6 +39,7 @@ import {
   splitCsv,
   validateAndroidReleaseGateReceipt,
   validateCleanReleaseSource,
+  validateMacosGateSigningIdentity,
   validatePromotableReleaseManifest,
   validatePromotableReleaseSource,
   validateReleaseAssetSet,
@@ -460,6 +461,27 @@ function run(
     throw new Error(stderr || `${command} exited with status ${result.status ?? 'unknown'}`)
   }
   return capture ? result.stdout.trim() : ''
+}
+
+function resolveMacosSigningCertificateSha256(identitySha1) {
+  const certificates = run(
+    'security',
+    ['find-certificate', '-a', '-p'],
+    { capture: true },
+  ).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? []
+  const matches = certificates.flatMap((certificate) => {
+    const parsed = new X509Certificate(certificate)
+    const sha1 = createHash('sha1').update(parsed.raw).digest('hex')
+    return sha1 === identitySha1.toLowerCase()
+      ? [createHash('sha256').update(parsed.raw).digest('hex')]
+      : []
+  })
+  if (matches.length !== 1) {
+    throw new Error(
+      'macOS gate signing identity does not resolve to exactly one keychain certificate.',
+    )
+  }
+  return matches[0]
 }
 
 const htreeReleaseMetadataPaths = [
@@ -1447,7 +1469,6 @@ function buildMacosArtifacts({
   }
   let gateSource = { commit: candidateCommit, tree: candidateTree }
   if (!dryRun) {
-    rmSync(join(distDir, `nostr-vpn-${tag}-macos-arm64.zip`), { force: true })
     const gateReceipt = readRequiredJson(
       gateReceiptPath,
       'macOS exact-artifact gate receipt',
@@ -1459,10 +1480,23 @@ function buildMacosArtifacts({
       platform: 'macos',
       label: 'macOS exact-artifact gate receipt',
     })
+    const gateSigning = validateMacosGateSigningIdentity({
+      receipt: gateReceipt,
+      codesigningIdentities: run(
+        'security',
+        ['find-identity', '-v', '-p', 'codesigning'],
+        { capture: true },
+      ),
+      resolvedCertificateSha256: resolveMacosSigningCertificateSha256(
+        String(gateReceipt.signingIdentitySha1 ?? '').trim(),
+      ),
+    })
+    env.MACOS_SIGNING_IDENTITY = gateSigning.identitySha1
     gateSource = {
       commit: gateReceipt.appGitSha,
       tree: gateReceipt.appGitTree,
     }
+    rmSync(join(distDir, `nostr-vpn-${tag}-macos-arm64.zip`), { force: true })
     if (!existsSync(gatedAppPath)) {
       throw new Error(
         `Gate-tested macOS Release app is missing: ${gatedAppPath}`,
