@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_join_roster_delivery_runs_without_blocking_the_daemon_loop() {
+    async fn pre_sync_join_delivery_remains_claimed_through_post_sync_retry() {
         let path = std::env::temp_dir().join(format!(
             "nvpn-join-roster-background-{}-{}",
             std::process::id(),
@@ -214,7 +214,7 @@ mod tests {
         assert!(path.exists(), "the slow delivery must still be pending");
         assert!(
             !claim_join_roster_delivery(&path),
-            "a pending background delivery must not be started twice"
+            "the post-sync retry must not duplicate the pre-sync delivery"
         );
         complete_tx.send(()).expect("complete delivery");
         tokio::time::timeout(Duration::from_secs(1), async {

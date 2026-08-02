@@ -841,6 +841,17 @@ loop {
                         "fips: roster publish failed before peer-set refresh: {error}"
                     );
                 }
+                // The approval outbox and authoritative roster are durable before
+                // Reload reaches the daemon. Start the receipt-backed delivery on
+                // the existing FIPS runtime now: the recipient's npub is enough to
+                // route it, and waiting for the full peer-set sync consumed most of
+                // the mobile coordination deadline on Windows. The post-sync call
+                // below remains as an idempotent retry for runtimes created by sync.
+                if publish_fips_roster_after_control
+                    && let Some(runtime) = fips_tunnel_runtime.as_ref()
+                {
+                    start_queued_join_roster_deliveries(runtime, &config_path);
+                }
                 let fips_sync_succeeded = match sync_fips_private_runtime(
                     &mut fips_tunnel_runtime,
                     SyncFipsPrivateRuntimeContext {
