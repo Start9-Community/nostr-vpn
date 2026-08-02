@@ -363,11 +363,19 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                 encryption_compliance=True,
             )
 
-    def test_review_submission_allows_truthful_unapproved_france_state(self):
+    def test_review_submission_requires_live_exact_build_france_proof(self):
+        for action in ("submit", "public", "public-submit"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "approved French-store encryption declaration",
+                ):
+                    metadata.require_review_submission_encryption_compliance(
+                        action,
+                        None,
+                    )
+
         for action in (
-            "submit",
-            "public",
-            "public-submit",
             "put",
             "attach",
             "status",
@@ -378,6 +386,23 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                     action,
                     None,
                 )
+
+        proof = export_compliance.VerifiedBuildCompliance(
+            build={
+                "type": "builds",
+                "id": "build-id",
+                "attributes": {"usesNonExemptEncryption": True},
+            },
+            build_id="build-id",
+            declaration_id="declaration-id",
+        )
+        for action in ("submit", "public", "public-submit"):
+            with self.subTest(action=action):
+                metadata.require_review_submission_encryption_compliance(
+                    action,
+                    proof,
+                )
+
         with self.assertRaisesRegex(ValueError, "verified exact-build proof"):
             metadata.require_review_submission_encryption_compliance(
                 "submit",

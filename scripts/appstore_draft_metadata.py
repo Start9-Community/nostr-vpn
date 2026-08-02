@@ -343,18 +343,16 @@ def require_review_submission_encryption_compliance(
     action: str,
     encryption_compliance: VerifiedBuildCompliance | None,
 ) -> None:
-    """Validate an optional live approval proof before review submission.
-
-    France remains enabled even while a truthful encryption declaration is
-    pending. In that case reviewer notes must omit any approval claim and App
-    Store Connect decides whether the worldwide submission can proceed.
-    """
+    """Require live exact-build French approval before review submission."""
 
     if action not in {"submit", "public", "public-submit"}:
         return
-    if encryption_compliance is not None and not isinstance(
-        encryption_compliance, VerifiedBuildCompliance
-    ):
+    if encryption_compliance is None:
+        raise ValueError(
+            "Review submission requires an approved French-store encryption "
+            "declaration linked to the exact build"
+        )
+    if not isinstance(encryption_compliance, VerifiedBuildCompliance):
         raise ValueError(
             "Review submission encryption compliance must be a verified "
             "exact-build proof when supplied"

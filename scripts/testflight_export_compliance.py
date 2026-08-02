@@ -725,11 +725,12 @@ def prepare_build_compliance_for_submission(
     get_build: Callable[[str], Mapping[str, object]],
     log: Callable[[str], None] | None = None,
 ) -> tuple[Mapping[str, object], VerifiedBuildCompliance | None]:
-    """Prefer approved proof, but allow App Store Connect to judge France.
+    """Prefer approved proof while allowing non-review preparation to proceed.
 
     Only the narrow, truthful not-yet-approved state is allowed through. API
     errors, malformed responses, mismatched declarations, and failed exact
-    build readbacks still fail closed.
+    build readbacks still fail closed. The separate review-submission gate
+    requires the returned proof for App Review and external TestFlight review.
     """
 
     try:
@@ -746,7 +747,8 @@ def prepare_build_compliance_for_submission(
         if log is not None:
             log(
                 f"{error} Continuing with France enabled and truthful "
-                "review metadata so App Store Connect can decide."
+                "metadata preparation; external review submission remains "
+                "blocked until approval."
             )
         current_build = ensure_build_non_exempt_encryption(
             build,
