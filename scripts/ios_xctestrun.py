@@ -227,23 +227,52 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
     payload = read_plist(source)
     targets = xctestrun_targets(payload)
     assignments = environment_assignments(args)
+    app_bundle_id = runner_bundle_id = ""
+    if args.use_destination_artifacts:
+        app_bundle_id = read_plist(app / "Info.plist").get("CFBundleIdentifier")
+        runner_bundle_id = read_plist(runner / "Info.plist").get(
+            "CFBundleIdentifier"
+        )
+        require(
+            isinstance(app_bundle_id, str) and app_bundle_id,
+            "iOS target app lacks a bundle identifier",
+        )
+        require(
+            isinstance(runner_bundle_id, str) and runner_bundle_id,
+            "iOS test runner lacks a bundle identifier",
+        )
     for target in targets:
         require(
             "UseDestinationArtifacts" not in target
             or target.get("UseDestinationArtifacts") is False,
             "xctestrun relies on destination-side products",
         )
-        target["TestBundlePath"] = str(test_bundle)
-        target["TestHostPath"] = str(runner)
         target["UITargetAppCommandLineArguments"] = []
         target["UITargetAppEnvironmentVariables"] = {}
-        target["UITargetAppPath"] = str(app)
-        target["DependentProductPaths"] = [
-            str(tunnel),
-            str(app),
-            str(runner),
-            str(test_bundle),
-        ]
+        if args.use_destination_artifacts:
+            target["UseDestinationArtifacts"] = True
+            target["TestHostBundleIdentifier"] = runner_bundle_id
+            target["TestBundleDestinationRelativePath"] = (
+                f"PlugIns/{UI_TEST_BUNDLE}"
+            )
+            target["UITargetAppBundleIdentifier"] = app_bundle_id
+            for key in (
+                "TestBundlePath",
+                "TestHostPath",
+                "UITargetAppPath",
+                "DependentProductPaths",
+            ):
+                target.pop(key, None)
+        else:
+            target["TestBundlePath"] = str(test_bundle)
+            target["TestHostPath"] = str(runner)
+            target["UITargetAppPath"] = str(app)
+            target["DependentProductPaths"] = [
+                str(tunnel),
+                str(app),
+                str(runner),
+                str(test_bundle),
+            ]
         environment = target.get("EnvironmentVariables")
         require(
             isinstance(environment, dict),
@@ -265,6 +294,28 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
     )
     targets = xctestrun_targets(payload)
     for target in targets:
+        if args.use_destination_artifacts:
+            require(
+                target.get("UseDestinationArtifacts") is True
+                and target.get("TestHostBundleIdentifier") == runner_bundle_id
+                and target.get("TestBundleDestinationRelativePath")
+                == f"PlugIns/{UI_TEST_BUNDLE}"
+                and target.get("UITargetAppBundleIdentifier") == app_bundle_id,
+                "rewritten xctestrun lacks destination artifact identity",
+            )
+            require(
+                not any(
+                    key in target
+                    for key in (
+                        "TestBundlePath",
+                        "TestHostPath",
+                        "UITargetAppPath",
+                        "DependentProductPaths",
+                    )
+                ),
+                "destination-artifact xctestrun retains install paths",
+            )
+            continue
         for key in (
             "TestBundlePath",
             "TestHostPath",

@@ -14,18 +14,25 @@ TUNNEL="$APP/PlugIns/Nostr VPN Tunnel.appex"
 SOURCE="$PRODUCTS/NostrVpnIos_fixture.xctestrun"
 PRIVATE_DIR="$TMP_ROOT/private"
 OUTPUT="$PRIVATE_DIR/network-case.xctestrun"
+DESTINATION_OUTPUT="$PRIVATE_DIR/network-case-installed.xctestrun"
 mkdir -p "$TEST_BUNDLE" "$TUNNEL" "$PRIVATE_DIR"
 chmod 700 "$PRIVATE_DIR"
 printf 'app\n' >"$APP/Nostr VPN"
 printf 'tunnel\n' >"$TUNNEL/Nostr VPN Tunnel"
 printf 'test bundle\n' >"$TEST_BUNDLE/NostrVpnIosUITests"
 
-python3 - "$SOURCE" <<'PY'
+python3 - "$SOURCE" "$APP" "$RUNNER" <<'PY'
 import pathlib
 import plistlib
 import sys
 
-path = pathlib.Path(sys.argv[1])
+path, app, runner = map(pathlib.Path, sys.argv[1:])
+for bundle, identifier in (
+    (app, "example.nvpn"),
+    (runner, "example.nvpn.UITests.xctrunner"),
+):
+    with (bundle / "Info.plist").open("wb") as handle:
+        plistlib.dump({"CFBundleIdentifier": identifier}, handle)
 payload = {
     "CodeCoverageBuildableInfos": [
         {
@@ -95,6 +102,39 @@ printf '%s\0' \
     --products-root "$PRODUCTS" \
     --target-app "$APP" \
     --environment-stdin0
+
+python3 "$TOOL" rewrite-xctestrun \
+  --source "$SOURCE" \
+  --output "$DESTINATION_OUTPUT" \
+  --products-root "$PRODUCTS" \
+  --target-app "$APP" \
+  --use-destination-artifacts
+
+python3 - "$DESTINATION_OUTPUT" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+payload = plistlib.load(pathlib.Path(sys.argv[1]).open("rb"))
+target = payload["TestConfigurations"][0]["TestTargets"][0]
+expected = {
+    "UseDestinationArtifacts": True,
+    "TestHostBundleIdentifier": "example.nvpn.UITests.xctrunner",
+    "TestBundleDestinationRelativePath": "PlugIns/NostrVpnIosUITests.xctest",
+    "UITargetAppBundleIdentifier": "example.nvpn",
+}
+for key, value in expected.items():
+    if target.get(key) != value:
+        raise SystemExit(f"destination-artifact plan has the wrong {key}")
+for key in (
+    "TestBundlePath",
+    "TestHostPath",
+    "UITargetAppPath",
+    "DependentProductPaths",
+):
+    if key in target:
+        raise SystemExit(f"destination-artifact plan retains {key}")
+PY
 
 python3 - \
   "$ROOT/scripts/mobile_release_artifact_receipt.py" \

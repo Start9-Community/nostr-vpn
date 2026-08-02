@@ -736,6 +736,7 @@ def parser() -> argparse.ArgumentParser:
     rewrite.add_argument("--output", required=True)
     rewrite.add_argument("--products-root", required=True)
     rewrite.add_argument("--target-app", required=True)
+    rewrite.add_argument("--use-destination-artifacts", action="store_true")
     rewrite.add_argument("--environment", action="append", default=[])
     rewrite.add_argument("--environment-stdin0", action="store_true")
 

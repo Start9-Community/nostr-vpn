@@ -449,6 +449,7 @@ release_join_install_ios_release() {
   local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
   local installed_json="$RESULT_DIR/ios-installed-apps.json"
   local installed_receipt="$RESULT_DIR/ios-release-install.json"
+  local runner="$derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
   release_join_require_device_mutation_allowed || return 1
   RELEASE_JOIN_DEVICE_MUTATED=1
   # Installing the exact verified bundle in place replaces its executable but
@@ -457,6 +458,12 @@ release_join_install_ios_release() {
   # prompt before every physical gate retry.
   xcrun devicectl device install app \
     --device "$IOS_DEVICE" "$app_path" --quiet
+  [[ -d "$runner" ]] || {
+    echo "Exact iOS UI runner is unavailable" >&2
+    return 1
+  }
+  xcrun devicectl device install app \
+    --device "$IOS_DEVICE" "$runner" --quiet
   xcrun devicectl device info apps \
     --device "$IOS_DEVICE" \
     --json-output "$installed_json" \

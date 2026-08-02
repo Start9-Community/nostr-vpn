@@ -430,6 +430,17 @@ PY
     ios_release_network_prepare_abort
     return
   }
+  local runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  if ! xcrun devicectl device install app \
+      --device "$IOS_RELEASE_NETWORK_DEVICE" \
+      "$(ios_release_network_app_path)" --quiet >/dev/null \
+    || ! xcrun devicectl device install app \
+      --device "$IOS_RELEASE_NETWORK_DEVICE" "$runner" --quiet >/dev/null
+  then
+    echo "iOS Release gate could not install its exact test products in place" >&2
+    ios_release_network_prepare_abort
+    return
+  fi
   IOS_RELEASE_NETWORK_PREPARED=1
   if bool_is_true "$reuse_build"; then
     echo "iOS company-signed Release network gate reused its preserved build"
@@ -492,6 +503,7 @@ ios_release_network_prepare_xctestrun() {
     --output "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
     --products-root "$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products"
     --target-app "$(ios_release_network_app_path)"
+    --use-destination-artifacts
     --environment-stdin0
   )
   runner_environment=(
