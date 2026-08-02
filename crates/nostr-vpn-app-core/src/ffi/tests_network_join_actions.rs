@@ -119,6 +119,61 @@
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn mobile_manual_approval_keeps_explicit_connect_intent_over_stopped_runtime_state() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nvpn-mobile-manual-connect-{nonce}"));
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.mobile_runtime = true;
+        runtime.config_path = dir.join("config.toml");
+        runtime.dispatch(NativeAppAction::AddNetwork {
+            name: "Home".to_string(),
+        });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        let network_id = runtime.config.networks[0].id.clone();
+        fs::write(
+            dir.join(MOBILE_RUNTIME_STATE_FILE),
+            serde_json::to_vec(&DaemonRuntimeState {
+                updated_at: unix_timestamp(),
+                vpn_enabled: false,
+                vpn_active: false,
+                vpn_status: "Disconnected".to_string(),
+                ..DaemonRuntimeState::default()
+            })
+            .expect("encode stopped runtime state"),
+        )
+        .expect("persist stopped runtime state");
+
+        let joiner = Keys::generate();
+        runtime.dispatch(NativeAppAction::AddParticipant {
+            network_id,
+            npub: joiner.public_key().to_bech32().expect("joiner npub"),
+            alias: None,
+        });
+        let state = runtime.state();
+
+        assert!(state.error.is_empty(), "{}", state.error);
+        assert!(
+            state.vpn_enabled,
+            "the explicit approval connect must survive an old stopped runtime snapshot"
+        );
+        assert!(state.vpn_active);
+        assert_eq!(
+            nostr_vpn_core::join_delivery::load_join_rosters(&runtime.config_path).len(),
+            1,
+            "the signed approval must remain queued until its durable acknowledgement"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     struct FailingJoinStartFixture {
         dir: std::path::PathBuf,

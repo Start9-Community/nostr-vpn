@@ -350,11 +350,16 @@ impl NativeAppRuntime {
         }
         self.vpn_enabled = true;
         if self.mobile_runtime {
+            self.refresh_mobile_status()?;
+            // An explicit connect is newer than the last tunnel snapshot. A
+            // stopped provider can leave a fresh "off" state behind; reading
+            // it here must not cancel the host's request to start a new one.
+            self.daemon_state = None;
             self.vpn_enabled = true;
             self.vpn_active = true;
             self.daemon_running = true;
             self.vpn_status = "VPN on".to_string();
-            return self.refresh_mobile_status();
+            return Ok(());
         }
         let _ = self.refresh_status();
         if self.daemon_running {

@@ -1,7 +1,7 @@
     static WEBSOCKET_JOIN_LATENCY_GATE: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin() {
+    fn websocket_seed_router_routes_new_recipient_without_preconverged_roster_peer() {
         let _latency_guard = WEBSOCKET_JOIN_LATENCY_GATE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -150,6 +150,8 @@
         guest_app.node_name = "Joining device".to_string();
         guest_app.fips_nostr_discovery_enabled = false;
         guest_app.fips_webrtc_enabled = false;
+        guest_app.fips_bootstrap_enabled = false;
+        guest_app.fips_bootstrap_peers.clear();
         guest_app
             .ensure_pending_nostr_join_request(requested_at)
             .expect("pending guest join request");
@@ -184,6 +186,13 @@
             );
         }
         admin_app.ensure_defaults();
+        admin_app.fips_websocket_seed_urls = vec![seed_url.clone()];
+        admin_app.fips_nostr_discovery_enabled = false;
+        admin_app.fips_webrtc_enabled = false;
+        admin_app.fips_bootstrap_enabled = false;
+        admin_app.fips_bootstrap_peers.clear();
+        let preapproval_admin_mobile =
+            MobileTunnelConfig::from_app(&admin_app).expect("pre-approval admin config");
         let network_entry_id = admin_app.networks[0].id.clone();
         let prepared = crate::join_approval::prepare_join_approval(
             &admin_app,
@@ -193,9 +202,15 @@
         )
         .expect("prepare ordinary signed join roster");
         admin_app = prepared.updated_config;
-        admin_app.fips_websocket_seed_urls = vec![seed_url.clone()];
-        admin_app.fips_nostr_discovery_enabled = false;
-        admin_app.fips_webrtc_enabled = false;
+        let guest_pubkey = normalize_nostr_pubkey(&bootstrap.device_app_key_npub)
+            .expect("normalize guest pubkey");
+        assert!(
+            preapproval_admin_mobile
+                .peers
+                .iter()
+                .all(|peer| peer.participant_pubkey != guest_pubkey),
+            "the approval recipient must not be preconverged in the sender runtime graph"
+        );
 
         let admin_dir = std::env::temp_dir().join(format!(
             "nvpn-mobile-queued-join-{}-{}-{}",
@@ -232,9 +247,7 @@
         guest_mobile.detach_from_persisted_config_path();
         guest_mobile.listen_port = available_udp_port();
         let guest_listen_port = guest_mobile.listen_port;
-        let mut admin_mobile =
-            MobileTunnelConfig::from_app_with_config_path(&admin_app, &admin_config_path)
-                .expect("admin config");
+        let mut admin_mobile = preapproval_admin_mobile;
         let queued_join_rosters = nostr_vpn_core::join_delivery::load_join_rosters(
             &admin_config_path,
         )

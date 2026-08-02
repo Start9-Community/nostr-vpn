@@ -110,7 +110,7 @@ loop {
                 })
                 .await;
                 if let Some(runtime) = fips_tunnel_runtime.as_ref() {
-                    start_queued_join_roster_deliveries(runtime, &app, &config_path);
+                    start_queued_join_roster_deliveries(runtime, &config_path);
                 }
             }
             if !vpn_active {

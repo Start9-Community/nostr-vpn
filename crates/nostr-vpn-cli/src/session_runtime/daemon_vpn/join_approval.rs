@@ -50,7 +50,7 @@ pub(super) async fn publish_fips_control_updates(
         eprintln!("fips: capabilities broadcast failed after control request: {error}");
     }
     if fips_sync_succeeded {
-        start_queued_join_roster_deliveries(runtime, app, config_path);
+        start_queued_join_roster_deliveries(runtime, config_path);
     }
 }
 
@@ -88,16 +88,20 @@ fn track_join_roster_delivery(
 
 pub(super) fn start_queued_join_roster_deliveries(
     runtime: &FipsPrivateTunnelRuntime,
-    app: &AppConfig,
     config_path: &Path,
 ) {
-    let participants = app.participant_pubkeys_hex();
-    for (path, mut queued) in load_join_rosters(config_path) {
-        if !claim_join_roster_delivery(&path) {
-            continue;
+    // The outbox is committed before the UI asks the daemon to reload. Read
+    // the authoritative persisted roster here so a heartbeat holding the old
+    // in-memory snapshot cannot reject or claim the new approval first.
+    let participants = match AppConfig::load(config_path) {
+        Ok(app) => app.participant_pubkeys_hex(),
+        Err(error) => {
+            eprintln!("join roster delivery is waiting for readable config: {error:#}");
+            return;
         }
+    };
+    for (path, mut queued) in load_join_rosters(config_path) {
         if join_roster_delivery_expired(&queued, crate::unix_timestamp()) {
-            release_join_roster_delivery(&path);
             consume_join_roster(&path);
             eprintln!(
                 "expired queued join approval for {}; removed it from the outbox",
@@ -106,7 +110,6 @@ pub(super) fn start_queued_join_roster_deliveries(
             continue;
         }
         if !participants.contains(&queued.recipient_npub) {
-            release_join_roster_delivery(&path);
             finish_join_roster_delivery(
                 &path,
                 &queued.recipient_npub,
@@ -115,6 +118,9 @@ pub(super) fn start_queued_join_roster_deliveries(
                     queued.recipient_npub
                 )),
             );
+            continue;
+        }
+        if !claim_join_roster_delivery(&path) {
             continue;
         }
         let participant = queued.recipient_npub.clone();

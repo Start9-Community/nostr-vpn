@@ -326,8 +326,13 @@ impl MobileTunnel {
         }
 
         for queued in queued_join_rosters {
-            let Some(destination) = mobile_join_roster_destination(&config, &queued.recipient_npub)?
-            else {
+            let destination = {
+                let app = app_config
+                    .read()
+                    .map_err(|_| anyhow!("mobile app config lock poisoned"))?;
+                mobile_join_roster_destination(&app, &queued.recipient_npub)?
+            };
+            let Some(destination) = destination else {
                 tracing::warn!(
                     recipient = %queued.recipient_npub,
                     "mobile: queued join-roster recipient is not in the active roster"
@@ -772,12 +777,12 @@ impl MobileTunnel {
         join_roster: &JoinRosterControl,
         timeout: Duration,
     ) -> Result<()> {
-        let config = self
-            .config
+        let app = self
+            .app_config
             .read()
-            .map_err(|_| anyhow!("mobile FIPS config lock poisoned"))?
+            .map_err(|_| anyhow!("mobile app config lock poisoned"))?
             .clone();
-        let destination = mobile_join_roster_destination(&config, recipient)?.with_context(|| {
+        let destination = mobile_join_roster_destination(&app, recipient)?.with_context(|| {
             format!("missing FIPS endpoint identity for participant {recipient}")
         })?;
         self.runtime.block_on(send_join_roster_with_receipt(

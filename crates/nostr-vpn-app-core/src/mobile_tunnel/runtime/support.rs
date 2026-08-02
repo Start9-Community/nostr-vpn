@@ -1,17 +1,15 @@
 fn mobile_join_roster_destination(
-    config: &MobileTunnelConfig,
+    app: &AppConfig,
     recipient: &str,
 ) -> Result<Option<PeerIdentity>> {
     let recipient = normalize_nostr_pubkey(recipient)?;
-    config
-        .peers
-        .iter()
-        .find(|peer| peer.participant_pubkey == recipient)
-        .map(|peer| {
-            PeerIdentity::from_npub(&peer.endpoint_npub)
-                .with_context(|| format!("invalid FIPS endpoint identity {}", peer.endpoint_npub))
-        })
-        .transpose()
+    if !app.participant_pubkeys_hex().contains(&recipient) {
+        return Ok(None);
+    }
+    let peer = FipsMeshPeerConfig::from_participant_pubkey(&recipient, Vec::new())?;
+    PeerIdentity::from_npub(&peer.endpoint_npub)
+        .with_context(|| format!("invalid FIPS endpoint identity {}", peer.endpoint_npub))
+        .map(Some)
 }
 
 async fn deliver_mobile_queued_join_roster(
