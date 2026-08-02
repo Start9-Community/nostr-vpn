@@ -62,8 +62,10 @@ iptables -I INPUT 1 \
   -j nvpn-wg-dns-through
 iptables -t nat -A POSTROUTING -s "${NVPN_MOBILE_WG_TUNNEL_CIDR%.*}.0/24" -o eth0 -j MASQUERADE
 
-tcpdump -i wg0 -nn -U -s 0 -w /fixture/resolver-clienthello.pcap \
-  'tcp dst port 443' >/fixture/tcpdump.log 2>&1 &
+resolver_tls_capture_filter='tcp dst port 443 and (dst host 1.1.1.1 or dst host 1.0.0.1 or dst host 9.9.9.9 or dst host 149.112.112.112 or dst host 8.8.8.8 or dst host 8.8.4.4)'
+tcpdump -i wg0 -nn -U -s 0 -C 1 -W 1 -Z root \
+  -w /fixture/resolver-clienthello.pcap "$resolver_tls_capture_filter" \
+  >/fixture/tcpdump.log 2>&1 &
 echo "$!" >/fixture/tls-capture.pid
 
 dnsmasq \

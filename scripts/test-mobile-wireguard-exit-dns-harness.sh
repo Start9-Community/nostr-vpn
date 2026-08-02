@@ -65,6 +65,19 @@ for tls_fixture in "$server" "$remote_native" "$fixture_lib"; do
     exit 1
   fi
 done
+resolver_filter='tcp dst port 443 and (dst host 1.1.1.1 or dst host 1.0.0.1 or dst host 9.9.9.9 or dst host 149.112.112.112 or dst host 8.8.8.8 or dst host 8.8.4.4)'
+for tls_fixture in "$server" "$remote_native"; do
+  grep -Fq "$resolver_filter" "$tls_fixture" \
+    && grep -Fq -- '-C 1 -W 1 -Z root' "$tls_fixture" \
+    || {
+      echo "$(basename "$tls_fixture") TLS capture is broad or unbounded" >&2
+      exit 1
+    }
+  if grep -Fq "'tcp dst port 443'" "$tls_fixture"; then
+    echo "$(basename "$tls_fixture") captures unrelated phone HTTPS" >&2
+    exit 1
+  fi
+done
 
 python3 - "$ROOT/scripts/mobile-wireguard-tls-sni-count.py" <<'PY'
 import runpy
@@ -78,26 +91,50 @@ parse = module["client_hello_snis"]
 name = b"cloudflare-dns.com"
 server_name = b"\x00" + len(name).to_bytes(2, "big") + name
 extension_value = len(server_name).to_bytes(2, "big") + server_name
-extension = b"\x00\x00" + len(extension_value).to_bytes(2, "big") + extension_value
+server_name_extension = (
+    b"\x00\x00" + len(extension_value).to_bytes(2, "big") + extension_value
+)
+padding_value = bytes(2600)
+padding_extension = b"\x00\x15" + len(padding_value).to_bytes(2, "big") + padding_value
+extensions = server_name_extension + padding_extension
 hello = (
     b"\x03\x03" + bytes(32) + b"\x00"
     + b"\x00\x02\x13\x01" + b"\x01\x00"
-    + len(extension).to_bytes(2, "big") + extension
+    + len(extensions).to_bytes(2, "big") + extensions
 )
 handshake = b"\x01" + len(hello).to_bytes(3, "big") + hello
 record = b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
 assert parse(record) == [name.decode()]
 assert parse(b"ordinary HTTPS bytes: " + name) == []
 
-tcp = bytes(12) + b"\x50" + bytes(7) + record
-ip = b"\x45" + bytes(8) + b"\x06" + bytes(10) + tcp
-pcap = (
-    b"\x4d\x3c\xb2\xa1" + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, 101)
-    + struct.pack("<IIII", 1, 0, len(ip), len(ip)) + ip
-)
+def packet(sequence, payload, destination=b"\x01\x01\x01\x01"):
+    tcp = struct.pack("!HHIIHHHH", 12345, 443, sequence, 0, 0x5018, 0, 0, 0) + payload
+    ip = struct.pack(
+        "!BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 0, 0, 64, 6, 0,
+        b"\x0a\x63\x4d\x02", destination,
+    )
+    return ip + tcp
+
+chunks = [record[offset:offset + 900] for offset in range(0, len(record), 900)]
+assert len(record) > 2 * 1280 and max(map(len, chunks)) <= 900
+packets = [
+    packet(1000 + 2 * 900, chunks[2]),
+    packet(1000, chunks[0]),
+    packet(1000 + 900, chunks[1]),
+    packet(1000 + 900, chunks[1]),
+    *[
+        packet(1000 + index * 900, chunks[index])
+        for index in range(3, len(chunks))
+    ],
+    packet(9000, record, b"\xc0\x00\x02\x01"),
+]
+pcap = b"\x4d\x3c\xb2\xa1" + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, 101)
+for packet_bytes in packets:
+    pcap += struct.pack("<IIII", 1, 0, len(packet_bytes), len(packet_bytes)) + packet_bytes
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory) / "resolver-clienthello.pcap"
-    path.write_bytes(pcap)
+    rotated_path = pathlib.Path(str(path) + "0")
+    rotated_path.write_bytes(pcap)
     assert module["captured_snis"](path) == [name.decode()]
 PY
 

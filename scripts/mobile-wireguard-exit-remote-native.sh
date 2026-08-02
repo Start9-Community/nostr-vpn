@@ -653,8 +653,9 @@ PY
     nft add rule inet "$nft_table" postrouting \
       ip saddr "$tunnel_subnet" oifname "$egress_interface" masquerade
 
-    tcpdump -i "$interface" -nn -U -s 0 \
-      -w "$state_dir/resolver-clienthello.pcap" 'tcp dst port 443' \
+    resolver_tls_capture_filter='tcp dst port 443 and (dst host 1.1.1.1 or dst host 1.0.0.1 or dst host 9.9.9.9 or dst host 149.112.112.112 or dst host 8.8.8.8 or dst host 8.8.4.4)'
+    tcpdump -i "$interface" -nn -U -s 0 -C 1 -W 1 -Z root \
+      -w "$state_dir/resolver-clienthello.pcap" "$resolver_tls_capture_filter" \
       >"$state_dir/tcpdump.log" 2>&1 &
     echo "$!" >"$state_dir/tls-capture.pid"
     # A separate accepting base chain cannot override a later host chain with
