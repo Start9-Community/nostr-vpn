@@ -29,7 +29,15 @@ CHECKPOINT = re.compile(
     r"UNDERLAY_VALIDATED|PAYLOAD_RECOVERY|VERIFIED)"
     r"|RELEASE_BACKGROUND_\d+_REQUESTED"
     r"|RELEASE_FOREGROUND_\d+_VERIFIED"
+    r"|RELEASE_CONNECTED_DIRECT_PASSED"
+    r"|RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED"
     r")"
+)
+DIRECT_CHECKPOINTS = frozenset(
+    {
+        "release_connected_direct_passed",
+        "release_connected_direct_relaunch_passed",
+    }
 )
 
 
@@ -152,6 +160,7 @@ class ProcessSampler:
             )
         app_pids: set[int] = set()
         tunnel_pids: set[int] = set()
+        direct_checkpoint_processes: dict[str, dict[str, int]] = {}
         valid_checkpoints: set[str] = set()
         for index, sample in enumerate(samples, start=1):
             if sample.get("error"):
@@ -165,21 +174,26 @@ class ProcessSampler:
                 errors.append(
                     f"process observation {index} appPids={app!r}"
                 )
-            else:
-                app_pids.add(int(app[0]))
             if not isinstance(tunnel, list) or len(tunnel) != 1:
                 errors.append(
                     f"process observation {index} packetTunnelPids={tunnel!r}"
                 )
-            else:
-                tunnel_pids.add(int(tunnel[0]))
             if (
                 isinstance(app, list)
                 and len(app) == 1
                 and isinstance(tunnel, list)
                 and len(tunnel) == 1
             ):
-                valid_checkpoints.add(str(sample.get("checkpoint", "")))
+                checkpoint = str(sample.get("checkpoint", ""))
+                valid_checkpoints.add(checkpoint)
+                if checkpoint in DIRECT_CHECKPOINTS:
+                    direct_checkpoint_processes[checkpoint] = {
+                        "appProcessIdentifier": int(app[0]),
+                        "packetTunnelProcessIdentifier": int(tunnel[0]),
+                    }
+                else:
+                    app_pids.add(int(app[0]))
+                    tunnel_pids.add(int(tunnel[0]))
         if len(app_pids) != 1:
             errors.append(f"distinct app PIDs={sorted(app_pids)}")
         if len(tunnel_pids) != 1:
@@ -198,6 +212,7 @@ class ProcessSampler:
             "activeSessionBeginSeen": self.begin_seen,
             "activeSessionEndSeen": self.end_seen,
             "appProcessIdentifiers": sorted(app_pids),
+            "directCheckpointProcesses": direct_checkpoint_processes,
             "observedCheckpoints": sorted(valid_checkpoints),
             "packetTunnelProcessIdentifiers": sorted(tunnel_pids),
             "passed": not errors,

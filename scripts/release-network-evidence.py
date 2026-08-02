@@ -491,10 +491,29 @@ def validate_ios_support(
             f"iOS {case} lacks exact shipped-UI markers",
         )
         if case == "through-exit":
+            direct_processes = process.get("directCheckpointProcesses")
             require(
                 "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1" in markers
                 and "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1"
-                in markers,
+                in markers
+                and isinstance(direct_processes, dict)
+                and all(
+                    isinstance(direct_processes.get(checkpoint), dict)
+                    and all(
+                        isinstance(
+                            direct_processes[checkpoint].get(identifier), int
+                        )
+                        and direct_processes[checkpoint][identifier] > 0
+                        for identifier in (
+                            "appProcessIdentifier",
+                            "packetTunnelProcessIdentifier",
+                        )
+                    )
+                    for checkpoint in (
+                        "release_connected_direct_passed",
+                        "release_connected_direct_relaunch_passed",
+                    )
+                ),
                 "iOS through-exit case lacks connected Direct restoration",
             )
         summaries[case] = {
@@ -504,6 +523,8 @@ def validate_ios_support(
             "observedCheckpointCount": len(observed),
             "sampleCount": process.get("sampleCount"),
         }
+        if case == "through-exit":
+            summaries[case]["directCheckpointProcesses"] = direct_processes
         paths.extend((process_path, marker_path))
 
     if mode == "wireguard-dns":

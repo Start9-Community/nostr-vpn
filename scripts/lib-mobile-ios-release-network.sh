@@ -1332,6 +1332,7 @@ if truthy(sys.argv[3]):
         expected.add(f"release_foreground_{cycle}_verified")
 if truthy(sys.argv[4]):
     expected.add("release_connected_direct_passed")
+    expected.add("release_connected_direct_relaunch_passed")
 required = set(receipt.get("requiredCheckpoints", []))
 observed = set(receipt.get("observedCheckpoints", []))
 if required != expected:
@@ -1342,6 +1343,25 @@ if not expected.issubset(observed):
     raise SystemExit(
         "iOS Release process sampler did not observe every expected checkpoint"
     )
+if truthy(sys.argv[4]):
+    direct_processes = receipt.get("directCheckpointProcesses")
+    if not isinstance(direct_processes, dict):
+        raise SystemExit("iOS Release connected Direct process proof is missing")
+    for checkpoint in (
+        "release_connected_direct_passed",
+        "release_connected_direct_relaunch_passed",
+    ):
+        processes = direct_processes.get(checkpoint)
+        if not isinstance(processes, dict) or any(
+            not isinstance(processes.get(key), int) or processes[key] <= 0
+            for key in (
+                "appProcessIdentifier",
+                "packetTunnelProcessIdentifier",
+            )
+        ):
+            raise SystemExit(
+                f"iOS Release {checkpoint} lacks one real PacketTunnel process"
+            )
 PY
   if bool_is_true "$underlay"; then
     mobile_continuity_validate \

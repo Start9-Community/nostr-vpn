@@ -298,6 +298,52 @@ fi
 grep -Fq 'duplicate iOS underlay markers: switch_1_requested' \
   "$temp/duplicate.err"
 
+python3 - "$ios_output_capture" "$temp" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("ios_capture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class FinishedThread:
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return False
+
+def finish(samples, name):
+    path = pathlib.Path(sys.argv[2], name)
+    sampler = module.ProcessSampler("fixture-device", path)
+    sampler.thread = FinishedThread()
+    sampler.begin_seen = True
+    sampler.end_seen = True
+    sampler.samples = samples
+    sampler.required_checkpoints = {row["checkpoint"] for row in samples}
+    status = sampler.finish()
+    return status, json.loads(path.read_text(encoding="utf-8"))
+
+samples = [
+    {"checkpoint": "active-session-begin", "appPids": [111], "packetTunnelPids": [211]},
+    {"checkpoint": "active-session-end", "appPids": [111], "packetTunnelPids": [211]},
+    {"checkpoint": "release_connected_direct_passed", "appPids": [111], "packetTunnelPids": [212]},
+    {"checkpoint": "release_connected_direct_relaunch_passed", "appPids": [112], "packetTunnelPids": [213]},
+]
+status, receipt = finish(samples, "direct-processes.json")
+assert status == 0 and receipt["passed"] is True
+assert receipt["appProcessIdentifiers"] == [111]
+assert receipt["packetTunnelProcessIdentifiers"] == [211]
+assert [proof["packetTunnelProcessIdentifier"] for proof in receipt["directCheckpointProcesses"].values()] == [212, 213]
+
+samples[-1] = {**samples[-1], "packetTunnelPids": []}
+status, receipt = finish(samples, "disconnected-direct-processes.json")
+assert status == 1 and receipt["passed"] is False
+assert "release_connected_direct_relaunch_passed" not in receipt["observedCheckpoints"]
+PY
+
 cat >"$temp/adb" <<'SH'
 #!/usr/bin/env bash
 if [[ "$*" == *" logcat "* ]]; then

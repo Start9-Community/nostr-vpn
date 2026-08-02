@@ -589,6 +589,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
         try proveDirect(spec, expectedSource: directSource)
         emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
+        // Leave the stable Direct session intact while the external process
+        // sampler records the PacketTunnel checkpoint.
+        Thread.sleep(forTimeInterval: 6)
 
         relaunch()
         openInternetTab()
@@ -598,6 +601,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
         try proveDirect(spec, expectedSource: directSource)
         emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1")
+        // Do not let the caller turn VPN off before the external sampler has
+        // recorded the post-relaunch PacketTunnel checkpoint.
+        Thread.sleep(forTimeInterval: 6)
     }
 
     private func releaseSpec() throws -> Spec {

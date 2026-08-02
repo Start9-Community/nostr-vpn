@@ -800,6 +800,7 @@ grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
 grep -Fq 'capture-mobile-ios-underlay-output.py' "$ios_release_gate" \
   && grep -Fq 'packetTunnelProcessIdentifiers' "$ios_underlay_capture" \
   && grep -Fq 'distinct packet-tunnel PIDs' "$ios_underlay_capture" \
+  && grep -Fq '"directCheckpointProcesses": direct_checkpoint_processes' "$ios_underlay_capture" \
   && grep -Fq '"requiredCheckpoints": sorted(required_checkpoints)' "$ios_underlay_capture" \
   && grep -Fq 'checkpoints without a valid process observation=' "$ios_underlay_capture" \
   && grep -Fq 'self.update_checkpoint("active-session-end")' "$ios_underlay_capture" \
@@ -885,11 +886,13 @@ for token in (
     "waitForVPNState(on: true",
     "try proveDirect",
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
+    "Thread.sleep(forTimeInterval: 6)",
     "relaunch()",
     'assertPicker("internet-source-picker", contains: "This device")',
     "waitForVPNState(on: true",
     "try proveDirect",
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1",
+    "Thread.sleep(forTimeInterval: 6)",
 ):
     offset = direct.find(token, offset + 1)
     if offset < 0:
@@ -909,8 +912,15 @@ if active_end > direct_call:
         "iOS process-continuity sampling includes an intentional app relaunch"
     )
 capture = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-if "RELEASE_CONNECTED_DIRECT_PASSED" in capture:
-    raise SystemExit("iOS process continuity still spans the Direct route restart")
+for token in (
+    "RELEASE_CONNECTED_DIRECT_PASSED",
+    "RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED",
+    '"directCheckpointProcesses": direct_checkpoint_processes',
+):
+    if token not in capture:
+        raise SystemExit(
+            "iOS connected Direct path lacks external PacketTunnel process proof"
+        )
 PY
 if grep -Fq -- '--nvpn-debug-' \
   "$ios_release_gate" "$ios_release_ui" "$ios_release_ui_support" "$ios_release_underlay"
