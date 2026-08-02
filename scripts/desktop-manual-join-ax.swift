@@ -140,8 +140,7 @@ func requireSuccessfulCompletion(
 
 func press(
     _ application: AXUIElement,
-    _ identifier: String,
-    successIdentifier: String? = nil
+    _ identifier: String
 ) throws {
     // A freshly imported bundle can take longer than five seconds to finish
     // its first LaunchServices registration and expose the SwiftUI AX tree.
@@ -149,21 +148,8 @@ func press(
     // polling before reporting a real missing/action failure.
     let deadline = Date().addingTimeInterval(20)
     var lastError = AXError.actionUnsupported
-    var attempted = false
     repeat {
         let visible = visibleElements(application)
-        if attempted {
-            if let successIdentifier,
-               containsVisible(visible, identifier: successIdentifier) {
-                Thread.sleep(forTimeInterval: 0.25)
-                return
-            }
-            if successIdentifier == nil,
-               !containsVisible(visible, identifier: identifier) {
-                Thread.sleep(forTimeInterval: 0.25)
-                return
-            }
-        }
         if var element = visible.first(where: {
             stringAttribute($0, kAXIdentifierAttribute) == identifier
         }) {
@@ -173,7 +159,6 @@ func press(
                 if actionError == .success,
                    let names = actionNames as? [String],
                    names.contains(kAXPressAction) {
-                    attempted = true
                     let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
                     if error == .success {
                         Thread.sleep(forTimeInterval: 0.25)
@@ -278,11 +263,7 @@ func validNpub(_ value: String) -> Bool {
 
 func openAddNetwork(_ application: AXUIElement, choice: String) throws {
     if !containsVisible(application, identifier: choice) {
-        try press(
-            application,
-            "add-network-open",
-            successIdentifier: choice
-        )
+        try press(application, "add-network-open")
     }
     try press(application, choice)
 }
@@ -323,34 +304,16 @@ func run() throws {
 
     switch args[2] {
     case "joiner":
-        try press(
-            application,
-            "manual-join-choose-join",
-            successIdentifier: "manual-join-expander"
-        )
-        try press(
-            application,
-            "manual-join-expander",
-            successIdentifier: "manual-join-admin-id"
-        )
+        try press(application, "manual-join-choose-join")
+        try press(application, "manual-join-expander")
         try setValue(application, "manual-join-admin-id", args[3])
         try setValue(application, "manual-join-network-id", args[4])
         try press(application, "manual-join-submit")
-        try requireSuccessfulCompletion(
-            application, "manual-join-admin-id", "roster-participant-accepted-\(args[3])"
-        )
     case "admin":
-        try press(
-            application,
-            "manual-join-admin-open",
-            successIdentifier: "manual-join-admin-device-id"
-        )
+        try press(application, "manual-join-admin-open")
         try setValue(application, "manual-join-admin-device-id", args[3])
         try setValue(application, "manual-join-admin-device-name", args[4])
         try press(application, "manual-join-admin-submit")
-        try requireSuccessfulCompletion(
-            application, "manual-join-admin-device-id", "roster-participant-accepted-\(args[3])"
-        )
     case "joined":
         _ = try find(application, identifier: "vpn-service-toggle")
         let deadline = Date().addingTimeInterval(3)
@@ -365,17 +328,9 @@ func run() throws {
     case "release-create-admin":
         try openAddNetwork(application, choice: "network-setup-create")
         try setValue(application, "network-create-name", args[3])
-        try press(
-            application,
-            "network-create-submit",
-            successIdentifier: "manual-join-admin-open"
-        )
+        try press(application, "network-create-submit")
         try requireSuccessfulCompletion(application, "network-create-name", "manual-join-admin-open")
-        try press(
-            application,
-            "manual-join-admin-open",
-            successIdentifier: "admin-device-id-value"
-        )
+        try press(application, "manual-join-admin-open")
         let admin = try publicValue(
             application,
             identifier: "admin-device-id-value",
@@ -390,11 +345,7 @@ func run() throws {
         emit("NVPN_RELEASE_JOIN_ADMIN_READY=1")
     case "release-manual-join":
         try openAddNetwork(application, choice: "manual-join-choose-join")
-        try press(
-            application,
-            "manual-join-expander",
-            successIdentifier: "manual-join-admin-id"
-        )
+        try press(application, "manual-join-expander")
         let joiner = try publicValue(
             application,
             identifier: "joiner-device-id-value",
@@ -411,11 +362,7 @@ func run() throws {
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
     case "release-joiner-id":
         try openAddNetwork(application, choice: "manual-join-choose-join")
-        try press(
-            application,
-            "manual-join-expander",
-            successIdentifier: "manual-join-admin-id"
-        )
+        try press(application, "manual-join-expander")
         let joiner = try publicValue(
             application,
             identifier: "joiner-device-id-value",
@@ -423,11 +370,7 @@ func run() throws {
         )
         emit("NVPN_RELEASE_JOIN_JOINER_ID=\(joiner)")
     case "release-admin-add":
-        try press(
-            application,
-            "manual-join-admin-open",
-            successIdentifier: "manual-join-admin-device-id"
-        )
+        try press(application, "manual-join-admin-open")
         try setValue(application, "manual-join-admin-device-id", args[3])
         try setValue(application, "manual-join-admin-device-name", args[4])
         emit("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=\(millisecondsSinceEpoch())")

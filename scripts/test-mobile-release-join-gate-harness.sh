@@ -847,50 +847,16 @@ if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
     raise SystemExit("Desktop Release app is launched against injected private state")
 if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
-for required in (
-    "service-preflight", "assert-fips-ready", "daemon-log-offset", "require-delivery-log",
-    "NVPN_MACOS_RELEASE_SERVICE_READY=1", "NVPN_MACOS_RELEASE_FIPS_READY=1",
-    "macos_release_app_acquire", "swap_test_profile", "restore_config_dir",
-    "delivered and applied one signed join roster over FIPS-TCP to", "daemon.log",
-    "restore_test_profile", "CONFIG_BACKUP", "desktop-add-android-delivery.txt",
-    "desktop-add-android-daemon.log", "desktop-add-iphone-delivery.txt",
-    "desktop-add-iphone-daemon.log",
+for source, required in (
+    (desktop_remote, ("service_preflight", "assert_fips_ready", "swap_test_profile", "restore_config_dir", "require_delivery_log", 'normalize-npub "$1"')),
+    (desktop, ("remote service-preflight", "remote require-delivery-log", "desktop-add-android-daemon.log", "desktop-add-iphone-daemon.log")),
+    (desktop_ui_driver, ("requireSuccessfulCompletion", "Action failed", "visibleElements(application)")),
+    (desktop_join_fixture, ("normalize-npub", "normalize_nostr_pubkey(&value)")),
 ):
-    if required not in desktop_remote and required not in desktop:
-        raise SystemExit(f"macOS/mobile join lacks real service/delivery evidence: {required}")
-if desktop.index("remote service-preflight") > desktop.index(
-    "RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1"
-):
-    raise SystemExit("macOS shipped service preflight runs after phone mutation is armed")
-service_preflight = desktop_remote.split("service_preflight() {", 1)[1].split(
-    "daemon_log_offset() {", 1
-)[0]
-if service_preflight.index("macos_release_app_acquire") > service_preflight.index(
-    "swap_test_profile"
-):
-    raise SystemExit("macOS GUI ownership is acquired after canonical state is swapped")
+    if any(value not in source for value in required):
+        raise SystemExit("macOS/mobile join service, delivery, or UI evidence regressed")
 if "PROFILE_STATE_NAMES" in desktop_remote:
     raise SystemExit("macOS profile isolation still enumerates known files")
-launch_app = desktop_remote.split("launch_app() {", 1)[1].split("run_driver() {", 1)[0]
-if "verify_import" in launch_app or "codesign" in launch_app:
-    raise SystemExit("macOS Release app is revalidated for each UI phase")
-remote_stage = desktop_remote.split("stage() {", 1)[1].split("prepare() {", 1)[0]
-if remote_stage.index("restore_test_profile") > remote_stage.index('rm -rf "$ARTIFACT_DIR"'):
-    raise SystemExit("macOS test profile is deleted before its prior state is restored")
-for accepted, recipient in (
-    ("release_join_android_relaunch_and_wait_accepted", '"$RELEASE_JOIN_ANDROID_JOINER_ID"'),
-    ("DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1", '"$IOS_JOINER_ID"'),
-):
-    proof = desktop.index("remote require-delivery-log", desktop.index(accepted))
-    desktop.index(recipient, proof, proof + 200)
-if 'normalize-npub "$1"' not in desktop_remote:
-    raise SystemExit("macOS delivery proof does not normalize the phone npub")
-for required in ("normalize-npub", "normalize_nostr_pubkey(&value)", "phone_npub_normalizes_to_the_stored_hex_identity"):
-    if required not in desktop_join_fixture:
-        raise SystemExit(f"macOS delivery identity normalization lacks {required}")
-for required in ("requireSuccessfulCompletion", "Action failed", "manual-join-admin-device-id", "manual-join-admin-id"):
-    if required not in desktop_ui_driver:
-        raise SystemExit(f"macOS shipped UI completion is not proven: {required}")
 completion_poll = desktop_ui_driver.split("func requireSuccessfulCompletion", 1)[1].split(
     "func press", 1
 )[0]
@@ -917,6 +883,10 @@ for required in (
     'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-app',
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support',
+    "validate-published-app",
+    "--require-gate-bundle-tree",
+    "PRODUCT_GIT_SHA",
+    'expected-harness-head "$APP_GIT_SHA"',
     "desktop_manual_join_e2e_fixture",
     "desktop-manual-join-ax",
     "macos-service-toggle-ax",

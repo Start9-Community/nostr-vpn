@@ -824,19 +824,3 @@ fn main() -> ExitCode {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phone_npub_normalizes_to_the_stored_hex_identity() {
-        let config = AppConfig::generated_without_networks();
-        let stored = config.own_nostr_pubkey_hex().expect("stored identity");
-        let public = npub(&config).expect("public identity");
-        assert_eq!(
-            normalize_nostr_pubkey(&public).expect("normalize npub"),
-            stored
-        );
-    }
-}

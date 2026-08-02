@@ -89,6 +89,8 @@ HOST_SERVICE_DRIVER="$HOST_SUPPORT/drivers/macos-service-toggle-ax"
 HOST_ARCHIVE="$PRIVATE_DIR/macos-release-gate.zip"
 HOST_RECEIPT="$PRIVATE_DIR/artifact.json"
 PUBLICATION_DIR="$RESULT_DIR/macos/publication"
+CACHED_APP="$PUBLICATION_DIR/Nostr VPN.app"
+CACHED_RECEIPT="$PUBLICATION_DIR/artifact.json"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
@@ -114,6 +116,8 @@ export RELEASE_JOIN_DELIVERY_WAIT_SECS RELEASE_JOIN_CAMERA_WAIT_SECS
 release_join_require_clean_fips
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+PRODUCT_GIT_SHA="$APP_GIT_SHA"
+PRODUCT_GIT_TREE="$APP_GIT_TREE"
 APP_SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
 release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
@@ -164,9 +168,11 @@ remote() {
   shift
   local remote_command argument
   printf -v remote_command \
-    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q %q %q' \
+    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_HARNESS_GIT_SHA=%q NVPN_EXPECTED_HARNESS_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q %q %q' \
     "$GUEST_REPO" \
     "../fips" \
+    "$PRODUCT_GIT_SHA" \
+    "$PRODUCT_GIT_TREE" \
     "$APP_GIT_SHA" \
     "$APP_GIT_TREE" \
     "$RELEASE_JOIN_FIPS_SHA" \
@@ -267,12 +273,48 @@ assert_delivery_deadline() {
     >>"$RESULT_DIR/macos/delivery-times.tsv"
 }
 
+read_product_identity() {
+  local extra
+  IFS=$'\t' read -r PRODUCT_GIT_SHA PRODUCT_GIT_TREE extra < <(
+    python3 - "$1" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1], encoding="utf-8"))
+print(value.get("appGitSha", ""), value.get("appGitTree", ""), sep="\t")
+PY
+  )
+  [[ "$PRODUCT_GIT_SHA" =~ ^[0-9a-f]{40}$ \
+    && "$PRODUCT_GIT_TREE" =~ ^[0-9a-f]{40}$ \
+    && -z "${extra:-}" ]] || {
+    echo "Cached macOS Release receipt has no exact product identity" >&2
+    return 1
+  }
+}
+
 prepare_host_artifact() {
   local build_log="$RESULT_DIR/macos/host-build.log"
   local support
   rm -rf "$HOST_PACKAGE" "$HOST_SUPPORT"
   rm -f "$HOST_ARCHIVE" "$HOST_RECEIPT"
-  if ! (
+  : >"$build_log"
+  if [[ -d "$CACHED_APP" || -f "$CACHED_RECEIPT" ]]; then
+    [[ -d "$CACHED_APP" && -f "$CACHED_RECEIPT" ]] || {
+      echo "Cached macOS Release app/receipt pair is incomplete" >&2
+      return 1
+    }
+    read_product_identity "$CACHED_RECEIPT"
+    python3 "$ROOT/scripts/macos_release_join_artifact.py" validate-published-app \
+      --receipt "$CACHED_RECEIPT" \
+      --app "$CACHED_APP" \
+      --expected-app-head "$PRODUCT_GIT_SHA" \
+      --expected-app-tree "$PRODUCT_GIT_TREE" \
+      --expected-team "$EXPECTED_MACOS_TEAM" \
+      --expected-identity-sha1 "$MACOS_SIGNING_IDENTITY" \
+      --expected-signer-sha256 "$EXPECTED_MACOS_CERT" \
+      --require-gate-bundle-tree \
+      >"$RESULT_DIR/macos/host-app-reuse.json"
+    mkdir -p "$(dirname "$HOST_APP")"
+    ditto "$CACHED_APP" "$HOST_APP"
+  elif ! (
     cd "$HOST_BUILD_ROOT"
     MACOS_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" \
       NVPN_BUILD_GIT_SHA="$APP_GIT_SHA" \
@@ -283,12 +325,19 @@ prepare_host_artifact() {
       NVPN_MACOS_RUST_TARGETS=aarch64-apple-darwin \
       NVPN_MACOS_REQUIRE_SIGNING=1 \
       "$HOST_BUILD_ROOT/scripts/macos-build" macos-app
+  ) >>"$build_log" 2>&1
+  then
+    tail -n 120 "$build_log" >&2 || true
+    return 1
+  fi
+  if ! (
+    cd "$HOST_BUILD_ROOT"
     NVPN_FIPS_REPO_PATH="$HOST_FIPS_ROOT" \
       SOURCE_DATE_EPOCH="$APP_SOURCE_DATE_EPOCH" \
       NVPN_MACOS_HOST_TARGET=aarch64-apple-darwin \
       NVPN_MACOS_GATE_SUPPORT_DIR="$HOST_SUPPORT" \
       "$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support
-  ) >"$build_log" 2>&1
+  ) >>"$build_log" 2>&1
   then
     tail -n 120 "$build_log" >&2 || true
     return 1
@@ -338,8 +387,10 @@ prepare_host_artifact() {
       "$HOST_PACKAGE/drivers/macos-service-toggle-ax" \
     --app-root "$ROOT" \
     --fips-root "$HOST_FIPS_ROOT" \
-    --expected-app-head "$APP_GIT_SHA" \
-    --expected-app-tree "$APP_GIT_TREE" \
+    --expected-app-head "$PRODUCT_GIT_SHA" \
+    --expected-app-tree "$PRODUCT_GIT_TREE" \
+    --expected-harness-head "$APP_GIT_SHA" \
+    --expected-harness-tree "$APP_GIT_TREE" \
     --expected-fips-head "$RELEASE_JOIN_FIPS_SHA" \
     --expected-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
     --expected-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
@@ -418,6 +469,7 @@ esac
 
 case "$ARTIFACT_ACTION" in
   verify-only)
+    read_product_identity "$RESULT_DIR/macos/artifact.json"
     remote verify-import | tee "$RESULT_DIR/macos/verify-import.log"
     ;;
   full|prepare-only)
@@ -742,8 +794,10 @@ if (
     raise SystemExit("macOS/iPhone directional relaunch evidence is incomplete")
 if (
     artifact.get("receiptSchema") != 1
-    or artifact.get("appGitSha") != app_sha
-    or artifact.get("appGitTree") != app_tree
+    or artifact.get("harnessGitSha") != app_sha
+    or artifact.get("harnessGitTree") != app_tree
+    or not artifact.get("appGitSha")
+    or not artifact.get("appGitTree")
     or artifact.get("companySigningVerified") is not True
     or not artifact.get("appExecutableSha256")
 ):
@@ -796,8 +850,10 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             "platform": "macos",
             "artifact": {
                 "type": "signed macOS Release app",
-                "appGitSha": app_sha,
-                "appGitTree": app_tree,
+                "appGitSha": artifact["appGitSha"],
+                "appGitTree": artifact["appGitTree"],
+                "harnessGitSha": app_sha,
+                "harnessGitTree": app_tree,
                 "artifactReceiptSha256": hashlib.sha256(
                     artifact_path.read_bytes()
                 ).hexdigest(),

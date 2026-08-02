@@ -69,6 +69,20 @@ def git_snapshot(root: pathlib.Path) -> dict[str, str]:
     }
 
 
+def git_snapshot_at(root: pathlib.Path, head: str) -> dict[str, str]:
+    if git_text(root, "rev-parse", "HEAD") == head:
+        return git_snapshot(root)
+    resolved = git_text(root, "rev-parse", f"{head}^{{commit}}")
+    if resolved != head:
+        raise ValueError(f"source commit is not exact: {head}")
+    index = run(["git", "-C", str(root), "ls-tree", "-r", "-z", head])
+    return {
+        "head": head,
+        "tree": git_text(root, "rev-parse", f"{head}^{{tree}}"),
+        "manifest": hashlib.sha256(index).hexdigest(),
+    }
+
+
 def fips_version(root: pathlib.Path) -> str:
     manifest = root / "crates" / "fips-core" / "Cargo.toml"
     text = manifest.read_text(encoding="utf-8")
@@ -201,7 +215,8 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 f"macOS Release package does not contain {path}"
             ) from error
-    app_source = git_snapshot(app_root)
+    app_source = git_snapshot_at(app_root, args.expected_app_head)
+    harness_source = git_snapshot(app_root)
     fips_source = git_snapshot(fips_root)
     expected_identity = normalized_hex(
         args.expected_identity_sha1, 40, "signing identity SHA-1"
@@ -216,6 +231,8 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     expected = {
         "appGitSha": args.expected_app_head,
         "appGitTree": args.expected_app_tree,
+        "harnessGitSha": args.expected_harness_head,
+        "harnessGitTree": args.expected_harness_tree,
         "fipsGitSha": args.expected_fips_head,
         "fipsGitTree": args.expected_fips_tree,
         "fipsCoreVersion": args.expected_fips_version,
@@ -223,6 +240,8 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     actual = {
         "appGitSha": app_source["head"],
         "appGitTree": app_source["tree"],
+        "harnessGitSha": harness_source["head"],
+        "harnessGitTree": harness_source["tree"],
         "fipsGitSha": fips_source["head"],
         "fipsGitTree": fips_source["tree"],
         "fipsCoreVersion": fips_version(fips_root),
@@ -273,7 +292,10 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "serviceToggleDriverCodeDirectoryHash": service_driver_signature["cdhash"],
         "appGitSha": app_source["head"],
         "appGitTree": app_source["tree"],
+        "harnessGitSha": harness_source["head"],
+        "harnessGitTree": harness_source["tree"],
         "appSourceManifestSha256": app_source["manifest"],
+        "harnessSourceManifestSha256": harness_source["manifest"],
         "fipsGitSha": fips_source["head"],
         "fipsGitTree": fips_source["tree"],
         "fipsSourceManifestSha256": fips_source["manifest"],
@@ -319,6 +341,8 @@ def validate_receipt(args: argparse.Namespace) -> None:
         "serviceToggleDriverSha256": observed["serviceToggleDriverSha256"],
         "appGitSha": observed["appGitSha"],
         "appGitTree": observed["appGitTree"],
+        "harnessGitSha": observed["harnessGitSha"],
+        "harnessGitTree": observed["harnessGitTree"],
         "fipsGitSha": observed["fipsGitSha"],
         "fipsGitTree": observed["fipsGitTree"],
         "fipsSourceManifestSha256": observed["fipsSourceManifestSha256"],
@@ -346,6 +370,13 @@ def validate_published_app(args: argparse.Namespace) -> None:
         or receipt.get("companySigningVerified") is not True
     ):
         raise ValueError("macOS publication received the wrong gate receipt")
+    for name, expected in (
+        ("signingTeam", args.expected_team),
+        ("signingIdentitySha1", args.expected_identity_sha1),
+        ("signerCertificateSha256", args.expected_signer_sha256),
+    ):
+        if expected and receipt.get(name, "").lower() != expected.lower():
+            raise ValueError(f"macOS publication receipt {name} is not pinned")
     for name, expected in (
         ("appGitSha", args.expected_app_head),
         ("appGitTree", args.expected_app_tree),
@@ -406,6 +437,8 @@ def add_common_arguments(command: argparse.ArgumentParser) -> None:
         "fips_root",
         "expected_app_head",
         "expected_app_tree",
+        "expected_harness_head",
+        "expected_harness_tree",
         "expected_fips_head",
         "expected_fips_tree",
         "expected_fips_version",
@@ -432,6 +465,9 @@ def parser() -> argparse.ArgumentParser:
     publication.add_argument("--expected-app-head", required=True)
     publication.add_argument("--expected-app-tree", required=True)
     publication.add_argument("--require-gate-bundle-tree", action="store_true")
+    publication.add_argument("--expected-team")
+    publication.add_argument("--expected-identity-sha1")
+    publication.add_argument("--expected-signer-sha256")
     return result
 
 

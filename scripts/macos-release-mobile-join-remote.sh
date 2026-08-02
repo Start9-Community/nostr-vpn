@@ -18,6 +18,8 @@ ARCHIVE="$ARTIFACT_DIR/macos-release-gate.zip"
 RECEIPT="$ARTIFACT_DIR/artifact.json"
 EXPECTED_APP="${NVPN_EXPECTED_APP_GIT_SHA:-}"
 EXPECTED_APP_TREE="${NVPN_EXPECTED_APP_GIT_TREE:-}"
+EXPECTED_HARNESS="${NVPN_EXPECTED_HARNESS_GIT_SHA:-}"
+EXPECTED_HARNESS_TREE="${NVPN_EXPECTED_HARNESS_GIT_TREE:-}"
 EXPECTED_FIPS="${NVPN_EXPECTED_FIPS_GIT_SHA:-}"
 EXPECTED_FIPS_TREE="${NVPN_EXPECTED_FIPS_GIT_TREE:-}"
 EXPECTED_FIPS_VERSION="${NVPN_EXPECTED_FIPS_VERSION:-}"
@@ -232,6 +234,8 @@ verify_import() {
     --fips-root "$FIPS_PATH" \
     --expected-app-head "$EXPECTED_APP" \
     --expected-app-tree "$EXPECTED_APP_TREE" \
+    --expected-harness-head "$EXPECTED_HARNESS" \
+    --expected-harness-tree "$EXPECTED_HARNESS_TREE" \
     --expected-fips-head "$EXPECTED_FIPS" \
     --expected-fips-tree "$EXPECTED_FIPS_TREE" \
     --expected-fips-version "$EXPECTED_FIPS_VERSION" \
@@ -362,10 +366,6 @@ case "${1:-}" in
     [[ $# == 1 ]] || { echo "usage: $0 service-preflight" >&2; exit 2; }
     service_preflight
     ;;
-  assert-fips-ready)
-    [[ $# == 1 ]] || { echo "usage: $0 assert-fips-ready" >&2; exit 2; }
-    assert_fips_ready
-    ;;
   daemon-log-offset)
     [[ $# == 1 ]] || { echo "usage: $0 daemon-log-offset" >&2; exit 2; }
     daemon_log_offset
@@ -379,7 +379,7 @@ case "${1:-}" in
     macos_release_app_restore
     ;;
   *)
-    echo "usage: $0 <stage|prepare|verify-import|service-preflight|assert-fips-ready|daemon-log-offset|require-delivery-log|create-admin|joiner-id|manual-join|admin-add|verify|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|verify-import|service-preflight|daemon-log-offset|require-delivery-log|create-admin|joiner-id|manual-join|admin-add|verify|cleanup>" >&2
     exit 2
     ;;
 esac

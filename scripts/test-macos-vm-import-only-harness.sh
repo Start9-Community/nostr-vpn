@@ -75,6 +75,10 @@ for required in (
     '--fips-root "$HOST_FIPS_ROOT"',
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-app',
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support',
+    'validate-published-app',
+    '--require-gate-bundle-tree',
+    'PRODUCT_GIT_SHA',
+    '--expected-harness-head "$APP_GIT_SHA"',
     "desktop_manual_join_e2e_fixture",
     "desktop-manual-join-ax",
     "macos-service-toggle-ax",
@@ -103,6 +107,9 @@ for required in (
     "manualJoinFixtureCodeDirectoryHash",
     "manualJoinDriverCodeDirectoryHash",
     "serviceToggleDriverCodeDirectoryHash",
+    "harnessGitSha",
+    "harnessGitTree",
+    "harnessSourceManifestSha256",
     "tree_sha256(package)",
 ):
     if required not in artifact:
@@ -338,6 +345,11 @@ signature = {
 }
 module.inspect_signature = lambda path, deep=False: dict(signature)
 module.git_snapshot = lambda path: {
+    "head": ("7" if pathlib.Path(path).name == "app-source" else "4") * 40,
+    "tree": ("8" if pathlib.Path(path).name == "app-source" else "5") * 40,
+    "manifest": ("9" if pathlib.Path(path).name == "app-source" else "6") * 64,
+}
+module.git_snapshot_at = lambda path, head: {
     "head": "4" * 40,
     "tree": "5" * 40,
     "manifest": "6" * 64,
@@ -379,6 +391,8 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
         fips_root=str(work / "fips-source"),
         expected_app_head="4" * 40,
         expected_app_tree="5" * 40,
+        expected_harness_head="7" * 40,
+        expected_harness_tree="8" * 40,
         expected_fips_head="4" * 40,
         expected_fips_tree="5" * 40,
         expected_fips_version="0.4.45",
@@ -389,6 +403,9 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
     )
     module.create_receipt(args)
     module.validate_receipt(args)
+    value = module.load_json(receipt)
+    assert value["appGitSha"] == "4" * 40
+    assert value["harnessGitSha"] == "7" * 40
     for path in (executable, cli, fixture, manual, service):
         original = path.read_bytes()
         path.write_bytes(original + b"-tampered")
