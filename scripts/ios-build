@@ -281,11 +281,6 @@ run_ios_archive() {
   local NVPN_IOS_RUST_PROFILE="release"
   export NVPN_IOS_RUST_PROFILE
   prepare_frozen_revision_args
-  if [[ -d "$ARCHIVE_PATH" && ! -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then
-    write_frozen_archive_receipt
-    echo "Recovered and verified the exact frozen iOS archive receipt."
-    return
-  fi
   if [[ -e "$ARCHIVE_PATH" || -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then
     if [[ -d "$ARCHIVE_PATH" && -f "$FROZEN_ARCHIVE_RECEIPT" ]] \
       && validate_frozen_archive

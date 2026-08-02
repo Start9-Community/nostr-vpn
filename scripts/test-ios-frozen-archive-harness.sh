@@ -1049,16 +1049,17 @@ recovery = (
     'if [[ -d "$ARCHIVE_PATH" '
     '&& ! -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then'
 )
-if recovery not in archive or "write_frozen_archive_receipt" not in (
-    archive.split(recovery, 1)[1].split("\n  fi", 1)[0]
-):
-    raise SystemExit("archive-only recovery does not validate and freeze")
+if recovery in archive:
+    raise SystemExit("receiptless archive can synthesize Release provenance")
+partial_state_guard = (
+    'if [[ -e "$ARCHIVE_PATH" || -e "$FROZEN_ARCHIVE_RECEIPT" ]]'
+)
 if (
-    archive.index(recovery) > archive.index("ensure_profiles")
-    or 'if [[ -e "$ARCHIVE_PATH" || -e "$FROZEN_ARCHIVE_RECEIPT" ]]'
-    not in archive
+    partial_state_guard not in archive
+    or archive.index(partial_state_guard) > archive.index("ensure_profiles")
+    or "refusing to rebuild over it" not in archive
 ):
-    raise SystemExit("archive-only recovery can rebuild before validation")
+    raise SystemExit("receiptless archive is not rejected before rebuilding")
 if 'BUNDLE_ID" == "$NVPN_BUILTIN_IOS_BUNDLE_ID' not in ios_build:
     raise SystemExit("frozen archive permits non-production app identifiers")
 if 'NVPN_APP_VERSION_NAME" == "$source_version' not in ios_build:
