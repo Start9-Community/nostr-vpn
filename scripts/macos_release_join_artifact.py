@@ -61,7 +61,7 @@ def git_snapshot(root: pathlib.Path) -> dict[str, str]:
         )
         if not session_matches:
             raise ValueError(f"source checkout is dirty: {root}")
-    index = run(["git", "-C", str(root), "ls-files", "-s", "-z"])
+    index = run(["git", "-C", str(root), "ls-tree", "-r", "-z", "HEAD"])
     return {
         "head": git_text(root, "rev-parse", "HEAD"),
         "tree": git_text(root, "rev-parse", "HEAD^{tree}"),

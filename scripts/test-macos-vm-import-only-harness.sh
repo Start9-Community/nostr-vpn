@@ -321,7 +321,17 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-git-snapshot.") as tmp:
     subprocess.run(
         ["git", "-C", str(checkout), "commit", "-qm", "fixture"], check=True
     )
-    module.git_snapshot(checkout)
+    first_head = subprocess.check_output(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+    ).strip()
+    current_snapshot = module.git_snapshot(checkout)
+    tracked.write_text("next commit\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "commit", "-qm", "second fixture"], check=True
+    )
+    historical_snapshot = module.git_snapshot_at(checkout, first_head)
+    assert historical_snapshot["manifest"] == current_snapshot["manifest"]
     lock.write_text("realized local FIPS lock\n", encoding="utf-8")
     os.environ["NVPN_LOCAL_FIPS_SESSION_CARGO_TOML_SHA256"] = hashlib.sha256(
         manifest.read_bytes()
