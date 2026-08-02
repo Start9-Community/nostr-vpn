@@ -8,6 +8,7 @@ enum DriverError: Error, CustomStringConvertible {
     case missing(String)
     case action(String, AXError)
     case value(String, AXError)
+    case failedAction(String)
 
     var description: String {
         switch self {
@@ -19,6 +20,8 @@ enum DriverError: Error, CustomStringConvertible {
             return "AXPress failed for \(identifier): \(error.rawValue)"
         case .value(let identifier, let error):
             return "AX value update failed for \(identifier): \(error.rawValue)"
+        case .failedAction(let message):
+            return "shipped UI reported Action failed: \(message)"
         }
     }
 }
@@ -84,6 +87,50 @@ func containsVisible(_ application: AXUIElement, identifier: String) -> Bool {
         stringAttribute($0, kAXIdentifierAttribute) == identifier
             && boolAttribute($0, kAXHiddenAttribute) != true
     }
+}
+
+func visibleActionFailure(_ application: AXUIElement) -> String? {
+    let visible = descendants(application).filter {
+        boolAttribute($0, kAXHiddenAttribute) != true
+    }
+    guard visible.contains(where: { element in
+        [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].contains {
+            stringAttribute(element, $0) == "Action failed"
+        }
+    }) else {
+        return nil
+    }
+    return visible.lazy.compactMap { element in
+        [kAXValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute]
+            .map { stringAttribute(element, $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && $0 != "Action failed" && $0 != "OK" }
+    }.first ?? "unknown action error"
+}
+
+func requireSuccessfulCompletion(
+    _ application: AXUIElement,
+    dismissedIdentifier: String,
+    visibleIdentifier: String,
+    timeout: TimeInterval = 15
+) throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+        if let failure = visibleActionFailure(application) {
+            throw DriverError.failedAction(failure)
+        }
+        if !containsVisible(application, identifier: dismissedIdentifier),
+           containsVisible(application, identifier: visibleIdentifier) {
+            Thread.sleep(forTimeInterval: 0.25)
+            return
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    } while Date() < deadline
+    if let failure = visibleActionFailure(application) {
+        throw DriverError.failedAction(failure)
+    }
+    throw DriverError.missing(
+        "successful completion: dismissed \(dismissedIdentifier), visible \(visibleIdentifier)"
+    )
 }
 
 func press(
@@ -282,6 +329,11 @@ func run() throws {
         try setValue(application, "manual-join-admin-id", args[3])
         try setValue(application, "manual-join-network-id", args[4])
         try press(application, "manual-join-submit")
+        try requireSuccessfulCompletion(
+            application,
+            dismissedIdentifier: "manual-join-admin-id",
+            visibleIdentifier: "roster-participant-accepted-\(args[3])"
+        )
     case "admin":
         try press(
             application,
@@ -291,6 +343,11 @@ func run() throws {
         try setValue(application, "manual-join-admin-device-id", args[3])
         try setValue(application, "manual-join-admin-device-name", args[4])
         try press(application, "manual-join-admin-submit")
+        try requireSuccessfulCompletion(
+            application,
+            dismissedIdentifier: "manual-join-admin-device-id",
+            visibleIdentifier: "roster-participant-accepted-\(args[3])"
+        )
     case "joined":
         _ = try find(application, identifier: "vpn-service-toggle")
         let deadline = Date().addingTimeInterval(3)
@@ -309,6 +366,11 @@ func run() throws {
             application,
             "network-create-submit",
             successIdentifier: "manual-join-admin-open"
+        )
+        try requireSuccessfulCompletion(
+            application,
+            dismissedIdentifier: "network-create-name",
+            visibleIdentifier: "manual-join-admin-open"
         )
         try press(
             application,
@@ -344,10 +406,10 @@ func run() throws {
         try setValue(application, "manual-join-network-id", args[4])
         try press(application, "manual-join-submit")
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
-        _ = try find(
+        try requireSuccessfulCompletion(
             application,
-            identifier: "roster-participant-accepted-\(args[3])",
-            timeout: 15
+            dismissedIdentifier: "manual-join-admin-id",
+            visibleIdentifier: "roster-participant-accepted-\(args[3])"
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
     case "release-joiner-id":
@@ -373,10 +435,10 @@ func run() throws {
         try setValue(application, "manual-join-admin-device-name", args[4])
         emit("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=\(millisecondsSinceEpoch())")
         try press(application, "manual-join-admin-submit")
-        _ = try find(
+        try requireSuccessfulCompletion(
             application,
-            identifier: "roster-participant-accepted-\(args[3])",
-            timeout: 15
+            dismissedIdentifier: "manual-join-admin-device-id",
+            visibleIdentifier: "roster-participant-accepted-\(args[3])"
         )
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(args[3])")
     case "release-verify":

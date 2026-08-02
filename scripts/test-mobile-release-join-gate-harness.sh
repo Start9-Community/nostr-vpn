@@ -846,6 +846,52 @@ if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
 if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
 for required in (
+    "service-preflight",
+    "assert-fips-ready",
+    "observe-delivery",
+    "NVPN_MACOS_RELEASE_SERVICE_READY=1",
+    "NVPN_MACOS_RELEASE_FIPS_READY=1",
+    "join-roster-outbox",
+    "deliveryAttempts",
+    "daemon.log",
+    "restore_test_profile",
+    "TEST_STATE_BACKUP",
+):
+    if required not in desktop_remote and required not in desktop:
+        raise SystemExit(f"macOS/mobile join lacks real service/delivery evidence: {required}")
+if desktop.index("remote service-preflight") > desktop.index(
+    "RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1"
+):
+    raise SystemExit("macOS shipped service preflight runs after phone mutation is armed")
+remote_stage = desktop_remote.split("stage() {", 1)[1].split("prepare() {", 1)[0]
+if remote_stage.index("restore_test_profile") > remote_stage.index('rm -rf "$ARTIFACT_DIR"'):
+    raise SystemExit("macOS test profile is deleted before its prior state is restored")
+for evidence in (
+    "desktop-add-android-delivery.json",
+    "desktop-add-android-daemon.log",
+    "desktop-add-iphone-delivery.json",
+    "desktop-add-iphone-daemon.log",
+):
+    if evidence not in desktop:
+        raise SystemExit(f"macOS delivery diagnostics omit {evidence}")
+for recipient, alias in (
+    ("$RELEASE_JOIN_ANDROID_JOINER_ID", "ReleaseGatePhone"),
+    ("$IOS_JOINER_ID", "ReleaseGateIphone"),
+):
+    observe = desktop.index("remote observe-delivery")
+    observed_recipient = desktop.index(f'"{recipient}"', observe)
+    approve = desktop.index(f'remote admin-add "{recipient}" {alias}')
+    if observed_recipient > approve:
+        raise SystemExit(f"macOS delivery observer starts after approval for {alias}")
+for required in (
+    "requireSuccessfulCompletion",
+    "Action failed",
+    'dismissedIdentifier: "manual-join-admin-device-id"',
+    'dismissedIdentifier: "manual-join-admin-id"',
+):
+    if required not in desktop_ui_driver:
+        raise SystemExit(f"macOS shipped UI completion is not proven: {required}")
+for required in (
     "exec /usr/bin/env -i",
     "NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1",
     "NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID",

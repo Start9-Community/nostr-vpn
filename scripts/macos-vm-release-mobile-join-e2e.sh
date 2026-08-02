@@ -119,6 +119,7 @@ release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 remote_pid=""
 acceptance_observer_pids=()
+diagnostic_observer_pids=()
 remote_app_ownership_armed=0
 cleanup() {
   local status=$?
@@ -132,7 +133,13 @@ cleanup() {
   fi
   RELEASE_JOIN_IOS_TEST_PID=""
   local observer_pid
-  for observer_pid in "${acceptance_observer_pids[@]}"; do
+  for observer_pid in "${acceptance_observer_pids[@]-}"; do
+    [[ -n "$observer_pid" ]] || continue
+    kill "$observer_pid" >/dev/null 2>&1 || true
+    wait "$observer_pid" >/dev/null 2>&1 || true
+  done
+  for observer_pid in "${diagnostic_observer_pids[@]-}"; do
+    [[ -n "$observer_pid" ]] || continue
     kill "$observer_pid" >/dev/null 2>&1 || true
     wait "$observer_pid" >/dev/null 2>&1 || true
   done
@@ -441,6 +448,9 @@ if [[ "$ARTIFACT_ACTION" != "full" ]]; then
   exit 0
 fi
 
+remote_app_ownership_armed=1
+remote service-preflight | tee "$RESULT_DIR/macos/service-preflight.log"
+
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 [[ -n "$ANDROID_REQUESTED" ]] || {
   echo "Set NVPN_ANDROID_SERIAL to the exact physical Android phone" >&2
@@ -463,7 +473,6 @@ rm -f "$RESULT_DIR/macos/delivery-times.tsv"
 # macOS admin -> physical Android joiner.
 release_join_reset_android_state
 desktop_admin_log="$RESULT_DIR/macos/desktop-admin.log"
-remote_app_ownership_armed=1
 remote create-admin "ReleaseDesktopAdmin" >"$desktop_admin_log" 2>&1
 DESKTOP_ADMIN_ID="$(marker_value "$desktop_admin_log" NVPN_RELEASE_JOIN_ADMIN_ID)"
 DESKTOP_NETWORK_ID="$(marker_value "$desktop_admin_log" NVPN_RELEASE_JOIN_NETWORK_ID)"
@@ -471,6 +480,13 @@ release_join_valid_npub "$DESKTOP_ADMIN_ID"
 [[ -n "$DESKTOP_NETWORK_ID" ]]
 release_join_android_manual_submit "$DESKTOP_ADMIN_ID" "$DESKTOP_NETWORK_ID"
 desktop_add_log="$RESULT_DIR/macos/desktop-add-android.log"
+remote observe-delivery \
+  "$RELEASE_JOIN_ANDROID_JOINER_ID" \
+  "$((RELEASE_JOIN_UI_WAIT_SECS + RELEASE_JOIN_DELIVERY_WAIT_SECS + 5))" \
+  >"$RESULT_DIR/macos/desktop-add-android-delivery.json" \
+  2>"$RESULT_DIR/macos/desktop-add-android-daemon.log" &
+desktop_android_delivery_pid=$!
+diagnostic_observer_pids+=("$desktop_android_delivery_pid")
 remote admin-add "$RELEASE_JOIN_ANDROID_JOINER_ID" ReleaseGatePhone \
   >"$desktop_add_log" 2>&1 &
 remote_pid=$!
@@ -486,6 +502,7 @@ release_join_android_wait_join_complete "$DESKTOP_ADMIN_ID" \
 release_join_android_relaunch_and_wait_accepted "$DESKTOP_ADMIN_ID" \
   || { echo "Android did not retain the macOS signed roster across relaunch" >&2; exit 1; }
 desktop_completed_ms="$(release_join_now_ms)"
+wait "$desktop_android_delivery_pid"
 assert_delivery_deadline \
   "$desktop_submitted_ms" "$desktop_completed_ms" \
   "macOS-admin-to-Android-manual"
@@ -590,6 +607,13 @@ release_join_valid_npub "$IOS_JOINER_ID"
 release_join_ios_wait_marker NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10 \
   || { echo "iPhone did not submit through shipped manual-join controls" >&2; exit 1; }
 desktop_add_ios_log="$RESULT_DIR/macos/desktop-add-iphone.log"
+remote observe-delivery \
+  "$IOS_JOINER_ID" \
+  "$((RELEASE_JOIN_UI_WAIT_SECS + RELEASE_JOIN_DELIVERY_WAIT_SECS + 5))" \
+  >"$RESULT_DIR/macos/desktop-add-iphone-delivery.json" \
+  2>"$RESULT_DIR/macos/desktop-add-iphone-daemon.log" &
+desktop_iphone_delivery_pid=$!
+diagnostic_observer_pids+=("$desktop_iphone_delivery_pid")
 remote admin-add "$IOS_JOINER_ID" ReleaseGateIphone \
   >"$desktop_add_ios_log" 2>&1 &
 remote_pid=$!
@@ -618,6 +642,7 @@ iphone_joiner_relaunch_admin="$(
   }
 DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1
 desktop_ios_completed_ms="$(release_join_now_ms)"
+wait "$desktop_iphone_delivery_pid"
 assert_delivery_deadline \
   "$desktop_ios_submitted_ms" "$desktop_ios_completed_ms" \
   "macOS-admin-to-iPhone-manual"
