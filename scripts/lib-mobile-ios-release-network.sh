@@ -863,30 +863,66 @@ ios_release_network_xctrunner_installed() {
   [[ -n "${apps//[[:space:]]/}" ]]
 }
 
-ios_release_network_clear_forced_xctrunner() {
+ios_release_network_xctrunner_process_ids() {
   local device="$1"
-  local bundle="$IOS_BUNDLE_ID.UITests.xctrunner"
+  xcrun devicectl device info processes \
+    --device "$device" --json-output /dev/stdout --quiet \
+    | jq -r '
+      .result.runningProcesses[]?
+      | select(
+          .executable
+          | endswith(
+              "/NostrVpnIosUITests-Runner.app/NostrVpnIosUITests-Runner"
+            )
+        )
+      | .processIdentifier
+      | select(type == "number")
+    '
+}
+
+ios_release_network_stop_forced_xctrunner() {
+  local device="$1"
   local timeout="${NVPN_IOS_XCTRUNNER_STOP_TIMEOUT_SECS:-5}"
-  local deadline runner_status
+  local deadline runner_status process_ids process_id
   [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || {
     echo "iOS XCTest runner stop timeout must be positive seconds" >&2
     return 2
   }
-  xcrun devicectl device uninstall app \
-    --device "$device" "$bundle" --quiet >/dev/null 2>&1 || true
+  if ios_release_network_xctrunner_installed "$device"; then
+    :
+  else
+    runner_status=$?
+    [[ "$runner_status" -eq 1 ]] \
+      && echo "iOS scoped XCTest runner was not retained after forced termination" >&2 \
+      || echo "iOS could not verify the scoped XCTest runner installation" >&2
+    return 1
+  fi
+  process_ids="$(ios_release_network_xctrunner_process_ids "$device")" \
+    || return 1
+  while IFS= read -r process_id; do
+    [[ "$process_id" =~ ^[1-9][0-9]*$ ]] || continue
+    xcrun devicectl device process terminate \
+      --device "$device" --pid "$process_id" --quiet >/dev/null 2>&1 \
+      || return 1
+  done <<<"$process_ids"
   deadline=$((SECONDS + timeout))
   while ((SECONDS < deadline)); do
-    if ios_release_network_xctrunner_installed "$device"; then
-      sleep 0.1
-      continue
-    else
-      runner_status=$?
+    process_ids="$(ios_release_network_xctrunner_process_ids "$device")" \
+      || return 1
+    if [[ -z "${process_ids//[[:space:]]/}" ]]; then
+      if ios_release_network_xctrunner_installed "$device"; then
+        return 0
+      else
+        runner_status=$?
+      fi
+      [[ "$runner_status" -eq 1 ]] \
+        && echo "iOS scoped XCTest runner disappeared during forced termination" >&2 \
+        || echo "iOS could not verify the retained scoped XCTest runner" >&2
+      return 1
     fi
-    [[ "$runner_status" -eq 1 ]] && return 0
-    echo "iOS could not verify the scoped XCTest runner stopped" >&2
-    return 1
+    sleep 0.1
   done
-  echo "iOS scoped XCTest runner remained installed after forced termination" >&2
+  echo "iOS scoped XCTest runner process remained active after forced termination" >&2
   return 1
 }
 
@@ -1006,7 +1042,7 @@ ios_release_network_run_bounded_xcode() {
   fi
   [[ -z "$device_markers" ]] || rm -f "$device_markers"
   if [[ "$forced_kill" -eq 1 && -n "$device" ]]; then
-    ios_release_network_clear_forced_xctrunner "$device" || status=1
+    ios_release_network_stop_forced_xctrunner "$device" || status=1
   fi
   IOS_RELEASE_NETWORK_ACTIVE_PGID=""
   [[ -z "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]] \

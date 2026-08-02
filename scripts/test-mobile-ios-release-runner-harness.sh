@@ -79,7 +79,7 @@ printf '%s\n' \
   ios_release_network_copy_runner_markers() {
     cp "$device_marker" "$2"
   }
-  ios_release_network_clear_forced_xctrunner() {
+  ios_release_network_stop_forced_xctrunner() {
     fail "device marker success unexpectedly cleared the XCTest runner"
   }
   ios_release_network_run_bounded_xcode \
@@ -97,6 +97,7 @@ fi
 
 scoped_cleanup_log="$TEMP_ROOT/scoped-cleanup.log"
 stale_device_marker="$TEMP_ROOT/stale-device-marker.log"
+runner_process_probe_count="$TEMP_ROOT/runner-process-probe-count"
 printf '%s\n' \
   'NVPN_XCUITEST_RUN_ID=stale-run' \
   'NVPN_XCUITEST_STARTED=1' >"$stale_device_marker"
@@ -107,7 +108,15 @@ set +e
   }
   ios_release_network_xctrunner_installed() {
     printf '%s\n' installation-probe >>"$scoped_cleanup_log"
-    return 1
+    return 0
+  }
+  ios_release_network_xctrunner_process_ids() {
+    local count=0
+    [[ ! -f "$runner_process_probe_count" ]] \
+      || count="$(wc -l <"$runner_process_probe_count" | tr -d '[:space:]')"
+    printf '%s\n' process-probe >>"$runner_process_probe_count"
+    [[ "$count" -eq 0 ]] && printf '%s\n' 4242
+    return 0
   }
   xcrun() {
     printf 'xcrun %s\n' "$*" >>"$scoped_cleanup_log"
@@ -124,11 +133,16 @@ set -e
 [[ "$device_no_marker_status" -eq 125 ]] \
   || fail "device no-marker timeout returned $device_no_marker_status instead of 125"
 grep -Fxq \
-  'xcrun devicectl device uninstall app --device fixture-device fi.siriusbusiness.nvpn.UITests.xctrunner --quiet' \
+  'xcrun devicectl device process terminate --device fixture-device --pid 4242 --quiet' \
   "$scoped_cleanup_log" \
-  || fail "forced launch timeout did not uninstall only the nVPN XCTest runner"
-[[ "$(grep -Fxc installation-probe "$scoped_cleanup_log")" -eq 1 ]] \
-  || fail "forced launch timeout did not wait for scoped runner absence"
+  || fail "forced launch timeout did not terminate only the nVPN XCTest runner process"
+if grep -Fq 'device uninstall app' "$scoped_cleanup_log"; then
+  fail "forced launch timeout uninstalled the retained nVPN XCTest runner"
+fi
+[[ "$(grep -Fxc installation-probe "$scoped_cleanup_log")" -eq 2 ]] \
+  || fail "forced launch timeout did not verify the runner remained installed"
+[[ "$(wc -l <"$runner_process_probe_count" | tr -d '[:space:]')" -eq 2 ]] \
+  || fail "forced launch timeout did not verify the runner process stopped"
 [[ "$(grep -c '^xcrun ' "$scoped_cleanup_log")" -eq 1 ]] \
   || fail "forced launch timeout performed broad or repeated device cleanup"
 
