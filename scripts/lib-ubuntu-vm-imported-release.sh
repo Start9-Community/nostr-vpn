@@ -208,6 +208,10 @@ ubuntu_vm_import_release_bundle() {
   }
   local release_root bundle receipt app_sha app_tree app_version
   local harness_sha harness_tree
+  # load_release_env writes these through Bash's dynamic scope. Keep the
+  # product identity local so it cannot replace the caller's harness identity.
+  # shellcheck disable=SC2034
+  local APP_GIT_SHA APP_GIT_TREE
   local fips_sha fips_tree fips_version target evidence_dir remote_dir
   local lock_evidence root_lock_sha root_realized_lock_sha
   local linux_lock_sha linux_realized_lock_sha

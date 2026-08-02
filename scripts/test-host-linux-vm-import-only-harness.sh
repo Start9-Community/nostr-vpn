@@ -22,6 +22,7 @@ RECOVERY="$ROOT/scripts/ubuntu-vm-recover-stale-import.sh"
 RECOVERY_HARNESS="$ROOT/scripts/test-ubuntu-vm-stale-import-recovery-harness.sh"
 JOIN_SERVICE_CLEANUP_HARNESS="$ROOT/scripts/test-linux-release-mobile-join-service-cleanup-harness.sh"
 IMPORT_LOCK_HOLDER="$ROOT/scripts/ubuntu-vm-import-lock-holder.sh"
+IMPORT_ENV_ISOLATION_HARNESS="$ROOT/scripts/test-ubuntu-vm-import-env-isolation-harness.sh"
 ISOLATION_LIB="$ROOT/scripts/lib-host-linux-builder-isolation.sh"
 ISOLATION_HARNESS="$ROOT/scripts/test-host-linux-builder-isolation-harness.sh"
 CONTAINER_PAYLOAD="$ROOT/scripts/build-host-linux-vm-bundle-in-container.sh"
@@ -61,6 +62,7 @@ for executable in \
   "$RECOVERY_HARNESS" \
   "$JOIN_SERVICE_CLEANUP_HARNESS" \
   "$IMPORT_LOCK_HOLDER" \
+  "$IMPORT_ENV_ISOLATION_HARNESS" \
   "$ISOLATION_HARNESS" \
   "$CONTAINER_PAYLOAD" \
   "$REMOTE_BUILDER" \
@@ -558,6 +560,7 @@ grep -Fq UBUNTU_EXACT_DEB_PURGE_FAILURE_RETRY_OK \
 recovery_harness_output="$("$RECOVERY_HARNESS")"
 grep -Fq UBUNTU_STALE_IMPORT_RECOVERY_HARNESS_OK \
   <<<"$recovery_harness_output"
+"$IMPORT_ENV_ISOLATION_HARNESS"
 "$JOIN_SERVICE_CLEANUP_HARNESS"
 
 python3 - "$IMPORT_LIB" "$RELEASE_GATE" <<'PY'
