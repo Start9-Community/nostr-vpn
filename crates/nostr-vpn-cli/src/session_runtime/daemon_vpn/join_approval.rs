@@ -101,17 +101,6 @@ pub(super) fn start_queued_join_roster_deliveries(
         }
     };
     for (path, mut queued) in load_join_rosters(config_path) {
-        if !participants.contains(&queued.recipient_npub) {
-            finish_join_roster_delivery(
-                &path,
-                &queued.recipient_npub,
-                Err(anyhow::anyhow!(
-                    "recipient {} is not in the roster",
-                    queued.recipient_npub
-                )),
-            );
-            continue;
-        }
         if !claim_join_roster_delivery(&path) {
             continue;
         }
@@ -121,6 +110,18 @@ pub(super) fn start_queued_join_roster_deliveries(
             eprintln!(
                 "expired queued join approval for {}; removed it from the outbox",
                 queued.recipient_npub
+            );
+            continue;
+        }
+        if !participants.contains(&queued.recipient_npub) {
+            release_join_roster_delivery(&path);
+            finish_join_roster_delivery(
+                &path,
+                &queued.recipient_npub,
+                Err(anyhow::anyhow!(
+                    "recipient {} is not in the roster",
+                    queued.recipient_npub
+                )),
             );
             continue;
         }
