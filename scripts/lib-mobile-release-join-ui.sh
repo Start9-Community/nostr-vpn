@@ -229,7 +229,6 @@ release_join_android_open_devices() {
   fi
   release_join_android_wait_query description "Devices tab"
   release_join_android_tap description "Devices tab"
-  release_join_android_wait_query description "Open manual device approval"
 }
 
 release_join_android_open_link_device() {

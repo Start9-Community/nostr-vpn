@@ -34,6 +34,15 @@ done
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 
 (
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  release_join_android_launch() { :; }
+  release_join_android_query() { return 1; }
+  release_join_android_wait_query() { [[ "$*" == "description Devices tab" ]]; }
+  release_join_android_tap() { [[ "$*" == "description Devices tab" ]]; }
+  release_join_android_open_devices
+)
+
+(
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
   fake_adb() {
