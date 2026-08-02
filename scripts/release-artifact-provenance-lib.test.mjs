@@ -67,9 +67,15 @@ test('component proof retains only unchanged platform product inputs', () => {
     const macHarnessPaths = [
       'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
       'scripts/desktop-manual-join-ax.swift',
+      'scripts/desktop-mobile-manual-join-atspi.py',
+      'scripts/desktop-mobile-manual-join-windows-ui.ps1',
+      'scripts/lib-mobile-release-join-ui.sh',
       'scripts/macos-release-mobile-join-remote.sh',
       'scripts/macos-vm-release-mobile-join-e2e.sh',
       'scripts/macos_release_join_artifact.py',
+      'scripts/mobile-release-join-ui-query.py',
+      'scripts/mobile-wireguard-exit-e2e.sh',
+      'scripts/windows-vm-release-mobile-join-e2e.sh',
     ]
     for (const path of macHarnessPaths) write(join(root, path), 'harness')
     git('add', '.')

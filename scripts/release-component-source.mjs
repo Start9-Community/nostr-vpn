@@ -10,17 +10,23 @@ const sharedFiles = [
 const harnessOnlyPaths = new Set([
   'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
   'scripts/desktop-manual-join-ax.swift',
+  'scripts/desktop-mobile-manual-join-atspi.py',
+  'scripts/desktop-mobile-manual-join-windows-ui.ps1',
   'scripts/lib-mobile-android-release-gate.sh',
   'scripts/lib-mobile-android-underlay.sh',
   'scripts/lib-mobile-ios-release-network.sh',
+  'scripts/lib-mobile-release-join-ui.sh',
   'scripts/linux-release-mobile-join-remote.sh',
   'scripts/mobile-android-smoke.sh',
+  'scripts/mobile-release-join-ui-query.py',
+  'scripts/mobile-wireguard-exit-e2e.sh',
   'scripts/macos-release-mobile-join-remote.sh',
   'scripts/macos-vm-release-mobile-join-e2e.sh',
   'scripts/macos_release_join_artifact.py',
   'scripts/release-network-evidence.py',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
+  'scripts/windows-vm-release-mobile-join-e2e.sh',
 ])
 const buildScripts = {
   android: [/prepare-android-release-from-bundle/],
