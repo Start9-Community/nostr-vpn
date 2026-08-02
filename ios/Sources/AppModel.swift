@@ -352,10 +352,7 @@ final class AppModel: ObservableObject {
         let compatibility = Self.appStoreCompatibleState(current, core: core)
         state = compatibility.state
         state.vpnEnabled = vpnDesiredState.presentationEnabled(
-            runtimeEnabled: state.vpnEnabled,
-            reconciliationPending: pendingVpnTransitionEnabled != nil
-                || packetTunnelTransitionTask != nil
-                || startupTunnelReconciliationTask != nil
+            runtimeEnabled: state.vpnEnabled
         )
         if compatibility.removedPaidConfiguration && compatibility.vpnWasRunning {
             appStoreTunnelRefreshPending = true

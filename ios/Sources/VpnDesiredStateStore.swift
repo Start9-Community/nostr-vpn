@@ -23,13 +23,7 @@ struct VpnDesiredStateStore {
         defaults.set(enabled, forKey: Self.key)
     }
 
-    func presentationEnabled(
-        runtimeEnabled: Bool,
-        reconciliationPending: Bool
-    ) -> Bool {
-        guard reconciliationPending else {
-            return runtimeEnabled
-        }
+    func presentationEnabled(runtimeEnabled: Bool) -> Bool {
         return restore(runtimeEnabled: runtimeEnabled)
     }
 
