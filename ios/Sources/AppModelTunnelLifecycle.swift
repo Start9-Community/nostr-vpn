@@ -68,7 +68,8 @@ extension AppModel {
             return false
         }
         let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
-        if !needsStart {
+        let replacementRestartRequired = vpnController.replacementRestartRequired()
+        if !needsStart, !replacementRestartRequired {
             guard let desired = PacketTunnelController.routeState(
                 in: providerOptionsConfigJson
             ) else {
@@ -155,7 +156,11 @@ extension AppModel {
                     // OFF is already durable; keep runtime state visible until teardown is confirmed.
                     break
                 case .setEnabled(true, _), .syncConfig(_, _):
-                    dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")
+                    if let replacementError = error as? PacketTunnelReplacementError,
+                       replacementError.disconnectConfirmed
+                    {
+                        dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")
+                    }
                 }
                 statusMessage = error.localizedDescription
                 debugLog("PacketTunnel operation failed: \(String(describing: error))")
