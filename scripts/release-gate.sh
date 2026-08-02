@@ -398,6 +398,7 @@ run_release_gate_static_preflight() {
   ./scripts/test-idle-cpu-gate-harness.sh
   ./scripts/test-mobile-physical-device-selection-harness.sh
   ./scripts/test-mobile-ios-vpn-cleanup-harness.sh
+  ./scripts/test-ios-vpn-desired-state.sh
   ./scripts/test-mobile-android-release-cleanup-harness.sh
   ./scripts/test-mobile-wireguard-exit-dns-harness.sh
   ./scripts/test-mobile-wireguard-fixture-cleanup-harness.sh

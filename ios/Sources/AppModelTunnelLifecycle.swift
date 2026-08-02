@@ -209,6 +209,7 @@ extension AppModel {
         statusMessage = "Turning VPN off"
         let status = try await vpnController.stopAndWaitForDisconnected()
         try requirePacketTunnelTransition(generation)
+        vpnDesiredState.recordConfirmedExplicitStop()
         actionInFlight = false
         if state.vpnEnabled {
             dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")

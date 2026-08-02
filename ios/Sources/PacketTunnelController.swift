@@ -28,6 +28,8 @@ enum PacketTunnelControllerError: LocalizedError {
     case managerUnavailable
     case preferencesTimedOut(String)
     case providerMessageTimedOut(String)
+    case connectionFailed(Int)
+    case connectionTimedOut(Int)
     case disconnectTimedOut(Int)
 
     var errorDescription: String? {
@@ -38,6 +40,10 @@ enum PacketTunnelControllerError: LocalizedError {
             return "\(operation) VPN preferences timed out; approve any iOS VPN configuration prompt and retry"
         case .providerMessageTimedOut(let message):
             return "\(message) packet-tunnel response timed out"
+        case .connectionFailed(let status):
+            return "VPN connection failed with status \(status)"
+        case .connectionTimedOut(let status):
+            return "VPN connection timed out with status \(status)"
         case .disconnectTimedOut(let status):
             return "VPN disconnect timed out with status \(status); refusing to start a replacement tunnel"
         }
@@ -121,7 +127,9 @@ final class PacketTunnelController {
         ]
         try Task.checkCancellation()
         try manager.connection.startVPNTunnel(options: options)
-        debugLog("startVPNTunnel returned status=\(manager.connection.status.rawValue)")
+        let connectedStatus = try await waitForConnected(manager)
+        try Task.checkCancellation()
+        debugLog("confirmed connected status=\(connectedStatus)")
     }
 
     static func routeState(in configJson: String) -> PacketTunnelRouteState? {
@@ -173,6 +181,67 @@ final class PacketTunnelController {
         }
         debugLog("disconnect confirmation timed out status=\(status)")
         throw PacketTunnelControllerError.disconnectTimedOut(status)
+    }
+
+    private func waitForConnected(_ manager: NETunnelProviderManager) async throws -> Int {
+        let connection = manager.connection
+        let statuses = AsyncStream<Int>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let observer = NotificationCenter.default.addObserver(
+                forName: .NEVPNStatusDidChange,
+                object: connection,
+                queue: nil
+            ) { notification in
+                guard let connection = notification.object as? NEVPNConnection else {
+                    return
+                }
+                continuation.yield(connection.status.rawValue)
+            }
+            continuation.onTermination = { @Sendable _ in
+                NotificationCenter.default.removeObserver(observer)
+            }
+            continuation.yield(connection.status.rawValue)
+        }
+        do {
+            return try await withThrowingTaskGroup(of: Int.self) { group in
+                group.addTask {
+                    var observedStartingStatus = false
+                    for await status in statuses {
+                        try Task.checkCancellation()
+                        if status == NEVPNStatus.connected.rawValue {
+                            return status
+                        }
+                        if status == NEVPNStatus.connecting.rawValue
+                            || status == NEVPNStatus.reasserting.rawValue
+                        {
+                            observedStartingStatus = true
+                        } else if observedStartingStatus,
+                                  status == NEVPNStatus.invalid.rawValue
+                                    || status == NEVPNStatus.disconnected.rawValue
+                        {
+                            throw PacketTunnelControllerError.connectionFailed(status)
+                        }
+                    }
+                    throw CancellationError()
+                }
+                group.addTask {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(
+                            Self.preferencesOperationTimeoutSeconds * 1_000_000_000
+                        )
+                    )
+                    throw ConnectionWaitTimeout()
+                }
+                defer { group.cancelAll() }
+                guard let status = try await group.next() else {
+                    throw CancellationError()
+                }
+                return status
+            }
+        } catch is ConnectionWaitTimeout {
+            throw PacketTunnelControllerError.connectionTimedOut(
+                connection.status.rawValue
+            )
+        }
     }
 
     func statusRawValue() async -> Int? {
@@ -461,6 +530,8 @@ private final class ProviderMessageCompletion: @unchecked Sendable {
         return true
     }
 }
+
+private struct ConnectionWaitTimeout: Error {}
 
 private final class PreferenceOperationCompletion: @unchecked Sendable {
     private let lock = NSLock()

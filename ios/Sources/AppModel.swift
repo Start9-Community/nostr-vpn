@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
 
     var core: NativeCoreClient?
     let vpnController = PacketTunnelController()
+    let vpnDesiredState = VpnDesiredStateStore()
     let supportDir: URL?
     let fixtureMode: Bool
     private var refreshTask: Task<Void, Never>?
@@ -131,6 +132,23 @@ final class AppModel: ObservableObject {
         guard refreshTask == nil else {
             return
         }
+        let desiredVpnEnabled = vpnDesiredState.restore(runtimeEnabled: state.vpnEnabled)
+        let restoredStartAllowed = !desiredVpnEnabled
+            || AppStorePolicy.allowsVpnStart(
+                disclosureAccepted: UserDefaults.standard.bool(
+                    forKey: Self.vpnDisclosureAcceptedKey
+                )
+            )
+        if !restoredStartAllowed {
+            requireVpnDisclosureReview()
+            if pendingVpnTransitionEnabled != false {
+                setVpnEnabled(false, force: true)
+            }
+        } else if pendingVpnTransitionEnabled == nil,
+                  desiredVpnEnabled != state.vpnEnabled
+        {
+            pendingVpnTransitionEnabled = desiredVpnEnabled
+        }
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 let delay = self?.activeNetwork == nil
@@ -183,9 +201,9 @@ final class AppModel: ObservableObject {
         refreshTask = nil
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = nil
-        let preservePendingVpnStart = pendingVpnTransitionEnabled == true
+        let preservePendingVpnTransition = pendingVpnTransitionEnabled != nil
             && packetTunnelTransitionTask != nil
-        if !preservePendingVpnStart {
+        if !preservePendingVpnTransition {
             packetTunnelTransitionGeneration &+= 1
             packetTunnelTransitionTask?.cancel()
             packetTunnelTransitionTask = nil
@@ -443,6 +461,9 @@ final class AppModel: ObservableObject {
         guard core != nil else {
             statusMessage = "Native core unavailable"
             return
+        }
+        if enabled {
+            vpnDesiredState.recordStartRequest()
         }
         pendingVpnTransitionEnabled = enabled
         enqueuePacketTunnelOperation(.setEnabled(enabled, force: force))

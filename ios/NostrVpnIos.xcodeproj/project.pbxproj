@@ -12,6 +12,7 @@
 		0A933AB006CCAF79C262D8CB /* NostrVpnAppCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */; };
 		0B63754773064DF6054A88A9 /* NostrVpnReleaseNetworkUnderlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7344CBAC1489810776297A1B /* NostrVpnReleaseNetworkUnderlay.swift */; };
 		0E755CFCED416AC1EBC0ACB0 /* SettingsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F3184D78E49CCA600A3218 /* SettingsViews.swift */; };
+		11868F29F02FC01CC2969FF7 /* VpnDesiredStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F798B286AF9637B05F0D4BE /* VpnDesiredStateStore.swift */; };
 		134D0AE1F2653934E68D66F4 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 620E8362A0A3215BB8EFF1F5 /* RootView.swift */; };
 		2376F433BA1FBD612B5DF846 /* AppModelDebugURLAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74FA92081064D235A10456E4 /* AppModelDebugURLAutomation.swift */; };
 		2CDAA4060234E6D83A9E2876 /* NostrVpnAppCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */; };
@@ -99,6 +100,7 @@
 		431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridge.swift; sourceTree = "<group>"; };
 		47D10A3E63B2672F87095031 /* ScreenshotFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotFixtures.swift; sourceTree = "<group>"; };
 		4E8D34EBC51BAFC05BF873C3 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		4F798B286AF9637B05F0D4BE /* VpnDesiredStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VpnDesiredStateStore.swift; sourceTree = "<group>"; };
 		51DD5342E0ADF4BB17F33E8F /* AppModelTunnelLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTunnelLifecycle.swift; sourceTree = "<group>"; };
 		5E29C5DFF800EDE78B1158E2 /* NostrVpnReleaseNetworkProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnReleaseNetworkProbe.swift; sourceTree = "<group>"; };
 		5EE69AF3C3AAAA49D523C344 /* NostrVpnIos.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = NostrVpnIos.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -190,6 +192,7 @@
 				47D10A3E63B2672F87095031 /* ScreenshotFixtures.swift */,
 				91F3184D78E49CCA600A3218 /* SettingsViews.swift */,
 				BD3C4F5527757D58D8C6196A /* ViewComponents.swift */,
+				4F798B286AF9637B05F0D4BE /* VpnDesiredStateStore.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -394,6 +397,7 @@
 				D3C042D2A625A40B9B1DD2C6 /* ScreenshotFixtures.swift in Sources */,
 				0E755CFCED416AC1EBC0ACB0 /* SettingsViews.swift in Sources */,
 				FD6AFFF50E35477B86DBF788 /* ViewComponents.swift in Sources */,
+				11868F29F02FC01CC2969FF7 /* VpnDesiredStateStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

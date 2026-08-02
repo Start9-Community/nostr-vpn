@@ -374,7 +374,7 @@ if "case .background:" not in app_model or "suspendNativeCore()" not in app_mode
 if "case .active:" not in app_model or "resumeNativeCore()" not in app_model:
     raise SystemExit("iOS app does not reopen its native core after foregrounding")
 suspend = app_model.split("private func suspendNativeCore()", 1)[1].split("private func resumeNativeCore()", 1)[0]
-if not all(token in suspend for token in ("pendingVpnTransitionEnabled == true", "packetTunnelTransitionTask != nil", "if !preservePendingVpnStart {", "tunnelConfigSyncTask?.cancel()", "startupTunnelReconciliationTask?.cancel()")):
+if not all(token in suspend for token in ("pendingVpnTransitionEnabled != nil", "packetTunnelTransitionTask != nil", "if !preservePendingVpnTransition {", "tunnelConfigSyncTask?.cancel()", "startupTunnelReconciliationTask?.cancel()")):
     raise SystemExit("iOS backgrounding can cancel the delayed first-approval VPN start")
 start = app_model.split("func start()", 1)[1].split("func handleScenePhase", 1)[0]
 if "packetTunnelTransitionTask == nil" not in start:
