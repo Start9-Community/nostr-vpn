@@ -587,7 +587,7 @@ for required in (
     "shell svc wifi enable",
     "try setWiFiEnabled(false)",
     "try setWiFiEnabled(true)",
-    'settings.switches["Wi-Fi"].firstMatch',
+    "let toggle = try openWiFiSettings(settings)",
     "persistOriginalWiFiForCleanup(originalSsid)",
     "hasOriginalWiFiForCleanup()",
     "originalWiFiForCleanup()",
@@ -601,7 +601,8 @@ compact_navigation = "".join(navigation.split())
 for required in (
     "normalizeSettingsRoot(settings)",
     "guard rows.count == 1",
-    'settings.switches["Wi-Fi"].firstMatch',
+    "settings.switches.count == 1",
+    "settings.switches.firstMatch",
 ):
     if required not in navigation:
         raise SystemExit(
@@ -609,6 +610,8 @@ for required in (
         )
 if 'settings.cells.containing(.staticText,identifier:"Wi-Fi")' not in compact_navigation:
     raise SystemExit("iOS Settings does not select its unique public Wi-Fi row")
+if 'settings.switches["Wi-Fi"]' in navigation:
+    raise SystemExit("iOS Settings still assumes the destination switch is named Wi-Fi")
 if "for _ in 0..<5" in navigation:
     raise SystemExit("iOS Settings Wi-Fi navigation retained its fallback retry maze")
 cleanup = ios_test[ios_test.index("func testReleaseDisconnectCleanup()") :]

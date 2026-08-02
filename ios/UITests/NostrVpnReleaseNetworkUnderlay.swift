@@ -214,11 +214,7 @@ extension NostrVpnReleaseNetworkUITests {
         guard waitForApplicationState(settings, .runningForeground, timeout: 8) else {
             throw gateError("Settings did not foreground for the Wi-Fi radio change")
         }
-        try openWiFiSettings(settings)
-        let toggle = settings.switches["Wi-Fi"].firstMatch
-        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
-            throw gateError("Settings did not expose the Wi-Fi switch")
-        }
+        let toggle = try openWiFiSettings(settings)
         if toggleIsOn(toggle) != enabled {
             toggle.tap()
         }
@@ -238,7 +234,7 @@ extension NostrVpnReleaseNetworkUITests {
         guard waitForApplicationState(settings, .runningForeground, timeout: 8) else {
             throw gateError("Settings did not foreground for Wi-Fi readback")
         }
-        try openWiFiSettings(settings)
+        _ = try openWiFiSettings(settings)
         for cell in settings.cells.allElementsBoundByIndex where wifiCellIsSelected(cell) {
             let labels = cell.staticTexts.allElementsBoundByIndex
                 .map(\.label)
@@ -250,7 +246,7 @@ extension NostrVpnReleaseNetworkUITests {
         throw gateError("Settings did not expose the selected Wi-Fi")
     }
 
-    func openWiFiSettings(_ settings: XCUIApplication) throws {
+    func openWiFiSettings(_ settings: XCUIApplication) throws -> XCUIElement {
         try normalizeSettingsRoot(settings)
         let rows = settings.cells.containing(
             .staticText,
@@ -264,10 +260,17 @@ extension NostrVpnReleaseNetworkUITests {
             throw gateError("Settings Wi-Fi row was not hittable")
         }
         row.tap()
-        let toggle = settings.switches["Wi-Fi"].firstMatch
-        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
-            throw gateError("Settings did not open the public Wi-Fi page and switch")
-        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        repeat {
+            if rows.count == 0, settings.switches.count == 1 {
+                let toggle = settings.switches.firstMatch
+                if toggle.isHittable {
+                    return toggle
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        throw gateError("Settings did not open the public Wi-Fi page and switch")
     }
 
     func normalizeSettingsRoot(_ settings: XCUIApplication) throws {
