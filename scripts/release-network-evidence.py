@@ -1434,7 +1434,7 @@ def build_desktop(args: argparse.Namespace) -> None:
         direct_path = root / "direct.txt"
         direct = key_values(direct_path)
         require(
-            direct.get("resolver_files_absent") == "true"
+            direct.get("resolver_state_absent") == "true"
             and bool(direct.get("direct_interface"))
             and bool(direct.get("direct_gateway"))
             and bool(direct.get("direct_source_ip")),

@@ -266,6 +266,10 @@ require_tokens "$GUEST" "global secure DNS replaces the suffix-only resolver" \
   '[[ ! -e "$SECURE_RESOLVER" && -f "$MAGIC_RESOLVER" ]]' \
   'secure_dns_store_owned' \
   'secure_dns_store_absent'
+require_tokens "$GUEST" "canonical Direct resolver cleanup receipt" \
+  "printf 'resolver_state_absent=true\\n'"
+require_tokens "$NETWORK_EVIDENCE" "canonical Direct resolver cleanup validation" \
+  'direct.get("resolver_state_absent") == "true"'
 require_tokens "$GUEST" "process-stable macOS monotonic clock" \
   'mach_continuous_time' \
   'mach_timebase_info' \
