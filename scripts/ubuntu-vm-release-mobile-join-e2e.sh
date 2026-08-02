@@ -98,6 +98,7 @@ source "$ROOT/scripts/lib-ubuntu-vm-imported-release.sh"
 export NVPN_UBUNTU_IMPORT_EVIDENCE_DIR="$RESULT_DIR/import"
 
 remote_pid=""
+acceptance_observer_pids=()
 import_ready=0
 service_cleanup_armed=0
 
@@ -125,6 +126,11 @@ remote() {
 cleanup() {
   local status="$?"
   trap - EXIT
+  local observer_pid
+  for observer_pid in "${acceptance_observer_pids[@]}"; do
+    kill "$observer_pid" >/dev/null 2>&1 || true
+    wait "$observer_pid" >/dev/null 2>&1 || true
+  done
   if [[ -n "$remote_pid" ]] && kill -0 "$remote_pid" 2>/dev/null; then
     remote Stop >/dev/null 2>&1 || true
     wait "$remote_pid" >/dev/null 2>&1 || true
@@ -382,6 +388,20 @@ delivery_from_host_submit() {
   printf '%s\n' "$elapsed"
 }
 
+linux_admin_desktop_visible() {
+  local output="$1" temporary="$1.tmp"
+  remote ReadMarker >"$temporary" 2>/dev/null \
+    && [[ "$(marker_value "$temporary" desktopAccepted)" == true ]] \
+    && mv "$temporary" "$output"
+}
+
+linux_admin_pixel_visible() {
+  local admin="$1"
+  release_join_android_open_devices >/dev/null 2>&1 \
+    && release_join_android_query \
+      resource "roster-participant-accepted-$admin" center >/dev/null 2>&1
+}
+
 calibrate_remote_clock
 
 # Imported Linux desktop admin -> physical Pixel joiner.
@@ -417,23 +437,53 @@ DESKTOP_SUBMITTED_GUEST="$(
   marker_value "$RESULT_DIR/desktop-admin-add-submitted.json" \
     approvalSubmittedMs
 )"
-wait_remote_field \
-  "$RESULT_DIR/desktop-admin-add-accepted.json" \
-  desktopAccepted true "$RELEASE_JOIN_DELIVERY_WAIT_SECS" || {
+DESKTOP_ADMIN_DEADLINE_HOST_MS=$((
+  DESKTOP_SUBMITTED_GUEST + REMOTE_CLOCK_OFFSET_MS \
+    + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000
+))
+desktop_detected_file="$RESULT_DIR/desktop-admin-desktop-detected-ms.txt"
+pixel_detected_file="$RESULT_DIR/desktop-admin-pixel-detected-ms.txt"
+rm -f "$desktop_detected_file" "$pixel_detected_file"
+release_join_observe_until_ms \
+  "$DESKTOP_ADMIN_DEADLINE_HOST_MS" "$desktop_detected_file" \
+  "Linux desktop acceptance query" \
+  linux_admin_desktop_visible \
+  "$RESULT_DIR/desktop-admin-add-accepted.json" &
+desktop_observer_pid=$!
+release_join_observe_until_ms \
+  "$DESKTOP_ADMIN_DEADLINE_HOST_MS" "$pixel_detected_file" \
+  "Pixel acceptance query" \
+  linux_admin_pixel_visible "$DESKTOP_ADMIN_NPUB" &
+pixel_observer_pid=$!
+acceptance_observer_pids=("$desktop_observer_pid" "$pixel_observer_pid")
+observer_status=0
+wait "$desktop_observer_pid" || observer_status=1
+wait "$pixel_observer_pid" || observer_status=1
+acceptance_observer_pids=()
+if ((observer_status != 0)); then
   tail -n 160 "$desktop_add_log" >&2 || true
+  echo "Linux desktop and Pixel did not both accept before the shared deadline" >&2
   exit 1
-}
-release_join_android_wait_join_complete "$DESKTOP_ADMIN_NPUB" || {
-  echo "Pixel did not show the exact accepted Linux admin roster" >&2
-  exit 1
-}
-DESKTOP_ADMIN_COMPLETED_HOST="$(release_join_now_ms)"
-DESKTOP_ADMIN_DELIVERY_MS="$(
+fi
+DESKTOP_ACCEPTED_HOST_MS="$(<"$desktop_detected_file")"
+PIXEL_ACCEPTED_HOST_MS="$(<"$pixel_detected_file")"
+DESKTOP_ACCEPTANCE_MS="$(
   delivery_from_guest_submit \
     "$DESKTOP_SUBMITTED_GUEST" \
-    "$DESKTOP_ADMIN_COMPLETED_HOST" \
-    "Linux-admin-to-Pixel-manual"
+    "$DESKTOP_ACCEPTED_HOST_MS" \
+    "Linux-admin-desktop-acceptance"
 )"
+PIXEL_ACCEPTANCE_MS="$(
+  delivery_from_guest_submit \
+    "$DESKTOP_SUBMITTED_GUEST" \
+    "$PIXEL_ACCEPTED_HOST_MS" \
+    "Linux-admin-Pixel-acceptance"
+)"
+if ((DESKTOP_ACCEPTANCE_MS > PIXEL_ACCEPTANCE_MS)); then
+  DESKTOP_ADMIN_DELIVERY_MS="$DESKTOP_ACCEPTANCE_MS"
+else
+  DESKTOP_ADMIN_DELIVERY_MS="$PIXEL_ACCEPTANCE_MS"
+fi
 release_join_android_relaunch_and_wait_accepted "$DESKTOP_ADMIN_NPUB" || {
   echo "Pixel lost the Linux admin roster across force-stop/relaunch" >&2
   exit 1
@@ -457,9 +507,16 @@ remote Cleanup 1 >"$RESULT_DIR/desktop-admin-service-cleanup.log"
 service_cleanup_armed=0
 remote Reset >"$RESULT_DIR/desktop-joiner-reset.log"
 remote Bootstrap >"$RESULT_DIR/desktop-joiner-bootstrap.log"
+remote ReadMarker >"$RESULT_DIR/desktop-joiner-bootstrap.json"
+DESKTOP_JOINER_NPUB="$(
+  marker_value "$RESULT_DIR/desktop-joiner-bootstrap.json" joinerNpub
+)"
+release_join_valid_npub "$DESKTOP_JOINER_NPUB"
 service_cleanup_armed=1
 remote InstallService >"$RESULT_DIR/desktop-joiner-service.log"
 release_join_android_create_admin
+release_join_android_manual_admin_prepare "$DESKTOP_JOINER_NPUB" \
+  >"$RESULT_DIR/pixel-admin-prepare.log"
 
 desktop_join_log="$RESULT_DIR/pixel-admin-desktop-join.log"
 remote ManualJoin \
@@ -473,10 +530,12 @@ wait_remote_field \
   tail -n 160 "$desktop_join_log" >&2 || true
   exit 1
 }
-DESKTOP_JOINER_NPUB="$(
+[[ "$(
   marker_value "$RESULT_DIR/desktop-manual-join-identity.json" joinerNpub
-)"
-release_join_valid_npub "$DESKTOP_JOINER_NPUB"
+)" == "$DESKTOP_JOINER_NPUB" ]] || {
+  echo "Linux ManualJoin used a different identity than Bootstrap" >&2
+  exit 1
+}
 wait_remote_field \
   "$RESULT_DIR/desktop-manual-join-submitted.json" \
   manualSubmittedMs __present__ 10 || {
@@ -484,7 +543,7 @@ wait_remote_field \
   exit 1
 }
 pixel_add_log="$RESULT_DIR/pixel-admin-add-desktop.log"
-release_join_android_manual_admin_add "$DESKTOP_JOINER_NPUB" \
+release_join_android_manual_admin_submit "$DESKTOP_JOINER_NPUB" \
   | tee "$pixel_add_log"
 PIXEL_SUBMITTED_HOST="$(
   sed -n \

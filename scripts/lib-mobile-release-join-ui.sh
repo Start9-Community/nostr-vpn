@@ -20,6 +20,65 @@ print(time.time_ns() // 1_000_000)
 PY
 }
 
+# Run one public-UI poll without allowing a stuck adb/SSH query to outlive the
+# phase's absolute deadline.
+release_join_run_until_ms() {
+  local deadline_ms="$1" label="$2"
+  shift 2
+  local now_ms remaining_ms delay marker pid watchdog status=0
+  now_ms="$(release_join_now_ms)"
+  remaining_ms=$((deadline_ms - now_ms))
+  ((remaining_ms > 0)) || return 124
+  printf -v delay '%d.%03d' \
+    "$((remaining_ms / 1000))" "$((remaining_ms % 1000))"
+  marker="$(mktemp "${PRIVATE_DIR:-${TMPDIR:-/tmp}}/join-poll.XXXXXX")"
+  rm -f "$marker"
+  "$@" &
+  pid=$!
+  (
+    sleep "$delay"
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      : >"$marker"
+      pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+      sleep 0.2
+      pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  ) &
+  watchdog=$!
+  wait "$pid" || status=$?
+  kill "$watchdog" >/dev/null 2>&1 || true
+  wait "$watchdog" >/dev/null 2>&1 || true
+  now_ms="$(release_join_now_ms)"
+  if [[ -e "$marker" ]] || ((now_ms > deadline_ms)); then
+    rm -f "$marker"
+    echo "$label exceeded the shared acceptance deadline" >&2
+    return 124
+  fi
+  rm -f "$marker"
+  return "$status"
+}
+
+release_join_observe_until_ms() {
+  local deadline_ms="$1" timestamp_file="$2" label="$3"
+  shift 3
+  local detected_ms status
+  while (( $(release_join_now_ms) < deadline_ms )); do
+    status=0
+    release_join_run_until_ms "$deadline_ms" "$label" "$@" || status=$?
+    if ((status == 0)); then
+      detected_ms="$(release_join_now_ms)"
+      ((detected_ms <= deadline_ms)) || return 1
+      printf '%s\n' "$detected_ms" >"$timestamp_file"
+      return 0
+    fi
+    ((status != 124)) || return 1
+    sleep 0.1
+  done
+  return 1
+}
+
 release_join_android_dump_ui() {
   RELEASE_JOIN_ANDROID_UI_XML="$PRIVATE_DIR/android-ui.xml"
   "${ADB[@]}" shell uiautomator dump /sdcard/nvpn-release-join.xml >/dev/null 2>&1
@@ -379,15 +438,82 @@ release_join_android_manual_submit() {
   return 1
 }
 
-release_join_android_manual_admin_add() {
-  local joiner="$1" before after deadline
+release_join_android_admin_add_visible() {
+  local joiner="$1"
+  release_join_android_dump_ui || return 1
+  if release_join_android_query_dumped \
+      resource manual-admin-submit center >/dev/null 2>&1
+  then
+    return 1
+  fi
+  release_join_android_query_dumped \
+      resource "roster-participant-pending-$joiner" center >/dev/null 2>&1 \
+    || release_join_android_query_dumped \
+      resource "roster-participant-accepted-$joiner" center >/dev/null 2>&1
+}
+
+release_join_android_manual_admin_prepare() {
+  local joiner="$1" entered enabled
   release_join_android_open_link_device
-  before="$(release_join_android_query resource-prefix roster-participant- count)"
+  RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE="$(
+    release_join_android_query resource-prefix roster-participant- count
+  )"
   release_join_android_scroll_to description "Manual joiner Device ID"
   release_join_android_enter description "Manual joiner Device ID" "$joiner"
   release_join_android_scroll_to description "Add joining device manually"
-  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
-  release_join_android_tap description "Add joining device manually"
+  entered="$(
+    release_join_android_query resource manual-admin-joiner-id text
+  )" || return 1
+  [[ -n "$entered" && "$entered" == "$joiner" ]] || {
+    echo "Android manual admin-add Device ID did not remain populated" >&2
+    return 1
+  }
+  enabled="$(
+    release_join_android_query resource manual-admin-submit enabled
+  )" || return 1
+  [[ "$enabled" == true ]] || {
+    echo "Android manual admin-add remained disabled after valid input" >&2
+    return 1
+  }
+  RELEASE_JOIN_ANDROID_ADMIN_ADD_JOINER="$joiner"
+  export RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE \
+    RELEASE_JOIN_ANDROID_ADMIN_ADD_JOINER
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ADMIN_ADD_PREPARED=1"
+}
+
+release_join_android_manual_admin_submit() {
+  local joiner="$1" after deadline entered enabled submitted_ms
+  local submitted_visible=0
+  [[ "${RELEASE_JOIN_ANDROID_ADMIN_ADD_JOINER:-}" == "$joiner" \
+    && "${RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE:-}" =~ ^[0-9]+$ ]] || {
+    echo "Android manual admin-add was not prepared for this exact joiner" >&2
+    return 1
+  }
+  entered="$(
+    release_join_android_query resource manual-admin-joiner-id text
+  )" || return 1
+  enabled="$(
+    release_join_android_query resource manual-admin-submit enabled
+  )" || return 1
+  [[ "$entered" == "$joiner" && "$enabled" == true ]] || {
+    echo "Android prepared admin-add controls changed before submission" >&2
+    return 1
+  }
+  submitted_ms="$(release_join_now_ms)"
+  release_join_android_tap resource manual-admin-submit || return 1
+  deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    if release_join_android_admin_add_visible "$joiner"; then
+      echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$submitted_ms"
+      submitted_visible=1
+      break
+    fi
+    sleep 0.1
+  done
+  if ((submitted_visible != 1)); then
+    echo "Android manual admin-add tap did not visibly submit" >&2
+    return 1
+  fi
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
@@ -395,12 +521,18 @@ release_join_android_manual_admin_add() {
         resource "roster-participant-accepted-$joiner" center \
         >/dev/null 2>&1; then
       after="$(release_join_android_query resource-prefix roster-participant- count)"
-      ((after >= before + 1)) || return 1
+      ((after >= RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE + 1)) || return 1
       return 0
     fi
     sleep 0.25
   done
   return 1
+}
+
+release_join_android_manual_admin_add() {
+  local joiner="$1"
+  release_join_android_manual_admin_prepare "$joiner"
+  release_join_android_manual_admin_submit "$joiner"
 }
 
 release_join_ios_test_command() {

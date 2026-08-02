@@ -481,17 +481,28 @@ remote verify "$RELEASE_JOIN_ANDROID_JOINER_ID" \
 # waiting for the exact Android admin row, so receipt delivery is real.
 release_join_reset_android_state
 release_join_android_create_admin
+desktop_joiner_identity_log="$RESULT_DIR/macos/android-admin-desktop-identity.log"
+remote joiner-id >"$desktop_joiner_identity_log"
+DESKTOP_JOINER_ID="$(
+  marker_value "$desktop_joiner_identity_log" NVPN_RELEASE_JOIN_JOINER_ID
+)"
+release_join_valid_npub "$DESKTOP_JOINER_ID"
+release_join_android_manual_admin_prepare "$DESKTOP_JOINER_ID" \
+  >"$RESULT_DIR/macos/android-admin-prepare.log"
 desktop_join_log="$RESULT_DIR/macos/android-admin-desktop-join.log"
 remote manual-join \
   "$RELEASE_JOIN_ANDROID_ADMIN_ID" "$RELEASE_JOIN_ANDROID_NETWORK_ID" \
   >"$desktop_join_log" 2>&1 &
 remote_pid=$!
 wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID= 10
-DESKTOP_JOINER_ID="$(marker_value "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID)"
-release_join_valid_npub "$DESKTOP_JOINER_ID"
+[[ "$(marker_value "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID)" \
+  == "$DESKTOP_JOINER_ID" ]] || {
+  echo "macOS manual join used a different identity than preflight" >&2
+  exit 1
+}
 wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
 android_admin_log="$RESULT_DIR/macos/android-admin-add-desktop.log"
-release_join_android_manual_admin_add "$DESKTOP_JOINER_ID" \
+release_join_android_manual_admin_submit "$DESKTOP_JOINER_ID" \
   | tee "$android_admin_log"
 android_submitted_ms="$(
   sed -n \

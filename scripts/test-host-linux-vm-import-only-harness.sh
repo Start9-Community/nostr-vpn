@@ -73,6 +73,24 @@ done
 [[ -f "$IMPORT_LIB" && -f "$DOCKERFILE" && -f "$ISOLATION_LIB" \
   && -f "$NATIVE_BUILDER_LIB" ]] \
   || fail "shared import/build-isolation helper or Ubuntu builder image is missing"
+require_tokens "$RELEASE_JOIN" "concurrent desktop-admin acceptance timing" \
+  'DESKTOP_ADMIN_DEADLINE_HOST_MS' \
+  'release_join_observe_until_ms' \
+  'linux_admin_desktop_visible' \
+  'linux_admin_pixel_visible' \
+  'DESKTOP_ACCEPTED_HOST_MS' \
+  'PIXEL_ACCEPTED_HOST_MS'
+require_tokens "$RELEASE_JOIN" "two-phase Pixel-admin coordination" \
+  'marker_value "$RESULT_DIR/desktop-joiner-bootstrap.json" joinerNpub' \
+  'release_join_android_manual_admin_prepare "$DESKTOP_JOINER_NPUB"' \
+  'release_join_android_manual_admin_submit "$DESKTOP_JOINER_NPUB"'
+require_tokens "$ROOT/scripts/desktop-mobile-manual-join-atspi.py" \
+  "Bootstrap joiner identity preflight" \
+  'self.evidence["joinerNpub"] = read_npub('
+[[ "$(sed -n \
+  '/# Imported Linux desktop admin -> physical Pixel joiner\./,/# Physical Pixel admin -> imported Linux desktop joiner\./p' \
+  "$RELEASE_JOIN" | grep -Fc 'release_join_observe_until_ms')" -eq 2 ]] \
+  || fail "Linux desktop and Pixel acceptance are not observed independently"
 require_tokens "$PATCH_LOCK_VERIFIER" "fail-closed FIPS patch lock delta" \
   'REGISTRY_SOURCE' \
   'committed lock has duplicate target package' \

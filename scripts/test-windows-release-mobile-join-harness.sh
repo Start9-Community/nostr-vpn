@@ -30,21 +30,27 @@ do
 done
 grep -Fq 'AcceptedRosterAutomationId' "$XAML" \
   || fail "Windows roster UI does not bind its accepted-only selector"
-if sed -n '/AcceptedRosterAutomationId/,/DisplayName/p' "$MODELS" \
-  | grep -Fq 'State'; then
+accepted_selector="$(
+  sed -n '/AcceptedRosterAutomationId/,/DisplayName/p' "$MODELS"
+)"
+if grep -Fq 'State' <<<"$accepted_selector"; then
   fail "Windows roster membership selector still depends on transport state"
 fi
-for pending_status in 'waiting for admin' 'join request sent'; do
-  sed -n '/AcceptedRosterAutomationId/,/DisplayName/p' "$MODELS" \
-    | grep -Fq "$pending_status" \
-    || fail "Windows selector accepts an unconfirmed $pending_status roster"
-done
+grep -Fq 'RosterAccepted ?' <<<"$accepted_selector" \
+  || fail "Windows selector is not bound to signed-roster acceptance"
 grep -Fq 'RosterParticipantAccepted-' "$MODELS" \
   || fail "Windows model has no dynamic accepted roster identifier"
 
 for mode in Reset Bootstrap CreateAdmin AdminAdd ManualJoin Verify; do
   grep -Fq "\"$mode\"" "$DRIVER" \
     || fail "Windows UI driver lacks $mode"
+done
+for bootstrap_contract in \
+  'Read-PublicText "ManualJoinJoinerDeviceIdValue"' \
+  '$Evidence.joinerNpub = $Joiner'
+do
+  grep -Fq "$bootstrap_contract" "$DRIVER" \
+    || fail "Windows Bootstrap does not preflight its joiner identity"
 done
 grep -Fq '"RosterParticipantAccepted-$ParticipantNpub"' "$DRIVER" \
   || fail "Windows admin driver accepts a generic roster row"
@@ -111,6 +117,39 @@ for evidence in \
 do
   grep -Fq "$evidence" "$HOST" \
     || fail "Windows/Pixel orchestrator lacks $evidence"
+done
+desktop_admin_phase="$(
+  sed -n \
+    '/# Windows admin -> Pixel joiner\./,/# Pixel admin -> Windows joiner\./p' \
+    "$HOST"
+)"
+for timing_contract in \
+  WINDOWS_ADMIN_DEADLINE_HOST_MS \
+  release_join_observe_until_ms \
+  windows_admin_desktop_visible \
+  windows_admin_pixel_visible \
+  WINDOWS_DESKTOP_ACCEPTED_HOST_MS \
+  WINDOWS_PIXEL_ACCEPTED_HOST_MS
+do
+  grep -Fq "$timing_contract" <<<"$desktop_admin_phase" \
+    || fail "Windows desktop-admin timing lacks $timing_contract"
+done
+[[ "$(grep -Fc 'release_join_observe_until_ms' <<<"$desktop_admin_phase")" -eq 2 ]] \
+  || fail "Windows desktop and Pixel acceptance are not observed independently"
+timing_line="$(
+  grep -n 'WINDOWS_ADMIN_DELIVERY_MS=' <<<"$desktop_admin_phase" \
+    | tail -n 1 | cut -d: -f1
+)"
+durability_line="$(grep -n 'verify_desktop_relaunch' <<<"$desktop_admin_phase" | cut -d: -f1)"
+[[ -n "$timing_line" && -n "$durability_line" && "$timing_line" -lt "$durability_line" ]] \
+  || fail "Windows durability runs before concurrent acceptance timing closes"
+for reverse_contract in \
+  'release_join_android_manual_admin_prepare "$WINDOWS_JOINER_ID"' \
+  'remote ManualJoin' \
+  'release_join_android_manual_admin_submit "$WINDOWS_JOINER_ID"'
+do
+  grep -Fq "$reverse_contract" "$HOST" \
+    || fail "Windows reverse join lacks two-phase coordination: $reverse_contract"
 done
 for component_binding in \
   --android-artifact-receipt \

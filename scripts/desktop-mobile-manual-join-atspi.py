@@ -618,6 +618,11 @@ class Driver:
     def bootstrap(self) -> None:
         self.launch()
         find_named("nvpn-manual-join-create-network-choice")
+        invoke("nvpn-manual-join-choose-join")
+        invoke("nvpn-manual-join-expander")
+        self.evidence["joinerNpub"] = read_npub(
+            "nvpn-manual-join-joiner-device-id-value"
+        )
         self.evidence["bootstrapComplete"] = True
         screenshot(self.artifact_root, "bootstrap")
         self.write_evidence()

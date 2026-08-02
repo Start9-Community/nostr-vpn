@@ -170,6 +170,10 @@ case "${1:-}" in
     [[ $# == 2 ]] || { echo "usage: $0 create-admin <network-name>" >&2; exit 2; }
     run_driver release-create-admin "$2" _
     ;;
+  joiner-id)
+    [[ $# == 1 ]] || { echo "usage: $0 joiner-id" >&2; exit 2; }
+    run_driver release-joiner-id _ _
+    ;;
   manual-join)
     [[ $# == 3 ]] || { echo "usage: $0 manual-join <admin-npub> <network-id>" >&2; exit 2; }
     run_driver release-manual-join "$2" "$3"
@@ -186,7 +190,7 @@ case "${1:-}" in
     macos_release_app_restore
     ;;
   *)
-    echo "usage: $0 <stage|prepare|verify-import|create-admin|manual-join|admin-add|verify|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|verify-import|create-admin|joiner-id|manual-join|admin-add|verify|cleanup>" >&2
     exit 2
     ;;
 esac

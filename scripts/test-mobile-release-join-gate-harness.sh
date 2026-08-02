@@ -1166,7 +1166,8 @@ PY
 
 fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
 no_viewport_fixture="${fixture%.xml}-no-viewport.xml"
-trap 'rm -f "$fixture" "$no_viewport_fixture"' EXIT
+inset_viewport_fixture="${fixture%.xml}-inset-viewport.xml"
+trap 'rm -f "$fixture" "$no_viewport_fixture" "$inset_viewport_fixture"' EXIT
 printf '%s\n' \
   '<hierarchy>' \
   '  <node bounds="[0,0][1080,2410]" />' \
@@ -1176,7 +1177,7 @@ printf '%s\n' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-pending-a" content-desc="Roster participant pending a" bounds="[0,100][100,200]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-accepted-b" content-desc="Roster participant accepted b" bounds="[0,200][100,300]" />' \
   '  <node resource-id="manual-join-submit-clipped" bounds="[89,2369][991,2410]" />' \
-  '  <node resource-id="manual-join-submit-safe" bounds="[89,1800][991,1900]" />' \
+  '  <node resource-id="manual-join-submit-safe" enabled="true" bounds="[89,1800][991,1900]" />' \
   '</hierarchy>' >"$fixture"
 
 description="$(
@@ -1216,6 +1217,10 @@ fi
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource manual-join-submit-safe safe-center
 )" == "540 1850" ]]
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" resource manual-join-submit-safe enabled
+)" == true ]]
 sed '/bounds="\[0,0\]\[1080,2410\]"/d' \
   "$fixture" >"$no_viewport_fixture"
 if "$ROOT/scripts/mobile-release-join-ui-query.py" \
@@ -1225,5 +1230,69 @@ then
   echo "Android safe-center accepted a hierarchy without viewport bounds" >&2
   exit 1
 fi
+printf '%s\n' \
+  '<hierarchy>' \
+  '  <node bounds="[120,172][1200,2582]">' \
+  '    <node resource-id="manual-join-submit-safe" bounds="[209,1972][1111,2072]" />' \
+  '    <node resource-id="manual-join-submit-clipped" bounds="[209,2541][1111,2582]" />' \
+  '  </node>' \
+  '</hierarchy>' >"$inset_viewport_fixture"
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$inset_viewport_fixture" resource manual-join-submit-safe safe-center
+)" == "660 2022" ]]
+if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$inset_viewport_fixture" resource manual-join-submit-clipped safe-center \
+    >/dev/null 2>&1
+then
+  echo "Inset Android viewport applied its bottom margin from screen zero" >&2
+  exit 1
+fi
+
+android_admin_add="$(
+  sed -n \
+    '/^release_join_android_manual_admin_prepare() {/,/^release_join_android_manual_admin_add() {/p' \
+    "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+)"
+for required in \
+  'resource manual-admin-joiner-id text' \
+  'resource manual-admin-submit enabled' \
+  'release_join_android_admin_add_visible' \
+  'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS'
+do
+  grep -Fq "$required" <<<"$android_admin_add" \
+    || { echo "Android admin-add lacks verified public UI state: $required" >&2; exit 1; }
+done
+tap_line="$(grep -n 'release_join_android_tap resource manual-admin-submit' <<<"$android_admin_add" | cut -d: -f1)"
+visible_line="$(grep -n 'release_join_android_admin_add_visible' <<<"$android_admin_add" | tail -n 1 | cut -d: -f1)"
+marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_admin_add" | cut -d: -f1)"
+[[ -n "$tap_line" && -n "$visible_line" && -n "$marker_line" \
+  && "$tap_line" -lt "$visible_line" && "$visible_line" -lt "$marker_line" ]] || {
+  echo "Android admin-add emits approval before the tapped action visibly succeeds" >&2
+  exit 1
+}
+
+(
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-deadline.XXXXXX")"
+  trap 'rm -rf "$PRIVATE_DIR"' EXIT
+  quick_poll() { return 0; }
+  stuck_poll() { sleep 5; }
+  timestamp="$PRIVATE_DIR/detected-ms.txt"
+  deadline=$(( $(release_join_now_ms) + 500 ))
+  release_join_observe_until_ms "$deadline" "$timestamp" quick quick_poll
+  [[ -s "$timestamp" ]]
+  before="$(release_join_now_ms)"
+  deadline=$((before + 150))
+  ! release_join_observe_until_ms \
+    "$deadline" "$PRIVATE_DIR/unexpected.txt" stuck stuck_poll \
+    >/dev/null 2>&1
+  elapsed=$(( $(release_join_now_ms) - before ))
+  ((elapsed < 1000)) || {
+    echo "Blocking public-UI poll outlived its absolute deadline" >&2
+    exit 1
+  }
+)
 
 echo "Signed Release public-UI join gate contract passed"

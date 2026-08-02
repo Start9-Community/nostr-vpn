@@ -350,6 +350,19 @@ func run() throws {
             timeout: 15
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
+    case "release-joiner-id":
+        try openAddNetwork(application, choice: "manual-join-choose-join")
+        try press(
+            application,
+            "manual-join-expander",
+            successIdentifier: "manual-join-admin-id"
+        )
+        let joiner = try publicValue(
+            application,
+            identifier: "joiner-device-id-value",
+            validator: validNpub
+        )
+        emit("NVPN_RELEASE_JOIN_JOINER_ID=\(joiner)")
     case "release-admin-add":
         try press(
             application,

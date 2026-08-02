@@ -26,6 +26,7 @@ def parser() -> argparse.ArgumentParser:
             "text",
             "count",
             "width",
+            "enabled",
         ),
     )
     return result
@@ -55,13 +56,33 @@ def center(node: ET.Element) -> str:
 
 def bounds(node: ET.Element) -> tuple[int, int, int, int]:
     bounds = node.attrib.get("bounds", "")
-    match = re.fullmatch(r"\[(\d+),(\d+)]\[(\d+),(\d+)]", bounds)
+    match = re.fullmatch(r"\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]", bounds)
     if not match:
         raise ValueError(f"invalid bounds: {bounds}")
     left, top, right, bottom = map(int, match.groups())
     if right <= left or bottom <= top:
         raise ValueError(f"empty bounds: {bounds}")
     return left, top, right, bottom
+
+
+def viewport(root: ET.Element, node: ET.Element) -> tuple[int, int, int, int]:
+    node_box = bounds(node)
+    boxes: list[tuple[int, int, int, int]] = []
+    for candidate in root.iter("node"):
+        try:
+            box = bounds(candidate)
+        except ValueError:
+            continue
+        if box != node_box and (
+            box[0] <= node_box[0]
+            and box[1] <= node_box[1]
+            and box[2] >= node_box[2]
+            and box[3] >= node_box[3]
+        ):
+            boxes.append(box)
+    if not boxes:
+        raise ValueError("hierarchy has no valid viewport")
+    return max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
 
 
 def main() -> int:
@@ -76,28 +97,29 @@ def main() -> int:
     node = found[0]
     if args.output in ("center", "safe-center", "visible-center"):
         if args.output in ("safe-center", "visible-center"):
-            viewport_right = 0
-            viewport_bottom = 0
-            for candidate in root.iter("node"):
-                try:
-                    box = bounds(candidate)
-                except ValueError:
-                    continue
-                if box[:2] == (0, 0):
-                    viewport_right = max(viewport_right, box[2])
-                    viewport_bottom = max(viewport_bottom, box[3])
-            if viewport_right == 0 or viewport_bottom == 0:
+            try:
+                viewport_left, viewport_top, viewport_right, viewport_bottom = viewport(
+                    root, node
+                )
+            except ValueError:
                 return 1
+            safe_top = viewport_top + 200
+            safe_bottom = viewport_bottom - 300
             left, top, right, bottom = bounds(node)
             if args.output == "visible-center":
-                left, top = max(left, 0), max(top, 200)
+                left, top = max(left, viewport_left), max(top, safe_top)
                 right = min(right, viewport_right)
-                bottom = min(bottom, viewport_bottom - 300)
+                bottom = min(bottom, safe_bottom)
                 if right <= left or bottom - top < 48:
                     return 1
                 print(f"{(left + right) // 2} {(top + bottom) // 2}")
                 return 0
-            if bottom > viewport_bottom - 300:
+            if (
+                left < viewport_left
+                or top < viewport_top
+                or right > viewport_right
+                or bottom > safe_bottom
+            ):
                 return 1
         print(center(node))
     elif args.output == "width":
@@ -105,6 +127,8 @@ def main() -> int:
         print(right - left)
     elif args.output == "description":
         print(html.unescape(node.attrib.get("content-desc", "")))
+    elif args.output == "enabled":
+        print(node.attrib.get("enabled", "false").lower())
     else:
         print(html.unescape(node.attrib.get("text", "")))
     return 0

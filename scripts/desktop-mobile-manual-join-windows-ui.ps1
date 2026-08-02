@@ -385,6 +385,11 @@ try {
   switch ($Mode) {
     "Bootstrap" {
       $null = Find-Control "ManualJoinCreateNetworkChoice"
+      Invoke-Control "ManualJoinChooseJoin"
+      Expand-Control "ManualJoinExpander"
+      $Joiner = Read-PublicText "ManualJoinJoinerDeviceIdValue"
+      Assert-ValidNpub $Joiner "Windows joiner Device ID"
+      $Evidence.joinerNpub = $Joiner
       $Evidence.bootstrapComplete = $true
     }
     "CreateAdmin" {

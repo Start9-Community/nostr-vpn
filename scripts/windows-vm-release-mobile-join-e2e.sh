@@ -190,9 +190,15 @@ remote() {
 }
 
 REMOTE_ACTION_PID=""
+acceptance_observer_pids=()
 cleanup() {
   local status=$?
   trap - EXIT
+  local observer_pid
+  for observer_pid in "${acceptance_observer_pids[@]}"; do
+    kill "$observer_pid" >/dev/null 2>&1 || true
+    wait "$observer_pid" >/dev/null 2>&1 || true
+  done
   if [[ -n "$REMOTE_ACTION_PID" ]] \
     && kill -0 "$REMOTE_ACTION_PID" >/dev/null 2>&1
   then
@@ -265,6 +271,56 @@ assert_elapsed() {
   printf '%s\n' "$elapsed"
 }
 
+WINDOWS_CLOCK_OFFSET_MS=0
+WINDOWS_CLOCK_UNCERTAINTY_MS=0
+
+calibrate_windows_clock() {
+  local best_rtt=999999 best_offset=0 before after guest rtt offset
+  for _ in 1 2 3; do
+    before="$(release_join_now_ms)"
+    guest="$(remote NowMs | tr -d '\r' | tail -n 1)"
+    after="$(release_join_now_ms)"
+    [[ "$guest" =~ ^[0-9]+$ ]] || fail "Windows clock did not report epoch milliseconds"
+    rtt=$((after - before))
+    offset=$((((before + after) / 2) - guest))
+    if ((rtt < best_rtt)); then
+      best_rtt="$rtt"
+      best_offset="$offset"
+    fi
+  done
+  WINDOWS_CLOCK_OFFSET_MS="$best_offset"
+  WINDOWS_CLOCK_UNCERTAINTY_MS=$(((best_rtt + 1) / 2 + 250))
+  ((WINDOWS_CLOCK_UNCERTAINTY_MS <= 2000)) \
+    || fail "Windows clock calibration uncertainty is too high"
+}
+
+windows_delivery_from_guest_submit() {
+  local submitted_guest="$1" detected_host="$2" label="$3"
+  local elapsed=$((
+    detected_host - (submitted_guest + WINDOWS_CLOCK_OFFSET_MS) \
+      + WINDOWS_CLOCK_UNCERTAINTY_MS
+  ))
+  ((elapsed >= 0 && elapsed <= RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000)) \
+    || fail "$label took conservatively ${elapsed}ms after approval"
+  printf '%s\n' "$elapsed"
+}
+
+windows_admin_desktop_visible() {
+  local output="$1" temporary="$1.tmp"
+  read_marker >"$temporary" \
+    && jq -e \
+      '.mode == "AdminAdd" and .desktopAccepted == true' \
+      "$temporary" >/dev/null \
+    && mv "$temporary" "$output"
+}
+
+windows_admin_pixel_visible() {
+  local admin="$1"
+  release_join_android_open_devices >/dev/null 2>&1 \
+    && release_join_android_query \
+      resource "roster-participant-accepted-$admin" center >/dev/null 2>&1
+}
+
 verify_desktop_relaunch() {
   local participant="$1" label="$2" marker
   REMOTE_PARTICIPANT_NPUB="$participant"
@@ -289,6 +345,8 @@ verify_pixel_relaunch() {
   release_join_android_wait_accepted_participant "$participant" \
     || fail "$label Pixel relaunch did not show the exact accepted roster"
 }
+
+calibrate_windows_clock
 
 # Windows admin -> Pixel joiner.
 release_join_reset_android_state
@@ -317,19 +375,51 @@ wait_marker \
   "Windows admin approval submission"
 admin_submission_marker="$MARKER_PAYLOAD"
 WINDOWS_APPROVAL_MS="$(jq -er '.approvalSubmittedMs' <<<"$admin_submission_marker")"
-release_join_android_wait_accepted_participant "$WINDOWS_ADMIN_ID" \
-  || fail "Pixel did not apply the Windows admin's signed roster"
-WINDOWS_COMPLETED_MS="$(remote NowMs | tr -d '\r' | tail -n 1)"
-WINDOWS_ADMIN_DELIVERY_MS="$(
-  assert_elapsed \
+WINDOWS_ADMIN_DEADLINE_HOST_MS=$((
+  WINDOWS_APPROVAL_MS + WINDOWS_CLOCK_OFFSET_MS \
+    + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000
+))
+windows_desktop_detected_file="$PLATFORM_RESULT/desktop-admin-desktop-detected-ms.txt"
+windows_pixel_detected_file="$PLATFORM_RESULT/desktop-admin-pixel-detected-ms.txt"
+rm -f "$windows_desktop_detected_file" "$windows_pixel_detected_file"
+release_join_observe_until_ms \
+  "$WINDOWS_ADMIN_DEADLINE_HOST_MS" "$windows_desktop_detected_file" \
+  "Windows desktop acceptance query" \
+  windows_admin_desktop_visible \
+  "$PLATFORM_RESULT/desktop-admin-accepted.json" &
+desktop_observer_pid=$!
+release_join_observe_until_ms \
+  "$WINDOWS_ADMIN_DEADLINE_HOST_MS" "$windows_pixel_detected_file" \
+  "Pixel acceptance query" \
+  windows_admin_pixel_visible "$WINDOWS_ADMIN_ID" &
+pixel_observer_pid=$!
+acceptance_observer_pids=("$desktop_observer_pid" "$pixel_observer_pid")
+observer_status=0
+wait "$desktop_observer_pid" || observer_status=1
+wait "$pixel_observer_pid" || observer_status=1
+acceptance_observer_pids=()
+((observer_status == 0)) \
+  || fail "Windows desktop and Pixel did not both accept before the shared deadline"
+WINDOWS_DESKTOP_ACCEPTED_HOST_MS="$(<"$windows_desktop_detected_file")"
+WINDOWS_PIXEL_ACCEPTED_HOST_MS="$(<"$windows_pixel_detected_file")"
+WINDOWS_DESKTOP_ACCEPTANCE_MS="$(
+  windows_delivery_from_guest_submit \
     "$WINDOWS_APPROVAL_MS" \
-    "$WINDOWS_COMPLETED_MS" \
-    "Windows-admin-to-Pixel-manual"
+    "$WINDOWS_DESKTOP_ACCEPTED_HOST_MS" \
+    "Windows-admin-desktop-acceptance"
 )"
-wait_marker \
-  '.mode == "AdminAdd" and .desktopAccepted == true' \
-  "Windows admin accepted roster"
-desktop_admin_accepted_marker="$MARKER_PAYLOAD"
+WINDOWS_PIXEL_ACCEPTANCE_MS="$(
+  windows_delivery_from_guest_submit \
+    "$WINDOWS_APPROVAL_MS" \
+    "$WINDOWS_PIXEL_ACCEPTED_HOST_MS" \
+    "Windows-admin-Pixel-acceptance"
+)"
+if ((WINDOWS_DESKTOP_ACCEPTANCE_MS > WINDOWS_PIXEL_ACCEPTANCE_MS)); then
+  WINDOWS_ADMIN_DELIVERY_MS="$WINDOWS_DESKTOP_ACCEPTANCE_MS"
+else
+  WINDOWS_ADMIN_DELIVERY_MS="$WINDOWS_PIXEL_ACCEPTANCE_MS"
+fi
+desktop_admin_accepted_marker="$(<"$PLATFORM_RESULT/desktop-admin-accepted.json")"
 jq -e \
   --arg participant "$RELEASE_JOIN_ANDROID_JOINER_ID" \
   '.participantNpub == $participant' \
@@ -346,8 +436,16 @@ release_join_reset_android_state
 REMOTE_PARTICIPANT_NPUB=""
 remote Reset >"$PLATFORM_RESULT/desktop-joiner-reset.log" 2>&1
 remote Bootstrap >"$PLATFORM_RESULT/desktop-joiner-bootstrap.log" 2>&1
+desktop_joiner_bootstrap_marker="$(read_marker)"
+WINDOWS_JOINER_ID="$(
+  jq -er '.joinerNpub' <<<"$desktop_joiner_bootstrap_marker"
+)"
+release_join_valid_npub "$WINDOWS_JOINER_ID" \
+  || fail "Windows bootstrap did not expose a valid joiner Device ID"
 remote InstallService >"$PLATFORM_RESULT/desktop-joiner-service.log" 2>&1
 release_join_android_create_admin
+release_join_android_manual_admin_prepare "$WINDOWS_JOINER_ID" \
+  >"$PLATFORM_RESULT/pixel-admin-prepare.log"
 
 REMOTE_ADMIN_NPUB="$RELEASE_JOIN_ANDROID_ADMIN_ID"
 REMOTE_NETWORK_ID="$RELEASE_JOIN_ANDROID_NETWORK_ID"
@@ -360,12 +458,12 @@ wait_marker \
     and .joinerNpub != ""' \
   "Windows manual-join submission"
 join_submission_marker="$MARKER_PAYLOAD"
-WINDOWS_JOINER_ID="$(jq -er '.joinerNpub' <<<"$join_submission_marker")"
-release_join_valid_npub "$WINDOWS_JOINER_ID" \
-  || fail "Windows UI did not expose a valid joiner Device ID"
+jq -e --arg joiner "$WINDOWS_JOINER_ID" \
+  '.joinerNpub == $joiner' <<<"$join_submission_marker" >/dev/null \
+  || fail "Windows ManualJoin used a different identity than Bootstrap"
 
 android_approval_log="$PLATFORM_RESULT/pixel-admin-add.log"
-release_join_android_manual_admin_add "$WINDOWS_JOINER_ID" \
+release_join_android_manual_admin_submit "$WINDOWS_JOINER_ID" \
   | tee "$android_approval_log"
 PIXEL_APPROVAL_MS="$(
   sed -n \
