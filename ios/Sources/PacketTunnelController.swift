@@ -87,12 +87,19 @@ final class PacketTunnelController {
     ) async throws {
         try Task.checkCancellation()
         let update = Task { [self] in
-            try await updateAndStart(
-                state: state,
-                network: network,
-                tunnelConfigJson: tunnelConfigJson,
-                providerOptionsConfigJson: providerOptionsConfigJson,
-                onActiveTunnelDisconnected: onActiveTunnelDisconnected
+            try await PacketTunnelStartPreparation().perform(
+                operation: {
+                    try await updateAndStart(
+                        state: state,
+                        network: network,
+                        tunnelConfigJson: tunnelConfigJson,
+                        providerOptionsConfigJson: providerOptionsConfigJson,
+                        onActiveTunnelDisconnected: onActiveTunnelDisconnected
+                    )
+                },
+                confirmDisconnected: {
+                    _ = try await stopAndWaitForDisconnected()
+                }
             )
         }
         try await update.value

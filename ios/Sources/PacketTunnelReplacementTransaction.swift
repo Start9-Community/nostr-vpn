@@ -44,6 +44,35 @@ struct PacketTunnelReplacementError: LocalizedError {
     }
 }
 
+struct PacketTunnelStartPreparation {
+    func perform<Value>(
+        operation: () async throws -> Value,
+        confirmDisconnected: () async throws -> Void
+    ) async throws -> Value {
+        do {
+            return try await operation()
+        } catch let error as CancellationError {
+            throw error
+        } catch let error as PacketTunnelReplacementError {
+            throw error
+        } catch {
+            let operationError = error
+            do {
+                try await confirmDisconnected()
+            } catch {
+                throw PacketTunnelReplacementError(
+                    operationDescription: String(describing: operationError),
+                    cleanupDescription: String(describing: error)
+                )
+            }
+            throw PacketTunnelReplacementError(
+                operationDescription: String(describing: operationError),
+                cleanupDescription: nil
+            )
+        }
+    }
+}
+
 struct PacketTunnelReplacementTransaction {
     let state: PacketTunnelReplacementStateStore
 

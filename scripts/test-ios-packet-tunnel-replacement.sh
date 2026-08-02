@@ -39,6 +39,40 @@ actor Injection {
     }
 }
 
+actor PreparationInjection {
+    let cleanupFails: Bool
+    private(set) var cleanupCalls = 0
+
+    init(cleanupFails: Bool) { self.cleanupFails = cleanupFails }
+
+    func failBeforeTransaction() throws -> Int { throw FixtureError.injected }
+
+    func confirmDisconnected() throws {
+        cleanupCalls += 1
+        if cleanupFails { throw FixtureError.injected }
+    }
+}
+
+func expectPreparationFailure(cleanupFails: Bool) async {
+    let injection = PreparationInjection(cleanupFails: cleanupFails)
+    do {
+        let _: Int = try await PacketTunnelStartPreparation().perform(
+            operation: { try await injection.failBeforeTransaction() },
+            confirmDisconnected: { try await injection.confirmDisconnected() }
+        )
+        fatalError("injected pre-transaction failure passed")
+    } catch let error as PacketTunnelReplacementError {
+        require(
+            error.disconnectConfirmed == !cleanupFails,
+            "pre-transaction failure reported the wrong VPN-off certainty"
+        )
+    } catch {
+        fatalError("injected pre-transaction failure escaped without start context: \(error)")
+    }
+    let cleanupCalls = await injection.cleanupCalls
+    require(cleanupCalls == 1, "pre-transaction failure cleanup did not run exactly once")
+}
+
 func expectFailure(
     _ point: FailurePoint,
     disconnectConfirmed: Bool,
@@ -78,6 +112,9 @@ struct PacketTunnelReplacementTests {
         let state = PacketTunnelReplacementStateStore(markerURL: markerURL)
         let transaction = PacketTunnelReplacementTransaction(state: state)
         require(!state.restartRequired(), "fresh state requires a restart")
+
+        await expectPreparationFailure(cleanupFails: false)
+        await expectPreparationFailure(cleanupFails: true)
 
         for (point, confirmed, calls) in [
             (FailurePoint.saveOrReload, true, 1),
@@ -145,4 +182,11 @@ enqueue = lifecycle.split("func enqueuePacketTunnelOperation", 1)[1].split(
 failure = enqueue.split("} catch {", 1)[1]
 if "PacketTunnelReplacementError" not in failure or "disconnectConfirmed" not in failure:
     raise SystemExit("app state can claim VPN-off without confirmed replacement cleanup")
+start_entry = controller.split("func start(", 1)[1].split(
+    "private func updateAndStart", 1
+)[0]
+if "PacketTunnelStartPreparation().perform" not in start_entry:
+    raise SystemExit("pre-transaction start failures bypass disconnect recovery")
+if "confirmDisconnected:" not in start_entry or "stopAndWaitForDisconnected()" not in start_entry:
+    raise SystemExit("pre-transaction recovery does not confirm the Network Extension is off")
 PY
