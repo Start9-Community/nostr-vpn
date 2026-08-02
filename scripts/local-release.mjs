@@ -129,6 +129,8 @@ Options:
                             and post-publish Zapstore verification
   --dry-run                 Print the plan without running build or publish commands
   --skip-verify            Skip fmt/clippy/test verification
+  --reuse-gate-receipts    Validate and reuse the complete existing gate receipt set
+                            instead of executing the platform gate again
   --tag <tag>              Release tag (defaults to workspace version, for example v4.0.0)
   --release-tree <name>    htree release tree name (default: releases/nostr-vpn)
   --stage-dir <path>       Directory used for staged release metadata
@@ -159,6 +161,7 @@ function parseArgs(argv) {
     skipZapstore: false,
     requireZapstore: false,
     skipVerify: false,
+    reuseGateReceipts: false,
     releaseTree: null,
     stageDir: null,
     tag: null,
@@ -224,6 +227,9 @@ function parseArgs(argv) {
         break
       case '--skip-verify':
         options.skipVerify = true
+        break
+      case '--reuse-gate-receipts':
+        options.reuseGateReceipts = true
         break
       case '--tag':
         options.tag = normalizeTag(argv[++index] ?? '')
@@ -2358,9 +2364,24 @@ function main() {
   const skippedLines = []
   let androidReleaseGate = null
   let iosAppStoreGate = null
-  let releaseGateCompleted = false
   let releaseGateEvidence = null
   const artifactProofs = {}
+
+  if (
+    options.reuseGateReceipts
+    && (
+      options.skipVerify
+      || options.skip.has('verify')
+      || (options.only && !options.only.has('verify'))
+      || allowPartial
+      || options.publishStagedDraft
+      || options.promoteDraft
+    )
+  ) {
+    throw new Error(
+      '--reuse-gate-receipts requires complete verification and cannot be combined with skipped or partial staging.',
+    )
+  }
 
   if (options.publishStagedDraft) {
     const conflicts = []
@@ -2713,13 +2734,16 @@ function main() {
       builtLines,
     })],
     ['verify', () => {
-      runVerify({
-        dryRun: options.dryRun,
-        builtLines,
-        releaseGateLogDir,
-        tag,
-      })
-      releaseGateCompleted = true
+      if (options.reuseGateReceipts) {
+        builtLines.push('Validated and reused the complete existing release-gate receipt set.')
+      } else {
+        runVerify({
+          dryRun: options.dryRun,
+          builtLines,
+          releaseGateLogDir,
+          tag,
+        })
+      }
       if (!options.dryRun && !allowPartial) {
         releaseGateEvidence = collectReleaseGateReceipts({
           commit: candidateCommit,
@@ -2861,7 +2885,7 @@ function main() {
 
   const commit = resolveReleaseCommit(tag, { dryRun: options.dryRun })
   if (!options.dryRun && !allowPartial) {
-    if (!releaseGateCompleted || !releaseGateEvidence) {
+    if (!releaseGateEvidence) {
       throw new Error(
         'Complete release staging requires validated real-platform receipts.',
       )

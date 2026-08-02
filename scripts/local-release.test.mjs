@@ -2116,6 +2116,51 @@ test('final publication cannot bypass complete platform artifacts', () => {
   )
 })
 
+test('complete staging can reuse only a fully validated gate receipt set', () => {
+  const script = join(process.cwd(), 'scripts/local-release.mjs')
+  const reused = spawnSync(
+    process.execPath,
+    [script, '--dry-run', '--only', 'verify', '--reuse-gate-receipts'],
+    { encoding: 'utf8' },
+  )
+  assert.equal(reused.status, 0, reused.stderr)
+  assert.doesNotMatch(reused.stdout, /\$ .*release-gate\.sh/)
+  assert.match(reused.stdout, /Would stage 0 currently visible asset/)
+
+  for (const conflict of [
+    ['--skip-verify'],
+    ['--skip', 'verify'],
+    ['--only', 'android'],
+    ['--allow-partial'],
+    ['--publish-staged-draft'],
+    ['--promote-draft'],
+  ]) {
+    const rejected = spawnSync(
+      process.execPath,
+      [script, '--dry-run', '--reuse-gate-receipts', ...conflict],
+      { encoding: 'utf8' },
+    )
+    assert.equal(rejected.status, 1, conflict.join(' '))
+    assert.match(
+      rejected.stderr,
+      /requires complete verification.*skipped or partial staging/i,
+      conflict.join(' '),
+    )
+  }
+
+  const source = readFileSync(script, 'utf8')
+  const verify = source.slice(
+    source.indexOf("['verify', () => {"),
+    source.indexOf("['startos'"),
+  )
+  assert.match(
+    verify,
+    /if \(options\.reuseGateReceipts\)[\s\S]*?else \{[\s\S]*?runVerify\(/,
+  )
+  assert.match(verify, /collectReleaseGateReceipts\(\{/)
+  assert.doesNotMatch(verify, /releaseGateCompleted/)
+})
+
 test('final publication preflights tools and Zapstore identity before the release gate', () => {
   const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
   const mainStart = localRelease.indexOf('function main()')
