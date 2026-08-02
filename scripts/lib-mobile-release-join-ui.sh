@@ -82,9 +82,9 @@ release_join_android_scroll_to() {
 }
 
 release_join_android_enter() {
-  local resource="$1" value="$2"
-  release_join_android_scroll_to resource "$resource"
-  release_join_android_tap resource "$resource"
+  local kind="$1" selector="$2" value="$3"
+  release_join_android_scroll_to "$kind" "$selector"
+  release_join_android_tap "$kind" "$selector"
   "${ADB[@]}" shell input text "$value"
   "${ADB[@]}" shell input keyevent KEYCODE_BACK
 }
@@ -113,8 +113,10 @@ release_join_android_accept_camera_permission() {
 }
 
 release_join_android_public_value() {
-  local resource="$1" prefix="$2" description
-  description="$(release_join_android_query resource "$resource" description)" || return 1
+  local prefix="$1" description
+  description="$(
+    release_join_android_query description-prefix "$prefix: " description
+  )" || return 1
   [[ "$description" == "$prefix: "* ]] || return 1
   printf '%s\n' "${description#"$prefix: "}"
 }
@@ -125,15 +127,25 @@ release_join_valid_npub() {
 
 release_join_android_open_devices() {
   release_join_android_launch
-  release_join_android_wait_query resource navigation-devices
-  release_join_android_tap resource navigation-devices
+  if release_join_android_query \
+      description "Open manual device approval" center >/dev/null 2>&1; then
+    return 0
+  fi
+  release_join_android_wait_query description "Devices tab"
+  release_join_android_tap description "Devices tab"
+  release_join_android_wait_query description "Open manual device approval"
 }
 
 release_join_android_open_link_device() {
+  release_join_android_launch
+  if release_join_android_query \
+      description-prefix "Admin Device ID value: " center >/dev/null 2>&1; then
+    return 0
+  fi
   release_join_android_open_devices
-  release_join_android_wait_query resource manual-admin-open
-  release_join_android_tap resource manual-admin-open
-  release_join_android_wait_query resource admin-device-id-value
+  release_join_android_tap description "Open manual device approval"
+  release_join_android_wait_query \
+    description-prefix "Admin Device ID value: "
 }
 
 release_join_android_create_admin() {
@@ -142,13 +154,12 @@ release_join_android_create_admin() {
   release_join_android_tap resource network-setup-create
   release_join_android_wait_query resource network-create-submit
   release_join_android_tap resource network-create-submit
-  release_join_android_wait_query resource navigation-devices
   release_join_android_open_link_device
   RELEASE_JOIN_ANDROID_ADMIN_ID="$(
-    release_join_android_public_value admin-device-id-value "Admin Device ID value"
+    release_join_android_public_value "Admin Device ID value"
   )"
   RELEASE_JOIN_ANDROID_NETWORK_ID="$(
-    release_join_android_public_value admin-network-id-value "Admin Network ID value"
+    release_join_android_public_value "Admin Network ID value"
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_ADMIN_ID"
   [[ -n "$RELEASE_JOIN_ANDROID_NETWORK_ID" ]]
@@ -173,7 +184,7 @@ release_join_android_show_qr() {
   release_join_android_tap resource manual-join-expand
   release_join_android_wait_query resource joiner-device-id-value
   RELEASE_JOIN_ANDROID_JOINER_ID="$(
-    release_join_android_public_value joiner-device-id-value "Joiner Device ID value"
+    release_join_android_public_value "Joiner Device ID value"
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_android_scroll_to description "Join request QR code"
@@ -191,7 +202,7 @@ release_join_android_background_foreground_pending_qr() {
   release_join_android_assert_pending_qr
   foreground_joiner="$(
     release_join_android_public_value \
-      joiner-device-id-value "Joiner Device ID value"
+      "Joiner Device ID value"
   )"
   [[ "$foreground_joiner" == "$expected_joiner" ]] || {
     echo "Android foregrounded a different pending join request" >&2
@@ -234,7 +245,7 @@ release_join_android_assert_pending_qr() {
   release_join_android_query description "Join request QR code" center \
     >/dev/null
   release_join_android_public_value \
-    joiner-device-id-value "Joiner Device ID value" \
+    "Joiner Device ID value" \
     | grep -Fxq "$RELEASE_JOIN_ANDROID_JOINER_ID"
 }
 
@@ -245,14 +256,11 @@ release_join_android_wait_join_complete() {
 release_join_android_wait_accepted_participant() {
   local participant="$1" deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
-    release_join_android_launch >/dev/null 2>&1 || true
-    if release_join_android_query resource navigation-devices center >/dev/null 2>&1; then
-      release_join_android_tap resource navigation-devices >/dev/null
-      if release_join_android_query \
-          resource "roster-participant-accepted-$participant" center \
-          >/dev/null 2>&1; then
-        return 0
-      fi
+    release_join_android_open_devices >/dev/null 2>&1 || true
+    if release_join_android_query \
+        resource "roster-participant-accepted-$participant" center \
+        >/dev/null 2>&1; then
+      return 0
     fi
     sleep 0.25
   done
@@ -286,11 +294,6 @@ release_join_android_wait_qr_join_complete() {
       continue
     fi
     if ! release_join_android_query_dumped \
-        resource navigation-devices center >/dev/null 2>&1; then
-      echo "Android join QR disappeared before joined navigation was visible" >&2
-      return 1
-    fi
-    if ! release_join_android_query_dumped \
         resource "roster-participant-accepted-$admin" center >/dev/null 2>&1; then
       echo "Android join QR disappeared before the exact accepted admin roster was visible" >&2
       return 1
@@ -304,15 +307,15 @@ release_join_android_scan_and_accept() {
   local joiner="$1" before after deadline
   release_join_android_open_link_device
   before="$(release_join_android_query resource-prefix roster-participant- count)"
-  release_join_android_scroll_to resource join-request-scan-open
-  release_join_android_tap resource join-request-scan-open
+  release_join_android_scroll_to description "Scan joining device QR"
+  release_join_android_tap description "Scan joining device QR"
   release_join_android_accept_camera_permission
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_SCANNER_READY=1"
   release_join_android_wait_query \
-    resource join-request-confirm-add "$RELEASE_JOIN_CAMERA_WAIT_SECS"
+    description "Confirm adding scanned join request" "$RELEASE_JOIN_CAMERA_WAIT_SECS"
   release_join_require_fresh_ios_pending_qr
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
-  release_join_android_tap resource join-request-confirm-add
+  release_join_android_tap description "Confirm adding scanned join request"
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
@@ -356,11 +359,11 @@ release_join_android_manual_submit() {
   release_join_android_tap resource manual-join-expand
   release_join_android_wait_query resource joiner-device-id-value
   RELEASE_JOIN_ANDROID_JOINER_ID="$(
-    release_join_android_public_value joiner-device-id-value "Joiner Device ID value"
+    release_join_android_public_value "Joiner Device ID value"
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_JOINER_ID"
-  release_join_android_enter manual-join-admin-id "$admin"
-  release_join_android_enter manual-join-network-id "$network"
+  release_join_android_enter resource manual-join-admin-id "$admin"
+  release_join_android_enter resource manual-join-network-id "$network"
   release_join_android_scroll_to resource manual-join-submit
   release_join_android_tap resource manual-join-submit
   local deadline=$((SECONDS + 3))
@@ -380,11 +383,11 @@ release_join_android_manual_admin_add() {
   local joiner="$1" before after deadline
   release_join_android_open_link_device
   before="$(release_join_android_query resource-prefix roster-participant- count)"
-  release_join_android_scroll_to resource manual-admin-joiner-id
-  release_join_android_enter manual-admin-joiner-id "$joiner"
-  release_join_android_scroll_to resource manual-admin-submit
+  release_join_android_scroll_to description "Manual joiner Device ID"
+  release_join_android_enter description "Manual joiner Device ID" "$joiner"
+  release_join_android_scroll_to description "Add joining device manually"
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
-  release_join_android_tap resource manual-admin-submit
+  release_join_android_tap description "Add joining device manually"
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true

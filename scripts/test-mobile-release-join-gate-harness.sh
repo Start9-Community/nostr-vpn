@@ -86,8 +86,8 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
   release_join_valid_npub() { :; }
   release_join_android_public_value() {
     case "$1" in
-      admin-device-id-value) printf '%s\n' npub1admin ;;
-      admin-network-id-value) printf '%s\n' network-1 ;;
+      "Admin Device ID value") printf '%s\n' npub1admin ;;
+      "Admin Network ID value") printf '%s\n' network-1 ;;
       *) return 1 ;;
     esac
   }
@@ -676,7 +676,7 @@ if "an exact NVPN_EXPECTED_FIPS_GIT_SHA" not in artifacts:
 
 for required in (
     "QR scanner camera",
-    "join-request-confirm-add",
+    "Confirm adding scanned join request",
     "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS",
     "KEYCODE_HOME",
     "Join request QR code",
@@ -1112,6 +1112,7 @@ PY
   accepted_queries=0
 
   release_join_android_launch() { :; }
+  release_join_android_open_devices() { :; }
   release_join_android_query() {
     local kind="$1" expected="$2"
     if [[ "$kind" == resource && "$expected" == navigation-devices ]]; then
@@ -1148,6 +1149,7 @@ PY
   RELEASE_JOIN_DELIVERY_WAIT_SECS=1
 
   release_join_android_launch() { :; }
+  release_join_android_open_devices() { :; }
   release_join_android_query() {
     local kind="$1" expected="$2"
     [[ "$kind" == resource ]] \
@@ -1168,7 +1170,9 @@ trap 'rm -f "$fixture" "$no_viewport_fixture"' EXIT
 printf '%s\n' \
   '<hierarchy>' \
   '  <node bounds="[0,0][1080,2410]" />' \
-  '  <node resource-id="fi.siriusbusiness.nvpn:id/admin-device-id-value" content-desc="Admin Device ID value: npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" bounds="[10,20][110,80]" />' \
+  '  <node content-desc="Admin Device ID value: npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" bounds="[10,20][110,80]" />' \
+  '  <node content-desc="Manual joiner Device ID" bounds="[10,80][110,140]" />' \
+  '  <node content-desc="Add joining device manually" bounds="[10,140][110,200]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-pending-a" content-desc="Roster participant pending a" bounds="[0,100][100,200]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-accepted-b" content-desc="Roster participant accepted b" bounds="[0,200][100,300]" />' \
   '  <node resource-id="manual-join-submit-clipped" bounds="[89,2369][991,2410]" />' \
@@ -1177,7 +1181,7 @@ printf '%s\n' \
 
 description="$(
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
-    "$fixture" resource admin-device-id-value description
+    "$fixture" description-prefix "Admin Device ID value: " description
 )"
 [[ "$description" == "Admin Device ID value: npub1"* ]]
 [[ "$(
@@ -1196,11 +1200,11 @@ fi
 )" == "50 250" ]]
 [[ "$(
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
-    "$fixture" resource admin-device-id-value center
-)" == "60 50" ]]
+    "$fixture" description "Manual joiner Device ID" center
+)" == "60 110" ]]
 [[ "$(
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
-    "$fixture" resource admin-device-id-value width
+    "$fixture" description "Manual joiner Device ID" width
 )" == "100" ]]
 if "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource manual-join-submit-clipped safe-center >/dev/null 2>&1

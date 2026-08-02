@@ -657,7 +657,6 @@ class Driver:
         self.evidence["approvalSubmittedMs"] = now_ms()
         self.write_evidence()
         invoke("nvpn-manual-join-admin-submit")
-        invoke("Devices")
         find_named(
             f"nvpn-roster-participant-accepted-{self.args.participant_npub}",
             timeout=self.args.coordination_timeout,
