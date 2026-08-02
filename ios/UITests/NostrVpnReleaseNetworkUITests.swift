@@ -567,19 +567,22 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("Shipped WireGuard Save control was unavailable")
         }
 
-        // Autoconnect is disabled through the shipped Settings toggle in test
-        // setup. The Reconnecting phase is emitted by production code only
-        // after the old PacketTunnel has confirmed it is disconnected.
-        save.tap()
         let status = element("internet-settings-status")
-        let deadline = Date().addingTimeInterval(4)
-        while Date() < deadline,
-              !status.label.localizedCaseInsensitiveContains("Reconnecting VPN")
-        {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        guard status.label.localizedCaseInsensitiveContains("Reconnecting VPN") else {
-            throw gateError("Live WireGuard replacement did not confirm disconnection")
+        let updating = XCTNSPredicateExpectation(
+            predicate: NSPredicate(
+                format: "exists == true AND label CONTAINS[c] %@",
+                "Updating VPN"
+            ),
+            object: status
+        )
+
+        // Autoconnect is disabled through the shipped Settings toggle in test
+        // setup. Updating VPN spans the production stop/configure/start task;
+        // the Reconnecting VPN callback inside that task is intentionally
+        // transient and can be coalesced out of SwiftUI's conditional notice.
+        save.tap()
+        guard XCTWaiter.wait(for: [updating], timeout: 4) == .completed else {
+            throw gateError("Live WireGuard save did not start PacketTunnel reconciliation")
         }
 
         emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_REQUESTED_MS=\(millisecondsSinceEpoch())")

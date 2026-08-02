@@ -780,6 +780,36 @@ if "waitForApplicationState(.runningForeground" in body:
     raise SystemExit(
         "iOS Release lifecycle gate trusts stale XCUIApplication.state after activation"
     )
+
+config_sync = source.split(
+    "private func driveConfigSyncBackgroundForeground", 1
+)[1].split("private func selectDirectWhileConnected", 1)[0]
+required_sync = (
+    'let status = element("internet-settings-status")',
+    "let updating = XCTNSPredicateExpectation(",
+    'format: "exists == true AND label CONTAINS[c] %@"',
+    '"Updating VPN"',
+    "save.tap()",
+    "XCTWaiter.wait(for: [updating], timeout: 4)",
+    "XCUIDevice.shared.press(.home)",
+    "expected: directSource",
+)
+if any(token not in config_sync for token in required_sync):
+    raise SystemExit(
+        "iOS Release config-sync gate lacks stable UI synchronization and direct-path proof"
+    )
+if "status.label" in config_sync or '"Reconnecting VPN"' in config_sync:
+    raise SystemExit(
+        "iOS Release config-sync gate races SwiftUI's transient reconnect notice"
+    )
+if not (
+    config_sync.index("let updating = XCTNSPredicateExpectation(")
+    < config_sync.index("save.tap()")
+    < config_sync.index("XCTWaiter.wait(for: [updating], timeout: 4)")
+    < config_sync.index("XCUIDevice.shared.press(.home)")
+    < config_sync.index("expected: directSource")
+):
+    raise SystemExit("iOS Release config-sync evidence has unsafe ordering")
 PY
 if grep -Fq -- '--nvpn-debug-' \
   "$ios_release_gate" "$ios_release_ui" "$ios_release_ui_support" "$ios_release_underlay"
