@@ -20,6 +20,7 @@ SERIALIZED_DPKG="$ROOT/scripts/ubuntu-vm-serialized-dpkg.sh"
 CLEANUP_HARNESS="$ROOT/scripts/test-ubuntu-vm-exact-deb-cleanup-harness.sh"
 RECOVERY="$ROOT/scripts/ubuntu-vm-recover-stale-import.sh"
 RECOVERY_HARNESS="$ROOT/scripts/test-ubuntu-vm-stale-import-recovery-harness.sh"
+JOIN_SERVICE_CLEANUP_HARNESS="$ROOT/scripts/test-linux-release-mobile-join-service-cleanup-harness.sh"
 IMPORT_LOCK_HOLDER="$ROOT/scripts/ubuntu-vm-import-lock-holder.sh"
 ISOLATION_LIB="$ROOT/scripts/lib-host-linux-builder-isolation.sh"
 ISOLATION_HARNESS="$ROOT/scripts/test-host-linux-builder-isolation-harness.sh"
@@ -58,6 +59,7 @@ for executable in \
   "$CLEANUP_HARNESS" \
   "$RECOVERY" \
   "$RECOVERY_HARNESS" \
+  "$JOIN_SERVICE_CLEANUP_HARNESS" \
   "$IMPORT_LOCK_HOLDER" \
   "$ISOLATION_HARNESS" \
   "$CONTAINER_PAYLOAD" \
@@ -178,6 +180,12 @@ checks = (
 )
 if any(text.index(left) >= text.index(right) for text, left, right in checks):
     raise SystemExit("Linux Release join service lifecycle is out of order")
+for install in ('desktop-admin-service.log', 'desktop-joiner-service.log'):
+    install_index = host.index(f'remote InstallService >"$RESULT_DIR/{install}"')
+    last_arm = host.rfind('service_cleanup_armed=1', 0, install_index)
+    last_disarm = host.rfind('service_cleanup_armed=0', 0, install_index)
+    if last_arm < last_disarm:
+        raise SystemExit("Linux Release join service cleanup is armed after mutation")
 PY
 require_tokens "$CONTAINER_PAYLOAD" "one canonical container build payload" \
   'host_linux_cargo_archive_cache.py' \
@@ -531,6 +539,7 @@ grep -Fq UBUNTU_EXACT_DEB_PURGE_FAILURE_RETRY_OK \
 recovery_harness_output="$("$RECOVERY_HARNESS")"
 grep -Fq UBUNTU_STALE_IMPORT_RECOVERY_HARNESS_OK \
   <<<"$recovery_harness_output"
+"$JOIN_SERVICE_CLEANUP_HARNESS"
 
 python3 - "$IMPORT_LIB" "$RELEASE_GATE" <<'PY'
 import pathlib

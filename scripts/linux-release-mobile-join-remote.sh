@@ -42,6 +42,7 @@ MARKER="$ARTIFACT_ROOT/action.json"
 STOP_PATH="$ARTIFACT_ROOT/stop"
 DRIVER="$ROOT/scripts/desktop-mobile-manual-join-atspi.py"
 SERVICE_BINARY=/usr/local/bin/nvpn
+SERVICE_UNIT=/etc/systemd/system/nvpn.service
 CONFIG="${XDG_DATA_HOME:-$HOME/.local/share}/nostr-vpn/config.toml"
 
 assert_imported_artifacts() {
@@ -123,16 +124,40 @@ assert_service_ready() {
 }
 
 cleanup_candidate_service() {
-  local expected_hash; expected_hash="$(jq -er '.artifacts.cli.sha256' "$RECEIPT")"
-  if ! sudo -n test -f "$SERVICE_BINARY" || sudo -n test -L "$SERVICE_BINARY" \
-    || [[ "$(sudo -n sha256sum "$SERVICE_BINARY" | awk '{ print $1 }')" != "$expected_hash" ]]; then
-    echo "Refusing to remove a service binary outside this candidate" >&2
-    return 1
+  local expected_hash has_binary=0 has_unit=0
+  expected_hash="$(jq -er '.artifacts.cli.sha256' "$RECEIPT")"
+  if sudo -n test -e "$SERVICE_BINARY" || sudo -n test -L "$SERVICE_BINARY"; then
+    has_binary=1
+    if ! sudo -n test -f "$SERVICE_BINARY" || sudo -n test -L "$SERVICE_BINARY" \
+      || [[ "$(sudo -n sha256sum "$SERVICE_BINARY" | awk '{ print $1 }')" != "$expected_hash" ]]; then
+      echo "Refusing to remove a service binary outside this candidate" >&2
+      return 1
+    fi
+  fi
+  if sudo -n test -e "$SERVICE_UNIT" || sudo -n test -L "$SERVICE_UNIT"; then
+    has_unit=1
+    if ! sudo -n test -f "$SERVICE_UNIT" || sudo -n test -L "$SERVICE_UNIT" \
+      || ! sudo -n grep -Fq \
+        "ExecStart=\"$SERVICE_BINARY\" daemon --service --config \"$CONFIG\" " \
+        "$SERVICE_UNIT"; then
+      echo "Refusing to remove a service unit outside this candidate" >&2
+      return 1
+    fi
+  fi
+  if [[ "$has_binary" -eq 0 && "$has_unit" -eq 0 ]]; then
+    if systemctl is-active --quiet nvpn.service; then
+      echo "Refusing to stop an active service without candidate-owned files" >&2
+      return 1
+    fi
+    return 0
   fi
   sudo -n "$CLI" service uninstall --config "$CONFIG" >/dev/null
-  sudo -n find "$SERVICE_BINARY" -maxdepth 0 -type f -delete
+  if [[ "$has_binary" -eq 1 ]]; then
+    sudo -n find "$SERVICE_BINARY" -maxdepth 0 -type f -delete
+  fi
   if systemctl is-active --quiet nvpn.service \
-    || sudo -n test -e /etc/systemd/system/nvpn.service; then
+    || sudo -n test -e "$SERVICE_UNIT" \
+    || sudo -n test -e "$SERVICE_BINARY"; then
     echo "Linux desktop/mobile join service cleanup did not complete" >&2
     return 1
   fi
@@ -143,7 +168,7 @@ install_candidate_service() {
   [[ "$CONFIG" == /* && -f "$CONFIG" && ! -L "$CONFIG" ]] || {
     echo "Linux canonical profile was not bootstrapped before service installation" >&2; return 1
   }
-  if [[ -e /etc/systemd/system/nvpn.service || -L /etc/systemd/system/nvpn.service \
+  if [[ -e "$SERVICE_UNIT" || -L "$SERVICE_UNIT" \
     || -e "$SERVICE_BINARY" || -L "$SERVICE_BINARY" ]] \
     || systemctl is-active --quiet nvpn.service; then
     echo "Linux desktop/mobile join requires an empty service slot" >&2; return 1
@@ -153,7 +178,7 @@ install_candidate_service() {
     echo "LINUX_RELEASE_MOBILE_JOIN_SERVICE_READY"
     return 0
   fi
-  cleanup_candidate_service || true
+  cleanup_candidate_service
   return 1
 }
 

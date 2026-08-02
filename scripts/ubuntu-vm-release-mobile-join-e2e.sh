@@ -99,7 +99,7 @@ export NVPN_UBUNTU_IMPORT_EVIDENCE_DIR="$RESULT_DIR/import"
 
 remote_pid=""
 import_ready=0
-service_installed=0
+service_cleanup_armed=0
 
 remote() {
   local mode="$1"
@@ -130,7 +130,7 @@ cleanup() {
     wait "$remote_pid" >/dev/null 2>&1 || true
   fi
   if [[ "$import_ready" -eq 1 ]]; then
-    remote Cleanup "$service_installed" >/dev/null 2>&1 || status=1
+    remote Cleanup "$service_cleanup_armed" >/dev/null 2>&1 || status=1
   fi
   if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
     "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml \
@@ -399,8 +399,8 @@ DESKTOP_NETWORK_ID="$(
 )"
 release_join_valid_npub "$DESKTOP_ADMIN_NPUB"
 [[ -n "$DESKTOP_NETWORK_ID" ]]
+service_cleanup_armed=1
 remote InstallService >"$RESULT_DIR/desktop-admin-service.log"
-service_installed=1
 release_join_android_manual_submit "$DESKTOP_ADMIN_NPUB" "$DESKTOP_NETWORK_ID"
 
 desktop_add_log="$RESULT_DIR/desktop-admin-add-pixel.log"
@@ -454,11 +454,11 @@ remote ReadMarker >"$RESULT_DIR/desktop-admin-relaunch.json"
 # Physical Pixel admin -> imported Linux desktop joiner.
 release_join_reset_android_state
 remote Cleanup 1 >"$RESULT_DIR/desktop-admin-service-cleanup.log"
-service_installed=0
+service_cleanup_armed=0
 remote Reset >"$RESULT_DIR/desktop-joiner-reset.log"
 remote Bootstrap >"$RESULT_DIR/desktop-joiner-bootstrap.log"
+service_cleanup_armed=1
 remote InstallService >"$RESULT_DIR/desktop-joiner-service.log"
-service_installed=1
 release_join_android_create_admin
 
 desktop_join_log="$RESULT_DIR/pixel-admin-desktop-join.log"
