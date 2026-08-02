@@ -355,7 +355,8 @@ fn verify_admin(paths: &Paths, metadata: &Value) -> Result<()> {
 
 fn capture_delivery(paths: &Paths) -> Result<()> {
     let mut metadata = metadata(paths)?;
-    verify_joiner(paths, &metadata)?;
+    // Signed-LAN approval persists on the joiner asynchronously. Capture the
+    // authoritative queued artifact before waiting for its exact durable ack.
     verify_admin(paths, &metadata)?;
     let expected_admin = normalize_nostr_pubkey(metadata_string(&metadata, "adminNpub")?)?;
     let expected_joiner = normalize_nostr_pubkey(metadata_string(&metadata, "joinerNpub")?)?;

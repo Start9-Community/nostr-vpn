@@ -35,7 +35,8 @@ pub fn prepare_join_approval(
         return Err(anyhow!("active network is not administered by this device"));
     }
 
-    let (updated_config, shared) = stage_approved_config(config, network_entry_id, bootstrap)?;
+    let (updated_config, shared) =
+        stage_approved_config(config, network_entry_id, bootstrap, approved_at)?;
     let signed_roster = SignedRoster::sign(
         shared.network_id.clone(),
         NetworkRoster {
@@ -43,7 +44,7 @@ pub fn prepare_join_approval(
             devices: shared.devices.clone(),
             admins: shared.admins.clone(),
             aliases: shared.aliases.clone(),
-            signed_at: approved_at,
+            signed_at: shared.updated_at,
         },
         &signer_keys,
     )
@@ -60,8 +61,13 @@ fn stage_approved_config(
     config: &AppConfig,
     network_entry_id: &str,
     bootstrap: &NostrIdentityDeviceApprovalBootstrap,
+    approved_at: u64,
 ) -> Result<(AppConfig, SharedNetworkRoster)> {
     let mut updated = config.clone();
+    let previous_signed_at = updated
+        .network_by_id(network_entry_id)
+        .ok_or_else(|| anyhow!("network not found"))?
+        .shared_roster_updated_at;
     let device_pubkey = normalize_nostr_pubkey(&bootstrap.device_app_key_npub)?;
     updated.add_participant_to_network(network_entry_id, &device_pubkey)?;
     if let Some(label) = bootstrap
@@ -72,10 +78,13 @@ fn stage_approved_config(
     {
         let _ = updated.set_peer_alias(&device_pubkey, label);
     }
+    let signer_pubkey = updated.own_nostr_pubkey_hex()?;
     if let Some(network) = updated.network_by_id_mut(network_entry_id) {
         network
             .inbound_join_requests
             .retain(|pending| pending.requester != device_pubkey);
+        network.shared_roster_updated_at = approved_at.max(previous_signed_at.saturating_add(1));
+        network.shared_roster_signed_by = signer_pubkey;
     }
     let shared = updated.shared_network_roster(network_entry_id)?;
     Ok((updated, shared))
@@ -198,6 +207,8 @@ mod tests {
         admin.networks[0].admins = vec![keys.public_key().to_hex()];
         admin.node.advertise_exit_node = true;
         admin.ensure_defaults();
+        admin.networks[0].shared_roster_updated_at = REQUESTED_AT;
+        admin.networks[0].shared_roster_signed_by = keys.public_key().to_hex();
         let network_entry_id = admin.networks[0].id.clone();
         (admin, network_entry_id)
     }
@@ -230,6 +241,31 @@ mod tests {
                 .signer_pubkey_hex()
                 .expect("signer"),
             admin.own_nostr_pubkey_hex().expect("admin pubkey")
+        );
+        let shared = prepared
+            .updated_config
+            .shared_network_roster(&network_id)
+            .expect("updated shared roster");
+        assert_eq!(
+            roster.signed_at, shared.updated_at,
+            "approval and durable config must use one canonical roster timestamp"
+        );
+        let regenerated = SignedRoster::sign(
+            shared.network_id,
+            NetworkRoster {
+                network_name: shared.name,
+                devices: shared.devices,
+                admins: shared.admins,
+                aliases: shared.aliases,
+                signed_at: shared.updated_at,
+            },
+            &prepared.updated_config.nostr_keys().expect("admin keys"),
+        )
+        .expect("regenerate active roster");
+        assert_eq!(
+            prepared.join_roster.signed_roster.artifact_hash(),
+            regenerated.artifact_hash(),
+            "background roster sync must reuse the exact approved artifact identity"
         );
     }
 
