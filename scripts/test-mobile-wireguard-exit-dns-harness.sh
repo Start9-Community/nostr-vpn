@@ -1583,6 +1583,21 @@ grep -Fq 'NVPN_CONNECTED_DIRECT_UI_PASSED=1' "$ios_ui" \
   || { echo "iOS connected Direct XCTest does not emit an exact receipt" >&2; exit 1; }
 grep -Fq 'emit("NVPN_EXIT_DNS_UI_CONFIG_PERSISTED=\(spec.caseName)")' "$ios_ui" \
   || { echo "iOS shipped DNS XCTest does not emit an exact per-case receipt" >&2; exit 1; }
+python3 - "$ios_release_ui" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split("private func configureExitDNS", 1)[1].split(
+    "\n    private func turnVPNOn", 1
+)[0]
+if body.count("try finishExitDnsTextEntry") < 2:
+    raise SystemExit("iOS release DNS UI leaves editable settings focused at Save")
+ack = body.find('element("exit-dns-save-acknowledgement").waitForExistence')
+relaunch = body.find("relaunch()")
+if ack < 0 or relaunch < 0 or ack > relaunch:
+    raise SystemExit("iOS release DNS UI relaunches before persistence acknowledgement")
+PY
 grep -Fq 'NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64: "$(NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64)"' "$ios_project" \
   || { echo "iOS scheme does not bridge the DNS case spec into the test runner" >&2; exit 1; }
 grep -Fq 'NVPN_XCUITEST_CONNECTED_DIRECT_GATE: "$(NVPN_XCUITEST_CONNECTED_DIRECT_GATE)"' "$ios_project" \

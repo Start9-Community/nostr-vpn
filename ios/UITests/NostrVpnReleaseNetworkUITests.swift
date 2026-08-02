@@ -289,10 +289,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                     scrollToElement("exit-dns-custom-url"),
                     with: spec.customUrl
                 )
-                replaceText(
-                    scrollToElement("exit-dns-custom-bootstrap-ips"),
-                    with: spec.bootstrapIps
-                )
+                let bootstrapField = scrollToElement("exit-dns-custom-bootstrap-ips")
+                replaceText(bootstrapField, with: spec.bootstrapIps)
+                try finishExitDnsTextEntry(bootstrapField)
             default:
                 throw gateError("Unsupported encrypted DNS provider")
             }
@@ -301,10 +300,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                 picker: "exit-dns-mode-picker",
                 option: "exit-dns-mode-through-exit"
             )
-            replaceText(
-                scrollToElement("exit-dns-through-exit-servers"),
-                with: spec.throughExitServers
-            )
+            let serverField = scrollToElement("exit-dns-through-exit-servers")
+            replaceText(serverField, with: spec.throughExitServers)
+            try finishExitDnsTextEntry(serverField)
         default:
             throw gateError("Unsupported Exit DNS mode")
         }
@@ -316,7 +314,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("Shipped Exit DNS controls rejected the case")
         }
         save.tap()
-        waitForActionToSettle()
+        guard element("exit-dns-save-acknowledgement").waitForExistence(timeout: 3) else {
+            throw gateError("Shipped Exit DNS save did not acknowledge persistence")
+        }
         relaunch()
         openInternetTab()
 
@@ -355,6 +355,15 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("Persisted Exit DNS settings became invalid")
         }
         emit("NVPN_IOS_RELEASE_DNS_UI_PERSISTED=\(spec.caseName)")
+    }
+
+    private func finishExitDnsTextEntry(_ field: XCUIElement) throws {
+        guard ShippedUIInteraction.finishTextEntry(
+            field,
+            byTapping: app.buttons["exit-dns-keyboard-done"]
+        ) else {
+            throw gateError("Shipped Exit DNS keyboard Done control was unavailable")
+        }
     }
 
     private func turnVPNOn() throws {
