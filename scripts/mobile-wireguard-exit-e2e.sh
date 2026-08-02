@@ -562,17 +562,9 @@ run_ios_case() {
       resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
       resolver_body="$HTTP_PROBE_TOKEN"
       ;;
-    doh-cloudflare)
-      resolver_probe_url="$DIRECT_URL"
-      resolver_body=""
-      ;;
-    doh-quad9)
-      resolver_probe_url="$DIRECT_URL"
-      resolver_body=""
-      ;;
-    doh-google)
-      resolver_probe_url="$DIRECT_URL"
-      resolver_body=""
+    doh-cloudflare|doh-quad9|doh-google)
+      resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
+      resolver_body="$HTTP_PROBE_TOKEN"
       ;;
     dns-through)
       resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"

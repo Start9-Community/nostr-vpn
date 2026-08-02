@@ -65,6 +65,20 @@ done
 
 grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
   || { echo "standalone mobile gate does not initialize exact build metadata" >&2; exit 1; }
+python3 - "$gate" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split("run_ios_case() {", 1)[1].split("\nrun_android_case() {", 1)[0]
+encrypted = body.split("doh-cloudflare|doh-quad9|doh-google)", 1)[1].split(";;", 1)[0]
+if 'resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"' not in encrypted:
+    raise SystemExit("iOS encrypted DNS cases do not use the controlled resolver probe")
+if 'resolver_body="$HTTP_PROBE_TOKEN"' not in encrypted:
+    raise SystemExit("iOS encrypted DNS cases do not require the controlled response token")
+if 'resolver_probe_url="$DIRECT_URL"' in encrypted:
+    raise SystemExit("iOS encrypted DNS cases still use an uncontrolled HTTPS resolver probe")
+PY
 grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
   && grep -Fq 'shell input text "${line// /%s}" </dev/null' "$android_smoke" \
   || {
