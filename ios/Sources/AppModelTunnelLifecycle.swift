@@ -152,7 +152,7 @@ extension AppModel {
                 actionInFlight = false
                 switch operation {
                 case .setEnabled(false, _):
-                    // Keep native desired state on when teardown was not confirmed.
+                    // OFF is already durable; keep runtime state visible until teardown is confirmed.
                     break
                 case .setEnabled(true, _), .syncConfig(_, _):
                     dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")

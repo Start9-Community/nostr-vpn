@@ -25,7 +25,7 @@
 
 - Windows: run build/test checks from the configured Windows dev VM checkout; do not use local macOS/Linux `dotnet` as the verification path. Check `dotnet build windows\NostrVpn.Windows\NostrVpn.Windows.csproj -p:EnableWindowsTargeting=true` there.
 - Mobile-sensitive: `just mobile-test-kit`; sim/device packet paths: `just mobile-test-kit-sim` / `just mobile-test-kit-device`.
-- Physical iOS XCTest: after a reboot, verify direct device Internet before trust or runner launch, then keep the same UI runner installed between cases.
+- Physical iOS XCTest: after reboot, verify unlocked, direct Internet, Developer Mode, and UI Automation; keep the same runner installed because removing the last development-signed runner drops trust.
 - FIPS protocol/routing/session/reconnect tests live in `fips`; Android/iOS VPN, FFI/JNI/C ABI, permissions, physical packet checks live here.
 - Do not commit hostnames, device IDs, signing details, or local paths; use env vars.
 
