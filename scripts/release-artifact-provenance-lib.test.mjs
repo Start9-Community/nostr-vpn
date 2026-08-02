@@ -531,17 +531,17 @@ test('release receipt collection requires exact source and strict public UI gate
           .map((label) => {
             const policy = {
               'automatic-profile': ['dns-profile', ['query', 'profile']],
-              'cloudflare-doh': ['doh-cloudflare', ['cloudflare']],
-              'quad9-doh': ['doh-quad9', ['quad9']],
-              'custom-doh': ['doh-google', ['google']],
+              'cloudflare-doh': ['doh-cloudflare', ['cloudflareTls']],
+              'quad9-doh': ['doh-quad9', ['quad9Tls']],
+              'custom-doh': ['doh-google', ['googleTls']],
               'through-exit': ['dns-through', ['query', 'through']],
             }[label]
             const counters = [
               'query',
               'profile',
-              'cloudflare',
-              'quad9',
-              'google',
+              'cloudflareTls',
+              'quad9Tls',
+              'googleTls',
               'through',
               'forward',
             ]
@@ -551,6 +551,9 @@ test('release receipt collection requires exact source and strict public UI gate
             const after = { ...before }
             for (const counter of policy[1]) {
               after[counter] += 1
+            }
+            if (label === 'automatic-profile') {
+              after.cloudflareTls += 3
             }
             return [label, {
               dnsEvidence: policy[0],
@@ -562,6 +565,8 @@ test('release receipt collection requires exact source and strict public UI gate
               forwardedPacketsAfter: 2,
               dnsPathCountersBefore: before,
               dnsPathCountersAfter: after,
+              dnsPathCountersBeforeObservedAtUnix: 1,
+              dnsPathCountersAfterObservedAtUnix: 2,
             }]
           }),
       ),
@@ -1399,8 +1404,8 @@ test('release receipt collection requires exact source and strict public UI gate
     const wrongAndroidDnsPath = JSON.parse(androidNetwork)
     const cloudflare =
       wrongAndroidDnsPath.dnsCases['cloudflare-doh']
-    cloudflare.dnsPathCountersAfter.cloudflare =
-      cloudflare.dnsPathCountersBefore.cloudflare
+    cloudflare.dnsPathCountersAfter.cloudflareTls =
+      cloudflare.dnsPathCountersBefore.cloudflareTls
     cloudflare.dnsPathCountersAfter.query =
       cloudflare.dnsPathCountersBefore.query + 1
     writeFileSync(
@@ -1414,7 +1419,7 @@ test('release receipt collection requires exact source and strict public UI gate
         releaseGateSummaryPath: summary,
         platformReceiptPaths: paths,
       }),
-      /used the wrong (query|cloudflare) DNS path/,
+      /used the wrong (query|cloudflareTls) DNS path/,
     )
     writeFileSync(paths.android.wireguard_dns, androidNetwork)
 

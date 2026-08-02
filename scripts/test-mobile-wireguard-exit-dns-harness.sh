@@ -54,13 +54,17 @@ grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$ROOT/.dockerignore" \
     exit 1
   }
 
-for doh_fixture in "$server" "$remote_native"; do
-  grep -Fq 'tcp flags syn' "$doh_fixture" \
-    || grep -Fq -- '--syn' "$doh_fixture" \
+for tls_fixture in "$server" "$remote_native"; do
+  grep -Fq 'tcp flags syn' "$tls_fixture" \
+    || grep -Fq -- '--syn' "$tls_fixture" \
     || {
-      echo "$(basename "$doh_fixture") counts pooled DoH teardown traffic as a new resolver use" >&2
+      echo "$(basename "$tls_fixture") counts pooled TLS teardown traffic as a new resolver use" >&2
       exit 1
     }
+  if grep -Eq 'nvpn-wg-doh|counter name doh_|counter_packets doh_' "$tls_fixture"; then
+    echo "$(basename "$tls_fixture") mislabels generic resolver HTTPS SYNs as DoH" >&2
+    exit 1
+  fi
 done
 
 grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
@@ -301,7 +305,9 @@ declare -F mobile_wg_endpoint_fields >/dev/null \
   || { echo "mobile fixture lacks strict endpoint rendering" >&2; exit 1; }
 declare -F mobile_wg_dns_case_fields >/dev/null \
   && declare -F mobile_wg_fixture_dns_evidence_snapshot >/dev/null \
+  && declare -F mobile_wg_fixture_timed_dns_evidence_snapshot >/dev/null \
   && declare -F mobile_wg_fixture_assert_dns_case_evidence >/dev/null \
+  && declare -F mobile_wg_fixture_assert_timed_dns_case_evidence >/dev/null \
   || { echo "mobile fixture lacks the shared DNS evidence contract" >&2; exit 1; }
 mobile_wg_dns_cases_are_complete \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit \
@@ -349,7 +355,7 @@ import sys
 fixture = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 remote = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 start = fixture.index("mobile_wg_fixture_dns_evidence_snapshot()")
-end = fixture.index("\nmobile_wg_fixture_assert_dns_case_evidence()", start)
+end = fixture.index("\nmobile_wg_fixture_timed_dns_evidence_snapshot()", start)
 snapshot = fixture[start:end]
 if snapshot.count("mobile_wg_remote_native dns-evidence-snapshot") != 1:
     raise SystemExit("native DNS evidence still uses multiple remote actions")
@@ -358,7 +364,7 @@ if snapshot.count("mobile_wg_fixture_docker exec") != 1:
 for old_call in (
     "mobile_wg_fixture_dns_count",
     "mobile_wg_fixture_profile_dns_count",
-    "mobile_wg_fixture_doh_count",
+    "mobile_wg_fixture_provider_tls_count",
     "mobile_wg_fixture_through_dns_count",
     "mobile_wg_fixture_forward_dns_count",
 ):
@@ -368,9 +374,9 @@ if "dns-evidence-snapshot)" not in remote:
     raise SystemExit("native fixture lacks an all-counter snapshot action")
 for counter in (
     "dns_profile",
-    "doh_cf",
-    "doh_q9",
-    "doh_google",
+    "provider_tls_cf",
+    "provider_tls_q9",
+    "provider_tls_google",
     "dns_through",
     "dns_forward",
 ):
@@ -396,6 +402,31 @@ mobile_wg_fixture_assert_dns_case_evidence \
   Android cloudflare-doh doh-cloudflare \
   $'0\t0\t0\t0\t0\t0\t0' $'0\t0\t4\t0\t0\t0\t0' >/dev/null \
   || { echo "valid exclusive Cloudflare evidence was rejected" >&2; exit 1; }
+mobile_wg_fixture_assert_timed_dns_case_evidence \
+  iOS automatic-profile dns-profile \
+  $'1000\t0\t0\t0\t0\t0\t0\t0' \
+  $'1001\t1\t1\t6\t0\t0\t0\t0' >/dev/null \
+  || { echo "profile DNS was rejected because of unrelated resolver HTTPS" >&2; exit 1; }
+if mobile_wg_fixture_assert_timed_dns_case_evidence \
+    iOS automatic-profile dns-profile \
+    $'1001\t0\t0\t0\t0\t0\t0\t0' \
+    $'1000\t1\t1\t0\t0\t0\t0\t0' >/dev/null 2>&1
+then
+  echo "profile DNS accepted counters outside their timestamped phase" >&2
+  exit 1
+fi
+python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
+import runpy
+import sys
+
+module = runpy.run_path(sys.argv[1])
+before = dict.fromkeys(module["COUNTERS"], 0)
+after = dict(before)
+after.update(query=1, profile=1, cloudflareTls=6)
+module["validate_dns_path_counters"](
+    "automatic-profile", "dns-profile", before, after
+)
+PY
 if mobile_wg_fixture_assert_dns_case_evidence \
     Android cloudflare-doh doh-cloudflare \
     $'0\t0\t0\t0\t0\t0\t0' $'1\t1\t4\t0\t0\t0\t0' >/dev/null 2>&1
@@ -542,8 +573,8 @@ for label in automatic-profile cloudflare-doh quad9-doh custom-doh through-exit;
   }
 done
 
-grep -Fq 'mobile_wg_fixture_dns_evidence_snapshot' "$gate" \
-  && grep -Fq 'mobile_wg_fixture_assert_dns_case_evidence' "$gate" \
+grep -Fq 'mobile_wg_fixture_timed_dns_evidence_snapshot' "$gate" \
+  && grep -Fq 'mobile_wg_fixture_assert_timed_dns_case_evidence' "$gate" \
   || { echo "mobile exit gate does not require exclusive resolver evidence" >&2; exit 1; }
 grep -Fq 'switch_direct="$final"' "$gate" \
   && grep -Fq 'NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED="$switch_direct"' "$gate" \
@@ -602,7 +633,7 @@ if grep -Fq ',,' "$android_smoke"; then
   echo "Android physical smoke uses Bash-4 lowercase expansion on macOS Bash" >&2
   exit 1
 fi
-[[ "$(grep -Fc 'mobile_wg_fixture_assert_dns_case_evidence' "$gate")" -eq 2 ]] \
+[[ "$(grep -Fc 'mobile_wg_fixture_assert_timed_dns_case_evidence' "$gate")" -eq 2 ]] \
   || {
     echo "Android/iOS Release DNS cases do not require shared positive/negative evidence" >&2
     exit 1
@@ -1640,18 +1671,18 @@ do
     || { echo "Android DNS UI is missing selector $selector" >&2; exit 1; }
 done
 
-grep -Fq 'nvpn-wg-doh-cf' "$server" \
-  || { echo "WireGuard fixture does not count Cloudflare DoH traffic" >&2; exit 1; }
-grep -Fq 'nvpn-wg-doh-q9' "$server" \
-  || { echo "WireGuard fixture does not count Quad9 DoH traffic" >&2; exit 1; }
-grep -Fq 'nvpn-wg-doh-google' "$server" \
+grep -Fq 'nvpn-wg-provider-tls-cf' "$server" \
+  || { echo "WireGuard fixture does not count Cloudflare TLS routing" >&2; exit 1; }
+grep -Fq 'nvpn-wg-provider-tls-q9' "$server" \
+  || { echo "WireGuard fixture does not count Quad9 TLS routing" >&2; exit 1; }
+grep -Fq 'nvpn-wg-provider-tls-google' "$server" \
   && grep -Fq 'nvpn-wg-dns-profile' "$server" \
   && grep -Fq 'nvpn-wg-dns-through' "$server" \
   && grep -Fq 'nvpn-wg-dns-forward' "$server" \
   || { echo "WireGuard fixture lacks distinct custom/profile/through counters" >&2; exit 1; }
 grep -Fq 'counter name dns_profile' "$remote_native" \
   && grep -Fq 'counter name dns_through' "$remote_native" \
-  && grep -Fq 'counter name doh_google' "$remote_native" \
+  && grep -Fq 'counter name provider_tls_google' "$remote_native" \
   && grep -Fq 'counter name dns_forward' "$remote_native" \
   && grep -Fq 'profile-dns-count' "$remote_native" \
   && grep -Fq 'through-dns-count' "$remote_native" \

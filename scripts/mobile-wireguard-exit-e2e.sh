@@ -320,8 +320,8 @@ record_case_evidence() {
   IFS=$'\t' read -r after_rx after_tx <<<"$after_bytes"
   IFS=$'\t' read -r -a before_dns_values <<<"$before_dns"
   IFS=$'\t' read -r -a after_dns_values <<<"$after_dns"
-  [[ "${#before_dns_values[@]}" -eq 7 \
-    && "${#after_dns_values[@]}" -eq 7 ]] || {
+  [[ "${#before_dns_values[@]}" -eq 8 \
+    && "${#after_dns_values[@]}" -eq 8 ]] || {
     echo "$platform $label has an incomplete DNS counter snapshot" >&2
     return 1
   }
@@ -420,7 +420,7 @@ run_android_case() {
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
   before_dns_evidence="$(
-    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+    mobile_wg_fixture_timed_dns_evidence_snapshot "$CONTAINER" "$probe_host"
   )"
   local -a android_args=(
     --accept-vpn-dialog
@@ -520,9 +520,9 @@ run_android_case() {
   fi
   assert_platform_traffic Android "$label" "$before_bytes" "$before_forward"
   after_dns_evidence="$(
-    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+    mobile_wg_fixture_timed_dns_evidence_snapshot "$CONTAINER" "$probe_host"
   )"
-  mobile_wg_fixture_assert_dns_case_evidence \
+  mobile_wg_fixture_assert_timed_dns_case_evidence \
     Android "$label" "$evidence" "$before_dns_evidence" "$after_dns_evidence"
   record_case_evidence \
     Android "$label" "$evidence" \
@@ -555,7 +555,7 @@ run_ios_case() {
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
   before_dns_evidence="$(
-    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+    mobile_wg_fixture_timed_dns_evidence_snapshot "$CONTAINER" "$probe_host"
   )"
   case "$evidence" in
     dns-profile)
@@ -659,9 +659,9 @@ PY
   fi
   assert_platform_traffic iOS "$label" "$before_bytes" "$before_forward"
   after_dns_evidence="$(
-    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+    mobile_wg_fixture_timed_dns_evidence_snapshot "$CONTAINER" "$probe_host"
   )"
-  mobile_wg_fixture_assert_dns_case_evidence \
+  mobile_wg_fixture_assert_timed_dns_case_evidence \
     iOS "$label" "$evidence" "$before_dns_evidence" "$after_dns_evidence"
   record_case_evidence \
     iOS "$label" "$evidence" \

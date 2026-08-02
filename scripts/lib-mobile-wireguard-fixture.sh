@@ -539,18 +539,18 @@ mobile_wg_fixture_dns_count() {
   fi
 }
 
-mobile_wg_fixture_doh_count() {
+mobile_wg_fixture_provider_tls_count() {
   local container="$1" provider="$2"
   if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
-    mobile_wg_remote_native doh-count "$provider"
+    mobile_wg_remote_native provider-tls-count "$provider"
     return
   fi
   local chain
   case "$provider" in
-    cloudflare) chain="nvpn-wg-doh-cf" ;;
-    quad9) chain="nvpn-wg-doh-q9" ;;
-    google) chain="nvpn-wg-doh-google" ;;
-    *) echo "unknown DoH counter provider: $provider" >&2; return 2 ;;
+    cloudflare) chain="nvpn-wg-provider-tls-cf" ;;
+    quad9) chain="nvpn-wg-provider-tls-q9" ;;
+    google) chain="nvpn-wg-provider-tls-google" ;;
+    *) echo "unknown provider TLS counter: $provider" >&2; return 2 ;;
   esac
   mobile_wg_fixture_docker exec "$container" iptables -L "$chain" -v -n -x \
     | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
@@ -607,27 +607,35 @@ query_count="$(grep -Fci "$probe_host" /fixture/dns.log 2>/dev/null || true)"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$query_count" \
   "$(chain_packets nvpn-wg-dns-profile)" \
-  "$(chain_packets nvpn-wg-doh-cf)" \
-  "$(chain_packets nvpn-wg-doh-q9)" \
-  "$(chain_packets nvpn-wg-doh-google)" \
+  "$(chain_packets nvpn-wg-provider-tls-cf)" \
+  "$(chain_packets nvpn-wg-provider-tls-q9)" \
+  "$(chain_packets nvpn-wg-provider-tls-google)" \
   "$(chain_packets nvpn-wg-dns-through)" \
   "$(chain_packets nvpn-wg-dns-forward)"
 SH
 }
 
+mobile_wg_fixture_timed_dns_evidence_snapshot() {
+  local container="$1" probe_host="$2" observed_at
+  observed_at="$(date -u +%s)"
+  printf '%s\t%s\n' \
+    "$observed_at" \
+    "$(mobile_wg_fixture_dns_evidence_snapshot "$container" "$probe_host")"
+}
+
 mobile_wg_fixture_assert_dns_case_evidence() {
   local platform="$1" label="$2" evidence="$3" before="$4" after="$5"
-  local b_query b_profile b_cf b_q9 b_google b_through b_forward_dns
-  local a_query a_profile a_cf a_q9 a_google a_through a_forward_dns
+  local b_query b_profile b_cf_tls b_q9_tls b_google_tls b_through b_forward_dns
+  local a_query a_profile a_cf_tls a_q9_tls a_google_tls a_through a_forward_dns
   IFS=$'\t' read -r \
-    b_query b_profile b_cf b_q9 b_google b_through b_forward_dns <<<"$before"
+    b_query b_profile b_cf_tls b_q9_tls b_google_tls b_through b_forward_dns <<<"$before"
   IFS=$'\t' read -r \
-    a_query a_profile a_cf a_q9 a_google a_through a_forward_dns <<<"$after"
+    a_query a_profile a_cf_tls a_q9_tls a_google_tls a_through a_forward_dns <<<"$after"
   local value
   for value in \
-    "$b_query" "$b_profile" "$b_cf" "$b_q9" "$b_google" "$b_through" \
+    "$b_query" "$b_profile" "$b_cf_tls" "$b_q9_tls" "$b_google_tls" "$b_through" \
     "$b_forward_dns" \
-    "$a_query" "$a_profile" "$a_cf" "$a_q9" "$a_google" "$a_through" \
+    "$a_query" "$a_profile" "$a_cf_tls" "$a_q9_tls" "$a_google_tls" "$a_through" \
     "$a_forward_dns"
   do
     [[ "$value" =~ ^[0-9]+$ ]] || {
@@ -637,10 +645,14 @@ mobile_wg_fixture_assert_dns_case_evidence() {
   done
 
   local -a increased=() unchanged=()
+  local allowed_extra=""
   case "$evidence" in
     dns-profile)
       increased=(query profile)
-      unchanged=(cf q9 google through forward_dns)
+      # Resolver-owned HTTPS destinations are routing evidence, not proof of
+      # DoH. Unrelated traffic to them must not invalidate exact profile DNS.
+      unchanged=(through forward_dns)
+      allowed_extra="cf q9 google"
       ;;
     doh-cloudflare)
       increased=(cf)
@@ -669,9 +681,9 @@ mobile_wg_fixture_assert_dns_case_evidence() {
     case "$counter" in
       query) before_value="$b_query"; after_value="$a_query" ;;
       profile) before_value="$b_profile"; after_value="$a_profile" ;;
-      cf) before_value="$b_cf"; after_value="$a_cf" ;;
-      q9) before_value="$b_q9"; after_value="$a_q9" ;;
-      google) before_value="$b_google"; after_value="$a_google" ;;
+      cf) before_value="$b_cf_tls"; after_value="$a_cf_tls" ;;
+      q9) before_value="$b_q9_tls"; after_value="$a_q9_tls" ;;
+      google) before_value="$b_google_tls"; after_value="$a_google_tls" ;;
       through) before_value="$b_through"; after_value="$a_through" ;;
       forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
     esac
@@ -684,9 +696,9 @@ mobile_wg_fixture_assert_dns_case_evidence() {
     case "$counter" in
       query) before_value="$b_query"; after_value="$a_query" ;;
       profile) before_value="$b_profile"; after_value="$a_profile" ;;
-      cf) before_value="$b_cf"; after_value="$a_cf" ;;
-      q9) before_value="$b_q9"; after_value="$a_q9" ;;
-      google) before_value="$b_google"; after_value="$a_google" ;;
+      cf) before_value="$b_cf_tls"; after_value="$a_cf_tls" ;;
+      q9) before_value="$b_q9_tls"; after_value="$a_q9_tls" ;;
+      google) before_value="$b_google_tls"; after_value="$a_google_tls" ;;
       through) before_value="$b_through"; after_value="$a_through" ;;
       forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
     esac
@@ -695,7 +707,34 @@ mobile_wg_fixture_assert_dns_case_evidence() {
       return 1
     fi
   done
+  for counter in $allowed_extra; do
+    case "$counter" in
+      cf) before_value="$b_cf_tls"; after_value="$a_cf_tls" ;;
+      q9) before_value="$b_q9_tls"; after_value="$a_q9_tls" ;;
+      google) before_value="$b_google_tls"; after_value="$a_google_tls" ;;
+    esac
+    if (( after_value < before_value )); then
+      echo "$platform $label returned a decreasing provider TLS counter" >&2
+      return 1
+    fi
+  done
   echo "$platform $label DNS path passed: $before -> $after"
+}
+
+mobile_wg_fixture_assert_timed_dns_case_evidence() {
+  local platform="$1" label="$2" evidence="$3" before="$4" after="$5"
+  local before_at after_at before_counters after_counters
+  before_at="${before%%$'\t'*}"
+  after_at="${after%%$'\t'*}"
+  before_counters="${before#*$'\t'}"
+  after_counters="${after#*$'\t'}"
+  [[ "$before_at" =~ ^[0-9]+$ && "$after_at" =~ ^[0-9]+$ \
+    && "$after_at" -gt "$before_at" ]] || {
+    echo "$platform $label DNS evidence is not bounded by an increasing timestamp" >&2
+    return 1
+  }
+  mobile_wg_fixture_assert_dns_case_evidence \
+    "$platform" "$label" "$evidence" "$before_counters" "$after_counters"
 }
 
 mobile_wg_fixture_cleanup() {

@@ -31,18 +31,19 @@ const mobileDnsEvidence = {
   'automatic-profile': {
     kind: 'dns-profile',
     increased: new Set(['query', 'profile']),
+    allowedExtra: new Set(['cloudflareTls', 'quad9Tls', 'googleTls']),
   },
   'cloudflare-doh': {
     kind: 'doh-cloudflare',
-    increased: new Set(['cloudflare']),
+    increased: new Set(['cloudflareTls']),
   },
   'quad9-doh': {
     kind: 'doh-quad9',
-    increased: new Set(['quad9']),
+    increased: new Set(['quad9Tls']),
   },
   'custom-doh': {
     kind: 'doh-google',
-    increased: new Set(['google']),
+    increased: new Set(['googleTls']),
   },
   'through-exit': {
     kind: 'dns-through',
@@ -52,9 +53,9 @@ const mobileDnsEvidence = {
 const mobileDnsCounters = [
   'query',
   'profile',
-  'cloudflare',
-  'quad9',
-  'google',
+  'cloudflareTls',
+  'quad9Tls',
+  'googleTls',
   'through',
   'forward',
 ]
@@ -880,6 +881,10 @@ function requireMobileNetworkReceipt({
       || !Number.isSafeInteger(value?.forwardedPacketsBefore)
       || !Number.isSafeInteger(value?.forwardedPacketsAfter)
       || value.forwardedPacketsAfter <= value.forwardedPacketsBefore
+      || !Number.isSafeInteger(value?.dnsPathCountersBeforeObservedAtUnix)
+      || !Number.isSafeInteger(value?.dnsPathCountersAfterObservedAtUnix)
+      || value.dnsPathCountersAfterObservedAtUnix
+        <= value.dnsPathCountersBeforeObservedAtUnix
       || !value.dnsPathCountersBefore
       || !value.dnsPathCountersAfter
     ) {
@@ -911,7 +916,9 @@ function requireMobileNetworkReceipt({
         || (
           dnsPolicy.increased.has(counter)
             ? after <= before
-            : after !== before
+            : dnsPolicy.allowedExtra?.has(counter)
+              ? after < before
+              : after !== before
         )
       ) {
         throw new Error(

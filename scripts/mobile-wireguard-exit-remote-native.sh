@@ -607,9 +607,9 @@ PY
     nft add table inet "$nft_table"
     nft add counter inet "$nft_table" forward_in
     nft add counter inet "$nft_table" forward_out
-    nft add counter inet "$nft_table" doh_cf
-    nft add counter inet "$nft_table" doh_q9
-    nft add counter inet "$nft_table" doh_google
+    nft add counter inet "$nft_table" provider_tls_cf
+    nft add counter inet "$nft_table" provider_tls_q9
+    nft add counter inet "$nft_table" provider_tls_google
     nft add counter inet "$nft_table" dns_profile
     nft add counter inet "$nft_table" dns_through
     nft add counter inet "$nft_table" dns_forward
@@ -643,13 +643,13 @@ PY
       counter name http_probe accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" ip daddr '{ 1.1.1.1, 1.0.0.1 }' \
-      tcp dport 443 tcp flags syn counter name doh_cf accept
+      tcp dport 443 tcp flags syn counter name provider_tls_cf accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" ip daddr '{ 9.9.9.9, 149.112.112.112 }' \
-      tcp dport 443 tcp flags syn counter name doh_q9 accept
+      tcp dport 443 tcp flags syn counter name provider_tls_q9 accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" ip daddr '{ 8.8.8.8, 8.8.4.4 }' \
-      tcp dport 443 tcp flags syn counter name doh_google accept
+      tcp dport 443 tcp flags syn counter name provider_tls_google accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" udp dport 53 counter name dns_forward accept
     nft add rule inet "$nft_table" forward \
@@ -754,12 +754,12 @@ PY
   forward-packets)
     counter_packets forward_in
     ;;
-  doh-count)
+  provider-tls-count)
     case "${2:-}" in
-      cloudflare) counter_packets doh_cf ;;
-      quad9) counter_packets doh_q9 ;;
-      google) counter_packets doh_google ;;
-      *) echo "unknown remote DoH counter" >&2; exit 2 ;;
+      cloudflare) counter_packets provider_tls_cf ;;
+      quad9) counter_packets provider_tls_q9 ;;
+      google) counter_packets provider_tls_google ;;
+      *) echo "unknown remote provider TLS counter" >&2; exit 2 ;;
     esac
     ;;
   through-dns-count)
@@ -777,9 +777,9 @@ PY
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$query_count" \
       "$(counter_packets dns_profile)" \
-      "$(counter_packets doh_cf)" \
-      "$(counter_packets doh_q9)" \
-      "$(counter_packets doh_google)" \
+      "$(counter_packets provider_tls_cf)" \
+      "$(counter_packets provider_tls_q9)" \
+      "$(counter_packets provider_tls_google)" \
       "$(counter_packets dns_through)" \
       "$(counter_packets dns_forward)"
     ;;
@@ -787,7 +787,7 @@ PY
     grep -Fci "${2:?DNS name is required}" "$state_dir/dns.log" 2>/dev/null || true
     ;;
   *)
-    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|doh-count|dns-count|profile-dns-count|through-dns-count|forward-dns-count|dns-evidence-snapshot" >&2
+    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|provider-tls-count|dns-count|profile-dns-count|through-dns-count|forward-dns-count|dns-evidence-snapshot" >&2
     exit 2
     ;;
 esac

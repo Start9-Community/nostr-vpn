@@ -22,13 +22,26 @@ DNS_CASES = {
     "custom-doh": "doh-google",
     "through-exit": "dns-through",
 }
-COUNTERS = ("query", "profile", "cloudflare", "quad9", "google", "through", "forward")
+COUNTERS = (
+    "query",
+    "profile",
+    "cloudflareTls",
+    "quad9Tls",
+    "googleTls",
+    "through",
+    "forward",
+)
 DNS_COUNTERS_INCREASED = {
     "dns-profile": {"query", "profile"},
-    "doh-cloudflare": {"cloudflare"},
-    "doh-quad9": {"quad9"},
-    "doh-google": {"google"},
+    "doh-cloudflare": {"cloudflareTls"},
+    "doh-quad9": {"quad9Tls"},
+    "doh-google": {"googleTls"},
     "dns-through": {"query", "through"},
+}
+DNS_COUNTERS_ALLOWED_EXTRA = {
+    # A resolver-owned HTTPS destination is not protocol-attributed DoH.
+    # Automatic is proven by its exact query and profile-port counters instead.
+    "dns-profile": {"cloudflareTls", "quad9Tls", "googleTls"},
 }
 DESKTOP_DNS_COUNTERS = {
     "automatic": "profile_dns",
@@ -161,6 +174,7 @@ def validate_dns_path_counters(
     expected_evidence = DNS_CASES.get(label)
     require(expected_evidence == evidence, f"{label} has the wrong DNS evidence kind")
     increased = DNS_COUNTERS_INCREASED[evidence]
+    allowed_extra = DNS_COUNTERS_ALLOWED_EXTRA.get(evidence, set())
     require(
         set(before_dns) == set(COUNTERS) and set(after_dns) == set(COUNTERS),
         f"{label} DNS counter set is incomplete",
@@ -170,6 +184,11 @@ def validate_dns_path_counters(
             require(
                 after_dns[counter] > before_dns[counter],
                 f"{label} did not increase required {counter} DNS counter",
+            )
+        elif counter in allowed_extra:
+            require(
+                after_dns[counter] >= before_dns[counter],
+                f"{label} returned a decreasing {counter} routing counter",
             )
         else:
             require(
@@ -194,7 +213,7 @@ def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[
     rows: dict[str, Any] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         fields = raw.split("\t")
-        require(len(fields) == 22, "mobile counter ledger row has the wrong width")
+        require(len(fields) == 24, "mobile counter ledger row has the wrong width")
         label, evidence = fields[:2]
         require(label not in rows, f"duplicate counter row for {label}")
         values = [int(value) for value in fields[2:]]
@@ -213,12 +232,21 @@ def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[
             and after_forward > before_forward,
             f"{label} lacks increasing WireGuard/forward counters",
         )
-        before_dns, after_dns = split_dns_counters(dns_values, label)
+        before_observed_at, after_observed_at = dns_values[0], dns_values[8]
+        require(
+            after_observed_at > before_observed_at,
+            f"{label} DNS counters are not bounded by increasing timestamps",
+        )
+        before_dns, after_dns = split_dns_counters(
+            dns_values[1:8] + dns_values[9:], label
+        )
         validate_dns_path_counters(label, evidence, before_dns, after_dns)
         rows[label] = {
             "dnsEvidence": evidence,
             "dnsPathCountersBefore": before_dns,
             "dnsPathCountersAfter": after_dns,
+            "dnsPathCountersBeforeObservedAtUnix": before_observed_at,
+            "dnsPathCountersAfterObservedAtUnix": after_observed_at,
             "wireGuardRxBytesBefore": before_rx,
             "wireGuardRxBytesAfter": after_rx,
             "wireGuardTxBytesBefore": before_tx,

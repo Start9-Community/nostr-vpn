@@ -33,32 +33,32 @@ wg set wg0 \
 ip link set wg0 up
 
 iptables -N nvpn-mobile-wg-forward 2>/dev/null || iptables -F nvpn-mobile-wg-forward
-iptables -N nvpn-wg-doh-cf 2>/dev/null || iptables -F nvpn-wg-doh-cf
-iptables -N nvpn-wg-doh-q9 2>/dev/null || iptables -F nvpn-wg-doh-q9
-iptables -N nvpn-wg-doh-google 2>/dev/null || iptables -F nvpn-wg-doh-google
+iptables -N nvpn-wg-provider-tls-cf 2>/dev/null || iptables -F nvpn-wg-provider-tls-cf
+iptables -N nvpn-wg-provider-tls-q9 2>/dev/null || iptables -F nvpn-wg-provider-tls-q9
+iptables -N nvpn-wg-provider-tls-google 2>/dev/null || iptables -F nvpn-wg-provider-tls-google
 iptables -N nvpn-wg-dns-profile 2>/dev/null || iptables -F nvpn-wg-dns-profile
 iptables -N nvpn-wg-dns-through 2>/dev/null || iptables -F nvpn-wg-dns-through
 iptables -N nvpn-wg-dns-forward 2>/dev/null || iptables -F nvpn-wg-dns-forward
-iptables -A nvpn-wg-doh-cf -j ACCEPT
-iptables -A nvpn-wg-doh-q9 -j ACCEPT
-iptables -A nvpn-wg-doh-google -j ACCEPT
+iptables -A nvpn-wg-provider-tls-cf -j ACCEPT
+iptables -A nvpn-wg-provider-tls-q9 -j ACCEPT
+iptables -A nvpn-wg-provider-tls-google -j ACCEPT
 iptables -A nvpn-wg-dns-profile -j ACCEPT
 iptables -A nvpn-wg-dns-through -j ACCEPT
 iptables -A nvpn-wg-dns-forward -j ACCEPT
 for resolver_ip in 1.1.1.1 1.0.0.1; do
   iptables -A nvpn-mobile-wg-forward \
     -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
-    -j nvpn-wg-doh-cf
+    -j nvpn-wg-provider-tls-cf
 done
 for resolver_ip in 9.9.9.9 149.112.112.112; do
   iptables -A nvpn-mobile-wg-forward \
     -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
-    -j nvpn-wg-doh-q9
+    -j nvpn-wg-provider-tls-q9
 done
 for resolver_ip in 8.8.8.8 8.8.4.4; do
   iptables -A nvpn-mobile-wg-forward \
     -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
-    -j nvpn-wg-doh-google
+    -j nvpn-wg-provider-tls-google
 done
 iptables -A nvpn-mobile-wg-forward \
   -i wg0 -p udp --dport 53 \
