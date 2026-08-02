@@ -198,6 +198,43 @@ mobile_wg_fixture_docker() {
   fi
 }
 
+mobile_wg_fixture_validate_docker_context() {
+  local root="$1" ignore expected
+  ignore="$root/Dockerfile.mobile-wireguard-exit-e2e.dockerignore"
+  expected=$'**\n\n!scripts\nscripts/**\n!scripts/mobile-wireguard-exit-server.sh\n!scripts/mobile-wireguard-http-probe.py\n!scripts/mobile-wireguard-tls-sni-count.py'
+  [[ -f "$ignore" && ! -L "$ignore" && "$(<"$ignore")" == "$expected" ]] || {
+    echo "mobile WireGuard Docker context is not strictly fixture-scoped" >&2
+    return 1
+  }
+}
+
+mobile_wg_fixture_stage_remote_docker_context() {
+  local root="$1" remote_host="$2" source
+  local -a root_sources=(
+    "$root/Dockerfile.mobile-wireguard-exit-e2e"
+    "$root/Dockerfile.mobile-wireguard-exit-e2e.dockerignore"
+  )
+  local -a script_sources=(
+    "$root/scripts/mobile-wireguard-exit-server.sh"
+    "$root/scripts/mobile-wireguard-http-probe.py"
+    "$root/scripts/mobile-wireguard-tls-sni-count.py"
+  )
+  mobile_wg_fixture_validate_docker_context "$root" || return 1
+  for source in "${root_sources[@]}" "${script_sources[@]}"; do
+    [[ -f "$source" && ! -L "$source" ]] || {
+      echo "mobile WireGuard remote Docker source is missing or unsafe: $source" >&2
+      return 1
+    }
+  done
+  mobile_wg_remote_exec mkdir -p "$MOBILE_WG_FIXTURE_REMOTE_DIR/scripts" \
+    && scp -q \
+      "${root_sources[@]}" \
+      "$remote_host:$MOBILE_WG_FIXTURE_REMOTE_DIR/" \
+    && scp -q \
+      "${script_sources[@]}" \
+      "$remote_host:$MOBILE_WG_FIXTURE_REMOTE_DIR/scripts/"
+}
+
 mobile_wg_fixture_initialize() {
   local root="$1" local_fixture_dir="$2"
   local remote_host="${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}"
@@ -301,18 +338,7 @@ mobile_wg_fixture_initialize() {
       return 1
       ;;
   esac
-  mobile_wg_remote_exec \
-    mkdir -p \
-    "$MOBILE_WG_FIXTURE_REMOTE_DIR/scripts" \
-    "$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture"
-  scp -q \
-    "$root/Dockerfile.mobile-wireguard-exit-e2e" \
-    "$remote_host:$MOBILE_WG_FIXTURE_REMOTE_DIR/" \
-    || return 1
-  scp -q \
-    "$root/scripts/mobile-wireguard-exit-server.sh" \
-    "$remote_host:$MOBILE_WG_FIXTURE_REMOTE_DIR/scripts/" \
-    || return 1
+  mobile_wg_remote_exec mkdir -p "$MOBILE_WG_FIXTURE_REMOTE_DIR/fixture"
   if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
     scp -q \
       "$root/scripts/mobile-wireguard-exit-remote-native.sh" \
@@ -324,6 +350,9 @@ mobile_wg_fixture_initialize() {
     mobile_wg_remote_exec \
       chmod 700 \
       "$MOBILE_WG_FIXTURE_REMOTE_DIR/mobile-wireguard-exit-remote-native.sh"
+  else
+    mobile_wg_fixture_stage_remote_docker_context "$root" "$remote_host" \
+      || return 1
   fi
   scp -q \
     "$local_fixture_dir/server.key" \
@@ -419,6 +448,7 @@ mobile_wg_fixture_build() {
   if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
     return 0
   elif [[ "$MOBILE_WG_FIXTURE_REMOTE" -eq 1 ]]; then
+    mobile_wg_fixture_validate_docker_context "$root" || return 1
     if mobile_wg_fixture_docker image inspect "$image" >/dev/null 2>&1; then
       echo "remote fixture image tag is already in use: $image" >&2
       return 1
@@ -429,6 +459,7 @@ mobile_wg_fixture_build() {
       "$MOBILE_WG_FIXTURE_REMOTE_DIR" >/dev/null
     MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT=1
   elif ! bool_is_true "$image_ready"; then
+    mobile_wg_fixture_validate_docker_context "$root" || return 1
     docker build -q \
       -f "$root/Dockerfile.mobile-wireguard-exit-e2e" \
       -t "$image" \
@@ -636,12 +667,10 @@ mobile_wg_fixture_assert_dns_case_evidence() {
   done
 
   local -a increased=() unchanged=()
-  local allowed_extra=""
   case "$evidence" in
     dns-profile)
       increased=(query profile)
-      unchanged=(through forward_dns)
-      allowed_extra="cf_sni q9_sni google_sni"
+      unchanged=(cf_sni q9_sni google_sni through forward_dns)
       ;;
     doh-cloudflare)
       increased=(cf_sni)
@@ -657,8 +686,7 @@ mobile_wg_fixture_assert_dns_case_evidence() {
       ;;
     dns-through)
       increased=(query through)
-      unchanged=(profile forward_dns)
-      allowed_extra="cf_sni q9_sni google_sni"
+      unchanged=(profile cf_sni q9_sni google_sni forward_dns)
       ;;
     *)
       echo "$platform $label has unknown DNS evidence kind: $evidence" >&2
@@ -694,17 +722,6 @@ mobile_wg_fixture_assert_dns_case_evidence() {
     esac
     if (( after_value != before_value )); then
       echo "$platform $label leaked or fell back through forbidden DNS path $counter ($before_value->$after_value)" >&2
-      return 1
-    fi
-  done
-  for counter in $allowed_extra; do
-    case "$counter" in
-      cf_sni) before_value="$b_cf_sni"; after_value="$a_cf_sni" ;;
-      q9_sni) before_value="$b_q9_sni"; after_value="$a_q9_sni" ;;
-      google_sni) before_value="$b_google_sni"; after_value="$a_google_sni" ;;
-    esac
-    if (( after_value < before_value )); then
-      echo "$platform $label returned a decreasing provider SNI counter" >&2
       return 1
     fi
   done

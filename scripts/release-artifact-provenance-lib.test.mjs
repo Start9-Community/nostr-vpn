@@ -578,9 +578,6 @@ test('release receipt collection requires exact source and strict public UI gate
             for (const counter of policy[1]) {
               after[counter] += 1
             }
-            if (label === 'automatic-profile') {
-              after.cloudflareSni += 3
-            }
             return [label, {
               dnsEvidence: policy[0],
               wireGuardRxBytesBefore: 1,
@@ -1427,6 +1424,26 @@ test('release receipt collection requires exact source and strict public UI gate
     writeFileSync(paths.windows.installer, windowsInstaller)
 
     const androidNetwork = readFileSync(paths.android.wireguard_dns, 'utf8')
+    for (const label of ['automatic-profile', 'through-exit']) {
+      const providerFallback = JSON.parse(androidNetwork)
+      providerFallback.dnsCases[label]
+        .dnsPathCountersAfter.cloudflareSni += 1
+      writeFileSync(
+        paths.android.wireguard_dns,
+        JSON.stringify(providerFallback),
+      )
+      assert.throws(
+        () => collectReleaseGateReceipts({
+          commit,
+          tree,
+          releaseGateSummaryPath: summary,
+          platformReceiptPaths: paths,
+        }),
+        new RegExp(`${label} used the wrong cloudflareSni DNS path`),
+      )
+    }
+    writeFileSync(paths.android.wireguard_dns, androidNetwork)
+
     const wrongAndroidDnsPath = JSON.parse(androidNetwork)
     const cloudflare =
       wrongAndroidDnsPath.dnsCases['cloudflare-doh']

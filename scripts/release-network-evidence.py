@@ -38,16 +38,6 @@ DNS_COUNTERS_INCREASED = {
     "doh-google": {"googleSni"},
     "dns-through": {"query", "through"},
 }
-DNS_COUNTERS_ALLOWED_EXTRA = {
-    # A resolver-owned HTTPS destination is not protocol-attributed DoH.
-    # Automatic is proven by its exact query and profile-port counters instead.
-    "dns-profile": {
-        "cloudflareSni", "quad9Sni", "googleSni",
-    },
-    "dns-through": {
-        "cloudflareSni", "quad9Sni", "googleSni",
-    },
-}
 DESKTOP_DNS_COUNTERS = {
     "automatic": "profile_dns",
     "cloudflare": "cloudflare",
@@ -179,7 +169,6 @@ def validate_dns_path_counters(
     expected_evidence = DNS_CASES.get(label)
     require(expected_evidence == evidence, f"{label} has the wrong DNS evidence kind")
     increased = DNS_COUNTERS_INCREASED[evidence]
-    allowed_extra = DNS_COUNTERS_ALLOWED_EXTRA.get(evidence, set())
     require(
         set(before_dns) == set(COUNTERS) and set(after_dns) == set(COUNTERS),
         f"{label} DNS counter set is incomplete",
@@ -189,11 +178,6 @@ def validate_dns_path_counters(
             require(
                 after_dns[counter] > before_dns[counter],
                 f"{label} did not increase required {counter} DNS counter",
-            )
-        elif counter in allowed_extra:
-            require(
-                after_dns[counter] >= before_dns[counter],
-                f"{label} returned a decreasing {counter} routing counter",
             )
         else:
             require(

@@ -378,11 +378,58 @@ source "$fixture_lib"
 declare -F mobile_wg_endpoint_fields >/dev/null \
   || { echo "mobile fixture lacks strict endpoint rendering" >&2; exit 1; }
 declare -F mobile_wg_dns_case_fields >/dev/null \
+  && declare -F mobile_wg_fixture_validate_docker_context >/dev/null \
+  && declare -F mobile_wg_fixture_stage_remote_docker_context >/dev/null \
   && declare -F mobile_wg_fixture_dns_evidence_snapshot >/dev/null \
   && declare -F mobile_wg_fixture_timed_dns_evidence_snapshot >/dev/null \
   && declare -F mobile_wg_fixture_assert_dns_case_evidence >/dev/null \
   && declare -F mobile_wg_fixture_assert_timed_dns_case_evidence >/dev/null \
   || { echo "mobile fixture lacks the shared DNS evidence contract" >&2; exit 1; }
+mobile_wg_fixture_validate_docker_context "$ROOT" \
+  || { echo "mobile fixture rejected its scoped Docker context" >&2; exit 1; }
+(
+  staging_log="$(mktemp "${TMPDIR:-/tmp}/nvpn-remote-docker-stage.XXXXXX")"
+  build_log="$(mktemp "${TMPDIR:-/tmp}/nvpn-remote-docker-build.XXXXXX")"
+  trap 'rm -f "$staging_log" "$build_log"' EXIT
+  MOBILE_WG_FIXTURE_REMOTE_DIR=/tmp/nvpn-mobile-wg-exit.staging-test
+  mobile_wg_remote_exec() { return 0; }
+  scp() { printf '%s\n' "$*" >>"$staging_log"; }
+  mobile_wg_fixture_stage_remote_docker_context "$ROOT" fixture-host
+  for staged in \
+    Dockerfile.mobile-wireguard-exit-e2e \
+    Dockerfile.mobile-wireguard-exit-e2e.dockerignore \
+    scripts/mobile-wireguard-exit-server.sh \
+    scripts/mobile-wireguard-http-probe.py \
+    scripts/mobile-wireguard-tls-sni-count.py
+  do
+    grep -Fq "$ROOT/$staged" "$staging_log" \
+      || { echo "remote Docker staging omitted $staged" >&2; exit 1; }
+  done
+  [[ "$(grep -Fc ":$MOBILE_WG_FIXTURE_REMOTE_DIR/scripts/" "$staging_log")" -eq 1 ]] \
+    && ! grep -Eq 'fixture/|server\.key|client\.key' "$staging_log" \
+    || { echo "remote Docker build context includes private fixture state" >&2; exit 1; }
+
+  scp() { return 19; }
+  if mobile_wg_fixture_stage_remote_docker_context "$ROOT" fixture-host; then
+    echo "remote Docker staging ignored an scp failure" >&2
+    exit 1
+  fi
+
+  mobile_wg_fixture_docker() {
+    if [[ "$1" == image && "$2" == inspect ]]; then
+      return 1
+    fi
+    printf '%s\n' "$*" >>"$build_log"
+  }
+  MOBILE_WG_FIXTURE_REMOTE=1
+  MOBILE_WG_FIXTURE_REMOTE_MODE=docker
+  MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT=0
+  mobile_wg_fixture_build "$ROOT" nvpn-staging-test 0
+  grep -Fq \
+    "build -q -f $MOBILE_WG_FIXTURE_REMOTE_DIR/Dockerfile.mobile-wireguard-exit-e2e -t nvpn-staging-test $MOBILE_WG_FIXTURE_REMOTE_DIR" \
+    "$build_log" \
+    || { echo "remote Docker build did not use the scoped staged context" >&2; exit 1; }
+)
 mobile_wg_dns_cases_are_complete \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit \
   || { echo "complete DNS matrix was rejected" >&2; exit 1; }
@@ -496,8 +543,16 @@ fi
 mobile_wg_fixture_assert_timed_dns_case_evidence \
   iOS automatic-profile dns-profile \
   $'1000\t0\t0\t0\t0\t0\t0\t0' \
-  $'1001\t1\t1\t2\t0\t0\t0\t0' >/dev/null \
-  || { echo "profile DNS was rejected because of unrelated resolver HTTPS" >&2; exit 1; }
+  $'1001\t1\t1\t0\t0\t0\t0\t0' >/dev/null \
+  || { echo "valid exclusive profile DNS evidence was rejected" >&2; exit 1; }
+if mobile_wg_fixture_assert_timed_dns_case_evidence \
+    iOS automatic-profile dns-profile \
+    $'1000\t0\t0\t0\t0\t0\t0\t0' \
+    $'1001\t1\t1\t1\t0\t0\t0\t0' >/dev/null 2>&1
+then
+  echo "profile DNS accepted a provider-SNI fallback" >&2
+  exit 1
+fi
 if mobile_wg_fixture_assert_timed_dns_case_evidence \
     iOS automatic-profile dns-profile \
     $'1001\t0\t0\t0\t0\t0\t0\t0' \
@@ -513,10 +568,19 @@ import sys
 module = runpy.run_path(sys.argv[1])
 before = dict.fromkeys(module["COUNTERS"], 0)
 after = dict(before)
-after.update(query=1, profile=1, cloudflareSni=2)
+after.update(query=1, profile=1)
 module["validate_dns_path_counters"](
     "automatic-profile", "dns-profile", before, after
 )
+after["cloudflareSni"] = 1
+try:
+    module["validate_dns_path_counters"](
+        "automatic-profile", "dns-profile", before, after
+    )
+except ValueError as error:
+    assert "forbidden cloudflareSni DNS path" in str(error)
+else:
+    raise SystemExit("profile DNS receipt accepted a provider-SNI fallback")
 PY
 if mobile_wg_fixture_assert_dns_case_evidence \
     Android cloudflare-doh doh-cloudflare \
@@ -545,6 +609,14 @@ if mobile_wg_fixture_assert_dns_case_evidence \
     $'1\t2\t0\t0\t0\t3\t0' >/dev/null 2>&1
 then
   echo "through-exit DNS accepted a profile-DNS fallback" >&2
+  exit 1
+fi
+if mobile_wg_fixture_assert_dns_case_evidence \
+    iOS through-exit dns-through \
+    $'0\t0\t0\t0\t0\t0\t0' \
+    $'1\t0\t1\t0\t0\t3\t0' >/dev/null 2>&1
+then
+  echo "through-exit DNS accepted a provider-SNI fallback" >&2
   exit 1
 fi
 

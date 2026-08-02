@@ -31,11 +31,6 @@ const mobileDnsEvidence = {
   'automatic-profile': {
     kind: 'dns-profile',
     increased: new Set(['query', 'profile']),
-    allowedExtra: new Set([
-      'cloudflareSni',
-      'quad9Sni',
-      'googleSni',
-    ]),
   },
   'cloudflare-doh': {
     kind: 'doh-cloudflare',
@@ -52,11 +47,6 @@ const mobileDnsEvidence = {
   'through-exit': {
     kind: 'dns-through',
     increased: new Set(['query', 'through']),
-    allowedExtra: new Set([
-      'cloudflareSni',
-      'quad9Sni',
-      'googleSni',
-    ]),
   },
 }
 const mobileDnsCounters = [
@@ -925,9 +915,7 @@ function requireMobileNetworkReceipt({
         || (
           dnsPolicy.increased.has(counter)
             ? after <= before
-            : dnsPolicy.allowedExtra?.has(counter)
-              ? after < before
-              : after !== before
+            : after !== before
         )
       ) {
         throw new Error(
