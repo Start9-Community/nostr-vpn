@@ -59,6 +59,14 @@ class NostrVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val foregroundRequired =
+            AndroidVpnServiceStartContract.requiresImmediateForeground(intent?.action)
+        val foregroundStarted = foregroundRequired && startServiceForeground()
+        if (foregroundRequired && !foregroundStarted) {
+            tunnelOwnedInProcess.set(false)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         if (intent?.action != ACTION_DISCONNECT) {
             val conflicts = AndroidLegacyPackageMigration.packagesToRemove(this)
             if (conflicts.isNotEmpty()) {
@@ -90,18 +98,19 @@ class NostrVpnService : VpnService() {
                 VpnStartState.setUserWantsVpn(this, true)
                 startTunnelAsync(
                     intent.getStringExtra(EXTRA_CONFIG_JSON).orEmpty(),
-                    foregroundRequired = true,
+                    foregroundStarted = foregroundStarted,
                 ).stickyResult()
             }
             ACTION_RESTORE -> {
                 if (!VpnStartState.userWantsVpn(this)) {
                     tunnelOwnedInProcess.set(false)
+                    stopServiceForeground()
                     stopSelf()
                     START_NOT_STICKY
                 } else {
                     startTunnelAsync(
                         persistedTunnelConfigJson(),
-                        foregroundRequired = true,
+                        foregroundStarted = foregroundStarted,
                     ).stickyResult()
                 }
             }
@@ -119,17 +128,19 @@ class NostrVpnService : VpnService() {
                 VpnStartState.setUserWantsVpn(this, true)
                 startTunnelAsync(
                     configJson,
-                    foregroundRequired = false,
+                    foregroundStarted = foregroundStarted,
                 ).stickyResult()
             }
             else -> {
                 if (VpnStartState.userWantsVpn(this)) {
                     startTunnelAsync(
                         persistedTunnelConfigJson(),
-                        foregroundRequired = true,
+                        foregroundStarted = foregroundStarted,
                     ).stickyResult()
                 } else {
                     tunnelOwnedInProcess.set(false)
+                    stopServiceForeground()
+                    stopSelf(startId)
                     START_NOT_STICKY
                 }
             }
@@ -154,18 +165,8 @@ class NostrVpnService : VpnService() {
         super.onRevoke()
     }
 
-    private fun startTunnelAsync(configJson: String, foregroundRequired: Boolean): Boolean {
+    private fun startTunnelAsync(configJson: String, foregroundStarted: Boolean): Boolean {
         tunnelOwnedInProcess.set(true)
-        val foregroundStarted = if (foregroundRequired) {
-            startServiceForeground()
-        } else {
-            false
-        }
-        if (foregroundRequired && !foregroundStarted) {
-            tunnelOwnedInProcess.set(false)
-            stopSelf()
-            return false
-        }
         if (configJson.isBlank()) {
             return failStart(foregroundStarted, "VPN config is empty")
         }
@@ -1003,11 +1004,13 @@ class NostrVpnService : VpnService() {
         fun startRestore(context: Context) {
             val intent = Intent(context, NostrVpnService::class.java)
                 .setAction(ACTION_RESTORE)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            context.startForegroundService(intent)
         }
     }
+}
+
+internal object AndroidVpnServiceStartContract {
+    fun requiresImmediateForeground(action: String?): Boolean =
+        action != NostrVpnService.ACTION_DISCONNECT &&
+            action != VpnService.SERVICE_INTERFACE
 }
