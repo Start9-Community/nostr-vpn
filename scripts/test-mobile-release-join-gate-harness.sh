@@ -43,6 +43,14 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 )
 
 (
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  release_join_android_dump_ui() { :; }
+  release_join_android_query_dumped() { return 0; }
+  release_join_android_open_devices() { return 1; }
+  [[ "$(release_join_android_accepted_snapshot_ms npub1accepted)" =~ ^[0-9]+$ ]]
+)
+
+(
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
   fake_adb() {
