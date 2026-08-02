@@ -758,7 +758,7 @@ if has_platform ios; then
   # packet-tunnel extension alive. Disconnect it before taking the first
   # fixture snapshot; otherwise retransmitted traffic from the previous DNS
   # policy is charged to the newly selected case.
-  ios_release_network_disconnect_cleanup || {
+  ios_release_network_disconnect_cleanup 1 || {
     echo "iOS WireGuard exit gate could not establish a disconnected counter baseline" >&2
     exit 1
   }

@@ -1438,6 +1438,7 @@ ios_release_network_disconnect_cleanup_inner() {
 }
 
 ios_release_network_disconnect_cleanup() {
+  local preserve_prepared="${1:-0}"
   local cleanup_failed=0
   ios_release_network_abort_active_run || cleanup_failed=1
   if [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 1 ]]; then
@@ -1505,6 +1506,8 @@ ios_release_network_disconnect_cleanup() {
     fi
     [[ "$status" -eq 0 ]] || cleanup_failed=1
   fi
-  ios_release_network_cleanup_private_artifacts || cleanup_failed=1
+  if [[ "$preserve_prepared" != "1" ]]; then
+    ios_release_network_cleanup_private_artifacts || cleanup_failed=1
+  fi
   return "$cleanup_failed"
 }

@@ -617,11 +617,29 @@ import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 prepare = source.index('  ios_release_network_prepare "$IOS_DEVICE_SELECTED"')
-cleanup = source.index('  ios_release_network_disconnect_cleanup', prepare)
+cleanup = source.index('  ios_release_network_disconnect_cleanup 1', prepare)
 case_loop = source.index('  for index in "${!DNS_CASES[@]}"; do', prepare)
 if not prepare < cleanup < case_loop:
     raise SystemExit(
         "iOS fixture counters are sampled before a stale installed tunnel is disconnected"
+    )
+PY
+python3 - "$ios_release_gate" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split("ios_release_network_disconnect_cleanup() {", 1)[1].split(
+    "\n}", 1
+)[0]
+required = (
+    'local preserve_prepared="${1:-0}"',
+    'if [[ "$preserve_prepared" != "1" ]]; then',
+    "ios_release_network_cleanup_private_artifacts || cleanup_failed=1",
+)
+if any(token not in body for token in required):
+    raise SystemExit(
+        "iOS preflight disconnect cannot retain its prepared Release runner"
     )
 PY
 grep -Fq -- '-configuration Release' "$ios_release_gate" \
