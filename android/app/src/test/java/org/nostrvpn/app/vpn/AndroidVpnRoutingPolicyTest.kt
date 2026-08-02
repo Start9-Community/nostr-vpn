@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 
 class AndroidVpnRoutingPolicyTest {
@@ -47,6 +48,34 @@ class AndroidVpnRoutingPolicyTest {
         )
         assertTrue(AndroidVpnRoutingPolicy.supportsAlwaysOn(listOf("0.0.0.0/0")))
         assertTrue(AndroidVpnRoutingPolicy.installsVpnDns(listOf("0.0.0.0/0")))
+    }
+
+    @Test
+    fun routeConfigNormalizesEntriesAndDetectsEitherInternetDefault() {
+        val config = JSONObject(
+            """{"routeTargets":[" 10.44.0.0/16 ","","   ","::/0"]}""",
+        )
+
+        assertEquals(
+            listOf("10.44.0.0/16", "::/0"),
+            AndroidVpnRoutingPolicy.routeTargets(config),
+        )
+        assertTrue(AndroidVpnRoutingPolicy.hasDefaultRoute(config))
+        assertTrue(
+            AndroidVpnRoutingPolicy.supportsAlwaysOnVpn(
+                """{"routeTargets":["0.0.0.0/0"]}""",
+            ),
+        )
+    }
+
+    @Test
+    fun missingOrMalformedRouteConfigCannotEnableAlwaysOn() {
+        assertEquals(
+            emptyList<String>(),
+            AndroidVpnRoutingPolicy.routeTargets(JSONObject()),
+        )
+        assertFalse(AndroidVpnRoutingPolicy.hasDefaultRoute(JSONObject()))
+        assertFalse(AndroidVpnRoutingPolicy.supportsAlwaysOnVpn("not-json"))
     }
 
     @Test

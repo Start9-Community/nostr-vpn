@@ -1,7 +1,6 @@
 package org.nostrvpn.app.vpn
 
 import android.Manifest
-import android.annotation.TargetApi
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,7 +11,6 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
-import android.net.IpPrefix
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -31,7 +29,6 @@ import org.nostrvpn.app.R
 import org.nostrvpn.app.appCoreDataDir
 import org.nostrvpn.app.core.NativeCore
 import org.nostrvpn.app.seedMobileConfig
-import java.net.InetAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -117,7 +114,7 @@ class NostrVpnService : VpnService() {
             VpnService.SERVICE_INTERFACE -> {
                 // Android starts the service with this action for OS Always-on VPN.
                 val configJson = persistedTunnelConfigJson()
-                if (!configJson.supportsAlwaysOnVpn()) {
+                if (!AndroidVpnRoutingPolicy.supportsAlwaysOnVpn(configJson)) {
                     VpnStartState.setUserWantsVpn(this, false)
                     tunnelOwnedInProcess.set(false)
                     tunnelStartGeneration.incrementAndGet()
@@ -183,7 +180,7 @@ class NostrVpnService : VpnService() {
         }
         val lockdownActive = currentLockdownActive()
         VpnStartState.setLockdownActive(this, lockdownActive)
-        if (lockdownActive && !config.hasDefaultRoute()) {
+        if (lockdownActive && !AndroidVpnRoutingPolicy.hasDefaultRoute(config)) {
             Log.w(
                 "NostrVpnService",
                 "Android VPN lockdown is active without a default internet route; non-nvpn internet will be blocked",
@@ -353,7 +350,7 @@ class NostrVpnService : VpnService() {
         val local = parseCidr(config.optString("localAddress", "10.44.0.1/32")) ?: return null
         builder.addAddress(local.address, local.prefix)
 
-        val routeTargets = config.routeTargets()
+        val routeTargets = AndroidVpnRoutingPolicy.routeTargets(config)
         if (AndroidVpnRoutingPolicy.requiresBypass(routeTargets)) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 // Always-on VPN ignores allowBypass(). Explicitly excluding
@@ -361,7 +358,7 @@ class NostrVpnService : VpnService() {
                 // device network while the more-specific mesh routes below
                 // still enter the tunnel.
                 for (route in AndroidVpnRoutingPolicy.excludedDeviceInternetRoutes(routeTargets)) {
-                    parseIpPrefix(route)?.let(builder::excludeRoute)
+                    AndroidVpnRoutingPolicy.parseIpPrefix(route)?.let(builder::excludeRoute)
                 }
             } else {
                 // On older Android releases this is the available split-VPN
@@ -453,39 +450,6 @@ class NostrVpnService : VpnService() {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && runCatching {
             isLockdownEnabled
         }.getOrDefault(false)
-
-    private fun JSONObject.hasDefaultRoute(): Boolean {
-        return routeTargets().any { route ->
-            route == "0.0.0.0/0" || route == "::/0"
-        }
-    }
-
-    private fun JSONObject.routeTargets(): List<String> {
-        val routes = optJSONArray("routeTargets") ?: return emptyList()
-        return buildList {
-            for (index in 0 until routes.length()) {
-                routes.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
-            }
-        }
-    }
-
-    private fun String.supportsAlwaysOnVpn(): Boolean =
-        runCatching {
-            AndroidVpnRoutingPolicy.supportsAlwaysOn(JSONObject(this).routeTargets())
-        }.getOrDefault(false)
-
-    @TargetApi(Build.VERSION_CODES.TIRAMISU)
-    private fun parseIpPrefix(value: String): IpPrefix? {
-        val parts = value.trim().split("/", limit = 2)
-        val address = parts.firstOrNull()?.takeIf(String::isNotBlank) ?: return null
-        val resolved = runCatching { InetAddress.getByName(address) }.getOrNull() ?: return null
-        val maximumPrefix = resolved.address.size * 8
-        val prefix = parts.getOrNull(1)?.toIntOrNull() ?: maximumPrefix
-        if (prefix !in 0..maximumPrefix) {
-            return null
-        }
-        return IpPrefix(resolved, prefix)
-    }
 
     private fun registerUnderlyingNetworkUpdates() {
         unregisterUnderlyingNetworkUpdates()
