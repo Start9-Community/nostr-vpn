@@ -244,10 +244,13 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     return result.stdout.trim()
   }
   const profilePaths = [
+    'scripts/ios_frozen_archive.py',
     'scripts/ios-profiles',
     'scripts/ios_profile_certificate.py',
   ]
   const harnessPaths = [
+    'scripts/ios_xctestrun.py',
+    'scripts/lib-mobile-release-join-artifacts.sh',
     'scripts/linux-release-mobile-join-remote.sh',
     'scripts/release-network-evidence.py',
     'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
@@ -264,9 +267,27 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     const receiptCommit = git('rev-parse', 'HEAD')
     const receiptTree = git('rev-parse', 'HEAD^{tree}')
 
-    for (const path of changedPaths) write(join(root, path), 'changed\n')
+    for (const path of harnessPaths) write(join(root, path), 'changed\n')
     git('add', '.')
-    git('commit', '-qm', 'candidate')
+    git('commit', '-qm', 'harness candidate')
+    const harnessCommit = git('rev-parse', 'HEAD')
+    const harnessTree = git('rev-parse', 'HEAD^{tree}')
+    const harnessDelta = sha256(`${harnessPaths.sort().join('\0')}\0`)
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      const proof = proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit,
+        receiptTree,
+        candidateCommit: harnessCommit,
+        candidateTree: harnessTree,
+      })
+      assert.equal(proof.changed_paths_sha256, harnessDelta)
+    }
+
+    for (const path of profilePaths) write(join(root, path), 'changed\n')
+    git('add', '.')
+    git('commit', '-qm', 'iOS build candidate')
     const candidateCommit = git('rev-parse', 'HEAD')
     const candidateTree = git('rev-parse', 'HEAD^{tree}')
     const args = {
@@ -285,6 +306,26 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     for (const platform of ['android', 'linux', 'macos', 'windows']) {
       const proof = proveUnchangedPlatformInputs({ ...args, platform })
       assert.equal(proof.changed_paths_sha256, expectedDelta)
+    }
+
+    const archiveReceiptCommit = candidateCommit
+    const archiveReceiptTree = candidateTree
+    write(join(root, 'scripts/ios_frozen_archive.py'), 'changed again\n')
+    git('add', '.')
+    git('commit', '-qm', 'iOS archive tooling')
+    const archiveArgs = {
+      candidateRoot: root,
+      receiptCommit: archiveReceiptCommit,
+      receiptTree: archiveReceiptTree,
+      candidateCommit: git('rev-parse', 'HEAD'),
+      candidateTree: git('rev-parse', 'HEAD^{tree}'),
+    }
+    assert.throws(
+      () => proveUnchangedPlatformInputs({ ...archiveArgs, platform: 'ios' }),
+      /changed product\/build input scripts\/ios_frozen_archive\.py/,
+    )
+    for (const platform of ['android', 'linux', 'macos', 'windows']) {
+      proveUnchangedPlatformInputs({ ...archiveArgs, platform })
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
