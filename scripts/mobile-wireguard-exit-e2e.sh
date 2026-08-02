@@ -762,6 +762,14 @@ if has_platform ios; then
   }
   IOS_CLEANUP_ARMED=1
   ios_release_network_prepare "$IOS_DEVICE_SELECTED"
+  # App replacement preserves the installed VPN manager and can leave its old
+  # packet-tunnel extension alive. Disconnect it before taking the first
+  # fixture snapshot; otherwise retransmitted traffic from the previous DNS
+  # policy is charged to the newly selected case.
+  ios_release_network_disconnect_cleanup || {
+    echo "iOS WireGuard exit gate could not establish a disconnected counter baseline" >&2
+    exit 1
+  }
   for index in "${!DNS_CASES[@]}"; do
     final=0
     [[ "$index" -eq "$((${#DNS_CASES[@]} - 1))" ]] && final=1

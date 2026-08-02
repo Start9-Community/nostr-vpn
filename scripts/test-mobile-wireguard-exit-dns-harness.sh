@@ -592,6 +592,19 @@ grep -Fq 'run_ios_release_network_case' "$gate" \
   && grep -Fq 'ios_release_network_prepare "$IOS_DEVICE_SELECTED"' "$gate" \
   && grep -Fq 'iOS physical network claims require the company-signed Release black-box gate' "$gate" \
   || { echo "iOS physical DNS cases do not require the Release black-box runner" >&2; exit 1; }
+python3 - "$gate" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+prepare = source.index('  ios_release_network_prepare "$IOS_DEVICE_SELECTED"')
+cleanup = source.index('  ios_release_network_disconnect_cleanup', prepare)
+case_loop = source.index('  for index in "${!DNS_CASES[@]}"; do', prepare)
+if not prepare < cleanup < case_loop:
+    raise SystemExit(
+        "iOS fixture counters are sampled before a stale installed tunnel is disconnected"
+    )
+PY
 grep -Fq -- '-configuration Release' "$ios_release_gate" \
   && grep -Fq 'export NVPN_IOS_RUST_PROFILE=release' "$ios_release_gate" \
   && grep -Fq 'testReleaseNetworkLifecycle' "$ios_release_gate" \
