@@ -92,7 +92,7 @@ android_release_require_inputs() {
     return 1
   }
   local signer_der configured_signer
-  signer_der="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-signer.XXXXXX.der")"
+  signer_der="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-signer.XXXXXX")"
   if ! env ANDROID_KEYSTORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD" \
     keytool -exportcert \
       -keystore "$ANDROID_KEYSTORE_PATH" \
@@ -272,7 +272,7 @@ verify_android_release_install() {
     echo "Android exact sealed Release artifact verified without rebuild, install, or receipt rewrite"
     return 0
   fi
-  native_lib="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-release-native.XXXXXX.so")"
+  native_lib="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-release-native.XXXXXX")"
   if ! unzip -p "$APK_PATH" \
       lib/arm64-v8a/libnostr_vpn_app_core.so >"$native_lib"
   then

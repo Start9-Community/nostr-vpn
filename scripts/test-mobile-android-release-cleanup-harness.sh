@@ -7,10 +7,14 @@ android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
 
 python3 - "$release_gate" "$android_smoke" <<'PY'
 import pathlib
+import re
 import sys
 
 release_gate = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 android_smoke = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+
+if re.search(r'mktemp "[^"]*XXXXXX\.[^"]+"', release_gate):
+    raise SystemExit("Android release gate uses a non-portable mktemp suffix")
 
 
 def function_body(source: str, name: str, next_name: str) -> str:
