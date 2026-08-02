@@ -360,6 +360,7 @@ func run() throws {
             application, "manual-join-admin-id", "roster-participant-accepted-\(args[3])"
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
+        emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS=\(millisecondsSinceEpoch())")
     case "release-joiner-id":
         try openAddNetwork(application, choice: "manual-join-choose-join")
         try press(application, "manual-join-expander")
@@ -379,6 +380,7 @@ func run() throws {
             application, "manual-join-admin-device-id", "roster-participant-accepted-\(args[3])"
         )
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(args[3])")
+        emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED_MS=\(millisecondsSinceEpoch())")
     case "release-verify":
         _ = try find(
             application,

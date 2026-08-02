@@ -195,7 +195,7 @@ cleanup() {
   local status=$?
   trap - EXIT
   local observer_pid
-  for observer_pid in "${acceptance_observer_pids[@]}"; do
+  for observer_pid in "${acceptance_observer_pids[@]-}"; do
     kill "$observer_pid" >/dev/null 2>&1 || true
     wait "$observer_pid" >/dev/null 2>&1 || true
   done
@@ -206,6 +206,9 @@ cleanup() {
     wait "$REMOTE_ACTION_PID" >/dev/null 2>&1 || true
   fi
   remote Cleanup >/dev/null 2>&1 || true
+  if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
+    cp "$PRIVATE_DIR/android-ui.xml" "$PLATFORM_RESULT/android-ui-failure.xml"
+  fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"
 }
@@ -306,20 +309,19 @@ windows_delivery_from_guest_submit() {
 }
 
 windows_admin_desktop_visible() {
-  local output="$1" temporary="$1.tmp"
+  local output="$1" temporary="$1.tmp" accepted_guest
   read_marker >"$temporary" \
     && jq -e \
       --arg mode "$WINDOWS_ACCEPTANCE_MODE" \
       '.mode == $mode and .desktopAccepted == true' \
       "$temporary" >/dev/null \
-    && mv "$temporary" "$output"
+    && accepted_guest="$(jq -er '.acceptedAtMs' "$temporary")" \
+    && mv "$temporary" "$output" \
+    && printf '%s\n' "$((accepted_guest + WINDOWS_CLOCK_OFFSET_MS))"
 }
 
 windows_admin_pixel_visible() {
-  local admin="$1"
-  release_join_android_open_devices >/dev/null 2>&1 \
-    && release_join_android_query \
-      resource "roster-participant-accepted-$admin" center >/dev/null 2>&1
+  release_join_android_accepted_snapshot_ms "$1"
 }
 
 verify_desktop_relaunch() {
@@ -363,7 +365,8 @@ release_join_valid_npub "$WINDOWS_ADMIN_ID" \
   || fail "Windows UI did not expose a Network ID"
 remote InstallService >"$PLATFORM_RESULT/desktop-admin-service.log" 2>&1
 
-release_join_android_manual_submit "$WINDOWS_ADMIN_ID" "$WINDOWS_NETWORK_ID"
+release_join_android_manual_submit "$WINDOWS_ADMIN_ID" "$WINDOWS_NETWORK_ID" \
+  >"$PLATFORM_RESULT/pixel-manual-submit.log" 2>&1
 REMOTE_PARTICIPANT_NPUB="$RELEASE_JOIN_ANDROID_JOINER_ID"
 REMOTE_PARTICIPANT_ALIAS="Release Pixel"
 desktop_admin_log="$PLATFORM_RESULT/desktop-admin-add.log"
@@ -436,7 +439,7 @@ release_join_valid_npub "$WINDOWS_JOINER_ID" \
 remote InstallService >"$PLATFORM_RESULT/desktop-joiner-service.log" 2>&1
 release_join_android_create_admin
 release_join_android_manual_admin_prepare "$WINDOWS_JOINER_ID" \
-  >"$PLATFORM_RESULT/pixel-admin-prepare.log"
+  >"$PLATFORM_RESULT/pixel-admin-prepare.log" 2>&1
 
 REMOTE_ADMIN_NPUB="$RELEASE_JOIN_ANDROID_ADMIN_ID"
 REMOTE_NETWORK_ID="$RELEASE_JOIN_ANDROID_NETWORK_ID"

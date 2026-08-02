@@ -589,13 +589,29 @@ macos_pixel_admin_phase = desktop.split(
 )[1].split("python3 -", 1)[0]
 for required in (
     'release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_ID"',
-    "Android admin did not retain the macOS joiner roster across relaunch",
+    "MACOS_ANDROID_DIRECTION_LABEL=pixel-admin-macos-joiner",
+    "android_admin_macos_status=$?",
 ):
     if required not in macos_pixel_admin_phase:
         raise SystemExit(
             "macOS/Pixel join gate claims Pixel relaunch durability without "
             f"the Android-admin direction check: {required}"
         )
+for required in (
+    "MACOS_ANDROID_DIRECTION_LABEL=macos-admin-pixel-joiner",
+    "macos_admin_android_status=$?",
+    "macos_admin_android_status != 0 || android_admin_macos_status != 0",
+):
+    if required not in desktop:
+        raise SystemExit(f"macOS/Pixel isolated direction gate is missing {required}")
+for required in (
+    'v.get("expected_peer_count", -1)',
+    's.get("vpn_enabled") is True',
+    's.get("vpn_active") is True',
+    "network_id",
+):
+    if required not in desktop_remote:
+        raise SystemExit(f"macOS zero-participant readiness is missing {required}")
 
 for required in (
     "NVPN_RELEASE_JOIN_ANDROID_RECEIPT",
@@ -1324,14 +1340,18 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-deadline.XXXXXX")"
   trap 'rm -rf "$PRIVATE_DIR"' EXIT
-  quick_poll() { return 0; }
+  quick_poll() { release_join_now_ms; }
   stuck_poll() { sleep 5; }
-  reverse_desktop_poll() { sleep 0.25; }
-  reverse_pixel_poll() { sleep 0.3; }
+  late_state_poll() { printf '%s\n' "$((deadline + 1))"; }
+  reverse_desktop_poll() { sleep 0.25; release_join_now_ms; }
+  reverse_pixel_poll() { sleep 0.3; release_join_now_ms; }
   timestamp="$PRIVATE_DIR/detected-ms.txt"
   deadline=$(( $(release_join_now_ms) + 500 ))
   release_join_observe_until_ms "$deadline" "$timestamp" quick quick_poll
   [[ -s "$timestamp" ]]
+  ! release_join_observe_until_ms \
+    "$deadline" "$PRIVATE_DIR/late.txt" late-state late_state_poll \
+    >/dev/null 2>&1
   before="$(release_join_now_ms)"
   deadline=$((before + 150))
   ! release_join_observe_until_ms \

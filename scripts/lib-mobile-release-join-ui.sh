@@ -50,8 +50,7 @@ release_join_run_until_ms() {
   wait "$pid" || status=$?
   kill "$watchdog" >/dev/null 2>&1 || true
   wait "$watchdog" >/dev/null 2>&1 || true
-  now_ms="$(release_join_now_ms)"
-  if [[ -e "$marker" ]] || ((now_ms > deadline_ms)); then
+  if [[ -e "$marker" ]]; then
     rm -f "$marker"
     echo "$label exceeded the shared acceptance deadline" >&2
     return 124
@@ -66,10 +65,18 @@ release_join_observe_until_ms() {
   local detected_ms status
   while (( $(release_join_now_ms) < deadline_ms )); do
     status=0
-    release_join_run_until_ms "$deadline_ms" "$label" "$@" || status=$?
+    detected_ms="$(release_join_run_until_ms "$deadline_ms" "$label" "$@")" \
+      || status=$?
     if ((status == 0)); then
-      detected_ms="$(release_join_now_ms)"
-      ((detected_ms <= deadline_ms)) || return 1
+      detected_ms="${detected_ms##*$'\n'}"
+      [[ "$detected_ms" =~ ^[0-9]+$ ]] || {
+        echo "$label did not report its state-observation timestamp" >&2
+        return 1
+      }
+      ((detected_ms <= deadline_ms)) || {
+        echo "$label observed acceptance after the shared deadline" >&2
+        return 1
+      }
       printf '%s\n' "$detected_ms" >"$timestamp_file"
       return 0
     fi
@@ -77,6 +84,17 @@ release_join_observe_until_ms() {
     sleep 0.1
   done
   return 1
+}
+
+release_join_android_accepted_snapshot_ms() {
+  local participant="$1" snapshot_ms
+  release_join_android_open_devices >/dev/null 2>&1 || return 1
+  release_join_android_dump_ui || return 1
+  snapshot_ms="$(release_join_now_ms)"
+  release_join_android_query_dumped \
+    resource "roster-participant-accepted-$participant" center \
+    >/dev/null 2>&1 || return 1
+  printf '%s\n' "$snapshot_ms"
 }
 
 release_join_observe_pair_until_ms() {

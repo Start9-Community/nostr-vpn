@@ -127,7 +127,7 @@ cleanup() {
   local status="$?"
   trap - EXIT
   local observer_pid
-  for observer_pid in "${acceptance_observer_pids[@]}"; do
+  for observer_pid in "${acceptance_observer_pids[@]-}"; do
     kill "$observer_pid" >/dev/null 2>&1 || true
     wait "$observer_pid" >/dev/null 2>&1 || true
   done
@@ -144,6 +144,9 @@ cleanup() {
   fi
   if ! ubuntu_vm_cleanup_imported_release_bundle; then
     status=1
+  fi
+  if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
+    cp "$PRIVATE_DIR/android-ui.xml" "$RESULT_DIR/android-ui-failure.xml"
   fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"
@@ -389,17 +392,17 @@ delivery_from_host_submit() {
 }
 
 linux_admin_desktop_visible() {
-  local output="$1" temporary="$1.tmp"
+  local output="$1" temporary="$1.tmp" accepted_guest
   remote ReadMarker >"$temporary" 2>/dev/null \
     && [[ "$(marker_value "$temporary" desktopAccepted)" == true ]] \
-    && mv "$temporary" "$output"
+    && accepted_guest="$(marker_value "$temporary" acceptedAtMs)" \
+    && [[ "$accepted_guest" =~ ^[0-9]+$ ]] \
+    && mv "$temporary" "$output" \
+    && printf '%s\n' "$((accepted_guest + REMOTE_CLOCK_OFFSET_MS))"
 }
 
 linux_admin_pixel_visible() {
-  local admin="$1"
-  release_join_android_open_devices >/dev/null 2>&1 \
-    && release_join_android_query \
-      resource "roster-participant-accepted-$admin" center >/dev/null 2>&1
+  release_join_android_accepted_snapshot_ms "$1"
 }
 
 calibrate_remote_clock
@@ -421,7 +424,8 @@ release_join_valid_npub "$DESKTOP_ADMIN_NPUB"
 [[ -n "$DESKTOP_NETWORK_ID" ]]
 service_cleanup_armed=1
 remote InstallService >"$RESULT_DIR/desktop-admin-service.log"
-release_join_android_manual_submit "$DESKTOP_ADMIN_NPUB" "$DESKTOP_NETWORK_ID"
+release_join_android_manual_submit "$DESKTOP_ADMIN_NPUB" "$DESKTOP_NETWORK_ID" \
+  >"$RESULT_DIR/pixel-manual-submit.log" 2>&1
 
 desktop_add_log="$RESULT_DIR/desktop-admin-add-pixel.log"
 remote AdminAdd "$RELEASE_JOIN_ANDROID_JOINER_ID" "Release Pixel" \
@@ -506,7 +510,7 @@ service_cleanup_armed=1
 remote InstallService >"$RESULT_DIR/desktop-joiner-service.log"
 release_join_android_create_admin
 release_join_android_manual_admin_prepare "$DESKTOP_JOINER_NPUB" \
-  >"$RESULT_DIR/pixel-admin-prepare.log"
+  >"$RESULT_DIR/pixel-admin-prepare.log" 2>&1
 
 desktop_join_log="$RESULT_DIR/pixel-admin-desktop-join.log"
 remote ManualJoin \

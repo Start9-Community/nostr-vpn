@@ -111,8 +111,16 @@ assert_fips_ready() {
     )"
     if python3 -c '
 import json,sys
-d=json.loads(sys.argv[1]).get("daemon", {})
-assert d.get("running") is True and (d.get("state") or {}).get("mesh_ready") is True
+v=json.loads(sys.argv[1]); d=v.get("daemon", {}); s=d.get("state") or {}
+configured_without_participants = (
+    int(v.get("expected_peer_count", -1)) == 0
+    and s.get("vpn_enabled") is True
+    and s.get("vpn_active") is True
+    and bool(v.get("network_id"))
+)
+assert d.get("running") is True and (
+    s.get("mesh_ready") is True or configured_without_participants
+)
 ' "$runtime_json" 2>/dev/null
     then
       echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_FIPS_READY=1"
