@@ -101,14 +101,6 @@ pub(super) fn start_queued_join_roster_deliveries(
         }
     };
     for (path, mut queued) in load_join_rosters(config_path) {
-        if join_roster_delivery_expired(&queued, crate::unix_timestamp()) {
-            consume_join_roster(&path);
-            eprintln!(
-                "expired queued join approval for {}; removed it from the outbox",
-                queued.recipient_npub
-            );
-            continue;
-        }
         if !participants.contains(&queued.recipient_npub) {
             finish_join_roster_delivery(
                 &path,
@@ -121,6 +113,15 @@ pub(super) fn start_queued_join_roster_deliveries(
             continue;
         }
         if !claim_join_roster_delivery(&path) {
+            continue;
+        }
+        if join_roster_delivery_expired(&queued, crate::unix_timestamp()) {
+            release_join_roster_delivery(&path);
+            consume_join_roster(&path);
+            eprintln!(
+                "expired queued join approval for {}; removed it from the outbox",
+                queued.recipient_npub
+            );
             continue;
         }
         let participant = queued.recipient_npub.clone();
