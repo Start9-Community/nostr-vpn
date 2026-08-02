@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 LOCAL_RELEASE="$ROOT/scripts/local-release.mjs"
+NETWORK_EVIDENCE="$ROOT/scripts/release-network-evidence.py"
 WINDOWS_HOST_ENTRY="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.sh"
 WINDOWS_HOST_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 WINDOWS_PEER_OBSERVER="$ROOT/scripts/desktop-underlay-peer-recovery-observer.sh"
@@ -525,6 +526,12 @@ require_tokens "$WINDOWS_HOST" "power-loss receipt enforcement" \
   'CANDIDATE_NATIVE_OWNER_DIR=' \
   'candidate-owned native WireGuard artifact remains after daemon stop' \
   'candidate-owned native WireGuard artifact remains after cleanup'
+require_tokens "$NETWORK_EVIDENCE" "Windows power-loss receipt schema" \
+  '"crashed_daemon_pid"' \
+  '"replacement_daemon_pid"' \
+  '"daemon_process_count"' \
+  '"startup_recovery_milliseconds"' \
+  '"native_wireguard_owned_files_removed_after_restart"'
 python3 - "$WINDOWS_GUEST" <<'PY'
 import pathlib
 import sys

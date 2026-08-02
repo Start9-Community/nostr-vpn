@@ -78,7 +78,7 @@ def sha256(path: pathlib.Path) -> str:
 
 def load_json(path: pathlib.Path) -> dict[str, Any]:
     require(path.is_file() and not path.is_symlink(), f"missing regular JSON receipt: {path}")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
     require(isinstance(value, dict), f"JSON receipt is not an object: {path}")
     return value
 
@@ -1332,18 +1332,35 @@ def build_desktop(args: argparse.Namespace) -> None:
             )
             crash_path = root / "crash-recovery-receipt.json"
             crash = load_json(crash_path)
+            crash_recovery = crash.get("startup_recovery_milliseconds")
+            crash_true_fields = (
+                "exact_candidate_binary_restarted",
+                "cleanup_journal_present_before_crash",
+                "cleanup_journal_survived_forced_termination",
+                "cleanup_journal_removed_after_restart",
+                "native_wireguard_owner_directory_layout",
+                "native_wireguard_owned_files_survived_forced_termination",
+                "native_wireguard_owned_files_removed_after_restart",
+                "selected_direct_while_daemon_stopped",
+                "wireguard_exit_state_remained_installed_after_crash",
+                "dns_policy_remained_installed_after_crash",
+                "public_dns",
+                "verified_https",
+            )
             require(
-                crash.get("sigkillExitCode") == 137
-                and crash.get("freshWireGuardHandshake") is True
-                and crash.get("throughExitDnsBeforeCrash") is True
-                and crash.get("verifiedHttpsBeforeCrash") is True
-                and crash.get("nativeWireGuardOwnerDirectoryLayout") is True
-                and crash.get("nativeWireGuardOwnerFilesSurvivedCrash") is True
-                and crash.get("nativeWireGuardOwnerFilesRemovedAfterRepair") is True
-                and crash.get("verifiedHttpsAfterRestart") is True
-                and crash.get("restartProcessCount") == 1,
+                isinstance(crash.get("crashed_daemon_pid"), int)
+                and crash["crashed_daemon_pid"] > 0
+                and isinstance(crash.get("replacement_daemon_pid"), int)
+                and crash["replacement_daemon_pid"] > 0
+                and crash["replacement_daemon_pid"]
+                != crash["crashed_daemon_pid"]
+                and crash.get("daemon_process_count") == 1
+                and isinstance(crash_recovery, int)
+                and 0 <= crash_recovery <= 30_000
+                and all(crash.get(field) is True for field in crash_true_fields),
                 "Windows crash/owner-file repair receipt is incomplete",
             )
+            summary["crashRepairMilliseconds"] = crash_recovery
             summary["nativeWireGuardOwnerFilesRepaired"] = True
             summary["singletonAfterCrashRecovery"] = True
         summary["directRestored"] = True

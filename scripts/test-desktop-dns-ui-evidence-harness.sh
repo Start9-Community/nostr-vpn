@@ -327,7 +327,7 @@ def write(root: pathlib.Path, platform: str) -> None:
                 }
             )
             + "\n",
-            encoding="utf-8",
+            encoding="utf-8-sig" if platform == "windows" else "utf-8",
         )
 
 
@@ -346,7 +346,7 @@ with tempfile.TemporaryDirectory() as temporary:
     bad = base / "bad-bootstrap"
     shutil.copytree(base / "linux", bad)
     path = bad / "custom.json"
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
     value["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
     try:
@@ -361,7 +361,7 @@ with tempfile.TemporaryDirectory() as temporary:
     mixed = base / "mixed-artifact"
     shutil.copytree(base / "windows", mixed)
     path = mixed / "quad9.json"
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
     value["appExecutableSha256"] = "e" * 64
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
     try:
@@ -376,7 +376,7 @@ with tempfile.TemporaryDirectory() as temporary:
     private = base / "private-state"
     shutil.copytree(base / "macos", private)
     path = private / "automatic.json"
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
     value["privateStateRead"] = True
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
     try:
