@@ -133,7 +133,7 @@ grep -Fq "DNS recovery was 4100ms" "$temp/slow-product.err"
 cat >"$temp/later-wireguard.log" <<'EOF'
 [1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
 [1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
-[1001.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
+[1000.400] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
 [1006.700] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
 [1006.900] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
 [1007.100] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
@@ -583,7 +583,7 @@ ordered = [payloads.index(needle) for needle in (
     'dns_completion_ms="$(mobile_underlay_now_ms)"',
     'dns_recovery_ms=$((dns_completion_ms - underlay_validated_ms))',
     '--udp-echo',
-    'completion_ms="$(mobile_underlay_now_ms)"')]
+    '\n  completion_ms="$(mobile_underlay_now_ms)"')]
 if ordered != sorted(ordered):
     raise SystemExit(
         "Android recovery clock includes the later UDP evidence probe"
