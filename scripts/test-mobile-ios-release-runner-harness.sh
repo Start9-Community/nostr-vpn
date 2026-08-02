@@ -109,12 +109,47 @@ process_fixture='{
     ]
   }
 }'
+xcrun_json_output_path() {
+  local previous="" argument output=""
+  for argument in "$@"; do
+    [[ "$previous" != --json-output ]] || output="$argument"
+    previous="$argument"
+  done
+  [[ -n "$output" && "$output" != /dev/stdout ]] || return 2
+  printf '%s\n' "$output"
+}
+process_json_path="$TEMP_ROOT/process-json-path"
 (
   xcrun() {
-    printf '%s\n' "$process_fixture"
+    local output
+    output="$(xcrun_json_output_path "$@")" || return
+    printf '%s\n' "$output" >"$process_json_path"
+    printf '%s\n' "$process_fixture" >"$output"
   }
   [[ "$(ios_release_network_xctrunner_process_ids fixture-device)" == 4242 ]]
 ) || fail "runner process query was not scoped to the exact XCTest runner"
+queried_process_json="$(<"$process_json_path")"
+[[ ! -e "$queried_process_json" ]] \
+  || fail "runner process query retained its private JSON output"
+
+failed_process_json_path="$TEMP_ROOT/failed-process-json-path"
+set +e
+(
+  xcrun() {
+    local output
+    output="$(xcrun_json_output_path "$@")" || return
+    printf '%s\n' "$output" >"$failed_process_json_path"
+    return 1
+  }
+  ios_release_network_xctrunner_process_ids fixture-device
+)
+failed_process_status=$?
+set -e
+[[ "$failed_process_status" -ne 0 ]] \
+  || fail "failed device process query unexpectedly passed"
+failed_process_json="$(<"$failed_process_json_path")"
+[[ ! -e "$failed_process_json" ]] \
+  || fail "failed runner process query retained its private JSON output"
 
 scoped_cleanup_log="$TEMP_ROOT/scoped-cleanup.log"
 stale_device_marker="$TEMP_ROOT/stale-device-marker.log"

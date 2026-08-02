@@ -865,9 +865,14 @@ ios_release_network_xctrunner_installed() {
 
 ios_release_network_xctrunner_process_ids() {
   local device="$1"
-  xcrun devicectl device info processes \
-    --device "$device" --json-output /dev/stdout --quiet \
-    | jq -r '
+  local process_json status=0
+  process_json="$(
+    mktemp "${TMPDIR:-/tmp}/nvpn-ios-runner-processes.XXXXXX"
+  )" || return 1
+  if xcrun devicectl device info processes \
+      --device "$device" --json-output "$process_json" --quiet \
+      >/dev/null \
+    && jq -r '
       .result.runningProcesses[]?
       | select(
           .executable
@@ -877,7 +882,14 @@ ios_release_network_xctrunner_process_ids() {
         )
       | .processIdentifier
       | select(type == "number")
-    '
+    ' "$process_json"
+  then
+    status=0
+  else
+    status=$?
+  fi
+  rm -f "$process_json" || status=1
+  return "$status"
 }
 
 ios_release_network_stop_forced_xctrunner() {
