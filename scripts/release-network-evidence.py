@@ -765,27 +765,65 @@ def validate_android_support(
         )
         direct_paths = []
         for label in direct_labels:
-            ping_path = exactly_one(
-                root,
-                f"mobile-android-network-{label}-[0-9]*.txt",
-                f"Android {label} Direct DNS",
-            )
-            https_path = exactly_one(
-                root,
-                f"mobile-android-network-{label}-direct-https-*.txt",
-                f"Android {label} Direct HTTPS",
-            )
+            if label in {"before-connect", "after-disconnect"}:
+                ping_paths = sorted(
+                    root.glob(f"mobile-android-network-{label}-[0-9]*.txt")
+                )
+                https_paths = sorted(
+                    root.glob(
+                        f"mobile-android-network-{label}-direct-https-*.txt"
+                    )
+                )
+                require(
+                    len(ping_paths) == len(cases)
+                    and len(https_paths) == len(cases),
+                    f"Android {label} expected one Direct receipt pair per DNS case",
+                )
+                ping_prefix = f"mobile-android-network-{label}-"
+                https_prefix = f"{ping_prefix}direct-https-"
+                require(
+                    {
+                        path.name.removeprefix(ping_prefix).removesuffix(".txt")
+                        for path in ping_paths
+                    }
+                    == {
+                        path.name.removeprefix(https_prefix).removesuffix(".txt")
+                        for path in https_paths
+                    },
+                    f"Android {label} Direct DNS/HTTPS receipt pairs do not match",
+                )
+            else:
+                ping_paths = [
+                    exactly_one(
+                        root,
+                        f"mobile-android-network-{label}-[0-9]*.txt",
+                        f"Android {label} Direct DNS",
+                    )
+                ]
+                https_paths = [
+                    exactly_one(
+                        root,
+                        f"mobile-android-network-{label}-direct-https-*.txt",
+                        f"Android {label} Direct HTTPS",
+                    )
+                ]
             require(
-                f"label={label}" in ping_path.read_text(encoding="utf-8")
-                and "0% packet loss" in ping_path.read_text(encoding="utf-8")
-                and re.search(
-                    r"^directHttpsStatus=[23][0-9][0-9]$",
-                    https_path.read_text(encoding="utf-8"),
-                    re.MULTILINE,
+                all(
+                    f"label={label}" in path.read_text(encoding="utf-8")
+                    and "0% packet loss" in path.read_text(encoding="utf-8")
+                    for path in ping_paths
+                )
+                and all(
+                    re.search(
+                        r"^directHttpsStatus=[23][0-9][0-9]$",
+                        path.read_text(encoding="utf-8"),
+                        re.MULTILINE,
+                    )
+                    for path in https_paths
                 ),
                 f"Android {label} Direct DNS/HTTPS receipt is incomplete",
             )
-            direct_paths.extend((ping_path, https_path))
+            direct_paths.extend((*ping_paths, *https_paths))
         reconnect_path = exactly_one(
             root,
             "mobile-android-network-start-stop-full-reconnect-*.txt",

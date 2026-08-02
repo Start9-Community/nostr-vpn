@@ -236,14 +236,23 @@ with tempfile.TemporaryDirectory() as temporary:
         "start-stop-stable-direct",
         "start-stop-reconnect-cleanup",
     ):
-        (root / f"mobile-android-network-{label}-123.txt").write_text(
-            f"label={label}\n0% packet loss\n",
-            encoding="utf-8",
+        suffixes = (
+            range(len(cases))
+            if label in {"before-connect", "after-disconnect"}
+            else (123,)
         )
-        (root / f"mobile-android-network-{label}-direct-https-123.txt").write_text(
-            "directHttpsStatus=200\n",
-            encoding="utf-8",
-        )
+        for suffix in suffixes:
+            (root / f"mobile-android-network-{label}-{suffix}.txt").write_text(
+                f"label={label}\n0% packet loss\n",
+                encoding="utf-8",
+            )
+            (
+                root
+                / f"mobile-android-network-{label}-direct-https-{suffix}.txt"
+            ).write_text(
+                "directHttpsStatus=200\n",
+                encoding="utf-8",
+            )
     (root / "mobile-android-network-start-stop-full-reconnect-123.txt").write_text(
         "capturedHttpStatus=200\ncapturedHttpsStatus=200\nexitSourceIp=192.0.2.1\n",
         encoding="utf-8",
@@ -253,7 +262,7 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     assert support["startStopCycles"] == 2
     assert support["directBeforeConnectedAfter"] is True
-    assert len(evidence_paths) == len(cases) + 12
+    assert len(evidence_paths) == len(cases) * 5 + 8
     custom = root / "mobile-android-exit-dns-state-3.json"
     payload = json.loads(custom.read_text(encoding="utf-8"))
     payload["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"
