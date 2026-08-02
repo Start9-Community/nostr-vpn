@@ -90,16 +90,6 @@ release_join_android_accepted_snapshot_ms() {
   local participant="$1" snapshot_ms
   release_join_android_dump_ui || return 1
   snapshot_ms="$(release_join_now_ms)"
-  if release_join_android_query_dumped \
-      resource "roster-participant-accepted-$participant" center \
-      >/dev/null 2>&1
-  then
-    printf '%s\n' "$snapshot_ms"
-    return 0
-  fi
-  release_join_android_open_devices >/dev/null 2>&1 || return 1
-  release_join_android_dump_ui || return 1
-  snapshot_ms="$(release_join_now_ms)"
   release_join_android_query_dumped \
     resource "roster-participant-accepted-$participant" center \
     >/dev/null 2>&1 || return 1
