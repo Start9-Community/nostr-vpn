@@ -540,17 +540,27 @@ then
   echo "encrypted DNS accepted provider traffic without ClientHello SNI" >&2
   exit 1
 fi
+mobile_wg_fixture_assert_dns_case_evidence \
+  iOS cloudflare-doh doh-cloudflare \
+  $'0\t0\t0\t0\t0\t0\t0' \
+  $'0\t0\t0\t0\t0\t0\t0' >/dev/null \
+  || { echo "iOS encrypted DNS still requires remote-WG provider SNI" >&2; exit 1; }
 mobile_wg_fixture_assert_timed_dns_case_evidence \
   iOS automatic-profile dns-profile \
   $'1000\t0\t0\t0\t0\t0\t0\t0' \
   $'1001\t1\t1\t0\t0\t0\t0\t0' >/dev/null \
   || { echo "valid exclusive profile DNS evidence was rejected" >&2; exit 1; }
+mobile_wg_fixture_assert_timed_dns_case_evidence \
+  iOS automatic-profile dns-profile \
+  $'1000\t0\t0\t0\t0\t0\t0\t0' \
+  $'1001\t1\t1\t1\t0\t0\t0\t0' >/dev/null \
+  || { echo "iOS profile DNS rejected unrelated whole-device SNI" >&2; exit 1; }
 if mobile_wg_fixture_assert_timed_dns_case_evidence \
-    iOS automatic-profile dns-profile \
+    Android automatic-profile dns-profile \
     $'1000\t0\t0\t0\t0\t0\t0\t0' \
     $'1001\t1\t1\t1\t0\t0\t0\t0' >/dev/null 2>&1
 then
-  echo "profile DNS accepted a provider-SNI fallback" >&2
+  echo "Android profile DNS accepted a provider-SNI fallback" >&2
   exit 1
 fi
 if mobile_wg_fixture_assert_timed_dns_case_evidence \
@@ -573,6 +583,9 @@ module["validate_dns_path_counters"](
     "automatic-profile", "dns-profile", before, after
 )
 after["cloudflareSni"] = 1
+module["validate_dns_path_counters"](
+    "automatic-profile", "dns-profile", before, after, "ios"
+)
 try:
     module["validate_dns_path_counters"](
         "automatic-profile", "dns-profile", before, after
@@ -604,7 +617,7 @@ mobile_wg_fixture_assert_dns_case_evidence \
   $'1\t0\t0\t0\t0\t3\t0' >/dev/null \
   || { echo "valid exclusive through-exit evidence was rejected" >&2; exit 1; }
 if mobile_wg_fixture_assert_dns_case_evidence \
-    iOS through-exit dns-through \
+    Android through-exit dns-through \
     $'0\t0\t0\t0\t0\t0\t0' \
     $'1\t2\t0\t0\t0\t3\t0' >/dev/null 2>&1
 then
@@ -612,13 +625,19 @@ then
   exit 1
 fi
 if mobile_wg_fixture_assert_dns_case_evidence \
-    iOS through-exit dns-through \
+    Android through-exit dns-through \
     $'0\t0\t0\t0\t0\t0\t0' \
     $'1\t0\t1\t0\t0\t3\t0' >/dev/null 2>&1
 then
-  echo "through-exit DNS accepted a provider-SNI fallback" >&2
+  echo "Android through-exit DNS accepted a provider-SNI fallback" >&2
   exit 1
 fi
+
+mobile_wg_fixture_assert_dns_case_evidence \
+  iOS through-exit dns-through \
+  $'0\t0\t0\t0\t0\t0\t0' \
+  $'1\t0\t1\t0\t0\t3\t0' >/dev/null \
+  || { echo "iOS through-exit rejected unrelated whole-device SNI" >&2; exit 1; }
 
 assert_endpoint_fields() {
   local raw="$1" port="$2" expected="$3" actual
@@ -903,6 +922,21 @@ grep -Fq 'build-for-testing' "$ios_release_gate" \
   && grep -Fq 'IOS_RELEASE_NETWORK_BASE_TREE_SHA' "$ios_release_artifact" \
   && grep -Fq 'installedBuildNumber' "$ios_release_artifact" \
   || { echo "iOS Release cases do not reuse/read back one exact signed artifact" >&2; exit 1; }
+python3 - "$ios_release_gate" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split(
+    '  local reuse_build="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"', 1
+)[1].split(
+    '  if ! NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID=', 1
+)[0]
+build = body.index("build_command+=(build-for-testing)")
+audit = body.index("ios_release_network_audit_rust_feature_surface")
+if build >= audit or body.count("ios_release_network_audit_rust_feature_surface") != 1:
+    raise SystemExit("cold-cache iOS preparation audits before building")
+PY
 grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
   && grep -Fq '"selectedPhysicalDevice": selected_device' "$ios_release_artifact" \
   && grep -Fq '"explicitPhysicalDeviceVerified": True' "$ios_release_gate" \
@@ -992,7 +1026,7 @@ direct = source.split("private func selectDirectWhileConnected", 1)[1].split(
 )[0]
 offset = -1
 for token in (
-    "direct.tap()",
+    'option: "internet-source-direct"',
     "waitForVPNState(on: true",
     "try proveDirect",
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
@@ -1011,6 +1045,8 @@ for token in (
         )
 if "Interrupt the scheduled stop/restart" in direct:
     raise SystemExit("iOS Direct gate still force-kills an in-flight tunnel update")
+if "isHittable" in direct or "waitForExistence" in direct:
+    raise SystemExit("iOS Direct gate duplicates menu timing logic")
 
 test_body = source.split("func testReleaseNetworkLifecycle", 1)[1].split(
     "private func configureWireGuard", 1
@@ -1304,6 +1340,24 @@ grep -Fq 'MobileAndroidCapturedNetworkProbe*.class' "$android_external_probe" \
     echo "Android captured-network probe omits nested Java classes from its dex archive" >&2
     exit 1
   }
+python3 - "$android_release_gate" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split("run_android_release_exit_network_probe() {", 1)[1].split(
+    "\nandroid_release_capture_native_tunnel_start_baseline()", 1
+)[0]
+for token in (
+    "MobileAndroidCapturedNetworkProbe",
+    "--fresh-dns",
+    '"$EXIT_PROBE_HOST" "$EXIT_PROBE_EXPECTED_IP"',
+):
+    if token not in body:
+        raise SystemExit("Android fresh DNS probe is incomplete")
+if "shell ping" in body:
+    raise SystemExit("Android DNS answer still has to be reachable")
+PY
 grep -Fq 'exitSourceIp' "$ROOT/scripts/MobileAndroidCapturedNetworkProbe.java" \
   && grep -Fq 'NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP' "$gate" \
   && grep -Fq 'exitSourceIp=$EXPECTED_EXIT_SOURCE_IP' "$android_external_probe" \

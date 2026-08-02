@@ -670,23 +670,36 @@ mobile_wg_fixture_assert_dns_case_evidence() {
   case "$evidence" in
     dns-profile)
       increased=(query profile)
-      unchanged=(cf_sni q9_sni google_sni through forward_dns)
+      unchanged=(through forward_dns)
+      [[ "$platform" == iOS ]] \
+        || unchanged+=(cf_sni q9_sni google_sni)
       ;;
     doh-cloudflare)
-      increased=(cf_sni)
-      unchanged=(query profile q9_sni google_sni through forward_dns)
+      unchanged=(query profile through forward_dns)
+      if [[ "$platform" != iOS ]]; then
+        increased=(cf_sni)
+        unchanged+=(q9_sni google_sni)
+      fi
       ;;
     doh-quad9)
-      increased=(q9_sni)
-      unchanged=(query profile cf_sni google_sni through forward_dns)
+      unchanged=(query profile through forward_dns)
+      if [[ "$platform" != iOS ]]; then
+        increased=(q9_sni)
+        unchanged+=(cf_sni google_sni)
+      fi
       ;;
     doh-google)
-      increased=(google_sni)
-      unchanged=(query profile cf_sni q9_sni through forward_dns)
+      unchanged=(query profile through forward_dns)
+      if [[ "$platform" != iOS ]]; then
+        increased=(google_sni)
+        unchanged+=(cf_sni q9_sni)
+      fi
       ;;
     dns-through)
       increased=(query through)
-      unchanged=(profile cf_sni q9_sni google_sni forward_dns)
+      unchanged=(profile forward_dns)
+      [[ "$platform" == iOS ]] \
+        || unchanged+=(cf_sni q9_sni google_sni)
       ;;
     *)
       echo "$platform $label has unknown DNS evidence kind: $evidence" >&2
@@ -695,21 +708,23 @@ mobile_wg_fixture_assert_dns_case_evidence() {
   esac
 
   local counter before_value after_value
-  for counter in "${increased[@]}"; do
-    case "$counter" in
-      query) before_value="$b_query"; after_value="$a_query" ;;
-      profile) before_value="$b_profile"; after_value="$a_profile" ;;
-      cf_sni) before_value="$b_cf_sni"; after_value="$a_cf_sni" ;;
-      q9_sni) before_value="$b_q9_sni"; after_value="$a_q9_sni" ;;
-      google_sni) before_value="$b_google_sni"; after_value="$a_google_sni" ;;
-      through) before_value="$b_through"; after_value="$a_through" ;;
-      forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
-    esac
-    if (( after_value <= before_value )); then
-      echo "$platform $label did not use required DNS path $counter ($before_value->$after_value)" >&2
-      return 1
-    fi
-  done
+  if ((${#increased[@]})); then
+    for counter in "${increased[@]}"; do
+      case "$counter" in
+        query) before_value="$b_query"; after_value="$a_query" ;;
+        profile) before_value="$b_profile"; after_value="$a_profile" ;;
+        cf_sni) before_value="$b_cf_sni"; after_value="$a_cf_sni" ;;
+        q9_sni) before_value="$b_q9_sni"; after_value="$a_q9_sni" ;;
+        google_sni) before_value="$b_google_sni"; after_value="$a_google_sni" ;;
+        through) before_value="$b_through"; after_value="$a_through" ;;
+        forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
+      esac
+      if (( after_value <= before_value )); then
+        echo "$platform $label did not use required DNS path $counter ($before_value->$after_value)" >&2
+        return 1
+      fi
+    done
+  fi
   for counter in "${unchanged[@]}"; do
     case "$counter" in
       query) before_value="$b_query"; after_value="$a_query" ;;

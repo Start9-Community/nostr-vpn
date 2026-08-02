@@ -803,19 +803,22 @@ run_android_release_exit_network_probe() {
     return 1
   }
   result_path="$(android_network_probe_path "$label")"
+  android_build_captured_network_probe || return 1
   {
     printf 'vpnDnsServers=%s\n' "$(tr '\n' ',' <<<"$dns_servers" | sed 's/,$//')"
-    "$ADB" -s "$serial" shell ping -c 3 -W 3 "$EXIT_PROBE_HOST"
+    "$ADB" -s "$serial" shell \
+      env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
+      app_process /system/bin MobileAndroidCapturedNetworkProbe \
+      --fresh-dns "$EXIT_PROBE_HOST" "$EXIT_PROBE_EXPECTED_IP" "$label"
   } >"$result_path" 2>&1 || {
-    echo "Android Release $label external resolver probe failed: $result_path" >&2
+    echo "Android Release $label fresh DNS probe failed: $result_path" >&2
     return 1
   }
-  resolved_ip="$(sed -n 's/^PING [^(]*(\([^)]*\)).*/\1/p' "$result_path" | head -n 1)"
+  resolved_ip="$(sed -n 's/.* expectedAddress=\([^ ]*\) .*/\1/p' "$result_path" | head -n 1)"
   if [[ -n "$EXIT_PROBE_EXPECTED_IP" && "$resolved_ip" != "$EXIT_PROBE_EXPECTED_IP" ]]; then
     echo "Android Release $label resolver returned the wrong address: $result_path" >&2
     return 1
   fi
-  android_build_captured_network_probe || return 1
   if ! "$ADB" -s "$serial" shell \
       env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
       app_process /system/bin MobileAndroidCapturedNetworkProbe \

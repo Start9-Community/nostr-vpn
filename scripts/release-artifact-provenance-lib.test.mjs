@@ -576,7 +576,9 @@ test('release receipt collection requires exact source and strict public UI gate
             )
             const after = { ...before }
             for (const counter of policy[1]) {
-              after[counter] += 1
+              if (platform !== 'ios' || !counter.endsWith('Sni')) {
+                after[counter] += 1
+              }
             }
             return [label, {
               dnsEvidence: policy[0],

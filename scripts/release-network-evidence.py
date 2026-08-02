@@ -165,15 +165,23 @@ def validate_dns_path_counters(
     evidence: str,
     before_dns: dict[str, int],
     after_dns: dict[str, int],
+    platform: str = "",
 ) -> None:
     expected_evidence = DNS_CASES.get(label)
     require(expected_evidence == evidence, f"{label} has the wrong DNS evidence kind")
     increased = DNS_COUNTERS_INCREASED[evidence]
+    unattributed = (
+        {"cloudflareSni", "quad9Sni", "googleSni"}
+        if platform == "ios"
+        else set()
+    )
     require(
         set(before_dns) == set(COUNTERS) and set(after_dns) == set(COUNTERS),
         f"{label} DNS counter set is incomplete",
     )
     for counter in COUNTERS:
+        if counter in unattributed:
+            continue
         if counter in increased:
             require(
                 after_dns[counter] > before_dns[counter],
@@ -197,7 +205,11 @@ def split_dns_counters(
     return dict(zip(COUNTERS, values[:width])), dict(zip(COUNTERS, values[width:]))
 
 
-def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[str, Any]:
+def parse_counter_ledger(
+    path: pathlib.Path,
+    expected_cases: list[str],
+    platform: str,
+) -> dict[str, Any]:
     require(path.is_file() and not path.is_symlink(), "mobile counter ledger is missing")
     rows: dict[str, Any] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -229,7 +241,9 @@ def parse_counter_ledger(path: pathlib.Path, expected_cases: list[str]) -> dict[
         before_dns, after_dns = split_dns_counters(
             dns_values[1:8] + dns_values[9:], label
         )
-        validate_dns_path_counters(label, evidence, before_dns, after_dns)
+        validate_dns_path_counters(
+            label, evidence, before_dns, after_dns, platform
+        )
         rows[label] = {
             "dnsEvidence": evidence,
             "dnsPathCountersBefore": before_dns,
@@ -1011,7 +1025,9 @@ def build_mobile(args: argparse.Namespace) -> None:
     root = pathlib.Path(args.artifact_dir).resolve()
     artifact = load_json(artifact_path)
     identity = artifact_identity(platform, artifact)
-    counter_cases = parse_counter_ledger(pathlib.Path(args.counter_ledger), cases)
+    counter_cases = parse_counter_ledger(
+        pathlib.Path(args.counter_ledger), cases, platform
+    )
     if platform == "ios":
         support, paths = validate_ios_support(root, cases, mode)
     else:

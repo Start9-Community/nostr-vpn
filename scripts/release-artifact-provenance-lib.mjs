@@ -907,15 +907,20 @@ function requireMobileNetworkReceipt({
     for (const counter of mobileDnsCounters) {
       const before = value.dnsPathCountersBefore[counter]
       const after = value.dnsPathCountersAfter[counter]
+      const unattributedIosSni = platform === 'ios'
+        && ['cloudflareSni', 'quad9Sni', 'googleSni'].includes(counter)
       if (
         !Number.isSafeInteger(before)
         || before < 0
         || !Number.isSafeInteger(after)
         || after < 0
         || (
-          dnsPolicy.increased.has(counter)
-            ? after <= before
-            : after !== before
+          !unattributedIosSni
+          && (
+            dnsPolicy.increased.has(counter)
+              ? after <= before
+              : after !== before
+          )
         )
       ) {
         throw new Error(

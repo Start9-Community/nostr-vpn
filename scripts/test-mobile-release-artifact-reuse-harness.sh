@@ -176,6 +176,15 @@ with (ios_app / "Info.plist").open("wb") as handle:
         },
         handle,
     )
+runner = (
+    ios_derived
+    / "Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+)
+with (runner / "Info.plist").open("wb") as handle:
+    plistlib.dump(
+        {"CFBundleIdentifier": f"{package}.UITests.xctrunner"},
+        handle,
+    )
 with ios_xctestrun.open("wb") as handle:
     plistlib.dump(
         {

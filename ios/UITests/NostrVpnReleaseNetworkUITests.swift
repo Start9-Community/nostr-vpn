@@ -578,12 +578,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         directSource: String
     ) throws {
         openInternetTab()
-        scrollToElement("internet-source-picker").tap()
-        let direct = element("internet-source-direct")
-        guard direct.waitForExistence(timeout: 3), direct.isHittable else {
-            throw gateError("Shipped This device choice was unavailable")
-        }
-        direct.tap()
+        selectMenu(
+            picker: "internet-source-picker",
+            option: "internet-source-direct"
+        )
         guard waitForVPNState(on: true, timeout: 8) else {
             throw gateError("This device transition turned the private-mesh VPN off")
         }

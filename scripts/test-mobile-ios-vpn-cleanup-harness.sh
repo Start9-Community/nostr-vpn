@@ -132,6 +132,18 @@ env PATH="$FIXTURE/bin:$PATH" NVPN_TEST_XCRUN_LOG="$FIXTURE/xcrun.log" \
   bash -c \
     "source '$ROOT/scripts/lib-mobile-ios-release-network.sh'; ios_release_network_require_unlocked test-device" \
   || fail "unlocked physical iOS device was rejected"
+
+watchdog_marker="$FIXTURE/watchdog-active"
+touch "$watchdog_marker"
+watchdog_started=$SECONDS
+env PATH="$FIXTURE/bin:$PATH" bash -c \
+  "source '$ROOT/scripts/lib-mobile-ios-release-network.sh'; ios_release_network_cleanup_watchdog '$watchdog_marker' 999999 30 5" &
+watchdog_pid=$!
+sleep 0.2
+rm -f "$watchdog_marker"
+wait "$watchdog_pid" || fail "cancelled cleanup watchdog failed"
+((SECONDS - watchdog_started < 2)) \
+  || fail "cancelled cleanup watchdog waited for its full deadline"
 set +e
 env PATH="$FIXTURE/bin:$PATH" \
   NVPN_TEST_XCRUN_LOG="$FIXTURE/xcrun.log" \

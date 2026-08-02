@@ -359,21 +359,7 @@ PY
   local result_dir build_log
   result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
   build_log="$IOS_RELEASE_NETWORK_SIGNING_DIR/build-for-testing.log"
-  if bool_is_true "$reuse_build"; then
-    ios_release_network_audit_rust_feature_surface || {
-      ios_release_network_prepare_abort
-      return
-    }
-  else
-    ios_release_network_audit_rust_feature_surface || {
-      ios_release_network_prepare_abort
-      return
-    }
-    [[ -z "$(git -C "$fips_path" status --porcelain)" ]] || {
-      echo "iOS Release FIPS build left the exact checkout dirty" >&2
-      ios_release_network_prepare_abort
-      return
-    }
+  if ! bool_is_true "$reuse_build"; then
     ios_release_network_xcode_command
     local -a build_command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
     build_command+=(build-for-testing)
@@ -390,6 +376,15 @@ PY
       return
     }
   fi
+  ios_release_network_audit_rust_feature_surface || {
+    ios_release_network_prepare_abort
+    return
+  }
+  [[ -z "$(git -C "$fips_path" status --porcelain)" ]] || {
+    echo "iOS Release FIPS build left the exact checkout dirty" >&2
+    ios_release_network_prepare_abort
+    return
+  }
   if ! NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID" \
     NVPN_IOS_ADHOC_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID" \
     NVPN_IOS_EXPORT_SIGNING_CERTIFICATE="$NVPN_IOS_CODE_SIGN_IDENTITY" \
@@ -1471,6 +1466,22 @@ ios_release_network_disconnect_cleanup_inner() {
       "$host_markers" "$markers"
 }
 
+ios_release_network_cleanup_watchdog() {
+  local marker="$1" cleanup_pgid="$2" timeout="$3" grace="$4"
+  local deadline=$((SECONDS + timeout))
+  while [[ -e "$marker" ]] && ((SECONDS < deadline)); do
+    sleep 0.1
+  done
+  [[ -e "$marker" ]] || return 0
+  kill -s TERM -- "-$cleanup_pgid" >/dev/null 2>&1 || true
+  deadline=$((SECONDS + grace))
+  while [[ -e "$marker" ]] && ((SECONDS < deadline)); do
+    sleep 0.1
+  done
+  [[ -e "$marker" ]] || return 0
+  kill -s KILL -- "-$cleanup_pgid" >/dev/null 2>&1 || true
+}
+
 ios_release_network_disconnect_cleanup() {
   local preserve_prepared="${1:-0}"
   local cleanup_failed=0
@@ -1512,14 +1523,8 @@ ios_release_network_disconnect_cleanup() {
       echo "iOS disconnect cleanup received no isolated process group" >&2
       return 2
     fi
-    (
-      sleep "$timeout"
-      [[ -e "$marker" ]] || exit 0
-      kill -s TERM -- "-$pid" >/dev/null 2>&1 || true
-      sleep "$grace"
-      [[ -e "$marker" ]] || exit 0
-      kill -s KILL -- "-$pid" >/dev/null 2>&1 || true
-    ) &
+    ios_release_network_cleanup_watchdog \
+      "$marker" "$pid" "$timeout" "$grace" &
     watchdog=$!
     if wait "$pid" 2>/dev/null; then
       :
