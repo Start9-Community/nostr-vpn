@@ -118,6 +118,7 @@ APP_SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD)"
 release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 remote_pid=""
+acceptance_observer_pids=()
 remote_app_ownership_armed=0
 cleanup() {
   local status=$?
@@ -130,6 +131,11 @@ cleanup() {
     wait "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
   fi
   RELEASE_JOIN_IOS_TEST_PID=""
+  local observer_pid
+  for observer_pid in "${acceptance_observer_pids[@]}"; do
+    kill "$observer_pid" >/dev/null 2>&1 || true
+    wait "$observer_pid" >/dev/null 2>&1 || true
+  done
   if [[ -n "$remote_pid" ]] \
     && ! macos_release_stop_owned_child "$remote_pid"
   then
@@ -193,6 +199,18 @@ wait_log_marker() {
 
 marker_value() {
   sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $2=//p" "$1" | tail -n 1
+}
+
+macos_reverse_desktop_visible() {
+  grep -Fq \
+    "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_COMPLETE=$RELEASE_JOIN_ANDROID_ADMIN_ID" \
+    "$1" 2>/dev/null
+}
+
+macos_reverse_pixel_visible() {
+  release_join_android_open_devices >/dev/null 2>&1 \
+    && release_join_android_query \
+      resource "roster-participant-accepted-$1" center >/dev/null 2>&1
 }
 
 ios_log() {
@@ -502,7 +520,7 @@ wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID= 10
 }
 wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
 android_admin_log="$RESULT_DIR/macos/android-admin-add-desktop.log"
-release_join_android_manual_admin_submit "$DESKTOP_JOINER_ID" \
+release_join_android_manual_admin_tap "$DESKTOP_JOINER_ID" \
   | tee "$android_admin_log"
 android_submitted_ms="$(
   sed -n \
@@ -510,10 +528,32 @@ android_submitted_ms="$(
     "$android_admin_log" \
     | tail -n 1
 )"
+MACOS_REVERSE_DEADLINE_MS=$((
+  android_submitted_ms + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000
+))
+macos_reverse_desktop_file="$RESULT_DIR/macos/android-admin-desktop-detected-ms.txt"
+macos_reverse_pixel_file="$RESULT_DIR/macos/android-admin-pixel-detected-ms.txt"
+rm -f "$macos_reverse_desktop_file" "$macos_reverse_pixel_file"
+release_join_observe_pair_until_ms \
+  "$MACOS_REVERSE_DEADLINE_MS" \
+  "$macos_reverse_desktop_file" "macOS reverse acceptance query" \
+  macos_reverse_desktop_visible "$desktop_join_log" \
+  "$macos_reverse_pixel_file" "Pixel reverse acceptance query" \
+  macos_reverse_pixel_visible "$DESKTOP_JOINER_ID" || {
+  tail -n 120 "$desktop_join_log" >&2 || true
+  echo "macOS and Pixel reverse acceptance exceeded their shared deadline" >&2
+  exit 1
+}
+macos_reverse_desktop_ms="$(<"$macos_reverse_desktop_file")"
+macos_reverse_pixel_ms="$(<"$macos_reverse_pixel_file")"
 finish_remote "$desktop_join_log"
 remote verify "$RELEASE_JOIN_ANDROID_ADMIN_ID" \
   >"$RESULT_DIR/macos/desktop-joiner-verify.log"
-android_completed_ms="$(release_join_now_ms)"
+if ((macos_reverse_desktop_ms > macos_reverse_pixel_ms)); then
+  android_completed_ms="$macos_reverse_desktop_ms"
+else
+  android_completed_ms="$macos_reverse_pixel_ms"
+fi
 assert_delivery_deadline \
   "$android_submitted_ms" "$android_completed_ms" \
   "Android-admin-to-macOS-manual"

@@ -692,6 +692,7 @@ class Driver:
         invoke("nvpn-manual-join-expander")
         joiner = read_npub("nvpn-manual-join-joiner-device-id-value")
         self.evidence["joinerNpub"] = joiner
+        self.evidence["adminNpub"] = self.args.admin_npub
         self.write_evidence()
         set_text("nvpn-manual-join-admin-id", self.args.admin_npub)
         set_text("nvpn-manual-join-network-id", self.args.network_id)

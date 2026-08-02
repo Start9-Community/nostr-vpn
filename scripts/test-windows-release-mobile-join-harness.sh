@@ -125,7 +125,7 @@ desktop_admin_phase="$(
 )"
 for timing_contract in \
   WINDOWS_ADMIN_DEADLINE_HOST_MS \
-  release_join_observe_until_ms \
+  release_join_observe_pair_until_ms \
   windows_admin_desktop_visible \
   windows_admin_pixel_visible \
   WINDOWS_DESKTOP_ACCEPTED_HOST_MS \
@@ -134,8 +134,8 @@ do
   grep -Fq "$timing_contract" <<<"$desktop_admin_phase" \
     || fail "Windows desktop-admin timing lacks $timing_contract"
 done
-[[ "$(grep -Fc 'release_join_observe_until_ms' <<<"$desktop_admin_phase")" -eq 2 ]] \
-  || fail "Windows desktop and Pixel acceptance are not observed independently"
+[[ "$(grep -Fc 'release_join_observe_pair_until_ms' <<<"$desktop_admin_phase")" -eq 1 ]] \
+  || fail "Windows desktop and Pixel acceptance do not share one observer deadline"
 timing_line="$(
   grep -n 'WINDOWS_ADMIN_DELIVERY_MS=' <<<"$desktop_admin_phase" \
     | tail -n 1 | cut -d: -f1
@@ -146,7 +146,9 @@ durability_line="$(grep -n 'verify_desktop_relaunch' <<<"$desktop_admin_phase" |
 for reverse_contract in \
   'release_join_android_manual_admin_prepare "$WINDOWS_JOINER_ID"' \
   'remote ManualJoin' \
-  'release_join_android_manual_admin_submit "$WINDOWS_JOINER_ID"'
+  'release_join_android_manual_admin_tap "$WINDOWS_JOINER_ID"' \
+  'WINDOWS_REVERSE_DEADLINE_HOST_MS' \
+  'release_join_observe_pair_until_ms'
 do
   grep -Fq "$reverse_contract" "$HOST" \
     || fail "Windows reverse join lacks two-phase coordination: $reverse_contract"

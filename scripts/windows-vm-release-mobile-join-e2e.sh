@@ -309,7 +309,8 @@ windows_admin_desktop_visible() {
   local output="$1" temporary="$1.tmp"
   read_marker >"$temporary" \
     && jq -e \
-      '.mode == "AdminAdd" and .desktopAccepted == true' \
+      --arg mode "$WINDOWS_ACCEPTANCE_MODE" \
+      '.mode == $mode and .desktopAccepted == true' \
       "$temporary" >/dev/null \
     && mv "$temporary" "$output"
 }
@@ -382,23 +383,13 @@ WINDOWS_ADMIN_DEADLINE_HOST_MS=$((
 windows_desktop_detected_file="$PLATFORM_RESULT/desktop-admin-desktop-detected-ms.txt"
 windows_pixel_detected_file="$PLATFORM_RESULT/desktop-admin-pixel-detected-ms.txt"
 rm -f "$windows_desktop_detected_file" "$windows_pixel_detected_file"
-release_join_observe_until_ms \
-  "$WINDOWS_ADMIN_DEADLINE_HOST_MS" "$windows_desktop_detected_file" \
-  "Windows desktop acceptance query" \
-  windows_admin_desktop_visible \
-  "$PLATFORM_RESULT/desktop-admin-accepted.json" &
-desktop_observer_pid=$!
-release_join_observe_until_ms \
-  "$WINDOWS_ADMIN_DEADLINE_HOST_MS" "$windows_pixel_detected_file" \
-  "Pixel acceptance query" \
-  windows_admin_pixel_visible "$WINDOWS_ADMIN_ID" &
-pixel_observer_pid=$!
-acceptance_observer_pids=("$desktop_observer_pid" "$pixel_observer_pid")
-observer_status=0
-wait "$desktop_observer_pid" || observer_status=1
-wait "$pixel_observer_pid" || observer_status=1
-acceptance_observer_pids=()
-((observer_status == 0)) \
+WINDOWS_ACCEPTANCE_MODE=AdminAdd
+release_join_observe_pair_until_ms \
+  "$WINDOWS_ADMIN_DEADLINE_HOST_MS" \
+  "$windows_desktop_detected_file" "Windows desktop acceptance query" \
+  windows_admin_desktop_visible "$PLATFORM_RESULT/desktop-admin-accepted.json" \
+  "$windows_pixel_detected_file" "Pixel acceptance query" \
+  windows_admin_pixel_visible "$WINDOWS_ADMIN_ID" \
   || fail "Windows desktop and Pixel did not both accept before the shared deadline"
 WINDOWS_DESKTOP_ACCEPTED_HOST_MS="$(<"$windows_desktop_detected_file")"
 WINDOWS_PIXEL_ACCEPTED_HOST_MS="$(<"$windows_pixel_detected_file")"
@@ -463,7 +454,7 @@ jq -e --arg joiner "$WINDOWS_JOINER_ID" \
   || fail "Windows ManualJoin used a different identity than Bootstrap"
 
 android_approval_log="$PLATFORM_RESULT/pixel-admin-add.log"
-release_join_android_manual_admin_submit "$WINDOWS_JOINER_ID" \
+release_join_android_manual_admin_tap "$WINDOWS_JOINER_ID" \
   | tee "$android_approval_log"
 PIXEL_APPROVAL_MS="$(
   sed -n \
@@ -473,26 +464,46 @@ PIXEL_APPROVAL_MS="$(
 )"
 [[ "$PIXEL_APPROVAL_MS" =~ ^[0-9]+$ ]] \
   || fail "Pixel admin UI did not report its real approval timestamp"
-wait_marker \
-  '.mode == "ManualJoin" and .desktopAccepted == true' \
-  "Windows accepted Pixel admin roster" \
-  "$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-desktop_joiner_accepted_marker="$MARKER_PAYLOAD"
+WINDOWS_REVERSE_DEADLINE_HOST_MS=$((
+  PIXEL_APPROVAL_MS + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000
+))
+windows_reverse_desktop_file="$PLATFORM_RESULT/pixel-admin-desktop-detected-ms.txt"
+windows_reverse_pixel_file="$PLATFORM_RESULT/pixel-admin-pixel-detected-ms.txt"
+rm -f "$windows_reverse_desktop_file" "$windows_reverse_pixel_file"
+WINDOWS_ACCEPTANCE_MODE=ManualJoin
+release_join_observe_pair_until_ms \
+  "$WINDOWS_REVERSE_DEADLINE_HOST_MS" \
+  "$windows_reverse_desktop_file" "Windows reverse acceptance query" \
+  windows_admin_desktop_visible "$PLATFORM_RESULT/desktop-joiner-accepted.json" \
+  "$windows_reverse_pixel_file" "Pixel reverse acceptance query" \
+  windows_admin_pixel_visible "$WINDOWS_JOINER_ID" \
+  || fail "Windows and Pixel reverse acceptance exceeded their shared deadline"
+WINDOWS_REVERSE_DESKTOP_MS="$(<"$windows_reverse_desktop_file")"
+WINDOWS_REVERSE_PIXEL_MS="$(<"$windows_reverse_pixel_file")"
+desktop_joiner_accepted_marker="$(<"$PLATFORM_RESULT/desktop-joiner-accepted.json")"
 jq -e \
   --arg admin "$RELEASE_JOIN_ANDROID_ADMIN_ID" \
   '.adminNpub == $admin' \
   <<<"$desktop_joiner_accepted_marker" >/dev/null \
   || fail "Windows joiner accepted the wrong Pixel admin roster"
-PIXEL_COMPLETED_MS="$(release_join_now_ms)"
-PIXEL_ADMIN_DELIVERY_MS="$(
+WINDOWS_REVERSE_DESKTOP_DELIVERY_MS="$(
   assert_elapsed \
     "$PIXEL_APPROVAL_MS" \
-    "$PIXEL_COMPLETED_MS" \
-    "Pixel-admin-to-Windows-manual"
+    "$WINDOWS_REVERSE_DESKTOP_MS" \
+    "Pixel-admin-Windows-acceptance"
 )"
+WINDOWS_REVERSE_PIXEL_DELIVERY_MS="$(
+  assert_elapsed \
+    "$PIXEL_APPROVAL_MS" \
+    "$WINDOWS_REVERSE_PIXEL_MS" \
+    "Pixel-admin-Pixel-acceptance"
+)"
+if ((WINDOWS_REVERSE_DESKTOP_DELIVERY_MS > WINDOWS_REVERSE_PIXEL_DELIVERY_MS)); then
+  PIXEL_ADMIN_DELIVERY_MS="$WINDOWS_REVERSE_DESKTOP_DELIVERY_MS"
+else
+  PIXEL_ADMIN_DELIVERY_MS="$WINDOWS_REVERSE_PIXEL_DELIVERY_MS"
+fi
 finish_remote_action "$desktop_joiner_log"
-release_join_android_wait_accepted_participant "$WINDOWS_JOINER_ID" \
-  || fail "Pixel admin roster did not retain the exact Windows joiner"
 verify_desktop_relaunch \
   "$RELEASE_JOIN_ANDROID_ADMIN_ID" "desktop-joiner"
 verify_pixel_relaunch "$WINDOWS_JOINER_ID" "desktop-joiner"

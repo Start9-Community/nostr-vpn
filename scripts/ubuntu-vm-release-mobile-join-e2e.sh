@@ -444,23 +444,13 @@ DESKTOP_ADMIN_DEADLINE_HOST_MS=$((
 desktop_detected_file="$RESULT_DIR/desktop-admin-desktop-detected-ms.txt"
 pixel_detected_file="$RESULT_DIR/desktop-admin-pixel-detected-ms.txt"
 rm -f "$desktop_detected_file" "$pixel_detected_file"
-release_join_observe_until_ms \
-  "$DESKTOP_ADMIN_DEADLINE_HOST_MS" "$desktop_detected_file" \
-  "Linux desktop acceptance query" \
-  linux_admin_desktop_visible \
-  "$RESULT_DIR/desktop-admin-add-accepted.json" &
-desktop_observer_pid=$!
-release_join_observe_until_ms \
-  "$DESKTOP_ADMIN_DEADLINE_HOST_MS" "$pixel_detected_file" \
-  "Pixel acceptance query" \
-  linux_admin_pixel_visible "$DESKTOP_ADMIN_NPUB" &
-pixel_observer_pid=$!
-acceptance_observer_pids=("$desktop_observer_pid" "$pixel_observer_pid")
-observer_status=0
-wait "$desktop_observer_pid" || observer_status=1
-wait "$pixel_observer_pid" || observer_status=1
-acceptance_observer_pids=()
-if ((observer_status != 0)); then
+if ! release_join_observe_pair_until_ms \
+    "$DESKTOP_ADMIN_DEADLINE_HOST_MS" \
+    "$desktop_detected_file" "Linux desktop acceptance query" \
+    linux_admin_desktop_visible "$RESULT_DIR/desktop-admin-add-accepted.json" \
+    "$pixel_detected_file" "Pixel acceptance query" \
+    linux_admin_pixel_visible "$DESKTOP_ADMIN_NPUB"
+then
   tail -n 160 "$desktop_add_log" >&2 || true
   echo "Linux desktop and Pixel did not both accept before the shared deadline" >&2
   exit 1
@@ -543,7 +533,7 @@ wait_remote_field \
   exit 1
 }
 pixel_add_log="$RESULT_DIR/pixel-admin-add-desktop.log"
-release_join_android_manual_admin_submit "$DESKTOP_JOINER_NPUB" \
+release_join_android_manual_admin_tap "$DESKTOP_JOINER_NPUB" \
   | tee "$pixel_add_log"
 PIXEL_SUBMITTED_HOST="$(
   sed -n \
@@ -551,20 +541,49 @@ PIXEL_SUBMITTED_HOST="$(
     "$pixel_add_log" \
     | tail -n 1
 )"
-wait_remote_field \
-  "$RESULT_DIR/desktop-manual-join-accepted.json" \
-  desktopAccepted true "$RELEASE_JOIN_DELIVERY_WAIT_SECS" || {
+LINUX_REVERSE_DEADLINE_HOST_MS=$((
+  PIXEL_SUBMITTED_HOST + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000
+))
+linux_reverse_desktop_file="$RESULT_DIR/pixel-admin-desktop-detected-ms.txt"
+linux_reverse_pixel_file="$RESULT_DIR/pixel-admin-pixel-detected-ms.txt"
+rm -f "$linux_reverse_desktop_file" "$linux_reverse_pixel_file"
+if ! release_join_observe_pair_until_ms \
+    "$LINUX_REVERSE_DEADLINE_HOST_MS" \
+    "$linux_reverse_desktop_file" "Linux reverse acceptance query" \
+    linux_admin_desktop_visible "$RESULT_DIR/desktop-manual-join-accepted.json" \
+    "$linux_reverse_pixel_file" "Pixel reverse acceptance query" \
+    linux_admin_pixel_visible "$DESKTOP_JOINER_NPUB"
+then
   tail -n 160 "$desktop_join_log" >&2 || true
+  echo "Linux and Pixel reverse acceptance exceeded their shared deadline" >&2
+  exit 1
+fi
+LINUX_REVERSE_DESKTOP_MS="$(<"$linux_reverse_desktop_file")"
+LINUX_REVERSE_PIXEL_MS="$(<"$linux_reverse_pixel_file")"
+[[ "$(
+  marker_value "$RESULT_DIR/desktop-manual-join-accepted.json" adminNpub
+)" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]] || {
+  echo "Linux joiner accepted the wrong Pixel admin roster" >&2
   exit 1
 }
 finish_remote "$desktop_join_log"
-PIXEL_ADMIN_COMPLETED_HOST="$(release_join_now_ms)"
-PIXEL_ADMIN_DELIVERY_MS="$(
+LINUX_REVERSE_DESKTOP_DELIVERY_MS="$(
   delivery_from_host_submit \
     "$PIXEL_SUBMITTED_HOST" \
-    "$PIXEL_ADMIN_COMPLETED_HOST" \
-    "Pixel-admin-to-Linux-manual"
+    "$LINUX_REVERSE_DESKTOP_MS" \
+    "Pixel-admin-Linux-acceptance"
 )"
+LINUX_REVERSE_PIXEL_DELIVERY_MS="$(
+  delivery_from_host_submit \
+    "$PIXEL_SUBMITTED_HOST" \
+    "$LINUX_REVERSE_PIXEL_MS" \
+    "Pixel-admin-Pixel-acceptance"
+)"
+if ((LINUX_REVERSE_DESKTOP_DELIVERY_MS > LINUX_REVERSE_PIXEL_DELIVERY_MS)); then
+  PIXEL_ADMIN_DELIVERY_MS="$LINUX_REVERSE_DESKTOP_DELIVERY_MS"
+else
+  PIXEL_ADMIN_DELIVERY_MS="$LINUX_REVERSE_PIXEL_DELIVERY_MS"
+fi
 release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_NPUB" || {
   echo "Pixel lost the Linux joiner roster across force-stop/relaunch" >&2
   exit 1

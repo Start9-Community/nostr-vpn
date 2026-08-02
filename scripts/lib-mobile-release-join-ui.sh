@@ -79,6 +79,25 @@ release_join_observe_until_ms() {
   return 1
 }
 
+release_join_observe_pair_until_ms() {
+  local deadline_ms="$1" left_file="$2" left_label="$3"
+  local left_callback="$4" left_arg="$5" right_file="$6" right_label="$7"
+  local right_callback="$8" right_arg="$9" left_pid right_pid result=0
+  release_join_observe_until_ms \
+    "$deadline_ms" "$left_file" "$left_label" "$left_callback" "$left_arg" &
+  left_pid=$!
+  release_join_observe_until_ms \
+    "$deadline_ms" "$right_file" "$right_label" "$right_callback" "$right_arg" &
+  right_pid=$!
+  # shellcheck disable=SC2034 # consumed by each platform cleanup trap
+  acceptance_observer_pids=("$left_pid" "$right_pid")
+  wait "$left_pid" || result=1
+  wait "$right_pid" || result=1
+  # shellcheck disable=SC2034 # consumed by each platform cleanup trap
+  acceptance_observer_pids=()
+  return "$result"
+}
+
 release_join_android_dump_ui() {
   RELEASE_JOIN_ANDROID_UI_XML="$PRIVATE_DIR/android-ui.xml"
   "${ADB[@]}" shell uiautomator dump /sdcard/nvpn-release-join.xml >/dev/null 2>&1
@@ -481,8 +500,8 @@ release_join_android_manual_admin_prepare() {
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ADMIN_ADD_PREPARED=1"
 }
 
-release_join_android_manual_admin_submit() {
-  local joiner="$1" after deadline entered enabled submitted_ms
+release_join_android_manual_admin_tap() {
+  local joiner="$1" deadline entered enabled submitted_ms
   local submitted_visible=0
   [[ "${RELEASE_JOIN_ANDROID_ADMIN_ADD_JOINER:-}" == "$joiner" \
     && "${RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE:-}" =~ ^[0-9]+$ ]] || {
@@ -514,6 +533,10 @@ release_join_android_manual_admin_submit() {
     echo "Android manual admin-add tap did not visibly submit" >&2
     return 1
   fi
+}
+
+release_join_android_manual_admin_wait_accepted() {
+  local joiner="$1" after deadline
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
@@ -527,6 +550,12 @@ release_join_android_manual_admin_submit() {
     sleep 0.25
   done
   return 1
+}
+
+release_join_android_manual_admin_submit() {
+  local joiner="$1"
+  release_join_android_manual_admin_tap "$joiner"
+  release_join_android_manual_admin_wait_accepted "$joiner"
 }
 
 release_join_android_manual_admin_add() {

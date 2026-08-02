@@ -1279,6 +1279,8 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
   trap 'rm -rf "$PRIVATE_DIR"' EXIT
   quick_poll() { return 0; }
   stuck_poll() { sleep 5; }
+  reverse_desktop_poll() { sleep 0.25; }
+  reverse_pixel_poll() { sleep 0.3; }
   timestamp="$PRIVATE_DIR/detected-ms.txt"
   deadline=$(( $(release_join_now_ms) + 500 ))
   release_join_observe_until_ms "$deadline" "$timestamp" quick quick_poll
@@ -1293,6 +1295,15 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
     echo "Blocking public-UI poll outlived its absolute deadline" >&2
     exit 1
   }
+  reverse_deadline=$(( $(release_join_now_ms) + 450 ))
+  release_join_observe_pair_until_ms \
+    "$reverse_deadline" \
+    "$PRIVATE_DIR/reverse-desktop.txt" reverse-desktop \
+    reverse_desktop_poll _ \
+    "$PRIVATE_DIR/reverse-pixel.txt" reverse-pixel \
+    reverse_pixel_poll _
+  [[ -s "$PRIVATE_DIR/reverse-desktop.txt" \
+    && -s "$PRIVATE_DIR/reverse-pixel.txt" ]]
 )
 
 echo "Signed Release public-UI join gate contract passed"
