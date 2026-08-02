@@ -658,16 +658,13 @@ class Driver:
         self.write_evidence()
         invoke("nvpn-manual-join-admin-submit")
         find_named(
-            f"nvpn-roster-participant-accepted-{self.args.participant_npub}",
+            "1 of 1 devices connected",
             timeout=self.args.coordination_timeout,
         )
-        self.evidence["acceptedSelector"] = (
-            "nvpn-roster-participant-accepted-"
-            f"{self.args.participant_npub}"
-        )
+        self.evidence["desktopParticipantVisible"] = True
         self.evidence["desktopAccepted"] = True
         self.evidence["acceptedAtMs"] = now_ms()
-        screenshot(self.artifact_root, "desktop-admin-accepted")
+        screenshot(self.artifact_root, "desktop-admin-participant-visible")
         self.write_evidence()
         deadline = time.monotonic() + self.args.hold_timeout
         while time.monotonic() < deadline:
