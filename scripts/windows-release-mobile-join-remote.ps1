@@ -316,12 +316,26 @@ switch ($Mode) {
       -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
     if ($Service) {
       $Config = Resolve-CanonicalConfig
-      $ExpectedPrefix = '"' + $CliExe + '" daemon --service --config "' + $Config + '" '
-      if (!$Service.PathName.StartsWith(
-        $ExpectedPrefix,
-        [System.StringComparison]::OrdinalIgnoreCase
-      )) {
-        throw "refusing to remove a Windows service outside this candidate"
+      $Command = [regex]::Match(
+        [string]$Service.PathName,
+        '^"(?<binary>[^"]+)"(?<arguments> .*)$'
+      )
+      $ExpectedArguments = ' daemon --service --config "' + $Config + '" '
+      if (
+        !$Command.Success -or
+        !$Command.Groups['arguments'].Value.StartsWith(
+          $ExpectedArguments,
+          [System.StringComparison]::OrdinalIgnoreCase
+        )
+      ) {
+        throw "refusing to remove a Windows service outside this candidate profile"
+      }
+      $ServiceExecutable = $Command.Groups['binary'].Value
+      if (
+        !(Test-Path -LiteralPath $ServiceExecutable -PathType Leaf) -or
+        (Get-Sha256 $ServiceExecutable) -ne (Get-Sha256 $CliExe)
+      ) {
+        throw "refusing to remove a Windows service outside this candidate artifact"
       }
       & $CliExe service uninstall --config $Config
       if ($LASTEXITCODE -ne 0) {

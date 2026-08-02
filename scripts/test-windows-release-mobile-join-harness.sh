@@ -83,6 +83,8 @@ for service_contract in \
   'Get-Service -Name $ServiceName' \
   'Stop-Service -Name $ServiceName' \
   'Get-CimInstance Win32_Service' \
+  'Get-Sha256 $ServiceExecutable' \
+  'Get-Sha256 $CliExe' \
   '$CliExe service uninstall --config $Config' \
   'WINDOWS_RELEASE_MOBILE_JOIN_CLEAN'
 do
