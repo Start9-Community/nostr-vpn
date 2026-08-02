@@ -79,6 +79,7 @@ class MainActivity : ComponentActivity() {
             var qrScanNetworkId by remember { mutableStateOf("") }
             var pendingScannedJoinRequest by remember { mutableStateOf<String?>(null) }
             var deviceAddCompletionNonce by remember { mutableStateOf(0L) }
+            var configChangeNonce by remember { mutableStateOf(0L) }
             var observedTunnelConfigJson by remember {
                 mutableStateOf(core.mobileTunnelConfigJson())
             }
@@ -306,30 +307,45 @@ class MainActivity : ComponentActivity() {
             DisposableEffect(core) {
                 onDispose { core.close() }
             }
+            DisposableEffect(core, dataDir) {
+                val observer = AndroidConfigChangeObserver(dataDir.resolve("config.toml")) {
+                    runOnUiThread { configChangeNonce += 1 }
+                }
+                observer.start()
+                onDispose { observer.stop() }
+            }
+            fun refreshFromCore() {
+                vpnLockdownActive = VpnStartState.refreshLockdownActive(this@MainActivity)
+                try {
+                    val nextState = core.refresh()
+                    if (nextState.error.isNotBlank()) {
+                        androidError = ""
+                    }
+                    val currentTunnelConfigJson = core.mobileTunnelConfigJson()
+                    val requiresTunnelRefresh =
+                        TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                            vpnEnabled = nextState.vpnEnabled,
+                            observedConfigJson = observedTunnelConfigJson,
+                            currentConfigJson = currentTunnelConfigJson,
+                        )
+                    state = nextState
+                    observedTunnelConfigJson = currentTunnelConfigJson
+                    if (requiresTunnelRefresh) {
+                        requestVpnTunnel()
+                    }
+                } catch (error: Exception) {
+                    showAndroidError(error, "Android refresh failed")
+                }
+            }
+            LaunchedEffect(configChangeNonce) {
+                if (configChangeNonce > 0) {
+                    refreshFromCore()
+                }
+            }
             LaunchedEffect(core, lifecycleOwner) {
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     while (true) {
-                        vpnLockdownActive = VpnStartState.refreshLockdownActive(this@MainActivity)
-                        try {
-                            val nextState = core.refresh()
-                            if (nextState.error.isNotBlank()) {
-                                androidError = ""
-                            }
-                            val currentTunnelConfigJson = core.mobileTunnelConfigJson()
-                            val requiresTunnelRefresh =
-                                TunnelConfigRefreshPolicy.requiresAsyncRefresh(
-                                    vpnEnabled = nextState.vpnEnabled,
-                                    observedConfigJson = observedTunnelConfigJson,
-                                    currentConfigJson = currentTunnelConfigJson,
-                                )
-                            state = nextState
-                            observedTunnelConfigJson = currentTunnelConfigJson
-                            if (requiresTunnelRefresh) {
-                                requestVpnTunnel()
-                            }
-                        } catch (error: Exception) {
-                            showAndroidError(error, "Android refresh failed")
-                        }
+                        refreshFromCore()
                         delay(2_000)
                     }
                 }
