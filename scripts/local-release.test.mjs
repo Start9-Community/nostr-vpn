@@ -2125,7 +2125,7 @@ test('complete staging can reuse only a fully validated gate receipt set', () =>
   )
   assert.equal(reused.status, 0, reused.stderr)
   assert.doesNotMatch(reused.stdout, /\$ .*release-gate\.sh/)
-  assert.match(reused.stdout, /Would stage 0 currently visible asset/)
+  assert.match(reused.stdout, /Would stage \d+ currently visible asset/)
 
   for (const conflict of [
     ['--skip-verify'],

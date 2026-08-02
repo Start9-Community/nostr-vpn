@@ -32,6 +32,8 @@ const releaseGateSummary = 'f'.repeat(64)
 const assetNames = [
   `nostr-vpn-${tag}-android-arm64.apk`,
   `nostr-vpn-${tag}-linux-x64.deb`,
+  `nvpn-${tag}-x86_64-unknown-linux-musl.tar.gz`,
+  `nvpn-${tag}-aarch64-unknown-linux-musl.tar.gz`,
   `nostr-vpn-${tag}-macos-arm64.app.tar.gz`,
   `nostr-vpn-${tag}-macos-arm64.dmg`,
   `nostr-vpn-${tag}-startos-aarch64.s9pk`,

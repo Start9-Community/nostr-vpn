@@ -389,6 +389,7 @@ mod tests {
     include!("ffi/tests_network.rs");
     include!("ffi/tests_network_join_actions.rs");
     include!("ffi/tests_service.rs");
+    include!("ffi/tests_service_wireguard.rs");
     include!("ffi/tests_exit_dns.rs");
     include!("ffi/tests_service_paid_exit_buy.rs");
     include!("ffi/tests_service_macos.rs");
