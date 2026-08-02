@@ -1357,6 +1357,14 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
   PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-deadline.XXXXXX")"
   trap 'rm -rf "$PRIVATE_DIR"' EXIT
   quick_poll() { release_join_now_ms; }
+  retry_poll() {
+    local attempts
+    attempts="$(<"$PRIVATE_DIR/retry-attempts.txt")"
+    attempts=$((attempts + 1))
+    printf '%s\n' "$attempts" >"$PRIVATE_DIR/retry-attempts.txt"
+    ((attempts > 1)) || return 1
+    release_join_now_ms
+  }
   stuck_poll() { sleep 5; }
   late_state_poll() { printf '%s\n' "$((deadline + 1))"; }
   reverse_desktop_poll() { sleep 0.25; release_join_now_ms; }
@@ -1365,6 +1373,11 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
   deadline=$(( $(release_join_now_ms) + 500 ))
   release_join_observe_until_ms "$deadline" "$timestamp" quick quick_poll
   [[ -s "$timestamp" ]]
+  printf '0\n' >"$PRIVATE_DIR/retry-attempts.txt"
+  deadline=$(( $(release_join_now_ms) + 750 ))
+  release_join_observe_until_ms \
+    "$deadline" "$PRIVATE_DIR/retry.txt" retry retry_poll
+  [[ "$(<"$PRIVATE_DIR/retry-attempts.txt")" == 2 ]]
   ! release_join_observe_until_ms \
     "$deadline" "$PRIVATE_DIR/late.txt" late-state late_state_poll \
     >/dev/null 2>&1

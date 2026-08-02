@@ -45,9 +45,10 @@ release_join_run_until_ms() {
       pkill -KILL -P "$pid" >/dev/null 2>&1 || true
       kill -KILL "$pid" >/dev/null 2>&1 || true
     fi
-  ) &
+  ) 2>/dev/null &
   watchdog=$!
   wait "$pid" || status=$?
+  pkill -TERM -P "$watchdog" >/dev/null 2>&1 || true
   kill "$watchdog" >/dev/null 2>&1 || true
   wait "$watchdog" >/dev/null 2>&1 || true
   if [[ -e "$marker" ]]; then
