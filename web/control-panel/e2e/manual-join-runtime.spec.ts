@@ -113,7 +113,7 @@ async function driveAdmin(page: Page, request: APIRequestContext) {
     .toEqual({
       ownNpub: metadata.adminNpub,
       participantNpub: metadata.joinerNpub,
-      alias: 'desktop-ui-joiner',
+      alias: metadata.joinerAlias,
     });
 }
 

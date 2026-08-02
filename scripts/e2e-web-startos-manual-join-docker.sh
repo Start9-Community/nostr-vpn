@@ -9,7 +9,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_NAME="${NVPN_WEB_STARTOS_JOIN_PROJECT:-nostr-vpn-web-startos-join-$$}"
 COMPOSE_FILE="$ROOT_DIR/umbrel/docker-compose.manual-join.yml"
 IMAGE="${NVPN_WEB_STARTOS_JOIN_IMAGE:-nostr-vpn-web-startos-manual-join:local}"
-ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT_DIR/artifacts}/web-startos-manual-join"
+ARTIFACT_DIR="${NVPN_WEB_STARTOS_JOIN_ARTIFACT_DIR:-${ARTIFACT_ROOT:-$ROOT_DIR/artifacts}/web-startos-manual-join}"
+PLAYWRIGHT_SPEC="${NVPN_WEB_STARTOS_JOIN_SPEC:-e2e/manual-join-runtime.spec.ts}"
+JOIN_LABEL="${NVPN_WEB_STARTOS_JOIN_LABEL:-manual join}"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-web-startos-manual-join.XXXXXX")"
 RUNTIME_TIMEOUT_SECS="${NVPN_WEB_STARTOS_JOIN_RUNTIME_TIMEOUT_SECS:-15}"
 NETWORK_OCTET="${NVPN_WEB_STARTOS_JOIN_NETWORK_OCTET:-$((100 + ($$ % 100)))}"
@@ -196,7 +198,15 @@ run_direction() {
     NVPN_WEB_STARTOS_JOIN_RESULT="$result" \
     PLAYWRIGHT_WORKERS=1 \
     env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright test \
-      e2e/manual-join-runtime.spec.ts
+      "$PLAYWRIGHT_SPEC"
+
+  if [[ "$PLAYWRIGHT_SPEC" == "e2e/lan-join-runtime.spec.ts" ]]; then
+    ! grep -R -E -q 'pending_nostr_join_request|pending-join-request' \
+      "$joiner_data" 2>/dev/null || {
+      echo "LAN join persisted its pending secret outside daemon memory" >&2
+      return 1
+    }
+  fi
 
   "$fixture" capture-delivery "${fixture_args[@]}"
   local joiner_hex
@@ -250,7 +260,12 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
 
   "${COMPOSE[@]}" down -v --remove-orphans
-  echo "$direction real web/StartOS automatic manual join passed in ${elapsed_ms}ms"
+  ! find "$CURRENT_NODE_A_DATA" "$CURRENT_NODE_B_DATA" -type s \
+    -name 'join-*.sock' -print -quit | grep -q . || {
+    echo "daemon shutdown left its join-request socket behind" >&2
+    return 1
+  }
+  echo "$direction real web/StartOS $JOIN_LABEL passed in ${elapsed_ms}ms"
 }
 
 grep -Fq "dockerfile: './umbrel/Dockerfile'" "$ROOT_DIR/startos/manifest/index.ts" || {
@@ -316,5 +331,5 @@ for direction in ("node-a-admin", "node-b-admin"):
             raise SystemExit(f"{direction} result has {field}={result.get(field)!r}, expected {value!r}")
 PY
 
-echo "WEB_STARTOS_MANUAL_JOIN_RUNTIME_E2E_OK"
+echo "WEB_STARTOS_JOIN_RUNTIME_E2E_OK"
 echo "Artifacts: $ARTIFACT_DIR"

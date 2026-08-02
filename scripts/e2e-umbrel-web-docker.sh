@@ -80,8 +80,13 @@ fi
 
 env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright install chromium
 
+PLAYWRIGHT_ARGS=("$@")
+if ((${#PLAYWRIGHT_ARGS[@]} == 0)); then
+  PLAYWRIGHT_ARGS=(e2e/umbrel-web.spec.ts)
+fi
 NVPN_UMBREL_WEB_BASE_URL="http://127.0.0.1:$PORT" \
 NVPN_UMBREL_WEB_PEER_NPUB="$PEER_NPUB" \
-  env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright test "$@"
+  env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright test \
+    "${PLAYWRIGHT_ARGS[@]}"
 
 echo "umbrel web docker e2e passed: bundled UI loaded and API config actions matched the expected web control surface"

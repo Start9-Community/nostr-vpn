@@ -177,7 +177,8 @@ test('bundled UI loads, navigates, renders QR, and stays responsive', async ({ p
 
     await page.getByRole('button', { name: 'Add Network' }).click();
     await expect(page.getByRole('heading', { name: 'Add Network' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Join Network' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create Network', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Join Network', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Done' }).click();
     await expectModalClosesWithEscape(page, 'Add Network', 'Add Network');
     await expectModalClosesOnBackdrop(page, 'Add Network', 'Add Network');

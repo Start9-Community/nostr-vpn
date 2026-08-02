@@ -54,6 +54,7 @@ igd-next = { version = "0.16", features = ["aio_tokio"] }
 netdev.workspace = true
 reqwest.workspace = true
 qrcode = { version = "0.14", default-features = false }
+rand.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 boringtun = { workspace = true, features = ["device"] }
@@ -93,6 +94,5 @@ fips-core = { workspace = true, features = ["sim-transport"] }
 futures-util = "0.3"
 nostr-sdk.workspace = true
 nostr-social-graph.workspace = true
-rand.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.26.2"

@@ -717,6 +717,8 @@ if grep -Fq 'test-manual-join-platform-contract.sh' "$release_gate"; then
 fi
 grep -Fq 'e2e-web-startos-manual-join-docker.sh' "$release_gate" \
   || fail "release gate does not execute the real web/StartOS manual-join runtime gate"
+grep -Fq 'e2e-web-startos-lan-join-docker.sh' "$release_gate" \
+  || fail "release gate does not execute the real web/StartOS signed-LAN join runtime gate"
 web_startos_join_gate="$ROOT_DIR/scripts/e2e-web-startos-manual-join-docker.sh"
 [[ -x "$web_startos_join_gate" ]] \
   || fail "real web/StartOS manual-join runtime gate is missing or not executable"
@@ -729,6 +731,11 @@ do
   grep -Fq "$evidence" "$web_startos_join_gate" \
     || fail "web/StartOS manual-join gate lacks production evidence: $evidence"
 done
+web_startos_lan_join_gate="$ROOT_DIR/scripts/e2e-web-startos-lan-join-docker.sh"
+[[ -x "$web_startos_lan_join_gate" ]] \
+  || fail "real web/StartOS signed-LAN join runtime gate is missing or not executable"
+grep -Fq 'e2e/lan-join-runtime.spec.ts' "$web_startos_lan_join_gate" \
+  || fail "web/StartOS signed-LAN gate does not select its production E2E"
 grep -Fq 'dockerfile: '\''./umbrel/Dockerfile'\''' \
   "$ROOT_DIR/startos/manifest/index.ts" \
   || fail "StartOS no longer packages the exact web image exercised by the runtime gate"

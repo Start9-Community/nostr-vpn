@@ -12,7 +12,7 @@ use nostr_vpn_core::signed_rosters::{load_signed_rosters, signed_rosters_file_pa
 use serde_json::{Value, json};
 
 const NETWORK_NAME: &str = "Manual join UI e2e";
-const JOINER_ALIAS: &str = "desktop-ui-joiner";
+const JOINER_ALIAS: &str = "ui-joiner";
 const ISOLATED_LOOPBACK_WEBSOCKET_URL: &str = "ws://127.0.0.1:9";
 
 struct Paths {
@@ -203,6 +203,7 @@ fn prepare(paths: &Paths) -> Result<()> {
     reset_dir(&paths.joiner_data_dir)?;
 
     let mut admin = AppConfig::generated_without_networks();
+    admin.node_name = "ui-admin".to_string();
     let network_entry_id = admin.add_owned_network(NETWORK_NAME);
     admin.set_network_enabled(&network_entry_id, true)?;
     let mesh_network_id = admin
@@ -214,6 +215,11 @@ fn prepare(paths: &Paths) -> Result<()> {
     let admin_hex = admin.own_nostr_pubkey_hex()?;
 
     let mut joiner = AppConfig::generated_without_networks();
+    joiner.node_name = JOINER_ALIAS.to_string();
+    anyhow::ensure!(
+        admin.node_name != joiner.node_name,
+        "fixture node names collide"
+    );
     let joiner_npub = npub(&joiner)?;
     let joiner_hex = joiner.own_nostr_pubkey_hex()?;
 

@@ -2021,6 +2021,12 @@ run_userspace_wireguard_exit_docker_gate() {
     ./scripts/e2e-wireguard-exit-userspace-docker.sh
 }
 
+run_web_startos_join_docker_gates() {
+  ./scripts/e2e-web-startos-manual-join-docker.sh
+  NVPN_WEB_STARTOS_JOIN_IMAGE_READY=1 \
+    ./scripts/e2e-web-startos-lan-join-docker.sh
+}
+
 run_docker_isolated_functional_gates() {
   docker_release_gates_enabled || return 0
 
@@ -2039,8 +2045,8 @@ run_docker_isolated_functional_gates() {
     run_userspace_wireguard_exit_docker_gate
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
-  release_gate_parallel_start "Web/StartOS real manual join" \
-    ./scripts/e2e-web-startos-manual-join-docker.sh
+  release_gate_parallel_start "Web/StartOS manual and signed LAN join" \
+    run_web_startos_join_docker_gates
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
   release_gate_parallel_wait_group "${lanes[@]}"

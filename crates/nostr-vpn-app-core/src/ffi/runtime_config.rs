@@ -342,6 +342,7 @@ impl NativeAppRuntime {
     fn connect_vpn(&mut self) -> Result<()> {
         if network_setup_required_for_config(&self.config)
             && self.config.pending_nostr_join_request.is_none()
+            && self.current_join_request_link().is_empty()
         {
             self.vpn_enabled = false;
             self.vpn_active = false;
