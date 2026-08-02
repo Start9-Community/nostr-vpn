@@ -1031,14 +1031,14 @@ for token in (
     'option: "internet-source-direct"',
     "waitForVPNState(on: true",
     "try proveDirect",
-    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
     "Thread.sleep(forTimeInterval: 6)",
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
     "relaunch()",
     'assertPicker("internet-source-picker", contains: "This device")',
     "waitForVPNState(on: true",
     "try proveDirect",
-    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1",
     "Thread.sleep(forTimeInterval: 6)",
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1",
 ):
     offset = direct.find(token, offset + 1)
     if offset < 0:

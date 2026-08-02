@@ -586,10 +586,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("This device transition turned the private-mesh VPN off")
         }
         try proveDirect(spec, expectedSource: directSource)
-        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
-        // Leave the stable Direct session intact while the external process
-        // sampler records the PacketTunnel checkpoint.
+        // Let the Direct PacketTunnel replacement settle before asking the
+        // external sampler to record its checkpoint.
         Thread.sleep(forTimeInterval: 6)
+        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
 
         relaunch()
         openInternetTab()
@@ -598,10 +598,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             throw gateError("This device relaunch stopped the private-mesh packet tunnel")
         }
         try proveDirect(spec, expectedSource: directSource)
-        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1")
-        // Do not let the caller turn VPN off before the external sampler has
-        // recorded the post-relaunch PacketTunnel checkpoint.
+        // Let startup reconciliation settle before the external sampler
+        // records the post-relaunch PacketTunnel checkpoint.
         Thread.sleep(forTimeInterval: 6)
+        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1")
     }
 
     private func releaseSpec() throws -> Spec {
