@@ -144,9 +144,15 @@ public sealed partial class AppViewModel
             return;
         }
         var participant = ParticipantInput.Trim();
+        BeginJoinCoordinationRefresh();
         var added = await DispatchAsync(
             NativeActions.AddParticipant(network.Id, participant, string.IsNullOrWhiteSpace(ParticipantAliasInput) ? null : ParticipantAliasInput.Trim()),
             "Adding device");
+        if (!added)
+        {
+            EndJoinCoordinationRefresh();
+            return;
+        }
         if (added && ActiveNetwork?.Participants.Any(item =>
                 item.RosterAccepted
                 && string.Equals(item.Npub, participant, StringComparison.Ordinal)) == true)
@@ -175,6 +181,7 @@ public sealed partial class AppViewModel
         {
             return;
         }
+        BeginJoinCoordinationRefresh();
         if (await DispatchAsync(NativeActions.ManualAddNetwork(admin, mesh), "Adding network"))
         {
             if (RuntimeActiveNetwork is { } network)
@@ -185,6 +192,10 @@ public sealed partial class AppViewModel
             ManualJoinMeshId = "";
             SetNetworkSetupMode("");
             Page = AppPage.Devices;
+        }
+        else
+        {
+            EndJoinCoordinationRefresh();
         }
     }
 

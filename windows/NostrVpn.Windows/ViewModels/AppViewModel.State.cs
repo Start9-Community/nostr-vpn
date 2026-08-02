@@ -32,13 +32,39 @@ public sealed partial class AppViewModel
         PaidRouteWalletInvoiceQr = string.IsNullOrWhiteSpace(invoice)
             ? new QrMatrix()
             : _core.QrMatrix(invoice);
-        _refreshTimer.Interval = TimeSpan.FromSeconds(
-            state.PaidRouteMarket.Wallet.LastAction.Kind == "topup" ? 2 : 15);
+        _refreshTimer.Interval = RefreshIntervalForState(
+            state,
+            DateTimeOffset.UtcNow < _joinCoordinationRefreshUntil);
         if (syncDrafts)
         {
             SyncDrafts(state);
         }
         CommandManager.InvalidateRequerySuggested();
+    }
+
+    private void BeginJoinCoordinationRefresh()
+    {
+        _joinCoordinationRefreshUntil = DateTimeOffset.UtcNow + JoinCoordinationRefreshWindow;
+        _refreshTimer.Interval = JoinCoordinationRefreshInterval;
+    }
+
+    private void EndJoinCoordinationRefresh()
+    {
+        _joinCoordinationRefreshUntil = default;
+        _refreshTimer.Interval = RefreshIntervalForState(State, joinCoordinationActive: false);
+    }
+
+    internal static TimeSpan RefreshIntervalForState(
+        NativeAppState state,
+        bool joinCoordinationActive)
+    {
+        if (joinCoordinationActive)
+        {
+            return JoinCoordinationRefreshInterval;
+        }
+        return state.PaidRouteMarket.Wallet.LastAction.Kind == "topup"
+            ? TimeSpan.FromSeconds(2)
+            : IdleRefreshInterval;
     }
 
     private static void TagSelfParticipants(NativeAppState state)

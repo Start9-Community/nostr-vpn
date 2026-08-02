@@ -79,6 +79,10 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
     private QrMatrix _joinRequestQr = new();
     private QrMatrix _paidRouteWalletInvoiceQr = new();
     private bool _joinRequestPromptOpen;
+    private DateTimeOffset _joinCoordinationRefreshUntil;
+    private static readonly TimeSpan IdleRefreshInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan JoinCoordinationRefreshInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan JoinCoordinationRefreshWindow = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UpdatePollInterval = LoadUpdatePollInterval();
     private static readonly Brush HeaderDangerBrush = new SolidColorBrush(Color.FromRgb(220, 38, 38));
     private static readonly Brush TextSecondaryBrush = new SolidColorBrush(Color.FromRgb(104, 113, 124));
@@ -96,7 +100,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
                 "Nostr VPN");
         }
         _core = new AppCoreClient(dataDir, version);
-        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        _refreshTimer = new DispatcherTimer { Interval = IdleRefreshInterval };
         _autoInstallUpdates = LoadAutoInstallUpdates();
         ApplyState(_core.State(), syncDrafts: true);
         SyncLaunchOnStartupRegistration();
