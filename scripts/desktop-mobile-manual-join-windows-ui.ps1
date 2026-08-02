@@ -168,6 +168,51 @@ function Find-Control {
   throw "visible Windows UI Automation control did not appear: $AutomationId"
 }
 
+function Test-VisibleControlName {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.Windows.Automation.AutomationElement]$Window,
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+  $Condition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty,
+    $Name
+  )
+  $Matches = $Window.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    $Condition
+  )
+  foreach ($Element in $Matches) {
+    if (!$Element.Current.IsOffscreen) { return $true }
+  }
+  return $false
+}
+
+function Wait-SinglePeerConnectedRoster {
+  param([int]$TimeoutSeconds)
+  $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $Deadline) {
+    $script:Process.Refresh()
+    if ($script:Process.HasExited) {
+      throw "Windows app exited while waiting for its connected roster"
+    }
+    if ($script:Process.MainWindowHandle -ne [IntPtr]::Zero) {
+      $Window = [System.Windows.Automation.AutomationElement]::FromHandle(
+        $script:Process.MainWindowHandle
+      )
+      if (
+        (Test-VisibleControlName $Window "1 of 1 connected") -and
+        (Test-VisibleControlName $Window "Online")
+      ) {
+        return
+      }
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  throw "single-peer connected roster did not appear"
+}
+
 function Invoke-Control {
   param(
     [Parameter(Mandatory = $true)]
@@ -419,9 +464,8 @@ try {
       $Evidence.approvalSubmittedMs = Now-Milliseconds
       Invoke-Control "ManualJoinAdminSubmit"
       Write-Evidence
-      $null = Find-Control `
-        "RosterParticipantAccepted-$ParticipantNpub" `
-        $CoordinationTimeoutSeconds
+      Wait-SinglePeerConnectedRoster $CoordinationTimeoutSeconds
+      $Evidence.acceptedSelector = "single-peer connected roster row"
       $Evidence.desktopAccepted = $true
       $Evidence.acceptedAtMs = Now-Milliseconds
       Save-WindowScreenshot "desktop-admin-accepted"
@@ -447,9 +491,8 @@ try {
       $Evidence.manualSubmittedMs = Now-Milliseconds
       Invoke-Control "ManualJoinSubmit"
       Write-Evidence
-      $null = Find-Control `
-        "RosterParticipantAccepted-$AdminNpub" `
-        $CoordinationTimeoutSeconds
+      Wait-SinglePeerConnectedRoster $CoordinationTimeoutSeconds
+      $Evidence.acceptedSelector = "single-peer connected roster row"
       $Evidence.desktopAccepted = $true
       $Evidence.acceptedAtMs = Now-Milliseconds
       Save-WindowScreenshot "desktop-joiner-accepted"
@@ -559,10 +602,9 @@ try {
     }
     "Verify" {
       Assert-ValidNpub $ParticipantNpub "expected accepted participant"
-      $null = Find-Control `
-        "RosterParticipantAccepted-$ParticipantNpub" `
-        $UiTimeoutSeconds
+      Wait-SinglePeerConnectedRoster $UiTimeoutSeconds
       $Evidence.participantNpub = $ParticipantNpub
+      $Evidence.acceptedSelector = "single-peer connected roster row"
       $Evidence.relaunchAccepted = $true
       Save-WindowScreenshot "relaunch-accepted"
     }

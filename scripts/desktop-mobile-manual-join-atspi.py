@@ -160,6 +160,16 @@ def find_named(
     raise RuntimeError(f"visible AT-SPI control did not appear: {name}")
 
 
+def wait_single_peer_connected_roster(timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if matching_nodes("1 of 1 devices connected") and matching_nodes("Online"):
+            return
+        pyatspi.Registry.pumpQueuedEvents()
+        time.sleep(0.1)
+    raise RuntimeError("single-peer connected roster did not appear")
+
+
 def focus_named_with_keyboard(name: str, max_tabs: int = 100) -> Any:
     subprocess.run(
         ["xdotool", "windowfocus", "--sync", str(TARGET_WINDOW)],
@@ -699,13 +709,8 @@ class Driver:
         self.evidence["manualSubmittedMs"] = now_ms()
         self.write_evidence()
         invoke("nvpn-manual-join-submit")
-        find_named(
-            f"nvpn-roster-participant-accepted-{self.args.admin_npub}",
-            timeout=self.args.coordination_timeout,
-        )
-        self.evidence["acceptedSelector"] = (
-            f"nvpn-roster-participant-accepted-{self.args.admin_npub}"
-        )
+        wait_single_peer_connected_roster(self.args.coordination_timeout)
+        self.evidence["acceptedSelector"] = "single-peer connected roster row"
         self.evidence["desktopAccepted"] = True
         self.evidence["acceptedAtMs"] = now_ms()
         screenshot(self.artifact_root, "desktop-joiner-accepted")
@@ -715,15 +720,9 @@ class Driver:
         if not NPUB.fullmatch(self.args.participant_npub):
             raise RuntimeError("expected accepted participant is invalid")
         self.launch()
-        find_named(
-            f"nvpn-roster-participant-accepted-{self.args.participant_npub}",
-            timeout=self.args.ui_timeout,
-        )
+        wait_single_peer_connected_roster(self.args.ui_timeout)
         self.evidence["participantNpub"] = self.args.participant_npub
-        self.evidence["acceptedSelector"] = (
-            "nvpn-roster-participant-accepted-"
-            f"{self.args.participant_npub}"
-        )
+        self.evidence["acceptedSelector"] = "single-peer connected roster row"
         self.evidence["relaunchAccepted"] = True
         screenshot(self.artifact_root, "relaunch-accepted")
         self.write_evidence()

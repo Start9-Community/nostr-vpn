@@ -1252,10 +1252,12 @@ printf '%s\n' \
   '  <node bounds="[0,0][1080,2410]" />' \
   '  <node content-desc="Admin Device ID value: npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" bounds="[10,20][110,80]" />' \
   '  <node content-desc="Manual joiner Device ID" bounds="[10,80][110,140]" />' \
+  '  <node text="npub1joiner" bounds="[10,80][110,140]" />' \
   '  <node content-desc="Add joining device manually" bounds="[10,140][110,200]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-pending-a" content-desc="Roster participant pending a" bounds="[0,100][100,200]" />' \
   '  <node resource-id="fi.siriusbusiness.nvpn:id/roster-participant-accepted-b" content-desc="Roster participant accepted b" bounds="[0,200][100,300]" />' \
   '  <node resource-id="manual-join-submit-clipped" bounds="[89,2369][991,2410]" />' \
+  '  <node resource-id="manual-join-submit-partial" bounds="[89,1950][991,2200]" />' \
   '  <node resource-id="manual-join-submit-safe" enabled="true" bounds="[89,1800][991,1900]" />' \
   '</hierarchy>' >"$fixture"
 
@@ -1286,6 +1288,10 @@ fi
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" description "Manual joiner Device ID" width
 )" == "100" ]]
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" text "npub1joiner" center
+)" == "60 110" ]]
 if "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource manual-join-submit-clipped safe-center >/dev/null 2>&1
 then
@@ -1296,6 +1302,10 @@ fi
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource manual-join-submit-safe safe-center
 )" == "540 1850" ]]
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$fixture" resource manual-join-submit-partial visible-center
+)" == "540 2030" ]]
 [[ "$(
   "$ROOT/scripts/mobile-release-join-ui-query.py" \
     "$fixture" resource manual-join-submit-safe enabled
@@ -1334,15 +1344,15 @@ android_admin_add="$(
     "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 )"
 for required in \
-  'resource manual-admin-joiner-id text' \
-  'resource manual-admin-submit enabled' \
+  'text "$joiner" center' \
+  'description "Add joining device manually" enabled' \
   'release_join_android_admin_add_visible' \
   'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS'
 do
   grep -Fq "$required" <<<"$android_admin_add" \
     || { echo "Android admin-add lacks verified public UI state: $required" >&2; exit 1; }
 done
-tap_line="$(grep -n 'release_join_android_tap resource manual-admin-submit' <<<"$android_admin_add" | cut -d: -f1)"
+tap_line="$(grep -n 'release_join_android_tap_visible' <<<"$android_admin_add" | tail -n 1 | cut -d: -f1)"
 visible_line="$(grep -n 'release_join_android_admin_add_visible' <<<"$android_admin_add" | tail -n 1 | cut -d: -f1)"
 marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_admin_add" | cut -d: -f1)"
 [[ -n "$tap_line" && -n "$visible_line" && -n "$marker_line" \

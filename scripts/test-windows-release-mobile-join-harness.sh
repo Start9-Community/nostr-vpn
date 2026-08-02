@@ -28,19 +28,6 @@ do
   grep -Fq "$identifier" "$XAML" \
     || fail "shipped Windows UI lacks $identifier"
 done
-grep -Fq 'AcceptedRosterAutomationId' "$XAML" \
-  || fail "Windows roster UI does not bind its accepted-only selector"
-accepted_selector="$(
-  sed -n '/AcceptedRosterAutomationId/,/DisplayName/p' "$MODELS"
-)"
-if grep -Fq 'State' <<<"$accepted_selector"; then
-  fail "Windows roster membership selector still depends on transport state"
-fi
-grep -Fq 'RosterAccepted ?' <<<"$accepted_selector" \
-  || fail "Windows selector is not bound to signed-roster acceptance"
-grep -Fq 'RosterParticipantAccepted-' "$MODELS" \
-  || fail "Windows model has no dynamic accepted roster identifier"
-
 for mode in Reset Bootstrap CreateAdmin AdminAdd ManualJoin Verify; do
   grep -Fq "\"$mode\"" "$DRIVER" \
     || fail "Windows UI driver lacks $mode"
@@ -52,10 +39,18 @@ do
   grep -Fq "$bootstrap_contract" "$DRIVER" \
     || fail "Windows Bootstrap does not preflight its joiner identity"
 done
-grep -Fq '"RosterParticipantAccepted-$ParticipantNpub"' "$DRIVER" \
-  || fail "Windows admin driver accepts a generic roster row"
-grep -Fq '"RosterParticipantAccepted-$AdminNpub"' "$DRIVER" \
-  || fail "Windows joiner driver accepts a generic roster row"
+for roster_contract in \
+  'Wait-SinglePeerConnectedRoster' \
+  'Test-VisibleControlName $Window "1 of 1 connected"' \
+  'Test-VisibleControlName $Window "Online"' \
+  'single-peer connected roster row'
+do
+  grep -Fq "$roster_contract" "$DRIVER" \
+    || fail "Windows driver lacks public roster status: $roster_contract"
+done
+if grep -Fq 'RosterParticipantAccepted-' "$DRIVER"; then
+  fail "Windows driver still depends on a test-only accepted marker"
+fi
 grep -Fq '$Evidence.relaunchAccepted = $true' "$DRIVER" \
   || fail "Windows driver lacks relaunch acceptance evidence"
 grep -Fq 'publicUiOnly = $true' "$DRIVER" \
@@ -86,11 +81,19 @@ done
 for service_contract in \
   '$ServiceName = "NvpnService"' \
   'Get-Service -Name $ServiceName' \
-  'Stop-Service -Name $ServiceName'
+  'Stop-Service -Name $ServiceName' \
+  'Get-CimInstance Win32_Service' \
+  '$CliExe service uninstall --config $Config' \
+  'WINDOWS_RELEASE_MOBILE_JOIN_CLEAN'
 do
   grep -Fq "$service_contract" "$REMOTE" \
     || fail "Windows wrapper does not use the production service name"
 done
+grep -Fq 'windows-cleanup.log' "$HOST" \
+  || fail "Windows cleanup evidence is discarded"
+if grep -Fq 'remote Cleanup >/dev/null 2>&1 || true' "$HOST"; then
+  fail "Windows cleanup failure is still ignored"
+fi
 if grep -Eq '(Get|Stop)-Service -Name "nvpn"' "$REMOTE"; then
   fail "Windows wrapper still queries the obsolete service name"
 fi

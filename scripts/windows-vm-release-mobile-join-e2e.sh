@@ -194,7 +194,7 @@ acceptance_observer_pids=()
 cleanup() {
   local status=$?
   trap - EXIT
-  local observer_pid
+  local observer_pid cleanup_status=0
   for observer_pid in "${acceptance_observer_pids[@]-}"; do
     kill "$observer_pid" >/dev/null 2>&1 || true
     wait "$observer_pid" >/dev/null 2>&1 || true
@@ -205,11 +205,15 @@ cleanup() {
     remote Stop >/dev/null 2>&1 || true
     wait "$REMOTE_ACTION_PID" >/dev/null 2>&1 || true
   fi
-  remote Cleanup >/dev/null 2>&1 || true
+  remote Cleanup >"$PLATFORM_RESULT/windows-cleanup.log" 2>&1 \
+    || cleanup_status=$?
   if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
     cp "$PRIVATE_DIR/android-ui.xml" "$PLATFORM_RESULT/android-ui-failure.xml"
   fi
   rm -rf "$PRIVATE_DIR"
+  if ((status == 0 && cleanup_status != 0)); then
+    status=$cleanup_status
+  fi
   exit "$status"
 }
 trap cleanup EXIT

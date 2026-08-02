@@ -306,9 +306,45 @@ switch ($Mode) {
     Write-Output ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
   }
   "Cleanup" {
-    Get-Process -Name "NostrVpn.Windows" -ErrorAction SilentlyContinue |
+    $CandidatePaths = @($AppExe, $CliExe)
+    Get-Process -ErrorAction SilentlyContinue |
+      Where-Object {
+        try { $CandidatePaths -icontains $_.Path } catch { $false }
+      } |
       Stop-Process -Force -ErrorAction SilentlyContinue
+    $Service = Get-CimInstance Win32_Service `
+      -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+    if ($Service) {
+      $Config = Resolve-CanonicalConfig
+      $ExpectedPrefix = '"' + $CliExe + '" daemon --service --config "' + $Config + '" '
+      if (!$Service.PathName.StartsWith(
+        $ExpectedPrefix,
+        [System.StringComparison]::OrdinalIgnoreCase
+      )) {
+        throw "refusing to remove a Windows service outside this candidate"
+      }
+      & $CliExe service uninstall --config $Config
+      if ($LASTEXITCODE -ne 0) {
+        throw "exact Windows candidate service cleanup failed"
+      }
+    }
+    $Deadline = (Get-Date).AddSeconds(15)
+    do {
+      $RemainingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+      $RemainingProcesses = @(
+        Get-Process -ErrorAction SilentlyContinue |
+          Where-Object {
+            try { $CandidatePaths -icontains $_.Path } catch { $false }
+          }
+      )
+      if (!$RemainingService -and $RemainingProcesses.Count -eq 0) { break }
+      Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $Deadline)
+    if ($RemainingService -or $RemainingProcesses.Count -ne 0) {
+      throw "Windows candidate cleanup left a service or process behind"
+    }
     Remove-Item -Force -ErrorAction SilentlyContinue $StopPath, $WrapperPath
+    Write-Output "WINDOWS_RELEASE_MOBILE_JOIN_CLEAN"
   }
   "InstallService" {
     Assert-PreparedReceipt

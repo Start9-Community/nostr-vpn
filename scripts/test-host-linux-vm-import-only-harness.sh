@@ -90,6 +90,17 @@ require_tokens "$RELEASE_JOIN" "two-phase Pixel-admin coordination" \
 require_tokens "$ROOT/scripts/desktop-mobile-manual-join-atspi.py" \
   "Bootstrap joiner identity preflight" \
   'self.evidence["joinerNpub"] = read_npub('
+require_tokens "$ROOT/scripts/desktop-mobile-manual-join-atspi.py" \
+  "public connected-roster acceptance" \
+  'wait_single_peer_connected_roster' \
+  'matching_nodes("1 of 1 devices connected")' \
+  'matching_nodes("Online")' \
+  'single-peer connected roster row'
+if grep -Fq 'nvpn-roster-participant-accepted-' \
+    "$ROOT/scripts/desktop-mobile-manual-join-atspi.py"
+then
+  fail "Linux UI driver still depends on a missing accepted marker"
+fi
 [[ "$(sed -n \
   '/# Imported Linux desktop admin -> physical Pixel joiner\./,/# Physical Pixel admin -> imported Linux desktop joiner\./p' \
   "$RELEASE_JOIN" | grep -Fc 'release_join_observe_pair_until_ms')" -eq 1 ]] \

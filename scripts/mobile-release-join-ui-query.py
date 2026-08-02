@@ -13,7 +13,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("xml")
     result.add_argument(
         "kind",
-        choices=("resource", "description", "resource-prefix", "description-prefix"),
+        choices=(
+            "resource",
+            "description",
+            "text",
+            "resource-prefix",
+            "description-prefix",
+        ),
     )
     result.add_argument("expected")
     result.add_argument(
@@ -43,6 +49,8 @@ def matches(node: ET.Element, kind: str, expected: str) -> bool:
         actual = node.attrib.get("resource-id", "")
         short = actual.rsplit("/", 1)[-1]
         return short.startswith(expected)
+    if kind == "text":
+        return html.unescape(node.attrib.get("text", "")) == expected
     actual = html.unescape(node.attrib.get("content-desc", ""))
     if kind == "description-prefix":
         return actual.startswith(expected)

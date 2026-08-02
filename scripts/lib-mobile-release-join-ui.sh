@@ -154,6 +154,14 @@ release_join_android_tap() {
   "${ADB[@]}" shell input tap $point
 }
 
+release_join_android_tap_visible() {
+  local kind="$1" expected="$2" point
+  point="$(release_join_android_query "$kind" "$expected" visible-center)" \
+    || return 1
+  # shellcheck disable=SC2086
+  "${ADB[@]}" shell input tap $point
+}
+
 release_join_android_scroll() {
   local size width height
   size="$("${ADB[@]}" shell wm size | tr -d '\r' | sed -n 's/^Physical size: //p')"
@@ -478,7 +486,7 @@ release_join_android_admin_add_visible() {
   local joiner="$1"
   release_join_android_dump_ui || return 1
   if release_join_android_query_dumped \
-      resource manual-admin-submit center >/dev/null 2>&1
+      description "Add joining device manually" center >/dev/null 2>&1
   then
     return 1
   fi
@@ -489,7 +497,7 @@ release_join_android_admin_add_visible() {
 }
 
 release_join_android_manual_admin_prepare() {
-  local joiner="$1" entered enabled
+  local joiner="$1" enabled
   release_join_android_open_link_device
   RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE="$(
     release_join_android_query resource-prefix roster-participant- count
@@ -497,15 +505,12 @@ release_join_android_manual_admin_prepare() {
   release_join_android_scroll_to description "Manual joiner Device ID"
   release_join_android_enter description "Manual joiner Device ID" "$joiner"
   release_join_android_scroll_to description "Add joining device manually"
-  entered="$(
-    release_join_android_query resource manual-admin-joiner-id text
-  )" || return 1
-  [[ -n "$entered" && "$entered" == "$joiner" ]] || {
+  release_join_android_query text "$joiner" center >/dev/null 2>&1 || {
     echo "Android manual admin-add Device ID did not remain populated" >&2
     return 1
   }
   enabled="$(
-    release_join_android_query resource manual-admin-submit enabled
+    release_join_android_query description "Add joining device manually" enabled
   )" || return 1
   [[ "$enabled" == true ]] || {
     echo "Android manual admin-add remained disabled after valid input" >&2
@@ -518,25 +523,25 @@ release_join_android_manual_admin_prepare() {
 }
 
 release_join_android_manual_admin_tap() {
-  local joiner="$1" deadline entered enabled submitted_ms
+  local joiner="$1" deadline enabled submitted_ms
   local submitted_visible=0
   [[ "${RELEASE_JOIN_ANDROID_ADMIN_ADD_JOINER:-}" == "$joiner" \
     && "${RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE:-}" =~ ^[0-9]+$ ]] || {
     echo "Android manual admin-add was not prepared for this exact joiner" >&2
     return 1
   }
-  entered="$(
-    release_join_android_query resource manual-admin-joiner-id text
-  )" || return 1
+  release_join_android_query text "$joiner" center >/dev/null 2>&1 \
+    || return 1
   enabled="$(
-    release_join_android_query resource manual-admin-submit enabled
+    release_join_android_query description "Add joining device manually" enabled
   )" || return 1
-  [[ "$entered" == "$joiner" && "$enabled" == true ]] || {
+  [[ "$enabled" == true ]] || {
     echo "Android prepared admin-add controls changed before submission" >&2
     return 1
   }
   submitted_ms="$(release_join_now_ms)"
-  release_join_android_tap resource manual-admin-submit || return 1
+  release_join_android_tap_visible \
+    description "Add joining device manually" || return 1
   deadline=$((SECONDS + 3))
   while ((SECONDS < deadline)); do
     if release_join_android_admin_add_visible "$joiner"; then
