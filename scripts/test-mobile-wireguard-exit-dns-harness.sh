@@ -865,7 +865,8 @@ grep -Fq -- '-configuration Release' "$ios_release_gate" \
   && grep -Fq 'testReleaseDisconnectCleanup' "$ios_release_gate" \
   || { echo "iOS physical DNS cases do not build/test the company-signed Release app" >&2; exit 1; }
 grep -Fq 'driveRapidStartStopStress' "$ios_release_ui" \
-  && grep -Fq '"exerciseStartStopStress": create_network == "1"' "$gate" \
+  && grep -Fq '"exerciseStartStopStress": rapid_start_stop.lower() in {"1", "true", "yes", "on"}' "$gate" \
+  && grep -Fq '"$rapid_start_stop_gate"' "$gate" \
   && grep -Fq 'NVPN_IOS_RELEASE_START_STOP_RECOVERED=1' "$ios_release_ui" \
   && grep -Fq 'NVPN_IOS_RELEASE_START_STOP_RECOVERED=1' "$ios_release_gate" \
   || {
@@ -873,7 +874,8 @@ grep -Fq 'driveRapidStartStopStress' "$ios_release_ui" \
     exit 1
   }
 grep -Fq 'RAPID_START_STOP_GATE="${NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE:-auto}"' "$gate" \
-  && grep -Fq 'auto) rapid_start_stop_gate="$first"' "$gate" \
+  && grep -Fq 'auto) printf '\''%s\n'\'' "$first"' "$gate" \
+  && [[ "$(grep -Fc 'rapid_start_stop_gate="$(rapid_start_stop_for_case "$first")"' "$gate")" -eq 2 ]] \
   && grep -Fq 'NVPN_ANDROID_RAPID_START_STOP_GATE="$rapid_start_stop_gate"' "$gate" \
   && grep -Fq 'run_android_release_rapid_start_stop_gate' "$android_release_gate" \
   && ! grep -Fq 'android_release_rapid_cancel_once' "$android_release_gate" \

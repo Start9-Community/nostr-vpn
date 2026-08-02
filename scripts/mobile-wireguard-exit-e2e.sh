@@ -91,6 +91,19 @@ has_platform() {
   [[ ",${PLATFORMS// /}," == *",$requested,"* ]]
 }
 
+rapid_start_stop_for_case() {
+  local first="$1"
+  case "$RAPID_START_STOP_GATE" in
+    auto) printf '%s\n' "$first" ;;
+    0|false|FALSE|False|no|NO|No|off|OFF|Off) printf '0\n' ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) printf '1\n' ;;
+    *)
+      echo "Unsupported NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE=$RAPID_START_STOP_GATE" >&2
+      return 2
+      ;;
+  esac
+}
+
 cleanup() {
   local status="${1:-$?}"
   local cleanup_failed=0
@@ -458,19 +471,7 @@ run_android_case() {
     lifecycle_gate=false
     underlay_gate=false
   fi
-  case "$RAPID_START_STOP_GATE" in
-    auto) rapid_start_stop_gate="$first" ;;
-    0|false|FALSE|False|no|NO|No|off|OFF|Off)
-      rapid_start_stop_gate=0
-      ;;
-    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
-      rapid_start_stop_gate=1
-      ;;
-    *)
-      echo "Unsupported NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE=$RAPID_START_STOP_GATE" >&2
-      return 2
-      ;;
-  esac
+  rapid_start_stop_gate="$(rapid_start_stop_for_case "$first")"
   switch_direct="$final"
   if bool_is_true "$underlay_gate"; then
     # The active lifecycle runs after this transition in the Android driver.
@@ -536,7 +537,7 @@ run_ios_case() {
   local mode provider custom_url bootstrap_ips through_servers probe_host
   local expected_ip evidence before_dns_evidence after_dns_evidence
   local before_bytes before_forward
-  local lifecycle_gate underlay_gate resolver_probe_url resolver_body
+  local lifecycle_gate underlay_gate rapid_start_stop_gate resolver_probe_url resolver_body
   local run_id spec_base64
   IFS='|' read -r \
     mode provider custom_url bootstrap_ips through_servers probe_host \
@@ -552,6 +553,7 @@ run_ios_case() {
     lifecycle_gate=false
     underlay_gate=false
   fi
+  rapid_start_stop_gate="$(rapid_start_stop_for_case "$first")"
   before_bytes="$(wg_bytes)"
   before_forward="$(forward_packets)"
   before_dns_evidence="$(
@@ -578,7 +580,7 @@ run_ios_case() {
       "$custom_url" "$bootstrap_ips" "$through_servers" "$probe_host" \
       "$expected_ip" "$resolver_probe_url" "$resolver_body" "$TUNNEL_SERVER_IP" \
       "$DIRECT_URL" "$EXIT_SOURCE_PROBE_URL" "$EXPECTED_EXIT_SOURCE_IP" \
-      "$first" "$underlay_gate" "$lifecycle_gate" "$final" \
+      "$first" "$underlay_gate" "$lifecycle_gate" "$rapid_start_stop_gate" "$final" \
       "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" \
       "${NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS:-20}" \
       "${NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS:-30}" <<'PY'
@@ -606,6 +608,7 @@ import sys
     create_network,
     underlay,
     lifecycle,
+    rapid_start_stop,
     direct,
     cycles,
     dwell,
@@ -631,7 +634,7 @@ payload = {
     "sourceIpUrl": source_url,
     "expectedExitSourceIp": expected_source,
     "createNetwork": create_network == "1",
-    "exerciseStartStopStress": create_network == "1",
+    "exerciseStartStopStress": rapid_start_stop.lower() in {"1", "true", "yes", "on"},
     "exerciseUnderlay": underlay.lower() in {"1", "true", "yes", "on"},
     "exerciseLifecycle": lifecycle.lower() in {"1", "true", "yes", "on"},
     "switchToDirect": direct == "1",
