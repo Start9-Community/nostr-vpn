@@ -563,7 +563,7 @@ run_ios_case() {
       resolver_body="$HTTP_PROBE_TOKEN"
       ;;
     doh-cloudflare|doh-quad9|doh-google)
-      resolver_probe_url="http://$probe_host:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
+      resolver_probe_url="http://$TUNNEL_SERVER_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
       resolver_body="$HTTP_PROBE_TOKEN"
       ;;
     dns-through)
