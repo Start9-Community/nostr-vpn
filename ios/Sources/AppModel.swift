@@ -148,6 +148,7 @@ final class AppModel: ObservableObject {
                   desiredVpnEnabled != state.vpnEnabled
         {
             pendingVpnTransitionEnabled = desiredVpnEnabled
+            state.vpnEnabled = desiredVpnEnabled
         }
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -350,6 +351,12 @@ final class AppModel: ObservableObject {
     ) -> Bool {
         let compatibility = Self.appStoreCompatibleState(current, core: core)
         state = compatibility.state
+        state.vpnEnabled = vpnDesiredState.presentationEnabled(
+            runtimeEnabled: state.vpnEnabled,
+            reconciliationPending: pendingVpnTransitionEnabled != nil
+                || packetTunnelTransitionTask != nil
+                || startupTunnelReconciliationTask != nil
+        )
         if compatibility.removedPaidConfiguration && compatibility.vpnWasRunning {
             appStoreTunnelRefreshPending = true
             _ = reconcileAppStoreTunnelAfterSanitization(reason: reason)
