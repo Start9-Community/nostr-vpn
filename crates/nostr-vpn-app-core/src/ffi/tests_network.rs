@@ -401,6 +401,85 @@
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn mobile_tick_adopts_durably_applied_join_roster_from_tunnel() {
+        let dir = unique_service_test_dir("nvpn-mobile-tunnel-roster-refresh");
+        let config_path = dir.join("config.toml");
+        let now = unix_timestamp();
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.mobile_runtime = true;
+        runtime.config_path.clone_from(&config_path);
+        runtime.config.clear_pending_nostr_join_request();
+        runtime
+            .config
+            .ensure_pending_nostr_join_request(now)
+            .expect("create mobile join request");
+        let consumed_request = runtime
+            .config
+            .pending_nostr_join_request
+            .clone()
+            .expect("pending mobile join request");
+        runtime
+            .config
+            .save(&config_path)
+            .expect("persist initial mobile config");
+
+        let mut admin = AppConfig::generated();
+        let admin_network_id = admin.networks[0].id.clone();
+        admin.networks[0].network_id = "mobile-tunnel-refresh-mesh".to_string();
+        admin.networks[0].admins = vec![admin.own_nostr_pubkey_hex().expect("admin pubkey")];
+        let bootstrap = nostr_vpn_core::identity_bridge::nostr_identity_device_approval_bootstrap(
+            &consumed_request.request,
+        )
+        .expect("join request bootstrap");
+        let approved = prepare_join_approval(&admin, &admin_network_id, &bootstrap, now)
+            .expect("prepare approved roster");
+
+        let mut tunnel_config = runtime.config.clone();
+        assert_eq!(
+            nostr_vpn_core::join_roster_persistence::apply_join_roster_durably(
+                &mut tunnel_config,
+                &config_path,
+                &approved.join_roster,
+                now,
+            )
+            .expect("tunnel durably applies approved roster")
+            .as_deref(),
+            Some("mobile-tunnel-refresh-mesh")
+        );
+        assert!(tunnel_config.active_network_has_confirmed_local_identity());
+
+        runtime.dispatch(NativeAppAction::Tick);
+
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert!(runtime.config.active_network_has_confirmed_local_identity());
+        let state = runtime.state();
+        assert!(
+            state.networks[0]
+                .participants
+                .iter()
+                .all(|participant| participant.roster_accepted),
+            "foreground state must reflect the tunnel's accepted roster"
+        );
+        assert_ne!(
+            runtime
+                .config
+                .pending_nostr_join_request
+                .as_ref()
+                .expect("mobile runtime keeps a fresh join request")
+                .request
+                .request_secret,
+            consumed_request.request.request_secret,
+            "foreground refresh must not resurrect the request consumed by the tunnel"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn join_approval_respects_disabled_autoconnect() {

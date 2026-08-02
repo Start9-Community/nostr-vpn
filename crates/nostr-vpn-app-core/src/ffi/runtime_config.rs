@@ -777,13 +777,8 @@ impl NativeAppRuntime {
             ));
         }
 
-        let in_memory_join_request = self
-            .mobile_runtime
-            .then(|| self.config.pending_nostr_join_request.clone())
-            .flatten();
         self.config = AppConfig::load(&self.config_path)?;
         if self.mobile_runtime {
-            self.config.pending_nostr_join_request = in_memory_join_request;
             self.config
                 .ensure_pending_nostr_join_request(unix_timestamp())?;
         }
