@@ -41,6 +41,7 @@ required_ios_fragments = (
     'mktemp -d "$IOS_RELEASE_NETWORK_SIGNING_DIR/NostrVpnIos-$label.XXXXXX"',
     'IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR/NostrVpnIos-$label.xctestrun"',
     'rmdir "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR"',
+    'ios_release_network_install_exact_runner || return 1',
 )
 for fragment in required_ios_fragments:
     if fragment not in ios_source:
@@ -49,6 +50,36 @@ for fragment in required_ios_fragments:
             + fragment
         )
 PY
+
+runner_root="$TEMP_ROOT/runner-derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+runner_install_log="$TEMP_ROOT/runner-install.log"
+mkdir -p "$runner_root"
+plutil -create xml1 "$runner_root/Info.plist"
+plutil -insert CFBundleIdentifier \
+  -string "$IOS_BUNDLE_ID.UITests.xctrunner" "$runner_root/Info.plist"
+(
+  IOS_RELEASE_NETWORK_DERIVED_DATA="$TEMP_ROOT/runner-derived"
+  IOS_RELEASE_NETWORK_DEVICE=fixture-device
+  xcrun() {
+    printf '%s\n' "$*" >>"$runner_install_log"
+    if [[ "$*" == "devicectl device info apps"* ]]; then
+      printf '%s\n' "$IOS_BUNDLE_ID.UITests.xctrunner"
+    fi
+  }
+  ios_release_network_install_exact_runner
+) || fail "exact signed iOS runner was not installed in place"
+grep -Fxq \
+  "devicectl device install app --device fixture-device $runner_root --quiet" \
+  "$runner_install_log" \
+  || fail "exact signed iOS runner path was not installed before XCTest"
+grep -Fq \
+  "device info apps --device fixture-device --bundle-id $IOS_BUNDLE_ID.UITests.xctrunner" \
+  "$runner_install_log" \
+  || fail "installed iOS runner bundle identity was not read back"
+if grep -Fq "device uninstall app" "$runner_install_log"; then
+  fail "exact iOS runner replacement revoked development trust"
+fi
+
 for stem in nvpn-installed-release nvpn-release-installed NostrVpnIos-case.xctestrun; do
   first="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"
   second="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"

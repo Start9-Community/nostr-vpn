@@ -532,14 +532,11 @@ PY
     ios_release_network_prepare_abort
     return
   }
-  local runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
   if ! xcrun devicectl device install app \
       --device "$IOS_RELEASE_NETWORK_DEVICE" \
-      "$(ios_release_network_app_path)" --quiet >/dev/null \
-    || ! xcrun devicectl device install app \
-      --device "$IOS_RELEASE_NETWORK_DEVICE" "$runner" --quiet >/dev/null
+      "$(ios_release_network_app_path)" --quiet >/dev/null
   then
-    echo "iOS Release gate could not install its exact test products in place" >&2
+    echo "iOS Release gate could not install its exact app in place" >&2
     ios_release_network_prepare_abort
     return
   fi
@@ -873,8 +870,30 @@ ios_release_network_preserve_pending_diagnostics() {
   ios_release_network_clear_pending_diagnostics
 }
 
+ios_release_network_install_exact_runner() {
+  local runner bundle expected_bundle
+  runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  expected_bundle="$IOS_BUNDLE_ID.UITests.xctrunner"
+  [[ -d "$runner" ]] \
+    && bundle="$(plutil -extract CFBundleIdentifier raw "$runner/Info.plist")" \
+    && [[ "$bundle" == "$expected_bundle" ]] || {
+      echo "iOS Release exact XCTest runner identity is invalid" >&2
+      return 1
+    }
+  xcrun devicectl device install app \
+    --device "$IOS_RELEASE_NETWORK_DEVICE" "$runner" --quiet >/dev/null || {
+      echo "iOS Release exact XCTest runner replacement failed" >&2
+      return 1
+    }
+  ios_release_network_xctrunner_installed "$IOS_RELEASE_NETWORK_DEVICE" || {
+    echo "iOS Release exact XCTest runner replacement was not readable" >&2
+    return 1
+  }
+}
+
 ios_release_network_test_command() {
   local xctestrun="$1"
+  ios_release_network_install_exact_runner || return 1
   IOS_RELEASE_NETWORK_XCODE_COMMAND=(
     xcodebuild
     -xctestrun "$xctestrun"
@@ -1374,7 +1393,8 @@ run_ios_release_network_case() {
   ios_release_network_require_unlocked "$IOS_RELEASE_NETWORK_DEVICE" || return 1
   ios_release_network_prepare_xctestrun \
     "$label" "$spec_base64" "$run_id" || return 1
-  ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
+  ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" \
+    || return 1
   command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
   command+=(
     -resultBundlePath "$xcresult"
@@ -1533,7 +1553,8 @@ ios_release_network_disconnect_cleanup_inner() {
   ios_release_network_prepare_xctestrun \
     cleanup "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" "$cleanup_run_id" \
     || return 1
-  ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
+  ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" \
+    || return 1
   command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
   command+=(
     -resultBundlePath "$xcresult"
