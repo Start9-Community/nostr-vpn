@@ -69,6 +69,7 @@ def main() -> int:
     marker_path = Path(sys.argv[2])
     summary_path = Path(sys.argv[3])
     platform = sys.argv[4]
+    is_android = platform.lower() == "android"
     max_recovery_ms = int(sys.argv[5])
     if not 1 <= max_recovery_ms <= 10_000:
         raise SystemExit("maximum recovery must be 1-10000ms")
@@ -109,7 +110,7 @@ def main() -> int:
             outage = markers[f"switch_{cycle}_outage"]
             radio_on_requested = markers[f"switch_{cycle}_recovery_requested"]
             underlay_validated = markers[f"switch_{cycle}_underlay_validated"]
-            recovery_ms = markers[f"switch_{cycle}_payload_recovery"]
+            payload_recovery_ms = markers[f"switch_{cycle}_payload_recovery"]
             verified = markers[f"switch_{cycle}_verified"]
             if (
                 requested > outage
@@ -159,17 +160,25 @@ def main() -> int:
                 )
                 continue
             association_ms = underlay_validated - radio_on_requested
-            if recovery_ms < 0:
+            if payload_recovery_ms < 0:
                 errors.append(f"switch {cycle} payload recovery was negative")
                 continue
-            if recovery_ms > max_recovery_ms:
+            if payload_recovery_ms > max_recovery_ms:
+                recovery_label = (
+                    "DNS recovery" if is_android else "payload recovery"
+                )
                 errors.append(
-                    f"switch {cycle} payload recovery was {recovery_ms}ms "
+                    f"switch {cycle} {recovery_label} was {payload_recovery_ms}ms "
                     f"(limit {max_recovery_ms}ms)"
                 )
             first_after_validation_ms = after_validation[0] - underlay_validated
             first_reverse_recovery_ms = (
                 0 if during_association else first_after_validation_ms
+            )
+            combined_recovery_ms = (
+                max(payload_recovery_ms, first_reverse_recovery_ms)
+                if is_android
+                else payload_recovery_ms
             )
             if first_after_validation_ms > max_recovery_ms:
                 errors.append(
@@ -198,14 +207,19 @@ def main() -> int:
                 )
             cycles.append(
                 {
-                    "dnsAndWireGuardRecoveryMilliseconds": recovery_ms,
+                    "dnsAndWireGuardRecoveryMilliseconds": combined_recovery_ms,
+                    **(
+                        {"dnsRecoveryMilliseconds": payload_recovery_ms}
+                        if is_android
+                        else {}
+                    ),
                     "firstReversePayloadRecoveryMilliseconds": (
                         first_reverse_recovery_ms
                     ),
                     "outageAtMilliseconds": outage,
                     "outageReversePayloads": len(during_outage),
                     "payloadBeforeSwitch": True,
-                    "recoveryMilliseconds": recovery_ms,
+                    "recoveryMilliseconds": combined_recovery_ms,
                     "recoveryRequestedAtMilliseconds": radio_on_requested,
                     "reversePayloadAfterRecoveryRequest": True,
                     "reversePayloadRecoveredBeforeValidation": bool(

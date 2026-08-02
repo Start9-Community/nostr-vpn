@@ -50,6 +50,7 @@ cycle = receipt["cycles"][0]
 assert cycle["outageReversePayloads"] == 0
 assert cycle["firstReversePayloadRecoveryMilliseconds"] == 0
 assert cycle["dnsAndWireGuardRecoveryMilliseconds"] == 200
+assert cycle["dnsRecoveryMilliseconds"] == 200
 assert cycle["underlayAssociationMilliseconds"] == 5000
 assert cycle["reversePayloadRecoveredBeforeValidation"] is True
 for fabricated in (
@@ -127,7 +128,26 @@ then
   echo "continuity validator accepted slow product recovery" >&2
   exit 1
 fi
-grep -Fq "payload recovery was 4100ms" "$temp/slow-product.err"
+grep -Fq "DNS recovery was 4100ms" "$temp/slow-product.err"
+
+cat >"$temp/later-wireguard.log" <<'EOF'
+[1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms
+[1000.200] 64 bytes from 10.0.0.2: icmp_seq=2 ttl=64 time=1 ms
+[1001.200] 64 bytes from 10.0.0.2: icmp_seq=3 ttl=64 time=1 ms
+[1006.700] 64 bytes from 10.0.0.2: icmp_seq=4 ttl=64 time=1 ms
+[1006.900] 64 bytes from 10.0.0.2: icmp_seq=5 ttl=64 time=1 ms
+[1007.100] 64 bytes from 10.0.0.2: icmp_seq=6 ttl=64 time=1 ms
+EOF
+python3 "$continuity" \
+  "$temp/later-wireguard.log" "$temp/markers.tsv" \
+  "$temp/later-wireguard.json" Android 4000 \
+  >/dev/null
+jq -e '
+  .cycles[0].dnsRecoveryMilliseconds == 200
+  and .cycles[0].firstReversePayloadRecoveryMilliseconds == 700
+  and .cycles[0].dnsAndWireGuardRecoveryMilliseconds == 700
+  and .cycles[0].recoveryMilliseconds == 700
+' "$temp/later-wireguard.json" >/dev/null
 
 grep -Ev 'switch_1_underlay_validated' \
   "$temp/markers.tsv" >"$temp/ambiguous-old-markers.tsv"
@@ -555,6 +575,19 @@ ordered = [gate.index(needle) for needle in (
     'android_underlay_recovery_payloads')]
 if ordered != sorted(ordered):
     raise SystemExit("Android radio-on and validated product clocks are not distinct")
+payloads = android[
+    android.index("android_underlay_recovery_payloads()"):
+    android.index("android_vpn_service_log_count()")
+]
+ordered = [payloads.index(needle) for needle in (
+    'dns_completion_ms="$(mobile_underlay_now_ms)"',
+    'dns_recovery_ms=$((dns_completion_ms - underlay_validated_ms))',
+    '--udp-echo',
+    'completion_ms="$(mobile_underlay_now_ms)"')]
+if ordered != sorted(ordered):
+    raise SystemExit(
+        "Android recovery clock includes the later UDP evidence probe"
+    )
 fingerprint = android_service[
     android_service.index("private fun currentUnderlyingNetworkFingerprint("):
     android_service.index("private fun underlyingNetworkCandidate(")

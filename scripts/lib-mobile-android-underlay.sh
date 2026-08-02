@@ -167,7 +167,8 @@ android_underlay_wait_offline() {
 
 android_underlay_recovery_payloads() {
   local underlay_validated_ms="$1" recovery_max_ms="$2"
-  local result_dir result_path dns_path completion_ms recovery_ms
+  local result_dir result_path dns_path dns_completion_ms dns_recovery_ms
+  local completion_ms
   local dns_servers fresh_dns_base fresh_dns_host
   result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-android}"
   result_path="$result_dir/mobile-android-radio-bounce-udp-$$.log"
@@ -209,6 +210,12 @@ android_underlay_recovery_payloads() {
     return 1
   fi
   ANDROID_UNDERLAY_FRESH_DNS_HOST="$fresh_dns_host"
+  dns_completion_ms="$(mobile_underlay_now_ms)"
+  dns_recovery_ms=$((dns_completion_ms - underlay_validated_ms))
+  if (( dns_recovery_ms < 0 || dns_recovery_ms > recovery_max_ms )); then
+    echo "Android DNS recovery was ${dns_recovery_ms}ms (limit ${recovery_max_ms}ms)" >&2
+    return 1
+  fi
 
   if ! "$ADB" -s "$serial" shell \
       env "CLASSPATH=$ANDROID_CAPTURED_PROBE_REMOTE_JAR" \
@@ -226,13 +233,8 @@ android_underlay_recovery_payloads() {
     return 1
   }
   completion_ms="$(mobile_underlay_now_ms)"
-  recovery_ms=$((completion_ms - underlay_validated_ms))
-  if (( recovery_ms < 0 || recovery_ms > recovery_max_ms )); then
-    echo "Android DNS/WireGuard recovery was ${recovery_ms}ms (limit ${recovery_max_ms}ms)" >&2
-    return 1
-  fi
   ANDROID_UNDERLAY_PAYLOAD_COMPLETED_MS="$completion_ms"
-  ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS="$recovery_ms"
+  ANDROID_UNDERLAY_PAYLOAD_RECOVERY_MS="$dns_recovery_ms"
 }
 
 android_vpn_service_log_count() {
