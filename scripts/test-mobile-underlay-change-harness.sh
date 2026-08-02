@@ -596,6 +596,21 @@ for required in (
         raise SystemExit(f"radio-bounce implementation is missing {required}")
 if 'navigationBars["Wi-Fi"]' in ios:
     raise SystemExit("iOS Wi-Fi navigation still depends on a localized page title")
+navigation = ios[ios.index("func openWiFiSettings") : ios.index("func wifiCellIsSelected")]
+compact_navigation = "".join(navigation.split())
+for required in (
+    "normalizeSettingsRoot(settings)",
+    "guard rows.count == 1",
+    'settings.switches["Wi-Fi"].firstMatch',
+):
+    if required not in navigation:
+        raise SystemExit(
+            f"iOS Settings Wi-Fi navigation is not deterministic: missing {required}"
+        )
+if 'settings.cells.containing(.staticText,identifier:"Wi-Fi")' not in compact_navigation:
+    raise SystemExit("iOS Settings does not select its unique public Wi-Fi row")
+if "for _ in 0..<5" in navigation:
+    raise SystemExit("iOS Settings Wi-Fi navigation retained its fallback retry maze")
 cleanup = ios_test[ios_test.index("func testReleaseDisconnectCleanup()") :]
 for required in (
     "if let spec = optionalReleaseSpec(), spec.exerciseUnderlay",

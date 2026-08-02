@@ -251,28 +251,42 @@ extension NostrVpnReleaseNetworkUITests {
     }
 
     func openWiFiSettings(_ settings: XCUIApplication) throws {
+        try normalizeSettingsRoot(settings)
+        let rows = settings.cells.containing(
+            .staticText,
+            identifier: "Wi-Fi"
+        )
+        guard rows.count == 1 else {
+            throw gateError("Settings root did not expose one Wi-Fi row")
+        }
+        let row = rows.firstMatch
+        guard row.isHittable else {
+            throw gateError("Settings Wi-Fi row was not hittable")
+        }
+        row.tap()
         let toggle = settings.switches["Wi-Fi"].firstMatch
-        if toggle.exists {
-            return
+        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
+            throw gateError("Settings did not open the public Wi-Fi page and switch")
         }
-        for _ in 0..<5 {
-            let row = settings.cells.containing(
-                .staticText,
-                identifier: "Wi-Fi"
-            ).firstMatch
-            if row.waitForExistence(timeout: 1), row.isHittable {
-                row.tap()
-                guard toggle.waitForExistence(timeout: 5) else {
-                    throw gateError("Settings did not open the Wi-Fi page")
-                }
-                return
+    }
+
+    func normalizeSettingsRoot(_ settings: XCUIApplication) throws {
+        let wifiRows = settings.cells.containing(
+            .staticText,
+            identifier: "Wi-Fi"
+        )
+        var remainingDepth = 8
+        while wifiRows.count != 1 {
+            guard remainingDepth > 0 else {
+                throw gateError("Settings root was more than eight pages away")
             }
-            let back = settings.navigationBars.buttons.element(boundBy: 0)
-            if back.exists, back.isHittable {
-                back.tap()
+            let back = settings.navigationBars.buttons.firstMatch
+            guard back.waitForExistence(timeout: 2), back.isHittable else {
+                throw gateError("Settings could not return to its root page")
             }
+            back.tap()
+            remainingDepth -= 1
         }
-        throw gateError("Settings Wi-Fi page was unavailable")
     }
 
     func wifiCellIsSelected(_ cell: XCUIElement) -> Bool {
