@@ -86,14 +86,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             packetDebugLog("added resolved WG excluded route \(resolvedWgExcludedRoute)")
         }
 
-        // tunnelRemoteAddress is what iOS shows in Settings → VPN
-        // and uses to decide "where the tunnel goes". wireguard-apple
-        // points it at the actual WG endpoint host, not TEST-NET. iOS
-        // will refuse to flip the status badge to "connected"+icon if
-        // it deems the remote address bogus.
-        let remoteAddress = parsedConfig.firstWireGuardEndpointHost
-            ?? parsedConfig.firstFipsEndpointHost
-            ?? "1.1.1.1"
+        // iOS requires tunnelRemoteAddress to be an IP. Use the endpoint route
+        // resolved by the running WireGuard transport; Direct/FIPS mode has no
+        // single remote tunnel server, so retain a valid display-only address.
+        let remoteAddress = parseIPv4CIDR(resolvedWgExcludedRoute)?.address ?? "1.1.1.1"
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
         settings.mtu = NSNumber(value: parsedConfig.mtu)
         packetDebugLog("remoteAddress=\(remoteAddress) mtu=\(parsedConfig.mtu)")
@@ -600,8 +596,6 @@ private struct MobileTunnelConfig {
     let dnsServers: [String]
     let magicDnsServer: String
     let dnsMatchDomains: [String]
-    let firstWireGuardEndpointHost: String?
-    let firstFipsEndpointHost: String?
     let mtu: Int
     let errorText: Error?
 
@@ -615,8 +609,6 @@ private struct MobileTunnelConfig {
             dnsServers = []
             magicDnsServer = ""
             dnsMatchDomains = []
-            firstWireGuardEndpointHost = nil
-            firstFipsEndpointHost = nil
             mtu = defaultMobileMtu
             errorText = PacketTunnelError.invalidConfig("Invalid tunnel configuration")
             return
@@ -628,66 +620,8 @@ private struct MobileTunnelConfig {
         dnsServers = object["dnsServers"] as? [String] ?? []
         magicDnsServer = object["magicDnsServer"] as? String ?? ""
         dnsMatchDomains = object["dnsMatchDomains"] as? [String] ?? []
-        if let wg = object["wireguardExit"] as? [String: Any],
-           let endpoint = wg["endpoint"] as? String
-        {
-            firstWireGuardEndpointHost = Self.endpointHost(from: endpoint)
-        } else {
-            firstWireGuardEndpointHost = nil
-        }
-        firstFipsEndpointHost = Self.firstEndpointHost(in: object["peerHints"])
-            ?? Self.firstEndpointHost(in: object["bootstrapPeers"])
         mtu = object["mtu"] as? Int ?? defaultMobileMtu
         errorText = error.isEmpty ? nil : PacketTunnelError.invalidConfig(error)
-    }
-
-    private static func firstEndpointHost(in value: Any?) -> String? {
-        guard let peers = value as? [String: Any] else {
-            return nil
-        }
-        for key in peers.keys.sorted() {
-            guard let hints = peers[key] as? [[String: Any]] else {
-                continue
-            }
-            for hint in hints {
-                if let addr = hint["addr"] as? String,
-                   let host = endpointHost(from: addr) {
-                    return host
-                }
-            }
-        }
-        return nil
-    }
-
-    private static func endpointHost(from value: String) -> String? {
-        var endpoint = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if endpoint.hasPrefix("websocket:") {
-            endpoint = String(endpoint.dropFirst("websocket:".count))
-        } else if endpoint.hasPrefix("tcp:") || endpoint.hasPrefix("udp:") {
-            endpoint = String(endpoint.dropFirst(4))
-        } else if endpoint.hasPrefix("tor:") || endpoint.hasPrefix("webrtc:") {
-            return nil
-        }
-        if endpoint.contains("://"),
-           let components = URLComponents(string: endpoint),
-           let host = components.host?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !host.isEmpty
-        {
-            if host.hasPrefix("["), host.hasSuffix("]") {
-                return String(host.dropFirst().dropLast())
-            }
-            return host
-        }
-        if endpoint.hasPrefix("["),
-           let close = endpoint.firstIndex(of: "]") {
-            let host = endpoint[endpoint.index(after: endpoint.startIndex)..<close]
-            return host.isEmpty ? nil : String(host)
-        }
-        guard let colon = endpoint.lastIndex(of: ":") else {
-            return endpoint.isEmpty ? nil : endpoint
-        }
-        let host = endpoint[..<colon]
-        return host.isEmpty ? nil : String(host)
     }
 }
 

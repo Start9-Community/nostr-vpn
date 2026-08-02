@@ -690,13 +690,13 @@ grep -Fq 'WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
   && grep -Fq 'Endpoint = $WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
   && grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"' "$gate" \
   || { echo "mobile gate does not separate raw host from endpoint authority" >&2; exit 1; }
-grep -Fq 'Self.endpointHost(from: endpoint)' "$ios_packet_tunnel" \
-  || { echo "iOS packet tunnel does not parse bracketed WireGuard endpoints" >&2; exit 1; }
-grep -Fq 'endpoint.hasPrefix("websocket:")' "$ios_packet_tunnel" \
-  && grep -Fq 'URLComponents(string: endpoint)' "$ios_packet_tunnel" \
-  && grep -Fq 'host.hasPrefix("["), host.hasSuffix("]")' "$ios_packet_tunnel" \
-  && grep -Fq 'String(host.dropFirst().dropLast())' "$ios_packet_tunnel" \
-  || { echo "iOS packet tunnel does not lower WebSocket hints to a valid remote host" >&2; exit 1; }
+grep -Fq 'let remoteAddress = parseIPv4CIDR(resolvedWgExcludedRoute)?.address ?? "1.1.1.1"' \
+  "$ios_packet_tunnel" \
+  || { echo "iOS tunnel does not derive its remote-address IP from the resolved WG route" >&2; exit 1; }
+if rg -q 'first(WireGuard|Fips)EndpointHost|endpointHost\(' "$ios_packet_tunnel"; then
+  echo "iOS tunnelRemoteAddress still accepts an unvalidated configured endpoint host" >&2
+  exit 1
+fi
 grep -Fq 'packetFlow.readPackets' "$ios_packet_flow_bridge" \
   && grep -Fq 'packetFlow.writePackets' "$ios_packet_flow_bridge" \
   && grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_start' "$ios_packet_flow_bridge" \
