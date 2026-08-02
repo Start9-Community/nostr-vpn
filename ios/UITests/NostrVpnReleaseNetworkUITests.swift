@@ -81,10 +81,10 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         try configureWireGuard(spec)
         try configureExitDNS(spec)
 
+        shippedUIVPNOffCleanupArmed = true
         if spec.exerciseStartStopStress {
             try driveRapidStartStopStress(spec, directSource: directSource)
         }
-        shippedUIVPNOffCleanupArmed = true
         try turnVPNOn()
         try waitForSourceIP(
             spec.sourceIpUrl,

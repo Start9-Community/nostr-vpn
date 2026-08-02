@@ -247,10 +247,11 @@ if re.search(
 ) is None:
     raise SystemExit("Release XCTest teardown bypasses the shipped VPN-off UI")
 arm = lifecycle.index("shippedUIVPNOffCleanupArmed = true")
+stress = lifecycle.index("try driveRapidStartStopStress(")
 connect = lifecycle.index("try turnVPNOn()")
 normal_disconnect = lifecycle.rindex("try turnVPNOffIfNeeded()")
 disarm = lifecycle.index("shippedUIVPNOffCleanupArmed = false", normal_disconnect)
-if not arm < connect < normal_disconnect < disarm:
+if not arm < stress < connect < normal_disconnect < disarm:
     raise SystemExit("Release XCTest VPN-off teardown has unsafe arm/disarm ordering")
 if "shippedUIVPNOffCleanupArmed = false" in lifecycle[arm:normal_disconnect]:
     raise SystemExit("mid-test failure could disarm the VPN-off teardown")
