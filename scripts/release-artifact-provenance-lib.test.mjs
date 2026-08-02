@@ -250,12 +250,15 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     'scripts/ios_profile_certificate.py',
   ]
   const harnessPaths = [
+    'scripts/e2e-web-startos-manual-join-docker.sh',
     'scripts/ios_xctestrun.py',
+    'scripts/lib-ubuntu-vm-imported-release.sh',
     'scripts/lib-mobile-release-join-artifacts.sh',
     'scripts/linux-release-mobile-join-remote.sh',
     'scripts/release-network-evidence.py',
     'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
     'scripts/validate-mobile-underlay-continuity.py',
+    'scripts/windows-release-mobile-join-remote.ps1',
   ]
   const changedPaths = [...profilePaths, ...harnessPaths]
   try {
@@ -348,6 +351,38 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     for (const platform of ['android', 'linux', 'macos', 'windows']) {
       proveUnchangedPlatformInputs({ ...gateArgs, platform })
     }
+
+    const desktopReceiptCommit = gateArgs.candidateCommit
+    const desktopReceiptTree = gateArgs.candidateTree
+    write(join(root, 'linux/src/main.rs'), 'changed product\n')
+    git('add', '.')
+    git('commit', '-qm', 'Linux product candidate')
+    assert.throws(
+      () => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform: 'linux',
+        receiptCommit: desktopReceiptCommit,
+        receiptTree: desktopReceiptTree,
+        candidateCommit: git('rev-parse', 'HEAD'),
+        candidateTree: git('rev-parse', 'HEAD^{tree}'),
+      }),
+      /changed product\/build input linux\/src\/main\.rs/,
+    )
+
+    write(join(root, 'windows/NostrVpn.Windows/App.xaml.cs'), 'changed product\n')
+    git('add', '.')
+    git('commit', '-qm', 'Windows product candidate')
+    assert.throws(
+      () => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform: 'windows',
+        receiptCommit: desktopReceiptCommit,
+        receiptTree: desktopReceiptTree,
+        candidateCommit: git('rev-parse', 'HEAD'),
+        candidateTree: git('rev-parse', 'HEAD^{tree}'),
+      }),
+      /changed product\/build input windows\/NostrVpn\.Windows\/App\.xaml\.cs/,
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

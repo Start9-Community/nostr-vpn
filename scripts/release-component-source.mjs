@@ -11,11 +11,13 @@ const harnessOnlyPaths = new Set([
   'Dockerfile.mobile-wireguard-exit-e2e',
   'Dockerfile.mobile-wireguard-exit-e2e.dockerignore',
   'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
+  'scripts/e2e-web-startos-manual-join-docker.sh',
   'scripts/capture-mobile-ios-underlay-output.py',
   'scripts/desktop-manual-join-ax.swift',
   'scripts/desktop-mobile-manual-join-atspi.py',
   'scripts/desktop-mobile-manual-join-windows-ui.ps1',
   'scripts/ios_xctestrun.py',
+  'scripts/lib-ubuntu-vm-imported-release.sh',
   'scripts/lib-mobile-android-release-gate.sh',
   'scripts/lib-mobile-android-underlay.sh',
   'scripts/lib-mobile-ios-release-network.sh',
@@ -35,6 +37,7 @@ const harnessOnlyPaths = new Set([
   'scripts/release-network-evidence.py',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
+  'scripts/windows-release-mobile-join-remote.ps1',
   'scripts/windows-vm-release-mobile-join-e2e.sh',
 ])
 const buildScripts = {
