@@ -63,6 +63,30 @@ test('component proof retains only unchanged platform product inputs', () => {
     assert.throws(() => proveUnchangedPlatformInputs({
       ...args, candidateCommit: changed.commit, candidateTree: changed.tree,
     }), /changed product\/build input Cargo.lock/)
+    const macReceipt = commit('macos/Sources/App.swift', 'base')
+    const macHarnessPaths = [
+      'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
+      'scripts/desktop-manual-join-ax.swift',
+      'scripts/macos-release-mobile-join-remote.sh',
+      'scripts/macos-vm-release-mobile-join-e2e.sh',
+      'scripts/macos_release_join_artifact.py',
+    ]
+    for (const path of macHarnessPaths) write(join(root, path), 'harness')
+    git('add', '.')
+    git('commit', '-qm', 'macOS join harness')
+    const macHarness = {
+      commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'),
+    }
+    const macArgs = {
+      candidateRoot: root, platform: 'macos',
+      receiptCommit: macReceipt.commit, receiptTree: macReceipt.tree,
+      candidateCommit: macHarness.commit, candidateTree: macHarness.tree,
+    }
+    assert.match(proveUnchangedPlatformInputs(macArgs).changed_paths_sha256, /^[0-9a-f]{64}$/)
+    const macProduct = commit('macos/Sources/App.swift', 'changed')
+    assert.throws(() => proveUnchangedPlatformInputs({
+      ...macArgs, candidateCommit: macProduct.commit, candidateTree: macProduct.tree,
+    }), /changed product\/build input macos\/Sources\/App.swift/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

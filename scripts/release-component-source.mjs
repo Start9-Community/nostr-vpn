@@ -7,12 +7,17 @@ const sharedFiles = [
   'Cargo.lock', 'Cargo.toml', 'build.rs', 'rust-toolchain',
   'rust-toolchain.toml', 'scripts/sync-versions.mjs',
 ]
-const harnessOnlyScripts = new Set([
+const harnessOnlyPaths = new Set([
+  'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
+  'scripts/desktop-manual-join-ax.swift',
   'scripts/lib-mobile-android-release-gate.sh',
   'scripts/lib-mobile-android-underlay.sh',
   'scripts/lib-mobile-ios-release-network.sh',
   'scripts/linux-release-mobile-join-remote.sh',
   'scripts/mobile-android-smoke.sh',
+  'scripts/macos-release-mobile-join-remote.sh',
+  'scripts/macos-vm-release-mobile-join-e2e.sh',
+  'scripts/macos_release_join_artifact.py',
   'scripts/release-network-evidence.py',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
@@ -43,13 +48,13 @@ function git(root, args, label) {
 }
 
 function isProductInput(path, platform) {
+  if (harnessOnlyPaths.has(path)) return false
   const root = path.split('/')[0]
   if (sharedFiles.includes(path) || sharedRoots.includes(root)) return true
   if (platforms.includes(root)) {
     return root === platform && !/\/(?:UI)?Tests?\//.test(`/${path}/`)
   }
   if (path.startsWith('scripts/')) {
-    if (harnessOnlyScripts.has(path)) return false
     for (const [owner, patterns] of Object.entries(buildScripts)) {
       if (patterns.some((pattern) => pattern.test(path))) return owner === platform
     }

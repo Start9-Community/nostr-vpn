@@ -88,6 +88,7 @@ HOST_MANUAL_DRIVER="$HOST_SUPPORT/drivers/desktop-manual-join-ax"
 HOST_SERVICE_DRIVER="$HOST_SUPPORT/drivers/macos-service-toggle-ax"
 HOST_ARCHIVE="$PRIVATE_DIR/macos-release-gate.zip"
 HOST_RECEIPT="$PRIVATE_DIR/artifact.json"
+HOST_COMPONENT_PROOF="$PRIVATE_DIR/macos-component-proof.json"
 PUBLICATION_DIR="$RESULT_DIR/macos/publication"
 CACHED_APP="$PUBLICATION_DIR/Nostr VPN.app"
 CACHED_RECEIPT="$PUBLICATION_DIR/artifact.json"
@@ -273,26 +274,43 @@ assert_delivery_deadline() {
     >>"$RESULT_DIR/macos/delivery-times.tsv"
 }
 
-read_product_identity() {
+read_cached_identity() {
   local extra
-  IFS=$'\t' read -r PRODUCT_GIT_SHA PRODUCT_GIT_TREE extra < <(
-    python3 - "$1" <<'PY'
+  IFS=$'\t' read -r CACHE_PRODUCT_SHA CACHE_PRODUCT_TREE \
+    CACHE_FIPS_SHA CACHE_FIPS_TREE CACHE_FIPS_VERSION extra <<<"$(
+      python3 -c '
 import json,sys
-value=json.load(open(sys.argv[1], encoding="utf-8"))
-print(value.get("appGitSha", ""), value.get("appGitTree", ""), sep="\t")
-PY
-  )
-  [[ "$PRODUCT_GIT_SHA" =~ ^[0-9a-f]{40}$ \
-    && "$PRODUCT_GIT_TREE" =~ ^[0-9a-f]{40}$ \
+v=json.load(open(sys.argv[1])); keys=("appGitSha","appGitTree","fipsGitSha","fipsGitTree","fipsCoreVersion")
+print(*(v.get(key, "") for key in keys), sep="\t")
+' "$1"
+    )"
+  [[ "$CACHE_PRODUCT_SHA" =~ ^[0-9a-f]{40}$ \
+    && "$CACHE_PRODUCT_TREE" =~ ^[0-9a-f]{40}$ \
+    && "$CACHE_FIPS_SHA" =~ ^[0-9a-f]{40}$ \
+    && "$CACHE_FIPS_TREE" =~ ^[0-9a-f]{40}$ \
+    && -n "$CACHE_FIPS_VERSION" \
     && -z "${extra:-}" ]] || {
-    echo "Cached macOS Release receipt has no exact product identity" >&2
+    echo "Cached macOS Release receipt has no exact component identity" >&2
     return 1
   }
 }
 
+write_component_proof() {
+  node --input-type=module - \
+    "$ROOT" "$1" "$2" "$APP_GIT_SHA" "$APP_GIT_TREE" <<'JS'
+import { pathToFileURL } from 'node:url'
+const [root, receiptCommit, receiptTree, candidateCommit, candidateTree] = process.argv.slice(2)
+const source = await import(pathToFileURL(`${root}/scripts/release-component-source.mjs`))
+console.log(JSON.stringify(source.proveUnchangedPlatformInputs({
+  candidateRoot: root, platform: 'macos', receiptCommit, receiptTree,
+  candidateCommit, candidateTree,
+})))
+JS
+}
+
 prepare_host_artifact() {
   local build_log="$RESULT_DIR/macos/host-build.log"
-  local support
+  local reuse_app=0 support
   rm -rf "$HOST_PACKAGE" "$HOST_SUPPORT"
   rm -f "$HOST_ARCHIVE" "$HOST_RECEIPT"
   : >"$build_log"
@@ -301,7 +319,21 @@ prepare_host_artifact() {
       echo "Cached macOS Release app/receipt pair is incomplete" >&2
       return 1
     }
-    read_product_identity "$CACHED_RECEIPT"
+  fi
+  if [[ -d "$CACHED_APP" ]]; then
+    read_cached_identity "$CACHED_RECEIPT"
+    if [[ "$CACHE_FIPS_SHA" == "$RELEASE_JOIN_FIPS_SHA" \
+      && "$CACHE_FIPS_TREE" == "$RELEASE_JOIN_FIPS_TREE" \
+      && "$CACHE_FIPS_VERSION" == "$RELEASE_JOIN_FIPS_VERSION" ]] \
+      && write_component_proof "$CACHE_PRODUCT_SHA" "$CACHE_PRODUCT_TREE" \
+        >"$HOST_COMPONENT_PROOF" 2>>"$build_log"
+    then
+      PRODUCT_GIT_SHA="$CACHE_PRODUCT_SHA"
+      PRODUCT_GIT_TREE="$CACHE_PRODUCT_TREE"
+      reuse_app=1
+    fi
+  fi
+  if ((reuse_app)); then
     python3 "$ROOT/scripts/macos_release_join_artifact.py" validate-published-app \
       --receipt "$CACHED_RECEIPT" \
       --app "$CACHED_APP" \
@@ -314,7 +346,13 @@ prepare_host_artifact() {
       >"$RESULT_DIR/macos/host-app-reuse.json"
     mkdir -p "$(dirname "$HOST_APP")"
     ditto "$CACHED_APP" "$HOST_APP"
-  elif ! (
+  else
+    PRODUCT_GIT_SHA="$APP_GIT_SHA"
+    PRODUCT_GIT_TREE="$APP_GIT_TREE"
+    write_component_proof "$PRODUCT_GIT_SHA" "$PRODUCT_GIT_TREE" \
+      >"$HOST_COMPONENT_PROOF"
+  fi
+  if ((!reuse_app)) && ! (
     cd "$HOST_BUILD_ROOT"
     MACOS_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" \
       NVPN_BUILD_GIT_SHA="$APP_GIT_SHA" \
@@ -365,6 +403,7 @@ prepare_host_artifact() {
   done
 
   mkdir -p "$HOST_PACKAGE/fixtures" "$HOST_PACKAGE/drivers"
+  cp "$HOST_COMPONENT_PROOF" "$HOST_PACKAGE/component-proof.json"
   ditto "$HOST_APP" "$HOST_PACKAGE/Nostr VPN.app"
   ditto "$HOST_FIXTURE" \
     "$HOST_PACKAGE/fixtures/desktop_manual_join_e2e_fixture"
@@ -385,6 +424,7 @@ prepare_host_artifact() {
       "$HOST_PACKAGE/drivers/desktop-manual-join-ax" \
     --service-toggle-driver \
       "$HOST_PACKAGE/drivers/macos-service-toggle-ax" \
+    --component-proof "$HOST_PACKAGE/component-proof.json" \
     --app-root "$ROOT" \
     --fips-root "$HOST_FIPS_ROOT" \
     --expected-app-head "$PRODUCT_GIT_SHA" \
@@ -469,7 +509,9 @@ esac
 
 case "$ARTIFACT_ACTION" in
   verify-only)
-    read_product_identity "$RESULT_DIR/macos/artifact.json"
+    read_cached_identity "$RESULT_DIR/macos/artifact.json"
+    PRODUCT_GIT_SHA="$CACHE_PRODUCT_SHA"
+    PRODUCT_GIT_TREE="$CACHE_PRODUCT_TREE"
     remote verify-import | tee "$RESULT_DIR/macos/verify-import.log"
     ;;
   full|prepare-only)
@@ -769,6 +811,7 @@ if set(timings) != expected_timings or any(
     raise SystemExit("macOS/mobile join timing receipt is incomplete or slow")
 artifact_path = pathlib.Path(sys.argv[3])
 artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+component_proof = artifact.get("componentInputProof") or {}
 ios_artifact_path = pathlib.Path(sys.argv[4])
 ios_artifact = json.loads(ios_artifact_path.read_text(encoding="utf-8"))
 (
@@ -794,8 +837,8 @@ if (
     raise SystemExit("macOS/iPhone directional relaunch evidence is incomplete")
 if (
     artifact.get("receiptSchema") != 1
-    or artifact.get("harnessGitSha") != app_sha
-    or artifact.get("harnessGitTree") != app_tree
+    or component_proof.get("candidate_app_git_sha") != app_sha
+    or component_proof.get("candidate_app_git_tree") != app_tree
     or not artifact.get("appGitSha")
     or not artifact.get("appGitTree")
     or artifact.get("companySigningVerified") is not True

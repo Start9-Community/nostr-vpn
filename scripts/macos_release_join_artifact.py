@@ -192,6 +192,7 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     fixture = pathlib.Path(args.manual_join_fixture).resolve()
     manual_driver = pathlib.Path(args.manual_join_driver).resolve()
     service_driver = pathlib.Path(args.service_toggle_driver).resolve()
+    component_proof = pathlib.Path(args.component_proof).resolve()
     app_root = pathlib.Path(args.app_root).resolve()
     fips_root = pathlib.Path(args.fips_root).resolve()
     executable = app / "Contents" / "MacOS" / "Nostr VPN"
@@ -203,12 +204,13 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
         fixture,
         manual_driver,
         service_driver,
+        component_proof,
     ):
         if not path.is_file():
             raise ValueError(f"required macOS Release artifact is missing: {path}")
     if not package.is_dir():
         raise ValueError(f"macOS Release package is missing: {package}")
-    for path in (app, fixture, manual_driver, service_driver):
+    for path in (app, fixture, manual_driver, service_driver, component_proof):
         try:
             path.relative_to(package)
         except ValueError as error:
@@ -216,7 +218,6 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
                 f"macOS Release package does not contain {path}"
             ) from error
     app_source = git_snapshot_at(app_root, args.expected_app_head)
-    harness_source = git_snapshot(app_root)
     fips_source = git_snapshot(fips_root)
     expected_identity = normalized_hex(
         args.expected_identity_sha1, 40, "signing identity SHA-1"
@@ -231,8 +232,6 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     expected = {
         "appGitSha": args.expected_app_head,
         "appGitTree": args.expected_app_tree,
-        "harnessGitSha": args.expected_harness_head,
-        "harnessGitTree": args.expected_harness_tree,
         "fipsGitSha": args.expected_fips_head,
         "fipsGitTree": args.expected_fips_tree,
         "fipsCoreVersion": args.expected_fips_version,
@@ -240,12 +239,23 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
     actual = {
         "appGitSha": app_source["head"],
         "appGitTree": app_source["tree"],
-        "harnessGitSha": harness_source["head"],
-        "harnessGitTree": harness_source["tree"],
         "fipsGitSha": fips_source["head"],
         "fipsGitTree": fips_source["tree"],
         "fipsCoreVersion": fips_version(fips_root),
     }
+    proof = load_json(component_proof)
+    expected_proof = {
+        "policy": "unchanged-platform-product-inputs-v1",
+        "platform": "macos",
+        "receipt_app_git_sha": args.expected_app_head,
+        "receipt_app_git_tree": args.expected_app_tree,
+        "candidate_app_git_sha": args.expected_harness_head,
+        "candidate_app_git_tree": args.expected_harness_tree,
+    }
+    if any(proof.get(name) != value for name, value in expected_proof.items()):
+        raise ValueError("macOS component-input proof has the wrong source identity")
+    if not re.fullmatch(r"[0-9a-f]{64}", proof.get("changed_paths_sha256", "")):
+        raise ValueError("macOS component-input proof has no changed-path digest")
     for name, value in expected.items():
         if actual[name] != value:
             raise ValueError(
@@ -290,12 +300,11 @@ def observed_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "manualJoinDriverCodeDirectoryHash": manual_driver_signature["cdhash"],
         "serviceToggleDriverSha256": sha256_file(service_driver),
         "serviceToggleDriverCodeDirectoryHash": service_driver_signature["cdhash"],
+        "componentInputProof": proof,
+        "componentInputProofSha256": sha256_file(component_proof),
         "appGitSha": app_source["head"],
         "appGitTree": app_source["tree"],
-        "harnessGitSha": harness_source["head"],
-        "harnessGitTree": harness_source["tree"],
         "appSourceManifestSha256": app_source["manifest"],
-        "harnessSourceManifestSha256": harness_source["manifest"],
         "fipsGitSha": fips_source["head"],
         "fipsGitTree": fips_source["tree"],
         "fipsSourceManifestSha256": fips_source["manifest"],
@@ -339,10 +348,9 @@ def validate_receipt(args: argparse.Namespace) -> None:
         "manualJoinFixtureSha256": observed["manualJoinFixtureSha256"],
         "manualJoinDriverSha256": observed["manualJoinDriverSha256"],
         "serviceToggleDriverSha256": observed["serviceToggleDriverSha256"],
+        "componentInputProofSha256": observed["componentInputProofSha256"],
         "appGitSha": observed["appGitSha"],
         "appGitTree": observed["appGitTree"],
-        "harnessGitSha": observed["harnessGitSha"],
-        "harnessGitTree": observed["harnessGitTree"],
         "fipsGitSha": observed["fipsGitSha"],
         "fipsGitTree": observed["fipsGitTree"],
         "fipsSourceManifestSha256": observed["fipsSourceManifestSha256"],
@@ -433,6 +441,7 @@ def add_common_arguments(command: argparse.ArgumentParser) -> None:
         "manual_join_fixture",
         "manual_join_driver",
         "service_toggle_driver",
+        "component_proof",
         "app_root",
         "fips_root",
         "expected_app_head",

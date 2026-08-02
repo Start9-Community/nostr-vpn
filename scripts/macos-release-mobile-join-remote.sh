@@ -13,6 +13,7 @@ CLI="$APP_PATH/Contents/Resources/nvpn"
 MANUAL_JOIN_FIXTURE="$PACKAGE/fixtures/desktop_manual_join_e2e_fixture"
 MANUAL_JOIN_DRIVER="$PACKAGE/drivers/desktop-manual-join-ax"
 SERVICE_TOGGLE_DRIVER="$PACKAGE/drivers/macos-service-toggle-ax"
+COMPONENT_PROOF="$PACKAGE/component-proof.json"
 FIPS_PATH="${NVPN_FIPS_REPO_PATH:-$ROOT/../fips}"
 ARCHIVE="$ARTIFACT_DIR/macos-release-gate.zip"
 RECEIPT="$ARTIFACT_DIR/artifact.json"
@@ -230,6 +231,7 @@ verify_import() {
     --manual-join-fixture "$MANUAL_JOIN_FIXTURE" \
     --manual-join-driver "$MANUAL_JOIN_DRIVER" \
     --service-toggle-driver "$SERVICE_TOGGLE_DRIVER" \
+    --component-proof "$COMPONENT_PROOF" \
     --app-root "$ROOT" \
     --fips-root "$FIPS_PATH" \
     --expected-app-head "$EXPECTED_APP" \
@@ -313,6 +315,7 @@ prepare() {
   mkdir -p "$import_dir"
   ditto -x -k "$ARCHIVE" "$import_dir"
   [[ -d "$import_dir/package/Nostr VPN.app" \
+    && -s "$import_dir/package/component-proof.json" \
     && -x "$import_dir/package/fixtures/desktop_manual_join_e2e_fixture" \
     && -x "$import_dir/package/drivers/desktop-manual-join-ax" \
     && -x "$import_dir/package/drivers/macos-service-toggle-ax" \

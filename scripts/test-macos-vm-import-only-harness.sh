@@ -77,6 +77,11 @@ for required in (
     '"$HOST_BUILD_ROOT/scripts/macos-build" macos-gate-support',
     'validate-published-app',
     '--require-gate-bundle-tree',
+    'proveUnchangedPlatformInputs',
+    'component-proof.json',
+    '"$CACHE_FIPS_SHA" == "$RELEASE_JOIN_FIPS_SHA"',
+    '"$CACHE_FIPS_TREE" == "$RELEASE_JOIN_FIPS_TREE"',
+    '"$CACHE_FIPS_VERSION" == "$RELEASE_JOIN_FIPS_VERSION"',
     'PRODUCT_GIT_SHA',
     '--expected-harness-head "$APP_GIT_SHA"',
     "desktop_manual_join_e2e_fixture",
@@ -107,9 +112,8 @@ for required in (
     "manualJoinFixtureCodeDirectoryHash",
     "manualJoinDriverCodeDirectoryHash",
     "serviceToggleDriverCodeDirectoryHash",
-    "harnessGitSha",
-    "harnessGitTree",
-    "harnessSourceManifestSha256",
+    "componentInputProof",
+    "componentInputProofSha256",
     "tree_sha256(package)",
 ):
     if required not in artifact:
@@ -280,6 +284,7 @@ python3 - "$ROOT" <<'PY'
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -345,9 +350,9 @@ signature = {
 }
 module.inspect_signature = lambda path, deep=False: dict(signature)
 module.git_snapshot = lambda path: {
-    "head": ("7" if pathlib.Path(path).name == "app-source" else "4") * 40,
-    "tree": ("8" if pathlib.Path(path).name == "app-source" else "5") * 40,
-    "manifest": ("9" if pathlib.Path(path).name == "app-source" else "6") * 64,
+    "head": "4" * 40,
+    "tree": "5" * 40,
+    "manifest": "6" * 64,
 }
 module.git_snapshot_at = lambda path, head: {
     "head": "4" * 40,
@@ -365,12 +370,22 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
     fixture = package / "fixtures" / "desktop_manual_join_e2e_fixture"
     manual = package / "drivers" / "desktop-manual-join-ax"
     service = package / "drivers" / "macos-service-toggle-ax"
+    component_proof = package / "component-proof.json"
     for path, payload in (
         (executable, b"app"),
         (cli, b"cli"),
         (fixture, b"fixture"),
         (manual, b"manual"),
         (service, b"service"),
+        (component_proof, json.dumps({
+            "policy": "unchanged-platform-product-inputs-v1",
+            "platform": "macos",
+            "receipt_app_git_sha": "4" * 40,
+            "receipt_app_git_tree": "5" * 40,
+            "candidate_app_git_sha": "7" * 40,
+            "candidate_app_git_tree": "8" * 40,
+            "changed_paths_sha256": "a" * 64,
+        }).encode()),
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
@@ -387,6 +402,7 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
         manual_join_fixture=str(fixture),
         manual_join_driver=str(manual),
         service_toggle_driver=str(service),
+        component_proof=str(component_proof),
         app_root=str(work / "app-source"),
         fips_root=str(work / "fips-source"),
         expected_app_head="4" * 40,
@@ -405,8 +421,8 @@ with tempfile.TemporaryDirectory(prefix="nvpn-macos-import-harness.") as tmp:
     module.validate_receipt(args)
     value = module.load_json(receipt)
     assert value["appGitSha"] == "4" * 40
-    assert value["harnessGitSha"] == "7" * 40
-    for path in (executable, cli, fixture, manual, service):
+    assert value["componentInputProof"]["candidate_app_git_sha"] == "7" * 40
+    for path in (executable, cli, fixture, manual, service, component_proof):
         original = path.read_bytes()
         path.write_bytes(original + b"-tampered")
         try:
