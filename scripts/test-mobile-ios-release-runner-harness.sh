@@ -95,6 +95,27 @@ if grep -Fq NVPN_XCUITEST_STARTED=1 "$TEMP_ROOT/device-marker.log.output"; then
   fail "device-marker fixture accidentally streamed the first marker"
 fi
 
+process_fixture='{
+  "result": {
+    "runningProcesses": [
+      {
+        "executable": "file:///private/NostrVpnIosUITests-Runner.app/NostrVpnIosUITests-Runner",
+        "processIdentifier": 4242
+      },
+      {
+        "executable": "file:///private/OtherUITests-Runner.app/OtherUITests-Runner",
+        "processIdentifier": 4343
+      }
+    ]
+  }
+}'
+(
+  xcrun() {
+    printf '%s\n' "$process_fixture"
+  }
+  [[ "$(ios_release_network_xctrunner_process_ids fixture-device)" == 4242 ]]
+) || fail "runner process query was not scoped to the exact XCTest runner"
+
 scoped_cleanup_log="$TEMP_ROOT/scoped-cleanup.log"
 stale_device_marker="$TEMP_ROOT/stale-device-marker.log"
 runner_process_probe_count="$TEMP_ROOT/runner-process-probe-count"
