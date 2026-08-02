@@ -147,6 +147,38 @@ require_tokens "$RELEASE_JOIN_GUEST" "DEB-installed binary verification" \
   '.installedCliSha256 == $cli_hash' \
   '"$(sha256sum "$APP"' \
   '"$(sha256sum "$CLI"'
+require_tokens "$RELEASE_JOIN_GUEST" "exact service lifecycle" \
+  'InstallService' \
+  'requires an empty service slot' \
+  'sudo -n "$CLI" service install --force --config "$CONFIG"' \
+  '.running and .label == "nvpn.service"' \
+  'sha256sum "$SERVICE_BINARY"' \
+  '&& assert_service_ready; then' \
+  'sudo -n "$CLI" service uninstall --config "$CONFIG"' \
+  'sudo -n find "$SERVICE_BINARY" -maxdepth 0 -type f -delete'
+python3 - "$RELEASE_JOIN" <<'PY'
+import pathlib
+import sys
+
+host = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+admin = host[
+    host.index("# Imported Linux desktop admin -> physical Pixel joiner.") :
+    host.index("# Physical Pixel admin -> imported Linux desktop joiner.")
+]
+joiner = host[
+    host.index("# Physical Pixel admin -> imported Linux desktop joiner.") :
+    host.index("release_join_assert_one_android_package")
+]
+checks = (
+    (admin, 'remote CreateAdmin', 'remote InstallService'),
+    (admin, 'remote InstallService', 'release_join_android_manual_submit'),
+    (joiner, 'remote Bootstrap', 'remote InstallService'),
+    (joiner, 'remote InstallService', 'release_join_android_create_admin'),
+)
+if any(text.index(left) >= text.index(right) for text, left, right in checks):
+    raise SystemExit("Linux Release join service lifecycle is out of order")
+PY
 require_tokens "$CONTAINER_PAYLOAD" "one canonical container build payload" \
   'host_linux_cargo_archive_cache.py' \
   'CARGO_NET_OFFLINE=true' \

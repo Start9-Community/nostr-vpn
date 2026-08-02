@@ -12,12 +12,12 @@ PACKAGE_RECEIPT="${6:-}"
 shift $(( $# >= 6 ? 6 : $# ))
 
 usage() {
-  echo "usage: $0 <Reset|Bootstrap|CreateAdmin|AdminAdd|ManualJoin|Verify|ReadMarker|ReadReceipt|Stop|NowMs|Cleanup> <artifact-root> <app> <cli> <receipt> <package-receipt> [arguments]" >&2
+  echo "usage: $0 <Reset|Bootstrap|InstallService|CreateAdmin|AdminAdd|ManualJoin|Verify|ReadMarker|ReadReceipt|Stop|NowMs|Cleanup> <artifact-root> <app> <cli> <receipt> <package-receipt> [arguments]" >&2
   exit 2
 }
 
 case "$MODE" in
-  Reset|Bootstrap|CreateAdmin|AdminAdd|ManualJoin|Verify|ReadMarker|ReadReceipt|Stop|NowMs|Cleanup) ;;
+  Reset|Bootstrap|InstallService|CreateAdmin|AdminAdd|ManualJoin|Verify|ReadMarker|ReadReceipt|Stop|NowMs|Cleanup) ;;
   *) usage ;;
 esac
 [[ "$ARTIFACT_ROOT" == /tmp/nvpn-linux-vm-release.*/* ]] || {
@@ -41,6 +41,8 @@ esac
 MARKER="$ARTIFACT_ROOT/action.json"
 STOP_PATH="$ARTIFACT_ROOT/stop"
 DRIVER="$ROOT/scripts/desktop-mobile-manual-join-atspi.py"
+SERVICE_BINARY=/usr/local/bin/nvpn
+CONFIG="${XDG_DATA_HOME:-$HOME/.local/share}/nostr-vpn/config.toml"
 
 assert_imported_artifacts() {
   local app_hash cli_hash
@@ -101,6 +103,60 @@ assert_imported_artifacts() {
   }
 }
 
+assert_service_ready() {
+  local expected_hash expected_version
+  expected_hash="$(jq -er '.artifacts.cli.sha256' "$RECEIPT")"
+  expected_version="$(jq -er '.appVersion' "$RECEIPT")"
+  for _ in {1..75}; do
+    if "$CLI" service status --json --config "$CONFIG" 2>/dev/null \
+      | jq -e --arg version "$expected_version" '
+      select(.running and .label == "nvpn.service" and .binary_path == "/usr/local/bin/nvpn"
+        and .binary_version == $version and (.pid | type == "number" and . > 1))
+    ' >/dev/null \
+      && [[ "$(sudo -n sha256sum "$SERVICE_BINARY" | awk '{ print $1 }')" == "$expected_hash" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "Linux desktop/mobile join exact daemon did not become ready" >&2
+  return 1
+}
+
+cleanup_candidate_service() {
+  local expected_hash; expected_hash="$(jq -er '.artifacts.cli.sha256' "$RECEIPT")"
+  if ! sudo -n test -f "$SERVICE_BINARY" || sudo -n test -L "$SERVICE_BINARY" \
+    || [[ "$(sudo -n sha256sum "$SERVICE_BINARY" | awk '{ print $1 }')" != "$expected_hash" ]]; then
+    echo "Refusing to remove a service binary outside this candidate" >&2
+    return 1
+  fi
+  sudo -n "$CLI" service uninstall --config "$CONFIG" >/dev/null
+  sudo -n find "$SERVICE_BINARY" -maxdepth 0 -type f -delete
+  if systemctl is-active --quiet nvpn.service \
+    || sudo -n test -e /etc/systemd/system/nvpn.service; then
+    echo "Linux desktop/mobile join service cleanup did not complete" >&2
+    return 1
+  fi
+}
+
+install_candidate_service() {
+  assert_imported_artifacts
+  [[ "$CONFIG" == /* && -f "$CONFIG" && ! -L "$CONFIG" ]] || {
+    echo "Linux canonical profile was not bootstrapped before service installation" >&2; return 1
+  }
+  if [[ -e /etc/systemd/system/nvpn.service || -L /etc/systemd/system/nvpn.service \
+    || -e "$SERVICE_BINARY" || -L "$SERVICE_BINARY" ]] \
+    || systemctl is-active --quiet nvpn.service; then
+    echo "Linux desktop/mobile join requires an empty service slot" >&2; return 1
+  fi
+  if sudo -n "$CLI" service install --force --config "$CONFIG" \
+    && assert_service_ready; then
+    echo "LINUX_RELEASE_MOBILE_JOIN_SERVICE_READY"
+    return 0
+  fi
+  cleanup_candidate_service || true
+  return 1
+}
+
 write_stop_atomically() {
   mkdir -p "$ARTIFACT_ROOT"
   local temporary="$ARTIFACT_ROOT/.stop.$$.tmp"
@@ -158,6 +214,10 @@ case "$MODE" in
     [[ $# == 0 ]] || usage
     run_driver Bootstrap
     ;;
+  InstallService)
+    [[ $# == 0 ]] || usage
+    install_candidate_service
+    ;;
   CreateAdmin)
     [[ $# == 1 ]] || usage
     run_driver CreateAdmin --network-name "$1"
@@ -197,8 +257,9 @@ print(time.time_ns() // 1_000_000)
 PY
     ;;
   Cleanup)
-    [[ $# == 0 ]] || usage
+    (( $# <= 1 )) || usage
     pkill -u "$(id -u)" -x nostr-vpn >/dev/null 2>&1 || true
     rm -f "$STOP_PATH"
+    [[ "${1:-0}" == 0 ]] || cleanup_candidate_service
     ;;
 esac
