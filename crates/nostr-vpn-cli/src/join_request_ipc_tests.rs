@@ -39,10 +39,12 @@ async fn current_reset_permissions_and_cleanup_use_one_socket() {
     }
 
     let socket = daemon_join_request_socket_path(&config).expect("socket path");
+    let socket_metadata = fs::symlink_metadata(&socket).unwrap();
     assert_eq!(
-        fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777,
-        0o600
+        (socket_metadata.uid(), socket_metadata.gid()),
+        server.runtime_dir.owner
     );
+    assert_ne!(socket_metadata.permissions().mode() & 0o200, 0);
     assert_eq!(
         fs::symlink_metadata(socket.parent().unwrap())
             .unwrap()

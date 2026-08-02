@@ -392,29 +392,29 @@ fn set_fd_owner_mode(file: &File, uid: u32, gid: u32, mode: u32) -> Result<()> {
 }
 
 fn protect_socket_entry(dir: &File, name: &CStr, uid: u32, gid: u32) -> Result<()> {
+    let metadata = metadata_at(dir, name)?;
     ensure!(
-        is_socket(&metadata_at(dir, name)?),
+        is_socket(&metadata),
         "join-request IPC entry is not a socket"
     );
-    zero(unsafe { libc::fchownat(dir.as_raw_fd(), name.as_ptr(), uid, gid, 0) })
-        .context("fchownat socket failed")?;
-    zero(unsafe { libc::fchmodat(dir.as_raw_fd(), name.as_ptr(), 0o600, 0) })
-        .context("fchmodat socket failed")?;
+    // The verified 0700 parent gates access; mounted filesystems may reject socket setattr.
+    if metadata.st_uid != uid || metadata.st_gid != gid {
+        zero(unsafe { libc::fchownat(dir.as_raw_fd(), name.as_ptr(), uid, gid, 0) })
+            .context("fchownat socket failed")?;
+    }
     verify_socket_entry(dir, name, uid, gid)
 }
-
 fn verify_socket_entry(dir: &File, name: &CStr, uid: u32, gid: u32) -> Result<()> {
     let metadata = metadata_at(dir, name)?;
     ensure!(
         is_socket(&metadata)
             && metadata.st_uid == uid
             && metadata.st_gid == gid
-            && metadata.st_mode & 0o777 == 0o600,
-        "join-request IPC socket type, owner, or mode changed"
+            && metadata.st_mode & 0o200 != 0,
+        "join-request IPC socket type, owner, or owner access changed"
     );
     Ok(())
 }
-
 fn remove_stale_socket(dir: &File, name: &CStr) -> Result<()> {
     match metadata_at(dir, name) {
         Ok(metadata) if is_socket(&metadata) => {
