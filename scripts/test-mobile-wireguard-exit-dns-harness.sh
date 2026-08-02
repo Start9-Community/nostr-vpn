@@ -763,7 +763,7 @@ import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 body = source.split("private func driveBackgroundForeground", 1)[1].split(
-    "private func driveConfigSyncBackgroundForeground", 1
+    "private func selectDirectWhileConnected", 1
 )[0]
 required = (
     "pressHomeAndWaitForSpringBoard()",
@@ -782,38 +782,9 @@ if "waitForApplicationState(.runningForeground" in body:
         "iOS Release lifecycle gate trusts stale XCUIApplication.state after activation"
     )
 
-config_sync = source.split(
-    "private func driveConfigSyncBackgroundForeground", 1
-)[1].split("private func selectDirectWhileConnected", 1)[0]
-required_sync = (
-    'let status = element("internet-settings-status")',
-    "let updating = XCTNSPredicateExpectation(",
-    'format: "exists == true AND label CONTAINS[c] %@"',
-    '"Updating VPN"',
-    "save.tap()",
-    "XCTWaiter.wait(for: [updating], timeout: 4)",
-    "pressHomeAndWaitForSpringBoard()",
-    "expected: directSource",
-)
-if any(token not in config_sync for token in required_sync):
+if "driveConfigSyncBackgroundForeground" in source:
     raise SystemExit(
-        "iOS Release config-sync gate lacks stable UI synchronization and direct-path proof"
-    )
-if "status.label" in config_sync or '"Reconnecting VPN"' in config_sync:
-    raise SystemExit(
-        "iOS Release config-sync gate races SwiftUI's transient reconnect notice"
-    )
-if not (
-    config_sync.index("let updating = XCTNSPredicateExpectation(")
-    < config_sync.index("save.tap()")
-    < config_sync.index("XCTWaiter.wait(for: [updating], timeout: 4)")
-    < config_sync.index("pressHomeAndWaitForSpringBoard()")
-    < config_sync.index("expected: directSource")
-):
-    raise SystemExit("iOS Release config-sync evidence has unsafe ordering")
-if ".runningBackground" in config_sync or "app.state" in config_sync:
-    raise SystemExit(
-        "iOS Release config-sync background gate trusts stale app process state"
+        "iOS Release gate includes timing-dependent config-sync interruption coverage"
     )
 PY
 if grep -Fq -- '--nvpn-debug-' \

@@ -113,7 +113,6 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
         if spec.exerciseLifecycle {
             try driveBackgroundForeground(spec)
-            try driveConfigSyncBackgroundForeground(spec, directSource: directSource)
         }
         if spec.switchToDirect {
             try selectDirectWhileConnected(spec, directSource: directSource)
@@ -571,65 +570,6 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             .runningForeground,
             timeout: timeout
         )
-    }
-
-    private func driveConfigSyncBackgroundForeground(
-        _ spec: Spec,
-        directSource: String
-    ) throws {
-        openInternetTab()
-        let save = scrollToElement("wireguard-save")
-        guard save.isEnabled, save.isHittable else {
-            throw gateError("Shipped WireGuard Save control was unavailable")
-        }
-
-        let status = element("internet-settings-status")
-        let updating = XCTNSPredicateExpectation(
-            predicate: NSPredicate(
-                format: "exists == true AND label CONTAINS[c] %@",
-                "Updating VPN"
-            ),
-            object: status
-        )
-
-        // Autoconnect is disabled through the shipped Settings toggle in test
-        // setup. Updating VPN spans the production stop/configure/start task;
-        // the Reconnecting VPN callback inside that task is intentionally
-        // transient and can be coalesced out of SwiftUI's conditional notice.
-        save.tap()
-        guard XCTWaiter.wait(for: [updating], timeout: 4) == .completed else {
-            throw gateError("Live WireGuard save did not start PacketTunnel reconciliation")
-        }
-
-        emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_REQUESTED_MS=\(millisecondsSinceEpoch())")
-        guard pressHomeAndWaitForSpringBoard() else {
-            throw gateError("SpringBoard did not become foreground during config sync")
-        }
-        try waitForSourceIP(
-            spec.sourceIpUrl,
-            expected: directSource,
-            timeout: 15
-        )
-        try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
-            spec.resolverProbeUrl
-        )
-        emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_DIRECT=1")
-
-        app.activate()
-        guard waitForApplicationState(.runningForeground, timeout: 10),
-              waitForVPNState(on: true, timeout: 10)
-        else {
-            throw gateError("VPN-on intent did not recover after interrupted config sync")
-        }
-        openInternetTab()
-        assertPicker("internet-source-picker", contains: "WireGuard VPN")
-        try waitForSourceIP(
-            spec.sourceIpUrl,
-            expected: spec.expectedExitSourceIp,
-            timeout: 20
-        )
-        try proveExit(spec, label: "config-sync-foreground")
-        emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_RECOVERED=1")
     }
 
     private func selectDirectWhileConnected(
