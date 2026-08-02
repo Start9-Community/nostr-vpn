@@ -68,6 +68,7 @@ class NostrVpnService : VpnService() {
                         conflicts.joinToString(),
                 )
                 VpnStartState.setUserWantsVpn(this, false)
+                tunnelOwnedInProcess.set(false)
                 tunnelStartGeneration.incrementAndGet()
                 stopTunnel()
                 stopServiceForeground()
@@ -78,6 +79,7 @@ class NostrVpnService : VpnService() {
         return when (intent?.action) {
             ACTION_DISCONNECT -> {
                 VpnStartState.setUserWantsVpn(this, false)
+                tunnelOwnedInProcess.set(false)
                 tunnelStartGeneration.incrementAndGet()
                 stopTunnel()
                 stopServiceForeground()
@@ -93,6 +95,7 @@ class NostrVpnService : VpnService() {
             }
             ACTION_RESTORE -> {
                 if (!VpnStartState.userWantsVpn(this)) {
+                    tunnelOwnedInProcess.set(false)
                     stopSelf()
                     START_NOT_STICKY
                 } else {
@@ -107,6 +110,7 @@ class NostrVpnService : VpnService() {
                 val configJson = persistedTunnelConfigJson()
                 if (!configJson.supportsAlwaysOnVpn()) {
                     VpnStartState.setUserWantsVpn(this, false)
+                    tunnelOwnedInProcess.set(false)
                     tunnelStartGeneration.incrementAndGet()
                     publishAlwaysOnSplitUnsupportedNotification()
                     stopSelf()
@@ -125,6 +129,7 @@ class NostrVpnService : VpnService() {
                         foregroundRequired = true,
                     ).stickyResult()
                 } else {
+                    tunnelOwnedInProcess.set(false)
                     START_NOT_STICKY
                 }
             }
@@ -132,6 +137,7 @@ class NostrVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        tunnelOwnedInProcess.set(false)
         tunnelStartGeneration.incrementAndGet()
         tunnelStartExecutor.shutdownNow()
         stopTunnel()
@@ -141,6 +147,7 @@ class NostrVpnService : VpnService() {
 
     override fun onRevoke() {
         VpnStartState.setUserWantsVpn(this, false)
+        tunnelOwnedInProcess.set(false)
         tunnelStartGeneration.incrementAndGet()
         stopTunnel()
         stopServiceForeground()
@@ -148,12 +155,14 @@ class NostrVpnService : VpnService() {
     }
 
     private fun startTunnelAsync(configJson: String, foregroundRequired: Boolean): Boolean {
+        tunnelOwnedInProcess.set(true)
         val foregroundStarted = if (foregroundRequired) {
             startServiceForeground()
         } else {
             false
         }
         if (foregroundRequired && !foregroundStarted) {
+            tunnelOwnedInProcess.set(false)
             stopSelf()
             return false
         }
@@ -301,6 +310,7 @@ class NostrVpnService : VpnService() {
             Log.w("NostrVpnService", message, error)
         }
         if (!running.get()) {
+            tunnelOwnedInProcess.set(false)
             if (foregroundStarted) {
                 stopServiceForeground()
             } else {
@@ -986,6 +996,9 @@ class NostrVpnService : VpnService() {
         private const val UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS = 250L
         private const val UNDERLAY_NETWORK_RETRY_MILLIS = 250L
         private const val UNDERLAY_NETWORK_MAX_RETRIES = 2
+        private val tunnelOwnedInProcess = AtomicBoolean(false)
+
+        internal fun isTunnelOwnedInProcess(): Boolean = tunnelOwnedInProcess.get()
 
         fun startRestore(context: Context) {
             val intent = Intent(context, NostrVpnService::class.java)

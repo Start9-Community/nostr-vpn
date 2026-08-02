@@ -60,6 +60,21 @@ class MainActivity : ComponentActivity() {
         // (workspace-inherited). Avoids drift between BuildConfig.VERSION_NAME
         // and the bundled nvpn binary's version.
         val core = AppCoreClient(dataDir.absolutePath, "")
+        val initialState = core.state()
+        val tunnelOwnedInProcess = NostrVpnService.isTunnelOwnedInProcess()
+        if (!tunnelOwnedInProcess) {
+            // Service ownership is process-local. A persisted start request and
+            // runtime snapshot can both outlive a killed process and its VPN.
+            VpnStartState.setUserWantsVpn(this, false)
+        }
+        if (
+            TunnelServiceCommandPolicy.commandAfterActivityStart(
+                vpnEnabled = initialState.vpnEnabled,
+                tunnelOwnedInProcess = tunnelOwnedInProcess,
+            ) == TunnelServiceCommand.DISCONNECT
+        ) {
+            core.dispatch(NativeActions.disconnectVpn())
+        }
         selfUpdateManager =
             AndroidSelfUpdateManager(
                 context = this,

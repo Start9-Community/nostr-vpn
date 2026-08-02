@@ -61,6 +61,31 @@ class TunnelRefreshPolicyTest {
     }
 
     @Test
+    fun activityStartDisconnectsStateLeftByAKilledTunnelProcess() {
+        assertEquals(
+            TunnelServiceCommand.DISCONNECT,
+            TunnelServiceCommandPolicy.commandAfterActivityStart(
+                vpnEnabled = true,
+                tunnelOwnedInProcess = false,
+            ),
+        )
+        assertEquals(
+            TunnelServiceCommand.NONE,
+            TunnelServiceCommandPolicy.commandAfterActivityStart(
+                vpnEnabled = true,
+                tunnelOwnedInProcess = true,
+            ),
+        )
+        assertEquals(
+            TunnelServiceCommand.NONE,
+            TunnelServiceCommandPolicy.commandAfterActivityStart(
+                vpnEnabled = false,
+                tunnelOwnedInProcess = false,
+            ),
+        )
+    }
+
+    @Test
     fun rapidToggleReadsAuthoritativeStateInsteadOfAStaleComposeValue() {
         assertEquals("connect_vpn", nextVpnToggleAction(vpnEnabled = false).getString("type"))
         assertEquals("disconnect_vpn", nextVpnToggleAction(vpnEnabled = true).getString("type"))

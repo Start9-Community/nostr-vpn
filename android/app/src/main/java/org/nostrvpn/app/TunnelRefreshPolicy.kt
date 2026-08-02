@@ -135,6 +135,16 @@ internal enum class TunnelServiceCommand {
 }
 
 internal object TunnelServiceCommandPolicy {
+    fun commandAfterActivityStart(
+        vpnEnabled: Boolean,
+        tunnelOwnedInProcess: Boolean,
+    ): TunnelServiceCommand =
+        if (vpnEnabled && !tunnelOwnedInProcess) {
+            TunnelServiceCommand.DISCONNECT
+        } else {
+            TunnelServiceCommand.NONE
+        }
+
     fun commandAfterAction(
         actionType: String,
         wasEnabled: Boolean,
