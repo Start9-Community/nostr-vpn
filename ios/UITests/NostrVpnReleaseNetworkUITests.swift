@@ -525,7 +525,11 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         for cycle in 1...spec.lifecycleCycles {
             let started = Date()
             emit("NVPN_IOS_RELEASE_BACKGROUND_\(cycle)_REQUESTED_MS=\(millisecondsSinceEpoch())")
-            XCUIDevice.shared.press(.home)
+            guard pressHomeAndWaitForSpringBoard() else {
+                throw gateError(
+                    "SpringBoard did not become foreground during lifecycle cycle \(cycle)"
+                )
+            }
             Thread.sleep(forTimeInterval: 16)
             try NostrVpnReleaseNetworkProbe.requireSourceIP(
                 spec.sourceIpUrl,
@@ -557,6 +561,18 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
     }
 
+    private func pressHomeAndWaitForSpringBoard(
+        timeout: TimeInterval = 4
+    ) -> Bool {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCUIDevice.shared.press(.home)
+        return waitForApplicationState(
+            springboard,
+            .runningForeground,
+            timeout: timeout
+        )
+    }
+
     private func driveConfigSyncBackgroundForeground(
         _ spec: Spec,
         directSource: String
@@ -586,18 +602,8 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
 
         emit("NVPN_IOS_RELEASE_CONFIG_BACKGROUND_REQUESTED_MS=\(millisecondsSinceEpoch())")
-        XCUIDevice.shared.press(.home)
-        let backgroundDeadline = Date().addingTimeInterval(4)
-        while Date() < backgroundDeadline,
-              app.state != .runningBackground,
-              app.state != .runningBackgroundSuspended
-        {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        guard app.state == .runningBackground
-                || app.state == .runningBackgroundSuspended
-        else {
-            throw gateError("Release app did not enter the background during config sync")
+        guard pressHomeAndWaitForSpringBoard() else {
+            throw gateError("SpringBoard did not become foreground during config sync")
         }
         try waitForSourceIP(
             spec.sourceIpUrl,
