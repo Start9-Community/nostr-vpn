@@ -64,6 +64,16 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         }
         addTeardownBlock { [weak self] in
             guard let self, self.shippedUIVPNOffCleanupArmed else { return }
+            if self.app.state != .runningForeground {
+                self.app.activate()
+                guard self.waitForApplicationState(.runningForeground, timeout: 10),
+                      self.app.windows.firstMatch.waitForExistence(timeout: 5)
+                else {
+                    throw self.gateError(
+                        "Release app UI was unavailable for VPN-off cleanup"
+                    )
+                }
+            }
             try self.turnVPNOffIfNeeded()
         }
         try turnVPNOffIfNeeded()

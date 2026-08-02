@@ -229,7 +229,6 @@ grep -Fq 'source "$ROOT/scripts/lib-mobile-ios-release-network.sh"' \
 
 python3 - "$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift" <<'PY'
 import pathlib
-import re
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
@@ -239,13 +238,19 @@ lifecycle = source.split("func testReleaseNetworkLifecycle() throws {", 1)[1].sp
 teardown_blocks = lifecycle.split("addTeardownBlock", 2)
 if len(teardown_blocks) != 3:
     raise SystemExit("Release XCTest has no dedicated VPN-off teardown")
-if re.search(
-    r"addTeardownBlock\s*\{\s*\[weak self\]\s*in\s*"
-    r"guard let self, self\.shippedUIVPNOffCleanupArmed else \{ return \}\s*"
-    r"try self\.turnVPNOffIfNeeded\(\)\s*\}",
-    lifecycle,
-) is None:
+if lifecycle.count("try self.turnVPNOffIfNeeded()") != 1:
     raise SystemExit("Release XCTest teardown bypasses the shipped VPN-off UI")
+cleanup_guard = lifecycle.index(
+    "guard let self, self.shippedUIVPNOffCleanupArmed else { return }"
+)
+activate = lifecycle.index("self.app.activate()", cleanup_guard)
+foreground = lifecycle.index(
+    "self.waitForApplicationState(.runningForeground, timeout: 10)",
+    activate,
+)
+cleanup_disconnect = lifecycle.index("try self.turnVPNOffIfNeeded()", foreground)
+if not cleanup_guard < activate < foreground < cleanup_disconnect:
+    raise SystemExit("Release XCTest teardown does not foreground before VPN off")
 arm = lifecycle.index("shippedUIVPNOffCleanupArmed = true")
 stress = lifecycle.index("try driveRapidStartStopStress(")
 connect = lifecycle.index("try turnVPNOn()")
