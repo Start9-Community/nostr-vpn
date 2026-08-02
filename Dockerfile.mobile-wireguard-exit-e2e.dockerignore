@@ -1,0 +1,7 @@
+**
+
+!scripts
+scripts/**
+!scripts/mobile-wireguard-exit-server.sh
+!scripts/mobile-wireguard-http-probe.py
+!scripts/mobile-wireguard-tls-sni-count.py

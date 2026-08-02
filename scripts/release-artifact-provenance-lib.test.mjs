@@ -171,8 +171,16 @@ test('component proof treats the iOS physical gate as harness-only', () => {
   }
   const changedPaths = [
     'android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt',
+    'Dockerfile.mobile-wireguard-exit-e2e',
+    'Dockerfile.mobile-wireguard-exit-e2e.dockerignore',
+    'ios/UITests/NostrVpnReleaseNetworkUITests.swift',
+    'scripts/capture-mobile-ios-underlay-output.py',
     'scripts/lib-mobile-android-release-gate.sh',
     'scripts/lib-mobile-ios-release-network.sh',
+    'scripts/lib-mobile-wireguard-fixture.sh',
+    'scripts/mobile-wireguard-exit-remote-native.sh',
+    'scripts/mobile-wireguard-exit-server.sh',
+    'scripts/mobile-wireguard-tls-sni-count.py',
     'scripts/test-mobile-android-release-cleanup-harness.sh',
     'scripts/test-mobile-underlay-change-harness.sh',
   ]
@@ -207,6 +215,21 @@ test('component proof treats the iOS physical gate as harness-only', () => {
     for (const platform of ['ios', 'linux', 'macos', 'windows']) {
       const proof = proveUnchangedPlatformInputs({ ...args, platform })
       assert.equal(proof.changed_paths_sha256, expectedDelta)
+    }
+
+    write(join(root, '.dockerignore'), 'changed product build context\n')
+    git('add', '.dockerignore')
+    git('commit', '-qm', 'change shared Docker build context')
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.throws(
+        () => proveUnchangedPlatformInputs({
+          ...args,
+          platform,
+          candidateCommit: git('rev-parse', 'HEAD'),
+          candidateTree: git('rev-parse', 'HEAD^{tree}'),
+        }),
+        /changed product\/build input \.dockerignore/,
+      )
     }
   } finally {
     rmSync(root, { recursive: true, force: true })

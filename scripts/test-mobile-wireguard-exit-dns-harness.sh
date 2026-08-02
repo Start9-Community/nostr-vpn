@@ -47,13 +47,14 @@ remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
 android_visible_center="$ROOT/scripts/mobile-release-join-ui-query.py"
 android_wireguard_geometry="$ROOT/scripts/fixtures/android-wireguard-config-partially-visible.xml"
 android_wireguard_sliver="$ROOT/scripts/fixtures/android-wireguard-config-one-pixel-visible.xml"
+docker_context="$ROOT/Dockerfile.mobile-wireguard-exit-e2e.dockerignore"
 
-grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$ROOT/.dockerignore" \
+grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$docker_context" \
   || {
     echo "mobile WireGuard Docker context omits its HTTP probe" >&2
     exit 1
   }
-grep -Fqx '!scripts/mobile-wireguard-tls-sni-count.py' "$ROOT/.dockerignore" \
+grep -Fqx '!scripts/mobile-wireguard-tls-sni-count.py' "$docker_context" \
   || {
     echo "mobile WireGuard Docker context omits its TLS SNI parser" >&2
     exit 1
