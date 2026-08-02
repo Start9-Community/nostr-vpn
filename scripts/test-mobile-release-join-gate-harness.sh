@@ -139,6 +139,7 @@ python3 - \
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
   "$ROOT/scripts/macos-release-mobile-join-remote.sh" \
   "$ROOT/scripts/desktop-manual-join-ax.swift" \
+  "$ROOT/crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs" \
   "$ROOT/scripts/macos_release_join_artifact.py" \
   "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift" \
   "$ROOT/ios/UITests/NostrVpnPhysicalGateSupport.swift" \
@@ -178,6 +179,7 @@ def read(path):
     desktop,
     desktop_remote,
     desktop_ui_driver,
+    desktop_join_fixture,
     desktop_artifact,
     ios_test,
     ios_interaction,
@@ -846,16 +848,13 @@ if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
 if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
 for required in (
-    "service-preflight",
-    "assert-fips-ready",
-    "observe-delivery",
-    "NVPN_MACOS_RELEASE_SERVICE_READY=1",
-    "NVPN_MACOS_RELEASE_FIPS_READY=1",
-    "join-roster-outbox",
-    "deliveryAttempts",
-    "daemon.log",
-    "restore_test_profile",
-    "TEST_STATE_BACKUP",
+    "service-preflight", "assert-fips-ready", "daemon-log-offset", "require-delivery-log",
+    "NVPN_MACOS_RELEASE_SERVICE_READY=1", "NVPN_MACOS_RELEASE_FIPS_READY=1",
+    "macos_release_app_acquire", "swap_test_profile", "restore_config_dir",
+    "delivered and applied one signed join roster over FIPS-TCP to", "daemon.log",
+    "restore_test_profile", "CONFIG_BACKUP", "desktop-add-android-delivery.txt",
+    "desktop-add-android-daemon.log", "desktop-add-iphone-delivery.txt",
+    "desktop-add-iphone-daemon.log",
 ):
     if required not in desktop_remote and required not in desktop:
         raise SystemExit(f"macOS/mobile join lacks real service/delivery evidence: {required}")
@@ -863,34 +862,40 @@ if desktop.index("remote service-preflight") > desktop.index(
     "RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1"
 ):
     raise SystemExit("macOS shipped service preflight runs after phone mutation is armed")
+service_preflight = desktop_remote.split("service_preflight() {", 1)[1].split(
+    "daemon_log_offset() {", 1
+)[0]
+if service_preflight.index("macos_release_app_acquire") > service_preflight.index(
+    "swap_test_profile"
+):
+    raise SystemExit("macOS GUI ownership is acquired after canonical state is swapped")
+if "PROFILE_STATE_NAMES" in desktop_remote:
+    raise SystemExit("macOS profile isolation still enumerates known files")
+launch_app = desktop_remote.split("launch_app() {", 1)[1].split("run_driver() {", 1)[0]
+if "verify_import" in launch_app or "codesign" in launch_app:
+    raise SystemExit("macOS Release app is revalidated for each UI phase")
 remote_stage = desktop_remote.split("stage() {", 1)[1].split("prepare() {", 1)[0]
 if remote_stage.index("restore_test_profile") > remote_stage.index('rm -rf "$ARTIFACT_DIR"'):
     raise SystemExit("macOS test profile is deleted before its prior state is restored")
-for evidence in (
-    "desktop-add-android-delivery.json",
-    "desktop-add-android-daemon.log",
-    "desktop-add-iphone-delivery.json",
-    "desktop-add-iphone-daemon.log",
+for accepted, recipient in (
+    ("release_join_android_relaunch_and_wait_accepted", '"$RELEASE_JOIN_ANDROID_JOINER_ID"'),
+    ("DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1", '"$IOS_JOINER_ID"'),
 ):
-    if evidence not in desktop:
-        raise SystemExit(f"macOS delivery diagnostics omit {evidence}")
-for recipient, alias in (
-    ("$RELEASE_JOIN_ANDROID_JOINER_ID", "ReleaseGatePhone"),
-    ("$IOS_JOINER_ID", "ReleaseGateIphone"),
-):
-    observe = desktop.index("remote observe-delivery")
-    observed_recipient = desktop.index(f'"{recipient}"', observe)
-    approve = desktop.index(f'remote admin-add "{recipient}" {alias}')
-    if observed_recipient > approve:
-        raise SystemExit(f"macOS delivery observer starts after approval for {alias}")
-for required in (
-    "requireSuccessfulCompletion",
-    "Action failed",
-    'dismissedIdentifier: "manual-join-admin-device-id"',
-    'dismissedIdentifier: "manual-join-admin-id"',
-):
+    proof = desktop.index("remote require-delivery-log", desktop.index(accepted))
+    desktop.index(recipient, proof, proof + 200)
+if 'normalize-npub "$1"' not in desktop_remote:
+    raise SystemExit("macOS delivery proof does not normalize the phone npub")
+for required in ("normalize-npub", "normalize_nostr_pubkey(&value)", "phone_npub_normalizes_to_the_stored_hex_identity"):
+    if required not in desktop_join_fixture:
+        raise SystemExit(f"macOS delivery identity normalization lacks {required}")
+for required in ("requireSuccessfulCompletion", "Action failed", "manual-join-admin-device-id", "manual-join-admin-id"):
     if required not in desktop_ui_driver:
         raise SystemExit(f"macOS shipped UI completion is not proven: {required}")
+completion_poll = desktop_ui_driver.split("func requireSuccessfulCompletion", 1)[1].split(
+    "func press", 1
+)[0]
+if completion_poll.count("visibleElements(application)") != 2:
+    raise SystemExit("macOS completion polling does not use one AX snapshot per iteration")
 for required in (
     "exec /usr/bin/env -i",
     "NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1",
@@ -1027,6 +1032,29 @@ if "xcrun xctrace list devices" in release_gate:
 if "devicectl device info details" not in release_gate or "xcrun xcdevice list" not in release_gate:
     raise SystemExit("Release iPhone preflight does not use CoreDevice/xcdevice")
 PY
+
+(
+  profile_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-profile-swap.XXXXXX")"
+  trap 'find "$profile_tmp" -depth -delete' EXIT
+  functions_file="$profile_tmp/functions.sh"
+  sed -n '/^swap_test_profile() {/,/^}$/p; /^restore_config_dir() {/,/^}$/p' \
+    "$ROOT/scripts/macos-release-mobile-join-remote.sh" >"$functions_file"
+  # shellcheck disable=SC1090
+  source "$functions_file"
+  CONFIG_DIR="$profile_tmp/Application Support/nvpn"
+  CONFIG_BACKUP="$profile_tmp/Application Support/.nvpn-release-mobile-join-prior"
+  TEST_PROFILE_MARKER="$profile_tmp/profile-state"
+  mkdir -p "$CONFIG_DIR/unknown/nested"
+  printf 'preserve-me\n' >"$CONFIG_DIR/unknown/nested/sentinel"
+  swap_test_profile
+  printf 'test-only\n' >"$CONFIG_DIR/test-only"
+  restore_config_dir
+  grep -Fxq preserve-me "$CONFIG_DIR/unknown/nested/sentinel"
+  [[ ! -e "$CONFIG_DIR/test-only" && ! -e "$CONFIG_BACKUP" ]]
+) || {
+  echo "macOS canonical profile swap did not preserve unknown nested state" >&2
+  exit 1
+}
 
 (
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"

@@ -33,29 +33,11 @@ MACOS_RELEASE_APP_PROCESS_NAME="Nostr VPN"
 OWNED_PID_FILE="$MACOS_RELEASE_APP_STATE_DIR/imported.pid"
 CONFIG_DIR="$HOME/Library/Application Support/nvpn"
 CONFIG="$CONFIG_DIR/config.toml"
-JOIN_OUTBOX="$CONFIG.join-roster-outbox"
 DAEMON_LOG="$CONFIG_DIR/daemon.log"
-TEST_STATE_DIR="$ARTIFACT_DIR/test-profile"
-TEST_STATE_BACKUP="$TEST_STATE_DIR/prior"
-TEST_STATE_ACTIVE="$TEST_STATE_DIR/active"
-TEST_SERVICE_OWNED="$TEST_STATE_DIR/service-owned"
-PROFILE_STATE_NAMES=(
-  config.toml
-  .config.toml.nostr-secret-key.secret
-  config.toml.join-roster-outbox
-  signed-rosters.json
-  daemon.log
-  daemon.recent-peers.json
-  daemon.state.json
-  daemon.pid
-  daemon.control
-  daemon.control.ready
-  daemon.control.result.json
-  config.pending.toml
-  daemon.cleanup.json
-  control-pubsub-events.json
-  control-pubsub-outbox
-)
+CONFIG_BACKUP="$(dirname "$CONFIG_DIR")/.nvpn-release-mobile-join-prior"
+TEST_PROFILE_MARKER="$ARTIFACT_DIR/test-profile-state"
+TEST_SERVICE_OWNED="$ARTIFACT_DIR/test-service-owned"
+IMPORT_VERIFIED="$ARTIFACT_DIR/import-verified"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -87,42 +69,22 @@ assert_service_ready() {
       "$CLI" service status --json --skip-binary-version \
         --config "$CONFIG" 2>/dev/null || true
     )"
-    if python3 - "$service_json" "$expected_hash" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-try:
-    value = json.loads(sys.argv[1])
-    binary = pathlib.Path(value["binary_path"])
-    observed = hashlib.sha256(binary.read_bytes()).hexdigest()
-except Exception:
-    raise SystemExit(1)
-if not (
-    value.get("installed") is True
-    and value.get("loaded") is True
-    and value.get("running") is True
-    and isinstance(value.get("pid"), int)
-    and value["pid"] > 1
-    and observed == sys.argv[2]
-):
-    raise SystemExit(1)
-PY
+    if python3 -c '
+import hashlib,json,pathlib,sys
+v=json.loads(sys.argv[1]); p=pathlib.Path(v["binary_path"])
+assert v.get("installed") is True and v.get("loaded") is True
+assert v.get("running") is True and int(v.get("pid", 0)) > 1
+assert hashlib.sha256(p.read_bytes()).hexdigest() == sys.argv[2]
+' "$service_json" "$expected_hash" 2>/dev/null
     then
       runtime_json="$(
         "$CLI" status --json --discover-secs 0 --config "$CONFIG" \
           2>/dev/null || true
       )"
-      if python3 - "$runtime_json" <<'PY'
-import json
-import sys
-try:
-    value = json.loads(sys.argv[1])
-except Exception:
-    raise SystemExit(1)
-raise SystemExit(0 if value.get("daemon", {}).get("running") is True else 1)
-PY
+      if python3 -c '
+import json,sys
+assert json.loads(sys.argv[1]).get("daemon", {}).get("running") is True
+' "$runtime_json" 2>/dev/null
       then
         echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_SERVICE_READY=1"
         return 0
@@ -144,18 +106,11 @@ assert_fips_ready() {
       "$CLI" status --json --discover-secs 0 --config "$CONFIG" \
         2>/dev/null || true
     )"
-    if python3 - "$runtime_json" <<'PY'
-import json
-import sys
-try:
-    daemon = json.loads(sys.argv[1]).get("daemon", {})
-    state = daemon.get("state") or {}
-except Exception:
-    raise SystemExit(1)
-raise SystemExit(
-    0 if daemon.get("running") is True and state.get("mesh_ready") is True else 1
-)
-PY
+    if python3 -c '
+import json,sys
+d=json.loads(sys.argv[1]).get("daemon", {})
+assert d.get("running") is True and (d.get("state") or {}).get("mesh_ready") is True
+' "$runtime_json" 2>/dev/null
     then
       echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_FIPS_READY=1"
       return 0
@@ -168,58 +123,65 @@ PY
   return 1
 }
 
+swap_test_profile() {
+  [[ ! -e "$TEST_PROFILE_MARKER" && ! -e "$CONFIG_BACKUP" ]] || {
+    echo "stale macOS Release join profile transaction exists" >&2
+    return 1
+  }
+  mkdir -p "$(dirname "$CONFIG_DIR")"
+  if [[ -e "$CONFIG_DIR" ]]; then
+    [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]] || {
+      echo "refusing non-directory macOS profile state: $CONFIG_DIR" >&2
+      return 1
+    }
+    mv "$CONFIG_DIR" "$CONFIG_BACKUP"
+    printf 'prior\n' >"$TEST_PROFILE_MARKER"
+  else
+    printf 'absent\n' >"$TEST_PROFILE_MARKER"
+  fi
+  mkdir "$CONFIG_DIR"
+}
+
+restore_config_dir() {
+  [[ -f "$TEST_PROFILE_MARKER" ]] || return 0
+  local prior
+  prior="$(<"$TEST_PROFILE_MARKER")"
+  [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]] || return 1
+  rm -rf "$CONFIG_DIR"
+  case "$prior" in
+    prior) mv "$CONFIG_BACKUP" "$CONFIG_DIR" ;;
+    absent) [[ ! -e "$CONFIG_BACKUP" ]] ;;
+    *) return 1 ;;
+  esac
+  rm -f "$TEST_PROFILE_MARKER"
+}
+
 restore_test_profile() {
-  [[ -e "$TEST_STATE_ACTIVE" || -e "$TEST_SERVICE_OWNED" ]] || return 0
+  [[ -e "$TEST_PROFILE_MARKER" || -e "$TEST_SERVICE_OWNED" ]] || return 0
   stop_app
   if [[ -e "$TEST_SERVICE_OWNED" ]]; then
     sudo -n "$CLI" service uninstall --config "$CONFIG" >/dev/null
+    rm -f "$TEST_SERVICE_OWNED"
   fi
-  local name path
-  for name in "${PROFILE_STATE_NAMES[@]}"; do
-    path="$CONFIG_DIR/$name"
-    rm -rf "$path"
-    if [[ -e "$TEST_STATE_BACKUP/$name" ]]; then
-      mkdir -p "$(dirname "$path")"
-      mv "$TEST_STATE_BACKUP/$name" "$path"
-    fi
-  done
-  rm -rf "$TEST_STATE_DIR"
+  restore_config_dir
 }
 
 service_preflight() {
-  verify_import
-  [[ ! -e "$TEST_STATE_ACTIVE" ]] || {
-    echo "macOS Release join test profile is already active" >&2
+  [[ -f "$IMPORT_VERIFIED" && -x "$CLI" ]] || {
+    echo "macOS Release join import was not verified" >&2
     return 1
   }
-  local status name path
+  macos_release_app_acquire
+  local status
   status="$(
     "$CLI" service status --json --skip-binary-version --config "$CONFIG" \
       2>/dev/null || true
   )"
-  python3 - "$status" <<'PY'
-import json
-import sys
-try:
-    value = json.loads(sys.argv[1])
-except Exception:
-    raise SystemExit("could not verify the empty macOS service slot")
-if value.get("installed") or value.get("running"):
-    raise SystemExit("macOS Release join requires an empty service slot")
-PY
-  mkdir -p "$TEST_STATE_BACKUP" "$CONFIG_DIR"
-  for name in "${PROFILE_STATE_NAMES[@]}"; do
-    path="$CONFIG_DIR/$name"
-    [[ ! -L "$path" ]] || {
-      echo "refusing symlinked macOS profile state: $path" >&2
-      return 1
-    }
-  done
-  : >"$TEST_STATE_ACTIVE"
-  for name in "${PROFILE_STATE_NAMES[@]}"; do
-    path="$CONFIG_DIR/$name"
-    [[ ! -e "$path" ]] || mv "$path" "$TEST_STATE_BACKUP/$name"
-  done
+  python3 -c '
+import json,sys
+v=json.loads(sys.argv[1]); assert not v.get("installed") and not v.get("running")
+' "$status" 2>/dev/null || { echo "macOS Release join requires an empty service slot" >&2; return 1; }
+  swap_test_profile
   "$CLI" init --config "$CONFIG" --force >/dev/null
   : >"$TEST_SERVICE_OWNED"
   if ! sudo -n "$CLI" service install --force --config "$CONFIG" >/dev/null; then
@@ -229,76 +191,28 @@ PY
   assert_service_ready
 }
 
-observe_delivery() {
-  local recipient="$1" duration="$2"
-  [[ "$duration" =~ ^[1-9][0-9]*$ && "$duration" -le 40 ]] || {
-    echo "delivery observer duration must be 1..40 seconds" >&2
-    return 2
-  }
-  assert_fips_ready >/dev/null
-  python3 - "$JOIN_OUTBOX" "$DAEMON_LOG" "$recipient" "$duration" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-import time
-
-outbox = pathlib.Path(sys.argv[1])
-daemon_log = pathlib.Path(sys.argv[2])
-recipient = sys.argv[3]
-duration = int(sys.argv[4])
-baseline = {path.name for path in outbox.glob("*.json")} if outbox.is_dir() else set()
-log_offset = daemon_log.stat().st_size if daemon_log.is_file() else 0
-seen = {}
-deadline = time.monotonic() + duration
-gone_samples = 0
-while time.monotonic() < deadline:
-    matching_now = set()
-    for path in outbox.glob("*.json") if outbox.is_dir() else ():
-        if path.name in baseline:
-            continue
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if value.get("recipient_npub") != recipient:
-            continue
-        key = hashlib.sha256(path.name.encode()).hexdigest()
-        matching_now.add(key)
-        entry = seen.setdefault(
-            key,
-            {"maxAttempts": 0, "lastAttemptAt": 0, "consumed": False},
-        )
-        entry["maxAttempts"] = max(entry["maxAttempts"], int(value.get("attempts", 0)))
-        entry["lastAttemptAt"] = max(entry["lastAttemptAt"], int(value.get("last_attempt_at", 0)))
-    if seen and not matching_now:
-        gone_samples += 1
-        if gone_samples >= 5:
-            break
-    else:
-        gone_samples = 0
-    time.sleep(0.01)
-for key, entry in seen.items():
-    entry["consumed"] = not any(
-        hashlib.sha256(path.name.encode()).hexdigest() == key
-        for path in (outbox.glob("*.json") if outbox.is_dir() else ())
-    )
-result = {
-    "schema": 1,
-    "recipientSha256": hashlib.sha256(recipient.encode()).hexdigest(),
-    "baselineItemCount": len(baseline),
-    "observedNewItems": len(seen),
-    "deliveryAttempts": sorted(entry["maxAttempts"] for entry in seen.values()),
-    "items": sorted(seen.values(), key=lambda entry: entry["lastAttemptAt"]),
+daemon_log_offset() {
+  [[ -f "$DAEMON_LOG" ]] && stat -f %z "$DAEMON_LOG" || printf '0\n'
 }
-print(json.dumps(result, sort_keys=True))
-if daemon_log.is_file():
-    with daemon_log.open("rb") as handle:
-        handle.seek(log_offset)
-        sys.stderr.buffer.write(handle.read())
-if not seen:
-    raise SystemExit("no new recipient-bound join outbox item was observed")
-PY
+
+require_delivery_log() {
+  local recipient_hex offset="$2" expected delta deadline=$((SECONDS + 3))
+  recipient_hex="$("$MANUAL_JOIN_FIXTURE" normalize-npub "$1")"
+  [[ "$recipient_hex" =~ ^[0-9a-f]{64}$ && "$offset" =~ ^[0-9]+$ ]] || return 2
+  expected="delivered and applied one signed join roster over FIPS-TCP to $recipient_hex"
+  delta="$ARTIFACT_DIR/delivery-daemon-delta.log"
+  while ((SECONDS < deadline)); do
+    tail -c "+$((offset + 1))" "$DAEMON_LOG" >"$delta" 2>/dev/null || true
+    if grep -Fxq "$expected" "$delta"; then
+      cat "$delta" >&2
+      printf '%s\n' "$expected"
+      return 0
+    fi
+    sleep 0.1
+  done
+  cat "$delta" >&2 2>/dev/null || true
+  echo "macOS daemon did not confirm recipient-specific durable delivery" >&2
+  return 1
 }
 
 verify_import() {
@@ -329,7 +243,10 @@ verify_import() {
 }
 
 launch_app() {
-  verify_import
+  [[ -f "$IMPORT_VERIFIED" ]] || {
+    echo "macOS Release join import was not verified" >&2
+    return 1
+  }
   macos_release_app_acquire
   [[ ! -f "$OWNED_PID_FILE" ]] || {
     echo "a previous imported app launch is still owned" >&2
@@ -402,6 +319,7 @@ prepare() {
   mv "$import_dir/package" "$PACKAGE"
   rmdir "$import_dir"
   verify_import
+  : >"$IMPORT_VERIFIED"
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_ARTIFACT_READY=1"
 }
 
@@ -414,6 +332,7 @@ case "${1:-}" in
     ;;
   verify-import)
     verify_import
+    : >"$IMPORT_VERIFIED"
     echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_ARTIFACT_VERIFIED=1"
     ;;
   create-admin)
@@ -447,16 +366,20 @@ case "${1:-}" in
     [[ $# == 1 ]] || { echo "usage: $0 assert-fips-ready" >&2; exit 2; }
     assert_fips_ready
     ;;
-  observe-delivery)
-    [[ $# == 3 ]] || { echo "usage: $0 observe-delivery <recipient-npub> <seconds>" >&2; exit 2; }
-    observe_delivery "$2" "$3"
+  daemon-log-offset)
+    [[ $# == 1 ]] || { echo "usage: $0 daemon-log-offset" >&2; exit 2; }
+    daemon_log_offset
+    ;;
+  require-delivery-log)
+    [[ $# == 3 ]] || { echo "usage: $0 require-delivery-log <recipient-npub> <offset>" >&2; exit 2; }
+    require_delivery_log "$2" "$3"
     ;;
   cleanup)
     restore_test_profile
     macos_release_app_restore
     ;;
   *)
-    echo "usage: $0 <stage|prepare|verify-import|service-preflight|assert-fips-ready|observe-delivery|create-admin|joiner-id|manual-join|admin-add|verify|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|verify-import|service-preflight|assert-fips-ready|daemon-log-offset|require-delivery-log|create-admin|joiner-id|manual-join|admin-add|verify|cleanup>" >&2
     exit 2
     ;;
 esac

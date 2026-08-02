@@ -779,6 +779,17 @@ fn write_result(path: &Path, value: &Value) -> Result<()> {
 }
 
 fn run() -> Result<()> {
+    let mut arguments = env::args().skip(1);
+    if arguments.next().as_deref() == Some("normalize-npub") {
+        let value = arguments
+            .next()
+            .context("normalize-npub requires one identity")?;
+        if arguments.next().is_some() {
+            bail!("normalize-npub accepts exactly one identity");
+        }
+        println!("{}", normalize_nostr_pubkey(&value)?);
+        return Ok(());
+    }
     let paths = parse_paths()?;
     match paths.command.as_str() {
         "prepare" => prepare(&paths),
@@ -811,5 +822,21 @@ fn main() -> ExitCode {
             eprintln!("desktop manual-join e2e fixture failed: {error:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phone_npub_normalizes_to_the_stored_hex_identity() {
+        let config = AppConfig::generated_without_networks();
+        let stored = config.own_nostr_pubkey_hex().expect("stored identity");
+        let public = npub(&config).expect("public identity");
+        assert_eq!(
+            normalize_nostr_pubkey(&public).expect("normalize npub"),
+            stored
+        );
     }
 }
