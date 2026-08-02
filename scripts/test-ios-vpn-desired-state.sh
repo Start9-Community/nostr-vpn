@@ -20,12 +20,15 @@ let store = VpnDesiredStateStore(defaults: defaults)
 
 require(!store.restore(runtimeEnabled: false), "fresh stopped state restored on")
 require(defaults.object(forKey: VpnDesiredStateStore.key) == nil, "fresh off became intent")
+require(store.permitsAutomaticStart(), "fresh install blocked configured autoconnect")
 require(store.restore(runtimeEnabled: true), "running upgrade did not migrate intent")
 require(store.restore(runtimeEnabled: false), "transient missing sidecar erased on intent")
-store.recordConfirmedExplicitStop()
+store.recordRequest(false)
 require(!store.restore(runtimeEnabled: true), "confirmed explicit stop was ignored")
-store.recordStartRequest()
+require(!store.permitsAutomaticStart(), "explicit stop allowed autoconnect resurrection")
+store.recordRequest(true)
 require(store.restore(runtimeEnabled: false), "start request did not survive missing sidecar")
+require(store.permitsAutomaticStart(), "explicit start blocked autoconnect restoration")
 
 print("iOS VPN desired-state tests passed")
 SWIFT
@@ -72,21 +75,48 @@ request = app.split("func setVpnEnabled(", 1)[1].split(
 start_transition = lifecycle.split("private func performVpnStart(", 1)[1].split(
     "private func performVpnStop", 1
 )[0]
-record = request.index("recordStartRequest()")
-if not request.index("guard core != nil") < record < request.index(
+record = request.index("recordRequest(enabled)")
+if not record < request.index("guard !enabled || core != nil") < request.index(
     "pendingVpnTransitionEnabled = enabled"
 ) < request.index("enqueuePacketTunnelOperation"):
-    raise SystemExit("VPN-on intent is not durable before the asynchronous transition")
-if "recordStartRequest()" in sync or "recordStartRequest()" in start_transition:
-    raise SystemExit("VPN-on intent is duplicated after asynchronous work starts")
+    raise SystemExit("explicit VPN intent is not durable before fallible asynchronous work")
+if "recordRequest(" in sync or "recordRequest(" in start_transition:
+    raise SystemExit("VPN intent is duplicated after asynchronous work starts")
 stop = lifecycle.split("private func performVpnStop(", 1)[1].split(
     "private func packetTunnelTransitionIsCurrent", 1
 )[0]
-confirmed = stop.index("stopAndWaitForDisconnected()")
-clear = stop.index("recordConfirmedExplicitStop()")
-native_off = stop.index("NativeActions.disconnectVpn()")
-if not confirmed < clear < native_off:
-    raise SystemExit("VPN-on intent is cleared before an explicit stop is confirmed")
+if "recordRequest(" in stop or "recordConfirmedExplicitStop" in stop:
+    raise SystemExit("explicit VPN-off intent is delayed until asynchronous teardown")
+for name, body in (
+    ("config scheduling", app.split("func schedulePacketTunnelConfigSync", 1)[1].split(
+        "func syncPacketTunnelConfig", 1
+    )[0]),
+    ("config synchronization", sync),
+    ("tunnel start", start_transition),
+):
+    if "vpnStartIsDesired()" not in body:
+        raise SystemExit(f"{name} can resurrect a persisted explicit VPN-off request")
+autoconnect = app.split("func ensureAutoconnectPacketTunnel", 1)[1].split(
+    "static func packetTunnelNeedsStart", 1
+)[0]
+if "vpnDesiredState.permitsAutomaticStart()" not in autoconnect:
+    raise SystemExit("autoconnect ignores persisted explicit VPN-off intent")
+controller_start = source.split("func start(", 1)[1].split(
+    "static func routeState", 1
+)[0]
+save = controller_start.index("try await save(")
+stop_active = controller_start.index("stopAndWaitForDisconnected(manager)")
+if save > stop_active:
+    raise SystemExit("route update still stops the live tunnel before preferences are durable")
+if "Task {" not in controller_start or ".value" not in controller_start:
+    raise SystemExit("route update transaction is not shielded from caller cancellation")
+startup_routes = lifecycle.split("private func reconcileStartupTunnelRoutes", 1)[1].split(
+    "private func requireStartupTunnelReconciliation", 1
+)[0]
+if not startup_routes.index("packetTunnelNeedsStart") < startup_routes.index(
+    "installedRouteState"
+) < startup_routes.index("vpnController.start"):
+    raise SystemExit("startup does not restart persisted VPN-on intent after NE disconnect")
 if "observedStartingStatus" not in source or "connectionFailed(status)" not in source:
     raise SystemExit("PacketTunnel readiness ignores a terminal failed start")
 if "continuation.onTermination" not in source or "group.cancelAll()" not in source:

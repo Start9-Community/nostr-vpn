@@ -307,8 +307,10 @@ start_method = controller.split("func start(", 1)[1].split("static func routeSta
 disconnect_index = start_method.index("try await stopAndWaitForDisconnected(manager)")
 phase_index = start_method.index("await onActiveTunnelDisconnected?()")
 save_index = start_method.index("try await save(manager,")
-if not disconnect_index < phase_index < save_index:
-    raise SystemExit("PacketTunnel replacement phase is not bounded by disconnect and save")
+if not save_index < disconnect_index < phase_index:
+    raise SystemExit("PacketTunnel replacement can stop before its new preferences are durable")
+if "Task {" not in start_method or "try await update.value" not in start_method:
+    raise SystemExit("PacketTunnel preference replacement is cancellable mid-transaction")
 if "let (manager, managerIsNew) = try await loadOrCreateManager()" not in start_method:
     raise SystemExit("PacketTunnel start does not identify the first interactive manager save")
 if "try await save(manager, waitsForUserApproval: managerIsNew)" not in start_method:

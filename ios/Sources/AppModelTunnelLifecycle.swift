@@ -164,6 +164,10 @@ extension AppModel {
     }
 
     private func performVpnStart(force: Bool, generation: UInt64) async throws {
+        guard vpnStartIsDesired() else {
+            debugLog("connect skipped: VPN off is desired")
+            return
+        }
         guard let core else {
             statusMessage = "Native core unavailable"
             return
@@ -209,7 +213,6 @@ extension AppModel {
         statusMessage = "Turning VPN off"
         let status = try await vpnController.stopAndWaitForDisconnected()
         try requirePacketTunnelTransition(generation)
-        vpnDesiredState.recordConfirmedExplicitStop()
         actionInFlight = false
         if state.vpnEnabled {
             dispatch(NativeActions.disconnectVpn(), status: "Turning VPN off")

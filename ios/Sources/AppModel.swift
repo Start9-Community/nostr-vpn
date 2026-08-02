@@ -401,7 +401,10 @@ final class AppModel: ObservableObject {
 
     func ensureAutoconnectPacketTunnel(reason: String) {
         let canReceiveDeviceApproval = !state.joinRequestQrCodeOrLink.isEmpty
-        guard state.autoconnect, activeNetwork != nil || canReceiveDeviceApproval else {
+        guard vpnDesiredState.permitsAutomaticStart(),
+              state.autoconnect,
+              activeNetwork != nil || canReceiveDeviceApproval
+        else {
             return
         }
         guard UserDefaults.standard.bool(forKey: Self.vpnDisclosureAcceptedKey) else {
@@ -458,15 +461,17 @@ final class AppModel: ObservableObject {
             requireVpnDisclosureReview()
             return
         }
-        guard core != nil else {
+        vpnDesiredState.recordRequest(enabled)
+        guard !enabled || core != nil else {
             statusMessage = "Native core unavailable"
             return
         }
-        if enabled {
-            vpnDesiredState.recordStartRequest()
-        }
         pendingVpnTransitionEnabled = enabled
         enqueuePacketTunnelOperation(.setEnabled(enabled, force: force))
+    }
+
+    func vpnStartIsDesired() -> Bool {
+        vpnDesiredState.restore(runtimeEnabled: state.vpnEnabled)
     }
 
     func schedulePacketTunnelConfigSync(reason: String, force: Bool = false) {
@@ -477,7 +482,9 @@ final class AppModel: ObservableObject {
             debugLog("PacketTunnel config sync skipped reason=\(reason) disclosure pending")
             return
         }
-        guard force || state.vpnEnabled || state.vpnActive else {
+        guard vpnStartIsDesired(),
+              force || state.vpnEnabled || state.vpnActive
+        else {
             debugLog("PacketTunnel config sync skipped reason=\(reason) vpn off")
             return
         }
@@ -492,7 +499,10 @@ final class AppModel: ObservableObject {
             } catch {
                 return
             }
-            guard let self, pendingVpnTransitionEnabled == nil else {
+            guard let self,
+                  pendingVpnTransitionEnabled == nil,
+                  vpnStartIsDesired()
+            else {
                 return
             }
             enqueuePacketTunnelOperation(
@@ -511,7 +521,9 @@ final class AppModel: ObservableObject {
             statusMessage = "Native core unavailable"
             return
         }
-        guard force || state.vpnEnabled || state.vpnActive else {
+        guard vpnStartIsDesired(),
+              force || state.vpnEnabled || state.vpnActive
+        else {
             debugLog("PacketTunnel config sync aborted reason=\(reason) vpn off")
             return
         }

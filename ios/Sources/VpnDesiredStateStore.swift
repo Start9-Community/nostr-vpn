@@ -19,11 +19,12 @@ struct VpnDesiredStateStore {
         return runtimeEnabled
     }
 
-    func recordStartRequest() {
-        defaults.set(true, forKey: Self.key)
+    func recordRequest(_ enabled: Bool) {
+        defaults.set(enabled, forKey: Self.key)
     }
 
-    func recordConfirmedExplicitStop() {
-        defaults.set(false, forKey: Self.key)
+    func permitsAutomaticStart() -> Bool {
+        defaults.object(forKey: Self.key) == nil
+            || defaults.bool(forKey: Self.key)
     }
 }

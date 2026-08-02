@@ -72,22 +72,30 @@ final class PacketTunnelController {
         onActiveTunnelDisconnected: (@MainActor () -> Void)? = nil
     ) async throws {
         try Task.checkCancellation()
+        let update = Task { [self] in
+            try await updateAndStart(
+                state: state,
+                network: network,
+                tunnelConfigJson: tunnelConfigJson,
+                providerOptionsConfigJson: providerOptionsConfigJson,
+                onActiveTunnelDisconnected: onActiveTunnelDisconnected
+            )
+        }
+        try await update.value
+    }
+
+    private func updateAndStart(
+        state: AppState,
+        network: NetworkState?,
+        tunnelConfigJson: String,
+        providerOptionsConfigJson: String,
+        onActiveTunnelDisconnected: (@MainActor () -> Void)?
+    ) async throws {
         debugLog("PacketTunnelController.start begin")
         let (manager, managerIsNew) = try await loadOrCreateManager()
-        try Task.checkCancellation()
         activeManager = manager
-        if manager.connection.status != .invalid,
-           manager.connection.status != .disconnected
-        {
-            debugLog(
-                "stopping active tunnel before preferences update status=\(manager.connection.status.rawValue)"
-            )
-            let status = try await stopAndWaitForDisconnected(manager)
-            debugLog("start confirmed active tunnel stopped status=\(status)")
-            try Task.checkCancellation()
-            await onActiveTunnelDisconnected?()
-            try Task.checkCancellation()
-        }
+        let hadActiveTunnel = manager.connection.status != .invalid
+            && manager.connection.status != .disconnected
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
         proto.serverAddress = network?.displayName ?? "Nostr VPN"
@@ -112,23 +120,30 @@ final class PacketTunnelController {
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Nostr VPN"
         manager.isEnabled = true
-        try Task.checkCancellation()
         debugLog("saving preferences")
         try await save(manager, waitsForUserApproval: managerIsNew)
-        try Task.checkCancellation()
         debugLog("reloading preferences")
         try await reload(manager)
-        try Task.checkCancellation()
+        if hadActiveTunnel {
+            if manager.connection.status != .invalid,
+               manager.connection.status != .disconnected
+            {
+                debugLog(
+                    "stopping active tunnel after preferences update status=\(manager.connection.status.rawValue)"
+                )
+                let status = try await stopAndWaitForDisconnected(manager)
+                debugLog("start confirmed active tunnel stopped status=\(status)")
+            }
+            await onActiveTunnelDisconnected?()
+        }
         debugLog("calling startVPNTunnel status=\(manager.connection.status.rawValue)")
         // Keep providerConfiguration redacted in VPN preferences; the full
         // config is delivered only to this start attempt.
         let options: [String: NSObject] = [
             "mobileTunnelConfigJson": providerOptionsConfigJson as NSString,
         ]
-        try Task.checkCancellation()
         try manager.connection.startVPNTunnel(options: options)
         let connectedStatus = try await waitForConnected(manager)
-        try Task.checkCancellation()
         debugLog("confirmed connected status=\(connectedStatus)")
     }
 
