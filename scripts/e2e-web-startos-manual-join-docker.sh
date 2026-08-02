@@ -17,6 +17,8 @@ RUNTIME_TIMEOUT_SECS="${NVPN_WEB_STARTOS_JOIN_RUNTIME_TIMEOUT_SECS:-15}"
 NETWORK_OCTET="${NVPN_WEB_STARTOS_JOIN_NETWORK_OCTET:-$((100 + ($$ % 100)))}"
 CURRENT_NODE_A_DATA=""
 CURRENT_NODE_B_DATA=""
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 
 export NVPN_WEB_STARTOS_JOIN_IMAGE="$IMAGE"
 export NVPN_WEB_STARTOS_JOIN_SUBNET="${NVPN_WEB_STARTOS_JOIN_SUBNET:-10.254.${NETWORK_OCTET}.0/24}"
@@ -45,8 +47,23 @@ cleanup() {
     dump_debug
   fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    docker run --rm \
+      -v "$TMP_ROOT:/cleanup" \
+      --entrypoint sh \
+      "$IMAGE" \
+      -c "chown -R $HOST_UID:$HOST_GID /cleanup" >/dev/null 2>&1 || true
+  fi
   rm -rf "$TMP_ROOT"
   exit "$status"
+}
+
+return_runtime_data_to_host() {
+  local service
+  for service in node-a-daemon node-b-daemon; do
+    "${COMPOSE[@]}" exec -T "$service" \
+      chown -R "$HOST_UID:$HOST_GID" /data/config/nvpn
+  done
 }
 trap cleanup EXIT
 
@@ -200,6 +217,8 @@ run_direction() {
     env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright test \
       "$PLAYWRIGHT_SPEC"
 
+  return_runtime_data_to_host
+
   if [[ "$PLAYWRIGHT_SPEC" == "e2e/lan-join-runtime.spec.ts" ]]; then
     ! grep -R -E -q 'pending_nostr_join_request|pending-join-request' \
       "$joiner_data" 2>/dev/null || {
@@ -218,6 +237,7 @@ run_direction() {
     /usr/local/bin/nvpn reload --config /data/config/nvpn/config.toml
   "${COMPOSE[@]}" exec -T "$admin_daemon" \
     /usr/local/bin/nvpn reload --config /data/config/nvpn/config.toml
+  return_runtime_data_to_host
   "$fixture" verify-runtime \
     --admin-data-dir "$admin_data" \
     --joiner-data-dir "$joiner_data" \
@@ -240,6 +260,7 @@ run_direction() {
     }
 
   local direction_dir="$ARTIFACT_DIR/$direction"
+  return_runtime_data_to_host
   capture_runtime_artifacts "$direction_dir" "$result"
   python3 - "$direction_dir/timings.json" "$direction" "$elapsed_ms" \
     "$((RUNTIME_TIMEOUT_SECS * 1000))" <<'PY'
@@ -259,6 +280,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 
+  return_runtime_data_to_host
   "${COMPOSE[@]}" down -v --remove-orphans
   ! find "$CURRENT_NODE_A_DATA" "$CURRENT_NODE_B_DATA" -type s \
     -name 'join-*.sock' -print -quit | grep -q . || {
