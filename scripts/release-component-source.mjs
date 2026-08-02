@@ -11,11 +11,20 @@ const harnessOnlyScripts = new Set([
   'scripts/lib-mobile-android-release-gate.sh',
   'scripts/lib-mobile-android-underlay.sh',
   'scripts/lib-mobile-ios-release-network.sh',
+  'scripts/linux-release-mobile-join-remote.sh',
   'scripts/mobile-android-smoke.sh',
+  'scripts/release-network-evidence.py',
+  'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
+  'scripts/validate-mobile-underlay-continuity.py',
 ])
 const buildScripts = {
   android: [/prepare-android-release-from-bundle/],
-  ios: [/scripts\/ios-build$/, /lib-mobile-ios-release-artifact/],
+  ios: [
+    /scripts\/ios-build$/,
+    /scripts\/ios-profiles$/,
+    /scripts\/ios_profile_certificate\.py$/,
+    /lib-mobile-ios-release-artifact/,
+  ],
   linux: [/build-host-linux-/, /build-nvpn-linux-musl$/, /host-linux-native-builder-/, /host_linux_package_content/, /lib-host-linux-/],
   macos: [/build-.*macos/, /scripts\/macos-build$/, /lib-macos-release-app-ownership/, /verify-macos-release-publication-artifacts/],
   windows: [/windows-build\.ps1$/, /windows-release-publication-proof/],
