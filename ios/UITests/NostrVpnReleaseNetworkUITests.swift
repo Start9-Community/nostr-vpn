@@ -20,6 +20,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         let bootstrapIps: String
         let throughExitServers: String
         let resolverQueryHost: String
+        let resolverExpectedAddress: String?
         let resolverProbeUrl: String
         let resolverExpectedBody: String?
         let udpHost: String
@@ -487,7 +488,8 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
 
     func proveExit(_ spec: Spec, label: String) throws {
         try NostrVpnReleaseNetworkProbe.exerciseFreshDNSQuery(
-            baseHost: spec.resolverQueryHost
+            baseHost: spec.resolverQueryHost,
+            expectedAddress: spec.resolverExpectedAddress
         )
         try NostrVpnReleaseNetworkProbe.requireDNSURL(
             spec.resolverProbeUrl,

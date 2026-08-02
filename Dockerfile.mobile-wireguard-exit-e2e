@@ -8,12 +8,15 @@ RUN apt-get update \
       iptables \
       python3 \
       socat \
+      tcpdump \
       wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/mobile-wireguard-exit-server.sh /usr/local/bin/mobile-wireguard-exit-server
 COPY scripts/mobile-wireguard-http-probe.py /usr/local/bin/mobile-wireguard-http-probe.py
+COPY scripts/mobile-wireguard-tls-sni-count.py /usr/local/bin/mobile-wireguard-tls-sni-count.py
 
 RUN python3 -c 'import runpy; runpy.run_path("/usr/local/bin/mobile-wireguard-http-probe.py")'
+RUN python3 -m py_compile /usr/local/bin/mobile-wireguard-tls-sni-count.py
 
 ENTRYPOINT ["/usr/local/bin/mobile-wireguard-exit-server"]

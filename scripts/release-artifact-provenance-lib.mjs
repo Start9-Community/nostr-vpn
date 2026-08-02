@@ -31,31 +31,40 @@ const mobileDnsEvidence = {
   'automatic-profile': {
     kind: 'dns-profile',
     increased: new Set(['query', 'profile']),
-    allowedExtra: new Set(['cloudflareTls', 'quad9Tls', 'googleTls']),
+    allowedExtra: new Set([
+      'cloudflareSni',
+      'quad9Sni',
+      'googleSni',
+    ]),
   },
   'cloudflare-doh': {
     kind: 'doh-cloudflare',
-    increased: new Set(['cloudflareTls']),
+    increased: new Set(['cloudflareSni']),
   },
   'quad9-doh': {
     kind: 'doh-quad9',
-    increased: new Set(['quad9Tls']),
+    increased: new Set(['quad9Sni']),
   },
   'custom-doh': {
     kind: 'doh-google',
-    increased: new Set(['googleTls']),
+    increased: new Set(['googleSni']),
   },
   'through-exit': {
     kind: 'dns-through',
     increased: new Set(['query', 'through']),
+    allowedExtra: new Set([
+      'cloudflareSni',
+      'quad9Sni',
+      'googleSni',
+    ]),
   },
 }
 const mobileDnsCounters = [
   'query',
   'profile',
-  'cloudflareTls',
-  'quad9Tls',
-  'googleTls',
+  'cloudflareSni',
+  'quad9Sni',
+  'googleSni',
   'through',
   'forward',
 ]

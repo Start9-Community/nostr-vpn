@@ -53,19 +53,53 @@ grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$ROOT/.dockerignore" \
     echo "mobile WireGuard Docker context omits its HTTP probe" >&2
     exit 1
   }
+grep -Fqx '!scripts/mobile-wireguard-tls-sni-count.py' "$ROOT/.dockerignore" \
+  || {
+    echo "mobile WireGuard Docker context omits its TLS SNI parser" >&2
+    exit 1
+  }
 
-for tls_fixture in "$server" "$remote_native"; do
-  grep -Fq 'tcp flags syn' "$tls_fixture" \
-    || grep -Fq -- '--syn' "$tls_fixture" \
-    || {
-      echo "$(basename "$tls_fixture") counts pooled TLS teardown traffic as a new resolver use" >&2
-      exit 1
-    }
-  if grep -Eq 'nvpn-wg-doh|counter name doh_|counter_packets doh_' "$tls_fixture"; then
-    echo "$(basename "$tls_fixture") mislabels generic resolver HTTPS SYNs as DoH" >&2
+for tls_fixture in "$server" "$remote_native" "$fixture_lib"; do
+  if grep -Eq 'nvpn-wg-provider-tls|provider_tls_|provider-tls-count|cloudflareTls|quad9Tls|googleTls' "$tls_fixture"; then
+    echo "$(basename "$tls_fixture") retains redundant generic provider TLS evidence" >&2
     exit 1
   fi
 done
+
+python3 - "$ROOT/scripts/mobile-wireguard-tls-sni-count.py" <<'PY'
+import runpy
+import pathlib
+import struct
+import sys
+import tempfile
+
+module = runpy.run_path(sys.argv[1])
+parse = module["client_hello_snis"]
+name = b"cloudflare-dns.com"
+server_name = b"\x00" + len(name).to_bytes(2, "big") + name
+extension_value = len(server_name).to_bytes(2, "big") + server_name
+extension = b"\x00\x00" + len(extension_value).to_bytes(2, "big") + extension_value
+hello = (
+    b"\x03\x03" + bytes(32) + b"\x00"
+    + b"\x00\x02\x13\x01" + b"\x01\x00"
+    + len(extension).to_bytes(2, "big") + extension
+)
+handshake = b"\x01" + len(hello).to_bytes(3, "big") + hello
+record = b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
+assert parse(record) == [name.decode()]
+assert parse(b"ordinary HTTPS bytes: " + name) == []
+
+tcp = bytes(12) + b"\x50" + bytes(7) + record
+ip = b"\x45" + bytes(8) + b"\x06" + bytes(10) + tcp
+pcap = (
+    b"\x4d\x3c\xb2\xa1" + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, 101)
+    + struct.pack("<IIII", 1, 0, len(ip), len(ip)) + ip
+)
+with tempfile.TemporaryDirectory() as directory:
+    path = pathlib.Path(directory) / "resolver-clienthello.pcap"
+    path.write_bytes(pcap)
+    assert module["captured_snis"](path) == [name.decode()]
+PY
 
 grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
   || { echo "standalone mobile gate does not initialize exact build metadata" >&2; exit 1; }
@@ -81,6 +115,8 @@ if expected not in encrypted:
     raise SystemExit("iOS encrypted DNS cases do not use the controlled resolver probe")
 if 'resolver_body="$HTTP_PROBE_TOKEN"' not in encrypted:
     raise SystemExit("iOS encrypted DNS cases do not require the controlled response token")
+if '"resolverExpectedAddress": resolver_expected_address or None' not in body:
+    raise SystemExit("iOS encrypted DNS permits an unverified NXDOMAIN result")
 for wrong in (
     'resolver_probe_url="$DIRECT_URL"',
     'resolver_probe_url="http://$probe_host:',
@@ -374,9 +410,9 @@ if "dns-evidence-snapshot)" not in remote:
     raise SystemExit("native fixture lacks an all-counter snapshot action")
 for counter in (
     "dns_profile",
-    "provider_tls_cf",
-    "provider_tls_q9",
-    "provider_tls_google",
+    "cloudflare-dns.com",
+    "dns.quad9.net",
+    "dns.google",
     "dns_through",
     "dns_forward",
 ):
@@ -389,8 +425,16 @@ custom_fields="$(
     custom-doh fixture.nvpn.test 10.99.77.1 10.99.77.53
 )"
 [[ "$custom_fields" \
-  == 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||iana.org||doh-google' ]] \
+  == 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||192-0-2-1.sslip.io|192.0.2.1|doh-google' ]] \
   || { echo "custom DoH is not independently routed through Google" >&2; exit 1; }
+for encrypted_case in cloudflare-doh quad9-doh; do
+  encrypted_fields="$(
+    mobile_wg_dns_case_fields \
+      "$encrypted_case" fixture.nvpn.test 10.99.77.1 10.99.77.53
+  )"
+  [[ "$encrypted_fields" == *'|192-0-2-1.sslip.io|192.0.2.1|'* ]] \
+    || { echo "$encrypted_case lacks a successful fresh-DNS answer" >&2; exit 1; }
+done
 through_fields="$(
   mobile_wg_dns_case_fields \
     through-exit fixture.nvpn.test 10.99.77.1 10.99.77.53
@@ -400,12 +444,21 @@ through_fields="$(
   || { echo "through-exit DNS is not distinct from profile DNS" >&2; exit 1; }
 mobile_wg_fixture_assert_dns_case_evidence \
   Android cloudflare-doh doh-cloudflare \
-  $'0\t0\t0\t0\t0\t0\t0' $'0\t0\t4\t0\t0\t0\t0' >/dev/null \
+  $'0\t0\t0\t0\t0\t0\t0' \
+  $'0\t0\t1\t0\t0\t0\t0' >/dev/null \
   || { echo "valid exclusive Cloudflare evidence was rejected" >&2; exit 1; }
+if mobile_wg_fixture_assert_dns_case_evidence \
+    Android cloudflare-doh doh-cloudflare \
+    $'0\t0\t0\t0\t0\t0\t0' \
+    $'0\t0\t0\t0\t0\t0\t0' >/dev/null 2>&1
+then
+  echo "encrypted DNS accepted provider traffic without ClientHello SNI" >&2
+  exit 1
+fi
 mobile_wg_fixture_assert_timed_dns_case_evidence \
   iOS automatic-profile dns-profile \
   $'1000\t0\t0\t0\t0\t0\t0\t0' \
-  $'1001\t1\t1\t6\t0\t0\t0\t0' >/dev/null \
+  $'1001\t1\t1\t2\t0\t0\t0\t0' >/dev/null \
   || { echo "profile DNS was rejected because of unrelated resolver HTTPS" >&2; exit 1; }
 if mobile_wg_fixture_assert_timed_dns_case_evidence \
     iOS automatic-profile dns-profile \
@@ -422,32 +475,36 @@ import sys
 module = runpy.run_path(sys.argv[1])
 before = dict.fromkeys(module["COUNTERS"], 0)
 after = dict(before)
-after.update(query=1, profile=1, cloudflareTls=6)
+after.update(query=1, profile=1, cloudflareSni=2)
 module["validate_dns_path_counters"](
     "automatic-profile", "dns-profile", before, after
 )
 PY
 if mobile_wg_fixture_assert_dns_case_evidence \
     Android cloudflare-doh doh-cloudflare \
-    $'0\t0\t0\t0\t0\t0\t0' $'1\t1\t4\t0\t0\t0\t0' >/dev/null 2>&1
+    $'0\t0\t0\t0\t0\t0\t0' \
+    $'1\t1\t1\t0\t0\t0\t0' >/dev/null 2>&1
 then
   echo "encrypted DNS accepted a plaintext profile fallback" >&2
   exit 1
 fi
 if mobile_wg_fixture_assert_dns_case_evidence \
     Android cloudflare-doh doh-cloudflare \
-    $'0\t0\t0\t0\t0\t0\t0' $'0\t0\t4\t0\t0\t0\t1' >/dev/null 2>&1
+    $'0\t0\t0\t0\t0\t0\t0' \
+    $'0\t0\t1\t0\t0\t0\t1' >/dev/null 2>&1
 then
   echo "encrypted DNS accepted a forwarded plaintext-DNS fallback" >&2
   exit 1
 fi
 mobile_wg_fixture_assert_dns_case_evidence \
   iOS through-exit dns-through \
-  $'0\t0\t0\t0\t0\t0\t0' $'1\t0\t0\t0\t0\t3\t0' >/dev/null \
+  $'0\t0\t0\t0\t0\t0\t0' \
+  $'1\t0\t0\t0\t0\t3\t0' >/dev/null \
   || { echo "valid exclusive through-exit evidence was rejected" >&2; exit 1; }
 if mobile_wg_fixture_assert_dns_case_evidence \
     iOS through-exit dns-through \
-    $'0\t0\t0\t0\t0\t0\t0' $'1\t2\t0\t0\t0\t3\t0' >/dev/null 2>&1
+    $'0\t0\t0\t0\t0\t0\t0' \
+    $'1\t2\t0\t0\t0\t3\t0' >/dev/null 2>&1
 then
   echo "through-exit DNS accepted a profile-DNS fallback" >&2
   exit 1
@@ -787,6 +844,7 @@ grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
   && grep -Fq 'NVPN_IOS_RELEASE_BACKGROUND_' "$ios_release_ui" \
   && grep -Fq 'NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1' "$ios_release_ui" \
   && grep -Fq 'requireUDPEcho' "$ios_release_probe" \
+  && grep -Fq 'expectedAddress: spec.resolverExpectedAddress' "$ios_release_ui" \
   || { echo "iOS Release runner omits underlay/lifecycle/Direct packet proof" >&2; exit 1; }
 python3 - "$ios_release_ui" "$ios_underlay_capture" <<'PY'
 import pathlib
@@ -1707,22 +1765,20 @@ do
     || { echo "Android DNS UI is missing selector $selector" >&2; exit 1; }
 done
 
-grep -Fq 'nvpn-wg-provider-tls-cf' "$server" \
-  || { echo "WireGuard fixture does not count Cloudflare TLS routing" >&2; exit 1; }
-grep -Fq 'nvpn-wg-provider-tls-q9' "$server" \
-  || { echo "WireGuard fixture does not count Quad9 TLS routing" >&2; exit 1; }
-grep -Fq 'nvpn-wg-provider-tls-google' "$server" \
+grep -Fq 'mobile-wireguard-tls-sni-count.py' "$fixture_lib" \
+  && grep -Fq 'cloudflare-dns.com dns.quad9.net dns.google' "$fixture_lib" \
   && grep -Fq 'nvpn-wg-dns-profile' "$server" \
   && grep -Fq 'nvpn-wg-dns-through' "$server" \
   && grep -Fq 'nvpn-wg-dns-forward' "$server" \
-  || { echo "WireGuard fixture lacks distinct custom/profile/through counters" >&2; exit 1; }
+  || { echo "WireGuard fixture lacks exact SNI/profile/through evidence" >&2; exit 1; }
 grep -Fq 'counter name dns_profile' "$remote_native" \
   && grep -Fq 'counter name dns_through' "$remote_native" \
-  && grep -Fq 'counter name provider_tls_google' "$remote_native" \
   && grep -Fq 'counter name dns_forward' "$remote_native" \
+  && grep -Fq 'mobile-wireguard-tls-sni-count.py' "$remote_native" \
+  && grep -Fq 'cloudflare-dns.com dns.quad9.net dns.google' "$remote_native" \
   && grep -Fq 'profile-dns-count' "$remote_native" \
   && grep -Fq 'through-dns-count' "$remote_native" \
   && grep -Fq 'forward-dns-count' "$remote_native" \
-  || { echo "native fixture lacks distinct custom/profile/through counters" >&2; exit 1; }
+  || { echo "native fixture lacks exact SNI/profile/through evidence" >&2; exit 1; }
 
 echo "mobile WireGuard exit DNS source contract passed"

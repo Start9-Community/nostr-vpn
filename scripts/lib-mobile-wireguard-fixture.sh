@@ -76,13 +76,13 @@ mobile_wg_dns_case_fields() {
         "$dns_name" "$profile_dns_ip"
       ;;
     cloudflare-doh)
-      printf 'encrypted|cloudflare||||cloudflare.com||doh-cloudflare\n'
+      printf 'encrypted|cloudflare||||192-0-2-1.sslip.io|192.0.2.1|doh-cloudflare\n'
       ;;
     quad9-doh)
-      printf 'encrypted|quad9||||quad9.net||doh-quad9\n'
+      printf 'encrypted|quad9||||192-0-2-1.sslip.io|192.0.2.1|doh-quad9\n'
       ;;
     custom-doh)
-      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||iana.org||doh-google\n'
+      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||192-0-2-1.sslip.io|192.0.2.1|doh-google\n'
       ;;
     through-exit)
       printf 'through_exit|cloudflare|||%s|through-exit.%s|%s|dns-through\n' \
@@ -245,6 +245,8 @@ mobile_wg_fixture_initialize() {
         || missing_packages+=(nftables)
       mobile_wg_remote_has_command flock \
         || missing_packages+=(util-linux)
+      mobile_wg_remote_has_command tcpdump \
+        || missing_packages+=(tcpdump)
       if ((${#missing_packages[@]} > 0)); then
         if ! bool_is_true "${NVPN_MOBILE_WG_EXIT_REMOTE_INSTALL_PACKAGES:-1}"; then
           echo "remote native fixture is missing required packages: ${missing_packages[*]}" >&2
@@ -316,6 +318,7 @@ mobile_wg_fixture_initialize() {
       "$root/scripts/mobile-wireguard-exit-remote-native.sh" \
       "$root/scripts/mobile-wireguard-udp-echo.py" \
       "$root/scripts/mobile-wireguard-http-probe.py" \
+      "$root/scripts/mobile-wireguard-tls-sni-count.py" \
       "$remote_host:$MOBILE_WG_FIXTURE_REMOTE_DIR/" \
       || return 1
     mobile_wg_remote_exec \
@@ -539,23 +542,6 @@ mobile_wg_fixture_dns_count() {
   fi
 }
 
-mobile_wg_fixture_provider_tls_count() {
-  local container="$1" provider="$2"
-  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
-    mobile_wg_remote_native provider-tls-count "$provider"
-    return
-  fi
-  local chain
-  case "$provider" in
-    cloudflare) chain="nvpn-wg-provider-tls-cf" ;;
-    quad9) chain="nvpn-wg-provider-tls-q9" ;;
-    google) chain="nvpn-wg-provider-tls-google" ;;
-    *) echo "unknown provider TLS counter: $provider" >&2; return 2 ;;
-  esac
-  mobile_wg_fixture_docker exec "$container" iptables -L "$chain" -v -n -x \
-    | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
-}
-
 mobile_wg_fixture_through_dns_count() {
   local container="$1"
   if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
@@ -604,12 +590,15 @@ chain_packets() {
     | awk '$3 == "ACCEPT" { packets += $1 } END { print packets + 0 }'
 }
 query_count="$(grep -Fci "$probe_host" /fixture/dns.log 2>/dev/null || true)"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+sni_counts="$(
+  python3 /usr/local/bin/mobile-wireguard-tls-sni-count.py \
+    /fixture/resolver-clienthello.pcap \
+    cloudflare-dns.com dns.quad9.net dns.google
+)"
+printf '%s\t%s\t%s\t%s\t%s\n' \
   "$query_count" \
   "$(chain_packets nvpn-wg-dns-profile)" \
-  "$(chain_packets nvpn-wg-provider-tls-cf)" \
-  "$(chain_packets nvpn-wg-provider-tls-q9)" \
-  "$(chain_packets nvpn-wg-provider-tls-google)" \
+  "$sni_counts" \
   "$(chain_packets nvpn-wg-dns-through)" \
   "$(chain_packets nvpn-wg-dns-forward)"
 SH
@@ -625,18 +614,20 @@ mobile_wg_fixture_timed_dns_evidence_snapshot() {
 
 mobile_wg_fixture_assert_dns_case_evidence() {
   local platform="$1" label="$2" evidence="$3" before="$4" after="$5"
-  local b_query b_profile b_cf_tls b_q9_tls b_google_tls b_through b_forward_dns
-  local a_query a_profile a_cf_tls a_q9_tls a_google_tls a_through a_forward_dns
+  local b_query b_profile b_cf_sni b_q9_sni b_google_sni b_through b_forward_dns
+  local a_query a_profile a_cf_sni a_q9_sni a_google_sni a_through a_forward_dns
   IFS=$'\t' read -r \
-    b_query b_profile b_cf_tls b_q9_tls b_google_tls b_through b_forward_dns <<<"$before"
+    b_query b_profile b_cf_sni b_q9_sni b_google_sni b_through b_forward_dns \
+    <<<"$before"
   IFS=$'\t' read -r \
-    a_query a_profile a_cf_tls a_q9_tls a_google_tls a_through a_forward_dns <<<"$after"
+    a_query a_profile a_cf_sni a_q9_sni a_google_sni a_through a_forward_dns \
+    <<<"$after"
   local value
   for value in \
-    "$b_query" "$b_profile" "$b_cf_tls" "$b_q9_tls" "$b_google_tls" "$b_through" \
-    "$b_forward_dns" \
-    "$a_query" "$a_profile" "$a_cf_tls" "$a_q9_tls" "$a_google_tls" "$a_through" \
-    "$a_forward_dns"
+    "$b_query" "$b_profile" "$b_cf_sni" "$b_q9_sni" "$b_google_sni" \
+    "$b_through" "$b_forward_dns" \
+    "$a_query" "$a_profile" "$a_cf_sni" "$a_q9_sni" "$a_google_sni" \
+    "$a_through" "$a_forward_dns"
   do
     [[ "$value" =~ ^[0-9]+$ ]] || {
       echo "$platform $label returned a non-numeric DNS evidence counter" >&2
@@ -649,26 +640,25 @@ mobile_wg_fixture_assert_dns_case_evidence() {
   case "$evidence" in
     dns-profile)
       increased=(query profile)
-      # Resolver-owned HTTPS destinations are routing evidence, not proof of
-      # DoH. Unrelated traffic to them must not invalidate exact profile DNS.
       unchanged=(through forward_dns)
-      allowed_extra="cf q9 google"
+      allowed_extra="cf_sni q9_sni google_sni"
       ;;
     doh-cloudflare)
-      increased=(cf)
-      unchanged=(query profile q9 google through forward_dns)
+      increased=(cf_sni)
+      unchanged=(query profile q9_sni google_sni through forward_dns)
       ;;
     doh-quad9)
-      increased=(q9)
-      unchanged=(query profile cf google through forward_dns)
+      increased=(q9_sni)
+      unchanged=(query profile cf_sni google_sni through forward_dns)
       ;;
     doh-google)
-      increased=(google)
-      unchanged=(query profile cf q9 through forward_dns)
+      increased=(google_sni)
+      unchanged=(query profile cf_sni q9_sni through forward_dns)
       ;;
     dns-through)
       increased=(query through)
-      unchanged=(profile cf q9 google forward_dns)
+      unchanged=(profile forward_dns)
+      allowed_extra="cf_sni q9_sni google_sni"
       ;;
     *)
       echo "$platform $label has unknown DNS evidence kind: $evidence" >&2
@@ -681,9 +671,9 @@ mobile_wg_fixture_assert_dns_case_evidence() {
     case "$counter" in
       query) before_value="$b_query"; after_value="$a_query" ;;
       profile) before_value="$b_profile"; after_value="$a_profile" ;;
-      cf) before_value="$b_cf_tls"; after_value="$a_cf_tls" ;;
-      q9) before_value="$b_q9_tls"; after_value="$a_q9_tls" ;;
-      google) before_value="$b_google_tls"; after_value="$a_google_tls" ;;
+      cf_sni) before_value="$b_cf_sni"; after_value="$a_cf_sni" ;;
+      q9_sni) before_value="$b_q9_sni"; after_value="$a_q9_sni" ;;
+      google_sni) before_value="$b_google_sni"; after_value="$a_google_sni" ;;
       through) before_value="$b_through"; after_value="$a_through" ;;
       forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
     esac
@@ -696,9 +686,9 @@ mobile_wg_fixture_assert_dns_case_evidence() {
     case "$counter" in
       query) before_value="$b_query"; after_value="$a_query" ;;
       profile) before_value="$b_profile"; after_value="$a_profile" ;;
-      cf) before_value="$b_cf_tls"; after_value="$a_cf_tls" ;;
-      q9) before_value="$b_q9_tls"; after_value="$a_q9_tls" ;;
-      google) before_value="$b_google_tls"; after_value="$a_google_tls" ;;
+      cf_sni) before_value="$b_cf_sni"; after_value="$a_cf_sni" ;;
+      q9_sni) before_value="$b_q9_sni"; after_value="$a_q9_sni" ;;
+      google_sni) before_value="$b_google_sni"; after_value="$a_google_sni" ;;
       through) before_value="$b_through"; after_value="$a_through" ;;
       forward_dns) before_value="$b_forward_dns"; after_value="$a_forward_dns" ;;
     esac
@@ -709,12 +699,12 @@ mobile_wg_fixture_assert_dns_case_evidence() {
   done
   for counter in $allowed_extra; do
     case "$counter" in
-      cf) before_value="$b_cf_tls"; after_value="$a_cf_tls" ;;
-      q9) before_value="$b_q9_tls"; after_value="$a_q9_tls" ;;
-      google) before_value="$b_google_tls"; after_value="$a_google_tls" ;;
+      cf_sni) before_value="$b_cf_sni"; after_value="$a_cf_sni" ;;
+      q9_sni) before_value="$b_q9_sni"; after_value="$a_q9_sni" ;;
+      google_sni) before_value="$b_google_sni"; after_value="$a_google_sni" ;;
     esac
     if (( after_value < before_value )); then
-      echo "$platform $label returned a decreasing provider TLS counter" >&2
+      echo "$platform $label returned a decreasing provider SNI counter" >&2
       return 1
     fi
   done

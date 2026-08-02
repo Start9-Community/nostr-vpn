@@ -33,33 +33,12 @@ wg set wg0 \
 ip link set wg0 up
 
 iptables -N nvpn-mobile-wg-forward 2>/dev/null || iptables -F nvpn-mobile-wg-forward
-iptables -N nvpn-wg-provider-tls-cf 2>/dev/null || iptables -F nvpn-wg-provider-tls-cf
-iptables -N nvpn-wg-provider-tls-q9 2>/dev/null || iptables -F nvpn-wg-provider-tls-q9
-iptables -N nvpn-wg-provider-tls-google 2>/dev/null || iptables -F nvpn-wg-provider-tls-google
 iptables -N nvpn-wg-dns-profile 2>/dev/null || iptables -F nvpn-wg-dns-profile
 iptables -N nvpn-wg-dns-through 2>/dev/null || iptables -F nvpn-wg-dns-through
 iptables -N nvpn-wg-dns-forward 2>/dev/null || iptables -F nvpn-wg-dns-forward
-iptables -A nvpn-wg-provider-tls-cf -j ACCEPT
-iptables -A nvpn-wg-provider-tls-q9 -j ACCEPT
-iptables -A nvpn-wg-provider-tls-google -j ACCEPT
 iptables -A nvpn-wg-dns-profile -j ACCEPT
 iptables -A nvpn-wg-dns-through -j ACCEPT
 iptables -A nvpn-wg-dns-forward -j ACCEPT
-for resolver_ip in 1.1.1.1 1.0.0.1; do
-  iptables -A nvpn-mobile-wg-forward \
-    -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
-    -j nvpn-wg-provider-tls-cf
-done
-for resolver_ip in 9.9.9.9 149.112.112.112; do
-  iptables -A nvpn-mobile-wg-forward \
-    -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
-    -j nvpn-wg-provider-tls-q9
-done
-for resolver_ip in 8.8.8.8 8.8.4.4; do
-  iptables -A nvpn-mobile-wg-forward \
-    -i wg0 -p tcp -d "$resolver_ip" --dport 443 --syn \
-    -j nvpn-wg-provider-tls-google
-done
 iptables -A nvpn-mobile-wg-forward \
   -i wg0 -p udp --dport 53 \
   -j nvpn-wg-dns-forward
@@ -82,6 +61,10 @@ iptables -I INPUT 1 \
   -i wg0 -d "$through_dns_ip" -p tcp --dport 53 \
   -j nvpn-wg-dns-through
 iptables -t nat -A POSTROUTING -s "${NVPN_MOBILE_WG_TUNNEL_CIDR%.*}.0/24" -o eth0 -j MASQUERADE
+
+tcpdump -i wg0 -nn -U -s 0 -w /fixture/resolver-clienthello.pcap \
+  'tcp dst port 443' >/fixture/tcpdump.log 2>&1 &
+echo "$!" >/fixture/tls-capture.pid
 
 dnsmasq \
   --keep-in-foreground \
@@ -111,6 +94,7 @@ trap cleanup EXIT INT TERM
 
 for _ in $(seq 1 50); do
   if wg show wg0 >/dev/null 2>&1 \
+    && kill -0 "$(</fixture/tls-capture.pid)" 2>/dev/null \
     && ss -lun | grep -Fq "$server_ip:53" \
     && ss -lun | grep -Fq "$through_dns_ip:53" \
     && ss -lun | grep -Fq "$server_ip:9" \

@@ -576,7 +576,7 @@ run_ios_case() {
     python3 - \
       "$run_id" "$label" "$(<"$FIXTURE_DIR/client.conf")" "$mode" "$provider" \
       "$custom_url" "$bootstrap_ips" "$through_servers" "$probe_host" \
-      "$resolver_probe_url" "$resolver_body" "$TUNNEL_SERVER_IP" \
+      "$expected_ip" "$resolver_probe_url" "$resolver_body" "$TUNNEL_SERVER_IP" \
       "$DIRECT_URL" "$EXIT_SOURCE_PROBE_URL" "$EXPECTED_EXIT_SOURCE_IP" \
       "$first" "$underlay_gate" "$lifecycle_gate" "$final" \
       "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" \
@@ -596,6 +596,7 @@ import sys
     bootstrap_ips,
     through_servers,
     resolver_host,
+    resolver_expected_address,
     resolver_url,
     resolver_body,
     udp_host,
@@ -621,6 +622,7 @@ payload = {
     "bootstrapIps": bootstrap_ips,
     "throughExitServers": through_servers,
     "resolverQueryHost": resolver_host,
+    "resolverExpectedAddress": resolver_expected_address or None,
     "resolverProbeUrl": resolver_url,
     "resolverExpectedBody": resolver_body or None,
     "udpHost": udp_host,

@@ -25,23 +25,28 @@ DNS_CASES = {
 COUNTERS = (
     "query",
     "profile",
-    "cloudflareTls",
-    "quad9Tls",
-    "googleTls",
+    "cloudflareSni",
+    "quad9Sni",
+    "googleSni",
     "through",
     "forward",
 )
 DNS_COUNTERS_INCREASED = {
     "dns-profile": {"query", "profile"},
-    "doh-cloudflare": {"cloudflareTls"},
-    "doh-quad9": {"quad9Tls"},
-    "doh-google": {"googleTls"},
+    "doh-cloudflare": {"cloudflareSni"},
+    "doh-quad9": {"quad9Sni"},
+    "doh-google": {"googleSni"},
     "dns-through": {"query", "through"},
 }
 DNS_COUNTERS_ALLOWED_EXTRA = {
     # A resolver-owned HTTPS destination is not protocol-attributed DoH.
     # Automatic is proven by its exact query and profile-port counters instead.
-    "dns-profile": {"cloudflareTls", "quad9Tls", "googleTls"},
+    "dns-profile": {
+        "cloudflareSni", "quad9Sni", "googleSni",
+    },
+    "dns-through": {
+        "cloudflareSni", "quad9Sni", "googleSni",
+    },
 }
 DESKTOP_DNS_COUNTERS = {
     "automatic": "profile_dns",

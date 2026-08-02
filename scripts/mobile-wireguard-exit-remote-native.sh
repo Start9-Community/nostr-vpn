@@ -413,7 +413,7 @@ PY
 
 fixture_processes_clean() {
   local name pid
-  for name in dnsmasq udp-echo http-probe; do
+  for name in dnsmasq udp-echo http-probe tls-capture; do
     if [[ -s "$state_dir/$name.pid" ]]; then
       pid="$(<"$state_dir/$name.pid")"
       pid_matches_fixture "$pid" "$state_dir" && return 1
@@ -466,7 +466,7 @@ assert_fixture_clean() {
 
 stop_fixture() {
   local name pid failed=0
-  for name in dnsmasq udp-echo http-probe; do
+  for name in dnsmasq udp-echo http-probe tls-capture; do
     if [[ -s "$state_dir/$name.pid" ]]; then
       pid="$(<"$state_dir/$name.pid")"
       if pid_matches_fixture "$pid" "$state_dir"; then
@@ -504,19 +504,22 @@ install_fixture_cleanup_trap() {
 }
 
 fixture_ready() {
-  local dns_pid echo_pid server_ip through_dns_ip
+  local dns_pid echo_pid capture_pid server_ip through_dns_ip
   server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
   through_dns_ip="${NVPN_MOBILE_WG_THROUGH_DNS_IP:?}"
   [[ -s "$state_dir/dnsmasq.pid" \
     && -s "$state_dir/udp-echo.pid" \
-    && -s "$state_dir/http-probe.pid" ]] || return 1
+    && -s "$state_dir/http-probe.pid" \
+    && -s "$state_dir/tls-capture.pid" ]] || return 1
   dns_pid="$(<"$state_dir/dnsmasq.pid")"
   echo_pid="$(<"$state_dir/udp-echo.pid")"
   local http_pid
   http_pid="$(<"$state_dir/http-probe.pid")"
+  capture_pid="$(<"$state_dir/tls-capture.pid")"
   pid_matches_fixture "$dns_pid" "$state_dir" \
     && pid_matches_fixture "$echo_pid" "$state_dir" \
     && pid_matches_fixture "$http_pid" "$state_dir" \
+    && pid_matches_fixture "$capture_pid" "$state_dir" \
     && ip link show "$interface" >/dev/null 2>&1 \
     && wg show "$interface" >/dev/null 2>&1 \
     && wireguard_listener_ready \
@@ -563,7 +566,7 @@ case "$action" in
         echo "remote fixture listen port is invalid" >&2
         exit 2
       }
-    for command in ip wg nft dnsmasq python3 ss flock; do
+    for command in ip wg nft dnsmasq python3 ss flock tcpdump; do
       command -v "$command" >/dev/null 2>&1 \
         || { echo "remote fixture requires $command" >&2; exit 2; }
     done
@@ -607,9 +610,6 @@ PY
     nft add table inet "$nft_table"
     nft add counter inet "$nft_table" forward_in
     nft add counter inet "$nft_table" forward_out
-    nft add counter inet "$nft_table" provider_tls_cf
-    nft add counter inet "$nft_table" provider_tls_q9
-    nft add counter inet "$nft_table" provider_tls_google
     nft add counter inet "$nft_table" dns_profile
     nft add counter inet "$nft_table" dns_through
     nft add counter inet "$nft_table" dns_forward
@@ -642,15 +642,6 @@ PY
       iifname "$interface" tcp dport "$NVPN_MOBILE_WG_HTTP_PROBE_PORT" \
       counter name http_probe accept
     nft add rule inet "$nft_table" forward \
-      iifname "$interface" ip daddr '{ 1.1.1.1, 1.0.0.1 }' \
-      tcp dport 443 tcp flags syn counter name provider_tls_cf accept
-    nft add rule inet "$nft_table" forward \
-      iifname "$interface" ip daddr '{ 9.9.9.9, 149.112.112.112 }' \
-      tcp dport 443 tcp flags syn counter name provider_tls_q9 accept
-    nft add rule inet "$nft_table" forward \
-      iifname "$interface" ip daddr '{ 8.8.8.8, 8.8.4.4 }' \
-      tcp dport 443 tcp flags syn counter name provider_tls_google accept
-    nft add rule inet "$nft_table" forward \
       iifname "$interface" udp dport 53 counter name dns_forward accept
     nft add rule inet "$nft_table" forward \
       iifname "$interface" tcp dport 53 counter name dns_forward accept
@@ -661,6 +652,11 @@ PY
       counter name forward_out accept
     nft add rule inet "$nft_table" postrouting \
       ip saddr "$tunnel_subnet" oifname "$egress_interface" masquerade
+
+    tcpdump -i "$interface" -nn -U -s 0 \
+      -w "$state_dir/resolver-clienthello.pcap" 'tcp dst port 443' \
+      >"$state_dir/tcpdump.log" 2>&1 &
+    echo "$!" >"$state_dir/tls-capture.pid"
     # A separate accepting base chain cannot override a later host chain with
     # policy drop. Insert narrowly scoped, handle-tracked rules into the
     # standard system chains when present, then remove those exact handles.
@@ -754,14 +750,6 @@ PY
   forward-packets)
     counter_packets forward_in
     ;;
-  provider-tls-count)
-    case "${2:-}" in
-      cloudflare) counter_packets provider_tls_cf ;;
-      quad9) counter_packets provider_tls_q9 ;;
-      google) counter_packets provider_tls_google ;;
-      *) echo "unknown remote provider TLS counter" >&2; exit 2 ;;
-    esac
-    ;;
   through-dns-count)
     counter_packets dns_through
     ;;
@@ -774,12 +762,15 @@ PY
   dns-evidence-snapshot)
     probe_host="${2:?DNS name is required}"
     query_count="$(grep -Fci "$probe_host" "$state_dir/dns.log" 2>/dev/null || true)"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    sni_counts="$(
+      python3 "$script_dir/mobile-wireguard-tls-sni-count.py" \
+        "$state_dir/resolver-clienthello.pcap" \
+        cloudflare-dns.com dns.quad9.net dns.google
+    )"
+    printf '%s\t%s\t%s\t%s\t%s\n' \
       "$query_count" \
       "$(counter_packets dns_profile)" \
-      "$(counter_packets provider_tls_cf)" \
-      "$(counter_packets provider_tls_q9)" \
-      "$(counter_packets provider_tls_google)" \
+      "$sni_counts" \
       "$(counter_packets dns_through)" \
       "$(counter_packets dns_forward)"
     ;;
@@ -787,7 +778,7 @@ PY
     grep -Fci "${2:?DNS name is required}" "$state_dir/dns.log" 2>/dev/null || true
     ;;
   *)
-    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|provider-tls-count|dns-count|profile-dns-count|through-dns-count|forward-dns-count|dns-evidence-snapshot" >&2
+    echo "usage: mobile-wireguard-exit-remote-native.sh start|stop|clean|ready|wg-bytes|forward-packets|dns-count|profile-dns-count|through-dns-count|forward-dns-count|dns-evidence-snapshot" >&2
     exit 2
     ;;
 esac
