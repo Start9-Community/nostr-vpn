@@ -42,6 +42,7 @@ const buildScripts = {
   ios: [
     /scripts\/ios-build$/,
     /scripts\/ios_frozen_archive\.py$/,
+    /scripts\/ios_frozen_gate\.py$/,
     /scripts\/ios-profiles$/,
     /scripts\/ios_profile_certificate\.py$/,
     /lib-mobile-ios-release-artifact/,

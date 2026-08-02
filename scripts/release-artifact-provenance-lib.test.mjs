@@ -245,6 +245,7 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
   }
   const profilePaths = [
     'scripts/ios_frozen_archive.py',
+    'scripts/ios_frozen_gate.py',
     'scripts/ios-profiles',
     'scripts/ios_profile_certificate.py',
   ]
@@ -326,6 +327,26 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     )
     for (const platform of ['android', 'linux', 'macos', 'windows']) {
       proveUnchangedPlatformInputs({ ...archiveArgs, platform })
+    }
+
+    const gateReceiptCommit = archiveArgs.candidateCommit
+    const gateReceiptTree = archiveArgs.candidateTree
+    write(join(root, 'scripts/ios_frozen_gate.py'), 'changed again\n')
+    git('add', '.')
+    git('commit', '-qm', 'iOS gate tooling')
+    const gateArgs = {
+      candidateRoot: root,
+      receiptCommit: gateReceiptCommit,
+      receiptTree: gateReceiptTree,
+      candidateCommit: git('rev-parse', 'HEAD'),
+      candidateTree: git('rev-parse', 'HEAD^{tree}'),
+    }
+    assert.throws(
+      () => proveUnchangedPlatformInputs({ ...gateArgs, platform: 'ios' }),
+      /changed product\/build input scripts\/ios_frozen_gate\.py/,
+    )
+    for (const platform of ['android', 'linux', 'macos', 'windows']) {
+      proveUnchangedPlatformInputs({ ...gateArgs, platform })
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
