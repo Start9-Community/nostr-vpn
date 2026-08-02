@@ -82,6 +82,10 @@ def validate_archive_and_adhoc(
         "gate seal requires a release-testing export",
     )
     for receipt, prefix in ((archive, "archive"), (adhoc, "Ad Hoc export")):
+        require(
+            receipt.get("rustBuildProfile") == "release",
+            f"{prefix} did not use the Release Rust profile",
+        )
         required_hash(
             receipt.get("archiveTreeSha256"),
             f"{prefix} archive tree hash",
@@ -180,6 +184,8 @@ def validate_archive_and_adhoc(
         and adhoc.get("fipsGitSha") == archive.get("fipsGitSha")
         and adhoc.get("fipsGitTree") == archive.get("fipsGitTree")
         and adhoc.get("fipsCoreVersion") == archive.get("fipsCoreVersion")
+        and adhoc.get("rustBuildProfile")
+        == archive.get("rustBuildProfile")
         and adhoc.get("identity") == identity,
         "release-testing export is not tied to the frozen archive",
     )

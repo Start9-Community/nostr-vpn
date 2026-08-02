@@ -534,6 +534,10 @@ def require_clean_checkout(root: pathlib.Path, label: str) -> None:
 
 
 def validate_source_and_fips(args: argparse.Namespace) -> None:
+    require(
+        args.rust_profile == "release",
+        "frozen iOS archive requires the Release Rust profile",
+    )
     source_root = pathlib.Path(args.source_root)
     fips_root = pathlib.Path(args.fips_root)
     app_head, app_tree = source_revision(source_root)
@@ -598,6 +602,7 @@ def freeze_archive(args: argparse.Namespace) -> None:
         "fipsGitSha": args.fips_head,
         "fipsGitTree": args.fips_tree,
         "identity": identity,
+        "rustBuildProfile": args.rust_profile,
         "signing": signing,
     }
     atomic_json(receipt_path, receipt)
@@ -631,12 +636,17 @@ def validate_archive_receipt(
         "fipsCoreVersion": args.fips_version,
         "fipsGitSha": args.fips_head,
         "fipsGitTree": args.fips_tree,
+        "rustBuildProfile": args.rust_profile,
     }
     for name, expected in expected_receipt.items():
         require(
             receipt.get(name) == expected,
             f"frozen iOS archive receipt {name} changed",
         )
+    require(
+        receipt.get("rustBuildProfile") == "release",
+        "frozen iOS archive did not use the Release Rust profile",
+    )
     identity = bundle_identity(app)
     require(identity == receipt.get("identity"), "frozen archive code identity changed")
     validate_identity(
@@ -698,6 +708,7 @@ def validate_export(args: argparse.Namespace) -> None:
         "identity": identity,
         "ipaPathSha256": path_sha256(ipa),
         "ipaSha256": sha256_file(ipa),
+        "rustBuildProfile": receipt["rustBuildProfile"],
         "signing": signing,
     }
     atomic_json(pathlib.Path(args.output), export_receipt)
@@ -713,6 +724,7 @@ def add_revision_arguments(parser: argparse.ArgumentParser) -> None:
         "fips_head",
         "fips_tree",
         "fips_version",
+        "rust_profile",
         "version",
         "build",
         "app_bundle_id",

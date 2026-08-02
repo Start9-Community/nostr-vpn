@@ -163,6 +163,11 @@ EOF
 prepare_frozen_revision_args() {
   local app_head app_tree fips_path fips_head fips_tree fips_version
   local expected_team expected_signer fips_metadata source_version
+  local NVPN_IOS_RUST_PROFILE="${NVPN_IOS_RUST_PROFILE:-release}"
+  [[ "$NVPN_IOS_RUST_PROFILE" == "release" ]] || {
+    echo "Frozen iOS archive requires the Release Rust profile." >&2
+    return 1
+  }
   app_head="$(git -C "$ROOT" rev-parse HEAD)"
   app_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
   assert_release_checkout_state \
@@ -245,6 +250,7 @@ prepare_frozen_revision_args() {
     --fips-head "$fips_head"
     --fips-tree "$fips_tree"
     --fips-version "$fips_version"
+    --rust-profile "$NVPN_IOS_RUST_PROFILE"
     --version "$NVPN_APP_VERSION_NAME"
     --build "$NVPN_IOS_BUILD_NUMBER"
     --app-bundle-id "$BUNDLE_ID"
@@ -272,6 +278,8 @@ write_frozen_archive_receipt() {
 }
 
 run_ios_archive() {
+  local NVPN_IOS_RUST_PROFILE="release"
+  export NVPN_IOS_RUST_PROFILE
   prepare_frozen_revision_args
   if [[ -d "$ARCHIVE_PATH" && ! -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then
     write_frozen_archive_receipt

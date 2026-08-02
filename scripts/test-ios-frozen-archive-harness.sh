@@ -320,6 +320,7 @@ archive = {
     "fipsGitSha": "4" * 40,
     "fipsGitTree": "5" * 40,
     "identity": identity,
+    "rustBuildProfile": "release",
 }
 adhoc = {
     "receiptSchema": 1,
@@ -336,6 +337,7 @@ adhoc = {
     "identity": identity,
     "ipaPathSha256": "d" * 64,
     "ipaSha256": "e" * 64,
+    "rustBuildProfile": archive["rustBuildProfile"],
     "signing": signing,
 }
 mobile = {
@@ -681,6 +683,22 @@ if seal_gate >/dev/null 2>&1; then
 fi
 restore_receipts
 
+python3 - "$ARCHIVE_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["rustBuildProfile"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted an archive without a Release Rust profile" >&2
+  exit 1
+fi
+restore_receipts
+
 python3 - "$ADHOC_RECEIPT" <<'PY'
 import json
 import pathlib
@@ -1008,6 +1026,21 @@ if (
 archive = ios_build.split("run_ios_archive() {", 1)[1].split(
     "\nrun_export_archive() {", 1
 )[0]
+for required in (
+    'local NVPN_IOS_RUST_PROFILE="release"',
+    "export NVPN_IOS_RUST_PROFILE",
+):
+    if required not in archive:
+        raise SystemExit("frozen archive does not force the Release Rust profile")
+if '--rust-profile "$NVPN_IOS_RUST_PROFILE"' not in ios_build:
+    raise SystemExit("frozen archive receipt is not bound to its Rust profile")
+for required in (
+    '"rustBuildProfile": args.rust_profile',
+    'args.rust_profile == "release"',
+    'receipt.get("rustBuildProfile") == "release"',
+):
+    if required not in tool:
+        raise SystemExit("frozen archive validator does not require Release Rust")
 if archive.index("prepare_frozen_revision_args") > archive.index(
     "run_ios_rust"
 ):
