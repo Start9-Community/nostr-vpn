@@ -809,6 +809,20 @@ run_cleanup_fault_regression() {
     ' "$ARTIFACT_DIR/cleanup-fault-receipt.json" >/dev/null
 }
 
+run_optional_cleanup_fault_regression() {
+  case "${NVPN_LINUX_UNDERLAY_CLEANUP_FAULT_DIAGNOSTIC:-0}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      run_cleanup_fault_regression
+      ;;
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      echo "Skipping optional Linux xtables cleanup-fault diagnostic."
+      ;;
+    *)
+      fail "unsupported NVPN_LINUX_UNDERLAY_CLEANUP_FAULT_DIAGNOSTIC value"
+      ;;
+  esac
+}
+
 capture_cleanup_fault_diagnostics() {
   local name destination
   local diagnostics_dir="$ARTIFACT_DIR/cleanup-fault-diagnostics"
@@ -1156,7 +1170,7 @@ start_linux_runner
 run_underlay_switches
 run_dns_matrix_and_direct_restore
 run_sigkill_restart_recovery
-run_cleanup_fault_regression
+run_optional_cleanup_fault_regression
 
 echo "LINUX_UNDERLAY_NETWORK_CHANGE_E2E_OK"
 echo "artifacts=$ARTIFACT_DIR"

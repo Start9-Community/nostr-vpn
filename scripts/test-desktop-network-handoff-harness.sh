@@ -335,6 +335,8 @@ require_tokens "$LINUX_HOST" "mandatory SIGKILL/startup-repair receipt" \
   '.restart_daemon_count == 1' \
   '.restart_repair_milliseconds <= $deadline'
 require_tokens "$LINUX_HOST" "cleanup-fault failure evidence before teardown" \
+  'NVPN_LINUX_UNDERLAY_CLEANUP_FAULT_DIAGNOSTIC:-0' \
+  'run_optional_cleanup_fault_regression()' \
   '>"$ARTIFACT_DIR/cleanup-fault.log" 2>&1' \
   'cleanup-fault-command-status.txt' \
   'capture_cleanup_fault_diagnostics' \
@@ -1297,7 +1299,7 @@ guest = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 host_order = (
     host.index("run_dns_matrix_and_direct_restore\n"),
     host.index("run_sigkill_restart_recovery\n"),
-    host.index("run_cleanup_fault_regression\n"),
+    host.index("run_optional_cleanup_fault_regression\n"),
 )
 if host_order != tuple(sorted(host_order)):
     raise SystemExit(
