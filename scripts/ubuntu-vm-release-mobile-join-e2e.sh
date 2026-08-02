@@ -296,8 +296,7 @@ REMOTE_CLOCK_UNCERTAINTY_MS=0
 
 calibrate_remote_clock() {
   local best_rtt=999999 best_offset=0 before after guest rtt offset
-  local sample
-  for sample in 1 2 3; do
+  for _ in 1 2 3; do
     before="$(release_join_now_ms)"
     guest="$(remote NowMs)"
     after="$(release_join_now_ms)"
