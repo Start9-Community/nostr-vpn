@@ -78,7 +78,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     func testScanPhysicalJoinQrAndRequireAdminRosterProgress() throws {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         openLinkDevice()
-        let before = rosterParticipantCount()
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))
         scan.tap()
@@ -101,7 +100,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
                 .waitForExistence(timeout: deliveryTimeout),
             "Admin roster did not show the scanned joining identity"
         )
-        XCTAssertGreaterThanOrEqual(rosterParticipantCount(), before + 1)
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(expectedJoiner)")
     }
 
@@ -139,7 +137,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     func testManualAdminAddRequiresRosterProgress() throws {
         let joiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         openLinkDevice()
-        let before = rosterParticipantCount()
         replaceText(scrollTo("manual-admin-joiner-id"), with: joiner)
         let alias = element("manual-admin-alias")
         if alias.exists {
@@ -153,7 +150,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
                 .waitForExistence(timeout: deliveryTimeout),
             "Manual admin add did not produce an exact roster row"
         )
-        XCTAssertGreaterThanOrEqual(rosterParticipantCount(), before + 1)
         try requireAcceptedRoster(
             joiner,
             relaunch: true,
@@ -363,23 +359,17 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             }
     }
 
-    private func rosterParticipantCount() -> Int {
-        app.descendants(matching: .any)
-            .allElementsBoundByIndex
-            .filter { $0.identifier.hasPrefix("roster-participant-") }
-            .count
-    }
-
     private func requireAcceptedRoster(
         _ participant: String,
         relaunch: Bool,
         failureMessage: String
     ) throws {
         let identifier = "roster-participant-accepted-\(participant)"
-        XCTAssertTrue(
-            element(identifier).waitForExistence(timeout: deliveryTimeout),
-            failureMessage
-        )
+        let applied = element(identifier).waitForExistence(timeout: deliveryTimeout)
+        XCTAssertTrue(applied, failureMessage)
+        if applied {
+            emit("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=\(millisecondsSinceEpoch())")
+        }
         guard relaunch else {
             return
         }

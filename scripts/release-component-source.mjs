@@ -10,6 +10,7 @@ const sharedFiles = [
 const harnessOnlyPaths = new Set([
   'Dockerfile.mobile-wireguard-exit-e2e',
   'Dockerfile.mobile-wireguard-exit-e2e.dockerignore',
+  'crates/nostr-vpn-app-core/src/mobile_tunnel/tests_core.rs',
   'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
   'scripts/e2e-web-startos-manual-join-docker.sh',
   'scripts/capture-mobile-ios-underlay-output.py',

@@ -278,14 +278,14 @@ macos_reverse_desktop_visible() {
   grep -Fq \
     "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_COMPLETE=$RELEASE_JOIN_ANDROID_ADMIN_ID" \
     "$1" 2>/dev/null \
-    && marker_value "$1" NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS
+    && release_join_now_ms
 }
 
 macos_admin_desktop_visible() {
   grep -Fq \
     "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=$RELEASE_JOIN_ANDROID_JOINER_ID" \
     "$1" 2>/dev/null \
-    && marker_value "$1" NVPN_RELEASE_JOIN_ADMIN_ACCEPTED_MS
+    && release_join_now_ms
 }
 
 macos_reverse_pixel_visible() {
@@ -720,9 +720,7 @@ remote admin-add "$RELEASE_JOIN_ANDROID_JOINER_ID" ReleaseGatePhone \
   >"$desktop_add_log" 2>&1 &
 remote_pid=$!
 wait_log_marker "$desktop_add_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
-desktop_submitted_ms="$(
-  marker_value "$desktop_add_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
-)"
+desktop_submitted_ms="$(release_join_now_ms)"
 deadline=$((desktop_submitted_ms + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000))
 desktop_file="$RESULT_DIR/macos/desktop-admin-desktop-detected-ms.txt"
 pixel_file="$RESULT_DIR/macos/desktop-admin-pixel-detected-ms.txt"
@@ -862,10 +860,17 @@ remote admin-add "$IOS_JOINER_ID" ReleaseGateIphone \
 remote_pid=$!
 wait_log_marker \
   "$desktop_add_ios_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
-desktop_ios_submitted_ms="$(
-  marker_value \
-    "$desktop_add_ios_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
-)"
+desktop_ios_submitted_ms="$(release_join_now_ms)"
+release_join_ios_wait_marker \
+  NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
+  || {
+    echo "iPhone did not receive the macOS signed roster in time" >&2
+    exit 1
+  }
+desktop_ios_completed_ms="$(release_join_now_ms)"
+assert_delivery_deadline \
+  "$desktop_ios_submitted_ms" "$desktop_ios_completed_ms" \
+  "macOS-admin-to-iPhone-manual"
 wait_log_marker \
   "$desktop_add_ios_log" "NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=$IOS_JOINER_ID"
 wait_log_marker "$desktop_add_ios_log" NVPN_MACOS_RELEASE_APP_HOLDING=1
@@ -884,14 +889,10 @@ iphone_joiner_relaunch_admin="$(
     exit 1
   }
 DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1
-desktop_ios_completed_ms="$(release_join_now_ms)"
 remote require-delivery-log \
   "$IOS_JOINER_ID" "$desktop_iphone_log_offset" \
   >"$RESULT_DIR/macos/desktop-add-iphone-delivery.txt" \
   2>"$RESULT_DIR/macos/desktop-add-iphone-daemon.log"
-assert_delivery_deadline \
-  "$desktop_ios_submitted_ms" "$desktop_ios_completed_ms" \
-  "macOS-admin-to-iPhone-manual"
 kill "$remote_pid" >/dev/null 2>&1 || true
 wait "$remote_pid" >/dev/null 2>&1 || true
 remote_pid=""
@@ -913,12 +914,28 @@ DESKTOP_IOS_JOINER_ID="$(
 release_join_valid_npub "$DESKTOP_IOS_JOINER_ID"
 wait_log_marker "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
 ios_admin_log="$(ios_log iphone-admin-macos-add)"
-release_join_ios_run_test \
+release_join_ios_start_test \
   testManualAdminAddRequiresRosterProgress "$ios_admin_log" \
   "NVPN_RELEASE_JOIN_JOINER_ID=$DESKTOP_IOS_JOINER_ID"
-ios_admin_submitted_ms="$(
-  ios_marker_value_from "$ios_admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
-)"
+release_join_ios_wait_marker \
+  NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
+  || {
+    echo "iPhone admin did not submit the macOS approval" >&2
+    exit 1
+  }
+ios_admin_submitted_ms="$(release_join_now_ms)"
+wait_log_marker \
+  "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS \
+  "$RELEASE_JOIN_DELIVERY_WAIT_SECS"
+ios_admin_completed_ms="$(release_join_now_ms)"
+assert_delivery_deadline \
+  "$ios_admin_submitted_ms" "$ios_admin_completed_ms" \
+  "iPhone-admin-to-macOS-manual"
+release_join_ios_finish_test \
+  || {
+    echo "iPhone admin did not retain the exact macOS joiner" >&2
+    exit 1
+  }
 ios_admin_relaunch_joiner="$(
   ios_marker_value_from \
     "$ios_admin_log" NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE
@@ -936,10 +953,6 @@ finish_remote "$desktop_ios_join_log" \
   }
 remote verify "$RELEASE_JOIN_IOS_ADMIN_ID" \
   >"$RESULT_DIR/macos/desktop-ios-joiner-verify.log"
-ios_admin_completed_ms="$(release_join_now_ms)"
-assert_delivery_deadline \
-  "$ios_admin_submitted_ms" "$ios_admin_completed_ms" \
-  "iPhone-admin-to-macOS-manual"
 release_join_launch_ios_release
 release_join_assert_one_ios_process
 

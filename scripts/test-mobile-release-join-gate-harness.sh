@@ -698,6 +698,14 @@ for required in (
 ):
     if required not in ios_test:
         raise SystemExit(f"Release join XCTest is missing {required}")
+for forbidden in ("rosterParticipantCount(", "allElementsBoundByIndex"):
+    if forbidden in ios_test:
+        raise SystemExit(
+            "Release join XCTest still performs a redundant full roster traversal: "
+            + forbidden
+        )
+if "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS" not in ios_test:
+    raise SystemExit("Release join XCTest does not timestamp the first exact roster row")
 if "paste" in ios_test.lower() or "UIPasteboard" in ios_test:
     raise SystemExit("Release QR XCTest may not paste/import a join request")
 if "waitForPendingQrDismissal" in ios_test:
@@ -901,6 +909,11 @@ android_admin_ios_manual_phase = gate.split(
 )[1].split("release_join_require_clean_fips", 1)[0]
 for required in (
     "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
+    "release_join_android_manual_admin_prepare",
+    "release_join_android_manual_admin_tap",
+    "android-admin-ios-manual-approval.log",
+    "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=",
+    "assert_delivery_deadline",
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
     '[[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
     "RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE=1",
@@ -916,6 +929,21 @@ if android_admin_ios_manual_phase.index(
 if android_admin_ios_manual_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2 \
         or "RELEASE_JOIN_UI_WAIT_SECS" in android_admin_ios_manual_phase:
     raise SystemExit("iPhone manual-join setup does not use only the setup budget")
+if 'android_admin_log="$RESULT_DIR/android-admin-ios-manual.log"' \
+        in android_admin_ios_manual_phase:
+    raise SystemExit("Android approval and iPhone XCTest still share one log path")
+if not (
+    android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_JOINER_ID=")
+    < android_admin_ios_manual_phase.index("release_join_android_manual_admin_prepare")
+    < android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
+    < android_admin_ios_manual_phase.index("release_join_android_manual_admin_tap")
+    < android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=")
+    < android_admin_ios_manual_phase.index("assert_delivery_deadline")
+    < android_admin_ios_manual_phase.index("release_join_ios_finish_test")
+):
+    raise SystemExit(
+        "Pixel-admin/iPhone manual timing does not overlap setup and measure first delivery"
+    )
 for required in (
     "args.ios_admin_manual_relaunch_durable",
     "args.ios_joiner_manual_relaunch_durable",
@@ -933,6 +961,8 @@ macos_iphone_joiner_phase = desktop.split(
 for required in (
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
     "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
+    "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS",
+    "assert_delivery_deadline",
     '[[ "$iphone_joiner_relaunch_admin" == "$DESKTOP_IOS_ADMIN_ID" ]]',
 ):
     if required not in macos_iphone_joiner_phase:
@@ -941,6 +971,13 @@ for required in (
         )
 if macos_iphone_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2:
     raise SystemExit("macOS/iPhone manual-join setup does not use the setup budget")
+if not (
+    macos_iphone_joiner_phase.index("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS")
+    < macos_iphone_joiner_phase.index("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS")
+    < macos_iphone_joiner_phase.index("assert_delivery_deadline")
+    < macos_iphone_joiner_phase.index("release_join_ios_finish_test")
+):
+    raise SystemExit("macOS/iPhone delivery is not measured before relaunch durability")
 
 ios_manual_admin = ios_test.split(
     "func testManualAdminAddRequiresRosterProgress()", 1
@@ -960,12 +997,21 @@ macos_iphone_admin_phase = desktop.split(
 )[1].split("python3 -", 1)[0]
 for required in (
     "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE",
+    "NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS",
+    "assert_delivery_deadline",
     '[[ "$ios_admin_relaunch_joiner" == "$DESKTOP_IOS_JOINER_ID" ]]',
 ):
     if required not in macos_iphone_admin_phase:
         raise SystemExit(
             f"macOS/iPhone gate does not consume iPhone-admin relaunch proof: {required}"
         )
+if not (
+    macos_iphone_admin_phase.index("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS")
+    < macos_iphone_admin_phase.index("NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS")
+    < macos_iphone_admin_phase.index("assert_delivery_deadline")
+    < macos_iphone_admin_phase.index("finish_remote")
+):
+    raise SystemExit("iPhone/macOS delivery is not measured before durability checks")
 android_clear = artifacts.split(
     "release_join_reset_android_state()", 1
 )[1].split("release_join_prepare_android_release()", 1)[0]

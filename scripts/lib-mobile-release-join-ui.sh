@@ -464,15 +464,17 @@ release_join_android_scan_and_accept() {
 }
 
 release_join_require_fresh_ios_pending_qr() {
-  local deadline=$((SECONDS + 3)) heartbeat now elapsed
+  local deadline=$((SECONDS + 3)) heartbeat fresh
   while ((SECONDS < deadline)); do
     heartbeat="$(
       release_join_ios_marker_value NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS
     )"
-    now="$(release_join_now_ms)"
     if [[ "$heartbeat" =~ ^[0-9]+$ ]]; then
-      elapsed=$((now - heartbeat))
-      if ((elapsed >= 0 && elapsed <= 1000)); then
+      sleep 0.2
+      fresh="$(
+        release_join_ios_marker_value NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS
+      )"
+      if [[ "$fresh" =~ ^[0-9]+$ ]] && ((fresh > heartbeat)); then
         return 0
       fi
     fi

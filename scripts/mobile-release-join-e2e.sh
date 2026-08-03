@@ -209,22 +209,26 @@ phase_ios_admin_android_qr() {
   release_join_ios_start_test \
     testScanPhysicalJoinQrAndRequireAdminRosterProgress "$scan_log" \
     "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
+  release_join_ios_wait_marker NVPN_RELEASE_JOIN_SCANNER_READY=1 \
+    "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
+    || fail "iPhone did not open its shipped QR scanner"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_DECODED=1 \
     "$RELEASE_JOIN_CAMERA_WAIT_SECS" \
     || fail "iPhone camera did not decode the Pixel's displayed QR"
   release_join_android_assert_pending_qr \
     || fail "Pixel QR disappeared before the iPhone submitted acceptance"
-  release_join_ios_finish_test \
-    || fail "iPhone admin did not accept the exact Pixel joiner"
-  submitted="$(
-    ios_marker_value_from "$scan_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
-  )"
+  release_join_ios_wait_marker NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= \
+    "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
+    || fail "iPhone did not submit the decoded Pixel join request"
+  submitted="$(release_join_now_ms)"
   release_join_android_wait_qr_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel stayed on QR view or lacked the exact iPhone admin roster row"
-  release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
-    || fail "Pixel QR join did not retain the signed roster across relaunch"
   completed="$(release_join_now_ms)"
   assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-QR"
+  release_join_ios_finish_test \
+    || fail "iPhone admin did not accept the exact Pixel joiner"
+  release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    || fail "Pixel QR join did not retain the signed roster across relaunch"
 }
 
 phase_android_admin_ios_qr() {
@@ -257,6 +261,11 @@ phase_android_admin_ios_qr() {
       "$android_scan_log" \
       | tail -n 1
   )"
+  release_join_ios_wait_marker \
+    NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
+    || fail "iPhone QR join did not receive the Pixel's signed roster"
+  completed="$(release_join_now_ms)"
+  assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-QR"
   release_join_ios_finish_test \
     || fail "iPhone stayed on QR view or lacked the exact Pixel admin roster row"
   ios_qr_relaunch_admin="$(
@@ -274,8 +283,6 @@ phase_android_admin_ios_qr() {
     && ((ios_qr_content_width_bps >= RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS)) \
     || fail "iPhone QR content-width measurement is missing or too narrow"
   RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS="$ios_qr_content_width_bps"
-  completed="$(release_join_now_ms)"
-  assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-QR"
 }
 
 phase_ios_admin_android_manual() {
@@ -293,9 +300,7 @@ phase_ios_admin_android_manual() {
   release_join_ios_wait_marker \
     NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone admin did not submit the manual approval"
-  submitted="$(
-    ios_marker_value_from "$admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
-  )"
+  submitted="$(release_join_now_ms)"
   release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel manual join never left its locally pending admin row"
   completed="$(release_join_now_ms)"
@@ -331,18 +336,25 @@ phase_android_admin_ios_manual() {
   )"
   release_join_valid_npub "$RELEASE_JOIN_IOS_JOINER_ID" \
     || fail "iPhone manual join identity was invalid"
+  android_admin_log="$RESULT_DIR/android-admin-ios-manual-approval.log"
+  release_join_android_manual_admin_prepare "$RELEASE_JOIN_IOS_JOINER_ID" \
+    >"$android_admin_log"
   release_join_ios_wait_marker \
     NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone did not submit through shipped manual-join controls"
-  android_admin_log="$RESULT_DIR/android-admin-ios-manual.log"
-  release_join_android_manual_admin_add "$RELEASE_JOIN_IOS_JOINER_ID" \
-    | tee "$android_admin_log"
+  release_join_android_manual_admin_tap "$RELEASE_JOIN_IOS_JOINER_ID" \
+    >>"$android_admin_log"
   submitted="$(
     sed -n \
       's/.*NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=//p' \
       "$android_admin_log" \
       | tail -n 1
   )"
+  release_join_ios_wait_marker \
+    NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
+    || fail "iPhone manual join did not receive the Pixel's signed roster"
+  completed="$(release_join_now_ms)"
+  assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-manual"
   release_join_ios_finish_test \
     || fail "iPhone manual join never received and retained the Pixel's signed roster"
   ios_joiner_relaunch_admin="$(
@@ -351,8 +363,6 @@ phase_android_admin_ios_manual() {
   [[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]] \
     || fail "iPhone joiner relaunch did not retain the exact Pixel admin"
   RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE=1
-  completed="$(release_join_now_ms)"
-  assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-manual"
 }
 
 release_join_require_clean_fips

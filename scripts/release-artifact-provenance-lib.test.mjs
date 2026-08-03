@@ -98,6 +98,32 @@ test('component proof retains only unchanged platform product inputs', () => {
     assert.throws(() => proveUnchangedPlatformInputs({
       ...macArgs, candidateCommit: macProduct.commit, candidateTree: macProduct.tree,
     }), /changed product\/build input macos\/Sources\/App.swift/)
+    const testOnlyReceipt = commit(
+      'crates/nostr-vpn-app-core/src/mobile_tunnel/config.rs',
+      'pub const PRODUCT: bool = false;\n',
+    )
+    const testOnly = commit(
+      'crates/nostr-vpn-app-core/src/mobile_tunnel/tests_core.rs',
+      '#[test]\nfn regression() {}\n',
+    )
+    const testOnlyArgs = {
+      candidateRoot: root, platform: 'android',
+      receiptCommit: testOnlyReceipt.commit, receiptTree: testOnlyReceipt.tree,
+      candidateCommit: testOnly.commit, candidateTree: testOnly.tree,
+    }
+    assert.match(
+      proveUnchangedPlatformInputs(testOnlyArgs).changed_paths_sha256,
+      /^[0-9a-f]{64}$/,
+    )
+    const sharedProduct = commit(
+      'crates/nostr-vpn-app-core/src/mobile_tunnel/config.rs',
+      'pub const PRODUCT: bool = true;\n',
+    )
+    assert.throws(() => proveUnchangedPlatformInputs({
+      ...testOnlyArgs,
+      candidateCommit: sharedProduct.commit,
+      candidateTree: sharedProduct.tree,
+    }), /changed product\/build input crates\/nostr-vpn-app-core\/src\/mobile_tunnel\/config\.rs/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
