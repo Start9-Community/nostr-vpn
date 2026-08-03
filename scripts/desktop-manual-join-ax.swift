@@ -357,7 +357,7 @@ func run() throws {
         try press(application, "manual-join-submit")
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
         try requireSuccessfulCompletion(
-            application, "manual-join-admin-id", "roster-participant-accepted-\(args[3])"
+            application, "manual-join-admin-id", "roster-participant-pending-\(args[3])"
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(args[3])")
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS=\(millisecondsSinceEpoch())")

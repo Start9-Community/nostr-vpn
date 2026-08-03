@@ -69,6 +69,17 @@ if 'CONFIG="$TEST_CONFIG_DIR/config.toml"' not in remote:
     raise SystemExit("macOS join CLI does not use the daemon's canonical config path")
 if 'CONFIG="$CONFIG_DIR/config.toml"' in remote:
     raise SystemExit("macOS join CLI still uses the symlink config path")
+if 'NVPN_APP_DATA_DIR="$TEST_CONFIG_DIR"' not in remote:
+    raise SystemExit("macOS join GUI does not use the daemon's canonical profile")
+if "outbound_join_request" in remote:
+    raise SystemExit("macOS manual join harness still requires obsolete QR request state")
+manual_join_phase = texts["desktop-manual-join-ax.swift"].split(
+    'case "release-manual-join":', 1
+)[1].split('case "release-joiner-id":', 1)[0]
+if 'roster-participant-pending-\\(args[3])' not in manual_join_phase:
+    raise SystemExit("macOS manual join UI does not prove pending roster state")
+if 'roster-participant-accepted-\\(args[3])' in manual_join_phase:
+    raise SystemExit("macOS manual join UI expects approval before the admin acts")
 longest_short_socket = (
     "/private/tmp/nvpn-rj-4294967295/"
     ".nvpn-runtime/join-0123456789abcdef.sock"

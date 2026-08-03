@@ -160,23 +160,6 @@ assert d.get("running") is True and listener_ready
   return 1
 }
 
-assert_outbound_join_ready() {
-  local driver_pid="$1" deadline=$((SECONDS + 15))
-  while ((SECONDS < deadline)); do
-    grep -Eq 'join_request_admin = "[0-9a-f]{64}"' "$CONFIG" \
-      && grep -Fq 'outbound_join_request' "$CONFIG" \
-      && grep -Eq 'recipient = "[0-9a-f]{64}"' "$CONFIG" \
-      && {
-        echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_OUTBOUND_JOIN_READY=1"
-        return 0
-      }
-    kill -0 "$driver_pid" 2>/dev/null || break
-    sleep 0.2
-  done
-  echo "macOS Release outbound join request did not become ready" >&2
-  return 1
-}
-
 swap_test_profile() {
   [[ ! -e "$TEST_PROFILE_MARKER" && ! -e "$CONFIG_BACKUP" \
     && ! -e "$TEST_CONFIG_DIR" ]] || {
@@ -348,6 +331,7 @@ launch_app() {
       PATH=/usr/bin:/bin:/usr/sbin:/sbin \
       TMPDIR="${TMPDIR:-/tmp}" \
       LANG="${LANG:-en_US.UTF-8}" \
+      NVPN_APP_DATA_DIR="$TEST_CONFIG_DIR" \
       "$APP_EXE"
   ) >>"$APP_LOG" 2>&1 &
   APP_PID=$!
@@ -370,15 +354,7 @@ run_driver() {
 }
 
 run_manual_join_driver() {
-  local driver_pid status=0
-  launch_app
-  "$MANUAL_JOIN_DRIVER" \
-    "$APP_PID" release-manual-join "$1" "$2" "Nostr VPN" &
-  driver_pid=$!
-  assert_outbound_join_ready "$driver_pid" || status=1
-  wait "$driver_pid" || status=1
-  stop_app || status=1
-  return "$status"
+  run_driver release-manual-join "$1" "$2"
 }
 
 run_driver_hold() {
