@@ -510,7 +510,7 @@ release_join_capture_ios_qr() {
 
 release_join_stage_ios_qr_image() {
   local image="$1" filename="$2"
-  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
   xcrun devicectl device copy to \
     --device "$IOS_DEVICE" \
     --domain-type appDataContainer \

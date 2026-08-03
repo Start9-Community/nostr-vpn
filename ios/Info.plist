@@ -41,8 +41,6 @@
 	<true/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan Nostr VPN join request QR codes.</string>
 	<key>NSBonjourServices</key>
@@ -51,8 +49,6 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect directly to nearby Nostr VPN devices on your local network.</string>
-	<key>UIFileSharingEnabled</key>
-	<true/>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

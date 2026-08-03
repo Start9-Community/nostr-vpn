@@ -1124,10 +1124,20 @@ for source in (network, join):
 for source, label in ((network, "network"), (release_gate, "join gate")):
     if "select_generated_ios_release_xctestrun" not in source:
         raise SystemExit(f"{label} does not select the generated xctestrun")
-    if "NVPN_MOBILE_IOS_RELEASE_XCTESTRUN" in source:
-        raise SystemExit(f"{label} still trusts an external xctestrun")
-    if "NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA" in source:
-        raise SystemExit(f"{label} still trusts external iOS test products")
+if "NVPN_MOBILE_IOS_RELEASE_XCTESTRUN" in release_gate:
+    raise SystemExit("join gate still trusts an external xctestrun")
+if "NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA" in release_gate:
+    raise SystemExit("join gate still trusts external iOS test products")
+for required in (
+    'xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"',
+    'xctestrun_sha="$(shasum -a 256 "$xctestrun"',
+    '"xctestrunSha256": xctest_sha',
+    '"testProductsTreeSha256": test_products_tree',
+):
+    if required not in network:
+        raise SystemExit(
+            f"iOS network reuse does not bind its supplied test plan: {required}"
+        )
 if "NVPN_MOBILE_IOS_RELEASE_APP_PATH" in release_gate:
     raise SystemExit("join gate still trusts an external frozen-app path")
 for required in (

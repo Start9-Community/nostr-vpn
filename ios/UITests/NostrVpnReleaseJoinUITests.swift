@@ -413,7 +413,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             }
         }
         for root in roots {
-            let folder = root.descendants(matching: .any)["Nostr VPN"]
+            let folder = root.descendants(matching: .any)["Nostr VPN Test Files"]
             if folder.waitForExistence(timeout: 2) && folder.isHittable {
                 folder.tap()
                 break
@@ -431,9 +431,17 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         timeout: TimeInterval
     ) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
+        let filePredicate = NSPredicate(
+            format: "identifier == %@ OR label == %@ OR value == %@",
+            filename,
+            filename,
+            filename
+        )
         repeat {
             for root in roots {
-                let file = root.descendants(matching: .any)[filename]
+                let file = root.descendants(matching: .any)
+                    .matching(filePredicate)
+                    .firstMatch
                 if file.exists && file.isHittable {
                     file.tap()
                     return true

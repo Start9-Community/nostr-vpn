@@ -518,6 +518,7 @@ python3 - \
   "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift" \
   "$ROOT/ios/UITests/NostrVpnPhysicalGateSupport.swift" \
   "$ROOT/ios/project.yml" \
+  "$ROOT/ios/Info.plist" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDevices.kt" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
   "$ROOT/ios/Sources/DevicesViews.swift" \
@@ -560,6 +561,7 @@ def read(path):
     ios_test,
     ios_interaction,
     ios_project,
+    ios_info,
     android_devices,
     android_components,
     ios_devices,
@@ -616,9 +618,20 @@ for required in (
     "device copy to",
     "appDataContainer",
     'Documents/$filename',
+    ".UITests.xctrunner",
 ):
     if required not in ui:
         raise SystemExit(f"Release join fixture staging is missing {required}")
+for forbidden in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace"):
+    if forbidden in ios_info:
+        raise SystemExit(f"Production iOS app exposes test fixture storage: {forbidden}")
+for required in (
+    "INFOPLIST_KEY_UIFileSharingEnabled: YES",
+    "INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES",
+    "INFOPLIST_KEY_CFBundleDisplayName: Nostr VPN Test Files",
+):
+    if required not in ios_project:
+        raise SystemExit(f"Persistent iOS UI runner lacks public fixture storage: {required}")
 
 install_ios = artifacts[
     artifacts.index("release_join_install_ios_release()"):
