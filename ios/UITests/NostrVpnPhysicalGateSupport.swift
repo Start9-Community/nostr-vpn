@@ -3,9 +3,11 @@ import XCTest
 
 enum PhysicalGateMarker {
     private static let fileName = "nvpn-ui-gate-markers.log"
+    private static let hostAcknowledgementFileName = "nvpn-host-process-ack.log"
 
     static func reset() {
         try? FileManager.default.removeItem(at: fileURL)
+        try? FileManager.default.removeItem(at: hostAcknowledgementFileURL)
         emit("NVPN_XCUITEST_STARTED=1")
     }
 
@@ -32,9 +34,36 @@ enum PhysicalGateMarker {
         FileHandle.standardError.write(data)
     }
 
+    static func waitForHostProcessObservation(
+        checkpoint: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        let runId = ProcessInfo.processInfo.environment["NVPN_XCUITEST_RUN_ID"]
+            ?? "missing"
+        let expectedRun = "NVPN_XCUITEST_RUN_ID=\(runId)"
+        let expectedCheckpoint = "NVPN_IOS_HOST_PROCESS_OBSERVED=\(checkpoint)"
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let data = try? Data(contentsOf: hostAcknowledgementFileURL),
+               let text = String(data: data, encoding: .utf8),
+               text.split(separator: "\n").contains(Substring(expectedRun)),
+               text.split(separator: "\n").contains(Substring(expectedCheckpoint))
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
+    }
+
     private static var fileURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(fileName)
+    }
+
+    private static var hostAcknowledgementFileURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(hostAcknowledgementFileName)
     }
 }
 

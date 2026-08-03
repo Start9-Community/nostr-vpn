@@ -325,9 +325,92 @@ def finish(samples, name):
     sampler.end_seen = True
     sampler.samples = samples
     sampler.required_checkpoints = {row["checkpoint"] for row in samples}
+    sampler.direct_acknowledgements = (
+        sampler.required_checkpoints & module.DIRECT_CHECKPOINTS
+    )
     status = sampler.finish()
     return status, json.loads(path.read_text(encoding="utf-8"))
 
+sampler = module.ProcessSampler(
+    "fixture-device", pathlib.Path(sys.argv[2], "unused.json")
+)
+module.DIRECT_SAMPLE_RETRY_SECONDS = 0
+module.DIRECT_SAMPLE_TIMEOUT_SECONDS = 0.001
+calls = []
+sampler._sample = (
+    lambda checkpoint, timeout=5: calls.append(checkpoint) or len(calls) == 2
+)
+assert sampler._sample_checkpoint("release_connected_direct_passed") is True
+assert calls == ["release_connected_direct_passed"] * 2
+calls.clear()
+sampler._sample = lambda checkpoint, timeout=5: calls.append(checkpoint) or False
+assert sampler._sample_checkpoint("release_connected_direct_passed") is False
+assert len(calls) > 1 and set(calls) == {"release_connected_direct_passed"}
+calls.clear()
+assert sampler._sample_checkpoint("active-session-begin") is False
+assert calls == ["active-session-begin"]
+
+calls.clear()
+acks = []
+sampler._sample = (
+    lambda checkpoint, timeout=5: calls.append(checkpoint) or len(calls) == 2
+)
+sampler._write_runner_acknowledgement = (
+    lambda checkpoint, run_id: acks.append((checkpoint, run_id)) or None
+)
+assert sampler._observe_direct_checkpoint(
+    "release_connected_direct_passed", "fixture-run"
+) is True
+assert calls == ["release_connected_direct_passed"] * 2
+assert acks == [("release_connected_direct_passed", "fixture-run")]
+assert sampler.direct_acknowledgements == {"release_connected_direct_passed"}
+sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
+
+mapped = []
+sampler = module.ProcessSampler(
+    "fixture-device", pathlib.Path(sys.argv[2], "mapped.json")
+)
+sampler._observe_direct_checkpoint = (
+    lambda checkpoint, run_id: mapped.append((checkpoint, run_id)) or True
+)
+sampler.observe_direct_checkpoint(
+    "RELEASE_CONNECTED_DIRECT_RELAUNCH_READY", "fixture-run"
+)
+for future in sampler.checkpoint_futures:
+    assert future.result(timeout=1) is True
+assert mapped == [("release_connected_direct_relaunch_passed", "fixture-run")]
+assert sampler.required_checkpoints == {
+    "release_connected_direct_relaunch_passed"
+}
+sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
+
+copied = []
+original_run = module.subprocess.run
+def record_copy(command, **kwargs):
+    source = pathlib.Path(command[command.index("--source") + 1])
+    copied.append((command, source.read_text(encoding="utf-8")))
+    return type("Completed", (), {"returncode": 0})()
+module.subprocess.run = record_copy
+sampler = module.ProcessSampler(
+    "fixture-device",
+    pathlib.Path(sys.argv[2], "copy.json"),
+    "fixture.runner",
+)
+assert sampler._write_runner_acknowledgement(
+    "release_connected_direct_passed", "fixture-run"
+) is None
+command, contents = copied[0]
+assert command[:5] == ["xcrun", "devicectl", "device", "copy", "to"]
+assert command[command.index("--destination") + 1] == (
+    "Documents/nvpn-host-process-ack.log"
+)
+assert command[command.index("--domain-identifier") + 1] == "fixture.runner"
+assert contents == (
+    "NVPN_XCUITEST_RUN_ID=fixture-run\n"
+    "NVPN_IOS_HOST_PROCESS_OBSERVED=release_connected_direct_passed\n"
+)
+module.subprocess.run = original_run
+sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
 samples = [
     {"checkpoint": "active-session-begin", "appPids": [111], "packetTunnelPids": [211]},
     {"checkpoint": "underlay_switch_1_outage", "appPids": [111], "packetTunnelPids": [211]},
@@ -344,6 +427,9 @@ assert receipt["directCheckpointProcesses"] == {
         "packetTunnelProcessIdentifier": 211,
     }
 }
+assert receipt["directRunnerAcknowledgements"] == [
+    "release_connected_direct_passed",
+]
 
 samples[1] = {**samples[1], "packetTunnelPids": []}
 status, receipt = finish(samples, "disconnected-active-processes.json")
@@ -352,15 +438,10 @@ assert "underlay_switch_1_outage" not in receipt["observedCheckpoints"]
 
 assert module.ACTIVE_TUNNEL_CHECKPOINT.search(
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1"
+) is None
+assert module.DIRECT_READY.search(
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_READY=1"
 ) is not None
-sampler = module.ProcessSampler(
-    "fixture-device", pathlib.Path(sys.argv[2], "post-end.json")
-)
-sampler.end_seen = True
-sampler._sample_checkpoint = lambda checkpoint: True
-sampler.update_checkpoint("release_connected_direct_relaunch_passed")
-assert sampler.required_checkpoints == {"release_connected_direct_relaunch_passed"}
-sampler.checkpoint_executor.shutdown(wait=True, cancel_futures=True)
 
 missing_end = module.ProcessSampler(
     "fixture-device", pathlib.Path(sys.argv[2], "missing-end.json")
@@ -375,6 +456,22 @@ diagnostics = io.StringIO()
 with redirect_stderr(diagnostics):
     assert missing_end.finish(report_errors=False) == 1
 assert diagnostics.getvalue() == "", repr(diagnostics.getvalue())
+
+missing_ack_samples = [dict(row) for row in samples]
+missing_ack_samples[1]["packetTunnelPids"] = [211]
+path = pathlib.Path(sys.argv[2], "missing-direct-ack.json")
+missing_ack = module.ProcessSampler("fixture-device", path)
+missing_ack.thread = FinishedThread()
+missing_ack.begin_seen = True
+missing_ack.end_seen = True
+missing_ack.samples = missing_ack_samples
+missing_ack.required_checkpoints = {
+    row["checkpoint"] for row in missing_ack_samples
+}
+assert missing_ack.finish() == 1
+receipt = json.loads(path.read_text(encoding="utf-8"))
+assert receipt["passed"] is False
+assert any("without runner acknowledgement" in error for error in receipt["errors"])
 PY
 
 cat >"$temp/adb" <<'SH'

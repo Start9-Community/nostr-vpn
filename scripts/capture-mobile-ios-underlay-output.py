@@ -29,17 +29,26 @@ ACTIVE_TUNNEL_CHECKPOINT = re.compile(
     r"UNDERLAY_VALIDATED|PAYLOAD_RECOVERY|VERIFIED)"
     r"|RELEASE_BACKGROUND_\d+_REQUESTED"
     r"|RELEASE_FOREGROUND_\d+_VERIFIED"
-    r"|RELEASE_CONNECTED_DIRECT_PASSED"
-    r"|RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED"
     r")"
 )
+DIRECT_READY = re.compile(
+    r"NVPN_IOS_(?P<name>RELEASE_CONNECTED_DIRECT(?:_RELAUNCH)?_READY)=1"
+)
+RUN_ID = re.compile(r"NVPN_XCUITEST_RUN_ID=(?P<value>[^\s]+)")
 DIRECT_CHECKPOINTS = frozenset(
     {
         "release_connected_direct_passed",
         "release_connected_direct_relaunch_passed",
     }
 )
-DIRECT_SAMPLE_ATTEMPTS = 2
+DIRECT_READY_CHECKPOINTS = {
+    "release_connected_direct_ready": "release_connected_direct_passed",
+    "release_connected_direct_relaunch_ready": (
+        "release_connected_direct_relaunch_passed"
+    ),
+}
+DIRECT_SAMPLE_TIMEOUT_SECONDS = 25
+DIRECT_ACK_TIMEOUT_SECONDS = 5
 DIRECT_SAMPLE_RETRY_SECONDS = 0.25
 
 
@@ -81,9 +90,15 @@ def process_ids(payload: object) -> tuple[list[int], list[int]]:
 
 
 class ProcessSampler:
-    def __init__(self, device: str, summary_path: Path) -> None:
+    def __init__(
+        self,
+        device: str,
+        summary_path: Path,
+        runner_bundle: str | None = None,
+    ) -> None:
         self.device = device
         self.summary_path = summary_path
+        self.runner_bundle = runner_bundle
         self.active = threading.Event()
         self.stopped = threading.Event()
         self.lock = threading.Lock()
@@ -100,6 +115,8 @@ class ProcessSampler:
         self.begin_seen = False
         self.end_seen = False
         self.samples: list[dict[str, object]] = []
+        self.direct_acknowledgements: set[str] = set()
+        self.direct_errors: list[str] = []
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -130,6 +147,20 @@ class ProcessSampler:
             )
             with self.lock:
                 self.checkpoint_futures.append(future)
+
+    def observe_direct_checkpoint(self, ready: str, run_id: str) -> None:
+        checkpoint = DIRECT_READY_CHECKPOINTS[ready.lower()]
+        with self.lock:
+            if checkpoint in self.required_checkpoints:
+                return
+            self.required_checkpoints.add(checkpoint)
+        future = self.checkpoint_executor.submit(
+            self._observe_direct_checkpoint,
+            checkpoint,
+            run_id,
+        )
+        with self.lock:
+            self.checkpoint_futures.append(future)
 
     def stop(self) -> None:
         with self.lock:
@@ -226,6 +257,18 @@ class ProcessSampler:
             )
         with self.lock:
             required_checkpoints = set(self.required_checkpoints)
+            direct_acknowledgements = set(self.direct_acknowledgements)
+            direct_errors = list(self.direct_errors)
+        errors.extend(direct_errors)
+        missing_acknowledgements = sorted(
+            (required_checkpoints & DIRECT_CHECKPOINTS)
+            - direct_acknowledgements
+        )
+        if missing_acknowledgements:
+            errors.append(
+                "Direct checkpoints without runner acknowledgement="
+                f"{missing_acknowledgements}"
+            )
         missing_checkpoints = sorted(required_checkpoints - valid_checkpoints)
         if missing_checkpoints:
             errors.append(
@@ -237,6 +280,7 @@ class ProcessSampler:
             "activeSessionEndSeen": self.end_seen,
             "appProcessIdentifiers": sorted(app_pids),
             "directCheckpointProcesses": direct_checkpoint_processes,
+            "directRunnerAcknowledgements": sorted(direct_acknowledgements),
             "observedCheckpoints": sorted(valid_checkpoints),
             "packetTunnelProcessIdentifiers": sorted(tunnel_pids),
             "passed": not errors,
@@ -269,19 +313,96 @@ class ProcessSampler:
             self.stopped.wait(0.25)
 
     def _sample_checkpoint(self, checkpoint: str) -> bool:
-        attempts = (
-            DIRECT_SAMPLE_ATTEMPTS
-            if checkpoint in DIRECT_CHECKPOINTS
-            else 1
-        )
-        for attempt in range(attempts):
-            if self._sample(checkpoint):
+        if checkpoint not in DIRECT_CHECKPOINTS:
+            return self._sample(checkpoint)
+        deadline = time.monotonic() + DIRECT_SAMPLE_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self._sample(checkpoint, timeout=min(5, remaining)):
                 return True
-            if attempt + 1 < attempts:
-                time.sleep(DIRECT_SAMPLE_RETRY_SECONDS)
-        return False
+            time.sleep(
+                min(
+                    DIRECT_SAMPLE_RETRY_SECONDS,
+                    max(0, deadline - time.monotonic()),
+                )
+            )
 
-    def _sample(self, checkpoint: str) -> bool:
+    def _observe_direct_checkpoint(
+        self,
+        checkpoint: str,
+        run_id: str,
+    ) -> bool:
+        if not self._sample_checkpoint(checkpoint):
+            with self.lock:
+                self.direct_errors.append(
+                    f"{checkpoint} had no real app and PacketTunnel process within "
+                    f"{DIRECT_SAMPLE_TIMEOUT_SECONDS}s"
+                )
+            return False
+        error = self._write_runner_acknowledgement(checkpoint, run_id)
+        if error:
+            with self.lock:
+                self.direct_errors.append(error)
+            return False
+        with self.lock:
+            self.direct_acknowledgements.add(checkpoint)
+        return True
+
+    def _write_runner_acknowledgement(
+        self,
+        checkpoint: str,
+        run_id: str,
+    ) -> str | None:
+        if not self.runner_bundle:
+            return "Direct process observation has no XCTest runner bundle"
+        contents = (
+            f"NVPN_XCUITEST_RUN_ID={run_id}\n"
+            f"NVPN_IOS_HOST_PROCESS_OBSERVED={checkpoint}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as source:
+            source.write(contents)
+            source.flush()
+            try:
+                completed = subprocess.run(
+                    [
+                        "xcrun",
+                        "devicectl",
+                        "device",
+                        "copy",
+                        "to",
+                        "--device",
+                        self.device,
+                        "--source",
+                        source.name,
+                        "--destination",
+                        "Documents/nvpn-host-process-ack.log",
+                        "--domain-type",
+                        "appDataContainer",
+                        "--domain-identifier",
+                        self.runner_bundle,
+                        "--quiet",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=DIRECT_ACK_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                return (
+                    f"{checkpoint} runner acknowledgement failed: "
+                    f"{type(error).__name__}"
+                )
+        if completed.returncode != 0:
+            return (
+                f"{checkpoint} runner acknowledgement copy failed with status "
+                f"{completed.returncode}"
+            )
+        return None
+
+    def _sample(self, checkpoint: str, timeout: float = 5) -> bool:
         timestamp_ms = time.time_ns() // 1_000_000
         sample: dict[str, object] = {
             "checkpoint": checkpoint,
@@ -305,7 +426,7 @@ class ProcessSampler:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=5,
+                    timeout=timeout,
                     check=False,
                 )
                 if completed.returncode != 0:
@@ -326,24 +447,25 @@ class ProcessSampler:
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 5):
+    if len(sys.argv) not in (3, 6):
         raise SystemExit(
             "usage: capture-mobile-ios-underlay-output.py "
-            "XCODE_LOG HOST_MARKERS [DEVICE PROCESS_SUMMARY]"
+            "XCODE_LOG HOST_MARKERS [DEVICE PROCESS_SUMMARY RUNNER_BUNDLE]"
         )
     log_path = Path(sys.argv[1])
     marker_path = Path(sys.argv[2])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     sampler = (
-        ProcessSampler(sys.argv[3], Path(sys.argv[4]))
-        if len(sys.argv) == 5
+        ProcessSampler(sys.argv[3], Path(sys.argv[4]), sys.argv[5])
+        if len(sys.argv) == 6
         else None
     )
     if sampler:
         sampler.start()
     seen: set[str] = set()
     duplicates: set[str] = set()
+    runner_run_id = ""
     with (
         log_path.open("w", encoding="utf-8", buffering=1) as log,
         marker_path.open("w", encoding="utf-8", buffering=1) as markers,
@@ -351,6 +473,9 @@ def main() -> int:
         for line in sys.stdin:
             received_ms = time.time_ns() // 1_000_000
             log.write(line)
+            run_id_match = RUN_ID.search(line)
+            if run_id_match:
+                runner_run_id = run_id_match.group("value")
             active_match = ACTIVE.search(line)
             if active_match and sampler:
                 if active_match.group("phase") == "BEGIN":
@@ -360,6 +485,17 @@ def main() -> int:
             checkpoint_match = ACTIVE_TUNNEL_CHECKPOINT.search(line)
             if checkpoint_match and sampler:
                 sampler.update_checkpoint(checkpoint_match.group("name"))
+            direct_ready_match = DIRECT_READY.search(line)
+            if direct_ready_match and sampler:
+                if not runner_run_id:
+                    with sampler.lock:
+                        sampler.direct_errors.append(
+                            "Direct process observation request had no XCTest run ID"
+                        )
+                else:
+                    sampler.observe_direct_checkpoint(
+                        direct_ready_match.group("name"), runner_run_id
+                    )
             match = MARKER.search(line)
             if not match:
                 continue

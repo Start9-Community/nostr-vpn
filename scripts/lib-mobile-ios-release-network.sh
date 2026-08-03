@@ -1296,7 +1296,9 @@ ios_release_network_run_bounded_xcode() {
     "$log" "$host_markers"
   )
   if [[ -n "$device" && -n "$process_summary" ]]; then
-    capture_command+=("$device" "$process_summary")
+    capture_command+=(
+      "$device" "$process_summary" "$IOS_BUNDLE_ID.UITests.xctrunner"
+    )
   fi
 
   [[ "$-" == *m* ]] && monitor_was_enabled=1

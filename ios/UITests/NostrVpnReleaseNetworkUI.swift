@@ -207,6 +207,40 @@ extension NostrVpnReleaseNetworkUITests {
         Thread.sleep(forTimeInterval: 0.5)
     }
 
+    func waitForInternetTransitionToSettle(
+        timeout: TimeInterval = 30
+    ) throws {
+        let status = element("internet-settings-status")
+        let transientMessages = [
+            "Saving internet",
+            "Updating VPN routes",
+            "Restoring VPN",
+            "Turning VPN on",
+        ]
+        let deadline = Date().addingTimeInterval(timeout)
+        var quietSince: Date?
+        repeat {
+            if status.exists {
+                quietSince = nil
+                let message = "\(status.label) \(status.value as? String ?? "")"
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard transientMessages.contains(where: message.contains) else {
+                    throw gateError(
+                        "VPN route transition failed with status: \(message)"
+                    )
+                }
+            } else if let quietSince {
+                if Date().timeIntervalSince(quietSince) >= 1 {
+                    return
+                }
+            } else {
+                quietSince = Date()
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        throw gateError("VPN route transition did not settle within \(Int(timeout))s")
+    }
+
     func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any)[identifier]
     }

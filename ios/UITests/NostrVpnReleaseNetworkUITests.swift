@@ -586,25 +586,39 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             picker: "internet-source-picker",
             option: "internet-source-direct"
         )
+        try waitForInternetTransitionToSettle()
         guard waitForVPNState(on: true, timeout: 8) else {
             throw gateError("This device transition turned the private-mesh VPN off")
         }
         try proveDirect(spec, expectedSource: directSource)
-        // Let the Direct PacketTunnel replacement settle before asking the
-        // external sampler to record its checkpoint.
-        Thread.sleep(forTimeInterval: 6)
+        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_READY=1")
+        guard PhysicalGateMarker.waitForHostProcessObservation(
+            checkpoint: "release_connected_direct_passed",
+            timeout: 35
+        ) else {
+            throw gateError(
+                "Host did not confirm the connected Direct PacketTunnel within 30s"
+            )
+        }
         emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1")
 
         relaunch()
         openInternetTab()
+        try waitForInternetTransitionToSettle()
         assertPicker("internet-source-picker", contains: "This device")
         guard waitForVPNState(on: true, timeout: 8) else {
             throw gateError("This device relaunch stopped the private-mesh packet tunnel")
         }
         try proveDirect(spec, expectedSource: directSource)
-        // Let startup reconciliation settle before the external sampler
-        // records the post-relaunch PacketTunnel checkpoint.
-        Thread.sleep(forTimeInterval: 6)
+        emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_READY=1")
+        guard PhysicalGateMarker.waitForHostProcessObservation(
+            checkpoint: "release_connected_direct_relaunch_passed",
+            timeout: 35
+        ) else {
+            throw gateError(
+                "Host did not confirm the relaunched Direct PacketTunnel within 30s"
+            )
+        }
         emit("NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1")
     }
 

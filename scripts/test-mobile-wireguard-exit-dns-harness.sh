@@ -995,7 +995,8 @@ grep -Fq 'capture-mobile-ios-underlay-output.py' "$ios_release_gate" \
   && grep -Fq 'packetTunnelProcessIdentifiers' "$ios_underlay_capture" \
   && grep -Fq 'distinct packet-tunnel PIDs' "$ios_underlay_capture" \
   && grep -Fq 'ACTIVE_TUNNEL_CHECKPOINT' "$ios_underlay_capture" \
-  && ! grep -Fq 'directCheckpointProcesses' "$ios_underlay_capture" \
+  && grep -Fq 'directCheckpointProcesses' "$ios_underlay_capture" \
+  && grep -Fq 'directRunnerAcknowledgements' "$ios_underlay_capture" \
   && grep -Fq '"requiredCheckpoints": sorted(required_checkpoints)' "$ios_underlay_capture" \
   && grep -Fq 'checkpoints without a valid process observation=' "$ios_underlay_capture" \
   && grep -Fq 'self.update_checkpoint("active-session-end")' "$ios_underlay_capture" \
@@ -1044,6 +1045,7 @@ grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
   || { echo "iOS Release runner omits underlay/lifecycle/Direct packet proof" >&2; exit 1; }
 python3 - "$ios_release_ui" "$ios_underlay_capture" <<'PY'
 import pathlib
+import re
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
@@ -1078,15 +1080,19 @@ direct = source.split("private func selectDirectWhileConnected", 1)[1].split(
 offset = -1
 for token in (
     'option: "internet-source-direct"',
+    "try waitForInternetTransitionToSettle()",
     "waitForVPNState(on: true",
     "try proveDirect",
-    "Thread.sleep(forTimeInterval: 6)",
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_READY=1",
+    "waitForHostProcessObservation",
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
     "relaunch()",
+    "try waitForInternetTransitionToSettle()",
     'assertPicker("internet-source-picker", contains: "This device")',
     "waitForVPNState(on: true",
     "try proveDirect",
-    "Thread.sleep(forTimeInterval: 6)",
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_READY=1",
+    "waitForHostProcessObservation",
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1",
 ):
     offset = direct.find(token, offset + 1)
@@ -1096,6 +1102,8 @@ for token in (
         )
 if "Interrupt the scheduled stop/restart" in direct:
     raise SystemExit("iOS Direct gate still force-kills an in-flight tunnel update")
+if "Thread.sleep(forTimeInterval: 6)" in direct:
+    raise SystemExit("iOS Direct gate still guesses tunnel readiness with a fixed sleep")
 if "isHittable" in direct or "waitForExistence" in direct:
     raise SystemExit("iOS Direct gate duplicates menu timing logic")
 
@@ -1110,14 +1118,38 @@ if active_end > direct_call:
     )
 capture = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 for token in (
-    "RELEASE_CONNECTED_DIRECT_PASSED",
-    "RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED",
-    "directCheckpointProcesses",
+    "RELEASE_CONNECTED_DIRECT(?:_RELAUNCH)?_READY",
+    '"release_connected_direct_ready": "release_connected_direct_passed"',
+    '"release_connected_direct_relaunch_ready"',
+    '"release_connected_direct_relaunch_passed"',
+    '"directCheckpointProcesses": direct_checkpoint_processes',
+    '"directRunnerAcknowledgements": sorted(direct_acknowledgements)',
 ):
-    if token in capture:
+    if token not in capture:
         raise SystemExit(
-            "iOS process continuity incorrectly samples an intentional Direct transition"
+            "iOS connected Direct path lacks acknowledged PacketTunnel process proof"
         )
+sample_timeout = int(
+    capture.split("DIRECT_SAMPLE_TIMEOUT_SECONDS = ", 1)[1].splitlines()[0]
+)
+ack_timeout = int(
+    capture.split("DIRECT_ACK_TIMEOUT_SECONDS = ", 1)[1].splitlines()[0]
+)
+runner_timeouts = [
+    int(value)
+    for value in re.findall(
+        r"waitForHostProcessObservation\([\s\S]*?timeout: (\d+)", direct
+    )
+]
+if len(runner_timeouts) != 2:
+    raise SystemExit("iOS Direct gate lacks two bounded host acknowledgements")
+if any(
+    sample_timeout + ack_timeout + 5 > timeout
+    for timeout in runner_timeouts
+):
+    raise SystemExit(
+        "iOS Direct host observation lacks five seconds of runner scheduling margin"
+    )
 PY
 if grep -Fq -- '--nvpn-debug-' \
   "$ios_release_gate" "$ios_release_ui" "$ios_release_ui_support" "$ios_release_underlay"
