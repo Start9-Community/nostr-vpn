@@ -220,6 +220,22 @@ def read(path):
 
 runtime_gate_code = "\n".join((gate, ui, desktop, desktop_remote, ios_test))
 join_receipt_code = "\n".join((gate, summary_builder))
+manual_join = ios_devices.split(
+    "DisclosureGroup(isExpanded: $manualExpanded) {", 1
+)[1].split("struct AddDeviceSheet", 1)[0]
+manual_join_content, manual_join_label = manual_join.split("} label: {", 1)
+for identifier in (
+    "joiner-device-id-value",
+    "manual-join-admin-id",
+    "manual-join-network-id",
+    "manual-join-submit",
+):
+    if identifier not in manual_join_content:
+        raise SystemExit(f"iOS manual join content is missing {identifier}")
+if "manual-join-expand" in manual_join_content:
+    raise SystemExit("iOS manual join disclosure overwrites child accessibility IDs")
+if 'Text("Manual join")' not in manual_join_label or "manual-join-expand" not in manual_join_label:
+    raise SystemExit("iOS manual join disclosure label lacks its expand identifier")
 for forbidden in (
     "run-as",
     "--nvpn-debug",
