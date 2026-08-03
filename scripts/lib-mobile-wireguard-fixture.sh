@@ -76,13 +76,13 @@ mobile_wg_dns_case_fields() {
         "$dns_name" "$profile_dns_ip"
       ;;
     cloudflare-doh)
-      printf 'encrypted|cloudflare||||192-0-2-1.sslip.io|192.0.2.1|doh-cloudflare\n'
+      printf 'encrypted|cloudflare||||cloudflare.192-0-2-1.sslip.io|192.0.2.1|doh-cloudflare\n'
       ;;
     quad9-doh)
-      printf 'encrypted|quad9||||192-0-2-1.sslip.io|192.0.2.1|doh-quad9\n'
+      printf 'encrypted|quad9||||quad9.192-0-2-1.sslip.io|192.0.2.1|doh-quad9\n'
       ;;
     custom-doh)
-      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||192-0-2-1.sslip.io|192.0.2.1|doh-google\n'
+      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-2-1.sslip.io|192.0.2.1|doh-google\n'
       ;;
     through-exit)
       printf 'through_exit|cloudflare|||%s|through-exit.%s|%s|dns-through\n' \
@@ -643,6 +643,40 @@ mobile_wg_fixture_timed_dns_evidence_snapshot() {
     "$(mobile_wg_fixture_dns_evidence_snapshot "$container" "$probe_host")"
 }
 
+mobile_wg_fixture_wait_for_dns_case_evidence() {
+  local platform="$1" label="$2" evidence="$3" before="$4"
+  local container="$5" probe_host="$6" timeout_seconds="$7"
+  local after deadline snapshot_file
+  [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
+    echo "$platform $label has an invalid DNS evidence timeout" >&2
+    return 2
+  }
+  deadline=$((SECONDS + timeout_seconds))
+  snapshot_file="$(mktemp "${TMPDIR:-/tmp}/nvpn-dns-evidence.XXXXXX")"
+  while true; do
+    if mobile_wg_fixture_dns_evidence_snapshot \
+        "$container" "$probe_host" >"$snapshot_file"
+    then
+      after="$(<"$snapshot_file")"
+      if mobile_wg_fixture_assert_dns_case_evidence \
+          "$platform" "$label" "$evidence" "$before" "$after" \
+          >/dev/null 2>&1
+      then
+        rm -f "$snapshot_file"
+        printf '%s\n' "$after"
+        return 0
+      fi
+    fi
+    if (( SECONDS >= deadline )); then
+      rm -f "$snapshot_file"
+      mobile_wg_fixture_assert_dns_case_evidence \
+        "$platform" "$label" "$evidence" "$before" "$after"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 mobile_wg_fixture_assert_dns_case_evidence() {
   local platform="$1" label="$2" evidence="$3" before="$4" after="$5"
   local b_query b_profile b_cf_sni b_q9_sni b_google_sni b_through b_forward_dns
@@ -678,21 +712,21 @@ mobile_wg_fixture_assert_dns_case_evidence() {
       unchanged=(query profile through forward_dns)
       if [[ "$platform" != iOS ]]; then
         increased=(cf_sni)
-        unchanged+=(q9_sni google_sni)
+        [[ "$platform" == macOS ]] || unchanged+=(q9_sni google_sni)
       fi
       ;;
     doh-quad9)
       unchanged=(query profile through forward_dns)
       if [[ "$platform" != iOS ]]; then
         increased=(q9_sni)
-        unchanged+=(cf_sni google_sni)
+        [[ "$platform" == macOS ]] || unchanged+=(cf_sni google_sni)
       fi
       ;;
     doh-google)
       unchanged=(query profile through forward_dns)
       if [[ "$platform" != iOS ]]; then
         increased=(google_sni)
-        unchanged+=(cf_sni q9_sni)
+        [[ "$platform" == macOS ]] || unchanged+=(cf_sni q9_sni)
       fi
       ;;
     dns-through)

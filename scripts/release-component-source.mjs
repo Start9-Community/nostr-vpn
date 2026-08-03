@@ -33,6 +33,7 @@ const harnessOnlyPaths = new Set([
   'scripts/mobile-wireguard-exit-server.sh',
   'scripts/mobile-wireguard-tls-sni-count.py',
   'scripts/macos-release-mobile-join-remote.sh',
+  'scripts/macos-vm-desktop-wireguard-exit-e2e.sh',
   'scripts/macos-vm-release-mobile-join-e2e.sh',
   'scripts/macos_release_join_artifact.py',
   'scripts/release-network-evidence.py',

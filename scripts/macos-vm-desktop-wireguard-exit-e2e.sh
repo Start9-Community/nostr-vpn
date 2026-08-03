@@ -624,8 +624,9 @@ do
   )"
   after_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
   after_evidence="$(
-    mobile_wg_fixture_dns_evidence_snapshot \
-      "$CONTAINER" "$DNS_CASE_PROBE_HOST"
+    mobile_wg_fixture_wait_for_dns_case_evidence \
+      macOS "$DNS_CASE_LABEL" "$evidence" "$before_evidence" \
+      "$CONTAINER" "$DNS_CASE_PROBE_HOST" 8
   )"
   assert_increased "$DNS_CASE_LABEL WireGuard bytes" \
     "$before_transfer" "$after_transfer"

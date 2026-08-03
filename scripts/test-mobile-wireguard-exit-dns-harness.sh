@@ -382,6 +382,7 @@ declare -F mobile_wg_dns_case_fields >/dev/null \
   && declare -F mobile_wg_fixture_validate_docker_context >/dev/null \
   && declare -F mobile_wg_fixture_stage_remote_docker_context >/dev/null \
   && declare -F mobile_wg_fixture_dns_evidence_snapshot >/dev/null \
+  && declare -F mobile_wg_fixture_wait_for_dns_case_evidence >/dev/null \
   && declare -F mobile_wg_fixture_timed_dns_evidence_snapshot >/dev/null \
   && declare -F mobile_wg_fixture_assert_dns_case_evidence >/dev/null \
   && declare -F mobile_wg_fixture_assert_timed_dns_case_evidence >/dev/null \
@@ -511,14 +512,14 @@ custom_fields="$(
     custom-doh fixture.nvpn.test 10.99.77.1 10.99.77.53
 )"
 [[ "$custom_fields" \
-  == 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||192-0-2-1.sslip.io|192.0.2.1|doh-google' ]] \
+  == 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-2-1.sslip.io|192.0.2.1|doh-google' ]] \
   || { echo "custom DoH is not independently routed through Google" >&2; exit 1; }
 for encrypted_case in cloudflare-doh quad9-doh; do
   encrypted_fields="$(
     mobile_wg_dns_case_fields \
       "$encrypted_case" fixture.nvpn.test 10.99.77.1 10.99.77.53
   )"
-  [[ "$encrypted_fields" == *'|192-0-2-1.sslip.io|192.0.2.1|'* ]] \
+  [[ "$encrypted_fields" == *"|${encrypted_case%-doh}.192-0-2-1.sslip.io|192.0.2.1|"* ]] \
     || { echo "$encrypted_case lacks a successful fresh-DNS answer" >&2; exit 1; }
 done
 through_fields="$(
@@ -541,6 +542,38 @@ then
   echo "encrypted DNS accepted provider traffic without ClientHello SNI" >&2
   exit 1
 fi
+mobile_wg_fixture_assert_dns_case_evidence \
+  macOS cloudflare-doh doh-cloudflare \
+  $'0\t0\t0\t0\t0\t0\t0' \
+  $'0\t0\t1\t1\t0\t0\t0' >/dev/null \
+  || { echo "macOS rejected a delayed unrelated provider capture" >&2; exit 1; }
+if mobile_wg_fixture_assert_dns_case_evidence \
+    macOS cloudflare-doh doh-cloudflare \
+    $'0\t0\t0\t0\t0\t0\t0' \
+    $'0\t0\t0\t1\t0\t0\t0' >/dev/null 2>&1
+then
+  echo "macOS accepted encrypted DNS without its target provider capture" >&2
+  exit 1
+fi
+(
+  snapshots=0
+  mobile_wg_fixture_dns_evidence_snapshot() {
+    snapshots=$((snapshots + 1))
+    if [[ "$snapshots" -lt 3 ]]; then
+      printf '0\t0\t0\t1\t0\t0\t0\n'
+    else
+      printf '0\t0\t1\t1\t0\t0\t0\n'
+    fi
+  }
+  sleep() { :; }
+  observed="$(
+    mobile_wg_fixture_wait_for_dns_case_evidence \
+      macOS cloudflare-doh doh-cloudflare \
+      $'0\t0\t0\t0\t0\t0\t0' fixture probe.example 4
+  )"
+  [[ "$observed" == $'0\t0\t1\t1\t0\t0\t0' ]] \
+    || { echo "bounded DNS evidence poll did not wait for the target capture" >&2; exit 1; }
+)
 mobile_wg_fixture_assert_dns_case_evidence \
   iOS cloudflare-doh doh-cloudflare \
   $'0\t0\t0\t0\t0\t0\t0' \
