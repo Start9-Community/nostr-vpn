@@ -735,95 +735,70 @@ release_join_android_manual_admin_add() {
 release_join_ios_test_command() {
   local test_name="$1"
   shift
-  local team="${NVPN_IOS_TEAM_ID:?Release join gate requires NVPN_IOS_TEAM_ID}"
   local bundle="${RELEASE_JOIN_IOS_APP_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
-  local -a command=()
-  if release_join_reuse_artifacts; then
-    local case_xctestrun
-    local ui_target_app_argument=""
-    local -a rewrite_command=()
-    local -a runner_environment=()
-    if ! case_xctestrun="$(
-      mktemp "$PRIVATE_DIR/join-$test_name.XXXXXX.xctestrun"
-    )"; then
-      return 1
-    fi
-    rewrite_command=(
-      python3 "$ROOT/scripts/ios_frozen_archive.py"
-      rewrite-xctestrun
-      --source "$RELEASE_JOIN_IOS_XCTESTRUN"
-      --output "$case_xctestrun"
-      --products-root "$RELEASE_JOIN_IOS_DERIVED_DATA/Build/Products"
-      --target-app "$RELEASE_JOIN_IOS_APP_PATH"
-      --use-destination-artifacts
-      --environment-stdin0
-    )
-    if [[ "$test_name" == \
-      testImportJoinQrImageAndRequireAdminRosterProgress ]]; then
-      ui_target_app_argument="--nvpn-ui-test-qr-image-import"
-    fi
-    runner_environment=(
-      "NVPN_RELEASE_JOIN_ADMIN_ID="
-      "NVPN_RELEASE_JOIN_BLACKBOX="
-      "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="
-      "NVPN_RELEASE_JOIN_IMAGE_FILENAME="
-      "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS="
-      "NVPN_RELEASE_JOIN_JOINER_ID="
-      "NVPN_RELEASE_JOIN_NETWORK_ID="
-      "NVPN_RELEASE_JOIN_NETWORK_NAME="
-      "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS="
-      "NVPN_IOS_BUNDLE_ID="
-      "NVPN_RELEASE_JOIN_BLACKBOX=1"
-      "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-      "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS=${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
-      "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS=$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
-      "NVPN_IOS_BUNDLE_ID=$bundle"
-    )
-    local assignment
-    for assignment in "$@"; do
-      runner_environment+=("$assignment")
-    done
-    if ! printf '%s\0' "${runner_environment[@]}" \
-      | NVPN_IOS_UI_TARGET_APP_ARGUMENT="$ui_target_app_argument" \
-        "${rewrite_command[@]}"
-    then
-      rm -f "$case_xctestrun"
-      return 1
-    fi
-    command=(
-      xcodebuild
-      -xctestrun "$case_xctestrun"
-      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
-      -destination-timeout 60
-      -collect-test-diagnostics never
-      -parallel-testing-enabled NO
-      -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
-    )
-  else
-    command=(
-      xcodebuild
-      -allowProvisioningUpdates
-      -project "$ROOT/ios/NostrVpnIos.xcodeproj"
-      -scheme NostrVpnIos
-      -configuration Release
-      -derivedDataPath "$RELEASE_JOIN_IOS_DERIVED_DATA"
-      -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
-      -destination-timeout 60
-      -collect-test-diagnostics never
-      -parallel-testing-enabled NO
-      -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
-      DEVELOPMENT_TEAM="$team"
-      NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY"
-      NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID"
-      NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
-      NVPN_RELEASE_JOIN_BLACKBOX=1
-      NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-      NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS="${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
-      NVPN_RELEASE_JOIN_SETUP_WAIT_SECS="$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
-      NVPN_IOS_BUNDLE_ID="$bundle"
-    )
-    command+=("$@")
+  if ! release_join_reuse_artifacts; then
+    echo "iOS release join requires the frozen xctestrun artifact" >&2
+    return 1
   fi
+  local case_xctestrun
+  local ui_target_app_argument=""
+  local -a command=() rewrite_command=() runner_environment=()
+  if ! case_xctestrun="$(
+    mktemp "$PRIVATE_DIR/join-$test_name.XXXXXX.xctestrun"
+  )"; then
+    return 1
+  fi
+  rewrite_command=(
+    python3 "$ROOT/scripts/ios_frozen_archive.py"
+    rewrite-xctestrun
+    --source "$RELEASE_JOIN_IOS_XCTESTRUN"
+    --output "$case_xctestrun"
+    --products-root "$RELEASE_JOIN_IOS_DERIVED_DATA/Build/Products"
+    --target-app "$RELEASE_JOIN_IOS_APP_PATH"
+    --use-destination-artifacts
+    --environment-stdin0
+  )
+  if [[ "$test_name" == \
+    testImportJoinQrImageAndRequireAdminRosterProgress ]]; then
+    ui_target_app_argument="--nvpn-ui-test-qr-image-import"
+  fi
+  runner_environment=(
+    "NVPN_RELEASE_JOIN_ADMIN_ID="
+    "NVPN_RELEASE_JOIN_BLACKBOX="
+    "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="
+    "NVPN_RELEASE_JOIN_IMAGE_FILENAME="
+    "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS="
+    "NVPN_RELEASE_JOIN_JOINER_ID="
+    "NVPN_RELEASE_JOIN_NETWORK_ID="
+    "NVPN_RELEASE_JOIN_NETWORK_NAME="
+    "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS="
+    "NVPN_IOS_BUNDLE_ID="
+    "NVPN_RELEASE_JOIN_BLACKBOX=1"
+    "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS"
+    "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS=${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
+    "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS=$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
+    "NVPN_IOS_BUNDLE_ID=$bundle"
+  )
+  local assignment
+  for assignment in "$@"; do
+    runner_environment+=("$assignment")
+  done
+  if ! printf '%s\0' "${runner_environment[@]}" \
+    | NVPN_IOS_UI_TARGET_APP_ARGUMENT="$ui_target_app_argument" \
+      "${rewrite_command[@]}"
+  then
+    rm -f "$case_xctestrun"
+    return 1
+  fi
+  command=(
+    xcodebuild
+    -xctestrun "$case_xctestrun"
+    -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
+    -destination-timeout 60
+    -collect-test-diagnostics never
+    -parallel-testing-enabled NO
+    -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
+  )
   command+=(test-without-building)
   printf '%s\0' "${command[@]}"
 }

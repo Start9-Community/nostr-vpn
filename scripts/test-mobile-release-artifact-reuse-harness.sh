@@ -513,6 +513,7 @@ rm "$IOS_PRODUCTS/escaping-product"
   RELEASE_JOIN_IOS_UDID=fixture-device
   RELEASE_JOIN_DELIVERY_WAIT_SECS=15
   RELEASE_JOIN_IMPORT_WAIT_SECS=15
+  RELEASE_JOIN_IOS_SETUP_WAIT_SECS=30
   mkdir -p "$PRIVATE_DIR"
   base_sha="$(shasum -a 256 "$IOS_XCTESTRUN" | awk '{print $1}')"
   command_file="$TMP_ROOT/join-command.bin"
