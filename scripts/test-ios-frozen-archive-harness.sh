@@ -135,6 +135,8 @@ expected = {
 for key, value in expected.items():
     if target.get(key) != value:
         raise SystemExit(f"destination-artifact plan has the wrong {key}")
+if target.get("UITargetAppCommandLineArguments") != []:
+    raise SystemExit("ordinary destination-artifact plan exposed test-only UI")
 for key in (
     "TestBundlePath",
     "TestHostPath",
