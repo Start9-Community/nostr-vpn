@@ -126,7 +126,7 @@ ios_create_admin() {
   log="$(ios_log "$label-create-admin")"
   release_join_ios_run_test \
     testCreateAdminNetworkAndReportPublicValues "$log" \
-    "NVPN_RELEASE_JOIN_NETWORK_NAME=$label"
+    "NVPN_RELEASE_JOIN_NETWORK_NAME=$label" || return 1
   RELEASE_JOIN_IOS_ADMIN_ID="$(
     ios_marker_value_from "$log" NVPN_RELEASE_JOIN_ADMIN_ID
   )"
@@ -138,7 +138,7 @@ ios_create_admin() {
   [[ -n "$RELEASE_JOIN_IOS_NETWORK_ID" ]] \
     || fail "iOS Release UI did not report a network identity"
   local existing
-  for existing in "${RELEASE_JOIN_IOS_NETWORK_IDS[@]}"; do
+  for existing in ${RELEASE_JOIN_IOS_NETWORK_IDS[@]+"${RELEASE_JOIN_IOS_NETWORK_IDS[@]}"}; do
     [[ "$existing" != "$RELEASE_JOIN_IOS_NETWORK_ID" ]] \
       || fail "iOS join phase reused a retained network"
   done
