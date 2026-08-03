@@ -150,6 +150,14 @@ cleanup() {
         --rm "Documents/$RELEASE_JOIN_IOS_STAGED_QR_FILENAME" \
         >/dev/null 2>&1 || cleanup_status=1
     fi
+    if [[ -n "${RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME:-}" ]]; then
+      ios_runner_bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
+      ios-deploy \
+        --id "$RELEASE_JOIN_IOS_UDID" \
+        --bundle_id "$ios_runner_bundle" \
+        --rm "Documents/$RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME" \
+        >/dev/null 2>&1 || cleanup_status=1
+    fi
     package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
     "${ADB[@]}" shell am force-stop "$package" >/dev/null 2>&1 || cleanup_status=1
     "${ADB[@]}" shell pm clear "$package" >/dev/null 2>&1 || cleanup_status=1

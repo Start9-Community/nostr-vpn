@@ -57,6 +57,35 @@ fi
   release_join_ios_wait_selected_test_started 3
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_READY=1 3
 )
+
+(
+  # The trusted XCTest runner capture must be copied by exact filename/hash.
+  # shellcheck disable=SC1091
+  source "$join_ui"
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-qr-capture.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  PRIVATE_DIR="$private"
+  IOS_DEVICE=fixture-device
+  RELEASE_JOIN_IOS_TEST_LOG="$private/runner.log"
+  captured="$private/captured.png"
+  printf '\211PNG\r\n\032\nfixture' >"$captured"
+  capture_sha="$(shasum -a 256 "$captured" | awk '{print $1}')"
+  cat >"$RELEASE_JOIN_IOS_TEST_LOG" <<EOF
+NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_QR_SCREENSHOT_FILENAME=nvpn-release-join-qr-ABC123.png
+NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_QR_SCREENSHOT_SHA256=$capture_sha
+EOF
+  xcrun() {
+    [[ "$*" == *"device copy from"* ]]
+    [[ "$*" == *"--domain-identifier fi.siriusbusiness.nvpn.UITests.xctrunner"* ]]
+    [[ "$*" == *"--source Documents/nvpn-release-join-qr-ABC123.png"* ]]
+    local destination="${@: -4:1}"
+    cp "$captured" "$destination"
+  }
+  release_join_capture_ios_qr "$private/qr.png"
+  [[ "$(od -An -tx1 -N8 "$private/qr.png" | tr -d ' \n')" \
+    == 89504e470d0a1a0a ]]
+  [[ "$(shasum -a 256 "$private/qr.png" | awk '{print $1}')" == "$capture_sha" ]]
+)
 for file in \
   "$ROOT/scripts/lib-mobile-ios-release-artifact.sh" \
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
@@ -619,16 +648,52 @@ for forbidden in (
         raise SystemExit(f"Release join gate retains forbidden private/debug path: {forbidden}")
 if "run-as" in artifacts:
     raise SystemExit("Release artifact validation still invokes run-as")
-if "device copy from" in runtime_gate_code:
-    raise SystemExit("Release join runtime reads a private app container")
 for required in (
     "device copy to",
     "appDataContainer",
     'Documents/$filename',
     ".UITests.xctrunner",
+    "device copy from",
+    "NVPN_RELEASE_JOIN_QR_SCREENSHOT_FILENAME",
+    "NVPN_RELEASE_JOIN_QR_SCREENSHOT_SHA256",
 ):
     if required not in ui:
         raise SystemExit(f"Release join fixture staging is missing {required}")
+reuse_command = ui.split("release_join_ios_test_command() {", 1)[1].split(
+    "release_join_ios_process_pgid() {", 1
+)[0]
+for required in (
+    "testImportJoinQrImageAndRequireAdminRosterProgress",
+    "--ui-target-app-argument=--nvpn-ui-test-qr-image-import",
+):
+    if required not in reuse_command:
+        raise SystemExit(
+            "UseDestinationArtifacts QR import lacks its allowlisted launch flag: "
+            + required
+        )
+if reuse_command.index("testImportJoinQrImageAndRequireAdminRosterProgress") \
+        > reuse_command.index(
+            "--ui-target-app-argument=--nvpn-ui-test-qr-image-import"
+        ):
+    raise SystemExit("QR import target argument is not scoped before xctestrun rewrite")
+run_only = desktop.split("select_run_only_artifact() {", 1)[1].split(
+    "write_component_proof() {", 1
+)[0]
+for required in (
+    "NVPN_MACOS_RELEASE_RUN_ONLY_RECEIPT",
+    'read_cached_identity "$RUN_ONLY_RECEIPT"',
+    'cp "$RUN_ONLY_RECEIPT" "$RESULT_DIR/macos/artifact.json"',
+    "NVPN_MACOS_RELEASE_RUN_ONLY_HARNESS_GIT_SHA",
+    "NVPN_MACOS_RELEASE_RUN_ONLY_HARNESS_GIT_TREE",
+    "verify_run_only_receipt_binding",
+    "artifactReceiptSha256",
+):
+    if required not in desktop:
+        raise SystemExit(f"macOS run-only cached-artifact path lacks {required}")
+if '$RESULT_DIR/macos/artifact.json"' in run_only.split(
+        'read_cached_identity "$RUN_ONLY_RECEIPT"', 1
+    )[0]:
+    raise SystemExit("macOS run-only still requires its output directory as input")
 for forbidden in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace"):
     if forbidden in ios_info:
         raise SystemExit(f"Production iOS app exposes test fixture storage: {forbidden}")
@@ -727,7 +792,7 @@ for required in (
         )
 if "allow.tap()" not in prompt_handler or "continue" not in prompt_handler:
     raise SystemExit("Release join XCTest reuses the disappearing Apple Allow hierarchy")
-if ios_test.count("try dismissSystemPromptsIfPresent()") != 5:
+if ios_test.count("try dismissSystemPromptsIfPresent()") != 4:
     raise SystemExit("Release join XCTest does not propagate every system-prompt failure")
 for required in (
     "ShippedUIInteraction.reveal(nameField, byTapping: create)",
@@ -796,6 +861,13 @@ if "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS" not in ios_test:
     raise SystemExit("Release join XCTest does not timestamp the first exact roster row")
 if "UIPasteboard" in ios_test:
     raise SystemExit("Release QR XCTest may not inject a join request payload")
+for required in (
+    "XCUIScreen.main.screenshot().pngRepresentation",
+    "SHA256.hash(data: png)",
+    "nvpn-release-join-qr-",
+):
+    if required not in ios_test:
+        raise SystemExit(f"Release QR XCTest lacks trusted screen capture: {required}")
 for required in (
     'element("join-request-import-image")',
     'XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")',

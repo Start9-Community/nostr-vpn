@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 
@@ -46,6 +47,9 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let qr = element("join-request-qr-content")
         XCTAssertTrue(qr.waitForExistence(timeout: 10), "Shipped full-width join QR was not visible")
         let initialQrWidthBasisPoints = assertQrIsFullWidth(qr)
+        let capture = try captureCurrentScreen()
+        emit("NVPN_RELEASE_JOIN_QR_SCREENSHOT_FILENAME=\(capture.filename)")
+        emit("NVPN_RELEASE_JOIN_QR_SCREENSHOT_SHA256=\(capture.sha256)")
         emit("NVPN_RELEASE_JOIN_QR_READY=1")
 
         XCUIDevice.shared.press(.home)
@@ -564,6 +568,21 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     private func emit(_ marker: String) {
         let data = Data("NVPN_RELEASE_JOIN_MARKER \(marker)\n".utf8)
         FileHandle.standardError.write(data)
+    }
+
+    private func captureCurrentScreen() throws -> (filename: String, sha256: String) {
+        let png = XCUIScreen.main.screenshot().pngRepresentation
+        XCTAssertGreaterThan(png.count, 8, "XCTest QR screen capture was empty")
+        let filename = "nvpn-release-join-qr-\(UUID().uuidString).png"
+        let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0]
+        try png.write(to: documents.appendingPathComponent(filename), options: .atomic)
+        let sha256 = SHA256.hash(data: png)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return (filename, sha256)
     }
 
     private func millisecondsSinceEpoch() -> Int64 {

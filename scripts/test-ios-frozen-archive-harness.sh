@@ -15,6 +15,7 @@ SOURCE="$PRODUCTS/NostrVpnIos_fixture.xctestrun"
 PRIVATE_DIR="$TMP_ROOT/private"
 OUTPUT="$PRIVATE_DIR/network-case.xctestrun"
 DESTINATION_OUTPUT="$PRIVATE_DIR/network-case-installed.xctestrun"
+DESTINATION_IMPORT_OUTPUT="$PRIVATE_DIR/join-import-installed.xctestrun"
 mkdir -p "$TEST_BUNDLE" "$TUNNEL" "$PRIVATE_DIR"
 chmod 700 "$PRIVATE_DIR"
 printf 'app\n' >"$APP/Nostr VPN"
@@ -110,6 +111,14 @@ python3 "$TOOL" rewrite-xctestrun \
   --target-app "$APP" \
   --use-destination-artifacts
 
+python3 "$TOOL" rewrite-xctestrun \
+  --source "$SOURCE" \
+  --output "$DESTINATION_IMPORT_OUTPUT" \
+  --products-root "$PRODUCTS" \
+  --target-app "$APP" \
+  --use-destination-artifacts \
+  --ui-target-app-argument=--nvpn-ui-test-qr-image-import
+
 python3 - "$DESTINATION_OUTPUT" <<'PY'
 import pathlib
 import plistlib
@@ -135,6 +144,33 @@ for key in (
     if key in target:
         raise SystemExit(f"destination-artifact plan retains {key}")
 PY
+
+python3 - "$DESTINATION_IMPORT_OUTPUT" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+payload = plistlib.load(pathlib.Path(sys.argv[1]).open("rb"))
+target = payload["TestConfigurations"][0]["TestTargets"][0]
+if target.get("UITargetAppCommandLineArguments") != [
+    "--nvpn-ui-test-qr-image-import"
+]:
+    raise SystemExit("destination-artifact plan lost the allowlisted import flag")
+if target.get("UITargetAppEnvironmentVariables") != {}:
+    raise SystemExit("destination-artifact plan injected target app environment")
+PY
+
+if python3 "$TOOL" rewrite-xctestrun \
+  --source "$SOURCE" \
+  --output "$PRIVATE_DIR/unallowlisted-app-argument.xctestrun" \
+  --products-root "$PRODUCTS" \
+  --target-app "$APP" \
+  --use-destination-artifacts \
+  --ui-target-app-argument=--untrusted-app-argument >/dev/null 2>&1
+then
+  echo "Frozen iOS helper accepted an unallowlisted target app argument" >&2
+  exit 1
+fi
 
 python3 - \
   "$ROOT/scripts/mobile_release_artifact_receipt.py" \

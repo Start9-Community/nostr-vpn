@@ -497,14 +497,39 @@ release_join_capture_android_qr() {
 
 release_join_capture_ios_qr() {
   local output="$1"
+  local bundle filename expected_sha actual_sha
   rm -f "$output"
-  command -v idevicescreenshot >/dev/null 2>&1 || {
-    echo "idevicescreenshot is required for real iPhone QR capture" >&2
+  filename="$(
+    release_join_ios_marker_value NVPN_RELEASE_JOIN_QR_SCREENSHOT_FILENAME
+  )"
+  expected_sha="$(
+    release_join_ios_marker_value NVPN_RELEASE_JOIN_QR_SCREENSHOT_SHA256
+  )"
+  [[ "$filename" =~ ^nvpn-release-join-qr-[A-Fa-f0-9-]+\.png$ \
+    && "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "iPhone XCTest did not report an exact QR screen capture" >&2
     return 1
   }
-  idevicescreenshot -u "$RELEASE_JOIN_IOS_UDID" "$output" >/dev/null
-  [[ "$(od -An -tx1 -N8 "$output" | tr -d ' \n')" == 89504e470d0a1a0a ]] || {
-    echo "iPhone QR screen capture is not a PNG" >&2
+  bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
+  RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME="$filename"
+  export RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME
+  xcrun devicectl device copy from \
+    --device "$IOS_DEVICE" \
+    --domain-type appDataContainer \
+    --domain-identifier "$bundle" \
+    --source "Documents/$filename" \
+    --destination "$output" \
+    --timeout 15 \
+    --quiet >/dev/null || {
+    echo "Could not copy the XCTest QR screen capture from the iPhone" >&2
+    return 1
+  }
+  actual_sha="$(shasum -a 256 "$output" | awk '{print $1}')"
+  [[ "$(od -An -tx1 -N8 "$output" 2>/dev/null | tr -d ' \n')" \
+      == 89504e470d0a1a0a \
+    && "$actual_sha" == "$expected_sha" ]] || {
+    rm -f "$output"
+    echo "Copied iPhone QR screen capture failed PNG/hash validation" >&2
     return 1
   }
 }
@@ -703,6 +728,12 @@ release_join_ios_test_command() {
       --use-destination-artifacts
       --environment-stdin0
     )
+    if [[ "$test_name" == \
+      testImportJoinQrImageAndRequireAdminRosterProgress ]]; then
+      rewrite_command+=(
+        "--ui-target-app-argument=--nvpn-ui-test-qr-image-import"
+      )
+    fi
     runner_environment=(
       "NVPN_RELEASE_JOIN_ADMIN_ID="
       "NVPN_RELEASE_JOIN_BLACKBOX="

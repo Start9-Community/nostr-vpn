@@ -107,6 +107,7 @@ HOST_COMPONENT_PROOF="$PRIVATE_DIR/macos-component-proof.json"
 PUBLICATION_DIR="$RESULT_DIR/macos/publication"
 CACHED_APP="$PUBLICATION_DIR/Nostr VPN.app"
 CACHED_RECEIPT="$PUBLICATION_DIR/artifact.json"
+RUN_ONLY_RECEIPT="${NVPN_MACOS_RELEASE_RUN_ONLY_RECEIPT:-$RESULT_DIR/macos/artifact.json}"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
@@ -398,13 +399,13 @@ print(*(v.get(key, "") for key in keys), p.get("candidate_app_git_sha", ""), p.g
 select_run_only_artifact() {
   local expected_sha="${NVPN_MACOS_RELEASE_RUN_ONLY_HARNESS_GIT_SHA:-}"
   local expected_tree="${NVPN_MACOS_RELEASE_RUN_ONLY_HARNESS_GIT_TREE:-}"
-  [[ -s "$RESULT_DIR/macos/artifact.json" \
+  [[ -s "$RUN_ONLY_RECEIPT" \
     && "$expected_sha" =~ ^[0-9a-f]{40}$ \
     && "$expected_tree" =~ ^[0-9a-f]{40}$ ]] || {
-    echo "macOS run-only requires cached artifact and exact frozen harness pins" >&2
+    echo "macOS run-only requires an explicit cached receipt and exact frozen artifact-harness pins" >&2
     return 1
   }
-  read_cached_identity "$RESULT_DIR/macos/artifact.json"
+  read_cached_identity "$RUN_ONLY_RECEIPT"
   [[ "$CACHE_HARNESS_SHA" == "$expected_sha" \
     && "$CACHE_HARNESS_TREE" == "$expected_tree" \
     && "$CACHE_FIPS_SHA" == "$RELEASE_JOIN_FIPS_SHA" \
@@ -417,6 +418,28 @@ select_run_only_artifact() {
   PRODUCT_GIT_TREE="$CACHE_PRODUCT_TREE"
   APP_GIT_SHA="$CACHE_HARNESS_SHA"
   APP_GIT_TREE="$CACHE_HARNESS_TREE"
+  if [[ "$RUN_ONLY_RECEIPT" != "$RESULT_DIR/macos/artifact.json" ]]; then
+    cp "$RUN_ONLY_RECEIPT" "$RESULT_DIR/macos/artifact.json"
+  fi
+}
+
+verify_run_only_receipt_binding() {
+  [[ "$ARTIFACT_ACTION" == "run-only" ]] || return 0
+  local host_receipt_sha remote_receipt_sha
+  host_receipt_sha="$(
+    shasum -a 256 "$RESULT_DIR/macos/artifact.json" | awk '{print $1}'
+  )"
+  remote_receipt_sha="$(
+    python3 -c '
+import json,sys
+print(json.load(open(sys.argv[1])).get("artifactReceiptSha256", ""))
+' "$RESULT_DIR/macos/verification.json"
+  )"
+  [[ "$remote_receipt_sha" =~ ^[0-9a-f]{64}$ \
+    && "$host_receipt_sha" == "$remote_receipt_sha" ]] || {
+    echo "Remote macOS verification does not bind the selected run-only receipt" >&2
+    return 1
+  }
 }
 
 write_component_proof() {
@@ -669,6 +692,7 @@ esac
 scp -q \
   "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/verification.json" \
   "$RESULT_DIR/macos/verification.json"
+verify_run_only_receipt_binding
 
 if [[ "$ARTIFACT_ACTION" != "full" && "$ARTIFACT_ACTION" != "run-only" ]]; then
   echo "MACOS_VM_IMPORTED_RELEASE_ARTIFACT_OK"
