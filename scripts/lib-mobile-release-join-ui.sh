@@ -13,6 +13,12 @@ RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
 RELEASE_JOIN_ANDROID_NETWORK_IDS=()
 
+release_join_marker_value_from_log() {
+  local log="$1" name="$2"
+  sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $name=//p" "$log" \
+    | tail -n 1 | tr -d '\r'
+}
+
 release_join_now_ms() {
   python3 - <<'PY'
 import time
@@ -725,8 +731,7 @@ release_join_ios_wait_marker() {
 
 release_join_ios_marker_value() {
   local name="$1"
-  sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $name=//p" "$RELEASE_JOIN_IOS_TEST_LOG" \
-    | tail -n 1
+  release_join_marker_value_from_log "$RELEASE_JOIN_IOS_TEST_LOG" "$name"
 }
 
 release_join_ios_finish_test() {

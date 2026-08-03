@@ -76,6 +76,9 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
   trap 'rm -f "$log"' EXIT
   RELEASE_JOIN_IOS_TEST_LOG="$log"
   RELEASE_JOIN_IOS_TEST_NAME="testSelectedMethod"
+  printf 'NVPN_RELEASE_JOIN_MARKER CRLF_VALUE=npub1fixture\r\n' >"$log"
+  [[ "$(release_join_ios_marker_value CRLF_VALUE)" == "npub1fixture" ]]
+  : >"$log"
   true &
   RELEASE_JOIN_IOS_TEST_PID=$!
   if release_join_ios_finish_test >/dev/null 2>&1; then

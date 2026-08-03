@@ -210,7 +210,7 @@ wait_log_marker() {
 }
 
 marker_value() {
-  sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $2=//p" "$1" | tail -n 1
+  release_join_marker_value_from_log "$1" "$2"
 }
 
 macos_reverse_desktop_visible() {

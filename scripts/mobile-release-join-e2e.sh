@@ -118,8 +118,7 @@ ios_log() {
 }
 
 ios_marker_value_from() {
-  local log="$1" name="$2"
-  sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $name=//p" "$log" | tail -n 1
+  release_join_marker_value_from_log "$1" "$2"
 }
 
 ios_create_admin() {
