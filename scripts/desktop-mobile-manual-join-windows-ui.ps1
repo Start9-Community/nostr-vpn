@@ -464,8 +464,10 @@ try {
       $Evidence.approvalSubmittedMs = Now-Milliseconds
       Invoke-Control "ManualJoinAdminSubmit"
       Write-Evidence
-      Wait-SinglePeerConnectedRoster $CoordinationTimeoutSeconds
-      $Evidence.acceptedSelector = "single-peer connected roster row"
+      $null = Find-Control `
+        "RosterParticipantAccepted-$ParticipantNpub" `
+        $CoordinationTimeoutSeconds
+      $Evidence.acceptedSelector = "exact accepted roster participant row"
       $Evidence.desktopAccepted = $true
       $Evidence.acceptedAtMs = Now-Milliseconds
       Save-WindowScreenshot "desktop-admin-accepted"
