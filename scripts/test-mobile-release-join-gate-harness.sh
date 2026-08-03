@@ -519,6 +519,7 @@ for required in (
         )
 for required in (
     "release_join_ios_finish_test",
+    "RELEASE_JOIN_UI_WAIT_SECS",
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
     '[[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
 ):
@@ -530,6 +531,8 @@ if ios_qr_joiner_phase.index(
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE"
 ) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
+if ios_qr_joiner_phase.count("RELEASE_JOIN_UI_WAIT_SECS") != 1:
+    raise SystemExit("iPhone QR readiness does not use the configured UI budget")
 
 ios_admin_android_manual_phase = gate.split(
     "phase_ios_admin_android_manual() {", 1
@@ -552,6 +555,7 @@ android_admin_ios_manual_phase = gate.split(
     "phase_android_admin_ios_manual() {", 1
 )[1].split("release_join_require_clean_fips", 1)[0]
 for required in (
+    "RELEASE_JOIN_UI_WAIT_SECS",
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
     '[[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
     "RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE=1",
@@ -564,6 +568,8 @@ if android_admin_ios_manual_phase.index(
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE"
 ) < android_admin_ios_manual_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone-joiner relaunch evidence is read before XCTest completes")
+if android_admin_ios_manual_phase.count("RELEASE_JOIN_UI_WAIT_SECS") != 2:
+    raise SystemExit("iPhone manual join markers do not use the configured UI budget")
 for required in (
     "args.ios_admin_manual_relaunch_durable",
     "args.ios_joiner_manual_relaunch_durable",

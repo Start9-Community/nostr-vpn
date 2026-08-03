@@ -194,7 +194,8 @@ phase_android_admin_ios_qr() {
   release_join_ios_start_test \
     testShowPhysicalJoinQrAndRequireRosterCompletion "$join_log" \
     "NVPN_RELEASE_JOIN_ADMIN_ID=$RELEASE_JOIN_ANDROID_ADMIN_ID"
-  release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_READY=1 15 \
+  release_join_ios_wait_marker \
+    NVPN_RELEASE_JOIN_QR_READY=1 "$RELEASE_JOIN_UI_WAIT_SECS" \
     || fail "iPhone did not display its shipped join QR"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_LIFECYCLE_READY=1 10 \
     || fail "iPhone pending QR did not survive Home/foreground"
@@ -273,14 +274,16 @@ phase_android_admin_ios_manual() {
     testManualJoinAndRequireRosterCompletion "$join_log" \
     "NVPN_RELEASE_JOIN_ADMIN_ID=$RELEASE_JOIN_ANDROID_ADMIN_ID" \
     "NVPN_RELEASE_JOIN_NETWORK_ID=$RELEASE_JOIN_ANDROID_NETWORK_ID"
-  release_join_ios_wait_marker NVPN_RELEASE_JOIN_JOINER_ID= 10 \
+  release_join_ios_wait_marker \
+    NVPN_RELEASE_JOIN_JOINER_ID= "$RELEASE_JOIN_UI_WAIT_SECS" \
     || fail "iPhone manual join did not expose its public identity"
   RELEASE_JOIN_IOS_JOINER_ID="$(
     ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_JOINER_ID
   )"
   release_join_valid_npub "$RELEASE_JOIN_IOS_JOINER_ID" \
     || fail "iPhone manual join identity was invalid"
-  release_join_ios_wait_marker NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10 \
+  release_join_ios_wait_marker \
+    NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 "$RELEASE_JOIN_UI_WAIT_SECS" \
     || fail "iPhone did not submit through shipped manual-join controls"
   android_admin_log="$RESULT_DIR/android-admin-ios-manual.log"
   release_join_android_manual_admin_add "$RELEASE_JOIN_IOS_JOINER_ID" \
