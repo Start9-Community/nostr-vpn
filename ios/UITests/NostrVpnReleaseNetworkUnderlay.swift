@@ -256,21 +256,51 @@ extension NostrVpnReleaseNetworkUITests {
             throw gateError("Settings root did not expose one Wi-Fi row")
         }
         let row = rows.firstMatch
-        guard row.isHittable else {
-            throw gateError("Settings Wi-Fi row was not hittable")
+        let label = row.staticTexts["Wi-Fi"].firstMatch
+        guard label.isHittable else {
+            throw gateError("Settings Wi-Fi label was not hittable")
         }
-        row.tap()
+        label.tap()
         let deadline = ProcessInfo.processInfo.systemUptime + 5
         repeat {
-            if rows.count == 0, settings.switches.count == 1 {
-                let toggle = settings.switches.firstMatch
-                if toggle.isHittable {
-                    return toggle
+            let back = settings.navigationBars.buttons.firstMatch
+            guard back.exists, back.isHittable else {
+                Thread.sleep(forTimeInterval: 0.05)
+                continue
+            }
+            let nativeSwitches = settings.switches.allElementsBoundByIndex
+                .filter { $0.exists && $0.isHittable }
+            if nativeSwitches.count == 1 {
+                return nativeSwitches[0]
+            }
+            let binaryControls = settings.descendants(matching: .any)
+                .allElementsBoundByIndex
+                .filter { element in
+                    element.exists && element.isHittable
+                        && binaryControlState(element) != nil
                 }
+            if binaryControls.count == 1 {
+                return binaryControls[0]
             }
             Thread.sleep(forTimeInterval: 0.05)
         } while ProcessInfo.processInfo.systemUptime < deadline
-        throw gateError("Settings did not open the public Wi-Fi page and switch")
+        throw gateError("Settings did not expose one public Wi-Fi toggle")
+    }
+
+    func binaryControlState(_ element: XCUIElement) -> Bool? {
+        guard let rawValue = element.value else {
+            return nil
+        }
+        switch String(describing: rawValue).trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        {
+        case "1", "on", "true", "yes":
+            return true
+        case "0", "off", "false", "no":
+            return false
+        default:
+            return nil
+        }
     }
 
     func normalizeSettingsRoot(_ settings: XCUIApplication) throws {

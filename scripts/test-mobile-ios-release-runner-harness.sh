@@ -3,8 +3,35 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER="$ROOT/scripts/lib-mobile-ios-release-network.sh"
+LOCK_DIR="/tmp/nvpn-ios-release-runner-harness.lock"
+lock_acquired=0
+for _ in {1..200}; do
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" >"$LOCK_DIR/owner"
+    lock_acquired=1
+    break
+  fi
+  lock_owner="$(cat "$LOCK_DIR/owner" 2>/dev/null || true)"
+  if [[ "$lock_owner" =~ ^[0-9]+$ ]] \
+    && ! kill -0 "$lock_owner" 2>/dev/null
+  then
+    stale_lock="$LOCK_DIR.stale.$$"
+    mv "$LOCK_DIR" "$stale_lock" 2>/dev/null || true
+    rm -rf "$stale_lock"
+  fi
+  sleep 0.05
+done
+[[ "$lock_acquired" -eq 1 ]] || {
+  echo "iOS Release runner harness fixture is already in use" >&2
+  exit 1
+}
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-runner-harness.XXXXXX")"
-trap 'rm -rf "$TEMP_ROOT"' EXIT
+cleanup() {
+  rm -rf "$TEMP_ROOT"
+  [[ "$(cat "$LOCK_DIR/owner" 2>/dev/null || true)" != "$$" ]] \
+    || rm -rf "$LOCK_DIR"
+}
+trap cleanup EXIT
 
 fail() {
   echo "iOS Release runner harness failed: $*" >&2
@@ -91,6 +118,180 @@ runner_command="$({
 if grep -Fq 'ios_release_network_install_exact_runner' <<<"$runner_command"; then
   fail "per-case XCTest command still replaces the retained exact runner"
 fi
+
+reuse_app="$TEMP_ROOT/reuse/Nostr VPN.app"
+reuse_runner="$TEMP_ROOT/reuse/NostrVpnIosUITests-Runner.app"
+reuse_receipt="$TEMP_ROOT/reuse/app-receipt.json"
+reuse_runner_receipt="$TEMP_ROOT/reuse/installed-runner-receipt.json"
+reuse_inventory_log="$TEMP_ROOT/reuse/inventory.log"
+mkdir -p "$reuse_app" "$reuse_runner"
+python3 - "$reuse_app/Info.plist" "$reuse_runner/Info.plist" \
+  "$reuse_receipt" <<'PY'
+import json
+import plistlib
+import sys
+
+app, runner, receipt = sys.argv[1:]
+for path, identifier, build, version in (
+    (app, "fi.siriusbusiness.nvpn", "4001008", "4.1.5"),
+    (runner, "fi.siriusbusiness.nvpn.UITests.xctrunner", "1", "1.0"),
+):
+    with open(path, "wb") as handle:
+        plistlib.dump({
+            "CFBundleIdentifier": identifier,
+            "CFBundleVersion": build,
+            "CFBundleShortVersionString": version,
+        }, handle)
+with open(receipt, "w", encoding="utf-8") as handle:
+    json.dump({
+        "installedBuildNumber": "4001008",
+        "installedMarketingVersion": "4.1.5",
+    }, handle)
+PY
+reuse_runner_tree="$(
+  python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$reuse_runner"
+)"
+reuse_device_sha="$(printf %s fixture-device | shasum -a 256 | awk '{print $1}')"
+python3 - \
+  "$reuse_runner_receipt" "$reuse_runner_tree" "$reuse_device_sha" <<'PY'
+import json, sys
+json.dump({
+    "receiptSchema": 1,
+    "artifactType": "installed iOS XCTest runner",
+    "bundleIdentifier": "fi.siriusbusiness.nvpn.UITests.xctrunner",
+    "runnerBundleTreeSha256": sys.argv[2],
+    "selectedPhysicalDeviceIdentifierSha256": sys.argv[3],
+    "xctestrunSha256": "d" * 64,
+    "testProductsTreeSha256": "e" * 64,
+}, open(sys.argv[1], "w"))
+PY
+
+run_installed_reuse_readback() (
+  local runner_version="$1"
+  IOS_RELEASE_NETWORK_SIGNING_DIR="$TEMP_ROOT/reuse"
+  IOS_RELEASE_NETWORK_DEVICE=fixture-device
+  xcrun() {
+    local bundle="" output="" previous=""
+    printf '%s\n' "$*" >>"$reuse_inventory_log"
+    for argument in "$@"; do
+      case "$previous" in
+        --bundle-id) bundle="$argument" ;;
+        --json-output) output="$argument" ;;
+      esac
+      previous="$argument"
+    done
+    [[ -n "$bundle" && -n "$output" ]] || return 1
+    python3 - "$output" "$bundle" "$runner_version" <<'PY'
+import json
+import sys
+
+path, bundle, runner_version = sys.argv[1:]
+is_runner = bundle.endswith(".UITests.xctrunner")
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump({
+        "info": {"outcome": "success"},
+        "result": {
+            "deviceIdentifier": "fixture-coredevice-uuid-not-hardware-udid",
+            "apps": [{
+                "bundleIdentifier": bundle,
+                "bundleVersion": "1" if is_runner else "4001008",
+                "version": runner_version if is_runner else "4.1.5",
+            }],
+        },
+    }, handle)
+PY
+  }
+  ios_release_network_require_installed_reuse \
+    "$reuse_app" "$reuse_runner" "$reuse_receipt" \
+    "$reuse_runner_receipt" "$reuse_runner_tree" "$reuse_device_sha" \
+    "$(printf 'd%.0s' {1..64})" "$(printf 'e%.0s' {1..64})"
+)
+
+run_installed_reuse_readback 1.0 \
+  || fail "exact installed iOS app and runner readback was rejected"
+if run_installed_reuse_readback 2.0 \
+    >"$TEMP_ROOT/reuse-mismatch.log" 2>&1
+then
+  fail "installed iOS runner version mismatch was accepted"
+fi
+grep -Fq 'Installed iOS app/runner identity differs' \
+  "$TEMP_ROOT/reuse-mismatch.log" \
+  || fail "installed iOS runner mismatch did not fail closed"
+cp "$reuse_runner_receipt" "$reuse_runner_receipt.clean"
+python3 - "$reuse_runner_receipt" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["selectedPhysicalDeviceIdentifierSha256"] = "0" * 64
+path.write_text(json.dumps(value))
+PY
+if run_installed_reuse_readback 1.0 \
+    >"$TEMP_ROOT/reuse-device-mismatch.log" 2>&1
+then
+  fail "installed iOS runner receipt accepted another phone"
+fi
+grep -Fq 'installed iOS runner receipt mismatch' \
+  "$TEMP_ROOT/reuse-device-mismatch.log" \
+  || fail "installed iOS runner device mismatch did not fail closed"
+mv "$reuse_runner_receipt.clean" "$reuse_runner_receipt"
+cp "$reuse_runner_receipt" "$reuse_runner_receipt.clean"
+python3 - "$reuse_runner_receipt" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["runnerBundleTreeSha256"] = "0" * 64
+path.write_text(json.dumps(value))
+PY
+if run_installed_reuse_readback 1.0 \
+    >"$TEMP_ROOT/reuse-runner-tree-mismatch.log" 2>&1
+then
+  fail "installed iOS runner receipt accepted another runner binary"
+fi
+grep -Fq 'installed iOS runner receipt mismatch' \
+  "$TEMP_ROOT/reuse-runner-tree-mismatch.log" \
+  || fail "installed iOS runner digest mismatch did not fail closed"
+mv "$reuse_runner_receipt.clean" "$reuse_runner_receipt"
+if grep -Eq 'device (install|uninstall) app' "$reuse_inventory_log"; then
+  fail "installed-artifact validation changed an iOS installation"
+fi
+
+python3 - "$RUNNER" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+reuse = source.split("ios_release_network_prepare_reuse() {", 1)[1].split(
+    "\nios_release_network_prepare() {", 1
+)[0]
+if 'NVPN_MOBILE_WG_EXIT_INSTALL_IOS:-1' not in source:
+    raise SystemExit("exact installed iOS reuse lacks an explicit install mode")
+for required in (
+    'ios_release_network_require_installed_reuse',
+    'IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=1',
+    'testProductsTreeSha256',
+):
+    if required not in reuse:
+        raise SystemExit(f"exact installed iOS reuse omits {required}")
+disabled = reuse.split(
+    '\n    0)', 1
+)[1].split(';;', 1)[0]
+if "device install app" in disabled or "device uninstall app" in disabled:
+    raise SystemExit("disabled iOS install mode changes the installation")
+if "--use-destination-artifacts" not in source:
+    raise SystemExit("retained iOS reuse lost destination-artifact XCTest")
+PY
+
+NVPN_MOBILE_WG_EXIT_INSTALL_IOS=0
+NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=0
+bool_is_true() { return 1; }
+if ios_release_network_prepare fixture-device \
+    >"$TEMP_ROOT/reuse-required.log" 2>&1
+then
+  fail "disabled iOS install mode ran without exact artifact reuse"
+fi
+grep -Fq 'requires exact artifact reuse' "$TEMP_ROOT/reuse-required.log" \
+  || fail "disabled iOS install mode did not fail closed"
+unset NVPN_MOBILE_WG_EXIT_INSTALL_IOS NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD
 
 for stem in nvpn-installed-release nvpn-release-installed NostrVpnIos-case.xctestrun; do
   first="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"
@@ -407,7 +608,9 @@ do
 done
 
 disconnect="$TEMP_ROOT/disconnect-markers.log"
-printf '%s\n' 'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' >"$disconnect"
+printf '%s\n' \
+  'NVPN_IOS_RELEASE_DIRECT_CLEANUP_PASSED=1' \
+  'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' >"$disconnect"
 ios_release_network_validate_disconnect_markers "$disconnect" ""
 if ios_release_network_validate_disconnect_markers \
     "$disconnect" "$spec" 2>/dev/null
@@ -415,6 +618,7 @@ then
   fail "underlay cleanup accepted no Wi-Fi restoration marker"
 fi
 printf '%s\n' \
+  'NVPN_IOS_RELEASE_DIRECT_CLEANUP_PASSED=1' \
   'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' \
   'NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1' >"$disconnect"
 ios_release_network_validate_disconnect_markers "$disconnect" "$spec"
@@ -424,10 +628,12 @@ then
   fail "non-underlay cleanup accepted a Wi-Fi restoration marker"
 fi
 printf '%s\n' \
+  'NVPN_IOS_RELEASE_DIRECT_CLEANUP_PASSED=1' \
   'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' \
   'NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1' >"$disconnect"
 ios_release_network_validate_disconnect_markers "$disconnect" "$spec"
 printf '%s\n' \
+  'NVPN_IOS_RELEASE_DIRECT_CLEANUP_PASSED=1' \
   'NVPN_IOS_RELEASE_DISCONNECT_PASSED=1' \
   'NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1' \
   'NVPN_IOS_RELEASE_HOME_WIFI_ENABLED_NO_SAVED_SSID=1' >"$disconnect"
@@ -436,6 +642,33 @@ if ios_release_network_validate_disconnect_markers \
 then
   fail "disconnect cleanup accepted conflicting Wi-Fi restoration markers"
 fi
+packet_processes="$TEMP_ROOT/packet-processes.json"
+(
+  xcrun() {
+    local previous="" output="" argument
+    for argument in "$@"; do
+      [[ "$previous" != --json-output ]] || output="$argument"
+      previous="$argument"
+    done
+    printf '%s\n' '{"result":{"runningProcesses":[]}}' >"$output"
+  }
+  ios_release_network_require_packet_tunnel_stopped \
+    fixture-device "$packet_processes" 1
+) || fail "disconnect cleanup rejected an absent PacketTunnel"
+(
+  xcrun() {
+    local previous="" output="" argument
+    for argument in "$@"; do
+      [[ "$previous" != --json-output ]] || output="$argument"
+      previous="$argument"
+    done
+    printf '%s\n' \
+      '{"result":{"runningProcesses":[{"executable":"file:///Nostr%20VPN.app/PlugIns/Nostr%20VPN%20Tunnel.appex/Nostr%20VPN%20Tunnel","processIdentifier":7}]}}' \
+      >"$output"
+  }
+  ! ios_release_network_require_packet_tunnel_stopped \
+    fixture-device "$packet_processes" 1 >/dev/null 2>&1
+) || fail "disconnect cleanup accepted a live PacketTunnel"
 if sed -n '/ios_release_network_test_command()/,/^}/p' "$RUNNER" \
   | grep -Fq -- '-quiet'
 then

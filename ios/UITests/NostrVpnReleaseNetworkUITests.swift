@@ -167,16 +167,20 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         if app.tabBars.buttons["Devices"].waitForExistence(timeout: 3) {
             try turnVPNOffIfNeeded()
         }
-        if let spec = optionalReleaseSpec() {
-            try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(spec.publicHttpsUrl)
-            _ = try waitForSourceIP(
-                spec.sourceIpUrl,
-                timeout: 15
-            )
+        let cleanupSpec = optionalReleaseSpec()
+        try NostrVpnReleaseNetworkProbe.requirePublicHTTPS(
+            cleanupSpec?.publicHttpsUrl ?? "https://example.com/"
+        )
+        _ = try waitForSourceIP(
+            cleanupSpec?.sourceIpUrl ?? "https://api.ipify.org",
+            timeout: 15
+        )
+        if let spec = cleanupSpec {
             try NostrVpnReleaseNetworkProbe.requireControlledHTTPUnavailable(
                 spec.resolverProbeUrl
             )
         }
+        emit("NVPN_IOS_RELEASE_DIRECT_CLEANUP_PASSED=1")
         emit("NVPN_IOS_RELEASE_DISCONNECT_PASSED=1")
     }
 

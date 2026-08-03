@@ -13,6 +13,8 @@ source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
 source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
 
 load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
@@ -43,6 +45,7 @@ if ! release_join_reuse_artifacts; then
     exit 2
   }
 fi
+release_join_configure_install_modes
 
 RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}"
 PRIVATE_DIR="$RESULT_DIR/.private-$$"
@@ -50,19 +53,39 @@ SUMMARY="$RESULT_DIR/summary.json"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
-MACOS_JOIN_GATE="${NVPN_RELEASE_JOIN_DESKTOP_MOBILE:-1}"
+RELEASE_JOIN_IOS_SETUP_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-30}"
+MACOS_JOIN_GATE_CONFIG="${NVPN_RELEASE_JOIN_DESKTOP_MOBILE:-1}"
 mkdir -p "$PRIVATE_DIR" "$RESULT_DIR"
 chmod 700 "$PRIVATE_DIR"
+RELEASE_JOIN_IOS_QUARANTINE="$RESULT_DIR/ios-network-state-unproven.quarantine"
+[[ ! -e "$RELEASE_JOIN_IOS_QUARANTINE" ]] || {
+  echo "iOS device remains quarantined after unproven network cleanup" >&2
+  exit 2
+}
+export RELEASE_JOIN_IOS_QUARANTINE
 
 fail() {
   echo "signed Release join gate failed: $*" >&2
   exit 1
 }
 
+RELEASE_JOIN_PHASE_SELECTION="${NVPN_RELEASE_JOIN_PHASES:-full}"
+case "$RELEASE_JOIN_PHASE_SELECTION" in
+  full|manual-only|iphone-admin-pixel-manual-only|pixel-admin-iphone-manual-only|iphone-admin-pixel-qr-only|pixel-admin-iphone-qr-only|desktop-only) ;;
+  *)
+    fail "unsupported NVPN_RELEASE_JOIN_PHASES=$RELEASE_JOIN_PHASE_SELECTION"
+    ;;
+esac
+MACOS_JOIN_GATE="$(
+  release_join_desktop_mode \
+    "$RELEASE_JOIN_PHASE_SELECTION" "$MACOS_JOIN_GATE_CONFIG"
+)" || fail "unsupported NVPN_RELEASE_JOIN_DESKTOP_MOBILE=$MACOS_JOIN_GATE_CONFIG"
+
 for value in \
   "$RELEASE_JOIN_UI_WAIT_SECS" \
   "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
-  "$RELEASE_JOIN_CAMERA_WAIT_SECS"
+  "$RELEASE_JOIN_CAMERA_WAIT_SECS" \
+  "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
 do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail "timeouts must be positive integers"
 done
@@ -70,6 +93,8 @@ done
   || fail "join delivery wait cannot exceed 15 seconds"
 ((RELEASE_JOIN_CAMERA_WAIT_SECS <= 30)) \
   || fail "optical camera wait cannot exceed 30 seconds"
+((RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 30)) \
+  || fail "iOS setup wait cannot exceed 30 seconds"
 
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 IOS_REQUESTED="${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
@@ -93,11 +118,12 @@ ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
 export NVPN_ANDROID_SERIAL="$ANDROID_SERIAL_SELECTED"
 export IOS_DEVICE RESULT_DIR PRIVATE_DIR
 export RELEASE_JOIN_UI_WAIT_SECS RELEASE_JOIN_DELIVERY_WAIT_SECS
-export RELEASE_JOIN_CAMERA_WAIT_SECS
+export RELEASE_JOIN_CAMERA_WAIT_SECS RELEASE_JOIN_IOS_SETUP_WAIT_SECS
 RELEASE_JOIN_IOS_NETWORK_IDS=()
 
 cleanup() {
   local status=$?
+  local cleanup_status=0 package route
   trap - EXIT
   if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" ]] \
       && kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null; then
@@ -106,6 +132,24 @@ cleanup() {
   fi
   if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
     "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || true
+    package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+    "${ADB[@]}" shell am force-stop "$package" >/dev/null 2>&1 || cleanup_status=1
+    "${ADB[@]}" shell pm clear "$package" >/dev/null 2>&1 || cleanup_status=1
+    [[ -z "$("${ADB[@]}" shell pidof "$package" 2>/dev/null | tr -d '\r')" ]] \
+      || cleanup_status=1
+    route="$("${ADB[@]}" shell ip route get 1.1.1.1 2>/dev/null | tr -d '\r')"
+    [[ -n "$route" && ! "$route" =~ dev[[:space:]]+(tun|wg|ppp) ]] \
+      || cleanup_status=1
+    "${ADB[@]}" shell ping -c 1 -W 5 one.one.one.one \
+      >"$RESULT_DIR/android-direct-cleanup.log" 2>&1 || cleanup_status=1
+    if [[ "${RELEASE_JOIN_IOS_CLEANUP_ARMED:-0}" -eq 1 ]]; then
+      release_join_cleanup_ios_network_state \
+        >"$RESULT_DIR/ios-direct-cleanup.log" 2>&1 || cleanup_status=1
+    fi
+  fi
+  if ((cleanup_status != 0)); then
+    echo "mobile join cleanup did not prove restored direct device state" >&2
+    [[ "$status" -ne 0 ]] || status=1
   fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"
@@ -195,7 +239,7 @@ phase_android_admin_ios_qr() {
     testShowPhysicalJoinQrAndRequireRosterCompletion "$join_log" \
     "NVPN_RELEASE_JOIN_ADMIN_ID=$RELEASE_JOIN_ANDROID_ADMIN_ID"
   release_join_ios_wait_marker \
-    NVPN_RELEASE_JOIN_QR_READY=1 "$RELEASE_JOIN_UI_WAIT_SECS" \
+    NVPN_RELEASE_JOIN_QR_READY=1 "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone did not display its shipped join QR"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_LIFECYCLE_READY=1 10 \
     || fail "iPhone pending QR did not survive Home/foreground"
@@ -275,7 +319,7 @@ phase_android_admin_ios_manual() {
     "NVPN_RELEASE_JOIN_ADMIN_ID=$RELEASE_JOIN_ANDROID_ADMIN_ID" \
     "NVPN_RELEASE_JOIN_NETWORK_ID=$RELEASE_JOIN_ANDROID_NETWORK_ID"
   release_join_ios_wait_marker \
-    NVPN_RELEASE_JOIN_JOINER_ID= "$RELEASE_JOIN_UI_WAIT_SECS" \
+    NVPN_RELEASE_JOIN_JOINER_ID= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone manual join did not expose its public identity"
   RELEASE_JOIN_IOS_JOINER_ID="$(
     ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_JOINER_ID
@@ -327,31 +371,39 @@ RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
 export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 release_join_prepare_android_release
 release_join_prepare_ios_release
-rm -f "$RESULT_DIR/delivery-times.tsv"
+rm -f "$SUMMARY" "$RESULT_DIR/delivery-times.tsv"
 
-phase_ios_admin_android_qr
-phase_android_admin_ios_qr
-phase_ios_admin_android_manual
-phase_android_admin_ios_manual
+case "$RELEASE_JOIN_PHASE_SELECTION" in
+  full)
+    phase_ios_admin_android_qr
+    phase_android_admin_ios_qr
+    phase_ios_admin_android_manual
+    phase_android_admin_ios_manual
+    ;;
+  manual-only)
+    phase_ios_admin_android_manual
+    phase_android_admin_ios_manual
+    ;;
+  iphone-admin-pixel-manual-only) phase_ios_admin_android_manual ;;
+  pixel-admin-iphone-manual-only) phase_android_admin_ios_manual ;;
+  iphone-admin-pixel-qr-only) phase_ios_admin_android_qr ;;
+  pixel-admin-iphone-qr-only) phase_android_admin_ios_qr ;;
+  desktop-only) ;;
+esac
 
 release_join_assert_one_android_package
 release_join_assert_one_android_process
 release_join_launch_ios_release
 release_join_assert_one_ios_process
-[[ "${RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
-  && "${RELEASE_JOIN_IOS_QR_CONTENT_WIDTH_BPS:-}" =~ ^[1-9][0-9]*$ \
-  && "${RELEASE_JOIN_IOS_QR_RELAUNCH_DURABLE:-}" == 1 \
-  && "${RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE:-}" == 1 \
-  && "${RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE:-}" == 1 ]] \
-  || fail "mobile QR width or directional relaunch evidence is incomplete"
+if [[ "$MACOS_JOIN_GATE" -eq 1 ]]; then
+  "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
+    "${NVPN_MACOS_SSH_HOST:-}"
+fi
 
-case "$MACOS_JOIN_GATE" in
-  0|false|FALSE|False|no|NO|No|off|OFF|Off) ;;
-  *)
-    "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
-      "${NVPN_MACOS_SSH_HOST:-}"
-    ;;
-esac
+if [[ "$RELEASE_JOIN_PHASE_SELECTION" != full ]]; then
+  echo "SIGNED_RELEASE_PUBLIC_UI_MOBILE_JOIN_DIAGNOSTIC_OK $RELEASE_JOIN_PHASE_SELECTION"
+  exit 0
+fi
 
 python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" join-summary \
   --summary "$SUMMARY" \

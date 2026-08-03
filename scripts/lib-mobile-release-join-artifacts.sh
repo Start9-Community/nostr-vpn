@@ -6,12 +6,39 @@
 RELEASE_JOIN_ARTIFACTS_VALIDATED=0
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=0
 RELEASE_JOIN_DEVICE_MUTATED=0
+RELEASE_JOIN_IOS_CLEANUP_ARMED=0
+RELEASE_JOIN_INSTALL_ANDROID=1
+RELEASE_JOIN_INSTALL_IOS=1
 
 release_join_reuse_artifacts() {
   case "${NVPN_RELEASE_JOIN_REUSE_ARTIFACTS:-0}" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+release_join_configure_install_modes() {
+  local name env_name value normalized
+  for name in ANDROID IOS; do
+    env_name="NVPN_RELEASE_JOIN_INSTALL_${name}"
+    value="${!env_name:-1}"
+    case "$value" in
+      1|true|TRUE|True|yes|YES|Yes|on|ON|On) normalized=1 ;;
+      0|false|FALSE|False|no|NO|No|off|OFF|Off) normalized=0 ;;
+      *)
+        echo "Unsupported NVPN_RELEASE_JOIN_INSTALL_${name}=$value" >&2
+        return 2
+        ;;
+    esac
+    printf -v "RELEASE_JOIN_INSTALL_${name}" '%s' "$normalized"
+  done
+  if [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 0 \
+      || "$RELEASE_JOIN_INSTALL_IOS" -eq 0 ]] \
+    && ! release_join_reuse_artifacts
+  then
+    echo "Disabled mobile join installation requires exact artifact reuse" >&2
+    return 1
+  fi
 }
 
 release_join_sha256() {
@@ -232,7 +259,7 @@ release_join_prepare_android_release() {
   local apk="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
   local apksigner remote_path pulled apk_sha installed_sha cert_sha cert_sha_lower app_sha app_tree
   local expected_android_cert="${NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256:-}"
-  local preexisting_package=false
+  local preexisting_package=false replacement_install=false
   if release_join_reuse_artifacts; then
     [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -eq 1 \
       && -f "$RELEASE_JOIN_ANDROID_APK" ]] || {
@@ -301,12 +328,18 @@ release_join_prepare_android_release() {
   if "${ADB[@]}" shell pm path "$package" >/dev/null 2>&1; then
     preexisting_package=true
   fi
-  # Install twice. The second operation is necessarily an in-place replacement
-  # of the canonical package, even on a phone that began this gate clean.
-  "${ADB[@]}" install -r "$apk" >/dev/null
-  release_join_assert_one_android_package
-  "${ADB[@]}" install -r "$apk" >/dev/null
-  release_join_assert_one_android_package
+  if [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 1 ]]; then
+    # Install twice. The second operation is necessarily an in-place replacement
+    # of the canonical package, even on a phone that began this gate clean.
+    "${ADB[@]}" install -r "$apk" >/dev/null
+    release_join_assert_one_android_package
+    "${ADB[@]}" install -r "$apk" >/dev/null
+    release_join_assert_one_android_package
+    replacement_install=true
+  elif [[ "$preexisting_package" != true ]]; then
+    echo "Exact Android Release package is not already installed" >&2
+    return 1
+  fi
   remote_path="$(
     "${ADB[@]}" shell pm path "$package" \
       | tr -d '\r' \
@@ -346,11 +379,11 @@ release_join_prepare_android_release() {
     "$RESULT_DIR/android-release-install.json" \
     "$apk_sha" "$cert_sha_lower" "$app_sha" "$app_tree" \
     "$RELEASE_JOIN_FIPS_SHA" "$RELEASE_JOIN_FIPS_TREE" "$package" \
-    "$preexisting_package" <<'PY'
+    "$preexisting_package" "$replacement_install" <<'PY'
 import json
 import sys
 
-path, apk, cert, app, app_tree, fips, fips_tree, package, preexisting = sys.argv[1:]
+path, apk, cert, app, app_tree, fips, fips_tree, package, preexisting, replacement = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
         {
@@ -364,8 +397,9 @@ with open(path, "w", encoding="utf-8") as handle:
             "fipsGitTree": fips_tree,
             "package": package,
             "preexistingCanonicalPackage": preexisting == "true",
-            "replacementInstall": True,
-            "replacementInstallVerified": True,
+            "replacementInstall": replacement == "true",
+            "replacementInstallVerified": replacement == "true",
+            "installedArtifactVerified": True,
             "debuggable": False,
             "canonicalPackageCount": 1,
             "canonicalProcessCount": 1,
@@ -450,30 +484,59 @@ release_join_install_ios_release() {
   local installed_json="$RESULT_DIR/ios-installed-apps.json"
   local installed_receipt="$RESULT_DIR/ios-release-install.json"
   local runner="$derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  local runner_tree
+  local replacement_install=false prior_install_receipt=""
   release_join_require_device_mutation_allowed || return 1
   RELEASE_JOIN_DEVICE_MUTATED=1
   # Installing the exact verified bundle in place replaces its executable but
   # preserves the app container and the user's already-approved VPN manager.
   # Uninstalling here needlessly revokes that approval and forces a passcode
   # prompt before every physical gate retry.
-  xcrun devicectl device install app \
-    --device "$IOS_DEVICE" "$app_path" --quiet
   [[ -d "$runner" ]] || {
     echo "Exact iOS UI runner is unavailable" >&2
     return 1
   }
-  xcrun devicectl device install app \
-    --device "$IOS_DEVICE" "$runner" --quiet
-  xcrun devicectl device info apps \
-    --device "$IOS_DEVICE" \
-    --json-output "$installed_json" \
-    --quiet
-  python3 - \
+  release_join_arm_ios_disconnect_cleanup "$app_path" "$derived" "$udid" \
+    || return 1
+  runner_tree="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner"
+  )" || return 1
+  if [[ "$RELEASE_JOIN_INSTALL_IOS" -eq 1 ]]; then
+    if ! xcrun devicectl device install app \
+        --device "$IOS_DEVICE" "$app_path" --quiet \
+      || ! xcrun devicectl device install app \
+        --device "$IOS_DEVICE" "$runner" --quiet
+    then
+      echo "Exact iOS app/runner installation failed" >&2
+      return 1
+    fi
+    replacement_install=true
+  else
+    prior_install_receipt="${NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT:-}"
+    [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -eq 1 \
+      && -s "$prior_install_receipt" ]] || {
+      echo "iOS no-install reuse requires its device-bound runner install receipt" >&2
+      return 1
+    }
+  fi
+  if ! xcrun devicectl device info apps \
+      --device "$IOS_DEVICE" \
+      --json-output "$installed_json" \
+      --quiet
+  then
+    echo "Installed iOS app/runner inventory failed" >&2
+    return 1
+  fi
+  if ! python3 - \
     "$installed_json" "$installed_receipt" "$bundle" "$manifest_sha" \
     "$app_sha" "$app_tree" "$RELEASE_JOIN_FIPS_SHA" \
     "$RELEASE_JOIN_FIPS_TREE" "$RELEASE_JOIN_FIPS_VERSION" \
-    "$team_hash" "$app_cert" <<'PY'
+    "$team_hash" "$app_cert" "$app_path/Info.plist" \
+    "$runner/Info.plist" "$replacement_install" \
+    "$prior_install_receipt" "$udid" "$runner_tree" <<'PY'
+import hashlib
 import json
+import plistlib
 import sys
 
 (
@@ -488,15 +551,21 @@ import sys
     fips_version,
     team_hash,
     cert,
+    app_plist_path,
+    runner_plist_path,
+    replacement,
+    prior_install_receipt_path,
+    udid,
+    runner_tree,
 ) = sys.argv[1:]
 payload = json.load(open(source, encoding="utf-8"))
-matches = []
+apps = []
 
 
 def visit(value):
     if isinstance(value, dict):
-        if value.get("bundleIdentifier") == bundle:
-            matches.append(value)
+        if isinstance(value.get("bundleIdentifier"), str):
+            apps.append(value)
         for child in value.values():
             visit(child)
     elif isinstance(value, list):
@@ -505,15 +574,60 @@ def visit(value):
 
 
 visit(payload)
-if len(matches) != 1:
-    raise SystemExit(f"expected one installed iOS app for {bundle}, found {len(matches)}")
-item = matches[0]
+
+def exact_installed(identifier, plist_path):
+    matches = [item for item in apps if item.get("bundleIdentifier") == identifier]
+    if len(matches) != 1:
+        raise SystemExit(f"expected one installed iOS app for {identifier}, found {len(matches)}")
+    with open(plist_path, "rb") as handle:
+        info = plistlib.load(handle)
+    if info.get("CFBundleIdentifier") != identifier:
+        raise SystemExit(f"local iOS bundle identity mismatch: {identifier}")
+    expected = (
+        str(info.get("CFBundleVersion", "")),
+        str(info.get("CFBundleShortVersionString", "")),
+    )
+    actual = (str(matches[0].get("bundleVersion", "")), str(matches[0].get("version", "")))
+    if not all(expected) or actual != expected:
+        raise SystemExit(f"installed iOS bundle version mismatch: {identifier}")
+    return actual
+
+app_version, app_short_version = exact_installed(bundle, app_plist_path)
+exact_installed(bundle + ".UITests.xctrunner", runner_plist_path)
+if replacement != "true":
+    prior = json.load(open(prior_install_receipt_path, encoding="utf-8"))
+    expected_prior = {
+        "receiptSchema": 1,
+        "artifactType": "installed iOS Release app and XCTest runner",
+        "appGitSha": app,
+        "appGitTree": app_tree,
+        "fipsGitSha": fips,
+        "fipsGitTree": fips_tree,
+        "bundleManifestSha256": manifest,
+        "runnerBundleTreeSha256": runner_tree,
+        "signerCertificateSha256": cert,
+        "selectedPhysicalDeviceIdentifierSha256": hashlib.sha256(
+            udid.encode()
+        ).hexdigest(),
+        "bundleIdentifier": bundle,
+        "installedVersion": app_version,
+        "installedShortVersion": app_short_version,
+    }
+    for key, value in expected_prior.items():
+        if prior.get(key) != value:
+            raise SystemExit(f"device-bound iOS receipt mismatch: {key}")
 receipt = {
+    "receiptSchema": 1,
+    "artifactType": "installed iOS Release app and XCTest runner",
     "artifact": "iOS Ad Hoc Release app",
     "bundleIdentifier": bundle,
     "bundleManifestSha256": manifest,
-    "installedVersion": item.get("version") or item.get("bundleVersion") or "",
-    "installedShortVersion": item.get("shortVersion") or item.get("bundleShortVersion") or "",
+    "runnerBundleTreeSha256": runner_tree,
+    "selectedPhysicalDeviceIdentifierSha256": hashlib.sha256(
+        udid.encode()
+    ).hexdigest(),
+    "installedVersion": app_version,
+    "installedShortVersion": app_short_version,
     "appGitSha": app,
     "appGitTree": app_tree,
     "fipsGitSha": fips,
@@ -526,16 +640,60 @@ receipt = {
     "configuration": "Release",
     "debugAutomation": False,
     "installedBundleCount": 1,
+    "installedArtifactVerified": True,
+    "replacementInstall": replacement == "true",
 }
+
 with open(output, "w", encoding="utf-8") as handle:
     json.dump(receipt, handle, indent=2, sort_keys=True)
     handle.write("\n")
 PY
+  then
+    rm -f "$installed_receipt"
+    echo "Installed iOS app/runner identity validation failed" >&2
+    return 1
+  fi
   RELEASE_JOIN_IOS_DERIVED_DATA="$derived"
   RELEASE_JOIN_IOS_APP_PATH="$app_path"
   RELEASE_JOIN_IOS_UDID="$udid"
   export RELEASE_JOIN_IOS_DERIVED_DATA RELEASE_JOIN_IOS_APP_PATH
   export RELEASE_JOIN_IOS_UDID
+}
+
+release_join_arm_ios_disconnect_cleanup() {
+  local app="$1" derived="$2" udid="$3" private_root
+  [[ -s "$RELEASE_JOIN_IOS_XCTESTRUN" ]] || {
+    echo "iOS disconnect cleanup requires the exact XCTest plan" >&2
+    return 1
+  }
+  [[ "$RELEASE_JOIN_IOS_CLEANUP_ARMED" -eq 0 ]] || return 0
+  private_root="${PRIVATE_DIR:-${TMPDIR:-/tmp}}"
+  IOS_RELEASE_NETWORK_SIGNING_DIR="$(
+    mktemp -d "$private_root/nvpn-ios-release-signing.join-cleanup.XXXXXX"
+  )" || return 1
+  IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE="$IOS_RELEASE_NETWORK_SIGNING_DIR/active-xcode.pgid"
+  IOS_RELEASE_NETWORK_DEVICE="$udid"
+  IOS_RELEASE_NETWORK_DESTINATION="platform=iOS,id=$udid,arch=arm64"
+  IOS_RELEASE_NETWORK_DERIVED_DATA="$derived"
+  IOS_RELEASE_NETWORK_XCTESTRUN="$RELEASE_JOIN_IOS_XCTESTRUN"
+  IOS_RELEASE_NETWORK_FROZEN_APP="$app"
+  IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=1
+  IOS_RELEASE_NETWORK_PREPARED=1
+  NVPN_MOBILE_IOS_RELEASE_APP_PATH="$app"
+  export NVPN_MOBILE_IOS_RELEASE_APP_PATH
+  RELEASE_JOIN_IOS_CLEANUP_ARMED=1
+}
+
+release_join_cleanup_ios_network_state() {
+  local quarantine="${RELEASE_JOIN_IOS_QUARANTINE:?missing iOS quarantine path}"
+  [[ "$RELEASE_JOIN_IOS_CLEANUP_ARMED" -eq 1 ]] || return 0
+  if ios_release_network_disconnect_cleanup; then
+    rm -f "$quarantine"
+    return 0
+  fi
+  printf '%s\n' 'PacketTunnel/direct Internet cleanup was not proven.' >"$quarantine"
+  echo "iOS device quarantined because PacketTunnel-off/direct Internet is unproven" >&2
+  return 1
 }
 
 release_join_prepare_ios_release() {
@@ -611,6 +769,11 @@ release_join_prepare_ios_release() {
     NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID" \
     NVPN_BUILD_GIT_SHA="$app_sha" \
     build-for-testing
+  RELEASE_JOIN_IOS_XCTESTRUN="$(
+    select_generated_ios_release_xctestrun \
+      "$derived/Build/Products" "iOS Release join build"
+  )" || return 1
+  export RELEASE_JOIN_IOS_XCTESTRUN
 
   app_path="$derived/Build/Products/Release-iphoneos/Nostr VPN.app"
   [[ -d "$app_path" ]] || {

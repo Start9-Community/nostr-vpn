@@ -22,7 +22,7 @@ load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
 ARTIFACT_ACTION="${NVPN_MACOS_RELEASE_ARTIFACT_ACTION:-full}"
 case "$ARTIFACT_ACTION" in
-  full|prepare-only|verify-only) ;;
+  full|prepare-only|verify-only|run-only) ;;
   *)
     echo "Unsupported NVPN_MACOS_RELEASE_ARTIFACT_ACTION=$ARTIFACT_ACTION" >&2
     exit 2
@@ -75,7 +75,20 @@ MAC_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
 macos_vm_require_isolated_target "$MAC_HOST"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
-REMOTE_SCRIPT="./scripts/macos-release-mobile-join-remote.sh"
+REMOTE_HARNESS_FILES=(
+  scripts/lib-macos-release-app-ownership.sh
+  scripts/macos-release-mobile-join-remote.sh
+  scripts/macos_release_join_artifact.py
+  scripts/mobile_release_artifact_receipt.py
+)
+REMOTE_HARNESS_DIGEST="$(
+  for file in "${REMOTE_HARNESS_FILES[@]}"; do
+    printf '%s\t%s\n' \
+      "$file" "$(shasum -a 256 "$ROOT/$file" | awk '{print $1}')"
+  done | shasum -a 256 | awk '{print $1}'
+)"
+REMOTE_HARNESS_ROOT_REL=".cache/nvpn-release-mobile-join-harness/$REMOTE_HARNESS_DIGEST"
+REMOTE_SCRIPT_REL="$REMOTE_HARNESS_ROOT_REL/scripts/macos-release-mobile-join-remote.sh"
 RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}"
 PRIVATE_DIR="$RESULT_DIR/.desktop-private-$$"
 HOST_BUILD_ROOT="$PRIVATE_DIR/source"
@@ -95,10 +108,12 @@ CACHED_RECEIPT="$PUBLICATION_DIR/artifact.json"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
+RELEASE_JOIN_IOS_SETUP_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-30}"
 for value in \
   "$RELEASE_JOIN_UI_WAIT_SECS" \
   "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
-  "$RELEASE_JOIN_CAMERA_WAIT_SECS"
+  "$RELEASE_JOIN_CAMERA_WAIT_SECS" \
+  "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
 do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
     echo "Join gate timeouts must be positive integers" >&2
@@ -109,12 +124,18 @@ done
   echo "Join delivery wait cannot exceed 15 seconds" >&2
   exit 2
 }
+((RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 30)) || {
+  echo "iOS setup wait cannot exceed 30 seconds" >&2
+  exit 2
+}
 mkdir -p "$PRIVATE_DIR" "$RESULT_DIR/macos"
 chmod 700 "$PRIVATE_DIR"
 
 export RESULT_DIR PRIVATE_DIR RELEASE_JOIN_UI_WAIT_SECS
 export RELEASE_JOIN_DELIVERY_WAIT_SECS RELEASE_JOIN_CAMERA_WAIT_SECS
+export RELEASE_JOIN_IOS_SETUP_WAIT_SECS
 release_join_require_clean_fips
+release_join_configure_install_modes
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
 PRODUCT_GIT_SHA="$APP_GIT_SHA"
@@ -125,6 +146,7 @@ release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 remote_pid=""
 acceptance_observer_pids=()
 remote_app_ownership_armed=0
+remote_harness_install_attempted=0
 cleanup() {
   local status=$?
   local cleanup_status=0
@@ -159,6 +181,15 @@ cleanup() {
       [[ "$status" -ne 0 ]] || status="$cleanup_status"
     fi
   fi
+  if [[ "$remote_harness_install_attempted" -eq 1 ]]; then
+    if remove_remote_harness >/dev/null; then
+      :
+    else
+      cleanup_status=$?
+      echo "macOS VM external harness cache survived cleanup (status $cleanup_status)" >&2
+      [[ "$status" -ne 0 ]] || status="$cleanup_status"
+    fi
+  fi
   if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
     cp "$PRIVATE_DIR/android-ui.xml" \
       "$RESULT_DIR/macos/android-ui-failure.xml"
@@ -169,13 +200,16 @@ cleanup() {
 trap cleanup EXIT
 
 remote() {
-  local command="$1"
+  local subcommand="$1"
   shift
   local remote_command argument
+  # shellcheck disable=SC2016 # $HOME is expanded by the remote shell.
   printf -v remote_command \
-    'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_HARNESS_GIT_SHA=%q NVPN_EXPECTED_HARNESS_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q %q %q' \
+    'cd %q && env NVPN_APP_REPO_PATH=. NVPN_FIPS_REPO_PATH=%q NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR=%q NVPN_EXTERNAL_HARNESS_DIGEST=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_HARNESS_GIT_SHA=%q NVPN_EXPECTED_HARNESS_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q "$HOME"/%q %q' \
     "$GUEST_REPO" \
     "../fips" \
+    "artifacts/macos-release-mobile-join" \
+    "$REMOTE_HARNESS_DIGEST" \
     "$PRODUCT_GIT_SHA" \
     "$PRODUCT_GIT_TREE" \
     "$APP_GIT_SHA" \
@@ -186,16 +220,39 @@ remote() {
     "$MACOS_SIGNING_IDENTITY" \
     "$EXPECTED_MACOS_TEAM" \
     "$EXPECTED_MACOS_CERT" \
-    "$REMOTE_SCRIPT" \
-    "$command"
+    "$REMOTE_SCRIPT_REL" \
+    "$subcommand"
   for argument in "$@"; do
     printf -v remote_command '%s %q' "$remote_command" "$argument"
   done
   ssh -o BatchMode=yes "$MAC_HOST" "$remote_command"
 }
 
+install_remote_harness() {
+  local install_command
+  # shellcheck disable=SC2016 # $HOME is expanded by the remote shell.
+  printf -v install_command \
+    'set -e; destination="$HOME"/%q; rm -rf "$destination"; mkdir -p "$destination"; tar -xf - -C "$destination"; chmod 700 "$destination/scripts/macos-release-mobile-join-remote.sh"' \
+    "$REMOTE_HARNESS_ROOT_REL"
+  tar -cf - -C "$ROOT" "${REMOTE_HARNESS_FILES[@]}" \
+    | ssh -o BatchMode=yes "$MAC_HOST" "$install_command"
+}
+
+remove_remote_harness() {
+  local remove_command
+  # This exact content-addressed path contains only the transferred harness.
+  # It deliberately does not invoke app/profile restoration.
+  # shellcheck disable=SC2016 # $HOME is expanded by the remote shell.
+  printf -v remove_command \
+    'target="$HOME"/%q; rm -rf "$target"; test ! -e "$target"' \
+    "$REMOTE_HARNESS_ROOT_REL"
+  ssh -o BatchMode=yes "$MAC_HOST" "$remove_command"
+}
+
 wait_log_marker() {
-  local log="$1" marker="$2" timeout="${3:-15}" deadline=$((SECONDS + timeout))
+  local log="$1" marker="$2" timeout="${3:-15}"
+  local deadline
+  deadline=$((SECONDS + timeout))
   while ((SECONDS < deadline)); do
     grep -Fq "NVPN_RELEASE_JOIN_MARKER $marker" "$log" 2>/dev/null && return 0
     if [[ -n "$remote_pid" ]] && ! kill -0 "$remote_pid" 2>/dev/null; then
@@ -206,6 +263,8 @@ wait_log_marker() {
     fi
     sleep 0.25
   done
+  echo "macOS join marker timed out after ${timeout}s: $marker" >&2
+  tail -n 160 "$log" >&2 || true
   return 1
 }
 
@@ -251,7 +310,7 @@ macos_android_direction_cleanup() {
 }
 
 recover_macos_android_direction() {
-  remote cleanup >/dev/null 2>&1 || true
+  remote reset-profile >/dev/null 2>&1 || true
   remote service-preflight \
     >"$RESULT_DIR/macos/service-preflight-recovery.log" 2>&1
 }
@@ -312,11 +371,13 @@ assert_delivery_deadline() {
 read_cached_identity() {
   local extra
   IFS=$'\t' read -r CACHE_PRODUCT_SHA CACHE_PRODUCT_TREE \
-    CACHE_FIPS_SHA CACHE_FIPS_TREE CACHE_FIPS_VERSION extra <<<"$(
+    CACHE_FIPS_SHA CACHE_FIPS_TREE CACHE_FIPS_VERSION \
+    CACHE_HARNESS_SHA CACHE_HARNESS_TREE extra <<<"$(
       python3 -c '
 import json,sys
-v=json.load(open(sys.argv[1])); keys=("appGitSha","appGitTree","fipsGitSha","fipsGitTree","fipsCoreVersion")
-print(*(v.get(key, "") for key in keys), sep="\t")
+v=json.load(open(sys.argv[1])); p=v.get("componentInputProof") or {}
+keys=("appGitSha","appGitTree","fipsGitSha","fipsGitTree","fipsCoreVersion")
+print(*(v.get(key, "") for key in keys), p.get("candidate_app_git_sha", ""), p.get("candidate_app_git_tree", ""), sep="\t")
 ' "$1"
     )"
   [[ "$CACHE_PRODUCT_SHA" =~ ^[0-9a-f]{40}$ \
@@ -324,10 +385,36 @@ print(*(v.get(key, "") for key in keys), sep="\t")
     && "$CACHE_FIPS_SHA" =~ ^[0-9a-f]{40}$ \
     && "$CACHE_FIPS_TREE" =~ ^[0-9a-f]{40}$ \
     && -n "$CACHE_FIPS_VERSION" \
+    && "$CACHE_HARNESS_SHA" =~ ^[0-9a-f]{40}$ \
+    && "$CACHE_HARNESS_TREE" =~ ^[0-9a-f]{40}$ \
     && -z "${extra:-}" ]] || {
     echo "Cached macOS Release receipt has no exact component identity" >&2
     return 1
   }
+}
+
+select_run_only_artifact() {
+  local expected_sha="${NVPN_MACOS_RELEASE_RUN_ONLY_HARNESS_GIT_SHA:-}"
+  local expected_tree="${NVPN_MACOS_RELEASE_RUN_ONLY_HARNESS_GIT_TREE:-}"
+  [[ -s "$RESULT_DIR/macos/artifact.json" \
+    && "$expected_sha" =~ ^[0-9a-f]{40}$ \
+    && "$expected_tree" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "macOS run-only requires cached artifact and exact frozen harness pins" >&2
+    return 1
+  }
+  read_cached_identity "$RESULT_DIR/macos/artifact.json"
+  [[ "$CACHE_HARNESS_SHA" == "$expected_sha" \
+    && "$CACHE_HARNESS_TREE" == "$expected_tree" \
+    && "$CACHE_FIPS_SHA" == "$RELEASE_JOIN_FIPS_SHA" \
+    && "$CACHE_FIPS_TREE" == "$RELEASE_JOIN_FIPS_TREE" \
+    && "$CACHE_FIPS_VERSION" == "$RELEASE_JOIN_FIPS_VERSION" ]] || {
+    echo "Cached macOS artifact differs from frozen run-only pins" >&2
+    return 1
+  }
+  PRODUCT_GIT_SHA="$CACHE_PRODUCT_SHA"
+  PRODUCT_GIT_TREE="$CACHE_PRODUCT_TREE"
+  APP_GIT_SHA="$CACHE_HARNESS_SHA"
+  APP_GIT_TREE="$CACHE_HARNESS_TREE"
 }
 
 write_component_proof() {
@@ -490,7 +577,7 @@ prepare_host_sources() {
   }
 }
 
-if [[ "$ARTIFACT_ACTION" == "full" ]]; then
+if [[ "$ARTIFACT_ACTION" == "full" || "$ARTIFACT_ACTION" == "run-only" ]]; then
   [[ -n "${IOS_DEVICE:-}" ]] || {
     echo "macOS/mobile Release join gate requires IOS_DEVICE" >&2
     exit 2
@@ -510,6 +597,9 @@ if [[ "$ARTIFACT_ACTION" == "full" ]]; then
     echo "macOS/mobile Release join gate requires the exact Android artifact and install receipts" >&2
     exit 1
   }
+  android_install_validation=()
+  [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 1 ]] \
+    || android_install_validation+=(--allow-verified-no-install)
   python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" \
     validate-android \
     --receipt "$ANDROID_INSTALL_RECEIPT" \
@@ -522,31 +612,43 @@ if [[ "$ARTIFACT_ACTION" == "full" ]]; then
     --expected-android-fips-sha "$RELEASE_JOIN_FIPS_SHA" \
     --expected-android-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
     --expected-android-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
+    "${android_install_validation[@]}" \
     >/dev/null
 fi
 
-if [[ "$ARTIFACT_ACTION" != "verify-only" ]]; then
+if [[ "$ARTIFACT_ACTION" != "verify-only" \
+  && "$ARTIFACT_ACTION" != "run-only" ]]; then
   prepare_host_sources
 fi
 SYNC_FIPS_ROOT="$NVPN_FIPS_REPO_PATH"
-if [[ "$ARTIFACT_ACTION" != "verify-only" ]]; then
+if [[ "$ARTIFACT_ACTION" != "verify-only" \
+  && "$ARTIFACT_ACTION" != "run-only" ]]; then
   SYNC_FIPS_ROOT="$HOST_FIPS_ROOT"
 fi
 
-case "${NVPN_MACOS_SKIP_GIT_SYNC:-0}" in
-  1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
-  *)
-    NVPN_MACOS_SYNC_PATH_DEPS=1 \
-      NVPN_FIPS_REPO_PATH="$SYNC_FIPS_ROOT" \
-      "$ROOT/scripts/macos-vm-git-sync.sh" "$MAC_HOST"
-    ;;
-esac
+if [[ "$ARTIFACT_ACTION" != "run-only" ]]; then
+  case "${NVPN_MACOS_SKIP_GIT_SYNC:-0}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
+    *)
+      NVPN_MACOS_SYNC_PATH_DEPS=1 \
+        NVPN_FIPS_REPO_PATH="$SYNC_FIPS_ROOT" \
+        "$ROOT/scripts/macos-vm-git-sync.sh" "$MAC_HOST"
+      ;;
+  esac
+fi
+
+remote_harness_install_attempted=1
+install_remote_harness
 
 case "$ARTIFACT_ACTION" in
   verify-only)
     read_cached_identity "$RESULT_DIR/macos/artifact.json"
     PRODUCT_GIT_SHA="$CACHE_PRODUCT_SHA"
     PRODUCT_GIT_TREE="$CACHE_PRODUCT_TREE"
+    remote verify-import | tee "$RESULT_DIR/macos/verify-import.log"
+    ;;
+  run-only)
+    select_run_only_artifact
     remote verify-import | tee "$RESULT_DIR/macos/verify-import.log"
     ;;
   full|prepare-only)
@@ -566,7 +668,7 @@ scp -q \
   "$MAC_HOST:$GUEST_REPO/artifacts/macos-release-mobile-join/verification.json" \
   "$RESULT_DIR/macos/verification.json"
 
-if [[ "$ARTIFACT_ACTION" != "full" ]]; then
+if [[ "$ARTIFACT_ACTION" != "full" && "$ARTIFACT_ACTION" != "run-only" ]]; then
   echo "MACOS_VM_IMPORTED_RELEASE_ARTIFACT_OK"
   exit 0
 fi
@@ -741,7 +843,8 @@ release_join_ios_start_test \
   testManualJoinAndRequireRosterCompletion "$ios_join_log" \
   "NVPN_RELEASE_JOIN_ADMIN_ID=$DESKTOP_IOS_ADMIN_ID" \
   "NVPN_RELEASE_JOIN_NETWORK_ID=$DESKTOP_IOS_NETWORK_ID"
-release_join_ios_wait_marker NVPN_RELEASE_JOIN_JOINER_ID= 10 \
+release_join_ios_wait_marker \
+  NVPN_RELEASE_JOIN_JOINER_ID= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
   || { echo "iPhone manual join did not expose its public identity" >&2; exit 1; }
 IOS_JOINER_ID="$(
   ios_marker_value_from "$ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID

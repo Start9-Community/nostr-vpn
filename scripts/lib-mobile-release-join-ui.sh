@@ -13,6 +13,21 @@ RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
 RELEASE_JOIN_ANDROID_NETWORK_IDS=()
 
+release_join_desktop_mode() {
+  local phase="$1" configured="$2"
+  case "$phase" in
+    desktop-only) printf '1\n' ;;
+    full)
+      case "$configured" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) printf '1\n' ;;
+        0|false|FALSE|False|no|NO|No|off|OFF|Off) printf '0\n' ;;
+        *) return 2 ;;
+      esac
+      ;;
+    *) printf '0\n' ;;
+  esac
+}
+
 release_join_marker_value_from_log() {
   local log="$1" name="$2"
   sed -n "s/.*NVPN_RELEASE_JOIN_MARKER $name=//p" "$log" \
@@ -728,11 +743,14 @@ release_join_ios_wait_marker() {
         && ! kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null; then
       wait "$RELEASE_JOIN_IOS_TEST_PID" || true
       RELEASE_JOIN_IOS_TEST_PID=""
-      tail -n 100 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
+      echo "iOS join test exited before marker: $marker" >&2
+      tail -n 160 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
       return 1
     fi
     sleep 0.25
   done
+  echo "iOS join marker timed out after ${timeout}s: $marker" >&2
+  tail -n 160 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
   return 1
 }
 

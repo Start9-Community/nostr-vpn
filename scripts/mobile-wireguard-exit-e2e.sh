@@ -70,6 +70,8 @@ NVPN_MOBILE_WG_EXIT_HOST_IP, and optionally NVPN_MOBILE_WG_EXIT_REMOTE_MODE
 (native by default). No remote host, address, or credential is built in.
 Set NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID=0 to exercise an already-installed
 canonical company-signed debug build without replacing it.
+Set NVPN_MOBILE_WG_EXIT_INSTALL_IOS=0 with exact iOS reuse inputs to validate
+and exercise the already-installed app and XCTest runner without replacing them.
 Set NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE=1 for one physical Wi-Fi radio
 OFF→ON cycle. Each phone must start on validated Wi-Fi. The gate proves a real
 outage without another validated physical fallback, restores the same Wi-Fi, and requires DNS

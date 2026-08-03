@@ -994,7 +994,8 @@ grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
 grep -Fq 'capture-mobile-ios-underlay-output.py' "$ios_release_gate" \
   && grep -Fq 'packetTunnelProcessIdentifiers' "$ios_underlay_capture" \
   && grep -Fq 'distinct packet-tunnel PIDs' "$ios_underlay_capture" \
-  && grep -Fq '"directCheckpointProcesses": direct_checkpoint_processes' "$ios_underlay_capture" \
+  && grep -Fq 'ACTIVE_TUNNEL_CHECKPOINT' "$ios_underlay_capture" \
+  && ! grep -Fq 'directCheckpointProcesses' "$ios_underlay_capture" \
   && grep -Fq '"requiredCheckpoints": sorted(required_checkpoints)' "$ios_underlay_capture" \
   && grep -Fq 'checkpoints without a valid process observation=' "$ios_underlay_capture" \
   && grep -Fq 'self.update_checkpoint("active-session-end")' "$ios_underlay_capture" \
@@ -1111,11 +1112,11 @@ capture = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 for token in (
     "RELEASE_CONNECTED_DIRECT_PASSED",
     "RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED",
-    '"directCheckpointProcesses": direct_checkpoint_processes',
+    "directCheckpointProcesses",
 ):
-    if token not in capture:
+    if token in capture:
         raise SystemExit(
-            "iOS connected Direct path lacks external PacketTunnel process proof"
+            "iOS process continuity incorrectly samples an intentional Direct transition"
         )
 PY
 if grep -Fq -- '--nvpn-debug-' \

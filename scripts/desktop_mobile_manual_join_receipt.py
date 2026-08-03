@@ -248,6 +248,7 @@ def validate_android_install_receipt(
     app_tree: str,
     fips_sha: str,
     fips_tree: str,
+    allow_verified_no_install: bool = False,
 ) -> None:
     label = "Android Release install receipt"
     require_exact(receipt, "artifact", "Android Release APK", label)
@@ -259,8 +260,14 @@ def validate_android_install_receipt(
     require_exact(receipt, "fipsGitSha", fips_sha, label)
     require_exact(receipt, "fipsGitTree", fips_tree, label)
     require_exact(receipt, "package", "fi.siriusbusiness.nvpn", label)
-    require_exact(receipt, "replacementInstall", True, label)
-    require_exact(receipt, "replacementInstallVerified", True, label)
+    if receipt.get("replacementInstall") is True:
+        require_exact(receipt, "replacementInstallVerified", True, label)
+    elif allow_verified_no_install:
+        require_exact(receipt, "replacementInstall", False, label)
+        require_exact(receipt, "replacementInstallVerified", False, label)
+        require_exact(receipt, "installedArtifactVerified", True, label)
+    else:
+        require_exact(receipt, "replacementInstall", True, label)
     require_exact(receipt, "debuggable", False, label)
     require_exact(receipt, "canonicalPackageCount", 1, label)
     require_exact(receipt, "canonicalProcessCount", 1, label)
@@ -481,6 +488,7 @@ def validate_android_only(args: argparse.Namespace) -> None:
         app_tree=args.expected_android_app_tree,
         fips_sha=args.expected_android_fips_sha,
         fips_tree=args.expected_android_fips_tree,
+        allow_verified_no_install=args.allow_verified_no_install,
     )
     require_regular_file(
         args.android_fips_metadata_receipt,
@@ -545,6 +553,7 @@ def parser() -> argparse.ArgumentParser:
     android.add_argument("--expected-android-fips-sha", required=True)
     android.add_argument("--expected-android-fips-tree", required=True)
     android.add_argument("--expected-android-fips-version", required=True)
+    android.add_argument("--allow-verified-no-install", action="store_true")
     android.set_defaults(function=validate_android_only)
     return root
 

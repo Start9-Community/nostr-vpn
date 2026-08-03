@@ -298,6 +298,51 @@ then
 fi
 mv "$WORK/android-artifact.original.json" "$WORK/android-artifact.json"
 
+cp "$WORK/android-install.json" "$WORK/android-no-install.json"
+python3 - "$WORK/android-no-install.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value.update({
+    "replacementInstall": False,
+    "replacementInstallVerified": False,
+    "installedArtifactVerified": True,
+})
+path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+PY
+android_only=(
+  --receipt "$WORK/android-no-install.json"
+  --android-artifact-receipt "$WORK/android-artifact.json"
+  --android-fips-metadata-receipt "$WORK/android-fips-metadata.json"
+  --apk "$WORK/app-release.apk"
+  --expected-android-app-sha 6666666666666666666666666666666666666666
+  --expected-android-app-tree 7777777777777777777777777777777777777777
+  --expected-android-fips-sha 8888888888888888888888888888888888888888
+  --expected-android-fips-tree 9999999999999999999999999999999999999999
+  --expected-android-fips-version 0.4.49
+)
+if python3 "$VERIFIER" validate-android "${android_only[@]}" \
+    >/dev/null 2>&1
+then
+  echo "receipt verifier accepted no-install evidence without explicit mode" >&2
+  exit 1
+fi
+python3 "$VERIFIER" validate-android \
+  --allow-verified-no-install "${android_only[@]}" >/dev/null
+python3 - "$WORK/android-no-install.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["installedArtifactVerified"] = False
+path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+PY
+if python3 "$VERIFIER" validate-android \
+    --allow-verified-no-install "${android_only[@]}" >/dev/null 2>&1
+then
+  echo "receipt verifier accepted unverified retained Android bytes" >&2
+  exit 1
+fi
+
 printf 'tamper' >>"$WORK/app-release.apk"
 if python3 "$VERIFIER" validate-android \
   --receipt "$WORK/android-install.json" \

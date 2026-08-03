@@ -300,9 +300,11 @@ grep -Fq 'duplicate iOS underlay markers: switch_1_requested' \
 
 python3 - "$ios_output_capture" "$temp" <<'PY'
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+from contextlib import redirect_stderr
 
 spec = importlib.util.spec_from_file_location("ios_capture", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -326,43 +328,46 @@ def finish(samples, name):
     status = sampler.finish()
     return status, json.loads(path.read_text(encoding="utf-8"))
 
-sampler = module.ProcessSampler("fixture-device", pathlib.Path(sys.argv[2], "unused.json"))
-module.DIRECT_SAMPLE_RETRY_SECONDS = 0
-calls = []
-sampler._sample = lambda checkpoint: calls.append(checkpoint) or len(calls) == 2
-assert sampler._sample_checkpoint("release_connected_direct_passed") is True
-assert calls == ["release_connected_direct_passed"] * 2
-calls.clear()
-sampler._sample = lambda checkpoint: calls.append(checkpoint) or False
-assert sampler._sample_checkpoint("release_connected_direct_passed") is False
-assert calls == ["release_connected_direct_passed"] * module.DIRECT_SAMPLE_ATTEMPTS
-calls.clear()
-assert sampler._sample_checkpoint("active-session-begin") is False
-assert calls == ["active-session-begin"]
-sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
-
 samples = [
     {"checkpoint": "active-session-begin", "appPids": [111], "packetTunnelPids": [211]},
+    {"checkpoint": "underlay_switch_1_outage", "appPids": [111], "packetTunnelPids": [211]},
     {"checkpoint": "active-session-end", "appPids": [111], "packetTunnelPids": [211]},
-    {"checkpoint": "release_connected_direct_passed", "appPids": [111], "packetTunnelPids": [212]},
-    {"checkpoint": "release_connected_direct_relaunch_passed", "appPids": [112], "packetTunnelPids": [213]},
 ]
-status, receipt = finish(samples, "direct-processes.json")
+status, receipt = finish(samples, "active-processes.json")
 assert status == 0 and receipt["passed"] is True
 assert receipt["appProcessIdentifiers"] == [111]
 assert receipt["packetTunnelProcessIdentifiers"] == [211]
-assert [proof["packetTunnelProcessIdentifier"] for proof in receipt["directCheckpointProcesses"].values()] == [212, 213]
+assert "directCheckpointProcesses" not in receipt
 
-retry_samples = samples[:2] + [
-    {"checkpoint": "release_connected_direct_passed", "appPids": [111], "packetTunnelPids": []}
-] + samples[2:]
-status, receipt = finish(retry_samples, "retried-direct-processes.json")
-assert status == 0 and receipt["passed"] is True
-
-samples[-1] = {**samples[-1], "packetTunnelPids": []}
-status, receipt = finish(samples, "disconnected-direct-processes.json")
+samples[1] = {**samples[1], "packetTunnelPids": []}
+status, receipt = finish(samples, "disconnected-active-processes.json")
 assert status == 1 and receipt["passed"] is False
-assert "release_connected_direct_relaunch_passed" not in receipt["observedCheckpoints"]
+assert "underlay_switch_1_outage" not in receipt["observedCheckpoints"]
+
+assert module.ACTIVE_TUNNEL_CHECKPOINT.search(
+    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1"
+) is None
+sampler = module.ProcessSampler(
+    "fixture-device", pathlib.Path(sys.argv[2], "post-end.json")
+)
+sampler.end_seen = True
+sampler.update_checkpoint("release_connected_direct_relaunch_passed")
+assert sampler.required_checkpoints == set()
+sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
+
+missing_end = module.ProcessSampler(
+    "fixture-device", pathlib.Path(sys.argv[2], "missing-end.json")
+)
+missing_end.thread = FinishedThread()
+missing_end.begin_seen = True
+missing_end.samples = [
+    {"checkpoint": "active-session-begin", "appPids": [111], "packetTunnelPids": [211]}
+]
+missing_end.required_checkpoints = {"active-session-begin"}
+diagnostics = io.StringIO()
+with redirect_stderr(diagnostics):
+    assert missing_end.finish(report_errors=False) == 1
+assert diagnostics.getvalue() == "", repr(diagnostics.getvalue())
 PY
 
 cat >"$temp/adb" <<'SH'
@@ -587,13 +592,16 @@ else:
     raise SystemExit("Android platform proof accepted a missing receipt")
 PY
 
-python3 - "$android_lib" "$android_service" "$ios_underlay" "$ios_test" <<'PY'
+python3 - "$android_lib" "$android_service" "$ios_underlay" "$ios_test" \
+  "$ROOT/scripts/mobile-underlay-local-timestamp.py" <<'PY'
 import pathlib
 import sys
 
-android, android_service, ios, ios_test = (
+android, android_service, ios, ios_test, timestamp = (
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 )
+if "except PermissionError:" not in timestamp or "child.terminate()" not in timestamp:
+    raise SystemExit("continuity owner does not recover from process-group EPERM")
 for forbidden in (
     "ALTERNATE_SSID",
     "ALTERNATE_SECURITY",
@@ -622,8 +630,12 @@ compact_navigation = "".join(navigation.split())
 for required in (
     "normalizeSettingsRoot(settings)",
     "guard rows.count == 1",
-    "settings.switches.count == 1",
-    "settings.switches.firstMatch",
+    'row.staticTexts["Wi-Fi"].firstMatch',
+    "settings.navigationBars.buttons.firstMatch",
+    "settings.switches.allElementsBoundByIndex",
+    "settings.descendants(matching: .any)",
+    "binaryControlState(element) != nil",
+    "binaryControls.count == 1",
 ):
     if required not in navigation:
         raise SystemExit(
@@ -633,8 +645,12 @@ if 'settings.cells.containing(.staticText,identifier:"Wi-Fi")' not in compact_na
     raise SystemExit("iOS Settings does not select its unique public Wi-Fi row")
 if 'settings.switches["Wi-Fi"]' in navigation:
     raise SystemExit("iOS Settings still assumes the destination switch is named Wi-Fi")
+if "App-Prefs:" in navigation or "prefs:" in navigation.lower():
+    raise SystemExit("iOS Settings navigation uses a private Settings URL")
 if "for _ in 0..<5" in navigation:
     raise SystemExit("iOS Settings Wi-Fi navigation retained its fallback retry maze")
+if "rows.count == 0" in navigation:
+    raise SystemExit("iOS Wi-Fi page detection still rejects the Settings sidebar")
 cleanup = ios_test[ios_test.index("func testReleaseDisconnectCleanup()") :]
 for required in (
     "if let spec = optionalReleaseSpec(), spec.exerciseUnderlay",

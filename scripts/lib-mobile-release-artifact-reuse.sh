@@ -141,9 +141,10 @@ release_join_validate_ios_reuse() {
   local team="${NVPN_IOS_TEAM_ID:-}"
   local expected_team="${NVPN_EXPECTED_IOS_DISTRIBUTION_TEAM_ID:-}"
   local expected_cert="${NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256:-}"
-  local tunnel_app app_cert tunnel_cert app_cdhash tunnel_cdhash
+  local tunnel_app runner test_bundle app_cert tunnel_cert app_cdhash tunnel_cdhash
   local udid device_identifier_sha audit_dir app_profile tunnel_profile
-  local app_signed_team tunnel_signed_team app_sha app_tree
+  local app_signed_team tunnel_signed_team runner_signed_team test_signed_team
+  local runner_details test_details app_sha app_tree
   for name in \
     NVPN_RELEASE_JOIN_IOS_APP_PATH \
     NVPN_RELEASE_JOIN_IOS_DERIVED_DATA \
@@ -171,21 +172,37 @@ release_join_validate_ios_reuse() {
     return 1
   }
   tunnel_app="$app/PlugIns/Nostr VPN Tunnel.appex"
+  runner="$derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  test_bundle="$runner/PlugIns/NostrVpnIosUITests.xctest"
   [[ -d "$app" && -d "$tunnel_app" && -d "$derived/Build/Products" \
+    && -d "$runner" && -d "$test_bundle" \
     && -s "$xctestrun" && -s "$receipt" && -s "$metadata" ]] || {
     echo "Strict iOS Release artifact set is incomplete" >&2
     return 1
   }
   codesign --verify --deep --strict "$app" >/dev/null 2>&1 \
-    && codesign --verify --strict "$tunnel_app" >/dev/null 2>&1 || {
+    && codesign --verify --strict "$tunnel_app" >/dev/null 2>&1 \
+    && codesign --verify --deep --strict "$runner" >/dev/null 2>&1 \
+    && codesign --verify --strict "$test_bundle" >/dev/null 2>&1 || {
       echo "Reused iOS Release artifact signature verification failed" >&2
       return 1
     }
   app_signed_team="$(release_join_codesign_team "$app")"
   tunnel_signed_team="$(release_join_codesign_team "$tunnel_app")"
+  runner_signed_team="$(release_join_codesign_team "$runner")"
+  test_signed_team="$(release_join_codesign_team "$test_bundle")"
   [[ "$app_signed_team" == "$expected_team" \
-    && "$tunnel_signed_team" == "$expected_team" ]] || {
-    echo "Reused iOS Release app or Packet Tunnel has the wrong team" >&2
+    && "$tunnel_signed_team" == "$expected_team" \
+    && "$runner_signed_team" == "$expected_team" \
+    && "$test_signed_team" == "$expected_team" ]] || {
+    echo "Reused iOS app, tunnel, or runner has the wrong team" >&2
+    return 1
+  }
+  runner_details="$(codesign -dvvv "$runner" 2>&1)"
+  test_details="$(codesign -dvvv "$test_bundle" 2>&1)"
+  [[ "$runner_details" == *"Authority=Apple Development:"* \
+    && "$test_details" == *"Authority=Apple Development:"* ]] || {
+    echo "Reused iOS UI runner is not development signed" >&2
     return 1
   }
   app_cert="$(release_join_codesign_certificate_sha256 "$app")"

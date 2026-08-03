@@ -226,7 +226,7 @@ do
     || fail "the iOS DNS disclosure omits: $dns_disclosure"
 done
 rg -q 'otherwise uses Cloudflare encrypted DNS' \
-  "$ROOT/ios/Sources/SettingsViews.swift" \
+  "$ROOT/ios/Sources/ExitDnsSettingsCard.swift" \
   || fail "Automatic exit DNS does not name its Cloudflare fallback"
 rg -q 'does not sell, use, or disclose VPN data to third parties' \
   "$ROOT/docs/privacy/index.html" \

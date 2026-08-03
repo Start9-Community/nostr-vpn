@@ -119,9 +119,119 @@ print(f"{identity}|{team}")
 ' "$organization" "$expected_certificate_sha256"
 }
 
+ios_release_network_install_mode() {
+  case "${NVPN_MOBILE_WG_EXIT_INSTALL_IOS:-1}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) printf '1\n' ;;
+    0|false|FALSE|False|no|NO|No|off|OFF|Off) printf '0\n' ;;
+    *)
+      echo "Unsupported NVPN_MOBILE_WG_EXIT_INSTALL_IOS=${NVPN_MOBILE_WG_EXIT_INSTALL_IOS}" >&2
+      return 2
+      ;;
+  esac
+}
+
+ios_release_network_installed_identity() {
+  local bundle="$1" inventory="$2"
+  if ! xcrun devicectl device info apps \
+      --device "$IOS_RELEASE_NETWORK_DEVICE" --bundle-id "$bundle" \
+      --columns '*' --json-output "$inventory" --quiet >/dev/null
+  then
+    echo "iOS exact installed-artifact readback failed: $bundle" >&2
+    return 1
+  fi
+  jq -er --arg bundle "$bundle" '
+    select(.info.outcome == "success")
+    | .result
+    | [.apps[] | select(.bundleIdentifier == $bundle)]
+    | select(length == 1)
+    | .[0]
+    | [.bundleVersion, .version]
+    | select(all(.[]; type == "string" and length > 0))
+    | @tsv
+  ' "$inventory"
+}
+
+ios_release_network_require_installed_reuse() {
+  local app="$1" runner="$2" receipt="$3" runner_install_receipt="$4"
+  local runner_tree="$5" device_sha="$6" xctestrun_sha="$7"
+  local test_products_tree="$8" runner_bundle
+  local app_actual runner_actual app_expected runner_expected receipt_expected
+  runner_bundle="$IOS_BUNDLE_ID.UITests.xctrunner"
+  app_actual="$(ios_release_network_installed_identity "$IOS_BUNDLE_ID" \
+    "$IOS_RELEASE_NETWORK_SIGNING_DIR/installed-app.json")" || return 1
+  runner_actual="$(ios_release_network_installed_identity "$runner_bundle" \
+    "$IOS_RELEASE_NETWORK_SIGNING_DIR/installed-runner.json")" || return 1
+  [[ "$(plutil -extract CFBundleIdentifier raw "$app/Info.plist")" \
+      == "$IOS_BUNDLE_ID" \
+    && "$(plutil -extract CFBundleIdentifier raw "$runner/Info.plist")" \
+      == "$runner_bundle" ]] || return 1
+  app_expected="$(plutil -extract CFBundleVersion raw "$app/Info.plist")"$'\t'"$(
+    plutil -extract CFBundleShortVersionString raw "$app/Info.plist"
+  )"
+  runner_expected="$(plutil -extract CFBundleVersion raw "$runner/Info.plist")"$'\t'"$(
+    plutil -extract CFBundleShortVersionString raw "$runner/Info.plist"
+  )"
+  receipt_expected="$(jq -er '[.installedBuildNumber, .installedMarketingVersion] | @tsv' \
+    "$receipt")" || return 1
+  [[ "$app_actual" == "$app_expected" \
+    && "$runner_actual" == "$runner_expected" \
+    && "$receipt_expected" == "$app_expected" ]] || {
+    echo "Installed iOS app/runner identity differs from exact reuse receipts" >&2
+    return 1
+  }
+  python3 - \
+    "$runner_install_receipt" "$runner_bundle" "$runner_tree" \
+    "$device_sha" "$xctestrun_sha" "$test_products_tree" <<'PY'
+import json, sys
+
+path, bundle, runner_tree, device_sha, xctestrun_sha, products_tree = sys.argv[1:]
+receipt = json.load(open(path, encoding="utf-8"))
+expected = {
+    "receiptSchema": 1,
+    "artifactType": "installed iOS XCTest runner",
+    "bundleIdentifier": bundle,
+    "runnerBundleTreeSha256": runner_tree,
+    "selectedPhysicalDeviceIdentifierSha256": device_sha,
+    "xctestrunSha256": xctestrun_sha,
+    "testProductsTreeSha256": products_tree,
+}
+for key, value in expected.items():
+    if receipt.get(key) != value:
+        raise SystemExit(f"installed iOS runner receipt mismatch: {key}")
+PY
+}
+
+ios_release_network_write_runner_install_receipt() {
+  local runner="$1" output="$2" runner_tree="$3" device_sha="$4"
+  local xctestrun_sha="$5" test_products_tree="$6" bundle
+  bundle="$(plutil -extract CFBundleIdentifier raw "$runner/Info.plist")"
+  mkdir -p "$(dirname "$output")"
+  python3 - \
+    "$output" "$bundle" "$runner_tree" "$device_sha" \
+    "$xctestrun_sha" "$test_products_tree" <<'PY'
+import json, pathlib, sys
+
+output, bundle, runner_tree, device_sha, xctestrun_sha, products_tree = sys.argv[1:]
+receipt = {
+    "receiptSchema": 1,
+    "artifactType": "installed iOS XCTest runner",
+    "bundleIdentifier": bundle,
+    "runnerBundleTreeSha256": runner_tree,
+    "selectedPhysicalDeviceIdentifierSha256": device_sha,
+    "xctestrunSha256": xctestrun_sha,
+    "testProductsTreeSha256": products_tree,
+}
+path = pathlib.Path(output)
+temporary = path.with_suffix(path.suffix + ".tmp")
+temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+}
+
 ios_release_network_prepare_reuse() {
   local device="$1" app derived xctestrun receipt runner_receipt runner
-  local app_tree runner_tree xctestrun_sha device_udid device_sha values
+  local app_tree runner_tree xctestrun_sha test_products_tree
+  local device_udid device_sha values install_mode runner_install_receipt
   app="${NVPN_MOBILE_IOS_RELEASE_APP_PATH:-}"
   derived="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-}"
   xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"
@@ -141,6 +251,10 @@ ios_release_network_prepare_reuse() {
   runner_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner")" \
     || return 1
   xctestrun_sha="$(shasum -a 256 "$xctestrun" | awk '{print $1}')"
+  test_products_tree="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+      tree-sha "$derived/Build/Products"
+  )" || return 1
   device_udid="$(resolve_physical_ios_udid "$device")" || return 1
   device_sha="$(printf %s "$device_udid" | shasum -a 256 | awk '{print $1}')"
   umask 077
@@ -150,18 +264,21 @@ ios_release_network_prepare_reuse() {
   IOS_RELEASE_NETWORK_DEVICE_RECEIPT="$IOS_RELEASE_NETWORK_SIGNING_DIR/selected-device-receipt.json"
   values="$(python3 - \
     "$receipt" "$runner_receipt" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" \
-    "$app_tree" "$runner_tree" "$xctestrun_sha" "$device_sha" \
+    "$app_tree" "$runner_tree" "$xctestrun_sha" "$test_products_tree" \
+    "$device_sha" \
     "$NVPN_EXPECTED_APP_GIT_SHA" "$NVPN_EXPECTED_FIPS_GIT_SHA" \
     "$NVPN_MOBILE_IOS_RELEASE_RUNNER_TREE_SHA256" "$IOS_BUNDLE_ID" <<'PY'
 import json, sys
 (receipt_path, runner_path, device_path, app_tree, runner_tree, xctest_sha,
- device_sha, app_sha, fips_sha, expected_runner, bundle) = sys.argv[1:]
+ test_products_tree, device_sha, app_sha, fips_sha, expected_runner,
+ bundle) = sys.argv[1:]
 r = json.load(open(receipt_path, encoding="utf-8"))
 rr = json.load(open(runner_path, encoding="utf-8"))
 expected = {
     "receiptSchema": 2, "artifactType": "iOS company Ad Hoc Release app",
     "appGitSha": app_sha, "appBundleTreeSha256": app_tree,
     "treeSha256": app_tree, "xctestrunSha256": xctest_sha,
+    "testProductsTreeSha256": test_products_tree,
     "fipsGitSha": fips_sha, "companySigningVerified": True,
     "selectedPhysicalDeviceIdentifierSha256": device_sha,
     "installedBundleIdentifier": bundle, "debuggable": False,
@@ -200,10 +317,7 @@ PY
     IOS_RELEASE_NETWORK_BASE_CDHASH <<<"$values"
   IOS_RELEASE_NETWORK_APP_HEAD="$NVPN_EXPECTED_APP_GIT_SHA"
   IOS_RELEASE_NETWORK_BASE_TREE_SHA="$app_tree"
-  IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA="$(
-    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
-      tree-sha "$derived/Build/Products"
-  )" || return 1
+  IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA="$test_products_tree"
   IOS_RELEASE_NETWORK_DERIVED_DATA="$derived"
   IOS_RELEASE_NETWORK_XCTESTRUN="$xctestrun"
   IOS_RELEASE_NETWORK_FROZEN_APP="$app"
@@ -211,24 +325,62 @@ PY
   IOS_RELEASE_NETWORK_DESTINATION="platform=iOS,id=$device_udid,arch=arm64"
   IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE="$IOS_RELEASE_NETWORK_SIGNING_DIR/active-xcode.pgid"
   export NVPN_EXPECTED_FIPS_VERSION NVPN_MOBILE_IOS_RELEASE_APP_PATH="$app"
-  if ! xcrun devicectl device install app \
-      --device "$device_udid" "$app" --quiet >/dev/null
-  then
-    echo "iOS Release gate could not install its exact app in place" >&2
+  install_mode="$(ios_release_network_install_mode)" || {
     ios_release_network_prepare_abort
     return
-  fi
-  if ! ios_release_network_install_exact_runner; then
-    ios_release_network_prepare_abort
-    return
-  fi
+  }
+  runner_install_receipt="${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT:-}"
+  case "$install_mode" in
+    1)
+      if ! xcrun devicectl device install app \
+          --device "$device_udid" "$app" --quiet >/dev/null
+      then
+        echo "iOS Release gate could not install its exact app in place" >&2
+        ios_release_network_prepare_abort
+        return
+      fi
+      if ! ios_release_network_install_exact_runner; then
+        ios_release_network_prepare_abort
+        return
+      fi
+      ios_release_network_write_runner_install_receipt \
+        "$runner" \
+        "${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT_OUTPUT:-${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}/installed-runner-receipt.json}" \
+        "$runner_tree" "$device_sha" "$xctestrun_sha" "$test_products_tree" || {
+        ios_release_network_prepare_abort
+        return
+      }
+      ;;
+    0)
+      [[ -s "$runner_install_receipt" ]] || {
+        echo "Exact retained iOS runner requires its device-bound install receipt" >&2
+        ios_release_network_prepare_abort
+        return
+      }
+      if ! ios_release_network_require_installed_reuse \
+          "$app" "$runner" "$receipt" "$runner_install_receipt" \
+          "$runner_tree" "$device_sha" "$xctestrun_sha" "$test_products_tree"
+      then
+        ios_release_network_prepare_abort
+        return
+      fi
+      IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=1
+      ;;
+  esac
   IOS_RELEASE_NETWORK_PREPARED=1
   echo "iOS Release network gate reused its exact signed artifacts"
 }
 
 ios_release_network_prepare() {
-  local device="$1"
+  local device="$1" install_mode
   [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 0 ]] || return 0
+  install_mode="$(ios_release_network_install_mode)" || return
+  if [[ "$install_mode" -eq 0 ]] \
+    && ! bool_is_true "${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"
+  then
+    echo "Disabled iOS installation requires exact artifact reuse" >&2
+    return 1
+  fi
   if bool_is_true "${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"; then
     ios_release_network_prepare_reuse "$device"
     return
@@ -1051,6 +1203,28 @@ ios_release_network_xctrunner_process_ids() {
   return "$status"
 }
 
+ios_release_network_require_packet_tunnel_stopped() {
+  local device="$1" output="$2" timeout="${3:-15}" deadline
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    if xcrun devicectl device info processes \
+        --device "$device" --json-output "$output" --quiet >/dev/null \
+      && jq -e '
+        [.result.runningProcesses[]?
+          | select((.executable | gsub("%20"; " "))
+            | endswith("/Nostr VPN.app/PlugIns/Nostr VPN Tunnel.appex/Nostr VPN Tunnel"))]
+        | length == 0
+      ' "$output" >/dev/null
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "iOS PacketTunnel process remained after disconnect cleanup" >&2
+  return 1
+}
+
 ios_release_network_stop_forced_xctrunner() {
   local device="$1"
   local timeout="${NVPN_IOS_XCTRUNNER_STOP_TIMEOUT_SECS:-5}"
@@ -1463,7 +1637,7 @@ run_ios_release_network_case() {
     "$markers" "$run_id" "$label" "$lifecycle" "$underlay" "$direct" \
     "$start_stop" || return 1
   python3 - \
-    "$process_summary" "$underlay" "$lifecycle" "$direct" \
+    "$process_summary" "$underlay" "$lifecycle" \
     "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" <<'PY'
 import json
 import sys
@@ -1487,12 +1661,9 @@ if truthy(sys.argv[2]):
     ):
         expected.add(f"underlay_switch_1_{phase}")
 if truthy(sys.argv[3]):
-    for cycle in range(1, int(sys.argv[5]) + 1):
+    for cycle in range(1, int(sys.argv[4]) + 1):
         expected.add(f"release_background_{cycle}_requested")
         expected.add(f"release_foreground_{cycle}_verified")
-if truthy(sys.argv[4]):
-    expected.add("release_connected_direct_passed")
-    expected.add("release_connected_direct_relaunch_passed")
 required = set(receipt.get("requiredCheckpoints", []))
 observed = set(receipt.get("observedCheckpoints", []))
 if required != expected:
@@ -1503,25 +1674,6 @@ if not expected.issubset(observed):
     raise SystemExit(
         "iOS Release process sampler did not observe every expected checkpoint"
     )
-if truthy(sys.argv[4]):
-    direct_processes = receipt.get("directCheckpointProcesses")
-    if not isinstance(direct_processes, dict):
-        raise SystemExit("iOS Release connected Direct process proof is missing")
-    for checkpoint in (
-        "release_connected_direct_passed",
-        "release_connected_direct_relaunch_passed",
-    ):
-        processes = direct_processes.get(checkpoint)
-        if not isinstance(processes, dict) or any(
-            not isinstance(processes.get(key), int) or processes[key] <= 0
-            for key in (
-                "appProcessIdentifier",
-                "packetTunnelProcessIdentifier",
-            )
-        ):
-            raise SystemExit(
-                f"iOS Release {checkpoint} lacks one real PacketTunnel process"
-            )
 PY
   if bool_is_true "$underlay"; then
     mobile_continuity_validate \
@@ -1542,6 +1694,7 @@ ios_release_network_validate_disconnect_markers() {
   local markers="$1" underlay_spec="$2"
   local restored enabled_without_saved marker_count
   grep -Fxq "NVPN_IOS_RELEASE_DISCONNECT_PASSED=1" "$markers" || return 1
+  grep -Fxq "NVPN_IOS_RELEASE_DIRECT_CLEANUP_PASSED=1" "$markers" || return 1
   restored="$(
     grep -Fxc "NVPN_IOS_RELEASE_HOME_WIFI_RESTORED=1" "$markers" || true
   )"
@@ -1617,7 +1770,9 @@ ios_release_network_disconnect_cleanup_inner() {
       "$markers" "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
     && ios_release_network_assert_retained_no_secrets \
       "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
-      "$host_markers" "$markers"
+      "$host_markers" "$markers" \
+    && ios_release_network_require_packet_tunnel_stopped \
+      "$IOS_RELEASE_NETWORK_DEVICE" "$result_dir/$stem-packet-tunnel-processes.json"
 }
 
 ios_release_network_cleanup_watchdog() {

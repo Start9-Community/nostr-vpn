@@ -35,7 +35,9 @@ def main() -> int:
         try:
             os.killpg(child.pid, signal.SIGTERM)
         except ProcessLookupError:
-            pass
+            return
+        except PermissionError:
+            child.terminate()
 
     signal.signal(signal.SIGINT, stop_child)
     signal.signal(signal.SIGTERM, stop_child)
@@ -47,7 +49,11 @@ def main() -> int:
             seconds, milliseconds = divmod(now_ms, 1_000)
             handle.write(f"[{seconds}.{milliseconds:03d}] {line}")
 
-    status = child.wait()
+    try:
+        status = child.wait(timeout=3 if stopping else None)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        status = child.wait()
     if stopping:
         return 0
     return status

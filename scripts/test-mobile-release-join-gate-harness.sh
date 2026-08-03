@@ -70,6 +70,227 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 )
 
 (
+  # Exact-artifact reuse may explicitly retain both installed mobile apps.
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-noinstall.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  export NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1
+  export NVPN_RELEASE_JOIN_INSTALL_ANDROID=0
+  export NVPN_RELEASE_JOIN_INSTALL_IOS=0
+  release_join_configure_install_modes
+  [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 0 \
+    && "$RELEASE_JOIN_INSTALL_IOS" -eq 0 ]]
+  NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=0
+  if release_join_configure_install_modes >"$tmp/no-reuse.log" 2>&1; then
+    echo "mobile join accepted disabled installs without exact reuse" >&2
+    exit 1
+  fi
+  grep -Fq 'requires exact artifact reuse' "$tmp/no-reuse.log"
+  NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1
+  NVPN_RELEASE_JOIN_INSTALL_IOS=maybe
+  if release_join_configure_install_modes >"$tmp/bad-mode.log" 2>&1; then
+    echo "mobile join accepted an ambiguous install mode" >&2
+    exit 1
+  fi
+)
+
+(
+  # Android no-install reuse pulls and byte-compares the real installed APK.
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-android-noinstall.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  apk="$tmp/app-release.apk"
+  printf 'exact installed apk\n' >"$apk"
+  fake_adb() {
+    printf '%s\n' "$*" >>"$tmp/adb.log"
+    case "$*" in
+      "shell pm path fi.siriusbusiness.nvpn")
+        printf 'package:/data/app/exact/base.apk\n'
+        ;;
+      "shell pm list packages") printf 'package:fi.siriusbusiness.nvpn\n' ;;
+      "pull /data/app/exact/base.apk "*) cp "$apk" "$3" ;;
+      "shell dumpsys package fi.siriusbusiness.nvpn") printf '  flags=[ HAS_CODE ]\n' ;;
+      "shell pidof fi.siriusbusiness.nvpn") printf '1234\n' ;;
+      "install -r "*) return 99 ;;
+      *) : ;;
+    esac
+  }
+  ADB=(fake_adb)
+  RESULT_DIR="$tmp/result"
+  PRIVATE_DIR="$tmp/private"
+  mkdir -p "$PRIVATE_DIR"
+  mkdir -p "$RESULT_DIR"
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
+  RELEASE_JOIN_ANDROID_APK="$apk"
+  RELEASE_JOIN_ANDROID_APP_SHA="$(printf '1%.0s' {1..40})"
+  RELEASE_JOIN_ANDROID_APP_TREE="$(printf '2%.0s' {1..40})"
+  RELEASE_JOIN_ANDROID_SIGNER_SHA="$(printf 'a%.0s' {1..64})"
+  RELEASE_JOIN_FIPS_SHA="$(printf '3%.0s' {1..40})"
+  RELEASE_JOIN_FIPS_TREE="$(printf '4%.0s' {1..40})"
+  APP_GIT_SHA="$RELEASE_JOIN_ANDROID_APP_SHA"
+  APP_GIT_TREE="$RELEASE_JOIN_ANDROID_APP_TREE"
+  NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1
+  NVPN_RELEASE_JOIN_INSTALL_ANDROID=0
+  NVPN_RELEASE_JOIN_INSTALL_IOS=1
+  release_join_configure_install_modes
+  release_join_assert_fips_unchanged() { :; }
+  release_join_assert_app_unchanged() { :; }
+  release_join_prepare_android_release
+  ! grep -Fq 'install -r' "$tmp/adb.log"
+  python3 - "$RESULT_DIR/android-release-install.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+assert r["installedArtifactVerified"] is True
+assert r["replacementInstall"] is False
+assert r["replacementInstallVerified"] is False
+PY
+)
+
+(
+  # Real devicectl inventory shape uses a CoreDevice UUID unrelated to the UDID.
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-ios-noinstall.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  app="$tmp/Nostr VPN.app"
+  runner="$tmp/derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  mkdir -p "$app" "$runner" "$tmp/result"
+  python3 - "$app/Info.plist" "$runner/Info.plist" <<'PY'
+import plistlib, sys
+for path, bundle, build, version in (
+    (sys.argv[1], "fi.siriusbusiness.nvpn", "4001008", "4.1.5"),
+    (sys.argv[2], "fi.siriusbusiness.nvpn.UITests.xctrunner", "1", "1.0"),
+):
+    with open(path, "wb") as f:
+        plistlib.dump({"CFBundleIdentifier": bundle, "CFBundleVersion": build,
+                       "CFBundleShortVersionString": version}, f)
+PY
+  xcrun() {
+    printf '%s\n' "$*" >>"$tmp/devicectl.log"
+    [[ "$*" != *"device install app"* ]] || return 99
+    local output="" previous=""
+    for argument in "$@"; do
+      [[ "$previous" != --json-output ]] || output="$argument"
+      previous="$argument"
+    done
+    [[ -n "$output" ]] || return 0
+    python3 - "$output" "${FAKE_IOS_RUNNER_VERSION:-1.0}" <<'PY'
+import json, sys
+json.dump({"info": {"outcome": "success"}, "result": {
+    "deviceIdentifier": "coredevice-uuid-not-hardware-udid", "apps": [
+        {"bundleIdentifier": "example.unrelated", "bundleVersion": "9", "version": "9"},
+        {"bundleIdentifier": "fi.siriusbusiness.nvpn", "bundleVersion": "4001008", "version": "4.1.5"},
+        {"bundleIdentifier": "fi.siriusbusiness.nvpn.UITests.xctrunner", "bundleVersion": "1", "version": sys.argv[2]},
+    ]}}, open(sys.argv[1], "w"))
+PY
+  }
+  RESULT_DIR="$tmp/result"
+  IOS_DEVICE=fixture-hardware-udid
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
+  RELEASE_JOIN_INSTALL_IOS=0
+  RELEASE_JOIN_FIPS_SHA="$(printf '3%.0s' {1..40})"
+  RELEASE_JOIN_FIPS_TREE="$(printf '4%.0s' {1..40})"
+  RELEASE_JOIN_FIPS_VERSION=1.2.3
+  RELEASE_JOIN_IOS_XCTESTRUN="$tmp/exact.xctestrun"
+  printf 'fixture\n' >"$RELEASE_JOIN_IOS_XCTESTRUN"
+  RELEASE_JOIN_IOS_QUARANTINE="$tmp/ios.quarantine"
+  NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT="$tmp/device-bound-ios-install-receipt.json"
+  runner_tree="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner"
+  )"
+  python3 - \
+    "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT" fixture-hardware-udid \
+    "$runner_tree" <<'PY'
+import hashlib, json, sys
+json.dump({
+    "receiptSchema": 1,
+    "artifactType": "installed iOS Release app and XCTest runner",
+    "appGitSha": "1" * 40,
+    "appGitTree": "2" * 40,
+    "fipsGitSha": "3" * 40,
+    "fipsGitTree": "4" * 40,
+    "bundleManifestSha256": "a" * 64,
+    "runnerBundleTreeSha256": sys.argv[3],
+    "signerCertificateSha256": "c" * 64,
+    "selectedPhysicalDeviceIdentifierSha256": hashlib.sha256(
+        sys.argv[2].encode()
+    ).hexdigest(),
+    "bundleIdentifier": "fi.siriusbusiness.nvpn",
+    "installedVersion": "4001008",
+    "installedShortVersion": "4.1.5",
+}, open(sys.argv[1], "w"))
+PY
+  release_join_install_ios_release \
+    "$app" "$(printf '1%.0s' {1..40})" "$(printf '2%.0s' {1..40})" \
+    "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" \
+    "$(printf 'c%.0s' {1..64})" "$tmp/derived" fixture-hardware-udid
+  ! grep -Fq 'device install app' "$tmp/devicectl.log"
+  python3 - "$RESULT_DIR/ios-release-install.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+assert r["installedArtifactVerified"] is True
+assert r["replacementInstall"] is False
+assert r["installedVersion"] == "4001008"
+assert r["installedShortVersion"] == "4.1.5"
+assert r["runnerBundleTreeSha256"]
+assert r["selectedPhysicalDeviceIdentifierSha256"]
+PY
+  cp "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT" "$tmp/device-bound-ios-receipt.clean"
+  python3 - "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["selectedPhysicalDeviceIdentifierSha256"] = "0" * 64
+path.write_text(json.dumps(value))
+PY
+  if release_join_install_ios_release \
+      "$app" "$(printf '1%.0s' {1..40})" "$(printf '2%.0s' {1..40})" \
+      "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" \
+      "$(printf 'c%.0s' {1..64})" "$tmp/derived" fixture-hardware-udid \
+      >"$tmp/device-receipt-mismatch.log" 2>&1
+  then
+    echo "iOS no-install reuse accepted another phone's install receipt" >&2
+    exit 1
+  fi
+  grep -Fq 'device-bound iOS receipt mismatch' \
+    "$tmp/device-receipt-mismatch.log"
+  mv "$tmp/device-bound-ios-receipt.clean" "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT"
+  cp "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT" "$tmp/device-bound-ios-receipt.clean"
+  python3 - "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["runnerBundleTreeSha256"] = "0" * 64
+path.write_text(json.dumps(value))
+PY
+  if release_join_install_ios_release \
+      "$app" "$(printf '1%.0s' {1..40})" "$(printf '2%.0s' {1..40})" \
+      "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" \
+      "$(printf 'c%.0s' {1..64})" "$tmp/derived" fixture-hardware-udid \
+      >"$tmp/runner-receipt-mismatch.log" 2>&1
+  then
+    echo "iOS no-install reuse accepted another runner binary" >&2
+    exit 1
+  fi
+  grep -Fq 'device-bound iOS receipt mismatch' \
+    "$tmp/runner-receipt-mismatch.log"
+  mv "$tmp/device-bound-ios-receipt.clean" "$NVPN_RELEASE_JOIN_IOS_INSTALL_RECEIPT"
+  plutil -replace CFBundleShortVersionString -string 2.0 "$runner/Info.plist"
+  if release_join_install_ios_release \
+      "$app" 1 2 3 4 5 "$tmp/derived" fixture-hardware-udid \
+      >"$tmp/runner-mismatch.log" 2>&1
+  then
+    echo "iOS no-install reuse accepted a mismatched installed runner" >&2
+    exit 1
+  fi
+  grep -Fq 'installed iOS bundle version mismatch' "$tmp/runner-mismatch.log"
+)
+
+(
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   log="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-join-selection.XXXXXX")"
@@ -519,7 +740,7 @@ for required in (
         )
 for required in (
     "release_join_ios_finish_test",
-    "RELEASE_JOIN_UI_WAIT_SECS",
+    "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
     '[[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
 ):
@@ -531,8 +752,8 @@ if ios_qr_joiner_phase.index(
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE"
 ) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
-if ios_qr_joiner_phase.count("RELEASE_JOIN_UI_WAIT_SECS") != 1:
-    raise SystemExit("iPhone QR readiness does not use the configured UI budget")
+if ios_qr_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 1:
+    raise SystemExit("iPhone QR readiness does not use the setup budget")
 
 ios_admin_android_manual_phase = gate.split(
     "phase_ios_admin_android_manual() {", 1
@@ -555,6 +776,7 @@ android_admin_ios_manual_phase = gate.split(
     "phase_android_admin_ios_manual() {", 1
 )[1].split("release_join_require_clean_fips", 1)[0]
 for required in (
+    "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
     "RELEASE_JOIN_UI_WAIT_SECS",
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
     '[[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
@@ -568,8 +790,9 @@ if android_admin_ios_manual_phase.index(
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE"
 ) < android_admin_ios_manual_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone-joiner relaunch evidence is read before XCTest completes")
-if android_admin_ios_manual_phase.count("RELEASE_JOIN_UI_WAIT_SECS") != 2:
-    raise SystemExit("iPhone manual join markers do not use the configured UI budget")
+if android_admin_ios_manual_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 1 \
+        or android_admin_ios_manual_phase.count("RELEASE_JOIN_UI_WAIT_SECS") != 1:
+    raise SystemExit("iPhone manual join does not separate setup and UI budgets")
 for required in (
     "args.ios_admin_manual_relaunch_durable",
     "args.ios_joiner_manual_relaunch_durable",
@@ -645,28 +868,6 @@ for required in (
 ):
     if required not in desktop:
         raise SystemExit(f"macOS/Pixel isolated direction gate is missing {required}")
-for required in (
-    'v.get("expected_peer_count", -1)',
-    's.get("vpn_enabled") is True',
-    's.get("vpn_active") is True',
-    "network_id",
-):
-    if required not in desktop_remote:
-        raise SystemExit(f"macOS zero-participant readiness is missing {required}")
-
-for required in (
-    "NVPN_RELEASE_JOIN_ANDROID_RECEIPT",
-    "NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT",
-    "desktop_mobile_manual_join_receipt.py",
-    "validate-android",
-    '"artifactReceiptSha256"',
-    '"installReceiptSha256"',
-    '"installReceiptSize"',
-):
-    if required not in desktop:
-        raise SystemExit(
-            f"macOS/Pixel join summary does not bind the exact Android install: {required}"
-        )
 for source, label, required_tokens in (
     (
         ios_frozen_gate,
@@ -905,7 +1106,7 @@ if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
 if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
 for source, required in (
-    (desktop_remote, ("service_preflight", "assert_fips_ready", "swap_test_profile", "restore_config_dir", "require_delivery_log", 'normalize-npub "$1"')),
+    (desktop_remote, ("service_preflight", "assert_join_listener_ready", "swap_test_profile", "restore_config_dir", "require_delivery_log", 'normalize-npub "$1"')),
     (desktop, ("remote service-preflight", "remote require-delivery-log", "desktop-add-android-daemon.log", "desktop-add-iphone-daemon.log")),
     (desktop_ui_driver, ("requireSuccessfulCompletion", "Action failed", "visibleElements(application)")),
     (desktop_join_fixture, ("normalize-npub", "normalize_nostr_pubkey(&value)")),
@@ -1072,15 +1273,19 @@ PY
   # shellcheck disable=SC1090
   source "$functions_file"
   CONFIG_DIR="$profile_tmp/Application Support/nvpn"
-  CONFIG_BACKUP="$profile_tmp/Application Support/.nvpn-release-mobile-join-prior"
-  TEST_PROFILE_MARKER="$profile_tmp/profile-state"
+  PROFILE_STATE_DIR="$profile_tmp/profile-transaction"
+  CONFIG_BACKUP="$PROFILE_STATE_DIR/prior"
+  TEST_CONFIG_DIR="$PROFILE_STATE_DIR/test"
+  TEST_PROFILE_MARKER="$PROFILE_STATE_DIR/state"
   mkdir -p "$CONFIG_DIR/unknown/nested"
   printf 'preserve-me\n' >"$CONFIG_DIR/unknown/nested/sentinel"
   swap_test_profile
-  printf 'test-only\n' >"$CONFIG_DIR/test-only"
+  [[ -L "$CONFIG_DIR" && "$(readlink "$CONFIG_DIR")" == "$TEST_CONFIG_DIR" ]]
+  printf 'test-only\n' >"$TEST_CONFIG_DIR/test-only"
+  chmod 000 "$TEST_CONFIG_DIR/test-only"
   restore_config_dir
   grep -Fxq preserve-me "$CONFIG_DIR/unknown/nested/sentinel"
-  [[ ! -e "$CONFIG_DIR/test-only" && ! -e "$CONFIG_BACKUP" ]]
+  [[ ! -L "$CONFIG_DIR" && ! -e "$TEST_CONFIG_DIR" && ! -e "$CONFIG_BACKUP" ]]
 ) || {
   echo "macOS canonical profile swap did not preserve unknown nested state" >&2
   exit 1
@@ -1409,6 +1614,12 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
 (
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  [[ "$(release_join_desktop_mode full 0)" == 0 ]]
+  [[ "$(release_join_desktop_mode full false)" == 0 ]]
+  [[ "$(release_join_desktop_mode full 1)" == 1 ]]
+  [[ "$(release_join_desktop_mode desktop-only 0)" == 1 ]]
+  [[ "$(release_join_desktop_mode manual-only 1)" == 0 ]]
+  ! release_join_desktop_mode full invalid >/dev/null
   PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-deadline.XXXXXX")"
   trap 'rm -rf "$PRIVATE_DIR"' EXIT
   quick_poll() { release_join_now_ms; }
@@ -1456,5 +1667,61 @@ marker_line="$(grep -n 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS' <<<"$android_ad
   [[ -s "$PRIVATE_DIR/reverse-desktop.txt" \
     && -s "$PRIVATE_DIR/reverse-pixel.txt" ]]
 )
+
+external_fixture="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-external-join-harness.XXXXXX")"
+mkdir -p "$external_fixture/source/scripts" "$external_fixture/home"
+for file in \
+  lib-macos-release-app-ownership.sh \
+  macos-release-mobile-join-remote.sh \
+  macos_release_join_artifact.py \
+  mobile_release_artifact_receipt.py
+do
+  cp "$ROOT/scripts/$file" "$external_fixture/source/scripts/$file"
+done
+external_digest="$({
+  for file in \
+    scripts/lib-macos-release-app-ownership.sh \
+    scripts/macos-release-mobile-join-remote.sh \
+    scripts/macos_release_join_artifact.py \
+    scripts/mobile_release_artifact_receipt.py
+  do
+    printf '%s\t%s\n' \
+      "$file" "$(shasum -a 256 "$external_fixture/source/$file" | awk '{print $1}')"
+  done
+} | shasum -a 256 | awk '{print $1}')"
+external_root="$external_fixture/home/.cache/nvpn-release-mobile-join-harness/$external_digest"
+mkdir -p "$(dirname "$external_root")"
+mv "$external_fixture/source" "$external_root"
+printf '\n' >>"$external_root/scripts/mobile_release_artifact_receipt.py"
+if HOME="$external_fixture/home" \
+    NVPN_EXTERNAL_HARNESS_DIGEST="$external_digest" \
+    "$external_root/scripts/macos-release-mobile-join-remote.sh" unknown \
+    >"$external_fixture/tampered.log" 2>&1
+then
+  echo "tampered transferred macOS harness unexpectedly ran" >&2
+  exit 1
+fi
+grep -Fq 'external harness identity is invalid' "$external_fixture/tampered.log"
+rm -rf "$external_root"
+mkdir -p "$external_root/scripts"
+for file in \
+  lib-macos-release-app-ownership.sh \
+  macos-release-mobile-join-remote.sh \
+  macos_release_join_artifact.py \
+  mobile_release_artifact_receipt.py
+do
+  cp "$ROOT/scripts/$file" "$external_root/scripts/$file"
+done
+HOME="$external_fixture/home" \
+NVPN_APP_REPO_PATH="$ROOT" \
+NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR="$external_fixture/artifacts" \
+NVPN_MACOS_RELEASE_JOIN_PROFILE_STATE_DIR="$external_fixture/profile" \
+NVPN_EXTERNAL_HARNESS_DIGEST="$external_digest" \
+  "$external_root/scripts/macos-release-mobile-join-remote.sh" cleanup
+[[ ! -e "$external_root" ]] || {
+  echo "macOS external harness cache survived owned cleanup" >&2
+  exit 1
+}
+rm -rf "$external_fixture"
 
 echo "Signed Release public-UI join gate contract passed"

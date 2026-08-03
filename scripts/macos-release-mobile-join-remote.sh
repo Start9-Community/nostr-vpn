@@ -3,6 +3,26 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_ROOT="${NVPN_APP_REPO_PATH:-$ROOT}"
+EXTERNAL_HARNESS_DIGEST="${NVPN_EXTERNAL_HARNESS_DIGEST:-}"
+REMOTE_HARNESS_FILES=(
+  scripts/lib-macos-release-app-ownership.sh
+  scripts/macos-release-mobile-join-remote.sh
+  scripts/macos_release_join_artifact.py
+  scripts/mobile_release_artifact_receipt.py
+)
+ACTUAL_HARNESS_DIGEST="$(
+  for file in "${REMOTE_HARNESS_FILES[@]}"; do
+    printf '%s\t%s\n' \
+      "$file" "$(shasum -a 256 "$ROOT/$file" | awk '{print $1}')"
+  done | shasum -a 256 | awk '{print $1}'
+)"
+[[ "$EXTERNAL_HARNESS_DIGEST" =~ ^[0-9a-f]{64}$ \
+  && "$(basename "$ROOT")" == "$EXTERNAL_HARNESS_DIGEST" \
+  && "$ACTUAL_HARNESS_DIGEST" == "$EXTERNAL_HARNESS_DIGEST" ]] || {
+  echo "macOS Release join external harness identity is invalid" >&2
+  exit 2
+}
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-macos-release-app-ownership.sh"
 ARTIFACT_DIR="${NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR:-$ROOT/artifacts/macos-release-mobile-join}"
@@ -37,9 +57,11 @@ OWNED_PID_FILE="$MACOS_RELEASE_APP_STATE_DIR/imported.pid"
 CONFIG_DIR="$HOME/Library/Application Support/nvpn"
 CONFIG="$CONFIG_DIR/config.toml"
 DAEMON_LOG="$CONFIG_DIR/daemon.log"
-CONFIG_BACKUP="$(dirname "$CONFIG_DIR")/.nvpn-release-mobile-join-prior"
-TEST_PROFILE_MARKER="$ARTIFACT_DIR/test-profile-state"
-TEST_SERVICE_OWNED="$ARTIFACT_DIR/test-service-owned"
+PROFILE_STATE_DIR="${NVPN_MACOS_RELEASE_JOIN_PROFILE_STATE_DIR:-$HOME/Library/Caches/nvpn-release-mobile-join-profile}"
+CONFIG_BACKUP="$PROFILE_STATE_DIR/prior"
+TEST_CONFIG_DIR="$PROFILE_STATE_DIR/test"
+TEST_PROFILE_MARKER="$PROFILE_STATE_DIR/state"
+TEST_SERVICE_OWNED="$PROFILE_STATE_DIR/service-owned"
 IMPORT_VERIFIED="$ARTIFACT_DIR/import-verified"
 
 mkdir -p "$ARTIFACT_DIR"
@@ -101,45 +123,67 @@ assert json.loads(sys.argv[1]).get("daemon", {}).get("running") is True
   return 1
 }
 
-assert_fips_ready() {
+assert_join_listener_ready() {
   assert_service_ready >/dev/null
   local runtime_json deadline=$((SECONDS + 15))
   while ((SECONDS < deadline)); do
     runtime_json="$(
-      "$CLI" status --json --discover-secs 0 --config "$CONFIG" \
+      "$CLI" status --json --include-join-request --discover-secs 0 \
+        --config "$CONFIG" \
         2>/dev/null || true
     )"
     if python3 -c '
 import json,sys
 v=json.loads(sys.argv[1]); d=v.get("daemon", {}); s=d.get("state") or {}
-configured_without_participants = (
+listener_ready = (
     int(v.get("expected_peer_count", -1)) == 0
     and s.get("vpn_enabled") is True
-    and s.get("vpn_active") is True
+    and s.get("vpn_active") is False
+    and s.get("vpn_status") == "Listening for join requests"
     and bool(v.get("network_id"))
+    and str(v.get("join_request_qr_code_or_link", "")).startswith(
+        "nvpn://join-request/"
+    )
 )
-assert d.get("running") is True and (
-    s.get("mesh_ready") is True or configured_without_participants
-)
+assert d.get("running") is True and listener_ready
 ' "$runtime_json" 2>/dev/null
     then
-      echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_FIPS_READY=1"
+      echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_JOIN_LISTENER_READY=1"
       return 0
     fi
     sleep 0.2
   done
-  echo "macOS Release join daemon/FIPS session did not become ready" >&2
+  echo "macOS Release join listener did not become ready" >&2
   printf '%s\n' "$runtime_json" >&2
   tail -n 120 "$DAEMON_LOG" >&2 2>/dev/null || true
   return 1
 }
 
+assert_outbound_join_ready() {
+  local driver_pid="$1" deadline=$((SECONDS + 15))
+  while ((SECONDS < deadline)); do
+    grep -Eq 'join_request_admin = "[0-9a-f]{64}"' "$CONFIG" \
+      && grep -Fq 'outbound_join_request' "$CONFIG" \
+      && grep -Eq 'recipient = "[0-9a-f]{64}"' "$CONFIG" \
+      && {
+        echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_OUTBOUND_JOIN_READY=1"
+        return 0
+      }
+    kill -0 "$driver_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  echo "macOS Release outbound join request did not become ready" >&2
+  return 1
+}
+
 swap_test_profile() {
-  [[ ! -e "$TEST_PROFILE_MARKER" && ! -e "$CONFIG_BACKUP" ]] || {
+  [[ ! -e "$TEST_PROFILE_MARKER" && ! -e "$CONFIG_BACKUP" \
+    && ! -e "$TEST_CONFIG_DIR" ]] || {
     echo "stale macOS Release join profile transaction exists" >&2
     return 1
   }
-  mkdir -p "$(dirname "$CONFIG_DIR")"
+  mkdir -p "$(dirname "$CONFIG_DIR")" "$PROFILE_STATE_DIR"
+  chmod 700 "$PROFILE_STATE_DIR"
   if [[ -e "$CONFIG_DIR" ]]; then
     [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]] || {
       echo "refusing non-directory macOS profile state: $CONFIG_DIR" >&2
@@ -150,21 +194,27 @@ swap_test_profile() {
   else
     printf 'absent\n' >"$TEST_PROFILE_MARKER"
   fi
-  mkdir "$CONFIG_DIR"
+  mkdir -m 700 "$TEST_CONFIG_DIR"
+  ln -s "$TEST_CONFIG_DIR" "$CONFIG_DIR"
 }
 
 restore_config_dir() {
   [[ -f "$TEST_PROFILE_MARKER" ]] || return 0
   local prior
   prior="$(<"$TEST_PROFILE_MARKER")"
-  [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]] || return 1
-  rm -rf "$CONFIG_DIR"
+  [[ -L "$CONFIG_DIR" \
+    && "$(readlink "$CONFIG_DIR")" == "$TEST_CONFIG_DIR" ]] || return 1
+  rm "$CONFIG_DIR"
   case "$prior" in
     prior) mv "$CONFIG_BACKUP" "$CONFIG_DIR" ;;
     absent) [[ ! -e "$CONFIG_BACKUP" ]] ;;
     *) return 1 ;;
   esac
   rm -f "$TEST_PROFILE_MARKER"
+  if ! rm -rf "$TEST_CONFIG_DIR"; then
+    echo "quarantined privileged macOS Release join test profile: $TEST_CONFIG_DIR" >&2
+  fi
+  rmdir "$PROFILE_STATE_DIR" 2>/dev/null || true
 }
 
 restore_test_profile() {
@@ -240,7 +290,7 @@ verify_import() {
     --manual-join-driver "$MANUAL_JOIN_DRIVER" \
     --service-toggle-driver "$SERVICE_TOGGLE_DRIVER" \
     --component-proof "$COMPONENT_PROOF" \
-    --app-root "$ROOT" \
+    --app-root "$APP_ROOT" \
     --fips-root "$FIPS_PATH" \
     --expected-app-head "$EXPECTED_APP" \
     --expected-app-tree "$EXPECTED_APP_TREE" \
@@ -293,6 +343,18 @@ run_driver() {
   "$MANUAL_JOIN_DRIVER" \
     "$APP_PID" "$phase" "$value1" "$value2" "Nostr VPN"
   stop_app
+}
+
+run_manual_join_driver() {
+  local driver_pid status=0
+  launch_app
+  "$MANUAL_JOIN_DRIVER" \
+    "$APP_PID" release-manual-join "$1" "$2" "Nostr VPN" &
+  driver_pid=$!
+  assert_outbound_join_ready "$driver_pid" || status=1
+  wait "$driver_pid" || status=1
+  stop_app || status=1
+  return "$status"
 }
 
 run_driver_hold() {
@@ -353,7 +415,7 @@ case "${1:-}" in
   create-admin)
     [[ $# == 2 ]] || { echo "usage: $0 create-admin <network-name>" >&2; exit 2; }
     run_driver release-create-admin "$2" _
-    assert_fips_ready
+    assert_join_listener_ready
     ;;
   joiner-id)
     [[ $# == 1 ]] || { echo "usage: $0 joiner-id" >&2; exit 2; }
@@ -361,12 +423,10 @@ case "${1:-}" in
     ;;
   manual-join)
     [[ $# == 3 ]] || { echo "usage: $0 manual-join <admin-npub> <network-id>" >&2; exit 2; }
-    assert_fips_ready
-    run_driver release-manual-join "$2" "$3"
+    run_manual_join_driver "$2" "$3"
     ;;
   admin-add)
     [[ $# == 3 ]] || { echo "usage: $0 admin-add <joiner-npub> <alias>" >&2; exit 2; }
-    assert_fips_ready
     run_driver_hold release-admin-add "$2" "$3"
     ;;
   verify)
@@ -388,9 +448,14 @@ case "${1:-}" in
   cleanup)
     restore_test_profile
     macos_release_app_restore
+    rm -rf "$ROOT"
+    ;;
+  reset-profile)
+    restore_test_profile
+    macos_release_app_restore
     ;;
   *)
-    echo "usage: $0 <stage|prepare|verify-import|service-preflight|daemon-log-offset|require-delivery-log|create-admin|joiner-id|manual-join|admin-add|verify|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|verify-import|service-preflight|daemon-log-offset|require-delivery-log|create-admin|joiner-id|manual-join|admin-add|verify|reset-profile|cleanup>" >&2
     exit 2
     ;;
 esac
