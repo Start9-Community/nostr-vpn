@@ -58,13 +58,14 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         )
         emit("NVPN_RELEASE_JOIN_LIFECYCLE_READY=1")
 
-        XCTAssertTrue(
-            waitForRosterBackedPendingQrDismissal(
-                qr,
-                expectedParticipant: expectedAdmin
-            ),
-            "Join QR disappeared before the exact admin roster was visible"
+        let rosterApplied = waitForRosterBackedPendingQrDismissal(
+            qr,
+            expectedParticipant: expectedAdmin
         )
+        let rosterFailure = qr.exists
+            ? "Join approval or signed-roster delivery timed out while the QR remained visible"
+            : "Join QR disappeared before the exact admin roster was visible"
+        XCTAssertTrue(rosterApplied, rosterFailure)
         try requireAcceptedRoster(
             expectedAdmin,
             relaunch: true,

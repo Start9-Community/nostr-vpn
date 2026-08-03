@@ -232,11 +232,13 @@ phase_ios_admin_android_qr() {
 }
 
 phase_android_admin_ios_qr() {
-  local join_log submitted completed ios_qr_content_width_bps
+  local join_log android_scan_log submitted completed ios_qr_content_width_bps
   local ios_qr_relaunch_admin
   release_join_restart_ios_in_place
   release_join_reset_android_state
   release_join_android_create_admin
+  android_scan_log="$RESULT_DIR/android-admin-ios-qr-approval.log"
+  release_join_android_scan_prepare >"$android_scan_log"
   join_log="$(ios_log android-admin-ios-qr)"
   release_join_ios_start_test \
     testShowPhysicalJoinQrAndRequireRosterCompletion "$join_log" \
@@ -252,9 +254,8 @@ phase_android_admin_ios_qr() {
   )"
   release_join_valid_npub "$RELEASE_JOIN_IOS_JOINER_ID" \
     || fail "iPhone Release UI did not report its joining identity"
-  local android_scan_log="$RESULT_DIR/android-admin-ios-qr.log"
-  release_join_android_scan_and_accept "$RELEASE_JOIN_IOS_JOINER_ID" \
-    | tee "$android_scan_log"
+  release_join_android_scan_submit "$RELEASE_JOIN_IOS_JOINER_ID" \
+    >>"$android_scan_log"
   submitted="$(
     sed -n \
       's/.*NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=//p' \

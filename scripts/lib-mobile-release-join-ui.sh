@@ -435,14 +435,23 @@ release_join_android_wait_qr_join_complete() {
   return 1
 }
 
-release_join_android_scan_and_accept() {
-  local joiner="$1" before after deadline
+release_join_android_scan_prepare() {
   release_join_android_open_link_device
-  before="$(release_join_android_query resource-prefix roster-participant- count)"
+  RELEASE_JOIN_ANDROID_SCAN_BEFORE="$(
+    release_join_android_query resource-prefix roster-participant- count
+  )"
   release_join_android_scroll_to description "Scan joining device QR"
   release_join_android_tap description "Scan joining device QR"
   release_join_android_accept_camera_permission
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_SCANNER_READY=1"
+}
+
+release_join_android_scan_submit() {
+  local joiner="$1" after deadline
+  [[ "${RELEASE_JOIN_ANDROID_SCAN_BEFORE:-}" =~ ^[0-9]+$ ]] || {
+    echo "Android QR scanner was not prepared before approval" >&2
+    return 1
+  }
   release_join_android_wait_query \
     description "Confirm adding scanned join request" "$RELEASE_JOIN_CAMERA_WAIT_SECS"
   release_join_require_fresh_ios_pending_qr
@@ -455,7 +464,7 @@ release_join_android_scan_and_accept() {
         resource "roster-participant-accepted-$joiner" center \
         >/dev/null 2>&1; then
       after="$(release_join_android_query resource-prefix roster-participant- count)"
-      ((after >= before + 1)) || return 1
+      ((after >= RELEASE_JOIN_ANDROID_SCAN_BEFORE + 1)) || return 1
       return 0
     fi
     sleep 0.25

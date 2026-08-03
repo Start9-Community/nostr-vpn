@@ -847,6 +847,12 @@ for required in (
 for required in (
     "release_join_ios_finish_test",
     "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
+    "release_join_android_scan_prepare",
+    "release_join_android_scan_submit",
+    "android-admin-ios-qr-approval.log",
+    "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=",
+    "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=",
+    "assert_delivery_deadline",
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
     '[[ "$ios_qr_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
 ):
@@ -860,6 +866,26 @@ if ios_qr_joiner_phase.index(
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
 if ios_qr_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2:
     raise SystemExit("iPhone QR readiness does not use the setup budget")
+if "release_join_android_scan_and_accept" in ios_qr_joiner_phase:
+    raise SystemExit("iPhone QR delivery still includes Android scanner setup")
+if not (
+    ios_qr_joiner_phase.index("release_join_android_scan_prepare")
+    < ios_qr_joiner_phase.index("release_join_ios_start_test")
+    < ios_qr_joiner_phase.index("NVPN_RELEASE_JOIN_LIFECYCLE_READY=1")
+    < ios_qr_joiner_phase.index("release_join_android_scan_submit")
+    < ios_qr_joiner_phase.index("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=")
+    < ios_qr_joiner_phase.index("assert_delivery_deadline")
+    < ios_qr_joiner_phase.index("release_join_ios_finish_test")
+):
+    raise SystemExit(
+        "Pixel scanner setup must precede iPhone QR readiness and approval timing"
+    )
+for required in (
+    "Join approval or signed-roster delivery timed out while the QR remained visible",
+    "Join QR disappeared before the exact admin roster was visible",
+):
+    if required not in ios_test:
+        raise SystemExit(f"iPhone QR failure diagnostics are missing: {required}")
 
 ios_admin_android_manual_phase = gate.split(
     "phase_ios_admin_android_manual() {", 1
