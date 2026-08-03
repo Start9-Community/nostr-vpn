@@ -110,9 +110,11 @@ if rapid_gate.count("android_release_capture_native_tunnel_start_baseline") != 2
 for receipt, expected in (
     (arm, 2),
     ("android_release_connect_ui", 2),
+    ("run_android_release_exit_network_probe", 2),
     ("android_release_disconnect_ui", 2),
     (stable, 2),
     (disarm, 2),
+    ("run_android_release_exit_network_probe start-stop-initial-exit", 1),
     ("run_android_release_exit_network_probe start-stop-full-reconnect", 1),
 ):
     if rapid_gate.count(receipt) != expected:
@@ -123,7 +125,10 @@ for receipt, expected in (
 cursor = 0
 for _ in range(2):
     positions = []
-    for receipt in (arm, "android_release_connect_ui", "android_release_disconnect_ui", stable, disarm):
+    for receipt in (
+        arm, "android_release_connect_ui", "run_android_release_exit_network_probe",
+        "android_release_disconnect_ui", stable, disarm,
+    ):
         cursor = rapid_gate.index(receipt, cursor)
         positions.append(cursor)
         cursor += len(receipt)

@@ -993,6 +993,7 @@ run_android_release_rapid_start_stop_gate() {
   vpn_cleanup_armed=1
   android_release_connect_ui || return 1
   android_release_pin_native_tunnel_start_count || return 1
+  run_android_release_exit_network_probe start-stop-initial-exit || return 1
   android_release_disconnect_ui || return 1
   android_release_wait_stable_quiescence \
     start-stop "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" || return 1
