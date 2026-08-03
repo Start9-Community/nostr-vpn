@@ -82,8 +82,15 @@ extension AppModel {
             }
             let installed = await vpnController.installedRouteState()
             try requireStartupTunnelReconciliation(generation)
-            guard installed != desired else {
-                return true
+            if installed == desired {
+                let providerResponsive = await vpnController.providerIsResponsive()
+                try requireStartupTunnelReconciliation(generation)
+                if providerResponsive {
+                    return true
+                }
+                debugLog(
+                    "startup replacing unresponsive PacketTunnel with matching saved routes"
+                )
             }
         }
 

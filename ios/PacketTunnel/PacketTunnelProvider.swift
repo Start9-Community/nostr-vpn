@@ -221,6 +221,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         let message = String(data: messageData, encoding: .utf8) ?? ""
         switch message {
+        case "health":
+            let runtimeIsAlive = withTunnelHandle { _ in true } == true
+            completionHandler?(runtimeIsAlive ? Data("ok".utf8) : nil)
         case "runtimeStateBegin":
             let data = runtimeStateData()
             appMessageSnapshotLock.lock()

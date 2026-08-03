@@ -67,7 +67,8 @@ python3 - \
   "$ROOT/ios/Sources/PacketTunnelController.swift" \
   "$ROOT/ios/Sources/AppModel.swift" \
   "$ROOT/ios/Sources/AppModelTunnelLifecycle.swift" \
-  "$ROOT/ios/Sources/AppModelDebugAutomation.swift" <<'PY'
+  "$ROOT/ios/Sources/AppModelDebugAutomation.swift" \
+  "$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift" <<'PY'
 import pathlib
 import sys
 
@@ -75,6 +76,7 @@ source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 app = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 lifecycle = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 debug = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+provider = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
 start = source.split("func start(", 1)[1].split("static func routeState", 1)[0]
 call = start.index("startVPNTunnel(options: options)")
 ready = start.index("try await waitForConnected(manager)")
@@ -202,6 +204,19 @@ if not startup_routes.index("packetTunnelNeedsStart") < startup_routes.index(
     "installedRouteState"
 ) < startup_routes.index("vpnController.start"):
     raise SystemExit("startup does not restart persisted VPN-on intent after NE disconnect")
+if "providerIsResponsive()" not in startup_routes:
+    raise SystemExit("startup trusts saved routes without proving the provider is alive")
+if not startup_routes.index("installed == desired") < startup_routes.index(
+    "providerIsResponsive()"
+) < startup_routes.index("return true"):
+    raise SystemExit("startup can reuse a matching route profile before provider liveness")
+if 'providerMessage("health") == "ok"' not in source:
+    raise SystemExit("startup provider liveness does not use the real Network Extension session")
+if not all(
+    token in provider
+    for token in ('case "health":', "withTunnelHandle", 'Data("ok".utf8)')
+):
+    raise SystemExit("the shipped PacketTunnel does not answer the startup liveness probe")
 if "observedStartingStatus" not in source or "connectionFailed(status)" not in source:
     raise SystemExit("PacketTunnel readiness ignores a terminal failed start")
 if "continuation.onTermination" not in source or "group.cancelAll()" not in source:

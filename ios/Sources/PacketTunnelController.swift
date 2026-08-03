@@ -320,6 +320,10 @@ final class PacketTunnelController {
         }
     }
 
+    func providerIsResponsive() async -> Bool {
+        await providerMessage("health") == "ok"
+    }
+
     func runtimeStateJson() async -> String? {
         await runtimeStateGate.acquire()
         let result = await readRuntimeStateJson()

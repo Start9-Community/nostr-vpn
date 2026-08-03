@@ -308,6 +308,37 @@
     }
 
     #[test]
+    fn mobile_direct_network_without_peers_keeps_private_mesh_route() {
+        let mut app = AppConfig::generated();
+        app.ensure_defaults();
+        let own = app.own_nostr_pubkey_hex().expect("own pubkey");
+        app.networks = vec![NetworkConfig {
+            id: "direct-no-peers".to_string(),
+            name: "Direct no peers".to_string(),
+            enabled: true,
+            network_id: "direct-no-peers".to_string(),
+            join_secret: "join-secret".to_string(),
+            devices: Vec::new(),
+            removed_devices: Vec::new(),
+            admins: vec![own],
+            listen_for_join_requests: true,
+            join_request_admin: String::new(),
+            local_identity_confirmation_pending: false,
+            outbound_join_request: None,
+            inbound_join_requests: Vec::new(),
+            shared_roster_updated_at: 0,
+            shared_roster_signed_by: String::new(),
+        }];
+        app.set_internet_source(nostr_vpn_core::config::InternetSource::Direct);
+
+        let config = MobileTunnelConfig::from_app(&app).expect("direct mobile config");
+
+        assert!(config.peers.is_empty());
+        assert_eq!(config.route_targets, vec![MESH_TUNNEL_IPV4_CIDR]);
+        assert!(config.wireguard_exit.is_none());
+    }
+
+    #[test]
     fn mobile_config_selected_exit_node_adds_default_route() {
         let mut app = AppConfig::generated();
         app.ensure_defaults();
