@@ -453,10 +453,18 @@ final class NostrVpnIosUITests: XCTestCase {
     private func openJoinNetworkPage() {
         let join = element("network-setup-join")
         if !join.waitForExistence(timeout: 3) {
+            let switcher = element("network-switcher-open")
             XCTAssertTrue(
-                ShippedUIInteraction.openAddNetwork(in: app),
-                "The shipped Add network action was not reachable."
+                switcher.waitForExistence(timeout: 5),
+                "The shipped network switcher was not visible."
             )
+            switcher.tap()
+            let addNetwork = element("add-network-open")
+            XCTAssertTrue(
+                addNetwork.waitForExistence(timeout: 5),
+                "The shipped Add network action was not visible."
+            )
+            addNetwork.tap()
         }
         scrollToElement("network-setup-join").tap()
     }

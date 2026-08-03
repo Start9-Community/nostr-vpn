@@ -169,6 +169,15 @@ private struct NetworkSwitcher: View {
 
     var body: some View {
         Menu {
+            Button {
+                addNetworkPresented = true
+            } label: {
+                Label("Add network", systemImage: "plus")
+            }
+            .accessibilityIdentifier("add-network-open")
+            if !model.state.networks.isEmpty {
+                Divider()
+            }
             ForEach(model.state.networks) { network in
                 Button {
                     shownNetworkId = network.id
@@ -181,15 +190,6 @@ private struct NetworkSwitcher: View {
                     }
                 }
             }
-            if !model.state.networks.isEmpty {
-                Divider()
-            }
-            Button {
-                addNetworkPresented = true
-            } label: {
-                Label("Add network", systemImage: "plus")
-            }
-            .accessibilityIdentifier("add-network-open")
         } label: {
             HStack(spacing: 4) {
                 if let shownNetwork, model.state.networks.count > 1 {
@@ -204,6 +204,7 @@ private struct NetworkSwitcher: View {
             .foregroundStyle(.primary)
         }
         .accessibilityIdentifier("network-switcher-open")
+        .menuOrder(.fixed)
     }
 }
 

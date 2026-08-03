@@ -93,29 +93,6 @@ enum PhysicalGateTimeouts {
 
 enum ShippedUIInteraction {
     private static let maximumAttempts = 2
-    private static let maximumMenuScrolls = 12
-
-    static func openAddNetwork(in app: XCUIApplication) -> Bool {
-        let switcher = app.descendants(matching: .any)["network-switcher-open"]
-        guard switcher.waitForExistence(timeout: 5), switcher.isHittable else {
-            return false
-        }
-        switcher.tap()
-
-        let menu = app.collectionViews.firstMatch
-        guard menu.waitForExistence(timeout: 5) else {
-            return false
-        }
-        let addNetwork = app.descendants(matching: .any)["add-network-open"]
-        for _ in 0..<maximumMenuScrolls {
-            if addNetwork.exists, addNetwork.isHittable {
-                addNetwork.tap()
-                return true
-            }
-            menu.swipeUp()
-        }
-        return false
-    }
 
     static func reveal(
         _ target: XCUIElement,
