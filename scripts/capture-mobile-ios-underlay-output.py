@@ -29,8 +29,18 @@ ACTIVE_TUNNEL_CHECKPOINT = re.compile(
     r"UNDERLAY_VALIDATED|PAYLOAD_RECOVERY|VERIFIED)"
     r"|RELEASE_BACKGROUND_\d+_REQUESTED"
     r"|RELEASE_FOREGROUND_\d+_VERIFIED"
+    r"|RELEASE_CONNECTED_DIRECT_PASSED"
+    r"|RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED"
     r")"
 )
+DIRECT_CHECKPOINTS = frozenset(
+    {
+        "release_connected_direct_passed",
+        "release_connected_direct_relaunch_passed",
+    }
+)
+DIRECT_SAMPLE_ATTEMPTS = 2
+DIRECT_SAMPLE_RETRY_SECONDS = 0.25
 
 
 def valid_process_sample(sample: dict[str, object]) -> bool:
@@ -104,7 +114,11 @@ class ProcessSampler:
         normalized = checkpoint.lower()
         should_sample = False
         with self.lock:
-            if self.end_seen and normalized != "active-session-end":
+            if (
+                self.end_seen
+                and normalized not in DIRECT_CHECKPOINTS
+                and normalized != "active-session-end"
+            ):
                 return
             self.checkpoint = normalized
             if normalized not in self.required_checkpoints:
@@ -164,9 +178,21 @@ class ProcessSampler:
             )
         app_pids: set[int] = set()
         tunnel_pids: set[int] = set()
+        direct_checkpoint_processes: dict[str, dict[str, int]] = {}
         valid_checkpoints: set[str] = set()
+        valid_direct_checkpoints = {
+            str(sample.get("checkpoint", ""))
+            for sample in samples
+            if valid_process_sample(sample)
+            and sample.get("checkpoint") in DIRECT_CHECKPOINTS
+        }
         for index, sample in enumerate(samples, start=1):
             checkpoint = str(sample.get("checkpoint", ""))
+            if (
+                checkpoint in valid_direct_checkpoints
+                and not valid_process_sample(sample)
+            ):
+                continue
             if sample.get("error"):
                 errors.append(
                     f"process observation {index}: {sample['error']}"
@@ -184,8 +210,14 @@ class ProcessSampler:
                 )
             if valid_process_sample(sample):
                 valid_checkpoints.add(checkpoint)
-                app_pids.add(int(app[0]))
-                tunnel_pids.add(int(tunnel[0]))
+                if checkpoint in DIRECT_CHECKPOINTS:
+                    direct_checkpoint_processes[checkpoint] = {
+                        "appProcessIdentifier": int(app[0]),
+                        "packetTunnelProcessIdentifier": int(tunnel[0]),
+                    }
+                else:
+                    app_pids.add(int(app[0]))
+                    tunnel_pids.add(int(tunnel[0]))
         if len(app_pids) != 1:
             errors.append(f"distinct app PIDs={sorted(app_pids)}")
         if len(tunnel_pids) != 1:
@@ -204,6 +236,7 @@ class ProcessSampler:
             "activeSessionBeginSeen": self.begin_seen,
             "activeSessionEndSeen": self.end_seen,
             "appProcessIdentifiers": sorted(app_pids),
+            "directCheckpointProcesses": direct_checkpoint_processes,
             "observedCheckpoints": sorted(valid_checkpoints),
             "packetTunnelProcessIdentifiers": sorted(tunnel_pids),
             "passed": not errors,
@@ -236,7 +269,17 @@ class ProcessSampler:
             self.stopped.wait(0.25)
 
     def _sample_checkpoint(self, checkpoint: str) -> bool:
-        return self._sample(checkpoint)
+        attempts = (
+            DIRECT_SAMPLE_ATTEMPTS
+            if checkpoint in DIRECT_CHECKPOINTS
+            else 1
+        )
+        for attempt in range(attempts):
+            if self._sample(checkpoint):
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(DIRECT_SAMPLE_RETRY_SECONDS)
+        return False
 
     def _sample(self, checkpoint: str) -> bool:
         timestamp_ms = time.time_ns() // 1_000_000

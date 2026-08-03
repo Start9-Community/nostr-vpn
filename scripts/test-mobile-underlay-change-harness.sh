@@ -332,12 +332,18 @@ samples = [
     {"checkpoint": "active-session-begin", "appPids": [111], "packetTunnelPids": [211]},
     {"checkpoint": "underlay_switch_1_outage", "appPids": [111], "packetTunnelPids": [211]},
     {"checkpoint": "active-session-end", "appPids": [111], "packetTunnelPids": [211]},
+    {"checkpoint": "release_connected_direct_passed", "appPids": [112], "packetTunnelPids": [211]},
 ]
 status, receipt = finish(samples, "active-processes.json")
 assert status == 0 and receipt["passed"] is True
 assert receipt["appProcessIdentifiers"] == [111]
 assert receipt["packetTunnelProcessIdentifiers"] == [211]
-assert "directCheckpointProcesses" not in receipt
+assert receipt["directCheckpointProcesses"] == {
+    "release_connected_direct_passed": {
+        "appProcessIdentifier": 112,
+        "packetTunnelProcessIdentifier": 211,
+    }
+}
 
 samples[1] = {**samples[1], "packetTunnelPids": []}
 status, receipt = finish(samples, "disconnected-active-processes.json")
@@ -346,14 +352,15 @@ assert "underlay_switch_1_outage" not in receipt["observedCheckpoints"]
 
 assert module.ACTIVE_TUNNEL_CHECKPOINT.search(
     "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1"
-) is None
+) is not None
 sampler = module.ProcessSampler(
     "fixture-device", pathlib.Path(sys.argv[2], "post-end.json")
 )
 sampler.end_seen = True
+sampler._sample_checkpoint = lambda checkpoint: True
 sampler.update_checkpoint("release_connected_direct_relaunch_passed")
-assert sampler.required_checkpoints == set()
-sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
+assert sampler.required_checkpoints == {"release_connected_direct_relaunch_passed"}
+sampler.checkpoint_executor.shutdown(wait=True, cancel_futures=True)
 
 missing_end = module.ProcessSampler(
     "fixture-device", pathlib.Path(sys.argv[2], "missing-end.json")
