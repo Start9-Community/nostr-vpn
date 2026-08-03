@@ -15,6 +15,19 @@ import testflight_export_compliance as export_compliance
 
 class AppStoreDraftMetadataTests(unittest.TestCase):
     @staticmethod
+    def _published_localization():
+        return {
+            "attributes": {
+                "description": "published description",
+                "keywords": "published,keywords",
+                "promotionalText": "published promotional text",
+                "supportUrl": "https://example.invalid/support",
+                "whatsNew": "published release notes",
+                "marketingUrl": "https://example.invalid/marketing",
+            }
+        }
+
+    @staticmethod
     def _screenshot_set(display_type, resource_id):
         return {
             "type": "appScreenshotSets",
@@ -152,28 +165,52 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             draft,
         )
 
-    def test_repo_defaults_replace_stale_existing_version_metadata(self):
-        existing = {
-            "attributes": {
-                "description": "stale description",
-                "keywords": "stale",
-                "promotionalText": "stale promotional text",
-                "supportUrl": "https://example.invalid/stale",
-                "whatsNew": "stale release notes",
-                "marketingUrl": "https://example.invalid/old",
-            }
-        }
+    def test_existing_public_metadata_is_reused_without_a_patch(self):
+        existing = self._published_localization()
 
         attrs = metadata.version_localization_attributes(existing, environ={})
 
+        self.assertEqual(attrs, existing["attributes"])
+        self.assertEqual(
+            metadata.version_localization_patch(existing, environ={}),
+            {},
+        )
+        draft = (ROOT / "scripts" / "appstore-draft").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("if not attrs:\n            return existing", draft)
+
+    def test_explicit_overrides_replace_only_selected_existing_fields(self):
+        existing = self._published_localization()
+
+        patch = metadata.version_localization_patch(
+            existing,
+            environ={
+                "NVPN_APPSTORE_DESCRIPTION": "replacement description",
+                "NVPN_APPSTORE_WHATS_NEW": "replacement release notes",
+            },
+        )
+
+        self.assertEqual(
+            patch,
+            {
+                "description": "replacement description",
+                "whatsNew": "replacement release notes",
+            },
+        )
+
+    def test_missing_localization_uses_safe_repository_defaults(self):
+        attrs = metadata.version_localization_attributes(None, environ={})
+
         self.assertEqual(attrs["description"], metadata.DEFAULT_DESCRIPTION)
         self.assertEqual(attrs["keywords"], metadata.DEFAULT_KEYWORDS)
-        self.assertEqual(attrs["promotionalText"], metadata.DEFAULT_PROMOTIONAL_TEXT)
-        self.assertEqual(attrs["supportUrl"], "https://nostrvpn.org/support/")
+        self.assertEqual(
+            attrs["promotionalText"],
+            metadata.DEFAULT_PROMOTIONAL_TEXT,
+        )
+        self.assertEqual(attrs["supportUrl"], metadata.DEFAULT_SUPPORT_URL)
         self.assertEqual(attrs["whatsNew"], metadata.DEFAULT_WHATS_NEW)
         self.assertEqual(attrs["marketingUrl"], metadata.DEFAULT_MARKETING_URL)
-        self.assertNotIn("Cashu", attrs["description"])
-        self.assertNotIn("paid", attrs["description"].lower())
 
     def test_explicit_environment_overrides_repo_defaults(self):
         attrs = metadata.version_localization_attributes(
@@ -236,6 +273,18 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("select Direct", notes)
         self.assertIn("signed roster containing its identity", notes)
         self.assertIn("Manual join", notes)
+
+    def test_public_metadata_reuse_does_not_prevent_reviewer_note_refresh(self):
+        existing = self._published_localization()
+        existing["attributes"]["notes"] = "stale reviewer notes"
+
+        self.assertEqual(
+            metadata.version_localization_patch(existing, environ={}),
+            {},
+        )
+        notes = metadata.review_notes("4.1.5", existing, environ={})
+        self.assertIn("Nostr VPN 4.1.5", notes)
+        self.assertNotIn("stale reviewer notes", notes)
 
     def test_reviewer_notes_claim_french_attachment_only_with_live_build_proof(self):
         proof = export_compliance.VerifiedBuildCompliance(

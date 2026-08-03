@@ -1,10 +1,8 @@
 """Pure, offline App Store draft metadata helpers.
 
-The repository defaults are authoritative for fields managed by
-``scripts/appstore-draft``. Existing App Store Connect values are accepted by
-the public helpers to make that update policy explicit, but are intentionally
-not used. A non-empty environment override is the only way to replace a
-repository default.
+Existing public App Store text is authoritative by default. Repository
+defaults initialize a missing localization, while a non-empty environment
+override explicitly replaces only its corresponding field.
 """
 
 from __future__ import annotations
@@ -31,6 +29,18 @@ REQUIRED_APPSTORE_SCREENSHOT_COUNTS = {
     "APP_IPAD_PRO_3GEN_129": 3,
     "APP_IPHONE_67": 3,
 }
+VERSION_LOCALIZATION_FIELDS = (
+    ("description", "NVPN_APPSTORE_DESCRIPTION", DEFAULT_DESCRIPTION),
+    ("keywords", "NVPN_APPSTORE_KEYWORDS", DEFAULT_KEYWORDS),
+    (
+        "promotionalText",
+        "NVPN_APPSTORE_PROMOTIONAL_TEXT",
+        DEFAULT_PROMOTIONAL_TEXT,
+    ),
+    ("supportUrl", "NVPN_APPSTORE_SUPPORT_URL", DEFAULT_SUPPORT_URL),
+    ("whatsNew", "NVPN_APPSTORE_WHATS_NEW", DEFAULT_WHATS_NEW),
+    ("marketingUrl", "NVPN_APPSTORE_MARKETING_URL", DEFAULT_MARKETING_URL),
+)
 
 
 def _explicit_boolean(
@@ -128,13 +138,15 @@ def reconcile_appstore_screenshots(
     )
 
 
-def _value(
-    environ: Mapping[str, str],
-    name: str,
-    default: str,
-) -> str:
-    value = str(environ.get(name, "")).strip()
-    return value or default
+def _existing_localization_attributes(
+    existing: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    if existing is None:
+        return None
+    attributes = existing.get("attributes")
+    if not isinstance(attributes, Mapping):
+        raise ValueError("existing App Store localization has no attributes")
+    return attributes
 
 
 def version_localization_attributes(
@@ -142,48 +154,42 @@ def version_localization_attributes(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Return authoritative version-localization fields for a PUT/PATCH."""
+    """Return preserved fields plus any explicit per-field replacements."""
 
-    del existing
     source = os.environ if environ is None else environ
-    keywords = _value(source, "NVPN_APPSTORE_KEYWORDS", DEFAULT_KEYWORDS)
-    if len(keywords) > 100:
+    current = _existing_localization_attributes(existing)
+    values: dict[str, str] = {}
+    for attribute, environment_name, default in VERSION_LOCALIZATION_FIELDS:
+        override = str(source.get(environment_name, "")).strip()
+        existing_value = current.get(attribute) if current is not None else None
+        if override:
+            values[attribute] = override
+        elif current is None:
+            values[attribute] = default
+        elif isinstance(existing_value, str):
+            values[attribute] = existing_value
+    if len(values.get("keywords", "")) > 100:
         raise ValueError(
-            f"NVPN_APPSTORE_KEYWORDS is {len(keywords)} characters; "
+            f"NVPN_APPSTORE_KEYWORDS is {len(values['keywords'])} characters; "
             "App Store limit is 100"
         )
+    return values
 
-    attrs = {
-        "description": _value(
-            source,
-            "NVPN_APPSTORE_DESCRIPTION",
-            DEFAULT_DESCRIPTION,
-        ),
-        "keywords": keywords,
-        "promotionalText": _value(
-            source,
-            "NVPN_APPSTORE_PROMOTIONAL_TEXT",
-            DEFAULT_PROMOTIONAL_TEXT,
-        ),
-        "supportUrl": _value(
-            source,
-            "NVPN_APPSTORE_SUPPORT_URL",
-            DEFAULT_SUPPORT_URL,
-        ),
-        "whatsNew": _value(
-            source,
-            "NVPN_APPSTORE_WHATS_NEW",
-            DEFAULT_WHATS_NEW,
-        ),
+
+def version_localization_patch(
+    existing: Mapping[str, object],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return only explicit replacements that differ from live metadata."""
+
+    current = _existing_localization_attributes(existing) or {}
+    desired = version_localization_attributes(existing, environ=environ)
+    return {
+        name: value
+        for name, value in desired.items()
+        if current.get(name) != value
     }
-    marketing_url = _value(
-        source,
-        "NVPN_APPSTORE_MARKETING_URL",
-        DEFAULT_MARKETING_URL,
-    )
-    if marketing_url:
-        attrs["marketingUrl"] = marketing_url
-    return attrs
 
 
 def default_review_notes(

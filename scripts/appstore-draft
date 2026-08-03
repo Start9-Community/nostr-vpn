@@ -20,9 +20,9 @@ usage() {
 usage: ./scripts/appstore-draft <preflight|put|submit|status|availability>
 
 Creates or updates the editable iOS App Store version draft for the workspace
-version, links the matching App Store Connect build, updates en-US metadata,
-and uploads screenshots from artifacts/appstore-screenshots. Repository
-defaults replace existing managed metadata unless a non-empty override is set.
+version and links the matching App Store Connect build. Existing en-US public
+metadata and screenshots are preserved unless a non-empty field override or
+explicit screenshot-replacement opt-in is set.
 
 Environment:
   NVPN_ASC_AUTH_KEY_PATH, NVPN_ASC_AUTH_KEY_ID, NVPN_ASC_AUTH_KEY_ISSUER_ID
@@ -396,8 +396,13 @@ def version_localizations(version_id):
 
 def metadata_attrs(existing=None):
     try:
+        if existing is not None:
+            return draft_metadata.version_localization_patch(
+                existing,
+                environ=os.environ,
+            )
         return draft_metadata.version_localization_attributes(
-            existing,
+            None,
             environ=os.environ,
         )
     except ValueError as exc:
@@ -420,7 +425,9 @@ def ensure_localization(version_id):
             break
 
     attrs = metadata_attrs(existing)
-    if existing:
+    if existing is not None:
+        if not attrs:
+            return existing
         status, body = request(
             "PATCH",
             f"appStoreVersionLocalizations/{existing['id']}",
@@ -434,6 +441,8 @@ def ensure_localization(version_id):
         )
         if not (200 <= status < 300) and whats_new_locked(body) and "whatsNew" in attrs:
             attrs.pop("whatsNew", None)
+            if not attrs:
+                return existing
             print("App Store localization state does not allow whatsNew; retrying without it")
             status, body = request(
                 "PATCH",
