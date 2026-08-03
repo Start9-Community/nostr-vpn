@@ -58,6 +58,17 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "600F3C14341435AA9692264C"
+               BuildableName = "NostrVpnIosTests.xctest"
+               BlueprintName = "NostrVpnIosTests"
+               ReferencedContainer = "container:NostrVpnIos.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "A8A78E72E9E78A3018055001"
                BuildableName = "NostrVpnIosUITests.xctest"
                BlueprintName = "NostrVpnIosUITests"

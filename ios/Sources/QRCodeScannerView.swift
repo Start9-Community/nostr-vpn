@@ -1,35 +1,68 @@
 import AVFoundation
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
+import Vision
 
 struct QRCodeScannerSheet: View {
     let onCode: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var error = ""
+    @State private var imageImporterPresented = false
+    @State private var importingImage = false
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 QRCodeScannerView(
                     onCode: { code in
-                        onCode(code)
-                        dismiss()
+                        completeQrCode(code)
                     },
                     onError: { error = $0 }
                 )
                 .ignoresSafeArea()
 
-                if !error.isEmpty {
-                    Text(error)
-                        .font(.footnote)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.black.opacity(0.72), in: Capsule())
-                        .padding(.bottom, 18)
+                VStack(spacing: 10) {
+                    if !error.isEmpty {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.72), in: Capsule())
+                    }
+                    Button {
+                        imageImporterPresented = true
+                    } label: {
+                        if importingImage {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Label("Import QR Image", systemImage: "photo")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(importingImage)
+                    .accessibilityIdentifier("join-request-import-image")
                 }
+                .padding(.horizontal)
+                .padding(.bottom, 18)
             }
             .accessibilityIdentifier("qr-scanner-camera")
+            .fileImporter(
+                isPresented: $imageImporterPresented,
+                allowedContentTypes: [.image],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case let .success(urls):
+                    guard let url = urls.first else { return }
+                    importQrCode(from: url)
+                case .failure:
+                    error = "Could not open that image."
+                }
+            }
             .navigationTitle("Scan QR")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -41,6 +74,69 @@ struct QRCodeScannerSheet: View {
             }
         }
     }
+
+    private func completeQrCode(_ code: String) {
+        onCode(code)
+        dismiss()
+    }
+
+    private func importQrCode(from url: URL) {
+        importingImage = true
+        error = ""
+        Task {
+            defer {
+                importingImage = false
+            }
+            do {
+                let code = try await Task.detached {
+                    let hasScopedAccess = url.startAccessingSecurityScopedResource()
+                    defer {
+                        if hasScopedAccess {
+                            url.stopAccessingSecurityScopedResource()
+                        }
+                    }
+                    return try QRCodeImageDecoder.decode(data: Data(contentsOf: url))
+                }.value
+                completeQrCode(code)
+            } catch {
+                self.error = "No QR code found in that image."
+            }
+        }
+    }
+}
+
+enum QRCodeImageDecoder {
+    enum DecodeError: Error {
+        case invalidImage
+        case qrCodeMissing
+    }
+
+    static func decode(data: Data) throws -> String {
+        guard let image = UIImage(data: data)?.cgImage else {
+            throw DecodeError.invalidImage
+        }
+
+        let request = VNDetectBarcodesRequest()
+        request.symbologies = [.qr]
+        try VNImageRequestHandler(cgImage: image).perform([request])
+
+        let payload = request.results?
+            .first(where: { $0.symbology == .qr })?
+            .payloadStringValue
+        guard let code = normalizedQrPayload(payload) else {
+            throw DecodeError.qrCodeMissing
+        }
+        return code
+    }
+}
+
+private func normalizedQrPayload(_ payload: String?) -> String? {
+    guard let code = payload?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !code.isEmpty
+    else {
+        return nil
+    }
+    return code
 }
 
 private struct QRCodeScannerView: UIViewRepresentable {
@@ -146,12 +242,10 @@ private struct QRCodeScannerView: UIViewRepresentable {
             from connection: AVCaptureConnection
         ) {
             guard !didFinish else { return }
-            guard let code = metadataObjects
+            guard let code = normalizedQrPayload(metadataObjects
                 .compactMap({ $0 as? AVMetadataMachineReadableCodeObject })
                 .first(where: { $0.type == .qr })?
-                .stringValue?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-                !code.isEmpty
+                .stringValue)
             else {
                 return
             }
