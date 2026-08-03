@@ -28,13 +28,21 @@ resolve_shared_build_metadata "$ROOT"
   echo "Signed Release mobile join gate requires a clean committed candidate" >&2
   exit 2
 }
-APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
-[[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
-  && "$APP_GIT_SHA" == "$NVPN_EXPECTED_APP_GIT_SHA" ]] || {
-  echo "Set NVPN_EXPECTED_APP_GIT_SHA to this exact committed candidate" >&2
+HARNESS_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+HARNESS_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+APP_GIT_SHA="${NVPN_EXPECTED_APP_GIT_SHA:-}"
+[[ "$APP_GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "Set an exact NVPN_EXPECTED_APP_GIT_SHA" >&2
   exit 2
 }
+APP_GIT_TREE="$(git -C "$ROOT" rev-parse "$APP_GIT_SHA^{tree}")"
+export APP_GIT_SHA APP_GIT_TREE
+if ! release_join_reuse_artifacts; then
+  [[ "$APP_GIT_SHA" == "$HARNESS_GIT_SHA" ]] || {
+    echo "Build path requires the exact committed candidate checkout" >&2
+    exit 2
+  }
+fi
 
 RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}"
 PRIVATE_DIR="$RESULT_DIR/.private-$$"
@@ -297,7 +305,17 @@ phase_android_admin_ios_manual() {
 }
 
 release_join_require_clean_fips
-release_join_validate_reused_artifacts
+if release_join_reuse_artifacts; then
+  release_join_load_reused_artifact_sources
+  release_join_validate_android_reuse
+  release_join_validate_ios_reuse
+  release_join_assert_fips_unchanged
+  release_join_assert_app_unchanged "$HARNESS_GIT_SHA" "$HARNESS_GIT_TREE"
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  export RELEASE_JOIN_ARTIFACTS_VALIDATED
+else
+  release_join_validate_reused_artifacts
+fi
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
 export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 release_join_prepare_android_release
@@ -331,8 +349,8 @@ esac
 python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" join-summary \
   --summary "$SUMMARY" \
   --timings "$RESULT_DIR/delivery-times.tsv" \
-  --harness-head "$APP_GIT_SHA" \
-  --harness-tree "$APP_GIT_TREE" \
+  --harness-head "$HARNESS_GIT_SHA" \
+  --harness-tree "$HARNESS_GIT_TREE" \
   --android-app-head "$RELEASE_JOIN_ANDROID_APP_SHA" \
   --android-app-tree "$RELEASE_JOIN_ANDROID_APP_TREE" \
   --ios-app-head "$RELEASE_JOIN_IOS_APP_SHA" \

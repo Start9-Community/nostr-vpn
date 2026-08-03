@@ -351,12 +351,14 @@ PY
   source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
   NVPN_RELEASE_JOIN_ANDROID_RECEIPT="$ANDROID_RECEIPT"
   NVPN_RELEASE_JOIN_IOS_RECEIPT="$IOS_RECEIPT"
+  NVPN_EXPECTED_APP_GIT_SHA="$IOS_APP_HEAD"
   release_join_load_reused_artifact_sources
   [[ "$RELEASE_JOIN_ANDROID_APP_SHA" == "$ANDROID_APP_HEAD" ]]
   [[ "$RELEASE_JOIN_ANDROID_APP_TREE" == "$ANDROID_APP_TREE" ]]
   [[ "$RELEASE_JOIN_IOS_APP_SHA" == "$IOS_APP_HEAD" ]]
   [[ "$RELEASE_JOIN_IOS_APP_TREE" == "$IOS_APP_TREE" ]]
   [[ "$RELEASE_JOIN_ANDROID_APP_SHA" != "$RELEASE_JOIN_IOS_APP_SHA" ]]
+  [[ "$RELEASE_JOIN_ANDROID_APP_SHA" != "$NVPN_EXPECTED_APP_GIT_SHA" && "$RELEASE_JOIN_IOS_APP_SHA" == "$NVPN_EXPECTED_APP_GIT_SHA" ]]
   [[ "$RELEASE_JOIN_ANDROID_APP_SHA" != "$(git -C "$ROOT" rev-parse HEAD)" ]]
   [[ "$RELEASE_JOIN_IOS_APP_SHA" != "$(git -C "$ROOT" rev-parse HEAD)" ]]
 )
@@ -537,6 +539,11 @@ import sys
 gate, artifacts, reuse, ui, release, android_release, android_smoke = [
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 ]
+for required in ("HARNESS_GIT_SHA", 'APP_GIT_SHA="${NVPN_EXPECTED_APP_GIT_SHA:-}"', "release_join_validate_android_reuse", "release_join_validate_ios_reuse", '--harness-head "$HARNESS_GIT_SHA"'):
+    if required not in gate:
+        raise SystemExit(f"Release join reuse identity separation is missing {required}")
+if '== "$APP_GIT_SHA:$APP_GIT_TREE"' in gate:
+    raise SystemExit("Release join falsely requires retained Android identity to equal iOS product")
 validation = gate.index("release_join_validate_reused_artifacts")
 arm = gate.index("RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1")
 android_install = gate.index("release_join_prepare_android_release", validation)
