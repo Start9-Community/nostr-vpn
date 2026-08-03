@@ -1637,7 +1637,7 @@ run_ios_release_network_case() {
     "$markers" "$run_id" "$label" "$lifecycle" "$underlay" "$direct" \
     "$start_stop" || return 1
   python3 - \
-    "$process_summary" "$underlay" "$lifecycle" \
+    "$process_summary" "$underlay" "$lifecycle" "$direct" \
     "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}" <<'PY'
 import json
 import sys
@@ -1661,9 +1661,12 @@ if truthy(sys.argv[2]):
     ):
         expected.add(f"underlay_switch_1_{phase}")
 if truthy(sys.argv[3]):
-    for cycle in range(1, int(sys.argv[4]) + 1):
+    for cycle in range(1, int(sys.argv[5]) + 1):
         expected.add(f"release_background_{cycle}_requested")
         expected.add(f"release_foreground_{cycle}_verified")
+if truthy(sys.argv[4]):
+    expected.add("release_connected_direct_passed")
+    expected.add("release_connected_direct_relaunch_passed")
 required = set(receipt.get("requiredCheckpoints", []))
 observed = set(receipt.get("observedCheckpoints", []))
 if required != expected:
@@ -1674,6 +1677,25 @@ if not expected.issubset(observed):
     raise SystemExit(
         "iOS Release process sampler did not observe every expected checkpoint"
     )
+if truthy(sys.argv[4]):
+    direct_processes = receipt.get("directCheckpointProcesses")
+    if not isinstance(direct_processes, dict):
+        raise SystemExit("iOS Release connected Direct process proof is missing")
+    for checkpoint in (
+        "release_connected_direct_passed",
+        "release_connected_direct_relaunch_passed",
+    ):
+        processes = direct_processes.get(checkpoint)
+        if not isinstance(processes, dict) or any(
+            not isinstance(processes.get(key), int) or processes[key] <= 0
+            for key in (
+                "appProcessIdentifier",
+                "packetTunnelProcessIdentifier",
+            )
+        ):
+            raise SystemExit(
+                f"iOS Release {checkpoint} lacks one real PacketTunnel process"
+            )
 PY
   if bool_is_true "$underlay"; then
     mobile_continuity_validate \
