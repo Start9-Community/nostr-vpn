@@ -42,6 +42,14 @@ for required in (
 ):
     if required not in remote:
         raise SystemExit(f"VM importer lacks app ownership contract: {required}")
+for required in (
+    "trap stop_app EXIT",
+    "trap 'exit 129' HUP",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+):
+    if required not in remote:
+        raise SystemExit(f"VM importer lacks signal-safe app cleanup: {required}")
 if 'pkill -x "Nostr VPN"' in remote or "pkill" in helper:
     raise SystemExit("VM importer still has a broad Nostr VPN process kill")
 stage = remote.split("stage() {", 1)[1].split("prepare() {", 1)[0]
@@ -115,6 +123,7 @@ run_cleanup_case() {
   local remote_status="$2"
   remote_pid=""
   remote_app_ownership_armed=1
+  remote_harness_install_attempted=0
   PRIVATE_DIR="$tmp/private-$primary_status-$remote_status"
   mkdir -p "$PRIVATE_DIR"
   remote() {

@@ -77,6 +77,9 @@ stop_app() {
   APP_PID=""
 }
 trap stop_app EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 load_app() {
   [[ -x "$APP_EXE" && -x "$CLI" ]] || {

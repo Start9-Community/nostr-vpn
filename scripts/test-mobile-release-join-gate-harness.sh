@@ -1336,8 +1336,10 @@ if "roster-participant-accepted-" not in desktop_ui_driver:
     raise SystemExit(
         "Desktop/mobile Release UI driver does not require an accepted roster row"
     )
-if 'NVPN_APP_DATA_DIR=' in desktop_remote or 'NVPN_CLI_PATH=' in desktop_remote:
-    raise SystemExit("Desktop Release app is launched against injected private state")
+if desktop_remote.count('NVPN_APP_DATA_DIR="$TEST_CONFIG_DIR"') != 1:
+    raise SystemExit("Desktop Release app does not use its canonical isolated profile")
+if desktop_remote.count("NVPN_APP_DATA_DIR=") != 1 or 'NVPN_CLI_PATH=' in desktop_remote:
+    raise SystemExit("Desktop Release app is launched with an unsupported injected shortcut")
 if '"$APP_EXE"' not in desktop_remote:
     raise SystemExit("Desktop gate does not launch the exact signed Release executable")
 for source, required in (
