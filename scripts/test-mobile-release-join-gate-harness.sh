@@ -34,6 +34,25 @@ if ! sed -n \
 fi
 
 (
+  # Only the physical QR-import test receives the capability-bearing host launch.
+  # shellcheck disable=SC1090,SC1091
+  source "$join_ui"
+  capture="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-import-launch.XXXXXX")"
+  trap 'rm -f "$capture"' EXIT
+  RELEASE_JOIN_IOS_UDID="fixture-device"
+  RELEASE_JOIN_IOS_APP_BUNDLE_ID="fixture.bundle"
+  xcrun() { printf '%s\n' "$*" >"$capture"; }
+  release_join_ios_prepare_target_app testCreateAdminNetworkAndReportPublicValues
+  [[ ! -s "$capture" ]] \
+    || { echo "ordinary iOS join test received the QR import flag" >&2; exit 1; }
+  release_join_ios_prepare_target_app \
+    testImportJoinQrImageAndRequireAdminRosterProgress
+  [[ "$(<"$capture")" == \
+    "devicectl device process launch --device fixture-device --terminate-existing --activate fixture.bundle --nvpn-ui-test-qr-image-import" ]] \
+    || { echo "QR import host launch was not exactly scoped" >&2; exit 1; }
+)
+
+(
   # Launch and in-test setup each receive their own bounded allowance. The
   # combined elapsed time deliberately exceeds either individual allowance.
   # shellcheck disable=SC1090,SC1091
@@ -727,13 +746,14 @@ ios_setup = ios_test.split("override func setUpWithError() throws", 1)[1].split(
 ios_import = ios_test.split(
     "func testImportJoinQrImageAndRequireAdminRosterProgress()", 1
 )[1].split("func test", 1)[0]
-launch_argument = 'app.launchArguments = ["--nvpn-ui-test-qr-image-import"]'
 if "app.launchArguments.isEmpty" not in ios_setup:
     raise SystemExit("Ordinary release join tests do not assert empty launch arguments")
-if ios_test.count(launch_argument) != 1 or launch_argument not in ios_import:
-    raise SystemExit("Release join XCTest does not scope the QR import capability exactly once")
-if ios_import.index(launch_argument) > ios_import.index("app.launch()"):
-    raise SystemExit("QR import XCTest launches before scoping its capability")
+for forbidden in ("app.launchArguments =", "app.launch()"):
+    if forbidden in ios_import:
+        raise SystemExit(f"QR import XCTest cannot attach to its host launch: {forbidden}")
+for required in ("app.state", ".notRunning", "app.activate()"):
+    if required not in ios_import:
+        raise SystemExit(f"QR import XCTest does not attach to its host launch: {required}")
 for required in (
     "private static let maximumAttempts = 2",
     'field.value(forKey: "hasKeyboardFocus")',
@@ -825,7 +845,6 @@ for required in (
     "testManualJoinAndRequireRosterCompletion",
     "testManualAdminAddRequiresRosterProgress",
     "requireAcceptedRoster",
-    'app.launchArguments = ["--nvpn-ui-test-qr-image-import"]',
     "app.terminate()",
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
 ):

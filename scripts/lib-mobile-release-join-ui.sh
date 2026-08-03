@@ -772,6 +772,19 @@ release_join_ios_process_pgid() {
   ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]'
 }
 
+release_join_ios_prepare_target_app() {
+  local test_name="$1"
+  [[ "$test_name" == \
+    testImportJoinQrImageAndRequireAdminRosterProgress ]] || return 0
+  local bundle="${RELEASE_JOIN_IOS_APP_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
+  xcrun devicectl device process launch \
+    --device "$RELEASE_JOIN_IOS_UDID" \
+    --terminate-existing \
+    --activate \
+    "$bundle" \
+    --nvpn-ui-test-qr-image-import >/dev/null
+}
+
 release_join_ios_stop_runner() {
   local device="${IOS_DEVICE:-${RELEASE_JOIN_IOS_UDID:-}}"
   local bundle="${RELEASE_JOIN_IOS_APP_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
@@ -798,6 +811,7 @@ release_join_ios_start_test() {
   rm -f "$command_file"
   [[ "${#command[@]}" -gt 0 ]] || return 1
   mkdir -p "$(dirname "$log")"
+  release_join_ios_prepare_target_app "$test_name" || return 1
   [[ "$-" == *m* ]] && monitor_was_enabled=1
   set -m
   (exec "${command[@]}") >"$log" 2>&1 &

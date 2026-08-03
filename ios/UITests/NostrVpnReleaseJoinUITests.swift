@@ -84,8 +84,13 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     func testImportJoinQrImageAndRequireAdminRosterProgress() throws {
-        app.launchArguments = ["--nvpn-ui-test-qr-image-import"]
-        app.launch()
+        XCTAssertNotEqual(
+            app.state,
+            .notRunning,
+            "Host-scoped QR import app launch was not retained for XCTest"
+        )
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
         try dismissSystemPromptsIfPresent()
 
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
