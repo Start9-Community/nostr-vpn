@@ -18,11 +18,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         XCTAssertEqual(environment["NVPN_RELEASE_JOIN_BLACKBOX"], "1")
-        if name.contains("testImportJoinQrImageAndRequireAdminRosterProgress") {
-            app.launchArguments = ["--nvpn-ui-test-qr-image-import"]
-        } else {
-            XCTAssertTrue(app.launchArguments.isEmpty, "Release join gate must not pass app arguments")
-        }
+        XCTAssertTrue(app.launchArguments.isEmpty, "Release join gate must not pass app arguments")
         XCTAssertTrue(app.launchEnvironment.isEmpty, "Release join gate must not pass app environment")
         app.launch()
         try dismissSystemPromptsIfPresent()

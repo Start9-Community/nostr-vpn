@@ -111,13 +111,13 @@ python3 "$TOOL" rewrite-xctestrun \
   --target-app "$APP" \
   --use-destination-artifacts
 
+NVPN_IOS_UI_TARGET_APP_ARGUMENT=--nvpn-ui-test-qr-image-import \
 python3 "$TOOL" rewrite-xctestrun \
   --source "$SOURCE" \
   --output "$DESTINATION_IMPORT_OUTPUT" \
   --products-root "$PRODUCTS" \
   --target-app "$APP" \
-  --use-destination-artifacts \
-  --ui-target-app-argument=--nvpn-ui-test-qr-image-import
+  --use-destination-artifacts
 
 python3 - "$DESTINATION_OUTPUT" <<'PY'
 import pathlib
@@ -160,13 +160,13 @@ if target.get("UITargetAppEnvironmentVariables") != {}:
     raise SystemExit("destination-artifact plan injected target app environment")
 PY
 
-if python3 "$TOOL" rewrite-xctestrun \
+if NVPN_IOS_UI_TARGET_APP_ARGUMENT=--untrusted-app-argument \
+  python3 "$TOOL" rewrite-xctestrun \
   --source "$SOURCE" \
   --output "$PRIVATE_DIR/unallowlisted-app-argument.xctestrun" \
   --products-root "$PRODUCTS" \
   --target-app "$APP" \
-  --use-destination-artifacts \
-  --ui-target-app-argument=--untrusted-app-argument >/dev/null 2>&1
+  --use-destination-artifacts >/dev/null 2>&1
 then
   echo "Frozen iOS helper accepted an unallowlisted target app argument" >&2
   exit 1

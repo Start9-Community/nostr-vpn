@@ -751,10 +751,6 @@ def parser() -> argparse.ArgumentParser:
     rewrite.add_argument("--use-destination-artifacts", action="store_true")
     rewrite.add_argument("--environment", action="append", default=[])
     rewrite.add_argument("--environment-stdin0", action="store_true")
-    rewrite.add_argument(
-        "--ui-target-app-argument", action="append", default=[]
-    )
-
     freeze = subparsers.add_parser("freeze")
     freeze.add_argument("--archive", required=True)
     freeze.add_argument("--receipt", required=True)

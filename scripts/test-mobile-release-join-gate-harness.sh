@@ -664,7 +664,8 @@ reuse_command = ui.split("release_join_ios_test_command() {", 1)[1].split(
 )[0]
 for required in (
     "testImportJoinQrImageAndRequireAdminRosterProgress",
-    "--ui-target-app-argument=--nvpn-ui-test-qr-image-import",
+    'ui_target_app_argument="--nvpn-ui-test-qr-image-import"',
+    'NVPN_IOS_UI_TARGET_APP_ARGUMENT="$ui_target_app_argument"',
 ):
     if required not in reuse_command:
         raise SystemExit(
@@ -673,7 +674,7 @@ for required in (
         )
 if reuse_command.index("testImportJoinQrImageAndRequireAdminRosterProgress") \
         > reuse_command.index(
-            "--ui-target-app-argument=--nvpn-ui-test-qr-image-import"
+            'ui_target_app_argument="--nvpn-ui-test-qr-image-import"'
         ):
     raise SystemExit("QR import target argument is not scoped before xctestrun rewrite")
 run_only = desktop.split("select_run_only_artifact() {", 1)[1].split(
@@ -735,22 +736,15 @@ if "fresh network ID" not in restart_ios:
 
 if ".launchEnvironment =" in ios_test:
     raise SystemExit("Release join XCTest injects app state through launchEnvironment")
-image_import_argument = (
-    'app.launchArguments = ["--nvpn-ui-test-qr-image-import"]'
-)
-if ios_test.count(image_import_argument) != 1:
-    raise SystemExit("Release join XCTest has an unexpected app launch argument")
 ios_setup = ios_test.split("override func setUpWithError() throws", 1)[1].split(
     "func testCreateAdminNetworkAndReportPublicValues()", 1
 )[0]
-if "testImportJoinQrImageAndRequireAdminRosterProgress" not in ios_setup:
-    raise SystemExit("Release join XCTest does not scope QR import to its test")
-if ios_setup.index(image_import_argument) > ios_setup.index("app.launch()"):
-    raise SystemExit("Release join XCTest enables QR import after its first launch")
+if ".launchArguments =" in ios_test:
+    raise SystemExit("Release join XCTest mutates target app launch arguments")
 ios_import = ios_test.split(
     "func testImportJoinQrImageAndRequireAdminRosterProgress()", 1
 )[1].split("func test", 1)[0]
-for forbidden in ("app.terminate()", "app.launch()", image_import_argument):
+for forbidden in ("app.terminate()", "app.launch()"):
     if forbidden in ios_import:
         raise SystemExit(
             f"Release join QR import test relaunches or mutates capability: {forbidden}"

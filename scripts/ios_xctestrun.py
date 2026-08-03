@@ -230,7 +230,8 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
     payload = read_plist(source)
     targets = xctestrun_targets(payload)
     assignments = environment_assignments(args)
-    app_arguments = list(args.ui_target_app_argument)
+    app_argument = os.environ.get("NVPN_IOS_UI_TARGET_APP_ARGUMENT", "")
+    app_arguments = [app_argument] if app_argument else []
     require(
         len(app_arguments) == len(set(app_arguments)),
         "xctestrun target app arguments contain duplicates",

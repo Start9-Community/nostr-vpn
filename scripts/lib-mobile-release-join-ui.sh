@@ -740,6 +740,7 @@ release_join_ios_test_command() {
   local -a command=()
   if release_join_reuse_artifacts; then
     local case_xctestrun
+    local ui_target_app_argument=""
     local -a rewrite_command=()
     local -a runner_environment=()
     if ! case_xctestrun="$(
@@ -759,9 +760,7 @@ release_join_ios_test_command() {
     )
     if [[ "$test_name" == \
       testImportJoinQrImageAndRequireAdminRosterProgress ]]; then
-      rewrite_command+=(
-        "--ui-target-app-argument=--nvpn-ui-test-qr-image-import"
-      )
+      ui_target_app_argument="--nvpn-ui-test-qr-image-import"
     fi
     runner_environment=(
       "NVPN_RELEASE_JOIN_ADMIN_ID="
@@ -785,7 +784,8 @@ release_join_ios_test_command() {
       runner_environment+=("$assignment")
     done
     if ! printf '%s\0' "${runner_environment[@]}" \
-      | "${rewrite_command[@]}"
+      | NVPN_IOS_UI_TARGET_APP_ARGUMENT="$ui_target_app_argument" \
+        "${rewrite_command[@]}"
     then
       rm -f "$case_xctestrun"
       return 1
