@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 XAML="$ROOT/windows/NostrVpn.Windows/MainWindow.xaml"
 MODELS="$ROOT/windows/NostrVpn.Windows/Core/Models.cs"
+VIEW_MODEL="$ROOT/windows/NostrVpn.Windows/ViewModels/AppViewModel.cs"
+ENROLLMENT="$ROOT/windows/NostrVpn.Windows/ViewModels/AppViewModel.Enrollment.cs"
 DRIVER="$ROOT/scripts/desktop-mobile-manual-join-windows-ui.ps1"
 REMOTE="$ROOT/scripts/windows-release-mobile-join-remote.ps1"
 HOST="$ROOT/scripts/windows-vm-release-mobile-join-e2e.sh"
@@ -13,9 +15,42 @@ fail() {
   exit 1
 }
 
-for file in "$XAML" "$MODELS" "$DRIVER" "$REMOTE" "$HOST"; do
+for file in "$XAML" "$MODELS" "$VIEW_MODEL" "$ENROLLMENT" "$DRIVER" "$REMOTE" "$HOST"; do
   [[ -f "$file" ]] || fail "missing $(basename "$file")"
 done
+
+python3 - "$ENROLLMENT" "$VIEW_MODEL" <<'PY'
+import pathlib
+import sys
+
+enrollment = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+view_model = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+
+def method_body(name: str, next_name: str) -> str:
+    return enrollment.split(f"private async Task {name}", 1)[1].split(
+        f"private async Task {next_name}", 1
+    )[0]
+
+for body in (
+    method_body("AddParticipantAsync()", "AddNetworkAsync()"),
+    method_body("ManualAddNetworkAsync()", "CreateNetworkAsync()"),
+):
+    if body.count("BeginJoinCoordinationRefresh();") != 1:
+        raise SystemExit("join action does not arm exactly one refresh window")
+    if body.index("DispatchAsync(") > body.index("BeginJoinCoordinationRefresh();"):
+        raise SystemExit("join refresh window starts before dispatch completes")
+    if "EndJoinCoordinationRefresh();" in body:
+        raise SystemExit("failed join action still needs a pre-dispatch refresh rollback")
+
+for contract in (
+    "private bool _refreshInFlight;",
+    "CanStartRefresh(ActionInFlight, _refreshInFlight)",
+    "_refreshInFlight = true;",
+    "_refreshInFlight = false;",
+):
+    if contract not in view_model:
+        raise SystemExit(f"Windows native refresh is not single-flight: {contract}")
+PY
 
 for identifier in \
   ManualJoinCreateNetworkChoice \
@@ -84,12 +119,19 @@ for service_contract in \
   'Get-CimInstance Win32_Service' \
   'Get-Sha256 $ServiceExecutable' \
   'Get-Sha256 $CliExe' \
+  'Normalize-ComparableWindowsPath' \
+  "\$ConfigArgument.Groups['config'].Value" \
   '$CliExe service uninstall --config $Config' \
   'WINDOWS_RELEASE_MOBILE_JOIN_CLEAN'
 do
   grep -Fq "$service_contract" "$REMOTE" \
     || fail "Windows wrapper does not use the production service name"
 done
+if grep -Fq ".StartsWith(" "$REMOTE" \
+  && grep -Fq '$ExpectedArguments' "$REMOTE"
+then
+  fail "Windows cleanup still compares raw service arguments"
+fi
 grep -Fq 'windows-cleanup.log' "$HOST" \
   || fail "Windows cleanup evidence is discarded"
 if grep -Fq 'remote Cleanup >/dev/null 2>&1 || true' "$HOST"; then

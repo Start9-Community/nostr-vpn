@@ -15,7 +15,8 @@ $StateType = $Assembly.GetType("NostrVpn.Windows.Core.NativeAppState", $true)
 $ViewModelType = $Assembly.GetType("NostrVpn.Windows.ViewModels.AppViewModel", $true)
 $Flags = [Reflection.BindingFlags]::Static -bor [Reflection.BindingFlags]::NonPublic
 $IntervalMethod = $ViewModelType.GetMethod("RefreshIntervalForState", $Flags)
-if (!$IntervalMethod) {
+$CanStartMethod = $ViewModelType.GetMethod("CanStartRefresh", $Flags)
+if (!$IntervalMethod -or !$CanStartMethod) {
   throw "Windows join refresh policy methods are missing"
 }
 
@@ -34,6 +35,16 @@ $State.PaidRouteMarket.Wallet.LastAction.Kind = "topup"
 $Wallet = $IntervalMethod.Invoke($null, @($State, $false))
 if ($Wallet -ne [TimeSpan]::FromSeconds(2)) {
   throw "wallet top-up refresh policy changed"
+}
+
+if (!$CanStartMethod.Invoke($null, @($false, $false))) {
+  throw "idle Windows refresh was incorrectly blocked"
+}
+if ($CanStartMethod.Invoke($null, @($true, $false))) {
+  throw "Windows refresh overlapped a dispatched action"
+}
+if ($CanStartMethod.Invoke($null, @($false, $true))) {
+  throw "Windows refresh policy permits overlapping native refreshes"
 }
 
 Write-Output "WINDOWS_JOIN_REFRESH_POLICY_OK"

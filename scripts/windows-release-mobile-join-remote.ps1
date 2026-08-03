@@ -119,6 +119,15 @@ function Resolve-CanonicalConfig {
   return Join-Path $Profile "AppData\Roaming\Nostr VPN\config.toml"
 }
 
+function Normalize-ComparableWindowsPath {
+  param([string]$Path)
+  $Value = $Path.Trim()
+  if ($Value.StartsWith('\\?\', [System.StringComparison]::Ordinal)) {
+    $Value = $Value.Substring(4)
+  }
+  return [IO.Path]::GetFullPath($Value).TrimEnd('\')
+}
+
 function Assert-SourceAndArtifacts {
   Assert-GitHash $ExpectedAppGitSha "ExpectedAppGitSha"
   Assert-GitHash $ExpectedAppGitTree "ExpectedAppGitTree"
@@ -320,11 +329,16 @@ switch ($Mode) {
         [string]$Service.PathName,
         '^"(?<binary>[^"]+)"(?<arguments> .*)$'
       )
-      $ExpectedArguments = ' daemon --service --config "' + $Config + '" '
+      $ConfigArgument = [regex]::Match(
+        $Command.Groups['arguments'].Value,
+        '^ daemon --service --config "(?<config>[^"]+)"(?: |$)'
+      )
       if (
         !$Command.Success -or
-        !$Command.Groups['arguments'].Value.StartsWith(
-          $ExpectedArguments,
+        !$ConfigArgument.Success -or
+        ![string]::Equals(
+          (Normalize-ComparableWindowsPath $ConfigArgument.Groups['config'].Value),
+          (Normalize-ComparableWindowsPath $Config),
           [System.StringComparison]::OrdinalIgnoreCase
         )
       ) {

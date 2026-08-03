@@ -48,12 +48,6 @@ public sealed partial class AppViewModel
         _refreshTimer.Interval = JoinCoordinationRefreshInterval;
     }
 
-    private void EndJoinCoordinationRefresh()
-    {
-        _joinCoordinationRefreshUntil = default;
-        _refreshTimer.Interval = RefreshIntervalForState(State, joinCoordinationActive: false);
-    }
-
     internal static TimeSpan RefreshIntervalForState(
         NativeAppState state,
         bool joinCoordinationActive)

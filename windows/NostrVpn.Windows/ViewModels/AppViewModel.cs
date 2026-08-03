@@ -39,6 +39,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
     private string _selectedParticipantKey = "";
     private string _shownNetworkId = "";
     private bool _actionInFlight;
+    private bool _refreshInFlight;
     private string _notice = "";
     private string _joinRequestInput = "";
     private string _participantInput = "";
@@ -702,10 +703,11 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task RefreshAsync()
     {
-        if (ActionInFlight)
+        if (!CanStartRefresh(ActionInFlight, _refreshInFlight))
         {
             return;
         }
+        _refreshInFlight = true;
         try
         {
             var state = await Task.Run(_core.Refresh);
@@ -715,7 +717,14 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         {
             Notice = error.Message;
         }
+        finally
+        {
+            _refreshInFlight = false;
+        }
     }
+
+    internal static bool CanStartRefresh(bool actionInFlight, bool refreshInFlight) =>
+        !actionInFlight && !refreshInFlight;
 
     public Task ToggleVpnAsync()
     {
