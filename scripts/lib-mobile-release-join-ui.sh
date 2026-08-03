@@ -179,10 +179,16 @@ release_join_android_scroll() {
 }
 
 release_join_android_scroll_to() {
-  local kind="$1" expected="$2"
+  local kind="$1" expected="$2" visibility="${3:-safe-center}"
   local attempts
+  case "$visibility" in
+    safe-center|visible-center) ;;
+    *) return 2 ;;
+  esac
   for attempts in $(seq 1 12); do
-    if release_join_android_query "$kind" "$expected" safe-center >/dev/null 2>&1; then
+    if release_join_android_query \
+        "$kind" "$expected" "$visibility" >/dev/null 2>&1
+    then
       return 0
     fi
     release_join_android_scroll >/dev/null
@@ -510,7 +516,8 @@ release_join_android_manual_admin_prepare() {
   )"
   release_join_android_scroll_to description "Manual joiner Device ID"
   release_join_android_enter description "Manual joiner Device ID" "$joiner"
-  release_join_android_scroll_to description "Add joining device manually"
+  release_join_android_scroll_to \
+    description "Add joining device manually" visible-center
   release_join_android_query text "$joiner" center >/dev/null 2>&1 || {
     echo "Android manual admin-add Device ID did not remain populated" >&2
     return 1

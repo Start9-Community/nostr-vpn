@@ -1271,7 +1271,8 @@ PY
 fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
 no_viewport_fixture="${fixture%.xml}-no-viewport.xml"
 inset_viewport_fixture="${fixture%.xml}-inset-viewport.xml"
-trap 'rm -f "$fixture" "$no_viewport_fixture" "$inset_viewport_fixture"' EXIT
+pixel_admin_add_fixture="${fixture%.xml}-pixel-admin-add.xml"
+trap 'rm -f "$fixture" "$no_viewport_fixture" "$inset_viewport_fixture" "$pixel_admin_add_fixture"' EXIT
 printf '%s\n' \
   '<hierarchy>' \
   '  <node bounds="[0,0][1080,2410]" />' \
@@ -1362,6 +1363,24 @@ then
   echo "Inset Android viewport applied its bottom margin from screen zero" >&2
   exit 1
 fi
+printf '%s\n' \
+  '<hierarchy>' \
+  '  <node resource-id="android:id/content" bounds="[120,172][960,2347]">' \
+  '    <node content-desc="Add joining device manually" enabled="true" bounds="[183,1980][375,2085]" />' \
+  '  </node>' \
+  '</hierarchy>' >"$pixel_admin_add_fixture"
+if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$pixel_admin_add_fixture" description "Add joining device manually" \
+    safe-center >/dev/null 2>&1
+then
+  echo "Pixel admin Add control unexpectedly fit the full safe-center margin" >&2
+  exit 1
+fi
+[[ "$(
+  "$ROOT/scripts/mobile-release-join-ui-query.py" \
+    "$pixel_admin_add_fixture" description "Add joining device manually" \
+    visible-center
+)" == "279 2013" ]]
 
 android_admin_add="$(
   sed -n \
@@ -1370,6 +1389,7 @@ android_admin_add="$(
 )"
 for required in \
   'text "$joiner" center' \
+  'description "Add joining device manually" visible-center' \
   'description "Add joining device manually" enabled' \
   'release_join_android_admin_add_visible' \
   'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS'
