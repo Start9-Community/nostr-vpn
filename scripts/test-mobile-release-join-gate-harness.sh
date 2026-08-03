@@ -293,6 +293,8 @@ PY
 (
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
   log="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-join-selection.XXXXXX")"
   trap 'rm -f "$log"' EXIT
   RELEASE_JOIN_IOS_TEST_LOG="$log"
@@ -313,6 +315,79 @@ PY
   true &
   RELEASE_JOIN_IOS_TEST_PID=$!
   release_join_ios_finish_test
+)
+
+(
+  set -u
+  # A failed concurrent phase must reap the whole host process group and stop
+  # only the retained runner process on-device, without uninstalling it.
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-join-abort.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  PRIVATE_DIR="$private"
+  IOS_DEVICE="fixture-device"
+  unset IOS_BUNDLE_ID
+  audit="$private/runner-audit"
+  ios_release_network_stop_forced_xctrunner() {
+    [[ "$IOS_BUNDLE_ID" == "fi.siriusbusiness.nvpn" ]]
+    printf 'audited\n' >"$audit"
+  }
+  release_join_ios_test_command() {
+    printf '%s\0' bash -c 'sleep 30 & wait'
+  }
+  release_join_ios_start_test fixture "$private/fixture.log"
+  pgid="$RELEASE_JOIN_IOS_TEST_PGID"
+  release_join_ios_abort_test
+  [[ -s "$audit" ]]
+  if ios_release_network_process_group_alive "$pgid"; then
+    echo "aborted iOS join test retained a process-group descendant" >&2
+    exit 1
+  fi
+  [[ -z "$RELEASE_JOIN_IOS_TEST_PID" && -z "$RELEASE_JOIN_IOS_TEST_PGID" ]]
+)
+
+(
+  # Even a failed isolation check must reap both the command's descendants and
+  # any separately reported process group before returning.
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-join-isolation.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  PRIVATE_DIR="$private"
+  IOS_DEVICE="fixture-device"
+  child_file="$private/child.pid"
+  set -m
+  (exec sleep 30) &
+  unexpected_pgid=$!
+  set +m
+  ios_release_network_stop_forced_xctrunner() { :; }
+  release_join_ios_test_command() {
+    printf '%s\0' bash -c 'sleep 30 & printf "%s\n" "$!" >"$1"; wait' \
+      fixture "$child_file"
+  }
+  release_join_ios_process_pgid() {
+    local deadline=$((SECONDS + 2))
+    while [[ ! -s "$child_file" && "$SECONDS" -lt "$deadline" ]]; do
+      sleep 0.01
+    done
+    printf '%s\n' "$unexpected_pgid"
+  }
+  if release_join_ios_start_test fixture "$private/fixture.log"; then
+    echo "iOS join runner accepted unexpected process-group isolation" >&2
+    exit 1
+  fi
+  child_pid="$(cat "$child_file")"
+  if kill -0 "$child_pid" >/dev/null 2>&1 \
+      || ios_release_network_process_group_alive "$unexpected_pgid"; then
+    echo "isolation failure retained a spawned child or process group" >&2
+    exit 1
+  fi
+  [[ -z "$RELEASE_JOIN_IOS_TEST_PID" && -z "$RELEASE_JOIN_IOS_TEST_PGID" ]]
 )
 
 (
@@ -576,6 +651,7 @@ for required in (
 for required in (
     "app.launchArguments.isEmpty",
     "app.launchEnvironment.isEmpty",
+    'app.buttons["manual-join-expand"]',
     'element("qr-scanner-camera")',
     "XCUIDevice.shared.press(.home)",
     "assertQrIsFullWidth(qr)",
@@ -769,8 +845,31 @@ for required in (
         )
 if ios_admin_android_manual_phase.index(
     "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE"
-) < ios_admin_android_manual_phase.index("release_join_ios_run_test"):
+) < ios_admin_android_manual_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone-admin relaunch evidence is read before XCTest completes")
+for required in (
+    "release_join_ios_start_test",
+    "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=",
+    "release_join_android_wait_join_complete",
+    "assert_delivery_deadline",
+    "release_join_android_relaunch_and_wait_accepted",
+    "release_join_ios_finish_test",
+):
+    if required not in ios_admin_android_manual_phase:
+        raise SystemExit(
+            f"iPhone-admin manual phase does not measure concurrent delivery: {required}"
+        )
+if not (
+    ios_admin_android_manual_phase.index("release_join_ios_start_test")
+    < ios_admin_android_manual_phase.index("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=")
+    < ios_admin_android_manual_phase.index("release_join_android_wait_join_complete")
+    < ios_admin_android_manual_phase.index("assert_delivery_deadline")
+    < ios_admin_android_manual_phase.index("release_join_android_relaunch_and_wait_accepted")
+    < ios_admin_android_manual_phase.index("release_join_ios_finish_test")
+):
+    raise SystemExit(
+        "iPhone-admin delivery timing is serialized behind the iOS relaunch proof"
+    )
 
 android_admin_ios_manual_phase = gate.split(
     "phase_android_admin_ios_manual() {", 1

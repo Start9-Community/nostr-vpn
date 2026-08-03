@@ -283,14 +283,20 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private func expandManualJoinIfNeeded() {
         if !element("joiner-device-id-value").waitForExistence(timeout: 2) {
-            let manual = scrollTo("manual-join-expand")
+            let manual = scrollTo(
+                app.buttons["manual-join-expand"],
+                named: "manual-join-expand"
+            )
             manual.tap()
         }
         XCTAssertTrue(element("joiner-device-id-value").waitForExistence(timeout: 5))
     }
 
     private func scrollTo(_ identifier: String) -> XCUIElement {
-        let target = element(identifier)
+        scrollTo(element(identifier), named: identifier)
+    }
+
+    private func scrollTo(_ target: XCUIElement, named identifier: String) -> XCUIElement {
         for _ in 0..<12 where !target.isHittable {
             app.swipeUp()
         }

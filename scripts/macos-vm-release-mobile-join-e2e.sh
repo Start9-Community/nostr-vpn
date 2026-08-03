@@ -14,6 +14,8 @@ source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 # shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+# shellcheck disable=SC1091
 source "$ROOT/scripts/lib-macos-release-app-ownership.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-macos-vm-identity.sh"

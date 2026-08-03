@@ -6,8 +6,10 @@
 
 RELEASE_JOIN_ANDROID_UI_XML=""
 RELEASE_JOIN_IOS_TEST_PID=""
+RELEASE_JOIN_IOS_TEST_PGID=""
 RELEASE_JOIN_IOS_TEST_LOG=""
 RELEASE_JOIN_IOS_TEST_NAME=""
+RELEASE_JOIN_IOS_APP_BUNDLE_ID=""
 RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
 RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
@@ -618,7 +620,7 @@ release_join_ios_test_command() {
   local test_name="$1"
   shift
   local team="${NVPN_IOS_TEAM_ID:?Release join gate requires NVPN_IOS_TEAM_ID}"
-  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+  local bundle="${RELEASE_JOIN_IOS_APP_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
   local -a command=()
   if release_join_reuse_artifacts; then
     local case_xctestrun
@@ -700,11 +702,25 @@ release_join_ios_test_command() {
   printf '%s\0' "${command[@]}"
 }
 
+release_join_ios_process_pgid() {
+  ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+release_join_ios_stop_runner() {
+  local device="${IOS_DEVICE:-${RELEASE_JOIN_IOS_UDID:-}}"
+  local bundle="${RELEASE_JOIN_IOS_APP_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
+  [[ -n "$device" ]] || return 1
+  IOS_BUNDLE_ID="$bundle" \
+    ios_release_network_stop_forced_xctrunner "$device"
+}
+
 release_join_ios_start_test() {
   local test_name="$1" log="$2"
   shift 2
   local -a command=()
-  local command_file
+  local command_file pid pgid actual_pgid caller_pgid cleanup_status=0
+  local monitor_was_enabled=0
+  RELEASE_JOIN_IOS_APP_BUNDLE_ID="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
   command_file="$(mktemp "$PRIVATE_DIR/ios-command.XXXXXX")"
   if ! release_join_ios_test_command "$test_name" "$@" >"$command_file"; then
     rm -f "$command_file"
@@ -716,10 +732,61 @@ release_join_ios_start_test() {
   rm -f "$command_file"
   [[ "${#command[@]}" -gt 0 ]] || return 1
   mkdir -p "$(dirname "$log")"
-  "${command[@]}" >"$log" 2>&1 &
-  RELEASE_JOIN_IOS_TEST_PID=$!
+  [[ "$-" == *m* ]] && monitor_was_enabled=1
+  set -m
+  (exec "${command[@]}") >"$log" 2>&1 &
+  pid=$!
+  ((monitor_was_enabled)) || set +m
+  pgid="$pid"
+  actual_pgid="$(release_join_ios_process_pgid "$pid" || true)"
+  caller_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$actual_pgid" != "$pgid" || "$pgid" == "$caller_pgid" ]]; then
+    ios_release_network_terminate_process_group "$pgid" || cleanup_status=1
+    if [[ "$actual_pgid" =~ ^[1-9][0-9]*$ \
+        && "$actual_pgid" != "$pgid" \
+        && "$actual_pgid" != "$caller_pgid" ]]; then
+      ios_release_network_terminate_process_group "$actual_pgid" \
+        || cleanup_status=1
+    fi
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+    if ios_release_network_process_group_alive "$pgid" \
+        || { [[ "$actual_pgid" =~ ^[1-9][0-9]*$ \
+          && "$actual_pgid" != "$caller_pgid" ]] \
+          && ios_release_network_process_group_alive "$actual_pgid"; }; then
+      cleanup_status=1
+    fi
+    release_join_ios_stop_runner || cleanup_status=1
+    echo "iOS join test did not receive an isolated process group" >&2
+    ((cleanup_status == 0)) \
+      || echo "iOS join test isolation-failure cleanup was incomplete" >&2
+    return 2
+  fi
+  RELEASE_JOIN_IOS_TEST_PID="$pid"
+  RELEASE_JOIN_IOS_TEST_PGID="$pgid"
   RELEASE_JOIN_IOS_TEST_LOG="$log"
   RELEASE_JOIN_IOS_TEST_NAME="$test_name"
+}
+
+release_join_ios_abort_test() {
+  local status=0 pid="$RELEASE_JOIN_IOS_TEST_PID" pgid="$RELEASE_JOIN_IOS_TEST_PGID"
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ ]]; then
+    ios_release_network_terminate_process_group "$pgid" || status=1
+  elif [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    kill "$pid" >/dev/null 2>&1 || true
+  fi
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ ]] \
+      && ios_release_network_process_group_alive "$pgid"; then
+    status=1
+  fi
+  RELEASE_JOIN_IOS_TEST_PID=""
+  RELEASE_JOIN_IOS_TEST_PGID=""
+  RELEASE_JOIN_IOS_TEST_NAME=""
+  release_join_ios_stop_runner || status=1
+  return "$status"
 }
 
 release_join_ios_assert_selected_test_started() {
@@ -741,8 +808,7 @@ release_join_ios_wait_marker() {
     fi
     if [[ -n "$RELEASE_JOIN_IOS_TEST_PID" ]] \
         && ! kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null; then
-      wait "$RELEASE_JOIN_IOS_TEST_PID" || true
-      RELEASE_JOIN_IOS_TEST_PID=""
+      release_join_ios_abort_test || true
       echo "iOS join test exited before marker: $marker" >&2
       tail -n 160 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
       return 1
@@ -761,14 +827,22 @@ release_join_ios_marker_value() {
 
 release_join_ios_finish_test() {
   [[ -n "$RELEASE_JOIN_IOS_TEST_PID" ]] || return 1
-  local status=0
+  local status=0 pgid="$RELEASE_JOIN_IOS_TEST_PGID"
   wait "$RELEASE_JOIN_IOS_TEST_PID" || status=$?
   RELEASE_JOIN_IOS_TEST_PID=""
+  if [[ "$pgid" =~ ^[1-9][0-9]*$ ]] \
+      && ios_release_network_process_group_alive "$pgid"; then
+    echo "iOS join test left a process-group descendant" >&2
+    ios_release_network_terminate_process_group "$pgid" || true
+    status=1
+  fi
+  RELEASE_JOIN_IOS_TEST_PGID=""
   if [[ "$status" -eq 0 ]] \
       && ! release_join_ios_assert_selected_test_started; then
     status=1
   fi
   if [[ "$status" -ne 0 ]]; then
+    release_join_ios_stop_runner || status=1
     tail -n 120 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
   fi
   RELEASE_JOIN_IOS_TEST_NAME=""

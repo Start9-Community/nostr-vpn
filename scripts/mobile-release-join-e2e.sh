@@ -125,10 +125,9 @@ cleanup() {
   local status=$?
   local cleanup_status=0 package route
   trap - EXIT
-  if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" ]] \
-      && kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null; then
-    kill "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
-    wait "$RELEASE_JOIN_IOS_TEST_PID" >/dev/null 2>&1 || true
+  if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" \
+    || -n "${RELEASE_JOIN_IOS_TEST_PGID:-}" ]]; then
+    release_join_ios_abort_test || cleanup_status=1
   fi
   if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
     "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || true
@@ -286,13 +285,24 @@ phase_ios_admin_android_manual() {
   release_join_android_manual_submit \
     "$RELEASE_JOIN_IOS_ADMIN_ID" "$RELEASE_JOIN_IOS_NETWORK_ID"
   admin_log="$(ios_log ios-admin-android-manual)"
-  release_join_ios_run_test \
+  release_join_ios_start_test \
     testManualAdminAddRequiresRosterProgress \
     "$admin_log" \
     "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
+  release_join_ios_wait_marker \
+    NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= "$RELEASE_JOIN_UI_WAIT_SECS" \
+    || fail "iPhone admin did not submit the manual approval"
   submitted="$(
     ios_marker_value_from "$admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
   )"
+  release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    || fail "Pixel manual join never left its locally pending admin row"
+  completed="$(release_join_now_ms)"
+  assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-manual"
+  release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    || fail "Pixel manual join did not retain the signed roster across relaunch"
+  release_join_ios_finish_test \
+    || fail "iPhone admin did not retain the exact Pixel joiner"
   ios_admin_relaunch_joiner="$(
     ios_marker_value_from \
       "$admin_log" NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE
@@ -300,12 +310,6 @@ phase_ios_admin_android_manual() {
   [[ "$ios_admin_relaunch_joiner" == "$RELEASE_JOIN_ANDROID_JOINER_ID" ]] \
     || fail "iPhone admin relaunch did not retain the exact Pixel joiner"
   RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE=1
-  release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
-    || fail "Pixel manual join never left its locally pending admin row"
-  release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
-    || fail "Pixel manual join did not retain the signed roster across relaunch"
-  completed="$(release_join_now_ms)"
-  assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-manual"
 }
 
 phase_android_admin_ios_manual() {
