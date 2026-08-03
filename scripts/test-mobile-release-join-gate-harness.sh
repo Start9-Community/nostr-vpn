@@ -675,6 +675,21 @@ image_import_argument = (
 )
 if ios_test.count(image_import_argument) != 1:
     raise SystemExit("Release join XCTest has an unexpected app launch argument")
+ios_setup = ios_test.split("override func setUpWithError() throws", 1)[1].split(
+    "func testCreateAdminNetworkAndReportPublicValues()", 1
+)[0]
+if "testImportJoinQrImageAndRequireAdminRosterProgress" not in ios_setup:
+    raise SystemExit("Release join XCTest does not scope QR import to its test")
+if ios_setup.index(image_import_argument) > ios_setup.index("app.launch()"):
+    raise SystemExit("Release join XCTest enables QR import after its first launch")
+ios_import = ios_test.split(
+    "func testImportJoinQrImageAndRequireAdminRosterProgress()", 1
+)[1].split("func test", 1)[0]
+for forbidden in ("app.terminate()", "app.launch()", image_import_argument):
+    if forbidden in ios_import:
+        raise SystemExit(
+            f"Release join QR import test relaunches or mutates capability: {forbidden}"
+        )
 for required in (
     "private static let maximumAttempts = 2",
     'field.value(forKey: "hasKeyboardFocus")',
