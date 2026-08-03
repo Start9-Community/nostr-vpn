@@ -659,24 +659,9 @@ for required in (
 ):
     if required not in ui:
         raise SystemExit(f"Release join fixture staging is missing {required}")
-reuse_command = ui.split("release_join_ios_test_command() {", 1)[1].split(
-    "release_join_ios_process_pgid() {", 1
-)[0]
-for required in (
-    "testImportJoinQrImageAndRequireAdminRosterProgress",
-    'ui_target_app_argument="--nvpn-ui-test-qr-image-import"',
-    'NVPN_IOS_UI_TARGET_APP_ARGUMENT="$ui_target_app_argument"',
-):
-    if required not in reuse_command:
-        raise SystemExit(
-            "UseDestinationArtifacts QR import lacks its allowlisted launch flag: "
-            + required
-        )
-if reuse_command.index("testImportJoinQrImageAndRequireAdminRosterProgress") \
-        > reuse_command.index(
-            'ui_target_app_argument="--nvpn-ui-test-qr-image-import"'
-        ):
-    raise SystemExit("QR import target argument is not scoped before xctestrun rewrite")
+for forbidden in ("NVPN_IOS_UI_TARGET_APP_ARGUMENT", "ui_target_app_argument"):
+    if forbidden in ui:
+        raise SystemExit(f"Release join retains obsolete app-argument plumbing: {forbidden}")
 run_only = desktop.split("select_run_only_artifact() {", 1)[1].split(
     "write_component_proof() {", 1
 )[0]
@@ -739,16 +724,16 @@ if ".launchEnvironment =" in ios_test:
 ios_setup = ios_test.split("override func setUpWithError() throws", 1)[1].split(
     "func testCreateAdminNetworkAndReportPublicValues()", 1
 )[0]
-if ".launchArguments =" in ios_test:
-    raise SystemExit("Release join XCTest mutates target app launch arguments")
 ios_import = ios_test.split(
     "func testImportJoinQrImageAndRequireAdminRosterProgress()", 1
 )[1].split("func test", 1)[0]
-for forbidden in ("app.terminate()", "app.launch()"):
-    if forbidden in ios_import:
-        raise SystemExit(
-            f"Release join QR import test relaunches or mutates capability: {forbidden}"
-        )
+launch_argument = 'app.launchArguments = ["--nvpn-ui-test-qr-image-import"]'
+if "app.launchArguments.isEmpty" not in ios_setup:
+    raise SystemExit("Ordinary release join tests do not assert empty launch arguments")
+if ios_test.count(launch_argument) != 1 or launch_argument not in ios_import:
+    raise SystemExit("Release join XCTest does not scope the QR import capability exactly once")
+if ios_import.index(launch_argument) > ios_import.index("app.launch()"):
+    raise SystemExit("QR import XCTest launches before scoping its capability")
 for required in (
     "private static let maximumAttempts = 2",
     'field.value(forKey: "hasKeyboardFocus")',
@@ -786,7 +771,7 @@ for required in (
         )
 if "allow.tap()" not in prompt_handler or "continue" not in prompt_handler:
     raise SystemExit("Release join XCTest reuses the disappearing Apple Allow hierarchy")
-if ios_test.count("try dismissSystemPromptsIfPresent()") != 4:
+if ios_test.count("try dismissSystemPromptsIfPresent()") != 5:
     raise SystemExit("Release join XCTest does not propagate every system-prompt failure")
 for required in (
     "ShippedUIInteraction.reveal(nameField, byTapping: create)",
@@ -840,6 +825,7 @@ for required in (
     "testManualJoinAndRequireRosterCompletion",
     "testManualAdminAddRequiresRosterProgress",
     "requireAcceptedRoster",
+    'app.launchArguments = ["--nvpn-ui-test-qr-image-import"]',
     "app.terminate()",
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
 ):

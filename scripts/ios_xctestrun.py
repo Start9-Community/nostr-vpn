@@ -19,9 +19,6 @@ TUNNEL_NAME = "Nostr VPN Tunnel.appex"
 TUNNEL_EXECUTABLE = "Nostr VPN Tunnel"
 UI_TEST_RUNNER = "NostrVpnIosUITests-Runner.app"
 UI_TEST_BUNDLE = "NostrVpnIosUITests.xctest"
-ALLOWED_UI_TARGET_APP_ARGUMENTS = {
-    "--nvpn-ui-test-qr-image-import",
-}
 
 
 def require(condition: bool, message: str) -> None:
@@ -230,20 +227,6 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
     payload = read_plist(source)
     targets = xctestrun_targets(payload)
     assignments = environment_assignments(args)
-    app_argument = os.environ.get("NVPN_IOS_UI_TARGET_APP_ARGUMENT", "")
-    app_arguments = [app_argument] if app_argument else []
-    require(
-        len(app_arguments) == len(set(app_arguments)),
-        "xctestrun target app arguments contain duplicates",
-    )
-    unsupported_arguments = sorted(
-        set(app_arguments) - ALLOWED_UI_TARGET_APP_ARGUMENTS
-    )
-    require(
-        not unsupported_arguments,
-        "xctestrun target app argument is not allowlisted: "
-        + ", ".join(unsupported_arguments),
-    )
     app_bundle_id = runner_bundle_id = ""
     if args.use_destination_artifacts:
         app_bundle_id = read_plist(app / "Info.plist").get("CFBundleIdentifier")
@@ -264,7 +247,7 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
             or target.get("UseDestinationArtifacts") is False,
             "xctestrun relies on destination-side products",
         )
-        target["UITargetAppCommandLineArguments"] = app_arguments
+        target["UITargetAppCommandLineArguments"] = []
         target["UITargetAppEnvironmentVariables"] = {}
         if args.use_destination_artifacts:
             target["UseDestinationArtifacts"] = True

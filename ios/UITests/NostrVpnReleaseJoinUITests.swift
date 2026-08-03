@@ -19,6 +19,9 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         XCTAssertEqual(environment["NVPN_RELEASE_JOIN_BLACKBOX"], "1")
         XCTAssertTrue(app.launchArguments.isEmpty, "Release join gate must not pass app arguments")
         XCTAssertTrue(app.launchEnvironment.isEmpty, "Release join gate must not pass app environment")
+        guard !name.contains("testImportJoinQrImageAndRequireAdminRosterProgress") else {
+            return
+        }
         app.launch()
         try dismissSystemPromptsIfPresent()
     }
@@ -81,6 +84,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     func testImportJoinQrImageAndRequireAdminRosterProgress() throws {
+        app.launchArguments = ["--nvpn-ui-test-qr-image-import"]
+        app.launch()
+        try dismissSystemPromptsIfPresent()
+
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         let imageFilename = try required("NVPN_RELEASE_JOIN_IMAGE_FILENAME")
         openLinkDevice()
