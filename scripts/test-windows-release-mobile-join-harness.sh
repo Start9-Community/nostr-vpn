@@ -48,8 +48,8 @@ do
   grep -Fq "$roster_contract" "$DRIVER" \
     || fail "Windows driver lacks public roster status: $roster_contract"
 done
-grep -Fq '"RosterParticipantAccepted-$ParticipantNpub"' "$DRIVER" \
-  || fail "Windows admin does not observe its exact public roster row"
+[[ "$(grep -Fc '"RosterParticipantAccepted-$ParticipantNpub"' "$DRIVER")" -eq 2 ]] \
+  || fail "Windows admin and relaunch checks do not observe the exact public roster row"
 grep -Fq '$Evidence.relaunchAccepted = $true' "$DRIVER" \
   || fail "Windows driver lacks relaunch acceptance evidence"
 grep -Fq 'publicUiOnly = $true' "$DRIVER" \

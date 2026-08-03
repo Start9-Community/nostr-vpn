@@ -604,9 +604,11 @@ try {
     }
     "Verify" {
       Assert-ValidNpub $ParticipantNpub "expected accepted participant"
-      Wait-SinglePeerConnectedRoster $UiTimeoutSeconds
+      $null = Find-Control `
+        "RosterParticipantAccepted-$ParticipantNpub" `
+        $UiTimeoutSeconds
       $Evidence.participantNpub = $ParticipantNpub
-      $Evidence.acceptedSelector = "single-peer connected roster row"
+      $Evidence.acceptedSelector = "exact accepted roster participant row"
       $Evidence.relaunchAccepted = $true
       Save-WindowScreenshot "relaunch-accepted"
     }
