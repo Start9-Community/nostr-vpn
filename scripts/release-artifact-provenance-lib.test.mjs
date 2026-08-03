@@ -70,6 +70,8 @@ test('component proof retains only unchanged platform product inputs', () => {
       'scripts/desktop-mobile-manual-join-atspi.py',
       'scripts/desktop-mobile-manual-join-windows-ui.ps1',
       'scripts/e2e-macos-release-network.sh',
+      'scripts/e2e-macos-service-toggle.sh',
+      'scripts/e2e-macos-service.sh',
       'scripts/lib-mobile-release-join-ui.sh',
       'scripts/macos-release-mobile-join-remote.sh',
       'scripts/macos-vm-desktop-wireguard-exit-e2e.sh',

@@ -245,6 +245,19 @@ if 'pgrep -f "$APP_EXE"' in texts["e2e-macos-service-toggle.sh"]:
 if "codesign --force" in texts["e2e-macos-service-toggle.sh"]:
     raise SystemExit("service-toggle gate still re-signs a VM-side app copy")
 
+service_toggle = texts["e2e-macos-service-toggle.sh"]
+for required in (
+    'mktemp -d /tmp/nvpn-sg.XXXXXX',
+    'chmod 700 "$DATA_ROOT"',
+    'rm -rf -- "$DATA_ROOT"',
+):
+    if required not in service_toggle:
+        raise SystemExit(f"service-toggle gate lacks short owned runtime cleanup: {required}")
+if 'DATA_ROOT="$ARTIFACT_DIR/app-data"' in service_toggle:
+    raise SystemExit("service-toggle gate still puts Unix sockets under artifacts")
+if 'mktemp -d /tmp/nvpn-svc-e2e.XXXXXX' not in texts["e2e-macos-service.sh"]:
+    raise SystemExit("service singleton gate lacks a short macOS runtime root")
+
 for required in (
     "env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release",
     "NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only",

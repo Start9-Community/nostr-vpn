@@ -7,9 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-macos-owned-test-app.sh"
 ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT/artifacts/macos-service-toggle}"
-DATA_ROOT="$ARTIFACT_DIR/app-data"
-ADMIN_DATA_DIR="$DATA_ROOT/admin"
-JOINER_DATA_DIR="$DATA_ROOT/joiner"
+DATA_ROOT=""
+ADMIN_DATA_DIR=""
+JOINER_DATA_DIR=""
 RESULT="$ARTIFACT_DIR/fixture.json"
 APP_LOG="$ARTIFACT_DIR/app.log"
 APP_PATH="${NVPN_MACOS_APP_PATH:-}"
@@ -54,14 +54,18 @@ stop_app() {
       [[ -z "$APP_EXE" ]] || macos_stop_exact_test_app "$APP_EXE"
       ;;
   esac
+  [[ "$DATA_ROOT" != /tmp/nvpn-sg.* ]] || rm -rf -- "$DATA_ROOT"
 }
 trap stop_app EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-rm -rf "$DATA_ROOT"
-mkdir -p "$ARTIFACT_DIR" "$DATA_ROOT"
+DATA_ROOT="$(mktemp -d /tmp/nvpn-sg.XXXXXX)"
+chmod 700 "$DATA_ROOT"
+ADMIN_DATA_DIR="$DATA_ROOT/admin"
+JOINER_DATA_DIR="$DATA_ROOT/joiner"
+mkdir -p "$ARTIFACT_DIR"
 rm -f "$RESULT" "$APP_LOG" "$ARTIFACT_DIR"/*.png
 
 if [[ -z "$APP_PATH" ]]; then
