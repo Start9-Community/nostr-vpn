@@ -27,6 +27,7 @@ const harnessOnlyPaths = new Set([
   'scripts/linux-release-mobile-join-remote.sh',
   'scripts/mobile-android-smoke.sh',
   'scripts/mobile-release-join-ui-query.py',
+  'scripts/mobile-release-join-e2e.sh',
   'scripts/mobile-wireguard-exit-e2e.sh',
   'scripts/mobile-wireguard-exit-remote-native.sh',
   'scripts/mobile-wireguard-exit-server.sh',
