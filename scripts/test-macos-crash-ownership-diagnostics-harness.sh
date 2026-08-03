@@ -59,11 +59,12 @@ WIREGUARD_INTERFACE_STATUS=0
 ENDPOINT_ROUTE_ABSENT_STATUS=1
 SECURE_DNS_STATUS=0
 RESTART_STATE_STATUS=0
+RESTART_FIPS_STATUS=0
 wireguard_interface() {
   ((WIREGUARD_INTERFACE_STATUS == 0)) || return 1
   printf 'utun9\n'
 }
-wireguard_endpoint_route_state_valid() { [[ "$1" == en0 ]]; }
+wireguard_endpoint_route_state_valid() { [[ "${1:-en0}" == en0 ]]; }
 wireguard_split_defaults_absent() {
   ((WIREGUARD_INTERFACE_STATUS != 0))
 }
@@ -77,7 +78,7 @@ runtime_wireguard_state_is() {
   return 1
 }
 runtime_dns_state_matches() { return "$RESTART_STATE_STATUS"; }
-runtime_fips_peer_connected() { return "$RESTART_STATE_STATUS"; }
+runtime_fips_peer_connected() { return "$RESTART_FIPS_STATUS"; }
 capture_fips_host_tunnel_route() { printf 'utun8\n'; }
 no_nvpn_processes() { return 0; }
 capture_underlay_routes() { printf 'route snapshot\n'; }
@@ -176,7 +177,11 @@ assert_single_owned_daemon() { return "$RESTART_STATE_STATUS"; }
 owned_daemon_pid() { printf '%s\n' "${RESTART_PID:-202}"; }
 wireguard_bind_receipt_count() { printf '%s\n' "${RESTART_BINDS:-2}"; }
 fips_host_tunnel_route_live() { return "$RESTART_STATE_STATUS"; }
+captured_probe_works() { return "$RESTART_STATE_STATUS"; }
+https_works() { return "$RESTART_STATE_STATUS"; }
+exit_source_is_expected() { return "$RESTART_STATE_STATUS"; }
 fips_payload_works() { return "$RESTART_STATE_STATUS"; }
+mkdir -p "$RESULT_DIR/crash-restart-probes"
 WIREGUARD_INTERFACE_STATUS=0
 crash_restart_state_live 2 101 \
   || fail "complete fresh crash recovery was rejected"
@@ -195,6 +200,11 @@ if crash_restart_state_live 2 101; then
   fail "crash recovery accepted missing tunnel/DNS/FIPS/WG state"
 fi
 RESTART_STATE_STATUS=0
+RESTART_FIPS_STATUS=1
+if crash_restart_state_live 2 101; then
+  fail "crash recovery accepted an unauthenticated FIPS peer"
+fi
+RESTART_FIPS_STATUS=0
 
 # A stable externally visible failure must retain predicate, route, resolver,
 # status, and daemon-log evidence without inspecting the private journal.

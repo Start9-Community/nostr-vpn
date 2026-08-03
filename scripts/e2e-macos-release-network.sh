@@ -1432,6 +1432,7 @@ crash_restart_state_live() {
     && "$(wireguard_bind_receipt_count)" == "$expected_bind_receipts" ]] \
     && runtime_wireguard_state_is true true \
     && runtime_dns_state_matches \
+    && runtime_fips_peer_connected \
     && wireguard_interface >/dev/null \
     && wireguard_endpoint_route_state_valid \
     && secure_dns_owned \
