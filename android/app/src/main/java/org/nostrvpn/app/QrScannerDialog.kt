@@ -94,24 +94,31 @@ private fun QrScannerHost(
                 PackageManager.PERMISSION_GRANTED,
         )
     }
-    val scanner =
+    val scannerOptions =
         remember {
-            val options =
-                BarcodeScannerOptions.Builder()
-                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                    .build()
-            BarcodeScanning.getClient(options)
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
         }
+    val cameraScanner = remember(scannerOptions) { BarcodeScanning.getClient(scannerOptions) }
+    val importScanner = remember(scannerOptions) { BarcodeScanning.getClient(scannerOptions) }
+    val active = remember { AtomicBoolean(true) }
     val didEmit = remember { AtomicBoolean(false) }
     val cameraInFlight = remember { AtomicBoolean(false) }
     val importInFlight = remember { AtomicBoolean(false) }
 
+    fun reportError(message: String) {
+        if (active.get()) {
+            error = message
+        }
+    }
+
     fun acceptDecodedQr(raw: String) {
-        if (!didEmit.compareAndSet(false, true)) {
+        if (!active.get() || !didEmit.compareAndSet(false, true)) {
             return
         }
         val errorMessage = onScanned(raw)
-        if (errorMessage != null) {
+        if (errorMessage != null && active.get()) {
             didEmit.set(false)
             error = errorMessage
         }
@@ -123,25 +130,36 @@ private fun QrScannerHost(
                 importInFlight.set(false)
                 return@rememberLauncherForActivityResult
             }
+            if (!active.get()) {
+                importInFlight.set(false)
+                return@rememberLauncherForActivityResult
+            }
             error = null
             runCatching { InputImage.fromFilePath(context, uri) }
                 .onSuccess { image ->
                     processQrImage(
-                        scanner = scanner,
+                        scanner = importScanner,
                         image = image,
-                        onDecoded = ::acceptDecodedQr,
-                        onEmpty = { error = "No QR code found in that image." },
-                        onFailure = { error = "Could not read a QR code from that image." },
+                        onDecoded = { raw ->
+                            if (active.get() && importInFlight.get()) {
+                                acceptDecodedQr(raw)
+                            }
+                        },
+                        onEmpty = { reportError("No QR code found in that image.") },
+                        onFailure = { reportError("Could not read a QR code from that image.") },
                         onComplete = { importInFlight.set(false) },
                     )
                 }.onFailure {
                     importInFlight.set(false)
-                    error = "Could not open that image."
+                    reportError("Could not open that image.")
                 }
         }
 
     val permissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!active.get()) {
+                return@rememberLauncherForActivityResult
+            }
             hasPermission = granted
             if (!granted) {
                 error = "Camera permission is needed for live scanning. You can import an image instead."
@@ -165,8 +183,10 @@ private fun QrScannerHost(
 
     DisposableEffect(Unit) {
         onDispose {
+            active.set(false)
             runCatching { cameraProvider?.unbindAll() }
-            runCatching { scanner.close() }
+            runCatching { cameraScanner.close() }
+            runCatching { importScanner.close() }
             runCatching { analysisExecutor.shutdown() }
         }
     }
@@ -179,8 +199,13 @@ private fun QrScannerHost(
         future.addListener(
             {
                 runCatching { future.get() }
-                    .onSuccess { cameraProvider = it }
-                    .onFailure { error = "Camera scanner unavailable." }
+                    .onSuccess { provider ->
+                        if (active.get()) {
+                            cameraProvider = provider
+                        } else {
+                            runCatching { provider.unbindAll() }
+                        }
+                    }.onFailure { reportError("Camera scanner unavailable.") }
             },
             ContextCompat.getMainExecutor(context),
         )
@@ -204,6 +229,10 @@ private fun QrScannerHost(
                 .build()
 
         analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+            if (!active.get()) {
+                imageProxy.close()
+                return@setAnalyzer
+            }
             val mediaImage = imageProxy.image
             if (mediaImage == null) {
                 imageProxy.close()
@@ -216,10 +245,10 @@ private fun QrScannerHost(
 
             val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
             processQrImage(
-                scanner = scanner,
+                scanner = cameraScanner,
                 image = image,
                 onDecoded = { raw ->
-                    if (!importInFlight.get()) {
+                    if (active.get() && !importInFlight.get()) {
                         acceptDecodedQr(raw)
                     }
                 },
@@ -239,7 +268,7 @@ private fun QrScannerHost(
                 analysis,
             )
         }.onFailure {
-            error = "Camera scanner unavailable."
+            reportError("Camera scanner unavailable.")
         }
     }
 
@@ -247,13 +276,14 @@ private fun QrScannerHost(
         previewView,
         error,
         {
-            error = null
-            importInFlight.set(true)
-            runCatching { imagePicker.launch(arrayOf("image/*")) }
-                .onFailure {
-                    importInFlight.set(false)
-                    error = "Could not open the image picker."
-                }
+            if (active.get() && importInFlight.compareAndSet(false, true)) {
+                error = null
+                runCatching { imagePicker.launch(arrayOf("image/*")) }
+                    .onFailure {
+                        importInFlight.set(false)
+                        reportError("Could not open the image picker.")
+                    }
+            }
         },
     )
 }
@@ -266,7 +296,14 @@ private fun processQrImage(
     onFailure: () -> Unit = {},
     onComplete: () -> Unit,
 ) {
-    scanner.process(image)
+    val task =
+        runCatching { scanner.process(image) }
+            .getOrElse {
+                onFailure()
+                onComplete()
+                return
+            }
+    task
         .addOnSuccessListener { barcodes ->
             firstQrPayload(barcodes.map { it.rawValue })?.let(onDecoded) ?: onEmpty()
         }.addOnFailureListener {
