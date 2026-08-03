@@ -26,6 +26,28 @@ require(store.restore(runtimeEnabled: false), "transient missing sidecar erased 
 store.recordRequest(false)
 require(!store.restore(runtimeEnabled: true), "confirmed explicit stop was ignored")
 require(!store.permitsAutomaticStart(), "explicit stop allowed autoconnect resurrection")
+require(
+    !store.adoptNativeState(runtimeEnabled: true, successfulTransportStart: false),
+    "ordinary native refresh overrode explicit stop"
+)
+require(
+    !store.adoptNativeState(runtimeEnabled: false, successfulTransportStart: true),
+    "failed native transport action enabled VPN"
+)
+require(
+    store.adoptNativeState(runtimeEnabled: true, successfulTransportStart: true),
+    "successful native transport action was masked by stale explicit stop"
+)
+require(store.permitsAutomaticStart(), "successful native transport start was not durable")
+require(
+    !AppStorePolicy.allowsVpnStart(disclosureAccepted: false),
+    "join-from-OFF bypassed the pre-use disclosure"
+)
+require(
+    store.restore(runtimeEnabled: false),
+    "blocking join-from-OFF on disclosure discarded its desired start"
+)
+store.recordRequest(false)
 store.recordRequest(true)
 require(store.restore(runtimeEnabled: false), "start request did not survive missing sidecar")
 require(store.permitsAutomaticStart(), "explicit start blocked autoconnect restoration")
@@ -34,6 +56,8 @@ print("iOS VPN desired-state tests passed")
 SWIFT
 
 xcrun swiftc -warnings-as-errors \
+  "$ROOT/ios/Sources/Models.swift" \
+  "$ROOT/ios/Sources/AppStorePolicy.swift" \
   "$ROOT/ios/Sources/VpnDesiredStateStore.swift" \
   "$TMP_DIR/main.swift" \
   -o "$TMP_DIR/test-ios-vpn-desired-state"
@@ -42,13 +66,15 @@ xcrun swiftc -warnings-as-errors \
 python3 - \
   "$ROOT/ios/Sources/PacketTunnelController.swift" \
   "$ROOT/ios/Sources/AppModel.swift" \
-  "$ROOT/ios/Sources/AppModelTunnelLifecycle.swift" <<'PY'
+  "$ROOT/ios/Sources/AppModelTunnelLifecycle.swift" \
+  "$ROOT/ios/Sources/AppModelDebugAutomation.swift" <<'PY'
 import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 app = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 lifecycle = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+debug = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 start = source.split("func start(", 1)[1].split("static func routeState", 1)[0]
 call = start.index("startVPNTunnel(options: options)")
 ready = start.index("try await waitForConnected(manager)")
@@ -101,6 +127,65 @@ autoconnect = app.split("func ensureAutoconnectPacketTunnel", 1)[1].split(
 )[0]
 if "vpnDesiredState.permitsAutomaticStart()" not in autoconnect:
     raise SystemExit("autoconnect ignores persisted explicit VPN-off intent")
+dispatch = app.split("func dispatch(", 1)[1].split(
+    "private struct AppStoreCompatibleStateResult", 1
+)[0]
+adoption = app.split("func adoptAppStoreCompatibleState(", 1)[1].split(
+    "private func reconcileAppStoreTunnelAfterSanitization", 1
+)[0]
+if "nativeStateBeforeAction = core.state()" not in dispatch:
+    raise SystemExit("native VPN start preservation does not verify an OFF-to-ON transition")
+if "actionRequiresPacketTunnelConfigSync(" not in dispatch:
+    raise SystemExit("native VPN start preservation is not limited to transport/config actions")
+if "nativeStateBeforeAction.error" in dispatch:
+    raise SystemExit("a stale pre-action error suppresses a successful VPN start")
+if "successfulTransportStart:" not in dispatch or not all(
+    condition in dispatch
+    for condition in (
+        "!nativeStateBeforeAction.vpnEnabled",
+        "nativeState.error.isEmpty",
+        "nativeState.vpnEnabled",
+    )
+):
+    raise SystemExit("failed transport actions can overwrite explicit VPN-off intent")
+if "adoptNativeState(" not in adoption:
+    raise SystemExit("native VPN start intent is still masked during state adoption")
+authorization = app.split("func packetTunnelStartAllowed(", 1)[1].split(
+    "func setVpnEnabled", 1
+)[0]
+for required in (
+    "AppStorePolicy.allowsVpnStart",
+    "requireVpnDisclosureReview()",
+):
+    if required not in authorization:
+        raise SystemExit("PacketTunnel start policy does not surface the required disclosure")
+continue_after_disclosure = app.split("func startVpnAfterDisclosure()", 1)[1].split(
+    "func ensureAutoconnectPacketTunnel", 1
+)[0]
+if "setVpnEnabled(true, force: true)" not in continue_after_disclosure:
+    raise SystemExit("accepting the disclosure does not resume the preserved VPN start")
+config_schedule = app.split("func schedulePacketTunnelConfigSync", 1)[1].split(
+    "func syncPacketTunnelConfig", 1
+)[0]
+if "packetTunnelStartAllowed(" not in config_schedule:
+    raise SystemExit("force=false PacketTunnel config sync bypasses the disclosure")
+start_functions = (
+    app.split("func syncPacketTunnelConfig(", 1)[1].split(
+        "private func actionRequiresPacketTunnelConfigSync", 1
+    )[0],
+    lifecycle.split("private func reconcileStartupTunnelRoutes", 1)[1].split(
+        "private func requireStartupTunnelReconciliation", 1
+    )[0],
+    lifecycle.split("private func performVpnStart", 1)[1].split(
+        "private func performVpnStop", 1
+    )[0],
+    debug.split("private func startVpnForDebugProbe", 1)[1].split(
+        "private func fetchDebugProbe", 1
+    )[0],
+)
+for body in start_functions:
+    if "vpnController.start(" not in body or "packetTunnelStartAllowed(" not in body:
+        raise SystemExit("a PacketTunnel start path bypasses the disclosure policy")
 controller_start = source.split("func start(", 1)[1].split(
     "static func routeState", 1
 )[0]

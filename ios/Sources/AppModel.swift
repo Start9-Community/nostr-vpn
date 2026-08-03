@@ -289,13 +289,25 @@ final class AppModel: ObservableObject {
         }
         actionInFlight = true
         statusMessage = status
+        let updateSettingKeys = (action["patch"] as? [String: Any])
+            .map { Set($0.keys) } ?? []
+        let requiresPacketTunnelConfigSync = actionRequiresPacketTunnelConfigSync(
+            actionType,
+            updateSettingKeys: updateSettingKeys
+        )
         if fixtureMode {
             state = ScreenshotFixtures.dispatch(action, state: state)
         } else if let core {
+            let nativeStateBeforeAction = core.state()
+            let nativeState = core.dispatch(action)
             adoptAppStoreCompatibleState(
-                core.dispatch(action),
+                nativeState,
                 core: core,
-                reason: actionType
+                reason: actionType,
+                successfulTransportStart: requiresPacketTunnelConfigSync
+                    && !nativeStateBeforeAction.vpnEnabled
+                    && nativeState.error.isEmpty
+                    && nativeState.vpnEnabled
             )
         }
         actionInFlight = false
@@ -303,13 +315,7 @@ final class AppModel: ObservableObject {
         debugLog(
             "dispatch action=\(actionType) error=\(!state.error.isEmpty) vpn=\(state.vpnEnabled)/\(state.vpnActive) network=\(activeNetwork?.id ?? "nil")"
         )
-        let updateSettingKeys = (action["patch"] as? [String: Any])
-            .map { Set($0.keys) } ?? []
-        if state.error.isEmpty
-            && actionRequiresPacketTunnelConfigSync(
-                actionType,
-                updateSettingKeys: updateSettingKeys
-            ) {
+        if state.error.isEmpty && requiresPacketTunnelConfigSync {
             let force = actionType == "remove_network"
                 && activeNetwork == nil
                 && !state.joinRequestQrCodeOrLink.isEmpty
@@ -347,12 +353,14 @@ final class AppModel: ObservableObject {
     func adoptAppStoreCompatibleState(
         _ current: AppState,
         core: NativeCoreClient,
-        reason: String
+        reason: String,
+        successfulTransportStart: Bool = false
     ) -> Bool {
         let compatibility = Self.appStoreCompatibleState(current, core: core)
         state = compatibility.state
-        state.vpnEnabled = vpnDesiredState.presentationEnabled(
-            runtimeEnabled: state.vpnEnabled
+        state.vpnEnabled = vpnDesiredState.adoptNativeState(
+            runtimeEnabled: state.vpnEnabled,
+            successfulTransportStart: successfulTransportStart
         )
         if compatibility.removedPaidConfiguration && compatibility.vpnWasRunning {
             appStoreTunnelRefreshPending = true
@@ -401,6 +409,19 @@ final class AppModel: ObservableObject {
         } else {
             toggleVpn()
         }
+    }
+
+    func packetTunnelStartAllowed(reason: String) -> Bool {
+        guard AppStorePolicy.allowsVpnStart(
+            disclosureAccepted: UserDefaults.standard.bool(
+                forKey: Self.vpnDisclosureAcceptedKey
+            )
+        ) else {
+            debugLog("PacketTunnel start blocked reason=\(reason) disclosure pending")
+            requireVpnDisclosureReview()
+            return false
+        }
+        return true
     }
 
     func ensureAutoconnectPacketTunnel(reason: String) {
@@ -482,14 +503,13 @@ final class AppModel: ObservableObject {
         guard !fixtureMode else {
             return
         }
-        guard !force || UserDefaults.standard.bool(forKey: Self.vpnDisclosureAcceptedKey) else {
-            debugLog("PacketTunnel config sync skipped reason=\(reason) disclosure pending")
-            return
-        }
         guard vpnStartIsDesired(),
               force || state.vpnEnabled || state.vpnActive
         else {
             debugLog("PacketTunnel config sync skipped reason=\(reason) vpn off")
+            return
+        }
+        guard packetTunnelStartAllowed(reason: reason) else {
             return
         }
         guard pendingVpnTransitionEnabled == nil else {
@@ -529,6 +549,9 @@ final class AppModel: ObservableObject {
               force || state.vpnEnabled || state.vpnActive
         else {
             debugLog("PacketTunnel config sync aborted reason=\(reason) vpn off")
+            return
+        }
+        guard packetTunnelStartAllowed(reason: reason) else {
             return
         }
         let tunnelConfigJson = core.mobileTunnelConfigJson()

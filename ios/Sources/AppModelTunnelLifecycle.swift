@@ -60,6 +60,9 @@ extension AppModel {
     }
 
     private func reconcileStartupTunnelRoutes(generation: UInt64) async throws -> Bool {
+        guard packetTunnelStartAllowed(reason: "startup") else {
+            return false
+        }
         let status = await vpnController.statusRawValue()
         try requireStartupTunnelReconciliation(generation)
         let needsStart = Self.packetTunnelNeedsStart(statusRawValue: status)
@@ -171,6 +174,9 @@ extension AppModel {
     private func performVpnStart(force: Bool, generation: UInt64) async throws {
         guard vpnStartIsDesired() else {
             debugLog("connect skipped: VPN off is desired")
+            return
+        }
+        guard packetTunnelStartAllowed(reason: "VPN start") else {
             return
         }
         guard let core else {

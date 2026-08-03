@@ -27,6 +27,16 @@ struct VpnDesiredStateStore {
         return restore(runtimeEnabled: runtimeEnabled)
     }
 
+    func adoptNativeState(
+        runtimeEnabled: Bool,
+        successfulTransportStart: Bool
+    ) -> Bool {
+        if successfulTransportStart && runtimeEnabled {
+            recordRequest(true)
+        }
+        return presentationEnabled(runtimeEnabled: runtimeEnabled)
+    }
+
     func permitsAutomaticStart() -> Bool {
         defaults.object(forKey: Self.key) == nil
             || defaults.bool(forKey: Self.key)

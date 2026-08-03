@@ -649,6 +649,9 @@ extension AppModel {
         guard let core else {
             return "Native core unavailable"
         }
+        guard packetTunnelStartAllowed(reason: "debug probe") else {
+            return Self.vpnDisclosurePromptMessage
+        }
         if !state.vpnEnabled {
             dispatch(NativeActions.connectVpn())
         }
