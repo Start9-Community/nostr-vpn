@@ -267,7 +267,7 @@ struct JoinNetworkCard: View {
                 }
             }
 
-            DisclosureGroup("Manual join", isExpanded: $manualExpanded) {
+            DisclosureGroup(isExpanded: $manualExpanded) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Give the admin your Device ID. Enter their Device ID and Network ID here; they must add your Device ID too.")
                         .font(.caption)
@@ -318,9 +318,11 @@ struct JoinNetworkCard: View {
                     )
                 }
                 .padding(.top, 6)
+            } label: {
+                Text("Manual join")
+                    .accessibilityIdentifier("manual-join-expand")
             }
             .font(.subheadline)
-            .accessibilityIdentifier("manual-join-expand")
 
         }
     }
