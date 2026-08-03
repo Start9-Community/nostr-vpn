@@ -55,12 +55,12 @@ MACOS_RELEASE_APP_GATE_EXE="$APP_EXE"
 MACOS_RELEASE_APP_PROCESS_NAME="Nostr VPN"
 OWNED_PID_FILE="$MACOS_RELEASE_APP_STATE_DIR/imported.pid"
 CONFIG_DIR="$HOME/Library/Application Support/nvpn"
-CONFIG="$CONFIG_DIR/config.toml"
-DAEMON_LOG="$CONFIG_DIR/daemon.log"
 PROFILE_STATE_DIR="${NVPN_MACOS_RELEASE_JOIN_PROFILE_STATE_DIR:-$HOME/Library/Caches/nvpn-release-mobile-join-profile}"
 CONFIG_BACKUP="$PROFILE_STATE_DIR/prior"
 # Short and stable for macOS sockaddr_un and interrupted-run cleanup.
 TEST_CONFIG_DIR="/tmp/nvpn-rj-$UID"
+CONFIG="$TEST_CONFIG_DIR/config.toml"
+DAEMON_LOG="$TEST_CONFIG_DIR/daemon.log"
 TEST_PROFILE_MARKER="$PROFILE_STATE_DIR/state"
 TEST_SERVICE_OWNED="$PROFILE_STATE_DIR/service-owned"
 IMPORT_VERIFIED="$ARTIFACT_DIR/import-verified"
@@ -140,7 +140,7 @@ listener_ready = (
     int(v.get("expected_peer_count", -1)) == 0
     and s.get("vpn_enabled") is True
     and s.get("vpn_active") is False
-    and s.get("vpn_status") == "Listening for join requests"
+    and s.get("vpn_status") == "Waiting for participants"
     and bool(v.get("network_id"))
     and str(v.get("join_request_qr_code_or_link", "")).startswith(
         "nvpn://join-request/"
@@ -222,7 +222,30 @@ restore_test_profile() {
   [[ -e "$TEST_PROFILE_MARKER" || -e "$TEST_SERVICE_OWNED" ]] || return 0
   stop_app
   if [[ -e "$TEST_SERVICE_OWNED" ]]; then
+    local service_pid deadline
+    service_pid="$(
+      "$CLI" service status --json --skip-binary-version --config "$CONFIG" \
+        2>/dev/null || true
+    )"
+    service_pid="$(python3 -c '
+import json,sys
+value=json.loads(sys.argv[1]).get("pid")
+print(value if isinstance(value, int) and value > 1 else "")
+' "$service_pid" 2>/dev/null || true)"
     sudo -n "$CLI" service uninstall --config "$CONFIG" >/dev/null
+    deadline=$((SECONDS + 15))
+    while [[ -n "$service_pid" ]] \
+      && ps -p "$service_pid" -o pid= >/dev/null 2>&1 \
+      && ((SECONDS < deadline))
+    do
+      sleep 0.2
+    done
+    if [[ -n "$service_pid" ]] \
+      && ps -p "$service_pid" -o pid= >/dev/null 2>&1
+    then
+      echo "macOS Release join service did not fully stop during cleanup" >&2
+      return 1
+    fi
     rm -f "$TEST_SERVICE_OWNED"
   fi
   restore_config_dir

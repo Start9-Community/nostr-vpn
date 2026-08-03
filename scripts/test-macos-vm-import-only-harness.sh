@@ -65,12 +65,42 @@ if 'TEST_CONFIG_DIR="/tmp/nvpn-rj-$UID"' not in remote:
     raise SystemExit("macOS join profile lacks a stable short config directory")
 if 'TEST_CONFIG_DIR="$PROFILE_STATE_DIR/test"' in remote:
     raise SystemExit("macOS join profile still places its Unix socket under caches")
+if 'CONFIG="$TEST_CONFIG_DIR/config.toml"' not in remote:
+    raise SystemExit("macOS join CLI does not use the daemon's canonical config path")
+if 'CONFIG="$CONFIG_DIR/config.toml"' in remote:
+    raise SystemExit("macOS join CLI still uses the symlink config path")
 longest_short_socket = (
     "/private/tmp/nvpn-rj-4294967295/"
     ".nvpn-runtime/join-0123456789abcdef.sock"
 )
 if len(longest_short_socket.encode()) > 103:
     raise SystemExit("macOS join profile can exceed the Unix socket path limit")
+
+listener = remote.split("assert_join_listener_ready() {", 1)[1].split(
+    "\n}\n\nassert_outbound_join_ready", 1
+)[0]
+if 's.get("vpn_status") == "Waiting for participants"' not in listener:
+    raise SystemExit("macOS join listener rejects the canonical empty-roster state")
+if 's.get("vpn_status") == "Listening for join requests"' in listener:
+    raise SystemExit("macOS join listener still expects an unreachable status")
+
+cleanup = remote.split("restore_test_profile() {", 1)[1].split(
+    "\n}\n\nservice_preflight", 1
+)[0]
+for required in (
+    'service_pid="$(python3 -c',
+    'service status --json --skip-binary-version --config "$CONFIG"',
+    'ps -p "$service_pid" -o pid=',
+):
+    if required not in cleanup:
+        raise SystemExit(f"macOS join cleanup lacks stopped-service proof: {required}")
+if not (
+    cleanup.index("service status --json")
+    < cleanup.index("service uninstall")
+    < cleanup.index('ps -p "$service_pid"')
+    < cleanup.index("restore_config_dir")
+):
+    raise SystemExit("macOS join cleanup restores the profile before service stop proof")
 
 for required in (
     'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
