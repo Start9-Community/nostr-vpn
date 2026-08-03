@@ -20,6 +20,7 @@ ios_ui="$ROOT/ios/UITests/NostrVpnIosUITests.swift"
 ios_lifecycle_ui="$ROOT/ios/UITests/NostrVpnLifecycleUITests.swift"
 ios_lifecycle_lib="$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
 ios_release_gate="$ROOT/scripts/lib-mobile-ios-release-network.sh"
+join_gate="$ROOT/scripts/mobile-release-join-e2e.sh"
 ios_release_artifact="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
 ios_packet_tunnel="$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift"
 ios_packet_flow_bridge="$ROOT/ios/PacketTunnel/PacketFlowBridge.swift"
@@ -924,20 +925,34 @@ grep -Fq 'build-for-testing' "$ios_release_gate" \
   && grep -Fq 'IOS_RELEASE_NETWORK_BASE_TREE_SHA' "$ios_release_artifact" \
   && grep -Fq 'installedBuildNumber' "$ios_release_artifact" \
   || { echo "iOS Release cases do not reuse/read back one exact signed artifact" >&2; exit 1; }
-python3 - "$ios_release_gate" <<'PY'
+python3 - "$ios_release_gate" "$join_gate" <<'PY'
 import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = source.split(
-    '  local reuse_build="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"', 1
-)[1].split(
-    '  if ! NVPN_IOS_ADHOC_PROVISIONING_PROFILE_UUID=', 1
+reuse = source.split("ios_release_network_prepare_reuse() {", 1)[1].split(
+    "\nios_release_network_prepare() {", 1
 )[0]
-build = body.index("build_command+=(build-for-testing)")
-audit = body.index("ios_release_network_audit_rust_feature_surface")
-if build >= audit or body.count("ios_release_network_audit_rust_feature_surface") != 1:
+for forbidden in ("security", "ios-profiles", "ios-build", "xcodebuild", "codesign"):
+    if forbidden in reuse:
+        raise SystemExit(f"exact iOS reuse invokes forbidden path: {forbidden}")
+for required in ("appBundleTreeSha256", "runner tree digest", "xctestrunSha256",
+                 "ios_release_network_install_exact_runner"):
+    if required not in reuse:
+        raise SystemExit(f"exact iOS reuse omits {required}")
+prepare = source.split("\nios_release_network_prepare() {", 1)[1]
+if prepare.index("ios_release_network_prepare_reuse") > prepare.index(
+    "ios_release_network_company_signing"
+):
+    raise SystemExit("exact iOS reuse reaches signing identity selection")
+build = prepare.index("build_command+=(build-for-testing)")
+audit = prepare.index("ios_release_network_audit_rust_feature_surface")
+if build >= audit:
     raise SystemExit("cold-cache iOS preparation audits before building")
+join = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+cleanup = join.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+if "device uninstall app" in cleanup or "kill \"$RELEASE_JOIN_IOS_TEST_PID\"" not in cleanup:
+    raise SystemExit("join cleanup does not terminate while retaining the iOS runner")
 PY
 grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
   && grep -Fq '"selectedPhysicalDevice": selected_device' "$ios_release_artifact" \

@@ -117,9 +117,116 @@ print(f"{identity}|{team}")
 ' "$organization" "$expected_certificate_sha256"
 }
 
+ios_release_network_prepare_reuse() {
+  local device="$1" app derived xctestrun receipt runner_receipt runner
+  local app_tree runner_tree xctestrun_sha device_udid device_sha values
+  app="${NVPN_MOBILE_IOS_RELEASE_APP_PATH:-}"
+  derived="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-}"
+  xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"
+  receipt="${NVPN_MOBILE_IOS_REUSE_RECEIPT:-}"
+  runner_receipt="${NVPN_MOBILE_IOS_RELEASE_RUNNER_RECEIPT:-}"
+  runner="$derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  [[ -d "$app" && -d "$runner" && -s "$xctestrun" \
+    && -s "$receipt" && -s "$runner_receipt" \
+    && "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
+    && "${NVPN_EXPECTED_FIPS_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
+    && "${NVPN_MOBILE_IOS_RELEASE_RUNNER_TREE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Exact iOS reuse requires pinned app, runner, xctestrun, and receipts" >&2
+    return 1
+  }
+  app_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$app")" \
+    || return 1
+  runner_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner")" \
+    || return 1
+  xctestrun_sha="$(shasum -a 256 "$xctestrun" | awk '{print $1}')"
+  device_udid="$(resolve_physical_ios_udid "$device")" || return 1
+  device_sha="$(printf %s "$device_udid" | shasum -a 256 | awk '{print $1}')"
+  umask 077
+  IOS_RELEASE_NETWORK_SIGNING_DIR="$(
+    mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-release-signing.XXXXXX"
+  )" || return 1
+  IOS_RELEASE_NETWORK_DEVICE_RECEIPT="$IOS_RELEASE_NETWORK_SIGNING_DIR/selected-device-receipt.json"
+  values="$(python3 - \
+    "$receipt" "$runner_receipt" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" \
+    "$app_tree" "$runner_tree" "$xctestrun_sha" "$device_sha" \
+    "$NVPN_EXPECTED_APP_GIT_SHA" "$NVPN_EXPECTED_FIPS_GIT_SHA" \
+    "$NVPN_MOBILE_IOS_RELEASE_RUNNER_TREE_SHA256" "$IOS_BUNDLE_ID" <<'PY'
+import json, sys
+(receipt_path, runner_path, device_path, app_tree, runner_tree, xctest_sha,
+ device_sha, app_sha, fips_sha, expected_runner, bundle) = sys.argv[1:]
+r = json.load(open(receipt_path, encoding="utf-8"))
+rr = json.load(open(runner_path, encoding="utf-8"))
+expected = {
+    "receiptSchema": 2, "artifactType": "iOS company Ad Hoc Release app",
+    "appGitSha": app_sha, "appBundleTreeSha256": app_tree,
+    "treeSha256": app_tree, "xctestrunSha256": xctest_sha,
+    "fipsGitSha": fips_sha, "companySigningVerified": True,
+    "selectedPhysicalDeviceIdentifierSha256": device_sha,
+    "installedBundleIdentifier": bundle, "debuggable": False,
+}
+for key, value in expected.items():
+    if r.get(key) != value: raise SystemExit(f"iOS receipt mismatch: {key}")
+if runner_tree != expected_runner:
+    raise SystemExit("iOS runner tree digest mismatch")
+runner_expected = {
+    "schemaVersion": 1, "appSigningClass": "distribution",
+    "appDebuggable": False, "runnerSigningClass": "development",
+    "runnerDebuggable": True, "sameSigningTeam": True,
+    "testBundleSigningClass": "development",
+    "testBundleHostedByDebuggableRunner": True,
+    "destinationArchitecture": "arm64", "xctestrunSha256": xctest_sha,
+}
+for key, value in runner_expected.items():
+    if rr.get(key) != value: raise SystemExit(f"iOS runner receipt mismatch: {key}")
+if "arm64" not in str(rr.get("runnerArchitectures", "")).split():
+    raise SystemExit("iOS runner receipt lacks arm64")
+if "arm64" not in str(rr.get("testBundleArchitectures", "")).split():
+    raise SystemExit("iOS test bundle receipt lacks arm64")
+device = r.get("selectedPhysicalDevice", {})
+if device.get("deviceIdentifierSha256") != device_sha:
+    raise SystemExit("iOS receipt is bound to another phone")
+json.dump(device, open(device_path, "w", encoding="utf-8"), sort_keys=True)
+print(r["appGitTree"], r["fipsGitTree"], r["fipsCoreVersion"],
+      r["appCodeDirectoryHash"], sep="\t")
+PY
+  )" || {
+    ios_release_network_prepare_abort
+    return
+  }
+  IFS=$'\t' read -r IOS_RELEASE_NETWORK_APP_TREE \
+    IOS_RELEASE_NETWORK_FIPS_TREE NVPN_EXPECTED_FIPS_VERSION \
+    IOS_RELEASE_NETWORK_BASE_CDHASH <<<"$values"
+  IOS_RELEASE_NETWORK_APP_HEAD="$NVPN_EXPECTED_APP_GIT_SHA"
+  IOS_RELEASE_NETWORK_BASE_TREE_SHA="$app_tree"
+  IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA="$(
+    python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+      tree-sha "$derived/Build/Products"
+  )" || return 1
+  IOS_RELEASE_NETWORK_DERIVED_DATA="$derived"
+  IOS_RELEASE_NETWORK_XCTESTRUN="$xctestrun"
+  IOS_RELEASE_NETWORK_FROZEN_APP="$app"
+  IOS_RELEASE_NETWORK_DEVICE="$device_udid"
+  IOS_RELEASE_NETWORK_DESTINATION="platform=iOS,id=$device_udid,arch=arm64"
+  IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE="$IOS_RELEASE_NETWORK_SIGNING_DIR/active-xcode.pgid"
+  export NVPN_EXPECTED_FIPS_VERSION NVPN_MOBILE_IOS_RELEASE_APP_PATH="$app"
+  if ! xcrun devicectl device install app \
+      --device "$device_udid" "$app" --quiet >/dev/null \
+    || ! ios_release_network_install_exact_runner
+  then
+    ios_release_network_prepare_abort
+    return
+  fi
+  IOS_RELEASE_NETWORK_PREPARED=1
+  echo "iOS Release network gate reused its exact signed artifacts"
+}
+
 ios_release_network_prepare() {
   local device="$1"
   [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 0 ]] || return 0
+  if bool_is_true "${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"; then
+    ios_release_network_prepare_reuse "$device"
+    return
+  fi
   IOS_RELEASE_NETWORK_APP_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
   IOS_RELEASE_NETWORK_APP_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
   assert_release_checkout_state \

@@ -98,10 +98,6 @@ cleanup() {
   fi
   if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
     "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || true
-    xcrun devicectl device uninstall app \
-      --device "$IOS_DEVICE" \
-      "${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner" \
-      --quiet >/dev/null 2>&1 || true
   fi
   rm -rf "$PRIVATE_DIR"
   exit "$status"
