@@ -14,13 +14,13 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -45,6 +45,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -61,7 +62,7 @@ internal fun QrScannerDialog(
     QrScannerHost(
         onDismiss = onDismiss,
         onScanned = onScanned,
-    ) { previewView, error ->
+    ) { previewView, error, importImage ->
         Dialog(
             onDismissRequest = onDismiss,
             properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -70,6 +71,7 @@ internal fun QrScannerDialog(
                 previewView = previewView,
                 error = error,
                 onDismiss = onDismiss,
+                onImportImage = importImage,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -81,7 +83,7 @@ internal fun QrScannerDialog(
 private fun QrScannerHost(
     onDismiss: () -> Unit,
     onScanned: (String) -> String?,
-    content: @Composable (PreviewView, String?) -> Unit,
+    content: @Composable (PreviewView, String?, () -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -92,12 +94,57 @@ private fun QrScannerHost(
                 PackageManager.PERMISSION_GRANTED,
         )
     }
+    val scanner =
+        remember {
+            val options =
+                BarcodeScannerOptions.Builder()
+                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                    .build()
+            BarcodeScanning.getClient(options)
+        }
+    val didEmit = remember { AtomicBoolean(false) }
+    val cameraInFlight = remember { AtomicBoolean(false) }
+    val importInFlight = remember { AtomicBoolean(false) }
+
+    fun acceptDecodedQr(raw: String) {
+        if (!didEmit.compareAndSet(false, true)) {
+            return
+        }
+        val errorMessage = onScanned(raw)
+        if (errorMessage != null) {
+            didEmit.set(false)
+            error = errorMessage
+        }
+    }
+
+    val imagePicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) {
+                importInFlight.set(false)
+                return@rememberLauncherForActivityResult
+            }
+            error = null
+            runCatching { InputImage.fromFilePath(context, uri) }
+                .onSuccess { image ->
+                    processQrImage(
+                        scanner = scanner,
+                        image = image,
+                        onDecoded = ::acceptDecodedQr,
+                        onEmpty = { error = "No QR code found in that image." },
+                        onFailure = { error = "Could not read a QR code from that image." },
+                        onComplete = { importInFlight.set(false) },
+                    )
+                }.onFailure {
+                    importInFlight.set(false)
+                    error = "Could not open that image."
+                }
+        }
 
     val permissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             hasPermission = granted
             if (!granted) {
-                error = "Camera permission is needed to scan QR codes."
+                error = "Camera permission is needed for live scanning. You can import an image instead."
             }
         }
 
@@ -107,42 +154,13 @@ private fun QrScannerHost(
         }
     }
 
-    if (!hasPermission) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text("Scan") },
-            text = { Text(error ?: "Waiting for camera permission.") },
-            confirmButton = {
-                TextButton(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                    Text("Retry")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = onDismiss) {
-                    Text("Close")
-                }
-            },
-        )
-        return
-    }
-
     val previewView =
         remember {
             PreviewView(context).apply {
                 scaleType = PreviewView.ScaleType.FILL_CENTER
             }
         }
-    val scanner =
-        remember {
-            val options =
-                BarcodeScannerOptions.Builder()
-                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                    .build()
-            BarcodeScanning.getClient(options)
-        }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
-    val didEmit = remember { AtomicBoolean(false) }
-    val inFlight = remember { AtomicBoolean(false) }
     var cameraProvider: ProcessCameraProvider? by remember { mutableStateOf(null) }
 
     DisposableEffect(Unit) {
@@ -153,7 +171,10 @@ private fun QrScannerHost(
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(hasPermission) {
+        if (!hasPermission) {
+            return@LaunchedEffect
+        }
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener(
             {
@@ -165,11 +186,14 @@ private fun QrScannerHost(
         )
     }
 
-    LaunchedEffect(cameraProvider) {
+    LaunchedEffect(cameraProvider, hasPermission) {
+        if (!hasPermission) {
+            return@LaunchedEffect
+        }
         val provider = cameraProvider ?: return@LaunchedEffect
         error = null
         didEmit.set(false)
-        inFlight.set(false)
+        cameraInFlight.set(false)
 
         val preview = Preview.Builder().build()
         preview.setSurfaceProvider(previewView.surfaceProvider)
@@ -185,33 +209,25 @@ private fun QrScannerHost(
                 imageProxy.close()
                 return@setAnalyzer
             }
-            if (!inFlight.compareAndSet(false, true)) {
+            if (importInFlight.get() || !cameraInFlight.compareAndSet(false, true)) {
                 imageProxy.close()
                 return@setAnalyzer
             }
 
             val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-            scanner.process(image)
-                .addOnSuccessListener { barcodes ->
-                    val raw = barcodes.firstOrNull()?.rawValue?.trim().orEmpty()
-                    if (raw.isBlank()) {
-                        return@addOnSuccessListener
+            processQrImage(
+                scanner = scanner,
+                image = image,
+                onDecoded = { raw ->
+                    if (!importInFlight.get()) {
+                        acceptDecodedQr(raw)
                     }
-                    if (!didEmit.compareAndSet(false, true)) {
-                        return@addOnSuccessListener
-                    }
-
-                    val errorMessage = onScanned(raw)
-                    if (errorMessage != null) {
-                        didEmit.set(false)
-                        error = errorMessage
-                    }
-                }.addOnFailureListener {
-                    // Keep scanning while the camera remains open.
-                }.addOnCompleteListener {
-                    inFlight.set(false)
+                },
+                onComplete = {
+                    cameraInFlight.set(false)
                     imageProxy.close()
-                }
+                },
+            )
         }
 
         runCatching {
@@ -227,14 +243,48 @@ private fun QrScannerHost(
         }
     }
 
-    content(previewView, error)
+    content(
+        previewView,
+        error,
+        {
+            error = null
+            importInFlight.set(true)
+            runCatching { imagePicker.launch(arrayOf("image/*")) }
+                .onFailure {
+                    importInFlight.set(false)
+                    error = "Could not open the image picker."
+                }
+        },
+    )
 }
+
+private fun processQrImage(
+    scanner: BarcodeScanner,
+    image: InputImage,
+    onDecoded: (String) -> Unit,
+    onEmpty: () -> Unit = {},
+    onFailure: () -> Unit = {},
+    onComplete: () -> Unit,
+) {
+    scanner.process(image)
+        .addOnSuccessListener { barcodes ->
+            firstQrPayload(barcodes.map { it.rawValue })?.let(onDecoded) ?: onEmpty()
+        }.addOnFailureListener {
+            onFailure()
+        }.addOnCompleteListener {
+            onComplete()
+        }
+}
+
+internal fun firstQrPayload(rawValues: Iterable<String?>): String? =
+    rawValues.firstNotNullOfOrNull { value -> value?.trim()?.takeIf(String::isNotEmpty) }
 
 @Composable
 private fun QrScannerCamera(
     previewView: PreviewView,
     error: String?,
     onDismiss: () -> Unit,
+    onImportImage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -267,6 +317,17 @@ private fun QrScannerCamera(
                 style = MaterialTheme.typography.titleLarge,
                 color = Color.White,
             )
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(
+                onClick = onImportImage,
+                modifier =
+                    Modifier.mobileUiSelector(
+                        id = "join-request-import-image",
+                        description = "Import QR Image",
+                    ),
+            ) {
+                Text("Import QR Image", color = Color.White)
+            }
         }
         error?.let { message ->
             Text(
