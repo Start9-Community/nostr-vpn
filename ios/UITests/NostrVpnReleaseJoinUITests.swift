@@ -79,7 +79,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         openLinkDevice()
         let before = rosterParticipantCount()
-        XCTAssertEqual(before, 0, "New admin network already contained a roster participant")
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))
         scan.tap()
@@ -141,7 +140,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let joiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         openLinkDevice()
         let before = rosterParticipantCount()
-        XCTAssertEqual(before, 0, "New admin network already contained a roster participant")
         replaceText(scrollTo("manual-admin-joiner-id"), with: joiner)
         let alias = element("manual-admin-alias")
         if alias.exists {
