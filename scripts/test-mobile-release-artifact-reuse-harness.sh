@@ -539,16 +539,17 @@ import sys
 gate, artifacts, reuse, ui, release, android_release, android_smoke = [
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 ]
-for required in ("HARNESS_GIT_SHA", 'APP_GIT_SHA="${NVPN_EXPECTED_APP_GIT_SHA:-}"', "release_join_validate_android_reuse", "release_join_validate_ios_reuse", '--harness-head "$HARNESS_GIT_SHA"'):
+for required in ("HARNESS_GIT_SHA", 'APP_GIT_SHA="${NVPN_EXPECTED_APP_GIT_SHA:-}"', 'APP_GIT_SHA="$HARNESS_GIT_SHA"', "release_join_validate_android_reuse", "release_join_validate_ios_reuse", '--harness-head "$HARNESS_GIT_SHA"'):
     if required not in gate:
         raise SystemExit(f"Release join reuse identity separation is missing {required}")
 if '== "$APP_GIT_SHA:$APP_GIT_TREE"' in gate:
     raise SystemExit("Release join falsely requires retained Android identity to equal iOS product")
 validation = gate.index("release_join_validate_reused_artifacts")
+checkout_rebind = gate.index('APP_GIT_SHA="$HARNESS_GIT_SHA"', validation)
 arm = gate.index("RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1")
 android_install = gate.index("release_join_prepare_android_release", validation)
 ios_install = gate.index("release_join_prepare_ios_release", validation)
-if not validation < arm < android_install < ios_install:
+if not validation < checkout_rebind < arm < android_install < ios_install:
     raise SystemExit("Release join does not validate both artifacts before mutation")
 if '[[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]' not in gate:
     raise SystemExit("prevalidation failure can still mutate devices during cleanup")

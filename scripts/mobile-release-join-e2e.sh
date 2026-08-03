@@ -316,6 +316,11 @@ if release_join_reuse_artifacts; then
 else
   release_join_validate_reused_artifacts
 fi
+if release_join_reuse_artifacts; then
+  APP_GIT_SHA="$HARNESS_GIT_SHA"
+  APP_GIT_TREE="$HARNESS_GIT_TREE"
+  export APP_GIT_SHA APP_GIT_TREE
+fi
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
 export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 release_join_prepare_android_release
