@@ -357,6 +357,8 @@ phase_android_admin_ios_manual() {
   release_join_restart_ios_in_place
   release_join_reset_android_state
   release_join_android_create_admin
+  release_join_clear_ios_admin_approval \
+    || fail "Host could not reset the iPhone runner approval acknowledgement"
   join_log="$(ios_log android-admin-ios-manual)"
   release_join_ios_start_test \
     testManualJoinAndRequireRosterCompletion "$join_log" \
@@ -378,6 +380,8 @@ phase_android_admin_ios_manual() {
     || fail "iPhone did not submit through shipped manual-join controls"
   release_join_android_manual_admin_tap "$RELEASE_JOIN_IOS_JOINER_ID" \
     >>"$android_admin_log"
+  release_join_ack_ios_admin_approval "$RELEASE_JOIN_ANDROID_ADMIN_ID" \
+    || fail "Host could not acknowledge the real Pixel approval to the iPhone runner"
   submitted="$(
     sed -n \
       's/.*NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=//p' \

@@ -548,6 +548,35 @@ release_join_stage_ios_qr_image() {
   export RELEASE_JOIN_IOS_STAGED_QR_FILENAME
 }
 
+release_join_write_ios_admin_approval_marker() {
+  local value="$1" source
+  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
+  source="$(mktemp "$PRIVATE_DIR/ios-admin-approval.XXXXXX")" || return 1
+  printf 'NVPN_RELEASE_JOIN_ADMIN_APPROVED=%s\n' "$value" >"$source"
+  if ! xcrun devicectl device copy to \
+    --device "$IOS_DEVICE" \
+    --domain-type appDataContainer \
+    --domain-identifier "$bundle" \
+    --source "$source" \
+    --destination "Documents/nvpn-release-join-host-ack.log" \
+    --quiet >/dev/null
+  then
+    rm -f "$source"
+    return 1
+  fi
+  rm -f "$source"
+}
+
+release_join_clear_ios_admin_approval() {
+  release_join_write_ios_admin_approval_marker PENDING
+}
+
+release_join_ack_ios_admin_approval() {
+  local admin="$1"
+  release_join_valid_npub "$admin" || return 1
+  release_join_write_ios_admin_approval_marker "$admin"
+}
+
 release_join_require_fresh_ios_pending_qr() {
   local deadline=$((SECONDS + 3)) heartbeat fresh
   while ((SECONDS < deadline)); do
@@ -743,10 +772,12 @@ release_join_ios_test_command() {
       "NVPN_RELEASE_JOIN_JOINER_ID="
       "NVPN_RELEASE_JOIN_NETWORK_ID="
       "NVPN_RELEASE_JOIN_NETWORK_NAME="
+      "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS="
       "NVPN_IOS_BUNDLE_ID="
       "NVPN_RELEASE_JOIN_BLACKBOX=1"
       "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS"
       "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS=${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
+      "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS=$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
       "NVPN_IOS_BUNDLE_ID=$bundle"
     )
     local assignment
@@ -788,6 +819,7 @@ release_join_ios_test_command() {
       NVPN_RELEASE_JOIN_BLACKBOX=1
       NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="$RELEASE_JOIN_DELIVERY_WAIT_SECS"
       NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS="${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
+      NVPN_RELEASE_JOIN_SETUP_WAIT_SECS="$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
       NVPN_IOS_BUNDLE_ID="$bundle"
     )
     command+=("$@")

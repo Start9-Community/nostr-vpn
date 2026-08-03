@@ -13,6 +13,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     private let environment = ProcessInfo.processInfo.environment
     private let qrContentWidthMinimumBasisPoints = 9_800
     private let qrContentWidthMaximumBasisPoints = 10_000
+    private let hostApprovalAcknowledgementFileName = "nvpn-release-join-host-ack.log"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -135,10 +136,14 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
 
         XCTAssertTrue(
-            waitUntil(timeout: deliveryTimeout) {
+            waitUntil(timeout: setupTimeout) {
                 self.app.tabBars.buttons["Devices"].exists
             },
             "Manual join did not leave the first-run join screen"
+        )
+        XCTAssertTrue(
+            waitForHostApproval(of: admin, timeout: setupTimeout),
+            "Host did not confirm the real Android approval"
         )
         openDevicesTab()
         try requireAcceptedRoster(
@@ -189,6 +194,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private var deliveryTimeout: TimeInterval {
         boundedTimeout("NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS", maximum: 15)
+    }
+
+    private var setupTimeout: TimeInterval {
+        boundedTimeout("NVPN_RELEASE_JOIN_SETUP_WAIT_SECS", maximum: 45)
     }
 
     private var importTimeout: TimeInterval {
@@ -469,6 +478,28 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             object: nil
         )
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForHostApproval(
+        of admin: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        let expected = "NVPN_RELEASE_JOIN_ADMIN_APPROVED=\(admin)"
+        let fileURL = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent(hostApprovalAcknowledgementFileName)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let data = try? Data(contentsOf: fileURL),
+               let text = String(data: data, encoding: .utf8),
+               text.split(separator: "\n").contains(Substring(expected))
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
     }
 
     private func waitForRosterBackedPendingQrDismissal(

@@ -1127,8 +1127,10 @@ android_admin_ios_manual_phase = gate.split(
 )[1].split("release_join_require_clean_fips", 1)[0]
 for required in (
     "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
+    "release_join_clear_ios_admin_approval",
     "release_join_android_manual_admin_prepare",
     "release_join_android_manual_admin_tap",
+    "release_join_ack_ios_admin_approval",
     "android-admin-ios-manual-approval.log",
     "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=",
     "assert_delivery_deadline",
@@ -1151,10 +1153,13 @@ if 'android_admin_log="$RESULT_DIR/android-admin-ios-manual.log"' \
         in android_admin_ios_manual_phase:
     raise SystemExit("Android approval and iPhone XCTest still share one log path")
 if not (
-    android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_JOINER_ID=")
+    android_admin_ios_manual_phase.index("release_join_clear_ios_admin_approval")
+    < android_admin_ios_manual_phase.index("release_join_ios_start_test")
+    < android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_JOINER_ID=")
     < android_admin_ios_manual_phase.index("release_join_android_manual_admin_prepare")
     < android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
     < android_admin_ios_manual_phase.index("release_join_android_manual_admin_tap")
+    < android_admin_ios_manual_phase.index("release_join_ack_ios_admin_approval")
     < android_admin_ios_manual_phase.index("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=")
     < android_admin_ios_manual_phase.index("assert_delivery_deadline")
     < android_admin_ios_manual_phase.index("release_join_ios_finish_test")
@@ -1162,6 +1167,38 @@ if not (
     raise SystemExit(
         "Pixel-admin/iPhone manual timing does not overlap setup and measure first delivery"
     )
+for required in (
+    "waitForHostApproval(of: admin, timeout: setupTimeout)",
+    "NVPN_RELEASE_JOIN_ADMIN_APPROVED=\\(admin)",
+    'boundedTimeout("NVPN_RELEASE_JOIN_SETUP_WAIT_SECS", maximum: 45)',
+):
+    if required not in ios_test:
+        raise SystemExit(
+            f"iPhone manual join does not isolate setup from delivery timing: {required}"
+        )
+manual_join_test = ios_test.split(
+    "func testManualJoinAndRequireRosterCompletion() throws", 1
+)[1].split("func testManualAdminAddRequiresRosterProgress() throws", 1)[0]
+if not (
+    manual_join_test.index("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
+    < manual_join_test.index("waitForHostApproval(of: admin, timeout: setupTimeout)")
+    < manual_join_test.index("requireAcceptedRoster(")
+):
+    raise SystemExit(
+        "iPhone manual join starts its delivery assertion before the real admin approval"
+    )
+for required in (
+    "release_join_clear_ios_admin_approval()",
+    "release_join_ack_ios_admin_approval()",
+    "release_join_write_ios_admin_approval_marker PENDING",
+    "NVPN_RELEASE_JOIN_ADMIN_APPROVED=%s",
+    "Documents/nvpn-release-join-host-ack.log",
+    ".UITests.xctrunner",
+):
+    if required not in ui:
+        raise SystemExit(
+            f"Host approval acknowledgement is not scoped to the XCTest runner: {required}"
+        )
 for required in (
     "args.ios_admin_manual_relaunch_durable",
     "args.ios_joiner_manual_relaunch_durable",
