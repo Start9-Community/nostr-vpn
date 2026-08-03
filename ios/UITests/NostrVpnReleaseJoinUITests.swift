@@ -242,12 +242,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private func createNetwork(named name: String) throws {
         if !element("network-setup-create").waitForExistence(timeout: 3) {
-            let switcher = element("network-switcher-open")
-            XCTAssertTrue(switcher.waitForExistence(timeout: 5))
-            switcher.tap()
-            let add = element("add-network-open")
-            XCTAssertTrue(add.waitForExistence(timeout: 5))
-            add.tap()
+            XCTAssertTrue(
+                ShippedUIInteraction.openAddNetwork(in: app),
+                "Add network was not reachable in the shipped network menu"
+            )
         }
         let create = element("network-setup-create")
         XCTAssertTrue(create.waitForExistence(timeout: 5))
@@ -265,12 +263,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private func openJoinNetwork() {
         if !element("network-setup-join").waitForExistence(timeout: 3) {
-            let switcher = element("network-switcher-open")
-            XCTAssertTrue(switcher.waitForExistence(timeout: 5))
-            switcher.tap()
-            let add = element("add-network-open")
-            XCTAssertTrue(add.waitForExistence(timeout: 5))
-            add.tap()
+            XCTAssertTrue(
+                ShippedUIInteraction.openAddNetwork(in: app),
+                "Add network was not reachable in the shipped network menu"
+            )
         }
         let join = element("network-setup-join")
         XCTAssertTrue(join.waitForExistence(timeout: 5))
