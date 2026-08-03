@@ -392,7 +392,7 @@ export function validateWindowsInstallerGateReceipt({
   const expectedName =
     `nostr-vpn-${expectedTag}-windows-x64-setup.exe`
   if (
-    receipt.receiptSchema !== 1
+    receipt.receiptSchema !== 2
     || receipt.platform !== 'windows'
     || receipt.artifactType !== 'exact installed Windows Release setup'
     || receipt.tag !== expectedTag

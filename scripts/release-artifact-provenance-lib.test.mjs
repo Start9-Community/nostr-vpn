@@ -256,11 +256,14 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     'scripts/ios_profile_certificate.py',
   ]
   const harnessPaths = [
+    'scripts/desktop_mobile_manual_join_receipt.py',
     'scripts/e2e-web-startos-manual-join-docker.sh',
     'scripts/ios_xctestrun.py',
     'scripts/lib-ubuntu-vm-imported-release.sh',
+    'scripts/lib-mobile-release-artifact-reuse.sh',
     'scripts/lib-mobile-release-join-artifacts.sh',
     'scripts/linux-release-mobile-join-remote.sh',
+    'scripts/mobile-underlay-local-timestamp.py',
     'scripts/release-network-evidence.py',
     'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
     'scripts/validate-mobile-underlay-continuity.py',
@@ -1048,7 +1051,7 @@ test('release receipt collection requires exact source and strict public UI gate
       if (platform === 'windows') {
         writeFileSync(paths.windows.installer, JSON.stringify({
           ...source,
-          receiptSchema: 1,
+          receiptSchema: 2,
           platform: 'windows',
           artifactType: 'exact installed Windows Release setup',
           tag: `v${desktopArtifact.appVersion}`,
