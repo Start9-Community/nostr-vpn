@@ -777,6 +777,11 @@ release_join_ios_start_test() {
   RELEASE_JOIN_IOS_TEST_PGID="$pgid"
   RELEASE_JOIN_IOS_TEST_LOG="$log"
   RELEASE_JOIN_IOS_TEST_NAME="$test_name"
+  if ! release_join_ios_wait_selected_test_started \
+      "${RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}"; then
+    release_join_ios_abort_test || true
+    return 1
+  fi
 }
 
 release_join_ios_abort_test() {
@@ -807,6 +812,27 @@ release_join_ios_assert_selected_test_started() {
     tail -n 120 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
     return 1
   }
+}
+
+release_join_ios_wait_selected_test_started() {
+  local timeout="${1:-${RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}}"
+  local expected="Test Case '-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests $RELEASE_JOIN_IOS_TEST_NAME]' started."
+  local deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    if grep -Fq "$expected" "$RELEASE_JOIN_IOS_TEST_LOG" 2>/dev/null; then
+      return 0
+    fi
+    if [[ -n "$RELEASE_JOIN_IOS_TEST_PID" ]] \
+        && ! kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null; then
+      echo "iOS join test exited before XCTest started: $RELEASE_JOIN_IOS_TEST_NAME" >&2
+      tail -n 160 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
+      return 1
+    fi
+    sleep 0.25
+  done
+  echo "iOS join XCTest launch timed out after ${timeout}s: $RELEASE_JOIN_IOS_TEST_NAME" >&2
+  tail -n 160 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
+  return 1
 }
 
 release_join_ios_wait_marker() {

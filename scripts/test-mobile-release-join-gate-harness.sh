@@ -21,6 +21,42 @@ grep -Fq -- '-destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"' \
 grep -Fq 'RELEASE_JOIN_IOS_TEST_NAME="$test_name"' "$join_ui" \
   && grep -Fq 'release_join_ios_assert_selected_test_started' "$join_ui" \
   || { echo "iOS join runner accepts a zero-selected-test success" >&2; exit 1; }
+grep -Fq \
+  'RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}"' \
+  "$ROOT/scripts/mobile-release-join-e2e.sh" \
+  || { echo "iOS join launch does not have an independent allowance" >&2; exit 1; }
+if ! sed -n \
+    '/^release_join_ios_start_test() {/,/^release_join_ios_abort_test() {/p' \
+    "$join_ui" \
+    | grep -Fq 'release_join_ios_wait_selected_test_started'; then
+  echo "iOS join setup budget still includes xcodebuild launch" >&2
+  exit 1
+fi
+
+(
+  # Launch and in-test setup each receive their own bounded allowance. The
+  # combined elapsed time deliberately exceeds either individual allowance.
+  # shellcheck disable=SC1090,SC1091
+  source "$join_ui"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-launch-budget.XXXXXX")"
+  trap 'kill "${RELEASE_JOIN_IOS_TEST_PID:-}" >/dev/null 2>&1 || true; wait "${RELEASE_JOIN_IOS_TEST_PID:-}" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+  RELEASE_JOIN_IOS_TEST_LOG="$tmp/runner.log"
+  RELEASE_JOIN_IOS_TEST_NAME="testFixture"
+  (
+    sleep 1.6
+    printf '%s\n' \
+      "Test Case '-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests testFixture]' started." \
+      >>"$RELEASE_JOIN_IOS_TEST_LOG"
+    sleep 1.6
+    printf '%s\n' \
+      'NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_QR_READY=1' \
+      >>"$RELEASE_JOIN_IOS_TEST_LOG"
+    sleep 1
+  ) &
+  RELEASE_JOIN_IOS_TEST_PID=$!
+  release_join_ios_wait_selected_test_started 3
+  release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_READY=1 3
+)
 for file in \
   "$ROOT/scripts/lib-mobile-ios-release-artifact.sh" \
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
@@ -358,7 +394,8 @@ PY
     printf 'audited\n' >"$audit"
   }
   release_join_ios_test_command() {
-    printf '%s\0' bash -c 'sleep 30 & wait'
+    printf '%s\0' bash -c \
+      'printf "%s\n" "Test Case '\''-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests fixture]'\'' started."; sleep 30 & wait'
   }
   release_join_ios_start_test fixture "$private/fixture.log"
   pgid="$RELEASE_JOIN_IOS_TEST_PGID"
