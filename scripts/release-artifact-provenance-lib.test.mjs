@@ -66,6 +66,9 @@ test('component proof retains only unchanged platform product inputs', () => {
     const macReceipt = commit('macos/Sources/App.swift', 'base')
     const macHarnessPaths = [
       'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
+      'scripts/appstore-draft',
+      'scripts/appstore_draft_metadata.py',
+      'scripts/test_appstore_draft_metadata.py',
       'scripts/desktop-manual-join-ax.swift',
       'scripts/desktop-mobile-manual-join-atspi.py',
       'scripts/desktop-mobile-manual-join-windows-ui.ps1',
