@@ -873,7 +873,11 @@ test('release receipt collection requires exact source and strict public UI gate
         },
       },
       publicUiOnly: true,
-      opticalCameraQr: true,
+      productionImageImportQr: true,
+      actualRenderedQrScreenCapture: {
+        androidRenderedScreenSha256: 'a'.repeat(64),
+        iosRenderedScreenSha256: 'b'.repeat(64),
+      },
       privateAppStateRead: false,
       appLaunchArgumentsOrEnvironment: false,
       desktopMobileManual: true,

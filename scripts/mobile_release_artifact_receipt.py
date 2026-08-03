@@ -143,6 +143,18 @@ def build_join_summary(args: argparse.Namespace) -> None:
     ios_app_bundle_tree_sha = require_lower_hash(
         args.ios_app_bundle_tree_sha, "iOS app bundle tree", 64
     )
+    qr_captures = {
+        "androidRenderedScreenSha256": sha256_file(
+            pathlib.Path(args.android_qr_capture)
+        ),
+        "iosRenderedScreenSha256": sha256_file(
+            pathlib.Path(args.ios_qr_capture)
+        ),
+    }
+    png_signature = b"\x89PNG\r\n\x1a\n"
+    for path in (args.android_qr_capture, args.ios_qr_capture):
+        if pathlib.Path(path).read_bytes()[:8] != png_signature:
+            raise ValueError("mobile join QR screen capture is not a PNG")
 
     android_receipt_path = pathlib.Path(args.android_receipt)
     ios_receipt_path = pathlib.Path(args.ios_receipt)
@@ -276,7 +288,8 @@ def build_join_summary(args: argparse.Namespace) -> None:
             },
         },
         "publicUiOnly": True,
-        "opticalCameraQr": True,
+        "productionImageImportQr": True,
+        "actualRenderedQrScreenCapture": qr_captures,
         "privateAppStateRead": False,
         "appLaunchArgumentsOrEnvironment": False,
         "deliveryDeadlineMilliseconds": 15_000,
@@ -571,6 +584,8 @@ def parser() -> argparse.ArgumentParser:
         "android_receipt",
         "ios_app_bundle_tree_sha",
         "ios_receipt",
+        "android_qr_capture",
+        "ios_qr_capture",
         "android_qr_width_bps",
         "android_pending_qr_lifecycle_ready",
         "ios_qr_width_bps",

@@ -315,6 +315,10 @@ fi
 
 JOIN_TIMINGS="$TMP_ROOT/join-timings.tsv"
 JOIN_SUMMARY="$TMP_ROOT/join-summary.json"
+ANDROID_QR_CAPTURE="$TMP_ROOT/android-rendered-qr.png"
+IOS_QR_CAPTURE="$TMP_ROOT/ios-rendered-qr.png"
+printf '\211PNG\r\n\032\n' >"$ANDROID_QR_CAPTURE"
+printf '\211PNG\r\n\032\n' >"$IOS_QR_CAPTURE"
 printf '%s\t100\n' \
   iPhone-admin-to-Pixel-QR \
   Pixel-admin-to-iPhone-QR \
@@ -343,6 +347,8 @@ python3 "$VALIDATOR" join-summary \
   --android-receipt "$ANDROID_RECEIPT" \
   --ios-app-bundle-tree-sha "$IOS_BUNDLE_TREE_SHA" \
   --ios-receipt "$IOS_RECEIPT" \
+  --android-qr-capture "$ANDROID_QR_CAPTURE" \
+  --ios-qr-capture "$IOS_QR_CAPTURE" \
   --android-qr-width-bps 10000 \
   --android-pending-qr-lifecycle-ready 1 \
   --ios-qr-width-bps 10000 \
@@ -506,7 +512,7 @@ rm "$IOS_PRODUCTS/escaping-product"
   RELEASE_JOIN_IOS_XCTESTRUN="$IOS_XCTESTRUN"
   RELEASE_JOIN_IOS_UDID=fixture-device
   RELEASE_JOIN_DELIVERY_WAIT_SECS=15
-  RELEASE_JOIN_CAMERA_WAIT_SECS=30
+  RELEASE_JOIN_IMPORT_WAIT_SECS=15
   mkdir -p "$PRIVATE_DIR"
   base_sha="$(shasum -a 256 "$IOS_XCTESTRUN" | awk '{print $1}')"
   command_file="$TMP_ROOT/join-command.bin"

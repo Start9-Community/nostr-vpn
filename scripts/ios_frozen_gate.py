@@ -395,7 +395,8 @@ def validate_mobile_join_receipt(
         receipt.get("schema") == 1
         and receipt.get("platform") == "mobile"
         and receipt.get("publicUiOnly") is True
-        and receipt.get("opticalCameraQr") is True
+        and receipt.get("productionImageImportQr") is True
+        and isinstance(receipt.get("actualRenderedQrScreenCapture"), dict)
         and receipt.get("privateAppStateRead") is False
         and receipt.get("appLaunchArgumentsOrEnvironment") is False
         and receipt.get("desktopMobileManual") is True
@@ -407,6 +408,12 @@ def validate_mobile_join_receipt(
         and isinstance(ios, dict),
         "mobile join receipt is not source-bound to the iOS artifact",
     )
+    captures = receipt["actualRenderedQrScreenCapture"]
+    for field in (
+        "androidRenderedScreenSha256",
+        "iosRenderedScreenSha256",
+    ):
+        required_hash(captures.get(field), f"mobile join {field}", 64)
     for field in (
         "appGitSha",
         "appGitTree",

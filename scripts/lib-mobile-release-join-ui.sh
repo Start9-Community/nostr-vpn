@@ -440,20 +440,32 @@ release_join_android_scan_prepare() {
   RELEASE_JOIN_ANDROID_SCAN_BEFORE="$(
     release_join_android_query resource-prefix roster-participant- count
   )"
-  release_join_android_scroll_to description "Scan joining device QR"
-  release_join_android_tap description "Scan joining device QR"
-  release_join_android_accept_camera_permission
-  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_SCANNER_READY=1"
+  export RELEASE_JOIN_ANDROID_SCAN_BEFORE
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_IMPORT_READY=1"
 }
 
 release_join_android_scan_submit() {
-  local joiner="$1" after deadline
+  local joiner="$1" image="$2" filename after deadline
   [[ "${RELEASE_JOIN_ANDROID_SCAN_BEFORE:-}" =~ ^[0-9]+$ ]] || {
-    echo "Android QR scanner was not prepared before approval" >&2
+    echo "Android QR image import was not prepared before approval" >&2
     return 1
   }
+  [[ -s "$image" ]] || {
+    echo "Android QR image import has no captured source image" >&2
+    return 1
+  }
+  filename="$(basename "$image")"
+  "${ADB[@]}" push "$image" "/sdcard/Download/$filename" >/dev/null
+  release_join_android_scroll_to description "Scan joining device QR"
+  release_join_android_tap description "Scan joining device QR"
+  release_join_android_accept_camera_permission
+  release_join_android_wait_query resource "join-request-import-image"
+  release_join_android_tap resource "join-request-import-image"
+  release_join_android_wait_query text "$filename"
+  release_join_android_tap text "$filename"
   release_join_android_wait_query \
-    description "Confirm adding scanned join request" "$RELEASE_JOIN_CAMERA_WAIT_SECS"
+    description "Confirm adding scanned join request" \
+    "${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
   release_join_require_fresh_ios_pending_qr
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
   release_join_android_tap description "Confirm adding scanned join request"
@@ -470,6 +482,44 @@ release_join_android_scan_submit() {
     sleep 0.25
   done
   return 1
+}
+
+release_join_capture_android_qr() {
+  local output="$1"
+  rm -f "$output"
+  "${ADB[@]}" exec-out screencap -p >"$output"
+  [[ "$(od -An -tx1 -N8 "$output" | tr -d ' \n')" == 89504e470d0a1a0a ]] || {
+    echo "Android QR screen capture is not a PNG" >&2
+    return 1
+  }
+}
+
+release_join_capture_ios_qr() {
+  local output="$1"
+  rm -f "$output"
+  command -v idevicescreenshot >/dev/null 2>&1 || {
+    echo "idevicescreenshot is required for real iPhone QR capture" >&2
+    return 1
+  }
+  idevicescreenshot -u "$RELEASE_JOIN_IOS_UDID" "$output" >/dev/null
+  [[ "$(od -An -tx1 -N8 "$output" | tr -d ' \n')" == 89504e470d0a1a0a ]] || {
+    echo "iPhone QR screen capture is not a PNG" >&2
+    return 1
+  }
+}
+
+release_join_stage_ios_qr_image() {
+  local image="$1" filename="$2"
+  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+  xcrun devicectl device copy to \
+    --device "$IOS_DEVICE" \
+    --domain-type appDataContainer \
+    --domain-identifier "$bundle" \
+    --source "$image" \
+    --destination "Documents/$filename" \
+    --quiet >/dev/null
+  RELEASE_JOIN_IOS_STAGED_QR_FILENAME="$filename"
+  export RELEASE_JOIN_IOS_STAGED_QR_FILENAME
 }
 
 release_join_require_fresh_ios_pending_qr() {
@@ -655,15 +705,16 @@ release_join_ios_test_command() {
     runner_environment=(
       "NVPN_RELEASE_JOIN_ADMIN_ID="
       "NVPN_RELEASE_JOIN_BLACKBOX="
-      "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS="
       "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="
+      "NVPN_RELEASE_JOIN_IMAGE_FILENAME="
+      "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS="
       "NVPN_RELEASE_JOIN_JOINER_ID="
       "NVPN_RELEASE_JOIN_NETWORK_ID="
       "NVPN_RELEASE_JOIN_NETWORK_NAME="
       "NVPN_IOS_BUNDLE_ID="
       "NVPN_RELEASE_JOIN_BLACKBOX=1"
       "NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS=$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-      "NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS=$RELEASE_JOIN_CAMERA_WAIT_SECS"
+      "NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS=${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
       "NVPN_IOS_BUNDLE_ID=$bundle"
     )
     local assignment
@@ -704,7 +755,7 @@ release_join_ios_test_command() {
       NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID"
       NVPN_RELEASE_JOIN_BLACKBOX=1
       NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS="$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-      NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS="$RELEASE_JOIN_CAMERA_WAIT_SECS"
+      NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS="${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
       NVPN_IOS_BUNDLE_ID="$bundle"
     )
     command+=("$@")

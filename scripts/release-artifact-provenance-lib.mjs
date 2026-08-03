@@ -511,7 +511,8 @@ function requireMobileJoinReceipt({
     receipt.schema !== 1
     || receipt.platform !== 'mobile'
     || receipt.publicUiOnly !== true
-    || receipt.opticalCameraQr !== true
+    || receipt.productionImageImportQr !== true
+    || !receipt.actualRenderedQrScreenCapture
     || receipt.privateAppStateRead !== false
     || receipt.appLaunchArgumentsOrEnvironment !== false
     || receipt.desktopMobileManual !== true
@@ -544,8 +545,14 @@ function requireMobileJoinReceipt({
   if (
     !/^[0-9a-f]{40}$/.test(String(receipt.harnessGitSha ?? ''))
     || !/^[0-9a-f]{40}$/.test(String(receipt.harnessGitTree ?? ''))
+    || !/^[0-9a-f]{64}$/.test(String(
+      receipt.actualRenderedQrScreenCapture?.androidRenderedScreenSha256 ?? '',
+    ))
+    || !/^[0-9a-f]{64}$/.test(String(
+      receipt.actualRenderedQrScreenCapture?.iosRenderedScreenSha256 ?? '',
+    ))
   ) {
-    throw new Error('Android/iOS mobile join receipt lacks its harness identity.')
+    throw new Error('Android/iOS mobile join receipt lacks its harness/capture identity.')
   }
   requireExactDeliveryTimings(
     receipt,

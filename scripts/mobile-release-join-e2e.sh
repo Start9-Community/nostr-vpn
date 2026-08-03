@@ -52,11 +52,12 @@ PRIVATE_DIR="$RESULT_DIR/.private-$$"
 SUMMARY="$RESULT_DIR/summary.json"
 RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
-RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
+RELEASE_JOIN_IMPORT_WAIT_SECS="${NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
 RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}"
 RELEASE_JOIN_IOS_SETUP_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-30}"
 MACOS_JOIN_GATE_CONFIG="${NVPN_RELEASE_JOIN_DESKTOP_MOBILE:-1}"
 mkdir -p "$PRIVATE_DIR" "$RESULT_DIR"
+mkdir -p "$RESULT_DIR/qr-captures"
 chmod 700 "$PRIVATE_DIR"
 RELEASE_JOIN_IOS_QUARANTINE="$RESULT_DIR/ios-network-state-unproven.quarantine"
 [[ ! -e "$RELEASE_JOIN_IOS_QUARANTINE" ]] || {
@@ -85,7 +86,7 @@ MACOS_JOIN_GATE="$(
 for value in \
   "$RELEASE_JOIN_UI_WAIT_SECS" \
   "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
-  "$RELEASE_JOIN_CAMERA_WAIT_SECS" \
+  "$RELEASE_JOIN_IMPORT_WAIT_SECS" \
   "$RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS" \
   "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS"
 do
@@ -93,8 +94,8 @@ do
 done
 ((RELEASE_JOIN_DELIVERY_WAIT_SECS <= 15)) \
   || fail "join delivery wait cannot exceed 15 seconds"
-((RELEASE_JOIN_CAMERA_WAIT_SECS <= 30)) \
-  || fail "optical camera wait cannot exceed 30 seconds"
+((RELEASE_JOIN_IMPORT_WAIT_SECS <= 15)) \
+  || fail "QR image import wait cannot exceed 15 seconds"
 ((RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS <= 60)) \
   || fail "iOS test launch wait cannot exceed 60 seconds"
 ((RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 30)) \
@@ -122,8 +123,11 @@ ADB=("${ADB_BIN:-adb}" -s "$ANDROID_SERIAL_SELECTED")
 export NVPN_ANDROID_SERIAL="$ANDROID_SERIAL_SELECTED"
 export IOS_DEVICE RESULT_DIR PRIVATE_DIR
 export RELEASE_JOIN_UI_WAIT_SECS RELEASE_JOIN_DELIVERY_WAIT_SECS
-export RELEASE_JOIN_CAMERA_WAIT_SECS RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS
+export RELEASE_JOIN_IMPORT_WAIT_SECS RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS
 export RELEASE_JOIN_IOS_SETUP_WAIT_SECS
+ANDROID_QR_CAPTURE="$RESULT_DIR/qr-captures/android-join-request.png"
+IOS_QR_CAPTURE="$RESULT_DIR/qr-captures/ios-join-request.png"
+IOS_QR_STAGED_FILENAME="nvpn-release-android-join-request.png"
 RELEASE_JOIN_IOS_NETWORK_IDS=()
 
 cleanup() {
@@ -136,6 +140,15 @@ cleanup() {
   fi
   if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
     "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || true
+    "${ADB[@]}" shell rm -f "/sdcard/Download/$(basename "$IOS_QR_CAPTURE")" \
+      >/dev/null 2>&1 || cleanup_status=1
+    if [[ -n "${RELEASE_JOIN_IOS_STAGED_QR_FILENAME:-}" ]]; then
+      ios-deploy \
+        --id "$RELEASE_JOIN_IOS_UDID" \
+        --bundle_id "${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}" \
+        --rm "Documents/$RELEASE_JOIN_IOS_STAGED_QR_FILENAME" \
+        >/dev/null 2>&1 || cleanup_status=1
+    fi
     package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
     "${ADB[@]}" shell am force-stop "$package" >/dev/null 2>&1 || cleanup_status=1
     "${ADB[@]}" shell pm clear "$package" >/dev/null 2>&1 || cleanup_status=1
@@ -210,16 +223,20 @@ phase_ios_admin_android_qr() {
   ios_create_admin "Release QR iPhone admin"
   release_join_android_show_qr
   release_join_android_background_foreground_pending_qr
+  release_join_capture_android_qr "$ANDROID_QR_CAPTURE"
+  release_join_stage_ios_qr_image \
+    "$ANDROID_QR_CAPTURE" "$IOS_QR_STAGED_FILENAME"
   scan_log="$(ios_log ios-admin-android-qr)"
   release_join_ios_start_test \
-    testScanPhysicalJoinQrAndRequireAdminRosterProgress "$scan_log" \
+    testImportJoinQrImageAndRequireAdminRosterProgress "$scan_log" \
+    "NVPN_RELEASE_JOIN_IMAGE_FILENAME=$IOS_QR_STAGED_FILENAME" \
     "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
-  release_join_ios_wait_marker NVPN_RELEASE_JOIN_SCANNER_READY=1 \
+  release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMPORT_READY=1 \
     "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
-    || fail "iPhone did not open its shipped QR scanner"
-  release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_DECODED=1 \
-    "$RELEASE_JOIN_CAMERA_WAIT_SECS" \
-    || fail "iPhone camera did not decode the Pixel's displayed QR"
+    || fail "iPhone did not open its shipped QR image importer"
+  release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_IMAGE_IMPORTED=1 \
+    "$RELEASE_JOIN_IMPORT_WAIT_SECS" \
+    || fail "iPhone did not decode the Pixel's captured QR image"
   release_join_android_assert_pending_qr \
     || fail "Pixel QR disappeared before the iPhone submitted acceptance"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= \
@@ -254,12 +271,14 @@ phase_android_admin_ios_qr() {
   release_join_ios_wait_marker \
     NVPN_RELEASE_JOIN_LIFECYCLE_READY=1 "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone pending QR did not survive Home/foreground"
+  release_join_capture_ios_qr "$IOS_QR_CAPTURE"
   RELEASE_JOIN_IOS_JOINER_ID="$(
     ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_JOINER_ID
   )"
   release_join_valid_npub "$RELEASE_JOIN_IOS_JOINER_ID" \
     || fail "iPhone Release UI did not report its joining identity"
-  release_join_android_scan_submit "$RELEASE_JOIN_IOS_JOINER_ID" \
+  release_join_android_scan_submit \
+    "$RELEASE_JOIN_IOS_JOINER_ID" "$IOS_QR_CAPTURE" \
     >>"$android_scan_log"
   submitted="$(
     sed -n \
@@ -443,6 +462,8 @@ python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" join-summary \
   --ios-app-bundle-tree-sha "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
   --ios-receipt \
     "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
+  --android-qr-capture "$ANDROID_QR_CAPTURE" \
+  --ios-qr-capture "$IOS_QR_CAPTURE" \
   --android-qr-width-bps "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \
   --android-pending-qr-lifecycle-ready \
     "${RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY:-0}" \

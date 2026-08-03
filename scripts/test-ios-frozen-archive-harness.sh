@@ -444,7 +444,11 @@ join = {
         },
     },
     "publicUiOnly": True,
-    "opticalCameraQr": True,
+    "productionImageImportQr": True,
+    "actualRenderedQrScreenCapture": {
+        "androidRenderedScreenSha256": "a" * 64,
+        "iosRenderedScreenSha256": "b" * 64,
+    },
     "privateAppStateRead": False,
     "appLaunchArgumentsOrEnvironment": False,
     "desktopMobileManual": True,

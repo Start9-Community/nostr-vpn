@@ -521,6 +521,8 @@ python3 - \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidDevices.kt" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
   "$ROOT/ios/Sources/DevicesViews.swift" \
+  "$ROOT/ios/Sources/QRCodeScannerView.swift" \
+  "$ROOT/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt" \
   "$ROOT/ios/Sources/SettingsViews.swift" \
   "$ROOT/macos/Sources/RootViewDevices.swift" \
   "$ROOT/crates/nostr-vpn-app-core/src/ffi/runtime_network.rs" \
@@ -561,6 +563,8 @@ def read(path):
     android_devices,
     android_components,
     ios_devices,
+    ios_qr_scanner,
+    android_qr_scanner,
     ios_participants,
     macos_devices,
     runtime_network,
@@ -598,7 +602,6 @@ for forbidden in (
     "run-as",
     "--nvpn-debug",
     "DEBUG_ACTION",
-    "appDataContainer",
     "import-join-request",
     "QR_PAYLOAD",
     "REQUEST_BASE64",
@@ -607,6 +610,15 @@ for forbidden in (
         raise SystemExit(f"Release join gate retains forbidden private/debug path: {forbidden}")
 if "run-as" in artifacts:
     raise SystemExit("Release artifact validation still invokes run-as")
+if "device copy from" in runtime_gate_code:
+    raise SystemExit("Release join runtime reads a private app container")
+for required in (
+    "device copy to",
+    "appDataContainer",
+    'Documents/$filename',
+):
+    if required not in ui:
+        raise SystemExit(f"Release join fixture staging is missing {required}")
 
 install_ios = artifacts[
     artifacts.index("release_join_install_ios_release()"):
@@ -711,7 +723,7 @@ for required in (
     "app.launchArguments.isEmpty",
     "app.launchEnvironment.isEmpty",
     'app.buttons["manual-join-expand"]',
-    'element("qr-scanner-camera")',
+    'element("join-request-import-image")',
     "XCUIDevice.shared.press(.home)",
     "assertQrIsFullWidth(qr)",
     'element("join-request-qr-content")',
@@ -719,13 +731,13 @@ for required in (
     "qrContentWidthMinimumBasisPoints",
     "qrContentWidthMaximumBasisPoints",
     "NVPN_RELEASE_JOIN_LIFECYCLE_READY=1",
-    "NVPN_RELEASE_JOIN_QR_DECODED=1",
+    "NVPN_RELEASE_JOIN_QR_IMAGE_IMPORTED=1",
     "NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS",
     "waitForRosterBackedPendingQrDismissal",
     "NVPN_RELEASE_JOIN_QR_DISMISSED_WITH_ROSTER_MS",
     "Join QR disappeared before the exact admin roster was visible",
     "roster-participant-accepted-",
-    "testScanPhysicalJoinQrAndRequireAdminRosterProgress",
+    "testImportJoinQrImageAndRequireAdminRosterProgress",
     "testShowPhysicalJoinQrAndRequireRosterCompletion",
     "testManualJoinAndRequireRosterCompletion",
     "testManualAdminAddRequiresRosterProgress",
@@ -743,8 +755,21 @@ for forbidden in ("rosterParticipantCount(", "allElementsBoundByIndex"):
         )
 if "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS" not in ios_test:
     raise SystemExit("Release join XCTest does not timestamp the first exact roster row")
-if "paste" in ios_test.lower() or "UIPasteboard" in ios_test:
-    raise SystemExit("Release QR XCTest may not paste/import a join request")
+if "UIPasteboard" in ios_test:
+    raise SystemExit("Release QR XCTest may not inject a join request payload")
+for required in (
+    'element("join-request-import-image")',
+    'XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")',
+    "selectImportedImage(named: imageFilename)",
+):
+    if required not in ios_test:
+        raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
+for source, label in (
+    (ios_qr_scanner, "iOS"),
+    (android_qr_scanner, "Android"),
+):
+    if "join-request-import-image" not in source or "Import QR Image" not in source:
+        raise SystemExit(f"{label} shipped scanner lacks public QR image import")
 if "waitForPendingQrDismissal" in ios_test:
     raise SystemExit(
         "Release QR XCTest still permits dismissal before the exact roster is visible"
@@ -778,7 +803,7 @@ if ios_roster_transition.index(
 
 ios_qr_joiner = ios_test.split(
     "func testShowPhysicalJoinQrAndRequireRosterCompletion()", 1
-)[1].split("func testScanPhysicalJoinQrAndRequireAdminRosterProgress()", 1)[0]
+)[1].split("func testImportJoinQrImageAndRequireAdminRosterProgress()", 1)[0]
 for required in (
     "waitForRosterBackedPendingQrDismissal",
     "requireAcceptedRoster(",
@@ -829,7 +854,8 @@ for required in (
     if required not in gate:
         raise SystemExit(f"Release join orchestrator is missing {required}")
 for required in (
-    "opticalCameraQr",
+    "productionImageImportQr",
+    "actualRenderedQrScreenCapture",
     "exactRosterOnBothSides",
     '"androidJoinerRelaunchDurable": True',
     '"iphoneJoinerRelaunchDurable"',
@@ -842,6 +868,8 @@ android_qr_joiner_phase = gate.split(
 for required in (
     "release_join_android_show_qr",
     "release_join_android_background_foreground_pending_qr",
+    "release_join_capture_android_qr",
+    "release_join_stage_ios_qr_image",
     "release_join_ios_start_test",
 ):
     if required not in android_qr_joiner_phase:
@@ -853,6 +881,8 @@ if not (
     < android_qr_joiner_phase.index(
         "release_join_android_background_foreground_pending_qr"
     )
+    < android_qr_joiner_phase.index("release_join_capture_android_qr")
+    < android_qr_joiner_phase.index("release_join_stage_ios_qr_image")
     < android_qr_joiner_phase.index("release_join_ios_start_test")
 ):
     raise SystemExit(
@@ -885,6 +915,7 @@ for required in (
     "release_join_ios_finish_test",
     "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
     "release_join_android_scan_prepare",
+    "release_join_capture_ios_qr",
     "release_join_android_scan_submit",
     "android-admin-ios-qr-approval.log",
     "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=",
@@ -909,6 +940,7 @@ if not (
     ios_qr_joiner_phase.index("release_join_android_scan_prepare")
     < ios_qr_joiner_phase.index("release_join_ios_start_test")
     < ios_qr_joiner_phase.index("NVPN_RELEASE_JOIN_LIFECYCLE_READY=1")
+    < ios_qr_joiner_phase.index("release_join_capture_ios_qr")
     < ios_qr_joiner_phase.index("release_join_android_scan_submit")
     < ios_qr_joiner_phase.index("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS=")
     < ios_qr_joiner_phase.index("assert_delivery_deadline")
@@ -1170,7 +1202,10 @@ if "an exact NVPN_EXPECTED_FIPS_GIT_SHA" not in artifacts:
     raise SystemExit("Release join gate does not pin the exact FIPS candidate")
 
 for required in (
-    "QR scanner camera",
+    "join-request-import-image",
+    "release_join_capture_android_qr",
+    "release_join_capture_ios_qr",
+    "release_join_stage_ios_qr_image",
     "Confirm adding scanned join request",
     "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS",
     "KEYCODE_HOME",

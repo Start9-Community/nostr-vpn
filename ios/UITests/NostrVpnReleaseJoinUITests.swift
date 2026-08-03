@@ -76,22 +76,29 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         emit("NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=\(expectedAdmin)")
     }
 
-    func testScanPhysicalJoinQrAndRequireAdminRosterProgress() throws {
+    func testImportJoinQrImageAndRequireAdminRosterProgress() throws {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
+        let imageFilename = try required("NVPN_RELEASE_JOIN_IMAGE_FILENAME")
         openLinkDevice()
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))
         scan.tap()
         allowCameraAccessIfNeeded()
-        XCTAssertTrue(element("qr-scanner-camera").waitForExistence(timeout: 10))
-        emit("NVPN_RELEASE_JOIN_SCANNER_READY=1")
+        let importImage = element("join-request-import-image")
+        XCTAssertTrue(
+            importImage.waitForExistence(timeout: 10),
+            "Shipped QR image import control was not visible"
+        )
+        emit("NVPN_RELEASE_JOIN_IMPORT_READY=1")
+        importImage.tap()
+        selectImportedImage(named: imageFilename)
 
         let confirm = element("join-request-confirm-add")
         XCTAssertTrue(
-            confirm.waitForExistence(timeout: cameraTimeout),
-            "Camera did not decode the other phone's displayed join QR"
+            confirm.waitForExistence(timeout: importTimeout),
+            "Production decoder did not read the other phone's captured join QR"
         )
-        emit("NVPN_RELEASE_JOIN_QR_DECODED=1")
+        emit("NVPN_RELEASE_JOIN_QR_IMAGE_IMPORTED=1")
         Thread.sleep(forTimeInterval: 3)
         emit("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=\(millisecondsSinceEpoch())")
         confirm.tap()
@@ -176,8 +183,8 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         boundedTimeout("NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS", maximum: 15)
     }
 
-    private var cameraTimeout: TimeInterval {
-        boundedTimeout("NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS", maximum: 30)
+    private var importTimeout: TimeInterval {
+        boundedTimeout("NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS", maximum: 15)
     }
 
     private func boundedTimeout(_ name: String, maximum: TimeInterval) -> TimeInterval {
@@ -382,6 +389,59 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             element(identifier).waitForExistence(timeout: deliveryTimeout),
             "\(failureMessage) after a real app relaunch"
         )
+    }
+
+    private func selectImportedImage(named filename: String) {
+        let documents = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        let roots = [app, documents]
+
+        if tapFile(named: filename, in: roots, timeout: 5) {
+            return
+        }
+        for root in roots {
+            let browse = root.buttons["Browse"]
+            if browse.exists && browse.isHittable {
+                browse.tap()
+                break
+            }
+        }
+        for root in roots {
+            let local = root.descendants(matching: .any)["On My iPhone"]
+            if local.waitForExistence(timeout: 2) && local.isHittable {
+                local.tap()
+                break
+            }
+        }
+        for root in roots {
+            let folder = root.descendants(matching: .any)["Nostr VPN"]
+            if folder.waitForExistence(timeout: 2) && folder.isHittable {
+                folder.tap()
+                break
+            }
+        }
+        XCTAssertTrue(
+            tapFile(named: filename, in: roots, timeout: 5),
+            "Staged QR screenshot was not selectable through the public Files picker"
+        )
+    }
+
+    private func tapFile(
+        named filename: String,
+        in roots: [XCUIApplication],
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for root in roots {
+                let file = root.descendants(matching: .any)[filename]
+                if file.exists && file.isHittable {
+                    file.tap()
+                    return true
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
     }
 
     private func waitUntil(
