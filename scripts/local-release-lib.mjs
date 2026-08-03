@@ -154,7 +154,6 @@ export function validateAndroidReleaseGateReceipt(
   {
     apkSha256,
     aabSha256,
-    apkPathSha256,
     expectedAppGitSha,
     expectedAppGitTree,
     expectedPackage,
@@ -168,7 +167,6 @@ export function validateAndroidReleaseGateReceipt(
   }
 
   const testedApkSha = String(apkSha256 ?? '').trim().toLowerCase()
-  const testedPathSha = String(apkPathSha256 ?? '').trim().toLowerCase()
   if (!/^[0-9a-f]{64}$/.test(testedApkSha)) {
     throw new Error('Current Android APK SHA-256 is invalid.')
   }
@@ -199,10 +197,11 @@ export function validateAndroidReleaseGateReceipt(
     )
   }
   if (
-    !/^[0-9a-f]{64}$/.test(testedPathSha)
-    || String(receipt.apkPathSha256 ?? '').trim().toLowerCase() !== testedPathSha
+    !/^[0-9a-f]{64}$/.test(
+      String(receipt.apkPathSha256 ?? '').trim().toLowerCase(),
+    )
   ) {
-    throw new Error('Android APK path differs from the artifact sealed by the physical gate.')
+    throw new Error('Physical Android gate receipt has no valid historical APK path hash.')
   }
   if (receipt.companySigningVerified !== true) {
     throw new Error('Physical Android gate did not verify a signed Release APK.')
@@ -249,6 +248,30 @@ export function validateAndroidReleaseGateReceipt(
     appGitTree,
     package: packageId,
     signerCertificateSha256,
+  }
+}
+
+export function validateAndroidBundleRelationship(
+  bundleReceipt,
+  { receipt, receiptSha256, apkSha256, aabSha256 } = {},
+) {
+  const sha256 = (value) => /^[0-9a-f]{64}$/.test(String(value ?? '').trim())
+  if (
+    receiptSha256 !== receipt?.bundleReceiptSha256
+    || bundleReceipt?.schema !== 1
+    || bundleReceipt.relationship !== 'universal-apk-derived-from-exact-aab'
+    || bundleReceipt.appGitSha !== receipt.appGitSha
+    || bundleReceipt.appGitTree !== receipt.appGitTree
+    || bundleReceipt.aabSha256 !== aabSha256
+    || bundleReceipt.apkSha256 !== apkSha256
+    || !sha256(bundleReceipt.aabPathSha256)
+    || bundleReceipt.apkPathSha256 !== receipt.apkPathSha256
+    || bundleReceipt.bundletoolVersion !== receipt.bundletoolVersion
+    || bundleReceipt.bundletoolSha256 !== receipt.bundletoolSha256
+  ) {
+    throw new Error(
+      'Android APK/AAB bytes differ from the bundle relationship sealed by the physical gate.',
+    )
   }
 }
 

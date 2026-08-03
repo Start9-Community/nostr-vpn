@@ -37,6 +37,7 @@ import {
   semverFromTag,
   shouldBlockLocalLinuxAmd64Qemu,
   splitCsv,
+  validateAndroidBundleRelationship,
   validateAndroidReleaseGateReceipt,
   validateCleanReleaseSource,
   validateMacosGateSigningIdentity,
@@ -224,7 +225,6 @@ test('Android publication accepts only the exact signed APK sealed by the physic
   const context = {
     apkSha256,
     aabSha256,
-    apkPathSha256: pathSha256,
     expectedAppGitSha: appGitSha,
     expectedAppGitTree: appGitTree,
     expectedPackage: packageId,
@@ -242,7 +242,6 @@ test('Android publication accepts only the exact signed APK sealed by the physic
   for (const [override, message] of [
     [{ apkSha256: 'f'.repeat(64) }, /APK bytes.*physical gate/i],
     [{ aabSha256: 'f'.repeat(64) }, /exact Play AAB/i],
-    [{ apkPathSha256: 'f'.repeat(64) }, /APK path.*physical gate/i],
     [{ expectedAppGitSha: 'f'.repeat(40) }, /application commit/i],
     [{ expectedAppGitTree: 'f'.repeat(40) }, /application tree/i],
     [{ expectedPackage: 'example.invalid' }, /package/i],
@@ -260,6 +259,13 @@ test('Android publication accepts only the exact signed APK sealed by the physic
       message,
     )
   }
+  assert.throws(
+    () => validateAndroidReleaseGateReceipt(
+      { ...receipt, apkPathSha256: 'not-a-hash' },
+      context,
+    ),
+    /historical APK path hash/i,
+  )
   assert.throws(
     () => validateAndroidReleaseGateReceipt(
       { ...receipt, apkDerivedFromAab: false },
@@ -288,6 +294,37 @@ test('Android publication accepts only the exact signed APK sealed by the physic
     ),
     /component-origin SHA\/tree/i,
   )
+
+  const bundleReceipt = {
+    schema: 1,
+    relationship: 'universal-apk-derived-from-exact-aab',
+    appGitSha,
+    appGitTree,
+    apkSha256,
+    aabSha256,
+    apkPathSha256: pathSha256,
+    aabPathSha256: '7'.repeat(64),
+    bundletoolVersion: receipt.bundletoolVersion,
+    bundletoolSha256: receipt.bundletoolSha256,
+  }
+  const relationship = {
+    receipt,
+    receiptSha256: receipt.bundleReceiptSha256,
+    apkSha256,
+    aabSha256,
+  }
+  assert.doesNotThrow(() =>
+    validateAndroidBundleRelationship(bundleReceipt, relationship),
+  )
+  for (const [candidate, candidateContext] of [
+    [{ ...bundleReceipt, apkPathSha256: '7'.repeat(64) }, relationship],
+    [bundleReceipt, { ...relationship, receiptSha256: '6'.repeat(64) }],
+  ]) {
+    assert.throws(
+      () => validateAndroidBundleRelationship(candidate, candidateContext),
+      /bundle relationship sealed by the physical gate/i,
+    )
+  }
 })
 
 test('macOS publication selects the exact gated leaf when another Developer ID identity is first', () => {
@@ -2804,7 +2841,9 @@ test('release script binds Android publication to the physical-gate receipt and 
   const androidBuildEnd = localRelease.indexOf('\nfunction buildMacosArtifacts', androidBuildStart)
   const androidBuild = localRelease.slice(androidBuildStart, androidBuildEnd)
 
-  assert.match(androidBuild, /validateAndroidReleaseGateReceipt\(/)
+  assert.match(androidBuild, /validateAndroidBundleRelationship\(/)
+  assert.match(androidBuild, /exactRegularFile\(path, label\)/)
+  assert.doesNotMatch(androidBuild, /pathSha256\(/)
   assert.match(androidBuild, /candidateCommit/)
   assert.match(androidBuild, /candidateTree/)
   assert.doesNotMatch(androidBuild, /const componentCommit/)

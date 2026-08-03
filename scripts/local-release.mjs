@@ -39,6 +39,7 @@ import {
   semverFromTag,
   sha256FileSync,
   splitCsv,
+  validateAndroidBundleRelationship,
   validateAndroidReleaseGateReceipt,
   validateCleanReleaseSource,
   validateMacosGateSigningIdentity,
@@ -331,10 +332,6 @@ function assertCleanReleaseSource(tag, expectedCommit = '') {
 
 function gitTree(commit = 'HEAD') {
   return run('git', ['rev-parse', `${commit}^{tree}`], { capture: true })
-}
-
-function pathSha256(path) {
-  return createHash('sha256').update(realpathSync(path)).digest('hex')
 }
 
 function stagedDraftSourceContext(tag, manifest) {
@@ -1342,6 +1339,12 @@ function buildAndroidArtifacts({
           'Physical Android release-gate receipt is missing; refusing to publish an untested APK.',
         )
       }
+      for (const [path, label] of [
+        [gateReceiptPath, 'Physical Android release-gate receipt'],
+        [bundleReceiptPath, 'Android AAB-derived APK receipt'],
+        [testedApkPath, 'Gate-tested Android APK'],
+        [aabPath, 'Signed Android AAB'],
+      ]) exactRegularFile(path, label)
       let receipt
       try {
         receipt = JSON.parse(readFileSync(gateReceiptPath, 'utf8'))
@@ -1363,26 +1366,15 @@ function buildAndroidArtifacts({
         platform: 'android',
         label: 'Physical Android release-gate receipt',
       })
-      if (
-        sha256FileSync(bundleReceiptPath) !== receipt.bundleReceiptSha256
-        || bundleReceipt.schema !== 1
-        || bundleReceipt.relationship
-          !== 'universal-apk-derived-from-exact-aab'
-        || bundleReceipt.appGitSha !== receipt.appGitSha
-        || bundleReceipt.appGitTree !== receipt.appGitTree
-        || bundleReceipt.aabSha256 !== aabSha256
-        || bundleReceipt.apkSha256 !== apkSha256
-        || bundleReceipt.aabPathSha256 !== pathSha256(aabPath)
-        || bundleReceipt.apkPathSha256 !== pathSha256(testedApkPath)
-      ) {
-        throw new Error(
-          'Android APK/AAB bytes differ from the bundle relationship sealed by the physical gate.',
-        )
-      }
+      validateAndroidBundleRelationship(bundleReceipt, {
+        receipt,
+        receiptSha256: sha256FileSync(bundleReceiptPath),
+        apkSha256,
+        aabSha256,
+      })
       gate = validateAndroidReleaseGateReceipt(receipt, {
         apkSha256,
         aabSha256,
-        apkPathSha256: pathSha256(testedApkPath),
         expectedAppGitSha: receipt.appGitSha,
         expectedAppGitTree: receipt.appGitTree,
         expectedPackage:
