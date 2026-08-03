@@ -13,10 +13,13 @@ if (!(Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) {
 $Assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path $AssemblyPath))
 $StateType = $Assembly.GetType("NostrVpn.Windows.Core.NativeAppState", $true)
 $ViewModelType = $Assembly.GetType("NostrVpn.Windows.ViewModels.AppViewModel", $true)
+$GateType = $Assembly.GetType("NostrVpn.Windows.ViewModels.NativeCoreCallGate", $true)
 $Flags = [Reflection.BindingFlags]::Static -bor [Reflection.BindingFlags]::NonPublic
 $IntervalMethod = $ViewModelType.GetMethod("RefreshIntervalForState", $Flags)
-$CanStartMethod = $ViewModelType.GetMethod("CanStartRefresh", $Flags)
-if (!$IntervalMethod -or !$CanStartMethod) {
+$InstanceFlags = [Reflection.BindingFlags]::Instance -bor [Reflection.BindingFlags]::NonPublic
+$TryRefreshMethod = $GateType.GetMethod("TryEnterRefresh", $InstanceFlags)
+$EnterDispatchMethod = $GateType.GetMethod("EnterDispatchAsync", $InstanceFlags)
+if (!$IntervalMethod -or !$TryRefreshMethod -or !$EnterDispatchMethod) {
   throw "Windows join refresh policy methods are missing"
 }
 
@@ -37,14 +40,32 @@ if ($Wallet -ne [TimeSpan]::FromSeconds(2)) {
   throw "wallet top-up refresh policy changed"
 }
 
-if (!$CanStartMethod.Invoke($null, @($false, $false))) {
-  throw "idle Windows refresh was incorrectly blocked"
+$Gate = [Activator]::CreateInstance($GateType, $true)
+$RefreshLease = $TryRefreshMethod.Invoke($Gate, @())
+if (!$RefreshLease) {
+  throw "idle Windows refresh could not enter the native core gate"
 }
-if ($CanStartMethod.Invoke($null, @($true, $false))) {
-  throw "Windows refresh overlapped a dispatched action"
+$QueuedDispatch = [Threading.Tasks.Task]$EnterDispatchMethod.Invoke($Gate, @())
+Start-Sleep -Milliseconds 100
+if ($QueuedDispatch.IsCompleted) {
+  throw "Windows dispatch overlapped an active native refresh"
 }
-if ($CanStartMethod.Invoke($null, @($false, $true))) {
-  throw "Windows refresh policy permits overlapping native refreshes"
+$RefreshLease.Dispose()
+if (!$QueuedDispatch.Wait(2000)) {
+  throw "Windows dispatch was dropped instead of waiting for refresh"
 }
+$DispatchLease = $QueuedDispatch.GetType().GetProperty("Result").GetValue($QueuedDispatch)
+$BlockedRefresh = $TryRefreshMethod.Invoke($Gate, @())
+if ($BlockedRefresh) {
+  $BlockedRefresh.Dispose()
+  throw "Windows refresh overlapped an active native dispatch"
+}
+$DispatchLease.Dispose()
+$NextRefresh = $TryRefreshMethod.Invoke($Gate, @())
+if (!$NextRefresh) {
+  throw "Windows native core gate did not release after dispatch"
+}
+$NextRefresh.Dispose()
 
+Write-Output "WINDOWS_NATIVE_CORE_CALL_GATE_OK"
 Write-Output "WINDOWS_JOIN_REFRESH_POLICY_OK"

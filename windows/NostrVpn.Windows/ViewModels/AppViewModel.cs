@@ -39,7 +39,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
     private string _selectedParticipantKey = "";
     private string _shownNetworkId = "";
     private bool _actionInFlight;
-    private bool _refreshInFlight;
+    private readonly NativeCoreCallGate _nativeCoreCallGate = new();
     private string _notice = "";
     private string _joinRequestInput = "";
     private string _participantInput = "";
@@ -703,11 +703,11 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task RefreshAsync()
     {
-        if (!CanStartRefresh(ActionInFlight, _refreshInFlight))
+        using var nativeCall = _nativeCoreCallGate.TryEnterRefresh();
+        if (nativeCall is null)
         {
             return;
         }
-        _refreshInFlight = true;
         try
         {
             var state = await Task.Run(_core.Refresh);
@@ -717,14 +717,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         {
             Notice = error.Message;
         }
-        finally
-        {
-            _refreshInFlight = false;
-        }
     }
-
-    internal static bool CanStartRefresh(bool actionInFlight, bool refreshInFlight) =>
-        !actionInFlight && !refreshInFlight;
 
     public Task ToggleVpnAsync()
     {
@@ -939,6 +932,7 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         }
         try
         {
+            using var nativeCall = await _nativeCoreCallGate.EnterDispatchAsync();
             var state = await Task.Run(() => _core.Dispatch(actionJson));
 #if DEBUG
             DebugRosterE2eTrace($"dispatch completed: {state.Error}");

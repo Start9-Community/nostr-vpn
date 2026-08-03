@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 XAML="$ROOT/windows/NostrVpn.Windows/MainWindow.xaml"
 MODELS="$ROOT/windows/NostrVpn.Windows/Core/Models.cs"
 VIEW_MODEL="$ROOT/windows/NostrVpn.Windows/ViewModels/AppViewModel.cs"
+NATIVE_CALL_GATE="$ROOT/windows/NostrVpn.Windows/ViewModels/NativeCoreCallGate.cs"
 ENROLLMENT="$ROOT/windows/NostrVpn.Windows/ViewModels/AppViewModel.Enrollment.cs"
 DRIVER="$ROOT/scripts/desktop-mobile-manual-join-windows-ui.ps1"
 REMOTE="$ROOT/scripts/windows-release-mobile-join-remote.ps1"
@@ -15,7 +16,7 @@ fail() {
   exit 1
 }
 
-for file in "$XAML" "$MODELS" "$VIEW_MODEL" "$ENROLLMENT" "$DRIVER" "$REMOTE" "$HOST"; do
+for file in "$XAML" "$MODELS" "$VIEW_MODEL" "$NATIVE_CALL_GATE" "$ENROLLMENT" "$DRIVER" "$REMOTE" "$HOST"; do
   [[ -f "$file" ]] || fail "missing $(basename "$file")"
 done
 
@@ -43,13 +44,12 @@ for body in (
         raise SystemExit("failed join action still needs a pre-dispatch refresh rollback")
 
 for contract in (
-    "private bool _refreshInFlight;",
-    "CanStartRefresh(ActionInFlight, _refreshInFlight)",
-    "_refreshInFlight = true;",
-    "_refreshInFlight = false;",
+    "private readonly NativeCoreCallGate _nativeCoreCallGate = new();",
+    "_nativeCoreCallGate.TryEnterRefresh()",
+    "await _nativeCoreCallGate.EnterDispatchAsync()",
 ):
     if contract not in view_model:
-        raise SystemExit(f"Windows native refresh is not single-flight: {contract}")
+        raise SystemExit(f"Windows native calls do not share one gate: {contract}")
 PY
 
 for identifier in \
@@ -121,12 +121,16 @@ for service_contract in \
   'Get-Sha256 $CliExe' \
   'Normalize-ComparableWindowsPath' \
   "\$ConfigArgument.Groups['config'].Value" \
+  "^ daemon --service --config \"(?<config>[^\"]+)\"\\s*\$" \
   '$CliExe service uninstall --config $Config' \
   'WINDOWS_RELEASE_MOBILE_JOIN_CLEAN'
 do
   grep -Fq "$service_contract" "$REMOTE" \
     || fail "Windows wrapper does not use the production service name"
 done
+if grep -Fq '"(?: |$)' "$REMOTE"; then
+  fail "Windows cleanup ownership matcher still permits trailing arguments"
+fi
 if grep -Fq ".StartsWith(" "$REMOTE" \
   && grep -Fq '$ExpectedArguments' "$REMOTE"
 then

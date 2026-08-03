@@ -331,7 +331,7 @@ switch ($Mode) {
       )
       $ConfigArgument = [regex]::Match(
         $Command.Groups['arguments'].Value,
-        '^ daemon --service --config "(?<config>[^"]+)"(?: |$)'
+        '^ daemon --service --config "(?<config>[^"]+)"\s*$'
       )
       if (
         !$Command.Success -or
