@@ -115,6 +115,7 @@ test('Android artifact survives the 8618306d8 harness delta but not a service ch
     'scripts/lib-mobile-android-release-gate.sh',
     'scripts/lib-mobile-android-underlay.sh',
     'scripts/mobile-android-smoke.sh',
+    'scripts/mobile_release_artifact_receipt.py',
     'scripts/release-artifact-provenance-lib.test.mjs',
     'scripts/release-component-source.mjs',
     'scripts/test-mobile-android-release-cleanup-harness.sh',

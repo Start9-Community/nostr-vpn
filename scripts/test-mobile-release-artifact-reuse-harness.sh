@@ -252,12 +252,13 @@ ios_receipt.write_text(
 PY
 
 validate_android() {
+  local dir="${1:-$ANDROID_DIR}"
   python3 "$VALIDATOR" validate-android \
-    --receipt "$ANDROID_RECEIPT" \
-    --apk "$ANDROID_DIR/app-release.apk" \
-    --aab "$ANDROID_DIR/app-release.aab" \
-    --bundle-receipt "$ANDROID_BUNDLE_RECEIPT" \
-    --fips-metadata "$ANDROID_METADATA" \
+    --receipt "$dir/mobile-android-release-artifact.json" \
+    --apk "$dir/app-release.apk" \
+    --aab "$dir/app-release.aab" \
+    --bundle-receipt "$dir/physical-gate-artifact.json" \
+    --fips-metadata "$dir/fips-linkage.json" \
     --app-root "$APP_ROOT" \
     --fips-root "$FIPS_ROOT" \
     --app-head "$ANDROID_APP_HEAD" \
@@ -292,6 +293,25 @@ validate_ios() {
 
 validate_android
 validate_ios
+
+ANDROID_RELOCATED="$TMP_ROOT/relocated/android"
+mkdir -p "$ANDROID_RELOCATED"
+cp "$ANDROID_DIR"/* "$ANDROID_RELOCATED/"
+validate_android "$ANDROID_RELOCATED"
+python3 - "$ANDROID_RELOCATED/physical-gate-artifact.json" \
+  "$ANDROID_RELOCATED/mobile-android-release-artifact.json" <<'PY'
+import hashlib, json, pathlib, sys
+bundle_path, receipt_path = map(pathlib.Path, sys.argv[1:])
+bundle = json.loads(bundle_path.read_text()); bundle["apkPathSha256"] = "0" * 64
+bundle_path.write_text(json.dumps(bundle))
+receipt = json.loads(receipt_path.read_text())
+receipt["bundleReceiptSha256"] = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+receipt_path.write_text(json.dumps(receipt))
+PY
+if validate_android "$ANDROID_RELOCATED" >/dev/null 2>&1; then
+  echo "Android artifact reuse accepted mismatched historical APK binding" >&2
+  exit 1
+fi
 
 JOIN_TIMINGS="$TMP_ROOT/join-timings.tsv"
 JOIN_SUMMARY="$TMP_ROOT/join-summary.json"

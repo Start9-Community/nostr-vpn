@@ -171,7 +171,7 @@ do
 done
 
 for token in \
-  "bundleReceipt.relationship" \
+  "validateAndroidBundleRelationship(bundleReceipt" \
   "sha256FileSync(aabDest) !== gate.aabSha256" \
   "physical-gate-sealed bundletool-derived APK"
 do

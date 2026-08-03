@@ -332,14 +332,13 @@ def validate_android(args: argparse.Namespace) -> None:
     app_root = pathlib.Path(args.app_root)
     fips_root = pathlib.Path(args.fips_root)
     for path in (receipt_path, apk, metadata):
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink():
             raise ValueError(f"required Android artifact is missing: {path}")
     receipt = load_json(receipt_path)
     apk_sha = sha256_file(apk)
     expected = {
         "receiptSchema": 2,
         "artifactType": "Android Release APK",
-        "apkPathSha256": path_sha256(apk),
         "apkSha256": apk_sha,
         "installedApkSha256": apk_sha,
         "companySigningVerified": True,
@@ -350,7 +349,6 @@ def validate_android(args: argparse.Namespace) -> None:
         "fipsGitTree": args.fips_tree,
         "fipsCoreVersion": args.fips_version,
         "fipsCheckoutPathSha256": path_sha256(fips_root),
-        "fipsCargoMetadataReceiptPathSha256": path_sha256(metadata),
         "fipsCargoMetadataReceiptSha256": sha256_file(metadata),
         "fipsDependenciesForcedRebuilt": True,
         "package": args.package,
@@ -359,6 +357,11 @@ def validate_android(args: argparse.Namespace) -> None:
     }
     for name, value in expected.items():
         require_equal(receipt, name, value)
+    for name in (
+        "apkPathSha256",
+        "fipsCargoMetadataReceiptPathSha256",
+    ):
+        require_lower_hash(receipt.get(name), name, 64)
     aab_value = getattr(args, "aab", None)
     bundle_value = getattr(args, "bundle_receipt", None)
     if bool(aab_value) != bool(bundle_value):
@@ -368,7 +371,7 @@ def validate_android(args: argparse.Namespace) -> None:
     if aab_value:
         aab = pathlib.Path(aab_value)
         bundle_path = pathlib.Path(bundle_value)
-        for path in (receipt_path, apk, aab, bundle_path):
+        for path in (aab, bundle_path):
             if not path.is_file() or path.is_symlink():
                 raise ValueError(
                     f"exact Android artifact must be a regular file: {path}"
@@ -385,15 +388,19 @@ def validate_android(args: argparse.Namespace) -> None:
             "relationship": "universal-apk-derived-from-exact-aab",
             "appGitSha": args.app_head,
             "appGitTree": args.app_tree,
-            "aabPathSha256": path_sha256(aab),
             "aabSha256": aab_sha,
-            "apkPathSha256": path_sha256(apk),
             "apkSha256": apk_sha,
             "bundletoolVersion": bundletool_version,
             "bundletoolSha256": bundletool_sha,
         }
         for name, value in bundle_expected.items():
             require_equal(bundle, name, value)
+        require_lower_hash(bundle.get("aabPathSha256"), "aabPathSha256", 64)
+        require_equal(
+            bundle,
+            "apkPathSha256",
+            receipt["apkPathSha256"],
+        )
         relationship_expected = {
             "aabSha256": aab_sha,
             "apkDerivedFromAab": True,
