@@ -504,6 +504,13 @@ grep -Fq 'ACTION_ADD_NETWORK' \
   || { echo "Android debug smoke lost its still-used add-network action" >&2; exit 1; }
 grep -Fq 'DEBUG_ACTION_EXTRA" add_network' "$ROOT/scripts/mobile-android-smoke.sh" \
   || { echo "Android debug add-network action has no smoke consumer" >&2; exit 1; }
+grep -Fq -- '--ez org.nostrvpn.app.extra.RELEASE_JOIN_IMAGE_IMPORT true' "$join_ui" \
+  || { echo "Android release join does not enable its hidden QR image import" >&2; exit 1; }
+grep -Fq 'allowImageImport = releaseJoinImageImportEnabled' \
+  "$ROOT/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt" \
+  && grep -Fq 'getBooleanExtra(EXTRA_RELEASE_JOIN_IMAGE_IMPORT, false)' \
+    "$ROOT/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt" \
+  || { echo "Android QR image import is not restricted to the release join flag" >&2; exit 1; }
 
 python3 - \
   "$ROOT/scripts/mobile-release-join-e2e.sh" \
@@ -661,9 +668,13 @@ for forbidden in (
 if "fresh network ID" not in restart_ios:
     raise SystemExit("iOS in-place restart does not document fresh-network isolation")
 
-for forbidden in (".launchArguments =", ".launchEnvironment ="):
-    if forbidden in ios_test:
-        raise SystemExit(f"Release join XCTest injects app state through {forbidden}")
+if ".launchEnvironment =" in ios_test:
+    raise SystemExit("Release join XCTest injects app state through launchEnvironment")
+image_import_argument = (
+    'app.launchArguments = ["--nvpn-ui-test-qr-image-import"]'
+)
+if ios_test.count(image_import_argument) != 1:
+    raise SystemExit("Release join XCTest has an unexpected app launch argument")
 for required in (
     "private static let maximumAttempts = 2",
     'field.value(forKey: "hasKeyboardFocus")',
@@ -701,7 +712,7 @@ for required in (
         )
 if "allow.tap()" not in prompt_handler or "continue" not in prompt_handler:
     raise SystemExit("Release join XCTest reuses the disappearing Apple Allow hierarchy")
-if ios_test.count("try dismissSystemPromptsIfPresent()") != 4:
+if ios_test.count("try dismissSystemPromptsIfPresent()") != 5:
     raise SystemExit("Release join XCTest does not propagate every system-prompt failure")
 for required in (
     "ShippedUIInteraction.reveal(nameField, byTapping: create)",
@@ -777,12 +788,24 @@ for required in (
 ):
     if required not in ios_test:
         raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
-for source, label in (
-    (ios_qr_scanner, "iOS"),
-    (android_qr_scanner, "Android"),
+for required in (
+    '--nvpn-ui-test-qr-image-import',
+    "if imageImportEnabled",
+    "join-request-import-image",
+    "Import QR Image",
 ):
-    if "join-request-import-image" not in source or "Import QR Image" not in source:
-        raise SystemExit(f"{label} shipped scanner lacks public QR image import")
+    if required not in ios_qr_scanner:
+        raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
+for required in (
+    "allowImageImport: Boolean = false",
+    "if (allowImageImport)",
+    "join-request-import-image",
+    "Import QR Image",
+):
+    if required not in android_qr_scanner:
+        raise SystemExit(
+            f"Android shipped scanner does not gate QR image import: {required}"
+        )
 if "waitForPendingQrDismissal" in ios_test:
     raise SystemExit(
         "Release QR XCTest still permits dismissal before the exact roster is visible"

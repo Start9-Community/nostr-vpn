@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Public accessibility-tree drivers for the signed Release join gate. This
-# library never reads an app container and never passes arguments/environment
-# to either production application.
+# library never reads an app container or passes join state to an application.
+# A capability-only flag reveals the screenshot importer used by this gate.
 
 RELEASE_JOIN_ANDROID_UI_XML=""
 RELEASE_JOIN_IOS_TEST_PID=""
@@ -225,6 +225,7 @@ release_join_android_enter() {
 release_join_android_launch() {
   local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
   "${ADB[@]}" shell am start -W \
+    --ez org.nostrvpn.app.extra.RELEASE_JOIN_IMAGE_IMPORT true \
     -n "$package/org.nostrvpn.app.MainActivity" >/dev/null
 }
 

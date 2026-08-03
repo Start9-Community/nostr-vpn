@@ -44,6 +44,7 @@ import org.nostrvpn.app.vpn.VpnStartState
 class MainActivity : ComponentActivity() {
     private var deepLink by mutableStateOf<String?>(null)
     private var debugRequest by mutableStateOf(AndroidDebugRequest())
+    private var releaseJoinImageImportEnabled by mutableStateOf(false)
     private var legacyPackageToRemove by mutableStateOf<String?>(null)
     private lateinit var selfUpdateManager: AndroidSelfUpdateManager
 
@@ -52,6 +53,8 @@ class MainActivity : ComponentActivity() {
         legacyPackageToRemove = AndroidLegacyPackageMigration.packageToRemove(this)
         deepLink = intent?.dataString
         debugRequest = AndroidDebugRequest.from(intent)
+        releaseJoinImageImportEnabled =
+            intent?.getBooleanExtra(EXTRA_RELEASE_JOIN_IMAGE_IMPORT, false) == true
         NativeCore.initializeAndroidContext(applicationContext)
         val dataDir = appCoreDataDir(this)
         seedMobileConfig(dataDir)
@@ -413,6 +416,7 @@ class MainActivity : ComponentActivity() {
                 if (showQrScanner) {
                     QrScannerDialog(
                         onDismiss = { showQrScanner = false },
+                        allowImageImport = releaseJoinImageImportEnabled,
                         onScanned = { value ->
                             if (looksLikeJoinRequestQrOrLink(value)) {
                                 showQrScanner = false
@@ -514,6 +518,8 @@ class MainActivity : ComponentActivity() {
         writeAndroidBuildMetadata(appCoreDataDir(this))
         deepLink = intent.dataString
         debugRequest = AndroidDebugRequest.from(intent)
+        releaseJoinImageImportEnabled =
+            intent.getBooleanExtra(EXTRA_RELEASE_JOIN_IMAGE_IMPORT, false)
     }
 
     private fun startVpnService(intent: Intent) {
@@ -560,6 +566,8 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val EXTRA_RELEASE_JOIN_IMAGE_IMPORT =
+            "org.nostrvpn.app.extra.RELEASE_JOIN_IMAGE_IMPORT"
         private const val ANDROID_BUILD_METADATA_FILE = "android-build-metadata.json"
         private const val ANDROID_LOCAL_NETWORK_OPT_IN_API = 36
         private const val ANDROID_ACCESS_LOCAL_NETWORK_API = 37

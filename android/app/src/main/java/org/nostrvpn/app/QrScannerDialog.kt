@@ -57,11 +57,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Composable
 internal fun QrScannerDialog(
     onDismiss: () -> Unit,
+    allowImageImport: Boolean = false,
     onScanned: (String) -> String?,
 ) {
     QrScannerHost(
         onDismiss = onDismiss,
         onScanned = onScanned,
+        allowImageImport = allowImageImport,
     ) { previewView, error, importImage ->
         Dialog(
             onDismissRequest = onDismiss,
@@ -72,6 +74,7 @@ internal fun QrScannerDialog(
                 error = error,
                 onDismiss = onDismiss,
                 onImportImage = importImage,
+                allowImageImport = allowImageImport,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -83,6 +86,7 @@ internal fun QrScannerDialog(
 private fun QrScannerHost(
     onDismiss: () -> Unit,
     onScanned: (String) -> String?,
+    allowImageImport: Boolean,
     content: @Composable (PreviewView, String?, () -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -162,7 +166,12 @@ private fun QrScannerHost(
             }
             hasPermission = granted
             if (!granted) {
-                error = "Camera permission is needed for live scanning. You can import an image instead."
+                error =
+                    if (allowImageImport) {
+                        "Camera permission is needed for live scanning. You can import an image instead."
+                    } else {
+                        "Camera permission is needed for live scanning."
+                    }
             }
         }
 
@@ -322,6 +331,7 @@ private fun QrScannerCamera(
     error: String?,
     onDismiss: () -> Unit,
     onImportImage: () -> Unit,
+    allowImageImport: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -355,15 +365,17 @@ private fun QrScannerCamera(
                 color = Color.White,
             )
             Spacer(modifier = Modifier.weight(1f))
-            TextButton(
-                onClick = onImportImage,
-                modifier =
-                    Modifier.mobileUiSelector(
-                        id = "join-request-import-image",
-                        description = "Import QR Image",
-                    ),
-            ) {
-                Text("Import QR Image", color = Color.White)
+            if (allowImageImport) {
+                TextButton(
+                    onClick = onImportImage,
+                    modifier =
+                        Modifier.mobileUiSelector(
+                            id = "join-request-import-image",
+                            description = "Import QR Image",
+                        ),
+                ) {
+                    Text("Import QR Image", color = Color.White)
+                }
             }
         }
         error?.let { message ->

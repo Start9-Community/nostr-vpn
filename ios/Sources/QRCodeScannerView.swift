@@ -13,6 +13,10 @@ struct QRCodeScannerSheet: View {
     @State private var importingImage = false
     @State private var importTask: Task<Void, Never>?
 
+    private var imageImportEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("--nvpn-ui-test-qr-image-import")
+    }
+
     var body: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
@@ -32,18 +36,20 @@ struct QRCodeScannerSheet: View {
                             .padding(.vertical, 8)
                             .background(.black.opacity(0.72), in: Capsule())
                     }
-                    Button(action: presentImageImporter) {
-                        if importingImage {
-                            ProgressView()
-                                .frame(maxWidth: .infinity)
-                        } else {
-                            Label("Import QR Image", systemImage: "photo")
-                                .frame(maxWidth: .infinity)
+                    if imageImportEnabled {
+                        Button(action: presentImageImporter) {
+                            if importingImage {
+                                ProgressView()
+                                    .frame(maxWidth: .infinity)
+                            } else {
+                                Label("Import QR Image", systemImage: "photo")
+                                    .frame(maxWidth: .infinity)
+                            }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(finished || importingImage)
+                        .accessibilityIdentifier("join-request-import-image")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(finished || importingImage)
-                    .accessibilityIdentifier("join-request-import-image")
                 }
                 .padding(.horizontal)
                 .padding(.bottom, 18)
