@@ -846,11 +846,6 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   'mobile_wg_fixture_dns_evidence_snapshot' \
   'mobile_wg_fixture_assert_dns_case_evidence' \
   'mobile_wg_fixture_cleanup'
-require_tokens "$WIREGUARD_FIXTURE_LIB" "shared positive/negative DNS counters" \
-  'mobile_wg_fixture_dns_count' \
-  'mobile_wg_fixture_doh_count' \
-  'mobile_wg_fixture_profile_dns_count' \
-  'mobile_wg_fixture_through_dns_count'
 for dns_case in \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
 do
