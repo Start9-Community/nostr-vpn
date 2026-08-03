@@ -61,6 +61,17 @@ macos_build = texts["macos-build"]
 release_gate = texts["release-gate.sh"]
 exit_dns = texts["macos-vm-release-exit-dns-ui-e2e.sh"]
 
+if 'TEST_CONFIG_DIR="/tmp/nvpn-rj-$UID"' not in remote:
+    raise SystemExit("macOS join profile lacks a stable short config directory")
+if 'TEST_CONFIG_DIR="$PROFILE_STATE_DIR/test"' in remote:
+    raise SystemExit("macOS join profile still places its Unix socket under caches")
+longest_short_socket = (
+    "/private/tmp/nvpn-rj-4294967295/"
+    ".nvpn-runtime/join-0123456789abcdef.sock"
+)
+if len(longest_short_socket.encode()) > 103:
+    raise SystemExit("macOS join profile can exceed the Unix socket path limit")
+
 for required in (
     'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
     'git clone --quiet --no-checkout --no-hardlinks',
