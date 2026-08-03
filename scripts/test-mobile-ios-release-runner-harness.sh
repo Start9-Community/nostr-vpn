@@ -41,7 +41,7 @@ required_ios_fragments = (
     'mktemp -d "$IOS_RELEASE_NETWORK_SIGNING_DIR/NostrVpnIos-$label.XXXXXX"',
     'IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR/NostrVpnIos-$label.xctestrun"',
     'rmdir "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR"',
-    'ios_release_network_install_exact_runner || return 1',
+    'ios_release_network_require_retained_exact_runner || return 1',
 )
 for fragment in required_ios_fragments:
     if fragment not in ios_source:
@@ -67,6 +67,8 @@ plutil -insert CFBundleIdentifier \
     fi
   }
   ios_release_network_install_exact_runner
+  ios_release_network_test_command "$TEMP_ROOT/runner-derived/exact.xctestrun"
+  ios_release_network_test_command "$TEMP_ROOT/runner-derived/exact.xctestrun"
 ) || fail "exact signed iOS runner was not installed in place"
 grep -Fxq \
   "devicectl device install app --device fixture-device $runner_root --quiet" \
@@ -78,6 +80,16 @@ grep -Fq \
   || fail "installed iOS runner bundle identity was not read back"
 if grep -Fq "device uninstall app" "$runner_install_log"; then
   fail "exact iOS runner replacement revoked development trust"
+fi
+[[ "$(grep -Fxc \
+  "devicectl device install app --device fixture-device $runner_root --quiet" \
+  "$runner_install_log")" -eq 1 ]] \
+  || fail "exact iOS runner was replaced between XCTest cases"
+runner_command="$({
+  sed -n '/ios_release_network_test_command()/,/^}/p' "$RUNNER"
+})"
+if grep -Fq 'ios_release_network_install_exact_runner' <<<"$runner_command"; then
+  fail "per-case XCTest command still replaces the retained exact runner"
 fi
 
 for stem in nvpn-installed-release nvpn-release-installed NostrVpnIos-case.xctestrun; do

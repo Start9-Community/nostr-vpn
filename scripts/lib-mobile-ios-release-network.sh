@@ -31,6 +31,7 @@ IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE=""
 IOS_RELEASE_NETWORK_PENDING_SPEC_BASE64=""
 IOS_RELEASE_NETWORK_PENDING_LOG=""
 IOS_RELEASE_NETWORK_PENDING_XCRESULT=""
+IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=0
 
 ios_release_network_cleanup_private_artifacts() {
   local cleanup_failed=0 signing_removed=1
@@ -56,6 +57,7 @@ ios_release_network_cleanup_private_artifacts() {
     IOS_RELEASE_NETWORK_SIGNING_ENV=""
     IOS_RELEASE_NETWORK_DEVICE_RECEIPT=""
     IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE=""
+    IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=0
     unset NVPN_IOS_CODE_SIGN_IDENTITY
     unset NVPN_IOS_PROVISIONING_PROFILE_UUID
     unset NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID
@@ -210,9 +212,13 @@ PY
   IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE="$IOS_RELEASE_NETWORK_SIGNING_DIR/active-xcode.pgid"
   export NVPN_EXPECTED_FIPS_VERSION NVPN_MOBILE_IOS_RELEASE_APP_PATH="$app"
   if ! xcrun devicectl device install app \
-      --device "$device_udid" "$app" --quiet >/dev/null \
-    || ! ios_release_network_install_exact_runner
+      --device "$device_udid" "$app" --quiet >/dev/null
   then
+    echo "iOS Release gate could not install its exact app in place" >&2
+    ios_release_network_prepare_abort
+    return
+  fi
+  if ! ios_release_network_install_exact_runner; then
     ios_release_network_prepare_abort
     return
   fi
@@ -537,6 +543,10 @@ PY
       "$(ios_release_network_app_path)" --quiet >/dev/null
   then
     echo "iOS Release gate could not install its exact app in place" >&2
+    ios_release_network_prepare_abort
+    return
+  fi
+  if ! ios_release_network_install_exact_runner; then
     ios_release_network_prepare_abort
     return
   fi
@@ -872,6 +882,10 @@ ios_release_network_preserve_pending_diagnostics() {
 
 ios_release_network_install_exact_runner() {
   local runner bundle expected_bundle
+  if [[ "$IOS_RELEASE_NETWORK_EXACT_RUNNER_READY" -eq 1 ]]; then
+    ios_release_network_require_retained_exact_runner
+    return
+  fi
   runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
   expected_bundle="$IOS_BUNDLE_ID.UITests.xctrunner"
   [[ -d "$runner" ]] \
@@ -882,18 +896,30 @@ ios_release_network_install_exact_runner() {
     }
   xcrun devicectl device install app \
     --device "$IOS_RELEASE_NETWORK_DEVICE" "$runner" --quiet >/dev/null || {
-      echo "iOS Release exact XCTest runner replacement failed" >&2
+      echo "iOS Release exact XCTest runner installation failed" >&2
       return 1
     }
   ios_release_network_xctrunner_installed "$IOS_RELEASE_NETWORK_DEVICE" || {
-    echo "iOS Release exact XCTest runner replacement was not readable" >&2
+    echo "iOS Release exact XCTest runner installation was not readable" >&2
+    return 1
+  }
+  IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=1
+}
+
+ios_release_network_require_retained_exact_runner() {
+  [[ "$IOS_RELEASE_NETWORK_EXACT_RUNNER_READY" -eq 1 ]] || {
+    echo "iOS Release exact XCTest runner was not installed during preparation" >&2
+    return 1
+  }
+  ios_release_network_xctrunner_installed "$IOS_RELEASE_NETWORK_DEVICE" || {
+    echo "iOS Release exact XCTest runner was not retained for this test case" >&2
     return 1
   }
 }
 
 ios_release_network_test_command() {
   local xctestrun="$1"
-  ios_release_network_install_exact_runner || return 1
+  ios_release_network_require_retained_exact_runner || return 1
   IOS_RELEASE_NETWORK_XCODE_COMMAND=(
     xcodebuild
     -xctestrun "$xctestrun"
