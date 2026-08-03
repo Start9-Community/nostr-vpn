@@ -39,6 +39,18 @@ DIRECT_CHECKPOINTS = frozenset(
         "release_connected_direct_relaunch_passed",
     }
 )
+DIRECT_SAMPLE_ATTEMPTS = 2
+DIRECT_SAMPLE_RETRY_SECONDS = 0.25
+
+
+def valid_process_sample(sample: dict[str, object]) -> bool:
+    return (
+        not sample.get("error")
+        and isinstance(sample.get("appPids"), list)
+        and len(sample["appPids"]) == 1
+        and isinstance(sample.get("packetTunnelPids"), list)
+        and len(sample["packetTunnelPids"]) == 1
+    )
 
 
 def process_ids(payload: object) -> tuple[list[int], list[int]]:
@@ -108,7 +120,7 @@ class ProcessSampler:
                 should_sample = True
         if should_sample:
             future = self.checkpoint_executor.submit(
-                self._sample, normalized
+                self._sample_checkpoint, normalized
             )
             with self.lock:
                 self.checkpoint_futures.append(future)
@@ -162,7 +174,19 @@ class ProcessSampler:
         tunnel_pids: set[int] = set()
         direct_checkpoint_processes: dict[str, dict[str, int]] = {}
         valid_checkpoints: set[str] = set()
+        valid_direct_checkpoints = {
+            str(sample.get("checkpoint", ""))
+            for sample in samples
+            if valid_process_sample(sample)
+            and sample.get("checkpoint") in DIRECT_CHECKPOINTS
+        }
         for index, sample in enumerate(samples, start=1):
+            checkpoint = str(sample.get("checkpoint", ""))
+            if (
+                checkpoint in valid_direct_checkpoints
+                and not valid_process_sample(sample)
+            ):
+                continue
             if sample.get("error"):
                 errors.append(
                     f"process observation {index}: {sample['error']}"
@@ -178,13 +202,7 @@ class ProcessSampler:
                 errors.append(
                     f"process observation {index} packetTunnelPids={tunnel!r}"
                 )
-            if (
-                isinstance(app, list)
-                and len(app) == 1
-                and isinstance(tunnel, list)
-                and len(tunnel) == 1
-            ):
-                checkpoint = str(sample.get("checkpoint", ""))
+            if valid_process_sample(sample):
                 valid_checkpoints.add(checkpoint)
                 if checkpoint in DIRECT_CHECKPOINTS:
                     direct_checkpoint_processes[checkpoint] = {
@@ -243,6 +261,19 @@ class ProcessSampler:
             self._sample(checkpoint)
             self.stopped.wait(0.25)
 
+    def _sample_checkpoint(self, checkpoint: str) -> bool:
+        attempts = (
+            DIRECT_SAMPLE_ATTEMPTS
+            if checkpoint in DIRECT_CHECKPOINTS
+            else 1
+        )
+        for attempt in range(attempts):
+            if self._sample(checkpoint):
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(DIRECT_SAMPLE_RETRY_SECONDS)
+        return False
+
     def _sample(self, checkpoint: str) -> bool:
         timestamp_ms = time.time_ns() // 1_000_000
         sample: dict[str, object] = {
@@ -284,13 +315,7 @@ class ProcessSampler:
                 sample["error"] = type(error).__name__
         with self.samples_lock:
             self.samples.append(sample)
-        return (
-            not sample.get("error")
-            and isinstance(sample.get("appPids"), list)
-            and len(sample["appPids"]) == 1
-            and isinstance(sample.get("packetTunnelPids"), list)
-            and len(sample["packetTunnelPids"]) == 1
-        )
+        return valid_process_sample(sample)
 
 
 def main() -> int:

@@ -326,6 +326,21 @@ def finish(samples, name):
     status = sampler.finish()
     return status, json.loads(path.read_text(encoding="utf-8"))
 
+sampler = module.ProcessSampler("fixture-device", pathlib.Path(sys.argv[2], "unused.json"))
+module.DIRECT_SAMPLE_RETRY_SECONDS = 0
+calls = []
+sampler._sample = lambda checkpoint: calls.append(checkpoint) or len(calls) == 2
+assert sampler._sample_checkpoint("release_connected_direct_passed") is True
+assert calls == ["release_connected_direct_passed"] * 2
+calls.clear()
+sampler._sample = lambda checkpoint: calls.append(checkpoint) or False
+assert sampler._sample_checkpoint("release_connected_direct_passed") is False
+assert calls == ["release_connected_direct_passed"] * module.DIRECT_SAMPLE_ATTEMPTS
+calls.clear()
+assert sampler._sample_checkpoint("active-session-begin") is False
+assert calls == ["active-session-begin"]
+sampler.checkpoint_executor.shutdown(wait=False, cancel_futures=True)
+
 samples = [
     {"checkpoint": "active-session-begin", "appPids": [111], "packetTunnelPids": [211]},
     {"checkpoint": "active-session-end", "appPids": [111], "packetTunnelPids": [211]},
@@ -337,6 +352,12 @@ assert status == 0 and receipt["passed"] is True
 assert receipt["appProcessIdentifiers"] == [111]
 assert receipt["packetTunnelProcessIdentifiers"] == [211]
 assert [proof["packetTunnelProcessIdentifier"] for proof in receipt["directCheckpointProcesses"].values()] == [212, 213]
+
+retry_samples = samples[:2] + [
+    {"checkpoint": "release_connected_direct_passed", "appPids": [111], "packetTunnelPids": []}
+] + samples[2:]
+status, receipt = finish(retry_samples, "retried-direct-processes.json")
+assert status == 0 and receipt["passed"] is True
 
 samples[-1] = {**samples[-1], "packetTunnelPids": []}
 status, receipt = finish(samples, "disconnected-direct-processes.json")
