@@ -744,8 +744,7 @@ remote require-delivery-log \
 assert_delivery_deadline \
   "$desktop_submitted_ms" "$desktop_accepted" \
   "macOS-admin-to-Android-manual"
-kill "$remote_pid" >/dev/null 2>&1 || true
-wait "$remote_pid" >/dev/null 2>&1 || true
+wait "$remote_pid"
 remote_pid=""
 remote verify "$RELEASE_JOIN_ANDROID_JOINER_ID" \
   >"$RESULT_DIR/macos/desktop-admin-verify.log"
@@ -893,8 +892,7 @@ remote require-delivery-log \
   "$IOS_JOINER_ID" "$desktop_iphone_log_offset" \
   >"$RESULT_DIR/macos/desktop-add-iphone-delivery.txt" \
   2>"$RESULT_DIR/macos/desktop-add-iphone-daemon.log"
-kill "$remote_pid" >/dev/null 2>&1 || true
-wait "$remote_pid" >/dev/null 2>&1 || true
+wait "$remote_pid"
 remote_pid=""
 remote verify "$IOS_JOINER_ID" \
   >"$RESULT_DIR/macos/desktop-ios-admin-verify.log"

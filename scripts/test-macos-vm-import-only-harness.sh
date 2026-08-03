@@ -87,6 +87,14 @@ longest_short_socket = (
 if len(longest_short_socket.encode()) > 103:
     raise SystemExit("macOS join profile can exceed the Unix socket path limit")
 
+for start, end in (
+    ("# macOS admin -> physical Android joiner.", "# Physical Android admin -> macOS joiner."),
+    ("# macOS admin -> physical iPhone joiner.", "# Physical iPhone admin -> macOS joiner."),
+):
+    direction = host.split(start, 1)[1].split(end, 1)[0]
+    if 'kill "$remote_pid"' in direction or 'wait "$remote_pid"' not in direction:
+        raise SystemExit("macOS admin hold is not cleanly joined before the next app launch")
+
 listener = remote.split("assert_join_listener_ready() {", 1)[1].split(
     "\n}\n\nassert_outbound_join_ready", 1
 )[0]
