@@ -1038,6 +1038,11 @@ grep -Fq 'for label in ["Turn VPN off", "Turn VPN on"]' "$ios_release_ui_support
   || { echo "iOS Release runner does not select the unique shipped VPN button" >&2; exit 1; }
 grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
   && grep -Fq '_PAYLOAD_RECOVERY_MS=' "$ios_release_underlay" \
+  && grep -Fq 'NWPathMonitor(requiredInterfaceType: .wifi)' "$ios_release_underlay" \
+  && grep -Fq 'NWPathMonitor(requiredInterfaceType: .cellular)' "$ios_release_underlay" \
+  && grep -Fq 'wifiMonitor.currentPath' "$ios_release_underlay" \
+  && grep -Fq 'cellularMonitor.currentPath' "$ios_release_underlay" \
+  && ! grep -Fq 'NWPathMonitor()' "$ios_release_underlay" \
   && grep -Fq 'NVPN_IOS_RELEASE_BACKGROUND_' "$ios_release_ui" \
   && grep -Fq 'NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1' "$ios_release_ui" \
   && grep -Fq 'requireUDPEcho' "$ios_release_probe" \

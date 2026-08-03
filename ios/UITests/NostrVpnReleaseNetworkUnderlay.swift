@@ -3,17 +3,21 @@ import Network
 import XCTest
 
 private final class NostrVpnReleasePhysicalPathMonitor {
-    private let monitor = NWPathMonitor()
+    // The VPN default route stays satisfied when its physical Wi-Fi disappears.
+    private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+    private let cellularMonitor = NWPathMonitor(requiredInterfaceType: .cellular)
     private let queue = DispatchQueue(
         label: "fi.siriusbusiness.nvpn.release-underlay"
     )
 
     init() {
-        monitor.start(queue: queue)
+        wifiMonitor.start(queue: queue)
+        cellularMonitor.start(queue: queue)
     }
 
     func cancel() {
-        monitor.cancel()
+        wifiMonitor.cancel()
+        cellularMonitor.cancel()
     }
 
     /// Returns the monotonic start of the last path check that still failed.
@@ -27,10 +31,9 @@ private final class NostrVpnReleasePhysicalPathMonitor {
             ?? ProcessInfo.processInfo.systemUptime
         repeat {
             let checkStarted = ProcessInfo.processInfo.systemUptime
-            let path = monitor.currentPath
+            let path = wifiMonitor.currentPath
             if path.status == .satisfied,
-               path.usesInterfaceType(.wifi),
-               !path.usesInterfaceType(.cellular)
+               path.usesInterfaceType(.wifi)
             {
                 return lastFailedCheckStarted
             }
@@ -44,10 +47,10 @@ private final class NostrVpnReleasePhysicalPathMonitor {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         repeat {
             let observed = ProcessInfo.processInfo.systemUptime
-            let path = monitor.currentPath
-            if path.status != .satisfied,
-               !path.usesInterfaceType(.wifi),
-               !path.usesInterfaceType(.cellular)
+            let wifiPath = wifiMonitor.currentPath
+            let cellularPath = cellularMonitor.currentPath
+            if wifiPath.status != .satisfied,
+               cellularPath.status != .satisfied
             {
                 return observed
             }
