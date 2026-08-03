@@ -207,11 +207,6 @@
         let calls_path = dir.join("calls.txt");
         let start_attempted_path = dir.join("start-attempted");
         let script_path = dir.join("nvpn");
-        let shell_literal = |path: &Path| {
-            path.to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-        };
         let service_running = cfg!(target_os = "macos");
         let service_pid = if service_running { "123" } else { "null" };
         let script = format!(
@@ -357,11 +352,6 @@ exit 0
         let reload_path = dir.join("reload-applied");
         let start_path = dir.join("unexpected-start");
         let script_path = dir.join("nvpn");
-        let shell_literal = |path: &Path| {
-            path.to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-        };
         let script = format!(
             r#"#!/bin/sh
 CONFIG="{}"
@@ -561,4 +551,9 @@ exit 0
         assert!(saved.networks[0].inbound_join_requests.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+    fn shell_literal(path: &Path) -> String {
+        path.to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
     }

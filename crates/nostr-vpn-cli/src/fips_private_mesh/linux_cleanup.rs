@@ -380,11 +380,11 @@ pub(crate) fn cleanup_linux_wireguard_state_with(
         ));
     }
 
-    if let Some(runtime) = state.wireguard_exit.take() {
-        if let Err(error) = cleanup_runtime(&runtime) {
-            failures.push(format!("WireGuard runtime: {error:#}"));
-            state.wireguard_exit = Some(runtime);
-        }
+    if let Some(runtime) = state.wireguard_exit.take()
+        && let Err(error) = cleanup_runtime(&runtime)
+    {
+        failures.push(format!("WireGuard runtime: {error:#}"));
+        state.wireguard_exit = Some(runtime);
     }
 
     if failures.is_empty() {

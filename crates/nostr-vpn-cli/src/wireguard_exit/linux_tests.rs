@@ -509,10 +509,14 @@ fn endpoint_resolution_is_pinned_once_for_kernel_and_bypass_ownership() {
     let runtime = apply_linux_wireguard_exit_upstream_with_journal(
         &mut runner,
         &desired,
-        "10.44.0.0/16",
-        "nvpn0",
-        None,
-        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+        LinuxWireGuardExitApplyContext {
+            source_cidr: "10.44.0.0/16",
+            mesh_iface: "nvpn0",
+            previous_runtime: None,
+            previous_default_route_hint: Some(
+                "default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10",
+            ),
+        },
         |_| {
             let call = resolver_calls.get();
             resolver_calls.set(call + 1);
@@ -563,10 +567,14 @@ fn endpoint_resolution_failure_precedes_every_kernel_mutation() {
     let error = apply_linux_wireguard_exit_upstream_with_journal(
         &mut runner,
         &desired,
-        "10.44.0.0/16",
-        "nvpn0",
-        None,
-        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+        LinuxWireGuardExitApplyContext {
+            source_cidr: "10.44.0.0/16",
+            mesh_iface: "nvpn0",
+            previous_runtime: None,
+            previous_default_route_hint: Some(
+                "default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10",
+            ),
+        },
         |_| Err(anyhow!("synthetic endpoint resolution failure")),
         |_| Ok(()),
     )
@@ -612,10 +620,14 @@ fn serialized_reapply_crash_repairs_rollback_before_prior_runtime_cleanup() {
     let failure = apply_linux_wireguard_exit_upstream_with_journal(
         &mut runner,
         &replacement,
-        "10.44.0.0/16",
-        "nvpn0",
-        Some(&previous_runtime),
-        Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
+        LinuxWireGuardExitApplyContext {
+            source_cidr: "10.44.0.0/16",
+            mesh_iface: "nvpn0",
+            previous_runtime: Some(&previous_runtime),
+            previous_default_route_hint: Some(
+                "default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10",
+            ),
+        },
         super::super::resolve_linux_wireguard_exit_endpoint,
         |obligation| {
             crate::fips_private_mesh::retain_linux_wireguard_apply_cleanup(

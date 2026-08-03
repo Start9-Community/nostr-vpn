@@ -596,7 +596,7 @@ impl NativeAppRuntime {
                         Err(error) => Err(error.context(message)),
                     };
                 }
-                return status_result;
+                status_result
             }
             #[cfg(target_os = "macos")]
             {

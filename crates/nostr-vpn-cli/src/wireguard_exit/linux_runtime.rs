@@ -77,7 +77,7 @@ struct ApplyProgress {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum LinuxWireGuardExitCleanupObligation {
-    ApplyRollback(LinuxWireGuardExitRollbackObligation),
+    ApplyRollback(Box<LinuxWireGuardExitRollbackObligation>),
     CreatedInterface { interface: String },
     RouteCacheFlush,
 }
@@ -107,6 +107,13 @@ pub(crate) struct LinuxWireGuardExitApplyFailure {
     cleanup_obligation: Option<LinuxWireGuardExitCleanupObligation>,
 }
 
+struct LinuxWireGuardExitApplyContext<'a> {
+    source_cidr: &'a str,
+    mesh_iface: &'a str,
+    previous_runtime: Option<&'a LinuxWireGuardExitRuntime>,
+    previous_default_route_hint: Option<&'a str>,
+}
+
 impl LinuxWireGuardExitApplyFailure {
     pub(crate) fn into_parts(self) -> (anyhow::Error, Option<LinuxWireGuardExitCleanupObligation>) {
         (self.error, self.cleanup_obligation)
@@ -132,10 +139,12 @@ pub(crate) fn apply_linux_wireguard_exit_upstream(
     apply_linux_wireguard_exit_upstream_with_journal(
         &mut SystemLinuxCommandRunner,
         config,
-        source_cidr,
-        mesh_iface,
-        previous_runtime,
-        previous_default_route_hint,
+        LinuxWireGuardExitApplyContext {
+            source_cidr,
+            mesh_iface,
+            previous_runtime,
+            previous_default_route_hint,
+        },
         super::resolve_linux_wireguard_exit_endpoint,
         persist_cleanup_intent,
     )
@@ -152,10 +161,12 @@ fn apply_linux_wireguard_exit_upstream_with(
     apply_linux_wireguard_exit_upstream_with_journal(
         runner,
         config,
-        source_cidr,
-        "nvpn0",
-        previous_runtime,
-        previous_default_route_hint,
+        LinuxWireGuardExitApplyContext {
+            source_cidr,
+            mesh_iface: "nvpn0",
+            previous_runtime,
+            previous_default_route_hint,
+        },
         super::resolve_linux_wireguard_exit_endpoint,
         |_| Ok(()),
     )
@@ -164,13 +175,16 @@ fn apply_linux_wireguard_exit_upstream_with(
 fn apply_linux_wireguard_exit_upstream_with_journal(
     runner: &mut impl LinuxCommandRunner,
     config: &WireGuardExitConfig,
-    source_cidr: &str,
-    mesh_iface: &str,
-    previous_runtime: Option<&LinuxWireGuardExitRuntime>,
-    previous_default_route_hint: Option<&str>,
+    context: LinuxWireGuardExitApplyContext<'_>,
     mut resolve_endpoint: impl FnMut(&str) -> Result<std::net::SocketAddrV4>,
     mut persist_cleanup_intent: impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
 ) -> std::result::Result<LinuxWireGuardExitRuntime, LinuxWireGuardExitApplyFailure> {
+    let LinuxWireGuardExitApplyContext {
+        source_cidr,
+        mesh_iface,
+        previous_runtime,
+        previous_default_route_hint,
+    } = context;
     let iface = super::validate_linux_wireguard_exit_config(config).map_err(apply_failure)?;
     if previous_runtime
         .is_some_and(|runtime| runtime.interface != iface || runtime.source_cidr != source_cidr)
@@ -290,14 +304,15 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
 
     let conservative_progress =
         conservative_apply_progress(&endpoint_specs, previous_runtime, &snapshot);
-    let mut write_ahead_obligation =
-        LinuxWireGuardExitCleanupObligation::ApplyRollback(LinuxWireGuardExitRollbackObligation {
+    let mut write_ahead_obligation = LinuxWireGuardExitCleanupObligation::ApplyRollback(Box::new(
+        LinuxWireGuardExitRollbackObligation {
             interface: iface.clone(),
             source_cidr: source_cidr.to_string(),
             snapshot: snapshot.clone(),
             progress: conservative_progress,
             created_interface,
-        });
+        },
+    ));
     if let Err(error) = persist_cleanup_intent(&write_ahead_obligation) {
         return match cleanup_linux_wireguard_exit_obligation_with(
             runner,
@@ -331,7 +346,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         created_interface,
         &mut persist_cleanup_intent,
     ) {
-        let mut obligation = LinuxWireGuardExitCleanupObligation::ApplyRollback(
+        let mut obligation = LinuxWireGuardExitCleanupObligation::ApplyRollback(Box::new(
             LinuxWireGuardExitRollbackObligation {
                 interface: iface,
                 source_cidr: source_cidr.to_string(),
@@ -339,7 +354,7 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
                 progress,
                 created_interface,
             },
-        );
+        ));
         return match cleanup_linux_wireguard_exit_obligation_with(runner, &mut obligation) {
             Ok(()) => Err(apply_failure(error)),
             Err(cleanup) => Err(LinuxWireGuardExitApplyFailure {
@@ -350,14 +365,16 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
     }
 
     Ok(build_runtime(
-        iface,
-        source_cidr,
+        LinuxWireGuardExitRollbackObligation {
+            interface: iface,
+            source_cidr: source_cidr.to_string(),
+            snapshot,
+            progress,
+            created_interface,
+        },
         previous_default_route,
-        created_interface,
         previous_runtime,
         &endpoint_specs,
-        &snapshot,
-        &progress,
     ))
 }
 
@@ -404,15 +421,18 @@ fn apply_failure(error: anyhow::Error) -> LinuxWireGuardExitApplyFailure {
 }
 
 fn build_runtime(
-    iface: String,
-    source_cidr: &str,
+    applied: LinuxWireGuardExitRollbackObligation,
     previous_default_route: Option<String>,
-    created_interface: bool,
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     endpoint_specs: &[crate::LinuxEndpointBypassRoute],
-    snapshot: &ApplySnapshot,
-    progress: &ApplyProgress,
 ) -> LinuxWireGuardExitRuntime {
+    let LinuxWireGuardExitRollbackObligation {
+        interface: iface,
+        source_cidr,
+        snapshot,
+        progress,
+        created_interface,
+    } = applied;
     let endpoint_routes = endpoint_specs
         .iter()
         .filter_map(|spec| {
@@ -458,7 +478,7 @@ fn build_runtime(
     LinuxWireGuardExitRuntime {
         interface: iface,
         managed_address: snapshot.address.configured.clone(),
-        source_cidr: source_cidr.to_string(),
+        source_cidr,
         table: WIREGUARD_EXIT_TABLE,
         priority: WIREGUARD_EXIT_RULE_PRIORITY,
         created_interface: created_interface
@@ -650,13 +670,13 @@ fn apply_snapshot_mutations(
                 }
             }
             persist_cleanup_intent(&LinuxWireGuardExitCleanupObligation::ApplyRollback(
-                LinuxWireGuardExitRollbackObligation {
+                Box::new(LinuxWireGuardExitRollbackObligation {
                     interface: iface.to_string(),
                     source_cidr: source_cidr.to_string(),
                     snapshot: snapshot.clone(),
                     progress: progress.clone(),
                     created_interface,
-                },
+                }),
             ))
         },
     )?;

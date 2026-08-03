@@ -543,10 +543,12 @@ fn new_interface_cleanup_intent_precedes_link_creation() {
     let failure = apply_linux_wireguard_exit_upstream_with_journal(
         &mut runner,
         &config(),
-        "10.44.0.0/16",
-        "nvpn0",
-        None,
-        None,
+        LinuxWireGuardExitApplyContext {
+            source_cidr: "10.44.0.0/16",
+            mesh_iface: "nvpn0",
+            previous_runtime: None,
+            previous_default_route_hint: None,
+        },
         super::super::resolve_linux_wireguard_exit_endpoint,
         |obligation| {
             first_obligation.get_or_insert_with(|| obligation.clone());
