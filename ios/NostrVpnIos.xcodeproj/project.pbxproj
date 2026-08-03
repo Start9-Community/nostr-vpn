@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 56;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -14,7 +14,6 @@
 		0E755CFCED416AC1EBC0ACB0 /* SettingsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F3184D78E49CCA600A3218 /* SettingsViews.swift */; };
 		11868F29F02FC01CC2969FF7 /* VpnDesiredStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F798B286AF9637B05F0D4BE /* VpnDesiredStateStore.swift */; };
 		134D0AE1F2653934E68D66F4 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 620E8362A0A3215BB8EFF1F5 /* RootView.swift */; };
-		195D3F6974DE913FC7932FF7 /* QRCodeImageDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C7608707CEC0D47AF634D4 /* QRCodeImageDecoderTests.swift */; };
 		2376F433BA1FBD612B5DF846 /* AppModelDebugURLAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74FA92081064D235A10456E4 /* AppModelDebugURLAutomation.swift */; };
 		2CDAA4060234E6D83A9E2876 /* NostrVpnAppCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */; };
 		2E22BA531D53E86404F0D766 /* PacketFlowBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */; };
@@ -70,13 +69,6 @@
 			remoteGlobalIDString = 2DDBC3A91D35DF14C8FB244F;
 			remoteInfo = NostrVpnIos;
 		};
-		FD7425AB0B41A5AA1063C20A /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = B8EEE5A5A357A9BE2F27A2CA /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 2DDBC3A91D35DF14C8FB244F;
-			remoteInfo = NostrVpnIos;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -95,7 +87,6 @@
 
 /* Begin PBXFileReference section */
 		06BD4BC01B5E92B3771DC4E2 /* AppModelDebugAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugAutomation.swift; sourceTree = "<group>"; };
-		09C7608707CEC0D47AF634D4 /* QRCodeImageDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeImageDecoderTests.swift; sourceTree = "<group>"; };
 		10601F7E977CA9A2CA70782B /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		106454A084D4E2BC7799376E /* PacketFlowBridgeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridgeLifecycle.swift; sourceTree = "<group>"; };
 		1432941BCEFBEB848E748486 /* NostrVpnAppCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = NostrVpnAppCore.xcframework; path = Frameworks/NostrVpnAppCore.xcframework; sourceTree = "<group>"; };
@@ -105,7 +96,6 @@
 		21F75A016D5B4CB3DFBE0621 /* PacketTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		272C4FEFDAC8674186934379 /* NostrVpnIosUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = NostrVpnIosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		29E68FA9898E0C487261BE03 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		2A939BAD826110438ADA7366 /* NostrVpnIosTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = NostrVpnIosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		32C567B4190F53A52A6E419A /* NostrVpnPhysicalGateSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnPhysicalGateSupport.swift; sourceTree = "<group>"; };
 		3DDFB58648107DDDBCC8DBE5 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
 		431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridge.swift; sourceTree = "<group>"; };
@@ -174,7 +164,6 @@
 				6EF67A9C6F0CFFD4E4F15136 /* PacketTunnel */,
 				FFB7F5B7C863D721E69404DD /* Resources */,
 				28B11EB5F22D50B40E07A4AF /* Sources */,
-				A495C22D04EE9D6D7C98351E /* Tests */,
 				D8A8478D237D0BDCFDA26AD1 /* UITests */,
 				9BCB071BA1A1F1809C62BE43 /* Frameworks */,
 				D39D5A56D64190205BCC5B1A /* Products */,
@@ -234,19 +223,10 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
-		A495C22D04EE9D6D7C98351E /* Tests */ = {
-			isa = PBXGroup;
-			children = (
-				09C7608707CEC0D47AF634D4 /* QRCodeImageDecoderTests.swift */,
-			);
-			path = Tests;
-			sourceTree = "<group>";
-		};
 		D39D5A56D64190205BCC5B1A /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				5EE69AF3C3AAAA49D523C344 /* NostrVpnIos.app */,
-				2A939BAD826110438ADA7366 /* NostrVpnIosTests.xctest */,
 				272C4FEFDAC8674186934379 /* NostrVpnIosUITests.xctest */,
 				21F75A016D5B4CB3DFBE0621 /* PacketTunnel.appex */,
 			);
@@ -301,24 +281,6 @@
 			productReference = 5EE69AF3C3AAAA49D523C344 /* NostrVpnIos.app */;
 			productType = "com.apple.product-type.application";
 		};
-		600F3C14341435AA9692264C /* NostrVpnIosTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 07C17D526C88DF103047038C /* Build configuration list for PBXNativeTarget "NostrVpnIosTests" */;
-			buildPhases = (
-				1A20E4D6A2E28134B2DA1A99 /* Sources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				DFBB63EB862DF34C969AA821 /* PBXTargetDependency */,
-			);
-			name = NostrVpnIosTests;
-			packageProductDependencies = (
-			);
-			productName = NostrVpnIosTests;
-			productReference = 2A939BAD826110438ADA7366 /* NostrVpnIosTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
 		A8A78E72E9E78A3018055001 /* NostrVpnIosUITests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = AB321588AF08641FAAD9B2CE /* Build configuration list for PBXNativeTarget "NostrVpnIosUITests" */;
@@ -365,9 +327,6 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
-					600F3C14341435AA9692264C = {
-						ProvisioningStyle = Automatic;
-					};
 					A8A78E72E9E78A3018055001 = {
 						ProvisioningStyle = Automatic;
 						TestTargetID = 2DDBC3A91D35DF14C8FB244F;
@@ -389,7 +348,6 @@
 			projectRoot = "";
 			targets = (
 				2DDBC3A91D35DF14C8FB244F /* NostrVpnIos */,
-				600F3C14341435AA9692264C /* NostrVpnIosTests */,
 				A8A78E72E9E78A3018055001 /* NostrVpnIosUITests */,
 				AB61873F2829C99F6B9C990E /* PacketTunnel */,
 			);
@@ -417,14 +375,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		1A20E4D6A2E28134B2DA1A99 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				195D3F6974DE913FC7932FF7 /* QRCodeImageDecoderTests.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		247F02439E466EA792536B57 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -492,11 +442,6 @@
 			isa = PBXTargetDependency;
 			target = 2DDBC3A91D35DF14C8FB244F /* NostrVpnIos */;
 			targetProxy = 466A032411501401CE111A44 /* PBXContainerItemProxy */;
-		};
-		DFBB63EB862DF34C969AA821 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 2DDBC3A91D35DF14C8FB244F /* NostrVpnIos */;
-			targetProxy = FD7425AB0B41A5AA1063C20A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -579,24 +524,6 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = DeviceDebug;
-		};
-		2356447C06DBB8817BBF6202 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = fi.siriusbusiness.nvpn.Tests;
-				PRODUCT_NAME = NostrVpnIosTests;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nostr VPN.app/Nostr VPN";
-			};
-			name = Release;
 		};
 		3E43FE312F2F8639EEDA505D /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -750,24 +677,6 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = NostrVpnIos;
-			};
-			name = Debug;
-		};
-		90F988B94E5E421D3C020347 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = fi.siriusbusiness.nvpn.Tests;
-				PRODUCT_NAME = NostrVpnIosTests;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nostr VPN.app/Nostr VPN";
 			};
 			name = Debug;
 		};
@@ -960,37 +869,9 @@
 			};
 			name = DeviceDebug;
 		};
-		F95EB2278EF97D7EF0C17F68 /* DeviceDebug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = fi.siriusbusiness.nvpn.Tests;
-				PRODUCT_NAME = NostrVpnIosTests;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nostr VPN.app/Nostr VPN";
-			};
-			name = DeviceDebug;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		07C17D526C88DF103047038C /* Build configuration list for PBXNativeTarget "NostrVpnIosTests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				90F988B94E5E421D3C020347 /* Debug */,
-				F95EB2278EF97D7EF0C17F68 /* DeviceDebug */,
-				2356447C06DBB8817BBF6202 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
 		74AC5F0BB81527A1F708C8A6 /* Build configuration list for PBXProject "NostrVpnIos" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

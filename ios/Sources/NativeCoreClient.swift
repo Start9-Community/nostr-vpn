@@ -62,9 +62,9 @@ final class NativeCoreClient {
         return matrix
     }
 
-    func decodeQrImage(path: String) -> QrDecodeResult {
+    static func decodeQrImage(path: String) -> QrDecodeResult {
         let json = path.withCString { pathPointer in
-            consume(nostr_vpn_decode_qr_image_json(pathPointer))
+            consumeQrDecodeResult(nostr_vpn_decode_qr_image_json(pathPointer))
         }
         guard let data = json.data(using: .utf8),
               let result = try? JSONDecoder().decode(QrDecodeResult.self, from: data)
@@ -72,6 +72,14 @@ final class NativeCoreClient {
             return QrDecodeResult(error: "Invalid QR decode response")
         }
         return result
+    }
+
+    private static func consumeQrDecodeResult(_ pointer: UnsafeMutablePointer<CChar>?) -> String {
+        guard let pointer else {
+            return ""
+        }
+        defer { nostr_vpn_string_free(pointer) }
+        return String(cString: pointer)
     }
 
     func mobileTunnelConfigJson() -> String {

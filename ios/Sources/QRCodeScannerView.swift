@@ -2,22 +2,23 @@ import AVFoundation
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
-import Vision
 
+@MainActor
 struct QRCodeScannerSheet: View {
     let onCode: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var error = ""
     @State private var imageImporterPresented = false
+    @State private var finished = false
     @State private var importingImage = false
+    @State private var importTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 QRCodeScannerView(
-                    onCode: { code in
-                        completeQrCode(code)
-                    },
+                    isEnabled: !finished && !importingImage,
+                    onCode: acceptCameraCode,
                     onError: { error = $0 }
                 )
                 .ignoresSafeArea()
@@ -31,9 +32,7 @@ struct QRCodeScannerSheet: View {
                             .padding(.vertical, 8)
                             .background(.black.opacity(0.72), in: Capsule())
                     }
-                    Button {
-                        imageImporterPresented = true
-                    } label: {
+                    Button(action: presentImageImporter) {
                         if importingImage {
                             ProgressView()
                                 .frame(maxWidth: .infinity)
@@ -43,7 +42,7 @@ struct QRCodeScannerSheet: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(importingImage)
+                    .disabled(finished || importingImage)
                     .accessibilityIdentifier("join-request-import-image")
                 }
                 .padding(.horizontal)
@@ -53,80 +52,101 @@ struct QRCodeScannerSheet: View {
             .fileImporter(
                 isPresented: $imageImporterPresented,
                 allowedContentTypes: [.image],
-                allowsMultipleSelection: false
-            ) { result in
-                switch result {
-                case let .success(urls):
-                    guard let url = urls.first else { return }
-                    importQrCode(from: url)
-                case .failure:
-                    error = "Could not open that image."
-                }
-            }
+                allowsMultipleSelection: false,
+                onCompletion: handleImageImportResult
+            )
             .navigationTitle("Scan QR")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") {
-                        dismiss()
+                        cancelAndDismiss()
                     }
                 }
             }
+            .onDisappear(perform: cancelOutstandingWork)
         }
     }
 
-    private func completeQrCode(_ code: String) {
+    private func presentImageImporter() {
+        guard !finished, !importingImage else { return }
+        error = ""
+        importingImage = true
+        imageImporterPresented = true
+    }
+
+    private func handleImageImportResult(_ result: Result<[URL], Error>) {
+        guard !finished, importingImage else { return }
+        switch result {
+        case let .success(urls):
+            guard let url = urls.first else {
+                resumeCamera(error: "Could not open that image.")
+                return
+            }
+            decodeImportedImage(at: url)
+        case .failure:
+            resumeCamera(error: "Could not open that image.")
+        }
+    }
+
+    private func decodeImportedImage(at url: URL) {
+        importTask?.cancel()
+        importTask = Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                let hasScopedAccess = url.startAccessingSecurityScopedResource()
+                defer {
+                    if hasScopedAccess {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+                guard !Task.isCancelled else {
+                    return QrDecodeResult(error: "Cancelled")
+                }
+                return NativeCoreClient.decodeQrImage(path: url.path)
+            }.value
+            guard !Task.isCancelled, !finished, importingImage else { return }
+            guard result.error.isEmpty,
+                  let code = normalizedQrPayload(result.value)
+            else {
+                resumeCamera(error: "No QR code found in that image.")
+                return
+            }
+            finished = true
+            importingImage = false
+            onCode(code)
+            dismiss()
+        }
+    }
+
+    private func acceptCameraCode(_ rawCode: String) -> Bool {
+        guard !finished, !importingImage, let code = normalizedQrPayload(rawCode) else {
+            return false
+        }
+        finished = true
+        importTask?.cancel()
         onCode(code)
+        dismiss()
+        return true
+    }
+
+    private func resumeCamera(error message: String) {
+        guard !finished, importingImage else { return }
+        importTask = nil
+        importingImage = false
+        error = message
+    }
+
+    private func cancelAndDismiss() {
+        cancelOutstandingWork()
         dismiss()
     }
 
-    private func importQrCode(from url: URL) {
-        importingImage = true
-        error = ""
-        Task {
-            defer {
-                importingImage = false
-            }
-            do {
-                let code = try await Task.detached {
-                    let hasScopedAccess = url.startAccessingSecurityScopedResource()
-                    defer {
-                        if hasScopedAccess {
-                            url.stopAccessingSecurityScopedResource()
-                        }
-                    }
-                    return try QRCodeImageDecoder.decode(data: Data(contentsOf: url))
-                }.value
-                completeQrCode(code)
-            } catch {
-                self.error = "No QR code found in that image."
-            }
-        }
-    }
-}
-
-enum QRCodeImageDecoder {
-    enum DecodeError: Error {
-        case invalidImage
-        case qrCodeMissing
-    }
-
-    static func decode(data: Data) throws -> String {
-        guard let image = UIImage(data: data)?.cgImage else {
-            throw DecodeError.invalidImage
-        }
-
-        let request = VNDetectBarcodesRequest()
-        request.symbologies = [.qr]
-        try VNImageRequestHandler(cgImage: image).perform([request])
-
-        let payload = request.results?
-            .first(where: { $0.symbology == .qr })?
-            .payloadStringValue
-        guard let code = normalizedQrPayload(payload) else {
-            throw DecodeError.qrCodeMissing
-        }
-        return code
+    private func cancelOutstandingWork() {
+        guard !finished else { return }
+        finished = true
+        importingImage = false
+        importTask?.cancel()
+        importTask = nil
     }
 }
 
@@ -140,11 +160,12 @@ private func normalizedQrPayload(_ payload: String?) -> String? {
 }
 
 private struct QRCodeScannerView: UIViewRepresentable {
-    let onCode: (String) -> Void
+    let isEnabled: Bool
+    let onCode: (String) -> Bool
     let onError: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onCode: onCode, onError: onError)
+        Coordinator(isEnabled: isEnabled, onCode: onCode, onError: onError)
     }
 
     func makeUIView(context: Context) -> ScannerPreviewView {
@@ -154,6 +175,7 @@ private struct QRCodeScannerView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: ScannerPreviewView, context: Context) {
+        context.coordinator.setEnabled(isEnabled)
         context.coordinator.attachPreview(to: view)
     }
 
@@ -162,16 +184,28 @@ private struct QRCodeScannerView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
-        private let onCode: (String) -> Void
+        private let onCode: (String) -> Bool
         private let onError: (String) -> Void
         private let sessionQueue = DispatchQueue(label: "fi.siriusbusiness.nvpn.qrscanner")
         private var session: AVCaptureSession?
         private var didConfigure = false
         private var didFinish = false
+        private var isEnabled: Bool
 
-        init(onCode: @escaping (String) -> Void, onError: @escaping (String) -> Void) {
+        init(
+            isEnabled: Bool,
+            onCode: @escaping (String) -> Bool,
+            onError: @escaping (String) -> Void
+        ) {
+            self.isEnabled = isEnabled
             self.onCode = onCode
             self.onError = onError
+        }
+
+        func setEnabled(_ enabled: Bool) {
+            sessionQueue.async {
+                self.isEnabled = enabled
+            }
         }
 
         func configure(in view: ScannerPreviewView) {
@@ -241,7 +275,7 @@ private struct QRCodeScannerView: UIViewRepresentable {
             didOutput metadataObjects: [AVMetadataObject],
             from connection: AVCaptureConnection
         ) {
-            guard !didFinish else { return }
+            guard isEnabled, !didFinish else { return }
             guard let code = normalizedQrPayload(metadataObjects
                 .compactMap({ $0 as? AVMetadataMachineReadableCodeObject })
                 .first(where: { $0.type == .qr })?
@@ -249,10 +283,15 @@ private struct QRCodeScannerView: UIViewRepresentable {
             else {
                 return
             }
-            didFinish = true
-            session?.stopRunning()
             DispatchQueue.main.async {
-                self.onCode(code)
+                if self.onCode(code) {
+                    self.sessionQueue.async {
+                        self.didFinish = true
+                        if self.session?.isRunning == true {
+                            self.session?.stopRunning()
+                        }
+                    }
+                }
             }
         }
     }
