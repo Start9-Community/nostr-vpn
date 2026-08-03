@@ -12,10 +12,7 @@ struct QRCodeScannerSheet: View {
     @State private var finished = false
     @State private var importingImage = false
     @State private var importTask: Task<Void, Never>?
-
-    private var imageImportEnabled: Bool {
-        ProcessInfo.processInfo.arguments.contains("--nvpn-ui-test-qr-image-import")
-    }
+    @State private var imageImportEnabled = false
 
     var body: some View {
         NavigationStack {
@@ -70,8 +67,17 @@ struct QRCodeScannerSheet: View {
                     }
                 }
             }
+            .onAppear(perform: consumeImageImportMarker)
             .onDisappear(perform: cancelOutstandingWork)
         }
+    }
+
+    private func consumeImageImportMarker() {
+        guard !imageImportEnabled else { return }
+        let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: AppModel.appGroupIdentifier
+        )
+        imageImportEnabled = QRImageImportTestMarker.consume(in: container)
     }
 
     private func presentImageImporter() {

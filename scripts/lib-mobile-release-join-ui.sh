@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Public accessibility-tree drivers for the signed Release join gate. This
-# library never reads an app container or passes join state to an application.
-# A capability-only flag reveals the screenshot importer used by this gate.
+# library never passes join state to an application. One short-lived app-group
+# marker reveals the screenshot importer only for its exact physical test.
 
 RELEASE_JOIN_ANDROID_UI_XML=""
 RELEASE_JOIN_IOS_TEST_PID=""
@@ -10,6 +10,8 @@ RELEASE_JOIN_IOS_TEST_PGID=""
 RELEASE_JOIN_IOS_TEST_LOG=""
 RELEASE_JOIN_IOS_TEST_NAME=""
 RELEASE_JOIN_IOS_APP_BUNDLE_ID=""
+RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED=0
+RELEASE_JOIN_IOS_QR_IMPORT_REMOTE_FILE="Nostr VPN/UITestCapability/probe"
 RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
 RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
@@ -772,17 +774,51 @@ release_join_ios_process_pgid() {
   ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]'
 }
 
+release_join_ios_copy_qr_import_marker() {
+  local source="$1"
+  local group
+  group="$(/usr/libexec/PlistBuddy -c 'Print :NVPNAppGroupIdentifier' \
+    "$RELEASE_JOIN_IOS_APP_PATH/Info.plist")"
+  [[ "$group" == group.* ]] || {
+    echo "Frozen iOS app has no valid app-group identifier" >&2
+    return 1
+  }
+  xcrun devicectl device copy to \
+    --device "$RELEASE_JOIN_IOS_UDID" \
+    --domain-type appGroupDataContainer \
+    --domain-identifier "$group" \
+    --source "$source" \
+    --destination "$RELEASE_JOIN_IOS_QR_IMPORT_REMOTE_FILE" \
+    --quiet >/dev/null
+}
+
+release_join_ios_cleanup_qr_import_marker() {
+  ((RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED)) || return 0
+  local invalid status=0
+  invalid="$(mktemp "$PRIVATE_DIR/ios-qr-import-invalid.XXXXXX")"
+  printf 'invalid\n0\n00000000-0000-0000-0000-000000000000\n' >"$invalid"
+  release_join_ios_copy_qr_import_marker "$invalid" || status=1
+  rm -f "$invalid"
+  if ((status == 0)); then
+    RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED=0
+  fi
+  return "$status"
+}
+
 release_join_ios_prepare_target_app() {
-  local test_name="$1"
+  local test_name="$1" marker status=0
   [[ "$test_name" == \
     testImportJoinQrImageAndRequireAdminRosterProgress ]] || return 0
-  local bundle="${RELEASE_JOIN_IOS_APP_BUNDLE_ID:-${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}}"
-  xcrun devicectl device process launch \
-    --device "$RELEASE_JOIN_IOS_UDID" \
-    --terminate-existing \
-    --activate \
-    "$bundle" \
-    --nvpn-ui-test-qr-image-import >/dev/null
+  marker="$(mktemp "$PRIVATE_DIR/ios-qr-import-stage.XXXXXX")"
+  printf 'nvpn-release-join-qr-image-import-v1\n%s\n%s\n' \
+    "$(date +%s)" "$(uuidgen | tr '[:upper:]' '[:lower:]')" >"$marker"
+  RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED=1
+  release_join_ios_copy_qr_import_marker "$marker" || status=1
+  rm -f "$marker"
+  if ((status != 0)); then
+    release_join_ios_cleanup_qr_import_marker || true
+  fi
+  return "$status"
 }
 
 release_join_ios_stop_runner() {
@@ -837,6 +873,7 @@ release_join_ios_start_test() {
       cleanup_status=1
     fi
     release_join_ios_stop_runner || cleanup_status=1
+    release_join_ios_cleanup_qr_import_marker || cleanup_status=1
     echo "iOS join test did not receive an isolated process group" >&2
     ((cleanup_status == 0)) \
       || echo "iOS join test isolation-failure cleanup was incomplete" >&2
@@ -871,6 +908,7 @@ release_join_ios_abort_test() {
   RELEASE_JOIN_IOS_TEST_PGID=""
   RELEASE_JOIN_IOS_TEST_NAME=""
   release_join_ios_stop_runner || status=1
+  release_join_ios_cleanup_qr_import_marker || status=1
   return "$status"
 }
 
@@ -951,6 +989,7 @@ release_join_ios_finish_test() {
     release_join_ios_stop_runner || status=1
     tail -n 120 "$RELEASE_JOIN_IOS_TEST_LOG" >&2 || true
   fi
+  release_join_ios_cleanup_qr_import_marker || status=1
   RELEASE_JOIN_IOS_TEST_NAME=""
   return "$status"
 }

@@ -34,25 +34,6 @@ if ! sed -n \
 fi
 
 (
-  # Only the physical QR-import test receives the capability-bearing host launch.
-  # shellcheck disable=SC1090,SC1091
-  source "$join_ui"
-  capture="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-import-launch.XXXXXX")"
-  trap 'rm -f "$capture"' EXIT
-  RELEASE_JOIN_IOS_UDID="fixture-device"
-  RELEASE_JOIN_IOS_APP_BUNDLE_ID="fixture.bundle"
-  xcrun() { printf '%s\n' "$*" >"$capture"; }
-  release_join_ios_prepare_target_app testCreateAdminNetworkAndReportPublicValues
-  [[ ! -s "$capture" ]] \
-    || { echo "ordinary iOS join test received the QR import flag" >&2; exit 1; }
-  release_join_ios_prepare_target_app \
-    testImportJoinQrImageAndRequireAdminRosterProgress
-  [[ "$(<"$capture")" == \
-    "devicectl device process launch --device fixture-device --terminate-existing --activate fixture.bundle --nvpn-ui-test-qr-image-import" ]] \
-    || { echo "QR import host launch was not exactly scoped" >&2; exit 1; }
-)
-
-(
   # Launch and in-test setup each receive their own bounded allowance. The
   # combined elapsed time deliberately exceeds either individual allowance.
   # shellcheck disable=SC1090,SC1091
@@ -559,6 +540,11 @@ grep -Fq 'allowImageImport = releaseJoinImageImportEnabled' \
   && grep -Fq 'getBooleanExtra(EXTRA_RELEASE_JOIN_IMAGE_IMPORT, false)' \
     "$ROOT/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt" \
   || { echo "Android QR image import is not restricted to the release join flag" >&2; exit 1; }
+if rg -q -- '--nvpn-ui-test-qr-image-import' \
+    "$ROOT/ios" "$join_ui" "$ROOT/scripts/ios_xctestrun.py"; then
+  echo "iOS QR image import retains the unreliable argv capability" >&2
+  exit 1
+fi
 
 python3 - \
   "$ROOT/scripts/mobile-release-join-e2e.sh" \
@@ -578,6 +564,7 @@ python3 - \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
   "$ROOT/ios/Sources/DevicesViews.swift" \
   "$ROOT/ios/Sources/QRCodeScannerView.swift" \
+  "$ROOT/ios/Sources/QRImageImportTestMarker.swift" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt" \
   "$ROOT/ios/Sources/SettingsViews.swift" \
   "$ROOT/macos/Sources/RootViewDevices.swift" \
@@ -621,6 +608,7 @@ def read(path):
     android_components,
     ios_devices,
     ios_qr_scanner,
+    ios_qr_marker,
     android_qr_scanner,
     ios_participants,
     macos_devices,
@@ -748,12 +736,11 @@ ios_import = ios_test.split(
 )[1].split("func test", 1)[0]
 if "app.launchArguments.isEmpty" not in ios_setup:
     raise SystemExit("Ordinary release join tests do not assert empty launch arguments")
-for forbidden in ("app.launchArguments =", "app.launch()"):
+if "app.launch()" not in ios_setup:
+    raise SystemExit("Release join XCTest no longer uses its normal app launch")
+for forbidden in ("app.launchArguments =", "app.activate()"):
     if forbidden in ios_import:
-        raise SystemExit(f"QR import XCTest cannot attach to its host launch: {forbidden}")
-for required in ("app.state", ".notRunning", "app.activate()"):
-    if required not in ios_import:
-        raise SystemExit(f"QR import XCTest does not attach to its host launch: {required}")
+        raise SystemExit(f"Release join XCTest retains capability launch plumbing: {forbidden}")
 for required in (
     "private static let maximumAttempts = 2",
     'field.value(forKey: "hasKeyboardFocus")',
@@ -791,7 +778,7 @@ for required in (
         )
 if "allow.tap()" not in prompt_handler or "continue" not in prompt_handler:
     raise SystemExit("Release join XCTest reuses the disappearing Apple Allow hierarchy")
-if ios_test.count("try dismissSystemPromptsIfPresent()") != 5:
+if ios_test.count("try dismissSystemPromptsIfPresent()") != 4:
     raise SystemExit("Release join XCTest does not propagate every system-prompt failure")
 for required in (
     "ShippedUIInteraction.reveal(nameField, byTapping: create)",
@@ -875,13 +862,24 @@ for required in (
     if required not in ios_test:
         raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
 for required in (
-    '--nvpn-ui-test-qr-image-import',
+    "QRImageImportTestMarker.consume",
+    "AppModel.appGroupIdentifier",
     "if imageImportEnabled",
     "join-request-import-image",
     "Import QR Image",
 ):
     if required not in ios_qr_scanner:
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
+for required in (
+    'directoryPath = "Nostr VPN/UITestCapability"',
+    'markerName = "probe"',
+    "maximumAgeSeconds = 60",
+    "UUID(uuidString:",
+    "removeItem(at: marker)",
+    'appendingPathComponent(".nvpn-ui-test"',
+):
+    if required not in ios_qr_marker:
+        raise SystemExit(f"iOS QR import marker is not fail-closed: {required}")
 for required in (
     "allowImageImport: Boolean = false",
     "if (allowImageImport)",
