@@ -637,17 +637,16 @@ release_join_ios_test_command() {
     fi
     command=(
       xcodebuild
-      -quiet
       -xctestrun "$case_xctestrun"
       -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
       -destination-timeout 60
       -collect-test-diagnostics never
+      -parallel-testing-enabled NO
       -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
     )
   else
     command=(
       xcodebuild
-      -quiet
       -allowProvisioningUpdates
       -project "$ROOT/ios/NostrVpnIos.xcodeproj"
       -scheme NostrVpnIos
@@ -656,6 +655,7 @@ release_join_ios_test_command() {
       -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
       -destination-timeout 60
       -collect-test-diagnostics never
+      -parallel-testing-enabled NO
       -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
       DEVELOPMENT_TEAM="$team"
       NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY"

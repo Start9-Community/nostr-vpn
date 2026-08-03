@@ -508,6 +508,13 @@ if "-xctestrun" not in command or "test-without-building" not in command:
     raise SystemExit("strict join command does not use xctestrun test-without-building")
 if "-project" in command or "build-for-testing" in command:
     raise SystemExit("strict join command retained a rebuild path")
+if "-quiet" in command:
+    raise SystemExit("strict join command suppresses XCTest and release markers")
+if (
+    "-parallel-testing-enabled" not in command
+    or command[command.index("-parallel-testing-enabled") + 1] != "NO"
+):
+    raise SystemExit("strict join command does not serialize the physical runner")
 case_path = pathlib.Path(command[command.index("-xctestrun") + 1])
 payload = plistlib.load(case_path.open("rb"))["NostrVpnIosUITests"]
 environment = payload["EnvironmentVariables"]
