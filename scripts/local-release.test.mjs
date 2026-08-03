@@ -81,6 +81,7 @@ import {
   startosExactPackageValidator,
   validateReleaseGateAttestation,
 } from './release-artifact-provenance-lib.mjs'
+import { proveUnchangedPlatformInputs } from './release-component-source.mjs'
 
 test('parseEnvFile reads basic dotenv syntax', () => {
   const parsed = parseEnvFile(`
@@ -607,6 +608,7 @@ test('frozen iOS publication rejects IPA, receipt, signer, and source substituti
       export_receipt_sha256: receiptSha256,
       signing_team_id: 'ABCDEFGHIJ',
       signer_certificate_sha256: signer,
+      source_equivalence: null,
     },
   }
   assert.equal(
@@ -646,8 +648,119 @@ test('frozen iOS publication rejects IPA, receipt, signer, and source substituti
           commit: '5'.repeat(40),
         },
       }),
-    /differs from exact staging/i,
+    /differs from exact staging|receipt source lookup/i,
   )
+})
+
+test('frozen iOS publication binds an unchanged-product source proof', () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'nvpn-ios-publication-source-'))
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  git('init', '-q')
+  git('config', 'user.name', 'Release Test')
+  git('config', 'user.email', 'release@example.invalid')
+  mkdirSync(join(repoRoot, 'ios', 'Sources'), { recursive: true })
+  writeFileSync(join(repoRoot, 'ios', 'Sources', 'App.swift'), 'product\n')
+  git('add', '.')
+  git('commit', '-qm', 'product')
+  const receiptCommit = git('rev-parse', 'HEAD')
+  const receiptTree = git('rev-parse', 'HEAD^{tree}')
+  mkdirSync(join(repoRoot, 'scripts'), { recursive: true })
+  writeFileSync(join(repoRoot, 'scripts', 'test-ios-harness.sh'), 'harness\n')
+  git('add', '.')
+  git('commit', '-qm', 'harness')
+  const candidateCommit = git('rev-parse', 'HEAD')
+  const candidateTree = git('rev-parse', 'HEAD^{tree}')
+  const sourceEquivalence = proveUnchangedPlatformInputs({
+    candidateRoot: repoRoot,
+    platform: 'ios',
+    receiptCommit,
+    receiptTree,
+    candidateCommit,
+    candidateTree,
+  })
+
+  const exportDir = join(repoRoot, 'dist', 'ios', 'export')
+  const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
+  mkdirSync(exportDir, { recursive: true })
+  mkdirSync(frozenDir, { recursive: true })
+  const ipaPath = join(exportDir, 'NostrVpnIos.ipa')
+  const receiptPath = join(frozenDir, 'app-store-receipt.json')
+  writeFileSync(ipaPath, 'retained product ipa')
+  const ipaSha256 = createHash('sha256').update(readFileSync(ipaPath)).digest('hex')
+  const signer = '3'.repeat(64)
+  const receipt = {
+    receiptSchema: 1,
+    artifactType: 'iOS export from frozen xcarchive',
+    distribution: 'app-store-connect',
+    appGitSha: receiptCommit,
+    appGitTree: receiptTree,
+    ipaSha256,
+    identity: {
+      appBundleIdentifier: 'fi.siriusbusiness.nvpn',
+      appBuildGitSha: receiptCommit,
+      buildNumber: '4001008',
+      marketingVersion: '4.1.5',
+      packetTunnelBuildGitSha: receiptCommit,
+    },
+    signing: {
+      signerCertificateSha256: signer,
+      signingTeamIdentifier: 'ABCDEFGHIJ',
+    },
+  }
+  writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`)
+  const stagedManifest = {
+    tag: 'v4.1.5',
+    commit: candidateCommit,
+    release_gate_attestation: { app_git_tree: candidateTree },
+    ios_app_store_gate: {
+      receipt_schema: 1,
+      app_git_sha: receiptCommit,
+      app_git_tree: receiptTree,
+      bundle_id: 'fi.siriusbusiness.nvpn',
+      marketing_version: '4.1.5',
+      build_number: '4001008',
+      ipa_sha256: ipaSha256,
+      ipa_size: statSync(ipaPath).size,
+      export_receipt_sha256: createHash('sha256')
+        .update(readFileSync(receiptPath)).digest('hex'),
+      signing_team_id: 'ABCDEFGHIJ',
+      signer_certificate_sha256: signer,
+      source_equivalence: sourceEquivalence,
+    },
+  }
+  assert.equal(
+    validateFrozenIosPublication({ repoRoot, stagedManifest }).ipaPath,
+    ipaPath,
+  )
+  stagedManifest.ios_app_store_gate.source_equivalence = {
+    ...sourceEquivalence,
+    changed_paths_sha256: '0'.repeat(64),
+  }
+  assert.throws(
+    () => validateFrozenIosPublication({ repoRoot, stagedManifest }),
+    /source proof|differs from exact staging/i,
+  )
+})
+
+test('retained iOS export runs only from its proven artifact source', () => {
+  const source = readFileSync(
+    new URL('./local-release.mjs', import.meta.url),
+    'utf8',
+  )
+  for (const required of [
+    'requireReceiptSource(archiveReceipt',
+    "'worktree', 'add', '--detach', sourceRoot, archiveReceipt.appGitSha",
+    "symlinkSync(join(repoRoot, 'dist'), join(sourceRoot, 'dist'), 'dir')",
+    "join(sourceRoot, 'scripts', 'ios-build'), 'ios-export'",
+    'NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha',
+    'source_equivalence: sourceEquivalence',
+  ]) {
+    assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
 })
 
 test('existing ASC build replays its original fleet upload authorization', () => {

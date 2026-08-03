@@ -14,6 +14,8 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -1628,6 +1630,31 @@ function buildIosArtifacts({
   if (process.platform !== 'darwin') {
     throw new SkipStepError('Skipping iOS artifacts because the host is not macOS.')
   }
+  if (dryRun) {
+    run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], {
+      env: {
+        ...process.env,
+        NVPN_RELEASE_TAG: tag,
+        NVPN_IOS_INTERNAL_ONLY: 'false',
+        NVPN_RELEASE_IOS_FROZEN_ARCHIVE: '1',
+        NVPN_RELEASE_GATE_LOG_DIR: releaseGateLogDir,
+      },
+      dryRun: true,
+    })
+    builtLines.push(`Verified and exported iOS ${tag} without uploading it.`)
+    return null
+  }
+  const archiveReceipt = readRequiredJson(
+    join(repoRoot, 'dist', 'ios', 'frozen', 'archive-receipt.json'),
+    'Frozen iOS archive receipt',
+  )
+  const sourceEquivalence = requireReceiptSource(archiveReceipt, {
+    commit: candidateCommit,
+    tree: candidateTree,
+    label: 'Frozen iOS archive receipt',
+    candidateRoot: repoRoot,
+    platform: 'ios',
+  })
   const env = {
     ...process.env,
     NVPN_RELEASE_TAG: tag,
@@ -1638,14 +1665,41 @@ function buildIosArtifacts({
   // Ordinary staging is local-only. It verifies the physically tested frozen
   // archive and exports its exact App Store IPA without contacting Apple.
   // Upload/attach/submission entry points require the post-fleet mutation gate.
-  run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], {
-    env,
-    dryRun,
-  })
-  builtLines.push(`Verified and exported iOS ${tag} without uploading it.`)
-  if (dryRun) {
-    return null
+  if (sourceEquivalence) {
+    const temporaryRoot = mkdtempSync(join(os.tmpdir(), 'nvpn-ios-export-source-'))
+    const sourceRoot = join(temporaryRoot, 'source')
+    let worktreeAdded = false
+    try {
+      run('git', [
+        'worktree', 'add', '--detach', sourceRoot, archiveReceipt.appGitSha,
+      ])
+      worktreeAdded = true
+      symlinkSync(join(repoRoot, 'dist'), join(sourceRoot, 'dist'), 'dir')
+      if (existsSync(join(repoRoot, 'artifacts'))) {
+        symlinkSync(
+          join(repoRoot, 'artifacts'),
+          join(sourceRoot, 'artifacts'),
+          'dir',
+        )
+      }
+      run('bash', [join(sourceRoot, 'scripts', 'ios-build'), 'ios-export'], {
+        cwd: sourceRoot,
+        env: { ...env, NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha },
+      })
+    } finally {
+      for (const name of ['dist', 'artifacts']) {
+        const path = join(sourceRoot, name)
+        if (existsSync(path)) unlinkSync(path)
+      }
+      if (worktreeAdded) {
+        run('git', ['worktree', 'remove', sourceRoot], { capture: true })
+      }
+      rmSync(temporaryRoot, { recursive: true, force: true })
+    }
+  } else {
+    run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], { env })
   }
+  builtLines.push(`Verified and exported iOS ${tag} without uploading it.`)
 
   const exportDir = join(repoRoot, 'dist', 'ios', 'export')
   const ipaNames = readdirSync(exportDir)
@@ -1675,10 +1729,10 @@ function buildIosArtifacts({
     receipt.receiptSchema !== 1
     || receipt.artifactType !== 'iOS export from frozen xcarchive'
     || receipt.distribution !== 'app-store-connect'
-    || receipt.appGitSha !== candidateCommit
-    || receipt.appGitTree !== candidateTree
-    || identity.appBuildGitSha !== candidateCommit
-    || identity.packetTunnelBuildGitSha !== candidateCommit
+    || receipt.appGitSha !== archiveReceipt.appGitSha
+    || receipt.appGitTree !== archiveReceipt.appGitTree
+    || identity.appBuildGitSha !== archiveReceipt.appGitSha
+    || identity.packetTunnelBuildGitSha !== archiveReceipt.appGitSha
     || identity.appBundleIdentifier !== 'fi.siriusbusiness.nvpn'
     || identity.marketingVersion !== expectedVersion
     || !/^[1-9][0-9]*$/.test(String(identity.buildNumber ?? ''))
@@ -1707,6 +1761,7 @@ function buildIosArtifacts({
     export_receipt_sha256: sha256FileSync(receiptPath),
     signing_team_id: signing.signingTeamIdentifier,
     signer_certificate_sha256: signing.signerCertificateSha256,
+    source_equivalence: sourceEquivalence,
   }
 }
 

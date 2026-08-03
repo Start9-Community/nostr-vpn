@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { isDeepStrictEqual } from 'node:util'
 import {
   lstatSync,
   readFileSync,
@@ -19,6 +20,7 @@ import {
   semverFromTag,
   sha256FileSync,
 } from './local-release-lib.mjs'
+import { requireReceiptSource } from './release-artifact-provenance-lib.mjs'
 
 function exactFile(path, label) {
   const metadata = lstatSync(path)
@@ -89,9 +91,12 @@ function normalizedGate(value) {
     'signer_certificate_sha256',
     'signing_team_id',
   ]
+  const actualKeys = Object.keys(value).sort()
+  const exactKeys = keys.sort()
+  const proofKeys = [...keys, 'source_equivalence'].sort()
   if (
-    JSON.stringify(Object.keys(value).sort())
-    !== JSON.stringify(keys.sort())
+    JSON.stringify(actualKeys) !== JSON.stringify(exactKeys)
+    && JSON.stringify(actualKeys) !== JSON.stringify(proofKeys)
   ) {
     throw new Error('Frozen iOS App Store gate fields are not exact.')
   }
@@ -115,11 +120,19 @@ export function validateFrozenIosPublication({ repoRoot, stagedManifest }) {
   const identity = receipt.identity ?? {}
   const signing = receipt.signing ?? {}
   const ipa = statSync(ipaPath)
+  const sourceEquivalence = requireReceiptSource(receipt, {
+    commit: stagedManifest.commit,
+    tree: stagedManifest.release_gate_attestation?.app_git_tree,
+    label: 'Frozen iOS App Store export receipt',
+    candidateRoot: repoRoot,
+    platform: 'ios',
+  })
   if (
     gate.receipt_schema !== 1
-    || gate.app_git_sha !== stagedManifest.commit
-    || gate.app_git_tree
-      !== stagedManifest.release_gate_attestation?.app_git_tree
+    || !isDeepStrictEqual(
+      gate.source_equivalence ?? null,
+      sourceEquivalence,
+    )
     || gate.marketing_version !== semverFromTag(stagedManifest.tag)
     || gate.bundle_id !== 'fi.siriusbusiness.nvpn'
     || !/^[1-9][0-9]*$/.test(String(gate.build_number ?? ''))
