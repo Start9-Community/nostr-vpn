@@ -852,7 +852,8 @@ IOS_JOINER_ID="$(
   ios_marker_value_from "$ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID
 )"
 release_join_valid_npub "$IOS_JOINER_ID"
-release_join_ios_wait_marker NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10 \
+release_join_ios_wait_marker \
+  NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
   || { echo "iPhone did not submit through shipped manual-join controls" >&2; exit 1; }
 desktop_add_ios_log="$RESULT_DIR/macos/desktop-add-iphone.log"
 desktop_iphone_log_offset="$(remote daemon-log-offset)"

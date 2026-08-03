@@ -34,6 +34,28 @@ done
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 
 (
+  set -u
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-join-cleanup.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  PRIVATE_DIR="$private"
+  RESULT_DIR="$private"
+  RELEASE_JOIN_IOS_XCTESTRUN="$private/fixture.xctestrun"
+  RELEASE_JOIN_IOS_QUARANTINE="$private/quarantine"
+  NVPN_DEFAULT_IOS_BUNDLE_ID="fixture.join.bundle"
+  printf 'fixture\n' >"$RELEASE_JOIN_IOS_XCTESTRUN"
+  unset IOS_BUNDLE_ID
+  ios_release_network_disconnect_cleanup() {
+    [[ "$IOS_BUNDLE_ID" == "$NVPN_DEFAULT_IOS_BUNDLE_ID" ]]
+  }
+  release_join_arm_ios_disconnect_cleanup \
+    "$private/Nostr VPN.app" "$private/derived" fixture-device
+  release_join_cleanup_ios_network_state
+  [[ ! -e "$RELEASE_JOIN_IOS_QUARANTINE" ]]
+)
+
+(
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   release_join_android_launch() { :; }
   release_join_android_query() { return 1; }
@@ -828,7 +850,7 @@ if ios_qr_joiner_phase.index(
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE"
 ) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
-if ios_qr_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 1:
+if ios_qr_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2:
     raise SystemExit("iPhone QR readiness does not use the setup budget")
 
 ios_admin_android_manual_phase = gate.split(
@@ -850,6 +872,7 @@ if ios_admin_android_manual_phase.index(
 for required in (
     "release_join_ios_start_test",
     "NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=",
+    "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
     "release_join_android_wait_join_complete",
     "assert_delivery_deadline",
     "release_join_android_relaunch_and_wait_accepted",
@@ -859,6 +882,8 @@ for required in (
         raise SystemExit(
             f"iPhone-admin manual phase does not measure concurrent delivery: {required}"
         )
+if "RELEASE_JOIN_UI_WAIT_SECS" in ios_admin_android_manual_phase:
+    raise SystemExit("iPhone-admin setup incorrectly consumes the delivery/UI budget")
 if not (
     ios_admin_android_manual_phase.index("release_join_ios_start_test")
     < ios_admin_android_manual_phase.index("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=")
@@ -876,7 +901,6 @@ android_admin_ios_manual_phase = gate.split(
 )[1].split("release_join_require_clean_fips", 1)[0]
 for required in (
     "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
-    "RELEASE_JOIN_UI_WAIT_SECS",
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
     '[[ "$ios_joiner_relaunch_admin" == "$RELEASE_JOIN_ANDROID_ADMIN_ID" ]]',
     "RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE=1",
@@ -889,9 +913,9 @@ if android_admin_ios_manual_phase.index(
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE"
 ) < android_admin_ios_manual_phase.index("release_join_ios_finish_test"):
     raise SystemExit("iPhone-joiner relaunch evidence is read before XCTest completes")
-if android_admin_ios_manual_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 1 \
-        or android_admin_ios_manual_phase.count("RELEASE_JOIN_UI_WAIT_SECS") != 1:
-    raise SystemExit("iPhone manual join does not separate setup and UI budgets")
+if android_admin_ios_manual_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2 \
+        or "RELEASE_JOIN_UI_WAIT_SECS" in android_admin_ios_manual_phase:
+    raise SystemExit("iPhone manual-join setup does not use only the setup budget")
 for required in (
     "args.ios_admin_manual_relaunch_durable",
     "args.ios_joiner_manual_relaunch_durable",
@@ -908,12 +932,15 @@ macos_iphone_joiner_phase = desktop.split(
 )[1].split("# Physical iPhone admin -> macOS joiner.", 1)[0]
 for required in (
     "NVPN_RELEASE_JOIN_RELAUNCH_DURABLE",
+    "RELEASE_JOIN_IOS_SETUP_WAIT_SECS",
     '[[ "$iphone_joiner_relaunch_admin" == "$DESKTOP_IOS_ADMIN_ID" ]]',
 ):
     if required not in macos_iphone_joiner_phase:
         raise SystemExit(
             f"macOS/iPhone gate does not consume iPhone-joiner relaunch proof: {required}"
         )
+if macos_iphone_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2:
+    raise SystemExit("macOS/iPhone manual-join setup does not use the setup budget")
 
 ios_manual_admin = ios_test.split(
     "func testManualAdminAddRequiresRosterProgress()", 1

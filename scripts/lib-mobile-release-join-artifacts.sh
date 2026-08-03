@@ -7,6 +7,7 @@ RELEASE_JOIN_ARTIFACTS_VALIDATED=0
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=0
 RELEASE_JOIN_DEVICE_MUTATED=0
 RELEASE_JOIN_IOS_CLEANUP_ARMED=0
+RELEASE_JOIN_IOS_CLEANUP_BUNDLE_ID=""
 RELEASE_JOIN_INSTALL_ANDROID=1
 RELEASE_JOIN_INSTALL_IOS=1
 
@@ -677,6 +678,7 @@ release_join_arm_ios_disconnect_cleanup() {
   IOS_RELEASE_NETWORK_DERIVED_DATA="$derived"
   IOS_RELEASE_NETWORK_XCTESTRUN="$RELEASE_JOIN_IOS_XCTESTRUN"
   IOS_RELEASE_NETWORK_FROZEN_APP="$app"
+  RELEASE_JOIN_IOS_CLEANUP_BUNDLE_ID="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
   IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=1
   IOS_RELEASE_NETWORK_PREPARED=1
   NVPN_MOBILE_IOS_RELEASE_APP_PATH="$app"
@@ -687,7 +689,8 @@ release_join_arm_ios_disconnect_cleanup() {
 release_join_cleanup_ios_network_state() {
   local quarantine="${RELEASE_JOIN_IOS_QUARANTINE:?missing iOS quarantine path}"
   [[ "$RELEASE_JOIN_IOS_CLEANUP_ARMED" -eq 1 ]] || return 0
-  if ios_release_network_disconnect_cleanup; then
+  if IOS_BUNDLE_ID="${RELEASE_JOIN_IOS_CLEANUP_BUNDLE_ID:?missing scoped iOS cleanup bundle}" \
+      ios_release_network_disconnect_cleanup; then
     rm -f "$quarantine"
     return 0
   fi
