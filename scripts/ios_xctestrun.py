@@ -77,6 +77,15 @@ def environment_assignments(args: argparse.Namespace) -> list[tuple[str, str]]:
     return [parse_assignment(value) for value in values]
 
 
+def ui_target_environment_assignments(
+    args: argparse.Namespace,
+) -> list[tuple[str, str]]:
+    return [
+        parse_assignment(value)
+        for value in getattr(args, "ui_target_environment", [])
+    ]
+
+
 def xctestrun_targets(payload: dict[str, Any]) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
     legacy = payload.get("NostrVpnIosUITests")
@@ -227,6 +236,7 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
     payload = read_plist(source)
     targets = xctestrun_targets(payload)
     assignments = environment_assignments(args)
+    ui_target_assignments = ui_target_environment_assignments(args)
     app_bundle_id = runner_bundle_id = ""
     if args.use_destination_artifacts:
         app_bundle_id = read_plist(app / "Info.plist").get("CFBundleIdentifier")
@@ -248,7 +258,7 @@ def rewrite_xctestrun(args: argparse.Namespace) -> None:
             "xctestrun relies on destination-side products",
         )
         target["UITargetAppCommandLineArguments"] = []
-        target["UITargetAppEnvironmentVariables"] = {}
+        target["UITargetAppEnvironmentVariables"] = dict(ui_target_assignments)
         if args.use_destination_artifacts:
             target["UseDestinationArtifacts"] = True
             target["TestHostBundleIdentifier"] = runner_bundle_id

@@ -15,6 +15,7 @@ SOURCE="$PRODUCTS/NostrVpnIos_fixture.xctestrun"
 PRIVATE_DIR="$TMP_ROOT/private"
 OUTPUT="$PRIVATE_DIR/network-case.xctestrun"
 DESTINATION_OUTPUT="$PRIVATE_DIR/network-case-installed.xctestrun"
+APP_ENV_OUTPUT="$PRIVATE_DIR/import-case-installed.xctestrun"
 mkdir -p "$TEST_BUNDLE" "$TUNNEL" "$PRIVATE_DIR"
 chmod 700 "$PRIVATE_DIR"
 printf 'app\n' >"$APP/Nostr VPN"
@@ -110,6 +111,14 @@ python3 "$TOOL" rewrite-xctestrun \
   --target-app "$APP" \
   --use-destination-artifacts
 
+python3 "$TOOL" rewrite-xctestrun \
+  --source "$SOURCE" \
+  --output "$APP_ENV_OUTPUT" \
+  --products-root "$PRODUCTS" \
+  --target-app "$APP" \
+  --use-destination-artifacts \
+  --ui-target-environment NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT=1
+
 python3 - "$DESTINATION_OUTPUT" <<'PY'
 import pathlib
 import plistlib
@@ -136,6 +145,18 @@ for key in (
 ):
     if key in target:
         raise SystemExit(f"destination-artifact plan retains {key}")
+PY
+
+python3 - "$APP_ENV_OUTPUT" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+payload = plistlib.load(pathlib.Path(sys.argv[1]).open("rb"))
+target = payload["TestConfigurations"][0]["TestTargets"][0]
+expected = {"NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT": "1"}
+if target.get("UITargetAppEnvironmentVariables") != expected:
+    raise SystemExit("explicit QR-import app environment was not preserved exactly")
 PY
 
 python3 - \
