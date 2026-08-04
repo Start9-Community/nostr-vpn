@@ -25,6 +25,8 @@ const harnessOnlyPaths = new Set([
   'scripts/e2e-macos-service-toggle.sh',
   'scripts/e2e-macos-service.sh',
   'scripts/ios_xctestrun.py',
+  'scripts/ios_frozen_archive.py',
+  'scripts/ios_frozen_gate.py',
   'scripts/lib-ubuntu-vm-imported-release.sh',
   'scripts/lib-mobile-android-release-gate.sh',
   'scripts/lib-mobile-android-underlay.sh',
@@ -58,8 +60,6 @@ const buildScripts = {
   android: [/prepare-android-release-from-bundle/],
   ios: [
     /scripts\/ios-build$/,
-    /scripts\/ios_frozen_archive\.py$/,
-    /scripts\/ios_frozen_gate\.py$/,
     /scripts\/ios-profiles$/,
     /scripts\/ios_profile_certificate\.py$/,
     /lib-mobile-ios-release-artifact/,

@@ -271,7 +271,7 @@ test('component proof treats the iOS physical gate as harness-only', () => {
   }
 })
 
-test('component proof scopes release harnesses and iOS profile tooling exactly', () => {
+test('component proof separates iOS harness and profile build inputs', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-release-script-scope-'))
   const git = (...args) => {
     const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
@@ -279,8 +279,6 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     return result.stdout.trim()
   }
   const profilePaths = [
-    'scripts/ios_frozen_archive.py',
-    'scripts/ios_frozen_gate.py',
     'scripts/ios-profiles',
     'scripts/ios_profile_certificate.py',
   ]
@@ -288,6 +286,8 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
     'scripts/desktop_mobile_manual_join_receipt.py',
     'scripts/e2e-web-startos-manual-join-docker.sh',
     'scripts/ios_xctestrun.py',
+    'scripts/ios_frozen_archive.py',
+    'scripts/ios_frozen_gate.py',
     'scripts/lib-ubuntu-vm-imported-release.sh',
     'scripts/lib-mobile-release-artifact-reuse.sh',
     'scripts/lib-mobile-release-join-artifacts.sh',
@@ -363,11 +363,7 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
       candidateCommit: git('rev-parse', 'HEAD'),
       candidateTree: git('rev-parse', 'HEAD^{tree}'),
     }
-    assert.throws(
-      () => proveUnchangedPlatformInputs({ ...archiveArgs, platform: 'ios' }),
-      /changed product\/build input scripts\/ios_frozen_archive\.py/,
-    )
-    for (const platform of ['android', 'linux', 'macos', 'windows']) {
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
       proveUnchangedPlatformInputs({ ...archiveArgs, platform })
     }
 
@@ -383,11 +379,7 @@ test('component proof scopes release harnesses and iOS profile tooling exactly',
       candidateCommit: git('rev-parse', 'HEAD'),
       candidateTree: git('rev-parse', 'HEAD^{tree}'),
     }
-    assert.throws(
-      () => proveUnchangedPlatformInputs({ ...gateArgs, platform: 'ios' }),
-      /changed product\/build input scripts\/ios_frozen_gate\.py/,
-    )
-    for (const platform of ['android', 'linux', 'macos', 'windows']) {
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
       proveUnchangedPlatformInputs({ ...gateArgs, platform })
     }
 
