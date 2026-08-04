@@ -121,7 +121,9 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         selectImportedImage(named: imageFilename)
         emit("NVPN_RELEASE_JOIN_IMAGE_SELECTED=1")
 
-        let confirm = element("join-request-confirm-add")
+        let confirm = app.buttons
+            .matching(identifier: "join-request-confirm-add")
+            .firstMatch
         XCTAssertTrue(
             confirm.waitForExistence(timeout: importTimeout),
             "Production decoder did not read the other phone's captured join QR"
@@ -434,16 +436,40 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             .deletingPathExtension()
             .lastPathComponent
 
-        if tapFile(named: displayedFilename, in: roots, timeout: 1) {
+        if tapImportedDocument(named: displayedFilename, in: roots, timeout: 1) {
             return
         }
         XCTAssertTrue(tapFile(named: "Browse", in: roots, timeout: 2))
         XCTAssertTrue(tapFile(named: "On My iPhone", in: roots, timeout: 2))
         XCTAssertTrue(tapFile(named: "Nostr VPN Test Files", in: roots, timeout: 2))
         XCTAssertTrue(
-            tapFile(named: displayedFilename, in: roots, timeout: 4),
+            tapImportedDocument(named: displayedFilename, in: roots, timeout: 4),
             "Staged QR screenshot was not selectable through the public Files picker"
         )
+    }
+
+    private func tapImportedDocument(
+        named filename: String,
+        in roots: [XCUIApplication],
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let documentPredicate = NSPredicate(
+            format: "identifier BEGINSWITH %@ OR label BEGINSWITH %@",
+            "\(filename),",
+            "\(filename),"
+        )
+        repeat {
+            for root in roots {
+                let document = root.cells.matching(documentPredicate).firstMatch
+                if document.exists && document.isHittable {
+                    document.tap()
+                    return waitUntil(timeout: timeout) { !document.exists }
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
     }
 
     private func tapFile(
