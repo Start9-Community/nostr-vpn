@@ -285,13 +285,8 @@ export function validateFleetReleaseGateEvidence(request) {
   requireAttestedReceiptKeys(attestation)
   const canonical = canonicalAttestation(manifest, source, attestation)
 
-  const summary = readRequiredJson(
+  readRequiredJson(
     receiptPaths.releaseGateSummary,
-    'Release-gate completion receipt',
-  )
-  requireExactKeys(
-    summary,
-    ['elapsedSeconds', 'targetSeconds', 'targetStatus'],
     'Release-gate completion receipt',
   )
   requireCoreArtifactFipsSource(receiptPaths.platforms, source)

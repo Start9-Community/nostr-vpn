@@ -1430,6 +1430,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     'local-release-lib.mjs',
     'release-source-verification.mjs',
     'release-artifact-provenance-lib.mjs',
+    'release-gate-resume.mjs',
     'release-component-source.mjs',
     'fleet-release-publication-lib.mjs',
     'fleet-release-preparer-lib.mjs',
@@ -1920,6 +1921,18 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
         'npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm',
     },
   }
+  const conflictingResume = spawnSync(
+    process.execPath,
+    [...releaseArgs, '--complete-gate-from-receipts'],
+    releaseOptions,
+  )
+  assert.equal(conflictingResume.status, 1)
+  assert.match(
+    conflictingResume.stderr,
+    /complete-gate-from-receipts cannot be combined/i,
+  )
+  assert.equal(readFileSync(htreeLog, 'utf8'), '')
+
   const unexpectedStagePath = join(stage, 'unsealed.txt')
   writeFileSync(unexpectedStagePath, 'not in the staged manifest\n')
   const unexpectedStageResult = spawnSync(

@@ -8,6 +8,7 @@ import {
   readSync,
 } from 'node:fs'
 import { basename } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 import { proveUnchangedPlatformInputs } from './release-component-source.mjs'
 
@@ -1230,11 +1231,86 @@ function requireDesktopNetworkReceipt({
   }
 }
 
-export function collectReleaseGateReceipts({
+function requireReleaseGateSummary(summary, {
+  commit,
+  tree,
+  platformGateReceipts,
+  platformSourceEquivalence,
+}) {
+  if (
+    !Number.isSafeInteger(summary.elapsedSeconds)
+    || summary.elapsedSeconds <= 0
+    || !Number.isSafeInteger(summary.targetSeconds)
+    || summary.targetSeconds <= 0
+  ) {
+    throw new Error('Release-gate completion receipt is incomplete.')
+  }
+  if (!Object.hasOwn(summary, 'receiptSchema')) {
+    if (
+      Object.keys(summary).sort().join(',')
+        !== 'elapsedSeconds,targetSeconds,targetStatus'
+    ) {
+      throw new Error(
+        'Release-gate completion receipt must contain exactly: elapsedSeconds, targetSeconds, targetStatus.',
+      )
+    }
+    if (!['met', 'missed'].includes(summary.targetStatus)) {
+      throw new Error('Release-gate completion receipt is incomplete.')
+    }
+    return
+  }
+  const expectedKeys = [
+    'appGitSha',
+    'appGitTree',
+    'completionMode',
+    'elapsedScope',
+    'elapsedSeconds',
+    'platformGateReceipts',
+    'platformSourceEquivalence',
+    'receiptSchema',
+    'targetSeconds',
+    'targetStatus',
+    'validatorGitSha',
+    'validatorGitTree',
+  ].sort()
+  const actualKeys = Object.keys(summary).sort()
+  if (
+    actualKeys.length !== expectedKeys.length
+    || actualKeys.some((key, index) => key !== expectedKeys[index])
+    || summary.receiptSchema !== 2
+    || summary.completionMode !== 'validated-existing-concrete-receipts'
+    || summary.elapsedScope !== 'receipt-validation-only'
+    || summary.targetStatus !== 'not-measured'
+    || summary.appGitSha !== commit
+    || summary.appGitTree !== tree
+    || summary.validatorGitSha !== commit
+    || summary.validatorGitTree !== tree
+  ) {
+    throw new Error(
+      'Resumed release-gate completion receipt is not bound to the exact candidate, validator, and concrete receipts.',
+    )
+  }
+  if (
+    platformGateReceipts
+    && (
+      !isDeepStrictEqual(summary.platformGateReceipts, platformGateReceipts)
+      || !isDeepStrictEqual(
+        summary.platformSourceEquivalence,
+        platformSourceEquivalence,
+      )
+    )
+  ) {
+    throw new Error(
+      'Resumed release-gate completion receipt is not bound to the exact candidate, validator, and concrete receipts.',
+    )
+  }
+}
+
+function collectReleaseGateEvidence({
   commit,
   tree,
   candidateRoot,
-  releaseGateSummaryPath,
+  releaseGateSummaryPath = null,
   platformReceiptPaths,
 }) {
   const platformSourceEquivalence = {}
@@ -1246,19 +1322,13 @@ export function collectReleaseGateReceipts({
     if (proof) platformSourceEquivalence[platform] = proof
     return source
   }
-  const summary = readRequiredJson(
-    releaseGateSummaryPath,
-    'Release-gate completion receipt',
-  )
-  if (
-    !Number.isSafeInteger(summary.elapsedSeconds)
-    || summary.elapsedSeconds <= 0
-    || !Number.isSafeInteger(summary.targetSeconds)
-    || summary.targetSeconds <= 0
-    || !['met', 'missed'].includes(summary.targetStatus)
-  ) {
-    throw new Error('Release-gate completion receipt is incomplete.')
-  }
+  const summary = releaseGateSummaryPath
+    ? readRequiredJson(
+      releaseGateSummaryPath,
+      'Release-gate completion receipt',
+    )
+    : null
+  if (summary) requireReleaseGateSummary(summary, { commit, tree })
 
   const android = readRequiredJson(
     platformReceiptPaths.android.physical,
@@ -1631,8 +1701,7 @@ export function collectReleaseGateReceipts({
     })
   }
 
-  return {
-    releaseGateSummarySha256: sha256FileSync(releaseGateSummaryPath),
+  const evidence = {
     platformGateReceipts: Object.fromEntries(
       Object.entries(platformReceiptPaths).map(([platform, receipts]) => [
         platform,
@@ -1646,6 +1715,31 @@ export function collectReleaseGateReceipts({
     ),
     platformSourceEquivalence,
   }
+  if (summary) {
+    requireReleaseGateSummary(summary, {
+      commit,
+      tree,
+      ...evidence,
+    })
+    evidence.releaseGateSummarySha256 = sha256FileSync(
+      releaseGateSummaryPath,
+    )
+  }
+  return evidence
+}
+
+export function collectConcreteReleaseGateReceipts(args) {
+  return collectReleaseGateEvidence({
+    ...args,
+    releaseGateSummaryPath: null,
+  })
+}
+
+export function collectReleaseGateReceipts(args) {
+  if (!args?.releaseGateSummaryPath) {
+    throw new Error('Release-gate completion receipt path is missing.')
+  }
+  return collectReleaseGateEvidence(args)
 }
 
 export function releaseAssetSetSha256(assets) {

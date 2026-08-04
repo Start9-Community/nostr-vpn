@@ -88,6 +88,7 @@ import {
   linuxPublicationVerificationPlan,
   validateWindowsPublicationFipsReceipts,
 } from './release-source-verification.mjs'
+import { completeReleaseGateFromReceipts } from './release-gate-resume.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -135,6 +136,8 @@ Options:
   --skip-verify            Skip fmt/clippy/test verification
   --reuse-gate-receipts    Validate and reuse the complete existing gate receipt set
                             instead of executing the platform gate again
+  --complete-gate-from-receipts
+                            Validate canonical receipts and write the completion summary
   --tag <tag>              Release tag (defaults to workspace version, for example v4.0.0)
   --release-tree <name>    htree release tree name (default: releases/nostr-vpn)
   --stage-dir <path>       Directory used for staged release metadata
@@ -166,6 +169,7 @@ function parseArgs(argv) {
     requireZapstore: false,
     skipVerify: false,
     reuseGateReceipts: false,
+    completeGateFromReceipts: false,
     releaseTree: null,
     stageDir: null,
     tag: null,
@@ -234,6 +238,9 @@ function parseArgs(argv) {
         break
       case '--reuse-gate-receipts':
         options.reuseGateReceipts = true
+        break
+      case '--complete-gate-from-receipts':
+        options.completeGateFromReceipts = true
         break
       case '--tag':
         options.tag = normalizeTag(argv[++index] ?? '')
@@ -2449,6 +2456,29 @@ function main() {
   const artifactProofs = {}
 
   if (
+    options.completeGateFromReceipts
+    && (
+      options.dryRun
+      || options.publish
+      || options.publishStagedDraft
+      || options.promoteDraft
+      || options.reuseGateReceipts
+      || options.skipVerify
+      || options.only
+      || options.skip.size > 0
+      || allowPartial
+      || options.cargoPublish
+      || options.skipCargoPublish
+      || options.skipZapstore
+      || options.requireZapstore
+    )
+  ) {
+    throw new Error(
+      '--complete-gate-from-receipts cannot be combined with build, partial, dry-run, or publication modes.',
+    )
+  }
+
+  if (
     options.reuseGateReceipts
     && (
       options.skipVerify
@@ -2633,6 +2663,21 @@ function main() {
     options.dryRun || options.promoteDraft
       ? ''
       : gitTree(candidateCommit)
+
+  if (options.completeGateFromReceipts) {
+    const result = completeReleaseGateFromReceipts({
+      commit: candidateCommit,
+      tree: candidateTree,
+      candidateRoot: repoRoot,
+      releaseGateSummaryPath,
+      platformReceiptPaths,
+      targetSeconds: Number(env.NVPN_RELEASE_GATE_TARGET_SECS || 1_800),
+    })
+    console.log(
+      `${result.created ? 'Created' : 'Validated existing'} exact release-gate completion receipt: ${releaseGateSummaryPath}`,
+    )
+    return
+  }
 
   if (options.promoteDraft) {
     if (!commandExists('htree')) {
