@@ -1058,6 +1058,11 @@ if (
     > archive.index("write_frozen_archive_receipt")
 ):
     raise SystemExit("frozen archive does not restore generated source before freezing")
+restore = ios_build.split("restore_generated_ios_project() {", 1)[1].split(
+    "\n}", 1
+)[0]
+if '>"$PROJECT/project.pbxproj"' not in restore:
+    raise SystemExit("generated iOS project restore targets the .xcodeproj directory")
 recovery = (
     'if [[ -d "$ARCHIVE_PATH" '
     '&& ! -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then'

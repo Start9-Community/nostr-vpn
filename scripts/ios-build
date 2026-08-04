@@ -280,7 +280,7 @@ write_frozen_archive_receipt() {
 restore_generated_ios_project() {
   git -C "$ROOT" show \
     "$NVPN_BUILD_GIT_SHA:ios/NostrVpnIos.xcodeproj/project.pbxproj" \
-    >"$PROJECT"
+    >"$PROJECT/project.pbxproj"
 }
 
 run_ios_archive() {
