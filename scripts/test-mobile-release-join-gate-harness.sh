@@ -96,6 +96,41 @@ do
     exit 1
   }
 done
+
+(
+  # Xcode's generated runner app owns the staged Documents container. Settings
+  # on the nested .xctest bundle cannot make that container visible in Files.
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-runner-files.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  PRIVATE_DIR="$tmp/private"
+  runner="$tmp/NostrVpnIosUITests-Runner.app"
+  mkdir -p "$PRIVATE_DIR" "$runner"
+  plutil -create xml1 "$runner/Info.plist"
+  plutil -insert CFBundleIdentifier \
+    -string fixture.runner.xctrunner "$runner/Info.plist"
+  codesign() {
+    local argument prefix=""
+    printf '%s\n' "$*" >>"$tmp/codesign.log"
+    for argument in "$@"; do
+      [[ "$argument" != --extract-certificates=* ]] \
+        || prefix="${argument#--extract-certificates=}"
+    done
+    [[ -z "$prefix" ]] || printf 'fixture certificate\n' >"${prefix}0"
+  }
+  release_join_expose_ios_runner_documents "$runner"
+  [[ "$(plutil -extract CFBundleDisplayName raw "$runner/Info.plist")" \
+    == "Nostr VPN Test Files" ]]
+  [[ "$(plutil -extract UIFileSharingEnabled raw "$runner/Info.plist")" \
+    == true ]]
+  [[ "$(plutil -extract LSSupportsOpeningDocumentsInPlace raw \
+    "$runner/Info.plist")" == true ]]
+  grep -Eq -- \
+    '--force --sign [0-9a-f]{40} --preserve-metadata=identifier,entitlements,requirements,flags,runtime' \
+    "$tmp/codesign.log"
+  grep -Fq -- '--verify --deep --strict' "$tmp/codesign.log"
+)
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 
 (
@@ -688,13 +723,25 @@ if '$RESULT_DIR/macos/artifact.json"' in run_only.split(
 for forbidden in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace"):
     if forbidden in ios_info:
         raise SystemExit(f"Production iOS app exposes test fixture storage: {forbidden}")
-for required in (
-    "INFOPLIST_KEY_UIFileSharingEnabled: YES",
-    "INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES",
+for forbidden in (
+    "INFOPLIST_KEY_UIFileSharingEnabled",
+    "INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace",
     "INFOPLIST_KEY_CFBundleDisplayName: Nostr VPN Test Files",
 ):
-    if required not in ios_project:
-        raise SystemExit(f"Persistent iOS UI runner lacks public fixture storage: {required}")
+    if forbidden in ios_project:
+        raise SystemExit(
+            f"iOS fixture storage is incorrectly configured on the nested test bundle: {forbidden}"
+        )
+
+prepare_ios = artifacts[
+    artifacts.index("release_join_prepare_ios_release()"):
+    artifacts.index("release_join_restart_ios_in_place()")
+]
+runner_exposure = 'release_join_expose_ios_runner_documents "$runner"'
+if runner_exposure not in prepare_ios:
+    raise SystemExit("iOS join build does not expose the outer runner Documents container")
+if prepare_ios.index(runner_exposure) > prepare_ios.index("create-ios-join-variant"):
+    raise SystemExit("iOS runner fixture storage is changed after its artifact receipt")
 
 install_ios = artifacts[
     artifacts.index("release_join_install_ios_release()"):
