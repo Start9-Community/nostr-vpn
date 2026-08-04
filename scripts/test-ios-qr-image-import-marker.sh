@@ -15,7 +15,11 @@ source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 PRIVATE_DIR="$TMP_ROOT/private"
 RELEASE_JOIN_IOS_UDID="fixture-device"
 RELEASE_JOIN_IOS_APP_PATH="$TMP_ROOT/Nostr VPN.app"
-mkdir -p "$PRIVATE_DIR" "$RELEASE_JOIN_IOS_APP_PATH"
+remote_marker="$TMP_ROOT/device-group/Nostr VPN/UITestCapability/probe"
+mkdir -p \
+  "$PRIVATE_DIR" "$RELEASE_JOIN_IOS_APP_PATH" \
+  "$(dirname "$remote_marker")"
+: >"$remote_marker"
 plutil -create xml1 "$RELEASE_JOIN_IOS_APP_PATH/Info.plist"
 plutil -insert NVPNAppGroupIdentifier -string group.fixture.frozen \
   "$RELEASE_JOIN_IOS_APP_PATH/Info.plist"
@@ -28,6 +32,8 @@ xcrun() {
     && "${11}" == --source \
     && "${13} ${14}" == "--destination Nostr VPN/UITestCapability/probe" \
     && "${15}" == --quiet ]] || return 1
+  [[ -f "$remote_marker" ]] || return 1
+  cp "${12}" "$remote_marker"
   calls=$((calls + 1))
   if [[ "$(sed -n '1p' "${12}")" == invalid ]]; then
     invalid_calls=$((invalid_calls + 1))
@@ -43,6 +49,7 @@ release_join_ios_prepare_target_app testCreateAdminNetworkAndReportPublicValues
 release_join_ios_prepare_target_app testImportJoinQrImageAndRequireAdminRosterProgress
 release_join_ios_cleanup_qr_import_marker
 [[ "$calls" -eq 2 && "$valid_calls" -eq 1 && "$invalid_calls" -eq 1 \
-  && "$RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED" -eq 0 ]] \
+  && "$RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED" -eq 0 \
+  && "$(sed -n '1p' "$remote_marker")" == invalid ]] \
   || { echo "QR import marker staging/cleanup contract failed" >&2; exit 1; }
 echo "iOS QR image import marker tests passed"

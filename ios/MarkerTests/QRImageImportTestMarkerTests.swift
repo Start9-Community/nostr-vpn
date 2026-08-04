@@ -30,19 +30,42 @@ struct QRImageImportTestMarkerTests {
             try Data(payload.utf8).write(to: marker, options: .atomic)
         }
 
+        func requireInertMarker(_ message: String) throws {
+            require(files.fileExists(atPath: marker.path), "\(message): marker path disappeared")
+            let data = try Data(contentsOf: marker)
+            require(data.isEmpty, "\(message): marker was still armed")
+        }
+
+        func overwriteExisting(_ payload: String) throws {
+            require(files.fileExists(atPath: marker.path), "CoreDevice overwrite target was missing")
+            try Data(payload.utf8).write(to: marker)
+        }
+
         try write("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
         require(QRImageImportTestMarker.consume(in: root, now: now), "valid marker rejected")
-        require(!files.fileExists(atPath: marker.path), "valid marker was not deleted")
+        try requireInertMarker("valid consume")
         require(!files.fileExists(atPath: legacy.path), "legacy probe was not removed")
         require(!QRImageImportTestMarker.consume(in: root, now: now), "marker was not one-shot")
+        try requireInertMarker("second consume")
 
-        try write("\(QRImageImportTestMarker.payloadVersion)\n\(now - 61)\n\(token)\n")
+        try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
+        require(
+            QRImageImportTestMarker.consume(in: root, now: now),
+            "existing marker path could not be rearmed"
+        )
+        try requireInertMarker("rearmed consume")
+
+        try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now - 61)\n\(token)\n")
         require(!QRImageImportTestMarker.consume(in: root, now: now), "stale marker accepted")
-        require(!files.fileExists(atPath: marker.path), "stale marker was not deleted")
+        try requireInertMarker("stale consume")
 
-        try write("invalid\n0\nnot-a-uuid\n")
+        try overwriteExisting("invalid\n0\nnot-a-uuid\n")
         require(!QRImageImportTestMarker.consume(in: root, now: now), "invalid marker accepted")
-        require(!files.fileExists(atPath: marker.path), "invalid marker was not deleted")
+        try requireInertMarker("invalid consume")
+
+        try files.removeItem(at: marker)
+        require(!QRImageImportTestMarker.consume(in: root, now: now), "missing marker accepted")
+        try requireInertMarker("missing consume")
         require(!QRImageImportTestMarker.consume(in: nil, now: now), "missing group accepted")
     }
 }
