@@ -16,16 +16,20 @@ scanner, tests, app_model, project, harness = (
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 )
 for required in (
-    "QRImageImportAvailability.isDeviceSpecificProvisionedApp",
-    'forResource: "embedded"',
-    'withExtension: "mobileprovision"',
-    'profile["ProvisionsAllDevices"] as? Bool != true',
-    'profile["ProvisionedDevices"] as? [String]',
+    "#if NVPN_RELEASE_JOIN_TESTING",
+    "private let imageImportEnabled = true",
+    "private let imageImportEnabled = false",
 ):
     if required not in scanner:
-        raise SystemExit(f"QR importer lacks Ad Hoc test-export gating: {required}")
+        raise SystemExit(f"QR importer lacks compile-time test gating: {required}")
 if "NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT" in scanner:
     raise SystemExit("QR importer retains unreliable environment transport")
+camera = scanner.split("QRCodeScannerView(", 1)[1].split("VStack(spacing: 10)", 1)[0]
+if '.accessibilityIdentifier("qr-scanner-camera")' not in camera:
+    raise SystemExit("QR scanner identifier is not scoped to the camera view")
+container = scanner.split("VStack(spacing: 10)", 1)[1].split(".fileImporter(", 1)[0]
+if '.accessibilityIdentifier("qr-scanner-camera")' in container:
+    raise SystemExit("QR scanner identifier leaks onto child controls")
 
 setup = tests.split("override func setUpWithError() throws", 1)[1].split(
     "func testCreateAdminNetworkAndReportPublicValues()", 1

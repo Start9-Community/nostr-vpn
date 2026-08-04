@@ -241,7 +241,7 @@ phase_ios_admin_android_qr() {
     "NVPN_RELEASE_JOIN_IMAGE_FILENAME=$IOS_QR_STAGED_FILENAME" \
     "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMPORT_READY=1 \
-    "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
+    "$((RELEASE_JOIN_IOS_SETUP_WAIT_SECS + RELEASE_JOIN_UI_WAIT_SECS))" \
     || fail "iPhone did not open its shipped QR image importer"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_IMAGE_IMPORTED=1 \
     "$RELEASE_JOIN_IMPORT_WAIT_SECS" \

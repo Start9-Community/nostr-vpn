@@ -876,11 +876,9 @@ for required in (
     if required not in ios_test:
         raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
 for required in (
-    "QRImageImportAvailability.isDeviceSpecificProvisionedApp",
-    'forResource: "embedded"',
-    'withExtension: "mobileprovision"',
-    'profile["ProvisionsAllDevices"] as? Bool != true',
-    'profile["ProvisionedDevices"] as? [String]',
+    "#if NVPN_RELEASE_JOIN_TESTING",
+    "private let imageImportEnabled = true",
+    "private let imageImportEnabled = false",
     "if imageImportEnabled",
     "join-request-import-image",
     "Import QR Image",
@@ -889,6 +887,16 @@ for required in (
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
 if "NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT" in ios_qr_scanner:
     raise SystemExit("iOS scanner retains unreliable environment transport")
+camera = ios_qr_scanner.split("QRCodeScannerView(", 1)[1].split(
+    "VStack(spacing: 10)", 1
+)[0]
+if '.accessibilityIdentifier("qr-scanner-camera")' not in camera:
+    raise SystemExit("iOS scanner identifier is not scoped to the camera view")
+container = ios_qr_scanner.split("VStack(spacing: 10)", 1)[1].split(
+    ".fileImporter(", 1
+)[0]
+if '.accessibilityIdentifier("qr-scanner-camera")' in container:
+    raise SystemExit("iOS scanner identifier leaks onto child controls")
 for forbidden in (
     "QRImageImportTestMarker",
     "nvpn-release-join-qr-image-import",
@@ -1364,6 +1372,7 @@ for source, label, required_tokens in (
 for required in (
     "-configuration Release",
     "build-for-testing",
+    "'OTHER_SWIFT_FLAGS=$(inherited) -DNVPN_RELEASE_JOIN_TESTING'",
     "NVPN_IOS_PROFILE_TYPE=IOS_APP_ADHOC",
     "Apple Distribution",
     "codesign --verify --deep --strict",

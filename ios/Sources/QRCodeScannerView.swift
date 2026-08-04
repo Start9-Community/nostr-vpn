@@ -4,34 +4,6 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-private enum QRImageImportAvailability {
-    static var isDeviceSpecificProvisionedApp: Bool {
-        guard
-            let profileURL = Bundle.main.url(
-                forResource: "embedded",
-                withExtension: "mobileprovision"
-            ),
-            let profileData = try? Data(contentsOf: profileURL),
-            let xmlStart = profileData.range(of: Data("<?xml".utf8)),
-            let xmlEnd = profileData.range(
-                of: Data("</plist>".utf8),
-                in: xmlStart.lowerBound..<profileData.endIndex
-            ),
-            let profile = try? PropertyListSerialization.propertyList(
-                from: profileData.subdata(
-                    in: xmlStart.lowerBound..<xmlEnd.upperBound
-                ),
-                format: nil
-            ) as? [String: Any],
-            profile["ProvisionsAllDevices"] as? Bool != true,
-            let devices = profile["ProvisionedDevices"] as? [String]
-        else {
-            return false
-        }
-        return !devices.isEmpty
-    }
-}
-
 @MainActor
 struct QRCodeScannerSheet: View {
     let onCode: (String) -> Void
@@ -41,8 +13,11 @@ struct QRCodeScannerSheet: View {
     @State private var finished = false
     @State private var importingImage = false
     @State private var importTask: Task<Void, Never>?
-    private let imageImportEnabled =
-        QRImageImportAvailability.isDeviceSpecificProvisionedApp
+    #if NVPN_RELEASE_JOIN_TESTING
+    private let imageImportEnabled = true
+    #else
+    private let imageImportEnabled = false
+    #endif
 
     var body: some View {
         NavigationStack {
@@ -52,6 +27,7 @@ struct QRCodeScannerSheet: View {
                     onCode: acceptCameraCode,
                     onError: { error = $0 }
                 )
+                .accessibilityIdentifier("qr-scanner-camera")
                 .ignoresSafeArea()
 
                 VStack(spacing: 10) {
@@ -81,7 +57,6 @@ struct QRCodeScannerSheet: View {
                 .padding(.horizontal)
                 .padding(.bottom, 18)
             }
-            .accessibilityIdentifier("qr-scanner-camera")
             .fileImporter(
                 isPresented: $imageImporterPresented,
                 allowedContentTypes: [.image],
