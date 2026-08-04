@@ -14,7 +14,8 @@ release_join_load_reused_artifact_sources() {
   local android_source ios_source extra
   for name in \
     NVPN_RELEASE_JOIN_ANDROID_RECEIPT \
-    NVPN_RELEASE_JOIN_IOS_RECEIPT
+    NVPN_RELEASE_JOIN_IOS_RECEIPT \
+    NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT
   do
     [[ -s "${!name:-}" ]] || {
       echo "Strict Release join artifact reuse requires $name" >&2
@@ -31,7 +32,7 @@ release_join_load_reused_artifact_sources() {
     python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
       artifact-source \
       --receipt "$NVPN_RELEASE_JOIN_IOS_RECEIPT" \
-      --artifact-type "iOS company Ad Hoc Release app"
+      --artifact-type "iOS Ad Hoc Release join-test variant"
   )" || return 1
   IFS=$'\t' read -r \
     RELEASE_JOIN_ANDROID_APP_SHA RELEASE_JOIN_ANDROID_APP_TREE extra \
@@ -284,7 +285,8 @@ PY
     --signer-sha "$app_cert" \
     --app-cdhash "$app_cdhash" \
     --tunnel-cdhash "$tunnel_cdhash" \
-    --device-identifier-sha "$device_identifier_sha"
+    --device-identifier-sha "$device_identifier_sha" \
+    --production-receipt "$NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT"
   then
     echo "Reused iOS Release artifact receipt validation failed" >&2
     return 1

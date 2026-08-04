@@ -12,6 +12,7 @@ LINUX_HELPER="$APP/scripts/fleet_release_canary_remote_linux.py"
 WINDOWS_HELPER="$APP/scripts/fleet_release_canary_remote_windows.ps1"
 GATE_VALIDATOR="$APP/scripts/fleet-release-gate-evidence.mjs"
 PROVENANCE_LIB="$APP/scripts/release-artifact-provenance-lib.mjs"
+COMPONENT_SOURCE_LIB="$APP/scripts/release-component-source.mjs"
 DRIVER_LOG="$WORK/driver.log"
 PYTHONPATH="$ROOT/scripts" python3 - <<'PY'
 from fleet_release_canary import ARCHES
@@ -720,6 +721,7 @@ printf '# fixture linux helper\n' >"$LINUX_HELPER"
 printf '# fixture windows helper\n' >"$WINDOWS_HELPER"
 cp "$ROOT/scripts/fleet-release-gate-evidence.mjs" "$GATE_VALIDATOR"
 cp "$ROOT/scripts/release-artifact-provenance-lib.mjs" "$PROVENANCE_LIB"
+cp "$ROOT/scripts/release-component-source.mjs" "$COMPONENT_SOURCE_LIB"
 
 git -C "$APP" init -q
 git -C "$APP" config user.name fixture

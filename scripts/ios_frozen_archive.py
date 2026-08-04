@@ -779,6 +779,7 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--archive-receipt", required=True)
     seal.add_argument("--adhoc-receipt", required=True)
     seal.add_argument("--mobile-receipt", required=True)
+    seal.add_argument("--mobile-join-ios-variant-receipt", required=True)
     seal.add_argument("--mobile-join-receipt", required=True)
     seal.add_argument("--mobile-wg-receipt", required=True)
     seal.add_argument("--mobile-underlay-receipt", required=True)
@@ -791,6 +792,9 @@ def parser() -> argparse.ArgumentParser:
     validate_seal.add_argument("--archive-receipt", required=True)
     validate_seal.add_argument("--adhoc-receipt", required=True)
     validate_seal.add_argument("--sealed-mobile-receipt", required=True)
+    validate_seal.add_argument(
+        "--mobile-join-ios-variant-receipt", required=True
+    )
     validate_seal.add_argument("--mobile-join-receipt", required=True)
     validate_seal.add_argument("--mobile-wg-receipt", required=True)
     validate_seal.add_argument("--mobile-underlay-receipt", required=True)

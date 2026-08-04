@@ -77,6 +77,7 @@ GATE_VALIDATOR_TIMEOUT_SECONDS = 30
 INSTALL_AUTHORIZATION_EXPIRED = 77
 GATE_RECEIPT_KEYS = {
     "android": {
+        "install",
         "physical",
         "mobile_join",
         "wireguard_dns",
@@ -86,6 +87,7 @@ GATE_RECEIPT_KEYS = {
     "ios": {
         "desktop_mobile_join",
         "frozen_archive",
+        "join_variant",
         "mobile_artifact",
         "mobile_join",
         "wireguard_dns",

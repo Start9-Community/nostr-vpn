@@ -387,7 +387,9 @@ def validate_mobile_receipt(
 
 def validate_mobile_join_receipt(
     receipt: dict[str, Any],
-    mobile_artifact: dict[str, Any],
+    join_variant: dict[str, Any],
+    join_variant_receipt_sha256: str,
+    production_receipt_sha256: str,
 ) -> None:
     artifact = receipt.get("artifact")
     ios = artifact.get("ios") if isinstance(artifact, dict) else None
@@ -395,7 +397,12 @@ def validate_mobile_join_receipt(
         receipt.get("schema") == 1
         and receipt.get("platform") == "mobile"
         and receipt.get("publicUiOnly") is True
-        and receipt.get("productionImageImportQr") is True
+        and receipt.get("productionImageImportQr") is False
+        and receipt.get("iosJoinTestVariant") is True
+        and receipt.get("testOnlyImageImportQr") is True
+        and receipt.get("productionQrDecoderPath") is True
+        and receipt.get("productionJoinApprovalPath") is True
+        and receipt.get("productionRosterPath") is True
         and isinstance(receipt.get("actualRenderedQrScreenCapture"), dict)
         and receipt.get("privateAppStateRead") is False
         and receipt.get("appLaunchArgumentsOrEnvironment") is False
@@ -405,8 +412,19 @@ def validate_mobile_join_receipt(
     )
     require(
         isinstance(artifact, dict)
-        and isinstance(ios, dict),
-        "mobile join receipt is not source-bound to the iOS artifact",
+        and isinstance(ios, dict)
+        and ios.get("artifactReceiptSha256")
+        == join_variant_receipt_sha256
+        and ios.get("productionArtifactReceiptSha256")
+        == production_receipt_sha256,
+        "mobile join receipt is not bound to the iOS join-test variant",
+    )
+    require(
+        ios.get("joinTestingCompilationCondition")
+        == "NVPN_RELEASE_JOIN_TESTING"
+        and ios.get("joinTestingCompilationConditionEnabled") is True
+        and ios.get("productionAppByteIdentical") is False,
+        "mobile join receipt does not identify its iOS join-test variant",
     )
     captures = receipt["actualRenderedQrScreenCapture"]
     for field in (
@@ -428,8 +446,8 @@ def validate_mobile_join_receipt(
         "installedBundleIdentifier",
     ):
         require(
-            ios.get(field) == mobile_artifact.get(field)
-            and bool(mobile_artifact.get(field)),
+            ios.get(field) == join_variant.get(field)
+            and bool(join_variant.get(field)),
             f"mobile join receipt iOS identity differs at {field}",
         )
     expected_timings = {
@@ -480,6 +498,55 @@ def validate_mobile_join_receipt(
         and content_width.get("iosObservedBasisPoints") <= 10_000,
         "mobile join receipt lacks strict public-UI/relaunch semantics",
     )
+
+
+def validate_join_variant_receipt(
+    variant: dict[str, Any],
+    production: dict[str, Any],
+    production_receipt_sha256: str,
+) -> None:
+    require(
+        variant.get("receiptSchema") == 2
+        and variant.get("artifactType")
+        == "iOS Ad Hoc Release join-test variant"
+        and variant.get("joinTestingCompilationCondition")
+        == "NVPN_RELEASE_JOIN_TESTING"
+        and variant.get("joinTestingCompilationConditionEnabled") is True
+        and variant.get("productionArtifactReceiptSha256")
+        == production_receipt_sha256
+        and variant.get("productionAppByteIdentical") is False
+        and variant.get("appExecutableSha256")
+        != production.get("appExecutableSha256")
+        and variant.get("companySigningVerified") is True
+        and variant.get("debuggable") is False,
+        "iOS join-test variant receipt is incomplete",
+    )
+    for field in (
+        "appGitSha",
+        "appGitTree",
+        "fipsGitSha",
+        "fipsGitTree",
+        "fipsCoreVersion",
+        "signerCertificateSha256",
+        "installedBundleIdentifier",
+    ):
+        require(
+            variant.get(field) == production.get(field)
+            and bool(production.get(field)),
+            f"iOS join-test variant differs from production at {field}",
+        )
+    for field, length in (
+        ("appBundleTreeSha256", 64),
+        ("appCodeDirectoryHash", 40),
+        ("packetTunnelCodeDirectoryHash", 40),
+        ("appExecutableSha256", 64),
+        ("packetTunnelExecutableSha256", 64),
+    ):
+        required_hash(
+            variant.get(field),
+            f"iOS join-test variant {field}",
+            length,
+        )
 
 
 def validate_mobile_network_receipt(
@@ -605,8 +672,8 @@ def validate_mobile_network_receipt(
 
 def validate_desktop_mobile_join_receipt(
     receipt: dict[str, Any],
-    mobile_artifact: dict[str, Any],
-    mobile_artifact_receipt_sha256: str,
+    join_variant: dict[str, Any],
+    join_variant_receipt_sha256: str,
     mobile_join: dict[str, Any],
 ) -> None:
     artifact = receipt.get("artifact")
@@ -649,7 +716,7 @@ def validate_desktop_mobile_join_receipt(
         and isinstance(android.get("installReceiptSize"), int)
         and android["installReceiptSize"] > 0
         and ios_artifact.get("artifactReceiptSha256")
-        == mobile_artifact_receipt_sha256
+        == join_variant_receipt_sha256
         and isinstance(timings, dict)
         and set(timings)
         == {
@@ -693,8 +760,8 @@ def validate_desktop_mobile_join_receipt(
         "installedBundleIdentifier",
     ):
         require(
-            ios_artifact.get(field) == mobile_artifact.get(field)
-            and bool(mobile_artifact.get(field)),
+            ios_artifact.get(field) == join_variant.get(field)
+            and bool(join_variant.get(field)),
             f"macOS/iPhone join artifact identity differs at {field}",
         )
 
@@ -703,7 +770,10 @@ def seal_gate(args: argparse.Namespace) -> None:
     archive_receipt = pathlib.Path(args.archive_receipt)
     archive = load_json(archive_receipt)
     adhoc = load_json(pathlib.Path(args.adhoc_receipt))
-    mobile = load_json(pathlib.Path(args.mobile_receipt))
+    mobile_receipt = pathlib.Path(args.mobile_receipt)
+    mobile = load_json(mobile_receipt)
+    join_variant_receipt = pathlib.Path(args.mobile_join_ios_variant_receipt)
+    join_variant = load_json(join_variant_receipt)
     mobile_join_receipt = pathlib.Path(args.mobile_join_receipt)
     mobile_join = load_json(mobile_join_receipt)
     mobile_wg_receipt = pathlib.Path(args.mobile_wg_receipt)
@@ -724,7 +794,19 @@ def seal_gate(args: argparse.Namespace) -> None:
         adhoc_signing,
         mobile,
     )
-    validate_mobile_join_receipt(mobile_join, mobile)
+    production_receipt_sha256 = sha256_file(mobile_receipt)
+    join_variant_receipt_sha256 = sha256_file(join_variant_receipt)
+    validate_join_variant_receipt(
+        join_variant,
+        mobile,
+        production_receipt_sha256,
+    )
+    validate_mobile_join_receipt(
+        mobile_join,
+        join_variant,
+        join_variant_receipt_sha256,
+        production_receipt_sha256,
+    )
     validate_mobile_network_receipt(mobile_wg, mobile, "wireguard-dns")
     validate_mobile_network_receipt(
         mobile_underlay,
@@ -733,8 +815,8 @@ def seal_gate(args: argparse.Namespace) -> None:
     )
     validate_desktop_mobile_join_receipt(
         desktop_join,
-        mobile,
-        sha256_file(pathlib.Path(args.mobile_receipt)),
+        join_variant,
+        join_variant_receipt_sha256,
         mobile_join,
     )
     required_gates = sorted(set(args.required_gate))
@@ -751,6 +833,7 @@ def seal_gate(args: argparse.Namespace) -> None:
         "archiveReceiptSha256": sha256_file(pathlib.Path(args.archive_receipt)),
         "archiveTreeSha256": archive["archiveTreeSha256"],
         "mobileArtifactReceiptSha256": sha256_file(sealed_mobile_receipt),
+        "mobileJoinIosVariantReceiptSha256": join_variant_receipt_sha256,
         "mobileJoinReceiptSha256": sha256_file(mobile_join_receipt),
         "mobileWireGuardDnsReceiptSha256": sha256_file(mobile_wg_receipt),
         "mobileUnderlayLifecycleReceiptSha256": sha256_file(
@@ -763,10 +846,12 @@ def seal_gate(args: argparse.Namespace) -> None:
                 sha256_file(mobile_underlay_receipt),
             ],
             "bidirectional-mobile-qr-and-manual-join": [
-                sha256_file(mobile_join_receipt)
+                sha256_file(mobile_join_receipt),
+                join_variant_receipt_sha256,
             ],
             "desktop-mobile-manual-join": [
-                sha256_file(desktop_join_receipt)
+                sha256_file(desktop_join_receipt),
+                join_variant_receipt_sha256,
             ],
             "wifi-radio-off-on-recovery": [
                 sha256_file(mobile_underlay_receipt)
@@ -788,6 +873,8 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
     adhoc = load_json(pathlib.Path(args.adhoc_receipt))
     sealed_mobile_receipt = pathlib.Path(args.sealed_mobile_receipt)
     mobile = load_json(sealed_mobile_receipt)
+    join_variant_receipt = pathlib.Path(args.mobile_join_ios_variant_receipt)
+    join_variant = load_json(join_variant_receipt)
     mobile_join_receipt = pathlib.Path(args.mobile_join_receipt)
     mobile_join = load_json(mobile_join_receipt)
     mobile_wg_receipt = pathlib.Path(args.mobile_wg_receipt)
@@ -814,7 +901,19 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         signing,
         mobile,
     )
-    validate_mobile_join_receipt(mobile_join, mobile)
+    production_receipt_sha256 = sha256_file(sealed_mobile_receipt)
+    join_variant_receipt_sha256 = sha256_file(join_variant_receipt)
+    validate_join_variant_receipt(
+        join_variant,
+        mobile,
+        production_receipt_sha256,
+    )
+    validate_mobile_join_receipt(
+        mobile_join,
+        join_variant,
+        join_variant_receipt_sha256,
+        production_receipt_sha256,
+    )
     validate_mobile_network_receipt(mobile_wg, mobile, "wireguard-dns")
     validate_mobile_network_receipt(
         mobile_underlay,
@@ -823,8 +922,8 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
     )
     validate_desktop_mobile_join_receipt(
         desktop_join,
-        mobile,
-        sha256_file(sealed_mobile_receipt),
+        join_variant,
+        join_variant_receipt_sha256,
         mobile_join,
     )
     required_hash(
@@ -846,6 +945,11 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
         seal.get("mobileJoinReceiptSha256"),
         "sealed mobile join receipt hash",
         64,
+    )
+    require(
+        seal.get("mobileJoinIosVariantReceiptSha256")
+        == join_variant_receipt_sha256,
+        "sealed iOS join-test variant receipt hash differs",
     )
     required_hash(
         seal.get("mobileWireGuardDnsReceiptSha256"),
@@ -915,10 +1019,12 @@ def validate_gate_seal(args: argparse.Namespace) -> None:
             sha256_file(mobile_underlay_receipt),
         ],
         "bidirectional-mobile-qr-and-manual-join": [
-            sha256_file(mobile_join_receipt)
+            sha256_file(mobile_join_receipt),
+            join_variant_receipt_sha256,
         ],
         "desktop-mobile-manual-join": [
-            sha256_file(desktop_join_receipt)
+            sha256_file(desktop_join_receipt),
+            join_variant_receipt_sha256,
         ],
         "wifi-radio-off-on-recovery": [
             sha256_file(mobile_underlay_receipt)

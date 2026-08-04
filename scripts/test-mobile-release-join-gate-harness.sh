@@ -1020,6 +1020,11 @@ for required in (
         raise SystemExit(f"Release join orchestrator is missing {required}")
 for required in (
     "productionImageImportQr",
+    "iosJoinTestVariant",
+    "testOnlyImageImportQr",
+    "productionQrDecoderPath",
+    "productionJoinApprovalPath",
+    "productionRosterPath",
     "actualRenderedQrScreenCapture",
     "exactRosterOnBothSides",
     '"androidJoinerRelaunchDurable": True',

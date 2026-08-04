@@ -1796,14 +1796,17 @@ run_mobile_join_e2e_gate() {
 
   local android_result_dir android_receipt android_fips_metadata
   local ios_result_dir ios_derived_data ios_app ios_xctestrun ios_receipt
-  local ios_fips_metadata
+  local ios_production_receipt
+  local ios_fips_metadata release_join_result_dir
   android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
   android_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$android_result_dir/mobile-android-release-artifact.json}"
   android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
   ios_result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-ios}"
-  ios_derived_data="$ROOT_DIR/ios/.build/ReleaseNetworkDerivedData"
-  ios_app="$ROOT_DIR/dist/ios/frozen/release-testing-unpacked/Payload/Nostr VPN.app"
-  ios_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$ios_result_dir/mobile-ios-release-artifact.json}"
+  release_join_result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
+  ios_derived_data="${NVPN_RELEASE_JOIN_IOS_VARIANT_DERIVED_DATA:-$release_join_result_dir/ios-derived-data}"
+  ios_app="${NVPN_RELEASE_JOIN_IOS_VARIANT_APP_PATH:-$ios_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
+  ios_production_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$ios_result_dir/mobile-ios-release-artifact.json}"
+  ios_receipt="${NVPN_RELEASE_JOIN_IOS_VARIANT_RECEIPT:-$release_join_result_dir/ios-join-test-variant.json}"
   ios_fips_metadata="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-ios/fips-linkage.json}"
   ios_xctestrun="$(
     select_generated_ios_release_xctestrun \
@@ -1824,6 +1827,7 @@ run_mobile_join_e2e_gate() {
     NVPN_RELEASE_JOIN_IOS_APP_PATH="$ios_app" \
     NVPN_RELEASE_JOIN_IOS_XCTESTRUN="$ios_xctestrun" \
     NVPN_RELEASE_JOIN_IOS_RECEIPT="$ios_receipt" \
+    NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT="$ios_production_receipt" \
     NVPN_RELEASE_JOIN_IOS_FIPS_METADATA_RECEIPT="$ios_fips_metadata" \
     ./scripts/mobile-release-join-e2e.sh
   MOBILE_ANDROID_APP_READY=1
@@ -1942,6 +1946,8 @@ seal_frozen_ios_release_gate() {
     --archive-receipt "$ROOT_DIR/dist/ios/frozen/archive-receipt.json" \
     --adhoc-receipt "$ROOT_DIR/dist/ios/frozen/release-testing-receipt.json" \
     --mobile-receipt "$NVPN_MOBILE_IOS_RELEASE_RECEIPT" \
+    --mobile-join-ios-variant-receipt \
+      "${NVPN_RELEASE_JOIN_IOS_VARIANT_RECEIPT:-$release_join_result_dir/ios-join-test-variant.json}" \
     --mobile-join-receipt "$release_join_result_dir/summary.json" \
     --mobile-wg-receipt "$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network/ios-wireguard-dns.json" \
     --mobile-underlay-receipt "$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network/ios-underlay-lifecycle.json" \

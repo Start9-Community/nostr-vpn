@@ -504,15 +504,21 @@ function requireMobileJoinReceipt({
   receipt,
   androidArtifact,
   androidArtifactReceiptSha256,
-  iosArtifact,
-  iosArtifactReceiptSha256,
+  iosJoinVariant,
+  iosJoinVariantReceiptSha256,
+  iosProductionArtifactReceiptSha256,
 }) {
   const contentWidth = receipt.contentWidth
   if (
     receipt.schema !== 1
     || receipt.platform !== 'mobile'
     || receipt.publicUiOnly !== true
-    || receipt.productionImageImportQr !== true
+    || receipt.productionImageImportQr !== false
+    || receipt.iosJoinTestVariant !== true
+    || receipt.testOnlyImageImportQr !== true
+    || receipt.productionQrDecoderPath !== true
+    || receipt.productionJoinApprovalPath !== true
+    || receipt.productionRosterPath !== true
     || !receipt.actualRenderedQrScreenCapture
     || receipt.privateAppStateRead !== false
     || receipt.appLaunchArgumentsOrEnvironment !== false
@@ -570,7 +576,13 @@ function requireMobileJoinReceipt({
     artifact.android?.artifactReceiptSha256
       !== androidArtifactReceiptSha256
     || artifact.ios?.artifactReceiptSha256
-      !== iosArtifactReceiptSha256
+      !== iosJoinVariantReceiptSha256
+    || artifact.ios?.productionArtifactReceiptSha256
+      !== iosProductionArtifactReceiptSha256
+    || artifact.ios?.joinTestingCompilationCondition
+      !== 'NVPN_RELEASE_JOIN_TESTING'
+    || artifact.ios?.joinTestingCompilationConditionEnabled !== true
+    || artifact.ios?.productionAppByteIdentical !== false
   ) {
     throw new Error(
       'Android/iOS mobile join receipt is not bound to the exact artifact receipts.',
@@ -593,7 +605,7 @@ function requireMobileJoinReceipt({
   )
   requireIdentityFieldsMatch(
     artifact.ios,
-    iosArtifact,
+    iosJoinVariant,
     [
       'appGitSha',
       'appGitTree',
@@ -611,6 +623,54 @@ function requireMobileJoinReceipt({
   )
 }
 
+function requireIosJoinVariant(
+  receipt,
+  productionArtifact,
+  productionArtifactReceiptSha256,
+) {
+  if (
+    receipt.receiptSchema !== 2
+    || receipt.artifactType !== 'iOS Ad Hoc Release join-test variant'
+    || receipt.joinTestingCompilationCondition
+      !== 'NVPN_RELEASE_JOIN_TESTING'
+    || receipt.joinTestingCompilationConditionEnabled !== true
+    || receipt.productionArtifactReceiptSha256
+      !== productionArtifactReceiptSha256
+    || receipt.productionAppByteIdentical !== false
+    || receipt.appExecutableSha256
+      === productionArtifact.appExecutableSha256
+    || receipt.companySigningVerified !== true
+    || receipt.debuggable !== false
+  ) {
+    throw new Error('iOS join-test variant receipt is incomplete.')
+  }
+  requireIdentityFieldsMatch(
+    receipt,
+    productionArtifact,
+    [
+      'appGitSha',
+      'appGitTree',
+      'fipsGitSha',
+      'fipsGitTree',
+      'fipsCoreVersion',
+      'signerCertificateSha256',
+      'installedBundleIdentifier',
+    ],
+    'iOS join-test variant source/signing',
+  )
+  for (const [field, length] of [
+    ['appBundleTreeSha256', 64],
+    ['appCodeDirectoryHash', 40],
+    ['packetTunnelCodeDirectoryHash', 40],
+    ['appExecutableSha256', 64],
+    ['packetTunnelExecutableSha256', 64],
+  ]) {
+    if (!new RegExp(`^[0-9a-f]{${length}}$`).test(receipt[field] ?? '')) {
+      throw new Error(`iOS join-test variant lacks ${field}.`)
+    }
+  }
+}
+
 function requireMacosJoinReceipt({
   receipt,
   artifactReceipt,
@@ -619,8 +679,8 @@ function requireMacosJoinReceipt({
   androidArtifactReceiptSha256,
   androidInstallReceiptSha256,
   androidInstallReceiptSize,
-  iosArtifact,
-  iosArtifactReceiptSha256,
+  iosJoinVariant,
+  iosJoinVariantReceiptSha256,
   commit,
   tree,
 }) {
@@ -652,7 +712,7 @@ function requireMacosJoinReceipt({
     || android?.installReceiptSha256 !== androidInstallReceiptSha256
     || android?.installReceiptSize !== androidInstallReceiptSize
     || receipt.artifact?.ios?.artifactReceiptSha256
-      !== iosArtifactReceiptSha256
+      !== iosJoinVariantReceiptSha256
   ) {
     throw new Error('macOS/mobile public-UI join receipt is incomplete.')
   }
@@ -673,7 +733,7 @@ function requireMacosJoinReceipt({
   )
   requireIdentityFieldsMatch(
     receipt.artifact.ios,
-    iosArtifact,
+    iosJoinVariant,
     [
       'appGitSha',
       'appGitTree',
@@ -1452,6 +1512,26 @@ function collectReleaseGateEvidence({
       'Frozen iOS physical-gate seal is not bound to the exact tested iOS artifact.',
     )
   }
+  const iosJoinVariant = readRequiredJson(
+    platformReceiptPaths.ios.join_variant,
+    'iOS Release join-test variant receipt',
+  )
+  const iosJoinVariantReceiptSha256 = sha256FileSync(
+    platformReceiptPaths.ios.join_variant,
+  )
+  requireIosJoinVariant(
+    iosJoinVariant,
+    iosArtifact,
+    iosArtifactReceiptSha256,
+  )
+  if (
+    ios.mobileJoinIosVariantReceiptSha256
+    !== iosJoinVariantReceiptSha256
+  ) {
+    throw new Error(
+      'Frozen iOS physical-gate seal is not bound to the join-test variant.',
+    )
+  }
   const iosNetworkReceipts = {}
   for (const [name, mode] of [
     ['wireguard_dns', 'wireguard-dns'],
@@ -1489,8 +1569,9 @@ function collectReleaseGateEvidence({
     tree,
     androidArtifact: android,
     androidArtifactReceiptSha256: androidReceiptSha256,
-    iosArtifact,
-    iosArtifactReceiptSha256,
+    iosJoinVariant,
+    iosJoinVariantReceiptSha256,
+    iosProductionArtifactReceiptSha256: iosArtifactReceiptSha256,
   })
 
   const macosArtifact = readRequiredJson(
@@ -1531,8 +1612,8 @@ function collectReleaseGateEvidence({
     androidArtifactReceiptSha256: androidReceiptSha256,
     androidInstallReceiptSha256,
     androidInstallReceiptSize,
-    iosArtifact,
-    iosArtifactReceiptSha256,
+    iosJoinVariant,
+    iosJoinVariantReceiptSha256,
     commit: macosSource.commit,
     tree: macosSource.tree,
   })
@@ -1554,9 +1635,11 @@ function collectReleaseGateEvidence({
     ],
     'bidirectional-mobile-qr-and-manual-join': [
       sha256FileSync(platformReceiptPaths.ios.mobile_join),
+      iosJoinVariantReceiptSha256,
     ],
     'desktop-mobile-manual-join': [
       sha256FileSync(platformReceiptPaths.ios.desktop_mobile_join),
+      iosJoinVariantReceiptSha256,
     ],
     'wifi-radio-off-on-recovery': [
       iosNetworkReceipts.underlay_lifecycle,

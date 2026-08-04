@@ -553,6 +553,7 @@ test('release receipt collection requires exact source and strict public UI gate
       ios: {
         desktop_mobile_join: macosJoinPath,
         frozen_archive: join(root, 'ios.json'),
+        join_variant: join(root, 'ios-join-test-variant.json'),
         mobile_artifact: join(root, 'ios-artifact.json'),
         mobile_join: mobileJoinPath,
         wireguard_dns: join(root, 'ios-wg.json'),
@@ -637,9 +638,24 @@ test('release receipt collection requires exact source and strict public UI gate
     }
     const androidInstallText = JSON.stringify(androidInstall)
     const iosText = JSON.stringify(iosArtifact)
+    const iosJoinVariant = {
+      ...iosArtifact,
+      artifactType: 'iOS Ad Hoc Release join-test variant',
+      appBundleTreeSha256: '9'.repeat(64),
+      appCodeDirectoryHash: 'a'.repeat(40),
+      appExecutableSha256: 'b'.repeat(64),
+      joinTestingCompilationCondition: 'NVPN_RELEASE_JOIN_TESTING',
+      joinTestingCompilationConditionEnabled: true,
+      productionArtifactReceiptSha256: sha256(iosText),
+      productionAppByteIdentical: false,
+      companySigningVerified: true,
+      debuggable: false,
+    }
+    const iosJoinVariantText = JSON.stringify(iosJoinVariant)
     writeFileSync(paths.android.physical, androidText)
     writeFileSync(paths.android.install, androidInstallText)
     writeFileSync(paths.ios.mobile_artifact, iosText)
+    writeFileSync(paths.ios.join_variant, iosJoinVariantText)
     const networkReceipt = (platform, mode, artifact, artifactText) => ({
       ...source,
       appGitSha: artifact.appGitSha,
@@ -849,24 +865,33 @@ test('release receipt collection requires exact source and strict public UI gate
             androidArtifact.signerCertificateSha256,
         },
         ios: {
-          appGitSha: iosArtifact.appGitSha,
-          appGitTree: iosArtifact.appGitTree,
-          fipsGitSha: iosArtifact.fipsGitSha,
-          fipsGitTree: iosArtifact.fipsGitTree,
-          artifactReceiptSha256: sha256(iosText),
-          appBundleTreeSha256: iosArtifact.appBundleTreeSha256,
-          appCodeDirectoryHash: iosArtifact.appCodeDirectoryHash,
+          appGitSha: iosJoinVariant.appGitSha,
+          appGitTree: iosJoinVariant.appGitTree,
+          fipsGitSha: iosJoinVariant.fipsGitSha,
+          fipsGitTree: iosJoinVariant.fipsGitTree,
+          artifactReceiptSha256: sha256(iosJoinVariantText),
+          productionArtifactReceiptSha256: sha256(iosText),
+          joinTestingCompilationCondition: 'NVPN_RELEASE_JOIN_TESTING',
+          joinTestingCompilationConditionEnabled: true,
+          productionAppByteIdentical: false,
+          appBundleTreeSha256: iosJoinVariant.appBundleTreeSha256,
+          appCodeDirectoryHash: iosJoinVariant.appCodeDirectoryHash,
           packetTunnelCodeDirectoryHash:
-            iosArtifact.packetTunnelCodeDirectoryHash,
-          appExecutableSha256: iosArtifact.appExecutableSha256,
+            iosJoinVariant.packetTunnelCodeDirectoryHash,
+          appExecutableSha256: iosJoinVariant.appExecutableSha256,
           packetTunnelExecutableSha256:
-            iosArtifact.packetTunnelExecutableSha256,
-          signerCertificateSha256: iosArtifact.signerCertificateSha256,
-          installedBundleIdentifier: iosArtifact.installedBundleIdentifier,
+            iosJoinVariant.packetTunnelExecutableSha256,
+          signerCertificateSha256: iosJoinVariant.signerCertificateSha256,
+          installedBundleIdentifier: iosJoinVariant.installedBundleIdentifier,
         },
       },
       publicUiOnly: true,
-      productionImageImportQr: true,
+      productionImageImportQr: false,
+      iosJoinTestVariant: true,
+      testOnlyImageImportQr: true,
+      productionQrDecoderPath: true,
+      productionJoinApprovalPath: true,
+      productionRosterPath: true,
       actualRenderedQrScreenCapture: {
         androidRenderedScreenSha256: 'a'.repeat(64),
         iosRenderedScreenSha256: 'b'.repeat(64),
@@ -941,22 +966,22 @@ test('release receipt collection requires exact source and strict public UI gate
             androidArtifact.signerCertificateSha256,
         },
         ios: {
-          appGitSha: iosArtifact.appGitSha,
-          appGitTree: iosArtifact.appGitTree,
-          fipsGitSha: iosArtifact.fipsGitSha,
-          fipsGitTree: iosArtifact.fipsGitTree,
-          artifactReceiptSha256: sha256(iosText),
-          appBundleTreeSha256: iosArtifact.appBundleTreeSha256,
-          appCodeDirectoryHash: iosArtifact.appCodeDirectoryHash,
+          appGitSha: iosJoinVariant.appGitSha,
+          appGitTree: iosJoinVariant.appGitTree,
+          fipsGitSha: iosJoinVariant.fipsGitSha,
+          fipsGitTree: iosJoinVariant.fipsGitTree,
+          artifactReceiptSha256: sha256(iosJoinVariantText),
+          appBundleTreeSha256: iosJoinVariant.appBundleTreeSha256,
+          appCodeDirectoryHash: iosJoinVariant.appCodeDirectoryHash,
           packetTunnelCodeDirectoryHash:
-            iosArtifact.packetTunnelCodeDirectoryHash,
-          appExecutableSha256: iosArtifact.appExecutableSha256,
+            iosJoinVariant.packetTunnelCodeDirectoryHash,
+          appExecutableSha256: iosJoinVariant.appExecutableSha256,
           packetTunnelExecutableSha256:
-            iosArtifact.packetTunnelExecutableSha256,
+            iosJoinVariant.packetTunnelExecutableSha256,
           signerCertificateSha256:
-            iosArtifact.signerCertificateSha256,
+            iosJoinVariant.signerCertificateSha256,
           installedBundleIdentifier:
-            iosArtifact.installedBundleIdentifier,
+            iosJoinVariant.installedBundleIdentifier,
         },
       },
       publicUiOnly: true,
@@ -1015,6 +1040,7 @@ test('release receipt collection requires exact source and strict public UI gate
       receiptSchema: 1,
       artifactType: 'iOS frozen archive physical-gate seal',
       mobileArtifactReceiptSha256: sha256(iosText),
+      mobileJoinIosVariantReceiptSha256: sha256(iosJoinVariantText),
       requiredRealDeviceGates: [
         'background-foreground-and-rapid-start-stop',
         'bidirectional-mobile-qr-and-manual-join',
@@ -1027,8 +1053,14 @@ test('release receipt collection requires exact source and strict public UI gate
           iosWgSha,
           iosUnderlaySha,
         ],
-        'bidirectional-mobile-qr-and-manual-join': [mobileJoinSha],
-        'desktop-mobile-manual-join': [macosJoinSha],
+        'bidirectional-mobile-qr-and-manual-join': [
+          mobileJoinSha,
+          sha256(iosJoinVariantText),
+        ],
+        'desktop-mobile-manual-join': [
+          macosJoinSha,
+          sha256(iosJoinVariantText),
+        ],
         'wifi-radio-off-on-recovery': [iosUnderlaySha],
         'wireguard-exit-and-five-dns-policies': [iosWgSha],
       },
@@ -1354,6 +1386,20 @@ test('release receipt collection requires exact source and strict public UI gate
         receipt.artifact.ios.appCodeDirectoryHash = '0'.repeat(40)
       },
       /iOS mobile join artifact identity differs at appCodeDirectoryHash/,
+    )
+    assertRejectedReceiptMutation(
+      paths.ios.join_variant,
+      (receipt) => {
+        receipt.joinTestingCompilationConditionEnabled = false
+      },
+      /join-test variant receipt is incomplete/,
+    )
+    assertRejectedReceiptMutation(
+      paths.ios.join_variant,
+      (receipt) => {
+        receipt.productionArtifactReceiptSha256 = '0'.repeat(64)
+      },
+      /join-test variant receipt is incomplete/,
     )
     assertRejectedReceiptMutation(
       macosJoinPath,

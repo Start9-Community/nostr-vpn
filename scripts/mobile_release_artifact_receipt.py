@@ -158,8 +158,10 @@ def build_join_summary(args: argparse.Namespace) -> None:
 
     android_receipt_path = pathlib.Path(args.android_receipt)
     ios_receipt_path = pathlib.Path(args.ios_receipt)
+    ios_production_receipt_path = pathlib.Path(args.ios_production_receipt)
     android = load_json(android_receipt_path)
     ios = load_json(ios_receipt_path)
+    ios_production = load_json(ios_production_receipt_path)
     android_expected = {
         "receiptSchema": 2,
         "artifactType": "Android Release APK",
@@ -171,20 +173,33 @@ def build_join_summary(args: argparse.Namespace) -> None:
         "installedApkSha256": apk_sha,
         "companySigningVerified": True,
     }
-    ios_expected = {
+    ios_production_expected = {
         "receiptSchema": 2,
         "artifactType": "iOS company Ad Hoc Release app",
         "appGitSha": ios_app_head,
         "appGitTree": ios_app_git_tree,
         "fipsGitSha": fips_head,
         "fipsGitTree": fips_tree,
-        "appBundleTreeSha256": ios_app_bundle_tree_sha,
         "companySigningVerified": True,
+    }
+    ios_expected = {
+        **ios_production_expected,
+        "artifactType": "iOS Ad Hoc Release join-test variant",
+        "appBundleTreeSha256": ios_app_bundle_tree_sha,
+        "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
+        "joinTestingCompilationConditionEnabled": True,
+        "productionArtifactReceiptSha256": sha256_file(
+            ios_production_receipt_path
+        ),
+        "productionAppByteIdentical": False,
+        "debuggable": False,
     }
     for name, value in android_expected.items():
         require_equal(android, name, value)
     for name, value in ios_expected.items():
         require_equal(ios, name, value)
+    for name, value in ios_production_expected.items():
+        require_equal(ios_production, name, value)
 
     android_identity_keys = (
         "apkSha256",
@@ -280,6 +295,14 @@ def build_join_summary(args: argparse.Namespace) -> None:
             },
             "ios": {
                 "artifactReceiptSha256": sha256_file(ios_receipt_path),
+                "productionArtifactReceiptSha256": sha256_file(
+                    ios_production_receipt_path
+                ),
+                "joinTestingCompilationCondition": (
+                    "NVPN_RELEASE_JOIN_TESTING"
+                ),
+                "joinTestingCompilationConditionEnabled": True,
+                "productionAppByteIdentical": False,
                 "appGitSha": ios_app_head,
                 "appGitTree": ios_app_git_tree,
                 "fipsGitSha": fips_head,
@@ -288,7 +311,12 @@ def build_join_summary(args: argparse.Namespace) -> None:
             },
         },
         "publicUiOnly": True,
-        "productionImageImportQr": True,
+        "productionImageImportQr": False,
+        "iosJoinTestVariant": True,
+        "testOnlyImageImportQr": True,
+        "productionQrDecoderPath": True,
+        "productionJoinApprovalPath": True,
+        "productionRosterPath": True,
         "actualRenderedQrScreenCapture": qr_captures,
         "privateAppStateRead": False,
         "appLaunchArgumentsOrEnvironment": False,
@@ -504,9 +532,19 @@ def validate_ios(args: argparse.Namespace) -> None:
     receipt = load_json(receipt_path)
     app_tree = tree_sha256(app)
     products_tree = tree_sha256(products)
+    production_receipt_path = (
+        pathlib.Path(args.production_receipt)
+        if args.production_receipt
+        else None
+    )
+    artifact_type = (
+        "iOS Ad Hoc Release join-test variant"
+        if production_receipt_path
+        else "iOS company Ad Hoc Release app"
+    )
     expected = {
         "receiptSchema": 2,
-        "artifactType": "iOS company Ad Hoc Release app",
+        "artifactType": artifact_type,
         "appCodeDirectoryHash": args.app_cdhash,
         "packetTunnelCodeDirectoryHash": args.tunnel_cdhash,
         "appExecutableSha256": sha256_file(executable),
@@ -539,6 +577,30 @@ def validate_ios(args: argparse.Namespace) -> None:
         "updaterCompiled": False,
         "debuggable": False,
     }
+    if production_receipt_path:
+        production = load_json(production_receipt_path)
+        for name, value in {
+            "receiptSchema": 2,
+            "artifactType": "iOS company Ad Hoc Release app",
+            "appGitSha": args.app_head,
+            "appGitTree": args.app_tree,
+            "fipsGitSha": args.fips_head,
+            "fipsGitTree": args.fips_tree,
+            "companySigningVerified": True,
+        }.items():
+            require_equal(production, name, value)
+        expected.update(
+            {
+                "joinTestingCompilationCondition": (
+                    "NVPN_RELEASE_JOIN_TESTING"
+                ),
+                "joinTestingCompilationConditionEnabled": True,
+                "productionArtifactReceiptSha256": sha256_file(
+                    production_receipt_path
+                ),
+                "productionAppByteIdentical": False,
+            }
+        )
     for name, value in expected.items():
         require_equal(receipt, name, value)
     device = receipt.get("selectedPhysicalDevice")
@@ -584,6 +646,7 @@ def parser() -> argparse.ArgumentParser:
         "android_receipt",
         "ios_app_bundle_tree_sha",
         "ios_receipt",
+        "ios_production_receipt",
         "android_qr_capture",
         "ios_qr_capture",
         "android_qr_width_bps",
@@ -636,6 +699,7 @@ def parser() -> argparse.ArgumentParser:
         "device_identifier_sha",
     ):
         ios.add_argument(f"--{name.replace('_', '-')}", required=True)
+    ios.add_argument("--production-receipt")
     return result
 
 

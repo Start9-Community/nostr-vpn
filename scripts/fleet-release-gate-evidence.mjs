@@ -35,6 +35,7 @@ const platformReceiptKeys = {
   ios: [
     'desktop_mobile_join',
     'frozen_archive',
+    'join_variant',
     'mobile_artifact',
     'mobile_join',
     'underlay_lifecycle',

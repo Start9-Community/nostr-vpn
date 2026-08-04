@@ -46,12 +46,14 @@ ANDROID_RECEIPT="$ANDROID_DIR/mobile-android-release-artifact.json"
 ANDROID_BUNDLE_RECEIPT="$ANDROID_DIR/physical-gate-artifact.json"
 IOS_METADATA="$TMP_ROOT/ios-fips-linkage.json"
 IOS_RECEIPT="$TMP_ROOT/mobile-ios-release-artifact.json"
+IOS_PRODUCTION_RECEIPT="$TMP_ROOT/mobile-ios-production-artifact.json"
 
 python3 - \
   "$VALIDATOR" "$APP_ROOT" "$FIPS_ROOT" \
   "$ANDROID_DIR/app-release.apk" "$ANDROID_DIR/app-release.aab" \
   "$ANDROID_METADATA" "$ANDROID_RECEIPT" "$ANDROID_BUNDLE_RECEIPT" \
-  "$IOS_APP" "$IOS_DERIVED" "$IOS_XCTESTRUN" "$IOS_METADATA" "$IOS_RECEIPT" \
+  "$IOS_APP" "$IOS_DERIVED" "$IOS_XCTESTRUN" "$IOS_METADATA" \
+  "$IOS_RECEIPT" "$IOS_PRODUCTION_RECEIPT" \
   "$ANDROID_APP_HEAD" "$ANDROID_APP_TREE" \
   "$IOS_APP_HEAD" "$IOS_APP_TREE" \
   "$FIPS_HEAD" "$FIPS_TREE" "$FIPS_VERSION" \
@@ -76,6 +78,7 @@ import sys
     ios_xctestrun,
     ios_metadata,
     ios_receipt,
+    ios_production_receipt,
     android_app_head,
     android_app_tree,
     ios_app_head,
@@ -105,6 +108,7 @@ ios_derived = pathlib.Path(ios_derived)
 ios_xctestrun = pathlib.Path(ios_xctestrun)
 ios_metadata = pathlib.Path(ios_metadata)
 ios_receipt = pathlib.Path(ios_receipt)
+ios_production_receipt = pathlib.Path(ios_production_receipt)
 
 metadata = {
     "checkoutPathSha256": module.path_sha256(fips_root),
@@ -246,6 +250,24 @@ ios = {
     "updaterCompiled": False,
     "debuggable": False,
 }
+production = {
+    **ios,
+    "appBundleTreeSha256": "e" * 64,
+    "treeSha256": "e" * 64,
+    "appExecutableSha256": "f" * 64,
+}
+ios_production_receipt.write_text(
+    json.dumps(production, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+ios.update({
+    "artifactType": "iOS Ad Hoc Release join-test variant",
+    "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
+    "joinTestingCompilationConditionEnabled": True,
+    "productionArtifactReceiptSha256": module.sha256_file(
+        ios_production_receipt
+    ),
+    "productionAppByteIdentical": False,
+})
 ios_receipt.write_text(
     json.dumps(ios, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 )
@@ -288,7 +310,8 @@ validate_ios() {
     --signer-sha "$SIGNER_SHA" \
     --app-cdhash "$APP_CDHASH" \
     --tunnel-cdhash "$TUNNEL_CDHASH" \
-    --device-identifier-sha "$DEVICE_SHA"
+    --device-identifier-sha "$DEVICE_SHA" \
+    --production-receipt "$IOS_PRODUCTION_RECEIPT"
 }
 
 validate_android
@@ -347,6 +370,7 @@ python3 "$VALIDATOR" join-summary \
   --android-receipt "$ANDROID_RECEIPT" \
   --ios-app-bundle-tree-sha "$IOS_BUNDLE_TREE_SHA" \
   --ios-receipt "$IOS_RECEIPT" \
+  --ios-production-receipt "$IOS_PRODUCTION_RECEIPT" \
   --android-qr-capture "$ANDROID_QR_CAPTURE" \
   --ios-qr-capture "$IOS_QR_CAPTURE" \
   --android-qr-width-bps 10000 \
@@ -368,6 +392,12 @@ assert summary["harnessGitSha"] == harness_head
 assert summary["artifact"]["android"]["appGitTree"] == android_git_tree
 assert summary["artifact"]["ios"]["appGitTree"] == ios_git_tree
 assert summary["artifact"]["ios"]["appBundleTreeSha256"] == ios_bundle_tree
+assert summary["productionImageImportQr"] is False
+assert summary["iosJoinTestVariant"] is True
+assert summary["testOnlyImageImportQr"] is True
+assert summary["productionQrDecoderPath"] is True
+assert summary["productionJoinApprovalPath"] is True
+assert summary["productionRosterPath"] is True
 assert len(summary["artifact"]["ios"]["appGitTree"]) == 40
 assert len(summary["artifact"]["ios"]["appBundleTreeSha256"]) == 64
 PY
@@ -377,6 +407,7 @@ PY
   source "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh"
   NVPN_RELEASE_JOIN_ANDROID_RECEIPT="$ANDROID_RECEIPT"
   NVPN_RELEASE_JOIN_IOS_RECEIPT="$IOS_RECEIPT"
+  NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT="$IOS_PRODUCTION_RECEIPT"
   NVPN_EXPECTED_APP_GIT_SHA="$IOS_APP_HEAD"
   release_join_load_reused_artifact_sources
   [[ "$RELEASE_JOIN_ANDROID_APP_SHA" == "$ANDROID_APP_HEAD" ]]
@@ -596,6 +627,7 @@ for required in (
     "NVPN_RELEASE_JOIN_IOS_DERIVED_DATA=",
     "NVPN_RELEASE_JOIN_IOS_XCTESTRUN=",
     "NVPN_RELEASE_JOIN_IOS_RECEIPT=",
+    "NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT=",
     "NVPN_RELEASE_JOIN_IOS_FIPS_METADATA_RECEIPT=",
 ):
     if required not in release:

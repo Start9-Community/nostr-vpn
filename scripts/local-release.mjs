@@ -2368,6 +2368,10 @@ function main() {
         'frozen',
         'physical-mobile-receipt.json',
       ),
+      join_variant: join(
+        releaseJoinResultDir,
+        'ios-join-test-variant.json',
+      ),
       mobile_join: join(releaseJoinResultDir, 'summary.json'),
       desktop_mobile_join: join(
         releaseJoinResultDir,

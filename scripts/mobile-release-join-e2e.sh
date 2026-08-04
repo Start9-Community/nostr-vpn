@@ -471,6 +471,8 @@ python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" join-summary \
   --ios-app-bundle-tree-sha "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
   --ios-receipt \
     "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact iOS receipt is required}" \
+  --ios-production-receipt \
+    "${NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT:?exact production iOS receipt is required}" \
   --android-qr-capture "$ANDROID_QR_CAPTURE" \
   --ios-qr-capture "$IOS_QR_CAPTURE" \
   --android-qr-width-bps "$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS" \

@@ -262,6 +262,7 @@ done
 ARCHIVE_RECEIPT="$TMP_ROOT/archive.json"
 ADHOC_RECEIPT="$TMP_ROOT/adhoc.json"
 MOBILE_RECEIPT="$TMP_ROOT/mobile.json"
+JOIN_VARIANT_RECEIPT="$TMP_ROOT/ios-join-test-variant.json"
 MOBILE_JOIN_RECEIPT="$TMP_ROOT/mobile-join.json"
 MOBILE_WG_RECEIPT="$TMP_ROOT/mobile-wg.json"
 MOBILE_UNDERLAY_RECEIPT="$TMP_ROOT/mobile-underlay.json"
@@ -271,11 +272,13 @@ GATE_SEAL="$TMP_ROOT/gate-seal.json"
 ARCHIVE_CLEAN="$TMP_ROOT/archive-clean.json"
 ADHOC_CLEAN="$TMP_ROOT/adhoc-clean.json"
 MOBILE_CLEAN="$TMP_ROOT/mobile-clean.json"
+JOIN_VARIANT_CLEAN="$TMP_ROOT/ios-join-test-variant-clean.json"
 MOBILE_JOIN_CLEAN="$TMP_ROOT/mobile-join-clean.json"
 DESKTOP_MOBILE_JOIN_CLEAN="$TMP_ROOT/desktop-mobile-join-clean.json"
 
 python3 - \
   "$ARCHIVE_RECEIPT" "$ADHOC_RECEIPT" "$MOBILE_RECEIPT" \
+  "$JOIN_VARIANT_RECEIPT" \
   "$MOBILE_JOIN_RECEIPT" "$MOBILE_WG_RECEIPT" \
   "$MOBILE_UNDERLAY_RECEIPT" "$DESKTOP_MOBILE_JOIN_RECEIPT" <<'PY'
 import hashlib
@@ -287,6 +290,7 @@ import sys
     archive_path,
     adhoc_path,
     mobile_path,
+    variant_path,
     join_path,
     wg_path,
     underlay_path,
@@ -408,6 +412,24 @@ for path, payload in ((adhoc_path, adhoc), (mobile_path, mobile)):
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+variant = {
+    **mobile,
+    "artifactType": "iOS Ad Hoc Release join-test variant",
+    "appBundleTreeSha256": "7" * 64,
+    "treeSha256": "7" * 64,
+    "appCodeDirectoryHash": "8" * 40,
+    "appExecutableSha256": "9" * 64,
+    "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
+    "joinTestingCompilationConditionEnabled": True,
+    "productionArtifactReceiptSha256": hashlib.sha256(
+        mobile_path.read_bytes()
+    ).hexdigest(),
+    "productionAppByteIdentical": False,
+}
+variant_path.write_text(
+    json.dumps(variant, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
 android_identity = {
     "artifactReceiptSha256": "a" * 64,
     "appGitSha": mobile["appGitSha"],
@@ -428,7 +450,7 @@ join = {
         "android": android_identity,
         "ios": {
             **{
-                key: mobile[key]
+                key: variant[key]
                 for key in (
                     "appGitSha",
                     "appGitTree",
@@ -443,10 +465,24 @@ join = {
                     "installedBundleIdentifier",
                 )
             },
+            "artifactReceiptSha256": hashlib.sha256(
+                variant_path.read_bytes()
+            ).hexdigest(),
+            "productionArtifactReceiptSha256": hashlib.sha256(
+                mobile_path.read_bytes()
+            ).hexdigest(),
+            "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
+            "joinTestingCompilationConditionEnabled": True,
+            "productionAppByteIdentical": False,
         },
     },
     "publicUiOnly": True,
-    "productionImageImportQr": True,
+    "productionImageImportQr": False,
+    "iosJoinTestVariant": True,
+    "testOnlyImageImportQr": True,
+    "productionQrDecoderPath": True,
+    "productionJoinApprovalPath": True,
+    "productionRosterPath": True,
     "actualRenderedQrScreenCapture": {
         "androidRenderedScreenSha256": "a" * 64,
         "iosRenderedScreenSha256": "b" * 64,
@@ -500,6 +536,10 @@ identity_fields = {
         "signerCertificateSha256",
         "installedBundleIdentifier",
     )
+}
+join_identity_fields = {
+    key: variant[key]
+    for key in identity_fields
 }
 def counter_case():
     return {
@@ -583,13 +623,13 @@ desktop_join = {
         },
         "ios": {
             "artifactReceiptSha256": hashlib.sha256(
-                mobile_path.read_bytes()
+                variant_path.read_bytes()
             ).hexdigest(),
-            "appGitSha": mobile["appGitSha"],
-            "appGitTree": mobile["appGitTree"],
-            "fipsGitSha": mobile["fipsGitSha"],
-            "fipsGitTree": mobile["fipsGitTree"],
-            **identity_fields,
+            "appGitSha": variant["appGitSha"],
+            "appGitTree": variant["appGitTree"],
+            "fipsGitSha": variant["fipsGitSha"],
+            "fipsGitTree": variant["fipsGitTree"],
+            **join_identity_fields,
         },
     },
     "publicUiOnly": True,
@@ -626,6 +666,7 @@ PY
 cp "$ARCHIVE_RECEIPT" "$ARCHIVE_CLEAN"
 cp "$ADHOC_RECEIPT" "$ADHOC_CLEAN"
 cp "$MOBILE_RECEIPT" "$MOBILE_CLEAN"
+cp "$JOIN_VARIANT_RECEIPT" "$JOIN_VARIANT_CLEAN"
 cp "$MOBILE_JOIN_RECEIPT" "$MOBILE_JOIN_CLEAN"
 cp "$DESKTOP_MOBILE_JOIN_RECEIPT" "$DESKTOP_MOBILE_JOIN_CLEAN"
 
@@ -633,6 +674,7 @@ restore_receipts() {
   cp "$ARCHIVE_CLEAN" "$ARCHIVE_RECEIPT"
   cp "$ADHOC_CLEAN" "$ADHOC_RECEIPT"
   cp "$MOBILE_CLEAN" "$MOBILE_RECEIPT"
+  cp "$JOIN_VARIANT_CLEAN" "$JOIN_VARIANT_RECEIPT"
   cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
   cp "$DESKTOP_MOBILE_JOIN_CLEAN" "$DESKTOP_MOBILE_JOIN_RECEIPT"
 }
@@ -650,6 +692,7 @@ seal_gate() {
     --archive-receipt "$ARCHIVE_RECEIPT" \
     --adhoc-receipt "$ADHOC_RECEIPT" \
     --mobile-receipt "$MOBILE_RECEIPT" \
+    --mobile-join-ios-variant-receipt "$JOIN_VARIANT_RECEIPT" \
     --mobile-join-receipt "$MOBILE_JOIN_RECEIPT" \
     --mobile-wg-receipt "$MOBILE_WG_RECEIPT" \
     --mobile-underlay-receipt "$MOBILE_UNDERLAY_RECEIPT" \
@@ -664,6 +707,7 @@ validate_gate() {
     --archive-receipt "$ARCHIVE_RECEIPT" \
     --adhoc-receipt "$ADHOC_RECEIPT" \
     --sealed-mobile-receipt "$SEALED_MOBILE_RECEIPT" \
+    --mobile-join-ios-variant-receipt "$JOIN_VARIANT_RECEIPT" \
     --mobile-join-receipt "$MOBILE_JOIN_RECEIPT" \
     --mobile-wg-receipt "$MOBILE_WG_RECEIPT" \
     --mobile-underlay-receipt "$MOBILE_UNDERLAY_RECEIPT" \
@@ -741,6 +785,23 @@ seal_gate
 validate_gate
 [[ "$(stat -f '%Lp' "$GATE_SEAL" 2>/dev/null || stat -c '%a' "$GATE_SEAL")" == 600 ]] \
   || { echo "Frozen iOS gate seal is not mode 0600" >&2; exit 1; }
+
+python3 - "$JOIN_VARIANT_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["joinTestingCompilationConditionEnabled"] = False
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted a join variant without its compile-time flag" >&2
+  exit 1
+fi
+cp "$JOIN_VARIANT_CLEAN" "$JOIN_VARIANT_RECEIPT"
+seal_gate
 
 python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
 import json

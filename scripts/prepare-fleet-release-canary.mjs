@@ -239,6 +239,7 @@ function receiptPaths({ root, gateDir, joinDir }) {
         'frozen',
         'physical-mobile-receipt.json',
       ),
+      join_variant: join(joinDir, 'ios-join-test-variant.json'),
       mobile_join: join(joinDir, 'summary.json'),
       desktop_mobile_join: join(joinDir, 'macos', 'summary.json'),
       wireguard_dns: join(mobileNetwork, 'ios-wireguard-dns.json'),
