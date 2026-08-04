@@ -281,7 +281,17 @@ class MainActivity : ComponentActivity() {
                     dispatchNow(action)
                 }
             }
-            val dispatchSucceeded: (JSONObject) -> Boolean = { action -> dispatchNow(action) }
+            val dispatchSucceeded: (JSONObject) -> Boolean = { action ->
+                val succeeded = dispatchNow(action)
+                if (
+                    succeeded &&
+                    action.optString("type") == "import_join_request" &&
+                    !state.vpnEnabled
+                ) {
+                    dispatch(NativeActions.connectVpn())
+                }
+                succeeded
+            }
             val wireGuardConfigFileLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument(),
             ) { uri ->
@@ -371,7 +381,7 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(deepLink, debugRequest) {
                 val request = deepLink
                 if (!request.isNullOrBlank() && looksLikeJoinRequestQrOrLink(request)) {
-                    dispatch(NativeActions.importJoinRequest(request))
+                    dispatchSucceeded(NativeActions.importJoinRequest(request))
                     deepLink = null
                 }
                 val automation = debugRequest
