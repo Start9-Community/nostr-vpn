@@ -277,6 +277,12 @@ write_frozen_archive_receipt() {
     "${FROZEN_REVISION_ARGS[@]}"
 }
 
+restore_generated_ios_project() {
+  git -C "$ROOT" show \
+    "$NVPN_BUILD_GIT_SHA:ios/NostrVpnIos.xcodeproj/project.pbxproj" \
+    >"$PROJECT"
+}
+
 run_ios_archive() {
   local NVPN_IOS_RUST_PROFILE="release"
   export NVPN_IOS_RUST_PROFILE
@@ -304,7 +310,7 @@ run_ios_archive() {
   : "${NVPN_IOS_PROVISIONING_PROFILE_UUID:?profile uuid not set}"
   : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?packet tunnel profile uuid not set}"
 
-  xcodebuild \
+  if ! xcodebuild \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
     -configuration "$CONFIGURATION" \
@@ -318,6 +324,11 @@ run_ios_archive() {
     NVPN_BUILD_GIT_SHA="$NVPN_BUILD_GIT_SHA" \
     NVPN_BUILD_TIMESTAMP_UTC="$NVPN_BUILD_TIMESTAMP_UTC" \
     archive
+  then
+    restore_generated_ios_project || true
+    return 1
+  fi
+  restore_generated_ios_project
   write_frozen_archive_receipt
   echo "Frozen iOS archive created once: $ARCHIVE_PATH"
 }

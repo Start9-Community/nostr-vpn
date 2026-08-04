@@ -1051,6 +1051,13 @@ if archive.index("prepare_frozen_revision_args") > archive.index(
     "run_ios_rust"
 ):
     raise SystemExit("frozen archive builds before pinning the full Git SHA")
+if (
+    "if ! xcodebuild" not in archive
+    or archive.count("restore_generated_ios_project") != 2
+    or archive.rindex("restore_generated_ios_project")
+    > archive.index("write_frozen_archive_receipt")
+):
+    raise SystemExit("frozen archive does not restore generated source before freezing")
 recovery = (
     'if [[ -d "$ARCHIVE_PATH" '
     '&& ! -e "$FROZEN_ARCHIVE_RECEIPT" ]]; then'
