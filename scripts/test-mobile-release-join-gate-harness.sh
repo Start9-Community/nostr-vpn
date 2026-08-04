@@ -863,7 +863,7 @@ for required in (
         raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
 for required in (
     "QRImageImportTestMarker.consume",
-    "AppModel.appGroupIdentifier",
+    "AppModel.supportDirectory()",
     "if imageImportEnabled",
     "join-request-import-image",
     "Import QR Image",
@@ -871,7 +871,6 @@ for required in (
     if required not in ios_qr_scanner:
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
 for required in (
-    'directoryPath = ""',
     'markerName = "nvpn-release-join-qr-image-import"',
     "maximumAgeSeconds = 60",
     "UUID(uuidString:",
@@ -880,6 +879,11 @@ for required in (
 ):
     if required not in ios_qr_marker:
         raise SystemExit(f"iOS QR import marker is not fail-closed: {required}")
+if (
+    'RELEASE_JOIN_IOS_QR_IMPORT_REMOTE_FILE="Nostr VPN/'
+    'nvpn-release-join-qr-image-import"'
+) not in ui:
+    raise SystemExit("iOS QR marker does not target the canonical support directory")
 for required in (
     "allowImageImport: Boolean = false",
     "if (allowImageImport)",

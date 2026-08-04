@@ -10,14 +10,11 @@ struct QRImageImportTestMarkerTests {
         let files = FileManager.default
         let root = files.temporaryDirectory
             .appendingPathComponent("nvpn-qr-marker-\(UUID())", isDirectory: true)
-        let directory = root.appendingPathComponent(
-            QRImageImportTestMarker.directoryPath,
-            isDirectory: true
-        )
-        let marker = directory.appendingPathComponent(QRImageImportTestMarker.markerName)
+        let supportDirectory = root.appendingPathComponent("Nostr VPN", isDirectory: true)
+        let marker = supportDirectory.appendingPathComponent(QRImageImportTestMarker.markerName)
         let legacy = root.appendingPathComponent(".nvpn-ui-test/probe")
         defer { try? files.removeItem(at: root) }
-        try files.createDirectory(at: directory, withIntermediateDirectories: true)
+        try files.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
         try files.createDirectory(
             at: legacy.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -28,8 +25,12 @@ struct QRImageImportTestMarkerTests {
 
         require(
             marker.deletingLastPathComponent().standardizedFileURL
-                == root.standardizedFileURL,
-            "marker was not rooted in the always-existing app-group container"
+                == supportDirectory.standardizedFileURL,
+            "marker was not rooted in the canonical app support directory"
+        )
+        require(
+            marker.path.hasSuffix("/Nostr VPN/nvpn-release-join-qr-image-import"),
+            "marker path did not match the CoreDevice destination contract"
         )
 
         func write(_ payload: String) throws {
@@ -47,20 +48,38 @@ struct QRImageImportTestMarkerTests {
             try Data(payload.utf8).write(to: marker)
         }
 
-        require(QRImageImportTestMarker.prepare(in: root), "initial marker preparation failed")
+        require(
+            QRImageImportTestMarker.prepare(in: supportDirectory),
+            "initial marker preparation failed"
+        )
         try requireInertMarker("initial prepare")
+        require(
+            !files.fileExists(
+                atPath: root.appendingPathComponent(QRImageImportTestMarker.markerName).path
+            ),
+            "marker leaked into the app-group root"
+        )
 
         try write("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
-        require(QRImageImportTestMarker.prepare(in: root), "armed marker preparation failed")
-        require(QRImageImportTestMarker.consume(in: root, now: now), "valid marker rejected")
+        require(
+            QRImageImportTestMarker.prepare(in: supportDirectory),
+            "armed marker preparation failed"
+        )
+        require(
+            QRImageImportTestMarker.consume(in: supportDirectory, now: now),
+            "valid marker rejected"
+        )
         try requireInertMarker("valid consume")
         require(!files.fileExists(atPath: legacy.path), "legacy probe was not removed")
-        require(!QRImageImportTestMarker.consume(in: root, now: now), "marker was not one-shot")
+        require(
+            !QRImageImportTestMarker.consume(in: supportDirectory, now: now),
+            "marker was not one-shot"
+        )
         try requireInertMarker("second consume")
 
         try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
         require(
-            QRImageImportTestMarker.consume(in: root, now: now),
+            QRImageImportTestMarker.consume(in: supportDirectory, now: now),
             "existing marker path could not be rearmed"
         )
         try requireInertMarker("rearmed consume")
@@ -68,26 +87,38 @@ struct QRImageImportTestMarkerTests {
         try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
         try files.setAttributes([.posixPermissions: 0o444], ofItemAtPath: marker.path)
         require(
-            QRImageImportTestMarker.consume(in: root, now: now),
+            QRImageImportTestMarker.consume(in: supportDirectory, now: now),
             "valid readable non-writable marker rejected"
         )
         require(
             !files.fileExists(atPath: marker.path),
             "non-writable marker invalidation was not attempted"
         )
-        require(QRImageImportTestMarker.prepare(in: root), "marker recreation failed")
+        require(
+            QRImageImportTestMarker.prepare(in: supportDirectory),
+            "marker recreation failed"
+        )
         try requireInertMarker("non-writable consume")
 
         try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now - 61)\n\(token)\n")
-        require(!QRImageImportTestMarker.consume(in: root, now: now), "stale marker accepted")
+        require(
+            !QRImageImportTestMarker.consume(in: supportDirectory, now: now),
+            "stale marker accepted"
+        )
         try requireInertMarker("stale consume")
 
         try overwriteExisting("invalid\n0\nnot-a-uuid\n")
-        require(!QRImageImportTestMarker.consume(in: root, now: now), "invalid marker accepted")
+        require(
+            !QRImageImportTestMarker.consume(in: supportDirectory, now: now),
+            "invalid marker accepted"
+        )
         try requireInertMarker("invalid consume")
 
         try files.removeItem(at: marker)
-        require(!QRImageImportTestMarker.consume(in: root, now: now), "missing marker accepted")
+        require(
+            !QRImageImportTestMarker.consume(in: supportDirectory, now: now),
+            "missing marker accepted"
+        )
         try requireInertMarker("missing consume")
         try files.removeItem(at: marker)
         require(!QRImageImportTestMarker.prepare(in: nil), "missing group prepared")

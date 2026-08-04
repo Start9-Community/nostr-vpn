@@ -74,10 +74,9 @@ struct QRCodeScannerSheet: View {
 
     private func consumeImageImportMarker() {
         guard !imageImportEnabled else { return }
-        let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: AppModel.appGroupIdentifier
+        imageImportEnabled = QRImageImportTestMarker.consume(
+            in: AppModel.supportDirectory()
         )
-        imageImportEnabled = QRImageImportTestMarker.consume(in: container)
     }
 
     private func presentImageImporter() {

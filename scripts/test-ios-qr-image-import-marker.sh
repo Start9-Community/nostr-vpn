@@ -10,15 +10,19 @@ xcrun swiftc \
   -o "$TMP_ROOT/marker-tests"
 "$TMP_ROOT/marker-tests"
 grep -Fq 'QRImageImportTestMarker.prepare(' "$ROOT/ios/Sources/AppModel.swift"
-grep -Fq 'appGroupSupportDir.deletingLastPathComponent()' \
+grep -Fq 'QRImageImportTestMarker.prepare(in: appGroupSupportDir)' \
   "$ROOT/ios/Sources/AppModel.swift"
+grep -Fq '.appendingPathComponent("Nostr VPN", isDirectory: true)' \
+  "$ROOT/ios/Sources/AppModelSupport.swift"
+grep -Fq 'in: AppModel.supportDirectory()' \
+  "$ROOT/ios/Sources/QRCodeScannerView.swift"
 
 # shellcheck disable=SC1090
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 PRIVATE_DIR="$TMP_ROOT/private"
 RELEASE_JOIN_IOS_UDID="fixture-device"
 RELEASE_JOIN_IOS_APP_PATH="$TMP_ROOT/Nostr VPN.app"
-remote_marker="$TMP_ROOT/device-group/nvpn-release-join-qr-image-import"
+remote_marker="$TMP_ROOT/device-group/Nostr VPN/nvpn-release-join-qr-image-import"
 mkdir -p \
   "$PRIVATE_DIR" "$RELEASE_JOIN_IOS_APP_PATH" \
   "$(dirname "$remote_marker")"
@@ -33,7 +37,7 @@ xcrun() {
     && "$7 $8" == "--domain-type appGroupDataContainer" \
     && "$9 ${10}" == "--domain-identifier group.fixture.frozen" \
     && "${11}" == --source \
-    && "${13} ${14}" == "--destination nvpn-release-join-qr-image-import" \
+    && "${13} ${14}" == "--destination Nostr VPN/nvpn-release-join-qr-image-import" \
     && "${15}" == --quiet ]] || return 1
   [[ -f "$remote_marker" ]] || return 1
   [[ "$(stat -f '%Lp' "${12}")" == 644 ]] || return 1

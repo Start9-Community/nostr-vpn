@@ -1,9 +1,9 @@
 import Foundation
 
 enum QRImageImportTestMarker {
-    // CoreDevice can overwrite, but not create, this app-group-root file. The
-    // ordinary app launch creates it inert before a physical gate can arm it.
-    static let directoryPath = ""
+    // CoreDevice can overwrite, but not create, this file. The ordinary app
+    // launch creates it inert in the app's canonical support directory before
+    // a physical gate can arm it.
     static let markerName = "nvpn-release-join-qr-image-import"
     static let payloadVersion = "nvpn-release-join-qr-image-import-v1"
     static let maximumAgeSeconds = 60
@@ -22,27 +22,30 @@ enum QRImageImportTestMarker {
         }
     }
 
-    private static func marker(in containerURL: URL) -> URL {
-        containerURL
-            .appendingPathComponent(directoryPath, isDirectory: true)
-            .appendingPathComponent(markerName)
+    private static func marker(in supportDirectoryURL: URL) -> URL {
+        supportDirectoryURL.appendingPathComponent(markerName)
     }
 
-    static func prepare(in containerURL: URL?) -> Bool {
-        guard let containerURL else { return false }
-        let marker = marker(in: containerURL)
+    static func prepare(in supportDirectoryURL: URL?) -> Bool {
+        guard let supportDirectoryURL else { return false }
+        let marker = marker(in: supportDirectoryURL)
         if FileManager.default.fileExists(atPath: marker.path) {
             return true
         }
         return invalidate(marker)
     }
 
-    static func consume(in containerURL: URL?, now: Int = Int(Date().timeIntervalSince1970)) -> Bool {
-        guard let containerURL else { return false }
+    static func consume(
+        in supportDirectoryURL: URL?,
+        now: Int = Int(Date().timeIntervalSince1970)
+    ) -> Bool {
+        guard let supportDirectoryURL else { return false }
         try? FileManager.default.removeItem(
-            at: containerURL.appendingPathComponent(".nvpn-ui-test", isDirectory: true)
+            at: supportDirectoryURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(".nvpn-ui-test", isDirectory: true)
         )
-        let marker = marker(in: containerURL)
+        let marker = marker(in: supportDirectoryURL)
         guard let data = try? Data(contentsOf: marker),
               let payload = String(data: data, encoding: .utf8) else {
             _ = invalidate(marker)

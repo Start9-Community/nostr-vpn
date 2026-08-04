@@ -86,9 +86,7 @@ final class AppModel: ObservableObject {
             )
             try Self.migrateLegacySupportDirectoryIfNeeded(to: appGroupSupportDir)
             try Self.seedMobileConfig(in: appGroupSupportDir, deviceName: Self.deviceName())
-            _ = QRImageImportTestMarker.prepare(
-                in: appGroupSupportDir.deletingLastPathComponent()
-            )
+            _ = QRImageImportTestMarker.prepare(in: appGroupSupportDir)
         } catch {
             supportDir = nil
             core = nil
