@@ -33,6 +33,7 @@ const harnessOnlyPaths = new Set([
   'scripts/lib-mobile-release-join-artifacts.sh',
   'scripts/lib-mobile-release-join-ui.sh',
   'scripts/lib-mobile-wireguard-fixture.sh',
+  'scripts/lib-macos-release-app-ownership.sh',
   'scripts/linux-release-mobile-join-remote.sh',
   'scripts/mobile-android-smoke.sh',
   'scripts/mobile_release_artifact_receipt.py',
