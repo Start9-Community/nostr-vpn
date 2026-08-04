@@ -204,7 +204,7 @@ release_join_android_scroll_to() {
     safe-center|visible-center) ;;
     *) return 2 ;;
   esac
-  for attempts in $(seq 1 12); do
+  for ((attempts = 0; attempts < 12; attempts++)); do
     if release_join_android_query \
         "$kind" "$expected" "$visibility" >/dev/null 2>&1
     then
@@ -218,10 +218,35 @@ release_join_android_scroll_to() {
 
 release_join_android_enter() {
   local kind="$1" selector="$2" value="$3"
-  release_join_android_scroll_to "$kind" "$selector"
-  release_join_android_tap "$kind" "$selector"
-  "${ADB[@]}" shell input text "$value"
-  "${ADB[@]}" shell input keyevent KEYCODE_BACK
+  local actual deadline input_state
+  release_join_android_scroll_to "$kind" "$selector" || return 1
+  release_join_android_tap "$kind" "$selector" || return 1
+  deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    input_state="$("${ADB[@]}" shell dumpsys input_method | tr -d '\r')" \
+      || return 1
+    if grep -Fq 'mInputShown=true' <<<"$input_state"; then
+      break
+    fi
+    sleep 0.1
+  done
+  grep -Fq 'mInputShown=true' <<<"$input_state" || {
+    echo "Android join field did not open the system input method: $selector" >&2
+    return 1
+  }
+  "${ADB[@]}" shell input keycombination -t 40 KEYCODE_CTRL_LEFT KEYCODE_A \
+    || return 1
+  "${ADB[@]}" shell input keyevent KEYCODE_DEL || return 1
+  "${ADB[@]}" shell input text "${value// /%s}" </dev/null || return 1
+  "${ADB[@]}" shell input keyevent KEYCODE_BACK || return 1
+  deadline=$((SECONDS + 3))
+  while ((SECONDS < deadline)); do
+    actual="$(release_join_android_query text "$value" text 2>/dev/null || true)"
+    [[ "$actual" == "$value" ]] && return 0
+    sleep 0.1
+  done
+  echo "Android join field did not retain exact text: $selector" >&2
+  return 1
 }
 
 release_join_android_launch() {

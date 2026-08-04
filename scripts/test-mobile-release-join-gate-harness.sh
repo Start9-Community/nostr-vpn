@@ -2017,6 +2017,7 @@ android_admin_add="$(
     "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 )"
 for required in \
+  'release_join_android_enter description "Manual joiner Device ID"' \
   'text "$joiner" center' \
   'description "Add joining device manually" visible-center' \
   'description "Add joining device manually" enabled' \
@@ -2025,6 +2026,19 @@ for required in \
 do
   grep -Fq "$required" <<<"$android_admin_add" \
     || { echo "Android admin-add lacks verified public UI state: $required" >&2; exit 1; }
+done
+
+android_field_entry="$(
+  sed -n \
+    '/^release_join_android_enter() {/,/^release_join_android_launch() {/p' \
+    "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+)"
+for required in 'dumpsys input_method' 'mInputShown=true' KEYCODE_CTRL_LEFT \
+  KEYCODE_A KEYCODE_DEL 'text "$value" text' \
+  '"$actual" == "$value"'
+do
+  grep -Fq "$required" <<<"$android_field_entry" \
+    || { echo "Android join field entry lacks $required" >&2; exit 1; }
 done
 tap_line="$(grep -n 'release_join_android_tap_visible' <<<"$android_admin_add" | tail -n 1 | cut -d: -f1)"
 visible_line="$(grep -n 'release_join_android_admin_add_visible' <<<"$android_admin_add" | tail -n 1 | cut -d: -f1)"
