@@ -875,7 +875,6 @@ for required in (
     "maximumAgeSeconds = 60",
     "UUID(uuidString:",
     "removeItem(at: marker)",
-    'appendingPathComponent(".nvpn-ui-test"',
 ):
     if required not in ios_qr_marker:
         raise SystemExit(f"iOS QR import marker is not fail-closed: {required}")

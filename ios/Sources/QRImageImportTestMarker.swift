@@ -40,11 +40,6 @@ enum QRImageImportTestMarker {
         now: Int = Int(Date().timeIntervalSince1970)
     ) -> Bool {
         guard let supportDirectoryURL else { return false }
-        try? FileManager.default.removeItem(
-            at: supportDirectoryURL
-                .deletingLastPathComponent()
-                .appendingPathComponent(".nvpn-ui-test", isDirectory: true)
-        )
         let marker = marker(in: supportDirectoryURL)
         guard let data = try? Data(contentsOf: marker),
               let payload = String(data: data, encoding: .utf8) else {

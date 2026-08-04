@@ -12,14 +12,8 @@ struct QRImageImportTestMarkerTests {
             .appendingPathComponent("nvpn-qr-marker-\(UUID())", isDirectory: true)
         let supportDirectory = root.appendingPathComponent("Nostr VPN", isDirectory: true)
         let marker = supportDirectory.appendingPathComponent(QRImageImportTestMarker.markerName)
-        let legacy = root.appendingPathComponent(".nvpn-ui-test/probe")
         defer { try? files.removeItem(at: root) }
         try files.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-        try files.createDirectory(
-            at: legacy.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try Data().write(to: legacy)
         let now = 2_000_000_000
         let token = UUID().uuidString.lowercased()
 
@@ -70,7 +64,6 @@ struct QRImageImportTestMarkerTests {
             "valid marker rejected"
         )
         try requireInertMarker("valid consume")
-        require(!files.fileExists(atPath: legacy.path), "legacy probe was not removed")
         require(
             !QRImageImportTestMarker.consume(in: supportDirectory, now: now),
             "marker was not one-shot"
