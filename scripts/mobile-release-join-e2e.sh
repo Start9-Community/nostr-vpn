@@ -244,6 +244,9 @@ phase_ios_admin_android_qr() {
     || fail "iPhone did not open its shipped QR image importer"
   release_join_stage_ios_qr_image \
     "$ANDROID_QR_CAPTURE" "$IOS_QR_STAGED_FILENAME"
+  release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMAGE_SELECTED=1 \
+    "$RELEASE_JOIN_UI_WAIT_SECS" \
+    || fail "iPhone did not select the Pixel's captured QR image"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_IMAGE_IMPORTED=1 \
     "$RELEASE_JOIN_IMPORT_WAIT_SECS" \
     || fail "iPhone did not decode the Pixel's captured QR image"

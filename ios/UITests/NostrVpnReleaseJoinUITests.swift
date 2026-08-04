@@ -119,6 +119,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         )
         importImage.tap()
         selectImportedImage(named: imageFilename)
+        emit("NVPN_RELEASE_JOIN_IMAGE_SELECTED=1")
 
         let confirm = element("join-request-confirm-add")
         XCTAssertTrue(
