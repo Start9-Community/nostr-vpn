@@ -15,6 +15,79 @@ release_gate="$ROOT/scripts/release-gate.sh"
 temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-underlay-harness.XXXXXX")"
 trap 'rm -rf "$temp"' EXIT
 
+# The continuity command can exit while a detached descendant still holds its
+# stdout pipe open. Stopping the observer must not wait for that pipe to close.
+python3 - "$ROOT/scripts/mobile-underlay-local-timestamp.py" "$temp" <<'PY'
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+observer_script = pathlib.Path(sys.argv[1])
+temp = pathlib.Path(sys.argv[2])
+holder_pid_path = temp / "continuity-pipe-holder.pid"
+output_path = temp / "continuity-observer.log"
+fixture = """
+import pathlib
+import subprocess
+import sys
+
+holder = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    start_new_session=True,
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+)
+pathlib.Path(sys.argv[1]).write_text(str(holder.pid), encoding="utf-8")
+print("fixture ready", flush=True)
+"""
+observer = subprocess.Popen(
+    [
+        sys.executable,
+        str(observer_script),
+        str(output_path),
+        "--",
+        sys.executable,
+        "-c",
+        fixture,
+        str(holder_pid_path),
+    ]
+)
+holder_pid = None
+try:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if holder_pid_path.exists():
+            holder_pid = int(holder_pid_path.read_text(encoding="utf-8"))
+            break
+        if observer.poll() is not None:
+            raise SystemExit("continuity observer exited before fixture was ready")
+        time.sleep(0.01)
+    if holder_pid is None:
+        raise SystemExit("continuity pipe-holder fixture did not start")
+    time.sleep(0.1)
+    if observer.poll() is not None:
+        raise SystemExit("continuity observer did not remain blocked on the inherited pipe")
+    observer.terminate()
+    try:
+        status = observer.wait(timeout=2)
+    except subprocess.TimeoutExpired as error:
+        raise SystemExit("continuity observer did not stop while its pipe stayed open") from error
+    if status != 0:
+        raise SystemExit(f"continuity observer stopped with status {status}")
+finally:
+    if observer.poll() is None:
+        observer.kill()
+        observer.wait()
+    if holder_pid is not None:
+        try:
+            os.killpg(holder_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+PY
+
 write_ping_fixture() {
   cat >"$temp/ping.log" <<'EOF'
 [1000.000] 64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=1 ms

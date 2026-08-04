@@ -11,6 +11,10 @@ import time
 from pathlib import Path
 
 
+class StopRequested(Exception):
+    """Interrupt a blocking pipe read when the observer is stopped."""
+
+
 def main() -> int:
     if len(sys.argv) < 4 or sys.argv[2] != "--":
         raise SystemExit(
@@ -35,19 +39,26 @@ def main() -> int:
         try:
             os.killpg(child.pid, signal.SIGTERM)
         except ProcessLookupError:
-            return
+            pass
         except PermissionError:
-            child.terminate()
+            try:
+                child.terminate()
+            except ProcessLookupError:
+                pass
+        raise StopRequested
 
     signal.signal(signal.SIGINT, stop_child)
     signal.signal(signal.SIGTERM, stop_child)
 
     assert child.stdout is not None
     with output.open("w", encoding="utf-8", buffering=1) as handle:
-        for line in child.stdout:
-            now_ms = time.time_ns() // 1_000_000
-            seconds, milliseconds = divmod(now_ms, 1_000)
-            handle.write(f"[{seconds}.{milliseconds:03d}] {line}")
+        try:
+            for line in child.stdout:
+                now_ms = time.time_ns() // 1_000_000
+                seconds, milliseconds = divmod(now_ms, 1_000)
+                handle.write(f"[{seconds}.{milliseconds:03d}] {line}")
+        except StopRequested:
+            pass
 
     try:
         status = child.wait(timeout=3 if stopping else None)
