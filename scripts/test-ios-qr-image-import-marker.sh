@@ -9,6 +9,9 @@ xcrun swiftc \
   "$ROOT/ios/MarkerTests/QRImageImportTestMarkerTests.swift" \
   -o "$TMP_ROOT/marker-tests"
 "$TMP_ROOT/marker-tests"
+grep -Fq 'QRImageImportTestMarker.prepare(' "$ROOT/ios/Sources/AppModel.swift"
+grep -Fq 'appGroupSupportDir.deletingLastPathComponent()' \
+  "$ROOT/ios/Sources/AppModel.swift"
 
 # shellcheck disable=SC1090
 source "$ROOT/scripts/lib-mobile-release-join-ui.sh"

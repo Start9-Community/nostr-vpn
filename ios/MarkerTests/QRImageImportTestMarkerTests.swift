@@ -47,7 +47,11 @@ struct QRImageImportTestMarkerTests {
             try Data(payload.utf8).write(to: marker)
         }
 
+        require(QRImageImportTestMarker.prepare(in: root), "initial marker preparation failed")
+        try requireInertMarker("initial prepare")
+
         try write("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
+        require(QRImageImportTestMarker.prepare(in: root), "armed marker preparation failed")
         require(QRImageImportTestMarker.consume(in: root, now: now), "valid marker rejected")
         try requireInertMarker("valid consume")
         require(!files.fileExists(atPath: legacy.path), "legacy probe was not removed")
@@ -72,6 +76,8 @@ struct QRImageImportTestMarkerTests {
         try files.removeItem(at: marker)
         require(!QRImageImportTestMarker.consume(in: root, now: now), "missing marker accepted")
         try requireInertMarker("missing consume")
+        try files.removeItem(at: marker)
+        require(!QRImageImportTestMarker.prepare(in: nil), "missing group prepared")
         require(!QRImageImportTestMarker.consume(in: nil, now: now), "missing group accepted")
     }
 }

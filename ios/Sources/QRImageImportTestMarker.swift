@@ -1,8 +1,8 @@
 import Foundation
 
 enum QRImageImportTestMarker {
-    // Keep the one-shot capability at the app-group root. CoreDevice always
-    // exposes that existing directory, including before the app's first launch.
+    // CoreDevice can overwrite, but not create, this app-group-root file. The
+    // ordinary app launch creates it inert before a physical gate can arm it.
     static let directoryPath = ""
     static let markerName = "nvpn-release-join-qr-image-import"
     static let payloadVersion = "nvpn-release-join-qr-image-import-v1"
@@ -22,14 +22,27 @@ enum QRImageImportTestMarker {
         }
     }
 
+    private static func marker(in containerURL: URL) -> URL {
+        containerURL
+            .appendingPathComponent(directoryPath, isDirectory: true)
+            .appendingPathComponent(markerName)
+    }
+
+    static func prepare(in containerURL: URL?) -> Bool {
+        guard let containerURL else { return false }
+        let marker = marker(in: containerURL)
+        if FileManager.default.fileExists(atPath: marker.path) {
+            return true
+        }
+        return invalidate(marker)
+    }
+
     static func consume(in containerURL: URL?, now: Int = Int(Date().timeIntervalSince1970)) -> Bool {
         guard let containerURL else { return false }
         try? FileManager.default.removeItem(
             at: containerURL.appendingPathComponent(".nvpn-ui-test", isDirectory: true)
         )
-        let marker = containerURL
-            .appendingPathComponent(directoryPath, isDirectory: true)
-            .appendingPathComponent(markerName)
+        let marker = marker(in: containerURL)
         guard let data = try? Data(contentsOf: marker),
               let payload = String(data: data, encoding: .utf8) else {
             _ = invalidate(marker)
