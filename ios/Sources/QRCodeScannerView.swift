@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -12,7 +13,8 @@ struct QRCodeScannerSheet: View {
     @State private var finished = false
     @State private var importingImage = false
     @State private var importTask: Task<Void, Never>?
-    @State private var imageImportEnabled = false
+    private let imageImportEnabled =
+        ProcessInfo.processInfo.environment["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT"] == "1"
 
     var body: some View {
         NavigationStack {
@@ -67,16 +69,8 @@ struct QRCodeScannerSheet: View {
                     }
                 }
             }
-            .onAppear(perform: consumeImageImportMarker)
             .onDisappear(perform: cancelOutstandingWork)
         }
-    }
-
-    private func consumeImageImportMarker() {
-        guard !imageImportEnabled else { return }
-        imageImportEnabled = QRImageImportTestMarker.consume(
-            in: AppModel.supportDirectory()
-        )
     }
 
     private func presentImageImporter() {

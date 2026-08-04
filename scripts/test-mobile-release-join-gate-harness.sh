@@ -564,7 +564,6 @@ python3 - \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidComponents.kt" \
   "$ROOT/ios/Sources/DevicesViews.swift" \
   "$ROOT/ios/Sources/QRCodeScannerView.swift" \
-  "$ROOT/ios/Sources/QRImageImportTestMarker.swift" \
   "$ROOT/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt" \
   "$ROOT/ios/Sources/SettingsViews.swift" \
   "$ROOT/macos/Sources/RootViewDevices.swift" \
@@ -608,7 +607,6 @@ def read(path):
     android_components,
     ios_devices,
     ios_qr_scanner,
-    ios_qr_marker,
     android_qr_scanner,
     ios_participants,
     macos_devices,
@@ -726,8 +724,6 @@ for forbidden in (
 if "fresh network ID" not in restart_ios:
     raise SystemExit("iOS in-place restart does not document fresh-network isolation")
 
-if ".launchEnvironment =" in ios_test:
-    raise SystemExit("Release join XCTest injects app state through launchEnvironment")
 ios_setup = ios_test.split("override func setUpWithError() throws", 1)[1].split(
     "func testCreateAdminNetworkAndReportPublicValues()", 1
 )[0]
@@ -736,8 +732,31 @@ ios_import = ios_test.split(
 )[1].split("func test", 1)[0]
 if "app.launchArguments.isEmpty" not in ios_setup:
     raise SystemExit("Ordinary release join tests do not assert empty launch arguments")
+if "app.launchEnvironment.isEmpty" not in ios_setup:
+    raise SystemExit("Ordinary release join tests do not assert empty launch environment")
 if "app.launch()" not in ios_setup:
     raise SystemExit("Release join XCTest no longer uses its normal app launch")
+launch_environment = 'app.launchEnvironment = ["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT": "1"]'
+if ios_test.count(launch_environment) != 1 or launch_environment not in ios_import:
+    raise SystemExit("Exact QR image import test lacks its sole target-app launch flag")
+if ".launchEnvironment =" in ios_test.replace(ios_import, ""):
+    raise SystemExit("A non-import release join test injects target-app environment")
+for required in (
+    "XCTAssertTrue(app.launchEnvironment.isEmpty)",
+    "app.terminate()",
+    launch_environment,
+    "XCTAssertEqual(app.launchEnvironment.count, 1)",
+    "addTeardownBlock { self.app.terminate() }",
+    "app.launch()",
+    'element("qr-scanner-camera").waitForExistence',
+    'element("join-request-import-image")',
+):
+    if required not in ios_import:
+        raise SystemExit(f"Exact QR image import test lacks launch contract: {required}")
+if ios_import.index('element("qr-scanner-camera")') > ios_import.index(
+    'element("join-request-import-image")'
+):
+    raise SystemExit("QR importer is queried before the shipped scanner exists")
 for forbidden in ("app.launchArguments =", "app.activate()"):
     if forbidden in ios_import:
         raise SystemExit(f"Release join XCTest retains capability launch plumbing: {forbidden}")
@@ -862,27 +881,20 @@ for required in (
     if required not in ios_test:
         raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
 for required in (
-    "QRImageImportTestMarker.consume",
-    "AppModel.supportDirectory()",
+    'ProcessInfo.processInfo.environment["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT"] == "1"',
     "if imageImportEnabled",
     "join-request-import-image",
     "Import QR Image",
 ):
     if required not in ios_qr_scanner:
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
-for required in (
-    'markerName = "nvpn-release-join-qr-image-import"',
-    "maximumAgeSeconds = 60",
-    "UUID(uuidString:",
-    "removeItem(at: marker)",
+for forbidden in (
+    "QRImageImportTestMarker",
+    "nvpn-release-join-qr-image-import",
+    "appGroupDataContainer",
 ):
-    if required not in ios_qr_marker:
-        raise SystemExit(f"iOS QR import marker is not fail-closed: {required}")
-if (
-    'RELEASE_JOIN_IOS_QR_IMPORT_REMOTE_FILE="Nostr VPN/'
-    'nvpn-release-join-qr-image-import"'
-) not in ui:
-    raise SystemExit("iOS QR marker does not target the canonical support directory")
+    if forbidden in ui or forbidden in ios_qr_scanner:
+        raise SystemExit(f"iOS QR import retains marker transport: {forbidden}")
 for required in (
     "allowImageImport: Boolean = false",
     "if (allowImageImport)",

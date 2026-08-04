@@ -86,11 +86,21 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     func testImportJoinQrImageAndRequireAdminRosterProgress() throws {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         let imageFilename = try required("NVPN_RELEASE_JOIN_IMAGE_FILENAME")
+        XCTAssertTrue(app.launchEnvironment.isEmpty)
+        app.terminate()
+        app.launchEnvironment = ["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT": "1"]
+        XCTAssertEqual(app.launchEnvironment.count, 1)
+        addTeardownBlock { self.app.terminate() }
+        app.launch()
         openLinkDevice()
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))
         scan.tap()
         allowCameraAccessIfNeeded()
+        XCTAssertTrue(
+            element("qr-scanner-camera").waitForExistence(timeout: 10),
+            "Shipped QR scanner was not visible"
+        )
         let importImage = element("join-request-import-image")
         XCTAssertTrue(
             importImage.waitForExistence(timeout: 10),
