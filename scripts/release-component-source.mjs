@@ -92,7 +92,7 @@ function isProductInput(path, platform) {
     for (const [owner, patterns] of Object.entries(buildScripts)) {
       if (patterns.some((pattern) => pattern.test(path))) return owner === platform
     }
-    if (/^scripts\/test-|release-gate|release-artifact-provenance|release-component-source|local-release|publication|fleet-release/.test(path)) {
+    if (/^scripts\/test-|release-gate|release-artifact-provenance|release-component-source|local-release|publication|fleet[-_]release/.test(path)) {
       return false
     }
     return true
