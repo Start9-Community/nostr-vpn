@@ -252,7 +252,14 @@ private struct AddNetworkPage: View {
                 }
                 switch mode {
                 case nil:
-                    AddNetworkChoiceButtons(mode: $mode)
+                    AddNetworkChoiceButtons(
+                        mode: $mode,
+                        onJoin: {
+                            if !model.state.vpnEnabled {
+                                model.setVpnEnabled(true)
+                            }
+                        }
+                    )
                     if showsWelcomeHeader {
                         Link(destination: URL(string: "https://nostrvpn.org/privacy/")!) {
                             Label("Privacy Policy", systemImage: "hand.raised")
@@ -278,6 +285,7 @@ private struct AddNetworkPage: View {
 
 private struct AddNetworkChoiceButtons: View {
     @Binding var mode: AddNetworkMode?
+    let onJoin: () -> Void
 
     var body: some View {
         VStack(spacing: 18) {
@@ -295,6 +303,7 @@ private struct AddNetworkChoiceButtons: View {
             .accessibilityIdentifier("network-setup-create")
 
             Button {
+                onJoin()
                 mode = .join
             } label: {
                 Label("Join Network", systemImage: "qrcode.viewfinder")
