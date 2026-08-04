@@ -331,7 +331,7 @@ switch ($Mode) {
       )
       $ConfigArgument = [regex]::Match(
         $Command.Groups['arguments'].Value,
-        '^ daemon --service --config "(?<config>[^"]+)"\s*$'
+        '^ daemon --service --config "(?<config>[^"]+)" --iface "(?<iface>[^"]+)" --mesh-refresh-interval-secs (?<refresh>[1-9][0-9]*)\s*$'
       )
       if (
         !$Command.Success -or

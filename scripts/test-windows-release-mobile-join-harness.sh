@@ -121,13 +121,16 @@ for service_contract in \
   'Get-Sha256 $CliExe' \
   'Normalize-ComparableWindowsPath' \
   "\$ConfigArgument.Groups['config'].Value" \
-  "^ daemon --service --config \"(?<config>[^\"]+)\"\\s*\$" \
+  "^ daemon --service --config \"(?<config>[^\"]+)\" --iface \"(?<iface>[^\"]+)\" --mesh-refresh-interval-secs (?<refresh>[1-9][0-9]*)\\s*\$" \
   '$CliExe service uninstall --config $Config' \
   'WINDOWS_RELEASE_MOBILE_JOIN_CLEAN'
 do
   grep -Fq "$service_contract" "$REMOTE" \
     || fail "Windows wrapper does not use the production service name"
 done
+if grep -Fq "^ daemon --service --config \"(?<config>[^\"]+)\"\\s*\$" "$REMOTE"; then
+  fail "Windows cleanup ownership matcher still rejects canonical service arguments"
+fi
 if grep -Fq '"(?: |$)' "$REMOTE"; then
   fail "Windows cleanup ownership matcher still permits trailing arguments"
 fi
