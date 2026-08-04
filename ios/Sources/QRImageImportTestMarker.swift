@@ -58,6 +58,7 @@ enum QRImageImportTestMarker {
             _ = invalidate(marker)
             return false
         }
-        return invalidate(marker)
+        _ = invalidate(marker)
+        return true
     }
 }

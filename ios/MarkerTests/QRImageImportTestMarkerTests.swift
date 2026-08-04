@@ -65,6 +65,19 @@ struct QRImageImportTestMarkerTests {
         )
         try requireInertMarker("rearmed consume")
 
+        try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now)\n\(token)\n")
+        try files.setAttributes([.posixPermissions: 0o444], ofItemAtPath: marker.path)
+        require(
+            QRImageImportTestMarker.consume(in: root, now: now),
+            "valid readable non-writable marker rejected"
+        )
+        require(
+            !files.fileExists(atPath: marker.path),
+            "non-writable marker invalidation was not attempted"
+        )
+        require(QRImageImportTestMarker.prepare(in: root), "marker recreation failed")
+        try requireInertMarker("non-writable consume")
+
         try overwriteExisting("\(QRImageImportTestMarker.payloadVersion)\n\(now - 61)\n\(token)\n")
         require(!QRImageImportTestMarker.consume(in: root, now: now), "stale marker accepted")
         try requireInertMarker("stale consume")

@@ -809,6 +809,7 @@ release_join_ios_copy_qr_import_marker() {
     echo "Frozen iOS app has no valid app-group identifier" >&2
     return 1
   }
+  chmod 0644 "$source"
   xcrun devicectl device copy to \
     --device "$RELEASE_JOIN_IOS_UDID" \
     --domain-type appGroupDataContainer \

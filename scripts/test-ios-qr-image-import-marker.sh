@@ -36,6 +36,7 @@ xcrun() {
     && "${13} ${14}" == "--destination nvpn-release-join-qr-image-import" \
     && "${15}" == --quiet ]] || return 1
   [[ -f "$remote_marker" ]] || return 1
+  [[ "$(stat -f '%Lp' "${12}")" == 644 ]] || return 1
   cp "${12}" "$remote_marker"
   calls=$((calls + 1))
   if [[ "$(sed -n '1p' "${12}")" == invalid ]]; then
