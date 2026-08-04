@@ -102,6 +102,15 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Shipped QR image import control was not visible"
         )
         emit("NVPN_RELEASE_JOIN_IMPORT_READY=1")
+        let stagedImage = try XCTUnwrap(
+            FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        ).appendingPathComponent(imageFilename)
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                FileManager.default.fileExists(atPath: stagedImage.path)
+            },
+            "Staged QR screenshot did not arrive in the running test container"
+        )
         importImage.tap()
         selectImportedImage(named: imageFilename)
 

@@ -1089,11 +1089,14 @@ if not (
         "release_join_android_background_foreground_pending_qr"
     )
     < android_qr_joiner_phase.index("release_join_capture_android_qr")
-    < android_qr_joiner_phase.index("release_join_stage_ios_qr_image")
     < android_qr_joiner_phase.index("release_join_ios_start_test")
+    < android_qr_joiner_phase.index(
+        "release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMPORT_READY=1"
+    )
+    < android_qr_joiner_phase.index("release_join_stage_ios_qr_image")
 ):
     raise SystemExit(
-        "Pixel pending QR lifecycle must finish before iPhone approval starts"
+        "Pixel QR must be staged only after the running iPhone test is ready"
     )
 for required in (
     "RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY",
