@@ -1020,6 +1020,8 @@ android_scan_submit = ui.split(
 )[1].split("release_join_capture_android_qr() {", 1)[0]
 if 'release_join_android_tap description "Scan joining device QR"' in android_scan_submit:
     raise SystemExit("Android scanner setup still consumes the iPhone delivery clock")
+if "release_join_android_wait_through_system_prompts" not in android_scan_submit:
+    raise SystemExit("Android admin approval does not complete VPN permission")
 
 android_qr_lifecycle = ui.split(
     "release_join_android_background_foreground_pending_qr() {", 1

@@ -555,6 +555,11 @@ release_join_android_scan_submit() {
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
   release_join_android_tap_center \
     description "Confirm adding scanned join request"
+  release_join_android_wait_through_system_prompts \
+    resource "roster-participant-accepted-$joiner" 10 || {
+      echo "Android admin transport permission did not complete" >&2
+      return 1
+    }
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
