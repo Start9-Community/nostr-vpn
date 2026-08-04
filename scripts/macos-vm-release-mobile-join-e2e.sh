@@ -399,6 +399,11 @@ assert_delivery_deadline() {
     return 1
   }
   local elapsed=$((completed_ms - submitted_ms))
+  assert_delivery_duration "$elapsed" "$label"
+}
+
+assert_delivery_duration() {
+  local elapsed="$1" label="$2"
   ((elapsed >= 0 && elapsed <= RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000)) || {
     echo "$label took ${elapsed}ms after approval" >&2
     return 1
@@ -1014,6 +1019,12 @@ DESKTOP_IOS_JOINER_ID="$(
 )"
 release_join_valid_npub "$DESKTOP_IOS_JOINER_ID"
 wait_log_marker "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
+if grep -Fq "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS=" \
+  "$desktop_ios_join_log"
+then
+  echo "macOS joiner completed before the iPhone approval" >&2
+  exit 1
+fi
 ios_admin_log="$(ios_log iphone-admin-macos-add)"
 release_join_ios_start_test \
   testManualAdminAddRequiresRosterProgress "$ios_admin_log" \
@@ -1027,19 +1038,33 @@ release_join_ios_wait_marker \
     echo "iPhone admin did not submit the macOS approval" >&2
     exit 1
   }
-ios_admin_submitted_ms="$(release_join_now_ms)"
+ios_admin_submitted_ms="$(
+  ios_marker_value_from "$ios_admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS
+)"
+[[ "$ios_admin_submitted_ms" =~ ^[0-9]+$ ]]
+ios_admin_observed_submitted_ms="$(release_join_now_ms)"
 wait_log_marker \
   "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS \
   "$RELEASE_JOIN_DELIVERY_WAIT_SECS"
-ios_admin_completed_ms="$(release_join_now_ms)"
-assert_delivery_deadline \
-  "$ios_admin_submitted_ms" "$ios_admin_completed_ms" \
-  "iPhone-admin-to-macOS-manual"
+ios_admin_remote_completed_ms="$(release_join_now_ms)"
 release_join_ios_finish_test \
   || {
     echo "iPhone admin did not retain the exact macOS joiner" >&2
     exit 1
   }
+ios_admin_applied_ms="$(
+  ios_marker_value_from "$ios_admin_log" NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS
+)"
+[[ "$ios_admin_applied_ms" =~ ^[0-9]+$ ]]
+ios_admin_remote_elapsed_ms=$((
+  ios_admin_remote_completed_ms - ios_admin_observed_submitted_ms
+))
+ios_admin_phone_elapsed_ms=$((ios_admin_applied_ms - ios_admin_submitted_ms))
+ios_admin_delivery_elapsed_ms="$ios_admin_remote_elapsed_ms"
+((ios_admin_phone_elapsed_ms <= ios_admin_delivery_elapsed_ms)) \
+  || ios_admin_delivery_elapsed_ms="$ios_admin_phone_elapsed_ms"
+assert_delivery_duration \
+  "$ios_admin_delivery_elapsed_ms" "iPhone-admin-to-macOS-manual"
 ios_admin_relaunch_joiner="$(
   ios_marker_value_from \
     "$ios_admin_log" NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE

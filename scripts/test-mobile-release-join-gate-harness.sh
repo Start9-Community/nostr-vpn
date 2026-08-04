@@ -1266,7 +1266,11 @@ macos_iphone_admin_phase = desktop.split(
 for required in (
     "NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE",
     "NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS",
-    "assert_delivery_deadline",
+    "NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS",
+    "macOS joiner completed before the iPhone approval",
+    "ios_admin_remote_elapsed_ms",
+    "ios_admin_phone_elapsed_ms",
+    "assert_delivery_duration",
     '[[ "$ios_admin_relaunch_joiner" == "$DESKTOP_IOS_JOINER_ID" ]]',
 ):
     if required not in macos_iphone_admin_phase:
@@ -1274,9 +1278,12 @@ for required in (
             f"macOS/iPhone gate does not consume iPhone-admin relaunch proof: {required}"
         )
 if not (
-    macos_iphone_admin_phase.index("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS")
-    < macos_iphone_admin_phase.index("NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS")
-    < macos_iphone_admin_phase.index("assert_delivery_deadline")
+    macos_iphone_admin_phase.index("macOS joiner completed before the iPhone approval")
+    < macos_iphone_admin_phase.index("testManualAdminAddRequiresRosterProgress")
+    < macos_iphone_admin_phase.index("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS")
+    < macos_iphone_admin_phase.rindex("NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS")
+    < macos_iphone_admin_phase.index("NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS")
+    < macos_iphone_admin_phase.index("assert_delivery_duration")
     < macos_iphone_admin_phase.index("finish_remote")
 ):
     raise SystemExit("iPhone/macOS delivery is not measured before durability checks")
