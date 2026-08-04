@@ -1008,7 +1008,7 @@ for required in (
     'release_join_android_scroll_to description "Scan joining device QR"',
     'release_join_android_tap description "Scan joining device QR"',
     "release_join_android_accept_camera_permission",
-    'release_join_android_wait_query resource "join-request-import-image"',
+    'release_join_android_wait_query description "Import QR Image"',
 ):
     if required not in android_scan_prepare:
         raise SystemExit(
@@ -1458,7 +1458,7 @@ if "an exact NVPN_EXPECTED_FIPS_GIT_SHA" not in artifacts:
     raise SystemExit("Release join gate does not pin the exact FIPS candidate")
 
 for required in (
-    "join-request-import-image",
+    "Import QR Image",
     "release_join_capture_android_qr",
     "release_join_capture_ios_qr",
     "release_join_stage_ios_qr_image",

@@ -254,21 +254,75 @@ release_join_android_launch() {
     -n "$package/org.nostrvpn.app.MainActivity" >/dev/null
 }
 
-release_join_android_accept_camera_permission() {
-  local deadline=$((SECONDS + 8))
+release_join_android_tap_center() {
+  local kind="$1" expected="$2" point
+  point="$(
+    release_join_android_query "$kind" "$expected" center 2>/dev/null
+  )" || return 1
+  # Permission sheets and confirmation dialogs can sit below the guarded
+  # scrolling-app viewport.
+  # shellcheck disable=SC2086
+  "${ADB[@]}" shell input tap $point
+}
+
+release_join_android_tap_system_resource() {
+  release_join_android_tap_center resource "$1"
+}
+
+release_join_android_top_activity() {
+  "${ADB[@]}" shell dumpsys activity activities 2>/dev/null \
+    | tr -d '\r' \
+    | sed -nE \
+      's/.*(topResumedActivity|mResumedActivity).* u[0-9]+ ([^ ]+\/[^ ]+) .*/\2/p' \
+    | head -n 1
+}
+
+release_join_android_wait_through_system_prompts() {
+  local kind="$1" expected="$2" timeout="$3"
+  local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+  local deadline=$((SECONDS + timeout)) activity
   while ((SECONDS < deadline)); do
-    if release_join_android_query description "QR scanner camera" center >/dev/null 2>&1; then
-      return 0
-    fi
-    release_join_android_tap resource "com.android.permissioncontroller:id/permission_allow_foreground_only_button" \
-      >/dev/null 2>&1 \
-      || release_join_android_tap resource "com.android.permissioncontroller:id/permission_allow_button" \
-        >/dev/null 2>&1 \
-      || release_join_android_tap description "While using the app" >/dev/null 2>&1 \
-      || true
+    activity="$(release_join_android_top_activity)"
+    case "$activity" in
+      com.android.permissioncontroller/*)
+        release_join_android_tap_system_resource \
+          "com.android.permissioncontroller:id/permission_allow_foreground_only_button" \
+          >/dev/null 2>&1 \
+          || release_join_android_tap_system_resource \
+            "com.android.permissioncontroller:id/permission_allow_button" \
+            >/dev/null 2>&1 \
+          || true
+        ;;
+      com.android.vpndialogs/*)
+        release_join_android_tap_system_resource "android:id/button1" \
+          >/dev/null 2>&1 || true
+        ;;
+      *)
+        if release_join_android_query "$kind" "$expected" center \
+          >/dev/null 2>&1
+        then
+          sleep 0.25
+          [[ "$(release_join_android_top_activity)" == \
+            "$package/"* ]] && return 0
+        fi
+        ;;
+    esac
     sleep 0.25
   done
   return 1
+}
+
+release_join_android_accept_camera_permission() {
+  release_join_android_wait_through_system_prompts \
+    description "QR scanner camera" 8
+}
+
+release_join_android_accept_join_transport_permissions() {
+  release_join_android_wait_through_system_prompts \
+    resource manual-join-expand 10 || {
+      echo "Android join transport permission did not complete" >&2
+      return 1
+    }
 }
 
 release_join_android_public_value() {
@@ -338,6 +392,7 @@ release_join_android_show_qr() {
   release_join_android_launch
   release_join_android_wait_query resource network-setup-join
   release_join_android_tap resource network-setup-join
+  release_join_android_accept_join_transport_permissions
   release_join_android_scroll_to resource manual-join-expand
   release_join_android_tap resource manual-join-expand
   release_join_android_wait_query resource joiner-device-id-value
@@ -470,7 +525,7 @@ release_join_android_scan_prepare() {
   release_join_android_scroll_to description "Scan joining device QR"
   release_join_android_tap description "Scan joining device QR"
   release_join_android_accept_camera_permission
-  release_join_android_wait_query resource "join-request-import-image"
+  release_join_android_wait_query description "Import QR Image"
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_IMPORT_READY=1"
 }
 
@@ -486,16 +541,20 @@ release_join_android_scan_submit() {
   }
   filename="$(basename "$image")"
   "${ADB[@]}" push "$image" "/sdcard/Download/$filename" >/dev/null
-  release_join_android_wait_query resource "join-request-import-image"
-  release_join_android_tap resource "join-request-import-image"
-  release_join_android_wait_query text "$filename"
-  release_join_android_tap text "$filename"
+  "${ADB[@]}" shell am broadcast \
+    -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+    -d "file:///sdcard/Download/$filename" >/dev/null
+  release_join_android_wait_query description "Import QR Image"
+  release_join_android_tap description "Import QR Image"
+  release_join_android_wait_query description-prefix "$filename,"
+  release_join_android_tap description-prefix "$filename,"
   release_join_android_wait_query \
     description "Confirm adding scanned join request" \
     "${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
   release_join_require_fresh_ios_pending_qr
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
-  release_join_android_tap description "Confirm adding scanned join request"
+  release_join_android_tap_center \
+    description "Confirm adding scanned join request"
   deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
   while ((SECONDS < deadline)); do
     release_join_android_open_devices >/dev/null 2>&1 || true
