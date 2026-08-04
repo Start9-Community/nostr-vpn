@@ -302,7 +302,9 @@ phase_android_admin_ios_qr() {
   release_join_ios_wait_marker \
     NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
     || fail "iPhone QR join did not receive the Pixel's signed roster"
-  completed="$(release_join_now_ms)"
+  completed="$(
+    ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS
+  )"
   assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-QR"
   release_join_ios_finish_test \
     || fail "iPhone stayed on QR view or lacked the exact Pixel admin roster row"
@@ -391,7 +393,9 @@ phase_android_admin_ios_manual() {
   release_join_ios_wait_marker \
     NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
     || fail "iPhone manual join did not receive the Pixel's signed roster"
-  completed="$(release_join_now_ms)"
+  completed="$(
+    ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS
+  )"
   assert_delivery_deadline "$submitted" "$completed" "Pixel-admin-to-iPhone-manual"
   release_join_ios_finish_test \
     || fail "iPhone manual join never received and retained the Pixel's signed roster"

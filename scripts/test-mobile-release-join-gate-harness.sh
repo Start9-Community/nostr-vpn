@@ -14,6 +14,11 @@ FILES=(
 for file in "${FILES[@]}"; do
   bash -n "$file"
 done
+grep -Fq 'RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA' \
+  "$ROOT/scripts/lib-mobile-release-artifact-reuse.sh" \
+  && grep -Fq '"$RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA"' \
+    "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" \
+  || { echo "iOS reuse install does not retain its canonical bundle manifest" >&2; exit 1; }
 join_ui="$ROOT/scripts/lib-mobile-release-join-ui.sh"
 grep -Fq -- '-destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"' \
   "$join_ui" \
@@ -1146,6 +1151,9 @@ if ios_qr_joiner_phase.index(
     raise SystemExit("iPhone QR relaunch evidence is read before XCTest completes")
 if ios_qr_joiner_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2:
     raise SystemExit("iPhone QR readiness does not use the setup budget")
+if 'ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS' \
+        not in ios_qr_joiner_phase:
+    raise SystemExit("iPhone QR timing uses host polling latency instead of its device marker")
 if "release_join_android_scan_and_accept" in ios_qr_joiner_phase:
     raise SystemExit("iPhone QR delivery still includes Android scanner setup")
 if not (
@@ -1236,6 +1244,9 @@ if android_admin_ios_manual_phase.index(
 if android_admin_ios_manual_phase.count("RELEASE_JOIN_IOS_SETUP_WAIT_SECS") != 2 \
         or "RELEASE_JOIN_UI_WAIT_SECS" in android_admin_ios_manual_phase:
     raise SystemExit("iPhone manual-join setup does not use only the setup budget")
+if 'ios_marker_value_from "$join_log" NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS' \
+        not in android_admin_ios_manual_phase:
+    raise SystemExit("iPhone manual timing uses host polling latency instead of its device marker")
 if 'android_admin_log="$RESULT_DIR/android-admin-ios-manual.log"' \
         in android_admin_ios_manual_phase:
     raise SystemExit("Android approval and iPhone XCTest still share one log path")
@@ -1425,7 +1436,8 @@ for required in (
     "ios-join-test-variant.json",
     "export NVPN_RELEASE_JOIN_IOS_RECEIPT",
     "NVPN_IOS_PROFILE_TYPE=IOS_APP_ADHOC",
-    "Apple Distribution",
+    "ios_release_network_company_signing",
+    'NVPN_IOS_CODE_SIGN_IDENTITY="$signing_identity"',
     "codesign --verify --deep --strict",
     "bundleManifestSha256",
     "installedApkSha256",

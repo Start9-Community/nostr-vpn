@@ -520,11 +520,27 @@ PY
 release_join_prepare_ios_profiles() {
   local udid="$1" profile_dir="$RESULT_DIR/ios-signing"
   local profile_env="$profile_dir/provisioning.env"
+  local company_signing signing_identity signing_team
+  declare -F ios_release_network_company_signing >/dev/null || {
+    echo "Release join gate cannot resolve the pinned company signer" >&2
+    return 1
+  }
+  company_signing="$(
+    ios_release_network_company_signing \
+      "${NVPN_IOS_EXPECTED_SIGNER_ORGANIZATION:-Sirius Business Oy}" \
+      "${NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256:-}"
+  )" || return 1
+  signing_identity="${company_signing%%|*}"
+  signing_team="${company_signing#*|}"
+  [[ "$signing_team" == "${NVPN_EXPECTED_IOS_DISTRIBUTION_TEAM_ID:-}" ]] || {
+    echo "Release join signer belongs to the wrong company team" >&2
+    return 1
+  }
   mkdir -p "$profile_dir"
   NVPN_IOS_PROFILE_TYPE=IOS_APP_ADHOC \
     NVPN_IOS_PROFILE_NAME="Nostr VPN Ad Hoc Release join gate" \
     NVPN_IOS_PACKET_TUNNEL_PROFILE_NAME="Nostr VPN Ad Hoc Release join tunnel" \
-    NVPN_IOS_CODE_SIGN_IDENTITY="Apple Distribution" \
+    NVPN_IOS_CODE_SIGN_IDENTITY="$signing_identity" \
     NVPN_IOS_DEVICE_UDIDS="$udid" \
     NVPN_IOS_PROFILES_ENV_PATH="$profile_env" \
     "$ROOT/scripts/ios-profiles" ensure >"$profile_dir/profile-setup.log" 2>&1
@@ -533,6 +549,10 @@ release_join_prepare_ios_profiles() {
   : "${NVPN_IOS_CODE_SIGN_IDENTITY:?Ad Hoc signing identity missing}"
   : "${NVPN_IOS_PROVISIONING_PROFILE_UUID:?Ad Hoc app profile missing}"
   : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?Ad Hoc tunnel profile missing}"
+  [[ "$NVPN_IOS_CODE_SIGN_IDENTITY" == "$signing_identity" ]] || {
+    echo "Release join profile selection changed the pinned company signer" >&2
+    return 1
+  }
 }
 
 release_join_install_ios_release() {
@@ -784,7 +804,7 @@ release_join_prepare_ios_release() {
       "$RELEASE_JOIN_IOS_APP_PATH" \
       "$RELEASE_JOIN_IOS_APP_SHA" \
       "$RELEASE_JOIN_IOS_APP_TREE" \
-      "$RELEASE_JOIN_IOS_APP_TREE_SHA" \
+      "$RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA" \
       "$team_hash" \
       "$RELEASE_JOIN_IOS_APP_CERT" \
       "$RELEASE_JOIN_IOS_DERIVED_DATA" \

@@ -303,9 +303,14 @@ import sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["appBundleTreeSha256"])
 PY
   )"
+  RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA="$(
+    release_join_ios_tree_receipt \
+      "$app" "$PRIVATE_DIR/ios-reuse-bundle-manifest.json"
+  )" || return 1
   export RELEASE_JOIN_IOS_DERIVED_DATA RELEASE_JOIN_IOS_APP_PATH
   export RELEASE_JOIN_IOS_XCTESTRUN RELEASE_JOIN_IOS_UDID
   export RELEASE_JOIN_IOS_APP_CERT RELEASE_JOIN_IOS_APP_TREE_SHA
+  export RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA
 }
 
 release_join_validate_reused_artifacts() {
