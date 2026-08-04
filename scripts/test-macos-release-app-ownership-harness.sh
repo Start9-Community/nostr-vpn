@@ -32,6 +32,59 @@ cleanup = host.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
 if "remote cleanup" not in cleanup or "remote_app_ownership_armed" not in cleanup:
     raise SystemExit("host cleanup is not conditional on remote app ownership")
 
+directions = (
+    ("macOS admin -> physical Android joiner.", "macos-admin-pixel-joiner"),
+    ("Physical Android admin -> macOS joiner.", "pixel-admin-macos-joiner"),
+    ("macOS admin -> physical iPhone joiner.", "macos-admin-iphone-joiner"),
+    ("Physical iPhone admin -> macOS joiner.", "iphone-admin-macos-joiner"),
+)
+for index, (comment, label) in enumerate(directions):
+    start = host.index(f"# {comment}")
+    end = (
+        host.index(f"# {directions[index + 1][0]}", start)
+        if index + 1 < len(directions)
+        else host.index("if ((macos_admin_android_status", start)
+    )
+    phase = host[start:end]
+    for required in (
+        "trap macos_mobile_direction_cleanup EXIT",
+        "prepare_macos_mobile_direction",
+        f"finish_macos_mobile_direction {label}",
+    ):
+        if required not in phase:
+            raise SystemExit(f"{label} lacks isolated lifecycle step: {required}")
+if host.count('prepare_macos_mobile_direction "$') != 4:
+    raise SystemExit("each macOS/mobile direction must start one fresh profile")
+if host.count("finish_macos_mobile_direction ") != 4:
+    raise SystemExit("each macOS/mobile direction must clean its profile")
+if "recover_macos_android_direction" in host:
+    raise SystemExit("macOS/mobile directions still share success-path profile state")
+prepare = host.split("prepare_macos_mobile_direction() {", 1)[1].split("\n}", 1)[0]
+if prepare.index("remote reset-profile") > prepare.index("remote service-preflight"):
+    raise SystemExit("a macOS/mobile direction starts before clearing prior profile state")
+direction_cleanup = host.split("macos_mobile_direction_cleanup() {", 1)[1].split(
+    "\n}\n\nprepare_macos_mobile_direction", 1
+)[0]
+for required in (
+    '"$RELEASE_JOIN_IOS_TEST_PID" "$ios_test_pid_owner"',
+    'macos_release_stop_owned_child "$remote_pid" "$remote_pid_owner"',
+):
+    if required not in direction_cleanup:
+        raise SystemExit(f"direction cleanup leaks a local runner: {required}")
+if host.count('macos_mobile_direction_child_owner "$remote_pid"') != 4:
+    raise SystemExit("remote direction children are not all bound to their exact parent")
+if host.count('macos_mobile_direction_child_owner "$RELEASE_JOIN_IOS_TEST_PID"') != 2:
+    raise SystemExit("iOS direction runners are not bound to their exact parent")
+for status in (
+    "macos_admin_android_status", "android_admin_macos_status",
+    "macos_admin_ios_status", "ios_admin_macos_status",
+):
+    aggregate = host.split(
+        'echo "One or more macOS/mobile manual-join directions failed"', 1
+    )[0].rsplit("if ((", 1)[1]
+    if status not in aggregate:
+        raise SystemExit(f"aggregate gate result omits {status}")
+
 for required in (
     "lib-macos-release-app-ownership.sh",
     "macos_release_app_acquire",
@@ -86,6 +139,11 @@ if stop.count("macos_release_app_poll_pid_gone") < 2 or "wait " in stop:
     raise SystemExit("bounded stop helper does not poll twice without blocking wait")
 if "macos_release_stop_owned_child" not in helper:
     raise SystemExit("host remote child has no shared bounded stop helper")
+owned_child = helper.split("macos_release_stop_owned_child() {", 1)[1].split(
+    "\n}\n\nmacos_release_app_stop_pid()", 1
+)[0]
+if 'owner_pid="${2:-$$}"' not in owned_child:
+    raise SystemExit("bounded child cleanup cannot bind a direction subshell owner")
 PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-app-owner.XXXXXX")"
@@ -368,5 +426,18 @@ then
   tail -n 40 "$worker_log" >&2 || true
   exit 1
 fi
+
+# macOS Bash 3 keeps $$ unchanged in subshells. Prove a captured exact parent
+# binds the child before bounded cleanup instead of loosening PID ownership.
+bash -s -- "$HELPER" <<'TEST'
+set -euo pipefail
+source "$1"
+(
+  sleep 60 & child=$!
+  owner="$(ps -ww -p "$child" -o ppid= | tr -d '[:space:]')"
+  macos_release_stop_owned_child "$child" "$owner"
+  ! kill -0 "$child" >/dev/null 2>&1
+)
+TEST
 
 echo "MACOS_RELEASE_APP_OWNERSHIP_HARNESS_OK"

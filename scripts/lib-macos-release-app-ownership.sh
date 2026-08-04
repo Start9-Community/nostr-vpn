@@ -39,17 +39,17 @@ macos_release_app_poll_pid_gone() {
 }
 
 macos_release_stop_owned_child() {
-  local pid="$1" parent
+  local pid="$1" owner_pid="${2:-$$}" parent
   macos_release_app_reap_if_terminated "$pid" && return 0
   parent="$(ps -ww -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
-  [[ "$parent" == "$$" ]] || {
+  [[ "$parent" == "$owner_pid" ]] || {
     echo "refusing to stop a process not owned by this shell" >&2
     return 1
   }
   kill -TERM "$pid" >/dev/null 2>&1 || true
   macos_release_app_poll_pid_gone "$pid" && return 0
   parent="$(ps -ww -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
-  [[ "$parent" == "$$" ]] || {
+  [[ "$parent" == "$owner_pid" ]] || {
     echo "refusing to KILL a process no longer owned by this shell" >&2
     return 1
   }

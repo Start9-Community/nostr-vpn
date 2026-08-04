@@ -1272,7 +1272,7 @@ macos_pixel_admin_phase = desktop.split(
 )[1].split("python3 -", 1)[0]
 for required in (
     'release_join_android_relaunch_and_wait_accepted "$DESKTOP_JOINER_ID"',
-    "MACOS_ANDROID_DIRECTION_LABEL=pixel-admin-macos-joiner",
+    "MACOS_MOBILE_DIRECTION_LABEL=pixel-admin-macos-joiner",
     "android_admin_macos_status=$?",
 ):
     if required not in macos_pixel_admin_phase:
@@ -1281,9 +1281,11 @@ for required in (
             f"the Android-admin direction check: {required}"
         )
 for required in (
-    "MACOS_ANDROID_DIRECTION_LABEL=macos-admin-pixel-joiner",
+    "MACOS_MOBILE_DIRECTION_LABEL=macos-admin-pixel-joiner",
     "macos_admin_android_status=$?",
-    "macos_admin_android_status != 0 || android_admin_macos_status != 0",
+    "android_admin_macos_status != 0",
+    "macos_admin_ios_status != 0",
+    "ios_admin_macos_status != 0",
 ):
     if required not in desktop:
         raise SystemExit(f"macOS/Pixel isolated direction gate is missing {required}")

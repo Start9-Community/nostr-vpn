@@ -293,29 +293,64 @@ macos_reverse_pixel_visible() {
   release_join_android_accepted_snapshot_ms "$1"
 }
 
-macos_android_direction_cleanup() {
+macos_mobile_direction_cleanup() {
   local status=$? observer_pid
   trap - EXIT
+  if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" ]] \
+      && kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null
+  then
+    if [[ ! "${ios_test_pid_owner:-}" =~ ^[0-9]+$ ]] \
+      || ! macos_release_stop_owned_child \
+        "$RELEASE_JOIN_IOS_TEST_PID" "$ios_test_pid_owner"
+    then
+      status=1
+      echo "iOS direction runner survived bounded cleanup" >&2
+    fi
+  fi
+  RELEASE_JOIN_IOS_TEST_PID=""
   for observer_pid in "${acceptance_observer_pids[@]-}"; do
     [[ -n "$observer_pid" ]] || continue
     kill "$observer_pid" >/dev/null 2>&1 || true
     wait "$observer_pid" >/dev/null 2>&1 || true
   done
   if [[ -n "$remote_pid" ]]; then
-    kill "$remote_pid" >/dev/null 2>&1 || true
-    wait "$remote_pid" >/dev/null 2>&1 || true
+    if [[ ! "${remote_pid_owner:-}" =~ ^[0-9]+$ ]] \
+      || ! macos_release_stop_owned_child "$remote_pid" "$remote_pid_owner"
+    then
+      status=1
+      echo "macOS VM direction child survived bounded cleanup" >&2
+    fi
+    remote_pid=""
   fi
   if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
     cp "$PRIVATE_DIR/android-ui.xml" \
-      "$RESULT_DIR/macos/${MACOS_ANDROID_DIRECTION_LABEL}-android-ui.xml"
+      "$RESULT_DIR/macos/${MACOS_MOBILE_DIRECTION_LABEL}-android-ui.xml"
   fi
   exit "$status"
 }
 
-recover_macos_android_direction() {
-  remote reset-profile >/dev/null 2>&1 || true
+macos_mobile_direction_child_owner() {
+  local pid="$1" owner
+  owner="$(ps -ww -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+  [[ "$owner" =~ ^[0-9]+$ ]] || {
+    echo "macOS/mobile direction child has no stable owner" >&2
+    return 1
+  }
+  printf '%s\n' "$owner"
+}
+
+prepare_macos_mobile_direction() {
+  local label="$1"
+  remote reset-profile \
+    >"$RESULT_DIR/macos/$label-preclean.log" 2>&1
   remote service-preflight \
-    >"$RESULT_DIR/macos/service-preflight-recovery.log" 2>&1
+    >"$RESULT_DIR/macos/$label-service-preflight.log" 2>&1
+}
+
+finish_macos_mobile_direction() {
+  local label="$1"
+  remote reset-profile \
+    >"$RESULT_DIR/macos/$label-cleanup.log" 2>&1
 }
 
 ios_log() {
@@ -350,6 +385,7 @@ finish_remote() {
   local log="$1" status=0
   wait "$remote_pid" || status=$?
   remote_pid=""
+  remote_pid_owner=""
   if [[ "$status" -ne 0 ]]; then
     tail -n 120 "$log" >&2 || true
   fi
@@ -700,7 +736,6 @@ if [[ "$ARTIFACT_ACTION" != "full" && "$ARTIFACT_ACTION" != "run-only" ]]; then
 fi
 
 remote_app_ownership_armed=1
-remote service-preflight | tee "$RESULT_DIR/macos/service-preflight.log"
 
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 [[ -n "$ANDROID_REQUESTED" ]] || {
@@ -725,10 +760,13 @@ rm -f "$RESULT_DIR/macos/delivery-times.tsv"
 set +e
 (
 set -euo pipefail
-MACOS_ANDROID_DIRECTION_LABEL=macos-admin-pixel-joiner
+MACOS_MOBILE_DIRECTION_LABEL=macos-admin-pixel-joiner
 remote_pid=""
+remote_pid_owner=""
+ios_test_pid_owner=""
 acceptance_observer_pids=()
-trap macos_android_direction_cleanup EXIT
+trap macos_mobile_direction_cleanup EXIT
+prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
 release_join_reset_android_state
 desktop_admin_log="$RESULT_DIR/macos/desktop-admin.log"
 remote create-admin "ReleaseDesktopAdmin" >"$desktop_admin_log" 2>&1
@@ -743,6 +781,7 @@ desktop_android_log_offset="$(remote daemon-log-offset)"
 remote admin-add "$RELEASE_JOIN_ANDROID_JOINER_ID" ReleaseGatePhone \
   >"$desktop_add_log" 2>&1 &
 remote_pid=$!
+remote_pid_owner="$(macos_mobile_direction_child_owner "$remote_pid")"
 wait_log_marker "$desktop_add_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
 desktop_submitted_ms="$(release_join_now_ms)"
 deadline=$((desktop_submitted_ms + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000))
@@ -770,6 +809,7 @@ assert_delivery_deadline \
   "macOS-admin-to-Android-manual"
 wait "$remote_pid"
 remote_pid=""
+remote_pid_owner=""
 remote verify "$RELEASE_JOIN_ANDROID_JOINER_ID" \
   >"$RESULT_DIR/macos/desktop-admin-verify.log"
 )
@@ -777,18 +817,21 @@ macos_admin_android_status=$?
 set -e
 if ((macos_admin_android_status != 0)); then
   echo "macOS admin -> Pixel joiner failed; continuing reverse direction" >&2
-  recover_macos_android_direction
 fi
+finish_macos_mobile_direction macos-admin-pixel-joiner
 
 # Physical Android admin -> macOS joiner. The remote app remains alive while
 # waiting for the exact Android admin row, so receipt delivery is real.
 set +e
 (
 set -euo pipefail
-MACOS_ANDROID_DIRECTION_LABEL=pixel-admin-macos-joiner
+MACOS_MOBILE_DIRECTION_LABEL=pixel-admin-macos-joiner
 remote_pid=""
+remote_pid_owner=""
+ios_test_pid_owner=""
 acceptance_observer_pids=()
-trap macos_android_direction_cleanup EXIT
+trap macos_mobile_direction_cleanup EXIT
+prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
 release_join_reset_android_state
 release_join_android_create_admin
 desktop_joiner_identity_log="$RESULT_DIR/macos/android-admin-desktop-identity.log"
@@ -804,6 +847,7 @@ remote manual-join \
   "$RELEASE_JOIN_ANDROID_ADMIN_ID" "$RELEASE_JOIN_ANDROID_NETWORK_ID" \
   >"$desktop_join_log" 2>&1 &
 remote_pid=$!
+remote_pid_owner="$(macos_mobile_direction_child_owner "$remote_pid")"
 wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID= 10
 [[ "$(marker_value "$desktop_join_log" NVPN_RELEASE_JOIN_JOINER_ID)" \
   == "$DESKTOP_JOINER_ID" ]] || {
@@ -845,11 +889,21 @@ android_admin_macos_status=$?
 set -e
 if ((android_admin_macos_status != 0)); then
   echo "Pixel admin -> macOS joiner failed; continuing independent Apple checks" >&2
-  recover_macos_android_direction
 fi
+finish_macos_mobile_direction pixel-admin-macos-joiner
 
 # macOS admin -> physical iPhone joiner. XCTest only drives the shipped
 # accessibility tree; the app receives no launch arguments or environment.
+set +e
+(
+set -euo pipefail
+MACOS_MOBILE_DIRECTION_LABEL=macos-admin-iphone-joiner
+remote_pid=""
+remote_pid_owner=""
+ios_test_pid_owner=""
+acceptance_observer_pids=()
+trap macos_mobile_direction_cleanup EXIT
+prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
 release_join_restart_ios_in_place
 desktop_ios_admin_log="$RESULT_DIR/macos/desktop-ios-admin.log"
 remote create-admin "ReleaseMacIphoneAdmin" >"$desktop_ios_admin_log" 2>&1
@@ -866,6 +920,9 @@ release_join_ios_start_test \
   testManualJoinAndRequireRosterCompletion "$ios_join_log" \
   "NVPN_RELEASE_JOIN_ADMIN_ID=$DESKTOP_IOS_ADMIN_ID" \
   "NVPN_RELEASE_JOIN_NETWORK_ID=$DESKTOP_IOS_NETWORK_ID"
+ios_test_pid_owner="$(
+  macos_mobile_direction_child_owner "$RELEASE_JOIN_IOS_TEST_PID"
+)"
 release_join_ios_wait_marker \
   NVPN_RELEASE_JOIN_JOINER_ID= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
   || { echo "iPhone manual join did not expose its public identity" >&2; exit 1; }
@@ -881,6 +938,7 @@ desktop_iphone_log_offset="$(remote daemon-log-offset)"
 remote admin-add "$IOS_JOINER_ID" ReleaseGateIphone \
   >"$desktop_add_ios_log" 2>&1 &
 remote_pid=$!
+remote_pid_owner="$(macos_mobile_direction_child_owner "$remote_pid")"
 wait_log_marker \
   "$desktop_add_ios_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
 desktop_ios_submitted_ms="$(release_join_now_ms)"
@@ -918,10 +976,30 @@ remote require-delivery-log \
   2>"$RESULT_DIR/macos/desktop-add-iphone-daemon.log"
 wait "$remote_pid"
 remote_pid=""
+remote_pid_owner=""
 remote verify "$IOS_JOINER_ID" \
   >"$RESULT_DIR/macos/desktop-ios-admin-verify.log"
+)
+macos_admin_ios_status=$?
+set -e
+if ((macos_admin_ios_status != 0)); then
+  echo "macOS admin -> iPhone joiner failed; continuing reverse direction" >&2
+else
+  DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1
+fi
+finish_macos_mobile_direction macos-admin-iphone-joiner
 
 # Physical iPhone admin -> macOS joiner.
+set +e
+(
+set -euo pipefail
+MACOS_MOBILE_DIRECTION_LABEL=iphone-admin-macos-joiner
+remote_pid=""
+remote_pid_owner=""
+ios_test_pid_owner=""
+acceptance_observer_pids=()
+trap macos_mobile_direction_cleanup EXIT
+prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
 release_join_restart_ios_in_place
 ios_create_admin "Release iPhone macOS admin"
 desktop_ios_join_log="$RESULT_DIR/macos/iphone-admin-desktop-join.log"
@@ -929,6 +1007,7 @@ remote manual-join \
   "$RELEASE_JOIN_IOS_ADMIN_ID" "$RELEASE_JOIN_IOS_NETWORK_ID" \
   >"$desktop_ios_join_log" 2>&1 &
 remote_pid=$!
+remote_pid_owner="$(macos_mobile_direction_child_owner "$remote_pid")"
 wait_log_marker "$desktop_ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID= 10
 DESKTOP_IOS_JOINER_ID="$(
   marker_value "$desktop_ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID
@@ -939,6 +1018,9 @@ ios_admin_log="$(ios_log iphone-admin-macos-add)"
 release_join_ios_start_test \
   testManualAdminAddRequiresRosterProgress "$ios_admin_log" \
   "NVPN_RELEASE_JOIN_JOINER_ID=$DESKTOP_IOS_JOINER_ID"
+ios_test_pid_owner="$(
+  macos_mobile_direction_child_owner "$RELEASE_JOIN_IOS_TEST_PID"
+)"
 release_join_ios_wait_marker \
   NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
   || {
@@ -975,11 +1057,23 @@ finish_remote "$desktop_ios_join_log" \
   }
 remote verify "$RELEASE_JOIN_IOS_ADMIN_ID" \
   >"$RESULT_DIR/macos/desktop-ios-joiner-verify.log"
+)
+ios_admin_macos_status=$?
+set -e
+if ((ios_admin_macos_status != 0)); then
+  echo "iPhone admin -> macOS joiner failed" >&2
+else
+  IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE=1
+fi
+finish_macos_mobile_direction iphone-admin-macos-joiner
 release_join_launch_ios_release
 release_join_assert_one_ios_process
 
-if ((macos_admin_android_status != 0 || android_admin_macos_status != 0)); then
-  echo "One or more macOS/Pixel manual-join directions failed" >&2
+if ((macos_admin_android_status != 0 \
+  || android_admin_macos_status != 0 \
+  || macos_admin_ios_status != 0 \
+  || ios_admin_macos_status != 0)); then
+  echo "One or more macOS/mobile manual-join directions failed" >&2
   exit 1
 fi
 
