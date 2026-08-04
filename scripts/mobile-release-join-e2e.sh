@@ -127,7 +127,7 @@ export RELEASE_JOIN_IMPORT_WAIT_SECS RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS
 export RELEASE_JOIN_IOS_SETUP_WAIT_SECS
 ANDROID_QR_CAPTURE="$RESULT_DIR/qr-captures/android-join-request.png"
 IOS_QR_CAPTURE="$RESULT_DIR/qr-captures/ios-join-request.png"
-IOS_QR_STAGED_FILENAME="nvpn-release-android-join-request.png"
+IOS_QR_STAGED_FILENAME="nvpn-release-android-join-request-$(uuidgen | tr '[:upper:]' '[:lower:]').png"
 RELEASE_JOIN_IOS_NETWORK_IDS=()
 
 cleanup() {
@@ -237,6 +237,7 @@ phase_ios_admin_android_qr() {
   release_join_ios_start_test \
     testImportJoinQrImageAndRequireAdminRosterProgress "$scan_log" \
     "NVPN_RELEASE_JOIN_IMAGE_FILENAME=$IOS_QR_STAGED_FILENAME" \
+    "NVPN_RELEASE_JOIN_IMAGE_SHA256=$(shasum -a 256 "$ANDROID_QR_CAPTURE" | awk '{print $1}')" \
     "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMPORT_READY=1 \
     "$((RELEASE_JOIN_IOS_SETUP_WAIT_SECS + RELEASE_JOIN_UI_WAIT_SECS))" \

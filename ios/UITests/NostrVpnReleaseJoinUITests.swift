@@ -86,6 +86,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     func testImportJoinQrImageAndRequireAdminRosterProgress() throws {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         let imageFilename = try required("NVPN_RELEASE_JOIN_IMAGE_FILENAME")
+        let expectedImageSHA = try required("NVPN_RELEASE_JOIN_IMAGE_SHA256")
         XCTAssertTrue(app.launchEnvironment.isEmpty)
         openLinkDevice()
         let scan = element("join-request-scan-open")
@@ -107,9 +108,14 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         ).appendingPathComponent(imageFilename)
         XCTAssertTrue(
             waitUntil(timeout: setupTimeout) {
-                FileManager.default.fileExists(atPath: stagedImage.path)
+                guard let data = try? Data(contentsOf: stagedImage) else {
+                    return false
+                }
+                return SHA256.hash(data: data)
+                    .map { String(format: "%02x", $0) }
+                    .joined() == expectedImageSHA
             },
-            "Staged QR screenshot did not arrive in the running test container"
+            "Exact staged QR screenshot did not arrive in the running test container"
         )
         importImage.tap()
         selectImportedImage(named: imageFilename)
