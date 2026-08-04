@@ -117,12 +117,16 @@ desktop_underlay_import_host_peer() {
   fips_version="$RELEASE_JOIN_FIPS_VERSION"
   target="x86_64-unknown-linux-musl"
 
-  DESKTOP_UNDERLAY_HOST_PEER_BINARY="$(
-    "$app_root/scripts/prepare-macos-release-fips-peer.sh"
-  )" || {
-    desktop_underlay_host_peer_error "host Linux peer preparation failed"
-    return 1
-  }
+  if [[ -n "${NVPN_DESKTOP_UNDERLAY_HOST_PEER_BINARY:-}" ]]; then
+    DESKTOP_UNDERLAY_HOST_PEER_BINARY="$NVPN_DESKTOP_UNDERLAY_HOST_PEER_BINARY"
+  else
+    DESKTOP_UNDERLAY_HOST_PEER_BINARY="$(
+      "$app_root/scripts/prepare-macos-release-fips-peer.sh"
+    )" || {
+      desktop_underlay_host_peer_error "host Linux peer preparation failed"
+      return 1
+    }
+  fi
   [[ "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" == /* \
     && -x "$DESKTOP_UNDERLAY_HOST_PEER_BINARY" ]] || {
     desktop_underlay_host_peer_error "host Linux peer path is invalid"
@@ -301,8 +305,15 @@ jq -e \
   --arg binary_sha "$expected_sha" \
   --argjson binary_size "$expected_size" \
   '.schema == 1
-    and .builtOnHostMac == true
-    and .builtOnRemoteVm == false
+    and (
+      (.builtOnHostMac == true and .builtOnRemoteVm == false)
+      or (
+        .builtOnHostMac == false
+        and .builtOnRemoteVm == true
+        and .builtOnMacosUtm == false
+        and .buildExecutionHostClass == "remote-linux-builder"
+      )
+    )
     and .appGitSha == $app_sha
     and .appGitTree == $app_tree
     and .fipsGitSha == $fips_sha
@@ -331,8 +342,10 @@ SH
     return 1
   fi
   {
-    printf 'builtOnHostMac=true\n'
-    printf 'builtOnRemoteVm=false\n'
+    printf 'builtOnHostMac=%s\n' "$(jq -r '.builtOnHostMac' "$receipt")"
+    printf 'builtOnRemoteVm=%s\n' "$(jq -r '.builtOnRemoteVm' "$receipt")"
+    printf 'buildExecutionHostClass=%s\n' \
+      "$(jq -r '.buildExecutionHostClass // "host-macos"' "$receipt")"
     printf 'appVersion=%s\n' "$app_version"
     printf 'appGitSha=%s\n' "$app_sha"
     printf 'appGitTree=%s\n' "$app_tree"

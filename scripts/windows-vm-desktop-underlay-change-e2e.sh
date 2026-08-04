@@ -231,7 +231,7 @@ Write-Host \"WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=\$ReceiptHash\"
 Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$CliHash\"" \
     >"$ARTIFACT_DIR/exact-artifact-validation.log"
 
-  NVPN_EXPECTED_APP_GIT_SHA="$harness_sha" \
+  NVPN_EXPECTED_APP_GIT_SHA="$ARTIFACT_APP_SHA" \
     desktop_underlay_import_host_peer \
       >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
     || {

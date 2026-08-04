@@ -83,8 +83,6 @@ def main() -> None:
     receipt = load_receipt(receipt_path)
     expected: dict[str, Any] = {
         "schema": 1,
-        "builtOnHostMac": True,
-        "builtOnRemoteVm": False,
         "appGitSha": app_sha,
         "appGitTree": app_tree,
         "fipsGitSha": fips_sha,
@@ -96,6 +94,18 @@ def main() -> None:
     for key, value in expected.items():
         if receipt.get(key) != value:
             fail(f"receipt mismatch for {key}")
+    local_build = (
+        receipt.get("builtOnHostMac") is True
+        and receipt.get("builtOnRemoteVm") is False
+    )
+    remote_build = (
+        receipt.get("builtOnHostMac") is False
+        and receipt.get("builtOnRemoteVm") is True
+        and receipt.get("builtOnMacosUtm") is False
+        and receipt.get("buildExecutionHostClass") == "remote-linux-builder"
+    )
+    if not (local_build or remote_build):
+        fail("receipt has no approved build execution class")
     digest = hashlib.sha256(binary_path.read_bytes()).hexdigest()
     if receipt.get("binarySha256") != digest:
         fail("binary SHA-256 does not match the receipt")
