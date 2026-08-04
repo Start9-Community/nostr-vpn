@@ -429,15 +429,18 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     private func selectImportedImage(named filename: String) {
         let documents = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
         let roots = [app, documents]
+        let displayedFilename = URL(fileURLWithPath: filename)
+            .deletingPathExtension()
+            .lastPathComponent
 
-        if tapFile(named: filename, in: roots, timeout: 1) {
+        if tapFile(named: displayedFilename, in: roots, timeout: 1) {
             return
         }
         XCTAssertTrue(tapFile(named: "Browse", in: roots, timeout: 2))
         XCTAssertTrue(tapFile(named: "On My iPhone", in: roots, timeout: 2))
         XCTAssertTrue(tapFile(named: "Nostr VPN Test Files", in: roots, timeout: 2))
         XCTAssertTrue(
-            tapFile(named: filename, in: roots, timeout: 4),
+            tapFile(named: displayedFilename, in: roots, timeout: 4),
             "Staged QR screenshot was not selectable through the public Files picker"
         )
     }
