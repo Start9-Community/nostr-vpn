@@ -4,6 +4,34 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private enum QRImageImportAvailability {
+    static var isDeviceSpecificProvisionedApp: Bool {
+        guard
+            let profileURL = Bundle.main.url(
+                forResource: "embedded",
+                withExtension: "mobileprovision"
+            ),
+            let profileData = try? Data(contentsOf: profileURL),
+            let xmlStart = profileData.range(of: Data("<?xml".utf8)),
+            let xmlEnd = profileData.range(
+                of: Data("</plist>".utf8),
+                in: xmlStart.lowerBound..<profileData.endIndex
+            ),
+            let profile = try? PropertyListSerialization.propertyList(
+                from: profileData.subdata(
+                    in: xmlStart.lowerBound..<xmlEnd.upperBound
+                ),
+                format: nil
+            ) as? [String: Any],
+            profile["ProvisionsAllDevices"] as? Bool != true,
+            let devices = profile["ProvisionedDevices"] as? [String]
+        else {
+            return false
+        }
+        return !devices.isEmpty
+    }
+}
+
 @MainActor
 struct QRCodeScannerSheet: View {
     let onCode: (String) -> Void
@@ -14,7 +42,7 @@ struct QRCodeScannerSheet: View {
     @State private var importingImage = false
     @State private var importTask: Task<Void, Never>?
     private let imageImportEnabled =
-        ProcessInfo.processInfo.environment["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT"] == "1"
+        QRImageImportAvailability.isDeviceSpecificProvisionedApp
 
     var body: some View {
         NavigationStack {

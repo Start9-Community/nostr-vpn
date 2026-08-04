@@ -754,11 +754,6 @@ release_join_ios_test_command() {
     --use-destination-artifacts
     --environment-stdin0
   )
-  if [[ "$test_name" == "testImportJoinQrImageAndRequireAdminRosterProgress" ]]; then
-    rewrite_command+=(
-      --ui-target-environment NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT=1
-    )
-  fi
   runner_environment=(
     "NVPN_RELEASE_JOIN_ADMIN_ID="
     "NVPN_RELEASE_JOIN_BLACKBOX="

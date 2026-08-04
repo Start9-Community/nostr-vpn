@@ -876,13 +876,19 @@ for required in (
     if required not in ios_test:
         raise SystemExit(f"Release QR XCTest lacks public image import: {required}")
 for required in (
-    'ProcessInfo.processInfo.environment["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT"] == "1"',
+    "QRImageImportAvailability.isDeviceSpecificProvisionedApp",
+    'forResource: "embedded"',
+    'withExtension: "mobileprovision"',
+    'profile["ProvisionsAllDevices"] as? Bool != true',
+    'profile["ProvisionedDevices"] as? [String]',
     "if imageImportEnabled",
     "join-request-import-image",
     "Import QR Image",
 ):
     if required not in ios_qr_scanner:
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
+if "NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT" in ios_qr_scanner:
+    raise SystemExit("iOS scanner retains unreliable environment transport")
 for forbidden in (
     "QRImageImportTestMarker",
     "nvpn-release-join-qr-image-import",

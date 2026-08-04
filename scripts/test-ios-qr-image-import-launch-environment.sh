@@ -15,14 +15,17 @@ import sys
 scanner, tests, app_model, project, harness = (
     pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
 )
-key = "NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT"
-assignment = f'app.launchEnvironment = ["{key}": "1"]'
-condition = f'ProcessInfo.processInfo.environment["{key}"] == "1"'
-
-if condition not in scanner:
-    raise SystemExit("QR importer is not hidden behind the exact launch environment value")
-if scanner.count(key) != 1:
-    raise SystemExit("QR importer has more than one production launch-environment path")
+for required in (
+    "QRImageImportAvailability.isDeviceSpecificProvisionedApp",
+    'forResource: "embedded"',
+    'withExtension: "mobileprovision"',
+    'profile["ProvisionsAllDevices"] as? Bool != true',
+    'profile["ProvisionedDevices"] as? [String]',
+):
+    if required not in scanner:
+        raise SystemExit(f"QR importer lacks Ad Hoc test-export gating: {required}")
+if "NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT" in scanner:
+    raise SystemExit("QR importer retains unreliable environment transport")
 
 setup = tests.split("override func setUpWithError() throws", 1)[1].split(
     "func testCreateAdminNetworkAndReportPublicValues()", 1
@@ -38,7 +41,7 @@ for required in (
 ):
     if required not in setup:
         raise SystemExit(f"Ordinary Release launch lacks empty-environment contract: {required}")
-if assignment in tests:
+if ".launchEnvironment =" in tests:
     raise SystemExit("QR import still uses the unreliable runtime environment path")
 if ".launchEnvironment =" in other_tests:
     raise SystemExit("A non-import release join test sets target-app environment")
@@ -65,4 +68,4 @@ for forbidden in (
         raise SystemExit(f"Legacy QR marker transport remains: {forbidden}")
 PY
 
-echo "iOS QR image import launch-environment tests passed"
+echo "iOS QR image import Ad Hoc gating tests passed"
