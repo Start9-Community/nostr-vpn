@@ -665,6 +665,7 @@ release_join_android_manual_submit() {
   release_join_android_launch
   release_join_android_wait_query resource network-setup-join
   release_join_android_tap resource network-setup-join
+  release_join_android_accept_join_transport_permissions
   release_join_android_scroll_to resource manual-join-expand
   release_join_android_tap resource manual-join-expand
   release_join_android_wait_query resource joiner-device-id-value

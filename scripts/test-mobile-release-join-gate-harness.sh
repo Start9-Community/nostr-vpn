@@ -1150,6 +1150,11 @@ for required in (
         raise SystemExit(
             f"iPhone QR phase does not consume exact relaunch evidence: {required}"
         )
+android_manual_submit = ui.split(
+    "release_join_android_manual_submit() {", 1
+)[1].split("release_join_android_admin_add_visible() {", 1)[0]
+if "release_join_android_accept_join_transport_permissions" not in android_manual_submit:
+    raise SystemExit("Android manual join does not clear its real permission sheets")
 if ios_qr_joiner_phase.index(
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE"
 ) < ios_qr_joiner_phase.index("release_join_ios_finish_test"):
