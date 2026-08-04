@@ -871,7 +871,7 @@ for required in (
     if required not in ios_qr_scanner:
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
 for required in (
-    'directoryPath = "Library/Caches"',
+    'directoryPath = ""',
     'markerName = "nvpn-release-join-qr-image-import"',
     "maximumAgeSeconds = 60",
     "UUID(uuidString:",
@@ -926,6 +926,7 @@ ios_qr_joiner = ios_test.split(
 )[1].split("func testImportJoinQrImageAndRequireAdminRosterProgress()", 1)[0]
 for required in (
     "waitForRosterBackedPendingQrDismissal",
+    "timeout: setupTimeout + deliveryTimeout",
     "requireAcceptedRoster(",
     "relaunch: true",
     "NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE",
@@ -938,6 +939,26 @@ if ios_qr_joiner.index("requireAcceptedRoster(") < ios_qr_joiner.index(
     "waitForRosterBackedPendingQrDismissal"
 ):
     raise SystemExit("iPhone QR joiner relaunches before the signed roster applies")
+
+android_scan_prepare = ui.split(
+    "release_join_android_scan_prepare() {", 1
+)[1].split("release_join_android_scan_submit() {", 1)[0]
+for required in (
+    'release_join_android_scroll_to description "Scan joining device QR"',
+    'release_join_android_tap description "Scan joining device QR"',
+    "release_join_android_accept_camera_permission",
+    'release_join_android_wait_query resource "join-request-import-image"',
+):
+    if required not in android_scan_prepare:
+        raise SystemExit(
+            "Android scanner was not ready before the iPhone delivery clock: "
+            + required
+        )
+android_scan_submit = ui.split(
+    "release_join_android_scan_submit() {", 1
+)[1].split("release_join_capture_android_qr() {", 1)[0]
+if 'release_join_android_tap description "Scan joining device QR"' in android_scan_submit:
+    raise SystemExit("Android scanner setup still consumes the iPhone delivery clock")
 
 android_qr_lifecycle = ui.split(
     "release_join_android_background_foreground_pending_qr() {", 1

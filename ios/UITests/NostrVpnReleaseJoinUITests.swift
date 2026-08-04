@@ -62,9 +62,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         )
         emit("NVPN_RELEASE_JOIN_LIFECYCLE_READY=1")
 
+        // The host still has to capture the QR and drive the other phone. The
+        // orchestrator separately enforces 15 seconds from the approval tap.
         let rosterApplied = waitForRosterBackedPendingQrDismissal(
             qr,
-            expectedParticipant: expectedAdmin
+            expectedParticipant: expectedAdmin,
+            timeout: setupTimeout + deliveryTimeout
         )
         let rosterFailure = qr.exists
             ? "Join approval or signed-roster delivery timed out while the QR remained visible"
@@ -477,9 +480,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private func waitForRosterBackedPendingQrDismissal(
         _ qr: XCUIElement,
-        expectedParticipant: String
+        expectedParticipant: String,
+        timeout: TimeInterval
     ) -> Bool {
-        let deadline = Date().addingTimeInterval(deliveryTimeout)
+        let deadline = Date().addingTimeInterval(timeout)
         repeat {
             if qr.exists {
                 emit("NVPN_RELEASE_JOIN_PENDING_QR_VISIBLE_MS=\(millisecondsSinceEpoch())")

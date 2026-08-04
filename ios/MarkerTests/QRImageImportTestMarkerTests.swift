@@ -26,6 +26,12 @@ struct QRImageImportTestMarkerTests {
         let now = 2_000_000_000
         let token = UUID().uuidString.lowercased()
 
+        require(
+            marker.deletingLastPathComponent().standardizedFileURL
+                == root.standardizedFileURL,
+            "marker was not rooted in the always-existing app-group container"
+        )
+
         func write(_ payload: String) throws {
             try Data(payload.utf8).write(to: marker, options: .atomic)
         }

@@ -1,9 +1,9 @@
 import Foundation
 
 enum QRImageImportTestMarker {
-    // CoreDevice can overwrite a file in this system-created app-group cache
-    // directory on a fresh install, without a preparatory app launch.
-    static let directoryPath = "Library/Caches"
+    // Keep the one-shot capability at the app-group root. CoreDevice always
+    // exposes that existing directory, including before the app's first launch.
+    static let directoryPath = ""
     static let markerName = "nvpn-release-join-qr-image-import"
     static let payloadVersion = "nvpn-release-join-qr-image-import-v1"
     static let maximumAgeSeconds = 60

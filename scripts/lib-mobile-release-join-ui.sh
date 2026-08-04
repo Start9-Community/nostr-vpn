@@ -11,7 +11,7 @@ RELEASE_JOIN_IOS_TEST_LOG=""
 RELEASE_JOIN_IOS_TEST_NAME=""
 RELEASE_JOIN_IOS_APP_BUNDLE_ID=""
 RELEASE_JOIN_IOS_QR_IMPORT_MARKER_ARMED=0
-RELEASE_JOIN_IOS_QR_IMPORT_REMOTE_FILE="Library/Caches/nvpn-release-join-qr-image-import"
+RELEASE_JOIN_IOS_QR_IMPORT_REMOTE_FILE="nvpn-release-join-qr-image-import"
 RELEASE_JOIN_QR_CONTENT_WIDTH_MIN_BPS=9800
 RELEASE_JOIN_QR_CONTENT_WIDTH_MAX_BPS=10000
 RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=""
@@ -469,6 +469,10 @@ release_join_android_scan_prepare() {
     release_join_android_query resource-prefix roster-participant- count
   )"
   export RELEASE_JOIN_ANDROID_SCAN_BEFORE
+  release_join_android_scroll_to description "Scan joining device QR"
+  release_join_android_tap description "Scan joining device QR"
+  release_join_android_accept_camera_permission
+  release_join_android_wait_query resource "join-request-import-image"
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_IMPORT_READY=1"
 }
 
@@ -484,9 +488,6 @@ release_join_android_scan_submit() {
   }
   filename="$(basename "$image")"
   "${ADB[@]}" push "$image" "/sdcard/Download/$filename" >/dev/null
-  release_join_android_scroll_to description "Scan joining device QR"
-  release_join_android_tap description "Scan joining device QR"
-  release_join_android_accept_camera_permission
   release_join_android_wait_query resource "join-request-import-image"
   release_join_android_tap resource "join-request-import-image"
   release_join_android_wait_query text "$filename"
