@@ -737,17 +737,12 @@ if "app.launchEnvironment.isEmpty" not in ios_setup:
 if "app.launch()" not in ios_setup:
     raise SystemExit("Release join XCTest no longer uses its normal app launch")
 launch_environment = 'app.launchEnvironment = ["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT": "1"]'
-if ios_test.count(launch_environment) != 1 or launch_environment not in ios_import:
-    raise SystemExit("Exact QR image import test lacks its sole target-app launch flag")
+if launch_environment in ios_test:
+    raise SystemExit("QR import still uses the unreliable runtime environment path")
 if ".launchEnvironment =" in ios_test.replace(ios_import, ""):
     raise SystemExit("A non-import release join test injects target-app environment")
 for required in (
     "XCTAssertTrue(app.launchEnvironment.isEmpty)",
-    "app.terminate()",
-    launch_environment,
-    "XCTAssertEqual(app.launchEnvironment.count, 1)",
-    "addTeardownBlock { self.app.terminate() }",
-    "app.launch()",
     'element("qr-scanner-camera").waitForExistence',
     'element("join-request-import-image")',
 ):

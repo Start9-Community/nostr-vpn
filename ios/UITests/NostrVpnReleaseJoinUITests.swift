@@ -87,11 +87,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let expectedJoiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
         let imageFilename = try required("NVPN_RELEASE_JOIN_IMAGE_FILENAME")
         XCTAssertTrue(app.launchEnvironment.isEmpty)
-        app.terminate()
-        app.launchEnvironment = ["NVPN_RELEASE_JOIN_QR_IMAGE_IMPORT": "1"]
-        XCTAssertEqual(app.launchEnvironment.count, 1)
-        addTeardownBlock { self.app.terminate() }
-        app.launch()
         openLinkDevice()
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))

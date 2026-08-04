@@ -38,17 +38,12 @@ for required in (
 ):
     if required not in setup:
         raise SystemExit(f"Ordinary Release launch lacks empty-environment contract: {required}")
-if tests.count(assignment) != 1 or assignment not in import_test:
-    raise SystemExit("Exact QR import test does not own the sole launch flag")
+if assignment in tests:
+    raise SystemExit("QR import still uses the unreliable runtime environment path")
 if ".launchEnvironment =" in other_tests:
     raise SystemExit("A non-import release join test sets target-app environment")
 for required in (
     "XCTAssertTrue(app.launchEnvironment.isEmpty)",
-    "app.terminate()",
-    assignment,
-    "XCTAssertEqual(app.launchEnvironment.count, 1)",
-    "addTeardownBlock { self.app.terminate() }",
-    "app.launch()",
     'element("qr-scanner-camera").waitForExistence',
     'element("join-request-import-image")',
 ):
