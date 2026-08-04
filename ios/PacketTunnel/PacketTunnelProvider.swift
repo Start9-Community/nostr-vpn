@@ -15,6 +15,11 @@ private let appGroupIdentifier: String = {
 private let defaultMobileMtu = 1150
 private let packetDebugLogLimitBytes = 1_048_576
 
+private enum UnderlayPathSource: Hashable {
+    case general
+    case physicalWiFi
+}
+
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let appMessageChunkSize = 3_072
     private var tunnelHandle: OpaquePointer?
@@ -30,9 +35,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     )
     private var runtimeStateSnapshot = Data()
     private var appConfigSnapshot = Data()
-    private var underlayMonitor: NWPathMonitor?
+    private var underlayMonitors: [NWPathMonitor] = []
     private var underlayMonitorGeneration: UInt64?
-    private var underlayMonitorSawInitialPath = false
+    private var initializedUnderlaySources: Set<UnderlayPathSource> = []
     private var underlayRefreshWorkItem: DispatchWorkItem?
 
     override func startTunnel(
@@ -455,8 +460,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) -> Bool {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
-            self?.handleUnderlayPathUpdate(path, generation: generation)
+            self?.handleUnderlayPathUpdate(
+                path,
+                generation: generation,
+                source: .general
+            )
         }
+        // A generic monitor can remain satisfied through the VPN default route
+        // while the physical Wi-Fi disappears. Observe Wi-Fi independently so
+        // its OFF→ON transition promptly refreshes the live tunnel.
+        let physicalWiFiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        physicalWiFiMonitor.pathUpdateHandler = { [weak self] path in
+            self?.handleUnderlayPathUpdate(
+                path,
+                generation: generation,
+                source: .physicalWiFi
+            )
+        }
+        let monitors = [monitor, physicalWiFiMonitor]
 
         tunnelCondition.lock()
         guard tunnelRunning,
@@ -468,41 +489,44 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return false
         }
         underlayMonitorLock.lock()
-        let previousMonitor = underlayMonitor
-        underlayMonitor = monitor
+        let previousMonitors = underlayMonitors
+        underlayMonitors = monitors
         underlayMonitorGeneration = generation
-        underlayMonitorSawInitialPath = false
+        initializedUnderlaySources.removeAll()
         underlayRefreshWorkItem?.cancel()
         underlayRefreshWorkItem = nil
         underlayMonitorLock.unlock()
-        previousMonitor?.cancel()
-        monitor.start(queue: underlayMonitorQueue)
+        previousMonitors.forEach { $0.cancel() }
+        monitors.forEach { $0.start(queue: underlayMonitorQueue) }
         tunnelCondition.unlock()
         return true
     }
 
     private func stopUnderlayNetworkMonitor() {
         underlayMonitorLock.lock()
-        let monitor = underlayMonitor
-        underlayMonitor = nil
+        let monitors = underlayMonitors
+        underlayMonitors.removeAll()
         underlayMonitorGeneration = nil
-        underlayMonitorSawInitialPath = false
+        initializedUnderlaySources.removeAll()
         underlayRefreshWorkItem?.cancel()
         underlayRefreshWorkItem = nil
         underlayMonitorLock.unlock()
-        monitor?.cancel()
+        monitors.forEach { $0.cancel() }
     }
 
-    private func handleUnderlayPathUpdate(_ path: Network.NWPath, generation: UInt64) {
+    private func handleUnderlayPathUpdate(
+        _ path: Network.NWPath,
+        generation: UInt64,
+        source: UnderlayPathSource
+    ) {
         underlayMonitorLock.lock()
         guard underlayMonitorGeneration == generation else {
             underlayMonitorLock.unlock()
             return
         }
-        if !underlayMonitorSawInitialPath {
-            underlayMonitorSawInitialPath = true
+        if initializedUnderlaySources.insert(source).inserted {
             underlayMonitorLock.unlock()
-            packetDebugLog("underlay monitor ready status=\(path.status)")
+            packetDebugLog("\(source) underlay monitor ready status=\(path.status)")
             return
         }
         underlayRefreshWorkItem?.cancel()
