@@ -197,6 +197,7 @@ private fun deviceCountText(network: NetworkState): String {
 private fun NetworkSetupCard(
     state: AppState,
     qrJson: (String) -> JSONObject,
+    dispatch: (JSONObject) -> Unit,
     dispatchSucceeded: (JSONObject) -> Boolean,
     onCreated: (() -> Unit)? = null,
     showWelcomeHeader: Boolean = false,
@@ -243,7 +244,12 @@ private fun NetworkSetupCard(
                     }
                 }
                 Button(
-                    onClick = { setupMode = NetworkSetupMode.Join },
+                    onClick = {
+                        if (!state.vpnEnabled) {
+                            dispatch(NativeActions.connectVpn())
+                        }
+                        setupMode = NetworkSetupMode.Join
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(58.dp)
@@ -461,16 +467,26 @@ private fun SetupChoiceCard(
 internal fun androidx.compose.foundation.lazy.LazyListScope.addNetworkBody(
     state: AppState,
     qrJson: (String) -> JSONObject,
+    dispatch: (JSONObject) -> Unit,
     dispatchSucceeded: (JSONObject) -> Boolean,
     showWelcomeHeader: Boolean = false,
 ) {
-    item { NetworkSetupCard(state, qrJson, dispatchSucceeded, showWelcomeHeader = showWelcomeHeader) }
+    item {
+        NetworkSetupCard(
+            state,
+            qrJson,
+            dispatch,
+            dispatchSucceeded,
+            showWelcomeHeader = showWelcomeHeader,
+        )
+    }
 }
 
 @Composable
 internal fun AddNetworkDialog(
     state: AppState,
     qrJson: (String) -> JSONObject,
+    dispatch: (JSONObject) -> Unit,
     dispatchSucceeded: (JSONObject) -> Boolean,
     onDismiss: () -> Unit,
     onCreated: () -> Unit,
@@ -486,7 +502,7 @@ internal fun AddNetworkDialog(
                 if (state.error.isNotBlank()) {
                     Notice(state.error)
                 }
-                NetworkSetupCard(state, qrJson, dispatchSucceeded, onCreated = onCreated)
+                NetworkSetupCard(state, qrJson, dispatch, dispatchSucceeded, onCreated = onCreated)
             }
         },
         confirmButton = {

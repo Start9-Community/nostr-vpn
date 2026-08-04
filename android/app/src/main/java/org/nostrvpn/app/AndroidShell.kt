@@ -223,7 +223,13 @@ internal fun NostrVpnApp(
                 item { Notice(state.error) }
             }
             if (network == null) {
-                addNetworkBody(state, qrJson, dispatchSucceeded, showWelcomeHeader = true)
+                addNetworkBody(
+                    state,
+                    qrJson,
+                    dispatch,
+                    dispatchSucceeded,
+                    showWelcomeHeader = true,
+                )
             } else {
                 when (effectivePage) {
                     Page.Devices -> devicesPage(
@@ -254,6 +260,7 @@ internal fun NostrVpnApp(
         AddNetworkDialog(
             state = state,
             qrJson = qrJson,
+            dispatch = dispatch,
             dispatchSucceeded = dispatchSucceeded,
             onDismiss = { showAddNetwork = false },
             onCreated = {
