@@ -437,6 +437,13 @@ release_join_codesign_certificate_sha256() {
   rm -rf "$certificate_dir"
 }
 
+release_join_codesign_cdhash() {
+  codesign -dvvv "$1" 2>&1 \
+    | sed -n 's/^CDHash=//p' \
+    | head -n 1 \
+    | tr '[:upper:]' '[:lower:]'
+}
+
 release_join_ios_tree_receipt() {
   python3 - "$1" "$2" <<'PY'
 import hashlib
@@ -708,6 +715,7 @@ release_join_prepare_ios_release() {
   local expected_cert="${NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256:-}"
   local udid app_path app_binary tunnel_app tunnel_binary profile_plist tunnel_profile_plist
   local app_signed_team tunnel_signed_team app_cert tunnel_cert team_hash
+  local app_cdhash tunnel_cdhash device_identifier_sha variant_receipt
   local derived="$RESULT_DIR/ios-derived-data"
   local app_sha app_tree manifest_sha
   if release_join_reuse_artifacts; then
@@ -732,6 +740,12 @@ release_join_prepare_ios_release() {
       "$RELEASE_JOIN_IOS_UDID"
     return
   fi
+  : "${NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT:?Release join gate requires the production iOS receipt}"
+  [[ -f "$NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT" \
+    && ! -L "$NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT" ]] || {
+    echo "Release join gate requires a regular production iOS receipt" >&2
+    return 1
+  }
   [[ -n "$expected_team" && "$team" == "$expected_team" ]] || {
     echo "NVPN_IOS_TEAM_ID is not the explicitly expected company distribution team" >&2
     return 1
@@ -830,6 +844,47 @@ release_join_prepare_ios_release() {
   )"
   release_join_assert_fips_unchanged
   release_join_assert_app_unchanged "$app_sha" "$app_tree"
+  app_cdhash="$(release_join_codesign_cdhash "$app_path")"
+  tunnel_cdhash="$(release_join_codesign_cdhash "$tunnel_app")"
+  [[ "$app_cdhash" =~ ^[0-9a-f]{40}$ \
+    && "$tunnel_cdhash" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "iOS join-test variant has invalid code-directory hashes" >&2
+    return 1
+  }
+  device_identifier_sha="$(printf '%s' "$udid" | shasum -a 256 | awk '{print $1}')"
+  variant_receipt="$RESULT_DIR/ios-join-test-variant.json"
+  python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+    create-ios-join-variant \
+    --receipt "$variant_receipt" \
+    --production-receipt "$NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT" \
+    --app "$app_path" \
+    --derived-data "$derived" \
+    --xctestrun "$RELEASE_JOIN_IOS_XCTESTRUN" \
+    --app-head "$app_sha" \
+    --app-tree "$app_tree" \
+    --fips-head "$RELEASE_JOIN_FIPS_SHA" \
+    --fips-tree "$RELEASE_JOIN_FIPS_TREE" \
+    --fips-version "$RELEASE_JOIN_FIPS_VERSION" \
+    --bundle "$bundle" \
+    --signer-sha "$app_cert" \
+    --app-cdhash "$app_cdhash" \
+    --tunnel-cdhash "$tunnel_cdhash" \
+    --device-identifier-sha "$device_identifier_sha" || return 1
+  NVPN_RELEASE_JOIN_IOS_RECEIPT="$variant_receipt"
+  RELEASE_JOIN_IOS_APP_SHA="$app_sha"
+  RELEASE_JOIN_IOS_APP_TREE="$app_tree"
+  RELEASE_JOIN_IOS_APP_CERT="$app_cert"
+  RELEASE_JOIN_IOS_APP_TREE_SHA="$(
+    python3 - "$variant_receipt" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["appBundleTreeSha256"])
+PY
+  )"
+  export NVPN_RELEASE_JOIN_IOS_RECEIPT RELEASE_JOIN_IOS_APP_SHA
+  export RELEASE_JOIN_IOS_APP_TREE RELEASE_JOIN_IOS_APP_CERT
+  export RELEASE_JOIN_IOS_APP_TREE_SHA
   release_join_install_ios_release \
     "$app_path" "$app_sha" "$app_tree" "$manifest_sha" \
     "$team_hash" "$app_cert" "$derived" "$udid"

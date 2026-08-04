@@ -496,6 +496,127 @@ def validate_xctestrun(path: pathlib.Path) -> None:
                 raise ValueError(f"iOS xctestrun lacks {key}")
 
 
+def create_ios_join_variant(args: argparse.Namespace) -> None:
+    for value, name, length in (
+        (args.app_head, "application commit", 40),
+        (args.app_tree, "application tree", 40),
+        (args.fips_head, "FIPS commit", 40),
+        (args.fips_tree, "FIPS tree", 40),
+        (args.signer_sha, "signer certificate", 64),
+        (args.app_cdhash, "app code-directory hash", 40),
+        (args.tunnel_cdhash, "tunnel code-directory hash", 40),
+        (args.device_identifier_sha, "device identifier", 64),
+    ):
+        require_lower_hash(value, name, length)
+    output = pathlib.Path(args.receipt)
+    production_path = pathlib.Path(args.production_receipt)
+    app = pathlib.Path(args.app)
+    derived = pathlib.Path(args.derived_data)
+    xctestrun = pathlib.Path(args.xctestrun)
+    products = derived / "Build" / "Products"
+    tunnel_app = app / "PlugIns" / "Nostr VPN Tunnel.appex"
+    executable = app / "Nostr VPN"
+    tunnel_executable = tunnel_app / "Nostr VPN Tunnel"
+    app_profile = app / "embedded.mobileprovision"
+    tunnel_profile = tunnel_app / "embedded.mobileprovision"
+    info = app / "Info.plist"
+    for path in (
+        production_path,
+        xctestrun,
+        executable,
+        tunnel_executable,
+        app_profile,
+        tunnel_profile,
+        info,
+    ):
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"required iOS artifact is missing: {path}")
+    for path in (app, derived, products, tunnel_app):
+        if not path.is_dir() or path.is_symlink():
+            raise ValueError(f"required iOS artifact tree is missing: {path}")
+    app_info = plistlib.load(info.open("rb"))
+    if app_info.get("CFBundleIdentifier") != args.bundle:
+        raise ValueError("iOS app bundle identifier mismatch")
+    validate_xctestrun(xctestrun)
+
+    production = load_json(production_path)
+    production_identity = {
+        "receiptSchema": 2,
+        "artifactType": "iOS company Ad Hoc Release app",
+        "appGitSha": args.app_head,
+        "appGitTree": args.app_tree,
+        "fipsGitSha": args.fips_head,
+        "fipsGitTree": args.fips_tree,
+        "fipsCoreVersion": args.fips_version,
+        "companySigningVerified": True,
+        "signerCertificateSha256": args.signer_sha,
+        "selectedPhysicalDeviceIdentifierSha256": args.device_identifier_sha,
+        "installedBundleIdentifier": args.bundle,
+        "debuggable": False,
+    }
+    for name, value in production_identity.items():
+        require_equal(production, name, value)
+    selected_device = production.get("selectedPhysicalDevice")
+    if not isinstance(selected_device, dict):
+        raise ValueError("production iOS receipt has no selected physical device")
+    require_equal(
+        selected_device,
+        "deviceIdentifierSha256",
+        args.device_identifier_sha,
+    )
+    require_equal(selected_device, "explicitPhysicalDeviceVerified", True)
+    require_equal(selected_device, "platform", "iOS")
+    if not selected_device.get("model") or not selected_device.get("productType"):
+        raise ValueError("production iOS receipt has incomplete device metadata")
+
+    app_tree = tree_sha256(app)
+    app_executable_sha = sha256_file(executable)
+    if app_tree == production.get("appBundleTreeSha256"):
+        raise ValueError("join-test app bundle tree matches production")
+    if app_executable_sha == production.get("appExecutableSha256"):
+        raise ValueError("join-test app executable matches production")
+    if args.app_cdhash == production.get("appCodeDirectoryHash"):
+        raise ValueError("join-test app code-directory hash matches production")
+
+    receipt = dict(production)
+    receipt.update(
+        {
+            **production_identity,
+            "artifactType": "iOS Ad Hoc Release join-test variant",
+            "appCodeDirectoryHash": args.app_cdhash,
+            "packetTunnelCodeDirectoryHash": args.tunnel_cdhash,
+            "appExecutableSha256": app_executable_sha,
+            "packetTunnelExecutableSha256": sha256_file(tunnel_executable),
+            "appPathSha256": path_sha256(app),
+            "appBundleTreeSha256": app_tree,
+            "treeSha256": app_tree,
+            "derivedDataPathSha256": path_sha256(derived),
+            "testProductsPathSha256": path_sha256(products),
+            "testProductsTreeSha256": tree_sha256(products),
+            "xctestrunPathSha256": path_sha256(xctestrun),
+            "xctestrunSha256": sha256_file(xctestrun),
+            "appProvisioningProfileSha256": sha256_file(app_profile),
+            "packetTunnelProvisioningProfileSha256": sha256_file(
+                tunnel_profile
+            ),
+            "selectedPhysicalDevice": selected_device,
+            "joinTestingCompilationCondition": (
+                "NVPN_RELEASE_JOIN_TESTING"
+            ),
+            "joinTestingCompilationConditionEnabled": True,
+            "productionArtifactReceiptSha256": sha256_file(
+                production_path
+            ),
+            "productionAppByteIdentical": False,
+        }
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def validate_ios(args: argparse.Namespace) -> None:
     receipt_path = pathlib.Path(args.receipt)
     app = pathlib.Path(args.app)
@@ -700,6 +821,26 @@ def parser() -> argparse.ArgumentParser:
     ):
         ios.add_argument(f"--{name.replace('_', '-')}", required=True)
     ios.add_argument("--production-receipt")
+
+    variant = subparsers.add_parser("create-ios-join-variant")
+    for name in (
+        "receipt",
+        "production_receipt",
+        "app",
+        "derived_data",
+        "xctestrun",
+        "app_head",
+        "app_tree",
+        "fips_head",
+        "fips_tree",
+        "fips_version",
+        "bundle",
+        "signer_sha",
+        "app_cdhash",
+        "tunnel_cdhash",
+        "device_identifier_sha",
+    ):
+        variant.add_argument(f"--{name.replace('_', '-')}", required=True)
     return result
 
 
@@ -716,6 +857,8 @@ def main() -> int:
             validate_android(args)
         elif args.command == "validate-ios":
             validate_ios(args)
+        elif args.command == "create-ios-join-variant":
+            create_ios_join_variant(args)
         else:
             raise ValueError(f"unsupported command: {args.command}")
     except (OSError, ValueError, json.JSONDecodeError, plistlib.InvalidFileException) as error:

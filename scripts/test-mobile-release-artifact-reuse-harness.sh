@@ -39,7 +39,7 @@ FIPS_VERSION=1.2.3
 SIGNER_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 APP_CDHASH=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 TUNNEL_CDHASH=cccccccccccccccccccccccccccccccccccccccc
-DEVICE_SHA=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+DEVICE_SHA=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 PACKAGE=fi.siriusbusiness.nvpn
 ANDROID_METADATA="$ANDROID_DIR/fips-linkage.json"
 ANDROID_RECEIPT="$ANDROID_DIR/mobile-android-release-artifact.json"
@@ -255,23 +255,81 @@ production = {
     "appBundleTreeSha256": "e" * 64,
     "treeSha256": "e" * 64,
     "appExecutableSha256": "f" * 64,
+    "appCodeDirectoryHash": "d" * 40,
 }
 ios_production_receipt.write_text(
     json.dumps(production, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 )
-ios.update({
-    "artifactType": "iOS Ad Hoc Release join-test variant",
-    "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
-    "joinTestingCompilationConditionEnabled": True,
-    "productionArtifactReceiptSha256": module.sha256_file(
-        ios_production_receipt
-    ),
-    "productionAppByteIdentical": False,
-})
-ios_receipt.write_text(
-    json.dumps(ios, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-)
 PY
+
+create_ios_variant() {
+  local production_receipt="${1:-$IOS_PRODUCTION_RECEIPT}"
+  local output_receipt="${2:-$IOS_RECEIPT}"
+  python3 "$VALIDATOR" create-ios-join-variant \
+    --receipt "$output_receipt" \
+    --production-receipt "$production_receipt" \
+    --app "$IOS_APP" \
+    --derived-data "$IOS_DERIVED" \
+    --xctestrun "$IOS_XCTESTRUN" \
+    --app-head "$IOS_APP_HEAD" \
+    --app-tree "$IOS_APP_TREE" \
+    --fips-head "$FIPS_HEAD" \
+    --fips-tree "$FIPS_TREE" \
+    --fips-version "$FIPS_VERSION" \
+    --bundle "$PACKAGE" \
+    --signer-sha "$SIGNER_SHA" \
+    --app-cdhash "$APP_CDHASH" \
+    --tunnel-cdhash "$TUNNEL_CDHASH" \
+    --device-identifier-sha "$DEVICE_SHA"
+}
+
+create_ios_variant
+python3 - "$IOS_RECEIPT" "$IOS_PRODUCTION_RECEIPT" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+variant_path, production_path = map(pathlib.Path, sys.argv[1:])
+variant = json.loads(variant_path.read_text(encoding="utf-8"))
+production = json.loads(production_path.read_text(encoding="utf-8"))
+assert variant["artifactType"] == "iOS Ad Hoc Release join-test variant"
+assert variant["joinTestingCompilationConditionEnabled"] is True
+assert variant["productionAppByteIdentical"] is False
+assert variant["productionArtifactReceiptSha256"] == hashlib.sha256(
+    production_path.read_bytes()
+).hexdigest()
+for field in (
+    "appBundleTreeSha256",
+    "appExecutableSha256",
+    "appCodeDirectoryHash",
+):
+    assert variant[field] != production[field]
+PY
+
+for field in appBundleTreeSha256 appExecutableSha256 appCodeDirectoryHash; do
+  collision_receipt="$TMP_ROOT/ios-production-$field.json"
+  collision_output="$TMP_ROOT/ios-variant-$field.json"
+  python3 - "$IOS_PRODUCTION_RECEIPT" "$IOS_RECEIPT" \
+    "$collision_receipt" "$field" <<'PY'
+import json
+import pathlib
+import sys
+
+production_path, variant_path, output_path = map(pathlib.Path, sys.argv[1:4])
+field = sys.argv[4]
+production = json.loads(production_path.read_text(encoding="utf-8"))
+variant = json.loads(variant_path.read_text(encoding="utf-8"))
+production[field] = variant[field]
+output_path.write_text(json.dumps(production) + "\n", encoding="utf-8")
+PY
+  if create_ios_variant "$collision_receipt" "$collision_output" \
+      >"$TMP_ROOT/ios-variant-$field.log" 2>&1
+  then
+    echo "iOS join variant accepted production-identical $field" >&2
+    exit 1
+  fi
+done
 
 validate_android() {
   local dir="${1:-$ANDROID_DIR}"
