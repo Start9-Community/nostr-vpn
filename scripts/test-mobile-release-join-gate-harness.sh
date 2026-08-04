@@ -871,8 +871,8 @@ for required in (
     if required not in ios_qr_scanner:
         raise SystemExit(f"iOS scanner does not gate QR image import: {required}")
 for required in (
-    'directoryPath = "Nostr VPN/UITestCapability"',
-    'markerName = "probe"',
+    'directoryPath = "Library/Caches"',
+    'markerName = "nvpn-release-join-qr-image-import"',
     "maximumAgeSeconds = 60",
     "UUID(uuidString:",
     "removeItem(at: marker)",
