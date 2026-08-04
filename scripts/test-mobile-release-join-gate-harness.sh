@@ -19,6 +19,11 @@ grep -Fq 'RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA' \
   && grep -Fq '"$RELEASE_JOIN_IOS_BUNDLE_MANIFEST_SHA"' \
     "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" \
   || { echo "iOS reuse install does not retain its canonical bundle manifest" >&2; exit 1; }
+grep -Fq 'mktemp -d "$PRIVATE_DIR/join-$test_name.XXXXXX"' \
+  "$ROOT/scripts/lib-mobile-release-join-ui.sh" \
+  && grep -Fq 'case_xctestrun="$case_dir/case.xctestrun"' \
+    "$ROOT/scripts/lib-mobile-release-join-ui.sh" \
+  || { echo "iOS join retry does not allocate a reusable xctestrun path" >&2; exit 1; }
 join_ui="$ROOT/scripts/lib-mobile-release-join-ui.sh"
 grep -Fq -- '-destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"' \
   "$join_ui" \

@@ -802,13 +802,14 @@ release_join_ios_test_command() {
     echo "iOS release join requires the frozen xctestrun artifact" >&2
     return 1
   fi
-  local case_xctestrun
+  local case_dir case_xctestrun
   local -a command=() rewrite_command=() runner_environment=()
-  if ! case_xctestrun="$(
-    mktemp "$PRIVATE_DIR/join-$test_name.XXXXXX.xctestrun"
+  if ! case_dir="$(
+    mktemp -d "$PRIVATE_DIR/join-$test_name.XXXXXX"
   )"; then
     return 1
   fi
+  case_xctestrun="$case_dir/case.xctestrun"
   rewrite_command=(
     python3 "$ROOT/scripts/ios_frozen_archive.py"
     rewrite-xctestrun
@@ -844,6 +845,7 @@ release_join_ios_test_command() {
     | "${rewrite_command[@]}"
   then
     rm -f "$case_xctestrun"
+    rmdir "$case_dir" || true
     return 1
   fi
   command=(
