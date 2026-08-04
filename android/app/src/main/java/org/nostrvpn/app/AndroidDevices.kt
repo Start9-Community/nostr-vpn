@@ -26,6 +26,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -203,6 +204,7 @@ private fun NetworkSetupCard(
     showWelcomeHeader: Boolean = false,
 ) {
     var setupMode by remember { mutableStateOf<NetworkSetupMode?>(null) }
+    var joinBaselineNetworkIds by remember { mutableStateOf<Set<String>?>(null) }
     var networkName by remember { mutableStateOf("My Network") }
     var manualExpanded by remember { mutableStateOf(false) }
     var manualAdminId by remember { mutableStateOf("") }
@@ -211,6 +213,19 @@ private fun NetworkSetupCard(
         state.networks.firstOrNull { it.joinRequestQrCodeOrLink.isNotBlank() }
             ?.joinRequestQrCodeOrLink
             .orEmpty()
+    }
+    val networkIds = state.networks.mapTo(linkedSetOf()) { it.id }
+
+    LaunchedEffect(setupMode, networkIds) {
+        val baseline = joinBaselineNetworkIds
+        if (
+            setupMode == NetworkSetupMode.Join &&
+            baseline != null &&
+            networkIds.any { it !in baseline }
+        ) {
+            joinBaselineNetworkIds = null
+            onCreated?.invoke()
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -248,6 +263,7 @@ private fun NetworkSetupCard(
                         if (!state.vpnEnabled) {
                             dispatch(NativeActions.connectVpn())
                         }
+                        joinBaselineNetworkIds = networkIds
                         setupMode = NetworkSetupMode.Join
                     },
                     modifier = Modifier
