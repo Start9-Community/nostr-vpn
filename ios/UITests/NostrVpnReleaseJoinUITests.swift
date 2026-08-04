@@ -415,32 +415,14 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let documents = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
         let roots = [app, documents]
 
-        if tapFile(named: filename, in: roots, timeout: 5) {
+        if tapFile(named: filename, in: roots, timeout: 1) {
             return
         }
-        for root in roots {
-            let browse = root.buttons["Browse"]
-            if browse.exists && browse.isHittable {
-                browse.tap()
-                break
-            }
-        }
-        for root in roots {
-            let local = root.descendants(matching: .any)["On My iPhone"]
-            if local.waitForExistence(timeout: 2) && local.isHittable {
-                local.tap()
-                break
-            }
-        }
-        for root in roots {
-            let folder = root.descendants(matching: .any)["Nostr VPN Test Files"]
-            if folder.waitForExistence(timeout: 2) && folder.isHittable {
-                folder.tap()
-                break
-            }
-        }
+        XCTAssertTrue(tapFile(named: "Browse", in: roots, timeout: 2))
+        XCTAssertTrue(tapFile(named: "On My iPhone", in: roots, timeout: 2))
+        XCTAssertTrue(tapFile(named: "Nostr VPN Test Files", in: roots, timeout: 2))
         XCTAssertTrue(
-            tapFile(named: filename, in: roots, timeout: 5),
+            tapFile(named: filename, in: roots, timeout: 4),
             "Staged QR screenshot was not selectable through the public Files picker"
         )
     }
