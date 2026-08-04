@@ -236,6 +236,7 @@ private struct AddNetworkPage: View {
     var showsWelcomeHeader = false
     var onReviewVpnDisclosure: () -> Void = {}
     @State private var mode: AddNetworkMode?
+    @State private var networkIdsBeforeQrJoin: Set<String>?
 
     var body: some View {
         ScrollView {
@@ -255,6 +256,7 @@ private struct AddNetworkPage: View {
                     AddNetworkChoiceButtons(
                         mode: $mode,
                         onJoin: {
+                            networkIdsBeforeQrJoin = Set(model.state.networks.map(\.id))
                             if !model.state.vpnEnabled {
                                 model.setVpnEnabled(true)
                             }
@@ -280,6 +282,18 @@ private struct AddNetworkPage: View {
         }
         .safeAreaPadding(.bottom, 92)
         .background(AppColors.background)
+        .onChange(of: model.state.networks.map(\.id)) { _, networkIds in
+            guard mode == .join,
+                  let networkIdsBeforeQrJoin,
+                  let joinedNetworkId = networkIds.first(where: {
+                      !networkIdsBeforeQrJoin.contains($0)
+                  })
+            else {
+                return
+            }
+            self.networkIdsBeforeQrJoin = nil
+            onCreated?(joinedNetworkId)
+        }
     }
 }
 
