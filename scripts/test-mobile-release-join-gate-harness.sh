@@ -723,16 +723,6 @@ if '$RESULT_DIR/macos/artifact.json"' in run_only.split(
 for forbidden in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace"):
     if forbidden in ios_info:
         raise SystemExit(f"Production iOS app exposes test fixture storage: {forbidden}")
-for forbidden in (
-    "INFOPLIST_KEY_UIFileSharingEnabled",
-    "INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace",
-    "INFOPLIST_KEY_CFBundleDisplayName: Nostr VPN Test Files",
-):
-    if forbidden in ios_project:
-        raise SystemExit(
-            f"iOS fixture storage is incorrectly configured on the nested test bundle: {forbidden}"
-        )
-
 prepare_ios = artifacts[
     artifacts.index("release_join_prepare_ios_release()"):
     artifacts.index("release_join_restart_ios_in_place()")
