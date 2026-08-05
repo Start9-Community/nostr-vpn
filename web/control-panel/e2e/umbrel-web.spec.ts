@@ -35,8 +35,6 @@ type UiState = {
   nodeName: string;
   selfMagicDnsName: string;
   autoconnect: boolean;
-  joinRequestBroadcastActive: boolean;
-  nearbyDiscoveryActive: boolean;
   networks: NetworkView[];
 };
 
@@ -413,18 +411,6 @@ test('API supports the Umbrel web config action surface', async ({ request }) =>
   });
   workNetwork = byName(state, 'E2E Renamed');
   expect(workNetwork.participants.some((participant) => participant.npub === peerNpub)).toBeFalsy();
-
-  state = await postJson<UiState>(request, '/api/start_join_request_broadcast');
-  expect(state.joinRequestBroadcastActive).toBeTruthy();
-
-  state = await postJson<UiState>(request, '/api/stop_join_request_broadcast');
-  expect(state.joinRequestBroadcastActive).toBeFalsy();
-
-  state = await postJson<UiState>(request, '/api/start_nearby_discovery');
-  expect(state.nearbyDiscoveryActive).toBeTruthy();
-
-  state = await postJson<UiState>(request, '/api/stop_nearby_discovery');
-  expect(state.nearbyDiscoveryActive).toBeFalsy();
 
   state = await postJson<UiState>(request, '/api/set_network_enabled', {
     networkId: originalNetwork.id,

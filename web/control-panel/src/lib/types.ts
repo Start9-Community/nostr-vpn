@@ -89,14 +89,6 @@ export type NetworkView = {
   participants: ParticipantView[];
 };
 
-export type LanPeer = {
-  npub: string;
-  networkId: string;
-  nodeName?: string;
-  networkName?: string;
-  lastSeenText?: string;
-};
-
 export type UiState = {
   platform: string;
   mobile: boolean;
@@ -156,10 +148,6 @@ export type UiState = {
   magicDnsSuffix: string;
   magicDnsStatus: string;
   autoconnect: boolean;
-  joinRequestBroadcastActive: boolean;
-  joinRequestBroadcastRemainingSecs: number;
-  nearbyDiscoveryActive: boolean;
-  nearbyDiscoveryRemainingSecs: number;
   launchOnStartup: boolean;
   closeToTrayOnClose: boolean;
   connectedPeerCount: number;
@@ -172,7 +160,6 @@ export type UiState = {
   network: NetworkSummary;
   portMapping: PortMappingStatus;
   networks: NetworkView[];
-  lanPeers: LanPeer[];
 };
 
 export type RelayView = {

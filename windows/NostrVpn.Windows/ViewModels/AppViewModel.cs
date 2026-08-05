@@ -132,8 +132,6 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
         CopyThisDeviceCommand = new RelayCommand(_ => CopyText(ThisDeviceCopyValue), _ => !string.IsNullOrWhiteSpace(ThisDeviceCopyValue));
         CopyPeerCommand = new RelayCommand(parameter => CopyText(parameter as string ?? ""));
         ImportJoinRequestQrImageCommand = new AsyncRelayCommand(_ => ImportJoinRequestQrImageAsync(), _ => !ActionInFlight && ActiveNetwork?.LocalIsAdmin == true);
-        ToggleNearbyDiscoveryCommand = new AsyncRelayCommand(_ => DispatchAsync(State.NearbyDiscoveryActive ? NativeActions.StopNearbyDiscovery() : NativeActions.StartNearbyDiscovery(), "Finding nearby"));
-        ToggleJoinRequestBroadcastCommand = new AsyncRelayCommand(_ => DispatchAsync(State.JoinRequestBroadcastActive ? NativeActions.StopJoinRequestBroadcast() : NativeActions.StartJoinRequestBroadcast(), State.JoinRequestBroadcastActive ? "Stopping nearby" : "Advertising nearby"));
         AddParticipantCommand = new AsyncRelayCommand(_ => AddParticipantAsync(), _ => !ActionInFlight && ActiveNetwork is { LocalIsAdmin: true, Enabled: true } && !string.IsNullOrWhiteSpace(ParticipantInput) && !ParticipantInputInvalid);
         SaveNodeCommand = new AsyncRelayCommand(_ => SaveNodeAsync(), _ => !ActionInFlight);
         AddRelayCommand = new AsyncRelayCommand(_ => AddRelayAsync(), _ => !ActionInFlight && !string.IsNullOrWhiteSpace(RelayInput));
@@ -585,15 +583,6 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
             StringComparison.Ordinal);
 
     public string ThisDeviceCopyValue => !string.IsNullOrWhiteSpace(State.OwnNpub) ? State.OwnNpub : State.TunnelIp;
-    public Visibility NoNearbyJoinRequestsNoticeVisibility => State.NearbyDiscoveryActive && State.LanPeers.Count == 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
-    public string NearbyDiscoveryButtonText => State.NearbyDiscoveryActive
-        ? $"Finding nearby · {FormatRemaining(State.NearbyDiscoveryRemainingSecs)}"
-        : "Find nearby";
-    public string JoinRequestBroadcastButtonText => State.JoinRequestBroadcastActive
-        ? $"Advertising · {FormatRemaining(State.JoinRequestBroadcastRemainingSecs)}"
-        : "Advertise nearby";
 
     private static string FormatRemaining(ulong seconds)
     {
@@ -675,8 +664,6 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
     public ICommand CopyThisDeviceCommand { get; }
     public ICommand CopyPeerCommand { get; }
     public ICommand ImportJoinRequestQrImageCommand { get; }
-    public ICommand ToggleNearbyDiscoveryCommand { get; }
-    public ICommand ToggleJoinRequestBroadcastCommand { get; }
     public ICommand AddParticipantCommand { get; }
     public ICommand SaveNodeCommand { get; }
     public ICommand AddRelayCommand { get; }

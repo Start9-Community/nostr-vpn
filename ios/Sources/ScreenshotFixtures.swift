@@ -67,9 +67,6 @@ enum ScreenshotFixtures {
         state.fipsNostrDiscoveryEnabled = true
         state.fipsWebrtcEnabled = false
         state.fipsBootstrapEnabled = false
-        state.joinRequestBroadcastActive = false
-        state.nearbyDiscoveryActive = true
-        state.nearbyDiscoveryRemainingSecs = 112
         state.configPath = "Fixture data"
         state.networks = [
             network(
@@ -80,9 +77,6 @@ enum ScreenshotFixtures {
                 androidNpub: androidNpub,
                 ipadNpub: ipadNpub
             )
-        ]
-        state.lanPeers = [
-            lanPeer(name: "iPadOS nearby", network: "Join request", joinRequest: "nvpn://join-request/demo-ipad")
         ]
         return state
     }
@@ -268,16 +262,6 @@ enum ScreenshotFixtures {
         participant.lastFipsDataSeenText = reachable ? "seen now" : ""
         participant.lastSeenText = reachable ? "now" : "yesterday"
         return participant
-    }
-
-    private static func lanPeer(name: String, network: String, joinRequest: String) -> LanPeerState {
-        var peer = LanPeerState()
-        peer.npub = fakeNpub("y")
-        peer.nodeName = name
-        peer.networkName = network
-        peer.joinRequest = joinRequest
-        peer.lastSeenText = "Nearby now"
-        return peer
     }
 
     private static func applySettings(_ patch: [String: Any], to state: inout AppState) {

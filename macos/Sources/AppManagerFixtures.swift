@@ -57,7 +57,6 @@ extension AppManager {
         let androidNpub = "npub1h988xqzvhu98t0n22ys7etjcg7ca33s78kda4mu5pfathz9xklmqxx6rg0"
         let ubuntuNpub = "npub1dxlnwd78xjhec3hlzc8qwjuc98w47hv89khggu8yk0ynpkw4czxsuccs3u"
         let joinNpub = "npub1xnvumr6snuvl7tcwll3kz9wny4fzjh9uwhmu4d6hc2hwuxrk6vqq8kukg4"
-        let nearbyNpub = "npub1saweqehm9a5gsn7xgcqjpmf2ungfj74wxawwvehn38s0mxtzx80qq8a5xa"
         let selfHex = "56ee71eb995b2454856ee74a85cd0f26047e30537b366875adb7989ca33c5157"
         let macbookHex = "03e75415631c080c89281c11a599796eee863ef4e8783576a43201513ec8ccb7"
         let iphoneHex = "5eeecb5e3659bcd73f4934d7c16d9828d4f71a63e844d7d34aabe15549612083"
@@ -678,10 +677,6 @@ extension AppManager {
             magicDnsSuffix: "nvpn",
             magicDnsStatus: "Serving .nvpn names",
             autoconnect: true,
-            joinRequestBroadcastActive: true,
-            joinRequestBroadcastRemainingSecs: 417,
-            nearbyDiscoveryActive: true,
-            nearbyDiscoveryRemainingSecs: 417,
             launchOnStartup: true,
             closeToTrayOnClose: true,
             connectedPeerCount: 4,
@@ -709,18 +704,7 @@ extension AppManager {
                 gateway: "192.0.2.1",
                 goodUntil: 0
             ),
-            networks: [network],
-            lanPeers: [
-                NativeLanPeerState(
-                    npub: nearbyNpub,
-                    nodeName: "nearby-macbook",
-                    endpoint: "192.0.2.44:51820",
-                    networkName: "Nearby Mesh",
-                    networkId: "nearby-mesh",
-                    joinRequest: "nvpn://join-request/nearby-mesh",
-                    lastSeenText: "3s ago"
-                )
-            ]
+            networks: [network]
         )
     }
 }

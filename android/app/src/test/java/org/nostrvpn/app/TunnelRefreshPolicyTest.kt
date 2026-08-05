@@ -9,7 +9,6 @@ class TunnelRefreshPolicyTest {
     @Test
     fun qrAndManualApprovalActionsRestartTheRunningTunnel() {
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("import_join_request"))
-        assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("start_join_request_broadcast"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("accept_join_request"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("manual_add_network"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("add_participant"))
@@ -96,15 +95,6 @@ class TunnelRefreshPolicyTest {
         assertEquals(
             TunnelServiceCommand.CONNECT,
             TunnelServiceCommandPolicy.commandAfterAction("connect_vpn", false, true, false),
-        )
-        assertEquals(
-            TunnelServiceCommand.CONNECT,
-            TunnelServiceCommandPolicy.commandAfterAction(
-                "start_join_request_broadcast",
-                false,
-                true,
-                false,
-            ),
         )
         assertEquals(
             TunnelServiceCommand.CONNECT,

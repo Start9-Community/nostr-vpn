@@ -81,18 +81,6 @@ pub struct NativeNetworkState {
 
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NativeLanPeerState {
-    pub npub: String,
-    pub node_name: String,
-    pub endpoint: String,
-    pub network_name: String,
-    pub network_id: String,
-    pub join_request: String,
-    pub last_seen_text: String,
-}
-
-#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct NativeHealthIssue {
     pub code: String,
     pub severity: String,
@@ -499,10 +487,6 @@ pub struct NativeAppState {
     pub magic_dns_suffix: String,
     pub magic_dns_status: String,
     pub autoconnect: bool,
-    pub join_request_broadcast_active: bool,
-    pub join_request_broadcast_remaining_secs: u64,
-    pub nearby_discovery_active: bool,
-    pub nearby_discovery_remaining_secs: u64,
     pub launch_on_startup: bool,
     pub close_to_tray_on_close: bool,
     pub connected_peer_count: u64,
@@ -515,5 +499,4 @@ pub struct NativeAppState {
     pub network: NativeNetworkSummary,
     pub port_mapping: NativePortMappingStatus,
     pub networks: Vec<NativeNetworkState>,
-    pub lan_peers: Vec<NativeLanPeerState>,
 }

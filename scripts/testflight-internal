@@ -152,7 +152,7 @@ DEFAULT_PUBLIC_GROUP_NAME = "Public Beta"
 DEFAULT_PUBLIC_LINK_LIMIT = 9999
 DEFAULT_WHATS_NEW = (
     "Please test creating or importing a Nostr VPN network, starting and stopping the iOS "
-    "packet tunnel, nearby join requests, peer connectivity, routing settings, "
+    "packet tunnel, join requests, peer connectivity, routing settings, "
     "WireGuard exit-node routing, and TestFlight feedback or crash reporting."
 )
 DEFAULT_BETA_DESCRIPTION = (

@@ -90,10 +90,6 @@ public sealed class NativeAppState
     public string MagicDnsSuffix { get; set; } = "";
     public string MagicDnsStatus { get; set; } = "";
     public bool Autoconnect { get; set; }
-    public bool JoinRequestBroadcastActive { get; set; }
-    public ulong JoinRequestBroadcastRemainingSecs { get; set; }
-    public bool NearbyDiscoveryActive { get; set; }
-    public ulong NearbyDiscoveryRemainingSecs { get; set; }
     public bool LaunchOnStartup { get; set; }
     public bool CloseToTrayOnClose { get; set; }
     public ulong ConnectedPeerCount { get; set; }
@@ -106,7 +102,6 @@ public sealed class NativeAppState
     public NativeNetworkSummary Network { get; set; } = new();
     public NativePortMappingStatus PortMapping { get; set; } = new();
     public List<NativeNetworkState> Networks { get; set; } = [];
-    public List<NativeLanPeerState> LanPeers { get; set; } = [];
 }
 
 public sealed class NativeRelayState
@@ -795,17 +790,6 @@ public sealed class NativeInboundJoinRequestState
     public string RequesterPubkeyHex { get; set; } = "";
     public string RequesterNodeName { get; set; } = "";
     public string RequestedAtText { get; set; } = "";
-}
-
-public sealed class NativeLanPeerState
-{
-    public string Npub { get; set; } = "";
-    public string NodeName { get; set; } = "";
-    public string Endpoint { get; set; } = "";
-    public string NetworkName { get; set; } = "";
-    public string NetworkId { get; set; } = "";
-    public string JoinRequest { get; set; } = "";
-    public string LastSeenText { get; set; } = "";
 }
 
 public sealed class NativeHealthIssue

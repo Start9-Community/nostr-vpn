@@ -269,8 +269,7 @@ run_ios_simulator_ui_gate() {
     -configuration Debug \
     -derivedDataPath "$ROOT/ios/.build/DerivedData" \
     -destination "platform=iOS Simulator,id=$device" \
-    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testJoinAdvertisingUsesTheShippedUiAndSurvivesBackgrounding \
-    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testNearbyDiscoveryUsesTheShippedUiAndSurvivesBackgrounding \
+    -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testJoinRequestUsesFullWidthAndSurvivesBackgrounding \
     -only-testing:NostrVpnIosUITests/NostrVpnIosUITests/testExitDnsSettingsUseShippedControlsAndValidateRequiredFields \
     test
   echo "iOS simulator shipped-UI QR, DNS, and lifecycle gate passed"

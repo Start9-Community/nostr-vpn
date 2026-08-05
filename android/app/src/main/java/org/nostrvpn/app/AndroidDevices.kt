@@ -423,10 +423,6 @@ private fun NetworkSetupCard(
                             }
 
                         }
-                        AdvertiseJoinRequestCard(state) { action ->
-                            dispatchSucceeded(action)
-                            Unit
-                        }
                     }
                 }
             }
@@ -603,7 +599,6 @@ internal fun AddDevicesDialog(
                 ) {
                     Text("Scan QR")
                 }
-                NearbyCard(state, dispatch)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("For manual join", style = MaterialTheme.typography.titleMedium)
                 Text(

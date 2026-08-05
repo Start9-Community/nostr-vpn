@@ -275,7 +275,6 @@ private struct AddNetworkPage: View {
                 case .join:
                     AddNetworkBackButton(mode: $mode)
                     JoinNetworkCard(model: model, onCreated: onCreated)
-                    AdvertiseJoinRequestCard(model: model)
                 }
             }
             .padding()

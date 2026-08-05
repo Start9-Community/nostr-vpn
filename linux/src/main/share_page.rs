@@ -8,7 +8,6 @@ fn build_network_setup(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
         Some(NetworkSetupMode::Join) => {
             append_setup_back(app, page);
             append_join_network_card(app, page, state, None);
-            append_nearby_card(app, page, state);
         }
     }
 }
@@ -226,87 +225,6 @@ fn append_join_network_card(
     page.append(&join_card);
 }
 
-fn append_nearby_card(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
-    let nearby = card();
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    header.set_valign(gtk::Align::Center);
-    section_header(&header, "Nearby join requests", "");
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    header.append(&spacer);
-    let nearby_label = if state.nearby_discovery_active {
-        format!(
-            "Finding nearby · {}",
-            remaining_text(state.nearby_discovery_remaining_secs)
-        )
-    } else {
-        "Find nearby".to_string()
-    };
-    let lan = icon_text_button(
-        &nearby_label,
-        if state.nearby_discovery_active {
-            "media-playback-stop-symbolic"
-        } else {
-            "system-search-symbolic"
-        },
-    );
-    {
-        let app = app.clone();
-        let active = state.nearby_discovery_active;
-        lan.connect_clicked(move |_| {
-            dispatch(
-                &app,
-                if active {
-                    NativeAppAction::StopNearbyDiscovery
-                } else {
-                    NativeAppAction::StartNearbyDiscovery
-                },
-            );
-        });
-    }
-    header.append(&lan);
-    nearby.append(&header);
-    if state.lan_peers.is_empty() {
-        empty_row(&nearby, "No nearby join requests");
-    } else {
-        for peer in &state.lan_peers {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            let title = gtk::Label::new(Some(if peer.node_name.trim().is_empty() {
-                &peer.network_name
-            } else {
-                &peer.node_name
-            }));
-            title.set_xalign(0.0);
-            title.add_css_class("heading");
-            text.append(&title);
-            let sub = gtk::Label::new(Some(&peer.last_seen_text));
-            sub.add_css_class("caption");
-            sub.add_css_class("dim-label");
-            sub.set_xalign(0.0);
-            text.append(&sub);
-            text.set_hexpand(true);
-            row.append(&text);
-            let join = icon_text_button("Add", "go-next-symbolic");
-            {
-                let app = app.clone();
-                let request = peer.join_request.clone();
-                join.connect_clicked(move |_| {
-                    dispatch(
-                        &app,
-                        NativeAppAction::ImportJoinRequest {
-                            request: request.clone(),
-                        },
-                    );
-                });
-            }
-            row.append(&join);
-            nearby.append(&row);
-        }
-    }
-    page.append(&nearby);
-}
-
 fn build_share_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     let Some(network) = active_network(state).cloned() else {
         return;
@@ -327,7 +245,6 @@ fn build_share_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
         build_paid_exit_seller_card(app, page, state);
     }
     append_join_network_card(app, page, state, None);
-    append_nearby_card(app, page, state);
 }
 
 fn append_link_device_card(app: &AppRef, page: &gtk::Box, network: &NativeNetworkState) {

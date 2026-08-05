@@ -143,14 +143,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void AddNearbyJoinRequest_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Tag: string request })
-        {
-            await ViewModel.ImportNearbyJoinRequestAsync(request);
-        }
-    }
-
     private async void DirectExit_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.SelectDirectExitAsync();

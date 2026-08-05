@@ -8,7 +8,7 @@ Responsibilities:
 - render `UiState` with native WPF views
 - dispatch `NativeAppAction` values into the shared Rust core
 - own Credential Manager access, UAC/service prompts, tray integration, camera/image QR scanning, startup registration, and installer/update UX
-- preserve current Windows service, Wintun/userspace tunnel, config import, join-request deep links, LAN pairing, and exit-node behavior
+- preserve current Windows service, Wintun/userspace tunnel, config import, join-request deep links, and exit-node behavior
 
 The parity checklist is in `docs/native-ui-parity-matrix.md`.
 

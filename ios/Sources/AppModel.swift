@@ -43,8 +43,6 @@ final class AppModel: ObservableObject {
     var startupTunnelReconciliationGeneration: UInt64 = 0
     private var sceneIsActive = false
     private var pendingOpenURLs: [URL] = []
-    private var restartJoinRequestBroadcastOnForeground = false
-    private var restartNearbyDiscoveryOnForeground = false
     var launchAutomationHandled = false
     var tunnelAppConfigRefreshInFlight = false
     var tunnelRuntimeRefreshInFlight = false
@@ -196,8 +194,6 @@ final class AppModel: ObservableObject {
     }
 
     private func suspendNativeCore() {
-        restartJoinRequestBroadcastOnForeground = state.joinRequestBroadcastActive
-        restartNearbyDiscoveryOnForeground = state.nearbyDiscoveryActive
         refreshTask?.cancel()
         refreshTask = nil
         tunnelConfigSyncTask?.cancel()
@@ -227,10 +223,6 @@ final class AppModel: ObservableObject {
     }
 
     private func resumeNativeCore() {
-        let restartJoinRequestBroadcast = restartJoinRequestBroadcastOnForeground
-        let restartNearbyDiscovery = restartNearbyDiscoveryOnForeground
-        restartJoinRequestBroadcastOnForeground = false
-        restartNearbyDiscoveryOnForeground = false
         if core == nil, let supportDir {
             let client = NativeCoreClient(dataDir: supportDir.path, appVersion: "")
             core = client
@@ -241,18 +233,6 @@ final class AppModel: ObservableObject {
         #endif
         start()
         refresh()
-        if restartJoinRequestBroadcast {
-            dispatch(
-                NativeActions.startJoinRequestBroadcast(),
-                status: "Advertising nearby"
-            )
-        }
-        if restartNearbyDiscovery {
-            dispatch(
-                NativeActions.startNearbyDiscovery(),
-                status: "Finding nearby"
-            )
-        }
     }
 
     func refresh() {
@@ -581,7 +561,6 @@ final class AppModel: ObservableObject {
     ) -> Bool {
         switch type {
         case "import_join_request",
-             "start_join_request_broadcast",
              "manual_add_network",
              "add_network",
              "rename_network",

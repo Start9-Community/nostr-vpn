@@ -61,12 +61,6 @@ pub enum NativeAppAction {
         admin_npub: String,
         mesh_network_id: String,
     },
-    /// Broadcast this device's signed join request over LAN multicast/broadcast.
-    StartJoinRequestBroadcast,
-    StopJoinRequestBroadcast,
-    /// Listen for nearby signed join requests (populates `lan_peers`).
-    StartNearbyDiscovery,
-    StopNearbyDiscovery,
     RemoveParticipant {
         network_id: String,
         npub: String,

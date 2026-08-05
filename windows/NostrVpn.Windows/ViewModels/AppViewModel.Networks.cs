@@ -67,13 +67,6 @@ public sealed partial class AppViewModel
         return DispatchAsync(NativeActions.RemoveNetwork(networkId), "Deleting network");
     }
 
-    public Task ImportNearbyJoinRequestAsync(string? request)
-    {
-        return string.IsNullOrWhiteSpace(request)
-            ? Task.CompletedTask
-            : ConfirmAndImportJoinRequestAsync(request.Trim());
-    }
-
     public Task RenameActiveNetworkAsync()
     {
         var network = ActiveNetwork;

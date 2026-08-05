@@ -417,7 +417,6 @@ impl NativeAppRuntime {
 
     fn refresh_mobile_status(&mut self) -> Result<()> {
         self.reload_config_from_disk()?;
-        self.refresh_lan_pairing();
         self.daemon_state = None;
         self.service_supported = false;
         self.service_enablement_supported = false;
@@ -481,7 +480,6 @@ impl NativeAppRuntime {
     fn refresh_status(&mut self) -> Result<()> {
         self.reload_config_from_disk()?;
         self.refresh_service_status_if_due();
-        self.refresh_lan_pairing();
         let output = self.run_nvpn([
             "status",
             "--json",

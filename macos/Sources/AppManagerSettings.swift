@@ -248,19 +248,4 @@ extension AppManager {
         dispatch(.uninstallSystemService, status: "Uninstalling service", successStatus: "Service uninstalled", settleService: true)
     }
 
-    func startNearbyDiscovery() {
-        dispatch(.startNearbyDiscovery, status: "Finding nearby")
-    }
-
-    func stopNearbyDiscovery() {
-        dispatch(.stopNearbyDiscovery, status: "Stopped looking")
-    }
-
-    func startJoinRequestBroadcast() {
-        dispatch(.startJoinRequestBroadcast, status: "Advertising nearby")
-    }
-
-    func stopJoinRequestBroadcast() {
-        dispatch(.stopJoinRequestBroadcast, status: "Stopping nearby")
-    }
 }

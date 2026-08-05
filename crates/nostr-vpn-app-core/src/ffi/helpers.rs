@@ -1,10 +1,3 @@
-impl Drop for NativeAppRuntime {
-    fn drop(&mut self) {
-        self.stop_join_request_broadcast();
-        self.stop_nearby_discovery();
-    }
-}
-
 fn native_outbound_join_request(
     request: &PendingOutboundJoinRequest,
 ) -> NativeOutboundJoinRequestState {
@@ -191,12 +184,6 @@ fn peer_offers_exit_node(routes: &[String]) -> bool {
     routes
         .iter()
         .any(|route| route == "0.0.0.0/0" || route == "::/0")
-}
-
-fn lan_pairing_deadline() -> SystemTime {
-    SystemTime::now()
-        .checked_add(LAN_PAIRING_DURATION)
-        .unwrap_or_else(SystemTime::now)
 }
 
 fn peer_last_fips_seen_secs(peer: &DaemonPeerState) -> Option<u64> {

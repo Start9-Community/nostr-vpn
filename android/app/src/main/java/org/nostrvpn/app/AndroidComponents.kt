@@ -52,7 +52,6 @@ import java.net.URI
 import java.net.URLDecoder
 import org.json.JSONObject
 import org.nostrvpn.app.core.AppState
-import org.nostrvpn.app.core.LanPeerState
 import org.nostrvpn.app.core.NativeActions
 import org.nostrvpn.app.core.NetworkState
 import org.nostrvpn.app.core.ParticipantState
@@ -411,82 +410,6 @@ private fun normalizedDeviceIdCandidate(value: String): String? {
 private fun firstNonBlank(vararg values: String?): String? =
     values.firstOrNull { !it.isNullOrBlank() }?.trim()
 
-@Composable
-internal fun NearbyCard(state: AppState, dispatch: (JSONObject) -> Unit) {
-    AppCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Nearby join requests", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Button(onClick = {
-                dispatch(
-                    if (state.nearbyDiscoveryActive) {
-                        NativeActions.stopNearbyDiscovery()
-                    } else {
-                        NativeActions.startNearbyDiscovery()
-                    },
-                )
-            }) {
-                Text(
-                    if (state.nearbyDiscoveryActive) {
-                        "Finding nearby · ${formatRemaining(state.nearbyDiscoveryRemainingSecs)}"
-                    } else {
-                        "Find nearby"
-                    },
-                )
-            }
-        }
-        if (state.lanPeers.isEmpty()) {
-            Text(
-                if (state.nearbyDiscoveryActive) "No nearby join requests yet" else "Tap above to find nearby join requests",
-                color = Muted,
-            )
-        } else {
-            state.lanPeers.forEach { peer -> LanPeerRow(peer, dispatch) }
-        }
-    }
-}
-
-@Composable
-internal fun AdvertiseJoinRequestCard(state: AppState, dispatch: (JSONObject) -> Unit) {
-    AppCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Nearby join request", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Button(onClick = {
-                dispatch(
-                    if (state.joinRequestBroadcastActive) {
-                        NativeActions.stopJoinRequestBroadcast()
-                    } else {
-                        NativeActions.startJoinRequestBroadcast()
-                    },
-                )
-            }) {
-                Text(
-                    if (state.joinRequestBroadcastActive) {
-                        "Advertising · ${formatRemaining(state.joinRequestBroadcastRemainingSecs)}"
-                    } else {
-                        "Advertise nearby"
-                    },
-                )
-            }
-        }
-        Text(
-            if (state.joinRequestBroadcastActive) {
-                "Admins nearby can add this device from its join request."
-            } else {
-                "Advertise this device's join request to nearby admins."
-            },
-            color = Muted,
-        )
-    }
-}
-
-private fun formatRemaining(seconds: Long): String {
-    if (seconds <= 0) return "off"
-    val minutes = seconds / 60
-    if (minutes == 0L) return "${seconds}s"
-    val secs = seconds % 60
-    return if (secs == 0L) "${minutes}m" else "${minutes}m%02ds".format(secs)
-}
-
 private fun formatDurationMs(ms: Long): String {
     if (ms <= 0) return "-"
     if (ms < 1_000) return "$ms ms"
@@ -495,19 +418,6 @@ private fun formatDurationMs(ms: Long): String {
     val minutes = seconds / 60
     if (minutes < 60) return "${minutes}m"
     return "${minutes / 60}h"
-}
-
-@Composable
-internal fun LanPeerRow(peer: LanPeerState, dispatch: (JSONObject) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-        Column(Modifier.weight(1f)) {
-            Text(peer.nodeName.ifBlank { peer.networkName }, fontWeight = FontWeight.SemiBold)
-            Text(peer.lastSeenText, color = Muted, style = MaterialTheme.typography.bodySmall)
-        }
-        Button(onClick = { dispatch(NativeActions.importJoinRequest(peer.joinRequest)) }) {
-            Text("Add")
-        }
-    }
 }
 
 @Composable

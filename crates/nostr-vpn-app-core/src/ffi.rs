@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
-use nostr_sdk::prelude::Keys;
 use nostr_vpn_core::config::{
     AppConfig, ExitDnsMode, ExitDohProvider, FiatCurrency, InternetSource, NetworkConfig,
     NostrPubsubMode, PendingInboundJoinRequest, PendingOutboundJoinRequest, derive_mesh_tunnel_ip,
@@ -27,15 +26,10 @@ use crate::join_approval::{prepare_join_approval, prepare_manual_join_delivery};
 use crate::join_request_link::{
     own_join_request_qr_code_or_link, parse_join_request_qr_code_or_link,
 };
-use crate::lan_pairing::{
-    LAN_PAIRING_DURATION, LAN_PAIRING_STALE_AFTER, LanPairingAnnouncement, LanPairingSignal,
-};
-#[cfg(not(test))]
-use crate::lan_pairing::{LanPairingWorker, spawn_lan_pairing_worker};
 use crate::native_state::{
-    NativeAppState, NativeHealthIssue, NativeInboundJoinRequestState, NativeLanPeerState,
-    NativeNetworkState, NativeNetworkSummary, NativeOutboundJoinRequestState,
-    NativePaidExitSellerState, NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
+    NativeAppState, NativeHealthIssue, NativeInboundJoinRequestState, NativeNetworkState,
+    NativeNetworkSummary, NativeOutboundJoinRequestState, NativePaidExitSellerState,
+    NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
     NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
     NativePaidRouteWalletState, NativeParticipantState, NativePortMappingStatus, NativeProbeStatus,
     NativeRelayState,
@@ -198,10 +192,6 @@ struct NativeAppRuntime {
     expected_service_binary_version: String,
     daemon_status_grace_until: Option<Instant>,
     last_service_status_refresh_at: Option<Instant>,
-    lan_pairing_worker: Option<NativeLanPairingWorker>,
-    join_request_broadcast_expires_at: Option<SystemTime>,
-    nearby_discovery_expires_at: Option<SystemTime>,
-    lan_peers: HashMap<String, LanPeerRecord>,
     paid_route_market_filter: NativePaidRouteMarketFilterState,
     paid_route_wallet_last_action: NativePaidRouteWalletActionState,
     #[cfg(feature = "paid-exit")]
@@ -224,116 +214,6 @@ struct PrivilegedCommandRunnerHandle(Arc<dyn PrivilegedCommandRunner>);
 impl std::fmt::Debug for PrivilegedCommandRunnerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PrivilegedCommandRunnerHandle(<foreign>)")
-    }
-}
-
-#[derive(Debug, Clone)]
-struct LanPeerRecord {
-    signal: LanPairingSignal,
-    last_seen: SystemTime,
-}
-
-#[cfg(not(test))]
-#[derive(Debug)]
-struct NativeLanPairingWorker(LanPairingWorker);
-
-#[cfg(test)]
-#[derive(Debug)]
-struct NativeLanPairingWorker;
-
-impl NativeLanPairingWorker {
-    #[cfg(not(test))]
-    fn spawn(announcement: LanPairingAnnouncement, signer: Keys) -> Result<Self> {
-        Ok(Self(spawn_lan_pairing_worker(announcement, signer)?))
-    }
-
-    #[cfg(test)]
-    fn spawn(announcement: LanPairingAnnouncement, signer: Keys) -> Result<Self> {
-        let LanPairingAnnouncement {
-            npub,
-            node_name,
-            endpoint,
-            join_request,
-        } = announcement;
-        anyhow::ensure!(!npub.trim().is_empty(), "LAN pairing npub is missing");
-        anyhow::ensure!(
-            normalize_nostr_pubkey(&npub)? == signer.public_key().to_hex(),
-            "LAN pairing announcement identity does not match signer"
-        );
-        drop(signer);
-        let _ = (node_name, endpoint, join_request);
-        Ok(Self)
-    }
-
-    #[cfg(not(test))]
-    fn drain(&mut self) -> Vec<LanPairingSignal> {
-        self.0.drain()
-    }
-
-    #[cfg(test)]
-    fn drain(&mut self) -> Vec<LanPairingSignal> {
-        let _ = self;
-        Vec::new()
-    }
-
-    #[cfg(not(test))]
-    fn set_broadcast_until(&self, expires_at: SystemTime) {
-        self.0.set_broadcast_until(expires_at);
-    }
-
-    #[cfg(test)]
-    fn set_broadcast_until(&self, expires_at: SystemTime) {
-        let _ = (self, expires_at);
-    }
-
-    #[cfg(not(test))]
-    fn set_listen_until(&self, expires_at: SystemTime) {
-        self.0.set_listen_until(expires_at);
-    }
-
-    #[cfg(test)]
-    fn set_listen_until(&self, expires_at: SystemTime) {
-        let _ = (self, expires_at);
-    }
-
-    #[cfg(not(test))]
-    fn clear_broadcast(&self) {
-        self.0.clear_broadcast();
-    }
-
-    #[cfg(test)]
-    fn clear_broadcast(&self) {
-        let _ = self;
-    }
-
-    #[cfg(not(test))]
-    fn clear_listen(&self) {
-        self.0.clear_listen();
-    }
-
-    #[cfg(test)]
-    fn clear_listen(&self) {
-        let _ = self;
-    }
-
-    #[cfg(not(test))]
-    fn update_announcement(&self, announcement: LanPairingAnnouncement) {
-        self.0.update_announcement(announcement);
-    }
-
-    #[cfg(test)]
-    fn update_announcement(&self, announcement: LanPairingAnnouncement) {
-        let _ = (self, announcement);
-    }
-
-    #[cfg(not(test))]
-    fn stop(&mut self) {
-        self.0.stop();
-    }
-
-    #[cfg(test)]
-    fn stop(&mut self) {
-        let _ = self;
     }
 }
 

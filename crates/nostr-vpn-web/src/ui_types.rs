@@ -63,13 +63,6 @@ pub(crate) struct ImportJoinRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct NearbyPeerRequest {
-    pub npub: String,
-    pub network_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct JoinRequestAction {
     pub network_id: String,
     pub requester_npub: String,

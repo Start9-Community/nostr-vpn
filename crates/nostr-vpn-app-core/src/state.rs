@@ -214,18 +214,6 @@ pub struct NetworkView {
     pub participants: Vec<ParticipantView>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct LanPeerView {
-    pub npub: String,
-    pub node_name: String,
-    pub endpoint: String,
-    pub network_name: String,
-    pub network_id: String,
-    pub join_request: String,
-    pub last_seen_text: String,
-}
-
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -305,10 +293,6 @@ pub struct UiState {
     pub magic_dns_suffix: String,
     pub magic_dns_status: String,
     pub autoconnect: bool,
-    pub join_request_broadcast_active: bool,
-    pub join_request_broadcast_remaining_secs: u64,
-    pub nearby_discovery_active: bool,
-    pub nearby_discovery_remaining_secs: u64,
     pub launch_on_startup: bool,
     pub close_to_tray_on_close: bool,
     pub connected_peer_count: usize,
@@ -321,7 +305,6 @@ pub struct UiState {
     pub network: NetworkSummary,
     pub port_mapping: PortMappingStatus,
     pub networks: Vec<NetworkView>,
-    pub lan_peers: Vec<LanPeerView>,
 }
 
 #[allow(clippy::struct_excessive_bools)]

@@ -219,14 +219,6 @@ run_direction() {
 
   return_runtime_data_to_host
 
-  if [[ "$PLAYWRIGHT_SPEC" == "e2e/lan-join-runtime.spec.ts" ]]; then
-    ! grep -R -E -q 'pending_nostr_join_request|pending-join-request' \
-      "$joiner_data" 2>/dev/null || {
-      echo "LAN join persisted its pending secret outside daemon memory" >&2
-      return 1
-    }
-  fi
-
   "$fixture" capture-delivery "${fixture_args[@]}"
   local joiner_hex
   joiner_hex="$(read_result "$result" joinerHex)"

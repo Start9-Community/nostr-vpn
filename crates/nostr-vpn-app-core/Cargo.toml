@@ -43,7 +43,6 @@ reqwest.workspace = true
 rqrr = "0.10"
 serde.workspace = true
 serde_json.workspace = true
-socket2.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

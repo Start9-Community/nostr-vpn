@@ -61,22 +61,6 @@ fn short_text(value: &str, keep: usize) -> String {
     )
 }
 
-fn remaining_text(seconds: u64) -> String {
-    if seconds == 0 {
-        return "off".to_string();
-    }
-    let minutes = seconds / 60;
-    if minutes == 0 {
-        return format!("{seconds}s");
-    }
-    let secs = seconds % 60;
-    if secs == 0 {
-        format!("{minutes}m")
-    } else {
-        format!("{minutes}m{secs:02}s")
-    }
-}
-
 fn non_empty_or(value: &str, fallback: &str) -> String {
     if value.trim().is_empty() {
         fallback.to_string()

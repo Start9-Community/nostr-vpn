@@ -45,7 +45,7 @@ target is online.
 
 ## Physical Device VPN Smoke
 
-Run this after VPN dataplane, reconnect, LAN discovery, roster transfer, or
+Run this after VPN dataplane, reconnect, local-path discovery, roster transfer, or
 mobile tunnel config changes:
 
 ```sh

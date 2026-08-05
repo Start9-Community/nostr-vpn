@@ -141,15 +141,6 @@
                 </Expander>
               </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupJoin, Converter={StaticResource BoolToVisibility}}">
-              <StackPanel>
-                <DockPanel LastChildFill="True" Margin="0,0,0,10">
-                  <Button DockPanel.Dock="Right" Content="{Binding JoinRequestBroadcastButtonText}" Command="{Binding ToggleJoinRequestBroadcastCommand}" />
-                  <TextBlock Text="Nearby join request" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" />
-                </DockPanel>
-                <TextBlock Text="Advertise this device's join request to nearby admins." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" />
-              </StackPanel>
-            </Border>
           </StackPanel>
 
           <StackPanel Visibility="{Binding Page, Converter={StaticResource PageVisibility}, ConverterParameter=Devices}">
@@ -400,41 +391,9 @@
                 </Expander>
               </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}" Visibility="{Binding ShowNetworkSetupJoin, Converter={StaticResource BoolToVisibility}}">
-              <StackPanel>
-                <DockPanel LastChildFill="True" Margin="0,0,0,10">
-                  <Button DockPanel.Dock="Right" Content="{Binding JoinRequestBroadcastButtonText}" Command="{Binding ToggleJoinRequestBroadcastCommand}" />
-                  <TextBlock Text="Nearby join request" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" />
-                </DockPanel>
-                <TextBlock Text="Advertise this device's join request to nearby admins." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" />
-              </StackPanel>
-            </Border>
           </StackPanel>
 
           <StackPanel Visibility="{Binding Page, Converter={StaticResource PageVisibility}, ConverterParameter=AddDevice}">
-            <Border Style="{StaticResource Card}">
-              <StackPanel>
-                <DockPanel LastChildFill="True" Margin="0,0,0,10">
-                  <Button DockPanel.Dock="Right" Content="{Binding NearbyDiscoveryButtonText}" Command="{Binding ToggleNearbyDiscoveryCommand}" />
-                  <TextBlock Text="Nearby join requests" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" />
-                </DockPanel>
-                <ItemsControl ItemsSource="{Binding State.LanPeers}">
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                      <DockPanel Margin="0,0,0,8">
-                        <Button DockPanel.Dock="Right" Content="Add" Tag="{Binding JoinRequest}" Click="AddNearbyJoinRequest_Click" />
-                        <StackPanel>
-                          <TextBlock Text="{Binding NodeName}" FontWeight="SemiBold" />
-                          <TextBlock Text="{Binding LastSeenText}" Foreground="{StaticResource TextSecondary}" />
-                        </StackPanel>
-                      </DockPanel>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock Text="No nearby join requests yet" Foreground="{StaticResource TextSecondary}" Visibility="{Binding NoNearbyJoinRequestsNoticeVisibility}" />
-              </StackPanel>
-            </Border>
-
             <Border Style="{StaticResource Card}" Visibility="{Binding ShowLinkDeviceCard, Converter={StaticResource BoolToVisibility}}">
               <StackPanel>
                 <TextBlock Text="Link Device" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,4" />

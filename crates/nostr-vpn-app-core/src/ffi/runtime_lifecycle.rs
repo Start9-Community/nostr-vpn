@@ -77,10 +77,6 @@ impl NativeAppRuntime {
             expected_service_binary_version: String::new(),
             daemon_status_grace_until: Some(Instant::now() + DAEMON_STARTUP_STATUS_GRACE),
             last_service_status_refresh_at: None,
-            lan_pairing_worker: None,
-            join_request_broadcast_expires_at: None,
-            nearby_discovery_expires_at: None,
-            lan_peers: HashMap::new(),
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
             #[cfg(feature = "paid-exit")]
@@ -143,10 +139,6 @@ impl NativeAppRuntime {
             expected_service_binary_version: String::new(),
             daemon_status_grace_until: Some(Instant::now() + DAEMON_STARTUP_STATUS_GRACE),
             last_service_status_refresh_at: None,
-            lan_pairing_worker: None,
-            join_request_broadcast_expires_at: None,
-            nearby_discovery_expires_at: None,
-            lan_peers: HashMap::new(),
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
             #[cfg(feature = "paid-exit")]
@@ -519,10 +511,6 @@ impl NativeAppRuntime {
                 self.magic_dns_status()
             },
             autoconnect: !config_unavailable && self.config.autoconnect,
-            join_request_broadcast_active: self.join_request_broadcast_active(),
-            join_request_broadcast_remaining_secs: self.join_request_broadcast_remaining_secs(),
-            nearby_discovery_active: self.nearby_discovery_active(),
-            nearby_discovery_remaining_secs: self.nearby_discovery_remaining_secs(),
             launch_on_startup: !config_unavailable && self.config.launch_on_startup,
             close_to_tray_on_close: !config_unavailable && self.config.close_to_tray_on_close,
             connected_peer_count: connected_peer_count as u64,
@@ -538,7 +526,6 @@ impl NativeAppRuntime {
             network,
             port_mapping,
             networks,
-            lan_peers: self.lan_peer_states(),
         }
     }
 

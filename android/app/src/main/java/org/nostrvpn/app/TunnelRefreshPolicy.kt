@@ -6,7 +6,6 @@ import org.json.JSONObject
 internal object TunnelRefreshPolicy {
     private val networkActions = setOf(
         "import_join_request",
-        "start_join_request_broadcast",
         "manual_add_network",
         "add_network",
         "rename_network",

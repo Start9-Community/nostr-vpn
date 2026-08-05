@@ -3888,7 +3888,6 @@ dependencies = [
  "hostname",
  "keyring-core",
  "libc",
- "netdev",
  "nostr-identity",
  "nostr-sdk",
  "reqwest",

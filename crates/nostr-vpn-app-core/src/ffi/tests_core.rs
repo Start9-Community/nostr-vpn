@@ -422,10 +422,6 @@
         assert!(state.join_request_qr_code_or_link.starts_with("nvpn://join-request/"));
         assert_eq!(state.expected_peer_count, 0);
 
-        runtime.dispatch(NativeAppAction::StartJoinRequestBroadcast);
-        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
-        assert!(runtime.state().join_request_broadcast_active);
-
         let saved = AppConfig::load(&runtime.config_path).expect("load persisted config");
         assert!(saved.networks.is_empty());
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -620,34 +616,6 @@
 
         assert!(state.error.is_empty(), "{}", state.error);
         assert!(state.vpn_enabled);
-        assert!(state.vpn_active);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn advertising_join_request_starts_the_approval_transport() {
-        let dir = unique_service_test_dir("nvpn-join-advertise-connect");
-        let error = anyhow!("boom");
-        let mut runtime = NativeAppRuntime::from_startup_error(&error);
-        runtime.startup_error = None;
-        runtime.mobile_runtime = true;
-        runtime.config_path = dir.join("config.toml");
-        runtime
-            .config
-            .save(&runtime.config_path)
-            .expect("persist isolated mobile config");
-
-        assert!(!runtime.state().vpn_enabled);
-        runtime.dispatch(NativeAppAction::StartJoinRequestBroadcast);
-        let state = runtime.state();
-
-        assert!(state.error.is_empty(), "{}", state.error);
-        assert!(state.join_request_broadcast_active);
-        assert!(
-            state.vpn_enabled,
-            "a joiner cannot receive the accepted roster without the FIPS transport"
-        );
         assert!(state.vpn_active);
 
         let _ = fs::remove_dir_all(dir);

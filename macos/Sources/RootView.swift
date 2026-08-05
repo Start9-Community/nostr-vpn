@@ -300,7 +300,6 @@ struct RootView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     joinRequestInputSection(network)
-                    nearbyJoinRequestsSection
                     manualAdminSection(network)
                 }
                 .padding(18)

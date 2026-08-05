@@ -358,7 +358,6 @@ struct AddDeviceSheet: View {
                         stageJoinRequest(value)
                     }
                 )
-                NearbyCard(model: model)
                 ManualPairingInfoCard(model: model, network: network)
                 AddDeviceCard(network: network) { npub, alias in
                     let added = model.dispatch(

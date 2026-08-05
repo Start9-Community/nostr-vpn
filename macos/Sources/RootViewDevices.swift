@@ -577,7 +577,6 @@ extension RootView {
                     .accessibilityIdentifier("manual-join-expander")
             }
 
-            advertiseJoinRequestSection
         }
     }
 
@@ -667,87 +666,4 @@ extension RootView {
         }
     }
 
-    var advertiseJoinRequestSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Divider()
-            HStack {
-                Text("Nearby join request")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-                Button {
-                    state.joinRequestBroadcastActive ? manager.stopJoinRequestBroadcast() : manager.startJoinRequestBroadcast()
-                } label: {
-                    Label(
-                        state.joinRequestBroadcastActive
-                            ? "Advertising · \(formatRemaining(state.joinRequestBroadcastRemainingSecs))"
-                            : "Advertise nearby",
-                        systemImage: state.joinRequestBroadcastActive ? "stop.circle" : "dot.radiowaves.left.and.right"
-                    )
-                }
-                .disabled(manager.actionInFlight)
-            }
-            Text(state.joinRequestBroadcastActive ? "Admins nearby can add this device from its join request." : "Advertise this device's join request to nearby admins.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    var nearbyJoinRequestsSection: some View {
-        surface {
-            HStack {
-                sectionHeader("Nearby Join Requests", systemImage: "dot.radiowaves.left.and.right")
-                Spacer()
-                Button {
-                    state.nearbyDiscoveryActive ? manager.stopNearbyDiscovery() : manager.startNearbyDiscovery()
-                } label: {
-                    Label(
-                        state.nearbyDiscoveryActive
-                            ? "Finding nearby · \(formatRemaining(state.nearbyDiscoveryRemainingSecs))"
-                            : "Find nearby",
-                        systemImage: state.nearbyDiscoveryActive ? "stop.circle" : "dot.radiowaves.left.and.right"
-                    )
-                }
-                .disabled(manager.actionInFlight)
-            }
-            if state.nearbyDiscoveryActive && state.lanPeers.isEmpty {
-                emptyRow("No nearby join requests yet", systemImage: "wifi")
-            } else {
-                ForEach(state.lanPeers, id: \.joinRequest) { peer in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(peer.nodeName.isEmpty ? peer.npub : peer.nodeName)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Text(peer.lastSeenText)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Add") {
-                            manager.importJoinRequest(peer.joinRequest)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-        }
-    }
-
-    func formatRemaining(_ seconds: UInt64) -> String {
-        if seconds == 0 { return "off" }
-        let days = seconds / 86_400
-        if days > 0 {
-            let hours = (seconds % 86_400) / 3_600
-            return hours == 0 ? "\(days)d" : "\(days)d \(hours)h"
-        }
-        let hours = seconds / 3_600
-        if hours > 0 {
-            let minutes = (seconds % 3_600) / 60
-            return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m"
-        }
-        let minutes = seconds / 60
-        if minutes == 0 { return "\(seconds)s" }
-        let secs = seconds % 60
-        return secs == 0 ? "\(minutes)m" : String(format: "%dm%02ds", minutes, secs)
-    }
 }

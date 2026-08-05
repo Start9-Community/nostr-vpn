@@ -19,7 +19,7 @@ final class NostrVpnIosUITests: XCTestCase {
         PhysicalGateMarker.reset()
     }
 
-    func testJoinAdvertisingUsesTheShippedUiAndSurvivesBackgrounding() {
+    func testJoinRequestUsesFullWidthAndSurvivesBackgrounding() {
         app.launch()
         acknowledgeVpnPromptsIfPresent()
         openJoinNetworkPage()
@@ -28,60 +28,12 @@ final class NostrVpnIosUITests: XCTestCase {
         XCTAssertTrue(qr.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(qr.frame.width, app.frame.width * 0.75)
 
-        let advertise = app.buttons["Advertise nearby"]
-        XCTAssertTrue(advertise.waitForExistence(timeout: 5))
-        advertise.tap()
-        acknowledgeVpnPromptsIfPresent()
-
-        XCTAssertTrue(
-            app.buttons.matching(
-                NSPredicate(format: "label BEGINSWITH %@", "Advertising")
-            ).firstMatch.waitForExistence(timeout: 15)
-        )
-
         XCUIDevice.shared.press(.home)
         sleep(2)
         app.activate()
 
-        XCTAssertTrue(
-            app.buttons.matching(
-                NSPredicate(format: "label BEGINSWITH %@", "Advertising")
-            ).firstMatch.waitForExistence(timeout: 5)
-        )
-
-    }
-
-    func testNearbyDiscoveryUsesTheShippedUiAndSurvivesBackgrounding() {
-        app.launchArguments = [
-            "--nvpn-debug-add-network", "Nearby lifecycle test",
-            "--nvpn-screenshot-tab", "devices",
-        ]
-        app.launch()
-        acknowledgeVpnPromptsIfPresent()
-
-        let openLinkDevice = element("link-device-open")
-        XCTAssertTrue(openLinkDevice.waitForExistence(timeout: 5))
-        openLinkDevice.tap()
-
-        let findNearby = app.buttons["Find nearby"]
-        XCTAssertTrue(findNearby.waitForExistence(timeout: 5))
-        findNearby.tap()
-
-        XCTAssertTrue(
-            app.buttons.matching(
-                NSPredicate(format: "label BEGINSWITH %@", "Finding nearby")
-            ).firstMatch.waitForExistence(timeout: 5)
-        )
-
-        XCUIDevice.shared.press(.home)
-        sleep(2)
-        app.activate()
-
-        XCTAssertTrue(
-            app.buttons.matching(
-                NSPredicate(format: "label BEGINSWITH %@", "Finding nearby")
-            ).firstMatch.waitForExistence(timeout: 5)
-        )
+        XCTAssertTrue(qr.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(qr.frame.width, app.frame.width * 0.75)
     }
 
     func testExitDnsSettingsUseShippedControlsAndValidateRequiredFields() {

@@ -66,12 +66,7 @@ data class AppState(
     val magicDnsSuffix: String = "",
     val magicDnsStatus: String = "",
     val autoconnect: Boolean = false,
-    val joinRequestBroadcastActive: Boolean = false,
-    val joinRequestBroadcastRemainingSecs: Long = 0,
-    val nearbyDiscoveryActive: Boolean = false,
-    val nearbyDiscoveryRemainingSecs: Long = 0,
     val networks: List<NetworkState> = emptyList(),
-    val lanPeers: List<LanPeerState> = emptyList(),
     val health: List<HealthIssue> = emptyList(),
 )
 
@@ -135,13 +130,6 @@ data class InboundJoinRequest(
     val requesterNpub: String = "",
     val requesterNodeName: String = "",
     val requestedAtText: String = "",
-)
-
-data class LanPeerState(
-    val nodeName: String = "",
-    val networkName: String = "",
-    val joinRequest: String = "",
-    val lastSeenText: String = "",
 )
 
 data class HealthIssue(
@@ -451,12 +439,7 @@ fun parseAppState(jsonText: String): AppState {
         magicDnsSuffix = json.optString("magicDnsSuffix"),
         magicDnsStatus = json.optString("magicDnsStatus"),
         autoconnect = json.optBoolean("autoconnect"),
-        joinRequestBroadcastActive = json.optBoolean("joinRequestBroadcastActive"),
-        joinRequestBroadcastRemainingSecs = json.optLong("joinRequestBroadcastRemainingSecs"),
-        nearbyDiscoveryActive = json.optBoolean("nearbyDiscoveryActive"),
-        nearbyDiscoveryRemainingSecs = json.optLong("nearbyDiscoveryRemainingSecs"),
         networks = json.optJSONArray("networks").toNetworkList(),
-        lanPeers = json.optJSONArray("lanPeers").toLanPeerList(),
         health = json.optJSONArray("health").toHealthList(),
     )
 }
@@ -528,15 +511,6 @@ private fun JSONArray?.toInboundJoinRequestList(): List<InboundJoinRequest> = ma
         requesterNpub = item.optString("requesterNpub"),
         requesterNodeName = item.optString("requesterNodeName"),
         requestedAtText = item.optString("requestedAtText"),
-    )
-}
-
-private fun JSONArray?.toLanPeerList(): List<LanPeerState> = mapObjects { item ->
-    LanPeerState(
-        nodeName = item.optString("nodeName"),
-        networkName = item.optString("networkName"),
-        joinRequest = item.optString("joinRequest"),
-        lastSeenText = item.optString("lastSeenText"),
     )
 }
 

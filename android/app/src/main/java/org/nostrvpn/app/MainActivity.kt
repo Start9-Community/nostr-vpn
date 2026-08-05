@@ -246,12 +246,12 @@ class MainActivity : ComponentActivity() {
 
             fun requiresLocalNetworkPermission(action: JSONObject): Boolean =
                 when (action.optString("type")) {
-                    "connect_vpn", "start_join_request_broadcast", "start_nearby_discovery" -> true
+                    "connect_vpn" -> true
                     else -> false
                 }
 
             fun localNetworkPermissionMessage() =
-                "Local network permission is needed for nearby device discovery."
+                "Local network permission is needed to connect VPN devices."
 
             val localNetworkPermissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission(),

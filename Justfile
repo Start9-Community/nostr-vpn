@@ -71,7 +71,6 @@ info:
     @echo "  just e2e-paid-exit-token"
     @echo "  just e2e-fips-routed-udp"
     @echo "  just e2e-join-request"
-    @echo "  just e2e-lan-pairing"
     @echo "  just e2e-roster-admin"
     @echo "  just e2e-desktop-roster-join"
     @echo "  just e2e-device-roster"
@@ -276,9 +275,6 @@ e2e-fips-routed-udp:
 
 e2e-join-request:
     cargo test -p nostr-vpn-app-core websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin
-
-e2e-lan-pairing:
-    ./scripts/e2e-lan-pairing-docker.sh
 
 e2e-roster-admin:
     ./scripts/e2e-roster-admin-docker.sh

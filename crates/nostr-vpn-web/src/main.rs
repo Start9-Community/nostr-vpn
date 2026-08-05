@@ -22,8 +22,8 @@ mod ui_types;
 
 use crate::ui_types::{
     AliasRequest, EndpointHintsRequest, ImportJoinRequest, JoinRequestAction, ManualNetworkRequest,
-    NameRequest, NearbyPeerRequest, NetworkEnabledRequest, NetworkIdRequest, NetworkMeshRequest,
-    NetworkNameRequest, NetworkPeerRequest, ParticipantRequest, QrMatrixRequest, QrMatrixResponse,
+    NameRequest, NetworkEnabledRequest, NetworkIdRequest, NetworkMeshRequest, NetworkNameRequest,
+    NetworkPeerRequest, ParticipantRequest, QrMatrixRequest, QrMatrixResponse,
 };
 
 const NVPN_BIN_ENV: &str = "NVPN_CLI_PATH";
@@ -137,17 +137,6 @@ async fn main() -> Result<()> {
         .route("/api/add_participant", post(add_participant))
         .route("/api/add_admin", post(add_admin))
         .route("/api/import_join_request", post(import_join_request))
-        .route("/api/import_nearby_peer", post(import_nearby_peer))
-        .route(
-            "/api/start_join_request_broadcast",
-            post(start_join_request_broadcast),
-        )
-        .route(
-            "/api/stop_join_request_broadcast",
-            post(stop_join_request_broadcast),
-        )
-        .route("/api/start_nearby_discovery", post(start_nearby_discovery))
-        .route("/api/stop_nearby_discovery", post(stop_nearby_discovery))
         .route("/api/remove_participant", post(remove_participant))
         .route("/api/remove_admin", post(remove_admin))
         .route("/api/accept_join_request", post(accept_join_request))
@@ -372,50 +361,6 @@ async fn import_join_request(
     )
 }
 
-async fn import_nearby_peer(
-    State(state): State<ServerState>,
-    Json(request): Json<NearbyPeerRequest>,
-) -> ApiResult<UiStateResponse> {
-    let refreshed = state.core.refresh();
-    let peer = refreshed
-        .lan_peers
-        .iter()
-        .find(|peer| peer.npub == request.npub && peer.network_id == request.network_id)
-        .ok_or_else(|| ApiError::bad_request("nearby peer is no longer available"))?;
-    let request = peer.join_request.trim();
-    if request.is_empty() {
-        return Err(ApiError::bad_request(
-            "nearby peer did not provide a join request",
-        ));
-    }
-    dispatch(
-        &state,
-        NativeAppAction::ImportJoinRequest {
-            request: request.to_string(),
-        },
-    )
-}
-
-async fn start_join_request_broadcast(
-    State(state): State<ServerState>,
-) -> ApiResult<UiStateResponse> {
-    dispatch(&state, NativeAppAction::StartJoinRequestBroadcast)
-}
-
-async fn stop_join_request_broadcast(
-    State(state): State<ServerState>,
-) -> ApiResult<UiStateResponse> {
-    dispatch(&state, NativeAppAction::StopJoinRequestBroadcast)
-}
-
-async fn start_nearby_discovery(State(state): State<ServerState>) -> ApiResult<UiStateResponse> {
-    dispatch(&state, NativeAppAction::StartNearbyDiscovery)
-}
-
-async fn stop_nearby_discovery(State(state): State<ServerState>) -> ApiResult<UiStateResponse> {
-    dispatch(&state, NativeAppAction::StopNearbyDiscovery)
-}
-
 async fn remove_participant(
     State(state): State<ServerState>,
     Json(request): Json<NetworkPeerRequest>,
@@ -572,14 +517,6 @@ fn umbrel_state_value(state: NativeAppState) -> ApiResult<Value> {
     ] {
         object.insert(field.to_string(), json!(""));
     }
-    if let Some(peers) = object.get_mut("lanPeers").and_then(Value::as_array_mut) {
-        for peer in peers {
-            if let Some(peer) = peer.as_object_mut() {
-                peer.remove("joinRequest");
-            }
-        }
-    }
-
     Ok(value)
 }
 
@@ -817,12 +754,6 @@ mod tests {
             wireguard_exit_private_key: "private-key".to_string(),
             wireguard_exit_peer_preshared_key: "preshared-key".to_string(),
             wireguard_exit_config: "[Interface]\nPrivateKey = private-key".to_string(),
-            lan_peers: vec![nostr_vpn_app_core::native_state::NativeLanPeerState {
-                npub: "npub1peer".to_string(),
-                network_id: "network-id".to_string(),
-                join_request: "nvpn://join-request/nearby-secret".to_string(),
-                ..nostr_vpn_app_core::native_state::NativeLanPeerState::default()
-            }],
             ..NativeAppState::default()
         };
 
@@ -832,10 +763,8 @@ mod tests {
         assert_eq!(value["wireguardExitPrivateKey"], "");
         assert_eq!(value["wireguardExitPeerPresharedKey"], "");
         assert_eq!(value["wireguardExitConfig"], "");
-        assert!(value["lanPeers"][0].get("joinRequest").is_none());
         assert!(!encoded.contains("private-key"));
         assert!(!encoded.contains("preshared-key"));
-        assert!(!encoded.contains("nearby-secret"));
     }
 
     #[test]

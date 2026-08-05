@@ -5,11 +5,10 @@
   import CopyButton from './lib/CopyButton.svelte';
   import Modal from './lib/Modal.svelte';
   import QRCode from './lib/QRCode.svelte';
-  import { formatBytes, nonEmpty, remainingText, shortMiddle } from './lib/format';
+  import { formatBytes, nonEmpty, shortMiddle } from './lib/format';
   import nostrVpnIcon from './lib/nostr-vpn-icon.svg';
   import type {
     HealthIssue,
-    LanPeer,
     NetworkView,
     ParticipantView,
     UiState,
@@ -36,7 +35,6 @@
   let joinRequestQr = '';
   let joinerInput = '';
   let pendingJoinRequest = '';
-  let pendingNearbyPeer: LanPeer | null = null;
   let settingsDirty = false;
   let participantNpub = '';
   let participantAlias = '';
@@ -706,46 +704,6 @@
     }
   }
 
-  async function confirmNearbyPeer() {
-    if (!pendingNearbyPeer) {
-      return;
-    }
-    const ok = await run(
-      '/api/import_nearby_peer',
-      { npub: pendingNearbyPeer.npub, networkId: pendingNearbyPeer.networkId },
-      'Adding device',
-    );
-    if (ok) {
-      pendingNearbyPeer = null;
-      addDeviceOpen = false;
-      setNotice('Device added');
-    }
-  }
-
-  async function toggleNearbyDiscovery() {
-    if (!state) {
-      return;
-    }
-    await run(
-      state.nearbyDiscoveryActive ? '/api/stop_nearby_discovery' : '/api/start_nearby_discovery',
-      undefined,
-      state.nearbyDiscoveryActive ? 'Stopping nearby lookup' : 'Finding nearby',
-    );
-  }
-
-  async function toggleJoinRequestBroadcast() {
-    if (!state) {
-      return;
-    }
-    await run(
-      state.joinRequestBroadcastActive
-        ? '/api/stop_join_request_broadcast'
-        : '/api/start_join_request_broadcast',
-      undefined,
-      state.joinRequestBroadcastActive ? 'Stopping nearby' : 'Advertising nearby',
-    );
-  }
-
   async function addNetwork() {
     const name = newNetworkName.trim();
     if (!name) {
@@ -1057,37 +1015,6 @@
 	          </div>
 
 	          <div class="modal-section">
-	            <div class="section-heading">
-	              <div>
-	                <h3>Nearby join requests</h3>
-	                <p>{state.lanPeers.length}</p>
-	              </div>
-	              <button type="button" class="small-button" on:click={toggleNearbyDiscovery}>
-	                {state.nearbyDiscoveryActive
-	                  ? `Finding nearby · ${remainingText(state.nearbyDiscoveryRemainingSecs)}`
-	                  : 'Find nearby'}
-	              </button>
-	            </div>
-	            {#if state.lanPeers.length === 0}
-	              <div class="empty-state">No nearby join requests yet</div>
-	            {:else}
-	              <div class="stack">
-	                {#each state.lanPeers as peer, index (index)}
-	                  <div class="request-row">
-	                    <div>
-	                      <strong>{peer.nodeName || peer.networkName || 'Nearby device'}</strong>
-	                      <span>{peer.lastSeenText ?? ''}</span>
-	                    </div>
-	                    <button type="button" class="small-button" on:click={() => (pendingNearbyPeer = peer)}>
-	                      Add
-	                    </button>
-	                  </div>
-	                {/each}
-	              </div>
-	            {/if}
-	          </div>
-
-	          <div class="modal-section">
             <div class="section-heading">
               <div>
                 <h3>For Manual Join</h3>
@@ -1154,28 +1081,6 @@
         </Modal>
       {/if}
 
-      {#if pendingNearbyPeer && shownNetwork}
-        <Modal title="Add Device?" titleId="confirm-nearby-peer-title" on:close={() => (pendingNearbyPeer = null)}>
-          <div class="modal-section">
-            <div class="section-heading">
-              <div>
-                <h3>Add device?</h3>
-                <p>{shownNetwork.name || 'This network'}</p>
-              </div>
-            </div>
-            <p class="muted-copy">Add {pendingNearbyPeer.nodeName || 'this nearby device'} to {shownNetwork.name || 'this network'}?</p>
-            <div class="button-row">
-              <button class="secondary-button" type="button" disabled={Boolean(busyAction)} on:click={confirmNearbyPeer}>
-                Add
-              </button>
-              <button class="small-button" type="button" on:click={() => (pendingNearbyPeer = null)}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        </Modal>
-      {/if}
-
       {#if addNetworkOpen}
         <Modal title="Add Network" titleId="add-network-title" on:close={closeAddNetwork}>
           {#if addNetworkMode === 'choice'}
@@ -1231,25 +1136,6 @@
                 disabled={!joinRequestQr}
                 on:copied={handleCopied}
               />
-            </div>
-
-            <div class="modal-section">
-              <div class="section-heading">
-                <div>
-                  <h3>Nearby join request</h3>
-                  <p>{state.joinRequestBroadcastActive ? 'Advertising' : 'Ready'}</p>
-                </div>
-                <button
-                  type="button"
-                  class="small-button"
-                  on:click={toggleJoinRequestBroadcast}
-                >
-                  {state.joinRequestBroadcastActive
-                    ? `Advertising · ${remainingText(state.joinRequestBroadcastRemainingSecs)}`
-                    : 'Advertise nearby'}
-                </button>
-              </div>
-              <p class="muted-copy">Advertise this device's join request to nearby admins.</p>
             </div>
 
             <form class="modal-section" on:submit|preventDefault={manualAddNetwork}>

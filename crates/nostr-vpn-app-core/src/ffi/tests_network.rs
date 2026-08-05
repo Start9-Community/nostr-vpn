@@ -651,57 +651,7 @@ exit 0
     }
 
     #[test]
-    fn lan_pairing_runs_for_fifteen_minutes_until_cancelled() {
-        let nonce = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock is after epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("nvpn-app-core-lan-pairing-{nonce}"));
-        fs::create_dir_all(&dir).expect("create test dir");
-
-        let error = anyhow!("boom");
-        let mut runtime = NativeAppRuntime::from_startup_error(&error);
-        runtime.startup_error = None;
-        runtime.mobile_runtime = true;
-        runtime.config_path = dir.join("config.toml");
-        runtime
-            .config
-            .save(&runtime.config_path)
-            .expect("persist isolated mobile config");
-
-        runtime.dispatch(NativeAppAction::StartJoinRequestBroadcast);
-        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
-        runtime.dispatch(NativeAppAction::StartNearbyDiscovery);
-        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
-
-        let state = runtime.state();
-        assert!(state.join_request_broadcast_active);
-        assert!(state.nearby_discovery_active);
-        assert!(state.join_request_broadcast_remaining_secs <= LAN_PAIRING_DURATION.as_secs());
-        assert!(state.join_request_broadcast_remaining_secs > LAN_PAIRING_DURATION.as_secs() - 10);
-        assert!(state.nearby_discovery_remaining_secs <= LAN_PAIRING_DURATION.as_secs());
-        assert!(state.nearby_discovery_remaining_secs > LAN_PAIRING_DURATION.as_secs() - 10);
-
-        runtime.dispatch(NativeAppAction::StopJoinRequestBroadcast);
-        let state = runtime.state();
-        assert!(!state.join_request_broadcast_active);
-        assert_eq!(state.join_request_broadcast_remaining_secs, 0);
-        assert!(
-            state.nearby_discovery_active,
-            "discovery should keep running"
-        );
-
-        runtime.dispatch(NativeAppAction::StopNearbyDiscovery);
-        let state = runtime.state();
-        assert!(!state.nearby_discovery_active);
-        assert_eq!(state.nearby_discovery_remaining_secs, 0);
-        assert!(state.lan_peers.is_empty());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn joined_device_keeps_qr_and_advertises_nearby_join_request() {
+    fn joined_device_keeps_join_request_qr() {
         let nonce = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock is after epoch")
@@ -714,7 +664,7 @@ exit 0
         runtime.startup_error = None;
         runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
-        let network_id = create_test_network(&mut runtime, "Home");
+        create_test_network(&mut runtime, "Home");
         runtime
             .config
             .save(&runtime.config_path)
@@ -726,51 +676,7 @@ exit 0
             .join_request_qr_code_or_link
             .starts_with("nvpn://join-request/"));
 
-        runtime.dispatch(NativeAppAction::StartJoinRequestBroadcast);
-
-        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
-        assert!(runtime.state().join_request_broadcast_active);
-        assert_eq!(runtime.config.networks[0].id, network_id);
-
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn nearby_join_request_disappears_after_device_is_added() {
-        let error = anyhow!("boom");
-        let mut runtime = NativeAppRuntime::from_startup_error(&error);
-        runtime.startup_error = None;
-        let network_id = create_test_network(&mut runtime, "Home");
-        let peer_keys = Keys::generate();
-        let peer_hex = peer_keys.public_key().to_hex();
-        let peer_npub = peer_keys
-            .public_key()
-            .to_bech32()
-            .expect("peer npub");
-        let key = format!("{peer_npub}:{peer_npub}");
-        runtime.lan_peers.insert(
-            key,
-            LanPeerRecord {
-                signal: LanPairingSignal {
-                    npub: peer_npub,
-                    node_name: "Nearby phone".to_string(),
-                    endpoint: String::new(),
-                    network_name: "Join request".to_string(),
-                    network_id: peer_hex.clone(),
-                    join_request: "nvpn://join-request/test".to_string(),
-                },
-                last_seen: SystemTime::now(),
-            },
-        );
-        assert_eq!(runtime.lan_peer_states().len(), 1);
-
-        runtime
-            .config
-            .add_participant_to_network(&network_id, &peer_hex)
-            .expect("add nearby peer");
-        runtime.refresh_lan_pairing();
-
-        assert!(runtime.lan_peer_states().is_empty());
     }
 
     #[cfg(unix)]

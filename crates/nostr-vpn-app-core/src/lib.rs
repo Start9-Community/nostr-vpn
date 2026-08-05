@@ -8,7 +8,6 @@ mod exchange_rate;
 mod ffi;
 pub mod join_approval;
 pub mod join_request_link;
-pub mod lan_pairing;
 mod mobile_tunnel;
 pub mod native_state;
 pub mod platform;
@@ -25,7 +24,7 @@ pub use platform::{
     current_runtime_platform, runtime_capabilities_for,
 };
 pub use state::{
-    DaemonPeerState, DaemonRuntimeState, InboundJoinRequestView, LanPeerView, NetworkView,
+    DaemonPeerState, DaemonRuntimeState, InboundJoinRequestView, NetworkView,
     OutboundJoinRequestView, ParticipantView, SettingsPatch, TrayExitNodeEntry, TrayMenuItemSpec,
     TrayNetworkGroup, TrayRuntimeState, UiState,
 };

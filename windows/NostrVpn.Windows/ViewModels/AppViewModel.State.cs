@@ -174,9 +174,6 @@ public sealed partial class AppViewModel
         OnPropertyChanged(nameof(ThisDeviceCopyValue));
         OnPropertyChanged(nameof(PublicFipsAddress));
         OnPropertyChanged(nameof(PublicFipsRoutingEnabled));
-        OnPropertyChanged(nameof(NearbyDiscoveryButtonText));
-        OnPropertyChanged(nameof(JoinRequestBroadcastButtonText));
-        OnPropertyChanged(nameof(NoNearbyJoinRequestsNoticeVisibility));
         OnPropertyChanged(nameof(ServiceSummary));
         OnPropertyChanged(nameof(CliSummary));
         OnPropertyChanged(nameof(SystemVersionLabel));

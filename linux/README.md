@@ -22,7 +22,7 @@ just linux-build
 The shell follows the current native app structure: Devices, Share, Exit Nodes,
 Settings, and an Advanced diagnostics disclosure. It owns the same core flows
 for connect/disconnect, roster presence, participant management, join-request
-QR/import, LAN pairing, saved networks, internet-source selection,
+QR/import, saved networks, internet-source selection,
 service/CLI actions, and diagnostics. Remaining
 Linux-native work is desktop portal integration, live camera QR scanning,
 tray/status notifier support, and packaged update UX.

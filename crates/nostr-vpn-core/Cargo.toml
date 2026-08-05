@@ -45,8 +45,6 @@ hex.workspace = true
 hickory-proto.workspace = true
 hostname.workspace = true
 hashtree-updater = { workspace = true, optional = true }
-netdev.workspace = true
-socket2.workspace = true
 reqwest = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

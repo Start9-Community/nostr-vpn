@@ -20,7 +20,6 @@ description: |
   - admin-approved signed join requests
   - exit nodes and route advertisement (incl. WireGuard upstream)
   - MagicDNS-style `.nvpn` naming inside the mesh
-  - nearby signed-request pairing when relay delivery is unavailable
 
 website: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-vpn
 icon: ios/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png

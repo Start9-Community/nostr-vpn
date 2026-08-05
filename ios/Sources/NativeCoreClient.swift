@@ -131,22 +131,6 @@ enum NativeActions {
         ["type": "import_join_request", "request": request]
     }
 
-    static func startJoinRequestBroadcast() -> [String: Any] {
-        ["type": "start_join_request_broadcast"]
-    }
-
-    static func stopJoinRequestBroadcast() -> [String: Any] {
-        ["type": "stop_join_request_broadcast"]
-    }
-
-    static func startNearbyDiscovery() -> [String: Any] {
-        ["type": "start_nearby_discovery"]
-    }
-
-    static func stopNearbyDiscovery() -> [String: Any] {
-        ["type": "stop_nearby_discovery"]
-    }
-
     static func addNetwork(_ name: String) -> [String: Any] {
         ["type": "add_network", "name": name]
     }

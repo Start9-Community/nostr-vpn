@@ -26,17 +26,6 @@ export function formatBytes(value: number): string {
   return `${amount.toFixed(digits)} ${units[unit]}`;
 }
 
-export function remainingText(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return '0:00';
-  }
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.floor(seconds % 60)
-    .toString()
-    .padStart(2, '0');
-  return `${minutes}:${rest}`;
-}
-
 export function routeList(value: string[]): string {
   return value.length > 0 ? value.join(', ') : '-';
 }

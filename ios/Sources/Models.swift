@@ -67,13 +67,8 @@ struct AppState: Decodable {
     var magicDnsSuffix = ""
     var magicDnsStatus = ""
     var autoconnect = false
-    var joinRequestBroadcastActive = false
-    var joinRequestBroadcastRemainingSecs: UInt64 = 0
-    var nearbyDiscoveryActive = false
-    var nearbyDiscoveryRemainingSecs: UInt64 = 0
     var configPath = ""
     var networks: [NetworkState] = []
-    var lanPeers: [LanPeerState] = []
     var health: [HealthIssue] = []
 
     var activeNetwork: NetworkState? {
@@ -102,9 +97,8 @@ struct AppState: Decodable {
         case connectToNonRosterFipsPeers
         case fipsNostrDiscoveryEnabled, fipsWebrtcEnabled, fipsBootstrapEnabled
         case magicDnsSuffix, magicDnsStatus, autoconnect
-        case joinRequestBroadcastActive, joinRequestBroadcastRemainingSecs
-        case nearbyDiscoveryActive, nearbyDiscoveryRemainingSecs, configPath
-        case networks, lanPeers, health
+        case configPath
+        case networks, health
     }
 
     init() {}
@@ -177,13 +171,8 @@ struct AppState: Decodable {
         magicDnsSuffix = container.string(.magicDnsSuffix)
         magicDnsStatus = container.string(.magicDnsStatus)
         autoconnect = container.bool(.autoconnect)
-        joinRequestBroadcastActive = container.bool(.joinRequestBroadcastActive)
-        joinRequestBroadcastRemainingSecs = container.uint64(.joinRequestBroadcastRemainingSecs)
-        nearbyDiscoveryActive = container.bool(.nearbyDiscoveryActive)
-        nearbyDiscoveryRemainingSecs = container.uint64(.nearbyDiscoveryRemainingSecs)
         configPath = container.string(.configPath)
         networks = container.array(.networks)
-        lanPeers = container.array(.lanPeers)
         health = container.array(.health)
     }
 }
@@ -341,15 +330,6 @@ struct InboundJoinRequest: Decodable, Identifiable {
     var requesterNpub = ""
     var requesterNodeName = ""
     var requestedAtText = ""
-}
-
-struct LanPeerState: Decodable, Identifiable {
-    var id: String { joinRequest.isEmpty ? npub : joinRequest }
-    var npub = ""
-    var nodeName = ""
-    var networkName = ""
-    var joinRequest = ""
-    var lastSeenText = ""
 }
 
 struct HealthIssue: Decodable, Identifiable {
