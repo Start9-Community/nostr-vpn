@@ -106,8 +106,8 @@ jobs:
         with:
           cache-bin: false
 
-      - name: Run workspace tests
-        run: cargo test --workspace
+      - name: Run remaining workspace tests
+        run: cargo test --workspace --exclude nostr-vpn-app-core
 
   web:
     name: Web typecheck

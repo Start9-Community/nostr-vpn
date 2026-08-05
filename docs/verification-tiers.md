@@ -8,8 +8,8 @@ physical-device confidence.
 Run `just verify-fast` for each coherent change. It checks native-lab contracts,
 version parity, formatting, strict workspace/all-target
 Clippy, focused dataplane/app-state safety tests, shared mobile Rust tests, and
-platform-tool contracts. CI runs the entire workspace test suite independently
-so it can overlap this tier.
+platform-tool contracts. CI runs the remaining workspace tests independently
+so they can overlap this tier without repeating app-core tests.
 
 The fast tier does not reserve or mutate a VM, GUI session, simulator, or phone.
 
