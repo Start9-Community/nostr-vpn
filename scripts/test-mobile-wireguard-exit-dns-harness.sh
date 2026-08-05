@@ -318,6 +318,36 @@ with tempfile.TemporaryDirectory() as temporary:
             encoding="utf-8",
         )
     module.validate_android_dns_ui_receipts(root, list(cases))
+    # Combined evidence validates all five settings first, then selects the
+    # Automatic receipt for its underlay/lifecycle sub-proof from the same
+    # artifact directory.
+    automatic_paths = module.validate_android_dns_ui_receipts(
+        root, ["automatic-profile"]
+    )
+    assert len(automatic_paths) == 1
+    assert json.loads(automatic_paths[0].read_text(encoding="utf-8"))[
+        "exitDnsMode"
+    ] == "automatic"
+
+    duplicate = root / "mobile-android-exit-dns-state-duplicate.json"
+    duplicate.write_text(
+        (root / "mobile-android-exit-dns-state-0.json").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    try:
+        module.validate_android_dns_ui_receipts(
+            root, ["automatic-profile"]
+        )
+    except ValueError as error:
+        if "wrong or duplicated" not in str(error):
+            raise
+    else:
+        raise SystemExit(
+            "Android underlay evidence accepted duplicate Automatic receipts"
+        )
+    duplicate.unlink()
     support, evidence_paths = module.validate_android_support(
         root, list(cases), "settings-only"
     )

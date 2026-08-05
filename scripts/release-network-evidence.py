@@ -662,10 +662,6 @@ def validate_android_dns_ui_receipts(
     cases: list[str],
 ) -> list[pathlib.Path]:
     state_paths = list(root.glob("mobile-android-exit-dns-state-*.json"))
-    require(
-        len(state_paths) == len(cases),
-        "Android DNS settings receipts do not cover every requested case",
-    )
     expected_settings = {
         "automatic-profile": {
             "mode": "automatic",
@@ -707,7 +703,13 @@ def validate_android_dns_ui_receipts(
         (settings["mode"], settings["provider"]): case
         for case, settings in expected_settings.items()
     }
-    observed: set[str] = set()
+    requested = set(cases)
+    require(
+        len(requested) == len(cases)
+        and requested.issubset(expected_settings),
+        "Android DNS settings requested an unknown or duplicate case",
+    )
+    observed: dict[str, pathlib.Path] = {}
     for path in state_paths:
         state = load_json(path)
         require(
@@ -726,7 +728,10 @@ def validate_android_dns_ui_receipts(
             str(state.get("exitDnsDohProvider")),
         )
         case = case_by_mode_provider.get(key)
-        require(case in cases and case not in observed, "Android DNS settings case is wrong or duplicated")
+        require(
+            case is not None and case not in observed,
+            "Android DNS settings case is wrong or duplicated",
+        )
         expected = expected_settings[case]
         require(
             state.get("exitDnsCustomDohUrl") == expected["customUrl"]
@@ -754,12 +759,12 @@ def validate_android_dns_ui_receipts(
                 through_servers == expected["throughServers"],
                 f"Android {case} UI readback retained a forbidden through-exit server",
             )
-        observed.add(case)
+        observed[case] = path
     require(
-        observed == set(cases),
+        requested.issubset(observed),
         "Android DNS settings receipts have the wrong requested policy values",
     )
-    return state_paths
+    return [observed[case] for case in cases]
 
 
 def validate_android_support(
