@@ -560,7 +560,10 @@ base_network = {
     "fipsGitSha": mobile["fipsGitSha"],
     "fipsGitTree": mobile["fipsGitTree"],
     "artifactIdentity": identity_fields,
-    "evidenceFiles": {"processes.json": "a" * 64},
+    "evidenceFiles": {
+        "processes.json": "a" * 64,
+        "mobile-ios-network-counter-ledger.tsv": "a" * 64,
+    },
 }
 wg = {
     **base_network,
@@ -591,6 +594,7 @@ underlay = {
             "case-reverse-payload.log",
             "case-runner-markers.log",
             "mobile-ios-underlay-fresh-dns-fixture.json",
+            "mobile-ios-network-counter-ledger.tsv",
         )
     },
     "dnsCases": {"automatic-profile": counter_case()},
@@ -801,6 +805,25 @@ if seal_gate >/dev/null 2>&1; then
   exit 1
 fi
 cp "$JOIN_VARIANT_CLEAN" "$JOIN_VARIANT_RECEIPT"
+seal_gate
+
+mobile_wg_ledger_clean="$TMP_ROOT/mobile-wg-ledger.clean"
+cp "$MOBILE_WG_RECEIPT" "$mobile_wg_ledger_clean"
+python3 - "$MOBILE_WG_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+del value["evidenceFiles"]["mobile-ios-network-counter-ledger.tsv"]
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted network evidence without its counter ledger" >&2
+  exit 1
+fi
+mv "$mobile_wg_ledger_clean" "$MOBILE_WG_RECEIPT"
 seal_gate
 
 python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'

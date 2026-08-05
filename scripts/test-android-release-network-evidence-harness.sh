@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
 import importlib.util
+import argparse
+import hashlib
 import json
 import pathlib
 import sys
@@ -151,6 +153,73 @@ with tempfile.TemporaryDirectory() as temporary:
             raise SystemExit("combined evidence accepted a partial DNS subset")
     finally:
         module.validate_android_support = original
+
+    receipt_root = root / "receipt-binding"
+    receipt_root.mkdir()
+    counter_ledger = receipt_root / "mobile-android-network-counter-ledger.tsv"
+    counter_ledger.write_text(
+        "\t".join(
+            [
+                "automatic-profile",
+                "dns-profile",
+                "1", "2", "1", "2", "1", "2",
+                "1", "0", "0", "0", "0", "0", "0", "0",
+                "2", "1", "1", "0", "0", "0", "0", "0",
+            ]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    proof = receipt_root / "proof.json"
+    proof.write_text("{}\n", encoding="utf-8")
+    artifact = receipt_root / "artifact.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "appGitSha": "a" * 40,
+                "appGitTree": "b" * 40,
+                "fipsGitSha": "c" * 40,
+                "fipsGitTree": "d" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = receipt_root / "receipt.json"
+    original_identity = module.artifact_identity
+    original_support = module.validate_mobile_support
+    module.artifact_identity = lambda _platform, _artifact: {
+        "apkSha256": "e" * 64,
+    }
+    module.validate_mobile_support = (
+        lambda *_args: ({"lifecycleCycles": 3}, [proof.resolve()])
+    )
+    try:
+        args = argparse.Namespace(
+            platform="android",
+            mode="underlay-lifecycle",
+            artifact_receipt=str(artifact),
+            artifact_dir=str(receipt_root),
+            counter_ledger=str(counter_ledger),
+            output=str(output),
+            include_underlay_lifecycle=False,
+        )
+        module.build_mobile(args)
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        expected_digest = hashlib.sha256(counter_ledger.read_bytes()).hexdigest()
+        if receipt["evidenceFiles"].get(counter_ledger.name) != expected_digest:
+            raise SystemExit("successful receipt is not bound to its durable ledger")
+        outside = root / "outside-counter-ledger.tsv"
+        outside.write_bytes(counter_ledger.read_bytes())
+        args.counter_ledger = str(outside)
+        try:
+            module.build_mobile(args)
+        except ValueError as error:
+            if "not preserved with its artifact evidence" not in str(error):
+                raise
+        else:
+            raise SystemExit("receipt accepted an unpreserved temporary ledger")
+    finally:
+        module.artifact_identity = original_identity
+        module.validate_mobile_support = original_support
 
 print("Android release network evidence regression passed")
 PY

@@ -47,6 +47,18 @@ IOS_COUNTER_LEDGER="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-network-counters.XXXXXX")
 NETWORK_AFTER_BYTES=""
 NETWORK_AFTER_FORWARD=""
 
+cleanup_counter_ledger() {
+  local ledger="$1" output="$2" platform="$3"
+  [[ -e "$ledger" ]] || return 0
+  if [[ ! -s "$ledger" || -z "$output" ]]; then
+    rm -f "$ledger"
+    return
+  fi
+  echo \
+    "$platform network counter ledger retained after incomplete receipt: $ledger" \
+    >&2
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/mobile-wireguard-exit-e2e.sh [android|ios|all]
@@ -138,7 +150,14 @@ cleanup() {
       cleanup_failed=1
     fi
   fi
-  rm -f "$ANDROID_COUNTER_LEDGER" "$IOS_COUNTER_LEDGER"
+  cleanup_counter_ledger \
+    "$ANDROID_COUNTER_LEDGER" \
+    "${NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT:-}" Android \
+    || cleanup_failed=1
+  cleanup_counter_ledger \
+    "$IOS_COUNTER_LEDGER" \
+    "${NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT:-}" iOS \
+    || cleanup_failed=1
   if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
     status=1
   fi
@@ -351,6 +370,32 @@ record_case_evidence() {
     "$before_forward" "$after_forward" >>"$ledger"
   printf '\t%s' "${before_dns_values[@]}" "${after_dns_values[@]}" >>"$ledger"
   printf '\n' >>"$ledger"
+}
+
+persist_counter_ledger() {
+  local platform="$1" artifact_dir="$2" ledger="$3"
+  local durable
+  [[ -f "$ledger" && ! -L "$ledger" && -s "$ledger" ]] || {
+    echo "$platform network counter ledger is missing or empty" >&2
+    return 1
+  }
+  [[ -d "$artifact_dir" && ! -L "$artifact_dir" ]] || {
+    echo "$platform network artifact directory is missing or unsafe" >&2
+    return 1
+  }
+  durable="$artifact_dir/mobile-$platform-network-counter-ledger.tsv"
+  if [[ ! -e "$durable" && ! -L "$durable" ]]; then
+    (umask 077; set -o noclobber; cat "$ledger" >"$durable") \
+      2>/dev/null || true
+  fi
+  [[ -f "$durable" && ! -L "$durable" ]] \
+    && cmp -s "$ledger" "$durable" || {
+      echo \
+        "$platform network artifact directory contains a stale counter ledger" \
+        >&2
+      return 1
+    }
+  printf '%s\n' "$durable"
 }
 
 write_underlay_fresh_dns_fixture_proof() {
@@ -679,6 +724,7 @@ PY
 
 write_network_evidence() {
   local platform="$1" output artifact_receipt artifact_dir ledger mode
+  local durable_ledger
   local include_underlay=0
   if bool_is_true "$UNDERLAY_CHANGE_GATE" \
     && mobile_wg_dns_cases_are_complete "${DNS_CASES[@]}"
@@ -715,19 +761,33 @@ write_network_evidence() {
     echo "$platform network evidence requires an exact artifact receipt" >&2
     return 1
   }
+  if [[ -L "$output" || ( -e "$output" && ! -f "$output" ) ]]; then
+    echo "$platform network evidence output is unsafe" >&2
+    return 1
+  fi
+  rm -f "$output"
+  durable_ledger="$(
+    persist_counter_ledger "$platform" "$artifact_dir" "$ledger"
+  )" || return 1
   local -a evidence_args=(
     mobile
     --platform "$platform"
     --mode "$mode"
     --artifact-receipt "$artifact_receipt"
     --artifact-dir "$artifact_dir"
-    --counter-ledger "$ledger"
+    --counter-ledger "$durable_ledger"
     --output "$output"
   )
   if [[ "$include_underlay" -eq 1 ]]; then
     evidence_args+=(--include-underlay-lifecycle)
   fi
-  python3 "$ROOT/scripts/release-network-evidence.py" "${evidence_args[@]}"
+  python3 "$ROOT/scripts/release-network-evidence.py" "${evidence_args[@]}" \
+    || return 1
+  [[ -f "$output" && ! -L "$output" ]] || {
+    echo "$platform network evidence builder produced no safe receipt" >&2
+    return 1
+  }
+  rm -f "$ledger"
 }
 
 DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)

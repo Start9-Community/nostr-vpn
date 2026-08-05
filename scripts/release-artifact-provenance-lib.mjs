@@ -1009,8 +1009,16 @@ function requireMobileNetworkReceipt({
     }
   }
   const evidenceFiles = Object.values(receipt.evidenceFiles ?? {})
+  const evidencePaths = Object.keys(receipt.evidenceFiles ?? {})
   if (evidenceFiles.length === 0) {
     throw new Error(`${platform} ${mode} receipt has no concrete evidence files.`)
+  }
+  if (
+    evidencePaths.filter(
+      (path) => path === `mobile-${platform}-network-counter-ledger.tsv`,
+    ).length !== 1
+  ) {
+    throw new Error(`${platform} ${mode} receipt lacks its durable counter ledger.`)
   }
   for (const digest of evidenceFiles) {
     requireSha256(digest, `${platform} ${mode} evidence file`)
@@ -1040,7 +1048,6 @@ function requireMobileNetworkReceipt({
     const cycles = receipt.support?.underlayCycles
     const cycle = Array.isArray(cycles) ? cycles[0] : undefined
     const processCounts = cycle?.processIdentifierCounts
-    const evidencePaths = Object.keys(receipt.evidenceFiles ?? {})
     const requiredEvidence = platform === 'android'
       ? [
           /underlay-.*-summary\.json$/,

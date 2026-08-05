@@ -779,7 +779,11 @@ test('release receipt collection requires exact source and strict public UI gate
               : {}),
           },
       evidenceFiles: mode === 'wireguard-dns'
-        ? { 'receipt.json': 'e'.repeat(64) }
+        ? {
+            'receipt.json': 'e'.repeat(64),
+            [`mobile-${platform}-network-counter-ledger.tsv`]:
+              'e'.repeat(64),
+          }
         : Object.fromEntries(
             (platform === 'android'
               ? [
@@ -797,7 +801,7 @@ test('release receipt collection requires exact source and strict public UI gate
                   'mobile-ios-release-network-automatic-profile-1-reverse-payload.log',
                   'mobile-ios-release-network-automatic-profile-1-runner-markers.log',
                   'mobile-ios-underlay-fresh-dns-fixture.json',
-                ])
+                ]).concat(`mobile-${platform}-network-counter-ledger.tsv`)
               .map((path) => [path, 'e'.repeat(64)]),
           ),
     })
@@ -1492,6 +1496,15 @@ test('release receipt collection requires exact source and strict public UI gate
         receipt.appGitSha = '0'.repeat(40)
       },
       /not exact source\/artifact evidence/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.wireguard_dns,
+      (receipt) => {
+        delete receipt.evidenceFiles[
+          'mobile-android-network-counter-ledger.tsv'
+        ]
+      },
+      /lacks its durable counter ledger/,
     )
     assertRejectedReceiptMutation(
       paths.linux.public_ui_join,

@@ -607,6 +607,13 @@ def validate_mobile_network_receipt(
         and bool(receipt["evidenceFiles"]),
         f"iOS {mode} receipt has incomplete concrete evidence",
     )
+    require(
+        list(receipt["evidenceFiles"]).count(
+            "mobile-ios-network-counter-ledger.tsv"
+        )
+        == 1,
+        f"iOS {mode} receipt lacks its durable counter ledger",
+    )
     for label, case in cases.items():
         require(
             isinstance(case, dict)
@@ -642,6 +649,7 @@ def validate_mobile_network_receipt(
             "reverse-payload.log",
             "runner-markers.log",
             "underlay-fresh-dns-fixture.json",
+            "mobile-ios-network-counter-ledger.tsv",
         )
         require(
             support.get("lifecycleCycles") == 3

@@ -441,18 +441,33 @@ if mobile_wg_dns_cases_are_complete custom-doh; then
 fi
 # shellcheck disable=SC1090
 source "$ROOT/scripts/release_common.sh"
+eval "$(sed -n '/^persist_counter_ledger() {/,/^}$/p' "$gate")"
 eval "$(sed -n '/^write_network_evidence() {/,/^}$/p' "$gate")"
 canonical_builder_calls=0
 canonical_builder_arguments=""
+canonical_builder_fail=0
 python3() {
   canonical_builder_calls=$((canonical_builder_calls + 1))
   canonical_builder_arguments="$*"
+  [[ "$canonical_builder_fail" -eq 0 ]] || return 19
+  local index output=""
+  for ((index = 1; index <= $#; index++)); do
+    if [[ "${!index}" == --output ]]; then
+      index=$((index + 1))
+      output="${!index}"
+      break
+    fi
+  done
+  [[ -n "$output" ]] || return 2
+  printf '{}\n' >"$output"
 }
+counter_test_root="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-counter-ledger-test.XXXXXX")"
+mkdir -p "$counter_test_root/artifacts"
 UNDERLAY_CHANGE_GATE=0
-NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT=/unused/canonical.json
-NVPN_MOBILE_ANDROID_RELEASE_RECEIPT=/unused/artifact.json
-NVPN_ANDROID_RESULT_DIR=/unused/artifacts
-ANDROID_COUNTER_LEDGER=/unused/counters.tsv
+NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$counter_test_root/receipt.json"
+NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$counter_test_root/artifact.json"
+NVPN_ANDROID_RESULT_DIR="$counter_test_root/artifacts"
+ANDROID_COUNTER_LEDGER="$counter_test_root/counters.tsv"
 DNS_CASES=(custom-doh)
 write_network_evidence android
 [[ "$canonical_builder_calls" -eq 0 ]] || {
@@ -460,6 +475,7 @@ write_network_evidence android
   exit 1
 }
 DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)
+printf 'exact-ledger\n' >"$ANDROID_COUNTER_LEDGER"
 write_network_evidence android
 [[ "$canonical_builder_calls" -eq 1 ]] || {
   echo "complete DNS matrix skipped the canonical receipt builder" >&2
@@ -470,6 +486,7 @@ write_network_evidence android
   exit 1
 }
 UNDERLAY_CHANGE_GATE=1
+printf 'exact-ledger\n' >"$ANDROID_COUNTER_LEDGER"
 write_network_evidence android
 [[ "$canonical_builder_calls" -eq 2 \
   && "$canonical_builder_arguments" == *"--mode wireguard-dns"* \
@@ -478,6 +495,7 @@ write_network_evidence android
   exit 1
 }
 DNS_CASES=(automatic-profile)
+printf 'exact-ledger\n' >"$ANDROID_COUNTER_LEDGER"
 write_network_evidence android
 [[ "$canonical_builder_calls" -eq 3 \
   && "$canonical_builder_arguments" == *"--mode underlay-lifecycle"* \
@@ -485,7 +503,34 @@ write_network_evidence android
   echo "focused underlay run did not retain its single-mode aggregation" >&2
   exit 1
 }
-unset -f python3 write_network_evidence
+rm -f "$counter_test_root/artifacts/mobile-android-network-counter-ledger.tsv"
+printf 'failure-ledger\n' >"$ANDROID_COUNTER_LEDGER"
+canonical_builder_fail=1
+if write_network_evidence android; then
+  echo "failed aggregation unexpectedly succeeded" >&2
+  exit 1
+fi
+cmp -s "$ANDROID_COUNTER_LEDGER" \
+  "$counter_test_root/artifacts/mobile-android-network-counter-ledger.tsv" \
+  || { echo "failed aggregation did not preserve its exact ledger" >&2; exit 1; }
+[[ ! -e "$NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT" ]] || {
+  echo "failed aggregation retained a stale receipt" >&2
+  exit 1
+}
+printf 'stale-ledger\n' >"$ANDROID_COUNTER_LEDGER"
+if write_network_evidence android >/dev/null 2>&1; then
+  echo "stale durable counter ledger was accepted" >&2
+  exit 1
+fi
+printf 'failure-ledger\n' >"$ANDROID_COUNTER_LEDGER"
+canonical_builder_fail=0
+write_network_evidence android
+[[ ! -e "$ANDROID_COUNTER_LEDGER" ]] || {
+  echo "successful aggregation retained its temporary ledger" >&2
+  exit 1
+}
+rm -rf "$counter_test_root"
+unset -f python3 persist_counter_ledger write_network_evidence
 
 python3 - "$fixture_lib" "$remote_native" <<'PY'
 import pathlib

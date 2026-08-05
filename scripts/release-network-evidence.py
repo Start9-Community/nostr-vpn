@@ -1058,9 +1058,12 @@ def build_mobile(args: argparse.Namespace) -> None:
     root = pathlib.Path(args.artifact_dir).resolve()
     artifact = load_json(artifact_path)
     identity = artifact_identity(platform, artifact)
-    counter_cases = parse_counter_ledger(
-        pathlib.Path(args.counter_ledger), cases, platform
+    counter_ledger = pathlib.Path(args.counter_ledger).resolve()
+    require(
+        counter_ledger.parent == root,
+        "mobile counter ledger is not preserved with its artifact evidence",
     )
+    counter_cases = parse_counter_ledger(counter_ledger, cases, platform)
     support, paths = validate_mobile_support(
         root,
         platform,
@@ -1068,6 +1071,7 @@ def build_mobile(args: argparse.Namespace) -> None:
         mode,
         args.include_underlay_lifecycle,
     )
+    paths.append(counter_ledger)
     receipt = {
         "receiptSchema": 1,
         "artifactType": f"physical {platform} Release {mode} gate",
