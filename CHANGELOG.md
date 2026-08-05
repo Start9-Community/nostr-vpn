@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 4.1.6 - 2026-08-06
+
+### Release notes
+
+Reliability improvements and basic feature fixes across every platform.
+
+- Improved exit-node discovery and connection reliability in native apps.
+- Improved VPN service startup and single-instance behavior.
+- Simplified device joining; QR and manual joining remain available.
+
 ## 4.1.5 - 2026-08-01
 
 ### Release notes
