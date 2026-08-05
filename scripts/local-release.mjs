@@ -818,6 +818,8 @@ function buildWindowsArtifacts({
   const guestPublishDir =
     env.NVPN_WINDOWS_RELEASE_PUBLISH_DIR
     || `${guestRepo}\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish`
+  const guestProofScript = env.NVPN_WINDOWS_RELEASE_PROOF_SCRIPT
+    || `${guestRepo}\\scripts\\windows-release-publication-proof.ps1`
   const installerName = `nostr-vpn-${tag}-windows-x64-setup.exe`
   const archiveName = `nvpn-${tag}-x86_64-pc-windows-msvc.zip`
   if (dryRun) {
@@ -880,7 +882,7 @@ function buildWindowsArtifacts({
     host,
     `
 $ErrorActionPreference = 'Stop'
-& ${psQuote(`${guestRepo}\\scripts\\windows-release-publication-proof.ps1`)} \`
+& ${psQuote(guestProofScript)} \`
   -RepoPath ${psQuote(guestRepo)} \`
   -ExpectedCommit ${psQuote(receipt.appGitSha)} \`
   -ExpectedTree ${psQuote(receipt.appGitTree)} \`

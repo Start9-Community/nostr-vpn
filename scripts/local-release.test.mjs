@@ -3380,6 +3380,8 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
   )
   assert.match(build, /ExpectedInstallerSha256/)
   assert.match(build, /ExpectedInstallerSize/)
+  assert.match(build, /NVPN_WINDOWS_RELEASE_PROOF_SCRIPT/)
+  assert.match(build, /& \$\{psQuote\(guestProofScript\)\}/)
   assert.match(build, /gateReceiptPath:\s*installerReceiptPath/)
   assert.doesNotMatch(
     build,
@@ -3393,6 +3395,15 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
   )
   assert.ok(hashCheck >= 0 && install > hashCheck)
   assert.match(proof, /\$installer\.Length -ne \$ExpectedInstallerSize/)
+  const cliSnapshot = proof.indexOf(
+    "Copy-Item -LiteralPath $files.cli",
+  )
+  const archive = proof.indexOf('Compress-Archive -Path (')
+  assert.ok(cliSnapshot > hashCheck && install > cliSnapshot)
+  assert.ok(archive > install)
+  assert.match(proof, /Join-Path \$env:TEMP "nvpn-publication-payload-proof-\$proofId"/)
+  assert.doesNotMatch(proof, /Join-Path \$ArtifactRoot 'publication-payload-proof'/)
+  assert.match(proof, /install directory overlaps the gated publish directory/)
 })
 
 test('Linux release reclaims Docker smoke storage before host packaging', () => {

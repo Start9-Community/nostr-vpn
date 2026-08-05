@@ -85,7 +85,41 @@ if (
 ) {
     throw 'The Windows installer differs from the exact locally retained smoke artifact'
 }
-$installDir = Join-Path $ArtifactRoot 'publication-payload-proof'
+$proofId = [Guid]::NewGuid().ToString('N')
+$tempDir = Join-Path $env:TEMP "nvpn-gated-x64-cli-$proofId"
+New-Item -ItemType Directory -Force -Path (
+    Join-Path $tempDir 'binaries'
+) | Out-Null
+Copy-Item -LiteralPath $files.cli -Destination (
+    Join-Path $tempDir 'nvpn.exe'
+)
+Copy-Item -LiteralPath $files.wintun -Destination (
+    Join-Path $tempDir 'binaries\wintun.dll'
+)
+foreach ($name in @('cli', 'wintun')) {
+    $snapshot = if ($name -eq 'cli') {
+        Join-Path $tempDir 'nvpn.exe'
+    } else {
+        Join-Path $tempDir 'binaries\wintun.dll'
+    }
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $snapshot).Hash.ToLowerInvariant()
+    if ($actual -ne $expected[$name]) {
+        throw "Windows gated payload snapshot changed: $name"
+    }
+}
+
+$installDir = Join-Path $env:TEMP "nvpn-publication-payload-proof-$proofId"
+$publishRoot = [IO.Path]::GetFullPath($PublishDir).TrimEnd([char[]]'\/')
+$installRoot = [IO.Path]::GetFullPath($installDir).TrimEnd([char[]]'\/')
+$comparison = [StringComparison]::OrdinalIgnoreCase
+$separator = [IO.Path]::DirectorySeparatorChar
+if (
+    $installRoot.Equals($publishRoot, $comparison) -or
+    $installRoot.StartsWith("$publishRoot$separator", $comparison) -or
+    $publishRoot.StartsWith("$installRoot$separator", $comparison)
+) {
+    throw 'Windows publication proof install directory overlaps the gated publish directory'
+}
 Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
 $setup = Start-Process -FilePath $InstallerPath -ArgumentList @(
     '/VERYSILENT',
@@ -127,17 +161,6 @@ try {
     Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
 }
 
-$tempDir = Join-Path $env:TEMP 'nvpn-gated-x64-cli'
-Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path (
-    Join-Path $tempDir 'binaries'
-) | Out-Null
-Copy-Item -LiteralPath $files.cli -Destination (
-    Join-Path $tempDir 'nvpn.exe'
-)
-Copy-Item -LiteralPath $files.wintun -Destination (
-    Join-Path $tempDir 'binaries\wintun.dll'
-)
 Compress-Archive -Path (
     Join-Path $tempDir '*'
 ) -DestinationPath $ArchivePath -Force
