@@ -21,6 +21,7 @@ const harnessOnlyPaths = new Set([
   'scripts/desktop_mobile_manual_join_receipt.py',
   'scripts/desktop-mobile-manual-join-atspi.py',
   'scripts/desktop-mobile-manual-join-windows-ui.ps1',
+  'scripts/desktop-linux-underlay-change-e2e.sh',
   'scripts/e2e-macos-release-network.sh',
   'scripts/e2e-macos-service-toggle.sh',
   'scripts/e2e-macos-service.sh',
