@@ -2,2138 +2,603 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-"$ROOT/scripts/test-ios-packet-flow-lifecycle.sh"
-"$ROOT/scripts/test-mobile-ios-release-runner-harness.sh"
-gate="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
-android_smoke="$ROOT/scripts/mobile-android-smoke.sh"
-android_release_gate="$ROOT/scripts/lib-mobile-android-release-gate.sh"
-android_underlay="$ROOT/scripts/lib-mobile-android-underlay.sh"
-android_external_probe="$ROOT/scripts/lib-mobile-android-external-probe.sh"
-android_vpn_service="$ROOT/android/app/src/main/java/org/nostrvpn/app/vpn/NostrVpnService.kt"
-android_tun_summary="$ROOT/scripts/write-mobile-android-tun-summary.py"
-ios_smoke="$ROOT/scripts/mobile-ios-smoke.sh"
-ios_probe_validator="$ROOT/scripts/validate-mobile-ios-vpn-probe.py"
-ios_debug_automation="$ROOT/ios/Sources/AppModelDebugAutomation.swift"
-ios_tun_probe="$ROOT/ios/Sources/AppModelDebugTunProbe.swift"
-ios_url_automation="$ROOT/ios/Sources/AppModelDebugURLAutomation.swift"
-ios_ui="$ROOT/ios/UITests/NostrVpnIosUITests.swift"
-ios_lifecycle_ui="$ROOT/ios/UITests/NostrVpnLifecycleUITests.swift"
-ios_lifecycle_lib="$ROOT/scripts/lib-mobile-ios-lifecycle.sh"
-ios_release_gate="$ROOT/scripts/lib-mobile-ios-release-network.sh"
-join_gate="$ROOT/scripts/mobile-release-join-e2e.sh"
-ios_release_artifact="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
-ios_packet_tunnel="$ROOT/ios/PacketTunnel/PacketTunnelProvider.swift"
-ios_packet_flow_bridge="$ROOT/ios/PacketTunnel/PacketFlowBridge.swift"
-ios_project_file="$ROOT/ios/NostrVpnIos.xcodeproj/project.pbxproj"
-ios_release_binary_audit="$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
-local_fips="$ROOT/scripts/local-fips-workspace.sh"
-fips_c_abi="$ROOT/crates/nostr-vpn-app-core/src/c_abi.rs"
-mobile_packet_flow="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/ios_packet_flow.rs"
-mobile_native_tun="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/native_tun.rs"
-mobile_tunnel_config="$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel/config.rs"
-ios_release_probe="$ROOT/ios/UITests/NostrVpnReleaseNetworkProbe.swift"
-ios_release_ui="$ROOT/ios/UITests/NostrVpnReleaseNetworkUITests.swift"
-ios_release_ui_support="$ROOT/ios/UITests/NostrVpnReleaseNetworkUI.swift"
-ios_release_underlay="$ROOT/ios/UITests/NostrVpnReleaseNetworkUnderlay.swift"
-ios_underlay_capture="$ROOT/scripts/capture-mobile-ios-underlay-output.py"
-ios_project="$ROOT/ios/project.yml"
-ios_internet="$ROOT/ios/Sources/InternetViews.swift"
-ios_settings="$ROOT/ios/Sources/SettingsViews.swift"
-ios_exit_dns_settings="$ROOT/ios/Sources/ExitDnsSettingsCard.swift"
-android_internet="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidInternet.kt"
-android_dns="$ROOT/android/app/src/main/java/org/nostrvpn/app/AndroidExitDns.kt"
-server="$ROOT/scripts/mobile-wireguard-exit-server.sh"
-fixture_lib="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
-remote_native="$ROOT/scripts/mobile-wireguard-exit-remote-native.sh"
-android_visible_center="$ROOT/scripts/mobile-release-join-ui-query.py"
-android_wireguard_geometry="$ROOT/scripts/fixtures/android-wireguard-config-partially-visible.xml"
-android_wireguard_sliver="$ROOT/scripts/fixtures/android-wireguard-config-one-pixel-visible.xml"
-docker_context="$ROOT/Dockerfile.mobile-wireguard-exit-e2e.dockerignore"
+GATE="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
+FIXTURE_LIB="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
+TLS_COUNTER="$ROOT/scripts/mobile-wireguard-tls-sni-count.py"
+HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-wg-contract.XXXXXX")"
 
-grep -Fqx '!scripts/mobile-wireguard-http-probe.py' "$docker_context" \
-  || {
-    echo "mobile WireGuard Docker context omits its HTTP probe" >&2
-    exit 1
-  }
-grep -Fqx '!scripts/mobile-wireguard-tls-sni-count.py' "$docker_context" \
-  || {
-    echo "mobile WireGuard Docker context omits its TLS SNI parser" >&2
-    exit 1
-  }
+cleanup_harness() {
+  rm -rf "$HARNESS_ROOT"
+}
+trap cleanup_harness EXIT
 
-for tls_fixture in "$server" "$remote_native" "$fixture_lib"; do
-  if grep -Eq 'nvpn-wg-provider-tls|provider_tls_|provider-tls-count|cloudflareTls|quad9Tls|googleTls' "$tls_fixture"; then
-    echo "$(basename "$tls_fixture") retains redundant generic provider TLS evidence" >&2
-    exit 1
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+
+assert_count() {
+  local expected="$1" pattern="$2" path="$3" actual
+  actual="$(grep -Fc -- "$pattern" "$path" || true)"
+  [[ "$actual" -eq "$expected" ]] \
+    || fail "$path contains $actual copies of '$pattern'; expected $expected"
+}
+
+# Exercise the shared production fixture contract directly. The physical gate
+# remains responsible for proving the device packet paths; this harness only
+# checks deterministic mapping, validation, and exclusive counter semantics.
+# shellcheck disable=SC1090
+source "$FIXTURE_LIB"
+
+cases=(
+  automatic-profile
+  cloudflare-doh
+  quad9-doh
+  custom-doh
+  through-exit
+)
+mobile_wg_dns_cases_are_complete "${cases[@]}" \
+  || fail "canonical five-case DNS matrix was rejected"
+if mobile_wg_dns_cases_are_complete "${cases[@]:0:4}"; then
+  fail "partial DNS matrix was accepted as canonical"
+fi
+
+actual_case_fields=""
+for label in "${cases[@]}"; do
+  actual_case_fields+="$label|$(
+    mobile_wg_dns_case_fields \
+      "$label" fixture.nvpn.test 10.99.77.1 10.99.77.53
+  )"$'\n'
+done
+expected_case_fields=$'automatic-profile|automatic|cloudflare||||fixture.nvpn.test|10.99.77.1|dns-profile\ncloudflare-doh|encrypted|cloudflare||||cloudflare.192-0-2-1.sslip.io|192.0.2.1|doh-cloudflare\nquad9-doh|encrypted|quad9||||quad9.192-0-2-1.sslip.io|192.0.2.1|doh-quad9\ncustom-doh|encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-2-1.sslip.io|192.0.2.1|doh-google\nthrough-exit|through_exit|cloudflare|||10.99.77.53|through-exit.fixture.nvpn.test|10.99.77.1|dns-through\n'
+[[ "$actual_case_fields" == "$expected_case_fields" ]] \
+  || fail "production DNS case mapping changed"
+
+for endpoint in \
+  $'192.0.2.10|51820|ipv4\t192.0.2.10\t192.0.2.10:51820' \
+  $'fixture.example.test|51820|dns\tfixture.example.test\tfixture.example.test:51820' \
+  $'2001:db8::10|51820|ipv6\t2001:db8::10\t[2001:db8::10]:51820'
+do
+  IFS='|' read -r host port expected <<<"$endpoint"
+  [[ "$(mobile_wg_endpoint_fields "$host" "$port")" == "$expected" ]] \
+    || fail "valid endpoint was rendered incorrectly: $host"
+done
+for host in \
+  "" " fixture.example.test" "fixture.example.test " \
+  "[2001:db8::10]" "fixture.example.test:51820" \
+  "https://fixture.example.test" "fixture.example.test/path" \
+  "2001:db8::gg" "-fixture.example.test" "fixture..example.test" \
+  "999.2.3.4"
+do
+  if mobile_wg_endpoint_fields "$host" 51820 >/dev/null 2>&1; then
+    fail "malformed endpoint host was accepted: '$host'"
   fi
 done
-resolver_filter='tcp dst port 443 and (dst host 1.1.1.1 or dst host 1.0.0.1 or dst host 9.9.9.9 or dst host 149.112.112.112 or dst host 8.8.8.8 or dst host 8.8.4.4)'
-for tls_fixture in "$server" "$remote_native"; do
-  grep -Fq "$resolver_filter" "$tls_fixture" \
-    && grep -Fq -- '-C 1 -W 1 -Z root' "$tls_fixture" \
-    || {
-      echo "$(basename "$tls_fixture") TLS capture is broad or unbounded" >&2
-      exit 1
-    }
-  if grep -Fq "'tcp dst port 443'" "$tls_fixture"; then
-    echo "$(basename "$tls_fixture") captures unrelated phone HTTPS" >&2
-    exit 1
+for port in 0 65536 port; do
+  if mobile_wg_endpoint_fields fixture.example.test "$port" >/dev/null 2>&1; then
+    fail "malformed endpoint port was accepted: '$port'"
   fi
 done
 
-python3 - "$ROOT/scripts/mobile-wireguard-tls-sni-count.py" <<'PY'
+for evidence_case in \
+  $'automatic-profile|dns-profile|0\t0\t0\t0\t0\t0\t0|1\t1\t0\t0\t0\t0\t0' \
+  $'cloudflare-doh|doh-cloudflare|0\t0\t0\t0\t0\t0\t0|0\t0\t1\t0\t0\t0\t0' \
+  $'quad9-doh|doh-quad9|0\t0\t0\t0\t0\t0\t0|0\t0\t0\t1\t0\t0\t0' \
+  $'custom-doh|doh-google|0\t0\t0\t0\t0\t0\t0|0\t0\t0\t0\t1\t0\t0' \
+  $'through-exit|dns-through|0\t0\t0\t0\t0\t0\t0|1\t0\t0\t0\t0\t1\t0'
+do
+  IFS='|' read -r label evidence before after <<<"$evidence_case"
+  mobile_wg_fixture_assert_timed_dns_case_evidence \
+    Android "$label" "$evidence" \
+    $'1000\t'"$before" $'1001\t'"$after" >/dev/null \
+    || fail "valid $label DNS evidence was rejected"
+done
+if mobile_wg_fixture_assert_timed_dns_case_evidence \
+    Android cloudflare-doh doh-cloudflare \
+    $'1000\t0\t0\t0\t0\t0\t0\t0' \
+    $'1001\t1\t0\t1\t0\t0\t0\t0' >/dev/null 2>&1
+then
+  fail "encrypted DNS accepted a plaintext fallback"
+fi
+if mobile_wg_fixture_assert_timed_dns_case_evidence \
+    Android automatic-profile dns-profile \
+    $'1001\t0\t0\t0\t0\t0\t0\t0' \
+    $'1000\t1\t1\t0\t0\t0\t0\t0' >/dev/null 2>&1
+then
+  fail "DNS evidence accepted a reversed observation window"
+fi
+
+# Keep one executable parser regression for fragmented resolver ClientHello
+# traffic; static greps cannot prove the fixture's SNI evidence parser works.
+python3 - "$TLS_COUNTER" <<'PY'
 import runpy
-import pathlib
 import struct
 import sys
-import tempfile
 
-module = runpy.run_path(sys.argv[1])
-parse = module["client_hello_snis"]
+parse = runpy.run_path(sys.argv[1])["client_hello_snis"]
 name = b"cloudflare-dns.com"
 server_name = b"\x00" + len(name).to_bytes(2, "big") + name
-extension_value = len(server_name).to_bytes(2, "big") + server_name
-server_name_extension = (
-    b"\x00\x00" + len(extension_value).to_bytes(2, "big") + extension_value
-)
-padding_value = bytes(2600)
-padding_extension = b"\x00\x15" + len(padding_value).to_bytes(2, "big") + padding_value
-extensions = server_name_extension + padding_extension
+value = len(server_name).to_bytes(2, "big") + server_name
+extension = b"\x00\x00" + len(value).to_bytes(2, "big") + value
 hello = (
-    b"\x03\x03" + bytes(32) + b"\x00"
-    + b"\x00\x02\x13\x01" + b"\x01\x00"
-    + len(extensions).to_bytes(2, "big") + extensions
+    b"\x03\x03" + bytes(32) + b"\x00" + b"\x00\x02\x13\x01"
+    + b"\x01\x00" + len(extension).to_bytes(2, "big") + extension
 )
 handshake = b"\x01" + len(hello).to_bytes(3, "big") + hello
 record = b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
 assert parse(record) == [name.decode()]
 assert parse(b"ordinary HTTPS bytes: " + name) == []
-
-def packet(sequence, payload, destination=b"\x01\x01\x01\x01"):
-    tcp = struct.pack("!HHIIHHHH", 12345, 443, sequence, 0, 0x5018, 0, 0, 0) + payload
-    ip = struct.pack(
-        "!BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 0, 0, 64, 6, 0,
-        b"\x0a\x63\x4d\x02", destination,
-    )
-    return ip + tcp
-
-chunks = [record[offset:offset + 900] for offset in range(0, len(record), 900)]
-assert len(record) > 2 * 1280 and max(map(len, chunks)) <= 900
-packets = [
-    packet(1000 + 2 * 900, chunks[2]),
-    packet(1000, chunks[0]),
-    packet(1000 + 900, chunks[1]),
-    packet(1000 + 900, chunks[1]),
-    *[
-        packet(1000 + index * 900, chunks[index])
-        for index in range(3, len(chunks))
-    ],
-    packet(9000, record, b"\xc0\x00\x02\x01"),
-]
-pcap = b"\x4d\x3c\xb2\xa1" + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, 101)
-for packet_bytes in packets:
-    pcap += struct.pack("<IIII", 1, 0, len(packet_bytes), len(packet_bytes)) + packet_bytes
-with tempfile.TemporaryDirectory() as directory:
-    path = pathlib.Path(directory) / "resolver-clienthello.pcap"
-    rotated_path = pathlib.Path(str(path) + "0")
-    rotated_path.write_bytes(pcap)
-    assert module["captured_snis"](path) == [name.decode()]
 PY
 
-grep -Fq 'resolve_shared_build_metadata "$ROOT"' "$gate" \
-  || { echo "standalone mobile gate does not initialize exact build metadata" >&2; exit 1; }
-python3 - "$gate" <<'PY'
-import pathlib
-import sys
+MOCK_ROOT="$HARNESS_ROOT/root"
+MOCK_BIN="$HARNESS_ROOT/bin"
+mkdir -p "$MOCK_ROOT/scripts" "$MOCK_BIN"
+cp "$GATE" "$MOCK_ROOT/scripts/mobile-wireguard-exit-e2e.sh"
+chmod +x "$MOCK_ROOT/scripts/mobile-wireguard-exit-e2e.sh"
 
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = source.split("run_ios_case() {", 1)[1].split("\nrun_android_case() {", 1)[0]
-encrypted = body.split("doh-cloudflare|doh-quad9|doh-google)", 1)[1].split(";;", 1)[0]
-expected = 'resolver_probe_url="http://$TUNNEL_SERVER_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"'
-if expected not in encrypted:
-    raise SystemExit("iOS encrypted DNS cases do not use the controlled resolver probe")
-if 'resolver_body="$HTTP_PROBE_TOKEN"' not in encrypted:
-    raise SystemExit("iOS encrypted DNS cases do not require the controlled response token")
-if '"resolverExpectedAddress": resolver_expected_address or None' not in body:
-    raise SystemExit("iOS encrypted DNS permits an unverified NXDOMAIN result")
-for wrong in (
-    'resolver_probe_url="$DIRECT_URL"',
-    'resolver_probe_url="http://$probe_host:',
-):
-    if wrong in encrypted:
-        raise SystemExit("iOS encrypted DNS cases use the wrong resolver probe destination")
-PY
-grep -Fq 'shell input keyevent KEYCODE_ENTER </dev/null' "$android_smoke" \
-  && grep -Fq 'shell input text "${line// /%s}" </dev/null' "$android_smoke" \
-  || {
-    echo "Android multiline UI entry lets adb consume the remaining config" >&2
-    exit 1
-  }
-grep -Fq 'tap_android_ui_visible resource "$selector"' "$android_smoke" \
-  && grep -Fq 'Android shipped multiline field did not gain focus' "$android_smoke" \
-  || {
-    echo "Android multiline UI entry lacks one clipped visible tap and readback" >&2
-    exit 1
-  }
-python3 - "$android_smoke" <<'PY'
-import pathlib
-import sys
-
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-start = text.index("replace_android_ui_multiline_text()")
-end = text.index("\nassert_android_ui_validation()", start)
-body = text[start:end]
-if "android_ui_reset_scroll" in body or "focus_attempt" in body:
-    raise SystemExit("Android multiline focus still retries by resetting scroll")
-if body.count("KEYCODE_BACK") != 1:
-    raise SystemExit("Android multiline entry must only dismiss the keyboard once")
-PY
-[[ "$(
-  "$android_visible_center" \
-    "$android_wireguard_geometry" resource wireguard-config visible-center
-)" == "540 1945" ]] || {
-  echo "Android visible-center did not intersect the real WireGuard field geometry" >&2
-  exit 1
+cat >"$MOCK_ROOT/scripts/release_common.sh" <<'SH'
+#!/usr/bin/env bash
+bool_is_true() {
+  case "${1:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
 }
-if "$android_visible_center" \
-  "$android_wireguard_sliver" resource wireguard-config visible-center \
-  >/dev/null 2>&1
-then
-  echo "Android visible-center accepted a one-pixel WireGuard field sliver" >&2
-  exit 1
-fi
-grep -Fq 'attribute == "descendant-text"' "$android_smoke" \
-  && grep -Fq 'internet-source-picker descendant-text' "$android_smoke" \
-  || {
-    echo "Android Release gate does not read the shipped picker label" >&2
-    exit 1
-  }
-grep -Fq 'attribute == "selected"' "$android_smoke" \
-  && grep -Fq 'attributes.get("selected") == "true"' "$android_smoke" \
-  && grep -Fq 'attributes.get("checked") == "true"' "$android_smoke" \
-  || {
-    echo "Android Release UI selected readback ignores UIAutomator checked state" >&2
-    exit 1
-  }
-python3 - "$android_smoke" <<'PY'
-import pathlib
-import subprocess
-import sys
-import tempfile
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-function = source.split("android_ui_query() {", 1)[1].split(
-    "\nandroid_ui_swipe() {", 1
-)[0]
-query = function.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
-with tempfile.TemporaryDirectory() as directory:
-    xml = pathlib.Path(directory) / "ui.xml"
-    for selector in (
-        "exit-dns-mode-encrypted",
-        "exit-dns-provider-cloudflare",
-    ):
-        xml.write_text(
-            f'<hierarchy><node resource-id="{selector}" '
-            'selected="false" checked="true" bounds="[0,0][10,10]" />'
-            "</hierarchy>",
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", query, str(xml), "resource", selector, "selected"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if result.stdout.strip() != "true":
-            raise SystemExit(f"checked UIAutomator node was not selected: {selector}")
-PY
-grep -Fq 'write_android_exit_dns_ui_receipt' "$android_smoke" \
-  && grep -Fq '"evidenceSource": "shipped-ui-restart-readback"' "$android_smoke" \
-  || {
-    echo "Android Release UI restart readback does not emit DNS settings evidence" >&2
-    exit 1
-  }
-
-python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
-import importlib.util
-import json
-import pathlib
-import tempfile
-import sys
-
-spec = importlib.util.spec_from_file_location("network_evidence", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-if "strict=True" in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"):
-    raise SystemExit("release network evidence still requires Python 3.10 zip(strict=)")
-before, after = module.split_dns_counters(list(range(14)), "fixture")
-assert list(before.values()) == list(range(7))
-assert list(after.values()) == list(range(7, 14))
-try:
-    module.split_dns_counters(list(range(13)), "short-fixture")
-except ValueError as error:
-    assert "wrong width" in str(error)
-else:
-    raise SystemExit("release network evidence accepted a short DNS counter row")
-cases = {
-    "automatic-profile": ("automatic", "cloudflare", "", "", ""),
-    "cloudflare-doh": ("encrypted", "cloudflare", "", "", ""),
-    "quad9-doh": ("encrypted", "quad9", "", "", ""),
-    "custom-doh": (
-        "encrypted",
-        "custom",
-        "https://dns.google/dns-query",
-        "8.8.8.8",
-        "",
-    ),
-    "through-exit": (
-        "through_exit",
-        "cloudflare",
-        "",
-        "",
-        "10.99.77.53",
-    ),
+load_release_env() { :; }
+load_appstoreconnect_defaults() { :; }
+resolve_shared_build_metadata() {
+  printf 'build-metadata %s\n' "$1" >>"$NVPN_CONTRACT_EVENTS"
 }
-with tempfile.TemporaryDirectory() as temporary:
-    root = pathlib.Path(temporary)
-    for index, (label, values) in enumerate(cases.items()):
-        mode, provider, custom_url, bootstrap, through = values
-        payload = {
-            "receiptSchema": 1,
-            "evidenceSource": "shipped-ui-restart-readback",
-            "uiRestartReadback": True,
-            "releaseBlackbox": True,
-            "exitDnsMode": mode,
-            "exitDnsDohProvider": provider,
-            "exitDnsCustomDohUrl": custom_url,
-            "exitDnsCustomDohBootstrapIps": bootstrap,
-            "exitDnsThroughExitServers": through,
-            "internetSource": "wireguard",
-            "wireguardExitEnabled": True,
-            "error": "",
-        }
-        (root / f"mobile-android-exit-dns-state-{index}.json").write_text(
-            json.dumps(payload),
-            encoding="utf-8",
-        )
-    module.validate_android_dns_ui_receipts(root, list(cases))
-    # Combined evidence validates all five settings first, then selects the
-    # Automatic receipt for its underlay/lifecycle sub-proof from the same
-    # artifact directory.
-    automatic_paths = module.validate_android_dns_ui_receipts(
-        root, ["automatic-profile"]
-    )
-    assert len(automatic_paths) == 1
-    assert json.loads(automatic_paths[0].read_text(encoding="utf-8"))[
-        "exitDnsMode"
-    ] == "automatic"
+SH
 
-    duplicate = root / "mobile-android-exit-dns-state-duplicate.json"
-    duplicate.write_text(
-        (root / "mobile-android-exit-dns-state-0.json").read_text(
-            encoding="utf-8"
-        ),
-        encoding="utf-8",
-    )
-    try:
-        module.validate_android_dns_ui_receipts(
-            root, ["automatic-profile"]
-        )
-    except ValueError as error:
-        if "wrong or duplicated" not in str(error):
-            raise
-    else:
-        raise SystemExit(
-            "Android underlay evidence accepted duplicate Automatic receipts"
-        )
-    duplicate.unlink()
-    support, evidence_paths = module.validate_android_support(
-        root, list(cases), "settings-only"
-    )
-    assert support["dnsSettingsReceiptCount"] == len(cases)
-    assert len(evidence_paths) == len(cases)
-    (root / "mobile-android-release-start-stop-123.tsv").write_text(
-        "semantic\t1234\t1\n",
-        encoding="utf-8",
-    )
-    for label in (
-        "before-connect",
-        "direct-while-connected",
-        "after-disconnect",
-        "start-stop-stable-direct",
-        "start-stop-reconnect-cleanup",
-    ):
-        suffixes = (
-            range(len(cases))
-            if label in {"before-connect", "after-disconnect"}
-            else (123,)
-        )
-        for suffix in suffixes:
-            (root / f"mobile-android-network-{label}-{suffix}.txt").write_text(
-                f"label={label}\n0% packet loss\n",
-                encoding="utf-8",
-            )
-            (
-                root
-                / f"mobile-android-network-{label}-direct-https-{suffix}.txt"
-            ).write_text(
-                "directHttpsStatus=200\n",
-                encoding="utf-8",
-            )
-    (root / "mobile-android-network-start-stop-full-reconnect-123.txt").write_text(
-        "capturedHttpStatus=200\ncapturedHttpsStatus=200\nexitSourceIp=192.0.2.1\n",
-        encoding="utf-8",
-    )
-    support, evidence_paths = module.validate_android_support(
-        root, list(cases), "wireguard-dns"
-    )
-    assert support["startStopCycles"] == 2
-    assert support["directBeforeConnectedAfter"] is True
-    assert len(evidence_paths) == len(cases) * 5 + 8
-    custom = root / "mobile-android-exit-dns-state-3.json"
-    payload = json.loads(custom.read_text(encoding="utf-8"))
-    payload["exitDnsCustomDohBootstrapIps"] = "1.1.1.1"
-    custom.write_text(json.dumps(payload), encoding="utf-8")
-    try:
-        module.validate_android_dns_ui_receipts(root, list(cases))
-    except ValueError as error:
-        if "custom DoH values" not in str(error):
-            raise
-    else:
-        raise SystemExit("Android Release UI evidence accepted wrong custom bootstrap")
-PY
+cat >"$MOCK_ROOT/scripts/mobile_env.sh" <<'SH'
+#!/usr/bin/env bash
+load_mobile_env() { :; }
+select_physical_android_serial() { printf '%s\n' "${2:-android-physical}"; }
+select_physical_ios_device() { printf '%s\n' "$1"; }
+SH
 
+cat >"$MOCK_ROOT/scripts/lib-mobile-underlay-change.sh" <<'SH'
+#!/usr/bin/env bash
+mobile_continuity_stop() {
+  printf 'continuity-stop\n' >>"$NVPN_CONTRACT_EVENTS"
+}
+SH
+
+cat >"$MOCK_ROOT/scripts/lib-mobile-wireguard-fixture.sh" <<'SH'
+#!/usr/bin/env bash
 # shellcheck disable=SC1090
-source "$fixture_lib"
-declare -F mobile_wg_endpoint_fields >/dev/null \
-  || { echo "mobile fixture lacks strict endpoint rendering" >&2; exit 1; }
-declare -F mobile_wg_dns_case_fields >/dev/null \
-  && declare -F mobile_wg_fixture_validate_docker_context >/dev/null \
-  && declare -F mobile_wg_fixture_stage_remote_docker_context >/dev/null \
-  && declare -F mobile_wg_fixture_dns_evidence_snapshot >/dev/null \
-  && declare -F mobile_wg_fixture_wait_for_dns_case_evidence >/dev/null \
-  && declare -F mobile_wg_fixture_timed_dns_evidence_snapshot >/dev/null \
-  && declare -F mobile_wg_fixture_assert_dns_case_evidence >/dev/null \
-  && declare -F mobile_wg_fixture_assert_timed_dns_case_evidence >/dev/null \
-  || { echo "mobile fixture lacks the shared DNS evidence contract" >&2; exit 1; }
-mobile_wg_fixture_validate_docker_context "$ROOT" \
-  || { echo "mobile fixture rejected its scoped Docker context" >&2; exit 1; }
-(
-  staging_log="$(mktemp "${TMPDIR:-/tmp}/nvpn-remote-docker-stage.XXXXXX")"
-  build_log="$(mktemp "${TMPDIR:-/tmp}/nvpn-remote-docker-build.XXXXXX")"
-  trap 'rm -f "$staging_log" "$build_log"' EXIT
-  MOBILE_WG_FIXTURE_REMOTE_DIR=/tmp/nvpn-mobile-wg-exit.staging-test
-  mobile_wg_remote_exec() { return 0; }
-  scp() { printf '%s\n' "$*" >>"$staging_log"; }
-  mobile_wg_fixture_stage_remote_docker_context "$ROOT" fixture-host
-  for staged in \
-    Dockerfile.mobile-wireguard-exit-e2e \
-    Dockerfile.mobile-wireguard-exit-e2e.dockerignore \
-    scripts/mobile-wireguard-exit-server.sh \
-    scripts/mobile-wireguard-http-probe.py \
-    scripts/mobile-wireguard-tls-sni-count.py
-  do
-    grep -Fq "$ROOT/$staged" "$staging_log" \
-      || { echo "remote Docker staging omitted $staged" >&2; exit 1; }
-  done
-  [[ "$(grep -Fc ":$MOBILE_WG_FIXTURE_REMOTE_DIR/scripts/" "$staging_log")" -eq 1 ]] \
-    && ! grep -Eq 'fixture/|server\.key|client\.key' "$staging_log" \
-    || { echo "remote Docker build context includes private fixture state" >&2; exit 1; }
+source "$NVPN_WG_REAL_FIXTURE_LIB"
 
-  scp() { return 19; }
-  if mobile_wg_fixture_stage_remote_docker_context "$ROOT" fixture-host; then
-    echo "remote Docker staging ignored an scp failure" >&2
-    exit 1
-  fi
-
-  mobile_wg_fixture_docker() {
-    if [[ "$1" == image && "$2" == inspect ]]; then
-      return 1
-    fi
-    printf '%s\n' "$*" >>"$build_log"
-  }
-  MOBILE_WG_FIXTURE_REMOTE=1
-  MOBILE_WG_FIXTURE_REMOTE_MODE=docker
-  MOBILE_WG_FIXTURE_REMOTE_IMAGE_BUILT=0
-  mobile_wg_fixture_build "$ROOT" nvpn-staging-test 0
-  grep -Fq \
-    "build -q -f $MOBILE_WG_FIXTURE_REMOTE_DIR/Dockerfile.mobile-wireguard-exit-e2e -t nvpn-staging-test $MOBILE_WG_FIXTURE_REMOTE_DIR" \
-    "$build_log" \
-    || { echo "remote Docker build did not use the scoped staged context" >&2; exit 1; }
-)
-mobile_wg_dns_cases_are_complete \
-  automatic-profile cloudflare-doh quad9-doh custom-doh through-exit \
-  || { echo "complete DNS matrix was rejected" >&2; exit 1; }
-if mobile_wg_dns_cases_are_complete custom-doh; then
-  echo "focused DNS retry was accepted as a complete matrix" >&2
-  exit 1
-fi
-# shellcheck disable=SC1090
-source "$ROOT/scripts/release_common.sh"
-eval "$(sed -n '/^persist_counter_ledger() {/,/^}$/p' "$gate")"
-eval "$(sed -n '/^write_network_evidence() {/,/^}$/p' "$gate")"
-canonical_builder_calls=0
-canonical_builder_arguments=""
-canonical_builder_fail=0
-python3() {
-  canonical_builder_calls=$((canonical_builder_calls + 1))
-  canonical_builder_arguments="$*"
-  [[ "$canonical_builder_fail" -eq 0 ]] || return 19
-  local index output=""
-  for ((index = 1; index <= $#; index++)); do
-    if [[ "${!index}" == --output ]]; then
-      index=$((index + 1))
-      output="${!index}"
-      break
-    fi
-  done
-  [[ -n "$output" ]] || return 2
-  printf '{}\n' >"$output"
-}
-counter_test_root="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-counter-ledger-test.XXXXXX")"
-mkdir -p "$counter_test_root/artifacts"
-UNDERLAY_CHANGE_GATE=0
-NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$counter_test_root/receipt.json"
-NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$counter_test_root/artifact.json"
-NVPN_ANDROID_RESULT_DIR="$counter_test_root/artifacts"
-ANDROID_COUNTER_LEDGER="$counter_test_root/counters.tsv"
-DNS_CASES=(custom-doh)
-write_network_evidence android
-[[ "$canonical_builder_calls" -eq 0 ]] || {
-  echo "focused DNS retry invoked the canonical receipt builder" >&2
-  exit 1
-}
-DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)
-printf 'exact-ledger\n' >"$ANDROID_COUNTER_LEDGER"
-write_network_evidence android
-[[ "$canonical_builder_calls" -eq 1 ]] || {
-  echo "complete DNS matrix skipped the canonical receipt builder" >&2
-  exit 1
-}
-[[ "$canonical_builder_arguments" != *--dns-cases* ]] || {
-  echo "canonical receipt builder accepted a focused DNS case selector" >&2
-  exit 1
-}
-UNDERLAY_CHANGE_GATE=1
-printf 'exact-ledger\n' >"$ANDROID_COUNTER_LEDGER"
-write_network_evidence android
-[[ "$canonical_builder_calls" -eq 2 \
-  && "$canonical_builder_arguments" == *"--mode wireguard-dns"* \
-  && "$canonical_builder_arguments" == *"--include-underlay-lifecycle"* ]] || {
-  echo "combined five-DNS/underlay run did not request strict aggregation" >&2
-  exit 1
-}
-DNS_CASES=(automatic-profile)
-printf 'exact-ledger\n' >"$ANDROID_COUNTER_LEDGER"
-write_network_evidence android
-[[ "$canonical_builder_calls" -eq 3 \
-  && "$canonical_builder_arguments" == *"--mode underlay-lifecycle"* \
-  && "$canonical_builder_arguments" != *"--include-underlay-lifecycle"* ]] || {
-  echo "focused underlay run did not retain its single-mode aggregation" >&2
-  exit 1
-}
-rm -f "$counter_test_root/artifacts/mobile-android-network-counter-ledger.tsv"
-printf 'failure-ledger\n' >"$ANDROID_COUNTER_LEDGER"
-canonical_builder_fail=1
-if write_network_evidence android; then
-  echo "failed aggregation unexpectedly succeeded" >&2
-  exit 1
-fi
-cmp -s "$ANDROID_COUNTER_LEDGER" \
-  "$counter_test_root/artifacts/mobile-android-network-counter-ledger.tsv" \
-  || { echo "failed aggregation did not preserve its exact ledger" >&2; exit 1; }
-[[ ! -e "$NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT" ]] || {
-  echo "failed aggregation retained a stale receipt" >&2
-  exit 1
-}
-printf 'stale-ledger\n' >"$ANDROID_COUNTER_LEDGER"
-if write_network_evidence android >/dev/null 2>&1; then
-  echo "stale durable counter ledger was accepted" >&2
-  exit 1
-fi
-printf 'failure-ledger\n' >"$ANDROID_COUNTER_LEDGER"
-canonical_builder_fail=0
-write_network_evidence android
-[[ ! -e "$ANDROID_COUNTER_LEDGER" ]] || {
-  echo "successful aggregation retained its temporary ledger" >&2
-  exit 1
-}
-rm -rf "$counter_test_root"
-unset -f python3 persist_counter_ledger write_network_evidence
-
-python3 - "$fixture_lib" "$remote_native" <<'PY'
-import pathlib
-import sys
-
-fixture = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-remote = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-start = fixture.index("mobile_wg_fixture_dns_evidence_snapshot()")
-end = fixture.index("\nmobile_wg_fixture_timed_dns_evidence_snapshot()", start)
-snapshot = fixture[start:end]
-if snapshot.count("mobile_wg_remote_native dns-evidence-snapshot") != 1:
-    raise SystemExit("native DNS evidence still uses multiple remote actions")
-if snapshot.count("mobile_wg_fixture_docker exec") != 1:
-    raise SystemExit("Docker DNS evidence still uses multiple container actions")
-for old_call in (
-    "mobile_wg_fixture_dns_count",
-    "mobile_wg_fixture_profile_dns_count",
-    "mobile_wg_fixture_provider_tls_count",
-    "mobile_wg_fixture_through_dns_count",
-    "mobile_wg_fixture_forward_dns_count",
-):
-    if old_call in snapshot:
-        raise SystemExit(f"DNS snapshot still fans out through {old_call}")
-if "dns-evidence-snapshot)" not in remote:
-    raise SystemExit("native fixture lacks an all-counter snapshot action")
-for counter in (
-    "dns_profile",
-    "cloudflare-dns.com",
-    "dns.quad9.net",
-    "dns.google",
-    "dns_through",
-    "dns_forward",
-):
-    if counter not in remote[remote.index("dns-evidence-snapshot)") :]:
-        raise SystemExit(f"native all-counter snapshot omits {counter}")
-PY
-
-custom_fields="$(
-  mobile_wg_dns_case_fields \
-    custom-doh fixture.nvpn.test 10.99.77.1 10.99.77.53
-)"
-[[ "$custom_fields" \
-  == 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-2-1.sslip.io|192.0.2.1|doh-google' ]] \
-  || { echo "custom DoH is not independently routed through Google" >&2; exit 1; }
-for encrypted_case in cloudflare-doh quad9-doh; do
-  encrypted_fields="$(
-    mobile_wg_dns_case_fields \
-      "$encrypted_case" fixture.nvpn.test 10.99.77.1 10.99.77.53
-  )"
-  [[ "$encrypted_fields" == *"|${encrypted_case%-doh}.192-0-2-1.sslip.io|192.0.2.1|"* ]] \
-    || { echo "$encrypted_case lacks a successful fresh-DNS answer" >&2; exit 1; }
-done
-through_fields="$(
-  mobile_wg_dns_case_fields \
-    through-exit fixture.nvpn.test 10.99.77.1 10.99.77.53
-)"
-[[ "$through_fields" \
-  == 'through_exit|cloudflare|||10.99.77.53|through-exit.fixture.nvpn.test|10.99.77.1|dns-through' ]] \
-  || { echo "through-exit DNS is not distinct from profile DNS" >&2; exit 1; }
-mobile_wg_fixture_assert_dns_case_evidence \
-  Android cloudflare-doh doh-cloudflare \
-  $'0\t0\t0\t0\t0\t0\t0' \
-  $'0\t0\t1\t0\t0\t0\t0' >/dev/null \
-  || { echo "valid exclusive Cloudflare evidence was rejected" >&2; exit 1; }
-if mobile_wg_fixture_assert_dns_case_evidence \
-    Android cloudflare-doh doh-cloudflare \
-    $'0\t0\t0\t0\t0\t0\t0' \
-    $'0\t0\t0\t0\t0\t0\t0' >/dev/null 2>&1
-then
-  echo "encrypted DNS accepted provider traffic without ClientHello SNI" >&2
-  exit 1
-fi
-mobile_wg_fixture_assert_dns_case_evidence \
-  macOS cloudflare-doh doh-cloudflare \
-  $'0\t0\t0\t0\t0\t0\t0' \
-  $'0\t0\t1\t1\t0\t0\t0' >/dev/null \
-  || { echo "macOS rejected a delayed unrelated provider capture" >&2; exit 1; }
-if mobile_wg_fixture_assert_dns_case_evidence \
-    macOS cloudflare-doh doh-cloudflare \
-    $'0\t0\t0\t0\t0\t0\t0' \
-    $'0\t0\t0\t1\t0\t0\t0' >/dev/null 2>&1
-then
-  echo "macOS accepted encrypted DNS without its target provider capture" >&2
-  exit 1
-fi
-(
-  snapshots=0
-  mobile_wg_fixture_dns_evidence_snapshot() {
-    snapshots=$((snapshots + 1))
-    if [[ "$snapshots" -lt 3 ]]; then
-      printf '0\t0\t0\t1\t0\t0\t0\n'
-    else
-      printf '0\t0\t1\t1\t0\t0\t0\n'
-    fi
-  }
-  sleep() { :; }
-  observed="$(
-    mobile_wg_fixture_wait_for_dns_case_evidence \
-      macOS cloudflare-doh doh-cloudflare \
-      $'0\t0\t0\t0\t0\t0\t0' fixture probe.example 4
-  )"
-  [[ "$observed" == $'0\t0\t1\t1\t0\t0\t0' ]] \
-    || { echo "bounded DNS evidence poll did not wait for the target capture" >&2; exit 1; }
-)
-mobile_wg_fixture_assert_dns_case_evidence \
-  iOS cloudflare-doh doh-cloudflare \
-  $'0\t0\t0\t0\t0\t0\t0' \
-  $'0\t0\t0\t0\t0\t0\t0' >/dev/null \
-  || { echo "iOS encrypted DNS still requires remote-WG provider SNI" >&2; exit 1; }
-mobile_wg_fixture_assert_timed_dns_case_evidence \
-  iOS automatic-profile dns-profile \
-  $'1000\t0\t0\t0\t0\t0\t0\t0' \
-  $'1001\t1\t1\t0\t0\t0\t0\t0' >/dev/null \
-  || { echo "valid exclusive profile DNS evidence was rejected" >&2; exit 1; }
-mobile_wg_fixture_assert_timed_dns_case_evidence \
-  iOS automatic-profile dns-profile \
-  $'1000\t0\t0\t0\t0\t0\t0\t0' \
-  $'1001\t1\t1\t1\t0\t0\t0\t0' >/dev/null \
-  || { echo "iOS profile DNS rejected unrelated whole-device SNI" >&2; exit 1; }
-if mobile_wg_fixture_assert_timed_dns_case_evidence \
-    Android automatic-profile dns-profile \
-    $'1000\t0\t0\t0\t0\t0\t0\t0' \
-    $'1001\t1\t1\t1\t0\t0\t0\t0' >/dev/null 2>&1
-then
-  echo "Android profile DNS accepted a provider-SNI fallback" >&2
-  exit 1
-fi
-if mobile_wg_fixture_assert_timed_dns_case_evidence \
-    iOS automatic-profile dns-profile \
-    $'1001\t0\t0\t0\t0\t0\t0\t0' \
-    $'1000\t1\t1\t0\t0\t0\t0\t0' >/dev/null 2>&1
-then
-  echo "profile DNS accepted counters outside their timestamped phase" >&2
-  exit 1
-fi
-python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
-import runpy
-import sys
-
-module = runpy.run_path(sys.argv[1])
-before = dict.fromkeys(module["COUNTERS"], 0)
-after = dict(before)
-after.update(query=1, profile=1)
-module["validate_dns_path_counters"](
-    "automatic-profile", "dns-profile", before, after
-)
-after["cloudflareSni"] = 1
-module["validate_dns_path_counters"](
-    "automatic-profile", "dns-profile", before, after, "ios"
-)
-try:
-    module["validate_dns_path_counters"](
-        "automatic-profile", "dns-profile", before, after
-    )
-except ValueError as error:
-    assert "forbidden cloudflareSni DNS path" in str(error)
-else:
-    raise SystemExit("profile DNS receipt accepted a provider-SNI fallback")
-PY
-if mobile_wg_fixture_assert_dns_case_evidence \
-    Android cloudflare-doh doh-cloudflare \
-    $'0\t0\t0\t0\t0\t0\t0' \
-    $'1\t1\t1\t0\t0\t0\t0' >/dev/null 2>&1
-then
-  echo "encrypted DNS accepted a plaintext profile fallback" >&2
-  exit 1
-fi
-if mobile_wg_fixture_assert_dns_case_evidence \
-    Android cloudflare-doh doh-cloudflare \
-    $'0\t0\t0\t0\t0\t0\t0' \
-    $'0\t0\t1\t0\t0\t0\t1' >/dev/null 2>&1
-then
-  echo "encrypted DNS accepted a forwarded plaintext-DNS fallback" >&2
-  exit 1
-fi
-mobile_wg_fixture_assert_dns_case_evidence \
-  iOS through-exit dns-through \
-  $'0\t0\t0\t0\t0\t0\t0' \
-  $'1\t0\t0\t0\t0\t3\t0' >/dev/null \
-  || { echo "valid exclusive through-exit evidence was rejected" >&2; exit 1; }
-if mobile_wg_fixture_assert_dns_case_evidence \
-    Android through-exit dns-through \
-    $'0\t0\t0\t0\t0\t0\t0' \
-    $'1\t2\t0\t0\t0\t3\t0' >/dev/null 2>&1
-then
-  echo "through-exit DNS accepted a profile-DNS fallback" >&2
-  exit 1
-fi
-if mobile_wg_fixture_assert_dns_case_evidence \
-    Android through-exit dns-through \
-    $'0\t0\t0\t0\t0\t0\t0' \
-    $'1\t0\t1\t0\t0\t3\t0' >/dev/null 2>&1
-then
-  echo "Android through-exit DNS accepted a provider-SNI fallback" >&2
-  exit 1
-fi
-
-mobile_wg_fixture_assert_dns_case_evidence \
-  iOS through-exit dns-through \
-  $'0\t0\t0\t0\t0\t0\t0' \
-  $'1\t0\t1\t0\t0\t3\t0' >/dev/null \
-  || { echo "iOS through-exit rejected unrelated whole-device SNI" >&2; exit 1; }
-
-assert_endpoint_fields() {
-  local raw="$1" port="$2" expected="$3" actual
-  actual="$(mobile_wg_endpoint_fields "$raw" "$port")" || {
-    echo "valid mobile fixture endpoint was rejected" >&2
-    exit 1
-  }
-  [[ "$actual" == "$expected" ]] || {
-    echo "mobile fixture endpoint rendered incorrectly" >&2
-    exit 1
-  }
+mock_increment() {
+  local path="$1" value=0
+  [[ ! -f "$path" ]] || value="$(<"$path")"
+  value=$((value + 1))
+  printf '%s\n' "$value" >"$path"
+  printf '%s\n' "$value"
 }
 
-assert_endpoint_fields \
-  192.0.2.10 51820 $'ipv4\t192.0.2.10\t192.0.2.10:51820'
-assert_endpoint_fields \
-  fixture.example.test 51820 \
-  $'dns\tfixture.example.test\tfixture.example.test:51820'
-assert_endpoint_fields \
-  2001:db8::10 51820 $'ipv6\t2001:db8::10\t[2001:db8::10]:51820'
+mobile_wg_fixture_initialize() {
+  MOBILE_WG_FIXTURE_VOLUME_DIR="$2"
+  printf 'fixture-init %s\n' "$2" >>"$NVPN_CONTRACT_EVENTS"
+}
+mobile_wg_fixture_assert_available() { :; }
+mobile_wg_fixture_build() {
+  printf 'fixture-build %s %s\n' "$2" "$3" >>"$NVPN_CONTRACT_EVENTS"
+}
+mobile_wg_fixture_run() {
+  MOBILE_WG_FIXTURE_STARTED=1
+  printf 'fixture-run %s\n' "$2" >>"$NVPN_CONTRACT_EVENTS"
+}
+mobile_wg_fixture_ready() { return 0; }
+mobile_wg_fixture_running() { return 0; }
+mobile_wg_fixture_logs() { :; }
+mobile_wg_fixture_wg_bytes() {
+  local value
+  value="$(mock_increment "$NVPN_CONTRACT_STATE/wg")"
+  printf '%s\t%s\n' "$value" "$value"
+}
+mobile_wg_fixture_forward_packets() {
+  mock_increment "$NVPN_CONTRACT_STATE/forward"
+}
+mobile_wg_fixture_timed_dns_evidence_snapshot() {
+  local unused_container="$1" host="$2" call after=0 timestamp
+  local key="${host//[^A-Za-z0-9]/_}"
+  call="$(mock_increment "$NVPN_CONTRACT_STATE/dns-$key")"
+  timestamp="$(mock_increment "$NVPN_CONTRACT_STATE/time")"
+  ((call % 2 == 0)) && after=1
+  case "$host" in
+    wireguard-exit.nvpn-e2e.test)
+      printf '%s\t%s\t%s\t0\t0\t0\t0\t0\n' \
+        "$timestamp" "$after" "$after"
+      ;;
+    cloudflare.*)
+      printf '%s\t0\t0\t%s\t0\t0\t0\t0\n' "$timestamp" "$after"
+      ;;
+    quad9.*)
+      printf '%s\t0\t0\t0\t%s\t0\t0\t0\n' "$timestamp" "$after"
+      ;;
+    custom.*)
+      printf '%s\t0\t0\t0\t0\t%s\t0\t0\n' "$timestamp" "$after"
+      ;;
+    through-exit.*)
+      printf '%s\t%s\t0\t0\t0\t0\t%s\t0\n' \
+        "$timestamp" "$after" "$after"
+      ;;
+    *) return 2 ;;
+  esac
+}
+mobile_wg_fixture_dns_count() { printf '1\n'; }
+mobile_wg_fixture_begin_cleanup() {
+  trap - EXIT
+  trap '' HUP INT TERM
+  printf 'fixture-begin-cleanup\n' >>"$NVPN_CONTRACT_EVENTS"
+}
+mobile_wg_fixture_cleanup() {
+  printf 'fixture-cleanup %s\n' "$1" >>"$NVPN_CONTRACT_EVENTS"
+  [[ "${NVPN_CONTRACT_CLEANUP_FAIL:-0}" != 1 ]]
+}
+SH
 
-for invalid_host in \
-  "" \
-  " fixture.example.test" \
-  "fixture.example.test " \
-  "[2001:db8::10]" \
-  "fixture.example.test:51820" \
-  "https://fixture.example.test" \
-  "fixture.example.test/path" \
-  "2001:db8::gg" \
-  "-fixture.example.test" \
-  "fixture..example.test" \
-  "999.2.3.4"
-do
-  if mobile_wg_endpoint_fields "$invalid_host" 51820 >/dev/null 2>&1; then
-    echo "mobile fixture accepted malformed raw endpoint host" >&2
-    exit 1
-  fi
-done
-for invalid_port in 0 65536 port; do
-  if mobile_wg_endpoint_fields fixture.example.test "$invalid_port" \
-      >/dev/null 2>&1
-  then
-    echo "mobile fixture accepted malformed endpoint port" >&2
-    exit 1
-  fi
-done
-
-grep -Fq 'WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
-  && grep -Fq 'Endpoint = $WIREGUARD_ENDPOINT_AUTHORITY' "$gate" \
-  && grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"' "$gate" \
-  || { echo "mobile gate does not separate raw host from endpoint authority" >&2; exit 1; }
-grep -Fq 'let remoteAddress = parseIPv4CIDR(resolvedWgExcludedRoute)?.address ?? "1.1.1.1"' \
-  "$ios_packet_tunnel" \
-  || { echo "iOS tunnel does not derive its remote-address IP from the resolved WG route" >&2; exit 1; }
-if rg -q 'first(WireGuard|Fips)EndpointHost|endpointHost\(' "$ios_packet_tunnel"; then
-  echo "iOS tunnelRemoteAddress still accepts an unvalidated configured endpoint host" >&2
-  exit 1
-fi
-grep -Fq 'packetFlow.readPackets' "$ios_packet_flow_bridge" \
-  && grep -Fq 'packetFlow.writePackets' "$ios_packet_flow_bridge" \
-  && grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_start' "$ios_packet_flow_bridge" \
-  && grep -Fq 'nostr_vpn_mobile_tunnel_packet_flow_send' "$ios_packet_tunnel" \
-  || { echo "iOS packet tunnel does not use the supported NEPacketTunnelFlow bridge" >&2; exit 1; }
-grep -Fq 'PacketFlowBridge.swift in Sources' "$ios_project_file" \
-  && grep -Fq 'ios_release_network_audit_packet_flow_binary' "$ios_release_binary_audit" \
-  && grep -Fq 'native utun fd attached' "$ios_release_binary_audit" \
-  || { echo "iOS packet-flow source or binary audit is not wired into release artifacts" >&2; exit 1; }
-grep -Fq 'include!("mobile_tunnel/ios_packet_flow.rs")' \
-  "$ROOT/crates/nostr-vpn-app-core/src/mobile_tunnel.rs" \
-  && grep -Fq 'IosPacketFlowRuntime' "$mobile_packet_flow" \
-  && grep -Fq 'Java_org_nostrvpn_app_core_NativeCore_mobileTunnelAttachTunFd' "$fips_c_abi" \
-  || { echo "mobile packet I/O does not preserve Android fd I/O beside the iOS packet-flow bridge" >&2; exit 1; }
-if rg -q \
-  'current_ios_utun_fd|CTLIOCGINFO|com\\.apple\\.net\\.utun_control|getpeername|libc::dup|libc::readv|libc::writev|attach_current_tun_fd' \
-  "$ROOT/crates/nostr-vpn-app-core/src" "$ROOT/ios/PacketTunnel"
-then
-  echo "iOS production packet I/O still reaches the private utun fd" >&2
-  exit 1
-fi
-if grep -Fq 'outbound_tx.blocking_send' "$mobile_packet_flow"; then
-  echo "iOS packet-flow send can deadlock tunnel shutdown" >&2
-  exit 1
-fi
-if grep -Fq 'nostr_vpn_mobile_tunnel_attach_current_tun_fd' \
-  "$ROOT/ios/Bindings/NostrVpnAppCoreC.h"
-then
-  echo "iOS C ABI still exports private utun fd attachment" >&2
-  exit 1
-fi
-grep -Fq 'if let Some(IpAddr::V4(ip)) =' "$mobile_tunnel_config" \
-  && grep -Fq 'wireguard_endpoint_host_ip(&app.wireguard_exit.endpoint)' \
-    "$mobile_tunnel_config" \
-  || { echo "mobile config can emit a non-IPv4 excluded route" >&2; exit 1; }
-grep -Fq 'NVPN_MOBILE_WG_REMOTE_ENDPOINT_FAMILY' "$remote_native" \
-  && grep -Fq 'ss -H -lun4' "$remote_native" \
-  && grep -Fq 'ss -H -lun6' "$remote_native" \
-  && grep -Fq 'ip filter INPUT' "$remote_native" \
-  && grep -Fq 'ip6 filter INPUT' "$remote_native" \
-  && grep -Fq 'if [[ "$endpoint_family" != "ipv6" ]]' "$remote_native" \
-  && grep -Fq 'if [[ "$endpoint_family" != "ipv4" ]]' "$remote_native" \
-  && grep -Fq 'meta nfproto ipv4 iifname "$interface" accept' "$remote_native" \
-  || { echo "remote native fixture lacks family-specific listener/firewall proof" >&2; exit 1; }
-dnsmasq_block="$(
-  sed -n '/^    dnsmasq \\$/,/^      --pid-file=/p' "$remote_native"
-)"
-grep -Fq -- '--bind-interfaces' <<<"$dnsmasq_block" \
-  && grep -Fq -- '--listen-address="$local_server_ip"' <<<"$dnsmasq_block" \
-  || { echo "remote native DNS is not bound to its explicit lane address" >&2; exit 1; }
-if grep -Fq -- '--interface=' <<<"$dnsmasq_block"; then
-  echo "remote native DNS implicitly unions every lane with loopback" >&2
-  exit 1
-fi
-
-for label in automatic-profile cloudflare-doh quad9-doh custom-doh through-exit; do
-  grep -Fq "$label" "$fixture_lib" || {
-    echo "shared mobile exit contract is missing the $label DNS case" >&2
-    exit 1
-  }
-done
-
-grep -Fq 'mobile_wg_fixture_timed_dns_evidence_snapshot' "$gate" \
-  && grep -Fq 'mobile_wg_fixture_assert_timed_dns_case_evidence' "$gate" \
-  || { echo "mobile exit gate does not require exclusive resolver evidence" >&2; exit 1; }
-grep -Fq 'switch_direct="$final"' "$gate" \
-  && grep -Fq 'NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED="$switch_direct"' "$gate" \
-  || { echo "Android gate does not exercise WireGuard -> Direct while connected" >&2; exit 1; }
-grep -Fq 'NVPN_ANDROID_PACKAGE="${NVPN_ANDROID_PACKAGE:-fi.siriusbusiness.nvpn}"' "$gate" \
-  || { echo "Android gate does not use the single canonical app package" >&2; exit 1; }
-grep -Fq 'assert_single_android_app' "$gate" \
-  || { echo "Android gate does not reject stale parallel nVPN installs" >&2; exit 1; }
-grep -Fq 'assert_single_android_app_process' "$android_smoke" \
-  || { echo "Android physical smoke does not reject duplicate canonical app processes" >&2; exit 1; }
-stale_package_filter='$0 == "org.nostrvpn.app" || ($0 ~ /^fi\.siriusbusiness\.nvpn(\.|$)/ && $0 != "fi.siriusbusiness.nvpn")'
-grep -Fq "$stale_package_filter" "$gate" \
-  || { echo "Android stale-package filter is missing or over-escaped" >&2; exit 1; }
-filtered_packages="$(
-  printf '%s\n' \
-    fi.siriusbusiness.nvpn \
-    fi.siriusbusiness.nvpn.debug \
-    fi.siriusbusiness.nvpn.test \
-    fi.siriusbusiness.other \
-    org.nostrvpn.app \
-    | awk "$stale_package_filter"
-)"
-[[ "$filtered_packages" == $'fi.siriusbusiness.nvpn.debug\nfi.siriusbusiness.nvpn.test\norg.nostrvpn.app' ]] \
-  || { echo "Android stale-package filter does not select only parallel nVPN installs" >&2; exit 1; }
-grep -Fq '"switchToDirect": direct == "1"' "$gate" \
-  && grep -Fq '"$label" "$run_id" "$spec_base64"' "$gate" \
-  || { echo "iOS Release gate does not exercise WireGuard -> Direct while connected" >&2; exit 1; }
-grep -Fq 'LIFECYCLE_GATE="${NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE:-1}"' "$gate" \
-  || { echo "standalone mobile exit gate does not retain lifecycle coverage by default" >&2; exit 1; }
-grep -Fq 'mobile_wg_fixture_build' "$gate" \
-  && grep -Fq 'elif ! bool_is_true "$image_ready"; then' "$fixture_lib" \
-  || { echo "parallel mobile exit lanes cannot reuse their prebuilt fixture image" >&2; exit 1; }
-grep -Fq 'NVPN_ANDROID_LIFECYCLE_GATE="$lifecycle_gate"' "$gate" \
-  || { echo "Android mobile exit cases ignore the lifecycle-gate mode" >&2; exit 1; }
-grep -Fq 'NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT="$WIREGUARD_ENDPOINT_AUTHORITY"' "$gate" \
-  || { echo "Android mobile exit cases do not pin the expected WireGuard endpoint" >&2; exit 1; }
-grep -Fq 'NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI=1' "$gate" \
-  || { echo "Android physical DNS cases do not require the shipped UI driver" >&2; exit 1; }
-grep -Fq 'android_release_accept_single_native_tunnel_refresh' "$android_release_gate" \
-  && grep -Fq 'expected=$((before + 1))' "$android_release_gate" \
-  && grep -Fq 'direct_transition_pid="$(android_app_pid)"' "$android_release_gate" \
-  && grep -Fq '[[ "$(android_app_pid)" == "$expected_pid" ]]' "$android_release_gate" \
-  && grep -Fq 'connected-direct "$direct_transition_pid"' "$android_release_gate" \
-  || {
-    echo "Android WireGuard-to-Direct transition does not require exactly one in-process tunnel refresh" >&2
-    exit 1
-  }
-grep -Fq 'RELEASE_BLACKBOX_GATE="${NVPN_MOBILE_WG_EXIT_RELEASE_BLACKBOX:-1}"' "$gate" \
-  && grep -Fq -- '--release-network-gate' "$gate" \
-  && grep -Fq 'NVPN_ANDROID_WIREGUARD_CONFIG_FILE="$wireguard_config_file"' "$gate" \
-  || {
-    echo "Android physical DNS cases do not default to the production Release UI path" >&2
-    exit 1
-  }
-if grep -Fq ',,' "$android_smoke"; then
-  echo "Android physical smoke uses Bash-4 lowercase expansion on macOS Bash" >&2
-  exit 1
-fi
-[[ "$(grep -Fc 'mobile_wg_fixture_assert_timed_dns_case_evidence' "$gate")" -eq 2 ]] \
-  || {
-    echo "Android/iOS Release DNS cases do not require shared positive/negative evidence" >&2
-    exit 1
-  }
-grep -Fq 'run_ios_release_network_case' "$gate" \
-  && grep -Fq 'ios_release_network_prepare "$IOS_DEVICE_SELECTED"' "$gate" \
-  && grep -Fq 'iOS physical network claims require the company-signed Release black-box gate' "$gate" \
-  || { echo "iOS physical DNS cases do not require the Release black-box runner" >&2; exit 1; }
-python3 - "$gate" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-prepare = source.index('  ios_release_network_prepare "$IOS_DEVICE_SELECTED"')
-cleanup = source.index('  ios_release_network_disconnect_cleanup 1', prepare)
-case_loop = source.index('  for index in "${!DNS_CASES[@]}"; do', prepare)
-if not prepare < cleanup < case_loop:
-    raise SystemExit(
-        "iOS fixture counters are sampled before a stale installed tunnel is disconnected"
-    )
-PY
-python3 - "$ios_release_gate" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = source.split("ios_release_network_disconnect_cleanup() {", 1)[1].split(
-    "\n}", 1
-)[0]
-required = (
-    'local preserve_prepared="${1:-0}"',
-    'if [[ "$preserve_prepared" != "1" ]]; then',
-    "ios_release_network_cleanup_private_artifacts || cleanup_failed=1",
-)
-if any(token not in body for token in required):
-    raise SystemExit(
-        "iOS preflight disconnect cannot retain its prepared Release runner"
-    )
-PY
-grep -Fq -- '-configuration Release' "$ios_release_gate" \
-  && grep -Fq 'export NVPN_IOS_RUST_PROFILE=release' "$ios_release_gate" \
-  && grep -Fq 'testReleaseNetworkLifecycle' "$ios_release_gate" \
-  && grep -Fq 'testReleaseDisconnectCleanup' "$ios_release_gate" \
-  || { echo "iOS physical DNS cases do not build/test the company-signed Release app" >&2; exit 1; }
-grep -Fq 'driveRapidStartStopStress' "$ios_release_ui" \
-  && grep -Fq '"exerciseStartStopStress": rapid_start_stop.lower() in {"1", "true", "yes", "on"}' "$gate" \
-  && grep -Fq '"$rapid_start_stop_gate"' "$gate" \
-  && grep -Fq 'NVPN_IOS_RELEASE_START_STOP_RECOVERED=1' "$ios_release_ui" \
-  && grep -Fq 'NVPN_IOS_RELEASE_START_STOP_RECOVERED=1' "$ios_release_gate" \
-  || {
-    echo "iOS signed Release gate lacks rapid cancel-during-start recovery coverage" >&2
-    exit 1
-  }
-grep -Fq 'RAPID_START_STOP_GATE="${NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE:-auto}"' "$gate" \
-  && grep -Fq 'auto) printf '\''%s\n'\'' "$first"' "$gate" \
-  && [[ "$(grep -Fc 'rapid_start_stop_gate="$(rapid_start_stop_for_case "$first")"' "$gate")" -eq 2 ]] \
-  && grep -Fq 'NVPN_ANDROID_RAPID_START_STOP_GATE="$rapid_start_stop_gate"' "$gate" \
-  && grep -Fq 'run_android_release_rapid_start_stop_gate' "$android_release_gate" \
-  && ! grep -Fq 'android_release_rapid_cancel_once' "$android_release_gate" \
-  && ! grep -Fq '0 10 30 80 160 320 640 1000' "$android_release_gate" \
-  && grep -Fq 'android_release_connect_ui' "$android_release_gate" \
-  && grep -Fq 'android_release_disconnect_ui' "$android_release_gate" \
-  && grep -Fq 'run_android_release_direct_network_probe start-stop-stable-direct 0' \
-    "$android_release_gate" \
-  && grep -Fq 'run_android_release_exit_network_probe start-stop-full-reconnect' \
-    "$android_release_gate" \
-  && grep -Fq 'assert_single_android_app_process' "$android_release_gate" \
-  || {
-    echo "Android signed Release gate lacks semantic start/stop/reconnect coverage" >&2
-    exit 1
-  }
-grep -Fq 'ios_release_network_audit_artifact' "$ios_release_gate" \
-  && grep -Fq 'fipsCoreVersion' "$ios_release_artifact" \
-  && grep -Fq 'fipsGitTree' "$ios_release_artifact" \
-  && grep -Fq 'fipsDependenciesForcedRebuilt' "$ios_release_artifact" \
-  && grep -Fq 'NVPN_EXPECTED_FIPS_VERSION' "$ios_release_gate" \
-  && grep -Fq 'rglob("fips_core-*.d")' "$ios_release_artifact" \
-  && grep -Fq 'fips_core::transport' "$ios_release_artifact" \
-  && grep -Fq 'packetTunnelCodeDirectoryHash' "$ios_release_artifact" \
-  && grep -Fq 'appCodeDirectoryHash' "$ios_release_artifact" \
-  && grep -Fq 'paid_exit::wallet_worker' "$ios_release_artifact" \
-  && grep -Fq 'nostr_vpn_update_check' "$ios_release_artifact" \
-  && grep -Fq '"paidExitWalletWorkerCompiled": False' "$ios_release_artifact" \
-  && grep -Fq '"updaterCompiled": False' "$ios_release_artifact" \
-  || { echo "iOS Release gate lacks exact app/tunnel/FIPS artifact receipts" >&2; exit 1; }
-grep -Fq 'nvpn_verify_local_fips_metadata' "$ROOT/tools/run-ios" \
-  && grep -Fq 'nvpn_force_rebuild_local_fips_target' "$ROOT/tools/run-ios" \
-  && grep -Fq 'checkoutPathSha256' "$local_fips" \
-  && ! grep -Fq '"checkoutPath":' "$local_fips" \
-  || { echo "iOS Release build lacks sanitized exact local-FIPS resolution/rebuild proof" >&2; exit 1; }
-if grep -Fq 'nostr_vpn_fips_core_version' "$fips_c_abi"; then
-  echo "mobile linkage gate retains a self-attested FIPS version C ABI" >&2
-  exit 1
-fi
-grep -Fq 'ios_release_network_company_signing' "$ios_release_gate" \
-  && grep -Fq 'profile.get("TeamIdentifier") != [team_id]' "$ios_release_artifact" \
-  && grep -Fq 'app and Packet Tunnel use different signing certificates' "$ios_release_artifact" \
-  && grep -Fq 'Release signer is not the expected company organization' "$ios_release_artifact" \
-  || { echo "iOS Release gate does not pin the Sirius Business app/tunnel signer" >&2; exit 1; }
-grep -Fq 'build-for-testing' "$ios_release_gate" \
-  && grep -Fq 'test-without-building' "$ios_release_gate" \
-  && grep -Fq 'IOS_RELEASE_NETWORK_BASE_TREE_SHA' "$ios_release_artifact" \
-  && grep -Fq 'installedBuildNumber' "$ios_release_artifact" \
-  || { echo "iOS Release cases do not reuse/read back one exact signed artifact" >&2; exit 1; }
-python3 - "$ios_release_gate" "$join_gate" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-reuse = source.split("ios_release_network_prepare_reuse() {", 1)[1].split(
-    "\nios_release_network_prepare() {", 1
-)[0]
-for forbidden in ("security", "ios-profiles", "ios-build", "xcodebuild", "codesign"):
-    if forbidden in reuse:
-        raise SystemExit(f"exact iOS reuse invokes forbidden path: {forbidden}")
-for required in ("appBundleTreeSha256", "runner tree digest", "xctestrunSha256",
-                 "ios_release_network_install_exact_runner"):
-    if required not in reuse:
-        raise SystemExit(f"exact iOS reuse omits {required}")
-prepare = source.split("\nios_release_network_prepare() {", 1)[1]
-if prepare.index("ios_release_network_prepare_reuse") > prepare.index(
-    "ios_release_network_company_signing"
-):
-    raise SystemExit("exact iOS reuse reaches signing identity selection")
-build = prepare.index("build_command+=(build-for-testing)")
-audit = prepare.index("ios_release_network_audit_rust_feature_surface")
-if build >= audit:
-    raise SystemExit("cold-cache iOS preparation audits before building")
-join = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-cleanup = join.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
-if "device uninstall app" in cleanup or "release_join_ios_abort_test" not in cleanup:
-    raise SystemExit("join cleanup does not terminate while retaining the iOS runner")
-PY
-grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
-  && grep -Fq '"selectedPhysicalDevice": selected_device' "$ios_release_artifact" \
-  && grep -Fq '"explicitPhysicalDeviceVerified": True' "$ios_release_gate" \
-  || { echo "iOS Release gate does not pin and receipt the explicitly selected phone" >&2; exit 1; }
-grep -Fq 'capture-mobile-ios-underlay-output.py' "$ios_release_gate" \
-  && grep -Fq 'packetTunnelProcessIdentifiers' "$ios_underlay_capture" \
-  && grep -Fq 'distinct packet-tunnel PIDs' "$ios_underlay_capture" \
-  && grep -Fq 'ACTIVE_TUNNEL_CHECKPOINT' "$ios_underlay_capture" \
-  && grep -Fq 'directCheckpointProcesses' "$ios_underlay_capture" \
-  && grep -Fq 'directRunnerAcknowledgements' "$ios_underlay_capture" \
-  && grep -Fq '"requiredCheckpoints": sorted(required_checkpoints)' "$ios_underlay_capture" \
-  && grep -Fq 'checkpoints without a valid process observation=' "$ios_underlay_capture" \
-  && grep -Fq 'self.update_checkpoint("active-session-end")' "$ios_underlay_capture" \
-  && grep -Fq 'if required != expected:' "$ios_release_gate" \
-  && grep -Fq 'if not expected.issubset(observed):' "$ios_release_gate" \
-  || { echo "iOS Release gate does not independently prove stable app/tunnel processes" >&2; exit 1; }
-grep -Fq '"NVPN_IOS_RELEASE_RUN_ID=$run_id"' "$ios_release_gate" \
-  && grep -Fq 'emit("NVPN_IOS_RELEASE_RUN_ID=\(spec.runId)")' "$ios_release_ui" \
-  || { echo "iOS Release runner accepts stale per-case marker receipts" >&2; exit 1; }
-grep -Fq 'XCTAssertTrue(app.launchArguments.isEmpty)' "$ios_release_ui" \
-  && grep -Fq 'XCTAssertTrue(app.launchEnvironment.isEmpty)' "$ios_release_ui" \
-  || { echo "iOS Release black-box runner permits app test mutation" >&2; exit 1; }
-grep -Fq '@FocusState private var configFocused: Bool' "$ios_settings" \
-  && grep -Fq '.focused($configFocused)' "$ios_settings" \
-  && grep -Fq '.accessibilityIdentifier("wireguard-keyboard-done")' "$ios_settings" \
-  && grep -Fq 'finishTextEntry(' "$ios_release_ui" "$ios_release_ui_support" \
-  && ! grep -Fq 'typeKey(.escape' "$ios_release_ui" "$ios_release_ui_support" \
-  && ! grep -Fq 'XCUIDevice.shared.press(.home)' "$ios_release_ui_support" \
-  || { echo "iOS WireGuard editor lacks its shipped keyboard Done path" >&2; exit 1; }
-for selector in \
-  internet-source-wireguard \
-  exit-dns-mode-automatic \
-  exit-dns-mode-encrypted \
-  exit-dns-provider-cloudflare \
-  exit-dns-provider-quad9 \
-  exit-dns-provider-custom \
-  exit-dns-mode-through-exit \
-  internet-source-direct \
-  vpn-toggle
-do
-  grep -Fq "\"$selector\"" "$ios_release_ui" "$ios_release_ui_support" \
-    || { echo "iOS Release runner omits shipped selector $selector" >&2; exit 1; }
-done
-grep -Fq 'for label in ["Turn VPN off", "Turn VPN on"]' "$ios_release_ui_support" \
-  && grep -Fq 'app.buttons.matching(' "$ios_release_ui_support" \
-  && grep -Fq 'guard count == 1 else' "$ios_release_ui_support" \
-  && grep -Fq 'return matches.firstMatch' "$ios_release_ui_support" \
-  && ! grep -Fq 'element("vpn-toggle")' "$ios_release_ui_support" \
-  || { echo "iOS Release runner does not select the unique shipped VPN button" >&2; exit 1; }
-grep -Fq 'assertPayloadRecovery(' "$ios_release_underlay" \
-  && grep -Fq '_PAYLOAD_RECOVERY_MS=' "$ios_release_underlay" \
-  && grep -Fq 'NWPathMonitor(requiredInterfaceType: .wifi)' "$ios_release_underlay" \
-  && grep -Fq 'NWPathMonitor(requiredInterfaceType: .cellular)' "$ios_release_underlay" \
-  && grep -Fq 'wifiMonitor.currentPath' "$ios_release_underlay" \
-  && grep -Fq 'cellularMonitor.currentPath' "$ios_release_underlay" \
-  && ! grep -Fq 'NWPathMonitor()' "$ios_release_underlay" \
-  && grep -Fq 'NVPN_IOS_RELEASE_BACKGROUND_' "$ios_release_ui" \
-  && grep -Fq 'NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1' "$ios_release_ui" \
-  && grep -Fq 'requireUDPEcho' "$ios_release_probe" \
-  && grep -Fq 'expectedAddress: spec.resolverExpectedAddress' "$ios_release_ui" \
-  || { echo "iOS Release runner omits underlay/lifecycle/Direct packet proof" >&2; exit 1; }
-python3 - "$ios_release_ui" "$ios_underlay_capture" <<'PY'
-import pathlib
-import re
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = source.split("private func driveBackgroundForeground", 1)[1].split(
-    "private func selectDirectWhileConnected", 1
-)[0]
-required = (
-    "pressHomeAndWaitForSpringBoard()",
-    "app.activate()",
-    "app.windows.firstMatch.waitForExistence(timeout: 10)",
-    "Release app UI was unavailable after lifecycle cycle",
-    "waitForVPNState(on: true, timeout: 8)",
-    "Release VPN UI was not on after lifecycle cycle",
-)
-if any(token not in body for token in required):
-    raise SystemExit(
-        "iOS Release lifecycle gate does not independently prove foreground UI and VPN state"
-    )
-if "waitForApplicationState(.runningForeground" in body:
-    raise SystemExit(
-        "iOS Release lifecycle gate trusts stale XCUIApplication.state after activation"
-    )
-
-if "driveConfigSyncBackgroundForeground" in source:
-    raise SystemExit(
-        "iOS Release gate includes timing-dependent config-sync interruption coverage"
-    )
-
-direct = source.split("private func selectDirectWhileConnected", 1)[1].split(
-    "private func releaseSpec", 1
-)[0]
-offset = -1
-for token in (
-    'option: "internet-source-direct"',
-    "try waitForInternetTransitionToSettle()",
-    "waitForVPNState(on: true",
-    "try proveDirect",
-    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_READY=1",
-    "waitForHostProcessObservation",
-    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_PASSED=1",
-    "relaunch()",
-    "try waitForInternetTransitionToSettle()",
-    'assertPicker("internet-source-picker", contains: "This device")',
-    "waitForVPNState(on: true",
-    "try proveDirect",
-    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_READY=1",
-    "waitForHostProcessObservation",
-    "NVPN_IOS_RELEASE_CONNECTED_DIRECT_RELAUNCH_PASSED=1",
-):
-    offset = direct.find(token, offset + 1)
-    if offset < 0:
-        raise SystemExit(
-            "iOS Direct transition does not settle before its persistence relaunch"
-        )
-if "Interrupt the scheduled stop/restart" in direct:
-    raise SystemExit("iOS Direct gate still force-kills an in-flight tunnel update")
-if "Thread.sleep(forTimeInterval: 6)" in direct:
-    raise SystemExit("iOS Direct gate still guesses tunnel readiness with a fixed sleep")
-if "isHittable" in direct or "waitForExistence" in direct:
-    raise SystemExit("iOS Direct gate duplicates menu timing logic")
-
-test_body = source.split("func testReleaseNetworkLifecycle", 1)[1].split(
-    "private func configureWireGuard", 1
-)[0]
-active_end = test_body.index("NVPN_IOS_RELEASE_ACTIVE_SESSION_END_MS")
-direct_call = test_body.index("try selectDirectWhileConnected")
-if active_end > direct_call:
-    raise SystemExit(
-        "iOS process-continuity sampling includes an intentional app relaunch"
-    )
-capture = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-for token in (
-    "RELEASE_CONNECTED_DIRECT(?:_RELAUNCH)?_READY",
-    '"release_connected_direct_ready": "release_connected_direct_passed"',
-    '"release_connected_direct_relaunch_ready"',
-    '"release_connected_direct_relaunch_passed"',
-    '"directCheckpointProcesses": direct_checkpoint_processes',
-    '"directRunnerAcknowledgements": sorted(direct_acknowledgements)',
-):
-    if token not in capture:
-        raise SystemExit(
-            "iOS connected Direct path lacks acknowledged PacketTunnel process proof"
-        )
-sample_timeout = int(
-    capture.split("DIRECT_SAMPLE_TIMEOUT_SECONDS = ", 1)[1].splitlines()[0]
-)
-ack_timeout = int(
-    capture.split("DIRECT_ACK_TIMEOUT_SECONDS = ", 1)[1].splitlines()[0]
-)
-runner_timeouts = [
-    int(value)
-    for value in re.findall(
-        r"waitForHostProcessObservation\([\s\S]*?timeout: (\d+)", direct
-    )
-]
-if len(runner_timeouts) != 2:
-    raise SystemExit("iOS Direct gate lacks two bounded host acknowledgements")
-if any(
-    sample_timeout + ack_timeout + 5 > timeout
-    for timeout in runner_timeouts
-):
-    raise SystemExit(
-        "iOS Direct host observation lacks five seconds of runner scheduling margin"
-    )
-PY
-if grep -Fq -- '--nvpn-debug-' \
-  "$ios_release_gate" "$ios_release_ui" "$ios_release_ui_support" "$ios_release_underlay"
-then
-  echo "iOS Release black-box path contains a debug app action" >&2
-  exit 1
-fi
-if grep -Fq 'DeviceDebug' "$ios_release_gate"; then
-  echo "iOS Release black-box path uses the debug configuration" >&2
-  exit 1
-fi
-grep -Fq 'IOS_CLEANUP_ARMED=1' "$gate" \
-  || { echo "iOS physical DNS gate never arms emergency tunnel cleanup" >&2; exit 1; }
-grep -Fq 'ios_release_network_delete_private_test_products' "$ios_release_gate" \
-  && grep -Fq 'ios_release_network_preserve_diagnostics' "$ios_release_gate" \
-  && grep -Fq 'ios_release_network_assert_retained_no_secrets' "$ios_release_gate" \
-  && grep -Fq 'NVPN_PRIVATE_RELEASE_SPEC_BASE64' "$ios_release_gate" \
-  && grep -Fq 'retainedFullXcresult' "$ios_release_gate" \
-  && grep -Fq 'runnerSigningClass": "development"' "$ios_release_gate" \
-  && grep -Fq 'appSigningClass": "distribution"' "$ios_release_gate" \
-  && ! grep -Fq 'tail -n 160 "$log"' "$ios_release_gate" \
-  || { echo "iOS Release runner does not retain safe exact launch diagnostics" >&2; exit 1; }
-secret_temp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-secret-scan.XXXXXX")"
-trap 'rm -rf "$secret_temp"' EXIT
-secret_spec="$(
-  python3 - <<'PY'
+cat >"$MOCK_ROOT/scripts/lib-mobile-ios-release-network.sh" <<'SH'
+#!/usr/bin/env bash
+ios_release_network_prepare() {
+  printf 'ios-prepare %s\n' "$1" >>"$NVPN_CONTRACT_EVENTS"
+}
+ios_release_network_disconnect_cleanup() {
+  printf 'ios-disconnect-cleanup %s\n' "${1:-0}" >>"$NVPN_CONTRACT_EVENTS"
+}
+ios_release_network_cleanup_private_artifacts() {
+  printf 'ios-private-cleanup\n' >>"$NVPN_CONTRACT_EVENTS"
+}
+run_ios_release_network_case() {
+  local label="$1" run_id="$2" spec="$3"
+  python3 - "$NVPN_CONTRACT_IOS_CASES" "$label" "$run_id" "$spec" \
+    "$4" "$5" "$6" "$7" <<'PY'
 import base64
 import json
+import pathlib
+import sys
 
-payload = {
-    "wireGuardConfig": "[Interface]\nPrivateKey = fake-private-key-material\n",
+path, label, run_id, encoded, lifecycle, underlay, direct, rapid = sys.argv[1:]
+payload = json.loads(base64.b64decode(encoded))
+record = {
+    "label": label,
+    "runId": run_id,
+    "lifecycleArg": lifecycle,
+    "underlayArg": underlay,
+    "directArg": direct,
+    "rapidArg": rapid,
+    "spec": payload,
 }
-print(base64.b64encode(json.dumps(payload).encode()).decode())
+with pathlib.Path(path).open("a", encoding="utf-8") as output:
+    output.write(json.dumps(record, sort_keys=True) + "\n")
 PY
+  if bool_is_true "$5"; then
+    mkdir -p "$NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR"
+    printf '%s\n' \
+      'NVPN_IOS_UNDERLAY_SWITCH_1_FRESH_DNS_QUERY=12345678-1234-1234-1234-123456789abc.fixture.test' \
+      >"$NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR/mobile-ios-release-network-automatic-profile-contract-runner-markers.log"
+  fi
+  [[ "${NVPN_CONTRACT_FAIL_IOS_LABEL:-}" != "$label" ]]
+}
+SH
+
+cat >"$MOCK_ROOT/scripts/mobile-android-smoke.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$NVPN_CONTRACT_ANDROID_CASES" "$@" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+mode = os.environ["NVPN_ANDROID_EXIT_DNS_MODE"]
+provider = os.environ["NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER"]
+label = {
+    ("automatic", "cloudflare"): "automatic-profile",
+    ("encrypted", "cloudflare"): "cloudflare-doh",
+    ("encrypted", "quad9"): "quad9-doh",
+    ("encrypted", "custom"): "custom-doh",
+    ("through_exit", "cloudflare"): "through-exit",
+}[(mode, provider)]
+keys = (
+    "NVPN_ANDROID_EXIT_DNS_MODE",
+    "NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER",
+    "NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_URL",
+    "NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS",
+    "NVPN_ANDROID_EXIT_DNS_THROUGH_EXIT_SERVERS",
+    "NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI",
+    "NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED",
+    "NVPN_ANDROID_LIFECYCLE_GATE",
+    "NVPN_ANDROID_UNDERLAY_CHANGE_GATE",
+    "NVPN_ANDROID_RAPID_START_STOP_GATE",
+    "NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT",
+    "NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP",
+)
+record = {
+    "label": label,
+    "args": sys.argv[2:],
+    **{key: os.environ.get(key, "") for key in keys},
+}
+with pathlib.Path(sys.argv[1]).open("a", encoding="utf-8") as output:
+    output.write(json.dumps(record, sort_keys=True) + "\n")
+PY
+if [[ "${NVPN_ANDROID_UNDERLAY_CHANGE_GATE:-0}" == 1 ]]; then
+  mkdir -p "$NVPN_ANDROID_RESULT_DIR"
+  printf 'proof_fresh_dns_query\t%s\n' \
+    '12345678-1234-1234-1234-123456789abc.fixture.test' \
+    >"$NVPN_ANDROID_RESULT_DIR/mobile-android-underlay-contract-markers.tsv"
+fi
+mode="${NVPN_ANDROID_EXIT_DNS_MODE}"
+provider="${NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER}"
+label="$mode-$provider"
+case "$label" in
+  automatic-cloudflare) label=automatic-profile ;;
+  encrypted-cloudflare) label=cloudflare-doh ;;
+  encrypted-quad9) label=quad9-doh ;;
+  encrypted-custom) label=custom-doh ;;
+  through_exit-cloudflare) label=through-exit ;;
+esac
+[[ "${NVPN_CONTRACT_FAIL_ANDROID_LABEL:-}" != "$label" ]]
+SH
+chmod +x "$MOCK_ROOT/scripts/mobile-android-smoke.sh"
+
+cat >"$MOCK_ROOT/scripts/release-network-evidence.py" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+if not args or args[0] != "mobile":
+    raise SystemExit("expected mobile evidence mode")
+
+def value(flag):
+    return args[args.index(flag) + 1]
+
+artifact = pathlib.Path(value("--artifact-receipt"))
+ledger = pathlib.Path(value("--counter-ledger"))
+output = pathlib.Path(value("--output"))
+if not artifact.is_file():
+    raise SystemExit("exact artifact receipt is missing")
+if not ledger.is_file() or not ledger.read_text(encoding="utf-8").strip():
+    raise SystemExit("durable counter ledger is missing")
+record = {
+    "platform": value("--platform"),
+    "mode": value("--mode"),
+    "artifactReceipt": str(artifact),
+    "counterLedger": str(ledger),
+    "output": str(output),
+    "includeUnderlay": "--include-underlay-lifecycle" in args,
+}
+with pathlib.Path(os.environ["NVPN_CONTRACT_EVIDENCE_LOG"]).open(
+    "a", encoding="utf-8"
+) as log:
+    log.write(json.dumps(record, sort_keys=True) + "\n")
+output.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+cat >"$MOCK_BIN/wg" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  genkey) printf 'private-key\n' ;;
+  pubkey) read -r _ || true; printf 'public-key\n' ;;
+  *) exit 2 ;;
+esac
+SH
+cat >"$MOCK_BIN/adb" <<'SH'
+#!/usr/bin/env bash
+if [[ " $* " == *" devices "* ]]; then
+  printf 'List of devices attached\nandroid-physical\tdevice\n'
+elif [[ " $* " == *" shell pm list packages "* ]]; then
+  printf 'package:fi.siriusbusiness.nvpn\n'
+else
+  exit 2
+fi
+SH
+chmod +x "$MOCK_BIN/wg" "$MOCK_BIN/adb"
+
+run_gate() {
+  local name="$1" platform="$2" selected_cases="$3" underlay="$4"
+  local fail_android="$5" fail_ios="$6" cleanup_fail="$7"
+  local android_receipt="$8" ios_receipt="$9" expected_status="${10}"
+  local status
+  RUN_DIR="$HARNESS_ROOT/$name"
+  mkdir -p \
+    "$RUN_DIR/state" "$RUN_DIR/android-artifacts" "$RUN_DIR/ios-artifacts"
+  : >"$RUN_DIR/events.log"
+  : >"$RUN_DIR/android-cases.jsonl"
+  : >"$RUN_DIR/ios-cases.jsonl"
+  : >"$RUN_DIR/evidence.jsonl"
+  [[ "$android_receipt" != 1 ]] \
+    || printf '{"artifact":"android"}\n' >"$RUN_DIR/android-artifact.json"
+  [[ "$ios_receipt" != 1 ]] \
+    || printf '{"artifact":"ios"}\n' >"$RUN_DIR/ios-artifact.json"
+
+  set +e
+  env \
+    PATH="$MOCK_BIN:$PATH" \
+    NVPN_RELEASE_ENV_FILE="$RUN_DIR/no-release-env" \
+    NVPN_MOBILE_ENV_FILE="$RUN_DIR/no-mobile-env" \
+    NVPN_WG_REAL_FIXTURE_LIB="$FIXTURE_LIB" \
+    NVPN_CONTRACT_STATE="$RUN_DIR/state" \
+    NVPN_CONTRACT_EVENTS="$RUN_DIR/events.log" \
+    NVPN_CONTRACT_ANDROID_CASES="$RUN_DIR/android-cases.jsonl" \
+    NVPN_CONTRACT_IOS_CASES="$RUN_DIR/ios-cases.jsonl" \
+    NVPN_CONTRACT_EVIDENCE_LOG="$RUN_DIR/evidence.jsonl" \
+    NVPN_CONTRACT_FAIL_ANDROID_LABEL="$fail_android" \
+    NVPN_CONTRACT_FAIL_IOS_LABEL="$fail_ios" \
+    NVPN_CONTRACT_CLEANUP_FAIL="$cleanup_fail" \
+    NVPN_MOBILE_WG_EXIT_HOST_IP=192.0.2.10 \
+    NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP=203.0.113.8 \
+    NVPN_MOBILE_WG_EXIT_IMAGE_READY=1 \
+    NVPN_MOBILE_WG_EXIT_DNS_CASES="$selected_cases" \
+    NVPN_MOBILE_WG_EXIT_LIFECYCLE_GATE=1 \
+    NVPN_MOBILE_WG_EXIT_UNDERLAY_CHANGE_GATE="$underlay" \
+    NVPN_MOBILE_WG_EXIT_RAPID_START_STOP_GATE=auto \
+    NVPN_MOBILE_WG_EXIT_REUSE_ANDROID_BUILD=1 \
+    NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID=0 \
+    NVPN_ANDROID_SERIAL=android-physical \
+    NVPN_ANDROID_RESULT_DIR="$RUN_DIR/android-artifacts" \
+    NVPN_MOBILE_ANDROID_RELEASE_RECEIPT="$RUN_DIR/android-artifact.json" \
+    NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$RUN_DIR/android-network.json" \
+    NVPN_IOS_DEVICE=ios-physical \
+    NVPN_IOS_EXPECTED_DEVICE_NAME='Contract iPhone' \
+    NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$RUN_DIR/ios-artifacts" \
+    NVPN_MOBILE_IOS_RELEASE_RECEIPT="$RUN_DIR/ios-artifact.json" \
+    NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT="$RUN_DIR/ios-network.json" \
+    "$MOCK_ROOT/scripts/mobile-wireguard-exit-e2e.sh" "$platform" \
+    >"$RUN_DIR/stdout.log" 2>"$RUN_DIR/stderr.log"
+  status=$?
+  set -e
+  [[ "$status" -eq "$expected_status" ]] || {
+    sed -n '1,160p' "$RUN_DIR/stderr.log" >&2
+    fail "$name exited $status; expected $expected_status"
+  }
+}
+
+assert_fixture_cleaned() {
+  local run="$1" fixture_dir
+  assert_count 1 'fixture-cleanup ' "$run/events.log"
+  fixture_dir="$(sed -n 's/^fixture-init //p' "$run/events.log")"
+  [[ -n "$fixture_dir" && ! -e "$fixture_dir" ]] \
+    || fail "fixture private directory survived cleanup: $fixture_dir"
+}
+
+run_gate full all "" 0 "" "" 0 1 1 0
+python3 - "$RUN_DIR" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+android = [json.loads(line) for line in (root / "android-cases.jsonl").read_text().splitlines()]
+ios = [json.loads(line) for line in (root / "ios-cases.jsonl").read_text().splitlines()]
+labels = [
+    "automatic-profile", "cloudflare-doh", "quad9-doh", "custom-doh", "through-exit"
+]
+assert [case["label"] for case in android] == labels
+assert [case["label"] for case in ios] == labels
+expected = [
+    ("automatic", "cloudflare", "", "", ""),
+    ("encrypted", "cloudflare", "", "", ""),
+    ("encrypted", "quad9", "", "", ""),
+    ("encrypted", "custom", "https://dns.google/dns-query", "8.8.8.8", ""),
+    ("through_exit", "cloudflare", "", "", "10.99.77.53"),
+]
+for index, (case, values) in enumerate(zip(android, expected)):
+    keys = (
+        "NVPN_ANDROID_EXIT_DNS_MODE",
+        "NVPN_ANDROID_EXIT_DNS_DOH_PROVIDER",
+        "NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_URL",
+        "NVPN_ANDROID_EXIT_DNS_CUSTOM_DOH_BOOTSTRAP_IPS",
+        "NVPN_ANDROID_EXIT_DNS_THROUGH_EXIT_SERVERS",
+    )
+    assert tuple(case[key] for key in keys) == values
+    assert case["NVPN_ANDROID_EXIT_DNS_USE_SHIPPED_UI"] == "1"
+    assert case["NVPN_ANDROID_EXPECT_WIREGUARD_ENDPOINT"] == "192.0.2.10:51886"
+    assert case["NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP"] == "203.0.113.8"
+    assert case["NVPN_ANDROID_LIFECYCLE_GATE"] == ("1" if index == 0 else "false")
+    assert case["NVPN_ANDROID_RAPID_START_STOP_GATE"] == ("1" if index == 0 else "0")
+    assert case["NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED"] == ("1" if index == 4 else "0")
+    assert "--release-network-gate" in case["args"]
+    assert "--no-build" in case["args"] and "--no-install" in case["args"]
+    assert ("--create-network" in case["args"]) == (index == 0)
+for index, case in enumerate(ios):
+    spec = case["spec"]
+    mode, provider, custom, bootstrap, through = expected[index]
+    assert (spec["mode"], spec["provider"], spec["customUrl"], spec["bootstrapIps"], spec["throughExitServers"]) == expected[index]
+    assert spec["createNetwork"] == (index == 0)
+    assert spec["exerciseLifecycle"] == (index == 0)
+    assert spec["exerciseStartStopStress"] == (index == 0)
+    assert spec["exerciseUnderlay"] is False
+    assert spec["switchToDirect"] == (index == 4)
+    assert case["lifecycleArg"] == ("1" if index == 0 else "false")
+    assert case["directArg"] == ("1" if index == 4 else "0")
+evidence = [json.loads(line) for line in (root / "evidence.jsonl").read_text().splitlines()]
+assert {(item["platform"], item["mode"]) for item in evidence} == {
+    ("android", "wireguard-dns"), ("ios", "wireguard-dns")
+}
+assert all(item["includeUnderlay"] is False for item in evidence)
+assert all(pathlib.Path(item["artifactReceipt"]).is_file() for item in evidence)
+assert (root / "android-network.json").is_file()
+assert (root / "ios-network.json").is_file()
+PY
+assert_fixture_cleaned "$RUN_DIR"
+assert_count 1 'ios-prepare ' "$RUN_DIR/events.log"
+assert_count 2 'ios-disconnect-cleanup ' "$RUN_DIR/events.log"
+assert_count 1 'ios-private-cleanup' "$RUN_DIR/events.log"
+
+run_gate underlay all automatic-profile 1 "" "" 0 1 1 0
+python3 - "$RUN_DIR" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+android = json.loads((root / "android-cases.jsonl").read_text())
+ios = json.loads((root / "ios-cases.jsonl").read_text())
+assert android["NVPN_ANDROID_UNDERLAY_CHANGE_GATE"] == "1"
+assert android["NVPN_ANDROID_LIFECYCLE_GATE"] == "1"
+assert android["NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED"] == "0"
+assert ios["spec"]["exerciseUnderlay"] is True
+assert ios["spec"]["exerciseLifecycle"] is True
+assert ios["spec"]["switchToDirect"] is True
+assert (root / "android-artifacts/mobile-android-underlay-fresh-dns-fixture.json").is_file()
+assert (root / "ios-artifacts/mobile-ios-underlay-fresh-dns-fixture.json").is_file()
+evidence = [json.loads(line) for line in (root / "evidence.jsonl").read_text().splitlines()]
+assert {(item["platform"], item["mode"]) for item in evidence} == {
+    ("android", "underlay-lifecycle"), ("ios", "underlay-lifecycle")
+}
+assert all(item["includeUnderlay"] is False for item in evidence)
+PY
+assert_fixture_cleaned "$RUN_DIR"
+
+run_gate android-failure android automatic-profile,cloudflare-doh 0 cloudflare-doh "" 0 1 0 1
+assert_fixture_cleaned "$RUN_DIR"
+retained_ledger="$(
+  sed -n 's/^Android network counter ledger retained after incomplete receipt: //p' \
+    "$RUN_DIR/stderr.log"
 )"
-printf '%s\n' '{"passed":true}' >"$secret_temp/safe.json"
-# shellcheck disable=SC1090
-source "$ios_release_gate"
-ios_release_network_assert_retained_no_secrets \
-  "$secret_spec" "$secret_temp/safe.json"
-printf '%s\n' 'fake-private-key-material' >"$secret_temp/unsafe.log"
-if ios_release_network_assert_retained_no_secrets \
-  "$secret_spec" "$secret_temp/unsafe.log" 2>/dev/null
-then
-  echo "iOS retained-artifact scan accepted a WireGuard private key" >&2
-  exit 1
-fi
-IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$secret_temp/private.xctestrun"
-printf '%s\n' "$secret_spec" >"$IOS_RELEASE_NETWORK_CASE_XCTESTRUN"
-mkdir -p "$secret_temp/private.xcresult"
-printf '%s\n' "$secret_spec" >"$secret_temp/private.log"
-ios_release_network_delete_private_test_products
-[[ ! -e "$secret_temp/private.xctestrun" \
-  && -e "$secret_temp/private.xcresult" \
-  && -e "$secret_temp/private.log" ]] || {
-  echo "iOS private xctestrun cleanup deleted retained evidence" >&2
-  exit 1
-}
-rm -rf "$secret_temp/private.xcresult"
-rm -f "$secret_temp/private.log"
-grep -Fq 'ios_release_network_disconnect_cleanup' "$gate" "$ios_release_gate" \
-  || { echo "iOS physical DNS gate cannot confirm Release disconnect after failure" >&2; exit 1; }
-python3 - "$gate" "$ios_release_gate" <<'PY'
-import sys
+[[ -f "$retained_ledger" && "$(wc -l <"$retained_ledger")" -eq 1 ]] \
+  || fail "Android failure did not retain its one completed-case ledger"
+rm -f "$retained_ledger"
+[[ ! -e "$RUN_DIR/android-network.json" ]] \
+  || fail "Android failure produced a canonical receipt"
 
-text = open(sys.argv[1], encoding="utf-8").read()
-start = text.index("run_ios_case()")
-end = text.index("\nDNS_CASES=", start)
-body = text[start:end]
-if "run_ios_release_network_case" not in body:
-    raise SystemExit("iOS DNS case never enters the Release black-box runner")
-if '"$lifecycle_gate" "$underlay_gate" "$final" "$rapid_start_stop_gate"' not in body:
-    raise SystemExit("iOS DNS case passes the wrong rapid start/stop selector")
-if "mobile-ios-smoke.sh" in body or "run_ios_exit_dns_shipped_ui_case_gate" in body:
-    raise SystemExit("iOS DNS case retains a duplicate debug/diagnostic path")
-release = open(sys.argv[2], encoding="utf-8").read()
-case = release[release.index("run_ios_release_network_case()"):]
-if "ios_release_network_validate_markers" not in case:
-    raise SystemExit("iOS Release case does not require shipped-UI persistence receipts")
-if "ios_release_network_audit_artifact" not in case:
-    raise SystemExit("iOS Release case does not audit the artifact it tested")
-PY
+# A failed platform run must leave the fixture clean enough for an independent
+# platform run to succeed without rebuilding or mutating a device.
+run_gate ios-after-android-failure ios automatic-profile 1 "" "" 0 0 1 0
+assert_fixture_cleaned "$RUN_DIR"
+[[ -s "$RUN_DIR/ios-network.json" ]] \
+  || fail "iOS contract did not recover after isolated Android failure"
 
-grep -Fq 'run_android_direct_while_tunnel_probe' "$android_smoke" \
-  || { echo "Android smoke lacks a connected split-tunnel Internet probe" >&2; exit 1; }
-for release_contract in \
-  android_release_require_inputs \
-  verify_android_release_install \
-  configure_android_release_wireguard_ui \
-  configure_android_exit_dns_ui \
-  run_android_release_exit_network_probe \
-  run_android_release_direct_network_probe \
-  run_android_release_active_vpn_lifecycle_gate
-do
-  grep -Fq "$release_contract" "$android_smoke" "$android_release_gate" \
-    || { echo "Android Release black-box gate is missing $release_contract" >&2; exit 1; }
-done
-grep -Fq 'WG upstream socket fd from native runtime:' "$android_vpn_service" \
-  && grep -Fq 'Physical network changed; live FIPS carriers refreshed' \
-    "$android_vpn_service" \
-  && grep -Fq 'android_release_pin_native_tunnel_start_count' \
-    "$android_release_gate" \
-  && grep -Fq 'android_release_assert_native_tunnel_unchanged' \
-    "$android_release_gate" "$android_underlay" \
-  || {
-    echo "Android Release gate does not pin native-tunnel continuity from production logs" >&2
-    exit 1
-  }
-grep -Fq 'android_underlay_wait_offline' "$android_underlay" \
-  && grep -Fq 'android_underlay_recovery_payloads' "$android_underlay" \
-  && grep -Fq 'android_underlay_assert_process_and_vpn' "$android_underlay" \
-  && grep -Fq 'android_underlay_assert_native_tunnel_unchanged radio-off' \
-    "$android_underlay" \
-  && grep -Fq 'android_underlay_assert_native_tunnel_unchanged radio-on' \
-    "$android_underlay" \
-  || {
-    echo "Android radio-bounce gate lacks outage/recovery/process continuity" >&2
-    exit 1
-  }
-python3 - "$android_release_gate" "$android_smoke" <<'PY'
-import pathlib
-import sys
+run_gate ios-failure ios automatic-profile,cloudflare-doh 0 "" cloudflare-doh 0 0 1 1
+assert_fixture_cleaned "$RUN_DIR"
+assert_count 2 'ios-disconnect-cleanup ' "$RUN_DIR/events.log"
+assert_count 1 'ios-private-cleanup' "$RUN_DIR/events.log"
+retained_ledger="$(
+  sed -n 's/^iOS network counter ledger retained after incomplete receipt: //p' \
+    "$RUN_DIR/stderr.log"
+)"
+[[ -f "$retained_ledger" && "$(wc -l <"$retained_ledger")" -eq 1 ]] \
+  || fail "iOS failure did not retain its one completed-case ledger"
+rm -f "$retained_ledger"
 
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-smoke = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-wireguard_start = text.index("configure_android_release_wireguard_ui()")
-wireguard_end = text.index("\nandroid_release_vpn_toggle_checked()", wireguard_start)
-wireguard = text[wireguard_start:wireguard_end]
-if "android_release_open_internet_settings" not in wireguard:
-    raise SystemExit(
-        "Android Release WireGuard gate does not verify Internet-screen navigation"
-    )
-source_select = wireguard.index(
-    'tap_android_ui description "Internet source WireGuard VPN"'
-)
-config_ready = wireguard.index(
-    "wait_for_android_ui resource wireguard-config"
-)
-config_entry = wireguard.index(
-    "replace_android_ui_multiline_text wireguard-config"
-)
-if not source_select < config_ready < config_entry:
-    raise SystemExit(
-        "Android Release WireGuard gate does not wait for the shipped config field"
-    )
-if wireguard.count(
-    'tap_android_ui description "Internet source WireGuard VPN"'
-) != 1:
-    raise SystemExit(
-        "Android Release WireGuard readiness path retries source selection"
-    )
-if "WireGuard config field did not appear after source selection" not in wireguard:
-    raise SystemExit(
-        "Android Release WireGuard config readiness timeout lacks a diagnostic"
-    )
-helper_start = smoke.index("android_open_internet_settings_ui()")
-helper_end = smoke.index("\nreplace_android_ui_text()", helper_start)
-helper = smoke[helper_start:helper_end]
-tap = helper.index('tap_android_ui description "Internet tab"')
-destination = helper.index(
-    'wait_for_android_ui resource internet-source-picker'
-)
-if tap >= destination:
-    raise SystemExit(
-        "Android Release Internet navigation does not verify its destination after tapping"
-    )
-if "did not reach the Internet settings screen" not in helper:
-    raise SystemExit(
-        "Android Release Internet navigation failure has no actionable diagnostic"
-    )
-if 'tap_android_ui description "Internet tab"' in helper[tap + 1:]:
-    raise SystemExit(
-        "Android Release Internet navigation retries the tab tap instead of failing closed"
-    )
-if "android_capture_internet_navigation_failure" not in helper:
-    raise SystemExit("Android Release Internet navigation does not retain failure UI")
-for function in (
-    "assert_android_exit_dns_ui_reloaded()",
-    "configure_android_exit_dns_ui()",
-    "select_android_direct_ui()",
-):
-    start = smoke.index(function)
-    body = smoke[start:smoke.find("\n}\n", start) + 3]
-    if "android_open_internet_settings_ui" not in body:
-        raise SystemExit(f"{function} bypasses verified Internet navigation")
-reset = wireguard.index("android_ui_reset_scroll")
-selector = wireguard.index("android_ui_scroll_to resource wireguard-enabled")
-checked = wireguard.index("android_ui_query resource wireguard-enabled checked")
-if not reset < selector < checked:
-    raise SystemExit(
-        "Android Release WireGuard gate does not return to its shipped toggle"
-    )
-if 'android_ui_scroll_to description "WireGuard upstream off"' in wireguard:
-    raise SystemExit(
-        "Android Release WireGuard gate still scrolls away from its toggle"
-    )
+run_gate missing-artifact android automatic-profile 1 "" "" 0 0 0 1
+grep -Fq 'exact artifact receipt is missing' "$RUN_DIR/stderr.log" \
+  || fail "mobile gate accepted missing exact artifact receipt"
+assert_fixture_cleaned "$RUN_DIR"
+retained_ledger="$(
+  sed -n 's/^Android network counter ledger retained after incomplete receipt: //p' \
+    "$RUN_DIR/stderr.log"
+)"
+rm -f "$retained_ledger"
 
-start = text.index("run_android_release_blackbox_cycle()")
-body = text[start:]
-for forbidden in (
-    "seed_debug_config",
-    "run_android_app_network_probe",
-    "copy_android_runtime_state",
-    "wait_for_android_runtime_state",
-    "configure_android_exit_dns_debug",
-):
-    if forbidden in body:
-        raise SystemExit(
-            f"Android Release black-box cycle uses forbidden debug helper {forbidden}"
-        )
-for required in (
-    "configure_android_release_wireguard_ui",
-    "configure_android_exit_dns_ui",
-    "android_release_capture_native_tunnel_start_baseline",
-    "android_release_connect_ui",
-    "android_release_pin_native_tunnel_start_count",
-    "android_release_assert_native_tunnel_unchanged",
-    "run_android_release_exit_network_probe",
-    "android_release_disconnect_ui",
-):
-    if required not in body:
-        raise SystemExit(f"Android Release black-box cycle omits {required}")
-baseline = body.index("android_release_capture_native_tunnel_start_baseline")
-connect = body.index("android_release_connect_ui")
-pin = body.index("android_release_pin_native_tunnel_start_count")
-connected_direct = body.index("connected-direct")
-disconnect = body.index("android_release_disconnect_ui", connect)
-after_disconnect = body.index("after-disconnect", disconnect)
-if not baseline < connect < pin < connected_direct < disconnect < after_disconnect:
-    raise SystemExit(
-        "Android native-tunnel receipt is not pinned across connect, Direct, and disconnect"
-    )
-PY
-if grep -Fq -- '--nvpn-debug-' "$android_release_gate"; then
-  echo "Android Release black-box library contains a debug app action" >&2
-  exit 1
-fi
-grep -Fq 'run-as "$PACKAGE_NAME" true' "$android_release_gate" \
-  && grep -Fq 'installedApkSha256' "$android_release_gate" \
-  && grep -Fq 'EXPECTED_ANDROID_SIGNER_CERT_SHA256' "$android_release_gate" \
-  && grep -Fq '"$normalized_cert_sha" != "$EXPECTED_ANDROID_SIGNER_CERT_SHA256"' "$android_release_gate" \
-  && grep -Fq 'fipsDependenciesForcedRebuilt' "$android_release_gate" \
-  && grep -Fq 'fipsGitTree' "$android_release_gate" \
-  && grep -Fq 'NVPN_EXPECTED_FIPS_VERSION' "$android_release_gate" \
-  && grep -Fq 'rglob("fips_core-*.d")' "$android_release_gate" \
-  && grep -Fq 'fips_core::transport' "$android_release_gate" \
-  && grep -Fq 'nvpn_force_rebuild_local_fips_target' "$ROOT/tools/run-android" \
-  && grep -Fq '"$ROOT/tools/run-android" release' "$android_smoke" \
-  || {
-    echo "Android Release gate does not prove a non-debuggable exact installed artifact" >&2
-    exit 1
-  }
-grep -Fq 'run_android_app_network_probe' "$android_smoke" \
-  || { echo "Android smoke does not prove DNS and HTTPS from the shipped app process" >&2; exit 1; }
-python3 - "$android_smoke" <<'PY'
-import sys
+run_gate cleanup-failure android automatic-profile 1 "" "" 1 1 0 1
+grep -Fq 'fixture cleanup left a managed resource behind' "$RUN_DIR/stderr.log" \
+  || fail "successful gate ignored cleanup verification failure"
+assert_fixture_cleaned "$RUN_DIR"
 
-text = open(sys.argv[1], encoding="utf-8").read()
-start = text.index("run_android_exit_network_probe()")
-end = text.index("\nwait_for_secure_dns_success_after()", start)
-body = text[start:end]
-call = body[body.index("run_android_app_network_probe") :]
-for required in ('"$DIRECT_PROBE_HOST"', '"$DIRECT_PROBE_URL"', '""'):
-    if required not in call:
-        raise SystemExit(
-            "Android exit gate asks the deliberately VPN-excluded app UID "
-            "to resolve tunnel-only DNS"
-        )
-PY
-grep -Fq 'MobileAndroidCapturedNetworkProbe*.class' "$android_external_probe" \
-  && grep -Fq '"${class_files[@]}"' "$android_external_probe" \
-  || {
-    echo "Android captured-network probe omits nested Java classes from its dex archive" >&2
-    exit 1
-  }
-python3 - "$android_release_gate" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = source.split("run_android_release_exit_network_probe() {", 1)[1].split(
-    "\nandroid_release_capture_native_tunnel_start_baseline()", 1
-)[0]
-for token in (
-    "MobileAndroidCapturedNetworkProbe",
-    "--fresh-dns",
-    '"$EXIT_PROBE_HOST" "$EXIT_PROBE_EXPECTED_IP"',
-):
-    if token not in body:
-        raise SystemExit("Android fresh DNS probe is incomplete")
-if "shell ping" in body:
-    raise SystemExit("Android DNS answer still has to be reachable")
-PY
-grep -Fq 'exitSourceIp' "$ROOT/scripts/MobileAndroidCapturedNetworkProbe.java" \
-  && grep -Fq 'NVPN_ANDROID_EXPECTED_EXIT_SOURCE_IP' "$gate" \
-  && grep -Fq 'exitSourceIp=$EXPECTED_EXIT_SOURCE_IP' "$android_external_probe" \
-  && grep -Fq 'exitSourceIp=$EXPECTED_EXIT_SOURCE_IP' "$android_release_gate" \
-  || {
-    echo "Android exit gate does not externally prove the observed exit source IP" >&2
-    exit 1
-  }
-grep -Fq 'run_android_active_vpn_lifecycle_gate' "$android_smoke" \
-  || { echo "Android smoke does not lifecycle-test the active VPN" >&2; exit 1; }
-grep -Fq 'ANDROID_LIFECYCLE_CYCLES="${NVPN_ANDROID_LIFECYCLE_CYCLES:-3}"' "$android_smoke" \
-  || { echo "Android active lifecycle does not default to three cycles" >&2; exit 1; }
-grep -Fq 'ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-10}"' "$android_smoke" \
-  || { echo "Android active lifecycle does not default to a ten-second dwell" >&2; exit 1; }
-grep -Fq 'for cycle in $(seq 1 "$ANDROID_LIFECYCLE_CYCLES")' "$android_smoke" \
-  || { echo "Android active lifecycle does not execute every configured cycle" >&2; exit 1; }
-grep -Fq 'wireguard-exit-after-foreground-$cycle' "$android_smoke" \
-  || { echo "Android active lifecycle does not re-run DNS/HTTPS after every foreground" >&2; exit 1; }
-grep -Fq 'scalar(wireguard, "endpoint") != expected_endpoint' "$android_smoke" \
-  || { echo "Android post-foreground probe does not validate tunnel identity" >&2; exit 1; }
-grep -Fq 'Android active-VPN background/foreground lifecycle gate passed' "$android_smoke" \
-  || { echo "Android active lifecycle does not emit a distinct proof receipt" >&2; exit 1; }
-python3 - "$android_smoke" <<'PY'
-import re
-import subprocess
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-truthy = text.index("truthy() {")
-reuse_guard = text.index(
-    "if android_release_reuse_verified_artifact \\\n  && ! truthy"
-)
-if truthy > reuse_guard:
-    raise SystemExit("Android reuse guard calls truthy before it is defined")
-permission = text.split("maybe_accept_vpn_dialog() {", 1)[1].split(
-    "base64_no_wrap() {", 1
-)[0]
-required = (
-    "com.android.permissioncontroller/.permission.ui.GrantPermissionsActivity",
-    "com.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity",
-    "com.android.permissioncontroller:id/permission_allow_button",
-    "com.android.permissioncontroller/*)",
-    'android:id/button1" "com.android.vpndialogs',
-    "Unknown Android system prompt",
-)
-if any(token not in permission for token in required):
-    raise SystemExit("Android VPN consent driver lacks the local-network prompt contract")
-if permission.index("permission_allow_button") > permission.index("com.android.vpndialogs"):
-    raise SystemExit("Android VPN consent is attempted before local-network permission")
-if any(token in permission for token in ("pm grant", "DEBUG_ACTION", "permission_deny_button")):
-    raise SystemExit("Android permission driver bypasses the shipped system UI")
-fixture = (
-    "topResumedActivity=ActivityRecord{233924169 u0 "
-    "com.android.permissioncontroller/"
-    "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t12452}"
-)
-top_activity = text.split("android_top_activity() {", 1)[1].split("\n}", 1)[0]
-pattern = re.search(r"\| sed -nE \\\n\s+'([^']+)'", top_activity)
-component = subprocess.run(
-    ["sed", "-nE", pattern.group(1)],
-    input=fixture,
-    text=True,
-    capture_output=True,
-    check=True,
-).stdout.strip() if pattern else ""
-if component not in permission:
-    raise SystemExit("Android permission driver rejects the real full activity rendering")
-start = text.index('if [[ "$vpn_cycle" -eq 1 ]]; then', text.index("wait_for_android_build_metadata"))
-body = text[start:]
-connected = body.index('wait_until "$VPN_START_WAIT_SECS" vpn_active')
-lifecycle = body.index("run_android_active_vpn_lifecycle_gate")
-cleanup = body.index("cleanup_android_vpn_after_pass")
-direct = body.index("run_android_direct_network_probe after-disconnect")
-if not connected < lifecycle < cleanup < direct:
-    raise SystemExit(
-        "Android active lifecycle must run after connect and before cleanup/Direct restoration"
-    )
-PY
-grep -Fq 'secureDnsSuccesses' "$android_smoke" \
-  || { echo "Android smoke does not require a production authenticated-DoH success" >&2; exit 1; }
-grep -Fq 'vpn_state_present' "$android_smoke" \
-  || { echo "Android connected Direct probe can pass with no VPN network" >&2; exit 1; }
-grep -Fq 'select_android_direct_ui' "$android_smoke" \
-  || { echo "Android smoke does not select Direct through the shipped UI" >&2; exit 1; }
-grep -Fq 'source_match.group(1) if source_match else "direct"' "$android_smoke" \
-  || { echo "Android Direct persistence check rejects the omitted default value" >&2; exit 1; }
-grep -Fq 'wireguard_enabled = bool(' "$android_smoke" \
-  || { echo "Android Direct persistence check does not reject enabled WireGuard" >&2; exit 1; }
-grep -Fq 'if [[ -n "$dns_servers" ]]' "$android_smoke" \
-  || { echo "Android Direct probe does not reject VPN-owned DNS" >&2; exit 1; }
-grep -Fq 'android_validated_underlying_dns_servers' "$android_smoke" \
-  || { echo "Android Direct probe does not verify native device DNS" >&2; exit 1; }
-grep -Fq 'android_vpn_has_default_route' "$android_smoke" \
-  || { echo "Android connected Direct probe does not reject a stale full-tunnel route" >&2; exit 1; }
-grep -Fq 'throw\b|unreachable\b' "$android_smoke" \
-  || { echo "Android connected Direct probe mistakes excluded defaults for captured routes" >&2; exit 1; }
-for shipped_ui_contract in \
-  configure_android_exit_dns_ui \
-  'tap_android_ui description "$mode_description"' \
-  'tap_android_ui description "$provider_description"' \
-  'shell input keycombination -t 40 KEYCODE_CTRL_LEFT KEYCODE_A' \
-  'assert_android_ui_validation "Enter an HTTPS DoH URL."' \
-  'assert_android_ui_validation "DoH URL must use HTTPS."' \
-  'assert_android_ui_validation "Enter at least one bootstrap IP."' \
-  'assert_android_ui_validation "Enter at least one DNS server IP."' \
-  wait_for_android_exit_dns_persistence \
-  assert_android_exit_dns_ui_reloaded \
-  'shell am force-stop "$PACKAGE_NAME"' \
-  'android_ui_query resource "$mode_selector" selected' \
-  'android_ui_query resource "$provider_selector" selected' \
-  'Android shipped Exit DNS restart readback passed'
-do
-  grep -Fq "$shipped_ui_contract" "$android_smoke" \
-    || { echo "Android shipped DNS UI driver is missing: $shipped_ui_contract" >&2; exit 1; }
-done
-if grep -Fq 'seq 1 96' "$android_smoke"; then
-  echo "Android shipped DNS UI driver still clears fields with 96 key events" >&2
-  exit 1
-fi
-grep -Fq 'if truthy "$EXIT_DNS_USE_SHIPPED_UI"; then' "$android_smoke" \
-  || { echo "Android DNS setup cannot select the shipped UI path" >&2; exit 1; }
-grep -Fq 'write-mobile-android-tun-summary.py' "$android_smoke" \
-  || { echo "Android physical packet evidence does not use its standalone summarizer" >&2; exit 1; }
-python3 - "$android_tun_summary" <<'PY'
-import json
-import pathlib
-import subprocess
-import sys
-import tempfile
-
-summarizer = pathlib.Path(sys.argv[1])
-with tempfile.TemporaryDirectory() as directory:
-    root = pathlib.Path(directory)
-    summary = root / "summary.json"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(summarizer),
-            str(summary),
-            "10.44.255.254",
-            "1",
-            "10",
-            "14",
-            "4",
-            "1000",
-            "1256",
-            "20",
-            "24",
-            "2000",
-            "2256",
-            "0",
-            "0",
-            str(root / "ping.txt"),
-            "0",
-            "250",
-            "500",
-            "5",
-            "100",
-            "1",
-            str(root / "runtime.json"),
-            str(root / "ping-summary.json"),
-            str(root / "link.txt"),
-            str(root / "link-summary.tsv"),
-            str(root / "build.json"),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise SystemExit(f"Android TUN summary fixture failed: {completed.stderr}")
-    value = json.loads(summary.read_text(encoding="utf-8"))
-    expected = {
-        "observed": 4,
-        "observedBytesRead": 256,
-        "observedWritten": 4,
-        "replyRequired": True,
-        "replyObserved": True,
-        "droppedDelta": 0,
-    }
-    for key, expected_value in expected.items():
-        if value.get(key) != expected_value:
-            raise SystemExit(
-                f"Android TUN summary {key}={value.get(key)!r} expected={expected_value!r}"
-            )
-PY
-
-grep -Fq -- '--nvpn-debug-exit-dns-mode' "$ios_smoke" \
-  || { echo "iOS smoke does not send DNS settings through the app" >&2; exit 1; }
-grep -Fq 'if [[ -n "$EXIT_DNS_MODE" ]] && ! bool_is_true "$EXIT_DNS_USE_SHIPPED_UI"; then' "$ios_smoke" \
-  || { echo "iOS smoke cannot preserve a shipped-UI DNS selection" >&2; exit 1; }
-grep -Fq 'debugDnsInjected' "$ios_debug_automation" \
-  || { echo "iOS packet receipt does not record whether debug DNS was injected" >&2; exit 1; }
-grep -Fq 'expected_debug_dns_injected' "$ios_probe_validator" \
-  || { echo "iOS packet validator does not enforce debugDnsInjected" >&2; exit 1; }
-grep -Fq 'expect_active_lifecycle' "$ios_probe_validator" \
-  || { echo "iOS packet validator does not require the active-tunnel lifecycle receipt" >&2; exit 1; }
-grep -Fq 'expected_active_lifecycle_cycles' "$ios_probe_validator" \
-  || { echo "iOS packet validator ignores the configured active lifecycle cycle count" >&2; exit 1; }
-grep -Fq 'expected_resolve_host' "$ios_probe_validator" \
-  || { echo "iOS packet validator cannot distinguish configured DNS probes from optional ones" >&2; exit 1; }
-grep -Fq 'expected_fetch_url' "$ios_probe_validator" \
-  || { echo "iOS packet validator cannot distinguish configured HTTPS probes from optional ones" >&2; exit 1; }
-grep -Fq 'expected_wireguard_endpoint' "$ios_probe_validator" \
-  || { echo "iOS packet validator does not pin WireGuard tunnel identity" >&2; exit 1; }
-grep -Fq 'expected_exit_source_ip' "$ios_probe_validator" \
-  && grep -Fq '"expectedExitSourceIp": expected_source' "$gate" \
-  && grep -Fq 'expected: spec.expectedExitSourceIp' "$ios_release_ui" \
-  || { echo "iOS exit gate does not externally prove the observed exit source IP" >&2; exit 1; }
-grep -Fq 'run_ios_active_tunnel_lifecycle_gate' "$ios_smoke" \
-  || { echo "iOS VPN cycle does not run its lifecycle gate with the tunnel active" >&2; exit 1; }
-grep -Fq 'IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES="${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}"' "$ios_smoke" \
-  || { echo "iOS active lifecycle does not default to three cycles" >&2; exit 1; }
-grep -Fq 'testPhysicalActiveTunnelBackgroundForegroundLifecycle' "$ios_lifecycle_ui" \
-  || { echo "iOS XCTest does not background a real active packet tunnel" >&2; exit 1; }
-grep -Fq 'run_ios_active_tunnel_lifecycle_gate()' "$ios_lifecycle_lib" \
-  || { echo "iOS host harness lacks the active-tunnel lifecycle driver" >&2; exit 1; }
-grep -Fq -- '--nvpn-debug-await-active-tunnel-lifecycle' "$ios_debug_automation" \
-  || { echo "iOS exit probe cannot synchronize with real Home/foreground events" >&2; exit 1; }
-grep -Fq 'postForegroundProbe' "$ios_debug_automation" \
-  || { echo "iOS exit probe does not mark its traffic as post-foreground" >&2; exit 1; }
-grep -Fq 'activeTunnelLifecycleCycleResults' "$ios_debug_automation" \
-  || { echo "iOS exit probe does not preserve evidence for every lifecycle cycle" >&2; exit 1; }
-grep -Fq 'Active VPN lifecycle verified \(' "$ios_lifecycle_ui" \
-  || { echo "iOS XCTest does not wait for each post-foreground packet proof" >&2; exit 1; }
-grep -Fq 'driveConnectedDirectIfRequested()' "$ios_lifecycle_ui" \
-  || { echo "iOS active lifecycle XCTest strands the combined Direct-restoration gate" >&2; exit 1; }
-grep -Fq 'VPN lifecycle release probe finished' "$ios_debug_automation" \
-  || { echo "iOS app does not acknowledge the final post-lifecycle release receipt" >&2; exit 1; }
-grep -Fq 'VPN lifecycle release probe finished' "$ios_lifecycle_ui" \
-  || { echo "iOS lifecycle XCTest can tear down before the final release receipt" >&2; exit 1; }
-python3 - "$ios_probe_validator" <<'PY'
-import json
-import pathlib
-import subprocess
-import sys
-import tempfile
-
-validator = pathlib.Path(sys.argv[1])
-with tempfile.TemporaryDirectory() as directory:
-    result = pathlib.Path(directory) / "result.json"
-    summary = pathlib.Path(directory) / "summary.json"
-    result.write_text(
-        json.dumps(
-            {
-                "debugDnsInjected": True,
-                "exitDnsMode": "encrypted",
-                "exitDnsDohProvider": "quad9",
-            }
-        ),
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(validator),
-            str(result),
-            str(summary),
-            "",
-            "0",
-            "",
-            "0",
-            "automatic",
-            "cloudflare",
-            "",
-            "",
-            "",
-            "0",
-            "0",
-            "0",
-            "0",
-            "3",
-            "",
-            "",
-            "",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode == 0:
-        raise SystemExit("iOS packet validator accepted an injected/mismatched DNS receipt")
-    for expected in (
-        "debugDnsInjected=True expected=False",
-        "exitDnsMode='encrypted' expected='automatic'",
-        "exitDnsDohProvider='quad9' expected='cloudflare'",
-    ):
-        if expected not in completed.stderr:
-            raise SystemExit(f"iOS packet validator did not fail closed on {expected}")
-
-    missing_ui_receipt = subprocess.run(
-        [
-            sys.executable,
-            str(validator),
-            str(result),
-            str(summary),
-            "",
-            "0",
-            "",
-            "0",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "1",
-            "0",
-            "",
-            "0",
-            "3",
-            "",
-            "",
-            "",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if missing_ui_receipt.returncode == 0:
-        raise SystemExit("iOS packet validator accepted Direct without a UI receipt")
-    if "directWhileTunnelUiSelectionObserved=None" not in missing_ui_receipt.stderr:
-        raise SystemExit("iOS packet validator did not require the Direct UI receipt")
-PY
-grep -Fq 'sendAndReceiveDebugUdpEchoes' "$ios_tun_probe" \
-  || { echo "iOS packet probe does not retain one socket for the UDP echo session" >&2; exit 1; }
-grep -Fq 'recv(fd, bytes.baseAddress, bytes.count, 0)' "$ios_tun_probe" \
-  || { echo "iOS packet probe does not read and validate real UDP echo replies" >&2; exit 1; }
-if grep -Fq 'sendDebugUdpPacket' "$ios_tun_probe"; then
-  echo "iOS packet probe still uses the send-and-close pseudo reply check" >&2
-  exit 1
-fi
-python3 - "$ios_probe_validator" <<'PY'
-import json
-import pathlib
-import subprocess
-import sys
-import tempfile
-
-validator = pathlib.Path(sys.argv[1])
-with tempfile.TemporaryDirectory() as directory:
-    result = pathlib.Path(directory) / "result.json"
-    summary = pathlib.Path(directory) / "summary.json"
-    receipt = {
-        "phase": "finished",
-        "finishedAt": "2026-07-25T00:00:00Z",
-        "packetTunnelStatusRawValue": 3,
-        "vpnEnabled": True,
-        "packetTunnelRuntimeStateJson": json.dumps(
-            {
-                "vpnActive": True,
-                "tunPacketsRead": 14,
-                "tunBytesRead": 1256,
-                "tunPacketsWritten": 24,
-                "tunBytesWritten": 2256,
-                "tunPacketsDropped": 0,
-            }
-        ),
-        "tunPacketProbeExpectedPackets": 4,
-        "tunPacketProbeSentPackets": 4,
-        "tunPacketProbeObservedPackets": 4,
-        "tunPacketProbeMissingPackets": 0,
-        "tunPacketProbeReplyPackets": 4,
-        "tunPacketProbeMissingReplyPackets": 0,
-        "tunPacketProbeObservedBytesRead": 256,
-        "tunPacketProbeObservedWritten": 4,
-        "tunPacketProbeObservedBytesWritten": 256,
-        "tunPacketProbeDroppedDelta": 0,
-        "tunPacketProbeReadIncreased": True,
-        "tunPacketProbeBytesReadIncreased": True,
-        "tunPacketProbeWrittenIncreased": True,
-        "tunPacketProbeBytesWrittenIncreased": True,
-        "tunPacketProbeDroppedIncreased": False,
-        "tunPacketProbeBaselineRead": 10,
-        "tunPacketProbeFinalRead": 14,
-        "tunPacketProbeBaselineBytesRead": 1000,
-        "tunPacketProbeFinalBytesRead": 1256,
-        "tunPacketProbeBaselineWritten": 20,
-        "tunPacketProbeFinalWritten": 24,
-        "tunPacketProbeBaselineBytesWritten": 2000,
-        "tunPacketProbeFinalBytesWritten": 2256,
-        "tunPacketProbeBaselineDropped": 0,
-        "tunPacketProbeFinalDropped": 0,
-        "activeTunnelLifecycleObserved": True,
-        "activeTunnelLifecycleCycles": 3,
-        "activeTunnelStatusBeforeBackgroundRawValue": 3,
-        "activeTunnelStatusAfterForegroundRawValue": 3,
-        "postForegroundProbe": True,
-        "internetSource": "wireguard",
-        "wireguardExitEnabled": True,
-        "wireguardExitConfigured": True,
-        "wireguardExitEndpoint": "192.0.2.10:51820",
-        "resolvedHost": "probe.example",
-        "resolvedAddresses": ["192.0.2.53"],
-        "url": "https://example.com/",
-        "statusCode": 204,
-        "body": "203.0.113.8\n",
-    }
-    cycle_results = []
-    for cycle in range(1, 4):
-        cycle_result = {
-            key: value
-            for key, value in receipt.items()
-            if key.startswith("tunPacketProbe")
-        }
-        cycle_result.update(
-            {
-                "cycle": cycle,
-                "postForegroundProbe": True,
-                "statusBeforeBackgroundRawValue": 3,
-                "statusAfterForegroundRawValue": 3,
-                "vpnEnabled": True,
-                "vpnActive": True,
-                "internetSource": "wireguard",
-                "wireguardExitEnabled": True,
-                "wireguardExitConfigured": True,
-                "wireguardExitEndpoint": "192.0.2.10:51820",
-                "resolvedHost": "probe.example",
-                "resolvedAddresses": ["192.0.2.53"],
-                "url": "https://example.com/",
-                "statusCode": 204,
-                "body": "203.0.113.8\n",
-                "packetTunnelRuntimeStateJson": receipt[
-                    "packetTunnelRuntimeStateJson"
-                ],
-            }
-        )
-        cycle_results.append(cycle_result)
-    receipt["activeTunnelLifecycleCycleResults"] = cycle_results
-    arguments = [
-        sys.executable,
-        str(validator),
-        str(result),
-        str(summary),
-        "",
-        "1",
-        "192.0.2.53",
-        "0",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "0",
-        "1",
-        "",
-        "1",
-        "3",
-        "192.0.2.10:51820",
-        "probe.example",
-        "https://example.com/",
-        "203.0.113.8",
-    ]
-    result.write_text(json.dumps(receipt), encoding="utf-8")
-    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    if completed.returncode != 0:
-        raise SystemExit(f"valid iOS UDP echo receipt failed: {completed.stderr}")
-    validated = json.loads(summary.read_text(encoding="utf-8"))
-    if validated.get("replyPackets") != 4 or validated.get("replyObserved") is not True:
-        raise SystemExit(f"iOS UDP echo summary lost reply evidence: {validated!r}")
-
-    receipt["activeTunnelLifecycleCycleResults"][1]["body"] = "198.51.100.7\n"
-    result.write_text(json.dumps(receipt), encoding="utf-8")
-    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    if completed.returncode == 0:
-        raise SystemExit("iOS packet validator accepted the wrong post-foreground exit IP")
-    if "activeLifecycleCycle[2].exitSourceIp" not in completed.stderr:
-        raise SystemExit("iOS packet validator did not identify the wrong exit source")
-    receipt["activeTunnelLifecycleCycleResults"][1]["body"] = "203.0.113.8\n"
-
-    receipt["activeTunnelStatusAfterForegroundRawValue"] = 1
-    result.write_text(json.dumps(receipt), encoding="utf-8")
-    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    if completed.returncode == 0:
-        raise SystemExit("iOS packet validator accepted a tunnel lost while backgrounded")
-    if "activeTunnelStatusAfterForegroundRawValue=1" not in completed.stderr:
-        raise SystemExit("iOS packet validator did not report the post-foreground tunnel loss")
-    receipt["activeTunnelStatusAfterForegroundRawValue"] = 3
-
-    receipt["activeTunnelLifecycleCycles"] = 2
-    result.write_text(json.dumps(receipt), encoding="utf-8")
-    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    if completed.returncode == 0:
-        raise SystemExit("iOS packet validator accepted fewer than the configured cycles")
-    if "activeTunnelLifecycleCycles=2 expected=3" not in completed.stderr:
-        raise SystemExit("iOS packet validator ignored the configured lifecycle count")
-    receipt["activeTunnelLifecycleCycles"] = 3
-
-    receipt["activeTunnelLifecycleCycleResults"][1]["statusCode"] = 500
-    result.write_text(json.dumps(receipt), encoding="utf-8")
-    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    if completed.returncode == 0:
-        raise SystemExit("iOS packet validator skipped the second foreground HTTPS proof")
-    if "activeLifecycleCycle[2].statusCode=500" not in completed.stderr:
-        raise SystemExit("iOS packet validator did not identify the failed lifecycle cycle")
-    receipt["activeTunnelLifecycleCycleResults"][1]["statusCode"] = 204
-
-    receipt["tunPacketProbeReplyPackets"] = 0
-    receipt["tunPacketProbeMissingReplyPackets"] = 4
-    receipt["tunPacketProbeReplyError"] = "received 0/4 UDP echo replies"
-    result.write_text(json.dumps(receipt), encoding="utf-8")
-    completed = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    if completed.returncode == 0:
-        raise SystemExit("iOS packet validator accepted provider counters without UDP replies")
-    if "tunPacketProbeReplyPackets=0/4" not in completed.stderr:
-        raise SystemExit("iOS packet validator did not report missing real UDP replies")
-PY
-grep -Fq -- '--nvpn-debug-await-direct-ui-while-connected' "$ios_smoke" \
-  || { echo "iOS smoke does not wait for the shipped connected Direct selection" >&2; exit 1; }
-if grep -Fq -- '--nvpn-debug-switch-to-direct-while-connected' "$ios_smoke"; then
-  echo "iOS smoke still exposes the obsolete debug Direct mutation" >&2
-  exit 1
-fi
-grep -Fq 'directWhileTunnelPacketTunnelStatusRawValue' "$ios_url_automation" \
-  || { echo "iOS automation does not record the live tunnel during Direct probing" >&2; exit 1; }
-grep -Fq 'directWhileTunnelUiSelectionObserved' "$ios_url_automation" \
-  || { echo "iOS automation does not prove the shipped UI selection was observed" >&2; exit 1; }
-grep -Fq 'directWhileTunnelHasDefaultRoute' "$ios_url_automation" \
-  || { echo "iOS automation does not inspect the installed Direct routes" >&2; exit 1; }
-python3 - "$ios_url_automation" <<'PY'
-import pathlib
-import sys
-
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = text.split("func runDebugDirectWhileConnected(", 1)[1]
-if "dispatch(" in body:
-    raise SystemExit("iOS Direct probe still mutates settings instead of observing shipped UI")
-PY
-
-for selector in \
-  internet-source-picker \
-  exit-dns-mode-picker \
-  exit-dns-provider-picker \
-  exit-dns-custom-url \
-  exit-dns-custom-bootstrap-ips \
-  exit-dns-through-exit-servers \
-  exit-dns-save
-do
-  grep -Fq "$selector" "$ios_internet" "$ios_settings" "$ios_exit_dns_settings" \
-    || { echo "iOS DNS UI is missing selector $selector" >&2; exit 1; }
-done
-grep -Fq 'testConfigureExitDnsForPhysicalPacketProbe' "$ios_ui" \
-  || { echo "iOS UI tests do not configure each packet-probe DNS case" >&2; exit 1; }
-grep -Fq 'testSelectDirectWhilePhysicalTunnelConnected' "$ios_ui" \
-  || { echo "iOS UI tests do not tap Direct while the physical tunnel is connected" >&2; exit 1; }
-grep -Fq 'NVPN_CONNECTED_DIRECT_UI_PASSED=1' "$ios_ui" \
-  || { echo "iOS connected Direct XCTest does not emit an exact receipt" >&2; exit 1; }
-grep -Fq 'emit("NVPN_EXIT_DNS_UI_CONFIG_PERSISTED=\(spec.caseName)")' "$ios_ui" \
-  || { echo "iOS shipped DNS XCTest does not emit an exact per-case receipt" >&2; exit 1; }
-python3 - "$ios_release_ui" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-body = source.split("private func configureExitDNS", 1)[1].split(
-    "\n    private func turnVPNOn", 1
-)[0]
-if body.count("try finishExitDnsTextEntry") < 2:
-    raise SystemExit("iOS release DNS UI leaves editable settings focused at Save")
-ack = body.find('element("exit-dns-save-acknowledgement").waitForExistence')
-relaunch = body.find("relaunch()")
-if ack < 0 or relaunch < 0 or ack > relaunch:
-    raise SystemExit("iOS release DNS UI relaunches before persistence acknowledgement")
-PY
-grep -Fq 'NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64: "$(NVPN_XCUITEST_EXIT_DNS_SPEC_BASE64)"' "$ios_project" \
-  || { echo "iOS scheme does not bridge the DNS case spec into the test runner" >&2; exit 1; }
-grep -Fq 'NVPN_XCUITEST_CONNECTED_DIRECT_GATE: "$(NVPN_XCUITEST_CONNECTED_DIRECT_GATE)"' "$ios_project" \
-  || { echo "iOS scheme does not bridge the connected Direct gate into the test runner" >&2; exit 1; }
-
-for selector in \
-  internet-source-picker \
-  exit-dns-mode \
-  exit-dns-provider \
-  exit-dns-custom-url \
-  exit-dns-custom-bootstrap-ips \
-  exit-dns-through-exit-servers \
-  exit-dns-save
-do
-  grep -Fq "$selector" "$android_internet" "$android_dns" \
-    || { echo "Android DNS UI is missing selector $selector" >&2; exit 1; }
-done
-
-grep -Fq 'mobile-wireguard-tls-sni-count.py' "$fixture_lib" \
-  && grep -Fq 'cloudflare-dns.com dns.quad9.net dns.google' "$fixture_lib" \
-  && grep -Fq 'nvpn-wg-dns-profile' "$server" \
-  && grep -Fq 'nvpn-wg-dns-through' "$server" \
-  && grep -Fq 'nvpn-wg-dns-forward' "$server" \
-  || { echo "WireGuard fixture lacks exact SNI/profile/through evidence" >&2; exit 1; }
-grep -Fq 'counter name dns_profile' "$remote_native" \
-  && grep -Fq 'counter name dns_through' "$remote_native" \
-  && grep -Fq 'counter name dns_forward' "$remote_native" \
-  && grep -Fq 'mobile-wireguard-tls-sni-count.py' "$remote_native" \
-  && grep -Fq 'cloudflare-dns.com dns.quad9.net dns.google' "$remote_native" \
-  && grep -Fq 'profile-dns-count' "$remote_native" \
-  && grep -Fq 'through-dns-count' "$remote_native" \
-  && grep -Fq 'forward-dns-count' "$remote_native" \
-  || { echo "native fixture lacks exact SNI/profile/through evidence" >&2; exit 1; }
-
-echo "mobile WireGuard exit DNS source contract passed"
+echo "mobile WireGuard exit DNS harness contract passed"
