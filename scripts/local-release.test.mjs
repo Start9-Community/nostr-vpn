@@ -2613,6 +2613,19 @@ test('Windows release transport supports jump hosts and proxy commands', () => {
   )
 })
 
+test('Windows publication bypasses script policy only for its remote process', () => {
+  const source = readFileSync('scripts/local-release.mjs', 'utf8')
+  const start = source.indexOf('function runWindowsPowerShell(')
+  const end = source.indexOf('\nfunction pullFileFromWindowsHost(', start)
+  const helper = source.slice(start, end)
+
+  assert.match(
+    helper,
+    /'powershell\.exe',[\s\S]*?'-NoProfile',[\s\S]*?'-NonInteractive',[\s\S]*?'-ExecutionPolicy',[\s\S]*?'Bypass',[\s\S]*?'-EncodedCommand'/,
+  )
+  assert.match(source, /windows-release-publication-proof\.ps1/)
+})
+
 test('readWorkspaceVersionTag reads the workspace package version', () => {
   const tag = readWorkspaceVersionTag(`
 [workspace]
