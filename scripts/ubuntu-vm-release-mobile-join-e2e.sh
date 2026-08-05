@@ -167,6 +167,12 @@ cmp -s \
   echo "Ubuntu VM receipt differs from the exact host-built bundle receipt" >&2
   exit 1
 }
+IMPORTED_DESKTOP_APP_SHA="$(
+  jq -er '.appGitSha' "$RESULT_DIR/import/host-bundle-receipt.json"
+)"
+IMPORTED_DESKTOP_APP_TREE="$(
+  jq -er '.appGitTree' "$RESULT_DIR/import/host-bundle-receipt.json"
+)"
 
 if release_join_reuse_artifacts; then
   release_join_validate_android_reuse
@@ -664,8 +670,8 @@ receipt_binding_args=(
     "$NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT"
   --android-apk "$RELEASE_JOIN_ANDROID_APK"
   --phase-evidence "$PHASE_EVIDENCE"
-  --expected-desktop-app-sha "$APP_GIT_SHA"
-  --expected-desktop-app-tree "$APP_GIT_TREE"
+  --expected-desktop-app-sha "$IMPORTED_DESKTOP_APP_SHA"
+  --expected-desktop-app-tree "$IMPORTED_DESKTOP_APP_TREE"
   --expected-desktop-fips-sha "$RELEASE_JOIN_FIPS_SHA"
   --expected-desktop-fips-tree "$RELEASE_JOIN_FIPS_TREE"
   --expected-desktop-fips-version "$RELEASE_JOIN_FIPS_VERSION"
