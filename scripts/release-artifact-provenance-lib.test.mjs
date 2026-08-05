@@ -84,6 +84,7 @@ test('component proof retains only unchanged platform product inputs', () => {
       'scripts/macos-vm-desktop-wireguard-exit-e2e.sh',
       'scripts/macos-vm-release-exit-dns-ui-e2e.sh',
       'scripts/macos-vm-release-mobile-join-e2e.sh',
+      'scripts/macos_exit_dns_ui_receipt.py',
       'scripts/macos_release_join_artifact.py',
       'scripts/mobile-release-join-e2e.sh',
       'scripts/mobile-release-join-ui-query.py',

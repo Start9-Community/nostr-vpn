@@ -54,6 +54,7 @@ const harnessOnlyPaths = new Set([
   'scripts/macos-vm-desktop-wireguard-exit-e2e.sh',
   'scripts/macos-vm-release-exit-dns-ui-e2e.sh',
   'scripts/macos-vm-release-mobile-join-e2e.sh',
+  'scripts/macos_exit_dns_ui_receipt.py',
   'scripts/macos_release_join_artifact.py',
   'scripts/prepare-macos-release-fips-peer.sh',
   'scripts/release-network-evidence.py',
