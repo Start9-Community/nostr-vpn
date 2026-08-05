@@ -27,6 +27,10 @@ for required in (
     "macos_vm_prepare_or_verify_imported_release",
     "NVPN_EXPECTED_MACOS_IMPORT_VERIFICATION_SHA256",
     'shasum -a 256 "$IMPORT_VERIFICATION"',
+    'receipt.get("appGitSha", "")',
+    'proof.get("candidate_app_git_sha", "")',
+    '--expected-app-head "$PRODUCT_APP_GIT_SHA"',
+    '--expected-app-tree "$PRODUCT_APP_GIT_TREE"',
     "xcrun swiftc -O",
     "codesign --force --timestamp --options runtime",
     "create-driver",
@@ -37,6 +41,8 @@ for required in (
 for prohibited in ("ssh macos-build", "ssh xcodebuild", "NVPN_APP_DATA_DIR="):
     if prohibited in host:
         raise SystemExit(f"macOS DNS host orchestrator contains {prohibited}")
+if '--expected-app-head "$APP_GIT_SHA"' in host:
+    raise SystemExit("macOS DNS driver validation confuses harness and product SHA")
 for required in (
     '"$APP_EXE"',
     "lib-macos-owned-test-app.sh",

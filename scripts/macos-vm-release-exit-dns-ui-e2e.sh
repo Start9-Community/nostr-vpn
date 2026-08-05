@@ -70,6 +70,8 @@ chmod 700 "$PRIVATE_DIR"
 release_join_require_clean_fips
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 APP_GIT_TREE="$(git -C "$ROOT" rev-parse HEAD^{tree})"
+PRODUCT_APP_GIT_SHA="$APP_GIT_SHA"
+PRODUCT_APP_GIT_TREE="$APP_GIT_TREE"
 release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 remote() {
@@ -79,8 +81,8 @@ remote() {
     'cd %q && env NVPN_FIPS_REPO_PATH=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q NVPN_EXPECTED_MACOS_IMPORT_VERIFICATION_SHA256=%q %q %q' \
     "$GUEST_REPO" \
     "../fips" \
-    "$APP_GIT_SHA" \
-    "$APP_GIT_TREE" \
+    "$PRODUCT_APP_GIT_SHA" \
+    "$PRODUCT_APP_GIT_TREE" \
     "$RELEASE_JOIN_FIPS_SHA" \
     "$RELEASE_JOIN_FIPS_TREE" \
     "$RELEASE_JOIN_FIPS_VERSION" \
@@ -124,6 +126,32 @@ IMPORT_VERIFICATION_SHA256="$(
   echo "import verification receipt has no exact SHA-256" >&2
   exit 1
 }
+IFS=$'\t' read -r \
+  PRODUCT_APP_GIT_SHA PRODUCT_APP_GIT_TREE \
+  receipt_candidate_sha receipt_candidate_tree extra <<<"$(
+    python3 - "$APP_RECEIPT" <<'PY'
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+proof = receipt.get("componentInputProof") or {}
+print(
+    receipt.get("appGitSha", ""),
+    receipt.get("appGitTree", ""),
+    proof.get("candidate_app_git_sha", ""),
+    proof.get("candidate_app_git_tree", ""),
+    sep="\t",
+)
+PY
+)"
+[[ "$PRODUCT_APP_GIT_SHA" =~ ^[0-9a-f]{40}$ \
+  && "$PRODUCT_APP_GIT_TREE" =~ ^[0-9a-f]{40}$ \
+  && "$receipt_candidate_sha" == "$APP_GIT_SHA" \
+  && "$receipt_candidate_tree" == "$APP_GIT_TREE" \
+  && -z "${extra:-}" ]] || {
+  echo "imported app receipt is not bound to the exact candidate harness" >&2
+  exit 1
+}
 
 xcrun swiftc -O \
   -framework AppKit \
@@ -144,8 +172,8 @@ python3 "$ROOT/scripts/macos_exit_dns_ui_receipt.py" create-driver \
   --app "$PUBLICATION_APP" \
   --app-receipt "$APP_RECEIPT" \
   --app-root "$ROOT" \
-  --expected-app-head "$APP_GIT_SHA" \
-  --expected-app-tree "$APP_GIT_TREE" \
+  --expected-app-head "$PRODUCT_APP_GIT_SHA" \
+  --expected-app-tree "$PRODUCT_APP_GIT_TREE" \
   --expected-team "$EXPECTED_TEAM" \
   --expected-identity-sha1 "$MACOS_SIGNING_IDENTITY" \
   --expected-signer-sha256 "$EXPECTED_SIGNER"

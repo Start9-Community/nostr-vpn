@@ -50,16 +50,22 @@ run_ps "\$ErrorActionPreference = 'Stop'
 Set-Location '$GUEST_REPO'
 New-Item -ItemType Directory -Force -Path '$GUEST_ARTIFACT_ROOT' | Out-Null
 if ('${NVPN_FIPS_REPO_PATH:-}' -ne '') { \$env:NVPN_FIPS_REPO_PATH = '$GUEST_FIPS_REPO' }
-\$app = Join-Path '$GUEST_REPO' 'windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe'
 \$installerReceiptPath = Join-Path '$GUEST_ARTIFACT_ROOT' 'windows-installer-gate\\installer-receipt.json'
-if (
-  !(Test-Path -LiteralPath \$app -PathType Leaf) -or
-  !(Test-Path -LiteralPath \$installerReceiptPath -PathType Leaf)
-) {
+if (!(Test-Path -LiteralPath \$installerReceiptPath -PathType Leaf)) {
   throw 'exact installed-and-launched Windows Release app receipt is missing'
 }
 \$installerReceipt = Get-Content -Raw -LiteralPath \$installerReceiptPath | ConvertFrom-Json
+\$releaseRoot = Join-Path '$GUEST_REPO' 'windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64'
+\$appFile = [string]\$installerReceipt.payloads.app.file
 if (
+  [IO.Path]::GetFileName(\$appFile) -ne \$appFile -or
+  \$appFile -ne 'NostrVpn.Windows.exe'
+) {
+  throw 'Windows installer receipt has an unsafe app payload path'
+}
+\$app = Join-Path \$releaseRoot \$appFile
+if (
+  !(Test-Path -LiteralPath \$app -PathType Leaf) -or
   \$installerReceipt.installerInstalledAndLaunched -ne \$true -or
   (Get-FileHash -Algorithm SHA256 -LiteralPath \$app).Hash.ToLowerInvariant() -ne
     \$installerReceipt.payloads.app.sha256
@@ -71,8 +77,9 @@ if (
 @'
 \$ErrorActionPreference = 'Stop'
 \$env:CARGO_TARGET_DIR = '$GUEST_ARTIFACT_ROOT\\windows-ui-e2e-cargo'
-& '$GUEST_REPO\\scripts\\e2e-windows-service-toggle.ps1' -AppExe '$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe' -ArtifactRoot '$GUEST_ARTIFACT_ROOT\\windows-service-toggle'
-'@ | Set-Content -Encoding utf8 \$interactiveWrapper"
+& '$GUEST_REPO\\scripts\\e2e-windows-service-toggle.ps1' -AppExe '__NVPN_EXACT_APP__' -ArtifactRoot '$GUEST_ARTIFACT_ROOT\\windows-service-toggle'
+'@.Replace('__NVPN_EXACT_APP__', \$app.Replace("'", "''")) |
+  Set-Content -Encoding utf8 \$interactiveWrapper"
 
 "$ROOT/scripts/windows-vm-wake-display.sh"
 

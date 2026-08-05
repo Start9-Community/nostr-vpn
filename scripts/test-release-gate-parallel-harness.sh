@@ -599,6 +599,12 @@ done
 grep -Fq 'virsh send-key "$vm" KEY_LEFTSHIFT' "$windows_display_wake" \
   || fail "Windows VM display wake does not inject a real console input event"
 windows_service_wrapper="$ROOT_DIR/scripts/windows-vm-service-toggle-e2e.sh"
+grep -Fq '\$installerReceipt.payloads.app.file' "$windows_service_wrapper" \
+  && grep -Fq "__NVPN_EXACT_APP__" "$windows_service_wrapper" \
+  || fail "Windows service-toggle runner does not resolve the installer-receipt app payload"
+if grep -Fq 'win-x64\\publish\\NostrVpn.Windows.exe' "$windows_service_wrapper"; then
+  fail "Windows service-toggle runner hardcodes a sibling publish executable"
+fi
 grep -Fq 'Get-Process consent' "$windows_service_wrapper" \
   || fail "Windows service-toggle VM runner does not observe the real UAC process"
 grep -Fq 'virsh send-key "$VM_NAME" KEY_ESC' "$windows_service_wrapper" \
