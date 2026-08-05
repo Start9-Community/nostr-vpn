@@ -21,6 +21,39 @@ printf 'app\n' >"$APP/Nostr VPN"
 printf 'tunnel\n' >"$TUNNEL/Nostr VPN Tunnel"
 printf 'test bundle\n' >"$TEST_BUNDLE/NostrVpnIosUITests"
 
+PYTHONPATH="$ROOT/scripts" python3 - "$TMP_ROOT" <<'PY'
+import pathlib
+import plistlib
+import shutil
+import sys
+
+from ios_frozen_archive import unsigned_content_manifest
+
+root = pathlib.Path(sys.argv[1])
+archive = root / "plist-archive" / "Nostr VPN.app"
+export = root / "plist-export" / "Nostr VPN.app"
+tunnel = pathlib.Path("PlugIns") / "Nostr VPN Tunnel.appex"
+for app in (archive, export):
+    (app / tunnel).mkdir(parents=True)
+    (app / "asset.bin").write_bytes(b"exact non-plist bytes\n")
+values = {
+    "CFBundleIdentifier": "example.nvpn",
+    "Nested": {"Enabled": True, "Values": [1, 2, 3]},
+}
+for relative in (pathlib.Path("Info.plist"), tunnel / "Info.plist"):
+    with (archive / relative).open("wb") as handle:
+        plistlib.dump(values, handle, fmt=plistlib.FMT_XML, sort_keys=False)
+    with (export / relative).open("wb") as handle:
+        plistlib.dump(values, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
+assert unsigned_content_manifest(archive) == unsigned_content_manifest(export)
+with (export / tunnel / "Info.plist").open("wb") as handle:
+    plistlib.dump({**values, "Nested": {"Enabled": False}}, handle)
+assert unsigned_content_manifest(archive) != unsigned_content_manifest(export)
+shutil.copy2(archive / tunnel / "Info.plist", export / tunnel / "Info.plist")
+(export / "asset.bin").write_bytes(b"changed non-plist bytes\n")
+assert unsigned_content_manifest(archive) != unsigned_content_manifest(export)
+PY
+
 python3 - "$SOURCE" "$APP" "$RUNNER" <<'PY'
 import pathlib
 import plistlib
@@ -1210,6 +1243,8 @@ if 'BUNDLE_ID" == "$NVPN_BUILTIN_IOS_BUNDLE_ID' not in ios_build:
     raise SystemExit("frozen archive permits non-production app identifiers")
 if 'NVPN_APP_VERSION_NAME" == "$source_version' not in ios_build:
     raise SystemExit("frozen archive permits an untracked marketing version")
+if 'IOS_INTERNAL_ONLY="${NVPN_IOS_INTERNAL_ONLY:-false}"' not in ios_build:
+    raise SystemExit("App Store export defaults to internal-only distribution")
 if 'NVPN_IOS_RELEASE_SOURCE_ROOT:-$HARNESS_ROOT' not in ios_build:
     raise SystemExit("current iOS harness cannot operate on exact product source")
 for current_tool in (

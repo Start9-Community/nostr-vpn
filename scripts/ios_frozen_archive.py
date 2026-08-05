@@ -105,12 +105,24 @@ def safe_symlink(path: pathlib.Path, root: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def canonical_plist(path: pathlib.Path) -> bytes:
+    return plistlib.dumps(
+        read_plist(path),
+        fmt=plistlib.FMT_BINARY,
+        sort_keys=True,
+    )
+
+
 def unsigned_content_manifest(app: pathlib.Path) -> tuple[str, int]:
     excluded_files = {
         pathlib.PurePosixPath(APP_EXECUTABLE),
         pathlib.PurePosixPath("embedded.mobileprovision"),
         pathlib.PurePosixPath("PlugIns") / TUNNEL_NAME / TUNNEL_EXECUTABLE,
         pathlib.PurePosixPath("PlugIns") / TUNNEL_NAME / "embedded.mobileprovision",
+    }
+    semantic_plists = {
+        pathlib.PurePosixPath("Info.plist"),
+        pathlib.PurePosixPath("PlugIns") / TUNNEL_NAME / "Info.plist",
     }
     entries: list[dict[str, Any]] = []
     for current, directories, files in os.walk(app, followlinks=False):
@@ -144,12 +156,17 @@ def unsigned_content_manifest(app: pathlib.Path) -> tuple[str, int]:
             require(path.is_file(), f"unsupported iOS bundle entry: {path}")
             if name.endswith((".dylib", ".so")):
                 raise ValueError(f"unexpected nested iOS executable: {relative}")
+            content = canonical_plist(path) if relative in semantic_plists else None
             entries.append(
                 {
                     "mode": stat.S_IMODE(metadata.st_mode),
                     "path": relative.as_posix(),
-                    "sha256": sha256_file(path),
-                    "size": metadata.st_size,
+                    "sha256": (
+                        hashlib.sha256(content).hexdigest()
+                        if content is not None
+                        else sha256_file(path)
+                    ),
+                    "size": len(content) if content is not None else metadata.st_size,
                     "type": "file",
                 }
             )
