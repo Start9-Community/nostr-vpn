@@ -113,7 +113,11 @@ def canonical_plist(path: pathlib.Path) -> bytes:
     )
 
 
-def unsigned_content_manifest(app: pathlib.Path) -> tuple[str, int]:
+def unsigned_content_manifest(
+    app: pathlib.Path,
+    *,
+    canonicalize_plists: bool = False,
+) -> tuple[str, int]:
     excluded_files = {
         pathlib.PurePosixPath(APP_EXECUTABLE),
         pathlib.PurePosixPath("embedded.mobileprovision"),
@@ -156,7 +160,11 @@ def unsigned_content_manifest(app: pathlib.Path) -> tuple[str, int]:
             require(path.is_file(), f"unsupported iOS bundle entry: {path}")
             if name.endswith((".dylib", ".so")):
                 raise ValueError(f"unexpected nested iOS executable: {relative}")
-            content = canonical_plist(path) if relative in semantic_plists else None
+            content = (
+                canonical_plist(path)
+                if canonicalize_plists and relative in semantic_plists
+                else None
+            )
             entries.append(
                 {
                     "mode": stat.S_IMODE(metadata.st_mode),
@@ -240,6 +248,17 @@ def bundle_identity(app: pathlib.Path) -> dict[str, Any]:
         "unsignedContentFileCount": content_count,
         "unsignedContentManifestSha256": content_sha,
     }
+
+
+def export_equivalence_identity(app: pathlib.Path) -> dict[str, Any]:
+    identity = bundle_identity(app)
+    content_sha, content_count = unsigned_content_manifest(
+        app,
+        canonicalize_plists=True,
+    )
+    identity["unsignedContentFileCount"] = content_count
+    identity["unsignedContentManifestSha256"] = content_sha
+    return identity
 
 
 def codesign_details(bundle: pathlib.Path) -> dict[str, str]:
@@ -689,13 +708,13 @@ def validate_archive_receipt(
 
 
 def validate_export(args: argparse.Namespace) -> None:
-    receipt, _archive_app, archive_identity = validate_archive_receipt(args)
+    receipt, archive_app, archive_identity = validate_archive_receipt(args)
     app = pathlib.Path(args.app).resolve()
     ipa = pathlib.Path(args.ipa).resolve()
     require(ipa.is_file(), f"exported iOS IPA is missing: {ipa}")
-    identity = bundle_identity(app)
     require(
-        identity == archive_identity,
+        export_equivalence_identity(app)
+        == export_equivalence_identity(archive_app),
         "exported iOS app is not code/content-identical to the frozen archive",
     )
     signing = signed_bundle_audit(
@@ -722,7 +741,7 @@ def validate_export(args: argparse.Namespace) -> None:
         "fipsCoreVersion": receipt["fipsCoreVersion"],
         "fipsGitSha": receipt["fipsGitSha"],
         "fipsGitTree": receipt["fipsGitTree"],
-        "identity": identity,
+        "identity": archive_identity,
         "ipaPathSha256": path_sha256(ipa),
         "ipaSha256": sha256_file(ipa),
         "rustBuildProfile": receipt["rustBuildProfile"],

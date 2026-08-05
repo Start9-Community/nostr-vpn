@@ -45,13 +45,20 @@ for relative in (pathlib.Path("Info.plist"), tunnel / "Info.plist"):
         plistlib.dump(values, handle, fmt=plistlib.FMT_XML, sort_keys=False)
     with (export / relative).open("wb") as handle:
         plistlib.dump(values, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
-assert unsigned_content_manifest(archive) == unsigned_content_manifest(export)
+assert unsigned_content_manifest(archive) != unsigned_content_manifest(export)
+assert unsigned_content_manifest(
+    archive, canonicalize_plists=True
+) == unsigned_content_manifest(export, canonicalize_plists=True)
 with (export / tunnel / "Info.plist").open("wb") as handle:
     plistlib.dump({**values, "Nested": {"Enabled": False}}, handle)
-assert unsigned_content_manifest(archive) != unsigned_content_manifest(export)
+assert unsigned_content_manifest(
+    archive, canonicalize_plists=True
+) != unsigned_content_manifest(export, canonicalize_plists=True)
 shutil.copy2(archive / tunnel / "Info.plist", export / tunnel / "Info.plist")
 (export / "asset.bin").write_bytes(b"changed non-plist bytes\n")
-assert unsigned_content_manifest(archive) != unsigned_content_manifest(export)
+assert unsigned_content_manifest(
+    archive, canonicalize_plists=True
+) != unsigned_content_manifest(export, canonicalize_plists=True)
 PY
 
 python3 - "$SOURCE" "$APP" "$RUNNER" <<'PY'
