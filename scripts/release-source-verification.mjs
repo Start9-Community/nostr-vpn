@@ -81,6 +81,21 @@ function cargoLockRegistryPackage(lock, name, version) {
   return { source, checksum }
 }
 
+function cargoLockUniqueRegistryPackage(lock, name) {
+  const matches = lock
+    .split(/^\[\[package\]\]\s*$/m)
+    .slice(1)
+    .filter((block) => new RegExp(`^name = "${name}"$`, 'm').test(block))
+  if (matches.length !== 1) {
+    throw new Error(`Cargo.lock must contain exactly one ${name} package.`)
+  }
+  const version = matches[0].match(/^version = "([^"]+)"$/m)?.[1] ?? ''
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`Cargo.lock has an invalid ${name} version.`)
+  }
+  return { version, ...cargoLockRegistryPackage(lock, name, version) }
+}
+
 function requireFilePayload(receipt, name, expectedFile, label) {
   const payload = receipt?.payloads?.[name]
   if (
@@ -323,12 +338,6 @@ export function exactFipsPublicationCandidate({
   label = 'Release publication',
 }) {
   const exactCandidateRoot = realpathSync(candidateRoot)
-  const commandEnv = { ...process.env, ...env }
-  const configuredFipsRoot = String(env?.NVPN_FIPS_REPO_PATH ?? '').trim()
-  if (!configuredFipsRoot) {
-    throw new Error(`${label} requires the exact NVPN_FIPS_REPO_PATH.`)
-  }
-  const fipsRoot = realpathSync(resolve(exactCandidateRoot, configuredFipsRoot))
   const expectedFipsGitSha = String(
     env?.NVPN_EXPECTED_FIPS_GIT_SHA ?? '',
   ).trim()
@@ -337,12 +346,24 @@ export function exactFipsPublicationCandidate({
       `${label} requires an exact lowercase NVPN_EXPECTED_FIPS_GIT_SHA.`,
     )
   }
-  const fipsGit = exactCleanGitCheckout({
-    root: fipsRoot,
-    env: commandEnv,
-    label: `${label} FIPS`,
-    expectedCommit: expectedFipsGitSha,
-  })
+  const expectedFipsGitTree = String(
+    env?.NVPN_EXPECTED_FIPS_GIT_TREE ?? '',
+  ).trim()
+  if (!/^[0-9a-f]{40}$/.test(expectedFipsGitTree)) {
+    throw new Error(
+      `${label} requires an exact lowercase NVPN_EXPECTED_FIPS_GIT_TREE.`,
+    )
+  }
+  const expectedFipsVersion = String(
+    env?.NVPN_EXPECTED_FIPS_VERSION ?? '',
+  ).trim()
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$/.test(
+    expectedFipsVersion,
+  )) {
+    throw new Error(
+      `${label} requires an exact NVPN_EXPECTED_FIPS_VERSION.`,
+    )
+  }
 
   const lockVerifierPath = join(
     exactCandidateRoot,
@@ -350,58 +371,26 @@ export function exactFipsPublicationCandidate({
     'verify-cargo-path-patch-lock.py',
   )
   requireRegularFile(lockVerifierPath, `${label} exact FIPS lock verifier`)
-  const specifications = captureRequired(
-    'python3',
-    [lockVerifierPath, '--manifest-specs', fipsRoot],
-    {
-      cwd: exactCandidateRoot,
-      env: commandEnv,
-      label: `${label} exact FIPS package specifications`,
-    },
-  )
-    .split(/\r?\n/)
-    .filter(Boolean)
-  const packageVersions = new Map()
-  for (const specification of specifications) {
-    const separator = specification.indexOf('=')
-    const name = specification.slice(0, separator)
-    const version = specification.slice(separator + 1)
-    if (
-      separator <= 0 ||
-      !/^[0-9A-Za-z_.+-]+$/.test(name) ||
-      !/^[0-9A-Za-z_.+-]+$/.test(version) ||
-      packageVersions.has(name)
-    ) {
-      throw new Error(`${label} exact FIPS package specifications are invalid.`)
-    }
-    packageVersions.set(name, version)
+  const rootCargoLockPath = join(exactCandidateRoot, 'Cargo.lock')
+  requireRegularFile(rootCargoLockPath, `${label} exact Cargo lock`)
+  const lock = readFileSync(rootCargoLockPath, 'utf8')
+  cargoLockRegistryPackage(lock, 'fips-core', expectedFipsVersion)
+  cargoLockRegistryPackage(lock, 'fips-endpoint', expectedFipsVersion)
+  const identity = cargoLockUniqueRegistryPackage(lock, 'fips-identity')
+  const packageVersions = {
+    'fips-core': expectedFipsVersion,
+    'fips-endpoint': expectedFipsVersion,
+    'fips-identity': identity.version,
   }
-  if (
-    packageVersions.size !== fipsPackageNames.length ||
-    fipsPackageNames.some((name) => !packageVersions.has(name))
-  ) {
-    throw new Error(
-      `${label} exact FIPS package set differs from the candidate.`,
-    )
-  }
-  exactCleanGitCheckout({
-    root: fipsRoot,
-    env: commandEnv,
-    label: `${label} FIPS`,
-    expectedCommit: fipsGit.commit,
-    expectedTree: fipsGit.tree,
-  })
 
   return {
-    fipsGitSha: fipsGit.commit,
-    fipsGitTree: fipsGit.tree,
-    fipsVersion: packageVersions.get('fips-core'),
+    fipsGitSha: expectedFipsGitSha,
+    fipsGitTree: expectedFipsGitTree,
+    fipsVersion: expectedFipsVersion,
     fipsSpecifications: fipsPackageNames.map(
-      (name) => `${name}=${packageVersions.get(name)}`,
+      (name) => `${name}=${packageVersions[name]}`,
     ),
-    fipsPatchedLockPackages: Object.fromEntries(
-      fipsPackageNames.map((name) => [name, packageVersions.get(name)]),
-    ),
+    fipsPatchedLockPackages: packageVersions,
     lockVerifierPath,
   }
 }

@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import {
+  exactFipsPublicationCandidate,
   linuxPublicationVerificationPlan,
   validateWindowsCratesIoReceipts,
   validateWindowsPublicationFipsReceipts,
@@ -402,6 +403,8 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
   const exactEnv = {
     ...process.env,
     NVPN_EXPECTED_FIPS_GIT_SHA: fipsGitSha,
+    NVPN_EXPECTED_FIPS_GIT_TREE: fipsGitTree,
+    NVPN_EXPECTED_FIPS_VERSION: fipsPackages['fips-core'],
     NVPN_FIPS_REPO_PATH: fipsRoot,
     NVPN_HOST_LINUX_VM_BUILDER_MODE: 'remote-native',
     NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST: 'fixture-builder',
@@ -463,8 +466,28 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
 
   const dirtyFipsPath = join(fipsRoot, 'untracked-publication-input')
   writeFileSync(dirtyFipsPath, 'dirty\n')
-  assert.throws(() => planFor(), /FIPS.*dirty/i)
+  assert.doesNotThrow(() => planFor())
   unlinkSync(dirtyFipsPath)
+
+  assert.doesNotThrow(() => planFor({
+    env: {
+      ...exactEnv,
+      NVPN_FIPS_REPO_PATH: join(temporaryRoot, 'nonexistent-live-fips'),
+    },
+  }))
+
+  for (const [field, value, message] of [
+    ['NVPN_EXPECTED_FIPS_GIT_SHA', '', /exact lowercase NVPN_EXPECTED_FIPS_GIT_SHA/i],
+    ['NVPN_EXPECTED_FIPS_GIT_TREE', '', /exact lowercase NVPN_EXPECTED_FIPS_GIT_TREE/i],
+    ['NVPN_EXPECTED_FIPS_VERSION', '', /exact NVPN_EXPECTED_FIPS_VERSION/i],
+    ['NVPN_EXPECTED_FIPS_VERSION', '0.4.53', /fips-core 0\.4\.53/i],
+  ]) {
+    assert.throws(
+      () => planFor({ env: { ...exactEnv, [field]: value } }),
+      message,
+      field,
+    )
+  }
 
   for (const [field, replacement, message] of [
     ['dockerfileSha256', 'b'.repeat(64), /dockerfileSha256/i],
@@ -569,6 +592,43 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     verificationCommit,
     verificationTree,
   }))
+})
+
+test('frozen FIPS publication identity comes from explicit proof and sealed Cargo.lock', (context) => {
+  const sourceRoot = process.cwd()
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-frozen-fips-proof-'))
+  context.after(() => rmSync(root, { recursive: true, force: true }))
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  copyFixtureInput(sourceRoot, 'Cargo.lock', join(root, 'Cargo.lock'))
+  copyFixtureInput(
+    sourceRoot,
+    'scripts/verify-cargo-path-patch-lock.py',
+    join(root, 'scripts', 'verify-cargo-path-patch-lock.py'),
+  )
+  const expected = {
+    fipsGitSha: 'a'.repeat(40),
+    fipsGitTree: 'b'.repeat(40),
+    fipsVersion: fipsPackages['fips-core'],
+    fipsSpecifications: fipsSpecs,
+    fipsPatchedLockPackages: fipsPackages,
+    lockVerifierPath: join(
+      realpathSync(root),
+      'scripts',
+      'verify-cargo-path-patch-lock.py',
+    ),
+  }
+  assert.deepEqual(
+    exactFipsPublicationCandidate({
+      candidateRoot: root,
+      env: {
+        NVPN_EXPECTED_FIPS_GIT_SHA: expected.fipsGitSha,
+        NVPN_EXPECTED_FIPS_GIT_TREE: expected.fipsGitTree,
+        NVPN_EXPECTED_FIPS_VERSION: expected.fipsVersion,
+        NVPN_FIPS_REPO_PATH: join(root, 'absent-and-irrelevant'),
+      },
+    }),
+    expected,
+  )
 })
 
 test('Windows publication requires installer and artifact receipts to bind exact FIPS', () => {
