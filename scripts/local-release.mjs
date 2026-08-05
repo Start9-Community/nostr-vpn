@@ -1841,38 +1841,79 @@ function runVerify({ dryRun, builtLines, releaseGateLogDir, tag }) {
 }
 
 function buildStartosArtifacts({
+  env,
   tag,
   dryRun,
   builtLines,
   releaseGateSummaryPath,
 }) {
-  run(
-    'node',
-    [
-      join(repoRoot, 'scripts', 'startos-release.mjs'),
-      '--tag',
-      tag,
-      '--output-dir',
-      distDir,
-    ],
-    { dryRun },
-  )
-  builtLines.push('Built signed StartOS packages for x86_64 and aarch64.')
+  const prebuiltArtifactDir = String(
+    env.NVPN_RELEASE_STARTOS_ARTIFACT_DIR ?? '',
+  ).trim()
+  let prebuiltPackages = null
+  if (!prebuiltArtifactDir) {
+    run(
+      'node',
+      [
+        join(repoRoot, 'scripts', 'startos-release.mjs'),
+        '--tag',
+        tag,
+        '--output-dir',
+        distDir,
+      ],
+      { dryRun },
+    )
+    builtLines.push('Built signed StartOS packages for x86_64 and aarch64.')
+  } else if (dryRun) {
+    builtLines.push('Would reuse inspected prebuilt StartOS packages for x86_64 and aarch64.')
+  } else {
+    const sourceDir = realpathSync(prebuiltArtifactDir)
+    prebuiltPackages = ['x86_64', 'aarch64'].map((arch) => {
+      const sourcePath = join(
+        sourceDir,
+        `nostr-vpn-${tag}-startos-${arch}.s9pk`,
+      )
+      if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) {
+        throw new Error(`Prebuilt StartOS ${arch} package is missing or invalid.`)
+      }
+      return {
+        arch,
+        sourcePath,
+        digest: sha256FileSync(sourcePath),
+        inspection: inspectStartosReleasePackage({ packagePath: sourcePath, arch, tag }),
+      }
+    })
+  }
   if (dryRun) {
     return {}
   }
+  if (prebuiltPackages) {
+    mkdirSync(distDir, { recursive: true })
+    builtLines.push('Reused inspected prebuilt StartOS packages for x86_64 and aarch64.')
+  }
   const proofs = {}
   for (const arch of ['x86_64', 'aarch64']) {
+    const prebuilt = prebuiltPackages?.find((entry) => entry.arch === arch)
     const path = join(
       distDir,
       `nostr-vpn-${tag}-startos-${arch}.s9pk`,
     )
+    if (prebuilt) copyFileSync(prebuilt.sourcePath, path)
     const digest = sha256FileSync(path)
     const inspection = inspectStartosReleasePackage({
       packagePath: path,
       arch,
       tag,
     })
+    if (
+      prebuilt
+      && (
+        digest !== prebuilt.digest
+        || inspection.manifestSha256 !== prebuilt.inspection.manifestSha256
+      )
+    ) {
+      throw new Error(`Prebuilt StartOS ${arch} package changed while staging.`)
+    }
     proofs[basename(path)] = exactArtifactProof({
       artifactPath: path,
       platform: 'startos',
@@ -2887,6 +2928,7 @@ function main() {
     ['startos', () => mergeArtifactProofs(
       artifactProofs,
       buildStartosArtifacts({
+        env,
         tag,
         dryRun: options.dryRun,
         builtLines,

@@ -2422,6 +2422,18 @@ test('publication verification requires real Windows and Linux underlay gates', 
   assert.match(verify, /isolated macOS VM network\/service proofs/)
 })
 
+test('StartOS staging uses an explicit inspected prebuilt directory without builder fallback', () => {
+  const source = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
+  const start = source.indexOf('function buildStartosArtifacts(')
+  const end = source.indexOf('\nfunction shouldRunStep(', start)
+  const build = source.slice(start, end)
+
+  assert.match(build, /NVPN_RELEASE_STARTOS_ARTIFACT_DIR/)
+  assert.match(build, /if \(!prebuiltArtifactDir\)[\s\S]*?startos-release\.mjs/)
+  assert.match(build, /prebuiltPackages = \['x86_64', 'aarch64'\]\.map/)
+  assert.match(build, /if \(prebuilt\) copyFileSync/)
+})
+
 test('release builds always include paid exit support', () => {
   for (const manifest of [
     'crates/nostr-vpn-core/Cargo.toml',
