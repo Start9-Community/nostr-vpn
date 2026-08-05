@@ -161,6 +161,7 @@ try {
     Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
 }
 
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 Remove-Item -Force $ArchivePath -ErrorAction SilentlyContinue
 $archive = [IO.Compression.ZipFile]::Open(
