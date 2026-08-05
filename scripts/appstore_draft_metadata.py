@@ -11,8 +11,6 @@ from collections.abc import Callable, Mapping, Sequence
 import os
 import re
 
-from testflight_export_compliance import VerifiedBuildCompliance
-
 
 DEFAULT_DESCRIPTION = """Nostr VPN creates private mesh VPN networks between your own devices and trusted peers.
 
@@ -196,13 +194,7 @@ def default_review_notes(
     version_name: str,
     *,
     environ: Mapping[str, str] | None = None,
-    encryption_compliance: VerifiedBuildCompliance | None = None,
 ) -> str:
-    if encryption_compliance is not None and not isinstance(
-        encryption_compliance,
-        VerifiedBuildCompliance,
-    ):
-        raise ValueError("review notes require a live build compliance proof")
     source = os.environ if environ is None else environ
     review_wireguard_config = str(
         source.get("NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG", "")
@@ -211,12 +203,6 @@ def default_review_notes(
         "\n\nReady-to-use reviewer WireGuard configuration:\n"
         f"{review_wireguard_config}"
         if review_wireguard_config
-        else ""
-    )
-    french_approval = (
-        " The approved French-store encryption declaration is attached to "
-        "this exact build in App Store Connect."
-        if encryption_compliance is not None
         else ""
     )
     return f"""Nostr VPN {version_name} is a client for user-configured private mesh networks and WireGuard endpoints. Sirius Business Oy does not operate, sell, or provide public VPN endpoints or a hosted VPN service. Users supply and control their own peers and WireGuard configurations. The iOS app uses Apple's Network Extension framework through an NEPacketTunnelProvider.
@@ -230,52 +216,9 @@ Review paths:
 
 The iOS app offers Direct, trusted Private VPN peers, and WireGuard configurations supplied by the user. Nostr provides signed device identity, peer discovery, and encrypted VPN/mesh networking control transport. The shared repository retains Cashu wallet and paid-exit implementations for non-iOS products. The iOS target is built without those feature dependencies or runtime workers and has no wallet or paid-exit UI/action path; only inert shared state-compatibility data types remain. There is no wallet, mint, token import/export; no paid VPN purchase, use, or sale; and no external purchase link in the iOS app.
 
-This build uses industry-standard cryptography implemented by the app, including WireGuard and encrypted Nostr/FIPS transport, in addition to cryptography provided by Apple operating systems. It is declared as using non-exempt encryption.{french_approval} App Store distribution is enabled in every territory except France, including China.
+This build implements industry-standard WireGuard and Nostr/FIPS cryptography. Both iOS bundles declare ITSAppUsesNonExemptEncryption=false. App Store distribution excludes France, and Apple treats this distribution as export-exempt in every enabled territory, including China. No app encryption declaration, export-compliance code, or French approval is required or claimed.
 
 Before first VPN activation, the app explains the connection data needed for configured networks, peers, relays, exits, and the selected DNS operator. Sirius Business Oy does not collect or retain VPN traffic, connection data, or DNS queries; sell VPN data; or use it for advertising or tracking. The Settings tab includes a link to the current Privacy Policy.{wireguard_fixture}"""
-
-
-def _claims_unverified_french_approval(notes: str) -> bool:
-    normalized = re.sub(r"\s+", " ", notes.lower())
-    sentences = [
-        sentence.strip()
-        for sentence in re.split(r"(?<=[.!?])\s+", normalized)
-        if sentence.strip()
-    ]
-    subject = re.compile(
-        r"(?:\b(?:french|france)\b.*\b(?:encryption|export[ -]compliance)\b"
-        r"|\b(?:encryption|export[ -]compliance)\b.*\bdeclaration\b)"
-    )
-    positive = re.compile(
-        r"\b(?:approval|approved|accepted|granted|cleared|attached|linked|"
-        r"associated|assigned)\b"
-    )
-    pending_or_negated = re.compile(
-        r"\b(?:no|not|never|without|pending|awaiting|unapproved|rejected|denied)\b"
-    )
-    referential = re.compile(r"\b(?:it|this|that|declaration|approval|apple|build)\b")
-
-    def positive_claim(sentence: str) -> bool:
-        clauses = re.split(
-            r"[,;:]|\b(?:but|however|although)\b",
-            sentence,
-        )
-        return any(
-            positive.search(clause) and not pending_or_negated.search(clause)
-            for clause in clauses
-        )
-
-    for index, sentence in enumerate(sentences):
-        if not subject.search(sentence):
-            continue
-        if positive_claim(sentence):
-            return True
-        if index + 1 >= len(sentences):
-            continue
-        following = sentences[index + 1]
-        if referential.search(following) and positive_claim(following):
-            return True
-    return False
 
 
 def _review_notes_value(
@@ -283,7 +226,6 @@ def _review_notes_value(
     override_name: str,
     source: Mapping[str, str],
     default: str,
-    encryption_compliance: VerifiedBuildCompliance | None,
 ) -> str:
     override = str(source.get(override_name, "")).strip()
     notes = override or default
@@ -311,15 +253,6 @@ def _review_notes_value(
             raise ValueError(
                 "review notes must not claim App Store availability in France"
             )
-    if (
-        override
-        and encryption_compliance is None
-        and _claims_unverified_french_approval(notes)
-    ):
-        raise ValueError(
-            "French encryption approval or attachment may be claimed only "
-            "after a verified live build relationship readback"
-        )
     return notes
 
 
@@ -328,7 +261,6 @@ def review_notes(
     existing: Mapping[str, object] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
-    encryption_compliance: VerifiedBuildCompliance | None = None,
 ) -> str:
     """Return authoritative reviewer notes for the current marketing version."""
 
@@ -337,12 +269,7 @@ def review_notes(
     return _review_notes_value(
         override_name="NVPN_APPSTORE_REVIEW_NOTES",
         source=source,
-        default=default_review_notes(
-            version_name,
-            environ=source,
-            encryption_compliance=encryption_compliance,
-        ),
-        encryption_compliance=encryption_compliance,
+        default=default_review_notes(version_name, environ=source),
     )
 
 
@@ -351,7 +278,6 @@ def testflight_review_notes(
     existing: Mapping[str, object] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
-    encryption_compliance: VerifiedBuildCompliance | None = None,
 ) -> str:
     """Return authoritative Beta App Review notes for an external build."""
 
@@ -360,33 +286,8 @@ def testflight_review_notes(
     return _review_notes_value(
         override_name="NVPN_TESTFLIGHT_REVIEW_NOTES",
         source=source,
-        default=default_review_notes(
-            version_name,
-            environ=source,
-            encryption_compliance=encryption_compliance,
-        ),
-        encryption_compliance=encryption_compliance,
+        default=default_review_notes(version_name, environ=source),
     )
-
-
-def require_review_submission_encryption_compliance(
-    action: str,
-    encryption_compliance: VerifiedBuildCompliance | None,
-) -> None:
-    """Require live exact-build French approval before review submission."""
-
-    if action not in {"submit", "public", "public-submit"}:
-        return
-    if encryption_compliance is None:
-        raise ValueError(
-            "Review submission requires an approved French-store encryption "
-            "declaration linked to the exact build"
-        )
-    if not isinstance(encryption_compliance, VerifiedBuildCompliance):
-        raise ValueError(
-            "Review submission encryption compliance must be a verified "
-            "exact-build proof when supplied"
-        )
 
 
 def require_testflight_external_review_material(

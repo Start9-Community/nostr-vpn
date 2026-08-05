@@ -112,7 +112,7 @@ from appstore_availability import (
 )
 from testflight_export_compliance import (
     ExportComplianceError,
-    prepare_build_compliance_for_submission,
+    ensure_build_export_exempt,
     select_exact_app,
     select_exact_build,
 )
@@ -718,7 +718,7 @@ def app_store_review_detail(version_id):
     return require_ok(status, body, "Read App Review detail").get("data")
 
 
-def review_detail_attrs(existing=None, encryption_compliance=None):
+def review_detail_attrs(existing=None):
     current = existing.get("attributes", {}) if existing else {}
     return {
         "contactFirstName": required_metadata_value(
@@ -750,14 +750,13 @@ def review_detail_attrs(existing=None, encryption_compliance=None):
             VERSION_NAME,
             existing,
             environ=os.environ,
-            encryption_compliance=encryption_compliance,
         ),
     }
 
 
-def ensure_review_detail(version_id, encryption_compliance):
+def ensure_review_detail(version_id):
     detail = app_store_review_detail(version_id)
-    attrs = review_detail_attrs(detail, encryption_compliance)
+    attrs = review_detail_attrs(detail)
     if detail:
         status, body = request(
             "PATCH",
@@ -1444,27 +1443,15 @@ build = find_build(app["id"])
 if build is None:
     fail(f"Build {BUILD_NUMBER} is not visible in App Store Connect")
 try:
-    build, encryption_compliance = prepare_build_compliance_for_submission(
+    build = ensure_build_export_exempt(
         build,
-        app_id=app["id"],
         request=request,
-        get_all=get_all,
         get_build=get_build,
         log=lambda message: print(f"{message} Build {BUILD_NUMBER}."),
     )
 except ExportComplianceError as error:
     fail(str(error))
-try:
-    draft_metadata.require_review_submission_encryption_compliance(
-        ACTION,
-        encryption_compliance,
-    )
-except ValueError as error:
-    fail(str(error))
-review_detail = ensure_review_detail(
-    version["id"],
-    encryption_compliance,
-)
+review_detail = ensure_review_detail(version["id"])
 link_build(version["id"], build)
 screenshot_mode, screenshots = reconcile_screenshots(localization["id"])
 submission = None

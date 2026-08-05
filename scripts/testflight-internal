@@ -118,13 +118,12 @@ sys.path.insert(
     os.path.join(os.environ["NVPN_TESTFLIGHT_REPO_ROOT"], "scripts"),
 )
 from appstore_draft_metadata import (
-    require_review_submission_encryption_compliance,
     require_testflight_external_review_material,
     testflight_review_notes,
 )
 from testflight_export_compliance import (
     ExportComplianceError,
-    prepare_build_compliance_for_submission,
+    ensure_build_export_exempt,
     select_exact_app,
     select_unique_build_for_marketing_version,
 )
@@ -459,11 +458,9 @@ def expire_build(build):
 
 def ensure_export_compliance(build):
     try:
-        return prepare_build_compliance_for_submission(
+        return ensure_build_export_exempt(
             build,
-            app_id=APP_ID,
             request=request,
-            get_all=get_all,
             get_build=get_build,
             log=lambda message: print(f"{message} Build {BUILD_NUMBER}."),
         )
@@ -839,7 +836,7 @@ def required_metadata_value(env_name, current, label, default=""):
     return value
 
 
-def patch_beta_review_detail(encryption_compliance):
+def patch_beta_review_detail():
     detail = beta_review_detail()
     attrs = detail.get("attributes", {}) if detail else {}
     contact_first = required_metadata_value(
@@ -866,7 +863,6 @@ def patch_beta_review_detail(encryption_compliance):
         VERSION_NAME,
         attrs,
         environ=os.environ,
-        encryption_compliance=encryption_compliance,
     )
     body = {
         "data": {
@@ -964,8 +960,8 @@ def upsert_beta_app_localization():
     print(f"Updated beta app localization for {locale}")
 
 
-def ensure_public_metadata(encryption_compliance):
-    patch_beta_review_detail(encryption_compliance)
+def ensure_public_metadata():
+    patch_beta_review_detail()
     upsert_beta_app_localization()
 
 
@@ -1131,9 +1127,8 @@ else:
         fail(f"Build {BUILD_NUMBER} is {build['attributes'].get('processingState')}, not VALID")
 
 if ACTION in {"put", "attach", "compliance", "public", "public-submit", "public-attach"}:
-    build, encryption_compliance = ensure_export_compliance(build)
+    build = ensure_export_compliance(build)
 else:
-    encryption_compliance = None
     build = get_build(build["id"])
 
 if ACTION == "compliance":
@@ -1146,14 +1141,7 @@ if ACTION in PUBLIC_ACTIONS:
     )
     build = ensure_public_build(build)
     if ACTION in {"public", "public-submit"}:
-        try:
-            require_review_submission_encryption_compliance(
-                ACTION,
-                encryption_compliance,
-            )
-        except ValueError as error:
-            fail(str(error))
-        ensure_public_metadata(encryption_compliance)
+        ensure_public_metadata()
         upsert_what_to_test(build)
         submit_beta_review(build)
     if ACTION in {"public", "public-attach"}:
