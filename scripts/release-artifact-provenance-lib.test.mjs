@@ -63,6 +63,19 @@ test('component proof retains only unchanged platform product inputs', () => {
     assert.doesNotThrow(() => proveUnchangedPlatformInputs({
       ...args, candidateCommit: verifierTest.commit, candidateTree: verifierTest.tree,
     }))
+    for (const path of [
+      'scripts/ios-upload-receipt.mjs',
+      'scripts/publish-release-refs.mjs',
+      'scripts/release-mutation-gate.mjs',
+      'scripts/release_common.sh',
+    ]) {
+      const publication = commit(path, 'publication harness')
+      assert.doesNotThrow(() => proveUnchangedPlatformInputs({
+        ...args,
+        candidateCommit: publication.commit,
+        candidateTree: publication.tree,
+      }))
+    }
     const android = commit('android/App.kt', 'product change')
     assert.throws(() => proveUnchangedPlatformInputs({
       ...args, candidateCommit: android.commit, candidateTree: android.tree,
