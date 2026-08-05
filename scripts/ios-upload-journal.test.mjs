@@ -55,20 +55,15 @@ function createJournalFixture() {
   const exportDir = join(repoRoot, 'dist', 'ios', 'export')
   const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
   const stageDir = join(repoRoot, 'stage')
-  const historicalFleetDir = join(repoRoot, 'fleet-historical')
-  const currentFleetDir = join(repoRoot, 'fleet-current')
   for (const path of [
     exportDir,
     frozenDir,
     stageDir,
-    historicalFleetDir,
-    currentFleetDir,
   ]) {
     mkdirSync(path, { recursive: true })
   }
 
   const now = Math.floor(Date.now() / 1000)
-  const authorizedAt = now - 10
   const commit = '1'.repeat(40)
   const tree = '2'.repeat(40)
   const signer = '3'.repeat(64)
@@ -117,39 +112,10 @@ function createJournalFixture() {
   const stageRelease = join(stageDir, 'release.json')
   writeFileSync(stageRelease, `${JSON.stringify(stagedManifest)}\n`)
 
-  const makeFleet = (directory, prefix) => {
-    const paths = {
-      result: join(directory, 'result.json'),
-      manifest: join(directory, 'manifest.json'),
-      inventory: join(directory, 'inventory.json'),
-      proof: join(directory, 'proof.json'),
-    }
-    for (const [name, path] of Object.entries(paths)) {
-      const value = name === 'proof'
-        ? { validatedAt: authorizedAt }
-        : { kind: `${prefix}-${name}` }
-      writeFileSync(path, `${JSON.stringify(value)}\n`)
-    }
-    chmodSync(paths.proof, 0o600)
-    return paths
-  }
-  const historicalPaths = makeFleet(historicalFleetDir, 'historical')
-  const currentPaths = makeFleet(currentFleetDir, 'current')
   const mutationEnv = {
     ...process.env,
     NVPN_RELEASE_STAGE_DIR: stageDir,
     NVPN_RELEASE_TAG: stagedManifest.tag,
-    NVPN_FLEET_RESULT_PATH: historicalPaths.result,
-    NVPN_FLEET_MANIFEST_PATH: historicalPaths.manifest,
-    NVPN_FLEET_INVENTORY_PATH: historicalPaths.inventory,
-    NVPN_FLEET_PROOF_PATH: historicalPaths.proof,
-  }
-  const currentMutationEnv = {
-    ...mutationEnv,
-    NVPN_FLEET_RESULT_PATH: currentPaths.result,
-    NVPN_FLEET_MANIFEST_PATH: currentPaths.manifest,
-    NVPN_FLEET_INVENTORY_PATH: currentPaths.inventory,
-    NVPN_FLEET_PROOF_PATH: currentPaths.proof,
   }
   const frozen = {
     ipaPath,
@@ -174,25 +140,14 @@ function createJournalFixture() {
     processingState: 'VALID',
     audience: 'APP_STORE_ELIGIBLE',
   }
-  const validations = []
-  const validatePublication = (value) => {
-    validations.push(value)
-    return { targetCount: 1, validatedAt: authorizedAt }
-  }
   return {
-    authorizedAt,
-    currentMutationEnv,
-    currentPaths,
     frozen,
-    historicalPaths,
     mutationEnv,
     now,
     repoRoot,
     stageDir,
     stagedManifest,
     testflight,
-    validatePublication,
-    validations,
   }
 }
 
@@ -202,7 +157,6 @@ function captureAndWriteIntent(fixture) {
     frozen: fixture.frozen,
     stagedManifest: fixture.stagedManifest,
     mutationEnv: fixture.mutationEnv,
-    validatePublication: fixture.validatePublication,
   })
   return writeIosUploadIntent({
     repoRoot: fixture.repoRoot,
@@ -210,7 +164,6 @@ function captureAndWriteIntent(fixture) {
     stagedManifest: fixture.stagedManifest,
     mutationEnv: fixture.mutationEnv,
     intent: value,
-    validatePublication: fixture.validatePublication,
   })
 }
 
@@ -222,7 +175,6 @@ function writePending(fixture, intentReceipt, source) {
     mutationEnv: fixture.mutationEnv,
     intentReceipt,
     acceptanceSource: source,
-    validatePublication: fixture.validatePublication,
   })
 }
 
@@ -234,7 +186,6 @@ function writeFinal(fixture, pendingReceipt) {
     mutationEnv: fixture.mutationEnv,
     pendingReceipt,
     testflight: fixture.testflight,
-    validatePublication: fixture.validatePublication,
   })
 }
 
@@ -256,7 +207,7 @@ function assertExactStat(path, expected) {
   assert.equal(actual.mtimeMs, expected.mtimeMs)
 }
 
-test('iOS upload journals are immutable, exact, and replay historical fleet authorization', () => {
+test('iOS upload journals are immutable and bind exact release bytes', () => {
   const fixture = createJournalFixture()
   const intent = captureAndWriteIntent(fixture)
   assert.equal(intent.created, true)
@@ -276,9 +227,8 @@ test('iOS upload journals are immutable, exact, and replay historical fleet auth
     repoRoot: fixture.repoRoot,
     frozen: fixture.frozen,
     stagedManifest: fixture.stagedManifest,
-    mutationEnv: fixture.currentMutationEnv,
+    mutationEnv: fixture.mutationEnv,
     testflight: { ...fixture.testflight, buildPresent: false },
-    validatePublication: fixture.validatePublication,
   })
   assert.equal(waiting.uploadAction, 'wait-intent')
   assertExactStat(intent.path, intentBeforeRetry)
@@ -287,9 +237,8 @@ test('iOS upload journals are immutable, exact, and replay historical fleet auth
     repoRoot: fixture.repoRoot,
     frozen: fixture.frozen,
     stagedManifest: fixture.stagedManifest,
-    mutationEnv: fixture.currentMutationEnv,
+    mutationEnv: fixture.mutationEnv,
     testflight: fixture.testflight,
-    validatePublication: fixture.validatePublication,
   })
   assert.equal(visible.uploadAction, 'recover-intent')
 
@@ -317,8 +266,7 @@ test('iOS upload journals are immutable, exact, and replay historical fleet auth
       repoRoot: fixture.repoRoot,
       frozen: fixture.frozen,
       stagedManifest: fixture.stagedManifest,
-      mutationEnv: fixture.currentMutationEnv,
-      validatePublication: fixture.validatePublication,
+      mutationEnv: fixture.mutationEnv,
     }).value,
     pending.value,
   )
@@ -327,9 +275,8 @@ test('iOS upload journals are immutable, exact, and replay historical fleet auth
     repoRoot: fixture.repoRoot,
     frozen: fixture.frozen,
     stagedManifest: fixture.stagedManifest,
-    mutationEnv: fixture.currentMutationEnv,
+    mutationEnv: fixture.mutationEnv,
     testflight: fixture.testflight,
-    validatePublication: fixture.validatePublication,
   })
   assert.equal(readyToFinalize.uploadAction, 'finalize-pending')
 
@@ -345,9 +292,8 @@ test('iOS upload journals are immutable, exact, and replay historical fleet auth
     repoRoot: fixture.repoRoot,
     frozen: fixture.frozen,
     stagedManifest: fixture.stagedManifest,
-    mutationEnv: fixture.currentMutationEnv,
+    mutationEnv: fixture.mutationEnv,
     testflight: fixture.testflight,
-    validatePublication: fixture.validatePublication,
   })
   assert.equal(complete.uploadAction, 'use-final')
   assert.equal(complete.intentReceipt.path, intent.path)
@@ -361,25 +307,10 @@ test('iOS upload journals are immutable, exact, and replay historical fleet auth
       repoRoot: fixture.repoRoot,
       frozen: fixture.frozen,
       stagedManifest: fixture.stagedManifest,
-      mutationEnv: fixture.currentMutationEnv,
+      mutationEnv: fixture.mutationEnv,
       testflight: fixture.testflight,
-      validatePublication: fixture.validatePublication,
     }).value,
     final.value,
-  )
-  assert.ok(
-    fixture.validations.some(
-      (validation) =>
-        validation.options.fleetProof
-        === realpathSync(fixture.historicalPaths.proof),
-    ),
-  )
-  assert.ok(
-    fixture.validations.every(
-      (validation) =>
-        validation.options.fleetProof
-        !== realpathSync(fixture.currentPaths.proof),
-    ),
   )
 })
 
@@ -526,7 +457,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
     frozen: symlinkFixture.frozen,
     stagedManifest: symlinkFixture.stagedManifest,
     mutationEnv: symlinkFixture.mutationEnv,
-    validatePublication: symlinkFixture.validatePublication,
   })
   assert.throws(
     () =>
@@ -536,7 +466,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
         stagedManifest: symlinkFixture.stagedManifest,
         mutationEnv: symlinkFixture.mutationEnv,
         intent: desired,
-        validatePublication: symlinkFixture.validatePublication,
       }),
     /regular non-symlink/i,
   )
@@ -555,7 +484,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
           ...mismatchedFixture.testflight,
           version: '4.1.4',
         },
-        validatePublication: mismatchedFixture.validatePublication,
       }),
     /exact valid build/i,
   )
@@ -578,7 +506,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
         frozen: fixture.frozen,
         stagedManifest: fixture.stagedManifest,
         mutationEnv: fixture.mutationEnv,
-        validatePublication: fixture.validatePublication,
       }),
     /mode must be 0600/i,
   )
@@ -602,7 +529,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
         stagedManifest: fixture.stagedManifest,
         mutationEnv: fixture.mutationEnv,
         testflight: fixture.testflight,
-        validatePublication: fixture.validatePublication,
       }),
     /attempt|binding|differ|invalid/i,
   )
@@ -618,7 +544,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
           ...fixture.testflight,
           buildId: 'substituted-build-id',
         },
-        validatePublication: fixture.validatePublication,
       }),
     /final iOS upload receipt is invalid/i,
   )
@@ -633,7 +558,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
           ...fixture.testflight,
           processingState: 'PROCESSING',
         },
-        validatePublication: fixture.validatePublication,
       }),
     /exact valid build/i,
   )
@@ -648,7 +572,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
           ...fixture.testflight,
           uploadedDate: '2000-01-01T00:00:00.000Z',
         },
-        validatePublication: fixture.validatePublication,
       }),
     /exact valid build/i,
   )
@@ -662,7 +585,6 @@ test('iOS upload journals reject path collisions, symlinks, modes, and tampering
         frozen: fixture.frozen,
         stagedManifest: fixture.stagedManifest,
         mutationEnv: fixture.mutationEnv,
-        validatePublication: fixture.validatePublication,
       }),
     /differs from exact frozen staging|authorization binding/i,
   )
@@ -796,7 +718,6 @@ test('accepted-before-return crash recovers from ASC without a duplicate upload'
         stagedManifest: fixture.stagedManifest,
         mutationEnv,
         preflight,
-        validatePublication: fixture.validatePublication,
       }),
     /failed/i,
   )
@@ -814,7 +735,6 @@ test('accepted-before-return crash recovers from ASC without a duplicate upload'
     repoRoot: fixture.repoRoot,
     stagedManifest: fixture.stagedManifest,
     mutationEnv: retryEnv,
-    validatePublication: fixture.validatePublication,
   })
   assert.equal(retryPreflight.uploadAction, 'recover-intent')
   const recovered = publishExactIosDistribution({
@@ -822,7 +742,6 @@ test('accepted-before-return crash recovers from ASC without a duplicate upload'
     stagedManifest: fixture.stagedManifest,
     mutationEnv: retryEnv,
     preflight: retryPreflight,
-    validatePublication: fixture.validatePublication,
   })
   assert.deepEqual(recovered, { submitted: true, verified: true })
   assert.equal(uploadCount(fake.uploadLog), 1)
@@ -855,7 +774,6 @@ test('intent creation failure cannot invoke upload', () => {
         stagedManifest: fixture.stagedManifest,
         mutationEnv: fake.mutationEnv,
         preflight,
-        validatePublication: fixture.validatePublication,
       }),
     /regular non-symlink/i,
   )
@@ -876,7 +794,6 @@ test('pre-spawn crash state times out without changing intent or re-uploading', 
     repoRoot: fixture.repoRoot,
     stagedManifest: fixture.stagedManifest,
     mutationEnv,
-    validatePublication: fixture.validatePublication,
   })
   assert.equal(preflight.uploadAction, 'wait-intent')
 
@@ -887,7 +804,6 @@ test('pre-spawn crash state times out without changing intent or re-uploading', 
         stagedManifest: fixture.stagedManifest,
         mutationEnv,
         preflight,
-        validatePublication: fixture.validatePublication,
       }),
     /failed/i,
   )
@@ -928,7 +844,6 @@ test('concurrent iOS publishers elect one intent winner and invoke upload once',
   writeFileSync(
     fixturePath,
     `${JSON.stringify({
-      authorizedAt: fixture.authorizedAt,
       mutationEnv: {
         ...fake.mutationEnv,
         FAKE_PREFLIGHT_BARRIER: 'true',
@@ -948,22 +863,16 @@ import {
       join(sourceRoot, 'scripts', 'ios-release-publication.mjs'),
     )}
 const fixture = JSON.parse(readFileSync(process.env.FIXTURE_PATH, 'utf8'))
-const validatePublication = () => ({
-  targetCount: 1,
-  validatedAt: fixture.authorizedAt,
-})
 const preflight = preflightIosPublication({
   repoRoot: fixture.repoRoot,
   stagedManifest: fixture.stagedManifest,
   mutationEnv: fixture.mutationEnv,
-  validatePublication,
 })
 publishExactIosDistribution({
   repoRoot: fixture.repoRoot,
   stagedManifest: fixture.stagedManifest,
   mutationEnv: fixture.mutationEnv,
   preflight,
-  validatePublication,
 })
 `,
   )

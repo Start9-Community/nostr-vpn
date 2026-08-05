@@ -198,7 +198,6 @@ export function preflightIosPublication({
   stagedManifest,
   mutationEnv,
   dryRun = false,
-  validatePublication,
 }) {
   const frozen = validateFrozenIosPublication({
     repoRoot,
@@ -242,7 +241,6 @@ export function preflightIosPublication({
     stagedManifest,
     mutationEnv,
     testflight,
-    validatePublication,
   })
   return {
     ...frozen,
@@ -261,7 +259,6 @@ export function publishExactIosDistribution({
   preflight,
   beforeMutation = () => {},
   dryRun = false,
-  validatePublication,
 }) {
   const frozen = validateFrozenIosPublication({ repoRoot, stagedManifest })
   if (dryRun) {
@@ -290,7 +287,6 @@ export function publishExactIosDistribution({
       stagedManifest,
       mutationEnv,
       testflight: uploaded,
-      validatePublication,
     })
 
   if (receipts.uploadAction === 'create-intent') {
@@ -299,7 +295,6 @@ export function publishExactIosDistribution({
       frozen,
       stagedManifest,
       mutationEnv,
-      validatePublication,
     })
     beforeMutation()
     const intent = writeIosUploadIntent({
@@ -308,7 +303,6 @@ export function publishExactIosDistribution({
       stagedManifest,
       mutationEnv,
       intent: authorization,
-      validatePublication,
     })
     if (intent.created) {
       run(
@@ -323,7 +317,6 @@ export function publishExactIosDistribution({
         mutationEnv,
         intentReceipt: intent,
         acceptanceSource: 'transporter-returned',
-        validatePublication,
       })
     } else {
       uploaded = testflightPreflight({ repoRoot, mutationEnv })
@@ -352,7 +345,6 @@ export function publishExactIosDistribution({
       mutationEnv,
       intentReceipt: receipts.intentReceipt,
       acceptanceSource: 'app-store-connect-visible',
-      validatePublication,
     })
     receipts = reconcile()
   }
@@ -364,7 +356,6 @@ export function publishExactIosDistribution({
       mutationEnv,
       pendingReceipt: receipts.pendingReceipt,
       testflight: uploaded,
-      validatePublication,
     })
     receipts = reconcile()
   }
@@ -384,7 +375,6 @@ export function publishExactIosDistribution({
       stagedManifest,
       mutationEnv,
       testflight: uploaded,
-      validatePublication,
     })
     beforeMutation()
     run(

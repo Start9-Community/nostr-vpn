@@ -11,10 +11,6 @@ import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
-  assertAuthorizedFleetPublication,
-  fleetPublicationPaths,
-} from './fleet-release-publication-lib.mjs'
-import {
   normalizeTag,
   validatePromotableReleaseManifest,
   validateStagedReleaseTree,
@@ -116,55 +112,28 @@ export function validateExactStageSource({
 
 export function validateReleaseMutationGate({
   stageDir,
-  fleetResult,
-  fleetManifest,
-  fleetInventory,
-  fleetProof,
   expectedTag = '',
   requireTag = false,
-  env = process.env,
 }) {
   if (!stageDir || !isAbsolute(stageDir)) {
     fail('stage directory requires an exact absolute path')
   }
-  const fleetOptions = {
-    fleetResult, fleetManifest, fleetInventory, fleetProof,
-  }
-  const fleetPaths = fleetPublicationPaths({
-    repoRoot,
-    options: fleetOptions,
-    env,
-  })
   const exact = validateExactStageSource({
     stageDir,
     expectedTag,
     requireTag,
   })
-  const fleet = fleetPaths
-    ? assertAuthorizedFleetPublication({
-        repoRoot,
-        options: fleetOptions,
-        env,
-        stageDir,
-        stagedManifest: exact.release,
-      })
-    : null
   return {
     appGitSha: exact.head,
     appGitTree: exact.tree,
     status: 'passed',
     tag: exact.tag,
-    targetCount: fleet?.targetCount ?? 0,
   }
 }
 
 function parseArgs(argv) {
   const values = {
     stageDir: process.env.NVPN_RELEASE_STAGE_DIR || '',
-    fleetResult: process.env.NVPN_FLEET_RESULT_PATH || '',
-    fleetManifest: process.env.NVPN_FLEET_MANIFEST_PATH || '',
-    fleetInventory: process.env.NVPN_FLEET_INVENTORY_PATH || '',
-    fleetProof: process.env.NVPN_FLEET_PROOF_PATH || '',
     expectedTag: process.env.NVPN_RELEASE_TAG || '',
     requireTag: false,
   }
@@ -173,18 +142,6 @@ function parseArgs(argv) {
     switch (argument) {
       case '--stage-dir':
         values.stageDir = argv[++index] ?? ''
-        break
-      case '--fleet-result':
-        values.fleetResult = argv[++index] ?? ''
-        break
-      case '--fleet-manifest':
-        values.fleetManifest = argv[++index] ?? ''
-        break
-      case '--fleet-inventory':
-        values.fleetInventory = argv[++index] ?? ''
-        break
-      case '--fleet-proof':
-        values.fleetProof = argv[++index] ?? ''
         break
       case '--tag':
         values.expectedTag = argv[++index] ?? ''
@@ -197,14 +154,9 @@ function parseArgs(argv) {
         console.log(`Usage: node scripts/release-mutation-gate.mjs [options]
 
 Requires a clean exact staged source before any external release mutation.
-When fleet evidence is supplied, all four paths are required and validated.
 
 Options:
   --stage-dir DIR
-  --fleet-result JSON       Optional with the complete fleet evidence set
-  --fleet-manifest JSON     Optional with the complete fleet evidence set
-  --fleet-inventory JSON    Optional with the complete fleet evidence set
-  --fleet-proof JSON        Optional with the complete fleet evidence set
   --tag TAG
   --require-tag`)
         process.exit(0)

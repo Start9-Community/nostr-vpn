@@ -16,10 +16,6 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
-import {
-  assertAuthorizedFleetPublication,
-  fleetPublicationPaths,
-} from './fleet-release-publication-lib.mjs'
 import { sha256FileSync } from './local-release-lib.mjs'
 
 const clockSkewSeconds = 300
@@ -67,19 +63,6 @@ function validateFileBinding(binding, label) {
     throw new Error(`${label} differs from its upload authorization binding.`)
   }
   return actual
-}
-
-function exactJson(path, label) {
-  exactFileBinding(path, label)
-  try {
-    const value = JSON.parse(readFileSync(path, 'utf8'))
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('not a JSON object')
-    }
-    return value
-  } catch (error) {
-    throw new Error(`${label} is invalid: ${error.message}`)
-  }
 }
 
 function journalMetadata(path, label) {
@@ -230,87 +213,6 @@ function uploadIdentity({ frozen, stagedManifest, mutationEnv }) {
   }
 }
 
-function fleetAuthorization(repoRoot, mutationEnv) {
-  const paths = fleetPublicationPaths({
-    repoRoot,
-    options: {},
-    env: mutationEnv,
-  })
-  if (!paths) return null
-  const proof = exactFileBinding(
-    paths.proof,
-    'Historical fleet authorization proof',
-  )
-  const authorization = exactJson(
-    proof.path,
-    'Historical fleet authorization proof',
-  )
-  return {
-    authorizedAt: authorization.validatedAt,
-    result: exactFileBinding(
-      paths.result,
-      'Historical fleet result',
-    ),
-    manifest: exactFileBinding(
-      paths.manifest,
-      'Historical fleet manifest',
-    ),
-    inventory: exactFileBinding(
-      paths.inventory,
-      'Historical fleet inventory',
-    ),
-    proof,
-  }
-}
-
-export function validateHistoricalIosFleetAuthorization({
-  repoRoot,
-  authorization,
-  stageDir,
-  stagedManifest,
-  env,
-  validatePublication = assertAuthorizedFleetPublication,
-}) {
-  exactKeys(
-    authorization,
-    ['authorizedAt', 'inventory', 'manifest', 'proof', 'result'],
-    'Historical iOS fleet authorization',
-  )
-  if (
-    !Number.isSafeInteger(authorization.authorizedAt)
-    || authorization.authorizedAt <= 0
-    || authorization.authorizedAt > Math.floor(Date.now() / 1000) + clockSkewSeconds
-  ) {
-    throw new Error('Historical iOS fleet authorization time is invalid.')
-  }
-  for (const [name, label] of [
-    ['result', 'Historical fleet result'],
-    ['manifest', 'Historical fleet manifest'],
-    ['inventory', 'Historical fleet inventory'],
-    ['proof', 'Historical fleet authorization proof'],
-  ]) {
-    validateFileBinding(authorization[name], label)
-  }
-  const validation = validatePublication({
-    repoRoot,
-    options: {
-      fleetResult: authorization.result.path,
-      fleetManifest: authorization.manifest.path,
-      fleetInventory: authorization.inventory.path,
-      fleetProof: authorization.proof.path,
-    },
-    env,
-    stageDir,
-    stagedManifest,
-  })
-  if (validation.validatedAt !== authorization.authorizedAt) {
-    throw new Error(
-      'Historical iOS fleet authorization time differs from its exact proof.',
-    )
-  }
-  return authorization
-}
-
 const identityKeys = [
   'appGitSha',
   'appGitTree',
@@ -347,18 +249,15 @@ const intentKeys = [
   ...identityKeys,
   'attemptId',
   'createdAt',
-  'fleetAuthorization',
   'kind',
   'schema',
 ]
 
 function validateIntentValue({
-  repoRoot,
   receipt,
   frozen,
   stagedManifest,
   mutationEnv,
-  validatePublication,
 }) {
   exactKeys(receipt, intentKeys, 'iOS upload intent')
   if (
@@ -368,30 +267,17 @@ function validateIntentValue({
     || !Number.isSafeInteger(receipt.createdAt)
     || receipt.createdAt <= 0
     || receipt.createdAt > Math.floor(Date.now() / 1000) + clockSkewSeconds
-    || receipt.createdAt < receipt.fleetAuthorization?.authorizedAt
   ) {
     throw new Error('iOS upload intent is invalid.')
   }
   validateUploadIdentity({ receipt, frozen, stagedManifest, mutationEnv })
-  if (receipt.fleetAuthorization !== null) {
-    validateHistoricalIosFleetAuthorization({
-      repoRoot,
-      authorization: receipt.fleetAuthorization,
-      stageDir: mutationEnv.NVPN_RELEASE_STAGE_DIR,
-      stagedManifest,
-      env: mutationEnv,
-      validatePublication,
-    })
-  }
   return receipt
 }
 
 export function captureIosUploadIntent({
-  repoRoot,
   frozen,
   stagedManifest,
   mutationEnv,
-  validatePublication,
 }) {
   const value = {
     schema: 1,
@@ -399,15 +285,12 @@ export function captureIosUploadIntent({
     attemptId: randomUUID(),
     createdAt: Math.floor(Date.now() / 1000),
     ...uploadIdentity({ frozen, stagedManifest, mutationEnv }),
-    fleetAuthorization: fleetAuthorization(repoRoot, mutationEnv),
   }
   return validateIntentValue({
-    repoRoot,
     receipt: value,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
   })
 }
 
@@ -416,23 +299,20 @@ export function validateIosUploadIntent({
   frozen,
   stagedManifest,
   mutationEnv,
-  validatePublication,
 }) {
   const path = iosUploadReceiptPaths({ repoRoot, mutationEnv }).intent
   if (!existsSync(path)) {
-    throw new Error('Fleet-authorized iOS upload intent is missing.')
+    throw new Error('Exact iOS upload intent is missing.')
   }
   const journal = readPrivateJournal(
     path,
-    'Fleet-authorized iOS upload intent',
+    'Exact iOS upload intent',
   )
   validateIntentValue({
-    repoRoot,
     receipt: journal.value,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
   })
   return journal
 }
@@ -448,29 +328,24 @@ export function writeIosUploadIntent({
   stagedManifest,
   mutationEnv,
   intent,
-  validatePublication,
 }) {
   validateIntentValue({
-    repoRoot,
     receipt: intent,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
   })
   const path = iosUploadReceiptPaths({ repoRoot, mutationEnv }).intent
   const written = writePrivateJournalNoReplace(
     path,
     intent,
-    'Fleet-authorized iOS upload intent',
+    'Exact iOS upload intent',
   )
   validateIntentValue({
-    repoRoot,
     receipt: written.value,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
   })
   if (
     !written.created
@@ -497,12 +372,7 @@ const acceptanceSources = new Set([
 ])
 
 function validatePendingValue({
-  repoRoot,
   receipt,
-  frozen,
-  stagedManifest,
-  mutationEnv,
-  validatePublication,
   intentReceipt,
 }) {
   exactKeys(receipt, pendingKeys, 'Pending iOS upload receipt')
@@ -529,27 +399,19 @@ function validatePendingValue({
 
 function readIosPendingUploadReceipt({
   repoRoot,
-  frozen,
-  stagedManifest,
   mutationEnv,
-  validatePublication,
   intentReceipt,
 }) {
   const path = iosUploadReceiptPaths({ repoRoot, mutationEnv }).pending
   if (!existsSync(path)) {
-    throw new Error('Pending fleet-authorized iOS upload receipt is missing.')
+    throw new Error('Pending exact iOS upload receipt is missing.')
   }
   const journal = readPrivateJournal(
     path,
-    'Pending fleet-authorized iOS upload receipt',
+    'Pending exact iOS upload receipt',
   )
   validatePendingValue({
-    repoRoot,
     receipt: journal.value,
-    frozen,
-    stagedManifest,
-    mutationEnv,
-    validatePublication,
     intentReceipt,
   })
   return journal
@@ -567,14 +429,12 @@ export function writeAcceptedIosPendingUpload({
   mutationEnv,
   intentReceipt,
   acceptanceSource,
-  validatePublication,
 }) {
   const validatedIntent = validateIosUploadIntent({
     repoRoot,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
   })
   if (
     intentReceipt?.path !== validatedIntent.path
@@ -591,27 +451,17 @@ export function writeAcceptedIosPendingUpload({
     intent: validatedIntent.binding,
   }
   validatePendingValue({
-    repoRoot,
     receipt: value,
-    frozen,
-    stagedManifest,
-    mutationEnv,
-    validatePublication,
     intentReceipt: validatedIntent,
   })
   const path = iosUploadReceiptPaths({ repoRoot, mutationEnv }).pending
   const written = writePrivateJournalNoReplace(
     path,
     value,
-    'Pending fleet-authorized iOS upload receipt',
+    'Pending exact iOS upload receipt',
   )
   validatePendingValue({
-    repoRoot,
     receipt: written.value,
-    frozen,
-    stagedManifest,
-    mutationEnv,
-    validatePublication,
     intentReceipt: validatedIntent,
   })
   if (
@@ -697,12 +547,12 @@ function readIosUploadReceipt({
   const path = iosUploadReceiptPaths({ repoRoot, mutationEnv }).final
   if (!existsSync(path)) {
     throw new Error(
-      'Existing App Store Connect build has no fleet-bound exact upload receipt.',
+      'Existing App Store Connect build has no exact upload receipt.',
     )
   }
   const journal = readPrivateJournal(
     path,
-    'Fleet-bound iOS upload receipt',
+    'Exact iOS upload receipt',
   )
   validateFinalValue({
     receipt: journal.value,
@@ -717,7 +567,7 @@ export function validateIosUploadReceipt(options) {
   const path = iosUploadReceiptPaths(options).final
   if (!existsSync(path)) {
     throw new Error(
-      'Existing App Store Connect build has no fleet-bound exact upload receipt.',
+      'Existing App Store Connect build has no exact upload receipt.',
     )
   }
   const intentReceipt = validateIosUploadIntent(options)
@@ -739,21 +589,18 @@ export function finalizeIosUploadReceipt({
   mutationEnv,
   pendingReceipt,
   testflight,
-  validatePublication,
 }) {
   const intentReceipt = validateIosUploadIntent({
     repoRoot,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
   })
   const validatedPending = readIosPendingUploadReceipt({
     repoRoot,
     frozen,
     stagedManifest,
     mutationEnv,
-    validatePublication,
     intentReceipt,
   })
   if (
@@ -776,7 +623,7 @@ export function finalizeIosUploadReceipt({
   const written = writePrivateJournalNoReplace(
     path,
     value,
-    'Fleet-bound iOS upload receipt',
+    'Exact iOS upload receipt',
   )
   validateFinalValue({
     receipt: written.value,
@@ -812,7 +659,7 @@ export function planIosUploadReconciliation({
   if (finalReceipt) {
     if (!buildPresent || !buildValid) {
       throw new Error(
-        'Final fleet-bound iOS upload receipt has no exact VALID App Store Connect build.',
+        'Final iOS upload receipt has no exact VALID App Store Connect build.',
       )
     }
     return 'use-final'
@@ -829,7 +676,7 @@ export function planIosUploadReconciliation({
   }
   if (buildPresent) {
     throw new Error(
-      'Orphan App Store Connect build has no fleet-authorized upload intent.',
+      'Orphan App Store Connect build has no exact upload intent.',
     )
   }
   return 'create-intent'
@@ -841,7 +688,6 @@ export function reconcileIosUploadReceipts({
   stagedManifest,
   mutationEnv,
   testflight,
-  validatePublication,
 }) {
   const paths = iosUploadReceiptPaths({ repoRoot, mutationEnv })
   const intentReceipt = existsSync(paths.intent)
@@ -850,7 +696,6 @@ export function reconcileIosUploadReceipts({
         frozen,
         stagedManifest,
         mutationEnv,
-        validatePublication,
       })
     : null
   const pendingExists = existsSync(paths.pending)
@@ -865,7 +710,6 @@ export function reconcileIosUploadReceipts({
         frozen,
         stagedManifest,
         mutationEnv,
-        validatePublication,
         intentReceipt,
       })
     : null

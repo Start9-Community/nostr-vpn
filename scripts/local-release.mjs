@@ -66,11 +66,6 @@ import {
 } from './release-artifact-provenance-lib.mjs'
 import { inspectStartosReleasePackage } from './startos-release.mjs'
 import {
-  assertAuthorizedFleetPublication,
-  authorizeFreshFleetPublication,
-  fleetPublicationPaths,
-} from './fleet-release-publication-lib.mjs'
-import {
   preflightGithubRelease,
   publishExactGithubRelease,
 } from './github-release-publication.mjs'
@@ -121,10 +116,6 @@ Options:
                             this tag to final/latest without rebuilding
   --publish-staged-draft    Publish an existing complete staged draft without
                             rebuilding, rerunning gates, or shipping elsewhere
-  --fleet-result <path>     Optional exact fleet-canary-result.json
-  --fleet-manifest <path>   Optional frozen fleet manifest
-  --fleet-inventory <path>  Optional authoritative-roster inventory
-  --fleet-proof <path>      Optional immutable fleet authorization proof
   --cargo-publish           Publish Rust crates during an exact staged
                             --promote-draft operation
   --skip-cargo-publish      With --promote-draft, don't push Rust crates
@@ -160,10 +151,6 @@ function parseArgs(argv) {
     draft: true,
     promoteDraft: false,
     publishStagedDraft: false,
-    fleetResult: null,
-    fleetManifest: null,
-    fleetInventory: null,
-    fleetProof: null,
     cargoPublish: false,
     skipCargoPublish: false,
     skipZapstore: false,
@@ -206,18 +193,6 @@ function parseArgs(argv) {
         break
       case '--publish-staged-draft':
         options.publishStagedDraft = true
-        break
-      case '--fleet-result':
-        options.fleetResult = resolve(repoRoot, argv[++index] ?? '')
-        break
-      case '--fleet-manifest':
-        options.fleetManifest = resolve(repoRoot, argv[++index] ?? '')
-        break
-      case '--fleet-inventory':
-        options.fleetInventory = resolve(repoRoot, argv[++index] ?? '')
-        break
-      case '--fleet-proof':
-        options.fleetProof = resolve(repoRoot, argv[++index] ?? '')
         break
       case '--cargo-publish':
         options.cargoPublish = true
@@ -1715,7 +1690,7 @@ function buildIosArtifacts({
   }
   // Ordinary staging is local-only. It verifies the physically tested frozen
   // archive and exports its exact App Store IPA without contacting Apple.
-  // Upload/attach/submission entry points require the post-fleet mutation gate.
+  // Upload/attach/submission entry points require the exact-source mutation gate.
   if (sourceEquivalence) {
     const temporaryRoot = mkdtempSync(join(os.tmpdir(), 'nvpn-ios-export-source-'))
     const sourceRoot = join(temporaryRoot, 'source')
@@ -2281,39 +2256,25 @@ function promoteStagedDraft({
 
 function releaseMutationEnvironment({
   env,
-  options,
   stageDir,
   stagedManifest,
 }) {
-  const fleet = fleetPublicationPaths({ repoRoot, options, env })
   return {
     ...process.env,
     ...env,
     NVPN_RELEASE_STAGE_DIR: resolve(stageDir),
     NVPN_RELEASE_TAG: stagedManifest.tag,
-    ...(fleet && {
-      NVPN_FLEET_RESULT_PATH: fleet.result,
-      NVPN_FLEET_MANIFEST_PATH: fleet.manifest,
-      NVPN_FLEET_INVENTORY_PATH: fleet.inventory,
-      NVPN_FLEET_PROOF_PATH: fleet.proof,
-    }),
   }
 }
 
 function replayCanonicalMutationGate({
   stageDir,
   tag,
-  options,
   env,
   requireTag,
 }) {
-  const fleet = fleetPublicationPaths({ repoRoot, options, env })
   return validateReleaseMutationGate({
     stageDir: resolve(stageDir),
-    fleetResult: fleet?.result,
-    fleetManifest: fleet?.manifest,
-    fleetInventory: fleet?.inventory,
-    fleetProof: fleet?.proof,
     expectedTag: tag,
     requireTag,
     env,
@@ -2323,7 +2284,6 @@ function replayCanonicalMutationGate({
 function publishRustCrates({
   dryRun,
   env,
-  options,
   stageDir,
   stagedManifest,
 }) {
@@ -2331,7 +2291,6 @@ function publishRustCrates({
   assertPromotableDraftSource(stagedManifest.tag, stagedManifest)
   const mutationEnv = releaseMutationEnvironment({
     env,
-    options,
     stageDir,
     stagedManifest,
   })
@@ -2350,7 +2309,6 @@ function publishRustCrates({
 function preflightRustCrates({
   dryRun,
   env,
-  options,
   stageDir,
   stagedManifest,
 }) {
@@ -2359,7 +2317,6 @@ function preflightRustCrates({
   }
   const mutationEnv = releaseMutationEnvironment({
     env,
-    options,
     stageDir,
     stagedManifest,
   })
@@ -2608,24 +2565,6 @@ function main() {
       )
     }
   }
-  const hasFleetPublicationPaths = Boolean(
-    options.fleetResult
-    || options.fleetManifest
-    || options.fleetInventory
-    || options.fleetProof,
-  )
-  if (
-    hasFleetPublicationPaths
-    && !options.publishStagedDraft
-    && !options.promoteDraft
-  ) {
-    throw new Error(
-      'Fleet evidence paths are valid only with --publish-staged-draft or --promote-draft.',
-    )
-  }
-  const fleetPublication = options.publishStagedDraft || options.promoteDraft
-    ? fleetPublicationPaths({ repoRoot, options, env })
-    : null
   if (options.publish && !options.promoteDraft) {
     throw new Error(
       'Direct --publish/--final is disabled: stage first, then use --publish-staged-draft and --promote-draft.',
@@ -2698,21 +2637,8 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    if (fleetPublication) {
-      const fleetValidation = authorizeFreshFleetPublication({
-        repoRoot,
-        options,
-        env,
-        stageDir,
-        stagedManifest,
-      })
-      console.log(
-        `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
-      )
-    }
     const mutationEnv = releaseMutationEnvironment({
       env,
-      options,
       stageDir,
       stagedManifest,
     })
@@ -2736,7 +2662,6 @@ function main() {
         replayCanonicalMutationGate({
           stageDir,
           tag,
-          options,
           env: mutationEnv,
           requireTag: false,
         })
@@ -2797,21 +2722,8 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    if (fleetPublication) {
-      const fleetValidation = assertAuthorizedFleetPublication({
-        repoRoot,
-        options,
-        env,
-        stageDir,
-        stagedManifest,
-      })
-      console.log(
-        `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
-      )
-    }
     const mutationEnv = releaseMutationEnvironment({
       env,
-      options,
       stageDir,
       stagedManifest,
     })
@@ -2855,7 +2767,6 @@ function main() {
       preflightRustCrates({
         dryRun: options.dryRun,
         env,
-        options,
         stageDir,
         stagedManifest,
       })
@@ -2868,7 +2779,6 @@ function main() {
       beforeMutation: () => replayCanonicalMutationGate({
         stageDir,
         tag,
-        options,
         env: mutationEnv,
         requireTag: true,
       }),
@@ -2891,7 +2801,6 @@ function main() {
         replayCanonicalMutationGate({
           stageDir,
           tag,
-          options,
           env: mutationEnv,
           requireTag: true,
         })
@@ -2901,7 +2810,6 @@ function main() {
     replayCanonicalMutationGate({
       stageDir,
       tag,
-      options,
       env: mutationEnv,
       requireTag: true,
     })
@@ -2915,7 +2823,6 @@ function main() {
       beforeMutation: () => replayCanonicalMutationGate({
         stageDir,
         tag,
-        options,
         env: mutationEnv,
         requireTag: true,
       }),
@@ -2928,7 +2835,6 @@ function main() {
       publishRustCrates({
         dryRun: options.dryRun,
         env,
-        options,
         stageDir,
         stagedManifest,
       })

@@ -190,31 +190,19 @@ Docker e2e and desktop updater scripts live under [`scripts`](scripts). The most
 2. Bump the root `[workspace.package].version` in `Cargo.toml`.
 3. Run `node scripts/sync-versions.mjs`, verify with `node scripts/sync-versions.mjs --check`, and commit the release source.
 4. From that exact clean commit, stage the complete release with `node scripts/local-release.mjs --stage-dir <stage-dir>`. Staging runs the mandatory release gate and binds its real-platform receipts.
-5. Prepare fresh private fleet inventory and manifest files with `scripts/prepare-fleet-release-canary.mjs`. Validate them with `scripts/fleet_release_canary.py plan`, then run its explicitly authorized `execute` mode. Continue only when `fleet-canary-result.json` reports `passed`.
-6. Publish the immutable fleet-gated draft:
+5. Publish the immutable draft:
 
    ```bash
    node scripts/local-release.mjs \
      --publish-staged-draft \
-     --stage-dir <stage-dir> \
-     --fleet-result <fleet-dir>/evidence/fleet-canary-result.json \
-     --fleet-manifest <fleet-dir>/manifest.json \
-     --fleet-inventory <fleet-dir>/inventory.json \
-     --fleet-proof <fleet-dir>/fleet-publication-proof.json
+     --stage-dir <stage-dir>
    ```
 
-   The first successful draft authorization creates the proof as a private
-   mode-`0600` file without replacing any existing proof.
-
-7. Publish the exact refs and wait for the immutable-draft workflow:
+6. Publish the exact refs and wait for the immutable-draft workflow:
 
    ```bash
    node scripts/publish-release-refs.mjs \
      --stage-dir <stage-dir> \
-     --fleet-result <fleet-dir>/evidence/fleet-canary-result.json \
-     --fleet-manifest <fleet-dir>/manifest.json \
-     --fleet-inventory <fleet-dir>/inventory.json \
-     --fleet-proof <fleet-dir>/fleet-publication-proof.json \
      --tag vX.Y.Z \
      --draft-cid <immutable-draft-cid>
    ```
@@ -223,9 +211,11 @@ Docker e2e and desktop updater scripts live under [`scripts`](scripts). The most
    remote refs, replays the canonical mutation gate before each external
    phase, pushes without force, resumes an already visible exact GitHub Actions
    run on retry, and fails closed if duplicate exact runs exist.
-8. Promote the same staged bytes and fleet evidence with `scripts/local-release.mjs --promote-draft` plus the four paths above. Promotion preflights and publishes Apple distribution, htree, the exact GitHub release, crates.io packages, and Zapstore.
+7. Promote the same staged bytes with `node scripts/local-release.mjs --promote-draft --stage-dir <stage-dir>`. Promotion preflights and publishes Apple distribution, htree, the exact GitHub release, crates.io packages, and Zapstore.
 
-Direct `--publish` and `--final` modes are intentionally disabled. Every external release mutation must replay the exact staged-source and passed-fleet gates.
+Direct `--publish` and `--final` modes are intentionally disabled. Every external release mutation replays the exact staged-source gate.
+
+Private fleet rollout is a separate post-release operation. Prepare its frozen inventory and manifest with `scripts/prepare-fleet-release-canary.mjs`, inspect the plan with `scripts/fleet_release_canary.py plan`, and run the explicitly authorized `execute` mode only when the fleet should be updated.
 
 ### Workspace Layout
 

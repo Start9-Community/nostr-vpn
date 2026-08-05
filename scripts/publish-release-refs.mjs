@@ -14,7 +14,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { githubRepositoryFromRemote } from './github-release-publication.mjs'
 import { normalizeTag } from './local-release-lib.mjs'
 import { validateReleaseMutationGate } from './release-mutation-gate.mjs'
-import { fleetPublicationPaths } from './fleet-release-publication-lib.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const canonicalHtreeRemote = 'htree://self/nostr-vpn'
@@ -470,19 +469,9 @@ export function publishReleaseRefs(options, dependencies = {}) {
   if (!options.stageDir || !isAbsolute(options.stageDir)) {
     fail('stage directory requires an exact absolute path')
   }
-  const fleet = fleetPublicationPaths({
-    repoRoot,
-    options,
-    env: options.env ?? process.env,
-  })
   const gateOptions = {
     stageDir: options.stageDir,
-    fleetResult: fleet?.result,
-    fleetManifest: fleet?.manifest,
-    fleetInventory: fleet?.inventory,
-    fleetProof: fleet?.proof,
     expectedTag: tag,
-    env: options.env ?? process.env,
   }
   const initial = validateGate({
     ...gateOptions,
@@ -660,10 +649,6 @@ export function publishReleaseRefs(options, dependencies = {}) {
 function parseArgs(argv) {
   const values = {
     stageDir: process.env.NVPN_RELEASE_STAGE_DIR || '',
-    fleetResult: process.env.NVPN_FLEET_RESULT_PATH || '',
-    fleetManifest: process.env.NVPN_FLEET_MANIFEST_PATH || '',
-    fleetInventory: process.env.NVPN_FLEET_INVENTORY_PATH || '',
-    fleetProof: process.env.NVPN_FLEET_PROOF_PATH || '',
     tag: process.env.NVPN_RELEASE_TAG || '',
     cid: process.env.NVPN_RELEASE_DRAFT_CID || '',
   }
@@ -672,18 +657,6 @@ function parseArgs(argv) {
     switch (argument) {
       case '--stage-dir':
         values.stageDir = argv[++index] ?? ''
-        break
-      case '--fleet-result':
-        values.fleetResult = argv[++index] ?? ''
-        break
-      case '--fleet-manifest':
-        values.fleetManifest = argv[++index] ?? ''
-        break
-      case '--fleet-inventory':
-        values.fleetInventory = argv[++index] ?? ''
-        break
-      case '--fleet-proof':
-        values.fleetProof = argv[++index] ?? ''
         break
       case '--tag':
         values.tag = argv[++index] ?? ''
@@ -700,10 +673,6 @@ exact immutable-draft workflow, and waits for that workflow to succeed.
 
 Options:
   --stage-dir DIR
-  --fleet-result JSON       Optional with the complete fleet evidence set
-  --fleet-manifest JSON     Optional with the complete fleet evidence set
-  --fleet-inventory JSON    Optional with the complete fleet evidence set
-  --fleet-proof JSON        Optional with the complete fleet evidence set
   --tag TAG
   --draft-cid CID`)
         process.exit(0)

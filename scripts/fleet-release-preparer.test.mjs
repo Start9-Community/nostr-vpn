@@ -15,7 +15,6 @@ import test from 'node:test'
 
 import {
   buildFrozenFleetInventory,
-  validateFleetPublicationMetadata,
 } from './fleet-release-preparer-lib.mjs'
 import { deriveFleetArtifacts } from './prepare-fleet-release-canary.mjs'
 
@@ -208,127 +207,14 @@ function inventoryArgs(snapshot = rosterSnapshot(), catalog = rosterCatalog(snap
   }
 }
 
-function publicationFixture() {
-  const snapshot = rosterSnapshot()
-  const input = inventoryArgs(snapshot)
-  const inventory = buildFrozenFleetInventory(input)
-  const source = {
+function releaseSource() {
+  return {
     appGitSha: hex('a', 40),
     appGitTree: hex('b', 40),
     appVersion: '4.1.5',
     fipsGitSha: hex('c', 40),
     fipsGitTree: hex('d', 40),
     fipsVersion: '0.4.45',
-  }
-  const paths = {
-    release: '/private/stage/release.json',
-    driver: '/checkout/scripts/fleet_release_canary_ssh_driver.py',
-  }
-  const hashes = {
-    manifestSha256: hex('f'),
-    inventorySha256: hex('0'),
-    driverSha256: hex('9'),
-    releaseGateManifestSha256: hex('8'),
-  }
-  const helpers = [
-    bound(
-      '/checkout/scripts/fleet_release_canary_remote_linux.py',
-      '6',
-    ),
-    bound(
-      '/checkout/scripts/fleet_release_canary_remote_windows.ps1',
-      '7',
-    ),
-  ]
-  const manifest = {
-    schema: 2,
-    inventorySha256: hashes.inventorySha256,
-    ...source,
-    driver: {
-      path: paths.driver,
-      sha256: hashes.driverSha256,
-      size: 42,
-      protocol: 'nvpn-fleet-ssh-transactional-v2',
-      helpers,
-    },
-    gateEvidence: [
-      {
-        id: 'complete-release-gate',
-        kind: 'staged-release-attestation-v1',
-        path: paths.release,
-        sha256: hashes.releaseGateManifestSha256,
-        size: 42,
-        receiptPaths: {
-          releaseGateSummary: bound('/private/gate-summary.json', '1'),
-          platforms: {},
-        },
-      },
-    ],
-    artifacts: [{ id: 'linux-x86_64' }],
-  }
-  const probeBinding = bound('/private/probe-linux-main-raw.json', '2')
-  const installBinding = bound('/private/install-linux-main-raw.json', '3')
-  const result = {
-    schema: 2,
-    mode: 'execute',
-    status: 'passed',
-    manifestSha256: hashes.manifestSha256,
-    inventorySha256: hashes.inventorySha256,
-    driverSha256: hashes.driverSha256,
-    releaseGateManifestSha256: hashes.releaseGateManifestSha256,
-    ...source,
-    targets: [
-      {
-        id: 'linux-main',
-        status: 'passed',
-        evidence: {
-          probe: probeBinding,
-          install: installBinding,
-        },
-      },
-    ],
-  }
-  const rawReceipts = {
-    'linux-main': {
-      probe: {
-        binding: probeBinding,
-        value: {
-          schema: 2,
-          targetId: 'linux-main',
-          realChecks: true,
-          mocked: false,
-          remoteBuildPerformed: false,
-        },
-      },
-      install: {
-        binding: installBinding,
-        value: {
-          schema: 2,
-          targetId: 'linux-main',
-          realChecks: true,
-          mocked: false,
-          remoteBuildPerformed: false,
-          installAuthorized: true,
-          transaction: { state: 'committed' },
-          ...source,
-        },
-      },
-    },
-  }
-  return {
-    catalog: input.catalog,
-    currentMacReceipt: input.currentMacReceipt,
-    roleEvidence: input.roleEvidence,
-    snapshot,
-    inventory,
-    source,
-    paths,
-    hashes,
-    helpers,
-    manifest,
-    result,
-    rawReceipts,
-    validationTimeSeconds: validatedAtSeconds,
   }
 }
 
@@ -540,122 +426,6 @@ test('private roster can represent fleet-only ARMv6 and unsupported ARMv7 as cov
   }
 })
 
-test('publication accepts only exact executed all-passed fleet evidence', () => {
-  const value = publicationFixture()
-  const validated = validateFleetPublicationMetadata(value)
-  assert.deepEqual(validated, value.source)
-})
-
-test('publication rejects forged hashes, source, target sets, and raw evidence', () => {
-  const cases = [
-    [
-      (value) => {
-        value.result.mode = 'plan'
-      },
-      /execute/i,
-    ],
-    [
-      (value) => {
-        value.result.status = 'incomplete'
-      },
-      /passed/i,
-    ],
-    [
-      (value) => {
-        value.result.appGitSha = hex('1', 40)
-      },
-      /appGitSha/i,
-    ],
-    [
-      (value) => {
-        value.result.fipsGitTree = hex('1', 40)
-      },
-      /fipsGitTree/i,
-    ],
-    [
-      (value) => {
-        value.result.manifestSha256 = hex('1')
-      },
-      /manifest SHA-256/i,
-    ],
-    [
-      (value) => {
-        value.result.inventorySha256 = hex('1')
-      },
-      /inventory SHA-256/i,
-    ],
-    [
-      (value) => {
-        value.result.driverSha256 = hex('1')
-      },
-      /driver SHA-256/i,
-    ],
-    [
-      (value) => {
-        value.result.releaseGateManifestSha256 = hex('1')
-      },
-      /staged release/i,
-    ],
-    [
-      (value) => {
-        value.result.targets.push(structuredClone(value.result.targets[0]))
-      },
-      /exact target set/i,
-    ],
-    [
-      (value) => {
-        value.result.targets[0].status = 'skipped-unreachable'
-      },
-      /pass/i,
-    ],
-    [
-      (value) => {
-        delete value.result.targets[0].evidence.install
-      },
-      /install, probe/i,
-    ],
-    [
-      (value) => {
-        value.result.targets[0].evidence.rollback = bound(
-          '/private/rollback.json',
-          '4',
-        )
-      },
-      /install, probe/i,
-    ],
-    [
-      (value) => {
-        value.rawReceipts['linux-main'].install.value.mocked = true
-      },
-      /install.*real/i,
-    ],
-    [
-      (value) => {
-        value.rawReceipts['linux-main'].probe.value.targetId = 'other'
-      },
-      /targetId/i,
-    ],
-    [
-      (value) => {
-        value.inventory.targets.push({
-          ...structuredClone(value.inventory.targets[0]),
-          id: 'unsealed-target',
-        })
-      },
-      /authoritative roster/i,
-    ],
-  ]
-
-  for (const [mutate, error] of cases) {
-    const value = publicationFixture()
-    mutate(value)
-    assert.throws(
-      () => validateFleetPublicationMetadata(value),
-      error,
-    )
-  }
-})
-
 test('preparer derives x86_64 receipts from public release archive bytes', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-fleet-preparer-'))
   try {
@@ -667,7 +437,7 @@ test('preparer derives x86_64 receipts from public release archive bytes', () =>
     const executable = join(bundleDir, 'nvpn')
     writeFileSync(executable, 'exact candidate binary\n')
     const payloadSha256 = sha256(readFileSync(executable))
-    const source = publicationFixture().source
+    const source = releaseSource()
 
     for (const { arch, assetName, payloadLabel } of [
       {

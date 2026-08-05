@@ -18,10 +18,6 @@ const repository = 'example/nostr-vpn'
 function options() {
   return {
     stageDir: '/private/release/stage',
-    fleetResult: '/private/fleet/result.json',
-    fleetManifest: '/private/fleet/manifest.json',
-    fleetInventory: '/private/fleet/inventory.json',
-    fleetProof: '/private/fleet/proof.json',
     tag,
     cid,
     env: {},
@@ -34,7 +30,6 @@ function successfulGate(events, { failAt = 0 } = {}) {
     call += 1
     events.push({
       mutation: false,
-      fleetProof: gateOptions.fleetProof,
       name: 'gate',
       requireTag: gateOptions.requireTag,
     })
@@ -46,7 +41,6 @@ function successfulGate(events, { failAt = 0 } = {}) {
       appGitTree: tree,
       status: 'passed',
       tag,
-      targetCount: 3,
     }
   }
 }
@@ -275,10 +269,6 @@ test('exact ref publication gates every external phase and waits for exact CI', 
       .map((event) => event.requireTag),
     [false, true, true, true],
   )
-  assert.ok(
-    fake.events.filter((event) => event.name === 'gate')
-      .every((event) => event.fleetProof === options().fleetProof),
-  )
   const localTag = fake.events.find((event) => event.name === 'local-tag')
   assert.deepEqual(localTag.args, [
     'tag',
@@ -323,48 +313,6 @@ test('exact ref publication gates every external phase and waits for exact CI', 
   ])
 })
 
-test('exact ref publication permits omitted post-release fleet evidence', () => {
-  const fake = fakePublication()
-  const noFleet = {
-    ...options(),
-    fleetResult: '',
-    fleetManifest: '',
-    fleetInventory: '',
-    fleetProof: '',
-  }
-  publishReleaseRefs(noFleet, {
-    runCommand: fake.runCommand,
-    sleep: () => {},
-    validateGate: successfulGate(fake.events),
-  })
-
-  assert.deepEqual(mutationNames(fake.events), [
-    'github-push',
-    'htree-push',
-    'workflow-dispatch',
-  ])
-  assert.ok(
-    fake.events.filter((event) => event.name === 'gate')
-      .every((event) => event.fleetProof === undefined),
-  )
-})
-
-test('partial fleet evidence stops before any command or mutation', () => {
-  const fake = fakePublication()
-  assert.throws(
-    () => publishReleaseRefs(
-      { ...options(), fleetProof: '' },
-      {
-        runCommand: fake.runCommand,
-        sleep: () => {},
-        validateGate: successfulGate(fake.events),
-      },
-    ),
-    /must be supplied together/i,
-  )
-  assert.deepEqual(fake.events, [])
-})
-
 test('exact successful retry performs no external mutation or duplicate dispatch', () => {
   const fake = fakePublication({
     githubMaster: commit,
@@ -405,17 +353,17 @@ test('bad immutable draft stops before tag or external mutation', () => {
   assert.deepEqual(mutationNames(fake.events), [])
 })
 
-test('missing fleet proof rejection stops before any command or mutation', () => {
+test('initial mutation-gate rejection stops before any command or mutation', () => {
   const fake = fakePublication()
   assert.throws(
     () => publishReleaseRefs(options(), {
       runCommand: fake.runCommand,
       sleep: () => {},
       validateGate: () => {
-        throw new Error('fleet authorization proof is missing')
+        throw new Error('exact staged source is invalid')
       },
     }),
-    /authorization proof is missing/i,
+    /exact staged source is invalid/i,
   )
   assert.deepEqual(fake.events, [])
 })

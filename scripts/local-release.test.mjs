@@ -8,7 +8,6 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -53,8 +52,6 @@ import {
   zapstorePublicationPrerequisites,
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
-import { buildFrozenFleetInventory } from './fleet-release-preparer-lib.mjs'
-import { fleetPublicationPaths } from './fleet-release-publication-lib.mjs'
 import {
   githubRepositoryFromRemote,
   githubReleaseRepairPlan,
@@ -68,7 +65,6 @@ import {
   finalizeIosUploadReceipt,
   planIosUploadReconciliation,
   reconcileIosUploadReceipts,
-  validateHistoricalIosFleetAuthorization,
   validateIosPendingUploadReceipt,
   validateIosUploadReceipt,
   writeAcceptedIosPendingUpload,
@@ -866,370 +862,6 @@ test('retained iOS outputs stay available without dirtying the exact checkout', 
   assert.equal(statSync(join(external, 'dist', 'ios', 'archive')).size, 12)
 })
 
-test('existing ASC build replays its original fleet upload authorization', () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), 'nvpn-ios-upload-receipt-'))
-  const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
-  const stageDir = join(repoRoot, 'stage')
-  const historicalFleetDir = join(repoRoot, 'fleet-historical')
-  const currentFleetDir = join(repoRoot, 'fleet-current')
-  mkdirSync(frozenDir, { recursive: true })
-  mkdirSync(stageDir, { recursive: true })
-  mkdirSync(historicalFleetDir, { recursive: true })
-  mkdirSync(currentFleetDir, { recursive: true })
-  const commit = '1'.repeat(40)
-  const tree = '2'.repeat(40)
-  const stagedManifest = {
-    tag: 'v4.1.5',
-    commit,
-    release_gate_attestation: { app_git_tree: tree },
-  }
-  const frozen = {
-    ipaPath: join(frozenDir, 'exact.ipa'),
-    gate: {
-      ipa_sha256: '',
-      ipa_size: 0,
-      bundle_id: 'fi.siriusbusiness.nvpn',
-      marketing_version: '4.1.5',
-      build_number: '4010501',
-    },
-  }
-  writeFileSync(frozen.ipaPath, 'exact frozen IPA bytes\n')
-  frozen.gate.ipa_sha256 = createHash('sha256')
-    .update(readFileSync(frozen.ipaPath))
-    .digest('hex')
-  frozen.gate.ipa_size = statSync(frozen.ipaPath).size
-  const currentPaths = {
-    stage: join(stageDir, 'release.json'),
-    result: join(currentFleetDir, 'result.json'),
-    manifest: join(currentFleetDir, 'manifest.json'),
-    inventory: join(currentFleetDir, 'inventory.json'),
-    proof: join(currentFleetDir, 'proof.json'),
-  }
-  const historicalPaths = {
-    result: join(historicalFleetDir, 'result.json'),
-    manifest: join(historicalFleetDir, 'manifest.json'),
-    inventory: join(historicalFleetDir, 'inventory.json'),
-    proof: join(historicalFleetDir, 'proof.json'),
-  }
-  for (const [name, path] of Object.entries(currentPaths)) {
-    if (name === 'proof') continue
-    writeFileSync(path, `current ${name}\n`)
-  }
-  for (const [name, path] of Object.entries(historicalPaths)) {
-    if (name === 'proof') continue
-    writeFileSync(path, `historical ${name}\n`)
-  }
-  const mutationEnv = {
-    NVPN_RELEASE_STAGE_DIR: stageDir,
-    NVPN_FLEET_RESULT_PATH: currentPaths.result,
-    NVPN_FLEET_MANIFEST_PATH: currentPaths.manifest,
-    NVPN_FLEET_INVENTORY_PATH: currentPaths.inventory,
-    NVPN_FLEET_PROOF_PATH: currentPaths.proof,
-  }
-  const historicalMutationEnv = {
-    ...mutationEnv,
-    NVPN_FLEET_RESULT_PATH: historicalPaths.result,
-    NVPN_FLEET_MANIFEST_PATH: historicalPaths.manifest,
-    NVPN_FLEET_INVENTORY_PATH: historicalPaths.inventory,
-    NVPN_FLEET_PROOF_PATH: historicalPaths.proof,
-  }
-  const now = Math.floor(Date.now() / 1000)
-  const testflight = {
-    buildPresent: true,
-    buildId: 'asc-build-id',
-    uploadedDate: new Date(now * 1_000).toISOString(),
-    processingState: 'VALID',
-    bundleId: frozen.gate.bundle_id,
-    version: frozen.gate.marketing_version,
-    buildNumber: frozen.gate.build_number,
-  }
-  const noFleetEnv = {
-    NVPN_RELEASE_STAGE_DIR: stageDir,
-    NVPN_IOS_UPLOAD_INTENT_PATH: join(frozenDir, 'no-fleet-intent.json'),
-    NVPN_IOS_PENDING_UPLOAD_RECEIPT_PATH: join(
-      frozenDir,
-      'no-fleet-pending.json',
-    ),
-    NVPN_IOS_UPLOAD_RECEIPT_PATH: join(frozenDir, 'no-fleet-final.json'),
-  }
-  const rejectFleetValidation = () => {
-    assert.fail('fleet validation must not run without fleet evidence')
-  }
-  const noFleetAuthorization = captureIosUploadIntent({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: noFleetEnv,
-    validatePublication: rejectFleetValidation,
-  })
-  assert.equal(noFleetAuthorization.fleetAuthorization, null)
-  const noFleetIntent = writeIosUploadIntent({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: noFleetEnv,
-    intent: noFleetAuthorization,
-    validatePublication: rejectFleetValidation,
-  })
-  const noFleetPending = writeAcceptedIosPendingUpload({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: noFleetEnv,
-    intentReceipt: noFleetIntent,
-    acceptanceSource: 'transporter-returned',
-    validatePublication: rejectFleetValidation,
-  })
-  const noFleetFinal = finalizeIosUploadReceipt({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: noFleetEnv,
-    pendingReceipt: noFleetPending,
-    testflight,
-    validatePublication: rejectFleetValidation,
-  })
-  assert.deepEqual(
-    validateIosUploadReceipt({
-      repoRoot,
-      frozen,
-      stagedManifest,
-      mutationEnv: noFleetEnv,
-      testflight,
-      validatePublication: rejectFleetValidation,
-    }).value,
-    noFleetFinal.value,
-  )
-  assert.throws(
-    () =>
-      validateIosUploadReceipt({
-        repoRoot,
-        frozen,
-        stagedManifest,
-        mutationEnv,
-        testflight,
-      }),
-    /no fleet-bound exact upload receipt/i,
-  )
-  const binding = (path) => ({
-    path: realpathSync(path),
-    sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
-    size: statSync(path).size,
-  })
-  const authorizedAt = now - 10
-  writeFileSync(
-    historicalPaths.proof,
-    `${JSON.stringify({ validatedAt: authorizedAt })}\n`,
-  )
-  chmodSync(historicalPaths.proof, 0o600)
-  const fleetAuthorization = {
-    authorizedAt,
-    result: binding(historicalPaths.result),
-    manifest: binding(historicalPaths.manifest),
-    inventory: binding(historicalPaths.inventory),
-    proof: binding(historicalPaths.proof),
-  }
-  const uploadReceiptPath = join(
-    frozenDir,
-    'app-store-upload-receipt.json',
-  )
-  const validations = []
-  const validatePublication = (value) => {
-    validations.push(value)
-    return { targetCount: 1, validatedAt: authorizedAt }
-  }
-  const authorization = captureIosUploadIntent({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: historicalMutationEnv,
-    validatePublication,
-  })
-  const intent = writeIosUploadIntent({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: historicalMutationEnv,
-    intent: authorization,
-    validatePublication,
-  })
-  const accepted = writeAcceptedIosPendingUpload({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: historicalMutationEnv,
-    intentReceipt: intent,
-    acceptanceSource: 'transporter-returned',
-    validatePublication,
-  })
-  assert.equal(statSync(accepted.path).mode & 0o777, 0o600)
-  assert.deepEqual(
-    validateIosPendingUploadReceipt({
-      repoRoot,
-      frozen,
-      stagedManifest,
-      mutationEnv,
-      validatePublication,
-    }).value,
-    accepted.value,
-  )
-  const finalized = finalizeIosUploadReceipt({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv: historicalMutationEnv,
-    pendingReceipt: accepted,
-    testflight,
-    validatePublication,
-  })
-  assert.equal(finalized.path, realpathSync(uploadReceiptPath))
-  assert.equal(statSync(finalized.path).mode & 0o777, 0o600)
-  assert.deepEqual(
-    validateIosUploadReceipt({
-      repoRoot,
-      frozen,
-      stagedManifest,
-      mutationEnv,
-      testflight,
-      validatePublication,
-    }).value,
-    finalized.value,
-  )
-  const matchingPair = reconcileIosUploadReceipts({
-    repoRoot,
-    frozen,
-    stagedManifest,
-    mutationEnv,
-    testflight,
-    validatePublication,
-  })
-  assert.equal(
-    matchingPair.uploadAction,
-    'use-final',
-  )
-  assert.equal(
-    matchingPair.finalReceipt.path,
-    realpathSync(uploadReceiptPath),
-  )
-  assert.deepEqual(matchingPair.pendingReceipt.value, accepted.value)
-  assert.ok(validations.length >= 4)
-  const historicalValidation = validations.find(
-    (validation) =>
-      validation.options.fleetResult
-      === realpathSync(historicalPaths.result),
-  )
-  assert.ok(historicalValidation)
-  assert.equal(
-    historicalValidation.options.fleetResult,
-    realpathSync(historicalPaths.result),
-  )
-  assert.notEqual(
-    historicalValidation.options.fleetResult,
-    realpathSync(currentPaths.result),
-  )
-  assert.equal(
-    historicalValidation.options.fleetProof,
-    realpathSync(historicalPaths.proof),
-  )
-  assert.equal(
-    Object.hasOwn(historicalValidation, 'validationTimeSeconds'),
-    false,
-  )
-  assert.throws(
-    () =>
-      validateHistoricalIosFleetAuthorization({
-        repoRoot,
-        authorization: {
-          ...fleetAuthorization,
-          authorizedAt: authorizedAt - 1,
-        },
-        stageDir,
-        stagedManifest,
-        env: mutationEnv,
-        validatePublication,
-      }),
-    /time differs from its exact proof/i,
-  )
-
-  writeFileSync(historicalPaths.result, 'tampered historical result\n')
-  assert.throws(
-    () =>
-      validateIosUploadReceipt({
-        repoRoot,
-        frozen,
-        stagedManifest,
-        mutationEnv,
-        testflight,
-        validatePublication,
-      }),
-    /differs from its upload authorization binding/i,
-  )
-  writeFileSync(historicalPaths.result, 'historical result\n')
-  writeFileSync(historicalPaths.proof, '{"validatedAt":1}\n')
-  assert.throws(
-    () =>
-      validateHistoricalIosFleetAuthorization({
-        repoRoot,
-        authorization: fleetAuthorization,
-        stageDir,
-        stagedManifest,
-        env: mutationEnv,
-        validatePublication,
-      }),
-    /differs from its upload authorization binding/i,
-  )
-  writeFileSync(
-    historicalPaths.proof,
-    `${JSON.stringify({ validatedAt: authorizedAt })}\n`,
-  )
-  unlinkSync(historicalPaths.inventory)
-  assert.throws(
-    () =>
-      validateHistoricalIosFleetAuthorization({
-        repoRoot,
-        authorization: fleetAuthorization,
-        stageDir,
-        stagedManifest,
-        env: mutationEnv,
-        validatePublication,
-      }),
-    /ENOENT|missing/i,
-  )
-  writeFileSync(historicalPaths.inventory, 'historical inventory\n')
-  assert.throws(
-    () =>
-      validateIosUploadReceipt({
-        repoRoot,
-        frozen,
-        stagedManifest,
-        mutationEnv,
-        testflight: { ...testflight, buildId: 'substituted-build' },
-        validatePublication,
-      }),
-    /final iOS upload receipt is invalid/i,
-  )
-
-  const tamperedPending = {
-    ...accepted.value,
-    attemptId: '00000000-0000-4000-8000-000000000000',
-  }
-  writeFileSync(
-    accepted.path,
-    `${JSON.stringify(tamperedPending)}\n`,
-  )
-  assert.throws(
-    () =>
-      reconcileIosUploadReceipts({
-        repoRoot,
-        frozen,
-        stagedManifest,
-        mutationEnv,
-        testflight,
-        validatePublication,
-      }),
-    /pending iOS upload receipt is invalid|binding/i,
-  )
-})
 
 test('accepted pending iOS upload waits or finalizes without duplicate upload', () => {
   const intent = { path: '/private/intent', value: {} }
@@ -1393,33 +1025,6 @@ test('direct htree and crates publication paths fail closed', () => {
   }
 })
 
-test('canonical mutation gate rejects non-exact evidence paths before publication', () => {
-  assert.throws(
-    () =>
-      validateReleaseMutationGate({
-        stageDir: 'relative-stage',
-        fleetResult: 'relative-result',
-        fleetManifest: 'relative-manifest',
-        fleetInventory: 'relative-inventory',
-      }),
-    /exact absolute path/i,
-  )
-})
-
-test('fleet evidence is optional but must be supplied as one complete set', () => {
-  assert.equal(
-    fleetPublicationPaths({ repoRoot: process.cwd(), options: {}, env: {} }),
-    null,
-  )
-  assert.throws(
-    () => fleetPublicationPaths({
-      repoRoot: process.cwd(),
-      options: { fleetProof: '/private/fleet/proof.json' },
-      env: {},
-    }),
-    /must be supplied together/i,
-  )
-})
 
 test('canonical mutation gate rejects a symlinked stage directory', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-stage-symlink-test-'))
@@ -1435,7 +1040,7 @@ test('canonical mutation gate rejects a symlinked stage directory', () => {
   assert.doesNotThrow(() => assertRealStageDirectory(exact))
 })
 
-test('every remaining publisher runs only after exact mutation validation', () => {
+test('every publisher runs only after exact staged-source validation', () => {
   const source = readFileSync(
     join(process.cwd(), 'scripts/local-release.mjs'),
     'utf8',
@@ -1449,10 +1054,6 @@ test('every remaining publisher runs only after exact mutation validation', () =
   )
   const staged = source.slice(stagedStart, stagedEnd)
   assert.ok(stagedStart >= 0 && stagedEnd > stagedStart)
-  assert.match(
-    staged,
-    /if \(fleetPublication\) \{[\s\S]*?authorizeFreshFleetPublication\(\{/,
-  )
   assert.ok(
     staged.indexOf('preflightHtreeRelease({')
     < staged.indexOf('publishRelease({'),
@@ -1470,22 +1071,12 @@ test('every remaining publisher runs only after exact mutation validation', () =
   assert.ok(promoteStart >= 0 && promoteEnd > promoteStart)
   assert.match(
     promote,
-    /if \(fleetPublication\) \{[\s\S]*?assertAuthorizedFleetPublication\(\{/,
-  )
-  assert.match(
-    promote,
     /promoteStagedDraft\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*\{[\s\S]*?preflightHtreeRelease\(\{[\s\S]*?replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
   )
   assert.match(
     promote,
     /Promoted \$\{tag\}[\s\S]*?replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true[\s\S]*?publishExactGithubRelease\(\{/,
   )
-
-  const publication = readFileSync(
-    join(process.cwd(), 'scripts/fleet-release-publication-lib.mjs'),
-    'utf8',
-  )
-  assert.match(publication, /fleet_release_result_replay\.py/)
 })
 
 test('GitHub mutation uses the repository pinned by preflight', () => {
@@ -1561,9 +1152,6 @@ test('staged draft publication publishes only the already validated bytes', () =
     'release-artifact-provenance-lib.mjs',
     'release-gate-resume.mjs',
     'release-component-source.mjs',
-    'fleet-release-publication-lib.mjs',
-    'fleet-release-preparer-lib.mjs',
-    'fleet-roster-catalog-lib.mjs',
     'github-release-publication.mjs',
     'htree-release-publication.mjs',
     'ios-release-publication.mjs',
@@ -1575,18 +1163,6 @@ test('staged draft publication publishes only the already validated bytes', () =
   ]) {
     copyFileSync(join(process.cwd(), 'scripts', name), join(scripts, name))
   }
-  for (const [name, contents] of [
-    ['fleet_release_canary_ssh_driver.py', '#!/usr/bin/env python3\n'],
-    ['fleet_release_canary_remote_linux.py', '# linux adapter\n'],
-    ['fleet_release_canary_remote_windows.ps1', '# windows adapter\n'],
-    [
-      'fleet_release_result_replay.py',
-      '#!/usr/bin/env python3\nraise SystemExit(0)\n',
-    ],
-  ]) {
-    writeFileSync(join(scripts, name), contents)
-  }
-  chmodSync(join(scripts, 'fleet_release_canary_ssh_driver.py'), 0o755)
   mkdirSync(join(repo, 'startos', 'versions'), { recursive: true })
   writeFileSync(
     join(repo, 'startos', 'versions', 'current.ts'),
@@ -1719,253 +1295,6 @@ test('staged draft publication publishes only the already validated bytes', () =
     )].map((path) => [path, readFileSync(join(stage, path))]),
   )
 
-  const fleetDir = join(root, 'fleet')
-  mkdirSync(fleetDir)
-  const fleetObservedAt = Math.floor(Date.now() / 1000) - 7_200
-  const fleetBound = (path) => {
-    const canonicalPath = realpathSync(path)
-    const bytes = readFileSync(canonicalPath)
-    return {
-      path: canonicalPath,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-      size: bytes.length,
-    }
-  }
-  const installDiscovery = join(fleetDir, 'install-discovery.json')
-  const currentDiscovery = join(fleetDir, 'current-discovery.json')
-  const fleetTarget = {
-    id: 'linux-guest',
-    role: 'linux-guest',
-    platform: 'linux',
-    arch: 'x86_64',
-    transport: { kind: 'ssh', hostAlias: 'private-linux' },
-    deployment: {
-      binaryPath: '/usr/local/bin/nvpn',
-      probeBinaryPath: '/usr/local/bin/nvpn',
-      configPath: '/etc/nvpn/config.toml',
-      serviceName: 'nvpn.service',
-    },
-    expected: {
-      machineIdentitySha256: '1'.repeat(64),
-      configSha256: '2'.repeat(64),
-      signedRosterStoreSha256: '3'.repeat(64),
-      rosterIdentitySha256: '4'.repeat(64),
-      rosterPeerCount: 1,
-      localDeviceIdentitySha256: '5'.repeat(64),
-      networkIdentitySha256: '6'.repeat(64),
-    },
-    checks: {
-      payloadTarget: '10.44.0.2',
-      dnsName: 'example.com',
-      directUrl: 'https://example.com/',
-    },
-  }
-  const rosterSnapshot = {
-    schema: 1,
-    authority: 'nvpn-known-host-roster-v1',
-    capturedAt: fleetObservedAt,
-    catalogSha256: '',
-    roles: [
-      {
-        id: fleetTarget.id,
-        disposition: 'install',
-        reason: 'reachable supported roster host',
-        observedAt: fleetObservedAt,
-        machineIdentitySha256:
-          fleetTarget.expected.machineIdentitySha256,
-        evidence: null,
-        target: fleetTarget,
-      },
-      {
-        id: 'current-mac',
-        disposition: 'excluded-current-mac',
-        reason: 'release host is explicitly excluded',
-        observedAt: fleetObservedAt,
-        machineIdentitySha256: '7'.repeat(64),
-        evidence: null,
-        target: null,
-      },
-    ],
-  }
-  const rosterCatalog = {
-    schema: 1,
-    authority: 'nvpn-private-roster-catalog-v1',
-    roles: [
-      {
-        id: fleetTarget.id,
-        platform: 'linux',
-        arch: 'x86_64',
-        dependencies: [],
-        capability: {
-          supported: true,
-          reason: 'transactional Linux adapter is supported',
-        },
-      },
-      {
-        id: 'current-mac',
-        platform: 'macos',
-        arch: 'aarch64',
-        dependencies: [],
-        capability: {
-          supported: false,
-          reason: 'current release host is never a fleet target',
-        },
-      },
-    ],
-  }
-  writeFileSync(installDiscovery, `${JSON.stringify({
-    schema: 1,
-    kind: 'nvpn-roster-install-observation-v1',
-    roleId: fleetTarget.id,
-    disposition: 'install',
-    observedAt: fleetObservedAt,
-    machineIdentitySha256:
-      fleetTarget.expected.machineIdentitySha256,
-    platform: 'linux',
-    arch: 'x86_64',
-    reachable: true,
-    installSupported: true,
-    capabilityReason: 'transactional Linux adapter is supported',
-  })}\n`)
-  writeFileSync(currentDiscovery, `${JSON.stringify({
-    schema: 1,
-    kind: 'nvpn-roster-current-host-observation-v1',
-    roleId: 'current-mac',
-    disposition: 'excluded-current-mac',
-    observedAt: fleetObservedAt,
-    machineIdentitySha256: '7'.repeat(64),
-    platform: 'macos',
-    arch: 'aarch64',
-    reachable: true,
-    installSupported: false,
-    capabilityReason: 'current release host is never a fleet target',
-  })}\n`)
-  rosterSnapshot.roles[0].evidence = fleetBound(installDiscovery)
-  rosterSnapshot.roles[1].evidence = fleetBound(currentDiscovery)
-  const catalogPath = join(fleetDir, 'catalog.json')
-  writeFileSync(catalogPath, `${JSON.stringify(rosterCatalog)}\n`)
-  rosterSnapshot.catalogSha256 = fleetBound(catalogPath).sha256
-  const rosterPath = join(fleetDir, 'roster.json')
-  writeFileSync(rosterPath, `${JSON.stringify(rosterSnapshot)}\n`)
-  const currentMacReceiptPath = join(
-    fleetDir,
-    'current-mac-receipt.json',
-  )
-  const currentMacReceipt = {
-    schema: 1,
-    kind: 'nvpn-current-mac-measurement-v1',
-    source: 'ioreg-IOPlatformUUID-sha256',
-    measuredAt: fleetObservedAt,
-    machineIdentitySha256: '7'.repeat(64),
-  }
-  writeFileSync(
-    currentMacReceiptPath,
-    `${JSON.stringify(currentMacReceipt)}\n`,
-  )
-  const fleetInventory = buildFrozenFleetInventory({
-    catalog: rosterCatalog,
-    catalogBinding: fleetBound(catalogPath),
-    expectedCatalogSha256: fleetBound(catalogPath).sha256,
-    snapshot: rosterSnapshot,
-    snapshotBinding: fleetBound(rosterPath),
-    currentMacReceipt,
-    currentMacReceiptBinding: fleetBound(currentMacReceiptPath),
-    roleEvidence: {
-      [fleetTarget.id]: JSON.parse(readFileSync(installDiscovery, 'utf8')),
-      'current-mac': JSON.parse(readFileSync(currentDiscovery, 'utf8')),
-    },
-    parallelProbes: 1,
-    validatedAtSeconds: fleetObservedAt,
-    maxEvidenceAgeSeconds: 1_800,
-  })
-  const inventoryPath = join(fleetDir, 'inventory.json')
-  writeFileSync(inventoryPath, `${JSON.stringify(fleetInventory)}\n`)
-  const fleetSource = {
-    appGitSha: commit,
-    appGitTree: tree,
-    appVersion: '4.1.5',
-    fipsGitSha: '8'.repeat(40),
-    fipsGitTree: '9'.repeat(40),
-    fipsVersion: '0.4.45',
-  }
-  const fleetDriverPath = join(
-    scripts,
-    'fleet_release_canary_ssh_driver.py',
-  )
-  const fleetHelpers = [
-    'fleet_release_canary_remote_linux.py',
-    'fleet_release_canary_remote_windows.ps1',
-  ].map((name) => fleetBound(join(scripts, name)))
-  const fleetManifest = {
-    schema: 2,
-    inventorySha256: fleetBound(inventoryPath).sha256,
-    ...fleetSource,
-    driver: {
-      ...fleetBound(fleetDriverPath),
-      protocol: 'nvpn-fleet-ssh-transactional-v2',
-      helpers: fleetHelpers,
-    },
-    gateEvidence: [
-      {
-        id: 'complete-release-gate',
-        kind: 'staged-release-attestation-v1',
-        ...fleetBound(join(stage, 'release.json')),
-        receiptPaths: {
-          releaseGateSummary: {
-            path: join(fleetDir, 'unused-summary.json'),
-            sha256: 'a'.repeat(64),
-            size: 1,
-          },
-          platforms: {},
-        },
-      },
-    ],
-    artifacts: [{ id: 'linux-x86_64' }],
-  }
-  const fleetManifestPath = join(fleetDir, 'manifest.json')
-  writeFileSync(fleetManifestPath, `${JSON.stringify(fleetManifest)}\n`)
-  const probePath = join(fleetDir, 'probe-raw.json')
-  const installPath = join(fleetDir, 'install-raw.json')
-  writeFileSync(probePath, `${JSON.stringify({
-    schema: 2,
-    targetId: fleetTarget.id,
-    realChecks: true,
-    mocked: false,
-    remoteBuildPerformed: false,
-  })}\n`)
-  writeFileSync(installPath, `${JSON.stringify({
-    schema: 2,
-    targetId: fleetTarget.id,
-    realChecks: true,
-    mocked: false,
-    remoteBuildPerformed: false,
-    installAuthorized: true,
-    transaction: { state: 'committed' },
-    ...fleetSource,
-  })}\n`)
-  const fleetResult = {
-    schema: 2,
-    mode: 'execute',
-    status: 'passed',
-    manifestSha256: fleetBound(fleetManifestPath).sha256,
-    inventorySha256: fleetBound(inventoryPath).sha256,
-    driverSha256: fleetBound(fleetDriverPath).sha256,
-    releaseGateManifestSha256:
-      fleetBound(join(stage, 'release.json')).sha256,
-    ...fleetSource,
-    targets: [
-      {
-        id: fleetTarget.id,
-        status: 'passed',
-        evidence: {
-          probe: fleetBound(probePath),
-          install: fleetBound(installPath),
-        },
-      },
-    ],
-  }
-  const fleetResultPath = join(fleetDir, 'result.json')
-  writeFileSync(fleetResultPath, `${JSON.stringify(fleetResult)}\n`)
 
   const fakeCid = `nhash1${'q'.repeat(58)}`
   const htree = join(bin, 'htree')
@@ -2027,14 +1356,6 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     stage,
     '--release-tree',
     'releases/test',
-    '--fleet-result',
-    fleetResultPath,
-    '--fleet-manifest',
-    fleetManifestPath,
-    '--fleet-inventory',
-    inventoryPath,
-    '--fleet-proof',
-    join(fleetDir, 'fleet-publication-proof.json'),
   ]
   const releaseOptions = {
     cwd: repo,
@@ -2077,262 +1398,22 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
   assert.equal(readFileSync(htreeLog, 'utf8'), '')
   unlinkSync(unexpectedStagePath)
 
-  const staleInitialDraft = spawnSync(
+  const result = spawnSync(
     process.execPath,
     releaseArgs,
     releaseOptions,
   )
-  assert.equal(staleInitialDraft.status, 1)
-  assert.match(staleInitialDraft.stderr, /roster snapshot.*stale/i)
-  assert.equal(readFileSync(htreeLog, 'utf8'), '')
-
-  const clockOverride = join(root, 'fleet-authorization-clock.cjs')
-  writeFileSync(
-    clockOverride,
-    'Date.now = () => Number(process.env.NVPN_TEST_NOW_MILLISECONDS)\n',
-  )
-  const authorizationOptions = {
-    ...releaseOptions,
-    env: {
-      ...releaseOptions.env,
-      NODE_OPTIONS: [
-        process.env.NODE_OPTIONS,
-        `--require=${clockOverride}`,
-      ].filter(Boolean).join(' '),
-      NVPN_TEST_NOW_MILLISECONDS: String(
-        (fleetObservedAt + 60) * 1_000,
-      ),
-    },
-  }
-  const result = spawnSync(
-    process.execPath,
-    releaseArgs,
-    authorizationOptions,
-  )
   assert.equal(result.status, 0, result.stderr)
-  assert.match(
-    result.stdout,
-    new RegExp(`Published staged draft v4\\.1\\.5 .* ${fakeCid}`),
-  )
-  const fleetProofPath = join(
-    fleetDir,
-    'fleet-publication-proof.json',
-  )
-  const fleetProofText = readFileSync(fleetProofPath, 'utf8')
-  assert.doesNotMatch(
-    fleetProofText,
-    /private-linux|linux-guest|current-mac/,
-  )
-  assert.equal(
-    statSync(fleetProofPath).mode & 0o777,
-    0o600,
-  )
-  const proofBeforeReplay = readFileSync(fleetProofPath)
-  const proofStatBeforeReplay = statSync(fleetProofPath)
+  assert.match(result.stdout, /Published staged draft v4\.1\.5/)
   const htreeLogAfterInitialDraft = readFileSync(htreeLog, 'utf8')
   const durableDraftRetry = spawnSync(
     process.execPath,
     releaseArgs,
     releaseOptions,
   )
-  assert.equal(
-    durableDraftRetry.status,
-    0,
-    durableDraftRetry.stderr,
-  )
-  assert.deepEqual(readFileSync(fleetProofPath), proofBeforeReplay)
-  const proofStatAfterDraftRetry = statSync(fleetProofPath)
-  assert.equal(
-    proofStatAfterDraftRetry.ino,
-    proofStatBeforeReplay.ino,
-  )
-  assert.equal(
-    proofStatAfterDraftRetry.mtimeMs,
-    proofStatBeforeReplay.mtimeMs,
-  )
-  assert.equal(
-    proofStatAfterDraftRetry.mode,
-    proofStatBeforeReplay.mode,
-  )
+  assert.equal(durableDraftRetry.status, 0, durableDraftRetry.stderr)
   writeFileSync(htreeLog, htreeLogAfterInitialDraft)
-  const mutationGateArgs = [
-    realpathSync(join(scripts, 'release-mutation-gate.mjs')),
-    '--stage-dir',
-    stage,
-    '--fleet-result',
-    fleetResultPath,
-    '--fleet-manifest',
-    fleetManifestPath,
-    '--fleet-inventory',
-    inventoryPath,
-    '--fleet-proof',
-    fleetProofPath,
-    '--tag',
-    'v4.1.5',
-  ]
-  for (let replay = 0; replay < 2; replay += 1) {
-    const replayResult = spawnSync(
-      process.execPath,
-      mutationGateArgs,
-      {
-        cwd: repo,
-        encoding: 'utf8',
-        env: releaseOptions.env,
-      },
-    )
-    assert.equal(replayResult.status, 0, replayResult.stderr)
-  }
-  assert.deepEqual(readFileSync(fleetProofPath), proofBeforeReplay)
-  const proofStatAfterReplay = statSync(fleetProofPath)
-  assert.equal(proofStatAfterReplay.ino, proofStatBeforeReplay.ino)
-  assert.equal(
-    proofStatAfterReplay.mtimeMs,
-    proofStatBeforeReplay.mtimeMs,
-  )
-  assert.equal(proofStatAfterReplay.mode, proofStatBeforeReplay.mode)
 
-  const missingProof = spawnSync(
-    process.execPath,
-    mutationGateArgs.map((argument) =>
-      argument === fleetProofPath
-        ? join(fleetDir, 'missing-proof.json')
-        : argument,
-    ),
-    {
-      cwd: repo,
-      encoding: 'utf8',
-      env: releaseOptions.env,
-    },
-  )
-  assert.equal(
-    missingProof.status,
-    1,
-    `${missingProof.stdout}\n${missingProof.stderr}`,
-  )
-  assert.match(missingProof.stderr, /authorization proof.*missing/i)
-
-  const proof = JSON.parse(proofBeforeReplay)
-  assert.deepEqual(proof.evidence, {
-    result: fleetBound(fleetResultPath),
-    manifest: fleetBound(fleetManifestPath),
-    inventory: fleetBound(inventoryPath),
-    release: fleetBound(join(stage, 'release.json')),
-    driver: fleetBound(fleetDriverPath),
-  })
-  const symlinkProofPath = join(fleetDir, 'symlink-proof.json')
-  symlinkSync(fleetProofPath, symlinkProofPath)
-  const symlinkProof = spawnSync(
-    process.execPath,
-    mutationGateArgs.map((argument) =>
-      argument === fleetProofPath ? symlinkProofPath : argument,
-    ),
-    {
-      cwd: repo,
-      encoding: 'utf8',
-      env: releaseOptions.env,
-    },
-  )
-  assert.equal(symlinkProof.status, 1)
-  assert.match(symlinkProof.stderr, /regular non-symlink file/i)
-
-  const permissiveProofPath = join(fleetDir, 'permissive-proof.json')
-  copyFileSync(fleetProofPath, permissiveProofPath)
-  chmodSync(permissiveProofPath, 0o644)
-  const permissiveProof = spawnSync(
-    process.execPath,
-    mutationGateArgs.map((argument) =>
-      argument === fleetProofPath ? permissiveProofPath : argument,
-    ),
-    {
-      cwd: repo,
-      encoding: 'utf8',
-      env: releaseOptions.env,
-    },
-  )
-  assert.equal(permissiveProof.status, 1)
-  assert.match(permissiveProof.stderr, /mode must be 0600/i)
-
-  for (const [name, mutate, message] of [
-    [
-      'tampered',
-      () => '{',
-      /authorization proof.*invalid json/i,
-    ],
-    [
-      'substituted-result',
-      () => JSON.stringify({
-        ...proof,
-        evidence: {
-          ...proof.evidence,
-          result: {
-            ...proof.evidence.result,
-            sha256: '0'.repeat(64),
-          },
-        },
-      }),
-      /result.*authorization proof binding/i,
-    ],
-    [
-      'substituted-tag',
-      () => JSON.stringify({ ...proof, releaseTag: 'v4.1.6' }),
-      /release tag.*authorization proof/i,
-    ],
-    [
-      'substituted-source',
-      () => JSON.stringify({
-        ...proof,
-        source: {
-          ...proof.source,
-          appGitSha: '0'.repeat(40),
-        },
-      }),
-      /source.*authorization proof/i,
-    ],
-    [
-      'substituted-driver',
-      () => JSON.stringify({
-        ...proof,
-        evidence: {
-          ...proof.evidence,
-          driver: {
-            ...proof.evidence.driver,
-            sha256: '0'.repeat(64),
-          },
-        },
-      }),
-      /fleet evidence differs from the exact authorization proof/i,
-    ],
-    [
-      'rebased-time',
-      () => JSON.stringify({
-        ...proof,
-        validatedAt: proof.validatedAt + 7_200,
-      }),
-      /roster snapshot.*stale/i,
-    ],
-    [
-      'schema-extension',
-      () => JSON.stringify({ ...proof, extra: true }),
-      /authorization proof fields are not exact/i,
-    ],
-  ]) {
-    const path = join(fleetDir, `${name}-proof.json`)
-    writeFileSync(path, `${mutate()}\n`)
-    chmodSync(path, 0o600)
-    const rejected = spawnSync(
-      process.execPath,
-      mutationGateArgs.map((argument) =>
-        argument === fleetProofPath ? path : argument,
-      ),
-      {
-        cwd: repo,
-        encoding: 'utf8',
-        env: releaseOptions.env,
-      },
-    )
-    assert.equal(rejected.status, 1, name)
-    assert.match(rejected.stderr, message, name)
-  }
   assert.equal(
     spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
       cwd: repo,
@@ -2375,9 +1456,9 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
       process.execPath,
       releaseArgs,
       {
-        ...authorizationOptions,
+        ...releaseOptions,
         env: {
-          ...authorizationOptions.env,
+          ...releaseOptions.env,
           FAKE_HTREE_MUTATE_METADATA: metadataPath,
         },
       },
@@ -2401,21 +1482,6 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
       ),
     )
   }
-  const proofStatAfterDraftRetries = statSync(fleetProofPath)
-  assert.deepEqual(readFileSync(fleetProofPath), proofBeforeReplay)
-  assert.equal(
-    proofStatAfterDraftRetries.ino,
-    proofStatBeforeReplay.ino,
-  )
-  assert.equal(
-    proofStatAfterDraftRetries.mtimeMs,
-    proofStatBeforeReplay.mtimeMs,
-  )
-  assert.equal(
-    proofStatAfterDraftRetries.mode,
-    proofStatBeforeReplay.mode,
-  )
-
   const staleTag = spawnSync('git', ['tag', 'v4.1.5', 'HEAD^'], {
     cwd: repo,
     encoding: 'utf8',
@@ -2425,7 +1491,7 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
   const staleTagResult = spawnSync(
     process.execPath,
     releaseArgs,
-    authorizationOptions,
+    releaseOptions,
   )
   assert.equal(staleTagResult.status, 1)
   assert.match(staleTagResult.stderr, /release tag .* not staged commit/i)
@@ -3100,10 +2166,6 @@ test('promotion preflights and publishes exact iOS to both TestFlight lanes and 
     promote.indexOf('preflightIosPublication({')
       < promote.indexOf('promoteStagedDraft({'),
   )
-  assert.ok(
-    promote.indexOf('assertAuthorizedFleetPublication({')
-      < promote.indexOf('preflightIosPublication({'),
-  )
   for (const preflight of [
     'preflightHtreeRelease({',
     'preflightGithubRelease({',
@@ -3146,21 +2208,6 @@ test('promotion preflights and publishes exact iOS to both TestFlight lanes and 
   assert.match(publisher, /\['appstore-draft', 'status'\]/)
   assert.match(publisher, /validateFrozenIosPublication\(/)
   assert.match(publisher, /validateIosUploadReceipt\(/)
-  const uploadReceipts = readFileSync(
-    join(process.cwd(), 'scripts/ios-upload-receipt.mjs'),
-    'utf8',
-  )
-  assert.match(uploadReceipts, /fleetAuthorization/)
-  assert.match(uploadReceipts, /authorizedAt/)
-  assert.match(
-    uploadReceipts,
-    /fleetProof:\s*authorization\.proof\.path/,
-  )
-  assert.doesNotMatch(
-    uploadReceipts,
-    /validationTimeSeconds:\s*authorization\.authorizedAt/,
-  )
-
   const promoteFunctionStart = localRelease.indexOf(
     'function promoteStagedDraft(',
   )
@@ -3199,10 +2246,7 @@ test('every mutating Apple distribution entry point requires the canonical exact
     'utf8',
   )
   assert.match(releaseCommon, /require_var NVPN_RELEASE_STAGE_DIR/)
-  assert.match(
-    releaseCommon,
-    /if \[\[ -n "\$\{NVPN_FLEET_RESULT_PATH:-\}[\s\S]*?--fleet-result[\s\S]*?--fleet-manifest[\s\S]*?--fleet-inventory[\s\S]*?--fleet-proof/,
-  )
+  assert.doesNotMatch(releaseCommon, /NVPN_FLEET_|--fleet-/)
   assert.match(releaseCommon, /--stage-dir "\$NVPN_RELEASE_STAGE_DIR"[\s\S]*?--require-tag/)
 
   const iosBuild = readFileSync(
