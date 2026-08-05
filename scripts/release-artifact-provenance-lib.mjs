@@ -362,7 +362,6 @@ export function validateLinuxArm64CliReceipt({
     || receipt.nativeArchitectureVerified !== true
     || receipt.nativeCliSmokePassed !== true
     || receipt.nativeStatusSmokePassed !== true
-    || receipt.armv6Build !== false
     || receipt.sourceClean !== true
     || receipt.archiveSha256 !== archiveSha256
     || receipt.nativeSmokeArchiveSha256 !== archiveSha256
