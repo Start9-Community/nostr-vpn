@@ -15,7 +15,6 @@ import {
   rmSync,
   statSync,
   symlinkSync,
-  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -1673,13 +1672,17 @@ function buildIosArtifacts({
         'worktree', 'add', '--detach', sourceRoot, archiveReceipt.appGitSha,
       ])
       worktreeAdded = true
-      symlinkSync(join(repoRoot, 'dist'), join(sourceRoot, 'dist'), 'dir')
-      if (existsSync(join(repoRoot, 'artifacts'))) {
-        symlinkSync(
-          join(repoRoot, 'artifacts'),
-          join(sourceRoot, 'artifacts'),
-          'dir',
-        )
+      for (const name of ['dist', 'artifacts']) {
+        const externalRoot = join(repoRoot, name)
+        if (!existsSync(externalRoot)) continue
+        const linkRoot = join(sourceRoot, name)
+        mkdirSync(linkRoot)
+        for (const entry of readdirSync(externalRoot)) {
+          symlinkSync(
+            join(externalRoot, entry),
+            join(linkRoot, entry),
+          )
+        }
       }
       run('bash', [join(sourceRoot, 'scripts', 'ios-build'), 'ios-export'], {
         cwd: sourceRoot,
@@ -1687,8 +1690,7 @@ function buildIosArtifacts({
       })
     } finally {
       for (const name of ['dist', 'artifacts']) {
-        const path = join(sourceRoot, name)
-        if (existsSync(path)) unlinkSync(path)
+        rmSync(join(sourceRoot, name), { recursive: true, force: true })
       }
       if (worktreeAdded) {
         run('git', ['worktree', 'remove', sourceRoot], { capture: true })

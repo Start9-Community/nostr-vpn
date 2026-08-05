@@ -9,6 +9,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -792,13 +793,56 @@ test('retained iOS export runs only from its proven artifact source', () => {
   for (const required of [
     'requireReceiptSource(archiveReceipt',
     "'worktree', 'add', '--detach', sourceRoot, archiveReceipt.appGitSha",
-    "symlinkSync(join(repoRoot, 'dist'), join(sourceRoot, 'dist'), 'dir')",
+    "for (const name of ['dist', 'artifacts'])",
+    'mkdirSync(linkRoot)',
+    'for (const entry of readdirSync(externalRoot))',
+    'join(linkRoot, entry)',
     "join(sourceRoot, 'scripts', 'ios-build'), 'ios-export'",
     'NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha',
     'source_equivalence: sourceEquivalence',
   ]) {
     assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+})
+
+test('retained iOS outputs stay available without dirtying the exact checkout', (context) => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-ios-export-links-'))
+  context.after(() => rmSync(root, { recursive: true, force: true }))
+  const checkout = join(root, 'source')
+  const external = join(root, 'external')
+  mkdirSync(checkout)
+  mkdirSync(join(external, 'dist', 'ios'), { recursive: true })
+  writeFileSync(join(external, 'dist', 'ios', 'archive'), 'exact bytes\n')
+  writeFileSync(join(checkout, '.gitignore'), 'dist/\nartifacts/\n')
+  const git = (...args) => spawnSync('git', args, {
+    cwd: checkout,
+    encoding: 'utf8',
+  })
+  assert.equal(git('init', '--quiet').status, 0)
+  assert.equal(git('add', '.gitignore').status, 0)
+  assert.equal(git(
+    '-c', 'user.name=release-test',
+    '-c', 'user.email=release-test@invalid',
+    'commit', '--quiet', '-m', 'fixture',
+  ).status, 0)
+
+  symlinkSync(join(external, 'dist'), join(checkout, 'dist'), 'dir')
+  assert.match(git('status', '--porcelain', '--untracked-files=all').stdout, /\?\? dist/)
+  unlinkSync(join(checkout, 'dist'))
+
+  mkdirSync(join(checkout, 'dist'))
+  symlinkSync(
+    join(external, 'dist', 'ios'),
+    join(checkout, 'dist', 'ios'),
+    'dir',
+  )
+  assert.equal(git('status', '--porcelain', '--untracked-files=all').stdout, '')
+  assert.equal(
+    readFileSync(join(checkout, 'dist', 'ios', 'archive'), 'utf8'),
+    'exact bytes\n',
+  )
+  rmSync(join(checkout, 'dist'), { recursive: true, force: true })
+  assert.equal(statSync(join(external, 'dist', 'ios', 'archive')).size, 12)
 })
 
 test('existing ASC build replays its original fleet upload authorization', () => {
