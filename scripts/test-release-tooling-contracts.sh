@@ -2,11 +2,14 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=scripts/lib-release-gate-parallel.sh
 source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
+# shellcheck disable=SC2329 # Invoked through the parallel lane runner.
 run_node_contracts() {
   node --test scripts/*.test.mjs
   python3 scripts/test_appstore_draft_metadata.py
 }
+# shellcheck disable=SC2329 # Invoked through the parallel lane runner.
 run_contract_batch() {
   for contract in "$@"; do "$contract"; done
 }

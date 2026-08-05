@@ -203,6 +203,8 @@ grep -Fq 'name: Release tooling contracts' "$ROOT_DIR/.github/workflows/ci.yml" 
   || fail "release tooling contracts do not run as an independent CI job"
 ! grep -Fq 'test-release-tooling-contracts.sh' "$release_gate" \
   || fail "artifact certification still reruns release-tooling contracts"
+grep -Fq 'node --test scripts/*.test.mjs' "$release_tooling_contracts" \
+  || fail "release tooling contracts do not run every Node contract test"
 required_modes_lib="$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
 # shellcheck disable=SC1090
 source "$required_modes_lib"
@@ -328,7 +330,6 @@ required_contracts=(
   'release_gate_parallel_cancel_all || cleanup_failed=1'
   'release_gate_cleanup_private_build_dirs || cleanup_failed=1'
   'platform_preparation_receipt_valid'
-  'scripts/release-artifact-provenance-lib.test.mjs'
   'NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT='
   'NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT='
   'NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1'
