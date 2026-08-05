@@ -17,6 +17,7 @@ source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
+release_join_configure_install_modes
 
 SSH_HOST="${NVPN_UBUNTU_SSH_HOST:-${1:-}}"
 GUEST_SRC_ROOT="${NVPN_UBUNTU_GUEST_SRC_ROOT:-src}"
