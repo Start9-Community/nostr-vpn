@@ -6,7 +6,6 @@ import { resolve } from 'node:path'
 import {
   normalizeTag,
   renderReleaseNotes,
-  splitCsv,
 } from './local-release-lib.mjs'
 
 function usage() {
@@ -14,12 +13,9 @@ function usage() {
 
 Options:
   --tag <tag>              Release tag
-  --commit <sha>           Release commit
   --asset-dir <path>       Directory containing release assets
   --asset-base-url <url>   Base URL for asset links
   --changelog <path>       Changelog path
-  --built-line <text>      Build summary line (repeatable)
-  --skipped-line <text>    Skipped/missing line (repeatable)
   --out <path>             Output file (defaults to stdout)
   --help                   Show this help`)
 }
@@ -27,12 +23,9 @@ Options:
 function parseArgs(argv) {
   const options = {
     tag: '',
-    commit: '',
     assetDir: '',
     assetBaseUrl: '',
     changelog: '',
-    builtLines: [],
-    skippedLines: [],
     out: '',
   }
 
@@ -46,9 +39,6 @@ function parseArgs(argv) {
       case '--tag':
         options.tag = normalizeTag(argv[++index] ?? '')
         break
-      case '--commit':
-        options.commit = argv[++index] ?? ''
-        break
       case '--asset-dir':
         options.assetDir = resolve(argv[++index] ?? '')
         break
@@ -57,15 +47,6 @@ function parseArgs(argv) {
         break
       case '--changelog':
         options.changelog = resolve(argv[++index] ?? '')
-        break
-      case '--built-line':
-        options.builtLines.push(argv[++index] ?? '')
-        break
-      case '--skipped-line':
-        options.skippedLines.push(argv[++index] ?? '')
-        break
-      case '--skipped-lines':
-        options.skippedLines.push(...splitCsv(argv[++index] ?? ''))
         break
       case '--out':
         options.out = resolve(argv[++index] ?? '')
@@ -99,14 +80,11 @@ function main() {
   const options = parseArgs(process.argv.slice(2))
   const notes = renderReleaseNotes({
     tag: options.tag,
-    commit: options.commit,
     assetNames: readAssetNames(options.assetDir),
     assetBaseUrl: options.assetBaseUrl,
     changelogText: options.changelog && existsSync(options.changelog)
       ? readFileSync(options.changelog, 'utf8')
       : '',
-    builtLines: options.builtLines.filter(Boolean),
-    skippedLines: options.skippedLines.filter(Boolean),
   })
 
   if (options.out) {

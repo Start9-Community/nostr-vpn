@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file.
 
 ## 4.1.5 - 2026-08-01
 
+### Release notes
+
+Reliability improvements and basic feature fixes across every platform.
+
+- More reliable exit nodes, DNS settings, Direct mode, and network switching.
+- Fixed QR and manual joining across mobile and desktop; mobile QR codes are larger.
+- Improved app, VPN-service, and paid-exit recovery.
+
 ### Added
 
 - Add exact signed-release gates on physical Android and iOS for WireGuard

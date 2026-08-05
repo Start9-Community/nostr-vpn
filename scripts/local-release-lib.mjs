@@ -751,6 +751,27 @@ export function extractChangelogSection(changelogText, tag) {
   return null
 }
 
+function extractProductReleaseNotes(changelogSection, tag) {
+  if (!changelogSection) {
+    return null
+  }
+  const heading = changelogSection.match(/^###\s+Release notes\s*$/mi)
+  if (!heading || heading.index == null) {
+    throw new Error(
+      `Changelog ${normalizeTag(tag)} must include a product-facing "### Release notes" section.`,
+    )
+  }
+  const remainder = changelogSection
+    .slice(heading.index + heading[0].length)
+    .replace(/^\r?\n/, '')
+  const nextHeading = remainder.match(/^###\s+/m)
+  const notes = (nextHeading ? remainder.slice(0, nextHeading.index) : remainder).trim()
+  if (!notes) {
+    throw new Error(`Changelog ${normalizeTag(tag)} has empty product release notes.`)
+  }
+  return notes
+}
+
 /**
  * "v4.0.6" / "4.0.6" / "v4.0.6+4000007" → "4.0.6".
  * Build metadata identifies a corrected release artifact without changing the
@@ -1199,41 +1220,24 @@ export function validateStagedReleaseTree(stageDir, manifest) {
 
 export function renderReleaseNotes({
   tag,
-  commit,
   assetNames,
-  builtLines = [],
-  skippedLines = [],
   changelogText = '',
   assetBaseUrl = '',
 }) {
-  const normalizedTag = normalizeTag(tag)
   const lines = []
-  const changelogSection = extractChangelogSection(changelogText, normalizedTag)
-  const visibleSkippedLines = skippedLines.filter((line) => !line.endsWith('skipped by CLI options.'))
+  const changelogSection = extractChangelogSection(changelogText, tag)
+  const productNotes = extractProductReleaseNotes(changelogSection, tag)
+
+  if (productNotes) {
+    lines.push(
+      '## Reliability across every platform',
+      '',
+      ...productNotes.split('\n'),
+      '',
+    )
+  }
 
   pushDownloadSections(lines, assetNames, assetBaseUrl)
-
-  if (changelogSection) {
-    lines.push('', '## Changes', '', ...changelogSection.split('\n'), '')
-  }
-
-  if (commit || builtLines.length > 0) {
-    lines.push('', '## Release Build', '')
-    if (commit) {
-      lines.push(`- Built from commit \`${commit}\` for release \`${normalizedTag}\`.`)
-    }
-  }
-
-  for (const line of builtLines) {
-    lines.push(`- ${line}`)
-  }
-
-  if (visibleSkippedLines.length > 0) {
-    lines.push('', '## Skipped or Not Built', '')
-    for (const line of visibleSkippedLines) {
-      lines.push(`- ${line}`)
-    }
-  }
 
   return `${lines.join('\n')}\n`
 }

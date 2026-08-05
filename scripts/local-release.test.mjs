@@ -3459,11 +3459,14 @@ test('Linux release reclaims Docker smoke storage before host packaging', () => 
   assert.match(linuxJob, /docker system prune --all --force --volumes/)
 })
 
-test('dispatched release notes record the checked-out tag source commit', () => {
+test('dispatched release notes contain no build provenance text', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
+  const prepareStart = workflow.indexOf('- name: Prepare release notes')
+  const prepareEnd = workflow.indexOf('- name: Confirm publication remains local', prepareStart)
+  const prepare = workflow.slice(prepareStart, prepareEnd)
 
-  assert.match(workflow, /--commit "\$\(git rev-parse HEAD\)"/)
-  assert.doesNotMatch(workflow, /--commit "\$\{GITHUB_SHA\}"/)
+  assert.ok(prepareStart >= 0 && prepareEnd > prepareStart)
+  assert.doesNotMatch(prepare, /--commit|--built-line|--skipped-line/)
 })
 
 test('GitHub release metadata rejects same-tag asset substitution', () => {
@@ -3706,7 +3709,7 @@ test('GitHub release requires and publishes both StartOS package architectures',
   assert.match(startosJob, /scripts\/startos-release\.mjs/)
   assert.match(releaseJob, /needs\.build-startos\.result == 'success'/)
   assert.match(releaseJob, /- build-startos/)
-  assert.match(releaseJob, /Built signed StartOS packages for x86_64 and aarch64\./)
+  assert.doesNotMatch(releaseJob, /--built-line/)
 })
 
 test('corrected GitHub release is explicitly promoted as latest', () => {
@@ -3966,7 +3969,7 @@ test('extractChangelogSection prefers corrected build notes when present', () =>
   assert.equal(section, '- Corrected build-specific notes.')
 })
 
-test('renderReleaseNotes includes changelog, built, and skipped sections', () => {
+test('renderReleaseNotes includes only product-facing changelog notes', () => {
   const notes = renderReleaseNotes({
     tag: 'v0.2.27',
     commit: 'abc123',
@@ -3980,9 +3983,11 @@ test('renderReleaseNotes includes changelog, built, and skipped sections', () =>
 
 ## 0.2.27 - 2026-03-25
 
-Changes since v0.2.26.
+### Release notes
 
-### Fixed
+- More reliable VPN connections.
+
+### Development
 
 - Release note formatting.
 `,
@@ -3990,14 +3995,16 @@ Changes since v0.2.26.
     skippedLines: ['Linux musl CLI skipped because cross was unavailable.'],
   })
 
-  assert.match(notes, /## Changes/)
-  assert.match(notes, /Changes since v0\.2\.26\./)
-  assert.match(notes, /### Fixed/)
+  assert.match(notes, /## Reliability across every platform/)
+  assert.match(notes, /More reliable VPN connections\./)
   assert.match(notes, /### Most People Will Want/)
   assert.match(notes, /### Command Line/)
   assert.match(notes, /Windows x64 CLI/)
-  assert.match(notes, /Built Windows x64 CLI on windows-builder\./)
-  assert.match(notes, /Linux musl CLI skipped because cross was unavailable\./)
+  assert.doesNotMatch(notes, /Release note formatting\./)
+  assert.doesNotMatch(notes, /Built Windows x64 CLI on windows-builder\./)
+  assert.doesNotMatch(notes, /Linux musl CLI skipped because cross was unavailable\./)
+  assert.doesNotMatch(notes, /Release Build/)
+  assert.doesNotMatch(notes, /Skipped or Not Built/)
 })
 
 test('renderReleaseNotes omits CLI skip boilerplate and can link assets', () => {

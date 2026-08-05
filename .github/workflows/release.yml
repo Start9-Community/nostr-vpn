@@ -795,15 +795,9 @@ jobs:
         run: |
           node scripts/render-release-notes.mjs \
             --tag "${RELEASE_TAG}" \
-            --commit "$(git rev-parse HEAD)" \
             --asset-dir locally-gated-release/assets \
             --asset-base-url "https://github.com/${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}" \
             --changelog CHANGELOG.md \
-            --built-line "Built signed and notarized Apple Silicon macOS DMG and updater archive." \
-            --built-line "Built Linux x64 desktop Debian package." \
-            --built-line "Built Windows x64 installer." \
-            --built-line "Built signed Android arm64 APK/AAB." \
-            --built-line "Built signed StartOS packages for x86_64 and aarch64." \
             --out release-notes.md
 
       - name: Confirm publication remains local and fleet-gated

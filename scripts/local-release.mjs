@@ -2029,13 +2029,11 @@ function collectReleaseAssetPaths(tag) {
   return paths
 }
 
-function writeReleaseNotes({ tag, commit, stageDir, builtLines, skippedLines, dryRun }) {
+function writeReleaseNotes({ tag, stageDir, dryRun }) {
   const args = [
     join(repoRoot, 'scripts', 'render-release-notes.mjs'),
     '--tag',
     tag,
-    '--commit',
-    commit,
     '--asset-dir',
     join(stageDir, 'assets'),
     '--changelog',
@@ -2043,13 +2041,6 @@ function writeReleaseNotes({ tag, commit, stageDir, builtLines, skippedLines, dr
     '--out',
     join(stageDir, 'notes.md'),
   ]
-
-  for (const line of builtLines) {
-    args.push('--built-line', line)
-  }
-  for (const line of skippedLines) {
-    args.push('--skipped-line', line)
-  }
 
   run('node', args, { dryRun })
 }
@@ -2175,7 +2166,7 @@ function stageRelease({
   for (const [fileName, text] of buildReleaseManifestFiles(manifest)) {
     writeFileSync(join(stageDir, fileName), text)
   }
-  writeReleaseNotes({ tag, commit, stageDir, builtLines, skippedLines, dryRun })
+  writeReleaseNotes({ tag, stageDir, dryRun })
   validateStagedReleaseTree(stageDir, manifest)
 
   return { assetPaths, stageDir, stagedAndroidApkPath }
