@@ -68,6 +68,7 @@ test('component proof retains only unchanged platform product inputs', () => {
       'scripts/publish-release-refs.mjs',
       'scripts/release-mutation-gate.mjs',
       'scripts/release_common.sh',
+      'scripts/windows-release-publication-proof.ps1',
     ]) {
       const publication = commit(path, 'publication harness')
       assert.doesNotThrow(() => proveUnchangedPlatformInputs({

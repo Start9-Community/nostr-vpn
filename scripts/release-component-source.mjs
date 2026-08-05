@@ -67,6 +67,7 @@ const harnessOnlyPaths = new Set([
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
   'scripts/verify-host-linux-peer-artifact.py',
+  'scripts/windows-release-publication-proof.ps1',
   'scripts/windows-release-mobile-join-remote.ps1',
   'scripts/windows-vm-desktop-underlay-change-e2e.sh',
   'scripts/windows-vm-release-mobile-join-e2e.sh',
@@ -82,7 +83,7 @@ const buildScripts = {
   ],
   linux: [/build-host-linux-/, /build-nvpn-linux-musl$/, /host-linux-native-builder-/, /host_linux_package_content/, /lib-host-linux-/],
   macos: [/build-.*macos/, /scripts\/macos-build$/, /lib-macos-release-app-ownership/, /verify-macos-release-publication-artifacts/],
-  windows: [/windows-build\.ps1$/, /windows-release-publication-proof/],
+  windows: [/windows-build\.ps1$/],
 }
 
 function git(root, args, label) {
