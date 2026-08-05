@@ -105,7 +105,9 @@ from appstore_availability import (
     AppStoreAvailabilityError,
     require_new_territories_enabled,
     require_no_eu_trader_status_errors,
-    require_worldwide_availability,
+    require_territory_policy,
+    required_territory_availability,
+    territory_id,
     territory_update_request,
 )
 from testflight_export_compliance import (
@@ -937,7 +939,7 @@ def territory_availabilities(availability_id):
         fail(str(error))
 
 
-def ensure_worldwide_availability(app_id):
+def ensure_territory_policy(app_id):
     availability = app_availability(app_id)
     if not availability or not availability.get("id"):
         fail("App Store territory availability has no resource ID")
@@ -951,13 +953,17 @@ def ensure_worldwide_availability(app_id):
         row_id = str(row.get("id", "")).strip()
         if not row_id:
             fail("App Store territory availability has no resource ID")
+        territory = territory_id(row)
+        if not territory:
+            fail("App Store availability row has no territory identifier")
         attributes = row.get("attributes")
         if not isinstance(attributes, dict) or (
             attributes.get("available") is not True
             and attributes.get("available") is not False
         ):
             fail("App Store territory availability has no boolean state")
-        if attributes["available"] is True:
+        required_available = required_territory_availability(territory)
+        if attributes["available"] is required_available:
             continue
         status, body = request(
             "PATCH",
@@ -965,17 +971,20 @@ def ensure_worldwide_availability(app_id):
                 "https://api.appstoreconnect.apple.com/v1/"
                 f"territoryAvailabilities/{urllib.parse.quote(row_id)}"
             ),
-            body=territory_update_request(row_id, available=True),
+            body=territory_update_request(
+                row_id,
+                available=required_available,
+            ),
         )
         require_ok(
             status,
             body,
-            "Enable App Store territory availability",
+            "Set App Store territory availability",
         )
 
     verified_rows = territory_availabilities(availability_id)
     try:
-        return require_worldwide_availability(verified_rows)
+        return require_territory_policy(verified_rows)
     except AppStoreAvailabilityError as error:
         fail(str(error))
 
@@ -1399,15 +1408,26 @@ if ACTION == "status":
     )
     rows = territory_availabilities(availability["id"])
     try:
-        require_worldwide_availability(rows)
+        configured = require_territory_policy(rows)
     except AppStoreAvailabilityError as error:
         fail(str(error))
-    print(f"  - Current App Store territories available: {len(rows)}")
+    enabled = sum(
+        row.get("attributes", {}).get("available") is True
+        for row in configured
+    )
+    print(
+        f"  - Current App Store territories enabled: {enabled} "
+        "(France disabled)"
+    )
     raise SystemExit(0)
 
 if ACTION == "availability":
-    worldwide = ensure_worldwide_availability(app["id"])
-    print(f"Current App Store territories available: {len(worldwide)}")
+    configured = ensure_territory_policy(app["id"])
+    enabled = sum(
+        row.get("attributes", {}).get("available") is True
+        for row in configured
+    )
+    print(f"Current App Store territories enabled: {enabled} (France disabled)")
     raise SystemExit(0)
 
 version = ensure_version(app["id"])
@@ -1418,7 +1438,7 @@ category_id = ensure_primary_category(app_info["id"])
 age_rating = ensure_age_rating(app_info["id"])
 content_rights = ensure_content_rights(app["id"])
 price_schedule_id = ensure_free_price_schedule(app["id"])
-worldwide_territories = ensure_worldwide_availability(app["id"])
+configured_territories = ensure_territory_policy(app["id"])
 availability = app_availability(app["id"])
 build = find_build(app["id"])
 if build is None:
@@ -1470,7 +1490,14 @@ print(
     "Automatically available in new territories: "
     f"{availability.get('attributes', {}).get('availableInNewTerritories')}"
 )
-print(f"Current App Store territories available: {len(worldwide_territories)}")
+enabled_territories = sum(
+    row.get("attributes", {}).get("available") is True
+    for row in configured_territories
+)
+print(
+    f"Current App Store territories enabled: {enabled_territories} "
+    "(France disabled)"
+)
 print(f"Build: {BUILD_NUMBER} [{build['id']}]")
 print(f"Screenshots {screenshot_mode}: {len(screenshots)}")
 if submission:

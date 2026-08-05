@@ -230,7 +230,7 @@ Review paths:
 
 The iOS app offers Direct, trusted Private VPN peers, and WireGuard configurations supplied by the user. Nostr provides signed device identity, peer discovery, and encrypted VPN/mesh networking control transport. The shared repository retains Cashu wallet and paid-exit implementations for non-iOS products. The iOS target is built without those feature dependencies or runtime workers and has no wallet or paid-exit UI/action path; only inert shared state-compatibility data types remain. There is no wallet, mint, token import/export; no paid VPN purchase, use, or sale; and no external purchase link in the iOS app.
 
-This build uses industry-standard cryptography implemented by the app, including WireGuard and encrypted Nostr/FIPS transport, in addition to cryptography provided by Apple operating systems. It is declared as using non-exempt encryption.{french_approval} The app is available worldwide, including France and China.
+This build uses industry-standard cryptography implemented by the app, including WireGuard and encrypted Nostr/FIPS transport, in addition to cryptography provided by Apple operating systems. It is declared as using non-exempt encryption.{french_approval} App Store distribution is enabled in every territory except France, including China.
 
 Before first VPN activation, the app explains the connection data needed for configured networks, peers, relays, exits, and the selected DNS operator. Sirius Business Oy does not collect or retain VPN traffic, connection data, or DNS queries; sell VPN data; or use it for advertising or tracking. The Settings tab includes a link to the current Privacy Policy.{wireguard_fixture}"""
 
@@ -287,6 +287,30 @@ def _review_notes_value(
 ) -> str:
     override = str(source.get(override_name, "")).strip()
     notes = override or default
+    normalized_notes = re.sub(r"\s+", " ", notes.lower())
+    if "worldwide" in normalized_notes:
+        raise ValueError(
+            "review notes must not claim worldwide App Store availability"
+        )
+    for sentence in re.split(r"(?<=[.!?])\s+", normalized_notes):
+        if "france" not in sentence:
+            continue
+        describes_availability = re.search(
+            r"\b(?:availab(?:le|ility)|distribut(?:e|ed|ion)|territor(?:y|ies))\b",
+            sentence,
+        )
+        says_enabled = re.search(
+            r"\b(?:including|includes|enabled|available in|distributed in)\b",
+            sentence,
+        )
+        says_disabled = re.search(
+            r"\b(?:except|exclude[sd]?|disabled|not available|unavailable)\b",
+            sentence,
+        )
+        if describes_availability and says_enabled and not says_disabled:
+            raise ValueError(
+                "review notes must not claim App Store availability in France"
+            )
     if (
         override
         and encryption_compliance is None

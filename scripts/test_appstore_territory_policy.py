@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import appstore_availability as availability
 
 
-class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
+class AppStoreTerritoryPolicyTests(unittest.TestCase):
     @staticmethod
     def _row(territory_id: str, available: object) -> dict[str, object]:
         return {
@@ -50,21 +50,32 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
                 }
             )
 
-    def test_every_current_territory_must_be_available(self):
-        france = self._row("FRA", True)
+    def test_france_must_be_disabled_and_every_other_territory_enabled(self):
+        france = self._row("FRA", False)
         china = self._row("CHN", True)
+        united_states = self._row("USA", True)
 
         self.assertEqual(
-            availability.require_worldwide_availability([france, china]),
-            [france, china],
+            availability.require_territory_policy(
+                [france, china, united_states]
+            ),
+            [france, china, united_states],
         )
 
         with self.assertRaisesRegex(
             availability.AppStoreAvailabilityError,
             "FRA",
         ):
-            availability.require_worldwide_availability(
-                [self._row("FRA", False), china]
+            availability.require_territory_policy(
+                [self._row("FRA", True), china]
+            )
+
+        with self.assertRaisesRegex(
+            availability.AppStoreAvailabilityError,
+            "USA",
+        ):
+            availability.require_territory_policy(
+                [france, china, self._row("USA", False)]
             )
 
     def test_france_and_china_must_be_present(self):
@@ -72,24 +83,24 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
             availability.AppStoreAvailabilityError,
             "CHN",
         ):
-            availability.require_worldwide_availability(
-                [self._row("FRA", True), self._row("USA", True)]
+            availability.require_territory_policy(
+                [self._row("FRA", False), self._row("USA", True)]
             )
 
         with self.assertRaisesRegex(
             availability.AppStoreAvailabilityError,
             "FRA",
         ):
-            availability.require_worldwide_availability(
+            availability.require_territory_policy(
                 [self._row("CHN", True), self._row("USA", True)]
             )
 
-    def test_worldwide_check_fails_closed_on_malformed_or_empty_rows(self):
+    def test_territory_check_fails_closed_on_malformed_or_empty_rows(self):
         with self.assertRaisesRegex(
             availability.AppStoreAvailabilityError,
             "no territory rows",
         ):
-            availability.require_worldwide_availability([])
+            availability.require_territory_policy([])
 
         for value in (None, 1, "true"):
             with self.subTest(value=value):
@@ -97,7 +108,7 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
                     availability.AppStoreAvailabilityError,
                     "boolean available state",
                 ):
-                    availability.require_worldwide_availability(
+                    availability.require_territory_policy(
                         [self._row("USA", value)]
                     )
 
@@ -107,7 +118,15 @@ class AppStoreWorldwideAvailabilityTests(unittest.TestCase):
             availability.AppStoreAvailabilityError,
             "no territory identifier",
         ):
-            availability.require_worldwide_availability([malformed])
+            availability.require_territory_policy([malformed])
+
+    def test_required_state_disables_only_france(self):
+        self.assertFalse(availability.required_territory_availability("FRA"))
+        for territory in ("CHN", "USA", "FIN"):
+            with self.subTest(territory=territory):
+                self.assertTrue(
+                    availability.required_territory_availability(territory)
+                )
 
 
 if __name__ == "__main__":

@@ -259,8 +259,9 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             "approved French-store encryption declaration is attached",
             notes,
         )
-        self.assertIn("available worldwide", notes)
-        self.assertIn("including France and China", notes)
+        self.assertIn("every territory except France", notes)
+        self.assertIn("including China", notes)
+        self.assertNotIn("worldwide", notes.lower())
         self.assertIn("Turning Wi-Fi off and on restores the same Wi-Fi", notes)
         self.assertIn("turn Wi-Fi off and back on", notes)
         self.assertNotIn("change the network connection", notes)
@@ -333,13 +334,13 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
                         environ={"NVPN_APPSTORE_REVIEW_NOTES": claim},
                     )
 
-    def test_unproved_override_allows_unrelated_purchase_link_and_france(self):
+    def test_override_allows_territory_policy_and_unrelated_purchase_copy(self):
         notes = (
             "The iOS target contains no wallet or paid-exit UI/runtime, "
             "purchase path, or external purchase link. "
             "It uses NEPacketTunnelProvider plus app-implemented WireGuard "
             "and encrypted FIPS/Nostr transport and is declared as non-exempt "
-            "encryption. Availability is worldwide, including France and China."
+            "encryption. Distribution excludes France and includes China."
         )
 
         self.assertEqual(
@@ -358,6 +359,29 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             ),
             notes,
         )
+
+    def test_overrides_cannot_claim_broader_storefront_availability(self):
+        prohibited = (
+            "App Store availability is worldwide.",
+            "App Store distribution is enabled in France and China.",
+            "The app is available in France.",
+        )
+        for notes in prohibited:
+            with self.subTest(notes=notes):
+                for environment_name, renderer in (
+                    ("NVPN_APPSTORE_REVIEW_NOTES", metadata.review_notes),
+                    ("NVPN_TESTFLIGHT_REVIEW_NOTES", metadata.testflight_review_notes),
+                ):
+                    with self.subTest(environment_name=environment_name):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "availability",
+                        ):
+                            renderer(
+                                "4.1.5",
+                                None,
+                                environ={environment_name: notes},
+                            )
 
     def test_unproved_override_may_truthfully_say_declaration_is_not_approved(self):
         for notes in (
@@ -499,8 +523,8 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             "approved French-store encryption declaration is attached",
             notes,
         )
-        self.assertIn("available worldwide", notes)
-        self.assertNotIn("excluded from availability", notes)
+        self.assertIn("every territory except France", notes)
+        self.assertNotIn("worldwide", notes.lower())
 
     def test_explicit_testflight_notes_override_repo_default(self):
         notes = metadata.testflight_review_notes(
@@ -605,11 +629,11 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
         self.assertIn("Nostr VPN Support", contents)
         self.assertIn("mailto:", contents)
 
-    def test_worldwide_availability_requires_every_returned_territory(self):
+    def test_territory_policy_requires_france_off_and_every_other_row_on(self):
         france = {
             "type": "territoryAvailabilities",
             "id": "france-row",
-            "attributes": {"available": True},
+            "attributes": {"available": False},
             "relationships": {
                 "territory": {
                     "data": {"type": "territories", "id": "FRA"},
@@ -637,42 +661,41 @@ class AppStoreDraftMetadataTests(unittest.TestCase):
             },
         }
         self.assertEqual(
-            availability.require_worldwide_availability(
+            availability.require_territory_policy(
                 [germany, france, china]
             ),
             [germany, france, china],
         )
         with self.assertRaises(availability.AppStoreAvailabilityError):
-            availability.require_worldwide_availability(
+            availability.require_territory_policy(
                 [
-                    {**france, "attributes": {"available": False}},
+                    {**france, "attributes": {"available": True}},
                     germany,
                     china,
                 ]
             )
         with self.assertRaises(availability.AppStoreAvailabilityError):
-            availability.require_worldwide_availability([])
+            availability.require_territory_policy([])
 
-    def test_worldwide_patch_enables_the_territory_resource(self):
+    def test_territory_patch_encodes_required_state(self):
         self.assertEqual(
             availability.territory_update_request(
                 "france-row",
-                available=True,
+                available=False,
             ),
             {
                 "data": {
                     "type": "territoryAvailabilities",
                     "id": "france-row",
-                    "attributes": {"available": True},
+                    "attributes": {"available": False},
                 }
             },
         )
         draft = (ROOT / "scripts" / "appstore-draft").read_text(
             encoding="utf-8"
         )
-        self.assertIn('ensure_worldwide_availability(app["id"])', draft)
-        self.assertNotIn("REQUIRED_EXCLUDED_TERRITORIES", draft)
-        self.assertNotIn("require_territory_excluded", draft)
+        self.assertIn('ensure_territory_policy(app["id"])', draft)
+        self.assertIn("required_territory_availability(territory)", draft)
         self.assertIn("territoryAvailabilities/", draft)
 
     def test_enabled_eu_territories_reject_every_dsa_trader_error(self):

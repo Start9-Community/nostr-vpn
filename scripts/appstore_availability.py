@@ -1,4 +1,4 @@
-"""Pure helpers for enforcing worldwide App Store availability."""
+"""Pure helpers for enforcing the App Store territory policy."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ EU_TERRITORY_IDS = frozenset(
     "AUT BEL BGR HRV CYP CZE DNK EST FIN FRA DEU GRC HUN IRL ITA "
     "LVA LTU LUX MLT NLD POL PRT ROU SVK SVN ESP SWE".split()
 )
-REQUIRED_TERRITORY_IDS = frozenset({"CHN", "FRA"})
+FRANCE_TERRITORY_ID = "FRA"
+REQUIRED_ENABLED_TERRITORY_IDS = frozenset({"CHN"})
+REQUIRED_TERRITORY_IDS = REQUIRED_ENABLED_TERRITORY_IDS | frozenset(
+    {FRANCE_TERRITORY_ID}
+)
 DSA_TRADER_CONTENT_ERRORS = frozenset(
     {
         "TRADER_STATUS_NOT_PROVIDED",
@@ -20,7 +24,7 @@ DSA_TRADER_CONTENT_ERRORS = frozenset(
 
 
 class AppStoreAvailabilityError(RuntimeError):
-    """Raised when worldwide storefront availability cannot be proven."""
+    """Raised when storefront availability does not match release policy."""
 
 
 def require_new_territories_enabled(
@@ -56,7 +60,16 @@ def territory_id(resource: Mapping[str, object]) -> str:
     return str(data.get("id", "")).strip().upper()
 
 
-def require_worldwide_availability(
+def required_territory_availability(territory: str) -> bool:
+    """Return the required availability state for one territory."""
+
+    territory = str(territory).strip().upper()
+    if not territory:
+        raise ValueError("territory identifier is required")
+    return territory != FRANCE_TERRITORY_ID
+
+
+def require_territory_policy(
     resources: Iterable[Mapping[str, object]],
 ) -> list[Mapping[str, object]]:
     rows = list(resources)
@@ -65,6 +78,7 @@ def require_worldwide_availability(
             "App Store availability has no territory rows"
         )
     unavailable = []
+    france_enabled = False
     present = set()
     for resource in rows:
         resource_id = str(resource.get("id", "")).strip()
@@ -88,12 +102,18 @@ def require_worldwide_availability(
                 f"App Store territory {territory} has no boolean available state"
             )
         present.add(territory)
-        if available is False:
+        if territory == FRANCE_TERRITORY_ID and available is True:
+            france_enabled = True
+        elif territory != FRANCE_TERRITORY_ID and available is False:
             unavailable.append(territory)
     missing = sorted(REQUIRED_TERRITORY_IDS - present)
     if missing:
         raise AppStoreAvailabilityError(
             "App Store required territories are missing: " + ", ".join(missing)
+        )
+    if france_enabled:
+        raise AppStoreAvailabilityError(
+            "App Store territory FRA must remain disabled"
         )
     if unavailable:
         raise AppStoreAvailabilityError(
