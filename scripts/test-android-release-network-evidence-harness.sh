@@ -105,5 +105,52 @@ with tempfile.TemporaryDirectory() as temporary:
     else:
         raise SystemExit("singleton Direct event accepted duplicate receipts")
 
+    calls = []
+    original = module.validate_android_support
+
+    def fake_support(_root, selected, mode):
+        calls.append((selected, mode))
+        if mode == "wireguard-dns":
+            return {"startStopCycles": 2}, [root / "wireguard-proof"]
+        return {
+            "lifecycleCycles": 3,
+            "underlayCycles": [{}],
+            "postForegroundDnsHttpsAndTunnelCycles": 3,
+        }, [root / "underlay-proof"]
+
+    module.validate_android_support = fake_support
+    try:
+        combined, combined_paths = module.validate_mobile_support(
+            root,
+            "android",
+            list(module.DNS_CASES),
+            "wireguard-dns",
+            True,
+        )
+        if calls != [
+            (list(module.DNS_CASES), "wireguard-dns"),
+            (["automatic-profile"], "underlay-lifecycle"),
+        ]:
+            raise SystemExit("combined evidence did not validate both strict gates")
+        if combined.get("postForegroundDnsHttpsAndTunnelCycles") != 3:
+            raise SystemExit("combined evidence discarded lifecycle support")
+        if len(combined_paths) != 2:
+            raise SystemExit("combined evidence discarded concrete proof paths")
+        try:
+            module.validate_mobile_support(
+                root,
+                "android",
+                list(module.DNS_CASES)[:-1],
+                "wireguard-dns",
+                True,
+            )
+        except ValueError as error:
+            if "canonical five DNS cases" not in str(error):
+                raise
+        else:
+            raise SystemExit("combined evidence accepted a partial DNS subset")
+    finally:
+        module.validate_android_support = original
+
 print("Android release network evidence regression passed")
 PY

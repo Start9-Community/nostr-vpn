@@ -1017,6 +1017,39 @@ def validate_android_support(
     return summary, paths
 
 
+def validate_mobile_support(
+    root: pathlib.Path,
+    platform: str,
+    cases: list[str],
+    mode: str,
+    include_underlay_lifecycle: bool,
+) -> tuple[dict[str, Any], list[pathlib.Path]]:
+    validator = (
+        validate_ios_support if platform == "ios" else validate_android_support
+    )
+    support, paths = validator(root, cases, mode)
+    if not include_underlay_lifecycle:
+        return support, paths
+    require(
+        mode == "wireguard-dns" and cases == list(DNS_CASES),
+        "combined mobile evidence requires the canonical five DNS cases",
+    )
+    underlay, underlay_paths = validator(
+        root,
+        ["automatic-profile"],
+        "underlay-lifecycle",
+    )
+    required = ["lifecycleCycles", "underlayCycles"]
+    if platform == "android":
+        required.append("postForegroundDnsHttpsAndTunnelCycles")
+    require(
+        all(key in underlay for key in required),
+        f"{platform} combined evidence lacks underlay/lifecycle support",
+    )
+    support.update({key: underlay[key] for key in required})
+    return support, paths + underlay_paths
+
+
 def build_mobile(args: argparse.Namespace) -> None:
     platform = args.platform
     mode = args.mode
@@ -1028,28 +1061,31 @@ def build_mobile(args: argparse.Namespace) -> None:
     counter_cases = parse_counter_ledger(
         pathlib.Path(args.counter_ledger), cases, platform
     )
-    if platform == "ios":
-        support, paths = validate_ios_support(root, cases, mode)
-    else:
-        support, paths = validate_android_support(root, cases, mode)
-    atomic_json(
-        pathlib.Path(args.output),
-        {
-            "receiptSchema": 1,
-            "artifactType": f"physical {platform} Release {mode} gate",
-            "platform": platform,
-            "mode": mode,
-            "appGitSha": artifact["appGitSha"],
-            "appGitTree": artifact["appGitTree"],
-            "fipsGitSha": artifact["fipsGitSha"],
-            "fipsGitTree": artifact["fipsGitTree"],
-            "artifactReceiptSha256": sha256(artifact_path),
-            "artifactIdentity": identity,
-            "dnsCases": counter_cases,
-            "support": support,
-            "evidenceFiles": evidence_hashes(root, paths),
-        },
+    support, paths = validate_mobile_support(
+        root,
+        platform,
+        cases,
+        mode,
+        args.include_underlay_lifecycle,
     )
+    receipt = {
+        "receiptSchema": 1,
+        "artifactType": f"physical {platform} Release {mode} gate",
+        "platform": platform,
+        "mode": mode,
+        "appGitSha": artifact["appGitSha"],
+        "appGitTree": artifact["appGitTree"],
+        "fipsGitSha": artifact["fipsGitSha"],
+        "fipsGitTree": artifact["fipsGitTree"],
+        "artifactReceiptSha256": sha256(artifact_path),
+        "artifactIdentity": identity,
+        "dnsCases": counter_cases,
+        "support": support,
+        "evidenceFiles": evidence_hashes(root, paths),
+    }
+    if args.include_underlay_lifecycle:
+        receipt["coveredModes"] = ["wireguard-dns", "underlay-lifecycle"]
+    atomic_json(pathlib.Path(args.output), receipt)
 
 
 def key_values(path: pathlib.Path) -> dict[str, str]:
@@ -1556,6 +1592,7 @@ def parser() -> argparse.ArgumentParser:
     mobile.add_argument("--artifact-dir", required=True)
     mobile.add_argument("--counter-ledger", required=True)
     mobile.add_argument("--output", required=True)
+    mobile.add_argument("--include-underlay-lifecycle", action="store_true")
     desktop = commands.add_parser("desktop")
     desktop.add_argument(
         "--platform",

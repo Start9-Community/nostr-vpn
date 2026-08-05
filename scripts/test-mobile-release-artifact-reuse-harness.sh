@@ -436,8 +436,7 @@ python3 "$VALIDATOR" join-summary \
   --ios-qr-width-bps 10000 \
   --ios-qr-relaunch-durable 1 \
   --ios-admin-manual-relaunch-durable 1 \
-  --ios-joiner-manual-relaunch-durable 1 \
-  --desktop-mode 1
+  --ios-joiner-manual-relaunch-durable 1
 python3 - "$JOIN_SUMMARY" \
   "$HARNESS_HEAD" "$ANDROID_APP_TREE" "$IOS_APP_TREE" \
   "$IOS_BUNDLE_TREE_SHA" <<'PY'
@@ -453,6 +452,7 @@ assert summary["artifact"]["ios"]["appBundleTreeSha256"] == ios_bundle_tree
 assert summary["productionImageImportQr"] is False
 assert summary["iosJoinTestVariant"] is True
 assert summary["testOnlyImageImportQr"] is True
+assert summary["coverageScope"] == "android-ios-mobile-only"
 assert summary["productionQrDecoderPath"] is True
 assert summary["productionJoinApprovalPath"] is True
 assert summary["productionRosterPath"] is True

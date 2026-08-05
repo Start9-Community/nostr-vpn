@@ -659,7 +659,7 @@ PY
   NVPN_MOBILE_UNDERLAY_CONTINUITY_REMOTE_DOCKER_SUDO="${NVPN_MOBILE_WG_EXIT_REMOTE_DOCKER_SUDO:-0}"
   run_ios_release_network_case \
     "$label" "$run_id" "$spec_base64" \
-    "$lifecycle_gate" "$underlay_gate" "$final" "$first"
+    "$lifecycle_gate" "$underlay_gate" "$final" "$rapid_start_stop_gate"
   if bool_is_true "$underlay_gate"; then
     write_underlay_fresh_dns_fixture_proof \
       iOS "${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
@@ -679,7 +679,13 @@ PY
 
 write_network_evidence() {
   local platform="$1" output artifact_receipt artifact_dir ledger mode
-  if bool_is_true "$UNDERLAY_CHANGE_GATE"; then
+  local include_underlay=0
+  if bool_is_true "$UNDERLAY_CHANGE_GATE" \
+    && mobile_wg_dns_cases_are_complete "${DNS_CASES[@]}"
+  then
+    mode=wireguard-dns
+    include_underlay=1
+  elif bool_is_true "$UNDERLAY_CHANGE_GATE"; then
     mode=underlay-lifecycle
   else
     mode=wireguard-dns
@@ -709,13 +715,19 @@ write_network_evidence() {
     echo "$platform network evidence requires an exact artifact receipt" >&2
     return 1
   }
-  python3 "$ROOT/scripts/release-network-evidence.py" mobile \
-    --platform "$platform" \
-    --mode "$mode" \
-    --artifact-receipt "$artifact_receipt" \
-    --artifact-dir "$artifact_dir" \
-    --counter-ledger "$ledger" \
+  local -a evidence_args=(
+    mobile
+    --platform "$platform"
+    --mode "$mode"
+    --artifact-receipt "$artifact_receipt"
+    --artifact-dir "$artifact_dir"
+    --counter-ledger "$ledger"
     --output "$output"
+  )
+  if [[ "$include_underlay" -eq 1 ]]; then
+    evidence_args+=(--include-underlay-lifecycle)
+  fi
+  python3 "$ROOT/scripts/release-network-evidence.py" "${evidence_args[@]}"
 }
 
 DNS_CASES=(automatic-profile cloudflare-doh quad9-doh custom-doh through-exit)

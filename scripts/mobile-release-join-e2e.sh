@@ -491,7 +491,6 @@ python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" join-summary \
   --ios-admin-manual-relaunch-durable \
     "$RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE" \
   --ios-joiner-manual-relaunch-durable \
-    "$RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE" \
-  --desktop-mode "$MACOS_JOIN_GATE"
+    "$RELEASE_JOIN_IOS_JOINER_MANUAL_RELAUNCH_DURABLE"
 
 echo "SIGNED_RELEASE_PUBLIC_UI_MOBILE_JOIN_E2E_OK $SUMMARY"

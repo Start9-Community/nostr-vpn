@@ -444,6 +444,7 @@ android_identity = {
 join = {
     "schema": 1,
     "platform": "mobile",
+    "coverageScope": "android-ios-mobile-only",
     "harnessGitSha": "8" * 40,
     "harnessGitTree": "9" * 40,
     "artifact": {
@@ -489,7 +490,6 @@ join = {
     },
     "privateAppStateRead": False,
     "appLaunchArgumentsOrEnvironment": False,
-    "desktopMobileManual": True,
     "deliveryDeadlineMilliseconds": 15000,
     "deliveryMilliseconds": {
         "iPhone-admin-to-Pixel-QR": 100,
@@ -801,6 +801,23 @@ if seal_gate >/dev/null 2>&1; then
   exit 1
 fi
 cp "$JOIN_VARIANT_CLEAN" "$JOIN_VARIANT_RECEIPT"
+seal_gate
+
+python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["coverageScope"] = "android-ios-desktop"
+path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if seal_gate >/dev/null 2>&1; then
+  echo "Frozen iOS gate accepted a dishonest mobile join coverage scope" >&2
+  exit 1
+fi
+cp "$MOBILE_JOIN_CLEAN" "$MOBILE_JOIN_RECEIPT"
 seal_gate
 
 python3 - "$MOBILE_JOIN_RECEIPT" <<'PY'

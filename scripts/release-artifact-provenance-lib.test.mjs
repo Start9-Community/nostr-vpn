@@ -849,6 +849,7 @@ test('release receipt collection requires exact source and strict public UI gate
     writeFileSync(mobileJoinPath, JSON.stringify({
       schema: 1,
       platform: 'mobile',
+      coverageScope: 'android-ios-mobile-only',
       harnessGitSha: '8'.repeat(40),
       harnessGitTree: '9'.repeat(40),
       artifact: {
@@ -898,7 +899,6 @@ test('release receipt collection requires exact source and strict public UI gate
       },
       privateAppStateRead: false,
       appLaunchArgumentsOrEnvironment: false,
-      desktopMobileManual: true,
       deliveryDeadlineMilliseconds: 15_000,
       deliveryMilliseconds: {
         'iPhone-admin-to-Pixel-QR': 100,
@@ -1293,6 +1293,47 @@ test('release receipt collection requires exact source and strict public UI gate
       ['android', 'ios', 'linux', 'macos', 'windows'],
     )
 
+    const wireguardText = readFileSync(paths.android.wireguard_dns, 'utf8')
+    const combinedWireguard = JSON.parse(wireguardText)
+    const underlayForCombined = JSON.parse(
+      readFileSync(paths.android.underlay_lifecycle, 'utf8'),
+    )
+    combinedWireguard.coveredModes = [
+      'wireguard-dns',
+      'underlay-lifecycle',
+    ]
+    Object.assign(combinedWireguard.support, underlayForCombined.support)
+    Object.assign(
+      combinedWireguard.evidenceFiles,
+      underlayForCombined.evidenceFiles,
+    )
+    writeFileSync(
+      paths.android.wireguard_dns,
+      JSON.stringify(combinedWireguard),
+    )
+    assert.doesNotThrow(() => collectReleaseGateReceipts({
+      commit,
+      tree,
+      releaseGateSummaryPath: summary,
+      platformReceiptPaths: paths,
+    }))
+    combinedWireguard.coveredModes = ['wireguard-dns', 'underlay-lifecycle']
+    delete combinedWireguard.support.underlayCycles
+    writeFileSync(
+      paths.android.wireguard_dns,
+      JSON.stringify(combinedWireguard),
+    )
+    assert.throws(
+      () => collectReleaseGateReceipts({
+        commit,
+        tree,
+        releaseGateSummaryPath: summary,
+        platformReceiptPaths: paths,
+      }),
+      /underlay\/lifecycle receipt is incomplete/,
+    )
+    writeFileSync(paths.android.wireguard_dns, wireguardText)
+
     const assertRejectedReceiptMutation = (path, mutate, error) => {
       const original = readFileSync(path, 'utf8')
       const mutated = JSON.parse(original)
@@ -1359,6 +1400,13 @@ test('release receipt collection requires exact source and strict public UI gate
     for (const [path, original] of originalDesktopJoinFiles) {
       writeFileSync(path, original)
     }
+    assertRejectedReceiptMutation(
+      mobileJoinPath,
+      (receipt) => {
+        receipt.coverageScope = 'android-ios-desktop'
+      },
+      /mobile join receipt is not strict public-UI\/relaunch evidence/,
+    )
     assertRejectedReceiptMutation(
       mobileJoinPath,
       (receipt) => {

@@ -512,6 +512,7 @@ function requireMobileJoinReceipt({
   if (
     receipt.schema !== 1
     || receipt.platform !== 'mobile'
+    || receipt.coverageScope !== 'android-ios-mobile-only'
     || receipt.publicUiOnly !== true
     || receipt.productionImageImportQr !== false
     || receipt.iosJoinTestVariant !== true
@@ -522,7 +523,6 @@ function requireMobileJoinReceipt({
     || !receipt.actualRenderedQrScreenCapture
     || receipt.privateAppStateRead !== false
     || receipt.appLaunchArgumentsOrEnvironment !== false
-    || receipt.desktopMobileManual !== true
     || receipt.qr?.iphoneAdminPixelJoiner !== true
     || receipt.qr?.pixelAdminIphoneJoiner !== true
     || receipt.qr?.pendingQrBackgroundForeground !== true
@@ -881,6 +881,17 @@ function requireMobileNetworkReceipt({
   commit,
   tree,
 }) {
+  const coveredModes = receipt.coveredModes
+  const combined = mode === 'wireguard-dns'
+    && JSON.stringify(coveredModes)
+      === JSON.stringify(['wireguard-dns', 'underlay-lifecycle'])
+  if (
+    coveredModes !== undefined
+    && JSON.stringify(coveredModes) !== JSON.stringify([mode])
+    && !combined
+  ) {
+    throw new Error(`${platform} ${mode} receipt has invalid covered modes.`)
+  }
   const expectedCases = mode === 'wireguard-dns'
     ? [
         'automatic-profile',
@@ -1025,7 +1036,7 @@ function requireMobileNetworkReceipt({
   ) {
     throw new Error('Android WireGuard/DNS receipt lacks Direct restoration evidence.')
   }
-  if (mode === 'underlay-lifecycle') {
+  if (mode === 'underlay-lifecycle' || combined) {
     const cycles = receipt.support?.underlayCycles
     const cycle = Array.isArray(cycles) ? cycles[0] : undefined
     const processCounts = cycle?.processIdentifierCounts
@@ -1077,7 +1088,7 @@ function requireMobileNetworkReceipt({
     }
   }
   if (
-    mode === 'underlay-lifecycle'
+    (mode === 'underlay-lifecycle' || combined)
     && platform === 'android'
     && receipt.support?.postForegroundDnsHttpsAndTunnelCycles !== 3
   ) {

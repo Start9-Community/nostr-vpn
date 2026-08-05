@@ -469,6 +469,22 @@ write_network_evidence android
   echo "canonical receipt builder accepted a focused DNS case selector" >&2
   exit 1
 }
+UNDERLAY_CHANGE_GATE=1
+write_network_evidence android
+[[ "$canonical_builder_calls" -eq 2 \
+  && "$canonical_builder_arguments" == *"--mode wireguard-dns"* \
+  && "$canonical_builder_arguments" == *"--include-underlay-lifecycle"* ]] || {
+  echo "combined five-DNS/underlay run did not request strict aggregation" >&2
+  exit 1
+}
+DNS_CASES=(automatic-profile)
+write_network_evidence android
+[[ "$canonical_builder_calls" -eq 3 \
+  && "$canonical_builder_arguments" == *"--mode underlay-lifecycle"* \
+  && "$canonical_builder_arguments" != *"--include-underlay-lifecycle"* ]] || {
+  echo "focused underlay run did not retain its single-mode aggregation" >&2
+  exit 1
+}
 unset -f python3 write_network_evidence
 
 python3 - "$fixture_lib" "$remote_native" <<'PY'
@@ -984,7 +1000,7 @@ if build >= audit:
     raise SystemExit("cold-cache iOS preparation audits before building")
 join = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 cleanup = join.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
-if "device uninstall app" in cleanup or "kill \"$RELEASE_JOIN_IOS_TEST_PID\"" not in cleanup:
+if "device uninstall app" in cleanup or "release_join_ios_abort_test" not in cleanup:
     raise SystemExit("join cleanup does not terminate while retaining the iOS runner")
 PY
 grep -Fq 'NVPN_IOS_EXPECTED_DEVICE_NAME' "$gate" "$ios_release_gate" \
@@ -1226,6 +1242,8 @@ end = text.index("\nDNS_CASES=", start)
 body = text[start:end]
 if "run_ios_release_network_case" not in body:
     raise SystemExit("iOS DNS case never enters the Release black-box runner")
+if '"$lifecycle_gate" "$underlay_gate" "$final" "$rapid_start_stop_gate"' not in body:
+    raise SystemExit("iOS DNS case passes the wrong rapid start/stop selector")
 if "mobile-ios-smoke.sh" in body or "run_ios_exit_dns_shipped_ui_case_gate" in body:
     raise SystemExit("iOS DNS case retains a duplicate debug/diagnostic path")
 release = open(sys.argv[2], encoding="utf-8").read()

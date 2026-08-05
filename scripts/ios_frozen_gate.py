@@ -396,6 +396,7 @@ def validate_mobile_join_receipt(
     require(
         receipt.get("schema") == 1
         and receipt.get("platform") == "mobile"
+        and receipt.get("coverageScope") == "android-ios-mobile-only"
         and receipt.get("publicUiOnly") is True
         and receipt.get("productionImageImportQr") is False
         and receipt.get("iosJoinTestVariant") is True
@@ -406,7 +407,6 @@ def validate_mobile_join_receipt(
         and isinstance(receipt.get("actualRenderedQrScreenCapture"), dict)
         and receipt.get("privateAppStateRead") is False
         and receipt.get("appLaunchArgumentsOrEnvironment") is False
-        and receipt.get("desktopMobileManual") is True
         and receipt.get("deliveryDeadlineMilliseconds") == 15_000,
         "iOS gate seal received a non-strict mobile join receipt",
     )
@@ -565,12 +565,19 @@ def validate_mobile_network_receipt(
         if mode == "wireguard-dns"
         else {"automatic-profile"}
     )
+    covered_modes = receipt.get("coveredModes")
+    allowed_covered_modes = [None, [mode]]
+    if mode == "wireguard-dns":
+        allowed_covered_modes.append(
+            ["wireguard-dns", "underlay-lifecycle"]
+        )
     identity = receipt.get("artifactIdentity")
     require(
         receipt.get("receiptSchema") == 1
         and receipt.get("artifactType") == f"physical ios Release {mode} gate"
         and receipt.get("platform") == "ios"
         and receipt.get("mode") == mode
+        and covered_modes in allowed_covered_modes
         and receipt.get("appGitSha") == mobile_artifact.get("appGitSha")
         and receipt.get("appGitTree") == mobile_artifact.get("appGitTree")
         and receipt.get("fipsGitSha") == mobile_artifact.get("fipsGitSha")
@@ -620,7 +627,10 @@ def validate_mobile_network_receipt(
             support.get("rapidStartStopCycles") == 8,
             "iOS WireGuard/DNS receipt lacks eight rapid start/stop cycles",
         )
-    else:
+    if mode == "underlay-lifecycle" or covered_modes == [
+        "wireguard-dns",
+        "underlay-lifecycle",
+    ]:
         cycles = support.get("underlayCycles")
         cycle = cycles[0] if isinstance(cycles, list) and len(cycles) == 1 else {}
         process_counts = cycle.get("processIdentifierCounts", {})

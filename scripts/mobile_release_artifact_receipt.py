@@ -263,20 +263,10 @@ def build_join_summary(args: argparse.Namespace) -> None:
             "mobile QR lifecycle or iPhone directional relaunch evidence "
             "is incomplete"
         )
-    desktop_enabled = args.desktop_mode.lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    if not desktop_enabled:
-        raise ValueError(
-            "complete mobile release join requires desktop/mobile coverage"
-        )
-
     result = {
         "schema": 1,
         "platform": "mobile",
+        "coverageScope": "android-ios-mobile-only",
         "harnessGitSha": harness_head,
         "harnessGitTree": harness_tree,
         "artifact": {
@@ -344,7 +334,6 @@ def build_join_summary(args: argparse.Namespace) -> None:
             "pixelAdminIphoneJoinerRelaunchDurable": True,
         },
         "deliveryMilliseconds": timings,
-        "desktopMobileManual": desktop_enabled,
     }
     pathlib.Path(args.summary).write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n",
@@ -776,7 +765,6 @@ def parser() -> argparse.ArgumentParser:
         "ios_qr_relaunch_durable",
         "ios_admin_manual_relaunch_durable",
         "ios_joiner_manual_relaunch_durable",
-        "desktop_mode",
     ):
         summary.add_argument(f"--{name.replace('_', '-')}", required=True)
 
