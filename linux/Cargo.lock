@@ -1874,9 +1874,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.4.53"
+version = "0.4.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01294b3aa23edc1a2b770df29a8526f3e1725c1338cfd786616772eec39c8136"
+checksum = "d012825ab6024ee7f042c01879ac8a3268e39cd40a4702173ffccdb26b2469cf"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -1918,9 +1918,9 @@ dependencies = [
 
 [[package]]
 name = "fips-endpoint"
-version = "0.4.53"
+version = "0.4.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b23535c68d873c53004179ba6b46c086c2993d20fa69c373cf009775afdc724"
+checksum = "04cdeb99b20b067812e767c746493d09830a170a1781190e995629f57ce1b218"
 dependencies = [
  "fips-core",
 ]
