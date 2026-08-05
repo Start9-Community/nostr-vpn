@@ -232,8 +232,8 @@ rg -q 'does not sell, use, or disclose VPN data to third parties' \
   "$ROOT/docs/privacy/index.html" \
   || fail "the privacy policy omits the VPN data-use commitment"
 for plist in "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"; do
-  [[ "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$plist")" == "true" ]] \
-    || fail "industry-standard VPN cryptography is incorrectly declared exempt"
+  [[ "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$plist")" == "false" ]] \
+    || fail "the no-France build must declare export-exempt encryption"
 done
 rg -q '"unrestrictedWebAccess": False' "$ROOT/scripts/appstore-draft" \
   || fail "App Store metadata incorrectly declares an in-app unrestricted browser"
