@@ -2,9 +2,10 @@
 
 set -Eeuo pipefail
 
-ROOT="$(cd "${NVPN_IOS_RELEASE_SOURCE_ROOT:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+HARNESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "${NVPN_IOS_RELEASE_SOURCE_ROOT:-$HARNESS_ROOT}" && pwd)"
 # shellcheck disable=SC1091
-source "$ROOT/scripts/release_common.sh"
+source "$HARNESS_ROOT/scripts/release_common.sh"
 
 load_release_env "$ROOT"
 if [[ -n "${NVPN_IOS_ASC_ROOT:-}" && -z "${NVPN_ASC_ROOT:-}" ]]; then
@@ -32,7 +33,7 @@ FROZEN_DESKTOP_MOBILE_JOIN_RECEIPT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifa
 FROZEN_MOBILE_WG_RECEIPT="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT/artifacts/release-gate-logs}/mobile-network/ios-wireguard-dns.json"
 FROZEN_MOBILE_UNDERLAY_RECEIPT="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT/artifacts/release-gate-logs}/mobile-network/ios-underlay-lifecycle.json"
 FROZEN_GATE_SEAL="$FROZEN_DIR/physical-gate-seal.json"
-FROZEN_TOOL="$ROOT/scripts/ios_frozen_archive.py"
+FROZEN_TOOL="$HARNESS_ROOT/scripts/ios_frozen_archive.py"
 PROJECT="$IOS_DIR/NostrVpnIos.xcodeproj"
 SCHEME="${NVPN_IOS_SCHEME:-NostrVpnIos}"
 CONFIGURATION="${NVPN_IOS_CONFIGURATION:-Release}"
@@ -106,7 +107,7 @@ run_ios_project() {
 
 ensure_profiles() {
   ensure_dir "$DIST_DIR"
-  NVPN_IOS_PROFILES_ENV_PATH="$PROVISIONING_ENV" "$ROOT/scripts/ios-profiles" ensure
+  NVPN_IOS_PROFILES_ENV_PATH="$PROVISIONING_ENV" "$HARNESS_ROOT/scripts/ios-profiles" ensure
 }
 
 write_export_options() {
@@ -553,7 +554,7 @@ run_ios_attach_internal() {
   # internal-testers' TestFlight app — the entire reason we ran the upload.
   # Polls for this release's exact build number, then attaches it to the
   # internal-testers group.
-  "$ROOT/scripts/testflight-internal" put
+  "$HARNESS_ROOT/scripts/testflight-internal" put
 }
 
 run_ios_testflight() {

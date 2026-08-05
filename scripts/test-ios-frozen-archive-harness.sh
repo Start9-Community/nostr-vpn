@@ -1210,8 +1210,15 @@ if 'BUNDLE_ID" == "$NVPN_BUILTIN_IOS_BUNDLE_ID' not in ios_build:
     raise SystemExit("frozen archive permits non-production app identifiers")
 if 'NVPN_APP_VERSION_NAME" == "$source_version' not in ios_build:
     raise SystemExit("frozen archive permits an untracked marketing version")
-if 'NVPN_IOS_RELEASE_SOURCE_ROOT:-$(dirname' not in ios_build:
+if 'NVPN_IOS_RELEASE_SOURCE_ROOT:-$HARNESS_ROOT' not in ios_build:
     raise SystemExit("current iOS harness cannot operate on exact product source")
+for current_tool in (
+    'source "$HARNESS_ROOT/scripts/release_common.sh"',
+    'FROZEN_TOOL="$HARNESS_ROOT/scripts/ios_frozen_archive.py"',
+    '"$HARNESS_ROOT/scripts/ios-profiles" ensure',
+):
+    if current_tool not in ios_build:
+        raise SystemExit("exact product export uses historical release tooling")
 if (
     '--mobile-join-ios-variant-receipt \\\n'
     '      "$FROZEN_MOBILE_JOIN_IOS_VARIANT_RECEIPT"'
