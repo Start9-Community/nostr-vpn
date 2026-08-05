@@ -59,6 +59,7 @@ const harnessOnlyPaths = new Set([
   'scripts/macos_release_join_artifact.py',
   'scripts/prepare-macos-release-fips-peer.sh',
   'scripts/release-network-evidence.py',
+  'scripts/release-source-verification.mjs',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
   'scripts/verify-host-linux-peer-artifact.py',
