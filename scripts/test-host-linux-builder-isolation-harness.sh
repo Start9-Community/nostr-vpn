@@ -10,6 +10,14 @@ fail() {
   exit 1
 }
 
+acquire_test_lock() {
+  case "$(uname -s)" in
+    Darwin) /usr/bin/lockf "$1" ;;
+    Linux) flock "$1" ;;
+    *) fail "unsupported lock platform: $(uname -s)" ;;
+  esac
+}
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-linux-builder-isolation.XXXXXX")"
 TEST_CONTAINER_NAME=""
 TEST_CACHE_ID=""
@@ -39,7 +47,7 @@ trap cleanup EXIT
 
 fake_builder() (
   exec 9>"$TMP_ROOT/build.lock"
-  /usr/bin/lockf 9
+  acquire_test_lock 9
   if [[ -f "$TMP_ROOT/receipt" ]]; then
     printf 'reused\n' >>"$TMP_ROOT/results"
     exit 0
@@ -79,7 +87,7 @@ assert_cancelled_waiter_does_not_cleanup() {
   (
     trap 'exit 0' TERM
     exec 8>"$lock"
-    /usr/bin/lockf 8
+    acquire_test_lock 8
     : >"$holder_ready"
     while :; do
       sleep 0.1
@@ -104,7 +112,7 @@ assert_cancelled_waiter_does_not_cleanup() {
       exit 143
     ' TERM
     exec 9>"$lock"
-    /usr/bin/lockf 9
+    acquire_test_lock 9
     lock_held=1
     : >"$acquired_marker"
   ) >/dev/null 2>&1 &
