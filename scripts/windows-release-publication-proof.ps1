@@ -161,7 +161,26 @@ try {
     Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
 }
 
-Compress-Archive -Path (
-    Join-Path $tempDir '*'
-) -DestinationPath $ArchivePath -Force
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+Remove-Item -Force $ArchivePath -ErrorAction SilentlyContinue
+$archive = [IO.Compression.ZipFile]::Open(
+    $ArchivePath,
+    [IO.Compression.ZipArchiveMode]::Create
+)
+try {
+    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+        $archive,
+        (Join-Path $tempDir 'nvpn.exe'),
+        'nvpn.exe',
+        [IO.Compression.CompressionLevel]::Optimal
+    ) | Out-Null
+    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+        $archive,
+        (Join-Path $tempDir 'binaries\wintun.dll'),
+        'binaries/wintun.dll',
+        [IO.Compression.CompressionLevel]::Optimal
+    ) | Out-Null
+} finally {
+    $archive.Dispose()
+}
 Remove-Item -Recurse -Force $tempDir

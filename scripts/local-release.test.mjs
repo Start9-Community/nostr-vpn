@@ -3398,9 +3398,10 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
   const cliSnapshot = proof.indexOf(
     "Copy-Item -LiteralPath $files.cli",
   )
-  const archive = proof.indexOf('Compress-Archive -Path (')
+  const archive = proof.indexOf('[IO.Compression.ZipFile]::Open(')
   assert.ok(cliSnapshot > hashCheck && install > cliSnapshot)
   assert.ok(archive > install)
+  assert.match(proof, /CreateEntryFromFile\([\s\S]*?'binaries\/wintun\.dll'/)
   assert.match(proof, /Join-Path \$env:TEMP "nvpn-publication-payload-proof-\$proofId"/)
   assert.doesNotMatch(proof, /Join-Path \$ArtifactRoot 'publication-payload-proof'/)
   assert.match(proof, /install directory overlaps the gated publish directory/)
