@@ -32,6 +32,16 @@ cleanup = host.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
 if "remote cleanup" not in cleanup or "remote_app_ownership_armed" not in cleanup:
     raise SystemExit("host cleanup is not conditional on remote app ownership")
 
+for required in (
+    'NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS:-all',
+    'all|pixel)',
+    'if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then',
+    "release_join_validate_reused_android_only",
+    '"selectedDirections": selected',
+):
+    if required not in host:
+        raise SystemExit(f"macOS/mobile direction selector lacks {required}")
+
 directions = (
     ("macOS admin -> physical Android joiner.", "macos-admin-pixel-joiner"),
     ("Physical Android admin -> macOS joiner.", "pixel-admin-macos-joiner"),

@@ -37,6 +37,10 @@ run_ps() {
   "${SSH_CMD[@]}" powershell.exe -NoProfile -EncodedCommand "$encoded"
 }
 
+consent_state() {
+  run_ps "if (Get-Process consent -ErrorAction SilentlyContinue) { Write-Output 'NVPN_CONSENT_PRESENT' } else { Write-Output 'NVPN_CONSENT_CLOSED' }"
+}
+
 case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
   *) "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST" ;;
@@ -82,16 +86,39 @@ if (!(Test-Path (Join-Path \$artifact 'window.png'))) {
   throw 'Windows service-toggle UI window artifact was not created'
 }" &
 interactive_pid="$!"
+consent_cancel_failed=0
 while kill -0 "$interactive_pid" >/dev/null 2>&1; do
-  if run_ps "if (Get-Process consent -ErrorAction SilentlyContinue) { exit 0 }; exit 1" \
-    >/dev/null 2>&1
-  then
+  state="$(consent_state 2>/dev/null)" || {
+    sleep 0.1
+    continue
+  }
+  if [[ "$state" == *NVPN_CONSENT_PRESENT* ]]; then
     ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
       virsh send-key "$VM_NAME" KEY_ESC
+    consent_deadline=$((SECONDS + 10))
+    while ((SECONDS < consent_deadline)); do
+      state="$(consent_state 2>/dev/null)" || {
+        echo "Windows UAC close state could not be queried" >&2
+        consent_cancel_failed=1
+        break 2
+      }
+      if [[ "$state" == *NVPN_CONSENT_CLOSED* ]]; then
+        break 2
+      fi
+      sleep 0.1
+    done
+    echo "Windows UAC consent prompt survived VM-console cancellation" >&2
+    consent_cancel_failed=1
     break
   fi
   sleep 0.1
 done
+set +e
 wait "$interactive_pid"
+interactive_status=$?
+set -e
+if ((consent_cancel_failed != 0 || interactive_status != 0)); then
+  exit 1
+fi
 
 echo "WINDOWS_VM_SERVICE_TOGGLE_E2E_OK"

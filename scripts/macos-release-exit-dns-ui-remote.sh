@@ -27,6 +27,7 @@ EXPECTED_FIPS_VERSION="${NVPN_EXPECTED_FIPS_VERSION:-}"
 EXPECTED_IDENTITY="${NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1:-}"
 EXPECTED_TEAM="${NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID:-}"
 EXPECTED_SIGNER="${NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256:-}"
+EXPECTED_IMPORT_VERIFICATION_SHA256="${NVPN_EXPECTED_MACOS_IMPORT_VERIFICATION_SHA256:-}"
 CANONICAL_DATA="$HOME/Library/Application Support/nvpn"
 BACKUP_ROOT="/tmp/nvpn-macos-exit-dns-profile-backup"
 INSTALLED_APP_PATH="/Applications/Nostr VPN.app"
@@ -145,7 +146,15 @@ launch_app() {
 }
 
 verify_artifacts() {
-  "$ROOT/scripts/macos-release-mobile-join-remote.sh" verify-import >/dev/null
+  [[ "$EXPECTED_IMPORT_VERIFICATION_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "exact external import-verification digest is required" >&2
+    return 1
+  }
+  [[ "$(shasum -a 256 "$IMPORT_VERIFICATION" | awk '{ print $1 }')" \
+    == "$EXPECTED_IMPORT_VERIFICATION_SHA256" ]] || {
+    echo "import-verification receipt differs from the controller evidence" >&2
+    return 1
+  }
   python3 "$ROOT/scripts/macos_exit_dns_ui_receipt.py" validate-driver \
     --receipt "$DRIVER_RECEIPT" \
     --verification-output "$DRIVER_VERIFICATION" \

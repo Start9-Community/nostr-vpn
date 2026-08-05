@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Build/cache the exact Linux peer used by the macos-utm Release roaming gate.
-# This runs on the host Mac. The exclusive VM lane only verifies and imports
-# the resulting immutable x86_64-musl artifact.
+# Prepare the exact Linux peer used by the macos-utm Release roaming gate.
+# A strictly verified cached remote-Linux artifact may be reused; otherwise
+# this host builds the immutable x86_64-musl artifact locally.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

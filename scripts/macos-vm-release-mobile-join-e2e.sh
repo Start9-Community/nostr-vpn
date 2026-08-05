@@ -30,6 +30,14 @@ case "$ARTIFACT_ACTION" in
     exit 2
     ;;
 esac
+MACOS_MOBILE_DIRECTIONS="${NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS:-all}"
+case "$MACOS_MOBILE_DIRECTIONS" in
+  all|pixel) ;;
+  *)
+    echo "Unsupported NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS=$MACOS_MOBILE_DIRECTIONS (expected all or pixel)" >&2
+    exit 2
+    ;;
+esac
 MACOS_RUST_PROFILE="${NVPN_MACOS_RUST_PROFILE:-release}"
 MACOS_XCODE_CONFIGURATION="${NVPN_MACOS_XCODE_CONFIGURATION:-Release}"
 if [[ "$MACOS_RUST_PROFILE" != "release" \
@@ -644,7 +652,7 @@ prepare_host_sources() {
 }
 
 if [[ "$ARTIFACT_ACTION" == "full" || "$ARTIFACT_ACTION" == "run-only" ]]; then
-  [[ -n "${IOS_DEVICE:-}" ]] || {
+  [[ "$MACOS_MOBILE_DIRECTIONS" == "pixel" || -n "${IOS_DEVICE:-}" ]] || {
     echo "macOS/mobile Release join gate requires IOS_DEVICE" >&2
     exit 2
   }
@@ -652,10 +660,17 @@ if [[ "$ARTIFACT_ACTION" == "full" || "$ARTIFACT_ACTION" == "run-only" ]]; then
     echo "macOS/mobile Release join gate requires exact artifact reuse" >&2
     exit 2
   }
-  release_join_validate_reused_artifacts || {
-    echo "macOS/mobile Release join gate rejected the exact mobile artifacts" >&2
-    exit 1
-  }
+  if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then
+    release_join_validate_reused_artifacts || {
+      echo "macOS/mobile Release join gate rejected the exact mobile artifacts" >&2
+      exit 1
+    }
+  else
+    release_join_validate_reused_android_only || {
+      echo "macOS/Pixel join gate rejected the exact Android artifact" >&2
+      exit 1
+    }
+  fi
   ANDROID_ARTIFACT_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_RECEIPT:-}"
   ANDROID_INSTALL_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT:-$RESULT_DIR/android-release-install.json}"
   [[ -s "$ANDROID_ARTIFACT_RECEIPT" \
@@ -760,6 +775,12 @@ release_join_assert_one_android_package || {
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
 export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 rm -f "$RESULT_DIR/macos/delivery-times.tsv"
+macos_admin_android_status=0
+android_admin_macos_status=0
+macos_admin_ios_status=0
+ios_admin_macos_status=0
+DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=0
+IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE=0
 
 # macOS admin -> physical Android joiner.
 set +e
@@ -897,6 +918,7 @@ if ((android_admin_macos_status != 0)); then
 fi
 finish_macos_mobile_direction pixel-admin-macos-joiner
 
+if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then
 # macOS admin -> physical iPhone joiner. XCTest only drives the shipped
 # accessibility tree; the app receives no launch arguments or environment.
 set +e
@@ -1093,6 +1115,7 @@ fi
 finish_macos_mobile_direction iphone-admin-macos-joiner
 release_join_launch_ios_release
 release_join_assert_one_ios_process
+fi
 
 if ((macos_admin_android_status != 0 \
   || android_admin_macos_status != 0 \
@@ -1106,13 +1129,14 @@ python3 - \
   "$RESULT_DIR/macos/summary.json" \
   "$RESULT_DIR/macos/delivery-times.tsv" \
   "$RESULT_DIR/macos/artifact.json" \
-  "$NVPN_RELEASE_JOIN_IOS_RECEIPT" \
+  "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact retained iOS receipt is required}" \
   "$DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE" \
   "$IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE" \
   "$APP_GIT_SHA" \
   "$APP_GIT_TREE" \
   "$ANDROID_ARTIFACT_RECEIPT" \
-  "$ANDROID_INSTALL_RECEIPT" <<'PY'
+  "$ANDROID_INSTALL_RECEIPT" \
+  "$MACOS_MOBILE_DIRECTIONS" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -1122,12 +1146,18 @@ timings = {}
 for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines():
     label, elapsed = line.split("\t")
     timings[label] = int(elapsed)
-expected_timings = {
+all_timings = {
     "macOS-admin-to-Android-manual",
     "Android-admin-to-macOS-manual",
     "macOS-admin-to-iPhone-manual",
     "iPhone-admin-to-macOS-manual",
 }
+pixel_timings = {
+    "macOS-admin-to-Android-manual",
+    "Android-admin-to-macOS-manual",
+}
+selected = sys.argv[11]
+expected_timings = all_timings if selected == "all" else pixel_timings
 if set(timings) != expected_timings or any(
     elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
 ):
@@ -1144,7 +1174,7 @@ ios_artifact = json.loads(ios_artifact_path.read_text(encoding="utf-8"))
     app_tree,
     android_artifact_receipt_name,
     android_install_receipt_name,
-) = sys.argv[5:]
+) = sys.argv[5:11]
 android_artifact_receipt = pathlib.Path(android_artifact_receipt_name)
 android_install_receipt = pathlib.Path(android_install_receipt_name)
 android_artifact = json.loads(
@@ -1153,7 +1183,7 @@ android_artifact = json.loads(
 android_install = json.loads(
     android_install_receipt.read_text(encoding="utf-8")
 )
-if (
+if selected == "all" and (
     desktop_admin_iphone_joiner_relaunch != "1"
     or iphone_admin_desktop_joiner_relaunch != "1"
 ):
@@ -1257,18 +1287,19 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             "privateStateRead": False,
             "fixtureInvoked": False,
             "acceptedSelectorSemantics": "participant-state-not-pending",
+            "selectedDirections": selected,
             "desktopAdminAndroidJoiner": True,
             "androidAdminDesktopJoiner": True,
-            "desktopAdminIphoneJoiner": True,
-            "iphoneAdminDesktopJoiner": True,
+            "desktopAdminIphoneJoiner": selected == "all",
+            "iphoneAdminDesktopJoiner": selected == "all",
             "exactRosterOnBothSides": True,
             "acceptedRosterRetainedAcrossRelaunch": True,
             "desktopRelaunchDurability": True,
             "pixelRelaunchDurability": True,
             "desktopAdminIphoneJoinerRelaunchDurable":
-                desktop_admin_iphone_joiner_relaunch == "1",
+                selected == "all" and desktop_admin_iphone_joiner_relaunch == "1",
             "iphoneAdminDesktopJoinerRelaunchDurable":
-                iphone_admin_desktop_joiner_relaunch == "1",
+                selected == "all" and iphone_admin_desktop_joiner_relaunch == "1",
             "deliveryDeadlineMilliseconds": 15_000,
             "deliveryMilliseconds": timings,
         },

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the immutable host-built Linux peer receipt used by release gates."""
+"""Verify the immutable Linux peer receipt used by release gates."""
 
 from __future__ import annotations
 

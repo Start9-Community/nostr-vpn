@@ -227,6 +227,9 @@ wrapper_contracts = {
     "macos-vm-desktop-daemon-idle-e2e.sh": (
         "NVPN_MACOS_VM_IMPORT_ONLY=1",
         "NVPN_E2E_BINARY=",
+        'REMOTE_RESULT="artifacts/macos-daemon-idle-cpu.json"',
+        'REMOTE_RESULT_SCP="$GUEST_REPO/$REMOTE_RESULT"',
+        'scp -q "$SSH_HOST:$REMOTE_RESULT_SCP"',
     ),
 }
 for name, required_values in wrapper_contracts.items():

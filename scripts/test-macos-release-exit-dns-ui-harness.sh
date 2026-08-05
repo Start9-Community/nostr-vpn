@@ -25,6 +25,8 @@ host, remote, driver, receipt = [
 ]
 for required in (
     "macos_vm_prepare_or_verify_imported_release",
+    "NVPN_EXPECTED_MACOS_IMPORT_VERIFICATION_SHA256",
+    'shasum -a 256 "$IMPORT_VERIFICATION"',
     "xcrun swiftc -O",
     "codesign --force --timestamp --options runtime",
     "create-driver",
@@ -51,6 +53,8 @@ for required in (
     "restore_profile",
     "validate-driver",
     "create-case",
+    "EXPECTED_IMPORT_VERIFICATION_SHA256",
+    'shasum -a 256 "$IMPORT_VERIFICATION"',
 ):
     if required not in remote:
         raise SystemExit(f"macOS DNS VM runner lacks {required}")
@@ -64,6 +68,8 @@ for prohibited in (
         raise SystemExit(f"macOS DNS VM runner reads/injects private state: {prohibited}")
 if re.search(r'(?m)^\s*"\$APP_EXE"(?:\s|$)', remote):
     raise SystemExit("macOS DNS VM runner executes the bundle binary directly")
+if "macos-release-mobile-join-remote.sh\" verify-import" in remote:
+    raise SystemExit("macOS DNS VM runner redundantly re-runs import verification")
 for required in (
     "exit-dns-mode",
     "exit-dns-provider",

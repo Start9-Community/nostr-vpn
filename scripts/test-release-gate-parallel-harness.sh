@@ -603,6 +603,11 @@ grep -Fq 'Get-Process consent' "$windows_service_wrapper" \
   || fail "Windows service-toggle VM runner does not observe the real UAC process"
 grep -Fq 'virsh send-key "$VM_NAME" KEY_ESC' "$windows_service_wrapper" \
   || fail "Windows service-toggle VM runner cannot cancel the secure-desktop prompt"
+grep -Fq 'consent_cancel_failed=1' "$windows_service_wrapper" \
+  && grep -Fq 'wait "$interactive_pid"' "$windows_service_wrapper" \
+  && grep -Fq 'NVPN_CONSENT_CLOSED' "$windows_service_wrapper" \
+  && grep -Fq 'Windows UAC close state could not be queried' "$windows_service_wrapper" \
+  || fail "Windows UAC cancellation failure abandons its interactive cleanup"
 windows_manual_join="$ROOT_DIR/scripts/e2e-windows-manual-join-ui.ps1"
 grep -Fq 'SetThreadExecutionState(2147483651)' "$windows_manual_join" \
   || fail "Windows manual-join evidence does not hold the interactive display awake"
@@ -619,6 +624,12 @@ import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+consent_wait = text.index('$ConsentCloseDeadline = (Get-Date).AddSeconds(20)')
+requester_stop = text.index(
+    'Stop-Process -Id $ElevationProcess.ProcessId -Force -ErrorAction SilentlyContinue'
+)
+if consent_wait > requester_stop:
+    raise SystemExit("Windows UAC requester is killed before console cancellation")
 toggle = text.index("$Toggle = $null")
 foreground = text.index("[NvpnServiceToggleInput]::SetForegroundWindow(")
 capture = text.index("$ScreenshotGraphics.CopyFromScreen(")

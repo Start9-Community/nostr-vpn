@@ -9,7 +9,8 @@ source "$ROOT/scripts/lib-macos-vm-imported-release.sh"
 SSH_HOST="${NVPN_MACOS_SSH_HOST:-${1:-}}"
 GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
-REMOTE_RESULT="$GUEST_REPO/artifacts/macos-daemon-idle-cpu.json"
+REMOTE_RESULT="artifacts/macos-daemon-idle-cpu.json"
+REMOTE_RESULT_SCP="$GUEST_REPO/$REMOTE_RESULT"
 LOCAL_RESULT="${ARTIFACT_ROOT:-$ROOT/artifacts}/macos-daemon-idle-cpu.json"
 [[ -n "$SSH_HOST" ]] || {
   echo "set NVPN_MACOS_SSH_HOST or pass the macOS VM SSH target" >&2
@@ -35,5 +36,5 @@ remote_command+=" ./scripts/e2e-macos-service.sh"
 
 ssh -o BatchMode=yes "$SSH_HOST" "$remote_command"
 mkdir -p "$(dirname "$LOCAL_RESULT")"
-scp -q "$SSH_HOST:$REMOTE_RESULT" "$LOCAL_RESULT"
+scp -q "$SSH_HOST:$REMOTE_RESULT_SCP" "$LOCAL_RESULT"
 echo "MACOS_VM_DAEMON_IDLE_CPU_E2E_OK"

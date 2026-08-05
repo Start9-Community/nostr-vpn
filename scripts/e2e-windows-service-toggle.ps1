@@ -195,17 +195,17 @@ public static class NvpnServiceToggleInput {
     throw "VPN toggle did not open a Windows UAC consent prompt"
   }
 
-  # Kill the unelevated requester without approving or installing anything.
-  # The VM host runner owns secure-desktop cancellation because the
-  # intentionally limited GUI task cannot send input to that desktop itself.
-  Stop-Process -Id $ElevationProcess.ProcessId -Force -ErrorAction Stop
-  $ConsentCloseDeadline = (Get-Date).AddSeconds(5)
+  # The VM host owns secure-desktop cancellation. Keep the requester alive
+  # until its Escape has closed consent, so console input cannot race into the
+  # ordinary desktop after this runner tears the prompt down itself.
+  $ConsentCloseDeadline = (Get-Date).AddSeconds(20)
   while ((Get-Date) -lt $ConsentCloseDeadline -and (Get-Process consent -ErrorAction SilentlyContinue)) {
     Start-Sleep -Milliseconds 100
   }
   if (Get-Process consent -ErrorAction SilentlyContinue) {
-    throw "Windows UAC consent prompt survived requester cancellation"
+    throw "Windows UAC consent prompt was not cancelled through the VM console"
   }
+  Stop-Process -Id $ElevationProcess.ProcessId -Force -ErrorAction SilentlyContinue
   if (Get-Service NvpnService -ErrorAction SilentlyContinue) {
     throw "service-toggle prompt test unexpectedly installed the nvpn service"
   }

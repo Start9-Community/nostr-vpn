@@ -329,3 +329,15 @@ release_join_validate_reused_artifacts() {
   export RELEASE_JOIN_ARTIFACTS_VALIDATED
   echo "Exact Android and iOS Release artifacts validated before device mutation"
 }
+
+release_join_validate_reused_android_only() {
+  release_join_reuse_artifacts || return 1
+  release_join_load_reused_artifact_sources || return 1
+  release_join_validate_android_reuse || return 1
+  release_join_assert_fips_unchanged || return 1
+  release_join_assert_app_unchanged \
+    "$APP_GIT_SHA" "$APP_GIT_TREE" || return 1
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  export RELEASE_JOIN_ARTIFACTS_VALIDATED
+  echo "Exact Android Release artifact validated before Pixel mutation"
+}

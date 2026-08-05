@@ -61,7 +61,7 @@ printf 'fail:37\n' >"$REMOTE_DIR/underlay.status"
 [[ "$(poll_remote_underlay_status)" == "fail:37" ]]
 BASH
 
-require_tokens "$HOST_PREP" "host-only immutable peer preparation" \
+require_tokens "$HOST_PREP" "strict immutable peer preparation" \
   '[[ "$(uname -s)" == "Darwin" ]]' \
   'x86_64-unknown-linux-musl' \
   'build-nvpn-linux-musl' \
@@ -84,11 +84,11 @@ require_tokens "$CONTROLLER" "host import and exact receipts" \
   'requires a reachable numeric IPv4 WireGuard endpoint' \
   'FIPS_FIXTURE_HOST=' \
   'remote FIPS peer must use its separate numeric IPv6 address' \
-  'prepare_host_fips_peer_binary' \
-  'fips-peer-host-receipt.json' \
+  'prepare_fips_peer_binary' \
+  'fips-peer-artifact-receipt.json' \
   'import_host_fips_peer_binary' \
   'mktemp -d /tmp/nvpn-macos-fips-peer.XXXXXX' \
-  'Vader peer binary differs from the host-built immutable artifact' \
+  'Vader peer binary differs from the verified immutable artifact' \
   'NVPN_MACOS_FIPS_PEER_BINARY_SHA256' \
   '"NVPN_MACOS_FIPS_PEER_BINARY=$FIPS_PEER_REMOTE_DIR/nvpn"' \
   '"$fixture_ssh:$FIPS_PEER_REMOTE_DIR/nvpn"' \
@@ -103,6 +103,57 @@ require_tokens "$CONTROLLER" "host import and exact receipts" \
   'poll_remote_underlay_status' \
   'macOS SIGKILL/restart WireGuard bytes' \
   'fips-peer-after-crash-restart.json'
+
+PEER_BINARY="$TMP_ROOT/remote-peer"
+PEER_RECEIPT="$TMP_ROOT/remote-peer.json"
+printf '#!/bin/sh\nexit 0\n' >"$PEER_BINARY"
+chmod 0555 "$PEER_BINARY"
+python3 - "$PEER_BINARY" "$PEER_RECEIPT" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+binary = pathlib.Path(sys.argv[1])
+receipt = pathlib.Path(sys.argv[2])
+receipt.write_text(json.dumps({
+    "schema": 1,
+    "builtOnHostMac": False,
+    "builtOnRemoteVm": True,
+    "builtOnMacosUtm": False,
+    "buildExecutionHostClass": "remote-linux-builder",
+    "appGitSha": "a" * 40,
+    "appGitTree": "b" * 40,
+    "fipsGitSha": "c" * 40,
+    "fipsGitTree": "d" * 40,
+    "fipsVersion": "0.4.54",
+    "target": "x86_64-unknown-linux-musl",
+    "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+    "binarySize": binary.stat().st_size,
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
+  "$PEER_RECEIPT" "$PEER_BINARY" \
+  "$(printf 'a%.0s' {1..40})" "$(printf 'b%.0s' {1..40})" \
+  "$(printf 'c%.0s' {1..40})" "$(printf 'd%.0s' {1..40})" \
+  0.4.54 x86_64-unknown-linux-musl
+python3 - "$PEER_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+receipt = json.loads(path.read_text(encoding="utf-8"))
+del receipt["builtOnRemoteVm"]
+path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+PY
+if python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
+  "$PEER_RECEIPT" "$PEER_BINARY" \
+  "$(printf 'a%.0s' {1..40})" "$(printf 'b%.0s' {1..40})" \
+  "$(printf 'c%.0s' {1..40})" "$(printf 'd%.0s' {1..40})" \
+  0.4.54 x86_64-unknown-linux-musl 2>/dev/null
+then
+  fail "contradictory remote-builder receipt was accepted"
+fi
 require_tokens "$REMOTE_PEER" "owned unique production peer" \
   'EXPECTED_BINARY_SHA256' \
   'EXPECTED_APP_SHA' \

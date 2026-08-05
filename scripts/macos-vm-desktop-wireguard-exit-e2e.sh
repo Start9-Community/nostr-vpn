@@ -323,18 +323,18 @@ discover_remote_fixture_ipv4() {
   '
 }
 
-prepare_host_fips_peer_binary() {
+prepare_fips_peer_binary() {
   FIPS_PEER_BINARY="$("$ROOT/scripts/prepare-macos-release-fips-peer.sh")"
   [[ "$FIPS_PEER_BINARY" == /* && -x "$FIPS_PEER_BINARY" ]] \
-    || fail "host FIPS peer cache returned no executable"
+    || fail "FIPS peer cache returned no executable"
   FIPS_PEER_BINARY_SHA256="$(
     shasum -a 256 "$FIPS_PEER_BINARY" | awk '{ print $1 }'
   )"
   [[ "$FIPS_PEER_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-    || fail "host FIPS peer cache returned an invalid SHA-256"
+    || fail "FIPS peer cache returned an invalid SHA-256"
   mkdir -p "$ARTIFACT_DIR"
   cp "$(dirname "$FIPS_PEER_BINARY")/receipt.json" \
-    "$ARTIFACT_DIR/fips-peer-host-receipt.json"
+    "$ARTIFACT_DIR/fips-peer-artifact-receipt.json"
 }
 
 capture_fips_peer_failure() {
@@ -412,7 +412,7 @@ import_host_fips_peer_binary() {
       sha256sum "$FIPS_PEER_REMOTE_DIR/nvpn" \
       | awk '{ print $1 }'
   )" == "$FIPS_PEER_BINARY_SHA256" ]] \
-    || fail "Vader peer binary differs from the host-built immutable artifact"
+    || fail "Vader peer binary differs from the verified immutable artifact"
   FIPS_PEER_IMPORTED=1
 }
 
@@ -452,7 +452,7 @@ release_join_assert_app_unchanged "$APP_GIT_SHA" "$APP_GIT_TREE"
 
 macos_vm_prepare_or_verify_imported_release "$ROOT" "$SSH_HOST"
 PACKAGE="$(macos_vm_imported_release_package "$GUEST_REPO")"
-prepare_host_fips_peer_binary
+prepare_fips_peer_binary
 
 if [[ -z "$FIXTURE_HOST" ]]; then
   FIXTURE_HOST="$(discover_remote_fixture_ipv4)" \
