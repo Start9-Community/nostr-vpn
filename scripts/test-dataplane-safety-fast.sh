@@ -275,9 +275,9 @@ run_nvpn_reliability() {
   run cargo_test -p nvpn fips_peer_liveness_rejects_far_future_presence
   run cargo_test -p nvpn fips_peer_ping_due_recovers_from_future_timestamps
   run cargo_test -p nvpn endpoint_config_keeps_static_transit_peers_outside_mesh_routes
-  run cargo_test -p nvpn endpoint_config_marks_default_route_peers_non_transit
-  run cargo_test -p nvpn tunnel_config_seeds_recent_outside_roster_transit_peers
-  run cargo_test -p nvpn tunnel_config_caps_recent_outside_roster_transit_peers
+  run cargo_test -p nvpn endpoint_config_keeps_default_route_roster_peers_as_transit
+  run cargo_test -p nvpn tunnel_config_seeds_recent_transit_without_granting_routes
+  run cargo_test -p nvpn tunnel_config_caps_recent_non_roster_transit_peers
   run cargo_test -p nvpn open_discovery_does_not_loosen_tun_roster_gate
 }
 
@@ -287,7 +287,7 @@ run_macos_route() {
   run cargo_test -p nvpn macos_route_parser_keeps_private_routes_via_local_underlay_gateway
   run cargo_test -p nvpn macos_route_get_rejects_private_endpoint_via_hotspot_default_gateway
   run cargo_test -p nvpn macos_route_get_keeps_private_endpoint_on_direct_lan
-  run cargo_test -p nvpn macos_route_monitor_ignores_self_host_route_churn
+  run cargo_test -p nvpn macos_route_monitor_observes_route_and_interface_changes
 }
 
 run_nvpn() {
