@@ -31,6 +31,7 @@
 
 ## Release
 
+- App Store availability: exclude France, keep China enabled, and never claim worldwide availability in metadata or review notes.
 - Before release: `just release-gate`; Linux GTK: `( cd linux && cargo check )`.
 - Bump: changelog `## X.Y.Z - YYYY-MM-DD`; root version; `node scripts/sync-versions.mjs --check`; gate.
 - Draft: `node scripts/local-release.mjs --publish`; no `v*` GitHub tag.
