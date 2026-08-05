@@ -681,6 +681,9 @@ receipt_binding_args=(
   --expected-android-fips-tree "$RELEASE_JOIN_FIPS_TREE"
   --expected-android-fips-version "$RELEASE_JOIN_FIPS_VERSION"
 )
+if [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 0 ]]; then
+  receipt_binding_args+=(--allow-verified-no-install)
+fi
 python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" create \
   --platform linux \
   "${receipt_binding_args[@]}" \

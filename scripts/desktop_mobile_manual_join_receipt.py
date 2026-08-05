@@ -398,6 +398,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         app_tree=args.expected_android_app_tree,
         fips_sha=args.expected_android_fips_sha,
         fips_tree=args.expected_android_fips_tree,
+        allow_verified_no_install=args.allow_verified_no_install,
     )
     require_regular_file(
         args.android_fips_metadata_receipt,
@@ -516,6 +517,7 @@ def add_component_binding_arguments(command: argparse.ArgumentParser) -> None:
     )
     command.add_argument("--android-apk", type=pathlib.Path, required=True)
     command.add_argument("--phase-evidence", type=pathlib.Path, required=True)
+    command.add_argument("--allow-verified-no-install", action="store_true")
     for component in ("desktop", "android"):
         command.add_argument(f"--expected-{component}-app-sha", required=True)
         command.add_argument(f"--expected-{component}-app-tree", required=True)

@@ -211,6 +211,35 @@ python3 "$VERIFIER" validate \
   --phase-evidence "$WORK/phase-linux.json" \
   "${common[@]}"
 
+cp "$WORK/android-install.json" "$WORK/android-install.replacement.json"
+python3 - "$WORK/android-install.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["replacementInstall"] = False
+value["replacementInstallVerified"] = False
+value["installedArtifactVerified"] = True
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+python3 "$VERIFIER" create \
+  --platform linux \
+  --desktop-receipt "$WORK/linux.json" \
+  --phase-evidence "$WORK/phase-linux.json" \
+  --allow-verified-no-install \
+  "${common[@]}" \
+  --output "$WORK/linux-reuse-summary.json"
+python3 "$VERIFIER" validate \
+  --platform linux \
+  --receipt "$WORK/linux-reuse-summary.json" \
+  --desktop-receipt "$WORK/linux.json" \
+  --phase-evidence "$WORK/phase-linux.json" \
+  --allow-verified-no-install \
+  "${common[@]}"
+cp "$WORK/android-install.replacement.json" "$WORK/android-install.json"
+
 expect_rejected() {
   local label="$1" phase="$2"
   if python3 "$VERIFIER" create \
