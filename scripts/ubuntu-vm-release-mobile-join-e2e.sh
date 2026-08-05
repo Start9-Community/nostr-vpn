@@ -160,6 +160,9 @@ case "${NVPN_UBUNTU_SKIP_GIT_SYNC:-0}" in
 esac
 ubuntu_vm_import_release_bundle
 import_ready=1
+# Import validation sources the product checkout's artifact helpers. Restore
+# the caller's explicit install policy before any device mutation.
+release_join_configure_install_modes
 remote ReadReceipt >"$RESULT_DIR/import/remote-bundle-receipt.json"
 cmp -s \
   "$RESULT_DIR/import/host-bundle-receipt.json" \

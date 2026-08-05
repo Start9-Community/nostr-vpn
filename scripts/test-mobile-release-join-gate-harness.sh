@@ -2,6 +2,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+python3 - "$ROOT/scripts/ubuntu-vm-release-mobile-join-e2e.sh" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+imported = source.index("ubuntu_vm_import_release_bundle\n")
+restored = source.index("release_join_configure_install_modes\n", imported)
+mutated = source.index("release_join_prepare_android_release\n", restored)
+assert imported < restored < mutated
+PY
 FILES=(
   "$ROOT/scripts/mobile-release-join-e2e.sh"
   "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
