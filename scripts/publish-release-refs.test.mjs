@@ -34,6 +34,7 @@ function successfulGate(events, { failAt = 0 } = {}) {
     call += 1
     events.push({
       mutation: false,
+      fleetProof: gateOptions.fleetProof,
       name: 'gate',
       requireTag: gateOptions.requireTag,
     })
@@ -274,6 +275,10 @@ test('exact ref publication gates every external phase and waits for exact CI', 
       .map((event) => event.requireTag),
     [false, true, true, true],
   )
+  assert.ok(
+    fake.events.filter((event) => event.name === 'gate')
+      .every((event) => event.fleetProof === options().fleetProof),
+  )
   const localTag = fake.events.find((event) => event.name === 'local-tag')
   assert.deepEqual(localTag.args, [
     'tag',
@@ -316,6 +321,48 @@ test('exact ref publication gates every external phase and waits for exact CI', 
     '-f',
     `locally_gated_release_cid=${cid}`,
   ])
+})
+
+test('exact ref publication permits omitted post-release fleet evidence', () => {
+  const fake = fakePublication()
+  const noFleet = {
+    ...options(),
+    fleetResult: '',
+    fleetManifest: '',
+    fleetInventory: '',
+    fleetProof: '',
+  }
+  publishReleaseRefs(noFleet, {
+    runCommand: fake.runCommand,
+    sleep: () => {},
+    validateGate: successfulGate(fake.events),
+  })
+
+  assert.deepEqual(mutationNames(fake.events), [
+    'github-push',
+    'htree-push',
+    'workflow-dispatch',
+  ])
+  assert.ok(
+    fake.events.filter((event) => event.name === 'gate')
+      .every((event) => event.fleetProof === undefined),
+  )
+})
+
+test('partial fleet evidence stops before any command or mutation', () => {
+  const fake = fakePublication()
+  assert.throws(
+    () => publishReleaseRefs(
+      { ...options(), fleetProof: '' },
+      {
+        runCommand: fake.runCommand,
+        sleep: () => {},
+        validateGate: successfulGate(fake.events),
+      },
+    ),
+    /must be supplied together/i,
+  )
+  assert.deepEqual(fake.events, [])
 })
 
 test('exact successful retry performs no external mutation or duplicate dispatch', () => {
