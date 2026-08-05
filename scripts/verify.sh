@@ -31,9 +31,6 @@ run_fast() {
   scripts/test-dataplane-safety-fast.sh nvpn app-state
   scripts/mobile-test-kit.sh rust
   scripts/test-mobile-platform-tools.sh
-  if [[ "${NVPN_VERIFY_FAST_WORKSPACE:-0}" == "1" ]]; then
-    cargo test --workspace
-  fi
 }
 
 build_health_args() {

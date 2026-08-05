@@ -368,9 +368,6 @@ run_release_gate_candidate_preflight() {
   fi
   node scripts/sync-versions.mjs --check
   ./scripts/check-source-file-lines.sh
-  # Fail fast before any remote artifact build. This fake-checkout harness
-  # also injects the local-FIPS session variables used later by the full gate.
-  ./scripts/test-linux-gui-e2e-lockfile-harness.sh
 }
 
 run_release_gate_static_preflight() {

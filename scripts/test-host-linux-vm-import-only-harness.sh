@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Executable contracts for exact/import-only native Linux VM bundles.
+# shellcheck disable=SC2034 # Fixture variables are read by sourced builder helpers.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

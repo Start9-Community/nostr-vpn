@@ -8,8 +8,8 @@ physical-device confidence.
 Run `just verify-fast` for each coherent change. It checks native-lab contracts,
 version parity, formatting, strict workspace/all-target
 Clippy, focused dataplane/app-state safety tests, shared mobile Rust tests, and
-platform-tool contracts. Set `NVPN_VERIFY_FAST_WORKSPACE=1` when a change also
-needs the entire workspace test suite.
+platform-tool contracts. CI runs the entire workspace test suite independently
+so it can overlap this tier.
 
 The fast tier does not reserve or mutate a VM, GUI session, simulator, or phone.
 

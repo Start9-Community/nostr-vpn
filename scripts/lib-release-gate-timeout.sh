@@ -62,6 +62,7 @@ release_gate_run_with_timeout() {
     pid=$!
     (
       sleep_pid=""
+      # shellcheck disable=SC2329 # Invoked by the watchdog signal trap.
       cleanup_watchdog_sleep() {
         if [[ -n "$sleep_pid" ]]; then
           kill "$sleep_pid" >/dev/null 2>&1 || true
@@ -72,11 +73,15 @@ release_gate_run_with_timeout() {
       sleep "$timeout_secs" &
       sleep_pid=$!
       wait "$sleep_pid" || exit 0
+      sleep_pid=""
       if kill -0 "$pid" >/dev/null 2>&1; then
         printf '%s timed out after %ss\n' "$label" "$timeout_secs" >&2
         : >"$marker"
         kill "$pid" >/dev/null 2>&1 || true
-        sleep "$kill_after_secs"
+        sleep "$kill_after_secs" &
+        sleep_pid=$!
+        wait "$sleep_pid" || exit 0
+        sleep_pid=""
         kill -9 "$pid" >/dev/null 2>&1 || true
       fi
     ) &

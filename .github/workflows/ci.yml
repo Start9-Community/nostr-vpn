@@ -16,16 +16,59 @@ env:
 jobs:
   release-tooling-contracts:
     name: Release tooling contracts
+    # Several harnesses compile tiny ownership fixtures with xcrun. Linux import
+    # contracts run independently on their native platform below.
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Test release tooling contracts
+        run: ./scripts/test-release-tooling-contracts.sh
+
+  linux-tooling-contracts:
+    name: Linux tooling (${{ matrix.contract }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        contract:
+          - host-linux-vm-import-only
+          - linux-gui-e2e-lockfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Test Linux release tooling
+        run: ./scripts/test-${{ matrix.contract }}-harness.sh
+
+  dataplane-tooling-contracts:
+    name: Dataplane tooling contracts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Test release tooling contracts
-        run: ./scripts/test-release-tooling-contracts.sh
+      - name: Test dataplane tooling
+        run: ./scripts/test-dataplane-safety-fast.sh harnesses
+
+  fleet-contracts:
+    name: Fleet rollout contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Test post-release fleet rollout
+        run: ./scripts/test-fleet-release-canary-harness.sh
 
   checks:
-    name: Lint + Tests
+    name: Lint + focused tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -43,9 +86,28 @@ jobs:
           cache-bin: false
 
       - name: Run focused verification
-        env:
-          NVPN_VERIFY_FAST_WORKSPACE: '1'
         run: ./scripts/verify.sh fast
+
+  rust-tests:
+    name: Rust workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux native dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Run workspace tests
+        run: cargo test --workspace
 
   web:
     name: Web typecheck
