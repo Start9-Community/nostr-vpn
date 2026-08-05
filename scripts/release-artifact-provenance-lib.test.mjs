@@ -59,6 +59,10 @@ test('component proof retains only unchanged platform product inputs', () => {
     assert.doesNotThrow(() => proveUnchangedPlatformInputs({
       ...args, candidateCommit: verifier.commit, candidateTree: verifier.tree,
     }))
+    const verifierTest = commit('scripts/release-source-verification.test.mjs', 'harness test')
+    assert.doesNotThrow(() => proveUnchangedPlatformInputs({
+      ...args, candidateCommit: verifierTest.commit, candidateTree: verifierTest.tree,
+    }))
     const android = commit('android/App.kt', 'product change')
     assert.throws(() => proveUnchangedPlatformInputs({
       ...args, candidateCommit: android.commit, candidateTree: android.tree,
