@@ -17,6 +17,7 @@ import {
   buildReleaseGateAttestation,
   collectReleaseGateReceipts,
   startosExactPackageValidator,
+  validateExactZipMembers,
 } from './release-artifact-provenance-lib.mjs'
 import { proveUnchangedPlatformInputs } from './release-component-source.mjs'
 
@@ -28,6 +29,37 @@ function write(path, value) {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, value)
 }
+
+test('exact ZIP validation rejects publication payload extras', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-exact-zip-'))
+  try {
+    write(join(root, 'nvpn.exe'), 'cli')
+    write(join(root, 'binaries', 'wintun.dll'), 'wintun')
+    write(join(root, 'unexpected.txt'), 'extra')
+    const exact = join(root, 'exact.zip')
+    const extra = join(root, 'extra.zip')
+    for (const [archive, members] of [
+      [exact, ['nvpn.exe', 'binaries/wintun.dll']],
+      [extra, ['nvpn.exe', 'binaries/wintun.dll', 'unexpected.txt']],
+    ]) {
+      const result = spawnSync('zip', ['-q', archive, ...members], {
+        cwd: root,
+        encoding: 'utf8',
+      })
+      assert.equal(result.status, 0, result.stderr)
+    }
+    assert.deepEqual(
+      validateExactZipMembers(exact, ['nvpn.exe', 'binaries/wintun.dll']),
+      ['binaries/wintun.dll', 'nvpn.exe'],
+    )
+    assert.throws(
+      () => validateExactZipMembers(extra, ['nvpn.exe', 'binaries/wintun.dll']),
+      /ZIP member set differs.*unexpected\.txt/,
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('component proof retains only unchanged platform product inputs', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-component-proof-'))

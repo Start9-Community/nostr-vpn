@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { createHash, X509Certificate } from 'node:crypto'
+import { createHash, randomUUID, X509Certificate } from 'node:crypto'
 import {
   cpSync,
   copyFileSync,
@@ -62,6 +62,7 @@ import {
   startosExactPackageValidator,
   validateLinuxArm64CliReceipt,
   validateWindowsInstallerGateReceipt,
+  validateExactZipMembers,
 } from './release-artifact-provenance-lib.mjs'
 import { inspectStartosReleasePackage } from './startos-release.mjs'
 import {
@@ -746,6 +747,11 @@ function pullFileFromWindowsHost({ host, remotePath, localParent, name, dryRun }
   run('scp', [...windowsSshTransportArgs(process.env), `${host}:${remoteFile}`, dest], { dryRun })
 }
 
+function pushFileToWindowsHost({ host, localPath, remotePath, dryRun }) {
+  const remoteFile = remotePath.replace(/\\/g, '/')
+  run('scp', [...windowsSshTransportArgs(process.env), localPath, `${host}:${remoteFile}`], { dryRun })
+}
+
 function buildWindowsArtifacts({
   env,
   tag,
@@ -818,8 +824,11 @@ function buildWindowsArtifacts({
   const guestPublishDir =
     env.NVPN_WINDOWS_RELEASE_PUBLISH_DIR
     || `${guestRepo}\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish`
-  const guestProofScript = env.NVPN_WINDOWS_RELEASE_PROOF_SCRIPT
-    || `${guestRepo}\\scripts\\windows-release-publication-proof.ps1`
+  const proofScriptPath = join(
+    repoRoot,
+    'scripts',
+    'windows-release-publication-proof.ps1',
+  )
   const installerName = `nostr-vpn-${tag}-windows-x64-setup.exe`
   const archiveName = `nvpn-${tag}-x86_64-pc-windows-msvc.zip`
   if (dryRun) {
@@ -878,11 +887,39 @@ function buildWindowsArtifacts({
     || `${guestArtifactRoot}\\windows-installer-gate`
   const guestInstaller = `${guestInstallerGateDir}\\${installerName}`
   const guestArchive = `${guestArtifactRoot}\\${archiveName}`
+  const guestTemp = runWindowsPowerShell(
+    host,
+    '[Console]::Out.Write($env:TEMP)',
+    { capture: true },
+  ).trim()
+  if (!/^[A-Za-z]:\\/.test(guestTemp)) {
+    throw new Error('Windows publication proof could not resolve the guest temporary directory.')
+  }
+  const proofId = randomUUID().replaceAll('-', '')
+  const guestProofDir = `${guestTemp}\\nvpn-publication-harness-${proofId}`
+  const guestProofScript = `${guestProofDir}\\windows-release-publication-proof.ps1`
+  const proofScriptSha256 = sha256FileSync(proofScriptPath)
   runWindowsPowerShell(
     host,
-    `
+    `New-Item -ItemType Directory -Force -Path ${psQuote(guestProofDir)} | Out-Null`,
+  )
+  try {
+    pushFileToWindowsHost({
+      host,
+      localPath: proofScriptPath,
+      remotePath: guestProofScript,
+      dryRun: false,
+    })
+    runWindowsPowerShell(
+      host,
+      `
 $ErrorActionPreference = 'Stop'
-& ${psQuote(guestProofScript)} \`
+$proofScript = ${psQuote(guestProofScript)}
+$proofScriptSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $proofScript).Hash.ToLowerInvariant()
+if ($proofScriptSha256 -ne ${psQuote(proofScriptSha256)}) {
+  throw 'The uploaded Windows publication proof does not match the committed host harness.'
+}
+& $proofScript \`
   -RepoPath ${psQuote(guestRepo)} \`
   -ExpectedCommit ${psQuote(receipt.appGitSha)} \`
   -ExpectedTree ${psQuote(receipt.appGitTree)} \`
@@ -897,7 +934,13 @@ $ErrorActionPreference = 'Stop'
   -ExpectedCliSha256 ${psQuote(expected.cli)} \`
   -ExpectedWintunSha256 ${psQuote(expected.wintun)}
 `,
-  )
+    )
+  } finally {
+    runWindowsPowerShell(
+      host,
+      `Remove-Item -Recurse -Force -LiteralPath ${psQuote(guestProofDir)} -ErrorAction SilentlyContinue`,
+    )
+  }
   pullFileFromWindowsHost({
     host,
     remotePath: guestArtifactRoot,
@@ -917,6 +960,10 @@ $ErrorActionPreference = 'Stop'
       'Windows exact installer changed while copying it into the publication directory.',
     )
   }
+  validateExactZipMembers(
+    archivePath,
+    ['nvpn.exe', 'binaries/wintun.dll'],
+  )
   if (
     commandOutputSha256('unzip', ['-p', archivePath, 'nvpn.exe'])
       !== expected.cli

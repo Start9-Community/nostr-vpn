@@ -167,6 +167,24 @@ function zipMembers(path, { cwd = process.cwd() } = {}) {
     .filter(Boolean)
 }
 
+export function validateExactZipMembers(
+  path,
+  expectedMembers,
+  { cwd = process.cwd() } = {},
+) {
+  const actual = zipMembers(path, { cwd }).sort()
+  const expected = [...expectedMembers].sort()
+  if (
+    actual.length !== expected.length
+    || actual.some((member, index) => member !== expected[index])
+  ) {
+    throw new Error(
+      `ZIP member set differs from the exact release payload: ${actual.join(', ')}`,
+    )
+  }
+  return actual
+}
+
 export function archiveMemberSha256(
   command,
   args,

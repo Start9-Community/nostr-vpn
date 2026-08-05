@@ -3400,8 +3400,14 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
   )
   assert.match(build, /ExpectedInstallerSha256/)
   assert.match(build, /ExpectedInstallerSize/)
-  assert.match(build, /NVPN_WINDOWS_RELEASE_PROOF_SCRIPT/)
-  assert.match(build, /& \$\{psQuote\(guestProofScript\)\}/)
+  assert.doesNotMatch(build, /NVPN_WINDOWS_RELEASE_PROOF_SCRIPT/)
+  assert.match(build, /pushFileToWindowsHost\(/)
+  assert.match(build, /sha256FileSync\(proofScriptPath\)/)
+  assert.match(build, /Get-FileHash -Algorithm SHA256 -LiteralPath \$proofScript/)
+  assert.match(build, /nvpn-publication-harness-\$\{proofId\}/)
+  assert.match(build, /finally \{[\s\S]*?Remove-Item -Recurse -Force -LiteralPath/)
+  assert.match(build, /validateExactZipMembers\([\s\S]*?'nvpn\.exe'[\s\S]*?'binaries\/wintun\.dll'/)
+  assert.match(build, /& \$proofScript/)
   assert.match(build, /gateReceiptPath:\s*installerReceiptPath/)
   assert.doesNotMatch(
     build,
@@ -3419,9 +3425,16 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
     "Copy-Item -LiteralPath $files.cli",
   )
   const archive = proof.indexOf('[IO.Compression.ZipFile]::Open(')
+  const containment = proof.indexOf('$archiveFile.StartsWith(')
+  const archiveDelete = proof.indexOf(
+    'Remove-Item -Force -LiteralPath $ArchivePath',
+  )
   assert.ok(cliSnapshot > hashCheck && install > cliSnapshot)
   assert.ok(archive > install)
+  assert.ok(containment >= 0 && archiveDelete > containment)
   assert.match(proof, /CreateEntryFromFile\([\s\S]*?'binaries\/wintun\.dll'/)
+  assert.match(proof, /finally \{[\s\S]*?unins000\.exe[\s\S]*?\$installDir, \$tempDir/)
+  assert.match(proof, /!\$archiveComplete[\s\S]*?Remove-Item -Force -LiteralPath \$ArchivePath/)
   assert.match(proof, /Join-Path \$env:TEMP "nvpn-publication-payload-proof-\$proofId"/)
   assert.doesNotMatch(proof, /Join-Path \$ArtifactRoot 'publication-payload-proof'/)
   assert.match(proof, /install directory overlaps the gated publish directory/)
