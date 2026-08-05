@@ -27,6 +27,7 @@ FROZEN_APPSTORE_UNPACK_DIR="$FROZEN_DIR/app-store-unpacked"
 FROZEN_APPSTORE_RECEIPT="$FROZEN_DIR/app-store-receipt.json"
 FROZEN_MOBILE_RECEIPT="$FROZEN_DIR/physical-mobile-receipt.json"
 FROZEN_MOBILE_JOIN_RECEIPT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}/summary.json"
+FROZEN_MOBILE_JOIN_IOS_VARIANT_RECEIPT="${NVPN_RELEASE_JOIN_IOS_VARIANT_RECEIPT:-${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}/ios-join-test-variant.json}"
 FROZEN_DESKTOP_MOBILE_JOIN_RECEIPT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}/macos/summary.json"
 FROZEN_MOBILE_WG_RECEIPT="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT/artifacts/release-gate-logs}/mobile-network/ios-wireguard-dns.json"
 FROZEN_MOBILE_UNDERLAY_RECEIPT="${NVPN_RELEASE_GATE_LOG_DIR:-$ROOT/artifacts/release-gate-logs}/mobile-network/ios-underlay-lifecycle.json"
@@ -393,6 +394,8 @@ validate_frozen_gate_seal() {
     --archive-receipt "$FROZEN_ARCHIVE_RECEIPT" \
     --adhoc-receipt "$FROZEN_ADHOC_RECEIPT" \
     --sealed-mobile-receipt "$FROZEN_MOBILE_RECEIPT" \
+    --mobile-join-ios-variant-receipt \
+      "$FROZEN_MOBILE_JOIN_IOS_VARIANT_RECEIPT" \
     --mobile-join-receipt "$FROZEN_MOBILE_JOIN_RECEIPT" \
     --mobile-wg-receipt "$FROZEN_MOBILE_WG_RECEIPT" \
     --mobile-underlay-receipt "$FROZEN_MOBILE_UNDERLAY_RECEIPT" \
