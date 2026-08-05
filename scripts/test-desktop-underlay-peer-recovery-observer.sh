@@ -50,6 +50,10 @@ sed -i.bak \
   's/1785436929.998726/1785436933.552248462/' \
   "$STATE/fips-underlay.pcap.txt"
 rm -f "$STATE/fips-underlay.pcap.txt.bak"
+sed -i.bak \
+  's/1785436930.396074/1785436933.652248462/' \
+  "$STATE/peer-payload.log"
+rm -f "$STATE/peer-payload.log.bak"
 if run_bounded \
   "$STATE" 1785436929.552248461 198.51.100.10 4000 late \
   >"$STATE/late.out" 2>"$STATE/late.err"

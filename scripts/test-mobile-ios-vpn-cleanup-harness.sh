@@ -192,7 +192,7 @@ if grep -Fq 'device install app' "$FIXTURE/xcrun.log"; then
   fail "unsafe replacement reached the install command"
 fi
 
-if rg -q -- '--domain-type appGroupDataContainer|NVPN_IOS_ALLOW_LEGACY_APP_DATA_CLEANUP' \
+if grep -Eq -- '--domain-type appGroupDataContainer|NVPN_IOS_ALLOW_LEGACY_APP_DATA_CLEANUP' \
   "$ROOT/scripts/mobile-ios-smoke.sh"
 then
   fail "physical iOS gates retain a broken CoreDevice App Group copy or legacy receipt path"
@@ -203,7 +203,7 @@ grep -Fq 'DEVICE_SIGNING_MODE="${NVPN_IOS_DEVICE_SIGNING_MODE:-adhoc}"' \
 if grep -Fq 'mode="auto"' "$ROOT/scripts/mobile-ios-smoke.sh"; then
   fail "physical iOS signing still has an implicit development-signing mode"
 fi
-if rg -q -- '--terminate-existing' \
+if grep -Eq -- '--terminate-existing' \
   "$ROOT/scripts/mobile_env.sh" \
   "$ROOT/scripts/mobile-ios-smoke.sh" \
   "$ROOT/scripts/lib-mobile-ios-lifecycle.sh" \

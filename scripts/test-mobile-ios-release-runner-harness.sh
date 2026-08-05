@@ -573,9 +573,11 @@ IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE="$timeout_signing/active-xcode.pgid"
 IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64=""
 NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$TEMP_ROOT/timeout-artifacts"
 NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS=1
+timeout_child_pid_file="$TEMP_ROOT/disconnect-cleanup-child.pid"
 ios_release_network_disconnect_cleanup_inner() {
   trap "" TERM
   (trap "" TERM; sleep 10) &
+  printf '%s\n' "$!" >"$timeout_child_pid_file"
   wait
 }
 set +e
@@ -586,7 +588,9 @@ set -e
   || fail "end-to-end disconnect cleanup deadline passed a hung cleanup"
 [[ ! -e "$timeout_signing" ]] \
   || fail "timed-out disconnect cleanup retained private signing state"
-if ps -axo command= | grep -F 'sleep 10' | grep -v grep >/dev/null; then
+timeout_child_pid="$(<"$timeout_child_pid_file")"
+if ps -o stat= -p "$timeout_child_pid" 2>/dev/null \
+    | grep -Eqv '^[[:space:]]*Z'; then
   fail "disconnect cleanup deadline left its fixture child running"
 fi
 

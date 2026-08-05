@@ -26,7 +26,7 @@ required_source=(
 for entry in "${required_source[@]}"; do
   file="${entry%%:*}"
   text="${entry#*:}"
-  rg -Fq "$text" "$file" || {
+  grep -Fq -- "$text" "$file" || {
     echo "desktop DNS UI source contract is missing: $file: $text" >&2
     exit 1
   }

@@ -947,8 +947,7 @@ python3 -m py_compile \
   "$ORCHESTRATOR" \
   "$ROOT/scripts/fleet_release_canary_evidence.py" \
   "$ROOT/scripts/fleet_release_canary_ssh_driver.py" \
-  "$ROOT/scripts/fleet_release_canary_remote_linux.py" \
-  "$DRIVER"
+  "$ROOT/scripts/fleet_release_canary_remote_linux.py"
 bash -n "$0"
 if grep -Fq "NVPN_FLEET_LOCAL_MACHINE_ID_SHA256" \
   "$ORCHESTRATOR" \
