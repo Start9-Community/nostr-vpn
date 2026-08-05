@@ -554,6 +554,12 @@ def validate_mobile_network_receipt(
     mobile_artifact: dict[str, Any],
     mode: str,
 ) -> None:
+    covered_modes = receipt.get("coveredModes")
+    combined = (
+        receipt.get("mode") == "wireguard-dns"
+        and covered_modes == ["wireguard-dns", "underlay-lifecycle"]
+    )
+    receipt_mode = "wireguard-dns" if combined else mode
     expected_cases = (
         {
             "automatic-profile",
@@ -562,21 +568,21 @@ def validate_mobile_network_receipt(
             "custom-doh",
             "through-exit",
         }
-        if mode == "wireguard-dns"
+        if receipt_mode == "wireguard-dns"
         else {"automatic-profile"}
     )
-    covered_modes = receipt.get("coveredModes")
     allowed_covered_modes = [None, [mode]]
-    if mode == "wireguard-dns":
+    if combined or mode == "wireguard-dns":
         allowed_covered_modes.append(
             ["wireguard-dns", "underlay-lifecycle"]
         )
     identity = receipt.get("artifactIdentity")
     require(
         receipt.get("receiptSchema") == 1
-        and receipt.get("artifactType") == f"physical ios Release {mode} gate"
+        and receipt.get("artifactType")
+        == f"physical ios Release {receipt_mode} gate"
         and receipt.get("platform") == "ios"
-        and receipt.get("mode") == mode
+        and receipt.get("mode") == receipt_mode
         and covered_modes in allowed_covered_modes
         and receipt.get("appGitSha") == mobile_artifact.get("appGitSha")
         and receipt.get("appGitTree") == mobile_artifact.get("appGitTree")
@@ -629,7 +635,7 @@ def validate_mobile_network_receipt(
         )
     support = receipt.get("support")
     require(isinstance(support, dict), f"iOS {mode} support evidence is missing")
-    if mode == "wireguard-dns":
+    if receipt_mode == "wireguard-dns":
         require(
             support.get("rapidStartStopCycles") == 8,
             "iOS WireGuard/DNS receipt lacks eight rapid start/stop cycles",

@@ -667,6 +667,33 @@ for path, payload in (
         encoding="utf-8",
     )
 PY
+
+python3 - \
+  "$ROOT" "$MOBILE_RECEIPT" "$MOBILE_WG_RECEIPT" \
+  "$MOBILE_UNDERLAY_RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts"))
+from ios_frozen_gate import validate_mobile_network_receipt
+
+mobile = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+wireguard = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
+underlay = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
+combined = {
+    **wireguard,
+    "coveredModes": ["wireguard-dns", "underlay-lifecycle"],
+    "evidenceFiles": {
+        **wireguard["evidenceFiles"],
+        **underlay["evidenceFiles"],
+    },
+    "support": {**wireguard["support"], **underlay["support"]},
+}
+validate_mobile_network_receipt(combined, mobile, "wireguard-dns")
+validate_mobile_network_receipt(combined, mobile, "underlay-lifecycle")
+PY
+
 cp "$ARCHIVE_RECEIPT" "$ARCHIVE_CLEAN"
 cp "$ADHOC_RECEIPT" "$ADHOC_CLEAN"
 cp "$MOBILE_RECEIPT" "$MOBILE_CLEAN"
