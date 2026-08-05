@@ -34,6 +34,7 @@ import {
   linuxReleaseTargetsForDockerPlatform,
   parseEnvFile,
   readWorkspaceVersionTag,
+  replaceWithExactFileCopy,
   renderReleaseNotes,
   semverFromTag,
   shouldBlockLocalLinuxAmd64Qemu,
@@ -3273,7 +3274,7 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   assert.match(linuxBuild, /nostr-vpn\.deb/)
   assert.match(linuxBuild, /nvpn-x86_64-unknown-linux-musl\.tar\.gz/)
   assert.match(linuxBuild, /packageInstalledByDpkg/)
-  assert.match(linuxBuild, /copyFileSync\(gatedDebPath, debPath\)/)
+  assert.match(linuxBuild, /replaceWithExactFileCopy\(gatedDebPath, debPath\)/)
   const verificationPlan = linuxBuild.indexOf(
     'linuxPublicationVerificationPlan({',
   )
@@ -3281,7 +3282,7 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
     '[verificationPlan.verifierPath, ...verificationPlan.verifierArgs]',
   )
   const publicationCopy = linuxBuild.indexOf(
-    'copyFileSync(gatedDebPath, debPath)',
+    'replaceWithExactFileCopy(gatedDebPath, debPath)',
   )
   assert.ok(
     verificationPlan >= 0
@@ -3302,6 +3303,20 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   assert.doesNotMatch(linuxBuild, /cargo build/)
   assert.doesNotMatch(linuxBuild, /prepare-host-linux-vm-bundle\.sh/)
   assert.match(githubRelease, /cargo build --release --locked -p nvpn/)
+})
+
+test('exact artifact copy safely replaces a stale read-only destination', (context) => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-exact-copy-'))
+  context.after(() => rmSync(root, { recursive: true, force: true }))
+  const source = join(root, 'source')
+  const destination = join(root, 'destination')
+  writeFileSync(source, 'verified artifact\n')
+  writeFileSync(destination, 'stale artifact\n')
+  chmodSync(destination, 0o444)
+
+  replaceWithExactFileCopy(source, destination)
+
+  assert.equal(readFileSync(destination, 'utf8'), 'verified artifact\n')
 })
 
 test('macOS publication packages the canonical CLI from the app bundle', () => {

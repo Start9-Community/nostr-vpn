@@ -35,6 +35,7 @@ import {
   normalizeTag,
   parseEnvFile,
   readWorkspaceVersionTag,
+  replaceWithExactFileCopy,
   semverFromTag,
   sha256FileSync,
   splitCsv,
@@ -1119,9 +1120,9 @@ function buildLinuxArtifacts({
     )
   }
   mkdirSync(distDir, { recursive: true })
-  copyFileSync(gatedDebPath, debPath)
+  replaceWithExactFileCopy(gatedDebPath, debPath)
   for (const cliAsset of cliAssets) {
-    copyFileSync(gatedMuslArchivePath, cliAsset)
+    replaceWithExactFileCopy(gatedMuslArchivePath, cliAsset)
   }
   if (
     sha256FileSync(debPath) !== expectedDeb

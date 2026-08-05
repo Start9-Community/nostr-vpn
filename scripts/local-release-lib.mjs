@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto'
 import {
   closeSync,
+  constants,
+  copyFileSync,
   lstatSync,
   openSync,
   readSync,
+  rmSync,
   statSync,
 } from 'node:fs'
 import { basename, join, posix as pathPosix } from 'node:path'
@@ -26,6 +29,15 @@ export function sha256FileSync(path) {
     closeSync(descriptor)
   }
   return hash.digest('hex')
+}
+
+export function replaceWithExactFileCopy(source, destination) {
+  const sourceMetadata = lstatSync(source)
+  if (sourceMetadata.isSymbolicLink() || !sourceMetadata.isFile()) {
+    throw new Error('Exact artifact copy source must be a regular non-symlink file.')
+  }
+  rmSync(destination, { force: true })
+  copyFileSync(source, destination, constants.COPYFILE_EXCL)
 }
 
 export function parseEnvFile(text) {
