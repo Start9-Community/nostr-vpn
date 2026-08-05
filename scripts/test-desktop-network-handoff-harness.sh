@@ -1173,13 +1173,6 @@ if max(join_positions) >= positions[0] or positions != sorted(positions):
     raise SystemExit("exclusive desktop/device/measurement tail is out of order")
 if any(position >= positions[0] for position in join_positions):
     raise SystemExit("a desktop prep lane is not joined before exclusive network gates")
-for mobile_contract in (
-    "test-mobile-release-provenance-harness.sh",
-    "test-mobile-release-artifact-reuse-harness.sh",
-    "test-mobile-underlay-change-harness.sh",
-):
-    if mobile_contract not in text:
-        raise SystemExit(f"current mobile release contract was dropped: {mobile_contract}")
 for receipt in (
     "NVPN_MOBILE_ANDROID_RELEASE_RECEIPT",
     "NVPN_MOBILE_IOS_RELEASE_RECEIPT",

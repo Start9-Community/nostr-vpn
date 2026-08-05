@@ -196,6 +196,13 @@ fi
 
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
 local_release="$ROOT_DIR/scripts/local-release.mjs"
+release_tooling_contracts="$ROOT_DIR/scripts/test-release-tooling-contracts.sh"
+[[ -x "$release_tooling_contracts" ]] \
+  || fail "release tooling contracts have no standalone executable"
+grep -Fq 'name: Release tooling contracts' "$ROOT_DIR/.github/workflows/ci.yml" \
+  || fail "release tooling contracts do not run as an independent CI job"
+! grep -Fq 'test-release-tooling-contracts.sh' "$release_gate" \
+  || fail "artifact certification still reruns release-tooling contracts"
 required_modes_lib="$ROOT_DIR/scripts/lib-release-gate-required-modes.sh"
 # shellcheck disable=SC1090
 source "$required_modes_lib"

@@ -230,6 +230,9 @@ dataplane-host-pair-comparison:
 release-gate:
     ./scripts/release-gate.sh
 
+release-tooling-contracts:
+    ./scripts/test-release-tooling-contracts.sh
+
 verify-fast:
     ./scripts/verify.sh fast
 
