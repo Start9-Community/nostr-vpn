@@ -27,6 +27,7 @@ const harnessOnlyPaths = new Set([
   'scripts/e2e-macos-service.sh',
   'scripts/e2e-windows-service-toggle.ps1',
   'scripts/ios_xctestrun.py',
+  'scripts/ios-build',
   'scripts/ios_frozen_archive.py',
   'scripts/ios_frozen_gate.py',
   'scripts/ios-upload-receipt.mjs',
@@ -76,7 +77,6 @@ const harnessOnlyPaths = new Set([
 const buildScripts = {
   android: [/prepare-android-release-from-bundle/],
   ios: [
-    /scripts\/ios-build$/,
     /scripts\/ios-profiles$/,
     /scripts\/ios_profile_certificate\.py$/,
     /lib-mobile-ios-release-artifact/,

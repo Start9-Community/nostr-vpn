@@ -573,15 +573,15 @@ case "${1:-}" in
   ios-release-testing) run_ios_release_testing_export ;;
   ios-export) run_ios_export ;;
   ios-upload)
-    require_release_mutation_gate "$ROOT"
+    require_release_mutation_gate "$HARNESS_ROOT"
     run_ios_upload
     ;;
   ios-attach-internal)
-    require_release_mutation_gate "$ROOT"
+    require_release_mutation_gate "$HARNESS_ROOT"
     run_ios_attach_internal
     ;;
   ios-testflight|ios-release-artifacts)
-    require_release_mutation_gate "$ROOT"
+    require_release_mutation_gate "$HARNESS_ROOT"
     run_ios_testflight
     ;;
   -h|--help|help|"") usage ;;

@@ -1690,9 +1690,13 @@ function buildIosArtifacts({
           )
         }
       }
-      run('bash', [join(sourceRoot, 'scripts', 'ios-build'), 'ios-export'], {
+      run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], {
         cwd: sourceRoot,
-        env: { ...env, NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha },
+        env: {
+          ...env,
+          NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha,
+          NVPN_IOS_RELEASE_SOURCE_ROOT: sourceRoot,
+        },
       })
     } finally {
       for (const name of ['dist', 'artifacts']) {

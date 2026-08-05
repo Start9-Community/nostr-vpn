@@ -703,13 +703,14 @@ test('frozen iOS publication binds an unchanged-product source proof', () => {
   git('config', 'user.name', 'Release Test')
   git('config', 'user.email', 'release@example.invalid')
   mkdirSync(join(repoRoot, 'ios', 'Sources'), { recursive: true })
+  mkdirSync(join(repoRoot, 'scripts'), { recursive: true })
   writeFileSync(join(repoRoot, 'ios', 'Sources', 'App.swift'), 'product\n')
+  writeFileSync(join(repoRoot, 'scripts', 'ios-build'), 'controller v1\n')
   git('add', '.')
   git('commit', '-qm', 'product')
   const receiptCommit = git('rev-parse', 'HEAD')
   const receiptTree = git('rev-parse', 'HEAD^{tree}')
-  mkdirSync(join(repoRoot, 'scripts'), { recursive: true })
-  writeFileSync(join(repoRoot, 'scripts', 'test-ios-harness.sh'), 'harness\n')
+  writeFileSync(join(repoRoot, 'scripts', 'ios-build'), 'controller v2\n')
   git('add', '.')
   git('commit', '-qm', 'harness')
   const candidateCommit = git('rev-parse', 'HEAD')
@@ -722,6 +723,20 @@ test('frozen iOS publication binds an unchanged-product source proof', () => {
     candidateCommit,
     candidateTree,
   })
+  writeFileSync(join(repoRoot, 'ios', 'Sources', 'App.swift'), 'changed product\n')
+  git('add', '.')
+  git('commit', '-qm', 'product change')
+  assert.throws(
+    () => proveUnchangedPlatformInputs({
+      candidateRoot: repoRoot,
+      platform: 'ios',
+      receiptCommit,
+      receiptTree,
+      candidateCommit: git('rev-parse', 'HEAD'),
+      candidateTree: git('rev-parse', 'HEAD^{tree}'),
+    }),
+    /changed product\/build input ios\/Sources\/App\.swift/i,
+  )
 
   const exportDir = join(repoRoot, 'dist', 'ios', 'export')
   const frozenDir = join(repoRoot, 'dist', 'ios', 'frozen')
@@ -798,12 +813,17 @@ test('retained iOS export runs only from its proven artifact source', () => {
     'mkdirSync(linkRoot)',
     'for (const entry of readdirSync(externalRoot))',
     'join(linkRoot, entry)',
-    "join(sourceRoot, 'scripts', 'ios-build'), 'ios-export'",
+    "join(repoRoot, 'scripts', 'ios-build'), 'ios-export'",
     'NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha',
+    'NVPN_IOS_RELEASE_SOURCE_ROOT: sourceRoot',
     'source_equivalence: sourceEquivalence',
   ]) {
     assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+  assert.doesNotMatch(
+    source,
+    /join\(sourceRoot, 'scripts', 'ios-build'\), 'ios-export'/,
+  )
 })
 
 test('retained iOS outputs stay available without dirtying the exact checkout', (context) => {

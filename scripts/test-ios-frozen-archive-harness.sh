@@ -1258,9 +1258,14 @@ for current_tool in (
     'source "$HARNESS_ROOT/scripts/release_common.sh"',
     'FROZEN_TOOL="$HARNESS_ROOT/scripts/ios_frozen_archive.py"',
     '"$HARNESS_ROOT/scripts/ios-profiles" ensure',
+    'require_release_mutation_gate "$HARNESS_ROOT"',
 ):
     if current_tool not in ios_build:
         raise SystemExit("exact product export uses historical release tooling")
+if 'require_release_mutation_gate "$ROOT"' in ios_build:
+    raise SystemExit("iOS publication replays a historical mutation gate")
+if ios_build.count('require_release_mutation_gate "$HARNESS_ROOT"') != 3:
+    raise SystemExit("not every iOS publication action uses the current mutation gate")
 if (
     '--mobile-join-ios-variant-receipt \\\n'
     '      "$FROZEN_MOBILE_JOIN_IOS_VARIANT_RECEIPT"'
