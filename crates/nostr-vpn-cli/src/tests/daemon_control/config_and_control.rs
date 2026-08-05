@@ -200,6 +200,24 @@ fn unix_daemon_instance_lock_uses_a_protected_system_runtime_path() {
     );
 }
 
+#[test]
+fn explicit_daemon_instance_locks_are_scoped_and_validated() {
+    let config = Path::new("/unused/config.toml");
+    let first = daemon_instance_lock_file_path_for_instance(config, Some("seed-a"))
+        .expect("valid instance path");
+    let second = daemon_instance_lock_file_path_for_instance(config, Some("seed-b"))
+        .expect("valid instance path");
+    assert_ne!(first, second);
+    assert!(first.to_string_lossy().contains("seed-a"));
+
+    for invalid in ["", "Seed", "-seed", "seed/other", "seed.other", &"a".repeat(65)] {
+        assert!(
+            daemon_instance_lock_file_path_for_instance(config, Some(invalid)).is_err(),
+            "invalid instance ID must be rejected: {invalid}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn unix_daemon_instance_lock_refuses_a_world_writable_parent() {

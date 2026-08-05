@@ -375,6 +375,15 @@ struct DaemonArgs {
     paused: bool,
     #[arg(long, hide = true, default_value_t = false)]
     service: bool,
+    /// Isolate an audited server service in its own protected runtime directory.
+    #[arg(long, hide = true, value_parser = parse_daemon_instance_id)]
+    daemon_instance: Option<String>,
+}
+
+fn parse_daemon_instance_id(value: &str) -> Result<String, String> {
+    validate_daemon_instance_id(value)
+        .map(str::to_owned)
+        .map_err(|error| error.to_string())
 }
 
 fn parse_fips_websocket_seed_url(value: &str) -> Result<String, String> {

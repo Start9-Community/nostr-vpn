@@ -262,6 +262,15 @@ fn linux_proc_fields_preserve_full_daemon_command_and_reject_zombies() {
 }
 
 #[test]
+fn daemon_pid_scan_recognizes_a_role_named_nvpn_binary() {
+    let config = Path::new("/etc/nvpn-paid-exit/config.toml");
+    assert!(crate::daemon_command_matches_config(
+        "/usr/local/libexec/nvpn-paid-exit daemon --service --daemon-instance paid-exit --config /etc/nvpn-paid-exit/config.toml",
+        config
+    ));
+}
+
+#[test]
 fn default_cli_install_path_uses_nvpn_filename() {
     let path = default_cli_install_path();
     assert_eq!(

@@ -160,6 +160,22 @@ fn daemon_rejects_invalid_or_remote_plaintext_fips_websocket_seeds() {
 }
 
 #[test]
+fn daemon_instance_is_an_explicit_validated_server_scope() {
+    let cli = Cli::parse_from(["nvpn", "daemon", "--daemon-instance", "seed-a"]);
+    let Command::Daemon(args) = cli.command else {
+        panic!("expected daemon command");
+    };
+    assert_eq!(args.daemon_instance.as_deref(), Some("seed-a"));
+
+    for invalid in ["Seed", "-seed", "seed/other"] {
+        let argument = format!("--daemon-instance={invalid}");
+        let error = Cli::try_parse_from(["nvpn", "daemon", argument.as_str()])
+            .expect_err("invalid daemon instance must be rejected");
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+}
+
+#[test]
 fn set_parses_explicit_lan_discovery_disable() {
     let cli = Cli::parse_from([
         "nvpn",

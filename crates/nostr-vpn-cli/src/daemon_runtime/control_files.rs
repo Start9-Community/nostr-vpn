@@ -15,24 +15,58 @@ pub(crate) fn production_unix_daemon_instance_lock_file_path() -> PathBuf {
     runtime_dir.join("to.nostrvpn.nvpn.daemon.instance.lock")
 }
 
-pub(crate) fn daemon_instance_lock_file_path(_config_path: &Path) -> Result<PathBuf> {
+pub(crate) fn validate_daemon_instance_id(value: &str) -> Result<&str> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'-' | b'_'))
+        });
+    if !valid {
+        return Err(anyhow!(
+            "daemon instance must match [a-z0-9][a-z0-9_-]{{0,63}}"
+        ));
+    }
+    Ok(value)
+}
+
+pub(crate) fn daemon_instance_lock_file_path_for_instance(
+    _config_path: &Path,
+    daemon_instance: Option<&str>,
+) -> Result<PathBuf> {
+    let daemon_instance = daemon_instance.map(validate_daemon_instance_id).transpose()?;
+
     #[cfg(test)]
     {
-        Ok(std::env::temp_dir()
+        let base = std::env::temp_dir()
             .join(format!(
                 "to.nostrvpn.nvpn.daemon-instance-test-{}",
                 std::process::id()
-            ))
-            .join("daemon.instance.lock"))
+            ));
+        let runtime_dir = daemon_instance.map_or(base.clone(), |id| base.join(id));
+        return Ok(runtime_dir.join("daemon.instance.lock"));
     }
 
     #[cfg(all(not(test), unix))]
     {
+        if let Some(id) = daemon_instance {
+            #[cfg(target_os = "linux")]
+            let runtime_dir = PathBuf::from(format!("/run/nvpn-{id}"));
+            #[cfg(not(target_os = "linux"))]
+            let runtime_dir = PathBuf::from(format!("/var/run/nvpn-{id}"));
+            return Ok(runtime_dir.join("to.nostrvpn.nvpn.daemon.instance.lock"));
+        }
         Ok(production_unix_daemon_instance_lock_file_path())
     }
 
     #[cfg(all(not(test), windows))]
     {
+        if daemon_instance.is_some() {
+            return Err(anyhow!(
+                "explicit daemon instances are supported only by Unix system services"
+            ));
+        }
         let root = std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())
@@ -54,19 +88,40 @@ pub(crate) fn daemon_instance_lock_file_path(_config_path: &Path) -> Result<Path
     }
 }
 
+#[cfg(test)]
+pub(crate) fn daemon_instance_lock_file_path(config_path: &Path) -> Result<PathBuf> {
+    daemon_instance_lock_file_path_for_instance(config_path, None)
+}
+
 pub(crate) struct DaemonInstanceLock {
     _file: fs::File,
 }
 
 pub(crate) fn acquire_daemon_instance_lock(config_path: &Path) -> Result<DaemonInstanceLock> {
-    let lock_path = daemon_instance_lock_file_path(config_path)?;
+    acquire_daemon_instance_lock_for_daemon(config_path, None)
+}
+
+pub(crate) fn acquire_daemon_instance_lock_for_daemon(
+    config_path: &Path,
+    daemon_instance: Option<&str>,
+) -> Result<DaemonInstanceLock> {
+    let lock_path = daemon_instance_lock_file_path_for_instance(config_path, daemon_instance)?;
 
     #[cfg(unix)]
     {
         #[cfg(test)]
         let expected_uid = unsafe { libc::geteuid() };
         #[cfg(not(test))]
-        let expected_uid = 0;
+        let expected_uid = daemon_instance.map_or(0, |_| unsafe { libc::geteuid() });
+        if daemon_instance.is_some() && !lock_path.parent().is_some_and(Path::is_dir) {
+            return Err(anyhow!(
+                "isolated daemon runtime directory is unavailable: {}",
+                lock_path.parent().map_or_else(
+                    || Path::new("<missing>").display().to_string(),
+                    |path| path.display().to_string()
+                )
+            ));
+        }
         return acquire_unix_daemon_instance_lock_at(&lock_path, expected_uid);
     }
 

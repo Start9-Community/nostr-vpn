@@ -388,10 +388,11 @@ fn daemon_command_has_nvpn_executable_prefix(prefix: &str) -> bool {
     }
 
     let normalized = trimmed.replace('\\', "/");
-    if normalized == "nvpn"
-        || normalized.ends_with("/nvpn")
-        || normalized.eq_ignore_ascii_case("nvpn.exe")
-        || normalized.to_ascii_lowercase().ends_with("/nvpn.exe")
+    let executable_name = normalized.rsplit('/').next().unwrap_or_default();
+    let executable_name_lower = executable_name.to_ascii_lowercase();
+    if executable_name_lower == "nvpn"
+        || executable_name_lower == "nvpn.exe"
+        || executable_name_lower.starts_with("nvpn-")
     {
         return true;
     }

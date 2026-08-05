@@ -72,7 +72,8 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     };
 
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
-    let instance_lock = acquire_daemon_instance_lock(&config_path)?;
+    let instance_lock =
+        acquire_daemon_instance_lock_for_daemon(&config_path, args.daemon_instance.as_deref())?;
     if args.service
         && let Err(error) = redirect_stdio_to_daemon_log(&config_path)
     {
