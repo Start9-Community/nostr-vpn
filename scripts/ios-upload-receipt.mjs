@@ -18,6 +18,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 import {
   assertAuthorizedFleetPublication,
+  fleetPublicationPaths,
 } from './fleet-release-publication-lib.mjs'
 import { sha256FileSync } from './local-release-lib.mjs'
 
@@ -229,9 +230,15 @@ function uploadIdentity({ frozen, stagedManifest, mutationEnv }) {
   }
 }
 
-function fleetAuthorization(mutationEnv) {
+function fleetAuthorization(repoRoot, mutationEnv) {
+  const paths = fleetPublicationPaths({
+    repoRoot,
+    options: {},
+    env: mutationEnv,
+  })
+  if (!paths) return null
   const proof = exactFileBinding(
-    mutationEnv.NVPN_FLEET_PROOF_PATH,
+    paths.proof,
     'Historical fleet authorization proof',
   )
   const authorization = exactJson(
@@ -241,15 +248,15 @@ function fleetAuthorization(mutationEnv) {
   return {
     authorizedAt: authorization.validatedAt,
     result: exactFileBinding(
-      mutationEnv.NVPN_FLEET_RESULT_PATH,
+      paths.result,
       'Historical fleet result',
     ),
     manifest: exactFileBinding(
-      mutationEnv.NVPN_FLEET_MANIFEST_PATH,
+      paths.manifest,
       'Historical fleet manifest',
     ),
     inventory: exactFileBinding(
-      mutationEnv.NVPN_FLEET_INVENTORY_PATH,
+      paths.inventory,
       'Historical fleet inventory',
     ),
     proof,
@@ -366,14 +373,16 @@ function validateIntentValue({
     throw new Error('iOS upload intent is invalid.')
   }
   validateUploadIdentity({ receipt, frozen, stagedManifest, mutationEnv })
-  validateHistoricalIosFleetAuthorization({
-    repoRoot,
-    authorization: receipt.fleetAuthorization,
-    stageDir: mutationEnv.NVPN_RELEASE_STAGE_DIR,
-    stagedManifest,
-    env: mutationEnv,
-    validatePublication,
-  })
+  if (receipt.fleetAuthorization !== null) {
+    validateHistoricalIosFleetAuthorization({
+      repoRoot,
+      authorization: receipt.fleetAuthorization,
+      stageDir: mutationEnv.NVPN_RELEASE_STAGE_DIR,
+      stagedManifest,
+      env: mutationEnv,
+      validatePublication,
+    })
+  }
   return receipt
 }
 
@@ -390,7 +399,7 @@ export function captureIosUploadIntent({
     attemptId: randomUUID(),
     createdAt: Math.floor(Date.now() / 1000),
     ...uploadIdentity({ frozen, stagedManifest, mutationEnv }),
-    fleetAuthorization: fleetAuthorization(mutationEnv),
+    fleetAuthorization: fleetAuthorization(repoRoot, mutationEnv),
   }
   return validateIntentValue({
     repoRoot,

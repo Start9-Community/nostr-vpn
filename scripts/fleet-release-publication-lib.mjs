@@ -78,12 +78,12 @@ export function fleetPublicationPaths({ repoRoot, options, env }) {
       options.fleetProof
       || env.NVPN_FLEET_PROOF_PATH,
   }
+  const supplied = Object.values(values).filter((value) => value).length
+  if (supplied === 0) return null
+  if (supplied !== Object.keys(values).length) {
+    throw new Error('Fleet publication evidence paths must be supplied together.')
+  }
   for (const [name, value] of Object.entries(values)) {
-    if (!String(value ?? '').trim()) {
-      throw new Error(
-        `Fleet-gated publication requires --fleet-${name} (or NVPN_FLEET_${name.toUpperCase()}_PATH).`,
-      )
-    }
     if (!isAbsolute(value)) {
       throw new Error(
         `Fleet-gated publication requires an absolute --fleet-${name} path.`,

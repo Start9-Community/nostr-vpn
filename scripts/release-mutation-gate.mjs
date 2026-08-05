@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   assertAuthorizedFleetPublication,
+  fleetPublicationPaths,
 } from './fleet-release-publication-lib.mjs'
 import {
   normalizeTag,
@@ -123,40 +124,37 @@ export function validateReleaseMutationGate({
   requireTag = false,
   env = process.env,
 }) {
-  for (const [label, value] of [
-    ['stage directory', stageDir],
-    ['fleet result', fleetResult],
-    ['fleet manifest', fleetManifest],
-    ['fleet inventory', fleetInventory],
-    ['fleet authorization proof', fleetProof],
-  ]) {
-    if (!value || !isAbsolute(value)) {
-      fail(`${label} requires an exact absolute path`)
-    }
+  if (!stageDir || !isAbsolute(stageDir)) {
+    fail('stage directory requires an exact absolute path')
   }
+  const fleetOptions = {
+    fleetResult, fleetManifest, fleetInventory, fleetProof,
+  }
+  const fleetPaths = fleetPublicationPaths({
+    repoRoot,
+    options: fleetOptions,
+    env,
+  })
   const exact = validateExactStageSource({
     stageDir,
     expectedTag,
     requireTag,
   })
-  const fleet = assertAuthorizedFleetPublication({
-    repoRoot,
-    options: {
-      fleetResult,
-      fleetManifest,
-      fleetInventory,
-      fleetProof,
-    },
-    env,
-    stageDir,
-    stagedManifest: exact.release,
-  })
+  const fleet = fleetPaths
+    ? assertAuthorizedFleetPublication({
+        repoRoot,
+        options: fleetOptions,
+        env,
+        stageDir,
+        stagedManifest: exact.release,
+      })
+    : null
   return {
     appGitSha: exact.head,
     appGitTree: exact.tree,
     status: 'passed',
     tag: exact.tag,
-    targetCount: fleet.targetCount,
+    targetCount: fleet?.targetCount ?? 0,
   }
 }
 
@@ -198,15 +196,15 @@ function parseArgs(argv) {
       case '-h':
         console.log(`Usage: node scripts/release-mutation-gate.mjs [options]
 
-Requires exact absolute paths, a clean staged source, and canonical passed fleet
-evidence before any external release mutation.
+Requires a clean exact staged source before any external release mutation.
+When fleet evidence is supplied, all four paths are required and validated.
 
 Options:
   --stage-dir DIR
-  --fleet-result JSON
-  --fleet-manifest JSON
-  --fleet-inventory JSON
-  --fleet-proof JSON
+  --fleet-result JSON       Optional with the complete fleet evidence set
+  --fleet-manifest JSON     Optional with the complete fleet evidence set
+  --fleet-inventory JSON    Optional with the complete fleet evidence set
+  --fleet-proof JSON        Optional with the complete fleet evidence set
   --tag TAG
   --require-tag`)
         process.exit(0)

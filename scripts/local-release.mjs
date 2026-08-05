@@ -111,20 +111,20 @@ Build local Rust/native release artifacts, stage a hashtree release directory,
 and optionally publish it.
 
 Options:
-  --publish                 Disabled direct publication mode; stage, execute
-                            the fleet canary, then publish the staged draft
+  --publish                 Disabled direct publication mode; stage, then
+                            publish the exact staged draft
   --final                   Disabled direct final mode; use --promote-draft
-                            with exact passed fleet evidence
+                            with exact staged release evidence
   --draft                   Disabled alias for --publish
   --promote-draft           Promote an existing staged draft directory for
                             this tag to final/latest without rebuilding
   --publish-staged-draft    Publish an existing complete staged draft without
                             rebuilding, rerunning gates, or shipping elsewhere
-  --fleet-result <path>     Exact fleet-canary-result.json from execute mode
-  --fleet-manifest <path>   Frozen fleet manifest used by that execution
-  --fleet-inventory <path>  Frozen authoritative-roster inventory used by it
-  --fleet-proof <path>      Private immutable fleet authorization proof
-  --cargo-publish           Publish Rust crates during an exact fleet-gated
+  --fleet-result <path>     Optional exact fleet-canary-result.json
+  --fleet-manifest <path>   Optional frozen fleet manifest
+  --fleet-inventory <path>  Optional authoritative-roster inventory
+  --fleet-proof <path>      Optional immutable fleet authorization proof
+  --cargo-publish           Publish Rust crates during an exact staged
                             --promote-draft operation
   --skip-cargo-publish      With --promote-draft, don't push Rust crates
   --skip-zapstore           With --promote-draft, skip Android Zapstore
@@ -2241,10 +2241,12 @@ function releaseMutationEnvironment({
     ...env,
     NVPN_RELEASE_STAGE_DIR: resolve(stageDir),
     NVPN_RELEASE_TAG: stagedManifest.tag,
-    NVPN_FLEET_RESULT_PATH: fleet.result,
-    NVPN_FLEET_MANIFEST_PATH: fleet.manifest,
-    NVPN_FLEET_INVENTORY_PATH: fleet.inventory,
-    NVPN_FLEET_PROOF_PATH: fleet.proof,
+    ...(fleet && {
+      NVPN_FLEET_RESULT_PATH: fleet.result,
+      NVPN_FLEET_MANIFEST_PATH: fleet.manifest,
+      NVPN_FLEET_INVENTORY_PATH: fleet.inventory,
+      NVPN_FLEET_PROOF_PATH: fleet.proof,
+    }),
   }
 }
 
@@ -2258,10 +2260,10 @@ function replayCanonicalMutationGate({
   const fleet = fleetPublicationPaths({ repoRoot, options, env })
   return validateReleaseMutationGate({
     stageDir: resolve(stageDir),
-    fleetResult: fleet.result,
-    fleetManifest: fleet.manifest,
-    fleetInventory: fleet.inventory,
-    fleetProof: fleet.proof,
+    fleetResult: fleet?.result,
+    fleetManifest: fleet?.manifest,
+    fleetInventory: fleet?.inventory,
+    fleetProof: fleet?.proof,
     expectedTag: tag,
     requireTag,
     env,
@@ -2571,14 +2573,17 @@ function main() {
       'Fleet evidence paths are valid only with --publish-staged-draft or --promote-draft.',
     )
   }
+  const fleetPublication = options.publishStagedDraft || options.promoteDraft
+    ? fleetPublicationPaths({ repoRoot, options, env })
+    : null
   if (options.publish && !options.promoteDraft) {
     throw new Error(
-      'Direct --publish/--final is disabled: stage first, execute the exact fleet canary, then use --publish-staged-draft and --promote-draft.',
+      'Direct --publish/--final is disabled: stage first, then use --publish-staged-draft and --promote-draft.',
     )
   }
   if (options.cargoPublish && !options.promoteDraft) {
     throw new Error(
-      'Direct --cargo-publish is disabled: publish crates only while promoting an exact fleet-gated draft.',
+      'Direct --cargo-publish is disabled: publish crates only while promoting an exact staged draft.',
     )
   }
   if (requireZapstore && options.skipZapstore) {
@@ -2643,16 +2648,18 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    const fleetValidation = authorizeFreshFleetPublication({
-      repoRoot,
-      options,
-      env,
-      stageDir,
-      stagedManifest,
-    })
-    console.log(
-      `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
-    )
+    if (fleetPublication) {
+      const fleetValidation = authorizeFreshFleetPublication({
+        repoRoot,
+        options,
+        env,
+        stageDir,
+        stagedManifest,
+      })
+      console.log(
+        `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
+      )
+    }
     const mutationEnv = releaseMutationEnvironment({
       env,
       options,
@@ -2740,16 +2747,18 @@ function main() {
       commit: stagedCommit,
       tree: gitTree(stagedCommit),
     })
-    const fleetValidation = assertAuthorizedFleetPublication({
-      repoRoot,
-      options,
-      env,
-      stageDir,
-      stagedManifest,
-    })
-    console.log(
-      `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
-    )
+    if (fleetPublication) {
+      const fleetValidation = assertAuthorizedFleetPublication({
+        repoRoot,
+        options,
+        env,
+        stageDir,
+        stagedManifest,
+      })
+      console.log(
+        `Verified passed fleet execution for ${fleetValidation.targetCount} target(s).`,
+      )
+    }
     const mutationEnv = releaseMutationEnvironment({
       env,
       options,

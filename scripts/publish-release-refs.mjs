@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { githubRepositoryFromRemote } from './github-release-publication.mjs'
 import { normalizeTag } from './local-release-lib.mjs'
 import { validateReleaseMutationGate } from './release-mutation-gate.mjs'
+import { fleetPublicationPaths } from './fleet-release-publication-lib.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const canonicalHtreeRemote = 'htree://self/nostr-vpn'
@@ -466,23 +467,20 @@ export function publishReleaseRefs(options, dependencies = {}) {
   if (!/^nhash1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(cid)) {
     fail('immutable draft CID must be one exact root nhash CID')
   }
-  for (const [label, value] of [
-    ['stage directory', options.stageDir],
-    ['fleet result', options.fleetResult],
-    ['fleet manifest', options.fleetManifest],
-    ['fleet inventory', options.fleetInventory],
-    ['fleet authorization proof', options.fleetProof],
-  ]) {
-    if (!value || !isAbsolute(value)) {
-      fail(`${label} requires an exact absolute path`)
-    }
+  if (!options.stageDir || !isAbsolute(options.stageDir)) {
+    fail('stage directory requires an exact absolute path')
   }
+  const fleet = fleetPublicationPaths({
+    repoRoot,
+    options,
+    env: options.env ?? process.env,
+  })
   const gateOptions = {
     stageDir: options.stageDir,
-    fleetResult: options.fleetResult,
-    fleetManifest: options.fleetManifest,
-    fleetInventory: options.fleetInventory,
-    fleetProof: options.fleetProof,
+    fleetResult: fleet?.result,
+    fleetManifest: fleet?.manifest,
+    fleetInventory: fleet?.inventory,
+    fleetProof: fleet?.proof,
     expectedTag: tag,
     env: options.env ?? process.env,
   }
@@ -697,15 +695,15 @@ function parseArgs(argv) {
       case '-h':
         console.log(`Usage: node scripts/publish-release-refs.mjs [options]
 
-Publishes the exact fleet-authorized release refs without force, dispatches the
+Publishes the exact staged release refs without force, dispatches the
 exact immutable-draft workflow, and waits for that workflow to succeed.
 
 Options:
   --stage-dir DIR
-  --fleet-result JSON
-  --fleet-manifest JSON
-  --fleet-inventory JSON
-  --fleet-proof JSON
+  --fleet-result JSON       Optional with the complete fleet evidence set
+  --fleet-manifest JSON     Optional with the complete fleet evidence set
+  --fleet-inventory JSON    Optional with the complete fleet evidence set
+  --fleet-proof JSON        Optional with the complete fleet evidence set
   --tag TAG
   --draft-cid CID`)
         process.exit(0)

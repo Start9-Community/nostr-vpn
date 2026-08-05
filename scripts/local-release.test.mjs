@@ -52,6 +52,7 @@ import {
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
 import { buildFrozenFleetInventory } from './fleet-release-preparer-lib.mjs'
+import { fleetPublicationPaths } from './fleet-release-publication-lib.mjs'
 import {
   githubRepositoryFromRemote,
   githubReleaseRepairPlan,
@@ -877,6 +878,63 @@ test('existing ASC build replays its original fleet upload authorization', () =>
     version: frozen.gate.marketing_version,
     buildNumber: frozen.gate.build_number,
   }
+  const noFleetEnv = {
+    NVPN_RELEASE_STAGE_DIR: stageDir,
+    NVPN_IOS_UPLOAD_INTENT_PATH: join(frozenDir, 'no-fleet-intent.json'),
+    NVPN_IOS_PENDING_UPLOAD_RECEIPT_PATH: join(
+      frozenDir,
+      'no-fleet-pending.json',
+    ),
+    NVPN_IOS_UPLOAD_RECEIPT_PATH: join(frozenDir, 'no-fleet-final.json'),
+  }
+  const rejectFleetValidation = () => {
+    assert.fail('fleet validation must not run without fleet evidence')
+  }
+  const noFleetAuthorization = captureIosUploadIntent({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv: noFleetEnv,
+    validatePublication: rejectFleetValidation,
+  })
+  assert.equal(noFleetAuthorization.fleetAuthorization, null)
+  const noFleetIntent = writeIosUploadIntent({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv: noFleetEnv,
+    intent: noFleetAuthorization,
+    validatePublication: rejectFleetValidation,
+  })
+  const noFleetPending = writeAcceptedIosPendingUpload({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv: noFleetEnv,
+    intentReceipt: noFleetIntent,
+    acceptanceSource: 'transporter-returned',
+    validatePublication: rejectFleetValidation,
+  })
+  const noFleetFinal = finalizeIosUploadReceipt({
+    repoRoot,
+    frozen,
+    stagedManifest,
+    mutationEnv: noFleetEnv,
+    pendingReceipt: noFleetPending,
+    testflight,
+    validatePublication: rejectFleetValidation,
+  })
+  assert.deepEqual(
+    validateIosUploadReceipt({
+      repoRoot,
+      frozen,
+      stagedManifest,
+      mutationEnv: noFleetEnv,
+      testflight,
+      validatePublication: rejectFleetValidation,
+    }).value,
+    noFleetFinal.value,
+  )
   assert.throws(
     () =>
       validateIosUploadReceipt({
@@ -1283,6 +1341,21 @@ test('canonical mutation gate rejects non-exact evidence paths before publicatio
   )
 })
 
+test('fleet evidence is optional but must be supplied as one complete set', () => {
+  assert.equal(
+    fleetPublicationPaths({ repoRoot: process.cwd(), options: {}, env: {} }),
+    null,
+  )
+  assert.throws(
+    () => fleetPublicationPaths({
+      repoRoot: process.cwd(),
+      options: { fleetProof: '/private/fleet/proof.json' },
+      env: {},
+    }),
+    /must be supplied together/i,
+  )
+})
+
 test('canonical mutation gate rejects a symlinked stage directory', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-stage-symlink-test-'))
   const exact = join(root, 'exact')
@@ -1297,7 +1370,7 @@ test('canonical mutation gate rejects a symlinked stage directory', () => {
   assert.doesNotThrow(() => assertRealStageDirectory(exact))
 })
 
-test('every remaining publisher runs only after exact fleet validation', () => {
+test('every remaining publisher runs only after exact mutation validation', () => {
   const source = readFileSync(
     join(process.cwd(), 'scripts/local-release.mjs'),
     'utf8',
@@ -1311,9 +1384,9 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   )
   const staged = source.slice(stagedStart, stagedEnd)
   assert.ok(stagedStart >= 0 && stagedEnd > stagedStart)
-  assert.ok(
-    staged.indexOf('authorizeFreshFleetPublication({')
-    < staged.indexOf('publishRelease({'),
+  assert.match(
+    staged,
+    /if \(fleetPublication\) \{[\s\S]*?authorizeFreshFleetPublication\(\{/,
   )
   assert.ok(
     staged.indexOf('preflightHtreeRelease({')
@@ -1329,20 +1402,11 @@ test('every remaining publisher runs only after exact fleet validation', () => {
   )
   const promoteEnd = source.indexOf('\n  const steps = [', promoteStart)
   const promote = source.slice(promoteStart, promoteEnd)
-  const fleetValidation = promote.indexOf(
-    'assertAuthorizedFleetPublication({',
-  )
   assert.ok(promoteStart >= 0 && promoteEnd > promoteStart)
-  assert.ok(fleetValidation >= 0)
-  for (const publisher of [
-    'promoteStagedDraft({',
-    'publishExactGithubRelease({',
-    'publishRustCrates({',
-    'publishExactZapstoreRelease({',
-    'publishExactIosDistribution({',
-  ]) {
-    assert.ok(fleetValidation < promote.indexOf(publisher), publisher)
-  }
+  assert.match(
+    promote,
+    /if \(fleetPublication\) \{[\s\S]*?assertAuthorizedFleetPublication\(\{/,
+  )
   assert.match(
     promote,
     /promoteStagedDraft\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*\{[\s\S]*?preflightHtreeRelease\(\{[\s\S]*?replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
@@ -3051,16 +3115,17 @@ test('htree promotion requires an exact private publisher identity pin', () => {
   assert.match(publisher, /if \(expected !== npub\)/)
 })
 
-test('every mutating Apple distribution entry point requires the canonical fleet gate', () => {
+test('every mutating Apple distribution entry point requires the canonical exact-stage gate', () => {
   const releaseCommon = readFileSync(
     join(process.cwd(), 'scripts/release_common.sh'),
     'utf8',
   )
-  assert.match(releaseCommon, /require_var NVPN_FLEET_PROOF_PATH/)
+  assert.match(releaseCommon, /require_var NVPN_RELEASE_STAGE_DIR/)
   assert.match(
     releaseCommon,
-    /--fleet-proof "\$NVPN_FLEET_PROOF_PATH"[\s\S]*?--require-tag/,
+    /if \[\[ -n "\$\{NVPN_FLEET_RESULT_PATH:-\}[\s\S]*?--fleet-result[\s\S]*?--fleet-manifest[\s\S]*?--fleet-inventory[\s\S]*?--fleet-proof/,
   )
+  assert.match(releaseCommon, /--stage-dir "\$NVPN_RELEASE_STAGE_DIR"[\s\S]*?--require-tag/)
 
   const iosBuild = readFileSync(
     join(process.cwd(), 'scripts/ios-build'),
@@ -3434,7 +3499,7 @@ test('GitHub retry never repairs a conflicting release or asset', () => {
   }
 })
 
-test('Actions cannot mutate public releases and local promotion is fleet-gated', () => {
+test('Actions cannot mutate public releases and local promotion is exact-stage gated', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
   const trigger = workflow.slice(0, workflow.indexOf('\nenv:'))
   const localRelease = readFileSync(
@@ -3471,16 +3536,16 @@ test('Actions cannot mutate public releases and local promotion is fleet-gated',
   assert.doesNotMatch(releaseJob, /contents:\s*write/)
   assert.doesNotMatch(releaseJob, /action-gh-release|gh release create/)
   const promoteStart = localRelease.indexOf(
-    'if (options.promoteDraft) {',
+    'if (options.promoteDraft) {\n    if (!commandExists',
   )
   const promote = localRelease.slice(
     promoteStart,
     localRelease.indexOf('\n  const steps = [', promoteStart),
   )
-  const fleet = promote.indexOf('assertAuthorizedFleetPublication({')
+  const mutationGate = promote.indexOf('replayCanonicalMutationGate({')
   const preflight = promote.indexOf('preflightGithubRelease({')
   const publish = promote.indexOf('publishExactGithubRelease({')
-  assert.ok(fleet >= 0 && preflight > fleet && publish > preflight)
+  assert.ok(preflight >= 0 && mutationGate > preflight && publish > mutationGate)
 })
 
 test('GitHub platform builds run beside verification and join before release', () => {
