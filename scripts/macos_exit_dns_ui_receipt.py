@@ -116,7 +116,8 @@ def tracked_source_sha(root: pathlib.Path, source: pathlib.Path) -> str:
 def validate_app_receipt(
     receipt: dict[str, Any],
     app: pathlib.Path,
-    source: dict[str, str],
+    expected_app_head: str,
+    expected_app_tree: str,
 ) -> None:
     executable = app / "Contents" / "MacOS" / "Nostr VPN"
     if not executable.is_file() or not app.is_dir():
@@ -128,13 +129,17 @@ def validate_app_receipt(
         ("configuration", "Release"),
         ("builtOnHost", True),
         ("builtOnTestVm", False),
-        ("appGitSha", source["head"]),
-        ("appGitTree", source["tree"]),
-        ("appSourceManifestSha256", source["manifest"]),
+        ("appGitSha", expected_app_head),
+        ("appGitTree", expected_app_tree),
         ("appExecutableSha256", sha256_file(executable)),
         ("appBundleTreeSha256", tree_sha256(app)),
     ):
         require(receipt, name, expected)
+    normalized_hex(
+        receipt.get("appSourceManifestSha256"),
+        64,
+        "app source manifest SHA-256",
+    )
     signature = inspect_signature(app, deep=True)
     for name, expected in (
         ("team", receipt.get("signingTeam")),
@@ -156,14 +161,13 @@ def observed_driver(args: argparse.Namespace) -> dict[str, Any]:
         if not path.is_file():
             fail(f"required macOS Exit DNS artifact is missing: {path}")
     source = git_snapshot(root)
-    for name, actual, expected in (
-        ("appGitSha", source["head"], args.expected_app_head),
-        ("appGitTree", source["tree"], args.expected_app_tree),
-    ):
-        if actual != expected:
-            fail(f"{name} mismatch: expected {expected!r}, got {actual!r}")
     app_receipt = load_json(app_receipt_path)
-    validate_app_receipt(app_receipt, app, source)
+    validate_app_receipt(
+        app_receipt,
+        app,
+        args.expected_app_head,
+        args.expected_app_tree,
+    )
     expected_identity = normalized_hex(
         args.expected_identity_sha1, 40, "signing identity SHA-1"
     )
@@ -190,9 +194,14 @@ def observed_driver(args: argparse.Namespace) -> dict[str, Any]:
         "appArtifactReceiptSha256": sha256_file(app_receipt_path),
         "appExecutableSha256": app_receipt["appExecutableSha256"],
         "appBundleTreeSha256": app_receipt["appBundleTreeSha256"],
-        "appGitSha": source["head"],
-        "appGitTree": source["tree"],
-        "appSourceManifestSha256": source["manifest"],
+        "appGitSha": app_receipt["appGitSha"],
+        "appGitTree": app_receipt["appGitTree"],
+        "appSourceManifestSha256": app_receipt[
+            "appSourceManifestSha256"
+        ],
+        "harnessGitSha": source["head"],
+        "harnessGitTree": source["tree"],
+        "harnessSourceManifestSha256": source["manifest"],
         "fipsGitSha": app_receipt["fipsGitSha"],
         "fipsGitTree": app_receipt["fipsGitTree"],
         "fipsCoreVersion": app_receipt["fipsCoreVersion"],
@@ -229,6 +238,8 @@ def validate_driver(args: argparse.Namespace) -> None:
         "appBundleTreeSha256": observed["appBundleTreeSha256"],
         "appGitSha": observed["appGitSha"],
         "appGitTree": observed["appGitTree"],
+        "harnessGitSha": observed["harnessGitSha"],
+        "harnessGitTree": observed["harnessGitTree"],
         "driverExecutableSha256": observed["driverExecutableSha256"],
         "driverSourceSha256": observed["driverSourceSha256"],
         "driverCodeDirectoryHash": observed["driverCodeDirectoryHash"],

@@ -185,6 +185,8 @@ for required in (
     '"appArtifactReceiptSha256"',
     '"driverReceiptSha256"',
     '"canonicalProfileRestored": True',
+    '"harnessGitSha"',
+    '"harnessGitTree"',
 ):
     if required not in receipt:
         raise SystemExit(f"macOS DNS receipt contract lacks {required}")
@@ -192,6 +194,97 @@ PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-dns-contract.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+python3 - "$RECEIPT" "$tmp" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+from types import SimpleNamespace
+
+helper = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / "identity-contract"
+root.mkdir(parents=True)
+sys.path.insert(0, str(helper.parent))
+spec = importlib.util.spec_from_file_location("macos_exit_dns_ui_receipt", helper)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+product_head = "50ee66ed6c112ebc2100aa9bd6afa21f2a21a0c0"
+product_tree = "ff5866ae8421c56b343ac0e25a00dcb82f8547ef"
+harness_head = "5fb33509d27358befc386b502c16f2727715d2e6"
+harness_tree = "1" * 40
+identity = "2" * 40
+signer = "3" * 64
+team = "TEAM123456"
+
+app = root / "Nostr VPN.app"
+executable = app / "Contents" / "MacOS" / "Nostr VPN"
+executable.parent.mkdir(parents=True)
+executable.write_bytes(b"exact product executable")
+driver = root / "macos-exit-dns-ax"
+driver.write_bytes(b"current harness driver")
+driver_source = root / "macos-exit-dns-ax.swift"
+driver_source.write_text("// current harness source\n", encoding="utf-8")
+app_receipt = {
+    "receiptSchema": 1,
+    "artifactType": "macOS company Developer ID Release gate package",
+    "companySigningVerified": True,
+    "configuration": "Release",
+    "builtOnHost": True,
+    "builtOnTestVm": False,
+    "appGitSha": product_head,
+    "appGitTree": product_tree,
+    "appSourceManifestSha256": "4" * 64,
+    "appExecutableSha256": module.sha256_file(executable),
+    "appBundleTreeSha256": module.tree_sha256(app),
+    "fipsGitSha": "5" * 40,
+    "fipsGitTree": "6" * 40,
+    "fipsCoreVersion": "0.4.54",
+    "signingTeam": team,
+    "appCodeDirectoryHash": "7" * 40,
+    "signingIdentitySha1": identity,
+    "signerCertificateSha256": signer,
+}
+app_receipt_path = root / "artifact.json"
+app_receipt_path.write_text(json.dumps(app_receipt), encoding="utf-8")
+
+module.git_snapshot = lambda _root: {
+    "head": harness_head,
+    "tree": harness_tree,
+    "manifest": "8" * 64,
+}
+module.tracked_source_sha = lambda _root, _source: "9" * 64
+module.inspect_signature = lambda path, deep=False: {
+    "team": team,
+    "cdhash": "7" * 40 if pathlib.Path(path).suffix == ".app" else "a" * 40,
+    "certificateSha1": identity,
+    "certificateSha256": signer,
+}
+module.verify_signature = lambda *args, **kwargs: None
+
+observed = module.observed_driver(
+    SimpleNamespace(
+        app_root=str(root),
+        driver_source=str(driver_source),
+        driver=str(driver),
+        app=str(app),
+        app_receipt=str(app_receipt_path),
+        expected_app_head=product_head,
+        expected_app_tree=product_tree,
+        expected_team=team,
+        expected_identity_sha1=identity,
+        expected_signer_sha256=signer,
+    )
+)
+if observed["appGitSha"] != product_head or observed["appGitTree"] != product_tree:
+    raise SystemExit("driver receipt replaced the exact product identity")
+if observed["appSourceManifestSha256"] != app_receipt["appSourceManifestSha256"]:
+    raise SystemExit("driver receipt replaced the exact product source manifest")
+if observed["harnessGitSha"] != harness_head or observed["harnessGitTree"] != harness_tree:
+    raise SystemExit("driver receipt did not bind the current harness identity")
+PY
+
 python3 - "$RECEIPT" "$tmp" <<'PY'
 import hashlib
 import json

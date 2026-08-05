@@ -78,7 +78,7 @@ if (
 \$ErrorActionPreference = 'Stop'
 \$env:CARGO_TARGET_DIR = '$GUEST_ARTIFACT_ROOT\\windows-ui-e2e-cargo'
 & '$GUEST_REPO\\scripts\\e2e-windows-service-toggle.ps1' -AppExe '__NVPN_EXACT_APP__' -ArtifactRoot '$GUEST_ARTIFACT_ROOT\\windows-service-toggle'
-'@.Replace('__NVPN_EXACT_APP__', \$app.Replace([char]39, ([string][char]39 + [char]39))) |
+'@.Replace('__NVPN_EXACT_APP__', \$app.Replace([string][char]39, ([string][char]39 + [char]39))) |
   Set-Content -Encoding utf8 \$interactiveWrapper"
 
 "$ROOT/scripts/windows-vm-wake-display.sh"
