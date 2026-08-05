@@ -368,6 +368,33 @@ fn paid_exit_collect_requires_seller_mode() {
     );
 }
 
+#[test]
+fn paid_exit_discover_accepts_the_shared_gui_command_contract() {
+    let dir = TestDir::new("nvpn-paid-exit-cli-discover");
+    let config_path = dir.path().join("config.toml");
+    let ratings_path = dir.path().join("ratings.json");
+    std::fs::write(&ratings_path, r#"{"ratings":[]}"#).expect("write ratings fixture");
+
+    let discover = run_nvpn([
+        "paid-exit",
+        "discover",
+        "--config",
+        config_path.to_str().expect("utf8 config path"),
+        "--json",
+        "--fips-peer-ratings",
+        ratings_path.to_str().expect("utf8 ratings path"),
+        "--trusted-rating-author",
+        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "--rating-scope",
+        "fips.peer.test",
+    ]);
+
+    assert_success(&discover);
+    let json = output_json(&discover);
+    assert_eq!(json["count"].as_u64(), Some(0));
+    assert_eq!(json["ratings"]["scope"].as_str(), Some("fips.peer.test"));
+}
+
 fn run_nvpn<I, S>(args: I) -> Output
 where
     I: IntoIterator<Item = S>,

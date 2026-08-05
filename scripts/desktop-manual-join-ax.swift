@@ -388,6 +388,29 @@ func run() throws {
             timeout: 15
         )
         emit("NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=\(args[3])")
+    case "paid-exit-discover":
+        try press(application, "paid-exit-discover")
+        let deadline = Date().addingTimeInterval(15)
+        repeat {
+            let visible = visibleElements(application)
+            if let failure = visibleActionFailure(visible) {
+                throw DriverError.failedAction(failure)
+            }
+            if let control = visible.first(where: {
+                stringAttribute($0, kAXIdentifierAttribute) == "paid-exit-discover"
+            }), boolAttribute(control, kAXEnabledAttribute) == true {
+                Thread.sleep(forTimeInterval: 0.5)
+                if let failure = visibleActionFailure(visibleElements(application)) {
+                    throw DriverError.failedAction(failure)
+                }
+                emit("NVPN_PAID_EXIT_DISCOVER_COMPLETE=1")
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        guard Date() < deadline else {
+            throw DriverError.missing("paid-exit discovery completion")
+        }
     default:
         throw DriverError.usage(
             "unsupported phase \(args[2])"

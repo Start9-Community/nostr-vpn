@@ -716,7 +716,7 @@ exit 0
 
     #[cfg(all(unix, feature = "paid-exit"))]
     #[test]
-    fn discover_paid_route_offers_passes_configured_rating_sources() {
+    fn discover_paid_route_offers_passes_supported_rating_sources() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = unique_service_test_dir("nvpn-app-core-paid-rating-discover");
@@ -762,11 +762,11 @@ exit 0
         assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
         let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
         assert!(calls.contains("paid-exit discover --config"));
-        assert!(calls.contains("--duration-secs 5 --json"));
+        assert!(calls.contains("--json"));
+        assert!(!calls.contains("--duration-secs"));
         assert!(calls.contains("--fips-peer-ratings"));
         assert!(calls.contains(rating_path.to_string_lossy().as_ref()));
-        assert!(calls.contains("--fips-peer-ratings-relay wss://ratings-a.example"));
-        assert!(calls.contains("--fips-peer-ratings-relay wss://ratings-b.example"));
+        assert!(!calls.contains("--fips-peer-ratings-relay"));
         assert!(calls.contains("--trusted-rating-author npub1author"));
         assert!(calls.contains("--rating-scope fips.peer.test"));
 

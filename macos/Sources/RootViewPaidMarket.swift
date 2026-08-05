@@ -51,6 +51,7 @@ extension RootView {
                 }
                 .controlSize(.small)
                 .disabled(manager.actionInFlight || !market.supported)
+                .accessibilityIdentifier("paid-exit-discover")
             }
 
             if !market.statusText.isEmpty {

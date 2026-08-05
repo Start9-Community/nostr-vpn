@@ -45,7 +45,7 @@ pub(crate) fn daemon_instance_lock_file_path_for_instance(
                 std::process::id()
             ));
         let runtime_dir = daemon_instance.map_or(base.clone(), |id| base.join(id));
-        return Ok(runtime_dir.join("daemon.instance.lock"));
+        Ok(runtime_dir.join("daemon.instance.lock"))
     }
 
     #[cfg(all(not(test), unix))]
