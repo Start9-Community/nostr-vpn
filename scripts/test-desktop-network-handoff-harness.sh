@@ -124,6 +124,12 @@ require_tokens "$LINUX_CLEANUP_FAULT" "successful interface lookup status" \
   'basename "$(dirname "$path")"' \
   'return 0' \
   'return 1'
+require_tokens "$LINUX_GUEST" "short owned netlink probe runtime" \
+  'local probe_dir="/tmp/nvpn-pnm-$$-${RANDOM}"' \
+  'local join_socket_probe="$probe_dir/.nvpn-runtime/join-0000000000000000.sock"' \
+  '((${#join_socket_probe} <= 107))' \
+  '[[ ! -e "$probe_dir" ]]' \
+  '[[ -d "$probe_dir" && -O "$probe_dir" && ! -L "$probe_dir" ]]'
 require_tokens "$LINUX_SYNC" "isolated exact-source sync support" \
   'NVPN_UBUNTU_LOCAL_REPO_PATH' \
   'NVPN_UBUNTU_SSH_JUMP' \

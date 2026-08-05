@@ -315,10 +315,20 @@ test_https() {
 
 probe_production_platform_network_monitor() (
   local interface="$1"
-  local probe_dir="$STATE_DIR/platform-network-monitor-probe"
+  # Keep the production join-request Unix socket below Linux's 107-byte limit.
+  local probe_dir="/tmp/nvpn-pnm-$$-${RANDOM}"
   local probe_config="$probe_dir/config.toml"
   local probe_iface="nvmp${RANDOM}"
   local probe_pid=""
+  local join_socket_probe="$probe_dir/.nvpn-runtime/join-0000000000000000.sock"
+  case "$probe_dir" in
+    /tmp/nvpn-pnm-*) ;;
+    *) fail "unsafe platform-network monitor probe directory" ;;
+  esac
+  ((${#join_socket_probe} <= 107)) \
+    || fail "platform-network monitor probe Unix socket path is too long"
+  [[ ! -e "$probe_dir" ]] \
+    || fail "platform-network monitor probe directory already exists"
   cleanup_probe() {
     if [[ -n "$probe_pid" ]]; then
       "$BINARY" stop --config "$probe_config" --timeout-secs 3 --force \
@@ -326,12 +336,16 @@ probe_production_platform_network_monitor() (
       kill "$probe_pid" >/dev/null 2>&1 || true
       wait "$probe_pid" >/dev/null 2>&1 || true
     fi
-    rm -rf "$probe_dir"
+    if [[ -d "$probe_dir" && -O "$probe_dir" && ! -L "$probe_dir" ]]; then
+      rm -rf "$probe_dir"
+    fi
   }
   trap cleanup_probe EXIT
 
   mkdir -p "$probe_dir"
   chmod 700 "$probe_dir"
+  [[ -d "$probe_dir" && -O "$probe_dir" && ! -L "$probe_dir" ]] \
+    || fail "platform-network monitor probe directory ownership is unsafe"
   "$BINARY" init --config "$probe_config" --force >/dev/null
   "$BINARY" daemon \
     --paused \
