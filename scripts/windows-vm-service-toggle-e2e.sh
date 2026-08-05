@@ -100,20 +100,36 @@ while kill -0 "$interactive_pid" >/dev/null 2>&1; do
     continue
   }
   if [[ "$state" == *NVPN_CONSENT_PRESENT* ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
-      virsh send-key "$VM_NAME" KEY_ESC
-    consent_deadline=$((SECONDS + 10))
-    while ((SECONDS < consent_deadline)); do
-      state="$(consent_state 2>/dev/null)" || {
-        echo "Windows UAC close state could not be queried" >&2
-        consent_cancel_failed=1
-        break 2
-      }
-      if [[ "$state" == *NVPN_CONSENT_CLOSED* ]]; then
-        break 2
-      fi
+    consent_stable_count=0
+    while ((consent_stable_count < 3)); do
       sleep 0.1
+      state="$(consent_state 2>/dev/null)" || continue 2
+      if [[ "$state" != *NVPN_CONSENT_PRESENT* ]]; then
+        continue 2
+      fi
+      consent_stable_count=$((consent_stable_count + 1))
     done
+    consent_deadline=$((SECONDS + 10))
+    for consent_attempt in 1 2 3; do
+      kill -0 "$interactive_pid" >/dev/null 2>&1 || break
+      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+        virsh send-key "$VM_NAME" KEY_ESC
+      consent_attempt_deadline=$((SECONDS + 2))
+      while ((SECONDS < consent_deadline \
+        && SECONDS < consent_attempt_deadline)); do
+        state="$(consent_state 2>/dev/null)" || {
+          echo "Windows UAC close state could not be queried" >&2
+          consent_cancel_failed=1
+          break 3
+        }
+        if [[ "$state" == *NVPN_CONSENT_CLOSED* ]]; then
+          break 3
+        fi
+        sleep 0.1
+      done
+    done
+    state="$(consent_state 2>/dev/null)" || state=""
+    [[ "$state" == *NVPN_CONSENT_CLOSED* ]] && break
     echo "Windows UAC consent prompt survived VM-console cancellation" >&2
     consent_cancel_failed=1
     break

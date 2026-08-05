@@ -612,6 +612,13 @@ grep -Fq 'Get-Process consent' "$windows_service_wrapper" \
   || fail "Windows service-toggle VM runner does not observe the real UAC process"
 grep -Fq 'virsh send-key "$VM_NAME" KEY_ESC' "$windows_service_wrapper" \
   || fail "Windows service-toggle VM runner cannot cancel the secure-desktop prompt"
+grep -Fq 'while ((consent_stable_count < 3))' "$windows_service_wrapper" \
+  && grep -Fq 'for consent_attempt in 1 2 3' "$windows_service_wrapper" \
+  && grep -Fq 'kill -0 "$interactive_pid"' "$windows_service_wrapper" \
+  || fail "Windows UAC cancellation does not wait for and retry the real prompt"
+if grep -Eq 'virsh send-key .*KEY_(ENTER|SPACE)' "$windows_service_wrapper"; then
+  fail "Windows UAC cancellation can approve the secure-desktop prompt"
+fi
 grep -Fq 'consent_cancel_failed=1' "$windows_service_wrapper" \
   && grep -Fq 'wait "$interactive_pid"' "$windows_service_wrapper" \
   && grep -Fq 'NVPN_CONSENT_CLOSED' "$windows_service_wrapper" \
