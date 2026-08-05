@@ -1090,8 +1090,8 @@ function buildLinuxArtifacts({
   const verificationPlan = linuxPublicationVerificationPlan({
     env,
     tag,
-    candidateCommit: gateReceipt.appGitSha,
-    candidateTree: gateReceipt.appGitTree,
+    candidateCommit,
+    candidateTree,
     gateReceipt,
     packageInstallReceipt,
     bundlePath: gatedBundle,

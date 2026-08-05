@@ -9,6 +9,7 @@ import {
   semverFromTag,
   sha256FileSync,
 } from './local-release-lib.mjs'
+import { proveUnchangedPlatformInputs } from './release-component-source.mjs'
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url))
 const defaultCandidateRoot = resolve(scriptsDir, '..')
@@ -501,6 +502,18 @@ export function linuxPublicationVerificationPlan({
   })
   const actualCommit = candidateGit.commit
   const actualTree = candidateGit.tree
+  const artifactCommit = String(gateReceipt?.appGitSha ?? '')
+  const artifactTree = String(gateReceipt?.appGitTree ?? '')
+  if (artifactCommit !== actualCommit || artifactTree !== actualTree) {
+    proveUnchangedPlatformInputs({
+      candidateRoot: exactCandidateRoot,
+      platform: 'linux',
+      receiptCommit: artifactCommit,
+      receiptTree: artifactTree,
+      candidateCommit: actualCommit,
+      candidateTree: actualTree,
+    })
+  }
 
   const rootManifestPath = join(exactCandidateRoot, 'Cargo.toml')
   requireRegularFile(rootManifestPath, 'Linux publication workspace manifest')
@@ -581,7 +594,7 @@ export function linuxPublicationVerificationPlan({
   const dockerfileSha256 = sha256FileSync(dockerfilePath)
   const containerPayloadSha256 = sha256FileSync(containerPayloadPath)
   const sourceDateEpoch = Number(
-    captureRequired('git', ['log', '-1', '--format=%ct', actualCommit], {
+    captureRequired('git', ['log', '-1', '--format=%ct', artifactCommit], {
       cwd: exactCandidateRoot,
       env: commandEnv,
       label: 'Linux publication source date epoch',
@@ -614,8 +627,8 @@ export function linuxPublicationVerificationPlan({
       schema: 2,
       builderMode,
       ...expectedBuilder,
-      appGitSha: actualCommit,
-      appGitTree: actualTree,
+      appGitSha: artifactCommit,
+      appGitTree: artifactTree,
       appVersion,
       fipsGitSha: fips.fipsGitSha,
       fipsGitTree: fips.fipsGitTree,
@@ -671,8 +684,8 @@ export function linuxPublicationVerificationPlan({
     {
       schema: 2,
       artifactType: 'exact Debian package installed on Ubuntu VM',
-      appGitSha: actualCommit,
-      appGitTree: actualTree,
+      appGitSha: artifactCommit,
+      appGitTree: artifactTree,
       fipsGitSha: fips.fipsGitSha,
       fipsGitTree: fips.fipsGitTree,
       appVersion,
@@ -715,8 +728,8 @@ export function linuxPublicationVerificationPlan({
     verifierArgs: [
       exactBundlePath,
       exactBundleReceiptPath,
-      actualCommit,
-      actualTree,
+      artifactCommit,
+      artifactTree,
       appVersion,
       fips.fipsGitSha,
       fips.fipsGitTree,

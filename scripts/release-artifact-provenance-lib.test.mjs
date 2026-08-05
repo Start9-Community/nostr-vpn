@@ -972,8 +972,8 @@ test('release receipt collection requires exact source and strict public UI gate
           fipsGitTree: androidArtifact.fipsGitTree,
           artifactReceiptSha256: sha256(androidText),
           artifactReceiptSize: Buffer.byteLength(androidText),
-          installReceiptSha256: sha256(androidInstallText),
-          installReceiptSize: Buffer.byteLength(androidInstallText),
+          installReceiptSha256: sha256('independent exact macOS join install'),
+          installReceiptSize: 820,
           apkSha256: androidArtifact.apkSha256,
           installedApkSha256: androidArtifact.installedApkSha256,
           package: androidArtifact.package,
@@ -1332,6 +1332,27 @@ test('release receipt collection requires exact source and strict public UI gate
       releaseGateSummaryPath: summary,
       platformReceiptPaths: paths,
     }))
+    const separateAndroidUnderlayPath = paths.android.underlay_lifecycle
+    paths.android.underlay_lifecycle = paths.android.wireguard_dns
+    assert.doesNotThrow(() => collectReleaseGateReceipts({
+      commit,
+      tree,
+      releaseGateSummaryPath: summary,
+      platformReceiptPaths: paths,
+    }))
+    paths.android.underlay_lifecycle = separateAndroidUnderlayPath
+    const separateAndroidUnderlayText = readFileSync(
+      separateAndroidUnderlayPath,
+      'utf8',
+    )
+    rmSync(separateAndroidUnderlayPath)
+    assert.doesNotThrow(() => collectReleaseGateReceipts({
+      commit,
+      tree,
+      releaseGateSummaryPath: summary,
+      platformReceiptPaths: paths,
+    }))
+    writeFileSync(separateAndroidUnderlayPath, separateAndroidUnderlayText)
     combinedWireguard.coveredModes = ['wireguard-dns', 'underlay-lifecycle']
     delete combinedWireguard.support.underlayCycles
     writeFileSync(
@@ -1472,6 +1493,13 @@ test('release receipt collection requires exact source and strict public UI gate
       /macOS\/mobile public-UI join receipt is incomplete/,
     )
     assertRejectedReceiptMutation(
+      macosJoinPath,
+      (receipt) => {
+        receipt.artifact.android.installReceiptSha256 = 'invalid'
+      },
+      /macOS\/Android join install receipt/i,
+    )
+    assertRejectedReceiptMutation(
       paths.windows.public_ui_join,
       (receipt) => {
         receipt.artifact.android.artifactReceiptSha256 = '0'.repeat(64)
@@ -1481,9 +1509,9 @@ test('release receipt collection requires exact source and strict public UI gate
     assertRejectedReceiptMutation(
       paths.android.install,
       (receipt) => {
-        receipt.preexistingCanonicalPackage = false
+        receipt.replacementInstall = false
       },
-      /macOS\/mobile public-UI join receipt is incomplete/,
+      /install receipt is not bound to the exact physical artifact/,
     )
     assertRejectedReceiptMutation(
       paths.android.install,

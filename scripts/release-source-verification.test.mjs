@@ -187,8 +187,8 @@ function sha256(path) {
 }
 
 const fipsPackages = {
-  'fips-core': '0.4.53',
-  'fips-endpoint': '0.4.53',
+  'fips-core': '0.4.54',
+  'fips-endpoint': '0.4.54',
   'fips-identity': '0.3.2',
 }
 const fipsSpecs = Object.entries(fipsPackages).map(
@@ -413,6 +413,8 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     env = exactEnv,
     hostPlatform = 'darwin',
     hostArch = 'arm64',
+    verificationCommit = candidateCommit,
+    verificationTree = candidateTree,
   } = {}) => {
     writeFileSync(
       bundleReceiptPath,
@@ -422,8 +424,8 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     return linuxPublicationVerificationPlan({
       env,
       tag: 'v4.1.5',
-      candidateCommit,
-      candidateTree,
+      candidateCommit: verificationCommit,
+      candidateTree: verificationTree,
       gateReceipt,
       packageInstallReceipt: {
         ...packageInstallReceipt,
@@ -543,6 +545,30 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
       }),
     /arm64.*remote-native|remote-native.*arm64/i,
   )
+
+  mkdirSync(join(root, 'docs'), { recursive: true })
+  writeFileSync(join(root, 'docs', 'harness-only-note'), 'unchanged Linux inputs\n')
+  capture('git', ['add', 'docs/harness-only-note'], root)
+  capture(
+    'git',
+    [
+      '-c',
+      'user.name=Release Test',
+      '-c',
+      'user.email=release-test@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'harness-only change',
+    ],
+    root,
+  )
+  const verificationCommit = capture('git', ['rev-parse', 'HEAD'], root)
+  const verificationTree = capture('git', ['rev-parse', 'HEAD^{tree}'], root)
+  assert.doesNotThrow(() => planFor({
+    verificationCommit,
+    verificationTree,
+  }))
 })
 
 test('Windows publication requires installer and artifact receipts to bind exact FIPS', () => {

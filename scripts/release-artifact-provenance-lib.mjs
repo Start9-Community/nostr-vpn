@@ -677,8 +677,6 @@ function requireMacosJoinReceipt({
   artifactReceiptSha256,
   androidArtifact,
   androidArtifactReceiptSha256,
-  androidInstallReceiptSha256,
-  androidInstallReceiptSize,
   iosJoinVariant,
   iosJoinVariantReceiptSha256,
   commit,
@@ -695,6 +693,16 @@ function requireMacosJoinReceipt({
     label: 'macOS/mobile public-UI join receipt',
   })
   const android = receipt.artifact?.android
+  requireSha256(
+    android?.installReceiptSha256,
+    'macOS/Android join install receipt',
+  )
+  if (
+    !Number.isSafeInteger(android?.installReceiptSize)
+    || android.installReceiptSize <= 0
+  ) {
+    throw new Error('macOS/Android join install receipt size is invalid.')
+  }
   if (
     receipt.appLaunchArgumentsOrEnvironment !== false
     || receipt.desktopAdminAndroidJoiner !== true
@@ -709,8 +717,6 @@ function requireMacosJoinReceipt({
     || receipt.artifact?.appExecutableSha256
       !== artifactReceipt.appExecutableSha256
     || android?.artifactReceiptSha256 !== androidArtifactReceiptSha256
-    || android?.installReceiptSha256 !== androidInstallReceiptSha256
-    || android?.installReceiptSize !== androidInstallReceiptSize
     || receipt.artifact?.ios?.artifactReceiptSha256
       !== iosJoinVariantReceiptSha256
   ) {
@@ -768,8 +774,6 @@ function requireDesktopMobileJoinReceipt({
   desktopArtifactReceiptSha256,
   androidArtifact,
   androidArtifactReceiptSha256,
-  androidInstallReceiptSha256,
-  androidInstallReceiptSize,
 }) {
   const label = `${platform} / Pixel public-UI join receipt`
   requirePublicUiJoinReceipt(receipt, platform, label, 2)
@@ -805,6 +809,16 @@ function requireDesktopMobileJoinReceipt({
   const desktop = evidence?.desktop
   const android = evidence?.android
   const artifacts = desktopArtifact.artifacts
+  requireSha256(
+    android?.installReceiptSha256,
+    `${platform} / Pixel join install receipt`,
+  )
+  if (
+    !Number.isSafeInteger(android?.installReceiptSize)
+    || android.installReceiptSize <= 0
+  ) {
+    throw new Error(`${label} has an invalid install receipt size.`)
+  }
   if (
     !desktop
     || desktop.artifactReceiptSha256 !== desktopArtifactReceiptSha256
@@ -831,8 +845,6 @@ function requireDesktopMobileJoinReceipt({
     || android.package !== androidArtifact.package
     || android.signerCertificateSha256
       !== androidArtifact.signerCertificateSha256
-    || android.installReceiptSha256 !== androidInstallReceiptSha256
-    || android.installReceiptSize !== androidInstallReceiptSize
   ) {
     throw new Error(`${label} is not bound to the exact desktop/Android artifacts.`)
   }
@@ -882,7 +894,7 @@ function requireMobileNetworkReceipt({
   tree,
 }) {
   const coveredModes = receipt.coveredModes
-  const combined = mode === 'wireguard-dns'
+  const combined = receipt.mode === 'wireguard-dns'
     && JSON.stringify(coveredModes)
       === JSON.stringify(['wireguard-dns', 'underlay-lifecycle'])
   if (
@@ -892,7 +904,8 @@ function requireMobileNetworkReceipt({
   ) {
     throw new Error(`${platform} ${mode} receipt has invalid covered modes.`)
   }
-  const expectedCases = mode === 'wireguard-dns'
+  const receiptMode = combined ? 'wireguard-dns' : mode
+  const expectedCases = receiptMode === 'wireguard-dns'
     ? [
         'automatic-profile',
         'cloudflare-doh',
@@ -903,9 +916,9 @@ function requireMobileNetworkReceipt({
     : ['automatic-profile']
   if (
     receipt.receiptSchema !== 1
-    || receipt.artifactType !== `physical ${platform} Release ${mode} gate`
+    || receipt.artifactType !== `physical ${platform} Release ${receiptMode} gate`
     || receipt.platform !== platform
-    || receipt.mode !== mode
+    || receipt.mode !== receiptMode
     || receipt.appGitSha !== commit
     || receipt.appGitTree !== tree
     || receipt.fipsGitSha !== artifact.fipsGitSha
@@ -1024,21 +1037,21 @@ function requireMobileNetworkReceipt({
     requireSha256(digest, `${platform} ${mode} evidence file`)
   }
   if (
-    mode === 'wireguard-dns'
+    receiptMode === 'wireguard-dns'
     && platform === 'ios'
     && receipt.support?.rapidStartStopCycles !== 8
   ) {
     throw new Error('iOS WireGuard/DNS receipt lacks eight rapid start/stop cycles.')
   }
   if (
-    mode === 'wireguard-dns'
+    receiptMode === 'wireguard-dns'
     && platform === 'android'
     && receipt.support?.startStopCycles !== 2
   ) {
     throw new Error('Android WireGuard/DNS receipt lacks two semantic start/stop cycles.')
   }
   if (
-    mode === 'wireguard-dns'
+    receiptMode === 'wireguard-dns'
     && platform === 'android'
     && receipt.support?.directBeforeConnectedAfter !== true
   ) {
@@ -1443,12 +1456,21 @@ function collectReleaseGateEvidence({
   const androidInstallReceiptSize = readFileSync(
     platformReceiptPaths.android.install,
   ).byteLength
+  const androidNetworkReceiptPaths = {
+    wireguard_dns: platformReceiptPaths.android.wireguard_dns,
+    underlay_lifecycle: existsSync(
+      platformReceiptPaths.android.underlay_lifecycle,
+    )
+      ? platformReceiptPaths.android.underlay_lifecycle
+      : platformReceiptPaths.android.wireguard_dns,
+  }
   for (const [name, mode] of [
     ['wireguard_dns', 'wireguard-dns'],
     ['underlay_lifecycle', 'underlay-lifecycle'],
   ]) {
+    const receiptPath = androidNetworkReceiptPaths[name]
     const receipt = readRequiredJson(
-      platformReceiptPaths.android[name],
+      receiptPath,
       `Physical Android ${mode} receipt`,
     )
     requireMobileNetworkReceipt({
@@ -1628,8 +1650,6 @@ function collectReleaseGateEvidence({
     ),
     androidArtifact: android,
     androidArtifactReceiptSha256: androidReceiptSha256,
-    androidInstallReceiptSha256,
-    androidInstallReceiptSize,
     iosJoinVariant,
     iosJoinVariantReceiptSha256,
     commit: macosSource.commit,
@@ -1786,8 +1806,6 @@ function collectReleaseGateEvidence({
       ),
       androidArtifact: android,
       androidArtifactReceiptSha256: androidReceiptSha256,
-      androidInstallReceiptSha256,
-      androidInstallReceiptSize,
     })
     const network = readRequiredJson(
       platformReceiptPaths[platform].network,
@@ -1809,7 +1827,11 @@ function collectReleaseGateEvidence({
         Object.fromEntries(
           Object.entries(receipts).map(([name, path]) => [
             name,
-            sha256FileSync(path),
+            sha256FileSync(
+              platform === 'android' && androidNetworkReceiptPaths[name]
+                ? androidNetworkReceiptPaths[name]
+                : path,
+            ),
           ]),
         ),
       ]),
