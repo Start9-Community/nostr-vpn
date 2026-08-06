@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 
 const platforms = ['android', 'ios', 'linux', 'macos', 'windows']
+const desktopPlatforms = new Set(['linux', 'macos', 'windows'])
 const sharedRoots = ['.cargo', 'assets', 'crates', 'docker', 'src', 'tools']
 const sharedFiles = [
   'Cargo.lock', 'Cargo.toml', 'build.rs', 'rust-toolchain',
@@ -15,6 +16,7 @@ const harnessOnlyPaths = new Set([
   'scripts/appstore-draft',
   'scripts/appstore_draft_metadata.py',
   'scripts/test_appstore_draft_metadata.py',
+  'scripts/e2e-fips-roaming-docker.sh',
   'scripts/e2e-web-startos-manual-join-docker.sh',
   'scripts/capture-mobile-ios-underlay-output.py',
   'scripts/desktop-manual-join-ax.swift',
@@ -100,6 +102,23 @@ function git(root, args, label) {
 
 function isProductInput(path, platform) {
   if (harnessOnlyPaths.has(path)) return false
+  if (
+    path.startsWith('crates/')
+    && (
+      /\/tests\//.test(path)
+      || /\/src\/tests\//.test(path)
+      || /\/tests(?:_[^/]+)?\.rs$/.test(path)
+    )
+  ) return false
+  if (path.startsWith('crates/nostr-vpn-cli/')) {
+    if (path === 'crates/nostr-vpn-cli/src/macos_service.rs') {
+      return platform === 'macos'
+    }
+    return desktopPlatforms.has(platform)
+  }
+  if (path.startsWith('crates/nostr-vpn-wintun/')) {
+    return platform === 'windows'
+  }
   const root = path.split('/')[0]
   if (sharedFiles.includes(path) || sharedRoots.includes(root)) return true
   if (platforms.includes(root)) {

@@ -197,6 +197,66 @@ test('component proof retains only unchanged platform product inputs', () => {
   }
 })
 
+test('component proof scopes desktop crates and Rust test modules', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-desktop-component-proof-'))
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  const paths = [
+    'crates/nostr-vpn-cli/src/session_runtime/fips_status_helpers.rs',
+    'crates/nostr-vpn-cli/src/macos_service.rs',
+    'crates/nostr-vpn-wintun/src/lib.rs',
+    'crates/nostr-vpn-cli/src/fips_private_mesh/tests_runtime.rs',
+    'crates/nostr-vpn-cli/src/session_runtime/tests.rs',
+    'crates/nostr-vpn-cli/src/tests/service_cli.rs',
+    'scripts/e2e-fips-roaming-docker.sh',
+  ]
+  try {
+    git('init', '-q')
+    git('config', 'user.name', 'Release Test')
+    git('config', 'user.email', 'release@example.invalid')
+    for (const path of paths) write(join(root, path), 'base\n')
+    git('add', '.')
+    git('commit', '-qm', 'receipt source')
+    const receiptCommit = git('rev-parse', 'HEAD')
+    const receiptTree = git('rev-parse', 'HEAD^{tree}')
+
+    const assertScope = (name, changedPaths, affected) => {
+      git('checkout', '-q', '-b', name, receiptCommit)
+      for (const path of changedPaths) write(join(root, path), 'changed\n')
+      git('add', '.')
+      git('commit', '-qm', name)
+      const args = {
+        candidateRoot: root,
+        receiptCommit,
+        receiptTree,
+        candidateCommit: git('rev-parse', 'HEAD'),
+        candidateTree: git('rev-parse', 'HEAD^{tree}'),
+      }
+      for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+        const prove = () => proveUnchangedPlatformInputs({
+          ...args,
+          platform,
+        })
+        if (affected.includes(platform)) {
+          assert.throws(prove, /changed product\/build input/)
+        } else {
+          assert.doesNotThrow(prove)
+        }
+      }
+    }
+
+    assertScope('shared-cli', [paths[0]], ['linux', 'macos', 'windows'])
+    assertScope('macos-service', [paths[1]], ['macos'])
+    assertScope('windows-wintun', [paths[2]], ['windows'])
+    assertScope('harness-only', paths.slice(3), [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('Android artifact survives the 8618306d8 harness delta but not a service change', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-android-harness-proof-'))
   const git = (...args) => {
