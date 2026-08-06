@@ -12,6 +12,7 @@ fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
         .expect("clock")
         .as_nanos();
     let directory = std::env::temp_dir().join(format!("nvpn-paid-exit-p2p-{nonce}"));
+    std::fs::create_dir_all(&directory).expect("create test directory");
     let config_path = directory.join("config.toml");
     let mut app = AppConfig::generated();
     app.nostr.relays.clear();
@@ -21,7 +22,35 @@ fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
     app.paid_exit.pricing.per_units = 1_000_000;
     app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
     app.paid_exit.normalize();
-    let now_unix = 1_000;
+    let now_unix = PAID_ROUTE_OFFER_TTL_SECS + 1_000;
+    let keys = app.nostr_keys().expect("seller keys");
+    let stale_signed_at = now_unix - PAID_ROUTE_OFFER_TTL_SECS;
+    let stale_offer = signed_paid_exit_offer_from_config(
+        "internet-exit",
+        &keys,
+        &app.paid_exit,
+        None,
+        stale_signed_at,
+    )
+    .expect("sign stale offer")
+    .offer()
+    .expect("decode stale offer");
+    let stale = SignedPaidRouteOffer::sign_expiring_at(
+        stale_offer,
+        &keys,
+        stale_signed_at,
+        now_unix + 100,
+    )
+    .expect("sign stale offer with misleading long expiration");
+    assert!(!stale.is_live_at(now_unix));
+    persist_paid_exit_offer_snapshot(
+        &paid_route_store_file_path(&config_path),
+        &stale,
+        &[],
+        &stale.offer().expect("stale offer"),
+        stale_signed_at,
+    )
+    .expect("store stale offer");
 
     let mut publisher = PaidExitOfferPublisher::load(&app, &config_path, now_unix);
     assert_eq!(
@@ -86,9 +115,9 @@ fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
             .collect::<Vec<_>>(),
         vec![
             (now_unix, PAID_ROUTE_OFFER_TTL_SECS),
-            (now_unix + 1, 5),
+            (now_unix + 1, 0),
             (now_unix + 2, PAID_ROUTE_OFFER_TTL_SECS),
-            (now_unix + 3, 5),
+            (now_unix + 3, 0),
         ]
     );
 

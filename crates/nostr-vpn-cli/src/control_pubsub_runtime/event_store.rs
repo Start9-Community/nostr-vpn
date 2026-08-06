@@ -338,11 +338,12 @@ fn rating_event_store_key(event: &Event) -> Option<(RatingEventStoreKey, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use nostr_sdk::{EventBuilder, Tag, Timestamp, ToBech32};
+    use nostr_sdk::{EventBuilder, ToBech32};
     use nostr_social_graph::Rating;
     use nostr_social_memory::RatingEventExt;
     use nostr_vpn_core::paid_routes::{
-        PAID_ROUTE_OFFER_TTL_SECS, PaidExitConfig, signed_paid_exit_offer_from_config,
+        PAID_ROUTE_OFFER_TTL_SECS, PaidExitConfig, SignedPaidRouteOffer,
+        signed_paid_exit_offer_from_config,
     };
 
     use super::*;
@@ -416,9 +417,9 @@ mod tests {
         let now = now_ms() / 1_000;
         let mut store =
             ControlEventStore::load(None, test_update_events()).expect("event store");
-        let older = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1), None);
-        let newer = paid_offer_event(&seller, "internet-exit", now, None);
-        let other = paid_offer_event(&other_seller, "internet-exit", now, None);
+        let older = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1));
+        let newer = paid_offer_event(&seller, "internet-exit", now);
+        let other = paid_offer_event(&other_seller, "internet-exit", now);
 
         assert!(store.insert(older.clone()).expect("insert older offer"));
         assert!(store.insert(other.clone()).expect("insert other seller"));
@@ -437,8 +438,14 @@ mod tests {
         let now = now_ms() / 1_000;
         let mut store =
             ControlEventStore::load(None, test_update_events()).expect("event store");
-        let live = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1), None);
-        let withdrawal = paid_offer_event(&seller, "internet-exit", now, Some(now));
+        let live = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1));
+        let offer = SignedPaidRouteOffer::from_event(live.clone())
+            .expect("live signed offer")
+            .offer()
+            .expect("live offer");
+        let withdrawal = SignedPaidRouteOffer::sign_expiring_at(offer, &seller, now, now)
+            .expect("immediate tombstone")
+            .event;
 
         assert!(store.insert(live).expect("insert live offer"));
         assert!(store.insert(withdrawal).expect("withdraw live offer"));
@@ -451,7 +458,7 @@ mod tests {
         let signed_at = now_ms() / 1_000;
         let mut store =
             ControlEventStore::load(None, test_update_events()).expect("event store");
-        let offer = paid_offer_event(&seller, "internet-exit", signed_at, None);
+        let offer = paid_offer_event(&seller, "internet-exit", signed_at);
 
         assert!(store.insert(offer).expect("insert paid offer"));
         assert_eq!(
@@ -539,32 +546,13 @@ mod tests {
         rating.to_event(author).expect("signed rating")
     }
 
-    fn paid_offer_event(
-        author: &Keys,
-        offer_id: &str,
-        signed_at: u64,
-        expires_at: Option<u64>,
-    ) -> Event {
+    fn paid_offer_event(author: &Keys, offer_id: &str, signed_at: u64) -> Event {
         let config = PaidExitConfig {
             enabled: true,
             ..PaidExitConfig::default()
         };
-        let signed = signed_paid_exit_offer_from_config(offer_id, author, &config, None, signed_at)
+        signed_paid_exit_offer_from_config(offer_id, author, &config, None, signed_at)
             .expect("signed paid offer")
-            .event;
-        let Some(expires_at) = expires_at else {
-            return signed;
-        };
-        let tags = signed
-            .tags
-            .iter()
-            .filter(|tag| tag.as_slice().first().map(String::as_str) != Some("expiration"))
-            .cloned()
-            .chain([Tag::expiration(Timestamp::from(expires_at))]);
-        EventBuilder::new(signed.kind, signed.content)
-            .tags(tags)
-            .custom_created_at(signed.created_at)
-            .sign_with_keys(author)
-            .expect("signed paid offer with custom expiry")
+            .event
     }
 }

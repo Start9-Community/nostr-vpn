@@ -148,9 +148,9 @@ impl SignedPaidRouteOffer {
         signed_at: u64,
         expires_at: u64,
     ) -> Result<Self> {
-        if expires_at <= signed_at {
+        if expires_at < signed_at {
             return Err(anyhow!(
-                "paid route offer expiration must follow its creation"
+                "paid route offer expiration cannot precede its creation"
             ));
         }
         validate_paid_route_offer(&offer)?;

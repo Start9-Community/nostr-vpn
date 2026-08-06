@@ -13,7 +13,6 @@ pub(super) const PAID_EXIT_DAEMON_STREAM_PAYMENT_LIMIT: usize = 4;
 pub(super) const PAID_EXIT_SESSION_OPEN_RETRY_SECS: u64 = 5;
 pub(super) const PAID_EXIT_OFFER_REFRESH_SECS: u64 =
     nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS / 4;
-const PAID_EXIT_OFFER_WITHDRAW_TTL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaidExitOfferPublication {
@@ -45,14 +44,9 @@ impl PaidExitOfferPublisher {
             .filter(|record| record.offer.seller_npub == own_npub)
             .collect::<Vec<_>>();
         Self {
-            advertised: own_offers.iter().any(|record| {
-                record
-                    .signed_offer
-                    .event
-                    .tags
-                    .expiration()
-                    .is_none_or(|expiration| expiration.as_secs() > now_unix)
-            }),
+            advertised: own_offers
+                .iter()
+                .any(|record| record.signed_offer.is_live_at(now_unix)),
             last_created_at: own_offers
                 .iter()
                 .map(|record| record.signed_offer.event.created_at.as_secs())
@@ -138,12 +132,7 @@ fn withdraw_paid_exit_offers_for_daemon(
         .collect::<Vec<_>>();
     let mut count = 0;
     for offer in offers {
-        let signed = SignedPaidRouteOffer::sign_expiring_at(
-            offer.clone(),
-            &keys,
-            signed_at,
-            signed_at.saturating_add(PAID_EXIT_OFFER_WITHDRAW_TTL_SECS),
-        )?;
+        let signed = SignedPaidRouteOffer::sign_expiring_at(offer, &keys, signed_at, signed_at)?;
         store.upsert_signed_offer(signed.clone(), Vec::new(), signed_at)?;
         publish_paid_exit_offer_pubsub(app, config_path, &signed)?;
         count += 1;

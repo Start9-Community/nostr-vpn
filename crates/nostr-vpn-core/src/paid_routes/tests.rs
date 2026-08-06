@@ -515,9 +515,14 @@ fn signed_offer_accepts_a_short_expiry_for_readiness_withdrawal() {
     assert_eq!(signed.offer().expect("decode short-lived offer"), offer);
     SignedPaidRouteOffer::from_event(signed.event).expect("verify short-lived offer");
 
-    let error =
+    let tombstone =
         SignedPaidRouteOffer::sign_expiring_at(sample_paid_exit_offer(&seller), &seller, 123, 123)
-            .expect_err("non-future expiry rejected");
+            .expect("sign immediate offer tombstone");
+    assert!(!tombstone.is_live_at(123));
+
+    let error =
+        SignedPaidRouteOffer::sign_expiring_at(sample_paid_exit_offer(&seller), &seller, 123, 122)
+            .expect_err("pre-creation expiry rejected");
     assert!(error.to_string().contains("expiration"));
 }
 
