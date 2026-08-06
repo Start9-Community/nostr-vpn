@@ -26,9 +26,13 @@ extension AppManager {
         ipv4: Bool,
         ipv6: Bool
     ) {
+        guard let priceMsat = Self.parsePaidExitPriceSats(priceSats) else {
+            actionError = "Enter the price in sats with up to three decimal places."
+            return
+        }
         dispatch(.updateSettings(patch: settingsPatch(
             paidExitUpstream: upstream,
-            paidExitPriceMsat: Self.parsePaidExitPriceSats(priceSats),
+            paidExitPriceMsat: priceMsat,
             paidExitPerUnits: Self.parsePaidExitPricingUnits(perUnits),
             paidExitAcceptedMints: acceptedMints,
             paidExitMaxChannelCapacitySat: UInt64(maxChannelCapacitySat.trimmingCharacters(in: .whitespacesAndNewlines)),

@@ -168,7 +168,10 @@ extension RootView {
             exitDnsThroughExitServers = state.exitDnsThroughExitServers
             lastSyncedExitDnsThroughExitServers = state.exitDnsThroughExitServers
         }
-        if lastSyncedPaidExitSeller != state.paidExitSeller {
+        if paidExitSellerDraftConfigChanged(
+            from: lastSyncedPaidExitSeller,
+            to: state.paidExitSeller
+        ) {
             let seller = state.paidExitSeller
             paidExitPriceSats = AppManager.formatPaidExitPriceSats(seller.priceMsat)
             paidExitPerUnits = fallbackText(seller.perUnitsText, paidExitPricingUnitDraft(seller.perUnits))
@@ -181,8 +184,8 @@ extension RootView {
             paidExitAsn = seller.asn == 0 ? "" : String(seller.asn)
             paidExitIpv4 = seller.ipv4
             paidExitIpv6 = seller.ipv6
-            lastSyncedPaidExitSeller = seller
         }
+        lastSyncedPaidExitSeller = state.paidExitSeller
 
         for network in state.networks {
             if networkNameDrafts[network.id] == nil {
@@ -200,6 +203,24 @@ extension RootView {
         } else {
             selectedDevicePubkeyHex = nil
         }
+    }
+
+    func paidExitSellerDraftConfigChanged(
+        from previous: NativePaidExitSellerState?,
+        to current: NativePaidExitSellerState
+    ) -> Bool {
+        guard let previous else { return true }
+        return previous.priceMsat != current.priceMsat
+            || previous.perUnits != current.perUnits
+            || previous.acceptedMints != current.acceptedMints
+            || previous.maxChannelCapacitySat != current.maxChannelCapacitySat
+            || previous.channelExpirySecs != current.channelExpirySecs
+            || previous.freeProbeUnits != current.freeProbeUnits
+            || previous.graceUnits != current.graceUnits
+            || previous.countryCode != current.countryCode
+            || previous.asn != current.asn
+            || previous.ipv4 != current.ipv4
+            || previous.ipv6 != current.ipv6
     }
 
     func displayName(_ network: NativeNetworkState) -> String {

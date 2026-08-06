@@ -170,6 +170,11 @@ extension RootView {
                         paidExitPriceUnitControl
                     }
                 }
+                if !paidExitPriceSats.isEmpty && !paidExitPriceSatsIsValid {
+                    Text("Use sats with up to three decimal places.")
+                        .font(.caption)
+                        .foregroundStyle(Color.orange)
+                }
                 paidExitFormRow("Mint") {
                     TextField("https://mint.minibits.cash/Bitcoin", text: $paidExitAcceptedMints)
                 }
@@ -342,7 +347,11 @@ extension RootView {
         } label: {
             Label("Save", systemImage: "checkmark")
         }
-        .disabled(manager.actionInFlight)
+        .disabled(manager.actionInFlight || !paidExitPriceSatsIsValid)
+    }
+
+    var paidExitPriceSatsIsValid: Bool {
+        AppManager.parsePaidExitPriceSats(paidExitPriceSats) != nil
     }
 
     var paidExitSellerAdvertiseButton: some View {
