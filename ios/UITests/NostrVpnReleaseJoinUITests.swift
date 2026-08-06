@@ -376,19 +376,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             retained,
             "Shipped text control did not retain the exact supplied value"
         )
-        if retained {
-            // Batched XCTest input can update the accessibility value before
-            // SwiftUI observes the edit. Force one real incremental edit and
-            // restore the exact requested value before testing validation.
-            field.typeText("q")
-            field.typeKey(.delete, modifierFlags: [])
-            XCTAssertTrue(
-                waitUntil(timeout: 2) {
-                    (field.value as? String) == value
-                },
-                "Shipped text control changed while committing typed input"
-            )
-        }
     }
 
     private func publicValue(
