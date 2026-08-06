@@ -14,9 +14,9 @@ mod paid_exit {
         paid_route_store_file_path, write_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{
-        ExitNetworkClass, PaidExitConfig, PaidExitUpstream, PaidRouteAccessState,
-        PaidRouteCountryClaim, PaidRouteOffer, PaidRouteQualityMetrics,
-        PaidRouteRoutingDecision, paid_route_country_claim,
+        PaidExitConfig, PaidExitUpstream, PaidRouteAccessState, PaidRouteCountryClaim,
+        PaidRouteOffer, PaidRouteQualityMetrics, PaidRouteRoutingDecision,
+        normalize_paid_route_country_code, paid_route_country_claim,
     };
     use serde_json::json;
 

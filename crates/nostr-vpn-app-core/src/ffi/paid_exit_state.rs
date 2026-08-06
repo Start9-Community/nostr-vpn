@@ -54,10 +54,10 @@ fn paid_exit_seller_state(
         free_probe_text: paid_route_binary_bytes_text(config.channel.free_probe_units),
         grace_units: config.channel.grace_units,
         grace_text: paid_route_binary_bytes_text(config.channel.grace_units),
-        country_code: config.location.country_code.clone(),
-        region: config.location.region.clone(),
+        country_code: normalize_paid_route_country_code(&config.location.country_code),
+        region: String::new(),
         asn: config.location.asn.unwrap_or_default(),
-        network_class: config.location.network_class.as_str().to_string(),
+        network_class: String::new(),
         ipv4: config.ip_support.ipv4,
         ipv6: config.ip_support.ipv6,
         channel_credit_msat,
@@ -331,7 +331,6 @@ fn paid_route_market_state(
     offers.sort_by(|left, right| paid_route_offer_order(left, right, "quality"));
     let filter = normalize_paid_route_market_filter(filter);
     let country_options = paid_route_offer_country_options(&offers);
-    let network_class_options = paid_route_offer_network_class_options(&offers);
     let visible_offers = paid_route_visible_offers(&offers, &filter);
     let hidden_offer_count = offers.len().saturating_sub(visible_offers.len()) as u64;
 
@@ -385,7 +384,7 @@ fn paid_route_market_state(
         visible_offers,
         hidden_offer_count,
         country_options,
-        network_class_options,
+        network_class_options: Vec::new(),
         channels,
         sessions,
     }
@@ -394,8 +393,9 @@ fn paid_route_market_state(
 fn normalize_paid_route_market_filter(
     filter: &NativePaidRouteMarketFilterState,
 ) -> NativePaidRouteMarketFilterState {
-    let country_code = normalize_paid_route_filter_value(&filter.country_code).to_uppercase();
-    let network_class = normalize_paid_route_filter_value(&filter.network_class).to_lowercase();
+    let country_code = normalize_paid_route_country_code(&normalize_paid_route_filter_value(
+        &filter.country_code,
+    ));
     let sort = match normalize_paid_route_filter_value(&filter.sort)
         .to_lowercase()
         .as_str()
@@ -408,7 +408,7 @@ fn normalize_paid_route_market_filter(
     NativePaidRouteMarketFilterState {
         query: filter.query.trim().to_string(),
         country_code,
-        network_class,
+        network_class: String::new(),
         mint_url: normalize_paid_route_filter_value(&filter.mint_url),
         require_ipv4: filter.require_ipv4,
         require_ipv6: filter.require_ipv6,
@@ -432,7 +432,6 @@ fn paid_route_visible_offers(
 ) -> Vec<NativePaidRouteOfferState> {
     let query = filter.query.trim().to_lowercase();
     let country_code = filter.country_code.trim().to_uppercase();
-    let network_class = filter.network_class.trim().to_lowercase();
     let mint_url = filter.mint_url.trim();
     let mut visible = offers
         .iter()
@@ -444,13 +443,6 @@ fn paid_route_visible_offers(
         })
         .filter(|offer| {
             country_code.is_empty() || offer.country_code.trim().to_uppercase() == country_code
-        })
-        .filter(|offer| {
-            network_class.is_empty()
-                || offer
-                    .network_class
-                    .trim()
-                    .eq_ignore_ascii_case(&network_class)
         })
         .filter(|offer| {
             mint_url.is_empty() || offer.accepted_mints.iter().any(|mint| mint == mint_url)
@@ -466,13 +458,11 @@ fn paid_route_visible_offers(
 
 fn paid_route_offer_search_text(offer: &NativePaidRouteOfferState) -> String {
     format!(
-        "{} {} {} {} {} {} {}",
+        "{} {} {} {} {}",
         offer.offer_id,
         offer.seller_npub,
         offer.status_text,
         offer.country_code,
-        offer.region,
-        offer.network_class,
         offer.accepted_mints.join(" ")
     )
 }
@@ -543,17 +533,6 @@ fn paid_route_offer_country_options(offers: &[NativePaidRouteOfferState]) -> Vec
         .iter()
         .map(|offer| offer.country_code.trim().to_uppercase())
         .filter(|country_code| !country_code.is_empty())
-        .collect::<Vec<_>>();
-    options.sort();
-    options.dedup();
-    options
-}
-
-fn paid_route_offer_network_class_options(offers: &[NativePaidRouteOfferState]) -> Vec<String> {
-    let mut options = offers
-        .iter()
-        .map(|offer| offer.network_class.trim().to_lowercase())
-        .filter(|network_class| !network_class.is_empty() && network_class != "unknown")
         .collect::<Vec<_>>();
     options.sort();
     options.dedup();
@@ -638,10 +617,10 @@ fn paid_route_offer_state(
         free_probe_text: paid_route_binary_bytes_text(offer.channel.free_probe_units),
         grace_units: offer.channel.grace_units,
         grace_text: paid_route_binary_bytes_text(offer.channel.grace_units),
-        country_code: offer.location.country_code.clone(),
-        region: offer.location.region.clone(),
+        country_code: normalize_paid_route_country_code(&offer.location.country_code),
+        region: String::new(),
         asn: offer.location.asn.unwrap_or_default(),
-        network_class: offer.location.network_class.as_str().to_string(),
+        network_class: String::new(),
         ipv4: offer.ip_support.ipv4,
         ipv6: offer.ip_support.ipv6,
         has_rating: record.rating_score.is_some(),
@@ -674,11 +653,9 @@ fn paid_route_offer_state(
 
 fn paid_route_offer_status_text(offer: &PaidRouteOffer, last_seen_unix: u64) -> String {
     let mut parts = Vec::new();
-    if !offer.location.country_code.trim().is_empty() {
-        parts.push(offer.location.country_code.clone());
-    }
-    if offer.location.network_class != ExitNetworkClass::Unknown {
-        parts.push(offer.location.network_class.as_str().to_string());
+    let country_code = normalize_paid_route_country_code(&offer.location.country_code);
+    if !country_code.is_empty() {
+        parts.push(country_code);
     }
     if let Some(latency_ms) = offer
         .quality

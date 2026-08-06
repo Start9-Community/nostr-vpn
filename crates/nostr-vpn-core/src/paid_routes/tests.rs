@@ -60,7 +60,8 @@ fn paid_exit_config_normalizes_operator_hints() {
         ]
     );
     assert_eq!(config.location.country_code, "FI");
-    assert_eq!(config.location.region, "Uusimaa");
+    assert!(config.location.region.is_empty());
+    assert_eq!(config.location.network_class, ExitNetworkClass::Unknown);
     assert_eq!(config.rating_discovery.file, "ratings.json");
     assert_eq!(
         config.rating_discovery.relays,
@@ -74,6 +75,14 @@ fn paid_exit_config_normalizes_operator_hints() {
         config.rating_discovery.scope,
         DEFAULT_FIPS_PEER_RATING_SCOPE
     );
+}
+
+#[test]
+fn paid_exit_country_is_exactly_two_ascii_letters() {
+    assert_eq!(normalize_paid_route_country_code(" fi "), "FI");
+    assert!(normalize_paid_route_country_code("FIN").is_empty());
+    assert!(normalize_paid_route_country_code("F1").is_empty());
+    assert!(normalize_paid_route_country_code("ÅX").is_empty());
 }
 
 #[test]
@@ -501,6 +510,8 @@ fn signed_offer_event_includes_spilman_receiver_pubkey_when_present() {
     let offer = signed.offer().expect("decode offer");
 
     assert_eq!(offer.receiver_pubkey_hex, receiver_pubkey_hex);
+    assert!(offer.location.region.is_empty());
+    assert_eq!(offer.location.network_class, ExitNetworkClass::Unknown);
     assert!(signed.event.tags.iter().any(|tag| {
         tag.as_slice() == ["receiver_pubkey".to_string(), receiver_pubkey_hex.clone()].as_slice()
     }));

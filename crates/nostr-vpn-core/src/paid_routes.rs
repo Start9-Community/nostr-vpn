@@ -303,8 +303,9 @@ impl PaidExitConfig {
         self.channel.max_channel_capacity_sat = self.channel.max_channel_capacity_sat.max(1);
         self.channel.channel_expiry_secs = self.channel.channel_expiry_secs.max(1);
         self.channel.accepted_mints = normalize_string_list(&self.channel.accepted_mints);
-        self.location.country_code = normalize_country_code(&self.location.country_code);
-        self.location.region = self.location.region.trim().to_string();
+        self.location.country_code = normalize_paid_route_country_code(&self.location.country_code);
+        self.location.region.clear();
+        self.location.network_class = ExitNetworkClass::Unknown;
         self.rating_discovery.normalize();
     }
 
@@ -735,9 +736,9 @@ pub fn paid_route_country_claim(
     claimed_country_code: impl AsRef<str>,
     observed_country_code: Option<&str>,
 ) -> PaidRouteCountryClaim {
-    let claimed_country_code = normalize_country_code(claimed_country_code.as_ref());
+    let claimed_country_code = normalize_paid_route_country_code(claimed_country_code.as_ref());
     let observed_country_code = observed_country_code
-        .map(normalize_country_code)
+        .map(normalize_paid_route_country_code)
         .unwrap_or_default();
     let status = if claimed_country_code.is_empty() {
         PaidRouteCountryClaimStatus::NoClaim
@@ -787,7 +788,7 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-fn normalize_country_code(value: &str) -> String {
+pub fn normalize_paid_route_country_code(value: &str) -> String {
     let value = value.trim();
     if value.len() == 2 && value.chars().all(|ch| ch.is_ascii_alphabetic()) {
         value.to_ascii_uppercase()

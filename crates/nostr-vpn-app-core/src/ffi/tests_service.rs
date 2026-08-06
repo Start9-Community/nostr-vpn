@@ -686,9 +686,9 @@ exit 0
         assert_eq!(saved.paid_exit.channel.free_probe_units, 65_536);
         assert_eq!(saved.paid_exit.channel.grace_units, 131_072);
         assert_eq!(saved.paid_exit.location.country_code, "FI");
-        assert_eq!(saved.paid_exit.location.region, "Uusimaa");
+        assert!(saved.paid_exit.location.region.is_empty());
         assert_eq!(saved.paid_exit.location.asn, Some(12_345));
-        assert_eq!(saved.paid_exit.location.network_class.as_str(), "datacenter");
+        assert_eq!(saved.paid_exit.location.network_class.as_str(), "unknown");
         assert!(saved.paid_exit.ip_support.ipv4);
         assert!(!saved.paid_exit.ip_support.ipv6);
         assert_eq!(saved.paid_exit.rating_discovery.file, "ratings.json");
