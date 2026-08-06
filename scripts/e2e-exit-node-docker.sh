@@ -25,6 +25,9 @@ NODE_B_PRIVATE_IP="${NVPN_E2E_NODE_B_PRIVATE_IP:-172.30.242.3}"
 NODE_B_PRIVATE_CIDR="$NODE_B_PRIVATE_IP/${NODE_B_PRIVATE_SUBNET#*/}"
 CASHU_MINT_IP="${NVPN_E2E_CASHU_MINT_IP:-198.18.242.50}"
 CASHU_MINT_URL="${NVPN_EXIT_NODE_E2E_CASHU_MINT_URL:-http://$CASHU_MINT_IP:3338}"
+WG_UPSTREAM_IP="${NVPN_E2E_WG_UPSTREAM_IP:-198.18.242.20}"
+WG_LISTEN_PORT=51821
+PAID_EXIT_RESALE_TARGET="${NVPN_E2E_PAID_EXIT_RESALE_TARGET:-203.0.113.100}"
 PAID_EXIT_MODE="${NVPN_EXIT_NODE_E2E_PAID:-0}"
 PAID_EXIT_PAYMENT_MODE="${NVPN_EXIT_NODE_E2E_PAYMENT_MODE:-spilman}"
 PAID_EXIT_MINT="${NVPN_EXIT_NODE_E2E_MINT:-}"
@@ -61,7 +64,7 @@ dump_debug() {
   set +e
   echo "exit-node docker e2e failed, collecting debug output..."
   "${COMPOSE[@]}" ps || true
-  for service in cashu-mint internet-target nat-b node-a node-b; do
+  for service in cashu-mint internet-target nat-b node-a node-b wireguard-upstream; do
     echo "--- logs: $service ---"
     "${COMPOSE[@]}" logs --no-color --tail 120 "$service" || true
   done
@@ -236,6 +239,173 @@ ping_until_success() {
   done
 
   return 1
+}
+
+assert_buyer_egress_source() {
+  local expected_source="$1"
+  local label="$2"
+  local capture="/tmp/nvpn-paid-exit-${label}-egress.log"
+  local ping_log="/tmp/nvpn-paid-exit-${label}-ping.log"
+  local capture_pid
+
+  "${COMPOSE[@]}" exec -T internet-target sh -lc \
+    "timeout 12 tcpdump -ni any -c 1 'icmp and src host $expected_source and dst host $PAID_EXIT_RESALE_TARGET'" \
+    >"$capture" 2>&1 &
+  capture_pid=$!
+  sleep 1
+  if ! ping_until_success node-b "$PAID_EXIT_RESALE_TARGET" "$ping_log"; then
+    wait "$capture_pid" 2>/dev/null || true
+    echo "exit-node docker e2e failed: buyer could not use the $label seller upstream" >&2
+    cat "$ping_log" >&2 || true
+    exit 1
+  fi
+  if ! wait "$capture_pid" || ! grep -Fq "$expected_source > $PAID_EXIT_RESALE_TARGET" "$capture"; then
+    echo "exit-node docker e2e failed: $label seller traffic did not use $expected_source" >&2
+    cat "$capture" >&2 || true
+    exit 1
+  fi
+}
+
+assert_buyer_egress_blocked() {
+  local label="$1"
+  local consecutive_failures=0
+  for _ in $(seq 1 30); do
+    if "${COMPOSE[@]}" exec -T node-b ping -c 1 -W 1 "$PAID_EXIT_RESALE_TARGET" \
+      >/dev/null 2>&1; then
+      consecutive_failures=0
+    else
+      consecutive_failures="$((consecutive_failures + 1))"
+      if ((consecutive_failures >= 3)); then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo "exit-node docker e2e failed: buyer traffic leaked after the $label upstream failed" >&2
+  exit 1
+}
+
+configure_paid_exit_wireguard_upstream() {
+  "${COMPOSE[@]}" exec -T wireguard-upstream sh -eu -c '
+    umask 077
+    wg genkey > /tmp/server.key
+    wg genkey > /tmp/client.key
+    wg pubkey < /tmp/server.key > /tmp/server.pub
+    wg pubkey < /tmp/client.key > /tmp/client.pub
+  '
+  local server_pub client_priv client_pub
+  server_pub="$("${COMPOSE[@]}" exec -T wireguard-upstream cat /tmp/server.pub | tr -d '\r\n')"
+  client_priv="$("${COMPOSE[@]}" exec -T wireguard-upstream cat /tmp/client.key | tr -d '\r\n')"
+  client_pub="$("${COMPOSE[@]}" exec -T wireguard-upstream cat /tmp/client.pub | tr -d '\r\n')"
+
+  "${COMPOSE[@]}" exec -T wireguard-upstream sh -eu -c "
+    iface=\"\$(ip -o -4 addr show | awk '\$4 == \"$WG_UPSTREAM_IP/24\" { print \$2; exit }')\"
+    test -n \"\$iface\"
+    ip link add dev wg0 type wireguard
+    ip address add 10.99.99.1/24 dev wg0
+    wg set wg0 listen-port $WG_LISTEN_PORT private-key /tmp/server.key
+    wg set wg0 peer '$client_pub' allowed-ips 10.99.99.2/32,10.44.0.0/16
+    ip link set wg0 up
+    ip route replace 10.44.0.0/16 dev wg0
+    iptables -P FORWARD ACCEPT
+    iptables -t nat -A POSTROUTING -o \"\$iface\" -s 10.99.99.0/24 -j MASQUERADE
+  "
+
+  "${COMPOSE[@]}" exec -T node-a sh -lc 'cat > /tmp/paid-exit-wg.conf' <<EOF
+[Interface]
+PrivateKey = $client_priv
+Address = 10.99.99.2/32
+
+[Peer]
+PublicKey = $server_pub
+Endpoint = $WG_UPSTREAM_IP:$WG_LISTEN_PORT
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 1
+EOF
+  "${COMPOSE[@]}" exec -T node-a nvpn set \
+    --paid-exit-upstream wireguard-exit \
+    --wireguard-exit-config-file /tmp/paid-exit-wg.conf \
+    --wireguard-exit-enabled true >/dev/null
+
+  local handshake
+  for _ in $(seq 1 60); do
+    handshake="$("${COMPOSE[@]}" exec -T node-a sh -lc \
+      "wg show all latest-handshakes 2>/dev/null | awk '\$3 > 0 { print \$3; exit }'" | tr -d '\r')"
+    [[ -n "$handshake" ]] && return 0
+    "${COMPOSE[@]}" exec -T node-a ping -c 1 -W 1 "$PUBLIC_INTERNET_TARGET" \
+      >/dev/null 2>&1 || true
+    sleep 1
+  done
+  echo "exit-node docker e2e failed: seller WireGuard upstream never handshook" >&2
+  exit 1
+}
+
+run_spilman_resale_matrix() {
+  "${COMPOSE[@]}" exec -T internet-target ip address add "$PAID_EXIT_RESALE_TARGET/32" dev lo
+  for node in node-a wireguard-upstream; do
+    "${COMPOSE[@]}" exec -T "$node" ip route replace "$PAID_EXIT_RESALE_TARGET/32" \
+      via "$PUBLIC_INTERNET_TARGET"
+  done
+  assert_buyer_egress_source "$NODE_A_PUBLIC_IP" direct
+
+  "${COMPOSE[@]}" exec -T node-a ip route del "$PAID_EXIT_RESALE_TARGET/32"
+  configure_paid_exit_wireguard_upstream
+  "${COMPOSE[@]}" exec -T node-a ip route get "$PAID_EXIT_RESALE_TARGET" | grep -Fq 'dev nvpn-wg-exit'
+  assert_buyer_egress_source "$WG_UPSTREAM_IP" wireguard
+
+  "${COMPOSE[@]}" exec -T wireguard-upstream ip link del wg0
+  assert_buyer_egress_blocked WireGuard
+
+  "${COMPOSE[@]}" exec -T wireguard-upstream nvpn init --force >/dev/null
+  local upstream_npub
+  upstream_npub="$(nostr_pubkey_from_config wireguard-upstream)"
+  [[ -n "$upstream_npub" ]]
+  "${COMPOSE[@]}" exec -T node-a nvpn set \
+    --participant "$upstream_npub" \
+    --fips-peer-endpoint "$upstream_npub=$WG_UPSTREAM_IP:51820" >/dev/null
+  "${COMPOSE[@]}" exec -T wireguard-upstream nvpn set \
+    --network-id "$PAID_EXIT_SELLER_NETWORK_ID" \
+    --participant "$ALICE_NPUB" \
+    --endpoint "$WG_UPSTREAM_IP:51820" \
+    --listen-port 51820 \
+    --fips-advertise-endpoint true \
+    --fips-bootstrap-enabled false \
+    --fips-peer-endpoint "$ALICE_NPUB=$NODE_A_PUBLIC_IP:51820" \
+    --advertise-exit-node >/dev/null
+  "${COMPOSE[@]}" exec -T wireguard-upstream sh -lc \
+    "sed -i 's|^discovery_timeout_secs = .*|discovery_timeout_secs = 2|' '$CONFIG_PATH'; sed -i '/^lan_discovery_enabled = /d' '$CONFIG_PATH'; sed -i '1ilan_discovery_enabled = false' '$CONFIG_PATH'"
+  "${COMPOSE[@]}" exec -T wireguard-upstream nvpn start --daemon --connect \
+    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  "${COMPOSE[@]}" exec -T node-a nvpn set \
+    --exit-node "$upstream_npub" \
+    --paid-exit-upstream host-default >/dev/null
+
+  local seller_route private_ready=0
+  for _ in $(seq 1 80); do
+    seller_route="$("${COMPOSE[@]}" exec -T node-a ip route get "$PAID_EXIT_RESALE_TARGET" | tr -d '\r')"
+    if grep -Fq 'dev utun100' <<<"$seller_route"; then
+      private_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$private_ready" != 1 ]]; then
+    echo "exit-node docker e2e failed: private FIPS seller upstream did not become ready" >&2
+    printf '%s\n' "$seller_route" >&2
+    exit 1
+  fi
+  assert_buyer_egress_source "$WG_UPSTREAM_IP" private-fips
+
+  "${COMPOSE[@]}" exec -T wireguard-upstream nvpn stop --force >/dev/null
+  assert_buyer_egress_blocked private-FIPS
+
+  "${COMPOSE[@]}" exec -T node-a nvpn set \
+    --exit-node none \
+    --paid-exit-upstream host-default >/dev/null
+  "${COMPOSE[@]}" exec -T node-a ip route replace "$PAID_EXIT_RESALE_TARGET/32" \
+    via "$PUBLIC_INTERNET_TARGET"
+  assert_buyer_egress_source "$NODE_A_PUBLIC_IP" direct-restored
+  echo "paid-exit resale matrix passed: Direct, WireGuard, private FIPS, fail-closed, Direct restored"
 }
 
 assert_secure_exit_dns() {
@@ -416,7 +586,7 @@ fi
 
 SERVICES=(internet-target node-a nat-b)
 if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
-  SERVICES=(cashu-mint "${SERVICES[@]}")
+  SERVICES=(cashu-mint wireguard-upstream "${SERVICES[@]}")
 fi
 
 if ! truthy "${NVPN_EXIT_NODE_E2E_SKIP_BUILD:-0}"; then
@@ -884,6 +1054,10 @@ if truthy "$PAID_EXIT_MODE"; then
     grep -q '"state":"paid"' <<<"$PAID_AFTER_COMPACT"
     grep -q '"allow_routing":true' <<<"$PAID_AFTER_COMPACT"
   fi
+fi
+
+if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
+  run_spilman_resale_matrix
 fi
 
 echo "--- Default route ---"
