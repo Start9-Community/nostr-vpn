@@ -9,6 +9,24 @@ struct PaidRouteWalletTokenPreview {
     redeemable: bool,
 }
 
+fn paid_route_wallet_mint_label(store: &PaidRouteStore, mint_url: &str) -> String {
+    store
+        .wallet
+        .mints
+        .iter()
+        .find(|mint| mint.url == mint_url)
+        .map_or_else(
+            || {
+                if mint_url == DEFAULT_PAID_EXIT_WALLET_MINT {
+                    "Minibits".to_string()
+                } else {
+                    String::new()
+                }
+            },
+            |mint| mint.label.clone(),
+        )
+}
+
 impl NativeAppRuntime {
     pub(super) fn paid_exit_seller_state(
         &self,
@@ -48,15 +66,7 @@ impl NativeAppRuntime {
         );
         if app.is_some_and(|app| app.wallet_fiat_enabled) {
             let snapshot = self.exchange_rate_service.snapshot();
-            for offer in &mut state.offers {
-                offer.price_text = paid_route_price_text_with_fiat(
-                    offer.price_msat_per_gb,
-                    snapshot.rate,
-                    snapshot.currency.as_str(),
-                    snapshot.stale,
-                );
-            }
-            for offer in &mut state.visible_offers {
+            for offer in state.offers.iter_mut().chain(&mut state.visible_offers) {
                 offer.price_text = paid_route_price_text_with_fiat(
                     offer.price_msat_per_gb,
                     snapshot.rate,
@@ -87,12 +97,10 @@ impl NativeAppRuntime {
                     && store
                         .buyer_session_allows_routing(&record.session.session_id, now_unix)
                         .unwrap_or(false))
-                .then(|| {
-                    (
-                        record.updated_at_unix,
-                        record.session.realized_exit_ip.clone().unwrap_or_default(),
-                    )
-                })
+                .then(|| (
+                    record.updated_at_unix,
+                    record.session.realized_exit_ip.clone().unwrap_or_default(),
+                ))
             })
             .max_by_key(|(updated_at, _)| *updated_at)
             .map(|(_, realized_exit_ip)| realized_exit_ip)
@@ -116,9 +124,8 @@ impl NativeAppRuntime {
         label: Option<&str>,
     ) -> Result<()> {
         let url = normalize_paid_route_mint_url(url)?;
-        let label = label.unwrap_or_default();
         self.mutate_paid_route_store(|store| {
-            store.upsert_wallet_mint(&url, label, None, unix_timestamp())
+            store.upsert_wallet_mint(&url, label.unwrap_or_default(), None, unix_timestamp())
         })
     }
 
@@ -353,21 +360,7 @@ impl NativeAppRuntime {
     ) -> Result<()> {
         let mint_url = normalize_paid_route_mint_url(mint_url)?;
         self.mutate_paid_route_store(|store| {
-            let label = store
-                .wallet
-                .mints
-                .iter()
-                .find(|mint| mint.url == mint_url)
-                .map_or_else(
-                    || {
-                        if mint_url == DEFAULT_PAID_EXIT_WALLET_MINT {
-                            "Minibits".to_string()
-                        } else {
-                            String::new()
-                        }
-                    },
-                    |mint| mint.label.clone(),
-                );
+            let label = paid_route_wallet_mint_label(store, &mint_url);
             store.upsert_wallet_mint(&mint_url, label, balance_msat, unix_timestamp())
         })
     }
@@ -382,21 +375,7 @@ impl NativeAppRuntime {
                 if entry.unit != "sat" {
                     continue;
                 }
-                let label = store
-                    .wallet
-                    .mints
-                    .iter()
-                    .find(|mint| mint.url == entry.mint_url)
-                    .map_or_else(
-                        || {
-                            if entry.mint_url == DEFAULT_PAID_EXIT_WALLET_MINT {
-                                "Minibits".to_string()
-                            } else {
-                                String::new()
-                            }
-                        },
-                        |mint| mint.label.clone(),
-                    );
+                let label = paid_route_wallet_mint_label(store, &entry.mint_url);
                 changed |= store.upsert_wallet_mint(
                     &entry.mint_url,
                     label,
@@ -459,9 +438,8 @@ impl NativeAppRuntime {
             ));
         }
 
-        // Payment delivery is authenticated against the selected public exit.
-        // Persist the seller before queuing the first payment, but let the daemon
-        // install public routes only after the seller acknowledges admission.
+        // Persist the authenticated seller before payment, but only install public routes
+        // after the seller acknowledges admission.
         self.select_paid_route_session(&result.session_id, false)?;
 
         if wallet_can_fund {
@@ -570,16 +548,12 @@ impl NativeAppRuntime {
         session_id: &str,
         timeout_secs: u64,
     ) -> Result<()> {
-        let args = vec![
-            "paid-exit".to_string(),
-            "probe".to_string(),
-            "--config".to_string(),
-            self.config_path_str()?.to_string(),
-            "--json".to_string(),
+        let mut args = self.paid_exit_cli_args("probe")?;
+        args.extend([
             session_id.trim().to_string(),
             "--timeout-secs".to_string(),
             timeout_secs.max(1).to_string(),
-        ];
+        ]);
         let output = self.run_nvpn_vec(&args)?;
         let value = decode_paid_route_command_json_output(output, "nvpn paid-exit probe")?;
         self.paid_route_payment_last_action = paid_route_probe_action_state(&value);
@@ -594,17 +568,13 @@ impl NativeAppRuntime {
         delivered_units: Option<u64>,
         paid_msat: Option<u64>,
     ) -> Result<()> {
-        let mut args = vec![
-            "paid-exit".to_string(),
-            "create-payment".to_string(),
-            "--config".to_string(),
-            self.config_path_str()?.to_string(),
-            "--json".to_string(),
+        let mut args = self.paid_exit_cli_args("create-payment")?;
+        args.extend([
             session_id.trim().to_string(),
             "--kind".to_string(),
             kind.trim().to_string(),
             "--payment-stdin".to_string(),
-        ];
+        ]);
         if let Some(delivered_units) = delivered_units {
             args.push("--delivered-units".to_string());
             args.push(delivered_units.to_string());
@@ -776,14 +746,8 @@ impl NativeAppRuntime {
     }
 
     pub(super) fn apply_paid_route_payment_envelope(&mut self, envelope_json: &str) -> Result<()> {
-        let args = vec![
-            "paid-exit".to_string(),
-            "apply-payment".to_string(),
-            "--config".to_string(),
-            self.config_path_str()?.to_string(),
-            "--json".to_string(),
-            "--envelope-stdin".to_string(),
-        ];
+        let mut args = self.paid_exit_cli_args("apply-payment")?;
+        args.push("--envelope-stdin".to_string());
         let output = self.run_nvpn_vec_with_stdin(&args, envelope_json.as_bytes())?;
         let value = decode_paid_route_command_json_output(output, "nvpn paid-exit apply-payment")?;
         self.paid_route_payment_last_action = paid_route_payment_action_state("apply", &value)?;
@@ -800,14 +764,8 @@ impl NativeAppRuntime {
         &mut self,
         envelope_json: &str,
     ) -> Result<serde_json::Value> {
-        let args = vec![
-            "paid-exit".to_string(),
-            "send-payment".to_string(),
-            "--config".to_string(),
-            self.config_path_str()?.to_string(),
-            "--json".to_string(),
-            "--envelope-stdin".to_string(),
-        ];
+        let mut args = self.paid_exit_cli_args("send-payment")?;
+        args.push("--envelope-stdin".to_string());
         let output = self.run_nvpn_vec_with_stdin(&args, envelope_json.as_bytes())?;
         decode_paid_route_command_json_output(output, "nvpn paid-exit send-payment")
     }
@@ -818,15 +776,11 @@ impl NativeAppRuntime {
         min_increment_msat: u64,
         limit: u64,
     ) -> Result<()> {
-        let mut args = vec![
-            "paid-exit".to_string(),
-            "stream-payments".to_string(),
-            "--config".to_string(),
-            self.config_path_str()?.to_string(),
-            "--json".to_string(),
+        let mut args = self.paid_exit_cli_args("stream-payments")?;
+        args.extend([
             "--min-increment-msat".to_string(),
             min_increment_msat.to_string(),
-        ];
+        ]);
         if publish {
             args.push("--publish".to_string());
         }
@@ -943,15 +897,11 @@ impl NativeAppRuntime {
             self.save_reload_and_refresh()?;
         }
         let rating_discovery = &self.config.paid_exit.rating_discovery;
-        let mut args = vec![
-            "paid-exit".to_string(),
-            "discover".to_string(),
-            "--config".to_string(),
-            self.config_path_str()?.to_string(),
-            "--json".to_string(),
+        let mut args = self.paid_exit_cli_args("discover")?;
+        args.extend([
             "--duration-secs".to_string(),
             duration_secs.clamp(1, 30).to_string(),
-        ];
+        ]);
         if !rating_discovery.file.trim().is_empty() {
             args.push("--fips-peer-ratings".to_string());
             args.push(rating_discovery.file.clone());
@@ -966,6 +916,16 @@ impl NativeAppRuntime {
         }
         let output = self.run_nvpn_vec(&args)?;
         ensure_success("nvpn paid-exit discover", &output)
+    }
+
+    fn paid_exit_cli_args(&self, action: &str) -> Result<Vec<String>> {
+        Ok(vec![
+            "paid-exit".to_string(),
+            action.to_string(),
+            "--config".to_string(),
+            self.config_path_str()?.to_string(),
+            "--json".to_string(),
+        ])
     }
 
     fn run_nvpn_vec(&self, args: &[String]) -> Result<Output> {

@@ -24,6 +24,27 @@
         udp
     }
 
+    fn endpoint_transport(
+        endpoint: &str,
+        public: bool,
+        nostr_discovery: bool,
+        share_local_candidates: bool,
+    ) -> FipsEndpointTransportConfig {
+        FipsEndpointTransportConfig {
+            listen_port: 51820,
+            bind_interface: None,
+            advertised_endpoint: endpoint.to_string(),
+            advertise_public_endpoint: public,
+            nostr_discovery_enabled: nostr_discovery,
+            advertise_on_nostr: true,
+            webrtc_enabled: false,
+            stun_servers: Vec::new(),
+            nostr_relays: Vec::new(),
+            websocket: fips_endpoint::WebSocketConfig::default(),
+            share_local_candidates,
+        }
+    }
+
     #[test]
     fn tunnel_config_routes_default_through_selected_exit_peer() {
         let alice_keys = Keys::generate();
@@ -704,19 +725,7 @@
             vec!["10.44.1.2/32".to_string()],
         )
         .expect("peer config");
-        let transport = FipsEndpointTransportConfig {
-            listen_port: 51820,
-            bind_interface: None,
-            advertised_endpoint: "192.168.50.20:51820".to_string(),
-            advertise_public_endpoint: false,
-            nostr_discovery_enabled: false,
-            advertise_on_nostr: true,
-            webrtc_enabled: false,
-            stun_servers: Vec::new(),
-            nostr_relays: Vec::new(),
-            websocket: fips_endpoint::WebSocketConfig::default(),
-            share_local_candidates: true,
-        };
+        let transport = endpoint_transport("192.168.50.20:51820", false, false, true);
         let endpoint_peers = fips_endpoint_peers_from_mesh(&[peer], Vec::new(), Vec::new());
         let config = fips_endpoint_config_with_open_discovery_limit(
             &endpoint_peers,
@@ -754,19 +763,9 @@
             vec!["10.44.1.2/32".to_string()],
         )
         .expect("peer config");
-        let transport = FipsEndpointTransportConfig {
-            listen_port: 51820,
-            bind_interface: None,
-            advertised_endpoint: "192.168.50.20:51820".to_string(),
-            advertise_public_endpoint: true,
-            nostr_discovery_enabled: true,
-            advertise_on_nostr: true,
-            webrtc_enabled: false,
-            stun_servers: vec!["stun:stun.example.org:3478".to_string()],
-            nostr_relays: vec!["wss://relay.example.org".to_string()],
-            websocket: fips_endpoint::WebSocketConfig::default(),
-            share_local_candidates: true,
-        };
+        let mut transport = endpoint_transport("192.168.50.20:51820", true, true, true);
+        transport.stun_servers = vec!["stun:stun.example.org:3478".to_string()];
+        transport.nostr_relays = vec!["wss://relay.example.org".to_string()];
 
         let endpoint_peers = fips_endpoint_peers_from_mesh(&[peer], Vec::new(), Vec::new());
         let config = fips_endpoint_config_with_open_discovery_limit(
@@ -818,19 +817,7 @@
 
     #[test]
     fn endpoint_config_advertises_public_app_endpoint_over_nostr() {
-        let transport = FipsEndpointTransportConfig {
-            listen_port: 51820,
-            bind_interface: None,
-            advertised_endpoint: "198.51.100.20:51820".to_string(),
-            advertise_public_endpoint: true,
-            nostr_discovery_enabled: true,
-            advertise_on_nostr: true,
-            webrtc_enabled: false,
-            stun_servers: Vec::new(),
-            nostr_relays: Vec::new(),
-            websocket: fips_endpoint::WebSocketConfig::default(),
-            share_local_candidates: false,
-        };
+        let transport = endpoint_transport("198.51.100.20:51820", true, true, false);
 
         let config = fips_endpoint_config_with_open_discovery_limit(
             &[],
@@ -855,19 +842,9 @@
             vec!["10.44.1.2/32".to_string()],
         )
         .expect("peer config");
-        let transport = FipsEndpointTransportConfig {
-            listen_port: 51820,
-            bind_interface: None,
-            advertised_endpoint: "192.168.50.20:51820".to_string(),
-            advertise_public_endpoint: true,
-            nostr_discovery_enabled: false,
-            advertise_on_nostr: true,
-            webrtc_enabled: false,
-            stun_servers: vec!["stun:stun.example.org:3478".to_string()],
-            nostr_relays: vec!["wss://relay.example.org".to_string()],
-            websocket: fips_endpoint::WebSocketConfig::default(),
-            share_local_candidates: true,
-        };
+        let mut transport = endpoint_transport("192.168.50.20:51820", true, false, true);
+        transport.stun_servers = vec!["stun:stun.example.org:3478".to_string()];
+        transport.nostr_relays = vec!["wss://relay.example.org".to_string()];
 
         let endpoint_peers = fips_endpoint_peers_from_mesh(&[peer], Vec::new(), Vec::new());
         let config = fips_endpoint_config_with_open_discovery_limit(
@@ -903,19 +880,7 @@
             vec![(charlie_npub.clone(), vec!["10.203.0.12:51820".to_string()])],
             Vec::new(),
         );
-        let transport = FipsEndpointTransportConfig {
-            listen_port: 51820,
-            bind_interface: None,
-            advertised_endpoint: "10.203.0.10:51820".to_string(),
-            advertise_public_endpoint: false,
-            nostr_discovery_enabled: true,
-            advertise_on_nostr: true,
-            webrtc_enabled: false,
-            stun_servers: Vec::new(),
-            nostr_relays: Vec::new(),
-            websocket: fips_endpoint::WebSocketConfig::default(),
-            share_local_candidates: false,
-        };
+        let transport = endpoint_transport("10.203.0.10:51820", false, true, false);
 
         let config = fips_endpoint_config_with_open_discovery_limit(
             &endpoint_peers,

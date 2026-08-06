@@ -197,6 +197,26 @@ async fn wait_pubsub_transport_connected(runtime: &ControlPubsubFipsRuntime) {
     .expect("reliable TCP/FIPS pubsub transport connected");
 }
 
+fn run_async_test<F, Fut>(name: &str, run: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("local control pubsub test runtime")
+                .block_on(run());
+        })
+        .expect("spawn control pubsub test")
+        .join()
+        .expect("control pubsub test thread");
+}
+
 #[test]
 fn relay_subscriptions_bound_retained_replay() {
     let publisher = Keys::generate();
@@ -287,19 +307,10 @@ fn standard_fips_pubsub_bounds_retained_replay() {
 
 #[test]
 fn offers_ratings_and_updates_are_carried_p2p_without_relays() {
-    std::thread::Builder::new()
-        .name("relayless-control-events".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local relayless control-event runtime")
-                .block_on(offers_ratings_and_updates_are_carried_p2p_without_relays_run());
-        })
-        .expect("spawn relayless control-event test")
-        .join()
-        .expect("relayless control-event test thread");
+    run_async_test(
+        "relayless-control-events",
+        offers_ratings_and_updates_are_carried_p2p_without_relays_run,
+    );
 }
 
 async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
@@ -387,19 +398,10 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
 
 #[test]
 fn retained_paid_exit_offer_replays_to_late_manual_provider_buyer_without_relays() {
-    std::thread::Builder::new()
-        .name("late-manual-paid-provider".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("relayless retained-offer runtime")
-                .block_on(retained_paid_exit_offer_replays_to_late_buyer_run());
-        })
-        .expect("spawn retained-offer test")
-        .join()
-        .expect("retained-offer test thread");
+    run_async_test(
+        "late-manual-paid-provider",
+        retained_paid_exit_offer_replays_to_late_buyer_run,
+    );
 }
 
 async fn retained_paid_exit_offer_replays_to_late_buyer_run() {
@@ -493,19 +495,10 @@ fn plain_control_events_are_verified_before_entering_the_verified_path() {
 
 #[test]
 fn standard_pubsub_delivers_over_url_only_websocket_first_adjacency() {
-    std::thread::Builder::new()
-        .name("websocket-fips-pubsub".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local WebSocket pubsub test runtime")
-                .block_on(standard_pubsub_delivers_over_url_only_websocket_first_adjacency_run());
-        })
-        .expect("spawn WebSocket pubsub test thread")
-        .join()
-        .expect("WebSocket pubsub test thread");
+    run_async_test(
+        "websocket-fips-pubsub",
+        standard_pubsub_delivers_over_url_only_websocket_first_adjacency_run,
+    );
 }
 
 async fn standard_pubsub_delivers_over_url_only_websocket_first_adjacency_run() {
@@ -549,21 +542,10 @@ async fn standard_pubsub_delivers_over_url_only_websocket_first_adjacency_run() 
 
 #[test]
 fn late_connected_fips_peer_receives_cached_update_root_without_relays() {
-    std::thread::Builder::new()
-        .name("late-fips-update-peer".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local FIPS update test runtime")
-                .block_on(
-                    late_connected_fips_peer_receives_cached_update_root_without_relays_run(),
-                );
-        })
-        .expect("spawn local FIPS update test")
-        .join()
-        .expect("local FIPS update test thread");
+    run_async_test(
+        "late-fips-update-peer",
+        late_connected_fips_peer_receives_cached_update_root_without_relays_run,
+    );
 }
 
 async fn late_connected_fips_peer_receives_cached_update_root_without_relays_run() {
@@ -639,19 +621,10 @@ async fn late_connected_fips_peer_receives_cached_update_root_without_relays_run
 
 #[test]
 fn standalone_publish_replays_after_udp_roster_peer_appears() {
-    std::thread::Builder::new()
-        .name("standalone-fips-pubsub".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local standalone pubsub test runtime")
-                .block_on(standalone_publish_replays_after_udp_roster_peer_appears_run());
-        })
-        .expect("spawn standalone pubsub test")
-        .join()
-        .expect("standalone pubsub test thread");
+    run_async_test(
+        "standalone-fips-pubsub",
+        standalone_publish_replays_after_udp_roster_peer_appears_run,
+    );
 }
 
 async fn standalone_publish_replays_after_udp_roster_peer_appears_run() {
@@ -740,19 +713,10 @@ async fn standalone_publish_replays_after_udp_roster_peer_appears_run() {
 
 #[test]
 fn control_pubsub_preserves_56k_event_limit_over_real_udp_fips() {
-    std::thread::Builder::new()
-        .name("bounded-fips-pubsub".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local bounded pubsub test runtime")
-                .block_on(control_pubsub_preserves_56k_event_limit_over_real_udp_fips_run());
-        })
-        .expect("spawn bounded pubsub test")
-        .join()
-        .expect("bounded pubsub test thread");
+    run_async_test(
+        "bounded-fips-pubsub",
+        control_pubsub_preserves_56k_event_limit_over_real_udp_fips_run,
+    );
 }
 
 async fn control_pubsub_preserves_56k_event_limit_over_real_udp_fips_run() {
@@ -837,19 +801,10 @@ impl MeshPeerPolicy for RejectAllPeers {
 
 #[test]
 fn peer_policy_rejects_events_from_authenticated_udp_fips_peer() {
-    std::thread::Builder::new()
-        .name("policy-fips-pubsub".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local policy pubsub test runtime")
-                .block_on(peer_policy_rejects_events_from_authenticated_udp_fips_peer_run());
-        })
-        .expect("spawn policy pubsub test")
-        .join()
-        .expect("policy pubsub test thread");
+    run_async_test(
+        "policy-fips-pubsub",
+        peer_policy_rejects_events_from_authenticated_udp_fips_peer_run,
+    );
 }
 
 async fn peer_policy_rejects_events_from_authenticated_udp_fips_peer_run() {
@@ -918,19 +873,10 @@ async fn peer_policy_rejects_events_from_authenticated_udp_fips_peer_run() {
 
 #[test]
 fn restarted_pubsub_resubscribes_after_tcp_fips_connection_loss() {
-    std::thread::Builder::new()
-        .name("restarted-fips-pubsub".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("local FIPS reconnect test runtime")
-                .block_on(restarted_pubsub_resubscribes_after_connection_loss_run());
-        })
-        .expect("spawn local FIPS reconnect test")
-        .join()
-        .expect("local FIPS reconnect test thread");
+    run_async_test(
+        "restarted-fips-pubsub",
+        restarted_pubsub_resubscribes_after_connection_loss_run,
+    );
 }
 
 async fn restarted_pubsub_resubscribes_after_connection_loss_run() {

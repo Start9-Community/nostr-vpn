@@ -13,6 +13,20 @@ mod tests {
     const TEST_WG_PUBLIC_KEY: &str = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=";
     const TEST_WG_PRESHARED_KEY: &str = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=";
 
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir().join(format!("nvpn-{name}-{}-{nonce}", std::process::id()))
+    }
+
+    fn temp_config_dir(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = temp_path(name);
+        std::fs::create_dir_all(&dir).expect("create config directory");
+        let path = dir.join("config.toml");
+        (dir, path)
+    }
+
     #[test]
     fn split_peer_transport_addr_preserves_webrtc_transport() {
         let route = format!("webrtc:02{}", "ab".repeat(32));
@@ -279,15 +293,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn loading_a_legacy_device_approval_allows_startup_to_rotate_it() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "nvpn-load-legacy-device-approval-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create config directory");
-        let path = dir.join("config.toml");
+        let (dir, path) = temp_config_dir("load-legacy-device-approval");
         let mut config = AppConfig::generated_without_networks();
         config
             .ensure_pending_nostr_join_request(1_778_998_000)
@@ -323,15 +329,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn clearing_join_request_deletes_its_persisted_secret() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "nvpn-cleared-join-request-secret-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("config.toml");
+        let (dir, path) = temp_config_dir("cleared-join-request-secret");
         let mut config = AppConfig::generated_without_networks();
         config
             .ensure_pending_nostr_join_request(1_778_998_000)
@@ -358,15 +356,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn desktop_unix_never_persists_ephemeral_join_request_material() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "nvpn-ephemeral-join-request-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("config.toml");
+        let (dir, path) = temp_config_dir("ephemeral-join-request");
         let mut config = AppConfig::generated_without_networks();
         config
             .ensure_pending_nostr_join_request(1_778_998_000)
@@ -404,13 +394,7 @@ mod tests {
 
     #[test]
     fn save_plaintext_does_not_write_config_secrets_inline() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-save-plaintext-{}-{nonce}.toml",
-            std::process::id()
-        ));
+        let path = temp_path("save-plaintext").with_extension("toml");
         let mut config = AppConfig::generated();
         config.wireguard_exit.private_key = TEST_WG_PRIVATE_KEY.to_string();
         config.wireguard_exit.peer_public_key = TEST_WG_PUBLIC_KEY.to_string();
@@ -461,15 +445,7 @@ mod tests {
     fn save_plaintext_rejects_symlinked_secret_sidecar() {
         use std::os::unix::fs::symlink;
 
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "nvpn-secret-sidecar-symlink-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("config.toml");
+        let (dir, path) = temp_config_dir("secret-sidecar-symlink");
         let target = dir.join("target-secret");
         let sidecar = dir.join(".config.toml.nostr-secret-key.secret");
         std::fs::write(&target, "do-not-overwrite").expect("write target");
@@ -495,13 +471,7 @@ mod tests {
 
     #[test]
     fn migrate_persisted_secrets_rewrites_plaintext_config_secrets() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-migrate-secrets-{}-{nonce}.toml",
-            std::process::id()
-        ));
+        let path = temp_path("migrate-secrets").with_extension("toml");
         let mut config = AppConfig::generated();
         config.wireguard_exit.private_key = TEST_WG_PRIVATE_KEY.to_string();
         config.wireguard_exit.peer_public_key = TEST_WG_PUBLIC_KEY.to_string();
@@ -536,13 +506,7 @@ mod tests {
 
     #[test]
     fn minimal_seeded_config_does_not_need_secret_migration() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-seeded-config-no-secret-migration-{}-{nonce}.toml",
-            std::process::id()
-        ));
+        let path = temp_path("seeded-config-no-secret-migration").with_extension("toml");
         std::fs::write(&path, "node_name = \"iPhone\"\n").expect("write seeded config");
 
         assert!(
@@ -563,15 +527,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn load_rejects_mismatched_nostr_secret_sidecar() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "nvpn-mismatched-nostr-secret-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("config.toml");
+        let (dir, path) = temp_config_dir("mismatched-nostr-secret");
         let sidecar = dir.join(".config.toml.nostr-secret-key.secret");
         let config = AppConfig::generated();
         let (wrong_secret, _) = generate_nostr_identity();
@@ -593,13 +549,7 @@ mod tests {
 
     #[test]
     fn save_rejects_unsupported_secret_markers() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-unsupported-secret-marker-{}-{nonce}.toml",
-            std::process::id()
-        ));
+        let path = temp_path("unsupported-secret-marker").with_extension("toml");
         let mut config = AppConfig::generated();
         config.nostr.secret_key = "stored-in-macos-keychain".to_string();
 

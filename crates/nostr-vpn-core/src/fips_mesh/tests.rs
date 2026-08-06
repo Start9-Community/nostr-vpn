@@ -18,13 +18,19 @@ mod tests {
     impl TestPeer {
         fn generate() -> Self {
             let keys = Keys::generate();
-            let endpoint_pubkey = keys.public_key().to_hex();
             let endpoint_pubkey_bytes = *keys.public_key().as_bytes();
             Self {
-                participant_pubkey: endpoint_pubkey.clone(),
+                participant_pubkey: keys.public_key().to_hex(),
                 endpoint_npub: keys.public_key().to_bech32().expect("npub"),
                 endpoint_pubkey: endpoint_pubkey_bytes,
                 endpoint_node_addr: endpoint_node_addr_from_pubkey_bytes(endpoint_pubkey_bytes),
+            }
+        }
+        fn config(&self, allowed_ips: &[&str]) -> FipsMeshPeerConfig {
+            FipsMeshPeerConfig {
+                participant_pubkey: self.participant_pubkey.clone(),
+                endpoint_npub: self.endpoint_npub.clone(),
+                allowed_ips: allowed_ips.iter().map(|ip| (*ip).to_string()).collect(),
             }
         }
     }
@@ -33,16 +39,8 @@ mod tests {
         let general = TestPeer::generate();
         let specific = TestPeer::generate();
         FipsMeshRuntime::new(vec![
-            FipsMeshPeerConfig {
-                participant_pubkey: general.participant_pubkey,
-                endpoint_npub: general.endpoint_npub,
-                allowed_ips: vec!["10.44.0.0/16".to_string()],
-            },
-            FipsMeshPeerConfig {
-                participant_pubkey: specific.participant_pubkey,
-                endpoint_npub: specific.endpoint_npub,
-                allowed_ips: vec!["10.44.22.44/32".to_string()],
-            },
+            general.config(&["10.44.0.0/16"]),
+            specific.config(&["10.44.22.44/32"]),
         ])
     }
 
@@ -220,9 +218,8 @@ mod tests {
         let peer = TestPeer::generate();
         let packet = ipv4_packet(Ipv4Addr::new(10, 44, 10, 1), Ipv4Addr::new(10, 44, 22, 44));
         let runtime = FipsMeshRuntime::new(vec![FipsMeshPeerConfig {
-            participant_pubkey: peer.participant_pubkey.clone(),
             endpoint_npub: format!(" {} ", hex::encode(peer.endpoint_pubkey)),
-            allowed_ips: vec!["10.44.22.44/32".to_string()],
+            ..peer.config(&["10.44.22.44/32"])
         }]);
 
         let routed = runtime
@@ -243,8 +240,7 @@ mod tests {
             ipv4_packet(Ipv4Addr::new(10, 44, 22, 44), Ipv4Addr::new(10, 44, 10, 1));
         let runtime = FipsMeshRuntime::new(vec![FipsMeshPeerConfig {
             participant_pubkey: format!(" {} ", peer.endpoint_npub),
-            endpoint_npub: peer.endpoint_npub.clone(),
-            allowed_ips: vec!["10.44.22.44/32".to_string()],
+            ..peer.config(&["10.44.22.44/32"])
         }]);
 
         assert_eq!(
@@ -292,20 +288,14 @@ mod tests {
         let second = TestPeer::generate();
         let duplicate_participant = TestPeer::generate();
         let runtime = FipsMeshRuntime::new(vec![
+            first.config(&[]),
             FipsMeshPeerConfig {
-                participant_pubkey: first.participant_pubkey.clone(),
-                endpoint_npub: first.endpoint_npub.clone(),
-                allowed_ips: Vec::new(),
-            },
-            FipsMeshPeerConfig {
-                participant_pubkey: first.participant_pubkey.clone(),
                 endpoint_npub: duplicate_participant.endpoint_npub.clone(),
-                allowed_ips: Vec::new(),
+                ..first.config(&[])
             },
             FipsMeshPeerConfig {
-                participant_pubkey: second.participant_pubkey.clone(),
                 endpoint_npub: first.endpoint_npub.clone(),
-                allowed_ips: Vec::new(),
+                ..second.config(&[])
             },
         ]);
 
@@ -396,11 +386,7 @@ mod tests {
         let buyer_ip = Ipv4Addr::new(10, 44, 195, 6);
         let internet_ip = Ipv4Addr::new(203, 0, 113, 100);
         let runtime = FipsMeshRuntime::with_local_routes_and_paid_route_admissions(
-            vec![FipsMeshPeerConfig {
-                participant_pubkey: upstream.participant_pubkey.clone(),
-                endpoint_npub: upstream.endpoint_npub.clone(),
-                allowed_ips: vec!["0.0.0.0/0".to_string()],
-            }],
+            vec![upstream.config(&["0.0.0.0/0"])],
             vec!["0.0.0.0/0".to_string()],
             vec![paid_route_admission_with_destinations(
                 &buyer,
@@ -466,15 +452,7 @@ mod tests {
     #[test]
     fn peer_config_detects_default_route_advertisement() {
         let peer = TestPeer::generate();
-        let config = FipsMeshPeerConfig {
-            participant_pubkey: peer.participant_pubkey,
-            endpoint_npub: peer.endpoint_npub,
-            allowed_ips: vec![
-                "10.44.22.44/32".to_string(),
-                " 0.0.0.0/0 ".to_string(),
-                "::/0".to_string(),
-            ],
-        };
+        let config = peer.config(&["10.44.22.44/32", " 0.0.0.0/0 ", "::/0"]);
 
         assert!(config.advertises_default_route());
     }
@@ -482,11 +460,7 @@ mod tests {
     #[test]
     fn peer_config_ignores_non_default_routes() {
         let peer = TestPeer::generate();
-        let config = FipsMeshPeerConfig {
-            participant_pubkey: peer.participant_pubkey,
-            endpoint_npub: peer.endpoint_npub,
-            allowed_ips: vec!["10.44.0.0/16".to_string(), "fd00::/8".to_string()],
-        };
+        let config = peer.config(&["10.44.0.0/16", "fd00::/8"]);
 
         assert!(!config.advertises_default_route());
     }
@@ -497,16 +471,8 @@ mod tests {
         let specific = TestPeer::generate();
         let packet = ipv4_packet(Ipv4Addr::new(10, 44, 10, 1), Ipv4Addr::new(10, 44, 22, 44));
         let runtime = FipsMeshRuntime::new(vec![
-            FipsMeshPeerConfig {
-                participant_pubkey: general.participant_pubkey,
-                endpoint_npub: general.endpoint_npub,
-                allowed_ips: vec!["10.44.0.0/16".to_string()],
-            },
-            FipsMeshPeerConfig {
-                participant_pubkey: specific.participant_pubkey.clone(),
-                endpoint_npub: specific.endpoint_npub.clone(),
-                allowed_ips: vec!["10.44.22.44/32".to_string()],
-            },
+            general.config(&["10.44.0.0/16"]),
+            specific.config(&["10.44.22.44/32"]),
         ]);
 
         assert_eq!(runtime.exact_route_peer_index.len(), 1);
@@ -554,25 +520,9 @@ mod tests {
         let subnet = TestPeer::generate();
         let exit = TestPeer::generate();
         let runtime = FipsMeshRuntime::new(vec![
-            FipsMeshPeerConfig {
-                participant_pubkey: exact.participant_pubkey.clone(),
-                endpoint_npub: exact.endpoint_npub.clone(),
-                allowed_ips: vec!["10.44.22.44/32".to_string()],
-            },
-            FipsMeshPeerConfig {
-                participant_pubkey: subnet.participant_pubkey.clone(),
-                endpoint_npub: subnet.endpoint_npub.clone(),
-                allowed_ips: vec!["10.44.0.0/16".to_string()],
-            },
-            FipsMeshPeerConfig {
-                participant_pubkey: exit.participant_pubkey.clone(),
-                endpoint_npub: exit.endpoint_npub.clone(),
-                allowed_ips: vec![
-                    "0.0.0.0/0".to_string(),
-                    "fd00::/8".to_string(),
-                    "fd00:44::/48".to_string(),
-                ],
-            },
+            exact.config(&["10.44.22.44/32"]),
+            subnet.config(&["10.44.0.0/16"]),
+            exit.config(&["0.0.0.0/0", "fd00::/8", "fd00:44::/48"]),
         ]);
 
         assert_eq!(runtime.exact_route_peer_index.len(), 1);
@@ -619,11 +569,10 @@ mod tests {
     fn duplicate_exact_routes_for_same_peer_are_not_ambiguous() {
         let peer = TestPeer::generate();
         let packet = ipv4_packet(Ipv4Addr::new(10, 44, 10, 1), Ipv4Addr::new(10, 44, 22, 44));
-        let runtime = FipsMeshRuntime::new(vec![FipsMeshPeerConfig {
-            participant_pubkey: peer.participant_pubkey.clone(),
-            endpoint_npub: peer.endpoint_npub.clone(),
-            allowed_ips: vec!["10.44.22.44/32".to_string(), "10.44.22.44/32".to_string()],
-        }]);
+        let runtime = FipsMeshRuntime::new(vec![peer.config(&[
+            "10.44.22.44/32",
+            "10.44.22.44/32",
+        ])]);
 
         let outgoing = runtime
             .route_outbound_packet_owned_with_peer(packet.clone())
@@ -644,11 +593,7 @@ mod tests {
     fn inbound_endpoint_data_accepts_roster_source_with_owned_packet_source() {
         let peer = TestPeer::generate();
         let packet = ipv4_packet(Ipv4Addr::new(10, 44, 22, 44), Ipv4Addr::new(10, 44, 10, 1));
-        let runtime = FipsMeshRuntime::new(vec![FipsMeshPeerConfig {
-            participant_pubkey: peer.participant_pubkey.clone(),
-            endpoint_npub: peer.endpoint_npub.clone(),
-            allowed_ips: vec!["10.44.22.44/32".to_string()],
-        }]);
+        let runtime = FipsMeshRuntime::new(vec![peer.config(&["10.44.22.44/32"])]);
 
         let admitter = runtime
             .endpoint_source_admitter(&peer.endpoint_node_addr)
@@ -673,11 +618,7 @@ mod tests {
         let peer = TestPeer::generate();
         let admitted = ipv4_packet(Ipv4Addr::new(10, 44, 22, 44), Ipv4Addr::new(10, 44, 10, 1));
         let rejected = ipv4_packet(Ipv4Addr::new(192, 0, 2, 10), Ipv4Addr::new(10, 44, 10, 1));
-        let runtime = FipsMeshRuntime::new(vec![FipsMeshPeerConfig {
-            participant_pubkey: peer.participant_pubkey.clone(),
-            endpoint_npub: peer.endpoint_npub.clone(),
-            allowed_ips: vec!["10.44.22.44/32".to_string()],
-        }]);
+        let runtime = FipsMeshRuntime::new(vec![peer.config(&["10.44.22.44/32"])]);
 
         let mut admission_cache = FipsEndpointAdmissionCache::default();
         let mut accepted = Vec::new();
