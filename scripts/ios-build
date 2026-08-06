@@ -58,6 +58,7 @@ commands:
   ios-archive           create or verify the one frozen App Store archive
   ios-release-testing   export an Ad Hoc app from that frozen archive
   ios-export            export App Store IPA from the verified frozen archive
+  ios-upload-preflight  validate the exact upload without contacting Apple
   ios-upload            upload the exact verified frozen-archive IPA
   ios-testflight        verify gate seal + export + upload, without rebuilding
   ios-release-artifacts alias for ios-testflight
@@ -489,7 +490,10 @@ run_ios_export() {
     "${FROZEN_REVISION_ARGS[@]}"
 }
 
-run_ios_upload() {
+IOS_UPLOAD_IPA=""
+IOS_UPLOAD_TRANSPORTER=""
+
+prepare_ios_upload() {
   local ipa app expected_sha actual_sha
   local transporter="${NVPN_ITMS_TRANSPORTER:-/Applications/Transporter.app/Contents/itms/bin/iTMSTransporter}"
   validate_frozen_archive
@@ -531,6 +535,14 @@ PY
     echo "Install Apple's Transporter app or set NVPN_ITMS_TRANSPORTER." >&2
     exit 1
   fi
+  IOS_UPLOAD_IPA="$ipa"
+  IOS_UPLOAD_TRANSPORTER="$transporter"
+}
+
+run_ios_upload() {
+  prepare_ios_upload
+  local ipa="$IOS_UPLOAD_IPA"
+  local transporter="$IOS_UPLOAD_TRANSPORTER"
   echo "Uploading $ipa to App Store Connect..."
   "$transporter" \
     -m upload \
@@ -569,6 +581,11 @@ case "${1:-}" in
   ios-archive) run_ios_archive ;;
   ios-release-testing) run_ios_release_testing_export ;;
   ios-export) run_ios_export ;;
+  ios-upload-preflight)
+    require_release_mutation_gate "$HARNESS_ROOT"
+    prepare_ios_upload
+    echo "Exact App Store upload preflight passed."
+    ;;
   ios-upload)
     require_release_mutation_gate "$HARNESS_ROOT"
     run_ios_upload

@@ -618,16 +618,25 @@ function installFakeAppleBoundary(fixture) {
   writeExecutable(transporter, '#!/bin/sh\nexit 0\n')
   writeExecutable(
     join(scripts, 'ios-build'),
-    `#!/bin/sh
-set -eu
-test "$1" = ios-upload
-printf 'upload\\n' >> "$FAKE_UPLOAD_LOG"
-sleep "\${FAKE_UPLOAD_DELAY:-0}"
-cp "$FAKE_ASC_VISIBLE" "$FAKE_ASC_STATE"
-if [ "\${FAKE_UPLOAD_MODE:-success}" = accept-crash ]; then
-  exit 86
-fi
-`,
+	    `#!/bin/sh
+	set -eu
+	case "$1" in
+	  ios-upload-preflight)
+	    [ "\${FAKE_UPLOAD_PREFLIGHT_MODE:-success}" = success ] || exit 87
+	    ;;
+	  ios-upload)
+	    printf 'upload\\n' >> "$FAKE_UPLOAD_LOG"
+	    sleep "\${FAKE_UPLOAD_DELAY:-0}"
+	    cp "$FAKE_ASC_VISIBLE" "$FAKE_ASC_STATE"
+	    if [ "\${FAKE_UPLOAD_MODE:-success}" = accept-crash ]; then
+	      exit 86
+	    fi
+	    ;;
+	  *)
+	    exit 2
+	    ;;
+	esac
+	`,
   )
   writeExecutable(
     join(scripts, 'testflight-internal'),
@@ -697,6 +706,38 @@ esac
 function uploadCount(path) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).length
 }
+
+test('local upload validation fails before creating an immutable intent', () => {
+  const fixture = createJournalFixture()
+  const fake = installFakeAppleBoundary(fixture)
+  const mutationEnv = {
+    ...fake.mutationEnv,
+    FAKE_UPLOAD_PREFLIGHT_MODE: 'fail',
+  }
+  const preflight = preflightIosPublication({
+    repoRoot: fixture.repoRoot,
+    stagedManifest: fixture.stagedManifest,
+    mutationEnv,
+  })
+  assert.equal(preflight.uploadAction, 'create-intent')
+
+  assert.throws(
+    () =>
+      publishExactIosDistribution({
+        repoRoot: fixture.repoRoot,
+        stagedManifest: fixture.stagedManifest,
+        mutationEnv,
+        preflight,
+      }),
+    /failed/i,
+  )
+  const paths = iosUploadReceiptPaths({
+    repoRoot: fixture.repoRoot,
+    mutationEnv,
+  })
+  assert.equal(existsSync(paths.intent), false)
+  assert.equal(uploadCount(fake.uploadLog), 0)
+})
 
 test('accepted-before-return crash recovers from ASC without a duplicate upload', () => {
   const fixture = createJournalFixture()

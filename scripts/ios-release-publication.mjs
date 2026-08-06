@@ -290,6 +290,11 @@ export function publishExactIosDistribution({
     })
 
   if (receipts.uploadAction === 'create-intent') {
+    run(
+      'bash',
+      [join(repoRoot, 'scripts', 'ios-build'), 'ios-upload-preflight'],
+      { cwd: repoRoot, env: mutationEnv },
+    )
     const authorization = captureIosUploadIntent({
       repoRoot,
       frozen,
