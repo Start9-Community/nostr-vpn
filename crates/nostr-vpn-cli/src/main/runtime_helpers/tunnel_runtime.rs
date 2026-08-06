@@ -15,8 +15,8 @@ impl CliTunnelRuntime {
         None
     }
 
-    fn listen_port(&self, configured: u16) -> u16 {
-        self.active_listen_port.unwrap_or(configured)
+    fn listen_port(&self) -> Option<u16> {
+        self.active_listen_port
     }
 
     pub(crate) fn owns_interface(&self, iface: &str) -> bool {

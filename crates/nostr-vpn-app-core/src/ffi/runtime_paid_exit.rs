@@ -26,12 +26,14 @@ mod paid_exit {
     };
 
     use super::{
-        AppConfig, Command, CommandWindowExt, Context, NVPN_BIN_ENV, NativeAppRuntime,
+        AppConfig, Command, CommandWindowExt, Context, DaemonRuntimeState, NVPN_BIN_ENV,
+        NativeAppRuntime,
         NativePaidExitSellerState, NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
         NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
-        NativePaidRouteWalletState, Output, Path, PathBuf, PortMappingStatus, Result, age_secs_since,
-        anyhow, compact_age_text, effective_config_relays, ensure_success, extract_json_document,
-        normalize_nostr_pubkey, unix_timestamp,
+        NativePaidRouteWalletState, Output, PaidExitSellerEgress, Path, PathBuf,
+        PortMappingStatus, Result, age_secs_since, anyhow, compact_age_text,
+        effective_config_relays, ensure_success, extract_json_document, normalize_nostr_pubkey,
+        peer_offers_exit_node, short_pubkey, unix_timestamp,
     };
 
     const PAID_ROUTE_WALLET_TOP_UP_POLL_CADENCE: std::time::Duration =

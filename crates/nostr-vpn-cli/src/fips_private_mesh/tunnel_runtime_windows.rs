@@ -7,6 +7,7 @@ impl FipsPrivateTunnelRuntime {
         validate_windows_wireguard_config(&config.wireguard_exit, &config.exit_dns)?;
         crate::pipeline_profile::maybe_spawn_reporter();
         let mesh = bind_fips_private_mesh(&config).await?;
+        let active_listen_port = mesh.confirmed_udp_listen_port(config.listen_port).await?;
         #[cfg(feature = "paid-exit")]
         mesh.set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
         let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers(
@@ -126,6 +127,7 @@ impl FipsPrivateTunnelRuntime {
             mesh_recv_task,
             event_rx,
             exit_route_ready,
+            active_listen_port,
             interface_index,
             route_guard,
             endpoint_bypass_routes,

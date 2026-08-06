@@ -86,6 +86,50 @@ impl AppConfig {
         normalize_nostr_pubkey(&self.exit_node).ok()
     }
 
+    pub fn paid_exit_seller_egress(&self) -> Result<PaidExitSellerEgress> {
+        match self.internet_source {
+            InternetSource::Direct => Ok(PaidExitSellerEgress::Direct),
+            InternetSource::WireGuard => Ok(PaidExitSellerEgress::WireGuard),
+            InternetSource::PrivateVpn => {
+                let peer = normalize_nostr_pubkey(&self.exit_node)
+                    .map_err(|_| anyhow!("select a private exit before selling internet"))?;
+                if let Ok(own_pubkey) = self.own_nostr_pubkey_hex()
+                    && peer == own_pubkey
+                {
+                    return Err(anyhow!("cannot resell this device as its own private exit"));
+                }
+                if !self
+                    .active_network_signal_pubkeys_hex()
+                    .iter()
+                    .any(|participant| participant == &peer)
+                {
+                    return Err(anyhow!(
+                        "selected private exit is not in the active network"
+                    ));
+                }
+                Ok(PaidExitSellerEgress::PrivatePeer { pubkey: peer })
+            }
+            InternetSource::PaidAutomatic | InternetSource::PaidManual => Err(anyhow!(
+                "paid exits cannot be resold; choose device internet, WireGuard, or a private exit"
+            )),
+        }
+    }
+
+    pub fn validate_paid_exit_seller_buyer(&self, buyer: &str) -> Result<String> {
+        let buyer = normalize_nostr_pubkey(buyer)
+            .map_err(|error| anyhow!("invalid paid exit buyer pubkey: {error}"))?;
+        if self
+            .paid_exit_seller_egress()?
+            .private_peer_pubkey()
+            .is_some_and(|upstream| upstream == buyer)
+        {
+            return Err(anyhow!(
+                "private exit upstream cannot also connect as this seller's buyer"
+            ));
+        }
+        Ok(buyer)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;

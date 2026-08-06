@@ -35,6 +35,7 @@
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn paid_route_admissions_install_buyer_return_routes() {
+        use nostr_vpn_core::config::PaidExitSellerEgress;
         use nostr_vpn_core::fips_mesh::FipsPaidRouteAdmission;
 
         let seller_keys = Keys::generate();
@@ -70,6 +71,147 @@
             config
                 .interface_route_targets(Vec::new())
                 .contains(&"10.44.133.173/32".to_string())
+        );
+
+        assert!(super::paid_route_admissions_for_egress(&config, true)[0].allow_routing);
+        config.local_exit_seller_egress = Some(PaidExitSellerEgress::WireGuard);
+        assert!(!super::paid_route_admissions_for_egress(&config, false)[0].allow_routing);
+
+        let upstream = Keys::generate().public_key().to_hex();
+        config.local_exit_seller_egress = Some(PaidExitSellerEgress::PrivatePeer {
+            pubkey: upstream.clone(),
+        });
+        config.peers.push(
+            FipsMeshPeerConfig::from_participant_pubkey(
+                &upstream,
+                vec!["0.0.0.0/0".to_string()],
+            )
+            .expect("private upstream"),
+        );
+        let connected = HashSet::from([upstream.as_str()]);
+        assert!(!super::local_exit_seller_egress_ready(
+            &config, &connected, false, None
+        ));
+        assert!(super::local_exit_seller_egress_ready(
+            &config,
+            &connected,
+            false,
+            Some(config.listen_port)
+        ));
+        config.paid_route_admissions[0].participant_pubkey = upstream;
+        assert!(!super::paid_route_admissions_for_egress(&config, true)[0].allow_routing);
+    }
+
+    async fn bind_listener_test_runtime(port: u16) -> FipsPrivateMeshRuntime {
+        let keys = Keys::generate();
+        let peer = Keys::generate();
+        let endpoint_peers = vec![FipsEndpointPeerTransportConfig {
+            npub: peer.public_key().to_bech32().expect("peer npub"),
+            addresses: Vec::new(),
+            connect_on_start: false,
+            auto_reconnect: false,
+            discovery_fallback_transit: false,
+        }];
+        let transport = FipsEndpointTransportConfig {
+            listen_port: port,
+            bind_interface: None,
+            advertised_endpoint: format!("8.8.8.8:{port}"),
+            advertise_public_endpoint: true,
+            nostr_discovery_enabled: true,
+            advertise_on_nostr: true,
+            webrtc_enabled: false,
+            stun_servers: Vec::new(),
+            nostr_relays: Vec::new(),
+            websocket: Default::default(),
+            share_local_candidates: false,
+        };
+        let config = super::fips_endpoint_config_with_open_discovery_limit(
+            &endpoint_peers,
+            Some(&transport),
+            super::private_mesh_mtu_from_app(None),
+            NostrDiscoveryPolicy::ConfiguredOnly,
+            0,
+        );
+        FipsPrivateMeshRuntime::bind_with_config_scoped(
+            keys.secret_key().to_bech32().expect("nsec"),
+            None,
+            Vec::new(),
+            config,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("FIPS bind")
+    }
+
+    #[tokio::test]
+    async fn production_fips_bind_confirms_its_udp_listener() {
+        let port = available_udp_port();
+        let runtime = bind_listener_test_runtime(port).await;
+
+        assert_eq!(
+            runtime
+                .confirmed_udp_listen_port(port)
+                .await
+                .expect("listener snapshot"),
+            Some(port)
+        );
+        runtime.endpoint().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn production_fips_bind_does_not_claim_an_occupied_udp_port() {
+        let reservation = UdpSocket::bind("0.0.0.0:0").expect("reserve UDP port");
+        let port = reservation.local_addr().expect("reserved address").port();
+        let runtime = bind_listener_test_runtime(port).await;
+
+        assert_eq!(
+            runtime
+                .confirmed_udp_listen_port(port)
+                .await
+                .expect("listener snapshot"),
+            None
+        );
+        runtime.endpoint().shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn seller_outbound_interface_follows_the_derived_egress() {
+        use nostr_vpn_core::config::PaidExitSellerEgress;
+
+        let private = PaidExitSellerEgress::PrivatePeer {
+            pubkey: "private-upstream".to_string(),
+        };
+        assert_eq!(
+            super::local_exit_outbound_interface(
+                Some(&PaidExitSellerEgress::Direct),
+                "nvpn0",
+                Some("wg0"),
+                Some("en0")
+            )
+            .as_deref(),
+            Some("en0")
+        );
+        assert_eq!(
+            super::local_exit_outbound_interface(
+                Some(&PaidExitSellerEgress::WireGuard),
+                "nvpn0",
+                Some("wg0"),
+                Some("en0")
+            )
+            .as_deref(),
+            Some("wg0")
+        );
+        assert_eq!(
+            super::local_exit_outbound_interface(
+                Some(&private),
+                "nvpn0",
+                Some("wg0"),
+                Some("en0")
+            )
+            .as_deref(),
+            Some("nvpn0")
         );
     }
 

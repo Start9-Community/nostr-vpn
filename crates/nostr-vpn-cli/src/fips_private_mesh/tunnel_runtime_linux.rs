@@ -230,6 +230,13 @@ impl FipsPrivateTunnelRuntime {
         self.reconcile_linux_exit_node_forwarding(
             &config.local_address,
             &config.local_exit_forwarding_routes,
+            config.local_exit_seller_egress.as_ref(),
+            local_exit_seller_egress_ready(
+                config,
+                &connected_peer_pubkeys(&self.mesh.peer_statuses()),
+                self.exit_node_runtime.wireguard_exit.is_some(),
+                self.active_listen_port,
+            ),
             &config.wireguard_exit,
             config.exit_node_leak_protection,
             config.mesh_mtu.tunnel,
@@ -490,6 +497,8 @@ impl FipsPrivateTunnelRuntime {
         &mut self,
         local_address: &str,
         routes: &[String],
+        seller_egress: Option<&PaidExitSellerEgress>,
+        seller_egress_ready: bool,
         wireguard_exit: &WireGuardExitConfig,
         exit_node_leak_protection: bool,
         tunnel_mtu: u16,
@@ -556,10 +565,21 @@ impl FipsPrivateTunnelRuntime {
             return Ok(());
         }
 
+        let seller_egress_ready = match seller_egress {
+            Some(PaidExitSellerEgress::WireGuard) => wireguard_exit_iface.is_some(),
+            Some(PaidExitSellerEgress::Direct | PaidExitSellerEgress::PrivatePeer { .. }) => {
+                seller_egress_ready
+            }
+            None => false,
+        };
+        if !seller_egress_ready {
+            self.cleanup_linux_exit_node_forwarding_rules()?;
+            return Ok(());
+        }
+
         let ipv4_outbound_iface = if route_families.ipv4 {
-            if let Some((iface, _)) = wireguard_exit_iface.as_ref() {
-                Some(iface.clone())
-            } else {
+            let host_default_iface = if matches!(seller_egress, Some(PaidExitSellerEgress::Direct))
+            {
                 match crate::linux_default_route() {
                     Ok(route) => Some(route.dev),
                     Err(error) => {
@@ -567,7 +587,17 @@ impl FipsPrivateTunnelRuntime {
                         return Err(error).context("failed to resolve default IPv4 route device");
                     }
                 }
-            }
+            } else {
+                None
+            };
+            local_exit_outbound_interface(
+                seller_egress,
+                &self.iface,
+                wireguard_exit_iface
+                    .as_ref()
+                    .map(|(iface, _)| iface.as_str()),
+                host_default_iface.as_deref(),
+            )
         } else {
             None
         };

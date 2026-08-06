@@ -629,12 +629,19 @@ fn fips_paid_route_admissions_from_store(
     Ok(store
         .seller_admissions(&app.paid_exit, unix_timestamp())
         .into_iter()
-        .map(|admission| {
-            crate::fips_private_mesh::fips_paid_route_admission_from_seller_admission(
+        .filter_map(|admission| {
+            if let Err(error) = app.validate_paid_exit_seller_buyer(&admission.buyer_pubkey) {
+                eprintln!(
+                    "paid-exit: withholding seller admission for {}: {error}",
+                    admission.buyer_pubkey
+                );
+                return None;
+            }
+            Some(crate::fips_private_mesh::fips_paid_route_admission_from_seller_admission(
                 &network_id,
                 admission,
                 &destination_allowed_ips,
-            )
+            ))
         })
         .collect())
 }

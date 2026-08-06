@@ -53,7 +53,10 @@ async fn bind_fips_private_mesh(
             endpoint_config,
             config.local_allowed_ips(),
             local_tunnel_ips,
-            config.paid_route_admissions.clone(),
+            paid_route_admissions_for_egress(
+                config,
+                local_exit_seller_egress_ready(config, &HashSet::new(), false, None),
+            ),
         )
         .await?,
     ))

@@ -686,6 +686,7 @@ pub(crate) struct FipsPrivateTunnelConfig {
     pub(crate) local_advertised_routes: Vec<String>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) local_exit_forwarding_routes: Vec<String>,
+    pub(crate) local_exit_seller_egress: Option<PaidExitSellerEgress>,
     pub(crate) paid_route_admissions: Vec<FipsPaidRouteAdmission>,
     #[cfg(feature = "paid-exit")]
     pub(crate) paid_route_accounting_peers: Vec<FipsPaidRouteAccountingPeer>,

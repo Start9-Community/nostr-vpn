@@ -165,22 +165,13 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     let last_fips_stale_participant_restart_at = None;
     let fips_pending_roster_restart_state = FipsPendingRosterRestartState::default();
     let iface = args.iface.clone();
-    let tunnel_runtime = CliTunnelRuntime::new(iface.clone());
+    let mut tunnel_runtime = CliTunnelRuntime::new(iface.clone());
     let network_snapshot = capture_network_snapshot();
     let network_changed_at = Some(unix_timestamp());
     let timeout = network_probe_timeout(&app);
     let captive_portal = detect_captive_portal(timeout).await;
     let mut port_mapping_runtime = PortMappingRuntime::default();
     let vpn_enabled = daemon_start_vpn_enabled(&app, args.paused);
-    if daemon_vpn_active(vpn_enabled, expected_peers) {
-        refresh_port_mapping(
-            &app,
-            &network_snapshot,
-            app.node.listen_port,
-            &mut port_mapping_runtime,
-        )
-        .await;
-    }
     let (fips_tunnel_runtime, last_fips_endpoint_peer_signature) =
         if fips_private_runtime_active(&app, vpn_enabled, expected_peers) {
             let mut config = match fips_tunnel_config_from_app(FipsTunnelConfigInput {
@@ -269,6 +260,21 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
         } else {
             (None, Vec::new())
         };
+
+    tunnel_runtime.active_listen_port = fips_tunnel_runtime
+        .as_ref()
+        .and_then(crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port);
+    if daemon_vpn_active(vpn_enabled, expected_peers)
+        && let Some(listen_port) = tunnel_runtime.active_listen_port
+    {
+        refresh_port_mapping(
+            &app,
+            &network_snapshot,
+            listen_port,
+            &mut port_mapping_runtime,
+        )
+        .await;
+    }
 
     Ok(DaemonVpnStartup {
         config_path,

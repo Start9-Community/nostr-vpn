@@ -19,12 +19,20 @@ impl FipsPrivateTunnelRuntime {
             ));
         }
         let mesh = bind_fips_private_mesh(&config).await?;
-        Self::start_with_mesh(config, mesh, cleanup_journal_config_path).await
+        let active_listen_port = mesh.confirmed_udp_listen_port(config.listen_port).await?;
+        Self::start_with_mesh(
+            config,
+            mesh,
+            active_listen_port,
+            cleanup_journal_config_path,
+        )
+        .await
     }
 
     async fn start_with_mesh(
         config: FipsPrivateTunnelConfig,
         mesh: Arc<FipsPrivateMeshRuntime>,
+        active_listen_port: Option<u16>,
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<Self> {
         crate::pipeline_profile::maybe_spawn_reporter();
@@ -56,6 +64,12 @@ impl FipsPrivateTunnelRuntime {
 
         let (event_tx, event_rx) = mpsc::channel::<FipsPrivateMeshEvent>(1024);
         let exit_route_ready = fips_exit_route_ready(&config, &mesh.peer_statuses());
+        let seller_egress_ready = local_exit_seller_egress_ready(
+            &config,
+            &connected_peer_pubkeys(&mesh.peer_statuses()),
+            false,
+            active_listen_port,
+        );
 
         let mut runtime = Self {
             iface,
@@ -74,6 +88,8 @@ impl FipsPrivateTunnelRuntime {
             fips_host_recv_worker: None,
             event_rx,
             exit_route_ready,
+            local_exit_seller_egress_ready: seller_egress_ready,
+            active_listen_port,
             endpoint_bypass_routes: Vec::new(),
             #[cfg(target_os = "macos")]
             endpoint_bypass_underlay: None,
@@ -97,6 +113,13 @@ impl FipsPrivateTunnelRuntime {
                 .prepare_secure_dns(&config, cleanup_journal_config_path)
                 .await?;
             runtime.apply_interface_config(&config).await?;
+            let ready = local_exit_seller_egress_ready(
+                &config,
+                &connected_peer_pubkeys(&runtime.mesh.peer_statuses()),
+                runtime.wireguard_exit_ready(),
+                runtime.active_listen_port,
+            );
+            runtime.replace_paid_route_admissions(&config, ready)?;
             runtime.finish_secure_dns(&config).await?;
             runtime
                 .reconcile_fips_host_runtime(config.fips_host.clone())
@@ -138,16 +161,39 @@ impl FipsPrivateTunnelRuntime {
         fips_tunnel_requires_endpoint_restart(&self.config, config)
     }
 
+    fn wireguard_exit_ready(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.exit_node_runtime.wireguard_exit.is_some()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.wg_upstream.is_some()
+        }
+    }
+
+    fn replace_paid_route_admissions(
+        &mut self,
+        config: &FipsPrivateTunnelConfig,
+        egress_ready: bool,
+    ) -> Result<()> {
+        self.mesh.replace_peers(
+            config.peers.clone(),
+            config.local_allowed_ips(),
+            paid_route_admissions_for_egress(config, egress_ready),
+        )?;
+        self.local_exit_seller_egress_ready = egress_ready;
+        Ok(())
+    }
+
     pub(crate) async fn apply_config(
         &mut self,
         config: FipsPrivateTunnelConfig,
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<()> {
-        self.mesh.replace_peers(
-            config.peers.clone(),
-            config.local_allowed_ips(),
-            config.paid_route_admissions.clone(),
-        )?;
+        // A source switch must close buyer routing before any host route/NAT
+        // mutation. Re-open it only after the selected egress is usable.
+        self.replace_paid_route_admissions(&config, false)?;
         #[cfg(feature = "paid-exit")]
         self.mesh
             .set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
@@ -160,6 +206,13 @@ impl FipsPrivateTunnelRuntime {
         self.prepare_secure_dns(&config, cleanup_journal_config_path)
             .await?;
         self.apply_interface_config(&config).await?;
+        let ready = local_exit_seller_egress_ready(
+            &config,
+            &connected_peer_pubkeys(&self.mesh.peer_statuses()),
+            self.wireguard_exit_ready(),
+            self.active_listen_port,
+        );
+        self.replace_paid_route_admissions(&config, ready)?;
         self.finish_secure_dns(&config).await?;
         self.reconcile_fips_host_runtime(config.fips_host.clone())
             .await?;
@@ -168,10 +221,25 @@ impl FipsPrivateTunnelRuntime {
     }
 
     pub(crate) async fn refresh_peer_dependent_routes(&mut self) -> Result<()> {
-        let exit_route_ready = fips_exit_route_ready(&self.config, &self.mesh.peer_statuses());
-        if self.exit_route_ready != exit_route_ready {
+        let statuses = self.mesh.peer_statuses();
+        let exit_route_ready = fips_exit_route_ready(&self.config, &statuses);
+        let seller_egress_ready = local_exit_seller_egress_ready(
+            &self.config,
+            &connected_peer_pubkeys(&statuses),
+            self.wireguard_exit_ready(),
+            self.active_listen_port,
+        );
+        let seller_readiness_changed =
+            self.local_exit_seller_egress_ready != seller_egress_ready;
+        if self.local_exit_seller_egress_ready && !seller_egress_ready {
             let config = self.config.clone();
-            return self.apply_interface_config(&config).await;
+            self.replace_paid_route_admissions(&config, false)?;
+        }
+        if self.exit_route_ready != exit_route_ready || seller_readiness_changed {
+            let config = self.config.clone();
+            self.apply_interface_config(&config).await?;
+            self.replace_paid_route_admissions(&config, seller_egress_ready)?;
+            return Ok(());
         }
 
         #[cfg(target_os = "linux")]
@@ -400,6 +468,13 @@ impl FipsPrivateTunnelRuntime {
             self.reconcile_macos_exit_node_forwarding(
                 &config.local_address,
                 &config.local_exit_forwarding_routes,
+                config.local_exit_seller_egress.as_ref(),
+                local_exit_seller_egress_ready(
+                    config,
+                    &connected_peer_pubkeys(&self.mesh.peer_statuses()),
+                    self.wg_upstream.is_some(),
+                    self.active_listen_port,
+                ),
             )?;
         }
         self.exit_route_ready = fips_exit_route_ready(config, &self.mesh.peer_statuses());
@@ -662,6 +737,8 @@ impl FipsPrivateTunnelRuntime {
         &mut self,
         local_address: &str,
         routes: &[String],
+        seller_egress: Option<&PaidExitSellerEgress>,
+        seller_egress_ready: bool,
     ) -> Result<()> {
         let route_families = crate::linux_exit_node_default_route_families(routes);
         if !route_families.ipv4 {
@@ -672,12 +749,24 @@ impl FipsPrivateTunnelRuntime {
                 "fips: IPv6 exit-node forwarding is disabled on macOS until nvpn has IPv6 PF source filtering"
             );
         }
+        if !seller_egress_ready {
+            return self.cleanup_macos_exit_node_forwarding_checked();
+        }
 
         let tunnel_source_cidr = crate::linux_exit_node_source_cidr(local_address)
             .ok_or_else(|| anyhow!("invalid IPv4 tunnel address '{local_address}'"))?;
-        let outbound_iface = crate::macos_underlay_default_route_from_system()?
-            .map(|route| route.interface)
-            .ok_or_else(|| anyhow!("no macOS underlay default route is available for exit NAT"))?;
+        let host_default_iface = if matches!(seller_egress, Some(PaidExitSellerEgress::Direct)) {
+            crate::macos_underlay_default_route_from_system()?.map(|route| route.interface)
+        } else {
+            None
+        };
+        let outbound_iface = local_exit_outbound_interface(
+            seller_egress,
+            &self.iface,
+            self.wg_upstream.as_ref().map(|upstream| upstream.iface.as_str()),
+            host_default_iface.as_deref(),
+        )
+        .ok_or_else(|| anyhow!("selected seller internet source is not ready for exit NAT"))?;
 
         let already_configured = self.exit_node_runtime.outbound_iface.as_deref()
             == Some(outbound_iface.as_str())
@@ -797,6 +886,10 @@ fn fips_host_disabled_cleanup_due(runtime_running: bool, cleanup_complete: bool)
 impl FipsPrivateTunnelRuntime {
     pub(crate) fn iface(&self) -> &str {
         &self.iface
+    }
+
+    pub(crate) fn active_listen_port(&self) -> Option<u16> {
+        self.active_listen_port
     }
 
     pub(crate) fn client_dataplane_enabled(&self) -> bool {

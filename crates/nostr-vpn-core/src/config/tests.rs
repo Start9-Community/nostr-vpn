@@ -3,7 +3,7 @@ mod tests {
     use super::{
         AdminSignedSharedRosterUpdate, AppConfig, CLOUDFLARE_DOH_URL, ExitDnsConfig,
         ExitDnsMode, ExitDnsResolverConfig, ExitDohProvider, InternetSource,
-        PendingOutboundJoinRequest, QUAD9_DOH_URL, WireGuardExitConfig,
+        PaidExitSellerEgress, PendingOutboundJoinRequest, QUAD9_DOH_URL, WireGuardExitConfig,
         effective_fips_nostr_relays, normalize_nostr_pubkey, npub_for_pubkey_hex,
         parse_wireguard_exit_config, split_peer_transport_addr, wireguard_exit_config_text,
     };
@@ -803,6 +803,59 @@ mod tests {
         config.set_internet_source(InternetSource::Direct);
         assert!(!config.wireguard_exit.enabled);
         assert!(config.exit_node.is_empty());
+    }
+
+    #[test]
+    fn paid_exit_seller_egress_follows_the_selected_internet_source() {
+        let peer = normalize_nostr_pubkey(&generate_nostr_identity().1).expect("peer pubkey");
+        let buyer = normalize_nostr_pubkey(&generate_nostr_identity().1).expect("buyer pubkey");
+        let mut config = AppConfig::generated();
+        config
+            .set_active_network_id("paid-exit-seller-test")
+            .expect("activate generated network");
+        config.networks[0].devices.push(peer.clone());
+
+        assert_eq!(
+            config.paid_exit_seller_egress().expect("direct egress"),
+            PaidExitSellerEgress::Direct
+        );
+        config.set_internet_source(InternetSource::WireGuard);
+        assert_eq!(
+            config.paid_exit_seller_egress().expect("WireGuard egress"),
+            PaidExitSellerEgress::WireGuard
+        );
+        config
+            .select_private_exit_node(&peer)
+            .expect("select private exit");
+        assert_eq!(
+            config.paid_exit_seller_egress().expect("private egress"),
+            PaidExitSellerEgress::PrivatePeer {
+                pubkey: peer.clone()
+            }
+        );
+        assert_eq!(
+            config
+                .paid_exit_seller_egress()
+                .expect("private egress")
+                .offer_upstream(),
+            crate::paid_routes::PaidExitUpstream::HostDefault
+        );
+        assert!(config.validate_paid_exit_seller_buyer(&peer).is_err());
+        assert_eq!(
+            config
+                .validate_paid_exit_seller_buyer(&buyer)
+                .expect("independent buyer"),
+            buyer
+        );
+    }
+
+    #[test]
+    fn paid_exit_seller_rejects_paid_upstream_chains() {
+        let mut config = AppConfig::generated();
+        config.set_internet_source(InternetSource::PaidAutomatic);
+        assert!(config.paid_exit_seller_egress().is_err());
+        config.set_internet_source(InternetSource::PaidManual);
+        assert!(config.paid_exit_seller_egress().is_err());
     }
 
     #[test]

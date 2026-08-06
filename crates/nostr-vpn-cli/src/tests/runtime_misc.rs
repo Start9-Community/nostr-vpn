@@ -814,6 +814,16 @@ fn paid_exit_forwarding_respects_ipv4_support() {
     assert!(runtime_local_exit_forwarding_routes(&app).is_empty());
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn paid_exit_forwarding_rejects_paid_on_paid_resale() {
+    let mut app = AppConfig::generated();
+    app.paid_exit.enabled = true;
+    app.set_internet_source(InternetSource::PaidAutomatic);
+
+    assert!(runtime_local_exit_forwarding_routes(&app).is_empty());
+}
+
 #[test]
 fn legacy_macos_exit_cleanup_leaves_global_ipv4_forwarding_alone() {
     let mut app = AppConfig::generated();

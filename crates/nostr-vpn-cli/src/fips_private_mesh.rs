@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use arc_swap::ArcSwap;
 #[cfg(feature = "paid-exit")]
 use cashu_service::StreamingRoutePaymentEnvelope;
-use fips_core::discovery::nostr::OverlayEndpointAdvert;
+use fips_core::discovery::nostr::{OverlayEndpointAdvert, OverlayTransportKind};
 use fips_endpoint::{
     Config, ConnectPolicy, EthernetConfig, FipsEndpoint, FipsEndpointData, FipsEndpointMessage,
     FipsEndpointPeer, NostrDiscoveryPolicy, NostrPeerfindingSource, PeerAddress,
@@ -17,7 +17,7 @@ use fips_endpoint::{
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use nostr_vpn_core::config::{
     AppConfig, DEFAULT_FIPS_BOOTSTRAP_PEERS, ExitDnsConfig, ExitDnsResolverConfig, InternetSource,
-    WireGuardExitConfig, derive_mesh_tunnel_ip, effective_fips_nostr_relays,
+    PaidExitSellerEgress, WireGuardExitConfig, derive_mesh_tunnel_ip, effective_fips_nostr_relays,
     normalize_nostr_pubkey, split_peer_transport_addr,
 };
 use nostr_vpn_core::data_plane::MeshPeerStatus;

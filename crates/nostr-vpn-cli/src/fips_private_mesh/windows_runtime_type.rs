@@ -13,6 +13,7 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     mesh_recv_task: JoinHandle<()>,
     event_rx: mpsc::Receiver<FipsPrivateMeshEvent>,
     exit_route_ready: bool,
+    active_listen_port: Option<u16>,
     interface_index: u32,
     route_guard: crate::wg_upstream_runtime::WindowsManagedInterfaceRoutes,
     endpoint_bypass_routes: Option<crate::wg_upstream_runtime::WindowsManagedEndpointRoutes>,

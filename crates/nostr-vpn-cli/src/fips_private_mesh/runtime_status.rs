@@ -185,6 +185,16 @@ impl FipsPrivateMeshRuntime {
             .context("failed to snapshot FIPS local advertised endpoints")
     }
 
+    async fn confirmed_udp_listen_port(&self, configured: u16) -> Result<Option<u16>> {
+        Ok((configured != 0
+            && self
+                .local_advertised_endpoints()
+                .await?
+                .iter()
+                .any(|endpoint| endpoint.transport == OverlayTransportKind::Udp))
+        .then_some(configured))
+    }
+
     pub(crate) async fn update_relays(&self, relays: &[String]) -> Result<()> {
         self.endpoint
             .update_relays(relays.to_vec())

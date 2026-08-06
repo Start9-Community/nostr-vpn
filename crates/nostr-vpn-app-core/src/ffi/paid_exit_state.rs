@@ -1,13 +1,12 @@
-fn selected_paid_exit_upstream(config: &AppConfig) -> PaidExitUpstream {
-    if config.wireguard_exit.enabled {
-        PaidExitUpstream::WireGuardExit
-    } else {
-        PaidExitUpstream::HostDefault
-    }
+fn selected_paid_exit_upstream(config: &AppConfig) -> Result<PaidExitUpstream> {
+    config
+        .paid_exit_seller_egress()
+        .map(|egress| egress.offer_upstream())
 }
 
 fn paid_exit_seller_state(
     app: Option<&AppConfig>,
+    daemon_state: Option<&DaemonRuntimeState>,
     port_mapping: Option<&PortMappingStatus>,
     supported: bool,
     store_path: &Path,
@@ -24,12 +23,20 @@ fn paid_exit_seller_state(
         };
     };
     let mut config = app.paid_exit.clone();
-    config.access.upstream = selected_paid_exit_upstream(app);
+    if let Ok(upstream) = selected_paid_exit_upstream(app) {
+        config.access.upstream = upstream;
+    }
     let (store_status, channels, sessions, traffic_summary) =
         paid_exit_seller_store_state(&config, supported, store_path);
     let channel_credit_msat = paid_exit_seller_channel_credit_msat(&sessions);
     let status_text = append_paid_exit_seller_store_status(
-        paid_exit_seller_status_text(app, &config, app.wireguard_exit.configured(), supported),
+        paid_exit_seller_status_text(
+            app,
+            daemon_state,
+            &config,
+            app.wireguard_exit.configured(),
+            supported,
+        ),
         store_status,
     );
 
@@ -39,7 +46,7 @@ fn paid_exit_seller_state(
         status_text,
         upstream: config.access.upstream.as_str().to_string(),
         private_vpn_access: config.access.private_vpn_access.as_str().to_string(),
-        internet_text: paid_route_upstream_text(config.access.upstream.as_str()),
+        internet_text: paid_exit_seller_internet_text(app),
         public_ip_text: paid_exit_public_ip_text(port_mapping),
         price_text: paid_route_price_text(config.pricing.price_msat, config.pricing.per_units),
         price_msat: config.pricing.price_msat,
@@ -270,6 +277,7 @@ fn append_paid_exit_seller_store_status(config_status: String, store_status: Str
 
 fn paid_exit_seller_status_text(
     app: &AppConfig,
+    daemon_state: Option<&DaemonRuntimeState>,
     config: &PaidExitConfig,
     wireguard_exit_configured: bool,
     supported: bool,
@@ -278,10 +286,25 @@ fn paid_exit_seller_status_text(
         "Selling internet is not supported on this platform".to_string()
     } else if !config.enabled {
         "Selling internet is off".to_string()
+    } else if let Err(error) = app.paid_exit_seller_egress() {
+        error.to_string()
+    } else if !daemon_state.is_some_and(|state| state.vpn_active && state.listen_port > 0) {
+        "Waiting for the FIPS listener".to_string()
     } else if config.access.upstream == PaidExitUpstream::WireGuardExit
         && !wireguard_exit_configured
     {
         "Configure WireGuard upstream before advertising".to_string()
+    } else if let Ok(PaidExitSellerEgress::PrivatePeer { pubkey }) =
+        app.paid_exit_seller_egress()
+        && !daemon_state.is_some_and(|state| {
+            state.peers.iter().any(|peer| {
+                peer.participant_pubkey == pubkey
+                    && peer.reachable
+                    && peer_offers_exit_node(&peer.advertised_routes)
+            })
+        })
+    {
+        "Waiting for the selected private exit".to_string()
     } else if app.nostr_keys().is_err() {
         "Set up Nostr identity before advertising".to_string()
     } else if effective_config_relays(app).is_empty() {
@@ -292,6 +315,21 @@ fn paid_exit_seller_status_text(
         "Selling internet is on with a free/dev price".to_string()
     } else {
         "Selling internet is ready".to_string()
+    }
+}
+
+fn paid_exit_seller_internet_text(app: &AppConfig) -> String {
+    match app.paid_exit_seller_egress() {
+        Ok(PaidExitSellerEgress::Direct) => "Device internet".to_string(),
+        Ok(PaidExitSellerEgress::WireGuard) => "WireGuard exit".to_string(),
+        Ok(PaidExitSellerEgress::PrivatePeer { pubkey }) => {
+            let name = app
+                .magic_dns_name_for_participant(&pubkey)
+                .or_else(|| app.peer_alias(&pubkey))
+                .unwrap_or_else(|| short_pubkey(&pubkey));
+            format!("Private exit · {name}")
+        }
+        Err(_) => "Unavailable".to_string(),
     }
 }
 

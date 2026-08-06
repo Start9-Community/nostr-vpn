@@ -13,11 +13,7 @@ fn fips_exit_route_ready(
     config: &FipsPrivateTunnelConfig,
     peer_statuses: &[MeshPeerStatus],
 ) -> bool {
-    let connected = peer_statuses
-        .iter()
-        .filter(|status| status.connected)
-        .map(|status| status.pubkey.as_str())
-        .collect::<HashSet<_>>();
+    let connected = connected_peer_pubkeys(peer_statuses);
     fips_exit_route_ready_for_connected(
         &config.route_targets,
         &config.peers,
@@ -26,6 +22,14 @@ fn fips_exit_route_ready(
         config.public_paid_exit_waiting_for_admission,
         &connected,
     )
+}
+
+fn connected_peer_pubkeys(peer_statuses: &[MeshPeerStatus]) -> HashSet<&str> {
+    peer_statuses
+        .iter()
+        .filter(|status| status.connected)
+        .map(|status| status.pubkey.as_str())
+        .collect()
 }
 
 fn fips_exit_route_ready_for_connected(
@@ -49,6 +53,61 @@ fn fips_exit_route_ready_for_connected(
     peers.iter().any(|peer| {
         peer.advertises_default_route() && connected.contains(peer.participant_pubkey.as_str())
     })
+}
+
+fn local_exit_seller_egress_ready(
+    config: &FipsPrivateTunnelConfig,
+    connected: &HashSet<&str>,
+    wireguard_ready: bool,
+    active_listen_port: Option<u16>,
+) -> bool {
+    if active_listen_port.is_none() {
+        return false;
+    }
+    match config.local_exit_seller_egress.as_ref() {
+        Some(PaidExitSellerEgress::Direct) => true,
+        Some(PaidExitSellerEgress::WireGuard) => wireguard_ready,
+        Some(PaidExitSellerEgress::PrivatePeer { pubkey }) => {
+            config.peers.iter().any(|peer| {
+                peer.participant_pubkey == *pubkey && peer.advertises_default_route()
+            }) && connected.contains(pubkey.as_str())
+        }
+        None => false,
+    }
+}
+
+fn paid_route_admissions_for_egress(
+    config: &FipsPrivateTunnelConfig,
+    egress_ready: bool,
+) -> Vec<FipsPaidRouteAdmission> {
+    let private_upstream = config
+        .local_exit_seller_egress
+        .as_ref()
+        .and_then(PaidExitSellerEgress::private_peer_pubkey);
+    config
+        .paid_route_admissions
+        .iter()
+        .cloned()
+        .map(|mut admission| {
+            admission.allow_routing &= egress_ready
+                && private_upstream != Some(admission.participant_pubkey.as_str());
+            admission
+        })
+        .collect()
+}
+
+fn local_exit_outbound_interface(
+    seller_egress: Option<&PaidExitSellerEgress>,
+    tunnel_iface: &str,
+    wireguard_iface: Option<&str>,
+    host_default_iface: Option<&str>,
+) -> Option<String> {
+    match seller_egress {
+        Some(PaidExitSellerEgress::Direct) => host_default_iface.map(str::to_owned),
+        Some(PaidExitSellerEgress::WireGuard) => wireguard_iface.map(str::to_owned),
+        Some(PaidExitSellerEgress::PrivatePeer { .. }) => Some(tunnel_iface.to_string()),
+        None => None,
+    }
 }
 
 pub(crate) fn effective_fips_route_targets(
@@ -395,6 +454,11 @@ impl FipsPrivateTunnelConfig {
             } else {
                 crate::runtime_local_exit_forwarding_routes(app)
             },
+            local_exit_seller_egress: if local_identity_confirmation_pending {
+                None
+            } else {
+                app.paid_exit_seller_egress().ok()
+            },
             paid_route_admissions: Vec::new(),
             #[cfg(feature = "paid-exit")]
             paid_route_accounting_peers: if local_identity_confirmation_pending {
@@ -673,6 +737,8 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     fips_host_recv_worker: Option<FipsHostRecvWorker>,
     event_rx: mpsc::Receiver<FipsPrivateMeshEvent>,
     exit_route_ready: bool,
+    local_exit_seller_egress_ready: bool,
+    active_listen_port: Option<u16>,
     #[cfg(target_os = "macos")]
     endpoint_bypass_routes: Vec<String>,
     #[cfg(target_os = "linux")]

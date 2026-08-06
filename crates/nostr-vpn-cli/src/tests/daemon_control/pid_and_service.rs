@@ -38,6 +38,41 @@ fn daemon_runtime_state_tracks_live_endpoint_and_listen_port() {
 }
 
 #[test]
+fn daemon_runtime_state_does_not_claim_an_unbound_configured_port() {
+    let mut config = AppConfig::generated();
+    config.node.endpoint = "198.51.100.10:51820".to_string();
+    config.node.listen_port = 51820;
+    let tunnel_runtime = crate::CliTunnelRuntime::new("utun100");
+    let state = crate::build_daemon_runtime_state(crate::DaemonRuntimeStateInput {
+        app: &config,
+        vpn_enabled: true,
+        vpn_active: true,
+        expected_peers: 0,
+        tunnel_runtime: &tunnel_runtime,
+        fips_peer_statuses: &[],
+        fips_relay_statuses: &[],
+        fips_endpoint_peers: &[],
+        advertised_routes_by_participant: &std::collections::HashMap::new(),
+        vpn_status: "Connected",
+        network: &nostr_vpn_core::diagnostics::NetworkSummary::default(),
+        port_mapping: &nostr_vpn_core::diagnostics::PortMappingStatus::default(),
+    });
+    let daemon = crate::DaemonStatus {
+        running: true,
+        pid: Some(1),
+        pid_file: "/tmp/nvpn.pid".into(),
+        log_file: "/tmp/nvpn.log".into(),
+        state_file: "/tmp/nvpn.state.json".into(),
+        state: Some(state.clone()),
+    };
+
+    assert_eq!(state.listen_port, 0);
+    assert!(state.advertised_endpoint.is_empty());
+    assert_eq!(crate::status_listen_port(&config, &daemon), 0);
+    assert!(crate::status_endpoint(&config, &daemon).is_empty());
+}
+
+#[test]
 fn daemon_pid_scan_matches_processes_for_config() {
     let config_path = Path::new("/Users/example/Library/Application Support/nvpn/config.toml");
     let ps = "  42063 /Applications/Nostr VPN.app/Contents/MacOS/nvpn daemon --config /Users/example/Library/Application Support/nvpn/config.toml --iface utun100\n\

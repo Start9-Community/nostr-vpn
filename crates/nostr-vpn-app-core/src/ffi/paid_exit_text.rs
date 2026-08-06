@@ -439,15 +439,6 @@ fn paid_route_bitrate_text(bps: u64) -> String {
     }
 }
 
-fn paid_route_upstream_text(value: &str) -> String {
-    match value {
-        "wireguard_exit" | "wireguard" | "wg" | "upstream_vpn" | "vpn" => {
-            "My internet through WireGuard".to_string()
-        }
-        _ => "My internet".to_string(),
-    }
-}
-
 fn paid_route_duration_text(seconds: u64) -> String {
     match seconds {
         0..=59 => plural_text(seconds.max(1), "sec"),

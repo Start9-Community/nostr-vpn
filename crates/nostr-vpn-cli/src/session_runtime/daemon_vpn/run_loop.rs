@@ -1,4 +1,7 @@
 loop {
+    tunnel_runtime.active_listen_port = fips_tunnel_runtime
+        .as_ref()
+        .and_then(crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port);
     let control_request_waiting = daemon_control_file_path(&config_path).exists();
     let background_ready = daemon_state_background_maintenance_enabled(
         &intervals.network_deadline,
@@ -196,14 +199,14 @@ loop {
             let network_changed = latest_snapshot.changed_since(&network_snapshot);
             let platform_network_event = network_event_pending;
             network_event_pending = false;
-            let runtime_listen_port =
-                tunnel_runtime.active_listen_port.unwrap_or(app.node.listen_port);
             let vpn_active = daemon_vpn_active(vpn_enabled, expected_peers);
             let endpoint_changed = if network_refresh_attempt.is_some() {
                 false
             } else if network_changed || resumed_after_sleep {
                 vpn_active
-            } else if vpn_active {
+            } else if vpn_active
+                && let Some(runtime_listen_port) = tunnel_runtime.active_listen_port
+            {
                 match port_mapping_runtime
                     .renew_if_due(&network_snapshot, runtime_listen_port, timeout)
                     .await
@@ -366,7 +369,12 @@ loop {
                 FipsLinkEventRefresh::RestartEndpoint
                     | FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
             ) {
-                if vpn_active {
+                tunnel_runtime.active_listen_port = fips_tunnel_runtime.as_ref().and_then(
+                    crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port,
+                );
+                if vpn_active
+                    && let Some(runtime_listen_port) = tunnel_runtime.active_listen_port
+                {
                     refresh_port_mapping(
                         &app,
                         &network_snapshot,
@@ -691,10 +699,9 @@ loop {
                                 &config_path,
                                 vpn_enabled,
                             );
-                        if daemon_vpn_active(vpn_enabled, expected_peers) {
-                            let runtime_listen_port = tunnel_runtime
-                                .active_listen_port
-                                .unwrap_or(app.node.listen_port);
+                        if daemon_vpn_active(vpn_enabled, expected_peers)
+                            && let Some(runtime_listen_port) = tunnel_runtime.active_listen_port
+                        {
                             refresh_port_mapping(
                                 &app,
                                 &network_snapshot,
@@ -799,10 +806,10 @@ loop {
                                         } else {
                                             "Config reloaded (paused)".to_string()
                                         };
-                                        if vpn_active {
-                                            let runtime_listen_port = tunnel_runtime
-                                                .active_listen_port
-                                                .unwrap_or(app.node.listen_port);
+                                        if vpn_active
+                                            && let Some(runtime_listen_port) =
+                                                tunnel_runtime.active_listen_port
+                                        {
                                             refresh_port_mapping(
                                                 &app,
                                                 &network_snapshot,

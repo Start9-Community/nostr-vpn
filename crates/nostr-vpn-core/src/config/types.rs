@@ -298,6 +298,35 @@ pub enum InternetSource {
     WireGuard,
 }
 
+/// The local internet path a paid-exit seller actually forwards buyers into.
+///
+/// This is derived from `internet_source`; it is deliberately not another
+/// persisted setting that can drift away from the host's selected exit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaidExitSellerEgress {
+    Direct,
+    WireGuard,
+    PrivatePeer { pubkey: String },
+}
+
+impl PaidExitSellerEgress {
+    /// Preserve paid-offer v3 compatibility. `host_default` means the
+    /// seller's active host path, which may itself be a private FIPS exit.
+    pub fn offer_upstream(&self) -> PaidExitUpstream {
+        match self {
+            Self::WireGuard => PaidExitUpstream::WireGuardExit,
+            Self::Direct | Self::PrivatePeer { .. } => PaidExitUpstream::HostDefault,
+        }
+    }
+
+    pub fn private_peer_pubkey(&self) -> Option<&str> {
+        match self {
+            Self::PrivatePeer { pubkey } => Some(pubkey),
+            Self::Direct | Self::WireGuard => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum FiatCurrency {

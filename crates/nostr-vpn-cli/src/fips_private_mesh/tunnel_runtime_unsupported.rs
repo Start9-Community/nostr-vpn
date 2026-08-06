@@ -16,6 +16,10 @@ impl FipsPrivateTunnelRuntime {
         ""
     }
 
+    pub(crate) fn active_listen_port(&self) -> Option<u16> {
+        None
+    }
+
     pub(crate) fn client_dataplane_enabled(&self) -> bool {
         false
     }

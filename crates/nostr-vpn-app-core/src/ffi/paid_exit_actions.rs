@@ -18,6 +18,7 @@ impl NativeAppRuntime {
     ) -> NativePaidExitSellerState {
         paid_exit_seller_state(
             app,
+            self.daemon_state.as_ref(),
             port_mapping,
             paid_exit_seller_supported_for_current_target(mobile),
             &self.paid_route_store_path(),
@@ -883,7 +884,7 @@ impl NativeAppRuntime {
     }
 
     pub(super) fn publish_paid_exit_offer(&mut self) -> Result<()> {
-        self.config.paid_exit.access.upstream = selected_paid_exit_upstream(&self.config);
+        self.config.paid_exit.access.upstream = selected_paid_exit_upstream(&self.config)?;
         self.save_config()?;
         let output = self.run_nvpn([
             "paid-exit",

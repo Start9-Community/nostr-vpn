@@ -557,10 +557,7 @@ fn status_endpoint(app: &AppConfig, daemon: &DaemonStatus) -> String {
     daemon
         .state
         .as_ref()
-        .and_then(|state| {
-            let endpoint = state.advertised_endpoint.trim();
-            (!endpoint.is_empty()).then(|| endpoint.to_string())
-        })
+        .map(|state| state.advertised_endpoint.trim().to_string())
         .unwrap_or_else(|| app.node.endpoint.clone())
 }
 
@@ -568,7 +565,7 @@ fn status_listen_port(app: &AppConfig, daemon: &DaemonStatus) -> u16 {
     daemon
         .state
         .as_ref()
-        .and_then(|state| (state.listen_port > 0).then_some(state.listen_port))
+        .map(|state| state.listen_port)
         .unwrap_or(app.node.listen_port)
 }
 

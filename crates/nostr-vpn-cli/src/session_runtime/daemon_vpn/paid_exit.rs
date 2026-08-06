@@ -98,6 +98,16 @@ pub(super) fn apply_paid_exit_session_opens(
         ..PaidExitApplySessionOpensResult::default()
     };
     for (buyer_pubkey, open) in opens {
+        let buyer_pubkey = match app.validate_paid_exit_seller_buyer(&buyer_pubkey) {
+            Ok(buyer_pubkey) => buyer_pubkey,
+            Err(error) => {
+                result.error_count += 1;
+                eprintln!(
+                    "paid-exit: rejected authenticated session open from {buyer_pubkey}: {error}"
+                );
+                continue;
+            }
+        };
         match store.apply_seller_session_open(ApplyPaidRouteSellerSessionOpenRequest {
             open,
             authenticated_buyer_pubkey: buyer_pubkey.clone(),

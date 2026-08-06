@@ -353,8 +353,11 @@ pub(crate) fn build_daemon_runtime_state(input: DaemonRuntimeStateInput<'_>) -> 
 
     let own_pubkey = app.own_nostr_pubkey_hex().ok();
     let now = unix_timestamp();
-    let listen_port = tunnel_runtime.listen_port(app.node.listen_port);
-    let local_endpoint = local_signal_endpoint(app, listen_port);
+    let listen_port = tunnel_runtime.listen_port().unwrap_or_default();
+    let local_endpoint = tunnel_runtime
+        .listen_port()
+        .map(|port| local_signal_endpoint(app, port))
+        .unwrap_or_default();
     // Daemon no longer pre-discovers a public endpoint; fips-core advertises
     // its own (and falls back to udp:nat traversal when behind NAT). The
     // advertised_endpoint we surface in state.json is the local-network
