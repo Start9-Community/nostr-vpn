@@ -1214,7 +1214,7 @@ ios_identity_keys = (
 if (
     ios_artifact.get("receiptSchema") != 2
     or ios_artifact.get("artifactType")
-    != "iOS company Ad Hoc Release app"
+    != "iOS Ad Hoc Release join-test variant"
     or ios_artifact.get("companySigningVerified") is not True
     or any(not ios_artifact.get(key) for key in ios_identity_keys)
 ):
