@@ -18,8 +18,7 @@ fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
     app.nostr.relays.clear();
     app.nostr.pubsub.mode = NostrPubsubMode::Client;
     app.paid_exit.enabled = true;
-    app.paid_exit.pricing.price_msat = 100;
-    app.paid_exit.pricing.per_units = 1_000_000;
+    app.paid_exit.pricing.price_msat_per_gb = 100;
     app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
     app.paid_exit.normalize();
     let now_unix = PAID_ROUTE_OFFER_TTL_SECS + 1_000;

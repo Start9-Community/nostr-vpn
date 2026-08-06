@@ -642,8 +642,7 @@ exit 0
             patch: SettingsPatch {
                 paid_exit_enabled: Some(true),
                 paid_exit_upstream: Some("wg".to_string()),
-                paid_exit_price_msat: Some(2_500),
-                paid_exit_per_units: Some(1_048_576),
+                paid_exit_price_msat_per_gb: Some(2_500),
                 paid_exit_accepted_mints: Some(
                     "https://mint-b.example, https://mint-a.example".to_string(),
                 ),
@@ -675,8 +674,7 @@ exit 0
         let saved = AppConfig::load(&runtime.config_path).expect("load persisted config");
         assert!(saved.paid_exit.enabled);
         assert_eq!(saved.paid_exit.access.upstream.as_str(), "wireguard_exit");
-        assert_eq!(saved.paid_exit.pricing.price_msat, 2_500);
-        assert_eq!(saved.paid_exit.pricing.per_units, 1_048_576);
+        assert_eq!(saved.paid_exit.pricing.price_msat_per_gb, 2_500);
         assert_eq!(
             saved.paid_exit.channel.accepted_mints,
             vec!["https://mint-a.example", "https://mint-b.example"]

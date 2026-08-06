@@ -440,14 +440,8 @@ async fn run_command(command: Command) -> Result<()> {
                         .parse::<PaidExitUpstream>()
                         .map_err(|error| anyhow!(error))?;
                 }
-                if let Some(value) = args.paid_exit_price_msat {
-                    app.paid_exit.pricing.price_msat = value;
-                }
-                if let Some(value) = args.paid_exit_per_units.as_deref() {
-                    app.paid_exit.pricing.per_units = paid_exit_parse_pricing_units_arg(
-                        value,
-                        "--paid-exit-per-units",
-                    )?;
+                if let Some(value) = args.paid_exit_price_msat_per_gb {
+                    app.paid_exit.pricing.price_msat_per_gb = value;
                 }
                 if let Some(value) = args.paid_exit_connection_minimum_msat_per_day {
                     app.paid_exit.pricing.connection_minimum_msat_per_day = value;

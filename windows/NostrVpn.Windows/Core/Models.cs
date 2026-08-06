@@ -117,14 +117,13 @@ public sealed class NativePaidExitSellerState
     public bool Supported { get; set; }
     public bool Enabled { get; set; }
     public string StatusText { get; set; } = "";
+    public string ProviderLink { get; set; } = "";
     public string Upstream { get; set; } = "";
     public string PrivateVpnAccess { get; set; } = "";
     public string InternetText { get; set; } = "";
     public string PublicIpText { get; set; } = "";
     public string PriceText { get; set; } = "";
-    public ulong PriceMsat { get; set; }
-    public ulong PerUnits { get; set; }
-    public string PerUnitsText { get; set; } = "";
+    public ulong PriceMsatPerGb { get; set; }
     public List<string> AcceptedMints { get; set; } = [];
     public ulong MaxChannelCapacitySat { get; set; }
     public ulong ChannelExpirySecs { get; set; }
@@ -242,9 +241,7 @@ public sealed class NativePaidRouteOfferState
     public string SellerNpub { get; set; } = "";
     public string StatusText { get; set; } = "";
     public string PriceText { get; set; } = "";
-    public ulong PriceMsat { get; set; }
-    public ulong PerUnits { get; set; }
-    public string PerUnitsText { get; set; } = "";
+    public ulong PriceMsatPerGb { get; set; }
     public List<string> AcceptedMints { get; set; } = [];
     public ulong MaxChannelCapacitySat { get; set; }
     public ulong ChannelExpirySecs { get; set; }
@@ -272,9 +269,7 @@ public sealed class NativePaidRouteOfferState
     public List<string> RelayUrls { get; set; } = [];
     public string DisplayCountry => string.IsNullOrWhiteSpace(CountryCode) ? "Unknown country" : CountryCode.ToUpperInvariant();
     public string DisplayNetworkClass => NativeDisplayText.NetworkClassTitle(NetworkClass);
-    public string DisplayPrice => string.IsNullOrWhiteSpace(PriceText)
-        ? NativeDisplayText.PriceText(PriceMsat, PerUnits)
-        : PriceText;
+    public string DisplayPrice => PriceText;
     public string DisplayMetricText => NativeDisplayText.MetricText(QualityText, BandwidthText);
 }
 
@@ -418,6 +413,8 @@ public sealed class NativePaidRouteMarketState
 {
     public bool Supported { get; set; }
     public string StatusText { get; set; } = "";
+    public string ManualProviderLink { get; set; } = "";
+    public string ManualProviderStatusText { get; set; } = "";
     public string StorePath { get; set; } = "";
     public NativePaidRouteWalletState Wallet { get; set; } = new();
     public NativePaidRoutePaymentActionState LastPaymentAction { get; set; } = new();
@@ -640,17 +637,6 @@ internal static class NativeDisplayText
         return Math.Abs(value - Math.Round(value)) < 0.05
             ? $"{value:0} {units[index]}"
             : $"{value:0.0} {units[index]}";
-    }
-
-    public static string PriceText(ulong priceMsat, ulong perUnits)
-    {
-        if (priceMsat == 0 || perUnits == 0)
-        {
-            return "Free";
-        }
-        var satPerGigabyte = (decimal)priceMsat * 1_000_000m / perUnits;
-        var megabytesPerSat = (decimal)perUnits / (priceMsat * 1_000m);
-        return $"{satPerGigabyte:0.###} sat / GB · 1 sat ≈ {megabytesPerSat:0.###} MB";
     }
 
     public static string TrafficUnitText(ulong units) => FormatBytes(units);

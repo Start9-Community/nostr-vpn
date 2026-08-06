@@ -168,13 +168,16 @@ extension RootView {
             exitDnsThroughExitServers = state.exitDnsThroughExitServers
             lastSyncedExitDnsThroughExitServers = state.exitDnsThroughExitServers
         }
+        if lastSyncedManualPaidExitProvider != state.paidRouteMarket.manualProviderLink {
+            manualPaidExitProvider = state.paidRouteMarket.manualProviderLink
+            lastSyncedManualPaidExitProvider = state.paidRouteMarket.manualProviderLink
+        }
         if paidExitSellerDraftConfigChanged(
             from: lastSyncedPaidExitSeller,
             to: state.paidExitSeller
         ) {
             let seller = state.paidExitSeller
-            paidExitPriceSats = AppManager.formatPaidExitPriceSats(seller.priceMsat)
-            paidExitPerUnits = fallbackText(seller.perUnitsText, paidExitPricingUnitDraft(seller.perUnits))
+            paidExitPriceMsatPerGb = String(seller.priceMsatPerGb)
             paidExitAcceptedMints = seller.acceptedMints.joined(separator: ", ")
             paidExitMaxChannelCapacitySat = String(seller.maxChannelCapacitySat)
             paidExitChannelExpirySecs = paidExitDurationDraft(seller.channelExpirySecs)
@@ -210,8 +213,7 @@ extension RootView {
         to current: NativePaidExitSellerState
     ) -> Bool {
         guard let previous else { return true }
-        return previous.priceMsat != current.priceMsat
-            || previous.perUnits != current.perUnits
+        return previous.priceMsatPerGb != current.priceMsatPerGb
             || previous.acceptedMints != current.acceptedMints
             || previous.maxChannelCapacitySat != current.maxChannelCapacitySat
             || previous.channelExpirySecs != current.channelExpirySecs

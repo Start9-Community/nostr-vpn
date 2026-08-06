@@ -293,6 +293,14 @@ impl NativeAppRuntime {
                 mint_url,
                 channel_capacity_sat,
             } => self.buy_best_paid_route_offer(mint_url.as_deref(), channel_capacity_sat),
+            NativeAppAction::SetManualPaidExitProvider { provider } => {
+                self.config.set_manual_paid_exit_provider(&provider)?;
+                self.save_reload_and_refresh()
+            }
+            NativeAppAction::ClearManualPaidExitProvider => {
+                self.config.clear_manual_paid_exit_provider();
+                self.save_reload_and_refresh()
+            }
             NativeAppAction::SelectPaidRouteSession {
                 session_id,
                 connect,

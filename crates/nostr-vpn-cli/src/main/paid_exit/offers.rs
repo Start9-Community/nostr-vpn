@@ -34,10 +34,7 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
         println!("seller: {}", local.offer.seller_npub);
         println!(
             "price: {}",
-            paid_exit_price_text(
-                local.offer.pricing.price_msat,
-                local.offer.pricing.per_units,
-            )
+            paid_exit_price_text(local.offer.pricing.price_msat_per_gb)
         );
         println!(
             "access: upstream={} private_vpn_access={}",

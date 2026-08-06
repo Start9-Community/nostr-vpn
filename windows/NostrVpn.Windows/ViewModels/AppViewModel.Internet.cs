@@ -95,6 +95,20 @@ public sealed partial class AppViewModel
     public Task DiscoverPaidRouteOffersAsync() =>
         DispatchAsync(NativeActions.DiscoverPaidRouteOffers(), "Finding sellers");
 
+    public Task SetManualPaidExitProviderAsync()
+    {
+        var provider = ManualPaidExitProvider.Trim();
+        return string.IsNullOrWhiteSpace(provider)
+            ? Task.CompletedTask
+            : DispatchAsync(NativeActions.SetManualPaidExitProvider(provider), "Adding provider");
+    }
+
+    public async Task ClearManualPaidExitProviderAsync()
+    {
+        await DispatchAsync(NativeActions.ClearManualPaidExitProvider(), "Clearing provider");
+        ManualPaidExitProvider = "";
+    }
+
     public Task RefreshPaidRouteWalletAsync() =>
         DispatchAsync(NativeActions.RefreshPaidRouteWallet(), "Refreshing wallet");
 
@@ -259,6 +273,14 @@ public sealed partial class AppViewModel
             "Saving listing");
     }
 
+    public Task SavePaidExitPriceAsync()
+    {
+        return ulong.TryParse(PaidExitPriceMsatPerGb.Trim(), out var price)
+            ? DispatchAsync(
+                NativeActions.UpdateSettings(new SettingsPatch { PaidExitPriceMsatPerGb = price }),
+                "Saving price")
+             : Task.CompletedTask;
+    }
     public Task ReceivePaidRoutePaymentsAsync() =>
         DispatchAsync(NativeActions.ReceivePaidRoutePayments(), "Checking payments");
 }

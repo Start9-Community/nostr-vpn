@@ -85,11 +85,8 @@ fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> 
             .parse::<PaidExitUpstream>()
             .map_err(|error| anyhow!(error))?;
     }
-    if let Some(value) = args.price_msat {
-        app.paid_exit.pricing.price_msat = value;
-    }
-    if let Some(value) = args.per_units.as_deref() {
-        app.paid_exit.pricing.per_units = paid_exit_parse_pricing_units_arg(value, "--per-units")?;
+    if let Some(value) = args.price_msat_per_gb {
+        app.paid_exit.pricing.price_msat_per_gb = value;
     }
     if let Some(value) = args.connection_minimum_msat_per_day {
         app.paid_exit.pricing.connection_minimum_msat_per_day = value;
@@ -273,10 +270,7 @@ fn print_paid_exit_run_result(result: &PaidExitRunResult) {
     println!("event_id: {}", result.event_id);
     println!(
         "price: {}",
-        paid_exit_price_text(
-            result.offer.pricing.price_msat,
-            result.offer.pricing.per_units,
-        )
+        paid_exit_price_text(result.offer.pricing.price_msat_per_gb)
     );
     println!(
         "access: upstream={} private_vpn_access={}",

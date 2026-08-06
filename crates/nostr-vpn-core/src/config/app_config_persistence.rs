@@ -79,6 +79,31 @@ impl AppConfig {
         Ok(seller_pubkey)
     }
 
+    pub fn set_manual_paid_exit_provider(&mut self, value: &str) -> Result<()> {
+        let provider = ManualPaidExitProvider::parse(value)?;
+        let provider_hex = normalize_nostr_pubkey(&provider.npub)?;
+        if self
+            .own_nostr_pubkey_hex()
+            .is_ok_and(|own_pubkey| own_pubkey == provider_hex)
+        {
+            return Err(anyhow!("cannot use this device as its own paid exit"));
+        }
+        self.manual_paid_exit_provider = provider;
+        self.connect_to_non_roster_fips_peers = true;
+        if self.nostr.pubsub.mode == NostrPubsubMode::Off {
+            self.nostr.pubsub.mode = NostrPubsubMode::Client;
+        }
+        Ok(())
+    }
+
+    pub fn clear_manual_paid_exit_provider(&mut self) {
+        self.manual_paid_exit_provider = ManualPaidExitProvider::default();
+    }
+
+    pub fn manual_paid_exit_provider_pubkey_hex(&self) -> Option<String> {
+        normalize_nostr_pubkey(&self.manual_paid_exit_provider.npub).ok()
+    }
+
     pub fn public_paid_exit_node_pubkey_hex(&self) -> Option<String> {
         if !self.exit_node_public_paid_exit || !self.connect_to_non_roster_fips_peers {
             return None;
@@ -209,6 +234,7 @@ impl AppConfig {
 #[cfg(test)]
 mod public_paid_exit_tests {
     use super::AppConfig;
+    use crate::config::{InternetSource, NostrPubsubMode};
 
     #[test]
     fn configured_public_paid_exit_does_not_require_nostr_discovery() {
@@ -219,5 +245,68 @@ mod public_paid_exit_tests {
         app.fips_nostr_discovery_enabled = false;
 
         assert_eq!(app.public_paid_exit_node_pubkey_hex().as_deref(), Some(seller));
+    }
+
+    #[test]
+    fn manual_provider_pins_control_peer_without_enabling_relay_discovery() {
+        let seller = "1111111111111111111111111111111111111111111111111111111111111111";
+        let mut app = AppConfig::generated();
+        app.fips_nostr_discovery_enabled = false;
+        app.nostr.pubsub.mode = NostrPubsubMode::Off;
+
+        app.set_manual_paid_exit_provider(seller)
+            .expect("set manual provider");
+
+        assert_eq!(app.internet_source, InternetSource::Direct);
+        assert!(app.exit_node.is_empty());
+        assert!(app.connect_to_non_roster_fips_peers);
+        assert_eq!(app.nostr.pubsub.mode, NostrPubsubMode::Client);
+        assert!(!app.fips_nostr_discovery_enabled);
+        assert_eq!(
+            app.manual_paid_exit_provider_pubkey_hex().as_deref(),
+            Some(seller)
+        );
+    }
+
+    #[test]
+    fn adding_manual_provider_does_not_change_current_internet_source() {
+        let seller = "1111111111111111111111111111111111111111111111111111111111111111";
+        for source in [
+            InternetSource::Direct,
+            InternetSource::WireGuard,
+            InternetSource::PrivateVpn,
+        ] {
+            let mut app = AppConfig::generated();
+            app.internet_source = source;
+            app.exit_node = if source == InternetSource::PrivateVpn {
+                "2222222222222222222222222222222222222222222222222222222222222222"
+                    .to_string()
+            } else {
+                String::new()
+            };
+            let prior_exit = app.exit_node.clone();
+
+            app.set_manual_paid_exit_provider(seller)
+                .expect("pin manual provider");
+
+            assert_eq!(app.internet_source, source);
+            assert_eq!(app.exit_node, prior_exit);
+            assert!(!app.exit_node_public_paid_exit);
+        }
+    }
+
+    #[test]
+    fn legacy_variable_pricing_is_rejected_instead_of_becoming_free() {
+        let raw = r#"
+[paid_exit]
+enabled = true
+
+[paid_exit.pricing]
+price_msat = 2500
+per_units = 1000000
+"#;
+        let error = toml::from_str::<AppConfig>(raw).expect_err("legacy pricing rejected");
+
+        assert!(error.to_string().contains("price_msat_per_gb"));
     }
 }

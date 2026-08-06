@@ -367,10 +367,7 @@ fn print_paid_exit_status_snapshot(app: &AppConfig, store_path: &Path, store: &P
                 .unwrap_or_default();
             println!(
                 "  {key} price={} country={} upstream={} last_seen={}{}",
-                paid_exit_price_text(
-                    offer.pricing.price_msat,
-                    offer.pricing.per_units,
-                ),
+                paid_exit_price_text(offer.pricing.price_msat_per_gb),
                 display_or_none(&offer.location.country_code),
                 offer.access.upstream.as_str(),
                 record.last_seen_unix,
@@ -721,10 +718,7 @@ pub(crate) fn paid_exit_offer_summary_line(
         "  {} seller={} price={} country={} upstream={} channel=max={} expiry={}s free_probe={} grace={} mints={} quality={} event={}",
         offer.offer_id,
         offer.seller_npub,
-        paid_exit_price_text(
-            offer.pricing.price_msat,
-            offer.pricing.per_units,
-        ),
+        paid_exit_price_text(offer.pricing.price_msat_per_gb),
         display_or_none(&offer.location.country_code),
         offer.access.upstream.as_str(),
         paid_exit_sat_text(offer.channel.max_channel_capacity_sat),

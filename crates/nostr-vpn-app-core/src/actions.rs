@@ -125,6 +125,10 @@ pub enum NativeAppAction {
         mint_url: Option<String>,
         channel_capacity_sat: Option<u64>,
     },
+    SetManualPaidExitProvider {
+        provider: String,
+    },
+    ClearManualPaidExitProvider,
     SelectPaidRouteSession {
         session_id: String,
         connect: bool,

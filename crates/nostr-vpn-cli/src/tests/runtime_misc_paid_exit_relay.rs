@@ -202,8 +202,7 @@ async fn paid_exit_offer_publish_and_discover_roundtrips_without_relays() {
     app.nostr.relays.clear();
     app.nostr.pubsub.mode = NostrPubsubMode::Client;
     app.paid_exit.enabled = true;
-    app.paid_exit.pricing.price_msat = 750;
-    app.paid_exit.pricing.per_units = 1_000_000;
+    app.paid_exit.pricing.price_msat_per_gb = 750;
     app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
     app.paid_exit.location.country_code = "fi".to_string();
     app.paid_exit.normalize();
@@ -237,7 +236,7 @@ async fn paid_exit_offer_publish_and_discover_roundtrips_without_relays() {
     assert_eq!(discovered_offer.offer_id, offer.offer_id);
     assert_eq!(discovered_offer.seller_npub, offer.seller_npub);
     assert_eq!(discovered_offer.location.country_code, "FI");
-    assert_eq!(discovered_offer.pricing.price_msat, 750);
+    assert_eq!(discovered_offer.pricing.price_msat_per_gb, 750);
 
     let _ = std::fs::remove_dir_all(directory);
 }
@@ -490,8 +489,7 @@ fn paid_exit_buy_and_use_select_public_exit_route() {
         enabled: true,
         ..PaidExitConfig::default()
     };
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 1_000_000;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     let signed_offer =
         signed_paid_exit_offer_from_config("internet-exit", &seller, &offer_config, None, 123)
@@ -580,8 +578,7 @@ fn paid_exit_buy_selects_route_before_payment_or_free_probe() {
         enabled: true,
         ..PaidExitConfig::default()
     };
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 1_000_000;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     offer_config.channel.free_probe_units = 0;
     offer_config.channel.grace_units = 0;
@@ -649,8 +646,7 @@ async fn paid_exit_create_payment_command_updates_buyer_session() {
         enabled: true,
         ..PaidExitConfig::default()
     };
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     offer_config.channel.free_probe_units = 0;
     offer_config.channel.grace_units = 0;
@@ -763,8 +759,7 @@ async fn paid_exit_stream_payments_signs_due_buyer_usage_update() {
         enabled: true,
         ..PaidExitConfig::default()
     };
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     offer_config.channel.free_probe_units = 0;
     offer_config.channel.grace_units = 0;

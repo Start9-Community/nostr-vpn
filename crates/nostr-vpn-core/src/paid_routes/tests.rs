@@ -10,13 +10,12 @@ fn paid_exit_config_normalizes_operator_hints() {
             private_vpn_access: PaidRoutePrivateVpnAccess::Denied,
         },
         pricing: PaidRoutePricing {
-            price_msat: 25,
-            per_units: 0,
+            price_msat_per_gb: 25_000_000_000,
             connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {
             accepted_mints: vec![
-                " https://mint.example ".to_string(),
+                " https://mint.example/ ".to_string(),
                 "https://mint.example".to_string(),
                 "https://mint2.example, https://mint3.example".to_string(),
             ],
@@ -48,7 +47,6 @@ fn paid_exit_config_normalizes_operator_hints() {
 
     config.normalize();
 
-    assert_eq!(config.pricing.per_units, 1);
     assert_eq!(config.channel.max_channel_capacity_sat, 1);
     assert_eq!(config.channel.channel_expiry_secs, 1);
     assert_eq!(
@@ -115,8 +113,7 @@ fn route_usage_accounting_uses_cashu_service_spilman_policy() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 25,
-            per_units: 10,
+            price_msat_per_gb: 2_500_000_000,
             ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
@@ -144,8 +141,7 @@ fn route_pricing_prorates_fractional_units_before_rounding() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 25,
-            per_units: 10,
+            price_msat_per_gb: 2_500_000_000,
             ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
@@ -170,8 +166,7 @@ fn connection_minimum_is_prorated_and_acts_as_floor() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 100,
-            per_units: 10,
+            price_msat_per_gb: 10_000_000_000,
             connection_minimum_msat_per_day: 86_400,
         },
         channel: PaidRouteChannelTerms {
@@ -208,8 +203,7 @@ fn connection_minimum_due_can_tolerate_active_time_skew_without_discounting_traf
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 100,
-            per_units: 10,
+            price_msat_per_gb: 10_000_000_000,
             connection_minimum_msat_per_day: 86_400,
         },
         channel: PaidRouteChannelTerms {
@@ -247,9 +241,8 @@ fn connection_minimum_participates_in_routing_decision() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 0,
+            price_msat_per_gb: 0,
             connection_minimum_msat_per_day: 86_400,
-            ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
             free_probe_units: 1_000,
@@ -279,8 +272,7 @@ fn route_decision_reports_free_paid_grace_and_suspended_states() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 25,
-            per_units: 10,
+            price_msat_per_gb: 2_500_000_000,
             ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
@@ -320,8 +312,7 @@ fn session_routing_decision_bills_bytes() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 100,
-            per_units: 1_000_000,
+            price_msat_per_gb: 100_000,
             connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {
@@ -442,14 +433,15 @@ fn signed_offer_event_roundtrips_without_raw_exit_endpoint() {
     );
     assert!(tags.contains(&vec!["service".to_string(), "internet_exit".to_string()].as_slice()));
     assert!(tags.contains(&vec!["payment".to_string(), "cashu_spilman".to_string()].as_slice()));
-    assert_eq!(PAID_ROUTE_OFFER_VERSION, "3");
+    assert_eq!(PAID_ROUTE_OFFER_VERSION, "4");
     assert!(
         !tags
             .iter()
             .any(|tag| tag.first().is_some_and(|name| name == "meter"))
     );
-    assert!(tags.contains(&vec!["price_msat".to_string(), "2500".to_string()].as_slice()));
-    assert!(tags.contains(&vec!["per_units".to_string(), "1000000".to_string()].as_slice()));
+    assert!(
+        tags.contains(&vec!["price_msat_per_gb".to_string(), "2500000".to_string()].as_slice())
+    );
     assert!(
         tags.contains(
             &vec![
@@ -599,6 +591,117 @@ fn signed_offer_rejects_private_vpn_access_tag_claims() {
 }
 
 #[test]
+fn signed_offer_rejects_old_variable_denominator_protocol_version() {
+    let seller = Keys::generate();
+    let offer = sample_paid_exit_offer(&seller);
+    let mut tags = paid_route_offer_tags(&offer).expect("offer tags");
+    let version = tags
+        .iter_mut()
+        .find(|tag| tag.as_slice().first().is_some_and(|kind| kind == "v"))
+        .expect("version tag");
+    *version = paid_route_tag(&["v", "3"]).expect("old version tag");
+    let event = EventBuilder::new(
+        Kind::Custom(PAID_ROUTE_OFFER_KIND),
+        serde_json::to_string(&offer).expect("encode offer"),
+    )
+    .tags(tags)
+    .custom_created_at(Timestamp::from(123))
+    .sign_with_keys(&seller)
+    .expect("sign old-version offer");
+
+    let error = SignedPaidRouteOffer::from_event(event).expect_err("old version rejected");
+
+    assert!(error.to_string().contains("version"));
+}
+
+#[test]
+fn manual_paid_exit_provider_parses_npub_and_roundtrips_link() {
+    let seller = Keys::generate();
+    let npub = seller.public_key().to_bech32().expect("seller npub");
+
+    assert_eq!(
+        ManualPaidExitProvider::parse(&npub)
+            .expect("bare npub")
+            .npub,
+        npub
+    );
+    let provider = ManualPaidExitProvider::new(
+        &seller.public_key().to_hex(),
+        Some(2_500_000),
+        Some("https://mint.example/path/"),
+    )
+    .expect("provider");
+    let link = provider.link().expect("provider link");
+    let parsed = ManualPaidExitProvider::parse(&link).expect("roundtrip link");
+
+    assert_eq!(parsed, provider);
+    assert!(link.contains("maxMsatPerGb=2500000"));
+    assert!(link.contains("mint=https%3A%2F%2Fmint.example%2Fpath"));
+}
+
+#[test]
+fn manual_paid_exit_provider_rejects_unknown_and_repeated_options() {
+    let npub = Keys::generate()
+        .public_key()
+        .to_bech32()
+        .expect("seller npub");
+
+    for suffix in [
+        "?price=1",
+        "?maxMsatPerGb=1&maxMsatPerGb=2",
+        "?mint=https%3A%2F%2Fmint.example&mint=https%3A%2F%2Fother.example",
+    ] {
+        assert!(
+            ManualPaidExitProvider::parse(&format!("nvpn://paid-exit/{npub}{suffix}")).is_err()
+        );
+    }
+}
+
+#[test]
+fn manual_paid_exit_provider_enforces_seller_price_and_mint() {
+    let seller = Keys::generate();
+    let other = Keys::generate();
+    let npub = seller.public_key().to_bech32().expect("seller npub");
+    let provider =
+        ManualPaidExitProvider::new(&npub, Some(2_500_000), Some("https://mint.example/"))
+            .expect("provider");
+    let mut config = sample_paid_exit_config();
+    config.pricing.price_msat_per_gb = 2_500_000;
+    config.channel.accepted_mints = vec!["https://mint.example/".to_string()];
+    config.normalize();
+    let offer = PaidRouteOffer::from_paid_exit_config("offer", &npub, &config, None);
+
+    provider.accepts(&offer).expect("matching terms");
+
+    let mut expensive = offer.clone();
+    expensive.pricing.price_msat_per_gb += 1;
+    assert!(provider.accepts(&expensive).is_err());
+    let mut wrong_mint = offer.clone();
+    wrong_mint.channel.accepted_mints = vec!["https://other.example".to_string()];
+    assert!(provider.accepts(&wrong_mint).is_err());
+    let mut wrong_seller = offer;
+    wrong_seller.seller_npub = other.public_key().to_bech32().expect("other npub");
+    assert!(provider.accepts(&wrong_seller).is_err());
+}
+
+#[test]
+fn seller_link_matches_its_normalized_offer_terms() {
+    let seller = Keys::generate();
+    let npub = seller.public_key().to_bech32().expect("seller npub");
+    let mut config = sample_paid_exit_config();
+    config.channel.accepted_mints = vec!["https://mint.example/".to_string()];
+    let provider = ManualPaidExitProvider::parse(
+        &ManualPaidExitProvider::seller_link(&npub, &config).expect("seller link"),
+    )
+    .expect("provider");
+    let offer = PaidRouteOffer::from_paid_exit_config("offer", &npub, &config, None);
+
+    provider
+        .accepts(&offer)
+        .expect("seller link accepts own offer");
+}
+
+#[test]
 fn signed_offer_builder_requires_enabled_paid_exit_with_mint_for_nonzero_price() {
     let seller = Keys::generate();
     let mut config = sample_paid_exit_config();
@@ -614,7 +717,7 @@ fn signed_offer_builder_requires_enabled_paid_exit_with_mint_for_nonzero_price()
         .expect_err("priced offer without mint rejected");
     assert!(error.to_string().contains("mint"));
 
-    config.pricing.price_msat = 0;
+    config.pricing.price_msat_per_gb = 0;
     config.pricing.connection_minimum_msat_per_day = 0;
     signed_paid_exit_offer_from_config("paid-exit-fi", &seller, &config, None, 123)
         .expect("free dev offer can omit mints");
@@ -656,8 +759,7 @@ fn sample_paid_exit_config() -> PaidExitConfig {
             private_vpn_access: PaidRoutePrivateVpnAccess::Denied,
         },
         pricing: PaidRoutePricing {
-            price_msat: 2500,
-            per_units: 1_000_000,
+            price_msat_per_gb: 2_500_000,
             connection_minimum_msat_per_day: 86_400,
         },
         channel: PaidRouteChannelTerms {

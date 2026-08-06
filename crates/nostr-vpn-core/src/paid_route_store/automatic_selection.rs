@@ -1,14 +1,14 @@
 use std::cmp::Ordering;
 
 use super::{persistence::*, *};
+use crate::paid_routes::PAID_ROUTE_PRICE_BYTES_PER_GB;
 
-pub const PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GIB: u64 = 100_000;
+pub const PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GB: u64 = 100_000;
 pub const PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES: u64 = 1024 * 1024;
 pub const PAID_ROUTE_AUTO_MAX_CHANNEL_CAPACITY_SAT: u64 = 1_000;
 
 const FUTURE_CLOCK_SKEW_SECS: u64 = 5 * 60;
 const CHANNEL_TARGET_BYTES: u64 = 100 * 1024 * 1024;
-const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Candidate {
@@ -18,7 +18,7 @@ struct Candidate {
     local_probe: Option<LocalProbeRank>,
     local_probe_count: u32,
     rating_score: i64,
-    price_msat_per_gib: u64,
+    price_msat_per_gb: u64,
     signed_at_unix: u64,
 }
 
@@ -64,18 +64,12 @@ impl PaidRouteStore {
             || !record.signed_offer.is_live_at(now_unix)
             || !offer.ip_support.ipv4
             || offer.channel.free_probe_units < PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES
-            || offer.pricing.per_units == 0
             || offer.pricing.connection_minimum_msat_per_day != 0
         {
             return None;
         }
 
-        let price_msat_per_gib = normalized_price_msat(
-            offer.pricing.price_msat,
-            offer.pricing.per_units,
-            BYTES_PER_GIB,
-        )?;
-        if price_msat_per_gib > PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GIB {
+        if offer.pricing.price_msat_per_gb > PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GB {
             return None;
         }
         let (mint_url, capacity_sat) = self.trusted_mint_and_capacity(&offer, now_unix)?;
@@ -87,7 +81,7 @@ impl PaidRouteStore {
             local_probe,
             local_probe_count,
             rating_score: record.rating_score.unwrap_or_default(),
-            price_msat_per_gib,
+            price_msat_per_gb: offer.pricing.price_msat_per_gb,
             signed_at_unix,
         })
     }
@@ -180,7 +174,7 @@ fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
     left.local_probe
         .cmp(&right.local_probe)
         .then_with(|| left.local_probe_count.cmp(&right.local_probe_count))
-        .then_with(|| right.price_msat_per_gib.cmp(&left.price_msat_per_gib))
+        .then_with(|| right.price_msat_per_gb.cmp(&left.price_msat_per_gb))
         .then_with(|| left.signed_at_unix.cmp(&right.signed_at_unix))
         .then_with(|| left.rating_score.cmp(&right.rating_score))
         .then_with(|| right.offer_key.cmp(&left.offer_key))
@@ -202,18 +196,13 @@ fn probe_rank(quality: &PaidRouteQualityMetrics) -> Option<LocalProbeRank> {
     })
 }
 
-fn normalized_price_msat(price_msat: u64, per_units: u64, units: u64) -> Option<u64> {
-    let denominator = u128::from(per_units);
-    let numerator = u128::from(price_msat).checked_mul(u128::from(units))?;
-    u64::try_from(numerator.checked_add(denominator.checked_sub(1)?)? / denominator).ok()
-}
-
 fn recommended_capacity_sat(offer: &PaidRouteOffer, balance_msat: Option<u64>) -> Option<u64> {
-    let traffic_msat = normalized_price_msat(
-        offer.pricing.price_msat,
-        offer.pricing.per_units,
-        CHANNEL_TARGET_BYTES,
-    )?;
+    let traffic_msat = u64::try_from(
+        u128::from(offer.pricing.price_msat_per_gb)
+            .saturating_mul(u128::from(CHANNEL_TARGET_BYTES))
+            .div_ceil(u128::from(PAID_ROUTE_PRICE_BYTES_PER_GB)),
+    )
+    .ok()?;
     let target_sat = traffic_msat
         .saturating_add(999)
         .saturating_div(1_000)

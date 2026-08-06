@@ -5,7 +5,7 @@ fn paid_buyer_session_without_payment_does_not_allow_routing() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
+    config.pricing.price_msat_per_gb = 1_000_000;
     config.pricing.connection_minimum_msat_per_day = 1;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
@@ -27,7 +27,7 @@ fn paid_buyer_session_with_opening_payment_allows_routing() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
+    config.pricing.price_msat_per_gb = 1_000_000;
     config.pricing.connection_minimum_msat_per_day = 1;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
@@ -214,6 +214,40 @@ fn paid_route_store_persists_wallet_offer_session_and_channel_state() {
             .and_then(|quality| quality.jitter_ms),
         Some(7)
     );
+}
+
+#[test]
+fn variable_denominator_store_upgrade_drops_only_offers() {
+    let scratch = ScratchDir::new("variable-denominator-upgrade");
+    let store_path = scratch.path().join("paid-routes.json");
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let (store, session_id, channel_id) =
+        buyer_store_with_session(&seller, &buyer, &sample_config());
+    let expected_mint = store.wallet.default_mint.clone();
+    let mut encoded = serde_json::to_value(&store).expect("encode legacy store");
+    encoded["version"] = json!(2);
+    let legacy_offer = encoded["offers"]
+        .as_object_mut()
+        .and_then(|offers| offers.values_mut().next())
+        .expect("legacy offer");
+    legacy_offer["offer"]["pricing"] = json!({
+        "price_msat": 2_500,
+        "per_units": 1_000_000,
+    });
+    fs::write(
+        &store_path,
+        serde_json::to_vec_pretty(&encoded).expect("encode legacy fixture"),
+    )
+    .expect("write legacy fixture");
+
+    let loaded = load_paid_route_store(&store_path).expect("upgrade legacy store");
+
+    assert_eq!(loaded.version, CURRENT_VERSION);
+    assert!(loaded.offers.is_empty());
+    assert_eq!(loaded.wallet.default_mint, expected_mint);
+    assert!(loaded.channels.contains_key(&channel_id));
+    assert!(loaded.sessions.contains_key(&session_id));
 }
 
 #[test]
@@ -475,8 +509,7 @@ fn attach_buyer_spilman_channel_replaces_placeholder_channel_id() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, placeholder_channel_id) =
@@ -523,8 +556,7 @@ fn attach_buyer_spilman_channel_rejects_overclaimed_payment_without_mutating_sto
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, placeholder_channel_id) =
@@ -557,8 +589,7 @@ fn seller_admissions_reflect_streaming_payment_decision() {
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -658,8 +689,7 @@ fn seller_collection_states_mark_expired_spilman_credit_due() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 

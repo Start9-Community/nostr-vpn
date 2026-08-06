@@ -56,8 +56,7 @@ fn sample_config() -> PaidExitConfig {
             private_vpn_access: PaidRoutePrivateVpnAccess::Denied,
         },
         pricing: PaidRoutePricing {
-            price_msat: 2500,
-            per_units: 1_000_000,
+            price_msat_per_gb: 2_500_000,
             connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {

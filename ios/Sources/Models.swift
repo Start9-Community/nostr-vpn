@@ -344,14 +344,13 @@ struct PaidExitSellerState: Decodable, Equatable {
     var supported = false
     var enabled = false
     var statusText = ""
+    var providerLink = ""
     var upstream = ""
     var privateVpnAccess = ""
     var internetText = ""
     var publicIpText = ""
     var priceText = ""
-    var priceMsat: UInt64 = 0
-    var perUnits: UInt64 = 0
-    var perUnitsText = ""
+    var priceMsatPerGb: UInt64 = 0
     var acceptedMints: [String] = []
     var maxChannelCapacitySat: UInt64 = 0
     var channelExpirySecs: UInt64 = 0
@@ -470,9 +469,7 @@ struct PaidRouteOfferState: Decodable, Identifiable, Equatable {
     var sellerNpub = ""
     var statusText = ""
     var priceText = ""
-    var priceMsat: UInt64 = 0
-    var perUnits: UInt64 = 0
-    var perUnitsText = ""
+    var priceMsatPerGb: UInt64 = 0
     var acceptedMints: [String] = []
     var maxChannelCapacitySat: UInt64 = 0
     var channelExpirySecs: UInt64 = 0
@@ -582,6 +579,8 @@ struct PaidRouteMarketFilterState: Decodable, Equatable {
 struct PaidRouteMarketState: Decodable, Equatable {
     var supported = false
     var statusText = ""
+    var manualProviderLink = ""
+    var manualProviderStatusText = ""
     var storePath = ""
     var wallet = PaidRouteWalletState()
     var lastPaymentAction = PaidRoutePaymentActionState()

@@ -7,7 +7,7 @@ use cashu_service::{
     StreamingRouteDecision, StreamingRouteMeter, StreamingRoutePolicy,
 };
 use nostr_sdk::prelude::{
-    Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
+    Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32, Url,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,14 +18,14 @@ use serde::{Deserialize, Serialize};
 /// kind so market/payment terms do not overload endpoint discovery or require
 /// publishing raw transport endpoints.
 pub const PAID_ROUTE_OFFER_KIND: u16 = 37_196;
-pub const PAID_ROUTE_OFFER_VERSION: &str = "3";
+pub const PAID_ROUTE_OFFER_VERSION: &str = "4";
 pub const PAID_ROUTE_OFFER_APP: &str = "fips/paid-route-offer";
 /// Signed seller listings expire if the seller stops refreshing them.
 pub const PAID_ROUTE_OFFER_TTL_SECS: u64 = 3_600;
 const PAID_ROUTE_OFFER_FUTURE_SKEW_SECS: u64 = 5 * 60;
 pub const DEFAULT_FIPS_PEER_RATING_SCOPE: &str = "fips.peer";
 
-const DEFAULT_PRICE_DENOMINATOR_UNITS: u64 = 1_000_000;
+pub const PAID_ROUTE_PRICE_BYTES_PER_GB: u64 = 1_000_000_000;
 const DEFAULT_MAX_CHANNEL_CAPACITY_SAT: u64 = 1_000;
 const DEFAULT_CHANNEL_EXPIRY_SECS: u64 = 86_400;
 const DEFAULT_FREE_PROBE_BYTES: u64 = 1_048_576;
@@ -180,24 +180,11 @@ impl ExitNetworkClass {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaidRoutePricing {
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub price_msat: u64,
-    #[serde(default = "default_price_denominator_units")]
-    pub per_units: u64,
+    pub price_msat_per_gb: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection_minimum_msat_per_day: u64,
-}
-
-impl Default for PaidRoutePricing {
-    fn default() -> Self {
-        Self {
-            price_msat: 0,
-            per_units: DEFAULT_PRICE_DENOMINATOR_UNITS,
-            connection_minimum_msat_per_day: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +280,158 @@ pub struct PaidExitConfig {
     pub rating_discovery: PaidExitRatingDiscoveryConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ManualPaidExitProvider {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub npub: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price_msat_per_gb: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mint: String,
+}
+
+impl ManualPaidExitProvider {
+    pub fn is_default(&self) -> bool {
+        self.npub.is_empty() && self.max_price_msat_per_gb.is_none() && self.mint.is_empty()
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(anyhow!("paid exit provider is empty"));
+        }
+        if !value.starts_with("nvpn://") {
+            return Self::new(value, None, None);
+        }
+
+        let url = Url::parse(value).context("invalid paid exit link")?;
+        if url.scheme() != "nvpn" || url.host_str() != Some("paid-exit") {
+            return Err(anyhow!("expected nvpn://paid-exit/<npub>"));
+        }
+        let npub = url.path().trim_matches('/');
+        if npub.is_empty() || npub.contains('/') {
+            return Err(anyhow!("paid exit link is missing a provider npub"));
+        }
+        let mut max_price = None;
+        let mut mint = None;
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "maxMsatPerGb" => {
+                    if max_price.is_some() {
+                        return Err(anyhow!("paid exit link repeats maxMsatPerGb"));
+                    }
+                    max_price = Some(
+                        value
+                            .parse::<u64>()
+                            .context("invalid maxMsatPerGb in paid exit link")?,
+                    );
+                }
+                "mint" => {
+                    if mint.is_some() {
+                        return Err(anyhow!("paid exit link repeats mint"));
+                    }
+                    mint = Some(value.into_owned());
+                }
+                other => return Err(anyhow!("unsupported paid exit link option '{other}'")),
+            }
+        }
+        Self::new(npub, max_price, mint.as_deref())
+    }
+
+    pub fn new(npub: &str, max_price_msat_per_gb: Option<u64>, mint: Option<&str>) -> Result<Self> {
+        let public_key = PublicKey::parse(npub).context("invalid paid exit provider npub")?;
+        let npub = public_key
+            .to_bech32()
+            .context("failed to encode paid exit provider npub")?;
+        let mint = mint
+            .map(str::trim)
+            .filter(|mint| !mint.is_empty())
+            .map(normalize_paid_exit_provider_mint)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            npub,
+            max_price_msat_per_gb,
+            mint,
+        })
+    }
+
+    pub fn link(&self) -> Result<String> {
+        let normalized = Self::new(
+            &self.npub,
+            self.max_price_msat_per_gb,
+            (!self.mint.is_empty()).then_some(self.mint.as_str()),
+        )?;
+        let mut url = Url::parse(&format!("nvpn://paid-exit/{}", normalized.npub))?;
+        if normalized.max_price_msat_per_gb.is_some() || !normalized.mint.is_empty() {
+            let mut query = url.query_pairs_mut();
+            if let Some(max_price) = normalized.max_price_msat_per_gb {
+                query.append_pair("maxMsatPerGb", &max_price.to_string());
+            }
+            if !normalized.mint.is_empty() {
+                query.append_pair("mint", &normalized.mint);
+            }
+        }
+        Ok(url.to_string())
+    }
+
+    pub fn seller_link(npub: &str, config: &PaidExitConfig) -> Result<String> {
+        Self::new(
+            npub,
+            Some(config.pricing.price_msat_per_gb),
+            config.channel.accepted_mints.first().map(String::as_str),
+        )?
+        .link()
+    }
+
+    pub fn accepts(&self, offer: &PaidRouteOffer) -> Result<()> {
+        let seller = PublicKey::parse(&offer.seller_npub)
+            .context("invalid paid exit offer seller")?
+            .to_bech32()?;
+        if seller != self.npub {
+            return Err(anyhow!("paid exit offer is from a different provider"));
+        }
+        if self
+            .max_price_msat_per_gb
+            .is_some_and(|max| offer.pricing.price_msat_per_gb > max)
+        {
+            return Err(anyhow!(
+                "provider offer is over the configured maximum of {} msat/GB",
+                self.max_price_msat_per_gb.unwrap_or_default()
+            ));
+        }
+        if !self.mint.is_empty()
+            && !offer
+                .channel
+                .accepted_mints
+                .iter()
+                .any(|mint| mint == &self.mint)
+        {
+            return Err(anyhow!(
+                "provider offer does not accept the configured mint"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn normalize_paid_exit_provider_mint(value: &str) -> Result<String> {
+    let mut url = Url::parse(value).context("invalid paid exit provider mint URL")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none_or(str::is_empty) {
+        return Err(anyhow!(
+            "paid exit provider mint must be an HTTP(S) URL with a host"
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!(
+            "paid exit provider mint must not include a query or fragment"
+        ));
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
 impl PaidExitConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
@@ -300,10 +439,15 @@ impl PaidExitConfig {
 
     pub fn normalize(&mut self) {
         self.access.private_vpn_access = PaidRoutePrivateVpnAccess::Denied;
-        self.pricing.per_units = self.pricing.per_units.max(1);
         self.channel.max_channel_capacity_sat = self.channel.max_channel_capacity_sat.max(1);
         self.channel.channel_expiry_secs = self.channel.channel_expiry_secs.max(1);
-        self.channel.accepted_mints = normalize_string_list(&self.channel.accepted_mints);
+        let mut accepted_mints = normalize_string_list(&self.channel.accepted_mints)
+            .into_iter()
+            .filter_map(|mint| normalize_paid_exit_provider_mint(&mint).ok())
+            .collect::<Vec<_>>();
+        accepted_mints.sort();
+        accepted_mints.dedup();
+        self.channel.accepted_mints = accepted_mints;
         self.location.country_code = normalize_paid_route_country_code(&self.location.country_code);
         self.location.region.clear();
         self.location.network_class = ExitNetworkClass::Unknown;
@@ -314,8 +458,8 @@ impl PaidExitConfig {
     pub fn streaming_policy(&self) -> StreamingRoutePolicy {
         StreamingRoutePolicy {
             meter: StreamingRouteMeter::Bytes,
-            price_msat: self.pricing.price_msat,
-            per_units: self.pricing.per_units.max(1),
+            price_msat: self.pricing.price_msat_per_gb,
+            per_units: PAID_ROUTE_PRICE_BYTES_PER_GB,
             max_channel_capacity_sat: self.channel.max_channel_capacity_sat.max(1),
             channel_expiry_secs: self.channel.channel_expiry_secs.max(1),
             free_probe_units: self.channel.free_probe_units,
@@ -327,8 +471,8 @@ impl PaidExitConfig {
         paid_route_amount_due_msat_for_usage(
             usage,
             self.channel.free_probe_units,
-            self.pricing.price_msat,
-            self.pricing.per_units,
+            self.pricing.price_msat_per_gb,
+            PAID_ROUTE_PRICE_BYTES_PER_GB,
             self.pricing.connection_minimum_msat_per_day,
         )
     }
@@ -341,8 +485,8 @@ impl PaidExitConfig {
         paid_route_amount_due_msat_for_usage_with_connection_minimum_skew(
             usage,
             self.channel.free_probe_units,
-            self.pricing.price_msat,
-            self.pricing.per_units,
+            self.pricing.price_msat_per_gb,
+            PAID_ROUTE_PRICE_BYTES_PER_GB,
             self.pricing.connection_minimum_msat_per_day,
             active_millis_skew,
         )
@@ -387,8 +531,8 @@ impl PaidExitConfig {
                 self.channel.free_probe_units,
                 self.channel.grace_units,
                 paid_msat,
-                self.pricing.price_msat,
-                self.pricing.per_units,
+                self.pricing.price_msat_per_gb,
+                PAID_ROUTE_PRICE_BYTES_PER_GB,
             ),
         }
     }
@@ -759,10 +903,6 @@ pub fn paid_route_country_claim(
 
 fn default_true() -> bool {
     true
-}
-
-fn default_price_denominator_units() -> u64 {
-    DEFAULT_PRICE_DENOMINATOR_UNITS
 }
 
 fn default_max_channel_capacity_sat() -> u64 {

@@ -32,7 +32,30 @@ pub fn load_paid_route_store(path: &Path) -> Result<PaidRouteStore> {
         }
     };
 
-    let mut store = match serde_json::from_str::<PaidRouteStore>(&raw) {
+    let mut value = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!(
+                "discarding unreadable paid route store {}: {error}",
+                path.display()
+            );
+            return Ok(PaidRouteStore::default());
+        }
+    };
+    let stored_version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    if stored_version < u64::from(CURRENT_VERSION)
+        && let Some(object) = value.as_object_mut()
+    {
+        // v4 offers intentionally removed variable price denominators. Drop
+        // only stale signed listings; wallet, channels, leases, and sessions
+        // remain intact so an upgrade never loses funds or payment history.
+        object.insert("offers".to_string(), serde_json::json!({}));
+        object.insert("version".to_string(), CURRENT_VERSION.into());
+    }
+    let mut store = match serde_json::from_value::<PaidRouteStore>(value) {
         Ok(store) => store,
         Err(error) => {
             eprintln!(
@@ -236,7 +259,7 @@ pub(super) fn requested_channel_capacity(
 }
 
 pub(super) fn paid_route_offer_requires_payment(offer: &PaidRouteOffer) -> bool {
-    offer.pricing.price_msat > 0 || offer.pricing.connection_minimum_msat_per_day > 0
+    offer.pricing.price_msat_per_gb > 0 || offer.pricing.connection_minimum_msat_per_day > 0
 }
 
 pub(super) fn paid_route_offer_requires_payment_before_routing(offer: &PaidRouteOffer) -> bool {
@@ -244,7 +267,7 @@ pub(super) fn paid_route_offer_requires_payment_before_routing(offer: &PaidRoute
 }
 
 pub(super) fn paid_exit_config_requires_payment(config: &PaidExitConfig) -> bool {
-    config.pricing.price_msat > 0 || config.pricing.connection_minimum_msat_per_day > 0
+    config.pricing.price_msat_per_gb > 0 || config.pricing.connection_minimum_msat_per_day > 0
 }
 
 pub(super) fn initial_buyer_session_status(

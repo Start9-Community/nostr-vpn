@@ -43,6 +43,15 @@ impl AppConfig {
         normalize_wireguard_exit_config(&mut self.wireguard_exit);
         self.normalize_internet_source();
         self.paid_exit.normalize();
+        if !self.manual_paid_exit_provider.is_default() {
+            self.manual_paid_exit_provider = ManualPaidExitProvider::new(
+                &self.manual_paid_exit_provider.npub,
+                self.manual_paid_exit_provider.max_price_msat_per_gb,
+                (!self.manual_paid_exit_provider.mint.is_empty())
+                    .then_some(self.manual_paid_exit_provider.mint.as_str()),
+            )
+            .unwrap_or_default();
+        }
         self.nostr.relays = normalize_relay_urls(std::mem::take(&mut self.nostr.relays));
         self.nostr.disabled_relays =
             normalize_relay_urls(std::mem::take(&mut self.nostr.disabled_relays));
@@ -90,7 +99,6 @@ impl AppConfig {
         }
         if self.exit_node.is_empty()
             || !self.connect_to_non_roster_fips_peers
-            || !self.fips_nostr_discovery_enabled
         {
             self.exit_node_public_paid_exit = false;
         }
@@ -209,11 +217,16 @@ impl AppConfig {
                 self.exit_node_public_paid_exit = false;
                 self.wireguard_exit.enabled = false;
             }
-            InternetSource::PaidAutomatic | InternetSource::PaidManual => {
+            InternetSource::PaidAutomatic => {
                 self.exit_node_public_paid_exit = !self.exit_node.trim().is_empty();
                 self.wireguard_exit.enabled = false;
                 self.connect_to_non_roster_fips_peers = true;
                 self.fips_nostr_discovery_enabled = true;
+            }
+            InternetSource::PaidManual => {
+                self.exit_node_public_paid_exit = !self.exit_node.trim().is_empty();
+                self.wireguard_exit.enabled = false;
+                self.connect_to_non_roster_fips_peers = true;
             }
             InternetSource::WireGuard => {
                 self.exit_node.clear();
@@ -226,6 +239,8 @@ impl AppConfig {
     fn canonicalize_user_facing_pubkeys(&mut self) {
         self.nostr.public_key = canonical_npub_key(&self.nostr.public_key).unwrap_or_default();
         self.exit_node = canonical_npub_key(&self.exit_node).unwrap_or_default();
+        self.manual_paid_exit_provider.npub =
+            canonical_npub_key(&self.manual_paid_exit_provider.npub).unwrap_or_default();
         self.normalize_fips_peer_endpoints();
 
         for network in &mut self.networks {

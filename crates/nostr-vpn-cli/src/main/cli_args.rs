@@ -506,10 +506,7 @@ struct SetArgs {
     paid_exit_upstream: Option<String>,
     #[cfg(feature = "paid-exit")]
     #[arg(long)]
-    paid_exit_price_msat: Option<u64>,
-    #[cfg(feature = "paid-exit")]
-    #[arg(long, value_name = "UNITS")]
-    paid_exit_per_units: Option<String>,
+    paid_exit_price_msat_per_gb: Option<u64>,
     #[cfg(feature = "paid-exit")]
     #[arg(long)]
     paid_exit_connection_minimum_msat_per_day: Option<u64>,

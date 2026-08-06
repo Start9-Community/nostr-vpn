@@ -195,11 +195,8 @@ impl NativeAppRuntime {
                 .parse::<PaidExitUpstream>()
                 .map_err(|error| anyhow!(error))?;
         }
-        if let Some(value) = patch.paid_exit_price_msat {
-            self.config.paid_exit.pricing.price_msat = value;
-        }
-        if let Some(value) = patch.paid_exit_per_units {
-            self.config.paid_exit.pricing.per_units = value;
+        if let Some(value) = patch.paid_exit_price_msat_per_gb {
+            self.config.paid_exit.pricing.price_msat_per_gb = value;
         }
         if let Some(value) = patch.paid_exit_accepted_mints {
             self.config.paid_exit.channel.accepted_mints = parse_csv_values(&value);

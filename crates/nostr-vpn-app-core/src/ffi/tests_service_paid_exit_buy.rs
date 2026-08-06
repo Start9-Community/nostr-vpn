@@ -26,8 +26,7 @@
             enabled: true,
             ..PaidExitConfig::default()
         };
-        offer_config.pricing.price_msat = 25;
-        offer_config.pricing.per_units = 1_000_000;
+        offer_config.pricing.price_msat_per_gb = 25;
         offer_config.channel.accepted_mints = vec![mint.to_string()];
         offer_config.channel.free_probe_units = 1_048_576;
         let signed = signed_paid_exit_offer_from_config(

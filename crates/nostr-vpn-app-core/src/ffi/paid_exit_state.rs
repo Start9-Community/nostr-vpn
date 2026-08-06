@@ -44,14 +44,17 @@ fn paid_exit_seller_state(
         supported,
         enabled: supported && config.enabled,
         status_text,
+        provider_link: app
+            .own_nostr_pubkey_hex()
+            .ok()
+            .and_then(|npub| ManualPaidExitProvider::seller_link(&npub, &config).ok())
+            .unwrap_or_default(),
         upstream: config.access.upstream.as_str().to_string(),
         private_vpn_access: config.access.private_vpn_access.as_str().to_string(),
         internet_text: paid_exit_seller_internet_text(app),
         public_ip_text: paid_exit_public_ip_text(port_mapping),
-        price_text: paid_route_price_text(config.pricing.price_msat, config.pricing.per_units),
-        price_msat: config.pricing.price_msat,
-        per_units: config.pricing.per_units,
-        per_units_text: paid_route_decimal_bytes_text(config.pricing.per_units),
+        price_text: paid_route_price_text(config.pricing.price_msat_per_gb),
+        price_msat_per_gb: config.pricing.price_msat_per_gb,
         accepted_mints: config.channel.accepted_mints.clone(),
         max_channel_capacity_sat: config.channel.max_channel_capacity_sat,
         channel_expiry_secs: config.channel.channel_expiry_secs,
@@ -311,7 +314,7 @@ pub(super) fn paid_exit_seller_status_text(
         "Add Nostr relays before advertising".to_string()
     } else if config.channel.accepted_mints.is_empty() {
         "Selling internet is on; add accepted mints before advertising".to_string()
-    } else if config.pricing.price_msat == 0 {
+    } else if config.pricing.price_msat_per_gb == 0 {
         "Selling internet is on with a free/dev price".to_string()
     } else {
         "Selling internet is ready".to_string()
@@ -340,7 +343,7 @@ fn paid_route_market_state(
     wallet_last_action: &NativePaidRouteWalletActionState,
     payment_last_action: &NativePaidRoutePaymentActionState,
 ) -> NativePaidRouteMarketState {
-    let Some(_app) = app else {
+    let Some(app) = app else {
         return NativePaidRouteMarketState {
             supported: false,
             status_text: "Config unavailable".to_string(),
@@ -373,6 +376,11 @@ fn paid_route_market_state(
     let country_options = paid_route_offer_country_options(&offers);
     let visible_offers = paid_route_visible_offers(&offers, &filter);
     let hidden_offer_count = offers.len().saturating_sub(visible_offers.len()) as u64;
+    let manual_provider_link = app
+        .manual_paid_exit_provider
+        .link()
+        .unwrap_or_default();
+    let manual_provider_status_text = manual_paid_exit_provider_status(app, &store, &offers);
 
     let mut channels = store
         .channels
@@ -416,6 +424,8 @@ fn paid_route_market_state(
     NativePaidRouteMarketState {
         supported: true,
         status_text,
+        manual_provider_link,
+        manual_provider_status_text,
         store_path: store_path.display().to_string(),
         wallet: paid_route_wallet_state(&store.wallet, wallet_last_action),
         last_payment_action: payment_last_action.clone(),
@@ -428,6 +438,27 @@ fn paid_route_market_state(
         channels,
         sessions,
     }
+}
+
+fn manual_paid_exit_provider_status(
+    app: &AppConfig,
+    store: &PaidRouteStore,
+    offers: &[NativePaidRouteOfferState],
+) -> String {
+    if app.manual_paid_exit_provider.is_default() {
+        return String::new();
+    }
+    offers
+        .iter()
+        .find(|offer| offer.seller_npub == app.manual_paid_exit_provider.npub)
+        .and_then(|offer| store.offers.get(&offer.key))
+        .map_or_else(
+            || "Waiting for provider offer".to_string(),
+            |record| match app.manual_paid_exit_provider.accepts(&record.offer) {
+                Ok(()) => "Provider offer ready".to_string(),
+                Err(error) => error.to_string(),
+            },
+        )
 }
 
 fn normalize_paid_route_market_filter(
@@ -542,9 +573,7 @@ fn paid_route_offer_price_order(
     left: &NativePaidRouteOfferState,
     right: &NativePaidRouteOfferState,
 ) -> std::cmp::Ordering {
-    let left_units = u128::from(left.per_units.max(1));
-    let right_units = u128::from(right.per_units.max(1));
-    (u128::from(left.price_msat) * right_units).cmp(&(u128::from(right.price_msat) * left_units))
+    left.price_msat_per_gb.cmp(&right.price_msat_per_gb)
 }
 
 fn paid_route_offer_newest_order(
@@ -646,10 +675,8 @@ fn paid_route_offer_state(
         offer_id: offer.offer_id.clone(),
         seller_npub: offer.seller_npub.clone(),
         status_text: paid_route_offer_status_text(offer, record.last_seen_unix),
-        price_text: paid_route_price_text(offer.pricing.price_msat, offer.pricing.per_units),
-        price_msat: offer.pricing.price_msat,
-        per_units: offer.pricing.per_units,
-        per_units_text: paid_route_decimal_bytes_text(offer.pricing.per_units),
+        price_text: paid_route_price_text(offer.pricing.price_msat_per_gb),
+        price_msat_per_gb: offer.pricing.price_msat_per_gb,
         accepted_mints: offer.channel.accepted_mints.clone(),
         max_channel_capacity_sat: offer.channel.max_channel_capacity_sat,
         channel_expiry_secs: offer.channel.channel_expiry_secs,

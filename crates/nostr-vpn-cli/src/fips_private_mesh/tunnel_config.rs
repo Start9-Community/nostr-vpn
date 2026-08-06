@@ -208,6 +208,12 @@ impl FipsPrivateTunnelConfig {
         {
             route_participants.push(public_paid_exit);
         }
+        #[cfg(feature = "paid-exit")]
+        if !local_identity_confirmation_pending
+            && let Some(provider) = app.manual_paid_exit_provider_pubkey_hex()
+        {
+            route_participants.push(provider);
+        }
         route_participants.sort();
         route_participants.dedup();
 
@@ -245,6 +251,11 @@ impl FipsPrivateTunnelConfig {
                 && Some(public_paid_exit.as_str()) != own_pubkey
             {
                 desired_endpoint_hint_npubs.insert(normalize_fips_endpoint_npub(&public_paid_exit));
+            }
+            if let Some(provider) = app.manual_paid_exit_provider_pubkey_hex()
+                && Some(provider.as_str()) != own_pubkey
+            {
+                desired_endpoint_hint_npubs.insert(normalize_fips_endpoint_npub(&provider));
             }
             desired_endpoint_hint_npubs
         };
@@ -390,6 +401,16 @@ impl FipsPrivateTunnelConfig {
                 if peer.auto_reconnect && desired_endpoint_hint_npubs.contains(&peer.npub) {
                     peer.discovery_fallback_transit = false;
                 }
+            }
+            #[cfg(feature = "paid-exit")]
+            if let Some(provider) = app.manual_paid_exit_provider_pubkey_hex()
+                && let Some(peer) = endpoint_peers.iter_mut().find(|peer| {
+                    peer.npub == normalize_fips_endpoint_npub(&provider)
+                })
+            {
+                // A manually pinned provider is intentionally reachable by
+                // identity through FIPS transit even without Nostr discovery.
+                peer.discovery_fallback_transit = true;
             }
         }
         route_targets.sort();

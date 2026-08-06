@@ -56,7 +56,7 @@ use crate::network_roster::{
     normalize_shared_roster_devices,
 };
 use crate::network_routes::is_exit_node_route;
-use crate::paid_routes::{PaidExitConfig, PaidExitUpstream};
+use crate::paid_routes::{ManualPaidExitProvider, PaidExitConfig, PaidExitUpstream};
 use serde::{Deserialize, Serialize};
 
 include!("config/types.rs");

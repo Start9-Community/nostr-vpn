@@ -17,8 +17,7 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
     let offer_config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
-            price_msat: 90,
-            per_units: 1_000_000,
+            price_msat_per_gb: 90_000,
             connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {

@@ -16,36 +16,41 @@ fn paid_route_session_status_text(
     }
 }
 
-fn paid_route_price_text(price_msat: u64, per_units: u64) -> String {
-    if price_msat == 0 {
+fn paid_route_price_text(price_msat_per_gb: u64) -> String {
+    if price_msat_per_gb == 0 {
         "free".to_string()
     } else {
-        let denominator = u128::from(per_units.max(1));
-        let per_gb_msat = u64::try_from(
-            u128::from(price_msat)
-                .saturating_mul(1_000_000_000)
-                .saturating_add(denominator.saturating_sub(1))
-                .saturating_div(denominator)
-                .min(u128::from(u64::MAX)),
+        format!(
+            "{price_msat_per_gb} msat/GB · {}/GB",
+            paid_route_msat_text(price_msat_per_gb)
         )
-        .unwrap_or(u64::MAX);
-        let bytes_per_sat = u64::try_from(
-            denominator
-                .saturating_mul(1_000)
-                .saturating_div(u128::from(price_msat))
-                .min(u128::from(u64::MAX)),
-        )
-        .unwrap_or(u64::MAX);
-        let price = format!("{} / GB", paid_route_msat_text(per_gb_msat));
-        if bytes_per_sat == 0 {
-            price
-        } else {
-            format!(
-                "{price} · 1 sat ≈ {}",
-                paid_route_decimal_bytes_text(bytes_per_sat)
-            )
-        }
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn paid_route_price_text_with_fiat(
+    price_msat_per_gb: u64,
+    fiat_per_btc: Option<f64>,
+    currency: &str,
+) -> String {
+    let mut text = paid_route_price_text(price_msat_per_gb);
+    let Some(rate) = fiat_per_btc.filter(|rate| rate.is_finite() && *rate > 0.0) else {
+        return text;
+    };
+    if price_msat_per_gb == 0 || currency.trim().is_empty() {
+        return text;
+    }
+    let value = price_msat_per_gb as f64 / 100_000_000_000.0 * rate;
+    let decimals = if value >= 0.01 { 2 } else { 6 };
+    let mut value = format!("{value:.decimals$}");
+    while value.contains('.') && value.ends_with('0') {
+        value.pop();
+    }
+    if value.ends_with('.') {
+        value.pop();
+    }
+    let _ = write!(&mut text, " · ≈ {value} {}/GB", currency.trim());
+    text
 }
 
 fn paid_route_paid_text(msat: u64) -> String {
@@ -498,24 +503,6 @@ fn paid_route_binary_bytes_text(bytes: u64) -> String {
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn paid_route_decimal_bytes_text(bytes: u64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit_index = 0usize;
-    while value >= 1_000.0 && unit_index < units.len() - 1 {
-        value /= 1_000.0;
-        unit_index += 1;
-    }
-    if unit_index == 0 {
-        format!("{bytes} B")
-    } else if value.fract().abs() < 0.05 {
-        format!("{value:.0} {}", units[unit_index])
-    } else {
-        format!("{value:.1} {}", units[unit_index])
-    }
-}
-
 fn paid_route_channel_role_text(role: PaidRouteChannelRole) -> &'static str {
     match role {
         PaidRouteChannelRole::Buyer => "buyer",
@@ -546,7 +533,7 @@ fn paid_route_lifecycle_allows_routing_for_state(status: PaidRouteLifecycleStatu
 }
 
 fn paid_route_offer_requires_payment_before_routing_for_state(offer: &PaidRouteOffer) -> bool {
-    (offer.pricing.price_msat > 0 || offer.pricing.connection_minimum_msat_per_day > 0)
+    (offer.pricing.price_msat_per_gb > 0 || offer.pricing.connection_minimum_msat_per_day > 0)
         && offer.channel.free_probe_units == 0
 }
 

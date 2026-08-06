@@ -20,6 +20,36 @@ namespace NostrVpn.Windows.ViewModels;
 
 public sealed partial class AppViewModel
 {
+    public string ManualPaidExitProvider
+    {
+        get => _manualPaidExitProvider;
+        set
+        {
+            if (SetField(ref _manualPaidExitProvider, value))
+            {
+                OnPropertyChanged(nameof(CanSetManualPaidExitProvider));
+            }
+        }
+    }
+
+    public string PaidExitPriceMsatPerGb
+    {
+        get => _paidExitPriceMsatPerGb;
+        set
+        {
+            if (SetField(ref _paidExitPriceMsatPerGb, value))
+            {
+                OnPropertyChanged(nameof(CanSavePaidExitPrice));
+            }
+        }
+    }
+
+    public bool CanSetManualPaidExitProvider =>
+        PaidRouteMarketVisible && !ActionInFlight && !string.IsNullOrWhiteSpace(ManualPaidExitProvider);
+
+    public bool CanSavePaidExitPrice =>
+        PaidExitSellerVisible && !ActionInFlight && ulong.TryParse(PaidExitPriceMsatPerGb.Trim(), out _);
+
     public string PaidRouteMintUrl
     {
         get => _paidRouteMintUrl;
@@ -190,7 +220,7 @@ public sealed partial class AppViewModel
     }
 
     public string PaidExitSellerSummary =>
-        $"{TextOr(State.PaidExitSeller.CountryCode, "Country unset")} · {TextOr(State.PaidExitSeller.PriceText, NativeDisplayText.PriceText(State.PaidExitSeller.PriceMsat, State.PaidExitSeller.PerUnits))}";
+        $"{TextOr(State.PaidExitSeller.CountryCode, "Country unset")} · {State.PaidExitSeller.PriceText}";
 
     public string PaidExitSellerTrialText =>
         $"Free test: {TextOr(State.PaidExitSeller.FreeProbeText, NativeDisplayText.TrafficUnitText(State.PaidExitSeller.FreeProbeUnits))} · Grace: {TextOr(State.PaidExitSeller.GraceText, NativeDisplayText.TrafficUnitText(State.PaidExitSeller.GraceUnits))}";

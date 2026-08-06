@@ -90,6 +90,11 @@ object NativeActions {
             "channelCapacitySat" to channelCapacitySat,
         )
 
+    fun setManualPaidExitProvider(provider: String) =
+        action("set_manual_paid_exit_provider", "provider" to provider)
+
+    fun clearManualPaidExitProvider() = action("clear_manual_paid_exit_provider")
+
     fun selectPaidRouteSession(sessionId: String, connect: Boolean) =
         action("select_paid_route_session", "sessionId" to sessionId, "connect" to connect)
 

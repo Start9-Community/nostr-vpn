@@ -5,13 +5,8 @@ fn paid_exit_status_json(app: &AppConfig) -> serde_json::Value {
         "enabled": config.enabled,
         "upstream": config.access.upstream.as_str(),
         "private_vpn_access": config.access.private_vpn_access.as_str(),
-        "price_msat": config.pricing.price_msat,
-        "price_text": paid_exit_price_text(
-            config.pricing.price_msat,
-            config.pricing.per_units,
-        ),
-        "per_units": config.pricing.per_units,
-        "per_units_text": paid_exit_decimal_bytes_text(config.pricing.per_units),
+        "price_msat_per_gb": config.pricing.price_msat_per_gb,
+        "price_text": paid_exit_price_text(config.pricing.price_msat_per_gb),
         "connection_minimum_msat_per_day": config.pricing.connection_minimum_msat_per_day,
         "connection_minimum_text": paid_exit_connection_minimum_text(
             config.pricing.connection_minimum_msat_per_day,
@@ -47,7 +42,7 @@ fn print_paid_exit_status(app: &AppConfig) {
 
     if !config.enabled
         && config.channel.accepted_mints.is_empty()
-        && config.pricing.price_msat == 0
+        && config.pricing.price_msat_per_gb == 0
         && config.pricing.connection_minimum_msat_per_day == 0
     {
         return;
@@ -55,10 +50,7 @@ fn print_paid_exit_status(app: &AppConfig) {
 
     println!(
         "paid_exit_price: {}",
-        paid_exit_price_text(
-            config.pricing.price_msat,
-            config.pricing.per_units,
-        )
+        paid_exit_price_text(config.pricing.price_msat_per_gb)
     );
     println!(
         "paid_exit_connection_minimum: {}",
@@ -101,28 +93,14 @@ fn print_paid_exit_status(app: &AppConfig) {
     );
 }
 
-fn paid_exit_price_text(price_msat: u64, per_units: u64) -> String {
-    if price_msat == 0 {
+fn paid_exit_price_text(price_msat_per_gb: u64) -> String {
+    if price_msat_per_gb == 0 {
         return "free".to_string();
     }
-    let denominator = u128::from(per_units.max(1));
-    let per_gb_msat = u128::from(price_msat)
-        .saturating_mul(1_000_000_000)
-        .div_ceil(denominator)
-        .min(u128::from(u64::MAX)) as u64;
-    let bytes_per_sat = denominator
-        .saturating_mul(1_000)
-        .saturating_div(u128::from(price_msat))
-        .min(u128::from(u64::MAX)) as u64;
-    let price = format!("{} / GB", paid_exit_msat_text(per_gb_msat));
-    if bytes_per_sat == 0 {
-        price
-    } else {
-        format!(
-            "{price} · 1 sat ≈ {}",
-            paid_exit_decimal_bytes_text(bytes_per_sat)
-        )
-    }
+    format!(
+        "{price_msat_per_gb} msat/GB · {}/GB",
+        paid_exit_msat_text(price_msat_per_gb)
+    )
 }
 
 fn paid_exit_connection_minimum_text(msat_per_day: u64) -> String {
@@ -179,10 +157,6 @@ fn paid_exit_plural_text(value: u64, unit: &str) -> String {
     } else {
         format!("{value} {unit}s")
     }
-}
-
-fn paid_exit_parse_pricing_units_arg(value: &str, flag: &str) -> Result<u64> {
-    paid_exit_parse_units_arg(value, 1_000.0, flag)
 }
 
 fn paid_exit_parse_traffic_units_arg(value: &str, flag: &str) -> Result<u64> {
@@ -270,10 +244,6 @@ fn paid_exit_usage_text(bytes: u64) -> String {
 
 fn paid_exit_binary_bytes_text(bytes: u64) -> String {
     paid_exit_scaled_bytes_text(bytes, 1_024.0)
-}
-
-fn paid_exit_decimal_bytes_text(bytes: u64) -> String {
-    paid_exit_scaled_bytes_text(bytes, 1_000.0)
 }
 
 fn paid_exit_scaled_bytes_text(bytes: u64, threshold: f64) -> String {

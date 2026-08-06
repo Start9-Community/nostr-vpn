@@ -103,7 +103,7 @@ fn authenticated_free_probe_open_creates_seller_admission_and_upgrades_to_paymen
 }
 
 #[test]
-fn session_open_requires_v3_buyer_tunnel_ip_and_rejects_public_sources() {
+fn session_open_requires_current_version_buyer_tunnel_ip_and_rejects_public_sources() {
     let legacy = serde_json::json!({
         "version": "2",
         "service_id": "internet-exit",
@@ -145,8 +145,7 @@ fn record_seller_usage_updates_session_and_admission_decision() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -234,8 +233,7 @@ fn seller_payment_channel_open_creates_seller_session_and_admission() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 100;
     config.channel.grace_units = 0;
 
@@ -366,8 +364,7 @@ fn seller_payment_channel_open_requires_spilman_funding_without_mutating_store()
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 100;
     config.channel.grace_units = 0;
     let mut payment = sample_spilman_payment("channel-1", 0);
@@ -411,8 +408,7 @@ fn seller_payment_with_spilman_receiver_validates_and_applies_channel_open() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 100;
     config.channel.grace_units = 0;
     let mut store = PaidRouteStore::default();
@@ -464,8 +460,7 @@ fn seller_payment_with_spilman_receiver_rejects_receiver_mismatch_without_mutati
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 100;
     config.channel.grace_units = 0;
     let mut store = PaidRouteStore::default();
@@ -513,8 +508,7 @@ fn seller_payment_with_spilman_receiver_accepts_lagging_due_as_partial_credit() 
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let mut store = PaidRouteStore::default();
@@ -618,8 +612,7 @@ fn buyer_payment_envelope_channel_open_persists_spilman_snapshot() {
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -667,8 +660,7 @@ fn buyer_payment_envelope_balance_update_advances_usage_and_paid_amount() {
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -733,8 +725,7 @@ fn buyer_payment_envelope_rejects_overclaimed_spilman_balance_without_mutating_s
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -767,8 +758,7 @@ fn cashu_token_lease_fallback_prepays_buyer_but_seller_requires_redemption() {
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut buyer_store, session_id, channel_id) =

@@ -7,8 +7,7 @@ fn seller_payment_rejects_regressing_balance_update_without_mutating_store() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -67,8 +66,7 @@ fn seller_payment_rejects_overclaimed_spilman_balance_without_mutating_store() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -106,8 +104,7 @@ fn seller_payment_rejects_underpaid_cooperative_close_without_mutating_store() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -156,8 +153,7 @@ fn seller_payment_cooperative_close_suspends_admission() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -303,8 +299,7 @@ fn seller_manual_channel_close_suspends_admission() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -348,8 +343,7 @@ fn seller_payment_rejects_overclaimed_spilman_close_without_mutating_store() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -618,8 +612,7 @@ fn automatic_offer_selection_requires_safe_fresh_terms_and_a_wallet_mint() {
     config.channel.free_probe_units = PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES - 1;
     assert_rejected(config, now_unix - 1);
     let mut config = automatic_offer_config();
-    config.pricing.per_units = 1_073_741_824;
-    config.pricing.price_msat = PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GIB + 1;
+    config.pricing.price_msat_per_gb = PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GB + 1;
     assert_rejected(config, now_unix - 1);
     let mut config = automatic_offer_config();
     config.pricing.connection_minimum_msat_per_day = 1;
@@ -692,15 +685,15 @@ fn automatic_offer_selection_uses_rating_price_freshness_and_stable_key_order() 
         now_unix - 30,
     );
     let mut expected = Vec::new();
-    for (offer_id, price_msat, signed_at) in [
-        ("older-expensive", 70, now_unix - 30),
-        ("newer-expensive-rated-low", 70, now_unix - 20),
-        ("newer-expensive-unrated", 70, now_unix - 20),
-        ("newer-cheap", 50, now_unix - 10),
+    for (offer_id, price_msat_per_gb, signed_at) in [
+        ("older-expensive", 70_000, now_unix - 30),
+        ("newer-expensive-rated-low", 70_000, now_unix - 20),
+        ("newer-expensive-unrated", 70_000, now_unix - 20),
+        ("newer-cheap", 50_000, now_unix - 10),
     ] {
         let seller = Keys::generate();
         let mut config = automatic_offer_config();
-        config.pricing.price_msat = price_msat;
+        config.pricing.price_msat_per_gb = price_msat_per_gb;
         let signed =
             signed_paid_exit_offer_from_config(offer_id, &seller, &config, None, signed_at)
                 .expect("signed offer");
@@ -744,7 +737,7 @@ fn automatic_offer_selection_uses_rating_price_freshness_and_stable_key_order() 
         .expect("cheap offer")
         .offer
         .pricing
-        .price_msat = 70;
+        .price_msat_per_gb = 70_000;
     assert_eq!(
         store
             .select_automatic_offer(now_unix)
@@ -837,7 +830,7 @@ fn automatic_offer_selection_reuses_a_funded_channel_when_wallet_balance_is_lock
 
 fn automatic_offer_config() -> PaidExitConfig {
     let mut config = sample_config();
-    config.pricing.price_msat = 50;
+    config.pricing.price_msat_per_gb = 50_000;
     config
 }
 

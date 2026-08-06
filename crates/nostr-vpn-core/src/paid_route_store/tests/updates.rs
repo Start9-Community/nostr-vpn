@@ -34,8 +34,7 @@ fn record_buyer_usage_updates_session_for_exit_seller() {
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -102,8 +101,7 @@ fn buyer_payment_updates_due_reports_signable_balance_updates() {
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -171,7 +169,7 @@ fn buyer_payment_updates_due_uses_connection_minimum_floor() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 0;
+    config.pricing.price_msat_per_gb = 0;
     config.pricing.connection_minimum_msat_per_day = 86_400;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
@@ -213,8 +211,7 @@ fn buyer_payment_updates_due_caps_at_channel_capacity() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -256,8 +253,7 @@ fn buyer_signed_payment_envelope_uses_cashu_service_signer() {
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
     let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
@@ -413,8 +409,7 @@ fn seller_payment_balance_update_raises_paid_amount_and_usage() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -481,8 +476,7 @@ fn seller_payment_balance_update_does_not_import_buyer_overreported_units() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -541,8 +535,7 @@ fn seller_payment_balance_update_accepts_lagging_buyer_usage_counter() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -604,7 +597,7 @@ fn seller_payment_balance_update_tolerates_connection_minimum_flush_skew() {
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 0;
+    config.pricing.price_msat_per_gb = 0;
     config.pricing.connection_minimum_msat_per_day = 86_400;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
@@ -656,8 +649,7 @@ fn seller_payment_balance_update_accepts_underreported_due_without_importing_usa
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
-    config.pricing.price_msat = 1_000;
-    config.pricing.per_units = 100;
+    config.pricing.price_msat_per_gb = 10_000_000_000;
     config.pricing.connection_minimum_msat_per_day = 86_400;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;

@@ -94,7 +94,7 @@ pub fn signed_paid_exit_offer_from_config_with_receiver(
     }
     let mut normalized_config = config.clone();
     normalized_config.normalize();
-    if (normalized_config.pricing.price_msat > 0
+    if (normalized_config.pricing.price_msat_per_gb > 0
         || normalized_config.pricing.connection_minimum_msat_per_day > 0)
         && normalized_config.channel.accepted_mints.is_empty()
     {
@@ -295,12 +295,8 @@ pub(super) fn paid_route_offer_tags(offer: &PaidRouteOffer) -> Result<Vec<Tag>> 
         paid_route_tag(&["service", offer.service.as_str()])?,
         paid_route_tag(&["payment", PaidRoutePaymentMode::CashuSpilman.as_str()])?,
         paid_route_owned_tag(vec![
-            "price_msat".to_string(),
-            offer.pricing.price_msat.to_string(),
-        ])?,
-        paid_route_owned_tag(vec![
-            "per_units".to_string(),
-            offer.pricing.per_units.to_string(),
+            "price_msat_per_gb".to_string(),
+            offer.pricing.price_msat_per_gb.to_string(),
         ])?,
         paid_route_owned_tag(vec![
             "connection_minimum_msat_per_day".to_string(),
@@ -412,11 +408,6 @@ fn validate_paid_route_offer(offer: &PaidRouteOffer) -> Result<()> {
     }
     if offer.service != PaidRouteServiceKind::InternetExit {
         return Err(anyhow!("unsupported paid route service"));
-    }
-    if offer.pricing.per_units == 0 {
-        return Err(anyhow!(
-            "paid route price denominator must be greater than zero"
-        ));
     }
     if offer.channel.max_channel_capacity_sat == 0 {
         return Err(anyhow!(

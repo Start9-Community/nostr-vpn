@@ -29,8 +29,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         enabled: true,
         ..PaidExitConfig::default()
     };
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     offer_config.channel.free_probe_units = 0;
     offer_config.channel.grace_units = 0;

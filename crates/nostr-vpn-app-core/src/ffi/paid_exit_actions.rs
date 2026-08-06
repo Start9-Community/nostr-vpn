@@ -16,26 +16,53 @@ impl NativeAppRuntime {
         port_mapping: Option<&PortMappingStatus>,
         mobile: bool,
     ) -> NativePaidExitSellerState {
-        paid_exit_seller_state(
+        let mut state = paid_exit_seller_state(
             app,
             self.daemon_state.as_ref(),
             port_mapping,
             paid_exit_seller_supported_for_current_target(mobile),
             &self.paid_route_store_path(),
-        )
+        );
+        if app.is_some_and(|app| app.wallet_fiat_enabled) {
+            let snapshot = self.exchange_rate_service.snapshot();
+            state.price_text = paid_route_price_text_with_fiat(
+                state.price_msat_per_gb,
+                snapshot.rate,
+                snapshot.currency.as_str(),
+            );
+        }
+        state
     }
 
     pub(super) fn paid_route_market_state(
         &self,
         app: Option<&AppConfig>,
     ) -> NativePaidRouteMarketState {
-        paid_route_market_state(
+        let mut state = paid_route_market_state(
             app,
             &self.paid_route_store_path(),
             &self.paid_route_market_filter,
             &self.paid_route_wallet_last_action,
             &self.paid_route_payment_last_action,
-        )
+        );
+        if app.is_some_and(|app| app.wallet_fiat_enabled) {
+            let snapshot = self.exchange_rate_service.snapshot();
+            for offer in &mut state.offers {
+                offer.price_text = paid_route_price_text_with_fiat(
+                    offer.price_msat_per_gb,
+                    snapshot.rate,
+                    snapshot.currency.as_str(),
+                );
+            }
+            for offer in &mut state.visible_offers {
+                offer.price_text = paid_route_price_text_with_fiat(
+                    offer.price_msat_per_gb,
+                    snapshot.rate,
+                    snapshot.currency.as_str(),
+                );
+            }
+        }
+        state
     }
 
     fn paid_route_store_path(&self) -> PathBuf {
@@ -392,13 +419,24 @@ impl NativeAppRuntime {
             .context("failed to encode buyer npub")?;
         let path = self.paid_route_store_path();
         let mut store = load_paid_route_store(&path)?;
+        let now_unix = unix_timestamp();
+        let preferred_mint = if self.config.manual_paid_exit_provider.is_default() {
+            mint_url.map(ToOwned::to_owned)
+        } else {
+            let offer = store.live_offer_for_selector(offer_key, now_unix)?;
+            self.config.manual_paid_exit_provider.accepts(&offer)?;
+            mint_url
+                .map(ToOwned::to_owned)
+                .or_else(|| (!self.config.manual_paid_exit_provider.mint.is_empty())
+                    .then(|| self.config.manual_paid_exit_provider.mint.clone()))
+        };
         let result = store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
             offer_selector: offer_key.to_string(),
             buyer_npub,
-            mint_url: mint_url.map(ToOwned::to_owned),
+            mint_url: preferred_mint,
             channel_capacity_sat,
             initial_paid_msat: 0,
-            now_unix: unix_timestamp(),
+            now_unix,
         })?;
         if result.changed {
             write_paid_route_store(&path, &store)?;

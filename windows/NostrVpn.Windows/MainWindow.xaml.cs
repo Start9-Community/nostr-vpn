@@ -177,6 +177,16 @@ public partial class MainWindow : Window
         await ViewModel.DiscoverPaidRouteOffersAsync();
     }
 
+    private async void SetManualPaidExitProvider_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SetManualPaidExitProviderAsync();
+    }
+
+    private async void ClearManualPaidExitProvider_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.ClearManualPaidExitProviderAsync();
+    }
+
     private async void RefreshPaidRouteWallet_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.RefreshPaidRouteWalletAsync();
@@ -281,6 +291,10 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void SavePaidExitPrice_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SavePaidExitPriceAsync();
+    }
     private async void ReceivePaidRoutePayments_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.ReceivePaidRoutePaymentsAsync();

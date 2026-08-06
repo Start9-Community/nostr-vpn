@@ -27,8 +27,8 @@ struct RootView: View {
     @State var exitDnsCustomDohUrl = ""
     @State var exitDnsCustomDohBootstrapIps = ""
     @State var exitDnsThroughExitServers = ""
-    @State var paidExitPriceSats = ""
-    @State var paidExitPerUnits = ""
+    @State var paidExitPriceMsatPerGb = ""
+    @State var manualPaidExitProvider = ""
     @State var paidExitAcceptedMints = ""
     @State var paidExitMaxChannelCapacitySat = ""
     @State var paidExitChannelExpirySecs = ""
@@ -90,6 +90,7 @@ struct RootView: View {
     @State var lastSyncedExitDnsCustomDohUrl: String? = nil
     @State var lastSyncedExitDnsCustomDohBootstrapIps: String? = nil
     @State var lastSyncedExitDnsThroughExitServers: String? = nil
+    @State var lastSyncedManualPaidExitProvider: String? = nil
     @State var lastSyncedPaidExitSeller: NativePaidExitSellerState? = nil
 
     var state: NativeAppState {

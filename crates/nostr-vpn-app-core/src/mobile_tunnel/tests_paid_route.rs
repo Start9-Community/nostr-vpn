@@ -154,8 +154,7 @@ async fn mobile_paid_route_payment_and_ack_roundtrip() {
     seller_app.nostr.public_key = seller_pubkey.clone();
     seller_app.nostr.secret_key = seller_nsec;
     seller_app.paid_exit.enabled = true;
-    seller_app.paid_exit.pricing.price_msat = 2_500;
-    seller_app.paid_exit.pricing.per_units = 1_000_000;
+    seller_app.paid_exit.pricing.price_msat_per_gb = 2_500;
     seller_app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
     seller_app.paid_exit.channel.max_channel_capacity_sat = 100;
     seller_app.paid_exit.channel.channel_expiry_secs = 600;

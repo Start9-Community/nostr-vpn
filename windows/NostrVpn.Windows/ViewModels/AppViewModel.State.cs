@@ -96,6 +96,24 @@ public sealed partial class AppViewModel
         {
             PaidRouteMintUrl = state.PaidRouteMarket.Wallet.DefaultMint;
         }
+        if (_lastSyncedManualPaidExitProvider != state.PaidRouteMarket.ManualProviderLink)
+        {
+            if (_lastSyncedManualPaidExitProvider is null
+                || ManualPaidExitProvider == _lastSyncedManualPaidExitProvider)
+            {
+                ManualPaidExitProvider = state.PaidRouteMarket.ManualProviderLink;
+            }
+            _lastSyncedManualPaidExitProvider = state.PaidRouteMarket.ManualProviderLink;
+        }
+        if (_lastSyncedPaidExitPriceMsatPerGb != state.PaidExitSeller.PriceMsatPerGb)
+        {
+            if (_lastSyncedPaidExitPriceMsatPerGb is null
+                || PaidExitPriceMsatPerGb == _lastSyncedPaidExitPriceMsatPerGb.Value.ToString())
+            {
+                PaidExitPriceMsatPerGb = state.PaidExitSeller.PriceMsatPerGb.ToString();
+            }
+            _lastSyncedPaidExitPriceMsatPerGb = state.PaidExitSeller.PriceMsatPerGb;
+        }
         NetworkNameDraft = active?.Name ?? "";
         NetworkMeshIdDraft = DisplayNetworkId(active?.NetworkId ?? "");
     }
@@ -220,6 +238,8 @@ public sealed partial class AppViewModel
 
     private void RaisePaidRouteWalletInputStateChanged()
     {
+        OnPropertyChanged(nameof(CanSetManualPaidExitProvider));
+        OnPropertyChanged(nameof(CanSavePaidExitPrice));
         OnPropertyChanged(nameof(CanAddPaidRouteWalletMint));
         OnPropertyChanged(nameof(CanTopUpPaidRouteWallet));
         OnPropertyChanged(nameof(CanSendPaidRouteWalletToken));

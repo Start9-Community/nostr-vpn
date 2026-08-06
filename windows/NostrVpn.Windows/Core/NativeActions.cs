@@ -34,6 +34,8 @@ public static class NativeActions
     public static string SendPaidRouteWalletToken(string? mintUrl, ulong amountSat) => AppCoreClient.Action(new { type = "send_paid_route_wallet_token", mintUrl, amountSat });
     public static string WithdrawPaidRouteWalletLightning(string? mintUrl, string invoice) => AppCoreClient.Action(new { type = "withdraw_paid_route_wallet_lightning", mintUrl, invoice });
     public static string BuyPaidRouteOffer(string offerKey, string? mintUrl = null, ulong? channelCapacitySat = null) => AppCoreClient.Action(new { type = "buy_paid_route_offer", offerKey, mintUrl, channelCapacitySat });
+    public static string SetManualPaidExitProvider(string provider) => AppCoreClient.Action(new { type = "set_manual_paid_exit_provider", provider });
+    public static string ClearManualPaidExitProvider() => AppCoreClient.Action(new { type = "clear_manual_paid_exit_provider" });
     public static string SelectPaidRouteSession(string sessionId, bool connect) => AppCoreClient.Action(new { type = "select_paid_route_session", sessionId, connect });
     public static string ProbePaidRouteSession(string sessionId, ulong timeoutSecs = 5) => AppCoreClient.Action(new { type = "probe_paid_route_session", sessionId, timeoutSecs });
     public static string OpenPaidRouteChannelFromWallet(string sessionId, string? mintUrl = null, ulong? paidMsat = null, ulong? maxAmountPerOutput = null, string? keysetId = null) => AppCoreClient.Action(new { type = "open_paid_route_channel_from_wallet", sessionId, mintUrl, paidMsat, maxAmountPerOutput, keysetId });
@@ -81,8 +83,7 @@ public sealed class SettingsPatch
     public string? WalletFiatCurrency { get; set; }
     public bool? PaidExitEnabled { get; set; }
     public string? PaidExitUpstream { get; set; }
-    public ulong? PaidExitPriceMsat { get; set; }
-    public ulong? PaidExitPerUnits { get; set; }
+    public ulong? PaidExitPriceMsatPerGb { get; set; }
     public string? PaidExitAcceptedMints { get; set; }
     public ulong? PaidExitMaxChannelCapacitySat { get; set; }
     public ulong? PaidExitChannelExpirySecs { get; set; }

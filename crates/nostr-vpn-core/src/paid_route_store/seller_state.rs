@@ -1,6 +1,15 @@
 use super::{persistence::*, *};
 
 impl PaidRouteStore {
+    pub fn live_offer_for_selector(&self, selector: &str, now_unix: u64) -> Result<PaidRouteOffer> {
+        let (_, record) = self.resolve_offer(selector)?;
+        if !record.signed_offer.is_live_at(now_unix) {
+            return Err(anyhow!("paid route offer '{}' expired", selector.trim()));
+        }
+        record.signed_offer.verify()?;
+        Ok(record.offer.clone())
+    }
+
     pub fn record_seller_usage(
         &mut self,
         request: RecordPaidRouteSellerUsageRequest,

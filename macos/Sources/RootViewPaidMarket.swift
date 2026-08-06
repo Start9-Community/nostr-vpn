@@ -65,6 +65,25 @@ extension RootView {
                     .foregroundStyle(.orange)
             }
 
+            HStack(spacing: 8) {
+                TextField("Provider npub or paid exit link", text: $manualPaidExitProvider)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("manual-paid-exit-provider")
+                Button("Add") {
+                    manager.setManualPaidExitProvider(manualPaidExitProvider)
+                }
+                .disabled(manager.actionInFlight || manualPaidExitProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if !market.manualProviderLink.isEmpty {
+                    Button("Clear") { manager.clearManualPaidExitProvider() }
+                        .disabled(manager.actionInFlight)
+                }
+            }
+            if !market.manualProviderStatusText.isEmpty {
+                Text(market.manualProviderStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if market.supported && !market.offers.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {

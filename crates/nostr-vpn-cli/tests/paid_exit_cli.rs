@@ -18,10 +18,8 @@ fn paid_exit_run_and_status_cover_headless_seller_cli() {
         "--offer-id",
         "cli-fi",
         "--no-reload-daemon",
-        "--price-msat",
-        "2500",
-        "--per-units",
-        "1 MB",
+        "--price-msat-per-gb",
+        "2500000",
         "--accepted-mint",
         "https://mint.example",
         "--country-code",
@@ -35,7 +33,7 @@ fn paid_exit_run_and_status_cover_headless_seller_cli() {
     let stdout = output_stdout(&run);
     assert!(stdout.contains("paid_exit_seller: enabled"), "{stdout}");
     assert!(
-        stdout.contains("price: 2500 sat / GB · 1 sat ≈ 400 KB"),
+        stdout.contains("price: 2500000 msat/GB · 2500 sat/GB"),
         "{stdout}"
     );
     assert!(stdout.contains("free_probe=1 MB"), "{stdout}");
@@ -51,15 +49,13 @@ fn paid_exit_run_and_status_cover_headless_seller_cli() {
     assert_success(&status);
     let status_json = output_json(&status);
     assert_eq!(status_json["config"]["enabled"].as_bool(), Some(true));
-    assert_eq!(status_json["config"]["price_msat"].as_u64(), Some(2_500));
+    assert_eq!(
+        status_json["config"]["price_msat_per_gb"].as_u64(),
+        Some(2_500_000)
+    );
     assert_eq!(
         status_json["config"]["price_text"].as_str(),
-        Some("2500 sat / GB · 1 sat ≈ 400 KB")
-    );
-    assert_eq!(status_json["config"]["per_units"].as_u64(), Some(1_000_000));
-    assert_eq!(
-        status_json["config"]["per_units_text"].as_str(),
-        Some("1 MB")
+        Some("2500000 msat/GB · 2500 sat/GB")
     );
     assert_eq!(
         status_json["config"]["channel_expiry_text"].as_str(),
@@ -138,7 +134,7 @@ fn paid_exit_run_and_status_cover_headless_seller_cli() {
 }
 
 #[test]
-fn set_paid_exit_units_accept_human_byte_text() {
+fn set_paid_exit_uses_fixed_gigabyte_price_and_accepts_human_traffic_units() {
     let dir = TestDir::new("nvpn-paid-exit-cli-set-human-bytes");
     let config_path = dir.path().join("config.toml");
     let config = config_path.to_str().expect("utf8 config path");
@@ -149,10 +145,8 @@ fn set_paid_exit_units_accept_human_byte_text() {
         config,
         "--paid-exit-enabled",
         "true",
-        "--paid-exit-price-msat",
+        "--paid-exit-price-msat-per-gb",
         "1000",
-        "--paid-exit-per-units",
-        "1 GB",
         "--paid-exit-free-probe-units",
         "1 MB",
         "--paid-exit-grace-units",
@@ -165,15 +159,7 @@ fn set_paid_exit_units_accept_human_byte_text() {
     let status_json = output_json(&status);
     assert_eq!(
         status_json["config"]["price_text"].as_str(),
-        Some("1 sat / GB · 1 sat ≈ 1 GB")
-    );
-    assert_eq!(
-        status_json["config"]["per_units"].as_u64(),
-        Some(1_000_000_000)
-    );
-    assert_eq!(
-        status_json["config"]["per_units_text"].as_str(),
-        Some("1 GB")
+        Some("1000 msat/GB · 1 sat/GB")
     );
     assert_eq!(
         status_json["config"]["free_probe_units"].as_u64(),
@@ -201,10 +187,8 @@ fn paid_exit_offer_includes_spilman_receiver_key_after_seller_config() {
         "--offer-id",
         "cli-fi",
         "--no-reload-daemon",
-        "--price-msat",
-        "2500",
-        "--per-units",
-        "1000000",
+        "--price-msat-per-gb",
+        "2500000",
         "--accepted-mint",
         "https://mint.example",
     ]);

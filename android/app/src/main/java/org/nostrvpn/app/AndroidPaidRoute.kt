@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
@@ -63,6 +64,7 @@ internal fun PaidRouteMarketCard(
     var filterIpv4 by remember { mutableStateOf(market.filter.requireIpv4) }
     var filterIpv6 by remember { mutableStateOf(market.filter.requireIpv6) }
     var filterSort by remember { mutableStateOf(market.filter.sort.ifBlank { "quality" }) }
+    var manualProvider by remember { mutableStateOf(market.manualProviderLink) }
     LaunchedEffect(
         market.filter.countryCode,
         market.filter.requireIpv4,
@@ -73,6 +75,9 @@ internal fun PaidRouteMarketCard(
         filterIpv4 = market.filter.requireIpv4
         filterIpv6 = market.filter.requireIpv6
         filterSort = market.filter.sort.ifBlank { "quality" }
+    }
+    LaunchedEffect(market.manualProviderLink) {
+        manualProvider = market.manualProviderLink
     }
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -133,6 +138,28 @@ internal fun PaidRouteMarketCard(
 
         when (mode) {
             PaidRouteCardMode.Market -> {
+                OutlinedTextField(
+                    value = manualProvider,
+                    onValueChange = { manualProvider = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Provider npub or paid exit link") },
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = manualProvider.isNotBlank(),
+                        onClick = { dispatch(NativeActions.setManualPaidExitProvider(manualProvider.trim())) },
+                    ) { Text("Add provider") }
+                    if (market.manualProviderLink.isNotBlank()) {
+                        OutlinedButton(onClick = { dispatch(NativeActions.clearManualPaidExitProvider()) }) {
+                            Text("Clear")
+                        }
+                    }
+                }
+                if (market.manualProviderStatusText.isNotBlank()) {
+                    Text(market.manualProviderStatusText, color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
+
                 PaidRouteMarketFilterControls(
                     market = market,
                     country = filterCountry,
@@ -784,9 +811,7 @@ private fun PaidRouteSessionRow(
 
 private fun paidRouteOfferTitle(offer: PaidRouteOfferState): String {
     val location = offer.countryCode.ifBlank { "Unknown country" }.uppercase()
-    val price = offer.priceText.ifBlank {
-        paidRoutePriceText(offer.priceMsat, offer.perUnits)
-    }
+    val price = offer.priceText
     return "$location · $price"
 }
 
@@ -937,17 +962,6 @@ internal fun formatBytes(bytes: Long): String {
         kotlin.math.abs(value - kotlin.math.round(value)) < 0.05 -> "%.0f %s".format(value, units[index])
         else -> "%.1f %s".format(value, units[index])
     }
-}
-
-internal fun paidRoutePriceText(
-    priceMsat: Long,
-    perUnits: Long,
-): String {
-    if (priceMsat == 0L) return "free"
-    if (perUnits <= 0L) return "Price unavailable"
-    val priceMsatPerGb = kotlin.math.ceil(priceMsat.toDouble() * 1_000_000_000.0 / perUnits).toLong()
-    val bytesPerSat = (perUnits.toDouble() * 1_000.0 / priceMsat).toLong()
-    return "${formatPaidRouteMsat(priceMsatPerGb)} / GB · 1 sat ≈ ${formatDecimalBytes(bytesPerSat)}"
 }
 
 internal fun paidRouteTrafficUnitText(units: Long): String = formatBytes(units)

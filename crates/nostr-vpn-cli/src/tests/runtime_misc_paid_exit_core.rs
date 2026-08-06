@@ -18,8 +18,7 @@ fn paid_exit_status_snapshot_reports_store_sessions_and_routing() {
     let buyer = Keys::generate();
     let mut offer_config = PaidExitConfig::default();
     offer_config.enabled = true;
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     offer_config.channel.free_probe_units = 0;
     offer_config.channel.grace_units = 0;
@@ -111,8 +110,7 @@ fn paid_exit_record_probe_once_persists_session_measurements() {
     let buyer = Keys::generate();
     let mut offer_config = PaidExitConfig::default();
     offer_config.enabled = true;
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     let signed_offer =
         signed_paid_exit_offer_from_config("internet-exit", &seller, &offer_config, None, 123)
@@ -208,8 +206,7 @@ fn paid_exit_probe_once_measures_and_persists_session() {
     let buyer = Keys::generate();
     let mut offer_config = PaidExitConfig::default();
     offer_config.enabled = true;
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     let signed_offer =
         signed_paid_exit_offer_from_config("internet-exit", &seller, &offer_config, None, 123)
@@ -332,8 +329,7 @@ fn paid_exit_probe_once_uses_stun_for_realized_exit_ip() {
     let buyer = Keys::generate();
     let mut offer_config = PaidExitConfig::default();
     offer_config.enabled = true;
-    offer_config.pricing.price_msat = 1_000;
-    offer_config.pricing.per_units = 100;
+    offer_config.pricing.price_msat_per_gb = 1_000;
     offer_config.channel.accepted_mints = vec!["https://mint.example".to_string()];
     let signed_offer =
         signed_paid_exit_offer_from_config("internet-exit", &seller, &offer_config, None, 123)
@@ -498,8 +494,7 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
         publish: false,
         no_reload_daemon: true,
         upstream: Some("host-default".to_string()),
-        price_msat: Some(250),
-        per_units: Some("1 MB".to_string()),
+        price_msat_per_gb: Some(250),
         connection_minimum_msat_per_day: Some(86_400),
         accepted_mints: Some("https://mint.example".to_string()),
         accepted_mint: vec!["https://other-mint.example".to_string()],
@@ -526,8 +521,7 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
         load_paid_route_store(&paid_route_store_file_path(&config_path)).expect("load store");
 
     assert!(app.paid_exit.enabled);
-    assert_eq!(app.paid_exit.pricing.price_msat, 250);
-    assert_eq!(app.paid_exit.pricing.per_units, 1_000_000);
+    assert_eq!(app.paid_exit.pricing.price_msat_per_gb, 250);
     assert_eq!(app.paid_exit.pricing.connection_minimum_msat_per_day, 86_400);
     assert_eq!(app.paid_exit.location.country_code, "FI");
     assert_eq!(
@@ -542,7 +536,7 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
         ]
     );
     assert_eq!(result.offer.offer_id, "starlink-fi");
-    assert_eq!(result.offer.pricing.price_msat, 250);
+    assert_eq!(result.offer.pricing.price_msat_per_gb, 250);
     assert_eq!(
         result.offer.pricing.connection_minimum_msat_per_day,
         86_400
@@ -582,8 +576,7 @@ fn paid_exit_run_once_rejects_incomplete_wireguard_upstream() {
         publish: false,
         no_reload_daemon: true,
         upstream: Some("wireguard_exit".to_string()),
-        price_msat: Some(500),
-        per_units: Some("1 MB".to_string()),
+        price_msat_per_gb: Some(500),
         connection_minimum_msat_per_day: None,
         accepted_mints: Some("https://mint.example".to_string()),
         accepted_mint: vec![],
@@ -638,8 +631,7 @@ fn paid_exit_run_once_enables_configured_wireguard_upstream() {
             publish: false,
             no_reload_daemon: true,
             upstream: Some("wg".to_string()),
-            price_msat: Some(500),
-            per_units: Some("1 MB".to_string()),
+            price_msat_per_gb: Some(500),
             connection_minimum_msat_per_day: None,
             accepted_mints: Some("https://mint.example".to_string()),
             accepted_mint: vec![],

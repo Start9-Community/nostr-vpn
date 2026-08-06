@@ -327,8 +327,7 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
         enabled: true,
         ..PaidExitConfig::default()
     };
-    paid_exit.pricing.price_msat = 25;
-    paid_exit.pricing.per_units = 1_000_000_000;
+    paid_exit.pricing.price_msat_per_gb = 25;
     paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
     paid_exit.location.country_code = "FI".to_string();
     paid_exit.normalize();
@@ -384,6 +383,90 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
     buyer_pubsub.stop().await;
     seller_endpoint.shutdown().await.expect("shutdown seller");
     buyer_endpoint.shutdown().await.expect("shutdown buyer");
+}
+
+#[test]
+fn retained_paid_exit_offer_replays_to_late_manual_provider_buyer_without_relays() {
+    std::thread::Builder::new()
+        .name("late-manual-paid-provider".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("relayless retained-offer runtime")
+                .block_on(retained_paid_exit_offer_replays_to_late_buyer_run());
+        })
+        .expect("spawn retained-offer test")
+        .join()
+        .expect("retained-offer test thread");
+}
+
+async fn retained_paid_exit_offer_replays_to_late_buyer_run() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let seller_npub = seller.public_key().to_bech32().expect("seller npub");
+    let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
+    let [seller_port, buyer_port, _] = available_udp_ports();
+    let seller_endpoint = endpoint(&seller, endpoint_config(seller_port, &[])).await;
+    let updates = update_events(&seller, "releases/manual-provider-replay");
+    let seller_pubsub = start_pubsub(Arc::clone(&seller_endpoint), updates.clone()).await;
+
+    let mut paid_exit = PaidExitConfig {
+        enabled: true,
+        ..PaidExitConfig::default()
+    };
+    paid_exit.pricing.price_msat_per_gb = 25_000;
+    paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
+    let signed_offer = signed_paid_exit_offer_from_config(
+        "manual-provider-replay",
+        &seller,
+        &paid_exit,
+        None,
+        Timestamp::now().as_secs(),
+    )
+    .expect("signed paid-exit offer");
+    assert!(
+        seller_pubsub
+            .publish(signed_offer.event.clone())
+            .await
+            .expect("retain standalone offer")
+    );
+
+    let buyer_endpoint = endpoint(
+        &buyer,
+        endpoint_config(buyer_port, &[(seller_npub.as_str(), seller_port)]),
+    )
+    .await;
+    let buyer_pubsub = start_pubsub(Arc::clone(&buyer_endpoint), updates).await;
+    seller_endpoint
+        .update_peers(vec![PeerConfig::new(
+            &buyer_npub,
+            "udp",
+            format!("127.0.0.1:{buyer_port}"),
+        )])
+        .await
+        .expect("connect retained-offer seller to buyer");
+    wait_connected(&seller_endpoint, &buyer_npub).await;
+    wait_connected(&buyer_endpoint, &seller_npub).await;
+    wait_for_event(&buyer_pubsub, signed_offer.event.id).await;
+
+    let replayed = buyer_pubsub
+        .events()
+        .await
+        .into_iter()
+        .find(|event| event.id == signed_offer.event.id)
+        .and_then(|event| SignedPaidRouteOffer::from_event(event).ok())
+        .expect("buyer validates retained offer replayed over FIPS pubsub");
+    assert_eq!(
+        replayed.offer().expect("replayed offer").seller_npub,
+        seller_npub
+    );
+
+    buyer_pubsub.stop().await;
+    seller_pubsub.stop().await;
+    buyer_endpoint.shutdown().await.expect("shutdown buyer");
+    seller_endpoint.shutdown().await.expect("shutdown seller");
 }
 
 #[test]

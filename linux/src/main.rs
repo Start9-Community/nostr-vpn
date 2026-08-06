@@ -117,6 +117,8 @@ struct Drafts {
     exit_dns_custom_doh_bootstrap_ips: String,
     exit_dns_through_exit_servers: String,
     paid_route_country: String,
+    manual_paid_exit_provider: String,
+    paid_exit_price_msat_per_gb: String,
     paid_route_mint_url: String,
     paid_route_top_up_amount: String,
     paid_route_send_amount: String,
@@ -138,6 +140,8 @@ impl Drafts {
         self.exit_dns_custom_doh_url = state.exit_dns_custom_doh_url.clone();
         self.exit_dns_custom_doh_bootstrap_ips = state.exit_dns_custom_doh_bootstrap_ips.clone();
         self.exit_dns_through_exit_servers = state.exit_dns_through_exit_servers.clone();
+        self.manual_paid_exit_provider = state.paid_route_market.manual_provider_link.clone();
+        self.paid_exit_price_msat_per_gb = state.paid_exit_seller.price_msat_per_gb.to_string();
         if let Some(network) = active_network(state) {
             self.network_name = display_network_name(network);
             self.mesh_id = display_network_id(&network.network_id);

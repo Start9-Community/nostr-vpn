@@ -68,6 +68,10 @@ public sealed partial class AppViewModel : INotifyPropertyChanged, IDisposable
     private string _paidRouteSendAmount = "";
     private string _paidRouteReceiveToken = "";
     private string _paidRouteWithdrawInvoice = "";
+    private string _manualPaidExitProvider = "";
+    private string _paidExitPriceMsatPerGb = "0";
+    private string? _lastSyncedManualPaidExitProvider;
+    private ulong? _lastSyncedPaidExitPriceMsatPerGb;
     private string _networkSetupMode = "";
     private string _updateStatus = "";
     private Uri? _updateAssetUrl;

@@ -218,6 +218,65 @@
         );
     }
 
+    #[cfg(feature = "paid-exit")]
+    #[test]
+    fn tunnel_config_pins_manual_provider_for_control_without_routing_through_it() {
+        let alice_keys = Keys::generate();
+        let seller_keys = Keys::generate();
+        let transit_keys = Keys::generate();
+        let alice_nsec = alice_keys.secret_key().to_bech32().expect("alice nsec");
+        let alice_pubkey = alice_keys.public_key().to_hex();
+        let seller_npub = seller_keys.public_key().to_bech32().expect("seller npub");
+        let transit_npub = transit_keys.public_key().to_bech32().expect("transit npub");
+        let network_id = "fips-manual-provider-control-test";
+
+        let mut app = AppConfig::default();
+        app.nostr.secret_key = alice_nsec;
+        app.networks[0].enabled = true;
+        app.networks[0].network_id = network_id.to_string();
+        app.networks[0].devices = vec![alice_pubkey.clone()];
+        app.fips_bootstrap_enabled = false;
+        app.fips_nostr_discovery_enabled = false;
+        app.fips_peer_endpoints.insert(
+            transit_npub.clone(),
+            vec!["203.0.113.46:51821".to_string()],
+        );
+        app.set_manual_paid_exit_provider(&seller_npub)
+            .expect("pin manual provider");
+
+        let config = FipsPrivateTunnelConfig::from_app(
+            &app,
+            network_id,
+            "utun-test",
+            Some(&alice_pubkey),
+            None,
+            &[],
+        )
+        .expect("fips tunnel config");
+
+        let seller = config
+            .endpoint_peers
+            .iter()
+            .find(|peer| peer.npub == seller_npub)
+            .expect("manual provider endpoint peer");
+        assert!(seller.addresses.is_empty());
+        assert!(seller.discovery_fallback_transit);
+        let transit = config
+            .endpoint_peers
+            .iter()
+            .find(|peer| peer.npub == transit_npub)
+            .expect("configured FIPS transit");
+        assert_eq!(transit.addresses[0].addr, "203.0.113.46:51821");
+        let routed = config
+            .peers
+            .iter()
+            .find(|peer| peer.participant_pubkey == seller_keys.public_key().to_hex())
+            .expect("manual provider control peer");
+        assert!(routed.allowed_ips.is_empty());
+        assert!(!config.route_targets.iter().any(|route| route == "0.0.0.0/0"));
+        assert!(!config.nostr_discovery_enabled);
+    }
+
     #[test]
     fn pending_remote_exit_only_keeps_fail_closed_route_when_leak_protection_is_enabled() {
         let keys = Keys::generate();

@@ -540,6 +540,14 @@
                   </StackPanel>
                 </DockPanel>
                 <TextBlock Text="{Binding PaidRouteMarketStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                <DockPanel LastChildFill="True" Margin="0,0,0,8">
+                  <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="8,0,0,0">
+                    <Button Content="Add provider" Click="SetManualPaidExitProvider_Click" IsEnabled="{Binding CanSetManualPaidExitProvider}" Margin="0,0,8,0" />
+                    <Button Content="Clear" Click="ClearManualPaidExitProvider_Click" Visibility="{Binding State.PaidRouteMarket.ManualProviderLink, Converter={StaticResource NonEmptyStringToVisibility}}" />
+                  </StackPanel>
+                  <TextBox Text="{Binding ManualPaidExitProvider, UpdateSourceTrigger=PropertyChanged}" ToolTip="Provider npub or paid exit link" AutomationProperties.AutomationId="ManualPaidExitProvider" />
+                </DockPanel>
+                <TextBlock Text="{Binding State.PaidRouteMarket.ManualProviderStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" Visibility="{Binding State.PaidRouteMarket.ManualProviderStatusText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                 <TextBlock Text="{Binding State.PaidRouteMarket.LastPaymentAction.DisplayStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Visibility="{Binding State.PaidRouteMarket.LastPaymentAction.DisplayStatusText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                 <Button Content="Send payment" Click="SendPaidRoutePaymentEnvelope_Click" HorizontalAlignment="Left" Margin="0,6,0,10" Visibility="{Binding State.PaidRouteMarket.LastPaymentAction.EnvelopeJson, Converter={StaticResource NonEmptyStringToVisibility}}" />
                 <TextBlock Text="Available" FontWeight="SemiBold" Margin="0,8,0,6" />
@@ -607,6 +615,14 @@
                   <TextBlock Text="{Binding PaidExitSellerChannelCreditHelpText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" Visibility="{Binding PaidExitSellerChannelCreditHelpText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                   <TextBlock Text="{Binding PaidExitSellerPaymentStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" Visibility="{Binding PaidExitSellerPaymentStatusText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                   <TextBlock Text="{Binding PaidExitSellerSummary}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                  <DockPanel LastChildFill="True" Margin="0,0,0,6">
+                    <Button DockPanel.Dock="Right" Content="Save price" Click="SavePaidExitPrice_Click" IsEnabled="{Binding CanSavePaidExitPrice}" Margin="8,0,0,0" />
+                    <TextBox Text="{Binding PaidExitPriceMsatPerGb, UpdateSourceTrigger=PropertyChanged}" ToolTip="Price in msat/GB" AutomationProperties.AutomationId="PaidExitPriceMsatPerGb" />
+                  </DockPanel>
+                  <DockPanel LastChildFill="True" Margin="0,0,0,6" Visibility="{Binding State.PaidExitSeller.ProviderLink, Converter={StaticResource NonEmptyStringToVisibility}}">
+                    <Button DockPanel.Dock="Right" Content="Copy link" Tag="{Binding State.PaidExitSeller.ProviderLink}" Click="CopyWalletValue_Click" Margin="8,0,0,0" />
+                    <TextBox Text="{Binding State.PaidExitSeller.ProviderLink}" IsReadOnly="True" />
+                  </DockPanel>
                   <TextBlock Text="{Binding PaidExitSellerTrialText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" />
                   <TextBlock Text="{Binding PaidExitSellerChannelExpiryText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" />
                   <TextBlock Text="{Binding PaidExitSellerSettlementText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" Visibility="{Binding PaidExitSellerSettlementText, Converter={StaticResource NonEmptyStringToVisibility}}" />

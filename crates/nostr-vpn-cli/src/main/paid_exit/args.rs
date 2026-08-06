@@ -86,10 +86,7 @@ struct PaidExitRunArgs {
     #[arg(long)]
     upstream: Option<String>,
     #[arg(long)]
-    price_msat: Option<u64>,
-    /// Price unit. Accepts byte quantities such as "1 MB" or "1 GB".
-    #[arg(long, value_name = "UNITS")]
-    per_units: Option<String>,
+    price_msat_per_gb: Option<u64>,
     /// Minimum charge while a buyer is connected, prorated by active time.
     #[arg(long)]
     connection_minimum_msat_per_day: Option<u64>,

@@ -1,6 +1,7 @@
 #[cfg(feature = "paid-exit")]
 mod paid_exit {
     use std::collections::HashSet;
+    use std::fmt::Write as _;
     use std::io::Write as _;
     use std::process::Stdio;
 
@@ -14,7 +15,7 @@ mod paid_exit {
         paid_route_store_file_path, write_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{
-        PaidExitConfig, PaidExitUpstream, PaidRouteAccessState, PaidRouteCountryClaim,
+        ManualPaidExitProvider, PaidExitConfig, PaidExitUpstream, PaidRouteAccessState, PaidRouteCountryClaim,
         PaidRouteOffer, PaidRouteQualityMetrics, PaidRouteRoutingDecision,
         normalize_paid_route_country_code, paid_route_country_claim,
     };
@@ -51,12 +52,16 @@ mod paid_exit {
         use super::*;
 
         #[test]
-        fn price_text_normalizes_to_gigabytes_and_purchasing_power() {
+        fn price_text_uses_one_fixed_gigabyte_denominator() {
             assert_eq!(
-                paid_route_price_text(25, 1_000_000),
-                "25 sat / GB · 1 sat ≈ 40 MB"
+                paid_route_price_text(25_000),
+                "25000 msat/GB · 25 sat/GB"
             );
-            assert_eq!(paid_route_price_text(0, 1_000_000), "free");
+            assert_eq!(paid_route_price_text(0), "free");
+            assert_eq!(
+                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR"),
+                "25000 msat/GB · 25 sat/GB · ≈ 0.02 EUR/GB"
+            );
         }
 
         #[test]
@@ -224,14 +229,13 @@ mod paid_exit {
         fn offer(
             key: &str,
             rating_score: Option<i64>,
-            price_msat: u64,
+            price_msat_per_gb: u64,
         ) -> NativePaidRouteOfferState {
             NativePaidRouteOfferState {
                 key: key.to_string(),
                 has_rating: rating_score.is_some(),
                 rating_score: rating_score.unwrap_or_default(),
-                price_msat,
-                per_units: 1,
+                price_msat_per_gb,
                 ..NativePaidRouteOfferState::default()
             }
         }

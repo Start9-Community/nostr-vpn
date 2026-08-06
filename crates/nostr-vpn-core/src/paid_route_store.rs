@@ -28,7 +28,7 @@ use crate::paid_routes::{
     PaidRouteSessionOpen, PaidRouteUsage, SignedPaidRouteOffer,
 };
 
-const CURRENT_VERSION: u8 = 2;
+const CURRENT_VERSION: u8 = 3;
 const SELLER_CONNECTION_MINIMUM_PAYMENT_SKEW_MILLIS: u64 = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,7 +539,7 @@ mod wallet_offers;
 pub use wallet_offers::normalize_paid_route_mint_url;
 
 pub use automatic_selection::{
-    PAID_ROUTE_AUTO_MAX_CHANNEL_CAPACITY_SAT, PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GIB,
+    PAID_ROUTE_AUTO_MAX_CHANNEL_CAPACITY_SAT, PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GB,
     PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES,
 };
 pub use persistence::{

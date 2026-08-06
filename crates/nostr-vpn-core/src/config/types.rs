@@ -268,6 +268,8 @@ pub struct AppConfig {
     pub wireguard_exit: WireGuardExitConfig,
     #[serde(default, skip_serializing_if = "PaidExitConfig::is_default")]
     pub paid_exit: PaidExitConfig,
+    #[serde(default, skip_serializing_if = "ManualPaidExitProvider::is_default")]
+    pub manual_paid_exit_provider: ManualPaidExitProvider,
     #[serde(
         default = "default_wallet_fiat_enabled",
         skip_serializing_if = "is_true"
@@ -563,6 +565,7 @@ impl Default for AppConfig {
             exit_dns: ExitDnsConfig::default(),
             wireguard_exit: WireGuardExitConfig::default(),
             paid_exit: PaidExitConfig::default(),
+            manual_paid_exit_provider: ManualPaidExitProvider::default(),
             wallet_fiat_enabled: default_wallet_fiat_enabled(),
             wallet_fiat_currency: FiatCurrency::default(),
             peer_aliases: default_peer_aliases(),

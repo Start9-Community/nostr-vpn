@@ -95,6 +95,46 @@ fn build_paid_route_market_card(app: &AppRef, page: &gtk::Box, state: &NativeApp
         ),
     );
     detail_row(&buyer, "Status", &market.status_text);
+    let provider_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let provider = entry(
+        "Provider npub or paid exit link",
+        &app.borrow().drafts.manual_paid_exit_provider,
+    );
+    provider.set_hexpand(true);
+    {
+        let app = app.clone();
+        provider.connect_changed(move |entry| {
+            app.borrow_mut().drafts.manual_paid_exit_provider = entry.text().to_string();
+        });
+    }
+    provider_row.append(&provider);
+    let add_provider = icon_text_button("Add provider", "list-add-symbolic");
+    {
+        let app = app.clone();
+        let provider = provider.clone();
+        add_provider.connect_clicked(move |_| {
+            dispatch(
+                &app,
+                NativeAppAction::SetManualPaidExitProvider {
+                    provider: provider.text().to_string(),
+                },
+            );
+        });
+    }
+    provider_row.append(&add_provider);
+    if !market.manual_provider_link.is_empty() {
+        let clear = icon_text_button("Clear", "edit-clear-symbolic");
+        {
+            let app = app.clone();
+            clear.connect_clicked(move |_| {
+                app.borrow_mut().drafts.manual_paid_exit_provider.clear();
+                dispatch(&app, NativeAppAction::ClearManualPaidExitProvider);
+            });
+        }
+        provider_row.append(&clear);
+    }
+    buyer.append(&provider_row);
+    detail_row(&buyer, "Provider", &market.manual_provider_status_text);
     detail_row(
         &buyer,
         "Payments",
@@ -493,15 +533,44 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
         &format!(
             "{} · {}",
             non_empty_or(&seller.country_code, "Country unset"),
-            non_empty_or(
-                &seller.price_text,
-                &paid_route_price_text(
-                    seller.price_msat,
-                    seller.per_units,
-                ),
-            )
+            &seller.price_text
         ),
     );
+    let price_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let price = entry(
+        "Price (msat/GB)",
+        &app.borrow().drafts.paid_exit_price_msat_per_gb,
+    );
+    price.set_hexpand(true);
+    {
+        let app = app.clone();
+        price.connect_changed(move |entry| {
+            app.borrow_mut().drafts.paid_exit_price_msat_per_gb = entry.text().to_string();
+        });
+    }
+    price_row.append(&price);
+    let save_price = icon_text_button("Save price", "document-save-symbolic");
+    {
+        let app = app.clone();
+        let price = price.clone();
+        save_price.connect_clicked(move |_| {
+            let Ok(value) = price.text().trim().parse::<u64>() else {
+                return;
+            };
+            dispatch(
+                &app,
+                NativeAppAction::UpdateSettings {
+                    patch: SettingsPatch {
+                        paid_exit_price_msat_per_gb: Some(value),
+                        ..SettingsPatch::default()
+                    },
+                },
+            );
+        });
+    }
+    price_row.append(&save_price);
+    seller_card.append(&price_row);
+    detail_row(&seller_card, "Paid exit link", &seller.provider_link);
     detail_row(
         &seller_card,
         "Trial",
@@ -713,13 +782,7 @@ fn paid_route_offer_title(offer: &NativePaidRouteOfferState) -> String {
     format!(
         "{} · {}",
         non_empty_or(&offer.country_code, "Unknown country").to_uppercase(),
-        non_empty_or(
-            &offer.price_text,
-            &paid_route_price_text(
-                offer.price_msat,
-                offer.per_units,
-            ),
-        )
+        &offer.price_text
     )
 }
 
@@ -883,23 +946,6 @@ fn paid_route_country_claim_text(session: &NativePaidRouteSessionState) -> Strin
             &non_empty_or(&session.claimed_country_code, "country unknown"),
         ),
     }
-}
-
-fn paid_route_price_text(price_msat: u64, per_units: u64) -> String {
-    if price_msat == 0 {
-        return "free".to_string();
-    }
-    if per_units == 0 {
-        return "Price unavailable".to_string();
-    }
-    let price_msat_per_gb = (u128::from(price_msat) * 1_000_000_000_u128)
-        .div_ceil(u128::from(per_units));
-    let bytes_per_sat = (u128::from(per_units) * 1_000_u128) / u128::from(price_msat);
-    format!(
-        "{} / GB · 1 sat ≈ {}",
-        format_paid_route_msat(u64::try_from(price_msat_per_gb).unwrap_or(u64::MAX)),
-        format_bytes(u64::try_from(bytes_per_sat).unwrap_or(u64::MAX)),
-    )
 }
 
 fn paid_route_traffic_unit_text(units: u64) -> String {

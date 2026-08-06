@@ -250,9 +250,11 @@ impl NativeAppRuntime {
             };
         let config_for_paid = (!config_unavailable).then_some(&self.config);
         let raw_port_mapping = daemon_state.map(|state| &state.port_mapping);
-        let mut paid_route_market = self.paid_route_market_state(config_for_paid);
         if !config_unavailable && self.config.wallet_fiat_enabled {
             let _ = self.exchange_rate_service.refresh_if_due();
+        }
+        let mut paid_route_market = self.paid_route_market_state(config_for_paid);
+        if !config_unavailable && self.config.wallet_fiat_enabled {
             apply_exchange_rate(
                 &mut paid_route_market.wallet,
                 &self.exchange_rate_service.snapshot(),

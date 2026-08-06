@@ -158,8 +158,7 @@ fn paid_exit_run_settings_prepare_public_fips_discovery() {
             publish: false,
             no_reload_daemon: true,
             upstream: None,
-            price_msat: None,
-            per_units: None,
+            price_msat_per_gb: None,
             connection_minimum_msat_per_day: None,
             accepted_mints: None,
             accepted_mint: Vec::new(),
@@ -463,7 +462,7 @@ fn fips_tunnel_config_carries_paid_route_payment_streaming_inputs() {
     ];
     app.nostr.disabled_relays = vec!["wss://disabled.example".to_string()];
     app.paid_exit.enabled = true;
-    app.paid_exit.pricing.price_msat = 123;
+    app.paid_exit.pricing.price_msat_per_gb = 123;
 
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -499,7 +498,7 @@ fn fips_tunnel_config_carries_paid_route_payment_streaming_inputs() {
         config.paid_route_payment_relays,
         vec!["wss://relay.example".to_string()]
     );
-    assert_eq!(config.paid_exit.pricing.price_msat, 123);
+    assert_eq!(config.paid_exit.pricing.price_msat_per_gb, 123);
     assert_eq!(config.identity_nsec, app.nostr.secret_key);
 
     let _ = std::fs::remove_dir_all(&dir);

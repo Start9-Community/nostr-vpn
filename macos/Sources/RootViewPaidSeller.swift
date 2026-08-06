@@ -40,6 +40,19 @@ extension RootView {
             if state.paidExitSeller.supported {
                 paidExitSellerStatusBadges
                 paidExitSellerInternetSummary
+                if !state.paidExitSeller.providerLink.isEmpty {
+                    HStack(spacing: 8) {
+                        Text(state.paidExitSeller.providerLink)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Copy paid exit link") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(state.paidExitSeller.providerLink, forType: .string)
+                        }
+                        .controlSize(.small)
+                    }
+                }
             }
         }
     }
@@ -160,18 +173,15 @@ extension RootView {
             VStack(alignment: .leading, spacing: 10) {
                 paidExitFormRow("Charge") {
                     HStack(spacing: 8) {
-                        TextField("0", text: $paidExitPriceSats)
+                        TextField("0", text: $paidExitPriceMsatPerGb)
                             .frame(width: 130)
-                            .accessibilityIdentifier("paid-exit-price-sats")
-                        Text("sats")
+                            .accessibilityIdentifier("paid-exit-price-msat-per-gb")
+                        Text("msat/GB")
                             .foregroundStyle(.secondary)
-                        Text("per")
-                            .foregroundStyle(.secondary)
-                        paidExitPriceUnitControl
                     }
                 }
-                if !paidExitPriceSats.isEmpty && !paidExitPriceSatsIsValid {
-                    Text("Use sats with up to three decimal places.")
+                if !paidExitPriceMsatPerGb.isEmpty && !paidExitPriceIsValid {
+                    Text("Use a whole number of millisatoshis per GB.")
                         .font(.caption)
                         .foregroundStyle(Color.orange)
                 }
@@ -180,34 +190,6 @@ extension RootView {
                 }
             }
         }
-    }
-
-    @ViewBuilder
-    var paidExitPriceUnitControl: some View {
-        Picker("", selection: $paidExitPerUnits) {
-            ForEach(paidExitBytePriceUnitOptions, id: \.value) { option in
-                Text(option.label).tag(option.value)
-            }
-        }
-        .labelsHidden()
-        .frame(width: 150)
-    }
-
-    var paidExitBytePriceUnitOptions: [(label: String, value: String)] {
-        var options: [(label: String, value: String)] = [
-            ("100 KB", "100 KB"),
-            ("1 MB", "1 MB"),
-            ("10 MB", "10 MB"),
-            ("100 MB", "100 MB"),
-            ("1 GB", "1 GB")
-        ]
-        let current = paidExitPerUnits.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !current.isEmpty && !options.contains(where: { $0.value == current }) {
-            let label = UInt64(current)
-                .map(formatBytes) ?? current
-            options.insert((label, current), at: 0)
-        }
-        return options
     }
 
     var paidExitSellerTermsSettings: some View {
@@ -330,8 +312,7 @@ extension RootView {
         Button {
             manager.savePaidExitSellerSettings(
                 upstream: paidExitCurrentUpstream,
-                priceSats: paidExitPriceSats,
-                perUnits: paidExitPerUnits,
+                priceMsatPerGb: paidExitPriceMsatPerGb,
                 acceptedMints: paidExitAcceptedMints,
                 maxChannelCapacitySat: paidExitMaxChannelCapacitySat,
                 channelExpirySecs: paidExitChannelExpirySecs,
@@ -345,11 +326,11 @@ extension RootView {
         } label: {
             Label("Save", systemImage: "checkmark")
         }
-        .disabled(manager.actionInFlight || !paidExitPriceSatsIsValid)
+        .disabled(manager.actionInFlight || !paidExitPriceIsValid)
     }
 
-    var paidExitPriceSatsIsValid: Bool {
-        AppManager.parsePaidExitPriceSats(paidExitPriceSats) != nil
+    var paidExitPriceIsValid: Bool {
+        UInt64(paidExitPriceMsatPerGb.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
     var paidExitSellerPaymentsButton: some View {
