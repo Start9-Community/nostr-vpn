@@ -11,6 +11,16 @@ fn paid_internet_available(state: &NativeAppState) -> bool {
 fn build_paid_routes_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     page_title(page, "Buy Internet", "network-wireless-symbolic");
     page.append(&badge("Experimental", "warn"));
+    page.append(&badge(
+        &state.exit_node_status_text,
+        if state.exit_node_blocked {
+            "bad"
+        } else if state.exit_node_active {
+            "ok"
+        } else {
+            "muted"
+        },
+    ));
     build_paid_route_market_card(app, page, state);
 }
 

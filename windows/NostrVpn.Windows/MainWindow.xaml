@@ -523,6 +523,7 @@
           </StackPanel>
 
           <StackPanel Visibility="{Binding Page, Converter={StaticResource PageVisibility}, ConverterParameter=PublicExits}">
+            <TextBlock Text="{Binding State.ExitNodeStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,10" AutomationProperties.AutomationId="PaidExitCurrentInternet" />
             <Border Style="{StaticResource Card}">
               <StackPanel>
                 <DockPanel LastChildFill="True" Margin="0,0,0,10">

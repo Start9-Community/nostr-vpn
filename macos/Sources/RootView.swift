@@ -584,6 +584,11 @@ struct RootView: View {
                 Text("Experimental")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text(state.exitNodeStatusText)
+                    .font(.callout)
+                    .foregroundStyle(state.exitNodeBlocked ? Color.red : Color.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("paid-exit-current-internet")
                 paidRouteMarketSettings
             }
         case .sellExit:
