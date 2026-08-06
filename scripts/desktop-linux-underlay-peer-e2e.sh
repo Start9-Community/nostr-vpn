@@ -270,6 +270,7 @@ cleanup() {
     "$BINARY" repair-network --config "$CONFIG" >/dev/null 2>&1 || true
   fi
   stop_pid_file "$STATE_DIR/peer-process.pid"
+  rmdir "/run/nvpn-$PEER_NETNS" 2>/dev/null || true
   remove_counter_chain
   wireguard_cleanup
 }
@@ -478,10 +479,12 @@ case "$ACTION" in
       --advertise-exit-node true \
       --autoconnect true \
       >/dev/null
+    install -d -m 0700 "/run/nvpn-$PEER_NETNS"
     nohup env RUST_LOG=info "$BINARY" daemon \
       --config "$CONFIG" \
       --iface "$TUN_IFACE" \
       --mesh-refresh-interval-secs 2 \
+      --daemon-instance "$PEER_NETNS" \
       >"$STATE_DIR/daemon.stdout.log" \
       2>"$STATE_DIR/daemon.stderr.log" \
       </dev/null &
