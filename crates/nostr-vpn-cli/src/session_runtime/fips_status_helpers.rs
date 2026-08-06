@@ -144,6 +144,11 @@ pub(crate) enum FipsLinkEventRefresh {
     ReconcileNetworkState,
     UpdatePeersAndRefreshPaths,
 }
+impl FipsLinkEventRefresh {
+    const fn explicitly_refreshes_peer_paths(self) -> bool {
+        matches!(self, Self::UpdatePeersAndRefreshPaths)
+    }
+}
 #[derive(Debug, Default)]
 pub(crate) struct FipsPendingRosterRestartState {
     pending_since: Option<u64>,
@@ -576,12 +581,20 @@ async fn refresh_fips_tunnel_runtime_after_link_event(
                 existing.iface(),
                 daemon_wall_clock_unix_milliseconds(),
             );
-        } else {
+        } else if refresh.explicitly_refreshes_peer_paths() {
             let refreshed = existing.refresh_peer_paths(&endpoint_peers).await?;
             eprintln!(
                 "daemon: refreshed FIPS private mesh paths on {} after {reason} ({refreshed} direct probe(s) started); refreshed_unix_ms={}",
                 existing.iface(),
                 daemon_wall_clock_unix_milliseconds(),
+            );
+        } else if matches!(refresh, FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths) {
+            // The rebind already invalidated affected paths and scheduled
+            // reprobes after FIPS's underlay/roam guard. An immediate second
+            // refresh races that guard and can delay authenticated payload.
+            eprintln!(
+                "daemon: FIPS private mesh path reprobe owned by carrier rebind on {} after {reason}",
+                existing.iface(),
             );
         }
     } else {

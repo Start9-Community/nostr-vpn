@@ -205,6 +205,11 @@ mod tests {
             FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
             "an address/route handoff must rebind carriers while preserving sessions unless runtime config requires replacement"
         );
+        assert!(
+            !FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths
+                .explicitly_refreshes_peer_paths(),
+            "FIPS rebind owns its guarded path reprobe"
+        );
 
         assert_eq!(
             fips_link_event_refresh(true, false, false, false, false),
@@ -214,6 +219,10 @@ mod tests {
         assert_eq!(
             fips_link_event_refresh(false, false, false, true, false),
             FipsLinkEventRefresh::UpdatePeersAndRefreshPaths
+        );
+        assert!(
+            FipsLinkEventRefresh::UpdatePeersAndRefreshPaths.explicitly_refreshes_peer_paths(),
+            "endpoint-only updates still require an explicit path refresh"
         );
         assert_eq!(
             fips_link_event_refresh(true, false, true, false, false),

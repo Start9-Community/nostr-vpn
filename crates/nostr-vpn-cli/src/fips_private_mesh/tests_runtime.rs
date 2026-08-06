@@ -211,7 +211,7 @@
     }
 
     #[test]
-    fn two_local_endpoints_exchange_raw_packets_over_fips() {
+    fn two_local_endpoints_exchange_raw_packets_and_macos_rebind_recovers() {
         std::thread::Builder::new()
             .name("two-local-fips-endpoints".to_string())
             .stack_size(8 * 1024 * 1024)
@@ -311,6 +311,61 @@
             event => panic!("expected packet event, got {event:?}"),
         };
         assert_eq!(received, bob_to_alice);
+
+        #[cfg(target_os = "macos")]
+        {
+            let started = std::time::Instant::now();
+            let endpoint_peers = [FipsEndpointPeerTransportConfig {
+                npub: bob_npub.clone(),
+                addresses: vec![FipsPeerAddressHint {
+                    addr: format!("udp:127.0.0.1:{bob_port}"),
+                    seen_at_ms: None,
+                    priority: FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY,
+                }],
+                connect_on_start: true,
+                auto_reconnect: true,
+                discovery_fallback_transit: false,
+            }];
+            assert!(
+                alice_runtime
+                    .rebind_network_transports(Some("lo0".to_string()))
+                    .await
+                    .expect("rebind Alice to replacement underlay")
+                    >= 1
+            );
+            alice_runtime
+                .update_peers(&endpoint_peers)
+                .await
+                .expect("apply peer config after rebind");
+            tokio::time::timeout(Duration::from_secs(4), async {
+                loop {
+                    let _ = send_tunnel_packet_batch_owned_with_capacity(
+                        &alice_runtime,
+                        vec![alice_to_bob.clone()],
+                        1,
+                    );
+                    if let Ok(Ok(Some(_))) = tokio::time::timeout(
+                        Duration::from_millis(75),
+                        recv_mesh_event_batch_into(
+                            &bob_runtime,
+                            &mut messages,
+                            &mut events,
+                            1,
+                        ),
+                    )
+                    .await
+                        && events.iter().any(|event| {
+                            matches!(event, FipsPrivateMeshEvent::Packet(packet) if packet.as_ref() == alice_to_bob)
+                        })
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("authenticated payload did not recover within four seconds");
+            assert!(started.elapsed() <= Duration::from_secs(4));
+        }
 
         alice_runtime
             .endpoint()
