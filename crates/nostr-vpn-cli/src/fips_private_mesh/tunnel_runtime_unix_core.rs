@@ -66,7 +66,6 @@ impl FipsPrivateTunnelRuntime {
         );
         let iface = tun.name().context("failed to read FIPS tunnel name")?;
         let tun_fd = BorrowedTunFd::new(tun.as_raw_fd());
-
         let (event_tx, event_rx) = mpsc::channel::<FipsPrivateMeshEvent>(1024);
         let exit_route_ready = fips_exit_route_ready(&config, &mesh.peer_statuses());
         let seller_egress_ready = local_exit_seller_egress_ready(
@@ -75,7 +74,6 @@ impl FipsPrivateTunnelRuntime {
             false,
             active_listen_port,
         );
-
         let mut runtime = Self {
             iface,
             mesh,
@@ -118,12 +116,7 @@ impl FipsPrivateTunnelRuntime {
                 .prepare_secure_dns(&config, cleanup_journal_config_path)
                 .await?;
             runtime.apply_interface_config(&config).await?;
-            let ready = local_exit_seller_egress_ready(
-                &config,
-                &connected_peer_pubkeys(&runtime.mesh.peer_statuses()),
-                runtime.wireguard_exit_ready(),
-                runtime.active_listen_port,
-            );
+            let ready = runtime.seller_egress_ready(&config);
             runtime.replace_paid_route_admissions(&config, ready)?;
             runtime.finish_secure_dns(&config).await?;
             runtime
@@ -144,7 +137,6 @@ impl FipsPrivateTunnelRuntime {
         Ok(runtime)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn endpoint_bypass_ipv4_hosts(
         &self,
         config: &FipsPrivateTunnelConfig,
@@ -161,11 +153,9 @@ impl FipsPrivateTunnelRuntime {
         hosts.dedup();
         Ok(hosts)
     }
-
     pub(crate) fn requires_endpoint_restart(&self, config: &FipsPrivateTunnelConfig) -> bool {
         fips_tunnel_requires_endpoint_restart(&self.config, config)
     }
-
     fn wireguard_exit_ready(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -176,7 +166,14 @@ impl FipsPrivateTunnelRuntime {
             self.wg_upstream.is_some()
         }
     }
-
+    fn seller_egress_ready(&self, config: &FipsPrivateTunnelConfig) -> bool {
+        local_exit_seller_egress_ready(
+            config,
+            &connected_peer_pubkeys(&self.mesh.peer_statuses()),
+            self.wireguard_exit_ready(),
+            self.active_listen_port,
+        )
+    }
     fn replace_paid_route_admissions(
         &mut self,
         config: &FipsPrivateTunnelConfig,
@@ -190,7 +187,6 @@ impl FipsPrivateTunnelRuntime {
         self.local_exit_seller_egress_ready = egress_ready;
         Ok(())
     }
-
     pub(crate) async fn apply_config(
         &mut self,
         config: FipsPrivateTunnelConfig,
@@ -211,12 +207,7 @@ impl FipsPrivateTunnelRuntime {
         self.prepare_secure_dns(&config, cleanup_journal_config_path)
             .await?;
         self.apply_interface_config(&config).await?;
-        let ready = local_exit_seller_egress_ready(
-            &config,
-            &connected_peer_pubkeys(&self.mesh.peer_statuses()),
-            self.wireguard_exit_ready(),
-            self.active_listen_port,
-        );
+        let ready = self.seller_egress_ready(&config);
         self.replace_paid_route_admissions(&config, ready)?;
         self.finish_secure_dns(&config).await?;
         self.reconcile_fips_host_runtime(config.fips_host.clone())
@@ -247,13 +238,11 @@ impl FipsPrivateTunnelRuntime {
             self.replace_paid_route_admissions(&config, seller_egress_ready)?;
             return Ok(());
         }
-
         #[cfg(target_os = "linux")]
         {
             if !linux_route_targets_require_ip_endpoint_bypass(&self.config.route_targets) {
                 return Ok(());
             }
-
             let config = self.config.clone();
             let mut bypass_hosts = config.control_plane_bypass_hosts.clone();
             bypass_hosts.extend(self.endpoint_bypass_ipv4_hosts(&config).await?);
@@ -265,7 +254,6 @@ impl FipsPrivateTunnelRuntime {
             }
             return self.apply_interface_config(&config).await;
         }
-
         #[cfg(target_os = "macos")]
         {
             let config = self.config.clone();
@@ -276,10 +264,7 @@ impl FipsPrivateTunnelRuntime {
     }
 
     pub(crate) async fn stop(self) -> Result<()> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut runtime = self;
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let runtime = self;
         #[cfg(target_os = "linux")]
         let network_cleanup = runtime.cleanup_linux_network_state();
         #[cfg(target_os = "macos")]
@@ -293,19 +278,12 @@ impl FipsPrivateTunnelRuntime {
             macos_network_failures.push(format!("restore macOS exit forwarding: {error:#}"));
         }
         #[cfg(target_os = "macos")]
-        let mut wg_cleanup_succeeded = false;
-        #[cfg(target_os = "macos")]
         if let Some(handle) = runtime.wg_upstream.as_mut() {
-            match handle.cleanup().await {
-                Ok(()) => wg_cleanup_succeeded = true,
-                Err(error) => {
-                    macos_network_failures.push(format!("remove macOS WG upstream: {error:#}"));
-                }
+            if let Err(error) = handle.cleanup().await {
+                macos_network_failures.push(format!("remove macOS WG upstream: {error:#}"));
+            } else {
+                runtime.wg_upstream.take();
             }
-        }
-        #[cfg(target_os = "macos")]
-        if wg_cleanup_succeeded {
-            runtime.wg_upstream.take();
         }
         let dns_cleanup = if let Some(secure_dns) = runtime.secure_dns.as_mut() {
             secure_dns.stop().await
@@ -327,11 +305,7 @@ impl FipsPrivateTunnelRuntime {
             LinuxNetworkCleanupState::from_runtime(&runtime),
         );
         #[cfg(target_os = "macos")]
-        let network_cleanup = if macos_network_failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(macos_network_failures.join("; ")))
-        };
+        let network_cleanup = combined_failures(macos_network_failures);
         #[cfg(target_os = "macos")]
         let macos_owned_cleanup = if network_cleanup.is_ok() && dns_cleanup.is_ok() {
             Ok(())
@@ -343,7 +317,7 @@ impl FipsPrivateTunnelRuntime {
             &macos_owned_cleanup,
             runtime.macos_network_cleanup_state(),
         );
-        runtime.stop_fips_host_runtime().await;
+        runtime.stop_fips_host_runtime();
         if let Some(control_pubsub) = runtime.control_pubsub.take() {
             control_pubsub.stop().await;
         }
@@ -374,11 +348,7 @@ impl FipsPrivateTunnelRuntime {
         if let Err(error) = endpoint_cleanup {
             failures.push(format!("endpoint shutdown failed ({error:#})"));
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(failures.join("; ")))
-        }
+        combined_failures(failures)
     }
 
     async fn prepare_secure_dns(
@@ -407,7 +377,6 @@ impl FipsPrivateTunnelRuntime {
             .await?;
         }
         if let Some(secure_dns) = self.secure_dns.as_mut() {
-            secure_dns.update_records(config.magic_dns_records.clone());
             secure_dns.update_config(
                 config.magic_dns_records.clone(),
                 config.exit_dns_resolver_config(false)?,
@@ -478,12 +447,7 @@ impl FipsPrivateTunnelRuntime {
                 &config.local_address,
                 &config.local_exit_forwarding_routes,
                 config.local_exit_seller_egress.as_ref(),
-                local_exit_seller_egress_ready(
-                    config,
-                    &connected_peer_pubkeys(&self.mesh.peer_statuses()),
-                    self.wg_upstream.is_some(),
-                    self.active_listen_port,
-                ),
+                self.seller_egress_ready(config),
             )?;
         }
         self.exit_route_ready = fips_exit_route_ready(config, &self.mesh.peer_statuses());
@@ -506,11 +470,9 @@ impl FipsPrivateTunnelRuntime {
             });
         let original_route_targets_require_bypass =
             crate::route_targets_require_endpoint_bypass(&route_targets);
-
         let (has_peer_endpoint_hosts, underlay) = self
             .reconcile_macos_endpoint_bypass_for_config(config)
             .await?;
-
         if requested_ipv4_exit && !has_peer_endpoint_hosts && !pending_exit_without_peer {
             eprintln!(
                 "fips: withholding macOS default route until the selected exit peer underlay endpoint is known"
@@ -535,7 +497,6 @@ impl FipsPrivateTunnelRuntime {
                 self.iface, error
             );
         }
-
         route_targets = config.interface_route_targets(route_targets);
         self.persist_network_cleanup_ownership()?;
         // FIPS mesh peer routes go in first. They're /32s for each peer's
@@ -607,7 +568,12 @@ impl FipsPrivateTunnelRuntime {
             .collect::<std::collections::HashSet<_>>();
         let underlay_changed = self.endpoint_bypass_underlay.as_ref() != underlay;
         let current_underlay = self.endpoint_bypass_underlay.clone();
-
+        let current_gateway = current_underlay
+            .as_ref()
+            .and_then(|owner| owner.gateway.as_deref());
+        let current_interface = current_underlay
+            .as_ref()
+            .map(|owner| owner.interface.as_str());
         let stale = self
             .endpoint_bypass_routes
             .iter()
@@ -615,15 +581,8 @@ impl FipsPrivateTunnelRuntime {
             .cloned()
             .collect::<Vec<_>>();
         for route in stale {
-            if let Err(error) = crate::delete_macos_managed_route(
-                &route,
-                current_underlay
-                    .as_ref()
-                    .and_then(|owner| owner.gateway.as_deref()),
-                current_underlay
-                    .as_ref()
-                    .map(|owner| owner.interface.as_str()),
-            )
+            if let Err(error) =
+                crate::delete_macos_managed_route(&route, current_gateway, current_interface)
                 && !crate::daemon_runtime::macos_route_delete_error_is_absent(&error.to_string())
             {
                 failures.push(format!("remove endpoint bypass route {route}: {error:#}"));
@@ -639,7 +598,6 @@ impl FipsPrivateTunnelRuntime {
             self.endpoint_bypass_routes
                 .retain(|route| desired.contains(route));
         }
-
         // Journal every exact desired route and underlay before the first
         // route add. Replaying this intent is safe if the crash happened
         // before an add because cleanup verifies exact route ownership and
@@ -651,27 +609,17 @@ impl FipsPrivateTunnelRuntime {
         self.endpoint_bypass_routes = actual_routes;
         self.endpoint_bypass_underlay = actual_underlay;
         persist_intent?;
-
+        let interface = underlay.map(|owner| owner.interface.as_str());
         for (route, error) in apply_macos_endpoint_bypass_route_changes(
             &mut self.endpoint_bypass_routes,
             &mut self.endpoint_bypass_underlay,
             routes,
             underlay,
-            |route, gateway| {
-                crate::apply_macos_route_spec(
-                    route,
-                    gateway,
-                    underlay.map(|owner| owner.interface.as_str()),
-                )
-            },
+            |route, gateway| crate::apply_macos_route_spec(route, gateway, interface),
         ) {
             failures.push(format!("install endpoint bypass route {route}: {error:#}"));
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(failures.join("; ")))
-        }
+        combined_failures(failures)
     }
 
     #[cfg(target_os = "macos")]
@@ -688,11 +636,7 @@ impl FipsPrivateTunnelRuntime {
                 self.iface
             ));
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(failures.join("; ")))
-        }
+        combined_failures(failures)
     }
 
     async fn reconcile_fips_host_runtime(
@@ -702,14 +646,12 @@ impl FipsPrivateTunnelRuntime {
         let was_running = self.fips_host.is_some();
         let needs_restart = match (&self.fips_host, &config) {
             (Some(runtime), Some(config)) => runtime.requires_restart(&self.iface, config),
-            (Some(_), None) => true,
-            (None, Some(_)) => true,
+            (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         };
         if needs_restart {
-            self.stop_fips_host_runtime().await;
+            self.stop_fips_host_runtime();
         }
-
         match config {
             Some(config) if self.fips_host.is_none() => {
                 self.fips_host_disabled_artifacts_cleaned = false;
@@ -734,8 +676,7 @@ impl FipsPrivateTunnelRuntime {
         }
         Ok(())
     }
-
-    async fn stop_fips_host_runtime(&mut self) {
+    fn stop_fips_host_runtime(&mut self) {
         if let Some(runtime) = self.fips_host.take() {
             runtime.stop();
         }
@@ -761,7 +702,6 @@ impl FipsPrivateTunnelRuntime {
         if !seller_egress_ready {
             return self.cleanup_macos_exit_node_forwarding_checked();
         }
-
         let tunnel_source_cidr = crate::linux_exit_node_source_cidr(local_address)
             .ok_or_else(|| anyhow!("invalid IPv4 tunnel address '{local_address}'"))?;
         let host_default_iface = if matches!(seller_egress, Some(PaidExitSellerEgress::Direct)) {
@@ -776,7 +716,6 @@ impl FipsPrivateTunnelRuntime {
             host_default_iface.as_deref(),
         )
         .ok_or_else(|| anyhow!("selected seller internet source is not ready for exit NAT"))?;
-
         let already_configured = self.exit_node_runtime.outbound_iface.as_deref()
             == Some(outbound_iface.as_str())
             && self.exit_node_runtime.tunnel_source_cidr.as_deref()
@@ -785,7 +724,6 @@ impl FipsPrivateTunnelRuntime {
         if already_configured {
             return Ok(());
         }
-
         self.cleanup_macos_exit_node_forwarding_checked()?;
         let previous_forwarding = crate::read_macos_ipv4_forwarding()
             .context("read macOS IPv4 forwarding state")?;
@@ -798,7 +736,6 @@ impl FipsPrivateTunnelRuntime {
                 error.context("enable macOS IPv4 forwarding"),
             ));
         }
-
         let previous_pf = match crate::macos_pf_enabled() {
             Ok(enabled) => enabled,
             Err(error) => {
@@ -817,7 +754,6 @@ impl FipsPrivateTunnelRuntime {
                 self.rollback_macos_exit_node_setup(error.context("enable macOS PF for exit NAT"))
             );
         }
-
         if let Err(error) =
             crate::apply_macos_exit_node_pf_rules(&self.iface, &outbound_iface, &tunnel_source_cidr)
         {
@@ -825,7 +761,6 @@ impl FipsPrivateTunnelRuntime {
                 self.rollback_macos_exit_node_setup(error.context("install macOS exit PF rules"))
             );
         }
-
         Ok(())
     }
 
@@ -849,7 +784,6 @@ impl FipsPrivateTunnelRuntime {
                 Err(error) => failures.push(format!("remove PF exit rules: {error:#}")),
             }
         }
-
         match self.exit_node_runtime.ipv4_forward_was_enabled {
             Some(false) => match crate::write_macos_ipv4_forwarding(false) {
                 Ok(()) => self.exit_node_runtime.ipv4_forward_was_enabled = None,
@@ -860,16 +794,11 @@ impl FipsPrivateTunnelRuntime {
             Some(true) => self.exit_node_runtime.ipv4_forward_was_enabled = None,
             None => {}
         }
-
         if self.exit_node_runtime.pf_was_enabled.is_none() {
             self.exit_node_runtime.outbound_iface = None;
             self.exit_node_runtime.tunnel_source_cidr = None;
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(failures.join("; ")))
-        }
+        combined_failures(failures)
     }
 
     #[cfg(target_os = "macos")]
@@ -883,24 +812,40 @@ impl FipsPrivateTunnelRuntime {
         }
     }
 }
-
 include!("macos_wg_transition.rs");
-
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn combined_failures(failures: Vec<String>) -> Result<()> {
+    if !failures.is_empty() {
+        return Err(anyhow!(failures.join("; ")));
+    }
+    Ok(())
+}
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn fips_host_disabled_cleanup_due(runtime_running: bool, cleanup_complete: bool) -> bool {
     !runtime_running && !cleanup_complete
 }
-
+macro_rules! mesh_delegate {
+    ($(#[$meta:meta])* async fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty) => {
+        $(#[$meta])*
+        pub(crate) async fn $name(&self, $($arg: $ty),*) -> $result {
+            self.mesh.$name($($arg),*).await
+        }
+    };
+    ($(#[$meta:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty) => {
+        $(#[$meta])*
+        pub(crate) fn $name(&self, $($arg: $ty),*) -> $result {
+            self.mesh.$name($($arg),*)
+        }
+    };
+}
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl FipsPrivateTunnelRuntime {
     pub(crate) fn iface(&self) -> &str {
         &self.iface
     }
-
     pub(crate) fn active_listen_port(&self) -> Option<u16> {
         self.active_listen_port
     }
-
     #[cfg(all(
         feature = "paid-exit",
         any(target_os = "linux", target_os = "macos")
@@ -908,81 +853,36 @@ impl FipsPrivateTunnelRuntime {
     pub(crate) fn paid_exit_seller_ready(&self) -> bool {
         self.active_listen_port.is_some() && self.local_exit_seller_egress_ready
     }
-
     pub(crate) fn client_dataplane_enabled(&self) -> bool {
         self.config.client_dataplane_enabled
     }
-
     pub(crate) fn ethernet_underlay(&self) -> Option<&FipsEthernetUnderlayConfig> {
         self.config.ethernet_underlay.as_ref()
     }
-
-    pub(crate) fn peer_statuses(&self) -> Vec<MeshPeerStatus> {
-        self.mesh.peer_statuses()
-    }
-
-    #[cfg(feature = "paid-exit")]
-    pub(crate) fn drain_paid_route_usage(&self, participant: &str) -> Result<PaidRouteUsage> {
-        self.mesh.drain_paid_route_usage(participant)
-    }
-
-    pub(crate) fn stale_participants_needing_path_refresh(&self, now: u64) -> Vec<String> {
-        self.mesh.stale_participants_needing_path_refresh(now)
-    }
-
-    pub(crate) async fn relay_statuses(&self) -> Result<Vec<FipsRelayStatus>> {
-        self.mesh.relay_statuses().await
-    }
-
-    pub(crate) async fn local_advertised_endpoints(&self) -> Result<Vec<OverlayEndpointAdvert>> {
-        self.mesh.local_advertised_endpoints().await
-    }
-
-    pub(crate) fn peer_pubkeys(&self) -> Vec<String> {
-        self.mesh.peer_pubkeys()
-    }
-
-    pub(crate) async fn authenticated_endpoint_peers(&self) -> Result<Vec<FipsEndpointPeer>> {
-        self.mesh.authenticated_endpoint_peers().await
-    }
-
-    pub(crate) fn peer_endpoint_hints(&self) -> Vec<(String, Vec<(String, u64)>)> {
-        self.mesh.peer_endpoint_hints()
-    }
-
-    /// Forward a refreshed peer roster + address hints to fips without
-    /// restarting the endpoint. Daemon heartbeat path: when the
-    /// recent-peers cache or active-network roster changes, build the
-    /// merged hint list and call this so fips can diff + apply.
-    pub(crate) async fn update_peers(
-        &self,
-        endpoint_peers: &[FipsEndpointPeerTransportConfig],
-    ) -> Result<fips_endpoint::UpdatePeersOutcome> {
-        self.mesh.update_peers(endpoint_peers).await
-    }
-
-    pub(crate) async fn refresh_peer_paths(
-        &self,
-        endpoint_peers: &[FipsEndpointPeerTransportConfig],
-    ) -> Result<usize> {
-        self.mesh.refresh_peer_paths(endpoint_peers).await
-    }
-
-    pub(crate) async fn rebind_network_transports(
-        &self,
-        bind_interface: Option<String>,
-    ) -> Result<usize> {
-        self.mesh.rebind_network_transports(bind_interface).await
-    }
-
-    pub(crate) async fn ping_peers(&self, network_id: &str, now: u64) -> Result<usize> {
-        self.mesh.ping_peers(network_id, now).await
-    }
-
-    pub(crate) async fn refresh_link_statuses(&self) -> Result<()> {
-        self.mesh.refresh_link_statuses().await
-    }
-
+    mesh_delegate!(fn peer_statuses() -> Vec<MeshPeerStatus>);
+    mesh_delegate!(
+        #[cfg(feature = "paid-exit")]
+        fn drain_paid_route_usage(participant: &str) -> Result<PaidRouteUsage>
+    );
+    mesh_delegate!(fn stale_participants_needing_path_refresh(now: u64) -> Vec<String>);
+    mesh_delegate!(async fn relay_statuses() -> Result<Vec<FipsRelayStatus>>);
+    mesh_delegate!(async fn local_advertised_endpoints() -> Result<Vec<OverlayEndpointAdvert>>);
+    mesh_delegate!(fn peer_pubkeys() -> Vec<String>);
+    mesh_delegate!(async fn authenticated_endpoint_peers() -> Result<Vec<FipsEndpointPeer>>);
+    mesh_delegate!(fn peer_endpoint_hints() -> Vec<(String, Vec<(String, u64)>)>);
+    mesh_delegate!(
+        /// Forward a refreshed peer roster and address hints without restarting the endpoint.
+        async fn update_peers(endpoint_peers: &[FipsEndpointPeerTransportConfig])
+            -> Result<fips_endpoint::UpdatePeersOutcome>
+    );
+    mesh_delegate!(
+        async fn refresh_peer_paths(endpoint_peers: &[FipsEndpointPeerTransportConfig])
+            -> Result<usize>
+    );
+    mesh_delegate!(async fn rebind_network_transports(bind_interface: Option<String>) -> Result<usize>);
+    mesh_delegate!(async fn ping_peers(network_id: &str, now: u64) -> Result<usize>);
+    mesh_delegate!(async fn refresh_link_statuses() -> Result<()>);
+    mesh_delegate!(fn peer_advertised_routes(participant: &str) -> Vec<String>);
     pub(crate) async fn send_join_request(
         &self,
         participant: &str,
@@ -993,7 +893,6 @@ impl FipsPrivateTunnelRuntime {
             .send_join_request(&self.state_control, participant, requested_at, request)
             .await
     }
-
     pub(crate) fn enqueue_roster(
         &self,
         participant: &str,
@@ -1002,7 +901,6 @@ impl FipsPrivateTunnelRuntime {
         self.mesh
             .enqueue_roster(&self.state_control.sender(), participant, signed_roster)
     }
-
     pub(crate) fn join_roster_delivery(
         &self,
         participant: String,
@@ -1014,7 +912,6 @@ impl FipsPrivateTunnelRuntime {
             join_roster,
         )
     }
-
     pub(crate) async fn send_join_roster_ack(
         &self,
         participant: &str,
@@ -1037,7 +934,6 @@ impl FipsPrivateTunnelRuntime {
             capabilities,
         )
     }
-
     #[cfg(feature = "paid-exit")]
     pub(crate) async fn send_paid_route_session_open(
         &self,
@@ -1048,7 +944,6 @@ impl FipsPrivateTunnelRuntime {
             .send_paid_route_session_open(&self.state_control, seller, open)
             .await
     }
-
     #[cfg(feature = "paid-exit")]
     pub(crate) async fn send_paid_route_session_open_ack(
         &self,
@@ -1059,7 +954,6 @@ impl FipsPrivateTunnelRuntime {
             .send_paid_route_session_open_ack(&self.state_control, buyer, lease_id)
             .await
     }
-
     #[cfg(feature = "paid-exit")]
     pub(crate) fn enqueue_paid_route_payment(
         &self,
@@ -1070,18 +964,12 @@ impl FipsPrivateTunnelRuntime {
         self.mesh
             .enqueue_paid_route_payment(&self.state_control.sender(), seller, id, envelope)
     }
-
     #[cfg(feature = "paid-exit")]
     pub(crate) async fn send_paid_route_payment_ack(&self, buyer: &str, id: String) -> Result<()> {
         self.mesh
             .send_paid_route_payment_ack(&self.state_control, buyer, id)
             .await
     }
-
-    pub(crate) fn peer_advertised_routes(&self, participant: &str) -> Vec<String> {
-        self.mesh.peer_advertised_routes(participant)
-    }
-
     pub(crate) fn drain_events(&mut self) -> Vec<FipsPrivateMeshEvent> {
         let mut events = drain_event_batch(&mut self.event_rx, FIPS_MESH_EVENT_DRAIN_LIMIT);
         let remaining = FIPS_MESH_EVENT_DRAIN_LIMIT.saturating_sub(events.len());
