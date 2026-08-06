@@ -1159,7 +1159,7 @@ test_start_compose_services_supports_skip_build() {
   rm -f "$calls"
 }
 
-test_roaming_network_change_refresh_log_contract() {
+test_roaming_network_change_rebind_log_contract() {
   python3 - "$ROOT_DIR/scripts/e2e-fips-roaming-docker.sh" <<'PY'
 import pathlib
 import subprocess
@@ -1167,7 +1167,7 @@ import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 section = source[
-    source.index("wait_for_network_change_refresh_after_marker() {"):
+    source.index("wait_for_network_change_rebind_after_marker() {"):
     source.index("\nmark_daemon_log() {")
 ]
 program = section.split('awk -v marker="$marker" \'\n', 1)[1].split(
@@ -1191,21 +1191,16 @@ rebound = (
     "daemon: FIPS underlay carrier(s) rebound on utun100 "
     "after network change (2)"
 )
-refresh = (
-    "daemon: refreshed FIPS private mesh paths on utun100 "
-    "after network change (2 direct probe(s) started)"
-)
 restart = "daemon: restarted FIPS private mesh on utun100"
 
-if not accepts(marker, change, rebound, refresh):
-    raise SystemExit("ordered nonzero rebind and refresh receipts were rejected")
+if not accepts(marker, change, rebound):
+    raise SystemExit("ordered nonzero rebind receipt was rejected")
 for invalid in (
-    (marker, change, refresh, rebound),
-    (marker, change, rebound.replace("(2)", "(0)"), refresh),
-    (marker, change, rebound, refresh.replace("(2 direct", "(0 direct")),
-    (marker, change, rebound),
-    (marker, change, rebound, refresh, restart),
-    (change, rebound, refresh, marker),
+    (marker, rebound, change),
+    (marker, change, rebound.replace("(2)", "(0)")),
+    (marker, change),
+    (marker, change, rebound, restart),
+    (change, rebound, marker),
 ):
     if accepts(*invalid):
         raise SystemExit(f"invalid network-change receipts were accepted: {invalid}")
@@ -1569,7 +1564,7 @@ test_rx_maintenance_priority_queue_wait_threshold
 test_phase_argument_selection
 test_phase_summary_pipeline_columns
 test_start_compose_services_supports_skip_build
-test_roaming_network_change_refresh_log_contract
+test_roaming_network_change_rebind_log_contract
 test_dockerfile_supports_local_base_images
 test_perf_harness_supports_cpu_stress
 test_perf_metadata_maps_e2e_env

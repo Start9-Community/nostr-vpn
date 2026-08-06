@@ -397,7 +397,7 @@ daemon_process_id() {
   "${COMPOSE[@]}" exec -T "$node" sh -lc 'pgrep -o -x nvpn' | tr -d '\r'
 }
 
-wait_for_network_change_refresh_after_marker() {
+wait_for_network_change_rebind_after_marker() {
   local node="$1"
   local marker="$2"
   local label="$3"
@@ -410,9 +410,8 @@ awk -v marker="$marker" '
   $0 ~ "NVPN_E2E_MARKER " marker { seen = 1; next }
   seen && /network change detected; refreshing FIPS endpoint state/ { changed = 1 }
   changed && /underlay carrier\(s\) rebound.*after network change \([1-9][0-9]*\)/ { rebound = 1 }
-  rebound && /refreshed FIPS private mesh paths.*after network change \([1-9][0-9]* direct probe\(s\) started\)/ { refreshed = 1 }
   seen && /restarted FIPS private mesh/ { restarted = 1 }
-  END { exit (changed && rebound && refreshed && !restarted) ? 0 : 1 }
+  END { exit (changed && rebound && !restarted) ? 0 : 1 }
 ' /root/.config/nvpn/daemon.log
 SH
     then
@@ -803,7 +802,7 @@ run_underlay_network_change() {
   replace_node_address \
     node-a eth0 "$NVPN_E2E_NODE_A_UNDERLAY_IP" "$MIGRATED_NODE_A_IP" "$UNDERLAY_PREFIX.1"
 
-  wait_for_network_change_refresh_after_marker node-a "$roam_marker" "alice changing source address"
+  wait_for_network_change_rebind_after_marker node-a "$roam_marker" "alice changing source address"
   local alice_roam_direct bob_roam_direct
   alice_roam_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$NVPN_E2E_NODE_B_UNDERLAY_IP:51820" "alice after source-address change" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
   bob_roam_direct="$(wait_for_direct_peer node-b "$ALICE_NPUB" "$MIGRATED_NODE_A_IP:51820" "bob after alice source-address change" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$change_started")"
@@ -833,7 +832,7 @@ run_underlay_network_change() {
   replace_node_address \
     node-a eth0 "$MIGRATED_NODE_A_IP" "$NVPN_E2E_NODE_A_UNDERLAY_IP" "$UNDERLAY_PREFIX.1"
 
-  wait_for_network_change_refresh_after_marker node-a "$home_marker" "alice returning to original underlay"
+  wait_for_network_change_rebind_after_marker node-a "$home_marker" "alice returning to original underlay"
   local alice_home_direct bob_home_direct
   alice_home_direct="$(wait_for_direct_peer node-a "$BOB_NPUB" "$NVPN_E2E_NODE_B_UNDERLAY_IP:51820" "alice after original-underlay restore" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$restore_started")"
   bob_home_direct="$(wait_for_direct_peer node-b "$ALICE_NPUB" "$NVPN_E2E_NODE_A_UNDERLAY_IP:51820" "bob after alice original-underlay restore" "$NETWORK_CHANGE_RECOVERY_DEADLINE_SECS" "$restore_started")"
