@@ -136,8 +136,12 @@ impl SignedPaidRouteOffer {
     pub fn sign(offer: PaidRouteOffer, keys: &Keys, signed_at: u64) -> Result<Self> {
         validate_paid_route_offer(&offer)?;
         let content = serde_json::to_string(&offer).context("failed to encode paid route offer")?;
+        let mut tags = paid_route_offer_tags(&offer)?;
+        tags.push(Tag::expiration(Timestamp::from(
+            signed_at.saturating_add(PAID_ROUTE_OFFER_TTL_SECS),
+        )));
         let event = EventBuilder::new(Kind::Custom(PAID_ROUTE_OFFER_KIND), content)
-            .tags(paid_route_offer_tags(&offer)?)
+            .tags(tags)
             .custom_created_at(Timestamp::from(signed_at))
             .sign_with_keys(keys)
             .map_err(|error| anyhow!("failed to sign paid route offer: {error}"))?;

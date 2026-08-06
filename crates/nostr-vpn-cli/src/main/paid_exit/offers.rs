@@ -2,25 +2,15 @@
 async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
-    ensure_paid_exit_advertisable(&app)?;
-    let keys = app.nostr_keys()?;
     let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
-    let receiver_pubkey_hex = paid_exit_spilman_receiver_pubkey_hex(&config_path, &app.paid_exit)?;
-    let signed = signed_paid_exit_offer_from_config_with_receiver(
-        offer_id,
-        &keys,
-        &app.paid_exit,
-        receiver_pubkey_hex.as_deref(),
-        Some(local_paid_exit_quality_hint()),
-        unix_timestamp(),
-    )?;
-    let offer = signed.offer()?;
-    let store_path = paid_route_store_file_path(&config_path);
-    let stored =
-        persist_paid_exit_offer_snapshot(&store_path, &signed, &[], &offer, unix_timestamp())?;
+    let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
 
     let publish = if args.publish {
-        Some(publish_paid_exit_offer_pubsub(&app, &config_path, &signed)?)
+        Some(publish_paid_exit_offer_pubsub(
+            &app,
+            &config_path,
+            &local.signed,
+        )?)
     } else {
         None
     };
@@ -29,41 +19,45 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
-                "offer": offer,
-                "event": signed.event,
+                "offer": local.offer,
+                "event": local.signed.event,
                 "publish": publish,
-                "store_path": store_path,
-                "stored": stored,
+                "store_path": local.store_path,
+                "stored": local.stored,
             }))?
         );
     } else {
-        println!("paid_exit_offer: {}", offer.offer_id);
-        println!("seller: {}", offer.seller_npub);
+        println!("paid_exit_offer: {}", local.offer.offer_id);
+        println!("seller: {}", local.offer.seller_npub);
         println!(
             "price: {}",
             paid_exit_price_text(
-                offer.pricing.price_msat,
-                offer.pricing.per_units,
+                local.offer.pricing.price_msat,
+                local.offer.pricing.per_units,
             )
         );
         println!(
             "access: upstream={} private_vpn_access={}",
-            offer.access.upstream.as_str(),
-            offer.access.private_vpn_access.as_str()
+            local.offer.access.upstream.as_str(),
+            local.offer.access.private_vpn_access.as_str()
         );
         println!(
             "location: country={} region={} class={} asn={}",
-            display_or_none(&offer.location.country_code),
-            display_or_none(&offer.location.region),
-            offer.location.network_class.as_str(),
-            offer
+            display_or_none(&local.offer.location.country_code),
+            display_or_none(&local.offer.location.region),
+            local.offer.location.network_class.as_str(),
+            local.offer
                 .location
                 .asn
                 .map(|asn| asn.to_string())
                 .unwrap_or_else(|| "none".to_string())
         );
-        println!("event_id: {}", signed.event.id);
-        println!("store: {} changed={stored}", store_path.display());
+        println!("event_id: {}", local.signed.event.id);
+        println!(
+            "store: {} changed={}",
+            local.store_path.display(),
+            local.stored
+        );
         if let Some(publish) = publish {
             println!(
                 "published: nostr-pubsub queued={}",
@@ -75,6 +69,43 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+struct LocalPaidExitOffer {
+    signed: SignedPaidRouteOffer,
+    offer: PaidRouteOffer,
+    store_path: PathBuf,
+    stored: bool,
+}
+
+fn build_local_paid_exit_offer(
+    app: &AppConfig,
+    config_path: &Path,
+    offer_id: &str,
+    now_unix: u64,
+) -> Result<LocalPaidExitOffer> {
+    ensure_paid_exit_advertisable(app)?;
+    let receiver_pubkey_hex = paid_exit_spilman_receiver_pubkey_hex(config_path, &app.paid_exit)?;
+    let signed = signed_paid_exit_offer_from_config_with_receiver(
+        offer_id,
+        &app.nostr_keys()?,
+        &app.paid_exit,
+        receiver_pubkey_hex.as_deref(),
+        Some(PaidRouteQualityMetrics {
+            last_seen_unix: Some(now_unix),
+            ..PaidRouteQualityMetrics::default()
+        }),
+        now_unix,
+    )?;
+    let offer = signed.offer()?;
+    let store_path = paid_route_store_file_path(config_path);
+    let stored = persist_paid_exit_offer_snapshot(&store_path, &signed, &[], &offer, now_unix)?;
+    Ok(LocalPaidExitOffer {
+        signed,
+        offer,
+        store_path,
+        stored,
+    })
 }
 
 fn paid_exit_import_offer_command(args: PaidExitImportOfferArgs) -> Result<()> {
@@ -109,6 +140,52 @@ fn paid_exit_import_offer_command(args: PaidExitImportOfferArgs) -> Result<()> {
     Ok(())
 }
 
+fn paid_exit_offer_event_is_live(
+    event: &Event,
+    retention_policy: &nostr_pubsub::EventRetentionPolicy,
+    now_unix: u64,
+) -> bool {
+    event
+        .tags
+        .expiration()
+        .is_none_or(|expiration| expiration.as_secs() > now_unix)
+        && nostr_pubsub::VerifiedEvent::try_from(event.clone())
+            .is_ok_and(|verified| retention_policy.accepts(&verified))
+        && SignedPaidRouteOffer::from_event(event.clone()).is_ok()
+}
+
+async fn wait_for_paid_exit_control_events(
+    config_path: &Path,
+    retention_policy: &nostr_pubsub::EventRetentionPolicy,
+    duration_secs: u64,
+) -> Result<Vec<Event>> {
+    let deadline = Instant::now() + Duration::from_secs(duration_secs);
+    let mut events = crate::control_pubsub_runtime::load_control_pubsub_events(config_path)?;
+    if duration_secs == 0 {
+        return Ok(events);
+    }
+    let initial_offer_ids = events
+        .iter()
+        .filter(|event| paid_exit_offer_event_is_live(event, retention_policy, unix_timestamp()))
+        .map(|event| event.id)
+        .collect::<HashSet<_>>();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(events);
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
+        events = crate::control_pubsub_runtime::load_control_pubsub_events(config_path)?;
+        let now_unix = unix_timestamp();
+        if events.iter().any(|event| {
+            !initial_offer_ids.contains(&event.id)
+                && paid_exit_offer_event_is_live(event, retention_policy, now_unix)
+        }) {
+            return Ok(events);
+        }
+    }
+}
+
 async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let trusted_rating_authors =
@@ -123,8 +200,13 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
     } else {
         Some(unix_timestamp().saturating_sub(args.since_secs))
     };
-    let cached_control_events =
-        crate::control_pubsub_runtime::load_control_pubsub_events(&config_path)?;
+    let retention_policy = paid_exit_offer_retention_policy(args.limit, since_unix);
+    let cached_control_events = wait_for_paid_exit_control_events(
+        &config_path,
+        &retention_policy,
+        args.duration_secs,
+    )
+    .await?;
     let cached_rating_events = cached_control_events
         .iter()
         .filter(|event| event.kind == Kind::Custom(RATING_FACT_KIND as u16))
@@ -139,13 +221,11 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
         )?;
         merge_paid_exit_rating_scores(&mut rating_scores, cached_scores);
     }
-    let retention_policy = paid_exit_offer_retention_policy(args.limit, since_unix);
+    let now_unix = unix_timestamp();
     let cached_offers = cached_control_events
         .into_iter()
         .filter_map(|event| {
-            let verified = nostr_pubsub::VerifiedEvent::try_from(event.clone()).ok()?;
-            retention_policy
-                .accepts(&verified)
+            paid_exit_offer_event_is_live(&event, &retention_policy, now_unix)
                 .then(|| SignedPaidRouteOffer::from_event(event).ok())
                 .flatten()
         })

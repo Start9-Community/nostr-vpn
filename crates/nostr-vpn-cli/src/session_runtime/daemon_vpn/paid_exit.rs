@@ -11,6 +11,25 @@ pub(in crate::session_runtime) use refunds::PaidExitBuyerRefundRuntime;
 pub(super) const PAID_EXIT_DAEMON_STREAM_PAYMENT_MIN_INCREMENT_MSAT: u64 = 1;
 pub(super) const PAID_EXIT_DAEMON_STREAM_PAYMENT_LIMIT: usize = 4;
 pub(super) const PAID_EXIT_SESSION_OPEN_RETRY_SECS: u64 = 5;
+pub(super) const PAID_EXIT_OFFER_REFRESH_SECS: u64 =
+    nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS / 4;
+
+pub(crate) fn refresh_paid_exit_offer_for_daemon(
+    app: &AppConfig,
+    config_path: &Path,
+    now_unix: u64,
+) -> Result<bool> {
+    if !app.paid_exit.enabled {
+        return Ok(false);
+    }
+    let local =
+        build_local_paid_exit_offer(app, config_path, &default_paid_exit_offer_id(), now_unix)?;
+    Ok(
+        publish_paid_exit_offer_pubsub(app, config_path, &local.signed)?["nostr_pubsub_queued"]
+            .as_bool()
+            .unwrap_or_default(),
+    )
+}
 
 #[derive(Debug, Default)]
 pub(super) struct PaidExitApplySessionOpensResult {

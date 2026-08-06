@@ -52,6 +52,16 @@ loop {
                 }
             }
         }
+        _ = paid_exit_offer_refresh_interval.tick(), if background_ready => {
+            #[cfg(feature = "paid-exit")]
+            if app.paid_exit.enabled {
+                match refresh_paid_exit_offer_for_daemon(&app, &config_path, unix_timestamp()) {
+                    Ok(true) => eprintln!("paid-exit: refreshed public offer"),
+                    Ok(false) => {}
+                    Err(error) => eprintln!("paid-exit: offer refresh failed: {error}"),
+                }
+            }
+        }
         _ = recent_peer_refresh_interval.tick(), if background_ready => {
             if let Some(runtime) = fips_tunnel_runtime.as_ref() {
                 update_recent_peers_from_runtime(
@@ -755,6 +765,7 @@ loop {
                                         app = reload.app;
                                         #[cfg(feature = "paid-exit")]
                                         {
+                                            paid_exit_offer_refresh_interval.reset_immediately();
                                             (
                                                 paid_exit_spilman_receiver,
                                                 paid_exit_spilman_receiver_error,

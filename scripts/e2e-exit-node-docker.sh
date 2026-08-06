@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
+PRIMARY_CHECKOUT_DIR="$(dirname "$GIT_COMMON_DIR")"
+PRIMARY_CHECKOUT_PARENT="$(dirname "$PRIMARY_CHECKOUT_DIR")"
 PROJECT_NAME="${NVPN_EXIT_NODE_E2E_PROJECT_NAME:-nostr-vpn-e2e-exit-node}"
 COMPOSE=(docker compose -p "$PROJECT_NAME" -f "$ROOT_DIR/docker-compose.exit-node-e2e.yml")
 
@@ -399,8 +402,8 @@ cleanup
 if truthy "$PAID_EXIT_MODE"; then
   export NVPN_EXIT_NODE_E2E_DOCKERFILE="${NVPN_EXIT_NODE_E2E_DOCKERFILE:-Dockerfile.paid-exit-e2e}"
   export NVPN_EXIT_NODE_E2E_IMAGE="${NVPN_EXIT_NODE_E2E_IMAGE:-nostr-vpn-paid-exit-e2e-node}"
-  export NVPN_CASHU_SERVICE_REPO_PATH="${NVPN_CASHU_SERVICE_REPO_PATH:-../cashu-service}"
-  export NVPN_CASHU_SPILMAN_CHANNELS_REPO_PATH="${NVPN_CASHU_SPILMAN_CHANNELS_REPO_PATH:-../cashu_spilman_channels}"
+  export NVPN_CASHU_SERVICE_REPO_PATH="${NVPN_CASHU_SERVICE_REPO_PATH:-$PRIMARY_CHECKOUT_PARENT/cashu-service}"
+  export NVPN_CASHU_SPILMAN_CHANNELS_REPO_PATH="${NVPN_CASHU_SPILMAN_CHANNELS_REPO_PATH:-$PRIMARY_CHECKOUT_PARENT/cashu_spilman_channels}"
 fi
 if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
   export COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}paid-exit"
@@ -498,6 +501,11 @@ else
     --exit-node "$ALICE_NPUB" >/dev/null
 fi
 
+for node in node-a node-b; do
+  "${COMPOSE[@]}" exec -T "$node" sh -lc \
+    "sed -i 's|^discovery_timeout_secs = .*|discovery_timeout_secs = 2|' '$CONFIG_PATH'; sed -i '/^lan_discovery_enabled = /d' '$CONFIG_PATH'; sed -i '1ilan_discovery_enabled = false' '$CONFIG_PATH'"
+done
+
 if truthy "$PAID_EXIT_MODE"; then
   PAID_MAX_CHANNEL_CAPACITY_SAT="$PAID_EXIT_TOKEN_AMOUNT_SAT"
   PAID_FREE_PROBE_UNITS="$PAID_EXIT_TOKEN_FREE_PROBE_UNITS"
@@ -538,25 +546,24 @@ if truthy "$PAID_EXIT_MODE"; then
     wait_for_paid_exit_wallet_balance node-b "$PAID_EXIT_MINT" "$PAID_EXIT_SPILMAN_WALLET_TOPUP_SAT" >/dev/null
   fi
 
-  OFFER_JSON="$("${COMPOSE[@]}" exec -T node-a env RUST_LOG=warn nvpn paid-exit offer \
+  # Exercise the production seller lifecycle and buyer cache. No direct event
+  # import is allowed here: the running seller must publish through the control
+  # pubsub outbox and the independent buyer must discover that signed offer.
+  "${COMPOSE[@]}" exec -T node-a nvpn start --daemon --connect \
+    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  "${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect \
+    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
     --config "$CONFIG_PATH" \
-    --offer-id internet-exit \
+    --duration-secs 20 \
     --json | tr -d '\r')"
-  if ! OFFER_EVENT="$(jq -c '.event' <<<"$OFFER_JSON" 2>/dev/null)"; then
-    echo "exit-node docker e2e failed: seller offer output was not valid JSON" >&2
-    printf '%s\n' "$OFFER_JSON" >&2
+  if ! jq -e --arg seller "$ALICE_NPUB" \
+    'any(.offers[]?; .offer.offer_id == "internet-exit" and .offer.seller_npub == $seller)' \
+    <<<"$DISCOVER_JSON" >/dev/null; then
+    echo "exit-node docker e2e failed: buyer did not discover the seller's published offer" >&2
+    printf '%s\n' "$DISCOVER_JSON" >&2
     exit 1
   fi
-  if [[ -z "$OFFER_EVENT" || "$OFFER_EVENT" == "null" ]]; then
-    echo "exit-node docker e2e failed: seller offer did not include a signed event" >&2
-    printf '%s\n' "$OFFER_JSON" >&2
-    exit 1
-  fi
-  printf '%s' "$OFFER_EVENT" | "${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit import-offer \
-    --config "$CONFIG_PATH" \
-    --event-stdin \
-    --json >/dev/null
-
   PAID_BUY_CAPACITY_SAT="$PAID_EXIT_TOKEN_AMOUNT_SAT"
   if [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
     PAID_BUY_CAPACITY_SAT="$PAID_EXIT_SPILMAN_CHANNEL_CAPACITY_SAT"
@@ -566,9 +573,8 @@ if truthy "$PAID_EXIT_MODE"; then
     --mint "$PAID_EXIT_MINT" \
     --channel-capacity-sat "$PAID_BUY_CAPACITY_SAT" \
     --initial-paid-msat "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT" \
-    --no-reload-daemon \
     --json \
-    internet-exit | tr -d '\r')"
+    "$ALICE_NPUB:internet-exit" | tr -d '\r')"
   if ! PAID_EXIT_SESSION_ID="$(jq -r '.session.session_id // empty' <<<"$BUY_JSON" 2>/dev/null)"; then
     echo "exit-node docker e2e failed: buyer session output was not valid JSON" >&2
     printf '%s\n' "$BUY_JSON" >&2
@@ -593,7 +599,6 @@ EOF
     printf '%s' "$PAID_ENVELOPE" | "${COMPOSE[@]}" exec -T node-a nvpn paid-exit apply-payment \
       --config "$CONFIG_PATH" \
       --json \
-      --no-reload-daemon \
       --envelope-stdin >/dev/null
     PAID_STATUS="$("${COMPOSE[@]}" exec -T node-a nvpn paid-exit status --json | tr -d '\r')"
     PAID_COMPACT="$(printf '%s' "$PAID_STATUS" | compact_json)"
@@ -621,7 +626,6 @@ EOF
     printf '%s' "$OPEN_ENVELOPE" | "${COMPOSE[@]}" exec -T node-a nvpn paid-exit apply-payment \
       --config "$CONFIG_PATH" \
       --json \
-      --no-reload-daemon \
       --envelope-stdin >/dev/null
 
     PAID_STATUS="$("${COMPOSE[@]}" exec -T node-a nvpn paid-exit status --json | tr -d '\r')"
@@ -633,15 +637,10 @@ EOF
     printf '%s\n' "$PAID_STATUS" >&2
     exit 1
   fi
+else
+  "${COMPOSE[@]}" exec -T node-a nvpn start --daemon --connect --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  "${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
 fi
-
-for node in node-a node-b; do
-  "${COMPOSE[@]}" exec -T "$node" sh -lc \
-    "sed -i 's|^discovery_timeout_secs = .*|discovery_timeout_secs = 2|' '$CONFIG_PATH'; sed -i '/^lan_discovery_enabled = /d' '$CONFIG_PATH'; sed -i '1ilan_discovery_enabled = false' '$CONFIG_PATH'"
-done
-
-"${COMPOSE[@]}" exec -T node-a nvpn start --daemon --connect --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
-"${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
 
 if truthy "$PAID_EXIT_MODE"; then
   PAID_STATUS=""

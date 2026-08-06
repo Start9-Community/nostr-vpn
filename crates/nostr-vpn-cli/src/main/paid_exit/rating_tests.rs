@@ -518,6 +518,63 @@ mod paid_exit_rating_tests {
     }
 
     #[test]
+    fn offer_discovery_rejects_expired_nip40_events() {
+        let signed = sample_signed_offer("expiring", 100);
+        let policy = paid_exit_offer_retention_policy(25, None);
+
+        assert!(paid_exit_offer_event_is_live(
+            &signed.event,
+            &policy,
+            100 + nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS - 1,
+        ));
+        assert!(!paid_exit_offer_event_is_live(
+            &signed.event,
+            &policy,
+            100 + nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS,
+        ));
+    }
+
+    #[tokio::test]
+    async fn offer_discovery_waits_for_the_daemon_cache() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("nvpn-paid-discover-{nonce}"));
+        let config_path = directory.join("config.toml");
+        let store_path =
+            crate::control_pubsub_runtime::control_pubsub_store_file_path(&config_path);
+        let signed = sample_signed_offer("delayed", unix_timestamp());
+        let event_id = signed.event.id;
+        let event = signed.event;
+        let write_store = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            std::fs::create_dir_all(store_path.parent().expect("store parent"))
+                .expect("create store parent");
+            let temporary = store_path.with_extension("tmp");
+            std::fs::write(
+                &temporary,
+                serde_json::to_vec(&json!({ "version": 1, "events": [event] }))
+                    .expect("encode cache"),
+            )
+            .expect("write cache");
+            std::fs::rename(temporary, store_path).expect("publish cache");
+        });
+
+        let events = wait_for_paid_exit_control_events(
+            &config_path,
+            &paid_exit_offer_retention_policy(25, None),
+            1,
+        )
+        .await
+        .expect("wait for cached offer");
+        write_store.await.expect("cache writer");
+
+        assert!(events.iter().any(|event| event.id == event_id));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn unbounded_offer_requests_still_get_bounded_pubsub_retention() {
         let policy = paid_exit_offer_retention_policy(0, None);
 

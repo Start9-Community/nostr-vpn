@@ -1,3 +1,14 @@
+fn paid_exit_offer_refresh_secs() -> u64 {
+    #[cfg(feature = "paid-exit")]
+    {
+        PAID_EXIT_OFFER_REFRESH_SECS
+    }
+    #[cfg(not(feature = "paid-exit"))]
+    {
+        86_400
+    }
+}
+
 pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     let startup = initialize_daemon_vpn(&args).await?;
     let mut magic_dns_runtime = start_split_magic_dns(&startup.app);
@@ -5,6 +16,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     let mut intervals = daemon_vpn_intervals();
     #[cfg(feature = "paid-exit")]
     let mut last_paid_exit_usage_flush_at = Instant::now();
+    let mut paid_exit_offer_refresh_interval =
+        tokio::time::interval(Duration::from_secs(paid_exit_offer_refresh_secs()));
+    paid_exit_offer_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_runtime_heartbeat_at = WallTimeJumpObserver::new(unix_timestamp());
     let mut platform_network_change_rx = spawn_platform_network_change_monitor();
     let mut terminate_wait = daemon_termination_wait()?;

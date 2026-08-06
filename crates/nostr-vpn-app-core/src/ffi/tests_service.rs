@@ -763,7 +763,7 @@ exit 0
         let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
         assert!(calls.contains("paid-exit discover --config"));
         assert!(calls.contains("--json"));
-        assert!(!calls.contains("--duration-secs"));
+        assert!(calls.contains("--duration-secs 5"));
         assert!(calls.contains("--fips-peer-ratings"));
         assert!(calls.contains(rating_path.to_string_lossy().as_ref()));
         assert!(!calls.contains("--fips-peer-ratings-relay"));

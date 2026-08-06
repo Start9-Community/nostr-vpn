@@ -160,6 +160,9 @@ struct PaidExitImportOfferArgs {
 struct PaidExitDiscoverArgs {
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Wait up to this many seconds for the daemon's live discovery cache.
+    #[arg(long, default_value_t = 0)]
+    duration_secs: u64,
     #[arg(long, default_value_t = 50)]
     limit: usize,
     /// Ignore offer events older than this many seconds.

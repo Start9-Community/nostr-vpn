@@ -896,7 +896,7 @@ impl NativeAppRuntime {
         ensure_success("nvpn paid-exit offer --publish", &output)
     }
 
-    pub(super) fn discover_paid_route_offers(&mut self, _duration_secs: u64) -> Result<()> {
+    pub(super) fn discover_paid_route_offers(&mut self, duration_secs: u64) -> Result<()> {
         let rating_discovery = &self.config.paid_exit.rating_discovery;
         let mut args = vec![
             "paid-exit".to_string(),
@@ -904,6 +904,8 @@ impl NativeAppRuntime {
             "--config".to_string(),
             self.config_path_str()?.to_string(),
             "--json".to_string(),
+            "--duration-secs".to_string(),
+            duration_secs.clamp(1, 30).to_string(),
         ];
         if !rating_discovery.file.trim().is_empty() {
             args.push("--fips-peer-ratings".to_string());

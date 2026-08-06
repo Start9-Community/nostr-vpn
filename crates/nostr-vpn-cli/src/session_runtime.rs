@@ -240,7 +240,7 @@ mod daemon_vpn_intervals;
 mod daemon_vpn_join_approval;
 #[cfg(feature = "paid-exit")]
 #[path = "session_runtime/daemon_vpn/paid_exit.rs"]
-mod daemon_vpn_paid_exit;
+pub(crate) mod daemon_vpn_paid_exit;
 #[path = "session_runtime/daemon_vpn/persistence.rs"]
 mod daemon_vpn_persistence;
 #[path = "session_runtime/daemon_vpn/shutdown.rs"]

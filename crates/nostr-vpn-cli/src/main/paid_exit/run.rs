@@ -35,21 +35,8 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
     ensure_paid_exit_advertisable(&app)?;
     app.save(&config_path)?;
 
-    let keys = app.nostr_keys()?;
     let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
-    let receiver_pubkey_hex = paid_exit_spilman_receiver_pubkey_hex(&config_path, &app.paid_exit)?;
-    let signed = signed_paid_exit_offer_from_config_with_receiver(
-        offer_id,
-        &keys,
-        &app.paid_exit,
-        receiver_pubkey_hex.as_deref(),
-        Some(local_paid_exit_quality_hint()),
-        unix_timestamp(),
-    )?;
-    let offer = signed.offer()?;
-    let store_path = paid_route_store_file_path(&config_path);
-    let stored =
-        persist_paid_exit_offer_snapshot(&store_path, &signed, &[], &offer, unix_timestamp())?;
+    let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
 
     let daemon_reload_attempted = !args.no_reload_daemon;
     if daemon_reload_attempted {
@@ -57,19 +44,23 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
     }
 
     let publish = if args.publish {
-        Some(publish_paid_exit_offer_pubsub(&app, &config_path, &signed)?)
+        Some(publish_paid_exit_offer_pubsub(
+            &app,
+            &config_path,
+            &local.signed,
+        )?)
     } else {
         None
     };
-    let store = load_paid_route_store(&store_path)?;
-    let status = paid_exit_status_snapshot_json(&app, &store_path, &store);
+    let store = load_paid_route_store(&local.store_path)?;
+    let status = paid_exit_status_snapshot_json(&app, &local.store_path, &store);
 
     Ok(PaidExitRunResult {
         config_path,
-        store_path,
-        offer,
-        event_id: signed.event.id.to_string(),
-        stored,
+        store_path: local.store_path,
+        offer: local.offer,
+        event_id: local.signed.event.id.to_string(),
+        stored: local.stored,
         publish,
         daemon_reload_attempted,
         status,
