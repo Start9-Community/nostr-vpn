@@ -151,17 +151,44 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
         replaceText(element("manual-join-admin-id"), with: admin)
         replaceText(element("manual-join-network-id"), with: network)
+
+        // Recreate both shipped text fields before trusting their values. This
+        // commits SwiftUI's focused edit state and catches physical-keyboard
+        // entry that looked correct to XCTest but failed production validation.
+        scrollTo("manual-join-expand").tap()
+        XCTAssertTrue(
+            waitUntil(timeout: 3) {
+                !self.element("manual-join-admin-id").exists
+                    && !self.element("manual-join-network-id").exists
+            },
+            "Manual join fields did not resign focus and collapse"
+        )
+        expandManualJoinIfNeeded()
+        assertText(element("manual-join-admin-id"), equals: admin)
+        assertText(element("manual-join-network-id"), equals: network)
+
+        let invalidAdmin = app.staticTexts["Not a valid device ID"]
         let submit = scrollTo("manual-join-submit")
+        XCTAssertTrue(
+            waitUntil(timeout: 5) {
+                !invalidAdmin.exists && submit.isEnabled && submit.isHittable
+            },
+            "Exact manual join values did not enable the shipped Add manually control"
+        )
         submit.tap()
         try dismissSystemPromptsIfPresent()
+
+        let pendingAdmin = element("roster-participant-pending-\(admin)")
+        guard waitUntil(timeout: setupTimeout, predicate: {
+            !submit.exists
+                && self.element("network-switcher-open").exists
+                && pendingAdmin.exists
+        }) else {
+            XCTFail("Manual join did not dismiss Add Network with the expected pending admin")
+            return
+        }
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
 
-        XCTAssertTrue(
-            waitUntil(timeout: setupTimeout) {
-                self.app.tabBars.buttons["Devices"].exists
-            },
-            "Manual join did not leave the first-run join screen"
-        )
         openDevicesTab()
         try requireAcceptedRoster(
             admin,
@@ -355,6 +382,16 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         if retained {
             field.typeKey(.return, modifierFlags: [])
         }
+    }
+
+    private func assertText(_ field: XCUIElement, equals expected: String) {
+        XCTAssertTrue(
+            waitUntil(timeout: 3) {
+                let actual = field.value as? String ?? ""
+                return actual != field.placeholderValue && actual == expected
+            },
+            "Shipped text control did not retain the exact supplied value after focus resignation"
+        )
     }
 
     private func publicValue(
