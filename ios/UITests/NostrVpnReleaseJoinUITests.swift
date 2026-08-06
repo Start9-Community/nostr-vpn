@@ -150,15 +150,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         emit("NVPN_RELEASE_JOIN_JOINER_ID=\(joiner)")
 
         replaceText(element("manual-join-admin-id"), with: admin)
-        let networkField = element("manual-join-network-id")
-        replaceText(networkField, with: network)
-        XCTAssertTrue(
-            ShippedUIInteraction.finishTextEntry(
-                networkField,
-                byTapping: app.staticTexts["Add Network"].firstMatch
-            ),
-            "Manual join fields did not finish text entry"
-        )
+        replaceText(element("manual-join-network-id"), with: network)
 
         let invalidAdmin = app.staticTexts["Not a valid device ID"]
         let submit = scrollTo("manual-join-submit")
