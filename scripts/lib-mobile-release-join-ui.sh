@@ -681,8 +681,8 @@ release_join_android_manual_submit() {
   release_join_android_enter resource manual-join-admin-id "$admin"
   release_join_android_enter \
     resource manual-join-network-id "$network" visible-center
-  release_join_android_scroll_to resource manual-join-submit
-  release_join_android_tap resource manual-join-submit
+  release_join_android_wait_query resource manual-join-submit
+  release_join_android_tap_center resource manual-join-submit
   local deadline=$((SECONDS + 3))
   while ((SECONDS < deadline)); do
     if ! release_join_android_query resource manual-join-submit center >/dev/null 2>&1; then
