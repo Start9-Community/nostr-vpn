@@ -110,12 +110,6 @@ pub(crate) fn retain_linux_wireguard_apply_cleanup(
 impl FipsPrivateTunnelRuntime {
     #[cfg(target_os = "linux")]
     async fn apply_linux_network_state(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
-        // WireGuard cleanup restores the physical default saved by that
-        // runtime. Do it before a replacement private-FIPS default is applied
-        // so the stale restore cannot overwrite the newly selected route.
-        if !config.wireguard_exit.enabled {
-            self.cleanup_linux_wireguard_exit_upstream()?;
-        }
         let requested_ipv4_exit =
             linux_ipv4_underlay_capture_requested(&config.route_targets, config.wireguard_exit.enabled);
         let requested_ipv6_exit = config.route_targets.iter().any(|route| route == "::/0")
@@ -213,6 +207,32 @@ impl FipsPrivateTunnelRuntime {
             );
         if unchanged_control_only_state {
             return Ok(());
+        }
+        // WireGuard cleanup restores its saved physical default. Delay it
+        // until all awaited/fallible preparation is complete, then block that
+        // default synchronously in strict mode before applying replacement
+        // private-FIPS routes. No fallible preparation may be inserted here.
+        if !config.wireguard_exit.enabled {
+            let mut failures = Vec::new();
+            if let Err(error) = self.cleanup_linux_wireguard_exit_upstream() {
+                failures.push(format!("WireGuard cleanup: {error:#}"));
+            }
+            if strict_exit && requested_ipv4_exit
+                && let Err(error) = self.block_linux_original_default_route_checked()
+            {
+                failures.push(format!("IPv4 default block: {error:#}"));
+            }
+            if strict_exit && requested_ipv6_exit
+                && let Err(error) = self.block_linux_original_default_ipv6_route_checked()
+            {
+                failures.push(format!("IPv6 default block: {error:#}"));
+            }
+            if !failures.is_empty() {
+                return Err(anyhow!(
+                    "Linux WireGuard exit handoff incomplete: {}",
+                    failures.join("; ")
+                ));
+            }
         }
         crate::apply_local_interface_network_with_mtu_and_addresses(
             &self.iface,
@@ -343,30 +363,39 @@ impl FipsPrivateTunnelRuntime {
 
     #[cfg(target_os = "linux")]
     fn block_linux_original_default_route(&mut self) {
-        match crate::linux_default_route() {
-            Ok(route) if Some(route.line.as_str()) == self.original_default_route.as_deref() => {
-                if let Err(error) = crate::delete_linux_default_route() {
-                    eprintln!("fips: failed to block IPv4 default route: {error}");
-                }
-            }
-            Ok(_) => {}
-            Err(_) => {}
+        if let Err(error) = self.block_linux_original_default_route_checked() {
+            eprintln!("fips: failed to block IPv4 default route: {error:#}");
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn block_linux_original_default_ipv6_route(&mut self) {
-        match crate::linux_default_ipv6_route() {
-            Ok(route)
-                if Some(route.line.as_str()) == self.original_default_ipv6_route.as_deref() =>
-            {
-                if let Err(error) = crate::delete_linux_default_ipv6_route() {
-                    eprintln!("fips: failed to block IPv6 default route: {error}");
-                }
-            }
-            Ok(_) => {}
-            Err(_) => {}
+    fn block_linux_original_default_route_checked(&mut self) -> Result<()> {
+        let current = crate::linux_current_default_route()
+            .context("failed to inspect IPv4 default route before blocking it")?;
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        if current.is_some_and(|route| !owned.contains(&route.dev)) {
+            crate::delete_linux_default_route().context("failed to delete IPv4 default route")?;
         }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn block_linux_original_default_ipv6_route(&mut self) {
+        if let Err(error) = self.block_linux_original_default_ipv6_route_checked() {
+            eprintln!("fips: failed to block IPv6 default route: {error:#}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn block_linux_original_default_ipv6_route_checked(&mut self) -> Result<()> {
+        let current = crate::linux_current_default_ipv6_route()
+            .context("failed to inspect IPv6 default route before blocking it")?;
+        let owned = linux_owned_default_interfaces(&self.iface, &self.exit_node_runtime);
+        if current.is_some_and(|route| !owned.contains(&route.dev)) {
+            crate::delete_linux_default_ipv6_route()
+                .context("failed to delete IPv6 default route")?;
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

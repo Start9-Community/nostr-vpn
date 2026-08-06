@@ -376,8 +376,16 @@ run_spilman_resale_matrix() {
     "sed -i 's|^discovery_timeout_secs = .*|discovery_timeout_secs = 2|' '$CONFIG_PATH'; sed -i '/^lan_discovery_enabled = /d' '$CONFIG_PATH'; sed -i '1ilan_discovery_enabled = false' '$CONFIG_PATH'"
   "${COMPOSE[@]}" exec -T wireguard-upstream nvpn start --daemon --connect \
     --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+
+  local transition_capture=/tmp/nvpn-paid-exit-wireguard-private-handoff.log
+  "${COMPOSE[@]}" exec -T internet-target sh -lc \
+    "rm -f '$transition_capture'; timeout 90 tcpdump -lni any -c 1 'icmp and src host $NODE_A_PUBLIC_IP and dst host $PAID_EXIT_RESALE_TARGET' >'$transition_capture' 2>&1 & echo \$! >/tmp/nvpn-handoff-tcpdump.pid"
+  "${COMPOSE[@]}" exec -d node-b sh -lc \
+    "touch /tmp/nvpn-handoff-probe; while test -e /tmp/nvpn-handoff-probe; do ping -f -w 1 '$PAID_EXIT_RESALE_TARGET' >/dev/null 2>&1 || true; done"
+  sleep 1
   "${COMPOSE[@]}" exec -T node-a nvpn set \
     --exit-node "$upstream_npub" \
+    --exit-node-leak-protection true \
     --paid-exit-upstream host-default >/dev/null
 
   local seller_route private_ready=0
@@ -394,6 +402,16 @@ run_spilman_resale_matrix() {
     printf '%s\n' "$seller_route" >&2
     exit 1
   fi
+  "${COMPOSE[@]}" exec -T node-b rm -f /tmp/nvpn-handoff-probe
+  "${COMPOSE[@]}" exec -T internet-target sh -lc \
+    "kill \$(cat /tmp/nvpn-handoff-tcpdump.pid) 2>/dev/null || true"
+  if "${COMPOSE[@]}" exec -T internet-target grep -Fq \
+    "$NODE_A_PUBLIC_IP > $PAID_EXIT_RESALE_TARGET" "$transition_capture"; then
+    echo "exit-node docker e2e failed: WireGuard-to-private handoff leaked through Direct" >&2
+    "${COMPOSE[@]}" exec -T internet-target cat "$transition_capture" >&2
+    exit 1
+  fi
+  echo "WireGuard-to-private strict handoff emitted no Direct packets under flood probe"
   assert_buyer_egress_source "$WG_UPSTREAM_IP" private-fips
 
   "${COMPOSE[@]}" exec -T wireguard-upstream nvpn stop --force >/dev/null
@@ -401,6 +419,7 @@ run_spilman_resale_matrix() {
 
   "${COMPOSE[@]}" exec -T node-a nvpn set \
     --exit-node none \
+    --exit-node-leak-protection false \
     --paid-exit-upstream host-default >/dev/null
   "${COMPOSE[@]}" exec -T node-a ip route replace "$PAID_EXIT_RESALE_TARGET/32" \
     via "$PUBLIC_INTERNET_TARGET"
