@@ -371,7 +371,12 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     private func replaceText(_ field: XCUIElement, with value: String) {
-        let retained = ShippedUIInteraction.replaceText(field, with: value, in: app)
+        let retained = ShippedUIInteraction.replaceText(
+            field,
+            with: value,
+            in: app,
+            incrementally: value.hasPrefix("npub1")
+        )
         XCTAssertTrue(
             retained,
             "Shipped text control did not retain the exact supplied value"

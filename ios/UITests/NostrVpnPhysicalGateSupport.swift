@@ -116,7 +116,8 @@ enum ShippedUIInteraction {
     static func replaceText(
         _ field: XCUIElement,
         with value: String,
-        in app: XCUIApplication
+        in app: XCUIApplication,
+        incrementally: Bool = false
     ) -> Bool {
         let readyDeadline = Date().addingTimeInterval(5)
         while Date() < readyDeadline, !(field.exists && field.isHittable) {
@@ -137,7 +138,13 @@ enum ShippedUIInteraction {
             }
             field.typeKey("a", modifierFlags: .command)
             field.typeKey(.delete, modifierFlags: [])
-            field.typeText(value)
+            if incrementally {
+                for character in value {
+                    field.typeText(String(character))
+                }
+            } else {
+                field.typeText(value)
+            }
             if waitForValue(value, in: field) {
                 return true
             }
