@@ -54,6 +54,7 @@ use nostr_vpn_core::signed_rosters::{signed_rosters_file_path, upsert_signed_ros
 use nostr_vpn_core::wg_upstream::{DAEMON_WG_UPSTREAM_HANDSHAKE_TIMEOUT, WgUpstreamRuntime};
 use serde::{Deserialize, Serialize};
 
+use crate::platform::{RuntimePlatform, current_runtime_platform};
 use crate::state::{DaemonPeerState, DaemonRuntimeState};
 use crate::wg_upstream_nat::{rewrite_ipv4_destination, rewrite_ipv4_source};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};

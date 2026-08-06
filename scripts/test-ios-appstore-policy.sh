@@ -235,6 +235,17 @@ for plist in "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"; do
   [[ "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$plist")" == "false" ]] \
     || fail "the no-France build must declare export-exempt encryption"
 done
+if rg -q 'NSBonjourServices|NSLocalNetworkUsageDescription|_fips\._udp' \
+  "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"
+then
+  fail "the iOS build declares LAN discovery that its profiles do not authorize"
+fi
+if rg -q 'com\.apple\.developer\.networking\.multicast' \
+  "$ROOT/ios/NostrVpnIos.entitlements" \
+  "$ROOT/ios/PacketTunnel/PacketTunnel.entitlements"
+then
+  fail "the iOS build requests an unprovisioned multicast entitlement"
+fi
 rg -q '"unrestrictedWebAccess": False' "$ROOT/scripts/appstore-draft" \
   || fail "App Store metadata incorrectly declares an in-app unrestricted browser"
 rg -Fq ': "${NVPN_IOS_TEAM_ID:?NVPN_IOS_TEAM_ID is required in the private release environment}"' \

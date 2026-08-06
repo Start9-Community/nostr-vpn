@@ -182,6 +182,14 @@ fn non_empty_path(value: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> FipsConfig {
+    fips_endpoint_config_for_platform(scope, mobile, current_runtime_platform())
+}
+
+fn fips_endpoint_config_for_platform(
+    scope: &str,
+    mobile: &MobileTunnelConfig,
+    platform: RuntimePlatform,
+) -> FipsConfig {
     let mut config = FipsConfig::new();
     // A first-adjacency seed may authenticate before its tree/bloom adverts
     // have converged. Reply-learned discovery can ask that live adjacency for
@@ -239,7 +247,13 @@ pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> 
     config.node.discovery.nostr.failure_streak_threshold = MOBILE_NOSTR_FAILURE_STREAK_THRESHOLD;
     config.node.discovery.nostr.startup_sweep_max_age_secs = FIPS_NOSTR_STARTUP_SWEEP_MAX_AGE_SECS;
     config.node.discovery.nostr.share_local_candidates = mobile.share_local_candidates;
-    config.node.discovery.lan.enabled = mobile.share_local_candidates && nostr_enabled;
+    // iOS requires Apple's managed multicast entitlement for raw mDNS. Our
+    // packet-tunnel profiles do not carry it, so keep LAN candidates available
+    // to encrypted Nostr traversal while leaving the multicast daemon closed.
+    // Packet-tunnel extensions may still use ordinary local unicast traffic.
+    config.node.discovery.lan.enabled = mobile.share_local_candidates
+        && nostr_enabled
+        && platform != RuntimePlatform::Ios;
     // Leave the relay-side `app` at fips-core's default ("fips-overlay-v1");
     // see fips_private_mesh::fips_endpoint_config for the rationale (the relay
     // `protocol` tag is publicly visible, so per-network apps would let any
@@ -267,6 +281,7 @@ pub(crate) fn fips_endpoint_config(scope: &str, mobile: &MobileTunnelConfig) -> 
             &mut config,
             nostr_enabled,
             &mobile.stun_servers,
+            platform != RuntimePlatform::Ios,
         );
     }
     if !mobile.websocket_seed_urls.is_empty() {
@@ -549,6 +564,7 @@ fn configure_mobile_webrtc_transport(
     config: &mut FipsConfig,
     nostr_enabled: bool,
     stun_servers: &[String],
+    resolve_mdns_candidates: bool,
 ) {
     if !nostr_enabled {
         return;
@@ -564,6 +580,7 @@ fn configure_mobile_webrtc_transport(
     webrtc.advertise_on_nostr = Some(true);
     webrtc.auto_connect = Some(true);
     webrtc.accept_connections = Some(true);
+    webrtc.resolve_mdns_candidates = Some(resolve_mdns_candidates);
     if !stun_servers.is_empty() {
         webrtc.stun_servers = Some(stun_servers.to_vec());
     }
@@ -616,6 +633,7 @@ mod endpoint_config_tests {
         assert_eq!(webrtc.advertise_on_nostr, Some(true));
         assert_eq!(webrtc.auto_connect, Some(true));
         assert_eq!(webrtc.accept_connections, Some(true));
+        assert_eq!(webrtc.resolve_mdns_candidates, Some(true));
         assert_eq!(
             webrtc.stun_servers.as_ref().expect("stun servers"),
             &mobile.stun_servers
@@ -624,6 +642,55 @@ mod endpoint_config_tests {
             panic!("expected one WebSocket transport");
         };
         assert_eq!(websocket.seed_urls, mobile.websocket_seed_urls);
+    }
+
+    #[test]
+    fn ios_keeps_routable_discovery_without_opening_multicast() {
+        let peer = test_peer();
+        let peer_npub = peer.endpoint_npub.clone();
+        let peer_pubkey = peer.participant_pubkey.clone();
+        let mobile = MobileTunnelConfig {
+            peers: vec![peer],
+            peer_hints: HashMap::from([(
+                peer_pubkey,
+                vec![FipsPeerAddressHint {
+                    addr: "192.168.50.24:51820".to_string(),
+                    seen_at_ms: None,
+                    priority: FIPS_STATIC_PEER_ENDPOINT_PRIORITY,
+                }],
+            )]),
+            nostr_relays: vec!["wss://relay.example.org".to_string()],
+            websocket_seed_urls: vec!["wss://seed.example.org/fips".to_string()],
+            stun_servers: vec!["stun:stun.example.org:3478".to_string()],
+            share_local_candidates: true,
+            nostr_discovery_enabled: true,
+            webrtc_enabled: true,
+            ..empty_config()
+        };
+
+        let config =
+            fips_endpoint_config_for_platform("nostr-vpn:test", &mobile, RuntimePlatform::Ios);
+
+        assert!(config.node.discovery.nostr.enabled);
+        assert!(
+            config.node.discovery.nostr.share_local_candidates,
+            "encrypted traversal signaling should retain direct LAN candidates"
+        );
+        assert!(!config.node.discovery.lan.enabled);
+        let TransportInstances::Single(webrtc) = &config.transports.webrtc else {
+            panic!("expected one WebRTC transport");
+        };
+        assert_eq!(webrtc.resolve_mdns_candidates, Some(false));
+        assert!(!config.transports.websocket.is_empty());
+        assert!(!config.transports.udp.is_empty());
+        let configured_peer = config
+            .peers
+            .iter()
+            .find(|candidate| candidate.npub == peer_npub)
+            .expect("configured peer");
+        assert!(configured_peer.addresses.iter().any(|address| {
+            address.transport == "udp" && address.addr == "192.168.50.24:51820"
+        }));
     }
 
     #[test]
