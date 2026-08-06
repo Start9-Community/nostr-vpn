@@ -155,7 +155,10 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         // Recreate both shipped text fields before trusting their values. This
         // commits SwiftUI's focused edit state and catches physical-keyboard
         // entry that looked correct to XCTest but failed production validation.
-        scrollTo("manual-join-expand").tap()
+        scrollTo(
+            app.buttons["manual-join-expand"],
+            named: "manual-join-expand"
+        ).tap()
         XCTAssertTrue(
             waitUntil(timeout: 3) {
                 !self.element("manual-join-admin-id").exists
