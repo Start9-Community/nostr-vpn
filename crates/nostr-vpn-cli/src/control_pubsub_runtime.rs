@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use nostr_vpn_core::control_pubsub::{
     CONTROL_PUBSUB_MAX_EVENT_BYTES, CONTROL_PUBSUB_MAX_WIRE_BYTES, FIPS_PEER_ADVERT_KIND,
     PAID_EXIT_OFFER_KIND, RATING_FACT_KIND,
 };
-use nostr_vpn_core::paid_routes::SignedPaidRouteOffer;
+use nostr_vpn_core::paid_routes::{PAID_ROUTE_OFFER_TTL_SECS, SignedPaidRouteOffer};
 use nostr_vpn_core::updater::{UpdateEventCache, configured_update_ref};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};

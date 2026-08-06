@@ -2,6 +2,8 @@
 struct StoredEventsFile {
     version: u8,
     events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paid_offer_watermarks: Vec<Event>,
 }
 
 #[derive(Debug)]
@@ -9,6 +11,7 @@ struct ControlEventStore {
     path: Option<PathBuf>,
     events: HashMap<String, Event>,
     order: VecDeque<String>,
+    paid_offer_watermarks: HashMap<(u16, String, String), Event>,
     rating_events: HashMap<RatingEventStoreKey, RatingEventStoreEntry>,
     update_events: UpdateEventCache,
 }
@@ -38,6 +41,7 @@ impl ControlEventStore {
                 path: None,
                 events: HashMap::new(),
                 order: VecDeque::new(),
+                paid_offer_watermarks: HashMap::new(),
                 rating_events: HashMap::new(),
                 update_events,
             });
@@ -46,6 +50,7 @@ impl ControlEventStore {
             path: Some(path.clone()),
             events: HashMap::new(),
             order: VecDeque::new(),
+            paid_offer_watermarks: HashMap::new(),
             rating_events: HashMap::new(),
             update_events,
         };
@@ -66,6 +71,7 @@ impl ControlEventStore {
             ));
         }
         let saved_count = saved.events.len();
+        let saved_watermark_count = saved.paid_offer_watermarks.len();
         for event in saved.events {
             if event.verify().is_ok()
                 && is_control_event(&event, &store.update_events)
@@ -74,7 +80,17 @@ impl ControlEventStore {
                 let _ = store.insert_memory(event);
             }
         }
-        if store.events.len() != saved_count {
+        for event in saved.paid_offer_watermarks {
+            if event.verify().is_ok()
+                && is_control_event(&event, &store.update_events)
+                && u16::from(event.kind) == PAID_EXIT_OFFER_KIND
+            {
+                let _ = store.insert_memory(event);
+            }
+        }
+        if store.events.len() != saved_count
+            || store.paid_offer_watermarks.len() != saved_watermark_count
+        {
             store.persist()?;
         }
         Ok(store)
@@ -106,21 +122,19 @@ impl ControlEventStore {
             None
         };
         if let Some((coordinate, is_live)) = paid_offer {
-            let replaced = self.events.iter().find_map(|(stored_id, stored)| {
-                (paid_offer_coordinate(stored).as_ref() == Some(&coordinate)).then(|| {
-                    (stored_id.clone(), stored.created_at, stored.id)
-                })
-            });
-            if let Some((stored_id, stored_created_at, stored_event_id)) = replaced {
-                if stored_created_at > event.created_at
-                    || (stored_created_at == event.created_at && stored_event_id < event.id)
-                {
+            if let Some(stored) = self.paid_offer_watermarks.get(&coordinate) {
+                if !paid_offer_supersedes(&event, stored) {
                     return false;
                 }
-                self.remove_memory(&stored_id);
-            } else if !is_live {
-                return false;
             }
+            if let Some(stored_id) = self.events.iter().find_map(|(stored_id, stored)| {
+                (paid_offer_coordinate(stored).as_ref() == Some(&coordinate))
+                    .then(|| stored_id.clone())
+            }) {
+                self.remove_memory(&stored_id);
+            }
+            self.paid_offer_watermarks
+                .insert(coordinate, event.clone());
             if !is_live {
                 return true;
             }
@@ -237,14 +251,30 @@ impl ControlEventStore {
         );
         remove.sort();
         remove.dedup();
-        if remove.is_empty() {
+        let removed_event_ids = remove.iter().cloned().collect::<HashSet<_>>();
+        let expired_watermarks = self
+            .paid_offer_watermarks
+            .iter()
+            .filter(|(_, event)| {
+                now_secs >= event.created_at.as_secs().saturating_add(PAID_ROUTE_OFFER_TTL_SECS)
+            })
+            .map(|(coordinate, event)| (coordinate.clone(), event.id.to_hex()))
+            .collect::<Vec<_>>();
+        if remove.is_empty() && expired_watermarks.is_empty() {
             return Ok(0);
         }
         for event_id in &remove {
             self.remove_memory(event_id);
         }
+        let hidden_watermarks_removed = expired_watermarks
+            .iter()
+            .filter(|(_, event_id)| !removed_event_ids.contains(event_id))
+            .count();
+        for (coordinate, _) in expired_watermarks {
+            self.paid_offer_watermarks.remove(&coordinate);
+        }
         self.persist()?;
-        Ok(remove.len())
+        Ok(remove.len() + hidden_watermarks_removed)
     }
 
     fn persist(&self) -> Result<()> {
@@ -255,6 +285,12 @@ impl ControlEventStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        let mut paid_offer_watermarks = self
+            .paid_offer_watermarks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        paid_offer_watermarks.sort_by_key(|event| paid_offer_coordinate(event));
         let saved = StoredEventsFile {
             version: STORE_VERSION,
             events: self
@@ -262,6 +298,7 @@ impl ControlEventStore {
                 .into_iter()
                 .filter(control_event_is_persistent)
                 .collect(),
+            paid_offer_watermarks,
         };
         let bytes = serde_json::to_vec(&saved).context("failed to encode control pubsub store")?;
         let temporary = temporary_store_path(path);
@@ -276,6 +313,11 @@ impl ControlEventStore {
         })?;
         Ok(())
     }
+}
+
+fn paid_offer_supersedes(candidate: &Event, stored: &Event) -> bool {
+    candidate.created_at > stored.created_at
+        || (candidate.created_at == stored.created_at && candidate.id < stored.id)
 }
 
 fn control_event_is_persistent(event: &Event) -> bool {
@@ -453,6 +495,75 @@ mod tests {
     }
 
     #[test]
+    fn paid_offer_tombstone_rejects_out_of_order_live_replay() {
+        let seller = Keys::generate();
+        let now = now_ms() / 1_000;
+        let live = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1));
+        let offer = SignedPaidRouteOffer::from_event(live.clone())
+            .expect("live signed offer")
+            .offer()
+            .expect("live offer");
+        let tombstone = SignedPaidRouteOffer::sign_expiring_at(offer, &seller, now, now)
+            .expect("immediate tombstone")
+            .event;
+        let mut store =
+            ControlEventStore::load(None, test_update_events()).expect("event store");
+
+        assert!(store.insert(tombstone).expect("insert tombstone first"));
+        assert!(!store.insert(live).expect("reject older live replay"));
+        assert!(store.snapshot().is_empty());
+        assert_eq!(store.paid_offer_watermarks.len(), 1);
+        assert_eq!(
+            store
+                .prune_expired_events(now + PAID_ROUTE_OFFER_TTL_SECS - 1)
+                .expect("retain watermark while an older offer could be live"),
+            0
+        );
+        assert_eq!(
+            store
+                .prune_expired_events(now + PAID_ROUTE_OFFER_TTL_SECS)
+                .expect("prune safe watermark"),
+            1
+        );
+    }
+
+    #[test]
+    fn paid_offer_tombstone_survives_restart_without_becoming_visible() {
+        let seller = Keys::generate();
+        let now = now_ms() / 1_000;
+        let live = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1));
+        let offer = SignedPaidRouteOffer::from_event(live.clone())
+            .expect("live signed offer")
+            .offer()
+            .expect("live offer");
+        let tombstone = SignedPaidRouteOffer::sign_expiring_at(offer, &seller, now, now)
+            .expect("immediate tombstone")
+            .event;
+        let directory = std::env::temp_dir().join(format!(
+            "nvpn-paid-offer-watermark-{}-{now}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("event store directory");
+        let path = directory.join("control-events.json");
+        let mut store = ControlEventStore::load(Some(path.clone()), test_update_events())
+            .expect("event store");
+
+        assert!(store.insert(tombstone.clone()).expect("persist tombstone"));
+        assert!(store.snapshot().is_empty());
+        let saved: StoredEventsFile =
+            serde_json::from_slice(&fs::read(&path).expect("persisted store"))
+                .expect("decode persisted store");
+        assert!(saved.events.is_empty());
+        assert_eq!(saved.paid_offer_watermarks, vec![tombstone]);
+
+        let mut reloaded = ControlEventStore::load(Some(path), test_update_events())
+            .expect("reload event store");
+        assert!(reloaded.snapshot().is_empty());
+        assert!(!reloaded.insert(live).expect("reject replay after restart"));
+        fs::remove_dir_all(directory).expect("remove event store directory");
+    }
+
+    #[test]
     fn maintenance_prunes_expired_paid_offers() {
         let seller = Keys::generate();
         let signed_at = now_ms() / 1_000;
@@ -510,6 +621,7 @@ mod tests {
         let legacy = StoredEventsFile {
             version: STORE_VERSION,
             events: vec![advert, rating.clone()],
+            paid_offer_watermarks: Vec::new(),
         };
         fs::write(&path, serde_json::to_vec(&legacy).expect("encode legacy store"))
             .expect("write legacy store");
