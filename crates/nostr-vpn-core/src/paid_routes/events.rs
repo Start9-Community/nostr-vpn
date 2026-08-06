@@ -94,8 +94,7 @@ pub fn signed_paid_exit_offer_from_config_with_receiver(
     }
     let mut normalized_config = config.clone();
     normalized_config.normalize();
-    if (normalized_config.pricing.price_msat_per_gb > 0
-        || normalized_config.pricing.connection_minimum_msat_per_day > 0)
+    if normalized_config.pricing.price_msat_per_gb > 0
         && normalized_config.channel.accepted_mints.is_empty()
     {
         return Err(anyhow!(
@@ -297,10 +296,6 @@ pub(super) fn paid_route_offer_tags(offer: &PaidRouteOffer) -> Result<Vec<Tag>> 
         paid_route_owned_tag(vec![
             "price_msat_per_gb".to_string(),
             offer.pricing.price_msat_per_gb.to_string(),
-        ])?,
-        paid_route_owned_tag(vec![
-            "connection_minimum_msat_per_day".to_string(),
-            offer.pricing.connection_minimum_msat_per_day.to_string(),
         ])?,
         paid_route_owned_tag(vec![
             "max_channel_capacity_sat".to_string(),

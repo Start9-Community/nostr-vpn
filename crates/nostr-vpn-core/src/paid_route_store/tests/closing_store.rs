@@ -614,9 +614,6 @@ fn automatic_offer_selection_requires_safe_fresh_terms_and_a_wallet_mint() {
     let mut config = automatic_offer_config();
     config.pricing.price_msat_per_gb = PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GB + 1;
     assert_rejected(config, now_unix - 1);
-    let mut config = automatic_offer_config();
-    config.pricing.connection_minimum_msat_per_day = 1;
-    assert_rejected(config, now_unix - 1);
     assert_rejected(
         automatic_offer_config(),
         now_unix - crate::paid_routes::PAID_ROUTE_OFFER_TTL_SECS,

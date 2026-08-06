@@ -91,9 +91,6 @@ fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> 
     if let Some(value) = args.price_msat_per_gb {
         app.paid_exit.pricing.price_msat_per_gb = value;
     }
-    if let Some(value) = args.connection_minimum_msat_per_day {
-        app.paid_exit.pricing.connection_minimum_msat_per_day = value;
-    }
     if let Some(mints) = paid_exit_run_accepted_mints(args)? {
         app.paid_exit.channel.accepted_mints = mints;
     }

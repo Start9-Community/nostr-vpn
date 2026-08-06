@@ -57,7 +57,6 @@ fn sample_config() -> PaidExitConfig {
         },
         pricing: PaidRoutePricing {
             price_msat_per_gb: 2_500_000,
-            connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {
             accepted_mints: vec!["https://mint.minibits.cash/Bitcoin".to_string()],

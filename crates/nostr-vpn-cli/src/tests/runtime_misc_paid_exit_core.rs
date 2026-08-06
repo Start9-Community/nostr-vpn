@@ -499,7 +499,6 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
         no_reload_daemon: true,
         upstream: Some("host-default".to_string()),
         price_msat_per_gb: Some(250),
-        connection_minimum_msat_per_day: Some(86_400),
         accepted_mints: Some("https://mint.example".to_string()),
         accepted_mint: vec!["https://other-mint.example".to_string()],
         country_code: Some("fi".to_string()),
@@ -526,7 +525,6 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
 
     assert!(app.paid_exit.enabled);
     assert_eq!(app.paid_exit.pricing.price_msat_per_gb, 250);
-    assert_eq!(app.paid_exit.pricing.connection_minimum_msat_per_day, 86_400);
     assert_eq!(app.paid_exit.location.country_code, "FI");
     assert_eq!(
         app.paid_exit.channel.accepted_mints,
@@ -537,20 +535,12 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
     );
     assert_eq!(result.offer.offer_id, "starlink-fi");
     assert_eq!(result.offer.pricing.price_msat_per_gb, 250);
-    assert_eq!(
-        result.offer.pricing.connection_minimum_msat_per_day,
-        86_400
-    );
     assert_eq!(result.offer.access.private_vpn_access.as_str(), "denied");
     assert!(result.publish.is_none());
     assert!(!result.daemon_reload_attempted);
     assert_eq!(store.offers.len(), 1);
     assert_eq!(store.wallet.mints.len(), 2);
     assert_eq!(result.status["counts"]["offers"].as_u64(), Some(1));
-    assert_eq!(
-        result.status["config"]["connection_minimum_msat_per_day"].as_u64(),
-        Some(86_400)
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -577,7 +567,6 @@ fn paid_exit_run_once_rejects_incomplete_wireguard_upstream() {
         no_reload_daemon: true,
         upstream: Some("wireguard_exit".to_string()),
         price_msat_per_gb: Some(500),
-        connection_minimum_msat_per_day: None,
         accepted_mints: Some("https://mint.example".to_string()),
         accepted_mint: vec![],
         country_code: Some("fi".to_string()),
@@ -632,7 +621,6 @@ fn paid_exit_run_once_enables_configured_wireguard_upstream() {
             no_reload_daemon: true,
             upstream: Some("wg".to_string()),
             price_msat_per_gb: Some(500),
-            connection_minimum_msat_per_day: None,
             accepted_mints: Some("https://mint.example".to_string()),
             accepted_mint: vec![],
             country_code: Some("fi".to_string()),

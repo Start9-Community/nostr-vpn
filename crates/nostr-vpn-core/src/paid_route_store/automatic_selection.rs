@@ -64,7 +64,6 @@ impl PaidRouteStore {
             || !record.signed_offer.is_live_at(now_unix)
             || !offer.ip_support.ipv4
             || offer.channel.free_probe_units < PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES
-            || offer.pricing.connection_minimum_msat_per_day != 0
         {
             return None;
         }

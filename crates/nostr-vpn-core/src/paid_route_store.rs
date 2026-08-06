@@ -29,7 +29,6 @@ use crate::paid_routes::{
 };
 
 const CURRENT_VERSION: u8 = 4;
-const SELLER_CONNECTION_MINIMUM_PAYMENT_SKEW_MILLIS: u64 = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRouteStore {

@@ -443,9 +443,6 @@ async fn run_command(command: Command) -> Result<()> {
                 if let Some(value) = args.paid_exit_price_msat_per_gb {
                     app.paid_exit.pricing.price_msat_per_gb = value;
                 }
-                if let Some(value) = args.paid_exit_connection_minimum_msat_per_day {
-                    app.paid_exit.pricing.connection_minimum_msat_per_day = value;
-                }
                 if let Some(value) = args.paid_exit_accepted_mints {
                     app.paid_exit.channel.accepted_mints = parse_csv_arg(&value);
                 }

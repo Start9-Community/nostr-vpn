@@ -24,10 +24,6 @@ fn paid_exit_status_json(app: &AppConfig) -> serde_json::Value {
         "private_vpn_access": config.access.private_vpn_access.as_str(),
         "price_msat_per_gb": config.pricing.price_msat_per_gb,
         "price_text": paid_exit_price_text(config.pricing.price_msat_per_gb),
-        "connection_minimum_msat_per_day": config.pricing.connection_minimum_msat_per_day,
-        "connection_minimum_text": paid_exit_connection_minimum_text(
-            config.pricing.connection_minimum_msat_per_day,
-        ),
         "accepted_mints": &config.channel.accepted_mints,
         "max_channel_capacity_sat": config.channel.max_channel_capacity_sat,
         "channel_expiry_secs": config.channel.channel_expiry_secs,
@@ -58,7 +54,6 @@ fn print_paid_exit_status(app: &AppConfig) {
     if !config.enabled
         && config.channel.accepted_mints.is_empty()
         && config.pricing.price_msat_per_gb == 0
-        && config.pricing.connection_minimum_msat_per_day == 0
     {
         return;
     }
@@ -66,10 +61,6 @@ fn print_paid_exit_status(app: &AppConfig) {
     println!(
         "paid_exit_price: {}",
         paid_exit_price_text(config.pricing.price_msat_per_gb)
-    );
-    println!(
-        "paid_exit_connection_minimum: {}",
-        paid_exit_connection_minimum_text(config.pricing.connection_minimum_msat_per_day)
     );
     println!(
         "paid_exit_access: upstream={} private_vpn_access={}",
@@ -116,14 +107,6 @@ fn paid_exit_price_text(price_msat_per_gb: u64) -> String {
         "{price_msat_per_gb} msat/GB · {}/GB",
         paid_exit_msat_text(price_msat_per_gb)
     )
-}
-
-fn paid_exit_connection_minimum_text(msat_per_day: u64) -> String {
-    if msat_per_day == 0 {
-        "none".to_string()
-    } else {
-        format!("{} / day", paid_exit_msat_text(msat_per_day))
-    }
 }
 
 fn paid_exit_settlement_text(channel_expiry_secs: u64) -> String {

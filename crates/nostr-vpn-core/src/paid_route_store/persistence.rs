@@ -263,7 +263,7 @@ pub(super) fn requested_channel_capacity(
 }
 
 pub(super) fn paid_route_offer_requires_payment(offer: &PaidRouteOffer) -> bool {
-    offer.pricing.price_msat_per_gb > 0 || offer.pricing.connection_minimum_msat_per_day > 0
+    offer.pricing.price_msat_per_gb > 0
 }
 
 pub(super) fn paid_route_offer_requires_payment_before_routing(offer: &PaidRouteOffer) -> bool {
@@ -271,7 +271,7 @@ pub(super) fn paid_route_offer_requires_payment_before_routing(offer: &PaidRoute
 }
 
 pub(super) fn paid_exit_config_requires_payment(config: &PaidExitConfig) -> bool {
-    config.pricing.price_msat_per_gb > 0 || config.pricing.connection_minimum_msat_per_day > 0
+    config.pricing.price_msat_per_gb > 0
 }
 
 pub(super) fn accepted_channel_terms(

@@ -87,9 +87,6 @@ struct PaidExitRunArgs {
     upstream: Option<String>,
     #[arg(long)]
     price_msat_per_gb: Option<u64>,
-    /// Minimum charge while a buyer is connected, prorated by active time.
-    #[arg(long)]
-    connection_minimum_msat_per_day: Option<u64>,
     /// Replace accepted Cashu mints with a comma-separated list. Empty clears them.
     #[arg(long)]
     accepted_mints: Option<String>,

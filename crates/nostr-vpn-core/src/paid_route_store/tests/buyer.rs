@@ -6,7 +6,6 @@ fn paid_buyer_session_without_payment_does_not_allow_routing() {
     let buyer = Keys::generate();
     let mut config = sample_config();
     config.pricing.price_msat_per_gb = 1_000_000;
-    config.pricing.connection_minimum_msat_per_day = 1;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 
@@ -28,7 +27,6 @@ fn paid_buyer_session_with_opening_payment_allows_routing() {
     let buyer = Keys::generate();
     let mut config = sample_config();
     config.pricing.price_msat_per_gb = 1_000_000;
-    config.pricing.connection_minimum_msat_per_day = 1;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 

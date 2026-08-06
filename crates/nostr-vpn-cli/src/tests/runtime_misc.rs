@@ -159,7 +159,6 @@ fn paid_exit_run_settings_prepare_public_fips_discovery() {
             no_reload_daemon: true,
             upstream: None,
             price_msat_per_gb: None,
-            connection_minimum_msat_per_day: None,
             accepted_mints: None,
             accepted_mint: Vec::new(),
             country_code: None,

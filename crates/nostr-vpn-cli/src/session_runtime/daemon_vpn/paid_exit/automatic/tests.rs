@@ -18,7 +18,6 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
         enabled: true,
         pricing: PaidRoutePricing {
             price_msat_per_gb: 90_000,
-            connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {
             accepted_mints: vec![mint.to_string()],

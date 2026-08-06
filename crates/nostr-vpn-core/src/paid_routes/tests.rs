@@ -11,7 +11,6 @@ fn paid_exit_config_normalizes_operator_hints() {
         },
         pricing: PaidRoutePricing {
             price_msat_per_gb: 25_000_000_000,
-            connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {
             accepted_mints: vec![
@@ -110,7 +109,6 @@ fn route_usage_accounting_uses_cashu_service_spilman_policy() {
         enabled: true,
         pricing: PaidRoutePricing {
             price_msat_per_gb: 2_500_000_000,
-            ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
             free_probe_units: 100,
@@ -138,7 +136,6 @@ fn route_pricing_prorates_fractional_units_before_rounding() {
         enabled: true,
         pricing: PaidRoutePricing {
             price_msat_per_gb: 2_500_000_000,
-            ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
             free_probe_units: 0,
@@ -158,118 +155,11 @@ fn route_pricing_prorates_fractional_units_before_rounding() {
 }
 
 #[test]
-fn connection_minimum_is_prorated_and_acts_as_floor() {
-    let config = PaidExitConfig {
-        enabled: true,
-        pricing: PaidRoutePricing {
-            price_msat_per_gb: 10_000_000_000,
-            connection_minimum_msat_per_day: 86_400,
-        },
-        channel: PaidRouteChannelTerms {
-            free_probe_units: 0,
-            grace_units: 0,
-            ..PaidRouteChannelTerms::default()
-        },
-        ..PaidExitConfig::default()
-    };
-
-    let idle = PaidRouteUsage {
-        active_millis: 1_000,
-        ..PaidRouteUsage::default()
-    };
-    assert_eq!(config.amount_due_msat(&idle), 1);
-
-    let below_floor = PaidRouteUsage {
-        active_millis: 1_000,
-        billable_bytes: 1,
-        ..PaidRouteUsage::default()
-    };
-    assert_eq!(config.amount_due_msat(&below_floor), 10);
-
-    let above_floor = PaidRouteUsage {
-        active_millis: 1_000,
-        billable_bytes: 20,
-        ..PaidRouteUsage::default()
-    };
-    assert_eq!(config.amount_due_msat(&above_floor), 200);
-}
-
-#[test]
-fn connection_minimum_due_can_tolerate_active_time_skew_without_discounting_traffic() {
-    let config = PaidExitConfig {
-        enabled: true,
-        pricing: PaidRoutePricing {
-            price_msat_per_gb: 10_000_000_000,
-            connection_minimum_msat_per_day: 86_400,
-        },
-        channel: PaidRouteChannelTerms {
-            free_probe_units: 0,
-            grace_units: 0,
-            ..PaidRouteChannelTerms::default()
-        },
-        ..PaidExitConfig::default()
-    };
-    let usage = PaidRouteUsage {
-        active_millis: 2_000,
-        billable_bytes: 2,
-        ..PaidRouteUsage::default()
-    };
-
-    assert_eq!(config.amount_due_msat(&usage), 20);
-    assert_eq!(
-        config.amount_due_msat_with_connection_minimum_skew(&usage, 1_000),
-        20
-    );
-
-    let idle = PaidRouteUsage {
-        active_millis: 2_000,
-        ..PaidRouteUsage::default()
-    };
-    assert_eq!(config.amount_due_msat(&idle), 2);
-    assert_eq!(
-        config.amount_due_msat_with_connection_minimum_skew(&idle, 1_000),
-        1
-    );
-}
-
-#[test]
-fn connection_minimum_participates_in_routing_decision() {
-    let config = PaidExitConfig {
-        enabled: true,
-        pricing: PaidRoutePricing {
-            price_msat_per_gb: 0,
-            connection_minimum_msat_per_day: 86_400,
-        },
-        channel: PaidRouteChannelTerms {
-            free_probe_units: 1_000,
-            grace_units: 1_000,
-            ..PaidRouteChannelTerms::default()
-        },
-        ..PaidExitConfig::default()
-    };
-    let usage = PaidRouteUsage {
-        active_millis: 1_000,
-        ..PaidRouteUsage::default()
-    };
-
-    let paid = config.routing_decision(&usage, 1);
-    assert_eq!(paid.state, PaidRouteAccessState::Paid);
-    assert!(paid.allow_routing);
-    assert_eq!(paid.amount_due_msat, 1);
-
-    let suspended = config.routing_decision(&usage, 0);
-    assert_eq!(suspended.state, PaidRouteAccessState::Suspended);
-    assert!(!suspended.allow_routing);
-    assert_eq!(suspended.unpaid_msat, 1);
-}
-
-#[test]
 fn route_decision_reports_free_paid_grace_and_suspended_states() {
     let config = PaidExitConfig {
         enabled: true,
         pricing: PaidRoutePricing {
             price_msat_per_gb: 2_500_000_000,
-            ..PaidRoutePricing::default()
         },
         channel: PaidRouteChannelTerms {
             free_probe_units: 100,
@@ -309,7 +199,6 @@ fn session_routing_decision_bills_bytes() {
         enabled: true,
         pricing: PaidRoutePricing {
             price_msat_per_gb: 100_000,
-            connection_minimum_msat_per_day: 0,
         },
         channel: PaidRouteChannelTerms {
             free_probe_units: 0,
@@ -431,15 +320,6 @@ fn signed_offer_event_roundtrips_without_raw_exit_endpoint() {
     );
     assert!(
         tags.contains(&vec!["price_msat_per_gb".to_string(), "2500000".to_string()].as_slice())
-    );
-    assert!(
-        tags.contains(
-            &vec![
-                "connection_minimum_msat_per_day".to_string(),
-                "86400".to_string()
-            ]
-            .as_slice()
-        )
     );
     assert!(
         tags.contains(&vec!["max_channel_capacity_sat".to_string(), "100".to_string()].as_slice())
@@ -702,7 +582,6 @@ fn signed_offer_builder_requires_enabled_paid_exit_with_mint_for_nonzero_price()
     assert!(error.to_string().contains("mint"));
 
     config.pricing.price_msat_per_gb = 0;
-    config.pricing.connection_minimum_msat_per_day = 0;
     signed_paid_exit_offer_from_config("paid-exit-fi", &seller, &config, None, 123)
         .expect("free dev offer can omit mints");
 }
@@ -744,7 +623,6 @@ fn sample_paid_exit_config() -> PaidExitConfig {
         },
         pricing: PaidRoutePricing {
             price_msat_per_gb: 2_500_000,
-            connection_minimum_msat_per_day: 86_400,
         },
         channel: PaidRouteChannelTerms {
             accepted_mints: vec!["https://mint.minibits.cash/Bitcoin".to_string()],

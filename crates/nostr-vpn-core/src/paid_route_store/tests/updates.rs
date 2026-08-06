@@ -165,48 +165,6 @@ fn buyer_payment_updates_due_reports_signable_balance_updates() {
 }
 
 #[test]
-fn buyer_payment_updates_due_uses_connection_minimum_floor() {
-    let seller = Keys::generate();
-    let buyer = Keys::generate();
-    let mut config = sample_config();
-    config.pricing.price_msat_per_gb = 0;
-    config.pricing.connection_minimum_msat_per_day = 86_400;
-    config.channel.free_probe_units = 0;
-    config.channel.grace_units = 0;
-    let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
-
-    store
-        .attach_buyer_spilman_channel(AttachPaidRouteBuyerSpilmanChannelRequest {
-            session_id: session_id.clone(),
-            channel_id: channel_id.clone(),
-            cashu_unit: "sat".to_string(),
-            capacity_sat: 10,
-            paid_msat: Some(0),
-            payment: sample_spilman_payment(&channel_id, 0),
-            now_unix: 130,
-        })
-        .expect("attach channel");
-    store
-        .sessions
-        .get_mut(&session_id)
-        .expect("session")
-        .session
-        .usage
-        .active_millis = 1_000;
-
-    let due = store.buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
-        now_unix: 131,
-        min_increment_msat: 1,
-    });
-
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].delivered_units, 0);
-    assert_eq!(due[0].amount_due_msat, 1);
-    assert_eq!(due[0].target_paid_msat, 1_000);
-    assert_eq!(due[0].payment_increment_msat, 1_000);
-}
-
-#[test]
 fn buyer_payment_updates_due_caps_at_channel_capacity() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
@@ -591,58 +549,6 @@ fn seller_payment_balance_update_accepts_lagging_buyer_usage_counter() {
 }
 
 #[test]
-fn seller_payment_balance_update_tolerates_connection_minimum_flush_skew() {
-    let seller = Keys::generate();
-    let buyer = Keys::generate();
-    let seller_npub = seller.public_key().to_bech32().expect("seller npub");
-    let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
-    let mut config = sample_config();
-    config.pricing.price_msat_per_gb = 0;
-    config.pricing.connection_minimum_msat_per_day = 86_400;
-    config.channel.free_probe_units = 0;
-    config.channel.grace_units = 0;
-
-    let mut store = seller_store_with_open_channel(&seller, &buyer, &config);
-    store
-        .record_seller_usage(RecordPaidRouteSellerUsageRequest {
-            buyer_pubkey: buyer.public_key().to_hex(),
-            config: config.clone(),
-            usage_delta: PaidRouteUsage {
-                active_millis: 3_000,
-                ..PaidRouteUsage::default()
-            },
-            now_unix: 110,
-        })
-        .expect("record seller-observed active time")
-        .expect("matched seller session");
-
-    let result = store
-        .apply_seller_payment(ApplyPaidRouteSellerPaymentRequest {
-            envelope: seller_payment_envelope(
-                "internet-exit",
-                "lease-1",
-                &buyer_npub,
-                &seller_npub,
-                120,
-                StreamingRoutePaymentPayload::BalanceUpdate(StreamingRouteBalanceUpdate {
-                    delivered_units: 0,
-                    amount_due_msat: 1,
-                    paid_msat: 1_000,
-                    payment: sample_spilman_payment("channel-1", 1),
-                }),
-            ),
-            seller_npub,
-            config: config.clone(),
-            now_unix: 120,
-        })
-        .expect("apply skew-tolerated balance update");
-
-    assert_eq!(result.amount_due_msat, 3);
-    assert_eq!(result.paid_msat, 1_000);
-    assert!(result.allow_routing);
-}
-
-#[test]
 fn seller_payment_balance_update_accepts_underreported_due_without_importing_usage() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
@@ -650,7 +556,6 @@ fn seller_payment_balance_update_accepts_underreported_due_without_importing_usa
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
     let mut config = sample_config();
     config.pricing.price_msat_per_gb = 10_000_000_000;
-    config.pricing.connection_minimum_msat_per_day = 86_400;
     config.channel.free_probe_units = 0;
     config.channel.grace_units = 0;
 

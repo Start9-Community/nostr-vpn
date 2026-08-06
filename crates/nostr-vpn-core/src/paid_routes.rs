@@ -30,7 +30,6 @@ const DEFAULT_MAX_CHANNEL_CAPACITY_SAT: u64 = 1_000;
 const DEFAULT_CHANNEL_EXPIRY_SECS: u64 = 86_400;
 const DEFAULT_FREE_PROBE_BYTES: u64 = 1_048_576;
 const DEFAULT_GRACE_BYTES: u64 = 262_144;
-const MILLIS_PER_DAY: u64 = 86_400_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -132,8 +131,6 @@ pub struct PaidRouteLocationHint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaidRoutePricing {
     pub price_msat_per_gb: u64,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub connection_minimum_msat_per_day: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,27 +412,11 @@ impl PaidExitConfig {
     }
 
     pub fn amount_due_msat(&self, usage: &PaidRouteUsage) -> u64 {
-        paid_route_amount_due_msat_for_usage(
-            usage,
+        paid_route_amount_due_msat(
+            usage.billable_bytes,
             self.channel.free_probe_units,
             self.pricing.price_msat_per_gb,
             PAID_ROUTE_PRICE_BYTES_PER_GB,
-            self.pricing.connection_minimum_msat_per_day,
-        )
-    }
-
-    pub fn amount_due_msat_with_connection_minimum_skew(
-        &self,
-        usage: &PaidRouteUsage,
-        active_millis_skew: u64,
-    ) -> u64 {
-        paid_route_amount_due_msat_for_usage_with_connection_minimum_skew(
-            usage,
-            self.channel.free_probe_units,
-            self.pricing.price_msat_per_gb,
-            PAID_ROUTE_PRICE_BYTES_PER_GB,
-            self.pricing.connection_minimum_msat_per_day,
-            active_millis_skew,
         )
     }
 
@@ -517,59 +498,6 @@ fn paid_route_amount_due_msat(
 ) -> u64 {
     let billable_units = delivered_units.saturating_sub(free_probe_units);
     paid_route_price_for_units(billable_units, price_msat, per_units)
-}
-
-fn paid_route_amount_due_msat_for_usage(
-    usage: &PaidRouteUsage,
-    free_probe_units: u64,
-    price_msat: u64,
-    per_units: u64,
-    connection_minimum_msat_per_day: u64,
-) -> u64 {
-    let traffic_due = paid_route_amount_due_msat(
-        usage.billable_bytes,
-        free_probe_units,
-        price_msat,
-        per_units,
-    );
-    let connection_due = paid_route_connection_minimum_due_msat(
-        usage.active_millis,
-        connection_minimum_msat_per_day,
-    );
-    traffic_due.max(connection_due)
-}
-
-fn paid_route_amount_due_msat_for_usage_with_connection_minimum_skew(
-    usage: &PaidRouteUsage,
-    free_probe_units: u64,
-    price_msat: u64,
-    per_units: u64,
-    connection_minimum_msat_per_day: u64,
-    active_millis_skew: u64,
-) -> u64 {
-    let traffic_due = paid_route_amount_due_msat(
-        usage.billable_bytes,
-        free_probe_units,
-        price_msat,
-        per_units,
-    );
-    let connection_due = paid_route_connection_minimum_due_msat(
-        usage.active_millis.saturating_sub(active_millis_skew),
-        connection_minimum_msat_per_day,
-    );
-    traffic_due.max(connection_due)
-}
-
-fn paid_route_connection_minimum_due_msat(
-    active_millis: u64,
-    connection_minimum_msat_per_day: u64,
-) -> u64 {
-    if active_millis == 0 || connection_minimum_msat_per_day == 0 {
-        return 0;
-    }
-    active_millis
-        .saturating_mul(connection_minimum_msat_per_day)
-        .saturating_div(MILLIS_PER_DAY)
 }
 
 fn paid_route_price_for_units(units: u64, price_msat: u64, per_units: u64) -> u64 {
