@@ -41,6 +41,28 @@ impl AppConfig {
         self.normalize_internet_source();
     }
 
+    pub fn set_paid_exit_seller_enabled(&mut self, enabled: bool) {
+        self.paid_exit.enabled = enabled;
+        if enabled {
+            self.enable_paid_exit_relay_control();
+        }
+    }
+
+    pub fn enable_paid_exit_market_discovery(&mut self) -> bool {
+        let changed = !self.connect_to_non_roster_fips_peers;
+        self.connect_to_non_roster_fips_peers = true;
+        self.enable_paid_exit_relay_control() || changed
+    }
+
+    fn enable_paid_exit_relay_control(&mut self) -> bool {
+        if self.nostr.pubsub.mode == NostrPubsubMode::Off {
+            self.nostr.pubsub.mode = NostrPubsubMode::Relay;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn select_private_exit_node(&mut self, peer: &str) -> Result<String> {
         let peer_pubkey = normalize_nostr_pubkey(peer)
             .map_err(|error| anyhow!("invalid private exit peer pubkey: {error}"))?;

@@ -635,11 +635,14 @@ exit 0
         let error = anyhow!("boom");
         let mut runtime = NativeAppRuntime::from_startup_error(&error);
         runtime.startup_error = None;
-        runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
+        runtime.config.connect_to_non_roster_fips_peers = false;
+        runtime.config.fips_nostr_discovery_enabled = false;
+        runtime.config.fips_advertise_public_endpoint = false;
+        runtime.config.nostr.pubsub.mode = NostrPubsubMode::Off;
 
-        runtime.dispatch(NativeAppAction::UpdateSettings {
-            patch: SettingsPatch {
+        runtime
+            .apply_settings_patch(SettingsPatch {
                 paid_exit_enabled: Some(true),
                 paid_exit_upstream: Some("wg".to_string()),
                 paid_exit_price_msat_per_gb: Some(2_500),
@@ -665,12 +668,19 @@ exit 0
                 ]),
                 paid_exit_rating_scope: Some(" fips.peer.test ".to_string()),
                 ..SettingsPatch::default()
-            },
-        });
+            })
+            .expect("apply paid exit settings");
+        runtime
+            .config
+            .save(&runtime.config_path)
+            .expect("save paid exit settings");
 
-        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
         let saved = AppConfig::load(&runtime.config_path).expect("load persisted config");
         assert!(saved.paid_exit.enabled);
+        assert!(!saved.connect_to_non_roster_fips_peers);
+        assert!(!saved.fips_nostr_discovery_enabled);
+        assert!(!saved.fips_advertise_public_endpoint);
+        assert_eq!(saved.nostr.pubsub.mode, NostrPubsubMode::Relay);
         assert_eq!(saved.paid_exit.access.upstream.as_str(), "wireguard_exit");
         assert_eq!(saved.paid_exit.pricing.price_msat_per_gb, 2_500);
         assert_eq!(
@@ -740,8 +750,13 @@ exit 0
         let mut runtime = NativeAppRuntime::from_startup_error(&error);
         runtime.startup_error = None;
         runtime.last_error.clear();
+        runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
         runtime.nvpn_bin = Some(script_path);
+        runtime.config.connect_to_non_roster_fips_peers = false;
+        runtime.config.fips_nostr_discovery_enabled = false;
+        runtime.config.fips_advertise_public_endpoint = false;
+        runtime.config.nostr.pubsub.mode = NostrPubsubMode::Off;
         runtime.config.paid_exit.rating_discovery.file = rating_path.display().to_string();
         runtime.config.paid_exit.rating_discovery.relays = vec![
             "wss://ratings-a.example".to_string(),
@@ -754,6 +769,17 @@ exit 0
         runtime.dispatch(NativeAppAction::DiscoverPaidRouteOffers { duration_secs: 5 });
 
         assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert_eq!(runtime.config.internet_source, InternetSource::Direct);
+        assert!(runtime.config.connect_to_non_roster_fips_peers);
+        assert!(!runtime.config.fips_nostr_discovery_enabled);
+        assert!(!runtime.config.fips_advertise_public_endpoint);
+        assert_eq!(runtime.config.nostr.pubsub.mode, NostrPubsubMode::Relay);
+        let saved = AppConfig::load(&runtime.config_path).expect("load discovery config");
+        assert_eq!(saved.internet_source, InternetSource::Direct);
+        assert!(saved.connect_to_non_roster_fips_peers);
+        assert!(!saved.fips_nostr_discovery_enabled);
+        assert!(!saved.fips_advertise_public_endpoint);
+        assert_eq!(saved.nostr.pubsub.mode, NostrPubsubMode::Relay);
         let calls = fs::read_to_string(&calls_path).expect("read fake nvpn calls");
         assert!(calls.contains("paid-exit discover --config"));
         assert!(calls.contains("--json"));

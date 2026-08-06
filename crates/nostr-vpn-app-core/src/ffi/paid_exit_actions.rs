@@ -936,6 +936,9 @@ impl NativeAppRuntime {
     }
 
     pub(super) fn discover_paid_route_offers(&mut self, duration_secs: u64) -> Result<()> {
+        if self.config.enable_paid_exit_market_discovery() {
+            self.save_reload_and_refresh()?;
+        }
         let rating_discovery = &self.config.paid_exit.rating_discovery;
         let mut args = vec![
             "paid-exit".to_string(),

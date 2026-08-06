@@ -188,7 +188,7 @@ impl NativeAppRuntime {
             }
         }
         if let Some(value) = patch.paid_exit_enabled {
-            self.config.paid_exit.enabled = value;
+            self.config.set_paid_exit_seller_enabled(value);
         }
         if let Some(value) = patch.paid_exit_upstream {
             self.config.paid_exit.access.upstream = value

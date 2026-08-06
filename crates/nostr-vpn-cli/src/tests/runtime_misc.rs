@@ -144,11 +144,39 @@ fn paid_automatic_keeps_fips_runtime_active_before_selecting_seller() {
 
 #[cfg(feature = "paid-exit")]
 #[test]
-fn paid_exit_run_settings_prepare_public_fips_discovery() {
+fn manual_provider_starts_fips_without_switching_source_or_enabling_discovery() {
+    let provider = Keys::generate()
+        .public_key()
+        .to_bech32()
+        .expect("provider npub");
+    let mut app = AppConfig::generated();
+    app.fips_host_tunnel_enabled = false;
+    app.fips_nostr_discovery_enabled = false;
+    app.fips_advertise_public_endpoint = false;
+    for network in &mut app.networks {
+        network.listen_for_join_requests = false;
+    }
+
+    app.set_manual_paid_exit_provider(&provider)
+        .expect("manual provider");
+
+    assert_eq!(app.internet_source, InternetSource::Direct);
+    assert!(!app.fips_nostr_discovery_enabled);
+    assert!(!app.fips_advertise_public_endpoint);
+    assert!(paid_exit_fips_runtime_active(&app));
+    assert!(fips_private_runtime_active(&app, false, 0));
+}
+
+#[cfg(feature = "paid-exit")]
+#[test]
+fn paid_exit_run_settings_prepare_seller_transport_without_ambient_discovery() {
+    use nostr_vpn_core::config::NostrPubsubMode;
+
     let mut app = AppConfig::generated();
     app.connect_to_non_roster_fips_peers = false;
     app.fips_nostr_discovery_enabled = false;
     app.fips_advertise_public_endpoint = false;
+    app.nostr.pubsub.mode = NostrPubsubMode::Off;
 
     apply_paid_exit_run_settings(
         &mut app,
@@ -175,9 +203,10 @@ fn paid_exit_run_settings_prepare_public_fips_discovery() {
     .expect("paid exit run settings");
 
     assert!(app.paid_exit.enabled);
-    assert!(app.connect_to_non_roster_fips_peers);
-    assert!(app.fips_nostr_discovery_enabled);
-    assert!(app.fips_advertise_public_endpoint);
+    assert!(!app.connect_to_non_roster_fips_peers);
+    assert!(!app.fips_nostr_discovery_enabled);
+    assert!(!app.fips_advertise_public_endpoint);
+    assert_eq!(app.nostr.pubsub.mode, NostrPubsubMode::Relay);
 }
 
 #[cfg(feature = "paid-exit")]

@@ -80,6 +80,7 @@ pub(crate) fn paid_exit_fips_runtime_active(app: &AppConfig) -> bool {
         app.paid_exit.enabled
             || app.internet_source == nostr_vpn_core::config::InternetSource::PaidAutomatic
             || app.public_paid_exit_node_pubkey_hex().is_some()
+            || app.connect_to_non_roster_fips_peers
     }
     #[cfg(not(feature = "paid-exit"))]
     {
