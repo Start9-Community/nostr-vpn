@@ -388,14 +388,6 @@ function envFlagEnabled(value) {
   return /^(1|true|yes|on)$/i.test(String(value ?? '').trim())
 }
 
-function cargoTargetDir(env = process.env) {
-  const configured = String(env.CARGO_TARGET_DIR ?? '').trim()
-  if (configured.length === 0) {
-    return join(repoRoot, 'target')
-  }
-  return resolve(repoRoot, configured)
-}
-
 function macosCargoTargetDir(env = process.env) {
   const configured = String(env.NVPN_MACOS_CARGO_TARGET_DIR ?? '').trim()
   if (configured.length === 0) {
