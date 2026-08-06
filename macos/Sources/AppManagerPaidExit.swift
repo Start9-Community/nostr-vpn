@@ -14,7 +14,7 @@ extension AppManager {
 
     func savePaidExitSellerSettings(
         upstream: String,
-        priceMsat: String,
+        priceSats: String,
         perUnits: String,
         acceptedMints: String,
         maxChannelCapacitySat: String,
@@ -22,15 +22,13 @@ extension AppManager {
         freeProbeUnits: String,
         graceUnits: String,
         countryCode: String,
-        region: String,
         asn: String,
-        networkClass: String,
         ipv4: Bool,
         ipv6: Bool
     ) {
         dispatch(.updateSettings(patch: settingsPatch(
             paidExitUpstream: upstream,
-            paidExitPriceMsat: UInt64(priceMsat.trimmingCharacters(in: .whitespacesAndNewlines)),
+            paidExitPriceMsat: Self.parsePaidExitPriceSats(priceSats),
             paidExitPerUnits: Self.parsePaidExitPricingUnits(perUnits),
             paidExitAcceptedMints: acceptedMints,
             paidExitMaxChannelCapacitySat: UInt64(maxChannelCapacitySat.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -38,12 +36,39 @@ extension AppManager {
             paidExitFreeProbeUnits: Self.parsePaidExitTrafficUnits(freeProbeUnits),
             paidExitGraceUnits: Self.parsePaidExitTrafficUnits(graceUnits),
             paidExitCountryCode: countryCode,
-            paidExitRegion: region,
+            paidExitRegion: "",
             paidExitAsn: asn,
-            paidExitNetworkClass: networkClass,
+            paidExitNetworkClass: "unknown",
             paidExitIpv4: ipv4,
             paidExitIpv6: ipv6
         )), status: "Saving seller settings")
+    }
+
+    static func formatPaidExitPriceSats(_ millisats: UInt64) -> String {
+        let whole = millisats / 1_000
+        let fraction = millisats % 1_000
+        guard fraction > 0 else { return String(whole) }
+        let digits = String(format: "%03llu", fraction)
+            .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+        return "\(whole).\(digits)"
+    }
+
+    static func parsePaidExitPriceSats(_ value: String) -> UInt64? {
+        let parts = value.trimmingCharacters(in: .whitespacesAndNewlines).split(
+            separator: ".",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        guard let whole = UInt64(parts.first ?? ""), parts.count <= 2 else { return nil }
+        let fraction = parts.count == 2 ? String(parts[1]) : ""
+        guard fraction.count <= 3,
+              fraction.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        let padded = fraction.padding(toLength: 3, withPad: "0", startingAt: 0)
+        guard let fractionMillisats = UInt64(padded) else { return nil }
+        let (wholeMillisats, overflow) = whole.multipliedReportingOverflow(by: 1_000)
+        guard !overflow else { return nil }
+        let (millisats, additionOverflow) = wholeMillisats.addingReportingOverflow(fractionMillisats)
+        return additionOverflow ? nil : millisats
     }
 
     static func parsePaidExitPricingUnits(_ value: String) -> UInt64? {
@@ -316,12 +341,12 @@ extension AppManager {
         dispatch(.publishPaidExitOffer, status: "Advertising listing")
     }
 
-    func setPaidRouteMarketFilter(countryCode: String, networkClass: String, sort: String) {
+    func setPaidRouteMarketFilter(countryCode: String, sort: String) {
         dispatch(
             .setPaidRouteMarketFilter(
                 query: "",
                 countryCode: Self.emptyAllFilter(countryCode),
-                networkClass: Self.emptyAllFilter(networkClass),
+                networkClass: "",
                 mintUrl: "",
                 requireIpv4: false,
                 requireIpv6: false,

@@ -117,7 +117,6 @@ struct Drafts {
     exit_dns_custom_doh_bootstrap_ips: String,
     exit_dns_through_exit_servers: String,
     paid_route_country: String,
-    paid_route_network_class: String,
     paid_route_mint_url: String,
     paid_route_top_up_amount: String,
     paid_route_send_amount: String,

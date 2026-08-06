@@ -27,7 +27,7 @@ struct RootView: View {
     @State var exitDnsCustomDohUrl = ""
     @State var exitDnsCustomDohBootstrapIps = ""
     @State var exitDnsThroughExitServers = ""
-    @State var paidExitPriceMsat = ""
+    @State var paidExitPriceSats = ""
     @State var paidExitPerUnits = ""
     @State var paidExitAcceptedMints = ""
     @State var paidExitMaxChannelCapacitySat = ""
@@ -35,9 +35,7 @@ struct RootView: View {
     @State var paidExitFreeProbeUnits = ""
     @State var paidExitGraceUnits = ""
     @State var paidExitCountryCode = ""
-    @State var paidExitRegion = ""
     @State var paidExitAsn = ""
-    @State var paidExitNetworkClass = "unknown"
     @State var paidExitIpv4 = true
     @State var paidExitIpv6 = false
     @State var paidRouteMintUrl = ""
@@ -54,7 +52,6 @@ struct RootView: View {
     @State var paidExitListingAdvancedExpanded = false
     @State var wireGuardUpstreamExpanded = RootView.initialWireGuardUpstreamExpanded()
     @State var paidRouteOfferCountryFilter = "all"
-    @State var paidRouteOfferNetworkFilter = "all"
     @State var paidRouteOfferSort = "quality"
     @State var networkNameInput = ""
     @State var selectedDevicePubkeyHex: String?

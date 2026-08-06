@@ -190,7 +190,7 @@ public sealed partial class AppViewModel
     }
 
     public string PaidExitSellerSummary =>
-        $"{TextOr(State.PaidExitSeller.CountryCode, "Country unset")} · {NativeDisplayText.NetworkClassTitle(State.PaidExitSeller.NetworkClass)} · {TextOr(State.PaidExitSeller.PriceText, NativeDisplayText.PriceText(State.PaidExitSeller.PriceMsat, State.PaidExitSeller.PerUnits))}";
+        $"{TextOr(State.PaidExitSeller.CountryCode, "Country unset")} · {TextOr(State.PaidExitSeller.PriceText, NativeDisplayText.PriceText(State.PaidExitSeller.PriceMsat, State.PaidExitSeller.PerUnits))}";
 
     public string PaidExitSellerTrialText =>
         $"Free test: {TextOr(State.PaidExitSeller.FreeProbeText, NativeDisplayText.TrafficUnitText(State.PaidExitSeller.FreeProbeUnits))} · Grace: {TextOr(State.PaidExitSeller.GraceText, NativeDisplayText.TrafficUnitText(State.PaidExitSeller.GraceUnits))}";

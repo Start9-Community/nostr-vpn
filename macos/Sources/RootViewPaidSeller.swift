@@ -121,20 +121,14 @@ extension RootView {
             }
             VStack(alignment: .leading, spacing: 10) {
                 paidExitFormRow("Country") {
-                    HStack(spacing: 8) {
-                        TextField("FI", text: $paidExitCountryCode)
-                            .frame(width: 70)
-                        TextField("Region", text: $paidExitRegion)
-                    }
-                }
-                paidExitFormRow("Connection") {
-                    Picker("", selection: $paidExitNetworkClass) {
-                        ForEach(["unknown", "datacenter", "residential", "mobile", "satellite", "community_mesh"], id: \.self) { value in
-                            Text(paidExitNetworkClassTitle(value)).tag(value)
+                    TextField("FI", text: $paidExitCountryCode)
+                        .frame(width: 70)
+                        .accessibilityIdentifier("paid-exit-country-code")
+                        .onChange(of: paidExitCountryCode) { _, value in
+                            paidExitCountryCode = String(
+                                value.uppercased().filter { $0.isASCII && $0.isLetter }.prefix(2)
+                            )
                         }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: 260)
                 }
                 paidExitFormRow("Works with") {
                     HStack(spacing: 16) {
@@ -166,8 +160,11 @@ extension RootView {
             VStack(alignment: .leading, spacing: 10) {
                 paidExitFormRow("Charge") {
                     HStack(spacing: 8) {
-                        TextField("msat", text: $paidExitPriceMsat)
+                        TextField("0", text: $paidExitPriceSats)
                             .frame(width: 130)
+                            .accessibilityIdentifier("paid-exit-price-sats")
+                        Text("sats")
+                            .foregroundStyle(.secondary)
                         Text("per")
                             .foregroundStyle(.secondary)
                         paidExitPriceUnitControl
@@ -330,7 +327,7 @@ extension RootView {
         Button {
             manager.savePaidExitSellerSettings(
                 upstream: paidExitCurrentUpstream,
-                priceMsat: paidExitPriceMsat,
+                priceSats: paidExitPriceSats,
                 perUnits: paidExitPerUnits,
                 acceptedMints: paidExitAcceptedMints,
                 maxChannelCapacitySat: paidExitMaxChannelCapacitySat,
@@ -338,9 +335,7 @@ extension RootView {
                 freeProbeUnits: paidExitFreeProbeUnits,
                 graceUnits: paidExitGraceUnits,
                 countryCode: paidExitCountryCode,
-                region: paidExitRegion,
                 asn: paidExitAsn,
-                networkClass: paidExitNetworkClass,
                 ipv4: paidExitIpv4,
                 ipv6: paidExitIpv6
             )
@@ -491,17 +486,6 @@ extension RootView {
             return "Waiting for payment"
         }
         return session.statusText.isEmpty ? "Buyer session" : session.statusText
-    }
-
-    func paidExitNetworkClassTitle(_ value: String) -> String {
-        switch value {
-        case "datacenter": return "Datacenter"
-        case "residential": return "Residential"
-        case "mobile": return "Mobile"
-        case "satellite": return "Satellite"
-        case "community_mesh": return "Community mesh"
-        default: return "Unknown"
-        }
     }
 
     func paidExitPrivateAccessTitle(_ value: String) -> String {

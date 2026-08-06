@@ -60,19 +60,16 @@ internal fun PaidRouteMarketCard(
     var pendingWalletToken by remember { mutableStateOf<String?>(null) }
     var redeemingWalletToken by remember { mutableStateOf(false) }
     var filterCountry by remember { mutableStateOf(market.filter.countryCode) }
-    var filterNetwork by remember { mutableStateOf(market.filter.networkClass) }
     var filterIpv4 by remember { mutableStateOf(market.filter.requireIpv4) }
     var filterIpv6 by remember { mutableStateOf(market.filter.requireIpv6) }
     var filterSort by remember { mutableStateOf(market.filter.sort.ifBlank { "quality" }) }
     LaunchedEffect(
         market.filter.countryCode,
-        market.filter.networkClass,
         market.filter.requireIpv4,
         market.filter.requireIpv6,
         market.filter.sort,
     ) {
         filterCountry = market.filter.countryCode
-        filterNetwork = market.filter.networkClass
         filterIpv4 = market.filter.requireIpv4
         filterIpv6 = market.filter.requireIpv6
         filterSort = market.filter.sort.ifBlank { "quality" }
@@ -140,8 +137,6 @@ internal fun PaidRouteMarketCard(
                     market = market,
                     country = filterCountry,
                     onCountryChange = { filterCountry = it },
-                    networkClass = filterNetwork,
-                    onNetworkClassChange = { filterNetwork = it },
                     requireIpv4 = filterIpv4,
                     onRequireIpv4Change = { filterIpv4 = it },
                     requireIpv6 = filterIpv6,
@@ -152,7 +147,6 @@ internal fun PaidRouteMarketCard(
                         dispatchPaidRouteMarketFilter(
                             dispatch,
                             filterCountry,
-                            filterNetwork,
                             filterIpv4,
                             filterIpv6,
                             sort,
@@ -162,7 +156,6 @@ internal fun PaidRouteMarketCard(
                         dispatchPaidRouteMarketFilter(
                             dispatch,
                             filterCountry,
-                            filterNetwork,
                             filterIpv4,
                             filterIpv6,
                             filterSort,
@@ -170,11 +163,10 @@ internal fun PaidRouteMarketCard(
                     },
                     onClear = {
                         filterCountry = ""
-                        filterNetwork = ""
                         filterIpv4 = false
                         filterIpv6 = false
                         filterSort = "quality"
-                        dispatchPaidRouteMarketFilter(dispatch, "", "", false, false, "quality")
+                        dispatchPaidRouteMarketFilter(dispatch, "", false, false, "quality")
                     },
                 )
 
@@ -472,8 +464,6 @@ private fun PaidRouteMarketFilterControls(
     market: PaidRouteMarketState,
     country: String,
     onCountryChange: (String) -> Unit,
-    networkClass: String,
-    onNetworkClassChange: (String) -> Unit,
     requireIpv4: Boolean,
     onRequireIpv4Change: (Boolean) -> Unit,
     requireIpv6: Boolean,
@@ -487,17 +477,14 @@ private fun PaidRouteMarketFilterControls(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = country,
-                onValueChange = onCountryChange,
+                onValueChange = { value ->
+                    onCountryChange(
+                        value.filter { it.code < 128 && it.isLetter() }.take(2).uppercase(),
+                    )
+                },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
                 label = { Text("Country") },
-            )
-            OutlinedTextField(
-                value = networkClass,
-                onValueChange = onNetworkClassChange,
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                label = { Text("Class") },
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -546,7 +533,6 @@ private fun PaidRouteSortButton(
 private fun dispatchPaidRouteMarketFilter(
     dispatch: (JSONObject) -> Unit,
     country: String,
-    networkClass: String,
     requireIpv4: Boolean,
     requireIpv6: Boolean,
     sort: String,
@@ -554,7 +540,7 @@ private fun dispatchPaidRouteMarketFilter(
     dispatch(
         NativeActions.setPaidRouteMarketFilter(
             countryCode = country.trim(),
-            networkClass = networkClass.trim(),
+            networkClass = "",
             requireIpv4 = requireIpv4,
             requireIpv6 = requireIpv6,
             sort = sort.ifBlank { "quality" },
@@ -798,11 +784,10 @@ private fun PaidRouteSessionRow(
 
 private fun paidRouteOfferTitle(offer: PaidRouteOfferState): String {
     val location = offer.countryCode.ifBlank { "Unknown country" }.uppercase()
-    val network = paidRouteNetworkClassTitle(offer.networkClass)
     val price = offer.priceText.ifBlank {
         paidRoutePriceText(offer.priceMsat, offer.perUnits)
     }
-    return "$location · $network · $price"
+    return "$location · $price"
 }
 
 private fun paidRouteSessionDetail(session: PaidRouteSessionState): String {
@@ -873,17 +858,6 @@ private fun paidRouteWalletActionTitle(kind: String): String =
         "refresh" -> "Wallet refreshed"
         "open_channel" -> "Exit funded"
         else -> kind.ifBlank { "Wallet updated" }.replace('_', ' ').replaceFirstChar { it.uppercase() }
-    }
-
-internal fun paidRouteNetworkClassTitle(value: String): String =
-    when (value) {
-        "datacenter" -> "Datacenter"
-        "residential" -> "Residential"
-        "mobile" -> "Mobile"
-        "satellite" -> "Satellite"
-        "community_mesh" -> "Community mesh"
-        "unknown", "" -> "Unknown"
-        else -> value.replace('_', ' ').replaceFirstChar { it.uppercase() }
     }
 
 private fun paidRouteCountryClaimText(session: PaidRouteSessionState): String =

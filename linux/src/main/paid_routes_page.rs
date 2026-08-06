@@ -151,17 +151,21 @@ fn build_paid_route_market_card(app: &AppRef, page: &gtk::Box, state: &NativeApp
 fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
     let filter = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let country = entry("Country", &app.borrow().drafts.paid_route_country);
+    country.set_max_length(2);
     {
         let app = app.clone();
         country.connect_changed(move |entry| {
-            app.borrow_mut().drafts.paid_route_country = entry.text().to_string();
-        });
-    }
-    let network_class = entry("Class", &app.borrow().drafts.paid_route_network_class);
-    {
-        let app = app.clone();
-        network_class.connect_changed(move |entry| {
-            app.borrow_mut().drafts.paid_route_network_class = entry.text().to_string();
+            let normalized = entry
+                .text()
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .take(2)
+                .collect::<String>()
+                .to_ascii_uppercase();
+            if entry.text() != normalized {
+                entry.set_text(&normalized);
+            }
+            app.borrow_mut().drafts.paid_route_country = normalized;
         });
     }
     let apply = icon_text_button("Filter", "view-filter-symbolic");
@@ -174,7 +178,7 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
                 NativeAppAction::SetPaidRouteMarketFilter {
                     query: String::new(),
                     country_code: drafts.paid_route_country.trim().to_string(),
-                    network_class: drafts.paid_route_network_class.trim().to_string(),
+                    network_class: String::new(),
                     mint_url: String::new(),
                     require_ipv4: false,
                     require_ipv6: false,
@@ -190,7 +194,6 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
             {
                 let mut model = app.borrow_mut();
                 model.drafts.paid_route_country.clear();
-                model.drafts.paid_route_network_class.clear();
             }
             dispatch(
                 &app,
@@ -207,7 +210,6 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
         });
     }
     filter.append(&country);
-    filter.append(&network_class);
     filter.append(&apply);
     filter.append(&clear);
     parent.append(&filter);
@@ -489,9 +491,8 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
         &seller_card,
         "Pricing",
         &format!(
-            "{} · {} · {}",
+            "{} · {}",
             non_empty_or(&seller.country_code, "Country unset"),
-            paid_route_network_class_title(&seller.network_class),
             non_empty_or(
                 &seller.price_text,
                 &paid_route_price_text(
@@ -719,9 +720,8 @@ fn paid_exit_seller_session_can_collect(session: &NativePaidRouteSessionState) -
 
 fn paid_route_offer_title(offer: &NativePaidRouteOfferState) -> String {
     format!(
-        "{} · {} · {}",
+        "{} · {}",
         non_empty_or(&offer.country_code, "Unknown country").to_uppercase(),
-        paid_route_network_class_title(&offer.network_class),
         non_empty_or(
             &offer.price_text,
             &paid_route_price_text(
@@ -835,18 +835,6 @@ fn paid_route_wallet_action_title(kind: &str) -> String {
         "open_channel" => "Exit funded".to_string(),
         "" => "Wallet updated".to_string(),
         other => paid_route_plain_status(other, "Wallet updated"),
-    }
-}
-
-fn paid_route_network_class_title(value: &str) -> String {
-    match value {
-        "datacenter" => "Datacenter".to_string(),
-        "residential" => "Residential".to_string(),
-        "mobile" => "Mobile".to_string(),
-        "satellite" => "Satellite".to_string(),
-        "community_mesh" => "Community mesh".to_string(),
-        "" | "unknown" => "Unknown".to_string(),
-        other => paid_route_plain_status(other, "Unknown"),
     }
 }
 

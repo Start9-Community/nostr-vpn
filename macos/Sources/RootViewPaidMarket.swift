@@ -79,15 +79,6 @@ extension RootView {
                         .pickerStyle(.menu)
                         .controlSize(.small)
                         .help("Country")
-                        Picker("Class", selection: $paidRouteOfferNetworkFilter) {
-                            Text("Any class").tag("all")
-                            ForEach(market.networkClassOptions, id: \.self) { networkClass in
-                                Text(paidExitNetworkClassTitle(networkClass)).tag(networkClass)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .controlSize(.small)
-                        .help("Network class")
                         Picker("Sort", selection: $paidRouteOfferSort) {
                             Text("Quality").tag("quality")
                             Text("Price").tag("price")
@@ -98,9 +89,6 @@ extension RootView {
                         .frame(width: 210)
                     }
                     .onChange(of: paidRouteOfferCountryFilter) { _, _ in
-                        applyPaidRouteMarketFilter()
-                    }
-                    .onChange(of: paidRouteOfferNetworkFilter) { _, _ in
                         applyPaidRouteMarketFilter()
                     }
                     .onChange(of: paidRouteOfferSort) { _, _ in
@@ -459,9 +447,7 @@ extension RootView {
     }
 
     func paidRouteOfferTitle(_ offer: NativePaidRouteOfferState) -> String {
-        let country = offer.countryCode.isEmpty ? "Unknown country" : offer.countryCode
-        let network = paidExitNetworkClassTitle(offer.networkClass)
-        return "\(country) - \(network)"
+        offer.countryCode.isEmpty ? "Unknown country" : offer.countryCode
     }
 
     func paidRouteVisibleOffers(_ market: NativePaidRouteMarketState) -> [NativePaidRouteOfferState] {
@@ -474,7 +460,6 @@ extension RootView {
     func applyPaidRouteMarketFilter() {
         manager.setPaidRouteMarketFilter(
             countryCode: paidRouteOfferCountryFilter,
-            networkClass: paidRouteOfferNetworkFilter,
             sort: paidRouteOfferSort
         )
     }

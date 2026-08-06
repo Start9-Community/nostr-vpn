@@ -551,7 +551,6 @@
                         <StackPanel>
                           <WrapPanel>
                             <TextBlock Text="{Binding DisplayCountry}" FontWeight="SemiBold" Margin="0,0,8,0" />
-                            <TextBlock Text="{Binding DisplayNetworkClass}" Foreground="{StaticResource TextSecondary}" Margin="0,0,8,0" />
                             <TextBlock Text="{Binding DisplayPrice}" Foreground="{StaticResource TextSecondary}" />
                           </WrapPanel>
                           <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource TextSecondary}" TextTrimming="CharacterEllipsis" />

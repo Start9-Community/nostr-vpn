@@ -170,7 +170,7 @@ extension RootView {
         }
         if lastSyncedPaidExitSeller != state.paidExitSeller {
             let seller = state.paidExitSeller
-            paidExitPriceMsat = String(seller.priceMsat)
+            paidExitPriceSats = AppManager.formatPaidExitPriceSats(seller.priceMsat)
             paidExitPerUnits = fallbackText(seller.perUnitsText, paidExitPricingUnitDraft(seller.perUnits))
             paidExitAcceptedMints = seller.acceptedMints.joined(separator: ", ")
             paidExitMaxChannelCapacitySat = String(seller.maxChannelCapacitySat)
@@ -178,9 +178,7 @@ extension RootView {
             paidExitFreeProbeUnits = fallbackText(seller.freeProbeText, paidExitTrafficUnitDraft(seller.freeProbeUnits))
             paidExitGraceUnits = fallbackText(seller.graceText, paidExitTrafficUnitDraft(seller.graceUnits))
             paidExitCountryCode = seller.countryCode
-            paidExitRegion = seller.region
             paidExitAsn = seller.asn == 0 ? "" : String(seller.asn)
-            paidExitNetworkClass = seller.networkClass
             paidExitIpv4 = seller.ipv4
             paidExitIpv6 = seller.ipv6
             lastSyncedPaidExitSeller = seller
