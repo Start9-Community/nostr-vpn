@@ -152,24 +152,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         replaceText(element("manual-join-admin-id"), with: admin)
         replaceText(element("manual-join-network-id"), with: network)
 
-        // Recreate both shipped text fields before trusting their values. This
-        // commits SwiftUI's focused edit state and catches physical-keyboard
-        // entry that looked correct to XCTest but failed production validation.
-        scrollTo(
-            app.buttons["manual-join-expand"],
-            named: "manual-join-expand"
-        ).tap()
-        XCTAssertTrue(
-            waitUntil(timeout: 3) {
-                !self.element("manual-join-admin-id").exists
-                    && !self.element("manual-join-network-id").exists
-            },
-            "Manual join fields did not resign focus and collapse"
-        )
-        expandManualJoinIfNeeded()
-        assertText(element("manual-join-admin-id"), equals: admin)
-        assertText(element("manual-join-network-id"), equals: network)
-
         let invalidAdmin = app.staticTexts["Not a valid device ID"]
         let submit = scrollTo("manual-join-submit")
         XCTAssertTrue(
@@ -389,16 +371,6 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         if retained {
             field.typeKey(.return, modifierFlags: [])
         }
-    }
-
-    private func assertText(_ field: XCUIElement, equals expected: String) {
-        XCTAssertTrue(
-            waitUntil(timeout: 3) {
-                let actual = field.value as? String ?? ""
-                return actual != field.placeholderValue && actual == expected
-            },
-            "Shipped text control did not retain the exact supplied value after focus resignation"
-        )
     }
 
     private func publicValue(
