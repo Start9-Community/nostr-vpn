@@ -185,8 +185,6 @@ extension RootView {
             paidExitGraceUnits = fallbackText(seller.graceText, paidExitTrafficUnitDraft(seller.graceUnits))
             paidExitCountryCode = seller.countryCode
             paidExitAsn = seller.asn == 0 ? "" : String(seller.asn)
-            paidExitIpv4 = seller.ipv4
-            paidExitIpv6 = seller.ipv6
         }
         lastSyncedPaidExitSeller = state.paidExitSeller
 
@@ -221,8 +219,6 @@ extension RootView {
             || previous.graceUnits != current.graceUnits
             || previous.countryCode != current.countryCode
             || previous.asn != current.asn
-            || previous.ipv4 != current.ipv4
-            || previous.ipv6 != current.ipv6
     }
 
     func displayName(_ network: NativeNetworkState) -> String {

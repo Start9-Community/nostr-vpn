@@ -760,14 +760,7 @@ fn runtime_supported_advertised_routes(routes: Vec<String>) -> Vec<String> {
 pub(crate) fn runtime_local_exit_forwarding_routes(app: &AppConfig) -> Vec<String> {
     let mut routes = runtime_effective_advertised_routes(app);
     if app.paid_exit.enabled && app.paid_exit_seller_egress().is_ok() {
-        let mut paid_exit_routes = runtime_exit_node_default_routes();
-        if !app.paid_exit.ip_support.ipv4 {
-            paid_exit_routes.retain(|route| route != "0.0.0.0/0");
-        }
-        if !app.paid_exit.ip_support.ipv6 {
-            paid_exit_routes.retain(|route| route != "::/0");
-        }
-        routes.extend(paid_exit_routes);
+        routes.extend(runtime_exit_node_default_routes());
     }
     routes.sort();
     routes.dedup();

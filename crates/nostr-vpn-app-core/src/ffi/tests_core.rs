@@ -57,6 +57,67 @@
     }
 
     #[test]
+    fn paid_exit_status_reports_missing_upstream_before_listener() {
+        let mut app = AppConfig::generated();
+        app.paid_exit.enabled = true;
+        app.set_internet_source(InternetSource::WireGuard);
+
+        assert_eq!(
+            paid_exit::paid_exit_seller_status_text(
+                &app,
+                Some(&DaemonRuntimeState::default()),
+                &app.paid_exit,
+                false,
+                true,
+            ),
+            "Configure WireGuard upstream before advertising"
+        );
+
+        let peer = Keys::generate().public_key().to_hex();
+        app.set_internet_source(InternetSource::Direct);
+        app.set_active_network_id("paid-exit-status-test")
+            .expect("activate generated network");
+        app.networks[0].devices.push(peer.clone());
+        app.select_private_exit_node(&peer)
+            .expect("select private exit");
+        assert_eq!(
+            paid_exit::paid_exit_seller_status_text(
+                &app,
+                Some(&DaemonRuntimeState::default()),
+                &app.paid_exit,
+                true,
+                true,
+            ),
+            "Waiting for the selected private exit"
+        );
+    }
+
+    #[test]
+    fn paid_exit_direct_provider_readiness_does_not_require_relays() {
+        let mut app = AppConfig::generated();
+        app.paid_exit.enabled = true;
+        app.paid_exit.pricing.price_msat_per_gb = 100;
+        app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
+        app.nostr.disabled_relays = effective_config_relays(&app);
+        let daemon_state = DaemonRuntimeState {
+            paid_exit_seller_ready: true,
+            ..DaemonRuntimeState::default()
+        };
+
+        assert!(effective_config_relays(&app).is_empty());
+        assert_eq!(
+            paid_exit::paid_exit_seller_status_text(
+                &app,
+                Some(&daemon_state),
+                &app.paid_exit,
+                false,
+                true,
+            ),
+            "Selling internet is ready"
+        );
+    }
+
+    #[test]
     fn empty_app_relay_config_exposes_fips_defaults() {
         let mut config = AppConfig::generated();
         config.nostr.relays.clear();

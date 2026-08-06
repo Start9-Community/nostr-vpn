@@ -655,8 +655,8 @@ exit 0
                 paid_exit_grace_units: Some(131_072),
                 paid_exit_country_code: Some("fi".to_string()),
                 paid_exit_asn: Some("AS12345".to_string()),
-                paid_exit_ipv4: Some(true),
-                paid_exit_ipv6: Some(false),
+                paid_exit_ipv4: Some(false),
+                paid_exit_ipv6: Some(true),
                 paid_exit_rating_file: Some(" ratings.json ".to_string()),
                 paid_exit_rating_relays: Some(vec![
                     " wss://ratings-b.example ".to_string(),

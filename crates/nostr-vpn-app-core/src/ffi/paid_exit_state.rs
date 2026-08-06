@@ -289,9 +289,10 @@ pub(super) fn paid_exit_seller_status_text(
         "Selling internet is off".to_string()
     } else if let Err(error) = app.paid_exit_seller_egress() {
         error.to_string()
-    } else if !daemon_state.is_some_and(|state| state.paid_exit_seller_ready) {
-        "Waiting for the FIPS listener".to_string()
-    } else if config.access.upstream == PaidExitUpstream::WireGuardExit
+    } else if matches!(
+        app.paid_exit_seller_egress(),
+        Ok(PaidExitSellerEgress::WireGuard)
+    )
         && !wireguard_exit_configured
     {
         "Configure WireGuard upstream before advertising".to_string()
@@ -306,10 +307,10 @@ pub(super) fn paid_exit_seller_status_text(
         })
     {
         "Waiting for the selected private exit".to_string()
+    } else if !daemon_state.is_some_and(|state| state.paid_exit_seller_ready) {
+        "Waiting for the FIPS listener".to_string()
     } else if app.nostr_keys().is_err() {
         "Set up Nostr identity before advertising".to_string()
-    } else if effective_config_relays(app).is_empty() {
-        "Add Nostr relays before advertising".to_string()
     } else if config.channel.accepted_mints.is_empty() {
         "Selling internet is on; add accepted mints before advertising".to_string()
     } else if config.pricing.price_msat_per_gb == 0 {

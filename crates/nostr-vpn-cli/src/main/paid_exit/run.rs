@@ -97,12 +97,6 @@ fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> 
     if let Some(value) = args.asn {
         app.paid_exit.location.asn = Some(value);
     }
-    if let Some(value) = args.ipv4 {
-        app.paid_exit.ip_support.ipv4 = value;
-    }
-    if let Some(value) = args.ipv6 {
-        app.paid_exit.ip_support.ipv6 = value;
-    }
     if let Some(value) = args.max_channel_capacity_sat {
         app.paid_exit.channel.max_channel_capacity_sat = value;
     }

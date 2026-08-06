@@ -97,10 +97,6 @@ struct PaidExitRunArgs {
     country_code: Option<String>,
     #[arg(long)]
     asn: Option<u32>,
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    ipv4: Option<bool>,
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    ipv6: Option<bool>,
     #[arg(long)]
     max_channel_capacity_sat: Option<u64>,
     #[arg(long)]

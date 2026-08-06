@@ -416,8 +416,6 @@ fn clap_set_supports_paid_exit_seller_flags() {
         "paid-exit-accepted-mints",
         "paid-exit-country-code",
         "paid-exit-asn",
-        "paid-exit-ipv4",
-        "paid-exit-ipv6",
         "paid-exit-max-channel-capacity-sat",
         "paid-exit-channel-expiry-secs",
         "paid-exit-free-probe-units",
@@ -429,15 +427,33 @@ fn clap_set_supports_paid_exit_seller_flags() {
             "missing --{flag} on set command"
         );
     }
-    for legacy_flag in [
+    let run = command
+        .get_subcommands()
+        .find(|subcommand| subcommand.get_name() == "paid-exit")
+        .and_then(|paid_exit| {
+            paid_exit
+                .get_subcommands()
+                .find(|subcommand| subcommand.get_name() == "run")
+        })
+        .expect("paid-exit run subcommand exists");
+    for removed_flag in ["ipv4", "ipv6"] {
+        assert!(
+            run.get_arguments()
+                .all(|argument| argument.get_long() != Some(removed_flag)),
+            "obsolete paid-exit run --{removed_flag} must stay removed"
+        );
+    }
+    for removed_flag in [
         "paid-exit-meter",
         "paid-exit-price-msat",
         "paid-exit-per-units",
+        "paid-exit-ipv4",
+        "paid-exit-ipv6",
     ] {
         assert!(
             !set.get_arguments()
-                .any(|argument| argument.get_long() == Some(legacy_flag)),
-            "fixed-GB pricing must not expose legacy --{legacy_flag}"
+                .any(|argument| argument.get_long() == Some(removed_flag)),
+            "obsolete --{removed_flag} must stay removed"
         );
     }
 }

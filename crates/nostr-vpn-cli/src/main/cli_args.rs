@@ -518,12 +518,6 @@ struct SetArgs {
     paid_exit_asn: Option<u32>,
     #[cfg(feature = "paid-exit")]
     #[arg(long)]
-    paid_exit_ipv4: Option<bool>,
-    #[cfg(feature = "paid-exit")]
-    #[arg(long)]
-    paid_exit_ipv6: Option<bool>,
-    #[cfg(feature = "paid-exit")]
-    #[arg(long)]
     paid_exit_max_channel_capacity_sat: Option<u64>,
     #[cfg(feature = "paid-exit")]
     #[arg(long)]

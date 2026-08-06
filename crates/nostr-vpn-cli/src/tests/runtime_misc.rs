@@ -191,8 +191,6 @@ fn paid_exit_run_settings_prepare_seller_transport_without_ambient_discovery() {
             accepted_mint: Vec::new(),
             country_code: None,
             asn: None,
-            ipv4: None,
-            ipv6: None,
             max_channel_capacity_sat: None,
             channel_expiry_secs: None,
             free_probe_units: None,
@@ -833,12 +831,16 @@ fn paid_exit_host_forwarding_does_not_advertise_free_exit_route() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn paid_exit_forwarding_respects_ipv4_support() {
+fn paid_exit_forwarding_ignores_removed_legacy_ip_support_knobs() {
     let mut app = AppConfig::generated();
     app.paid_exit.enabled = true;
     app.paid_exit.ip_support.ipv4 = false;
+    app.paid_exit.ip_support.ipv6 = true;
 
-    assert!(runtime_local_exit_forwarding_routes(&app).is_empty());
+    assert_eq!(
+        runtime_local_exit_forwarding_routes(&app),
+        vec!["0.0.0.0/0"]
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

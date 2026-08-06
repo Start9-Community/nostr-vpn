@@ -27,7 +27,10 @@ fn paid_exit_config_normalizes_operator_hints() {
             country_code: "fi".to_string(),
             asn: Some(12_345),
         },
-        ip_support: PaidRouteIpSupport::default(),
+        ip_support: PaidRouteIpSupport {
+            ipv4: false,
+            ipv6: true,
+        },
         rating_discovery: PaidExitRatingDiscoveryConfig {
             file: " ratings.json ".to_string(),
             relays: vec![
@@ -55,6 +58,7 @@ fn paid_exit_config_normalizes_operator_hints() {
         ]
     );
     assert_eq!(config.location.country_code, "FI");
+    assert_eq!(config.ip_support, PaidRouteIpSupport::default());
     assert_eq!(config.rating_discovery.file, "ratings.json");
     assert_eq!(
         config.rating_discovery.relays,
@@ -582,8 +586,15 @@ fn signed_offer_builder_requires_enabled_paid_exit_with_mint_for_nonzero_price()
     assert!(error.to_string().contains("mint"));
 
     config.pricing.price_msat_per_gb = 0;
-    signed_paid_exit_offer_from_config("paid-exit-fi", &seller, &config, None, 123)
-        .expect("free dev offer can omit mints");
+    config.ip_support = PaidRouteIpSupport {
+        ipv4: false,
+        ipv6: true,
+    };
+    let offer = signed_paid_exit_offer_from_config("paid-exit-fi", &seller, &config, None, 123)
+        .expect("free dev offer can omit mints")
+        .offer()
+        .expect("decode normalized offer");
+    assert_eq!(offer.ip_support, PaidRouteIpSupport::default());
 }
 
 #[test]

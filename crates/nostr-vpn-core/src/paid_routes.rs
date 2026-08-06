@@ -385,6 +385,7 @@ impl PaidExitConfig {
 
     pub fn normalize(&mut self) {
         self.access.private_vpn_access = PaidRoutePrivateVpnAccess::Denied;
+        self.ip_support = PaidRouteIpSupport::default();
         self.channel.max_channel_capacity_sat = self.channel.max_channel_capacity_sat.max(1);
         self.channel.channel_expiry_secs = self.channel.channel_expiry_secs.max(1);
         let mut accepted_mints = normalize_string_list(&self.channel.accepted_mints)

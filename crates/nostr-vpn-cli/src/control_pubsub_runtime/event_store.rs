@@ -122,10 +122,10 @@ impl ControlEventStore {
             None
         };
         if let Some((coordinate, is_live)) = paid_offer {
-            if let Some(stored) = self.paid_offer_watermarks.get(&coordinate) {
-                if !paid_offer_supersedes(&event, stored) {
-                    return false;
-                }
+            if let Some(stored) = self.paid_offer_watermarks.get(&coordinate)
+                && !paid_offer_supersedes(&event, stored)
+            {
+                return false;
             }
             if let Some(stored_id) = self.events.iter().find_map(|(stored_id, stored)| {
                 (paid_offer_coordinate(stored).as_ref() == Some(&coordinate))
@@ -290,7 +290,7 @@ impl ControlEventStore {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        paid_offer_watermarks.sort_by_key(|event| paid_offer_coordinate(event));
+        paid_offer_watermarks.sort_by_key(paid_offer_coordinate);
         let saved = StoredEventsFile {
             version: STORE_VERSION,
             events: self

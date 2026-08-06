@@ -568,12 +568,7 @@ fn best_rated_offer_key_prefers_good_then_newcomer_over_degraded() {
 #[test]
 fn automatic_offer_selection_requires_safe_fresh_terms_and_a_wallet_mint() {
     let now_unix = 100_000;
-    let assert_rejected = |mut config: PaidExitConfig, signed_at: u64| {
-        config.channel.accepted_mints = vec!["https://mint.example".to_string()];
-        let seller = Keys::generate();
-        let signed =
-            signed_paid_exit_offer_from_config("auto-exit", &seller, &config, None, signed_at)
-                .expect("signed offer");
+    let assert_signed_rejected = |signed: SignedPaidRouteOffer| {
         let mut store = PaidRouteStore::default();
         store.upsert_wallet_mint(
             "https://mint.example",
@@ -586,6 +581,14 @@ fn automatic_offer_selection_requires_safe_fresh_terms_and_a_wallet_mint() {
             .expect("store offer");
 
         assert!(store.select_automatic_offer(now_unix).is_err());
+    };
+    let assert_rejected = |mut config: PaidExitConfig, signed_at: u64| {
+        config.channel.accepted_mints = vec!["https://mint.example".to_string()];
+        let seller = Keys::generate();
+        let signed =
+            signed_paid_exit_offer_from_config("auto-exit", &seller, &config, None, signed_at)
+                .expect("signed offer");
+        assert_signed_rejected(signed);
     };
 
     let seller = Keys::generate();
@@ -605,9 +608,20 @@ fn automatic_offer_selection_requires_safe_fresh_terms_and_a_wallet_mint() {
     assert!(untrusted.select_automatic_offer(now_unix).is_err());
     assert_eq!(untrusted.wallet, wallet_before);
 
+    let seller = Keys::generate();
     let mut config = automatic_offer_config();
-    config.ip_support.ipv4 = false;
-    assert_rejected(config, now_unix - 1);
+    config.channel.accepted_mints = vec!["https://mint.example".to_string()];
+    let mut offer =
+        signed_paid_exit_offer_from_config("auto-exit", &seller, &config, None, now_unix - 1)
+            .expect("signed offer")
+            .offer()
+            .expect("decode offer");
+    offer.ip_support.ipv4 = false;
+    offer.ip_support.ipv6 = true;
+    assert_signed_rejected(
+        SignedPaidRouteOffer::sign(offer, &seller, now_unix - 1)
+            .expect("sign external IPv6-only offer"),
+    );
     let mut config = automatic_offer_config();
     config.channel.free_probe_units = PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES - 1;
     assert_rejected(config, now_unix - 1);

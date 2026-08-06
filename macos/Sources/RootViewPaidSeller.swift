@@ -144,10 +144,7 @@ extension RootView {
                         }
                 }
                 paidExitFormRow("Works with") {
-                    HStack(spacing: 16) {
-                        Toggle("IPv4", isOn: $paidExitIpv4)
-                        Toggle("IPv6", isOn: $paidExitIpv6)
-                    }
+                    Text("IPv4")
                 }
             }
             disclosureSection(
@@ -319,9 +316,7 @@ extension RootView {
                 freeProbeUnits: paidExitFreeProbeUnits,
                 graceUnits: paidExitGraceUnits,
                 countryCode: paidExitCountryCode,
-                asn: paidExitAsn,
-                ipv4: paidExitIpv4,
-                ipv6: paidExitIpv6
+                asn: paidExitAsn
             )
         } label: {
             Label("Save", systemImage: "checkmark")

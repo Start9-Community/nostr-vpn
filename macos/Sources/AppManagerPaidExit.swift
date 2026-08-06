@@ -21,9 +21,7 @@ extension AppManager {
         freeProbeUnits: String,
         graceUnits: String,
         countryCode: String,
-        asn: String,
-        ipv4: Bool,
-        ipv6: Bool
+        asn: String
     ) {
         guard let priceMsatPerGb = UInt64(priceMsatPerGb.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             actionError = "Enter an integer price in msat/GB."
@@ -38,9 +36,7 @@ extension AppManager {
             paidExitFreeProbeUnits: Self.parsePaidExitTrafficUnits(freeProbeUnits),
             paidExitGraceUnits: Self.parsePaidExitTrafficUnits(graceUnits),
             paidExitCountryCode: countryCode,
-            paidExitAsn: asn,
-            paidExitIpv4: ipv4,
-            paidExitIpv6: ipv6
+            paidExitAsn: asn
         )), status: "Saving seller settings")
     }
 

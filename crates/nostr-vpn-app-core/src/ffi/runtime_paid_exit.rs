@@ -33,7 +33,7 @@ mod paid_exit {
         NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
         NativePaidRouteWalletState, Output, PaidExitSellerEgress, Path, PathBuf,
         PortMappingStatus, Result, age_secs_since, anyhow, compact_age_text,
-        effective_config_relays, ensure_success, extract_json_document, normalize_nostr_pubkey,
+        ensure_success, extract_json_document, normalize_nostr_pubkey,
         peer_offers_exit_node, short_pubkey, unix_timestamp,
     };
 

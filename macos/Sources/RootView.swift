@@ -36,8 +36,6 @@ struct RootView: View {
     @State var paidExitGraceUnits = ""
     @State var paidExitCountryCode = ""
     @State var paidExitAsn = ""
-    @State var paidExitIpv4 = true
-    @State var paidExitIpv6 = false
     @State var paidRouteMintUrl = ""
     @State var paidRouteWalletFlow: PaidRouteWalletFlow?
     @State var paidRouteTopupAmount = "1000"
