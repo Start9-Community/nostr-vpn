@@ -135,7 +135,7 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.internetPage(
                 Text("Automatic paid provider", style = MaterialTheme.typography.titleMedium)
                 Text("Experimental", color = Muted, style = MaterialTheme.typography.labelSmall)
                 Text(
-                    state.exitNodeStatusText.ifBlank { "Looking for a working provider at a reasonable price" },
+                    state.exitNodeStatusText,
                     color = Muted,
                     style = MaterialTheme.typography.bodySmall,
                 )

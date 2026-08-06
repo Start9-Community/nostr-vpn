@@ -1,12 +1,6 @@
 fn build_exit_nodes_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     page_title(page, "Internet", "");
 
-    let Some(network) = active_network(state).cloned() else {
-        build_wireguard_settings_card(app, page, state);
-        build_exit_dns_settings_card(app, page);
-        return;
-    };
-
     let exit = card();
     section_header(&exit, "Internet Source", "");
     let status_style = if state.exit_node_blocked {
@@ -22,6 +16,13 @@ fn build_exit_nodes_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) 
     )]);
     status.set_halign(gtk::Align::Start);
     exit.append(&status);
+
+    let Some(network) = active_network(state).cloned() else {
+        page.append(&exit);
+        build_wireguard_settings_card(app, page, state);
+        build_exit_dns_settings_card(app, page);
+        return;
+    };
 
     let all_exit_candidates = exit_node_candidates(&network, state);
     let show_search = all_exit_candidates.len() > SEARCH_VISIBILITY_THRESHOLD;
