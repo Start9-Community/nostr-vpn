@@ -111,7 +111,9 @@ impl AppConfig {
 
         if self.exit_node_public_paid_exit
             && self.connect_to_non_roster_fips_peers
-            && self.fips_nostr_discovery_enabled
+            && (self.internet_source == InternetSource::PaidManual
+                || (self.internet_source == InternetSource::PaidAutomatic
+                    && self.fips_nostr_discovery_enabled))
         {
             return;
         }

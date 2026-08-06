@@ -528,8 +528,9 @@ fn paid_exit_buy_and_use_select_public_exit_route() {
     assert!(!buy.daemon_reload_attempted);
     let saved = AppConfig::load(&config_path).expect("load selected config");
     assert_eq!(saved.exit_node, seller_hex);
+    assert_eq!(saved.internet_source, InternetSource::PaidManual);
     assert!(saved.connect_to_non_roster_fips_peers);
-    assert!(saved.fips_nostr_discovery_enabled);
+    assert!(!saved.fips_nostr_discovery_enabled);
     assert!(!saved.wireguard_exit.enabled);
 
     let mut reset = saved;
@@ -552,8 +553,9 @@ fn paid_exit_buy_and_use_select_public_exit_route() {
     assert!(!selected.daemon_reload_attempted);
     let saved = AppConfig::load(&config_path).expect("load used config");
     assert_eq!(saved.exit_node, seller_hex);
+    assert_eq!(saved.internet_source, InternetSource::PaidManual);
     assert!(saved.connect_to_non_roster_fips_peers);
-    assert!(saved.fips_nostr_discovery_enabled);
+    assert!(!saved.fips_nostr_discovery_enabled);
     assert!(!saved.wireguard_exit.enabled);
 
     let _ = std::fs::remove_dir_all(&dir);
