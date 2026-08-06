@@ -1,6 +1,8 @@
 
-fn ensure_paid_exit_advertisable(app: &AppConfig) -> Result<()> {
-    if app.paid_exit.access.upstream == PaidExitUpstream::WireGuardExit {
+fn paid_exit_offer_config(app: &AppConfig) -> Result<PaidExitConfig> {
+    let mut config = app.paid_exit.clone();
+    config.access.upstream = app.paid_exit_seller_egress()?.offer_upstream();
+    if config.access.upstream == PaidExitUpstream::WireGuardExit {
         if !app.wireguard_exit.configured() {
             return Err(anyhow!(
                 "paid exit is configured to resell a WireGuard upstream, but wireguard_exit is incomplete"
@@ -12,7 +14,23 @@ fn ensure_paid_exit_advertisable(app: &AppConfig) -> Result<()> {
             ));
         }
     }
+    Ok(config)
+}
+
+fn set_paid_exit_upstream(app: &mut AppConfig, value: &str) -> Result<()> {
+    let upstream = value
+        .parse::<PaidExitUpstream>()
+        .map_err(|error| anyhow!(error))?;
+    app.paid_exit.access.upstream = upstream;
+    app.set_internet_source(match upstream {
+        PaidExitUpstream::HostDefault => InternetSource::Direct,
+        PaidExitUpstream::WireGuardExit => InternetSource::WireGuard,
+    });
     Ok(())
+}
+
+fn ensure_paid_exit_advertisable(app: &AppConfig) -> Result<()> {
+    paid_exit_offer_config(app).map(drop)
 }
 
 const PAID_EXIT_SELLER_READY_TIMEOUT: Duration = Duration::from_secs(15);

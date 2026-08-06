@@ -436,9 +436,7 @@ async fn run_command(command: Command) -> Result<()> {
                     app.paid_exit.enabled = value;
                 }
                 if let Some(value) = args.paid_exit_upstream {
-                    app.paid_exit.access.upstream = value
-                        .parse::<PaidExitUpstream>()
-                        .map_err(|error| anyhow!(error))?;
+                    set_paid_exit_upstream(&mut app, &value)?;
                 }
                 if let Some(value) = args.paid_exit_price_msat_per_gb {
                     app.paid_exit.pricing.price_msat_per_gb = value;

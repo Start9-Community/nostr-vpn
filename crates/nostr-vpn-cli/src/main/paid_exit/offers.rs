@@ -85,12 +85,12 @@ fn build_local_paid_exit_offer(
     offer_id: &str,
     now_unix: u64,
 ) -> Result<LocalPaidExitOffer> {
-    ensure_paid_exit_advertisable(app)?;
-    let receiver_pubkey_hex = paid_exit_spilman_receiver_pubkey_hex(config_path, &app.paid_exit)?;
+    let config = paid_exit_offer_config(app)?;
+    let receiver_pubkey_hex = paid_exit_spilman_receiver_pubkey_hex(config_path, &config)?;
     let signed = signed_paid_exit_offer_from_config_with_receiver(
         offer_id,
         &app.nostr_keys()?,
-        &app.paid_exit,
+        &config,
         receiver_pubkey_hex.as_deref(),
         Some(PaidRouteQualityMetrics {
             last_seen_unix: Some(now_unix),

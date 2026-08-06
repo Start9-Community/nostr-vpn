@@ -219,6 +219,60 @@ fn paid_exit_run_settings_prepare_seller_transport_without_ambient_discovery() {
 
 #[cfg(feature = "paid-exit")]
 #[test]
+fn paid_exit_offer_tracks_current_source_without_resaving_seller_settings() {
+    let peer = Keys::generate().public_key().to_hex();
+    let mut app = AppConfig::generated();
+    let offer_upstream = |app: &AppConfig| {
+        paid_exit_offer_config(app)
+            .expect("advertisable offer")
+            .access
+            .upstream
+    };
+    app.set_active_network_id("paid-exit-source-switch")
+        .expect("activate network");
+    app.networks[0].devices.push(peer.clone());
+    app.wireguard_exit.address = "10.200.0.2/32".to_string();
+    app.wireguard_exit.private_key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".to_string();
+    app.wireguard_exit.peer_public_key = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=".to_string();
+    app.wireguard_exit.endpoint = "198.51.100.20:51820".to_string();
+
+    app.paid_exit.access.upstream = PaidExitUpstream::WireGuardExit;
+    assert_eq!(offer_upstream(&app), PaidExitUpstream::HostDefault);
+
+    app.paid_exit.access.upstream = PaidExitUpstream::HostDefault;
+    app.set_internet_source(InternetSource::WireGuard);
+    assert_eq!(offer_upstream(&app), PaidExitUpstream::WireGuardExit);
+
+    app.paid_exit.access.upstream = PaidExitUpstream::WireGuardExit;
+    app.set_internet_source(InternetSource::Direct);
+    assert_eq!(offer_upstream(&app), PaidExitUpstream::HostDefault);
+
+    app.select_private_exit_node(&peer)
+        .expect("select private exit");
+    assert_eq!(offer_upstream(&app), PaidExitUpstream::HostDefault);
+}
+
+#[cfg(feature = "paid-exit")]
+#[test]
+fn paid_exit_upstream_cli_setting_selects_the_same_runtime_source() {
+    let mut app = AppConfig::generated();
+
+    set_paid_exit_upstream(&mut app, "wg").expect("select WireGuard");
+    assert_eq!(app.internet_source, InternetSource::WireGuard);
+    assert!(app.wireguard_exit.enabled);
+    assert_eq!(
+        app.paid_exit.access.upstream,
+        PaidExitUpstream::WireGuardExit
+    );
+
+    set_paid_exit_upstream(&mut app, "host-default").expect("select direct internet");
+    assert_eq!(app.internet_source, InternetSource::Direct);
+    assert!(!app.wireguard_exit.enabled);
+    assert_eq!(app.paid_exit.access.upstream, PaidExitUpstream::HostDefault);
+}
+
+#[cfg(feature = "paid-exit")]
+#[test]
 fn selected_public_paid_exit_counts_as_private_fips_peer_without_active_network() {
     let seller = Keys::generate();
     let seller_pubkey = seller.public_key().to_hex();

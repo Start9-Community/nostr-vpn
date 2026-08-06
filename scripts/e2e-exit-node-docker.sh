@@ -322,7 +322,6 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 1
 EOF
   "${COMPOSE[@]}" exec -T node-a nvpn set \
-    --paid-exit-upstream wireguard-exit \
     --wireguard-exit-config-file /tmp/paid-exit-wg.conf \
     --wireguard-exit-enabled true >/dev/null
 
@@ -384,8 +383,7 @@ run_spilman_resale_matrix() {
   sleep 1
   "${COMPOSE[@]}" exec -T node-a nvpn set \
     --exit-node "$upstream_npub" \
-    --exit-node-leak-protection true \
-    --paid-exit-upstream host-default >/dev/null
+    --exit-node-leak-protection true >/dev/null
 
   local seller_route private_ready=0
   for _ in $(seq 1 80); do
@@ -418,8 +416,7 @@ run_spilman_resale_matrix() {
 
   "${COMPOSE[@]}" exec -T node-a nvpn set \
     --exit-node none \
-    --exit-node-leak-protection false \
-    --paid-exit-upstream host-default >/dev/null
+    --exit-node-leak-protection false >/dev/null
   "${COMPOSE[@]}" exec -T node-a ip route replace "$PAID_EXIT_RESALE_TARGET/32" \
     via "$PUBLIC_INTERNET_TARGET"
   assert_buyer_egress_source "$NODE_A_PUBLIC_IP" direct-restored
@@ -712,7 +709,6 @@ if truthy "$PAID_EXIT_MODE"; then
   "${COMPOSE[@]}" exec -T node-a nvpn paid-exit run \
     --config "$CONFIG_PATH" \
     --offer-id internet-exit \
-    --upstream host-default \
     --price-msat-per-gb "$PAID_EXIT_PRICE_MSAT_PER_GB" \
     --accepted-mint "$PAID_EXIT_MINT" \
     --max-channel-capacity-sat "$PAID_MAX_CHANNEL_CAPACITY_SAT" \

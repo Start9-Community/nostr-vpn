@@ -240,6 +240,9 @@ extension RootView {
         if state.internetSource == "wireguard" {
             return wireguardUpstreamSubtitle
         }
+        if state.internetSource == "private_vpn" {
+            return "Through the selected trusted device"
+        }
         return "The same connection this Mac already uses"
     }
 

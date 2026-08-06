@@ -37,7 +37,6 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
     let mut app = load_or_default_config(&config_path)?;
     apply_paid_exit_run_settings(&mut app, &args)?;
     app.ensure_defaults();
-    enable_wireguard_exit_upstream_for_paid_exit(&mut app);
     ensure_paid_exit_advertisable(&app)?;
     app.save(&config_path)?;
 
@@ -81,9 +80,7 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
 fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> Result<()> {
     app.set_paid_exit_seller_enabled(true);
     if let Some(value) = args.upstream.as_deref() {
-        app.paid_exit.access.upstream = value
-            .parse::<PaidExitUpstream>()
-            .map_err(|error| anyhow!(error))?;
+        set_paid_exit_upstream(app, value)?;
     }
     if let Some(value) = args.price_msat_per_gb {
         app.paid_exit.pricing.price_msat_per_gb = value;
@@ -115,14 +112,6 @@ fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> 
     }
     app.paid_exit.normalize();
     Ok(())
-}
-
-fn enable_wireguard_exit_upstream_for_paid_exit(app: &mut AppConfig) {
-    if app.paid_exit.access.upstream == PaidExitUpstream::WireGuardExit
-        && app.wireguard_exit.configured()
-    {
-        app.wireguard_exit.enabled = true;
-    }
 }
 
 fn paid_exit_run_accepted_mints(args: &PaidExitRunArgs) -> Result<Option<Vec<String>>> {

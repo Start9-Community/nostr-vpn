@@ -93,11 +93,11 @@ impl PaidExitOfferPublisher {
 }
 
 fn validate_paid_exit_offer_for_daemon(app: &AppConfig, signed_at: u64) -> Result<()> {
-    ensure_paid_exit_advertisable(app)?;
+    let config = paid_exit_offer_config(app)?;
     signed_paid_exit_offer_from_config_with_receiver(
         default_paid_exit_offer_id(),
         &app.nostr_keys()?,
-        &app.paid_exit,
+        &config,
         None,
         None,
         signed_at,
