@@ -64,6 +64,16 @@ impl PaidExitOfferPublisher {
         refresh: bool,
     ) -> Result<PaidExitOfferPublication> {
         let should_advertise = app.paid_exit.enabled && seller_ready;
+        if should_advertise && let Err(error) = validate_paid_exit_offer_for_daemon(app, now_unix) {
+            if self.advertised {
+                let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
+                let count = withdraw_paid_exit_offers_for_daemon(app, config_path, signed_at)?;
+                self.advertised = false;
+                self.last_created_at = signed_at;
+                return Ok(PaidExitOfferPublication::Withdrawn(count));
+            }
+            return Err(error);
+        }
         if should_advertise && (!self.advertised || refresh) {
             let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
             refresh_paid_exit_offer_for_daemon(app, config_path, signed_at)?;
@@ -80,6 +90,19 @@ impl PaidExitOfferPublisher {
         }
         Ok(PaidExitOfferPublication::None)
     }
+}
+
+fn validate_paid_exit_offer_for_daemon(app: &AppConfig, signed_at: u64) -> Result<()> {
+    ensure_paid_exit_advertisable(app)?;
+    signed_paid_exit_offer_from_config_with_receiver(
+        default_paid_exit_offer_id(),
+        &app.nostr_keys()?,
+        &app.paid_exit,
+        None,
+        None,
+        signed_at,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn log_paid_exit_offer_publication(result: Result<PaidExitOfferPublication>) {

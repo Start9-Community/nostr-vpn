@@ -78,6 +78,33 @@ fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
             .expect("republish after readiness returns"),
         PaidExitOfferPublication::Published
     );
+    app.paid_exit.channel.accepted_mints.clear();
+    let outbox = crate::control_pubsub_runtime::control_pubsub_outbox_directory(&config_path);
+    let saved_outbox = directory.join("saved-control-pubsub-outbox");
+    std::fs::rename(&outbox, &saved_outbox).expect("move offer outbox");
+    std::fs::write(&outbox, b"temporarily blocked").expect("block offer outbox path");
+    assert!(
+        publisher
+            .reconcile(&app, &config_path, now_unix + 1, true, false)
+            .expect_err("transient outbox error")
+            .to_string()
+            .contains("failed to create")
+    );
+    std::fs::remove_file(&outbox).expect("unblock offer outbox path");
+    std::fs::rename(&saved_outbox, &outbox).expect("restore offer outbox");
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix + 1, true, false)
+            .expect("withdraw offer after terms become invalid"),
+        PaidExitOfferPublication::Withdrawn(1)
+    );
+    app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix + 1, true, false)
+            .expect("republish after valid terms return"),
+        PaidExitOfferPublication::Published
+    );
     app.paid_exit.enabled = false;
     assert_eq!(
         publisher
@@ -117,6 +144,8 @@ fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
             (now_unix + 1, 0),
             (now_unix + 2, PAID_ROUTE_OFFER_TTL_SECS),
             (now_unix + 3, 0),
+            (now_unix + 4, PAID_ROUTE_OFFER_TTL_SECS),
+            (now_unix + 5, 0),
         ]
     );
 
