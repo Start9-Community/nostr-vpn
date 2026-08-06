@@ -243,6 +243,7 @@ impl FipsPrivateTunnelRuntime {
         if self.exit_route_ready != exit_route_ready || seller_readiness_changed {
             let config = self.config.clone();
             self.apply_interface_config(&config).await?;
+            self.finish_secure_dns(&config).await?;
             self.replace_paid_route_admissions(&config, seller_egress_ready)?;
             return Ok(());
         }
@@ -431,7 +432,10 @@ impl FipsPrivateTunnelRuntime {
                 }
             };
             let resolver_config = config.exit_dns_resolver_config(wireguard_active)?;
-            secure_dns.update_config(config.magic_dns_records.clone(), resolver_config)?;
+            secure_dns.update_records(config.magic_dns_records.clone());
+            // Drop connections opened before the route handoff; pooled DoH
+            // sockets keep their original path and otherwise fail until idle expiry.
+            secure_dns.reset_resolver(resolver_config)?;
         }
         if (!self.manages_secure_dns || !config.secure_dns_required())
             && let Some(secure_dns) = self.secure_dns.as_mut()

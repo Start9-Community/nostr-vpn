@@ -163,13 +163,18 @@ impl SecureDnsRuntime {
             *current = records;
         }
         if self.resolver_config != resolver_config {
-            let resolver = dns_resolver(&resolver_config)?;
-            *self
-                .resolver
-                .write()
-                .map_err(|_| anyhow!("secure DNS resolver lock poisoned"))? = resolver;
-            self.resolver_config = resolver_config;
+            self.reset_resolver(resolver_config)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn reset_resolver(&mut self, resolver_config: ExitDnsResolverConfig) -> Result<()> {
+        let resolver = dns_resolver(&resolver_config)?;
+        *self
+            .resolver
+            .write()
+            .map_err(|_| anyhow!("secure DNS resolver lock poisoned"))? = resolver;
+        self.resolver_config = resolver_config;
         Ok(())
     }
 
