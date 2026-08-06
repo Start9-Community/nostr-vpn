@@ -540,7 +540,7 @@ pub use wallet_offers::normalize_paid_route_mint_url;
 
 pub use automatic_selection::{
     PAID_ROUTE_AUTO_MAX_CHANNEL_CAPACITY_SAT, PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GIB,
-    PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES, PAID_ROUTE_AUTO_OFFER_MAX_AGE_SECS,
+    PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES,
 };
 pub use persistence::{
     acknowledge_paid_route_payment_outbox, apply_paid_route_seller_payment_file,

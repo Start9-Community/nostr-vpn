@@ -58,6 +58,46 @@ fn paid_buyer_session_with_opening_payment_allows_routing() {
 }
 
 #[test]
+fn expired_offer_cannot_open_a_buyer_session() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let signed_at = 100;
+    let signed = signed_paid_exit_offer_from_config(
+        "internet-exit",
+        &seller,
+        &sample_config(),
+        None,
+        signed_at,
+    )
+    .expect("signed offer");
+    let mut store = PaidRouteStore::default();
+    store.upsert_wallet_mint(
+        "https://mint.minibits.cash/Bitcoin",
+        "Minibits",
+        Some(10_000),
+        signed_at,
+    );
+    store
+        .upsert_signed_offer(signed, Vec::new(), signed_at)
+        .expect("store offer");
+
+    let error = store
+        .open_buyer_session(OpenPaidRouteBuyerSessionRequest {
+            offer_selector: "internet-exit".to_string(),
+            buyer_npub: buyer.public_key().to_bech32().expect("buyer npub"),
+            mint_url: None,
+            channel_capacity_sat: Some(10),
+            initial_paid_msat: 0,
+            now_unix: signed_at + crate::paid_routes::PAID_ROUTE_OFFER_TTL_SECS,
+        })
+        .expect_err("expired offer must not open a buyer session");
+
+    assert!(error.to_string().contains("expired"));
+    assert!(store.sessions.is_empty());
+    assert!(store.channels.is_empty());
+}
+
+#[test]
 fn paid_route_store_path_sits_next_to_config() {
     let path = paid_route_store_file_path(Path::new("/tmp/nvpn/config.toml"));
 

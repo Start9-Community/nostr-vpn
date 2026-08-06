@@ -168,6 +168,59 @@ mod paid_exit {
             assert_eq!(paid_route_top_up_activity_status(&value, "missing"), None);
         }
 
+        #[test]
+        fn persisted_market_hides_expired_offers() {
+            let now = unix_timestamp();
+            let expired_seller = nostr_sdk::Keys::generate();
+            let live_seller = nostr_sdk::Keys::generate();
+            let config = PaidExitConfig {
+                enabled: true,
+                ..PaidExitConfig::default()
+            };
+            let expired = nostr_vpn_core::paid_routes::signed_paid_exit_offer_from_config(
+                "expired",
+                &expired_seller,
+                &config,
+                None,
+                now - nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS,
+            )
+            .expect("expired offer");
+            let live = nostr_vpn_core::paid_routes::signed_paid_exit_offer_from_config(
+                "live",
+                &live_seller,
+                &config,
+                None,
+                now,
+            )
+            .expect("live offer");
+            let mut store = PaidRouteStore::default();
+            store
+                .upsert_signed_offer(expired, Vec::new(), now)
+                .expect("store expired offer");
+            store
+                .upsert_signed_offer(live, Vec::new(), now)
+                .expect("store live offer");
+            let directory = std::env::temp_dir().join(format!(
+                "nvpn-market-liveness-{}-{now}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).expect("create market test directory");
+            let path = directory.join("paid-routes.json");
+            write_paid_route_store(&path, &store).expect("write market store");
+
+            let state = paid_route_market_state(
+                Some(&AppConfig::generated()),
+                &path,
+                &NativePaidRouteMarketFilterState::default(),
+                &NativePaidRouteWalletActionState::default(),
+                &NativePaidRoutePaymentActionState::default(),
+            );
+
+            assert_eq!(state.offers.len(), 1);
+            assert_eq!(state.offers[0].offer_id, "live");
+            std::fs::remove_dir_all(directory).expect("remove market test directory");
+        }
+
         fn offer(
             key: &str,
             rating_score: Option<i64>,

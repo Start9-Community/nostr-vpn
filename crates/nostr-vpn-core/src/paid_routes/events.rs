@@ -182,6 +182,21 @@ impl SignedPaidRouteOffer {
     pub fn offer(&self) -> Result<PaidRouteOffer> {
         serde_json::from_str(&self.event.content).context("failed to decode paid route offer")
     }
+
+    pub fn is_live_at(&self, now_unix: u64) -> bool {
+        let signed_at = self.event.created_at.as_secs();
+        if signed_at > now_unix.saturating_add(PAID_ROUTE_OFFER_FUTURE_SKEW_SECS) {
+            return false;
+        }
+        let protocol_expiry = signed_at.saturating_add(PAID_ROUTE_OFFER_TTL_SECS);
+        let expiry = self
+            .event
+            .tags
+            .expiration()
+            .map(|expiry| expiry.as_secs().min(protocol_expiry))
+            .unwrap_or(protocol_expiry);
+        now_unix < expiry
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

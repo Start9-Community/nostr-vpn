@@ -26,6 +26,7 @@ use nostr_vpn_core::control_pubsub::{
     CONTROL_PUBSUB_MAX_EVENT_BYTES, CONTROL_PUBSUB_MAX_WIRE_BYTES, FIPS_PEER_ADVERT_KIND,
     PAID_EXIT_OFFER_KIND, RATING_FACT_KIND,
 };
+use nostr_vpn_core::paid_routes::SignedPaidRouteOffer;
 use nostr_vpn_core::updater::{UpdateEventCache, configured_update_ref};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -617,9 +618,9 @@ async fn publish_policy_maintenance(context: PublishContext<'_>) {
         .events
         .lock()
         .await
-        .prune_expired_ratings(now / 1_000)
+        .prune_expired_events(now / 1_000)
     {
-        tracing::warn!(%error, "failed to prune expired control pubsub ratings");
+        tracing::warn!(%error, "failed to prune expired control pubsub events");
     }
     let policy_events = match context
         .pubsub_policy

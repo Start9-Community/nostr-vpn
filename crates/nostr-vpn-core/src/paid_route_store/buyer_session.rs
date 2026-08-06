@@ -5,9 +5,14 @@ impl PaidRouteStore {
         &mut self,
         request: OpenPaidRouteBuyerSessionRequest,
     ) -> Result<OpenPaidRouteBuyerSessionResult> {
-        let (offer_key, offer) = self
-            .resolve_offer(&request.offer_selector)
-            .map(|(key, record)| (key, record.offer.clone()))?;
+        let (offer_key, record) = self.resolve_offer(&request.offer_selector)?;
+        if !record.signed_offer.is_live_at(request.now_unix) {
+            return Err(anyhow!(
+                "paid route offer '{}' expired; discover sellers again",
+                request.offer_selector.trim()
+            ));
+        }
+        let offer = record.offer.clone();
         let buyer_npub = normalize_paid_route_npub(&request.buyer_npub, "buyer")?;
         let mint_url = select_buyer_mint(&offer, &self.wallet, request.mint_url.as_deref())?;
         let capacity_sat = requested_channel_capacity(&offer, request.channel_capacity_sat)?;

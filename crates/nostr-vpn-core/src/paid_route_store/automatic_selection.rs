@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 
 use super::{persistence::*, *};
 
-pub const PAID_ROUTE_AUTO_OFFER_MAX_AGE_SECS: u64 = 6 * 60 * 60;
 pub const PAID_ROUTE_AUTO_MAX_PRICE_MSAT_PER_GIB: u64 = 100_000;
 pub const PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES: u64 = 1024 * 1024;
 pub const PAID_ROUTE_AUTO_MAX_CHANNEL_CAPACITY_SAT: u64 = 1_000;
@@ -62,8 +61,7 @@ impl PaidRouteStore {
         let signed_at_unix = record.signed_offer.event.created_at.as_secs();
         if offer != record.offer
             || paid_route_offer_store_key(&offer.seller_npub, &offer.offer_id) != key
-            || signed_at_unix > now_unix.saturating_add(FUTURE_CLOCK_SKEW_SECS)
-            || now_unix.saturating_sub(signed_at_unix) > PAID_ROUTE_AUTO_OFFER_MAX_AGE_SECS
+            || !record.signed_offer.is_live_at(now_unix)
             || !offer.ip_support.ipv4
             || offer.channel.free_probe_units < PAID_ROUTE_AUTO_MIN_FREE_PROBE_BYTES
             || offer.pricing.per_units == 0

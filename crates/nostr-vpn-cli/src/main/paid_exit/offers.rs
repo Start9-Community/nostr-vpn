@@ -143,13 +143,10 @@ fn paid_exit_offer_event_is_live(
     retention_policy: &nostr_pubsub::EventRetentionPolicy,
     now_unix: u64,
 ) -> bool {
-    event
-        .tags
-        .expiration()
-        .is_none_or(|expiration| expiration.as_secs() > now_unix)
-        && nostr_pubsub::VerifiedEvent::try_from(event.clone())
-            .is_ok_and(|verified| retention_policy.accepts(&verified))
-        && SignedPaidRouteOffer::from_event(event.clone()).is_ok()
+    nostr_pubsub::VerifiedEvent::try_from(event.clone())
+        .is_ok_and(|verified| retention_policy.accepts(&verified))
+        && SignedPaidRouteOffer::from_event(event.clone())
+            .is_ok_and(|signed| signed.is_live_at(now_unix))
 }
 
 async fn wait_for_paid_exit_control_events(

@@ -418,6 +418,9 @@ fn signed_offer_event_roundtrips_without_raw_exit_endpoint() {
     assert_eq!(signed.event.created_at.as_secs(), 123);
     assert_eq!(signed.offer().expect("decode offer"), offer);
     SignedPaidRouteOffer::from_event(signed.event.clone()).expect("verify signed offer");
+    assert!(signed.is_live_at(123));
+    assert!(signed.is_live_at(123 + PAID_ROUTE_OFFER_TTL_SECS - 1));
+    assert!(!signed.is_live_at(123 + PAID_ROUTE_OFFER_TTL_SECS));
 
     let tags = signed
         .event
@@ -467,7 +470,10 @@ fn signed_offer_event_roundtrips_without_raw_exit_endpoint() {
         tags.contains(&vec!["private_vpn_access".to_string(), "denied".to_string()].as_slice())
     );
     assert!(tags.contains(&vec!["country".to_string(), "FI".to_string()].as_slice()));
-    assert!(tags.contains(&vec!["network_class".to_string(), "satellite".to_string()].as_slice()));
+    assert!(!tags.iter().any(|tag| {
+        tag.first()
+            .is_some_and(|name| name == "region" || name == "network_class")
+    }));
     assert!(tags.contains(&vec!["ip".to_string(), "ipv4".to_string()].as_slice()));
     assert!(
         tags.contains(

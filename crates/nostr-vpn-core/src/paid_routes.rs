@@ -22,6 +22,7 @@ pub const PAID_ROUTE_OFFER_VERSION: &str = "3";
 pub const PAID_ROUTE_OFFER_APP: &str = "fips/paid-route-offer";
 /// Signed seller listings expire if the seller stops refreshing them.
 pub const PAID_ROUTE_OFFER_TTL_SECS: u64 = 3_600;
+const PAID_ROUTE_OFFER_FUTURE_SKEW_SECS: u64 = 5 * 60;
 pub const DEFAULT_FIPS_PEER_RATING_SCOPE: &str = "fips.peer";
 
 const DEFAULT_PRICE_DENOMINATOR_UNITS: u64 = 1_000_000;

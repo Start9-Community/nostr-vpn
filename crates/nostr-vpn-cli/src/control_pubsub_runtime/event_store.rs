@@ -96,8 +96,37 @@ impl ControlEventStore {
         if self.events.contains_key(&event_id) {
             return false;
         }
+        let now_secs = now_ms() / 1_000;
+        let paid_offer = if u16::from(event.kind) == PAID_EXIT_OFFER_KIND {
+            let Some(state) = paid_offer_state(&event, now_secs) else {
+                return false;
+            };
+            Some(state)
+        } else {
+            None
+        };
+        if let Some((coordinate, is_live)) = paid_offer {
+            let replaced = self.events.iter().find_map(|(stored_id, stored)| {
+                (paid_offer_coordinate(stored).as_ref() == Some(&coordinate)).then(|| {
+                    (stored_id.clone(), stored.created_at, stored.id)
+                })
+            });
+            if let Some((stored_id, stored_created_at, stored_event_id)) = replaced {
+                if stored_created_at > event.created_at
+                    || (stored_created_at == event.created_at && stored_event_id < event.id)
+                {
+                    return false;
+                }
+                self.remove_memory(&stored_id);
+            } else if !is_live {
+                return false;
+            }
+            if !is_live {
+                return true;
+            }
+        }
         let rating = if u16::from(event.kind) == RATING_FACT_KIND {
-            let Some((rating_key, created_at)) = retained_rating_event(&event, now_ms() / 1_000)
+            let Some((rating_key, created_at)) = retained_rating_event(&event, now_secs)
             else {
                 return false;
             };
@@ -188,8 +217,8 @@ impl ControlEventStore {
             .collect()
     }
 
-    fn prune_expired_ratings(&mut self, now_secs: u64) -> Result<usize> {
-        let remove = self
+    fn prune_expired_events(&mut self, now_secs: u64) -> Result<usize> {
+        let mut remove = self
             .rating_events
             .iter()
             .filter(|(_, stored)| {
@@ -197,6 +226,17 @@ impl ControlEventStore {
             })
             .map(|(_, stored)| stored.event_id.clone())
             .collect::<Vec<_>>();
+        remove.extend(
+            self.events
+                .iter()
+                .filter(|(_, event)| {
+                    u16::from(event.kind) == PAID_EXIT_OFFER_KIND
+                        && retained_paid_offer_coordinate(event, now_secs).is_none()
+                })
+                .map(|(event_id, _)| event_id.clone()),
+        );
+        remove.sort();
+        remove.dedup();
         if remove.is_empty() {
             return Ok(0);
         }
@@ -242,6 +282,30 @@ fn control_event_is_persistent(event: &Event) -> bool {
     u16::from(event.kind) != FIPS_PEER_ADVERT_KIND
 }
 
+fn paid_offer_coordinate(event: &Event) -> Option<(u16, String, String)> {
+    if u16::from(event.kind) != PAID_EXIT_OFFER_KIND {
+        return None;
+    }
+    Some((
+        u16::from(event.kind),
+        event.pubkey.to_hex(),
+        event.tags.identifier()?.to_string(),
+    ))
+}
+
+fn retained_paid_offer_coordinate(event: &Event, now_secs: u64) -> Option<(u16, String, String)> {
+    let (coordinate, is_live) = paid_offer_state(event, now_secs)?;
+    is_live.then_some(coordinate)
+}
+
+fn paid_offer_state(event: &Event, now_secs: u64) -> Option<((u16, String, String), bool)> {
+    let signed = SignedPaidRouteOffer::from_event(event.clone()).ok()?;
+    Some((
+        paid_offer_coordinate(&signed.event)?,
+        signed.is_live_at(now_secs),
+    ))
+}
+
 fn retained_rating_event(event: &Event, now_secs: u64) -> Option<(RatingEventStoreKey, u64)> {
     let (key, created_at) = rating_event_store_key(event)?;
     if created_at > now_secs.saturating_add(PEER_RATING_MAX_FUTURE_SKEW.as_secs())
@@ -274,9 +338,12 @@ fn rating_event_store_key(event: &Event) -> Option<(RatingEventStoreKey, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use nostr_sdk::{EventBuilder, ToBech32};
+    use nostr_sdk::{EventBuilder, Tag, Timestamp, ToBech32};
     use nostr_social_graph::Rating;
     use nostr_social_memory::RatingEventExt;
+    use nostr_vpn_core::paid_routes::{
+        PAID_ROUTE_OFFER_TTL_SECS, PaidExitConfig, signed_paid_exit_offer_from_config,
+    };
 
     use super::*;
 
@@ -335,8 +402,62 @@ mod tests {
         assert!(store.insert(rating).expect("insert rating"));
         assert_eq!(
             store
-                .prune_expired_ratings(created_at + PEER_RATING_MAX_AGE.as_secs() + 1)
+                .prune_expired_events(created_at + PEER_RATING_MAX_AGE.as_secs() + 1)
                 .expect("prune ratings"),
+            1
+        );
+        assert!(store.snapshot().is_empty());
+    }
+
+    #[test]
+    fn paid_offer_refreshes_replace_the_same_author_and_identifier() {
+        let seller = Keys::generate();
+        let other_seller = Keys::generate();
+        let now = now_ms() / 1_000;
+        let mut store =
+            ControlEventStore::load(None, test_update_events()).expect("event store");
+        let older = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1), None);
+        let newer = paid_offer_event(&seller, "internet-exit", now, None);
+        let other = paid_offer_event(&other_seller, "internet-exit", now, None);
+
+        assert!(store.insert(older.clone()).expect("insert older offer"));
+        assert!(store.insert(other.clone()).expect("insert other seller"));
+        assert!(store.insert(newer.clone()).expect("insert refreshed offer"));
+        assert!(!store.insert(older).expect("reject stale refresh"));
+
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.contains(&newer));
+        assert!(snapshot.contains(&other));
+    }
+
+    #[test]
+    fn expired_replacement_withdraws_the_previous_paid_offer() {
+        let seller = Keys::generate();
+        let now = now_ms() / 1_000;
+        let mut store =
+            ControlEventStore::load(None, test_update_events()).expect("event store");
+        let live = paid_offer_event(&seller, "internet-exit", now.saturating_sub(1), None);
+        let withdrawal = paid_offer_event(&seller, "internet-exit", now, Some(now));
+
+        assert!(store.insert(live).expect("insert live offer"));
+        assert!(store.insert(withdrawal).expect("withdraw live offer"));
+        assert!(store.snapshot().is_empty());
+    }
+
+    #[test]
+    fn maintenance_prunes_expired_paid_offers() {
+        let seller = Keys::generate();
+        let signed_at = now_ms() / 1_000;
+        let mut store =
+            ControlEventStore::load(None, test_update_events()).expect("event store");
+        let offer = paid_offer_event(&seller, "internet-exit", signed_at, None);
+
+        assert!(store.insert(offer).expect("insert paid offer"));
+        assert_eq!(
+            store
+                .prune_expired_events(signed_at + PAID_ROUTE_OFFER_TTL_SECS)
+                .expect("prune expired events"),
             1
         );
         assert!(store.snapshot().is_empty());
@@ -416,5 +537,34 @@ mod tests {
         rating.scope = Some(scope.to_string());
         rating.created_at = created_at;
         rating.to_event(author).expect("signed rating")
+    }
+
+    fn paid_offer_event(
+        author: &Keys,
+        offer_id: &str,
+        signed_at: u64,
+        expires_at: Option<u64>,
+    ) -> Event {
+        let config = PaidExitConfig {
+            enabled: true,
+            ..PaidExitConfig::default()
+        };
+        let signed = signed_paid_exit_offer_from_config(offer_id, author, &config, None, signed_at)
+            .expect("signed paid offer")
+            .event;
+        let Some(expires_at) = expires_at else {
+            return signed;
+        };
+        let tags = signed
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) != Some("expiration"))
+            .cloned()
+            .chain([Tag::expiration(Timestamp::from(expires_at))]);
+        EventBuilder::new(signed.kind, signed.content)
+            .tags(tags)
+            .custom_created_at(signed.created_at)
+            .sign_with_keys(author)
+            .expect("signed paid offer with custom expiry")
     }
 }

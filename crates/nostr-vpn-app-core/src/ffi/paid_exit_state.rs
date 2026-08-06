@@ -361,9 +361,11 @@ fn paid_route_market_state(
         }
     };
 
+    let now_unix = unix_timestamp();
     let mut offers = store
         .offers
         .iter()
+        .filter(|(_, record)| record.signed_offer.is_live_at(now_unix))
         .map(|(key, record)| paid_route_offer_state(key, record))
         .collect::<Vec<_>>();
     offers.sort_by(|left, right| paid_route_offer_order(left, right, "quality"));
