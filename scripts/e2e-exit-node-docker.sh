@@ -424,7 +424,7 @@ run_spilman_resale_matrix() {
 }
 
 assert_secure_exit_dns() {
-  local dns_result doh_capture_status doh_packets doh_pid no53_capture_status no53_packets no53_pid resolver_nameservers
+  local dns_result doh_capture_status doh_packets doh_pid https_status no53_capture_status no53_packets no53_pid resolver_nameservers
 
   "${COMPOSE[@]}" exec -T node-b sh -lc \
     "rm -f /tmp/nvpn-secure-dns-no53.pcap /tmp/nvpn-secure-dns-doh.pcap"
@@ -452,6 +452,14 @@ assert_secure_exit_dns() {
     echo "exit-node docker e2e failed: secure DNS did not resolve example.com" >&2
     exit 1
   fi
+  https_status="$("${COMPOSE[@]}" exec -T node-b curl --silent --show-error \
+    --noproxy '*' --resolve cloudflare-dns.com:443:1.1.1.1 \
+    --connect-timeout 4 --max-time 8 --output /dev/null --write-out '%{http_code}' \
+    https://cloudflare-dns.com/cdn-cgi/trace | tr -d '\r')"
+  if [[ "$https_status" != 200 ]]; then
+    echo "exit-node docker e2e failed: HTTPS through the selected exit returned $https_status" >&2
+    exit 1
+  fi
   if [[ "$resolver_nameservers" != "127.0.0.1" ]]; then
     echo "exit-node docker e2e failed: buyer resolver was not pinned exclusively to localhost" >&2
     printf '%s\n' "$resolver_nameservers" >&2
@@ -470,6 +478,7 @@ assert_secure_exit_dns() {
   fi
 
   printf '%s\n' "$dns_result" >/tmp/nvpn-exit-node-secure-dns.log
+  printf 'HTTPS status: %s\n' "$https_status" >>/tmp/nvpn-exit-node-secure-dns.log
   printf '%s\n' "$doh_packets" >>/tmp/nvpn-exit-node-secure-dns.log
 }
 
