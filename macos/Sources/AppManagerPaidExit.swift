@@ -38,9 +38,7 @@ extension AppManager {
             paidExitFreeProbeUnits: Self.parsePaidExitTrafficUnits(freeProbeUnits),
             paidExitGraceUnits: Self.parsePaidExitTrafficUnits(graceUnits),
             paidExitCountryCode: countryCode,
-            paidExitRegion: "",
             paidExitAsn: asn,
-            paidExitNetworkClass: "unknown",
             paidExitIpv4: ipv4,
             paidExitIpv6: ipv6
         )), status: "Saving seller settings")
@@ -323,7 +321,6 @@ extension AppManager {
             .setPaidRouteMarketFilter(
                 query: "",
                 countryCode: Self.emptyAllFilter(countryCode),
-                networkClass: "",
                 mintUrl: "",
                 requireIpv4: false,
                 requireIpv6: false,

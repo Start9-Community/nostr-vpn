@@ -218,7 +218,6 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
                 NativeAppAction::SetPaidRouteMarketFilter {
                     query: String::new(),
                     country_code: drafts.paid_route_country.trim().to_string(),
-                    network_class: String::new(),
                     mint_url: String::new(),
                     require_ipv4: false,
                     require_ipv6: false,
@@ -240,7 +239,6 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
                 NativeAppAction::SetPaidRouteMarketFilter {
                     query: String::new(),
                     country_code: String::new(),
-                    network_class: String::new(),
                     mint_url: String::new(),
                     require_ipv4: false,
                     require_ipv6: false,

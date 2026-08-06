@@ -651,9 +651,7 @@ exit 0
                 paid_exit_free_probe_units: Some(65_536),
                 paid_exit_grace_units: Some(131_072),
                 paid_exit_country_code: Some("fi".to_string()),
-                paid_exit_region: Some("Uusimaa".to_string()),
                 paid_exit_asn: Some("AS12345".to_string()),
-                paid_exit_network_class: Some("dc".to_string()),
                 paid_exit_ipv4: Some(true),
                 paid_exit_ipv6: Some(false),
                 paid_exit_rating_file: Some(" ratings.json ".to_string()),
@@ -684,9 +682,7 @@ exit 0
         assert_eq!(saved.paid_exit.channel.free_probe_units, 65_536);
         assert_eq!(saved.paid_exit.channel.grace_units, 131_072);
         assert_eq!(saved.paid_exit.location.country_code, "FI");
-        assert!(saved.paid_exit.location.region.is_empty());
         assert_eq!(saved.paid_exit.location.asn, Some(12_345));
-        assert_eq!(saved.paid_exit.location.network_class.as_str(), "unknown");
         assert!(saved.paid_exit.ip_support.ipv4);
         assert!(!saved.paid_exit.ip_support.ipv6);
         assert_eq!(saved.paid_exit.rating_discovery.file, "ratings.json");

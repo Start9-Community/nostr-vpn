@@ -90,9 +90,7 @@ public sealed class SettingsPatch
     public ulong? PaidExitFreeProbeUnits { get; set; }
     public ulong? PaidExitGraceUnits { get; set; }
     public string? PaidExitCountryCode { get; set; }
-    public string? PaidExitRegion { get; set; }
     public string? PaidExitAsn { get; set; }
-    public string? PaidExitNetworkClass { get; set; }
     public bool? PaidExitIpv4 { get; set; }
     public bool? PaidExitIpv6 { get; set; }
     public bool? FipsHostTunnelEnabled { get; set; }

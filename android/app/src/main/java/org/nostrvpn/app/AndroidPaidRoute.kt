@@ -567,7 +567,6 @@ private fun dispatchPaidRouteMarketFilter(
     dispatch(
         NativeActions.setPaidRouteMarketFilter(
             countryCode = country.trim(),
-            networkClass = "",
             requireIpv4 = requireIpv4,
             requireIpv6 = requireIpv6,
             sort = sort.ifBlank { "quality" },

@@ -335,19 +335,10 @@ pub(super) fn paid_route_offer_tags(offer: &PaidRouteOffer) -> Result<Vec<Tag>> 
             offer.location.country_code.trim(),
         ])?);
     }
-    if !offer.location.region.trim().is_empty() {
-        tags.push(paid_route_tag(&["region", offer.location.region.trim()])?);
-    }
     if let Some(asn) = offer.location.asn {
         tags.push(paid_route_owned_tag(vec![
             "asn".to_string(),
             asn.to_string(),
-        ])?);
-    }
-    if offer.location.network_class != ExitNetworkClass::Unknown {
-        tags.push(paid_route_tag(&[
-            "network_class",
-            offer.location.network_class.as_str(),
         ])?);
     }
     if offer.ip_support.ipv4 {

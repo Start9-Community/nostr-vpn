@@ -151,7 +151,6 @@ object NativeActions {
     fun setPaidRouteMarketFilter(
         query: String = "",
         countryCode: String = "",
-        networkClass: String = "",
         mintUrl: String = "",
         requireIpv4: Boolean = false,
         requireIpv6: Boolean = false,
@@ -160,7 +159,6 @@ object NativeActions {
         "set_paid_route_market_filter",
         "query" to query,
         "countryCode" to countryCode,
-        "networkClass" to networkClass,
         "mintUrl" to mintUrl,
         "requireIpv4" to requireIpv4,
         "requireIpv6" to requireIpv6,

@@ -104,47 +104,6 @@ pub struct PaidRouteAccessPolicy {
     pub private_vpn_access: PaidRoutePrivateVpnAccess,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ExitNetworkClass {
-    #[default]
-    Unknown,
-    Datacenter,
-    Residential,
-    Mobile,
-    Satellite,
-    CommunityMesh,
-}
-
-impl ExitNetworkClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Datacenter => "datacenter",
-            Self::Residential => "residential",
-            Self::Mobile => "mobile",
-            Self::Satellite => "satellite",
-            Self::CommunityMesh => "community_mesh",
-        }
-    }
-}
-
-impl FromStr for ExitNetworkClass {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match normalize_enum_value(value).as_str() {
-            "" | "unknown" => Ok(Self::Unknown),
-            "datacenter" | "data_center" | "dc" | "hosting" => Ok(Self::Datacenter),
-            "residential" | "home" => Ok(Self::Residential),
-            "mobile" | "cellular" | "lte" | "5g" => Ok(Self::Mobile),
-            "satellite" | "starlink" => Ok(Self::Satellite),
-            "community_mesh" | "mesh" | "community" => Ok(Self::CommunityMesh),
-            _ => Err(format!("unsupported exit network class '{value}'")),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRouteIpSupport {
     #[serde(default = "default_true")]
@@ -166,18 +125,8 @@ impl Default for PaidRouteIpSupport {
 pub struct PaidRouteLocationHint {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub country_code: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asn: Option<u32>,
-    #[serde(default, skip_serializing_if = "ExitNetworkClass::is_unknown")]
-    pub network_class: ExitNetworkClass,
-}
-
-impl ExitNetworkClass {
-    fn is_unknown(value: &Self) -> bool {
-        *value == Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -449,8 +398,6 @@ impl PaidExitConfig {
         accepted_mints.dedup();
         self.channel.accepted_mints = accepted_mints;
         self.location.country_code = normalize_paid_route_country_code(&self.location.country_code);
-        self.location.region.clear();
-        self.location.network_class = ExitNetworkClass::Unknown;
         self.rating_discovery.normalize();
     }
 

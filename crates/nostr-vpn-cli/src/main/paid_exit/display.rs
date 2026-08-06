@@ -21,9 +21,7 @@ fn paid_exit_status_json(app: &AppConfig) -> serde_json::Value {
         "grace_units": config.channel.grace_units,
         "grace_text": paid_exit_binary_bytes_text(config.channel.grace_units),
         "country_code": &config.location.country_code,
-        "region": &config.location.region,
         "asn": config.location.asn,
-        "network_class": config.location.network_class.as_str(),
         "ipv4": config.ip_support.ipv4,
         "ipv6": config.ip_support.ipv6,
     })

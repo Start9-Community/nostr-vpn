@@ -134,9 +134,7 @@ public sealed class NativePaidExitSellerState
     public ulong GraceUnits { get; set; }
     public string GraceText { get; set; } = "";
     public string CountryCode { get; set; } = "";
-    public string Region { get; set; } = "";
     public uint Asn { get; set; }
-    public string NetworkClass { get; set; } = "";
     public bool Ipv4 { get; set; }
     public bool Ipv6 { get; set; }
     public ulong ChannelCreditMsat { get; set; }
@@ -250,9 +248,7 @@ public sealed class NativePaidRouteOfferState
     public ulong GraceUnits { get; set; }
     public string GraceText { get; set; } = "";
     public string CountryCode { get; set; } = "";
-    public string Region { get; set; } = "";
     public uint Asn { get; set; }
-    public string NetworkClass { get; set; } = "";
     public bool Ipv4 { get; set; }
     public bool Ipv6 { get; set; }
     public bool HasQuality { get; set; }
@@ -268,7 +264,6 @@ public sealed class NativePaidRouteOfferState
     public ulong LastSeenUnix { get; set; }
     public List<string> RelayUrls { get; set; } = [];
     public string DisplayCountry => string.IsNullOrWhiteSpace(CountryCode) ? "Unknown country" : CountryCode.ToUpperInvariant();
-    public string DisplayNetworkClass => NativeDisplayText.NetworkClassTitle(NetworkClass);
     public string DisplayPrice => PriceText;
     public string DisplayMetricText => NativeDisplayText.MetricText(QualityText, BandwidthText);
 }
@@ -655,17 +650,6 @@ internal static class NativeDisplayText
         }
         return string.Join(" · ", parts);
     }
-
-    public static string NetworkClassTitle(string value) => value switch
-    {
-        "datacenter" => "Datacenter",
-        "residential" => "Residential",
-        "mobile" => "Mobile",
-        "satellite" => "Satellite",
-        "community_mesh" => "Community mesh",
-        "unknown" or "" => "Unknown",
-        _ => value.Replace('_', ' '),
-    };
 
     public static string PaidExitUpstreamTitle(string value) => value switch
     {

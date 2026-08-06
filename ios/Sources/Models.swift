@@ -361,9 +361,7 @@ struct PaidExitSellerState: Decodable, Equatable {
     var graceUnits: UInt64 = 0
     var graceText = ""
     var countryCode = ""
-    var region = ""
     var asn: UInt32 = 0
-    var networkClass = ""
     var ipv4 = false
     var ipv6 = false
     var channelCreditMsat: UInt64 = 0
@@ -478,9 +476,7 @@ struct PaidRouteOfferState: Decodable, Identifiable, Equatable {
     var graceUnits: UInt64 = 0
     var graceText = ""
     var countryCode = ""
-    var region = ""
     var asn: UInt32 = 0
-    var networkClass = ""
     var ipv4 = false
     var ipv6 = false
     var hasQuality = false
@@ -567,7 +563,6 @@ struct PaidRouteSessionState: Decodable, Identifiable, Equatable {
 struct PaidRouteMarketFilterState: Decodable, Equatable {
     var query = ""
     var countryCode = ""
-    var networkClass = ""
     var mintUrl = ""
     var requireIpv4 = false
     var requireIpv6 = false
@@ -589,7 +584,6 @@ struct PaidRouteMarketState: Decodable, Equatable {
     var visibleOffers: [PaidRouteOfferState] = []
     var hiddenOfferCount: UInt64 = 0
     var countryOptions: [String] = []
-    var networkClassOptions: [String] = []
     var channels: [PaidRouteChannelState] = []
     var sessions: [PaidRouteSessionState] = []
 

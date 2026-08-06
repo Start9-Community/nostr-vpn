@@ -217,14 +217,8 @@ impl NativeAppRuntime {
             self.config.paid_exit.location.country_code =
                 normalize_paid_route_country_code(&value);
         }
-        if patch.paid_exit_region.is_some() {
-            self.config.paid_exit.location.region.clear();
-        }
         if let Some(value) = patch.paid_exit_asn {
             self.config.paid_exit.location.asn = parse_optional_asn(&value)?;
-        }
-        if patch.paid_exit_network_class.is_some() {
-            self.config.paid_exit.location.network_class = ExitNetworkClass::Unknown;
         }
         if let Some(value) = patch.paid_exit_ipv4 {
             self.config.paid_exit.ip_support.ipv4 = value;

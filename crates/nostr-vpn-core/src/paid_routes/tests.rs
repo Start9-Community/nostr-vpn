@@ -26,9 +26,7 @@ fn paid_exit_config_normalizes_operator_hints() {
         },
         location: PaidRouteLocationHint {
             country_code: "fi".to_string(),
-            region: " Uusimaa ".to_string(),
             asn: Some(12_345),
-            network_class: ExitNetworkClass::Residential,
         },
         ip_support: PaidRouteIpSupport::default(),
         rating_discovery: PaidExitRatingDiscoveryConfig {
@@ -58,8 +56,6 @@ fn paid_exit_config_normalizes_operator_hints() {
         ]
     );
     assert_eq!(config.location.country_code, "FI");
-    assert!(config.location.region.is_empty());
-    assert_eq!(config.location.network_class, ExitNetworkClass::Unknown);
     assert_eq!(config.rating_discovery.file, "ratings.json");
     assert_eq!(
         config.rating_discovery.relays,
@@ -367,7 +363,6 @@ fn offer_json_does_not_publish_raw_exit_ip() {
         channel: PaidRouteChannelTerms::default(),
         location: PaidRouteLocationHint {
             country_code: "FI".to_string(),
-            network_class: ExitNetworkClass::Satellite,
             ..PaidRouteLocationHint::default()
         },
         ip_support: PaidRouteIpSupport::default(),
@@ -376,7 +371,6 @@ fn offer_json_does_not_publish_raw_exit_ip() {
 
     let json = serde_json::to_string(&offer).expect("serialize offer");
     assert!(json.contains("country_code"));
-    assert!(json.contains("satellite"));
     assert!(!json.contains("public_ip"));
     assert!(!json.contains("publicIp"));
     assert!(!json.contains("realized_exit_ip"));
@@ -386,11 +380,7 @@ fn offer_json_does_not_publish_raw_exit_ip() {
 }
 
 #[test]
-fn enum_parsers_accept_user_friendly_spellings() {
-    assert_eq!(
-        "community-mesh".parse::<ExitNetworkClass>(),
-        Ok(ExitNetworkClass::CommunityMesh)
-    );
+fn paid_exit_upstream_parser_accepts_user_friendly_spelling() {
     assert_eq!(
         "wg".parse::<PaidExitUpstream>(),
         Ok(PaidExitUpstream::WireGuardExit)
@@ -462,10 +452,6 @@ fn signed_offer_event_roundtrips_without_raw_exit_endpoint() {
         tags.contains(&vec!["private_vpn_access".to_string(), "denied".to_string()].as_slice())
     );
     assert!(tags.contains(&vec!["country".to_string(), "FI".to_string()].as_slice()));
-    assert!(!tags.iter().any(|tag| {
-        tag.first()
-            .is_some_and(|name| name == "region" || name == "network_class")
-    }));
     assert!(tags.contains(&vec!["ip".to_string(), "ipv4".to_string()].as_slice()));
     assert!(
         tags.contains(
@@ -534,8 +520,6 @@ fn signed_offer_event_includes_spilman_receiver_pubkey_when_present() {
     let offer = signed.offer().expect("decode offer");
 
     assert_eq!(offer.receiver_pubkey_hex, receiver_pubkey_hex);
-    assert!(offer.location.region.is_empty());
-    assert_eq!(offer.location.network_class, ExitNetworkClass::Unknown);
     assert!(signed.event.tags.iter().any(|tag| {
         tag.as_slice() == ["receiver_pubkey".to_string(), receiver_pubkey_hex.clone()].as_slice()
     }));
@@ -771,9 +755,7 @@ fn sample_paid_exit_config() -> PaidExitConfig {
         },
         location: PaidRouteLocationHint {
             country_code: "FI".to_string(),
-            region: "Uusimaa".to_string(),
             asn: Some(14593),
-            network_class: ExitNetworkClass::Satellite,
         },
         ip_support: PaidRouteIpSupport {
             ipv4: true,

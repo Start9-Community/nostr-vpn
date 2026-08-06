@@ -196,7 +196,6 @@ pub enum NativeAppAction {
     SetPaidRouteMarketFilter {
         query: String,
         country_code: String,
-        network_class: String,
         mint_url: String,
         require_ipv4: bool,
         require_ipv6: bool,
@@ -469,7 +468,6 @@ mod tests {
         let filter = NativeAppAction::SetPaidRouteMarketFilter {
             query: "fiber".to_string(),
             country_code: "FI".to_string(),
-            network_class: "residential".to_string(),
             mint_url: "https://mint.example".to_string(),
             require_ipv4: true,
             require_ipv6: false,
@@ -478,7 +476,7 @@ mod tests {
         let encoded = serde_json::to_string(&filter).expect("serialize filter");
         assert_eq!(
             encoded,
-            r#"{"type":"set_paid_route_market_filter","query":"fiber","countryCode":"FI","networkClass":"residential","mintUrl":"https://mint.example","requireIpv4":true,"requireIpv6":false,"sort":"price"}"#
+            r#"{"type":"set_paid_route_market_filter","query":"fiber","countryCode":"FI","mintUrl":"https://mint.example","requireIpv4":true,"requireIpv6":false,"sort":"price"}"#
         );
         assert_eq!(
             serde_json::from_str::<NativeAppAction>(&encoded).expect("parse filter"),

@@ -525,10 +525,6 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
     assert_eq!(app.paid_exit.pricing.connection_minimum_msat_per_day, 86_400);
     assert_eq!(app.paid_exit.location.country_code, "FI");
     assert_eq!(
-        app.paid_exit.location.network_class,
-        nostr_vpn_core::paid_routes::ExitNetworkClass::Unknown
-    );
-    assert_eq!(
         app.paid_exit.channel.accepted_mints,
         vec![
             "https://mint.example".to_string(),

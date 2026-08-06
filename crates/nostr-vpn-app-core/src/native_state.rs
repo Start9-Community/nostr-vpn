@@ -151,9 +151,7 @@ pub struct NativePaidExitSellerState {
     pub grace_units: u64,
     pub grace_text: String,
     pub country_code: String,
-    pub region: String,
     pub asn: u32,
-    pub network_class: String,
     pub ipv4: bool,
     pub ipv6: bool,
     pub channel_credit_msat: u64,
@@ -267,9 +265,7 @@ pub struct NativePaidRouteOfferState {
     pub grace_units: u64,
     pub grace_text: String,
     pub country_code: String,
-    pub region: String,
     pub asn: u32,
-    pub network_class: String,
     pub ipv4: bool,
     pub ipv6: bool,
     pub has_rating: bool,
@@ -294,7 +290,6 @@ pub struct NativePaidRouteOfferState {
 pub struct NativePaidRouteMarketFilterState {
     pub query: String,
     pub country_code: String,
-    pub network_class: String,
     pub mint_url: String,
     pub require_ipv4: bool,
     pub require_ipv6: bool,
@@ -306,7 +301,6 @@ impl Default for NativePaidRouteMarketFilterState {
         Self {
             query: String::new(),
             country_code: String::new(),
-            network_class: String::new(),
             mint_url: String::new(),
             require_ipv4: false,
             require_ipv6: false,
@@ -393,7 +387,6 @@ pub struct NativePaidRouteMarketState {
     pub visible_offers: Vec<NativePaidRouteOfferState>,
     pub hidden_offer_count: u64,
     pub country_options: Vec<String>,
-    pub network_class_options: Vec<String>,
     pub channels: Vec<NativePaidRouteChannelState>,
     pub sessions: Vec<NativePaidRouteSessionState>,
 }

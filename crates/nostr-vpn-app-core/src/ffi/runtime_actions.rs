@@ -234,7 +234,6 @@ impl NativeAppRuntime {
             NativeAppAction::SetPaidRouteMarketFilter {
                 query,
                 country_code,
-                network_class: _,
                 mint_url,
                 require_ipv4,
                 require_ipv6,
@@ -243,7 +242,6 @@ impl NativeAppRuntime {
                 self.paid_route_market_filter = NativePaidRouteMarketFilterState {
                     query: query.trim().to_string(),
                     country_code: normalize_paid_route_country_code(&country_code),
-                    network_class: String::new(),
                     mint_url: mint_url.trim().to_string(),
                     require_ipv4,
                     require_ipv6,
