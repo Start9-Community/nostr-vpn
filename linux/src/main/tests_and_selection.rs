@@ -120,6 +120,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn completed_manual_add_is_not_hidden_by_a_later_connect_error() {
+        let npub = "npub1joined";
+        let state = NativeAppState {
+            error: "nvpn start failed".to_string(),
+            networks: vec![NativeNetworkState {
+                id: "home".to_string(),
+                participants: vec![NativeParticipantState {
+                    npub: npub.to_string(),
+                    roster_accepted: true,
+                    ..NativeParticipantState::default()
+                }],
+                ..NativeNetworkState::default()
+            }],
+            ..NativeAppState::default()
+        };
+
+        assert!(manual_participant_added(&state, "home", npub));
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn resolves_debug_network_ids_to_internal_ids() {

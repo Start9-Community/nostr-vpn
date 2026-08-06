@@ -421,14 +421,7 @@ fn add_participant_from_drafts(app: &AppRef, network_id: String) {
             alias: (!alias.is_empty()).then_some(alias),
         },
     );
-    let added = state.error.trim().is_empty()
-        && state.networks.iter().any(|network| {
-            network.id == network_id
-                && network
-                    .participants
-                    .iter()
-                    .any(|participant| participant.npub == npub && participant.roster_accepted)
-        });
+    let added = manual_participant_added(&state, &network_id, &npub);
     if added {
         {
             let mut model = app.borrow_mut();
@@ -437,4 +430,14 @@ fn add_participant_from_drafts(app: &AppRef, network_id: String) {
         }
         set_page(app, Page::Devices);
     }
+}
+
+fn manual_participant_added(state: &NativeAppState, network_id: &str, npub: &str) -> bool {
+    state.networks.iter().any(|network| {
+        network.id == network_id
+            && network
+                .participants
+                .iter()
+                .any(|participant| participant.npub == npub && participant.roster_accepted)
+    })
 }
