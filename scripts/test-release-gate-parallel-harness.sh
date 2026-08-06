@@ -338,6 +338,16 @@ for contract in "${required_contracts[@]}"; do
   grep -Fq "$contract" "$release_gate" \
     || fail "release gate omits artifact/cleanup contract: $contract"
 done
+docker_functional_body="$(sed -n '/^run_docker_isolated_functional_gates() {$/,/^}$/p' "$release_gate")"
+for contract in \
+  './scripts/e2e-paid-exit-docker.sh' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_IMAGE' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_PROJECT_NAME' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_PUBLIC_SUBNET' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_PRIVATE_SUBNET'; do
+  grep -Fq "$contract" <<<"$docker_functional_body" \
+    || fail "isolated Docker gates omit paid-exit contract: $contract"
+done
 grep -Fq "NVPN_RELEASE_GATE_REQUIRE_COMPLETE: '1'" "$local_release" \
   || fail "full release does not require complete real-network coverage"
 

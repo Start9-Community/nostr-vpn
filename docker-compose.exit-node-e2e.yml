@@ -124,17 +124,17 @@ services:
       - |
         set -e
         public_iface="$$(ip -o -4 addr show | awk '$$4 == "${NVPN_E2E_NAT_B_PUBLIC_IP:-198.18.242.11}/24" { print $$2; exit }')"
-        private_iface="$$(ip -o -4 addr show | awk '$$4 == "172.30.242.2/24" { print $$2; exit }')"
+        private_iface="$$(ip -o -4 addr show | awk '$$4 == "${NVPN_E2E_NAT_B_PRIVATE_IP:-172.30.242.2}/24" { print $$2; exit }')"
         test -n "$$public_iface"
         test -n "$$private_iface"
         iptables -P FORWARD ACCEPT
-        iptables -t nat -A PREROUTING -i "$$public_iface" -p udp --dport 51820 -j DNAT --to-destination 172.30.242.3:51820
-        iptables -t nat -A POSTROUTING -o "$$public_iface" -s 172.30.242.0/24 -p udp --sport 51820 -j SNAT --to-source ${NVPN_E2E_NAT_B_PUBLIC_IP:-198.18.242.11}:51820
-        iptables -t nat -A POSTROUTING -o "$$public_iface" -s 172.30.242.0/24 -j MASQUERADE
+        iptables -t nat -A PREROUTING -i "$$public_iface" -p udp --dport 51820 -j DNAT --to-destination ${NVPN_E2E_NODE_B_PRIVATE_IP:-172.30.242.3}:51820
+        iptables -t nat -A POSTROUTING -o "$$public_iface" -s ${NVPN_E2E_PRIVATE_B_SUBNET:-172.30.242.0/24} -p udp --sport 51820 -j SNAT --to-source ${NVPN_E2E_NAT_B_PUBLIC_IP:-198.18.242.11}:51820
+        iptables -t nat -A POSTROUTING -o "$$public_iface" -s ${NVPN_E2E_PRIVATE_B_SUBNET:-172.30.242.0/24} -j MASQUERADE
         sleep infinity
     networks:
       private-b:
-        ipv4_address: 172.30.242.2
+        ipv4_address: ${NVPN_E2E_NAT_B_PRIVATE_IP:-172.30.242.2}
       internet:
         ipv4_address: ${NVPN_E2E_NAT_B_PUBLIC_IP:-198.18.242.11}
 
@@ -162,7 +162,7 @@ services:
       - nat-b
     networks:
       private-b:
-        ipv4_address: 172.30.242.3
+        ipv4_address: ${NVPN_E2E_NODE_B_PRIVATE_IP:-172.30.242.3}
 
 networks:
   internet:
@@ -174,4 +174,5 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.30.242.0/24
+        - subnet: ${NVPN_E2E_PRIVATE_B_SUBNET:-172.30.242.0/24}
+          gateway: ${NVPN_E2E_PRIVATE_B_GATEWAY_IP:-172.30.242.1}

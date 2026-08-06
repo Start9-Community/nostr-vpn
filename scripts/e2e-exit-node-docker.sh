@@ -17,7 +17,12 @@ MESH_REFRESH_SECS="${NVPN_EXIT_NODE_E2E_MESH_REFRESH_SECS:-5}"
 NODE_A_PUBLIC_IP="${NVPN_E2E_NODE_A_PUBLIC_IP:-198.18.242.10}"
 NAT_B_PUBLIC_IP="${NVPN_E2E_NAT_B_PUBLIC_IP:-198.18.242.11}"
 PUBLIC_INTERNET_TARGET="${NVPN_EXIT_NODE_E2E_PUBLIC_IP:-198.18.242.100}"
-NODE_B_PRIVATE_SUBNET="172.30.242.0/24"
+NODE_B_PRIVATE_SUBNET="${NVPN_E2E_PRIVATE_B_SUBNET:-172.30.242.0/24}"
+NODE_B_PRIVATE_PREFIX="${NODE_B_PRIVATE_SUBNET%.*}."
+PRIVATE_B_GATEWAY_IP="${NVPN_E2E_PRIVATE_B_GATEWAY_IP:-172.30.242.1}"
+NAT_B_PRIVATE_IP="${NVPN_E2E_NAT_B_PRIVATE_IP:-172.30.242.2}"
+NODE_B_PRIVATE_IP="${NVPN_E2E_NODE_B_PRIVATE_IP:-172.30.242.3}"
+NODE_B_PRIVATE_CIDR="$NODE_B_PRIVATE_IP/${NODE_B_PRIVATE_SUBNET#*/}"
 CASHU_MINT_IP="${NVPN_E2E_CASHU_MINT_IP:-198.18.242.50}"
 CASHU_MINT_URL="${NVPN_EXIT_NODE_E2E_CASHU_MINT_URL:-http://$CASHU_MINT_IP:3338}"
 PAID_EXIT_MODE="${NVPN_EXIT_NODE_E2E_PAID:-0}"
@@ -361,10 +366,10 @@ assert_idle_cpu_below() {
 block_docker_nat_shortcuts() {
   "${COMPOSE[@]}" exec -T node-a sh -lc \
     "ip route replace blackhole '$NODE_B_PRIVATE_SUBNET'"
-  "${COMPOSE[@]}" exec -T node-b sh -lc '
-    iptables -I OUTPUT -p udp -d 172.30.242.1 --dport 51820 -j DROP
-    iptables -I INPUT -p udp -s 172.30.242.1 --sport 51820 -j DROP
-  '
+  "${COMPOSE[@]}" exec -T node-b sh -lc "
+    iptables -I OUTPUT -p udp -d '$PRIVATE_B_GATEWAY_IP' --dport 51820 -j DROP
+    iptables -I INPUT -p udp -s '$PRIVATE_B_GATEWAY_IP' --sport 51820 -j DROP
+  "
 }
 
 assert_no_private_b_fips_shortcut() {
@@ -372,7 +377,7 @@ assert_no_private_b_fips_shortcut() {
   local node="$2"
   local compact
   compact="$(printf '%s' "$status" | compact_json)"
-  if grep -q '"fips_transport_addr":"172\.30\.242\.' <<<"$compact"; then
+  if grep -Fq "\"fips_transport_addr\":\"$NODE_B_PRIVATE_PREFIX" <<<"$compact"; then
     echo "exit-node docker e2e failed: $node used node-b's Docker-private subnet as its FIPS transport" >&2
     printf '%s\n' "$status" >&2
     exit 1
@@ -432,11 +437,11 @@ fi
 "${COMPOSE[@]}" up -d node-b >/dev/null
 wait_for_service node-b
 
-NODE_B_PRIVATE_IFACE="$(private_iface_for_ip node-b 172.30.242.3/24)"
+NODE_B_PRIVATE_IFACE="$(private_iface_for_ip node-b "$NODE_B_PRIVATE_CIDR")"
 [[ -n "$NODE_B_PRIVATE_IFACE" ]]
 
 "${COMPOSE[@]}" exec -T node-b sh -lc \
-  "ip route del default >/dev/null 2>&1 || true; ip route add default via 172.30.242.2 dev $NODE_B_PRIVATE_IFACE; ip route replace $NODE_A_PUBLIC_IP via 172.30.242.2 dev $NODE_B_PRIVATE_IFACE"
+  "ip route del default >/dev/null 2>&1 || true; ip route add default via $NAT_B_PRIVATE_IP dev $NODE_B_PRIVATE_IFACE; ip route replace $NODE_A_PUBLIC_IP via $NAT_B_PRIVATE_IP dev $NODE_B_PRIVATE_IFACE"
 block_docker_nat_shortcuts
 
 for node in node-a node-b; do
