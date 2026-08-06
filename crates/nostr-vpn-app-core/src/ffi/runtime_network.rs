@@ -16,6 +16,12 @@ impl NativeAppRuntime {
     ) -> ExitNodeUiStatus {
         let selected_exit_node = self.config.exit_node.trim();
         if !selected_exit_node.is_empty() {
+            let source = match self.config.internet_source {
+                InternetSource::PaidAutomatic => "Automatic paid exit",
+                InternetSource::PaidManual => "Manual paid exit",
+                InternetSource::WireGuard => "WireGuard exit",
+                InternetSource::Direct | InternetSource::PrivateVpn => "Private exit",
+            };
             let name = exit_node_display_name(&self.config, active_network, selected_exit_node);
             let selected_peer = daemon_state.and_then(|state| {
                 state
@@ -36,16 +42,16 @@ impl NativeAppRuntime {
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !selected_exit_active;
             let text = if blocked {
-                format!("Internet blocked: waiting for {name}")
+                format!("{source} · Blocked, waiting for {name}")
             } else if selected_exit_active {
                 let realized_exit_ip = active_paid_exit_ip.unwrap_or_default();
                 if realized_exit_ip.is_empty() {
-                    format!("Exit: {name}")
+                    format!("{source} · {name} · Connected")
                 } else {
-                    format!("Exit: {name} · {realized_exit_ip}")
+                    format!("{source} · {name} · {realized_exit_ip} · Connected")
                 }
             } else {
-                format!("Exit pending: {name}")
+                format!("{source} · {name} · Pending")
             };
             return ExitNodeUiStatus {
                 active: selected_exit_active,
@@ -55,10 +61,9 @@ impl NativeAppRuntime {
         }
 
         let pending_source = match self.config.internet_source {
-            InternetSource::PrivateVpn => Some("private VPN device"),
-            InternetSource::PaidAutomatic | InternetSource::PaidManual => {
-                Some("paid provider")
-            }
+            InternetSource::PrivateVpn => Some("Private exit"),
+            InternetSource::PaidAutomatic => Some("Automatic paid exit"),
+            InternetSource::PaidManual => Some("Manual paid exit"),
             InternetSource::Direct | InternetSource::WireGuard => None,
         };
         if let Some(source) = pending_source {
@@ -67,9 +72,9 @@ impl NativeAppRuntime {
                 active: false,
                 blocked,
                 text: if blocked {
-                    format!("Internet blocked: waiting for {source}")
+                    format!("{source} · Blocked")
                 } else {
-                    format!("Exit pending: {source}")
+                    format!("{source} · Pending")
                 },
             };
         }
@@ -80,11 +85,11 @@ impl NativeAppRuntime {
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !wireguard_exit_active;
             let text = if blocked {
-                "Internet blocked: waiting for WireGuard exit".to_string()
+                "WireGuard exit · Blocked".to_string()
             } else if wireguard_exit_active {
-                "Exit: WireGuard upstream".to_string()
+                "WireGuard exit · Connected".to_string()
             } else {
-                "Exit pending: WireGuard upstream".to_string()
+                "WireGuard exit · Pending".to_string()
             };
             return ExitNodeUiStatus {
                 active: wireguard_exit_active,
@@ -93,7 +98,10 @@ impl NativeAppRuntime {
             };
         }
 
-        ExitNodeUiStatus::default()
+        ExitNodeUiStatus {
+            text: "Direct internet".to_string(),
+            ..ExitNodeUiStatus::default()
+        }
     }
 
     fn network_state(

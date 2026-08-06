@@ -899,6 +899,6 @@
         assert!(!state.exit_node_active);
         assert_eq!(
             state.exit_node_status_text,
-            "Internet blocked: waiting for lab-exit.nvpn"
+            "Private exit · Blocked, waiting for lab-exit.nvpn"
         );
     }

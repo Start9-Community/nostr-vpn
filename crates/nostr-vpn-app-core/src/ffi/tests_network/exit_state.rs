@@ -11,6 +11,9 @@
         runtime.daemon_running = true;
         runtime.vpn_enabled = true;
         runtime.vpn_active = true;
+        runtime
+            .config
+            .set_internet_source(InternetSource::PrivateVpn);
         runtime.config.exit_node = exit_pubkey.to_string();
         runtime.config.exit_node_leak_protection = true;
         create_test_network(&mut runtime, "Home");
@@ -38,7 +41,10 @@
         let state = runtime.state();
         assert!(!state.exit_node_blocked);
         assert!(state.exit_node_active);
-        assert_eq!(state.exit_node_status_text, "Exit: lab-exit.nvpn");
+        assert_eq!(
+            state.exit_node_status_text,
+            "Private exit · lab-exit.nvpn · Connected"
+        );
     }
 
     #[test]
@@ -74,14 +80,14 @@
         assert!(!state.exit_node_active);
         assert_eq!(
             state.exit_node_status_text,
-            "Internet blocked: waiting for WireGuard exit"
+            "WireGuard exit · Blocked"
         );
 
         runtime.vpn_active = true;
         let state = runtime.state();
         assert!(!state.exit_node_blocked);
         assert!(state.exit_node_active);
-        assert_eq!(state.exit_node_status_text, "Exit: WireGuard upstream");
+        assert_eq!(state.exit_node_status_text, "WireGuard exit · Connected");
     }
 
     #[test]
@@ -99,7 +105,7 @@
 
         assert!(!state.exit_node_blocked);
         assert!(!state.exit_node_active);
-        assert_eq!(state.exit_node_status_text, "Exit pending: paid provider");
+        assert_eq!(state.exit_node_status_text, "Automatic paid exit · Pending");
 
         runtime.config.exit_node_leak_protection = true;
         let state = runtime.state();
@@ -107,6 +113,24 @@
         assert!(!state.exit_node_active);
         assert_eq!(
             state.exit_node_status_text,
-            "Internet blocked: waiting for paid provider"
+            "Automatic paid exit · Blocked"
+        );
+    }
+
+    #[test]
+    fn native_state_distinguishes_direct_and_manual_paid_internet() {
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        create_test_network(&mut runtime, "Home");
+
+        assert_eq!(runtime.state().exit_node_status_text, "Direct internet");
+
+        runtime
+            .config
+            .set_internet_source(InternetSource::PaidManual);
+        assert_eq!(
+            runtime.state().exit_node_status_text,
+            "Manual paid exit · Pending"
         );
     }

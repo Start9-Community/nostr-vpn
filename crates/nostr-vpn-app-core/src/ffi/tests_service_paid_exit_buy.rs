@@ -82,7 +82,9 @@
         assert!(state.exit_node_active);
         assert!(!state.exit_node_blocked);
         assert!(
-            state.exit_node_status_text.starts_with("Exit: "),
+            state
+                .exit_node_status_text
+                .starts_with("Manual paid exit · "),
             "{}",
             state.exit_node_status_text
         );
