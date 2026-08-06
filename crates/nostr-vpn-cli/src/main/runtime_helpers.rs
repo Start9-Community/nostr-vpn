@@ -74,6 +74,34 @@ fn fips_private_runtime_active(app: &AppConfig, vpn_enabled: bool, expected_peer
         || app.has_fips_static_peer_endpoints()
 }
 
+fn fips_private_runtime_active_for_config(
+    app: &AppConfig,
+    config_path: &Path,
+    vpn_enabled: bool,
+    expected_peers: usize,
+) -> bool {
+    fips_private_runtime_active(app, vpn_enabled, expected_peers)
+        || !load_pending_fips_control_recipients(config_path).is_empty()
+}
+
+fn load_pending_fips_control_recipients(config_path: &Path) -> Vec<(&'static str, String)> {
+    let recipients = nostr_vpn_core::join_delivery::load_join_rosters(config_path)
+        .into_iter()
+        .map(|(_, queued)| ("join roster", queued.recipient_npub))
+        .collect::<Vec<_>>();
+    #[cfg(feature = "paid-exit")]
+    let recipients = {
+        let mut recipients = recipients;
+        recipients.extend(
+            load_paid_exit_payment_outbox(config_path)
+                .into_iter()
+                .map(|queued| ("paid-exit", queued.envelope.seller)),
+        );
+        recipients
+    };
+    recipients
+}
+
 pub(crate) fn paid_exit_fips_runtime_active(app: &AppConfig) -> bool {
     #[cfg(feature = "paid-exit")]
     {
@@ -457,13 +485,20 @@ fn fips_tunnel_config_from_app(
         ethernet_underlay,
     } = input;
 
-    let mut config = crate::fips_private_mesh::FipsPrivateTunnelConfig::from_app(
+    let pending_control_recipients = load_pending_fips_control_recipients(config_path);
+    let control_recipient_pubkeys = pending_control_recipients
+        .iter()
+        .map(|(_, recipient)| recipient.as_str())
+        .collect::<Vec<_>>();
+    let mut config =
+        crate::fips_private_mesh::FipsPrivateTunnelConfig::from_app_with_control_recipients(
         app,
         network_id,
         iface,
         own_pubkey,
         recent_peers,
         live_peer_endpoints,
+        &control_recipient_pubkeys,
     )?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -472,26 +507,14 @@ fn fips_tunnel_config_from_app(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = underlay_interface;
     config.ethernet_underlay = ethernet_underlay.cloned();
-    for (_, queued) in nostr_vpn_core::join_delivery::load_join_rosters(config_path) {
+    for (kind, recipient) in pending_control_recipients {
         match crate::fips_private_mesh::prioritize_fips_control_recipient(
             config.endpoint_peers.clone(),
-            &queued.recipient_npub,
+            &recipient,
         ) {
             Ok(peers) => config.endpoint_peers = peers,
             Err(error) => {
-                eprintln!("ignoring invalid pending join roster recipient: {error}");
-            }
-        }
-    }
-    #[cfg(feature = "paid-exit")]
-    for queued in load_paid_exit_payment_outbox(config_path) {
-        match crate::fips_private_mesh::prioritize_fips_control_recipient(
-            config.endpoint_peers.clone(),
-            &queued.envelope.seller,
-        ) {
-            Ok(peers) => config.endpoint_peers = peers,
-            Err(error) => {
-                eprintln!("ignoring invalid pending paid-exit recipient: {error}");
+                eprintln!("ignoring invalid pending {kind} recipient: {error}");
             }
         }
     }
@@ -659,7 +682,12 @@ async fn sync_fips_private_runtime(
     runtime: &mut Option<crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
     context: SyncFipsPrivateRuntimeContext<'_>,
 ) -> Result<()> {
-    if !fips_private_runtime_active(context.app, context.vpn_enabled, context.expected_peers) {
+    if !fips_private_runtime_active_for_config(
+        context.app,
+        context.config_path,
+        context.vpn_enabled,
+        context.expected_peers,
+    ) {
         if let Some(runtime) = runtime.take() {
             stop_fips_private_tunnel_runtime(context.config_path, runtime).await?;
         }

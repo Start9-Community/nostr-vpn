@@ -6,6 +6,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     use nostr_vpn_core::paid_route_store::{
         OpenPaidRouteBuyerSessionRequest, PaidRouteBuyerPaymentUpdatesDueRequest,
         PaidRouteLifecycleStatus, PaidRouteStore, RecordPaidRouteBuyerUsageRequest,
+        write_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{
         PaidExitConfig, PaidRouteUsage, signed_paid_exit_offer_from_config,
@@ -18,8 +19,13 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("nvpn-paid-exit-settle-{nonce}"));
     std::fs::create_dir_all(&dir).expect("create test dir");
+    let config_path = dir.join("config.toml");
 
     let mut app = AppConfig::generated();
+    app.fips_host_tunnel_enabled = false;
+    for network in &mut app.networks {
+        network.listen_for_join_requests = false;
+    }
     let buyer_keys = app.nostr_keys().expect("buyer keys");
     let buyer_npub = buyer_keys.public_key().to_bech32().expect("buyer npub");
     let seller = Keys::generate();
@@ -69,7 +75,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     let wallet_data_dir = dir.join("wallet");
     let result = paid_exit_settle_with_signer(PaidExitSettleRequest {
         app: &app,
-        config_path: &dir.join("config.toml"),
+        config_path: &config_path,
         store: &mut store,
         signer: &RuntimeFakePaymentSigner,
         session_id: &session.session_id,
@@ -78,6 +84,11 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         now_unix: 128,
     })
     .expect("settle channel");
+    write_paid_route_store(&paid_route_store_file_path(&config_path), &store)
+        .expect("persist closing channel");
+    let queued_payments = load_paid_exit_payment_outbox(&config_path);
+    assert_eq!(queued_payments.len(), 1);
+    let payment_id = queued_payments[0].id.clone();
 
     assert!(result.payment.changed);
     assert_eq!(result.payment.payload_type, "cooperative_close");
@@ -123,6 +134,15 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     );
 
     app.set_internet_source(InternetSource::Direct);
+    assert!(
+        !app.connect_to_non_roster_fips_peers,
+        "leaving paid mode must release implicit market discovery ownership"
+    );
+    assert!(!fips_private_runtime_active(&app, false, 0));
+    assert!(
+        fips_private_runtime_active_for_config(&app, &config_path, false, 0),
+        "queued cooperative close must keep its control transport alive"
+    );
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let network_id = app.effective_network_id();
     let own_pubkey = app.own_nostr_pubkey_hex().expect("buyer pubkey");
@@ -134,7 +154,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     assert!(recent_peers.note_success(&seller.public_key().to_hex(), "203.0.113.40:51821", 128,));
     let config = fips_tunnel_config_from_app(FipsTunnelConfigInput {
         app: &app,
-        config_path: &dir.join("config.toml"),
+        config_path: &config_path,
         network_id: &network_id,
         iface: "utun-test".to_string(),
         underlay_interface: None,
@@ -163,6 +183,16 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
             .iter()
             .all(|peer| peer.participant_pubkey != seller.public_key().to_hex()),
         "pending close must not restore the seller as an exit route"
+    );
+
+    assert!(
+        acknowledge_paid_exit_payment(&config_path, &seller.public_key().to_hex(), &payment_id)
+            .expect("acknowledge cooperative close"),
+        "seller acknowledgment must remove the queued close"
+    );
+    assert!(
+        !fips_private_runtime_active_for_config(&app, &config_path, false, 0),
+        "idle direct mode must release the control runtime"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

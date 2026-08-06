@@ -98,7 +98,12 @@ loop {
             let maintain_fips = if vpn_active {
                 fips_tunnel_runtime.is_some()
             } else {
-                fips_private_runtime_active(&app, vpn_enabled, expected_peers)
+                fips_private_runtime_active_for_config(
+                    &app,
+                    &config_path,
+                    vpn_enabled,
+                    expected_peers,
+                )
             };
             if maintain_fips {
                 maintain_fips_heartbeat(FipsHeartbeatContext {
@@ -310,7 +315,12 @@ loop {
                 network_changed_at = Some(unix_timestamp());
             }
             let fips_result = if fips_tunnel_runtime.is_some()
-                || fips_private_runtime_active(&app, vpn_enabled, expected_peers)
+                || fips_private_runtime_active_for_config(
+                    &app,
+                    &config_path,
+                    vpn_enabled,
+                    expected_peers,
+                )
             {
                 refresh_fips_tunnel_runtime_after_link_event(
                     &mut fips_tunnel_runtime,
@@ -443,6 +453,8 @@ loop {
             }
             #[cfg(feature = "paid-exit")]
             let mut automatic_paid_exit_route_changed = false;
+            #[cfg(feature = "paid-exit")]
+            let mut paid_exit_payment_outbox_changed = false;
             if let Some(runtime) = fips_tunnel_runtime.as_mut() {
                 #[cfg(feature = "paid-exit")]
                 if last_paid_exit_session_open_at.elapsed()
@@ -527,24 +539,27 @@ loop {
                                 format!("FIPS endpoint hint refresh failed ({error})");
                         }
                         #[cfg(feature = "paid-exit")]
-                        handle_paid_exit_mesh_events(
-                            PaidExitMeshEventContext {
-                                runtime,
-                                app: &app,
-                                config_path: &config_path,
-                                network_id: &network_id,
-                                underlay_interface: network_snapshot
-                                    .default_interface
-                                    .as_deref(),
-                                underlay_interface_mtu: network_snapshot.default_interface_mtu,
-                                own_pubkey: own_pubkey.as_deref(),
-                                vpn_status: &mut vpn_status,
-                                spilman_receiver: paid_exit_spilman_receiver.as_ref(),
-                                spilman_receiver_error: paid_exit_spilman_receiver_error.as_deref(),
-                            },
-                            &mut drained,
-                        )
-                        .await;
+                        {
+                            paid_exit_payment_outbox_changed |= handle_paid_exit_mesh_events(
+                                PaidExitMeshEventContext {
+                                    runtime,
+                                    app: &app,
+                                    config_path: &config_path,
+                                    network_id: &network_id,
+                                    underlay_interface: network_snapshot
+                                        .default_interface
+                                        .as_deref(),
+                                    underlay_interface_mtu: network_snapshot.default_interface_mtu,
+                                    own_pubkey: own_pubkey.as_deref(),
+                                    vpn_status: &mut vpn_status,
+                                    spilman_receiver: paid_exit_spilman_receiver.as_ref(),
+                                    spilman_receiver_error: paid_exit_spilman_receiver_error
+                                        .as_deref(),
+                                },
+                                &mut drained,
+                            )
+                            .await;
+                        }
                     }
                     Err(error) => {
                         vpn_status = format!("FIPS event handling failed ({error})");
@@ -646,7 +661,7 @@ loop {
                 }
             }
                 #[cfg(feature = "paid-exit")]
-                if automatic_paid_exit_route_changed
+                if (automatic_paid_exit_route_changed || paid_exit_payment_outbox_changed)
                     && let Err(error) = sync_fips_private_runtime(
                         &mut fips_tunnel_runtime,
                         SyncFipsPrivateRuntimeContext {
@@ -665,7 +680,7 @@ loop {
                     )
                     .await
                 {
-                    vpn_status = format!("automatic paid-exit failover failed ({error})");
+                    vpn_status = format!("paid-exit runtime reconciliation failed ({error})");
                 }
             }
             if let Some(request) = pending_control_request {

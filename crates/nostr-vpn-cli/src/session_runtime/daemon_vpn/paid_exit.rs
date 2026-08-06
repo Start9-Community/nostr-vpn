@@ -287,7 +287,7 @@ pub(super) struct PaidExitMeshEventContext<'a> {
 pub(super) async fn handle_paid_exit_mesh_events(
     context: PaidExitMeshEventContext<'_>,
     drained: &mut DrainedFipsMeshEvents,
-) {
+) -> bool {
     let PaidExitMeshEventContext {
         runtime,
         app,
@@ -300,6 +300,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
         spilman_receiver,
         spilman_receiver_error,
     } = context;
+    let mut payment_outbox_changed = false;
 
     let session_opens = std::mem::take(&mut drained.paid_route_session_opens);
     if !session_opens.is_empty() {
@@ -371,20 +372,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
         match acknowledge_paid_exit_payment(config_path, &seller_pubkey, &id) {
             Ok(true) => {
                 eprintln!("paid-exit: seller acknowledged direct FIPS payment {id}");
-                if let Err(error) = refresh_fips_tunnel_config(
-                    runtime,
-                    app,
-                    config_path,
-                    network_id,
-                    underlay_interface,
-                    underlay_interface_mtu,
-                    own_pubkey,
-                )
-                .await
-                {
-                    *vpn_status =
-                        format!("paid-exit payment acknowledgment refresh failed ({error})");
-                }
+                payment_outbox_changed = true;
             }
             Ok(false) => {}
             Err(error) => {
@@ -395,7 +383,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
 
     let payments = std::mem::take(&mut drained.paid_route_payments);
     if payments.is_empty() {
-        return;
+        return payment_outbox_changed;
     }
     match paid_exit_apply_fips_payments(
         app,
@@ -438,6 +426,7 @@ pub(super) async fn handle_paid_exit_mesh_events(
         }
         Err(error) => eprintln!("paid-exit: failed to apply direct FIPS payment: {error}"),
     }
+    payment_outbox_changed
 }
 
 pub(super) fn acknowledge_paid_exit_session_open(

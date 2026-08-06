@@ -134,6 +134,26 @@ impl FipsPrivateTunnelConfig {
         recent_peers: Option<&nostr_vpn_core::recent_peers::RecentPeerEndpoints>,
         live_peer_endpoints: &[(String, Vec<(String, u64)>)],
     ) -> Result<Self> {
+        Self::from_app_with_control_recipients(
+            app,
+            network_id,
+            iface,
+            own_pubkey,
+            recent_peers,
+            live_peer_endpoints,
+            &[],
+        )
+    }
+
+    pub(crate) fn from_app_with_control_recipients(
+        app: &AppConfig,
+        network_id: &str,
+        iface: impl Into<String>,
+        own_pubkey: Option<&str>,
+        recent_peers: Option<&nostr_vpn_core::recent_peers::RecentPeerEndpoints>,
+        live_peer_endpoints: &[(String, Vec<(String, u64)>)],
+        control_recipient_pubkeys: &[&str],
+    ) -> Result<Self> {
         let local_identity_confirmation_pending = app
             .active_network_opt()
             .is_some_and(|network| network.local_identity_confirmation_pending);
@@ -237,12 +257,20 @@ impl FipsPrivateTunnelConfig {
         //   * recent-peers cache entries (stamped with `last_success_at`)
         // Configured hints are authenticated by FIPS and may intentionally
         // cross a routed private network, so only reject overlay tunnel loops.
-        let desired_endpoint_hint_npubs = app
+        let mut desired_endpoint_hint_npubs = app
             .active_network_signal_pubkeys_hex()
             .into_iter()
             .filter(|participant| Some(participant.as_str()) != own_pubkey)
             .map(|participant| normalize_fips_endpoint_npub(&participant))
             .collect::<std::collections::HashSet<_>>();
+        desired_endpoint_hint_npubs.extend(control_recipient_pubkeys.iter().filter_map(
+            |recipient| {
+                normalize_nostr_pubkey(recipient)
+                    .ok()
+                    .filter(|recipient| Some(recipient.as_str()) != own_pubkey)
+                    .map(|recipient| normalize_fips_endpoint_npub(&recipient))
+            },
+        ));
         #[cfg(feature = "paid-exit")]
         let desired_endpoint_hint_npubs = {
             let mut desired_endpoint_hint_npubs = desired_endpoint_hint_npubs;
@@ -344,9 +372,10 @@ impl FipsPrivateTunnelConfig {
             non_roster_endpoint_group_count(&recent_peer_endpoints, &desired_endpoint_hint_npubs);
         open_discovery_max_pending =
             open_discovery_max_pending.saturating_sub(recent_non_roster_transit_seeds);
-        // Live capability hints are accepted only for network signal peers because
-        // they are claims carried by that peer. The disk cache above is
-        // different: it records peers this endpoint already authenticated.
+        // Live capability hints are accepted only for network signal peers or
+        // pending control recipients because they are claims carried by that
+        // authenticated peer. The disk cache above records peers this endpoint
+        // already authenticated.
         if stamped_endpoint_hints_enabled {
             recent_peer_endpoints.extend(
                 filter_stamped_tunnel_endpoints(

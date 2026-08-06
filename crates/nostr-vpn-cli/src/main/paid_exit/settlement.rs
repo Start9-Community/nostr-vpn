@@ -105,6 +105,9 @@ async fn paid_exit_settle_command(args: PaidExitSettleArgs) -> Result<()> {
     if changed {
         write_paid_route_store(&store_path, &store)?;
     }
+    if result.persisted {
+        maybe_reload_running_daemon(&config_path);
+    }
 
     if args.json {
         println!(
