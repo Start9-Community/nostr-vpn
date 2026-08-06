@@ -361,17 +361,28 @@ TEST
 # Run both bounded stop paths in a watchdog-protected shell where each
 # TERM-ignoring fixture is a real child that must be reaped.
 child_pid_file="$tmp/stubborn-child.pid"
-timings="$tmp/stubborn-timings"
+kill_events="$tmp/stubborn-kill-events"
 worker_log="$tmp/stubborn-worker.log"
-bash -s -- "$HELPER" "$stubborn" "$child_pid_file" "$timings" \
+bash -s -- "$HELPER" "$stubborn" "$child_pid_file" "$kill_events" \
   >"$worker_log" 2>&1 <<'TEST' &
 set -euo pipefail
 trap 'echo "bounded stop worker failed at line $LINENO" >&2' ERR
 source "$1"
 stubborn="$2"
 child_pid_file="$3"
-timings="$4"
+kill_events="$4"
 child=""
+mode=""
+kill() {
+  if [[ ("${1:-}" == -TERM || "${1:-}" == -KILL) && -n "$mode" ]]; then
+    if builtin kill "$@"; then
+      printf '%s\t%s\n' "$mode" "${1#-}" >>"$kill_events"
+      return 0
+    fi
+    return 1
+  fi
+  builtin kill "$@"
+}
 cleanup_child() {
   [[ -n "$child" ]] || return 0
   kill -KILL "$child" >/dev/null 2>&1 || true
@@ -379,7 +390,7 @@ cleanup_child() {
 }
 trap cleanup_child EXIT
 for mode in exact-app owned-child; do
-  ready="$timings.$mode.ready"
+  ready="$kill_events.$mode.ready"
   "$stubborn" "$ready" &
   child=$!
   printf '%s\n' "$child" >"$child_pid_file"
@@ -388,16 +399,15 @@ for mode in exact-app owned-child; do
     sleep 0.02
   done
   [[ -e "$ready" ]]
-  SECONDS=0
   if [[ "$mode" == exact-app ]]; then
     macos_release_app_stop_pid "$child" "$stubborn $ready"
   else
     macos_release_stop_owned_child "$child"
   fi
-  elapsed="$SECONDS"
+  grep -Fxq "$mode"$'\tTERM' "$kill_events"
+  grep -Fxq "$mode"$'\tKILL' "$kill_events"
   ! kill -0 "$child" >/dev/null 2>&1
   [[ -z "$(ps -ww -p "$child" -o stat= 2>/dev/null)" ]]
-  printf '%s\t%s\n' "$mode" "$elapsed" >>"$timings"
   child=""
 done
 trap - EXIT
@@ -424,19 +434,6 @@ if ! wait "$worker_pid"; then
   tail -n 40 "$worker_log" >&2 || true
   exit 1
 fi
-if ! awk -F'\t' '
-  ($1 == "exact-app" || $1 == "owned-child") && $2 >= 2 && $2 < 8 {
-    passed[$1] = 1
-  }
-  END { exit !(passed["exact-app"] && passed["owned-child"]) }
-' "$timings"
-then
-  echo "bounded stop timings were incomplete or out of range:" >&2
-  cat "$timings" >&2 || true
-  tail -n 40 "$worker_log" >&2 || true
-  exit 1
-fi
-
 # macOS Bash 3 keeps $$ unchanged in subshells. Prove a captured exact parent
 # binds the child before bounded cleanup instead of loosening PID ownership.
 bash -s -- "$HELPER" <<'TEST'
