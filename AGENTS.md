@@ -34,5 +34,5 @@
 - App Store availability: exclude France, keep China enabled, and never claim worldwide availability in metadata or review notes.
 - Before release: `just release-gate`; Linux GTK: `( cd linux && cargo check )`.
 - Bump: changelog `## X.Y.Z - YYYY-MM-DD`; root version; `node scripts/sync-versions.mjs --check`; gate.
-- Draft: `node scripts/local-release.mjs --publish`; no `v*` GitHub tag.
-- Final: commit, lightweight `vX.Y.Z`, push `master` and tag to `github`, push `master` to htree `origin`, run htree publish, watch `gh run list --workflow=release.yml --limit 3`.
+- Stage the exact clean commit with `node scripts/local-release.mjs --stage-dir <dir>`; use `--reuse-gate-receipts` only after composing a complete artifact-bound receipt set.
+- Publish with `--publish-staged-draft`, then `scripts/publish-release-refs.mjs`, then `--promote-draft --require-zapstore`. Direct `--publish` and `--final` modes are disabled.
