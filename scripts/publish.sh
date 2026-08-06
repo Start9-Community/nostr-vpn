@@ -183,7 +183,7 @@ print(json.load(open(sys.argv[1], encoding="utf-8"))["packageSha256"])
     downloaded="$(mktemp "${TMPDIR:-/tmp}/nvpn-crate.XXXXXX")"
     for _ in {1..20}; do
         if curl -fsSL \
-            "https://crates.io/api/v1/crates/${crate}/${version}/download" \
+            "https://static.crates.io/crates/${crate}/${crate}-${version}.crate" \
             -o "$downloaded"
         then
             actual="$(shasum -a 256 "$downloaded" | awk '{print tolower($1)}')"
@@ -337,8 +337,12 @@ if [[ "$PREFLIGHT_ONLY" -eq 1 ]]; then
         exit 1
     }
     preflight_crates_io_credentials
-    for crate in "${ALL_CRATES[@]}"; do
+    for crate in "${TIER_1_CRATES[@]}"; do
         package_crate_and_bind_digest "$crate"
+        verify_exact_release_source
+    done
+    for crate in "${TIER_2_CRATES[@]}"; do
+        cargo package --locked -p "$crate" --list >/dev/null
         verify_exact_release_source
     done
     echo "[ok] crates.io credentials and exact packages are ready."

@@ -2326,7 +2326,15 @@ test('crates publication has no dirty bypass and replays exact source immediatel
   assert.match(publisher, /verify_published_crate "\$crate"/)
   assert.match(
     publisher,
-    /crates\.io\/api\/v1\/crates\/\$\{crate\}\/\$\{version\}\/download/,
+    /static\.crates\.io\/crates\/\$\{crate\}\/\$\{crate\}-\$\{version\}\.crate/,
+  )
+  assert.match(
+    publisher,
+    /for crate in "\$\{TIER_1_CRATES\[@\]\}"; do[\s\S]*package_crate_and_bind_digest "\$crate"/,
+  )
+  assert.match(
+    publisher,
+    /for crate in "\$\{TIER_2_CRATES\[@\]\}"; do[\s\S]*cargo package --locked -p "\$crate" --list/,
   )
   assert.match(
     publisher,
