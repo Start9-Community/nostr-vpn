@@ -521,13 +521,7 @@ struct SetArgs {
     paid_exit_country_code: Option<String>,
     #[cfg(feature = "paid-exit")]
     #[arg(long)]
-    paid_exit_region: Option<String>,
-    #[cfg(feature = "paid-exit")]
-    #[arg(long)]
     paid_exit_asn: Option<u32>,
-    #[cfg(feature = "paid-exit")]
-    #[arg(long)]
-    paid_exit_network_class: Option<String>,
     #[cfg(feature = "paid-exit")]
     #[arg(long)]
     paid_exit_ipv4: Option<bool>,

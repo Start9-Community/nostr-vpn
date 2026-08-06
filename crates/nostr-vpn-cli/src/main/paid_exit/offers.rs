@@ -42,10 +42,8 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
             local.offer.access.private_vpn_access.as_str()
         );
         println!(
-            "location: country={} region={} class={} asn={}",
+            "location: country={} asn={}",
             display_or_none(&local.offer.location.country_code),
-            display_or_none(&local.offer.location.region),
-            local.offer.location.network_class.as_str(),
             local.offer
                 .location
                 .asn

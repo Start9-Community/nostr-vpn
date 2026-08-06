@@ -92,16 +92,8 @@ fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> 
     if let Some(value) = args.country_code.as_deref() {
         app.paid_exit.location.country_code = value.to_string();
     }
-    if let Some(value) = args.region.as_deref() {
-        app.paid_exit.location.region = value.to_string();
-    }
     if let Some(value) = args.asn {
         app.paid_exit.location.asn = Some(value);
-    }
-    if let Some(value) = args.network_class.as_deref() {
-        app.paid_exit.location.network_class = value
-            .parse::<ExitNetworkClass>()
-            .map_err(|error| anyhow!(error))?;
     }
     if let Some(value) = args.ipv4 {
         app.paid_exit.ip_support.ipv4 = value;
@@ -296,10 +288,8 @@ fn print_paid_exit_run_result(result: &PaidExitRunResult) {
         }
     );
     println!(
-        "location: country={} region={} class={} asn={}",
+        "location: country={} asn={}",
         display_or_none(&result.offer.location.country_code),
-        display_or_none(&result.offer.location.region),
-        result.offer.location.network_class.as_str(),
         result
             .offer
             .location

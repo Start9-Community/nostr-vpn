@@ -26,10 +26,6 @@ fn paid_exit_run_and_status_cover_headless_seller_cli() {
         "https://mint.example",
         "--country-code",
         "fi",
-        "--region",
-        "Uusimaa",
-        "--network-class",
-        "residential",
         "--free-probe-units",
         "1 MB",
         "--grace-units",
@@ -84,9 +80,10 @@ fn paid_exit_run_and_status_cover_headless_seller_cli() {
     assert_eq!(status_json["config"]["grace_units"].as_u64(), Some(262_144));
     assert_eq!(status_json["config"]["grace_text"].as_str(), Some("256 KB"));
     assert_eq!(status_json["config"]["country_code"].as_str(), Some("FI"));
+    assert_eq!(status_json["config"]["region"].as_str(), Some(""));
     assert_eq!(
         status_json["config"]["network_class"].as_str(),
-        Some("residential")
+        Some("unknown")
     );
     assert_eq!(
         status_json["config"]["accepted_mints"][0].as_str(),

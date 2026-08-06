@@ -458,16 +458,8 @@ async fn run_command(command: Command) -> Result<()> {
                 if let Some(value) = args.paid_exit_country_code {
                     app.paid_exit.location.country_code = value;
                 }
-                if let Some(value) = args.paid_exit_region {
-                    app.paid_exit.location.region = value;
-                }
                 if let Some(value) = args.paid_exit_asn {
                     app.paid_exit.location.asn = Some(value);
-                }
-                if let Some(value) = args.paid_exit_network_class {
-                    app.paid_exit.location.network_class = value
-                        .parse::<ExitNetworkClass>()
-                        .map_err(|error| anyhow!(error))?;
                 }
                 if let Some(value) = args.paid_exit_ipv4 {
                     app.paid_exit.ip_support.ipv4 = value;

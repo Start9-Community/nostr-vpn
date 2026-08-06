@@ -366,13 +366,12 @@ fn print_paid_exit_status_snapshot(app: &AppConfig, store_path: &Path, store: &P
                 .map(|score| format!(" rating_score={score:+}"))
                 .unwrap_or_default();
             println!(
-                "  {key} price={} country={} class={} upstream={} last_seen={}{}",
+                "  {key} price={} country={} upstream={} last_seen={}{}",
                 paid_exit_price_text(
                     offer.pricing.price_msat,
                     offer.pricing.per_units,
                 ),
                 display_or_none(&offer.location.country_code),
-                offer.location.network_class.as_str(),
                 offer.access.upstream.as_str(),
                 record.last_seen_unix,
                 rating_text
@@ -719,7 +718,7 @@ pub(crate) fn paid_exit_offer_summary_line(
     event_id: impl std::fmt::Display,
 ) -> String {
     format!(
-        "  {} seller={} price={} country={} class={} upstream={} channel=max={} expiry={}s free_probe={} grace={} mints={} quality={} event={}",
+        "  {} seller={} price={} country={} upstream={} channel=max={} expiry={}s free_probe={} grace={} mints={} quality={} event={}",
         offer.offer_id,
         offer.seller_npub,
         paid_exit_price_text(
@@ -727,7 +726,6 @@ pub(crate) fn paid_exit_offer_summary_line(
             offer.pricing.per_units,
         ),
         display_or_none(&offer.location.country_code),
-        offer.location.network_class.as_str(),
         offer.access.upstream.as_str(),
         paid_exit_sat_text(offer.channel.max_channel_capacity_sat),
         offer.channel.channel_expiry_secs,

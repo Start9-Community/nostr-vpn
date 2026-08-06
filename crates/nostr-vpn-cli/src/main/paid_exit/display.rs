@@ -87,10 +87,8 @@ fn print_paid_exit_status(app: &AppConfig) {
         );
     }
     println!(
-        "paid_exit_location: country={} region={} class={} asn={}",
+        "paid_exit_location: country={} asn={}",
         display_or_none(&config.location.country_code),
-        display_or_none(&config.location.region),
-        config.location.network_class.as_str(),
         config
             .location
             .asn

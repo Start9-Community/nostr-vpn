@@ -504,9 +504,7 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
         accepted_mints: Some("https://mint.example".to_string()),
         accepted_mint: vec!["https://other-mint.example".to_string()],
         country_code: Some("fi".to_string()),
-        region: Some("uusimaa".to_string()),
         asn: Some(12_345),
-        network_class: Some("satellite".to_string()),
         ipv4: Some(true),
         ipv6: Some(false),
         max_channel_capacity_sat: Some(250),
@@ -534,7 +532,7 @@ fn paid_exit_run_once_enables_seller_and_stores_offer() {
     assert_eq!(app.paid_exit.location.country_code, "FI");
     assert_eq!(
         app.paid_exit.location.network_class,
-        ExitNetworkClass::Satellite
+        nostr_vpn_core::paid_routes::ExitNetworkClass::Unknown
     );
     assert_eq!(
         app.paid_exit.channel.accepted_mints,
@@ -590,9 +588,7 @@ fn paid_exit_run_once_rejects_incomplete_wireguard_upstream() {
         accepted_mints: Some("https://mint.example".to_string()),
         accepted_mint: vec![],
         country_code: Some("fi".to_string()),
-        region: None,
         asn: None,
-        network_class: Some("residential".to_string()),
         ipv4: Some(true),
         ipv6: Some(false),
         max_channel_capacity_sat: Some(100),
@@ -648,9 +644,7 @@ fn paid_exit_run_once_enables_configured_wireguard_upstream() {
             accepted_mints: Some("https://mint.example".to_string()),
             accepted_mint: vec![],
             country_code: Some("fi".to_string()),
-            region: None,
             asn: None,
-            network_class: Some("residential".to_string()),
             ipv4: Some(true),
             ipv6: Some(false),
             max_channel_capacity_sat: Some(100),

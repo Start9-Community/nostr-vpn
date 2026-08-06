@@ -131,7 +131,7 @@ use nostr_vpn_core::paid_route_store::{
 };
 #[cfg(feature = "paid-exit")]
 use nostr_vpn_core::paid_routes::{
-    ExitNetworkClass, PaidExitConfig, PaidExitUpstream, PaidRouteOffer, PaidRoutePaymentMode,
+    PaidExitConfig, PaidExitUpstream, PaidRouteOffer, PaidRoutePaymentMode,
     PaidRouteQualityMetrics, PaidRouteRoutingDecision, PaidRouteSessionOpen, SignedPaidRouteOffer,
     paid_route_country_claim, paid_route_offer_filter,
     signed_paid_exit_offer_from_config_with_receiver,

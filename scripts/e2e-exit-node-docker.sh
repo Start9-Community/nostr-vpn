@@ -528,7 +528,6 @@ if truthy "$PAID_EXIT_MODE"; then
     --free-probe-units "$PAID_FREE_PROBE_UNITS" \
     --grace-units "$PAID_GRACE_UNITS" \
     --country-code FI \
-    --network-class datacenter \
     --no-reload-daemon \
     --json >/dev/null
 
