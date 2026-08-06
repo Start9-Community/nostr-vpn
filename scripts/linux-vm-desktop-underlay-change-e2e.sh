@@ -1064,6 +1064,8 @@ rows="$(virsh domiflist "$vm" | awk '$2 == "network" { print $1 "|" $5 }')"
   || fail "peer DNS counter chain remains"
 ! sudo -n ip netns list | awk '{ print $1 }' | grep -Fxq "$peer_netns" \
   || fail "peer namespace remains"
+! sudo -n test -e "/run/nvpn-$peer_netns" \
+  || fail "peer daemon singleton runtime remains"
 ! ip link show dev "$peer_host_veth" >/dev/null 2>&1 \
   || fail "peer namespace veth remains"
 ! ip -4 route show exact "$peer_address/$peer_prefix" | grep -q . \

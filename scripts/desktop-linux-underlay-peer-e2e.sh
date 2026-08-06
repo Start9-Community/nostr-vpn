@@ -270,6 +270,7 @@ cleanup() {
     "$BINARY" repair-network --config "$CONFIG" >/dev/null 2>&1 || true
   fi
   stop_pid_file "$STATE_DIR/peer-process.pid"
+  rm -f "/run/nvpn-$PEER_NETNS/to.nostrvpn.nvpn.daemon.instance.lock"
   rmdir "/run/nvpn-$PEER_NETNS" 2>/dev/null || true
   remove_counter_chain
   wireguard_cleanup

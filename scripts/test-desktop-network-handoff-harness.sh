@@ -218,6 +218,7 @@ require_tokens "$PEER" "listener ownership integration" \
 require_tokens "$PEER" "run-scoped daemon singleton" \
   'install -d -m 0700 "/run/nvpn-$PEER_NETNS"' \
   '--daemon-instance "$PEER_NETNS"' \
+  'rm -f "/run/nvpn-$PEER_NETNS/to.nostrvpn.nvpn.daemon.instance.lock"' \
   'rmdir "/run/nvpn-$PEER_NETNS"'
 require_tokens "$WINDOWS_HOST_ENTRY" "exact Windows FIPS provenance" \
   'expected="fips_core_version: $EXPECTED_FIPS_VERSION (rev $EXPECTED_FIPS_REV)"' \
