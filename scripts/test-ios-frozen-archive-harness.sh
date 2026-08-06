@@ -459,6 +459,11 @@ variant = {
     "treeSha256": "7" * 64,
     "appCodeDirectoryHash": "8" * 40,
     "appExecutableSha256": "9" * 64,
+    "fileSharingFixture": {
+        "bundleIdentifier": mobile["installedBundleIdentifier"],
+        "displayName": "Nostr VPN Test Files",
+        "scope": "join-test-variant-only",
+    },
     "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
     "joinTestingCompilationConditionEnabled": True,
     "productionArtifactReceiptSha256": hashlib.sha256(
@@ -504,6 +509,7 @@ join = {
                     "packetTunnelExecutableSha256",
                     "signerCertificateSha256",
                     "installedBundleIdentifier",
+                    "fileSharingFixture",
                 )
             },
             "artifactReceiptSha256": hashlib.sha256(

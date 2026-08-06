@@ -132,7 +132,7 @@ RELEASE_JOIN_IOS_NETWORK_IDS=()
 
 cleanup() {
   local status=$?
-  local cleanup_status=0 package route ios_runner_bundle
+  local cleanup_status=0 package route ios_app_bundle ios_runner_bundle bundle
   trap - EXIT
   if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" \
     || -n "${RELEASE_JOIN_IOS_TEST_PGID:-}" ]]; then
@@ -143,12 +143,15 @@ cleanup() {
     "${ADB[@]}" shell rm -f "/sdcard/Download/$(basename "$IOS_QR_CAPTURE")" \
       >/dev/null 2>&1 || cleanup_status=1
     if [[ -n "${RELEASE_JOIN_IOS_STAGED_QR_FILENAME:-}" ]]; then
-      ios_runner_bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
-      ios-deploy \
-        --id "$RELEASE_JOIN_IOS_UDID" \
-        --bundle_id "$ios_runner_bundle" \
-        --rm "Documents/$RELEASE_JOIN_IOS_STAGED_QR_FILENAME" \
-        >/dev/null 2>&1 || cleanup_status=1
+      ios_app_bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+      ios_runner_bundle="$ios_app_bundle.UITests.xctrunner"
+      for bundle in "$ios_app_bundle" "$ios_runner_bundle"; do
+        ios-deploy \
+          --id "$RELEASE_JOIN_IOS_UDID" \
+          --bundle_id "$bundle" \
+          --rm "Documents/$RELEASE_JOIN_IOS_STAGED_QR_FILENAME" \
+          >/dev/null 2>&1 || cleanup_status=1
+      done
     fi
     if [[ -n "${RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME:-}" ]]; then
       ios_runner_bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"

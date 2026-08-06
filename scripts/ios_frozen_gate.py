@@ -512,6 +512,12 @@ def validate_join_variant_receipt(
         and variant.get("joinTestingCompilationCondition")
         == "NVPN_RELEASE_JOIN_TESTING"
         and variant.get("joinTestingCompilationConditionEnabled") is True
+        and variant.get("fileSharingFixture")
+        == {
+            "bundleIdentifier": variant.get("installedBundleIdentifier"),
+            "displayName": "Nostr VPN Test Files",
+            "scope": "join-test-variant-only",
+        }
         and variant.get("productionArtifactReceiptSha256")
         == production_receipt_sha256
         and variant.get("productionAppByteIdentical") is False

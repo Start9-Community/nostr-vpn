@@ -769,6 +769,11 @@ test('release receipt collection requires exact source and strict public UI gate
       appBundleTreeSha256: '9'.repeat(64),
       appCodeDirectoryHash: 'a'.repeat(40),
       appExecutableSha256: 'b'.repeat(64),
+      fileSharingFixture: {
+        bundleIdentifier: iosArtifact.installedBundleIdentifier,
+        displayName: 'Nostr VPN Test Files',
+        scope: 'join-test-variant-only',
+      },
       joinTestingCompilationCondition: 'NVPN_RELEASE_JOIN_TESTING',
       joinTestingCompilationConditionEnabled: true,
       productionArtifactReceiptSha256: sha256(iosText),
@@ -1003,6 +1008,7 @@ test('release receipt collection requires exact source and strict public UI gate
           productionArtifactReceiptSha256: sha256(iosText),
           joinTestingCompilationCondition: 'NVPN_RELEASE_JOIN_TESTING',
           joinTestingCompilationConditionEnabled: true,
+          fileSharingFixture: iosJoinVariant.fileSharingFixture,
           productionAppByteIdentical: false,
           appBundleTreeSha256: iosJoinVariant.appBundleTreeSha256,
           appCodeDirectoryHash: iosJoinVariant.appCodeDirectoryHash,
@@ -1589,6 +1595,13 @@ test('release receipt collection requires exact source and strict public UI gate
       paths.ios.join_variant,
       (receipt) => {
         receipt.joinTestingCompilationConditionEnabled = false
+      },
+      /join-test variant receipt is incomplete/,
+    )
+    assertRejectedReceiptMutation(
+      paths.ios.join_variant,
+      (receipt) => {
+        receipt.fileSharingFixture.scope = 'production'
       },
       /join-test variant receipt is incomplete/,
     )

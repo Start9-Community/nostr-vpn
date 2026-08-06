@@ -444,52 +444,59 @@ release_join_codesign_cdhash() {
     | tr '[:upper:]' '[:lower:]'
 }
 
-release_join_expose_ios_runner_documents() {
-  local runner="$1"
-  local info="$runner/Info.plist"
+release_join_expose_ios_fixture_documents() {
+  local app="$1"
+  local info="$app/Info.plist"
+  local production_info="$ROOT/ios/Info.plist"
   local certificate_dir certificate_prefix certificate identity
   [[ -f "$info" ]] || {
-    echo "iOS UI runner Info.plist is unavailable" >&2
+    echo "iOS join-test app Info.plist is unavailable" >&2
     return 1
   }
+  for key in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+    if plutil -extract "$key" raw "$production_info" >/dev/null 2>&1; then
+      echo "Production iOS Info.plist exposes test fixture file sharing" >&2
+      return 1
+    fi
+  done
   certificate_dir="$(mktemp -d "${PRIVATE_DIR:-${TMPDIR:-/tmp}}/nvpn-ios-runner-cert.XXXXXX")" \
     || return 1
   certificate_prefix="$certificate_dir/certificate"
-  if ! codesign -d --extract-certificates="$certificate_prefix" "$runner" \
+  if ! codesign -d --extract-certificates="$certificate_prefix" "$app" \
       >/dev/null 2>&1; then
     rm -rf "$certificate_dir"
-    echo "Could not read the iOS UI runner signing identity" >&2
+    echo "Could not read the iOS join-test app signing identity" >&2
     return 1
   fi
   certificate="${certificate_prefix}0"
   identity="$(shasum -a 1 "$certificate" 2>/dev/null | awk '{print $1}')"
   if [[ ! "$identity" =~ ^[0-9a-fA-F]{40}$ ]]; then
     rm -rf "$certificate_dir"
-    echo "iOS UI runner has no reusable signing identity" >&2
+    echo "iOS join-test app has no reusable signing identity" >&2
     return 1
   fi
 
-  # Xcode applies UI-test Info.plist settings to the nested .xctest bundle,
-  # not to the generated runner app whose Documents container Files exposes.
+  # This app is a separately receipted join-test variant. Production keeps
+  # file sharing disabled; the retained XCTest runner remains untouched.
   plutil -replace CFBundleDisplayName \
     -string "Nostr VPN Test Files" "$info"
   plutil -replace UIFileSharingEnabled -bool YES "$info"
   plutil -replace LSSupportsOpeningDocumentsInPlace -bool YES "$info"
   if ! codesign --force --sign "$identity" \
       --preserve-metadata=identifier,entitlements,requirements,flags,runtime \
-      "$runner" >/dev/null 2>&1; then
+      "$app" >/dev/null 2>&1; then
     rm -rf "$certificate_dir"
-    echo "Could not re-sign the iOS UI runner after enabling fixture storage" >&2
+    echo "Could not re-sign the iOS join-test app after enabling fixture storage" >&2
     return 1
   fi
   rm -rf "$certificate_dir"
-  codesign --verify --deep --strict "$runner" >/dev/null 2>&1 \
+  codesign --verify --deep --strict "$app" >/dev/null 2>&1 \
     && [[ "$(plutil -extract CFBundleDisplayName raw "$info")" \
       == "Nostr VPN Test Files" ]] \
     && [[ "$(plutil -extract UIFileSharingEnabled raw "$info")" == true ]] \
     && [[ "$(plutil -extract LSSupportsOpeningDocumentsInPlace raw "$info")" \
       == true ]] || {
-    echo "iOS UI runner fixture storage verification failed" >&2
+    echo "iOS join-test app fixture storage verification failed" >&2
     return 1
   }
 }
@@ -784,7 +791,6 @@ release_join_prepare_ios_release() {
   local expected_team="${NVPN_EXPECTED_IOS_DISTRIBUTION_TEAM_ID:-}"
   local expected_cert="${NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256:-}"
   local udid app_path app_binary tunnel_app tunnel_binary profile_plist tunnel_profile_plist
-  local runner
   local app_signed_team tunnel_signed_team app_cert tunnel_cert team_hash
   local app_cdhash tunnel_cdhash device_identifier_sha variant_receipt
   local derived="$RESULT_DIR/ios-derived-data"
@@ -858,8 +864,6 @@ release_join_prepare_ios_release() {
     NVPN_BUILD_GIT_SHA="$app_sha" \
     'OTHER_SWIFT_FLAGS=$(inherited) -DNVPN_RELEASE_JOIN_TESTING' \
     build-for-testing
-  runner="$derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
-  release_join_expose_ios_runner_documents "$runner" || return 1
   RELEASE_JOIN_IOS_XCTESTRUN="$(
     select_generated_ios_release_xctestrun \
       "$derived/Build/Products" "iOS Release join build"
@@ -871,6 +875,7 @@ release_join_prepare_ios_release() {
     echo "iOS Release app was not built for testing" >&2
     return 1
   }
+  release_join_expose_ios_fixture_documents "$app_path" || return 1
   app_binary="$app_path/Nostr VPN"
   tunnel_app="$app_path/PlugIns/Nostr VPN Tunnel.appex"
   tunnel_binary="$tunnel_app/Nostr VPN Tunnel"

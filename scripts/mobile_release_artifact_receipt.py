@@ -13,6 +13,26 @@ import stat
 import sys
 from typing import Any
 
+IOS_FIXTURE_DISPLAY_NAME = "Nostr VPN Test Files"
+IOS_FIXTURE_SCOPE = "join-test-variant-only"
+
+
+def ios_fixture_identity(bundle: str) -> dict[str, Any]:
+    return {
+        "bundleIdentifier": bundle,
+        "displayName": IOS_FIXTURE_DISPLAY_NAME,
+        "scope": IOS_FIXTURE_SCOPE,
+    }
+
+
+def require_ios_fixture_info(info: dict[str, Any]) -> None:
+    if (
+        info.get("CFBundleDisplayName") != IOS_FIXTURE_DISPLAY_NAME
+        or info.get("UIFileSharingEnabled") is not True
+        or info.get("LSSupportsOpeningDocumentsInPlace") is not True
+    ):
+        raise ValueError("iOS join-test app lacks scoped Files fixture access")
+
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
@@ -186,6 +206,9 @@ def build_join_summary(args: argparse.Namespace) -> None:
         **ios_production_expected,
         "artifactType": "iOS Ad Hoc Release join-test variant",
         "appBundleTreeSha256": ios_app_bundle_tree_sha,
+        "fileSharingFixture": ios_fixture_identity(
+            ios_production["installedBundleIdentifier"]
+        ),
         "joinTestingCompilationCondition": "NVPN_RELEASE_JOIN_TESTING",
         "joinTestingCompilationConditionEnabled": True,
         "productionArtifactReceiptSha256": sha256_file(
@@ -215,6 +238,7 @@ def build_join_summary(args: argparse.Namespace) -> None:
         "packetTunnelExecutableSha256",
         "signerCertificateSha256",
         "installedBundleIdentifier",
+        "fileSharingFixture",
     )
     for key in android_identity_keys:
         if not android.get(key):
@@ -526,6 +550,7 @@ def create_ios_join_variant(args: argparse.Namespace) -> None:
     app_info = plistlib.load(info.open("rb"))
     if app_info.get("CFBundleIdentifier") != args.bundle:
         raise ValueError("iOS app bundle identifier mismatch")
+    require_ios_fixture_info(app_info)
     validate_xctestrun(xctestrun)
 
     production = load_json(production_path)
@@ -589,6 +614,7 @@ def create_ios_join_variant(args: argparse.Namespace) -> None:
                 tunnel_profile
             ),
             "selectedPhysicalDevice": selected_device,
+            "fileSharingFixture": ios_fixture_identity(args.bundle),
             "joinTestingCompilationCondition": (
                 "NVPN_RELEASE_JOIN_TESTING"
             ),
@@ -688,6 +714,7 @@ def validate_ios(args: argparse.Namespace) -> None:
         "debuggable": False,
     }
     if production_receipt_path:
+        require_ios_fixture_info(app_info)
         production = load_json(production_receipt_path)
         for name, value in {
             "receiptSchema": 2,
@@ -705,12 +732,18 @@ def validate_ios(args: argparse.Namespace) -> None:
                     "NVPN_RELEASE_JOIN_TESTING"
                 ),
                 "joinTestingCompilationConditionEnabled": True,
+                "fileSharingFixture": ios_fixture_identity(args.bundle),
                 "productionArtifactReceiptSha256": sha256_file(
                     production_receipt_path
                 ),
                 "productionAppByteIdentical": False,
             }
         )
+    elif (
+        "UIFileSharingEnabled" in app_info
+        or "LSSupportsOpeningDocumentsInPlace" in app_info
+    ):
+        raise ValueError("production iOS app exposes test fixture file sharing")
     for name, value in expected.items():
         require_equal(receipt, name, value)
     device = receipt.get("selectedPhysicalDevice")

@@ -77,18 +77,23 @@ EOF
   [[ "$(shasum -a 256 "$private/qr.png" | awk '{print $1}')" == "$capture_sha" ]]
 )
 (
-  # Xcode's generated runner app owns the staged Documents container. Settings
-  # on the nested .xctest bundle cannot make that container visible in Files.
+  # Only the separately receipted join-test app exposes a Files container.
+  # Production metadata and the retained XCTest runner remain unchanged.
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-runner-files.XXXXXX")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-fixture-files.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
   PRIVATE_DIR="$tmp/private"
-  runner="$tmp/NostrVpnIosUITests-Runner.app"
-  mkdir -p "$PRIVATE_DIR" "$runner"
-  plutil -create xml1 "$runner/Info.plist"
+  app="$tmp/Nostr VPN.app"
+  mkdir -p "$PRIVATE_DIR" "$app"
+  plutil -create xml1 "$app/Info.plist"
   plutil -insert CFBundleIdentifier \
-    -string fixture.runner.xctrunner "$runner/Info.plist"
+    -string fixture.join.app "$app/Info.plist"
+  for key in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+    if plutil -extract "$key" raw "$ROOT/ios/Info.plist" >/dev/null 2>&1; then
+      exit 1
+    fi
+  done
   codesign() {
     local argument prefix=""
     printf '%s\n' "$*" >>"$tmp/codesign.log"
@@ -98,17 +103,44 @@ EOF
     done
     [[ -z "$prefix" ]] || printf 'fixture certificate\n' >"${prefix}0"
   }
-  release_join_expose_ios_runner_documents "$runner"
-  [[ "$(plutil -extract CFBundleDisplayName raw "$runner/Info.plist")" \
+  release_join_expose_ios_fixture_documents "$app"
+  [[ "$(plutil -extract CFBundleDisplayName raw "$app/Info.plist")" \
     == "Nostr VPN Test Files" ]]
-  [[ "$(plutil -extract UIFileSharingEnabled raw "$runner/Info.plist")" \
+  [[ "$(plutil -extract UIFileSharingEnabled raw "$app/Info.plist")" \
     == true ]]
   [[ "$(plutil -extract LSSupportsOpeningDocumentsInPlace raw \
-    "$runner/Info.plist")" == true ]]
+    "$app/Info.plist")" == true ]]
   grep -Eq -- \
     '--force --sign [0-9a-f]{40} --preserve-metadata=identifier,entitlements,requirements,flags,runtime' \
     "$tmp/codesign.log"
   grep -Fq -- '--verify --deep --strict' "$tmp/codesign.log"
+)
+(
+  # The visible app and runner hash-binding containers receive the same image.
+  # shellcheck disable=SC1091
+  source "$join_ui"
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-dual-qr-stage.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  PRIVATE_DIR="$private"
+  IOS_DEVICE=fixture-device
+  image="$private/fixture.png"
+  printf '\211PNG\r\n\032\nfixture' >"$image"
+  xcrun() {
+    local argument bundle="" previous=""
+    printf '%s\n' "$*" >>"$private/xcrun.log"
+    [[ "$*" == *"device copy to"* ]]
+    for argument in "$@"; do
+      [[ "$previous" != --domain-identifier ]] || bundle="$argument"
+      previous="$argument"
+    done
+    [[ -n "$bundle" && "$*" == *"--source $image"* ]]
+  }
+  release_join_stage_ios_qr_image "$image" fixture.png
+  [[ "$(grep -c 'device copy to' "$private/xcrun.log")" == 2 ]]
+  grep -Fq -- '--domain-identifier fi.siriusbusiness.nvpn ' "$private/xcrun.log"
+  grep -Fq -- \
+    '--domain-identifier fi.siriusbusiness.nvpn.UITests.xctrunner ' \
+    "$private/xcrun.log"
 )
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 

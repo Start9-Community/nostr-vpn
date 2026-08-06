@@ -174,9 +174,12 @@ android_receipt.write_text(
 with (ios_app / "Info.plist").open("wb") as handle:
     plistlib.dump(
         {
+            "CFBundleDisplayName": "Nostr VPN Test Files",
             "CFBundleIdentifier": package,
             "CFBundleShortVersionString": "4.1.5",
             "CFBundleVersion": "4001007",
+            "LSSupportsOpeningDocumentsInPlace": True,
+            "UIFileSharingEnabled": True,
         },
         handle,
     )
@@ -295,6 +298,11 @@ variant = json.loads(variant_path.read_text(encoding="utf-8"))
 production = json.loads(production_path.read_text(encoding="utf-8"))
 assert variant["artifactType"] == "iOS Ad Hoc Release join-test variant"
 assert variant["joinTestingCompilationConditionEnabled"] is True
+assert variant["fileSharingFixture"] == {
+    "bundleIdentifier": variant["installedBundleIdentifier"],
+    "displayName": "Nostr VPN Test Files",
+    "scope": "join-test-variant-only",
+}
 assert variant["productionAppByteIdentical"] is False
 assert variant["productionArtifactReceiptSha256"] == hashlib.sha256(
     production_path.read_bytes()

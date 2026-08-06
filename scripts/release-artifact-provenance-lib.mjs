@@ -651,6 +651,10 @@ function requireIosJoinVariant(
     || receipt.joinTestingCompilationCondition
       !== 'NVPN_RELEASE_JOIN_TESTING'
     || receipt.joinTestingCompilationConditionEnabled !== true
+    || receipt.fileSharingFixture?.bundleIdentifier
+      !== receipt.installedBundleIdentifier
+    || receipt.fileSharingFixture?.displayName !== 'Nostr VPN Test Files'
+    || receipt.fileSharingFixture?.scope !== 'join-test-variant-only'
     || receipt.productionArtifactReceiptSha256
       !== productionArtifactReceiptSha256
     || receipt.productionAppByteIdentical !== false

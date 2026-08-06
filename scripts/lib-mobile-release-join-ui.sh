@@ -631,17 +631,21 @@ release_join_capture_ios_qr() {
 
 release_join_stage_ios_qr_image() {
   local image="$1" filename="$2"
-  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
+  local app_bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
+  local runner_bundle="$app_bundle.UITests.xctrunner"
+  local bundle
   RELEASE_JOIN_IOS_STAGED_QR_FILENAME="$filename"
   export RELEASE_JOIN_IOS_STAGED_QR_FILENAME
-  xcrun devicectl device copy to \
-    --device "$IOS_DEVICE" \
-    --domain-type appDataContainer \
-    --domain-identifier "$bundle" \
-    --source "$image" \
-    --destination "Documents/$filename" \
-    --timeout 15 \
-    --quiet >/dev/null
+  for bundle in "$app_bundle" "$runner_bundle"; do
+    xcrun devicectl device copy to \
+      --device "$IOS_DEVICE" \
+      --domain-type appDataContainer \
+      --domain-identifier "$bundle" \
+      --source "$image" \
+      --destination "Documents/$filename" \
+      --timeout 15 \
+      --quiet >/dev/null || return 1
+  done
 }
 
 release_join_require_fresh_ios_pending_qr() {
