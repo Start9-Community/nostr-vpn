@@ -28,8 +28,6 @@
 	<string>$(NVPN_BUILD_TIMESTAMP_UTC)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect directly to Nostr VPN devices on your local network.</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>
