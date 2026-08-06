@@ -85,24 +85,24 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     assert_eq!(result.payment.channel_id, session.channel_id);
     assert_eq!(result.payment.lease_id, session.lease_id);
     assert_eq!(result.payment.delivered_units, 110);
-    assert_eq!(result.payment.amount_due_msat, 1_100);
-    assert_eq!(result.payment.paid_msat, 2_000);
+    assert_eq!(result.payment.amount_due_msat, 1);
+    assert_eq!(result.payment.paid_msat, 1_000);
     assert!(!result.dry_run);
     assert_eq!(result.queued, Some(true));
     assert!(result.persisted);
 
     let channel = store.channels.get(&session.channel_id).expect("channel");
     assert_eq!(channel.status, PaidRouteLifecycleStatus::Closing);
-    assert_eq!(channel.payment.paid_msat, 2_000);
+    assert_eq!(channel.payment.paid_msat, 1_000);
     assert_eq!(
         channel
             .payment
             .cashu_spilman_payment
             .as_ref()
             .map(|payment| payment.balance),
-        Some(2)
+        Some(1)
     );
-    let expected_signature = format!("closed-{}-2", session.channel_id);
+    let expected_signature = format!("closed-{}-1", session.channel_id);
     assert_eq!(
         channel
             .payment

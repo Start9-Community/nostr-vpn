@@ -412,8 +412,7 @@ fn clap_set_supports_paid_exit_seller_flags() {
     for flag in [
         "paid-exit-enabled",
         "paid-exit-upstream",
-        "paid-exit-price-msat",
-        "paid-exit-per-units",
+        "paid-exit-price-msat-per-gb",
         "paid-exit-accepted-mints",
         "paid-exit-country-code",
         "paid-exit-asn",
@@ -430,11 +429,17 @@ fn clap_set_supports_paid_exit_seller_flags() {
             "missing --{flag} on set command"
         );
     }
-    assert!(
-        !set.get_arguments()
-            .any(|argument| argument.get_long() == Some("paid-exit-meter")),
-        "byte billing must not expose a legacy meter selector"
-    );
+    for legacy_flag in [
+        "paid-exit-meter",
+        "paid-exit-price-msat",
+        "paid-exit-per-units",
+    ] {
+        assert!(
+            !set.get_arguments()
+                .any(|argument| argument.get_long() == Some(legacy_flag)),
+            "fixed-GB pricing must not expose legacy --{legacy_flag}"
+        );
+    }
 }
 
 #[test]
