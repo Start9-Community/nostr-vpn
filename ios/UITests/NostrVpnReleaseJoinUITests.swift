@@ -364,7 +364,11 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private func scrollTo(_ target: XCUIElement, named identifier: String) -> XCUIElement {
         for _ in 0..<12 where !target.isHittable {
-            app.swipeUp()
+            if target.exists, target.frame.midY < app.frame.midY {
+                app.swipeDown()
+            } else {
+                app.swipeUp()
+            }
         }
         XCTAssertTrue(
             target.waitForExistence(timeout: 5) && target.isHittable,
