@@ -1,5 +1,12 @@
 #[cfg(target_os = "windows")]
 impl FipsPrivateTunnelRuntime {
+    #[cfg(feature = "paid-exit")]
+    pub(crate) fn paid_exit_seller_ready(&self) -> bool {
+        // Windows does not yet install seller forwarding/NAT, so listener
+        // ownership alone must never make a public offer discoverable.
+        false
+    }
+
     pub(crate) async fn start(
         config: FipsPrivateTunnelConfig,
         cleanup_journal_config_path: &std::path::Path,

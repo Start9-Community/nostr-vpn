@@ -76,6 +76,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
         Instant::now() - Duration::from_secs(PAID_EXIT_SESSION_OPEN_RETRY_SECS);
     #[cfg(feature = "paid-exit")]
     let mut paid_exit_buyer_refunds = PaidExitBuyerRefundRuntime::new()?;
+    #[cfg(feature = "paid-exit")]
+    let mut paid_exit_offer_publisher =
+        PaidExitOfferPublisher::load(&app, &config_path, unix_timestamp());
     let mut last_recent_peer_refresh_signature = None;
     let mut last_recent_peer_cache_persisted_at = 0;
     let (join_request_ipc_tx, mut join_request_ipc_rx) =

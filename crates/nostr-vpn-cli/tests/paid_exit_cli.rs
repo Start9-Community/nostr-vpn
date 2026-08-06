@@ -246,6 +246,40 @@ fn paid_exit_offer_includes_spilman_receiver_key_after_seller_config() {
         }),
         "receiver_pubkey tag missing from offer event: {offer_json}"
     );
+
+    let store_path = dir.path().join("paid-routes.json");
+    std::fs::remove_file(&store_path).expect("remove offer snapshot");
+
+    let offer = run_nvpn(["paid-exit", "offer", "--config", config, "--publish"]);
+    assert!(
+        !offer.status.success(),
+        "config-only publish unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&offer.stderr).contains("daemon is not running"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&offer.stderr)
+    );
+    assert!(
+        !store_path.exists(),
+        "failed publish persisted a live offer"
+    );
+
+    let untouched_config = dir.path().join("untouched.toml");
+    let run = run_nvpn([
+        "paid-exit",
+        "run",
+        "--config",
+        untouched_config.to_str().expect("utf8 config path"),
+        "--publish",
+        "--no-reload-daemon",
+    ]);
+    assert!(
+        !run.status.success(),
+        "no-reload publish unexpectedly succeeded"
+    );
+    assert!(String::from_utf8_lossy(&run.stderr).contains("--publish requires daemon reload"));
+    assert!(!untouched_config.exists(), "invalid command mutated config");
 }
 
 #[test]

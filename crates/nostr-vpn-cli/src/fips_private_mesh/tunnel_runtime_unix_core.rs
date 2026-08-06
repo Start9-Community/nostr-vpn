@@ -892,6 +892,14 @@ impl FipsPrivateTunnelRuntime {
         self.active_listen_port
     }
 
+    #[cfg(all(
+        feature = "paid-exit",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub(crate) fn paid_exit_seller_ready(&self) -> bool {
+        self.active_listen_port.is_some() && self.local_exit_seller_egress_ready
+    }
+
     pub(crate) fn client_dataplane_enabled(&self) -> bool {
         self.config.client_dataplane_enabled
     }

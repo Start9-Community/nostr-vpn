@@ -501,6 +501,27 @@ fn signed_offer_event_roundtrips_without_raw_exit_endpoint() {
 }
 
 #[test]
+fn signed_offer_accepts_a_short_expiry_for_readiness_withdrawal() {
+    let seller = Keys::generate();
+    let offer = sample_paid_exit_offer(&seller);
+
+    let signed = SignedPaidRouteOffer::sign_expiring_at(offer.clone(), &seller, 123, 128)
+        .expect("sign short-lived paid route offer");
+
+    assert_eq!(
+        signed.event.tags.expiration().map(|value| value.as_secs()),
+        Some(128)
+    );
+    assert_eq!(signed.offer().expect("decode short-lived offer"), offer);
+    SignedPaidRouteOffer::from_event(signed.event).expect("verify short-lived offer");
+
+    let error =
+        SignedPaidRouteOffer::sign_expiring_at(sample_paid_exit_offer(&seller), &seller, 123, 123)
+            .expect_err("non-future expiry rejected");
+    assert!(error.to_string().contains("expiration"));
+}
+
+#[test]
 fn signed_offer_event_includes_spilman_receiver_pubkey_when_present() {
     let seller = Keys::generate();
     let receiver_pubkey_hex = format!("03{}", "11".repeat(32));

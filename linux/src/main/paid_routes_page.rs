@@ -550,15 +550,6 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
     }
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let publish = icon_text_button("Publish", "document-send-symbolic");
-    publish.set_sensitive(seller.supported && seller.enabled);
-    {
-        let app = app.clone();
-        publish.connect_clicked(move |_| {
-            dispatch(&app, NativeAppAction::PublishPaidExitOffer);
-        });
-    }
-    actions.append(&publish);
     let receive = icon_text_button("Receive", "mail-receive-symbolic");
     receive.set_sensitive(seller.supported && seller.enabled);
     {

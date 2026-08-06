@@ -33,6 +33,30 @@
     }
 
     #[test]
+    fn standalone_paid_exit_status_uses_runtime_readiness_not_vpn_activity() {
+        let mut app = AppConfig::generated();
+        app.paid_exit.enabled = true;
+        app.paid_exit.pricing.price_msat = 100;
+        app.paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
+        let daemon_state = DaemonRuntimeState {
+            paid_exit_seller_ready: true,
+            vpn_active: false,
+            ..DaemonRuntimeState::default()
+        };
+
+        assert_eq!(
+            paid_exit::paid_exit_seller_status_text(
+                &app,
+                Some(&daemon_state),
+                &app.paid_exit,
+                false,
+                true,
+            ),
+            "Selling internet is ready"
+        );
+    }
+
+    #[test]
     fn empty_app_relay_config_exposes_fips_defaults() {
         let mut config = AppConfig::generated();
         config.nostr.relays.clear();

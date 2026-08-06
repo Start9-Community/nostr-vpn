@@ -134,12 +134,29 @@ pub struct SignedPaidRouteOffer {
 
 impl SignedPaidRouteOffer {
     pub fn sign(offer: PaidRouteOffer, keys: &Keys, signed_at: u64) -> Result<Self> {
+        Self::sign_expiring_at(
+            offer,
+            keys,
+            signed_at,
+            signed_at.saturating_add(PAID_ROUTE_OFFER_TTL_SECS),
+        )
+    }
+
+    pub fn sign_expiring_at(
+        offer: PaidRouteOffer,
+        keys: &Keys,
+        signed_at: u64,
+        expires_at: u64,
+    ) -> Result<Self> {
+        if expires_at <= signed_at {
+            return Err(anyhow!(
+                "paid route offer expiration must follow its creation"
+            ));
+        }
         validate_paid_route_offer(&offer)?;
         let content = serde_json::to_string(&offer).context("failed to encode paid route offer")?;
         let mut tags = paid_route_offer_tags(&offer)?;
-        tags.push(Tag::expiration(Timestamp::from(
-            signed_at.saturating_add(PAID_ROUTE_OFFER_TTL_SECS),
-        )));
+        tags.push(Tag::expiration(Timestamp::from(expires_at)));
         let event = EventBuilder::new(Kind::Custom(PAID_ROUTE_OFFER_KIND), content)
             .tags(tags)
             .custom_created_at(Timestamp::from(signed_at))

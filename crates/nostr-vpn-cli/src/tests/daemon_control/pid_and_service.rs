@@ -4,10 +4,11 @@ fn daemon_runtime_state_tracks_live_endpoint_and_listen_port() {
     config.node.endpoint = "198.51.100.10:51820".to_string();
     let mut tunnel_runtime = crate::CliTunnelRuntime::new("utun100");
     tunnel_runtime.active_listen_port = Some(53083);
+    tunnel_runtime.paid_exit_seller_ready = true;
     let state = crate::build_daemon_runtime_state(crate::DaemonRuntimeStateInput {
         app: &config,
         vpn_enabled: true,
-        vpn_active: true,
+        vpn_active: false,
         expected_peers: 0,
         tunnel_runtime: &tunnel_runtime,
         fips_peer_statuses: &[],
@@ -28,6 +29,8 @@ fn daemon_runtime_state_tracks_live_endpoint_and_listen_port() {
     };
 
     assert_eq!(state.listen_port, 53083);
+    assert!(!state.vpn_active);
+    assert!(state.paid_exit_seller_ready);
     let expected_endpoint = crate::local_signal_endpoint(&config, 53083);
     assert_eq!(state.local_endpoint, expected_endpoint);
     // advertised_endpoint now mirrors local_endpoint — fips-core owns

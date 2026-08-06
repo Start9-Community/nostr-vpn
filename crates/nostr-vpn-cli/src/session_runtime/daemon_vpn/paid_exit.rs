@@ -13,6 +13,93 @@ pub(super) const PAID_EXIT_DAEMON_STREAM_PAYMENT_LIMIT: usize = 4;
 pub(super) const PAID_EXIT_SESSION_OPEN_RETRY_SECS: u64 = 5;
 pub(super) const PAID_EXIT_OFFER_REFRESH_SECS: u64 =
     nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS / 4;
+const PAID_EXIT_OFFER_WITHDRAW_TTL_SECS: u64 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaidExitOfferPublication {
+    None,
+    Published,
+    Withdrawn(usize),
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PaidExitOfferPublisher {
+    advertised: bool,
+    last_created_at: u64,
+}
+
+impl PaidExitOfferPublisher {
+    pub(crate) fn load(app: &AppConfig, config_path: &Path, now_unix: u64) -> Self {
+        let Ok(own_npub) = app
+            .nostr_keys()
+            .and_then(|keys| keys.public_key().to_bech32().map_err(anyhow::Error::from))
+        else {
+            return Self::default();
+        };
+        let Ok(store) = load_paid_route_store(&paid_route_store_file_path(config_path)) else {
+            return Self::default();
+        };
+        let own_offers = store
+            .offers
+            .values()
+            .filter(|record| record.offer.seller_npub == own_npub)
+            .collect::<Vec<_>>();
+        Self {
+            advertised: own_offers.iter().any(|record| {
+                record
+                    .signed_offer
+                    .event
+                    .tags
+                    .expiration()
+                    .is_none_or(|expiration| expiration.as_secs() > now_unix)
+            }),
+            last_created_at: own_offers
+                .iter()
+                .map(|record| record.signed_offer.event.created_at.as_secs())
+                .max()
+                .unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        app: &AppConfig,
+        config_path: &Path,
+        now_unix: u64,
+        seller_ready: bool,
+        refresh: bool,
+    ) -> Result<PaidExitOfferPublication> {
+        let should_advertise = app.paid_exit.enabled && seller_ready;
+        if should_advertise && (!self.advertised || refresh) {
+            let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
+            refresh_paid_exit_offer_for_daemon(app, config_path, signed_at)?;
+            self.advertised = true;
+            self.last_created_at = signed_at;
+            return Ok(PaidExitOfferPublication::Published);
+        }
+        if !should_advertise && self.advertised {
+            let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
+            let count = withdraw_paid_exit_offers_for_daemon(app, config_path, signed_at)?;
+            self.advertised = false;
+            self.last_created_at = signed_at;
+            return Ok(PaidExitOfferPublication::Withdrawn(count));
+        }
+        Ok(PaidExitOfferPublication::None)
+    }
+}
+
+pub(crate) fn log_paid_exit_offer_publication(result: Result<PaidExitOfferPublication>) {
+    match result {
+        Ok(PaidExitOfferPublication::Published) => {
+            eprintln!("paid-exit: published ready public offer")
+        }
+        Ok(PaidExitOfferPublication::Withdrawn(count)) if count > 0 => {
+            eprintln!("paid-exit: withdrew {count} unavailable public offer(s)")
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("paid-exit: offer reconcile failed: {error}"),
+    }
+}
 
 pub(crate) fn refresh_paid_exit_offer_for_daemon(
     app: &AppConfig,
@@ -29,6 +116,42 @@ pub(crate) fn refresh_paid_exit_offer_for_daemon(
             .as_bool()
             .unwrap_or_default(),
     )
+}
+
+fn withdraw_paid_exit_offers_for_daemon(
+    app: &AppConfig,
+    config_path: &Path,
+    signed_at: u64,
+) -> Result<usize> {
+    let keys = app.nostr_keys()?;
+    let own_npub = keys
+        .public_key()
+        .to_bech32()
+        .context("failed to encode paid route seller npub")?;
+    let store_path = paid_route_store_file_path(config_path);
+    let mut store = load_paid_route_store(&store_path)?;
+    let offers = store
+        .offers
+        .values()
+        .filter(|record| record.offer.seller_npub == own_npub)
+        .map(|record| record.offer.clone())
+        .collect::<Vec<_>>();
+    let mut count = 0;
+    for offer in offers {
+        let signed = SignedPaidRouteOffer::sign_expiring_at(
+            offer.clone(),
+            &keys,
+            signed_at,
+            signed_at.saturating_add(PAID_EXIT_OFFER_WITHDRAW_TTL_SECS),
+        )?;
+        store.upsert_signed_offer(signed.clone(), Vec::new(), signed_at)?;
+        publish_paid_exit_offer_pubsub(app, config_path, &signed)?;
+        count += 1;
+    }
+    if count > 0 {
+        write_paid_route_store(&store_path, &store)?;
+    }
+    Ok(count)
 }
 
 #[derive(Debug, Default)]

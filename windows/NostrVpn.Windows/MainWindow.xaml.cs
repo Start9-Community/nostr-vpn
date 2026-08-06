@@ -281,11 +281,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void PublishPaidExitOffer_Click(object sender, RoutedEventArgs e)
-    {
-        await ViewModel.PublishPaidExitOfferAsync();
-    }
-
     private async void ReceivePaidRoutePayments_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.ReceivePaidRoutePaymentsAsync();

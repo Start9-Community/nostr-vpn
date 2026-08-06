@@ -341,10 +341,6 @@ extension AppManager {
         return amount
     }
 
-    func publishPaidExitOffer() {
-        dispatch(.publishPaidExitOffer, status: "Advertising listing")
-    }
-
     func setPaidRouteMarketFilter(countryCode: String, sort: String) {
         dispatch(
             .setPaidRouteMarketFilter(

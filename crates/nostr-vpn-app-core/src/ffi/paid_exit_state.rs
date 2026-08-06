@@ -275,7 +275,7 @@ fn append_paid_exit_seller_store_status(config_status: String, store_status: Str
     }
 }
 
-fn paid_exit_seller_status_text(
+pub(super) fn paid_exit_seller_status_text(
     app: &AppConfig,
     daemon_state: Option<&DaemonRuntimeState>,
     config: &PaidExitConfig,
@@ -288,7 +288,7 @@ fn paid_exit_seller_status_text(
         "Selling internet is off".to_string()
     } else if let Err(error) = app.paid_exit_seller_egress() {
         error.to_string()
-    } else if !daemon_state.is_some_and(|state| state.vpn_active && state.listen_port > 0) {
+    } else if !daemon_state.is_some_and(|state| state.paid_exit_seller_ready) {
         "Waiting for the FIPS listener".to_string()
     } else if config.access.upstream == PaidExitUpstream::WireGuardExit
         && !wireguard_exit_configured

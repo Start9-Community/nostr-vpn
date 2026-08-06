@@ -66,6 +66,8 @@ struct DaemonRuntimeState {
     advertised_endpoint: String,
     #[serde(default)]
     listen_port: u16,
+    #[serde(default)]
+    paid_exit_seller_ready: bool,
     vpn_enabled: bool,
     vpn_active: bool,
     vpn_status: String,
@@ -473,6 +475,7 @@ impl Drop for ConnectMagicDnsRuntime {
 struct CliTunnelRuntime {
     iface: String,
     active_listen_port: Option<u16>,
+    paid_exit_seller_ready: bool,
 }
 
 #[cfg(target_os = "linux")]

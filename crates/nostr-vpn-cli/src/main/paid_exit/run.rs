@@ -27,6 +27,11 @@ async fn paid_exit_run_command(args: PaidExitRunArgs) -> Result<()> {
 }
 
 async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> {
+    if args.publish && args.no_reload_daemon {
+        return Err(anyhow!(
+            "--publish requires daemon reload; remove --no-reload-daemon"
+        ));
+    }
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
     let mut app = load_or_default_config(&config_path)?;
     apply_paid_exit_run_settings(&mut app, &args)?;
@@ -35,13 +40,16 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
     ensure_paid_exit_advertisable(&app)?;
     app.save(&config_path)?;
 
-    let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
-    let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
-
     let daemon_reload_attempted = !args.no_reload_daemon;
-    if daemon_reload_attempted {
+    if args.publish {
+        reload_running_daemon_after_save(&config_path)?;
+        require_paid_exit_seller_daemon_ready(&config_path, true).await?;
+    } else if daemon_reload_attempted {
         maybe_reload_running_daemon(&config_path);
     }
+
+    let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
+    let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
 
     let publish = if args.publish {
         Some(publish_paid_exit_offer_pubsub(

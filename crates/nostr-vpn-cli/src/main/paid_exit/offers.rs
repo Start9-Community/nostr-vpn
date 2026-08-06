@@ -2,6 +2,9 @@
 async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
+    if args.publish {
+        require_paid_exit_seller_daemon_ready(&config_path, false).await?;
+    }
     let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
     let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
 

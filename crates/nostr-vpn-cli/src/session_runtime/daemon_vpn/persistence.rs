@@ -33,6 +33,8 @@ pub(super) async fn persist_current_daemon_state(context: DaemonStatePersistCont
         .network_snapshot
         .summary(context.network_changed_at, context.captive_portal);
     let port_mapping = context.port_mapping_runtime.status();
+    let mut tunnel_runtime = context.tunnel_runtime.clone();
+    tunnel_runtime.sync_fips_state(context.fips_tunnel_runtime.as_ref());
     persist_daemon_runtime_and_cleanup_state_async(
         context.state_file,
         context.config_path,
@@ -41,7 +43,7 @@ pub(super) async fn persist_current_daemon_state(context: DaemonStatePersistCont
             vpn_enabled: context.vpn_enabled,
             vpn_active: daemon_vpn_active(context.vpn_enabled, context.expected_peers),
             expected_peers: context.expected_peers,
-            tunnel_runtime: context.tunnel_runtime,
+            tunnel_runtime: &tunnel_runtime,
             fips_peer_statuses: &fips_peer_statuses,
             fips_relay_statuses: &fips_relay_statuses,
             fips_endpoint_peers: &fips_endpoint_peer_states,

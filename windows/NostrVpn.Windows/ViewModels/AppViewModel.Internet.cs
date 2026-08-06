@@ -259,9 +259,6 @@ public sealed partial class AppViewModel
             "Saving listing");
     }
 
-    public Task PublishPaidExitOfferAsync() =>
-        DispatchAsync(NativeActions.PublishPaidExitOffer(), "Advertising listing");
-
     public Task ReceivePaidRoutePaymentsAsync() =>
         DispatchAsync(NativeActions.ReceivePaidRoutePayments(), "Checking payments");
 }

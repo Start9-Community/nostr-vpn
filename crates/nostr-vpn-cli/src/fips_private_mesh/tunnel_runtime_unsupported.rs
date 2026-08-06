@@ -20,6 +20,11 @@ impl FipsPrivateTunnelRuntime {
         None
     }
 
+    #[cfg(feature = "paid-exit")]
+    pub(crate) fn paid_exit_seller_ready(&self) -> bool {
+        false
+    }
+
     pub(crate) fn client_dataplane_enabled(&self) -> bool {
         false
     }

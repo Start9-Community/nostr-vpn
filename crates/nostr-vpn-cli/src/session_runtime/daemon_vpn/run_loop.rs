@@ -1,7 +1,5 @@
 loop {
-    tunnel_runtime.active_listen_port = fips_tunnel_runtime
-        .as_ref()
-        .and_then(crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port);
+    tunnel_runtime.sync_fips_state(fips_tunnel_runtime.as_ref());
     let control_request_waiting = daemon_control_file_path(&config_path).exists();
     let background_ready = daemon_state_background_maintenance_enabled(
         &intervals.network_deadline,
@@ -57,13 +55,15 @@ loop {
         }
         _ = paid_exit_offer_refresh_interval.tick(), if background_ready => {
             #[cfg(feature = "paid-exit")]
-            if app.paid_exit.enabled {
-                match refresh_paid_exit_offer_for_daemon(&app, &config_path, unix_timestamp()) {
-                    Ok(true) => eprintln!("paid-exit: refreshed public offer"),
-                    Ok(false) => {}
-                    Err(error) => eprintln!("paid-exit: offer refresh failed: {error}"),
-                }
-            }
+            log_paid_exit_offer_publication(paid_exit_offer_publisher.reconcile(
+                &app,
+                &config_path,
+                unix_timestamp(),
+                fips_tunnel_runtime.as_ref().is_some_and(
+                    crate::fips_private_mesh::FipsPrivateTunnelRuntime::paid_exit_seller_ready,
+                ),
+                true,
+            ));
         }
         _ = recent_peer_refresh_interval.tick(), if background_ready => {
             if let Some(runtime) = fips_tunnel_runtime.as_ref() {
@@ -940,6 +940,16 @@ loop {
             if !state_background_ready {
                 continue;
             }
+            #[cfg(feature = "paid-exit")]
+            log_paid_exit_offer_publication(paid_exit_offer_publisher.reconcile(
+                &app,
+                &config_path,
+                unix_timestamp(),
+                fips_tunnel_runtime.as_ref().is_some_and(
+                    crate::fips_private_mesh::FipsPrivateTunnelRuntime::paid_exit_seller_ready,
+                ),
+                false,
+            ));
             let supervised_service = supervised_service_executable.as_ref();
             if daemon_service_supervisor_requests_restart(supervised_service) {
                 break;

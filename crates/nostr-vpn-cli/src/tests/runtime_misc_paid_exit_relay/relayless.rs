@@ -1,8 +1,11 @@
 #[cfg(feature = "paid-exit")]
 #[test]
-fn enabled_paid_exit_daemon_queues_one_expiring_offer_without_relays() {
+fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
     use nostr_vpn_core::config::NostrPubsubMode;
     use nostr_vpn_core::paid_routes::{PAID_ROUTE_OFFER_KIND, PAID_ROUTE_OFFER_TTL_SECS};
+    use crate::session_runtime::daemon_vpn_paid_exit::{
+        PaidExitOfferPublication, PaidExitOfferPublisher,
+    };
 
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -20,37 +23,73 @@ fn enabled_paid_exit_daemon_queues_one_expiring_offer_without_relays() {
     app.paid_exit.normalize();
     let now_unix = 1_000;
 
-    assert!(
-        crate::session_runtime::daemon_vpn_paid_exit::refresh_paid_exit_offer_for_daemon(
-            &app,
-            &config_path,
-            now_unix,
-        )
-            .expect("refresh daemon offer")
+    let mut publisher = PaidExitOfferPublisher::load(&app, &config_path, now_unix);
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix, false, false)
+            .expect("keep unready seller hidden"),
+        PaidExitOfferPublication::None
     );
-    assert!(
-        !crate::session_runtime::daemon_vpn_paid_exit::refresh_paid_exit_offer_for_daemon(
-            &app,
-            &config_path,
-            now_unix,
-        )
-            .expect("deduplicate identical refresh")
+    assert!(!crate::control_pubsub_runtime::control_pubsub_outbox_directory(&config_path).exists());
+
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix, true, false)
+            .expect("publish ready seller"),
+        PaidExitOfferPublication::Published
+    );
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix, false, false)
+            .expect("withdraw on listener or upstream loss"),
+        PaidExitOfferPublication::Withdrawn(1)
+    );
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix + 1, true, false)
+            .expect("republish after readiness returns"),
+        PaidExitOfferPublication::Published
+    );
+    app.paid_exit.enabled = false;
+    assert_eq!(
+        publisher
+            .reconcile(&app, &config_path, now_unix + 1, true, false)
+            .expect("withdraw when seller is disabled"),
+        PaidExitOfferPublication::Withdrawn(1)
     );
 
-    let paths = std::fs::read_dir(
+    let mut events = std::fs::read_dir(
         crate::control_pubsub_runtime::control_pubsub_outbox_directory(&config_path),
     )
-        .expect("read offer outbox")
-        .map(|entry| entry.expect("outbox entry").path())
-        .collect::<Vec<_>>();
-    assert_eq!(paths.len(), 1);
-    let event: nostr_sdk::prelude::Event =
-        serde_json::from_slice(&std::fs::read(&paths[0]).expect("read queued offer"))
-            .expect("decode queued offer");
-    assert_eq!(u16::from(event.kind), PAID_ROUTE_OFFER_KIND);
+    .expect("read offer outbox")
+    .map(|entry| {
+        serde_json::from_slice::<nostr_sdk::prelude::Event>(
+            &std::fs::read(entry.expect("outbox entry").path()).expect("read queued offer"),
+        )
+        .expect("decode queued offer")
+    })
+    .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.created_at);
+    assert!(
+        events
+            .iter()
+            .all(|event| u16::from(event.kind) == PAID_ROUTE_OFFER_KIND)
+    );
     assert_eq!(
-        event.tags.expiration().map(|value| value.as_secs()),
-        Some(now_unix + PAID_ROUTE_OFFER_TTL_SECS)
+        events
+            .iter()
+            .map(|event| (
+                event.created_at.as_secs(),
+                event.tags.expiration().expect("offer expiry").as_secs()
+                    - event.created_at.as_secs(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (now_unix, PAID_ROUTE_OFFER_TTL_SECS),
+            (now_unix + 1, 5),
+            (now_unix + 2, PAID_ROUTE_OFFER_TTL_SECS),
+            (now_unix + 3, 5),
+        ]
     );
 
     let _ = std::fs::remove_dir_all(directory);

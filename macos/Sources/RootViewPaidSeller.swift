@@ -269,7 +269,6 @@ extension RootView {
             HStack(spacing: 12) {
                 sectionHeader("Customers", systemImage: "person.2.fill")
                 Spacer(minLength: 16)
-                paidExitSellerAdvertiseButton
                 paidExitSellerPaymentsButton
             }
             paidRoutePaymentActionResult(state.paidRouteMarket.lastPaymentAction)
@@ -323,7 +322,6 @@ extension RootView {
     var paidExitSellerActionButtons: some View {
         HStack(spacing: 8) {
             paidExitSellerSaveButton
-            paidExitSellerAdvertiseButton
             paidExitSellerPaymentsButton
         }
     }
@@ -352,15 +350,6 @@ extension RootView {
 
     var paidExitPriceSatsIsValid: Bool {
         AppManager.parsePaidExitPriceSats(paidExitPriceSats) != nil
-    }
-
-    var paidExitSellerAdvertiseButton: some View {
-        Button {
-            manager.publishPaidExitOffer()
-        } label: {
-            Label("Advertise", systemImage: "paperplane.fill")
-        }
-        .disabled(manager.actionInFlight || !state.paidExitSeller.enabled)
     }
 
     var paidExitSellerPaymentsButton: some View {

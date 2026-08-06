@@ -601,7 +601,6 @@
                 <StackPanel Visibility="{Binding PaidExitSellerVisible, Converter={StaticResource BoolToVisibility}}">
                   <CheckBox Style="{StaticResource SwitchCheckBox}" Content="Share my internet" IsChecked="{Binding State.PaidExitSeller.Enabled, Mode=OneWay}" Click="PaidExitEnabled_Click" />
                   <StackPanel Orientation="Horizontal" Margin="0,10,0,10">
-                    <Button Content="Advertise" Click="PublishPaidExitOffer_Click" IsEnabled="{Binding State.PaidExitSeller.Enabled}" Margin="0,0,8,0" />
                     <Button Content="Payments" Click="ReceivePaidRoutePayments_Click" IsEnabled="{Binding State.PaidExitSeller.Enabled}" />
                   </StackPanel>
                   <TextBlock Text="{Binding PaidExitSellerChannelCreditText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" />

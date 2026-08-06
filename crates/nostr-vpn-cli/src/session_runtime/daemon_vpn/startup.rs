@@ -261,9 +261,7 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
             (None, Vec::new())
         };
 
-    tunnel_runtime.active_listen_port = fips_tunnel_runtime
-        .as_ref()
-        .and_then(crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port);
+    tunnel_runtime.sync_fips_state(fips_tunnel_runtime.as_ref());
     if daemon_vpn_active(vpn_enabled, expected_peers)
         && let Some(listen_port) = tunnel_runtime.active_listen_port
     {

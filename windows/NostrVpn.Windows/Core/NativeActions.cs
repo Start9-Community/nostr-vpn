@@ -43,7 +43,6 @@ public static class NativeActions
     public static string StreamPaidRoutePayments(bool publish = true, ulong minIncrementMsat = 1, ulong limit = 0) => AppCoreClient.Action(new { type = "stream_paid_route_payments", publish, minIncrementMsat, limit });
     public static string ReceivePaidRoutePayments(ulong durationSecs = 5) => AppCoreClient.Action(new { type = "receive_paid_route_payments", durationSecs });
     public static string CollectDuePaidExitChannels() => AppCoreClient.Action(new { type = "collect_due_paid_exit_channels" });
-    public static string PublishPaidExitOffer() => AppCoreClient.Action(new { type = "publish_paid_exit_offer" });
     public static string DiscoverPaidRouteOffers(ulong durationSecs = 5) => AppCoreClient.Action(new { type = "discover_paid_route_offers", durationSecs });
     public static string UpdateSettings(SettingsPatch patch) => AppCoreClient.Action(new { type = "update_settings", patch });
 }

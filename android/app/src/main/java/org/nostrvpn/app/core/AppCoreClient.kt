@@ -143,8 +143,6 @@ object NativeActions {
 
     fun collectDuePaidExitChannels() = action("collect_due_paid_exit_channels")
 
-    fun publishPaidExitOffer() = action("publish_paid_exit_offer")
-
     fun setPaidRouteMarketFilter(
         query: String = "",
         countryCode: String = "",

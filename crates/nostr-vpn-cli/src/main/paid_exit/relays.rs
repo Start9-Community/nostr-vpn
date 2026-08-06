@@ -15,6 +15,34 @@ fn ensure_paid_exit_advertisable(app: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+const PAID_EXIT_SELLER_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+async fn require_paid_exit_seller_daemon_ready(config_path: &Path, wait: bool) -> Result<()> {
+    let deadline = Instant::now() + PAID_EXIT_SELLER_READY_TIMEOUT;
+    loop {
+        let status = daemon_status(config_path)
+            .context("failed to inspect paid exit seller runtime")?;
+        if !status.running {
+            return Err(anyhow!(
+                "cannot publish a paid exit offer: the nvpn daemon is not running"
+            ));
+        }
+        if status
+            .state
+            .as_ref()
+            .is_some_and(|state| state.paid_exit_seller_ready)
+        {
+            return Ok(());
+        }
+        if !wait || Instant::now() >= deadline {
+            return Err(anyhow!(
+                "cannot publish a paid exit offer: the FIPS listener and selected upstream are not ready"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn default_paid_exit_offer_id() -> String {
     "internet-exit".to_string()
 }

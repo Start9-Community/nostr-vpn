@@ -214,7 +214,7 @@ extension RootView {
         if !state.paidExitSeller.enabled {
             return "People can pay to use this Mac's internet connection."
         }
-        return "Sharing is on. Save changes before advertising a new listing."
+        return "Sharing is on. Save changes to refresh the listing automatically."
     }
 
     var wireguardUpstreamSubtitle: String {

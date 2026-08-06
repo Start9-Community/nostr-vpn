@@ -3,11 +3,13 @@ impl CliTunnelRuntime {
         Self {
             iface: iface.into(),
             active_listen_port: None,
+            paid_exit_seller_ready: false,
         }
     }
 
     fn stop(&mut self) {
         self.active_listen_port = None;
+        self.paid_exit_seller_ready = false;
     }
 
     #[cfg(target_os = "macos")]
@@ -17,6 +19,21 @@ impl CliTunnelRuntime {
 
     fn listen_port(&self) -> Option<u16> {
         self.active_listen_port
+    }
+
+    fn sync_fips_state(
+        &mut self,
+        runtime: Option<&crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
+    ) {
+        self.active_listen_port = runtime.and_then(
+            crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port,
+        );
+        #[cfg(feature = "paid-exit")]
+        {
+            self.paid_exit_seller_ready = runtime.is_some_and(
+                crate::fips_private_mesh::FipsPrivateTunnelRuntime::paid_exit_seller_ready,
+            );
+        }
     }
 
     pub(crate) fn owns_interface(&self, iface: &str) -> bool {
