@@ -139,6 +139,13 @@ fn paid_automatic_keeps_fips_runtime_active_before_selecting_seller() {
     assert!(fips_private_runtime_active(&app, false, 0));
 
     app.set_internet_source(InternetSource::Direct);
+    assert!(!app.connect_to_non_roster_fips_peers);
+    assert!(!paid_exit_fips_runtime_active(&app));
+
+    assert!(app.enable_paid_exit_market_discovery());
+    assert_eq!(app.internet_source, InternetSource::Direct);
+    assert!(paid_exit_fips_runtime_active(&app));
+    app.connect_to_non_roster_fips_peers = false;
     assert!(!paid_exit_fips_runtime_active(&app));
 }
 
@@ -159,8 +166,11 @@ fn manual_provider_starts_fips_without_switching_source_or_enabling_discovery() 
 
     app.set_manual_paid_exit_provider(&provider)
         .expect("manual provider");
+    app.set_internet_source(InternetSource::PaidManual);
+    app.set_internet_source(InternetSource::Direct);
 
     assert_eq!(app.internet_source, InternetSource::Direct);
+    assert!(app.connect_to_non_roster_fips_peers);
     assert!(!app.fips_nostr_discovery_enabled);
     assert!(!app.fips_advertise_public_endpoint);
     assert!(paid_exit_fips_runtime_active(&app));
@@ -249,6 +259,10 @@ fn selected_public_paid_exit_counts_as_private_fips_peer_without_active_network(
             .iter()
             .any(|route| route == "0.0.0.0/0")
     );
+
+    app.set_internet_source(InternetSource::Direct);
+    assert!(!app.connect_to_non_roster_fips_peers);
+    assert!(!paid_exit_fips_runtime_active(&app));
 }
 #[test]
 fn fips_roster_publish_attempts_disconnected_recipients() {

@@ -11,6 +11,7 @@ impl AppConfig {
     }
 
     pub fn set_internet_source(&mut self, source: InternetSource) {
+        let previous_source = self.internet_source;
         self.internet_source = source;
         match source {
             InternetSource::Direct => {
@@ -39,6 +40,16 @@ impl AppConfig {
             }
         }
         self.normalize_internet_source();
+        if matches!(
+            previous_source,
+            InternetSource::PaidAutomatic | InternetSource::PaidManual
+        ) && !matches!(
+            self.internet_source,
+            InternetSource::PaidAutomatic | InternetSource::PaidManual
+        ) && self.manual_paid_exit_provider_pubkey_hex().is_none()
+        {
+            self.connect_to_non_roster_fips_peers = false;
+        }
     }
 
     pub fn set_paid_exit_seller_enabled(&mut self, enabled: bool) {
