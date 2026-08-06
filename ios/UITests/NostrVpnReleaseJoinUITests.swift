@@ -150,7 +150,15 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         emit("NVPN_RELEASE_JOIN_JOINER_ID=\(joiner)")
 
         replaceText(element("manual-join-admin-id"), with: admin)
-        replaceText(element("manual-join-network-id"), with: network)
+        let networkField = element("manual-join-network-id")
+        replaceText(networkField, with: network)
+        XCTAssertTrue(
+            ShippedUIInteraction.finishTextEntry(
+                networkField,
+                byTapping: app.staticTexts["Add Network"].firstMatch
+            ),
+            "Manual join fields did not finish text entry"
+        )
 
         let invalidAdmin = app.staticTexts["Not a valid device ID"]
         let submit = scrollTo("manual-join-submit")
@@ -369,7 +377,17 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Shipped text control did not retain the exact supplied value"
         )
         if retained {
-            field.typeKey(.return, modifierFlags: [])
+            // Batched XCTest input can update the accessibility value before
+            // SwiftUI observes the edit. Force one real incremental edit and
+            // restore the exact requested value before testing validation.
+            field.typeText("q")
+            field.typeKey(.delete, modifierFlags: [])
+            XCTAssertTrue(
+                waitUntil(timeout: 2) {
+                    (field.value as? String) == value
+                },
+                "Shipped text control changed while committing typed input"
+            )
         }
     }
 
