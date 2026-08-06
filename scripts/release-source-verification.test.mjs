@@ -21,6 +21,12 @@ import {
   validateWindowsCratesIoReceipts,
   validateWindowsPublicationFipsReceipts,
 } from './release-source-verification.mjs'
+import { readWorkspaceVersionTag } from './local-release-lib.mjs'
+
+const workspaceTag = readWorkspaceVersionTag(
+  readFileSync(join(process.cwd(), 'Cargo.toml'), 'utf8'),
+)
+const workspaceVersion = workspaceTag.slice(1)
 
 function exactWindowsCratesIoFixture() {
   const appGitSha = 'a'.repeat(40)
@@ -367,7 +373,7 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     ),
     appGitSha: candidateCommit,
     appGitTree: candidateTree,
-    appVersion: '4.1.5',
+    appVersion: workspaceVersion,
     fipsGitSha,
     fipsGitTree,
     fipsVersion: fipsPackages['fips-core'],
@@ -390,7 +396,7 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     appGitTree: candidateTree,
     fipsGitSha,
     fipsGitTree,
-    appVersion: '4.1.5',
+    appVersion: workspaceVersion,
     builderMode: exactGateReceipt.builderMode,
     builtOnHostMac: exactGateReceipt.builtOnHostMac,
     builtOnRemoteVm: exactGateReceipt.builtOnRemoteVm,
@@ -426,7 +432,7 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     const receiptSha256 = sha256(bundleReceiptPath)
     return linuxPublicationVerificationPlan({
       env,
-      tag: 'v4.1.5',
+      tag: workspaceTag,
       candidateCommit: verificationCommit,
       candidateTree: verificationTree,
       gateReceipt,

@@ -1270,7 +1270,7 @@ for current_tool in (
         raise SystemExit("exact product export uses historical release tooling")
 if 'require_release_mutation_gate "$ROOT"' in ios_build:
     raise SystemExit("iOS publication replays a historical mutation gate")
-if ios_build.count('require_release_mutation_gate "$HARNESS_ROOT"') != 3:
+if ios_build.count('require_release_mutation_gate "$HARNESS_ROOT"') < 4:
     raise SystemExit("not every iOS publication action uses the current mutation gate")
 if (
     '--mobile-join-ios-variant-receipt \\\n'

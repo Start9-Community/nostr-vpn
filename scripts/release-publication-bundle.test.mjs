@@ -18,13 +18,17 @@ import { dirname, join } from 'node:path'
 import {
   buildReleaseManifest,
   buildReleaseManifestFiles,
+  readWorkspaceVersionTag,
 } from './local-release-lib.mjs'
 import {
   buildReleaseGateAttestation,
   startosExactPackageValidator,
 } from './release-artifact-provenance-lib.mjs'
 
-const tag = 'v4.1.5'
+const tag = readWorkspaceVersionTag(
+  readFileSync(join(process.cwd(), 'Cargo.toml'), 'utf8'),
+)
+const marketingVersion = tag.slice(1)
 const commit = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const releaseGateSummary = 'f'.repeat(64)
@@ -60,7 +64,7 @@ function startosManifestSha256(arch) {
       id: 'nostr-vpn',
       images: [{ id: 'app', arch: [arch] }],
       nestedRuntime: true,
-      version: '4.1.5:0',
+      version: `${marketingVersion}:0`,
     }))
     .digest('hex')
 }
@@ -92,7 +96,7 @@ case "$3" in
   *-startos-x86_64.s9pk) arch=x86_64 ;;
   *) exit 2 ;;
 esac
-printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
+printf '{"id":"nostr-vpn","version":"${marketingVersion}:0","nestedRuntime":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
 `,
   )
   chmodSync(fakeStartCli, 0o755)
