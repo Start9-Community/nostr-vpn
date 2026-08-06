@@ -29,6 +29,7 @@ impl NativeAppRuntime {
                 state.price_msat_per_gb,
                 snapshot.rate,
                 snapshot.currency.as_str(),
+                snapshot.stale,
             );
         }
         state
@@ -52,6 +53,7 @@ impl NativeAppRuntime {
                     offer.price_msat_per_gb,
                     snapshot.rate,
                     snapshot.currency.as_str(),
+                    snapshot.stale,
                 );
             }
             for offer in &mut state.visible_offers {
@@ -59,6 +61,7 @@ impl NativeAppRuntime {
                     offer.price_msat_per_gb,
                     snapshot.rate,
                     snapshot.currency.as_str(),
+                    snapshot.stale,
                 );
             }
         }

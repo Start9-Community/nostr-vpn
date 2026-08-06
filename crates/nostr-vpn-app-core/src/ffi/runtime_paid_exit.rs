@@ -59,8 +59,12 @@ mod paid_exit {
             );
             assert_eq!(paid_route_price_text(0), "free");
             assert_eq!(
-                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR"),
+                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR", false),
                 "25000 msat/GB · 25 sat/GB · ≈ 0.02 EUR/GB"
+            );
+            assert_eq!(
+                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR", true),
+                "25000 msat/GB · 25 sat/GB"
             );
         }
 

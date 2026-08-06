@@ -32,8 +32,12 @@ fn paid_route_price_text_with_fiat(
     price_msat_per_gb: u64,
     fiat_per_btc: Option<f64>,
     currency: &str,
+    exchange_rate_stale: bool,
 ) -> String {
     let mut text = paid_route_price_text(price_msat_per_gb);
+    if exchange_rate_stale {
+        return text;
+    }
     let Some(rate) = fiat_per_btc.filter(|rate| rate.is_finite() && *rate > 0.0) else {
         return text;
     };
