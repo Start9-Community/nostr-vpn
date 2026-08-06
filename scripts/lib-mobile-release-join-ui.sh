@@ -216,9 +216,14 @@ release_join_android_scroll_to() {
 
 release_join_android_enter() {
   local kind="$1" selector="$2" value="$3"
+  local visibility="${4:-safe-center}"
   local actual deadline input_state
-  release_join_android_scroll_to "$kind" "$selector" || return 1
-  release_join_android_tap "$kind" "$selector" || return 1
+  release_join_android_scroll_to "$kind" "$selector" "$visibility" || return 1
+  if [[ "$visibility" == visible-center ]]; then
+    release_join_android_tap_visible "$kind" "$selector" || return 1
+  else
+    release_join_android_tap "$kind" "$selector" || return 1
+  fi
   deadline=$((SECONDS + 3))
   while ((SECONDS < deadline)); do
     input_state="$("${ADB[@]}" shell dumpsys input_method | tr -d '\r')" \
@@ -674,7 +679,8 @@ release_join_android_manual_submit() {
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_android_enter resource manual-join-admin-id "$admin"
-  release_join_android_enter resource manual-join-network-id "$network"
+  release_join_android_enter \
+    resource manual-join-network-id "$network" visible-center
   release_join_android_scroll_to resource manual-join-submit
   release_join_android_tap resource manual-join-submit
   local deadline=$((SECONDS + 3))

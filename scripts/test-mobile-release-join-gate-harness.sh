@@ -1013,6 +1013,34 @@ fi
     visible-center
 )" == "279 2013" ]]
 
+# A partially visible manual-join field must use the clipped safe viewport
+# rather than silently failing before text entry.
+(
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  ADB=(fake_adb)
+  fake_adb() {
+    if [[ "$*" == "shell dumpsys input_method" ]]; then
+      printf 'mInputShown=true\n'
+    fi
+  }
+  sleep() { :; }
+  release_join_android_scroll_to() {
+    [[ "$*" == "resource manual-field visible-center" ]]
+  }
+  release_join_android_tap() { return 1; }
+  release_join_android_tap_visible() {
+    [[ "$*" == "resource manual-field" ]]
+  }
+  release_join_android_query() {
+    [[ "$*" == "text expected-value text" ]] \
+      && printf 'expected-value\n'
+  }
+
+  release_join_android_enter \
+    resource manual-field expected-value visible-center
+)
+
 # Exercise manual admin preparation and submission through observable UI state.
 (
   # shellcheck disable=SC1091
