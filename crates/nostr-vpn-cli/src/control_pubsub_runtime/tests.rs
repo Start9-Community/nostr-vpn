@@ -342,9 +342,14 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
     paid_exit.channel.accepted_mints = vec!["https://mint.example".to_string()];
     paid_exit.location.country_code = "FI".to_string();
     paid_exit.normalize();
-    let signed_offer =
-        signed_paid_exit_offer_from_config("relayless-exit", &seller, &paid_exit, None, 1_000)
-            .expect("signed paid-exit offer");
+    let signed_offer = signed_paid_exit_offer_from_config(
+        "relayless-exit",
+        &seller,
+        &paid_exit,
+        None,
+        Timestamp::now().as_secs(),
+    )
+    .expect("signed paid-exit offer");
     assert!(
         seller_pubsub
             .publish(signed_offer.event.clone())
