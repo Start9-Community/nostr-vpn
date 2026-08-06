@@ -34,8 +34,8 @@ pub(super) fn macos_service_executable_path_from_plist_contents(plist: &str) -> 
     }
 }
 
-#[cfg(target_os = "macos")]
-fn macos_service_target(config_path: &Path) -> String {
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn macos_service_target(config_path: &Path) -> String {
     format!("system/{}", macos_service_label(config_path))
 }
 
@@ -128,14 +128,25 @@ pub(super) fn macos_install_service(
 #[cfg(target_os = "macos")]
 pub(super) fn macos_uninstall_service(config_path: &Path) -> Result<()> {
     macos_service_bootout(config_path, true)?;
-    macos_service_disable(config_path, true)?;
+    macos_service_enable(config_path)?;
     let plist_path = macos_service_plist_path(config_path);
-    if plist_path.exists() {
-        fs::remove_file(&plist_path)
-            .with_context(|| format!("failed to remove {}", plist_path.display()))?;
-        println!("removed system service plist: {}", plist_path.display());
-    } else {
-        println!("system service plist not found: {}", plist_path.display());
+    let binary_path = macos_service_binary_path(config_path);
+    macos_remove_service_artifacts(&plist_path, &binary_path)?;
+    println!(
+        "uninstalled system service: {}",
+        macos_service_label(config_path)
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn macos_remove_service_artifacts(plist_path: &Path, binary_path: &Path) -> Result<()> {
+    for path in [plist_path, binary_path] {
+        if let Err(error) = fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+        }
     }
     Ok(())
 }
@@ -169,7 +180,7 @@ pub(super) fn macos_disable_service(config_path: &Path) -> Result<()> {
     }
 
     macos_service_bootout(config_path, true)?;
-    macos_service_disable(config_path, false)?;
+    macos_service_disable(config_path)?;
     println!("disabled system service: {}", plist_path.display());
     println!("label: {service_label}");
     Ok(())
@@ -269,13 +280,9 @@ fn macos_service_enable(config_path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_service_disable(config_path: &Path, ignore_missing: bool) -> Result<()> {
+fn macos_service_disable(config_path: &Path) -> Result<()> {
     let target = macos_service_target(config_path);
-    run_launchctl_allow_missing(
-        &["disable", target.as_str()],
-        "disable service",
-        ignore_missing,
-    )
+    run_launchctl_checked(&["disable", target.as_str()], "disable service")
 }
 
 #[cfg(target_os = "macos")]

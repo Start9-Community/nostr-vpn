@@ -138,10 +138,51 @@ fn macos_service_binary_uses_privileged_helper_copy() {
 }
 
 #[test]
-fn macos_service_label_scopes_non_default_configs() {
-    let label = crate::macos_service::macos_service_label(Path::new("/tmp/nvpn-debug/config.toml"));
+fn macos_service_identity_scopes_non_default_configs() {
+    let selected = Path::new("/tmp/nvpn-selected/config.toml");
+    let unrelated = Path::new("/tmp/nvpn-unrelated/config.toml");
+    let label = crate::macos_service::macos_service_label(selected);
+    let selected_target = crate::macos_service::macos_service_target(selected);
+
     assert!(label.starts_with("to.nostrvpn.nvpn."));
-    assert_ne!(label, "to.nostrvpn.nvpn");
+    assert_eq!(selected_target, format!("system/{label}"));
+    assert_ne!(
+        selected_target,
+        crate::macos_service::macos_service_target(unrelated)
+    );
+    assert_ne!(selected_target, format!("system/{MACOS_SERVICE_LABEL}"));
+}
+
+#[test]
+fn macos_service_uninstall_removes_only_selected_artifacts() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("nvpn-macos-uninstall-{nonce}"));
+    fs::create_dir(&root).expect("create fixture directory");
+    let selected_label = crate::macos_service::macos_service_label(Path::new("/tmp/selected"));
+    let other_label = crate::macos_service::macos_service_label(Path::new("/tmp/other"));
+    let selected = [
+        root.join(format!("{selected_label}.plist")),
+        root.join(selected_label),
+    ];
+    let preserved = [
+        root.join(MACOS_SERVICE_LABEL),
+        root.join(&other_label),
+        root.join(format!("{other_label}.plist")),
+    ];
+    for path in selected.iter().chain(&preserved) {
+        fs::write(path, "fixture").expect("write artifact fixture");
+    }
+
+    crate::macos_service::macos_remove_service_artifacts(&selected[0], &selected[1])
+        .expect("remove selected artifacts");
+    crate::macos_service::macos_remove_service_artifacts(&selected[0], &selected[1])
+        .expect("repeat selected cleanup");
+    assert!(selected.iter().all(|path| !path.exists()));
+    assert!(preserved.iter().all(|path| path.exists()));
+    fs::remove_dir_all(root).expect("remove fixture directory");
 }
 
 #[test]
