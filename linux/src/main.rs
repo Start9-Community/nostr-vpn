@@ -44,6 +44,7 @@ enum Page {
     Share,
     ExitNodes,
     PaidRoutes,
+    SellInternet,
     Wallet,
     Settings,
 }
@@ -60,6 +61,7 @@ struct PageScrollOffsets {
     share: f64,
     exit_nodes: f64,
     paid_routes: f64,
+    sell_internet: f64,
     wallet: f64,
     settings: f64,
 }
@@ -71,6 +73,7 @@ impl PageScrollOffsets {
             Page::Share => self.share,
             Page::ExitNodes => self.exit_nodes,
             Page::PaidRoutes => self.paid_routes,
+            Page::SellInternet => self.sell_internet,
             Page::Wallet => self.wallet,
             Page::Settings => self.settings,
         }
@@ -82,6 +85,7 @@ impl PageScrollOffsets {
             Page::Share => self.share = offset,
             Page::ExitNodes => self.exit_nodes = offset,
             Page::PaidRoutes => self.paid_routes = offset,
+            Page::SellInternet => self.sell_internet = offset,
             Page::Wallet => self.wallet = offset,
             Page::Settings => self.settings = offset,
         }

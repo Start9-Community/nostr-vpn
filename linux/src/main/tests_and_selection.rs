@@ -9,10 +9,14 @@ mod tests {
         offsets.set(Page::Settings, 640.0);
         offsets.set(Page::Devices, 120.0);
         offsets.set(Page::ExitNodes, 260.0);
+        offsets.set(Page::PaidRoutes, 300.0);
+        offsets.set(Page::SellInternet, 420.0);
 
         assert_eq!(offsets.get(Page::Settings), 640.0);
         assert_eq!(offsets.get(Page::Devices), 120.0);
         assert_eq!(offsets.get(Page::ExitNodes), 260.0);
+        assert_eq!(offsets.get(Page::PaidRoutes), 300.0);
+        assert_eq!(offsets.get(Page::SellInternet), 420.0);
         assert_eq!(offsets.get(Page::Share), 0.0);
     }
 

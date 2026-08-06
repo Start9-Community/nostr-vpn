@@ -12,9 +12,12 @@ fn build_paid_routes_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState)
     page_title(page, "Buy Internet", "network-wireless-symbolic");
     page.append(&badge("Experimental", "warn"));
     build_paid_route_market_card(app, page, state);
-    if state.paid_exit_seller.supported {
-        build_paid_exit_seller_card(app, page, state);
-    }
+}
+
+fn build_paid_exit_seller_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
+    page_title(page, "Sell Internet", "mail-send-symbolic");
+    page.append(&badge("Experimental", "warn"));
+    build_paid_exit_seller_card(app, page, state);
 }
 
 fn build_paid_route_wallet_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {

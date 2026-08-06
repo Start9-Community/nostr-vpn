@@ -9,6 +9,19 @@ fn build_exit_nodes_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) 
 
     let exit = card();
     section_header(&exit, "Internet Source", "");
+    let status_style = if state.exit_node_blocked {
+        "bad"
+    } else if state.exit_node_active {
+        "ok"
+    } else {
+        "muted"
+    };
+    let status = badge(&state.exit_node_status_text, status_style);
+    status.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-internet-source-status",
+    )]);
+    status.set_halign(gtk::Align::Start);
+    exit.append(&status);
 
     let all_exit_candidates = exit_node_candidates(&network, state);
     let show_search = all_exit_candidates.len() > SEARCH_VISIBILITY_THRESHOLD;
@@ -141,7 +154,7 @@ fn build_exit_nodes_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) 
         let sell = icon_text_button("Sell internet access · Experimental", "mail-send-symbolic");
         {
             let app = app.clone();
-            sell.connect_clicked(move |_| set_page(&app, Page::PaidRoutes));
+            sell.connect_clicked(move |_| set_page(&app, Page::SellInternet));
         }
         offer.append(&sell);
     }

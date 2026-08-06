@@ -532,6 +532,9 @@ try {
         throw "DnsPolicy exact artifact identity is incomplete"
       }
       Invoke-Control "ExitDnsInternetNavigation"
+      if ((Read-PublicText "InternetSourceStatus") -notmatch "Direct") {
+        throw "Windows Internet page did not identify the current Direct source"
+      }
       Select-ComboItem "ExitDnsMode" $ModeLabels[$DnsMode]
       if ($DnsMode -eq "encrypted") {
         Select-ComboItem "ExitDnsProvider" $ProviderLabels[$DnsProvider]
@@ -549,6 +552,9 @@ try {
       Stop-App
       Start-App
       Invoke-Control "ExitDnsInternetNavigation"
+      if ((Read-PublicText "InternetSourceStatus") -notmatch "Direct") {
+        throw "Windows relaunch lost the current Direct source status"
+      }
       if ((Read-ComboItem "ExitDnsMode") -ne $ModeLabels[$DnsMode]) {
         throw "Windows relaunch changed the saved DNS mode"
       }

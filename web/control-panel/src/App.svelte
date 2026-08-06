@@ -814,17 +814,25 @@
   async function setDirectExit() {
     await run(
       '/api/update_settings',
-      { exitNode: '', wireguardExitEnabled: false },
+      { internetSource: 'direct', exitNode: '' },
       'Updating route',
     );
   }
 
   async function setExitNode(npub: string) {
-    await run('/api/update_settings', { exitNode: npub }, 'Updating route');
+    await run(
+      '/api/update_settings',
+      { internetSource: 'private_vpn', exitNode: npub },
+      'Updating route',
+    );
   }
 
   async function setWireGuardExitEnabled(enabled: boolean) {
-    await run('/api/update_settings', { wireguardExitEnabled: enabled }, 'Updating route');
+    await run(
+      '/api/update_settings',
+      { internetSource: enabled ? 'wireguard' : 'direct' },
+      'Updating route',
+    );
   }
 
   async function setAdvertiseExitNode(enabled: boolean) {
@@ -867,16 +875,6 @@
     } finally {
       input.value = '';
     }
-  }
-
-  function routeSummary(value: UiState): string {
-    if (value.wireguardExitEnabled) {
-      return 'WireGuard upstream';
-    }
-    if (value.exitNode) {
-      return 'Peer exit';
-    }
-    return 'Direct';
   }
 
   function wireGuardExitSubtitle(value: UiState): string {
@@ -1453,7 +1451,9 @@
             <div class="section-heading">
               <div>
                 <h3>Route</h3>
-                <p>{routeSummary(state)}</p>
+                <p class:blocked={state.exitNodeBlocked} data-testid="internet-source-status">
+                  {state.exitNodeStatusText}
+                </p>
               </div>
             </div>
             {#if showExitSearch}
@@ -1466,7 +1466,7 @@
             <div class="choice-list">
               <button
                 type="button"
-                class:active={!state.exitNode && !state.wireguardExitEnabled}
+                class:active={state.internetSource === 'direct'}
                 class="choice-row"
                 on:click={setDirectExit}
               >
@@ -1479,7 +1479,7 @@
 
               <button
                 type="button"
-                class:active={state.wireguardExitEnabled}
+                class:active={state.internetSource === 'wireguard'}
                 class="choice-row"
                 disabled={!state.wireguardExitConfigured}
                 on:click={() => setWireGuardExitEnabled(true)}
@@ -1494,7 +1494,7 @@
               {#each exitCandidates as participant (participant.pubkeyHex || participant.npub)}
                 <button
                   type="button"
-                  class:active={!state.wireguardExitEnabled && state.exitNode === participant.npub}
+                  class:active={state.internetSource === 'private_vpn' && state.exitNode === participant.npub}
                   class="choice-row"
                   on:click={() => setExitNode(participant.npub)}
                 >
@@ -1549,7 +1549,7 @@
                 <span>Enabled</span>
                 <input
                   type="checkbox"
-                  checked={state.wireguardExitEnabled}
+                  checked={state.internetSource === 'wireguard'}
                   disabled={!state.wireguardExitConfigured}
                   on:change={(event) =>
                     setWireGuardExitEnabled((event.currentTarget as HTMLInputElement).checked)}
@@ -1584,7 +1584,6 @@
                 <button type="submit" class="secondary-button" disabled={Boolean(busyAction) || !wireguardDirty}>
                   Save
                 </button>
-                <span class="form-status">{state.exitNodeStatusText}</span>
               </div>
             </form>
           </div>

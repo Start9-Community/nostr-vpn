@@ -28,6 +28,9 @@ type UiState = {
   serviceSupported: boolean;
   serviceStatusDetail: string;
   vpnStatus: string;
+  internetSource: string;
+  exitNodeStatusText: string;
+  exitNodeBlocked: boolean;
   exitNodeLeakProtection: boolean;
   wireguardExitEnabled: boolean;
   wireguardExitConfigured: boolean;
@@ -183,6 +186,7 @@ test('bundled UI loads, navigates, renders QR, and stays responsive', async ({ p
 
     await page.getByRole('button', { name: 'Exit Nodes' }).click();
     await expect(page.getByRole('heading', { name: 'Route' })).toBeVisible();
+    await expect(page.getByTestId('internet-source-status')).not.toBeEmpty();
     await expect(page.locator('.choice-row').filter({ hasText: 'WireGuard upstream' })).toBeVisible();
     await expect(page.getByLabel('Block internet if exit node disconnects')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'WireGuard Upstream' })).toBeVisible();
@@ -279,6 +283,10 @@ test('WireGuard exit settings import, save, toggle, and reject bad config from t
           timeout: DAEMON_RELOAD_TIMEOUT_MS,
         })
         .toBe(true);
+      await expect
+        .poll(async () => (await postJson<UiState>(request, '/api/tick')).internetSource)
+        .toBe('wireguard');
+      await expect(page.getByTestId('internet-source-status')).toContainText(/WireGuard/i);
       await expect(enabled).toBeChecked();
       await enabled.click();
       await expect
@@ -286,6 +294,10 @@ test('WireGuard exit settings import, save, toggle, and reject bad config from t
           timeout: DAEMON_RELOAD_TIMEOUT_MS,
         })
         .toBe(false);
+      await expect
+        .poll(async () => (await postJson<UiState>(request, '/api/tick')).internetSource)
+        .toBe('direct');
+      await expect(page.getByTestId('internet-source-status')).toContainText(/Direct/i);
 
       await configField.fill(`
 [Interface]

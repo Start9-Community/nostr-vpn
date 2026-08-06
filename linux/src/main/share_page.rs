@@ -232,18 +232,12 @@ fn build_share_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
 
     if network.local_is_admin {
         page_title(page, "Link Device", "contact-new-symbolic");
-        if state.paid_exit_seller.supported {
-            build_paid_exit_seller_card(app, page, state);
-        }
         append_link_device_card(app, page, &network);
         append_join_requests(app, page, &network);
         return;
     }
 
     page_title(page, "Join Network", "go-down-symbolic");
-    if state.paid_exit_seller.supported {
-        build_paid_exit_seller_card(app, page, state);
-    }
     append_join_network_card(app, page, state, None);
 }
 

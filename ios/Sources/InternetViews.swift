@@ -53,6 +53,14 @@ struct InternetPage: View {
                     .pickerStyle(.menu)
                     .accessibilityIdentifier("internet-source-picker")
 
+                    Text(model.state.exitNodeStatusText)
+                        .font(.footnote)
+                        .foregroundStyle(
+                            model.state.exitNodeBlocked ? Color.red : Color.secondary
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("internet-source-status")
+
                     if model.state.internetSource == "private_vpn" {
                         if exitParticipants.isEmpty {
                             Text("No trusted devices sharing internet")

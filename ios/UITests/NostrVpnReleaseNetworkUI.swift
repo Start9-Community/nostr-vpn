@@ -25,6 +25,15 @@ extension NostrVpnReleaseNetworkUITests {
         )
     }
 
+    func assertInternetStatus(contains expected: String) {
+        let status = scrollToElement("internet-source-status")
+        let summary = "\(status.label) \(status.value as? String ?? "")"
+        XCTAssertTrue(
+            summary.localizedCaseInsensitiveContains(expected),
+            "Internet status was \(summary), expected \(expected)"
+        )
+    }
+
     func vpnToggle() throws -> XCUIElement {
         let deadline = Date().addingTimeInterval(8)
         repeat {

@@ -127,8 +127,10 @@ export type UiState = {
   nostrPubsubMaxHops: number;
   nostrPubsubMaxEventBytes: number;
   exitNode: string;
+  internetSource: string;
   exitNodeLeakProtection: boolean;
   exitNodeActive: boolean;
+  exitNodeBlocked: boolean;
   exitNodeStatusText: string;
   advertiseExitNode: boolean;
   advertisedRoutes: string[];

@@ -1313,6 +1313,7 @@ assert_android_exit_dns_ui_reloaded() {
     echo "Android Exit DNS restart readback lost WireGuard internet source: $source" >&2
     return 1
   fi
+  assert_android_internet_status_contains "WireGuard" || return 1
 
   mode_selector="exit-dns-mode-$EXIT_DNS_MODE"
   android_ui_scroll_to resource "$mode_selector" || return 1
@@ -1358,6 +1359,20 @@ assert_android_exit_dns_ui_reloaded() {
   echo "Android shipped Exit DNS restart readback passed: mode=$EXIT_DNS_MODE provider=$EXIT_DNS_DOH_PROVIDER"
 }
 
+assert_android_internet_status_contains() {
+  local expected="$1" status="" deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    android_ui_scroll_to resource internet-source-status || return 1
+    status="$(android_ui_query resource internet-source-status descendant-text 2>/dev/null || true)"
+    if [[ "${status,,}" == *"${expected,,}"* ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Android current Internet status was '$status', expected '$expected'" >&2
+  return 1
+}
+
 configure_android_exit_dns_ui() {
   android_open_internet_settings_ui "Exit DNS configuration" || return 1
   android_ui_reset_scroll
@@ -1367,6 +1382,7 @@ configure_android_exit_dns_ui() {
   wait_for_android_ui description "Internet source WireGuard VPN" || return 1
   tap_android_ui description "Internet source WireGuard VPN" || return 1
   sleep 0.5
+  assert_android_internet_status_contains "WireGuard" || return 1
 
   local mode_description
   case "$EXIT_DNS_MODE" in
@@ -1475,6 +1491,7 @@ select_android_direct_ui() {
   local deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
   while ((SECONDS < deadline)); do
     if android_direct_source_persisted; then
+      assert_android_internet_status_contains "Direct" || return 1
       echo "Android shipped UI selected and persisted This device"
       return 0
     fi

@@ -10,7 +10,6 @@ extension RootView {
                 paidExitSellerListingSettings
                 paidExitSellerPaymentSettings
                 paidExitSellerActivitySettings
-                paidRouteWalletSection(state.paidRouteMarket.wallet)
                 paidExitSellerTermsSettings
             }
         }

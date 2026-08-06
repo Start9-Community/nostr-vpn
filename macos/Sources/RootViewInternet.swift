@@ -22,6 +22,12 @@ extension RootView {
     var internetChoiceSettings: some View {
         return surface {
             sectionHeader("Use Internet", systemImage: "network")
+            Text(state.exitNodeStatusText)
+                .font(.callout)
+                .foregroundStyle(state.exitNodeBlocked ? Color.red : Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("internet-source-status")
             VStack(spacing: 8) {
                 routeChoice(
                     title: "This device",
@@ -137,7 +143,7 @@ extension RootView {
                 } label: {
                     Label("Sell Internet · Experimental", systemImage: "bitcoinsign.circle.fill")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.bordered)
             }
         }
     }

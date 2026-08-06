@@ -81,6 +81,7 @@ fn render(app: &AppRef) {
         Page::Share => build_share_page(app, &page_box, &state),
         Page::ExitNodes => build_exit_nodes_page(app, &page_box, &state),
         Page::PaidRoutes => build_paid_routes_page(app, &page_box, &state),
+        Page::SellInternet => build_paid_exit_seller_page(app, &page_box, &state),
         Page::Wallet => build_paid_route_wallet_page(app, &page_box, &state),
         Page::Settings => build_settings_page(app, &page_box, &state),
     }

@@ -248,6 +248,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         relaunch()
         openInternetTab()
         assertPicker("internet-source-picker", contains: "WireGuard VPN")
+        assertInternetStatus(contains: "WireGuard")
         let persistedToggle = scrollToElement("wireguard-enabled")
         guard wireGuardIsOn(persistedToggle) else {
             throw gateError("WireGuard enabled state did not survive a real relaunch")
@@ -606,6 +607,7 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         openInternetTab()
         try waitForInternetTransitionToSettle()
         assertPicker("internet-source-picker", contains: "This device")
+        assertInternetStatus(contains: "Direct")
         guard waitForVPNState(on: true, timeout: 8) else {
             throw gateError("This device relaunch stopped the private-mesh packet tunnel")
         }

@@ -193,6 +193,10 @@ code {
   margin: 4px 0 0;
 }
 
+.section-heading p.blocked {
+  color: var(--bad);
+}
+
 .nav {
   display: grid;
   gap: 5px;

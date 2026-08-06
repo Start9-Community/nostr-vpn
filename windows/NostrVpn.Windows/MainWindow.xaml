@@ -425,7 +425,8 @@
           <StackPanel Visibility="{Binding Page, Converter={StaticResource PageVisibility}, ConverterParameter=Internet}">
             <Border Style="{StaticResource Card}">
               <StackPanel>
-                <TextBlock Text="Internet Source" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,10" />
+                <TextBlock Text="Internet Source" FontSize="18" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding State.ExitNodeStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,2,0,10" AutomationProperties.AutomationId="InternetSourceStatus" />
                 <Button Click="DirectExit_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,0,0,8">
                   <DockPanel LastChildFill="False">
                     <TextBlock DockPanel.Dock="Right" Text="Use this device's normal internet" Foreground="{StaticResource TextSecondary}" Margin="12,0,0,0" />
@@ -603,9 +604,6 @@
                     <Button Content="Advertise" Click="PublishPaidExitOffer_Click" IsEnabled="{Binding State.PaidExitSeller.Enabled}" Margin="0,0,8,0" />
                     <Button Content="Payments" Click="ReceivePaidRoutePayments_Click" IsEnabled="{Binding State.PaidExitSeller.Enabled}" />
                   </StackPanel>
-                  <TextBlock Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6">
-                    <Run Text="Spendable wallet " /><Run Text="{Binding PaidRouteWalletBalanceText, Mode=OneWay}" />
-                  </TextBlock>
                   <TextBlock Text="{Binding PaidExitSellerChannelCreditText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" />
                   <TextBlock Text="{Binding PaidExitSellerChannelCreditHelpText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" Visibility="{Binding PaidExitSellerChannelCreditHelpText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                   <TextBlock Text="{Binding PaidExitSellerPaymentStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,6" Visibility="{Binding PaidExitSellerPaymentStatusText, Converter={StaticResource NonEmptyStringToVisibility}}" />
