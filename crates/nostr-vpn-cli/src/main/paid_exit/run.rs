@@ -3,6 +3,7 @@ struct PaidExitRunResult {
     config_path: PathBuf,
     store_path: PathBuf,
     offer: PaidRouteOffer,
+    provider_link: String,
     event_id: String,
     stored: bool,
     publish: Option<serde_json::Value>,
@@ -61,12 +62,14 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
         None
     };
     let store = load_paid_route_store(&local.store_path)?;
-    let status = paid_exit_status_snapshot_json(&app, &local.store_path, &store);
+    let status = paid_exit_status_snapshot_json(&app, &local.store_path, &store)?;
+    let provider_link = paid_exit_provider_link_for_offer(&local.offer)?;
 
     Ok(PaidExitRunResult {
         config_path,
         store_path: local.store_path,
         offer: local.offer,
+        provider_link,
         event_id: local.signed.event.id.to_string(),
         stored: local.stored,
         publish,
@@ -248,6 +251,7 @@ fn paid_exit_run_result_json(result: &PaidExitRunResult) -> serde_json::Value {
         "store_path": result.store_path.display().to_string(),
         "enabled": true,
         "offer": result.offer,
+        "provider_link": result.provider_link,
         "event_id": result.event_id,
         "stored": result.stored,
         "published": result.publish.is_some(),
@@ -267,6 +271,7 @@ fn print_paid_exit_run_result(result: &PaidExitRunResult) {
     );
     println!("paid_exit_offer: {}", result.offer.offer_id);
     println!("seller: {}", result.offer.seller_npub);
+    println!("provider_link: {}", result.provider_link);
     println!("event_id: {}", result.event_id);
     println!(
         "price: {}",

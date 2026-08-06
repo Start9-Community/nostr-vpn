@@ -14,7 +14,7 @@ impl PaidRouteStore {
         &mut self,
         request: RecordPaidRouteSellerUsageRequest,
     ) -> Result<Option<RecordPaidRouteSellerUsageResult>> {
-        if request.usage_delta.is_empty() {
+        if !request.config.enabled || request.usage_delta.is_empty() {
             return Ok(None);
         }
         let buyer_pubkey = normalize_nostr_pubkey(&request.buyer_pubkey)
@@ -27,6 +27,12 @@ impl PaidRouteStore {
         else {
             return Ok(None);
         };
+        let accepted_terms = self
+            .channels
+            .get(&admission.channel_id)
+            .and_then(|channel| accepted_channel_terms(channel, PaidRouteChannelRole::Seller).ok())
+            .cloned()
+            .ok_or_else(|| anyhow!("paid route seller channel has no accepted terms"))?;
 
         let Some(record) = self.sessions.get_mut(&admission.session_id) else {
             return Ok(None);
@@ -38,7 +44,7 @@ impl PaidRouteStore {
             record.updated_at_unix = request.now_unix;
         }
 
-        let decision = record.session.routing_decision(&request.config);
+        let decision = record.session.routing_decision(&accepted_terms);
         Ok(Some(RecordPaidRouteSellerUsageResult {
             buyer_pubkey,
             buyer_npub: admission.buyer_npub,
@@ -60,6 +66,9 @@ impl PaidRouteStore {
         config: &PaidExitConfig,
         now_unix: u64,
     ) -> Vec<PaidRouteSellerAdmission> {
+        if !config.enabled {
+            return Vec::new();
+        }
         let mut by_buyer = BTreeMap::<String, PaidRouteSellerAdmission>::new();
         for record in self.sessions.values() {
             let Some(admission) = self.seller_admission_for_session(config, now_unix, record)
@@ -145,12 +154,16 @@ impl PaidRouteStore {
         now_unix: u64,
         record: &PaidRouteSessionRecord,
     ) -> Option<PaidRouteSellerAdmission> {
+        if !config.enabled {
+            return None;
+        }
         let session = &record.session;
         let lease_record = self.leases.get(&session.lease_id)?;
         let channel = self.channels.get(&session.payment.channel_id)?;
         if channel.role != PaidRouteChannelRole::Seller {
             return None;
         }
+        let accepted_terms = accepted_channel_terms(channel, PaidRouteChannelRole::Seller).ok()?;
 
         let buyer_npub = normalize_paid_route_npub(&lease_record.lease.buyer_npub, "buyer").ok()?;
         let buyer_pubkey = normalize_nostr_pubkey(&buyer_npub).ok()?;
@@ -158,7 +171,7 @@ impl PaidRouteStore {
             .seller_session_tunnel_ips
             .get(&session.session_id)?
             .clone();
-        let decision = session.routing_decision(config);
+        let decision = session.routing_decision(accepted_terms);
         let expires_at_unix = lease_record
             .lease
             .expires_at_unix
@@ -180,6 +193,7 @@ impl PaidRouteStore {
             session_id: session.session_id.clone(),
             lease_id: session.lease_id.clone(),
             channel_id: session.payment.channel_id.clone(),
+            destination_allowed_ips: paid_exit_destination_allowed_ips(accepted_terms),
             state,
             allow_routing,
             amount_due_msat: decision.amount_due_msat,

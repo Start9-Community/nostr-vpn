@@ -169,7 +169,7 @@ async fn paid_exit_collect_command(args: PaidExitCollectArgs) -> Result<()> {
                 "cashu": cashu_wallet_overview_json(&overview),
                 "changed": changed,
                 "daemon_reload_attempted": daemon_reload_attempted,
-                "status": paid_exit_status_snapshot_json(&app, &store_path, &store),
+                "status": paid_exit_status_snapshot_json(&app, &store_path, &store)?,
             }))?
         );
     } else {
@@ -299,7 +299,7 @@ async fn paid_exit_collect_due_command(args: PaidExitCollectDueArgs) -> Result<(
                 "cashu": cashu,
                 "changed": changed,
                 "daemon_reload_attempted": daemon_reload_attempted,
-                "status": paid_exit_status_snapshot_json(&app, &store_path, &store),
+                "status": paid_exit_status_snapshot_json(&app, &store_path, &store)?,
             }))?
         );
     } else if due.is_empty() {

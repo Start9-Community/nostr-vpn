@@ -530,24 +530,30 @@ impl PaidRouteStore {
         lease_record: &PaidRouteLeaseRecord,
         channel: &PaidRouteChannelRecord,
     ) -> Result<PaidRouteOffer> {
-        self.offers
-            .values()
-            .find(|record| {
-                record.offer.offer_id == lease_record.lease.offer_id
-                    && record.offer.seller_npub == channel.counterparty_npub
-            })
-            .or_else(|| {
-                self.offers
-                    .values()
-                    .find(|record| record.offer.offer_id == lease_record.lease.offer_id)
-            })
-            .map(|record| record.offer.clone())
-            .ok_or_else(|| {
-                anyhow!(
-                    "paid route offer {} for buyer session was not found",
-                    lease_record.lease.offer_id
-                )
-            })
+        if channel.role != PaidRouteChannelRole::Buyer
+            || channel.offer_id != lease_record.lease.offer_id
+        {
+            return Err(anyhow!("paid route buyer channel does not match its lease"));
+        }
+        let terms = channel.accepted_terms.as_ref().ok_or_else(|| {
+            anyhow!(
+                "paid route buyer channel {} has no accepted terms",
+                channel.channel_id
+            )
+        })?;
+        if !terms.enabled {
+            return Err(anyhow!(
+                "paid route buyer channel {} has disabled accepted terms",
+                channel.channel_id
+            ));
+        }
+        let seller_npub = normalize_paid_route_npub(&channel.counterparty_npub, "seller")?;
+        Ok(PaidRouteOffer::from_paid_exit_config(
+            lease_record.lease.offer_id.clone(),
+            seller_npub,
+            terms,
+            None,
+        ))
     }
 
     pub(super) fn buyer_usage_session_for_seller(

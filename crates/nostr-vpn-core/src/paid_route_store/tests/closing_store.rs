@@ -851,6 +851,7 @@ fn add_local_offer_quality(
             channel_id: channel_id.clone(),
             ..PaidRoutePaymentState::default()
         },
+        accepted_terms: Some(PaidExitConfig::from_paid_route_offer(offer)),
         mint_url: "https://mint.minibits.cash/Bitcoin".to_string(),
         counterparty_npub: offer.seller_npub.clone(),
         created_at_unix: measured_at_unix,

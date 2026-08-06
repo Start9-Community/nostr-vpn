@@ -397,11 +397,21 @@ impl MobileTunnelConfig {
             .into_iter()
             .collect::<HashSet<_>>();
 
-        let signal_pubkeys = if manual_roster_pending {
+        let mut signal_pubkeys = if manual_roster_pending {
             Vec::new()
         } else {
             app.active_network_signal_pubkeys_hex()
         };
+        // A manually configured paid provider is a control peer even before a
+        // live offer/session assigns it the default route. FIPS can discover
+        // and route to this identity through transit without a direct address.
+        if !manual_roster_pending
+            && let Some(provider) = app.manual_paid_exit_provider_pubkey_hex()
+            && provider != own_pubkey
+            && !signal_pubkeys.contains(&provider)
+        {
+            signal_pubkeys.push(provider);
+        }
         for participant in signal_pubkeys
             .into_iter()
             .filter(|participant| participant != &own_pubkey)

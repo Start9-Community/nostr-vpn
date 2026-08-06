@@ -59,7 +59,13 @@ impl PaidRouteStore {
             let Some(channel) = self.channels.get(&session.session.payment.channel_id) else {
                 return false;
             };
+            let Ok(terms) = accepted_channel_terms(channel, PaidRouteChannelRole::Buyer) else {
+                return false;
+            };
             channel.role == PaidRouteChannelRole::Buyer
+                && paid_route_lifecycle_allows_routing(lease.status)
+                && paid_route_lifecycle_allows_routing(channel.status)
+                && session.session.routing_decision(terms).allow_routing
                 && lease.lease.expires_at_unix.min(channel.expires_at_unix) > now_unix
                 && normalize_nostr_pubkey(&channel.counterparty_npub)
                     .ok()
@@ -314,6 +320,7 @@ impl PaidRouteStore {
             role: PaidRouteChannelRole::Seller,
             status: PaidRouteLifecycleStatus::Probing,
             payment: payment.clone(),
+            accepted_terms: Some(config.clone()),
             mint_url: String::new(),
             counterparty_npub: buyer_npub.clone(),
             created_at_unix: request.now_unix,

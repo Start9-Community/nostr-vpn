@@ -28,7 +28,7 @@ use crate::paid_routes::{
     PaidRouteSessionOpen, PaidRouteUsage, SignedPaidRouteOffer,
 };
 
-const CURRENT_VERSION: u8 = 3;
+const CURRENT_VERSION: u8 = 4;
 const SELLER_CONNECTION_MINIMUM_PAYMENT_SKEW_MILLIS: u64 = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +128,12 @@ pub struct PaidRouteChannelRecord {
     pub status: PaidRouteLifecycleStatus,
     #[serde(default)]
     pub payment: PaidRoutePaymentState,
+    /// Immutable pricing and routing terms accepted when this channel opened.
+    ///
+    /// Legacy records without a snapshot fail closed instead of inheriting a
+    /// later offer or seller configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_terms: Option<PaidExitConfig>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mint_url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -502,6 +508,8 @@ pub struct PaidRouteSellerAdmission {
     pub session_id: String,
     pub lease_id: String,
     pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destination_allowed_ips: Vec<String>,
     pub state: PaidRouteAccessState,
     pub allow_routing: bool,
     pub amount_due_msat: u64,

@@ -496,6 +496,7 @@ mod tests {
                 }),
                 ..nostr_vpn_core::paid_routes::PaidRoutePaymentState::default()
             },
+            accepted_terms: None,
             mint_url: "https://mint.example".to_string(),
             counterparty_npub: "seller".to_string(),
             created_at_unix: 1,

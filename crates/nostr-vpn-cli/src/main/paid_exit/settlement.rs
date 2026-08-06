@@ -204,7 +204,7 @@ async fn paid_exit_apply_payment_command(args: PaidExitApplyPaymentArgs) -> Resu
                 "spilman_receiver_validation": spilman_receiver_processing,
                 "spilman_receiver_error": spilman_receiver_error,
                 "daemon_reload_attempted": daemon_reload_attempted,
-                "status": paid_exit_status_snapshot_json(&app, &store_path, &store),
+                "status": paid_exit_status_snapshot_json(&app, &store_path, &store)?,
             }))?
         );
     } else {

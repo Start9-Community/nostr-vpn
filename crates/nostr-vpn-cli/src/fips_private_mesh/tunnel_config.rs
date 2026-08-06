@@ -1,11 +1,10 @@
 #[cfg(feature = "paid-exit")]
 pub(crate) fn fips_paid_route_admission_from_seller_admission(
-    _network_id: &str,
     admission: PaidRouteSellerAdmission,
-    destination_allowed_ips: &[String],
 ) -> FipsPaidRouteAdmission {
     let mut admission = FipsPaidRouteAdmission::from(admission);
-    admission.destination_allowed_ips = destination_allowed_ips.to_vec();
+    admission.destination_allowed_ips =
+        crate::runtime_supported_advertised_routes(admission.destination_allowed_ips);
     admission
 }
 

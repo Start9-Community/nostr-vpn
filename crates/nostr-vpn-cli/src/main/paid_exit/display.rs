@@ -1,4 +1,21 @@
 
+fn paid_exit_provider_link_for_offer(offer: &PaidRouteOffer) -> Result<String> {
+    ManualPaidExitProvider::seller_link(
+        &offer.seller_npub,
+        &PaidExitConfig::from_paid_route_offer(offer),
+    )
+}
+
+fn paid_exit_seller_identity(app: &AppConfig) -> Result<(String, String)> {
+    let seller_npub = app
+        .nostr_keys()?
+        .public_key()
+        .to_bech32()
+        .context("failed to encode seller npub")?;
+    let provider_link = ManualPaidExitProvider::seller_link(&seller_npub, &app.paid_exit)?;
+    Ok((seller_npub, provider_link))
+}
+
 fn paid_exit_status_json(app: &AppConfig) -> serde_json::Value {
     let config = &app.paid_exit;
     json!({

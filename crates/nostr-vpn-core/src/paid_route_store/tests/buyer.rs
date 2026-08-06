@@ -142,6 +142,7 @@ fn paid_route_store_persists_wallet_offer_session_and_channel_state() {
             updated_at_unix: 112,
             ..PaidRoutePaymentState::default()
         },
+        accepted_terms: Some(sample_config()),
         mint_url: "https://mint.minibits.cash/Bitcoin".to_string(),
         counterparty_npub: signed_offer.offer().expect("offer").seller_npub,
         created_at_unix: 111,
@@ -248,6 +249,99 @@ fn variable_denominator_store_upgrade_drops_only_offers() {
     assert_eq!(loaded.wallet.default_mint, expected_mint);
     assert!(loaded.channels.contains_key(&channel_id));
     assert!(loaded.sessions.contains_key(&session_id));
+}
+
+#[test]
+fn accepted_buyer_terms_survive_same_offer_replacement() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let mut accepted = sample_config();
+    accepted.pricing.price_msat_per_gb = 1_000_000_000;
+    accepted.channel.free_probe_units = 0;
+    accepted.channel.grace_units = 0;
+    let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &accepted);
+
+    let mut replacement = accepted.clone();
+    replacement.pricing.price_msat_per_gb = 10_000_000_000;
+    replacement.channel.accepted_mints = vec!["https://mint.attacker.example".to_string()];
+    let signed =
+        signed_paid_exit_offer_from_config("internet-exit", &seller, &replacement, None, 122)
+            .expect("replacement offer");
+    store
+        .upsert_signed_offer(signed, vec!["wss://relay.example".to_string()], 122)
+        .expect("replace stored offer");
+
+    let usage = store
+        .record_buyer_usage(RecordPaidRouteBuyerUsageRequest {
+            seller_pubkey: seller.public_key().to_hex(),
+            usage_delta: PaidRouteUsage {
+                billable_bytes: 100,
+                rx_bytes: 100,
+                ..PaidRouteUsage::default()
+            },
+            now_unix: 123,
+        })
+        .expect("record buyer usage")
+        .expect("buyer session");
+
+    assert_eq!(usage.amount_due_msat, 100);
+    let terms = store.channels[&channel_id]
+        .accepted_terms
+        .as_ref()
+        .expect("accepted terms");
+    assert_eq!(terms.pricing.price_msat_per_gb, 1_000_000_000);
+    assert_eq!(
+        terms.channel.accepted_mints,
+        vec!["https://mint.minibits.cash/Bitcoin"]
+    );
+    assert_eq!(
+        store
+            .build_buyer_session_open(
+                &session_id,
+                &buyer.public_key().to_bech32().expect("buyer npub"),
+                "10.44.201.17/32",
+                124,
+            )
+            .expect("session open from accepted terms")
+            .seller_npub,
+        seller.public_key().to_bech32().expect("seller npub")
+    );
+}
+
+#[test]
+fn version_three_channels_are_preserved_but_fail_closed_without_terms() {
+    let scratch = ScratchDir::new("accepted-terms-upgrade");
+    let store_path = scratch.path().join("paid-routes.json");
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let (store, session_id, channel_id) =
+        buyer_store_with_session(&seller, &buyer, &sample_config());
+    let expected_offers = store.offers.len();
+    let mut encoded = serde_json::to_value(store).expect("encode v3 store");
+    encoded["version"] = json!(3);
+    encoded["channels"][&channel_id]
+        .as_object_mut()
+        .expect("channel object")
+        .remove("accepted_terms");
+    fs::write(
+        &store_path,
+        serde_json::to_vec_pretty(&encoded).expect("encode v3 fixture"),
+    )
+    .expect("write v3 fixture");
+
+    let loaded = load_paid_route_store(&store_path).expect("load v3 store");
+
+    assert_eq!(loaded.version, CURRENT_VERSION);
+    assert_eq!(loaded.offers.len(), expected_offers);
+    assert!(loaded.channels.contains_key(&channel_id));
+    assert!(loaded.sessions.contains_key(&session_id));
+    assert!(
+        loaded
+            .buyer_session_allows_routing(&session_id, 121)
+            .expect_err("legacy channel must fail closed")
+            .to_string()
+            .contains("no accepted terms")
+    );
 }
 
 #[test]
@@ -472,6 +566,7 @@ fn buyer_session_seller_npub_rejects_seller_sessions() {
             channel_id: "channel-1".to_string(),
             ..PaidRoutePaymentState::default()
         },
+        accepted_terms: None,
         mint_url: "https://mint.example".to_string(),
         counterparty_npub:
             "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqfu2a5w".to_string(),
@@ -622,6 +717,7 @@ fn seller_admissions_reflect_streaming_payment_decision() {
             updated_at_unix: 100,
             ..PaidRoutePaymentState::default()
         },
+        accepted_terms: Some(config.clone()),
         mint_url: "https://mint.minibits.cash/Bitcoin".to_string(),
         counterparty_npub: buyer_npub.clone(),
         created_at_unix: 100,

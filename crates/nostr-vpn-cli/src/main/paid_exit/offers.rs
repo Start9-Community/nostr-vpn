@@ -7,6 +7,7 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     }
     let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
     let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
+    let provider_link = paid_exit_provider_link_for_offer(&local.offer)?;
 
     let publish = if args.publish {
         Some(publish_paid_exit_offer_pubsub(
@@ -23,6 +24,7 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "offer": local.offer,
+                "provider_link": provider_link,
                 "event": local.signed.event,
                 "publish": publish,
                 "store_path": local.store_path,
@@ -32,6 +34,7 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     } else {
         println!("paid_exit_offer: {}", local.offer.offer_id);
         println!("seller: {}", local.offer.seller_npub);
+        println!("provider_link: {provider_link}");
         println!(
             "price: {}",
             paid_exit_price_text(local.offer.pricing.price_msat_per_gb)

@@ -3,7 +3,7 @@ fn paid_exit_status_snapshot_json(
     app: &AppConfig,
     store_path: &Path,
     store: &PaidRouteStore,
-) -> serde_json::Value {
+) -> Result<serde_json::Value> {
     let now_unix = unix_timestamp();
     let offers = store
         .offers
@@ -44,8 +44,11 @@ fn paid_exit_status_snapshot_json(
         .filter(|state| state.auto_collect_due)
         .map(|state| state.paid_msat)
         .fold(0_u64, u64::saturating_add);
+    let (seller_npub, provider_link) = paid_exit_seller_identity(app)?;
 
-    json!({
+    Ok(json!({
+        "seller_npub": seller_npub,
+        "provider_link": provider_link,
         "config": paid_exit_status_json(app),
         "store_path": store_path.display().to_string(),
         "wallet": store.wallet,
@@ -80,7 +83,7 @@ fn paid_exit_status_snapshot_json(
         "sessions": sessions,
         "seller_admissions": seller_admissions,
         "seller_collection": seller_collection.iter().map(paid_exit_seller_collection_status_json).collect::<Vec<_>>(),
-    })
+    }))
 }
 
 fn paid_exit_channel_status_json(channel: &PaidRouteChannelRecord) -> serde_json::Value {
@@ -301,9 +304,16 @@ fn paid_exit_seller_cli_summary(
     summary
 }
 
-fn print_paid_exit_status_snapshot(app: &AppConfig, store_path: &Path, store: &PaidRouteStore) {
+fn print_paid_exit_status_snapshot(
+    app: &AppConfig,
+    store_path: &Path,
+    store: &PaidRouteStore,
+) -> Result<()> {
     let now_unix = unix_timestamp();
     print_paid_exit_status(app);
+    let (seller_npub, provider_link) = paid_exit_seller_identity(app)?;
+    println!("paid_exit_seller: {seller_npub}");
+    println!("paid_exit_provider_link: {provider_link}");
     println!("paid_exit_store: {}", store_path.display());
     println!(
         "paid_exit_store_counts: offers={} quotes={} leases={} channels={} sessions={}",
@@ -479,6 +489,7 @@ fn print_paid_exit_status_snapshot(app: &AppConfig, store_path: &Path, store: &P
             );
         }
     }
+    Ok(())
 }
 
 fn paid_exit_session_config(
@@ -486,25 +497,11 @@ fn paid_exit_session_config(
     record: &PaidRouteSessionRecord,
 ) -> Option<PaidExitConfig> {
     let session = &record.session;
-    let lease = store.leases.get(&session.lease_id)?;
-    let channel = store.channels.get(&session.payment.channel_id);
-    let offer = store
-        .offers
-        .values()
-        .find(|candidate| {
-            candidate.offer.offer_id == lease.lease.offer_id
-                && channel.is_none_or(|channel| {
-                    channel.counterparty_npub.is_empty()
-                        || channel.counterparty_npub == candidate.offer.seller_npub
-                })
-        })
-        .or_else(|| {
-            store
-                .offers
-                .values()
-                .find(|candidate| candidate.offer.offer_id == lease.lease.offer_id)
-        })?;
-    Some(PaidExitConfig::from_paid_route_offer(&offer.offer))
+    store
+        .channels
+        .get(&session.payment.channel_id)?
+        .accepted_terms
+        .clone()
 }
 
 fn paid_route_channel_role_text(role: PaidRouteChannelRole) -> &'static str {

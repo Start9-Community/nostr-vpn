@@ -49,6 +49,9 @@ impl PaidRouteStore {
     {
         let mut config = request.config.clone();
         config.normalize();
+        if !config.enabled {
+            return Err(anyhow!("paid exit selling is disabled"));
+        }
         let envelope = &request.envelope;
         if envelope.version != STREAMING_ROUTE_PAYMENT_PROTOCOL_VERSION {
             return Err(anyhow!(
@@ -69,10 +72,16 @@ impl PaidRouteStore {
         let service_id = trimmed_required(&envelope.service_id, "paid route service id")?;
         let lease_id = trimmed_required(&envelope.lease_id, "paid route lease id")?;
         let channel_id = trimmed_required(envelope.channel_id(), "paid route channel id")?;
+        let config = accepted_channel_terms(
+            self.channels
+                .get(&channel_id)
+                .ok_or_else(|| anyhow!("paid route channel {channel_id} does not exist"))?,
+            PaidRouteChannelRole::Seller,
+        )?;
 
         match &envelope.payload {
             StreamingRoutePaymentPayload::ChannelOpen(open) => {
-                validate_seller_open_payment(&config, &seller_pubkey_hex, &channel_id, open)?;
+                validate_seller_open_payment(config, &seller_pubkey_hex, &channel_id, open)?;
                 let capacity_sat = paid_route_channel_capacity_sat(&open.unit, open.capacity)?;
                 process_streaming_route_cashu_payment_with_receiver(
                     receiver,
@@ -151,6 +160,9 @@ impl PaidRouteStore {
     ) -> Result<ApplyPaidRouteSellerPaymentResult> {
         let mut config = request.config;
         config.normalize();
+        if !config.enabled {
+            return Err(anyhow!("paid exit selling is disabled"));
+        }
         let envelope = request.envelope;
         if envelope.version != STREAMING_ROUTE_PAYMENT_PROTOCOL_VERSION {
             return Err(anyhow!(
@@ -171,6 +183,9 @@ impl PaidRouteStore {
         let service_id = trimmed_required(&envelope.service_id, "paid route service id")?;
         let lease_id = trimmed_required(&envelope.lease_id, "paid route lease id")?;
         let channel_id = trimmed_required(envelope.channel_id(), "paid route channel id")?;
+        let config = self
+            .seller_payment_accepted_terms(&service_id, &lease_id, &channel_id, &buyer_npub)?
+            .unwrap_or(config);
         let payload_type = paid_route_payment_payload_type(&envelope.payload).to_string();
         let apply_context = SellerPaymentApplyContext {
             config: &config,
@@ -307,6 +322,10 @@ impl PaidRouteStore {
             })
             .transpose()?
             .unwrap_or(0);
+        let accepted_terms = match self.channels.get(context.channel_id) {
+            Some(channel) => accepted_channel_terms(channel, PaidRouteChannelRole::Seller)?.clone(),
+            None => context.config.clone(),
+        };
         let paid_msat = existing_channel_payment.max(open.paid_msat);
         let status = initial_seller_session_status(context.config, paid_msat);
         let expires_at_unix = seller_channel_open_expiry(
@@ -367,6 +386,7 @@ impl PaidRouteStore {
             role: PaidRouteChannelRole::Seller,
             status: channel_status,
             payment: payment.clone(),
+            accepted_terms: Some(accepted_terms),
             mint_url: open.mint_url.trim().to_string(),
             counterparty_npub: context.buyer_npub.to_string(),
             created_at_unix,
@@ -641,6 +661,38 @@ impl PaidRouteStore {
         }
 
         Ok(())
+    }
+
+    fn seller_payment_accepted_terms(
+        &self,
+        service_id: &str,
+        lease_id: &str,
+        channel_id: &str,
+        buyer_npub: &str,
+    ) -> Result<Option<PaidExitConfig>> {
+        if let Some(channel) = self.channels.get(channel_id) {
+            ensure_seller_channel_matches(channel, service_id, buyer_npub)?;
+            return accepted_channel_terms(channel, PaidRouteChannelRole::Seller)
+                .cloned()
+                .map(Some);
+        }
+        let session_id = seller_session_id_for_lease(lease_id);
+        let Some(session) = self.sessions.get(&session_id) else {
+            return Ok(None);
+        };
+        if session.session.lease_id != lease_id {
+            return Err(anyhow!(
+                "paid route seller session does not match its lease"
+            ));
+        }
+        let existing_channel = self
+            .channels
+            .get(&session.session.payment.channel_id)
+            .ok_or_else(|| anyhow!("paid route seller session has no channel"))?;
+        ensure_seller_channel_matches(existing_channel, service_id, buyer_npub)?;
+        accepted_channel_terms(existing_channel, PaidRouteChannelRole::Seller)
+            .cloned()
+            .map(Some)
     }
 
     pub(super) fn ensure_existing_seller_session(

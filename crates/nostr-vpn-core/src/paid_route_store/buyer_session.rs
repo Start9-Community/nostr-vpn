@@ -13,6 +13,7 @@ impl PaidRouteStore {
             ));
         }
         let offer = record.offer.clone();
+        let accepted_terms = PaidExitConfig::from_paid_route_offer(&offer);
         let buyer_npub = normalize_paid_route_npub(&request.buyer_npub, "buyer")?;
         let mint_url = select_buyer_mint(&offer, &self.wallet, request.mint_url.as_deref())?;
         let capacity_sat = requested_channel_capacity(&offer, request.channel_capacity_sat)?;
@@ -67,6 +68,7 @@ impl PaidRouteStore {
             role: PaidRouteChannelRole::Buyer,
             status,
             payment: payment.clone(),
+            accepted_terms: Some(accepted_terms),
             mint_url: mint_url.clone(),
             counterparty_npub: offer.seller_npub.clone(),
             created_at_unix: now_unix,

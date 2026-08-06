@@ -227,6 +227,102 @@ fn record_seller_usage_updates_session_and_admission_decision() {
 }
 
 #[test]
+fn seller_accounting_keeps_terms_accepted_at_channel_open() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let mut accepted = sample_config();
+    accepted.pricing.price_msat_per_gb = 1_000_000_000;
+    accepted.channel.free_probe_units = 0;
+    accepted.channel.grace_units = 0;
+    accepted.ip_support.ipv6 = false;
+    let mut store = seller_store_with_open_channel(&seller, &buyer, &accepted);
+
+    let mut changed = accepted.clone();
+    changed.pricing.price_msat_per_gb = 10_000_000_000;
+    changed.channel.accepted_mints = vec!["https://mint.changed.example".to_string()];
+    changed.ip_support.ipv4 = false;
+    changed.ip_support.ipv6 = true;
+    let usage = store
+        .record_seller_usage(RecordPaidRouteSellerUsageRequest {
+            buyer_pubkey: buyer.public_key().to_hex(),
+            config: changed.clone(),
+            usage_delta: PaidRouteUsage {
+                billable_bytes: 100,
+                rx_bytes: 100,
+                ..PaidRouteUsage::default()
+            },
+            now_unix: 130,
+        })
+        .expect("record seller usage")
+        .expect("seller session");
+
+    assert_eq!(usage.amount_due_msat, 100);
+    assert_eq!(
+        store.seller_admissions(&changed, 130)[0].amount_due_msat,
+        100
+    );
+    assert_eq!(
+        store.seller_admissions(&changed, 130)[0].destination_allowed_ips,
+        vec!["0.0.0.0/0"]
+    );
+    let payment = store
+        .apply_seller_payment(ApplyPaidRouteSellerPaymentRequest {
+            envelope: seller_payment_envelope(
+                "internet-exit",
+                "lease-1",
+                &buyer.public_key().to_bech32().expect("buyer npub"),
+                &seller.public_key().to_bech32().expect("seller npub"),
+                131,
+                StreamingRoutePaymentPayload::BalanceUpdate(StreamingRouteBalanceUpdate {
+                    delivered_units: 100,
+                    amount_due_msat: 100,
+                    paid_msat: 1_000,
+                    payment: sample_spilman_payment("channel-1", 1),
+                }),
+            ),
+            seller_npub: seller.public_key().to_bech32().expect("seller npub"),
+            config: changed.clone(),
+            now_unix: 131,
+        })
+        .expect("apply payment under original accepted terms");
+    assert_eq!(payment.amount_due_msat, 100);
+    let terms = store.channels["channel-1"]
+        .accepted_terms
+        .as_ref()
+        .expect("accepted terms");
+    assert_eq!(terms.pricing.price_msat_per_gb, 1_000_000_000);
+    assert_eq!(
+        terms.channel.accepted_mints,
+        vec!["https://mint.minibits.cash/Bitcoin"]
+    );
+}
+
+#[test]
+fn legacy_seller_channel_without_terms_has_no_admission() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let config = sample_config();
+    let mut store = seller_store_with_open_channel(&seller, &buyer, &config);
+    store.channels.get_mut("channel-1").unwrap().accepted_terms = None;
+
+    assert!(store.seller_admissions(&config, 130).is_empty());
+    assert!(
+        store
+            .record_seller_usage(RecordPaidRouteSellerUsageRequest {
+                buyer_pubkey: buyer.public_key().to_hex(),
+                config,
+                usage_delta: PaidRouteUsage {
+                    billable_bytes: 1,
+                    ..PaidRouteUsage::default()
+                },
+                now_unix: 130,
+            })
+            .expect("legacy seller usage must fail closed")
+            .is_none()
+    );
+}
+
+#[test]
 fn seller_payment_channel_open_creates_seller_session_and_admission() {
     let seller = Keys::generate();
     let buyer = Keys::generate();

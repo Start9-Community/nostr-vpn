@@ -761,25 +761,22 @@ fn paid_route_session_state(
     store: &PaidRouteStore,
 ) -> NativePaidRouteSessionState {
     let session = &record.session;
-    let offer = store
-        .leases
-        .get(&session.lease_id)
-        .and_then(|lease| {
-            store
-                .offers
-                .values()
-                .find(|offer| offer.offer.offer_id == lease.lease.offer_id)
-        })
-        .map(|record| &record.offer);
-    let decision = offer.map(|offer| {
-        let config = paid_exit_config_from_offer(offer);
-        session.routing_decision(&config)
+    let channel = store.channels.get(&session.payment.channel_id);
+    let accepted_terms = channel.and_then(|channel| channel.accepted_terms.as_ref());
+    let offer = channel.zip(accepted_terms).map(|(channel, terms)| {
+        PaidRouteOffer::from_paid_exit_config(
+            channel.offer_id.clone(),
+            channel.counterparty_npub.clone(),
+            terms,
+            None,
+        )
     });
-    let country_claim = offer.map_or_else(
+    let decision = accepted_terms.map(|terms| session.routing_decision(terms));
+    let country_claim = accepted_terms.map_or_else(
         || paid_route_country_claim("", session.observed_country_code.as_deref()),
-        |offer| {
+        |terms| {
             paid_route_country_claim(
-                &offer.location.country_code,
+                &terms.location.country_code,
                 session.observed_country_code.as_deref(),
             )
         },
@@ -787,7 +784,7 @@ fn paid_route_session_state(
     paid_route_session_state_with_decision(
         record,
         store,
-        offer,
+        offer.as_ref(),
         decision.as_ref(),
         country_claim,
         None,
@@ -800,9 +797,15 @@ fn paid_route_seller_session_state(
     config: &PaidExitConfig,
 ) -> NativePaidRouteSessionState {
     let now_unix = unix_timestamp();
-    let decision = Some(record.session.routing_decision(config));
+    let accepted_terms = store
+        .channels
+        .get(&record.session.payment.channel_id)
+        .and_then(|channel| channel.accepted_terms.as_ref());
+    let decision = accepted_terms.map(|terms| record.session.routing_decision(terms));
     let country_claim = paid_route_country_claim(
-        &config.location.country_code,
+        accepted_terms
+            .map(|terms| terms.location.country_code.as_str())
+            .unwrap_or_default(),
         record.session.observed_country_code.as_deref(),
     );
     let collection =
@@ -963,17 +966,5 @@ fn paid_route_session_state_with_decision(
         up_bps: quality.and_then(|quality| quality.up_bps).unwrap_or_default(),
         updated_at_unix: record.updated_at_unix,
         expires_at_unix,
-    }
-}
-
-fn paid_exit_config_from_offer(offer: &PaidRouteOffer) -> PaidExitConfig {
-    PaidExitConfig {
-        enabled: true,
-        access: offer.access.clone(),
-        pricing: offer.pricing.clone(),
-        channel: offer.channel.clone(),
-        location: offer.location.clone(),
-        ip_support: offer.ip_support.clone(),
-        rating_discovery: nostr_vpn_core::paid_routes::PaidExitRatingDiscoveryConfig::default(),
     }
 }

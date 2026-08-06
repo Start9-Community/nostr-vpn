@@ -109,6 +109,50 @@
     }
 
     #[test]
+    fn mobile_manual_paid_provider_is_an_addressless_transit_routable_control_peer() {
+        let provider = Keys::generate();
+        let provider_npub = provider.public_key().to_bech32().expect("provider npub");
+        let provider_pubkey = provider.public_key().to_hex();
+        let bootstrap = Keys::generate();
+        let bootstrap_npub = bootstrap.public_key().to_bech32().expect("bootstrap npub");
+        let mut app = AppConfig::generated_without_networks();
+        app.ensure_defaults();
+        app.set_manual_paid_exit_provider(&provider_npub)
+            .expect("manual provider");
+        app.fips_nostr_discovery_enabled = false;
+        app.fips_websocket_seed_urls.clear();
+        app.connect_to_non_roster_fips_peers = true;
+        app.set_fips_bootstrap_peers(HashMap::from([(
+            bootstrap_npub,
+            vec!["192.168.50.20:51820".to_string()],
+        )]));
+
+        let mobile = MobileTunnelConfig::from_app(&app).expect("mobile config");
+        let provider_peer = mobile
+            .peers
+            .iter()
+            .find(|peer| peer.participant_pubkey == provider_pubkey)
+            .expect("manual provider control peer");
+        assert!(provider_peer.allowed_ips.is_empty());
+        assert!(!mobile.route_targets.iter().any(|route| route == "0.0.0.0/0"));
+
+        let endpoint = fips_endpoint_config("manual-provider", &mobile);
+        let provider_endpoint = endpoint
+            .peers
+            .iter()
+            .find(|peer| peer.npub == provider_npub)
+            .expect("manual provider endpoint peer");
+        assert!(provider_endpoint.addresses.is_empty());
+        assert!(provider_endpoint.discovery_fallback_transit);
+        assert!(!endpoint.node.discovery.nostr.enabled);
+        assert_eq!(
+            endpoint.node.discovery.nostr.policy,
+            NostrDiscoveryPolicy::Open
+        );
+        assert!(endpoint.peers.iter().any(|peer| !peer.addresses.is_empty()));
+    }
+
+    #[test]
     fn mobile_peer_ping_due_recovers_from_future_timestamps() {
         assert!(!mobile_peer_ping_due(Some(122), Some(115), 120));
         assert!(!mobile_peer_ping_due(Some(180), Some(1), 120));

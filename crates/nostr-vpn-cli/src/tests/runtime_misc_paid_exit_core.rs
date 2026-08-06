@@ -57,7 +57,8 @@ fn paid_exit_status_snapshot_reports_store_sessions_and_routing() {
     });
 
     let app = AppConfig::generated();
-    let snapshot = paid_exit_status_snapshot_json(&app, Path::new("/tmp/paid-routes.json"), &store);
+    let snapshot = paid_exit_status_snapshot_json(&app, Path::new("/tmp/paid-routes.json"), &store)
+        .expect("status snapshot");
 
     assert_eq!(snapshot["counts"]["sessions"].as_u64(), Some(1));
     assert_eq!(snapshot["counts"]["channels"].as_u64(), Some(1));
@@ -166,7 +167,8 @@ fn paid_exit_record_probe_once_persists_session_measurements() {
     );
 
     let store = load_paid_route_store(&store_path).expect("load store");
-    let snapshot = paid_exit_status_snapshot_json(&app, &store_path, &store);
+    let snapshot =
+        paid_exit_status_snapshot_json(&app, &store_path, &store).expect("status snapshot");
     assert_eq!(
         snapshot["sessions"][0]["realized_exit_ip"].as_str(),
         Some("198.51.100.42")
@@ -273,7 +275,8 @@ fn paid_exit_probe_once_measures_and_persists_session() {
     );
 
     let store = load_paid_route_store(&store_path).expect("load store");
-    let snapshot = paid_exit_status_snapshot_json(&app, &store_path, &store);
+    let snapshot =
+        paid_exit_status_snapshot_json(&app, &store_path, &store).expect("status snapshot");
     assert_eq!(
         snapshot["sessions"][0]["realized_exit_ip"].as_str(),
         Some("198.51.100.42")
@@ -383,7 +386,8 @@ fn paid_exit_probe_once_uses_stun_for_realized_exit_ip() {
     assert_eq!(result.measurement.failure_count(), 0);
 
     let store = load_paid_route_store(&store_path).expect("load store");
-    let snapshot = paid_exit_status_snapshot_json(&app, &store_path, &store);
+    let snapshot =
+        paid_exit_status_snapshot_json(&app, &store_path, &store).expect("status snapshot");
     assert_eq!(
         snapshot["sessions"][0]["realized_exit_ip"].as_str(),
         Some("198.51.100.77")

@@ -36,10 +36,10 @@ fn paid_exit_status_command(args: PaidExitStatusArgs) -> Result<()> {
                 &app,
                 &store_path,
                 &store
-            ))?
+            )?)?
         );
     } else {
-        print_paid_exit_status_snapshot(&app, &store_path, &store);
+        print_paid_exit_status_snapshot(&app, &store_path, &store)?;
     }
 
     Ok(())

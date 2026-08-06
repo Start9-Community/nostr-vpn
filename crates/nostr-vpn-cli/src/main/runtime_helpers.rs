@@ -622,10 +622,8 @@ fn fips_paid_route_admissions_from_store(
     if !app.paid_exit.enabled {
         return Ok(Vec::new());
     }
-    let network_id = app.effective_network_id();
     let store_path = paid_route_store_file_path(config_path);
     let store = load_paid_route_store(&store_path)?;
-    let destination_allowed_ips = runtime_local_exit_forwarding_routes(app);
     Ok(store
         .seller_admissions(&app.paid_exit, unix_timestamp())
         .into_iter()
@@ -638,9 +636,7 @@ fn fips_paid_route_admissions_from_store(
                 return None;
             }
             Some(crate::fips_private_mesh::fips_paid_route_admission_from_seller_admission(
-                &network_id,
                 admission,
-                &destination_allowed_ips,
             ))
         })
         .collect())

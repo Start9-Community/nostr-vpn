@@ -5,6 +5,44 @@ mod paid_exit_rating_tests {
     use nostr_sdk::prelude::{EventBuilder, Kind, Tag, Timestamp};
 
     #[test]
+    fn seller_outputs_include_canonical_provider_link() {
+        let keys = Keys::generate();
+        let mut config = PaidExitConfig {
+            enabled: true,
+            ..PaidExitConfig::default()
+        };
+        config.pricing.price_msat_per_gb = 25_000;
+        config.channel.accepted_mints = vec!["https://mint.example".to_string()];
+        config.normalize();
+        let signed = signed_paid_exit_offer_from_config_with_receiver(
+            "internet", &keys, &config, None, None, 100,
+        )
+        .expect("signed offer");
+        let offer = signed.offer().expect("offer");
+        let provider_link = paid_exit_provider_link_for_offer(&offer).expect("provider link");
+        let result = PaidExitRunResult {
+            config_path: PathBuf::from("config.toml"),
+            store_path: PathBuf::from("paid-routes.json"),
+            offer,
+            provider_link: provider_link.clone(),
+            event_id: signed.event.id.to_string(),
+            stored: true,
+            publish: None,
+            daemon_reload_attempted: false,
+            status: json!({}),
+        };
+
+        assert_eq!(
+            paid_exit_run_result_json(&result)["provider_link"],
+            provider_link
+        );
+        let parsed = ManualPaidExitProvider::parse(&provider_link).expect("parse provider link");
+        assert_eq!(parsed.npub, result.offer.seller_npub);
+        assert_eq!(parsed.max_price_msat_per_gb, Some(25_000));
+        assert_eq!(parsed.mint, "https://mint.example");
+    }
+
+    #[test]
     fn rating_scores_use_scope_and_newest_record() {
         let ratings = json!({
             "ratings": [

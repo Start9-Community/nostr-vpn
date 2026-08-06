@@ -49,10 +49,14 @@ pub fn load_paid_route_store(path: &Path) -> Result<PaidRouteStore> {
     if stored_version < u64::from(CURRENT_VERSION)
         && let Some(object) = value.as_object_mut()
     {
-        // v4 offers intentionally removed variable price denominators. Drop
-        // only stale signed listings; wallet, channels, leases, and sessions
-        // remain intact so an upgrade never loses funds or payment history.
-        object.insert("offers".to_string(), serde_json::json!({}));
+        if stored_version < 3 {
+            // v3 offers intentionally removed variable price denominators. Drop
+            // only stale signed listings; wallet, channels, leases, and sessions
+            // remain intact so an upgrade never loses funds or payment history.
+            object.insert("offers".to_string(), serde_json::json!({}));
+        }
+        // v4 adds immutable accepted terms to new channels. Existing channels
+        // are retained for accounting/refunds but fail closed without a snapshot.
         object.insert("version".to_string(), CURRENT_VERSION.into());
     }
     let mut store = match serde_json::from_value::<PaidRouteStore>(value) {
@@ -268,6 +272,35 @@ pub(super) fn paid_route_offer_requires_payment_before_routing(offer: &PaidRoute
 
 pub(super) fn paid_exit_config_requires_payment(config: &PaidExitConfig) -> bool {
     config.pricing.price_msat_per_gb > 0 || config.pricing.connection_minimum_msat_per_day > 0
+}
+
+pub(super) fn accepted_channel_terms(
+    channel: &PaidRouteChannelRecord,
+    role: PaidRouteChannelRole,
+) -> Result<&PaidExitConfig> {
+    if channel.role != role {
+        return Err(anyhow!("paid route channel has the wrong role"));
+    }
+    channel
+        .accepted_terms
+        .as_ref()
+        .filter(|terms| terms.enabled)
+        .ok_or_else(|| {
+            anyhow!(
+                "paid route channel {} has no accepted terms",
+                channel.channel_id
+            )
+        })
+}
+
+pub(super) fn paid_exit_destination_allowed_ips(config: &PaidExitConfig) -> Vec<String> {
+    crate::config::exit_node_default_routes()
+        .into_iter()
+        .filter(|route| {
+            (route == "0.0.0.0/0" && config.ip_support.ipv4)
+                || (route == "::/0" && config.ip_support.ipv6)
+        })
+        .collect()
 }
 
 pub(super) fn initial_buyer_session_status(
