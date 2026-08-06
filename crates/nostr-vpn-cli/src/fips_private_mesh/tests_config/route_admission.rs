@@ -104,21 +104,14 @@
 
     async fn bind_listener_test_runtime(port: u16) -> FipsPrivateMeshRuntime {
         let keys = Keys::generate();
-        let peer = Keys::generate();
-        let endpoint_peers = vec![FipsEndpointPeerTransportConfig {
-            npub: peer.public_key().to_bech32().expect("peer npub"),
-            addresses: Vec::new(),
-            connect_on_start: false,
-            auto_reconnect: false,
-            discovery_fallback_transit: false,
-        }];
+        let endpoint_peers = Vec::new();
         let transport = FipsEndpointTransportConfig {
             listen_port: port,
             bind_interface: None,
             advertised_endpoint: format!("8.8.8.8:{port}"),
             advertise_public_endpoint: true,
-            nostr_discovery_enabled: true,
-            advertise_on_nostr: true,
+            nostr_discovery_enabled: false,
+            advertise_on_nostr: false,
             webrtc_enabled: false,
             stun_servers: Vec::new(),
             nostr_relays: Vec::new(),
@@ -152,7 +145,7 @@
 
         assert_eq!(
             runtime
-                .confirmed_udp_listen_port(port)
+                .confirmed_udp_listen_port(port, None)
                 .await
                 .expect("listener snapshot"),
             Some(port)
@@ -168,7 +161,7 @@
 
         assert_eq!(
             runtime
-                .confirmed_udp_listen_port(port)
+                .confirmed_udp_listen_port(port, Some(false))
                 .await
                 .expect("listener snapshot"),
             None

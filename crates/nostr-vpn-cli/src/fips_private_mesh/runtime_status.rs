@@ -185,13 +185,21 @@ impl FipsPrivateMeshRuntime {
             .context("failed to snapshot FIPS local advertised endpoints")
     }
 
-    async fn confirmed_udp_listen_port(&self, configured: u16) -> Result<Option<u16>> {
+    async fn confirmed_udp_listen_port(
+        &self,
+        configured: u16,
+        required_ipv6: Option<bool>,
+    ) -> Result<Option<u16>> {
+        let addrs = self
+            .endpoint
+            .bound_udp_listen_addrs()
+            .await
+            .context("failed to snapshot FIPS bound UDP listeners")?;
         Ok((configured != 0
-            && self
-                .local_advertised_endpoints()
-                .await?
-                .iter()
-                .any(|endpoint| endpoint.transport == OverlayTransportKind::Udp))
+            && addrs.iter().any(|addr| {
+                addr.port() == configured
+                    && required_ipv6.is_none_or(|ipv6| addr.is_ipv6() == ipv6)
+            }))
         .then_some(configured))
     }
 

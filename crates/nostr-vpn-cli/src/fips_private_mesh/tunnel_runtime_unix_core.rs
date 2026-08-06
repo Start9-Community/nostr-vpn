@@ -19,7 +19,12 @@ impl FipsPrivateTunnelRuntime {
             ));
         }
         let mesh = bind_fips_private_mesh(&config).await?;
-        let active_listen_port = mesh.confirmed_udp_listen_port(config.listen_port).await?;
+        let active_listen_port = mesh
+            .confirmed_udp_listen_port(
+                config.listen_port,
+                required_public_udp_listener_ipv6(&config),
+            )
+            .await?;
         Self::start_with_mesh(
             config,
             mesh,

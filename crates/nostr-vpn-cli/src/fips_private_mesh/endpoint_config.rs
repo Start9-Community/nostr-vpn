@@ -627,6 +627,14 @@ fn fips_udp_external_addr(advertised_endpoint: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
+fn required_public_udp_listener_ipv6(config: &FipsPrivateTunnelConfig) -> Option<bool> {
+    config.advertise_public_endpoint.then(|| {
+        fips_udp_external_addr(&config.advertised_endpoint)
+            .and_then(|addr| addr.parse::<SocketAddr>().ok())
+            .is_some_and(|addr| addr.is_ipv6())
+    })
+}
+
 fn configure_fips_webrtc_transport(
     config: &mut Config,
     ambient_discovery_enabled: bool,
