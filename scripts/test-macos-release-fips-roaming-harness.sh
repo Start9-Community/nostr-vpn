@@ -126,7 +126,7 @@ receipt.write_text(json.dumps({
     "appGitTree": "b" * 40,
     "fipsGitSha": "c" * 40,
     "fipsGitTree": "d" * 40,
-    "fipsVersion": "0.4.54",
+    "fipsVersion": "0.4.55",
     "target": "x86_64-unknown-linux-musl",
     "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
     "binarySize": binary.stat().st_size,
@@ -136,7 +136,7 @@ python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
   "$PEER_RECEIPT" "$PEER_BINARY" \
   "$(printf 'a%.0s' {1..40})" "$(printf 'b%.0s' {1..40})" \
   "$(printf 'c%.0s' {1..40})" "$(printf 'd%.0s' {1..40})" \
-  0.4.54 x86_64-unknown-linux-musl
+  0.4.55 x86_64-unknown-linux-musl
 python3 - "$PEER_RECEIPT" <<'PY'
 import json
 import pathlib
@@ -150,7 +150,7 @@ if python3 "$ROOT/scripts/verify-host-linux-peer-artifact.py" \
   "$PEER_RECEIPT" "$PEER_BINARY" \
   "$(printf 'a%.0s' {1..40})" "$(printf 'b%.0s' {1..40})" \
   "$(printf 'c%.0s' {1..40})" "$(printf 'd%.0s' {1..40})" \
-  0.4.54 x86_64-unknown-linux-musl 2>/dev/null
+  0.4.55 x86_64-unknown-linux-musl 2>/dev/null
 then
   fail "contradictory remote-builder receipt was accepted"
 fi

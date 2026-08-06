@@ -240,7 +240,7 @@ app_receipt = {
     "appBundleTreeSha256": module.tree_sha256(app),
     "fipsGitSha": "5" * 40,
     "fipsGitTree": "6" * 40,
-    "fipsCoreVersion": "0.4.54",
+    "fipsCoreVersion": "0.4.55",
     "signingTeam": team,
     "appCodeDirectoryHash": "7" * 40,
     "signingIdentitySha1": identity,

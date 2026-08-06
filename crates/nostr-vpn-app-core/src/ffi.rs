@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "paid-exit")]
+use nostr_vpn_core::config::PaidExitSellerEgress;
 use nostr_vpn_core::config::{
     AppConfig, ExitDnsMode, ExitDohProvider, FiatCurrency, InternetSource, NetworkConfig,
-    NostrPubsubMode, PaidExitSellerEgress, PendingInboundJoinRequest, PendingOutboundJoinRequest,
-    derive_mesh_tunnel_ip, maybe_autoconfigure_node, normalize_advertised_route,
-    normalize_magic_dns_label, normalize_nostr_pubkey, normalize_relay_urls,
-    normalize_runtime_network_id, npub_for_pubkey_hex, parse_wireguard_exit_config,
-    wireguard_exit_config_text,
+    NostrPubsubMode, PendingInboundJoinRequest, PendingOutboundJoinRequest, derive_mesh_tunnel_ip,
+    maybe_autoconfigure_node, normalize_advertised_route, normalize_magic_dns_label,
+    normalize_nostr_pubkey, normalize_relay_urls, normalize_runtime_network_id,
+    npub_for_pubkey_hex, parse_wireguard_exit_config, wireguard_exit_config_text,
 };
 use nostr_vpn_core::diagnostics::ProbeStatus;
 use nostr_vpn_core::paid_routes::{PaidExitUpstream, normalize_paid_route_country_code};

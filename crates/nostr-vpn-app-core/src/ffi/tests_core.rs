@@ -32,6 +32,7 @@
         );
     }
 
+    #[cfg(feature = "paid-exit")]
     #[test]
     fn standalone_paid_exit_status_uses_runtime_readiness_not_vpn_activity() {
         let mut app = AppConfig::generated();
@@ -56,6 +57,7 @@
         );
     }
 
+    #[cfg(feature = "paid-exit")]
     #[test]
     fn paid_exit_status_reports_missing_upstream_before_listener() {
         let mut app = AppConfig::generated();
@@ -92,6 +94,7 @@
         );
     }
 
+    #[cfg(feature = "paid-exit")]
     #[test]
     fn paid_exit_direct_provider_readiness_does_not_require_relays() {
         let mut app = AppConfig::generated();

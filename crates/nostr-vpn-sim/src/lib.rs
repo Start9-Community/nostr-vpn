@@ -10,11 +10,12 @@ use fips_core::{
     SimTransportConfig, register_sim_network, unregister_sim_network,
 };
 use nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_SERVICE_PORT;
-use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, Timestamp};
+use nostr_sdk::prelude::{Event, Keys, Kind, Timestamp};
 use nostr_social_graph::RatingGraphConfig;
 use nostr_social_memory::rating_from_event;
 use nostr_vpn_core::config::{NostrPubsubConfig, NostrPubsubMode};
-use nostr_vpn_core::control_pubsub::{PAID_EXIT_OFFER_KIND, RATING_FACT_KIND};
+use nostr_vpn_core::control_pubsub::RATING_FACT_KIND;
+use nostr_vpn_core::paid_routes::{PaidExitConfig, signed_paid_exit_offer_from_config};
 use nvpn::control_pubsub_runtime::ControlPubsubFipsRuntime;
 use serde::{Deserialize, Serialize};
 
@@ -166,12 +167,7 @@ impl SimulationRuntime {
 
     async fn run_scenario(&mut self) -> Result<SimulationReport> {
         let honest_node_count = self.config.node_count - self.config.attacker_count;
-        let baseline = signed_event(
-            &self.keys[0],
-            PAID_EXIT_OFFER_KIND,
-            "honest baseline control event",
-            1,
-        );
+        let baseline = signed_live_paid_offer(&self.keys[0], "simulation-baseline");
         if !self.pubsub[0].publish(baseline.clone()).await? {
             bail!("baseline publisher had no connected pubsub peer");
         }
@@ -188,12 +184,7 @@ impl SimulationRuntime {
             self.honest_rating_event_count(honest_node_count).await;
         let received_untrusted_ratings_ignored =
             self.apply_received_ratings(honest_node_count).await?;
-        let post_attack = signed_event(
-            &self.keys[1],
-            PAID_EXIT_OFFER_KIND,
-            "honest control event under attack",
-            2,
-        );
+        let post_attack = signed_live_paid_offer(&self.keys[1], "simulation-post-attack");
         if !self.pubsub[1].publish(post_attack.clone()).await? {
             bail!("post-attack publisher had no connected pubsub peer");
         }
@@ -675,11 +666,14 @@ fn deterministic_secret(seed: u64, index: usize) -> [u8; 32] {
     bytes
 }
 
-fn signed_event(keys: &Keys, kind: u16, content: &str, created_at: u64) -> Event {
-    EventBuilder::new(Kind::Custom(kind), content)
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .expect("simulation event signs")
+fn signed_live_paid_offer(keys: &Keys, offer_id: &str) -> Event {
+    let config = PaidExitConfig {
+        enabled: true,
+        ..PaidExitConfig::default()
+    };
+    signed_paid_exit_offer_from_config(offer_id, keys, &config, None, Timestamp::now().as_secs())
+        .expect("simulation paid-exit offer signs")
+        .event
 }
 
 fn basis_points(numerator: usize, denominator: usize) -> u32 {
