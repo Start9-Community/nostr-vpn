@@ -162,7 +162,7 @@ impl FipsPrivateTunnelRuntime {
     }
 
     #[cfg(feature = "paid-exit")]
-    pub(crate) async fn send_paid_route_payment(
+    pub(crate) fn enqueue_paid_route_payment(
         &self,
         _seller: &str,
         _id: String,

@@ -951,15 +951,14 @@ impl FipsPrivateTunnelRuntime {
     }
 
     #[cfg(feature = "paid-exit")]
-    pub(crate) async fn send_paid_route_payment(
+    pub(crate) fn enqueue_paid_route_payment(
         &self,
         seller: &str,
         id: String,
         envelope: StreamingRoutePaymentEnvelope,
     ) -> Result<()> {
         self.mesh
-            .send_paid_route_payment(&self.state_control, seller, id, envelope)
-            .await
+            .enqueue_paid_route_payment(&self.state_control.sender(), seller, id, envelope)
     }
 
     #[cfg(feature = "paid-exit")]

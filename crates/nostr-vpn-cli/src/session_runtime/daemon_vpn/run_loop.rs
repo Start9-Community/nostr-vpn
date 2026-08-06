@@ -629,10 +629,10 @@ loop {
                             }
                     }
                     let flushed = flush_paid_exit_payment_outbox(runtime, &config_path).await;
-                    if flushed.sent > 0 || flushed.errors > 0 {
+                    if flushed.queued > 0 || flushed.errors > 0 {
                         eprintln!(
-                            "paid-exit: direct FIPS payment outbox sent={} errors={}",
-                            flushed.sent, flushed.errors
+                            "paid-exit: direct FIPS payment outbox queued={} errors={}",
+                            flushed.queued, flushed.errors
                         );
                     }
                 }

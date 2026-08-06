@@ -130,7 +130,7 @@ fn load_paid_exit_payment_outbox(config_path: &Path) -> Vec<QueuedPaidExitPaymen
 
 #[derive(Default)]
 struct PaidExitPaymentOutboxFlushResult {
-    sent: usize,
+    queued: usize,
     errors: usize,
 }
 
@@ -139,28 +139,15 @@ async fn flush_paid_exit_payment_outbox(
     config_path: &Path,
 ) -> PaidExitPaymentOutboxFlushResult {
     let mut result = PaidExitPaymentOutboxFlushResult::default();
-    let connected_sellers = runtime
-        .peer_statuses()
-        .into_iter()
-        .filter(|peer| peer.connected)
-        .map(|peer| peer.pubkey)
-        .collect::<HashSet<_>>();
     for queued in load_paid_exit_payment_outbox(config_path) {
         let seller = queued.envelope.seller.clone();
-        // FIPS-TCP waits for its destination to become reachable. The durable
-        // outbox is retried every daemon tick, so waiting here for an offline
-        // historical seller only starves config reloads and liveness work.
-        if !connected_sellers.contains(&seller) {
-            continue;
-        }
         match runtime
-            .send_paid_route_payment(&seller, queued.id, queued.envelope)
-            .await
+            .enqueue_paid_route_payment(&seller, queued.id, queued.envelope)
         {
-            Ok(()) => result.sent += 1,
+            Ok(()) => result.queued += 1,
             Err(error) => {
                 result.errors += 1;
-                eprintln!("paid-exit: direct FIPS payment send failed: {error}");
+                eprintln!("paid-exit: direct FIPS payment queue failed: {error}");
             }
         }
     }

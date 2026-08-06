@@ -144,19 +144,18 @@ impl FipsPrivateMeshRuntime {
     }
 
     #[cfg(feature = "paid-exit")]
-    pub(crate) async fn send_paid_route_payment(
+    pub(crate) fn enqueue_paid_route_payment(
         &self,
-        control: &FipsControlTcpRuntime,
+        control: &FipsControlTcpSender,
         seller: &str,
         id: String,
         envelope: StreamingRoutePaymentEnvelope,
     ) -> Result<()> {
-        self.send_stateful_control_frame(
+        self.enqueue_stateful_control_frame(
             control,
             seller,
             &FipsControlFrame::PaidRoutePayment { id, envelope },
         )
-        .await
     }
 
     #[cfg(feature = "paid-exit")]
