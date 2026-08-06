@@ -105,42 +105,52 @@ fn paid_route_destination_routes_from_admissions(
         .collect()
 }
 
-fn select_paid_route_peer_for_ip(
-    peers: &[FipsMeshPeerRuntime],
+fn select_indexed_peer_for_ip<'a>(
+    peers: &'a [FipsMeshPeerRuntime],
+    exact_routes: &HashMap<IpAddr, ExactRouteMatch>,
+    prefix_v4_routes: &[IndexedIpRoute],
+    prefix_v6_routes: &[IndexedIpRoute],
     destination: IpAddr,
-) -> Option<&FipsMeshPeerRuntime> {
-    let mut best_peer = None;
-    let mut best_prefix = None;
-    let mut ambiguous = false;
-
-    for peer in peers {
-        for route in &peer.routes {
-            if !route.matches(destination) {
-                continue;
-            }
-            match best_prefix {
-                None => {
-                    best_peer = Some(peer);
-                    best_prefix = Some(route.prefix_len);
-                    ambiguous = false;
-                }
-                Some(prefix) if route.prefix_len > prefix => {
-                    best_peer = Some(peer);
-                    best_prefix = Some(route.prefix_len);
-                    ambiguous = false;
-                }
-                Some(prefix)
-                    if route.prefix_len == prefix
-                        && best_peer.is_some_and(|best| !same_participant(best, peer)) =>
-                {
-                    ambiguous = true;
-                }
-                Some(_) => {}
-            }
-        }
+) -> PeerRouteSelection<'a> {
+    if let Some(route_match) = exact_routes.get(&destination) {
+        let prefix_len = if destination.is_ipv4() { 32 } else { 128 };
+        return match *route_match {
+            ExactRouteMatch::Peer(peer_index) => peers
+                .get(peer_index)
+                .map_or(PeerRouteSelection::None, |peer| PeerRouteSelection::Match {
+                    peer,
+                    prefix_len,
+                }),
+            ExactRouteMatch::Ambiguous => PeerRouteSelection::Ambiguous { prefix_len },
+        };
     }
 
-    if ambiguous { None } else { best_peer }
+    let prefix_routes = if destination.is_ipv4() {
+        prefix_v4_routes
+    } else {
+        prefix_v6_routes
+    };
+    let mut selected = PeerRouteSelection::None;
+
+    for candidate in prefix_routes {
+        if selected
+            .prefix_len()
+            .is_some_and(|prefix| candidate.route.prefix_len < prefix)
+        {
+            break;
+        }
+        if !candidate.route.matches(destination) {
+            continue;
+        }
+        let Some(peer) = peers.get(candidate.peer_index) else {
+            continue;
+        };
+        selected = selected.combine(PeerRouteSelection::Match {
+            peer,
+            prefix_len: candidate.route.prefix_len,
+        });
+    }
+    selected
 }
 
 fn participant_peer_index(peers: &[FipsMeshPeerRuntime]) -> HashMap<[u8; 32], usize> {

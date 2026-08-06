@@ -127,6 +127,9 @@ pub struct FipsMeshRuntime {
     exact_route_peer_index: HashMap<IpAddr, ExactRouteMatch>,
     prefix_v4_route_peer_index: Vec<IndexedIpRoute>,
     prefix_v6_route_peer_index: Vec<IndexedIpRoute>,
+    paid_exact_route_peer_index: HashMap<IpAddr, ExactRouteMatch>,
+    paid_prefix_v4_route_peer_index: Vec<IndexedIpRoute>,
+    paid_prefix_v6_route_peer_index: Vec<IndexedIpRoute>,
     exit_flows: Arc<Mutex<ExitFlowFilter>>,
 }
 
@@ -155,6 +158,51 @@ enum ExactRouteMatch {
 struct IndexedIpRoute {
     peer_index: usize,
     route: IpRoute,
+}
+
+#[derive(Clone, Copy)]
+enum PeerRouteSelection<'a> {
+    None,
+    Match {
+        peer: &'a FipsMeshPeerRuntime,
+        prefix_len: u8,
+    },
+    Ambiguous {
+        prefix_len: u8,
+    },
+}
+
+impl<'a> PeerRouteSelection<'a> {
+    fn combine(self, candidate: Self) -> Self {
+        match (self.prefix_len(), candidate.prefix_len()) {
+            (None, _) => candidate,
+            (_, None) => self,
+            (Some(current), Some(next)) if next > current => candidate,
+            (Some(current), Some(next)) if current > next => self,
+            (Some(prefix_len), Some(_)) => match (self, candidate) {
+                (Self::Match { peer: left, .. }, Self::Match { peer: right, .. })
+                    if same_participant(left, right) =>
+                {
+                    self
+                }
+                _ => Self::Ambiguous { prefix_len },
+            },
+        }
+    }
+
+    fn prefix_len(self) -> Option<u8> {
+        match self {
+            Self::None => None,
+            Self::Match { prefix_len, .. } | Self::Ambiguous { prefix_len } => Some(prefix_len),
+        }
+    }
+
+    fn peer(self) -> Option<&'a FipsMeshPeerRuntime> {
+        match self {
+            Self::Match { peer, .. } => Some(peer),
+            Self::None | Self::Ambiguous { .. } => None,
+        }
+    }
 }
 
 impl FipsMeshRuntime {
@@ -209,7 +257,7 @@ impl FipsMeshRuntime {
             .collect::<Vec<_>>();
         let participant_peer_index = participant_peer_index(&peers);
         let endpoint_node_addr_peer_index = endpoint_node_addr_peer_index(&peers);
-        let exact_route_peer_index = exact_route_peer_index(&peers);
+        let regular_exact_route_peer_index = exact_route_peer_index(&peers);
         let (prefix_v4_route_peer_index, prefix_v6_route_peer_index) =
             prefix_route_peer_indexes(&peers);
         let local_routes = local_allowed_ips
@@ -223,6 +271,9 @@ impl FipsMeshRuntime {
         let paid_route_peers = paid_route_peers_from_admissions(&paid_route_admissions, false);
         let paid_route_routing_peers =
             paid_route_peers_from_admissions(&paid_route_admissions, true);
+        let paid_exact_route_peer_index = exact_route_peer_index(&paid_route_routing_peers);
+        let (paid_prefix_v4_route_peer_index, paid_prefix_v6_route_peer_index) =
+            prefix_route_peer_indexes(&paid_route_routing_peers);
 
         Self {
             peers,
@@ -233,9 +284,12 @@ impl FipsMeshRuntime {
             paid_route_routing_peers,
             participant_peer_index,
             endpoint_node_addr_peer_index,
-            exact_route_peer_index,
+            exact_route_peer_index: regular_exact_route_peer_index,
             prefix_v4_route_peer_index,
             prefix_v6_route_peer_index,
+            paid_exact_route_peer_index,
+            paid_prefix_v4_route_peer_index,
+            paid_prefix_v6_route_peer_index,
             exit_flows: Arc::new(Mutex::new(ExitFlowFilter::default())),
         }
     }
@@ -255,6 +309,11 @@ impl FipsMeshRuntime {
             paid_route_peers_from_admissions(&self.paid_route_admissions, false);
         self.paid_route_routing_peers =
             paid_route_peers_from_admissions(&self.paid_route_admissions, true);
+        self.paid_exact_route_peer_index = exact_route_peer_index(&self.paid_route_routing_peers);
+        (
+            self.paid_prefix_v4_route_peer_index,
+            self.paid_prefix_v6_route_peer_index,
+        ) = prefix_route_peer_indexes(&self.paid_route_routing_peers);
     }
 
     pub fn route_outbound_packet_peer<'a>(&'a self, packet: &[u8]) -> Option<RoutedFipsPeer<'a>> {
@@ -418,59 +477,21 @@ impl FipsMeshRuntime {
     }
 
     fn select_peer_for_ip(&self, destination: IpAddr) -> Option<&FipsMeshPeerRuntime> {
-        if let Some(route_match) = self.exact_route_peer_index.get(&destination) {
-            return match *route_match {
-                ExactRouteMatch::Peer(peer_index) => self.peers.get(peer_index),
-                ExactRouteMatch::Ambiguous => None,
-            };
-        }
-
-        let prefix_routes = match destination {
-            IpAddr::V4(_) => &self.prefix_v4_route_peer_index,
-            IpAddr::V6(_) => &self.prefix_v6_route_peer_index,
-        };
-        let mut best_peer_index = None;
-        let mut best_prefix = None;
-        let mut ambiguous = false;
-
-        for candidate in prefix_routes {
-            if best_prefix.is_some_and(|prefix| candidate.route.prefix_len < prefix) {
-                break;
-            }
-            if !candidate.route.matches(destination) {
-                continue;
-            }
-
-            let Some(peer) = self.peers.get(candidate.peer_index) else {
-                continue;
-            };
-            match best_peer_index {
-                None => {
-                    best_peer_index = Some(candidate.peer_index);
-                    best_prefix = Some(candidate.route.prefix_len);
-                    ambiguous = false;
-                }
-                Some(best_index)
-                    if best_prefix == Some(candidate.route.prefix_len)
-                        && self
-                            .peers
-                            .get(best_index)
-                            .is_some_and(|best_peer| !same_participant(best_peer, peer)) =>
-                {
-                    ambiguous = true;
-                }
-                Some(_) => {}
-            }
-        }
-
-        if ambiguous {
-            None
-        } else {
-            let peer = best_peer_index.and_then(|peer_index| self.peers.get(peer_index));
-            peer.or_else(|| {
-                select_paid_route_peer_for_ip(&self.paid_route_routing_peers, destination)
-            })
-        }
+        select_indexed_peer_for_ip(
+            &self.peers,
+            &self.exact_route_peer_index,
+            &self.prefix_v4_route_peer_index,
+            &self.prefix_v6_route_peer_index,
+            destination,
+        )
+        .combine(select_indexed_peer_for_ip(
+            &self.paid_route_routing_peers,
+            &self.paid_exact_route_peer_index,
+            &self.paid_prefix_v4_route_peer_index,
+            &self.paid_prefix_v6_route_peer_index,
+            destination,
+        ))
+        .peer()
     }
 
     fn peer_allows_inbound_destination(

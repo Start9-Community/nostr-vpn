@@ -389,6 +389,55 @@ mod tests {
     }
 
     #[test]
+    fn paid_buyer_route_outweighs_private_upstream_default() {
+        let upstream = TestPeer::generate();
+        let buyer = TestPeer::generate();
+        let seller_ip = Ipv4Addr::new(10, 44, 94, 74);
+        let buyer_ip = Ipv4Addr::new(10, 44, 195, 6);
+        let internet_ip = Ipv4Addr::new(203, 0, 113, 100);
+        let runtime = FipsMeshRuntime::with_local_routes_and_paid_route_admissions(
+            vec![FipsMeshPeerConfig {
+                participant_pubkey: upstream.participant_pubkey.clone(),
+                endpoint_npub: upstream.endpoint_npub.clone(),
+                allowed_ips: vec!["0.0.0.0/0".to_string()],
+            }],
+            vec!["0.0.0.0/0".to_string()],
+            vec![paid_route_admission_with_destinations(
+                &buyer,
+                vec!["10.44.195.6/32"],
+                vec!["0.0.0.0/0"],
+                true,
+            )],
+        );
+        let request = ipv4_packet(buyer_ip, internet_ip);
+
+        let buyer_admitter = runtime
+            .endpoint_source_admitter(&buyer.endpoint_node_addr)
+            .expect("paid buyer identity");
+        assert!(buyer_admitter.receive_owned(request.clone()).is_some());
+        let upstream_route = runtime
+            .route_outbound_packet_owned_with_peer(request)
+            .expect("Internet traffic should use the private upstream");
+        assert_eq!(upstream_route.participant_pubkey, upstream.participant_pubkey);
+
+        let reply = ipv4_packet(internet_ip, buyer_ip);
+        let buyer_route = runtime
+            .route_outbound_packet_owned_with_peer(reply)
+            .expect("reply should return to the paid buyer");
+        assert_eq!(buyer_route.participant_pubkey, buyer.participant_pubkey);
+
+        let upstream_admitter = runtime
+            .endpoint_source_admitter(&upstream.endpoint_node_addr)
+            .expect("private upstream identity");
+        assert!(
+            upstream_admitter
+                .receive_owned(ipv4_packet(buyer_ip, seller_ip))
+                .is_none(),
+            "the private upstream cannot claim the paid buyer's more-specific source"
+        );
+    }
+
+    #[test]
     fn paid_route_admission_without_routing_keeps_identity_but_blocks_raw_packets() {
         let buyer = TestPeer::generate();
         let packet = ipv4_packet(Ipv4Addr::new(10, 44, 22, 44), Ipv4Addr::new(8, 8, 8, 8));

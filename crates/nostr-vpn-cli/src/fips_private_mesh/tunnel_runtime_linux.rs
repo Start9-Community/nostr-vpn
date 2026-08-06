@@ -110,6 +110,12 @@ pub(crate) fn retain_linux_wireguard_apply_cleanup(
 impl FipsPrivateTunnelRuntime {
     #[cfg(target_os = "linux")]
     async fn apply_linux_network_state(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
+        // WireGuard cleanup restores the physical default saved by that
+        // runtime. Do it before a replacement private-FIPS default is applied
+        // so the stale restore cannot overwrite the newly selected route.
+        if !config.wireguard_exit.enabled {
+            self.cleanup_linux_wireguard_exit_upstream()?;
+        }
         let requested_ipv4_exit =
             linux_ipv4_underlay_capture_requested(&config.route_targets, config.wireguard_exit.enabled);
         let requested_ipv6_exit = config.route_targets.iter().any(|route| route == "::/0")
