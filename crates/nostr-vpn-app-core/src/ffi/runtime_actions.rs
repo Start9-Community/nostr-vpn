@@ -294,6 +294,7 @@ impl NativeAppRuntime {
             NativeAppAction::SetManualPaidExitProvider { provider } => {
                 let mut config = self.config.clone();
                 config.set_manual_paid_exit_provider(&provider)?;
+                #[cfg(feature = "paid-exit")]
                 if !config.manual_paid_exit_provider.mint.is_empty() {
                     self.add_paid_route_wallet_mint(
                         &config.manual_paid_exit_provider.mint,

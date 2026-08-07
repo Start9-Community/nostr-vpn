@@ -191,7 +191,6 @@ fn build_paid_route_market_card(app: &AppRef, page: &gtk::Box, state: &NativeApp
 fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
     let filter = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let country = entry("Country", &app.borrow().drafts.paid_route_country);
-    country.set_max_length(2);
     {
         let app = app.clone();
         country.connect_changed(move |entry| {
@@ -565,7 +564,6 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
     price_row.append(&price);
     price_row.append(&gtk::Label::new(Some("Country")));
     let country = entry("2-letter code", &app.borrow().drafts.paid_exit_country_code);
-    country.set_max_length(2);
     country.set_hexpand(false);
     country.set_width_chars(4);
     price_row.append(&country);
