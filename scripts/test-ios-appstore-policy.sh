@@ -236,15 +236,16 @@ for plist in "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"; do
     || fail "the no-France build must declare export-exempt encryption"
 done
 if rg -q 'NSBonjourServices|NSLocalNetworkUsageDescription|_fips\._udp' \
-  "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"
+  "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist" "$ROOT/macos/Info.plist"
 then
-  fail "the iOS build declares LAN discovery that its profiles do not authorize"
+  fail "Apple app metadata declares unused LAN discovery"
 fi
 if rg -q 'com\.apple\.developer\.networking\.multicast' \
   "$ROOT/ios/NostrVpnIos.entitlements" \
-  "$ROOT/ios/PacketTunnel/PacketTunnel.entitlements"
+  "$ROOT/ios/PacketTunnel/PacketTunnel.entitlements" \
+  "$ROOT/macos/NostrVpnMac.entitlements"
 then
-  fail "the iOS build requests an unprovisioned multicast entitlement"
+  fail "an Apple build requests an unused multicast entitlement"
 fi
 rg -q '"unrestrictedWebAccess": False' "$ROOT/scripts/appstore-draft" \
   || fail "App Store metadata incorrectly declares an in-app unrestricted browser"

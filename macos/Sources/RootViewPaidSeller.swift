@@ -307,17 +307,20 @@ extension RootView {
 
     var paidExitSellerSaveButton: some View {
         Button {
-            manager.savePaidExitSellerSettings(
-                upstream: paidExitCurrentUpstream,
-                priceMsatPerGb: paidExitPriceMsatPerGb,
-                acceptedMints: paidExitAcceptedMints,
-                maxChannelCapacitySat: paidExitMaxChannelCapacitySat,
-                channelExpirySecs: paidExitChannelExpirySecs,
-                freeProbeUnits: paidExitFreeProbeUnits,
-                graceUnits: paidExitGraceUnits,
-                countryCode: paidExitCountryCode,
-                asn: paidExitAsn
-            )
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            DispatchQueue.main.async {
+                manager.savePaidExitSellerSettings(
+                    upstream: paidExitCurrentUpstream,
+                    priceMsatPerGb: paidExitPriceMsatPerGb,
+                    acceptedMints: paidExitAcceptedMints,
+                    maxChannelCapacitySat: paidExitMaxChannelCapacitySat,
+                    channelExpirySecs: paidExitChannelExpirySecs,
+                    freeProbeUnits: paidExitFreeProbeUnits,
+                    graceUnits: paidExitGraceUnits,
+                    countryCode: paidExitCountryCode,
+                    asn: paidExitAsn
+                )
+            }
         } label: {
             Label("Save", systemImage: "checkmark")
         }
