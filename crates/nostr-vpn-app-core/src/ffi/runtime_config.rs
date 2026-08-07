@@ -535,6 +535,31 @@ impl NativeAppRuntime {
     }
 
     fn save_reload_and_refresh(&mut self) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if !self.mobile_runtime
+            && self.config_path.try_exists().with_context(|| {
+                format!("failed to inspect config {}", self.config_path.display())
+            })?
+        {
+            let previous_config = AppConfig::load(&self.config_path)?;
+            let mut reload_attempted = false;
+            return match self.save_reload_and_refresh_unchecked(&mut reload_attempted) {
+                Ok(()) => Ok(()),
+                Err(error) if reload_attempted || self.service_running => self
+                    .restore_desktop_config_after_failed_apply(
+                        previous_config,
+                        reload_attempted,
+                        &error,
+                    ),
+                Err(error) => Err(error),
+            };
+        }
+
+        let mut reload_attempted = false;
+        self.save_reload_and_refresh_unchecked(&mut reload_attempted)
+    }
+
+    fn save_reload_and_refresh_unchecked(&mut self, _reload_attempted: &mut bool) -> Result<()> {
         let status_result = if self.mobile_runtime {
             Ok(())
         } else {
@@ -571,6 +596,7 @@ impl NativeAppRuntime {
             #[cfg(not(target_os = "macos"))]
             {
                 if self.daemon_running {
+                    *_reload_attempted = true;
                     let output =
                         self.run_nvpn(["reload", "--config", self.config_path_str()?])?;
                     ensure_success("nvpn reload", &output)?;
@@ -578,7 +604,7 @@ impl NativeAppRuntime {
                 }
                 if self.service_running {
                     let message =
-                        "background service is running but daemon status is unavailable; configuration was saved but not applied";
+                        "background service is running but daemon status is unavailable";
                     return match status_result {
                         Ok(()) => Err(anyhow!(message)),
                         Err(error) => Err(error.context(message)),
@@ -593,6 +619,39 @@ impl NativeAppRuntime {
                 }
                 status_result
             }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn restore_desktop_config_after_failed_apply(
+        &mut self,
+        previous_config: AppConfig,
+        reload_attempted: bool,
+        apply_error: &anyhow::Error,
+    ) -> Result<()> {
+        self.config = previous_config;
+        self.sync_exchange_rate_currency();
+        let restore_result = self
+            .save_config()
+            .context("restore previous configuration on disk")
+            .and_then(|()| {
+                if !reload_attempted {
+                    return Ok(());
+                }
+                let output = self
+                    .run_nvpn(["reload", "--config", self.config_path_str()?])
+                    .context("request daemon rollback reload")?;
+                ensure_success("nvpn rollback reload", &output)?;
+                self.refresh_status()
+                    .context("refresh status after daemon rollback reload")
+            });
+        match restore_result {
+            Ok(()) => Err(anyhow!(
+                "configuration was not applied; restored previous configuration: {apply_error:#}"
+            )),
+            Err(restore_error) => Err(anyhow!(
+                "configuration was not applied ({apply_error:#}); failed to restore previous configuration: {restore_error:#}"
+            )),
         }
     }
 

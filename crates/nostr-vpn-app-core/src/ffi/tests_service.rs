@@ -70,7 +70,7 @@ exit 0
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn config_edit_does_not_treat_starting_service_as_reloaded() {
+    fn direct_exit_change_rolls_back_while_service_status_is_unavailable() {
         let dir = unique_service_test_dir("nvpn-app-core-config-while-starting");
         let script_path = write_starting_service_fake_nvpn(&dir);
         let error = anyhow!("boom");
@@ -81,23 +81,124 @@ exit 0
         create_test_network(&mut runtime, "Home");
         runtime
             .config
+            .select_public_paid_exit_node(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .expect("select paid exit");
+        runtime
+            .config
             .save(&runtime.config_path)
             .expect("save test config");
         runtime.nvpn_bin = Some(script_path);
         runtime.daemon_status_grace_until = Some(Instant::now() + DAEMON_STARTUP_STATUS_GRACE);
-        runtime.config.node_name = "Pending edit".to_string();
 
-        let error = runtime
-            .save_reload_and_refresh()
-            .expect_err("starting service must not report an unapplied edit as reloaded");
+        runtime.dispatch(NativeAppAction::UpdateSettings {
+            patch: SettingsPatch {
+                internet_source: Some("direct".to_string()),
+                ..SettingsPatch::default()
+            },
+        });
 
-        assert!(error.to_string().contains("daemon status is unavailable"));
-        assert_eq!(
-            AppConfig::load(&runtime.config_path)
-                .expect("load saved config")
-                .node_name,
-            "Pending edit"
+        assert!(
+            runtime.last_error.contains("daemon status is unavailable"),
+            "{}",
+            runtime.last_error
         );
+        assert_eq!(runtime.config.internet_source, InternetSource::PaidManual);
+        assert!(!runtime.config.exit_node.is_empty());
+        let state = runtime.state();
+        assert_eq!(state.internet_source, "paid_manual");
+        assert!(state.error.contains("daemon status is unavailable"));
+        let saved = AppConfig::load(&runtime.config_path).expect("load restored config");
+        assert_eq!(saved.internet_source, InternetSource::PaidManual);
+        assert_eq!(
+            saved.exit_node,
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn failed_reload_restores_and_reapplies_the_previous_paid_exit_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_service_test_dir("nvpn-app-core-config-reload-rollback");
+        let script_path = dir.join("nvpn");
+        fs::write(
+            &script_path,
+            r#"#!/bin/sh
+if [ "$1" = "service" ] && [ "$2" = "status" ]; then
+  printf '%s\n' '{"supported":true,"installed":true,"disabled":false,"loaded":true,"running":true,"pid":123,"label":"fi.siriusbusiness.nvpn.test","binary_version":"test"}'
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  printf '%s\n' '{"daemon":{"running":true,"state":null}}'
+  exit 0
+fi
+if [ "$1" = "reload" ]; then
+  printf 'reload\n' >> "$3.reloads"
+  if [ ! -f "$3.first-reload" ]; then
+    touch "$3.first-reload"
+    echo "simulated reload failure" >&2
+    exit 7
+  fi
+  grep -q 'internet_source = "paid_manual"' "$3" || exit 92
+  exit 0
+fi
+exit 93
+"#,
+        )
+        .expect("write fake nvpn");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake nvpn metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("make fake nvpn executable");
+
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.config_path = dir.join("config.toml");
+        create_test_network(&mut runtime, "Home");
+        runtime
+            .config
+            .select_public_paid_exit_node(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .expect("select paid exit");
+        runtime.config.save(&runtime.config_path).expect("save config");
+        runtime.nvpn_bin = Some(script_path);
+
+        runtime.dispatch(NativeAppAction::UpdateSettings {
+            patch: SettingsPatch {
+                internet_source: Some("direct".to_string()),
+                ..SettingsPatch::default()
+            },
+        });
+
+        assert!(
+            runtime.last_error.contains("simulated reload failure"),
+            "{}",
+            runtime.last_error
+        );
+        assert_eq!(runtime.config.internet_source, InternetSource::PaidManual);
+        assert!(!runtime.config.exit_node.is_empty());
+        let state = runtime.state();
+        assert_eq!(state.internet_source, "paid_manual");
+        assert!(state.error.contains("simulated reload failure"));
+        let saved = AppConfig::load(&runtime.config_path).expect("load restored config");
+        assert_eq!(saved.internet_source, InternetSource::PaidManual);
+        assert_eq!(saved.exit_node, runtime.config.exit_node);
+        let calls = fs::read_to_string(format!("{}.reloads", runtime.config_path.display()))
+            .expect("read fake nvpn reloads");
+        assert_eq!(
+            calls.lines().count(),
+            2,
+            "failed apply and rollback must each issue one reload:\n{calls}"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -135,16 +236,51 @@ exit 0
         runtime.config_path = dir.join("config.toml");
         create_test_network(&mut runtime, "Home");
         runtime.config.save(&runtime.config_path).expect("save config");
+        let previous_name = runtime.config.node_name.clone();
         runtime.nvpn_bin = Some(script_path);
         runtime.service_running = true;
         runtime.config.node_name = "Pending edit".to_string();
 
         let error = runtime
             .save_reload_and_refresh()
-            .expect_err("failed live-service query must not report the edit as applied");
+            .expect_err("failed live-service query must not keep the unapplied edit");
 
         assert!(runtime.service_running, "cached live state was discarded");
-        assert!(error.to_string().contains("configuration was saved but not applied"));
+        assert!(error.to_string().contains("configuration was not applied"));
+        assert_eq!(runtime.config.node_name, previous_name);
+        assert_eq!(
+            AppConfig::load(&runtime.config_path)
+                .expect("load restored config")
+                .node_name,
+            runtime.config.node_name
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn offline_config_edit_still_persists_when_status_is_unavailable() {
+        let dir = unique_service_test_dir("nvpn-app-core-offline-config-edit");
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.config_path = dir.join("config.toml");
+        runtime.config.save(&runtime.config_path).expect("save config");
+        runtime.nvpn_bin = Some(PathBuf::from("/usr/bin/false"));
+        runtime.config.node_name = "Offline edit".to_string();
+
+        runtime
+            .save_reload_and_refresh()
+            .expect_err("offline status remains unavailable");
+
+        assert_eq!(runtime.config.node_name, "Offline edit");
+        assert_eq!(
+            AppConfig::load(&runtime.config_path)
+                .expect("load offline edit")
+                .node_name,
+            "Offline edit"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
