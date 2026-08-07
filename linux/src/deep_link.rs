@@ -29,7 +29,7 @@ pub fn parse(raw: &str) -> Option<DeepLink> {
 
     #[cfg(debug_assertions)]
     {
-        return parse_debug(raw);
+        parse_debug(raw)
     }
 
     #[cfg(not(debug_assertions))]

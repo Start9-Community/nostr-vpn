@@ -20,10 +20,7 @@ fn paid_route_price_text(price_msat_per_gb: u64) -> String {
     if price_msat_per_gb == 0 {
         "free".to_string()
     } else {
-        format!(
-            "{price_msat_per_gb} msat/GB · {}/GB",
-            paid_route_msat_text(price_msat_per_gb)
-        )
+        format!("{price_msat_per_gb} msat/GB")
     }
 }
 

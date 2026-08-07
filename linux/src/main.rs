@@ -119,6 +119,8 @@ struct Drafts {
     paid_route_country: String,
     manual_paid_exit_provider: String,
     paid_exit_price_msat_per_gb: String,
+    paid_exit_country_code: String,
+    paid_exit_accepted_mints: String,
     paid_route_mint_url: String,
     paid_route_top_up_amount: String,
     paid_route_send_amount: String,
@@ -142,6 +144,8 @@ impl Drafts {
         self.exit_dns_through_exit_servers = state.exit_dns_through_exit_servers.clone();
         self.manual_paid_exit_provider = state.paid_route_market.manual_provider_link.clone();
         self.paid_exit_price_msat_per_gb = state.paid_exit_seller.price_msat_per_gb.to_string();
+        self.paid_exit_country_code = state.paid_exit_seller.country_code.clone();
+        self.paid_exit_accepted_mints = state.paid_exit_seller.accepted_mints.join(", ");
         if let Some(network) = active_network(state) {
             self.network_name = display_network_name(network);
             self.mesh_id = display_network_id(&network.network_id);

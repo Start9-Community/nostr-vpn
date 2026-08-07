@@ -195,13 +195,7 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
     {
         let app = app.clone();
         country.connect_changed(move |entry| {
-            let normalized = entry
-                .text()
-                .chars()
-                .filter(char::is_ascii_alphabetic)
-                .take(2)
-                .collect::<String>()
-                .to_ascii_uppercase();
+            let normalized = normalize_paid_route_country_input(&entry.text());
             if entry.text() != normalized {
                 entry.set_text(&normalized);
             }
@@ -251,6 +245,15 @@ fn build_paid_route_filter(app: &AppRef, parent: &gtk::Box) {
     filter.append(&apply);
     filter.append(&clear);
     parent.append(&filter);
+}
+
+fn normalize_paid_route_country_input(value: &str) -> String {
+    value
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .take(2)
+        .collect::<String>()
+        .to_ascii_uppercase()
 }
 
 fn paid_route_offer_row(
@@ -487,6 +490,24 @@ fn paid_route_session_row(
     parent.append(&row);
 }
 
+const PAID_EXIT_PRICE_ERROR: &str = "Price must be a whole number in msat/GB.";
+
+fn paid_exit_seller_settings_patch(drafts: &Drafts) -> Result<SettingsPatch, &'static str> {
+    let price = drafts
+        .paid_exit_price_msat_per_gb
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| PAID_EXIT_PRICE_ERROR)?;
+    Ok(SettingsPatch {
+        paid_exit_price_msat_per_gb: Some(price),
+        paid_exit_country_code: Some(normalize_paid_route_country_input(
+            &drafts.paid_exit_country_code,
+        )),
+        paid_exit_accepted_mints: Some(drafts.paid_exit_accepted_mints.clone()),
+        ..SettingsPatch::default()
+    })
+}
+
 fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     let seller = &state.paid_exit_seller;
     let seller_card = card();
@@ -535,39 +556,89 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
         ),
     );
     let price_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    price_row.set_valign(gtk::Align::Center);
+    price_row.append(&gtk::Label::new(Some("Price (msat/GB)")));
     let price = entry(
-        "Price (msat/GB)",
+        "0",
         &app.borrow().drafts.paid_exit_price_msat_per_gb,
     );
-    price.set_hexpand(true);
-    {
-        let app = app.clone();
-        price.connect_changed(move |entry| {
-            app.borrow_mut().drafts.paid_exit_price_msat_per_gb = entry.text().to_string();
-        });
-    }
     price_row.append(&price);
-    let save_price = icon_text_button("Save price", "document-save-symbolic");
+    price_row.append(&gtk::Label::new(Some("Country")));
+    let country = entry("2-letter code", &app.borrow().drafts.paid_exit_country_code);
+    country.set_max_length(2);
+    country.set_hexpand(false);
+    country.set_width_chars(4);
+    price_row.append(&country);
+    seller_card.append(&price_row);
+
+    let mints_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    mints_row.set_valign(gtk::Align::Center);
+    mints_row.append(&gtk::Label::new(Some("Accepted mints")));
+    let mints = entry(
+        "Mint URLs, comma-separated",
+        &app.borrow().drafts.paid_exit_accepted_mints,
+    );
+    mints_row.append(&mints);
+    seller_card.append(&mints_row);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_valign(gtk::Align::Center);
+    let save = icon_text_button("Save", "document-save-symbolic");
+    let price_error = gtk::Label::new(Some(PAID_EXIT_PRICE_ERROR));
+    price_error.add_css_class("caption");
+    price_error.add_css_class("warning");
+    let price_valid = paid_exit_seller_settings_patch(&app.borrow().drafts).is_ok();
+    price_error.set_visible(!price_valid);
+    save.set_sensitive(price_valid);
     {
         let app = app.clone();
-        let price = price.clone();
-        save_price.connect_clicked(move |_| {
-            let Ok(value) = price.text().trim().parse::<u64>() else {
-                return;
+        let save = save.clone();
+        let price_error = price_error.clone();
+        price.connect_changed(move |entry| {
+            let valid = {
+                let mut model = app.borrow_mut();
+                model.drafts.paid_exit_price_msat_per_gb = entry.text().to_string();
+                paid_exit_seller_settings_patch(&model.drafts).is_ok()
             };
-            dispatch(
-                &app,
-                NativeAppAction::UpdateSettings {
-                    patch: SettingsPatch {
-                        paid_exit_price_msat_per_gb: Some(value),
-                        ..SettingsPatch::default()
-                    },
-                },
-            );
+            save.set_sensitive(valid);
+            price_error.set_visible(!valid);
         });
     }
-    price_row.append(&save_price);
-    seller_card.append(&price_row);
+    {
+        let app = app.clone();
+        country.connect_changed(move |entry| {
+            let normalized = normalize_paid_route_country_input(&entry.text());
+            if entry.text() != normalized {
+                entry.set_text(&normalized);
+            }
+            app.borrow_mut().drafts.paid_exit_country_code = normalized;
+        });
+    }
+    {
+        let app = app.clone();
+        mints.connect_changed(move |entry| {
+            app.borrow_mut().drafts.paid_exit_accepted_mints = entry.text().to_string();
+        });
+    }
+    {
+        let app = app.clone();
+        let price_error = price_error.clone();
+        save.connect_clicked(move |_| {
+            let patch = paid_exit_seller_settings_patch(&app.borrow().drafts);
+            match patch {
+                Ok(patch) => {
+                    dispatch(&app, NativeAppAction::UpdateSettings { patch });
+                }
+                Err(error) => {
+                    price_error.set_text(error);
+                    price_error.set_visible(true);
+                }
+            }
+        });
+    }
+    actions.append(&save);
+    actions.append(&price_error);
+    seller_card.append(&actions);
     detail_row(&seller_card, "Paid exit link", &seller.provider_link);
     detail_row(
         &seller_card,

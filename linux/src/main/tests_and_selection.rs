@@ -144,6 +144,47 @@ mod tests {
         assert!(manual_participant_added(&state, "home", npub));
     }
 
+    #[test]
+    fn paid_exit_seller_drafts_build_one_validated_settings_patch() {
+        assert_eq!(normalize_paid_route_country_input("f!iX"), "FI");
+        assert_eq!(normalize_paid_route_country_input("12"), "");
+
+        let state = NativeAppState {
+            paid_exit_seller: NativePaidExitSellerState {
+                price_msat_per_gb: 25_000,
+                country_code: "FI".to_string(),
+                accepted_mints: vec![
+                    "https://mint-a.example".to_string(),
+                    "https://mint-b.example".to_string(),
+                ],
+                ..NativePaidExitSellerState::default()
+            },
+            ..NativeAppState::default()
+        };
+        let mut drafts = Drafts::default();
+        drafts.sync_from_state(&state);
+
+        assert_eq!(drafts.paid_exit_price_msat_per_gb, "25000");
+        assert_eq!(drafts.paid_exit_country_code, "FI");
+        assert_eq!(
+            drafts.paid_exit_accepted_mints,
+            "https://mint-a.example, https://mint-b.example"
+        );
+        let patch = paid_exit_seller_settings_patch(&drafts).expect("valid seller settings");
+        assert_eq!(patch.paid_exit_price_msat_per_gb, Some(25_000));
+        assert_eq!(patch.paid_exit_country_code.as_deref(), Some("FI"));
+        assert_eq!(
+            patch.paid_exit_accepted_mints.as_deref(),
+            Some("https://mint-a.example, https://mint-b.example")
+        );
+
+        drafts.paid_exit_price_msat_per_gb = "2.5".to_string();
+        assert_eq!(
+            paid_exit_seller_settings_patch(&drafts),
+            Err(PAID_EXIT_PRICE_ERROR)
+        );
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn resolves_debug_network_ids_to_internal_ids() {
