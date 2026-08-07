@@ -1,13 +1,60 @@
     #[cfg(feature = "paid-exit")]
+    fn approve_manual_provider_mint(
+        runtime: &mut NativeAppRuntime,
+        seller_npub: &str,
+        offer_config: &nostr_vpn_core::paid_routes::PaidExitConfig,
+        store_path: &Path,
+    ) -> nostr_vpn_core::paid_route_store::PaidRouteStore {
+        use nostr_vpn_core::paid_route_store::{load_paid_route_store, write_paid_route_store};
+        use nostr_vpn_core::paid_routes::ManualPaidExitProvider;
+
+        runtime.dispatch(NativeAppAction::SetManualPaidExitProvider {
+            provider: seller_npub.to_string(),
+        });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert_eq!(runtime.config.manual_paid_exit_provider.npub, seller_npub);
+        assert!(runtime.config.manual_paid_exit_provider.mint.is_empty());
+        assert!(
+            load_paid_route_store(store_path)
+                .expect("load wallet after bare npub")
+                .wallet
+                .mints
+                .is_empty(),
+            "a bare provider npub must not approve a mint"
+        );
+
+        let provider_link = ManualPaidExitProvider::seller_link(seller_npub, offer_config)
+            .expect("seller link");
+        runtime.dispatch(NativeAppAction::SetManualPaidExitProvider {
+            provider: provider_link.clone(),
+        });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        let mut store = load_paid_route_store(store_path).expect("load approved wallet mint");
+        assert_eq!(store.wallet.mints.len(), 1);
+
+        store.wallet.mints[0].label = "Minibits".to_string();
+        store.wallet.mints[0].balance_msat = Some(7_000);
+        store.wallet.mints[0].last_checked_unix = 123;
+        write_paid_route_store(store_path, &store).expect("persist wallet metadata");
+        runtime.dispatch(NativeAppAction::SetManualPaidExitProvider {
+            provider: provider_link,
+        });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        let store = load_paid_route_store(store_path).expect("reload approved wallet mint");
+        assert_eq!(store.wallet.mints[0].label, "Minibits");
+        assert_eq!(store.wallet.mints[0].balance_msat, Some(7_000));
+        assert_eq!(store.wallet.mints[0].last_checked_unix, 123);
+        store
+    }
+
+    #[cfg(feature = "paid-exit")]
     #[test]
     fn gui_buy_paid_route_offer_selects_and_activates_the_exit_route() {
         use nostr_vpn_core::paid_route_store::{
-            PaidRouteStore, load_paid_route_store, paid_route_offer_store_key,
-            paid_route_store_file_path, write_paid_route_store,
+            load_paid_route_store, paid_route_offer_store_key, paid_route_store_file_path,
+            write_paid_route_store,
         };
-        use nostr_vpn_core::paid_routes::{
-            PaidExitConfig, signed_paid_exit_offer_from_config,
-        };
+        use nostr_vpn_core::paid_routes::{PaidExitConfig, signed_paid_exit_offer_from_config};
 
         let dir = unique_service_test_dir("nvpn-app-core-paid-route-buy");
         let error = anyhow!("test runtime");
@@ -38,8 +85,10 @@
         )
         .expect("sign offer");
         let store_path = paid_route_store_file_path(&runtime.config_path);
-        let mut store = PaidRouteStore::default();
-        store.upsert_wallet_mint(mint, "Minibits", Some(0), unix_timestamp());
+        let mut store =
+            approve_manual_provider_mint(&mut runtime, &seller_npub, &offer_config, &store_path);
+        assert_eq!(store.wallet.mints[0].url, mint);
+
         store
             .upsert_signed_offer(signed, vec!["wss://relay.example".to_string()], unix_timestamp())
             .expect("store offer");

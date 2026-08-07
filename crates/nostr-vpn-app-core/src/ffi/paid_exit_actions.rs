@@ -125,7 +125,24 @@ impl NativeAppRuntime {
     ) -> Result<()> {
         let url = normalize_paid_route_mint_url(url)?;
         self.mutate_paid_route_store(|store| {
-            store.upsert_wallet_mint(&url, label.unwrap_or_default(), None, unix_timestamp())
+            let default_changed = if store.wallet.default_mint.trim().is_empty() {
+                store.wallet.default_mint.clone_from(&url);
+                true
+            } else {
+                false
+            };
+            if let Some(existing) = store.wallet.mints.iter_mut().find(|mint| mint.url == url) {
+                let Some(label) = label.map(str::trim) else {
+                    return default_changed;
+                };
+                if existing.label == label {
+                    return default_changed;
+                }
+                existing.label = label.to_string();
+                true
+            } else {
+                store.upsert_wallet_mint(&url, label.unwrap_or_default(), None, unix_timestamp())
+            }
         })
     }
 
