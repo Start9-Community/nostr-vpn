@@ -78,6 +78,9 @@ trait LinuxNetworkCleanupActions {
     fn restore_original_ipv6_default(&mut self);
     fn ipv4_default_restore_pending(&self) -> bool;
     fn ipv6_default_restore_pending(&self) -> bool;
+    fn wait_before_default_restore_retry(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     fn flush_route_cache(&mut self) -> anyhow::Result<()>;
 }
 
@@ -108,12 +111,6 @@ fn cleanup_linux_network_state_with_actions(
     // NetworkManager default after an underlay switch.
     actions.restore_original_ipv4_default();
     actions.restore_original_ipv6_default();
-    if actions.ipv4_default_restore_pending() {
-        failures.push("failed to restore original IPv4 default route".to_string());
-    }
-    if actions.ipv6_default_restore_pending() {
-        failures.push("failed to restore original IPv6 default route".to_string());
-    }
 
     let mut forwarding_cleanup_error = None;
     for _ in 0..LINUX_NETWORK_CLEANUP_ATTEMPTS {
@@ -129,6 +126,37 @@ fn cleanup_linux_network_state_with_actions(
         failures.push(format!(
             "forwarding/WireGuard cleanup failed after three attempts: {error:#}"
         ));
+    }
+
+    // WireGuard cleanup can restore a usable journaled underlay after the
+    // saved route became invalid. Recheck against that post-cleanup state.
+    for attempt in 0..LINUX_NETWORK_CLEANUP_ATTEMPTS {
+        if !actions.ipv4_default_restore_pending() {
+            break;
+        }
+        actions.restore_original_ipv4_default();
+        if actions.ipv4_default_restore_pending()
+            && attempt + 1 < LINUX_NETWORK_CLEANUP_ATTEMPTS
+        {
+            actions.wait_before_default_restore_retry();
+        }
+    }
+    for attempt in 0..LINUX_NETWORK_CLEANUP_ATTEMPTS {
+        if !actions.ipv6_default_restore_pending() {
+            break;
+        }
+        actions.restore_original_ipv6_default();
+        if actions.ipv6_default_restore_pending()
+            && attempt + 1 < LINUX_NETWORK_CLEANUP_ATTEMPTS
+        {
+            actions.wait_before_default_restore_retry();
+        }
+    }
+    if actions.ipv4_default_restore_pending() {
+        failures.push("failed to restore original IPv4 default route".to_string());
+    }
+    if actions.ipv6_default_restore_pending() {
+        failures.push("failed to restore original IPv6 default route".to_string());
     }
 
     if let Err(error) = actions.flush_route_cache() {

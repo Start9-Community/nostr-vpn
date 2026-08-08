@@ -2,6 +2,8 @@
     struct FakeLinuxNetworkCleanupActions {
         events: Vec<&'static str>,
         forwarding_failures_remaining: usize,
+        ipv4_restore_unblocked_by_forwarding_cleanup: bool,
+        ipv4_restore_failures_remaining: usize,
         ipv4_restore_pending: bool,
         ipv6_restore_pending: bool,
         fail_route_cache_flush: bool,
@@ -19,12 +21,19 @@
                 self.forwarding_failures_remaining -= 1;
                 return Err(anyhow::anyhow!("synthetic forwarding cleanup failure"));
             }
+            if self.ipv4_restore_unblocked_by_forwarding_cleanup {
+                self.ipv4_restore_failures_remaining = 0;
+            }
             Ok(())
         }
 
         fn restore_original_ipv4_default(&mut self) {
             self.events.push("restore-ipv4");
-            self.ipv4_restore_pending = false;
+            if self.ipv4_restore_failures_remaining > 0 {
+                self.ipv4_restore_failures_remaining -= 1;
+            } else {
+                self.ipv4_restore_pending = false;
+            }
         }
 
         fn restore_original_ipv6_default(&mut self) {
@@ -38,6 +47,10 @@
 
         fn ipv6_default_restore_pending(&self) -> bool {
             self.ipv6_restore_pending
+        }
+
+        fn wait_before_default_restore_retry(&mut self) {
+            self.events.push("wait-default-restore");
         }
 
         fn flush_route_cache(&mut self) -> anyhow::Result<()> {
@@ -57,6 +70,7 @@
     fn linux_cleanup_restores_defaults_after_forwarding_cleanup_exhausts_retries() {
         let mut actions = FakeLinuxNetworkCleanupActions {
             forwarding_failures_remaining: 3,
+            ipv4_restore_failures_remaining: 1,
             ipv4_restore_pending: true,
             ipv6_restore_pending: true,
             fail_route_cache_flush: true,
@@ -75,6 +89,7 @@
                 "forwarding-wireguard",
                 "forwarding-wireguard",
                 "forwarding-wireguard",
+                "restore-ipv4",
                 "flush-route-cache",
             ]
         );
@@ -83,6 +98,65 @@
         let message = format!("{error:#}");
         assert!(message.contains("forwarding/WireGuard cleanup failed after three attempts"));
         assert!(message.contains("synthetic route cache flush failure"));
+    }
+
+    #[test]
+    fn linux_cleanup_rechecks_default_after_forwarding_restores_alternate() {
+        let mut actions = FakeLinuxNetworkCleanupActions {
+            ipv4_restore_unblocked_by_forwarding_cleanup: true,
+            ipv4_restore_failures_remaining: usize::MAX,
+            ipv4_restore_pending: true,
+            ..FakeLinuxNetworkCleanupActions::default()
+        };
+
+        super::cleanup_linux_network_state_with_actions(&mut actions)
+            .expect("post-WireGuard secondary default completes saved-route cleanup");
+
+        assert_eq!(
+            actions.events,
+            vec![
+                "endpoint",
+                "restore-ipv4",
+                "restore-ipv6",
+                "forwarding-wireguard",
+                "restore-ipv4",
+                "flush-route-cache",
+            ]
+        );
+        assert!(!actions.ipv4_restore_pending);
+    }
+
+    #[test]
+    fn linux_cleanup_bounds_default_restore_retries() {
+        let mut actions = FakeLinuxNetworkCleanupActions {
+            ipv4_restore_failures_remaining: usize::MAX,
+            ipv4_restore_pending: true,
+            ..FakeLinuxNetworkCleanupActions::default()
+        };
+
+        let error = super::cleanup_linux_network_state_with_actions(&mut actions)
+            .expect_err("persistent default-route failure remains reportable");
+
+        assert_eq!(
+            actions
+                .events
+                .iter()
+                .filter(|event| **event == "restore-ipv4")
+                .count(),
+            super::LINUX_NETWORK_CLEANUP_ATTEMPTS + 1
+        );
+        assert_eq!(
+            actions
+                .events
+                .iter()
+                .filter(|event| **event == "wait-default-restore")
+                .count(),
+            super::LINUX_NETWORK_CLEANUP_ATTEMPTS - 1
+        );
+        assert!(actions.ipv4_restore_pending);
+        assert!(
+            format!("{error:#}").contains("failed to restore original IPv4 default route")
+        );
     }
 
     #[cfg(target_os = "linux")]

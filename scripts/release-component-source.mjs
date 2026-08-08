@@ -117,6 +117,9 @@ function isProductInput(path, platform) {
     )
   ) return false
   if (path.startsWith('crates/nostr-vpn-cli/')) {
+    if (path === 'crates/nostr-vpn-cli/src/fips_private_mesh/linux_cleanup.rs') {
+      return platform === 'linux'
+    }
     if (
       path === 'crates/nostr-vpn-cli/src/wireguard_exit.rs'
       || path.startsWith('crates/nostr-vpn-cli/src/wireguard_exit/')
