@@ -61,7 +61,8 @@ impl LinuxWireGuardExitRuntime {
     }
 
     pub(crate) fn underlay_default_route_hints(&self) -> &[String] {
-        &self.previous_main_default_routes
+        // The full default-route set is cleanup history, not live selection state.
+        self.previous_default_route.as_slice()
     }
 
     pub(crate) fn underlay_default_route_for_interface(

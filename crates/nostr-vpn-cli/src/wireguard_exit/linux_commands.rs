@@ -695,22 +695,6 @@ pub(super) fn restore_linux_main_default_snapshot(
         &strings(&["-4", "route", "del", "default", "dev", iface]),
     )
     .context("failed to remove managed WireGuard default route")?;
-    let current =
-        command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
-    let has_live_physical_default = crate::linux_default_route_specs_from_output(&current)
-        .any(|route| route.dev != iface && runner.ipv4_default_route_is_usable(&route));
-    if has_live_physical_default {
-        let managed_interface_snapshot = routes
-            .iter()
-            .filter(|route| {
-                crate::linux_default_route_spec_from_line(route)
-                    .is_some_and(|route| route.dev == iface)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        return restore_linux_route_snapshot(runner, &managed_interface_snapshot, None)
-            .context("failed to restore preexisting defaults on the managed WireGuard interface");
-    }
     let usable_routes = routes
         .iter()
         .filter(|route| {

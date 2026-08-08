@@ -105,12 +105,12 @@ fn refreshed_underlay_details_replace_only_the_same_interface() {
 }
 
 #[test]
-fn new_underlay_is_cached_without_losing_switch_back_route() {
+fn new_underlay_is_cached_and_switch_back_survives_reapply() {
     let _guard = lock_tests();
     let mut runner = FakeRunner::existing();
     let initial_defaults = runner.state.main_routes.clone();
     let primary = initial_defaults[0].clone();
-    let new_underlay = "default via 10.42.0.1 dev wlan0 src 10.42.0.20 metric 700".to_string();
+    let new_underlay = "default via 10.42.0.1 dev wlan0 src 10.42.0.20 metric 5".to_string();
     let mut runtime = apply_linux_wireguard_exit_upstream_with(
         &mut runner,
         &config(),
@@ -148,7 +148,7 @@ fn new_underlay_is_cached_without_losing_switch_back_route() {
     );
 
     runtime.refresh_underlay_default_route(primary.clone());
-    let runtime = apply_linux_wireguard_exit_upstream_with(
+    let mut runtime = apply_linux_wireguard_exit_upstream_with(
         &mut runner,
         &config(),
         "10.44.0.0/16",
@@ -157,23 +157,51 @@ fn new_underlay_is_cached_without_losing_switch_back_route() {
     )
     .expect("switch back to original underlay");
     assert_eq!(
-        runtime.previous_default_route.as_deref(),
-        Some(primary.as_str())
+        runtime.underlay_default_route_hints(),
+        std::slice::from_ref(&primary),
+        "only the active primary may feed later route selection"
     );
-    assert!(
-        initial_defaults
-            .iter()
-            .chain(std::iter::once(&new_underlay))
-            .all(|route| runtime.previous_main_default_routes.contains(route)),
-        "switch-back must not forget any captured physical default"
+    for _ in 0..2 {
+        let hint = lowest_metric_default_route(
+            &runtime.underlay_default_route_hints().join("\n"),
+        )
+        .map(|(route, _)| route)
+        .expect("active underlay hint");
+        runtime = apply_linux_wireguard_exit_upstream_with(
+            &mut runner,
+            &config(),
+            "10.44.0.0/16",
+            Some(&runtime),
+            Some(&hint),
+        )
+        .expect("repeated WireGuard/DNS reapply");
+    }
+    assert_eq!(
+        runner.state.endpoint_routes["198.51.100.20/32"],
+        vec!["198.51.100.20/32 via 192.0.2.1 dev eth0 src 192.0.2.10".to_string()]
     );
+    for route in initial_defaults
+        .iter()
+        .chain(std::iter::once(&new_underlay))
+    {
+        assert_eq!(
+            runtime
+                .previous_main_default_routes
+                .iter()
+                .filter(|candidate| *candidate == route)
+                .count(),
+            1,
+            "every captured physical default must remain exactly once in the cleanup journal"
+        );
+    }
 }
 
 #[test]
-fn cleanup_removes_exact_managed_default_when_a_new_physical_default_is_live() {
+fn failed_reapply_cleanup_preserves_new_and_restores_usable_defaults() {
     let _guard = lock_tests();
     let mut runner = FakeRunner::existing();
-    let runtime = apply_linux_wireguard_exit_upstream_with(
+    let saved_defaults = runner.state.main_routes.clone();
+    let mut runtime = apply_linux_wireguard_exit_upstream_with(
         &mut runner,
         &config(),
         "10.44.0.0/16",
@@ -181,17 +209,32 @@ fn cleanup_removes_exact_managed_default_when_a_new_physical_default_is_live() {
         Some("default via 192.0.2.1 dev eth0 src 192.0.2.10 metric 10"),
     )
     .expect("apply");
+    runtime.refresh_underlay_default_route(
+        "default via 10.42.0.1 dev wlan0 src 10.42.0.20 metric 5".to_string(),
+    );
     let fresh_physical = "default via 198.51.100.1 dev eth2 src 198.51.100.42".to_string();
+    runner.fail_route_cache_once = true;
+    apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        Some(&runtime),
+        runtime.previous_default_route.as_deref(),
+    )
+    .expect_err("failed reapply rolls back before runtime cleanup");
     runner.state.main_routes.insert(0, fresh_physical.clone());
+    runner.usable_default_interfaces.remove("wlan0");
 
     cleanup_linux_wireguard_exit_upstream_with(&mut runner, &runtime)
         .expect("cleanup after underlay handoff");
 
     assert_eq!(
         runner.state.main_routes,
-        vec![fresh_physical],
+        std::iter::once(fresh_physical)
+            .chain(saved_defaults)
+            .collect::<Vec<_>>(),
         "cleanup must delete the exact managed WG default, preserve the live physical route, \
-         and avoid resurrecting obsolete captured defaults"
+         and restore every captured default that is still usable"
     );
     assert!(
         runner.commands.iter().any(|(_, args)| {
@@ -201,7 +244,7 @@ fn cleanup_removes_exact_managed_default_when_a_new_physical_default_is_live() {
 }
 
 #[test]
-fn handoff_cleanup_preserves_preexisting_default_on_managed_interface() {
+fn handoff_cleanup_preserves_new_and_saved_defaults() {
     let _guard = lock_tests();
     let mut runner = FakeRunner::existing();
     let captured = vec![
@@ -219,8 +262,8 @@ fn handoff_cleanup_preserves_preexisting_default_on_managed_interface() {
 
     assert_eq!(
         runner.state.main_routes,
-        vec![fresh_physical, captured[1].clone()],
-        "fresh physical state must win without destroying a captured unowned WG default"
+        vec![fresh_physical, captured[0].clone(), captured[1].clone()],
+        "fresh physical state and all usable captured defaults must survive cleanup"
     );
 }
 
