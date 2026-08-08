@@ -20,6 +20,8 @@ pub struct DaemonRuntimeState {
     pub listen_port: u16,
     #[serde(default, alias = "paid_exit_seller_ready")]
     pub paid_exit_seller_ready: bool,
+    #[serde(default, alias = "wireguard_exit_ready")]
+    pub wireguard_exit_ready: bool,
     #[serde(alias = "vpn_enabled")]
     pub vpn_enabled: bool,
     #[serde(alias = "vpn_active")]

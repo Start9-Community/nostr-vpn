@@ -184,6 +184,7 @@ extension RootView {
                 }
                 paidExitFormRow("Mint") {
                     TextField("https://mint.minibits.cash/Bitcoin", text: $paidExitAcceptedMints)
+                        .accessibilityIdentifier("paid-exit-accepted-mints")
                 }
             }
         }
@@ -247,8 +248,6 @@ extension RootView {
         surface {
             HStack(spacing: 12) {
                 sectionHeader("Customers", systemImage: "person.2.fill")
-                Spacer(minLength: 16)
-                paidExitSellerPaymentsButton
             }
             paidRoutePaymentActionResult(state.paidRouteMarket.lastPaymentAction)
             if !state.paidExitSeller.sessions.isEmpty || !state.paidExitSeller.channels.isEmpty {
@@ -299,45 +298,41 @@ extension RootView {
     }
 
     var paidExitSellerActionButtons: some View {
-        HStack(spacing: 8) {
-            paidExitSellerSaveButton
-            paidExitSellerPaymentsButton
-        }
+        paidExitSellerSaveButton
     }
 
     var paidExitSellerSaveButton: some View {
-        Button {
-            NSApp.keyWindow?.makeFirstResponder(nil)
-            DispatchQueue.main.async {
-                manager.savePaidExitSellerSettings(
-                    upstream: paidExitCurrentUpstream,
-                    priceMsatPerGb: paidExitPriceMsatPerGb,
-                    acceptedMints: paidExitAcceptedMints,
-                    maxChannelCapacitySat: paidExitMaxChannelCapacitySat,
-                    channelExpirySecs: paidExitChannelExpirySecs,
-                    freeProbeUnits: paidExitFreeProbeUnits,
-                    graceUnits: paidExitGraceUnits,
-                    countryCode: paidExitCountryCode,
-                    asn: paidExitAsn
-                )
-            }
+        let upstream = paidExitCurrentUpstream
+        let priceMsatPerGb = paidExitPriceMsatPerGb
+        let acceptedMints = paidExitAcceptedMints
+        let maxChannelCapacitySat = paidExitMaxChannelCapacitySat
+        let channelExpirySecs = paidExitChannelExpirySecs
+        let freeProbeUnits = paidExitFreeProbeUnits
+        let graceUnits = paidExitGraceUnits
+        let countryCode = paidExitCountryCode
+        let asn = paidExitAsn
+
+        return Button {
+            manager.savePaidExitSellerSettings(
+                upstream: upstream,
+                priceMsatPerGb: priceMsatPerGb,
+                acceptedMints: acceptedMints,
+                maxChannelCapacitySat: maxChannelCapacitySat,
+                channelExpirySecs: channelExpirySecs,
+                freeProbeUnits: freeProbeUnits,
+                graceUnits: graceUnits,
+                countryCode: countryCode,
+                asn: asn
+            )
         } label: {
             Label("Save", systemImage: "checkmark")
         }
+        .accessibilityIdentifier("paid-exit-seller-save")
         .disabled(manager.actionInFlight || !paidExitPriceIsValid)
     }
 
     var paidExitPriceIsValid: Bool {
         UInt64(paidExitPriceMsatPerGb.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
-    }
-
-    var paidExitSellerPaymentsButton: some View {
-        Button {
-            manager.receivePaidRoutePayments()
-        } label: {
-            Label("Payments", systemImage: "tray.and.arrow.down.fill")
-        }
-        .disabled(manager.actionInFlight || !state.paidExitSeller.enabled)
     }
 
     func paidExitSellerSessionRow(_ session: NativePaidRouteSessionState) -> some View {
@@ -367,7 +362,7 @@ extension RootView {
                         Label(paidExitSellerCollectButtonTitle(session), systemImage: paidExitSellerCollectButtonIcon(session))
                     }
                     .controlSize(.small)
-                    .disabled(manager.actionInFlight || !state.paidExitSeller.enabled)
+                    .disabled(manager.actionInFlight)
                     .help(paidExitSellerCollectButtonHelp(session))
                 }
                 Text(fallbackText(session.paidText, "\(formatPaidRouteMsat(session.paidMsat)) paid"))

@@ -160,6 +160,29 @@ impl MobileTunnel {
         // the OS tun.
         let mesh_ipv4 = parse_ipv4(&config.local_address);
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+
+        #[cfg(feature = "paid-exit")]
+        if let Some(store_path) = private_state_config_path
+            .as_deref()
+            .map(nostr_vpn_core::paid_route_store::paid_route_store_file_path)
+        {
+            let provider = app_config
+                .read()
+                .map_err(|_| anyhow!("mobile app config lock poisoned"))?
+                .manual_paid_exit_provider
+                .clone();
+            if !provider.is_default() {
+                let endpoint = Arc::clone(&endpoint);
+                tasks.push(tokio::spawn(async move {
+                    if let Err(error) =
+                        import_mobile_manual_paid_exit_offer(endpoint, provider, store_path).await
+                    {
+                        tracing::warn!(?error, "mobile: manual paid exit offer import stopped");
+                    }
+                }));
+            }
+        }
+
         let mut wg_runtime: Option<WgUpstreamRuntime> = None;
         let mut wg_send_tx: Option<tokio_mpsc::Sender<Vec<Vec<u8>>>> = None;
         #[cfg(target_os = "android")]
@@ -390,6 +413,9 @@ impl MobileTunnel {
             let status_config = Arc::clone(&config_state);
             let status_tun_counters = Arc::clone(&tun_counters);
             let status_secure_dns = secure_dns.clone();
+            let status_wireguard_handshake = wg_runtime
+                .as_ref()
+                .map(WgUpstreamRuntime::handshake_observer);
             tasks.push(tokio::spawn(async move {
                 loop {
                     if let Err(error) = persist_mobile_runtime_state(
@@ -399,7 +425,10 @@ impl MobileTunnel {
                         &presence,
                         &status_config,
                         &status_tun_counters,
-                        status_secure_dns.as_ref(),
+                        MobileRuntimeDiagnostics {
+                            secure_dns: status_secure_dns.as_ref(),
+                            wireguard_handshake: status_wireguard_handshake.as_ref(),
+                        },
                     )
                     .await
                     {
@@ -712,6 +741,10 @@ impl MobileTunnel {
     pub(crate) fn runtime_state_json(&self) -> Result<String> {
         let tun_counters = self.tun_counters.snapshot();
         let secure_dns_counters = self.secure_dns.as_ref().map(SecureDnsResolver::counters);
+        let wireguard_exit_ready = self
+            .wg_upstream
+            .as_ref()
+            .is_some_and(|runtime| runtime.handshake_observer().has_completed_handshake());
 
         let endpoint = self
             .endpoint
@@ -753,6 +786,7 @@ impl MobileTunnel {
                 state.secure_dns_successes = counters.successes;
                 state.secure_dns_failures = counters.failures;
             }
+            state.wireguard_exit_ready = wireguard_exit_ready;
             serde_json::to_string(&state).context("serialize mobile runtime state")
         })
     }

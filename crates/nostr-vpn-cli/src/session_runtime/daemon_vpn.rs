@@ -54,6 +54,12 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
         mut fips_tunnel_runtime,
         mut last_fips_endpoint_peer_signature,
     } = startup;
+    #[cfg(feature = "paid-exit")]
+    if let Some(signer) = FileSpilmanPaymentSigner::try_load(&paid_exit_wallet_data_dir(&config_path))
+        .map_err(|error| anyhow!("{error}"))?
+    {
+        drop(signer);
+    }
     let DaemonVpnLoopState {
         mut vpn_status,
         mut last_log_compact_check,

@@ -123,47 +123,52 @@ pub(crate) fn paid_exit_stream_due_payments_for_daemon(
         .to_bech32()
         .context("failed to encode buyer npub")?;
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let now_unix = unix_timestamp();
-    let mut due = store.buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
-        now_unix,
-        min_increment_msat,
-    });
+    let due = load_paid_route_store(&store_path)?.buyer_payment_updates_due(
+        PaidRouteBuyerPaymentUpdatesDueRequest {
+            now_unix,
+            min_increment_msat,
+        },
+    );
     let total_due_count = due.len();
-    if limit > 0 && due.len() > limit {
-        due.truncate(limit);
-    }
-    let processed_due_count = due.len();
     if due.is_empty() {
-        return Ok(PaidExitDaemonStreamPaymentsResult {
-            total_due_count,
-            processed_due_count,
-            ..Default::default()
-        });
+        return Ok(PaidExitDaemonStreamPaymentsResult::default());
     }
-    let Some(_client_store_guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
+    let Some(signer) = FileSpilmanPaymentSigner::try_load(&paid_exit_wallet_data_dir(config_path))
+        .map_err(|error| anyhow!("{error}"))?
+    else {
         return Ok(PaidExitDaemonStreamPaymentsResult {
             total_due_count,
             ..Default::default()
         });
     };
-    let signer = FileSpilmanPaymentSigner::load(&paid_exit_wallet_data_dir(config_path))
-        .map_err(|error| anyhow!("{error}"))?;
-    let result = paid_exit_stream_payment_updates_with_signer(
-        PaidExitStreamPaymentUpdatesRequest {
-            app,
-            config_path,
-            store: &mut store,
-            signer: &signer,
-            buyer_npub: &buyer_npub,
-            due,
-            queue: true,
-            now_unix,
-        },
-    );
-    if result.changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
+    let (total_due_count, processed_due_count, result) =
+        update_paid_route_store(&store_path, |store| {
+            let mut due = store.buyer_payment_updates_due(
+                PaidRouteBuyerPaymentUpdatesDueRequest {
+                    now_unix,
+                    min_increment_msat,
+                },
+            );
+            let total_due_count = due.len();
+            if limit > 0 && due.len() > limit {
+                due.truncate(limit);
+            }
+            let processed_due_count = due.len();
+            let result = paid_exit_stream_payment_updates_with_signer(
+                PaidExitStreamPaymentUpdatesRequest {
+                    app,
+                    config_path,
+                    store,
+                    signer: &signer,
+                    buyer_npub: &buyer_npub,
+                    due,
+                    queue: true,
+                    now_unix,
+                },
+            );
+            Ok((total_due_count, processed_due_count, result))
+        })?;
 
     Ok(PaidExitDaemonStreamPaymentsResult {
         total_due_count,
@@ -184,41 +189,56 @@ async fn paid_exit_stream_payments_command(args: PaidExitStreamPaymentsArgs) -> 
         .to_bech32()
         .context("failed to encode buyer npub")?;
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let now_unix = unix_timestamp();
-    let mut due = store.buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
+    let mut due = load_paid_route_store(&store_path)?.buyer_payment_updates_due(
+        PaidRouteBuyerPaymentUpdatesDueRequest {
         now_unix,
         min_increment_msat: args.min_increment_msat,
-    });
+        },
+    );
     let total_due_count = due.len();
     if args.limit > 0 && due.len() > args.limit {
         due.truncate(args.limit);
     }
     let selected_due_count = due.len();
 
-    let result = if due.is_empty() {
-        PaidExitStreamPaymentUpdatesResult::default()
+    let (total_due_count, selected_due_count, result) = if due.is_empty() {
+        (
+            total_due_count,
+            selected_due_count,
+            PaidExitStreamPaymentUpdatesResult::default(),
+        )
     } else {
         let signer = FileSpilmanPaymentSigner::load(&paid_exit_wallet_data_dir(&config_path))
             .map_err(|error| anyhow!("{error}"))?;
-        paid_exit_stream_payment_updates_with_signer(
-            PaidExitStreamPaymentUpdatesRequest {
-                app: &app,
-                config_path: &config_path,
-                store: &mut store,
-                signer: &signer,
-                buyer_npub: &buyer_npub,
-                due,
-                queue: !args.dry_run,
-                now_unix,
-            },
-        )
+        update_paid_route_store(&store_path, |store| {
+            let mut due = store.buyer_payment_updates_due(
+                PaidRouteBuyerPaymentUpdatesDueRequest {
+                    now_unix,
+                    min_increment_msat: args.min_increment_msat,
+                },
+            );
+            let total_due_count = due.len();
+            if args.limit > 0 && due.len() > args.limit {
+                due.truncate(args.limit);
+            }
+            let selected_due_count = due.len();
+            let result = paid_exit_stream_payment_updates_with_signer(
+                PaidExitStreamPaymentUpdatesRequest {
+                    app: &app,
+                    config_path: &config_path,
+                    store,
+                    signer: &signer,
+                    buyer_npub: &buyer_npub,
+                    due,
+                    queue: !args.dry_run,
+                    now_unix,
+                },
+            );
+            Ok((total_due_count, selected_due_count, result))
+        })?
     };
     let changed = result.changed;
-
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
 
     if args.json {
         println!(

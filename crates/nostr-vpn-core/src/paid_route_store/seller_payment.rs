@@ -47,11 +47,6 @@ impl PaidRouteStore {
     where
         R: CashuSpilmanPaymentReceiver<C>,
     {
-        let mut config = request.config.clone();
-        config.normalize();
-        if !config.enabled {
-            return Err(anyhow!("paid exit selling is disabled"));
-        }
         let envelope = &request.envelope;
         if envelope.version != STREAMING_ROUTE_PAYMENT_PROTOCOL_VERSION {
             return Err(anyhow!(
@@ -160,9 +155,6 @@ impl PaidRouteStore {
     ) -> Result<ApplyPaidRouteSellerPaymentResult> {
         let mut config = request.config;
         config.normalize();
-        if !config.enabled {
-            return Err(anyhow!("paid exit selling is disabled"));
-        }
         let envelope = request.envelope;
         if envelope.version != STREAMING_ROUTE_PAYMENT_PROTOCOL_VERSION {
             return Err(anyhow!(
@@ -183,9 +175,12 @@ impl PaidRouteStore {
         let service_id = trimmed_required(&envelope.service_id, "paid route service id")?;
         let lease_id = trimmed_required(&envelope.lease_id, "paid route lease id")?;
         let channel_id = trimmed_required(envelope.channel_id(), "paid route channel id")?;
-        let config = self
-            .seller_payment_accepted_terms(&service_id, &lease_id, &channel_id, &buyer_npub)?
-            .unwrap_or(config);
+        let accepted_terms =
+            self.seller_payment_accepted_terms(&service_id, &lease_id, &channel_id, &buyer_npub)?;
+        if accepted_terms.is_none() && !config.enabled {
+            return Err(anyhow!("paid exit selling is disabled"));
+        }
+        let config = accepted_terms.unwrap_or(config);
         let payload_type = paid_route_payment_payload_type(&envelope.payload).to_string();
         let apply_context = SellerPaymentApplyContext {
             config: &config,

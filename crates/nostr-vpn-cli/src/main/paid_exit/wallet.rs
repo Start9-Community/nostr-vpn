@@ -16,18 +16,16 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let data_dir = paid_exit_wallet_data_dir(&config_path);
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let mut changed = false;
     let json_output = args.json;
 
     match args.command {
         PaidExitWalletCommand::Show(show) => {
             let overview = load_wallet_overview(&data_dir, show.refresh).await?;
-            changed |=
-                sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
-            if changed {
-                write_paid_route_store(&store_path, &store)?;
-            }
+            let (changed, store) = update_paid_route_store(&store_path, |store| {
+                let changed =
+                    sync_paid_exit_wallet_store_from_cashu(store, &overview, unix_timestamp());
+                Ok((changed, store.clone()))
+            })?;
             let activity = if show.activity {
                 Some(load_wallet_activity(&data_dir).await?)
             } else {
@@ -65,15 +63,18 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
                     }
                 }
             }
-            return Ok(());
+            Ok(())
         }
         PaidExitWalletCommand::Topup(topup) => {
-            let mint = paid_exit_wallet_mint(&store, topup.mint.as_deref())?;
+            let mint = paid_exit_wallet_mint(
+                &load_paid_route_store(&store_path)?,
+                topup.mint.as_deref(),
+            )?;
             let quote = create_topup_quote(&data_dir, &mint, topup.amount_sat).await?;
-            changed |= ensure_paid_exit_wallet_mint(&mut store, &quote.mint_url, None)?;
-            if changed {
-                write_paid_route_store(&store_path, &store)?;
-            }
+            let (changed, store) = update_paid_route_store(&store_path, |store| {
+                let changed = ensure_paid_exit_wallet_mint(store, &quote.mint_url, None)?;
+                Ok((changed, store.clone()))
+            })?;
 
             if json_output {
                 println!(
@@ -100,17 +101,17 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
                 println!("expires_at: {}", quote.expiry_unix);
                 println!("invoice: {}", quote.payment_request);
             }
-            return Ok(());
+            Ok(())
         }
         PaidExitWalletCommand::Receive(receive) => {
             let token = read_paid_exit_wallet_token(receive.token, receive.token_stdin)?;
             let payment = receive_payment_token(&data_dir, &token).await?;
             let overview = load_wallet_overview(&data_dir, false).await?;
-            changed |=
-                sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
-            if changed {
-                write_paid_route_store(&store_path, &store)?;
-            }
+            let (changed, store) = update_paid_route_store(&store_path, |store| {
+                let changed =
+                    sync_paid_exit_wallet_store_from_cashu(store, &overview, unix_timestamp());
+                Ok((changed, store.clone()))
+            })?;
 
             if json_output {
                 println!(
@@ -129,7 +130,7 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
                 println!("mint: {}", payment.mint_url);
                 println!("store: {} changed={changed}", store_path.display());
             }
-            return Ok(());
+            Ok(())
         }
         PaidExitWalletCommand::Inspect(inspect) => {
             let token = read_paid_exit_wallet_token(inspect.token, inspect.token_stdin)?;
@@ -146,17 +147,20 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
                 println!("state: {}", preview.state);
                 println!("status: {}", preview.status_text);
             }
-            return Ok(());
+            Ok(())
         }
         PaidExitWalletCommand::Send(send) => {
-            let mint = paid_exit_wallet_mint(&store, send.mint.as_deref())?;
+            let mint = paid_exit_wallet_mint(
+                &load_paid_route_store(&store_path)?,
+                send.mint.as_deref(),
+            )?;
             let payment = send_payment_token(&data_dir, &mint, send.amount_sat).await?;
             let overview = load_wallet_overview(&data_dir, false).await?;
-            changed |=
-                sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
-            if changed {
-                write_paid_route_store(&store_path, &store)?;
-            }
+            let (changed, store) = update_paid_route_store(&store_path, |store| {
+                let changed =
+                    sync_paid_exit_wallet_store_from_cashu(store, &overview, unix_timestamp());
+                Ok((changed, store.clone()))
+            })?;
 
             if json_output {
                 println!(
@@ -180,17 +184,20 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
                 println!("operation_id: {}", payment.operation_id);
                 println!("token: {}", payment.token);
             }
-            return Ok(());
+            Ok(())
         }
         PaidExitWalletCommand::Withdraw(withdraw) => {
-            let mint = paid_exit_wallet_mint(&store, withdraw.mint.as_deref())?;
+            let mint = paid_exit_wallet_mint(
+                &load_paid_route_store(&store_path)?,
+                withdraw.mint.as_deref(),
+            )?;
             let payment = send_lightning_payment(&data_dir, &mint, &withdraw.invoice).await?;
             let overview = load_wallet_overview(&data_dir, false).await?;
-            changed |=
-                sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
-            if changed {
-                write_paid_route_store(&store_path, &store)?;
-            }
+            let (changed, store) = update_paid_route_store(&store_path, |store| {
+                let changed =
+                    sync_paid_exit_wallet_store_from_cashu(store, &overview, unix_timestamp());
+                Ok((changed, store.clone()))
+            })?;
 
             if json_output {
                 println!(
@@ -214,43 +221,52 @@ async fn paid_exit_wallet_command(args: PaidExitWalletArgs) -> Result<()> {
                 println!("quote_id: {}", payment.quote_id);
                 println!("preimage: {}", payment.preimage);
             }
-            return Ok(());
+            Ok(())
         }
-        PaidExitWalletCommand::AddMint(add) => {
-            let url = normalize_mint_url(&add.url)?;
-            let label = add.label.unwrap_or_default();
-            changed |= store.upsert_wallet_mint(&url, label, add.balance_msat, unix_timestamp());
-            if add.make_default {
-                changed |= store.set_default_mint(&url);
+        command => {
+            let (changed, store) = update_paid_route_store(&store_path, |store| {
+                let mut changed = false;
+                match command {
+                    PaidExitWalletCommand::AddMint(add) => {
+                        let url = normalize_mint_url(&add.url)?;
+                        let label = add.label.unwrap_or_default();
+                        changed |= store.upsert_wallet_mint(
+                            &url,
+                            label,
+                            add.balance_msat,
+                            unix_timestamp(),
+                        );
+                        if add.make_default {
+                            changed |= store.set_default_mint(&url);
+                        }
+                    }
+                    PaidExitWalletCommand::RemoveMint(mint) => {
+                        changed |= store.remove_wallet_mint(normalize_mint_url(&mint.url)?);
+                    }
+                    PaidExitWalletCommand::SetDefault(mint) => {
+                        changed |= store.set_default_mint(normalize_mint_url(&mint.url)?);
+                    }
+                    _ => unreachable!("wallet action returned before transactional mutation"),
+                }
+                Ok((changed, store.clone()))
+            })?;
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "store_path": store_path.display().to_string(),
+                        "changed": changed,
+                        "wallet": store.wallet,
+                    }))?
+                );
+            } else {
+                println!("store: {} changed={changed}", store_path.display());
+                print_paid_exit_wallet(&store);
             }
-        }
-        PaidExitWalletCommand::RemoveMint(mint) => {
-            changed |= store.remove_wallet_mint(normalize_mint_url(&mint.url)?);
-        }
-        PaidExitWalletCommand::SetDefault(mint) => {
-            changed |= store.set_default_mint(normalize_mint_url(&mint.url)?);
+            Ok(())
         }
     }
-
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
-
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "store_path": store_path.display().to_string(),
-                "changed": changed,
-                "wallet": store.wallet,
-            }))?
-        );
-    } else {
-        println!("store: {} changed={changed}", store_path.display());
-        print_paid_exit_wallet(&store);
-    }
-
-    Ok(())
 }
 
 async fn inspect_paid_exit_wallet_token(token_text: &str) -> Result<PaidExitWalletTokenPreview> {

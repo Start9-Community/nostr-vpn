@@ -125,9 +125,6 @@ pub(crate) async fn update_automatic_paid_exit(
             && candidate.health_evidence_fresh(now_unix)
     });
     if fund {
-        let Some(_client_store_guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
-            return Ok(false);
-        };
         let session_id = automatic
             .candidate
             .as_ref()
@@ -183,17 +180,15 @@ fn record_automatic_paid_exit_probe(
     now_unix: u64,
 ) -> Result<()> {
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let result = store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
-        session_id: session_id.to_string(),
-        realized_exit_ip: measurement.realized_exit_ip,
-        observed_country_code: measurement.observed_country_code,
-        observed_asn: measurement.observed_asn,
-        quality: Some(measurement.quality),
-        now_unix,
-    })?;
-    if result.changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
-    Ok(())
+    update_paid_route_store(&store_path, |store| {
+        store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
+            session_id: session_id.to_string(),
+            realized_exit_ip: measurement.realized_exit_ip,
+            observed_country_code: measurement.observed_country_code,
+            observed_asn: measurement.observed_asn,
+            quality: Some(measurement.quality),
+            now_unix,
+        })?;
+        Ok(())
+    })
 }

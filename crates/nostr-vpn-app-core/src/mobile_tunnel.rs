@@ -71,6 +71,8 @@ include!("mobile_tunnel/endpoint_control.rs");
 include!("mobile_tunnel/runtime_state.rs");
 include!("mobile_tunnel/endpoint_config.rs");
 include!("mobile_tunnel/magic_dns.rs");
+#[cfg(feature = "paid-exit")]
+include!("mobile_tunnel/paid_exit_offer.rs");
 
 #[cfg(test)]
 mod tests {

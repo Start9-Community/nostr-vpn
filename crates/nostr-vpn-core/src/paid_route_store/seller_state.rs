@@ -93,9 +93,6 @@ impl PaidRouteStore {
         config: &PaidExitConfig,
         now_unix: u64,
     ) -> Vec<PaidRouteSellerCollectionState> {
-        if !config.enabled {
-            return Vec::new();
-        }
         let mut states = self
             .sessions
             .values()
@@ -117,9 +114,6 @@ impl PaidRouteStore {
         now_unix: u64,
         session_id: &str,
     ) -> Option<PaidRouteSellerCollectionState> {
-        if !config.enabled {
-            return None;
-        }
         self.sessions
             .get(session_id)
             .and_then(|record| self.seller_collection_state_for_record(config, now_unix, record))

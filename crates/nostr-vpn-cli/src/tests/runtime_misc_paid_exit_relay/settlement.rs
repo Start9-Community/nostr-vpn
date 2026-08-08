@@ -1,4 +1,129 @@
 #[cfg(feature = "paid-exit")]
+#[test]
+fn disabled_seller_keeps_existing_channel_control_transport_alive() {
+    use nostr_vpn_core::paid_route_store::{
+        PaidRouteChannelRecord, PaidRouteChannelRole, PaidRouteLifecycleStatus, PaidRouteStore,
+        update_paid_route_store,
+    };
+    use nostr_vpn_core::paid_routes::PaidExitConfig;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-paid-exit-disabled-settlement-{nonce}"));
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let config_path = dir.join("config.toml");
+
+    let mut app = AppConfig::generated();
+    app.fips_host_tunnel_enabled = false;
+    app.connect_to_non_roster_fips_peers = false;
+    app.paid_exit.enabled = false;
+    for network in &mut app.networks {
+        network.listen_for_join_requests = false;
+    }
+    assert!(!fips_private_runtime_active(&app, false, 0));
+
+    let buyer = Keys::generate();
+    let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
+    let mut accepted_terms = PaidExitConfig {
+        enabled: true,
+        ..PaidExitConfig::default()
+    };
+    accepted_terms.channel.accepted_mints = vec!["https://mint.example".to_string()];
+    let mut store = PaidRouteStore::default();
+    store.channels.insert(
+        "seller-channel-1".to_string(),
+        PaidRouteChannelRecord {
+            channel_id: "seller-channel-1".to_string(),
+            offer_id: "internet-exit".to_string(),
+            role: PaidRouteChannelRole::Seller,
+            status: PaidRouteLifecycleStatus::Active,
+            payment: Default::default(),
+            accepted_terms: Some(accepted_terms),
+            mint_url: "https://mint.example".to_string(),
+            counterparty_npub: buyer_npub.clone(),
+            created_at_unix: 100,
+            expires_at_unix: 500,
+            updated_at_unix: 100,
+            error: String::new(),
+        },
+    );
+    let store_path = paid_route_store_file_path(&config_path);
+    update_paid_route_store(&store_path, |target| {
+        *target = store.clone();
+        Ok(())
+    })
+    .expect("persist seller channel");
+
+    assert!(
+        fips_private_runtime_active_for_config(&app, &config_path, false, 0)
+            .expect("inspect seller settlement runtime"),
+        "an existing seller channel must keep its payment transport alive"
+    );
+
+    let network_id = app.effective_network_id();
+    let own_npub = app
+        .nostr_keys()
+        .expect("seller keys")
+        .public_key()
+        .to_bech32()
+        .expect("seller npub");
+    let own_pubkey = app.own_nostr_pubkey_hex().expect("seller pubkey");
+    let mut recent_peers = nostr_vpn_core::recent_peers::RecentPeerEndpoints::new(
+        own_npub,
+        nostr_vpn_core::recent_peers::recent_peers_scope(&network_id),
+    )
+    .expect("recent peers cache");
+    assert!(recent_peers.note_success(&buyer.public_key().to_hex(), "203.0.113.41:51821", 100));
+    let config = fips_tunnel_config_from_app(FipsTunnelConfigInput {
+        app: &app,
+        config_path: &config_path,
+        network_id: &network_id,
+        iface: "utun-test".to_string(),
+        underlay_interface: None,
+        underlay_interface_mtu: None,
+        own_pubkey: Some(&own_pubkey),
+        recent_peers: Some(&recent_peers),
+        live_peer_endpoints: &[],
+        ethernet_underlay: None,
+    })
+    .expect("build disabled seller settlement config");
+    let buyer_control_peer = config
+        .endpoint_peers
+        .iter()
+        .find(|peer| peer.npub == buyer_npub)
+        .expect("existing buyer remains a control peer");
+    assert!(buyer_control_peer.auto_reconnect);
+    assert!(config.paid_route_admissions.is_empty());
+    assert!(
+        config
+            .peers
+            .iter()
+            .all(|peer| peer.participant_pubkey != buyer.public_key().to_hex()),
+        "disabled selling must not restore buyer routing admission"
+    );
+
+    store
+        .channels
+        .get_mut("seller-channel-1")
+        .expect("seller channel")
+        .status = PaidRouteLifecycleStatus::Closed;
+    update_paid_route_store(&store_path, |target| {
+        *target = store;
+        Ok(())
+    })
+    .expect("persist closed seller channel");
+    assert!(
+        !fips_private_runtime_active_for_config(&app, &config_path, false, 0)
+            .expect("inspect closed seller runtime"),
+        "terminal seller channels must release an otherwise idle control runtime"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "paid-exit")]
 #[tokio::test]
 async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     use cashu_service::{CashuSpilmanPayment, CashuSpilmanPaymentSigner};
@@ -6,7 +131,7 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     use nostr_vpn_core::paid_route_store::{
         OpenPaidRouteBuyerSessionRequest, PaidRouteBuyerPaymentUpdatesDueRequest,
         PaidRouteLifecycleStatus, PaidRouteStore, RecordPaidRouteBuyerUsageRequest,
-        write_paid_route_store,
+        update_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{
         PaidExitConfig, PaidRouteUsage, signed_paid_exit_offer_from_config,
@@ -84,8 +209,11 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         now_unix: 128,
     })
     .expect("settle channel");
-    write_paid_route_store(&paid_route_store_file_path(&config_path), &store)
-        .expect("persist closing channel");
+    update_paid_route_store(&paid_route_store_file_path(&config_path), |target| {
+        *target = store.clone();
+        Ok(())
+    })
+    .expect("persist closing channel");
     let queued_payments = load_paid_exit_payment_outbox(&config_path);
     assert_eq!(queued_payments.len(), 1);
     let payment_id = queued_payments[0].id.clone();
@@ -140,7 +268,8 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
     );
     assert!(!fips_private_runtime_active(&app, false, 0));
     assert!(
-        fips_private_runtime_active_for_config(&app, &config_path, false, 0),
+        fips_private_runtime_active_for_config(&app, &config_path, false, 0)
+            .expect("inspect pending close runtime"),
         "queued cooperative close must keep its control transport alive"
     );
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
@@ -191,7 +320,8 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         "seller acknowledgment must remove the queued close"
     );
     assert!(
-        !fips_private_runtime_active_for_config(&app, &config_path, false, 0),
+        !fips_private_runtime_active_for_config(&app, &config_path, false, 0)
+            .expect("inspect acknowledged close runtime"),
         "idle direct mode must release the control runtime"
     );
 

@@ -156,10 +156,13 @@ impl FipsPrivateTunnelRuntime {
     pub(crate) fn requires_endpoint_restart(&self, config: &FipsPrivateTunnelConfig) -> bool {
         fips_tunnel_requires_endpoint_restart(&self.config, config)
     }
-    fn wireguard_exit_ready(&self) -> bool {
+    pub(crate) fn wireguard_exit_ready(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            self.exit_node_runtime.wireguard_exit.is_some()
+            self.exit_node_runtime
+                .wireguard_exit
+                .as_ref()
+                .is_some_and(crate::LinuxWireGuardExitRuntime::has_completed_handshake)
         }
         #[cfg(target_os = "macos")]
         {
@@ -217,6 +220,12 @@ impl FipsPrivateTunnelRuntime {
     }
 
     pub(crate) async fn refresh_peer_dependent_routes(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = self.exit_node_runtime.wireguard_exit.as_mut()
+            && let Err(error) = runtime.refresh_completed_handshake()
+        {
+            eprintln!("fips: failed to query WireGuard exit handshake: {error:#}");
+        }
         let statuses = self.mesh.peer_statuses();
         let exit_route_ready = fips_exit_route_ready(&self.config, &statuses);
         let seller_egress_ready = local_exit_seller_egress_ready(

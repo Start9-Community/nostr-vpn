@@ -173,7 +173,8 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     let mut port_mapping_runtime = PortMappingRuntime::default();
     let vpn_enabled = daemon_start_vpn_enabled(&app, args.paused);
     let (fips_tunnel_runtime, last_fips_endpoint_peer_signature) =
-        if fips_private_runtime_active_for_config(&app, &config_path, vpn_enabled, expected_peers) {
+        if fips_private_runtime_active_for_config(&app, &config_path, vpn_enabled, expected_peers)?
+        {
             let mut config = match fips_tunnel_config_from_app(FipsTunnelConfigInput {
                 app: &app,
                 config_path: &config_path,

@@ -144,8 +144,12 @@ fn paid_exit_import_offer_command(args: PaidExitImportOfferArgs) -> Result<()> {
 fn paid_exit_offer_event_is_live(
     event: &Event,
     retention_policy: &nostr_pubsub::EventRetentionPolicy,
+    seller: Option<&PublicKey>,
     now_unix: u64,
 ) -> bool {
+    if seller.is_some_and(|seller| &event.pubkey != seller) {
+        return false;
+    }
     nostr_pubsub::VerifiedEvent::try_from(event.clone())
         .is_ok_and(|verified| retention_policy.accepts(&verified))
         && SignedPaidRouteOffer::from_event(event.clone())
@@ -155,6 +159,7 @@ fn paid_exit_offer_event_is_live(
 async fn wait_for_paid_exit_control_events(
     config_path: &Path,
     retention_policy: &nostr_pubsub::EventRetentionPolicy,
+    seller: Option<&PublicKey>,
     duration_secs: u64,
 ) -> Result<Vec<Event>> {
     let deadline = Instant::now() + Duration::from_secs(duration_secs);
@@ -164,7 +169,14 @@ async fn wait_for_paid_exit_control_events(
     }
     let initial_offer_ids = events
         .iter()
-        .filter(|event| paid_exit_offer_event_is_live(event, retention_policy, unix_timestamp()))
+        .filter(|event| {
+            paid_exit_offer_event_is_live(
+                event,
+                retention_policy,
+                seller,
+                unix_timestamp(),
+            )
+        })
         .map(|event| event.id)
         .collect::<HashSet<_>>();
     loop {
@@ -177,7 +189,7 @@ async fn wait_for_paid_exit_control_events(
         let now_unix = unix_timestamp();
         if events.iter().any(|event| {
             !initial_offer_ids.contains(&event.id)
-                && paid_exit_offer_event_is_live(event, retention_policy, now_unix)
+                && paid_exit_offer_event_is_live(event, retention_policy, seller, now_unix)
         }) {
             return Ok(events);
         }
@@ -186,6 +198,17 @@ async fn wait_for_paid_exit_control_events(
 
 async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
+    let provider = args
+        .provider
+        .as_deref()
+        .map(ManualPaidExitProvider::parse)
+        .transpose()
+        .context("invalid targeted paid exit provider")?;
+    let seller = provider
+        .as_ref()
+        .map(|provider| PublicKey::parse(&provider.npub))
+        .transpose()
+        .context("invalid targeted paid exit seller npub")?;
     let trusted_rating_authors =
         paid_exit_trusted_rating_author_set(&args.trusted_rating_authors)?;
     let mut rating_scores = args
@@ -202,6 +225,7 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
     let cached_control_events = wait_for_paid_exit_control_events(
         &config_path,
         &retention_policy,
+        seller.as_ref(),
         args.duration_secs,
     )
     .await?;
@@ -223,9 +247,21 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
     let cached_offers = cached_control_events
         .into_iter()
         .filter_map(|event| {
-            paid_exit_offer_event_is_live(&event, &retention_policy, now_unix)
+            paid_exit_offer_event_is_live(
+                &event,
+                &retention_policy,
+                seller.as_ref(),
+                now_unix,
+            )
                 .then(|| SignedPaidRouteOffer::from_event(event).ok())
                 .flatten()
+        })
+        .filter(|signed| {
+            provider.as_ref().is_none_or(|provider| {
+                signed
+                    .offer()
+                    .is_ok_and(|offer| provider.accepts(&offer).is_ok())
+            })
         })
         .collect::<Vec<_>>();
     let cached_offer_count = cached_offers.len();

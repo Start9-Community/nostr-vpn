@@ -68,13 +68,14 @@ use anyhow::{Context, Result, anyhow};
 use cashu_service::{
     CashuSpilmanPayment, CashuSpilmanPaymentSigner, CashuSpilmanReceiverCloseResult,
     CashuWalletOverview, FileSpilmanPaymentReceiver, FileSpilmanPaymentReceiverConfig,
-    FileSpilmanPaymentSigner, StreamingRouteCashuTokenLease,
+    FileSpilmanPaymentSigner, SharedSpilmanClientStoreLock, StreamingRouteCashuTokenLease,
     StreamingRouteOpenCashuSpilmanChannelFromWalletRequest, StreamingRoutePaymentEnvelope,
     StreamingRoutePaymentPayload, create_topup_quote, import_payment_proofs,
     load_or_create_cashu_spilman_receiver_key, load_wallet_activity, load_wallet_overview,
     normalize_mint_url, open_streaming_route_cashu_spilman_channel_from_wallet,
-    receive_payment_token, restore_streaming_route_cashu_spilman_refund, send_lightning_payment,
-    send_payment_token,
+    open_streaming_route_cashu_spilman_channel_from_wallet_with_lock, receive_payment_token,
+    restore_streaming_route_cashu_spilman_refund_with_lock, send_lightning_payment,
+    send_payment_token, spilman_client_store_path,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(all(feature = "paid-exit", test))]
@@ -88,6 +89,7 @@ use nostr_vpn_core::config::{
     derive_mesh_tunnel_ip, exit_node_default_routes, maybe_autoconfigure_node,
     normalize_advertised_route, normalize_fips_peer_endpoint_hint, normalize_nostr_pubkey,
     normalize_runtime_network_id, parse_wireguard_exit_config,
+    write_private_file_preserving_user_owner,
 };
 use nostr_vpn_core::control::PeerAnnouncement;
 use nostr_vpn_core::data_plane::MeshPeerStatus;
@@ -127,7 +129,7 @@ use nostr_vpn_core::paid_route_store::{
     PaidRouteSessionRecord, PaidRouteStore, RecordPaidRouteBuyerUsageRequest,
     RecordPaidRouteSellerUsageRequest, UpdatePaidRouteSessionProbeRequest,
     UpdatePaidRouteSessionProbeResult, load_paid_route_store, paid_route_store_file_path,
-    upsert_paid_route_offer, write_paid_route_store,
+    update_paid_route_store, upsert_paid_route_offer,
 };
 #[cfg(feature = "paid-exit")]
 use nostr_vpn_core::paid_routes::{
@@ -157,32 +159,6 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 #[cfg(target_os = "windows")]
 use windows_service::service_dispatcher;
-
-#[cfg(feature = "paid-exit")]
-fn try_lock_paid_exit_cashu_client_store(
-    config_path: &Path,
-) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-    type ClientStoreLocks =
-        std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>;
-    static LOCKS: std::sync::OnceLock<ClientStoreLocks> = std::sync::OnceLock::new();
-
-    let key = paid_exit_wallet_data_dir(config_path);
-    let mut locks = LOCKS
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    let lock = locks
-        .get(&key)
-        .and_then(std::sync::Weak::upgrade)
-        .unwrap_or_else(|| {
-            let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-            locks.insert(key, std::sync::Arc::downgrade(&lock));
-            lock
-        });
-    drop(locks);
-    lock.try_lock_owned().ok()
-}
 
 #[cfg(test)]
 pub(crate) use crate::config_bootstrap::default_cli_install_path;

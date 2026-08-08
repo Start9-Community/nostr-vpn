@@ -79,27 +79,9 @@ fn fips_private_runtime_active_for_config(
     config_path: &Path,
     vpn_enabled: bool,
     expected_peers: usize,
-) -> bool {
-    fips_private_runtime_active(app, vpn_enabled, expected_peers)
-        || !load_pending_fips_control_recipients(config_path).is_empty()
-}
-
-fn load_pending_fips_control_recipients(config_path: &Path) -> Vec<(&'static str, String)> {
-    let recipients = nostr_vpn_core::join_delivery::load_join_rosters(config_path)
-        .into_iter()
-        .map(|(_, queued)| ("join roster", queued.recipient_npub))
-        .collect::<Vec<_>>();
-    #[cfg(feature = "paid-exit")]
-    let recipients = {
-        let mut recipients = recipients;
-        recipients.extend(
-            load_paid_exit_payment_outbox(config_path)
-                .into_iter()
-                .map(|queued| ("paid-exit", queued.envelope.seller)),
-        );
-        recipients
-    };
-    recipients
+) -> Result<bool> {
+    Ok(fips_private_runtime_active(app, vpn_enabled, expected_peers)
+        || !load_pending_fips_control_recipients(config_path)?.is_empty())
 }
 
 pub(crate) fn paid_exit_fips_runtime_active(app: &AppConfig) -> bool {
@@ -485,7 +467,7 @@ fn fips_tunnel_config_from_app(
         ethernet_underlay,
     } = input;
 
-    let pending_control_recipients = load_pending_fips_control_recipients(config_path);
+    let pending_control_recipients = load_pending_fips_control_recipients(config_path)?;
     let control_recipient_pubkeys = pending_control_recipients
         .iter()
         .map(|(_, recipient)| recipient.as_str())
@@ -687,7 +669,7 @@ async fn sync_fips_private_runtime(
         context.config_path,
         context.vpn_enabled,
         context.expected_peers,
-    ) {
+    )? {
         if let Some(runtime) = runtime.take() {
             stop_fips_private_tunnel_runtime(context.config_path, runtime).await?;
         }

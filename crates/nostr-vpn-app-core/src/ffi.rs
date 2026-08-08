@@ -18,6 +18,8 @@ use nostr_vpn_core::config::{
     npub_for_pubkey_hex, parse_wireguard_exit_config, wireguard_exit_config_text,
 };
 use nostr_vpn_core::diagnostics::ProbeStatus;
+#[cfg(feature = "paid-exit")]
+use nostr_vpn_core::paid_route_store::normalize_paid_route_mint_url;
 use nostr_vpn_core::paid_routes::{PaidExitUpstream, normalize_paid_route_country_code};
 use nostr_vpn_core::process_ext::CommandWindowExt;
 use serde::Deserialize;
@@ -273,6 +275,7 @@ mod tests {
     include!("ffi/tests_service.rs");
     include!("ffi/tests_service_wireguard.rs");
     include!("ffi/tests_exit_dns.rs");
+    include!("ffi/tests_service_paid_exit_config.rs");
     include!("ffi/tests_service_paid_exit_buy.rs");
     include!("ffi/tests_service_macos.rs");
 }

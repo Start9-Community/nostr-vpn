@@ -246,7 +246,7 @@ final class AppManager: ObservableObject {
         if state.paidRouteMarket.wallet.lastAction.kind == "topup" {
             return true
         }
-        if state.paidExitSeller.enabled, !state.paidExitSeller.sessions.isEmpty {
+        if !state.paidExitSeller.sessions.isEmpty {
             return true
         }
         return state.paidRouteMarket.sessions.contains { session in

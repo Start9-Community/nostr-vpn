@@ -129,7 +129,7 @@ fn paid_exit_seller_store_state(
     Vec<NativePaidRouteSessionState>,
     PaidExitSellerTrafficSummary,
 ) {
-    if !supported || !config.enabled {
+    if !supported {
         return (
             String::new(),
             Vec::new(),
@@ -296,6 +296,12 @@ pub(super) fn paid_exit_seller_status_text(
         && !wireguard_exit_configured
     {
         "Configure WireGuard upstream before advertising".to_string()
+    } else if matches!(
+        app.paid_exit_seller_egress(),
+        Ok(PaidExitSellerEgress::WireGuard)
+    ) && !daemon_state.is_some_and(|state| state.wireguard_exit_ready)
+    {
+        "Waiting for the WireGuard handshake".to_string()
     } else if let Ok(PaidExitSellerEgress::PrivatePeer { pubkey }) =
         app.paid_exit_seller_egress()
         && !daemon_state.is_some_and(|state| {

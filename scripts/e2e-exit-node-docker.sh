@@ -43,11 +43,14 @@ PAID_EXIT_SPILMAN_WALLET_TOPUP_SAT="${NVPN_EXIT_NODE_E2E_SPILMAN_WALLET_TOPUP_SA
 PAID_EXIT_SPILMAN_FREE_PROBE_UNITS="${NVPN_EXIT_NODE_E2E_SPILMAN_FREE_PROBE_UNITS:-0}"
 PAID_EXIT_SPILMAN_GRACE_UNITS="${NVPN_EXIT_NODE_E2E_SPILMAN_GRACE_UNITS:-65536}"
 PAID_EXIT_PROBE_PORT="${NVPN_EXIT_NODE_E2E_PROBE_PORT:-8080}"
+FIXTURE_READY_DEADLINE_SECS=30
+FIXTURE_CONNECT_TIMEOUT_SECS=2
 PAID_EXIT_SESSION_ID=""
 PAID_EXIT_PROBE_JSON=""
 
 cleanup() {
-  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  COMPOSE_PROFILES=paid-exit \
+    "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm \
     "${PROJECT_NAME}_internet" \
     "${PROJECT_NAME}_private-b" >/dev/null 2>&1 || true
@@ -138,14 +141,28 @@ wait_for_service() {
   exit 1
 }
 
-wait_for_cashu_mint() {
-  for _ in $(seq 1 60); do
-    if "${COMPOSE[@]}" exec -T node-a sh -lc "nc -z '$CASHU_MINT_IP' 3338" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
+wait_for_fixture_tcp() {
+  local label="$1" host="$2" port="$3"
+  echo "--- paid-exit fixture readiness: waiting for $label at $host:$port (${FIXTURE_READY_DEADLINE_SECS}s deadline) ---"
+  # shellcheck disable=SC2016 # Positional parameters expand in the container.
+  if "${COMPOSE[@]}" exec -T node-a \
+    timeout "$FIXTURE_READY_DEADLINE_SECS" sh -c '
+      host="$1"
+      port="$2"
+      connect_timeout="$3"
+      until nc -z -w "$connect_timeout" "$host" "$port"; do sleep 1; done
+    ' sh "$host" "$port" "$FIXTURE_CONNECT_TIMEOUT_SECS" \
+    >/dev/null 2>&1
+  then
+    echo "--- paid-exit fixture readiness: $label ready ---"
+    return 0
+  fi
+  echo "--- paid-exit fixture readiness: $label timed out ---" >&2
+  return 1
+}
 
+wait_for_cashu_mint() {
+  wait_for_fixture_tcp "Cashu test mint" "$CASHU_MINT_IP" 3338 && return 0
   echo "exit-node docker e2e failed: Cashu test mint did not become reachable at $CASHU_MINT_URL" >&2
   exit 1
 }
@@ -214,13 +231,9 @@ NVPN_PROBE_IP='$NODE_A_PUBLIC_IP' NVPN_PROBE_COUNTRY='FI' NVPN_PROBE_ASN='64500'
 }
 
 wait_for_paid_exit_probe_fixture() {
-  for _ in $(seq 1 30); do
-    if "${COMPOSE[@]}" exec -T node-a sh -lc "nc -z '$PUBLIC_INTERNET_TARGET' '$PAID_EXIT_PROBE_PORT'" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-
+  wait_for_fixture_tcp \
+    "paid-exit probe" "$PUBLIC_INTERNET_TARGET" "$PAID_EXIT_PROBE_PORT" \
+    && return 0
   echo "exit-node docker e2e failed: paid-exit probe fixture did not become reachable at $PUBLIC_INTERNET_TARGET:$PAID_EXIT_PROBE_PORT" >&2
   "${COMPOSE[@]}" exec -T internet-target sh -lc "cat /tmp/nvpn-paid-exit-probe-fixture.log 2>/dev/null || true" >&2 || true
   exit 1
@@ -715,7 +728,7 @@ if truthy "$PAID_EXIT_MODE"; then
     PAID_GRACE_UNITS="$PAID_EXIT_SPILMAN_GRACE_UNITS"
   fi
 
-  "${COMPOSE[@]}" exec -T node-a nvpn paid-exit run \
+  SELLER_RUN_JSON="$("${COMPOSE[@]}" exec -T node-a env RUST_LOG=warn nvpn paid-exit run \
     --config "$CONFIG_PATH" \
     --offer-id internet-exit \
     --price-msat-per-gb "$PAID_EXIT_PRICE_MSAT_PER_GB" \
@@ -726,7 +739,13 @@ if truthy "$PAID_EXIT_MODE"; then
     --grace-units "$PAID_GRACE_UNITS" \
     --country-code FI \
     --no-reload-daemon \
-    --json >/dev/null
+    --json | tr -d '\r')"
+  PAID_EXIT_PROVIDER_LINK="$(jq -r '.provider_link // empty' <<<"$SELLER_RUN_JSON")"
+  if [[ -z "$PAID_EXIT_PROVIDER_LINK" ]]; then
+    echo "exit-node docker e2e failed: seller did not produce a paid exit provider link" >&2
+    printf '%s\n' "$SELLER_RUN_JSON" >&2
+    exit 1
+  fi
 
   "${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit wallet \
     --config "$CONFIG_PATH" \
@@ -742,21 +761,48 @@ if truthy "$PAID_EXIT_MODE"; then
     wait_for_paid_exit_wallet_balance node-b "$PAID_EXIT_MINT" "$PAID_EXIT_SPILMAN_WALLET_TOPUP_SAT" >/dev/null
   fi
 
-  # Exercise the production seller lifecycle and buyer cache. No direct event
-  # import is allowed here: the running seller must publish through the control
-  # pubsub outbox and the independent buyer must discover that signed offer.
+  # Exercise a provider-link import over the production FIPS pubsub path. The
+  # link only constrains the seller, ceiling, and mint; the signed offer remains
+  # authoritative for the receiver and channel terms used below.
   "${COMPOSE[@]}" exec -T node-a nvpn start --daemon --connect \
     --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
   "${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect \
     --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  PAID_EXIT_REJECT_MAX_MSAT_PER_GB="$((PAID_EXIT_PRICE_MSAT_PER_GB - 1))"
+  PAID_EXIT_REJECT_PROVIDER_LINK="${PAID_EXIT_PROVIDER_LINK/maxMsatPerGb=${PAID_EXIT_PRICE_MSAT_PER_GB}/maxMsatPerGb=${PAID_EXIT_REJECT_MAX_MSAT_PER_GB}}"
+  if [[ "$PAID_EXIT_REJECT_PROVIDER_LINK" == "$PAID_EXIT_PROVIDER_LINK" ]]; then
+    echo "exit-node docker e2e failed: provider link omitted its price ceiling" >&2
+    printf '%s\n' "$PAID_EXIT_PROVIDER_LINK" >&2
+    exit 1
+  fi
   DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
     --config "$CONFIG_PATH" \
     --duration-secs 20 \
+    --provider "$PAID_EXIT_REJECT_PROVIDER_LINK" \
     --json | tr -d '\r')"
-  if ! jq -e --arg seller "$ALICE_NPUB" \
-    'any(.offers[]?; .offer.offer_id == "internet-exit" and .offer.seller_npub == $seller)' \
+  if ! jq -e '.offers | length == 0' <<<"$DISCOVER_JSON" >/dev/null; then
+    echo "exit-node docker e2e failed: targeted import accepted an offer above its price ceiling" >&2
+    printf '%s\n' "$DISCOVER_JSON" >&2
+    exit 1
+  fi
+  DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
+    --config "$CONFIG_PATH" \
+    --duration-secs 0 \
+    --provider "$PAID_EXIT_PROVIDER_LINK" \
+    --json | tr -d '\r')"
+  if ! jq -e \
+    --arg seller "$ALICE_NPUB" \
+    --arg mint "$PAID_EXIT_MINT" \
+    --argjson price "$PAID_EXIT_PRICE_MSAT_PER_GB" \
+    --argjson capacity "$PAID_MAX_CHANNEL_CAPACITY_SAT" \
+    'any(.offers[]?; .offer.offer_id == "internet-exit"
+      and .offer.seller_npub == $seller
+      and (.offer.receiver_pubkey_hex | length) == 66
+      and .offer.pricing.price_msat_per_gb == $price
+      and .offer.channel.max_channel_capacity_sat == $capacity
+      and (.offer.channel.accepted_mints | index($mint)) != null)' \
     <<<"$DISCOVER_JSON" >/dev/null; then
-    echo "exit-node docker e2e failed: buyer did not discover the seller's published offer" >&2
+    echo "exit-node docker e2e failed: buyer did not import the seller's exact signed offer" >&2
     printf '%s\n' "$DISCOVER_JSON" >&2
     exit 1
   fi

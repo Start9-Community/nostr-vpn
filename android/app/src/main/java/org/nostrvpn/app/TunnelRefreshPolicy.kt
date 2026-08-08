@@ -18,6 +18,8 @@ internal object TunnelRefreshPolicy {
         "remove_participant",
         "remove_admin",
         "accept_join_request",
+        "set_manual_paid_exit_provider",
+        "clear_manual_paid_exit_provider",
         "set_participant_alias",
         "set_participant_endpoint_hints",
     )

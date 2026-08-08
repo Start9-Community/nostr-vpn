@@ -407,6 +407,22 @@ fn parse_csv_values(input: &str) -> Vec<String> {
     values
 }
 
+#[cfg(feature = "paid-exit")]
+fn parse_paid_exit_mint_urls(input: &str) -> Result<Vec<String>> {
+    let mut urls = parse_csv_values(input)
+        .into_iter()
+        .map(|url| normalize_paid_route_mint_url(&url))
+        .collect::<Result<Vec<_>>>()?;
+    urls.sort();
+    urls.dedup();
+    Ok(urls)
+}
+
+#[cfg(not(feature = "paid-exit"))]
+fn parse_paid_exit_mint_urls(_input: &str) -> Result<Vec<String>> {
+    Err(anyhow!("paid exit is unavailable"))
+}
+
 fn parse_optional_asn(input: &str) -> Result<Option<u32>> {
     let trimmed = input.trim();
     if trimmed.is_empty() {

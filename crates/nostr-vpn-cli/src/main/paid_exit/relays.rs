@@ -125,15 +125,14 @@ fn persist_paid_exit_offer_snapshot(
     offer: &PaidRouteOffer,
     seen_at_unix: u64,
 ) -> Result<bool> {
-    let mut store = load_paid_route_store(store_path)?;
-    let mut changed = store.upsert_signed_offer(signed.clone(), relays.to_vec(), seen_at_unix)?;
-    for mint in &offer.channel.accepted_mints {
-        changed |= store.upsert_wallet_mint(mint, "", None, 0);
-    }
-    if changed {
-        write_paid_route_store(store_path, &store)?;
-    }
-    Ok(changed)
+    update_paid_route_store(store_path, |store| {
+        let mut changed =
+            store.upsert_signed_offer(signed.clone(), relays.to_vec(), seen_at_unix)?;
+        for mint in &offer.channel.accepted_mints {
+            changed |= store.upsert_wallet_mint(mint, "", None, 0);
+        }
+        Ok(changed)
+    })
 }
 
 fn persist_paid_exit_discovered_offers(
@@ -142,27 +141,26 @@ fn persist_paid_exit_discovered_offers(
     relays: &[String],
     rating_scores: Option<&HashMap<String, PaidExitRatingScore>>,
 ) -> Result<usize> {
-    let mut store = load_paid_route_store(store_path)?;
-    let mut changed_count = 0usize;
-    let seen_at_unix = unix_timestamp();
-    for signed in offers {
-        let offer = signed.offer()?;
-        let mut changed = store.upsert_signed_offer(signed.clone(), relays.to_vec(), seen_at_unix)?;
-        if let Some(score) = rating_scores.and_then(|scores| scores.get(&offer.seller_npub)) {
-            changed |= store.upsert_offer_rating_score(
-                &offer.seller_npub,
-                score.score,
-                score.created_at,
-            );
+    update_paid_route_store(store_path, |store| {
+        let mut changed_count = 0usize;
+        let seen_at_unix = unix_timestamp();
+        for signed in offers {
+            let offer = signed.offer()?;
+            let mut changed =
+                store.upsert_signed_offer(signed.clone(), relays.to_vec(), seen_at_unix)?;
+            if let Some(score) = rating_scores.and_then(|scores| scores.get(&offer.seller_npub)) {
+                changed |= store.upsert_offer_rating_score(
+                    &offer.seller_npub,
+                    score.score,
+                    score.created_at,
+                );
+            }
+            if changed {
+                changed_count += 1;
+            }
         }
-        if changed {
-            changed_count += 1;
-        }
-    }
-    if changed_count > 0 {
-        write_paid_route_store(store_path, &store)?;
-    }
-    Ok(changed_count)
+        Ok(changed_count)
+    })
 }
 
 fn publish_paid_exit_control_event(

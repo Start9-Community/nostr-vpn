@@ -4,15 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.7 - 2026-08-06
+## 4.1.7 - 2026-08-08
 
 ### Release notes
 
 Reliability improvements and basic feature fixes across every platform.
 
-- Fixed paid-exit discovery and direct provider links.
+- Fixed paid-exit discovery, provider links, and connection status.
 - Simplified pricing to one per-GB rate with optional fiat display.
-- Improved selling and reselling Direct, WireGuard, or private-exit Internet.
+- Improved selling, settlement, and reselling Direct, WireGuard, or private-exit Internet.
 
 ## 4.1.6 - 2026-08-06
 

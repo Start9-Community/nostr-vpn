@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-#[cfg(unix)]
 use std::fs::OpenOptions;
-#[cfg(unix)]
 use std::io::Write;
 use std::net::IpAddr;
 #[cfg(unix)]

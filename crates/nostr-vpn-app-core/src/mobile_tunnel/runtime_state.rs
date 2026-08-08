@@ -174,6 +174,12 @@ fn mobile_runtime_state_path(config_path: &Path) -> Option<PathBuf> {
         .map(|parent| parent.join(MOBILE_RUNTIME_STATE_FILE))
 }
 
+struct MobileRuntimeDiagnostics<'a> {
+    secure_dns: Option<&'a SecureDnsResolver>,
+    wireguard_handshake:
+        Option<&'a nostr_vpn_core::wg_upstream::WgUpstreamHandshakeObserver>,
+}
+
 async fn persist_mobile_runtime_state(
     path: &Path,
     endpoint: &FipsEndpoint,
@@ -181,7 +187,7 @@ async fn persist_mobile_runtime_state(
     presence: &Arc<RwLock<HashMap<String, MobilePeerPresence>>>,
     config: &Arc<RwLock<MobileTunnelConfig>>,
     tun_counters: &MobileTunAtomicCounters,
-    secure_dns: Option<&SecureDnsResolver>,
+    diagnostics: MobileRuntimeDiagnostics<'_>,
 ) -> Result<()> {
     let endpoint_peers = endpoint
         .peers()
@@ -210,11 +216,14 @@ async fn persist_mobile_runtime_state(
             unix_timestamp(),
         )
     };
-    if let Some(counters) = secure_dns.map(SecureDnsResolver::counters) {
+    if let Some(counters) = diagnostics.secure_dns.map(SecureDnsResolver::counters) {
         state.secure_dns_queries = counters.queries;
         state.secure_dns_successes = counters.successes;
         state.secure_dns_failures = counters.failures;
     }
+    state.wireguard_exit_ready = diagnostics.wireguard_handshake.is_some_and(
+        nostr_vpn_core::wg_upstream::WgUpstreamHandshakeObserver::has_completed_handshake,
+    );
     write_mobile_runtime_state(path, &state)
 }
 

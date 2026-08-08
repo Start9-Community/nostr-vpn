@@ -103,7 +103,7 @@ loop {
                     &config_path,
                     vpn_enabled,
                     expected_peers,
-                )
+                )?
             };
             if maintain_fips {
                 maintain_fips_heartbeat(FipsHeartbeatContext {
@@ -320,7 +320,7 @@ loop {
                     &config_path,
                     vpn_enabled,
                     expected_peers,
-                )
+                )?
             {
                 refresh_fips_tunnel_runtime_after_link_event(
                     &mut fips_tunnel_runtime,

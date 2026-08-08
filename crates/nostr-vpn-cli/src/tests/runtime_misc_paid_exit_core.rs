@@ -131,7 +131,11 @@ fn paid_exit_record_probe_once_persists_session_measurements() {
             now_unix: 125,
         })
         .expect("open buyer session");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store;
+        Ok(())
+    })
+    .expect("write store");
 
     let result = paid_exit_record_probe_once(PaidExitRecordProbeArgs {
         config: Some(config_path.clone()),
@@ -228,7 +232,11 @@ fn paid_exit_probe_once_measures_and_persists_session() {
             now_unix: 125,
         })
         .expect("open buyer session");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store;
+        Ok(())
+    })
+    .expect("write store");
 
     let (server_base, server) = spawn_paid_exit_probe_fixture_server(5);
     let result = tokio::runtime::Runtime::new()
@@ -352,7 +360,11 @@ fn paid_exit_probe_once_uses_stun_for_realized_exit_ip() {
             now_unix: 125,
         })
         .expect("open buyer session");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store;
+        Ok(())
+    })
+    .expect("write store");
 
     let (stun_server, stun_fixture) = spawn_paid_exit_stun_fixture([198, 51, 100, 77]);
     let result = tokio::runtime::Runtime::new()

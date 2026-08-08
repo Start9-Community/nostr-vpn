@@ -1,5 +1,9 @@
 #[cfg(target_os = "windows")]
 impl FipsPrivateTunnelRuntime {
+    pub(crate) fn wireguard_exit_ready(&self) -> bool {
+        self.wg_upstream.is_some()
+    }
+
     #[cfg(feature = "paid-exit")]
     pub(crate) fn paid_exit_seller_ready(&self) -> bool {
         // Windows does not yet install seller forwarding/NAT, so listener

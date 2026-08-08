@@ -4,12 +4,14 @@ impl CliTunnelRuntime {
             iface: iface.into(),
             active_listen_port: None,
             paid_exit_seller_ready: false,
+            wireguard_exit_ready: false,
         }
     }
 
     fn stop(&mut self) {
         self.active_listen_port = None;
         self.paid_exit_seller_ready = false;
+        self.wireguard_exit_ready = false;
     }
 
     #[cfg(target_os = "macos")]
@@ -28,6 +30,9 @@ impl CliTunnelRuntime {
         self.active_listen_port = runtime.and_then(
             crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port,
         );
+        self.wireguard_exit_ready = runtime.is_some_and(
+            crate::fips_private_mesh::FipsPrivateTunnelRuntime::wireguard_exit_ready,
+        );
         #[cfg(feature = "paid-exit")]
         {
             self.paid_exit_seller_ready = runtime.is_some_and(
@@ -39,6 +44,47 @@ impl CliTunnelRuntime {
     pub(crate) fn owns_interface(&self, iface: &str) -> bool {
         self.iface == iface
     }
+}
+
+fn load_pending_fips_control_recipients(
+    config_path: &Path,
+) -> Result<Vec<(&'static str, String)>> {
+    let recipients = nostr_vpn_core::join_delivery::load_join_rosters(config_path)
+        .into_iter()
+        .map(|(_, queued)| ("join roster", queued.recipient_npub))
+        .collect::<Vec<_>>();
+    #[cfg(feature = "paid-exit")]
+    let recipients = {
+        let mut recipients = recipients;
+        recipients.extend(
+            load_paid_exit_payment_outbox(config_path)
+                .into_iter()
+                .map(|queued| ("paid-exit", queued.envelope.seller)),
+        );
+        let store = load_paid_route_store(&paid_route_store_file_path(config_path))?;
+        recipients.extend(
+            store
+                .channels
+                .values()
+                .filter(|channel| {
+                    channel.role == PaidRouteChannelRole::Seller
+                        && !matches!(
+                            channel.status,
+                            PaidRouteLifecycleStatus::Closed
+                                | PaidRouteLifecycleStatus::Expired
+                                | PaidRouteLifecycleStatus::Failed
+                        )
+                })
+                .map(|channel| {
+                    (
+                        "paid-exit seller settlement",
+                        channel.counterparty_npub.clone(),
+                    )
+                }),
+        );
+        recipients
+    };
+    Ok(recipients)
 }
 
 fn endpoint_with_listen_port(endpoint: &str, listen_port: u16) -> String {

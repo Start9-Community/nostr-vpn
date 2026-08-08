@@ -36,9 +36,17 @@ impl NativeAppRuntime {
             .then(|| self.active_paid_route_exit_ip(selected_exit_node))
             .flatten();
             let selected_exit_active = vpn_active
-                && (selected_peer.is_some_and(|peer| {
-                    peer.reachable && peer_offers_exit_node(&peer.advertised_routes)
-                }) || active_paid_exit_ip.is_some());
+                && if matches!(
+                    self.config.internet_source,
+                    InternetSource::PaidAutomatic | InternetSource::PaidManual
+                ) {
+                    active_paid_exit_ip.is_some()
+                        && selected_peer.is_some_and(|peer| peer.reachable)
+                } else {
+                    selected_peer.is_some_and(|peer| {
+                        peer.reachable && peer_offers_exit_node(&peer.advertised_routes)
+                    })
+                };
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !selected_exit_active;
             let text = if blocked {
@@ -81,7 +89,9 @@ impl NativeAppRuntime {
 
         let wireguard_exit_selected = self.config.internet_source == InternetSource::WireGuard;
         if wireguard_exit_selected {
-            let wireguard_exit_active = vpn_active && self.config.wireguard_exit.configured();
+            let wireguard_exit_active = vpn_active
+                && self.config.wireguard_exit.configured()
+                && daemon_state.is_some_and(|state| state.wireguard_exit_ready);
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !wireguard_exit_active;
             let text = if blocked {

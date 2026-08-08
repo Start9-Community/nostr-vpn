@@ -120,6 +120,13 @@ pub struct WgUpstreamHandshakeObserver {
 }
 
 impl WgUpstreamHandshakeObserver {
+    pub fn has_completed_handshake(&self) -> bool {
+        self.handshake
+            .last_completed_receiver_index
+            .load(Ordering::Acquire)
+            != 0
+    }
+
     /// Wait for at most `timeout` for the WG handshake to complete.
     /// Returns `true` if a handshake was observed; `false` on timeout.
     pub async fn wait_for_handshake(&self, timeout: Duration) -> bool {

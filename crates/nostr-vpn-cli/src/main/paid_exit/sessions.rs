@@ -40,26 +40,26 @@ fn paid_exit_buy_once(args: PaidExitBuyArgs) -> Result<PaidExitBuyResult> {
         .to_bech32()
         .context("failed to encode buyer npub")?;
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let offer_selector = paid_exit_buy_offer_selector(&args, &store)?;
-    let result = store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
-        offer_selector,
-        buyer_npub,
-        mint_url: args.mint,
-        channel_capacity_sat: args.channel_capacity_sat,
-        initial_paid_msat: args.initial_paid_msat,
-        now_unix: unix_timestamp(),
+    let no_select_exit_node = args.no_select_exit_node;
+    let no_reload_daemon = args.no_reload_daemon;
+    let result = update_paid_route_store(&store_path, |store| {
+        let offer_selector = paid_exit_buy_offer_selector(&args, store)?;
+        store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
+            offer_selector,
+            buyer_npub,
+            mint_url: args.mint,
+            channel_capacity_sat: args.channel_capacity_sat,
+            initial_paid_msat: args.initial_paid_msat,
+            now_unix: unix_timestamp(),
+        })
     })?;
-    if result.changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
 
-    let (selected_exit_node, daemon_reload_attempted) = if args.no_select_exit_node {
+    let (selected_exit_node, daemon_reload_attempted) = if no_select_exit_node {
         (None, false)
     } else {
         let selected = app.select_public_paid_exit_node(&result.seller_npub)?;
         app.save(&config_path)?;
-        let daemon_reload_attempted = !args.no_reload_daemon;
+        let daemon_reload_attempted = !no_reload_daemon;
         if daemon_reload_attempted {
             maybe_reload_running_daemon(&config_path);
         }

@@ -87,24 +87,20 @@ async fn paid_exit_settle_command(args: PaidExitSettleArgs) -> Result<()> {
     let wallet_data_dir = paid_exit_wallet_data_dir(&config_path);
     let signer =
         FileSpilmanPaymentSigner::load(&wallet_data_dir).map_err(|error| anyhow!("{error}"))?;
-    let mut store = load_paid_route_store(&store_path)?;
-    let result = paid_exit_settle_with_signer(
-        PaidExitSettleRequest {
+    let result = update_paid_route_store(&store_path, |store| {
+        paid_exit_settle_with_signer(PaidExitSettleRequest {
             app: &app,
             config_path: &config_path,
-            store: &mut store,
+            store,
             signer: &signer,
             session_id: &args.session,
             dry_run: args.dry_run,
             wallet_data_dir: &wallet_data_dir,
             now_unix: unix_timestamp(),
-        },
-    )?;
+        })
+    })?;
 
     let changed = result.persisted && result.payment.changed;
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
     if result.persisted {
         maybe_reload_running_daemon(&config_path);
     }
@@ -161,9 +157,6 @@ async fn paid_exit_settle_command(args: PaidExitSettleArgs) -> Result<()> {
 async fn paid_exit_apply_payment_command(args: PaidExitApplyPaymentArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
-    if !app.paid_exit.enabled {
-        return Err(anyhow!("paid exit selling is disabled"));
-    }
     let seller_npub = app
         .nostr_keys()?
         .public_key()
@@ -173,24 +166,23 @@ async fn paid_exit_apply_payment_command(args: PaidExitApplyPaymentArgs) -> Resu
     let envelope: StreamingRoutePaymentEnvelope = serde_json::from_str(&envelope_json)
         .context("failed to decode paid route payment envelope JSON")?;
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let (spilman_receiver, spilman_receiver_error) =
         try_load_paid_exit_spilman_receiver(&config_path, &app.paid_exit).await;
     let spilman_receiver_processing = spilman_receiver.is_some();
-    let result = apply_paid_route_seller_payment(
-        &mut store,
-        ApplyPaidRouteSellerPaymentRequest {
-            envelope,
-            seller_npub,
-            config: app.paid_exit.clone(),
-            now_unix: unix_timestamp(),
-        },
-        spilman_receiver.as_ref(),
-        spilman_receiver_error.as_deref(),
-    )?;
-    if result.changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
+    let (result, store) = update_paid_route_store(&store_path, |store| {
+        let result = apply_paid_route_seller_payment(
+            store,
+            ApplyPaidRouteSellerPaymentRequest {
+                envelope,
+                seller_npub,
+                config: app.paid_exit.clone(),
+                now_unix: unix_timestamp(),
+            },
+            spilman_receiver.as_ref(),
+            spilman_receiver_error.as_deref(),
+        )?;
+        Ok((result, store.clone()))
+    })?;
     let daemon_reload_attempted = result.changed && !args.no_reload_daemon;
     if daemon_reload_attempted {
         maybe_reload_running_daemon(&config_path);

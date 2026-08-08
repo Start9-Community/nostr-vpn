@@ -85,9 +85,66 @@
 
         runtime.vpn_active = true;
         let state = runtime.state();
+        assert!(state.exit_node_blocked);
+        assert!(!state.exit_node_active);
+        assert_eq!(state.exit_node_status_text, "WireGuard exit · Blocked");
+
+        runtime.daemon_state = Some(DaemonRuntimeState {
+            vpn_enabled: true,
+            vpn_active: true,
+            wireguard_exit_ready: true,
+            ..DaemonRuntimeState::default()
+        });
+        let state = runtime.state();
         assert!(!state.exit_node_blocked);
         assert!(state.exit_node_active);
         assert_eq!(state.exit_node_status_text, "WireGuard exit · Connected");
+    }
+
+    #[test]
+    fn reachable_paid_peer_is_pending_until_its_session_can_route() {
+        let dir = unique_service_test_dir("nvpn-paid-exit-ui-readiness");
+        let error = anyhow!("boom");
+        let mut runtime = NativeAppRuntime::from_startup_error(&error);
+        let own_pubkey = runtime
+            .config
+            .own_nostr_pubkey_hex()
+            .expect("generated config should have own pubkey");
+        let exit_pubkey = "26525c442dd039de4e728b41ee8d7f717b267ab25b7c219d53a3249e1c9174cc";
+        runtime.startup_error = None;
+        runtime.config_path = dir.join("config.toml");
+        runtime.daemon_running = true;
+        runtime.vpn_enabled = true;
+        runtime.vpn_active = true;
+        runtime
+            .config
+            .set_internet_source(InternetSource::PaidManual);
+        runtime.config.exit_node = exit_pubkey.to_string();
+        runtime.config.exit_node_leak_protection = true;
+        create_test_network(&mut runtime, "Home");
+        runtime.config.networks[0].admins = vec![own_pubkey];
+        runtime.config.networks[0].devices = vec![exit_pubkey.to_string()];
+        runtime.daemon_state = Some(DaemonRuntimeState {
+            vpn_enabled: true,
+            vpn_active: true,
+            expected_peer_count: 1,
+            connected_peer_count: 1,
+            mesh_ready: true,
+            peers: vec![DaemonPeerState {
+                participant_pubkey: exit_pubkey.to_string(),
+                advertised_routes: vec!["0.0.0.0/0".to_string()],
+                reachable: true,
+                ..DaemonPeerState::default()
+            }],
+            ..DaemonRuntimeState::default()
+        });
+
+        let state = runtime.state();
+        assert!(state.exit_node_blocked);
+        assert!(!state.exit_node_active);
+        assert!(state.exit_node_status_text.contains("waiting"));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

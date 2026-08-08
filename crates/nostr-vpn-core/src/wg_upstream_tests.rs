@@ -265,6 +265,7 @@ mod tests {
         let runtime = WgUpstreamRuntime::start_handshake_only(&cfg)
             .await
             .expect("start runtime");
+        let handshake = runtime.handshake_observer();
         #[cfg(target_os = "macos")]
         let mut runtime = runtime;
         let ok = runtime.wait_for_handshake(Duration::from_secs(10)).await;
@@ -272,6 +273,7 @@ mod tests {
             ok,
             "expected handshake to complete against the paired responder"
         );
+        assert!(handshake.has_completed_handshake());
 
         let original_socket_fd = runtime.udp_socket_fd();
         let receiver_index = runtime

@@ -531,6 +531,10 @@ try {
       ) {
         throw "DnsPolicy exact artifact identity is incomplete"
       }
+      Invoke-Control "ManualJoinCreateNetworkChoice"
+      Set-ControlValue "ManualJoinCreateNetworkName" "Release DNS $Case"
+      Invoke-Control "ManualJoinCreateNetworkSubmit"
+      $null = Find-Control "ManualJoinAdminOpen"
       Invoke-Control "ExitDnsInternetNavigation"
       if ((Read-PublicText "InternetSourceStatus") -notmatch "Direct") {
         throw "Windows Internet page did not identify the current Direct source"

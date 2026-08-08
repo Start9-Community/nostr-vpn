@@ -281,6 +281,4 @@ public sealed partial class AppViewModel
                 "Saving price")
              : Task.CompletedTask;
     }
-    public Task ReceivePaidRoutePaymentsAsync() =>
-        DispatchAsync(NativeActions.ReceivePaidRoutePayments(), "Checking payments");
 }

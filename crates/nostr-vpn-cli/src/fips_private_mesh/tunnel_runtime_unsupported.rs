@@ -20,6 +20,10 @@ impl FipsPrivateTunnelRuntime {
         None
     }
 
+    pub(crate) fn wireguard_exit_ready(&self) -> bool {
+        false
+    }
+
     #[cfg(feature = "paid-exit")]
     pub(crate) fn paid_exit_seller_ready(&self) -> bool {
         false

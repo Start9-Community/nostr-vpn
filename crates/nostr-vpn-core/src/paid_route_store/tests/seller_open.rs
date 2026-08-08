@@ -227,7 +227,7 @@ fn record_seller_usage_updates_session_and_admission_decision() {
 }
 
 #[test]
-fn seller_accounting_keeps_terms_accepted_at_channel_open() {
+fn seller_accounting_keeps_terms_after_selling_is_disabled() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let mut accepted = sample_config();
@@ -265,6 +265,7 @@ fn seller_accounting_keeps_terms_accepted_at_channel_open() {
         store.seller_admissions(&changed, 130)[0].destination_allowed_ips,
         vec!["0.0.0.0/0"]
     );
+    changed.enabled = false;
     let payment = store
         .apply_seller_payment(ApplyPaidRouteSellerPaymentRequest {
             envelope: seller_payment_envelope(
@@ -598,7 +599,7 @@ fn seller_payment_with_spilman_receiver_rejects_receiver_mismatch_without_mutati
 }
 
 #[test]
-fn seller_payment_with_spilman_receiver_accepts_lagging_due_as_partial_credit() {
+fn seller_payment_with_spilman_receiver_settles_after_selling_is_disabled() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
@@ -661,6 +662,7 @@ fn seller_payment_with_spilman_receiver_accepts_lagging_due_as_partial_credit() 
         .expect("record seller-observed usage")
         .expect("matched seller session");
     let receiver = FakeSpilmanReceiver::new("channel-1", 2);
+    config.enabled = false;
 
     let result = store
         .apply_seller_payment_with_spilman_receiver(
@@ -685,7 +687,7 @@ fn seller_payment_with_spilman_receiver_accepts_lagging_due_as_partial_credit() 
             &receiver,
             &(),
         )
-        .expect("lagging reported due is accepted as partial credit");
+        .expect("existing channel settles while new selling is disabled");
 
     assert_eq!(result.amount_due_msat, 2_000);
     assert_eq!(result.paid_msat, 2_000);

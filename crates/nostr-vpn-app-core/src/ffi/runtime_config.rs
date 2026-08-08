@@ -6,6 +6,11 @@ impl NativeAppRuntime {
             .as_deref()
             .map(parse_wireguard_exit_config)
             .transpose()?;
+        let parsed_paid_exit_accepted_mints = patch
+            .paid_exit_accepted_mints
+            .as_deref()
+            .map(parse_paid_exit_mint_urls)
+            .transpose()?;
         let internet_source_in_patch = patch.internet_source.is_some();
 
         if let Some(value) = patch.node_name {
@@ -198,8 +203,8 @@ impl NativeAppRuntime {
         if let Some(value) = patch.paid_exit_price_msat_per_gb {
             self.config.paid_exit.pricing.price_msat_per_gb = value;
         }
-        if let Some(value) = patch.paid_exit_accepted_mints {
-            self.config.paid_exit.channel.accepted_mints = parse_csv_values(&value);
+        if let Some(value) = parsed_paid_exit_accepted_mints {
+            self.config.paid_exit.channel.accepted_mints = value;
         }
         if let Some(value) = patch.paid_exit_max_channel_capacity_sat {
             self.config.paid_exit.channel.max_channel_capacity_sat = value;

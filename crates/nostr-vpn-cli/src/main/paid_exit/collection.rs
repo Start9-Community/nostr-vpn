@@ -19,52 +19,53 @@ pub(crate) fn paid_exit_apply_fips_payments(
     if payments.is_empty() {
         return Ok(PaidExitApplyFipsPaymentsResult::default());
     }
-    if !app.paid_exit.enabled {
-        return Err(anyhow!("paid exit selling is disabled"));
-    }
     let seller_npub = app
         .nostr_keys()?
         .public_key()
         .to_bech32()
         .context("failed to encode seller npub")?;
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let spilman_receiver_processing = spilman_receiver.is_some();
     let received_count = payments.len();
-    let mut applied_count = 0;
-    let mut error_count = 0;
-    let mut changed = false;
-    let mut acknowledgments = Vec::new();
-    for (sender_pubkey, id, envelope) in payments {
-        if normalize_nostr_pubkey(&envelope.buyer).ok().as_deref() != Some(&sender_pubkey) {
-            error_count += 1;
-            continue;
-        }
-        match apply_paid_route_seller_payment(
-            &mut store,
-            ApplyPaidRouteSellerPaymentRequest {
-                envelope,
-                seller_npub: seller_npub.clone(),
-                config: app.paid_exit.clone(),
-                now_unix: unix_timestamp(),
-            },
-            spilman_receiver,
-            spilman_receiver_error,
-        ) {
-            Ok(result) => {
-                applied_count += 1;
-                changed |= result.changed;
-                acknowledgments.push((sender_pubkey, id));
+    let (applied_count, error_count, changed, acknowledgments) =
+        update_paid_route_store(&store_path, |store| {
+            let mut applied_count = 0;
+            let mut error_count = 0;
+            let mut changed = false;
+            let mut acknowledgments = Vec::new();
+            for (sender_pubkey, id, envelope) in payments {
+                if normalize_nostr_pubkey(&envelope.buyer).ok().as_deref()
+                    != Some(&sender_pubkey)
+                {
+                    error_count += 1;
+                    continue;
+                }
+                match apply_paid_route_seller_payment(
+                    store,
+                    ApplyPaidRouteSellerPaymentRequest {
+                        envelope,
+                        seller_npub: seller_npub.clone(),
+                        config: app.paid_exit.clone(),
+                        now_unix: unix_timestamp(),
+                    },
+                    spilman_receiver,
+                    spilman_receiver_error,
+                ) {
+                    Ok(result) => {
+                        applied_count += 1;
+                        changed |= result.changed;
+                        acknowledgments.push((sender_pubkey, id));
+                    }
+                    Err(error) => {
+                        error_count += 1;
+                        eprintln!(
+                            "paid-exit: rejected direct FIPS payment from {sender_pubkey}: {error}"
+                        );
+                    }
+                }
             }
-            Err(error) => {
-                error_count += 1;
-                eprintln!("paid-exit: rejected direct FIPS payment from {sender_pubkey}: {error}");
-            }
-        }
-    }
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
+            Ok((applied_count, error_count, changed, acknowledgments))
+        })?;
     Ok(PaidExitApplyFipsPaymentsResult {
         received_count,
         applied_count,
@@ -85,7 +86,6 @@ async fn paid_exit_collect_channel_with_receiver(
     receiver: &FileSpilmanPaymentReceiver,
     wallet_data_dir: &Path,
     store_path: &Path,
-    store: &mut PaidRouteStore,
     channel_id: &str,
 ) -> Result<PaidExitCollectChannelOutcome> {
     let close = receiver
@@ -93,14 +93,13 @@ async fn paid_exit_collect_channel_with_receiver(
         .await
         .map_err(|error| anyhow!("{error}"))?;
 
-    let changed = store.mark_seller_channel_closed(
-        &close.channel_id,
-        close.closed_amount.saturating_mul(1_000),
-        unix_timestamp(),
-    )?;
-    if changed {
-        write_paid_route_store(store_path, store)?;
-    }
+    let changed = update_paid_route_store(store_path, |store| {
+        store.mark_seller_channel_closed(
+            &close.channel_id,
+            close.closed_amount.saturating_mul(1_000),
+            unix_timestamp(),
+        )
+    })?;
     let wallet_collect = if close.receiver_proofs_json.trim().is_empty() {
         None
     } else {
@@ -125,10 +124,6 @@ async fn paid_exit_collect_channel_with_receiver(
 async fn paid_exit_collect_command(args: PaidExitCollectArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
-    if !app.paid_exit.enabled {
-        return Err(anyhow!("paid exit selling is disabled"));
-    }
-
     let receiver_config = paid_exit_spilman_receiver_config(&app.paid_exit)
         .ok_or_else(|| anyhow!("no accepted Cashu mints configured"))?;
     let wallet_data_dir = paid_exit_wallet_data_dir(&config_path);
@@ -138,21 +133,20 @@ async fn paid_exit_collect_command(args: PaidExitCollectArgs) -> Result<()> {
             .map_err(|error| anyhow!("{error}"))?;
 
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let outcome = paid_exit_collect_channel_with_receiver(
         &receiver,
         &wallet_data_dir,
         &store_path,
-        &mut store,
         &args.channel,
     )
     .await?;
     let mut changed = outcome.changed;
     let overview = load_wallet_overview(&wallet_data_dir, false).await?;
-    changed |= sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
+    let (wallet_changed, store) = update_paid_route_store(&store_path, |store| {
+        let changed = sync_paid_exit_wallet_store_from_cashu(store, &overview, unix_timestamp());
+        Ok((changed, store.clone()))
+    })?;
+    changed |= wallet_changed;
     let daemon_reload_attempted = changed && !args.no_reload_daemon;
     if daemon_reload_attempted {
         maybe_reload_running_daemon(&config_path);
@@ -224,9 +218,8 @@ async fn paid_exit_collect_due_command(args: PaidExitCollectDueArgs) -> Result<(
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let wallet_data_dir = paid_exit_wallet_data_dir(&config_path);
-    let mut due = store
+    let mut due = load_paid_route_store(&store_path)?
         .seller_collection_states(&app.paid_exit, unix_timestamp())
         .into_iter()
         .filter(|state| state.auto_collect_due)
@@ -250,7 +243,6 @@ async fn paid_exit_collect_due_command(args: PaidExitCollectDueArgs) -> Result<(
                 &receiver,
                 &wallet_data_dir,
                 &store_path,
-                &mut store,
                 &state.channel_id,
             )
             .await
@@ -274,12 +266,16 @@ async fn paid_exit_collect_due_command(args: PaidExitCollectDueArgs) -> Result<(
         serde_json::Value::Null
     } else {
         let overview = load_wallet_overview(&wallet_data_dir, false).await?;
-        changed |= sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
+        changed |= update_paid_route_store(&store_path, |store| {
+            Ok(sync_paid_exit_wallet_store_from_cashu(
+                store,
+                &overview,
+                unix_timestamp(),
+            ))
+        })?;
         json!(cashu_wallet_overview_json(&overview))
     };
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
+    let store = load_paid_route_store(&store_path)?;
     let daemon_reload_attempted = changed && !args.no_reload_daemon;
     if daemon_reload_attempted {
         maybe_reload_running_daemon(&config_path);

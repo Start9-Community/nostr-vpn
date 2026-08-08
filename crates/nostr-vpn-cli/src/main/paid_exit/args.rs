@@ -146,6 +146,9 @@ struct PaidExitImportOfferArgs {
 struct PaidExitDiscoverArgs {
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Import only signed offers accepted by this provider npub/link.
+    #[arg(long)]
+    provider: Option<String>,
     /// Wait up to this many seconds for the daemon's live discovery cache.
     #[arg(long, default_value_t = 0)]
     duration_secs: u64,

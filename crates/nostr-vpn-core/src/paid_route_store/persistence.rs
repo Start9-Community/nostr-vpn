@@ -1,4 +1,8 @@
 use super::*;
+use std::fs::{File, OpenOptions};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
 pub fn paid_route_store_file_path(config_path: &Path) -> PathBuf {
     let parent = config_path
@@ -73,23 +77,110 @@ pub fn load_paid_route_store(path: &Path) -> Result<PaidRouteStore> {
     Ok(store)
 }
 
-pub fn write_paid_route_store(path: &Path, store: &PaidRouteStore) -> Result<()> {
+fn write_paid_route_store(path: &Path, store: &PaidRouteStore) -> Result<()> {
     let raw = serde_json::to_string_pretty(store)
         .with_context(|| format!("failed to serialize paid route store {}", path.display()))?;
     crate::config::write_private_file_preserving_user_owner(path, raw.as_bytes())
         .with_context(|| format!("failed to write paid route store {}", path.display()))
 }
 
+#[cfg(unix)]
+fn preferred_paid_route_lock_owner(path: &Path) -> Option<(u32, u32)> {
+    let store_owner = fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.uid(), metadata.gid()));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_owner = fs::metadata(parent)
+        .ok()
+        .map(|metadata| (metadata.uid(), metadata.gid()));
+    crate::config::preferred_private_file_owner(store_owner, parent_owner)
+}
+
+#[cfg(unix)]
+fn repair_paid_route_lock(file: &File, path: &Path, owner: Option<(u32, u32)>) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect paid route lock {}", path.display()))?;
+    if let Some((uid, gid)) = owner
+        && (metadata.uid(), metadata.gid()) != (uid, gid)
+    {
+        std::os::unix::fs::fchown(file, Some(uid), Some(gid)).with_context(|| {
+            format!(
+                "failed to restore user ownership on paid route lock {}",
+                path.display()
+            )
+        })?;
+    }
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to protect paid route lock {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Exclusively updates the paid-route store across processes and commits it atomically.
+pub fn update_paid_route_store<T>(
+    path: &Path,
+    update: impl FnOnce(&mut PaidRouteStore) -> Result<T>,
+) -> Result<T> {
+    let lock_path = path.with_extension("json.lock");
+    #[cfg(unix)]
+    let initial_owner = preferred_paid_route_lock_owner(path);
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let lock = options.open(&lock_path).with_context(|| {
+        format!(
+            "failed to open paid route store lock {}",
+            lock_path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    repair_paid_route_lock(&lock, &lock_path, initial_owner)?;
+    lock.lock()
+        .with_context(|| format!("failed to lock paid route store {}", path.display()))?;
+    #[cfg(unix)]
+    repair_paid_route_lock(&lock, &lock_path, preferred_paid_route_lock_owner(path))?;
+
+    let mut store = load_paid_route_store(path)?;
+    let original = store.clone();
+    let result = update(&mut store)?;
+    if store != original {
+        write_paid_route_store(path, &store)?;
+    }
+    Ok(result)
+}
+
+#[cfg(all(test, unix))]
+mod lock_owner_tests {
+    #[test]
+    fn lock_owner_tracks_store_then_non_root_parent() {
+        assert_eq!(
+            crate::config::preferred_private_file_owner(Some((502, 20)), Some((501, 20))),
+            Some((502, 20))
+        );
+        assert_eq!(
+            crate::config::preferred_private_file_owner(Some((0, 0)), Some((501, 20))),
+            Some((501, 20))
+        );
+        assert_eq!(
+            crate::config::preferred_private_file_owner(None, Some((501, 20))),
+            Some((501, 20))
+        );
+    }
+}
+
 pub fn apply_paid_route_seller_payment_file(
     path: &Path,
     request: ApplyPaidRouteSellerPaymentRequest,
 ) -> Result<ApplyPaidRouteSellerPaymentResult> {
-    let mut store = load_paid_route_store(path)?;
-    let result = store.apply_seller_payment(request)?;
-    if result.changed {
-        write_paid_route_store(path, &store)?;
-    }
-    Ok(result)
+    update_paid_route_store(path, |store| store.apply_seller_payment(request))
 }
 
 pub fn acknowledge_paid_route_payment_outbox(
@@ -141,12 +232,9 @@ pub fn upsert_paid_route_offer(
     relay_urls: Vec<String>,
     seen_at_unix: u64,
 ) -> Result<bool> {
-    let mut store = load_paid_route_store(path)?;
-    let changed = store.upsert_signed_offer(signed_offer, relay_urls, seen_at_unix)?;
-    if changed {
-        write_paid_route_store(path, &store)?;
-    }
-    Ok(changed)
+    update_paid_route_store(path, |store| {
+        store.upsert_signed_offer(signed_offer, relay_urls, seen_at_unix)
+    })
 }
 
 pub fn paid_route_offer_store_key(seller_npub: &str, offer_id: &str) -> String {

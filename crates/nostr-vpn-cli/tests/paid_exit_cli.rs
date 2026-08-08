@@ -357,7 +357,7 @@ fn paid_exit_wallet_and_status_cover_mint_management_cli() {
 }
 
 #[test]
-fn paid_exit_collect_requires_seller_mode() {
+fn paid_exit_collect_requires_a_configured_mint() {
     let dir = TestDir::new("nvpn-paid-exit-cli-collect-disabled");
     let config_path = dir.path().join("config.toml");
 
@@ -373,7 +373,7 @@ fn paid_exit_collect_requires_seller_mode() {
     assert!(!collect.status.success(), "collect unexpectedly succeeded");
     let stderr = String::from_utf8_lossy(&collect.stderr);
     assert!(
-        stderr.contains("paid exit selling is disabled"),
+        stderr.contains("no accepted Cashu mints configured"),
         "unexpected stderr: {stderr}"
     );
 }

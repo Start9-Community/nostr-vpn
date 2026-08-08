@@ -142,11 +142,11 @@ async fn excess_stalled_clients_are_rejected_without_blocking_later_work() {
 fn relative_config_path_has_the_same_absolute_identity() {
     let relative = Path::new("Cargo.toml");
     let absolute = std::env::current_dir().unwrap().join(relative);
-    let relative_socket = daemon_join_request_socket_path(relative).unwrap();
-    assert!(relative_socket.is_absolute());
+    let relative_identity = absolute_config_identity(relative).unwrap();
+    assert!(relative_identity.is_absolute());
     assert_eq!(
-        relative_socket,
-        daemon_join_request_socket_path(&absolute).unwrap()
+        relative_identity,
+        absolute_config_identity(&absolute).unwrap()
     );
 }
 

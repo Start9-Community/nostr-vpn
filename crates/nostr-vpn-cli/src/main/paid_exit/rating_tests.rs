@@ -559,15 +559,25 @@ mod paid_exit_rating_tests {
     fn offer_discovery_rejects_expired_nip40_events() {
         let signed = sample_signed_offer("expiring", 100);
         let policy = paid_exit_offer_retention_policy(25, None);
+        let requested_seller = signed.event.pubkey;
+        let other_seller = Keys::generate().public_key();
 
         assert!(paid_exit_offer_event_is_live(
             &signed.event,
             &policy,
+            Some(&requested_seller),
             100 + nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS - 1,
         ));
         assert!(!paid_exit_offer_event_is_live(
             &signed.event,
             &policy,
+            Some(&other_seller),
+            100,
+        ));
+        assert!(!paid_exit_offer_event_is_live(
+            &signed.event,
+            &policy,
+            None,
             100 + nostr_vpn_core::paid_routes::PAID_ROUTE_OFFER_TTL_SECS,
         ));
     }
@@ -602,6 +612,7 @@ mod paid_exit_rating_tests {
         let events = wait_for_paid_exit_control_events(
             &config_path,
             &paid_exit_offer_retention_policy(25, None),
+            None,
             1,
         )
         .await

@@ -11,8 +11,8 @@ mod paid_exit {
         BuildPaidRouteBuyerPaymentEnvelopeRequest, BuildPaidRouteBuyerSignedPaymentEnvelopeRequest,
         OpenPaidRouteBuyerSessionRequest, PaidRouteChannelRecord, PaidRouteChannelRole,
         PaidRouteLifecycleStatus, PaidRouteSellerCollectionState, PaidRouteStore, PaidRouteWalletState,
-        UpdatePaidRouteSessionProbeRequest, load_paid_route_store, normalize_paid_route_mint_url,
-        paid_route_store_file_path, write_paid_route_store,
+        UpdatePaidRouteSessionProbeRequest, load_paid_route_store,
+        normalize_paid_route_mint_url, paid_route_store_file_path, update_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{
         ManualPaidExitProvider, PaidExitConfig, PaidExitUpstream, PaidRouteAccessState, PaidRouteCountryClaim,
@@ -27,8 +27,8 @@ mod paid_exit {
     };
 
     use super::{
-        AppConfig, Command, CommandWindowExt, Context, DaemonRuntimeState, NVPN_BIN_ENV,
-        NativeAppRuntime,
+        AppConfig, Command, CommandWindowExt, Context, DaemonRuntimeState, InternetSource,
+        NVPN_BIN_ENV, NativeAppRuntime,
         NativePaidExitSellerState, NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
         NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
         NativePaidRouteWalletState, Output, PaidExitSellerEgress, Path, PathBuf,
@@ -42,6 +42,7 @@ mod paid_exit {
 
     include!("paid_exit_wallet_runtime.rs");
     include!("paid_exit_actions.rs");
+    include!("paid_exit_manual_provider.rs");
     include!("paid_exit_wallet_helpers.rs");
     include!("paid_exit_state.rs");
     include!("paid_exit_text.rs");
@@ -215,7 +216,11 @@ mod paid_exit {
             ));
             std::fs::create_dir_all(&directory).expect("create market test directory");
             let path = directory.join("paid-routes.json");
-            write_paid_route_store(&path, &store).expect("write market store");
+            update_paid_route_store(&path, |target| {
+                *target = store;
+                Ok(())
+            })
+            .expect("write market store");
 
             let state = paid_route_market_state(
                 Some(&AppConfig::generated()),

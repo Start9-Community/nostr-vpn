@@ -184,7 +184,11 @@ fn paid_route_store_persists_wallet_offer_session_and_channel_state() {
         112
     ));
 
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store;
+        Ok(())
+    })
+    .expect("write store");
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -830,4 +834,17 @@ fn seller_collection_states_mark_expired_spilman_credit_due() {
     assert_eq!(due[0].reason, "expired");
     assert_eq!(due[0].channel_id, "channel-1");
     assert_eq!(due[0].session_id, "seller-session-lease-1");
+
+    config.enabled = false;
+    let disabled_due = store.seller_collection_states(&config, 500);
+
+    assert_eq!(disabled_due.len(), 1);
+    assert!(disabled_due[0].auto_collect_due);
+    assert_eq!(disabled_due[0].channel_id, "channel-1");
+    assert!(
+        store
+            .seller_collection_state_for_session(&config, 500, "seller-session-lease-1")
+            .is_some_and(|state| state.auto_collect_due),
+        "disabling new sales must not hide an existing collectable channel"
+    );
 }

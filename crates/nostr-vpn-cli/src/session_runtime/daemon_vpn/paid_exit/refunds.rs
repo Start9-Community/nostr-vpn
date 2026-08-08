@@ -34,7 +34,7 @@ struct PaidExitBuyerRefundAttempt {
 }
 
 struct PaidExitBuyerRefundCommand {
-    _client_store_guard: tokio::sync::OwnedMutexGuard<()>,
+    client_store_lock: SharedSpilmanClientStoreLock,
     config_path: PathBuf,
     channel_id: String,
     sync_wallet: bool,
@@ -196,13 +196,17 @@ impl PaidExitBuyerRefundRuntime {
         let Some(channel_id) = self.next_eligible_channel(&channel_ids) else {
             return Ok(());
         };
-        let Some(client_store_guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
+        let Some(client_store_lock) = SharedSpilmanClientStoreLock::try_acquire(
+            spilman_client_store_path(&paid_exit_wallet_data_dir(config_path)),
+        )
+        .map_err(|error| anyhow!("{error}"))?
+        else {
             return Ok(());
         };
         let sync_wallet = self.wallet_sync_pending.contains(&channel_id);
         self.command_tx
             .send(PaidExitBuyerRefundCommand {
-                _client_store_guard: client_store_guard,
+                client_store_lock,
                 config_path: config_path.to_path_buf(),
                 channel_id: channel_id.clone(),
                 sync_wallet,
@@ -299,7 +303,7 @@ async fn attempt_paid_exit_buyer_refund(
     command: PaidExitBuyerRefundCommand,
 ) -> PaidExitBuyerRefundAttempt {
     let PaidExitBuyerRefundCommand {
-        _client_store_guard,
+        client_store_lock,
         config_path,
         channel_id,
         sync_wallet,
@@ -308,17 +312,24 @@ async fn attempt_paid_exit_buyer_refund(
     let wallet_data_dir = paid_exit_wallet_data_dir(&config_path);
     let restore = tokio::time::timeout(
         attempt_timeout,
-        restore_streaming_route_cashu_spilman_refund(&wallet_data_dir, &channel_id),
+        restore_streaming_route_cashu_spilman_refund_with_lock(
+            &wallet_data_dir,
+            &channel_id,
+            client_store_lock,
+        ),
     )
     .await;
-    let outcome = match restore {
-        Err(_) => PaidExitBuyerRefundOutcome::Failed(format!(
+    let restore = match restore {
+        Err(_) => Err(anyhow!(
             "Cashu refund recovery timed out after {} ms",
             attempt_timeout.as_millis()
         )),
-        Ok(Err(error)) => PaidExitBuyerRefundOutcome::Failed(error.to_string()),
-        Ok(Ok(result)) if !result.complete => PaidExitBuyerRefundOutcome::Pending,
-        Ok(Ok(result)) => {
+        Ok(result) => result,
+    };
+    let outcome = match restore {
+        Err(error) => PaidExitBuyerRefundOutcome::Failed(error.to_string()),
+        Ok(result) if !result.complete => PaidExitBuyerRefundOutcome::Pending,
+        Ok(result) => {
             let refresh_wallet = sync_wallet || result.imported_amount_sat > 0;
             let (overview, wallet_error) = if refresh_wallet {
                 match tokio::time::timeout(
@@ -358,54 +369,52 @@ fn apply_paid_exit_buyer_refund_attempt(
     attempt: PaidExitBuyerRefundAttempt,
 ) -> Result<PaidExitBuyerRefundRecovery> {
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let mut recovery = PaidExitBuyerRefundRecovery {
-        scanned_count: 1,
-        ..PaidExitBuyerRefundRecovery::default()
-    };
-    if !store.channels.contains_key(&attempt.channel_id) {
-        return Ok(recovery);
-    }
-    match attempt.outcome {
-        PaidExitBuyerRefundOutcome::Complete {
-            imported_amount_sat,
-            overview,
-            wallet_error,
-        } => {
-            recovery.complete_count = 1;
-            recovery.imported_amount_sat = imported_amount_sat;
-            recovery.changed |=
-                store.mark_buyer_channel_closed(&attempt.channel_id, unix_timestamp())?;
-            if let Some(overview) = overview {
+    update_paid_route_store(&store_path, |store| {
+        let mut recovery = PaidExitBuyerRefundRecovery {
+            scanned_count: 1,
+            ..PaidExitBuyerRefundRecovery::default()
+        };
+        if !store.channels.contains_key(&attempt.channel_id) {
+            return Ok(recovery);
+        }
+        match attempt.outcome {
+            PaidExitBuyerRefundOutcome::Complete {
+                imported_amount_sat,
+                overview,
+                wallet_error,
+            } => {
+                recovery.complete_count = 1;
+                recovery.imported_amount_sat = imported_amount_sat;
                 recovery.changed |=
-                    sync_paid_exit_wallet_store_from_cashu(&mut store, &overview, unix_timestamp());
+                    store.mark_buyer_channel_closed(&attempt.channel_id, unix_timestamp())?;
+                if let Some(overview) = overview {
+                    recovery.changed |=
+                        sync_paid_exit_wallet_store_from_cashu(store, &overview, unix_timestamp());
+                }
+                if let Some(error) = wallet_error {
+                    recovery.error_count = 1;
+                    recovery.changed |= set_paid_exit_buyer_refund_error(
+                        store,
+                        &attempt.channel_id,
+                        format!("Cashu wallet balance refresh failed: {error}"),
+                    );
+                }
             }
-            if let Some(error) = wallet_error {
+            PaidExitBuyerRefundOutcome::Pending => {
+                recovery.pending_count = 1;
+                recovery.changed |= clear_paid_exit_buyer_refund_error(store, &attempt.channel_id);
+            }
+            PaidExitBuyerRefundOutcome::Failed(error) => {
                 recovery.error_count = 1;
                 recovery.changed |= set_paid_exit_buyer_refund_error(
-                    &mut store,
+                    store,
                     &attempt.channel_id,
-                    format!("Cashu wallet balance refresh failed: {error}"),
+                    format!("Cashu refund recovery failed: {error}"),
                 );
             }
         }
-        PaidExitBuyerRefundOutcome::Pending => {
-            recovery.pending_count = 1;
-            recovery.changed |= clear_paid_exit_buyer_refund_error(&mut store, &attempt.channel_id);
-        }
-        PaidExitBuyerRefundOutcome::Failed(error) => {
-            recovery.error_count = 1;
-            recovery.changed |= set_paid_exit_buyer_refund_error(
-                &mut store,
-                &attempt.channel_id,
-                format!("Cashu refund recovery failed: {error}"),
-            );
-        }
-    }
-    if recovery.changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
-    Ok(recovery)
+        Ok(recovery)
+    })
 }
 
 fn clear_paid_exit_buyer_refund_error(store: &mut PaidRouteStore, channel_id: &str) -> bool {
@@ -608,8 +617,11 @@ mod tests {
             PaidRouteChannelRole::Buyer,
             PaidRouteLifecycleStatus::Closing,
         ));
-        write_paid_route_store(&paid_route_store_file_path(&config_path), &store)
-            .expect("write paid route fixture");
+        update_paid_route_store(&paid_route_store_file_path(&config_path), |target| {
+            *target = store;
+            Ok(())
+        })
+        .expect("write paid route fixture");
         write_daemon_control_request(&config_path, DaemonControlRequest::Pause)
             .expect("queue daemon control request");
         let mut runtime = PaidExitBuyerRefundRuntime::with_timings(
@@ -671,6 +683,7 @@ mod tests {
         storage_errors
             .ensure_ok()
             .expect("persist Spilman fixtures");
+        drop(client_storage);
 
         let mut store = PaidRouteStore::default();
         store.upsert_channel(channel(
@@ -683,8 +696,11 @@ mod tests {
             PaidRouteChannelRole::Buyer,
             PaidRouteLifecycleStatus::Closing,
         ));
-        write_paid_route_store(&paid_route_store_file_path(&config_path), &store)
-            .expect("write paid route fixtures");
+        update_paid_route_store(&paid_route_store_file_path(&config_path), |target| {
+            *target = store;
+            Ok(())
+        })
+        .expect("write paid route fixtures");
 
         let attempt_timeout = Duration::from_millis(250);
         let mut runtime =
@@ -706,8 +722,11 @@ mod tests {
             .await
             .expect("production refund path did not reach the hanging HTTP mint")
             .expect("hanging mint acceptance signal dropped");
+        let client_store_path = spilman_client_store_path(&paid_exit_wallet_data_dir(&config_path));
         assert!(
-            try_lock_paid_exit_cashu_client_store(&config_path).is_none(),
+            SharedSpilmanClientStoreLock::try_acquire(&client_store_path)
+                .expect("probe Spilman client lock")
+                .is_none(),
             "daemon Cashu operations must not race the refund worker"
         );
         let control_tick_started = Instant::now();
@@ -736,10 +755,10 @@ mod tests {
         let complete = store.channels.get("b-complete").expect("complete channel");
         assert_eq!(complete.status, PaidRouteLifecycleStatus::Closed);
         assert!(complete.error.is_empty());
-        assert!(
-            try_lock_paid_exit_cashu_client_store(&config_path).is_some(),
-            "refund worker did not release Cashu client storage"
-        );
+        let released = SharedSpilmanClientStoreLock::try_acquire(&client_store_path)
+            .expect("probe released Spilman client lock")
+            .expect("refund worker did not release Cashu client storage");
+        drop(released);
 
         hanging_mint.abort();
     }

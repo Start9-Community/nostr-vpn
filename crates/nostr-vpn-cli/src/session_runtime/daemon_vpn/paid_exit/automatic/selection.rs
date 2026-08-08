@@ -12,7 +12,7 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
     }
 
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
+    let store = load_paid_route_store(&store_path)?;
     let selection = match automatic.selection(&store, now_unix) {
         Ok(selection) => selection,
         Err(_) => {
@@ -32,14 +32,6 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
     if let Some((seller_npub, seller_pubkey, session_id, funded)) =
         recover_automatic_paid_exit_session(&store, &selection, now_unix)
     {
-        let _client_store_guard = if funded {
-            let Some(guard) = try_lock_paid_exit_cashu_client_store(config_path) else {
-                return Ok(false);
-            };
-            Some(guard)
-        } else {
-            None
-        };
         let route_changed =
             app.public_paid_exit_node_pubkey_hex().as_deref() != Some(seller_pubkey.as_str());
         app.select_public_paid_exit_node(&seller_npub)?;
@@ -52,13 +44,7 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
             app.save(config_path)?;
         }
         if funded {
-            queue_recovered_automatic_channel_open(
-                app,
-                config_path,
-                &mut store,
-                &session_id,
-                now_unix,
-            )?;
+            queue_recovered_automatic_channel_open(app, config_path, &session_id, now_unix)?;
         }
         automatic.start_candidate(selection, seller_pubkey, session_id, funded, now_unix);
         return Ok(route_changed);
@@ -69,13 +55,15 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
         .public_key()
         .to_bech32()
         .context("failed to encode automatic paid exit buyer npub")?;
-    let session = store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
-        offer_selector: selection.offer_key.clone(),
-        buyer_npub,
-        mint_url: Some(selection.mint_url.clone()),
-        channel_capacity_sat: Some(selection.channel_capacity_sat),
-        initial_paid_msat: 0,
-        now_unix,
+    let session = update_paid_route_store(&store_path, |store| {
+        store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
+            offer_selector: selection.offer_key.clone(),
+            buyer_npub,
+            mint_url: Some(selection.mint_url.clone()),
+            channel_capacity_sat: Some(selection.channel_capacity_sat),
+            initial_paid_msat: 0,
+            now_unix,
+        })
     })?;
     let seller_pubkey = normalize_nostr_pubkey(&session.seller_npub)
         .context("invalid automatically selected paid exit seller")?;
@@ -87,9 +75,6 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
         return Err(anyhow!(
             "automatic paid exit selection changed internet mode"
         ));
-    }
-    if session.changed {
-        write_paid_route_store(&store_path, &store)?;
     }
     app.save(config_path)?;
     automatic.start_candidate(

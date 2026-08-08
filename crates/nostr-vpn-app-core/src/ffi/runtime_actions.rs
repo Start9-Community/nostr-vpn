@@ -27,10 +27,18 @@ impl NativeAppRuntime {
                 #[cfg(feature = "paid-exit")]
                 self.refresh_pending_paid_route_wallet();
                 if self.mobile_runtime {
-                    self.refresh_mobile_status()
+                    self.refresh_mobile_status()?;
                 } else {
-                    self.refresh_status()
+                    self.refresh_status()?;
                 }
+                #[cfg(feature = "paid-exit")]
+                if !self.config.manual_paid_exit_provider.is_default()
+                    && self.config.internet_source != InternetSource::PaidManual
+                {
+                    self.import_manual_paid_exit_provider_offer(0)?;
+                    self.buy_manual_paid_exit_provider_if_available()?;
+                }
+                Ok(())
             }
             NativeAppAction::ConnectVpn => self.connect_vpn(),
             NativeAppAction::DisconnectVpn => self.disconnect_vpn(),
@@ -302,7 +310,19 @@ impl NativeAppRuntime {
                     )?;
                 }
                 self.config = config;
-                self.save_reload_and_refresh()
+                self.save_reload_and_refresh()?;
+                #[cfg(feature = "paid-exit")]
+                {
+                    if !self.vpn_enabled {
+                        self.connect_vpn()?;
+                    }
+                    self.import_manual_paid_exit_provider_offer(0)?;
+                    if !self.buy_manual_paid_exit_provider_if_available()? {
+                        self.import_manual_paid_exit_provider_offer(5)?;
+                        self.buy_manual_paid_exit_provider_if_available()?;
+                    }
+                }
+                Ok(())
             }
             NativeAppAction::ClearManualPaidExitProvider => {
                 self.config.clear_manual_paid_exit_provider();

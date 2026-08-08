@@ -295,11 +295,6 @@ public partial class MainWindow : Window
     {
         await ViewModel.SavePaidExitPriceAsync();
     }
-    private async void ReceivePaidRoutePayments_Click(object sender, RoutedEventArgs e)
-    {
-        await ViewModel.ReceivePaidRoutePaymentsAsync();
-    }
-
     private async void RelayEnabled_Click(object sender, RoutedEventArgs e)
     {
         if (sender is CheckBox { Tag: NativeRelayState relay } checkBox)

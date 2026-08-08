@@ -398,22 +398,20 @@ fn paid_exit_record_probe_command(args: PaidExitRecordProbeArgs) -> Result<()> {
 fn paid_exit_record_probe_once(args: PaidExitRecordProbeArgs) -> Result<PaidExitRecordProbeResult> {
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
     let store_path = paid_route_store_file_path(&config_path);
-    let mut store = load_paid_route_store(&store_path)?;
     let quality = paid_exit_probe_quality_from_args(&args);
-    let result = store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
-        session_id: args.session,
-        realized_exit_ip: args.realized_exit_ip,
-        observed_country_code: args.observed_country_code,
-        observed_asn: args.observed_asn,
-        quality,
-        now_unix: unix_timestamp(),
+    let result = update_paid_route_store(&store_path, |store| {
+        store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
+            session_id: args.session,
+            realized_exit_ip: args.realized_exit_ip,
+            observed_country_code: args.observed_country_code,
+            observed_asn: args.observed_asn,
+            quality,
+            now_unix: unix_timestamp(),
+        })
     })?;
 
-    if result.changed {
-        write_paid_route_store(&store_path, &store)?;
-        if !args.no_reload_daemon {
-            maybe_reload_running_daemon(&config_path);
-        }
+    if result.changed && !args.no_reload_daemon {
+        maybe_reload_running_daemon(&config_path);
     }
 
     Ok(PaidExitRecordProbeResult {

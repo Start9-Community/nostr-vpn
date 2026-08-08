@@ -25,6 +25,8 @@ pub(crate) struct LinuxWireGuardExitRuntime {
     pub(crate) priority: u32,
     pub(crate) created_interface: bool,
     pub(crate) previous_default_route: Option<String>,
+    #[serde(default)]
+    handshake_completed: bool,
     endpoint_routes: Vec<LinuxRouteRestore>,
     previous_main_default_routes: Vec<String>,
     previous_table_routes: Vec<String>,
@@ -33,6 +35,26 @@ pub(crate) struct LinuxWireGuardExitRuntime {
 }
 
 impl LinuxWireGuardExitRuntime {
+    pub(crate) fn has_completed_handshake(&self) -> bool {
+        self.handshake_completed
+    }
+
+    pub(crate) fn refresh_completed_handshake(&mut self) -> Result<bool> {
+        match linux_wireguard_exit_has_completed_handshake_with(
+            &mut SystemLinuxCommandRunner,
+            &self.interface,
+        ) {
+            Ok(completed) => {
+                self.handshake_completed = completed;
+                Ok(completed)
+            }
+            Err(error) => {
+                self.handshake_completed = false;
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn refresh_underlay_default_route(&mut self, route: String) {
         upsert_runtime_underlay_route(&mut self.previous_main_default_routes, &route);
         self.previous_default_route = Some(route);
@@ -484,6 +506,7 @@ fn build_runtime(
         created_interface: created_interface
             || previous_runtime.is_some_and(|runtime| runtime.created_interface),
         previous_default_route,
+        handshake_completed: false,
         endpoint_routes,
         previous_main_default_routes,
         previous_table_routes: previous_runtime.map_or_else(
@@ -494,6 +517,44 @@ fn build_runtime(
             || previous_runtime.is_some_and(|runtime| runtime.policy_rule_owned),
         interface_restore,
     }
+}
+
+fn linux_wireguard_exit_has_completed_handshake_with(
+    runner: &mut impl LinuxCommandRunner,
+    iface: &str,
+) -> Result<bool> {
+    let output = command_output_checked(
+        runner,
+        "wg",
+        &strings(&["show", iface, "latest-handshakes"]),
+    )?;
+    parse_linux_wireguard_latest_handshakes(&output)
+}
+
+fn parse_linux_wireguard_latest_handshakes(output: &str) -> Result<bool> {
+    let mut rows = output.lines().map(str::trim).filter(|row| !row.is_empty());
+    let Some(row) = rows.next() else {
+        return Ok(false);
+    };
+    if rows.next().is_some() {
+        return Err(anyhow!(
+            "WireGuard exit interface returned more than one peer handshake"
+        ));
+    }
+    let mut fields = row.split_whitespace();
+    let _peer = fields
+        .next()
+        .ok_or_else(|| anyhow!("WireGuard exit handshake row is missing a peer"))?;
+    let timestamp = fields
+        .next()
+        .ok_or_else(|| anyhow!("WireGuard exit handshake row is missing a timestamp"))?;
+    if fields.next().is_some() {
+        return Err(anyhow!("WireGuard exit handshake row has extra fields"));
+    }
+    Ok(timestamp
+        .parse::<u64>()
+        .context("parse WireGuard exit handshake timestamp")?
+        > 0)
 }
 
 fn upsert_runtime_underlay_route(routes: &mut Vec<String>, route: &str) {

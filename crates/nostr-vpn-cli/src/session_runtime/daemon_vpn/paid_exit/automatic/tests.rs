@@ -45,7 +45,11 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
     store
         .upsert_signed_offer(signed, Vec::new(), now)
         .expect("stored offer");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store;
+        Ok(())
+    })
+    .expect("write store");
 
     let mut app = AppConfig::generated();
     app.set_internet_source(InternetSource::PaidAutomatic);

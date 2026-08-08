@@ -68,6 +68,8 @@ struct DaemonRuntimeState {
     listen_port: u16,
     #[serde(default)]
     paid_exit_seller_ready: bool,
+    #[serde(default)]
+    wireguard_exit_ready: bool,
     vpn_enabled: bool,
     vpn_active: bool,
     vpn_status: String,
@@ -476,6 +478,7 @@ struct CliTunnelRuntime {
     iface: String,
     active_listen_port: Option<u16>,
     paid_exit_seller_ready: bool,
+    wireguard_exit_ready: bool,
 }
 
 #[cfg(target_os = "linux")]

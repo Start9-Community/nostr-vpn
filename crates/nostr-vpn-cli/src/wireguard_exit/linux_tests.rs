@@ -987,3 +987,4 @@ fn post_apply_audit_fails_when_a_physical_default_keeps_reasserting() {
 }
 
 include!("linux_tests/reconciliation.rs");
+include!("linux_tests/readiness.rs");

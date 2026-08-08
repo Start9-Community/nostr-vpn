@@ -16,12 +16,9 @@ fn paid_route_wallet_mint_label(store: &PaidRouteStore, mint_url: &str) -> Strin
         .iter()
         .find(|mint| mint.url == mint_url)
         .map_or_else(
-            || {
-                if mint_url == DEFAULT_PAID_EXIT_WALLET_MINT {
-                    "Minibits".to_string()
-                } else {
-                    String::new()
-                }
+            || match mint_url {
+                DEFAULT_PAID_EXIT_WALLET_MINT => "Minibits".to_string(),
+                _ => String::new(),
             },
             |mint| mint.label.clone(),
         )
@@ -95,6 +92,9 @@ impl NativeAppRuntime {
                 (channel.role == PaidRouteChannelRole::Buyer
                     && counterparty == selected_exit_node
                     && store
+                        .buyer_session_is_seller_admitted(&record.session.session_id)
+                        .unwrap_or(false)
+                    && store
                         .buyer_session_allows_routing(&record.session.session_id, now_unix)
                         .unwrap_or(false))
                 .then(|| (
@@ -111,11 +111,10 @@ impl NativeAppRuntime {
         mutate: impl FnOnce(&mut PaidRouteStore) -> bool,
     ) -> Result<()> {
         let path = self.paid_route_store_path();
-        let mut store = load_paid_route_store(&path)?;
-        if mutate(&mut store) {
-            write_paid_route_store(&path, &store)?;
-        }
-        Ok(())
+        update_paid_route_store(&path, |store| {
+            mutate(store);
+            Ok(())
+        })
     }
 
     pub(super) fn add_paid_route_wallet_mint(
@@ -417,37 +416,38 @@ impl NativeAppRuntime {
             .to_bech32()
             .context("failed to encode buyer npub")?;
         let path = self.paid_route_store_path();
-        let mut store = load_paid_route_store(&path)?;
         let now_unix = unix_timestamp();
-        let preferred_mint = if self.config.manual_paid_exit_provider.is_default() {
-            mint_url.map(ToOwned::to_owned)
-        } else {
-            let offer = store.live_offer_for_selector(offer_key, now_unix)?;
-            self.config.manual_paid_exit_provider.accepts(&offer)?;
-            mint_url
-                .map(ToOwned::to_owned)
-                .or_else(|| (!self.config.manual_paid_exit_provider.mint.is_empty())
-                    .then(|| self.config.manual_paid_exit_provider.mint.clone()))
-        };
-        let result = store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
-            offer_selector: offer_key.to_string(),
-            buyer_npub,
-            mint_url: preferred_mint,
-            channel_capacity_sat,
-            initial_paid_msat: 0,
-            now_unix,
-        })?;
-        if result.changed {
-            write_paid_route_store(&path, &store)?;
-        }
-
-        let wallet_can_fund = paid_route_wallet_can_fund_channel(
-            &store.wallet,
-            &result.mint_url,
-            result.channel_capacity_sat,
-        );
-        let free_probe_ready = store
-            .buyer_session_allows_routing(&result.session_id, unix_timestamp())?;
+        let manual_provider = self.config.manual_paid_exit_provider.clone();
+        let offer_key = offer_key.to_string();
+        let requested_mint = mint_url.map(ToOwned::to_owned);
+        let (result, wallet_can_fund, free_probe_ready) =
+            update_paid_route_store(&path, |store| {
+                let preferred_mint = if manual_provider.is_default() {
+                    requested_mint
+                } else {
+                    let offer = store.live_offer_for_selector(&offer_key, now_unix)?;
+                    manual_provider.accepts(&offer)?;
+                    requested_mint.or_else(|| {
+                        (!manual_provider.mint.is_empty()).then(|| manual_provider.mint.clone())
+                    })
+                };
+                let result = store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
+                    offer_selector: offer_key,
+                    buyer_npub,
+                    mint_url: preferred_mint,
+                    channel_capacity_sat,
+                    initial_paid_msat: 0,
+                    now_unix,
+                })?;
+                let wallet_can_fund = paid_route_wallet_can_fund_channel(
+                    &store.wallet,
+                    &result.mint_url,
+                    result.channel_capacity_sat,
+                );
+                let free_probe_ready =
+                    store.buyer_session_allows_routing(&result.session_id, now_unix)?;
+                Ok((result, wallet_can_fund, free_probe_ready))
+            })?;
         if !wallet_can_fund && !free_probe_ready {
             return Err(anyhow!(
                 "Paid route created but is not ready: the selected mint needs at least {} sat to fund it",
@@ -545,19 +545,17 @@ impl NativeAppRuntime {
             last_seen_unix,
         };
         let path = self.paid_route_store_path();
-        let mut store = load_paid_route_store(&path)?;
-        let result = store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
-            session_id: session_id.to_string(),
-            realized_exit_ip: realized_exit_ip.map(ToOwned::to_owned),
-            observed_country_code: observed_country_code.map(ToOwned::to_owned),
-            observed_asn,
-            quality: (!quality.is_empty()).then_some(quality),
-            now_unix: unix_timestamp(),
-        })?;
-        if result.changed {
-            write_paid_route_store(&path, &store)?;
-        }
-        Ok(())
+        update_paid_route_store(&path, |store| {
+            store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
+                session_id: session_id.to_string(),
+                realized_exit_ip: realized_exit_ip.map(ToOwned::to_owned),
+                observed_country_code: observed_country_code.map(ToOwned::to_owned),
+                observed_asn,
+                quality: (!quality.is_empty()).then_some(quality),
+                now_unix: unix_timestamp(),
+            })?;
+            Ok(())
+        })
     }
 
     pub(super) fn probe_paid_route_session(
@@ -626,7 +624,7 @@ impl NativeAppRuntime {
             .to_bech32()
             .context("failed to encode buyer npub")?;
         let store_path = self.paid_route_store_path();
-        let mut store = load_paid_route_store(&store_path)?;
+        let store = load_paid_route_store(&store_path)?;
         let request = paid_route_wallet_channel_open_request(
             &store,
             session_id,
@@ -636,7 +634,7 @@ impl NativeAppRuntime {
             keyset_id,
         )?;
         let opened = self.cashu_wallet()?.open_spilman_channel(request)?;
-        let attach =
+        let payment = update_paid_route_store(&store_path, |store| {
             store.attach_buyer_spilman_channel(AttachPaidRouteBuyerSpilmanChannelRequest {
                 session_id: session_id.to_string(),
                 channel_id: opened.channel.channel_id.clone(),
@@ -646,19 +644,16 @@ impl NativeAppRuntime {
                 payment: opened.channel.payment.clone(),
                 now_unix: unix_timestamp(),
             })?;
-        let payment =
             store.build_buyer_payment_envelope(BuildPaidRouteBuyerPaymentEnvelopeRequest {
                 session_id: session_id.to_string(),
-                buyer_npub,
+                buyer_npub: buyer_npub.clone(),
                 kind: BuildPaidRouteBuyerPaymentEnvelopeKind::ChannelOpen,
                 payment: opened.channel.payment.clone(),
                 delivered_units: None,
                 paid_msat: Some(opened.channel.opening_paid_msat),
                 now_unix: unix_timestamp(),
-            })?;
-        if attach.changed || payment.changed {
-            write_paid_route_store(&store_path, &store)?;
-        }
+            })
+        })?;
         self.paid_route_payment_last_action =
             paid_route_payment_action_state("open_channel", &json!({ "payment": payment }))?;
         let amount_sat = opened.wallet_send.amount_sat;
@@ -700,24 +695,22 @@ impl NativeAppRuntime {
             .public_key()
             .to_bech32()
             .context("failed to encode buyer npub")?;
+        let store_path = self.paid_route_store_path();
         let signer = cashu_service::FileSpilmanPaymentSigner::load(&self.wallet_data_dir())
             .map_err(|error| anyhow!(error))?;
-        let store_path = self.paid_route_store_path();
-        let mut store = load_paid_route_store(&store_path)?;
-        let result = store.build_buyer_signed_payment_envelope(
-            &signer,
-            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
-                session_id: session_id.trim().to_string(),
-                buyer_npub,
-                kind,
-                delivered_units,
-                paid_msat,
-                now_unix: unix_timestamp(),
-            },
-        )?;
-        if result.changed {
-            write_paid_route_store(&store_path, &store)?;
-        }
+        let result = update_paid_route_store(&store_path, |store| {
+            store.build_buyer_signed_payment_envelope(
+                &signer,
+                BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                    session_id: session_id.trim().to_string(),
+                    buyer_npub,
+                    kind,
+                    delivered_units,
+                    paid_msat,
+                    now_unix: unix_timestamp(),
+                },
+            )
+        })?;
         self.paid_route_payment_last_action =
             paid_route_payment_action_state("sign", &json!({ "payment": result }))?;
         Ok(())
@@ -734,29 +727,33 @@ impl NativeAppRuntime {
             .public_key()
             .to_bech32()
             .context("failed to encode buyer npub")?;
+        let store_path = self.paid_route_store_path();
         let signer = cashu_service::FileSpilmanPaymentSigner::load(&self.wallet_data_dir())
             .map_err(|error| anyhow!(error))?;
-        let store_path = self.paid_route_store_path();
-        let mut store = load_paid_route_store(&store_path)?;
-        let result = store.build_buyer_signed_payment_envelope(
-            &signer,
-            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
-                session_id: session_id.trim().to_string(),
-                buyer_npub,
-                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose,
-                delivered_units: None,
-                paid_msat: None,
-                now_unix: unix_timestamp(),
-            },
-        )?;
-        let envelope_json = serde_json::to_string(&result.envelope)
-            .context("failed to encode paid route cooperative close envelope")?;
-        if publish {
-            self.send_paid_route_payment_envelope(&envelope_json)?;
-            if result.changed {
-                write_paid_route_store(&store_path, &store)?;
-            }
-        }
+        let build = |store: &mut PaidRouteStore| {
+            store.build_buyer_signed_payment_envelope(
+                &signer,
+                BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                    session_id: session_id.trim().to_string(),
+                    buyer_npub,
+                    kind: BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose,
+                    delivered_units: None,
+                    paid_msat: None,
+                    now_unix: unix_timestamp(),
+                },
+            )
+        };
+        let result = if publish {
+            update_paid_route_store(&store_path, |store| {
+                let result = build(store)?;
+                let envelope_json = serde_json::to_string(&result.envelope)
+                    .context("failed to encode paid route cooperative close envelope")?;
+                self.send_paid_route_payment_envelope(&envelope_json)?;
+                Ok(result)
+            })?
+        } else {
+            build(&mut load_paid_route_store(&store_path)?)?
+        };
         self.paid_route_payment_last_action =
             paid_route_payment_action_state("settle", &json!({ "payment": result }))?;
         Ok(())

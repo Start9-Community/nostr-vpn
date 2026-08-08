@@ -12,6 +12,8 @@ class TunnelRefreshPolicyTest {
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("accept_join_request"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("manual_add_network"))
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("add_participant"))
+        assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("set_manual_paid_exit_provider"))
+        assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("clear_manual_paid_exit_provider"))
     }
 
     @Test

@@ -468,7 +468,7 @@ fn relay_message_text(message: &Message) -> Option<&str> {
 #[test]
 fn paid_exit_buy_and_use_select_public_exit_route() {
     use nostr_sdk::prelude::Keys;
-    use nostr_vpn_core::paid_route_store::{PaidRouteStore, write_paid_route_store};
+    use nostr_vpn_core::paid_route_store::{PaidRouteStore, update_paid_route_store};
     use nostr_vpn_core::paid_routes::{PaidExitConfig, signed_paid_exit_offer_from_config};
 
     let nonce = std::time::SystemTime::now()
@@ -507,7 +507,11 @@ fn paid_exit_buy_and_use_select_public_exit_route() {
             now_unix,
         )
         .expect("store offer");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store.clone();
+        Ok(())
+    })
+    .expect("write store");
 
     let buy = paid_exit_buy_once(PaidExitBuyArgs {
         config: Some(config_path.clone()),
@@ -566,7 +570,7 @@ fn paid_exit_buy_and_use_select_public_exit_route() {
 fn paid_exit_buy_selects_route_before_payment_or_free_probe() {
     use nostr_sdk::prelude::Keys;
     use nostr_vpn_core::paid_route_store::{
-        PaidRouteStore, load_paid_route_store, write_paid_route_store,
+        PaidRouteStore, load_paid_route_store, update_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{PaidExitConfig, signed_paid_exit_offer_from_config};
 
@@ -604,7 +608,11 @@ fn paid_exit_buy_selects_route_before_payment_or_free_probe() {
             now_unix,
         )
         .expect("store offer");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store.clone();
+        Ok(())
+    })
+    .expect("write store");
 
     let buy = paid_exit_buy_once(PaidExitBuyArgs {
         config: Some(config_path.clone()),
@@ -688,7 +696,11 @@ async fn paid_exit_create_payment_command_updates_buyer_session() {
             now_unix: 125,
         })
         .expect("open buyer session");
-    write_paid_route_store(&store_path, &store).expect("write store");
+    update_paid_route_store(&store_path, |target| {
+        *target = store.clone();
+        Ok(())
+    })
+    .expect("write store");
 
     paid_exit_create_payment_command(PaidExitCreatePaymentArgs {
         config: Some(config_path.clone()),
@@ -864,8 +876,11 @@ async fn paid_exit_stream_payments_signs_due_buyer_usage_update() {
             })
             .is_empty()
     );
-    write_paid_route_store(&paid_route_store_file_path(&config_path), &store)
-        .expect("persist buyer store");
+    update_paid_route_store(&paid_route_store_file_path(&config_path), |target| {
+        *target = store.clone();
+        Ok(())
+    })
+    .expect("persist buyer store");
     let queued = load_paid_exit_payment_outbox(&config_path);
     assert_eq!(queued.len(), 1);
     assert!(

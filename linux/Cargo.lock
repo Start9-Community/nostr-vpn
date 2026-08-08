@@ -148,7 +148,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -159,7 +159,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -810,9 +810,9 @@ dependencies = [
 
 [[package]]
 name = "cashu-service"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fab47d9ad10bf5b4d8f4b50bc5ae70c09c873ad7d6ca106ace175d815359ede"
+checksum = "7d00c0bbcb4dda6545a09f38176d14b84dba846cf2c4ca8ced60ea1b115ae201"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -822,10 +822,12 @@ dependencies = [
  "cdk-sqlite",
  "fs2",
  "hex",
+ "libc",
  "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "url",
  "uuid",
@@ -1134,8 +1136,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1638,7 +1642,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1780,7 +1784,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1874,9 +1878,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.4.55"
+version = "0.4.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69bc9b6a989908341b2431a9c50d16b9b42eaf88abf3dc2f7215fb03f3c2ab34"
+checksum = "95762d6e4787aae6fee1df6e7d6e3cb2c0447a87f779c0acb99c09b3a2113458"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -1918,9 +1922,9 @@ dependencies = [
 
 [[package]]
 name = "fips-endpoint"
-version = "0.4.55"
+version = "0.4.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "483fdf372b17a3e24264ab845b833a94e8be794ba867226445dc197854c1cb54"
+checksum = "840d21774345687a7cf4efb76b60ed2ef2a90e619ff243b802b1842bd2a81d0e"
 dependencies = [
  "fips-core",
 ]
@@ -3776,6 +3780,20 @@ dependencies = [
 
 [[package]]
 name = "nostr-identity"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "848aac810edafec01cd47650e31bfe920129a9d1422df0385cca286625caeed4"
+dependencies = [
+ "anyhow",
+ "nostr-sdk",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "nostr-identity"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95fd048871579a175d1c38d1ea947f1034206d93696ea7ac74d140979e8022bb"
@@ -3791,14 +3809,44 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.11"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c509d68c8de0f87de781630cca6d3d4e61b2fe8a1ba3d21463efd7bc4780c6"
+checksum = "84bfacf8bb4c535ad4c80dc14bdef1dfe94b2b7064f8bf83509a137f8068e0e1"
 dependencies = [
  "async-trait",
  "nostr",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "nostr-pubsub-fips"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adc8faf150062ba116238c17ff74a61aef690942381c5ebff3198e74b43e60ec"
+dependencies = [
+ "async-trait",
+ "fips-core",
+ "fips-tcp",
+ "fips-tcp-endpoint",
+ "nostr",
+ "nostr-pubsub",
+ "nostr-pubsub-social-graph",
+ "tokio",
+]
+
+[[package]]
+name = "nostr-pubsub-social-graph"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1d9357bc482537beaf82ca020202063cdd62391d011341fb723869e0f22550"
+dependencies = [
+ "async-trait",
+ "nostr",
+ "nostr-pubsub",
+ "nostr-social-graph",
+ "nostr-social-memory",
  "thiserror 2.0.18",
 ]
 
@@ -3836,6 +3884,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostr-social-graph"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe75a62e7939ca311dce77039443ea14af0c8e0a9969c01746992acf7ef40b17"
+dependencies = [
+ "hex",
+ "indexmap 2.14.0",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "nostr-social-memory"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a51c186658b0602aebc9566ee405adfcc1c92d082c697543d0b50358da7f0f"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "nostr-identity 0.1.5",
+ "nostr-sdk",
+ "nostr-social-graph",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "nostr-vpn-app-core"
 version = "4.1.7"
 dependencies = [
@@ -3851,7 +3929,8 @@ dependencies = [
  "libc",
  "ndk-context",
  "netdev",
- "nostr-identity",
+ "nostr-identity 0.4.0",
+ "nostr-pubsub-fips",
  "nostr-sdk",
  "nostr-vpn-core",
  "qrcode",
@@ -3887,7 +3966,7 @@ dependencies = [
  "hostname",
  "keyring-core",
  "libc",
- "nostr-identity",
+ "nostr-identity 0.4.0",
  "nostr-sdk",
  "reqwest",
  "security-framework 2.11.1",
@@ -3927,7 +4006,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5029,7 +5108,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5585,7 +5664,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5781,7 +5860,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

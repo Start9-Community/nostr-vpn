@@ -146,24 +146,23 @@ fn withdraw_paid_exit_offers_for_daemon(
         .to_bech32()
         .context("failed to encode paid route seller npub")?;
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let offers = store
-        .offers
-        .values()
-        .filter(|record| record.offer.seller_npub == own_npub)
-        .map(|record| record.offer.clone())
-        .collect::<Vec<_>>();
-    let mut count = 0;
-    for offer in offers {
-        let signed = SignedPaidRouteOffer::sign_expiring_at(offer, &keys, signed_at, signed_at)?;
-        store.upsert_signed_offer(signed.clone(), Vec::new(), signed_at)?;
-        publish_paid_exit_offer_pubsub(app, config_path, &signed)?;
-        count += 1;
-    }
-    if count > 0 {
-        write_paid_route_store(&store_path, &store)?;
-    }
-    Ok(count)
+    update_paid_route_store(&store_path, |store| {
+        let offers = store
+            .offers
+            .values()
+            .filter(|record| record.offer.seller_npub == own_npub)
+            .map(|record| record.offer.clone())
+            .collect::<Vec<_>>();
+        let mut count = 0;
+        for offer in offers {
+            let signed =
+                SignedPaidRouteOffer::sign_expiring_at(offer, &keys, signed_at, signed_at)?;
+            store.upsert_signed_offer(signed.clone(), Vec::new(), signed_at)?;
+            publish_paid_exit_offer_pubsub(app, config_path, &signed)?;
+            count += 1;
+        }
+        Ok(count)
+    })
 }
 
 #[derive(Debug, Default)]
@@ -227,48 +226,46 @@ pub(super) fn apply_paid_exit_session_opens(
         .to_bech32()
         .context("failed to encode paid route seller npub")?;
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let mut result = PaidExitApplySessionOpensResult {
-        received_count: opens.len(),
-        ..PaidExitApplySessionOpensResult::default()
-    };
-    for (buyer_pubkey, open) in opens {
-        let buyer_pubkey = match app.validate_paid_exit_seller_buyer(&buyer_pubkey) {
-            Ok(buyer_pubkey) => buyer_pubkey,
-            Err(error) => {
-                result.error_count += 1;
-                eprintln!(
-                    "paid-exit: rejected authenticated session open from {buyer_pubkey}: {error}"
-                );
-                continue;
-            }
+    update_paid_route_store(&store_path, |store| {
+        let mut result = PaidExitApplySessionOpensResult {
+            received_count: opens.len(),
+            ..PaidExitApplySessionOpensResult::default()
         };
-        match store.apply_seller_session_open(ApplyPaidRouteSellerSessionOpenRequest {
-            open,
-            authenticated_buyer_pubkey: buyer_pubkey.clone(),
-            seller_npub: seller_npub.clone(),
-            config: app.paid_exit.clone(),
-            now_unix: unix_timestamp(),
-        }) {
-            Ok(applied) => {
-                result.applied_count += 1;
-                result.changed |= applied.changed;
-                result
-                    .acknowledgments
-                    .push((buyer_pubkey, applied.lease_id));
-            }
-            Err(error) => {
-                result.error_count += 1;
-                eprintln!(
-                    "paid-exit: rejected authenticated free-probe open from {buyer_pubkey}: {error}"
-                );
+        for (buyer_pubkey, open) in opens {
+            let buyer_pubkey = match app.validate_paid_exit_seller_buyer(&buyer_pubkey) {
+                Ok(buyer_pubkey) => buyer_pubkey,
+                Err(error) => {
+                    result.error_count += 1;
+                    eprintln!(
+                        "paid-exit: rejected authenticated session open from {buyer_pubkey}: {error}"
+                    );
+                    continue;
+                }
+            };
+            match store.apply_seller_session_open(ApplyPaidRouteSellerSessionOpenRequest {
+                open,
+                authenticated_buyer_pubkey: buyer_pubkey.clone(),
+                seller_npub: seller_npub.clone(),
+                config: app.paid_exit.clone(),
+                now_unix: unix_timestamp(),
+            }) {
+                Ok(applied) => {
+                    result.applied_count += 1;
+                    result.changed |= applied.changed;
+                    result
+                        .acknowledgments
+                        .push((buyer_pubkey, applied.lease_id));
+                }
+                Err(error) => {
+                    result.error_count += 1;
+                    eprintln!(
+                        "paid-exit: rejected authenticated free-probe open from {buyer_pubkey}: {error}"
+                    );
+                }
             }
         }
-    }
-    if result.changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
-    Ok(result)
+        Ok(result)
+    })
 }
 
 pub(super) struct PaidExitMeshEventContext<'a> {
@@ -435,13 +432,9 @@ pub(super) fn acknowledge_paid_exit_session_open(
     lease_id: &str,
 ) -> Result<bool> {
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let changed =
-        store.acknowledge_buyer_session_open(seller_pubkey, lease_id, unix_timestamp())?;
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
-    Ok(changed)
+    update_paid_route_store(&store_path, |store| {
+        store.acknowledge_buyer_session_open(seller_pubkey, lease_id, unix_timestamp())
+    })
 }
 
 pub(super) fn flush_fips_paid_route_usage(
@@ -452,69 +445,68 @@ pub(super) fn flush_fips_paid_route_usage(
     active_millis_delta: u64,
 ) -> Result<PaidExitUsageFlush> {
     let store_path = paid_route_store_file_path(config_path);
-    let mut store = load_paid_route_store(&store_path)?;
-    let mut changed = false;
-    let seller_admission_routing_before = if app.paid_exit.enabled {
-        paid_route_seller_admission_routing_signature(
-            &store.seller_admissions(&app.paid_exit, now_unix),
-        )
-    } else {
-        Vec::new()
-    };
+    update_paid_route_store(&store_path, |store| {
+        let mut changed = false;
+        let seller_admission_routing_before = if app.paid_exit.enabled {
+            paid_route_seller_admission_routing_signature(
+                &store.seller_admissions(&app.paid_exit, now_unix),
+            )
+        } else {
+            Vec::new()
+        };
 
-    let mut buyer_delta = PaidRouteUsage::default();
-    if let Some(seller_pubkey) = app.public_paid_exit_node_pubkey_hex() {
-        let mut usage_delta = runtime.drain_paid_route_usage(&seller_pubkey)?;
-        usage_delta.active_millis = usage_delta
-            .active_millis
-            .saturating_add(active_millis_delta);
-        buyer_delta = usage_delta.clone();
-        if !usage_delta.is_empty() {
-            changed |= store
-                .record_buyer_usage(RecordPaidRouteBuyerUsageRequest {
-                    seller_pubkey,
-                    usage_delta,
-                    now_unix,
-                })?
-                .is_some_and(|result| result.changed);
-        }
-    }
-
-    if app.paid_exit.enabled {
-        for admission in store.seller_admissions(&app.paid_exit, now_unix) {
-            let mut usage_delta = runtime.drain_paid_route_usage(&admission.buyer_pubkey)?;
-            if admission.allow_routing {
-                usage_delta.active_millis = usage_delta
-                    .active_millis
-                    .saturating_add(active_millis_delta);
+        let mut buyer_delta = PaidRouteUsage::default();
+        if let Some(seller_pubkey) = app.public_paid_exit_node_pubkey_hex() {
+            let mut usage_delta = runtime.drain_paid_route_usage(&seller_pubkey)?;
+            usage_delta.active_millis = usage_delta
+                .active_millis
+                .saturating_add(active_millis_delta);
+            buyer_delta = usage_delta.clone();
+            if !usage_delta.is_empty() {
+                changed |= store
+                    .record_buyer_usage(RecordPaidRouteBuyerUsageRequest {
+                        seller_pubkey,
+                        usage_delta,
+                        now_unix,
+                    })?
+                    .is_some_and(|result| result.changed);
             }
-            if usage_delta.is_empty() {
-                continue;
-            }
-            changed |= store
-                .record_seller_usage(RecordPaidRouteSellerUsageRequest {
-                    buyer_pubkey: admission.buyer_pubkey,
-                    config: app.paid_exit.clone(),
-                    usage_delta,
-                    now_unix,
-                })?
-                .is_some_and(|result| result.changed);
         }
-    }
 
-    if changed {
-        write_paid_route_store(&store_path, &store)?;
-    }
-    let seller_admission_routing_after = if changed && app.paid_exit.enabled {
-        paid_route_seller_admission_routing_signature(
-            &store.seller_admissions(&app.paid_exit, now_unix),
-        )
-    } else {
-        seller_admission_routing_before.clone()
-    };
-    Ok(PaidExitUsageFlush {
-        seller_admission_changed: seller_admission_routing_after != seller_admission_routing_before,
-        buyer_delta,
+        if app.paid_exit.enabled {
+            for admission in store.seller_admissions(&app.paid_exit, now_unix) {
+                let mut usage_delta = runtime.drain_paid_route_usage(&admission.buyer_pubkey)?;
+                if admission.allow_routing {
+                    usage_delta.active_millis = usage_delta
+                        .active_millis
+                        .saturating_add(active_millis_delta);
+                }
+                if usage_delta.is_empty() {
+                    continue;
+                }
+                changed |= store
+                    .record_seller_usage(RecordPaidRouteSellerUsageRequest {
+                        buyer_pubkey: admission.buyer_pubkey,
+                        config: app.paid_exit.clone(),
+                        usage_delta,
+                        now_unix,
+                    })?
+                    .is_some_and(|result| result.changed);
+            }
+        }
+
+        let seller_admission_routing_after = if changed && app.paid_exit.enabled {
+            paid_route_seller_admission_routing_signature(
+                &store.seller_admissions(&app.paid_exit, now_unix),
+            )
+        } else {
+            seller_admission_routing_before.clone()
+        };
+        Ok(PaidExitUsageFlush {
+            seller_admission_changed: seller_admission_routing_after
+                != seller_admission_routing_before,
+            buyer_delta,
+        })
     })
 }
 
