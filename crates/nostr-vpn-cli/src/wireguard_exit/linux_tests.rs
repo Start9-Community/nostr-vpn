@@ -869,7 +869,7 @@ fn already_active_alternate_underlay_refresh_preserves_all_cleanup_defaults() {
         "the endpoint bypass must move to the selected alternate underlay"
     );
     assert_eq!(
-        runtime.underlay_default_route_hints(),
+        runtime.underlay_default_route_hints_with(&mut runner),
         std::slice::from_ref(&secondary)
     );
     assert_eq!(

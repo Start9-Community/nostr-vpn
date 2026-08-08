@@ -61,8 +61,17 @@ impl LinuxWireGuardExitRuntime {
     }
 
     pub(crate) fn underlay_default_route_hints(&self) -> &[String] {
-        // The full default-route set is cleanup history, not live selection state.
-        self.previous_default_route.as_slice()
+        self.underlay_default_route_hints_with(&mut SystemLinuxCommandRunner)
+    }
+
+    fn underlay_default_route_hints_with(&self, runner: &mut impl LinuxCommandRunner) -> &[String] {
+        if let Some(route) = self.previous_default_route.as_ref()
+            && crate::linux_default_route_spec_from_line(route)
+                .is_some_and(|route| runner.ipv4_default_route_is_usable(&route))
+        {
+            return self.previous_default_route.as_slice();
+        }
+        &self.previous_main_default_routes
     }
 
     pub(crate) fn underlay_default_route_for_interface(

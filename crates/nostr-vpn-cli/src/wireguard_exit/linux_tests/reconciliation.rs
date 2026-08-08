@@ -120,6 +120,38 @@ fn new_underlay_is_cached_and_switch_back_survives_reapply() {
     )
     .expect("initial primary apply");
 
+    assert_eq!(
+        runtime.underlay_default_route_hints_with(&mut runner),
+        std::slice::from_ref(&primary)
+    );
+
+    runner.usable_default_interfaces.remove("eth0");
+    let hints = runtime
+        .underlay_default_route_hints_with(&mut runner)
+        .to_vec();
+    assert_eq!(hints, initial_defaults);
+    let usable_hints = hints
+        .into_iter()
+        .filter(|route| {
+            crate::linux_default_route_spec_from_line(route)
+                .is_some_and(|route| runner.ipv4_default_route_is_usable(&route))
+        })
+        .collect::<Vec<_>>();
+    let alternate = lowest_metric_default_route(&usable_hints.join("\n"))
+        .map(|(route, _)| route)
+        .expect("carrier-up journal route");
+    assert_eq!(alternate, initial_defaults[1]);
+    runtime = apply_linux_wireguard_exit_upstream_with(
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        Some(&runtime),
+        Some(&alternate),
+    )
+    .expect("fail over to captured alternate");
+    assert!(runner.state.endpoint_routes["198.51.100.20/32"][0].contains("dev eth1"));
+    runner.usable_default_interfaces.insert("eth0".to_string());
+
     runner.state.main_routes.push(new_underlay.clone());
     runtime.refresh_underlay_default_route(new_underlay.clone());
     let mut runtime = apply_linux_wireguard_exit_upstream_with(
@@ -157,13 +189,15 @@ fn new_underlay_is_cached_and_switch_back_survives_reapply() {
     )
     .expect("switch back to original underlay");
     assert_eq!(
-        runtime.underlay_default_route_hints(),
+        runtime.underlay_default_route_hints_with(&mut runner),
         std::slice::from_ref(&primary),
         "only the active primary may feed later route selection"
     );
     for _ in 0..2 {
         let hint = lowest_metric_default_route(
-            &runtime.underlay_default_route_hints().join("\n"),
+            &runtime
+                .underlay_default_route_hints_with(&mut runner)
+                .join("\n"),
         )
         .map(|(route, _)| route)
         .expect("active underlay hint");
