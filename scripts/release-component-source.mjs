@@ -105,6 +105,10 @@ function git(root, args, label) {
 function isProductInput(path, platform) {
   if (harnessOnlyPaths.has(path)) return false
   if (
+    path === 'crates/nostr-vpn-cli/src/wireguard_exit/linux_tests.rs'
+    || path.startsWith('crates/nostr-vpn-cli/src/wireguard_exit/linux_tests/')
+  ) return false
+  if (
     path.startsWith('crates/')
     && (
       /\/tests\//.test(path)
@@ -113,6 +117,12 @@ function isProductInput(path, platform) {
     )
   ) return false
   if (path.startsWith('crates/nostr-vpn-cli/')) {
+    if (
+      path === 'crates/nostr-vpn-cli/src/wireguard_exit.rs'
+      || path.startsWith('crates/nostr-vpn-cli/src/wireguard_exit/')
+    ) {
+      return platform === 'linux'
+    }
     if (path === 'crates/nostr-vpn-cli/src/macos_service.rs') {
       return platform === 'macos'
     }

@@ -212,6 +212,12 @@ test('component proof scopes desktop crates and Rust test modules', () => {
     'crates/nostr-vpn-cli/src/session_runtime/tests.rs',
     'crates/nostr-vpn-cli/src/tests/service_cli.rs',
     'scripts/e2e-fips-roaming-docker.sh',
+    'crates/nostr-vpn-cli/src/wireguard_exit.rs',
+    'crates/nostr-vpn-cli/src/wireguard_exit/linux_runtime.rs',
+    'crates/nostr-vpn-cli/src/wireguard_exit/linux_commands.rs',
+    'crates/nostr-vpn-cli/src/wireguard_exit/linux_tests.rs',
+    'crates/nostr-vpn-cli/src/wireguard_exit/linux_tests/reconciliation.rs',
+    'crates/nostr-vpn-cli/src/wireguard_exit_helpers.rs',
   ]
   try {
     git('init', '-q')
@@ -251,7 +257,15 @@ test('component proof scopes desktop crates and Rust test modules', () => {
     assertScope('shared-cli', [paths[0]], ['linux', 'macos', 'windows'])
     assertScope('macos-service', [paths[1]], ['macos'])
     assertScope('windows-wintun', [paths[2]], ['windows'])
-    assertScope('harness-only', paths.slice(3), [])
+    assertScope('harness-only', paths.slice(3, 7), [])
+    assertScope('linux-wireguard-exit-module', [paths[7]], ['linux'])
+    assertScope('linux-wireguard-exit-sources', paths.slice(8, 10), ['linux'])
+    assertScope('linux-wireguard-exit-tests', paths.slice(10, 12), [])
+    assertScope(
+      'wireguard-exit-boundary-control',
+      [paths[12]],
+      ['linux', 'macos', 'windows'],
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
