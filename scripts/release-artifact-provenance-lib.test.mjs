@@ -96,6 +96,7 @@ test('component proof retains only unchanged platform product inputs', () => {
       ...args, candidateCommit: verifierTest.commit, candidateTree: verifierTest.tree,
     }))
     for (const path of [
+      'scripts/android-release-foreground-idle-receipt.mjs',
       'scripts/ios-upload-receipt.mjs',
       'scripts/publish-release-refs.mjs',
       'scripts/release-mutation-gate.mjs',
@@ -688,6 +689,8 @@ test('release receipt collection requires exact source and strict public UI gate
       android: {
         install: join(root, 'android-install.json'),
         physical: join(root, 'android.json'),
+        foreground_idle_cpu: join(root, 'android-foreground-idle.json'),
+        foreground_idle_cpu_raw: join(root, 'android-foreground-idle-raw.json'),
         mobile_join: mobileJoinPath,
         wireguard_dns: join(root, 'android-wg.json'),
         underlay_lifecycle: join(root, 'android-underlay.json'),
@@ -745,6 +748,7 @@ test('release receipt collection requires exact source and strict public UI gate
       package: 'fi.siriusbusiness.nvpn',
       signerCertificateSha256: '2'.repeat(64),
       companySigningVerified: true,
+      debuggable: false,
       fipsCoreVersion: source.fipsVersion,
       fipsCargoMetadataReceiptSha256: 'd'.repeat(64),
     }
@@ -762,6 +766,44 @@ test('release receipt collection requires exact source and strict public UI gate
       fipsCoreVersion: source.fipsVersion,
     }
     const androidText = JSON.stringify(androidArtifact)
+    const androidForegroundIdleRaw = {
+      ok: true,
+      mode: 'android-package',
+      label: 'Android Release foreground VPN-off',
+      maxPercent: 2,
+      sampleSeconds: 60,
+      settleSeconds: 10,
+      elapsedSeconds: 60.25,
+      cpuPercent: 1.25,
+      package: androidArtifact.package,
+      pids: [1234],
+      clockTicks: 100,
+      generatedAt: '2026-08-09T17:30:55Z',
+    }
+    const androidForegroundIdleRawText = JSON.stringify(
+      androidForegroundIdleRaw,
+    )
+    const androidForegroundIdle = {
+      ...source,
+      receiptSchema: 1,
+      artifactType:
+        'Android exact Release foreground VPN-off idle CPU gate',
+      platform: 'android',
+      mode: 'foreground-vpn-off-idle',
+      artifactReceiptSha256: sha256(androidText),
+      artifactIdentity: {
+        apkSha256: androidArtifact.apkSha256,
+        installedApkSha256: androidArtifact.installedApkSha256,
+        package: androidArtifact.package,
+        signerCertificateSha256:
+          androidArtifact.signerCertificateSha256,
+      },
+      rawIdleCpuReceiptSha256: sha256(androidForegroundIdleRawText),
+      foregroundActivityVerified: true,
+      vpnInactiveBeforeSample: true,
+      releaseNonDebuggable: true,
+      sample: androidForegroundIdleRaw,
+    }
     const androidInstall = {
       artifact: 'Android Release APK',
       apkSha256: androidArtifact.apkSha256,
@@ -802,6 +844,14 @@ test('release receipt collection requires exact source and strict public UI gate
     const iosJoinVariantText = JSON.stringify(iosJoinVariant)
     writeFileSync(paths.android.physical, androidText)
     writeFileSync(paths.android.install, androidInstallText)
+    writeFileSync(
+      paths.android.foreground_idle_cpu_raw,
+      androidForegroundIdleRawText,
+    )
+    writeFileSync(
+      paths.android.foreground_idle_cpu,
+      JSON.stringify(androidForegroundIdle),
+    )
     writeFileSync(paths.ios.mobile_artifact, iosText)
     writeFileSync(paths.ios.join_variant, iosJoinVariantText)
     const networkReceipt = (platform, mode, artifact, artifactText) => ({
@@ -1527,6 +1577,7 @@ test('release receipt collection requires exact source and strict public UI gate
     const androidIdentityPaths = [
       paths.android.physical,
       paths.android.install,
+      paths.android.foreground_idle_cpu,
       paths.android.wireguard_dns,
       paths.android.underlay_lifecycle,
       paths.android.replacement_singleton,
@@ -1680,6 +1731,27 @@ test('release receipt collection requires exact source and strict public UI gate
         ]
       },
       /lacks its durable counter ledger/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.foreground_idle_cpu,
+      (receipt) => {
+        receipt.sample.cpuPercent = 2.01
+      },
+      /foreground VPN-off idle CPU receipt is incomplete/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.foreground_idle_cpu,
+      (receipt) => {
+        receipt.artifactReceiptSha256 = '0'.repeat(64)
+      },
+      /foreground VPN-off idle CPU receipt is not exact artifact evidence/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.foreground_idle_cpu_raw,
+      (receipt) => {
+        receipt.cpuPercent = 1.5
+      },
+      /foreground VPN-off idle CPU raw receipt SHA-256 differs/,
     )
     assertRejectedReceiptMutation(
       paths.linux.public_ui_join,

@@ -196,6 +196,8 @@ grep -Fq 'Android Release foreground idle CPU gate requires VPN-off state' "$MOB
   || fail "Android exact Release foreground idle gate does not require VPN-off state"
 grep -Fq 'android-release-foreground-vpn-off-idle/idle-cpu.json' "$RELEASE_GATE" \
   || fail "Android exact Release foreground idle CPU lacks a distinct artifact path"
+grep -Fq 'write_android_release_foreground_idle_receipt' "$MOBILE_ANDROID_SMOKE" \
+  || fail "Android exact Release foreground idle CPU lacks its source/artifact-bound receipt"
 grep -Fq './scripts/mobile-android-smoke.sh --release-network-gate' "$RELEASE_GATE" \
   || fail "release gate does not run the exact signed nondebuggable Android Release foreground idle gate"
 grep -Fq 'run_android_activity_lifecycle_gate' "$MOBILE_ANDROID_SMOKE" \

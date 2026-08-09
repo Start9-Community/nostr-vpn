@@ -501,6 +501,18 @@ PY
   echo "Android exact company-signed Release replacement passed: $receipt"
 }
 
+write_android_release_foreground_idle_receipt() {
+  local raw_receipt artifact_receipt output
+  raw_receipt="$(android_idle_cpu_path)"
+  artifact_receipt="${NVPN_MOBILE_ANDROID_RELEASE_RECEIPT:-$RUNTIME_STATE_RESULT_DIR/mobile-android-release-artifact.json}"
+  output="${NVPN_ANDROID_FOREGROUND_IDLE_RECEIPT:-$(dirname "$raw_receipt")/receipt.json}"
+  node "$ROOT/scripts/android-release-foreground-idle-receipt.mjs" create \
+    --artifact-receipt "$artifact_receipt" \
+    --raw-receipt "$raw_receipt" \
+    --output "$output" \
+    --verified-live-context
+}
+
 android_release_ensure_network_ui() {
   start_main_activity
   sleep 0.5

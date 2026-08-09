@@ -11,6 +11,8 @@ import { buildReleaseGateAttestation } from './release-artifact-provenance-lib.m
 
 const platforms = {
   android: [
+    'foreground_idle_cpu',
+    'foreground_idle_cpu_raw',
     'install',
     'mobile_join',
     'physical',

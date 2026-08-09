@@ -905,6 +905,88 @@ function requireAndroidInstallReceipt(receipt, artifact) {
   }
 }
 
+export function validateAndroidForegroundIdleCpuSample(sample, packageName) {
+  if (
+    sample?.ok !== true
+    || sample.mode !== 'android-package'
+    || sample.label !== 'Android Release foreground VPN-off'
+    || sample.package !== packageName
+    || sample.maxPercent !== 2
+    || sample.sampleSeconds !== 60
+    || !Number.isFinite(sample.settleSeconds)
+    || sample.settleSeconds < 0
+    || !Number.isFinite(sample.elapsedSeconds)
+    || sample.elapsedSeconds < sample.sampleSeconds
+    || !Number.isFinite(sample.cpuPercent)
+    || sample.cpuPercent < 0
+    || sample.cpuPercent > sample.maxPercent
+    || !Number.isSafeInteger(sample.clockTicks)
+    || sample.clockTicks <= 0
+    || !Array.isArray(sample.pids)
+    || sample.pids.length === 0
+    || sample.pids.some(
+      (pid) => !Number.isSafeInteger(pid) || pid <= 0,
+    )
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
+      .test(String(sample.generatedAt ?? ''))
+  ) {
+    throw new Error(
+      'Android foreground VPN-off idle CPU receipt is incomplete.',
+    )
+  }
+}
+
+function requireAndroidForegroundIdleReceipt({
+  receipt,
+  rawReceipt,
+  rawReceiptSha256,
+  artifact,
+  artifactReceiptSha256,
+}) {
+  const identity = receipt.artifactIdentity
+  if (
+    receipt.receiptSchema !== 1
+    || receipt.artifactType
+      !== 'Android exact Release foreground VPN-off idle CPU gate'
+    || receipt.platform !== 'android'
+    || receipt.mode !== 'foreground-vpn-off-idle'
+    || receipt.appGitSha !== artifact.appGitSha
+    || receipt.appGitTree !== artifact.appGitTree
+    || receipt.fipsGitSha !== artifact.fipsGitSha
+    || receipt.fipsGitTree !== artifact.fipsGitTree
+    || receipt.artifactReceiptSha256 !== artifactReceiptSha256
+    || artifact.companySigningVerified !== true
+    || artifact.debuggable !== false
+    || artifact.apkSha256 !== artifact.installedApkSha256
+    || identity?.apkSha256 !== artifact.apkSha256
+    || identity?.installedApkSha256 !== artifact.installedApkSha256
+    || identity?.package !== artifact.package
+    || identity?.signerCertificateSha256
+      !== artifact.signerCertificateSha256
+  ) {
+    throw new Error(
+      'Android foreground VPN-off idle CPU receipt is not exact artifact evidence.',
+    )
+  }
+  if (receipt.rawIdleCpuReceiptSha256 !== rawReceiptSha256) {
+    throw new Error(
+      'Android foreground VPN-off idle CPU raw receipt SHA-256 differs.',
+    )
+  }
+  const sample = receipt.sample
+  if (
+    !isDeepStrictEqual(sample, rawReceipt)
+    || receipt.foregroundActivityVerified !== true
+    || receipt.vpnInactiveBeforeSample !== true
+    || receipt.releaseNonDebuggable !== true
+  ) {
+    throw new Error(
+      'Android foreground VPN-off idle CPU receipt is incomplete.',
+    )
+  }
+  validateAndroidForegroundIdleCpuSample(sample, artifact.package)
+}
+
 function requireMobileNetworkReceipt({
   receipt,
   platform,
@@ -1477,6 +1559,23 @@ function collectReleaseGateEvidence({
   const androidInstallReceiptSize = readFileSync(
     platformReceiptPaths.android.install,
   ).byteLength
+  const androidForegroundIdleRaw = readRequiredJson(
+    platformReceiptPaths.android.foreground_idle_cpu_raw,
+    'Android foreground VPN-off idle CPU raw receipt',
+  )
+  const androidForegroundIdle = readRequiredJson(
+    platformReceiptPaths.android.foreground_idle_cpu,
+    'Android foreground VPN-off idle CPU receipt',
+  )
+  requireAndroidForegroundIdleReceipt({
+    receipt: androidForegroundIdle,
+    rawReceipt: androidForegroundIdleRaw,
+    rawReceiptSha256: sha256FileSync(
+      platformReceiptPaths.android.foreground_idle_cpu_raw,
+    ),
+    artifact: android,
+    artifactReceiptSha256: androidReceiptSha256,
+  })
   const androidNetworkReceiptPaths = {
     wireguard_dns: platformReceiptPaths.android.wireguard_dns,
     underlay_lifecycle: existsSync(

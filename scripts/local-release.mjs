@@ -2377,6 +2377,18 @@ function main() {
     android: {
       install: join(releaseJoinResultDir, 'android-release-install.json'),
       physical: androidGateReceiptPath,
+      foreground_idle_cpu: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'android-release-foreground-vpn-off-idle',
+        'receipt.json',
+      ),
+      foreground_idle_cpu_raw: join(
+        releaseGateLogDir,
+        'mobile-network',
+        'android-release-foreground-vpn-off-idle',
+        'idle-cpu.json',
+      ),
       mobile_join: join(releaseJoinResultDir, 'summary.json'),
       wireguard_dns: join(
         releaseGateLogDir,

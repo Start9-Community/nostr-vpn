@@ -2820,6 +2820,7 @@ if truthy "$RELEASE_BLACKBOX_GATE"; then
       exit 1
     fi
     run_android_idle_cpu_gate "Android Release foreground VPN-off"
+    write_android_release_foreground_idle_receipt
   fi
   assert_single_android_app_process
   echo "Android Release black-box smoke passed on adb serial: $serial"

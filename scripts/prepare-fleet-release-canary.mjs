@@ -207,10 +207,21 @@ function receiptPaths({ root, gateDir, joinDir }) {
   const desktopNetwork = join(gateDir, 'desktop-network')
   return {
     android: {
+      install: join(joinDir, 'android-release-install.json'),
       physical: join(
         gateDir,
         'mobile-release-artifacts',
         'android.json',
+      ),
+      foreground_idle_cpu: join(
+        mobileNetwork,
+        'android-release-foreground-vpn-off-idle',
+        'receipt.json',
+      ),
+      foreground_idle_cpu_raw: join(
+        mobileNetwork,
+        'android-release-foreground-vpn-off-idle',
+        'idle-cpu.json',
       ),
       mobile_join: join(joinDir, 'summary.json'),
       wireguard_dns: join(mobileNetwork, 'android-wireguard-dns.json'),

@@ -25,6 +25,8 @@ const sourceKeys = [
 ]
 const platformReceiptKeys = {
   android: [
+    'foreground_idle_cpu',
+    'foreground_idle_cpu_raw',
     'install',
     'mobile_join',
     'physical',
