@@ -2815,6 +2815,11 @@ if truthy "$RELEASE_BLACKBOX_GATE"; then
     run_android_release_blackbox_cycle
   else
     run_android_activity_lifecycle_gate
+    if ! vpn_inactive; then
+      echo "Android Release foreground idle CPU gate requires VPN-off state" >&2
+      exit 1
+    fi
+    run_android_idle_cpu_gate "Android Release foreground VPN-off"
   fi
   assert_single_android_app_process
   echo "Android Release black-box smoke passed on adb serial: $serial"

@@ -184,6 +184,20 @@ grep -Fq './scripts/mobile-ios-smoke.sh simulator' "$RELEASE_GATE" \
   || fail "release gate does not run the iOS app idle CPU smoke"
 grep -Fq './scripts/mobile-android-smoke.sh --vpn-cycle --create-network' "$RELEASE_GATE" \
   || fail "release gate does not run the Android background active-VPN idle CPU smoke"
+grep -Fq 'run_android_idle_cpu_gate "Android Release foreground VPN-off"' "$MOBILE_ANDROID_SMOKE" \
+  || fail "Android exact Release smoke does not measure foreground VPN-off idle CPU"
+# shellcheck disable=SC2016 # Match the literal default-value contract.
+grep -Fq 'ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT="${NVPN_ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT:-2}"' "$RELEASE_GATE" \
+  || fail "release gate does not cap Android exact Release foreground idle CPU at 2 percent"
+# shellcheck disable=SC2016 # Match the literal default-value contract.
+grep -Fq 'ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS="${NVPN_ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS:-60}"' "$RELEASE_GATE" \
+  || fail "release gate does not sample Android exact Release foreground idle CPU for 60 seconds"
+grep -Fq 'Android Release foreground idle CPU gate requires VPN-off state' "$MOBILE_ANDROID_SMOKE" \
+  || fail "Android exact Release foreground idle gate does not require VPN-off state"
+grep -Fq 'android-release-foreground-vpn-off-idle/idle-cpu.json' "$RELEASE_GATE" \
+  || fail "Android exact Release foreground idle CPU lacks a distinct artifact path"
+grep -Fq './scripts/mobile-android-smoke.sh --release-network-gate' "$RELEASE_GATE" \
+  || fail "release gate does not run the exact signed nondebuggable Android Release foreground idle gate"
 grep -Fq 'run_android_activity_lifecycle_gate' "$MOBILE_ANDROID_SMOKE" \
   || fail "Android physical smoke does not verify Activity background/foreground survival"
 if grep -Fq 'fi.siriusbusiness.nvpn.releasegate' "$RELEASE_GATE"; then

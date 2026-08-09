@@ -24,6 +24,11 @@ export NVPN_IDLE_CPU_SETTLE_SECONDS="${NVPN_RELEASE_GATE_IDLE_CPU_SETTLE_SECONDS
 # unlike the foreground/UI idle gates. Keep a separate bound for that active
 # encrypted overlay while retaining the packet/TUN correctness probe below.
 ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT="${NVPN_ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT:-4}"
+# The shipped, nondebuggable foreground app has no active overlay work. Keep
+# this independent of the background active-VPN allowance above so every exact
+# Release candidate proves a full low-idle minute before artifact reuse.
+ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT="${NVPN_ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT:-2}"
+ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS="${NVPN_ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS:-60}"
 
 MACOS_WG_EXIT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MACOS_WG_EXIT_TIMEOUT_SECS:-300}"
 WINDOWS_WG_EXIT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_TIMEOUT_SECS:-1800}"
@@ -1396,6 +1401,16 @@ run_mobile_idle_cpu_gates() {
       NVPN_ANDROID_SERIAL="$android_idle_serial" \
       NVPN_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
       ./scripts/mobile-android-smoke.sh --vpn-cycle --create-network --accept-vpn-dialog
+    release_gate_run_with_timeout \
+      "Android exact signed Release foreground VPN-off idle CPU" \
+      "$MOBILE_GUI_SMOKE_TIMEOUT_SECS" \
+      env \
+        NVPN_ANDROID_SERIAL="$android_idle_serial" \
+        NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT" \
+        NVPN_ANDROID_IDLE_CPU_SAMPLE_SECONDS="$ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS" \
+        NVPN_ANDROID_IDLE_CPU_RESULT_NAME="android-release-foreground-vpn-off-idle/idle-cpu.json" \
+        NVPN_ANDROID_RESULT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network" \
+        ./scripts/mobile-android-smoke.sh --release-network-gate
     MOBILE_ANDROID_APP_READY=1
   else
     echo "Skipping Android idle CPU smoke because no adb device is online."
