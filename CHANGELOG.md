@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.7 - 2026-08-08
+## 4.1.7 - 2026-08-10
 
 ### Release notes
 
@@ -104,6 +104,9 @@ Reliability improvements and basic feature fixes across every platform.
   OFF→ON transitions.
 - Serialize Android native tunnel startup and cancel obsolete generations,
   preventing rapid connect/disconnect from reviving or leaking a stopped VPN.
+- Stop foreground Android status polling from rebuilding tunnel configuration
+  or recomposing unchanged state, reducing exact Release VPN-off idle CPU from
+  6.30% to 1.48% in the physical 60-second gate.
 - Expose the iOS VPN switch as one accessible control while retaining its
   native action, enabled state, label, and value.
 - Keep macOS configuration editable while an installed background service is
