@@ -2,6 +2,20 @@ package org.nostrvpn.app
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.nostrvpn.app.core.AppState
+
+internal enum class AndroidRefreshTrigger {
+    PERIODIC,
+    CONFIG_CHANGED,
+}
+
+internal object AndroidRefreshPolicy {
+    fun shouldRefreshTunnelConfig(trigger: AndroidRefreshTrigger): Boolean =
+        trigger == AndroidRefreshTrigger.CONFIG_CHANGED
+
+    fun shouldReplaceState(current: AppState, refreshed: AppState): Boolean =
+        current.copy(rev = refreshed.rev) != refreshed
+}
 
 internal object TunnelRefreshPolicy {
     private val networkActions = setOf(

@@ -342,22 +342,30 @@ class MainActivity : ComponentActivity() {
                 observer.start()
                 onDispose { observer.stop() }
             }
-            fun refreshFromCore() {
+            fun refreshFromCore(trigger: AndroidRefreshTrigger) {
                 vpnLockdownActive = VpnStartState.refreshLockdownActive(this@MainActivity)
                 try {
                     val nextState = core.refresh()
                     if (nextState.error.isNotBlank()) {
                         androidError = ""
                     }
-                    val currentTunnelConfigJson = core.mobileTunnelConfigJson()
-                    val requiresTunnelRefresh =
-                        TunnelConfigRefreshPolicy.requiresAsyncRefresh(
+                    val requiresTunnelRefresh = if (
+                        AndroidRefreshPolicy.shouldRefreshTunnelConfig(trigger)
+                    ) {
+                        val currentTunnelConfigJson = core.mobileTunnelConfigJson()
+                        val refreshRequired = TunnelConfigRefreshPolicy.requiresAsyncRefresh(
                             vpnEnabled = nextState.vpnEnabled,
                             observedConfigJson = observedTunnelConfigJson,
                             currentConfigJson = currentTunnelConfigJson,
                         )
-                    state = nextState
-                    observedTunnelConfigJson = currentTunnelConfigJson
+                        observedTunnelConfigJson = currentTunnelConfigJson
+                        refreshRequired
+                    } else {
+                        false
+                    }
+                    if (AndroidRefreshPolicy.shouldReplaceState(state, nextState)) {
+                        state = nextState
+                    }
                     if (requiresTunnelRefresh) {
                         requestVpnTunnel()
                     }
@@ -367,13 +375,13 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(configChangeNonce) {
                 if (configChangeNonce > 0) {
-                    refreshFromCore()
+                    refreshFromCore(AndroidRefreshTrigger.CONFIG_CHANGED)
                 }
             }
             LaunchedEffect(core, lifecycleOwner) {
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     while (true) {
-                        refreshFromCore()
+                        refreshFromCore(AndroidRefreshTrigger.PERIODIC)
                         delay(2_000)
                     }
                 }

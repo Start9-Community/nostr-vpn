@@ -1,11 +1,40 @@
 package org.nostrvpn.app
 
+import org.nostrvpn.app.core.AppState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TunnelRefreshPolicyTest {
+    @Test
+    fun periodicStatusRefreshSkipsTunnelConfigRecomputation() {
+        assertFalse(
+            AndroidRefreshPolicy.shouldRefreshTunnelConfig(AndroidRefreshTrigger.PERIODIC),
+        )
+        assertTrue(
+            AndroidRefreshPolicy.shouldRefreshTunnelConfig(AndroidRefreshTrigger.CONFIG_CHANGED),
+        )
+    }
+
+    @Test
+    fun revisionOnlyRefreshDoesNotReplaceComposeState() {
+        val current = AppState(rev = 7, nodeName = "Pixel")
+
+        assertFalse(
+            AndroidRefreshPolicy.shouldReplaceState(
+                current = current,
+                refreshed = current.copy(rev = 8),
+            ),
+        )
+        assertTrue(
+            AndroidRefreshPolicy.shouldReplaceState(
+                current = current,
+                refreshed = current.copy(rev = 8, vpnStatus = "VPN on"),
+            ),
+        )
+    }
+
     @Test
     fun qrAndManualApprovalActionsRestartTheRunningTunnel() {
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("import_join_request"))
