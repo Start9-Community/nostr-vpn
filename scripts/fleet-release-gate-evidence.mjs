@@ -44,6 +44,7 @@ const platformReceiptKeys = {
     'wireguard_dns',
   ],
   linux: [
+    'arm64_cli',
     'artifact',
     'network',
     'package_install',
@@ -172,6 +173,7 @@ function requireAndroidGateComponentSource(
   manifest,
   platformReceiptPaths,
   source,
+  platformSourceEquivalence,
 ) {
   const gate = requireObject(
     manifest.android_release_gate,
@@ -181,10 +183,21 @@ function requireAndroidGateComponentSource(
     platformReceiptPaths.android.physical,
     'Physical Android artifact receipt',
   )
+  const sourceEquivalence = platformSourceEquivalence.android
+  const exactCandidate =
+    gate.app_git_sha === source.appGitSha
+    && gate.app_git_tree === source.appGitTree
+    && !Object.hasOwn(gate, 'source_equivalence')
+  const retainedCandidate =
+    sourceEquivalence
+    && isDeepStrictEqual(gate.source_equivalence, sourceEquivalence)
+    && sourceEquivalence.receipt_app_git_sha === gate.app_git_sha
+    && sourceEquivalence.receipt_app_git_tree === gate.app_git_tree
+    && sourceEquivalence.candidate_app_git_sha === source.appGitSha
+    && sourceEquivalence.candidate_app_git_tree === source.appGitTree
   if (
     gate.receipt_schema !== physical.receiptSchema
-    || gate.app_git_sha !== source.appGitSha
-    || gate.app_git_tree !== source.appGitTree
+    || (!exactCandidate && !retainedCandidate)
     || gate.app_git_sha !== physical.appGitSha
     || gate.app_git_tree !== physical.appGitTree
     || gate.apk_sha256 !== physical.apkSha256
@@ -254,6 +267,7 @@ function canonicalAttestation(manifest, source, attestation) {
     assets: manifest.assets,
     releaseGateSummarySha256: attestation.release_gate_summary_sha256,
     platformGateReceipts: attestation.platform_gate_receipts,
+    platformSourceEquivalence: attestation.platform_source_equivalence,
     assetProofs: attestation.asset_proofs,
   })
   if (!isDeepStrictEqual(attestation, canonical)) {
@@ -267,8 +281,12 @@ function canonicalAttestation(manifest, source, attestation) {
 export function validateFleetReleaseGateEvidence(request) {
   requireExactKeys(
     request,
-    ['receiptPaths', 'releasePath', 'source'],
+    ['candidateRoot', 'receiptPaths', 'releasePath', 'source'],
     'Fleet release-gate request',
+  )
+  const candidateRoot = requireAbsolutePath(
+    request.candidateRoot,
+    'Fleet release candidate root',
   )
   const releasePath = requireAbsolutePath(
     request.releasePath,
@@ -298,10 +316,16 @@ export function validateFleetReleaseGateEvidence(request) {
   const collected = collectReleaseGateReceipts({
     commit: source.appGitSha,
     tree: source.appGitTree,
+    candidateRoot,
     releaseGateSummaryPath: receiptPaths.releaseGateSummary,
     platformReceiptPaths: receiptPaths.platforms,
   })
-  requireAndroidGateComponentSource(manifest, receiptPaths.platforms, source)
+  requireAndroidGateComponentSource(
+    manifest,
+    receiptPaths.platforms,
+    source,
+    canonical.platform_source_equivalence,
+  )
   if (
     collected.releaseGateSummarySha256 !==
       canonical.release_gate_summary_sha256 ||
@@ -312,6 +336,14 @@ export function validateFleetReleaseGateEvidence(request) {
   ) {
     throw new Error(
       'Collected release-gate receipt hashes differ from the staged attestation.',
+    )
+  }
+  if (!isDeepStrictEqual(
+    collected.platformSourceEquivalence,
+    canonical.platform_source_equivalence,
+  )) {
+    throw new Error(
+      'Collected release-gate source equivalence differs from the staged attestation.',
     )
   }
 

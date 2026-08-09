@@ -30,6 +30,7 @@ const platforms = {
     'wireguard_dns',
   ],
   linux: [
+    'arm64_cli',
     'artifact',
     'network',
     'package_install',
@@ -149,6 +150,7 @@ function fixture(root) {
     releaseGateSummary,
     releasePath,
     request: {
+      candidateRoot: root,
       releasePath,
       source,
       receiptPaths: {
@@ -174,6 +176,18 @@ function collectorFixture(root, overrides = {}) {
     NVPN_FLEET_GATE_FIXTURE_ROOT: root,
     NVPN_FLEET_GATE_TARGET_STATUS: overrides.targetStatus ?? 'missed',
     NVPN_FLEET_GATE_DRAFT: String(overrides.draft ?? true),
+    NVPN_FLEET_GATE_APP_GIT_SHA:
+      overrides.receiptAppGitSha ?? '11965154edc8b1e2777b813640aefeeef17799b2',
+    NVPN_FLEET_GATE_APP_GIT_TREE:
+      overrides.receiptAppGitTree ?? '3addae26d8a96f8e248823d6f5840d9a3958016f',
+    NVPN_FLEET_GATE_CANDIDATE_APP_GIT_SHA:
+      overrides.candidateAppGitSha
+        ?? 'a14621094046920583c8cc995996e601b4573e15',
+    NVPN_FLEET_GATE_CANDIDATE_APP_GIT_TREE:
+      overrides.candidateAppGitTree
+        ?? 'e68340fce16e3bf81f997690148bfc51494003b8',
+    NVPN_FLEET_GATE_CANDIDATE_ROOT:
+      overrides.candidateRoot ?? process.cwd(),
   }
   delete env.NODE_TEST_CONTEXT
   const generated = spawnSync(
@@ -201,6 +215,16 @@ test('accepts real collector evidence through the function and CLI', () => {
       targetStatus: 'missed',
     })
     const release = JSON.parse(readFileSync(value.request.releasePath, 'utf8'))
+    assert.deepEqual(
+      Object.keys(
+        release.release_gate_attestation.platform_source_equivalence,
+      ).sort(),
+      ['android', 'ios', 'linux', 'macos', 'windows'],
+    )
+    assert.equal(
+      release.android_release_gate.source_equivalence.policy,
+      'unchanged-platform-product-inputs-v1',
+    )
     for (const draft of [true, false]) {
       json(value.request.releasePath, { ...release, draft })
       const validated = validateFleetReleaseGateEvidence(value.request)
@@ -219,6 +243,11 @@ test('accepts real collector evidence through the function and CLI', () => {
         ],
         validated.assets[0].sha256,
       )
+      assert.equal(
+        validated.platformGateReceipts.linux.arm64_cli,
+        release.release_gate_attestation.platform_gate_receipts.linux
+          .arm64_cli,
+      )
 
       const cli = spawnSync(
         process.execPath,
@@ -228,6 +257,74 @@ test('accepts real collector evidence through the function and CLI', () => {
       assert.equal(cli.status, 0, cli.stderr)
       assert.deepEqual(JSON.parse(cli.stdout), validated)
     }
+
+    const arm64Path = value.request.receiptPaths.platforms.linux.arm64_cli
+    const arm64Receipt = readFileSync(arm64Path)
+    writeFileSync(arm64Path, Buffer.concat([arm64Receipt, Buffer.from('\n')]))
+    assert.throws(
+      () => validateFleetReleaseGateEvidence(value.request),
+      /linux arm64_cli receipt hash differs/i,
+    )
+    writeFileSync(arm64Path, arm64Receipt)
+
+    const { candidateRoot: omittedCandidateRoot, ...withoutCandidateRoot } =
+      value.request
+    assert.ok(omittedCandidateRoot)
+    assert.throws(
+      () => validateFleetReleaseGateEvidence(withoutCandidateRoot),
+      /request must contain exactly/i,
+    )
+
+    json(value.request.releasePath, {
+      ...release,
+      release_gate_attestation: {
+        ...release.release_gate_attestation,
+        platform_source_equivalence: {},
+      },
+    })
+    assert.throws(
+      () => validateFleetReleaseGateEvidence(value.request),
+      /source equivalence|release candidate and physical receipt/i,
+    )
+
+    json(value.request.releasePath, {
+      ...release,
+      android_release_gate: {
+        ...release.android_release_gate,
+        source_equivalence: {
+          ...release.android_release_gate.source_equivalence,
+          changed_paths_sha256: '0'.repeat(64),
+        },
+      },
+    })
+    assert.throws(
+      () => validateFleetReleaseGateEvidence(value.request),
+      /release candidate and physical receipt/i,
+    )
+
+    const forgedAndroidProof = {
+      ...release.android_release_gate.source_equivalence,
+      changed_paths_sha256: '0'.repeat(64),
+    }
+    json(value.request.releasePath, {
+      ...release,
+      android_release_gate: {
+        ...release.android_release_gate,
+        source_equivalence: forgedAndroidProof,
+      },
+      release_gate_attestation: {
+        ...release.release_gate_attestation,
+        platform_source_equivalence: {
+          ...release.release_gate_attestation.platform_source_equivalence,
+          android: forgedAndroidProof,
+        },
+      },
+    })
+    assert.throws(
+      () => validateFleetReleaseGateEvidence(value.request),
+      /collected release-gate source equivalence differs/i,
+    )
+
     json(value.request.releasePath, {
       ...release,
       android_release_gate: {

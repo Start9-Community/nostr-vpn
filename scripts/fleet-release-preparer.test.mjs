@@ -5,18 +5,23 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import {
   buildFrozenFleetInventory,
 } from './fleet-release-preparer-lib.mjs'
-import { deriveFleetArtifacts } from './prepare-fleet-release-canary.mjs'
+import {
+  boundReleaseGateReceiptPaths,
+  deriveFleetArtifacts,
+  releaseGateReceiptPaths,
+} from './prepare-fleet-release-canary.mjs'
 
 const hex = (character, length = 64) => character.repeat(length)
 const sha256 = (value) =>
@@ -206,6 +211,36 @@ function inventoryArgs(snapshot = rosterSnapshot(), catalog = rosterCatalog(snap
     maxEvidenceAgeSeconds: 1_800,
   }
 }
+
+test('canary preparation binds the canonical Linux ARM64 CLI gate receipt', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-fleet-gate-bindings-'))
+  try {
+    const gateDir = join(root, 'gate')
+    const joinDir = join(root, 'join')
+    const paths = releaseGateReceiptPaths({ root, gateDir, joinDir })
+    assert.equal(
+      paths.linux.arm64_cli,
+      join(gateDir, 'linux-arm64-cli', 'receipt.json'),
+    )
+    for (const receipts of Object.values(paths)) {
+      for (const path of Object.values(receipts)) {
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(path, `${path}\n`)
+      }
+    }
+    const receiptPaths = boundReleaseGateReceiptPaths({
+      releaseGateSummary: paths.android.physical,
+      platforms: paths,
+    })
+    assert.deepEqual(receiptPaths.platforms.linux.arm64_cli, {
+      path: realpathSync(paths.linux.arm64_cli),
+      sha256: sha256(readFileSync(paths.linux.arm64_cli)),
+      size: statSync(paths.linux.arm64_cli).size,
+    })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 function releaseSource() {
   return {

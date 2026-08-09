@@ -669,19 +669,31 @@ test('release receipt collection requires exact source and strict public UI gate
     mkdirSync(root, { recursive: true })
   }
   try {
-    const commit =
+    const receiptCommit =
       process.env.NVPN_FLEET_GATE_APP_GIT_SHA ?? 'a'.repeat(40)
-    const tree =
+    const receiptTree =
       process.env.NVPN_FLEET_GATE_APP_GIT_TREE ?? 'b'.repeat(40)
+    const candidateCommit =
+      process.env.NVPN_FLEET_GATE_CANDIDATE_APP_GIT_SHA ?? receiptCommit
+    const candidateTree =
+      process.env.NVPN_FLEET_GATE_CANDIDATE_APP_GIT_TREE ?? receiptTree
+    const commit = receiptCommit
+    const tree = receiptTree
+    const candidateRoot = process.env.NVPN_FLEET_GATE_CANDIDATE_ROOT
     const source = {
-      appGitSha: commit,
-      appGitTree: tree,
+      appGitSha: receiptCommit,
+      appGitTree: receiptTree,
       appVersion: process.env.NVPN_FLEET_GATE_APP_VERSION ?? '4.1.5',
       fipsGitSha:
         process.env.NVPN_FLEET_GATE_FIPS_GIT_SHA ?? 'c'.repeat(40),
       fipsGitTree:
         process.env.NVPN_FLEET_GATE_FIPS_GIT_TREE ?? 'd'.repeat(40),
       fipsVersion: process.env.NVPN_FLEET_GATE_FIPS_VERSION ?? '0.4.45',
+    }
+    const candidateSource = {
+      ...source,
+      appGitSha: candidateCommit,
+      appGitTree: candidateTree,
     }
     const mobileJoinPath = join(root, 'mobile-join.json')
     const macosJoinPath = join(root, 'macos-join.json')
@@ -706,6 +718,7 @@ test('release receipt collection requires exact source and strict public UI gate
         underlay_lifecycle: join(root, 'ios-underlay.json'),
       },
       linux: {
+        arm64_cli: join(root, 'linux-arm64-cli.json'),
         artifact: join(root, 'linux-artifact.json'),
         package_install: join(root, 'linux-package-install.json'),
         public_ui_join: join(root, 'linux-join.json'),
@@ -732,6 +745,12 @@ test('release receipt collection requires exact source and strict public UI gate
         process.env.NVPN_FLEET_GATE_TARGET_STATUS === 'missed'
           ? 'missed'
           : 'met',
+    }))
+    writeFileSync(paths.linux.arm64_cli, JSON.stringify({
+      receiptSchema: 1,
+      artifactType: 'exact native-smoked Linux ARM64 static CLI',
+      appGitSha: source.appGitSha,
+      appGitTree: source.appGitTree,
     }))
     const androidArtifact = {
       ...source,
@@ -1807,6 +1826,13 @@ test('release receipt collection requires exact source and strict public UI gate
     }
 
     if (fixtureRoot) {
+      const fleetEvidence = collectReleaseGateReceipts({
+        commit: candidateCommit,
+        tree: candidateTree,
+        candidateRoot,
+        releaseGateSummaryPath: summary,
+        platformReceiptPaths: paths,
+      })
       const artifactSha256 =
         process.env.NVPN_FLEET_GATE_ARTIFACT_SHA256 ?? 'e'.repeat(64)
       const artifactSize = Number(
@@ -1827,18 +1853,19 @@ test('release receipt collection requires exact source and strict public UI gate
         size: artifactSize,
       }]
       const releaseGateAttestation = buildReleaseGateAttestation({
-        commit,
-        tree,
+        commit: candidateCommit,
+        tree: candidateTree,
         assets,
-        releaseGateSummarySha256: evidence.releaseGateSummarySha256,
-        platformGateReceipts: evidence.platformGateReceipts,
+        releaseGateSummarySha256: fleetEvidence.releaseGateSummarySha256,
+        platformGateReceipts: fleetEvidence.platformGateReceipts,
+        platformSourceEquivalence: fleetEvidence.platformSourceEquivalence,
         assetProofs: {
           [releaseAssetPath]: {
             platform: 'linux',
             verification: 'gate-payload-identity',
             artifact_sha256: artifactSha256,
             gate_receipt_sha256:
-              evidence.platformGateReceipts.linux.artifact,
+              fleetEvidence.platformGateReceipts.linux.artifact,
             payloads: { [payloadLabel]: payloadSha256 },
           },
         },
@@ -1849,7 +1876,7 @@ test('release receipt collection requires exact source and strict public UI gate
         id: tag,
         title: tag,
         tag,
-        commit,
+        commit: candidateCommit,
         draft: process.env.NVPN_FLEET_GATE_DRAFT !== 'false',
         assets,
         android_release_gate: {
@@ -1861,6 +1888,12 @@ test('release receipt collection requires exact source and strict public UI gate
           package: androidArtifact.package,
           signer_certificate_sha256:
             androidArtifact.signerCertificateSha256,
+          ...(fleetEvidence.platformSourceEquivalence.android
+            ? {
+                source_equivalence:
+                  fleetEvidence.platformSourceEquivalence.android,
+              }
+            : {}),
         },
         release_gate_attestation: releaseGateAttestation,
       }))
@@ -1870,8 +1903,9 @@ test('release receipt collection requires exact source and strict public UI gate
           releaseAssetPath,
           payloadLabel,
           request: {
+            candidateRoot,
             releasePath,
-            source,
+            source: candidateSource,
             receiptPaths: {
               releaseGateSummary: summary,
               platforms: paths,

@@ -731,6 +731,13 @@ printf 'fixture app\n' >"$APP/source.txt"
 git -C "$APP" add .gitignore source.txt scripts
 git -C "$APP" commit -qm app
 
+RECEIPT_APP_SHA="$(git -C "$APP" rev-parse HEAD)"
+RECEIPT_APP_TREE="$(git -C "$APP" rev-parse 'HEAD^{tree}')"
+printf 'fixture production-path test\n' \
+  >"$APP/scripts/fleet-release-gate-evidence.test.mjs"
+git -C "$APP" add scripts/fleet-release-gate-evidence.test.mjs
+git -C "$APP" commit -qm 'tooling-only candidate'
+
 git -C "$FIPS" init -q
 git -C "$FIPS" config user.name fixture
 git -C "$FIPS" config user.email fixture@example.invalid
@@ -760,8 +767,11 @@ ARTIFACT_SIZE="$(wc -c <"$ARTIFACT" | tr -d '[:space:]')"
 
 NVPN_FLEET_GATE_FIXTURE_ROOT="$GATE_FIXTURE_ROOT" \
 NVPN_FLEET_GATE_TARGET_STATUS=missed \
-NVPN_FLEET_GATE_APP_GIT_SHA="$APP_SHA" \
-NVPN_FLEET_GATE_APP_GIT_TREE="$APP_TREE" \
+NVPN_FLEET_GATE_APP_GIT_SHA="$RECEIPT_APP_SHA" \
+NVPN_FLEET_GATE_APP_GIT_TREE="$RECEIPT_APP_TREE" \
+NVPN_FLEET_GATE_CANDIDATE_APP_GIT_SHA="$APP_SHA" \
+NVPN_FLEET_GATE_CANDIDATE_APP_GIT_TREE="$APP_TREE" \
+NVPN_FLEET_GATE_CANDIDATE_ROOT="$APP" \
 NVPN_FLEET_GATE_APP_VERSION=4.1.5 \
 NVPN_FLEET_GATE_FIPS_GIT_SHA="$FIPS_SHA" \
 NVPN_FLEET_GATE_FIPS_GIT_TREE="$FIPS_TREE" \

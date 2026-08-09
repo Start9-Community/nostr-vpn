@@ -202,7 +202,7 @@ function writeJson(path, value) {
   chmodSync(path, 0o600)
 }
 
-function receiptPaths({ root, gateDir, joinDir }) {
+export function releaseGateReceiptPaths({ root, gateDir, joinDir }) {
   const mobileNetwork = join(gateDir, 'mobile-network')
   const desktopNetwork = join(gateDir, 'desktop-network')
   return {
@@ -260,6 +260,7 @@ function receiptPaths({ root, gateDir, joinDir }) {
       ),
     },
     linux: {
+      arm64_cli: join(gateDir, 'linux-arm64-cli', 'receipt.json'),
       artifact: join(
         joinDir,
         'linux',
@@ -449,7 +450,7 @@ export function deriveFleetArtifacts({
   return { artifacts, receipts }
 }
 
-function boundReceiptPaths(paths) {
+export function boundReleaseGateReceiptPaths(paths) {
   return {
     releaseGateSummary: boundFile(
       paths.releaseGateSummary,
@@ -549,7 +550,7 @@ export function prepareFleetReleaseCanary(options) {
     options.releaseJoinResultDir
       || join(root, 'artifacts', 'mobile-release-join'),
   )
-  const platforms = receiptPaths({ root, gateDir, joinDir })
+  const platforms = releaseGateReceiptPaths({ root, gateDir, joinDir })
   const releaseGateSummary = join(gateDir, 'release-gate-summary.json')
   const linuxArtifact = readJson(
     platforms.linux.artifact,
@@ -564,6 +565,7 @@ export function prepareFleetReleaseCanary(options) {
     fipsVersion: linuxArtifact.fipsVersion,
   }
   validateFleetReleaseGateEvidence({
+    candidateRoot: root,
     releasePath,
     source,
     receiptPaths: {
@@ -596,7 +598,7 @@ export function prepareFleetReleaseCanary(options) {
     id: 'complete-release-gate',
     kind: 'staged-release-attestation-v1',
     ...boundFile(releasePath, 'staged release manifest'),
-    receiptPaths: boundReceiptPaths({
+    receiptPaths: boundReleaseGateReceiptPaths({
       releaseGateSummary,
       platforms,
     }),

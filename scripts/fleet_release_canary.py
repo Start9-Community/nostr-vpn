@@ -77,6 +77,8 @@ GATE_VALIDATOR_TIMEOUT_SECONDS = 30
 INSTALL_AUTHORIZATION_EXPIRED = 77
 GATE_RECEIPT_KEYS = {
     "android": {
+        "foreground_idle_cpu",
+        "foreground_idle_cpu_raw",
         "install",
         "physical",
         "mobile_join",
@@ -94,6 +96,7 @@ GATE_RECEIPT_KEYS = {
         "underlay_lifecycle",
     },
     "linux": {
+        "arm64_cli",
         "artifact",
         "public_ui_join",
         "package_install",
@@ -348,6 +351,7 @@ def validate_gate_evidence(
     if tracked.returncode != 0:
         fail("fleet release-gate validator must be tracked by the exact checkout")
     request = {
+        "candidateRoot": str(root),
         "releasePath": str(release_path),
         "source": source,
         "receiptPaths": {
