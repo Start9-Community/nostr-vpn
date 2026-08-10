@@ -101,6 +101,7 @@ test('component proof retains only unchanged platform product inputs', () => {
       'scripts/publish-release-refs.mjs',
       'scripts/release-mutation-gate.mjs',
       'scripts/release_common.sh',
+      'scripts/umbrel-release.mjs',
       'scripts/windows-release-publication-proof.ps1',
     ]) {
       const publication = commit(path, 'publication harness')
@@ -247,6 +248,61 @@ test('component proof treats only the native-lab supervisor as harness-only', ()
         candidateCommit: nearby.commit,
         candidateTree: nearby.tree,
       }), /changed product\/build input scripts\/native-lab-helper\.py/)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('component proof treats only the Umbrel publisher as harness-only', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-umbrel-publisher-component-proof-'))
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  const commit = (path, value, message) => {
+    write(join(root, path), value)
+    git('add', path)
+    git('commit', '-qm', message)
+    return { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') }
+  }
+  try {
+    git('init', '-q')
+    git('config', 'user.name', 'Release Test')
+    git('config', 'user.email', 'release@example.invalid')
+    const receipt = commit('README.md', 'base\n', 'receipt source')
+    const publisher = commit(
+      'scripts/umbrel-release.mjs',
+      'console.log("publish Umbrel image")\n',
+      'Umbrel publication harness change',
+    )
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.doesNotThrow(() => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit: receipt.commit,
+        receiptTree: receipt.tree,
+        candidateCommit: publisher.commit,
+        candidateTree: publisher.tree,
+      }))
+    }
+
+    git('checkout', '-q', '-b', 'nearby-script', receipt.commit)
+    const nearby = commit(
+      'scripts/umbrel-release-helper.mjs',
+      'console.log("ordinary script")\n',
+      'nearby ordinary script change',
+    )
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.throws(() => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit: receipt.commit,
+        receiptTree: receipt.tree,
+        candidateCommit: nearby.commit,
+        candidateTree: nearby.tree,
+      }), /changed product\/build input scripts\/umbrel-release-helper\.mjs/)
     }
   } finally {
     rmSync(root, { recursive: true, force: true })

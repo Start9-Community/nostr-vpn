@@ -71,6 +71,7 @@ const harnessOnlyPaths = new Set([
   'scripts/release-mutation-gate.mjs',
   'scripts/release-source-verification.mjs',
   'scripts/release_common.sh',
+  'scripts/umbrel-release.mjs',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
   'scripts/verify-host-linux-peer-artifact.py',
