@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import os from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -101,7 +104,16 @@ function quote(arg) {
   return /[^\w./:@=-]/.test(value) ? JSON.stringify(value) : value
 }
 
-function run(command, args, { capture = false, cwd = repoRoot, dryRun = false } = {}) {
+function run(
+  command,
+  args,
+  {
+    capture = false,
+    cwd = repoRoot,
+    dryRun = false,
+    env = process.env,
+  } = {},
+) {
   const rendered = [command, ...args].map(quote).join(' ')
   console.log(`$ ${rendered}`)
 
@@ -112,6 +124,7 @@ function run(command, args, { capture = false, cwd = repoRoot, dryRun = false } 
   const result = spawnSync(command, args, {
     cwd,
     encoding: 'utf8',
+    env,
     stdio: capture ? 'pipe' : 'inherit',
   })
 
@@ -178,6 +191,117 @@ export function extractBuildxDigest(metadataText) {
   return digest
 }
 
+function normalizePlatforms(platforms) {
+  const values = [...new Set((platforms ?? []).map((value) => String(value).trim()))]
+  if (
+    values.length !== 2
+    || values[0] !== 'linux/amd64'
+    || values[1] !== 'linux/arm64'
+  ) {
+    throw new Error(
+      `Umbrel release platforms must be exactly linux/amd64,linux/arm64; got ${values.join(',')}`,
+    )
+  }
+  return values
+}
+
+function normalizeImageRepo(imageRepo) {
+  const value = String(imageRepo ?? '').trim().replace(/\/$/, '')
+  if (!/^[a-z0-9.-]+(?::[0-9]+)?\/[a-z0-9._/-]+$/i.test(value)) {
+    throw new Error(`Invalid Umbrel image repository: ${imageRepo}`)
+  }
+  return value
+}
+
+export function validatePublishedImageIndex(
+  indexText,
+  { digest, imageRef, platforms },
+) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(String(digest ?? ''))) {
+    throw new Error(`Invalid published Umbrel image digest: ${digest}`)
+  }
+  if (
+    validatePinnedImageRef(imageRef) !== imageRef
+    || !imageRef.endsWith(`@${digest}`)
+  ) {
+    throw new Error('Published Umbrel image reference is not bound to the expected digest')
+  }
+  const expected = normalizePlatforms(platforms)
+  let index
+  try {
+    index = JSON.parse(indexText)
+  } catch {
+    throw new Error('Published Umbrel image index is not valid JSON')
+  }
+  if (
+    index?.schemaVersion !== 2
+    || !Array.isArray(index.manifests)
+  ) {
+    throw new Error('Published Umbrel image index has an invalid shape')
+  }
+
+  const runnable = []
+  let attestationManifestCount = 0
+  for (const descriptor of index.manifests) {
+    if (!/^sha256:[0-9a-f]{64}$/.test(String(descriptor?.digest ?? ''))) {
+      throw new Error('Published Umbrel image index contains an invalid descriptor digest')
+    }
+    const osName = String(descriptor?.platform?.os ?? '')
+    const architecture = String(descriptor?.platform?.architecture ?? '')
+    if (osName === 'unknown' && architecture === 'unknown') {
+      const referenceType = descriptor?.annotations?.['vnd.docker.reference.type']
+      if (!descriptor?.artifactType && referenceType !== 'attestation-manifest') {
+        throw new Error('Published Umbrel image index contains an unclassified unknown platform')
+      }
+      attestationManifestCount += 1
+      continue
+    }
+    const variant = String(descriptor?.platform?.variant ?? '').trim()
+    runnable.push(`${osName}/${architecture}${variant ? `/${variant}` : ''}`)
+  }
+  runnable.sort()
+  const sortedExpected = [...expected].sort()
+  if (
+    runnable.length !== sortedExpected.length
+    || runnable.some((value, indexValue) => value !== sortedExpected[indexValue])
+  ) {
+    throw new Error(
+      `Published Umbrel image platforms differ: expected ${sortedExpected.join(',')}; got ${runnable.join(',')}`,
+    )
+  }
+  return {
+    digest,
+    imageRef,
+    platforms: expected,
+    attestationManifestCount,
+  }
+}
+
+export function preflightUmbrelPublication({
+  dryRun = false,
+  imageRepo,
+  platforms = ['linux/amd64', 'linux/arm64'],
+} = {}) {
+  const normalized = {
+    imageRepo: normalizeImageRepo(imageRepo),
+    platforms: normalizePlatforms(platforms),
+  }
+  if (!dryRun) {
+    if (!commandExists('docker')) {
+      throw new Error('Missing docker; cannot publish the required Umbrel image')
+    }
+    const buildx = spawnSync('docker', ['buildx', 'version'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    })
+    if (buildx.status !== 0) {
+      throw new Error('Docker buildx is unavailable; cannot publish the required Umbrel image')
+    }
+  }
+  return normalized
+}
+
 function releaseNotesUrl(tag) {
   return `https://github.com/mmalmi/nostr-vpn/releases/tag/${normalizeTag(tag)}`
 }
@@ -198,6 +322,7 @@ Files:
 - \`exports.sh\`: empty app exports file
 - \`icon.svg\`: app icon
 - \`IMAGE.txt\`: pinned container image reference used for this bundle
+- \`publication.json\`: public registry readback and bundle-file digests
 
 The real app compose uses Umbrel's built-in \`app_proxy\` service, so validate
 the app inside umbrelOS. For ordinary Docker validation, use the repo's local
@@ -268,25 +393,56 @@ export function renderUmbrelManifest(templateText, { tag, releaseNotes } = {}) {
   return manifest.endsWith('\n') ? manifest : `${manifest}\n`
 }
 
-function writeBundle({ imageRef, outputDir, tag }) {
-  rmSync(outputDir, { force: true, recursive: true })
-  mkdirSync(outputDir, { recursive: true })
-
-  copyFileSync(baseIconPath, join(outputDir, 'icon.svg'))
-  copyFileSync(baseExportsPath, join(outputDir, 'exports.sh'))
-  writeFileSync(join(outputDir, 'README.md'), renderBundleReadme({ imageRef, tag }))
-  writeFileSync(join(outputDir, 'docker-compose.yml'), renderUmbrelCompose(imageRef))
-  writeFileSync(
-    join(outputDir, 'umbrel-app.yml'),
-    renderUmbrelManifest(readFileSync(baseManifestPath, 'utf8'), {
-      releaseNotes: releaseNotesUrl(tag),
-      tag,
-    }),
-  )
-  writeFileSync(join(outputDir, 'IMAGE.txt'), `${imageRef}\n`)
+function writeBundle({ imageRef, outputDir, publication = null, tag }) {
+  const parent = dirname(outputDir)
+  mkdirSync(parent, { recursive: true })
+  if (existsSync(outputDir)) {
+    throw new Error(`Refusing to replace existing Umbrel bundle: ${outputDir}`)
+  }
+  const temporary = mkdtempSync(join(parent, `.${basename(outputDir)}.`))
+  let completed = false
+  try {
+    copyFileSync(baseIconPath, join(temporary, 'icon.svg'))
+    copyFileSync(baseExportsPath, join(temporary, 'exports.sh'))
+    writeFileSync(join(temporary, 'README.md'), renderBundleReadme({ imageRef, tag }))
+    writeFileSync(join(temporary, 'docker-compose.yml'), renderUmbrelCompose(imageRef))
+    writeFileSync(
+      join(temporary, 'umbrel-app.yml'),
+      renderUmbrelManifest(readFileSync(baseManifestPath, 'utf8'), {
+        releaseNotes: releaseNotesUrl(tag),
+        tag,
+      }),
+    )
+    writeFileSync(join(temporary, 'IMAGE.txt'), `${imageRef}\n`)
+    if (publication) {
+      publication.bundleFiles = Object.fromEntries(
+        [
+          'IMAGE.txt',
+          'README.md',
+          'docker-compose.yml',
+          'exports.sh',
+          'icon.svg',
+          'umbrel-app.yml',
+        ].map((name) => [
+          name,
+          createHash('sha256').update(readFileSync(join(temporary, name))).digest('hex'),
+        ]),
+      )
+      writeFileSync(
+        join(temporary, 'publication.json'),
+        `${JSON.stringify(publication, null, 2)}\n`,
+      )
+    }
+    renameSync(temporary, outputDir)
+    completed = true
+  } finally {
+    if (!completed) {
+      rmSync(temporary, { force: true, recursive: true })
+    }
+  }
 }
 
-function buildAndPushImage({ dryRun, imageRepo, platforms, tag }) {
+function buildAndPushImage({ beforeMutation, dryRun, imageRepo, platforms, tag }) {
   if (!imageRepo) {
     throw new Error('--image-repo is required with --push')
   }
@@ -298,6 +454,7 @@ function buildAndPushImage({ dryRun, imageRepo, platforms, tag }) {
   const metadataPath = join(tempDir, 'buildx-metadata.json')
 
   try {
+    beforeMutation?.()
     run(
       'docker',
       [
@@ -328,6 +485,93 @@ function buildAndPushImage({ dryRun, imageRepo, platforms, tag }) {
   }
 }
 
+function inspectPublishedImage({ digest, imageRepo, platforms, tag }) {
+  const imageRef = buildPinnedImageRef(imageRepo, tag, digest)
+  const digestRef = `${normalizeImageRepo(imageRepo)}@${digest}`
+  const anonymousDockerConfig = mkdtempSync(
+    join(os.tmpdir(), 'nostr-vpn-umbrel-public-readback-'),
+  )
+  try {
+    const publicEnvironment = {
+      ...process.env,
+      DOCKER_CONFIG: anonymousDockerConfig,
+    }
+    for (const name of [
+      'BUILDX_CONFIG',
+      'DOCKER_AUTH_CONFIG',
+      'REGISTRY_AUTH_FILE',
+    ]) {
+      delete publicEnvironment[name]
+    }
+    const indexText = run(
+      'docker',
+      ['buildx', 'imagetools', 'inspect', '--raw', digestRef],
+      {
+        capture: true,
+        env: publicEnvironment,
+      },
+    )
+    const validation = validatePublishedImageIndex(indexText, {
+      digest,
+      imageRef,
+      platforms,
+    })
+    return {
+      ...validation,
+      anonymousReadback: true,
+      indexSha256: createHash('sha256').update(indexText).digest('hex'),
+    }
+  } finally {
+    rmSync(anonymousDockerConfig, { force: true, recursive: true })
+  }
+}
+
+export function publishVerifiedUmbrelRelease({
+  beforeMutation,
+  dryRun = false,
+  imageRepo,
+  outputDir,
+  platforms = ['linux/amd64', 'linux/arm64'],
+  tag,
+} = {}) {
+  const preflight = preflightUmbrelPublication({ dryRun, imageRepo, platforms })
+  const normalizedTag = normalizeTag(tag)
+  const targetDir = resolve(repoRoot, outputDir || defaultOutputDir(normalizedTag))
+  const imageRef = buildAndPushImage({
+    beforeMutation,
+    dryRun,
+    imageRepo: preflight.imageRepo,
+    platforms: preflight.platforms,
+    tag: normalizedTag,
+  })
+  if (dryRun) {
+    console.log(`Would anonymously verify ${preflight.imageRepo}:${normalizedTag} by immutable digest`)
+    console.log(`Would write verified Umbrel bundle to ${targetDir}`)
+    return { published: false, imageRef: null, outputDir: targetDir }
+  }
+  const digest = imageRef.slice(imageRef.lastIndexOf('@') + 1)
+  const inspection = inspectPublishedImage({
+    digest,
+    imageRepo: preflight.imageRepo,
+    platforms: preflight.platforms,
+    tag: normalizedTag,
+  })
+  const publication = {
+    receiptSchema: 1,
+    status: 'published-and-publicly-verified',
+    tag: normalizedTag,
+    imageRepository: preflight.imageRepo,
+    imageRef,
+    digest,
+    platforms: inspection.platforms,
+    attestationManifestCount: inspection.attestationManifestCount,
+    anonymousRegistryReadback: inspection.anonymousReadback,
+    imageIndexSha256: inspection.indexSha256,
+  }
+  writeBundle({ imageRef, outputDir: targetDir, publication, tag: normalizedTag })
+  return { published: true, imageRef, outputDir: targetDir, publication }
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv)
   const tag = resolveReleaseTag(options.tag)
@@ -335,12 +579,18 @@ export async function main(argv = process.argv.slice(2)) {
 
   let imageRef = options.imageRef ? validatePinnedImageRef(options.imageRef) : null
   if (!imageRef && options.push) {
-    imageRef = buildAndPushImage({
+    const published = publishVerifiedUmbrelRelease({
       dryRun: options.dryRun,
       imageRepo: options.imageRepo,
+      outputDir,
       platforms: options.platforms,
       tag,
     })
+    if (options.dryRun) return
+    imageRef = published.imageRef
+    console.log(`Wrote Umbrel bundle to ${published.outputDir}`)
+    console.log(`Pinned image: ${imageRef}`)
+    return
   }
 
   if (!imageRef) {

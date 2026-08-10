@@ -211,7 +211,7 @@ Docker e2e and desktop updater scripts live under [`scripts`](scripts). The most
    remote refs, replays the canonical mutation gate before each external
    phase, pushes without force, resumes an already visible exact GitHub Actions
    run on retry, and fails closed if duplicate exact runs exist.
-7. Promote the same staged bytes with `node scripts/local-release.mjs --promote-draft --stage-dir <stage-dir>`. Promotion preflights and publishes Apple distribution, htree, the exact GitHub release, crates.io packages, and Zapstore.
+7. Promote the same staged bytes with `node scripts/local-release.mjs --promote-draft --stage-dir <stage-dir>`. Promotion preflights and publishes Apple distribution, htree, the exact GitHub release, crates.io packages, Zapstore, and the multi-architecture Umbrel image. Umbrel publication records the pushed digest, verifies the public registry index anonymously for `linux/amd64` and `linux/arm64`, and writes a digest-pinned submission bundle under `dist/umbrel-vX.Y.Z`.
 
 Direct `--publish` and `--final` modes are intentionally disabled. Every external release mutation replays the exact staged-source gate.
 

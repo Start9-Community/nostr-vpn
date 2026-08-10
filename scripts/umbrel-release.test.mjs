@@ -9,6 +9,7 @@ import {
   extractBuildxDigest,
   renderUmbrelCompose,
   renderUmbrelManifest,
+  validatePublishedImageIndex,
   validatePinnedImageRef,
 } from './umbrel-release.mjs'
 
@@ -39,6 +40,50 @@ test('extractBuildxDigest reads the primary metadata field', () => {
   })
 
   assert.equal(extractBuildxDigest(metadata), digest)
+})
+
+test('published image verification requires both release platforms and allows only attestations besides them', () => {
+  const digest = `sha256:${'d'.repeat(64)}`
+  const index = JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    manifests: [
+      { digest: `sha256:${'1'.repeat(64)}`, platform: { os: 'linux', architecture: 'amd64' } },
+      { digest: `sha256:${'2'.repeat(64)}`, platform: { os: 'linux', architecture: 'arm64' } },
+      { digest: `sha256:${'3'.repeat(64)}`, artifactType: 'application/vnd.in-toto+json', platform: { os: 'unknown', architecture: 'unknown' } },
+    ],
+  })
+  assert.deepEqual(
+    validatePublishedImageIndex(index, {
+      digest,
+      imageRef: `ghcr.io/example/nostr-vpn-umbrel@${digest}`,
+      platforms: ['linux/amd64', 'linux/arm64'],
+    }),
+    {
+      digest,
+      imageRef: `ghcr.io/example/nostr-vpn-umbrel@${digest}`,
+      platforms: ['linux/amd64', 'linux/arm64'],
+      attestationManifestCount: 1,
+    },
+  )
+
+  for (const manifests of [
+    [{ digest: `sha256:${'1'.repeat(64)}`, platform: { os: 'linux', architecture: 'amd64' } }],
+    [
+      { digest: `sha256:${'1'.repeat(64)}`, platform: { os: 'linux', architecture: 'amd64' } },
+      { digest: `sha256:${'2'.repeat(64)}`, platform: { os: 'linux', architecture: 'arm64' } },
+      { digest: `sha256:${'4'.repeat(64)}`, platform: { os: 'linux', architecture: 's390x' } },
+    ],
+  ]) {
+    assert.throws(
+      () => validatePublishedImageIndex(JSON.stringify({ schemaVersion: 2, manifests }), {
+        digest,
+        imageRef: `ghcr.io/example/nostr-vpn-umbrel@${digest}`,
+        platforms: ['linux/amd64', 'linux/arm64'],
+      }),
+      /published Umbrel image platforms/i,
+    )
+  }
 })
 
 test('renderUmbrelCompose includes the pinned image and tunnel access', () => {
@@ -91,4 +136,16 @@ test('base Umbrel manifest uses the app-store port assigned for Nostr VPN', () =
 
 test('base Umbrel app includes an exports file', () => {
   assert.equal(existsSync(join(repoRoot, 'umbrel/exports.sh')), true)
+})
+
+test('Umbrel publication uses anonymous digest readback and atomic append-only bundles', () => {
+  const source = readFileSync(join(repoRoot, 'scripts/umbrel-release.mjs'), 'utf8')
+  assert.match(source, /DOCKER_CONFIG:\s*anonymousDockerConfig/)
+  assert.match(source, /'DOCKER_AUTH_CONFIG',[\s\S]*?'REGISTRY_AUTH_FILE'/)
+  assert.match(source, /delete publicEnvironment\[name\]/)
+  assert.match(source, /\['buildx', 'imagetools', 'inspect', '--raw', digestRef\]/)
+  assert.match(source, /Refusing to replace existing Umbrel bundle/)
+  assert.match(source, /renameSync\(temporary, outputDir\)/)
+  assert.match(source, /publication\.bundleFiles = Object\.fromEntries/)
+  assert.match(source, /anonymousRegistryReadback:\s*inspection\.anonymousReadback/)
 })

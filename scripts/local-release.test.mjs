@@ -988,6 +988,7 @@ test('staged draft publication rejects build, final, and distribution flags', ()
     ['--cargo-publish'],
     ['--skip-cargo-publish'],
     ['--skip-zapstore'],
+    ['--skip-umbrel'],
     ['--require-zapstore'],
     ['--skip-verify'],
     ['--only', 'verify'],
@@ -1008,6 +1009,26 @@ test('staged draft publication rejects build, final, and distribution flags', ()
       conflict.join(' '),
     )
   }
+})
+
+test('draft promotion makes verified multi-arch Umbrel publication a default release channel', () => {
+  const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
+  const promoteStart = localRelease.indexOf('if (options.promoteDraft)')
+  const promoteEnd = localRelease.indexOf('\n  const steps = [', promoteStart)
+  const promote = localRelease.slice(promoteStart, promoteEnd)
+
+  assert.match(localRelease, /--skip-umbrel/)
+  assert.match(localRelease, /NVPN_UMBREL_IMAGE_REPO/)
+  assert.ok(promote.indexOf('preflightUmbrelPublication({') >= 0)
+  assert.ok(
+    promote.indexOf('preflightUmbrelPublication({')
+      < promote.indexOf('publishExactIosDistribution({'),
+  )
+  assert.match(
+    promote,
+    /publishVerifiedUmbrelRelease\(\{[\s\S]*?beforeMutation:\s*\(\)\s*=>\s*replayCanonicalMutationGate\(\{[\s\S]*?requireTag:\s*true/,
+  )
+  assert.match(promote, /platforms:\s*\['linux\/amd64',\s*'linux\/arm64'\]/)
 })
 
 test('direct htree and crates publication paths fail closed', () => {
@@ -1159,6 +1180,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     'release-mutation-gate.mjs',
     'verify-release-publication-bundle.mjs',
     'startos-release.mjs',
+    'umbrel-release.mjs',
     'zapstore-release-publication.mjs',
   ]) {
     copyFileSync(join(process.cwd(), 'scripts', name), join(scripts, name))

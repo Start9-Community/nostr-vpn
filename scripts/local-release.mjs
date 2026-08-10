@@ -74,6 +74,10 @@ import {
   preflightIosPublication,
   publishExactIosDistribution,
 } from './ios-release-publication.mjs'
+import {
+  preflightUmbrelPublication,
+  publishVerifiedUmbrelRelease,
+} from './umbrel-release.mjs'
 import { validateReleaseMutationGate } from './release-mutation-gate.mjs'
 import {
   preflightRequiredZapstorePublication as preflightExactZapstorePublication,
@@ -121,6 +125,8 @@ Options:
   --skip-cargo-publish      With --promote-draft, don't push Rust crates
   --skip-zapstore           With --promote-draft, skip Android Zapstore
                             publication
+  --skip-umbrel             With --promote-draft, skip the required multi-arch
+                            Umbrel image publication and public readback
   --require-zapstore        With --promote-draft, require a signed APK, zsp,
                             signing configuration, successful publication,
                             and post-publish Zapstore verification
@@ -154,6 +160,7 @@ function parseArgs(argv) {
     cargoPublish: false,
     skipCargoPublish: false,
     skipZapstore: false,
+    skipUmbrel: false,
     requireZapstore: false,
     skipVerify: false,
     reuseGateReceipts: false,
@@ -202,6 +209,9 @@ function parseArgs(argv) {
         break
       case '--skip-zapstore':
         options.skipZapstore = true
+        break
+      case '--skip-umbrel':
+        options.skipUmbrel = true
         break
       case '--require-zapstore':
         options.requireZapstore = true
@@ -2349,6 +2359,7 @@ function main() {
 
   const tag = options.tag || readWorkspaceVersionTag(readFileSync(rootCargoToml, 'utf8'))
   const releaseTree = options.releaseTree || env.NVPN_RELEASE_TREE || 'releases/nostr-vpn'
+  const umbrelImageRepo = env.NVPN_UMBREL_IMAGE_REPO || 'ghcr.io/mmalmi/nostr-vpn-umbrel'
   const stageDir =
     options.stageDir || join(os.tmpdir(), `nostr-vpn-release-${tag.replace(/[^\w.-]/g, '_')}`)
   const releaseGateLogDir = resolve(
@@ -2528,6 +2539,7 @@ function main() {
       || options.cargoPublish
       || options.skipCargoPublish
       || options.skipZapstore
+      || options.skipUmbrel
       || options.requireZapstore
     )
   ) {
@@ -2558,6 +2570,7 @@ function main() {
     if (options.cargoPublish) conflicts.push('--cargo-publish')
     if (options.skipCargoPublish) conflicts.push('--skip-cargo-publish')
     if (options.skipZapstore) conflicts.push('--skip-zapstore')
+    if (options.skipUmbrel) conflicts.push('--skip-umbrel')
     if (options.requireZapstore) conflicts.push('--require-zapstore')
     if (options.skipVerify) conflicts.push('--skip-verify')
     if (options.only) conflicts.push('--only')
@@ -2609,6 +2622,9 @@ function main() {
   console.log(`Release tree: ${releaseTree}`)
   if (requireZapstore) {
     console.log('Zapstore publication and post-publish verification are required.')
+  }
+  if (finalPublication && !options.skipUmbrel) {
+    console.log('Umbrel multi-arch image publication and anonymous digest verification are required.')
   }
   if (loadedPaths.length > 0) {
     console.log(`Loaded env files: ${loadedPaths.join(', ')}`)
@@ -2748,6 +2764,13 @@ function main() {
       mutationEnv,
       dryRun: options.dryRun,
     })
+    if (!options.skipUmbrel) {
+      preflightUmbrelPublication({
+        dryRun: options.dryRun,
+        imageRepo: umbrelImageRepo,
+        platforms: ['linux/amd64', 'linux/arm64'],
+      })
+    }
     if (!options.dryRun && !options.skipZapstore) {
       preflightExactZapstorePublication({
         repoRoot,
@@ -2835,6 +2858,24 @@ function main() {
     console.log(
       `${githubRelease.created ? 'Created and verified' : 'Verified existing'} exact GitHub release ${tag}.`,
     )
+    if (!options.skipUmbrel) {
+      const umbrel = publishVerifiedUmbrelRelease({
+        beforeMutation: () => replayCanonicalMutationGate({
+          stageDir,
+          tag,
+          env: mutationEnv,
+          requireTag: true,
+        }),
+        dryRun: options.dryRun,
+        imageRepo: umbrelImageRepo,
+        outputDir: join(distDir, `umbrel-${tag}`),
+        platforms: ['linux/amd64', 'linux/arm64'],
+        tag,
+      })
+      console.log(
+        `${umbrel.published ? 'Published and anonymously verified' : 'Would publish'} ${tag} for Umbrel.`,
+      )
+    }
     if (options.cargoPublish || !options.skipCargoPublish) {
       publishRustCrates({
         dryRun: options.dryRun,
