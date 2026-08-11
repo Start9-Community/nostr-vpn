@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { createHash, randomUUID, X509Certificate } from 'node:crypto'
+import { createHash, X509Certificate } from 'node:crypto'
 import {
   cpSync,
   copyFileSync,
@@ -47,7 +47,6 @@ import {
   validatePromotableReleaseSource,
   validateReleaseAssetSet,
   validateStagedReleaseTree,
-  windowsSshTransportArgs,
   zapstorePublicationRequired,
 } from './local-release-lib.mjs'
 import {
@@ -686,49 +685,6 @@ function packageUnixCliTarball({ binaryPath, targetTriple, tag, dryRun }) {
   return [unversioned, versioned]
 }
 
-function psQuote(value) {
-  return `'${String(value).replace(/'/g, "''")}'`
-}
-
-function encodePowerShellScript(script) {
-  return Buffer.from(script, 'utf16le').toString('base64')
-}
-
-/// Run a PowerShell snippet on the remote SSH host. We base64 the source so
-/// quoting and newlines survive the SSH/PowerShell round-trip cleanly.
-function runWindowsPowerShell(host, script, { capture = false, dryRun = false } = {}) {
-  const encoded = encodePowerShellScript(script)
-  return run(
-    'ssh',
-    [
-      ...windowsSshTransportArgs(process.env),
-      host,
-      'powershell.exe',
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-EncodedCommand',
-      encoded,
-    ],
-    { capture, dryRun },
-  )
-}
-
-function pullFileFromWindowsHost({ host, remotePath, localParent, name, dryRun }) {
-  const remoteFile = `${remotePath.replace(/\\/g, '/')}/${name}`
-  const dest = join(localParent, name)
-  if (!dryRun) {
-    mkdirSync(localParent, { recursive: true })
-  }
-  run('scp', [...windowsSshTransportArgs(process.env), `${host}:${remoteFile}`, dest], { dryRun })
-}
-
-function pushFileToWindowsHost({ host, localPath, remotePath, dryRun }) {
-  const remoteFile = remotePath.replace(/\\/g, '/')
-  run('scp', [...windowsSshTransportArgs(process.env), localPath, `${host}:${remoteFile}`], { dryRun })
-}
-
 function buildWindowsArtifacts({
   env,
   tag,
@@ -740,39 +696,6 @@ function buildWindowsArtifacts({
   installerReceiptPath,
   installerArtifactPath,
 }) {
-  const host = String(env.NVPN_WINDOWS_SSH_HOST || '').trim()
-  if (!host) {
-    throw new SkipStepError(
-      'Skipping Windows artifacts because NVPN_WINDOWS_SSH_HOST is unset.',
-    )
-  }
-
-  if (!dryRun) {
-    const probe = spawnSync(
-      'ssh',
-      [...windowsSshTransportArgs(env), host, 'whoami'],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    )
-    if (probe.status !== 0) {
-      throw new SkipStepError(
-        `Skipping Windows artifacts because ssh ${host} is unreachable. ` +
-          'Bring up the VM (e.g. on local VM host) and ensure VPN is connected, or set NVPN_WINDOWS_SSH_HOST.',
-      )
-    }
-  }
-
-  const guestRepo = env.NVPN_WINDOWS_GUEST_REPO_PATH || 'C:\\src\\nostr-vpn'
-  const vmArchitecture = runWindowsPowerShell(
-    host,
-    '[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()',
-    { capture: true, dryRun },
-  ).trim()
-  if (!dryRun && vmArchitecture.toLowerCase() !== 'x64') {
-    throw new SkipStepError(
-      `Skipping Windows artifacts because ${host} is ${vmArchitecture}; Windows x64 release artifacts must be built on an x64 Windows runner.`,
-    )
-  }
-
   const targets = splitCsv(
     env.NVPN_WINDOWS_CLI_TARGETS || 'x86_64-pc-windows-msvc',
   )
@@ -794,20 +717,12 @@ function buildWindowsArtifacts({
     )
   }
 
-  const guestArtifactRoot =
-    env.NVPN_WINDOWS_RELEASE_ARTIFACT_ROOT
-    || env.GUEST_ARTIFACT_ROOT
-    || `${guestRepo}\\artifacts`
-  const guestPublishDir =
-    env.NVPN_WINDOWS_RELEASE_PUBLISH_DIR
-    || `${guestRepo}\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish`
-  const proofScriptPath = join(
-    repoRoot,
-    'scripts',
-    'windows-release-publication-proof.ps1',
-  )
   const installerName = `nostr-vpn-${tag}-windows-x64-setup.exe`
   const archiveName = `nvpn-${tag}-x86_64-pc-windows-msvc.zip`
+  const retainedArchivePath = resolve(
+    env.NVPN_WINDOWS_RELEASE_ARCHIVE_PATH
+      || join(dirname(installerArtifactPath), archiveName),
+  )
   if (dryRun) {
     builtLines.push('Reused the exact Windows installer and CLI payload exercised by the Windows VM gate.')
     return {}
@@ -858,83 +773,20 @@ function buildWindowsArtifacts({
     )
   }
   const expected = sealedInstaller.payloads
-
-  const guestInstallerGateDir =
-    env.NVPN_WINDOWS_INSTALLER_GATE_REMOTE_DIR
-    || `${guestArtifactRoot}\\windows-installer-gate`
-  const guestInstaller = `${guestInstallerGateDir}\\${installerName}`
-  const guestArchive = `${guestArtifactRoot}\\${archiveName}`
-  const guestTemp = runWindowsPowerShell(
-    host,
-    '[Console]::Out.Write($env:TEMP)',
-    { capture: true },
-  ).trim()
-  if (!/^[A-Za-z]:\\/.test(guestTemp)) {
-    throw new Error('Windows publication proof could not resolve the guest temporary directory.')
-  }
-  const proofId = randomUUID().replaceAll('-', '')
-  const guestProofDir = `${guestTemp}\\nvpn-publication-harness-${proofId}`
-  const guestProofScript = `${guestProofDir}\\windows-release-publication-proof.ps1`
-  const proofScriptSha256 = sha256FileSync(proofScriptPath)
-  runWindowsPowerShell(
-    host,
-    `New-Item -ItemType Directory -Force -Path ${psQuote(guestProofDir)} | Out-Null`,
-  )
-  try {
-    pushFileToWindowsHost({
-      host,
-      localPath: proofScriptPath,
-      remotePath: guestProofScript,
-      dryRun: false,
-    })
-    runWindowsPowerShell(
-      host,
-      `
-$ErrorActionPreference = 'Stop'
-$proofScript = ${psQuote(guestProofScript)}
-$proofScriptSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $proofScript).Hash.ToLowerInvariant()
-if ($proofScriptSha256 -ne ${psQuote(proofScriptSha256)}) {
-  throw 'The uploaded Windows publication proof does not match the committed host harness.'
-}
-& $proofScript \`
-  -RepoPath ${psQuote(guestRepo)} \`
-  -ExpectedCommit ${psQuote(receipt.appGitSha)} \`
-  -ExpectedTree ${psQuote(receipt.appGitTree)} \`
-  -PublishDir ${psQuote(guestPublishDir)} \`
-  -InstallerPath ${psQuote(guestInstaller)} \`
-  -ArtifactRoot ${psQuote(guestArtifactRoot)} \`
-  -ArchivePath ${psQuote(guestArchive)} \`
-  -ExpectedInstallerSha256 ${psQuote(sealedInstaller.installerSha256)} \`
-  -ExpectedInstallerSize ${sealedInstaller.installerSize} \`
-  -ExpectedAppSha256 ${psQuote(expected.app)} \`
-  -ExpectedAppCoreSha256 ${psQuote(expected.appCore)} \`
-  -ExpectedCliSha256 ${psQuote(expected.cli)} \`
-  -ExpectedWintunSha256 ${psQuote(expected.wintun)}
-`,
-    )
-  } finally {
-    runWindowsPowerShell(
-      host,
-      `Remove-Item -Recurse -Force -LiteralPath ${psQuote(guestProofDir)} -ErrorAction SilentlyContinue`,
-    )
-  }
-  pullFileFromWindowsHost({
-    host,
-    remotePath: guestArtifactRoot,
-    localParent: distDir,
-    name: archiveName,
-    dryRun: false,
-  })
   const installerPath = join(distDir, installerName)
   const archivePath = join(distDir, archiveName)
+  exactRegularFile(retainedArchivePath, 'Windows exact CLI archive')
+  const retainedArchiveSha256 = sha256FileSync(retainedArchivePath)
   mkdirSync(distDir, { recursive: true })
+  copyFileSync(retainedArchivePath, archivePath)
   copyFileSync(installerArtifactPath, installerPath)
   if (
-    sha256FileSync(installerPath) !== sealedInstaller.installerSha256
+    sha256FileSync(archivePath) !== retainedArchiveSha256
+    || sha256FileSync(installerPath) !== sealedInstaller.installerSha256
     || statSync(installerPath).size !== sealedInstaller.installerSize
   ) {
     throw new Error(
-      'Windows exact installer changed while copying it into the publication directory.',
+      'Windows exact retained artifacts changed while copying them into the publication directory.',
     )
   }
   validateExactZipMembers(

@@ -1721,17 +1721,16 @@ test('Windows release transport supports jump hosts and proxy commands', () => {
   )
 })
 
-test('Windows publication bypasses script policy only for its remote process', () => {
+test('Windows publication does not depend on a retained remote VM workspace', () => {
   const source = readFileSync('scripts/local-release.mjs', 'utf8')
-  const start = source.indexOf('function runWindowsPowerShell(')
-  const end = source.indexOf('\nfunction pullFileFromWindowsHost(', start)
-  const helper = source.slice(start, end)
+  const start = source.indexOf('function buildWindowsArtifacts(')
+  const end = source.indexOf('\nfunction buildLinuxArtifacts(', start)
+  const build = source.slice(start, end)
 
-  assert.match(
-    helper,
-    /'powershell\.exe',[\s\S]*?'-NoProfile',[\s\S]*?'-NonInteractive',[\s\S]*?'-ExecutionPolicy',[\s\S]*?'Bypass',[\s\S]*?'-EncodedCommand'/,
-  )
-  assert.match(source, /windows-release-publication-proof\.ps1/)
+  assert.match(build, /NVPN_WINDOWS_RELEASE_ARCHIVE_PATH/)
+  assert.match(build, /exactRegularFile\(retainedArchivePath/)
+  assert.doesNotMatch(build, /runWindowsPowerShell|pushFileToWindowsHost|pullFileFromWindowsHost/)
+  assert.doesNotMatch(source, /function runWindowsPowerShell\(/)
 })
 
 test('readWorkspaceVersionTag reads the workspace package version', () => {
@@ -2449,7 +2448,7 @@ test('macOS publication packages the canonical CLI from the app bundle', () => {
   assert.match(build, /env\.MACOS_SIGNING_IDENTITY = gateSigning\.identitySha1/)
 })
 
-test('Windows publication reuses the exact installer that passed the VM smoke gate', () => {
+test('Windows publication reuses the exact installer and CLI archive that passed the VM gate', () => {
   const localRelease = readFileSync(
     join(process.cwd(), 'scripts/local-release.mjs'),
     'utf8',
@@ -2472,21 +2471,12 @@ test('Windows publication reuses the exact installer that passed the VM smoke ga
     build,
     /copyFileSync\(installerArtifactPath,\s*installerPath\)/,
   )
-  assert.match(build, /ExpectedInstallerSha256/)
-  assert.match(build, /ExpectedInstallerSize/)
-  assert.doesNotMatch(build, /NVPN_WINDOWS_RELEASE_PROOF_SCRIPT/)
-  assert.match(build, /pushFileToWindowsHost\(/)
-  assert.match(build, /sha256FileSync\(proofScriptPath\)/)
-  assert.match(build, /Get-FileHash -Algorithm SHA256 -LiteralPath \$proofScript/)
-  assert.match(build, /nvpn-publication-harness-\$\{proofId\}/)
-  assert.match(build, /finally \{[\s\S]*?Remove-Item -Recurse -Force -LiteralPath/)
+  assert.match(build, /NVPN_WINDOWS_RELEASE_ARCHIVE_PATH/)
+  assert.match(build, /copyFileSync\(retainedArchivePath,\s*archivePath\)/)
+  assert.match(build, /sha256FileSync\(archivePath\) !== retainedArchiveSha256/)
   assert.match(build, /validateExactZipMembers\([\s\S]*?'nvpn\.exe'[\s\S]*?'binaries\/wintun\.dll'/)
-  assert.match(build, /& \$proofScript/)
   assert.match(build, /gateReceiptPath:\s*installerReceiptPath/)
-  assert.doesNotMatch(
-    build,
-    /pullFileFromWindowsHost\(\{[\s\S]*?name:\s*installerName/,
-  )
+  assert.doesNotMatch(build, /ssh|scp|powershell\.exe/i)
   const hashCheck = proof.indexOf(
     '$installerSha256 = (',
   )

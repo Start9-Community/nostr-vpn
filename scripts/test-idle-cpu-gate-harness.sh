@@ -296,14 +296,20 @@ end = text.index("\nfunction buildLinuxArtifacts(", start)
 windows = text[start:end]
 for required in (
     "validateWindowsInstallerGateReceipt({",
-    "windows-release-publication-proof.ps1",
+    "NVPN_WINDOWS_RELEASE_ARCHIVE_PATH",
+    "exactRegularFile(retainedArchivePath",
     "Reused the exact Windows installer and CLI payload exercised by the Windows VM gate.",
 ):
     if required not in windows:
         raise SystemExit(
             f"Windows publication does not reuse its exact VM-gated payload: {required}"
         )
-for forbidden in ("cargo build", "windows-build.ps1"):
+for forbidden in (
+    "cargo build",
+    "windows-build.ps1",
+    "runWindowsPowerShell",
+    "pullFileFromWindowsHost",
+):
     if forbidden in windows:
         raise SystemExit(
             f"Windows publication can rebuild a payload held by the VM gate: {forbidden}"
