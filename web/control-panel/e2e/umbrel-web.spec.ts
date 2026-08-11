@@ -514,6 +514,14 @@ test('VPN switch starts the Umbrel daemon without tunnel setup errors', async ({
     await expect(page.locator('.app-header')).toBeVisible();
     await expect(page.locator('.vpn-switch')).toBeVisible();
 
+    const initialState = await postJson<UiState>(request, '/api/tick');
+    if (initialState.vpnEnabled) {
+      await page.getByRole('button', { name: 'Turn VPN off' }).click();
+      await expect
+        .poll(async () => (await postJson<UiState>(request, '/api/tick')).vpnEnabled)
+        .toBe(false);
+    }
+
     await page.getByRole('button', { name: 'Turn VPN on' }).click();
     await expect
       .poll(

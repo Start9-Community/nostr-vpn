@@ -73,6 +73,7 @@ const harnessOnlyPaths = new Set([
   'scripts/release-source-verification.mjs',
   'scripts/release_common.sh',
   'scripts/umbrel-release.mjs',
+  'web/control-panel/e2e/umbrel-web.spec.ts',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
   'scripts/verify-host-linux-peer-artifact.py',

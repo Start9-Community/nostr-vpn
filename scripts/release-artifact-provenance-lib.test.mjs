@@ -232,7 +232,6 @@ test('component proof treats only the native-lab supervisor as harness-only', ()
         candidateTree: nativeLab.tree,
       }))
     }
-
     git('checkout', '-q', '-b', 'nearby-script', receipt.commit)
     const nearby = commit(
       'scripts/native-lab-helper.py',
@@ -300,6 +299,21 @@ test('component proof treats only the exact Umbrel release harnesses as harness-
         receiptTree: receipt.tree,
         candidateCommit: authenticatedGate.commit,
         candidateTree: authenticatedGate.tree,
+      }))
+    }
+    const webE2E = commit(
+      'web/control-panel/e2e/umbrel-web.spec.ts',
+      'test("Umbrel web release behavior")\n',
+      'Umbrel web release test change',
+    )
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.doesNotThrow(() => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit: receipt.commit,
+        receiptTree: receipt.tree,
+        candidateCommit: webE2E.commit,
+        candidateTree: webE2E.tree,
       }))
     }
 
