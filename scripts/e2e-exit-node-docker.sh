@@ -239,6 +239,30 @@ wait_for_paid_exit_probe_fixture() {
   exit 1
 }
 
+assert_exact_paid_exit_offer() {
+  local label="$1"
+  local discovery_json="$2"
+  if jq -e \
+    --arg seller "$ALICE_NPUB" \
+    --arg mint "$PAID_EXIT_MINT" \
+    --argjson price "$PAID_EXIT_PRICE_MSAT_PER_GB" \
+    --argjson capacity "$PAID_MAX_CHANNEL_CAPACITY_SAT" \
+    'any(.offers[]?; .offer.offer_id == "internet-exit"
+      and .offer.seller_npub == $seller
+      and (.offer.receiver_pubkey_hex | length) == 66
+      and .offer.pricing.price_msat_per_gb == $price
+      and .offer.channel.max_channel_capacity_sat == $capacity
+      and (.offer.channel.accepted_mints | index($mint)) != null)' \
+    <<<"$discovery_json" >/dev/null
+  then
+    echo "paid-exit $label discovery passed: exact signed seller offer received"
+    return 0
+  fi
+  echo "exit-node docker e2e failed: $label discovery did not return the seller's exact signed offer" >&2
+  printf '%s\n' "$discovery_json" >&2
+  exit 1
+}
+
 ping_until_success() {
   local node="$1"
   local target="$2"
@@ -768,6 +792,12 @@ if truthy "$PAID_EXIT_MODE"; then
     --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
   "${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect \
     --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
+    --config "$CONFIG_PATH" \
+    --duration-secs 20 \
+    --json | tr -d '\r')"
+  assert_exact_paid_exit_offer marketplace "$DISCOVER_JSON"
+
   PAID_EXIT_REJECT_MAX_MSAT_PER_GB="$((PAID_EXIT_PRICE_MSAT_PER_GB - 1))"
   PAID_EXIT_REJECT_PROVIDER_LINK="${PAID_EXIT_PROVIDER_LINK/maxMsatPerGb=${PAID_EXIT_PRICE_MSAT_PER_GB}/maxMsatPerGb=${PAID_EXIT_REJECT_MAX_MSAT_PER_GB}}"
   if [[ "$PAID_EXIT_REJECT_PROVIDER_LINK" == "$PAID_EXIT_PROVIDER_LINK" ]]; then
@@ -790,22 +820,7 @@ if truthy "$PAID_EXIT_MODE"; then
     --duration-secs 0 \
     --provider "$PAID_EXIT_PROVIDER_LINK" \
     --json | tr -d '\r')"
-  if ! jq -e \
-    --arg seller "$ALICE_NPUB" \
-    --arg mint "$PAID_EXIT_MINT" \
-    --argjson price "$PAID_EXIT_PRICE_MSAT_PER_GB" \
-    --argjson capacity "$PAID_MAX_CHANNEL_CAPACITY_SAT" \
-    'any(.offers[]?; .offer.offer_id == "internet-exit"
-      and .offer.seller_npub == $seller
-      and (.offer.receiver_pubkey_hex | length) == 66
-      and .offer.pricing.price_msat_per_gb == $price
-      and .offer.channel.max_channel_capacity_sat == $capacity
-      and (.offer.channel.accepted_mints | index($mint)) != null)' \
-    <<<"$DISCOVER_JSON" >/dev/null; then
-    echo "exit-node docker e2e failed: buyer did not import the seller's exact signed offer" >&2
-    printf '%s\n' "$DISCOVER_JSON" >&2
-    exit 1
-  fi
+  assert_exact_paid_exit_offer provider-link "$DISCOVER_JSON"
   PAID_BUY_CAPACITY_SAT="$PAID_EXIT_TOKEN_AMOUNT_SAT"
   if [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
     PAID_BUY_CAPACITY_SAT="$PAID_EXIT_SPILMAN_CHANNEL_CAPACITY_SAT"
