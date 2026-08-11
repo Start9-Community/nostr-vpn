@@ -21,6 +21,10 @@ grep -Fq 'NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90' \
   "$ROOT/scripts/mobile-release-join-e2e.sh"
 grep -Fq 'RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 90' \
   "$ROOT/scripts/mobile-release-join-e2e.sh"
+grep -Fq 'NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90' \
+  "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
+grep -Fq 'RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 90' \
+  "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
 join_ui="$ROOT/scripts/lib-mobile-release-join-ui.sh"
 
 (
