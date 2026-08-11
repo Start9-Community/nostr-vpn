@@ -1999,6 +1999,7 @@ run_web_startos_manual_join_docker_gate() {
 
 run_umbrel_release_gate() {
   local image="${NVPN_RELEASE_GATE_UMBREL_IMAGE:-nostr-vpn-release-gate-umbrel}"
+  pnpm --dir "$ROOT_DIR/web/control-panel" install --frozen-lockfile
   env \
     NOSTR_VPN_IMAGE="$image" \
     NVPN_UMBREL_WEB_E2E_PROJECT="${NVPN_RELEASE_GATE_UMBREL_WEB_PROJECT:-nostr-vpn-release-gate-umbrel-web}" \
