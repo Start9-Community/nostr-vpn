@@ -3,17 +3,21 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  accessSync,
+  constants as fsConstants,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import os from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -144,6 +148,42 @@ function commandExists(command) {
   return result.status === 0
 }
 
+export function extractDockerCliPluginPath(infoText, pluginName) {
+  let plugins
+  try {
+    plugins = JSON.parse(infoText)
+  } catch {
+    throw new Error('Docker CLI plugin metadata is not valid JSON')
+  }
+  const matches = Array.isArray(plugins)
+    ? plugins.filter((plugin) => plugin?.Name === pluginName)
+    : []
+  const pluginPath = matches.length === 1 ? String(matches[0]?.Path ?? '').trim() : ''
+  if (!isAbsolute(pluginPath)) {
+    throw new Error(
+      `Docker CLI plugin metadata must contain exactly one absolute ${pluginName} path`,
+    )
+  }
+  return pluginPath
+}
+
+function resolveDockerCliPluginExecutable(pluginName) {
+  const pluginPath = extractDockerCliPluginPath(
+    run(
+      'docker',
+      ['info', '--format', '{{json .ClientInfo.Plugins}}'],
+      { capture: true },
+    ),
+    pluginName,
+  )
+  const executable = realpathSync(pluginPath)
+  if (!statSync(executable).isFile()) {
+    throw new Error(`Docker CLI plugin is not a regular file: ${pluginPath}`)
+  }
+  accessSync(executable, fsConstants.X_OK)
+  return executable
+}
+
 function resolveReleaseTag(explicitTag) {
   if (explicitTag) {
     return normalizeTag(explicitTag)
@@ -173,6 +213,22 @@ export function validatePinnedImageRef(imageRef) {
     throw new Error(`Expected a pinned image reference ending with @sha256:..., got: ${imageRef}`)
   }
   return trimmed
+}
+
+export function parsePinnedImageRef(imageRef) {
+  const pinned = validatePinnedImageRef(imageRef)
+  const at = pinned.lastIndexOf('@')
+  const tagged = pinned.slice(0, at)
+  const tagSeparator = tagged.lastIndexOf(':')
+  if (tagSeparator <= tagged.lastIndexOf('/')) {
+    throw new Error(`Expected a tagged image reference before the digest: ${imageRef}`)
+  }
+  return {
+    digest: pinned.slice(at + 1),
+    imageRef: pinned,
+    imageRepo: normalizeImageRepo(tagged.slice(0, tagSeparator)),
+    tag: normalizeTag(tagged.slice(tagSeparator + 1)),
+  }
 }
 
 export function extractBuildxDigest(metadataText) {
@@ -488,6 +544,7 @@ function buildAndPushImage({ beforeMutation, dryRun, imageRepo, platforms, tag }
 function inspectPublishedImage({ digest, imageRepo, platforms, tag }) {
   const imageRef = buildPinnedImageRef(imageRepo, tag, digest)
   const digestRef = `${normalizeImageRepo(imageRepo)}@${digest}`
+  const buildxExecutable = resolveDockerCliPluginExecutable('buildx')
   const anonymousDockerConfig = mkdtempSync(
     join(os.tmpdir(), 'nostr-vpn-umbrel-public-readback-'),
   )
@@ -504,8 +561,8 @@ function inspectPublishedImage({ digest, imageRepo, platforms, tag }) {
       delete publicEnvironment[name]
     }
     const indexText = run(
-      'docker',
-      ['buildx', 'imagetools', 'inspect', '--raw', digestRef],
+      buildxExecutable,
+      ['imagetools', 'inspect', '--raw', digestRef],
       {
         capture: true,
         env: publicEnvironment,
@@ -549,6 +606,34 @@ export function publishVerifiedUmbrelRelease({
     console.log(`Would write verified Umbrel bundle to ${targetDir}`)
     return { published: false, imageRef: null, outputDir: targetDir }
   }
+  const verified = verifyPublishedUmbrelRelease({
+    imageRef,
+    imageRepo: preflight.imageRepo,
+    outputDir: targetDir,
+    platforms: preflight.platforms,
+    tag: normalizedTag,
+  })
+  return { ...verified, reusedPublishedImage: false }
+}
+
+export function verifyPublishedUmbrelRelease({
+  imageRef,
+  imageRepo,
+  outputDir,
+  platforms = ['linux/amd64', 'linux/arm64'],
+  tag,
+} = {}) {
+  const preflight = preflightUmbrelPublication({ imageRepo, platforms })
+  const normalizedTag = normalizeTag(tag)
+  const targetDir = resolve(repoRoot, outputDir || defaultOutputDir(normalizedTag))
+  const expected = buildPinnedImageRef(
+    preflight.imageRepo,
+    normalizedTag,
+    parsePinnedImageRef(imageRef).digest,
+  )
+  if (imageRef !== expected) {
+    throw new Error(`Pinned Umbrel image does not match ${preflight.imageRepo}:${normalizedTag}`)
+  }
   const digest = imageRef.slice(imageRef.lastIndexOf('@') + 1)
   const inspection = inspectPublishedImage({
     digest,
@@ -569,7 +654,13 @@ export function publishVerifiedUmbrelRelease({
     imageIndexSha256: inspection.indexSha256,
   }
   writeBundle({ imageRef, outputDir: targetDir, publication, tag: normalizedTag })
-  return { published: true, imageRef, outputDir: targetDir, publication }
+  return {
+    published: true,
+    imageRef,
+    outputDir: targetDir,
+    publication,
+    reusedPublishedImage: true,
+  }
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -607,9 +698,19 @@ export async function main(argv = process.argv.slice(2)) {
     return
   }
 
-  writeBundle({ imageRef, outputDir, tag })
-  console.log(`Wrote Umbrel bundle to ${outputDir}`)
-  console.log(`Pinned image: ${imageRef}`)
+  const parsed = parsePinnedImageRef(imageRef)
+  if (parsed.tag !== tag) {
+    throw new Error(`Pinned Umbrel image tag ${parsed.tag} does not match release tag ${tag}`)
+  }
+  const verified = verifyPublishedUmbrelRelease({
+    imageRef,
+    imageRepo: parsed.imageRepo,
+    outputDir,
+    platforms: options.platforms,
+    tag,
+  })
+  console.log(`Wrote anonymously verified Umbrel bundle to ${verified.outputDir}`)
+  console.log(`Pinned image: ${verified.imageRef}`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 
 import {
   buildPinnedImageRef,
+  extractDockerCliPluginPath,
   extractBuildxDigest,
+  parsePinnedImageRef,
   renderUmbrelCompose,
   renderUmbrelManifest,
   validatePublishedImageIndex,
@@ -30,6 +32,23 @@ test('validatePinnedImageRef rejects unpinned refs', () => {
   )
 })
 
+test('parsePinnedImageRef preserves registry ports and exact release tags', () => {
+  const digest = `sha256:${'e'.repeat(64)}`
+  assert.deepEqual(
+    parsePinnedImageRef(`registry.example:5443/team/nvpn:v4.1.7@${digest}`),
+    {
+      digest,
+      imageRef: `registry.example:5443/team/nvpn:v4.1.7@${digest}`,
+      imageRepo: 'registry.example:5443/team/nvpn',
+      tag: 'v4.1.7',
+    },
+  )
+  assert.throws(
+    () => parsePinnedImageRef(`registry.example/team/nvpn@${digest}`),
+    /tagged image reference/i,
+  )
+})
+
 test('extractBuildxDigest reads the primary metadata field', () => {
   const digest = `sha256:${'b'.repeat(64)}`
   const metadata = JSON.stringify({
@@ -40,6 +59,31 @@ test('extractBuildxDigest reads the primary metadata field', () => {
   })
 
   assert.equal(extractBuildxDigest(metadata), digest)
+})
+
+test('extractDockerCliPluginPath selects one absolute buildx executable', () => {
+  assert.equal(
+    extractDockerCliPluginPath(JSON.stringify([
+      { Name: 'compose', Path: '/opt/docker/docker-compose' },
+      { Name: 'buildx', Path: '/opt/docker/docker-buildx' },
+    ]), 'buildx'),
+    '/opt/docker/docker-buildx',
+  )
+
+  for (const value of [
+    'not json',
+    JSON.stringify([]),
+    JSON.stringify([{ Name: 'buildx', Path: 'docker-buildx' }]),
+    JSON.stringify([
+      { Name: 'buildx', Path: '/one/docker-buildx' },
+      { Name: 'buildx', Path: '/two/docker-buildx' },
+    ]),
+  ]) {
+    assert.throws(
+      () => extractDockerCliPluginPath(value, 'buildx'),
+      /Docker CLI plugin metadata/i,
+    )
+  }
 })
 
 test('published image verification requires both release platforms and allows only attestations besides them', () => {
@@ -143,9 +187,14 @@ test('Umbrel publication uses anonymous digest readback and atomic append-only b
   assert.match(source, /DOCKER_CONFIG:\s*anonymousDockerConfig/)
   assert.match(source, /'DOCKER_AUTH_CONFIG',[\s\S]*?'REGISTRY_AUTH_FILE'/)
   assert.match(source, /delete publicEnvironment\[name\]/)
-  assert.match(source, /\['buildx', 'imagetools', 'inspect', '--raw', digestRef\]/)
+  assert.match(source, /resolveDockerCliPluginExecutable\('buildx'\)/)
+  assert.match(source, /\['imagetools', 'inspect', '--raw', digestRef\]/)
+  assert.doesNotMatch(source, /\['buildx', 'imagetools', 'inspect', '--raw', digestRef\]/)
   assert.match(source, /Refusing to replace existing Umbrel bundle/)
   assert.match(source, /renameSync\(temporary, outputDir\)/)
   assert.match(source, /publication\.bundleFiles = Object\.fromEntries/)
   assert.match(source, /anonymousRegistryReadback:\s*inspection\.anonymousReadback/)
+  assert.match(source, /verifyPublishedUmbrelRelease\(\{[\s\S]*?imageRef/)
+  assert.match(source, /const parsed = parsePinnedImageRef\(imageRef\)/)
+  assert.match(source, /const verified = verifyPublishedUmbrelRelease\(\{/)
 })
