@@ -20,6 +20,12 @@ STUB_PID=''
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
+  if ((status != 0)) && [[ -f "$COMPOSE" ]]; then
+    echo "Umbrel auth/join e2e failed; collecting bounded container diagnostics." >&2
+    docker compose -p "$PROJECT" -f "$COMPOSE" ps >&2 || true
+    docker compose -p "$PROJECT" -f "$COMPOSE" logs --no-color --tail 120 \
+      auth app_proxy web >&2 || true
+  fi
   docker compose -p "$PROJECT" -f "$COMPOSE" down -v --remove-orphans \
     >/dev/null 2>&1 || true
   if [[ "$STUB_PID" =~ ^[0-9]+$ ]]; then
