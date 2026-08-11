@@ -361,6 +361,8 @@ for contract in \
   'getumbrel/app-proxy:1.7.0@sha256:' \
   'getumbrel/auth-server:1.7.0@sha256:' \
   'nvpn://join-request/' \
+  'PROXY_PORT: $PROXY_PORT' \
+  '127.0.0.1:$PROXY_PORT:$PROXY_PORT' \
   'UMBREL_PROXY_TOKEN'; do
   grep -Fq "$contract" "$umbrel_gate" \
     || fail "authenticated Umbrel gate omits contract: $contract"

@@ -160,7 +160,7 @@ services:
     image: $APP_PROXY_IMAGE
     depends_on: [web, auth]
     environment:
-      PROXY_PORT: 4000
+      PROXY_PORT: $PROXY_PORT
       PROXY_AUTH_ADD: "true"
       PROXY_AUTH_WHITELIST: ""
       PROXY_AUTH_BLACKLIST: ""
@@ -172,7 +172,7 @@ services:
       MANAGER_IP: 127.0.0.1
       MANAGER_PORT: 3006
       JWT_SECRET: $JWT_SECRET
-    ports: [127.0.0.1:$PROXY_PORT:4000]
+    ports: [127.0.0.1:$PROXY_PORT:$PROXY_PORT]
     volumes: [$TMP/umbrel-app.yml:/extra/umbrel-app.yml:ro]
 YAML
 
