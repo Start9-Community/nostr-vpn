@@ -348,6 +348,19 @@ for contract in \
   grep -Fq "$contract" <<<"$docker_functional_body" \
     || fail "isolated Docker gates omit paid-exit contract: $contract"
 done
+grep -Fq 'run_umbrel_release_gate' <<<"$docker_functional_body" \
+  || fail "isolated Docker gates omit the authenticated Umbrel release gate"
+umbrel_gate="$ROOT_DIR/scripts/e2e-umbrel-auth-join-docker.sh"
+[[ -x "$umbrel_gate" ]] \
+  || fail "authenticated Umbrel release gate is missing or not executable"
+for contract in \
+  'getumbrel/app-proxy:1.7.0@sha256:' \
+  'getumbrel/auth-server:1.7.0@sha256:' \
+  'nvpn://join-request/' \
+  'UMBREL_PROXY_TOKEN'; do
+  grep -Fq "$contract" "$umbrel_gate" \
+    || fail "authenticated Umbrel gate omits contract: $contract"
+done
 grep -Fq "NVPN_RELEASE_GATE_REQUIRE_COMPLETE: '1'" "$local_release" \
   || fail "full release does not require complete real-network coverage"
 

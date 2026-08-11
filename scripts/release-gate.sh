@@ -1997,6 +1997,23 @@ run_web_startos_manual_join_docker_gate() {
   ./scripts/e2e-web-startos-manual-join-docker.sh
 }
 
+run_umbrel_release_gate() {
+  local image="${NVPN_RELEASE_GATE_UMBREL_IMAGE:-nostr-vpn-release-gate-umbrel}"
+  env \
+    NOSTR_VPN_IMAGE="$image" \
+    NVPN_UMBREL_WEB_E2E_PROJECT="${NVPN_RELEASE_GATE_UMBREL_WEB_PROJECT:-nostr-vpn-release-gate-umbrel-web}" \
+    NVPN_UMBREL_WEB_PORT="${NVPN_RELEASE_GATE_UMBREL_WEB_PORT:-38180}" \
+    ./scripts/e2e-umbrel-web-docker.sh
+  env \
+    NOSTR_VPN_IMAGE="$image" \
+    NVPN_UMBREL_AUTH_JOIN_SKIP_BUILD=1 \
+    NVPN_UMBREL_AUTH_JOIN_PROJECT="${NVPN_RELEASE_GATE_UMBREL_AUTH_PROJECT:-nostr-vpn-release-gate-umbrel-auth}" \
+    NVPN_UMBREL_AUTH_JOIN_PROXY_PORT="${NVPN_RELEASE_GATE_UMBREL_PROXY_PORT:-38380}" \
+    NVPN_UMBREL_AUTH_JOIN_AUTH_PORT="${NVPN_RELEASE_GATE_UMBREL_AUTH_PORT:-38300}" \
+    NVPN_UMBREL_AUTH_JOIN_RPC_PORT="${NVPN_RELEASE_GATE_UMBREL_RPC_PORT:-38301}" \
+    ./scripts/e2e-umbrel-auth-join-docker.sh
+}
+
 run_docker_isolated_functional_gates() {
   docker_release_gates_enabled || return 0
 
@@ -2017,6 +2034,10 @@ run_docker_isolated_functional_gates() {
 
   release_gate_parallel_start "Web/StartOS manual join" \
     run_web_startos_manual_join_docker_gate
+  lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
+
+  release_gate_parallel_start "Umbrel authenticated requester join" \
+    run_umbrel_release_gate
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
   release_gate_parallel_start "Docker Spilman paid exit" \

@@ -254,7 +254,7 @@ test('component proof treats only the native-lab supervisor as harness-only', ()
   }
 })
 
-test('component proof treats only the Umbrel publisher as harness-only', () => {
+test('component proof treats only the exact Umbrel release harnesses as harness-only', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-umbrel-publisher-component-proof-'))
   const git = (...args) => {
     const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
@@ -285,6 +285,21 @@ test('component proof treats only the Umbrel publisher as harness-only', () => {
         receiptTree: receipt.tree,
         candidateCommit: publisher.commit,
         candidateTree: publisher.tree,
+      }))
+    }
+    const authenticatedGate = commit(
+      'scripts/e2e-umbrel-auth-join-docker.sh',
+      'echo "verify authenticated Umbrel join"\n',
+      'Umbrel authentication and join harness change',
+    )
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.doesNotThrow(() => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit: receipt.commit,
+        receiptTree: receipt.tree,
+        candidateCommit: authenticatedGate.commit,
+        candidateTree: authenticatedGate.tree,
       }))
     }
 

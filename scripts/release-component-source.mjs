@@ -19,6 +19,7 @@ const harnessOnlyPaths = new Set([
   'scripts/appstore_draft_metadata.py',
   'scripts/test_appstore_draft_metadata.py',
   'scripts/e2e-fips-roaming-docker.sh',
+  'scripts/e2e-umbrel-auth-join-docker.sh',
   'scripts/e2e-web-startos-manual-join-docker.sh',
   'scripts/capture-mobile-ios-underlay-output.py',
   'scripts/desktop-manual-join-ax.swift',
