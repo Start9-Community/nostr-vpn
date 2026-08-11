@@ -1061,7 +1061,7 @@ function buildLinuxArtifacts({
     `nvpn-${tag}-aarch64-unknown-linux-musl.tar.gz`,
   ]) {
     const asset = join(distDir, name)
-    copyFileSync(arm64CliArchivePath, asset)
+    replaceWithExactFileCopy(arm64CliArchivePath, asset)
     if (sha256FileSync(asset) !== arm64.archiveSha256) {
       throw new Error('Linux ARM64 publication copy changed.')
     }

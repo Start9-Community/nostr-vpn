@@ -2381,6 +2381,14 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   assert.match(linuxBuild, /nvpn-x86_64-unknown-linux-musl\.tar\.gz/)
   assert.match(linuxBuild, /packageInstalledByDpkg/)
   assert.match(linuxBuild, /replaceWithExactFileCopy\(gatedDebPath, debPath\)/)
+  assert.match(
+    linuxBuild,
+    /replaceWithExactFileCopy\(arm64CliArchivePath, asset\)/,
+  )
+  assert.doesNotMatch(
+    linuxBuild,
+    /copyFileSync\(arm64CliArchivePath, asset\)/,
+  )
   const verificationPlan = linuxBuild.indexOf(
     'linuxPublicationVerificationPlan({',
   )
