@@ -364,6 +364,9 @@ for contract in \
   'scanner_web:' \
   "getByPlaceholder('Paste a join request to continue').fill(request)" \
   'requester was not added to the scanner roster' \
+  'requester did not activate the scanned network' \
+  'requester retained its pending join request after approval' \
+  "getByRole('dialog', { name: 'Add Network' }).waitFor({ state: 'hidden', timeout: 15_000 })" \
   '/dev/net/tun:/dev/net/tun' \
   'PROXY_PORT: $PROXY_PORT' \
   '127.0.0.1:$PROXY_PORT:$PROXY_PORT' \

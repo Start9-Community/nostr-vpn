@@ -327,11 +327,34 @@ try {
   if (!scannerResponse.ok()) throw new Error(`scanner tick returned ${scannerResponse.status()}`)
   const scannerState = await scannerResponse.json()
   const scannerNetwork = scannerState.networks.find((network) => network.enabled)
+  const scannerNpub = String(scannerState.ownNpub ?? '')
+  if (!scannerNpub.startsWith('npub1')) {
+    throw new Error('scanner did not expose its admin identity')
+  }
   const requesterAdded = scannerNetwork?.participants?.some(
     (participant) => participant.npub === requesterNpub,
   )
   if (!requesterAdded) throw new Error('requester was not added to the scanner roster')
   await scannerPage.close()
+
+  const requesterDeadline = Date.now() + 15_000
+  let requesterNetwork
+  do {
+    state = await tick()
+    requesterNetwork = state.networks.find(
+      (network) => network.enabled && network.participants?.some(
+        (participant) => participant.npub === scannerNpub && participant.isAdmin,
+      ),
+    )
+    if (requesterNetwork) break
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  } while (Date.now() < requesterDeadline)
+  if (!requesterNetwork) throw new Error('requester did not activate the scanned network')
+  if (String(state.joinRequestQrCodeOrLink ?? '').startsWith('nvpn://join-request/')) {
+    throw new Error('requester retained its pending join request after approval')
+  }
+  await page.getByRole('dialog', { name: 'Add Network' }).waitFor({ state: 'hidden', timeout: 15_000 })
+  await page.getByRole('button', { name: 'Add Network' }).waitFor({ state: 'visible' })
 
   const restored = await context.request.post(`${proxy}/api/set_network_enabled`, {
     data: { networkId: originalNetworkId, enabled: true },

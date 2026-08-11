@@ -91,6 +91,9 @@ Reliability improvements and basic feature fixes across every platform.
 - Keep join, roster, and control delivery progressing during network-settle
   sampling so a scanned or manually entered phone join cannot stall behind an
   unrelated underlay event.
+- Close the web requester’s QR/link screen only after it activates the
+  admin-signed network, and require the authenticated Umbrel release gate to
+  prove both the scanner roster and requester-side transition.
 - Replace prior Android installs in place, reject parallel package variants,
   and prevent duplicate VPN service/process ownership.
 - Route Android's embedded encrypted DNS through an active WireGuard exit,

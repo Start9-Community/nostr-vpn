@@ -164,6 +164,13 @@
 
   function applyState(next: UiState) {
     const firstState = state === null;
+    const requesterJoinCompleted = Boolean(
+      addNetworkOpen
+        && addNetworkMode === 'join'
+        && state?.joinRequestQrCodeOrLink
+        && !state.networks.some((network) => network.enabled)
+        && next.networks.some((network) => network.enabled),
+    );
     shownNetworkId = preferredNetworkId(next, shownNetworkId);
     state = next;
     loading = false;
@@ -176,6 +183,9 @@
     }
     syncNetworkDrafts(next);
     syncAliasDrafts(next);
+    if (requesterJoinCompleted) {
+      closeAddNetwork();
+    }
   }
 
   function preferredNetworkId(next: UiState, current: string): string {
