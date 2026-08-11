@@ -889,9 +889,11 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'runtime_wireguard_state_is false false' \
   'wait_for_crash_live_precondition' \
   'crash_fail_closed_after_sigkill' \
+  'crash_restart_transport_live' \
   'crash_restart_payloads_live' \
   'record_crash_restart_probe' \
   'crash-restart-probes' \
+  'wait_until "the restarted authenticated FIPS status cache"' \
   'expected_bind_receipts=1' \
   'startup_persist_path_completed=true' \
   'sigkill_tunnel_routes_absent=true' \
@@ -902,6 +904,15 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'direct_source_ip' \
   'endpoint_route_interface' \
   'MACOS_RELEASE_NETWORK_DIRECT_OK'
+crash_restart_transport_body="$(
+  sed -n '/^crash_restart_transport_live() {$/,/^}$/p' \
+    "$MACOS_NETWORK_GUEST"
+)"
+grep -Fq 'crash_restart_payloads_live' <<<"$crash_restart_transport_body" \
+  || fail "macOS timed crash recovery omits authenticated payload probes"
+if grep -Fq 'runtime_fips_peer_connected' <<<"$crash_restart_transport_body"; then
+  fail "macOS timed crash recovery still waits on the cached FIPS status snapshot"
+fi
 require_tokens "$WIREGUARD_FIXTURE_LIB" "independent resolver endpoints" \
   'https://dns.google/dns-query' \
   '8.8.8.8' \

@@ -1424,7 +1424,7 @@ crash_restart_payloads_live() {
     && -s "$receipt_dir/private-fips.pass" ]]
 }
 
-crash_restart_state_live() {
+crash_restart_transport_live() {
   local expected_bind_receipts="$1" old_pid="$2" new_pid
   assert_single_owned_daemon || return 1
   new_pid="$(owned_daemon_pid)" || return 1
@@ -1432,7 +1432,6 @@ crash_restart_state_live() {
     && "$(wireguard_bind_receipt_count)" == "$expected_bind_receipts" ]] \
     && runtime_wireguard_state_is true true \
     && runtime_dns_state_matches \
-    && runtime_fips_peer_connected \
     && wireguard_interface >/dev/null \
     && wireguard_endpoint_route_state_valid \
     && secure_dns_owned \
@@ -1451,7 +1450,7 @@ wait_for_crash_restart_recovery() {
       fail "crash restart did not restore one fresh daemon, tunnel, routes, DNS, authenticated FIPS payload, and WireGuard payload in ${RECOVERY_DEADLINE_MS}ms"
       return 1
     fi
-    if crash_restart_state_live \
+    if crash_restart_transport_live \
       "$expected_bind_receipts" "$old_pid"
     then
       now="$(monotonic_ms)"
@@ -1509,6 +1508,17 @@ run_crash_restart_gate() {
   )"
   then
     capture_wireguard_readiness_failure
+    capture_fips_peer_readiness_failure
+    return 1
+  fi
+  # The authenticated private-FIPS payload above is the externally observable
+  # recovery boundary. A freshly restarted daemon can exchange that payload
+  # before its periodic status snapshot publishes connected_peer_count=1, so
+  # require the cache to converge as separate evidence without charging that
+  # publication lag to the four-second dataplane deadline.
+  if ! wait_until "the restarted authenticated FIPS status cache" \
+    runtime_fips_peer_connected
+  then
     capture_fips_peer_readiness_failure
     return 1
   fi
