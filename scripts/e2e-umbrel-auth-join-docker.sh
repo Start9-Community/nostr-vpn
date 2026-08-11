@@ -135,6 +135,8 @@ cat >"$COMPOSE" <<YAML
 services:
   daemon:
     image: $IMAGE
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
     entrypoint: [/usr/local/bin/nvpn]
     command: [daemon, --paused, --config, /data/config/nvpn/config.toml]
     environment:
@@ -154,6 +156,8 @@ services:
     volumes: [$TMP/nvpn-data:/data]
   scanner_daemon:
     image: $IMAGE
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
     entrypoint: [/usr/local/bin/nvpn]
     command: [daemon, --paused, --config, /scanner/config/nvpn/config.toml]
     environment:

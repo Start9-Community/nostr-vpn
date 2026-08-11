@@ -364,6 +364,7 @@ for contract in \
   'scanner_web:' \
   "getByPlaceholder('Paste a join request to continue').fill(request)" \
   'requester was not added to the scanner roster' \
+  '/dev/net/tun:/dev/net/tun' \
   'PROXY_PORT: $PROXY_PORT' \
   '127.0.0.1:$PROXY_PORT:$PROXY_PORT' \
   'UMBREL_PROXY_TOKEN'; do
