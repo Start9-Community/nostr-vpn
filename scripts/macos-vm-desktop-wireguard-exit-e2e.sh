@@ -214,6 +214,28 @@ poll_remote_underlay_status() {
   "
 }
 
+wait_for_fixture_dns_quiet() {
+  local probe_host="$1" previous current
+  local remaining=10
+  previous="$(
+    mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+  )" || return 1
+  while ((remaining > 0)); do
+    sleep 1
+    current="$(
+      mobile_wg_fixture_dns_evidence_snapshot "$CONTAINER" "$probe_host"
+    )" || return 1
+    if [[ "$current" == "$previous" ]]; then
+      printf '%s\n' "$current"
+      return 0
+    fi
+    previous="$current"
+    remaining=$((remaining - 1))
+  done
+  echo "fixture DNS counters did not quiesce after policy transition" >&2
+  return 1
+}
+
 copy_guest_results() {
   [[ -n "$REMOTE_DIR" ]] || return 0
   mkdir -p "$ARTIFACT_DIR"
@@ -598,6 +620,7 @@ PY
 for DNS_CASE_LABEL in \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
 do
+  transition_probe_host=""
   IFS='|' read -r \
     DNS_CASE_MODE \
     DNS_CASE_PROVIDER \
@@ -610,14 +633,24 @@ do
       mobile_wg_dns_case_fields \
         "$DNS_CASE_LABEL" "$DNS_NAME" "$TUNNEL_SERVER_IP" "$THROUGH_DNS_IP"
     )"
-  before_transfer="$(
-    mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
-  )"
-  before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
+  # Apply the new policy once before opening its counter window. Changing DNS
+  # policy can legitimately finish queries that were already in flight on the
+  # old resolver; counting those against the new policy produces a false leak.
+  # The second identical production probe below is the measured one, and the
+  # forbidden-path assertions remain strict inside that quiescent window.
+  remote_phase primary dns-case
+  transition_probe_host="$DNS_CASE_PROBE_HOST"
+  wait_for_fixture_dns_quiet "$transition_probe_host" >/dev/null \
+    || fail "$DNS_CASE_LABEL DNS counters did not settle after transition"
+  DNS_CASE_PROBE_HOST="measure-$PPID-$RANDOM.$transition_probe_host"
   before_evidence="$(
     mobile_wg_fixture_dns_evidence_snapshot \
       "$CONTAINER" "$DNS_CASE_PROBE_HOST"
   )"
+  before_transfer="$(
+    mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
+  )"
+  before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
   remote_phase primary dns-case
   after_transfer="$(
     mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total

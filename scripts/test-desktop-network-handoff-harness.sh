@@ -855,6 +855,9 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   'mobile_wg_fixture_wg_bytes' \
   'mobile_wg_fixture_forward_packets' \
   'mobile_wg_fixture_dns_evidence_snapshot' \
+  'wait_for_fixture_dns_quiet' \
+  'DNS counters did not settle after transition' \
+  'DNS_CASE_PROBE_HOST="measure-$PPID-$RANDOM.$transition_probe_host"' \
   'mobile_wg_fixture_assert_dns_case_evidence' \
   'mobile_wg_fixture_cleanup'
 for dns_case in \
