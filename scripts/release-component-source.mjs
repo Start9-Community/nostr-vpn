@@ -109,6 +109,11 @@ function git(root, args, label) {
 
 function isProductInput(path, platform) {
   if (harnessOnlyPaths.has(path)) return false
+  // The control panel is a real product, but it is packaged only into the
+  // independently rebuilt and inspected Umbrel/StartOS web artifacts. It is
+  // not linked or copied into any of the five native platform artifacts whose
+  // retained receipts this classifier governs.
+  if (path.startsWith('web/control-panel/')) return false
   if (
     path === 'crates/nostr-vpn-cli/src/wireguard_exit/linux_tests.rs'
     || path.startsWith('crates/nostr-vpn-cli/src/wireguard_exit/linux_tests/')

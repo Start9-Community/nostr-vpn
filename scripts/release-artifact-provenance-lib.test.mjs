@@ -253,7 +253,7 @@ test('component proof treats only the native-lab supervisor as harness-only', ()
   }
 })
 
-test('component proof treats only the exact Umbrel release harnesses as harness-only', () => {
+test('component proof separates the Umbrel web product from native platform inputs', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-umbrel-publisher-component-proof-'))
   const git = (...args) => {
     const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
@@ -316,6 +316,21 @@ test('component proof treats only the exact Umbrel release harnesses as harness-
         candidateTree: webE2E.tree,
       }))
     }
+    const webProduct = commit(
+      'web/control-panel/src/App.svelte',
+      '<main>Umbrel requester joined</main>\n',
+      'Umbrel web product change',
+    )
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.doesNotThrow(() => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit: receipt.commit,
+        receiptTree: receipt.tree,
+        candidateCommit: webProduct.commit,
+        candidateTree: webProduct.tree,
+      }))
+    }
 
     git('checkout', '-q', '-b', 'nearby-script', receipt.commit)
     const nearby = commit(
@@ -332,6 +347,23 @@ test('component proof treats only the exact Umbrel release harnesses as harness-
         candidateCommit: nearby.commit,
         candidateTree: nearby.tree,
       }), /changed product\/build input scripts\/umbrel-release-helper\.mjs/)
+    }
+
+    git('checkout', '-q', '-b', 'shared-web-backend', receipt.commit)
+    const sharedWebBackend = commit(
+      'crates/nostr-vpn-web/src/main.rs',
+      'fn main() {}\n',
+      'shared web backend product change',
+    )
+    for (const platform of ['android', 'ios', 'linux', 'macos', 'windows']) {
+      assert.throws(() => proveUnchangedPlatformInputs({
+        candidateRoot: root,
+        platform,
+        receiptCommit: receipt.commit,
+        receiptTree: receipt.tree,
+        candidateCommit: sharedWebBackend.commit,
+        candidateTree: sharedWebBackend.tree,
+      }), /changed product\/build input crates\/nostr-vpn-web\/src\/main\.rs/)
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
