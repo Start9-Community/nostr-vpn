@@ -300,7 +300,7 @@ try {
   await page.getByRole('button', { name: 'Add Network' }).click()
   await page.getByRole('button', { name: 'Join Network', exact: true }).click()
   await page.getByRole('img', { name: 'QR code' }).waitFor({ state: 'visible' })
-  const copy = page.getByRole('button', { name: 'Copy Request' })
+  const copy = page.getByRole('button', { name: 'Copy Join request' })
   await copy.waitFor({ state: 'visible' })
   if (await copy.isDisabled()) throw new Error('join request copy action is disabled')
 
