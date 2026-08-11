@@ -32,6 +32,28 @@ for entry in "${required_source[@]}"; do
   }
 done
 
+python3 - "$ROOT/scripts/windows-vm-exit-dns-ui-e2e.sh" <<'PY'
+import pathlib
+import sys
+
+script = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for forbidden in ("& \\$cli init", "& \\$cli set"):
+    if forbidden in script:
+        raise SystemExit(
+            "Windows Exit DNS UI gate bootstraps a legacy/default network "
+            f"instead of letting the shipped app create an empty profile: {forbidden}"
+        )
+for required in (
+    "isolated Windows DNS UI data directory already exists",
+    "New-Item -ItemType Directory -Path \\$data",
+    "if (!\\$?)",
+):
+    if required not in script:
+        raise SystemExit(
+            f"Windows Exit DNS UI gate lacks fresh-profile/PowerShell success handling: {required}"
+        )
+PY
+
 python3 - \
   "$ROOT/scripts/ubuntu-vm-exit-dns-ui-e2e.sh" \
   "$ROOT/scripts/lib-linux-owned-test-app.sh" <<'PY'

@@ -149,6 +149,7 @@ test('component proof retains only unchanged platform product inputs', () => {
       'scripts/prepare-macos-release-fips-peer.sh',
       'scripts/verify-host-linux-peer-artifact.py',
       'scripts/windows-vm-desktop-underlay-change-e2e.sh',
+      'scripts/windows-vm-exit-dns-ui-e2e.sh',
       'scripts/windows-vm-release-mobile-join-e2e.sh',
       'scripts/windows-vm-service-toggle-e2e.sh',
     ]

@@ -104,14 +104,10 @@ if (
 )
 foreach (\$item in \$cases) {
   \$data = Join-Path \$artifact ('data-' + \$item.Case)
-  New-Item -ItemType Directory -Force -Path \$data | Out-Null
-  & \$cli init --config (Join-Path \$data 'config.toml')
-  if (\$LASTEXITCODE -eq 0) {
-    & \$cli set --config (Join-Path \$data 'config.toml') --autoconnect false | Out-Null
+  if (Test-Path -LiteralPath \$data) {
+    throw ('isolated Windows DNS UI data directory already exists for ' + \$item.Case)
   }
-  if (\$LASTEXITCODE -ne 0) {
-    throw ('exact nvpn config bootstrap failed for ' + \$item.Case)
-  }
+  New-Item -ItemType Directory -Path \$data | Out-Null
   \$marker = Join-Path \$artifact (\$item.Case + '.json')
   \$driverArguments = @{
     Mode = 'DnsPolicy'
@@ -129,7 +125,7 @@ foreach (\$item in \$cases) {
     AppGitTree = \$appTree
   }
   & \$driver @driverArguments
-  if (\$LASTEXITCODE -ne 0) {
+  if (!\$?) {
     throw ('shipped Windows DNS UI failed for ' + \$item.Case)
   }
 }

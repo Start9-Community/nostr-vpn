@@ -80,6 +80,7 @@ const harnessOnlyPaths = new Set([
   'scripts/windows-release-publication-proof.ps1',
   'scripts/windows-release-mobile-join-remote.ps1',
   'scripts/windows-vm-desktop-underlay-change-e2e.sh',
+  'scripts/windows-vm-exit-dns-ui-e2e.sh',
   'scripts/windows-vm-release-mobile-join-e2e.sh',
   'scripts/windows-vm-service-toggle-e2e.sh',
 ])
