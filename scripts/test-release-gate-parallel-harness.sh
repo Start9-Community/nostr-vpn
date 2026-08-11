@@ -361,6 +361,9 @@ for contract in \
   'getumbrel/app-proxy:1.7.0@sha256:' \
   'getumbrel/auth-server:1.7.0@sha256:' \
   'nvpn://join-request/' \
+  'scanner_web:' \
+  "getByPlaceholder('Paste a join request to continue').fill(request)" \
+  'requester was not added to the scanner roster' \
   'PROXY_PORT: $PROXY_PORT' \
   '127.0.0.1:$PROXY_PORT:$PROXY_PORT' \
   'UMBREL_PROXY_TOKEN'; do

@@ -10,6 +10,7 @@ PROJECT="${NVPN_UMBREL_AUTH_JOIN_PROJECT:-nostr-vpn-umbrel-auth-join-e2e}"
 PROXY_PORT="${NVPN_UMBREL_AUTH_JOIN_PROXY_PORT:-38380}"
 AUTH_PORT="${NVPN_UMBREL_AUTH_JOIN_AUTH_PORT:-38300}"
 RPC_PORT="${NVPN_UMBREL_AUTH_JOIN_RPC_PORT:-38301}"
+SCANNER_PORT="${NVPN_UMBREL_AUTH_JOIN_SCANNER_PORT:-38382}"
 JWT_SECRET=nvpn-umbrel-auth-join-e2e-jwt-secret
 AUTH_SECRET=nvpn-umbrel-auth-join-e2e-hmac-secret
 PASSWORD=nvpn-umbrel-auth-join-e2e-password
@@ -24,7 +25,7 @@ cleanup() {
     echo "Umbrel auth/join e2e failed; collecting bounded container diagnostics." >&2
     docker compose -p "$PROJECT" -f "$COMPOSE" ps >&2 || true
     docker compose -p "$PROJECT" -f "$COMPOSE" logs --no-color --tail 120 \
-      auth app_proxy web >&2 || true
+      auth app_proxy web scanner_web scanner_daemon >&2 || true
   fi
   docker compose -p "$PROJECT" -f "$COMPOSE" down -v --remove-orphans \
     >/dev/null 2>&1 || true
@@ -52,9 +53,20 @@ case "${NVPN_UMBREL_AUTH_JOIN_SKIP_BUILD:-0}" in
     ;;
 esac
 
-mkdir -p "$TMP/app-data/nostr-vpn" "$TMP/data" "$TMP/nvpn-data"
-cp "$ROOT_DIR/umbrel/umbrel-app.yml" "$TMP/app-data/nostr-vpn/umbrel-app.yml"
-cp "$ROOT_DIR/umbrel/umbrel-app.yml" "$TMP/umbrel-app.yml"
+mkdir -p "$TMP/app-data/nostr-vpn" "$TMP/data" "$TMP/nvpn-data" "$TMP/scanner-data"
+python3 - "$ROOT_DIR/umbrel/umbrel-app.yml" "$TMP/umbrel-app.yml" "$PROXY_PORT" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+source, destination, port = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
+manifest = source.read_text()
+updated, count = re.subn(r"(?m)^port: [0-9]+$", f"port: {port}", manifest)
+if count != 1:
+    raise SystemExit(f"expected one Umbrel manifest port, found {count}")
+destination.write_text(updated)
+PY
+cp "$TMP/umbrel-app.yml" "$TMP/app-data/nostr-vpn/umbrel-app.yml"
 printf 'user:\n  wallpaper: "18"\n' >"$TMP/data/umbrel.yaml"
 
 python3 - "$RPC_PORT" "$JWT_SECRET" "$PASSWORD" <<'PY' &
@@ -140,6 +152,26 @@ services:
       NVPN_DAEMON_STATUS_MODE: state-file
       NVPN_EXTERNAL_DAEMON: "true"
     volumes: [$TMP/nvpn-data:/data]
+  scanner_daemon:
+    image: $IMAGE
+    entrypoint: [/usr/local/bin/nvpn]
+    command: [daemon, --paused, --config, /scanner/config/nvpn/config.toml]
+    environment:
+      HOME: /scanner/home
+      XDG_CONFIG_HOME: /scanner/config
+    volumes: [$TMP/scanner-data:/scanner]
+  scanner_web:
+    image: $IMAGE
+    depends_on: [scanner_daemon]
+    command: [--listen, 0.0.0.0:38081, --behind-trusted-proxy, --config, /scanner/config/nvpn/config.toml]
+    environment:
+      HOME: /scanner/home
+      XDG_CONFIG_HOME: /scanner/config
+      NVPN_CLI_PATH: /usr/local/bin/nvpn
+      NVPN_DAEMON_STATUS_MODE: state-file
+      NVPN_EXTERNAL_DAEMON: "true"
+    ports: [127.0.0.1:$SCANNER_PORT:38081]
+    volumes: [$TMP/scanner-data:/scanner]
   auth:
     image: $AUTH_IMAGE
     environment:
@@ -196,11 +228,13 @@ location="$(curl -sSI "http://127.0.0.1:$PROXY_PORT/api/health" \
 [[ "$location" == *'path=%2Fapi%2Fhealth'* ]]
 
 PROXY_BASE="http://127.0.0.1:$PROXY_PORT" \
+SCANNER_BASE="http://127.0.0.1:$SCANNER_PORT" \
 AUTH_PORT="$AUTH_PORT" TEST_PASSWORD="$PASSWORD" \
   pnpm --dir "$ROOT_DIR/web/control-panel" exec node --input-type=module - <<'JS'
 import { chromium } from '@playwright/test'
 
 const proxy = process.env.PROXY_BASE
+const scanner = process.env.SCANNER_BASE
 const authPort = process.env.AUTH_PORT
 const browser = await chromium.launch({ headless: true })
 let context
@@ -250,8 +284,12 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 200))
   } while (Date.now() < deadline)
   const request = String(state.joinRequestQrCodeOrLink ?? '')
+  const requesterNpub = String(state.ownNpub ?? '')
   if (!request.startsWith('nvpn://join-request/')) {
     throw new Error('unjoined Umbrel did not expose a signed join request')
+  }
+  if (!requesterNpub.startsWith('npub1')) {
+    throw new Error('unjoined Umbrel did not expose its requester identity')
   }
 
   await page.goto(`${proxy}/`, { waitUntil: 'domcontentloaded' })
@@ -270,6 +308,26 @@ try {
   if (!(qr.width > 0) || qr.cells.length !== qr.width * qr.width || !qr.cells.some(Boolean)) {
     throw new Error('join request QR matrix is invalid')
   }
+
+  const scannerPage = await context.newPage()
+  await scannerPage.goto(`${scanner}/`, { waitUntil: 'domcontentloaded' })
+  await scannerPage.getByRole('heading', { name: 'Nostr VPN' }).waitFor({ state: 'visible' })
+  await scannerPage.getByRole('button', { name: 'Add Device' }).click()
+  await scannerPage.getByPlaceholder('Paste a join request to continue').fill(request)
+  const confirm = scannerPage.getByRole('dialog', { name: 'Add Device?' })
+  await confirm.waitFor({ state: 'visible' })
+  await confirm.getByRole('button', { name: 'Add', exact: true }).click()
+  await scannerPage.getByText('Device added', { exact: true }).waitFor({ state: 'visible' })
+
+  const scannerResponse = await context.request.post(`${scanner}/api/tick`)
+  if (!scannerResponse.ok()) throw new Error(`scanner tick returned ${scannerResponse.status()}`)
+  const scannerState = await scannerResponse.json()
+  const scannerNetwork = scannerState.networks.find((network) => network.enabled)
+  const requesterAdded = scannerNetwork?.participants?.some(
+    (participant) => participant.npub === requesterNpub,
+  )
+  if (!requesterAdded) throw new Error('requester was not added to the scanner roster')
+  await scannerPage.close()
 
   const restored = await context.request.post(`${proxy}/api/set_network_enabled`, {
     data: { networkId: originalNetworkId, enabled: true },
