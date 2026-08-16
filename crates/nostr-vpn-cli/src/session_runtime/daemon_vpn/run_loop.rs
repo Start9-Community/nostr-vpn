@@ -169,6 +169,7 @@ loop {
                 default_route_hints,
             )
             .await;
+            let sampled_physical_network = sampled_network.snapshot.clone();
             log_event_driven_network_sample(
                 event_driven_sample,
                 &sampled_network,
@@ -276,6 +277,22 @@ loop {
                 }
                 network_refresh_attempt =
                     Some(PlatformNetworkRefreshAttempt::new(latest_snapshot, refresh, reason));
+            }
+            if platform_network_refresh_waits_for_underlay(
+                network_refresh_attempt.as_ref(),
+                &sampled_physical_network,
+            ) {
+                if network_settle_rechecks == 0 {
+                    begin_platform_network_settle_rechecks(&mut network_settle_rechecks);
+                    eprintln!(
+                        "daemon: physical underlay not ready; keeping FIPS endpoint restart staged"
+                    );
+                }
+                schedule_platform_network_settle_recheck(
+                    &mut intervals.network_deadline,
+                    &mut network_settle_rechecks,
+                );
+                continue;
             }
             let (fips_refresh, refresh_reason, target_snapshot, needs_carrier_rebind) =
                 network_refresh_attempt

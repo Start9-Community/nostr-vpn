@@ -164,6 +164,47 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
     );
 }
 
+#[test]
+fn sleep_wake_restart_stays_staged_until_the_underlay_has_an_address() {
+    let target = crate::diagnostics::NetworkSnapshot {
+        default_interface: Some("en0".to_string()),
+        primary_ipv4: Some(Ipv4Addr::new(192, 0, 2, 10)),
+        gateway_ipv4: Some(Ipv4Addr::new(192, 0, 2, 1)),
+        ..Default::default()
+    };
+    let restart = PlatformNetworkRefreshAttempt::new(
+        target.clone(),
+        FipsLinkEventRefresh::RestartEndpoint,
+        "sleep/wake",
+    );
+
+    assert!(platform_network_refresh_waits_for_underlay(
+        Some(&restart),
+        &crate::diagnostics::NetworkSnapshot::default(),
+    ));
+    assert!(platform_network_refresh_waits_for_underlay(
+        Some(&restart),
+        &crate::diagnostics::NetworkSnapshot {
+            default_interface: Some("en0".to_string()),
+            ..Default::default()
+        },
+    ));
+    assert!(!platform_network_refresh_waits_for_underlay(
+        Some(&restart),
+        &target,
+    ));
+
+    let ordinary_rebind = PlatformNetworkRefreshAttempt::new(
+        target,
+        FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
+        "network change",
+    );
+    assert!(!platform_network_refresh_waits_for_underlay(
+        Some(&ordinary_rebind),
+        &crate::diagnostics::NetworkSnapshot::default(),
+    ));
+}
+
 #[tokio::test]
 async fn back_to_back_network_roam_is_not_delayed_by_prior_refresh() {
     let previous = crate::diagnostics::NetworkSnapshot {

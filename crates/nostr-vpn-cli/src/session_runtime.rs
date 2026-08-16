@@ -133,6 +133,10 @@ impl PlatformNetworkRefreshAttempt {
             )
     }
 
+    const fn waits_for_usable_underlay(&self) -> bool {
+        matches!(self.refresh, FipsLinkEventRefresh::RestartEndpoint)
+    }
+
     pub(crate) fn mark_carrier_rebound(&mut self) {
         self.carrier_rebound = true;
     }
@@ -168,6 +172,15 @@ impl PlatformNetworkRefreshAttempt {
         );
         PlatformNetworkRefreshRetry::Scheduled
     }
+}
+
+pub(crate) fn platform_network_refresh_waits_for_underlay(
+    attempt: Option<&PlatformNetworkRefreshAttempt>,
+    sampled_network: &crate::diagnostics::NetworkSnapshot,
+) -> bool {
+    attempt.is_some_and(PlatformNetworkRefreshAttempt::waits_for_usable_underlay)
+        && (sampled_network.default_interface.is_none()
+            || (sampled_network.primary_ipv4.is_none() && sampled_network.primary_ipv6.is_none()))
 }
 
 pub(crate) fn stage_platform_network_refresh_retry(
