@@ -677,6 +677,27 @@ fn fips_stale_participant_recovery_is_cooldown_gated() {
 }
 
 #[test]
+fn fips_stale_participant_recovery_rebinds_only_after_every_roster_path_fails() {
+    let roster = roster_pubkeys(&["a", "b"]);
+    let stale = vec!["a".to_string()];
+    let mut peers = vec![pending_fips_peer("a"), pending_fips_peer("b")];
+
+    assert!(fips_stale_participant_carrier_rebind_required(
+        &peers, &roster, &stale
+    ));
+
+    peers[1].connected = true;
+    assert!(!fips_stale_participant_carrier_rebind_required(
+        &peers, &roster, &stale
+    ));
+    assert!(!fips_stale_participant_carrier_rebind_required(
+        &peers,
+        &roster,
+        &[]
+    ));
+}
+
+#[test]
 fn fips_endpoint_failures_requiring_runtime_replacement_are_classified() {
     for endpoint_error in [
         fips_endpoint::FipsEndpointError::Timeout {
