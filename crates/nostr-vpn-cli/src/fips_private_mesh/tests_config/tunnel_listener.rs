@@ -19,6 +19,7 @@
         app.nostr.secret_key = alice_nsec;
         app.connect_to_non_roster_fips_peers = true;
         app.fips_websocket_bind_addr = "127.0.0.1:8765".to_string();
+        app.fips_websocket_public_url = "wss://seed.example/fips".to_string();
         app.networks[0].enabled = true;
         app.networks[0].network_id = network_id.to_string();
         app.networks[0].devices = vec![alice_pubkey.clone(), bob_pubkey.clone()];
@@ -48,6 +49,18 @@
         assert!(
             config.open_discovery_max_pending > FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
             "a public WSS listener must not share the small endpoint admission budget"
+        );
+        assert_eq!(
+            config.websocket.max_connections(),
+            FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS,
+        );
+        assert_eq!(
+            config.websocket.max_inbound_connections(),
+            FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS,
+        );
+        assert_eq!(
+            config.websocket.idle_timeout_secs(),
+            FIPS_PUBLIC_WEBSOCKET_IDLE_TIMEOUT_SECS,
         );
         assert!(
             config.endpoint_peers.iter().any(|peer| peer.npub == bob_npub),

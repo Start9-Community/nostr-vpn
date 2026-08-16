@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Keep public FIPS WebSocket bootstrap listeners responsive under connection
+  pressure by expanding their bounded inbound budget and evicting idle clients
+  after one missed transport-ping cycle.
+
 ## 4.1.7 - 2026-08-10
 
 ### Release notes

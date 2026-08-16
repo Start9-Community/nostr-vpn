@@ -289,6 +289,8 @@ impl FipsPrivateTunnelConfig {
         let nostr_discovery_policy = fips_nostr_discovery_policy_from_app(app);
         let allow_non_roster_transit = nostr_discovery_policy == NostrDiscoveryPolicy::Open;
         let websocket_listener = !app.fips_websocket_bind_addr.is_empty();
+        let public_websocket_listener =
+            websocket_listener && !app.fips_websocket_public_url.trim().is_empty();
         let tunnel_endpoint_hosts = fips_tunnel_endpoint_hosts(app, network_id);
         let local_private_subnets = local_private_ipv4_subnets();
         // In static-only mode, the configured endpoint is the user's only path.
@@ -404,7 +406,7 @@ impl FipsPrivateTunnelConfig {
         apply_canonical_websocket_dial_direction(
             &mut endpoint_peers,
             own_pubkey.unwrap_or_default(),
-            websocket_listener && !app.fips_websocket_public_url.trim().is_empty(),
+            public_websocket_listener,
         );
         let websocket_seed_urls = websocket_seed_urls_after_peer_dial_ownership(
             &app.fips_websocket_seed_urls,
@@ -417,6 +419,12 @@ impl FipsPrivateTunnelConfig {
             public_url: (!app.fips_websocket_public_url.is_empty())
                 .then(|| app.fips_websocket_public_url.clone()),
             seed_urls: websocket_seed_urls,
+            max_connections: public_websocket_listener
+                .then_some(FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS),
+            max_inbound_connections: public_websocket_listener
+                .then_some(FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS),
+            idle_timeout_secs: public_websocket_listener
+                .then_some(FIPS_PUBLIC_WEBSOCKET_IDLE_TIMEOUT_SECS),
             ..WebSocketConfig::default()
         };
         websocket

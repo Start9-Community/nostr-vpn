@@ -92,6 +92,13 @@ const FIPS_NOSTR_PAID_EXIT_OPEN_DISCOVERY_MAX_PENDING: usize = 64;
 // unaffiliated authenticated-adjacency budget bounded, but large enough that
 // a handful of slow or abandoned handshakes cannot deny all fresh clients.
 const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize = 64;
+// Public bootstrap routers need more physical sockets than an ordinary client
+// listener. Keep spare total slots for their configured upstream seeds, and
+// evict peers that do not answer transport pings before they consume the
+// entire inbound budget.
+const FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS: usize = 320;
+const FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS: usize = 256;
+const FIPS_PUBLIC_WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
 const FIPS_STATIC_NON_ROSTER_TRANSIT_MAX_SEEDS: usize = 2;
 const FIPS_RECENT_NON_ROSTER_TRANSIT_MAX_SEEDS: usize = 4;
 // Relay announcements are discovery hints, not a reason to keep probing an
