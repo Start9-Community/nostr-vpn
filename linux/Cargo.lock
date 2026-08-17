@@ -810,9 +810,9 @@ dependencies = [
 
 [[package]]
 name = "cashu-service"
-version = "0.4.4"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d00c0bbcb4dda6545a09f38176d14b84dba846cf2c4ca8ced60ea1b115ae201"
+checksum = "ece5a1d230fe42e51ea84bbf25abc0c363dfb9991e0d4847b7261bae6be87606"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2846,7 +2846,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4611,7 +4611,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4648,7 +4648,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
