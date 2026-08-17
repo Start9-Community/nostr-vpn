@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATE="$ROOT/scripts/mobile-wireguard-exit-e2e.sh"
 FIXTURE_LIB="$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
 TLS_COUNTER="$ROOT/scripts/mobile-wireguard-tls-sni-count.py"
+FIXTURE_SERVER="$ROOT/scripts/mobile-wireguard-exit-server.sh"
 HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-mobile-wg-contract.XXXXXX")"
 
 cleanup_harness() {
@@ -23,6 +24,11 @@ assert_count() {
   [[ "$actual" -eq "$expected" ]] \
     || fail "$path contains $actual copies of '$pattern'; expected $expected"
 }
+
+grep -Fq \
+  'iptables -t mangle -A POSTROUTING -o wg0 -j CHECKSUM --checksum-fill' \
+  "$FIXTURE_SERVER" \
+  || fail "Docker fixture no longer finalizes forwarded WireGuard checksums"
 
 # Exercise the shared production fixture contract directly. The physical gate
 # remains responsible for proving the device packet paths; this harness only

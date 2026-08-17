@@ -48,6 +48,10 @@ iptables -A nvpn-mobile-wg-forward \
 iptables -A nvpn-mobile-wg-forward -i wg0 -j ACCEPT
 iptables -A nvpn-mobile-wg-forward -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -I FORWARD 1 -j nvpn-mobile-wg-forward
+# Docker Desktop can deliver forwarded veth packets with a deferred transport
+# checksum. Finalize it before WireGuard encrypts the return packet; otherwise
+# macOS receives the bytes but correctly drops the invalid TCP segment.
+iptables -t mangle -A POSTROUTING -o wg0 -j CHECKSUM --checksum-fill
 iptables -I INPUT 1 \
   -i wg0 -d "$server_ip" -p udp --dport 53 \
   -j nvpn-wg-dns-profile
