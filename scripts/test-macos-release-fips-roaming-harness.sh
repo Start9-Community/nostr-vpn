@@ -81,6 +81,8 @@ require_tokens "$GUEST" "production WireGuard lifecycle" \
   '--wireguard-exit-enabled true' \
   '--autoconnect false' \
   'runtime_has_no_fips_peers' \
+  'state.get("mesh_ready") is False' \
+  'state.get("vpn_status") == "Waiting for participants"' \
   'state.get("connected_peer_count") == 0' \
   'wireguard_endpoint_route_state_valid' \
   'wireguard_routes_live' \

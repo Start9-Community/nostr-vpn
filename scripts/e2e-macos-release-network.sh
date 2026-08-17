@@ -484,8 +484,12 @@ peers = state.get("fips_endpoint_peers", [])
 if (
     status.get("status_source") == "daemon"
     and daemon.get("running") is True
-    and state.get("mesh_ready") is True
+    and status.get("mesh_ready") is False
+    and status.get("expected_peer_count") == 0
+    and state.get("mesh_ready") is False
     and state.get("connected_peer_count") == 0
+    and state.get("expected_peer_count") == 0
+    and state.get("vpn_status") == "Waiting for participants"
     and state.get("listen_port") == int(expected_listen_port)
     and peers == []
     and state.get("fips_core_version", "").endswith(
