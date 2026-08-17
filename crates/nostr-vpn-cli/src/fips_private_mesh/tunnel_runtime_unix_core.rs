@@ -169,6 +169,16 @@ impl FipsPrivateTunnelRuntime {
             self.wg_upstream.is_some()
         }
     }
+    fn wireguard_exit_active(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.exit_node_runtime.wireguard_exit.is_some()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.wg_upstream.is_some()
+        }
+    }
     fn seller_egress_ready(&self, config: &FipsPrivateTunnelConfig) -> bool {
         local_exit_seller_egress_ready(
             config,
@@ -365,13 +375,18 @@ impl FipsPrivateTunnelRuntime {
         config: &FipsPrivateTunnelConfig,
         cleanup_journal_config_path: &std::path::Path,
     ) -> Result<()> {
+        // Keep an already-active WireGuard profile resolver throughout a
+        // config handoff. Staging the no-exit automatic fallback here can
+        // dispatch an in-flight Cloudflare query before finish_secure_dns
+        // restores the profile resolver.
+        let wireguard_active = self.wireguard_exit_active();
         if self.manages_secure_dns && config.secure_dns_required() && self.secure_dns.is_none() {
             crate::secure_dns_runtime::SecureDnsRuntime::start_into(
                 &mut self.secure_dns,
                 &self.iface,
                 None,
                 config.magic_dns_records.clone(),
-                config.exit_dns_resolver_config(false)?,
+                config.exit_dns_resolver_config(wireguard_active)?,
                 config
                     .fips_host
                     .as_ref()
@@ -388,27 +403,18 @@ impl FipsPrivateTunnelRuntime {
         if let Some(secure_dns) = self.secure_dns.as_mut() {
             secure_dns.update_config(
                 config.magic_dns_records.clone(),
-                config.exit_dns_resolver_config(false)?,
+                config.exit_dns_resolver_config(wireguard_active)?,
             )?;
         }
         Ok(())
     }
 
     async fn finish_secure_dns(&mut self, config: &FipsPrivateTunnelConfig) -> Result<()> {
+        let wireguard_active = self.wireguard_exit_active();
         if self.manages_secure_dns
             && config.secure_dns_required()
             && let Some(secure_dns) = self.secure_dns.as_mut()
         {
-            let wireguard_active = {
-                #[cfg(target_os = "linux")]
-                {
-                    self.exit_node_runtime.wireguard_exit.is_some()
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    self.wg_upstream.is_some()
-                }
-            };
             let resolver_config = config.exit_dns_resolver_config(wireguard_active)?;
             secure_dns.update_records(config.magic_dns_records.clone());
             // Drop connections opened before the route handoff; pooled DoH
