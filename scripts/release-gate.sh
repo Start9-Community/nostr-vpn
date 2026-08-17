@@ -734,9 +734,14 @@ run_windows_underlay_network_change_gate() {
   local mode="${NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E:-auto}"
   local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/windows-artifacts"
   local receipt="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/windows.json"
-  local installer_receipt source_fips_receipt
+  local installer_receipt source_fips_receipt installer_guest_repo
+  local installer_guest_artifact_root exact_cli_path guest_installer_receipt
   installer_receipt="$(windows_host_installer_receipt)"
   source_fips_receipt="$(windows_host_source_fips_receipt)"
+  installer_guest_repo="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
+  installer_guest_artifact_root="${GUEST_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts}"
+  exact_cli_path="${NVPN_WINDOWS_EXACT_CLI_PATH:-$installer_guest_repo\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\nvpn.exe}"
+  guest_installer_receipt="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:-$installer_guest_artifact_root\\windows-installer-gate\\installer-receipt.json}"
   local ran=0
   rm -rf "$artifact_dir"
   case "$mode" in
@@ -748,6 +753,8 @@ run_windows_underlay_network_change_gate() {
       release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
         "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
         env NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
+        NVPN_WINDOWS_EXACT_CLI_PATH="$exact_cli_path" \
+        NVPN_WINDOWS_INSTALLER_RECEIPT_PATH="$guest_installer_receipt" \
         NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH="$installer_receipt" \
         NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH="$source_fips_receipt" \
         ./scripts/windows-vm-desktop-underlay-change-e2e.sh
@@ -758,6 +765,8 @@ run_windows_underlay_network_change_gate() {
         release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
           "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
           env NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
+          NVPN_WINDOWS_EXACT_CLI_PATH="$exact_cli_path" \
+          NVPN_WINDOWS_INSTALLER_RECEIPT_PATH="$guest_installer_receipt" \
           NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH="$installer_receipt" \
           NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH="$source_fips_receipt" \
           ./scripts/windows-vm-desktop-underlay-change-e2e.sh

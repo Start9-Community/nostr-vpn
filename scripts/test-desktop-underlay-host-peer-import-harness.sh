@@ -11,6 +11,7 @@ WINDOWS_SYNC="$ROOT/scripts/windows-vm-git-sync.sh"
 LINUX_SYNC="$ROOT/scripts/ubuntu-vm-git-sync.sh"
 WINDOWS_LIB="$ROOT/scripts/windows-vm-desktop-underlay-change-e2e.lib.sh"
 LINUX_LIB="$ROOT/scripts/linux-vm-desktop-underlay-change-e2e.lib.sh"
+RELEASE_GATE="$ROOT/scripts/release-gate.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-underlay-peer-import.XXXXXX")"
 
 # Synthetic repositories below must not inherit the enclosing release gate's
@@ -194,6 +195,9 @@ require_tokens "$WINDOWS" "exact Windows underlay candidate" \
   'WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=' \
   '\$ReceiptHash -ne $(ps_quote "$EXPECTED_INSTALLER_RECEIPT_SHA256")' \
   'Windows underlay CLI differs from the exact installed-and-launched installer payload'
+require_tokens "$RELEASE_GATE" "Windows underlay exact artifact handoff" \
+  'NVPN_WINDOWS_EXACT_CLI_PATH="$exact_cli_path"' \
+  'NVPN_WINDOWS_INSTALLER_RECEIPT_PATH="$guest_installer_receipt"'
 if grep -Fq 'windows-build.ps1' "$WINDOWS"; then
   fail "Windows underlay release lane still rebuilds instead of using the installer payload"
 fi
