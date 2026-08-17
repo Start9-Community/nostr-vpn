@@ -247,6 +247,9 @@ capture_fixture_failure() {
     >"$ARTIFACT_DIR/fixture-failure-routes.txt" 2>&1 || true
   mobile_wg_fixture_docker exec "$CONTAINER" iptables-save -c \
     >"$ARTIFACT_DIR/fixture-failure-iptables.txt" 2>&1 || true
+  mobile_wg_fixture_docker exec "$CONTAINER" \
+    tcpdump -nn -tttt -r /fixture/wg0-all.pcap \
+    >"$ARTIFACT_DIR/fixture-failure-packets.txt" 2>&1 || true
   mobile_wg_fixture_logs "$CONTAINER" \
     >"$ARTIFACT_DIR/fixture-failure-logs.txt" 2>&1 || true
 }

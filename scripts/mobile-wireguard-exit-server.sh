@@ -63,6 +63,9 @@ iptables -I INPUT 1 \
 iptables -t nat -A POSTROUTING -s "${NVPN_MOBILE_WG_TUNNEL_CIDR%.*}.0/24" -o eth0 -j MASQUERADE
 
 resolver_tls_capture_filter='tcp dst port 443 and (dst host 1.1.1.1 or dst host 1.0.0.1 or dst host 9.9.9.9 or dst host 149.112.112.112 or dst host 8.8.8.8 or dst host 8.8.4.4)'
+tcpdump -i wg0 -nn -U -s 0 -C 4 -W 1 -w /fixture/wg0-all.pcap \
+  >/fixture/wg0-all-tcpdump.log 2>&1 &
+echo "$!" >/fixture/wg0-all-tcpdump.pid
 tcpdump -i wg0 -nn -U -s 0 -C 1 -W 1 -Z root \
   -w /fixture/resolver-clienthello.pcap "$resolver_tls_capture_filter" \
   >/fixture/tcpdump.log 2>&1 &
@@ -96,6 +99,7 @@ trap cleanup EXIT INT TERM
 
 for _ in $(seq 1 50); do
   if wg show wg0 >/dev/null 2>&1 \
+    && kill -0 "$(</fixture/wg0-all-tcpdump.pid)" 2>/dev/null \
     && kill -0 "$(</fixture/tls-capture.pid)" 2>/dev/null \
     && ss -lun | grep -Fq "$server_ip:53" \
     && ss -lun | grep -Fq "$through_dns_ip:53" \
