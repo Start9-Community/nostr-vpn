@@ -328,6 +328,24 @@ for required in (
         raise SystemExit(f"service-toggle gate lacks short owned runtime cleanup: {required}")
 if 'DATA_ROOT="$ARTIFACT_DIR/app-data"' in service_toggle:
     raise SystemExit("service-toggle gate still puts Unix sockets under artifacts")
+
+service_toggle_launch = service_toggle.split("launch_app() {", 1)[1].split(
+    "\n}\n\nif ! launch_app", 1
+)[0]
+for required in (
+    "for launch_attempt in 1 2 3",
+    'macos_stop_exact_test_app "$APP_EXE"',
+    "open -n -F",
+    "macos_exact_executable_pids",
+):
+    if required not in service_toggle_launch:
+        raise SystemExit(
+            f"service-toggle launch lacks bounded exact-app retry: {required}"
+        )
+if service_toggle_launch.index('macos_stop_exact_test_app "$APP_EXE"') > (
+    service_toggle_launch.index("open -n -F")
+):
+    raise SystemExit("service-toggle retry launches before clearing its exact stale app")
 if 'mktemp -d /tmp/nvpn-svc-e2e.XXXXXX' not in texts["e2e-macos-service.sh"]:
     raise SystemExit("service singleton gate lacks a short macOS runtime root")
 

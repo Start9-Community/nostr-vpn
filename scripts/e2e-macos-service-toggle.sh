@@ -160,22 +160,41 @@ esac
   --joiner-data-dir "$JOINER_DATA_DIR" \
   --result "$RESULT"
 
-open -n -F \
-  --env "NVPN_APP_DATA_DIR=$ADMIN_DATA_DIR" \
-  --env "NVPN_CLI_PATH=$NVPN" \
-  --stdout "$APP_LOG" \
-  --stderr "$APP_LOG" \
-  "$APP_PATH"
+launch_app() {
+  local launch_attempt launch_deadline launch_wait_secs open_status
+  launch_wait_secs=$(((TIMEOUT_SECS + 2) / 3))
+  ((launch_wait_secs >= 2)) || launch_wait_secs=2
 
-deadline=$((SECONDS + TIMEOUT_SECS))
-while ((SECONDS < deadline)); do
-  app_pid="$(macos_exact_executable_pids "$APP_EXE" | tail -n 1)"
-  if [[ -n "$app_pid" ]] && kill -0 "$app_pid" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.1
-done
-if [[ -z "$app_pid" ]] || ! kill -0 "$app_pid" >/dev/null 2>&1; then
+  for launch_attempt in 1 2 3; do
+    app_pid=""
+    macos_stop_exact_test_app "$APP_EXE" || return 1
+    if ((launch_attempt > 1)); then
+      echo "Retrying macOS app launch after stale LaunchServices state ($launch_attempt/3)." >&2
+      sleep 1
+    fi
+
+    open_status=0
+    open -n -F \
+      --env "NVPN_APP_DATA_DIR=$ADMIN_DATA_DIR" \
+      --env "NVPN_CLI_PATH=$NVPN" \
+      --stdout "$APP_LOG" \
+      --stderr "$APP_LOG" \
+      "$APP_PATH" || open_status=$?
+
+    launch_deadline=$((SECONDS + launch_wait_secs))
+    ((open_status == 0)) || launch_deadline=$((SECONDS + 1))
+    while ((SECONDS < launch_deadline)); do
+      app_pid="$(macos_exact_executable_pids "$APP_EXE" | tail -n 1)"
+      if [[ -n "$app_pid" ]] && kill -0 "$app_pid" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 0.1
+    done
+  done
+  return 1
+}
+
+if ! launch_app; then
   echo "macOS release app exited before the VPN toggle could be tested." >&2
   tail -n 120 "$APP_LOG" >&2 || true
   exit 1
