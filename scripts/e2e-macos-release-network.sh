@@ -105,6 +105,10 @@ route_value() {
     | awk -v field="$field" '$1 == field ":" { print $2; exit }'
 }
 
+interface_ipv4() {
+  /usr/sbin/ipconfig getifaddr "$1" 2>/dev/null
+}
+
 endpoint_route_value() {
   local field="$1"
   if [[ "$ENDPOINT_FAMILY" == "ipv6" ]]; then
@@ -788,12 +792,14 @@ no_nvpn_processes() {
 }
 
 snapshot_direct_state() {
-  local direct_iface direct_gateway
+  local direct_iface direct_gateway direct_source_ip
   direct_iface="$(route_value default interface)"
   direct_gateway="$(route_value default gateway)"
+  direct_source_ip="$(interface_ipv4 "$direct_iface")"
   [[ "$direct_iface" == "$PRIMARY_IFACE" \
     && -n "$direct_gateway" \
-    && "$direct_gateway" != link#* ]] \
+    && "$direct_gateway" != link#* \
+    && -n "$direct_source_ip" ]] \
     || fail "primary service does not own the initial Direct route"
   [[ "$(service_state "$PRIMARY_SERVICE")" == "Enabled" \
     && "$(service_state "$SECONDARY_SERVICE")" == "Enabled" ]] \
@@ -807,6 +813,7 @@ snapshot_direct_state() {
 
   printf '%s\n' "$direct_iface" >"$STATE_DIR/direct-interface"
   printf '%s\n' "$direct_gateway" >"$STATE_DIR/direct-gateway"
+  printf '%s\n' "$direct_source_ip" >"$STATE_DIR/direct-source-ip"
   service_state "$PRIMARY_SERVICE" >"$STATE_DIR/primary-service-state"
   service_state "$SECONDARY_SERVICE" >"$STATE_DIR/secondary-service-state"
   /usr/sbin/scutil --dns >"$STATE_DIR/direct-scutil-dns"
@@ -1340,11 +1347,13 @@ run_crash_restart_gate() {
 }
 
 direct_state_matches() {
-  local expected_iface expected_gateway
+  local expected_iface expected_gateway expected_source_ip
   expected_iface="$(cat "$STATE_DIR/direct-interface")"
   expected_gateway="$(cat "$STATE_DIR/direct-gateway")"
+  expected_source_ip="$(cat "$STATE_DIR/direct-source-ip")"
   [[ "$(route_value default interface)" == "$expected_iface" \
     && "$(route_value default gateway)" == "$expected_gateway" \
+    && "$(interface_ipv4 "$expected_iface")" == "$expected_source_ip" \
     && "$(endpoint_route_interface)" == "$expected_iface" ]] \
     && wireguard_split_defaults_absent \
     && resolver_files_absent \
@@ -1371,6 +1380,7 @@ saved_direct_baseline_available() {
   for path in \
     direct-interface \
     direct-gateway \
+    direct-source-ip \
     direct-dns-probe-host \
     direct-scutil-dns.normalized \
     direct-primary-dns \
@@ -1449,6 +1459,8 @@ select_direct_and_stop() {
   {
     printf 'direct_interface=%s\n' "$(route_value default interface)"
     printf 'direct_gateway=%s\n' "$(route_value default gateway)"
+    printf 'direct_source_ip=%s\n' \
+      "$(interface_ipv4 "$(route_value default interface)")"
     printf 'resolver_state_absent=true\n'
   } >"$RESULT_DIR/direct.txt"
   echo "MACOS_RELEASE_NETWORK_DIRECT_OK"
