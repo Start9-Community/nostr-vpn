@@ -228,6 +228,29 @@ copy_guest_results() {
     "$SSH_HOST:$REMOTE_DIR/results/." "$ARTIFACT_DIR/"
 }
 
+capture_fixture_failure() {
+  mkdir -p "$ARTIFACT_DIR"
+  {
+    printf 'wireguard_bytes='
+    mobile_wg_fixture_wg_bytes "$CONTAINER"
+    printf 'forward_packets='
+    mobile_wg_fixture_forward_packets "$CONTAINER"
+  } >"$ARTIFACT_DIR/fixture-failure-counters.txt" 2>&1 || true
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE_MODE" == "native" ]]; then
+    mobile_wg_fixture_logs "$CONTAINER" \
+      >"$ARTIFACT_DIR/fixture-failure-logs.txt" 2>&1 || true
+    return
+  fi
+  mobile_wg_fixture_docker exec "$CONTAINER" wg show \
+    >"$ARTIFACT_DIR/fixture-failure-wireguard.txt" 2>&1 || true
+  mobile_wg_fixture_docker exec "$CONTAINER" ip -4 route show table all \
+    >"$ARTIFACT_DIR/fixture-failure-routes.txt" 2>&1 || true
+  mobile_wg_fixture_docker exec "$CONTAINER" iptables-save -c \
+    >"$ARTIFACT_DIR/fixture-failure-iptables.txt" 2>&1 || true
+  mobile_wg_fixture_logs "$CONTAINER" \
+    >"$ARTIFACT_DIR/fixture-failure-logs.txt" 2>&1 || true
+}
+
 remove_remote_dir() {
   [[ -n "$REMOTE_DIR" ]] || return 0
   local lane=primary
@@ -253,6 +276,9 @@ close_ssh_controls() {
 cleanup() {
   local status="$?" cleanup_failed=0
   trap - EXIT INT TERM
+  if [[ "$status" -ne 0 && "$MOBILE_WG_FIXTURE_STARTED" -eq 1 ]]; then
+    capture_fixture_failure
+  fi
   if [[ -n "$REMOTE_DIR" ]]; then
     local lane=primary
     [[ -n "$SECONDARY_IP" ]] && lane=secondary
