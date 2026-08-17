@@ -653,14 +653,19 @@ counter_value() {
 }
 
 stable_dns_counters() {
-  local previous current attempt
+  local previous current attempt stable_samples=0
   previous="$(peer_command counters)"
-  for attempt in $(seq 1 20); do
+  for attempt in $(seq 1 100); do
     sleep 0.2
     current="$(peer_command counters)"
     if [[ "$current" == "$previous" ]]; then
-      printf '%s\n' "$current"
-      return 0
+      ((stable_samples += 1))
+      if ((stable_samples >= 10)); then
+        printf '%s\n' "$current"
+        return 0
+      fi
+    else
+      stable_samples=0
     fi
     previous="$current"
   done
