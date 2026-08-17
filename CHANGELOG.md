@@ -4,11 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 4.1.8 - 2026-08-17
+
+### Release notes
+
+Reliability improvements for discovery and recovery across every platform.
+
+- Improved paid-exit and peer discovery through more resilient public
+  WebSocket bootstrap peers.
+- Restored authenticated private-mesh sessions after complete network path
+  loss without requiring an app or daemon restart.
+
 ### Fixed
 
 - Keep public FIPS WebSocket bootstrap listeners responsive under connection
   pressure by expanding their bounded inbound budget and evicting idle clients
   after one missed transport-ping cycle.
+- Stage FIPS wake recovery until the underlay is ready, then replace stale
+  carriers after total path loss so authenticated traffic resumes cleanly.
+- Keep release verification aligned with the sealed FIPS dependency versions
+  and make fleet source-equivalence fixtures work in shallow clones.
 
 ## 4.1.7 - 2026-08-10
 
