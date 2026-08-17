@@ -22,11 +22,6 @@ server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
 through_dns_ip="$NVPN_MOBILE_WG_THROUGH_DNS_IP"
 client_public_key="$(tr -d '\r\n' <"$NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE")"
 
-# Docker Desktop's external veth path can leave forwarded transport checksums
-# for a virtual NIC to finish. WireGuard encrypts before that virtual offload
-# boundary, so make the Linux stack materialize checksums first.
-ethtool -K eth0 rx off tx off tso off gso off gro off
-
 ip link add wg0 type wireguard
 ip address add "$NVPN_MOBILE_WG_TUNNEL_CIDR" dev wg0
 ip address add "$through_dns_ip/32" dev wg0
@@ -36,6 +31,11 @@ wg set wg0 \
   peer "$client_public_key" \
   allowed-ips "$NVPN_MOBILE_WG_CLIENT_IP/32"
 ip link set wg0 up
+# Docker Desktop's outer virtual NIC can leave forwarded transport checksums
+# deferred. Materialize them on wg0 egress immediately before WireGuard
+# encryption so the client receives valid return packets.
+tc qdisc add dev wg0 clsact
+tc filter add dev wg0 egress matchall action csum tcp udp
 
 iptables -N nvpn-mobile-wg-forward 2>/dev/null || iptables -F nvpn-mobile-wg-forward
 iptables -N nvpn-wg-dns-profile 2>/dev/null || iptables -F nvpn-wg-dns-profile
@@ -53,10 +53,6 @@ iptables -A nvpn-mobile-wg-forward \
 iptables -A nvpn-mobile-wg-forward -i wg0 -j ACCEPT
 iptables -A nvpn-mobile-wg-forward -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -I FORWARD 1 -j nvpn-mobile-wg-forward
-# Docker Desktop can deliver forwarded veth packets with a deferred transport
-# checksum. Finalize it before WireGuard encrypts the return packet; otherwise
-# macOS receives the bytes but correctly drops the invalid TCP segment.
-iptables -t mangle -A POSTROUTING -o wg0 -j CHECKSUM --checksum-fill
 iptables -I INPUT 1 \
   -i wg0 -d "$server_ip" -p udp --dport 53 \
   -j nvpn-wg-dns-profile
