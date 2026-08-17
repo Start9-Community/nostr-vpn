@@ -149,7 +149,10 @@ start_guest_secondary_unit() {
 }
 
 wait_for_guest_runner_success() {
-  local deadline="$((SECONDS + 30))"
+  # The guest's Direct restoration loop may consume its full 30-second
+  # deadline. Leave enough time for it to write the receipt and for the
+  # systemd state transition to become visible over SSH.
+  local deadline="$((SECONDS + 60))"
   local state
   while ((SECONDS < deadline)); do
     state="$(run_primary sudo -n systemctl show "$LINUX_RUN_UNIT" \

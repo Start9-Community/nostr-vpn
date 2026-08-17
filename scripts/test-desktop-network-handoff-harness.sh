@@ -1394,6 +1394,8 @@ require_tokens "$LINUX_HOST_LIB" "detached fail-closed guest-runner supervision"
   'ConnectionAttempts=1' \
   'ServerAliveInterval=2' \
   'ServerAliveCountMax=2'
+grep -Fq 'local deadline="$((SECONDS + 60))"' "$LINUX_HOST_LIB" \
+  || fail "Linux host runner wait does not outlive the guest Direct restoration deadline"
 if grep -Fq 'LINUX_RUN_PID' "$LINUX_HOST" "$LINUX_HOST_LIB" \
   || grep -Fq 'reap_linux_guest_runner_if_exited' "$LINUX_HOST_LIB"
 then
