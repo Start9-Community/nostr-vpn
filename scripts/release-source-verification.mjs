@@ -306,6 +306,13 @@ export function createWindowsCratesIoSourceReceiptForCandidate({
     expectedFipsGitSha,
     expectedFipsVersion,
   })
+  exactCleanGitCheckout({
+    root: exactCandidateRoot,
+    env: process.env,
+    label: 'Windows crates.io source candidate after Cargo metadata',
+    expectedCommit: expectedAppGitSha,
+    expectedTree: expectedAppGitTree,
+  })
   return createWindowsCratesIoSourceReceipt({
     appGitSha: expectedAppGitSha,
     appGitTree: expectedAppGitTree,

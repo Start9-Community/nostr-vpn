@@ -39,6 +39,7 @@ VERSION="$(
 )"
 SMOKE_TAG="${NVPN_WINDOWS_APP_SMOKE_TAG:-v$VERSION}"
 LOCAL_GATE_DIR="${NVPN_WINDOWS_INSTALLER_GATE_ARTIFACT_DIR:-$ARTIFACT_ROOT/windows-installer-gate}"
+PRESEALED_SOURCE_FIPS_RECEIPT="${NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH:-}"
 REMOTE_GATE_DIR="$GUEST_ARTIFACT_ROOT\\windows-installer-gate"
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ \
@@ -263,15 +264,26 @@ for name, value in payloads.items():
 PY
 
 SOURCE_FIPS_RECEIPT="$LOCAL_GATE_DIR/cratesio-source-receipt.json"
-node "$ROOT/scripts/release-source-verification.mjs" \
-  windows-cratesio-source-receipt \
-  "$(git -C "$ROOT" rev-parse HEAD)" \
-  "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
-  "$NVPN_FIPS_REPO_PATH" \
-  "$EXPECTED_FIPS_SHA" \
-  "$EXPECTED_FIPS_TREE" \
-  "$EXPECTED_FIPS_VERSION" \
-  >"$SOURCE_FIPS_RECEIPT"
+if [[ -n "$PRESEALED_SOURCE_FIPS_RECEIPT" ]]; then
+  if [[ ! -f "$PRESEALED_SOURCE_FIPS_RECEIPT" \
+    || -L "$PRESEALED_SOURCE_FIPS_RECEIPT" \
+    || ! -r "$PRESEALED_SOURCE_FIPS_RECEIPT" ]]
+  then
+    echo "Presealed Windows crates.io source receipt is not a readable regular file." >&2
+    exit 1
+  fi
+  cp "$PRESEALED_SOURCE_FIPS_RECEIPT" "$SOURCE_FIPS_RECEIPT"
+else
+  node "$ROOT/scripts/release-source-verification.mjs" \
+    windows-cratesio-source-receipt \
+    "$(git -C "$ROOT" rev-parse HEAD)" \
+    "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+    "$NVPN_FIPS_REPO_PATH" \
+    "$EXPECTED_FIPS_SHA" \
+    "$EXPECTED_FIPS_TREE" \
+    "$EXPECTED_FIPS_VERSION" \
+    >"$SOURCE_FIPS_RECEIPT"
+fi
 node "$ROOT/scripts/release-source-verification.mjs" \
   windows-cratesio-provenance \
   "$SOURCE_FIPS_RECEIPT" \

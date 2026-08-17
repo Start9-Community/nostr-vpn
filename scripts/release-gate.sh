@@ -459,11 +459,39 @@ windows_host_source_fips_receipt() {
   printf '%s\n' "${NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH:-$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer/cratesio-source-receipt.json}"
 }
 
+windows_presealed_source_fips_receipt() {
+  printf '%s\n' "$RELEASE_GATE_PARALLEL_LOG_DIR/windows-source/cratesio-source-receipt.json"
+}
+
+prepare_windows_source_fips_receipt() {
+  local receipt temporary_receipt
+  receipt="$(windows_presealed_source_fips_receipt)"
+  temporary_receipt="$receipt.tmp.$$"
+  mkdir -p "$(dirname "$receipt")"
+  rm -f "$receipt" "$temporary_receipt"
+  if ! node "$ROOT_DIR/scripts/release-source-verification.mjs" \
+    windows-cratesio-source-receipt \
+    "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
+    "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" \
+    "${NVPN_FIPS_REPO_PATH:?Windows source receipt requires NVPN_FIPS_REPO_PATH}" \
+    "${NVPN_EXPECTED_FIPS_GIT_SHA:?Windows source receipt requires NVPN_EXPECTED_FIPS_GIT_SHA}" \
+    "${NVPN_EXPECTED_FIPS_GIT_TREE:?Windows source receipt requires NVPN_EXPECTED_FIPS_GIT_TREE}" \
+    "${NVPN_EXPECTED_FIPS_VERSION:?Windows source receipt requires NVPN_EXPECTED_FIPS_VERSION}" \
+    >"$temporary_receipt"
+  then
+    rm -f "$temporary_receipt"
+    return 1
+  fi
+  mv "$temporary_receipt" "$receipt"
+  export NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH="$receipt"
+}
+
 run_auto_windows_vm_app_smoke() {
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
     release_gate_run_with_timeout "Windows VM app launch smoke" "$WINDOWS_GUI_SMOKE_TIMEOUT_SECS" \
       env NVPN_WINDOWS_INSTALLER_GATE_ARTIFACT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer" \
+      NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH="${NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH:-}" \
       ./scripts/windows-vm-app-launch-smoke.sh "$host"
   else
     echo "Skipping Windows VM app launch smoke because ssh $host is unreachable."
@@ -571,6 +599,7 @@ run_windows_app_launch_gate() {
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm)
       release_gate_run_with_timeout "Windows VM app launch smoke" "$WINDOWS_GUI_SMOKE_TIMEOUT_SECS" \
         env NVPN_WINDOWS_INSTALLER_GATE_ARTIFACT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer" \
+        NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH="${NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH:-}" \
         ./scripts/windows-vm-app-launch-smoke.sh "${NVPN_WINDOWS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
@@ -2193,14 +2222,20 @@ main() {
   # overlap work on resource-isolated remote hosts.
   run_release_gate_candidate_preflight
 
+  local windows_platform_requested_for_gate=0
+  if windows_platform_lane_requested; then
+    windows_platform_requested_for_gate=1
+    # Seal crates.io/FIPS provenance while the exact candidate is still clean.
+    # Later release preparation deliberately realizes a temporary Cargo graph.
+    prepare_windows_source_fips_receipt
+  fi
+
   # These preparation lanes read or snapshot the tracked candidate. Join all
   # of them before any Cargo command: an ignored user Cargo patch config can
   # make even a nominally static check realize Cargo.lock. The already-synced
   # VM verification lanes start again below and overlap host validation.
   local platform_preparation_lanes=()
-  local windows_platform_requested_for_gate=0
-  if windows_platform_lane_requested; then
-    windows_platform_requested_for_gate=1
+  if [[ "$windows_platform_requested_for_gate" == "1" ]]; then
     release_gate_parallel_start \
       "Windows platform preparation" \
       prepare_windows_platform_lane_sync

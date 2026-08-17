@@ -89,7 +89,8 @@ done
 
 for receipt_handoff in \
   'windows-cratesio-source-receipt' \
-  'cratesio-source-receipt.json'
+  'cratesio-source-receipt.json' \
+  'NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH'
 do
   grep -Fq "$receipt_handoff" "$APP_SMOKE" \
     || fail "Windows installer smoke does not seal its crates.io source receipt: $receipt_handoff"
@@ -97,6 +98,7 @@ done
 for receipt_handoff in \
   'NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH' \
   'NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH' \
+  'NVPN_WINDOWS_PRESEALED_SOURCE_FIPS_RECEIPT_PATH' \
   'cratesio-source-receipt.json'
 do
   grep -Fq "$receipt_handoff" "$RELEASE_GATE" \
