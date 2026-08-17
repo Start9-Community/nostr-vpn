@@ -240,43 +240,22 @@ loop {
                 continue;
             }
             if network_refresh_attempt.is_none() {
-                let refresh = fips_link_event_refresh(
+                let Some(attempt) = begin_platform_network_refresh_attempt(
+                    latest_snapshot,
                     platform_network_event,
                     network_changed,
                     wireguard_network_state_drift,
                     endpoint_changed,
                     resumed_after_sleep,
-                );
-                if matches!(refresh, FipsLinkEventRefresh::None) {
+                ) else {
                     schedule_platform_network_settle_recheck(
                         &mut intervals.network_deadline,
                         &mut network_settle_rechecks,
                     );
                     continue;
-                }
-                network_settle_rechecks = 0;
-                let reason = if network_changed {
-                    "network change"
-                } else if resumed_after_sleep {
-                    "sleep/wake"
-                } else if wireguard_network_state_drift {
-                    "WireGuard route drift"
-                } else {
-                    "endpoint change"
                 };
-                if network_changed {
-                    eprintln!("daemon: network change detected; refreshing FIPS endpoint state");
-                } else if resumed_after_sleep {
-                    eprintln!("daemon: sleep/wake detected; refreshing FIPS endpoint state");
-                } else if wireguard_network_state_drift {
-                    eprintln!(
-                        "daemon: unmanaged Linux default route detected; reconciling WireGuard network state"
-                    );
-                } else {
-                    eprintln!("daemon: endpoint changed; refreshing FIPS endpoint state");
-                }
-                network_refresh_attempt =
-                    Some(PlatformNetworkRefreshAttempt::new(latest_snapshot, refresh, reason));
+                network_settle_rechecks = 0;
+                network_refresh_attempt = Some(attempt);
             }
             if platform_network_refresh_waits_for_underlay(
                 network_refresh_attempt.as_ref(),

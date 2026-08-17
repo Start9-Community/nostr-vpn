@@ -653,49 +653,8 @@ fn fips_link_events_ignore_route_notifications_without_state_change() {
         FipsLinkEventRefresh::None
     );
 }
-#[test]
-fn fips_stale_participant_recovery_is_cooldown_gated() {
-    let mut last_restart_at = None;
-
-    assert!(fips_stale_participant_restart_due(
-        &mut last_restart_at,
-        1_000
-    ));
-    assert_eq!(last_restart_at, Some(1_000));
-    assert!(!fips_stale_participant_restart_due(
-        &mut last_restart_at,
-        1_000 + FIPS_STALE_PARTICIPANT_RESTART_COOLDOWN_SECS - 1
-    ));
-    assert!(fips_stale_participant_restart_due(
-        &mut last_restart_at,
-        1_000 + FIPS_STALE_PARTICIPANT_RESTART_COOLDOWN_SECS
-    ));
-    assert!(fips_stale_participant_restart_due(
-        &mut last_restart_at,
-        900
-    ));
-}
-
-#[test]
-fn fips_stale_participant_recovery_rebinds_only_after_every_roster_path_fails() {
-    let roster = roster_pubkeys(&["a", "b"]);
-    let stale = vec!["a".to_string()];
-    let mut peers = vec![pending_fips_peer("a"), pending_fips_peer("b")];
-
-    assert!(fips_stale_participant_carrier_rebind_required(
-        &peers, &roster, &stale
-    ));
-
-    peers[1].connected = true;
-    assert!(!fips_stale_participant_carrier_rebind_required(
-        &peers, &roster, &stale
-    ));
-    assert!(!fips_stale_participant_carrier_rebind_required(
-        &peers,
-        &roster,
-        &[]
-    ));
-}
+#[path = "runtime_misc/stale_participant_recovery.rs"]
+mod stale_participant_recovery;
 
 #[test]
 fn fips_endpoint_failures_requiring_runtime_replacement_are_classified() {

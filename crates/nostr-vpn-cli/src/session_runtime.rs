@@ -242,6 +242,7 @@ macro_rules! current_fips_endpoint_peer_states {
     };
 }
 
+include!("session_runtime/network_refresh_helpers.rs");
 include!("session_runtime/fips_status_helpers.rs");
 include!("session_runtime/connect_vpn.rs");
 
