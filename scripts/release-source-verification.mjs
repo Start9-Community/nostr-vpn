@@ -325,6 +325,24 @@ function resolveWindowsCratesIoFipsPackages({
   return exactPackages
 }
 
+function resolveWindowsCratesIoFipsPackagesFromCommit({
+  candidateRoot,
+  expectedAppGitSha,
+  expectedFipsGitSha,
+  expectedFipsVersion,
+}) {
+  return withExactGitArchive({
+    root: candidateRoot,
+    commit: expectedAppGitSha,
+    label: 'Windows crates.io provenance candidate',
+    validate: (archiveRoot) => resolveWindowsCratesIoFipsPackages({
+      exactCandidateRoot: archiveRoot,
+      expectedFipsGitSha,
+      expectedFipsVersion,
+    }),
+  })
+}
+
 export function createWindowsCratesIoSourceReceiptForCandidate({
   candidateRoot = defaultCandidateRoot,
   expectedAppGitSha,
@@ -350,20 +368,16 @@ export function createWindowsCratesIoSourceReceiptForCandidate({
     expectedCommit: expectedFipsGitSha,
     expectedTree: expectedFipsGitTree,
   })
-  const exactPackages = withExactGitArchive({
-    root: exactCandidateRoot,
-    commit: expectedAppGitSha,
-    label: 'Windows crates.io provenance candidate',
-    validate: (archiveRoot) => resolveWindowsCratesIoFipsPackages({
-      exactCandidateRoot: archiveRoot,
-      expectedFipsGitSha,
-      expectedFipsVersion,
-    }),
+  const exactPackages = resolveWindowsCratesIoFipsPackagesFromCommit({
+    candidateRoot: exactCandidateRoot,
+    expectedAppGitSha,
+    expectedFipsGitSha,
+    expectedFipsVersion,
   })
   exactCleanGitCheckout({
     root: exactCandidateRoot,
     env: process.env,
-    label: 'Windows crates.io source candidate after Cargo metadata',
+    label: 'Windows crates.io source candidate after source resolution',
     expectedCommit: expectedAppGitSha,
     expectedTree: expectedAppGitTree,
   })
@@ -410,8 +424,9 @@ export function validateWindowsCratesIoFipsProvenance({
     expectedTree: expectedFipsGitTree,
   })
 
-  const exactPackages = resolveWindowsCratesIoFipsPackages({
-    exactCandidateRoot,
+  const exactPackages = resolveWindowsCratesIoFipsPackagesFromCommit({
+    candidateRoot: exactCandidateRoot,
+    expectedAppGitSha,
     expectedFipsGitSha,
     expectedFipsVersion,
   })

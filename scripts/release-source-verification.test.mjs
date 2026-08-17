@@ -243,6 +243,21 @@ test('exact Git archive validation ignores a later dirty Cargo.lock', (context) 
   assert.equal(readFileSync(lock, 'utf8'), 'temporary local path lock\n')
 })
 
+test('Windows final provenance resolves packages from the sealed commit', () => {
+  const source = readFileSync(
+    join(process.cwd(), 'scripts', 'release-source-verification.mjs'),
+    'utf8',
+  )
+  const body = source
+    .split('export function validateWindowsCratesIoFipsProvenance({')[1]
+    .split('\nexport function ')[0]
+  assert.match(body, /resolveWindowsCratesIoFipsPackagesFromCommit\(\{/)
+  assert.doesNotMatch(
+    body,
+    /resolveWindowsCratesIoFipsPackages\(\{\s*exactCandidateRoot,/,
+  )
+})
+
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
