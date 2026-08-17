@@ -2219,6 +2219,7 @@ main() {
   trap release_gate_cleanup EXIT
 
   release_gate_enforce_complete_real_network_modes
+  release_gate_require_complete_fixture_inputs
 
   # Validate generated version metadata before any remote lane snapshots the
   # candidate. The remaining preflight leaves tracked source unchanged and can

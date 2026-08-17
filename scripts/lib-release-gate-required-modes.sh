@@ -43,3 +43,35 @@ release_gate_enforce_complete_real_network_modes() {
     release_gate_require_real_network_mode "$name" || return
   done
 }
+
+release_gate_require_complete_fixture_inputs() {
+  case "${NVPN_RELEASE_GATE_REQUIRE_COMPLETE:-0}" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off|"") return 0 ;;
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
+    *)
+      echo "NVPN_RELEASE_GATE_REQUIRE_COMPLETE must be a boolean." >&2
+      return 2
+      ;;
+  esac
+
+  local provider_config="${NVPN_WINDOWS_WG_EXIT_CONFIG_FILE:-${NVPN_WG_EXIT_CONFIG_FILE:-}}"
+  if [[ -n "$provider_config" ]]; then
+    [[ -r "$provider_config" ]] || {
+      echo "Complete release gate Windows WireGuard config is unreadable." >&2
+      return 1
+    }
+  elif [[ -z "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    || -z "${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-}" ]]
+  then
+    echo "Complete release gate requires a remote Windows WireGuard fixture or an explicit provider config." >&2
+    return 1
+  elif [[ "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" != native ]]; then
+    echo "Complete release gate Windows WireGuard fixture must use remote native mode." >&2
+    return 1
+  fi
+
+  [[ -n "${NVPN_MOBILE_WG_EXIT_HOST_IP:-}" ]] || {
+    echo "Complete release gate requires NVPN_MOBILE_WG_EXIT_HOST_IP for physical mobile network gates." >&2
+    return 1
+  }
+}

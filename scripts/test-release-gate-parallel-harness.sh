@@ -244,6 +244,20 @@ if release_gate_enforce_complete_real_network_modes >/dev/null 2>&1; then
 fi
 export NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=required
 
+unset NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST
+unset NVPN_MOBILE_WG_EXIT_HOST_IP
+unset NVPN_WINDOWS_WG_FIXTURE_HOST_IP
+unset NVPN_WINDOWS_WG_EXIT_CONFIG_FILE
+unset NVPN_WG_EXIT_CONFIG_FILE
+if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
+  fail "complete release gate accepted missing WireGuard fixture inputs"
+fi
+export NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST=fixture-host
+export NVPN_WINDOWS_WG_FIXTURE_HOST_IP=192.0.2.10
+export NVPN_MOBILE_WG_EXIT_HOST_IP=192.0.2.10
+release_gate_require_complete_fixture_inputs \
+  || fail "complete release gate rejected explicit WireGuard fixture inputs"
+
 # Exercise candidate receipts rather than asserting their implementation text.
 receipt_functions="$tmp/platform-preparation-receipts.sh"
 sed -n '/^write_platform_preparation_receipt() {$/,/^}$/p' \
