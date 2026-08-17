@@ -349,7 +349,16 @@ fn append_link_device_card(app: &AppRef, page: &gtk::Box, network: &NativeNetwor
     {
         let app = app.clone();
         let network_id = network.id.clone();
-        add.connect_clicked(move |_| add_participant_from_drafts(&app, network_id.clone()));
+        let npub = npub.clone();
+        let alias = alias.clone();
+        add.connect_clicked(move |_| {
+            add_participant(
+                &app,
+                network_id.clone(),
+                npub.text().trim().to_string(),
+                alias.text().trim().to_string(),
+            );
+        });
     }
     manual.append(&npub);
     manual.append(&alias);
@@ -393,14 +402,7 @@ fn import_join_request_or_add_device(app: &AppRef, network_id: String) {
     }
 }
 
-fn add_participant_from_drafts(app: &AppRef, network_id: String) {
-    let (npub, alias) = {
-        let model = app.borrow();
-        (
-            model.drafts.participant_npub.trim().to_string(),
-            model.drafts.participant_alias.trim().to_string(),
-        )
-    };
+fn add_participant(app: &AppRef, network_id: String, npub: String, alias: String) {
     if npub.is_empty() {
         return;
     }
