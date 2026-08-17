@@ -247,6 +247,7 @@ export NVPN_RELEASE_GATE_MOBILE_UNDERLAY_E2E=required
 unset NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST
 unset NVPN_MOBILE_WG_EXIT_HOST_IP
 unset NVPN_WINDOWS_WG_FIXTURE_HOST_IP
+unset NVPN_MACOS_WG_FIXTURE_HOST_IP
 unset NVPN_WINDOWS_WG_EXIT_CONFIG_FILE
 unset NVPN_WG_EXIT_CONFIG_FILE
 if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
@@ -254,6 +255,10 @@ if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
 fi
 export NVPN_WINDOWS_WG_FIXTURE_HOST_IP=192.0.2.10
 export NVPN_MOBILE_WG_EXIT_HOST_IP=192.0.2.10
+if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
+  fail "complete release gate accepted a missing macOS local fixture address"
+fi
+export NVPN_MACOS_WG_FIXTURE_HOST_IP=192.0.2.10
 release_gate_require_complete_fixture_inputs \
   || fail "complete release gate rejected local WireGuard fixture inputs"
 

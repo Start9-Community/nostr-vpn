@@ -848,10 +848,9 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   'NVPN_MACOS_VM_IMPORT_ONLY=1' \
   'NVPN_E2E_BINARY=' \
   './scripts/e2e-macos-release-network.sh' \
-  'NVPN_MACOS_WG_FIXTURE_IPV4' \
-  'discover_remote_fixture_ipv4' \
+  'NVPN_MACOS_WG_FIXTURE_HOST_IP' \
+  'unset NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST' \
   'MOBILE_WG_FIXTURE_ENDPOINT_FAMILY" == "ipv4"' \
-  'remote FIPS peer must use its separate numeric IPv6 address' \
   'mobile_wg_fixture_wg_bytes' \
   'mobile_wg_fixture_forward_packets' \
   'mobile_wg_fixture_dns_evidence_snapshot' \
@@ -860,6 +859,13 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   'DNS_CASE_PROBE_HOST="measure-$PPID-$RANDOM.$transition_probe_host"' \
   'mobile_wg_fixture_assert_dns_case_evidence' \
   'mobile_wg_fixture_cleanup'
+if grep -Fq 'requires the remote Vader fixture' "$MACOS_WIREGUARD" \
+  || grep -Fq 'discover_remote_fixture_ipv4' "$MACOS_WIREGUARD" \
+  || grep -Fq 'mobile_wg_remote_exec' "$MACOS_WIREGUARD" \
+  || grep -Fq 'FIPS_PEER_SSH_HOST' "$MACOS_WIREGUARD"
+then
+  fail "macOS network fixture still depends on a remote fixture host"
+fi
 for dns_case in \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
 do
@@ -893,7 +899,7 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'crash_restart_payloads_live' \
   'record_crash_restart_probe' \
   'crash-restart-probes' \
-  'wait_until "the restarted authenticated FIPS status cache"' \
+  'runtime_has_no_fips_peers' \
   'expected_bind_receipts=1' \
   'startup_persist_path_completed=true' \
   'sigkill_tunnel_routes_absent=true' \
@@ -910,8 +916,8 @@ crash_restart_transport_body="$(
 )"
 grep -Fq 'crash_restart_payloads_live' <<<"$crash_restart_transport_body" \
   || fail "macOS timed crash recovery omits authenticated payload probes"
-if grep -Fq 'runtime_fips_peer_connected' <<<"$crash_restart_transport_body"; then
-  fail "macOS timed crash recovery still waits on the cached FIPS status snapshot"
+if grep -Fq 'runtime_fips_peer_connected' "$MACOS_NETWORK_GUEST"; then
+  fail "macOS WireGuard gate still depends on an authenticated FIPS peer"
 fi
 require_tokens "$WIREGUARD_FIXTURE_LIB" "independent resolver endpoints" \
   'https://dns.google/dns-query' \
@@ -1023,21 +1029,7 @@ payload_loop() {
     sleep 1
   done
 }
-fips_payload_loop() {
-  while true; do
-    sleep 1
-  done
-}
-fips_payload_success_count() {
-  printf '1\n'
-}
-runtime_fips_peer_connected() {
-  return 0
-}
-fips_route_interface() {
-  printf 'utun8\n'
-}
-fips_route_interface_owns_tunnel_ip() {
+runtime_has_no_fips_peers() {
   return 0
 }
 wireguard_interface() {
@@ -1079,8 +1071,6 @@ if grep -Fq 'MACOS_RELEASE_NETWORK_UNDERLAY_OK' "$UNDERLAY_PROBE_DIR/probe.log";
 fi
 [[ ! -e "$UNDERLAY_PROBE_DIR/state/payload.pid" ]] \
   || fail "mid-gate failure left its owned payload receipt/process"
-[[ ! -e "$UNDERLAY_PROBE_DIR/state/fips-payload.pid" ]] \
-  || fail "mid-gate failure left its owned private-FIPS payload receipt/process"
 
 CLEANUP_PROBE="$COMBINED_DIR/macos-cleanup-probe.sh"
 cat >"$CLEANUP_PROBE" <<'BASH'

@@ -822,27 +822,13 @@ prepare_macos_platform_lane_sync() {
   MACOS_PLATFORM_LANE_PRE_SYNCED=0
   macos_platform_lane_requested || return 0
   if macos_vm_reachable; then
-    local peer_build_pid="" peer_build_status=0 artifact_status=0
-    local peer_build_log="$RELEASE_GATE_PARALLEL_LOG_DIR/macos-fips-peer-host-prep.log"
-    if ! release_gate_mode_disabled \
-      "${NVPN_RELEASE_GATE_MACOS_WG_EXIT_E2E:-auto}"
-    then
-      ./scripts/prepare-macos-release-fips-peer.sh \
-        >"$peer_build_log" 2>&1 &
-      peer_build_pid="$!"
-    fi
+    local artifact_status=0
     env NVPN_MACOS_RUST_PROFILE=release NVPN_MACOS_XCODE_CONFIGURATION=Release \
       NVPN_MACOS_RELEASE_ARTIFACT_ACTION=prepare-only \
       ./scripts/macos-vm-release-mobile-join-e2e.sh \
         "${NVPN_MACOS_SSH_HOST:-}" \
       || artifact_status="$?"
-    if [[ -n "$peer_build_pid" ]]; then
-      wait "$peer_build_pid" || peer_build_status="$?"
-    fi
-    if [[ "$artifact_status" -ne 0 || "$peer_build_status" -ne 0 ]]; then
-      if [[ "$peer_build_status" -ne 0 ]]; then
-        tail -n 120 "$peer_build_log" >&2 || true
-      fi
+    if [[ "$artifact_status" -ne 0 ]]; then
       return 1
     fi
     write_platform_preparation_receipt \

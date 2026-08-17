@@ -47,7 +47,6 @@ RESULT_DIR="$STATE_DIR/results"
 CONFIG="$STATE_DIR/config.toml"
 ENDPOINT_FAMILY=ipv4
 ENDPOINT_HOST=192.0.2.10
-FIPS_PEER_TUNNEL_IP=100.64.0.2
 PRIMARY_IFACE=en0
 WAIT_SECS=2
 SECURE_RESOLVER="$STATE_DIR/nvpn-secure-dns"
@@ -59,7 +58,6 @@ WIREGUARD_INTERFACE_STATUS=0
 ENDPOINT_ROUTE_ABSENT_STATUS=1
 SECURE_DNS_STATUS=0
 RESTART_STATE_STATUS=0
-RESTART_FIPS_STATUS=0
 wireguard_interface() {
   ((WIREGUARD_INTERFACE_STATUS == 0)) || return 1
   printf 'utun9\n'
@@ -78,8 +76,7 @@ runtime_wireguard_state_is() {
   return 1
 }
 runtime_dns_state_matches() { return "$RESTART_STATE_STATUS"; }
-runtime_fips_peer_connected() { return "$RESTART_FIPS_STATUS"; }
-capture_fips_host_tunnel_route() { printf 'utun8\n'; }
+runtime_has_no_fips_peers() { return "$RESTART_STATE_STATUS"; }
 no_nvpn_processes() { return 0; }
 capture_underlay_routes() { printf 'route snapshot\n'; }
 secure_dns_store_state() { printf 'dynamic resolver snapshot\n'; }
@@ -172,15 +169,13 @@ fi
 SECURE_DNS_STATUS=0
 
 # Restart acceptance is one atomic production-state predicate: a fresh PID and
-# bind, tunnel/routes/DNS, authenticated peer, private payload, and WG payload.
+# bind, tunnel/routes/DNS, isolated zero-peer runtime, and WG payloads.
 assert_single_owned_daemon() { return "$RESTART_STATE_STATUS"; }
 owned_daemon_pid() { printf '%s\n' "${RESTART_PID:-202}"; }
 wireguard_bind_receipt_count() { printf '%s\n' "${RESTART_BINDS:-2}"; }
-fips_host_tunnel_route_live() { return "$RESTART_STATE_STATUS"; }
 captured_probe_works() { return "$RESTART_STATE_STATUS"; }
 https_works() { return "$RESTART_STATE_STATUS"; }
 exit_source_is_expected() { return "$RESTART_STATE_STATUS"; }
-fips_payload_works() { return "$RESTART_FIPS_STATUS"; }
 mkdir -p "$RESULT_DIR/crash-restart-probes"
 WIREGUARD_INTERFACE_STATUS=0
 crash_restart_transport_live 2 101 \
@@ -197,15 +192,9 @@ fi
 RESTART_BINDS=2
 RESTART_STATE_STATUS=1
 if crash_restart_transport_live 2 101; then
-  fail "crash recovery accepted missing tunnel/DNS/FIPS/WG state"
+  fail "crash recovery accepted missing tunnel/DNS/WG state"
 fi
 RESTART_STATE_STATUS=0
-rm -f "$RESULT_DIR/crash-restart-probes/private-fips.pass"
-RESTART_FIPS_STATUS=1
-if crash_restart_transport_live 2 101; then
-  fail "crash recovery accepted missing authenticated FIPS payload"
-fi
-RESTART_FIPS_STATUS=0
 
 # A stable externally visible failure must retain predicate, route, resolver,
 # status, and daemon-log evidence without inspecting the private journal.

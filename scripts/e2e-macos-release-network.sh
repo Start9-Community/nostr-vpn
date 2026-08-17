@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Production-path macOS Release network gate, executed only in macos-utm.
 # The controller imports the exact host-built package and supplies a real
-# remote WireGuard fixture. This guest runner never builds or signs anything.
+# host-local WireGuard fixture. This guest runner never builds or signs anything.
 set -euo pipefail
 
 ACTION="${1:-${NVPN_MACOS_NETWORK_ACTION:-}}"
@@ -33,9 +33,6 @@ SECONDARY_IFACE="${NVPN_MACOS_SECONDARY_INTERFACE:-en2}"
 WAIT_SECS="${NVPN_MACOS_NETWORK_WAIT_SECS:-30}"
 RECOVERY_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 FIPS_NETWORK_ID="${NVPN_MACOS_FIPS_NETWORK_ID:-}"
-FIPS_PEER_NPUB="${NVPN_MACOS_FIPS_PEER_NPUB:-}"
-FIPS_PEER_ENDPOINT="${NVPN_MACOS_FIPS_PEER_ENDPOINT:-}"
-FIPS_PEER_TUNNEL_IP="${NVPN_MACOS_FIPS_PEER_TUNNEL_IP:-}"
 FIPS_CLIENT_LISTEN_PORT="${NVPN_MACOS_FIPS_CLIENT_LISTEN_PORT:-}"
 EXPECTED_FIPS_REV="${NVPN_MACOS_FIPS_EXPECTED_REV:-}"
 SECURE_RESOLVER="/etc/resolver/nvpn-secure-dns"
@@ -83,11 +80,8 @@ validate_inputs() {
   [[ "$RECOVERY_DEADLINE_MS" =~ ^[1-9][0-9]*$ \
     && "$RECOVERY_DEADLINE_MS" -le 4000 ]] \
     || fail "underlay recovery deadline must be at most four seconds"
-  [[ -n "$FIPS_NETWORK_ID" \
-    && "$FIPS_PEER_NPUB" == npub1* \
-    && -n "$FIPS_PEER_ENDPOINT" \
-    && -n "$FIPS_PEER_TUNNEL_IP" ]] \
-    || fail "authenticated FIPS peer inputs are incomplete"
+  [[ -n "$FIPS_NETWORK_ID" ]] \
+    || fail "isolated network id is missing"
   [[ "$FIPS_CLIENT_LISTEN_PORT" =~ ^[1-9][0-9]{0,4}$ \
     && "$FIPS_CLIENT_LISTEN_PORT" -le 65535 ]] \
     || fail "local FIPS client UDP port is invalid"
@@ -364,18 +358,6 @@ capture_wireguard_readiness_failure() {
     >"$RESULT_DIR/wireguard-readiness-daemon.log" 2>&1 || true
 }
 
-capture_fips_peer_readiness_failure() {
-  if [[ -f "$STATE_DIR/status-fips-peer.json" ]]; then
-    cp "$STATE_DIR/status-fips-peer.json" \
-      "$RESULT_DIR/fips-peer-readiness-status.json"
-  else
-    printf '{"error":"client status was not written"}\n' \
-      >"$RESULT_DIR/fips-peer-readiness-status.json"
-  fi
-  tail -n 240 "$STATE_DIR/daemon.log" \
-    >"$RESULT_DIR/fips-peer-readiness-daemon.log" 2>&1 || true
-}
-
 wait_until() {
   local description="$1"
   shift
@@ -508,14 +490,12 @@ raise SystemExit(1)
 PY
 }
 
-runtime_fips_peer_connected() {
-  local status_file="${1:-$STATE_DIR/status-fips-peer.json}"
+runtime_has_no_fips_peers() {
+  local status_file="${1:-$STATE_DIR/status-no-fips-peers.json}"
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$status_file" || return 1
   /usr/bin/python3 - \
     "$status_file" \
-    "$FIPS_PEER_NPUB" \
-    "$FIPS_PEER_ENDPOINT" \
     "$FIPS_CLIENT_LISTEN_PORT" \
     "$EXPECTED_FIPS_REV" <<'PY'
 import json
@@ -523,8 +503,6 @@ import sys
 
 (
     path,
-    expected_peer,
-    expected_endpoint,
     expected_listen_port,
     expected_revision,
 ) = sys.argv[1:]
@@ -533,16 +511,13 @@ with open(path, encoding="utf-8") as handle:
 daemon = status.get("daemon", {})
 state = daemon.get("state", {})
 peers = state.get("fips_endpoint_peers", [])
-addresses = peers[0].get("addresses", []) if len(peers) == 1 else []
 if (
     status.get("status_source") == "daemon"
     and daemon.get("running") is True
     and state.get("mesh_ready") is True
-    and state.get("connected_peer_count") == 1
+    and state.get("connected_peer_count") == 0
     and state.get("listen_port") == int(expected_listen_port)
-    and len(peers) == 1
-    and peers[0].get("npub") == expected_peer
-    and any(address.get("addr") == expected_endpoint for address in addresses)
+    and peers == []
     and state.get("fips_core_version", "").endswith(
         f"(rev {expected_revision})"
     )
@@ -668,8 +643,6 @@ capture_underlay_routes() {
     else
       /sbin/route -n get "$ENDPOINT_HOST" 2>&1 || true
     fi
-    printf '%s\n' '--- FIPS peer tunnel route ---'
-    /sbin/route -n get "$FIPS_PEER_TUNNEL_IP" 2>&1 || true
   }
 }
 
@@ -705,8 +678,7 @@ crash_live_precondition() {
   wireguard_routes_live \
     && runtime_wireguard_state_is true true \
     && runtime_dns_state_matches \
-    && runtime_fips_peer_connected \
-    && capture_fips_host_tunnel_route >/dev/null \
+    && runtime_has_no_fips_peers \
     && crash_startup_log_order_is_valid
 }
 
@@ -755,10 +727,8 @@ record_crash_external_audit() {
       runtime_wireguard_state_is true true
     snapshot_predicate "$predicates" runtime_dns_state_matches \
       runtime_dns_state_matches
-    snapshot_predicate "$predicates" authenticated_fips_peer \
-      runtime_fips_peer_connected
-    snapshot_predicate "$predicates" fips_host_tunnel_route_live \
-      capture_fips_host_tunnel_route
+    snapshot_predicate "$predicates" isolated_zero_peer_runtime \
+      runtime_has_no_fips_peers
     snapshot_predicate "$predicates" startup_log_order \
       crash_startup_log_order_is_valid
     crash_live_precondition || return 1
@@ -823,10 +793,8 @@ capture_crash_external_failure() {
     runtime_wireguard_state_is true true
   snapshot_predicate "$predicates" runtime_dns_state_matches \
     runtime_dns_state_matches
-  snapshot_predicate "$predicates" authenticated_fips_peer \
-    runtime_fips_peer_connected
-  snapshot_predicate "$predicates" fips_host_tunnel_route_live \
-    capture_fips_host_tunnel_route
+  snapshot_predicate "$predicates" isolated_zero_peer_runtime \
+    runtime_has_no_fips_peers
   snapshot_predicate "$predicates" startup_log_order \
     crash_startup_log_order_is_valid
   capture_underlay_routes \
@@ -925,20 +893,22 @@ prepare_gate() {
     || fail "dedicated Release identity changed before daemon start"
   nvpn set --config "$CONFIG" \
     --network-id "$FIPS_NETWORK_ID" \
-    --participant "$FIPS_PEER_NPUB" \
     --listen-port "$FIPS_CLIENT_LISTEN_PORT" \
     --fips-advertise-public-endpoint false \
     --fips-nostr-discovery-enabled false \
     --lan-discovery-enabled false \
     --fips-webrtc-enabled false \
     --fips-bootstrap-enabled false \
-    --fips-peer-endpoint "${FIPS_PEER_NPUB}=${FIPS_PEER_ENDPOINT}" \
-    --autoconnect true \
+    --autoconnect false \
     --wireguard-exit-config-file "$WG_CONFIG" \
     --wireguard-exit-enabled true \
     --exit-dns-mode automatic
-  privileged_nvpn start --config "$CONFIG" --connect --daemon \
-    >"$RESULT_DIR/daemon-start.txt"
+  if ! privileged_nvpn start --config "$CONFIG" --connect --daemon \
+    >"$RESULT_DIR/daemon-start.txt" 2>"$RESULT_DIR/daemon-start.stderr"
+  then
+    capture_wireguard_readiness_failure
+    return 1
+  fi
   if ! wait_until \
     "the production WireGuard route, DNS, HTTPS, and source IP" \
     wireguard_routes_live
@@ -948,14 +918,14 @@ prepare_gate() {
   fi
   wait_until "the daemon runtime/status WireGuard state" \
     runtime_wireguard_state_is true true
-  if ! wait_until "one exact authenticated FIPS peer session" \
-    runtime_fips_peer_connected
+  if ! wait_until "the isolated zero-peer FIPS runtime" \
+    runtime_has_no_fips_peers
   then
-    capture_fips_peer_readiness_failure
+    capture_wireguard_readiness_failure
     return 1
   fi
-  runtime_fips_peer_connected "$RESULT_DIR/fips-peer-initial.json" \
-    || fail "authenticated FIPS peer disappeared after initial readiness"
+  runtime_has_no_fips_peers "$RESULT_DIR/fips-zero-peer-initial.json" \
+    || fail "isolated zero-peer FIPS runtime changed after initial readiness"
   [[ -s "$STATE_DIR/daemon.log" ]] \
     || fail "the owned daemon did not write its config-scoped log"
   grep -Fq \
@@ -971,9 +941,7 @@ prepare_gate() {
     printf 'wireguard_interface=%s\n' "$(cat "$STATE_DIR/wireguard-interface")"
     printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
     printf 'exit_source_ip=%s\n' "$(source_ip)"
-    printf 'fips_peer_npub=%s\n' "$FIPS_PEER_NPUB"
-    printf 'fips_peer_tunnel_ip=%s\n' "$FIPS_PEER_TUNNEL_IP"
-    printf 'connected_peer_count=1\n'
+    printf 'connected_peer_count=0\n'
   } >"$RESULT_DIR/prepare.txt"
   echo "MACOS_RELEASE_NETWORK_PREPARED"
 }
@@ -1023,83 +991,6 @@ payload_after() {
   awk -F '\t' -v lower="$lower_bound_ms" -v token="$CAPTURED_PROBE_TOKEN" \
     '$1 >= lower && $2 == token { found=1 } END { exit found ? 0 : 1 }' \
     "$STATE_DIR/underlay-payload.tsv"
-}
-
-fips_payload_loop() {
-  local now
-  while true; do
-    now="$(monotonic_ms)"
-    if /sbin/ping -n -c 1 -W 700 "$FIPS_PEER_TUNNEL_IP" \
-      >/dev/null 2>&1
-    then
-      printf '%s\t%s\n' "$now" "$FIPS_PEER_NPUB"
-    fi
-    sleep 0.1
-  done
-}
-
-fips_payload_after() {
-  local lower_bound_ms="$1"
-  awk -F '\t' -v lower="$lower_bound_ms" -v peer="$FIPS_PEER_NPUB" \
-    '$1 >= lower && $2 == peer { found=1 } END { exit found ? 0 : 1 }' \
-    "$STATE_DIR/underlay-fips-payload.tsv"
-}
-
-fips_payload_works() {
-  /sbin/ping -n -c 1 -W 700 "$FIPS_PEER_TUNNEL_IP" \
-    >/dev/null 2>&1
-}
-
-fips_payload_success_count() {
-  awk -F '\t' -v peer="$FIPS_PEER_NPUB" \
-    '$2 == peer { count += 1 } END { print count + 0 }' \
-    "$STATE_DIR/underlay-fips-payload.tsv" 2>/dev/null
-}
-
-fips_route_interface() {
-  route_value "$FIPS_PEER_TUNNEL_IP" interface
-}
-
-fips_route_interface_owns_tunnel_ip() {
-  local interface="$1" tunnel_ip
-  tunnel_ip="$(tr -d '[:space:]' <"$STATE_DIR/original-tunnel-ip")"
-  [[ -n "$tunnel_ip" ]] || return 1
-  /sbin/ifconfig "$interface" 2>/dev/null \
-    | awk -v expected="$tunnel_ip" '
-      $1 == "inet" && $2 == expected { found = 1 }
-      $1 == "inet6" {
-        split($2, address, "%")
-        if (address[1] == expected) found = 1
-      }
-      END { exit found ? 0 : 1 }
-    '
-}
-
-capture_fips_host_tunnel_route() {
-  local fips_iface wireguard_iface
-  fips_iface="$(fips_route_interface)" || return 1
-  wireguard_iface="$(wireguard_interface)" || return 1
-  [[ "$fips_iface" == utun* \
-    && "$fips_iface" != "$wireguard_iface" \
-    && "$fips_iface" != "$PRIMARY_IFACE" \
-    && "$fips_iface" != "$SECONDARY_IFACE" ]] \
-    && fips_route_interface_owns_tunnel_ip "$fips_iface" \
-    || return 1
-  printf '%s\n' "$fips_iface"
-}
-
-fips_host_tunnel_route_live() {
-  local expected_iface actual_iface wireguard_iface
-  [[ -s "$STATE_DIR/fips-route-interface" ]] || return 1
-  expected_iface="$(tr -d '[:space:]' <"$STATE_DIR/fips-route-interface")"
-  actual_iface="$(fips_route_interface)" || return 1
-  wireguard_iface="$(wireguard_interface)" || return 1
-  [[ "$expected_iface" == utun* \
-    && "$actual_iface" == "$expected_iface" \
-    && "$actual_iface" != "$wireguard_iface" \
-    && "$actual_iface" != "$PRIMARY_IFACE" \
-    && "$actual_iface" != "$SECONDARY_IFACE" ]] \
-    && fips_route_interface_owns_tunnel_ip "$actual_iface"
 }
 
 pid_is_underlay_runner() {
@@ -1161,10 +1052,6 @@ stop_owned_payload() {
   stop_owned_loop payload "WireGuard payload" "$1"
 }
 
-stop_owned_fips_payload() {
-  stop_owned_loop fips-payload "private-FIPS payload" "$1"
-}
-
 stop_owned_underlay_runner() {
   local pid ignored
   [[ -f "$STATE_DIR/underlay.pid" ]] || return 0
@@ -1200,14 +1087,12 @@ stop_owned_underlay_runner() {
 
 underlay_recovered() {
   local expected_iface="$1" requested_ms="$2" expected_rebind="$3"
-  local expected_wg_rebind="$4" status_file="$5"
+  local expected_wg_rebind="$4"
   wireguard_endpoint_route_state_valid "$expected_iface" \
     && wireguard_interface >/dev/null \
-    && fips_host_tunnel_route_live \
     && payload_after "$requested_ms" \
-    && fips_payload_after "$requested_ms" \
     && runtime_dns_state_matches \
-    && runtime_fips_peer_connected "$status_file" \
+    && runtime_has_no_fips_peers \
     && [[ "$(rebind_count)" == "$expected_rebind" ]] \
     && [[ "$(wireguard_rebind_count)" == "$expected_wg_rebind" ]] \
     && wireguard_last_rebind_target_is "$expected_iface"
@@ -1216,11 +1101,11 @@ underlay_recovered() {
 wait_for_underlay_recovery() {
   local label="$1" expected_iface="$2" requested_ms="$3"
   local expected_rebind="$4" expected_wg_rebind="$5"
-  local now elapsed status_file="$RESULT_DIR/fips-peer-$label.json"
+  local now elapsed
   while true; do
     if underlay_recovered \
       "$expected_iface" "$requested_ms" "$expected_rebind" \
-      "$expected_wg_rebind" "$status_file"
+      "$expected_wg_rebind"
     then
       now="$(monotonic_ms)"
       elapsed=$((now - requested_ms))
@@ -1233,7 +1118,7 @@ wait_for_underlay_recovery() {
     fi
     now="$(monotonic_ms)"
     if (( now - requested_ms > RECOVERY_DEADLINE_MS )); then
-      fail "$label did not restore WireGuard + authenticated private-FIPS payload, route, FIPS carrier rebind, and fresh WireGuard handshake on $expected_iface in ${RECOVERY_DEADLINE_MS}ms"
+      fail "$label did not restore WireGuard payload, carrier rebind, DNS, and a fresh handshake on $expected_iface in ${RECOVERY_DEADLINE_MS}ms"
       return 1
     fi
     sleep 0.1
@@ -1241,42 +1126,19 @@ wait_for_underlay_recovery() {
 }
 
 run_underlay_gate() {
-  local payload_pid fips_payload_pid baseline wg_baseline first_requested first_elapsed
-  local second_requested second_elapsed fips_before_first fips_after_first
-  local fips_before_second fips_after_second
+  local payload_pid baseline wg_baseline first_requested first_elapsed
+  local second_requested second_elapsed
   baseline="$(tr -d '[:space:]' <"$STATE_DIR/rebind-baseline")"
   wg_baseline="$(tr -d '[:space:]' <"$STATE_DIR/wireguard-rebind-baseline")"
   [[ "$baseline" =~ ^[0-9]+$ ]] || fail "invalid carrier-rebind baseline"
   [[ "$wg_baseline" =~ ^[0-9]+$ ]] || fail "invalid WG-rebind baseline"
   : >"$STATE_DIR/underlay-payload.tsv"
-  : >"$STATE_DIR/underlay-fips-payload.tsv"
   payload_loop >>"$STATE_DIR/underlay-payload.tsv" 2>&1 &
   payload_pid="$!"
   printf '%s\n' "$payload_pid" >"$STATE_DIR/payload.pid"
   process_start_signature "$payload_pid" >"$STATE_DIR/payload.start"
   [[ -s "$STATE_DIR/payload.start" ]] \
     || fail "continuous payload process has no start-time receipt"
-  fips_payload_loop >>"$STATE_DIR/underlay-fips-payload.tsv" 2>&1 &
-  fips_payload_pid="$!"
-  printf '%s\n' "$fips_payload_pid" >"$STATE_DIR/fips-payload.pid"
-  process_start_signature "$fips_payload_pid" >"$STATE_DIR/fips-payload.start"
-  [[ -s "$STATE_DIR/fips-payload.start" ]] \
-    || fail "continuous private-FIPS payload has no start-time receipt"
-  for _ in $(seq 1 20); do
-    [[ "$(fips_payload_success_count)" -gt 0 ]] \
-      && runtime_fips_peer_connected \
-        "$RESULT_DIR/fips-peer-before-underlay.json" \
-      && break
-    sleep 0.1
-  done
-  [[ "$(fips_payload_success_count)" -gt 0 ]] \
-    && runtime_fips_peer_connected \
-      "$RESULT_DIR/fips-peer-before-underlay.json" \
-    || fail "private-FIPS payload/session was not live before the first cut"
-  capture_fips_host_tunnel_route >"$STATE_DIR/fips-route-interface" \
-    || fail "private-FIPS payload is not routed through its distinct host tunnel"
-
-  fips_before_first="$(fips_payload_success_count)"
   first_requested="$(monotonic_ms)"
   sudo -n /usr/sbin/networksetup \
     -setnetworkserviceenabled "$PRIMARY_SERVICE" off
@@ -1285,14 +1147,10 @@ run_underlay_gate() {
       primary-to-secondary "$SECONDARY_IFACE" "$first_requested" \
       "$((baseline + 1))" "$((wg_baseline + 1))"
   )"
-  fips_after_first="$(fips_payload_success_count)"
-  (( fips_after_first > fips_before_first )) \
-    || fail "primary-to-secondary produced no fresh private-FIPS ping"
   dns_query_works || fail "DNS failed after the secondary underlay recovered"
   captured_probe_works && https_works && exit_source_is_expected \
     || fail "exit traffic failed after the secondary underlay recovered"
 
-  fips_before_second="$(fips_payload_success_count)"
   second_requested="$(monotonic_ms)"
   sudo -n /usr/sbin/networksetup \
     -setnetworkserviceenabled "$PRIMARY_SERVICE" on
@@ -1301,16 +1159,11 @@ run_underlay_gate() {
       secondary-to-primary "$PRIMARY_IFACE" "$second_requested" \
       "$((baseline + 2))" "$((wg_baseline + 2))"
   )"
-  fips_after_second="$(fips_payload_success_count)"
-  (( fips_after_second > fips_before_second )) \
-    || fail "secondary-to-primary produced no fresh private-FIPS ping"
   dns_query_works || fail "DNS failed after the primary underlay recovered"
   captured_probe_works && https_works && exit_source_is_expected \
     || fail "exit traffic failed after the primary underlay recovered"
   stop_owned_payload "$$" \
     || fail "owned continuous payload did not stop cleanly"
-  stop_owned_fips_payload "$$" \
-    || fail "owned private-FIPS payload did not stop cleanly"
 
   {
     printf 'primary_to_secondary_ms=%s\n' "$first_elapsed"
@@ -1319,14 +1172,7 @@ run_underlay_gate() {
     printf 'carrier_rebinds=%s->%s\n' "$baseline" "$(rebind_count)"
     printf 'wireguard_rebinds=%s->%s\n' \
       "$wg_baseline" "$(wireguard_rebind_count)"
-    printf 'primary_to_secondary_fips_pings=%s->%s\n' \
-      "$fips_before_first" "$fips_after_first"
-    printf 'secondary_to_primary_fips_pings=%s->%s\n' \
-      "$fips_before_second" "$fips_after_second"
-    printf 'authenticated_fips_peer=%s\n' "$FIPS_PEER_NPUB"
-    printf 'fips_route_interface=%s\n' \
-      "$(tr -d '[:space:]' <"$STATE_DIR/fips-route-interface")"
-    printf 'connected_peer_count=1\n'
+    printf 'connected_peer_count=0\n'
   } >"$RESULT_DIR/underlay.txt"
   echo "MACOS_RELEASE_NETWORK_UNDERLAY_OK"
 }
@@ -1336,7 +1182,6 @@ record_underlay_status_on_exit() {
   local cleanup_failed=0 recorded_pid=""
   trap - EXIT HUP INT TERM
   stop_owned_payload "$$" || cleanup_failed=1
-  stop_owned_fips_payload "$$" || cleanup_failed=1
   restore_saved_service_states || cleanup_failed=1
   wait_until \
     "both original network-service states" saved_service_states_match \
@@ -1412,16 +1257,13 @@ crash_restart_payloads_live() {
   pids+=("$!")
   record_crash_restart_probe exit-source exit_source_is_expected &
   pids+=("$!")
-  record_crash_restart_probe private-fips fips_payload_works &
-  pids+=("$!")
   for pid in "${pids[@]}"; do
     wait "$pid" || true
   done
   local receipt_dir="$RESULT_DIR/crash-restart-probes"
   [[ -s "$receipt_dir/captured-http.pass" \
     && -s "$receipt_dir/public-https.pass" \
-    && -s "$receipt_dir/exit-source.pass" \
-    && -s "$receipt_dir/private-fips.pass" ]]
+    && -s "$receipt_dir/exit-source.pass" ]]
 }
 
 crash_restart_transport_live() {
@@ -1435,7 +1277,7 @@ crash_restart_transport_live() {
     && wireguard_interface >/dev/null \
     && wireguard_endpoint_route_state_valid \
     && secure_dns_owned \
-    && fips_host_tunnel_route_live \
+    && runtime_has_no_fips_peers \
     && crash_restart_payloads_live
 }
 
@@ -1447,7 +1289,7 @@ wait_for_crash_restart_recovery() {
   while true; do
     now="$(monotonic_ms)"
     if ((now - requested_ms > RECOVERY_DEADLINE_MS)); then
-      fail "crash restart did not restore one fresh daemon, tunnel, routes, DNS, authenticated FIPS payload, and WireGuard payload in ${RECOVERY_DEADLINE_MS}ms"
+      fail "crash restart did not restore one fresh daemon, WireGuard routes, DNS, and exit payloads in ${RECOVERY_DEADLINE_MS}ms"
       return 1
     fi
     if crash_restart_transport_live \
@@ -1475,7 +1317,7 @@ run_crash_restart_gate() {
     || fail "SIGKILL gate did not start with exactly one owned daemon"
   if ! wait_for_crash_live_precondition; then
     capture_crash_external_failure
-    fail "SIGKILL gate lacks live WireGuard, DNS, HTTPS, and FIPS state"
+    fail "SIGKILL gate lacks live WireGuard, DNS, and HTTPS state"
   fi
   old_pid="$(owned_daemon_pid)"
   bind_baseline="$(wireguard_bind_receipt_count)"
@@ -1508,18 +1350,6 @@ run_crash_restart_gate() {
   )"
   then
     capture_wireguard_readiness_failure
-    capture_fips_peer_readiness_failure
-    return 1
-  fi
-  # The authenticated private-FIPS payload above is the externally observable
-  # recovery boundary. A freshly restarted daemon can exchange that payload
-  # before its periodic status snapshot publishes connected_peer_count=1, so
-  # require the cache to converge as separate evidence without charging that
-  # publication lag to the four-second dataplane deadline.
-  if ! wait_until "the restarted authenticated FIPS status cache" \
-    runtime_fips_peer_connected
-  then
-    capture_fips_peer_readiness_failure
     return 1
   fi
   assert_single_owned_daemon \
@@ -1545,8 +1375,7 @@ run_crash_restart_gate() {
     printf 'exit_source_ip=%s\n' "$(source_ip)"
     printf 'dns_label=%s\n' "$DNS_LABEL"
     printf 'dns_mode=%s\n' "$DNS_MODE"
-    printf 'authenticated_fips_peer=%s\n' "$FIPS_PEER_NPUB"
-    printf 'connected_peer_count=1\n'
+    printf 'connected_peer_count=0\n'
   } >"$RESULT_DIR/crash-restart.txt"
   echo "MACOS_RELEASE_NETWORK_CRASH_RESTART_OK"
 }
@@ -1682,14 +1511,6 @@ cleanup_gate() {
       stop_owned_payload "$underlay_owner" || cleanup_failed=1
     else
       echo "payload receipt survived without an owned underlay PID" >&2
-      cleanup_failed=1
-    fi
-  fi
-  if [[ -f "$STATE_DIR/fips-payload.pid" ]]; then
-    if [[ "$underlay_owner" =~ ^[1-9][0-9]*$ ]]; then
-      stop_owned_fips_payload "$underlay_owner" || cleanup_failed=1
-    else
-      echo "private-FIPS payload receipt survived without an owned underlay PID" >&2
       cleanup_failed=1
     fi
   fi
