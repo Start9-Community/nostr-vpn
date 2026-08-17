@@ -55,7 +55,7 @@ for label in "${cases[@]}"; do
       "$label" fixture.nvpn.test 10.99.77.1 10.99.77.53
   )"$'\n'
 done
-expected_case_fields=$'automatic-profile|automatic|cloudflare||||fixture.nvpn.test|10.99.77.1|dns-profile\ncloudflare-doh|encrypted|cloudflare||||cloudflare.192-0-2-1.sslip.io|192.0.2.1|doh-cloudflare\nquad9-doh|encrypted|quad9||||quad9.192-0-2-1.sslip.io|192.0.2.1|doh-quad9\ncustom-doh|encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-2-1.sslip.io|192.0.2.1|doh-google\nthrough-exit|through_exit|cloudflare|||10.99.77.53|through-exit.fixture.nvpn.test|10.99.77.1|dns-through\n'
+expected_case_fields=$'automatic-profile|automatic|cloudflare||||fixture.nvpn.test|10.99.77.1|dns-profile\ncloudflare-doh|encrypted|cloudflare||||cloudflare.192-0-43-8.sslip.io|192.0.43.8|doh-cloudflare\nquad9-doh|encrypted|quad9||||quad9.192-0-43-8.sslip.io|192.0.43.8|doh-quad9\ncustom-doh|encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-43-8.sslip.io|192.0.43.8|doh-google\nthrough-exit|through_exit|cloudflare|||10.99.77.53|through-exit.fixture.nvpn.test|10.99.77.1|dns-through\n'
 [[ "$actual_case_fields" == "$expected_case_fields" ]] \
   || fail "production DNS case mapping changed"
 

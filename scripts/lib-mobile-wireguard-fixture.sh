@@ -76,13 +76,13 @@ mobile_wg_dns_case_fields() {
         "$dns_name" "$profile_dns_ip"
       ;;
     cloudflare-doh)
-      printf 'encrypted|cloudflare||||cloudflare.192-0-2-1.sslip.io|192.0.2.1|doh-cloudflare\n'
+      printf 'encrypted|cloudflare||||cloudflare.192-0-43-8.sslip.io|192.0.43.8|doh-cloudflare\n'
       ;;
     quad9-doh)
-      printf 'encrypted|quad9||||quad9.192-0-2-1.sslip.io|192.0.2.1|doh-quad9\n'
+      printf 'encrypted|quad9||||quad9.192-0-43-8.sslip.io|192.0.43.8|doh-quad9\n'
       ;;
     custom-doh)
-      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-2-1.sslip.io|192.0.2.1|doh-google\n'
+      printf 'encrypted|custom|https://dns.google/dns-query|8.8.8.8||custom.192-0-43-8.sslip.io|192.0.43.8|doh-google\n'
       ;;
     through-exit)
       printf 'through_exit|cloudflare|||%s|through-exit.%s|%s|dns-through\n' \
