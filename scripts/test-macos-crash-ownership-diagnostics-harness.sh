@@ -180,29 +180,30 @@ fips_host_tunnel_route_live() { return "$RESTART_STATE_STATUS"; }
 captured_probe_works() { return "$RESTART_STATE_STATUS"; }
 https_works() { return "$RESTART_STATE_STATUS"; }
 exit_source_is_expected() { return "$RESTART_STATE_STATUS"; }
-fips_payload_works() { return "$RESTART_STATE_STATUS"; }
+fips_payload_works() { return "$RESTART_FIPS_STATUS"; }
 mkdir -p "$RESULT_DIR/crash-restart-probes"
 WIREGUARD_INTERFACE_STATUS=0
-crash_restart_state_live 2 101 \
+crash_restart_transport_live 2 101 \
   || fail "complete fresh crash recovery was rejected"
 RESTART_PID=101
-if crash_restart_state_live 2 101; then
+if crash_restart_transport_live 2 101; then
   fail "crash recovery accepted the killed daemon PID"
 fi
 RESTART_PID=202
 RESTART_BINDS=3
-if crash_restart_state_live 2 101; then
+if crash_restart_transport_live 2 101; then
   fail "crash recovery accepted more than one fresh WireGuard bind"
 fi
 RESTART_BINDS=2
 RESTART_STATE_STATUS=1
-if crash_restart_state_live 2 101; then
+if crash_restart_transport_live 2 101; then
   fail "crash recovery accepted missing tunnel/DNS/FIPS/WG state"
 fi
 RESTART_STATE_STATUS=0
+rm -f "$RESULT_DIR/crash-restart-probes/private-fips.pass"
 RESTART_FIPS_STATUS=1
-if crash_restart_state_live 2 101; then
-  fail "crash recovery accepted an unauthenticated FIPS peer"
+if crash_restart_transport_live 2 101; then
+  fail "crash recovery accepted missing authenticated FIPS payload"
 fi
 RESTART_FIPS_STATUS=0
 

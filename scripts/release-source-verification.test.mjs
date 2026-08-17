@@ -193,11 +193,30 @@ function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
-const fipsPackages = {
-  'fips-core': '0.4.55',
-  'fips-endpoint': '0.4.55',
-  'fips-identity': '0.3.2',
+function committedRegistryPackageVersion(name) {
+  const lock = trackedFixtureInput(process.cwd(), 'Cargo.lock').toString('utf8')
+  const versions = lock
+    .split(/\n(?=\[\[package\]\]\n)/)
+    .filter((block) =>
+      block.includes(`name = "${name}"`) &&
+      block.includes('source = "registry+'),
+    )
+    .map((block) => block.match(/^version = "([^"]+)"$/m)?.[1])
+    .filter(Boolean)
+  assert.equal(
+    versions.length,
+    1,
+    `committed Cargo.lock must contain exactly one registry ${name} package`,
+  )
+  return versions[0]
 }
+
+const fipsPackages = Object.fromEntries(
+  ['fips-core', 'fips-endpoint', 'fips-identity'].map((name) => [
+    name,
+    committedRegistryPackageVersion(name),
+  ]),
+)
 const fipsSpecs = Object.entries(fipsPackages).map(
   ([name, version]) => `${name}=${version}`,
 )

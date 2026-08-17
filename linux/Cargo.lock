@@ -1878,9 +1878,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fips-core"
-version = "0.4.56"
+version = "0.4.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95762d6e4787aae6fee1df6e7d6e3cb2c0447a87f779c0acb99c09b3a2113458"
+checksum = "6fb9347eab417dbd9477a457d7d86c512f300e82be56e07a22340b72524f886e"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -1922,9 +1922,9 @@ dependencies = [
 
 [[package]]
 name = "fips-endpoint"
-version = "0.4.56"
+version = "0.4.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840d21774345687a7cf4efb76b60ed2ef2a90e619ff243b802b1842bd2a81d0e"
+checksum = "9b1939952e9729f217a2f3748071ccdabcc7382d7c2bfd114a9388ffee666e9b"
 dependencies = [
  "fips-core",
 ]
@@ -2846,7 +2846,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -4611,7 +4611,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4648,7 +4648,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]

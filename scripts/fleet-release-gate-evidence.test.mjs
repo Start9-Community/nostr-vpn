@@ -44,6 +44,50 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function gitObject(root, revision) {
+  const result = spawnSync('git', ['rev-parse', revision], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  assert.equal(result.status, 0, result.stderr || `could not resolve ${revision}`)
+  return result.stdout.trim()
+}
+
+function sourceHistoryFixture(root) {
+  const git = (...args) => {
+    const result = spawnSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    assert.equal(result.status, 0, result.stderr || `git ${args.join(' ')} failed`)
+  }
+  git('init', '--quiet')
+  writeFileSync(join(root, 'README.md'), 'receipt source\n')
+  git('add', 'README.md')
+  git(
+    '-c', 'user.name=Release Test',
+    '-c', 'user.email=release-test@example.invalid',
+    'commit', '--quiet', '-m', 'receipt source',
+  )
+  const receiptAppGitSha = gitObject(root, 'HEAD')
+  const receiptAppGitTree = gitObject(root, 'HEAD^{tree}')
+  writeFileSync(join(root, 'README.md'), 'candidate source\n')
+  git('add', 'README.md')
+  git(
+    '-c', 'user.name=Release Test',
+    '-c', 'user.email=release-test@example.invalid',
+    'commit', '--quiet', '-m', 'candidate source',
+  )
+  return {
+    receiptAppGitSha,
+    receiptAppGitTree,
+    candidateAppGitSha: gitObject(root, 'HEAD'),
+    candidateAppGitTree: gitObject(root, 'HEAD^{tree}'),
+  }
+}
+
 function json(path, value) {
   writeFileSync(path, JSON.stringify(value))
 }
@@ -171,23 +215,22 @@ function withFixture(callback) {
 }
 
 function collectorFixture(root, overrides = {}) {
+  const history = sourceHistoryFixture(root)
   const env = {
     ...process.env,
     NVPN_FLEET_GATE_FIXTURE_ROOT: root,
     NVPN_FLEET_GATE_TARGET_STATUS: overrides.targetStatus ?? 'missed',
     NVPN_FLEET_GATE_DRAFT: String(overrides.draft ?? true),
     NVPN_FLEET_GATE_APP_GIT_SHA:
-      overrides.receiptAppGitSha ?? '11965154edc8b1e2777b813640aefeeef17799b2',
+      overrides.receiptAppGitSha ?? history.receiptAppGitSha,
     NVPN_FLEET_GATE_APP_GIT_TREE:
-      overrides.receiptAppGitTree ?? '3addae26d8a96f8e248823d6f5840d9a3958016f',
+      overrides.receiptAppGitTree ?? history.receiptAppGitTree,
     NVPN_FLEET_GATE_CANDIDATE_APP_GIT_SHA:
-      overrides.candidateAppGitSha
-        ?? 'a14621094046920583c8cc995996e601b4573e15',
+      overrides.candidateAppGitSha ?? history.candidateAppGitSha,
     NVPN_FLEET_GATE_CANDIDATE_APP_GIT_TREE:
-      overrides.candidateAppGitTree
-        ?? 'e68340fce16e3bf81f997690148bfc51494003b8',
+      overrides.candidateAppGitTree ?? history.candidateAppGitTree,
     NVPN_FLEET_GATE_CANDIDATE_ROOT:
-      overrides.candidateRoot ?? process.cwd(),
+      overrides.candidateRoot ?? root,
   }
   delete env.NODE_TEST_CONTEXT
   const generated = spawnSync(

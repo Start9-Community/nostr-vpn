@@ -251,7 +251,7 @@ require_tokens "$GUEST" "real crash/restart cleanup evidence" \
   'runtime_wireguard_state_is true false' \
   'privileged_nvpn start --config "$CONFIG" --connect --daemon' \
   'wait_for_crash_restart_recovery' \
-  'crash_restart_state_live' \
+  'crash_restart_transport_live' \
   'fips_payload_works' \
   'restart did not converge to exactly one owned daemon' \
   'restart did not produce exactly one fresh WireGuard bind receipt' \
