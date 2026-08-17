@@ -282,15 +282,19 @@ for name in (
         if required not in texts[name]:
             raise SystemExit(f"{name} lacks exact imported-app cleanup: {required}")
 
-if "trap cleanup EXIT" not in texts["e2e-macos-manual-join-ui.sh"]:
-    raise SystemExit("manual-join gate does not restore acquired app ownership")
-for required in (
-    "lib-macos-release-app-ownership.sh",
-    "macos_release_app_acquire",
-    "macos_release_app_restore",
+for name in (
+    "e2e-macos-manual-join-ui.sh",
+    "e2e-macos-service-toggle.sh",
 ):
-    if required not in texts["e2e-macos-manual-join-ui.sh"]:
-        raise SystemExit(f"manual-join gate lacks shared app ownership: {required}")
+    if "trap cleanup EXIT" not in texts[name]:
+        raise SystemExit(f"{name} does not restore acquired app ownership")
+    for required in (
+        "lib-macos-release-app-ownership.sh",
+        "macos_release_app_acquire",
+        "macos_release_app_restore",
+    ):
+        if required not in texts[name]:
+            raise SystemExit(f"{name} lacks shared app ownership: {required}")
 
 manual_join = texts["e2e-macos-manual-join-ui.sh"]
 manual_join_driver = texts["desktop-manual-join-ax.swift"]
