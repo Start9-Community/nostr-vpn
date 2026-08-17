@@ -943,6 +943,8 @@ do
     fail "macOS guest network path can build/sign in the VM: $forbidden"
   fi
 done
+[[ "$(grep -Fc 'connected_peer_count") == "0"' "$NETWORK_EVIDENCE")" == 2 ]] \
+  || fail "macOS release evidence does not preserve the isolated zero-peer runtime contract"
 
 MACOS_DEFINITIONS="$COMBINED_DIR/macos-network-definitions.sh"
 sed '/^validate_inputs$/,$d' "$MACOS_NETWORK_GUEST" >"$MACOS_DEFINITIONS"

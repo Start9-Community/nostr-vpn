@@ -1535,7 +1535,7 @@ def build_desktop(args: argparse.Namespace) -> None:
         require(
             0 <= first <= 4_000
             and 0 <= second <= 4_000
-            and underlay.get("connected_peer_count") == "1",
+            and underlay.get("connected_peer_count") == "0",
             "macOS dual-underlay receipt is incomplete",
         )
         crash_path = root / "crash-restart.txt"
@@ -1546,7 +1546,7 @@ def build_desktop(args: argparse.Namespace) -> None:
             and crash.get("sigkill_secure_dns_ownership_seen") == "true"
             and crash.get("old_pid") != crash.get("new_pid")
             and 0 <= int(crash.get("restart_payload_ms", "4001")) <= 4_000
-            and crash.get("connected_peer_count") == "1",
+            and crash.get("connected_peer_count") == "0",
             "macOS SIGKILL/restart receipt is incomplete",
         )
         direct_path = root / "direct.txt"
