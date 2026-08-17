@@ -350,6 +350,28 @@ fn linux_service_unit_parser_extracts_service_executable() {
 }
 
 #[test]
+fn linux_service_unit_parser_extracts_exact_config_identity() {
+    let config = Path::new("/home/example/Nostr VPN/config.toml");
+    let unit = crate::linux_service_unit_content(
+        Path::new("/usr/local/bin/nvpn"),
+        config,
+        "nvpn",
+        20,
+        Path::new("/home/example/.local/state/nvpn/daemon.log"),
+    );
+
+    assert_eq!(
+        linux_service_config_path_from_unit_contents(&unit).as_deref(),
+        config.to_str()
+    );
+    assert!(linux_service_unit_matches_config(&unit, config));
+    assert!(!linux_service_unit_matches_config(
+        &unit,
+        Path::new("/home/other/.config/nvpn/config.toml")
+    ));
+}
+
+#[test]
 fn windows_service_query_parser_extracts_running_state() {
     let query = "SERVICE_NAME: NvpnService\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 4  RUNNING\n                                (STOPPABLE, NOT_PAUSABLE, ACCEPTS_SHUTDOWN)\n        WIN32_EXIT_CODE    : 0  (0x0)\n        SERVICE_EXIT_CODE  : 0  (0x0)\n        CHECKPOINT         : 0x0\n        WAIT_HINT          : 0x0\n        PID                : 1234\n        FLAGS              :\n";
     let (running, pid) = windows_service_status_from_query_output(query);

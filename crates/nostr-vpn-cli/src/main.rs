@@ -193,8 +193,9 @@ pub(crate) use crate::service_management::{
 };
 #[cfg(test)]
 pub(crate) use crate::service_management::{
-    linux_service_binary_path, linux_service_executable_path_from_unit_contents,
-    linux_service_status_from_show_output, linux_service_unit_content,
+    linux_service_binary_path, linux_service_config_path_from_unit_contents,
+    linux_service_executable_path_from_unit_contents, linux_service_status_from_show_output,
+    linux_service_unit_content, linux_service_unit_matches_config,
 };
 #[cfg(any(target_os = "macos", test))]
 pub(crate) use crate::service_management::{xml_escape, xml_unescape};

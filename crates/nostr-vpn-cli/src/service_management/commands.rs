@@ -366,7 +366,7 @@ pub(crate) fn query_service_status_with_binary_version(
 
     #[cfg(target_os = "linux")]
     {
-        linux_query_service_status(include_binary_version)
+        linux_query_service_status(_config_path, include_binary_version)
     }
 
     #[cfg(target_os = "windows")]

@@ -26,7 +26,14 @@ GUEST_SRC_ROOT="${NVPN_MACOS_GUEST_SRC_ROOT:-src}"
 GUEST_REPO="$GUEST_SRC_ROOT/nostr-vpn"
 REMOTE_SCRIPT="./scripts/macos-release-exit-dns-ui-remote.sh"
 RESULT_DIR="${NVPN_DESKTOP_DNS_UI_ARTIFACT_DIR:-$ROOT/artifacts/desktop-dns-ui/macos}"
-IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$RESULT_DIR/import}"
+if macos_vm_imported_release_bool \
+  "${NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY:-0}"
+then
+  DEFAULT_IMPORT_RESULT="$ROOT/artifacts/mobile-release-join"
+else
+  DEFAULT_IMPORT_RESULT="$RESULT_DIR/import"
+fi
+IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$DEFAULT_IMPORT_RESULT}"
 PRIVATE_DIR="$RESULT_DIR/.private-$$"
 HOST_DRIVER="$PRIVATE_DIR/macos-exit-dns-ax"
 HOST_DRIVER_RECEIPT="$PRIVATE_DIR/driver-receipt.json"

@@ -102,10 +102,18 @@ fn linux_uninstall_service() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_query_service_status(include_binary_version: bool) -> Result<ServiceStatusView> {
+fn linux_query_service_status(
+    config_path: &Path,
+    include_binary_version: bool,
+) -> Result<ServiceStatusView> {
     let unit_path = linux_service_unit_path();
-    let installed = unit_path.exists();
-    let service_binary = linux_service_executable_path(&unit_path);
+    let unit = fs::read_to_string(&unit_path).ok();
+    let installed = unit
+        .as_deref()
+        .is_some_and(|unit| linux_service_unit_matches_config(unit, config_path));
+    let service_binary = installed
+        .then(|| linux_service_executable_path(&unit_path))
+        .flatten();
     let binary_version = if include_binary_version {
         service_binary
             .as_ref()
@@ -128,6 +136,21 @@ fn linux_query_service_status(include_binary_version: bool) -> Result<ServiceSta
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             binary_version,
+        });
+    }
+
+    if !installed {
+        return Ok(ServiceStatusView {
+            supported: true,
+            installed: false,
+            disabled: false,
+            loaded: false,
+            running: false,
+            pid: None,
+            label: LINUX_SERVICE_UNIT_NAME.to_string(),
+            plist_path: unit_path.display().to_string(),
+            binary_path: String::new(),
+            binary_version: String::new(),
         });
     }
 
@@ -198,6 +221,43 @@ pub(crate) fn linux_service_executable_path_from_unit_contents(unit: &str) -> Op
         let executable = command.split_whitespace().next()?.trim();
         if !executable.is_empty() {
             return Some(executable.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_service_config_path_from_unit_contents(unit: &str) -> Option<String> {
+    let command = unit
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("ExecStart="))?;
+    let value = command.split_once(" --config ")?.1.trim_start();
+    systemd_first_argument(value)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_service_unit_matches_config(unit: &str, config_path: &Path) -> bool {
+    linux_service_config_path_from_unit_contents(unit)
+        .is_some_and(|installed| installed == config_path.display().to_string())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn systemd_first_argument(value: &str) -> Option<String> {
+    let Some(quoted) = value.strip_prefix('"') else {
+        return value.split_whitespace().next().map(ToOwned::to_owned);
+    };
+    let mut parsed = String::new();
+    let mut escaped = false;
+    for character in quoted.chars() {
+        if escaped {
+            parsed.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return Some(parsed);
+        } else {
+            parsed.push(character);
         }
     }
     None

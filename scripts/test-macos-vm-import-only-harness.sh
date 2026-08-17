@@ -342,8 +342,17 @@ for required in (
     if required not in release_gate:
         raise SystemExit(f"release gate does not wire imported macOS artifacts: {required}")
 
-if 'IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$RESULT_DIR/import}"' not in exit_dns:
-    raise SystemExit("macOS Exit DNS UI gate cannot reuse the prepared exact app")
+for required in (
+    '"${NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY:-0}"',
+    'DEFAULT_IMPORT_RESULT="$ROOT/artifacts/mobile-release-join"',
+    'IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$DEFAULT_IMPORT_RESULT}"',
+):
+    if required not in exit_dns:
+        raise SystemExit(
+            f"macOS Exit DNS UI gate cannot reuse the prepared exact app: {required}"
+        )
+if 'IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$RESULT_DIR/import}"' in exit_dns:
+    raise SystemExit("macOS Exit DNS UI gate redirects reuse to an empty lane cache")
 if "NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY=0" in exit_dns:
     raise SystemExit("macOS Exit DNS UI gate forces a duplicate signed app build")
 

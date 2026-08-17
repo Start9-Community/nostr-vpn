@@ -25,6 +25,8 @@ host, remote, driver, receipt = [
 ]
 for required in (
     "macos_vm_prepare_or_verify_imported_release",
+    'NVPN_MACOS_IMPORTED_RELEASE_ARTIFACT_READY:-0',
+    '$ROOT/artifacts/mobile-release-join',
     "NVPN_EXPECTED_MACOS_IMPORT_VERIFICATION_SHA256",
     'shasum -a 256 "$IMPORT_VERIFICATION"',
     'receipt.get("appGitSha", "")',
@@ -38,6 +40,11 @@ for required in (
 ):
     if required not in host:
         raise SystemExit(f"macOS DNS host orchestrator lacks {required}")
+if 'IMPORT_RESULT="${NVPN_RELEASE_JOIN_RESULT_DIR:-$RESULT_DIR/import}"' in host:
+    raise SystemExit(
+        "macOS DNS host orchestrator still redirects prepared artifact reuse "
+        "to its empty per-lane import directory"
+    )
 for prohibited in ("ssh macos-build", "ssh xcodebuild", "NVPN_APP_DATA_DIR="):
     if prohibited in host:
         raise SystemExit(f"macOS DNS host orchestrator contains {prohibited}")
