@@ -1,5 +1,13 @@
 import { spawnSync } from 'node:child_process'
-import { lstatSync, readFileSync, realpathSync } from 'node:fs'
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -44,6 +52,47 @@ function captureRequired(command, args, { cwd, env, label }) {
     throw new Error(`${label} produced no output.`)
   }
   return output
+}
+
+function runRequired(command, args, { cwd, env, label }) {
+  const result = spawnSync(command, args, {
+    cwd,
+    env,
+    encoding: 'utf8',
+    stdio: 'pipe',
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  if (result.status !== 0) {
+    const stderr = String(result.stderr ?? '').trim()
+    throw new Error(
+      stderr ||
+        result.error?.message ||
+        `${label} failed with status ${result.status ?? 'unknown'}.`,
+    )
+  }
+}
+
+export function withExactGitArchive({ root, commit, label, validate }) {
+  const exactRoot = realpathSync(root)
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'nvpn-exact-source-'))
+  const archive = join(temporaryRoot, 'candidate.tar')
+  const archiveRoot = join(temporaryRoot, 'candidate')
+  mkdirSync(archiveRoot)
+  try {
+    runRequired(
+      'git',
+      ['archive', '--format=tar', `--output=${archive}`, commit],
+      { cwd: exactRoot, env: process.env, label: `${label} archive` },
+    )
+    runRequired(
+      'tar',
+      ['-xf', archive, '-C', archiveRoot],
+      { cwd: exactRoot, env: process.env, label: `${label} extraction` },
+    )
+    return validate(realpathSync(archiveRoot))
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true })
+  }
 }
 
 function requireExactFields(receipt, expected, label) {
@@ -301,10 +350,15 @@ export function createWindowsCratesIoSourceReceiptForCandidate({
     expectedCommit: expectedFipsGitSha,
     expectedTree: expectedFipsGitTree,
   })
-  const exactPackages = resolveWindowsCratesIoFipsPackages({
-    exactCandidateRoot,
-    expectedFipsGitSha,
-    expectedFipsVersion,
+  const exactPackages = withExactGitArchive({
+    root: exactCandidateRoot,
+    commit: expectedAppGitSha,
+    label: 'Windows crates.io provenance candidate',
+    validate: (archiveRoot) => resolveWindowsCratesIoFipsPackages({
+      exactCandidateRoot: archiveRoot,
+      expectedFipsGitSha,
+      expectedFipsVersion,
+    }),
   })
   exactCleanGitCheckout({
     root: exactCandidateRoot,

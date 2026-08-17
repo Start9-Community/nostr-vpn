@@ -19,6 +19,7 @@ import {
   createWindowsCratesIoSourceReceipt,
   exactFipsPublicationCandidate,
   linuxPublicationVerificationPlan,
+  withExactGitArchive,
   validateWindowsCratesIoReceipts,
   validateWindowsPublicationFipsReceipts,
 } from './release-source-verification.mjs'
@@ -204,6 +205,43 @@ function capture(command, args, cwd) {
   )
   return result.stdout.trim()
 }
+
+test('exact Git archive validation ignores a later dirty Cargo.lock', (context) => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-exact-git-archive-'))
+  context.after(() => rmSync(root, { recursive: true, force: true }))
+  const lock = join(root, 'Cargo.lock')
+  writeFileSync(lock, 'sealed registry lock\n')
+  capture('git', ['init', '--quiet'], root)
+  capture('git', ['add', 'Cargo.lock'], root)
+  capture(
+    'git',
+    [
+      '-c',
+      'user.name=Release Test',
+      '-c',
+      'user.email=release-test@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'sealed source',
+    ],
+    root,
+  )
+  const commit = capture('git', ['rev-parse', 'HEAD'], root)
+  writeFileSync(lock, 'temporary local path lock\n')
+
+  assert.equal(
+    withExactGitArchive({
+      root,
+      commit,
+      label: 'Windows source fixture',
+      validate: (archiveRoot) =>
+        readFileSync(join(archiveRoot, 'Cargo.lock'), 'utf8'),
+    }),
+    'sealed registry lock\n',
+  )
+  assert.equal(readFileSync(lock, 'utf8'), 'temporary local path lock\n')
+})
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
