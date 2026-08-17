@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-macos-owned-test-app.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-release-app-ownership.sh"
 ARTIFACT_DIR="${ARTIFACT_ROOT:-$ROOT/artifacts/macos-manual-join-ui}"
 E2E_ROOT="$ARTIFACT_DIR/app-data"
 ADMIN_DATA_DIR="$E2E_ROOT/admin"
@@ -18,6 +20,7 @@ DRIVER="${NVPN_DESKTOP_MANUAL_JOIN_DRIVER:-}"
 VM_IMPORT_ONLY="${NVPN_MACOS_VM_IMPORT_ONLY:-0}"
 app_pid=""
 APP_EXE=""
+release_app_acquired=0
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "macOS manual-join UI e2e requires macOS." >&2
@@ -54,7 +57,16 @@ stop_app() {
       ;;
   esac
 }
-trap stop_app EXIT
+cleanup() {
+  local status="$?"
+  trap - EXIT
+  stop_app || status=1
+  if [[ "$release_app_acquired" -eq 1 ]]; then
+    macos_release_app_restore || status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -89,6 +101,16 @@ if [[ -z "$NVPN" ]]; then
   echo "macOS release app has no bundled nvpn executable: $APP_PATH" >&2
   exit 1
 fi
+case "$VM_IMPORT_ONLY" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    MACOS_RELEASE_APP_STATE_DIR="$(dirname "$(dirname "$APP_PATH")")/app-ownership"
+    MACOS_RELEASE_APP_INSTALLED_EXE="/Applications/Nostr VPN.app/Contents/MacOS/Nostr VPN"
+    MACOS_RELEASE_APP_GATE_EXE="$APP_EXE"
+    MACOS_RELEASE_APP_PROCESS_NAME="Nostr VPN"
+    macos_release_app_acquire
+    release_app_acquired=1
+    ;;
+esac
 existing_app_pids="$(macos_exact_executable_pids "$APP_EXE")"
 if [[ -n "$existing_app_pids" ]]; then
   case "$VM_IMPORT_ONLY" in

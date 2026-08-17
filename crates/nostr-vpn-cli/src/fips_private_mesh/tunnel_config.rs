@@ -95,6 +95,7 @@ fn paid_route_admissions_for_egress(
         .collect()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn local_exit_outbound_interface(
     seller_egress: Option<&PaidExitSellerEgress>,
     tunnel_iface: &str,

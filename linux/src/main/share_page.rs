@@ -187,14 +187,11 @@ fn append_join_network_card(
     )]);
     {
         let app = app.clone();
+        let admin = admin.clone();
+        let mesh = mesh.clone();
         add_manual.connect_clicked(move |_| {
-            let (admin_npub, mesh_network_id) = {
-                let model = app.borrow();
-                (
-                    model.drafts.manual_admin_npub.trim().to_string(),
-                    normalize_network_id_input(&model.drafts.manual_mesh_id),
-                )
-            };
+            let admin_npub = admin.text().trim().to_string();
+            let mesh_network_id = normalize_network_id_input(mesh.text().as_str());
             if !is_valid_device_id(&admin_npub) || mesh_network_id.is_empty() {
                 set_notice(&app, "Enter a valid admin Device ID and Network ID".to_string());
                 return;

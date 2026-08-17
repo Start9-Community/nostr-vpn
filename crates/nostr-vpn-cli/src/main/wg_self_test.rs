@@ -757,6 +757,7 @@ fn runtime_supported_advertised_routes(routes: Vec<String>) -> Vec<String> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn runtime_local_exit_forwarding_routes(app: &AppConfig) -> Vec<String> {
     let mut routes = runtime_effective_advertised_routes(app);
     if app.paid_exit.enabled && app.paid_exit_seller_egress().is_ok() {
