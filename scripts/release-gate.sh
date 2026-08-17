@@ -160,6 +160,9 @@ install_release_cargo_wrapper() {
   release_cargo_wrapper_dir="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-release-gate-cargo.XXXXXX")"
   {
     printf '#!/usr/bin/env bash\n'
+    printf 'if [[ -z "${NVPN_FIPS_REPO_PATH:-}" ]]; then\n'
+    printf '  exec %q "$@"\n' "$real_cargo"
+    printf 'fi\n'
     printf 'exec %q' "$real_cargo"
     printf ' %q' "${release_cargo_config_args[@]}"
     printf ' "$@"\n'

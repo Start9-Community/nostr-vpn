@@ -258,6 +258,34 @@ test('Windows final provenance resolves packages from the sealed commit', () => 
   )
 })
 
+test('Windows crates.io provenance bypasses the release-gate path patch', () => {
+  const verifier = readFileSync(
+    join(process.cwd(), 'scripts', 'release-source-verification.mjs'),
+    'utf8',
+  )
+  const resolver = verifier
+    .split('function resolveWindowsCratesIoFipsPackages({')[1]
+    .split('\nfunction resolveWindowsCratesIoFipsPackagesFromCommit')[0]
+  assert.match(
+    resolver,
+    /NVPN_FIPS_REPO_PATH:\s*''/,
+    'the crates.io resolver must explicitly disable local FIPS',
+  )
+
+  const gate = readFileSync(
+    join(process.cwd(), 'scripts', 'release-gate.sh'),
+    'utf8',
+  )
+  const wrapper = gate
+    .split('install_release_cargo_wrapper() {')[1]
+    .split('\n}\n\ntoml_string()')[0]
+  assert.match(
+    wrapper,
+    /NVPN_FIPS_REPO_PATH.*exec.*real_cargo/s,
+    'the gate Cargo wrapper must honor the resolver\'s crates.io mode',
+  )
+})
+
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
