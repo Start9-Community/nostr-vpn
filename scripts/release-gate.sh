@@ -402,7 +402,7 @@ run_rust_validation_lane() {
   # and measure it once after joining that build below.
   release_cargo test "${release_cargo_lock_args[@]}" --workspace -- \
     --test-threads=1 \
-    --skip websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin \
+    --skip websocket_seed_router_routes_new_recipient_without_preconverged_roster_peer \
     --skip websocket_seed_router_retries_durable_join_receipt_after_first_route_failure \
     --skip websocket_seed_router_delivers_durable_join_receipt_after_tunnel_restart \
     --skip desktop_mobile_manual_join_desktop_admin_to_mobile_joiner \
@@ -2013,7 +2013,7 @@ run_mobile_qr_join_latency_gate() {
   # interrupt/restart a tunnel. Run them together only after build contention
   # has ended so their delivery and durable-retry measurements remain useful.
   release_cargo_test_filter nostr-vpn-app-core \
-    websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin
+    websocket_seed_router_routes_new_recipient_without_preconverged_roster_peer
   release_cargo_test_filter nostr-vpn-app-core \
     websocket_seed_router_retries_durable_join_receipt_after_first_route_failure
   release_cargo_test_filter nostr-vpn-app-core \

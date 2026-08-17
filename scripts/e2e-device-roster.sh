@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-cargo test -p nostr-vpn-app-core websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin
+cargo test -p nostr-vpn-app-core websocket_seed_router_routes_new_recipient_without_preconverged_roster_peer
 
 case "$(uname -s)" in
   Darwin)

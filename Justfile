@@ -274,7 +274,7 @@ e2e-fips-routed-udp:
     ./scripts/e2e-fips-routed-udp-docker.sh
 
 e2e-join-request:
-    cargo test -p nostr-vpn-app-core websocket_seed_router_delivers_join_roster_to_guest_without_preconfigured_admin
+    cargo test -p nostr-vpn-app-core websocket_seed_router_routes_new_recipient_without_preconverged_roster_peer
 
 e2e-roster-admin:
     ./scripts/e2e-roster-admin-docker.sh
