@@ -22,6 +22,11 @@ server_ip="${NVPN_MOBILE_WG_TUNNEL_CIDR%/*}"
 through_dns_ip="$NVPN_MOBILE_WG_THROUGH_DNS_IP"
 client_public_key="$(tr -d '\r\n' <"$NVPN_MOBILE_WG_CLIENT_PUBLIC_KEY_FILE")"
 
+# Docker Desktop's external veth path can leave forwarded transport checksums
+# for a virtual NIC to finish. WireGuard encrypts before that virtual offload
+# boundary, so make the Linux stack materialize checksums first.
+ethtool -K eth0 rx off tx off tso off gso off gro off
+
 ip link add wg0 type wireguard
 ip address add "$NVPN_MOBILE_WG_TUNNEL_CIDR" dev wg0
 ip address add "$through_dns_ip/32" dev wg0

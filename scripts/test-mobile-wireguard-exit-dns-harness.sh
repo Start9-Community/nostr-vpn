@@ -29,6 +29,12 @@ grep -Fq \
   'iptables -t mangle -A POSTROUTING -o wg0 -j CHECKSUM --checksum-fill' \
   "$FIXTURE_SERVER" \
   || fail "Docker fixture no longer finalizes forwarded WireGuard checksums"
+grep -Fq 'ethtool -K eth0 rx off tx off tso off gso off gro off' \
+  "$FIXTURE_SERVER" \
+  || fail "Docker fixture no longer disables unsafe external-veth offload"
+grep -Eq '^[[:space:]]+ethtool \\' \
+  "$ROOT/Dockerfile.mobile-wireguard-exit-e2e" \
+  || fail "Docker fixture image no longer provides ethtool"
 
 # Exercise the shared production fixture contract directly. The physical gate
 # remains responsible for proving the device packet paths; this harness only
