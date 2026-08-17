@@ -190,6 +190,7 @@ wait_for_fixture() {
     fi
     sleep 0.1
   done
+  import -window root "$ARTIFACT_DIR/$label-failure.png" >/dev/null 2>&1 || true
   "$FIXTURE" "$command" "${fixture_args[@]}"
   echo "Linux UI did not persist the $label manual-join action within ${TIMEOUT_SECS}s." >&2
   return 1
