@@ -152,16 +152,6 @@ def invoke(name):
         check=True,
     )
     try:
-        if try_accessible_action(name):
-            time.sleep(0.25)
-            return
-    except Exception as action_error:
-        print(
-            f"AT-SPI Action activation unavailable for {name}: "
-            f"{action_error}",
-            file=sys.stderr,
-        )
-    try:
         if try_component_focus(name):
             subprocess.run(
                 ["xdotool", "key", "--clearmodifiers", "space"],
@@ -188,9 +178,20 @@ def invoke(name):
         time.sleep(0.25)
         return
     except Exception as keyboard_error:
+        print(
+            f"AT-SPI keyboard activation unavailable for {name}: "
+            f"{keyboard_error}",
+            file=sys.stderr,
+        )
+    try:
+        if try_accessible_action(name):
+            time.sleep(0.25)
+            return
+    except Exception as action_error:
         raise RuntimeError(
-            f"AT-SPI keyboard activation failed for {name}: {keyboard_error}"
-        ) from keyboard_error
+            f"AT-SPI activation failed for {name}: {action_error}"
+        ) from action_error
+    raise RuntimeError(f"AT-SPI exposed no activation path for {name}")
 
 
 def set_text(name, value):
