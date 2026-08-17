@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Run the native Windows WG-exit tests on an SSH-reachable disposable VM.
 #
-# With the configured remote Linux fixture this creates a one-use WireGuard
-# exit, DNS resolver, and NAT gateway without provider credentials. An external
-# profile remains supported through NVPN_WINDOWS_WG_EXIT_CONFIG_FILE.
+# By default this creates a one-use local Docker WireGuard exit, DNS resolver,
+# and NAT gateway without provider credentials. A remote fixture or external
+# profile remains supported when explicitly configured.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -258,13 +258,21 @@ if (Test-Path -LiteralPath $(ps_quote "$REMOTE_DIRECT_STATE")) { exit 1 }" \
 trap cleanup EXIT INT TERM
 
 prepare_ephemeral_fixture() {
-  [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" && -n "$FIXTURE_HOST" ]] \
-    || return 1
-  [[ "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" == "native" ]] || {
+  [[ -n "$FIXTURE_HOST" ]] || return 1
+  if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    && "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" != native ]]
+  then
     echo "Windows provider-independent exit requires the native remote fixture" >&2
     return 2
-  }
-  for command in wg python3 ssh scp; do
+  fi
+  local commands=(wg python3)
+  if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" ]]; then
+    commands+=(ssh scp)
+  else
+    commands+=(curl docker)
+  fi
+  local command
+  for command in "${commands[@]}"; do
     command -v "$command" >/dev/null 2>&1 || {
       echo "Windows provider-independent exit fixture requires $command" >&2
       return 2
@@ -314,9 +322,13 @@ PY
   mobile_wg_fixture_initialize "$ROOT" "$FIXTURE_DIR"
   FIXTURE_INITIALIZED=1
   mobile_wg_fixture_assert_available "$CONTAINER" "$HOST_PORT"
-  EXPECTED_EXIT_SOURCE_IP="$(
-    mobile_wg_remote_exec curl -4fsS --max-time 8 "$SOURCE_IP_URL"
-  )"
+  if [[ "$MOBILE_WG_FIXTURE_REMOTE" -eq 1 ]]; then
+    EXPECTED_EXIT_SOURCE_IP="$(
+      mobile_wg_remote_exec curl -4fsS --max-time 8 "$SOURCE_IP_URL"
+    )"
+  else
+    EXPECTED_EXIT_SOURCE_IP="$(curl -4fsS --max-time 8 "$SOURCE_IP_URL")"
+  fi
   python3 - "$EXPECTED_EXIT_SOURCE_IP" <<'PY'
 import ipaddress
 import sys
@@ -383,12 +395,10 @@ EXPECTED_INSTALLER_RECEIPT_SHA256="$(shasum -a 256 "$HOST_INSTALLER_RECEIPT" | a
   exit 2
 }
 if [[ -z "$PROVIDER_CONFIG" ]]; then
-  if [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
-    && -n "$FIXTURE_HOST" ]]
-  then
+  if [[ -n "$FIXTURE_HOST" ]]; then
     prepare_ephemeral_fixture
   elif provider_e2e_required; then
-    echo "Windows Direct/WireGuard/Direct e2e requires either the remote Linux fixture or NVPN_WINDOWS_WG_EXIT_CONFIG_FILE" >&2
+    echo "Windows Direct/WireGuard/Direct e2e requires a reachable local fixture address or NVPN_WINDOWS_WG_EXIT_CONFIG_FILE" >&2
     exit 2
   else
     echo "Windows provider-independent WireGuard fixture is not configured; running scoped Wintun only."

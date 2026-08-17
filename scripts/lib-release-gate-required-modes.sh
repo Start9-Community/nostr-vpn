@@ -60,13 +60,18 @@ release_gate_require_complete_fixture_inputs() {
       echo "Complete release gate Windows WireGuard config is unreadable." >&2
       return 1
     }
-  elif [[ -z "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
-    || -z "${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-}" ]]
-  then
-    echo "Complete release gate requires a remote Windows WireGuard fixture or an explicit provider config." >&2
+  elif [[ -z "${NVPN_WINDOWS_WG_FIXTURE_HOST_IP:-}" ]]; then
+    echo "Complete release gate requires a reachable Windows WireGuard fixture address or an explicit provider config." >&2
     return 1
-  elif [[ "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" != native ]]; then
+  elif [[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" \
+    && "${NVPN_MOBILE_WG_EXIT_REMOTE_MODE:-native}" != native ]]
+  then
     echo "Complete release gate Windows WireGuard fixture must use remote native mode." >&2
+    return 1
+  elif [[ -z "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" ]] \
+    && ! command -v docker >/dev/null 2>&1
+  then
+    echo "Complete release gate local WireGuard fixture requires Docker." >&2
     return 1
   fi
 

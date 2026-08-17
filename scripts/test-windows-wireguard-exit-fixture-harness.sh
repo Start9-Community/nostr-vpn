@@ -26,6 +26,16 @@ do
   grep -Fq "$source" "$ORCHESTRATOR" \
     || fail "orchestrator lost production fixture step: $source"
 done
+if grep -Fq '[[ -n "${NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST:-}" && -n "$FIXTURE_HOST" ]]' "$ORCHESTRATOR"; then
+  fail "Windows WireGuard fixture still requires a remote production host"
+fi
+for local_proof in \
+  'if [[ "$MOBILE_WG_FIXTURE_REMOTE" -eq 1 ]]' \
+  'curl -4fsS --max-time 8 "$SOURCE_IP_URL"'
+do
+  grep -Fq "$local_proof" "$ORCHESTRATOR" \
+    || fail "Windows WireGuard fixture lost local exit proof: $local_proof"
+done
 
 run_ps_source="$(sed -n '/^run_ps() {/,/^}/p' "$ORCHESTRATOR")"
 [[ "$run_ps_source" == *'powershell.exe -NoProfile -ExecutionPolicy Bypass'* \
