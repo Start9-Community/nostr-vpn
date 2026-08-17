@@ -131,6 +131,14 @@ def try_component_focus(name):
     )
 
 
+def try_accessible_action(name):
+    node = find_named(name)
+    action = node.queryAction()
+    if action is None or action.nActions < 1:
+        return False
+    return bool(action.doAction(0))
+
+
 def invoke(name):
     geometry = subprocess.run(
         ["xdotool", "getwindowgeometry", "--shell", str(target_window)],
@@ -143,6 +151,16 @@ def invoke(name):
         ["xdotool", "windowfocus", "--sync", str(target_window)],
         check=True,
     )
+    try:
+        if try_accessible_action(name):
+            time.sleep(0.25)
+            return
+    except Exception as action_error:
+        print(
+            f"AT-SPI Action activation unavailable for {name}: "
+            f"{action_error}",
+            file=sys.stderr,
+        )
     try:
         if try_component_focus(name):
             subprocess.run(

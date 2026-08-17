@@ -25,6 +25,12 @@ ensure_cargo_audit
 # - RUSTSEC-2026-0194 / RUSTSEC-2026-0195: `quick-xml` 0.39 is pulled by
 #   plist 1.9 via netdev on Apple targets; remove once plist releases a
 #   quick-xml >= 0.41 update or netdev removes that dependency path.
+# - RUSTSEC-2026-0243: `nostr-relay-pool` 0.44 is now maintained inside
+#   nostr-sdk; remove when the exact FIPS/nostr dependency line moves to 0.45.
+# - RUSTSEC-2026-0253: `lru` 0.16 is required by the exact FIPS/nostr and QR
+#   dependency lines. The reported unwind requires a panicking key Drop plus
+#   catch_unwind; these paths use ordinary owned keys and do not recover across
+#   their drop panics. Remove when both lines accept patched lru >= 0.18.2.
 audit_args=(
   --deny warnings
   --ignore RUSTSEC-2024-0384
@@ -32,6 +38,8 @@ audit_args=(
   --ignore RUSTSEC-2026-0002
   --ignore RUSTSEC-2026-0194
   --ignore RUSTSEC-2026-0195
+  --ignore RUSTSEC-2026-0243
+  --ignore RUSTSEC-2026-0253
 )
 
 cargo audit "${audit_args[@]}"

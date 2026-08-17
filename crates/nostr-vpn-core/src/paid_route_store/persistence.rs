@@ -1,5 +1,8 @@
 use super::*;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
+
+#[cfg(unix)]
+use std::fs::File;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};

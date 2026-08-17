@@ -12,18 +12,20 @@ pub fn write_private_file_preserving_user_owner(
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     #[cfg(unix)]
     let existing_owner = fs::metadata(path)
         .ok()
         .map(|metadata| (metadata.uid(), metadata.gid()));
     #[cfg(unix)]
-    let parent_owner = fs::metadata(parent)
-        .ok()
-        .map(|metadata| (metadata.uid(), metadata.gid()));
+    let parent_owner = {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::metadata(parent)
+            .ok()
+            .map(|metadata| (metadata.uid(), metadata.gid()))
+    };
     #[cfg(unix)]
     let desired_owner = preferred_private_file_owner(existing_owner, parent_owner);
     #[cfg(not(unix))]

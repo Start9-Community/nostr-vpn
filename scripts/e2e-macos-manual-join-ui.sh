@@ -199,12 +199,29 @@ launch_app() {
       # Launch through LaunchServices so SwiftUI materializes the initial
       # WindowGroup in the active GUI session. Executing the bundle binary
       # directly over SSH starts the process and menu bar but no app window.
-      open -n -F \
-        --env "NVPN_APP_DATA_DIR=$data_dir" \
-        --env "NVPN_CLI_PATH=$NVPN" \
-        --stdout "$APP_LOG" \
-        --stderr "$APP_LOG" \
-        "$APP_PATH"
+      # LaunchServices may briefly retain a just-terminated imported instance.
+      # Retry the exact bundle until it owns a live process so the new data-dir
+      # environment is never silently attached to stale application state.
+      local deadline=$((SECONDS + TIMEOUT_SECS))
+      local next_launch=0
+      while ((SECONDS < deadline)); do
+        if ((SECONDS >= next_launch)); then
+          open -n -F \
+            --env "NVPN_APP_DATA_DIR=$data_dir" \
+            --env "NVPN_CLI_PATH=$NVPN" \
+            --stdout "$APP_LOG" \
+            --stderr "$APP_LOG" \
+            "$APP_PATH" || true
+          next_launch=$((SECONDS + 1))
+        fi
+        app_pid="$(macos_exact_executable_pids "$APP_EXE" | tail -n 1)"
+        if [[ -n "$app_pid" ]] && kill -0 "$app_pid" >/dev/null 2>&1; then
+          return 0
+        fi
+        sleep 0.1
+      done
+      echo "macOS release app did not launch within ${TIMEOUT_SECS}s." >&2
+      return 1
       ;;
     *)
       NVPN_APP_DATA_DIR="$data_dir" \
