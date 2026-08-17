@@ -660,7 +660,9 @@ stable_dns_counters() {
     current="$(peer_command counters)"
     if [[ "$current" == "$previous" ]]; then
       ((stable_samples += 1))
-      if ((stable_samples >= 10)); then
+      # Let requests holding the previous resolver exceed the 3s DoH timeout
+      # before attributing any packets to the newly selected policy.
+      if ((stable_samples >= 20)); then
         printf '%s\n' "$current"
         return 0
       fi

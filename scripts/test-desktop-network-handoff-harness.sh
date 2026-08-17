@@ -406,7 +406,7 @@ require_tokens "$LINUX_HOST_ENTRY" "host-coordinated DNS counter snapshot" \
 require_tokens "$LINUX_HOST_ENTRY" "sustained DNS counter quiescence" \
   'stable_samples=0' \
   'for attempt in $(seq 1 100)' \
-  'if ((stable_samples >= 10))' \
+  'if ((stable_samples >= 20))' \
   'stable_samples=0'
 direct_restore="$(
   sed -n '/^run_dns_matrix_and_direct_restore() {$/,/^}$/p' "$LINUX_HOST_ENTRY"
