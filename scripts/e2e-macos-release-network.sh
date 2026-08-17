@@ -23,9 +23,6 @@ DNS_BOOTSTRAP_IPS="${NVPN_MACOS_DNS_BOOTSTRAP_IPS:-}"
 DNS_THROUGH_SERVERS="${NVPN_MACOS_DNS_THROUGH_SERVERS:-}"
 CAPTURED_PROBE_URL="${NVPN_MACOS_CAPTURED_PROBE_URL:-}"
 CAPTURED_PROBE_TOKEN="${NVPN_MACOS_CAPTURED_PROBE_TOKEN:-}"
-INTERNET_URL="${NVPN_MACOS_INTERNET_URL:-https://example.com/}"
-SOURCE_IP_URL="${NVPN_MACOS_SOURCE_IP_URL:-https://api.ipify.org}"
-EXPECTED_EXIT_SOURCE_IP="${NVPN_MACOS_EXPECTED_EXIT_SOURCE_IP:-}"
 PRIMARY_SERVICE="${NVPN_MACOS_PRIMARY_NETWORK_SERVICE:-Ethernet}"
 SECONDARY_SERVICE="${NVPN_MACOS_SECONDARY_NETWORK_SERVICE:-Roaming Underlay}"
 PRIMARY_IFACE="${NVPN_MACOS_PRIMARY_INTERFACE:-en0}"
@@ -68,8 +65,7 @@ validate_inputs() {
   [[ -n "$ENDPOINT_HOST" \
     && -n "$TUNNEL_SERVER_IP" \
     && -n "$CAPTURED_PROBE_URL" \
-    && -n "$CAPTURED_PROBE_TOKEN" \
-    && -n "$EXPECTED_EXIT_SOURCE_IP" ]] \
+    && -n "$CAPTURED_PROBE_TOKEN" ]] \
     || fail "real fixture inputs are incomplete"
   case "$ENDPOINT_FAMILY" in
     ipv4|ipv6) ;;
@@ -283,12 +279,6 @@ dns_query_works() {
   printf '%s\n' "$output" >"$RESULT_DIR/dns-$DNS_LABEL.txt"
 }
 
-https_works() {
-  local timeout
-  timeout="$(wait_budget_seconds 8)" || return 1
-  curl -4fsS --max-time "$timeout" "$INTERNET_URL" >/dev/null
-}
-
 captured_probe_works() {
   local payload timeout
   timeout="$(wait_budget_seconds 5)" || return 1
@@ -296,31 +286,18 @@ captured_probe_works() {
   grep -Fq "$CAPTURED_PROBE_TOKEN" <<<"$payload"
 }
 
-source_ip() {
-  local timeout
-  timeout="$(wait_budget_seconds 8)" || return 1
-  curl -4fsS --max-time "$timeout" "$SOURCE_IP_URL" | tr -d '[:space:]'
-}
-
-exit_source_is_expected() {
-  [[ "$(source_ip)" == "$EXPECTED_EXIT_SOURCE_IP" ]]
-}
-
 wireguard_routes_live() {
   local interface
   interface="$(wireguard_interface)" || return 1
   wireguard_endpoint_route_state_valid \
     && secure_dns_owned \
-    && captured_probe_works \
-    && https_works \
-    && exit_source_is_expected
+    && captured_probe_works
 }
 
 capture_wireguard_readiness_failure() {
-  local interface="" endpoint_interface="" observed_source=""
+  local interface="" endpoint_interface=""
   interface="$(wireguard_interface 2>/dev/null || true)"
   endpoint_interface="$(endpoint_route_interface 2>/dev/null || true)"
-  observed_source="$(source_ip 2>/dev/null || true)"
   {
     printf 'wireguard_interface=%s\n' "${interface:-unavailable}"
     printf 'endpoint_route_interface=%s\n' \
@@ -332,13 +309,6 @@ capture_wireguard_readiness_failure() {
       "$(secure_dns_owned && printf true || printf false)"
     printf 'captured_probe_works=%s\n' \
       "$(captured_probe_works && printf true || printf false)"
-    printf 'public_https_works=%s\n' \
-      "$(https_works && printf true || printf false)"
-    printf 'exit_source_matches=%s\n' \
-      "$([[ "$observed_source" == "$EXPECTED_EXIT_SOURCE_IP" ]] \
-        && printf true || printf false)"
-    printf 'observed_exit_source_ip=%s\n' \
-      "${observed_source:-unavailable}"
   } >"$RESULT_DIR/wireguard-readiness-failure.txt"
   {
     /sbin/route -n get default 2>&1 || true
@@ -814,7 +784,7 @@ no_nvpn_processes() {
 }
 
 snapshot_direct_state() {
-  local direct_iface direct_gateway direct_source
+  local direct_iface direct_gateway
   direct_iface="$(route_value default interface)"
   direct_gateway="$(route_value default gateway)"
   [[ "$direct_iface" == "$PRIMARY_IFACE" \
@@ -830,13 +800,9 @@ snapshot_direct_state() {
     || fail "a stale nvpn resolver is installed before the gate"
   printf '%s\n' "$DNS_PROBE_HOST" >"$STATE_DIR/direct-dns-probe-host"
   dns_query_works || fail "Direct DNS failed before the gate"
-  https_works || fail "Direct HTTPS failed before the gate"
-  direct_source="$(source_ip)"
-  [[ -n "$direct_source" ]] || fail "Direct source-IP probe failed"
 
   printf '%s\n' "$direct_iface" >"$STATE_DIR/direct-interface"
   printf '%s\n' "$direct_gateway" >"$STATE_DIR/direct-gateway"
-  printf '%s\n' "$direct_source" >"$STATE_DIR/direct-source-ip"
   service_state "$PRIMARY_SERVICE" >"$STATE_DIR/primary-service-state"
   service_state "$SECONDARY_SERVICE" >"$STATE_DIR/secondary-service-state"
   /usr/sbin/scutil --dns >"$STATE_DIR/direct-scutil-dns"
@@ -910,7 +876,7 @@ prepare_gate() {
     return 1
   fi
   if ! wait_until \
-    "the production WireGuard route, DNS, HTTPS, and source IP" \
+    "the production WireGuard route, DNS, and local forwarded payload" \
     wireguard_routes_live
   then
     capture_wireguard_readiness_failure
@@ -940,7 +906,7 @@ prepare_gate() {
     printf 'direct_interface=%s\n' "$(cat "$STATE_DIR/direct-interface")"
     printf 'wireguard_interface=%s\n' "$(cat "$STATE_DIR/wireguard-interface")"
     printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
-    printf 'exit_source_ip=%s\n' "$(source_ip)"
+    printf 'forwarded_probe_ip=%s\n' "${CAPTURED_PROBE_URL#http://}"
     printf 'connected_peer_count=0\n'
   } >"$RESULT_DIR/prepare.txt"
   echo "MACOS_RELEASE_NETWORK_PREPARED"
@@ -964,7 +930,7 @@ set_dns_case() {
     printf 'provider=%s\n' "$DNS_PROVIDER"
     printf 'wireguard_interface=%s\n' "$(wireguard_interface)"
     printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
-    printf 'exit_source_ip=%s\n' "$(source_ip)"
+    printf 'forwarded_probe_live=true\n'
   } >"$RESULT_DIR/dns-$DNS_LABEL.receipt"
   echo "MACOS_RELEASE_NETWORK_DNS_OK=$DNS_LABEL"
 }
@@ -1148,8 +1114,8 @@ run_underlay_gate() {
       "$((baseline + 1))" "$((wg_baseline + 1))"
   )"
   dns_query_works || fail "DNS failed after the secondary underlay recovered"
-  captured_probe_works && https_works && exit_source_is_expected \
-    || fail "exit traffic failed after the secondary underlay recovered"
+  captured_probe_works \
+    || fail "local forwarded exit traffic failed after the secondary underlay recovered"
 
   second_requested="$(monotonic_ms)"
   sudo -n /usr/sbin/networksetup \
@@ -1160,8 +1126,8 @@ run_underlay_gate() {
       "$((baseline + 2))" "$((wg_baseline + 2))"
   )"
   dns_query_works || fail "DNS failed after the primary underlay recovered"
-  captured_probe_works && https_works && exit_source_is_expected \
-    || fail "exit traffic failed after the primary underlay recovered"
+  captured_probe_works \
+    || fail "local forwarded exit traffic failed after the primary underlay recovered"
   stop_owned_payload "$$" \
     || fail "owned continuous payload did not stop cleanly"
 
@@ -1250,20 +1216,9 @@ record_crash_restart_probe() {
 }
 
 crash_restart_payloads_live() {
-  local pid pids=()
-  record_crash_restart_probe captured-http captured_probe_works &
-  pids+=("$!")
-  record_crash_restart_probe public-https https_works &
-  pids+=("$!")
-  record_crash_restart_probe exit-source exit_source_is_expected &
-  pids+=("$!")
-  for pid in "${pids[@]}"; do
-    wait "$pid" || true
-  done
+  record_crash_restart_probe forwarded-http captured_probe_works || true
   local receipt_dir="$RESULT_DIR/crash-restart-probes"
-  [[ -s "$receipt_dir/captured-http.pass" \
-    && -s "$receipt_dir/public-https.pass" \
-    && -s "$receipt_dir/exit-source.pass" ]]
+  [[ -s "$receipt_dir/forwarded-http.pass" ]]
 }
 
 crash_restart_transport_live() {
@@ -1317,7 +1272,7 @@ run_crash_restart_gate() {
     || fail "SIGKILL gate did not start with exactly one owned daemon"
   if ! wait_for_crash_live_precondition; then
     capture_crash_external_failure
-    fail "SIGKILL gate lacks live WireGuard, DNS, and HTTPS state"
+    fail "SIGKILL gate lacks live WireGuard, DNS, and locally forwarded traffic"
   fi
   old_pid="$(owned_daemon_pid)"
   bind_baseline="$(wireguard_bind_receipt_count)"
@@ -1372,7 +1327,7 @@ run_crash_restart_gate() {
     printf 'restart_payload_ms=%s\n' "$restart_elapsed_ms"
     printf 'wireguard_interface=%s\n' "$(wireguard_interface)"
     printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
-    printf 'exit_source_ip=%s\n' "$(source_ip)"
+    printf 'forwarded_probe_live=true\n'
     printf 'dns_label=%s\n' "$DNS_LABEL"
     printf 'dns_mode=%s\n' "$DNS_MODE"
     printf 'connected_peer_count=0\n'
@@ -1381,18 +1336,15 @@ run_crash_restart_gate() {
 }
 
 direct_state_matches() {
-  local expected_iface expected_gateway expected_source
+  local expected_iface expected_gateway
   expected_iface="$(cat "$STATE_DIR/direct-interface")"
   expected_gateway="$(cat "$STATE_DIR/direct-gateway")"
-  expected_source="$(cat "$STATE_DIR/direct-source-ip")"
   [[ "$(route_value default interface)" == "$expected_iface" \
     && "$(route_value default gateway)" == "$expected_gateway" \
-    && "$(endpoint_route_interface)" == "$expected_iface" \
-    && "$(source_ip)" == "$expected_source" ]] \
+    && "$(endpoint_route_interface)" == "$expected_iface" ]] \
     && wireguard_split_defaults_absent \
     && resolver_files_absent \
-    && direct_dns_query_works \
-    && https_works
+    && direct_dns_query_works
 }
 
 exact_direct_dns_matches() {
@@ -1415,7 +1367,6 @@ saved_direct_baseline_available() {
   for path in \
     direct-interface \
     direct-gateway \
-    direct-source-ip \
     direct-dns-probe-host \
     direct-scutil-dns.normalized \
     direct-primary-dns \
@@ -1476,7 +1427,7 @@ wait_for_saved_direct_restore() {
 select_direct_and_stop() {
   echo "phase=select-direct"
   nvpn set --config "$CONFIG" --exit-node ""
-  wait_until "the exact Direct route, DNS, HTTPS, and source IP" \
+  wait_until "the exact Direct route and DNS state" \
     direct_state_matches
   wait_until "WireGuard disabled in the running daemon status" \
     runtime_wireguard_state_is false true
@@ -1494,7 +1445,6 @@ select_direct_and_stop() {
   {
     printf 'direct_interface=%s\n' "$(route_value default interface)"
     printf 'direct_gateway=%s\n' "$(route_value default gateway)"
-    printf 'direct_source_ip=%s\n' "$(source_ip)"
     printf 'resolver_state_absent=true\n'
   } >"$RESULT_DIR/direct.txt"
   echo "MACOS_RELEASE_NETWORK_DIRECT_OK"

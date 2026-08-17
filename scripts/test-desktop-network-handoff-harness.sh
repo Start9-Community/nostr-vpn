@@ -907,7 +907,7 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'sudo -n /bin/kill -KILL "$old_pid"' \
   'MACOS_RELEASE_NETWORK_CRASH_RESTART_OK' \
   'select-direct' \
-  'direct_source_ip' \
+  'forwarded_probe_live=true' \
   'endpoint_route_interface' \
   'MACOS_RELEASE_NETWORK_DIRECT_OK'
 crash_restart_transport_body="$(

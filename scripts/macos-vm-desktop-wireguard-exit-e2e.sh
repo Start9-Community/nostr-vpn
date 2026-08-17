@@ -33,8 +33,6 @@ DNS_NAME="${NVPN_MACOS_WG_DNS_NAME:-macos-wireguard-exit.nvpn-e2e.test}"
 # unrelated long-lived services on conventional ports such as 8080.
 HTTP_PROBE_PORT="${NVPN_MACOS_WG_HTTP_PROBE_PORT:-$HOST_PORT}"
 HTTP_PROBE_TOKEN="${NVPN_MACOS_WG_HTTP_TOKEN:-nvpn-macos-$PPID-$$-$RANDOM}"
-SOURCE_IP_URL="${NVPN_MACOS_SOURCE_IP_URL:-https://api.ipify.org}"
-INTERNET_URL="${NVPN_MACOS_INTERNET_URL:-https://example.com/}"
 PRIMARY_SERVICE="${NVPN_MACOS_PRIMARY_NETWORK_SERVICE:-Ethernet}"
 SECONDARY_SERVICE="${NVPN_MACOS_SECONDARY_NETWORK_SERVICE:-Roaming Underlay}"
 PRIMARY_IFACE="${NVPN_MACOS_PRIMARY_INTERFACE:-en0}"
@@ -43,13 +41,14 @@ RECOVERY_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 FIPS_NETWORK_ID="${NVPN_MACOS_FIPS_NETWORK_ID:-macos-release-roaming-$PPID-$$}"
 IMAGE="${NVPN_MACOS_WG_FIXTURE_IMAGE:-nostr-vpn-macos-wireguard-exit-e2e}"
 CONTAINER="${NVPN_MACOS_WG_FIXTURE_CONTAINER:-nostr-vpn-macos-wireguard-exit-e2e-$$}"
+TARGET_CONTAINER="${NVPN_MACOS_WG_TARGET_CONTAINER:-$CONTAINER-target}"
 # The numeric IPv4 endpoint must follow the split default in the guest, which
 # proves the production Apple IP_BOUND_IF path and endpoint bypass ownership.
 FIXTURE_HOST="${NVPN_MACOS_WG_FIXTURE_HOST_IP:-}"
 FIXTURE_DIR=""
 REMOTE_DIR=""
 SECONDARY_IP=""
-EXPECTED_EXIT_SOURCE_IP=""
+FORWARDED_PROBE_IP=""
 PACKAGE=""
 ARTIFACT_DIR="${NVPN_MACOS_NETWORK_ARTIFACT_DIR:-${ARTIFACT_ROOT:-$ROOT/artifacts}/macos-release-network-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PRIMARY_CONTROL_PATH="/tmp/nvpn-macos-network-primary-$PPID-$$"
@@ -147,11 +146,8 @@ remote_phase() {
     "NVPN_MACOS_WG_ENDPOINT_HOST=$FIXTURE_HOST"
     "NVPN_MACOS_WG_ENDPOINT_FAMILY=$MOBILE_WG_FIXTURE_ENDPOINT_FAMILY"
     "NVPN_MACOS_WG_SERVER_IP=$TUNNEL_SERVER_IP"
-    "NVPN_MACOS_CAPTURED_PROBE_URL=http://$TUNNEL_SERVER_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
+    "NVPN_MACOS_CAPTURED_PROBE_URL=http://$FORWARDED_PROBE_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN"
     "NVPN_MACOS_CAPTURED_PROBE_TOKEN=$HTTP_PROBE_TOKEN"
-    "NVPN_MACOS_INTERNET_URL=$INTERNET_URL"
-    "NVPN_MACOS_SOURCE_IP_URL=$SOURCE_IP_URL"
-    "NVPN_MACOS_EXPECTED_EXIT_SOURCE_IP=$EXPECTED_EXIT_SOURCE_IP"
     "NVPN_MACOS_PRIMARY_NETWORK_SERVICE=$PRIMARY_SERVICE"
     "NVPN_MACOS_SECONDARY_NETWORK_SERVICE=$SECONDARY_SERVICE"
     "NVPN_MACOS_PRIMARY_INTERFACE=$PRIMARY_IFACE"
@@ -252,6 +248,19 @@ capture_fixture_failure() {
     >"$ARTIFACT_DIR/fixture-failure-packets.txt" 2>&1 || true
   mobile_wg_fixture_logs "$CONTAINER" \
     >"$ARTIFACT_DIR/fixture-failure-logs.txt" 2>&1 || true
+  mobile_wg_fixture_docker logs "$TARGET_CONTAINER" \
+    >"$ARTIFACT_DIR/fixture-failure-target-logs.txt" 2>&1 || true
+}
+
+remove_forward_target() {
+  [[ -n "$TARGET_CONTAINER" ]] || return 0
+  if mobile_wg_fixture_docker container inspect "$TARGET_CONTAINER" \
+    >/dev/null 2>&1
+  then
+    mobile_wg_fixture_docker rm -f "$TARGET_CONTAINER" >/dev/null || return 1
+  fi
+  ! mobile_wg_fixture_docker container inspect "$TARGET_CONTAINER" \
+    >/dev/null 2>&1
 }
 
 remove_remote_dir() {
@@ -299,6 +308,11 @@ cleanup() {
       echo "macOS guest private fixture state survived cleanup" >&2
       cleanup_failed=1
     fi
+  fi
+  if remove_forward_target; then
+    :
+  else
+    cleanup_failed=1
   fi
   if mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"; then
     :
@@ -370,9 +384,6 @@ wg pubkey <"$FIXTURE_DIR/client.key" >"$FIXTURE_DIR/client.pub"
 mobile_wg_fixture_initialize "$ROOT" "$FIXTURE_DIR"
 mobile_wg_fixture_assert_available "$CONTAINER" "$HOST_PORT"
 mobile_wg_fixture_build "$ROOT" "$IMAGE" 0
-EXPECTED_EXIT_SOURCE_IP="$(curl -4fsS --max-time 8 "$SOURCE_IP_URL")"
-[[ -n "$EXPECTED_EXIT_SOURCE_IP" ]] \
-  || fail "local WireGuard fixture has no IPv4 egress receipt"
 cat >"$FIXTURE_DIR/client.conf" <<EOF
 [Interface]
 PrivateKey = $(<"$FIXTURE_DIR/client.key")
@@ -398,6 +409,43 @@ for _ in $(seq 1 100); do
 done
 mobile_wg_fixture_ready "$CONTAINER" \
   || { mobile_wg_fixture_logs "$CONTAINER" >&2; fail "local fixture is not ready"; }
+
+mobile_wg_fixture_docker container inspect "$TARGET_CONTAINER" \
+  >/dev/null 2>&1 \
+  && fail "local forwarded target container name is already in use"
+mobile_wg_fixture_docker run -d \
+  --name "$TARGET_CONTAINER" \
+  --entrypoint python3 \
+  "$IMAGE" \
+  /usr/local/bin/mobile-wireguard-http-probe.py \
+  0.0.0.0 "$HTTP_PROBE_PORT" /tmp/http-probe.pid "$HTTP_PROBE_TOKEN" \
+  >/dev/null
+for _ in $(seq 1 50); do
+  mobile_wg_fixture_docker exec "$TARGET_CONTAINER" \
+    test -s /tmp/http-probe.pid >/dev/null 2>&1 && break
+  sleep 0.1
+done
+mobile_wg_fixture_docker exec "$TARGET_CONTAINER" \
+  test -s /tmp/http-probe.pid \
+  || fail "local forwarded target did not become ready"
+FORWARDED_PROBE_IP="$(
+  mobile_wg_fixture_docker inspect \
+    -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+    "$TARGET_CONTAINER"
+)"
+[[ "$FORWARDED_PROBE_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || fail "local forwarded target has no Docker IPv4 address"
+mobile_wg_fixture_docker exec "$CONTAINER" python3 - \
+  "http://$FORWARDED_PROBE_IP:$HTTP_PROBE_PORT/$HTTP_PROBE_TOKEN" \
+  "$HTTP_PROBE_TOKEN" <<'PY'
+import sys
+import urllib.request
+
+with urllib.request.urlopen(sys.argv[1], timeout=5) as response:
+    body = response.read().decode()
+if sys.argv[2] not in body:
+    raise SystemExit("forwarded target returned the wrong receipt")
+PY
 
 REMOTE_DIR="$(
   remote_shell primary 'mktemp -d /tmp/nvpn-macos-release-network.XXXXXX'
@@ -538,6 +586,7 @@ remote_phase secondary direct
 copy_guest_results
 remote_phase secondary cleanup
 remove_remote_dir
+remove_forward_target
 mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"
 
 echo "MACOS_VM_WIREGUARD_EXIT_E2E_OK"

@@ -33,7 +33,10 @@ require_tokens "$CONTROLLER" "host-local exit fixture" \
   'mobile_wg_fixture_initialize "$ROOT" "$FIXTURE_DIR"' \
   'mobile_wg_fixture_build "$ROOT" "$IMAGE" 0' \
   'mobile_wg_fixture_run "$IMAGE" "$CONTAINER"' \
-  'EXPECTED_EXIT_SOURCE_IP="$(curl -4fsS' \
+  'TARGET_CONTAINER="${NVPN_MACOS_WG_TARGET_CONTAINER:-$CONTAINER-target}"' \
+  '--entrypoint python3' \
+  'FORWARDED_PROBE_IP="$(' \
+  'NVPN_MACOS_CAPTURED_PROBE_URL=http://$FORWARDED_PROBE_IP' \
   'mobile_wg_fixture_wg_bytes' \
   'mobile_wg_fixture_forward_packets' \
   'mobile_wg_fixture_dns_evidence_snapshot' \
@@ -51,6 +54,17 @@ for forbidden in \
 do
   grep -Fq "$forbidden" "$CONTROLLER" \
     && fail "controller retains remote/peer fixture coupling: $forbidden"
+done
+
+for forbidden in \
+  NVPN_MACOS_EXPECTED_EXIT_SOURCE_IP \
+  NVPN_MACOS_SOURCE_IP_URL \
+  NVPN_MACOS_INTERNET_URL
+do
+  grep -Fq "$forbidden" "$CONTROLLER" \
+    && fail "controller retains a public Internet probe: $forbidden"
+  grep -Fq "$forbidden" "$GUEST" \
+    && fail "guest retains a public Internet probe: $forbidden"
 done
 
 for dns_case in \
