@@ -109,6 +109,28 @@ function requireFilePayload(receipt, name, expectedFile, label) {
   return payload
 }
 
+export function createWindowsCratesIoSourceReceipt({
+  appGitSha,
+  appGitTree,
+  fipsGitSha,
+  fipsGitTree,
+  fipsVersion,
+  exactPackages,
+}) {
+  return {
+    receiptSchema: 1,
+    platform: 'windows',
+    appGitSha,
+    appGitTree,
+    sourceClean: true,
+    fipsReleaseGitSha: fipsGitSha,
+    fipsReleaseGitTree: fipsGitTree,
+    fipsReleaseTag: `v${fipsVersion}`,
+    fipsVersion,
+    fipsCrates: structuredClone(exactPackages),
+  }
+}
+
 export function validateWindowsCratesIoReceipts({
   sourceReceipt,
   artifactReceipt,
@@ -192,39 +214,11 @@ export function validateWindowsCratesIoReceipts({
   }
 }
 
-export function validateWindowsCratesIoFipsProvenance({
-  sourceReceipt,
-  artifactReceipt,
-  candidateRoot = defaultCandidateRoot,
-  expectedAppGitSha,
-  expectedAppGitTree,
-  fipsRoot,
+function resolveWindowsCratesIoFipsPackages({
+  exactCandidateRoot,
   expectedFipsGitSha,
-  expectedFipsGitTree,
   expectedFipsVersion,
 }) {
-  const exactCandidateRoot = realpathSync(candidateRoot)
-  const exactFipsRoot = realpathSync(fipsRoot)
-  const appTree = captureRequired(
-    'git',
-    ['rev-parse', `${expectedAppGitSha}^{tree}`],
-    {
-      cwd: exactCandidateRoot,
-      env: process.env,
-      label: 'Windows packaged app tree',
-    },
-  )
-  if (appTree !== expectedAppGitTree) {
-    throw new Error('Windows packaged app commit/tree differs from the receipt.')
-  }
-  exactCleanGitCheckout({
-    root: exactFipsRoot,
-    env: process.env,
-    label: 'Windows crates.io provenance FIPS',
-    expectedCommit: expectedFipsGitSha,
-    expectedTree: expectedFipsGitTree,
-  })
-
   const lock = readFileSync(join(exactCandidateRoot, 'Cargo.lock'), 'utf8')
   const metadata = JSON.parse(captureRequired(
     'cargo',
@@ -279,6 +273,87 @@ export function validateWindowsCratesIoFipsProvenance({
       pathInVcs,
     }
   }
+  return exactPackages
+}
+
+export function createWindowsCratesIoSourceReceiptForCandidate({
+  candidateRoot = defaultCandidateRoot,
+  expectedAppGitSha,
+  expectedAppGitTree,
+  fipsRoot,
+  expectedFipsGitSha,
+  expectedFipsGitTree,
+  expectedFipsVersion,
+}) {
+  const exactCandidateRoot = realpathSync(candidateRoot)
+  const exactFipsRoot = realpathSync(fipsRoot)
+  exactCleanGitCheckout({
+    root: exactCandidateRoot,
+    env: process.env,
+    label: 'Windows crates.io source candidate',
+    expectedCommit: expectedAppGitSha,
+    expectedTree: expectedAppGitTree,
+  })
+  exactCleanGitCheckout({
+    root: exactFipsRoot,
+    env: process.env,
+    label: 'Windows crates.io source FIPS',
+    expectedCommit: expectedFipsGitSha,
+    expectedTree: expectedFipsGitTree,
+  })
+  const exactPackages = resolveWindowsCratesIoFipsPackages({
+    exactCandidateRoot,
+    expectedFipsGitSha,
+    expectedFipsVersion,
+  })
+  return createWindowsCratesIoSourceReceipt({
+    appGitSha: expectedAppGitSha,
+    appGitTree: expectedAppGitTree,
+    fipsGitSha: expectedFipsGitSha,
+    fipsGitTree: expectedFipsGitTree,
+    fipsVersion: expectedFipsVersion,
+    exactPackages,
+  })
+}
+
+export function validateWindowsCratesIoFipsProvenance({
+  sourceReceipt,
+  artifactReceipt,
+  candidateRoot = defaultCandidateRoot,
+  expectedAppGitSha,
+  expectedAppGitTree,
+  fipsRoot,
+  expectedFipsGitSha,
+  expectedFipsGitTree,
+  expectedFipsVersion,
+}) {
+  const exactCandidateRoot = realpathSync(candidateRoot)
+  const exactFipsRoot = realpathSync(fipsRoot)
+  const appTree = captureRequired(
+    'git',
+    ['rev-parse', `${expectedAppGitSha}^{tree}`],
+    {
+      cwd: exactCandidateRoot,
+      env: process.env,
+      label: 'Windows packaged app tree',
+    },
+  )
+  if (appTree !== expectedAppGitTree) {
+    throw new Error('Windows packaged app commit/tree differs from the receipt.')
+  }
+  exactCleanGitCheckout({
+    root: exactFipsRoot,
+    env: process.env,
+    label: 'Windows crates.io provenance FIPS',
+    expectedCommit: expectedFipsGitSha,
+    expectedTree: expectedFipsGitTree,
+  })
+
+  const exactPackages = resolveWindowsCratesIoFipsPackages({
+    exactCandidateRoot,
+    expectedFipsGitSha,
+    expectedFipsVersion,
+  })
 
   return validateWindowsCratesIoReceipts({
     sourceReceipt,
@@ -741,8 +816,42 @@ if (
   process.argv[1]
   && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
+  const command = process.argv[2]
+  if (command === 'windows-cratesio-source-receipt') {
+    const [
+      expectedAppGitSha,
+      expectedAppGitTree,
+      fipsRoot,
+      expectedFipsGitSha,
+      expectedFipsGitTree,
+      expectedFipsVersion,
+    ] = process.argv.slice(3)
+    if (
+      !expectedAppGitSha
+      || !expectedAppGitTree
+      || !fipsRoot
+      || !expectedFipsGitSha
+      || !expectedFipsGitTree
+      || !expectedFipsVersion
+    ) {
+      throw new Error(
+        'Usage: release-source-verification.mjs windows-cratesio-source-receipt ' +
+        '<app-sha> <app-tree> <fips-root> <fips-sha> <fips-tree> <fips-version>',
+      )
+    }
+    const receipt = createWindowsCratesIoSourceReceiptForCandidate({
+      expectedAppGitSha,
+      expectedAppGitTree,
+      fipsRoot,
+      expectedFipsGitSha,
+      expectedFipsGitTree,
+      expectedFipsVersion,
+    })
+    process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`)
+    process.exit(0)
+  }
   const [
-    command,
+    provenanceCommand,
     sourceReceiptPath,
     artifactReceiptPath,
     expectedAppGitSha,
@@ -753,7 +862,7 @@ if (
     expectedFipsVersion,
   ] = process.argv.slice(2)
   if (
-    command !== 'windows-cratesio-provenance'
+    provenanceCommand !== 'windows-cratesio-provenance'
     || !sourceReceiptPath
     || !artifactReceiptPath
     || !expectedAppGitSha

@@ -6,6 +6,7 @@ ORCHESTRATOR="$ROOT/scripts/windows-vm-wireguard-exit-e2e.sh"
 GUEST_GATE="$ROOT/scripts/e2e-windows-wireguard-direct.ps1"
 LIFECYCLE="$ROOT/scripts/e2e-windows-wireguard-direct.lib.ps1"
 RELEASE_GATE="$ROOT/scripts/release-gate.sh"
+APP_SMOKE="$ROOT/scripts/windows-vm-app-launch-smoke.sh"
 
 fail() {
   echo "Windows WireGuard fixture contract failed: $*" >&2
@@ -84,6 +85,22 @@ for proof in \
 do
   grep -Fq "$proof" "$ORCHESTRATOR" \
     || fail "orchestrator lost exact candidate/fixture proof: $proof"
+done
+
+for receipt_handoff in \
+  'windows-cratesio-source-receipt' \
+  'cratesio-source-receipt.json'
+do
+  grep -Fq "$receipt_handoff" "$APP_SMOKE" \
+    || fail "Windows installer smoke does not seal its crates.io source receipt: $receipt_handoff"
+done
+for receipt_handoff in \
+  'NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH' \
+  'NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH' \
+  'cratesio-source-receipt.json'
+do
+  grep -Fq "$receipt_handoff" "$RELEASE_GATE" \
+    || fail "release gate does not hand Windows provenance to exclusive lanes: $receipt_handoff"
 done
 if grep -Fq 'windows-build.ps1' "$ORCHESTRATOR"; then
   fail "Windows WG release lane still rebuilds instead of using the installer payload"

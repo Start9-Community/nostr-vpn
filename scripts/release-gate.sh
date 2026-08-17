@@ -451,6 +451,14 @@ windows_vm_reachable() {
   "${WINDOWS_SSH_CMD[@]}" hostname >/dev/null 2>&1
 }
 
+windows_host_installer_receipt() {
+  printf '%s\n' "${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:-$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer/installer-receipt.json}"
+}
+
+windows_host_source_fips_receipt() {
+  printf '%s\n' "${NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH:-$RELEASE_GATE_PARALLEL_LOG_DIR/windows-installer/cratesio-source-receipt.json}"
+}
+
 run_auto_windows_vm_app_smoke() {
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
   if windows_vm_reachable "$host"; then
@@ -464,9 +472,14 @@ run_auto_windows_vm_app_smoke() {
 
 run_auto_windows_vm_wireguard_exit_e2e() {
   local host="${NVPN_WINDOWS_SSH_HOST:-}"
+  local installer_receipt source_fips_receipt
+  installer_receipt="$(windows_host_installer_receipt)"
+  source_fips_receipt="$(windows_host_source_fips_receipt)"
   if windows_vm_reachable "$host"; then
     release_gate_run_with_timeout "Windows WG exit e2e" "$WINDOWS_WG_EXIT_TIMEOUT_SECS" \
       env NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E=1 \
+      NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH="$installer_receipt" \
+      NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH="$source_fips_receipt" \
       ./scripts/windows-vm-wireguard-exit-e2e.sh "$host"
   else
     echo "Skipping Windows WG exit e2e because ssh $host is unreachable."
@@ -525,6 +538,9 @@ prepare_windows_platform_lane_sync() {
 }
 
 run_windows_wireguard_exit_gate() {
+  local installer_receipt source_fips_receipt
+  installer_receipt="$(windows_host_installer_receipt)"
+  source_fips_receipt="$(windows_host_source_fips_receipt)"
   case "${NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E:-auto}" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping Windows WG exit e2e because NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E=${NVPN_RELEASE_GATE_WINDOWS_WG_EXIT_E2E}"
@@ -532,6 +548,8 @@ run_windows_wireguard_exit_gate() {
     1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm)
       release_gate_run_with_timeout "Windows WG exit e2e" "$WINDOWS_WG_EXIT_TIMEOUT_SECS" \
         env NVPN_WINDOWS_REQUIRE_WG_DIRECT_E2E=1 \
+        NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH="$installer_receipt" \
+        NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH="$source_fips_receipt" \
         ./scripts/windows-vm-wireguard-exit-e2e.sh "${NVPN_WINDOWS_SSH_HOST:-}"
       ;;
     auto|AUTO|Auto|"")
@@ -684,6 +702,9 @@ run_windows_underlay_network_change_gate() {
   local mode="${NVPN_RELEASE_GATE_WINDOWS_UNDERLAY_NETWORK_CHANGE_E2E:-auto}"
   local artifact_dir="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/windows-artifacts"
   local receipt="$RELEASE_GATE_PARALLEL_LOG_DIR/desktop-network/windows.json"
+  local installer_receipt source_fips_receipt
+  installer_receipt="$(windows_host_installer_receipt)"
+  source_fips_receipt="$(windows_host_source_fips_receipt)"
   local ran=0
   rm -rf "$artifact_dir"
   case "$mode" in
@@ -695,6 +716,8 @@ run_windows_underlay_network_change_gate() {
       release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
         "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
         env NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
+        NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH="$installer_receipt" \
+        NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH="$source_fips_receipt" \
         ./scripts/windows-vm-desktop-underlay-change-e2e.sh
       ran=1
       ;;
@@ -703,6 +726,8 @@ run_windows_underlay_network_change_gate() {
         release_gate_run_with_timeout "Windows real underlay network-change and DNS e2e" \
           "$DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS" \
           env NVPN_DESKTOP_UNDERLAY_ARTIFACT_DIR="$artifact_dir" \
+          NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH="$installer_receipt" \
+          NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH="$source_fips_receipt" \
           ./scripts/windows-vm-desktop-underlay-change-e2e.sh
         ran=1
       else

@@ -262,5 +262,27 @@ for name, value in payloads.items():
         raise SystemExit(f"Windows installer receipt has invalid {name} payload")
 PY
 
+SOURCE_FIPS_RECEIPT="$LOCAL_GATE_DIR/cratesio-source-receipt.json"
+node "$ROOT/scripts/release-source-verification.mjs" \
+  windows-cratesio-source-receipt \
+  "$(git -C "$ROOT" rev-parse HEAD)" \
+  "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "$NVPN_FIPS_REPO_PATH" \
+  "$EXPECTED_FIPS_SHA" \
+  "$EXPECTED_FIPS_TREE" \
+  "$EXPECTED_FIPS_VERSION" \
+  >"$SOURCE_FIPS_RECEIPT"
+node "$ROOT/scripts/release-source-verification.mjs" \
+  windows-cratesio-provenance \
+  "$SOURCE_FIPS_RECEIPT" \
+  "$LOCAL_GATE_DIR/installer-receipt.json" \
+  "$(git -C "$ROOT" rev-parse HEAD)" \
+  "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "$NVPN_FIPS_REPO_PATH" \
+  "$EXPECTED_FIPS_SHA" \
+  "$EXPECTED_FIPS_TREE" \
+  "$EXPECTED_FIPS_VERSION" \
+  >"$LOCAL_GATE_DIR/cratesio-provenance-validation.json"
+
 release_join_assert_fips_unchanged
 echo "WINDOWS_VM_APP_LAUNCH_SMOKE_OK"

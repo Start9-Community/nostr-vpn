@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import {
+  createWindowsCratesIoSourceReceipt,
   exactFipsPublicationCandidate,
   linuxPublicationVerificationPlan,
   validateWindowsCratesIoReceipts,
@@ -106,6 +107,21 @@ function exactWindowsCratesIoFixture() {
     expectedFipsVersion: '0.4.53',
   }
 }
+
+test('Windows crates.io source receipt records the exact candidate inputs', () => {
+  const fixture = exactWindowsCratesIoFixture()
+  assert.deepEqual(
+    createWindowsCratesIoSourceReceipt({
+      appGitSha: fixture.expectedAppGitSha,
+      appGitTree: fixture.expectedAppGitTree,
+      fipsGitSha: fixture.expectedFipsGitSha,
+      fipsGitTree: fixture.expectedFipsGitTree,
+      fipsVersion: fixture.expectedFipsVersion,
+      exactPackages: fixture.exactPackages,
+    }),
+    fixture.sourceReceipt,
+  )
+})
 
 test('Windows crates.io receipts accept the exact sealed source and payloads', () => {
   const fixture = exactWindowsCratesIoFixture()
