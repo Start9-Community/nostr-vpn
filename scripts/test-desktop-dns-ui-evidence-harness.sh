@@ -210,6 +210,21 @@ for required in (
             f"accessible IDs: {required}"
         )
 
+read_text_start = driver.index("def read_text(name: str) -> str:")
+read_text_end = driver.index("\ndef read_npub(", read_text_start)
+read_text = driver[read_text_start:read_text_end]
+for required in (
+    "deadline = time.monotonic() + 3",
+    "for candidate in matching_nodes(name):",
+    "candidate.queryText().getText(0, -1).strip()",
+    "pyatspi.Registry.pumpQueuedEvents()",
+):
+    if required not in read_text:
+        raise SystemExit(
+            "Linux Exit DNS text read does not reacquire a fresh exact-ID "
+            f"AT-SPI node after GTK replaces a stale object: {required}"
+        )
+
 for forbidden in ("doAction(", "grabFocus(", "querySelection(", "selectChild("):
     if forbidden in driver:
         raise SystemExit(

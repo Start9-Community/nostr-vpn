@@ -311,14 +311,23 @@ def set_text(name: str, value: str) -> None:
 
 
 def read_text(name: str) -> str:
-    node = find_named(name)
-    try:
-        value = node.queryText().getText(0, -1).strip()
-    except Exception as error:
-        raise RuntimeError(f"AT-SPI could not read public text from {name}") from error
-    if not value:
-        raise RuntimeError(f"public GTK value is empty: {name}")
-    return value
+    deadline = time.monotonic() + 3
+    last_error: Exception | None = None
+    read_succeeded = False
+    while time.monotonic() < deadline:
+        for candidate in matching_nodes(name):
+            try:
+                value = candidate.queryText().getText(0, -1).strip()
+                read_succeeded = True
+                if value:
+                    return value
+            except Exception as error:
+                last_error = error
+        pyatspi.Registry.pumpQueuedEvents()
+        time.sleep(0.05)
+    if not read_succeeded and last_error is not None:
+        raise RuntimeError(f"AT-SPI could not read public text from {name}") from last_error
+    raise RuntimeError(f"public GTK value is empty: {name}")
 
 
 def read_npub(name: str) -> str:
