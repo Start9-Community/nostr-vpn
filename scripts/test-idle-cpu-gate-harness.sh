@@ -272,6 +272,10 @@ grep -Fq 'NVPN_LINUX_NONINTERACTIVE:-0' "$ROOT_DIR/tools/run-linux" \
   || fail "Linux runner cannot force a non-interactive Docker exec from a terminal"
 grep -Fq 'assert_idle_daemon_cpu_below node-a' "$ROOT_DIR/scripts/e2e-fips-routed-udp-docker.sh" \
   || fail "release-gated Linux active-tunnel e2e has no daemon idle CPU check"
+grep -Fq 'NVPN_LINUX_DAEMON_IDLE_CPU_MAX_PERCENT="${NVPN_LINUX_DAEMON_IDLE_CPU_MAX_PERCENT:-3}"' "$RELEASE_GATE" \
+  || fail "release-gated Linux active-tunnel CPU ceiling is not calibrated for direct-path renegotiation"
+grep -Fq 'RUST_LOG="${NVPN_E2E_RUST_LOG:-warn,nostr_relay_pool=off,boringtun::noise::timers=error}"' "$ROOT_DIR/scripts/e2e-fips-routed-udp-docker.sh" \
+  || fail "release-gated Linux idle CPU does not use the shipped warning-level log default"
 grep -Fq 'windows-daemon-idle-cpu.ps1' "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh" \
   || fail "release-gated Windows VM smoke has no daemon idle CPU check"
 grep -Fq 'SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"' "$ROOT_DIR/scripts/windows-vm-app-launch-smoke.sh" \

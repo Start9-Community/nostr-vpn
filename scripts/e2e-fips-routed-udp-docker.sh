@@ -291,8 +291,10 @@ wait_for_payload() {
 
 start_nvpn_daemon() {
   local node="$1"
+  # Match the shipped CLI's default warning-level filter for idle CPU
+  # measurements. Diagnostic runs can still opt into verbose tracing.
   "${COMPOSE[@]}" exec -T "$node" env \
-    RUST_LOG="${NVPN_E2E_RUST_LOG:-info}" \
+    RUST_LOG="${NVPN_E2E_RUST_LOG:-warn,nostr_relay_pool=off,boringtun::noise::timers=error}" \
     NVPN_FIPS_NOSTR_DISCOVERY_POLICY="$FIPS_NOSTR_DISCOVERY_POLICY" \
     NVPN_MESH_MTU_PROFILE=safe \
     NVPN_MESH_UNDERLAY_UDP_MTU=1280 \
