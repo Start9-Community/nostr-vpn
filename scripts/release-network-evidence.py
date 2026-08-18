@@ -1179,7 +1179,12 @@ def validate_desktop_dns_ui_receipts(
     platform: str,
     app_sha: str,
     app_tree: str,
-) -> tuple[dict[str, Any], dict[str, str]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, str],
+    tuple[str, str],
+    str | None,
+]:
     require(
         root.is_dir() and not root.is_symlink(),
         f"{platform} desktop DNS UI evidence directory is missing",
@@ -1192,8 +1197,82 @@ def validate_desktop_dns_ui_receipts(
     observed: dict[str, Any] = {}
     evidence: dict[str, str] = {}
     artifact_identity: tuple[str, str] | None = None
+    receipts = {path: load_json(path) for path in receipt_paths}
+    permitted_source = (app_sha, app_tree)
+    reused_artifact_receipt_hash: str | None = None
+    receipt_sources = {
+        (receipt.get("appGitSha"), receipt.get("appGitTree"))
+        for receipt in receipts.values()
+    }
+    if receipt_sources != {permitted_source}:
+        require(
+            platform == "macos" and len(receipt_sources) == 1,
+            f"{platform} desktop DNS UI receipts are not source-bound",
+        )
+        receipt_source = next(iter(receipt_sources))
+        artifact_path = root.parent / "app-artifact.json"
+        driver_path = root.parent / "driver-receipt.json"
+        require(
+            artifact_path.is_file()
+            and not artifact_path.is_symlink()
+            and driver_path.is_file()
+            and not driver_path.is_symlink(),
+            "macos reused DNS UI artifact provenance is missing",
+        )
+        artifact = load_json(artifact_path)
+        driver = load_json(driver_path)
+        proof = artifact.get("componentInputProof")
+        artifact_receipt_hash = sha256(artifact_path)
+        expected_proof_keys = {
+            "policy",
+            "platform",
+            "receipt_app_git_sha",
+            "receipt_app_git_tree",
+            "candidate_app_git_sha",
+            "candidate_app_git_tree",
+            "changed_paths_sha256",
+        }
+        require(
+            artifact.get("receiptSchema") == 1
+            and artifact.get("appGitSha") == receipt_source[0]
+            and artifact.get("appGitTree") == receipt_source[1]
+            and isinstance(proof, dict)
+            and set(proof) == expected_proof_keys
+            and proof.get("policy") == "unchanged-platform-product-inputs-v1"
+            and proof.get("platform") == "macos"
+            and proof.get("receipt_app_git_sha") == receipt_source[0]
+            and proof.get("receipt_app_git_tree") == receipt_source[1]
+            and proof.get("candidate_app_git_sha") == app_sha
+            and proof.get("candidate_app_git_tree") == app_tree
+            and re.fullmatch(
+                r"[0-9a-f]{64}", str(proof.get("changed_paths_sha256", ""))
+            )
+            is not None
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(artifact.get("componentInputProofSha256", "")),
+            )
+            is not None
+            and driver.get("receiptSchema") == 1
+            and driver.get("appGitSha") == receipt_source[0]
+            and driver.get("appGitTree") == receipt_source[1]
+            and driver.get("harnessGitSha") == app_sha
+            and driver.get("harnessGitTree") == app_tree
+            and driver.get("appArtifactReceiptSha256") == artifact_receipt_hash
+            and all(
+                receipt.get("appArtifactReceiptSha256") == artifact_receipt_hash
+                and receipt.get("appExecutableSha256")
+                == artifact.get("appExecutableSha256")
+                and receipt.get("cliExecutableSha256")
+                == artifact.get("cliExecutableSha256")
+                for receipt in receipts.values()
+            ),
+            "macos reused DNS UI artifact provenance is invalid",
+        )
+        permitted_source = receipt_source
+        reused_artifact_receipt_hash = artifact_receipt_hash
     for path in receipt_paths:
-        receipt = load_json(path)
+        receipt = receipts[path]
         case = receipt.get("case")
         require(
             receipt.get("receiptSchema") == 1
@@ -1207,8 +1286,8 @@ def validate_desktop_dns_ui_receipts(
             and receipt.get("releaseBlackbox") is True
             and receipt.get("publicUiOnly") is True
             and receipt.get("privateStateRead") is False
-            and receipt.get("appGitSha") == app_sha
-            and receipt.get("appGitTree") == app_tree,
+            and receipt.get("appGitSha") == permitted_source[0]
+            and receipt.get("appGitTree") == permitted_source[1],
             f"{platform} {case} DNS receipt is not exact shipped-UI readback",
         )
         app_hash = require_hash(
@@ -1274,6 +1353,8 @@ def validate_desktop_dns_ui_receipts(
     return (
         {case: observed[case] for case in DESKTOP_DNS_UI_SETTINGS},
         dict(sorted(evidence.items())),
+        permitted_source,
+        reused_artifact_receipt_hash,
     )
 
 
@@ -1284,7 +1365,12 @@ def build_desktop(args: argparse.Namespace) -> None:
     app_sha = require_hash(args.app_git_sha, "desktop application commit", 40)
     app_tree = require_hash(args.app_git_tree, "desktop application tree", 40)
     dns_ui_root = pathlib.Path(args.dns_ui_dir).resolve()
-    dns_ui_cases, dns_ui_evidence = validate_desktop_dns_ui_receipts(
+    (
+        dns_ui_cases,
+        dns_ui_evidence,
+        dns_ui_source,
+        dns_ui_artifact_receipt_hash,
+    ) = validate_desktop_dns_ui_receipts(
         dns_ui_root,
         platform,
         app_sha,
@@ -1480,11 +1566,16 @@ def build_desktop(args: argparse.Namespace) -> None:
         artifact = load_json(artifact_path)
         require(
             artifact.get("receiptSchema") == 1
-            and artifact.get("appGitSha") == app_sha
-            and artifact.get("appGitTree") == app_tree
+            and artifact.get("appGitSha") == dns_ui_source[0]
+            and artifact.get("appGitTree") == dns_ui_source[1]
             and artifact.get("companySigningVerified") is True,
             "macOS desktop network artifact receipt is not exact",
         )
+        if dns_ui_artifact_receipt_hash is not None:
+            require(
+                sha256(artifact_path) == dns_ui_artifact_receipt_hash,
+                "macOS desktop network artifact receipt differs from DNS UI provenance",
+            )
         require(
             all(
                 case["appExecutableSha256"]

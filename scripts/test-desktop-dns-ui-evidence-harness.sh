@@ -305,6 +305,7 @@ PY
 
 python3 - "$ROOT/scripts/release-network-evidence.py" <<'PY'
 import importlib.util
+import hashlib
 import json
 import pathlib
 import shutil
@@ -374,11 +375,13 @@ with tempfile.TemporaryDirectory() as temporary:
         root = base / platform
         root.mkdir()
         write(root, platform)
-        cases, hashes = module.validate_desktop_dns_ui_receipts(
+        cases, hashes, source, reused_hash = module.validate_desktop_dns_ui_receipts(
             root, platform, app_sha, app_tree
         )
         assert set(cases) == set(settings)
         assert set(hashes) == {f"{case}.json" for case in settings}
+        assert source == (app_sha, app_tree)
+        assert reused_hash is None
 
     bad = base / "bad-bootstrap"
     shutil.copytree(base / "linux", bad)
@@ -424,6 +427,105 @@ with tempfile.TemporaryDirectory() as temporary:
         pass
     else:
         raise SystemExit("private-state desktop DNS evidence was accepted")
+
+    reused = base / "reused-macos"
+    cases_root = reused / "cases"
+    cases_root.mkdir(parents=True)
+    write(cases_root, "macos")
+    receipt_sha = "e" * 40
+    receipt_tree = "f" * 40
+    proof = {
+        "policy": "unchanged-platform-product-inputs-v1",
+        "platform": "macos",
+        "receipt_app_git_sha": receipt_sha,
+        "receipt_app_git_tree": receipt_tree,
+        "candidate_app_git_sha": app_sha,
+        "candidate_app_git_tree": app_tree,
+        "changed_paths_sha256": "1" * 64,
+    }
+    artifact = {
+        "receiptSchema": 1,
+        "appGitSha": receipt_sha,
+        "appGitTree": receipt_tree,
+        "appExecutableSha256": artifact_hash,
+        "cliExecutableSha256": cli_hash,
+        "componentInputProof": proof,
+        "componentInputProofSha256": "2" * 64,
+    }
+    artifact_path = reused / "app-artifact.json"
+    artifact_path.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    artifact_receipt_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    (reused / "driver-receipt.json").write_text(
+        json.dumps(
+            {
+                "receiptSchema": 1,
+                "appGitSha": receipt_sha,
+                "appGitTree": receipt_tree,
+                "appExecutableSha256": artifact_hash,
+                "appArtifactReceiptSha256": artifact_receipt_hash,
+                "harnessGitSha": app_sha,
+                "harnessGitTree": app_tree,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for path in cases_root.glob("*.json"):
+        value = json.loads(path.read_text())
+        value["appGitSha"] = receipt_sha
+        value["appGitTree"] = receipt_tree
+        value["appArtifactReceiptSha256"] = artifact_receipt_hash
+        path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+    cases, hashes, source, reused_hash = module.validate_desktop_dns_ui_receipts(
+        cases_root, "macos", app_sha, app_tree
+    )
+    assert set(cases) == set(settings)
+    assert set(hashes) == {f"{case}.json" for case in settings}
+    assert source == (receipt_sha, receipt_tree)
+    assert reused_hash == artifact_receipt_hash
+
+    for label, mutate in (
+        ("candidate", lambda value: value["componentInputProof"].update(
+            candidate_app_git_sha="3" * 40
+        )),
+        ("proof", lambda value: value["componentInputProof"].update(
+            changed_paths_sha256="invalid"
+        )),
+    ):
+        tampered = base / f"tampered-{label}"
+        shutil.copytree(reused, tampered)
+        path = tampered / "app-artifact.json"
+        value = json.loads(path.read_text())
+        mutate(value)
+        path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        for case_path in (tampered / "cases").glob("*.json"):
+            case_value = json.loads(case_path.read_text())
+            case_value["appArtifactReceiptSha256"] = digest
+            case_path.write_text(json.dumps(case_value) + "\n", encoding="utf-8")
+        try:
+            module.validate_desktop_dns_ui_receipts(
+                tampered / "cases", "macos", app_sha, app_tree
+            )
+        except ValueError:
+            pass
+        else:
+            raise SystemExit(f"tampered {label} component proof was accepted")
+
+    bad_link = base / "bad-artifact-link"
+    shutil.copytree(reused, bad_link)
+    path = bad_link / "cases" / "automatic.json"
+    value = json.loads(path.read_text())
+    value["appArtifactReceiptSha256"] = "4" * 64
+    path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+    try:
+        module.validate_desktop_dns_ui_receipts(
+            bad_link / "cases", "macos", app_sha, app_tree
+        )
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("wrong macOS app artifact link was accepted")
 
     missing = base / "missing"
     shutil.copytree(base / "linux", missing)
