@@ -28,6 +28,7 @@ Reliability improvements for discovery and recovery across every platform.
   and make fleet source-equivalence fixtures work in shallow clones.
 - Shorten release verification by reusing signed mobile artifacts and proven
   network setup while retaining physical-device DNS, reconnect, and recovery checks.
+- Update HTTP/2 framing to h2 0.4.16 to bound empty DATA frame handling.
 
 ## 4.1.7 - 2026-08-10
 
