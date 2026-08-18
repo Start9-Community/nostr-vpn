@@ -38,10 +38,6 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-[[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] || {
-  echo "Umbrel auth/join e2e requires a clean candidate checkout." >&2
-  exit 2
-}
 docker info >/dev/null
 
 case "${NVPN_UMBREL_AUTH_JOIN_SKIP_BUILD:-0}" in
@@ -49,6 +45,10 @@ case "${NVPN_UMBREL_AUTH_JOIN_SKIP_BUILD:-0}" in
     docker image inspect "$IMAGE" >/dev/null
     ;;
   *)
+    [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] || {
+      echo "Umbrel auth/join image builds require a clean candidate checkout." >&2
+      exit 2
+    }
     docker build -f "$ROOT_DIR/umbrel/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
     ;;
 esac

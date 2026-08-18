@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## 4.1.8 - 2026-08-17
+## 4.1.8 - 2026-08-18
 
 ### Release notes
 
@@ -20,6 +20,8 @@ Reliability improvements for discovery and recovery across every platform.
 - Keep public FIPS WebSocket bootstrap listeners responsive under connection
   pressure by expanding their bounded inbound budget and evicting idle clients
   after one missed transport-ping cycle.
+- Refresh Cashu wallet keysets before paid-channel funding so mint key rotation
+  consolidates proofs into the current keyset instead of rejecting the purchase.
 - Stage FIPS wake recovery until the underlay is ready, then replace stale
   carriers after total path loss so authenticated traffic resumes cleanly.
 - Keep release verification aligned with the sealed FIPS dependency versions
