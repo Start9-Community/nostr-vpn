@@ -961,6 +961,12 @@ linux_platform_lane_requested() {
 
 prepare_host_linux_vm_bundle_and_record() {
   local bundle receipt temporary
+  if [[ -z "${NVPN_HOST_LINUX_VM_BUILDER_MODE:-}" \
+    && -n "${NVPN_UBUNTU_SSH_HOST:-}" ]]
+  then
+    export NVPN_HOST_LINUX_VM_BUILDER_MODE=remote-native
+    export NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST="${NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST:-$NVPN_UBUNTU_SSH_HOST}"
+  fi
   bundle="$(./scripts/prepare-host-linux-vm-bundle.sh)"
   [[ "$bundle" == /* && -d "$bundle" && ! -L "$bundle" ]] \
     || { echo "Host Linux VM bundle builder returned an invalid path." >&2; return 1; }
