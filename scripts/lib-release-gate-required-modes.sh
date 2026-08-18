@@ -83,4 +83,16 @@ release_gate_require_complete_fixture_inputs() {
     echo "Complete release gate requires NVPN_MACOS_WG_FIXTURE_HOST_IP for the local macOS WireGuard exit fixture." >&2
     return 1
   }
+  [[ -n "${NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH:-}" ]] || {
+    echo "Complete release gate requires NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH for desktop underlay gates." >&2
+    return 1
+  }
+  [[ -n "${NVPN_WINDOWS_UNDERLAY_VM_NAME:-${NVPN_WINDOWS_VM_NAME:-}}" ]] || {
+    echo "Complete release gate requires a Windows underlay VM name." >&2
+    return 1
+  }
+  [[ -n "${NVPN_LINUX_UNDERLAY_VM_NAME:-${NVPN_UBUNTU_VM_NAME:-}}" ]] || {
+    echo "Complete release gate requires a Linux underlay VM name." >&2
+    return 1
+  }
 }

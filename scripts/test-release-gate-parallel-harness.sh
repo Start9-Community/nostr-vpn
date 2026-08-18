@@ -259,6 +259,12 @@ if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
   fail "complete release gate accepted a missing macOS local fixture address"
 fi
 export NVPN_MACOS_WG_FIXTURE_HOST_IP=192.0.2.10
+export NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH=hypervisor.test
+export NVPN_WINDOWS_UNDERLAY_VM_NAME=windows-test
+if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
+  fail "complete release gate accepted a missing Linux underlay VM name"
+fi
+export NVPN_LINUX_UNDERLAY_VM_NAME=linux-test
 release_gate_require_complete_fixture_inputs \
   || fail "complete release gate rejected local WireGuard fixture inputs"
 
