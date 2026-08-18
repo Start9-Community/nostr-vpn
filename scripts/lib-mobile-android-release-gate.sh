@@ -252,7 +252,7 @@ verify_android_release_install() {
   fi
   cert_sha="$(
     "$apksigner" verify --print-certs "$APK_PATH" 2>/dev/null \
-      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+      | awk 'index($0, "certificate SHA-256 digest: ") { sub(/^.*certificate SHA-256 digest: /, ""); print; exit }' \
       | head -n 1
   )"
   [[ "$cert_sha" =~ ^[0-9a-fA-F]{64}$ ]] || {
@@ -996,25 +996,8 @@ run_android_release_rapid_start_stop_gate() {
   truthy "$ANDROID_RAPID_START_STOP_GATE" || return 0
   local start_stop_ledger="$RUNTIME_STATE_RESULT_DIR/mobile-android-release-start-stop-$$.tsv"
   : >"$start_stop_ledger"
-  configure_android_release_wireguard_ui || return 1
-  if [[ -n "$EXIT_DNS_MODE" ]]; then
-    configure_android_exit_dns_ui || return 1
-  fi
-
-  android_release_capture_native_tunnel_start_baseline || return 1
-  vpn_cleanup_armed=1
-  android_release_connect_ui || return 1
-  android_release_pin_native_tunnel_start_count || return 1
-  run_android_release_exit_network_probe start-stop-initial-exit || return 1
-  android_release_disconnect_ui || return 1
-  android_release_wait_stable_quiescence \
-    start-stop "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" || return 1
-  printf 'semantic\t%s\t%s\n' \
-    "$(android_app_pid)" "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
-    >>"$start_stop_ledger"
-  vpn_cleanup_armed=0
-  run_android_release_direct_network_probe start-stop-stable-direct 0 || return 1
-
+  # The enclosing black-box cycle already proves the initial start, exit,
+  # stop, and stable direct path. This gate only needs to prove a reconnect.
   android_release_capture_native_tunnel_start_baseline || return 1
   vpn_cleanup_armed=1
   android_release_connect_ui || return 1
@@ -1035,8 +1018,10 @@ run_android_release_blackbox_cycle() {
   local direct_transition_pid
   android_release_ensure_network_ui || return 1
   android_release_disconnect_ui || return 1
-  run_android_release_direct_network_probe before-connect 0 || return 1
-  configure_android_release_wireguard_ui || return 1
+  if ! truthy "$ANDROID_RELEASE_DNS_ONLY_CYCLE"; then
+    run_android_release_direct_network_probe before-connect 0 || return 1
+    configure_android_release_wireguard_ui || return 1
+  fi
   if [[ -n "$EXIT_DNS_MODE" ]]; then
     configure_android_exit_dns_ui || return 1
   fi
@@ -1065,9 +1050,15 @@ run_android_release_blackbox_cycle() {
     release-cycle-disconnect "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
     || return 1
   vpn_cleanup_armed=0
-  run_android_release_direct_network_probe after-disconnect 0 || return 1
-  android_release_assert_native_tunnel_unchanged \
-    after-disconnect || return 1
+  if ! truthy "$ANDROID_RELEASE_DNS_ONLY_CYCLE"; then
+    run_android_release_direct_network_probe after-disconnect 0 || return 1
+    android_release_assert_native_tunnel_unchanged \
+      after-disconnect || return 1
+  fi
+  if truthy "$IDLE_CPU_GATE"; then
+    run_android_idle_cpu_gate "Android Release foreground VPN-off" || return 1
+    write_android_release_foreground_idle_receipt || return 1
+  fi
   run_android_release_rapid_start_stop_gate || return 1
   assert_single_android_app_process
 }

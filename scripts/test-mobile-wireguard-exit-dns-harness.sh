@@ -135,6 +135,13 @@ assert parse(record) == [name.decode()]
 assert parse(b"ordinary HTTPS bytes: " + name) == []
 PY
 
+grep -Fq 'NVPN_ANDROID_RELEASE_DNS_ONLY_CYCLE="$((1 - first))"' \
+  "$ROOT/scripts/mobile-wireguard-exit-e2e.sh" \
+  || fail "Android follow-up DNS cases do not reuse the proven WireGuard setup"
+grep -Fq 'if ! truthy "$ANDROID_RELEASE_DNS_ONLY_CYCLE"; then' \
+  "$ROOT/scripts/lib-mobile-android-release-gate.sh" \
+  || fail "Android Release gate lacks its focused follow-up DNS path"
+
 MOCK_ROOT="$HARNESS_ROOT/root"
 MOCK_BIN="$HARNESS_ROOT/bin"
 mkdir -p "$MOCK_ROOT/scripts" "$MOCK_BIN"

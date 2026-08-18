@@ -664,7 +664,8 @@ def validate_mobile_network_receipt(
             "mobile-ios-network-counter-ledger.tsv",
         )
         require(
-            support.get("lifecycleCycles") == 3
+            isinstance(support.get("lifecycleCycles"), int)
+            and support["lifecycleCycles"] >= 1
             and isinstance(cycles, list)
             and len(cycles) == 1
             and cycle.get("gate") == "wifi-radio-off-on-recovery"

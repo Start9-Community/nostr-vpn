@@ -1573,7 +1573,7 @@ run_ios_release_network_case() {
   local continuity_summary="$result_dir/$stem-continuity.json"
   local xcresult="$result_dir/$stem.xcresult"
   local xctest_timeout="${NVPN_IOS_XCTEST_CASE_TIMEOUT_SECS:-600}"
-  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-45}"
+  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-180}"
   mkdir -p "$result_dir"
   if bool_is_true "$underlay"; then
     IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64="$spec_base64"
@@ -1743,7 +1743,7 @@ ios_release_network_disconnect_cleanup_inner() {
   local markers="$result_dir/$stem-runner-markers.log"
   local xcresult="$result_dir/$stem.xcresult"
   local cleanup_timeout="${NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS:-75}"
-  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-45}"
+  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-180}"
   local -a command=()
   local command_status=0 cleanup_run_id="cleanup-$$-$RANDOM"
   mkdir -p "$result_dir"

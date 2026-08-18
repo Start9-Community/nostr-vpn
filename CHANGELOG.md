@@ -26,6 +26,8 @@ Reliability improvements for discovery and recovery across every platform.
   carriers after total path loss so authenticated traffic resumes cleanly.
 - Keep release verification aligned with the sealed FIPS dependency versions
   and make fleet source-equivalence fixtures work in shallow clones.
+- Shorten release verification by reusing signed mobile artifacts and proven
+  network setup while retaining physical-device DNS, reconnect, and recovery checks.
 
 ## 4.1.7 - 2026-08-10
 

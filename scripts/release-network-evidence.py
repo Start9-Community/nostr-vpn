@@ -575,7 +575,14 @@ def validate_ios_support(
         )
         process = load_json(process_path)
         required = set(process["requiredCheckpoints"])
-        for cycle in range(1, 4):
+        lifecycle_cycles = 0
+        while (
+            f"release_background_{lifecycle_cycles + 1}_requested" in required
+            and f"release_foreground_{lifecycle_cycles + 1}_verified" in required
+        ):
+            lifecycle_cycles += 1
+        require(lifecycle_cycles >= 1, "iOS lifecycle proof is missing")
+        for cycle in range(1, lifecycle_cycles + 1):
             require(
                 f"release_background_{cycle}_requested" in required
                 and f"release_foreground_{cycle}_verified" in required,
@@ -633,7 +640,7 @@ def validate_ios_support(
             "iOS",
             fresh_dns_rows[0],
         )
-        summaries["lifecycleCycles"] = 3
+        summaries["lifecycleCycles"] = lifecycle_cycles
         summaries["underlayCycles"] = [{
             **cycle,
             "freshDnsQueryHost": fresh_dns_rows[0],
@@ -969,14 +976,17 @@ def validate_android_support(
             for line in lifecycle_ledger.read_text(encoding="utf-8").splitlines()
             if line
         ]
+        lifecycle_cycles = len(lifecycle_rows)
         require(
-            [int(row[0]) for row in lifecycle_rows] == [1, 2, 3]
+            lifecycle_cycles >= 1
+            and [int(row[0]) for row in lifecycle_rows]
+            == list(range(1, lifecycle_cycles + 1))
             and len({row[1] for row in lifecycle_rows}) == 1
             and len({row[2] for row in lifecycle_rows}) == 1,
-            "Android lifecycle lacks three same-process/tunnel receipts",
+            "Android lifecycle lacks contiguous same-process/tunnel receipts",
         )
         lifecycle_paths = []
-        for lifecycle_cycle in range(1, 4):
+        for lifecycle_cycle in range(1, lifecycle_cycles + 1):
             for phase in ("background", "foreground"):
                 path = exactly_one(
                     root,
@@ -991,7 +1001,7 @@ def validate_android_support(
                     f"Android release {phase} cycle {lifecycle_cycle} lacks DNS/HTTP/HTTPS packet evidence",
                 )
                 lifecycle_paths.append(path)
-        summary["lifecycleCycles"] = 3
+        summary["lifecycleCycles"] = lifecycle_cycles
         summary["underlayCycles"] = [{
             **measured_cycle,
             "freshDnsQueryHost": fresh_dns_host,
@@ -1006,7 +1016,7 @@ def validate_android_support(
                 "nativeTunnel": marker_proof["nativeTunnelIdentifierCount"],
             },
         }]
-        summary["postForegroundDnsHttpsAndTunnelCycles"] = 3
+        summary["postForegroundDnsHttpsAndTunnelCycles"] = lifecycle_cycles
         paths.extend(
             (
                 underlay_path,

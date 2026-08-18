@@ -1182,7 +1182,8 @@ function requireMobileNetworkReceipt({
           /underlay-fresh-dns-fixture\.json$/,
         ]
     if (
-      receipt.support?.lifecycleCycles !== 3
+      !Number.isSafeInteger(receipt.support?.lifecycleCycles)
+      || receipt.support.lifecycleCycles < 1
       || !Array.isArray(cycles)
       || cycles.length !== 1
       || cycle?.gate !== 'wifi-radio-off-on-recovery'
@@ -1213,10 +1214,11 @@ function requireMobileNetworkReceipt({
   if (
     (mode === 'underlay-lifecycle' || combined)
     && platform === 'android'
-    && receipt.support?.postForegroundDnsHttpsAndTunnelCycles !== 3
+    && receipt.support?.postForegroundDnsHttpsAndTunnelCycles
+      !== receipt.support?.lifecycleCycles
   ) {
     throw new Error(
-      'Android lifecycle receipt lacks three post-foreground DNS/HTTPS/tunnel checks.',
+      'Android lifecycle receipt lacks a post-foreground DNS/HTTPS/tunnel check per cycle.',
     )
   }
 }

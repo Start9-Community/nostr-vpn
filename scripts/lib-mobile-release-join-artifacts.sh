@@ -301,7 +301,7 @@ release_join_prepare_android_release() {
     "$apksigner" verify "$apk" >/dev/null
     cert_sha="$(
       "$apksigner" verify --print-certs "$apk" \
-        | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+        | awk 'index($0, "certificate SHA-256 digest: ") { sub(/^.*certificate SHA-256 digest: /, ""); print; exit }' \
         | head -n 1
     )"
     [[ "$cert_sha" =~ ^[0-9A-Fa-f]{64}$ ]] || {

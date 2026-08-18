@@ -103,18 +103,18 @@ rapid_gate = function_body(
     "run_android_release_rapid_start_stop_gate",
     "run_android_release_blackbox_cycle",
 )
-if rapid_gate.count("android_release_capture_native_tunnel_start_baseline") != 2:
+if rapid_gate.count("android_release_capture_native_tunnel_start_baseline") != 1:
     raise SystemExit(
-        "Release start/stop gate must reset native-start evidence before both cycles"
+        "Release reconnect gate must reset native-start evidence once"
     )
 for receipt, expected in (
-    (arm, 2),
-    ("android_release_connect_ui", 2),
-    ("run_android_release_exit_network_probe", 2),
-    ("android_release_disconnect_ui", 2),
-    (stable, 2),
-    (disarm, 2),
-    ("run_android_release_exit_network_probe start-stop-initial-exit", 1),
+    (arm, 1),
+    ("android_release_connect_ui", 1),
+    ("run_android_release_exit_network_probe", 1),
+    ("android_release_disconnect_ui", 1),
+    (stable, 1),
+    (disarm, 1),
+    ("run_android_release_exit_network_probe start-stop-initial-exit", 0),
     ("run_android_release_exit_network_probe start-stop-full-reconnect", 1),
 ):
     if rapid_gate.count(receipt) != expected:
@@ -122,18 +122,15 @@ for receipt, expected in (
             f"Release semantic start/stop gate has {rapid_gate.count(receipt)} "
             f"instances of {receipt!r}, expected {expected}"
         )
-cursor = 0
-for _ in range(2):
-    positions = []
+positions = [
+    rapid_gate.index(receipt)
     for receipt in (
         arm, "android_release_connect_ui", "run_android_release_exit_network_probe",
         "android_release_disconnect_ui", stable, disarm,
-    ):
-        cursor = rapid_gate.index(receipt, cursor)
-        positions.append(cursor)
-        cursor += len(receipt)
-    if positions != sorted(positions):
-        raise SystemExit("Release start/stop cleanup is not armed through stable quiescence")
+    )
+]
+if positions != sorted(positions):
+    raise SystemExit("Release reconnect cleanup is not armed through stable quiescence")
 
 emergency = function_body(
     release_gate,

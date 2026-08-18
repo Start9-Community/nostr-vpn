@@ -52,7 +52,7 @@ cleanup() {
       -v "$TMP_ROOT:/cleanup" \
       --entrypoint sh \
       "$IMAGE" \
-      -c "chown -R $HOST_UID:$HOST_GID /cleanup" >/dev/null 2>&1 || true
+      -c "find /cleanup ! -type s -exec chown $HOST_UID:$HOST_GID {} +" >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP_ROOT"
   exit "$status"
@@ -61,8 +61,8 @@ cleanup() {
 return_runtime_data_to_host() {
   local service
   for service in node-a-daemon node-b-daemon; do
-    "${COMPOSE[@]}" exec -T "$service" \
-      chown -R "$HOST_UID:$HOST_GID" /data/config/nvpn
+    "${COMPOSE[@]}" exec -T "$service" sh -c \
+      "find /data/config/nvpn ! -type s -exec chown $HOST_UID:$HOST_GID {} +"
   done
 }
 trap cleanup EXIT

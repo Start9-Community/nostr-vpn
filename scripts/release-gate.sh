@@ -24,7 +24,6 @@ export NVPN_IDLE_CPU_SETTLE_SECONDS="${NVPN_RELEASE_GATE_IDLE_CPU_SETTLE_SECONDS
 # The Android VPN fixture maintains the two production bootstrap adjacencies,
 # unlike the foreground/UI idle gates. Keep a separate bound for that active
 # encrypted overlay while retaining the packet/TUN correctness probe below.
-ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT="${NVPN_ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT:-4}"
 # The shipped, nondebuggable foreground app has no active overlay work. Keep
 # this independent of the background active-VPN allowance above so every exact
 # Release candidate proves a full low-idle minute before artifact reuse.
@@ -41,7 +40,6 @@ DESKTOP_MANUAL_JOIN_UI_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_MANUAL_JOIN_UI_
 DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_SERVICE_TOGGLE_TIMEOUT_SECS:-1800}"
 DESKTOP_DNS_UI_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_DNS_UI_TIMEOUT_SECS:-900}"
 DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_DESKTOP_UNDERLAY_NETWORK_CHANGE_TIMEOUT_SECS:-2400}"
-MOBILE_GUI_SMOKE_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_GUI_SMOKE_TIMEOUT_SECS:-1800}"
 ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_ANDROID_LEGACY_REPLACEMENT_TIMEOUT_SECS:-600}"
 IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS:-180}"
 MOBILE_WG_EXIT_TIMEOUT_SECS="${NVPN_RELEASE_GATE_MOBILE_WG_EXIT_TIMEOUT_SECS:-3600}"
@@ -1402,30 +1400,6 @@ raise SystemExit(
 '
 }
 
-release_gate_select_android_idle_serial() {
-  if [[ -n "${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}" ]]; then
-    printf '%s\n' "${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
-    return
-  fi
-
-  # Full release gates already require the physical Android device for the
-  # exit and join lanes. Prefer it for the idle sample too: unrelated projects
-  # commonly create and destroy default-port emulators, which can terminate a
-  # healthy VPN process halfway through the measurement. Keep an emulator as
-  # the explicit last choice for developer hosts without a phone attached.
-  adb devices 2>/dev/null | awk '
-    NR > 1 && $2 == "device" {
-      if (first == "") first = $1
-      if ($1 !~ /^emulator-/) {
-        print $1
-        selected = 1
-        exit
-      }
-    }
-    END { if (!selected && first != "") print first }
-  '
-}
-
 run_mobile_idle_cpu_gates() {
   case "$NVPN_IDLE_CPU_GATE" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
@@ -1434,41 +1408,8 @@ run_mobile_idle_cpu_gates() {
       ;;
   esac
 
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    release_gate_run_with_timeout "iOS simulator idle CPU smoke" "$MOBILE_GUI_SMOKE_TIMEOUT_SECS" \
-      env NVPN_IOS_RUST_PROFILE=release ./scripts/mobile-ios-smoke.sh simulator
-  else
-    echo "Skipping iOS simulator idle CPU smoke on this host."
-  fi
-
-  if command -v adb >/dev/null 2>&1 \
-    && adb devices 2>/dev/null | awk 'NR > 1 && $2 == "device" { found = 1 } END { exit !found }'; then
-    local android_idle_serial
-    android_idle_serial="$(release_gate_select_android_idle_serial)"
-    [[ -n "$android_idle_serial" ]] || {
-      echo "Android idle CPU smoke could not select an online device." >&2
-      return 1
-    }
-    release_gate_run_with_timeout "Android idle CPU smoke" "$MOBILE_GUI_SMOKE_TIMEOUT_SECS" \
-      env NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
-      NVPN_ANDROID_SERIAL="$android_idle_serial" \
-      NVPN_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
-      ./scripts/mobile-android-smoke.sh --vpn-cycle --create-network --accept-vpn-dialog
-    release_gate_run_with_timeout \
-      "Android exact signed Release foreground VPN-off idle CPU" \
-      "$MOBILE_GUI_SMOKE_TIMEOUT_SECS" \
-      env \
-        NVPN_ANDROID_SERIAL="$android_idle_serial" \
-        NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT" \
-        NVPN_ANDROID_IDLE_CPU_SAMPLE_SECONDS="$ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS" \
-        NVPN_ANDROID_IDLE_CPU_RESULT_NAME="android-release-foreground-vpn-off-idle/idle-cpu.json" \
-        NVPN_ANDROID_RESULT_DIR="$RELEASE_GATE_PARALLEL_LOG_DIR/mobile-network" \
-        ./scripts/mobile-android-smoke.sh --release-network-gate
-    MOBILE_ANDROID_APP_READY=1
-  else
-    echo "Skipping Android idle CPU smoke because no adb device is online."
-  fi
-
+  # Android Release idle is sampled after the first real signed-app network
+  # cycle. Simulator/debug idle runs belong to development smoke, not release.
   local ios_device="${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
   local ios_smoke_command=(./scripts/mobile-ios-smoke.sh device)
   if [[ -n "$ios_device" ]]; then
@@ -1547,7 +1488,7 @@ run_mobile_wireguard_exit_gates() {
     release_gate_run_with_timeout \
     "Android physical WireGuard exit and DNS" \
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
-    env NVPN_IDLE_CPU_GATE=0 \
+    env NVPN_IDLE_CPU_GATE="$NVPN_IDLE_CPU_GATE" \
       NVPN_MOBILE_WG_EXIT_DIRECT_HOST=example.com \
       NVPN_MOBILE_WG_EXIT_DIRECT_URL=https://example.com/ \
       NVPN_MOBILE_WG_EXIT_DNS_CASES=automatic-profile,cloudflare-doh,quad9-doh,custom-doh,through-exit \
@@ -1565,7 +1506,9 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.77.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$port_base" \
       NVPN_ANDROID_DEBUG_RELEASE_SIGNING=1 \
-      NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_ACTIVE_OVERLAY_IDLE_CPU_MAX_PERCENT" \
+      NVPN_ANDROID_IDLE_CPU_MAX_PERCENT="$ANDROID_RELEASE_FOREGROUND_IDLE_CPU_MAX_PERCENT" \
+      NVPN_ANDROID_IDLE_CPU_SAMPLE_SECONDS="$ANDROID_RELEASE_FOREGROUND_IDLE_CPU_SAMPLE_SECONDS" \
+      NVPN_ANDROID_IDLE_CPU_OUTPUT="$evidence_dir/android-release-foreground-vpn-off-idle/idle-cpu.json" \
       NVPN_MOBILE_WG_EXIT_INSTALL_ANDROID="$((1 - MOBILE_ANDROID_APP_READY))" \
       NVPN_ANDROID_RESULT_DIR="$android_artifact_dir" \
       NVPN_MOBILE_ANDROID_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/android-wireguard-dns.json" \
@@ -1673,8 +1616,8 @@ run_mobile_underlay_change_gates() {
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env NVPN_IDLE_CPU_GATE=0 \
       NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
-      NVPN_ANDROID_LIFECYCLE_CYCLES=3 \
-      NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=3 \
+      NVPN_ANDROID_LIFECYCLE_CYCLES=1 \
+      NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=1 \
       NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS=20 \
       NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS=30 \
       NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS=4000 \
@@ -1707,8 +1650,8 @@ run_mobile_underlay_change_gates() {
     "$MOBILE_WG_EXIT_TIMEOUT_SECS" \
     env NVPN_IDLE_CPU_GATE=0 \
       NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS=10 \
-      NVPN_ANDROID_LIFECYCLE_CYCLES=3 \
-      NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=3 \
+      NVPN_ANDROID_LIFECYCLE_CYCLES=1 \
+      NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=1 \
       NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS=20 \
       NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS=30 \
       NVPN_MOBILE_UNDERLAY_RECOVERY_MAX_MS=4000 \

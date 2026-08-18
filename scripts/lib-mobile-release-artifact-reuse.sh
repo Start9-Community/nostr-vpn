@@ -79,7 +79,7 @@ release_join_validate_android_reuse() {
   }
   cert_sha="$(
     "$apksigner" verify --print-certs "$apk" 2>/dev/null \
-      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+      | awk 'index($0, "certificate SHA-256 digest: ") { sub(/^.*certificate SHA-256 digest: /, ""); print; exit }' \
       | head -n 1 \
       | tr '[:upper:]' '[:lower:]'
   )"

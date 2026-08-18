@@ -58,6 +58,7 @@ RUNTIME_STATE_RESULT_DIR="${NVPN_ANDROID_RESULT_DIR:-$ROOT/artifacts/mobile-andr
 RUNTIME_STATE_RESULT_NAME="${NVPN_ANDROID_RUNTIME_STATE_RESULT_NAME:-mobile-android-runtime-state-$$.json}"
 ANDROID_BUILD_METADATA_RESULT_NAME="${NVPN_ANDROID_BUILD_METADATA_RESULT_NAME:-mobile-android-build-metadata-$$.json}"
 ANDROID_IDLE_CPU_RESULT_NAME="${NVPN_ANDROID_IDLE_CPU_RESULT_NAME:-mobile-android-idle-cpu-$$.json}"
+ANDROID_IDLE_CPU_OUTPUT="${NVPN_ANDROID_IDLE_CPU_OUTPUT:-}"
 VPN_LINK_STATS_RESULT_NAME="mobile-android-vpn-link-stats-$$.txt"
 VPN_LINK_STATS_SUMMARY_RESULT_NAME="mobile-android-vpn-link-stats-summary-$$.tsv"
 PING_PROBE_RESULT_NAME="mobile-android-ping-probe-$$.txt"
@@ -109,6 +110,7 @@ ANDROID_LIFECYCLE_GATE="${NVPN_ANDROID_LIFECYCLE_GATE:-1}"
 ANDROID_LIFECYCLE_CYCLES="${NVPN_ANDROID_LIFECYCLE_CYCLES:-3}"
 ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS="${NVPN_ANDROID_LIFECYCLE_BACKGROUND_DWELL_SECS:-10}"
 ANDROID_RAPID_START_STOP_GATE="${NVPN_ANDROID_RAPID_START_STOP_GATE:-0}"
+ANDROID_RELEASE_DNS_ONLY_CYCLE="${NVPN_ANDROID_RELEASE_DNS_ONLY_CYCLE:-0}"
 
 build=1
 install=1
@@ -440,6 +442,10 @@ android_build_metadata_path() {
 }
 
 android_idle_cpu_path() {
+  if [[ -n "$ANDROID_IDLE_CPU_OUTPUT" ]]; then
+    printf '%s\n' "$ANDROID_IDLE_CPU_OUTPUT"
+    return
+  fi
   printf '%s/%s\n' "$RUNTIME_STATE_RESULT_DIR" "$ANDROID_IDLE_CPU_RESULT_NAME"
 }
 
@@ -451,6 +457,7 @@ run_android_idle_cpu_gate() {
       return
       ;;
   esac
+  mkdir -p "$(dirname "$(android_idle_cpu_path)")"
   "$ROOT/scripts/idle-cpu-gate.py" android-package \
     --adb "$ADB" \
     --serial "$serial" \
@@ -1361,10 +1368,13 @@ assert_android_exit_dns_ui_reloaded() {
 
 assert_android_internet_status_contains() {
   local expected="$1" status="" deadline=$((SECONDS + ANDROID_UI_WAIT_SECS))
+  local status_lower expected_lower
+  expected_lower="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
   while ((SECONDS < deadline)); do
     android_ui_scroll_to resource internet-source-status || return 1
     status="$(android_ui_query resource internet-source-status descendant-text 2>/dev/null || true)"
-    if [[ "${status,,}" == *"${expected,,}"* ]]; then
+    status_lower="$(printf '%s' "$status" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$status_lower" == *"$expected_lower"* ]]; then
       return 0
     fi
     sleep 0.25

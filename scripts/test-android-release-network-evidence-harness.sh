@@ -115,9 +115,9 @@ with tempfile.TemporaryDirectory() as temporary:
         if mode == "wireguard-dns":
             return {"startStopCycles": 2}, [root / "wireguard-proof"]
         return {
-            "lifecycleCycles": 3,
+            "lifecycleCycles": 1,
             "underlayCycles": [{}],
-            "postForegroundDnsHttpsAndTunnelCycles": 3,
+            "postForegroundDnsHttpsAndTunnelCycles": 1,
         }, [root / "underlay-proof"]
 
     module.validate_android_support = fake_support
@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory() as temporary:
             (["automatic-profile"], "underlay-lifecycle"),
         ]:
             raise SystemExit("combined evidence did not validate both strict gates")
-        if combined.get("postForegroundDnsHttpsAndTunnelCycles") != 3:
+        if combined.get("postForegroundDnsHttpsAndTunnelCycles") != 1:
             raise SystemExit("combined evidence discarded lifecycle support")
         if len(combined_paths) != 2:
             raise SystemExit("combined evidence discarded concrete proof paths")
@@ -190,7 +190,7 @@ with tempfile.TemporaryDirectory() as temporary:
         "apkSha256": "e" * 64,
     }
     module.validate_mobile_support = (
-        lambda *_args: ({"lifecycleCycles": 3}, [proof.resolve()])
+        lambda *_args: ({"lifecycleCycles": 1}, [proof.resolve()])
     )
     try:
         args = argparse.Namespace(
