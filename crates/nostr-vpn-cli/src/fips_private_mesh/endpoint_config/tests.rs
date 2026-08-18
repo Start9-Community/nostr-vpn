@@ -80,6 +80,43 @@ mod endpoint_config_tests {
     }
 
     #[test]
+    fn public_websocket_listener_has_matching_fips_capacity() {
+        let mut transport = test_transport(true, false);
+        transport.websocket = WebSocketConfig {
+            bind_addr: Some("127.0.0.1:8765".to_string()),
+            public_url: Some("wss://seed.example.org/fips".to_string()),
+            max_connections: Some(FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS),
+            max_inbound_connections: Some(FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS),
+            idle_timeout_secs: Some(FIPS_PUBLIC_WEBSOCKET_IDLE_TIMEOUT_SECS),
+            ..WebSocketConfig::default()
+        };
+        let config = fips_endpoint_config_with_open_discovery_limit(
+            &[],
+            Some(&transport),
+            resolve_private_mesh_mtu(None, None, None),
+            NostrDiscoveryPolicy::Open,
+            FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING,
+        );
+
+        assert_eq!(
+            config.node.limits.max_connections,
+            FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS,
+        );
+        assert_eq!(
+            config.node.limits.max_peers,
+            FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS,
+        );
+        assert_eq!(
+            config.node.limits.max_links,
+            FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS,
+        );
+        assert_eq!(
+            config.node.discovery.nostr.open_discovery_max_pending,
+            FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS,
+        );
+    }
+
+    #[test]
     fn configured_control_peer_does_not_force_joiner_advertising() {
         let mut transport = test_transport(true, false);
         transport.advertise_on_nostr = false;

@@ -91,7 +91,8 @@ const FIPS_NOSTR_PAID_EXIT_OPEN_DISCOVERY_MAX_PENDING: usize = 64;
 // Public WebSocket listeners are explicit FIPS bootstrap routers. Keep their
 // unaffiliated authenticated-adjacency budget bounded, but large enough that
 // a handful of slow or abandoned handshakes cannot deny all fresh clients.
-const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize = 64;
+const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize =
+    FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS;
 // Public bootstrap routers need more physical sockets than an ordinary client
 // listener. Keep spare total slots for their configured upstream seeds, and
 // evict peers that do not answer transport pings before they consume the
