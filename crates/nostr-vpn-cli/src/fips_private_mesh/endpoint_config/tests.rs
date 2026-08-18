@@ -112,7 +112,12 @@ mod endpoint_config_tests {
         );
         assert_eq!(
             config.node.discovery.nostr.open_discovery_max_pending,
-            FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS,
+            128,
+        );
+        assert!(
+            config.node.discovery.nostr.open_discovery_max_pending
+                < FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS,
+            "public unaffiliated admission must remain bounded below socket capacity",
         );
     }
 

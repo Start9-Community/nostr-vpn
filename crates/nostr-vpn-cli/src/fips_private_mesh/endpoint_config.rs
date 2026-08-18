@@ -249,11 +249,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
     // Headless e2e meshes can force configured-only discovery to avoid
     // contending with ambient public relay traffic.
     config.node.discovery.nostr.policy = nostr_discovery_policy;
-    config.node.discovery.nostr.open_discovery_max_pending = if public_websocket_listener {
-        FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS
-    } else {
-        open_discovery_max_pending
-    };
+    config.node.discovery.nostr.open_discovery_max_pending = open_discovery_max_pending;
     config.node.discovery.nostr.failure_streak_threshold = FIPS_NOSTR_FAILURE_STREAK_THRESHOLD;
     config.node.discovery.nostr.extended_cooldown_secs = FIPS_NOSTR_EXTENDED_COOLDOWN_SECS;
     config.node.discovery.nostr.startup_sweep_max_age_secs = FIPS_NOSTR_STARTUP_SWEEP_MAX_AGE_SECS;
