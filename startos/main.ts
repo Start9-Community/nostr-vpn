@@ -11,13 +11,13 @@ const commonEnv = {
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting Nostr VPN'))
 
-  const daemonSub = await sdk.SubContainer.of(
+  const daemonSub = sdk.SubContainer.of(
     effects,
     { imageId: 'app' },
     dataMount,
     'nostr-vpn-daemon',
   )
-  const controlPanelSub = await sdk.SubContainer.of(
+  const controlPanelSub = sdk.SubContainer.of(
     effects,
     { imageId: 'app' },
     dataMount,
@@ -48,9 +48,6 @@ export const main = sdk.setupMain(async ({ effects }) => {
       ready: {
         display: i18n('Mesh daemon'),
         fn: () =>
-          // `nvpn status` exits 0 only when the daemon answers its control
-          // socket — real readiness, not just process presence. It does not
-          // require an active network, which is correct for the `--paused` start.
           sdk.healthCheck.runHealthScript(
             [
               '/usr/local/bin/nvpn',
@@ -74,13 +71,9 @@ export const main = sdk.setupMain(async ({ effects }) => {
           'sh',
           '-ec',
           [
-            // Bind the container's own eth0 address rather than 0.0.0.0: the
-            // daemon's `utun100` lives in this namespace too, and a wildcard
-            // bind would publish the panel to every mesh peer.
+            // A wildcard bind would publish the panel over the daemon's utun100 to every mesh peer.
             'bind_ip="$(ip -4 -o addr show dev eth0 scope global | awk \'{ split($4, a, "/"); print a[1]; exit }\')"',
             'test -n "$bind_ip"',
-            // --behind-trusted-proxy: reached only through the StartOS reverse
-            // proxy, so the forwarded client address is the real one.
             `exec /usr/local/bin/nvpn-web --listen "$bind_ip:${controlPanelPort}" --behind-trusted-proxy --config /data/config/nvpn/config.toml`,
           ].join('\n'),
         ],

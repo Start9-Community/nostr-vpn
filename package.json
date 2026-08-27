@@ -7,18 +7,21 @@
     "prettier": "prettier --write startos"
   },
   "dependencies": {
-    "@start9labs/start-sdk": "1.5.2"
+    "@start9labs/start-sdk": "2.0.9"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
     "@vercel/ncc": "^0.38.4",
     "prettier": "^3.6.2",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   },
   "prettier": {
     "trailingComma": "all",
     "tabWidth": 2,
     "semi": false,
     "singleQuote": true
+  },
+  "overrides": {
+    "@start9labs/start-sdk": "$@start9labs/start-sdk"
   }
 }

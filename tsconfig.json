@@ -1,13 +1,4 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "CommonJS",
-    "moduleResolution": "Node",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "outDir": "javascript"
-  },
-  "include": ["startos/**/*.ts"]
+  "extends": "@start9labs/start-sdk/tsconfig.base.json",
+  "include": ["startos/**/*.ts", "node_modules/**/startos"]
 }
