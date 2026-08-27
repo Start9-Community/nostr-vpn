@@ -13,8 +13,11 @@ The package version tracks upstream's. Check the latest upstream release:
 gh release view -R mmalmi/nostr-vpn --json tagName -q .tagName
 ```
 
-The current pin lives in `startos/versions/current.ts` (`current.version`). The
-fast-forward below brings it along automatically.
+**Sync to that tag, not to `upstream/master`.** Upstream bumps
+`startos/versions/current.ts` when it opens a version, so master routinely
+carries a version number that has no release behind it — following master
+packages a version whose artifacts do not exist. The current pin lives in
+`startos/versions/current.ts` (`current.version`).
 
 ## Applying the update
 
@@ -23,8 +26,8 @@ fast-forward:
 
 ```sh
 git remote add upstream https://github.com/mmalmi/nostr-vpn.git   # first time only
-git fetch upstream
-git merge --ff-only upstream/master
+git fetch upstream --tags
+git merge --ff-only v<latest>          # the release tag, not upstream/master
 ```
 
 Then reapply any in-flight Start9 changes (kept under `startos/`) on top, rebuild,
@@ -35,7 +38,7 @@ make x86 install
 ```
 
 > If Start9-specific commits have been landed on `master` (a hard fork), the
-> fast-forward will fail; `git rebase upstream/master` instead and resolve any
+> fast-forward will fail; rebase onto the release tag instead and resolve any
 > conflicts — which should only ever touch `startos/`.
 
 ## Keep divergence minimal
