@@ -13,8 +13,8 @@ The package version tracks upstream's. Check the latest upstream release:
 gh release view -R mmalmi/nostr-vpn --json tagName -q .tagName
 ```
 
-The current pin lives in `startos/versions/current.ts` (`currentVersion.version`,
-e.g. `4.0.47:0`). The fast-forward below brings it along automatically.
+The current pin lives in `startos/versions/current.ts` (`current.version`). The
+fast-forward below brings it along automatically.
 
 ## Applying the update
 
@@ -41,7 +41,8 @@ make x86 install
 ## Keep divergence minimal
 
 Upstream owns both the repo root and `startos/`. Confine Start9 changes to
-`startos/`, keep upstream's `.github/` workflows, and prefer contributing
-improvements upstream over carrying a fork delta. The one intentional
-out-of-`startos/` change is the augmented root `instructions.md` (it documents
-the StartOS-specific auth/critical-task setup flow).
+`startos/` and prefer contributing improvements upstream over carrying a fork
+delta. Two things sit outside it deliberately: the root `instructions.md`, which
+documents the StartOS-specific setup and device-joining flow, and the Start9
+packaging workflows, which run alongside upstream's rather than replacing them
+(see `AGENTS.md`).

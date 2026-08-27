@@ -60,11 +60,11 @@ Both subcontainers mount the same `main` volume, which is how the panel reads th
 daemon's state. A `prepare-data` oneshot runs as root before either daemon and
 creates the home and config directories.
 
-**The manifest sets `nestedRuntime: true`, and the data plane depends on it.**
-That grants the subcontainer the full capability set — including `CAP_NET_ADMIN`
-— and mounts `/dev/net/tun`, which is what lets `nvpn` create its `utun100`
-tunnel interface. No separate capability declaration exists or is needed; remove
-the flag and the tunnel cannot come up.
+**The manifest sets `virtualNetworking: true`, and the data plane depends on
+it.** That is what mounts `/dev/net/tun`, which `nvpn` needs to create its
+`utun100` tunnel interface. `CAP_NET_ADMIN` is retained by the service LXC's own
+user namespace, so no separate capability declaration exists or is needed —
+but remove this flag and the tunnel cannot come up.
 
 ## Volume and Data Layout
 
@@ -122,9 +122,10 @@ cleared. There is no upstream onboarding wizard to skip.
 1. **Set the control panel password.** The task points at the action; running it
    generates the credential and shows it once.
 2. **Open the panel and sign in** as `admin`.
-3. **Create or join a network.** The daemon launches with `--paused`, so the
-   tunnel interface exists but the node carries no traffic until a network is
-   active.
+3. **Switch the VPN on.** `nvpn` seeds a network ("Network 1") on its first
+   daemon start and enables it, with this node as its sole admin — so there is
+   nothing to create or activate. What is off is the VPN itself, because the
+   daemon launches with `--paused`; `utun100` exists either way.
 
 ## Actions
 
@@ -160,8 +161,8 @@ process-presence checks.
 
 A failing **Mesh daemon** check means the daemon is not answering its control
 socket — the process is gone, or it never got far enough to open the socket.
-Deliberately, it does not require an active network, so it stays green while the
-node is paused and idle, which is the normal state before you create one.
+Deliberately, it does not require the VPN to be on, so it stays green while the
+node is paused and idle, which is its state after every start.
 
 A failing **Control Panel** check means the web process is not listening. Because
 it is ordered behind the daemon, it will also be down whenever the daemon is.
@@ -179,8 +180,12 @@ again.
 Three things behave differently here than a reader coming from upstream would
 expect.
 
-1. **The daemon starts paused.** The node is idle until you create or join a
-   network in the control panel.
+1. **The VPN comes up off on every start, and Settings' "Start VPN
+   automatically" cannot change that.** The daemon launches with `--paused`,
+   which overrides `autoconnect` at every launch, so the user must switch the VPN
+   on in the panel after each start, restart, or update — the seeded network
+   stays active across all of them, so the switch is the only thing to re-do.
+   Expect this as the most common "it stopped working after an update" report.
 2. **Exit-node and full-tunnel routing are unverified on StartOS.** The mesh and
    the `utun100` tunnel come up, but the full-tunnel path — which also depends on
    host IP forwarding and routing — has not been validated here.

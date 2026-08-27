@@ -4,10 +4,6 @@ import { sdk } from './sdk'
 import { controlPanelPort, controlPanelUsername } from './utils'
 
 export const setInterfaces = sdk.setupInterfaces(async ({ effects }) => {
-  // Read reactively: when setControlPanelPassword writes controlPanelPassword,
-  // this re-runs and the proxy picks up the new credential. Until then auth is
-  // null — but a critical install task (watchCredentials) blocks startup until
-  // the password is set, so the control panel is never exposed ungated.
   const password = await storeJson
     .read((s) => s.controlPanelPassword)
     .const(effects)

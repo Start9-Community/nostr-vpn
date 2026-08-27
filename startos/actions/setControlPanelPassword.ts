@@ -21,10 +21,6 @@ export const setControlPanelPassword = sdk.Action.withoutInput(
   async ({ effects }) => {
     const password = utils.getDefaultString({ charset: 'a-z,A-Z,1-9', len: 22 })
 
-    // Writing controlPanelPassword re-runs setInterfaces, so the OS proxy
-    // enforces the new credential without a restart. This is the only place that
-    // generates and stores it — covering both first-set (via the critical
-    // install task) and later rotation.
     await storeJson.merge(effects, { controlPanelPassword: password })
 
     return {
