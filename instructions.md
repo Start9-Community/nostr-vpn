@@ -65,17 +65,19 @@ nothing to copy from your server for this step.
 
 Add a network and choose **Join Network**. The app shows a QR code and a **Copy
 Request** button. That is the device asking to join, and it is what your server
-needs next. Leave the app on this screen.
+needs next.
+
+Use **Copy Request** — the QR code is for admins running one of the phone or
+desktop apps, and the control panel in your browser cannot read one. Send the
+copied text to whatever machine you have the control panel open on, however you
+normally move text between your devices.
 
 ### 3. Approve it, from the server
 
 Back in the control panel, on the **Devices** tab:
 
 1. Click **Add Device**.
-2. Paste the device's request into the **Join request** box under **Link Device**.
-   (If the device showed a QR code, scan it with the device you have the panel
-   open on, or use **Copy Request** and paste it across however you normally move
-   text between your machines.)
+2. Paste the request into the **Join request** box under **Link Device**.
 3. A confirmation appears — click **Add**.
 
 The device shows up in the **Devices** list. Give it a moment and it comes online.
@@ -101,21 +103,23 @@ Once your devices are on the network, you can let them reach the other services
 running on this server — your Bitcoin node, your file server, anything with an
 address — without opening a single port to the internet.
 
-1. Open the service you want to reach and find its list of addresses.
-2. Click **Share Over Nostr VPN**.
-3. Accept the suggested port, or pick another, and save.
+Open the specific interface of the other service you want to reach — its RPC,
+its web page, whichever one you use. On that interface's page you'll find a
+**Nostr VPN** table, alongside the one Tor uses. Add a share there, accept the
+suggested port, and save.
 
-A new address appears in that service's list. It works from any device on your
-Nostr VPN network, and from nowhere else. To stop sharing it, use **Stop Sharing
-Over Nostr VPN** on that same address.
+A new address appears with that interface's other addresses. It works from any
+device on your Nostr VPN network and from nowhere else — not from your local
+network, and not from the internet. To stop sharing it, use **Stop Sharing Over
+Nostr VPN** on that address.
 
 ## Using Nostr VPN
 
 ### Control panel
 
-The control panel is where you administer the network: create and rename
-networks, activate the one in use, watch which devices are online, and add or
-remove them. Sign in as `admin` with the password you set.
+The control panel is where you administer the network: rename it, watch which
+devices are online, and add or remove them. Sign in as `admin` with the password
+you set.
 
 The **Exit Nodes** tab is where you would route a device's whole internet
 connection through another peer. See the upstream README for how exit nodes and
