@@ -1,0 +1,13 @@
+name: Sync next
+
+on:
+  push:
+    branches: ['master']
+  workflow_dispatch:
+
+jobs:
+  sync:
+    uses: Start9Labs/start-technologies/.github/workflows/syncNext.yml@master
+    permissions:
+      contents: write
+      pull-requests: write
