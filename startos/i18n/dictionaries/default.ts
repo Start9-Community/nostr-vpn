@@ -23,6 +23,26 @@ const dict = {
 
   // init/watchCredentials.ts
   'Set a password before opening the Nostr VPN control panel': 14,
+  // actions/exposeOverMesh.ts
+  'Share Over Nostr VPN': 15,
+  'Make this interface reachable from your other Nostr VPN devices, at this server’s mesh address. Nothing is published to the internet.': 16,
+  Port: 17,
+  'The port your other devices will use to reach this service over the mesh.': 18,
+  'That interface no longer exists.': 19,
+  'That interface is not reachable from this server.': 20,
+  'Port ${port} is already shared over Nostr VPN.': 21,
+  'Shared Over Nostr VPN': 22,
+  'Saved. The address appears in this service’s list once the mesh is up.': 23,
+
+  // actions/stopSharingOverMesh.ts
+  'Stop Sharing Over Nostr VPN': 24,
+  'Stop making this interface reachable from your other Nostr VPN devices.': 25,
+  'No Longer Shared': 26,
+  'That service is no longer reachable over Nostr VPN.': 27,
+
+  // main.ts — shared-service forwarders
+  'A shared service is reachable': 28,
+  'A shared service is not reachable': 29,
 } as const
 
 /**

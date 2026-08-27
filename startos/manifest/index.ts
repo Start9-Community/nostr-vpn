@@ -11,6 +11,7 @@ export const manifest = setupManifest({
   donationUrl: null,
   description: { short, long },
   virtualNetworking: true,
+  plugins: ['url-v0'],
   volumes: ['main'],
   images: {
     app: {
