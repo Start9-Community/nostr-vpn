@@ -17,8 +17,9 @@ Two things commonly catch people out, so read them before you start:
 
 - **Your devices do not connect with a generic WireGuard app.** Nostr VPN has its
   own apps, and only those can join. There is no WireGuard config file to export.
-- **The server starts idle.** Its private network is set up for you on first
-  run, but it carries no traffic until you switch the VPN on.
+- **Your server sets itself up.** Its private network is created and switched on
+  the first time the service starts, so there is nothing to configure before you
+  start adding devices.
 
 ## Getting set up
 
@@ -26,11 +27,10 @@ Two things commonly catch people out, so read them before you start:
    strong password and shows it to you **once** — copy it somewhere safe before
    you close the window. Your username is `admin`.
 2. Open the **Control Panel** and sign in as `admin` with that password.
-3. Switch **VPN** on, using the toggle in the panel header.
 
 That is the whole setup. Your server already has a private network of its own —
-called **Network 1**, created for you on first run — and it is already the
-network's administrator, so it is ready for devices to join.
+called **Network 1**, created for you the first time the service ran — and it is
+already the network's administrator, so it is ready for devices to join.
 
 Worth one more minute: your server names itself with a random string of letters,
 and every device you add will see that name in its device list. On the
@@ -95,6 +95,20 @@ ID _and_ it has your server's.
 3. **On the server:** under **Add Device → Add by Device ID**, paste the device's
    ID, optionally give it a name, and click **Add**.
 
+## Reaching your other services
+
+Once your devices are on the network, you can let them reach the other services
+running on this server — your Bitcoin node, your file server, anything with an
+address — without opening a single port to the internet.
+
+1. Open the service you want to reach and find its list of addresses.
+2. Click **Share Over Nostr VPN**.
+3. Accept the suggested port, or pick another, and save.
+
+A new address appears in that service's list. It works from any device on your
+Nostr VPN network, and from nowhere else. To stop sharing it, use **Stop Sharing
+Over Nostr VPN** on that same address.
+
 ## Using Nostr VPN
 
 ### Control panel
@@ -112,10 +126,3 @@ MagicDNS work.
 - **Set Control Panel Password** — generates a new random password and shows it
   once. Run it whenever you want to change the password. The new one takes effect
   immediately, and anyone signed in with the old one is locked out.
-
-## Limitations
-
-- **The VPN switch does not survive a restart.** Whenever the service restarts —
-  after an update, a reboot, or a manual stop — the network stays configured but
-  the VPN comes back **off**, and you have to switch it on again in the control
-  panel. Settings' **Start VPN automatically** has no effect here.

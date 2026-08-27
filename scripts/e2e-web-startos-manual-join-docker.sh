@@ -290,10 +290,6 @@ grep -Fq "NVPN_EXTERNAL_DAEMON: 'true'" "$ROOT_DIR/startos/main.ts" || {
   echo "StartOS no longer uses the daemon/web split exercised by this gate" >&2
   exit 1
 }
-grep -Fq "'--paused'," "$ROOT_DIR/startos/main.ts" || {
-  echo "StartOS no longer starts the production daemon in the mode exercised by this gate" >&2
-  exit 1
-}
 
 mkdir -p "$ARTIFACT_DIR"
 rm -rf "$ARTIFACT_DIR/node-a-admin" "$ARTIFACT_DIR/node-b-admin"

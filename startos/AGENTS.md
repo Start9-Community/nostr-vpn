@@ -53,6 +53,17 @@ and the PR body.
   service LXC's own user namespace, so there is no separate capability
   declaration to look for.
 
-- **`--paused` on the daemon is required by upstream's own gate.**
-  `scripts/e2e-web-startos-manual-join-docker.sh` asserts this file's daemon
-  command carries it; dropping it fails upstream CI.
+- **Forwarders bind the mesh device, never an address.** `nvpn` destroys and
+  recreates `utun100` when the first peer joins, so a socket bound to its
+  address dies silently. `SO_BINDTODEVICE` plus the interface-index supervisor
+  in `main.ts` is what survives that — don't simplify either away.
+
+- **Both share actions must call `syncExportedUrls` after writing.** Init's
+  reactive read of `exposures.json` / `mesh-status.json` does not re-fire the
+  url-v0 export when those files change, so without the explicit call a share
+  only reaches the target service's URL list after the next `package rebuild`.
+  `main`'s own watch on `exposures.json` does fire — the forwarder appearing is
+  not evidence the export did.
+
+- **A share targets the plaintext bridge port.** No certificate names a tunnel
+  address, and the mesh already encrypts end to end.
