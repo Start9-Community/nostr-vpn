@@ -5,12 +5,12 @@ export const manifest = setupManifest({
   id: 'nostr-vpn',
   title: 'Nostr VPN',
   license: 'MIT',
-  packageRepo: 'https://github.com/mmalmi/nostr-vpn',
+  packageRepo: 'https://github.com/Start9-Community/nostr-vpn',
   upstreamRepo: 'https://github.com/mmalmi/nostr-vpn',
   marketingUrl: 'https://github.com/mmalmi/nostr-vpn',
   donationUrl: null,
   description: { short, long },
-  nestedRuntime: true,
+  virtualNetworking: true,
   volumes: ['main'],
   images: {
     app: {
@@ -22,14 +22,6 @@ export const manifest = setupManifest({
       },
       arch: ['x86_64', 'aarch64'],
     },
-  },
-  alerts: {
-    install: null,
-    update: null,
-    uninstall: null,
-    restore: null,
-    start: null,
-    stop: null,
   },
   dependencies: {},
 })
