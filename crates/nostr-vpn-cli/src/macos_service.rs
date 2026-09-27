@@ -75,7 +75,6 @@ pub(super) fn macos_install_service(
     config_path: &Path,
     iface: &str,
     mesh_refresh_interval_secs: u64,
-    log_path: &Path,
     force: bool,
 ) -> Result<()> {
     let plist_path = macos_service_plist_path(config_path);
@@ -91,33 +90,16 @@ pub(super) fn macos_install_service(
     macos_service_bootout(config_path, true)?;
     stop_existing_daemons_before_service_install(config_path)?;
     let service_executable = macos_service_binary_path(config_path);
-    crate::service_management::install_service_executable_copy(executable, &service_executable)?;
+    crate::macos_privileged_files::install_executable(executable, &service_executable)?;
     let plist = macos_service_plist_content(
         &service_label,
         &service_executable,
         config_path,
         iface,
         mesh_refresh_interval_secs,
-        log_path,
     );
 
-    if let Some(parent) = plist_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let temp = plist_path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temp, plist).with_context(|| format!("failed to write {}", temp.display()))?;
-    #[cfg(unix)]
-    fs::set_permissions(&temp, fs::Permissions::from_mode(0o644))
-        .with_context(|| format!("failed to chmod {}", temp.display()))?;
-    fs::rename(&temp, &plist_path).with_context(|| {
-        format!(
-            "failed to move {} into {}",
-            temp.display(),
-            plist_path.display()
-        )
-    })?;
+    crate::macos_privileged_files::publish(&mut plist.as_bytes(), &plist_path, 0o644)?;
 
     macos_activate_service(config_path, &plist_path)?;
     println!("installed system service: {}", plist_path.display());
@@ -193,13 +175,11 @@ pub(super) fn macos_service_plist_content(
     config_path: &Path,
     iface: &str,
     mesh_refresh_interval_secs: u64,
-    log_path: &Path,
 ) -> String {
     let exec = xml_escape(&executable.display().to_string());
     let config = xml_escape(&config_path.display().to_string());
     let iface = xml_escape(iface);
     let interval = mesh_refresh_interval_secs.to_string();
-    let log = xml_escape(&log_path.display().to_string());
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -226,10 +206,6 @@ pub(super) fn macos_service_plist_content(
   <true/>
   <key>ProcessType</key>
   <string>Interactive</string>
-  <key>StandardOutPath</key>
-  <string>{log}</string>
-  <key>StandardErrorPath</key>
-  <string>{log}</string>
 </dict>
 </plist>
 "#
@@ -261,6 +237,14 @@ pub(super) fn macos_service_activation_commands(
 
 #[cfg(target_os = "macos")]
 fn macos_activate_service(config_path: &Path, plist_path: &Path) -> Result<()> {
+    crate::macos_privileged_files::validate_artifact(plist_path)?;
+    let binary_path = macos_service_binary_path(config_path);
+    crate::macos_privileged_files::validate_artifact(&binary_path)?;
+    if macos_service_executable_path(plist_path).as_ref() != Some(&binary_path) {
+        return Err(anyhow!(
+            "service executable is not the protected helper; reinstall the service"
+        ));
+    }
     for args in macos_service_activation_commands(config_path, plist_path) {
         match args.first().map(String::as_str) {
             Some("enable") => macos_service_enable(config_path)?,

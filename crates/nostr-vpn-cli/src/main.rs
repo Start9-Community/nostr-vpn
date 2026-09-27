@@ -13,6 +13,8 @@ mod join_request_ipc;
 mod linux_network;
 #[cfg(any(target_os = "macos", test))]
 mod macos_network;
+#[cfg(target_os = "macos")]
+mod macos_privileged_files;
 #[cfg(any(target_os = "macos", test))]
 mod macos_service;
 mod network_signaling;

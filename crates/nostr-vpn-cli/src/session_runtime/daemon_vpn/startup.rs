@@ -53,6 +53,13 @@ pub(super) fn daemon_service_supervisor_requests_restart(
 }
 
 pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpnStartup> {
+    #[cfg(target_os = "macos")]
+    if args.service {
+        let executable = std::env::current_exe()?;
+        if crate::macos_privileged_files::helper_destination(&executable).is_some() {
+            crate::macos_privileged_files::validate_artifact(&executable)?;
+        }
+    }
     if args.iface.trim().is_empty() {
         return Err(anyhow!("--iface must not be empty"));
     }

@@ -108,7 +108,6 @@ fn macos_service_plist_runs_service_supervised_daemon() {
         Path::new("/Users/example/Library/Application Support/nvpn/config.toml"),
         "utun100",
         60,
-        Path::new("/Users/example/Library/Logs/nvpn/daemon.log"),
     );
 
     assert!(plist.contains("<string>daemon</string>"));
@@ -118,6 +117,10 @@ fn macos_service_plist_runs_service_supervised_daemon() {
         plist.contains("<string>--mesh-refresh-interval-secs</string>\n    <string>60</string>")
     );
     assert!(plist.contains("<key>ProcessType</key>\n  <string>Interactive</string>"));
+    // launchd must not open user-controlled paths as root before the daemon's
+    // checked log opener gets to reject symlinks and hard links.
+    assert!(!plist.contains("StandardOutPath"));
+    assert!(!plist.contains("StandardErrorPath"));
 }
 
 #[test]
@@ -128,7 +131,6 @@ fn macos_service_plist_parser_extracts_service_executable() {
         Path::new("/Users/example/Library/Application Support/nvpn/config.toml"),
         "utun100",
         20,
-        Path::new("/Users/example/Library/Logs/nvpn/daemon.log"),
     );
 
     assert_eq!(
