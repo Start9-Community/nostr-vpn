@@ -12,6 +12,7 @@ ACTION="${1:-${NVPN_MACOS_NETWORK_ACTION:-}}"
 NVPN_BIN="${NVPN_E2E_BINARY:-}"
 STATE_DIR="${NVPN_MACOS_NETWORK_STATE_DIR:-}"
 CONFIG="${NVPN_E2E_CONFIG:-}"
+DAEMON_LOG=""
 WG_CONFIG="${NVPN_WG_EXIT_CONFIG_FILE:-}"
 RESULT_DIR="$STATE_DIR/results"
 ENDPOINT_HOST="${NVPN_MACOS_WG_ENDPOINT_HOST:-}"
@@ -103,6 +104,14 @@ validate_inputs() {
 
 nvpn() {
   "$NVPN_BIN" "$@"
+}
+
+resolve_daemon_log() {
+  DAEMON_LOG="$(
+    nvpn status --json --discover-secs 0 --config "$CONFIG" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon"]["log_file"])'
+  )"
+  [[ "$DAEMON_LOG" == /* ]] || fail "daemon status did not identify an absolute log path"
 }
 
 privileged_nvpn() {
@@ -529,7 +538,7 @@ capture_wireguard_readiness_failure() {
     >"$RESULT_DIR/wireguard-readiness-dns.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/wireguard-readiness-status.json" 2>&1 || true
-  tail -n 240 "$STATE_DIR/daemon.log" \
+  tail -n 240 "$DAEMON_LOG" \
     >"$RESULT_DIR/wireguard-readiness-daemon.log" 2>&1 || true
 }
 
@@ -585,19 +594,19 @@ PY
 }
 
 rebind_count() {
-  grep -Fc 'FIPS underlay carrier(s) rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+  grep -Fc 'FIPS underlay carrier(s) rebound' "$DAEMON_LOG" 2>/dev/null \
     || true
 }
 
 wireguard_rebind_count() {
-  grep -Fc 'WG upstream rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+  grep -Fc 'WG upstream rebound' "$DAEMON_LOG" 2>/dev/null \
     || true
 }
 
 wireguard_last_rebind_target_is() {
   local expected_iface="$1" last_rebind
   last_rebind="$(
-    grep -F 'WG upstream rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+    grep -F 'WG upstream rebound' "$DAEMON_LOG" 2>/dev/null \
       | tail -n 1
   )"
   [[ "$last_rebind" == *" -> $expected_iface with a fresh handshake" ]]
@@ -828,11 +837,11 @@ capture_underlay_routes() {
 crash_startup_log_order_is_valid() {
   local wireguard_line fips_line
   wireguard_line="$({
-    grep -nF 'fips: WG upstream up on ' "$STATE_DIR/daemon.log" \
+    grep -nF 'fips: WG upstream up on ' "$DAEMON_LOG" \
       || true
   } | tail -n 1 | cut -d: -f1)"
   fips_line="$({
-    grep -nF 'daemon: FIPS private mesh on ' "$STATE_DIR/daemon.log" \
+    grep -nF 'daemon: FIPS private mesh on ' "$DAEMON_LOG" \
       || true
   } | tail -n 1 | cut -d: -f1)"
   [[ "$wireguard_line" =~ ^[1-9][0-9]*$ \
@@ -843,9 +852,9 @@ crash_startup_log_order_is_valid() {
 capture_crash_startup_log_order() {
   {
     printf '%s\n' '--- WireGuard startup receipts ---'
-    grep -nF 'fips: WG upstream up on ' "$STATE_DIR/daemon.log" || true
+    grep -nF 'fips: WG upstream up on ' "$DAEMON_LOG" || true
     printf '%s\n' '--- FIPS startup completion receipts ---'
-    grep -nF 'daemon: FIPS private mesh on ' "$STATE_DIR/daemon.log" || true
+    grep -nF 'daemon: FIPS private mesh on ' "$DAEMON_LOG" || true
   }
 }
 
@@ -922,7 +931,7 @@ record_crash_external_audit() {
     >"$RESULT_DIR/crash-external-$label-startup-order.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/crash-external-$label-status.json" 2>&1 || true
-  cp -p "$STATE_DIR/daemon.log" \
+  cp -p "$DAEMON_LOG" \
     "$RESULT_DIR/crash-external-$label-daemon.log" 2>/dev/null || true
 }
 
@@ -984,7 +993,7 @@ capture_crash_external_failure() {
     >"$RESULT_DIR/crash-external-failure-startup-order.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/crash-external-failure-status.json" 2>&1 || true
-  cp -p "$STATE_DIR/daemon.log" \
+  cp -p "$DAEMON_LOG" \
     "$RESULT_DIR/crash-external-failure-daemon.log" 2>/dev/null || true
 }
 
@@ -1104,11 +1113,11 @@ prepare_gate() {
   fi
   runtime_has_no_fips_peers "$RESULT_DIR/fips-zero-peer-initial.json" \
     || fail "isolated zero-peer FIPS runtime changed after initial readiness"
-  [[ -s "$STATE_DIR/daemon.log" ]] \
+  [[ -s "$DAEMON_LOG" ]] \
     || fail "the owned daemon did not write its config-scoped log"
   grep -Fq \
     " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
-    "$STATE_DIR/daemon.log" \
+    "$DAEMON_LOG" \
     || fail "WireGuard did not bind to the initial physical underlay before readiness"
   assert_single_owned_daemon || fail "the gate does not own exactly one daemon"
   wireguard_interface >"$STATE_DIR/wireguard-interface"
@@ -1155,7 +1164,7 @@ set_dns_case() {
 }
 
 capture_dns_case_failure() {
-  cp -p "$STATE_DIR/daemon.log" \
+  cp -p "$DAEMON_LOG" \
     "$RESULT_DIR/dns-$DNS_LABEL-daemon.log" 2>/dev/null || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/dns-$DNS_LABEL-status.json" 2>&1 || true
@@ -1375,7 +1384,7 @@ capture_underlay_recovery_failure() {
   } >"$RESULT_DIR/underlay-failure-$label.txt"
   capture_underlay_routes \
     >"$RESULT_DIR/underlay-failure-$label-routes.txt" 2>&1 || true
-  cp -p "$STATE_DIR/daemon.log" \
+  cp -p "$DAEMON_LOG" \
     "$RESULT_DIR/underlay-failure-$label-daemon.log" 2>/dev/null || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/underlay-failure-$label-status.json" 2>&1 || true
@@ -1562,7 +1571,7 @@ start_underlay_gate() {
 wireguard_bind_receipt_count() {
   grep -Fc \
     " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
-    "$STATE_DIR/daemon.log" 2>/dev/null || true
+    "$DAEMON_LOG" 2>/dev/null || true
 }
 
 record_crash_restart_probe() {
@@ -1855,6 +1864,11 @@ cleanup_gate() {
 }
 
 validate_inputs
+case "$ACTION" in
+  prepare|dns-case|underlay-start|underlay-run|crash-restart|direct)
+    resolve_daemon_log
+    ;;
+esac
 case "$ACTION" in
   quiesce-installed-state) quiesce_installed_state ;;
   restore-installed-state) restore_installed_state ;;

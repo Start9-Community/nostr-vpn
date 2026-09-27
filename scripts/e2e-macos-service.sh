@@ -170,9 +170,12 @@ if [ "$DETECTED_RUNNING" != "true" ]; then
     echo "Service process:"
     ps -ww -p "$service_pid" -o pid=,stat=,command= || true
   fi
-  if [[ -f "$TEST_DIR/daemon.log" ]]; then
+  daemon_log="$(printf '%s' "$runtime_json" | python3 -c '
+import json,sys; print(json.load(sys.stdin).get("daemon",{}).get("log_file", ""))'
+  )"
+  if [[ -f "$daemon_log" ]]; then
     echo "Daemon log:"
-    tail -n 100 "$TEST_DIR/daemon.log" || true
+    tail -n 100 "$daemon_log" || true
   fi
   exit 1
 fi

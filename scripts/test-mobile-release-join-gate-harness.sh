@@ -1373,6 +1373,33 @@ PY
   }
 )
 (
+  log_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-join-log.XXXXXX")"
+  trap 'rm -rf "$log_tmp"' EXIT
+  sed -n '/^resolve_daemon_log() {/,/^}$/p; /^require_delivery_log() {/,/^}$/p' \
+    "$ROOT/scripts/macos-release-mobile-join-remote.sh" >"$log_tmp/functions.sh"
+  # shellcheck disable=SC1090
+  source "$log_tmp/functions.sh"
+  CLI=log_status
+  CONFIG="$log_tmp/config.toml"
+  ARTIFACT_DIR="$log_tmp"
+  MANUAL_JOIN_FIXTURE=log_recipient
+  fixture_recipient_hex="$(printf '%064d' 1)"
+  mkdir -p "$log_tmp/protected runtime"
+  printf 'delivered and applied one signed join roster over FIPS-TCP to %s\n' \
+    "$fixture_recipient_hex" >"$log_tmp/protected runtime/daemon.log"
+  log_status() {
+    [[ "$*" == "status --json --discover-secs 0 --config $CONFIG" ]] || return 1
+    printf '{"daemon":{"log_file":"%s"}}\n' "$log_tmp/protected runtime/daemon.log"
+  }
+  log_recipient() { printf '%s\n' "$fixture_recipient_hex"; }
+  require_delivery_log fixture 0 >/dev/null 2>&1
+  [[ "$DAEMON_LOG" == "$log_tmp/protected runtime/daemon.log" ]] \
+    && [[ ! -e "$log_tmp/daemon.log" ]] || {
+    echo "macOS join delivery did not read the status-reported protected log" >&2
+    exit 1
+  }
+)
+(
   profile_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-profile-swap.XXXXXX")"
   trap 'find "$profile_tmp" -depth -delete' EXIT
   functions_file="$profile_tmp/functions.sh"

@@ -60,7 +60,7 @@ CONFIG_BACKUP="$PROFILE_STATE_DIR/prior"
 # Short and stable for macOS sockaddr_un and interrupted-run cleanup.
 TEST_CONFIG_DIR="/tmp/nvpn-rj-$UID"
 CONFIG="$TEST_CONFIG_DIR/config.toml"
-DAEMON_LOG="$TEST_CONFIG_DIR/daemon.log"
+DAEMON_LOG=""
 TEST_PROFILE_MARKER="$PROFILE_STATE_DIR/state"
 TEST_SERVICE_OWNED="$PROFILE_STATE_DIR/service-owned"
 IMPORT_VERIFIED="$ARTIFACT_DIR/import-verified"
@@ -124,6 +124,7 @@ assert json.loads(sys.argv[1]).get("daemon", {}).get("running") is True
   done
   echo "macOS Release join shipped service did not become ready" >&2
   "$CLI" service status --json --config "$CONFIG" >&2 || true
+  resolve_daemon_log || true
   tail -n 120 "$DAEMON_LOG" >&2 2>/dev/null || true
   return 1
 }
@@ -158,6 +159,7 @@ assert d.get("running") is True and listener_ready
   done
   echo "macOS Release join listener did not authenticate a carrier peer" >&2
   printf '%s\n' "$runtime_json" >&2
+  resolve_daemon_log || true
   tail -n 120 "$DAEMON_LOG" >&2 2>/dev/null || true
   return 1
 }
@@ -267,12 +269,25 @@ v=json.loads(sys.argv[1]); assert not v.get("installed") and not v.get("running"
   assert_service_ready
 }
 
+resolve_daemon_log() {
+  DAEMON_LOG="$(
+    "$CLI" status --json --discover-secs 0 --config "$CONFIG" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon"]["log_file"])'
+  )"
+  [[ "$DAEMON_LOG" == /* ]] || {
+    echo "daemon status did not identify an absolute log path" >&2
+    return 1
+  }
+}
+
 daemon_log_offset() {
+  resolve_daemon_log
   [[ -f "$DAEMON_LOG" ]] && stat -f %z "$DAEMON_LOG" || printf '0\n'
 }
 
 require_delivery_log() {
   local recipient_hex offset="$2" expected delta deadline=$((SECONDS + 3))
+  resolve_daemon_log
   recipient_hex="$("$MANUAL_JOIN_FIXTURE" normalize-npub "$1")"
   [[ "$recipient_hex" =~ ^[0-9a-f]{64}$ && "$offset" =~ ^[0-9]+$ ]] || return 2
   expected="delivered and applied one signed join roster over FIPS-TCP to $recipient_hex"
@@ -414,6 +429,7 @@ capture_diagnostics() {
   find "$TEST_CONFIG_DIR/config.toml.join-roster-outbox" -maxdepth 1 -type f \
     -exec basename {} \; 2>/dev/null | sort
   echo "NVPN_RELEASE_JOIN_DIAGNOSTIC daemon-log"
+  resolve_daemon_log || true
   tail -n 240 "$DAEMON_LOG" 2>/dev/null
   return 0
 }
