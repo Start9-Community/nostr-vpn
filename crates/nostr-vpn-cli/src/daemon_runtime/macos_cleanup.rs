@@ -152,7 +152,7 @@ pub(crate) fn repair_saved_network_state(config_path: &Path) -> Result<bool> {
 
     #[cfg(target_os = "macos")]
     {
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let Some(state) = read_daemon_network_cleanup_state(&path)? else {
             return repair_legacy_macos_network_state(config_path);
         };
@@ -217,7 +217,7 @@ pub(crate) fn repair_saved_network_state(config_path: &Path) -> Result<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let Some(mut state) = read_daemon_network_cleanup_state(&path)? else {
             return Ok(false);
         };
@@ -238,7 +238,7 @@ pub(crate) fn repair_saved_network_state(config_path: &Path) -> Result<bool> {
 
     #[cfg(target_os = "windows")]
     {
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let Some(mut state) = read_daemon_network_cleanup_state(&path)? else {
             return Ok(false);
         };

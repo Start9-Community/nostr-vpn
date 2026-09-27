@@ -2,11 +2,11 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use nostr_vpn_core::macos_file_io::{clear_inherited_acl, reject_write_acl};
 
 pub(crate) fn helper_destination(path: &Path) -> Option<PathBuf> {
     let helpers = Path::new("/Library/PrivilegedHelperTools");
@@ -159,6 +159,7 @@ pub(crate) fn publish(contents: &mut impl Read, destination: &Path, mode: u32) -
     let result = (|| -> Result<()> {
         // Copy bytes into our newly created inode; fs::copy on macOS can clone
         // the installing user's ownership and ACLs from the app bundle.
+        clear_inherited_acl(&file)?;
         io::copy(contents, &mut file)?;
         std::os::unix::fs::fchown(&file, Some(0), Some(0))?;
         file.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -175,57 +176,75 @@ pub(crate) fn publish(contents: &mut impl Read, destination: &Path, mode: u32) -
     result.context("publish protected system artifact")
 }
 
-// Darwin ACLs can grant writes even when Unix mode bits appear protected.
-// Deny and read-only entries are fine; reject every write grant, including
-// inherited grants. This deliberately fails closed for unusual system ACLs.
-fn reject_write_acl(file: &File) -> Result<()> {
-    use std::ffi::c_void;
-    unsafe extern "C" {
-        fn acl_get_fd_np(fd: i32, kind: u32) -> *mut c_void;
-        fn acl_get_entry(acl: *mut c_void, which: i32, entry: *mut *mut c_void) -> i32;
-        fn acl_get_tag_type(entry: *mut c_void, tag: *mut u32) -> i32;
-        fn acl_get_permset_mask_np(entry: *mut c_void, mask: *mut u64) -> i32;
-        fn acl_free(acl: *mut c_void) -> i32;
+/// A user may edit configuration, but must not forge the daemon's record of
+/// routes/DNS it owns. Keep that authority under protected system ancestors.
+pub(crate) fn runtime_directory(config_path: &Path) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+    let config_path = nostr_vpn_core::macos_file_io::absolute_path(config_path)?;
+    let identity = format!("{:x}", Sha256::digest(config_path.as_os_str().as_bytes()));
+    Ok(Path::new("/Library/Application Support/nvpn/runtime").join(identity))
+}
+
+pub(crate) fn network_cleanup_path(config_path: &Path) -> Result<PathBuf> {
+    require_root()?;
+    let config_path = nostr_vpn_core::macos_file_io::absolute_path(config_path)?;
+    let path = runtime_directory(&config_path)?.join("daemon.cleanup.json");
+    migrate_private_state(&config_path.with_file_name("daemon.cleanup.json"), &path)?;
+    Ok(path)
+}
+
+pub(crate) fn migrate_private_state(legacy: &Path, destination: &Path) -> Result<()> {
+    require_root()?;
+    let parent = destination
+        .parent()
+        .context("private state has no parent")?;
+    protected_directory(parent, true)?;
+    let marker = destination.with_extension("migrated");
+    match fs::symlink_metadata(&marker) {
+        Ok(_) => return validate_artifact(&marker),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    const ACL_TYPE_EXTENDED: u32 = 0x100;
-    const ACL_EXTENDED_ALLOW: u32 = 1;
-    const WRITE_PERMISSIONS: u64 =
-        (1 << 2) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 10) | (1 << 12) | (1 << 13);
-    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
-    if acl.is_null() {
-        let error = io::Error::last_os_error();
-        // On a valid descriptor Darwin's FILESEC_ACL lookup returns ENOENT
-        // when the inode has no extended ACL (acl_file.c / filesec.c).
-        if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(());
-        }
-        return Err(error).context("read system artifact ACL");
-    }
-    let result = (|| -> Result<()> {
-        let mut which = 0; // ACL_FIRST_ENTRY
-        loop {
-            let mut entry = std::ptr::null_mut();
-            if unsafe { acl_get_entry(acl, which, &mut entry) } != 0 {
-                // Darwin uses EINVAL to indicate the end of this valid ACL.
-                if io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
-                    break;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => validate_artifact(destination)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let source = nostr_vpn_core::macos_file_io::OpenOptions::new()
+                .read(true)
+                .open(legacy);
+            match source {
+                Ok(mut file) => {
+                    let metadata = file.metadata()?;
+                    // Older releases wrote 0644 journals. Read permission is
+                    // compatible; non-root write permission is not. The new
+                    // copy is always private regardless of the legacy mode.
+                    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+                        bail!(
+                            "untrusted legacy network cleanup record; refusing automatic migration"
+                        );
+                    }
+                    reject_write_acl(&file)?;
+                    let mut raw = Vec::new();
+                    file.by_ref()
+                        .take(4 * 1024 * 1024 + 1)
+                        .read_to_end(&mut raw)?;
+                    if raw.len() > 4 * 1024 * 1024 {
+                        bail!("legacy network cleanup record is too large");
+                    }
+                    publish(&mut raw.as_slice(), destination, 0o600)?;
                 }
-                return Err(io::Error::last_os_error()).context("read ACL entry");
-            }
-            which = -1; // ACL_NEXT_ENTRY
-            let mut tag = 0;
-            let mut permissions = 0;
-            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0
-                || unsafe { acl_get_permset_mask_np(entry, &mut permissions) } != 0
-            {
-                return Err(io::Error::last_os_error()).context("read ACL permissions");
-            }
-            if tag == ACL_EXTENDED_ALLOW && permissions & WRITE_PERMISSIONS != 0 {
-                bail!("system artifact path has a write-granting ACL");
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("open legacy network cleanup record"),
             }
         }
-        Ok(())
-    })();
-    unsafe { acl_free(acl) };
-    result
+        Err(error) => return Err(error.into()),
+    }
+    // Commit the marker after the new record, before unlinking the old one.
+    // It prevents replay after a successful cleanup removes the new record.
+    publish(&mut &b"1\n"[..], &marker, 0o600)?;
+    match nostr_vpn_core::macos_file_io::remove_file(legacy) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove migrated network cleanup record"),
+    }
 }

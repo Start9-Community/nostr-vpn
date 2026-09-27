@@ -37,7 +37,7 @@ fn service_install(args: ServiceInstallArgs) -> Result<()> {
     let config_path = fs::canonicalize(&config_path)
         .with_context(|| format!("failed to canonicalize {}", config_path.display()))?;
     #[cfg(not(target_os = "macos"))]
-    let log_path = daemon_log_file_path(&config_path);
+    let log_path = daemon_log_file_path(&config_path)?;
     #[cfg(not(target_os = "macos"))]
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
@@ -103,7 +103,6 @@ pub(crate) fn ensure_service_config_exists(config_path: &Path) -> Result<()> {
         config.ensure_defaults();
         maybe_autoconfigure_node(&mut config);
         config.save(config_path)?;
-        repair_service_config_ownership(config_path)?;
         return Ok(());
     }
 
@@ -111,46 +110,6 @@ pub(crate) fn ensure_service_config_exists(config_path: &Path) -> Result<()> {
     config.ensure_defaults();
     maybe_autoconfigure_node(&mut config);
     config.save(config_path)
-}
-
-#[cfg(unix)]
-fn repair_service_config_ownership(config_path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::metadata(config_path)
-        .with_context(|| format!("failed to inspect config {}", config_path.display()))?;
-    if metadata.uid() != 0 {
-        return Ok(());
-    }
-
-    let Some(parent) = config_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(());
-    };
-    let parent_metadata = fs::metadata(parent)
-        .with_context(|| format!("failed to inspect config directory {}", parent.display()))?;
-    if parent_metadata.uid() == 0 {
-        return Ok(());
-    }
-
-    std::os::unix::fs::chown(
-        config_path,
-        Some(parent_metadata.uid()),
-        Some(parent_metadata.gid()),
-    )
-    .with_context(|| {
-        format!(
-            "failed to restore user ownership on config {}",
-            config_path.display()
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn repair_service_config_ownership(_config_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn service_uninstall(args: ServiceUninstallArgs) -> Result<()> {

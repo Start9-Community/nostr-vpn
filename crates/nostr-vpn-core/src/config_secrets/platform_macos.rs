@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 mod platform {
-    use std::fs::{self, File, OpenOptions};
+    use crate::macos_file_io::{self as fs, File, OpenOptions};
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};

@@ -412,6 +412,8 @@ fn daemon_status_ignores_and_quarantines_corrupt_daemon_state() {
 
     let status = crate::daemon_status(&config_path).expect("daemon status should succeed");
     assert!(status.state.is_none());
+    #[cfg(target_os = "macos")]
+    assert!(status.log_file.starts_with("/Library/Application Support/nvpn/runtime"));
     assert!(!state_path.exists());
 
     let quarantined: Vec<_> = fs::read_dir(&dir)
@@ -438,8 +440,7 @@ fn corrupt_network_cleanup_ownership_remains_fail_closed() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("nvpn-cleanup-corrupt-test-{nonce}"));
     fs::create_dir_all(&dir).expect("create temp dir");
-    let config_path = dir.join("config.toml");
-    let cleanup_path = daemon_network_cleanup_file_path(&config_path);
+    let cleanup_path = dir.join("cleanup/daemon.cleanup.json");
     fs::create_dir_all(cleanup_path.parent().expect("cleanup parent"))
         .expect("create cleanup parent");
     fs::write(&cleanup_path, b"{not-valid-json").expect("write corrupt cleanup ownership");
@@ -475,7 +476,7 @@ fn daemon_network_cleanup_snapshot_is_durable_and_private() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("nvpn-cleanup-mode-test-{nonce}"));
     fs::create_dir_all(&dir).expect("create temp dir");
-    let cleanup_path = daemon_network_cleanup_file_path(&dir.join("config.toml"));
+    let cleanup_path = dir.join("cleanup/daemon.cleanup.json");
     write_daemon_network_cleanup_state(&cleanup_path, &DaemonNetworkCleanupState::default())
         .expect("persist cleanup ownership privately");
     assert!(
@@ -511,6 +512,29 @@ fn daemon_network_cleanup_snapshot_is_durable_and_private() {
     }
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn legacy_macos_cleanup_record_retains_route_ownership_after_upgrade() {
+    let dir = std::env::temp_dir().join(format!("nvpn-legacy-cleanup-{}", rand::random::<u128>()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("daemon.cleanup.json");
+    // The pre-private-journal format predates secure_dns_resolver_files.
+    let legacy = br#"{"iface":"utun42","endpoint_bypass_routes":["192.0.2.1"],"managed_routes":[{"target":"192.0.2.1","gateway":"192.0.2.254","interface":"en0"}],"original_default_route":null,"ipv4_forward_was_enabled":false,"pf_was_enabled":false}"#;
+    let mut padded = legacy.to_vec();
+    padded.extend_from_slice(b"\n\0\0");
+    fs::write(&path, padded).unwrap();
+    let state = read_daemon_network_cleanup_state(&path).unwrap().unwrap();
+    assert_eq!(state.iface, "utun42");
+    assert_eq!(state.endpoint_bypass_routes, ["192.0.2.1"]);
+    assert_eq!(state.managed_routes[0].gateway.as_deref(), Some("192.0.2.254"));
+    assert_eq!(state.managed_routes[0].interface.as_deref(), Some("en0"));
+    assert_eq!(state.pf_was_enabled, Some(false));
+    assert!(!state.secure_dns_resolver_files);
+    write_daemon_network_cleanup_state(&path, &state).unwrap();
+    assert_eq!(read_daemon_network_cleanup_state(&path).unwrap(), Some(state));
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

@@ -1,4 +1,7 @@
+#[cfg(target_os = "macos")]
+use nostr_vpn_core::macos_file_io as fs;
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

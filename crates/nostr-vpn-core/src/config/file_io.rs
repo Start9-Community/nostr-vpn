@@ -33,6 +33,16 @@ pub fn write_private_file_preserving_user_owner(
     write_private_file_with_owner(path, raw, desired_owner)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn write_private_file_with_owner(
+    path: &Path,
+    raw: &[u8],
+    desired_owner: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    crate::macos_file_io::write_atomic(path, raw, 0o600, desired_owner, true)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn write_private_file_with_owner(
     path: &Path,
     raw: &[u8],
@@ -121,7 +131,7 @@ pub(crate) fn write_private_file_with_owner(
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn replace_private_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(temporary, destination)
 }

@@ -141,7 +141,9 @@ pub(crate) fn acquire_unix_daemon_instance_lock_at(
     lock_path: &Path,
     expected_uid: u32,
 ) -> Result<DaemonInstanceLock> {
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(not(target_os = "macos"))]
+    use std::os::unix::fs::DirBuilderExt as _;
 
     let parent = lock_path.parent().ok_or_else(|| {
         anyhow!(
@@ -152,9 +154,15 @@ pub(crate) fn acquire_unix_daemon_instance_lock_at(
     match fs::symlink_metadata(parent) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            match builder.create(parent) {
+            #[cfg(target_os = "macos")]
+            let created = fs::Directory::open(parent, true).and_then(|directory| {
+                directory.set_owner_and_permissions(
+                    expected_uid, unsafe { libc::getegid() }, 0o700,
+                )
+            });
+            #[cfg(not(target_os = "macos"))]
+            let created = fs::DirBuilder::new().mode(0o700).create(parent);
+            match created {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
@@ -310,11 +318,11 @@ pub(crate) fn visible_daemon_state_for_status(
     if running { state.cloned() } else { None }
 }
 
-pub(crate) fn daemon_log_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
-        .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    parent.join("daemon.log")
+pub(crate) fn daemon_log_file_path(config_path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return Ok(crate::macos_privileged_files::runtime_directory(config_path)?.join("daemon.log"));
+    #[cfg(not(target_os = "macos"))]
+    Ok(config_path.parent().unwrap_or_else(|| Path::new(".")).join("daemon.log"))
 }
 
 fn runtime_open_options_no_follow() -> OpenOptions {
@@ -331,7 +339,9 @@ fn runtime_open_options_no_follow() -> OpenOptions {
 }
 
 pub(crate) fn redirect_stdio_to_daemon_log(config_path: &Path) -> Result<()> {
-    let log_path = daemon_log_file_path(config_path);
+    let log_path = daemon_log_file_path(config_path)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_privileged_files::protected_directory(log_path.parent().unwrap(), true)?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -389,8 +399,11 @@ pub(crate) fn redirect_stdio_to_daemon_log(config_path: &Path) -> Result<()> {
 }
 
 pub(crate) fn compact_daemon_log_if_needed(config_path: &Path) -> Result<bool> {
+    let log_path = daemon_log_file_path(config_path)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_privileged_files::protected_directory(log_path.parent().unwrap(), true)?;
     compact_log_file_if_needed(
-        &daemon_log_file_path(config_path),
+        &log_path,
         DAEMON_LOG_MAX_BYTES,
         DAEMON_LOG_RETAIN_BYTES,
     )
@@ -480,17 +493,18 @@ pub(crate) fn daemon_state_file_path(config_path: &Path) -> PathBuf {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) fn daemon_network_cleanup_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
-        .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    #[cfg(target_os = "linux")]
-    return parent
-        .join(".nvpn-network-cleanup")
-        .join("daemon.cleanup.json");
+pub(crate) fn daemon_network_cleanup_file_path(config_path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return crate::macos_privileged_files::network_cleanup_path(config_path);
 
-    #[cfg(not(target_os = "linux"))]
-    parent.join("daemon.cleanup.json")
+    #[cfg(not(target_os = "macos"))]
+    {
+        let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+        #[cfg(target_os = "linux")]
+        return Ok(parent.join(".nvpn-network-cleanup").join("daemon.cleanup.json"));
+        #[cfg(not(target_os = "linux"))]
+        Ok(parent.join("daemon.cleanup.json"))
+    }
 }
 
 pub(crate) fn daemon_control_file_path(config_path: &Path) -> PathBuf {
@@ -776,6 +790,7 @@ pub(crate) fn stage_daemon_config_apply(config_path: &Path, source_path: &Path) 
     config
         .save(&staged_path)
         .with_context(|| format!("failed to stage config {}", staged_path.display()))?;
+    #[cfg(not(target_os = "macos"))]
     set_private_cache_file_permissions(&staged_path)?;
     Ok(())
 }

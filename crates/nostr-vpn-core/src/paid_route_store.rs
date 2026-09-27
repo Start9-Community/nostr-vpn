@@ -1,5 +1,8 @@
+#[cfg(target_os = "macos")]
+use crate::macos_file_io as fs;
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
+#[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;

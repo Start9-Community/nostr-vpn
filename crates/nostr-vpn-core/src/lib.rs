@@ -16,6 +16,8 @@ pub mod identity_bridge;
 pub mod join_delivery;
 pub mod join_requests;
 pub mod join_roster_persistence;
+#[cfg(target_os = "macos")]
+pub mod macos_file_io;
 pub mod magic_dns;
 mod network_roster;
 mod network_routes;

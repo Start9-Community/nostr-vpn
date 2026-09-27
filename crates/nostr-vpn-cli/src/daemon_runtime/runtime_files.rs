@@ -9,6 +9,16 @@ pub(crate) fn write_private_runtime_file_atomically(
     write_runtime_file_atomically_with_mode(path, contents, 0o600)
 }
 
+#[cfg(target_os = "macos")]
+fn write_runtime_file_atomically_with_mode(
+    path: &Path,
+    contents: &[u8],
+    unix_mode: u32,
+) -> Result<()> {
+    fs::write_atomic(path, contents, unix_mode, None, false).map_err(Into::into)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn write_runtime_file_atomically_with_mode(
     path: &Path,
     contents: &[u8],
@@ -153,7 +163,9 @@ pub(crate) fn spawn_daemon_process(args: &ConnectArgs, config_path: &Path) -> Re
         return Err(anyhow!("daemon already running with pid {}", existing_pid));
     }
 
-    let log_file_path = daemon_log_file_path(config_path);
+    let log_file_path = daemon_log_file_path(config_path)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_privileged_files::protected_directory(log_file_path.parent().unwrap(), true)?;
     if let Some(parent) = log_file_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;

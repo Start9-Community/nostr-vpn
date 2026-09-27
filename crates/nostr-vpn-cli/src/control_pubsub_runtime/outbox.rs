@@ -6,15 +6,6 @@ fn now_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn temporary_store_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_else(|| "control-pubsub-events.json".into());
-    name.push(".tmp");
-    path.with_file_name(name)
-}
-
 pub fn control_pubsub_store_file_path(config_path: &Path) -> PathBuf {
     nostr_vpn_core::updater::update_event_cache_path(config_path)
 }
@@ -41,18 +32,8 @@ pub fn queue_control_pubsub_event(config_path: &Path, event: &Event) -> Result<b
     if destination.exists() {
         return Ok(false);
     }
-    let temporary = directory.join(format!(
-        ".{}.{}-{}.tmp",
-        event.id.to_hex(),
-        std::process::id(),
-        now_ms()
-    ));
-    fs::write(&temporary, bytes)
-        .with_context(|| format!("failed to write {}", temporary.display()))?;
-    if let Err(error) = fs::rename(&temporary, &destination) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error).with_context(|| format!("failed to queue {}", destination.display()));
-    }
+    nostr_vpn_core::config::write_private_file_preserving_user_owner(&destination, &bytes)
+        .with_context(|| format!("failed to queue {}", destination.display()))?;
     Ok(true)
 }
 

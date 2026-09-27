@@ -1,4 +1,7 @@
+#[cfg(target_os = "macos")]
+use nostr_vpn_core::macos_file_io as fs;
 use std::collections::BTreeSet;
+#[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -812,7 +815,13 @@ fn prepare_ipc_directories(config_path: &Path) -> Result<()> {
     ] {
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
+        fs::Directory::open(&directory, false)?.set_owner_and_permissions(
+            desired_owner.0,
+            desired_owner.1,
+            0o700,
+        )?;
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
             let metadata = fs::metadata(&directory)

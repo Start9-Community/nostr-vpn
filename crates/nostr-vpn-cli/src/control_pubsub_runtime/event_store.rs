@@ -335,16 +335,8 @@ impl ControlEventStore {
             paid_offer_watermarks,
         };
         let bytes = serde_json::to_vec(&saved).context("failed to encode control pubsub store")?;
-        let temporary = temporary_store_path(path);
-        fs::write(&temporary, bytes)
-            .with_context(|| format!("failed to write {}", temporary.display()))?;
-        fs::rename(&temporary, path).with_context(|| {
-            format!(
-                "failed to replace control pubsub store {} with {}",
-                path.display(),
-                temporary.display()
-            )
-        })?;
+        nostr_vpn_core::config::write_private_file_preserving_user_owner(path, &bytes)
+            .with_context(|| format!("failed to write control pubsub store {}", path.display()))?;
         Ok(())
     }
 }

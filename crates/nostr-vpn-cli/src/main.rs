@@ -42,11 +42,14 @@ mod wireguard_exit;
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use fips_core::discovery::nostr::{OverlayEndpointAdvert, OverlayTransportKind};
+use fs::OpenOptions;
+#[cfg(target_os = "macos")]
+use nostr_vpn_core::macos_file_io as fs;
 use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "windows")]
 use std::ffi::OsString;
+#[cfg(not(target_os = "macos"))]
 use std::fs;
-use std::fs::OpenOptions;
 #[cfg(any(target_os = "macos", test))]
 use std::hash::{Hash, Hasher};
 #[cfg(feature = "paid-exit")]

@@ -3,6 +3,7 @@ pub(crate) fn set_daemon_cleanup_file_permissions(path: &Path) -> Result<()> {
     set_runtime_file_permissions(path, 0o600)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn set_private_cache_file_permissions(path: &Path) -> Result<()> {
     set_runtime_file_permissions(path, 0o600)
 }

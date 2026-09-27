@@ -29,7 +29,6 @@ extension AppManager {
 
     static func serviceUpdateRecommended(in state: NativeAppState) -> Bool {
         state.serviceInstalled
-            && !state.serviceBinaryVersion.isEmpty
             && !state.expectedServiceBinaryVersion.isEmpty
             && state.serviceBinaryVersion != state.expectedServiceBinaryVersion
     }
