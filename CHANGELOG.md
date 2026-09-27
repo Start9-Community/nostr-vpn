@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## 4.1.17 - 2026-09-27
+
+### Release notes
+
+This release hardens macOS background service installation and local file
+handling, and improves upgrades from older app versions. iOS does not support
+paid exits.
+
+### Fixed
+
+- Install and update the macOS background service with protected ownership and
+  permissions.
+- Protect macOS configuration, secrets, logs, and network recovery files against
+  unsafe filesystem links and permissions.
+- Preserve settings and identity during upgrades and migrate older network
+  recovery files into protected storage.
+- Show the macOS service update action when an older helper's version cannot be
+  safely determined.
+
 ## 4.1.16 - 2026-09-25
 
 ### Release notes
