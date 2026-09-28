@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 required_source=(
-  'macos/Sources/RootViewInternet.swift:.accessibilityIdentifier("exit-dns-mode")'
-  'macos/Sources/RootViewInternet.swift:.accessibilityIdentifier("exit-dns-save")'
+  'macos/Sources/RootViewSettings.swift:.accessibilityIdentifier("exit-dns-mode")'
+  'macos/Sources/RootViewSettings.swift:.accessibilityIdentifier("exit-dns-save")'
   'linux/src/main/saved_networks.rs:nvpn-exit-dns-mode'
   'linux/src/main/saved_networks.rs:nvpn-exit-dns-save'
   'windows/NostrVpn.Windows/MainWindow.xaml:AutomationProperties.AutomationId="ExitDnsMode"'
@@ -483,6 +483,7 @@ with tempfile.TemporaryDirectory() as temporary:
     }
     artifact = {
         "receiptSchema": 1,
+        "companySigningVerified": True,
         "appGitSha": receipt_sha,
         "appGitTree": receipt_tree,
         "appExecutableSha256": artifact_hash,
@@ -521,6 +522,43 @@ with tempfile.TemporaryDirectory() as temporary:
     assert set(hashes) == {f"{case}.json" for case in settings}
     assert source == (receipt_sha, receipt_tree)
     assert reused_hash == artifact_receipt_hash
+
+    network = reused / "network"
+    network.mkdir()
+    rows = []
+    for case, kind in module.DNS_CASES.items():
+        after = [int(name in module.DNS_COUNTERS_INCREASED[kind])
+                 for name in module.COUNTERS]
+        rows.append("\t".join(map(str, [case, 0, 1, 0, 1] + [0] * 7 + after)))
+    (network / "fixture-dns-counters.tsv").write_text("\n".join(rows) + "\n")
+    (network / "underlay.txt").write_text(
+        "primary_to_secondary_ms=100\nsecondary_to_primary_ms=100\n"
+        "primary_to_secondary_activation_ms=200\nsecondary_to_primary_activation_ms=200\n"
+        "primary_to_secondary_total_ms=300\nsecondary_to_primary_total_ms=300\n"
+        "connected_peer_count=0\n"
+    )
+    (network / "crash-restart.txt").write_text(
+        "startup_persist_path_completed=true\nsigkill_tunnel_routes_absent=true\n"
+        "sigkill_secure_dns_ownership_seen=true\nold_pid=1\nnew_pid=2\n"
+        "restart_payload_ms=100\nconnected_peer_count=0\n"
+    )
+    (network / "direct.txt").write_text(
+        "resolver_state_absent=true\ndirect_interface=en0\n"
+        "direct_gateway=192.0.2.1\ndirect_source_ip=192.0.2.2\n"
+    )
+    output = reused / "network-receipt.json"
+    module.build_desktop(module.parser().parse_args([
+        "desktop", "--platform", "macos", "--artifact-dir", str(network),
+        "--dns-ui-dir", str(cases_root), "--artifact-receipt", str(artifact_path),
+        "--app-git-sha", app_sha, "--app-git-tree", app_tree,
+        "--output", str(output),
+    ]))
+    network_receipt = json.loads(output.read_text())
+    assert (network_receipt["appGitSha"], network_receipt["appGitTree"]) == (
+        receipt_sha, receipt_tree
+    ), "network receipt replaced the tested artifact source with the harness source"
+    assert network_receipt["summary"]["artifactReceiptSha256"] == artifact_receipt_hash
+    assert network_receipt["desktopDnsUiEvidenceFiles"] == hashes
 
     for label, mutate in (
         ("candidate", lambda value: value["componentInputProof"].update(
