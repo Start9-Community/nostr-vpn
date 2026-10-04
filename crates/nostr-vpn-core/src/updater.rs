@@ -794,9 +794,11 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("seed port");
         let address = listener.local_addr().expect("seed address");
         drop(listener);
-        let mut app = AppConfig::default();
-        app.fips_bootstrap_enabled = false;
-        app.fips_websocket_seed_urls = vec!["ws://unused.invalid/fips".to_string()];
+        let mut app = AppConfig {
+            fips_bootstrap_enabled: false,
+            fips_websocket_seed_urls: vec!["ws://unused.invalid/fips".to_string()],
+            ..AppConfig::default()
+        };
         let mut seed_config = update_endpoint_config(&app);
         assert!(!seed_config.node.discovery.nostr.enabled);
         assert!(!seed_config.dns.enabled);
@@ -896,8 +898,10 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({ "events": [cached] })).expect("cache JSON"),
         )
         .expect("write cached root");
-        let mut app = AppConfig::default();
-        app.fips_bootstrap_enabled = false;
+        let app = AppConfig {
+            fips_bootstrap_enabled: false,
+            ..AppConfig::default()
+        };
         let (endpoint, client) = update_pubsub(&app).await.expect("offline updater network");
         let result = secure_selection_with_pubsub(
             "9999.0.0",
