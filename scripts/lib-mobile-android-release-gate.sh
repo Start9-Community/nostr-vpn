@@ -501,6 +501,27 @@ PY
   echo "Android exact company-signed Release replacement passed: $receipt"
 }
 
+android_release_prepare_idle_output() {
+  local raw output path archive
+  raw="$(android_idle_cpu_path)"
+  output="${NVPN_ANDROID_FOREGROUND_IDLE_RECEIPT:-$(dirname "$raw")/receipt.json}"
+  [[ "$raw" != "$output" ]] || return 1
+  # Validate both before moving either. A retry must not overwrite the raw
+  # sample and then fail minutes later on its previous exclusive receipt.
+  for path in "$raw" "$output"; do
+    if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
+      echo "Android idle evidence must be a regular non-symlink file: $path" >&2
+      return 1
+    fi
+  done
+  [[ -e "$raw" || -e "$output" ]] || return 0
+  mkdir -p "$(dirname "$raw")"
+  archive="$(mktemp -d "$(dirname "$raw")/previous-idle.XXXXXX")" || return 1
+  if [[ -e "$raw" ]]; then mv -- "$raw" "$archive/idle-cpu.json" || return 1; fi
+  if [[ -e "$output" ]]; then mv -- "$output" "$archive/receipt.json" || return 1; fi
+  echo "Preserved previous Android idle evidence: $archive"
+}
+
 write_android_release_foreground_idle_receipt() {
   local raw_receipt artifact_receipt output
   raw_receipt="$(android_idle_cpu_path)"
@@ -531,6 +552,7 @@ android_release_ensure_network_ui() {
   replace_android_ui_text network-create-name "$DEBUG_NETWORK_NAME" || return 1
   android_ui_scroll_to resource network-create-submit || return 1
   tap_android_ui resource network-create-submit || return 1
+  maybe_accept_vpn_dialog || return 1
   wait_for_android_ui description "Internet tab" || {
     echo "Android network created through shipped UI did not reach the app shell" >&2
     return 1
@@ -710,10 +732,18 @@ android_release_disconnect_ui() {
   if [[ "$checked" == "true" ]]; then
     tap_android_ui description "Turn VPN off" || return 1
   fi
-  wait_until "$VPN_STOP_WAIT_SECS" android_release_vpn_off_and_inactive || {
-    echo "Android Release VPN did not reach OS-inactive / shipped-toggle-Off state" >&2
-    return 1
-  }
+  if ! wait_until "$VPN_STOP_WAIT_SECS" android_release_vpn_off_and_inactive; then
+    start_main_activity || return 1
+    checked="$(android_release_vpn_toggle_checked)" || return 1
+    if [[ "$checked" == "true" ]]; then
+      echo "Android Release VPN-off gesture produced no UI state change; retrying once"
+      tap_android_ui description "Turn VPN off" || return 1
+    fi
+    wait_until "$VPN_STOP_WAIT_SECS" android_release_vpn_off_and_inactive || {
+      echo "Android Release VPN did not reach OS-inactive / shipped-toggle-Off state" >&2
+      return 1
+    }
+  fi
   echo "Android Release VPN disconnected through shipped UI"
 }
 
@@ -995,9 +1025,17 @@ run_android_release_active_vpn_lifecycle_gate() {
 run_android_release_rapid_start_stop_gate() {
   truthy "$ANDROID_RAPID_START_STOP_GATE" || return 0
   local start_stop_ledger="$RUNTIME_STATE_RESULT_DIR/mobile-android-release-start-stop-$$.tsv"
+  local expected_pid
   : >"$start_stop_ledger"
   # The enclosing black-box cycle already proves the initial start, exit,
   # stop, and stable direct path. This gate only needs to prove a reconnect.
+  expected_pid="$(android_app_pid)"
+  [[ "$expected_pid" =~ ^[1-9][0-9]*$ ]] \
+    && assert_single_android_app_process || {
+      echo "Android Release reconnect gate has no single canonical app process" >&2
+      return 1
+    }
+  run_android_release_direct_network_probe start-stop-stable-direct 0 || return 1
   android_release_capture_native_tunnel_start_baseline || return 1
   vpn_cleanup_armed=1
   android_release_connect_ui || return 1
@@ -1010,7 +1048,14 @@ run_android_release_rapid_start_stop_gate() {
   vpn_cleanup_armed=0
   run_android_release_direct_network_probe start-stop-reconnect-cleanup 0 || return 1
   android_release_assert_native_tunnel_unchanged start-stop-final || return 1
-  assert_single_android_app_process || return 1
+  [[ "$(android_app_pid)" == "$expected_pid" ]] \
+    && assert_single_android_app_process || {
+      echo "Android Release reconnect gate changed the canonical app process" >&2
+      return 1
+    }
+  printf 'semantic\t%s\t%s\n' \
+    "$expected_pid" "$ANDROID_RELEASE_NATIVE_TUNNEL_START_COUNT" \
+    >>"$start_stop_ledger"
   echo "Android Release semantic start/stop/reconnect gate passed"
 }
 

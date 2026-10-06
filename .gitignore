@@ -2,12 +2,14 @@
 .cargo-docker/
 .buildx-cache/
 **/target/
+/vendor/*/Cargo.lock
 node_modules/
 **/node_modules/
 dist/
 javascript/
 *.s9pk
 .claude/
+.startos/
 .codex_tmp*
 umbrel/.data
 **/*.rs.bk

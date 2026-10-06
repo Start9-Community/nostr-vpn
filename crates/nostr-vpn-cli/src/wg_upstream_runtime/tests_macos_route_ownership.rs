@@ -28,6 +28,23 @@
     }
 
     #[test]
+    fn macos_wireguard_gateway_endpoint_uses_the_existing_neighbor_route() {
+        let underlay = crate::MacosRouteSpec {
+            gateway: Some("192.168.64.1".to_string()),
+            interface: "en0".to_string(),
+        };
+
+        assert_eq!(
+            macos_wg_endpoint_bypass_route(
+                "192.168.64.1".parse().expect("gateway endpoint"),
+                &underlay,
+            ),
+            None,
+            "the physical gateway's preexisting neighbor route must remain foreign",
+        );
+    }
+
+    #[test]
     fn macos_wireguard_ipv6_endpoint_needs_no_ipv4_bypass() {
         let underlay = crate::MacosRouteSpec {
             gateway: Some("192.0.2.1".to_string()),

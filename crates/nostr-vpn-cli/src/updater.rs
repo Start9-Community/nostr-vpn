@@ -39,6 +39,21 @@ impl UpdateMode {
 pub(crate) async fn run_update(args: UpdateArgs) -> Result<()> {
     let mode = UpdateMode::from_args(&args);
     let source = core_source(args.source);
+    #[cfg(target_os = "macos")]
+    let helper_update = if mode == UpdateMode::Cli && !args.check && !args.download_only {
+        let destination = args
+            .path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe)?;
+        let helper = crate::macos_privileged_files::helper_destination(&destination).is_some();
+        if helper {
+            crate::macos_privileged_files::require_root()?;
+        }
+        helper
+    } else {
+        false
+    };
     let event_cache_path = update_event_cache_path(&default_config_path());
 
     if args.check {
@@ -67,6 +82,10 @@ pub(crate) async fn run_update(args: UpdateArgs) -> Result<()> {
 
     let temp_dir = create_temp_dir("nvpn-update")?;
     let download_parent = args.download_dir.as_deref().unwrap_or(&temp_dir);
+    #[cfg(target_os = "macos")]
+    if helper_update {
+        crate::macos_privileged_files::protected_directory(download_parent, false)?;
+    }
     let download = download_product_update_with_cache(
         PRODUCT_VERSION,
         mode.core(),
@@ -253,6 +272,10 @@ fn find_nvpn_binary(root: &Path) -> Result<PathBuf> {
 }
 
 fn install_binary(source: &Path, destination: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if let Some(destination) = crate::macos_privileged_files::helper_destination(destination) {
+        return crate::macos_privileged_files::install_executable(source, &destination);
+    }
     let parent = install_parent(destination)?;
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create directory {}", parent.display()))?;
@@ -415,6 +438,14 @@ fn install_helper_file(source: &Path, destination: &Path) -> Result<()> {
 
 fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
     let base = std::env::temp_dir();
+    #[cfg(target_os = "macos")]
+    let base = if unsafe { libc::geteuid() } == 0 {
+        let base = PathBuf::from("/Library/Application Support/nvpn/updates");
+        crate::macos_privileged_files::protected_directory(&base, true)?;
+        base
+    } else {
+        base
+    };
     for attempt in 0..128u32 {
         let path = base.join(format!(
             "{prefix}-{}-{}-{attempt}",

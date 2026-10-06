@@ -18,6 +18,7 @@ const DOH_HOST: &str = "cloudflare-dns.com";
 const DOH_CONTENT_TYPE: &str = "application/dns-message";
 const DOH_TIMEOUT: Duration = Duration::from_secs(3);
 const WIREGUARD_DNS_TIMEOUT: Duration = Duration::from_secs(3);
+const WIREGUARD_DNS_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 pub const SECURE_DNS_MAX_MESSAGE_BYTES: usize = 4_096;
 
 #[derive(Clone)]
@@ -126,6 +127,17 @@ impl SecureDnsResolver {
 
     async fn resolve_query_inner(&self, query: &[u8]) -> Result<Vec<u8>, SecureDnsError> {
         let request = validated_query(query)?;
+        match self.resolve_query_once(query, &request).await {
+            Err(SecureDnsError::Request(_)) => self.resolve_query_once(query, &request).await,
+            result => result,
+        }
+    }
+
+    async fn resolve_query_once(
+        &self,
+        query: &[u8],
+        request: &Message,
+    ) -> Result<Vec<u8>, SecureDnsError> {
         let mut response = self
             .client
             .post(self.endpoint.clone())
@@ -162,7 +174,7 @@ impl SecureDnsResolver {
             }
             packet.extend_from_slice(&chunk);
         }
-        validated_response(&request, &packet)?;
+        validated_response(request, &packet)?;
         Ok(packet)
     }
 
@@ -268,9 +280,24 @@ impl WireGuardDnsResolver {
             socket.connect(server).await?;
             socket.send(query).await?;
             let mut packet = vec![0_u8; SECURE_DNS_MAX_MESSAGE_BYTES];
-            let length = socket.recv(&mut packet).await?;
-            packet.truncate(length);
-            Ok::<_, std::io::Error>(packet)
+            // The first UDP packet can be lost while the exit session opens.
+            // Retry on this socket within the existing per-server deadline so
+            // callers need not repeat their first lookup after startup.
+            let mut retry = tokio::time::interval_at(
+                tokio::time::Instant::now() + WIREGUARD_DNS_RETRY_INTERVAL,
+                WIREGUARD_DNS_RETRY_INTERVAL,
+            );
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    received = socket.recv(&mut packet) => {
+                        packet.truncate(received?);
+                        return Ok::<_, std::io::Error>(packet);
+                    }
+                    _ = retry.tick() => { socket.send(query).await?; }
+                }
+            }
         })
         .await
         .map_err(|_| SecureDnsError::WireGuardDnsTimeout(server))?
@@ -401,6 +428,32 @@ mod tests {
     use hickory_proto::op::{OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
 
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 512];
+            let length = stream.read(&mut chunk).await.expect("fixture request");
+            assert!(length > 0, "request ended before HTTP headers");
+            request.extend_from_slice(&chunk[..length]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|length| length.trim().parse::<usize>().ok())
+            .expect("content length");
+        while request.len() - header_end < content_length {
+            let mut chunk = [0_u8; 512];
+            let length = stream.read(&mut chunk).await.expect("fixture body");
+            assert!(length > 0, "request ended before DNS body");
+            request.extend_from_slice(&chunk[..length]);
+        }
+        request
+    }
+
     fn dns_query(id: u16) -> Vec<u8> {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
         message.metadata.recursion_desired = true;
@@ -512,16 +565,12 @@ mod tests {
         let response_packet = dns_response(&query, 912);
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("fixture connection");
-            let mut request = Vec::new();
-            let header_end = loop {
-                let mut chunk = [0_u8; 512];
-                let length = stream.read(&mut chunk).await.expect("fixture request");
-                assert!(length > 0, "request ended before HTTP headers");
-                request.extend_from_slice(&chunk[..length]);
-                if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                    break offset + 4;
-                }
-            };
+            let request = read_http_request(&mut stream).await;
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("HTTP headers")
+                + 4;
             let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
             assert!(headers.starts_with("post /dns-query http/1.1\r\n"));
             assert!(headers.contains("content-type: application/dns-message\r\n"));
@@ -531,12 +580,6 @@ mod tests {
                 .find_map(|line| line.strip_prefix("content-length:"))
                 .and_then(|length| length.trim().parse::<usize>().ok())
                 .expect("content length");
-            while request.len() - header_end < content_length {
-                let mut chunk = [0_u8; 512];
-                let length = stream.read(&mut chunk).await.expect("fixture body");
-                assert!(length > 0, "request ended before DNS body");
-                request.extend_from_slice(&chunk[..length]);
-            }
             assert_eq!(
                 &request[header_end..header_end + content_length],
                 expected_query.as_slice()
@@ -573,6 +616,122 @@ mod tests {
             }
         );
         server.await.expect("fixture task");
+    }
+
+    #[tokio::test]
+    async fn doh_retries_one_transient_request_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let query = dns_query(914);
+        let expected_query = query.clone();
+        let response_packet = dns_response(&query, 914);
+        let server = tokio::spawn(async move {
+            let (mut failed, _) = listener.accept().await.expect("first connection");
+            let first_request = read_http_request(&mut failed).await;
+            assert!(first_request.ends_with(&expected_query));
+            drop(failed);
+
+            let (mut recovered, _) = listener.accept().await.expect("retry connection");
+            let second_request = read_http_request(&mut recovered).await;
+            assert!(second_request.ends_with(&expected_query));
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_packet.len()
+            );
+            recovered
+                .write_all(headers.as_bytes())
+                .await
+                .expect("retry response headers");
+            recovered
+                .write_all(&response_packet)
+                .await
+                .expect("retry response body");
+        });
+        let endpoint = Box::leak(format!("http://{address}/dns-query").into_boxed_str());
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("fixture client");
+        let resolver = SecureDnsResolver::with_test_endpoint(client, endpoint);
+
+        let response = resolver
+            .resolve_query(&query)
+            .await
+            .expect("transient request recovered");
+        assert_eq!(Message::from_vec(&response).expect("DNS response").id, 914);
+        server.await.expect("fixture task");
+    }
+
+    #[tokio::test]
+    async fn through_exit_dns_recovers_a_lost_first_query_without_application_retry() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("DNS fixture");
+        let address = socket.local_addr().expect("DNS address");
+        let query = dns_query(921);
+        let expected = dns_response(&query, 921);
+        let response = expected.clone();
+        let server = tokio::spawn(async move {
+            let mut packet = [0_u8; 512];
+            let (first_length, first_peer) =
+                socket.recv_from(&mut packet).await.expect("first query");
+            let first = packet[..first_length].to_vec();
+            // Simulate the first datagram disappearing while the exit path opens.
+            let (length, peer) = socket
+                .recv_from(&mut packet)
+                .await
+                .expect("retransmitted query");
+            assert_eq!(peer, first_peer, "retry uses the same DNS socket");
+            assert_eq!(&packet[..length], first.as_slice());
+            socket.send_to(&response, peer).await.expect("DNS answer");
+        });
+        let resolver = WireGuardDnsResolver::with_servers(vec![address]).expect("exit DNS");
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), resolver.resolve_query(&query)).await;
+        server.abort();
+        assert_eq!(
+            result
+                .expect("first lookup should recover within two seconds")
+                .expect("DNS response"),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn through_exit_dns_retries_preserve_the_upstream_failover_deadline() {
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("unresponsive DNS fixture");
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("healthy DNS fixture");
+        let resolver = WireGuardDnsResolver::with_servers(vec![
+            blackhole.local_addr().expect("unresponsive address"),
+            server.local_addr().expect("healthy address"),
+        ])
+        .expect("exit DNS");
+        let query = dns_query(922);
+        let response = dns_response(&query, 922);
+        let fixture = tokio::spawn(async move {
+            let mut packet = [0_u8; 512];
+            let (_, peer) = server.recv_from(&mut packet).await.expect("failover query");
+            server
+                .send_to(&response, peer)
+                .await
+                .expect("failover response");
+        });
+        let response = tokio::time::timeout(
+            WIREGUARD_DNS_TIMEOUT + Duration::from_secs(1),
+            resolver.resolve_query(&query),
+        )
+        .await
+        .expect("retries must not extend upstream failover")
+        .expect("DNS response");
+        assert_eq!(Message::from_vec(&response).expect("DNS answer").id, 922);
+        fixture.await.expect("DNS fixture");
     }
 
     #[tokio::test]

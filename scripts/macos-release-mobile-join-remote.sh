@@ -60,10 +60,11 @@ CONFIG_BACKUP="$PROFILE_STATE_DIR/prior"
 # Short and stable for macOS sockaddr_un and interrupted-run cleanup.
 TEST_CONFIG_DIR="/tmp/nvpn-rj-$UID"
 CONFIG="$TEST_CONFIG_DIR/config.toml"
-DAEMON_LOG="$TEST_CONFIG_DIR/daemon.log"
+DAEMON_LOG=""
 TEST_PROFILE_MARKER="$PROFILE_STATE_DIR/state"
 TEST_SERVICE_OWNED="$PROFILE_STATE_DIR/service-owned"
 IMPORT_VERIFIED="$ARTIFACT_DIR/import-verified"
+APPROVAL_STARTED="$ARTIFACT_DIR/approval-started"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -123,6 +124,7 @@ assert json.loads(sys.argv[1]).get("daemon", {}).get("running") is True
   done
   echo "macOS Release join shipped service did not become ready" >&2
   "$CLI" service status --json --config "$CONFIG" >&2 || true
+  resolve_daemon_log || true
   tail -n 120 "$DAEMON_LOG" >&2 2>/dev/null || true
   return 1
 }
@@ -144,10 +146,8 @@ listener_ready = (
     and s.get("vpn_enabled") is True
     and s.get("vpn_active") is False
     and s.get("vpn_status") == "Waiting for participants"
+    and int(s.get("fips_other_peer_count", 0)) > 0
     and bool(v.get("network_id"))
-    and str(v.get("join_request_qr_code_or_link", "")).startswith(
-        "nvpn://join-request/"
-    )
 )
 assert d.get("running") is True and listener_ready
 ' "$runtime_json" 2>/dev/null
@@ -157,8 +157,9 @@ assert d.get("running") is True and listener_ready
     fi
     sleep 0.2
   done
-  echo "macOS Release join listener did not become ready" >&2
+  echo "macOS Release join listener did not authenticate a carrier peer" >&2
   printf '%s\n' "$runtime_json" >&2
+  resolve_daemon_log || true
   tail -n 120 "$DAEMON_LOG" >&2 2>/dev/null || true
   return 1
 }
@@ -199,7 +200,13 @@ restore_config_dir() {
   esac
   rm -f "$TEST_PROFILE_MARKER"
   if ! rm -rf "$TEST_CONFIG_DIR"; then
-    echo "quarantined privileged macOS Release join test profile: $TEST_CONFIG_DIR" >&2
+    local quarantine="${TEST_CONFIG_DIR}.quarantine.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    if mv "$TEST_CONFIG_DIR" "$quarantine"; then
+      echo "quarantined privileged macOS Release join test profile: $quarantine" >&2
+    else
+      echo "could not quarantine privileged macOS Release join test profile" >&2
+      return 1
+    fi
   fi
   rmdir "$PROFILE_STATE_DIR" 2>/dev/null || true
 }
@@ -262,12 +269,25 @@ v=json.loads(sys.argv[1]); assert not v.get("installed") and not v.get("running"
   assert_service_ready
 }
 
+resolve_daemon_log() {
+  DAEMON_LOG="$(
+    "$CLI" status --json --discover-secs 0 --config "$CONFIG" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon"]["log_file"])'
+  )"
+  [[ "$DAEMON_LOG" == /* ]] || {
+    echo "daemon status did not identify an absolute log path" >&2
+    return 1
+  }
+}
+
 daemon_log_offset() {
+  resolve_daemon_log
   [[ -f "$DAEMON_LOG" ]] && stat -f %z "$DAEMON_LOG" || printf '0\n'
 }
 
 require_delivery_log() {
   local recipient_hex offset="$2" expected delta deadline=$((SECONDS + 3))
+  resolve_daemon_log
   recipient_hex="$("$MANUAL_JOIN_FIXTURE" normalize-npub "$1")"
   [[ "$recipient_hex" =~ ^[0-9a-f]{64}$ && "$offset" =~ ^[0-9]+$ ]] || return 2
   expected="delivered and applied one signed join roster over FIPS-TCP to $recipient_hex"
@@ -356,8 +376,39 @@ run_driver() {
   stop_app
 }
 
-run_manual_join_driver() {
-  run_driver release-manual-join "$1" "$2"
+run_driver_against_held_app() {
+  local phase="$1" value1="$2" value2="$3"
+  [[ "$APP_PID" =~ ^[0-9]+$ ]] && kill -0 "$APP_PID" >/dev/null 2>&1 || {
+    echo "macOS Release join app is not alive for $phase" >&2
+    return 1
+  }
+  "$MANUAL_JOIN_DRIVER" \
+    "$APP_PID" "$phase" "$value1" "$value2" "Nostr VPN"
+}
+
+run_manual_join_driver_hold() {
+  local setup_wait="${NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90}"
+  [[ "$setup_wait" =~ ^[1-9][0-9]*$ ]] && ((setup_wait <= 90)) || {
+    echo "iOS setup wait must be a positive integer no greater than 90 seconds" >&2
+    return 2
+  }
+  rm -f "$APPROVAL_STARTED"
+  launch_app
+  run_driver_against_held_app release-manual-join "$1" "$2"
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_APP_HOLDING=1"
+  # XCTest may spend 180 seconds connecting to the retained iPhone, followed
+  # by 60 seconds of test startup before driving approval. Keep those setup
+  # budgets outside the delivery deadline, which starts only at approval.
+  local deadline=$((SECONDS + 180 + 60 + setup_wait))
+  while [[ ! -f "$APPROVAL_STARTED" && "$SECONDS" -lt "$deadline" ]]; do
+    sleep 0.1
+  done
+  [[ -f "$APPROVAL_STARTED" ]] || {
+    echo "macOS Release join did not receive the approval-start signal" >&2
+    return 1
+  }
+  run_driver_against_held_app release-verify "$1" _
+  stop_app
 }
 
 run_driver_hold() {
@@ -368,6 +419,19 @@ run_driver_hold() {
   echo "NVPN_RELEASE_JOIN_MARKER NVPN_MACOS_RELEASE_APP_HOLDING=1"
   sleep "${NVPN_MACOS_RELEASE_JOIN_HOLD_SECS:-20}"
   stop_app
+}
+
+capture_diagnostics() {
+  set +e
+  echo "NVPN_RELEASE_JOIN_DIAGNOSTIC daemon-status"
+  "$CLI" status --json --discover-secs 0 --config "$CONFIG" 2>&1
+  echo "NVPN_RELEASE_JOIN_DIAGNOSTIC queued-approvals"
+  find "$TEST_CONFIG_DIR/config.toml.join-roster-outbox" -maxdepth 1 -type f \
+    -exec basename {} \; 2>/dev/null | sort
+  echo "NVPN_RELEASE_JOIN_DIAGNOSTIC daemon-log"
+  resolve_daemon_log || true
+  tail -n 240 "$DAEMON_LOG" 2>/dev/null
+  return 0
 }
 
 stage() {
@@ -426,7 +490,7 @@ case "${1:-}" in
     ;;
   manual-join)
     [[ $# == 3 ]] || { echo "usage: $0 manual-join <admin-npub> <network-id>" >&2; exit 2; }
-    run_manual_join_driver "$2" "$3"
+    run_manual_join_driver_hold "$2" "$3"
     ;;
   admin-add)
     [[ $# == 3 ]] || { echo "usage: $0 admin-add <joiner-npub> <alias>" >&2; exit 2; }
@@ -435,10 +499,15 @@ case "${1:-}" in
   verify)
     [[ $# == 2 ]] || { echo "usage: $0 verify <participant-npub>" >&2; exit 2; }
     run_driver release-verify "$2" _
+    assert_service_ready
     ;;
   service-preflight)
     [[ $# == 1 ]] || { echo "usage: $0 service-preflight" >&2; exit 2; }
     service_preflight
+    ;;
+  carrier-ready)
+    [[ $# == 1 ]] || { echo "usage: $0 carrier-ready" >&2; exit 2; }
+    assert_join_listener_ready
     ;;
   daemon-log-offset)
     [[ $# == 1 ]] || { echo "usage: $0 daemon-log-offset" >&2; exit 2; }
@@ -447,6 +516,14 @@ case "${1:-}" in
   require-delivery-log)
     [[ $# == 3 ]] || { echo "usage: $0 require-delivery-log <recipient-npub> <offset>" >&2; exit 2; }
     require_delivery_log "$2" "$3"
+    ;;
+  diagnostics)
+    [[ $# == 1 ]] || { echo "usage: $0 diagnostics" >&2; exit 2; }
+    capture_diagnostics
+    ;;
+  approval-start)
+    [[ $# == 1 ]] || { echo "usage: $0 approval-start" >&2; exit 2; }
+    : >"$APPROVAL_STARTED"
     ;;
   cleanup)
     restore_test_profile
@@ -458,7 +535,7 @@ case "${1:-}" in
     macos_release_app_restore
     ;;
   *)
-    echo "usage: $0 <stage|prepare|verify-import|service-preflight|daemon-log-offset|require-delivery-log|create-admin|joiner-id|manual-join|admin-add|verify|reset-profile|cleanup>" >&2
+    echo "usage: $0 <stage|prepare|verify-import|service-preflight|daemon-log-offset|require-delivery-log|diagnostics|approval-start|create-admin|joiner-id|manual-join|admin-add|verify|reset-profile|cleanup>" >&2
     exit 2
     ;;
 esac

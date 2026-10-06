@@ -6,6 +6,29 @@ $script:CandidateNativeWireGuardOwnerMarkerPath = ""
 $script:CandidateNativeWireGuardOwnerDirectoryPath = ""
 $script:CandidateNativeWireGuardConfigRootPath = ""
 $script:CandidateNativeWireGuardOwnerToken = ""
+$script:ActiveDirectCleanupJournalPresent = $false
+$script:ActiveDirectCleanupRouteCount = 0
+$script:CrashCleanupJournalReplaced = $false
+
+function Get-CleanupJournalSha256 {
+  $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+  $lastError = $null
+  do {
+    try {
+      return (Get-FileHash -Algorithm SHA256 `
+        -LiteralPath $CleanupJournalPath -ErrorAction Stop
+      ).Hash.ToLowerInvariant()
+    }
+    catch {
+      $lastError = $_
+      Start-Sleep -Milliseconds 25
+    }
+  } while ([DateTimeOffset]::UtcNow -lt $deadline)
+  throw (
+    "timed out reading the durable cleanup journal hash: " +
+    $lastError.Exception.Message
+  )
+}
 
 function Start-CandidateDaemon {
   param([string]$LogStem)
@@ -164,7 +187,8 @@ function Assert-CandidateNativeWireGuardOwnershipRemoved {
 function Assert-CrashRecoveredDirectState {
   param(
     [int]$ExpectedPhysicalIndex,
-    [int]$ExpectedDaemonPid
+    [int]$ExpectedDaemonPid,
+    [string]$CrashedCleanupJournalHash
   )
   $route = Get-BestRoute "1.1.1.1"
   $endpointHost = Get-WireGuardEndpointHost
@@ -174,19 +198,91 @@ function Assert-CrashRecoveredDirectState {
   $wireGuardService = Get-Service `
     -Name ('WireGuardTunnel$' + $WireGuardInterface) `
     -ErrorAction SilentlyContinue
-  if (
-    [int]$route.InterfaceIndex -ne $ExpectedPhysicalIndex -or
-    (Get-NetAdapter -Name $WireGuardInterface `
-      -IncludeHidden -ErrorAction SilentlyContinue) -or
-    $wireGuardService -or
-    $endpointRoutes.Count -ne 0 -or
-    (Get-SecureDnsRules).Count -ne 0 -or
-    (Test-Path -LiteralPath $CleanupJournalPath) -or
-    !(Test-PublicDns) -or
-    !(Test-ExternalHttps)
-  ) {
-    throw "startup recovery has not restored a clean native Direct network"
+  $wireGuardAdapter = Get-NetAdapter -Name $WireGuardInterface `
+    -IncludeHidden -ErrorAction SilentlyContinue
+  $secureDnsRules = @(Get-SecureDnsRules)
+  $cleanupJournalPresent = Test-Path `
+    -LiteralPath $CleanupJournalPath -PathType Leaf
+  $cleanupJournalRoutes = @()
+  $cleanupJournalNativeWireGuard = @()
+  $cleanupJournalSecureDns = @()
+  $cleanupJournalHash = ""
+  if ($cleanupJournalPresent) {
+    $cleanupJournal = Get-Content -Raw -LiteralPath $CleanupJournalPath |
+      ConvertFrom-Json
+    $cleanupJournalRoutes = @(
+      $cleanupJournal.routes.owned_routes |
+        Where-Object { $null -ne $_ }
+    )
+    $cleanupJournalNativeWireGuard = @(
+      $cleanupJournal.native_wireguard |
+        Where-Object { $null -ne $_ }
+    )
+    $cleanupJournalSecureDns = @(
+      $cleanupJournal.secure_dns_interface_indexes |
+        Where-Object { $null -ne $_ }
+    )
+    $cleanupJournalHash = Get-CleanupJournalSha256
   }
+  $publicDnsAvailable = Test-PublicDns
+  $externalHttpsAvailable = Test-ExternalHttps
+  $failures = [Collections.Generic.List[string]]::new()
+  if ([int]$route.InterfaceIndex -ne $ExpectedPhysicalIndex) {
+    $failures.Add(
+      "best route interface $($route.InterfaceIndex) is not physical interface $ExpectedPhysicalIndex"
+    )
+  }
+  if ($wireGuardAdapter) {
+    $failures.Add("native WireGuard adapter remains")
+  }
+  if ($wireGuardService) {
+    $failures.Add("native WireGuard service remains")
+  }
+  if ($endpointRoutes.Count -ne 0) {
+    $failures.Add("endpoint bypass route remains ($($endpointRoutes.Count))")
+  }
+  if ($secureDnsRules.Count -ne 0) {
+    $failures.Add("secure DNS policy remains ($($secureDnsRules.Count))")
+  }
+  if ($cleanupJournalNativeWireGuard.Count -ne 0) {
+    $failures.Add("native WireGuard ownership remains in cleanup journal")
+  }
+  if ($cleanupJournalSecureDns.Count -ne 0) {
+    $failures.Add("secure DNS ownership remains in cleanup journal")
+  }
+  foreach ($ownedRoute in $cleanupJournalRoutes) {
+    $prefix = [string]$ownedRoute.prefix
+    if ($prefix -eq "0.0.0.0/0") {
+      $failures.Add("paid-exit default route remains in cleanup journal")
+    }
+    if ($prefix -eq "$endpointHost/32") {
+      $failures.Add("paid-exit endpoint route remains in cleanup journal")
+    }
+  }
+  if (
+    $cleanupJournalPresent -and
+    $cleanupJournalHash -eq $CrashedCleanupJournalHash
+  ) {
+    $failures.Add("forced-crash cleanup journal was not replaced")
+  }
+  if (!$publicDnsAvailable) {
+    $failures.Add("public DNS is unavailable")
+  }
+  if (!$externalHttpsAvailable) {
+    $failures.Add("verified HTTPS is unavailable")
+  }
+  if ($failures.Count -ne 0) {
+    throw (
+      "startup recovery has not restored a clean native Direct network: " +
+      ($failures -join "; ")
+    )
+  }
+  $script:ActiveDirectCleanupJournalPresent = $cleanupJournalPresent
+  $script:ActiveDirectCleanupRouteCount = $cleanupJournalRoutes.Count
+  $script:CrashCleanupJournalReplaced = (
+    !$cleanupJournalPresent -or
+    $cleanupJournalHash -ne $CrashedCleanupJournalHash
+  )
   Assert-CandidateNativeWireGuardOwnershipRemoved
   Assert-SingleExactCandidateDaemon $ExpectedDaemonPid
 }
@@ -209,9 +305,7 @@ function Invoke-CrashRecovery {
       return $false
     }
   } 50 | Out-Null
-  $cleanupJournalHash = (
-    Get-FileHash -Algorithm SHA256 -LiteralPath $CleanupJournalPath
-  ).Hash.ToLowerInvariant()
+  $cleanupJournalHash = Get-CleanupJournalSha256
   Read-CandidateNativeWireGuardOwnership
   Assert-CandidateNativeWireGuardOwnershipPresent
 
@@ -222,9 +316,7 @@ function Invoke-CrashRecovery {
   $cleanupJournalHashAfterCrash = if (
     Test-Path -LiteralPath $CleanupJournalPath -PathType Leaf
   ) {
-    $journalHash = Get-FileHash -Algorithm SHA256 `
-      -LiteralPath $CleanupJournalPath
-    $journalHash.Hash.ToLowerInvariant()
+    Get-CleanupJournalSha256
   }
   else {
     ""
@@ -262,11 +354,9 @@ function Invoke-CrashRecovery {
   ) {
     throw "offline Direct selection unexpectedly changed the cleanup journal"
   }
-  $cleanupJournalHashAfterSelection = Get-FileHash -Algorithm SHA256 `
-    -LiteralPath $CleanupJournalPath
+  $cleanupJournalHashAfterSelection = Get-CleanupJournalSha256
   if (
-    $cleanupJournalHashAfterSelection.Hash.ToLowerInvariant() -ne
-      $cleanupJournalHash
+    $cleanupJournalHashAfterSelection -ne $cleanupJournalHash
   ) {
     throw "offline Direct selection unexpectedly changed the cleanup journal"
   }
@@ -292,7 +382,8 @@ function Invoke-CrashRecovery {
     try {
       Assert-CrashRecoveredDirectState `
         $ExpectedPhysicalIndex `
-        ([int]$replacement.Id)
+        ([int]$replacement.Id) `
+        $cleanupJournalHash
       return $true
     }
     catch {
@@ -322,7 +413,12 @@ function Invoke-CrashRecovery {
     cleanup_journal_present_before_crash = $true
     cleanup_journal_survived_forced_termination = $true
     cleanup_journal_sha256 = $cleanupJournalHash
-    cleanup_journal_removed_after_restart = $true
+    paid_exit_cleanup_ownership_removed_after_restart = $true
+    crash_cleanup_journal_replaced_after_restart =
+      $script:CrashCleanupJournalReplaced
+    active_direct_cleanup_journal_present =
+      $script:ActiveDirectCleanupJournalPresent
+    active_direct_cleanup_route_count = $script:ActiveDirectCleanupRouteCount
     native_wireguard_config_path = $script:CandidateNativeWireGuardConfigPath
     native_wireguard_owner_marker_path =
       $script:CandidateNativeWireGuardOwnerMarkerPath

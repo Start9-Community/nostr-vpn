@@ -831,48 +831,29 @@ def validate_android_support(
         )
         direct_paths = []
         for label in direct_labels:
-            if label in {"before-connect", "after-disconnect"}:
-                ping_paths = sorted(
-                    root.glob(f"mobile-android-network-{label}-[0-9]*.txt")
+            ping_paths = [
+                exactly_one(
+                    root,
+                    f"mobile-android-network-{label}-[0-9]*.txt",
+                    f"Android {label} Direct DNS",
                 )
-                https_paths = sorted(
-                    root.glob(
-                        f"mobile-android-network-{label}-direct-https-*.txt"
-                    )
+            ]
+            https_paths = [
+                exactly_one(
+                    root,
+                    f"mobile-android-network-{label}-direct-https-*.txt",
+                    f"Android {label} Direct HTTPS",
                 )
-                require(
-                    len(ping_paths) == len(cases)
-                    and len(https_paths) == len(cases),
-                    f"Android {label} expected one Direct receipt pair per DNS case",
-                )
-                ping_prefix = f"mobile-android-network-{label}-"
-                https_prefix = f"{ping_prefix}direct-https-"
-                require(
-                    {
-                        path.name.removeprefix(ping_prefix).removesuffix(".txt")
-                        for path in ping_paths
-                    }
-                    == {
-                        path.name.removeprefix(https_prefix).removesuffix(".txt")
-                        for path in https_paths
-                    },
-                    f"Android {label} Direct DNS/HTTPS receipt pairs do not match",
-                )
-            else:
-                ping_paths = [
-                    exactly_one(
-                        root,
-                        f"mobile-android-network-{label}-[0-9]*.txt",
-                        f"Android {label} Direct DNS",
-                    )
-                ]
-                https_paths = [
-                    exactly_one(
-                        root,
-                        f"mobile-android-network-{label}-direct-https-*.txt",
-                        f"Android {label} Direct HTTPS",
-                    )
-                ]
+            ]
+            ping_prefix = f"mobile-android-network-{label}-"
+            https_prefix = f"{ping_prefix}direct-https-"
+            require(
+                ping_paths[0].name.removeprefix(ping_prefix).removesuffix(".txt")
+                == https_paths[0]
+                .name.removeprefix(https_prefix)
+                .removesuffix(".txt"),
+                f"Android {label} Direct DNS/HTTPS receipt pair does not match",
+            )
             require(
                 all(
                     f"label={label}" in path.read_text(encoding="utf-8")
@@ -1199,11 +1180,28 @@ def validate_desktop_dns_ui_receipts(
         root.is_dir() and not root.is_symlink(),
         f"{platform} desktop DNS UI evidence directory is missing",
     )
-    receipt_paths = list(root.glob("*.json"))
+    all_receipt_paths = list(root.glob("*.json"))
+    expected_receipt_names = {
+        f"{case}.json" for case in DESKTOP_DNS_UI_SETTINGS
+    }
+    allowed_sidecar_names = (
+        {"paid-exit-seller.json"}
+        if platform == "macos"
+        else set()
+    )
+    observed_receipt_names = {path.name for path in all_receipt_paths}
     require(
-        len(receipt_paths) == len(DESKTOP_DNS_UI_SETTINGS),
+        expected_receipt_names <= observed_receipt_names
+        and observed_receipt_names
+        <= expected_receipt_names | allowed_sidecar_names,
         f"{platform} desktop DNS UI receipts do not cover exactly five policies",
     )
+    for path in all_receipt_paths:
+        if path.name in allowed_sidecar_names:
+            load_json(path)
+    receipt_paths = [
+        root / name for name in sorted(expected_receipt_names)
+    ]
     observed: dict[str, Any] = {}
     evidence: dict[str, str] = {}
     artifact_identity: tuple[str, str] | None = None
@@ -1534,7 +1532,8 @@ def build_desktop(args: argparse.Namespace) -> None:
                 "exact_candidate_binary_restarted",
                 "cleanup_journal_present_before_crash",
                 "cleanup_journal_survived_forced_termination",
-                "cleanup_journal_removed_after_restart",
+                "paid_exit_cleanup_ownership_removed_after_restart",
+                "crash_cleanup_journal_replaced_after_restart",
                 "native_wireguard_owner_directory_layout",
                 "native_wireguard_owned_files_survived_forced_termination",
                 "native_wireguard_owned_files_removed_after_restart",
@@ -1554,6 +1553,13 @@ def build_desktop(args: argparse.Namespace) -> None:
                 and crash.get("daemon_process_count") == 1
                 and isinstance(crash_recovery, int)
                 and 0 <= crash_recovery <= 30_000
+                and isinstance(
+                    crash.get("active_direct_cleanup_journal_present"), bool
+                )
+                and isinstance(
+                    crash.get("active_direct_cleanup_route_count"), int
+                )
+                and crash["active_direct_cleanup_route_count"] >= 0
                 and all(crash.get(field) is True for field in crash_true_fields),
                 "Windows crash/owner-file repair receipt is incomplete",
             )
@@ -1633,9 +1639,25 @@ def build_desktop(args: argparse.Namespace) -> None:
         underlay = key_values(underlay_path)
         first = int(underlay.get("primary_to_secondary_ms", "4001"))
         second = int(underlay.get("secondary_to_primary_ms", "4001"))
+        first_activation = int(
+            underlay.get("primary_to_secondary_activation_ms", "10001")
+        )
+        second_activation = int(
+            underlay.get("secondary_to_primary_activation_ms", "10001")
+        )
+        first_total = int(
+            underlay.get("primary_to_secondary_total_ms", "14001")
+        )
+        second_total = int(
+            underlay.get("secondary_to_primary_total_ms", "14001")
+        )
         require(
             0 <= first <= 4_000
             and 0 <= second <= 4_000
+            and 0 <= first_activation <= 10_000
+            and 0 <= second_activation <= 10_000
+            and first_total == first_activation + first
+            and second_total == second_activation + second
             and underlay.get("connected_peer_count") == "0",
             "macOS dual-underlay receipt is incomplete",
         )
@@ -1664,6 +1686,11 @@ def build_desktop(args: argparse.Namespace) -> None:
                 "artifactReceiptSha256": sha256(artifact_path),
                 "dnsPolicyCount": len(rows),
                 "handoffRecoveryMilliseconds": [first, second],
+                "underlayActivationMilliseconds": [
+                    first_activation,
+                    second_activation,
+                ],
+                "handoffTransitionMilliseconds": [first_total, second_total],
                 "crashRestartPayloadMilliseconds": int(
                     crash["restart_payload_ms"]
                 ),
@@ -1679,8 +1706,8 @@ def build_desktop(args: argparse.Namespace) -> None:
             "receiptSchema": 1,
             "artifactType": f"{platform} Release desktop network gate",
             "platform": platform,
-            "appGitSha": app_sha,
-            "appGitTree": app_tree,
+            "appGitSha": dns_ui_source[0],
+            "appGitTree": dns_ui_source[1],
             "summary": summary,
             "evidenceFiles": evidence_hashes(root, paths),
             "desktopDnsUiEvidenceFiles": dns_ui_evidence,

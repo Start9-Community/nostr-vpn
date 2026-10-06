@@ -54,16 +54,25 @@ for required in (
     '"$APP_EXE"',
     "lib-macos-owned-test-app.sh",
     "macos_open -n -F",
+    'macos_open "$APP_PATH"',
     '--args --hidden',
     "/usr/bin/open",
     "macos_exact_executable_pids",
     "stop_gate_app",
+    '"$DRIVER" "$APP_PID" --wait-window "Nostr VPN"',
+    "Requesting the existing macOS app to reopen its main window",
+    "stop_gate_app || return 1",
     'apply "$case"',
     'readback "$case"',
     "automatic cloudflare quad9 custom through-exit",
     "CANONICAL_DATA",
     "BACKUP_ROOT",
     "restore_profile",
+    "quiesce_system_service",
+    'sudo -n /bin/launchctl bootout "$SYSTEM_SERVICE_LABEL"',
+    "restore_system_service",
+    'sudo -n /bin/launchctl bootstrap system "$SYSTEM_SERVICE_PLIST"',
+    'sudo -n /bin/launchctl kickstart -k "$SYSTEM_SERVICE_LABEL"',
     "validate-driver",
     "create-case",
     "EXPECTED_IMPORT_VERIFICATION_SHA256",
@@ -96,6 +105,8 @@ for required in (
     "network-setup-create",
     "network-create-submit",
     "main-AppWindow-1",
+    'args[2] == "--wait-window"',
+    "MACOS_EXIT_DNS_AX_WINDOW_READY",
     "timeout: 60",
     "let finalElements = descendants(application)",
     "func blockingModalText(",
@@ -115,6 +126,9 @@ for required in (
     "error != .failure",
     "error != .cannotComplete",
     "error != .invalidUIElement",
+    '"AXScrollToVisible" as CFString',
+    "kAXVerticalScrollBarAttribute",
+    "NSNumber(value: fraction)",
 ):
     if required not in driver:
         raise SystemExit(f"macOS DNS AX driver lacks {required}")
@@ -133,6 +147,10 @@ for required in (
     "kAXFocusedAttribute",
     "postKey(to: pid, keyCode: 0, flags: .maskCommand)",
     "keyboardSetUnicodeString",
+    "let deadline = Date().addingTimeInterval(6)",
+    "let element = try find(",
+    "timeout: 1",
+    "stringAttribute(element, kAXValueAttribute) == value",
 ):
     if required not in set_text_body:
         raise SystemExit(
@@ -141,6 +159,10 @@ for required in (
 if "let directError" in set_text_body:
     raise SystemExit(
         "macOS DNS AX text entry bypasses SwiftUI bindings with a direct AX value write"
+    )
+if set_text_body.count("repeat {") < 2:
+    raise SystemExit(
+        "macOS DNS AX text entry does not retry a transient focus/type failure"
     )
 press_body = driver[
     driver.index("func press(") : driver.index("func pressSidebar(")
@@ -169,10 +191,23 @@ sidebar_calls = re.findall(
     r'try pressSidebar\(application, "([^"]+)", pid: pid\)',
     driver,
 )
-if sidebar_calls != ["sidebar-internet", "sidebar-devices", "sidebar-internet"]:
+if sidebar_calls != [
+    "sidebar-devices",
+    "sidebar-sharing",
+    "sidebar-internet",
+    "sidebar-settings",
+]:
     raise SystemExit(
-        "macOS DNS AX sidebar retry is not limited to the three idempotent "
+        "macOS DNS AX sidebar retry is not limited to the four idempotent "
         f"navigation actions: {sidebar_calls}"
+    )
+wait_window_body = driver[
+    driver.index('if args.count == 4,') : driver.index('guard args.count == 6,')
+]
+if 'try pressSidebar(application, "sidebar-internet", pid: pid)' not in wait_window_body:
+    raise SystemExit(
+        "macOS DNS AX launch readiness does not prove an idempotent sidebar "
+        "action can complete"
     )
 for required in (
     '"publicUiOnly": true',
@@ -192,6 +227,8 @@ for required in (
     '"appArtifactReceiptSha256"',
     '"driverReceiptSha256"',
     '"canonicalProfileRestored": True',
+    '"preexistingSystemServiceWasLoaded"',
+    '"preexistingSystemServiceRestored"',
     '"harnessGitSha"',
     '"harnessGitTree"',
 ):
@@ -452,6 +489,10 @@ restoration = write(
         "canonicalProfileRestored": True,
         "preexistingAppStateRestored": True,
         "gateAppProcessesStopped": True,
+        "preexistingSystemServiceWasLoaded": True,
+        "preexistingSystemServiceWasRunning": True,
+        "preexistingSystemServiceRestored": True,
+        "preexistingSystemServiceRunningRestored": True,
     },
 )
 subprocess.run(

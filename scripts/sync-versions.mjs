@@ -68,11 +68,54 @@ function makeTarget(relPath, transform) {
   }
 }
 
+function bumpCargoLockPackages(text, packageNames, version) {
+  let updated = text
+  for (const packageName of packageNames) {
+    const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const packagePattern = new RegExp(
+      `(\\[\\[package\\]\\]\\nname = "${escapedName}"\\nversion = ")[^"\\n]+(")`,
+      'g',
+    )
+    const matches = [...updated.matchAll(packagePattern)]
+    if (matches.length !== 1) {
+      throw new Error(
+        `Expected exactly one ${packageName} package in Cargo.lock, found ${matches.length}`,
+      )
+    }
+    updated = updated.replace(
+      packagePattern,
+      (_, prefix, suffix) => `${prefix}${version}${suffix}`,
+    )
+  }
+  return updated
+}
+
 const targets = [
+  makeTarget('Cargo.toml', (text, version) =>
+    text.replace(
+      /^(nostr-vpn-(?:core|wintun)\s*=\s*\{\s*version\s*=\s*")[^"\n]+(")/gm,
+      (_, prefix, suffix) => `${prefix}=${version}${suffix}`,
+    ),
+  ),
+  makeTarget('Cargo.lock', (text, version) =>
+    bumpCargoLockPackages(
+      text,
+      ['nostr-vpn-app-core', 'nostr-vpn-core', 'nostr-vpn-sim',
+        'nostr-vpn-web', 'nostr-vpn-wintun', 'nvpn'],
+      version,
+    ),
+  ),
   makeTarget('linux/Cargo.toml', (text, version) =>
     text.replace(
       /^(version\s*=\s*")[^"\n]+(")/m,
       (_, prefix, suffix) => `${prefix}${version}${suffix}`,
+    ),
+  ),
+  makeTarget('linux/Cargo.lock', (text, version) =>
+    bumpCargoLockPackages(
+      text,
+      ['nostr-vpn-app-core', 'nostr-vpn-core', 'nostr-vpn-linux'],
+      version,
     ),
   ),
   // ios/project.yml + macos/project.yml use plain ${NVPN_APP_VERSION_NAME} /

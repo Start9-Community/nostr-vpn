@@ -167,7 +167,8 @@ you want to rotate the credential. It generates a new random password, replaces
 whatever was stored, and displays the username and password once; the password is
 masked and copyable, and is not recoverable afterwards. It runs at any service
 status and is safe to repeat, but each run invalidates the previous password, so
-anyone signed in with the old one is locked out.
+anyone signed in with the old one is locked out. When a password is already
+stored, it asks for confirmation before running; the first run does not.
 
 **Share Over Nostr VPN** (`expose-over-mesh`) and **Stop Sharing Over Nostr VPN**
 (`stop-sharing-over-mesh`) are `visibility: 'hidden'` — the platform surfaces

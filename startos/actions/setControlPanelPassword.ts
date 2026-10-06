@@ -7,12 +7,18 @@ import { controlPanelUsername } from '../utils'
 export const setControlPanelPassword = sdk.Action.withoutInput(
   'set-control-panel-password',
 
-  async () => ({
+  async ({ effects }) => ({
     name: i18n('Set Control Panel Password'),
     description: i18n(
       'Generate a new random password for the Nostr VPN control panel. This replaces any existing password.',
     ),
-    warning: null,
+    warning: (await storeJson
+      .read((s) => s.controlPanelPassword)
+      .const(effects))
+      ? i18n(
+          'The current control panel password stops working immediately, and anyone signed in with it is locked out. The new password is shown only once.',
+        )
+      : null,
     allowedStatuses: 'any',
     group: null,
     visibility: 'enabled',

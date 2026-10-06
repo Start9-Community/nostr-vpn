@@ -13,9 +13,396 @@ FILES=(
   "$ROOT/scripts/lib-mobile-ios-release-artifact.sh"
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
   "$ROOT/scripts/macos-release-mobile-join-remote.sh"
+  "$ROOT/scripts/ubuntu-vm-release-mobile-join-e2e.sh"
+  "$ROOT/scripts/windows-vm-release-mobile-join-e2e.sh"
 )
 for file in "${FILES[@]}"; do
   bash -n "$file"
+done
+python3 - "$ROOT/scripts/mobile-release-join-e2e.sh" <<'PY'
+import os, pathlib, subprocess, sys, tempfile
+source = pathlib.Path(sys.argv[1]).read_text()
+reset = source.split('case "${NVPN_RELEASE_JOIN_BUILD_ONLY:-0}" in', 1)[1]
+reset = reset.split('\nesac\n', 1)[1].split('\n# Phone phases', 1)[0]
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    summary, timings = root / 'summary.json', root / 'delivery-times.tsv'
+    for phase in ('desktop-only', 'full', 'qr-only'):
+        summary.write_text('completed phone receipt')
+        timings.write_text('recorded phone timings')
+        subprocess.run(['bash', '-euc', reset], check=True, env={
+            **os.environ, 'RESULT_DIR': directory, 'SUMMARY': str(summary),
+            'RELEASE_JOIN_PHASE_SELECTION': phase,
+        })
+        if phase == 'desktop-only':
+            assert summary.read_text() == 'completed phone receipt'
+            assert timings.read_text() == 'recorded phone timings'
+        else:
+            assert not summary.exists() and not timings.exists()
+PY
+(
+  dispatch="$(sed -n '/^case "$RELEASE_JOIN_PHASE_SELECTION" in$/,/^esac$/p' "$ROOT/scripts/mobile-release-join-e2e.sh")"
+  RELEASE_JOIN_PHASE_SELECTION=qr-only
+  phase_ios_admin_android_qr() { echo iphone-qr; }
+  phase_android_admin_ios_qr() { echo pixel-qr; }
+  release_join_ios_run_test() { echo unexpected-normalization; return 1; }
+  [[ "$(eval "$dispatch")" == $'iphone-qr\npixel-qr' ]] || {
+    echo 'QR-only dispatch did not select exactly both QR directions' >&2
+    exit 1
+  }
+)
+python3 - "$ROOT" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+host=(root/'scripts/macos-vm-release-mobile-join-e2e.sh').read_text()
+host=host.split('ios_join_log="$(ios_log macos-admin-iphone-join)"',1)[1].split('# Physical iPhone admin -> macOS joiner.',1)[0]
+assert host.index('remote require-delivery-log') < host.index('release_join_signal_ios_peer_accepted') < host.index('release_join_ios_finish_test')
+runner=(root/'ios/UITests/NostrVpnReleaseJoinUITests.swift').read_text()
+runner=runner.split('func testManualJoinAndRequireRosterCompletion()',1)[1].split('func testManualAdminAddRequiresRosterProgress()',1)[0]
+assert runner.index('relaunch: false') < runner.index('waitForPeerAcceptance(admin)') < runner.index('relaunchAndRequireAcceptedRoster')
+assert 'NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME' in runner
+PY
+(
+  # Exercise the real USB copy adapter with an external fixture executable.
+  # Copying must neither launch the app nor depend on CoreDevice's active
+  # XCTest connection, and a transfer failure must reach the caller.
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-usb-copy.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  mkdir "$private/bin"
+  export PATH="$private/bin:$PATH"
+  export NVPN_TEST_IOS_COPY_DIR="$private"
+  IOS_DEVICE=fixture-device
+  cat >"$private/bin/ios-deploy" <<'PY'
+#!/usr/bin/env python3
+import os,pathlib,sys,time
+args=sys.argv[1:]
+root=pathlib.Path(os.environ['NVPN_TEST_IOS_COPY_DIR'])
+assert args[:5] == ['--id','fixture-device','--no-wifi','--bundle_id','fixture.runner']
+if os.environ.get('NVPN_TEST_IOS_COPY_FAIL') == '1':sys.exit(7)
+if os.environ.get('NVPN_TEST_IOS_COPY_FAIL') == 'timeout':
+    (root/'copy.pid').write_text(str(os.getpid()))
+    time.sleep(30)
+if '--upload' in args:
+    assert pathlib.Path(args[args.index('--upload')+1]).read_bytes() == b'fixture'
+    assert args[args.index('--to')+1] == 'Documents/fixture.txt'
+    (root/'uploaded').write_text('ok')
+else:
+    assert '--download=Documents/fixture.txt' in args
+    dest=pathlib.Path(args[args.index('--to')+1])/'Documents/fixture.txt'
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b'fixture')
+PY
+  chmod +x "$private/bin/ios-deploy"
+  printf fixture >"$private/source"
+  release_join_ios_copy_test_file to fixture.runner "$private/source" Documents/fixture.txt
+  [[ -s "$private/uploaded" ]]
+  release_join_ios_copy_test_file from fixture.runner Documents/fixture.txt "$private/downloaded"
+  cmp "$private/source" "$private/downloaded"
+  export NVPN_TEST_IOS_COPY_FAIL=1
+  if release_join_ios_copy_test_file to fixture.runner "$private/source" Documents/fixture.txt; then
+    echo 'USB copy failure was ignored' >&2
+    exit 1
+  fi
+  export NVPN_TEST_IOS_COPY_FAIL=timeout
+  started=$SECONDS
+  if release_join_ios_copy_test_file to fixture.runner "$private/source" Documents/fixture.txt; then
+    echo 'USB copy did not enforce its transfer deadline' >&2
+    exit 1
+  fi
+  ((SECONDS - started < 19))
+  if kill -0 "$(cat "$private/copy.pid")" 2>/dev/null; then
+    echo 'Timed-out USB copy process was not reaped' >&2
+    exit 1
+  fi
+)
+(
+  # A bounded unavailable/locked preflight must not launch XCTest. Once the
+  # device is unlocked, method selection and authorization are still checked.
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  ios_release_network_require_unlocked() { :; }
+  private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-join-readiness.XXXXXX")"
+  trap 'rm -rf "$private"' EXIT
+  PRIVATE_DIR="$private"
+  IOS_DEVICE=fixture-device
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
+  lock_available=0
+  ios_release_network_require_unlocked() {
+    printf 'checked\n' >>"$private/status-query"
+    [[ "$lock_available" == 1 ]]
+  }
+  release_join_ios_stop_runner() { :; }
+  release_join_ios_test_command() {
+    if [[ "$1" == denied ]]; then
+      printf '%s\0' bash -c 'echo "Timed out while enabling automation mode."; sleep 30'
+    else
+      printf '%s\0' bash -c \
+        'printf "%s\n" "Test Case '\''-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests fixture]'\'' started."; sleep 1'
+    fi
+  }
+  if release_join_ios_run_test fixture "$private/ready.log"; then
+    echo 'Unavailable lock preflight launched a test' >&2
+    exit 1
+  fi
+  [[ ! -e "$private/ready.log" && "$RELEASE_JOIN_DEVICE_MUTATED" == 0 ]]
+  lock_available=1
+  release_join_ios_run_test fixture "$private/ready.log"
+  authorization_started=$SECONDS
+  if release_join_ios_run_test denied "$private/denied.log"; then
+    echo 'iOS join accepted a pre-method authorization failure' >&2
+    exit 1
+  fi
+  ((SECONDS - authorization_started < 5)) || {
+    echo 'iOS join waited after Apple had already denied automation' >&2
+    exit 1
+  }
+  [[ $(wc -l <"$private/status-query" | tr -d ' ') == 3 ]]
+
+)
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-snapshot.XXXXXX")"
+  trap 'rm -rf "$PRIVATE_DIR"' EXIT
+  ADB=(snapshot_adb)
+  snapshot_adb() {
+    [[ "$1" != shell ]] || return "$dump_status"
+    printf 'read\n' >>"$PRIVATE_DIR/reads"
+    printf '<hierarchy><node resource-id="accepted" bounds="[0,0][100,100]"/></hierarchy>'
+  }
+  # A previous accepted snapshot must not survive a failed fresh device dump.
+  for dump_status in 0 7; do
+    result=0
+    release_join_android_query resource accepted center >/dev/null || result=$?
+    if (( (dump_status == 0 && result != 0) || (dump_status != 0 && result == 0) )); then
+      echo 'Android UI query accepted a stale snapshot or rejected a fresh one' >&2
+      exit 1
+    fi
+  done
+  [[ $(wc -l <"$PRIVATE_DIR/reads" | tr -d ' ') == 1 ]]
+)
+(
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-network-setup.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  RELEASE_JOIN_UI_WAIT_SECS=2
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1
+  trace() { printf '%s\n' "$*" >>"$tmp/calls"; }
+  ADB=(trace)
+  release_join_android_stop() { trace stop; }
+  release_join_android_launch() { trace launch; }
+  release_join_android_dump_ui() {
+    trace dump
+    RELEASE_JOIN_ANDROID_UI_XML="$tmp/ui.xml"
+    # Dialog accessibility exposes descriptions without resource IDs.
+    if [[ "$scenario" == fresh ]]; then
+      printf '<hierarchy><node text="" resource-id="" content-desc="Create Network" bounds="[0,0][100,100]"/></hierarchy>' >"$RELEASE_JOIN_ANDROID_UI_XML"
+    else
+      printf '<hierarchy><node><node clickable="true" bounds="[0,0][100,100]"><node text="Saved network"/></node><node checkable="true"><node content-desc="Turn VPN on"/></node></node></hierarchy>' >"$RELEASE_JOIN_ANDROID_UI_XML"
+    fi
+  }
+  release_join_android_wait_query() { trace "wait:$1:$2"; }
+  release_join_android_tap_center() { trace "tap:$1:$2"; }
+  release_join_android_tap_visible() { trace "tap:$1:$2"; }
+  release_join_android_scroll_to() { trace "scroll:$1:$2${4:+:$4}"; }
+  release_join_android_normalize_carrier() { trace normalize-carrier; }
+  release_join_android_query() {
+    [[ "$1:$2" == 'text:This device' && "$scenario" == saved-direct ]]
+  }
+  # Even navigation must not run before exact-artifact validation arms the device.
+  if release_join_android_open_network_setup; then
+    echo 'Android setup navigation ignored device ownership' >&2
+    exit 1
+  fi
+  [[ ! -e "$tmp/calls" ]]
+  RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
+  for scenario in fresh saved-wireguard saved-direct; do
+    : >"$tmp/calls"
+    release_join_android_open_network_setup
+    [[ "$(head -2 "$tmp/calls" | tr '\n' ' ')" == 'stop launch ' ]]
+    forbidden='clear|uninstall|delete|reset'
+    if [[ "$scenario" != fresh ]]; then
+      grep -Fxq normalize-carrier "$tmp/calls"
+      [[ $(grep -n normalize-carrier "$tmp/calls" | cut -d: -f1) -lt $(grep -n 'tap:text:Add network' "$tmp/calls" | cut -d: -f1) ]]
+      grep -Fxq 'tap:description:Internet tab' "$tmp/calls"
+      grep -Fxq 'scroll:resource:internet-source-picker:backward' "$tmp/calls"
+      if [[ "$scenario" == saved-wireguard ]]; then
+        grep -Fxq 'tap:description:Internet source This device' "$tmp/calls"
+        [[ $(grep -n 'tap:description:Internet source This device' "$tmp/calls" | cut -d: -f1) -lt $(grep -n 'tap:text:Add network' "$tmp/calls" | cut -d: -f1) ]]
+      else
+        forbidden+='|Internet source This device'
+      fi
+      grep -Fxq 'tap:network-picker:Turn VPN ' "$tmp/calls"
+      grep -Fxq 'scroll:text:Add network' "$tmp/calls"
+      grep -Fxq 'tap:text:Add network' "$tmp/calls"
+      grep -Fxq 'wait:description:Create Network' "$tmp/calls"
+    else
+      ! grep -Fxq normalize-carrier "$tmp/calls"
+      forbidden+='|^tap:'
+    fi
+    if grep -Eq "$forbidden" "$tmp/calls"; then
+      echo 'Android setup made an unnecessary or destructive change' >&2
+      exit 1
+    fi
+  done
+)
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-stop.XXXXXX")"
+  trap 'rm -rf "$PRIVATE_DIR"' EXIT
+  ADB=(cleanup_adb -s selected-test-device)
+  cleanup_adb() {
+    printf '%s\n' "$@" >>"$PRIVATE_DIR/adb-arguments"
+    case "${FAKE_STOP_RESULT:-stopped}" in
+      stopped) printf 'ACTIVITY MANAGER SERVICES\n  (nothing)\n' ;;
+      active) printf 'ServiceRecord{123 selected-test-package/.NostrVpnService}\n' ;;
+      ambiguous) printf 'query unavailable\n' ;;
+      offline) return 7 ;;
+    esac
+  }
+  # An iOS-only mutation must not grant ownership of Android cleanup.
+  RELEASE_JOIN_DEVICE_MUTATED=1
+  RELEASE_JOIN_ANDROID_MUTATED=0
+  release_join_android_stop
+  [[ ! -e "$PRIVATE_DIR/adb-arguments" ]]
+  RELEASE_JOIN_ANDROID_MUTATED=1
+  NVPN_DEFAULT_APP_ID=selected-test-package
+  release_join_android_stop
+  [[ "$(head -2 "$PRIVATE_DIR/adb-arguments" | tr '\n' ' ')" == '-s selected-test-device ' ]]
+  grep -Fxq selected-test-package "$PRIVATE_DIR/adb-arguments"
+  grep -Fxq force-stop "$PRIVATE_DIR/adb-arguments"
+  grep -Fxq dumpsys "$PRIVATE_DIR/adb-arguments"
+  grep -Fxq services "$PRIVATE_DIR/adb-arguments"
+  if grep -Eq 'clear|uninstall|reboot' "$PRIVATE_DIR/adb-arguments"; then
+    echo "Android cleanup attempted destructive recovery" >&2
+    exit 1
+  fi
+  for FAKE_STOP_RESULT in active ambiguous offline; do
+    if release_join_android_stop; then
+      echo "Android cleanup accepted $FAKE_STOP_RESULT state" >&2
+      exit 1
+    fi
+  done
+  # The shared deadline runner is exercised with a real blocked child below.
+  # Here test only this caller's five-second budget and timeout propagation.
+  release_join_now_ms() { printf '1000\n'; }
+  release_join_run_until_ms() {
+    printf '%s\n' "$1" >"$PRIVATE_DIR/deadline"
+    return 124
+  }
+  if release_join_android_stop; then
+    echo "Android cleanup accepted a stalled device command" >&2
+    exit 1
+  fi
+  [[ "$(<"$PRIVATE_DIR/deadline")" == 6000 ]]
+)
+(
+  # Exercise the actual desktop cleanup functions, not just their text.
+  PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-cleanup-trap.XXXXXX")"
+  trap 'rm -rf "$PRIVATE_DIR"' EXIT
+  for join_driver in ubuntu windows macos; do
+    for entry_status in 0 7; do
+      for stop_status in 0 1; do
+        result=0
+        (
+          RESULT_DIR="$PRIVATE_DIR"
+          PLATFORM_RESULT="$PRIVATE_DIR"
+          mkdir -p "$RESULT_DIR/macos" "$PRIVATE_DIR/state"
+          PRIVATE_DIR="$PRIVATE_DIR/state"
+          remote_pid="" REMOTE_ACTION_PID="" import_ready=0
+          acceptance_observer_pids=()
+          MACOS_MOBILE_DIRECTION_LABEL=fixture
+          remote() { :; }
+          ubuntu_vm_cleanup_imported_release_bundle() { :; }
+          release_join_android_capture_failure_log() { :; }
+          release_join_android_stop() {
+            printf 'stop\n' >>"$RESULT_DIR/calls"
+            return "$stop_status"
+          }
+          if [[ "$join_driver" == macos ]]; then
+            eval "$(sed -n '/^macos_mobile_direction_cleanup() {$/,/^}$/p' "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh")"
+            trap macos_mobile_direction_cleanup EXIT
+          else
+            eval "$(sed -n '/^cleanup() {$/,/^}$/p' "$ROOT/scripts/$join_driver-vm-release-mobile-join-e2e.sh")"
+            trap cleanup EXIT
+          fi
+          exit "$entry_status"
+        ) || result=$?
+        [[ -s "$PRIVATE_DIR/calls" ]]
+        rm "$PRIVATE_DIR/calls"
+        if ((entry_status != 0)); then
+          [[ "$result" -eq "$entry_status" ]]
+        elif ((stop_status != 0)); then
+          [[ "$result" -ne 0 ]]
+        else
+          [[ "$result" -eq 0 ]]
+        fi
+      done
+    done
+  done
+)
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-failure-log.XXXXXX")"
+  trap 'rm -rf "$PRIVATE_DIR"' EXIT
+  ADB=(failure_log_adb -s selected-test-device)
+  failure_log_adb() {
+    printf '%s\n' "$@" >"$PRIVATE_DIR/adb-arguments"
+    if [[ "$3 $4 $5" == 'exec-out screencap -p' ]]; then
+      printf 'failure-screen\n'
+      return "${FAKE_ADB_RESULT:-0}"
+    fi
+    printf 'retained service lifecycle log\n'
+    return "${FAKE_ADB_RESULT:-0}"
+  }
+  RELEASE_JOIN_ANDROID_MUTATED=0
+  release_join_android_capture_failure_log "$PRIVATE_DIR/not-selected.log"
+  [[ ! -e "$PRIVATE_DIR/not-selected.log" && ! -e "$PRIVATE_DIR/adb-arguments" ]]
+  RELEASE_JOIN_ANDROID_MUTATED=1
+  release_join_android_capture_failure_log "$PRIVATE_DIR/selected.log"
+  grep -Fxq 'failure-screen' "$PRIVATE_DIR/selected.log.png"
+  [[ "$(head -2 "$PRIVATE_DIR/adb-arguments" | tr '\n' ' ')" == '-s selected-test-device ' ]]
+  grep -Fxq NostrVpnService:I "$PRIVATE_DIR/adb-arguments"
+  grep -Fxq '*:S' "$PRIVATE_DIR/adb-arguments"
+  grep -Fq 'retained service lifecycle log' "$PRIVATE_DIR/selected.log"
+  FAKE_ADB_RESULT=7
+  release_join_android_capture_failure_log "$PRIVATE_DIR/offline.log"
+  grep -Fq 'status 7' "$PRIVATE_DIR/offline.log.stderr"
+  release_join_android_capture_failure_log "$PRIVATE_DIR/missing/output.log"
+  # Diagnostics must not abort cleanup or replace the original failure code.
+  release_join_now_ms() { printf '1000\n'; }
+  release_join_run_until_ms() {
+    printf '%s\n' "$1" >"$PRIVATE_DIR/deadline"
+    return 124
+  }
+  release_join_android_capture_failure_log "$PRIVATE_DIR/stalled.log"
+  grep -Fq 'status 124' "$PRIVATE_DIR/stalled.log.stderr"
+  [[ "$(<"$PRIVATE_DIR/deadline")" == 6000 ]]
+)
+for join_driver in \
+  mobile-release-join-e2e.sh \
+  macos-vm-release-mobile-join-e2e.sh \
+  ubuntu-vm-release-mobile-join-e2e.sh \
+  windows-vm-release-mobile-join-e2e.sh
+do
+  grep -Fq 'release_join_android_capture_failure_log ' "$ROOT/scripts/$join_driver"
+done
+for join_driver in \
+  mobile-release-join-e2e.sh \
+  macos-vm-release-mobile-join-e2e.sh \
+  ubuntu-vm-release-mobile-join-e2e.sh \
+  windows-vm-release-mobile-join-e2e.sh
+do
+  grep -Fq 'NVPN_RELEASE_JOIN_UI_WAIT_SECS:-30' \
+    "$ROOT/scripts/$join_driver" \
+    || { echo "$join_driver has a short public-UI readiness wait" >&2; exit 1; }
+  grep -Fq 'NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15' \
+    "$ROOT/scripts/$join_driver" \
+    || { echo "$join_driver weakened the 15-second delivery deadline" >&2; exit 1; }
 done
 grep -Fq 'NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90' \
   "$ROOT/scripts/mobile-release-join-e2e.sh"
@@ -25,7 +412,62 @@ grep -Fq 'NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90' \
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
 grep -Fq 'RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 90' \
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
+grep -Fq 'testNormalizeRetainedJoinCarrierSettings' \
+  "$ROOT/scripts/mobile-release-join-e2e.sh"
+grep -Fq 'NVPN_RELEASE_JOIN_BOOTSTRAP_CONNECTED=' \
+  "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift"
+for setting in \
+  connectToNonRosterFipsPeers \
+  fipsNostrDiscoveryEnabled \
+  fipsWebrtcEnabled \
+  fipsBootstrapEnabled
+do
+  grep -Fq "\"$setting\"," "$ROOT/ios/Sources/AppModel.swift"
+done
 join_ui="$ROOT/scripts/lib-mobile-release-join-ui.sh"
+
+python3 - \
+  "$ROOT/ios/Sources/SettingsViews.swift" \
+  "$ROOT/ios/UITests/NostrVpnReleaseJoinUITests.swift" <<'PY'
+import pathlib
+import sys
+
+settings, tests = [pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]]
+fips = settings.split("struct FipsSettingsCard: View", 1)[1].split(
+    "struct PubsubSettingsCard: View", 1
+)[0]
+if fips.count(".disabled(model.actionInFlight)") != 4:
+    raise SystemExit("FIPS controls do not all reject taps during VPN reconciliation")
+setter = tests.split("private func setSwitchOn", 1)[1].split(
+    "private func nonNegativeIntegerValue", 1
+)[0]
+if "control.exists && control.isEnabled" not in setter:
+    raise SystemExit("physical iOS join test taps FIPS controls before reconciliation finishes")
+if "control.coordinate(withNormalizedOffset:" not in setter:
+    raise SystemExit("physical iOS join test does not target the iOS 26 switch control")
+
+join_gate = pathlib.Path(sys.argv[2]).parents[2].joinpath(
+    "scripts/mobile-release-join-e2e.sh"
+).read_text(encoding="utf-8")
+build_only = join_gate.find("SIGNED_RELEASE_JOIN_ARTIFACTS_READY")
+if not (
+    join_gate.find("release_join_prepare_ios_release")
+    < build_only
+    < join_gate.find("carrier_preflight_log=")
+):
+    raise SystemExit("mobile join build-only exit is not between artifact preparation and UI execution")
+
+release_gate = pathlib.Path(sys.argv[2]).parents[2].joinpath(
+    "scripts/release-gate.sh"
+).read_text(encoding="utf-8")
+mobile_gate = release_gate.split("run_mobile_join_e2e_gate()", 1)[1].split(
+    "run_windows_release_mobile_join_e2e_gate()", 1
+)[0]
+variant_build = mobile_gate.find("NVPN_RELEASE_JOIN_BUILD_ONLY=1")
+xctestrun_selection = mobile_gate.find("select_generated_ios_release_xctestrun")
+if variant_build < 0 or not (variant_build < xctestrun_selection):
+    raise SystemExit("release gate does not build the exact iOS join variant before reuse")
+PY
 
 (
   # Launch and in-test setup each receive their own bounded allowance.
@@ -67,17 +509,10 @@ join_ui="$ROOT/scripts/lib-mobile-release-join-ui.sh"
 NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_QR_SCREENSHOT_FILENAME=nvpn-release-join-qr-ABC123.png
 NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_QR_SCREENSHOT_SHA256=$capture_sha
 EOF
-  xcrun() {
-    [[ "$*" == *"device copy from"* ]]
-    [[ "$*" == *"--domain-identifier fi.siriusbusiness.nvpn.UITests.xctrunner"* ]]
-    [[ "$*" == *"--source Documents/nvpn-release-join-qr-ABC123.png"* ]]
-    local argument destination="" previous=""
-    for argument in "$@"; do
-      [[ "$previous" != --destination ]] || destination="$argument"
-      previous="$argument"
-    done
-    [[ -n "$destination" ]]
-    cp "$captured" "$destination"
+  release_join_ios_copy_test_file() {
+    [[ "$1" == from && "$2" == fi.siriusbusiness.nvpn.UITests.xctrunner ]]
+    [[ "$3" == Documents/nvpn-release-join-qr-ABC123.png && -n "$4" ]]
+    cp "$captured" "$4"
   }
   release_join_capture_ios_qr "$private/qr.png"
   [[ "$(od -An -tx1 -N8 "$private/qr.png" | tr -d ' \n')" \
@@ -133,24 +568,61 @@ EOF
   IOS_DEVICE=fixture-device
   image="$private/fixture.png"
   printf '\211PNG\r\n\032\nfixture' >"$image"
-  xcrun() {
-    local argument bundle="" previous=""
-    printf '%s\n' "$*" >>"$private/xcrun.log"
-    [[ "$*" == *"device copy to"* ]]
-    for argument in "$@"; do
-      [[ "$previous" != --domain-identifier ]] || bundle="$argument"
-      previous="$argument"
-    done
-    [[ -n "$bundle" && "$*" == *"--source $image"* ]]
+  release_join_ios_copy_test_file() {
+    printf '%s\n' "$*" >>"$private/copy.log"
+    [[ "$1" == to && -n "$2" && "$3" == "$image" && "$4" == Documents/fixture.png ]]
   }
   release_join_stage_ios_qr_image "$image" fixture.png
-  [[ "$(grep -c 'device copy to' "$private/xcrun.log")" == 2 ]]
-  grep -Fq -- '--domain-identifier fi.siriusbusiness.nvpn ' "$private/xcrun.log"
+  [[ "$(grep -c '^to ' "$private/copy.log")" == 2 ]]
+  grep -Fq -- 'to fi.siriusbusiness.nvpn ' "$private/copy.log"
   grep -Fq -- \
-    '--domain-identifier fi.siriusbusiness.nvpn.UITests.xctrunner ' \
-    "$private/xcrun.log"
+    'to fi.siriusbusiness.nvpn.UITests.xctrunner ' \
+    "$private/copy.log"
 )
 python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
+
+(
+  set -u
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  RELEASE_JOIN_UI_WAIT_SECS=1
+  release_join_android_query() { return 1; }
+  release_join_android_os_vpn_connected() { return 0; }
+  release_join_android_wait_vpn_connected
+) || {
+  echo "Android carrier readiness incorrectly depends on an on-screen toggle" >&2
+  exit 1
+}
+
+python3 - \
+  "$ROOT/scripts/mobile-release-join-e2e.sh" \
+  "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh" \
+  "$ROOT/scripts/ubuntu-vm-release-mobile-join-e2e.sh" \
+  "$ROOT/scripts/windows-vm-release-mobile-join-e2e.sh" <<'PY'
+import pathlib
+import sys
+
+for name in sys.argv[1:]:
+    source = pathlib.Path(name).read_text(encoding="utf-8")
+    parts = source.split("release_join_android_manual_submit")
+    if len(parts) != 2:
+        raise SystemExit(f"{pathlib.Path(name).name} must have one Android manual-join phase")
+    following = parts[1]
+    wait = following.find("release_join_android_wait_vpn_connected")
+    if wait < 0:
+        raise SystemExit(
+            f"{pathlib.Path(name).name} approves before the Android join carrier is ready"
+        )
+    approval_markers = [
+        following.find(token)
+        for token in ("release_join_ios_start_test", "remote admin-add", "remote AdminAdd")
+        if following.find(token) >= 0
+    ]
+    if not approval_markers or wait > min(approval_markers):
+        raise SystemExit(
+            f"{pathlib.Path(name).name} starts approval before the Android join carrier is ready"
+        )
+PY
 
 (
   set -u
@@ -168,6 +640,7 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
   ios_release_network_disconnect_cleanup() {
     [[ "$IOS_BUNDLE_ID" == "$NVPN_DEFAULT_IOS_BUNDLE_ID" ]]
   }
+  ios_release_network_require_packet_tunnel_stopped() { return 1; }
   release_join_arm_ios_disconnect_cleanup \
     "$private/Nostr VPN.app" "$private/derived" fixture-device
   release_join_cleanup_ios_network_state
@@ -237,10 +710,10 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
 )
 
 (
-  # Android no-install reuse pulls and byte-compares the real installed APK.
+  # Cover reuse, replacement, and fresh installs through one real preparation path.
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-android-noinstall.XXXXXX")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-android-install.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
   apk="$tmp/app-release.apk"
   printf 'exact installed apk\n' >"$apk"
@@ -248,13 +721,14 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
     printf '%s\n' "$*" >>"$tmp/adb.log"
     case "$*" in
       "shell pm path fi.siriusbusiness.nvpn")
+        [[ "$installed" == true ]] || return 1
         printf 'package:/data/app/exact/base.apk\n'
         ;;
       "shell pm list packages") printf 'package:fi.siriusbusiness.nvpn\n' ;;
       "pull /data/app/exact/base.apk "*) cp "$apk" "$3" ;;
       "shell dumpsys package fi.siriusbusiness.nvpn") printf '  flags=[ HAS_CODE ]\n' ;;
       "shell pidof fi.siriusbusiness.nvpn") printf '1234\n' ;;
-      "install -r "*) return 99 ;;
+      "install -r "*) installed=true ;;
       *) : ;;
     esac
   }
@@ -274,29 +748,38 @@ python3 -B "$ROOT/scripts/macos_release_join_artifact.py" --help >/dev/null
   APP_GIT_SHA="$RELEASE_JOIN_ANDROID_APP_SHA"
   APP_GIT_TREE="$RELEASE_JOIN_ANDROID_APP_TREE"
   NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1
-  NVPN_RELEASE_JOIN_INSTALL_ANDROID=0
   NVPN_RELEASE_JOIN_INSTALL_IOS=1
-  release_join_configure_install_modes
   release_join_assert_fips_unchanged() { :; }
   release_join_assert_app_unchanged() { :; }
-  release_join_prepare_android_release
-  if grep -Fq 'install -r' "$tmp/adb.log"; then
-    echo "Android exact-artifact reuse unexpectedly installed an APK" >&2
-    exit 1
-  fi
-  python3 - "$RESULT_DIR/android-release-install.json" <<'PY'
+  sleep() { :; }
+  for scenario in '0 true 0' '1 true 1' '1 false 2'; do
+    read -r NVPN_RELEASE_JOIN_INSTALL_ANDROID installed expected_installs <<<"$scenario"
+    preexisting="$installed"
+    : >"$tmp/adb.log"
+    release_join_configure_install_modes
+    release_join_prepare_android_release
+    actual_installs="$(grep -c '^install -r ' "$tmp/adb.log" || true)"
+    [[ "$actual_installs" -eq "$expected_installs" ]] || {
+      echo "Android preparation made $actual_installs installs; expected $expected_installs ($scenario)" >&2
+      exit 1
+    }
+    python3 - "$RESULT_DIR/android-release-install.json" "$preexisting" "$NVPN_RELEASE_JOIN_INSTALL_ANDROID" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8"))
 assert r["installedArtifactVerified"] is True
-assert r["replacementInstall"] is False
-assert r["replacementInstallVerified"] is False
+assert r["preexistingCanonicalPackage"] is (sys.argv[2] == "true")
+assert r["replacementInstall"] is (sys.argv[3] == "1")
+assert r["replacementInstallVerified"] is (sys.argv[3] == "1")
 PY
+  done
 )
 
 (
-  # Real devicectl inventory shape uses a CoreDevice UUID unrelated to the UDID.
+  # App replacement retains the trusted runner and verifies USB inventories.
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  ios_release_network_require_unlocked() { :; }
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-ios-noinstall.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
   app="$tmp/Nostr VPN.app"
@@ -312,25 +795,30 @@ for path, bundle, build, version in (
         plistlib.dump({"CFBundleIdentifier": bundle, "CFBundleVersion": build,
                        "CFBundleShortVersionString": version}, f)
 PY
+  : >"$tmp/devicectl.log"
   xcrun() {
     printf '%s\n' "$*" >>"$tmp/devicectl.log"
-    [[ "$*" != *"device install app"* ]] || return 99
-    local output="" previous=""
-    for argument in "$@"; do
-      [[ "$previous" != --json-output ]] || output="$argument"
-      previous="$argument"
-    done
-    [[ -n "$output" ]] || return 0
-    python3 - "$output" "${FAKE_IOS_RUNNER_VERSION:-1.0}" <<'PY'
-import json, sys
-json.dump({"info": {"outcome": "success"}, "result": {
-    "deviceIdentifier": "coredevice-uuid-not-hardware-udid", "apps": [
-        {"bundleIdentifier": "example.unrelated", "bundleVersion": "9", "version": "9"},
-        {"bundleIdentifier": "fi.siriusbusiness.nvpn", "bundleVersion": "4001008", "version": "4.1.5"},
-        {"bundleIdentifier": "fi.siriusbusiness.nvpn.UITests.xctrunner", "bundleVersion": "1", "version": sys.argv[2]},
-    ]}}, open(sys.argv[1], "w"))
-PY
+    [[ "$*" == *"device install app"* && "${ALLOW_APP_INSTALL:-0}" == 1 && "$*" == *" $app --quiet" ]]
   }
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/ios-deploy" <<'USB_FIXTURE'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+assert sys.argv[1:3] == ["--id", "fixture-hardware-udid"]
+assert "--list_bundle_id" in sys.argv and "--json" in sys.argv
+apps = {}
+for bundle, build, version in (
+    ("fi.siriusbusiness.nvpn", "4001008", "4.1.5"),
+    ("fi.siriusbusiness.nvpn.UITests.xctrunner", "1", os.environ.get("FAKE_IOS_RUNNER_VERSION", "1.0")),
+):
+    apps[bundle] = {"CFBundleIdentifier": bundle, "CFBundleVersion": build, "CFBundleShortVersionString": version}
+print(json.dumps({"Event": "ListBundleId", "Apps": apps}))
+USB_FIXTURE
+  chmod +x "$tmp/bin/ios-deploy"
+  export PATH="$tmp/bin:$PATH"
+  export FAKE_IOS_RUNNER_VERSION=1.0
   RESULT_DIR="$tmp/result"
   IOS_DEVICE=fixture-hardware-udid
   RELEASE_JOIN_ARTIFACTS_VALIDATED=1
@@ -435,6 +923,48 @@ PY
     exit 1
   fi
   grep -Fq 'installed iOS bundle version mismatch' "$tmp/runner-mismatch.log"
+
+  # Switching to the separately signed QR variant must retain a proven runner.
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  ios_release_network_require_unlocked() { :; }
+  plutil -replace CFBundleShortVersionString -string 1.0 "$runner/Info.plist"
+  # The join path owns its bundle selection, not the packet-gate caller's globals.
+  IOS_BUNDLE_ID=unrelated.native.app
+  unset IOS_RELEASE_NETWORK_DEVICE IOS_RELEASE_NETWORK_SIGNING_DIR
+  PRIVATE_DIR="$tmp"
+  RELEASE_JOIN_IOS_CLEANUP_ARMED=0
+  RELEASE_JOIN_INSTALL_IOS=1
+  NVPN_RELEASE_JOIN_IOS_RECEIPT="$tmp/variant.json"
+  printf '%s\n' '{"installedBuildNumber":"4001008","installedMarketingVersion":"4.1.5"}' \
+    >"$NVPN_RELEASE_JOIN_IOS_RECEIPT"
+  NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT="$tmp/installed-runner.json"
+  ios_release_network_write_runner_install_receipt \
+    "$runner" "$NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT" "$runner_tree" \
+    "$(printf %s fixture-hardware-udid | shasum -a 256 | awk '{print $1}')" \
+    "$(release_join_sha256 "$RELEASE_JOIN_IOS_XCTESTRUN")" \
+    "$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$tmp/derived/Build/Products")"
+  ALLOW_APP_INSTALL=1
+  : >"$tmp/devicectl.log"
+  release_join_install_ios_release \
+    "$app" "$(printf '1%.0s' {1..40})" "$(printf '2%.0s' {1..40})" \
+    "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" \
+    "$(printf 'c%.0s' {1..64})" "$tmp/derived" fixture-hardware-udid
+  [[ "$(grep -Fc 'device install app' "$tmp/devicectl.log")" == 1 ]] \
+    || { echo "join variant replaced the verified installed runner" >&2; exit 1; }
+  [[ "$IOS_BUNDLE_ID" == unrelated.native.app ]]
+  printf '%s\n' '{}' >"$NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT"
+  : >"$tmp/devicectl.log"
+  if release_join_install_ios_release \
+      "$app" 1 2 3 4 5 "$tmp/derived" fixture-hardware-udid \
+      >"$tmp/retained-runner-mismatch.log" 2>&1
+  then
+    echo "join variant accepted missing installed runner provenance" >&2
+    exit 1
+  fi
+  if grep -Fq 'device install app' "$tmp/devicectl.log"; then
+    echo "join variant changed the phone before validating retained runner provenance" >&2
+    exit 1
+  fi
 )
 
 (
@@ -442,6 +972,7 @@ PY
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  ios_release_network_require_unlocked() { :; }
   log="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-join-selection.XXXXXX")"
   trap 'rm -f "$log"' EXIT
   RELEASE_JOIN_IOS_TEST_LOG="$log"
@@ -468,10 +999,12 @@ PY
   set -u
   # A failed concurrent phase must reap the whole host process group and stop
   # only the retained runner process on-device, without uninstalling it.
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  ios_release_network_require_unlocked() { :; }
   private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-join-abort.XXXXXX")"
   trap 'rm -rf "$private"' EXIT
   PRIVATE_DIR="$private"
@@ -486,6 +1019,13 @@ PY
     printf '%s\0' bash -c \
       'printf "%s\n" "Test Case '\''-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests fixture]'\'' started."; sleep 30 & wait'
   }
+  if release_join_ios_start_test fixture "$private/fixture.log"; then
+    echo "iOS join test started before device mutation was armed" >&2
+    exit 1
+  fi
+  [[ ! -e "$private/fixture.log" ]]
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
   release_join_ios_start_test fixture "$private/fixture.log"
   pgid="$RELEASE_JOIN_IOS_TEST_PGID"
   release_join_ios_abort_test
@@ -500,10 +1040,14 @@ PY
 (
   # Even a failed isolation check must reap both the command's descendants and
   # any separately reported process group before returning.
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+  RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  ios_release_network_require_unlocked() { :; }
   private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-join-isolation.XXXXXX")"
   trap 'rm -rf "$private"' EXIT
   PRIVATE_DIR="$private"
@@ -543,9 +1087,17 @@ PY
   set -u
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  calls="$(mktemp "${TMPDIR:-/tmp}/nvpn-android-create-admin.XXXXXX")"
+  trap 'rm -f "$calls"' EXIT
   release_join_android_launch() { :; }
   release_join_android_wait_query() { :; }
   release_join_android_tap() { :; }
+  release_join_android_accept_admin_transport_permissions() {
+    echo transport-permissions >>"$calls"
+  }
+  release_join_android_wait_vpn_connected() {
+    echo vpn-connected >>"$calls"
+  }
   release_join_android_open_link_device() { :; }
   release_join_valid_npub() { :; }
   release_join_android_public_value() {
@@ -559,6 +1111,8 @@ PY
   [[ "$RELEASE_JOIN_ANDROID_ADMIN_ID" == npub1admin ]]
   [[ "$RELEASE_JOIN_ANDROID_NETWORK_ID" == network-1 ]]
   ((${#RELEASE_JOIN_ANDROID_NETWORK_IDS[@]} == 1))
+  grep -Fxq transport-permissions "$calls"
+  grep -Fxq vpn-connected "$calls"
 ) || {
   echo "Android first network creation failed under Bash nounset" >&2
   exit 1
@@ -597,14 +1151,13 @@ PY
   trace() { printf '%s\n' "$*" >>"$trace_file"; }
   fail() { echo "$*" >&2; return 1; }
   ios_log() { printf '%s/%s.log\n' "$RESULT_DIR" "$1"; }
-  release_join_now_ms() { printf '1000\n'; }
+  release_join_now_ms() { trace clock; printf '1000\n'; }
   assert_delivery_deadline() {
     [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]]
     trace "delivered:$3"
   }
   release_join_valid_npub() { [[ "$1" == npub1* ]]; }
-  release_join_restart_ios_in_place() { trace restart-ios; }
-  release_join_reset_android_state() { trace reset-android; }
+  release_join_android_open_network_setup() { trace network-setup-android; }
   ios_create_admin() {
     RELEASE_JOIN_IOS_ADMIN_ID=npub1iosadmin
     RELEASE_JOIN_IOS_NETWORK_ID=ios-network
@@ -640,13 +1193,22 @@ PY
     : >"$2"
     trace "ios-test:$active_test"
   }
+  release_join_ios_run_test() {
+    [[ "$1" == testNormalizeRetainedJoinCarrierSettings ]]
+    trace ios-carrier-prepared
+  }
   release_join_ios_wait_marker() {
     trace "ios-marker:$1"
   }
   release_join_ios_finish_test() { trace "ios-finish:$active_test"; }
+  release_join_signal_ios_peer_accepted() {
+    [[ "$1" == nvpn-peer-accepted-*.txt && "$2" == npub1androidjoiner ]]
+    trace ios-peer-accepted
+  }
   ios_marker_value_from() {
     case "$2" in
       NVPN_RELEASE_JOIN_JOINER_ID) printf '%s\n' npub1iosjoiner ;;
+      NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS) trace approval-clock; printf '900\n' ;;
       NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS) printf '1000\n' ;;
       NVPN_RELEASE_JOIN_QR_RELAUNCH_DURABLE) printf '%s\n' "$RELEASE_JOIN_ANDROID_ADMIN_ID" ;;
       NVPN_RELEASE_JOIN_QR_CONTENT_WIDTH_BPS) printf '9900\n' ;;
@@ -656,7 +1218,11 @@ PY
     esac
   }
   release_join_android_assert_pending_qr() { trace android-qr-pending; }
-  release_join_android_wait_qr_join_complete() { trace "android-qr-accepted:$1"; }
+  release_join_android_wait_qr_join_complete() {
+    [[ "$2" == 1900 && "$3" == "$RESULT_DIR/iphone-admin-pixel-qr-observations.tsv" ]]
+    trace "android-qr-accepted:$1"
+    printf '1000\n'
+  }
   release_join_android_relaunch_and_wait_accepted() { trace "android-relaunch-accepted:$1"; }
   release_join_android_scan_prepare() { trace android-scan-ready; }
   release_join_android_scan_submit() {
@@ -669,7 +1235,22 @@ PY
     RELEASE_JOIN_ANDROID_JOINER_ID=npub1androidjoiner
     trace android-manual-joiner
   }
-  release_join_android_wait_join_complete() { trace "android-manual-accepted:$1"; }
+  release_join_android_wait_vpn_connected() {
+    trace android-vpn-connected
+  }
+  release_join_android_open_devices() {
+    echo "Pending manual join must not reopen or navigate the app" >&2
+    return 1
+  }
+  release_join_android_wait_query() {
+    [[ "$1" == resource && "$2" == roster-participant-pending-npub1iosadmin ]]
+    trace android-devices-ready
+  }
+  release_join_observe_until_ms() {
+    [[ "$1" == 1900 && "$4" == release_join_android_accepted_snapshot_ms ]]
+    trace "android-manual-accepted:$5"
+    printf '1000\n' >"$2"
+  }
   release_join_android_manual_admin_prepare() { trace "android-admin-prepared:$1"; }
   release_join_android_manual_admin_tap() {
     trace "android-admin-submitted:$1"
@@ -680,12 +1261,39 @@ PY
   phase_ios_admin_android_qr
   grep -Fxq ios-admin "$trace_file"
   grep -Fxq android-background-foreground "$trace_file"
+  qr_carrier_line="$(grep -n -m1 '^android-vpn-connected$' "$trace_file" | cut -d: -f1)"
+  qr_approval_line="$(grep -n -m1 '^ios-test:' "$trace_file" | cut -d: -f1)"
+  [[ -n "$qr_carrier_line" && -n "$qr_approval_line" ]]
+  ((qr_carrier_line < qr_approval_line))
   grep -Fxq stage-ios-qr "$trace_file"
+  pending_line="$(grep -n -m1 '^android-qr-pending$' "$trace_file" | cut -d: -f1)"
+  stage_line="$(grep -n -m1 '^stage-ios-qr$' "$trace_file" | cut -d: -f1)"
+  clock_line="$(grep -n -m1 '^approval-clock$' "$trace_file" | cut -d: -f1)"
+  approval_line="$(grep -n -m1 '^ios-marker:NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$' "$trace_file" | cut -d: -f1)"
+  ((pending_line < stage_line)) || {
+    echo "Pending QR check raced approval after staging the image" >&2
+    exit 1
+  }
+  ((stage_line < qr_approval_line)) || {
+    echo "QR image transfer competed with an active XCTest runner" >&2
+    exit 1
+  }
+  ((approval_line < clock_line)) || {
+    echo "QR delivery clock did not use the actual approval marker" >&2
+    exit 1
+  }
   grep -Fxq 'android-qr-accepted:npub1iosadmin' "$trace_file"
   grep -Fxq 'android-relaunch-accepted:npub1iosadmin' "$trace_file"
 
   : >"$trace_file"
   phase_android_admin_ios_qr
+  carrier_line="$(grep -n -m1 '^ios-carrier-prepared$' "$trace_file" | cut -d: -f1)"
+  pending_line="$(grep -n -m1 '^ios-test:testShowPhysicalJoinQrAndRequireRosterCompletion$' "$trace_file" | cut -d: -f1)"
+  [[ -n "$carrier_line" && -n "$pending_line" ]]
+  ((carrier_line < pending_line)) || {
+    echo "Reverse QR join began without preparing its public carrier" >&2
+    exit 1
+  }
   grep -Fxq android-admin "$trace_file"
   grep -Fxq android-scan-ready "$trace_file"
   grep -Fxq 'android-scan-accepted:npub1iosjoiner' "$trace_file"
@@ -696,6 +1304,19 @@ PY
   : >"$trace_file"
   phase_ios_admin_android_manual
   grep -Fxq android-manual-joiner "$trace_file"
+  accepted_line="$(grep -n -m1 '^android-manual-accepted:' "$trace_file" | cut -d: -f1)"
+  signal_line="$(grep -n -m1 '^ios-peer-accepted$' "$trace_file" | cut -d: -f1)"
+  relaunch_line="$(grep -n -m1 '^android-relaunch-accepted:' "$trace_file" | cut -d: -f1)"
+  ((accepted_line < signal_line && signal_line < relaunch_line)) || {
+    echo 'Admin relaunch was permitted before peer acceptance or after tearing down the peer' >&2
+    exit 1
+  }
+  ready_line="$(grep -n -m1 '^android-devices-ready$' "$trace_file" | cut -d: -f1 || true)"
+  approval_line="$(grep -n -m1 '^ios-test:' "$trace_file" | cut -d: -f1)"
+  if [[ -z "$ready_line" || -z "$approval_line" ]] || ((ready_line >= approval_line)); then
+    echo "Android manual-join delivery observer navigated after approval" >&2
+    exit 1
+  fi
   grep -Fxq 'android-manual-accepted:npub1iosadmin' "$trace_file"
   grep -Fxq 'ios-finish:testManualAdminAddRequiresRosterProgress' "$trace_file"
   [[ "$RELEASE_JOIN_IOS_ADMIN_MANUAL_RELAUNCH_DURABLE" == 1 ]]
@@ -729,6 +1350,54 @@ PY
   grep -Fxq 'shell input keyevent KEYCODE_HOME' "$tmp/adb"
   [[ "$(tr '\n' ' ' <"$tmp/actions")" == 'launch scroll pending width ' ]]
   [[ "$RELEASE_JOIN_ANDROID_PENDING_QR_LIFECYCLE_READY" == 1 ]]
+)
+(
+  # A local pre-pairing listener is not yet a live approval carrier.
+  listener_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-listener.XXXXXX")"
+  trap 'rm -rf "$listener_tmp"' EXIT
+  sed -n '/^assert_join_listener_ready() {/,/^}$/p' \
+    "$ROOT/scripts/macos-release-mobile-join-remote.sh" >"$listener_tmp/functions.sh"
+  source "$listener_tmp/functions.sh"
+  CLI=listener_status
+  CONFIG=fixture
+  peer_count=0
+  assert_service_ready() { :; }
+  listener_status() {
+    printf '{"expected_peer_count":0,"network_id":"fresh","daemon":{"running":true,"state":{"vpn_enabled":true,"vpn_active":false,"vpn_status":"Waiting for participants","fips_other_peer_count":%s}}}\n' "$peer_count"
+  }
+  sleep() { peer_count=2; }
+  assert_join_listener_ready >/dev/null
+  [[ "$peer_count" == 2 ]] || {
+    echo "macOS listener was accepted before a carrier peer authenticated" >&2
+    exit 1
+  }
+)
+(
+  log_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-join-log.XXXXXX")"
+  trap 'rm -rf "$log_tmp"' EXIT
+  sed -n '/^resolve_daemon_log() {/,/^}$/p; /^require_delivery_log() {/,/^}$/p' \
+    "$ROOT/scripts/macos-release-mobile-join-remote.sh" >"$log_tmp/functions.sh"
+  # shellcheck disable=SC1090
+  source "$log_tmp/functions.sh"
+  CLI=log_status
+  CONFIG="$log_tmp/config.toml"
+  ARTIFACT_DIR="$log_tmp"
+  MANUAL_JOIN_FIXTURE=log_recipient
+  fixture_recipient_hex="$(printf '%064d' 1)"
+  mkdir -p "$log_tmp/protected runtime"
+  printf 'delivered and applied one signed join roster over FIPS-TCP to %s\n' \
+    "$fixture_recipient_hex" >"$log_tmp/protected runtime/daemon.log"
+  log_status() {
+    [[ "$*" == "status --json --discover-secs 0 --config $CONFIG" ]] || return 1
+    printf '{"daemon":{"log_file":"%s"}}\n' "$log_tmp/protected runtime/daemon.log"
+  }
+  log_recipient() { printf '%s\n' "$fixture_recipient_hex"; }
+  require_delivery_log fixture 0 >/dev/null 2>&1
+  [[ "$DAEMON_LOG" == "$log_tmp/protected runtime/daemon.log" ]] \
+    && [[ ! -e "$log_tmp/daemon.log" ]] || {
+    echo "macOS join delivery did not read the status-reported protected log" >&2
+    exit 1
+  }
 )
 (
   profile_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-macos-profile-swap.XXXXXX")"
@@ -770,7 +1439,7 @@ PY
       printf '%s\n' "$fake_qr_width"
       return
     fi
-    if [[ "$kind" == resource && "$expected" == join-request-qr-content ]]; then
+    if [[ "$kind" == description && "$expected" == 'Join request QR content width' ]]; then
       printf '%s\n' "$fake_content_width"
       return
     fi
@@ -837,11 +1506,25 @@ PY
 
 (
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=1
+  now=1000
+  release_join_now_ms() { printf '%s\n' "$now"; }
+  release_join_android_dump_ui() { now=2001; }
+  release_join_android_query_dumped() { [[ "$1" == resource ]]; }
+  if release_join_android_wait_qr_join_complete npub1admin 2000 >/dev/null; then
+    echo "QR acceptance observed after the approval deadline incorrectly passed" >&2
+    exit 1
+  fi
+)
+
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
   RELEASE_JOIN_DELIVERY_WAIT_SECS=2
   RELEASE_JOIN_ANDROID_JOINER_ID=npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
   snapshot=0
+  launches=0
 
-  release_join_android_launch() { :; }
+  release_join_android_launch() { launches=$((launches + 1)); }
   release_join_android_dump_ui() {
     snapshot=$((snapshot + 1))
   }
@@ -851,8 +1534,8 @@ PY
       if [[ "$kind" == description && "$expected" == "Join request QR code" ]]; then
         return 0
       fi
-      if [[ "$kind" == resource \
-        && "$expected" == joiner-device-id-value \
+      if [[ "$kind" == description-prefix \
+        && "$expected" == 'Joiner Device ID value: ' \
         && "$output" == description ]]
       then
         printf 'Joiner Device ID value: %s\n' "$RELEASE_JOIN_ANDROID_JOINER_ID"
@@ -877,6 +1560,10 @@ PY
     }
   [[ "$snapshot" == 2 ]] || {
     echo "Android QR join did not accept the first exact roster snapshot" >&2
+    exit 1
+  }
+  [[ "$launches" == 0 ]] || {
+    echo "Android QR delivery polling relaunched the foreground app" >&2
     exit 1
   }
 )
@@ -937,6 +1624,35 @@ PY
     echo "Android manual join rejected the exact accepted roster row" >&2
     exit 1
   }
+)
+
+(
+  # The whole network title opens the picker, even when a long title leaves
+  # no space for the decorative dropdown arrow in the accessibility tree.
+  fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-network-picker.XXXXXX.xml")"
+  trap 'rm -f "$fixture"' EXIT
+  for state in on off; do
+    cat >"$fixture" <<EOF
+<hierarchy><node bounds="[0,0][1080,2410]">
+  <node clickable="true" bounds="[0,500][1000,600]"><node text="Unrelated action"/></node>
+  <node bounds="[47,198][1033,324]">
+    <node clickable="true" bounds="[47,198][896,324]">
+      <node text="A network title long enough to hide its dropdown arrow"/>
+    </node>
+    <node clickable="true" checkable="true" bounds="[896,198][1033,324]">
+      <node content-desc="Turn VPN $state"/>
+    </node>
+  </node>
+</node></hierarchy>
+EOF
+    [[ "$("$ROOT/scripts/mobile-release-join-ui-query.py" \
+      "$fixture" network-picker 'Turn VPN ' center)" == '471 261' ]]
+    if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+      "$fixture" network-picker 'Unrelated toggle' center; then
+      echo 'Network picker query accepted an unrelated control' >&2
+      exit 1
+    fi
+  done
 )
 
 fixture="$(mktemp "${TMPDIR:-/tmp}/nvpn-release-join-ui.XXXXXX.xml")"
@@ -1053,15 +1769,39 @@ fi
     visible-center
 )" == "279 2013" ]]
 
+# A modal's real scroll viewport must not inherit full-screen navigation margins.
+printf '%s\n' \
+  '<hierarchy><node resource-id="android:id/content" bounds="[120,863][960,1655]">' \
+  '  <node class="android.widget.ScrollView" scrollable="false" bounds="[183,1052][897,1403]">' \
+  '    <node content-desc="Join Network" bounds="[183,1251][897,1403]" />' \
+  '    <node content-desc="Clipped control" bounds="[183,1300][897,1500]" />' \
+  '  </node>' \
+  '</node></hierarchy>' >"$inset_viewport_fixture"
+[[ "$("$ROOT/scripts/mobile-release-join-ui-query.py" \
+  "$inset_viewport_fixture" description 'Join Network' safe-center)" == '540 1327' ]]
+if "$ROOT/scripts/mobile-release-join-ui-query.py" \
+  "$inset_viewport_fixture" description 'Clipped control' safe-center >/dev/null; then
+  echo 'Android modal accepted a control outside its scroll viewport' >&2
+  exit 1
+fi
+[[ "$("$ROOT/scripts/mobile-release-join-ui-query.py" \
+  "$inset_viewport_fixture" description 'Clipped control' visible-center)" == '540 1351' ]]
+
 # A partially visible manual-join field must use the clipped safe viewport
-# rather than silently failing before text entry.
+# and finish text entry before dismissing the system input method.
 (
   # shellcheck disable=SC1091
   source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  input_events="$(mktemp "${TMPDIR:-/tmp}/nvpn-join-input.XXXXXX")"
+  trap 'rm -f "$input_events"' EXIT
   ADB=(fake_adb)
   fake_adb() {
     if [[ "$*" == "shell dumpsys input_method" ]]; then
       printf 'mInputShown=true\n'
+    elif [[ "$*" == 'shell input text expected-value' ]]; then
+      printf 'text\n' >>"$input_events"
+    elif [[ "$*" == 'shell input keyevent KEYCODE_BACK' ]]; then
+      printf 'back\n' >>"$input_events"
     fi
   }
   sleep() { :; }
@@ -1073,12 +1813,14 @@ fi
     [[ "$*" == "resource manual-field" ]]
   }
   release_join_android_query() {
+    printf 'readback\n' >>"$input_events"
     [[ "$*" == "text expected-value text" ]] \
       && printf 'expected-value\n'
   }
 
   release_join_android_enter \
     resource manual-field expected-value visible-center
+  [[ "$(tr '\n' ' ' <"$input_events")" == 'text readback back ' ]]
 )
 
 # Exercise manual admin preparation and submission through observable UI state.
@@ -1099,23 +1841,26 @@ fi
       "resource-prefix roster-participant- count") printf '2\n' ;;
       "text $joiner center") return 0 ;;
       "description Add joining device manually enabled") printf 'true\n' ;;
+      "description Add joining device manually visible-center")
+        printf 'point\n' >>"$tmp/events"
+        printf '120 240\n'
+        ;;
       *) return 1 ;;
     esac
   }
-  release_join_android_tap_visible() {
-    [[ "$*" == "description Add joining device manually" ]]
+  ADB=(manual_tap_adb)
+  manual_tap_adb() {
+    [[ "$*" == 'shell input tap 120 240' ]]
+    printf 'tap\n' >>"$tmp/events"
     tapped=1
   }
-  release_join_android_dump_ui() { :; }
-  release_join_android_query_dumped() {
-    if [[ "$*" == "description Add joining device manually center" ]]; then
-      ((tapped == 0))
-      return
-    fi
-    [[ "$*" == "resource roster-participant-pending-$joiner center" \
-      && "$tapped" == 1 ]]
+  release_join_android_dump_ui() {
+    printf 'unnecessary intermediate snapshot\n' >>"$tmp/events"
   }
-  release_join_now_ms() { printf '1234\n'; }
+  release_join_now_ms() {
+    printf 'time\n' >>"$tmp/events"
+    printf '1234\n'
+  }
 
   release_join_android_manual_admin_prepare "$joiner" >"$tmp/prepare"
   grep -Fq NVPN_RELEASE_JOIN_ADMIN_ADD_PREPARED=1 "$tmp/prepare"
@@ -1128,6 +1873,10 @@ fi
   release_join_android_manual_admin_tap "$joiner" >"$tmp/submit"
   grep -Fq NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=1234 "$tmp/submit"
   [[ "$tapped" == 1 ]]
+  [[ "$(<"$tmp/events")" == $'point\ntime\ntap' ]] || {
+    echo "Submission must resolve its target before timing the tap, then let the acceptance observer take the next snapshot" >&2
+    exit 1
+  }
 )
 
 (
@@ -1155,8 +1904,8 @@ fi
   }
   stuck_poll() { sleep 5; }
   late_state_poll() { printf '%s\n' "$((deadline + 1))"; }
-  reverse_desktop_poll() { sleep 0.25; release_join_now_ms; }
-  reverse_pixel_poll() { sleep 0.3; release_join_now_ms; }
+  reverse_desktop_poll() { sleep 1; release_join_now_ms; }
+  reverse_pixel_poll() { sleep 1.2; release_join_now_ms; }
   timestamp="$PRIVATE_DIR/detected-ms.txt"
   deadline=$(( $(release_join_now_ms) + 500 ))
   release_join_observe_until_ms "$deadline" "$timestamp" quick quick_poll
@@ -1187,7 +1936,9 @@ fi
     echo "Blocking public-UI poll outlived its absolute deadline" >&2
     exit 1
   }
-  reverse_deadline=$(( $(release_join_now_ms) + 450 ))
+  # Keep enough process-start margin for loaded macOS CI while retaining a
+  # deadline shorter than the two polls would take if run serially.
+  reverse_deadline=$(( $(release_join_now_ms) + 1800 ))
   release_join_observe_pair_until_ms \
     "$reverse_deadline" \
     "$PRIVATE_DIR/reverse-desktop.txt" reverse-desktop \
@@ -1254,4 +2005,156 @@ NVPN_EXTERNAL_HARNESS_DIGEST="$external_digest" \
 }
 rm -rf "$external_fixture"
 
+bash "$ROOT/scripts/test-macos-join-late-observation-harness.sh"
 echo "Signed Release public-UI join gate contract passed"
+
+# QR approval must exclude image selection and accessibility lookup from delivery time.
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-qr-approval-clock.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  touch "$tmp/request.png"
+  printf 'image' >"$tmp/request.png"
+  RELEASE_JOIN_ANDROID_SCAN_BEFORE=1
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=1
+  ADB=(qr_clock_adb)
+  qr_clock_adb() {
+    if [[ "$*" == 'shell input tap 120 240' ]]; then
+      printf 'tap\n' >>"$tmp/events"
+    fi
+  }
+  release_join_android_wait_query() { :; }
+  release_join_android_tap() { :; }
+  release_join_android_open_devices() { :; }
+  release_join_android_wait_through_system_prompts() { :; }
+  release_join_require_fresh_ios_pending_qr() { printf 'fresh\n' >>"$tmp/events"; }
+  release_join_android_query() {
+    case "$*" in
+      'description Confirm adding scanned join request center')
+        printf 'point\n' >>"$tmp/events"
+        [[ "${point_fails:-0}" == 0 ]] || return 1
+        printf '120 240\n'
+        ;;
+      'resource roster-participant-accepted-test-joiner center') : ;;
+      'resource-prefix roster-participant- count') printf '2\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  release_join_now_ms() {
+    printf 'time\n' >>"$tmp/events"
+    printf '1234\n'
+  }
+  release_join_android_scan_submit test-joiner "$tmp/request.png" >"$tmp/submit"
+  grep -Fq 'NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=1234' "$tmp/submit"
+  [[ "$(<"$tmp/events")" == $'point\nfresh\ntime\ntap' ]] || {
+    echo 'QR delivery timing included setup or lost the fresh pending-QR check' >&2
+    exit 1
+  }
+  : >"$tmp/events"
+  point_fails=1
+  if release_join_android_scan_submit test-joiner "$tmp/request.png" >"$tmp/failed"; then
+    echo 'QR approval accepted a missing confirmation button' >&2
+    exit 1
+  fi
+  [[ "$(<"$tmp/events")" == point ]]
+  [[ ! -s "$tmp/failed" ]]
+)
+
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-carrier-ui.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  python3 - "$tmp/ui.xml" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.Element("hierarchy")
+card = ET.SubElement(root, "node", bounds="[0,0][1080,2410]")
+labels = [
+    ("Connect to non-roster FIPS peers", "false"),
+    ("Find peers over Nostr relays", "true"),
+    ("Use bootstrap servers", "false"),
+    ("Enable WebRTC transport", "false"),
+]
+for index, (label, checked) in enumerate(labels):
+    top = 400 + index * 150
+    ET.SubElement(card, "node", checkable="true", checked=checked,
+                  bounds=f"[90,{top}][216,{top + 126}]")
+    ET.SubElement(card, "node", text=label,
+                  bounds=f"[215,{top + 30}][900,{top + 90}]")
+ET.SubElement(card, "node", text="Unpaired label", bounds="[215,1100][900,1160]")
+ET.ElementTree(root).write(sys.argv[1])
+PY
+  ADB=(carrier_adb)
+  release_join_android_dump_ui() { RELEASE_JOIN_ANDROID_UI_XML="$tmp/ui.xml"; }
+  release_join_android_tap_center() { [[ "$1:$2" == 'description:Settings tab' ]]; }
+  release_join_android_scroll_to() {
+    release_join_android_query "$1" "$2" safe-center >/dev/null
+  }
+  carrier_adb() {
+    [[ "$1:$2:$3" == shell:input:tap ]]
+    printf '%s %s\n' "$4" "$5" >>"$tmp/taps"
+    [[ "${IGNORE_CARRIER_TAP:-0}" == 0 ]] || return 0
+    python3 - "$tmp/ui.xml" "$4" "$5" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+tree = ET.parse(sys.argv[1])
+x, y = map(int, sys.argv[2:])
+found = False
+for node in tree.iter("node"):
+    if node.get("checkable") != "true":
+        continue
+    left, top, right, bottom = map(int, re.findall(r"\d+", node.get("bounds")))
+    if (x, y) == ((left + right) // 2, (top + bottom) // 2):
+        node.set("checked", "false" if node.get("checked") == "true" else "true")
+        found = True
+assert found, "tap did not target a real checkbox"
+tree.write(sys.argv[1])
+PY
+  }
+  [[ "$(release_join_android_query checkbox-label 'Unpaired label' count)" == 0 ]]
+  release_join_android_normalize_carrier
+  [[ "$(wc -l <"$tmp/taps" | tr -d ' ')" == 2 ]]
+  [[ "$(release_join_android_query checkbox-label 'Enable WebRTC transport' checked)" == false ]]
+  release_join_android_normalize_carrier
+  [[ "$(wc -l <"$tmp/taps" | tr -d ' ')" == 2 ]]
+  carrier_adb shell input tap 153 463
+  IGNORE_CARRIER_TAP=1
+  if release_join_android_normalize_carrier; then
+    echo 'Android join setup accepted a prerequisite that stayed disabled' >&2
+    exit 1
+  fi
+)
+
+
+# Switching from scrolled Settings retains the list offset on Internet. Exercise
+# the real scroll driver against a viewport that starts below the source picker.
+(
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  scroll_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-join-scroll.XXXXXX")"
+  trap 'rm -rf "$scroll_tmp"' EXIT
+  printf '2\n' >"$scroll_tmp/offset"
+  ADB=(scroll_adb)
+  scroll_adb() {
+    if [[ "$*" == 'shell wm size' ]]; then
+      printf 'Physical size: 1080x2400\n'
+    elif [[ "$1 $2 $3" == 'shell input swipe' ]]; then
+      local offset
+      offset="$(cat "$scroll_tmp/offset")"
+      if (($5 < $7)); then
+        offset=$((offset - 1))
+      else
+        offset=$((offset + 1))
+      fi
+      ((offset >= 0)) || offset=0
+      ((offset <= 2)) || offset=2
+      printf '%s\n' "$offset" >"$scroll_tmp/offset"
+    else
+      return 2
+    fi
+  }
+  release_join_android_query() { [[ "$(cat "$scroll_tmp/offset")" == 0 ]]; }
+  sleep() { :; }
+  release_join_android_scroll_to resource internet-source-picker safe-center backward
+  [[ "$(cat "$scroll_tmp/offset")" == 0 ]]
+)

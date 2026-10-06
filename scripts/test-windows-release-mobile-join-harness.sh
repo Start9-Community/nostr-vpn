@@ -20,6 +20,66 @@ for file in "$XAML" "$MODELS" "$VIEW_MODEL" "$NATIVE_CALL_GATE" "$ENROLLMENT" "$
   [[ -f "$file" ]] || fail "missing $(basename "$file")"
 done
 
+# Reuse the shared install policy; no new install is needed for an exact,
+# verified installed APK, and both receipt validations must retain that policy.
+(
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  install_selection="$(sed -n '/^release_join_configure_install_modes$/,/^fi$/p' "$HOST")"
+  [[ -n "$install_selection" ]] || fail 'Windows join ignores the shared install policy'
+  NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1 NVPN_RELEASE_JOIN_INSTALL_ANDROID=0
+  eval "$install_selection"
+  [[ "${android_install_binding_args[*]}" == --allow-verified-no-install ]]
+  NVPN_RELEASE_JOIN_INSTALL_ANDROID=1
+  eval "$install_selection"
+  [[ "${#android_install_binding_args[@]}" == 0 ]]
+  # Exercise both production expansions under nounset, including macOS Bash
+  # 3.2, where expanding an empty array directly reports an unbound variable.
+  for NVPN_RELEASE_JOIN_INSTALL_ANDROID in 0 1; do
+    eval "$install_selection"
+    while IFS= read -r expansion; do
+      expansion="${expansion%\\}"
+      eval "expanded=( $expansion )"
+      if [[ "$NVPN_RELEASE_JOIN_INSTALL_ANDROID" == 0 ]]; then
+        [[ "${#expanded[@]}" == 1 \
+          && "${expanded[0]}" == --allow-verified-no-install ]]
+      else
+        [[ "${#expanded[@]}" == 0 ]]
+      fi
+    done < <(sed -n '/android_install_binding_args\[@\]/p' "$HOST")
+  done
+  if NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=0 NVPN_RELEASE_JOIN_INSTALL_ANDROID=0 \
+      bash -c 'set -e; source "$1"; eval "$2"' _ \
+      "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" "$install_selection"; then
+    fail 'Windows join disabled installation without exact artifact reuse'
+  fi
+  [[ "$(grep -Fc '"${android_install_binding_args[@]}"' "$HOST")" == 2 ]] \
+    || fail 'Windows initial and final receipt checks must use the same install policy'
+)
+
+(
+  source "$ROOT/scripts/release_common.sh"
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-windows-join-source.XXXXXX")"
+  trap 'rm -rf "$fixture"' EXIT
+  for name in harness product; do
+    git init -q "$fixture/$name"
+    git -C "$fixture/$name" -c user.name=Test -c user.email=test@example.invalid \
+      commit -q --allow-empty -m "$name"
+  done
+  source_selection="$(sed -n '/^DESKTOP_ROOT=/,/^SSH_HOST=/p' "$HOST" | sed '$d')"
+  [[ -n "$source_selection" ]] || fail 'Windows join conflates product and harness sources'
+  ROOT="$fixture/harness"
+  for NVPN_RELEASE_APP_REPO_PATH in '' "$fixture/product"; do
+    eval "$source_selection"
+    [[ "$DESKTOP_ROOT" == "${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}" ]]
+    [[ "$DESKTOP_APP_GIT_SHA" == "$(git -C "$DESKTOP_ROOT" rev-parse HEAD)" ]]
+    [[ "$DESKTOP_APP_GIT_TREE" == "$(git -C "$DESKTOP_ROOT" rev-parse 'HEAD^{tree}')" ]]
+  done
+  printf 'uncommitted\n' >"$fixture/product/change"
+  if (eval "$source_selection"); then
+    fail 'Windows join accepted an uncommitted product checkout'
+  fi
+)
+
 python3 - "$ENROLLMENT" "$VIEW_MODEL" <<'PY'
 import pathlib
 import sys
@@ -67,6 +127,8 @@ for mode in Reset Bootstrap CreateAdmin AdminAdd ManualJoin Verify; do
   grep -Fq "\"$mode\"" "$DRIVER" \
     || fail "Windows UI driver lacks $mode"
 done
+grep -Fq '"ReadDaemonLog"' "$REMOTE" \
+  || fail "Windows remote wrapper cannot preserve daemon failure evidence"
 for bootstrap_contract in \
   'Read-PublicText "ManualJoinJoinerDeviceIdValue"' \
   '$Evidence.joinerNpub = $Joiner'
@@ -75,16 +137,17 @@ do
     || fail "Windows Bootstrap does not preflight its joiner identity"
 done
 for roster_contract in \
-  'Wait-SinglePeerConnectedRoster' \
-  'Test-VisibleControlName $Window "1 of 1 connected"' \
-  'Test-VisibleControlName $Window "Online"' \
-  'single-peer connected roster row'
+  '"RosterParticipantAccepted-$AdminNpub"' \
+  'exact accepted roster participant row'
 do
   grep -Fq "$roster_contract" "$DRIVER" \
-    || fail "Windows driver lacks public roster status: $roster_contract"
+    || fail "Windows joiner does not prove accepted roster state: $roster_contract"
 done
-[[ "$(grep -Fc '"RosterParticipantAccepted-$ParticipantNpub"' "$DRIVER")" -eq 2 ]] \
-  || fail "Windows admin and relaunch checks do not observe the exact public roster row"
+[[ "$(grep -Fc 'RosterParticipantAccepted-' "$DRIVER")" -eq 3 ]] \
+  || fail "Windows admin, joiner, and relaunch checks do not observe exact accepted roster rows"
+if grep -Fq 'Wait-SinglePeerConnectedRoster' "$DRIVER"; then
+  fail "Windows joiner still treats mere transport connectivity as roster acceptance"
+fi
 grep -Fq '$Evidence.relaunchAccepted = $true' "$DRIVER" \
   || fail "Windows driver lacks relaunch acceptance evidence"
 grep -Fq 'publicUiOnly = $true' "$DRIVER" \
@@ -108,6 +171,18 @@ grep -Fq 'windows-release-artifact.json' "$REMOTE" \
   || fail "Windows remote wrapper has no artifact receipt"
 grep -Fq 'NostrVpn.Windows.exe' "$HOST" \
   || fail "Windows host wrapper does not select the Release app"
+for guest_repo in 'C:\src\nostr-vpn' 'C:\release candidate\nostr-vpn'; do
+  for explicit_app in '' 'C:\frozen release\NostrVpn.Windows.exe'; do
+    GUEST_REPO="$guest_repo" NVPN_WINDOWS_RELEASE_APP_PATH="$explicit_app" \
+      bash -c '
+        eval "$(sed -n "/^GUEST_APP=/p" "$1")"
+        [[ "$GUEST_APP" == "${NVPN_WINDOWS_RELEASE_APP_PATH:-$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe}" ]]
+      ' _ "$HOST" \
+      || fail "Windows app path does not follow its selected checkout or explicit artifact"
+  done
+done
+grep -Fq 'RELEASE_JOIN_ANDROID_APK="${NVPN_RELEASE_JOIN_ANDROID_APK:-${RELEASE_JOIN_ANDROID_APK:-}}"' "$HOST" \
+  || fail "Windows host wrapper does not map the public Android APK input"
 for artifact in nostr_vpn_app_core.dll nvpn.exe; do
   grep -Fq "$artifact" "$REMOTE" \
     || fail "Windows artifact receipt does not bind $artifact"
@@ -141,6 +216,13 @@ then
 fi
 grep -Fq 'windows-cleanup.log' "$HOST" \
   || fail "Windows cleanup evidence is discarded"
+grep -Fq 'remote ReadDaemonLog >"$PLATFORM_RESULT/windows-daemon-failure.log"' "$HOST" \
+  || fail "Windows failure cleanup discards the daemon delivery log"
+daemon_capture_line="$(grep -n 'remote ReadDaemonLog >' "$HOST" | head -n 1 | cut -d: -f1)"
+remote_cleanup_line="$(grep -n 'remote Cleanup >' "$HOST" | head -n 1 | cut -d: -f1)"
+[[ -n "$daemon_capture_line" && -n "$remote_cleanup_line" \
+  && "$daemon_capture_line" -lt "$remote_cleanup_line" ]] \
+  || fail "Windows daemon evidence is captured after destructive cleanup"
 if grep -Fq 'remote Cleanup >/dev/null 2>&1 || true' "$HOST"; then
   fail "Windows cleanup failure is still ignored"
 fi
@@ -163,6 +245,7 @@ done
 
 for evidence in \
   release_join_android_wait_accepted_participant \
+  release_join_android_wait_vpn_connected \
   verify_desktop_relaunch \
   verify_pixel_relaunch \
   desktop_mobile_manual_join_receipt.py \
@@ -171,6 +254,11 @@ do
   grep -Fq "$evidence" "$HOST" \
     || fail "Windows/Pixel orchestrator lacks $evidence"
 done
+artifact_validated_line="$(grep -n 'RELEASE_JOIN_ARTIFACTS_VALIDATED=1' "$HOST" | head -n 1 | cut -d: -f1)"
+first_android_setup_line="$(grep -n 'release_join_android_open_network_setup' "$HOST" | head -n 1 | cut -d: -f1)"
+[[ -n "$artifact_validated_line" && -n "$first_android_setup_line" \
+  && "$artifact_validated_line" -lt "$first_android_setup_line" ]] \
+  || fail "Windows mutates the Pixel before validating the reused signed artifact"
 desktop_admin_phase="$(
   sed -n \
     '/# Windows admin -> Pixel joiner\./,/# Pixel admin -> Windows joiner\./p' \

@@ -68,13 +68,13 @@ enum Command {
     RepairNetwork(RepairNetworkArgs),
     /// Ask the running daemon to reload config and peer set.
     Reload(ReloadArgs),
-    /// Pause VPN networking while keeping daemon running.
+    /// Pause VPN and FIPS networking; explicitly configured servers keep running.
     Pause(ControlArgs),
     /// Resume VPN networking on a running daemon.
     Resume(ControlArgs),
     /// Run a FIPS private mesh session from config.
     Connect(ConnectArgs),
-    /// Show this device's join-request link and QR, then wait for approval.
+    /// Connect for device approval and show this device's join-request link and QR.
     #[command(name = "join-request")]
     JoinRequest(JoinRequestArgs),
     /// Join with an admin Device ID and Network ID exchanged out of band.
@@ -130,7 +130,7 @@ struct JoinRequestArgs {
     /// nvpn configuration containing the device identity and approval state.
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Print the request and current reachability without waiting for approval.
+    /// Print the request and reachability without connecting or waiting for approval.
     #[arg(long)]
     no_wait: bool,
     /// Print only the link, without the terminal QR code.
@@ -476,6 +476,8 @@ struct StatusArgs {
 struct SetArgs {
     #[arg(long)]
     config: Option<PathBuf>,
+    #[arg(long, conflicts_with = "exit_node")]
+    internet_source: Option<String>,
     #[arg(long)]
     network_id: Option<String>,
     #[arg(long)]

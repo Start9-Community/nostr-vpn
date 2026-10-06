@@ -6,7 +6,11 @@
 RELEASE_JOIN_ARTIFACTS_VALIDATED=0
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=0
 RELEASE_JOIN_DEVICE_MUTATED=0
+RELEASE_JOIN_ANDROID_MUTATED=0
 RELEASE_JOIN_IOS_CLEANUP_ARMED=0
+RELEASE_JOIN_IOS_BASELINE_STOPPED=0
+RELEASE_JOIN_IOS_METHOD_STARTED=0
+RELEASE_JOIN_IOS_STARTUP_FAILED=0
 RELEASE_JOIN_IOS_CLEANUP_BUNDLE_ID=""
 RELEASE_JOIN_INSTALL_ANDROID=1
 RELEASE_JOIN_INSTALL_IOS=1
@@ -61,6 +65,7 @@ release_join_record_selected_devices() {
   }
   xcrun devicectl device info details \
     --device "$IOS_DEVICE" \
+    --timeout 180 \
     --json-output "$details" \
     --quiet >/dev/null
   android_manufacturer="$(
@@ -243,18 +248,6 @@ release_join_assert_one_android_process() {
   }
 }
 
-release_join_reset_android_state() {
-  local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
-  release_join_require_device_mutation_allowed || return 1
-  [[ "${NVPN_RELEASE_JOIN_ALLOW_ANDROID_DATA_CLEAR:-}" == "YES" ]] || {
-    echo "Set NVPN_RELEASE_JOIN_ALLOW_ANDROID_DATA_CLEAR=YES to clear Android app data between join phases" >&2
-    return 1
-  }
-  "${ADB[@]}" shell am force-stop "$package" >/dev/null 2>&1 || true
-  "${ADB[@]}" shell pm clear "$package" >/dev/null
-  release_join_assert_one_android_package
-}
-
 release_join_prepare_android_release() {
   local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
   local apk="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
@@ -326,14 +319,17 @@ release_join_prepare_android_release() {
 
   release_join_require_device_mutation_allowed || return 1
   RELEASE_JOIN_DEVICE_MUTATED=1
+  # shellcheck disable=SC2034 # read by the caller's Android cleanup trap
+  RELEASE_JOIN_ANDROID_MUTATED=1
   if "${ADB[@]}" shell pm path "$package" >/dev/null 2>&1; then
     preexisting_package=true
   fi
   if [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 1 ]]; then
-    # Install twice. The second operation is necessarily an in-place replacement
-    # of the canonical package, even on a phone that began this gate clean.
-    "${ADB[@]}" install -r "$apk" >/dev/null
-    release_join_assert_one_android_package
+    # A fresh phone needs an initial install before proving in-place replacement.
+    if [[ "$preexisting_package" != true ]]; then
+      "${ADB[@]}" install -r "$apk" >/dev/null
+      release_join_assert_one_android_package
+    fi
     "${ADB[@]}" install -r "$apk" >/dev/null
     release_join_assert_one_android_package
     replacement_install=true
@@ -567,6 +563,7 @@ release_join_install_ios_release() {
   local team_hash="$5" app_cert="$6" derived="$7" udid="$8"
   local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
   local installed_json="$RESULT_DIR/ios-installed-apps.json"
+  local runner_inventory="$RESULT_DIR/ios-installed-runner.json"
   local installed_receipt="$RESULT_DIR/ios-release-install.json"
   local runner="$derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
   local runner_tree
@@ -587,12 +584,29 @@ release_join_install_ios_release() {
     python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner"
   )" || return 1
   if [[ "$RELEASE_JOIN_INSTALL_IOS" -eq 1 ]]; then
+    # The packet gate has already installed and receipted this exact runner.
+    # Changing only the QR app variant must not replace it or revoke its trust.
+    if [[ -n "${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT:-}" ]]; then
+      [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -eq 1 ]] || return 1
+      IOS_BUNDLE_ID="$bundle" ios_release_network_require_installed_reuse \
+        "$app_path" "$runner" "$NVPN_RELEASE_JOIN_IOS_RECEIPT" \
+        "$NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT" "$runner_tree" \
+        "$(printf %s "$udid" | shasum -a 256 | awk '{print $1}')" \
+        "$(release_join_sha256 "$RELEASE_JOIN_IOS_XCTESTRUN")" \
+        "$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
+          tree-sha "$derived/Build/Products")" || return 1
+    fi
     if ! xcrun devicectl device install app \
-        --device "$IOS_DEVICE" "$app_path" --quiet \
-      || ! xcrun devicectl device install app \
+        --device "$IOS_DEVICE" "$app_path" --quiet
+    then
+      echo "Exact iOS app installation failed" >&2
+      return 1
+    fi
+    if [[ -z "${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT:-}" ]] \
+      && ! xcrun devicectl device install app \
         --device "$IOS_DEVICE" "$runner" --quiet
     then
-      echo "Exact iOS app/runner installation failed" >&2
+      echo "Exact iOS runner installation failed" >&2
       return 1
     fi
     replacement_install=true
@@ -604,16 +618,16 @@ release_join_install_ios_release() {
       return 1
     }
   fi
-  if ! xcrun devicectl device info apps \
-      --device "$IOS_DEVICE" \
-      --json-output "$installed_json" \
-      --quiet
+  if ! IOS_RELEASE_NETWORK_DEVICE="$udid" \
+      ios_release_network_installed_identity "$bundle" "$installed_json" >/dev/null \
+    || ! IOS_RELEASE_NETWORK_DEVICE="$udid" \
+      ios_release_network_installed_identity "$bundle.UITests.xctrunner" "$runner_inventory" >/dev/null
   then
-    echo "Installed iOS app/runner inventory failed" >&2
+    echo "Installed iOS app/runner USB inventory failed" >&2
     return 1
   fi
   if ! python3 - \
-    "$installed_json" "$installed_receipt" "$bundle" "$manifest_sha" \
+    "$installed_json" "$runner_inventory" "$installed_receipt" "$bundle" "$manifest_sha" \
     "$app_sha" "$app_tree" "$RELEASE_JOIN_FIPS_SHA" \
     "$RELEASE_JOIN_FIPS_TREE" "$RELEASE_JOIN_FIPS_VERSION" \
     "$team_hash" "$app_cert" "$app_path/Info.plist" \
@@ -626,6 +640,7 @@ import sys
 
 (
     source,
+    runner_source,
     output,
     bundle,
     manifest,
@@ -643,22 +658,14 @@ import sys
     udid,
     runner_tree,
 ) = sys.argv[1:]
-payload = json.load(open(source, encoding="utf-8"))
-apps = []
-
-
-def visit(value):
-    if isinstance(value, dict):
-        if isinstance(value.get("bundleIdentifier"), str):
-            apps.append(value)
-        for child in value.values():
-            visit(child)
-    elif isinstance(value, list):
-        for child in value:
-            visit(child)
-
-
-visit(payload)
+apps = [json.load(open(path, encoding="utf-8")) for path in (source, runner_source)]
+for item in apps:
+    if (
+        item.get("provider") != "apple-installation-proxy-usb"
+        or item.get("selectedPhysicalDeviceIdentifierSha256")
+        != hashlib.sha256(udid.encode()).hexdigest()
+    ):
+        raise SystemExit("installed iOS USB inventory belongs to another device or provider")
 
 def exact_installed(identifier, plist_path):
     matches = [item for item in apps if item.get("bundleIdentifier") == identifier]
@@ -768,11 +775,25 @@ release_join_arm_ios_disconnect_cleanup() {
   NVPN_MOBILE_IOS_RELEASE_APP_PATH="$app"
   export NVPN_MOBILE_IOS_RELEASE_APP_PATH
   RELEASE_JOIN_IOS_CLEANUP_ARMED=1
+  if ios_release_network_require_packet_tunnel_stopped "$udid" \
+      "$RESULT_DIR/ios-before-automation-packet-tunnel-processes.json" 5; then
+    RELEASE_JOIN_IOS_BASELINE_STOPPED=1
+  fi
 }
 
 release_join_cleanup_ios_network_state() {
   local quarantine="${RELEASE_JOIN_IOS_QUARANTINE:?missing iOS quarantine path}"
   [[ "$RELEASE_JOIN_IOS_CLEANUP_ARMED" -eq 1 ]] || return 0
+  if [[ "$RELEASE_JOIN_IOS_BASELINE_STOPPED" == 1 \
+      && "$RELEASE_JOIN_IOS_METHOD_STARTED" == 0 \
+      && "$RELEASE_JOIN_IOS_STARTUP_FAILED" == 1 ]] \
+      && ios_release_network_require_packet_tunnel_stopped \
+        "$IOS_RELEASE_NETWORK_DEVICE" \
+        "$RESULT_DIR/ios-no-method-packet-tunnel-processes.json" 5; then
+    echo "iOS test never touched the app; stopped baseline verified without UI cleanup"
+    rm -f "$quarantine"
+    return 0
+  fi
   if IOS_BUNDLE_ID="${RELEASE_JOIN_IOS_CLEANUP_BUNDLE_ID:?missing scoped iOS cleanup bundle}" \
       ios_release_network_disconnect_cleanup; then
     rm -f "$quarantine"
@@ -856,7 +877,8 @@ release_join_prepare_ios_release() {
     -scheme NostrVpnIos \
     -configuration Release \
     -derivedDataPath "$derived" \
-    -destination "platform=iOS,id=$udid" \
+    -destination "generic/platform=iOS" \
+    ARCHS=arm64 \
     DEVELOPMENT_TEAM="$team" \
     NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY" \
     NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID" \
@@ -968,51 +990,31 @@ PY
     "$team_hash" "$app_cert" "$derived" "$udid"
 }
 
-release_join_restart_ios_in_place() {
-  local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
-  release_join_require_device_mutation_allowed || return 1
-  [[ -d "$RELEASE_JOIN_IOS_APP_PATH" ]] || {
-    echo "Exact iOS Release artifact is unavailable" >&2
-    return 1
-  }
-  RELEASE_JOIN_DEVICE_MUTATED=1
-  # Restart the installed binary in place while retaining its VPN approval and
-  # container. Each phase proves isolation by creating a fresh network ID;
-  # reinstalling cannot improve that isolation and triggers passcode UI.
-  xcrun devicectl device process launch \
-    --device "$IOS_DEVICE" \
-    --terminate-existing \
-    --no-activate \
-    "$bundle" >/dev/null
-}
-
 release_join_assert_one_ios_process() {
   local processes="$RESULT_DIR/ios-processes-final.json"
-  xcrun devicectl device info processes \
-    --device "$IOS_DEVICE" \
-    --json-output "$processes" \
-    --quiet
-  python3 - "$processes" <<'PY'
+  python3 - "$ROOT/scripts" "$IOS_DEVICE" "$processes" <<'PY'
+import hashlib
 import json
+from pathlib import Path
+import subprocess
 import sys
-
-payload = json.load(open(sys.argv[1], encoding="utf-8"))
-matches = []
-
-def visit(value):
-    if isinstance(value, dict):
-        executable = str(value.get("executable", ""))
-        if executable.endswith("/Nostr%20VPN.app/Nostr%20VPN") or executable.endswith("/Nostr VPN.app/Nostr VPN"):
-            matches.append(value)
-        for child in value.values():
-            visit(child)
-    elif isinstance(value, list):
-        for child in value:
-            visit(child)
-
-visit(payload)
+sys.path.insert(0, sys.argv[1])
+from ios_packet_tunnel_processes import read_process_inventory
+device, output = sys.argv[2:]
+Path(output).unlink(missing_ok=True)
+try:
+    processes, inventory_sha = read_process_inventory(device, 5)
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    raise SystemExit(f"iOS app process inventory failed ({type(error).__name__})") from None
+matches = [pid for pid, name in processes.items() if name == "Nostr VPN"]
 if len(matches) != 1:
     raise SystemExit(f"expected one iOS Nostr VPN app process, found {len(matches)}")
+Path(output).write_text(json.dumps({
+    "provider": "apple-os-trace-relay-pidlist",
+    "selectedPhysicalDeviceIdentifierSha256": hashlib.sha256(device.encode()).hexdigest(),
+    "inventorySha256": inventory_sha, "appProcessIdentifier": matches[0],
+    "processCount": len(processes),
+}, indent=2) + "\n")
 PY
 }
 
@@ -1020,6 +1022,7 @@ release_join_launch_ios_release() {
   local bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}"
   xcrun devicectl device process launch \
     --device "$IOS_DEVICE" \
+    --timeout 180 \
     --activate \
     "$bundle" >/dev/null
   sleep 1

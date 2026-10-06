@@ -73,12 +73,15 @@
     }
 
     fn desktop_mobile_join_test_dir(label: &str) -> PathBuf {
+        static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock is after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("nvpn-{label}-{nonce}"));
-        fs::create_dir_all(&dir).expect("create desktop/mobile join test directory");
+        let sequence = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("nvpn-{label}-{pid}-{nonce}-{sequence}"));
+        fs::create_dir(&dir).expect("create desktop/mobile join test directory");
         dir
     }
 
@@ -102,32 +105,23 @@
                 .enable_all()
                 .build()
                 .expect("desktop/mobile join runtime")
-                .block_on(desktop_admin_to_mobile_joiner());
+                .block_on(desktop_admin_to_mobile_joiner(false, false));
         });
     }
 
-    async fn desktop_admin_to_mobile_joiner() {
+    async fn desktop_admin_to_mobile_joiner(routed: bool, receipt_backlog: bool) {
         let dir = desktop_mobile_join_test_dir("desktop-admin-mobile-joiner");
         let config_path = dir.join("mobile-config.toml");
         let (admin_app, joiner_app, queued, _admin_pubkey) =
             direct_manual_join_apps("desktop-admin-mobile-joiner");
         joiner_app.save(&config_path).expect("save mobile joiner config");
         let joiner_pubkey = joiner_app.own_nostr_pubkey_hex().expect("mobile pubkey");
-        let admin_pubkey = admin_app.own_nostr_pubkey_hex().expect("desktop pubkey");
-        let desktop_port = available_udp_port();
-        let mobile_port = available_udp_port();
-        let desktop = bind_direct_desktop_endpoint(
-            admin_app.nostr.secret_key.clone(),
-            desktop_port,
-            &joiner_pubkey,
-            mobile_port,
-        )
-        .await;
         let mut mobile_config =
             MobileTunnelConfig::from_app_with_config_path(&joiner_app, &config_path)
                 .expect("mobile joiner tunnel config");
-        mobile_config.listen_port = mobile_port;
-        add_direct_mobile_peer_hint(&mut mobile_config, &admin_pubkey, desktop_port);
+        let (desktop, carriers) = bind_desktop_mobile_join_carrier(
+            &admin_app, &joiner_pubkey, &mut mobile_config, routed,
+        ).await;
         let mobile = Box::pin(MobileTunnel::start_async(mobile_config, joiner_app))
             .await
             .expect("start mobile joiner");
@@ -136,6 +130,36 @@
             .expect("start desktop state control");
         let destination = PeerIdentity::from_npub(mobile.endpoint.npub())
             .expect("mobile endpoint identity");
+
+        if receipt_backlog {
+            // Retained phone state can contain receipts for administrators
+            // whose networks are no longer reachable. Start those retries
+            // before this new approval arrives.
+            for index in 0..8 {
+                let unreachable = PeerIdentity::from_npub(
+                    &Keys::generate().public_key().to_bech32().expect("old admin npub"),
+                )
+                .expect("old admin identity");
+                mobile.pending_join_roster_receipts
+                    .enqueue(format!("{index:064x}"), unreachable, true)
+                    .expect("retain old undelivered receipt");
+            }
+            tokio::time::timeout(Duration::from_secs(4), async {
+                loop {
+                    let retry_started = mobile.pending_join_roster_receipts.receipts
+                        .lock()
+                        .expect("pending receipts")
+                        .values()
+                        .any(|receipt| receipt.failed_attempts > 0);
+                    if retry_started {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("old unreachable receipts should enter retry");
+        }
 
         send_join_roster_with_receipt(
             &desktop_control.sender(),
@@ -151,9 +175,13 @@
             "mobile joiner must persist the exact desktop-admin roster before acknowledging"
         );
 
+        assert_desktop_mobile_join_carrier(&desktop, &mobile, routed).await;
         desktop_control.stop().await;
         shutdown_started_mobile_tunnel(mobile).await;
         desktop.shutdown().await.expect("shutdown desktop endpoint");
+        for carrier in carriers {
+            carrier.shutdown().await.expect("shutdown local join carrier");
+        }
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -164,11 +192,11 @@
                 .enable_all()
                 .build()
                 .expect("mobile/desktop join runtime")
-                .block_on(mobile_admin_to_desktop_joiner());
+                .block_on(mobile_admin_to_desktop_joiner(false));
         });
     }
 
-    async fn mobile_admin_to_desktop_joiner() {
+    async fn mobile_admin_to_desktop_joiner(routed: bool) {
         let dir = desktop_mobile_join_test_dir("mobile-admin-desktop-joiner");
         let mobile_config_path = dir.join("mobile-config.toml");
         let desktop_config_path = dir.join("desktop-config.toml");
@@ -185,23 +213,15 @@
             &queued.join_roster,
         )
         .expect("queue mobile admin join roster");
-        let mobile_port = available_udp_port();
-        let desktop_port = available_udp_port();
-        let desktop = bind_direct_desktop_endpoint(
-            joiner_app.nostr.secret_key.clone(),
-            desktop_port,
-            &admin_pubkey,
-            mobile_port,
-        )
-        .await;
-        let mut desktop_control = FipsControlTcpRuntime::start(Arc::clone(&desktop))
-            .await
-            .expect("start desktop joiner state control");
         let mut mobile_config =
             MobileTunnelConfig::from_app_with_config_path(&admin_app, &mobile_config_path)
                 .expect("mobile admin tunnel config");
-        mobile_config.listen_port = mobile_port;
-        add_direct_mobile_peer_hint(&mut mobile_config, &joiner_pubkey, desktop_port);
+        let (desktop, carriers) = bind_desktop_mobile_join_carrier(
+            &joiner_app, &admin_pubkey, &mut mobile_config, routed,
+        ).await;
+        let mut desktop_control = FipsControlTcpRuntime::start(Arc::clone(&desktop))
+            .await
+            .expect("start desktop joiner state control");
         let queued_launch = nostr_vpn_core::join_delivery::load_join_rosters(&mobile_config_path)
             .into_iter()
             .map(|(_, queued)| queued)
@@ -261,8 +281,149 @@
             "desktop joiner must persist the exact mobile-admin roster before acknowledging"
         );
 
+        assert_desktop_mobile_join_carrier(&desktop, &mobile, routed).await;
         shutdown_started_mobile_tunnel(mobile).await;
         desktop_control.stop().await;
         desktop.shutdown().await.expect("shutdown desktop endpoint");
+        for carrier in carriers {
+            carrier.shutdown().await.expect("shutdown local join carrier");
+        }
         let _ = fs::remove_dir_all(dir);
+    }
+
+    async fn bind_desktop_mobile_join_carrier(
+        desktop_app: &AppConfig,
+        mobile_pubkey: &str,
+        mobile_config: &mut MobileTunnelConfig,
+        via_seed: bool,
+    ) -> (Arc<FipsEndpoint>, Vec<Arc<FipsEndpoint>>) {
+        let desktop_port = available_udp_port();
+        mobile_config.listen_port = available_udp_port();
+        let desktop_pubkey = desktop_app.own_nostr_pubkey_hex().expect("desktop pubkey");
+        let (peer_pubkey, peer_port, carriers) = if via_seed {
+            let (seed, seed_url) = bind_manual_join_seed().await;
+            mobile_config.websocket_seed_urls = vec![seed_url.clone()];
+            let router_keys = Keys::generate();
+            let router_port = available_udp_port();
+            let router = bind_wss_physical_router(
+                &seed_url,
+                &PublicKey::from_hex(&desktop_pubkey)
+                    .expect("desktop key")
+                    .to_bech32()
+                    .expect("desktop npub"),
+                &format!("127.0.0.1:{desktop_port}"),
+                &router_keys.secret_key().to_bech32().expect("router nsec"),
+                router_port,
+            )
+            .await;
+            (
+                router_keys.public_key().to_hex(),
+                router_port,
+                vec![router, seed],
+            )
+        } else {
+            add_direct_mobile_peer_hint(mobile_config, &desktop_pubkey, desktop_port);
+            (mobile_pubkey.to_string(), mobile_config.listen_port, Vec::new())
+        };
+        let desktop = bind_direct_desktop_endpoint(
+            desktop_app.nostr.secret_key.clone(),
+            desktop_port,
+            &peer_pubkey,
+            peer_port,
+        )
+        .await;
+        (desktop, carriers)
+    }
+
+    async fn assert_desktop_mobile_join_carrier(
+        desktop: &FipsEndpoint,
+        mobile: &MobileTunnelStarted,
+        routed: bool,
+    ) {
+        if !routed {
+            return;
+        }
+        for (endpoint, remote_npub) in [
+            (desktop, mobile.endpoint.npub()),
+            (mobile.endpoint.as_ref(), desktop.npub()),
+        ] {
+            assert!(
+                endpoint.peers().await.expect("read physical peer links").iter()
+                    .all(|peer| peer.npub != remote_npub || !peer.connected),
+                "routed join must not bypass the local WebSocket seed with a direct link"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_mobile_manual_join_desktop_admin_via_websocket_seed() {
+        run_desktop_mobile_join_test("desktop-admin-wss-mobile", || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("routed desktop/mobile runtime")
+                .block_on(desktop_admin_to_mobile_joiner(true, false));
+        });
+    }
+
+    #[test]
+    fn desktop_mobile_manual_join_mobile_admin_via_websocket_seed() {
+        run_desktop_mobile_join_test("mobile-admin-wss-desktop", || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("routed mobile/desktop runtime")
+                .block_on(mobile_admin_to_desktop_joiner(true));
+        });
+    }
+
+    #[test]
+    fn desktop_mobile_manual_join_receipt_bypasses_unreachable_backlog() {
+        run_desktop_mobile_join_test("desktop-admin-receipt-backlog", || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("receipt backlog runtime")
+                .block_on(desktop_admin_to_mobile_joiner(true, true));
+        });
+    }
+
+    #[test]
+    fn expired_mobile_join_receipts_do_not_block_new_approval() {
+        let dir = desktop_mobile_join_test_dir("expired-join-receipts");
+        let path = dir.join("receipts.json");
+        let destination = PeerIdentity::from_npub(
+            &Keys::generate().public_key().to_bech32().expect("admin npub"),
+        )
+        .expect("admin identity");
+        let queue = PendingJoinRosterReceiptQueue::load(Some(path.clone()))
+            .expect("create persisted receipt queue");
+        for index in 0..MAX_PENDING_JOIN_ROSTER_RECEIPTS {
+            queue.enqueue(format!("{index:064x}"), destination, true)
+                .expect("persist retained receipt");
+        }
+        let mut stored: serde_json::Value = serde_json::from_slice(
+            &fs::read(&path).expect("read receipt sidecar"),
+        )
+        .expect("decode receipt sidecar");
+        for (index, receipt) in stored["receipts"]
+            .as_array_mut().expect("receipts").iter_mut().enumerate()
+        {
+            if index % 2 == 0 {
+                receipt["expiresAtUnix"] = serde_json::json!(1);
+            } else {
+                // Receipts from earlier app versions have no lifetime.
+                receipt.as_object_mut().expect("receipt").remove("expiresAtUnix");
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&stored).expect("encode expired receipts"))
+            .expect("retain expired and legacy phone state");
+        let restored = PendingJoinRosterReceiptQueue::load(Some(path.clone()))
+            .expect("restore retained receipt queue");
+        restored.enqueue("f".repeat(64), destination, true)
+            .expect("expired receipts must not exhaust capacity for a new approval");
+        let receipts = restored.committed_snapshot().expect("live receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].0, "f".repeat(64));
+        fs::remove_dir_all(dir).expect("remove receipt fixture");
     }

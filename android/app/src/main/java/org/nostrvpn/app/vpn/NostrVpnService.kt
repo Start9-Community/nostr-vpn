@@ -1,15 +1,9 @@
 package org.nostrvpn.app.vpn
 
-import android.Manifest
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -21,11 +15,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import org.json.JSONObject
 import org.nostrvpn.app.AndroidLegacyPackageMigration
-import org.nostrvpn.app.MainActivity
-import org.nostrvpn.app.R
+import org.nostrvpn.app.TunnelConfigRefreshPolicy
 import org.nostrvpn.app.appCoreDataDir
 import org.nostrvpn.app.core.NativeCore
 import org.nostrvpn.app.seedMobileConfig
@@ -47,12 +41,18 @@ class NostrVpnService : VpnService() {
     private var retryUnderlyingNetworkFingerprint: String? = null
     private var underlyingNetworkRetryCount = 0
     private var pendingUnderlyingNetworkRefreshDelayMillis: Long? = null
+    private var queuedApprovalRestartPending = false
+    private var queuedApprovalRestartDeadlineMillis = 0L
+    private var queuedApprovalRestartForegroundStarted = false
     private val refreshUnderlyingNetworksRunnable = Runnable {
         pendingUnderlyingNetworkRefreshDelayMillis = null
         refreshUnderlyingNetworks(resetRetryBudget = true)
     }
     private val refreshNativeNetworkPathsRunnable = Runnable {
         refreshUnderlyingNetworks(resetRetryBudget = false)
+    }
+    private val drainQueuedApprovalBeforeRestartRunnable = Runnable {
+        continueTunnelRestartAfterQueuedApprovalDrain()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -162,7 +162,11 @@ class NostrVpnService : VpnService() {
         super.onRevoke()
     }
 
-    private fun startTunnelAsync(configJson: String, foregroundStarted: Boolean): Boolean {
+    private fun startTunnelAsync(
+        configJson: String,
+        foregroundStarted: Boolean,
+        allowQueuedApprovalDeferral: Boolean = true,
+    ): Boolean {
         tunnelOwnedInProcess.set(true)
         if (configJson.isBlank()) {
             return failStart(foregroundStarted, "VPN config is empty")
@@ -187,7 +191,20 @@ class NostrVpnService : VpnService() {
             )
         }
         val tunnelConfigJson = config.toString()
+        if (
+            allowQueuedApprovalDeferral &&
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = running.get(),
+                configJson = tunnelConfigJson,
+                pendingJoinReceipt = tunnelHandle != 0L &&
+                    NativeCore.mobileTunnelHasPendingJoinReceipts(tunnelHandle),
+            )
+        ) {
+            deferTunnelRestartUntilQueuedApprovalDrains(foregroundStarted)
+            return true
+        }
 
+        cancelQueuedApprovalRestart()
         stopTunnel()
         val generation = tunnelStartGeneration.incrementAndGet()
         return runCatching {
@@ -219,6 +236,59 @@ class NostrVpnService : VpnService() {
         }.onFailure { error ->
             failStart(foregroundStarted, "Android VPN startup worker failed", error)
         }.isSuccess
+    }
+
+    private fun deferTunnelRestartUntilQueuedApprovalDrains(foregroundStarted: Boolean) {
+        if (!queuedApprovalRestartPending) {
+            queuedApprovalRestartDeadlineMillis =
+                SystemClock.elapsedRealtime() + QUEUED_APPROVAL_RESTART_MAX_DELAY_MILLIS
+        }
+        queuedApprovalRestartPending = true
+        queuedApprovalRestartForegroundStarted =
+            queuedApprovalRestartForegroundStarted || foregroundStarted
+        underlyingNetworkHandler.removeCallbacks(drainQueuedApprovalBeforeRestartRunnable)
+        underlyingNetworkHandler.postDelayed(
+            drainQueuedApprovalBeforeRestartRunnable,
+            QUEUED_APPROVAL_RESTART_POLL_MILLIS,
+        )
+    }
+
+    private fun continueTunnelRestartAfterQueuedApprovalDrain() {
+        if (!queuedApprovalRestartPending) {
+            return
+        }
+        val latestConfigJson = persistedTunnelConfigJson()
+        val deadlineReached =
+            SystemClock.elapsedRealtime() >= queuedApprovalRestartDeadlineMillis
+        if (
+            !deadlineReached &&
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = running.get(),
+                configJson = latestConfigJson,
+                pendingJoinReceipt = tunnelHandle != 0L &&
+                    NativeCore.mobileTunnelHasPendingJoinReceipts(tunnelHandle),
+            )
+        ) {
+            underlyingNetworkHandler.postDelayed(
+                drainQueuedApprovalBeforeRestartRunnable,
+                QUEUED_APPROVAL_RESTART_POLL_MILLIS,
+            )
+            return
+        }
+        val foregroundStarted = queuedApprovalRestartForegroundStarted
+        cancelQueuedApprovalRestart()
+        startTunnelAsync(
+            latestConfigJson,
+            foregroundStarted,
+            allowQueuedApprovalDeferral = !deadlineReached,
+        )
+    }
+
+    private fun cancelQueuedApprovalRestart() {
+        underlyingNetworkHandler.removeCallbacks(drainQueuedApprovalBeforeRestartRunnable)
+        queuedApprovalRestartPending = false
+        queuedApprovalRestartDeadlineMillis = 0L
+        queuedApprovalRestartForegroundStarted = false
     }
 
     private fun finishTunnelStart(
@@ -329,7 +399,7 @@ class NostrVpnService : VpnService() {
     private fun buildVpnInterface(config: JSONObject): ParcelFileDescriptor? {
         val builder = Builder()
             .setSession("Nostr VPN")
-            .setConfigureIntent(configureIntent())
+            .setConfigureIntent(AndroidVpnNotifications.configureIntent(this))
             .setMtu(config.optInt("mtu", 1150))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
@@ -799,6 +869,7 @@ class NostrVpnService : VpnService() {
     }
 
     private fun stopTunnel() {
+        cancelQueuedApprovalRestart()
         unregisterUnderlyingNetworkUpdates()
         running.set(false)
         releaseMulticastLock()
@@ -820,17 +891,17 @@ class NostrVpnService : VpnService() {
     }
 
     private fun startServiceForeground(): Boolean {
-        createNotificationChannel()
-        val notification = tunnelNotification()
+        AndroidVpnNotifications.createChannel(this)
+        val notification = AndroidVpnNotifications.tunnel(this)
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
-                    NOTIFICATION_ID,
+                    VPN_NOTIFICATION_ID,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
                 )
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                startForeground(VPN_NOTIFICATION_ID, notification)
             }
         }.onFailure { error ->
             Log.w("NostrVpnService", "Failed to start foreground VPN notification", error)
@@ -838,46 +909,11 @@ class NostrVpnService : VpnService() {
     }
 
     private fun publishTunnelNotification() {
-        if (!notificationsAllowed()) {
-            return
-        }
-        createNotificationChannel()
-        runCatching {
-            getSystemService(NotificationManager::class.java).notify(
-                NOTIFICATION_ID,
-                tunnelNotification(),
-            )
-        }.onFailure { error ->
-            Log.w("NostrVpnService", "Failed to publish VPN notification", error)
-        }
+        AndroidVpnNotifications.publishTunnel(this)
     }
 
     private fun publishAlwaysOnSplitUnsupportedNotification() {
-        if (!notificationsAllowed()) {
-            return
-        }
-        createNotificationChannel()
-        val openSettings = PendingIntent.getActivity(
-            this,
-            3,
-            Intent(android.provider.Settings.ACTION_VPN_SETTINGS),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        runCatching {
-            getSystemService(NotificationManager::class.java).notify(
-                NOTIFICATION_ID,
-                Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_launcher_monochrome)
-                    .setContentTitle(getString(R.string.vpn_always_on_split_title))
-                    .setContentText(getString(R.string.vpn_always_on_split_message))
-                    .setContentIntent(openSettings)
-                    .setAutoCancel(true)
-                    .setCategory(Notification.CATEGORY_ERROR)
-                    .build(),
-            )
-        }.onFailure { error ->
-            Log.w("NostrVpnService", "Failed to publish Always-on VPN warning", error)
-        }
+        AndroidVpnNotifications.publishAlwaysOnSplitUnsupported(this)
     }
 
     private fun stopServiceForeground() {
@@ -886,68 +922,7 @@ class NostrVpnService : VpnService() {
     }
 
     private fun clearTunnelNotification() {
-        runCatching {
-            getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
-        }
-    }
-
-    private fun notificationsAllowed(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-
-    private fun configureIntent(): PendingIntent {
-        return PendingIntent.getActivity(
-            this,
-            2,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-    }
-
-    private fun createNotificationChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
-            NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                getString(R.string.app_name),
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply {
-                setShowBadge(false)
-            },
-        )
-    }
-
-    private fun tunnelNotification(): Notification {
-        val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)
-            ?: Intent(this, MainActivity::class.java)
-        val openApp = PendingIntent.getActivity(
-            this,
-            0,
-            openAppIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val disconnect = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, NostrVpnService::class.java).setAction(ACTION_DISCONNECT),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        return Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.vpn_notification_connected))
-            .setContentIntent(openApp)
-            .setOngoing(true)
-            .setCategory(Notification.CATEGORY_SERVICE)
-            .addAction(
-                Notification.Action.Builder(
-                    Icon.createWithResource(this, R.drawable.ic_launcher_monochrome),
-                    getString(R.string.vpn_notification_disconnect),
-                    disconnect,
-                ).build(),
-            )
-            .build()
+        AndroidVpnNotifications.clear(this)
     }
 
     private data class Cidr(val address: String, val prefix: Int)
@@ -956,11 +931,11 @@ class NostrVpnService : VpnService() {
         const val ACTION_DISCONNECT = "fi.siriusbusiness.nvpn.vpn.DISCONNECT"
         const val ACTION_RESTORE = "fi.siriusbusiness.nvpn.vpn.RESTORE"
         const val EXTRA_CONFIG_JSON = "configJson"
-        private const val NOTIFICATION_CHANNEL_ID = "vpn"
-        private const val NOTIFICATION_ID = 7001
         private const val UNDERLAY_NETWORK_CHANGE_DEBOUNCE_MILLIS = 250L
         private const val UNDERLAY_NETWORK_RETRY_MILLIS = 250L
         private const val UNDERLAY_NETWORK_MAX_RETRIES = 2
+        private const val QUEUED_APPROVAL_RESTART_POLL_MILLIS = 250L
+        private const val QUEUED_APPROVAL_RESTART_MAX_DELAY_MILLIS = 12_000L
         private val tunnelOwnedInProcess = AtomicBoolean(false)
 
         internal fun isTunnelOwnedInProcess(): Boolean = tunnelOwnedInProcess.get()

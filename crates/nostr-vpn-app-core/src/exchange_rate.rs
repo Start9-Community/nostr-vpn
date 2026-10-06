@@ -175,20 +175,79 @@ pub(crate) fn apply_exchange_rate(
         return;
     };
     wallet.exchange_rate_text = format!("1 BTC = {rate:.2} {}", snapshot.currency.as_str());
+    let amount = |msat| format_fiat_msat(msat, rate, snapshot.currency.as_str());
     if wallet.balance_known {
-        let value = sats_as_btc(wallet.total_balance_msat / 1_000) * rate;
-        wallet.fiat_balance_text = if snapshot.currency == FiatCurrency::Jpy {
-            format!("{value:.0} JPY")
-        } else {
-            format!("{value:.2} {}", snapshot.currency.as_str())
-        };
+        wallet.fiat_balance_text = amount(wallet.total_balance_msat);
+        wallet
+            .total_balance_text
+            .clone_from(&wallet.fiat_balance_text);
+        if wallet.total_balance_msat > 0 {
+            wallet
+                .navigation_balance_text
+                .clone_from(&wallet.fiat_balance_text);
+        }
+    }
+    if wallet.channel_balance_msat > 0 {
+        wallet.channel_balance_text =
+            format!("{} in channels", amount(wallet.channel_balance_msat));
+    }
+    for mint in &mut wallet.mints {
+        if mint.balance_known {
+            mint.balance_text = amount(mint.balance_msat);
+        }
+    }
+    let action = &mut wallet.last_action;
+    if !action.amount_text.is_empty() {
+        action.amount_text = amount(action.amount_sat.saturating_mul(1_000));
+    }
+    if action.fee_sat > 0 {
+        action.fee_text = format!("{} fee", amount(action.fee_sat.saturating_mul(1_000)));
     }
 }
 
+pub(crate) fn format_fiat_msat(msat: u64, rate: f64, currency: &str) -> String {
+    format_fiat(msat, rate, currency, false)
+}
+
+pub(crate) fn format_fiat_price_msat(msat: u64, rate: f64, currency: &str) -> String {
+    format_fiat(msat, rate, currency, true)
+}
+
 #[allow(clippy::cast_precision_loss)]
-fn sats_as_btc(sats: u64) -> f64 {
-    // Every satoshi in Bitcoin's maximum supply fits exactly in an f64 integer.
-    sats as f64 / 100_000_000.0
+fn format_fiat(msat: u64, rate: f64, currency: &str, price: bool) -> String {
+    let value = msat as f64 / 100_000_000_000.0 * rate;
+    let symbol = match currency {
+        "USD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        "JPY" => "¥",
+        "CAD" => "CA$",
+        "AUD" => "A$",
+        _ => "CHF ",
+    };
+    if msat > 0 && value < 0.000_001 {
+        return format!("<{symbol}0.000001");
+    }
+    let decimals = if value > 0.0 && value < if price { 1.0 } else { 0.01 } {
+        6
+    } else if currency == "JPY" {
+        0
+    } else {
+        2
+    };
+    if decimals == 0 && value > 0.0 && value < 1.0 {
+        return format!("<{symbol}1");
+    }
+    let mut value = format!("{value:.decimals$}");
+    if decimals == 6 {
+        while value.ends_with('0') {
+            value.pop();
+        }
+        if value.ends_with('.') {
+            value.pop();
+        }
+    }
+    format!("≈ {symbol}{value}")
 }
 
 impl Inner {
@@ -444,5 +503,52 @@ mod tests {
             );
             assert!(wallet.exchange_rate_status.is_empty());
         }
+    }
+
+    #[test]
+    fn wallet_fiat_display_preserves_fractional_sats_unknown_balances_and_accounting() {
+        use crate::native_state::{
+            NativePaidRouteWalletActionState, NativePaidRouteWalletMintState,
+        };
+        let mut wallet = NativePaidRouteWalletState {
+            balance_known: true,
+            total_balance_msat: 125_500,
+            channel_balance_msat: 250_000,
+            mints: vec![
+                NativePaidRouteWalletMintState {
+                    balance_known: true,
+                    balance_msat: 125_500,
+                    ..Default::default()
+                },
+                NativePaidRouteWalletMintState::default(),
+            ],
+            last_action: NativePaidRouteWalletActionState {
+                amount_sat: 125,
+                amount_text: "125 sat".into(),
+                fee_sat: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot = ExchangeRateSnapshot {
+            currency: FiatCurrency::Eur,
+            rate: Some(80_000.0),
+            sources: vec![],
+            status: ExchangeRateStatus::Failed,
+            timestamp: None,
+            stale: true,
+        };
+        apply_exchange_rate(&mut wallet, &snapshot);
+        assert_eq!(wallet.total_balance_text, "≈ €0.10");
+        assert_eq!(wallet.navigation_balance_text, "≈ €0.10");
+        assert_eq!(wallet.channel_balance_text, "≈ €0.20 in channels");
+        assert_eq!(wallet.mints[0].balance_text, "≈ €0.10");
+        assert!(wallet.mints[1].balance_text.is_empty());
+        assert_eq!(wallet.last_action.amount_text, "≈ €0.10");
+        assert_eq!(wallet.last_action.fee_text, "≈ €0.0008 fee");
+        assert_eq!(wallet.exchange_rate_status, "Using last rate");
+        assert_eq!(wallet.total_balance_msat, 125_500);
+        assert_eq!(wallet.last_action.amount_sat, 125);
+        assert_eq!(wallet.last_action.fee_sat, 1);
     }
 }

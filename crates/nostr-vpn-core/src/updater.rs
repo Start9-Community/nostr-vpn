@@ -1,3 +1,6 @@
+#[cfg(target_os = "macos")]
+use crate::macos_file_io as fs;
+#[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

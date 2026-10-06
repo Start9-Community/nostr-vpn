@@ -1,4 +1,3 @@
-
 async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
@@ -47,7 +46,8 @@ async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
         println!(
             "location: country={} asn={}",
             display_or_none(&local.offer.location.country_code),
-            local.offer
+            local
+                .offer
                 .location
                 .asn
                 .map(|asn| asn.to_string())
@@ -87,11 +87,20 @@ fn build_local_paid_exit_offer(
 ) -> Result<LocalPaidExitOffer> {
     let config = paid_exit_offer_config(app)?;
     let receiver_pubkey_hex = paid_exit_spilman_receiver_pubkey_hex(config_path, &config)?;
-    let signed = signed_paid_exit_offer_from_config_with_receiver(
+    let fips_endpoints = if app.fips_advertise_public_endpoint {
+        normalize_fips_peer_endpoint_hint(&app.node.endpoint)
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let keys = app.nostr_keys()?;
+    let mut signed = signed_paid_exit_offer_from_config_with_receiver_and_fips_endpoints(
         offer_id,
-        &app.nostr_keys()?,
+        &keys,
         &config,
         receiver_pubkey_hex.as_deref(),
+        &fips_endpoints,
         Some(PaidRouteQualityMetrics {
             last_seen_unix: Some(now_unix),
             ..PaidRouteQualityMetrics::default()
@@ -100,6 +109,26 @@ fn build_local_paid_exit_offer(
     )?;
     let offer = signed.offer()?;
     let store_path = paid_route_store_file_path(config_path);
+    let store = load_paid_route_store(&store_path)?;
+    let offer_key = nostr_vpn_core::paid_route_store::paid_route_offer_store_key(
+        &offer.seller_npub,
+        &offer.offer_id,
+    );
+    if let Some(previous) = store.offers.get(&offer_key)
+        && previous.signed_offer.event.created_at.as_secs() >= now_unix
+    {
+        // Changed terms must replace an offer even within the same second.
+        // Reuse identical offers so reads do not advance their timestamps.
+        signed = if previous.offer == offer {
+            previous.signed_offer.clone()
+        } else {
+            SignedPaidRouteOffer::sign(
+                offer.clone(),
+                &keys,
+                previous.signed_offer.event.created_at.as_secs().saturating_add(1),
+            )?
+        };
+    }
     let stored = persist_paid_exit_offer_snapshot(&store_path, &signed, &[], &offer, now_unix)?;
     Ok(LocalPaidExitOffer {
         signed,
@@ -118,8 +147,7 @@ fn paid_exit_import_offer_command(args: PaidExitImportOfferArgs) -> Result<()> {
         .context("failed to verify paid route offer event")?;
     let offer = signed.offer()?;
     let store_path = paid_route_store_file_path(&config_path);
-    let changed =
-        upsert_paid_route_offer(&store_path, signed.clone(), vec![], unix_timestamp())?;
+    let changed = upsert_paid_route_offer(&store_path, signed.clone(), vec![], unix_timestamp())?;
 
     if args.json {
         println!(
@@ -170,12 +198,7 @@ async fn wait_for_paid_exit_control_events(
     let initial_offer_ids = events
         .iter()
         .filter(|event| {
-            paid_exit_offer_event_is_live(
-                event,
-                retention_policy,
-                seller,
-                unix_timestamp(),
-            )
+            paid_exit_offer_event_is_live(event, retention_policy, seller, unix_timestamp())
         })
         .map(|event| event.id)
         .collect::<HashSet<_>>();
@@ -209,13 +232,22 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
         .map(|provider| PublicKey::parse(&provider.npub))
         .transpose()
         .context("invalid targeted paid exit seller npub")?;
-    let trusted_rating_authors =
-        paid_exit_trusted_rating_author_set(&args.trusted_rating_authors)?;
-    let mut rating_scores = args
-        .fips_peer_ratings
-        .as_deref()
-        .map(|path| load_paid_exit_rating_scores(path, &args.rating_scope, &trusted_rating_authors))
-        .transpose()?;
+    let app = load_or_default_config(&config_path)?;
+    let mut rating_authors = app.paid_exit.rating_discovery.trusted_authors.clone();
+    rating_authors.extend(args.trusted_rating_authors.clone());
+    let mut trusted_rating_authors = paid_exit_trusted_rating_author_set(&rating_authors)?;
+    trusted_rating_authors.insert(app.nostr_keys()?.public_key().to_hex());
+    let exit_scope = args.rating_scope == nostr_vpn_core::paid_route_ratings::EXIT_RATING_SCOPE;
+    let mut rating_scores = if exit_scope {
+        None
+    } else {
+        args.fips_peer_ratings
+            .as_deref()
+            .map(|path| {
+                load_paid_exit_rating_scores(path, &args.rating_scope, &trusted_rating_authors)
+            })
+            .transpose()?
+    };
     let since_unix = if args.since_secs == 0 {
         None
     } else {
@@ -235,7 +267,7 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let cached_rating_event_count = cached_rating_events.len();
-    if !cached_rating_events.is_empty() {
+    if !exit_scope && !cached_rating_events.is_empty() {
         let cached_scores = paid_exit_rating_scores_from_value(
             &json!({ "events": cached_rating_events }),
             &args.rating_scope,
@@ -244,15 +276,48 @@ async fn paid_exit_discover_command(args: PaidExitDiscoverArgs) -> Result<()> {
         merge_paid_exit_rating_scores(&mut rating_scores, cached_scores);
     }
     let now_unix = unix_timestamp();
+    if exit_scope {
+        let mut events = cached_control_events.clone();
+        if let Some(path) = args.fips_peer_ratings.as_ref() {
+            let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+            if let Some(raw) = value.get("events").and_then(|v| v.as_array()) {
+                events.extend(
+                    raw.iter()
+                        .filter_map(|v| serde_json::from_value::<Event>(v.clone()).ok()),
+                );
+            }
+        }
+        let store = load_paid_route_store(&paid_route_store_file_path(&config_path))?;
+        events.extend(store.exit_ratings.values().map(|local| local.event.clone()));
+        let graph = nostr_vpn_core::paid_route_ratings::exit_rating_graph(
+            &app.nostr_keys()?.public_key().to_hex(),
+            &events,
+            &rating_authors,
+            now_unix,
+        )?;
+        rating_scores = Some(
+            nostr_vpn_core::paid_route_ratings::exit_rating_scores(events.iter(), &graph, now_unix)
+                .into_iter()
+                .map(|(subject, score)| {
+                    (
+                        subject,
+                        PaidExitRatingScore {
+                            score: score.score,
+                            created_at: score.created_at,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        update_paid_route_store(&paid_route_store_file_path(&config_path), |store| {
+            store.refresh_exit_reputation(&events, &graph, now_unix);
+            Ok(())
+        })?;
+    }
     let cached_offers = cached_control_events
         .into_iter()
         .filter_map(|event| {
-            paid_exit_offer_event_is_live(
-                &event,
-                &retention_policy,
-                seller.as_ref(),
-                now_unix,
-            )
+            paid_exit_offer_event_is_live(&event, &retention_policy, seller.as_ref(), now_unix)
                 .then(|| SignedPaidRouteOffer::from_event(event).ok())
                 .flatten()
         })

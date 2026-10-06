@@ -225,11 +225,13 @@ PY
 
   GUEST_BINARY_COPY_TMP="$GUEST_IMPORT_DIR/nvpn.copy"
   local -a primary_scp
-  primary_scp=(scp -q -o BatchMode=yes -o ConnectTimeout=10)
+  primary_scp=(scp -q "${SSH_LIVENESS_OPTIONS[@]}")
   if [[ -n "$PRIMARY_PROXY" ]]; then
     primary_scp+=(-o "ProxyCommand=$PRIMARY_PROXY")
   elif [[ -n "$LINUX_JUMP" ]]; then
-    primary_scp+=(-J "$LINUX_JUMP")
+    primary_scp+=(
+      -o "ProxyCommand=ssh -o BatchMode=yes -o ControlMaster=no -o ControlPersist=no -o ControlPath=none -W %h:%p $LINUX_JUMP"
+    )
   fi
   run_primary \
     "test ! -e '$GUEST_IMPORT_DIR' && install -d -m 0700 '$GUEST_IMPORT_DIR'"
@@ -432,7 +434,8 @@ SH
   NETWORK_CREATED=1
   NIC_ATTACHED=1
   SECONDARY_PROXY="ssh -o BatchMode=yes -o ConnectionAttempts=1 \
--o ConnectTimeout=10 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+-o ConnectTimeout=10 -o ControlMaster=no -o ControlPersist=no -o ControlPath=none \
+-o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
 $HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
 }
 
@@ -653,21 +656,19 @@ counter_value() {
 }
 
 stable_dns_counters() {
-  local previous current attempt stable_samples=0
-  previous="$(peer_command counters)"
-  for attempt in $(seq 1 100); do
+  local previous current started="$SECONDS" quiet_since
+  previous="$(peer_command counters)" || return 1
+  quiet_since="$SECONDS"
+  while ((SECONDS - started < 20)); do
     sleep 0.2
-    current="$(peer_command counters)"
-    if [[ "$current" == "$previous" ]]; then
-      ((stable_samples += 1))
-      # Let requests holding the previous resolver exceed the 3s DoH timeout
-      # before attributing any packets to the newly selected policy.
-      if ((stable_samples >= 20)); then
-        printf '%s\n' "$current"
-        return 0
-      fi
-    else
-      stable_samples=0
+    current="$(peer_command counters)" || return 1
+    if [[ "$current" != "$previous" ]]; then
+      quiet_since="$SECONDS"
+    # Five clock ticks guarantee at least four quiet seconds despite SECONDS'
+    # one-second precision, exceeding the old resolver's three-second timeout.
+    elif ((SECONDS - quiet_since >= 5)); then
+      printf '%s\n' "$current"
+      return 0
     fi
     previous="$current"
   done
@@ -861,7 +862,6 @@ capture_cleanup_fault_diagnostics() {
 }
 
 capture_guest_state() {
-  local transport="$1"
   local remote_command
   remote_command="sudo -n tar --ignore-failed-read -C '$GUEST_STATE_DIR' -cf - \
 identity.json daemon.state.json daemon.stderr.log daemon.stdout.log \
@@ -874,20 +874,9 @@ crash-connect.stderr.log crash-restart-daemon.stderr.log \
 cleanup-fault.receipt.json xtables-stop.log \
 fault-daemon.stdout.log fault-daemon.stderr.log \
 xtables-lock-held xtables-lock-release"
-  case "$transport" in
-    secondary)
-      run_secondary_bounded 30 "$remote_command" \
-        | tar -C "$ARTIFACT_DIR/guest-state" -xf -
-      ;;
-    primary)
-      primary_ssh_command
-      "${LINUX_PRIMARY_SSH[@]}" "$remote_command" \
-        | tar -C "$ARTIFACT_DIR/guest-state" -xf -
-      ;;
-    *)
-      fail "unsupported guest evidence transport: $transport"
-      ;;
-  esac
+  primary_ssh_command
+  "${LINUX_PRIMARY_SSH[@]}" "$remote_command" \
+    | tar -C "$ARTIFACT_DIR/guest-state" -xf -
 }
 
 capture_peer_state() {
@@ -906,16 +895,12 @@ capture_remote_state() {
   local peer_capture_succeeded=0
   local capture_failed=0
   mkdir -p "$ARTIFACT_DIR/guest-state" "$ARTIFACT_DIR/peer-state"
-  if [[ -n "$SECONDARY_PROXY" ]] \
-    && run_secondary_bounded 8 \
-      sudo -n test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
+  # Cleanup restores the primary link before collecting evidence. The guest
+  # has already deleted its secondary profile; probing it here times out and
+  # can orphan the SSH forwarding child after the deadline kills its parent.
+  if run_primary sudo -n test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
   then
-    capture_guest_state secondary && guest_capture_succeeded=1
-  fi
-  if [[ "$guest_capture_succeeded" == "0" ]] \
-    && run_primary sudo -n test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
-  then
-    capture_guest_state primary && guest_capture_succeeded=1
+    capture_guest_state && guest_capture_succeeded=1
   fi
   if [[ "$PEER_INITIALIZED" == "1" ]] \
     && run_hypervisor_bounded 8 \

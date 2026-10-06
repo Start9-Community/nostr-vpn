@@ -108,6 +108,7 @@ async fn run_command(command: Command) -> Result<()> {
             maybe_autoconfigure_node(&mut app);
             app.save(&config_path)?;
             reload_running_daemon_after_save(&config_path)?;
+            network_signaling::resume_running_daemon_for_join(&config_path)?;
 
             let own_device_id = app.nostr.public_key.clone();
             let admin_device_id = normalize_nostr_pubkey(&args.admin_device_id)?;
@@ -189,7 +190,7 @@ async fn run_command(command: Command) -> Result<()> {
                     let peers = configured_fips_peer_announcements(&app, &network_id);
                     let expected = expected_peer_count(&app);
                     (peers, expected, 0, false, "config")
-            };
+                };
 
             if args.json {
                 let endpoint = status_endpoint(&app, &daemon);
@@ -226,6 +227,7 @@ async fn run_command(command: Command) -> Result<()> {
                         "device_id": app.nostr.public_key.clone(),
                         "magic_dns_suffix": app.magic_dns_suffix,
                         "autoconnect": app.autoconnect,
+                        "internet_source": app.internet_source.as_str(),
                         "node_id": app.node.id,
                         "tunnel_ip": runtime_local_tunnel_ip(&app, &network_id),
                         "endpoint": endpoint,
@@ -354,6 +356,12 @@ async fn run_command(command: Command) -> Result<()> {
                             println!("daemon_fips_core_version: {}", state.fips_core_version);
                         }
                         println!("vpn_status: {}", state.vpn_status);
+                        println!(
+                            "fips_peers: {} connected ({} direct roster, {} other)",
+                            state.fips_direct_roster_peer_count + state.fips_other_peer_count,
+                            state.fips_direct_roster_peer_count,
+                            state.fips_other_peer_count,
+                        );
                     }
                 } else {
                     println!("daemon: stopped");
@@ -396,6 +404,22 @@ async fn run_command(command: Command) -> Result<()> {
             let mut app = load_or_default_config(&config_path)?;
             let previous_app = app.clone();
 
+            if let Some(value) = args.internet_source {
+                let source = value
+                    .parse::<InternetSource>()
+                    .map_err(anyhow::Error::msg)?;
+                app.set_internet_source(source);
+                #[cfg(feature = "paid-exit")]
+                if source != InternetSource::PaidAutomatic {
+                    let path = paid_route_store_file_path(&config_path);
+                    if path.exists() {
+                        update_paid_route_store(&path, |store| {
+                            store.automatic_reselect_from.clear();
+                            Ok(())
+                        })?;
+                    }
+                }
+            }
             if let Some(value) = args.network_id {
                 app.set_active_network_id(&value)?;
             }
@@ -457,16 +481,12 @@ async fn run_command(command: Command) -> Result<()> {
                     app.paid_exit.channel.channel_expiry_secs = value;
                 }
                 if let Some(value) = args.paid_exit_free_probe_units.as_deref() {
-                    app.paid_exit.channel.free_probe_units = paid_exit_parse_traffic_units_arg(
-                        value,
-                        "--paid-exit-free-probe-units",
-                    )?;
+                    app.paid_exit.channel.free_probe_units =
+                        paid_exit_parse_traffic_units_arg(value, "--paid-exit-free-probe-units")?;
                 }
                 if let Some(value) = args.paid_exit_grace_units.as_deref() {
-                    app.paid_exit.channel.grace_units = paid_exit_parse_traffic_units_arg(
-                        value,
-                        "--paid-exit-grace-units",
-                    )?;
+                    app.paid_exit.channel.grace_units =
+                        paid_exit_parse_traffic_units_arg(value, "--paid-exit-grace-units")?;
                 }
             }
             if let Some(value) = args.wireguard_exit_enabled {
@@ -532,7 +552,9 @@ async fn run_command(command: Command) -> Result<()> {
                 || args.exit_dns_custom_doh_bootstrap_ips.is_some()
                 || args.exit_dns_through_exit_servers.is_some();
             if let Some(value) = args.exit_dns_mode {
-                app.exit_dns.mode = value.parse::<ExitDnsMode>().map_err(|error| anyhow!(error))?;
+                app.exit_dns.mode = value
+                    .parse::<ExitDnsMode>()
+                    .map_err(|error| anyhow!(error))?;
             }
             if let Some(value) = args.exit_dns_doh_provider {
                 app.exit_dns.doh_provider = value
@@ -719,7 +741,10 @@ async fn run_command(command: Command) -> Result<()> {
                 })?;
                 let event: nostr_sdk::prelude::Event = serde_json::from_slice(&bytes)
                     .with_context(|| {
-                        format!("failed to decode signed Nostr event {}", args.event.display())
+                        format!(
+                            "failed to decode signed Nostr event {}",
+                            args.event.display()
+                        )
                     })?;
                 let queued = crate::control_pubsub_runtime::queue_control_pubsub_event(
                     &config_path,

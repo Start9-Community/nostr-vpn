@@ -55,7 +55,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
@@ -90,14 +90,16 @@ const FIPS_NOSTR_EXIT_OPEN_DISCOVERY_MAX_PENDING: usize = 8;
 const FIPS_NOSTR_PAID_EXIT_OPEN_DISCOVERY_MAX_PENDING: usize = 64;
 // Public WebSocket listeners are explicit FIPS bootstrap routers. Keep their
 // unaffiliated authenticated-adjacency budget bounded, but large enough that
-// a handful of slow or abandoned handshakes cannot deny all fresh clients.
-const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize = 128;
+// the established public client population cannot deny all fresh clients.
+// Reserve one quarter of the listener's inbound socket budget for configured
+// peers and in-flight transports.
+const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize = 384;
 // Public bootstrap routers need more physical sockets than an ordinary client
 // listener. Keep spare total slots for their configured upstream seeds, and
 // evict peers that do not answer transport pings before they consume the
 // entire inbound budget.
-const FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS: usize = 320;
-const FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS: usize = 256;
+const FIPS_PUBLIC_WEBSOCKET_MAX_CONNECTIONS: usize = 640;
+const FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS: usize = 512;
 const FIPS_PUBLIC_WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
 const FIPS_STATIC_NON_ROSTER_TRANSIT_MAX_SEEDS: usize = 2;
 const FIPS_RECENT_NON_ROSTER_TRANSIT_MAX_SEEDS: usize = 4;
@@ -122,6 +124,8 @@ const FIPS_ENDPOINT_REKEY_AFTER_SECS: u64 = 3600;
 const FIPS_PEER_ACTIVE_PING_INTERVAL_SECS: u64 = 10;
 const FIPS_PEER_LINK_PING_INTERVAL_SECS: u64 = 5;
 const FIPS_PEER_DISCOVERY_PROBE_INTERVAL_SECS: u64 = 30;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_ENDPOINT_BYPASS_VERIFY_INTERVAL: Duration = Duration::from_secs(5);
 const FIPS_CONTROL_RTT_MAX_ACCEPT_MS: u128 = 10_000;
 const MESH_LAN_UNDERLAY_UDP_MTU: u16 = 1452;
 const MESH_LAN_TUNNEL_MTU: u16 = 1322;
@@ -285,6 +289,7 @@ mod tests {
     include!("fips_private_mesh/tests_status.rs");
     include!("fips_private_mesh/tests_status_endpoint_data.rs");
     include!("fips_private_mesh/tests_runtime.rs");
+    include!("fips_private_mesh/tests_endpoint_config.rs");
     include!("fips_private_mesh/tests_network_cleanup.rs");
     include!("fips_private_mesh/tests_macos_bypass.rs");
     include!("fips_private_mesh/tests_config.rs");

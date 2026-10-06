@@ -20,6 +20,7 @@ import {
   semverFromTag,
   sha256FileSync,
 } from './local-release-lib.mjs'
+import { withIosArtifactSource } from './ios-artifact-source.mjs'
 import { requireReceiptSource } from './release-artifact-provenance-lib.mjs'
 
 function exactFile(path, label) {
@@ -206,6 +207,18 @@ export function preflightIosPublication({
   if (dryRun) {
     return { ...frozen, buildPresent: false, dryRun: true }
   }
+  if (!String(mutationEnv.NVPN_APPSTORE_REVIEW_WIREGUARD_CONFIG ?? '').trim()) {
+    for (const name of [
+      'NVPN_TESTFLIGHT_REVIEW_NOTES',
+      'NVPN_APPSTORE_REVIEW_NOTES',
+    ]) {
+      if (!String(mutationEnv[name] ?? '').trim()) {
+        throw new Error(
+          `iOS publication requires a reviewer WireGuard configuration or complete review notes (${name}).`,
+        )
+      }
+    }
+  }
   const transporter =
     mutationEnv.NVPN_ITMS_TRANSPORTER
     || '/Applications/Transporter.app/Contents/itms/bin/iTMSTransporter'
@@ -273,6 +286,14 @@ export function publishExactIosDistribution({
     throw new Error('iOS publication preflight does not bind exact staging.')
   }
 
+  const runIosUpload = (command) => withIosArtifactSource({
+    repoRoot,
+    receipt: exactJson(frozen.receiptPath, 'Frozen iOS export receipt'),
+    commit: stagedManifest.commit,
+    tree: stagedManifest.release_gate_attestation?.app_git_tree,
+    env: mutationEnv,
+  }, (context) => run('bash', [join(repoRoot, 'scripts', 'ios-build'), command], context))
+
   let uploaded = preflight.testflight
   let receipts = {
     finalReceipt: preflight.finalReceipt,
@@ -290,11 +311,7 @@ export function publishExactIosDistribution({
     })
 
   if (receipts.uploadAction === 'create-intent') {
-    run(
-      'bash',
-      [join(repoRoot, 'scripts', 'ios-build'), 'ios-upload-preflight'],
-      { cwd: repoRoot, env: mutationEnv },
-    )
+    runIosUpload('ios-upload-preflight')
     const authorization = captureIosUploadIntent({
       repoRoot,
       frozen,
@@ -310,11 +327,7 @@ export function publishExactIosDistribution({
       intent: authorization,
     })
     if (intent.created) {
-      run(
-        'bash',
-        [join(repoRoot, 'scripts', 'ios-build'), 'ios-upload'],
-        { cwd: repoRoot, env: mutationEnv },
-      )
+      runIosUpload('ios-upload')
       writeAcceptedIosPendingUpload({
         repoRoot,
         frozen,

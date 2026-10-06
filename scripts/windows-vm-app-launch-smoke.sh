@@ -17,6 +17,8 @@ release_join_assert_fips_unchanged
 EXPECTED_FIPS_SHA="$RELEASE_JOIN_FIPS_SHA"
 EXPECTED_FIPS_TREE="$RELEASE_JOIN_FIPS_TREE"
 EXPECTED_FIPS_VERSION="$RELEASE_JOIN_FIPS_VERSION"
+EXPECTED_APP_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+EXPECTED_APP_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 SSH_HOST="${NVPN_WINDOWS_SSH_HOST:-${1:-win11-dev}}"
 SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
@@ -81,12 +83,19 @@ case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
     echo "Skipping Windows VM git sync; release-gate lane already synced the candidate."
     ;;
   *)
-    "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST"
+    NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$EXPECTED_APP_SHA" \
+      "$ROOT/scripts/windows-vm-git-sync.sh" "$SSH_HOST"
     ;;
 esac
 
 run_ps "\$ErrorActionPreference = 'Stop'
 Set-Location '$GUEST_REPO'
+\$head = (git rev-parse HEAD).Trim()
+\$tree = (git rev-parse 'HEAD^{tree}').Trim()
+\$status = (git status --porcelain --untracked-files=all | Out-String).Trim()
+if (\$head -ne '$EXPECTED_APP_SHA' -or \$tree -ne '$EXPECTED_APP_TREE' -or \$status) {
+  throw 'Windows installer build checkout differs from the exact release candidate'
+}
 New-Item -ItemType Directory -Force -Path '$GUEST_ARTIFACT_ROOT' | Out-Null
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '$REMOTE_GATE_DIR'
 New-Item -ItemType Directory -Force -Path '$REMOTE_GATE_DIR' | Out-Null
@@ -170,6 +179,27 @@ foreach (\$entry in \$payloadFiles.GetEnumerator()) {
     size = [long]\$installed.size
   }
 }
+# Package only the payloads just matched to the installed app. Publication must
+# not rebuild the CLI or depend on the guest publish directory remaining intact.
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+\$cliArchive = Join-Path '$REMOTE_GATE_DIR' 'nvpn-$SMOKE_TAG-x86_64-pc-windows-msvc.zip'
+\$zip = [IO.Compression.ZipFile]::Open(\$cliArchive, [IO.Compression.ZipArchiveMode]::Create)
+try {
+  foreach (\$name in @('cli', 'wintun')) {
+    \$payload = \$payloadFiles[\$name]
+    \$entry = \$zip.CreateEntry(\$payload.file.Replace([char]92, [char]47))
+    \$entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+    \$inputStream = [IO.File]::OpenRead(\$payload.path)
+    try {
+      \$outputStream = \$entry.Open()
+      try { \$inputStream.CopyTo(\$outputStream) } finally { \$outputStream.Dispose() }
+    } finally {
+      \$inputStream.Dispose()
+    }
+  }
+} finally {
+  \$zip.Dispose()
+}
 \$receipt = [ordered]@{
   receiptSchema = 2
   platform = 'windows'
@@ -203,6 +233,9 @@ remote_gate_posix="${REMOTE_GATE_DIR//\\//}"
 "${SCP_CMD[@]}" \
   "$SSH_HOST:$remote_gate_posix/installer-receipt.json" \
   "$LOCAL_GATE_DIR/installer-receipt.json"
+"${SCP_CMD[@]}" \
+  "$SSH_HOST:$remote_gate_posix/nvpn-$SMOKE_TAG-x86_64-pc-windows-msvc.zip" \
+  "$LOCAL_GATE_DIR/nvpn-$SMOKE_TAG-x86_64-pc-windows-msvc.zip"
 python3 - \
   "$LOCAL_GATE_DIR/installer-receipt.json" \
   "$LOCAL_GATE_DIR/nostr-vpn-$SMOKE_TAG-windows-x64-setup.exe" \
@@ -217,6 +250,7 @@ import json
 import pathlib
 import re
 import sys
+import zipfile
 
 receipt_path = pathlib.Path(sys.argv[1])
 installer_path = pathlib.Path(sys.argv[2])
@@ -261,6 +295,15 @@ for name, value in payloads.items():
         and value["size"] > 0
     ):
         raise SystemExit(f"Windows installer receipt has invalid {name} payload")
+archive_path = receipt_path.parent / f"nvpn-{tag}-x86_64-pc-windows-msvc.zip"
+with zipfile.ZipFile(archive_path) as archive:
+    if sorted(archive.namelist()) != ["binaries/wintun.dll", "nvpn.exe"]:
+        raise SystemExit("Windows CLI archive has the wrong payload set")
+    for name in ("cli", "wintun"):
+        payload = payloads[name]
+        data = archive.read(payload["file"].replace("\\", "/"))
+        if len(data) != payload["size"] or hashlib.sha256(data).hexdigest() != payload["sha256"]:
+            raise SystemExit(f"Windows CLI archive differs from installed {name} payload")
 PY
 
 SOURCE_FIPS_RECEIPT="$LOCAL_GATE_DIR/cratesio-source-receipt.json"

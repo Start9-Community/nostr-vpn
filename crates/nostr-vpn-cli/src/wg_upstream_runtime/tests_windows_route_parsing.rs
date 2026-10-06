@@ -355,7 +355,7 @@ Idx     Met         MTU          State                Name
         ));
         std::fs::create_dir_all(&dir).expect("create test directory");
         let config_path = dir.join("config.toml");
-        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path);
+        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path).expect("cleanup path");
         let owner_token = format!("nvpn-test-{nonce:032x}");
         let native = WindowsNativeWireGuardCleanupState {
             name: format!("nvpn-test-{:08x}", std::process::id()),

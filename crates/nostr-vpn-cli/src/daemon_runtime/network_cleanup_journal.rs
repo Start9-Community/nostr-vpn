@@ -53,26 +53,32 @@ pub(crate) fn write_daemon_network_cleanup_state(
         set_daemon_cleanup_directory_permissions(parent)?;
     }
     let raw = serde_json::to_string_pretty(state)?;
-    write_private_runtime_file_atomically(path, raw.as_bytes())
-        .with_context(|| format!("failed to write daemon cleanup file {}", path.display()))?;
-    set_daemon_cleanup_file_permissions(path)?;
-    fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.sync_all())
-        .with_context(|| format!("failed to sync daemon cleanup file {}", path.display()))?;
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| {
-                format!(
-                    "failed to sync daemon cleanup directory {}",
-                    parent.display()
-                )
-            })?;
+    #[cfg(target_os = "macos")]
+    return fs::write_atomic(path, raw.as_bytes(), 0o600, None, true)
+        .with_context(|| format!("failed to persist daemon cleanup file {}", path.display()));
+    #[cfg(not(target_os = "macos"))]
+    {
+        write_private_runtime_file_atomically(path, raw.as_bytes())
+            .with_context(|| format!("failed to write daemon cleanup file {}", path.display()))?;
+        set_daemon_cleanup_file_permissions(path)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.sync_all())
+            .with_context(|| format!("failed to sync daemon cleanup file {}", path.display()))?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| {
+                    format!(
+                        "failed to sync daemon cleanup directory {}",
+                        parent.display()
+                    )
+                })?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -90,7 +96,7 @@ pub(crate) fn persist_daemon_network_cleanup_state(
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         if let Some(state) = tunnel_runtime.macos_network_cleanup_state() {
             write_daemon_network_cleanup_state(&path, &state)?;
         }
@@ -118,7 +124,7 @@ pub(crate) fn persist_windows_route_cleanup_intent(
     retain: bool,
 ) -> Result<()> {
     let _journal_lock = windows_network_cleanup_journal_lock();
-    let path = daemon_network_cleanup_file_path(config_path);
+    let path = daemon_network_cleanup_file_path(config_path)?;
     let mut state = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
     if retain {
         state.routes.merge(routes.clone());
@@ -139,7 +145,7 @@ pub(crate) fn persist_windows_route_cleanup_result(
     remaining: &crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot,
 ) -> Result<()> {
     let _journal_lock = windows_network_cleanup_journal_lock();
-    let path = daemon_network_cleanup_file_path(config_path);
+    let path = daemon_network_cleanup_file_path(config_path)?;
     let mut state = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
     state.routes.remove(attempted);
     state.routes.merge(remaining.clone());
@@ -156,7 +162,7 @@ pub(crate) fn persist_windows_native_wireguard_cleanup_intent(
     cleanup: &crate::wg_upstream_runtime::WindowsNativeWireGuardCleanupState,
 ) -> Result<()> {
     let _journal_lock = windows_network_cleanup_journal_lock();
-    let path = daemon_network_cleanup_file_path(config_path);
+    let path = daemon_network_cleanup_file_path(config_path)?;
     let mut state = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
     state
         .native_wireguard
@@ -177,7 +183,7 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let state = runtime
             .and_then(
                 crate::fips_private_mesh::FipsPrivateTunnelRuntime::macos_network_cleanup_state,
@@ -192,7 +198,7 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
 
     #[cfg(target_os = "linux")]
     {
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let state = runtime
             .and_then(LinuxNetworkCleanupState::from_runtime)
             .or_else(crate::fips_private_mesh::pending_linux_network_cleanup_state);
@@ -206,7 +212,7 @@ pub(crate) fn persist_fips_daemon_network_cleanup_state(
     #[cfg(target_os = "windows")]
     {
         let _journal_lock = windows_network_cleanup_journal_lock();
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let durable = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
         let mut state = WindowsNetworkCleanupState::from_runtime_and_pending(runtime);
         state.routes.merge(durable.routes);
@@ -246,7 +252,7 @@ fn persist_fips_failed_mutation_network_cleanup_state(
     #[cfg(target_os = "windows")]
     {
         let _journal_lock = windows_network_cleanup_journal_lock();
-        let path = daemon_network_cleanup_file_path(config_path);
+        let path = daemon_network_cleanup_file_path(config_path)?;
         let mut durable = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
         let current = WindowsNetworkCleanupState::from_runtime_and_pending(runtime);
         durable.routes.merge(current.routes);
@@ -286,7 +292,7 @@ pub(crate) fn persist_fips_secure_dns_cleanup_intent(
 ) -> Result<()> {
     #[cfg(target_os = "windows")]
     let _journal_lock = windows_network_cleanup_journal_lock();
-    let path = daemon_network_cleanup_file_path(config_path);
+    let path = daemon_network_cleanup_file_path(config_path)?;
     let mut state = read_daemon_network_cleanup_state(&path)?.unwrap_or_default();
 
     #[cfg(target_os = "linux")]
@@ -545,7 +551,7 @@ mod windows_network_cleanup_journal_tests {
         ));
         fs::create_dir_all(&dir).expect("create test directory");
         let config_path = dir.join("config.toml");
-        let cleanup_path = daemon_network_cleanup_file_path(&config_path);
+        let cleanup_path = daemon_network_cleanup_file_path(&config_path).expect("cleanup path");
         let owner_token = "nvpn-test-periodic-persist";
         let owned = native_cleanup(owner_token, true, true);
         let routes: crate::wg_upstream_runtime::WindowsRouteCleanupSnapshot =

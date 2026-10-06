@@ -34,6 +34,21 @@ let buyerPatch = AppStorePolicy.compatibilityPatch(for: paidBuyer)
 require(buyerPatch["internetSource"] as? String == "direct", "paid source must reset")
 require(buyerPatch["exitNode"] as? String == "", "paid seller must clear")
 
+var privateExit = direct
+privateExit.internetSource = "private_vpn"
+privateExit.exitNode = "my-private-exit"
+require(
+    AppStorePolicy.compatibilityPatch(for: privateExit).isEmpty,
+    "private exit selection must survive App Store state sanitization"
+)
+require(
+    !AppStorePolicy.blocks([
+        "type": "update_settings",
+        "patch": ["internetSource": "private_vpn", "exitNode": "my-private-exit"],
+    ]),
+    "selecting a private exit must remain available"
+)
+
 var paidSeller = direct
 paidSeller.paidExitSeller.enabled = true
 paidSeller.walletFiatEnabled = true

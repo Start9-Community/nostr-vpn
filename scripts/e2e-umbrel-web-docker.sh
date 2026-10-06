@@ -24,8 +24,7 @@ dump_debug() {
   set +e
   echo "umbrel web e2e failed, collecting debug output..."
   "${COMPOSE[@]}" ps || true
-  "${COMPOSE[@]}" logs --no-color --tail 200 web || true
-  "${COMPOSE[@]}" exec -T web sh -lc 'cat /data/config/nvpn/config.toml 2>/dev/null || true' || true
+  "${COMPOSE[@]}" logs --no-color --tail 200 daemon web || true
 }
 
 cleanup() {
@@ -35,6 +34,12 @@ cleanup() {
   fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   if [[ "$DATA_DIR_CREATED" == true ]]; then
+    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+      docker run --rm --pull never --network none \
+        -v "$DATA_DIR:/cleanup" --entrypoint sh "$IMAGE" \
+        -c "find /cleanup ! -type s -exec chown -h $(id -u):$(id -g) {} +" \
+        >/dev/null 2>&1 || exit_code=1
+    fi
     rm -rf "$DATA_DIR"
   fi
   exit "$exit_code"
@@ -44,12 +49,14 @@ trap cleanup EXIT
 wait_for_http() {
   local url="$1"
   for _ in $(seq 1 90); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+    if curl -fsS "$url" >/dev/null 2>&1 \
+      && curl -fsS -X POST "${url%/api/health}/api/tick" 2>/dev/null \
+        | jq -e '.daemonRunning == true' >/dev/null; then
       return 0
     fi
     sleep 1
   done
-  echo "umbrel web e2e failed: timed out waiting for $url" >&2
+  echo "umbrel web e2e failed: timed out waiting for web and daemon readiness at $url" >&2
   return 1
 }
 
@@ -69,7 +76,10 @@ read_temp_peer_npub() {
 }
 
 "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-"${COMPOSE[@]}" up --build -d web
+case "${NVPN_UMBREL_WEB_E2E_SKIP_BUILD:-0}" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On) "${COMPOSE[@]}" up -d web ;;
+  *) "${COMPOSE[@]}" up --build -d web ;;
+esac
 wait_for_http "http://127.0.0.1:$PORT/api/health"
 
 PEER_NPUB="$(read_temp_peer_npub)"
@@ -78,7 +88,11 @@ if [[ -z "$PEER_NPUB" ]]; then
   exit 1
 fi
 
-env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright install chromium
+chromium_executable="$(pnpm --dir "$ROOT_DIR/web/control-panel" exec node \
+  -p 'require("@playwright/test").chromium.executablePath()')"
+if [[ ! -x "$chromium_executable" ]]; then
+  env -u NO_COLOR pnpm --dir "$ROOT_DIR/web/control-panel" exec playwright install chromium
+fi
 
 PLAYWRIGHT_ARGS=("$@")
 if ((${#PLAYWRIGHT_ARGS[@]} == 0)); then

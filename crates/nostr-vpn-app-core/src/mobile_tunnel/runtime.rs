@@ -48,8 +48,8 @@ impl MobileTunnel {
                 launch.signed_roster,
                 non_empty_path(&launch.private_state_config_path),
             ))
-                .await
-                .context("mobile FIPS startup task failed")?
+            .await
+            .context("mobile FIPS startup task failed")?
         })?;
         mobile_debug_log("MobileTunnel::start start_async returned");
         Ok(Self {
@@ -100,8 +100,7 @@ impl MobileTunnel {
         let scope = mobile_lan_discovery_scope(&config.network_id);
         let initial_peers = config.peers.clone();
         let config_path = non_empty_path(&config.config_path);
-        let private_state_config_path =
-            private_state_config_path.or_else(|| config_path.clone());
+        let private_state_config_path = private_state_config_path.or_else(|| config_path.clone());
         let runtime_state_path = private_state_config_path
             .as_deref()
             .and_then(mobile_runtime_state_path);
@@ -131,7 +130,10 @@ impl MobileTunnel {
             initial_peers.clone(),
             local_routes,
         ));
-        let peer_identities = Arc::new(RwLock::new(mobile_peer_identity_map(&initial_peers)));
+        let peer_identities = Arc::new(RwLock::new(mobile_peer_identity_map(
+            &initial_peers,
+            &config.bootstrap_peers,
+        )));
         let mesh_peers = Arc::new(RwLock::new(initial_peers));
         let peer_hints = Arc::new(RwLock::new(config.peer_hints.clone()));
         let presence = Arc::new(RwLock::new(HashMap::new()));
@@ -166,18 +168,17 @@ impl MobileTunnel {
             .as_deref()
             .map(nostr_vpn_core::paid_route_store::paid_route_store_file_path)
         {
-            let provider = app_config
+            let pubsub_app = app_config
                 .read()
                 .map_err(|_| anyhow!("mobile app config lock poisoned"))?
-                .manual_paid_exit_provider
                 .clone();
-            if !provider.is_default() {
+            if pubsub_app.nostr.pubsub.enabled() {
                 let endpoint = Arc::clone(&endpoint);
                 tasks.push(tokio::spawn(async move {
                     if let Err(error) =
-                        import_mobile_manual_paid_exit_offer(endpoint, provider, store_path).await
+                        run_mobile_paid_exit_pubsub(endpoint, pubsub_app, store_path).await
                     {
-                        tracing::warn!(?error, "mobile: manual paid exit offer import stopped");
+                        tracing::warn!(?error, "mobile: paid exit pubsub stopped");
                     }
                 }));
             }
@@ -348,31 +349,12 @@ impl MobileTunnel {
             }));
         }
 
-        for queued in queued_join_rosters {
-            let destination = {
-                let app = app_config
-                    .read()
-                    .map_err(|_| anyhow!("mobile app config lock poisoned"))?;
-                mobile_join_roster_destination(&app, &queued.recipient_npub)?
-            };
-            let Some(destination) = destination else {
-                tracing::warn!(
-                    recipient = %queued.recipient_npub,
-                    "mobile: queued join-roster recipient is not in the active roster"
-                );
-                continue;
-            };
-            let state_control = state_control_sender.clone();
-            let private_state_config_path = private_state_config_path.clone();
-            tasks.push(tokio::spawn(async move {
-                deliver_mobile_queued_join_roster(
-                    &state_control,
-                    destination,
-                    private_state_config_path.as_deref(),
-                    queued,
-                )
-                .await;
-            }));
+        if !queued_join_rosters.is_empty() || private_state_config_path.is_some() {
+            tasks.push(tokio::spawn(watch_mobile_queued_join_rosters(
+                state_control_sender.clone(),
+                private_state_config_path.clone(),
+                queued_join_rosters,
+            )));
         }
 
         if !config.network_id.trim().is_empty() && !local_capability_hints.is_empty() {
@@ -448,9 +430,16 @@ impl MobileTunnel {
             let ping_config = Arc::clone(&config_state);
             tasks.push(tokio::spawn(async move {
                 loop {
-                    let network_id = ping_config
+                    let (network_id, bootstrap_peers) = ping_config
                         .read()
-                        .map(|config| config.network_id.clone())
+                        .map(|config| {
+                            let network_id = if config.network_id.trim().is_empty() {
+                                config.pending_join_network_id.clone()
+                            } else {
+                                config.network_id.clone()
+                            };
+                            (network_id, config.bootstrap_peers.clone())
+                        })
                         .unwrap_or_default();
                     if network_id.trim().is_empty() {
                         tokio::time::sleep(Duration::from_secs(MOBILE_RUNTIME_STATE_REFRESH_SECS))
@@ -463,6 +452,7 @@ impl MobileTunnel {
                         &peer_identities,
                         &presence,
                         &network_id,
+                        &bootstrap_peers,
                     )
                     .await
                     {
@@ -493,11 +483,9 @@ impl MobileTunnel {
                 };
                 let mut roster_sync = MobileRosterSyncState::default();
                 loop {
-                    if let Err(error) = sync_mobile_signed_roster_with_connected_peers(
-                        &context,
-                        &mut roster_sync,
-                    )
-                    .await
+                    if let Err(error) =
+                        sync_mobile_signed_roster_with_connected_peers(&context, &mut roster_sync)
+                            .await
                     {
                         tracing::warn!(?error, "mobile: failed to sync signed roster");
                     }
@@ -663,17 +651,8 @@ impl MobileTunnel {
     }
 
     #[cfg(target_os = "ios")]
-    pub(crate) fn send_packet_flow_batch(
-        &self,
-        bytes: &[u8],
-        lengths: &[usize],
-    ) -> Result<()> {
-        send_ios_packet_flow_batch(
-            &self.outbound_tx,
-            &self.tun_counters,
-            bytes,
-            lengths,
-        )
+    pub(crate) fn send_packet_flow_batch(&self, bytes: &[u8], lengths: &[usize]) -> Result<()> {
+        send_ios_packet_flow_batch(&self.outbound_tx, &self.tun_counters, bytes, lengths)
     }
 
     pub(crate) fn handle_underlay_network_change(&self) -> Result<MobileNetworkChangeOutcome> {
@@ -789,6 +768,11 @@ impl MobileTunnel {
             state.wireguard_exit_ready = wireguard_exit_ready;
             serde_json::to_string(&state).context("serialize mobile runtime state")
         })
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub(crate) fn has_pending_join_receipts(&self) -> bool {
+        self.pending_join_roster_receipts.has_pending_receipts()
     }
 
     pub(crate) fn take_app_config_toml(&self) -> Result<String> {

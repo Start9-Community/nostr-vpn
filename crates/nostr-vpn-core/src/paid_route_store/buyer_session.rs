@@ -13,6 +13,9 @@ impl PaidRouteStore {
             ));
         }
         let offer = record.offer.clone();
+        if self.exit_provider_is_avoided(&offer.seller_npub) {
+            return Err(anyhow!("clear your downvote before using this provider"));
+        }
         let accepted_terms = PaidExitConfig::from_paid_route_offer(&offer);
         let buyer_npub = normalize_paid_route_npub(&request.buyer_npub, "buyer")?;
         let mint_url = select_buyer_mint(&offer, &self.wallet, request.mint_url.as_deref())?;
@@ -22,7 +25,8 @@ impl PaidRouteStore {
         let seller_pubkey = PublicKey::parse(&offer.seller_npub)
             .map_err(|error| anyhow!("invalid paid route seller npub: {error}"))?;
         let receiver_pubkey_hex = paid_route_offer_receiver_pubkey_hex(&offer, &seller_pubkey)?;
-        let id_suffix = paid_route_buyer_session_id_suffix(&offer_key, &offer.offer_id, now_unix);
+        let id_suffix =
+            paid_route_buyer_session_id_suffix(&offer_key, &offer.offer_id, &mint_url, now_unix);
         let quote_id = format!("quote-{id_suffix}");
         let lease_id = format!("lease-{id_suffix}");
         let channel_id = format!("channel-{id_suffix}");
@@ -136,6 +140,28 @@ impl PaidRouteStore {
             .and_then(|seller| normalize_paid_route_npub(&seller, "seller"))
     }
 
+    pub fn buyer_session_seller_fips_endpoints(&self, session_id: &str) -> Result<Vec<String>> {
+        let session_id = trimmed_required(session_id, "paid route session id")?;
+        let record = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("paid route session {session_id} not found"))?;
+        let channel = self
+            .channels
+            .get(&record.session.payment.channel_id)
+            .ok_or_else(|| anyhow!("paid route session {session_id} has no channel"))?;
+        let seller_npub = self.buyer_session_seller_npub(&session_id)?;
+        Ok(self
+            .offers
+            .values()
+            .find(|candidate| {
+                candidate.offer.offer_id == channel.offer_id
+                    && candidate.offer.seller_npub == seller_npub
+            })
+            .map(|candidate| candidate.offer.fips_endpoints.clone())
+            .unwrap_or_default())
+    }
+
     pub fn buyer_session_allows_routing(&self, session_id: &str, now_unix: u64) -> Result<bool> {
         let session_id = trimmed_required(session_id, "paid route session id")?;
         let record = self
@@ -167,10 +193,13 @@ impl PaidRouteStore {
             .lease
             .expires_at_unix
             .min(channel.expires_at_unix);
-        if expires_at_unix <= now_unix {
+        if record.funding_started_unix != 0 || expires_at_unix <= now_unix {
             return Ok(false);
         }
         let offer = self.buyer_offer_for_session(lease_record, channel)?;
+        if self.exit_provider_is_avoided(&offer.seller_npub) {
+            return Ok(false);
+        }
         let config = PaidExitConfig::from_paid_route_offer(&offer);
         let decision = record.session.routing_decision(&config);
         if !paid_route_lifecycle_allows_routing(lease_record.status)
@@ -374,10 +403,18 @@ impl PaidRouteStore {
             let config = PaidExitConfig::from_paid_route_offer(&offer);
             let decision = record.session.routing_decision(&config);
             let capacity_msat = record.session.payment.capacity_sat.saturating_mul(1_000);
-            let raw_target_paid_msat = if capacity_msat == 0 {
-                decision.amount_due_msat
+            // Pay ahead of the byte counter. Waiting until the current credit
+            // is exhausted can leave the seller paused before the buyer sees
+            // enough received bytes to trigger its next payment.
+            let prepaid_target = if decision.amount_due_msat > 0 {
+                decision.amount_due_msat.saturating_add(1_000)
             } else {
-                decision.amount_due_msat.min(capacity_msat)
+                0
+            };
+            let raw_target_paid_msat = if capacity_msat == 0 {
+                prepaid_target
+            } else {
+                prepaid_target.min(capacity_msat)
             };
             let unit = paid_route_payment_cashu_unit(&record.session.payment);
             let Ok(target_paid_msat) = cashu_payment_target_msat(&unit, raw_target_paid_msat)

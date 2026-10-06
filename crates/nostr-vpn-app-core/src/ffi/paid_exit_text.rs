@@ -20,38 +20,60 @@ fn paid_route_price_text(price_msat_per_gb: u64) -> String {
     if price_msat_per_gb == 0 {
         "free".to_string()
     } else {
-        format!("{price_msat_per_gb} msat/GB")
+        let whole = price_msat_per_gb / 1_000;
+        let remainder = price_msat_per_gb % 1_000;
+        if remainder == 0 {
+            format!("{whole} sat/GB")
+        } else {
+            let fraction = format!("{remainder:03}");
+            format!("{whole}.{} sat/GB", fraction.trim_end_matches('0'))
+        }
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn paid_route_price_text_with_fiat(
     price_msat_per_gb: u64,
     fiat_per_btc: Option<f64>,
     currency: &str,
-    exchange_rate_stale: bool,
 ) -> String {
-    let mut text = paid_route_price_text(price_msat_per_gb);
-    if exchange_rate_stale {
-        return text;
-    }
     let Some(rate) = fiat_per_btc.filter(|rate| rate.is_finite() && *rate > 0.0) else {
-        return text;
+        return paid_route_price_text(price_msat_per_gb);
     };
     if price_msat_per_gb == 0 || currency.trim().is_empty() {
-        return text;
+        return paid_route_price_text(price_msat_per_gb);
     }
-    let value = price_msat_per_gb as f64 / 100_000_000_000.0 * rate;
-    let decimals = if value >= 0.01 { 2 } else { 6 };
-    let mut value = format!("{value:.decimals$}");
-    while value.contains('.') && value.ends_with('0') {
-        value.pop();
+    format!(
+        "{}/GB",
+        crate::exchange_rate::format_fiat_price_msat(price_msat_per_gb, rate, currency.trim())
+    )
+}
+
+fn apply_paid_route_currency(
+    channels: &mut [NativePaidRouteChannelState],
+    sessions: &mut [NativePaidRouteSessionState],
+    amount: &impl Fn(u64) -> String,
+) {
+    for channel in channels {
+        channel.capacity_text = amount(channel.capacity_sat.saturating_mul(1_000));
+        channel.paid_text = format!("{} paid", amount(channel.paid_msat));
     }
-    if value.ends_with('.') {
-        value.pop();
+    for session in sessions {
+        session.paid_text = format!("{} paid", amount(session.paid_msat));
+        session.amount_due_text = format!("{} due", amount(session.amount_due_msat));
+        if session.unpaid_msat > 0 {
+            session.unpaid_text = format!("{} behind", amount(session.unpaid_msat));
+        }
+        if session.channel_balance_msat > 0 {
+            session.channel_balance_text =
+                format!("{} in channel", amount(session.channel_balance_msat));
+        }
+        session.detail_text = paid_route_session_detail_text(
+            &session.lifecycle_status,
+            &session.access_state,
+            &session.usage_text,
+            &session.amount_due_text,
+        );
     }
-    let _ = write!(&mut text, " · ≈ {value} {}/GB", currency.trim());
-    text
 }
 
 fn paid_route_paid_text(msat: u64) -> String {
@@ -102,7 +124,13 @@ fn paid_route_session_title_text(
     allow_routing: bool,
     unpaid_msat: u64,
 ) -> String {
-    if allow_routing {
+    if lifecycle_status == "expired" {
+        "Ended".to_string()
+    } else if lifecycle_status == "closed" {
+        "Closed".to_string()
+    } else if lifecycle_status == "failed" {
+        "Connection failed".to_string()
+    } else if allow_routing {
         "Ready".to_string()
     } else if unpaid_msat > 0 {
         "Payment needed".to_string()
@@ -270,7 +298,7 @@ fn paid_route_session_detail_text(
     lifecycle_status: &str,
     access_state: &str,
     usage_text: &str,
-    amount_due_msat: u64,
+    amount_due_text: &str,
 ) -> String {
     format!(
         "{}, {}, {}",
@@ -283,7 +311,7 @@ fn paid_route_session_detail_text(
             },
         ),
         usage_text,
-        paid_route_due_text(amount_due_msat)
+        amount_due_text
     )
 }
 

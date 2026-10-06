@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 
-#[cfg(not(unix))]
 use nostr_vpn_core::config::AppConfig;
 
 #[cfg(not(unix))]
@@ -17,6 +16,7 @@ use crate::{
 };
 
 pub(crate) const JOIN_REQUEST_LINK_PREFIX: &str = "nvpn://join-request/";
+const REQUEST_REACHABILITY_MAX_AGE_SECS: u64 = crate::DAEMON_STATE_PERSIST_INTERVAL_SECS * 3;
 
 #[cfg(all(test, not(unix)))]
 pub(crate) fn pending_pairing_uri(config_path: &Path) -> Result<String> {
@@ -35,9 +35,8 @@ pub(crate) fn render_pairing_output(uri: &str) -> Result<String> {
 pub(crate) async fn run_join_request(args: JoinRequestArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     #[cfg(unix)]
-    let uri = crate::join_request_ipc::request_daemon_join_request_link(&config_path, args.reset)
-        .await
-        .context("the nVPN daemon must be running to create an ephemeral join request")?;
+    let uri =
+        crate::join_request_ipc::request_daemon_join_request_link(&config_path, args.reset).await?;
     #[cfg(not(unix))]
     let app = ensure_pending_join_request_and_reload(
         &config_path,
@@ -55,11 +54,12 @@ pub(crate) async fn run_join_request(args: JoinRequestArgs) -> Result<()> {
     }
 
     let state_path = daemon_state_file_path(&config_path);
-    let mut reachability = request_reachability(read_daemon_state(&state_path)?.as_ref());
+    let reachability = request_reachability(read_daemon_state(&state_path)?.as_ref());
     println!("{}", reachability.message());
     if args.no_wait {
         return Ok(());
     }
+    let resumed_for_join = crate::network_signaling::resume_running_daemon_for_join(&config_path)?;
     println!("Waiting for an admin to approve this join request (Ctrl-C to stop waiting).");
 
     let mut poll = tokio::time::interval(Duration::from_millis(500));
@@ -67,31 +67,31 @@ pub(crate) async fn run_join_request(args: JoinRequestArgs) -> Result<()> {
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
+                if resumed_for_join {
+                    crate::control_daemon(
+                        crate::ControlArgs { config: Some(config_path.clone()) },
+                        crate::DaemonControlRequest::Pause,
+                    ).context("failed to turn VPN back off after joining was cancelled")?;
+                }
                 result.context("failed to wait for Ctrl-C")?;
                 println!("Stopped waiting; the existing join request remains valid.");
                 return Ok(());
             }
             _ = poll.tick() => {
-                #[cfg(not(unix))]
-                let app = AppConfig::load(&config_path)
-                    .with_context(|| format!("failed to reload {}", config_path.display()))?;
                 #[cfg(unix)]
-                if crate::join_request_ipc::request_daemon_join_request_link(&config_path, false)
-                    .await
-                    .is_ok_and(|current| current != uri)
+                if AppConfig::load(&config_path)
+                    .is_ok_and(|app| app.active_network_has_confirmed_local_identity())
                 {
                     println!("Join request accepted.");
                     return Ok(());
                 }
                 #[cfg(not(unix))]
+                let app = AppConfig::load(&config_path)
+                    .with_context(|| format!("failed to reload {}", config_path.display()))?;
+                #[cfg(not(unix))]
                 if app.active_network_has_confirmed_local_identity() {
                     println!("Join approved for network {}.", app.effective_network_id());
                     return Ok(());
-                }
-                let next = request_reachability(read_daemon_state(&state_path)?.as_ref());
-                if next != reachability {
-                    reachability = next;
-                    println!("{}", reachability.message());
                 }
             }
         }
@@ -156,7 +156,7 @@ impl RequestReachability {
                 "nVPN daemon status is unavailable; the join request is still ready to share."
             }
             Self::NoFipsPeers => {
-                "No active FIPS connections; an admin cannot deliver approval yet. The join request is still ready to share."
+                "No active FIPS connections; turn VPN on to receive approval. The join request is still ready to share."
             }
             Self::FipsReachable => {
                 "FIPS connection active; approval can be delivered immediately after an admin accepts."
@@ -166,10 +166,17 @@ impl RequestReachability {
 }
 
 fn request_reachability(state: Option<&DaemonRuntimeState>) -> RequestReachability {
+    request_reachability_at(state, unix_timestamp())
+}
+
+fn request_reachability_at(state: Option<&DaemonRuntimeState>, now: u64) -> RequestReachability {
     let Some(state) = state else {
         return RequestReachability::DaemonUnavailable;
     };
-    if unix_timestamp().saturating_sub(state.updated_at) > 4 {
+    // The daemon persists status every five seconds. Give it several write
+    // intervals so the waiting UI does not alternate between reachable and
+    // unavailable between ordinary state-file updates.
+    if now.saturating_sub(state.updated_at) > REQUEST_REACHABILITY_MAX_AGE_SECS {
         return RequestReachability::DaemonUnavailable;
     }
     let connected =
@@ -183,10 +190,27 @@ fn request_reachability(state: Option<&DaemonRuntimeState>) -> RequestReachabili
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::SystemTime;
     #[cfg(not(unix))]
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn reachability_stays_stable_across_the_daemon_state_write_interval() {
+        let state = DaemonRuntimeState {
+            updated_at: 100,
+            fips_other_peer_count: 1,
+            ..DaemonRuntimeState::default()
+        };
+
+        assert_eq!(
+            request_reachability_at(Some(&state), 105),
+            RequestReachability::FipsReachable,
+            "the five-second daemon state cadence must not flap to unavailable"
+        );
+    }
 
     #[test]
     fn terminal_output_contains_dense_qr_and_exact_uri() {
@@ -197,6 +221,68 @@ mod tests {
         assert!(output.lines().any(|line| line.contains('▀')));
         assert_eq!(output.lines().filter(|line| *line == uri).count(), 1);
         assert!(output.ends_with(&format!("\n\n{uri}\n")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocking_wait_requests_once_then_observes_persisted_approval() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let directory = std::path::PathBuf::from("/tmp").join(format!(
+            "nvw-{}-{:x}",
+            std::process::id(),
+            nonce & 0xffff_ffff
+        ));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let config = directory.join("config.toml");
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let server = crate::join_request_ipc::JoinRequestIpcServer::spawn(&config, requests)
+            .expect("start join request IPC server");
+        let waiter = tokio::spawn(run_join_request(JoinRequestArgs {
+            config: Some(config.clone()),
+            no_wait: false,
+            no_qr: true,
+            reset: false,
+        }));
+
+        let request = tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .expect("initial IPC request timeout")
+            .expect("initial IPC request");
+        assert!(!request.reset);
+        request
+            .response
+            .send(Ok(format!("{JOIN_REQUEST_LINK_PREFIX}test")))
+            .expect("answer initial IPC request");
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        assert!(
+            received.try_recv().is_err(),
+            "waiting must observe config state instead of polling join-request IPC"
+        );
+
+        let mut approved = AppConfig::generated_without_networks();
+        let network_id = approved.add_owned_network("Approved network");
+        let own_pubkey = approved.own_nostr_pubkey_hex().expect("own public key");
+        approved
+            .network_by_id_mut(&network_id)
+            .expect("owned network")
+            .devices
+            .push(own_pubkey);
+        approved
+            .set_network_enabled(&network_id, true)
+            .expect("enable owned network");
+        approved.save(&config).expect("persist approval");
+
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("blocking wait did not finish")
+            .expect("wait task panicked")
+            .expect("blocking wait failed");
+        drop(server);
+        AppConfig::delete_persisted_secrets_for_path(&config).expect("delete test secrets");
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[cfg(not(unix))]

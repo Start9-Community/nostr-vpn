@@ -315,6 +315,13 @@
     addNetworkMode = 'choice';
   }
 
+  async function openJoinNetwork() {
+    addNetworkMode = 'join';
+    if (state && !activeNetwork && !state.vpnEnabled) {
+      await run('/api/connect_vpn', undefined, 'Joining network');
+    }
+  }
+
   function messageOf(value: unknown): string {
     if (value instanceof Error) {
       return value.message;
@@ -1097,7 +1104,7 @@
                 <button class="secondary-button" type="button" on:click={() => (addNetworkMode = 'create')}>
                   Create Network
                 </button>
-                <button class="secondary-button" type="button" on:click={() => (addNetworkMode = 'join')}>
+                <button class="secondary-button" type="button" on:click={openJoinNetwork}>
                   Join Network
                 </button>
               </div>

@@ -128,5 +128,6 @@ MagicDNS work.
 ### Actions
 
 - **Set Control Panel Password** — generates a new random password and shows it
-  once. Run it whenever you want to change the password. The new one takes effect
-  immediately, and anyone signed in with the old one is locked out.
+  once. Run it whenever you want to change the password; it asks you to confirm
+  first. The new one takes effect immediately, and anyone signed in with the old
+  one is locked out.

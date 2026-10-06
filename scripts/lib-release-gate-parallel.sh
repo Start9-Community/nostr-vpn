@@ -12,6 +12,9 @@ RELEASE_GATE_PARALLEL_STARTED_AT=()
 RELEASE_GATE_PARALLEL_LAST_INDEX=""
 RELEASE_GATE_PARALLEL_LOG_DIR=""
 RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS="${RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS:-2}"
+RELEASE_GATE_PARALLEL_SSH_DRAIN_SECONDS="${RELEASE_GATE_PARALLEL_SSH_DRAIN_SECONDS:-15}"
+RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES="${RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES:-80}"
+RELEASE_GATE_PARALLEL_FAILURE_LOG_LINES="${RELEASE_GATE_PARALLEL_FAILURE_LOG_LINES:-200}"
 
 release_gate_parallel_init() {
   RELEASE_GATE_PARALLEL_LOG_DIR="$1"
@@ -45,6 +48,9 @@ release_gate_parallel_start() {
   # Bash 3 has no portable `setsid`, but monitor mode gives each background
   # job a dedicated process group. Every descendant stays in that group even
   # if it forks during TERM grace or its wrapper exits.
+  if type release_gate_state_phase >/dev/null 2>&1; then
+    release_gate_state_phase "$label" running
+  fi
   set -m
   (
     # The parent has already placed this wrapper in its own group. Disable
@@ -99,13 +105,35 @@ release_gate_parallel_group_alive() {
       '
 }
 
+release_gate_parallel_group_snapshot() {
+  local pgid="$1"
+  [[ -n "$pgid" ]] || return 0
+  ps -axo pid=,ppid=,pgid=,stat=,comm= 2>/dev/null \
+    | awk -v expected="$pgid" '$3 == expected { print }'
+}
+
+release_gate_parallel_group_contains_only_ssh() {
+  local pgid="$1"
+  [[ -n "$pgid" ]] || return 1
+  ps -axo pgid=,stat=,comm= 2>/dev/null \
+    | awk -v expected="$pgid" '
+        $1 == expected && $2 !~ /^Z/ {
+          found = 1
+          if ($3 !~ /(^|\/)ssh$/) unexpected = 1
+        }
+        END { exit !(found && !unexpected) }
+      '
+}
+
 release_gate_parallel_wait_group_gone() {
   local pgid="$1"
-  local attempts=0
-  while ((attempts < 100)); do
+  local timeout_seconds="${2:-2}"
+  local deadline
+  [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || return 1
+  deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
     release_gate_parallel_group_alive "$pgid" || return 0
-    sleep 0.02
-    attempts=$((attempts + 1))
+    sleep 0.05
   done
   ! release_gate_parallel_group_alive "$pgid"
 }
@@ -200,16 +228,58 @@ release_gate_parallel_wait() {
 
   local orphaned_group=0
   local orphan_cleanup_failed=0
+  local natural_drain_seconds=2
   local pgid="${RELEASE_GATE_PARALLEL_PGIDS[$index]:-}"
   if ((status == 0)) && release_gate_parallel_group_alive "$pgid"; then
-    orphaned_group=1
-    release_gate_parallel_terminate_group "$pgid" || orphan_cleanup_failed=1
+    # A bounded OpenSSH ProxyCommand can remain briefly while it closes the
+    # forwarded channel after its successful parent exits. Give only an
+    # all-SSH remainder its configured transport drain; every other process
+    # type keeps the generic two-second fail-closed grace.
+    if release_gate_parallel_group_contains_only_ssh "$pgid"; then
+      natural_drain_seconds="$RELEASE_GATE_PARALLEL_SSH_DRAIN_SECONDS"
+    fi
+    if ! release_gate_parallel_wait_group_gone \
+      "$pgid" "$natural_drain_seconds"
+    then
+      orphaned_group=1
+      release_gate_parallel_group_snapshot "$pgid" >&2 || true
+      release_gate_parallel_terminate_group "$pgid" || orphan_cleanup_failed=1
+    fi
+  fi
+
+  if type release_gate_state_phase >/dev/null 2>&1; then
+    if ((status == 0 && orphaned_group == 0)); then
+      release_gate_state_phase "$label" passed
+    else
+      release_gate_state_phase "$label" failed "$((status == 0 ? 1 : status))"
+    fi
   fi
 
   local duration=$(( $(date +%s) - started_at ))
+  if type release_gate_timing_record >/dev/null 2>&1; then
+    release_gate_timing_record \
+      parallel "$label" "$started_at" "$((started_at + duration))" "$status" \
+      || return 1
+  fi
+  local log_lines="$RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES"
+  ((status == 0 && orphaned_group == 0)) \
+    || log_lines="$RELEASE_GATE_PARALLEL_FAILURE_LOG_LINES"
+  [[ "$log_lines" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'release gate parallel lane failed: invalid log line limit %s\n' \
+      "$log_lines" >&2
+    return 2
+  }
   printf '\n===== release-gate lane: %s (%ss) =====\n' "$label" "$duration"
   if [[ -n "$log_path" && -f "$log_path" ]]; then
-    cat "$log_path"
+    local total_lines
+    total_lines="$(wc -l <"$log_path" | tr -d '[:space:]')"
+    if [[ "$total_lines" =~ ^[0-9]+$ && "$total_lines" -gt "$log_lines" ]]; then
+      printf '[showing final %s of %s lines; complete log: %s]\n' \
+        "$log_lines" "$total_lines" "$log_path"
+      tail -n "$log_lines" "$log_path"
+    else
+      cat "$log_path"
+    fi
   fi
   printf '===== end release-gate lane: %s =====\n\n' "$label"
 
@@ -247,12 +317,12 @@ release_gate_parallel_wait_group() {
   fi
 
   # Bash 3 has no `wait -n`. Poll only the lane wrapper PIDs, then reap and
-  # report each lane as soon as it finishes. A failed lane cleans only its own
-  # process group; independent peers finish so the gate reports their complete
-  # result set instead of throwing away useful builds and diagnostics.
+  # report each lane as soon as it finishes. Fail fast: sibling lanes can own
+  # shared VM caches and must not survive a failed release attempt or race the
+  # next exact-candidate run.
   while ((${#remaining[@]})); do
     local pending=()
-    local index pid status
+    local index pid status group_failed=0
     for index in "${remaining[@]}"; do
       pid="${RELEASE_GATE_PARALLEL_PIDS[$index]:-}"
       if [[ -z "$pid" ]]; then
@@ -272,8 +342,15 @@ release_gate_parallel_wait_group() {
         if ((first_failure == 0)); then
           first_failure="$status"
         fi
+        group_failed=1
+        break
       fi
     done
+    if ((group_failed)); then
+      release_gate_parallel_cancel_all || first_failure=1
+      remaining=()
+      break
+    fi
     # Bash 3 treats "${pending[@]}" as an unbound expansion under `set -u`
     # when every lane was reaped in this poll.
     if ((${#pending[@]})); then

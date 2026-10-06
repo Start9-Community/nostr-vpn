@@ -134,6 +134,7 @@ public sealed class NativePaidExitSellerState
     public ulong GraceUnits { get; set; }
     public string GraceText { get; set; } = "";
     public string CountryCode { get; set; } = "";
+    public string NetworkClass { get; set; } = "unknown";
     public uint Asn { get; set; }
     public bool Ipv4 { get; set; }
     public bool Ipv6 { get; set; }
@@ -234,6 +235,15 @@ public sealed class NativePaidRoutePaymentActionState
 
 public sealed class NativePaidRouteOfferState
 {
+    public bool HasRating { get; set; }
+    public long RatingScore { get; set; }
+    public string DisplayRating => HasRating ? $"Rating {RatingScore}" : "";
+    public long PersonalRating { get; set; }
+    public bool CanRate { get; set; }
+    public bool CanUseProvider => PersonalRating >= 0;
+    public string RatingUpText => PersonalRating > 0 ? "👍 ✓" : "👍";
+    public string RatingDownText => PersonalRating < 0 ? "👎 ✓" : "👎";
+
     public string Key { get; set; } = "";
     public string OfferId { get; set; } = "";
     public string SellerNpub { get; set; } = "";
@@ -248,6 +258,7 @@ public sealed class NativePaidRouteOfferState
     public ulong GraceUnits { get; set; }
     public string GraceText { get; set; } = "";
     public string CountryCode { get; set; } = "";
+    public string NetworkClass { get; set; } = "unknown";
     public uint Asn { get; set; }
     public bool Ipv4 { get; set; }
     public bool Ipv6 { get; set; }
@@ -287,6 +298,13 @@ public sealed class NativePaidRouteChannelState
 
 public sealed class NativePaidRouteSessionState
 {
+    public long PersonalRating { get; set; }
+    public bool CanRate { get; set; }
+    public bool CanUseProvider => PersonalRating >= 0;
+    public string RatingUpText => PersonalRating > 0 ? "👍 ✓" : "👍";
+    public string RatingDownText => PersonalRating < 0 ? "👎 ✓" : "👎";
+    public string SellerNpub { get; set; } = "";
+
     public string SessionId { get; set; } = "";
     public string LeaseId { get; set; } = "";
     public string ChannelId { get; set; } = "";
@@ -404,6 +422,16 @@ public sealed class NativePaidRouteSessionState
         && !string.Equals(LifecycleStatus, "expired", System.StringComparison.Ordinal);
 }
 
+public sealed class NativePaidRouteMarketFilterState
+{
+    public string Query { get; set; } = "";
+    public string CountryCode { get; set; } = "";
+    public string MintUrl { get; set; } = "";
+    public bool RequireIpv4 { get; set; }
+    public bool RequireIpv6 { get; set; }
+    public string Sort { get; set; } = "quality";
+}
+
 public sealed class NativePaidRouteMarketState
 {
     public bool Supported { get; set; }
@@ -413,7 +441,11 @@ public sealed class NativePaidRouteMarketState
     public string StorePath { get; set; } = "";
     public NativePaidRouteWalletState Wallet { get; set; } = new();
     public NativePaidRoutePaymentActionState LastPaymentAction { get; set; } = new();
+    public NativePaidRouteMarketFilterState Filter { get; set; } = new();
     public List<NativePaidRouteOfferState> Offers { get; set; } = [];
+    public List<NativePaidRouteOfferState> VisibleOffers { get; set; } = [];
+    public ulong HiddenOfferCount { get; set; }
+    public List<string> CountryOptions { get; set; } = [];
     public List<NativePaidRouteChannelState> Channels { get; set; } = [];
     public List<NativePaidRouteSessionState> Sessions { get; set; } = [];
 }

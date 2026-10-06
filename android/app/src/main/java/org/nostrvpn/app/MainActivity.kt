@@ -285,8 +285,10 @@ class MainActivity : ComponentActivity() {
                 val succeeded = dispatchNow(action)
                 if (
                     succeeded &&
-                    action.optString("type") == "import_join_request" &&
-                    !state.vpnEnabled
+                    TunnelRefreshPolicy.shouldStartTunnelAfterAction(
+                        action.optString("type"),
+                        state.vpnEnabled,
+                    )
                 ) {
                     dispatch(NativeActions.connectVpn())
                 }
@@ -382,7 +384,9 @@ class MainActivity : ComponentActivity() {
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     while (true) {
                         refreshFromCore(AndroidRefreshTrigger.PERIODIC)
-                        delay(2_000)
+                        // Config changes arrive through FileObserver; the runtime publishes
+                        // peer status every ten seconds, so frequent idle reads add no detail.
+                        delay(5_000)
                     }
                 }
             }

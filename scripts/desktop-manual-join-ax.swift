@@ -1,4 +1,5 @@
 #!/usr/bin/env swift
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -76,7 +77,8 @@ func find(
         let identifier = stringAttribute(element, kAXIdentifierAttribute)
         guard !identifier.isEmpty else { return nil }
         let role = stringAttribute(element, kAXRoleAttribute)
-        return "\(role):\(identifier)"
+        let enabled = boolAttribute(element, kAXEnabledAttribute)
+        return "\(role):\(identifier):enabled=\(enabled.map { String($0) } ?? "unset")"
     }
     fputs("Visible AX identifiers: \(controls.joined(separator: ", "))\n", stderr)
     throw DriverError.missing(identifier)
@@ -117,16 +119,26 @@ func requireSuccessfulCompletion(
     _ visibleIdentifier: String,
     timeout: TimeInterval = 15
 ) throws {
+    // SwiftUI can retain a dismissed sheet in the AX tree with AXHidden=false.
+    // The result row is the durable product state, so require it to remain
+    // visible after settling instead of treating that stale sheet node as a
+    // failed action.
+    _ = dismissedIdentifier
     let deadline = Date().addingTimeInterval(timeout)
     repeat {
         let visible = visibleElements(application)
         if let failure = visibleActionFailure(visible) {
             throw DriverError.failedAction(failure)
         }
-        if !containsVisible(visible, identifier: dismissedIdentifier),
-           containsVisible(visible, identifier: visibleIdentifier) {
+        if containsVisible(visible, identifier: visibleIdentifier) {
             Thread.sleep(forTimeInterval: 0.25)
-            return
+            let settled = visibleElements(application)
+            if let failure = visibleActionFailure(settled) {
+                throw DriverError.failedAction(failure)
+            }
+            if containsVisible(settled, identifier: visibleIdentifier) {
+                return
+            }
         }
         Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline
@@ -134,7 +146,7 @@ func requireSuccessfulCompletion(
         throw DriverError.failedAction(failure)
     }
     throw DriverError.missing(
-        "successful completion: dismissed \(dismissedIdentifier), visible \(visibleIdentifier)"
+        "successful completion: visible \(visibleIdentifier)"
     )
 }
 
@@ -150,30 +162,36 @@ func press(
     var lastError = AXError.actionUnsupported
     repeat {
         let visible = visibleElements(application)
-        if var element = visible.first(where: {
+        let candidates = visible.filter {
             stringAttribute($0, kAXIdentifierAttribute) == identifier
-        }) {
-            for _ in 0..<8 {
-                var actionNames: CFArray?
-                let actionError = AXUIElementCopyActionNames(element, &actionNames)
-                if actionError == .success,
-                   let names = actionNames as? [String],
-                   names.contains(kAXPressAction) {
-                    let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
-                    if error == .success {
-                        Thread.sleep(forTimeInterval: 0.25)
-                        return
-                    }
-                    lastError = error
-                    break
-                }
-                guard let parent = attribute(element, kAXParentAttribute) else {
-                    break
-                }
-                element = parent as! AXUIElement
-            }
-        } else {
+                && boolAttribute($0, kAXEnabledAttribute) != false
+        }
+        if candidates.isEmpty {
             lastError = .cannotComplete
+        } else {
+            for candidate in candidates {
+                var element = candidate
+                for _ in 0..<8 {
+                    if boolAttribute(element, kAXEnabledAttribute) == false { break }
+                    var actionNames: CFArray?
+                    let actionError = AXUIElementCopyActionNames(element, &actionNames)
+                    if actionError == .success,
+                       let names = actionNames as? [String],
+                       names.contains(kAXPressAction) {
+                        let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
+                        if error == .success {
+                            Thread.sleep(forTimeInterval: 0.25)
+                            return
+                        }
+                        lastError = error
+                        break
+                    }
+                    guard let parent = attribute(element, kAXParentAttribute) else {
+                        break
+                    }
+                    element = parent as! AXUIElement
+                }
+            }
         }
         Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline
@@ -301,6 +319,10 @@ func run() throws {
             "AX PID \(pid) belongs to \(processName), expected \(args[5])"
         )
     }
+    NSRunningApplication(processIdentifier: pid)?.activate(
+        options: [.activateAllWindows]
+    )
+    _ = try find(application, identifier: "main-AppWindow-1", timeout: 60)
 
     switch args[2] {
     case "joiner":

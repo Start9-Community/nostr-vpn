@@ -241,6 +241,44 @@ async fn join_roster_timeout_reports_unacknowledged_real_transport() {
 }
 
 #[tokio::test]
+async fn join_roster_stops_retrying_when_the_runtime_is_closed() {
+    let endpoint = Arc::new(
+        FipsEndpoint::builder()
+            .without_system_tun()
+            .bind()
+            .await
+            .expect("bind embedded FIPS endpoint"),
+    );
+    let destination = PeerIdentity::from_npub(endpoint.npub()).expect("peer identity");
+    let control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
+        .await
+        .expect("start state-control runtime");
+    let sender = control.sender();
+    let (join_roster, _) = test_join_roster();
+    control.stop().await;
+
+    let started = Instant::now();
+    let error = send_join_roster_with_receipt(
+        &sender,
+        destination,
+        &join_roster,
+        Duration::from_millis(300),
+    )
+    .await
+    .expect_err("closed runtime must not deliver a roster");
+    assert!(
+        error.to_string().contains("runtime stopped"),
+        "closed runtime error must be preserved: {error:#}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "a permanently closed runtime must not consume the delivery deadline"
+    );
+
+    endpoint.shutdown().await.expect("shutdown endpoint");
+}
+
+#[tokio::test]
 async fn enqueue_returns_before_stateful_delivery_completes() {
     let endpoint = Arc::new(
         FipsEndpoint::builder()
@@ -368,6 +406,17 @@ fn restart_uses_a_fresh_tcp_sequence_seed() {
 
 #[test]
 fn route_discovery_time_does_not_consume_the_stream_delivery_window() {
+    let fips_handshake_timeout = Duration::from_secs(
+        fips_core::Config::new()
+            .node
+            .rate_limit
+            .handshake_timeout_secs,
+    );
+    assert!(
+        CONNECTION_TIMEOUT > fips_handshake_timeout,
+        "state-control must outlive FIPS route recovery"
+    );
+
     let now = Instant::now();
     let mut record = OutboundRecord {
         bytes: vec![1],

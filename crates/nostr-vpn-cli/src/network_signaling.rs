@@ -36,6 +36,17 @@ pub(crate) fn reload_running_daemon_after_save(config_path: &Path) -> Result<()>
     .context("daemon failed to apply saved configuration")
 }
 
+pub(crate) fn resume_running_daemon_for_join(config_path: &Path) -> Result<bool> {
+    let status = daemon_status(config_path)?;
+    if !status.running || status.state.as_ref().is_some_and(|state| state.vpn_enabled) {
+        return Ok(false);
+    }
+    crate::wait_for_running_daemon_control_ready(config_path, &status)?;
+    crate::write_daemon_control_request(config_path, DaemonControlRequest::Resume)?;
+    eprintln!("Turning VPN on to join.");
+    Ok(true)
+}
+
 pub(crate) fn save_config_and_reload_transactionally(
     config_path: &Path,
     previous: &AppConfig,
@@ -72,6 +83,7 @@ fn save_config_and_reload_with(
     Err(apply_error.context("configuration apply failed; previous configuration was restored"))
 }
 
+#[cfg(any(feature = "paid-exit", not(unix)))]
 pub(crate) fn maybe_reload_running_daemon(config_path: &Path) {
     if let Err(error) = reload_running_daemon_after_save(config_path) {
         eprintln!("config: daemon reload after save failed: {error}");
@@ -130,6 +142,9 @@ pub(crate) async fn update_active_network_roster(
     }
     app.save(&config_path)?;
     reload_running_daemon_after_save(&config_path)?;
+    if matches!(action, RosterEditAction::AddDevice) {
+        resume_running_daemon_for_join(&config_path)?;
+    }
 
     let published = 0usize;
 

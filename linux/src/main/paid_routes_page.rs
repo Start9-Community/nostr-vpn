@@ -255,6 +255,39 @@ fn normalize_paid_route_country_input(value: &str) -> String {
         .to_ascii_uppercase()
 }
 
+fn paid_exit_rating_buttons(app: &AppRef, parent: &gtk::Box, seller: &str, rating: i64) {
+    for (label, value, help) in [
+        ("👍", 1, "Publish a positive rating"),
+        (
+            "👎",
+            -1,
+            "Publish a negative rating and stop using this provider",
+        ),
+    ] {
+        let button = gtk::Button::with_label(label);
+        button.set_tooltip_text(Some(if rating == value {
+            "Clear your public rating"
+        } else {
+            help
+        }));
+        if rating == value {
+            button.add_css_class("suggested-action");
+        }
+        let app = app.clone();
+        let seller = seller.to_string();
+        button.connect_clicked(move |_| {
+            dispatch(
+                &app,
+                NativeAppAction::RatePaidExit {
+                    seller_npub: seller.clone(),
+                    rating: if rating == value { 0 } else { value },
+                },
+            );
+        });
+        parent.append(&button);
+    }
+}
+
 fn paid_route_offer_row(
     app: &AppRef,
     parent: &gtk::Box,
@@ -270,7 +303,11 @@ fn paid_route_offer_row(
     title.add_css_class("heading");
     title.set_xalign(0.0);
     text.append(&title);
-    let status = gtk::Label::new(Some(&non_empty_or(&offer.status_text, &offer.seller_npub)));
+    let mut status_text = non_empty_or(&offer.status_text, &offer.seller_npub);
+    if offer.has_rating {
+        status_text.push_str(&format!(" · Rating {}", offer.rating_score));
+    }
+    let status = gtk::Label::new(Some(&status_text));
     status.add_css_class("caption");
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
@@ -292,16 +329,29 @@ fn paid_route_offer_row(
     }
     row.append(&text);
 
+    if offer.can_rate {
+        paid_exit_rating_buttons(app, &row, &offer.seller_npub, offer.personal_rating);
+    }
     let active = state.internet_source == "paid_manual" && state.exit_node == offer.seller_npub;
-    let compatible_mint = offer
-        .accepted_mints
-        .iter()
-        .any(|accepted| state.paid_route_market.wallet.mints.iter().any(|mint| mint.url == *accepted));
+    let compatible_mint = offer.accepted_mints.iter().any(|accepted| {
+        state
+            .paid_route_market
+            .wallet
+            .mints
+            .iter()
+            .any(|mint| mint.url == *accepted)
+    });
     let connect = icon_text_button(
         if active { "Active" } else { "Connect" },
-        if active { "emblem-ok-symbolic" } else { "go-next-symbolic" },
+        if active {
+            "emblem-ok-symbolic"
+        } else {
+            "go-next-symbolic"
+        },
     );
-    connect.set_sensitive(!active && compatible_mint && !offer.key.is_empty());
+    connect.set_sensitive(
+        !active && compatible_mint && !offer.key.is_empty() && offer.personal_rating >= 0,
+    );
     {
         let app = app.clone();
         let offer_key = offer.key.clone();
@@ -360,6 +410,9 @@ fn paid_route_session_row(
     row.append(&text);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    if !seller_view && session.can_rate {
+        paid_exit_rating_buttons(app, &buttons, &session.seller_npub, session.personal_rating);
+    }
     if seller_view {
         let collect = icon_text_button(
             &non_empty_or(&session.collect_action_text, "Collect"),
@@ -381,6 +434,7 @@ fn paid_route_session_row(
         buttons.append(&collect);
     } else {
         let connect = icon_text_button("Connect", "go-next-symbolic");
+        connect.set_sensitive(session.personal_rating >= 0);
         {
             let app = app.clone();
             let session_id = session.session_id.clone();
@@ -499,6 +553,7 @@ fn paid_exit_seller_settings_patch(drafts: &Drafts) -> Result<SettingsPatch, &'s
         .map_err(|_| PAID_EXIT_PRICE_ERROR)?;
     Ok(SettingsPatch {
         paid_exit_price_msat_per_gb: Some(price),
+        paid_exit_network_class: Some(drafts.paid_exit_network_class.clone()),
         paid_exit_country_code: Some(normalize_paid_route_country_input(
             &drafts.paid_exit_country_code,
         )),
@@ -517,6 +572,9 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
     spacer.set_hexpand(true);
     header.append(&spacer);
     let enabled = gtk::Switch::builder().active(seller.enabled).build();
+    enabled.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-paid-exit-seller-enabled",
+    )]);
     enabled.set_sensitive(seller.supported);
     {
         let app = app.clone();
@@ -557,16 +615,45 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
     let price_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     price_row.set_valign(gtk::Align::Center);
     price_row.append(&gtk::Label::new(Some("Price (msat/GB)")));
-    let price = entry(
-        "0",
-        &app.borrow().drafts.paid_exit_price_msat_per_gb,
-    );
+    let price = entry("0", &app.borrow().drafts.paid_exit_price_msat_per_gb);
+    price.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-paid-exit-price-msat-per-gb",
+    )]);
     price_row.append(&price);
     price_row.append(&gtk::Label::new(Some("Country")));
     let country = entry("2-letter code", &app.borrow().drafts.paid_exit_country_code);
+    country.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-paid-exit-country-code",
+    )]);
     country.set_hexpand(false);
     country.set_width_chars(4);
     price_row.append(&country);
+    const NETWORK_CLASSES: [&str; 5] =
+        ["unknown", "residential", "datacenter", "mobile", "business"];
+    let network_class = gtk::DropDown::from_strings(&[
+        "Unspecified",
+        "Residential",
+        "Datacenter",
+        "Mobile",
+        "Business",
+    ]);
+    network_class.set_selected(
+        NETWORK_CLASSES
+            .iter()
+            .position(|value| *value == app.borrow().drafts.paid_exit_network_class)
+            .unwrap_or(0) as u32,
+    );
+    network_class.set_tooltip_text(Some("Network type declared to buyers"));
+    {
+        let app = app.clone();
+        network_class.connect_selected_notify(move |dropdown| {
+            app.borrow_mut().drafts.paid_exit_network_class = NETWORK_CLASSES
+                .get(dropdown.selected() as usize)
+                .unwrap_or(&"unknown")
+                .to_string();
+        });
+    }
+    price_row.append(&network_class);
     seller_card.append(&price_row);
 
     let mints_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -576,12 +663,18 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
         "Mint URLs, comma-separated",
         &app.borrow().drafts.paid_exit_accepted_mints,
     );
+    mints.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-paid-exit-accepted-mints",
+    )]);
     mints_row.append(&mints);
     seller_card.append(&mints_row);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_valign(gtk::Align::Center);
     let save = icon_text_button("Save", "document-save-symbolic");
+    save.update_property(&[gtk::accessible::Property::Label(
+        "nvpn-paid-exit-seller-save",
+    )]);
     let price_error = gtk::Label::new(Some(PAID_EXIT_PRICE_ERROR));
     price_error.add_css_class("caption");
     price_error.add_css_class("warning");
@@ -709,291 +802,5 @@ fn build_paid_exit_seller_card(app: &AppRef, page: &gtk::Box, state: &NativeAppS
     page.append(&seller_card);
 }
 
-fn paid_route_session_lines(session: &NativePaidRouteSessionState) -> Vec<String> {
-    let mut lines = vec![paid_route_session_detail(session)];
-    if !session.location_text.is_empty() {
-        lines.push(session.location_text.clone());
-    } else if !session.realized_exit_ip.is_empty() {
-        lines.push(format!(
-            "{} · {}",
-            session.realized_exit_ip,
-            paid_route_country_claim_text(session),
-        ));
-    }
-    let metric = paid_route_metric_text(
-        &non_empty_or(
-            &session.quality_text,
-            &paid_route_quality_text(
-                session.latency_ms,
-                session.jitter_ms,
-                session.packet_loss_ppm,
-            ),
-        ),
-        &session.bandwidth_text,
-    );
-    if !metric.is_empty() {
-        lines.push(metric);
-    }
-    if !session.settlement_text.is_empty() {
-        lines.push(session.settlement_text.clone());
-    }
-    lines.push(format!(
-        "{} · {}",
-        non_empty_or(
-            &session.paid_text,
-            &format!("{} paid", format_paid_route_msat(session.paid_msat)),
-        ),
-        if session.unpaid_msat > 0 {
-            non_empty_or(
-                &session.unpaid_text,
-                &format!("{} behind", format_paid_route_msat(session.unpaid_msat)),
-            )
-        } else {
-            non_empty_or(
-                &session.amount_due_text,
-                &format!("{} due", format_paid_route_msat(session.amount_due_msat)),
-            )
-        }
-    ));
-    lines
-}
-
-fn paid_route_buyer_session_title(session: &NativePaidRouteSessionState) -> String {
-    if !session.title_text.is_empty() {
-        session.title_text.clone()
-    } else if session.allow_routing {
-        "Ready".to_string()
-    } else if session.unpaid_msat > 0 {
-        "Payment needed".to_string()
-    } else if !session.payment_channel_ready {
-        "Needs funds".to_string()
-    } else {
-        paid_route_plain_status(
-            &non_empty_or(&session.status_text, &session.lifecycle_status),
-            "Session",
-        )
-    }
-}
-
-fn paid_exit_seller_session_title(session: &NativePaidRouteSessionState) -> String {
-    if !session.title_text.is_empty() {
-        session.title_text.clone()
-    } else if session.allow_routing {
-        "Connected customer".to_string()
-    } else if session.unpaid_msat > 0 {
-        "Customer behind".to_string()
-    } else {
-        paid_route_plain_status(
-            &non_empty_or(&session.status_text, &session.lifecycle_status),
-            "Customer",
-        )
-    }
-}
-
-fn paid_route_session_detail(session: &NativePaidRouteSessionState) -> String {
-    if !session.detail_text.is_empty() {
-        return session.detail_text.clone();
-    }
-    let access = paid_route_access_title(
-        &session.access_state,
-        &non_empty_or(&session.lifecycle_status, "session"),
-    );
-    let units = if session.bytes > 0 {
-        format!("{} used", format_bytes(session.bytes))
-    } else if session.packets > 0 {
-        format!("{} packets", session.packets)
-    } else {
-        format!("{} units", session.delivered_units)
-    };
-    format!(
-        "{access}, {units}, {} due",
-        format_paid_route_msat(session.amount_due_msat)
-    )
-}
-
-fn paid_route_session_can_open_channel(session: &NativePaidRouteSessionState) -> bool {
-    !session.session_id.is_empty() && !session.payment_channel_ready
-}
-
-fn paid_route_session_can_sign_payment(session: &NativePaidRouteSessionState) -> bool {
-    !session.session_id.is_empty() && session.payment_channel_ready && session.unpaid_msat > 0
-}
-
-fn paid_route_session_can_close_channel(session: &NativePaidRouteSessionState) -> bool {
-    !session.session_id.is_empty()
-        && session.payment_channel_ready
-        && !matches!(session.lifecycle_status.as_str(), "closed" | "expired")
-}
-
-fn paid_exit_seller_session_can_collect(session: &NativePaidRouteSessionState) -> bool {
-    session.payment_channel_ready
-        && session.paid_msat > 0
-        && !session.channel_id.is_empty()
-        && (!session.collect_action_text.is_empty()
-            || !matches!(session.lifecycle_status.as_str(), "closed" | "expired"))
-}
-
-fn paid_route_offer_title(offer: &NativePaidRouteOfferState) -> String {
-    format!(
-        "{} · {}",
-        non_empty_or(&offer.country_code, "Unknown country").to_uppercase(),
-        &offer.price_text
-    )
-}
-
-fn paid_exit_seller_status_text(seller: &NativePaidExitSellerState) -> String {
-    if !seller.status_text.is_empty() {
-        seller
-            .status_text
-            .replace("Paid exit selling", "Selling internet")
-            .replace("paid exit selling", "selling internet")
-    } else if seller.supported {
-        "People can pay to use my internet".to_string()
-    } else {
-        "This platform cannot sell public internet access".to_string()
-    }
-}
-
-fn paid_exit_seller_internet_text(seller: &NativePaidExitSellerState) -> String {
-    if !seller.internet_text.is_empty() {
-        seller.internet_text.clone()
-    } else if matches!(
-        seller.upstream.as_str(),
-        "wireguard_exit" | "wireguard" | "wg" | "upstream_vpn" | "vpn"
-    ) {
-        "My internet through WireGuard".to_string()
-    } else {
-        "My internet".to_string()
-    }
-}
-
-fn paid_exit_seller_totals_text(seller: &NativePaidExitSellerState) -> String {
-    [
-        format!("{} connected", seller.current_connection_count),
-        format!("{} past", seller.past_connection_count),
-        non_empty_or(
-            &seller.total_traffic_text,
-            &format!("{} routed", format_bytes(seller.total_billable_bytes)),
-        ),
-        format!(
-            "{} paid",
-            non_empty_or(
-                &seller.total_paid_text,
-                &format_paid_route_msat(seller.total_paid_msat),
-            )
-        ),
-        format!(
-            "{} due",
-            non_empty_or(
-                &seller.total_due_text,
-                &format_paid_route_msat(seller.total_due_msat),
-            )
-        ),
-    ]
-    .join(" · ")
-}
-
-fn paid_route_payment_action_text(
-    action: &nostr_vpn_app_core::native_state::NativePaidRoutePaymentActionState,
-) -> String {
-    if action.kind.is_empty() && action.status_text.is_empty() {
-        String::new()
-    } else {
-        non_empty_or(
-            &action.status_text,
-            &paid_route_payment_action_title(&action.kind),
-        )
-    }
-}
-
-fn paid_route_wallet_action_text(
-    action: &nostr_vpn_app_core::native_state::NativePaidRouteWalletActionState,
-) -> String {
-    if action.kind.is_empty() && action.status_text.is_empty() {
-        String::new()
-    } else {
-        non_empty_or(
-            &action.status_text,
-            &paid_route_wallet_action_title(&action.kind),
-        )
-    }
-}
-
-fn paid_route_access_title(value: &str, fallback: &str) -> String {
-    match value {
-        "paid" => "Paid".to_string(),
-        "free_probe" => "Free test".to_string(),
-        "grace" => "Grace".to_string(),
-        "suspended" => "Paused".to_string(),
-        other => paid_route_plain_status(other, fallback),
-    }
-}
-
-fn paid_route_plain_status(value: &str, fallback: &str) -> String {
-    let raw = non_empty_or(value, fallback).replace('_', " ");
-    let mut chars = raw.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-fn paid_route_quality_text(latency_ms: u32, jitter_ms: u32, packet_loss_ppm: u32) -> String {
-    if latency_ms == 0 && jitter_ms == 0 && packet_loss_ppm == 0 {
-        return "Quality unmeasured".to_string();
-    }
-    let loss = packet_loss_ppm as f64 / 10_000.0;
-    format!("{latency_ms} ms · {jitter_ms} ms jitter · {loss:.2}% loss")
-}
-
-fn paid_route_metric_text(quality: &str, bandwidth: &str) -> String {
-    [quality.trim(), bandwidth.trim()]
-        .into_iter()
-        .filter(|value| !value.is_empty() && *value != "Quality unmeasured")
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
-fn paid_route_country_claim_text(session: &NativePaidRouteSessionState) -> String {
-    match session.country_claim_status.as_str() {
-        "match" => format!(
-            "{} matches claim",
-            non_empty_or(
-                &session.observed_country_code,
-                &session.claimed_country_code
-            )
-        ),
-        "mismatch" => format!(
-            "{} differs from {}",
-            non_empty_or(&session.observed_country_code, "Observed country"),
-            session.claimed_country_code,
-        ),
-        _ => non_empty_or(
-            &session.observed_country_code,
-            &non_empty_or(&session.claimed_country_code, "country unknown"),
-        ),
-    }
-}
-
-fn paid_route_traffic_unit_text(units: u64) -> String {
-    format_bytes(units)
-}
-
-fn format_paid_route_msat(msat: u64) -> String {
-    if msat >= 1_000 {
-        let sat = msat as f64 / 1_000.0;
-        if (sat.fract()).abs() < f64::EPSILON {
-            format!("{sat:.0} sat")
-        } else {
-            format!("{sat:.3} sat")
-        }
-    } else {
-        format!("{msat} msat")
-    }
-}
-
-fn parse_positive_u64(value: &str) -> Option<u64> {
-    value.trim().parse::<u64>().ok().filter(|value| *value > 0)
-}
-
+include!("paid_routes_page/session_text.rs");
 include!("paid_routes_action_text.rs");

@@ -150,32 +150,69 @@ python3 "$TOOL" rewrite-xctestrun \
   --target-app "$APP" \
   --use-destination-artifacts
 
-python3 - "$DESTINATION_OUTPUT" <<'PY'
+# Exercise both release callers, not just the rewriter's optional mode. These
+# functions only prepare plans; no device, build, install, or XCTest is run.
+(
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  IOS_RELEASE_NETWORK_XCTESTRUN="$SOURCE"
+  IOS_RELEASE_NETWORK_DERIVED_DATA="$TMP_ROOT/DerivedData"
+  IOS_RELEASE_NETWORK_SIGNING_DIR="$PRIVATE_DIR"
+  NVPN_MOBILE_IOS_RELEASE_APP_PATH="$APP"
+  ios_release_network_prepare_xctestrun fixture "" fixture-run
+  cp "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" "$PRIVATE_DIR/network-caller.xctestrun"
+)
+(
+  source "$ROOT/scripts/lib-mobile-release-join-artifacts.sh"
+  source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
+  NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1
+  RELEASE_JOIN_IOS_XCTESTRUN="$SOURCE"
+  RELEASE_JOIN_IOS_DERIVED_DATA="$TMP_ROOT/DerivedData"
+  RELEASE_JOIN_IOS_APP_PATH="$APP"
+  RELEASE_JOIN_IOS_APP_BUNDLE_ID=example.nvpn
+  RELEASE_JOIN_IOS_UDID=fixture-device
+  RELEASE_JOIN_DELIVERY_WAIT_SECS=15
+  RELEASE_JOIN_IOS_SETUP_WAIT_SECS=30
+  release_join_ios_test_command testFixture >"$PRIVATE_DIR/join-command"
+)
+
+python3 - "$DESTINATION_OUTPUT" "$PRIVATE_DIR" <<'PY'
 import pathlib
 import plistlib
 import sys
 
-payload = plistlib.load(pathlib.Path(sys.argv[1]).open("rb"))
-target = payload["TestConfigurations"][0]["TestTargets"][0]
+private = pathlib.Path(sys.argv[2])
+command = (private / "join-command").read_bytes().decode().split("\0")
+assert command[0] == "xcodebuild"
+assert "test-without-building" in command
+join_plan = pathlib.Path(command[command.index("-xctestrun") + 1])
 expected = {
     "UseDestinationArtifacts": True,
     "TestHostBundleIdentifier": "example.nvpn.UITests.xctrunner",
     "TestBundleDestinationRelativePath": "PlugIns/NostrVpnIosUITests.xctest",
     "UITargetAppBundleIdentifier": "example.nvpn",
 }
-for key, value in expected.items():
-    if target.get(key) != value:
-        raise SystemExit(f"destination-artifact plan has the wrong {key}")
-if target.get("UITargetAppCommandLineArguments") != []:
-    raise SystemExit("ordinary destination-artifact plan exposed test-only UI")
-for key in (
-    "TestBundlePath",
-    "TestHostPath",
-    "UITargetAppPath",
-    "DependentProductPaths",
+for plan in (
+    pathlib.Path(sys.argv[1]),
+    private / "network-caller.xctestrun",
+    join_plan,
 ):
-    if key in target:
-        raise SystemExit(f"destination-artifact plan retains {key}")
+    payload = plistlib.load(plan.open("rb"))
+    target = payload["TestConfigurations"][0]["TestTargets"][0]
+    for key, value in expected.items():
+        if target.get(key) != value:
+            raise SystemExit(f"{plan.name}: destination-artifact plan has the wrong {key}")
+    if target.get("UITargetAppCommandLineArguments") != []:
+        raise SystemExit("ordinary destination-artifact plan exposed test-only UI")
+    if target.get("UITargetAppEnvironmentVariables") != {}:
+        raise SystemExit("ordinary destination-artifact plan exposed test-only state")
+    for key in (
+        "TestBundlePath",
+        "TestHostPath",
+        "UITargetAppPath",
+        "DependentProductPaths",
+    ):
+        if key in target:
+            raise SystemExit(f"{plan.name}: destination-artifact plan retains {key}")
 PY
 
 python3 - \
@@ -1175,6 +1212,47 @@ fi
   }
 )
 
+# Exercise the real export step without signing, building, or touching a device.
+# A failed export must not occupy the final path or destroy a previous export.
+(
+  eval "$(sed -n '/^run_export_archive() {/,/^exact_ipa_path() {/p' \
+    "$ROOT/scripts/ios-build" | sed '$d')"
+  ensure_dir() { mkdir -p "$1"; }
+  ARCHIVE_PATH="$TMP_ROOT/export-archive"
+  calls=0
+  fail_export=1
+  xcodebuild() {
+    local destination=""
+    calls=$((calls + 1))
+    while (($#)); do
+      if [[ "$1" == -exportPath ]]; then destination="$2"; break; fi
+      shift
+    done
+    printf 'retained export evidence\n' >"$destination/export.log"
+    [[ "$fail_export" -eq 0 ]] || return 70
+    printf 'signed IPA fixture\n' >"$destination/app.ipa"
+  }
+  output="$TMP_ROOT/export-resume/release-testing"
+  if run_export_archive "$output" "$TMP_ROOT/options.plist"; then
+    echo 'Failed Xcode export was accepted' >&2
+    exit 1
+  fi
+  [[ ! -e "$output" ]] || {
+    echo 'Failed export blocked retry with an incomplete final directory' >&2
+    exit 1
+  }
+  failed_log="$(find "$TMP_ROOT/export-resume" -name export.log -type f)"
+  [[ -s "$failed_log" ]] || { echo 'Failed export evidence was lost' >&2; exit 1; }
+  fail_export=0
+  run_export_archive "$output" "$TMP_ROOT/options.plist"
+  [[ -s "$output/app.ipa" && -s "$failed_log" && "$calls" -eq 2 ]]
+  run_export_archive "$output" "$TMP_ROOT/options.plist"
+  [[ -s "$output/app.ipa" && -s "$failed_log" && "$calls" -eq 2 ]] || {
+    echo 'Existing export was unnecessarily replaced' >&2
+    exit 1
+  }
+)
+
 python3 - \
   "$ROOT/scripts/ios-build" \
   "$ROOT/scripts/local-release.mjs" \
@@ -1206,6 +1284,11 @@ if (
 archive = ios_build.split("run_ios_archive() {", 1)[1].split(
     "\nrun_export_archive() {", 1
 )[0]
+if "\n  run_ios_rust\n" in archive or archive.count("\n  run_ios_xcframework\n") != 1:
+    raise SystemExit("frozen iOS archive must build Rust only through its framework step")
+ios_runner = pathlib.Path(sys.argv[1]).parents[1].joinpath("tools/run-ios").read_text(encoding="utf-8")
+if "xcframework) build_rust; build_xcframework ;;" not in ios_runner:
+    raise SystemExit("the framework step must build both Rust targets before packaging")
 for required in (
     'local NVPN_IOS_RUST_PROFILE="release"',
     "export NVPN_IOS_RUST_PROFILE",
@@ -1222,7 +1305,7 @@ for required in (
     if required not in tool:
         raise SystemExit("frozen archive validator does not require Release Rust")
 if archive.index("prepare_frozen_revision_args") > archive.index(
-    "run_ios_rust"
+    "run_ios_xcframework"
 ):
     raise SystemExit("frozen archive builds before pinning the full Git SHA")
 if (
@@ -1244,14 +1327,27 @@ recovery = (
 if recovery in archive:
     raise SystemExit("receiptless archive can synthesize Release provenance")
 partial_state_guard = (
-    'if [[ -e "$ARCHIVE_PATH" || -e "$FROZEN_ARCHIVE_RECEIPT" ]]'
+    'if [[ -e "$ARCHIVE_PATH" || -e "$FROZEN_DIR" ]]'
 )
 if (
     partial_state_guard not in archive
     or archive.index(partial_state_guard) > archive.index("ensure_profiles")
-    or "refusing to rebuild over it" not in archive
+    or "quarantine_stale_frozen_state" not in archive
 ):
-    raise SystemExit("receiptless archive is not rejected before rebuilding")
+    raise SystemExit("stale archive is not quarantined before rebuilding")
+quarantine = ios_build.split("quarantine_stale_frozen_state() {", 1)[1].split(
+    "\n}", 1
+)[0]
+for required in (
+    'mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-stale-state.XXXXXX"',
+    'chmod 700 "$quarantine"',
+    'mv "$ARCHIVE_PATH" "$quarantine/NostrVpnIos.xcarchive"',
+    'mv "$FROZEN_DIR" "$quarantine/frozen"',
+):
+    if required not in quarantine:
+        raise SystemExit("stale iOS archive quarantine is not recoverable and private")
+if 'rm -rf "$ARCHIVE_PATH"' in archive or 'rm -rf "$FROZEN_DIR"' in archive:
+    raise SystemExit("stale iOS archive state is destructively removed")
 if 'BUNDLE_ID" == "$NVPN_BUILTIN_IOS_BUNDLE_ID' not in ios_build:
     raise SystemExit("frozen archive permits non-production app identifiers")
 if 'NVPN_APP_VERSION_NAME" == "$source_version' not in ios_build:
@@ -1303,6 +1399,13 @@ full_dns = (
 )
 if release_gate.count(full_dns) < 2:
     raise SystemExit("release lanes can inherit a focused DNS subset")
+initial_mobile_network = release_gate.split(
+    "run_mobile_wireguard_exit_gates() {", 1
+)[1].split("\nverify_paid_exit_seller_ui_gates() {", 1)[0]
+if "NVPN_MOBILE_WG_EXIT_INSTALL_IOS=1" not in initial_mobile_network:
+    raise SystemExit("initial iOS network gate can skip installing its exact build")
+if 'NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))"' in initial_mobile_network:
+    raise SystemExit("iOS app readiness is incorrectly treated as exact artifact reuse")
 for pinned in (
     "NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=0",
     "NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=1",
@@ -1333,9 +1436,14 @@ for source in (network, join):
 for source, label in ((network, "network"), (release_gate, "join gate")):
     if "select_generated_ios_release_xctestrun" not in source:
         raise SystemExit(f"{label} does not select the generated xctestrun")
-if "NVPN_MOBILE_IOS_RELEASE_XCTESTRUN" in release_gate:
+# The underlay lane explicitly forwards its locally generated, receipt-bound
+# plan. Restrict the no-external-input assertion to the join gate it protects.
+join_gate_source = release_gate.split("run_mobile_join_e2e_gate() {", 1)[1].split(
+    "\nrun_windows_release_mobile_join_e2e_gate() {", 1
+)[0]
+if "NVPN_MOBILE_IOS_RELEASE_XCTESTRUN" in join_gate_source:
     raise SystemExit("join gate still trusts an external xctestrun")
-if "NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA" in release_gate:
+if "NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA" in join_gate_source:
     raise SystemExit("join gate still trusts external iOS test products")
 for required in (
     'xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"',
@@ -1347,7 +1455,7 @@ for required in (
         raise SystemExit(
             f"iOS network reuse does not bind its supplied test plan: {required}"
         )
-if "NVPN_MOBILE_IOS_RELEASE_APP_PATH" in release_gate:
+if "NVPN_MOBILE_IOS_RELEASE_APP_PATH" in join_gate_source:
     raise SystemExit("join gate still trusts an external frozen-app path")
 for required in (
     'target["TestBundlePath"]',
@@ -1410,6 +1518,58 @@ run(["git", "-C", str(repo), "add", "Cargo.lock"])
 rejects(repo)
 run(["git", "-C", str(repo), "reset", "-q", "HEAD", "Cargo.lock"])
 rejects(repo, "FIPS")
+PY
+
+PYTHONPATH="$ROOT/scripts" python3 - "$TOOL" "$TMP_ROOT" <<'PY'
+import importlib.util
+import pathlib
+import sys
+from types import SimpleNamespace
+
+tool = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("ios_frozen_archive_under_test", tool)
+if spec is None or spec.loader is None:
+    raise SystemExit("could not load frozen iOS archive module")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+captured = {}
+
+module.source_revision = lambda _root: ("head", "tree")
+module.require_clean_checkout = lambda _root, _label: None
+
+
+def validate_metadata(path, checkout_path_sha, head, tree, version):
+    captured.update(
+        path=path,
+        checkout_path_sha=checkout_path_sha,
+        head=head,
+        tree=tree,
+        version=version,
+    )
+
+
+module.validate_fips_metadata = validate_metadata
+source_root = root / "source"
+fips_root = root / "fips"
+module.validate_source_and_fips(
+    SimpleNamespace(
+        rust_profile="release",
+        source_root=str(source_root),
+        fips_root=str(fips_root),
+        app_head="head",
+        app_tree="tree",
+        fips_head="head",
+        fips_tree="tree",
+        fips_metadata=str(root / "fips-linkage.json"),
+        fips_version="1.2.3",
+    )
+)
+expected = module.path_sha256(fips_root)
+if captured.get("checkout_path_sha") != expected:
+    raise SystemExit(
+        "frozen iOS provenance validator did not hash the FIPS checkout path"
+    )
 PY
 
 echo "Frozen iOS archive fail-closed harness passed"

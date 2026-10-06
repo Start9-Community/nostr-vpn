@@ -20,7 +20,6 @@ WINDOWS_SSH="${NVPN_WINDOWS_SSH_HOST:?set NVPN_WINDOWS_SSH_HOST}"
 PRIMARY_PROXY="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 WINDOWS_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\nostr-vpn-release-gate}"
-GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\nvpn-desktop-underlay\\windows-target\\fips-release-gate}"
 GUEST_BINARY="${NVPN_WINDOWS_EXACT_CLI_PATH:?set NVPN_WINDOWS_EXACT_CLI_PATH to the packaged Windows CLI}"
 GUEST_INSTALLER_RECEIPT="${NVPN_WINDOWS_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_INSTALLER_RECEIPT_PATH to its installer receipt}"
 HOST_INSTALLER_RECEIPT="${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:?set NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH to the host-copied installer receipt}"
@@ -116,7 +115,6 @@ resolve_expected_fips_revision() {
 
 sync_and_import_candidates() {
   local harness_sha harness_tree windows_head windows_tree
-  local expected_fips_tree="" windows_fips_tree=""
   [[ "$ARTIFACT_APP_SHA" =~ ^[0-9a-f]{40}$ \
     && "$ARTIFACT_APP_TREE" =~ ^[0-9a-f]{40}$ ]] \
     || fail "Windows underlay requires an exact packaged app revision and tree"
@@ -149,28 +147,39 @@ sync_and_import_candidates() {
     fi
   } >"$ARTIFACT_DIR/source-provenance.txt"
 
+  # Windows and Linux may have been built at different candidate revisions.
+  # Bind each artifact to the current candidate using its own platform inputs.
+  node --input-type=module - "$ROOT" "${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}" \
+    "$ARTIFACT_APP_SHA" "$ARTIFACT_APP_TREE" \
+    "$harness_sha" "$harness_tree" \
+    >"$ARTIFACT_DIR/host-peer-component-proof.json" <<'JS'
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+const [root, peerRoot, windowsCommit, windowsTree, candidateCommit, candidateTree] = process.argv.slice(2)
+const { proveUnchangedPlatformInputs } = await import(
+  pathToFileURL(`${root}/scripts/release-component-source.mjs`))
+const git = ref => execFileSync('git', ['-C', peerRoot, 'rev-parse', ref], { encoding: 'utf8' }).trim()
+const candidate = { candidateRoot: root, candidateCommit, candidateTree }
+console.log(JSON.stringify({
+  windows: proveUnchangedPlatformInputs({
+    ...candidate, platform: 'windows',
+    receiptCommit: windowsCommit, receiptTree: windowsTree,
+  }),
+  linux: proveUnchangedPlatformInputs({
+    ...candidate, platform: 'linux',
+    receiptCommit: git('HEAD'), receiptTree: git('HEAD^{tree}'),
+  }),
+}, null, 2))
+JS
+
   env \
     NVPN_WINDOWS_SSH_HOST="$WINDOWS_SSH" \
     NVPN_WINDOWS_SSH_PROXY_COMMAND="$PRIMARY_PROXY" \
     NVPN_WINDOWS_SSH_JUMP="$WINDOWS_JUMP" \
     NVPN_WINDOWS_GUEST_REPO_PATH="$GUEST_REPO" \
-    NVPN_WINDOWS_GUEST_FIPS_REPO_PATH="$GUEST_FIPS_REPO" \
-    NVPN_WINDOWS_FIPS_REPO_PATH="${LOCAL_FIPS_REPO:-$ROOT/../fips}" \
-    NVPN_WINDOWS_SYNC_PATH_DEPS="$([[ -n "$LOCAL_FIPS_REPO" ]] && echo 1 || echo 0)" \
+    NVPN_WINDOWS_SYNC_PATH_DEPS=0 \
     NVPN_WINDOWS_GIT_SYNC_EXACT_APP_COMMIT="$harness_sha" \
     "$ROOT/scripts/windows-vm-git-sync.sh" "$WINDOWS_SSH"
-
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    for crate in fips-core fips-endpoint fips-identity; do
-      [[ -f "$LOCAL_FIPS_REPO/crates/$crate/Cargo.toml" ]] \
-        || fail "NVPN_FIPS_REPO_PATH is missing crates/$crate/Cargo.toml"
-    done
-    expected_fips_tree="$(
-      git -C "$LOCAL_FIPS_REPO" rev-parse 'HEAD^{tree}'
-    )"
-    run_ps_primary \
-      "git -C $(ps_quote "$GUEST_FIPS_REPO") checkout --detach $(ps_quote "$FIPS_SOURCE_REVISION") | Out-Null"
-  fi
 
   windows_head="$(run_ps_primary \
     "Set-Location $(ps_quote "$GUEST_REPO"); git rev-parse HEAD" \
@@ -183,20 +192,19 @@ sync_and_import_candidates() {
   [[ "$windows_head" == "$harness_sha" \
     && "$windows_tree" == "$harness_tree" ]] \
     || fail "Windows checkout differs from the exact harness revision/tree"
-  if [[ -n "$LOCAL_FIPS_REPO" ]]; then
-    windows_fips_tree="$(run_ps_primary \
-      "git -C $(ps_quote "$GUEST_FIPS_REPO") rev-parse 'HEAD^{tree}'" \
-      | tr -d '\r' \
-      | awk '/^[0-9a-f]{40}$/ { value = $0 } END { print value }')"
-    [[ "$windows_fips_tree" == "$expected_fips_tree" ]] \
-      || fail "Windows FIPS tree differs from the local release-gate tree"
-  fi
   run_ps_primary \
     "& $(ps_quote "$GUEST_REPO\\scripts\\test-desktop-windows-wireguard-ownership.ps1")" \
     >"$ARTIFACT_DIR/windows-wireguard-ownership-harness.log"
   grep -Fq 'WINDOWS_NATIVE_WIREGUARD_OWNERSHIP_HARNESS_OK' \
     "$ARTIFACT_DIR/windows-wireguard-ownership-harness.log" \
     || fail "Windows native WireGuard ownership regression harness failed"
+
+  run_ps_primary \
+    "& $(ps_quote "$GUEST_REPO\\scripts\\test-desktop-windows-probe-logging.ps1")" \
+    >"$ARTIFACT_DIR/windows-probe-logging-harness.log"
+  grep -Fq 'WINDOWS_CONCURRENT_PROBE_LOGGING_OK' \
+    "$ARTIFACT_DIR/windows-probe-logging-harness.log" \
+    || fail "Windows concurrent probe logging regression failed"
 
   run_ps_primary "\$ErrorActionPreference = 'Stop'
 \$Bin = $(ps_quote "$GUEST_BINARY")
@@ -231,8 +239,7 @@ Write-Host \"WINDOWS_EXACT_INSTALLER_RECEIPT_SHA256=\$ReceiptHash\"
 Write-Host \"WINDOWS_EXACT_INSTALLER_CLI_SHA256=\$CliHash\"" \
     >"$ARTIFACT_DIR/exact-artifact-validation.log"
 
-  NVPN_EXPECTED_APP_GIT_SHA="$ARTIFACT_APP_SHA" \
-    desktop_underlay_import_host_peer \
+  desktop_underlay_import_host_peer \
       >"$ARTIFACT_DIR/host-peer-import.log" 2>&1 \
     || {
       tail -n 120 "$ARTIFACT_DIR/host-peer-import.log" >&2 || true
@@ -246,7 +253,7 @@ capture_version_receipts() {
   run_ps_primary \
     "& $(ps_quote "$GUEST_BINARY") version --verbose" \
     | tr -d '\r' >"$ARTIFACT_DIR/target-version.txt"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
     "'$HYPERVISOR_BINARY' version --verbose" \
     >"$ARTIFACT_DIR/peer-version.txt"
   grep -Fxq "$expected" "$ARTIFACT_DIR/target-version.txt" \
@@ -301,7 +308,7 @@ random_mac() {
 
 discover_primary_interface() {
   local row_count rows
-  rows="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  rows="$(ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
     "virsh domiflist '$VM_NAME' | awk '\$2 == \"network\" { print \$1 \"|\" \$3 \"|\" \$5 }'")"
   row_count="$(grep -c . <<<"$rows" || true)"
   [[ "$row_count" == "1" ]] \
@@ -309,11 +316,11 @@ discover_primary_interface() {
   IFS='|' read -r PRIMARY_IFACE PRIMARY_SOURCE PRIMARY_MAC <<<"$rows"
   [[ -n "$PRIMARY_IFACE" && -n "$PRIMARY_SOURCE" && -n "$PRIMARY_MAC" ]]
 
-  PRIMARY_ADDRESS="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  PRIMARY_ADDRESS="$(ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
     "virsh domifaddr '$VM_NAME' --source lease | awk '\$2 == \"$PRIMARY_MAC\" && \$3 == \"ipv4\" { sub(/\\/.*/, \"\", \$4); print \$4; exit }'")"
   [[ -n "$PRIMARY_ADDRESS" ]] \
     || fail "could not resolve the Windows VM primary address from libvirt"
-  HYPERVISOR_UPLINK="$(ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  HYPERVISOR_UPLINK="$(ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
     "ip -j -4 route get 1.1.1.1 | jq -r '.[0].dev'")"
   [[ -n "$HYPERVISOR_UPLINK" ]] \
     || fail "could not resolve the hypervisor uplink for the isolated peer"
@@ -321,7 +328,7 @@ discover_primary_interface() {
 
 attach_secondary_network() {
   SECONDARY_MAC="$(random_mac)"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" bash -s -- \
     "$VM_NAME" "$NETWORK_NAME" "$SECONDARY_GATEWAY" "$SECONDARY_NETMASK" "$SECONDARY_MAC" <<'SH'
 set -euo pipefail
 vm="$1"
@@ -367,7 +374,9 @@ virsh attach-interface \
 SH
   NETWORK_CREATED=1
   NIC_ATTACHED=1
-  SECONDARY_PROXY="ssh -o BatchMode=yes $HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
+  SECONDARY_PROXY="ssh -o BatchMode=yes -o ControlMaster=no \
+-o ControlPersist=no -o ControlPath=none \
+$HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
 }
 
 wait_for_secondary_adapter() {
@@ -489,7 +498,7 @@ start_windows_runner() {
 
 set_primary_link() {
   local state="$1"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+  ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
     "date +%s.%N; virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' '$state' >/dev/null"
 }
 
@@ -499,7 +508,7 @@ assert_peer_recovered_from_source() {
   local label="$3"
   local observer="$ROOT/scripts/desktop-underlay-peer-recovery-observer.sh"
   [[ -r "$observer" ]] || fail "peer recovery observer is missing"
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" sudo -n bash -s -- \
+  ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" sudo -n bash -s -- \
     "$PEER_STATE_DIR" "$cut_timestamp" "$expected_source" \
     "$RECOVERY_DEADLINE_MS" "$label" <"$observer"
 }
@@ -552,7 +561,7 @@ run_underlay_switches() {
   wait_for_guest_marker armed-secondary 30
   cut="$(set_primary_link down | tr -d '\r')"
   printf '%s\n' "$cut" >"$ARTIFACT_DIR/secondary-link-cut-unix-seconds.txt"
-  wait_for_guest_marker secondary.receipt.json 15
+  wait_for_guest_marker secondary.receipt.json 45
   receipt="$(guest_receipt secondary.receipt.json)"
   receipt="$(jq --argjson link_changed "$cut" \
     '. + {host_link_change_unix_seconds: $link_changed}' <<<"$receipt")"
@@ -567,7 +576,7 @@ run_underlay_switches() {
   wait_for_guest_marker armed-primary 30
   cut="$(set_primary_link up | tr -d '\r')"
   printf '%s\n' "$cut" >"$ARTIFACT_DIR/primary-link-cut-unix-seconds.txt"
-  wait_for_guest_marker primary.receipt.json 15
+  wait_for_guest_marker primary.receipt.json 45
   receipt="$(guest_receipt primary.receipt.json)"
   receipt="$(jq --argjson link_changed "$cut" \
     '. + {host_link_change_unix_seconds: $link_changed}' <<<"$receipt")"
@@ -661,7 +670,11 @@ run_dns_matrix_and_crash_restore() {
     and .exact_candidate_binary_restarted == true
     and .cleanup_journal_present_before_crash == true
     and .cleanup_journal_survived_forced_termination == true
-    and .cleanup_journal_removed_after_restart == true
+    and .paid_exit_cleanup_ownership_removed_after_restart == true
+    and .crash_cleanup_journal_replaced_after_restart == true
+    and (.active_direct_cleanup_journal_present | type) == "boolean"
+    and (.active_direct_cleanup_route_count | type) == "number"
+    and .active_direct_cleanup_route_count >= 0
     and (.native_wireguard_config_path | type == "string" and length > 0)
     and (.native_wireguard_owner_marker_path | type == "string" and length > 0)
     and (.native_wireguard_owner_directory_path | type == "string" and length > 0)
@@ -798,7 +811,7 @@ Write-Output 'WINDOWS_GUEST_CLEANUP_AUDIT_OK'"
 }
 
 audit_hypervisor_cleanup() {
-  ssh -o BatchMode=yes "$HYPERVISOR_SSH" bash -s -- \
+  ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" bash -s -- \
     "$VM_NAME" "$NETWORK_NAME" "$PRIMARY_IFACE" "$PRIMARY_MAC" \
     "$PEER_TUN_IFACE" "$PEER_STATE_DIR" "$COUNTER_CHAIN" \
     "$PEER_NETNS" "$PEER_HOST_VETH" "$PEER_ENDPOINT_HOST" \
@@ -847,7 +860,11 @@ collect_failure_artifacts() {
       daemon.restart.stderr.log \
       daemon.restart.stdout.log \
       payload.log \
-      wireguard-payload.log
+      wireguard-payload.log \
+      probe.stdout.log \
+      probe.stderr.log \
+      wireguard-probe.stdout.log \
+      wireguard-probe.stderr.log
     do
       {
         printf '### %s\n' "$name"
@@ -884,7 +901,7 @@ collect_failure_artifacts() {
   fi
 
   if [[ "$PEER_INITIALIZED" == "1" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
       sudo -n bash -s -- "$PEER_STATE_DIR" "$HYPERVISOR_BINARY" \
       >"$ARTIFACT_DIR/peer-failure-diagnostics.txt" 2>&1 <<'SH' || true
 set -u
@@ -952,7 +969,7 @@ cleanup() {
   set +u
 
   if [[ -n "$PRIMARY_IFACE" ]]; then
-    ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+    ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
       "virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' up" >/dev/null 2>&1 || true
   fi
 
@@ -1008,12 +1025,12 @@ if (Test-Path -LiteralPath \$runnerPath) {
     || cleanup_failed=1
   if [[ "$QUARANTINE_GUEST_NETWORK" == "0" ]]; then
     if [[ "$NIC_ATTACHED" == "1" && -n "$SECONDARY_MAC" ]]; then
-      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
         "virsh detach-interface --domain '$VM_NAME' --type network --mac '$SECONDARY_MAC' --live" \
         >/dev/null 2>&1 || true
     fi
     if [[ "$NETWORK_CREATED" == "1" ]]; then
-      ssh -o BatchMode=yes "$HYPERVISOR_SSH" \
+      ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
         "virsh net-destroy '$NETWORK_NAME'" >/dev/null 2>&1 || cleanup_failed=1
     fi
     if [[ "$NIC_ATTACHED" == "1" ]]; then

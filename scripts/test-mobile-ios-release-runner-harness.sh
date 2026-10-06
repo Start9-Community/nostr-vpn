@@ -40,6 +40,8 @@ fail() {
 
 # shellcheck disable=SC1090
 source "$RUNNER"
+# Lock-state command behavior has its own subprocess regression below.
+ios_release_network_require_unlocked() { :; }
 NVPN_IOS_XCTEST_TERM_GRACE_SECS=1
 IOS_BUNDLE_ID=fi.siriusbusiness.nvpn
 
@@ -69,6 +71,9 @@ required_ios_fragments = (
     'IOS_RELEASE_NETWORK_CASE_XCTESTRUN="$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR/NostrVpnIos-$label.xctestrun"',
     'rmdir "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN_DIR"',
     'ios_release_network_require_retained_exact_runner || return 1',
+    'build_command+=(clean build-for-testing)',
+    'match.group(2).lower(): match.group(1).lower()',
+    'identity = identity.lower()',
 )
 for fragment in required_ios_fragments:
     if fragment not in ios_source:
@@ -77,6 +82,79 @@ for fragment in required_ios_fragments:
             + fragment
         )
 PY
+
+mkdir -p "$TEMP_ROOT/bin"
+cat >"$TEMP_ROOT/bin/ios-deploy" <<'USB_FIXTURE'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+assert sys.argv[1:3] == ["--id", "fixture-device"]
+assert "--list_bundle_id" in sys.argv and "--json" in sys.argv
+assert "--key=CFBundleIdentifier,CFBundleVersion,CFBundleShortVersionString,ApplicationType,ProfileValidated,SignerIdentity,NVPNBuildGitSha" in sys.argv
+with open(os.environ["NVPN_TEST_USB_INVENTORY_LOG"], "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+apps = {}
+for bundle, build, version in (
+    ("fi.siriusbusiness.nvpn", "4001008", "4.1.5"),
+    ("fi.siriusbusiness.nvpn.UITests.xctrunner", "1", os.environ.get("NVPN_TEST_USB_RUNNER_VERSION", "1.0")),
+):
+    apps[bundle] = {"CFBundleIdentifier": bundle, "CFBundleVersion": build, "CFBundleShortVersionString": version}
+print(json.dumps({"Event": "ListBundleId", "Apps": apps}))
+USB_FIXTURE
+chmod +x "$TEMP_ROOT/bin/ios-deploy"
+export PATH="$TEMP_ROOT/bin:$PATH"
+export NVPN_TEST_USB_INVENTORY_LOG="$TEMP_ROOT/usb-inventory.log"
+
+cat >"$TEMP_ROOT/bin/ideviceinfo" <<'DEVICE_FIXTURE'
+#!/usr/bin/env python3
+import os
+import plistlib
+import sys
+assert sys.argv[1] == "-u" and sys.argv[3] == "-x"
+sys.stdout.buffer.write(plistlib.dumps({
+    "UniqueDeviceID": os.environ.get("NVPN_TEST_USB_DEVICE_ID", sys.argv[2]),
+    "DeviceClass": os.environ.get("NVPN_TEST_USB_DEVICE_CLASS", "iPhone"),
+    "DeviceName": "Fixture Phone",
+}))
+DEVICE_FIXTURE
+chmod +x "$TEMP_ROOT/bin/ideviceinfo"
+(
+  device=00000001-0000000000000001
+  export NVPN_IOS_EXPECTED_DEVICE_NAME='Fixture Phone'
+  [[ "$(ios_release_network_resolve_device "$device")" == "$device" ]]
+  resolve_physical_ios_udid() { [[ "$1" == fixture-alias ]]; printf '%s\n' "$device"; }
+  [[ "$(ios_release_network_resolve_device fixture-alias)" == "$device" ]]
+  for invalid in wrong-device wrong-class wrong-name; do
+    unset NVPN_TEST_USB_DEVICE_ID NVPN_TEST_USB_DEVICE_CLASS
+    export NVPN_IOS_EXPECTED_DEVICE_NAME='Fixture Phone'
+    case "$invalid" in
+      wrong-device) export NVPN_TEST_USB_DEVICE_ID=another-device ;;
+      wrong-class) export NVPN_TEST_USB_DEVICE_CLASS=Mac ;;
+      wrong-name) export NVPN_IOS_EXPECTED_DEVICE_NAME='Another Phone' ;;
+    esac
+    if ios_release_network_resolve_device "$device" >"$TEMP_ROOT/$invalid.out" 2>/dev/null; then
+      fail "USB physical-device readback accepted $invalid"
+    fi
+    [[ ! -s "$TEMP_ROOT/$invalid.out" ]]
+  done
+) || fail "USB physical-device selection did not preserve exact identity"
+
+(
+  IOS_RELEASE_NETWORK_DERIVED_DATA="$TEMP_ROOT/build-only"
+  IOS_RELEASE_NETWORK_DESTINATION=fixture-device
+  NVPN_IOS_TEAM_ID=fixture-team
+  NVPN_IOS_CODE_SIGN_IDENTITY=fixture-signer
+  NVPN_IOS_PROVISIONING_PROFILE_UUID=fixture-app-profile
+  NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID=fixture-tunnel-profile
+  NVPN_BUILD_GIT_SHA=fixture-source
+  NVPN_BUILD_TIMESTAMP_UTC=fixture-time
+  ios_release_network_xcode_command
+  printf '%s\n' "${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}" >"$TEMP_ROOT/build-command.txt"
+  grep -Fxq 'generic/platform=iOS' "$TEMP_ROOT/build-command.txt" \
+    && grep -Fxq 'ARCHS=arm64' "$TEMP_ROOT/build-command.txt" \
+    && ! grep -Fq fixture-device "$TEMP_ROOT/build-command.txt"
+) || fail "compiling the iOS runner still waits for a live physical destination"
 
 runner_root="$TEMP_ROOT/runner-derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
 runner_install_log="$TEMP_ROOT/runner-install.log"
@@ -87,23 +165,22 @@ plutil -insert CFBundleIdentifier \
 (
   IOS_RELEASE_NETWORK_DERIVED_DATA="$TEMP_ROOT/runner-derived"
   IOS_RELEASE_NETWORK_DEVICE=fixture-device
+  IOS_RELEASE_NETWORK_DESTINATION=fixture-device
   xcrun() {
     printf '%s\n' "$*" >>"$runner_install_log"
-    if [[ "$*" == "devicectl device info apps"* ]]; then
-      printf '%s\n' "$IOS_BUNDLE_ID.UITests.xctrunner"
-    fi
   }
   ios_release_network_install_exact_runner
   ios_release_network_test_command "$TEMP_ROOT/runner-derived/exact.xctestrun"
   ios_release_network_test_command "$TEMP_ROOT/runner-derived/exact.xctestrun"
+  [[ " ${IOS_RELEASE_NETWORK_XCODE_COMMAND[*]} " == *" -destination fixture-device "* ]]
 ) || fail "exact signed iOS runner was not installed in place"
 grep -Fxq \
   "devicectl device install app --device fixture-device $runner_root --quiet" \
   "$runner_install_log" \
   || fail "exact signed iOS runner path was not installed before XCTest"
 grep -Fq \
-  "device info apps --device fixture-device --bundle-id $IOS_BUNDLE_ID.UITests.xctrunner" \
-  "$runner_install_log" \
+  -- '--id fixture-device --list_bundle_id --json' \
+  "$NVPN_TEST_USB_INVENTORY_LOG" \
   || fail "installed iOS runner bundle identity was not read back"
 if grep -Fq "device uninstall app" "$runner_install_log"; then
   fail "exact iOS runner replacement revoked development trust"
@@ -170,37 +247,8 @@ run_installed_reuse_readback() (
   local runner_version="$1"
   IOS_RELEASE_NETWORK_SIGNING_DIR="$TEMP_ROOT/reuse"
   IOS_RELEASE_NETWORK_DEVICE=fixture-device
-  xcrun() {
-    local bundle="" output="" previous=""
-    printf '%s\n' "$*" >>"$reuse_inventory_log"
-    for argument in "$@"; do
-      case "$previous" in
-        --bundle-id) bundle="$argument" ;;
-        --json-output) output="$argument" ;;
-      esac
-      previous="$argument"
-    done
-    [[ -n "$bundle" && -n "$output" ]] || return 1
-    python3 - "$output" "$bundle" "$runner_version" <<'PY'
-import json
-import sys
-
-path, bundle, runner_version = sys.argv[1:]
-is_runner = bundle.endswith(".UITests.xctrunner")
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump({
-        "info": {"outcome": "success"},
-        "result": {
-            "deviceIdentifier": "fixture-coredevice-uuid-not-hardware-udid",
-            "apps": [{
-                "bundleIdentifier": bundle,
-                "bundleVersion": "1" if is_runner else "4001008",
-                "version": runner_version if is_runner else "4.1.5",
-            }],
-        },
-    }, handle)
-PY
-  }
+  export NVPN_TEST_USB_RUNNER_VERSION="$runner_version"
+  export NVPN_TEST_USB_INVENTORY_LOG="$reuse_inventory_log"
   ios_release_network_require_installed_reuse \
     "$reuse_app" "$reuse_runner" "$reuse_receipt" \
     "$reuse_runner_receipt" "$reuse_runner_tree" "$reuse_device_sha" \
@@ -277,8 +325,6 @@ disabled = reuse.split(
 )[1].split(';;', 1)[0]
 if "device install app" in disabled or "device uninstall app" in disabled:
     raise SystemExit("disabled iOS install mode changes the installation")
-if "--use-destination-artifacts" not in source:
-    raise SystemExit("retained iOS reuse lost destination-artifact XCTest")
 PY
 
 NVPN_MOBILE_WG_EXIT_INSTALL_IOS=0
@@ -310,90 +356,139 @@ run_bounded() {
     "$@"
 }
 
+# Destination or automation authorization failures cannot touch the app.
+# A fresh USB stopped-state proof
+# should close this attempt without starting a second automation session.
+for fixture in destination authorization started earlier-ui stale-baseline standalone; do
+  (
+    IOS_RELEASE_NETWORK_PREPARED=1
+    IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED=1
+    IOS_RELEASE_NETWORK_DEVICE=fixture
+    IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64=""
+    NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$TEMP_ROOT/no-start-$fixture"
+    cleanup_calls="$TEMP_ROOT/no-start-$fixture.calls"
+    baseline_calls="$TEMP_ROOT/no-start-$fixture.baselines"
+    ios_release_network_require_packet_tunnel_stopped() {
+      if [[ "$fixture" == stale-baseline && -e "$baseline_calls" ]]; then return 1; fi
+      echo probe >>"$baseline_calls"
+    }
+    ios_release_network_disconnect_cleanup_inner() { echo ui >>"$cleanup_calls"; }
+    ios_release_network_cleanup_private_artifacts() { :; }
+    if [[ "$fixture" != standalone ]]; then
+      ios_release_network_disconnect_cleanup 1
+    fi
+    if [[ "$fixture" == earlier-ui ]]; then
+      run_bounded prior-ui 5 2 FIRST bash -c 'echo FIRST'
+    fi
+    set +e
+    if [[ "$fixture" == started ]]; then
+      run_bounded destination-failure 5 2 FIRST \
+        bash -c 'echo FIRST; exit 70'
+    elif [[ "$fixture" == authorization ]]; then
+      run_bounded authorization-failure 5 2 FIRST \
+        bash -c 'echo "Error Domain=com.apple.dt.XCTest.XCTFuture Code=1000 \"Timed out while enabling automation mode.\""; exit 70'
+    else
+      run_bounded destination-failure 5 2 FIRST \
+        bash -c 'echo "xcodebuild: error: Timed out waiting for all destinations matching the provided destination specifier to become available"; exit 70'
+    fi
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "startup failure became a success"
+    ios_release_network_disconnect_cleanup
+    if [[ "$fixture" == destination || "$fixture" == authorization ]]; then
+      [[ ! -e "$cleanup_calls" && -s "$baseline_calls" ]] \
+        || fail "untouched stopped app started unnecessary cleanup UI"
+    else
+      [[ -s "$cleanup_calls" ]] \
+        || fail "$fixture skipped required cleanup UI"
+    fi
+  )
+done
+
 run_bounded success 5 2 FIRST \
   bash -c 'printf "FIRST\nordinary output\n"'
 grep -Fxq FIRST "$TEMP_ROOT/success.log" \
   || fail "bounded runner did not retain command output"
+
+set +e
+authorization_started=$SECONDS
+run_bounded authorization 10 8 FIRST \
+  bash -c 'echo "Error Domain=com.apple.dt.XCTest.XCTFuture Code=1000 \"Timed out while enabling automation mode.\""; sleep 30' \
+  >"$TEMP_ROOT/authorization-diagnostic.log" 2>&1
+authorization_status=$?
+set -e
+[[ "$authorization_status" -eq 125 ]] \
+  || fail "pre-method Apple authorization failure did not fail closed"
+((SECONDS - authorization_started < 5)) \
+  || fail "bounded runner waited after Apple had already denied automation"
+grep -Fq 'Apple UI Automation authorization timed out before any test method' \
+  "$TEMP_ROOT/authorization-diagnostic.log" \
+  || fail "pre-method Apple authorization failure was hidden by a generic launch error"
+grep -Fq 'Enter the automation PIN on the selected iPhone when prompted' \
+  "$TEMP_ROOT/authorization-diagnostic.log" \
+  || fail "Apple authorization diagnostic omitted the required on-device action"
+
+# The runner emits identical markers to stderr and its Documents file. Use the
+# captured stream after a successful test; file vending can hang independently.
+stream_log="$TEMP_ROOT/streamed-markers.log"
+stream_markers="$TEMP_ROOT/collected-markers.log"
+printf 'ordinary XCTest output\r\nNVPN_XCUITEST_RUN_ID=stream-run\r\nNVPN_XCUITEST_STARTED=1\r\nNVPN_XCUITEST_RUN_ID=stream-run\r\nNVPN_IOS_RELEASE_DISCONNECT_PASSED=1\r\n' >"$stream_log"
+(
+  xcrun() { fail "streamed marker collection contacted the phone"; }
+  ios_release_network_collect_markers "$stream_log" stream-run "$stream_markers"
+) || fail "could not collect exact-run streamed markers"
+[[ "$(wc -l <"$stream_markers" | tr -d '[:space:]')" -eq 4 ]] \
+  || fail "streamed marker collection lost or invented markers"
+grep -Fxq NVPN_IOS_RELEASE_DISCONNECT_PASSED=1 "$stream_markers" \
+  || fail "streamed markers retained carriage returns"
+
+for invalid_stream in stale mixed missing-start missing-context duplicate-start; do
+  case "$invalid_stream" in
+    stale) printf '%s\n' NVPN_XCUITEST_RUN_ID=stale NVPN_XCUITEST_STARTED=1 ;;
+    mixed) printf '%s\n' NVPN_XCUITEST_RUN_ID=stream-run NVPN_XCUITEST_STARTED=1 NVPN_XCUITEST_RUN_ID=stale NVPN_IOS_RELEASE_DISCONNECT_PASSED=1 ;;
+    missing-start) printf '%s\n' NVPN_XCUITEST_RUN_ID=stream-run NVPN_IOS_RELEASE_DISCONNECT_PASSED=1 ;;
+    missing-context) printf '%s\n' NVPN_XCUITEST_STARTED=1 ;;
+    duplicate-start) printf '%s\n' NVPN_XCUITEST_RUN_ID=stream-run NVPN_XCUITEST_STARTED=1 NVPN_XCUITEST_RUN_ID=stream-run NVPN_XCUITEST_STARTED=1 ;;
+  esac >"$stream_log"
+  if ios_release_network_collect_markers "$stream_log" stream-run "$stream_markers"; then
+    fail "accepted $invalid_stream streamed evidence"
+  fi
+  [[ ! -e "$stream_markers" ]] || fail "failed marker collection retained partial evidence"
+done
 
 device_marker="$TEMP_ROOT/device-marker.log"
 printf '%s\n' \
   'NVPN_XCUITEST_RUN_ID=device-marker' \
   'NVPN_XCUITEST_STARTED=1' >"$device_marker"
 (
-  ios_release_network_copy_runner_markers() {
-    cp "$device_marker" "$2"
-  }
+  xcrun() { fail "launch marker observation contacted the phone"; }
   ios_release_network_stop_forced_xctrunner() {
     fail "device marker success unexpectedly cleared the XCTest runner"
   }
   ios_release_network_run_bounded_xcode \
-    device-marker 5 1 NVPN_XCUITEST_STARTED=1 device-marker \
+    device-marker 5 2 NVPN_XCUITEST_STARTED=1 device-marker \
     "$TEMP_ROOT/device-marker.log.output" \
     "$TEMP_ROOT/device-marker-host-markers.tsv" \
     fixture-device "" \
-    bash -c 'printf "Running tests...\n"; sleep 2'
+    bash -c 'printf "Running tests...\n"; cat "$1"; sleep 2' _ "$device_marker"
 )
 grep -Fq 'Running tests...' "$TEMP_ROOT/device-marker.log.output" \
   || fail "device-marker fixture did not retain runner launch output"
-if grep -Fq NVPN_XCUITEST_STARTED=1 "$TEMP_ROOT/device-marker.log.output"; then
-  fail "device-marker fixture accidentally streamed the first marker"
+grep -Fxq NVPN_XCUITEST_STARTED=1 "$TEMP_ROOT/device-marker.log.output" \
+  || fail "device-marker fixture lost the first streamed marker"
+
+cat >"$TEMP_ROOT/bin/idevicesyslog" <<'PROCESS_FIXTURE'
+#!/usr/bin/env bash
+[[ "$*" == '-u fixture-device pidlist' ]] || exit 2
+[[ "${NVPN_TEST_RUNNER_INVENTORY_FAIL:-0}" != 1 ]] || exit 1
+printf '1 launchd\n2 SpringBoard\n4242 NostrVpnIosUITests-Runner\n4343 OtherUITests-Runner\n'
+PROCESS_FIXTURE
+chmod +x "$TEMP_ROOT/bin/idevicesyslog"
+[[ "$(ios_release_network_xctrunner_process_ids fixture-device)" == 4242 ]] \
+  || fail "runner process query was not scoped to the exact XCTest runner"
+if NVPN_TEST_RUNNER_INVENTORY_FAIL=1 ios_release_network_xctrunner_process_ids fixture-device; then
+  fail "failed USB process inventory unexpectedly passed"
 fi
-
-process_fixture='{
-  "result": {
-    "runningProcesses": [
-      {
-        "executable": "file:///private/NostrVpnIosUITests-Runner.app/NostrVpnIosUITests-Runner",
-        "processIdentifier": 4242
-      },
-      {
-        "executable": "file:///private/OtherUITests-Runner.app/OtherUITests-Runner",
-        "processIdentifier": 4343
-      }
-    ]
-  }
-}'
-xcrun_json_output_path() {
-  local previous="" argument output=""
-  for argument in "$@"; do
-    [[ "$previous" != --json-output ]] || output="$argument"
-    previous="$argument"
-  done
-  [[ -n "$output" && "$output" != /dev/stdout ]] || return 2
-  printf '%s\n' "$output"
-}
-process_json_path="$TEMP_ROOT/process-json-path"
-(
-  xcrun() {
-    local output
-    output="$(xcrun_json_output_path "$@")" || return
-    printf '%s\n' "$output" >"$process_json_path"
-    printf '%s\n' "$process_fixture" >"$output"
-  }
-  [[ "$(ios_release_network_xctrunner_process_ids fixture-device)" == 4242 ]]
-) || fail "runner process query was not scoped to the exact XCTest runner"
-queried_process_json="$(<"$process_json_path")"
-[[ ! -e "$queried_process_json" ]] \
-  || fail "runner process query retained its private JSON output"
-
-failed_process_json_path="$TEMP_ROOT/failed-process-json-path"
-set +e
-(
-  xcrun() {
-    local output
-    output="$(xcrun_json_output_path "$@")" || return
-    printf '%s\n' "$output" >"$failed_process_json_path"
-    return 1
-  }
-  ios_release_network_xctrunner_process_ids fixture-device
-)
-failed_process_status=$?
-set -e
-[[ "$failed_process_status" -ne 0 ]] \
-  || fail "failed device process query unexpectedly passed"
-failed_process_json="$(<"$failed_process_json_path")"
-[[ ! -e "$failed_process_json" ]] \
-  || fail "failed runner process query retained its private JSON output"
 
 scoped_cleanup_log="$TEMP_ROOT/scoped-cleanup.log"
 stale_device_marker="$TEMP_ROOT/stale-device-marker.log"
@@ -403,9 +498,6 @@ printf '%s\n' \
   'NVPN_XCUITEST_STARTED=1' >"$stale_device_marker"
 set +e
 (
-  ios_release_network_copy_runner_markers() {
-    cp "$stale_device_marker" "$2"
-  }
   ios_release_network_xctrunner_installed() {
     printf '%s\n' installation-probe >>"$scoped_cleanup_log"
     return 0
@@ -426,14 +518,15 @@ set +e
     "$TEMP_ROOT/device-no-marker.log" \
     "$TEMP_ROOT/device-no-marker-host-markers.tsv" \
     fixture-device "" \
-    bash -c 'sleep 10'
+    bash -c 'cat "$1"; sleep 10 & printf "%s\n" "$!" >"$2"; wait' _ \
+      "$stale_device_marker" "$TEMP_ROOT/device-no-marker-child.pid"
 )
 device_no_marker_status=$?
 set -e
 [[ "$device_no_marker_status" -eq 125 ]] \
   || fail "device no-marker timeout returned $device_no_marker_status instead of 125"
 grep -Fxq \
-  'xcrun devicectl device process terminate --device fixture-device --pid 4242 --quiet' \
+  'xcrun devicectl device process terminate --device fixture-device --pid 4242 --timeout 5 --quiet' \
   "$scoped_cleanup_log" \
   || fail "forced launch timeout did not terminate only the nVPN XCTest runner process"
 if grep -Fq 'device uninstall app' "$scoped_cleanup_log"; then
@@ -451,10 +544,12 @@ run_bounded missing-marker 5 2 NEVER \
   bash -c 'printf "ordinary failure\n"; exit 7'
 missing_status=$?
 run_bounded launch-timeout 5 1 FIRST \
-  bash -c 'sleep 10'
+  bash -c 'sleep 10 & printf "%s\n" "$!" >"$1"; wait' _ \
+    "$TEMP_ROOT/launch-timeout-child.pid"
 launch_status=$?
 run_bounded total-timeout 1 5 FIRST \
-  bash -c 'trap "" TERM; printf "FIRST\n"; (trap "" TERM; sleep 10) & wait'
+  bash -c 'trap "" TERM; printf "FIRST\n"; (trap "" TERM; exec sleep 10) & printf "%s\n" "$!" >"$1"; wait' _ \
+    "$TEMP_ROOT/total-timeout-child.pid"
 total_status=$?
 set -e
 [[ "$missing_status" -eq 125 ]] \
@@ -463,9 +558,15 @@ set -e
   || fail "launch timeout returned $launch_status instead of 125"
 [[ "$total_status" -eq 124 ]] \
   || fail "total timeout returned $total_status instead of 124"
-if ps -axo command= | grep -F 'sleep 10' | grep -v grep >/dev/null; then
-  fail "bounded runner left its fixture child running"
-fi
+for phase in device-no-marker launch-timeout total-timeout; do
+  [[ -s "$TEMP_ROOT/$phase-child.pid" ]] || fail "$phase did not record its child"
+  fixture_child_pid="$(<"$TEMP_ROOT/$phase-child.pid")"
+  [[ "$fixture_child_pid" =~ ^[1-9][0-9]*$ ]] || fail "$phase recorded an invalid child"
+  if ps -o stat= -p "$fixture_child_pid" 2>/dev/null \
+    | awk 'NF && $1 !~ /^Z/ { alive = 1 } END { exit !alive }'; then
+    fail "bounded runner left its $phase fixture child running"
+  fi
+done
 
 spec="$(
   python3 - <<'PY'
@@ -564,6 +665,49 @@ ios_release_network_abort_active_run
 [[ ! -e "$pending_log" && ! -e "$pending_result" ]] \
   || fail "interrupt cleanup retained unredacted diagnostics"
 
+cleanup_started=$SECONDS
+bash -c '
+  set -euo pipefail
+  ROOT="$1"
+  source "$ROOT/scripts/lib-mobile-ios-release-network.sh"
+  source "$ROOT/scripts/lib-mobile-wireguard-fixture.sh"
+  NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$2/exit-cleanup"
+  IOS_RELEASE_NETWORK_PREPARED=1
+  NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS=5
+  NVPN_IOS_XCTEST_TERM_GRACE_SECS=1
+  ios_release_network_disconnect_cleanup_inner() { return 0; }
+  trap "mobile_wg_fixture_begin_cleanup; ios_release_network_disconnect_cleanup" EXIT
+' _ "$ROOT" "$TEMP_ROOT"
+((SECONDS - cleanup_started < 3)) \
+  || fail "completed EXIT cleanup waited for its watchdog deadline"
+
+(
+  # Finish cleanup while the real watchdog is sleeping. Its shell must reap
+  # that child before returning, rather than leaving it to the outer supervisor.
+  IOS_RELEASE_NETWORK_PREPARED=1
+  NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$TEMP_ROOT/watchdog-reap"
+  NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS=5
+  watchdog_sleep_pid_file="$TEMP_ROOT/watchdog-sleep.pid"
+  sleep() {
+    if [[ "$1" == 0.1 ]]; then
+      command sleep 1 &
+      printf '%s\n' "$!" >"$watchdog_sleep_pid_file"
+      wait "$!"
+    else
+      command sleep "$@"
+    fi
+  }
+  ios_release_network_disconnect_cleanup_inner() {
+    while [[ ! -s "$watchdog_sleep_pid_file" ]]; do command sleep 0.01; done
+  }
+  ios_release_network_disconnect_cleanup
+  watchdog_sleep_pid="$(cat "$watchdog_sleep_pid_file")"
+  if kill -0 "$watchdog_sleep_pid" 2>/dev/null; then
+    kill "$watchdog_sleep_pid" 2>/dev/null || true
+    fail "completed iOS cleanup orphaned its watchdog sleep"
+  fi
+)
+
 timeout_signing="$(
   mktemp -d "$TEMP_ROOT/nvpn-ios-release-signing.XXXXXX"
 )"
@@ -610,6 +754,10 @@ do
   grep -Fq -- "$token" "$RUNNER" \
     || fail "runner contract lacks: $token"
 done
+grep -Fq 'NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS:-330' "$RUNNER" \
+  || fail "disconnect cleanup does not cover Apple's five-minute authorization lifetime"
+grep -Fq 'NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS:-$((cleanup_timeout + 30))' "$RUNNER" \
+  || fail "disconnect cleanup wrapper can expire before its scoped XCTest runner"
 
 disconnect="$TEMP_ROOT/disconnect-markers.log"
 printf '%s\n' \
@@ -646,33 +794,9 @@ if ios_release_network_validate_disconnect_markers \
 then
   fail "disconnect cleanup accepted conflicting Wi-Fi restoration markers"
 fi
-packet_processes="$TEMP_ROOT/packet-processes.json"
-(
-  xcrun() {
-    local previous="" output="" argument
-    for argument in "$@"; do
-      [[ "$previous" != --json-output ]] || output="$argument"
-      previous="$argument"
-    done
-    printf '%s\n' '{"result":{"runningProcesses":[]}}' >"$output"
-  }
-  ios_release_network_require_packet_tunnel_stopped \
-    fixture-device "$packet_processes" 1
-) || fail "disconnect cleanup rejected an absent PacketTunnel"
-(
-  xcrun() {
-    local previous="" output="" argument
-    for argument in "$@"; do
-      [[ "$previous" != --json-output ]] || output="$argument"
-      previous="$argument"
-    done
-    printf '%s\n' \
-      '{"result":{"runningProcesses":[{"executable":"file:///Nostr%20VPN.app/PlugIns/Nostr%20VPN%20Tunnel.appex/Nostr%20VPN%20Tunnel","processIdentifier":7}]}}' \
-      >"$output"
-  }
-  ! ios_release_network_require_packet_tunnel_stopped \
-    fixture-device "$packet_processes" 1 >/dev/null 2>&1
-) || fail "disconnect cleanup accepted a live PacketTunnel"
+python3 "$ROOT/scripts/test-ios-packet-tunnel-processes.py"   || fail "disconnect process inventory regression failed"
+python3 "$ROOT/scripts/test-mobile-ios-artifact-readback.py" \
+  || fail "installed artifact USB identity regression failed"
 if sed -n '/ios_release_network_test_command()/,/^}/p' "$RUNNER" \
   | grep -Fq -- '-quiet'
 then
@@ -689,3 +813,5 @@ if grep -Eq 'test_entitlements|"testBundleDebuggable": true' <<<"$diagnostics"; 
 fi
 
 echo "MOBILE_IOS_RELEASE_RUNNER_HARNESS_OK"
+
+bash "$ROOT/scripts/test-mobile-ios-unattended-harness.sh"

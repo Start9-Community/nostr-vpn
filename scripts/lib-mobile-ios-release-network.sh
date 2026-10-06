@@ -32,6 +32,38 @@ IOS_RELEASE_NETWORK_PENDING_SPEC_BASE64=""
 IOS_RELEASE_NETWORK_PENDING_LOG=""
 IOS_RELEASE_NETWORK_PENDING_XCRESULT=""
 IOS_RELEASE_NETWORK_EXACT_RUNNER_READY=0
+IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED=1
+
+ios_release_network_require_unlocked() {
+  local device="$1"
+  python3 - "$device" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+try:
+    with tempfile.TemporaryDirectory(prefix="nvpn-ios-lock-") as directory:
+        output = Path(directory) / "state.json"
+        subprocess.run(
+            ["xcrun", "devicectl", "--timeout", "5", "device", "info",
+             "lockState", "--device", sys.argv[1], "--json-output", str(output)],
+            capture_output=True, timeout=8, check=True,
+        )
+        locked = json.loads(output.read_text()).get("result", {}).get("passcodeRequired")
+        if locked is True:
+            raise SystemExit("iPhone requires a physical unlock; no UI automation session started.")
+        if locked is not False:
+            raise ValueError("missing lock state")
+except (OSError, ValueError, subprocess.SubprocessError):
+    raise SystemExit("iPhone lock state unavailable within the bounded preflight; no UI automation session started.") from None
+
+# Notification observations can be cancelled while the trusted XCTest runner
+# still works. The bounded runner startup, not a separate notification probe,
+# establishes whether the actual test connection is usable.
+PY
+}
 
 ios_release_network_cleanup_private_artifacts() {
   local cleanup_failed=0 signing_removed=1
@@ -86,7 +118,7 @@ certificate_inventory = subprocess.check_output(
     text=True,
 )
 sha256_by_sha1 = {
-    match.group(2).upper(): match.group(1).lower()
+    match.group(2).lower(): match.group(1).lower()
     for match in re.finditer(
         r"SHA-256 hash: ([0-9A-Fa-f]{64})\nSHA-1 hash: ([0-9A-Fa-f]{40})",
         certificate_inventory,
@@ -106,7 +138,7 @@ for line in sys.stdin:
         or label.startswith("iPhone Distribution:")
     ):
         continue
-    identity = identity.upper()
+    identity = identity.lower()
     if sha256_by_sha1.get(identity) != expected_sha256:
         continue
     matches.add((identity, team_match.group(1)))
@@ -130,25 +162,88 @@ ios_release_network_install_mode() {
   esac
 }
 
+ios_release_network_resolve_device() {
+  local device="$1"
+  # Keep name/alias selection compatible; exact hardware identifiers go
+  # directly through the authenticated USB service used by physical gates.
+  if ! [[ "$device" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}$ \
+    || "$device" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    device="$(resolve_physical_ios_udid "$device")" || return 1
+  fi
+  python3 - "$device" "${NVPN_IOS_EXPECTED_DEVICE_NAME:-}" <<'PY_DEVICE'
+import plistlib
+import subprocess
+import sys
+
+device, expected_name = sys.argv[1:]
+try:
+    result = subprocess.run(
+        ["ideviceinfo", "-u", device, "-x"],
+        capture_output=True, timeout=15, check=True,
+    )
+    values = plistlib.loads(result.stdout)
+    if not isinstance(values, dict):
+        raise ValueError("invalid device identity")
+    if values.get("UniqueDeviceID") != device or values.get("DeviceClass") not in {"iPhone", "iPad"}:
+        raise ValueError("unexpected physical device")
+    if expected_name and values.get("DeviceName") != expected_name:
+        raise ValueError("unexpected device name")
+except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+    raise SystemExit(f"iOS USB physical-device verification failed ({type(error).__name__})") from None
+print(device)
+PY_DEVICE
+}
+
 ios_release_network_installed_identity() {
   local bundle="$1" inventory="$2"
-  if ! xcrun devicectl device info apps \
-      --device "$IOS_RELEASE_NETWORK_DEVICE" --bundle-id "$bundle" \
-      --columns '*' --json-output "$inventory" --quiet >/dev/null
-  then
-    echo "iOS exact installed-artifact readback failed: $bundle" >&2
-    return 1
-  fi
-  jq -er --arg bundle "$bundle" '
-    select(.info.outcome == "success")
-    | .result
-    | [.apps[] | select(.bundleIdentifier == $bundle)]
-    | select(length == 1)
-    | .[0]
-    | [.bundleVersion, .version]
-    | select(all(.[]; type == "string" and length > 0))
-    | @tsv
-  ' "$inventory"
+  # Installation Proxy uses the already-paired USB connection. CoreDevice can
+  # spend minutes reacquiring a connection after each successful XCTest.
+  python3 - "$IOS_RELEASE_NETWORK_DEVICE" "$bundle" "$inventory" <<'PY_USB'
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+device, bundle, output = sys.argv[1:]
+try:
+    Path(output).unlink(missing_ok=True)
+    result = subprocess.run(
+        ["ios-deploy", "--id", device, "--list_bundle_id", "--json",
+         "--key=CFBundleIdentifier,CFBundleVersion,CFBundleShortVersionString,ApplicationType,ProfileValidated,SignerIdentity,NVPNBuildGitSha",
+         "--timeout", "10"],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict) or payload.get("Event") != "ListBundleId":
+        raise ValueError("unexpected inventory event")
+    app = payload["Apps"][bundle]
+    if not isinstance(app, dict) or app.get("CFBundleIdentifier") != bundle:
+        raise ValueError("unexpected bundle identity")
+    values = [app[key] for key in ("CFBundleVersion", "CFBundleShortVersionString")]
+    if not all(isinstance(value, str) and value and not any(c in value for c in "\t\r\n") for value in values):
+        raise ValueError("incomplete installed version")
+    receipt = {
+        "receiptSchema": 1,
+        "provider": "apple-installation-proxy-usb",
+        "selectedPhysicalDeviceIdentifierSha256": hashlib.sha256(device.encode()).hexdigest(),
+        "inventorySha256": hashlib.sha256(result.stdout.encode()).hexdigest(),
+        "bundleIdentifier": bundle,
+        "bundleVersion": values[0],
+        "version": values[1],
+        "applicationType": app.get("ApplicationType"),
+        "profileValidated": app.get("ProfileValidated"),
+        "appGitSha": app.get("NVPNBuildGitSha"),
+        "signerIdentitySha256": (
+            hashlib.sha256(app["SignerIdentity"].encode()).hexdigest()
+            if isinstance(app.get("SignerIdentity"), str) and app["SignerIdentity"] else None
+        ),
+    }
+    Path(output).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    raise SystemExit(f"iOS USB installed-artifact readback failed ({type(error).__name__})") from None
+print("\t".join(values))
+PY_USB
 }
 
 ios_release_network_require_installed_reuse() {
@@ -255,7 +350,7 @@ ios_release_network_prepare_reuse() {
     python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" \
       tree-sha "$derived/Build/Products"
   )" || return 1
-  device_udid="$(resolve_physical_ios_udid "$device")" || return 1
+  device_udid="$(ios_release_network_resolve_device "$device")" || return 1
   device_sha="$(printf %s "$device_udid" | shasum -a 256 | awk '{print $1}')"
   umask 077
   IOS_RELEASE_NETWORK_SIGNING_DIR="$(
@@ -627,7 +722,7 @@ PY
   if ! bool_is_true "$reuse_build"; then
     ios_release_network_xcode_command
     local -a build_command=("${IOS_RELEASE_NETWORK_XCODE_COMMAND[@]}")
-    build_command+=(build-for-testing)
+    build_command+=(clean build-for-testing)
     if ! "${build_command[@]}" >"$build_log" 2>&1; then
       tail -n 160 "$build_log" >&2
       rm -f "$build_log" || true
@@ -702,6 +797,24 @@ PY
     ios_release_network_prepare_abort
     return
   fi
+  # Retain verified preparation before XCTest can fail to reach the phone.
+  # Subsequent network cases still audit this same app after execution.
+  ios_release_network_audit_artifact preparation "$result_dir" || {
+    ios_release_network_prepare_abort
+    return
+  }
+  local runner runner_tree device_sha xctestrun_sha
+  runner="$IOS_RELEASE_NETWORK_DERIVED_DATA/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app"
+  runner_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner")" \
+    && device_sha="$(printf %s "$IOS_RELEASE_NETWORK_DEVICE" | shasum -a 256 | awk '{print $1}')" \
+    && xctestrun_sha="$(shasum -a 256 "$IOS_RELEASE_NETWORK_XCTESTRUN" | awk '{print $1}')" \
+    && ios_release_network_write_runner_install_receipt \
+      "$runner" "$result_dir/installed-runner-receipt.json" \
+      "$runner_tree" "$device_sha" "$xctestrun_sha" \
+      "$IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA" || {
+    ios_release_network_prepare_abort
+    return
+  }
   IOS_RELEASE_NETWORK_PREPARED=1
   if bool_is_true "$reuse_build"; then
     echo "iOS company-signed Release network gate reused its preserved build"
@@ -719,8 +832,8 @@ ios_release_network_xcode_command() {
     -scheme NostrVpnIos
     -configuration Release
     -derivedDataPath "$IOS_RELEASE_NETWORK_DERIVED_DATA"
-    -destination "$IOS_RELEASE_NETWORK_DESTINATION"
-    -destination-timeout 60
+    -destination generic/platform=iOS
+    ARCHS=arm64
     -collect-test-diagnostics never
     DEVELOPMENT_TEAM="$NVPN_IOS_TEAM_ID"
     NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY"
@@ -1076,7 +1189,7 @@ ios_release_network_test_command() {
     xcodebuild
     -xctestrun "$xctestrun"
     -destination "$IOS_RELEASE_NETWORK_DESTINATION"
-    -destination-timeout 60
+    -destination-timeout 180
     -collect-test-diagnostics never
     -parallel-testing-enabled NO
   )
@@ -1134,21 +1247,8 @@ ios_release_network_abort_active_run() {
   return "$cleanup_failed"
 }
 
-ios_release_network_copy_runner_markers() {
-  local device="$1" destination="$2"
-  rm -f "$destination"
-  xcrun devicectl device copy from \
-    --device "$device" \
-    --domain-type appDataContainer \
-    --domain-identifier "$IOS_BUNDLE_ID.UITests.xctrunner" \
-    --source "Documents/nvpn-ui-gate-markers.log" \
-    --destination "$destination" \
-    --quiet >/dev/null 2>&1
-}
-
 ios_release_network_first_marker_observed() {
-  local marker="$1" runner_run_id="$2" log="$3" device="$4"
-  local device_markers="$5" probe_device="${6:-1}"
+  local marker="$1" runner_run_id="$2" log="$3"
   local context="NVPN_XCUITEST_RUN_ID=$runner_run_id"
   if grep -Fq -- "$marker" "$log" 2>/dev/null \
     && { [[ -z "$runner_run_id" ]] \
@@ -1156,73 +1256,44 @@ ios_release_network_first_marker_observed() {
   then
     return 0
   fi
-  [[ "$probe_device" -eq 1 && -n "$device" && -n "$device_markers" ]] \
-    || return 1
-  ios_release_network_copy_runner_markers "$device" "$device_markers" \
-    || return 1
-  grep -Fq -- "$marker" "$device_markers" 2>/dev/null \
-    && { [[ -z "$runner_run_id" ]] \
-      || grep -Fq -- "$context" "$device_markers" 2>/dev/null; }
+  return 1
 }
 
 ios_release_network_xctrunner_installed() {
-  local device="$1" bundle="$IOS_BUNDLE_ID.UITests.xctrunner" apps
-  apps="$(
-    xcrun devicectl device info apps \
-      --device "$device" --bundle-id "$bundle" --hide-headers 2>/dev/null
-  )" || return 2
-  [[ -n "${apps//[[:space:]]/}" ]]
+  local device="$1" bundle="$IOS_BUNDLE_ID.UITests.xctrunner" inventory status=0
+  inventory="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-installed-runner.XXXXXX")" || return 2
+  IOS_RELEASE_NETWORK_DEVICE="$device" \
+    ios_release_network_installed_identity "$bundle" "$inventory" >/dev/null \
+    || status=2
+  rm -f "$inventory" || status=2
+  return "$status"
 }
 
 ios_release_network_xctrunner_process_ids() {
   local device="$1"
-  local process_json status=0
-  process_json="$(
-    mktemp "${TMPDIR:-/tmp}/nvpn-ios-runner-processes.XXXXXX"
-  )" || return 1
-  if xcrun devicectl device info processes \
-      --device "$device" --json-output "$process_json" --quiet \
-      >/dev/null \
-    && jq -r '
-      .result.runningProcesses[]?
-      | select(
-          .executable
-          | endswith(
-              "/NostrVpnIosUITests-Runner.app/NostrVpnIosUITests-Runner"
-            )
-        )
-      | .processIdentifier
-      | select(type == "number")
-    ' "$process_json"
-  then
-    status=0
-  else
-    status=$?
-  fi
-  rm -f "$process_json" || status=1
-  return "$status"
+  python3 - "$ROOT/scripts" "$device" <<'PY'
+import subprocess
+import sys
+sys.path.insert(0, sys.argv[1])
+from ios_packet_tunnel_processes import read_process_inventory
+try:
+    processes, _ = read_process_inventory(sys.argv[2], 5)
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    raise SystemExit(f"iOS runner inventory failed ({type(error).__name__})") from None
+matches = [pid for pid, name in processes.items() if name == "NostrVpnIosUITests-Runner"]
+if len(matches) > 1:
+    raise SystemExit("iOS runner inventory is ambiguous")
+for pid in matches:
+    print(pid)
+PY
 }
 
 ios_release_network_require_packet_tunnel_stopped() {
-  local device="$1" output="$2" timeout="${3:-15}" deadline
+  local device="$1" output="$2" timeout="${3:-90}"
   [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || return 2
-  deadline=$((SECONDS + timeout))
-  while ((SECONDS < deadline)); do
-    if xcrun devicectl device info processes \
-        --device "$device" --json-output "$output" --quiet >/dev/null \
-      && jq -e '
-        [.result.runningProcesses[]?
-          | select((.executable | gsub("%20"; " "))
-            | endswith("/Nostr VPN.app/PlugIns/Nostr VPN Tunnel.appex/Nostr VPN Tunnel"))]
-        | length == 0
-      ' "$output" >/dev/null
-    then
-      return 0
-    fi
-    sleep 0.25
-  done
-  echo "iOS PacketTunnel process remained after disconnect cleanup" >&2
-  return 1
+  # The OS trace service remains responsive while CoreDevice reconnects after
+  # XCTest. Query that authenticated process inventory within the same deadline.
+  python3 "$ROOT/scripts/ios_packet_tunnel_processes.py"     "$device" "$output" "$timeout"
 }
 
 ios_release_network_stop_forced_xctrunner() {
@@ -1247,7 +1318,7 @@ ios_release_network_stop_forced_xctrunner() {
   while IFS= read -r process_id; do
     [[ "$process_id" =~ ^[1-9][0-9]*$ ]] || continue
     xcrun devicectl device process terminate \
-      --device "$device" --pid "$process_id" --quiet >/dev/null 2>&1 \
+      --device "$device" --pid "$process_id" --timeout "$timeout" --quiet >/dev/null 2>&1 \
       || return 1
   done <<<"$process_ids"
   deadline=$((SECONDS + timeout))
@@ -1276,9 +1347,9 @@ ios_release_network_run_bounded_xcode() {
   local first_marker="$4" runner_run_id="$5" log="$6" host_markers="$7"
   local device="$8" process_summary="$9"
   shift 9
-  local pid pgid actual_pgid caller_pgid started device_markers=""
-  local next_device_probe=0 probe_device=0
+  local pid pgid actual_pgid caller_pgid started
   local reason="" status=0 monitor_was_enabled=0 marker_seen=0 forced_kill=0
+  local prior_cleanup_required="$IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED"
   [[ "$timeout_secs" =~ ^[1-9][0-9]*$ ]] || {
     echo "iOS $label timeout must be positive seconds" >&2
     return 2
@@ -1291,6 +1362,8 @@ ios_release_network_run_bounded_xcode() {
     echo "iOS $label has no xcodebuild command" >&2
     return 2
   }
+  [[ -z "$device" ]] || ios_release_network_require_unlocked "$device" || return 75
+  IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED=1
   local -a capture_command=(
     python3 "$ROOT/scripts/capture-mobile-ios-underlay-output.py"
     "$log" "$host_markers"
@@ -1334,23 +1407,19 @@ ios_release_network_run_bounded_xcode() {
   if [[ -n "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]]; then
     printf '%s\n' "$pgid" >"$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE"
   fi
-  if [[ -n "$first_marker" && -n "$device" ]]; then
-    device_markers="$(dirname "$log")/.nvpn-ios-launch-markers-$pid"
-    rm -f "$device_markers"
-  fi
   started=$SECONDS
   while ios_release_network_process_group_alive "$pgid"; do
-    probe_device=0
-    if ((SECONDS >= next_device_probe)); then
-      probe_device=1
-      next_device_probe=$((SECONDS + 1))
-    fi
     if [[ -n "$first_marker" && "$marker_seen" -eq 0 ]] \
       && ios_release_network_first_marker_observed \
-        "$first_marker" "$runner_run_id" "$log" "$device" \
-        "$device_markers" "$probe_device"
+        "$first_marker" "$runner_run_id" "$log"
     then
       marker_seen=1
+    fi
+    if [[ "$marker_seen" -eq 0 ]] \
+      && grep -Fq 'Timed out while enabling automation mode.' "$log" 2>/dev/null
+    then
+      reason="authorization"
+      break
     fi
     if [[ -n "$first_marker" \
       && $SECONDS -ge $((started + launch_timeout_secs)) ]] \
@@ -1383,17 +1452,27 @@ ios_release_network_run_bounded_xcode() {
   fi
   if [[ -n "$first_marker" && "$marker_seen" -eq 0 ]] \
     && ios_release_network_first_marker_observed \
-      "$first_marker" "$runner_run_id" "$log" "$device" "$device_markers"
+      "$first_marker" "$runner_run_id" "$log"
   then
     marker_seen=1
   fi
-  [[ -z "$device_markers" ]] || rm -f "$device_markers"
   if [[ "$forced_kill" -eq 1 && -n "$device" ]]; then
     ios_release_network_stop_forced_xctrunner "$device" || status=1
   fi
   IOS_RELEASE_NETWORK_ACTIVE_PGID=""
   [[ -z "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" ]] \
     || rm -f "$IOS_RELEASE_NETWORK_ACTIVE_PGID_FILE" || status=1
+  # Destination and automation-authorization failures precede every test
+  # method. Preserve an untouched baseline only for those explicit failures,
+  # never for a missing marker alone or after earlier UI work.
+  if [[ "$prior_cleanup_required" == 0 && "$marker_seen" == 0 \
+    && "$status" -ne 0 ]] \
+    && { grep -Fq 'xcodebuild: error: Timed out waiting for all destinations matching the provided destination specifier to become available' "$log" \
+      || grep -Fq 'Timed out while enabling automation mode.' "$log"; } \
+    && ! grep -Fq 'Test Case' "$log"
+  then
+    IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED=0
+  fi
   if [[ "$reason" == "total" ]]; then
     echo "iOS $label exceeded its ${timeout_secs}s total deadline" >&2
     return 124
@@ -1402,49 +1481,45 @@ ios_release_network_run_bounded_xcode() {
     echo "iOS $label emitted no first test-method marker within ${launch_timeout_secs}s" >&2
     return 125
   fi
-  if [[ -n "$first_marker" && "$marker_seen" -eq 0 ]]
+  if [[ "$reason" == "authorization" ]] \
+    || [[ -n "$first_marker" && "$marker_seen" -eq 0 ]]
   then
-    echo "iOS $label exited before emitting its first test-method marker" >&2
+    if grep -Fq 'Timed out while enabling automation mode.' "$log"; then
+      echo "iOS $label: Apple UI Automation authorization timed out before any test method. Enter the automation PIN on the selected iPhone when prompted; unlocking alone does not authorize UI testing. Retain the installed runner; do not repeat unchanged retries." >&2
+    else
+      echo "iOS $label exited before emitting its first test-method marker" >&2
+    fi
     return 125
   fi
   return "$status"
 }
 
-ios_release_network_require_unlocked() {
-  local device="$1"
-  local lock_state
-  lock_state="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-lock-state.XXXXXX.json")"
-  if ! xcrun devicectl device info lockState \
-    --device "$device" \
-    --json-output "$lock_state" \
-    --quiet >/dev/null
-  then
-    rm -f "$lock_state"
-    echo "iOS Release gate could not verify that the selected phone is unlocked" >&2
+ios_release_network_collect_markers() {
+  local log="$1" run_id="$2" destination="$3"
+  # PhysicalGateMarker emits each run ID/marker pair to stderr atomically as
+  # well as Documents. The captured stream is already bound to this XCTest;
+  # vending the same file after completion adds an unrelated device operation.
+  if ! awk -v context="NVPN_XCUITEST_RUN_ID=$run_id" '
+    { sub(/\r$/, "") }
+    /^NVPN_/ {
+      if ($0 ~ /^NVPN_XCUITEST_RUN_ID=/) {
+        if ($0 != context || awaiting_marker) { invalid=1; exit 1 }
+        awaiting_marker=1
+      } else {
+        if (!awaiting_marker || $0 !~ /^NVPN_[A-Z0-9_]+=/) {
+          invalid=1; exit 1
+        }
+        awaiting_marker=0
+        if ($0 == "NVPN_XCUITEST_STARTED=1") starts++
+      }
+      print
+    }
+    END { if (invalid || awaiting_marker || starts != 1) exit 1 }
+  ' "$log" >"$destination"; then
+    rm -f "$destination"
+    echo "iOS Release streamed markers are incomplete or belong to another run" >&2
     return 1
   fi
-  if ! python3 - "$lock_state" <<'PY'
-import json
-import sys
-
-result = json.load(open(sys.argv[1], encoding="utf-8")).get("result", {})
-if result.get("unlockedSinceBoot") is not True:
-    raise SystemExit(1)
-if result.get("passcodeRequired") is not False:
-    raise SystemExit(1)
-PY
-  then
-    rm -f "$lock_state"
-    echo "iOS Release gate requires the selected phone to be unlocked" >&2
-    return 1
-  fi
-  rm -f "$lock_state"
-}
-
-ios_release_network_copy_markers() {
-  local destination="$1"
-  ios_release_network_copy_runner_markers \
-    "$IOS_RELEASE_NETWORK_DEVICE" "$destination"
 }
 
 ios_release_network_validate_markers() {
@@ -1573,7 +1648,7 @@ run_ios_release_network_case() {
   local continuity_summary="$result_dir/$stem-continuity.json"
   local xcresult="$result_dir/$stem.xcresult"
   local xctest_timeout="${NVPN_IOS_XCTEST_CASE_TIMEOUT_SECS:-600}"
-  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-180}"
+  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-240}"
   mkdir -p "$result_dir"
   if bool_is_true "$underlay"; then
     IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64="$spec_base64"
@@ -1592,7 +1667,6 @@ run_ios_release_network_case() {
   fi
 
   local -a command=()
-  ios_release_network_require_unlocked "$IOS_RELEASE_NETWORK_DEVICE" || return 1
   ios_release_network_prepare_xctestrun \
     "$label" "$spec_base64" "$run_id" || return 1
   ios_release_network_test_command "$IOS_RELEASE_NETWORK_CASE_XCTESTRUN" \
@@ -1634,7 +1708,7 @@ run_ios_release_network_case() {
     return 1
   fi
 
-  ios_release_network_copy_markers "$markers" || return 1
+  ios_release_network_collect_markers "$log" "$run_id" "$markers" || return 1
   ios_release_network_validate_markers \
     "$markers" "$run_id" "$label" "$lifecycle" "$underlay" "$direct" \
     "$start_stop" || return 1
@@ -1742,8 +1816,12 @@ ios_release_network_disconnect_cleanup_inner() {
   local host_markers="$result_dir/$stem-host-markers.tsv"
   local markers="$result_dir/$stem-runner-markers.log"
   local xcresult="$result_dir/$stem.xcresult"
-  local cleanup_timeout="${NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS:-75}"
-  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-180}"
+  # LocalAuthentication can keep a device-side authorization operation alive
+  # for five minutes even after XCTest has reported its test failure. Give the
+  # scoped runner time to return so cleanup can verify Direct state instead of
+  # killing it while the system operation still owns the VPN preference.
+  local cleanup_timeout="${NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS:-330}"
+  local launch_timeout="${NVPN_IOS_XCTEST_LAUNCH_TIMEOUT_SECS:-240}"
   local -a command=()
   local command_status=0 cleanup_run_id="cleanup-$$-$RANDOM"
   mkdir -p "$result_dir"
@@ -1751,7 +1829,6 @@ ios_release_network_disconnect_cleanup_inner() {
   rm -f "$log" "$host_markers" "$markers" \
     "${xcresult%.xcresult}-xcresult-summary.json" \
     "${xcresult%.xcresult}-diagnostic-redaction.json"
-  ios_release_network_require_unlocked "$IOS_RELEASE_NETWORK_DEVICE" || return 1
   ios_release_network_delete_private_test_products || return 1
   ios_release_network_prepare_xctestrun \
     cleanup "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" "$cleanup_run_id" \
@@ -1789,7 +1866,7 @@ ios_release_network_disconnect_cleanup_inner() {
     echo "iOS Release cleanup failed; safe diagnostics retained at $result_dir" >&2
     return 1
   fi
-  ios_release_network_copy_markers "$markers" || return 1
+  ios_release_network_collect_markers "$log" "$cleanup_run_id" "$markers" || return 1
   ios_release_network_validate_disconnect_markers \
       "$markers" "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" \
     && ios_release_network_assert_retained_no_secrets \
@@ -1820,9 +1897,30 @@ ios_release_network_disconnect_cleanup() {
   local cleanup_failed=0
   ios_release_network_abort_active_run || cleanup_failed=1
   if [[ "$IOS_RELEASE_NETWORK_PREPARED" -eq 1 ]]; then
-    local timeout="${NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS:-90}"
+    local cleanup_timeout="${NVPN_IOS_XCTEST_CLEANUP_TIMEOUT_SECS:-330}"
+    local timeout="${NVPN_IOS_DISCONNECT_CLEANUP_TOTAL_TIMEOUT_SECS:-$((cleanup_timeout + 30))}"
     local grace="${NVPN_IOS_XCTEST_TERM_GRACE_SECS:-5}"
     local result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT/artifacts/mobile-ios}"
+    mkdir -p "$result_dir" || return 1
+    # An already stopped tunnel gives the initial counter baseline directly.
+    # Avoid opening an unnecessary Apple automation session and its teardown.
+    # An explicit pre-method startup failure also leaves it untouched. Verify
+    # it over USB again before deciding whether cleanup UI is needed.
+    if [[ ( "$preserve_prepared" == 1 \
+      || "$IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED" == 0 ) \
+      && "$cleanup_failed" == 0 \
+      && -z "$IOS_RELEASE_NETWORK_CLEANUP_SPEC_BASE64" ]] \
+      && ios_release_network_require_packet_tunnel_stopped \
+        "$IOS_RELEASE_NETWORK_DEVICE" \
+        "$result_dir/mobile-ios-release-baseline-packet-tunnel-processes.json" 5
+    then
+      echo "iOS untouched counter baseline verified: packet tunnel already stopped"
+      IOS_RELEASE_NETWORK_UI_CLEANUP_REQUIRED=0
+      if [[ "$preserve_prepared" != 1 ]]; then
+        ios_release_network_cleanup_private_artifacts || return 1
+      fi
+      return 0
+    fi
     local stem="mobile-ios-release-cleanup-$$-$RANDOM"
     local xcresult="$result_dir/$stem.xcresult"
     local marker pid watchdog status=0 monitor_was_enabled=0 actual_pgid
@@ -1864,10 +1962,12 @@ ios_release_network_disconnect_cleanup() {
     else
       status=$?
     fi
-    kill "$watchdog" >/dev/null 2>&1 || true
+    # EXIT cleanup can inherit ignored TERM and omit its child's EXIT trap.
+    # Signal completion before waiting, so the watchdog exits in either case.
+    # Let its short polling sleep finish too; killing the shell can orphan it.
+    rm -f "$marker"
     wait "$watchdog" >/dev/null 2>&1 || true
     ios_release_network_terminate_process_group "$pid" || cleanup_failed=1
-    rm -f "$marker"
     ios_release_network_stop_active_processes || cleanup_failed=1
     if [[ -s "${xcresult%.xcresult}-diagnostic-redaction.json" ]]; then
       ios_release_network_clear_pending_diagnostics

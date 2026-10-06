@@ -9,17 +9,25 @@ const sharedFiles = [
   'rust-toolchain.toml', 'scripts/sync-versions.mjs',
 ]
 const harnessOnlyPaths = new Set([
+  'docker-compose.exit-node-e2e.yml',
   'Dockerfile.mobile-wireguard-exit-e2e',
   'Dockerfile.mobile-wireguard-exit-e2e.dockerignore',
   'scripts/android-release-foreground-idle-receipt.mjs',
   'scripts/native-lab.py',
+  'scripts/docker-replace-nvpn-binary',
+  // Included only by ffi.rs's cfg(test) module; the parent remains a product input.
+  'crates/nostr-vpn-app-core/src/ffi/tests_network/exit_state.rs',
   'crates/nostr-vpn-app-core/src/mobile_tunnel/tests_core.rs',
+  'crates/nostr-vpn-app-core/src/mobile_tunnel/tests_runtime/websocket_join.rs',
   'crates/nostr-vpn-core/examples/desktop_manual_join_e2e_fixture.rs',
   'scripts/appstore-draft',
   'scripts/appstore_draft_metadata.py',
   'scripts/test_appstore_draft_metadata.py',
   'scripts/e2e-fips-roaming-docker.sh',
+  'scripts/e2e-exit-node-docker.sh',
+  'scripts/e2e-device-roster.sh',
   'scripts/e2e-umbrel-auth-join-docker.sh',
+  'scripts/e2e-umbrel-web-docker.sh',
   'scripts/e2e-web-startos-manual-join-docker.sh',
   'scripts/capture-mobile-ios-underlay-output.py',
   'scripts/desktop-manual-join-ax.swift',
@@ -28,21 +36,29 @@ const harnessOnlyPaths = new Set([
   'scripts/desktop-mobile-manual-join-windows-ui.ps1',
   'scripts/desktop-linux-underlay-change-e2e.sh',
   'scripts/desktop-linux-underlay-peer-e2e.sh',
+  'scripts/desktop-windows-underlay-change-e2e.ps1',
   'scripts/e2e-macos-release-network.sh',
   'scripts/e2e-macos-service-toggle.sh',
   'scripts/e2e-macos-service.sh',
   'scripts/e2e-windows-service-toggle.ps1',
+  'scripts/e2e-windows-manual-join-ui.ps1',
+  'scripts/run-windows-interactive-e2e.ps1',
   'scripts/ios_xctestrun.py',
+  'scripts/ios_packet_tunnel_processes.py',
   'scripts/ios-build',
   'scripts/ios_frozen_archive.py',
   'scripts/ios_frozen_gate.py',
   'scripts/ios-upload-receipt.mjs',
+  'scripts/ios-artifact-source.mjs',
   'scripts/lib-desktop-underlay-host-peer.sh',
   'scripts/lib-ubuntu-vm-imported-release.sh',
   'scripts/linux-vm-desktop-underlay-change-e2e.sh',
   'scripts/lib-mobile-android-release-gate.sh',
   'scripts/lib-mobile-android-underlay.sh',
   'scripts/lib-mobile-ios-release-network.sh',
+  // Reads existing binaries, signatures, provenance and installed identity;
+  // it neither builds nor modifies the app or its provisioning profiles.
+  'scripts/lib-mobile-ios-release-artifact.sh',
   'scripts/lib-mobile-release-artifact-reuse.sh',
   'scripts/lib-mobile-release-join-artifacts.sh',
   'scripts/lib-mobile-release-join-ui.sh',
@@ -50,6 +66,8 @@ const harnessOnlyPaths = new Set([
   'scripts/lib-macos-release-app-ownership.sh',
   'scripts/linux-release-mobile-join-remote.sh',
   'scripts/mobile-android-smoke.sh',
+  // Test orchestration only; each product's actual build scripts stay inputs.
+  'scripts/mobile-test-kit.sh',
   'scripts/mobile_release_artifact_receipt.py',
   'scripts/mobile-underlay-local-timestamp.py',
   'scripts/mobile-release-join-ui-query.py',
@@ -68,19 +86,28 @@ const harnessOnlyPaths = new Set([
   'scripts/macos_release_join_artifact.py',
   'scripts/prepare-macos-release-fips-peer.sh',
   'scripts/publish-release-refs.mjs',
+  'scripts/publish.sh',
+  'scripts/verify-cargo-registry-dependency.py',
   'scripts/release-network-evidence.py',
   'scripts/release-mutation-gate.mjs',
   'scripts/release-source-verification.mjs',
   'scripts/release_common.sh',
   'scripts/umbrel-release.mjs',
+  // StartOS packages are inspected separately; this does not build or package
+  // any of the five native platform artifacts governed by this classifier.
+  'scripts/startos-release.mjs',
   'web/control-panel/e2e/umbrel-web.spec.ts',
   'scripts/ubuntu-vm-release-mobile-join-e2e.sh',
   'scripts/validate-mobile-underlay-continuity.py',
   'scripts/verify-host-linux-peer-artifact.py',
+  'scripts/verify.sh',
+  'scripts/verify-paid-exit-seller-ui-receipts.py',
+  'scripts/verify-paid-exit-seller-ui-receipts.mjs',
   'scripts/windows-release-publication-proof.ps1',
   'scripts/windows-release-mobile-join-remote.ps1',
   'scripts/windows-vm-desktop-underlay-change-e2e.sh',
   'scripts/windows-vm-exit-dns-ui-e2e.sh',
+  'scripts/windows-vm-manual-join-e2e.sh',
   'scripts/windows-vm-release-mobile-join-e2e.sh',
   'scripts/windows-vm-service-toggle-e2e.sh',
 ])
@@ -89,11 +116,10 @@ const buildScripts = {
   ios: [
     /scripts\/ios-profiles$/,
     /scripts\/ios_profile_certificate\.py$/,
-    /lib-mobile-ios-release-artifact/,
   ],
   linux: [/build-host-linux-/, /build-nvpn-linux-musl$/, /host-linux-native-builder-/, /host_linux_package_content/, /lib-host-linux-/],
   macos: [/build-.*macos/, /scripts\/macos-build$/, /lib-macos-release-app-ownership/, /verify-macos-release-publication-artifacts/],
-  windows: [/windows-build\.ps1$/],
+  windows: [/windows-build\.ps1$/, /^scripts\/windows-vm-app-launch-smoke\.sh$/],
 }
 
 function git(root, args, label) {
@@ -127,7 +153,20 @@ function isProductInput(path, platform) {
       || /\/tests(?:_[^/]+)?\.rs$/.test(path)
     )
   ) return false
+  // Both includes are gated on target_os = "ios" (the flow module also has
+  // host tests). Their parent files stay shared inputs so a changed include
+  // boundary invalidates every platform that could start compiling them.
+  if (
+    path === 'crates/nostr-vpn-app-core/src/mobile_tunnel/ios_packet_flow.rs'
+    || path === 'crates/nostr-vpn-app-core/src/c_abi/ios_packet_flow.rs'
+  ) return platform === 'ios'
   if (path.startsWith('crates/nostr-vpn-cli/')) {
+    // This leaf contains only Windows production items and host-only tests.
+    // Its include parent remains shared, so changing that boundary invalidates
+    // every desktop artifact.
+    if (path === 'crates/nostr-vpn-cli/src/fips_private_mesh/tunnel_runtime_windows.rs') {
+      return platform === 'windows'
+    }
     if (path === 'crates/nostr-vpn-cli/src/fips_private_mesh/linux_cleanup.rs') {
       return platform === 'linux'
     }
@@ -146,6 +185,7 @@ function isProductInput(path, platform) {
     return platform === 'windows'
   }
   const root = path.split('/')[0]
+  if (path === 'tools/run-ios') return platform === 'ios'
   if (sharedFiles.includes(path) || sharedRoots.includes(root)) return true
   if (platforms.includes(root)) {
     return root === platform && !/\/(?:UI)?Tests?\//.test(`/${path}/`)
@@ -162,7 +202,7 @@ function isProductInput(path, platform) {
   return !(
     path.startsWith('.github/')
     || path.startsWith('docs/')
-    || ['AGENTS.md', 'CHANGELOG.md', 'README.md'].includes(path)
+    || ['AGENTS.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'README.md'].includes(path)
   )
 }
 

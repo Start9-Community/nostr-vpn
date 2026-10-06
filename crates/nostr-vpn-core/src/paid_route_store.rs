@@ -1,5 +1,8 @@
+#[cfg(target_os = "macos")]
+use crate::macos_file_io as fs;
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
+#[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
@@ -28,14 +31,19 @@ use crate::paid_routes::{
     PaidRouteSessionOpen, PaidRouteUsage, SignedPaidRouteOffer,
 };
 
-const CURRENT_VERSION: u8 = 4;
+const CURRENT_VERSION: u8 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRouteStore {
+    /// Latest locally authored social-memory rating and its publication state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub exit_ratings: BTreeMap<String, crate::paid_route_ratings::LocalExitRating>,
     #[serde(default = "default_version")]
     pub version: u8,
     #[serde(default)]
     pub wallet: PaidRouteWalletState,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buyer_mint_retries: BTreeMap<String, PaidRouteMintRetry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub offers: BTreeMap<String, PaidRouteOfferRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -49,21 +57,42 @@ pub struct PaidRouteStore {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub buyer_session_admissions: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buyer_session_renewals: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buyer_session_renewal_starts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub selected_buyer_session_id: String,
+    /// Local request to choose a different seller once, without publishing a rating.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub automatic_reselect_from: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buyer_session_open_attempts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub seller_session_tunnel_ips: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seller_free_probe_sources: BTreeMap<String, PaidRouteFreeProbeSource>,
 }
 
 impl Default for PaidRouteStore {
     fn default() -> Self {
         Self {
+            exit_ratings: BTreeMap::new(),
+            automatic_reselect_from: String::new(),
             version: CURRENT_VERSION,
             wallet: PaidRouteWalletState::default(),
+            buyer_mint_retries: BTreeMap::new(),
             offers: BTreeMap::new(),
             quotes: BTreeMap::new(),
             leases: BTreeMap::new(),
             channels: BTreeMap::new(),
             sessions: BTreeMap::new(),
             buyer_session_admissions: BTreeMap::new(),
+            buyer_session_renewals: BTreeMap::new(),
+            buyer_session_renewal_starts: BTreeMap::new(),
+            selected_buyer_session_id: String::new(),
+            buyer_session_open_attempts: BTreeMap::new(),
             seller_session_tunnel_ips: BTreeMap::new(),
+            seller_free_probe_sources: BTreeMap::new(),
         }
     }
 }
@@ -167,6 +196,13 @@ pub enum PaidRouteLifecycleStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRouteSessionRecord {
+    /// Fee-inclusive lower bound observed by the wallet when funding failed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub funding_required_balance_sat: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub funding_started_unix: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_successful_probe_unix: u64,
     pub session: PaidRouteSession,
     pub created_at_unix: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -191,6 +227,13 @@ pub struct UpdatePaidRouteSessionProbeResult {
     pub observed_country_code: Option<String>,
     pub observed_asn: Option<u32>,
     pub quality: Option<PaidRouteQualityMetrics>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaidRouteBuyerSessionLifecycleReconcile {
+    pub changed: bool,
+    pub selected_session_timed_out: bool,
+    pub selected_session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +263,11 @@ pub struct OpenPaidRouteBuyerSessionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRouteAutomaticOfferSelection {
+    /// Existing channel credit makes opening a new channel unnecessary.
+    #[serde(default)]
+    pub funded: bool,
+    #[serde(default)]
+    pub previously_verified: bool,
     pub offer_key: String,
     pub mint_url: String,
     pub channel_capacity_sat: u64,
@@ -384,6 +432,8 @@ pub struct ApplyPaidRouteSellerPaymentResult {
 pub struct ApplyPaidRouteSellerSessionOpenRequest {
     pub open: PaidRouteSessionOpen,
     pub authenticated_buyer_pubkey: String,
+    /// Observed address of a direct authenticated carrier, never a buyer claim or relay address.
+    pub authenticated_source_ip: Option<std::net::IpAddr>,
     pub seller_npub: String,
     pub config: PaidExitConfig,
     pub now_unix: u64,
@@ -535,12 +585,18 @@ pub struct PaidRouteSellerCollectionState {
 }
 
 mod automatic_selection;
+mod buyer_funding;
 mod buyer_payment;
+mod mint_retry;
+pub use mint_retry::PaidRouteMintRetry;
+mod buyer_renewal;
 mod buyer_session;
+mod free_probe;
 mod persistence;
 mod seller_payment;
 mod seller_state;
 mod session_open;
+pub use free_probe::PaidRouteFreeProbeSource;
 mod wallet_offers;
 
 pub use wallet_offers::normalize_paid_route_mint_url;

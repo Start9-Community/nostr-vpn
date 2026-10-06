@@ -11,11 +11,16 @@ PROXY_PORT="${NVPN_UMBREL_AUTH_JOIN_PROXY_PORT:-38380}"
 AUTH_PORT="${NVPN_UMBREL_AUTH_JOIN_AUTH_PORT:-38300}"
 RPC_PORT="${NVPN_UMBREL_AUTH_JOIN_RPC_PORT:-38301}"
 SCANNER_PORT="${NVPN_UMBREL_AUTH_JOIN_SCANNER_PORT:-38382}"
+NETWORK_OCTET="${NVPN_UMBREL_AUTH_JOIN_NETWORK_OCTET:-$((100 + ($$ % 100)))}"
+SUBNET="${NVPN_UMBREL_AUTH_JOIN_SUBNET:-10.253.${NETWORK_OCTET}.0/24}"
+REQUESTER_IP="${NVPN_UMBREL_AUTH_JOIN_REQUESTER_IP:-10.253.${NETWORK_OCTET}.10}"
+SCANNER_IP="${NVPN_UMBREL_AUTH_JOIN_SCANNER_IP:-10.253.${NETWORK_OCTET}.11}"
 JWT_SECRET=nvpn-umbrel-auth-join-e2e-jwt-secret
 AUTH_SECRET=nvpn-umbrel-auth-join-e2e-hmac-secret
 PASSWORD=nvpn-umbrel-auth-join-e2e-password
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-umbrel-auth-join-e2e.XXXXXX")"
 COMPOSE="$TMP/compose.yml"
+FIXTURE_RESULT="$TMP/fixture-result.json"
 STUB_PID=''
 
 cleanup() {
@@ -32,6 +37,12 @@ cleanup() {
   if [[ "$STUB_PID" =~ ^[0-9]+$ ]]; then
     kill "$STUB_PID" >/dev/null 2>&1 || true
     wait "$STUB_PID" 2>/dev/null || true
+  fi
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    docker run --rm --pull never --network none \
+      -v "$TMP:/cleanup" --entrypoint sh "$IMAGE" \
+      -c "find /cleanup ! -type s -exec chown -h $(id -u):$(id -g) {} +" \
+      >/dev/null 2>&1 || status=1
   fi
   rm -rf "$TMP"
   exit "$status"
@@ -54,6 +65,22 @@ case "${NVPN_UMBREL_AUTH_JOIN_SKIP_BUILD:-0}" in
 esac
 
 mkdir -p "$TMP/app-data/nostr-vpn" "$TMP/data" "$TMP/nvpn-data" "$TMP/scanner-data"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}" \
+  cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p nostr-vpn-core --example desktop_manual_join_e2e_fixture
+TARGET_DIR="$(
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}" \
+    cargo metadata --manifest-path "$ROOT_DIR/Cargo.toml" --no-deps --format-version 1 \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'
+)"
+FIXTURE="$TARGET_DIR/debug/examples/desktop_manual_join_e2e_fixture"
+"$FIXTURE" prepare \
+  --admin-data-dir "$TMP/scanner-data/config/nvpn" \
+  --joiner-data-dir "$TMP/nvpn-data/config/nvpn" \
+  --result "$FIXTURE_RESULT" \
+  --admin-endpoint "$SCANNER_IP:25111" \
+  --joiner-endpoint "$REQUESTER_IP:25110" \
+  --direction umbrel-auth-requester
 python3 - "$ROOT_DIR/umbrel/umbrel-app.yml" "$TMP/umbrel-app.yml" "$PROXY_PORT" <<'PY'
 import re
 import sys
@@ -76,6 +103,7 @@ import hmac
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 port, secret, password = int(sys.argv[1]), sys.argv[2].encode(), sys.argv[3]
 
@@ -112,7 +140,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+class LocalLoginServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # This local fixture needs no reverse-DNS lookup of the test host.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = "localhost", self.server_address[1]
+
+LocalLoginServer(("0.0.0.0", port), Handler).serve_forever()
 PY
 STUB_PID=$!
 
@@ -143,6 +177,9 @@ services:
       HOME: /data/home
       XDG_CONFIG_HOME: /data/config
     volumes: [$TMP/nvpn-data:/data]
+    networks:
+      default:
+        ipv4_address: $REQUESTER_IP
   web:
     image: $IMAGE
     depends_on: [daemon]
@@ -164,6 +201,9 @@ services:
       HOME: /scanner/home
       XDG_CONFIG_HOME: /scanner/config
     volumes: [$TMP/scanner-data:/scanner]
+    networks:
+      default:
+        ipv4_address: $SCANNER_IP
   scanner_web:
     image: $IMAGE
     depends_on: [scanner_daemon]
@@ -210,6 +250,12 @@ services:
       JWT_SECRET: $JWT_SECRET
     ports: [127.0.0.1:$PROXY_PORT:$PROXY_PORT]
     volumes: [$TMP/umbrel-app.yml:/extra/umbrel-app.yml:ro]
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: $SUBNET
 YAML
 
 docker compose -p "$PROJECT" -f "$COMPOSE" up -d
@@ -235,14 +281,23 @@ PROXY_BASE="http://127.0.0.1:$PROXY_PORT" \
 SCANNER_BASE="http://127.0.0.1:$SCANNER_PORT" \
 AUTH_PORT="$AUTH_PORT" TEST_PASSWORD="$PASSWORD" \
   pnpm --dir "$ROOT_DIR/web/control-panel" exec node --input-type=module - <<'JS'
-import { chromium } from '@playwright/test'
+import { chromium, expect } from '@playwright/test'
 
 const proxy = process.env.PROXY_BASE
 const scanner = process.env.SCANNER_BASE
 const authPort = process.env.AUTH_PORT
 const browser = await chromium.launch({ headless: true })
 let context
-let originalNetworkId = ''
+const enableVpn = async (page, base) => {
+  // QR approval requires an active carrier; paused clients do not run FIPS.
+  await page.getByRole('button', { name: 'Turn VPN on', exact: true }).click()
+  await expect.poll(async () => {
+    const response = await context.request.post(`${base}/api/tick`)
+    if (!response.ok()) return false
+    const state = await response.json()
+    return state.vpnEnabled && !String(state.vpnStatus).startsWith('Turning VPN')
+  }, { timeout: 20_000 }).toBe(true)
+}
 try {
   context = await browser.newContext()
   const page = await context.newPage()
@@ -273,13 +328,9 @@ try {
     return response.json()
   }
   let state = await tick()
-  const original = state.networks.find((network) => network.enabled)
-  if (!original) throw new Error('Umbrel fixture lacks an active network')
-  originalNetworkId = original.id
-  const disabled = await context.request.post(`${proxy}/api/set_network_enabled`, {
-    data: { networkId: originalNetworkId, enabled: false },
-  })
-  if (!disabled.ok()) throw new Error(`network disable returned ${disabled.status()}`)
+  if (state.networks.length !== 0) {
+    throw new Error('unjoined Umbrel fixture unexpectedly has a network')
+  }
 
   const deadline = Date.now() + 15_000
   do {
@@ -287,7 +338,7 @@ try {
     if (String(state.joinRequestQrCodeOrLink ?? '').startsWith('nvpn://join-request/')) break
     await new Promise((resolve) => setTimeout(resolve, 200))
   } while (Date.now() < deadline)
-  const request = String(state.joinRequestQrCodeOrLink ?? '')
+  let request = String(state.joinRequestQrCodeOrLink ?? '')
   const requesterNpub = String(state.ownNpub ?? '')
   if (!request.startsWith('nvpn://join-request/')) {
     throw new Error('unjoined Umbrel did not expose a signed join request')
@@ -299,7 +350,9 @@ try {
   await page.goto(`${proxy}/`, { waitUntil: 'domcontentloaded' })
   await page.getByRole('button', { name: 'Add Network' }).click()
   await page.getByRole('button', { name: 'Join Network', exact: true }).click()
+  await expect.poll(async () => (await tick()).vpnEnabled, { timeout: 20_000 }).toBe(true)
   await page.getByRole('img', { name: 'QR code' }).waitFor({ state: 'visible' })
+  request = String((await tick()).joinRequestQrCodeOrLink ?? '')
   const copy = page.getByRole('button', { name: 'Copy Join request' })
   await copy.waitFor({ state: 'visible' })
   if (await copy.isDisabled()) throw new Error('join request copy action is disabled')
@@ -316,6 +369,7 @@ try {
   const scannerPage = await context.newPage()
   await scannerPage.goto(`${scanner}/`, { waitUntil: 'domcontentloaded' })
   await scannerPage.getByRole('heading', { name: 'Nostr VPN' }).waitFor({ state: 'visible' })
+  await enableVpn(scannerPage, scanner)
   await scannerPage.getByRole('button', { name: 'Add Device' }).click()
   await scannerPage.getByPlaceholder('Paste a join request to continue').fill(request)
   const confirm = scannerPage.getByRole('dialog', { name: 'Add Device?' })
@@ -356,12 +410,6 @@ try {
   await page.getByRole('dialog', { name: 'Add Network' }).waitFor({ state: 'hidden', timeout: 15_000 })
   await page.getByRole('button', { name: 'Add Network' }).waitFor({ state: 'visible' })
 
-  const restored = await context.request.post(`${proxy}/api/set_network_enabled`, {
-    data: { networkId: originalNetworkId, enabled: true },
-  })
-  if (!restored.ok()) throw new Error(`network restore returned ${restored.status()}`)
-  originalNetworkId = ''
-
   const unauthenticated = await browser.newContext()
   try {
     const response = await unauthenticated.request.get(`${proxy}/api/health`, { maxRedirects: 0 })
@@ -372,11 +420,6 @@ try {
     await unauthenticated.close()
   }
 } finally {
-  if (context && originalNetworkId) {
-    await context.request.post(`${proxy}/api/set_network_enabled`, {
-      data: { networkId: originalNetworkId, enabled: true },
-    }).catch(() => {})
-  }
   if (context) await context.close()
   await browser.close()
 }

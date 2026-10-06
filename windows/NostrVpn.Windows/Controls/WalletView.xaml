@@ -11,7 +11,7 @@
         <StackPanel>
           <TextBlock Text="Wallet" FontSize="18" FontWeight="SemiBold" />
           <TextBlock Text="{Binding PaidRouteWalletBalanceText, Mode=OneWay}" FontSize="32" FontWeight="Bold" Visibility="{Binding PaidRouteWalletBalanceText, Converter={StaticResource NonEmptyStringToVisibility}}" />
-          <TextBlock Text="{Binding PaidRouteWalletFiatText}" Foreground="{StaticResource TextSecondary}" Visibility="{Binding PaidRouteWalletFiatText, Converter={StaticResource NonEmptyStringToVisibility}}" />
+          <TextBlock Text="{Binding PaidRouteWalletSecondaryBalanceText}" Foreground="{StaticResource TextSecondary}" Visibility="{Binding PaidRouteWalletSecondaryBalanceText, Converter={StaticResource NonEmptyStringToVisibility}}" />
           <TextBlock Text="{Binding PaidRouteWalletRateText}" Foreground="{StaticResource TextSecondary}" FontSize="12" Visibility="{Binding PaidRouteWalletRateText, Converter={StaticResource NonEmptyStringToVisibility}}" />
         </StackPanel>
       </DockPanel>

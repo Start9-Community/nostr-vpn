@@ -105,6 +105,7 @@ public sealed partial class AppViewModel
             }
             _lastSyncedManualPaidExitProvider = state.PaidRouteMarket.ManualProviderLink;
         }
+        SyncPaidRouteFilterDraft(state.PaidRouteMarket.Filter);
         if (_lastSyncedPaidExitPriceMsatPerGb != state.PaidExitSeller.PriceMsatPerGb)
         {
             if (_lastSyncedPaidExitPriceMsatPerGb is null
@@ -116,6 +117,23 @@ public sealed partial class AppViewModel
         }
         NetworkNameDraft = active?.Name ?? "";
         NetworkMeshIdDraft = DisplayNetworkId(active?.NetworkId ?? "");
+    }
+
+    private void SyncPaidRouteFilterDraft(NativePaidRouteMarketFilterState filter, bool force = false)
+    {
+        if (_paidRouteFilterEditing && !force)
+        {
+            return;
+        }
+        _paidRouteFilterCountryCode = filter.CountryCode.ToUpperInvariant();
+        _paidRouteFilterSort = filter.Sort is "price" or "newest" ? filter.Sort : "quality";
+        _paidRouteFilterRequireIpv4 = filter.RequireIpv4;
+        _paidRouteFilterRequireIpv6 = filter.RequireIpv6;
+        _paidRouteFilterEditing = false;
+        OnPropertyChanged(nameof(PaidRouteFilterCountryCode));
+        OnPropertyChanged(nameof(PaidRouteFilterSort));
+        OnPropertyChanged(nameof(PaidRouteFilterRequireIpv4));
+        OnPropertyChanged(nameof(PaidRouteFilterRequireIpv6));
     }
 
     private static string NormalizeNetworkIdInput(string value)
@@ -207,6 +225,8 @@ public sealed partial class AppViewModel
         OnPropertyChanged(nameof(DirectExitMarker));
         OnPropertyChanged(nameof(WireguardExitMarker));
         OnPropertyChanged(nameof(PaidAutomaticExitMarker));
+        OnPropertyChanged(nameof(AutomaticProviderSelected));
+        OnPropertyChanged(nameof(ActiveAutomaticPaidSessions));
         OnPropertyChanged(nameof(PaidManualExitMarker));
         OnPropertyChanged(nameof(WireguardExitSubtitle));
         OnPropertyChanged(nameof(PaidRouteMarketVisible));
@@ -216,9 +236,11 @@ public sealed partial class AppViewModel
         OnPropertyChanged(nameof(PaidRouteWalletInvoiceExpiryText));
         OnPropertyChanged(nameof(HasPaidRouteWalletMint));
         OnPropertyChanged(nameof(WalletNavigationText));
-        OnPropertyChanged(nameof(PaidRouteWalletFiatText));
+        OnPropertyChanged(nameof(PaidRouteWalletSecondaryBalanceText));
         OnPropertyChanged(nameof(PaidRouteWalletRateText));
         OnPropertyChanged(nameof(PaidRouteMarketStatusText));
+        OnPropertyChanged(nameof(PaidRouteVisibleOffers));
+        OnPropertyChanged(nameof(PaidRouteHiddenOffersText));
         OnPropertyChanged(nameof(PaidExitSellerStatusText));
         OnPropertyChanged(nameof(PaidExitSellerSummary));
         OnPropertyChanged(nameof(PaidExitSellerTrialText));

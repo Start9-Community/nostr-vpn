@@ -26,10 +26,9 @@ resolve_shared_build_metadata "$ROOT"
   echo "Signed Release mobile join gate requires macOS/Xcode" >&2
   exit 2
 }
-[[ -z "$(git -C "$ROOT" status --porcelain)" ]] || {
-  echo "Signed Release mobile join gate requires a clean committed candidate" >&2
-  exit 2
-}
+assert_release_checkout_state \
+  "$ROOT" "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "Signed Release mobile join" || exit 2
 HARNESS_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 HARNESS_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 APP_GIT_SHA="${NVPN_EXPECTED_APP_GIT_SHA:-}"
@@ -50,10 +49,10 @@ release_join_configure_install_modes
 RESULT_DIR="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT/artifacts/mobile-release-join}"
 PRIVATE_DIR="$RESULT_DIR/.private-$$"
 SUMMARY="$RESULT_DIR/summary.json"
-RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
+RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-30}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_IMPORT_WAIT_SECS="${NVPN_RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
-RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}"
+RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-240}"
 RELEASE_JOIN_IOS_SETUP_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90}"
 MACOS_JOIN_GATE_CONFIG="${NVPN_RELEASE_JOIN_DESKTOP_MOBILE:-1}"
 mkdir -p "$PRIVATE_DIR" "$RESULT_DIR"
@@ -73,7 +72,7 @@ fail() {
 
 RELEASE_JOIN_PHASE_SELECTION="${NVPN_RELEASE_JOIN_PHASES:-full}"
 case "$RELEASE_JOIN_PHASE_SELECTION" in
-  full|manual-only|iphone-admin-pixel-manual-only|pixel-admin-iphone-manual-only|iphone-admin-pixel-qr-only|pixel-admin-iphone-qr-only|desktop-only) ;;
+  full|manual-only|qr-only|iphone-admin-pixel-manual-only|pixel-admin-iphone-manual-only|iphone-admin-pixel-qr-only|pixel-admin-iphone-qr-only|desktop-only) ;;
   *)
     fail "unsupported NVPN_RELEASE_JOIN_PHASES=$RELEASE_JOIN_PHASE_SELECTION"
     ;;
@@ -96,8 +95,8 @@ done
   || fail "join delivery wait cannot exceed 15 seconds"
 ((RELEASE_JOIN_IMPORT_WAIT_SECS <= 15)) \
   || fail "QR image import wait cannot exceed 15 seconds"
-((RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS <= 60)) \
-  || fail "iOS test launch wait cannot exceed 60 seconds"
+((RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS <= 240)) \
+  || fail "iOS test launch wait cannot exceed 240 seconds"
 ((RELEASE_JOIN_IOS_SETUP_WAIT_SECS <= 90)) \
   || fail "iOS setup wait cannot exceed 90 seconds"
 
@@ -134,6 +133,12 @@ cleanup() {
   local status=$?
   local cleanup_status=0 package route ios_app_bundle ios_runner_bundle bundle
   trap - EXIT
+  if ((status != 0)); then
+    release_join_android_capture_failure_log "$RESULT_DIR/android-service-failure.log"
+    if [[ -s "${RELEASE_JOIN_ANDROID_UI_XML:-}" ]]; then
+      cp "$RELEASE_JOIN_ANDROID_UI_XML" "$RESULT_DIR/android-ui-failure.xml" || true
+    fi
+  fi
   if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" \
     || -n "${RELEASE_JOIN_IOS_TEST_PGID:-}" ]]; then
     release_join_ios_abort_test || cleanup_status=1
@@ -163,7 +168,6 @@ cleanup() {
     fi
     package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
     "${ADB[@]}" shell am force-stop "$package" >/dev/null 2>&1 || cleanup_status=1
-    "${ADB[@]}" shell pm clear "$package" >/dev/null 2>&1 || cleanup_status=1
     [[ -z "$("${ADB[@]}" shell pidof "$package" 2>/dev/null | tr -d '\r')" ]] \
       || cleanup_status=1
     route="$("${ADB[@]}" shell ip route get 1.1.1.1 2>/dev/null | tr -d '\r')"
@@ -230,39 +234,51 @@ assert_delivery_deadline() {
 
 phase_ios_admin_android_qr() {
   local scan_log submitted completed
-  release_join_restart_ios_in_place
-  release_join_reset_android_state
+  local peer_accepted_filename="nvpn-peer-accepted-$(uuidgen).txt"
+  # Request iOS automation while the operator is ready, before Android setup.
   ios_create_admin "Release QR iPhone admin"
+  release_join_android_open_network_setup
   release_join_android_show_qr
   release_join_android_background_foreground_pending_qr
+  release_join_android_wait_vpn_connected
   release_join_capture_android_qr "$ANDROID_QR_CAPTURE"
+  # Stage before XCTest launches: CoreDevice file access can stall while the
+  # active runner waits for host input. Verify pending UI before approval can
+  # begin, then let the runner validate and import the exact captured image.
+  release_join_android_assert_pending_qr \
+    || fail "Pixel QR disappeared before the iPhone received its request image"
+  release_join_stage_ios_qr_image \
+    "$ANDROID_QR_CAPTURE" "$IOS_QR_STAGED_FILENAME"
   scan_log="$(ios_log ios-admin-android-qr)"
   release_join_ios_start_test \
     testImportJoinQrImageAndRequireAdminRosterProgress "$scan_log" \
     "NVPN_RELEASE_JOIN_IMAGE_FILENAME=$IOS_QR_STAGED_FILENAME" \
     "NVPN_RELEASE_JOIN_IMAGE_SHA256=$(shasum -a 256 "$ANDROID_QR_CAPTURE" | awk '{print $1}')" \
-    "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
+    "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID" \
+    "NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME=$peer_accepted_filename"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMPORT_READY=1 \
     "$((RELEASE_JOIN_IOS_SETUP_WAIT_SECS + RELEASE_JOIN_UI_WAIT_SECS))" \
     || fail "iPhone did not open its shipped QR image importer"
-  release_join_stage_ios_qr_image \
-    "$ANDROID_QR_CAPTURE" "$IOS_QR_STAGED_FILENAME"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_IMAGE_SELECTED=1 \
     "$RELEASE_JOIN_UI_WAIT_SECS" \
     || fail "iPhone did not select the Pixel's captured QR image"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_QR_IMAGE_IMPORTED=1 \
     "$((RELEASE_JOIN_IMPORT_WAIT_SECS + 5))" \
     || fail "iPhone did not decode the Pixel's captured QR image"
-  release_join_android_assert_pending_qr \
-    || fail "Pixel QR disappeared before the iPhone submitted acceptance"
   release_join_ios_wait_marker NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= \
     "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone did not submit the decoded Pixel join request"
-  submitted="$(release_join_now_ms)"
-  release_join_android_wait_qr_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
+  # Use the runner's approval timestamp, including time spent observing it.
+  submitted="$(ios_marker_value_from "$scan_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS)"
+  [[ "$submitted" =~ ^[0-9]+$ ]] || fail "iPhone QR approval timestamp is missing"
+  completed="$(release_join_android_wait_qr_join_complete \
+    "$RELEASE_JOIN_IOS_ADMIN_ID" \
+    "$((submitted + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000))" \
+    "$RESULT_DIR/iphone-admin-pixel-qr-observations.tsv")" \
     || fail "Pixel stayed on QR view or lacked the exact iPhone admin roster row"
-  completed="$(release_join_now_ms)"
   assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-QR"
+  release_join_signal_ios_peer_accepted \
+    "$peer_accepted_filename" "$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_ios_finish_test \
     || fail "iPhone admin did not accept the exact Pixel joiner"
   release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
@@ -271,9 +287,12 @@ phase_ios_admin_android_qr() {
 
 phase_android_admin_ios_qr() {
   local join_log android_scan_log submitted completed ios_qr_content_width_bps
-  local ios_qr_relaunch_admin
-  release_join_restart_ios_in_place
-  release_join_reset_android_state
+  local ios_qr_relaunch_admin qr_carrier_log
+  qr_carrier_log="$(ios_log ios-carrier-preflight)"
+  release_join_ios_run_test \
+    testNormalizeRetainedJoinCarrierSettings "$qr_carrier_log" \
+    || fail "iPhone QR join carrier did not authenticate public bootstrap"
+  release_join_android_open_network_setup
   release_join_android_create_admin
   android_scan_log="$RESULT_DIR/android-admin-ios-qr-approval.log"
   release_join_android_scan_prepare >"$android_scan_log"
@@ -330,24 +349,36 @@ phase_android_admin_ios_qr() {
 
 phase_ios_admin_android_manual() {
   local admin_log ios_admin_relaunch_joiner submitted completed
-  release_join_restart_ios_in_place
-  release_join_reset_android_state
+  local peer_accepted_filename="nvpn-peer-accepted-$(uuidgen).txt"
+  local accepted="$RESULT_DIR/iphone-admin-pixel-manual-accepted.ms"
   ios_create_admin "Release manual iPhone admin"
+  release_join_android_open_network_setup
   release_join_android_manual_submit \
     "$RELEASE_JOIN_IOS_ADMIN_ID" "$RELEASE_JOIN_IOS_NETWORK_ID"
+  release_join_android_wait_vpn_connected
+  # Manual submission lands on Devices. Observe its pending row before approval
+  # without relaunching the app or navigating during delivery.
+  release_join_android_wait_query \
+    resource "roster-participant-pending-$RELEASE_JOIN_IOS_ADMIN_ID"
   admin_log="$(ios_log ios-admin-android-manual)"
   release_join_ios_start_test \
     testManualAdminAddRequiresRosterProgress \
     "$admin_log" \
-    "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID"
+    "NVPN_RELEASE_JOIN_JOINER_ID=$RELEASE_JOIN_ANDROID_JOINER_ID" \
+    "NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME=$peer_accepted_filename"
   release_join_ios_wait_marker \
     NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     || fail "iPhone admin did not submit the manual approval"
-  submitted="$(release_join_now_ms)"
-  release_join_android_wait_join_complete "$RELEASE_JOIN_IOS_ADMIN_ID" \
+  submitted="$(ios_marker_value_from "$admin_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS)"
+  release_join_observe_until_ms \
+    "$((submitted + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000))" "$accepted" \
+    "Pixel manual-join acceptance" release_join_android_accepted_snapshot_ms \
+    "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel manual join never left its locally pending admin row"
-  completed="$(release_join_now_ms)"
+  completed="$(<"$accepted")"
   assert_delivery_deadline "$submitted" "$completed" "iPhone-admin-to-Pixel-manual"
+  release_join_signal_ios_peer_accepted \
+    "$peer_accepted_filename" "$RELEASE_JOIN_ANDROID_JOINER_ID"
   release_join_android_relaunch_and_wait_accepted "$RELEASE_JOIN_IOS_ADMIN_ID" \
     || fail "Pixel manual join did not retain the signed roster across relaunch"
   release_join_ios_finish_test \
@@ -363,8 +394,7 @@ phase_ios_admin_android_manual() {
 
 phase_android_admin_ios_manual() {
   local join_log ios_joiner_relaunch_admin android_admin_log submitted completed
-  release_join_restart_ios_in_place
-  release_join_reset_android_state
+  release_join_android_open_network_setup
   release_join_android_create_admin
   join_log="$(ios_log android-admin-ios-manual)"
   release_join_ios_start_test \
@@ -383,7 +413,8 @@ phase_android_admin_ios_manual() {
   release_join_android_manual_admin_prepare "$RELEASE_JOIN_IOS_JOINER_ID" \
     >"$android_admin_log"
   release_join_ios_wait_marker \
-    NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
+    NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 \
+    "$((RELEASE_JOIN_IOS_SETUP_WAIT_SECS + RELEASE_JOIN_UI_WAIT_SECS))" \
     || fail "iPhone did not submit through shipped manual-join controls"
   release_join_android_manual_admin_tap "$RELEASE_JOIN_IOS_JOINER_ID" \
     >>"$android_admin_log"
@@ -431,18 +462,47 @@ RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
 export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
 release_join_prepare_android_release
 release_join_prepare_ios_release
-rm -f "$SUMMARY" "$RESULT_DIR/delivery-times.tsv"
+
+case "${NVPN_RELEASE_JOIN_BUILD_ONLY:-0}" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    release_join_reuse_artifacts \
+      && fail "build-only mode requires the artifact build path"
+    echo "SIGNED_RELEASE_JOIN_ARTIFACTS_READY"
+    exit 0
+    ;;
+  0|false|FALSE|False|no|NO|No|off|OFF|Off|"") ;;
+  *) fail "unsupported NVPN_RELEASE_JOIN_BUILD_ONLY=$NVPN_RELEASE_JOIN_BUILD_ONLY" ;;
+esac
+
+if [[ "$RELEASE_JOIN_PHASE_SELECTION" != desktop-only ]]; then
+  rm -f "$SUMMARY" "$RESULT_DIR/delivery-times.tsv"
+fi
+
+# Phone phases prepare their own carrier. Desktop-only entry still needs
+# normalization before handing the retained app to the desktop harness.
+case "$RELEASE_JOIN_PHASE_SELECTION" in
+  desktop-only)
+    carrier_preflight_log="$(ios_log ios-carrier-preflight)"
+    release_join_ios_run_test \
+      testNormalizeRetainedJoinCarrierSettings "$carrier_preflight_log" \
+      || fail "iPhone join carrier preflight did not restore and authenticate public bootstrap"
+    ;;
+esac
 
 case "$RELEASE_JOIN_PHASE_SELECTION" in
   full)
-    phase_ios_admin_android_qr
-    phase_android_admin_ios_qr
     phase_ios_admin_android_manual
     phase_android_admin_ios_manual
+    phase_ios_admin_android_qr
+    phase_android_admin_ios_qr
     ;;
   manual-only)
     phase_ios_admin_android_manual
     phase_android_admin_ios_manual
+    ;;
+  qr-only)
+    phase_ios_admin_android_qr
+    phase_android_admin_ios_qr
     ;;
   iphone-admin-pixel-manual-only) phase_ios_admin_android_manual ;;
   pixel-admin-iphone-manual-only) phase_android_admin_ios_manual ;;

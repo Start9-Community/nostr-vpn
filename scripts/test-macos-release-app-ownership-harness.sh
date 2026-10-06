@@ -8,6 +8,7 @@ HELPER="$ROOT/scripts/lib-macos-release-app-ownership.sh"
 trap 'echo "macOS app ownership harness failed at line $LINENO" >&2' ERR
 
 bash -n "$HOST" "$REMOTE" "$HELPER"
+bash "$ROOT/scripts/test-macos-release-approval-wait-harness.sh"
 python3 - "$HOST" "$REMOTE" "$HELPER" <<'PY'
 import pathlib
 import sys
@@ -34,13 +35,22 @@ if "remote cleanup" not in cleanup or "remote_app_ownership_armed" not in cleanu
 
 for required in (
     'NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS:-all',
-    'all|pixel)',
+    'all|pixel|macos-admin-iphone)',
     'if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then',
     "release_join_validate_reused_android_only",
     '"selectedDirections": selected',
 ):
     if required not in host:
         raise SystemExit(f"macOS/mobile direction selector lacks {required}")
+if '${android_install_validation[@]+"${android_install_validation[@]}"}' not in host:
+    raise SystemExit("macOS/Pixel validator is not safe with an empty optional-argument array")
+for required in (
+    'local quarantine="${TEST_CONFIG_DIR}.quarantine.',
+    'mv "$TEST_CONFIG_DIR" "$quarantine"',
+    "could not quarantine privileged macOS Release join test profile",
+):
+    if required not in remote:
+        raise SystemExit(f"privileged profile cleanup lacks recoverable quarantine: {required}")
 
 directions = (
     ("macOS admin -> physical Android joiner.", "macos-admin-pixel-joiner"),
@@ -192,6 +202,8 @@ run_cleanup_case() {
   remote_pid=""
   remote_app_ownership_armed=1
   remote_harness_install_attempted=0
+  RESULT_DIR="$tmp"
+  release_join_android_capture_failure_log() { :; }
   PRIVATE_DIR="$tmp/private-$primary_status-$remote_status"
   mkdir -p "$PRIVATE_DIR"
   remote() {

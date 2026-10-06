@@ -64,6 +64,12 @@ pub fn load_paid_route_store(path: &Path) -> Result<PaidRouteStore> {
         }
         // v4 adds immutable accepted terms to new channels. Existing channels
         // are retained for accounting/refunds but fail closed without a snapshot.
+        // v5 records the exact selected buyer session and its open-attempt time.
+        // Serde defaults preserve existing sessions; the daemon selects the newest
+        // eligible legacy session once before sending another open request.
+        // v7 persists pending channel replacements so retries reuse wallet funding.
+        // v6 preserves successful-provider history independently of live health
+        // and persists rolling free-probe grants across daemon restarts.
         object.insert("version".to_string(), CURRENT_VERSION.into());
     }
     let mut store = match serde_json::from_value::<PaidRouteStore>(value) {
@@ -107,6 +113,14 @@ fn repair_paid_route_lock(file: &File, path: &Path, owner: Option<(u32, u32)>) -
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect paid route lock {}", path.display()))?;
+    // A privileged daemon must not change ownership or permissions through a
+    // hard link to another file. Inspect the open handle before any mutation.
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(anyhow!(
+            "paid route lock must be a regular file with a single link: {}",
+            path.display()
+        ));
+    }
     if let Some((uid, gid)) = owner
         && (metadata.uid(), metadata.gid()) != (uid, gid)
     {
@@ -435,8 +449,16 @@ pub(super) fn paid_route_session_has_payment_material(
 ) -> bool {
     match session.payment.mode {
         PaidRoutePaymentMode::CashuSpilman => {
-            session.payment.cashu_spilman_payment.is_some()
-                || channel.payment.cashu_spilman_payment.is_some()
+            session
+                .payment
+                .cashu_spilman_payment
+                .as_ref()
+                .is_some_and(CashuSpilmanPayment::has_funding)
+                || channel
+                    .payment
+                    .cashu_spilman_payment
+                    .as_ref()
+                    .is_some_and(CashuSpilmanPayment::has_funding)
         }
         PaidRoutePaymentMode::CashuTokenLease => {
             session.payment.cashu_token_lease.is_some()
@@ -520,13 +542,25 @@ pub(super) fn ensure_buyer_channel_accepts_payment(
 }
 
 pub(super) fn seller_admission_preferred(
+    store: &PaidRouteStore,
     candidate: &PaidRouteSellerAdmission,
     existing: &PaidRouteSellerAdmission,
 ) -> bool {
     match (candidate.allow_routing, existing.allow_routing) {
         (true, false) => true,
         (false, true) => false,
-        _ => candidate.updated_at_unix > existing.updated_at_unix,
+        _ => {
+            let order = |admission: &PaidRouteSellerAdmission| {
+                (
+                    store
+                        .channels
+                        .get(&admission.channel_id)
+                        .map_or(0, |channel| channel.created_at_unix),
+                    admission.updated_at_unix,
+                )
+            };
+            order(candidate) > order(existing)
+        }
     }
 }
 
@@ -581,8 +615,56 @@ pub(super) fn validate_seller_open_payment(
     if open.receiver_pubkey_hex.trim().is_empty() {
         return Err(anyhow!("paid route channel receiver pubkey is empty"));
     }
-    normalize_paid_route_receiver_pubkey(open.receiver_pubkey_hex.trim())
+    let receiver_pubkey = normalize_paid_route_receiver_pubkey(open.receiver_pubkey_hex.trim())
         .map_err(|error| anyhow!("invalid paid route channel receiver pubkey: {error}"))?;
+
+    #[derive(Deserialize)]
+    struct FundingTerms {
+        mint: String,
+        capacity: u64,
+        expiry_timestamp: u64,
+        receiver_pubkey: String,
+    }
+
+    let funding = FundingTerms::deserialize(
+        open.payment
+            .params
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing Cashu Spilman funding parameters"))?,
+    )
+    .context("invalid Cashu Spilman funding terms")?;
+    let funding_mint = normalize_paid_route_mint_url(&funding.mint)
+        .context("invalid Cashu Spilman funding mint")?;
+    if funding_mint != normalize_paid_route_mint_url(mint_url)? {
+        return Err(anyhow!(
+            "paid route mint does not match Cashu Spilman funding"
+        ));
+    }
+    if funding.capacity != open.capacity {
+        return Err(anyhow!(
+            "paid route capacity does not match Cashu Spilman funding"
+        ));
+    }
+    if open.expires_unix == 0 || open.expires_unix > funding.expiry_timestamp {
+        return Err(anyhow!(
+            "paid route expiry must not outlast Cashu Spilman funding"
+        ));
+    }
+    let funding_receiver = normalize_paid_route_receiver_pubkey(&funding.receiver_pubkey)
+        .context("invalid Cashu Spilman funding receiver pubkey")?;
+    // Channel creation lifts legacy x-only receiver keys to the even-Y point.
+    let compressed_receiver = |pubkey: String| {
+        if pubkey.len() == 64 {
+            format!("02{pubkey}")
+        } else {
+            pubkey
+        }
+    };
+    if compressed_receiver(funding_receiver) != compressed_receiver(receiver_pubkey) {
+        return Err(anyhow!(
+            "paid route receiver pubkey does not match Cashu Spilman funding"
+        ));
+    }
     Ok(())
 }
 
@@ -828,11 +910,13 @@ pub(super) fn apply_usage_delta(usage: &mut PaidRouteUsage, delta: &PaidRouteUsa
 pub(super) fn paid_route_buyer_session_id_suffix(
     offer_key: &str,
     offer_id: &str,
+    mint_url: &str,
     now_unix: u64,
 ) -> String {
     let mut hasher = DefaultHasher::new();
     offer_key.hash(&mut hasher);
     offer_id.hash(&mut hasher);
+    mint_url.hash(&mut hasher);
     now_unix.hash(&mut hasher);
     let readable = sanitize_id_component(offer_id);
     format!("{readable}-{now_unix}-{:016x}", hasher.finish())

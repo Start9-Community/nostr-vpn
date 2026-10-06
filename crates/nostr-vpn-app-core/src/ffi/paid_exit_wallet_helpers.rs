@@ -49,6 +49,7 @@ fn cashu_top_up_activity_status(
         })
 }
 
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn paid_route_wallet_channel_open_request(
     store: &PaidRouteStore,
     session_id: &str,
@@ -100,6 +101,8 @@ fn paid_route_wallet_channel_open_request(
                 .filter(|keyset_id| !keyset_id.is_empty())
                 .map(ToOwned::to_owned),
             keyset_info_json: None,
+            client_request_id: Some(session_id.to_string()),
+            route_created_at_unix: Some(channel_record.created_at_unix),
         },
     )
 }

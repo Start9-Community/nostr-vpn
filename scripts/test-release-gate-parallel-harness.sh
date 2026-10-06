@@ -6,6 +6,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # production two-second grace period.
 # shellcheck disable=SC2034 # Read by the sourced runner.
 export RELEASE_GATE_PARALLEL_TERM_GRACE_SECONDS=1
+# Keep the transport-drain regression short while still exceeding the generic
+# two-second descendant grace.
+export RELEASE_GATE_PARALLEL_SSH_DRAIN_SECONDS=10
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
 
@@ -101,15 +104,45 @@ set -e
 grep -Fq 'intentional lane failure' "$tmp/logs/failing-lane-2.log" \
   || fail "failing lane log was not preserved"
 
-# A failed lane must not cancel or hide an independent peer's result.
-collect_peer() {
-  sleep 0.2
-  printf 'independent lane completed\n'
-  : >"$tmp/collect-complete"
+verbose_lane() {
+  local line
+  for line in {1..100}; do
+    printf 'verbose lane line %s\n' "$line"
+  done
 }
 
-release_gate_parallel_start "independent peer" collect_peer
+RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES=10
+release_gate_parallel_start "bounded output" verbose_lane
+bounded="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+bounded_output="$(release_gate_parallel_wait "$bounded")"
+[[ "$bounded_output" == *"showing final 10 of 100 lines"* \
+  && "$bounded_output" == *"verbose lane line 100"* ]] \
+  || fail "successful lane output was not bounded while preserving its log"
+if grep -Fxq 'verbose lane line 1' <<<"$bounded_output"; then
+  fail "successful lane output included lines before its bounded tail"
+fi
+[[ "$(wc -l <"${RELEASE_GATE_PARALLEL_LOGS[$bounded]}" | tr -d ' ')" -eq 100 ]] \
+  || fail "bounded console output truncated the retained lane log"
+RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES=80
+
+# A failed lane must cancel its still-running siblings so a stale VM or cache
+# mutation cannot race the next exact-candidate release attempt.
+cancellable_peer() {
+  trap 'printf "term received\n" >"$tmp/peer-term"; exit 0' TERM
+  : >"$tmp/peer-ready"
+  while :; do
+    sleep 10 || true
+  done
+}
+
+release_gate_parallel_start "cancellable peer" cancellable_peer
 peer="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+for _ in $(seq 1 50); do
+  [[ -f "$tmp/peer-ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$tmp/peer-ready" ]] || fail "cancellable peer did not start"
+peer_pgid="${RELEASE_GATE_PARALLEL_PGIDS[$peer]}"
 release_gate_parallel_start "collected failure" lane_fails_before_followup
 collected_failure="$RELEASE_GATE_PARALLEL_LAST_INDEX"
 set +e
@@ -118,17 +151,43 @@ status=$?
 set -e
 [[ "$status" == 7 ]] \
   || fail "parallel group returned $status instead of the collected failure"
-[[ -f "$tmp/collect-complete" ]] \
-  || fail "a failed lane cancelled its independent peer"
+[[ -f "$tmp/peer-term" ]] \
+  || fail "a failed lane did not terminate its running sibling"
 [[ ! -e "$tmp/continued-after-failure" ]] \
   || fail "a failed lane continued mutating after its first error"
-grep -Fq 'independent lane completed' "${RELEASE_GATE_PARALLEL_LOGS[$peer]}" \
-  || fail "independent peer log was not preserved"
 [[ -z "${RELEASE_GATE_PARALLEL_PIDS[$peer]:-}" ]] \
-  || fail "parallel group did not reap its completed peer"
+  || fail "parallel group did not reap its cancelled peer"
+if release_gate_parallel_group_alive "$peer_pgid"; then
+  fail "cancelled peer process group survived the failed lane"
+fi
 
-# A successful wrapper with a stubborn child must fail closed and leave no
-# process behind. This exercises TERM and KILL escalation, not source strings.
+# A successful wrapper may finish just before a short-lived transport helper.
+# Let natural teardown drain without turning a healthy lane into a failure.
+settling_lane() {
+  ( sleep 0.1 ) &
+}
+
+release_gate_parallel_start "settling lane" settling_lane
+settling="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+release_gate_parallel_wait "$settling" >/dev/null \
+  || fail "short-lived lane descendant was misclassified as an orphan"
+
+# An OpenSSH ProxyCommand can outlive its already-successful parent briefly
+# while closing the forwarded channel. Match the real process name and prove
+# the lane waits for that bounded transport drain without accepting other
+# process types as successful descendants.
+ln -s /bin/sleep "$tmp/ssh"
+ssh_settling_lane() {
+  ( "$tmp/ssh" 8 ) &
+}
+
+release_gate_parallel_start "settling SSH transport" ssh_settling_lane
+ssh_settling="$RELEASE_GATE_PARALLEL_LAST_INDEX"
+release_gate_parallel_wait "$ssh_settling" >/dev/null \
+  || fail "bounded SSH transport teardown was misclassified as an orphan"
+
+# A successful wrapper with a stubborn child must still fail closed and leave
+# no process behind. This exercises TERM and KILL escalation, not source text.
 orphan_lane() {
   (
     trap 'printf "term received\n" >"$1"' TERM
@@ -197,6 +256,32 @@ fi
 release_gate="$ROOT_DIR/scripts/release-gate.sh"
 local_release="$ROOT_DIR/scripts/local-release.mjs"
 release_tooling_contracts="$ROOT_DIR/scripts/test-release-tooling-contracts.sh"
+
+grep -Fq 'load_release_env "$ROOT_DIR"' "$release_gate" \
+  || fail "release gate does not load its release environment"
+grep -Fq 'load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT_DIR/.env.zapstore.local}"' "$release_gate" \
+  || fail "release gate does not load its Android signing environment"
+
+# Complete mode normalizes auto-detected network lanes to the literal
+# "required" value. Every dispatcher receiving that normalized value must
+# treat it like its explicit enabled mode rather than rejecting it after the
+# expensive platform lanes have already completed.
+windows_wg_dispatcher="$(sed -n \
+  '/^run_windows_wireguard_exit_gate()/,/^}/p' "$release_gate")"
+grep -Fq \
+  '1|true|TRUE|True|yes|YES|Yes|on|ON|On|windows-vm|required)' \
+  <<<"$windows_wg_dispatcher" \
+  || fail "Windows WireGuard dispatcher rejects complete-mode required"
+for dispatcher in \
+  run_mobile_wireguard_exit_gates \
+  run_mobile_underlay_change_gates
+do
+  dispatcher_body="$(sed -n "/^${dispatcher}()/,/^}/p" "$release_gate")"
+  grep -Fq \
+    '1|true|TRUE|True|yes|YES|Yes|on|ON|On|required)' \
+    <<<"$dispatcher_body" \
+    || fail "$dispatcher rejects complete-mode required"
+done
 [[ -x "$release_tooling_contracts" ]] \
   || fail "release tooling contracts have no standalone executable"
 grep -Fq 'name: Release tooling contracts' "$ROOT_DIR/.github/workflows/ci.yml" \
@@ -260,13 +345,27 @@ if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
 fi
 export NVPN_MACOS_WG_FIXTURE_HOST_IP=192.0.2.10
 export NVPN_DESKTOP_UNDERLAY_HYPERVISOR_SSH=hypervisor.test
+unset NVPN_WINDOWS_VM_NAME
 export NVPN_WINDOWS_UNDERLAY_VM_NAME=windows-test
+unset NVPN_LINUX_UNDERLAY_VM_NAME
+unset NVPN_UBUNTU_VM_NAME
 if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
   fail "complete release gate accepted a missing Linux underlay VM name"
 fi
 export NVPN_LINUX_UNDERLAY_VM_NAME=linux-test
+export NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST=wireguard-fixture.test
+export NVPN_MOBILE_WG_EXIT_REMOTE_MODE=native
+unset NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256
+if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
+  fail "complete release gate accepted a missing Android signer pin"
+fi
+export NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256=invalid
+if release_gate_require_complete_fixture_inputs >/dev/null 2>&1; then
+  fail "complete release gate accepted an invalid Android signer pin"
+fi
+export NVPN_EXPECTED_ANDROID_SIGNER_CERT_SHA256="$(printf 'a%.0s' {1..64})"
 release_gate_require_complete_fixture_inputs \
-  || fail "complete release gate rejected local WireGuard fixture inputs"
+  || fail "complete release gate rejected remote-native WireGuard fixture inputs"
 
 # Exercise candidate receipts rather than asserting their implementation text.
 receipt_functions="$tmp/platform-preparation-receipts.sh"
@@ -313,7 +412,42 @@ git -C "$receipt_repo" commit -qm candidate
 # The orchestrator owns only this high-level contract. Platform harnesses own
 # their selectors, retry timing, fixture implementation, and cache details.
 main_body="$(sed -n '/^main() {$/,$p' "$release_gate")"
+static_preflight_body="$(
+  sed -n '/^run_release_gate_static_preflight() {$/,/^}$/p' "$release_gate"
+)"
+bundle_ready_line="$(grep -nF 'load_host_linux_vm_bundle_path_receipt' <<<"$main_body" | head -n1 | cut -d: -f1)"
+peer_preparation_line="$(grep -nF 'prepare_desktop_underlay_peer' <<<"$main_body" | head -n1 | cut -d: -f1)"
+cargo_preparation_line="$(grep -nF 'prepare_release_cargo_config' <<<"$main_body" | head -n1 | cut -d: -f1)"
+[[ -n "$bundle_ready_line" && -n "$peer_preparation_line" && -n "$cargo_preparation_line" ]] \
+  || fail "release gate omits native bundle/peer preparation"
+((bundle_ready_line < peer_preparation_line && peer_preparation_line < cargo_preparation_line)) \
+  || fail "release gate rebuilds the Linux peer before the native bundle can seed it"
+candidate_preflight_body="$(
+  sed -n '/^run_release_gate_candidate_preflight() {$/,/^}$/p' "$release_gate"
+)"
+ios_framework_build_line="$(
+  grep -nF 'NVPN_IOS_RUST_PROFILE=release ./tools/run-ios xcframework' \
+    <<<"$static_preflight_body" \
+    | cut -d: -f1 \
+    || true
+)"
+ios_policy_check_line="$(
+  grep -nF './scripts/test-ios-appstore-policy.sh' \
+    <<<"$static_preflight_body" \
+    | cut -d: -f1 \
+    || true
+)"
+[[ -n "$ios_framework_build_line" ]] \
+  || fail "clean release preflight does not build the packaged iOS XCFramework"
+[[ -n "$ios_policy_check_line" ]] \
+  || fail "clean release preflight omits the packaged iOS policy check"
+((ios_framework_build_line < ios_policy_check_line)) \
+  || fail "packaged iOS policy is checked before its release XCFramework is built"
+grep -Fq './scripts/test-release-gate-orchestration.sh' \
+  <<<"$candidate_preflight_body" \
+  || fail "cheap release-orchestration contracts do not run before remote candidate builds"
 required_steps=(
+  seal_release_gate_app_candidate
   run_release_gate_candidate_preflight
   release_gate_enforce_complete_real_network_modes
   prepare_windows_platform_lane_sync
@@ -321,23 +455,25 @@ required_steps=(
   prepare_linux_platform_lane_sync
   platform_preparation_receipt_valid
   run_windows_platform_lane
-  run_macos_platform_lane
   run_linux_platform_lane
   run_android_static_validation_lane
-  build_release_gate_docker_node_image
+  ensure_release_gate_docker_prerequisites
+  build_release_gate_docker_images
   run_host_validation_lane
-  run_desktop_app_launch_smokes
+  run_linux_app_launch_smoke
   run_linux_exclusive_desktop_gates
   run_windows_exclusive_desktop_gates
-  run_macos_exclusive_desktop_gates
+  run_macos_post_build_lane
+  run_local_fips_websocket_timing_regression_gate
   run_mobile_qr_join_latency_gate
-  run_public_fips_transit_gate
+  run_local_fips_transit_gate
   run_docker_signal_gates
   run_docker_isolated_functional_gates
   run_docker_perf_gate
   run_macos_daemon_idle_cpu_gate
   run_mobile_idle_cpu_gates
   run_mobile_wireguard_exit_gates
+  verify_paid_exit_seller_ui_gates
   run_android_legacy_replacement_gate
   run_mobile_underlay_change_gates
   run_mobile_join_e2e_gate
@@ -349,31 +485,252 @@ for step in "${required_steps[@]}"; do
   grep -Fq "$step" <<<"$main_body" \
     || fail "release gate omits required step: $step"
 done
+docker_prerequisite_body="$(
+  sed -n '/^ensure_release_gate_docker_prerequisites() {$/,/^}$/p' "$release_gate"
+)"
+for base_image in \
+  rust:1.93-bookworm \
+  debian:bookworm-slim \
+  ubuntu:24.04 \
+  node:24-bookworm \
+  rust:1.94-bookworm \
+  docker/dockerfile:1.7
+do
+  grep -Fq "$base_image" <<<"$docker_prerequisite_body" \
+    || fail "Docker prerequisite preflight omits $base_image"
+done
+grep -Fq 'docker image inspect "$image"' <<<"$docker_prerequisite_body" \
+  || fail "Docker prerequisite preflight does not reuse present base images"
+grep -Fq 'docker pull "$image"' <<<"$docker_prerequisite_body" \
+  || fail "Docker prerequisite preflight does not pull missing base images"
+docker_preflight_line="$(grep -nF 'ensure_release_gate_docker_prerequisites' <<<"$main_body" | head -1 | cut -d: -f1)"
+platform_preparation_line="$(grep -nF 'local platform_preparation_lanes=()' <<<"$main_body" | head -1 | cut -d: -f1)"
+[[ -n "$docker_preflight_line" && -n "$platform_preparation_line" ]] \
+  || fail "Docker prerequisite preflight is missing from the release flow"
+((docker_preflight_line < platform_preparation_line)) \
+  || fail "Docker prerequisite preflight runs after expensive platform preparation"
+
+macos_platform_body="$(
+  sed -n '/^run_macos_platform_lane() {$/,/^}$/p' "$release_gate"
+)"
+! grep -Fq 'run_macos_app_launch_smoke' <<<"$macos_platform_body" \
+  || fail "macOS idle CPU is measured while concurrent build lanes can starve its VM"
+macos_post_build_body="$(
+  sed -n '/^run_macos_post_build_lane() {$/,/^}$/p' "$release_gate"
+)"
+previous_macos_step_line=0
+for macos_step in \
+  run_macos_platform_lane \
+  run_macos_app_launch_smoke \
+  run_macos_exclusive_desktop_gates
+do
+  macos_step_line="$(grep -nF "$macos_step" <<<"$macos_post_build_body" | cut -d: -f1)"
+  [[ -n "$macos_step_line" && "$macos_step_line" -gt "$previous_macos_step_line" ]] \
+    || fail "post-build macOS lane does not serialize $macos_step"
+  previous_macos_step_line="$macos_step_line"
+done
+! grep -Fq 'run_desktop_app_launch_smokes' <<<"$main_body" \
+  || fail "desktop app launch smokes still block the serial release tail"
+
+linux_smoke_start="$(grep -nF '"Linux GUI launch smoke"' <<<"$main_body" | head -1 | cut -d: -f1)"
+validation_join="$(grep -nF 'release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}"' <<<"$main_body" | head -1 | cut -d: -f1)"
+[[ -n "$linux_smoke_start" && -n "$validation_join" ]] \
+  || fail "Linux GUI smoke is missing from the concurrent validation lanes"
+((linux_smoke_start < validation_join)) \
+  || fail "Linux GUI smoke starts after concurrent validation has already joined"
+
+fips_timing_start="$(grep -nF '"Local FIPS websocket transit timing regression"' <<<"$main_body" | head -1 | cut -d: -f1)"
+macos_post_build_start="$(grep -nF '"macOS post-build UI, idle CPU, and desktop network"' <<<"$main_body" | head -1 | cut -d: -f1)"
+[[ -n "$fips_timing_start" && -n "$macos_post_build_start" ]] \
+  || fail "isolated FIPS timing or macOS post-build lane is missing"
+((validation_join < fips_timing_start && fips_timing_start < macos_post_build_start)) \
+  || fail "timing-sensitive FIPS/macOS checks still overlap cold build lanes"
+linux_network_start="$(grep -nF 'run_linux_exclusive_desktop_gates' <<<"$main_body" | head -1 | cut -d: -f1)"
+windows_network_start="$(grep -nF 'run_windows_exclusive_desktop_gates' <<<"$main_body" | head -1 | cut -d: -f1)"
+exclusive_network_join="$(grep -nF 'release_gate_parallel_wait_group "${exclusive_desktop_lanes[@]}"' <<<"$main_body" | head -1 | cut -d: -f1)"
+[[ -n "$macos_post_build_start" && -n "$linux_network_start" \
+  && -n "$windows_network_start" && -n "$exclusive_network_join" ]] \
+  || fail "exclusive desktop network lanes are incomplete"
+((macos_post_build_start < linux_network_start \
+  && linux_network_start < exclusive_network_join \
+  && exclusive_network_join < windows_network_start)) \
+  || fail "macOS/Linux proofs are not fail-fast and serialized before the Windows hypervisor proof"
+
+local_fips_body="$(
+  sed -n '/^run_local_fips_regression_tests() {$/,/^}$/p' "$release_gate"
+)"
+! grep -Fq 'persistent_two_seed_websocket_transit_survives_client_churn' \
+  <<<"$local_fips_body" \
+  || fail "strict local FIPS websocket timing still runs beside cold builds"
+
+rust_regression_body="$(sed -n '/^run_rust_regression_checks() {$/,/^}$/p' "$release_gate")"
+mobile_timing_body="$(sed -n '/^run_mobile_qr_join_latency_gate() {$/,/^}$/p' "$release_gate")"
+for role in desktop_admin mobile_admin; do
+  test_name="desktop_mobile_manual_join_${role}_via_websocket_seed"
+  grep -Fq -- "--skip $test_name" <<<"$rust_regression_body" \
+    || fail "$test_name still competes with cold builds"
+  grep -Fxq "    $test_name" <<<"$mobile_timing_body" \
+    || fail "$test_name is missing from isolated join timing"
+done
+
+docker_image_build_body="$(
+  sed -n '/^build_release_gate_docker_images() {$/,/^}$/p' "$release_gate"
+)"
+previous_build_line=0
+for image_build in \
+  build_release_gate_docker_node_image \
+  build_release_gate_paid_exit_image \
+  build_release_gate_web_image
+do
+  [[ "$(grep -Fc "$image_build" <<<"$docker_image_build_body")" == "1" ]] \
+    || fail "reusable Docker image lane must run $image_build exactly once"
+  build_line="$(grep -nF "$image_build" <<<"$docker_image_build_body" | cut -d: -f1)"
+  ((build_line > previous_build_line)) \
+    || fail "reusable Docker image builds are not serialized in the required order"
+  previous_build_line="$build_line"
+done
+for old_parallel_build in \
+  'Docker node image build' \
+  'Docker paid-exit image build' \
+  'Docker web image build'
+do
+  ! grep -Fq "$old_parallel_build" <<<"$main_body" \
+    || fail "release gate still starts an unsafe parallel image build: $old_parallel_build"
+done
+
+cashu_mint_service="$(
+  sed -n '/^  cashu-mint:$/,/^  wireguard-upstream:$/p' \
+    "$ROOT_DIR/docker-compose.exit-node-e2e.yml"
+)"
+grep -Fq 'image: ${NVPN_EXIT_NODE_E2E_IMAGE:-nostr-vpn-e2e-node}' \
+  <<<"$cashu_mint_service" \
+  || fail "Cashu mint must reuse the paid node image instead of rebuilding implicitly"
+
+for cleanup_script in e2e-umbrel-web-docker.sh e2e-umbrel-auth-join-docker.sh; do
+  cleanup_body="$(sed -n '/^cleanup() {$/,/^}$/p' "$ROOT_DIR/scripts/$cleanup_script")"
+  grep -Fq 'find /cleanup ! -type s -exec chown -h $(id -u):$(id -g)' <<<"$cleanup_body" \
+    || fail "$cleanup_script does not reclaim its root-written test files"
+  grep -Fq -- '--pull never --network none' <<<"$cleanup_body" \
+    || fail "$cleanup_script cleanup can fetch images or access the network"
+done
 
 required_contracts=(
+  'source "$ROOT_DIR/scripts/lib-release-gate-timing.sh"'
+  'release_gate_timing_init "$log_dir"'
+  'release_gate_timing_write_run_diagnostic'
+  'export NVPN_EXPECTED_APP_GIT_SHA="$app_sha"'
+  'export NVPN_EXPECTED_APP_GIT_TREE="$app_tree"'
+  'candidate_root="$(cd "$ROOT_DIR" && pwd -P)"'
+  'export NVPN_RELEASE_APP_REPO_PATH="$candidate_root"'
   'release_gate_parallel_cancel_all || cleanup_failed=1'
   'release_gate_cleanup_private_build_dirs || cleanup_failed=1'
   'platform_preparation_receipt_valid'
   'NVPN_RELEASE_JOIN_ANDROID_INSTALL_RECEIPT='
   'NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT='
   'NVPN_RELEASE_JOIN_REUSE_ARTIFACTS=1'
+  'export NVPN_EXIT_NODE_E2E_SKIP_BUILD=1'
+  'export NVPN_WEB_STARTOS_JOIN_IMAGE_READY=1'
+  'export NVPN_UMBREL_WEB_E2E_SKIP_BUILD=1'
   'NVPN_HOST_LINUX_VM_BUILDER_MODE=remote-native'
   'NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST="${NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST:-$NVPN_UBUNTU_SSH_HOST}"'
+  'NVPN_HOST_LINUX_VM_NATIVE_BUILDER_PROXY_COMMAND="${NVPN_HOST_LINUX_VM_NATIVE_BUILDER_PROXY_COMMAND:-${NVPN_UBUNTU_SSH_PROXY_COMMAND:-}}"'
 )
 for contract in "${required_contracts[@]}"; do
   grep -Fq "$contract" "$release_gate" \
     || fail "release gate omits artifact/cleanup contract: $contract"
 done
+
+seal_candidate_line="$(
+  grep -nF 'seal_release_gate_app_candidate' <<<"$main_body" \
+    | head -n1 \
+    | cut -d: -f1 \
+    || true
+)"
+candidate_preflight_line="$(
+  grep -nF 'run_release_gate_candidate_preflight' <<<"$main_body" \
+    | head -n1 \
+    | cut -d: -f1 \
+    || true
+)"
+[[ -n "$seal_candidate_line" && -n "$candidate_preflight_line" ]] \
+  || fail "release gate does not seal the app candidate before preflight"
+((seal_candidate_line < candidate_preflight_line)) \
+  || fail "release gate snapshots the candidate before sealing its app revision"
+platform_preparation_line="$(
+  grep -nF 'local platform_preparation_lanes=()' <<<"$main_body" \
+    | head -n1 \
+    | cut -d: -f1 \
+    || true
+)"
+[[ -n "$platform_preparation_line" ]] \
+  || fail "release gate does not define platform preparation lanes"
+((candidate_preflight_line < platform_preparation_line)) \
+  || fail "release gate does not finish fail-fast candidate checks before platform preparation"
+candidate_preflight_body="$(
+  sed -n '/^run_release_gate_candidate_preflight() {$/,/^}$/p' "$release_gate"
+)"
+grep -Fq 'release_gate_checkpoint_run "Source quality" run_release_gate_source_quality' \
+  <<<"$candidate_preflight_body" \
+  || fail "release gate preflight does not validate or reuse exact source-quality evidence"
+source_quality_body="$(sed -n '/^run_release_gate_source_quality() {$/,/^}$/p' "$release_gate")"
+grep -Fq 'cargo clippy --locked --workspace --exclude nvpn-cashu-service --exclude nvpn-cdk-spilman --all-targets -- -D warnings' \
+  <<<"$source_quality_body" \
+  || fail "release gate candidate preflight omits strict fail-fast Clippy"
+grep -Fq 'cargo fmt --check' <<<"$source_quality_body" \
+  || fail "release gate candidate preflight omits fail-fast formatting"
+rust_validation_body="$(
+  sed -n '/^run_rust_validation_lane() {$/,/^}$/p' "$release_gate"
+)"
+! grep -Fq 'clippy' <<<"$rust_validation_body" \
+  || fail "release gate repeats Clippy after the fail-fast candidate preflight"
 docker_functional_body="$(sed -n '/^run_docker_isolated_functional_gates() {$/,/^}$/p' "$release_gate")"
 for contract in \
   './scripts/e2e-paid-exit-docker.sh' \
+  './scripts/e2e-paid-exit-automatic-docker.sh' \
   'NVPN_RELEASE_GATE_PAID_EXIT_IMAGE' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_AUTO_IMAGE' \
   'NVPN_RELEASE_GATE_PAID_EXIT_PROJECT_NAME' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_AUTO_PROJECT_NAME' \
   'NVPN_RELEASE_GATE_PAID_EXIT_PUBLIC_SUBNET' \
-  'NVPN_RELEASE_GATE_PAID_EXIT_PRIVATE_SUBNET'; do
+  'NVPN_RELEASE_GATE_PAID_EXIT_PRIVATE_SUBNET' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_AUTO_PUBLIC_SUBNET' \
+  'NVPN_RELEASE_GATE_PAID_EXIT_AUTO_PRIVATE_SUBNET'; do
   grep -Fq "$contract" <<<"$docker_functional_body" \
     || fail "isolated Docker gates omit paid-exit contract: $contract"
 done
+grep -Fq 'NVPN_RELEASE_GATE_PAID_EXIT_AUTO_IMAGE:-${NVPN_RELEASE_GATE_PAID_EXIT_IMAGE' \
+  <<<"$docker_functional_body" \
+  || fail "manual and automatic paid-exit lanes do not reuse one exact image"
+umbrel_web_e2e="$ROOT_DIR/scripts/e2e-umbrel-web-docker.sh"
+grep -Fq 'NVPN_UMBREL_WEB_E2E_SKIP_BUILD' "$umbrel_web_e2e" \
+  || fail "Umbrel web e2e cannot reuse the release gate's exact prebuilt image"
+exit_node_e2e="$ROOT_DIR/scripts/e2e-exit-node-docker.sh"
+for contract in \
+  'HOST_LOG_DIR="$(mktemp -d ' \
+  'PUBLIC_PING_LOG="$HOST_LOG_DIR/public-ping.log"' \
+  'REALIZED_IP_LOG="$HOST_LOG_DIR/realized-ip.log"' \
+  'SECURE_DNS_LOG="$HOST_LOG_DIR/secure-dns.log"' \
+  'rm -rf "$HOST_LOG_DIR"'; do
+  grep -Fq "$contract" "$exit_node_e2e" \
+    || fail "parallel paid-exit lanes do not isolate host logs: $contract"
+done
+if grep -Eq '/tmp/nvpn-exit-node-(public-ping|realized-ip|secure-dns)\.log' \
+  "$exit_node_e2e"; then
+  fail "parallel paid-exit lanes still share fixed host log paths"
+fi
+seller_ui_body="$(sed -n '/^verify_paid_exit_seller_ui_gates() {$/,/^}$/p' "$release_gate")"
+for platform in linux macos; do
+  grep -Fq "\"$platform=" <<<"$seller_ui_body" \
+    || fail "seller UI receipt gate omits supported platform: $platform"
+done
+for platform in android windows; do
+  if grep -Fq "\"$platform=" <<<"$seller_ui_body"; then
+    fail "seller UI receipt gate requires unsupported platform: $platform"
+  fi
+done
+grep -Fq "EXPECTED_PLATFORMS = ['linux', 'macos']" \
+  "$ROOT_DIR/scripts/verify-paid-exit-seller-ui-receipts.mjs" \
+  || fail "seller UI receipt verifier differs from the product support matrix"
 grep -Fq 'run_umbrel_release_gate' <<<"$docker_functional_body" \
   || fail "isolated Docker gates omit the authenticated Umbrel release gate"
 umbrel_function="$(sed -n '/^run_umbrel_release_gate() {$/,/^}$/p' "$release_gate")"
@@ -391,17 +748,49 @@ for contract in \
   "getByPlaceholder('Paste a join request to continue').fill(request)" \
   'requester was not added to the scanner roster' \
   'requester did not activate the scanned network' \
+  'desktop_manual_join_e2e_fixture' \
+  '--admin-endpoint "$SCANNER_IP:25111"' \
+  '--joiner-endpoint "$REQUESTER_IP:25110"' \
+  "throw new Error('unjoined Umbrel fixture unexpectedly has a network')" \
   'A joined device deliberately retains a reusable request link' \
   "getByRole('dialog', { name: 'Add Network' }).waitFor({ state: 'hidden', timeout: 15_000 })" \
   '/dev/net/tun:/dev/net/tun' \
   'PROXY_PORT: $PROXY_PORT' \
   '127.0.0.1:$PROXY_PORT:$PROXY_PORT' \
   'UMBREL_PROXY_TOKEN'; do
-  grep -Fq "$contract" "$umbrel_gate" \
+  grep -Fq -- "$contract" "$umbrel_gate" \
     || fail "authenticated Umbrel gate omits contract: $contract"
 done
 grep -Fq "NVPN_RELEASE_GATE_REQUIRE_COMPLETE: '1'" "$local_release" \
   || fail "full release does not require complete real-network coverage"
+
+# A failed local FIPS regression must stop the sequence immediately instead
+# of being masked by a later passing filter.
+fips_regression_function="$tmp/release-gate-fips-regressions.sh"
+awk '
+  /^run_local_fips_regression_tests\(\) \{/ { capture = 1 }
+  capture {
+    print
+    opens = gsub(/\{/, "{")
+    closes = gsub(/\}/, "}")
+    depth += opens - closes
+    if (depth == 0) exit
+  }
+' "$release_gate" >"$fips_regression_function"
+# shellcheck disable=SC1090
+source "$fips_regression_function"
+release_fips_path="$tmp"
+fips_filter_calls="$tmp/fips-filter-calls"
+: >"$fips_filter_calls"
+release_gate_cargo_test_filter() {
+  printf 'call\n' >>"$fips_filter_calls"
+  [[ "$(wc -l <"$fips_filter_calls")" -ne 2 ]]
+}
+if run_local_fips_regression_tests; then
+  fail "local FIPS regression failure was masked by a later passing filter"
+fi
+[[ "$(wc -l <"$fips_filter_calls")" -eq 2 ]] \
+  || fail "local FIPS regression sequence continued after its first failure"
 
 # Focused Rust gates must fail when a stale selector runs zero tests.
 selector_function="$tmp/release-gate-test-selector.sh"
@@ -410,17 +799,17 @@ sed -n '/^release_gate_cargo_test_filter() (/ , /^)/p' \
 # shellcheck disable=SC1090
 source "$selector_function"
 zero_match_output="$tmp/zero-match.log"
-if release_gate_cargo_test_filter fips-core stale_selector \
+if release_gate_cargo_test_filter nvpn-fips-core stale_selector \
   printf '%s\n' 'running 0 tests' \
   'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured' \
   >"$zero_match_output" 2>&1
 then
   fail "focused release-gate tests can pass with an empty selector"
 fi
-grep -Fq 'Release gate test selector matched no passing test: stale_selector (fips-core)' \
+grep -Fq 'Release gate test selector matched no passing test: stale_selector (nvpn-fips-core)' \
   "$zero_match_output" \
   || fail "zero-match selector did not explain its failure"
-release_gate_cargo_test_filter fips-core current_regression \
+release_gate_cargo_test_filter nvpn-fips-core current_regression \
   printf '%s\n' 'running 1 test' \
   'test module::current_regression ... ok' \
   'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured' \

@@ -9,6 +9,8 @@ pub(crate) fn run_service_command(args: ServiceArgs) -> Result<()> {
 }
 
 fn service_install(args: ServiceInstallArgs) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::macos_privileged_files::require_root()?;
     #[cfg(target_os = "windows")]
     let config_path = windows_service_install_config_path(args.config)?;
 
@@ -34,7 +36,9 @@ fn service_install(args: ServiceInstallArgs) -> Result<()> {
         .with_context(|| format!("failed to canonicalize {}", executable.display()))?;
     let config_path = fs::canonicalize(&config_path)
         .with_context(|| format!("failed to canonicalize {}", config_path.display()))?;
-    let log_path = daemon_log_file_path(&config_path);
+    #[cfg(not(target_os = "macos"))]
+    let log_path = daemon_log_file_path(&config_path)?;
+    #[cfg(not(target_os = "macos"))]
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -47,7 +51,6 @@ fn service_install(args: ServiceInstallArgs) -> Result<()> {
             &config_path,
             &args.iface,
             args.mesh_refresh_interval_secs.max(1),
-            &log_path,
             args.force,
         )
     }
@@ -100,7 +103,6 @@ pub(crate) fn ensure_service_config_exists(config_path: &Path) -> Result<()> {
         config.ensure_defaults();
         maybe_autoconfigure_node(&mut config);
         config.save(config_path)?;
-        repair_service_config_ownership(config_path)?;
         return Ok(());
     }
 
@@ -108,46 +110,6 @@ pub(crate) fn ensure_service_config_exists(config_path: &Path) -> Result<()> {
     config.ensure_defaults();
     maybe_autoconfigure_node(&mut config);
     config.save(config_path)
-}
-
-#[cfg(unix)]
-fn repair_service_config_ownership(config_path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::metadata(config_path)
-        .with_context(|| format!("failed to inspect config {}", config_path.display()))?;
-    if metadata.uid() != 0 {
-        return Ok(());
-    }
-
-    let Some(parent) = config_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(());
-    };
-    let parent_metadata = fs::metadata(parent)
-        .with_context(|| format!("failed to inspect config directory {}", parent.display()))?;
-    if parent_metadata.uid() == 0 {
-        return Ok(());
-    }
-
-    std::os::unix::fs::chown(
-        config_path,
-        Some(parent_metadata.uid()),
-        Some(parent_metadata.gid()),
-    )
-    .with_context(|| {
-        format!(
-            "failed to restore user ownership on config {}",
-            config_path.display()
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn repair_service_config_ownership(_config_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn service_uninstall(args: ServiceUninstallArgs) -> Result<()> {
@@ -176,7 +138,7 @@ fn service_uninstall(args: ServiceUninstallArgs) -> Result<()> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn install_service_executable_copy(source: &Path, destination: &Path) -> Result<()> {
     if let Ok(existing) = fs::canonicalize(destination)
         && existing == source
@@ -342,6 +304,9 @@ pub(crate) fn query_service_status_with_binary_version(
         let binary_version = if include_binary_version {
             service_binary
                 .as_ref()
+                // Status may itself be run as root. Never execute an unsafe
+                // legacy helper merely to discover its version.
+                .filter(|path| crate::macos_privileged_files::validate_artifact(path).is_ok())
                 .and_then(|path| query_binary_version(path))
                 .unwrap_or_default()
         } else {

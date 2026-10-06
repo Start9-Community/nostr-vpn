@@ -203,7 +203,7 @@
             pending.is_some(),
             "the failed start must retain in-process ownership until process exit"
         );
-        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path);
+        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path).expect("cleanup path");
         let saved = crate::read_daemon_network_cleanup_state(&cleanup_path)
             .expect("read cleanup ownership")
             .expect("cleanup ownership survives process-boundary readback");
@@ -233,7 +233,7 @@
             std::env::temp_dir().join(format!("nvpn-linux-stop-cleanup-test-{nonce}"));
         std::fs::create_dir_all(&directory).expect("create temp directory");
         let config_path = directory.join("config.toml");
-        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path);
+        let cleanup_path = crate::daemon_network_cleanup_file_path(&config_path).expect("cleanup path");
         let stale_default = "default via 192.0.2.1 dev eth0 metric 100".to_string();
         crate::write_daemon_network_cleanup_state(
             &cleanup_path,

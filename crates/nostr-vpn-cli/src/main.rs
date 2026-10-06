@@ -1,3 +1,5 @@
+#[cfg(feature = "paid-exit")]
+mod cashu_wallet_daemon;
 mod config_bootstrap;
 use nvpn::control_pubsub_runtime;
 mod daemon_runtime;
@@ -11,6 +13,8 @@ mod join_request_ipc;
 mod linux_network;
 #[cfg(any(target_os = "macos", test))]
 mod macos_network;
+#[cfg(target_os = "macos")]
+mod macos_privileged_files;
 #[cfg(any(target_os = "macos", test))]
 mod macos_service;
 mod network_signaling;
@@ -38,11 +42,14 @@ mod wireguard_exit;
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use fips_core::discovery::nostr::{OverlayEndpointAdvert, OverlayTransportKind};
+use fs::OpenOptions;
+#[cfg(target_os = "macos")]
+use nostr_vpn_core::macos_file_io as fs;
 use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "windows")]
 use std::ffi::OsString;
+#[cfg(not(target_os = "macos"))]
 use std::fs;
-use std::fs::OpenOptions;
 #[cfg(any(target_os = "macos", test))]
 use std::hash::{Hash, Hasher};
 #[cfg(feature = "paid-exit")]
@@ -70,26 +77,23 @@ use cashu_service::{
     CashuWalletOverview, FileSpilmanPaymentReceiver, FileSpilmanPaymentReceiverConfig,
     FileSpilmanPaymentSigner, SharedSpilmanClientStoreLock, StreamingRouteCashuTokenLease,
     StreamingRouteOpenCashuSpilmanChannelFromWalletRequest, StreamingRoutePaymentEnvelope,
-    StreamingRoutePaymentPayload, create_topup_quote, import_payment_proofs,
-    load_or_create_cashu_spilman_receiver_key, load_wallet_activity, load_wallet_overview,
-    normalize_mint_url, open_streaming_route_cashu_spilman_channel_from_wallet,
-    open_streaming_route_cashu_spilman_channel_from_wallet_with_lock, receive_payment_token,
-    restore_streaming_route_cashu_spilman_refund_with_lock, send_lightning_payment,
-    send_payment_token, spilman_client_store_path,
+    StreamingRoutePaymentPayload, load_or_create_cashu_spilman_receiver_key, normalize_mint_url,
+    spilman_client_store_path,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(all(feature = "paid-exit", test))]
-use nostr_sdk::prelude::{Alphabet, Filter, SingleLetterTag};
+use nostr_sdk::prelude::{Alphabet, Filter, SingleLetterTag, Timestamp};
 #[cfg(feature = "paid-exit")]
-use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32};
+use nostr_sdk::prelude::{Event, Keys, Kind, PublicKey, ToBech32};
 #[cfg(feature = "paid-exit")]
 use nostr_vpn_core::config::normalize_relay_urls;
+#[cfg(feature = "paid-exit")]
+use nostr_vpn_core::config::write_private_file_preserving_user_owner;
 use nostr_vpn_core::config::{
     AppConfig, ExitDnsMode, ExitDohProvider, InternetSource, SharedNetworkRoster,
     derive_mesh_tunnel_ip, exit_node_default_routes, maybe_autoconfigure_node,
     normalize_advertised_route, normalize_fips_peer_endpoint_hint, normalize_nostr_pubkey,
     normalize_runtime_network_id, parse_wireguard_exit_config,
-    write_private_file_preserving_user_owner,
 };
 use nostr_vpn_core::control::PeerAnnouncement;
 use nostr_vpn_core::data_plane::MeshPeerStatus;
@@ -137,6 +141,7 @@ use nostr_vpn_core::paid_routes::{
     PaidRouteQualityMetrics, PaidRouteRoutingDecision, PaidRouteSessionOpen, SignedPaidRouteOffer,
     paid_route_country_claim, paid_route_offer_filter,
     signed_paid_exit_offer_from_config_with_receiver,
+    signed_paid_exit_offer_from_config_with_receiver_and_fips_endpoints,
 };
 #[cfg(target_os = "windows")]
 use nostr_vpn_core::platform_paths::{
@@ -174,9 +179,11 @@ use crate::diagnostics::{
     PortMappingRuntime, build_health_issues, capture_network_snapshot, detect_captive_portal,
     run_netcheck_report, write_doctor_bundle,
 };
+#[cfg(any(feature = "paid-exit", not(unix)))]
+use crate::network_signaling::maybe_reload_running_daemon;
 use crate::network_signaling::{
-    RosterEditAction, maybe_reload_running_daemon, reload_running_daemon_after_save,
-    save_config_and_reload_transactionally, update_active_network_roster,
+    RosterEditAction, reload_running_daemon_after_save, save_config_and_reload_transactionally,
+    update_active_network_roster,
 };
 #[cfg(any(test, not(target_os = "windows")))]
 pub(crate) use crate::platform_routing::*;
@@ -214,7 +221,6 @@ const DAEMON_STATE_RUNNING_MAX_FUTURE_SKEW_SECS: u64 = 2;
 const DAEMON_PEER_STATUS_MAX_FUTURE_SKEW_SECS: u64 = 2;
 const MAJOR_LINK_CHANGE_TIME_JUMP_SECS: u64 = 30;
 const WAITING_FOR_PARTICIPANTS_STATUS: &str = "Waiting for participants";
-const LISTENING_FOR_JOIN_REQUESTS_STATUS: &str = "Listening for join requests";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) struct DaemonJoinRequestIpcRequest {

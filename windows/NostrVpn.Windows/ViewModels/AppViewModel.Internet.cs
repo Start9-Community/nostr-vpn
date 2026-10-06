@@ -77,6 +77,9 @@ public sealed partial class AppViewModel
             "Saving internet source");
     }
 
+    public Task ReselectPaidExitAsync() =>
+        DispatchAsync(NativeActions.ReselectPaidExit(), "Finding another provider");
+
     public Task SelectPaidAutomaticExitAsync()
     {
         return DispatchAsync(
@@ -84,16 +87,36 @@ public sealed partial class AppViewModel
             "Saving internet source");
     }
 
-    public async Task SelectPaidManualExitAsync()
+    public Task SelectPaidManualExitAsync()
     {
-        await DispatchAsync(
-            NativeActions.UpdateSettings(new SettingsPatch { InternetSource = "paid_manual" }),
-            "Saving internet source");
         Page = AppPage.PublicExits;
+        return Task.CompletedTask;
     }
 
     public Task DiscoverPaidRouteOffersAsync() =>
         DispatchAsync(NativeActions.DiscoverPaidRouteOffers(), "Finding sellers");
+
+    public async Task ApplyPaidRouteMarketFilterAsync()
+    {
+        _paidRouteFilterEditing = false;
+        await DispatchAsync(
+            NativeActions.SetPaidRouteMarketFilter(
+                PaidRouteFilterCountryCode,
+                PaidRouteFilterRequireIpv4,
+                PaidRouteFilterRequireIpv6,
+                PaidRouteFilterSort),
+            "Filtering sellers");
+        SyncPaidRouteFilterDraft(State.PaidRouteMarket.Filter, force: true);
+    }
+
+    public async Task ClearPaidRouteMarketFilterAsync()
+    {
+        _paidRouteFilterEditing = false;
+        await DispatchAsync(
+            NativeActions.SetPaidRouteMarketFilter("", false, false, "quality"),
+            "Clearing seller filters");
+        SyncPaidRouteFilterDraft(State.PaidRouteMarket.Filter, force: true);
+    }
 
     public Task SetManualPaidExitProviderAsync()
     {
@@ -234,6 +257,9 @@ public sealed partial class AppViewModel
         string.IsNullOrWhiteSpace(session.SessionId)
             ? Task.CompletedTask
             : DispatchAsync(NativeActions.SelectPaidRouteSession(session.SessionId, true), "Connecting");
+
+    public Task RatePaidExitAsync(string seller, long rating) =>
+        DispatchAsync(NativeActions.RatePaidExit(seller, rating), "Saving public rating");
 
     public Task ProbePaidRouteSessionAsync(NativePaidRouteSessionState session) =>
         string.IsNullOrWhiteSpace(session.SessionId)

@@ -102,7 +102,7 @@ internal fun PaidRouteMarketCard(
                     )
                 }
                 if (state.walletFiatEnabled && market.wallet.fiatBalanceText.isNotBlank()) {
-                    Text("≈ ${market.wallet.fiatBalanceText}", color = Muted, style = MaterialTheme.typography.bodySmall)
+                    Text(formatPaidRouteMsat(market.wallet.totalBalanceMsat), color = Muted, style = MaterialTheme.typography.bodySmall)
                 }
                 if (mode == PaidRouteCardMode.Wallet && market.wallet.exchangeRateText.isNotBlank()) {
                     Text(
@@ -113,11 +113,19 @@ internal fun PaidRouteMarketCard(
                 }
             }
             if (mode == PaidRouteCardMode.Market) {
-                Button(
-                    enabled = market.supported,
-                    onClick = { dispatch(NativeActions.discoverPaidRouteOffers()) },
-                ) {
-                    Text("Find")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        enabled = market.sessions.any(::paidRouteSessionCanSignPayment),
+                        onClick = { dispatch(NativeActions.streamPaidRoutePayments()) },
+                    ) {
+                        Text("Pay")
+                    }
+                    Button(
+                        enabled = market.supported,
+                        onClick = { dispatch(NativeActions.discoverPaidRouteOffers()) },
+                    ) {
+                        Text("Find")
+                    }
                 }
             }
         }
@@ -635,6 +643,18 @@ private fun PaidRoutePaymentActionResult(
 }
 
 @Composable
+private fun PaidExitRatingButtons(seller: String, rating: Long, dispatch: (JSONObject) -> Unit) {
+    Row {
+        TextButton(onClick = { dispatch(NativeActions.ratePaidExit(seller, if (rating > 0) 0 else 1)) }) {
+            Text(if (rating > 0) "👍 ✓" else "👍")
+        }
+        TextButton(onClick = { dispatch(NativeActions.ratePaidExit(seller, if (rating < 0) 0 else -1)) }) {
+            Text(if (rating < 0) "👎 ✓" else "👎")
+        }
+    }
+}
+
+@Composable
 private fun PaidRouteOfferRow(
     state: AppState,
     offer: PaidRouteOfferState,
@@ -672,11 +692,16 @@ private fun PaidRouteOfferRow(
             }
         }
             Button(
-                enabled = offer.key.isNotBlank() && compatibleMint && !active,
+                enabled = offer.key.isNotBlank() && compatibleMint && !active && offer.personalRating >= 0,
                 onClick = { dispatch(NativeActions.buyPaidRouteOffer(offer.key)) },
             ) {
                 Text(if (active) "Active" else "Connect")
             }
+        }
+        if (offer.hasRating) { Text("Rating ${offer.ratingScore}", style = MaterialTheme.typography.bodySmall, color = Muted) }
+        if (offer.canRate) {
+            PaidExitRatingButtons(offer.sellerNpub, offer.personalRating, dispatch)
+            Text("Public rating · thumbs down stops this provider", style = MaterialTheme.typography.bodySmall, color = Muted)
         }
         if (!compatibleMint) {
             Text(
@@ -755,11 +780,12 @@ private fun PaidRouteSessionRow(
                 }
             }
         }
+        if (session.canRate) { PaidExitRatingButtons(session.sellerNpub, session.personalRating, dispatch) }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
                     dispatch(NativeActions.selectPaidRouteSession(session.sessionId, connect = true))
-                }) {
+                }, enabled = session.personalRating >= 0) {
                     Text("Connect")
                 }
                 OutlinedButton(onClick = {
@@ -936,46 +962,3 @@ private fun paidRouteSessionCanCloseChannel(session: PaidRouteSessionState): Boo
 
 private fun parsePositivePaidRouteAmount(value: String): Long? =
     value.trim().toLongOrNull()?.takeIf { it > 0 }
-
-internal fun formatPaidRouteMsat(msat: Long): String {
-    if (msat <= 0) return "0 sat"
-    val whole = msat / 1000
-    val rem = msat % 1000
-    return if (rem == 0L) {
-        "$whole sat"
-    } else {
-        "%d.%03d sat".format(whole, rem)
-    }
-}
-
-internal fun formatBytes(bytes: Long): String {
-    val units = listOf("B", "KB", "MB", "GB", "TB")
-    var value = bytes.toDouble()
-    var index = 0
-    while (value >= 1024.0 && index < units.lastIndex) {
-        value /= 1024.0
-        index += 1
-    }
-    return when {
-        index == 0 -> "$bytes B"
-        kotlin.math.abs(value - kotlin.math.round(value)) < 0.05 -> "%.0f %s".format(value, units[index])
-        else -> "%.1f %s".format(value, units[index])
-    }
-}
-
-internal fun paidRouteTrafficUnitText(units: Long): String = formatBytes(units)
-
-private fun formatDecimalBytes(bytes: Long): String {
-    val units = listOf("B", "KB", "MB", "GB", "TB")
-    var value = bytes.toDouble()
-    var index = 0
-    while (value >= 1000.0 && index < units.lastIndex) {
-        value /= 1000.0
-        index += 1
-    }
-    return when {
-        index == 0 -> "$bytes B"
-        kotlin.math.abs(value - kotlin.math.round(value)) < 0.05 -> "%.0f %s".format(value, units[index])
-        else -> "%.1f %s".format(value, units[index])
-    }
-}

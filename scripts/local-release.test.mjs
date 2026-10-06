@@ -1,3 +1,4 @@
+import { withIosArtifactSource } from './ios-artifact-source.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -5,6 +6,8 @@ import { createHash } from 'node:crypto'
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
+  realpathSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -57,6 +60,7 @@ import {
   githubReleaseRepairPlan,
   validateGithubReleaseMetadata,
 } from './github-release-publication.mjs'
+import { parseActiveHtreeIdentity } from './htree-release-publication.mjs'
 import {
   validateFrozenIosPublication,
 } from './ios-release-publication.mjs'
@@ -127,6 +131,19 @@ test('splitCsv trims and drops empties', () => {
     'android',
     'macos',
   ])
+})
+
+test('htree identity parser accepts current and legacy active identity output', () => {
+  const npub = `npub1${'q'.repeat(58)}`
+  assert.equal(
+    parseActiveHtreeIdentity(`${npub}\n\nAliases:\n${npub} (sirius)`),
+    npub,
+  )
+  assert.equal(parseActiveHtreeIdentity(`${npub} (self)`), npub)
+  assert.throws(
+    () => parseActiveHtreeIdentity(`${npub} (self)\n${npub} (self)`),
+    /exactly one valid active identity/,
+  )
 })
 
 test('release source provenance rejects dirty or mismatched tagged candidates', () => {
@@ -797,29 +814,68 @@ test('frozen iOS publication binds an unchanged-product source proof', () => {
   )
 })
 
-test('retained iOS export runs only from its proven artifact source', () => {
-  const source = readFileSync(
-    new URL('./local-release.mjs', import.meta.url),
-    'utf8',
-  )
-  for (const required of [
-    'requireReceiptSource(archiveReceipt',
-    "'worktree', 'add', '--detach', sourceRoot, archiveReceipt.appGitSha",
-    "for (const name of ['dist', 'artifacts'])",
-    'mkdirSync(linkRoot)',
-    'for (const entry of readdirSync(externalRoot))',
-    'join(linkRoot, entry)',
-    "join(repoRoot, 'scripts', 'ios-build'), 'ios-export'",
-    'NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha',
-    'NVPN_IOS_RELEASE_SOURCE_ROOT: sourceRoot',
-    'source_equivalence: sourceEquivalence',
-  ]) {
-    assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+test('iOS export and upload retain original source, paths and bytes across harness changes', (context) => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'nvpn-ios-source-context-'))
+  context.after(() => rmSync(repoRoot, { recursive: true, force: true }))
+  const git = (args, cwd = repoRoot) => {
+    const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
   }
-  assert.doesNotMatch(
-    source,
-    /join\(sourceRoot, 'scripts', 'ios-build'\), 'ios-export'/,
-  )
+  git(['init', '-q'])
+  git(['config', 'user.name', 'Release Test'])
+  git(['config', 'user.email', 'release@example.invalid'])
+  mkdirSync(join(repoRoot, 'ios'))
+  mkdirSync(join(repoRoot, 'docs'))
+  writeFileSync(join(repoRoot, '.gitignore'), 'dist/\nartifacts/\n')
+  writeFileSync(join(repoRoot, 'ios', 'App.swift'), 'original app\n')
+  git(['add', '.'])
+  git(['commit', '-qm', 'artifact source'])
+  const receipt = { appGitSha: git(['rev-parse', 'HEAD']), appGitTree: git(['rev-parse', 'HEAD^{tree}']) }
+  const tag = 'v4.1.5'
+  const gateDir = join(repoRoot, 'artifacts', 'release-gate-logs', `local-release-${tag}`)
+  const joinDir = join(repoRoot, 'artifacts', 'mobile-release-join')
+  for (const directory of [join(repoRoot, 'dist', 'ios'), gateDir, joinDir]) mkdirSync(directory, { recursive: true })
+  const ipa = join(repoRoot, 'dist', 'ios', 'release.ipa')
+  writeFileSync(ipa, 'original archive bytes\n')
+  writeFileSync(join(gateDir, 'receipt.json'), 'original gate bytes\n')
+  const env = { ...process.env, NVPN_RELEASE_TAG: tag, NVPN_RELEASE_STAGE_DIR: '/exact/stage' }
+  const original = { repoRoot, receipt, commit: receipt.appGitSha, tree: receipt.appGitTree, env }
+  withIosArtifactSource(original, ({ cwd }) => assert.equal(cwd, repoRoot))
+
+  writeFileSync(join(repoRoot, 'docs', 'release-resume.md'), 'new harness instructions\n')
+  git(['add', 'docs'])
+  git(['commit', '-qm', 'harness update'])
+  const candidate = { ...original, commit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']) }
+  for (const shouldFail of [false, true]) {
+    let temporarySource
+    const invoke = () => withIosArtifactSource(candidate, ({ cwd, env: scoped }) => {
+      temporarySource = cwd
+      assert.notEqual(cwd, repoRoot)
+      assert.equal(git(['rev-parse', 'HEAD'], cwd), receipt.appGitSha)
+      assert.equal(git(['status', '--porcelain'], cwd), '')
+      assert.equal(scoped.NVPN_BUILD_GIT_SHA, receipt.appGitSha)
+      assert.equal(scoped.NVPN_IOS_RELEASE_SOURCE_ROOT, cwd)
+      assert.equal(scoped.NVPN_RELEASE_STAGE_DIR, env.NVPN_RELEASE_STAGE_DIR)
+      assert.equal(scoped.NVPN_RELEASE_GATE_LOG_DIR, gateDir)
+      assert.equal(scoped.NVPN_RELEASE_JOIN_RESULT_DIR, joinDir)
+      assert.equal(realpathSync(join(cwd, 'dist', 'ios', 'release.ipa')), realpathSync(ipa))
+      assert.equal(readFileSync(join(cwd, 'ios', 'App.swift'), 'utf8'), 'original app\n')
+      if (shouldFail) throw new Error('upload failed')
+    })
+    if (shouldFail) assert.throws(invoke, /upload failed/)
+    else invoke()
+    assert.equal(existsSync(temporarySource), false)
+    assert.equal(git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1)
+    assert.equal(readFileSync(ipa, 'utf8'), 'original archive bytes\n')
+    assert.equal(readFileSync(join(gateDir, 'receipt.json'), 'utf8'), 'original gate bytes\n')
+  }
+  writeFileSync(join(repoRoot, 'ios', 'App.swift'), 'changed app\n')
+  git(['add', 'ios'])
+  git(['commit', '-qm', 'product change'])
+  assert.throws(() => withIosArtifactSource({
+    ...candidate, commit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']),
+  }, () => assert.fail('changed product reached export/upload')), /changed product\/build input/)
 })
 
 test('retained iOS outputs stay available without dirtying the exact checkout', (context) => {
@@ -1176,6 +1232,7 @@ test('staged draft publication publishes only the already validated bytes', () =
     'github-release-publication.mjs',
     'htree-release-publication.mjs',
     'ios-release-publication.mjs',
+    'ios-artifact-source.mjs',
     'ios-upload-receipt.mjs',
     'release-mutation-gate.mjs',
     'verify-release-publication-bundle.mjs',
@@ -1289,7 +1346,7 @@ test('staged draft publication publishes only the already validated bytes', () =
                         asset.name.includes('aarch64')
                           ? 'aarch64'
                           : 'x86_64'
-                      }"],"id":"app"}],"nestedRuntime":true,"version":"4.1.5:0"}`,
+                      }"],"id":"app"}],"version":"4.1.5:0","virtualNetworking":true}`,
                     )
                     .digest('hex'),
                   package: asset.sha256,
@@ -1332,12 +1389,25 @@ case "$1" in
   status)
     ;;
   add)
+    if [ "$2" = --no-ignore ]; then
+      : > "$FAKE_HTREE_LOG.include-ignored"
+    else
+      rm -f "$FAKE_HTREE_LOG.include-ignored"
+    fi
     printf 'url: %s\\n' "$FAKE_HTREE_CID"
     ;;
   push)
     ;;
   cat)
     relative="\${2#*/}"
+    case "$relative" in
+      *.s9pk)
+        [ -f "$FAKE_HTREE_LOG.include-ignored" ] || {
+          echo "Path not found in directory: $relative" >&2
+          exit 1
+        }
+        ;;
+    esac
     if [ "\${FAKE_HTREE_MUTATE_METADATA:-}" = "$relative" ]; then
       LC_ALL=C /usr/bin/sed '1s/^./X/' "$FAKE_HTREE_STAGE/$relative"
     else
@@ -1359,12 +1429,16 @@ esac
     startCli,
     `#!/bin/sh
 set -eu
+if [ "$1" = --version ]; then
+  printf 'start-cli 1.1.0\\n'
+  exit 0
+fi
 case "$3" in
   *-startos-aarch64.s9pk) arch=aarch64 ;;
   *-startos-x86_64.s9pk) arch=x86_64 ;;
   *) exit 2 ;;
 esac
-printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
+printf '{"id":"nostr-vpn","version":"4.1.5:0","virtualNetworking":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
 `,
   )
   chmodSync(startCli, 0o755)
@@ -1452,7 +1526,7 @@ printf '{"id":"nostr-vpn","version":"4.1.5:0","nestedRuntime":true,"images":[{"i
     'user',
     'status',
     'release publish --help',
-    `add ${stage}`,
+    `add --no-ignore ${stage}`,
     'user',
     'status',
     'release publish --help',
@@ -1616,6 +1690,16 @@ test('final publication preflights tools and Zapstore identity before the releas
   assert.match(zapstorePublisher, /'nak',[\s\S]*\['decode', context\.publisherNpub\]/)
 })
 
+test('staging checks platform packaging prerequisites before starting its release gate', () => {
+  const source = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
+  const mainStart = source.indexOf('function main()')
+  const preflight = source.indexOf('preflightStartosRelease({', mainStart)
+  assert.ok(preflight > mainStart && preflight < source.indexOf('const steps = [', mainStart))
+  assert.match(source.slice(preflight, source.indexOf('const steps = [', preflight)), /needsWorkspace: !String\(env\.NVPN_RELEASE_STARTOS_ARTIFACT_DIR/)
+  const linux = source.indexOf('validateLinuxPublicationBuilder({ env })', mainStart)
+  assert.ok(linux > mainStart && linux < source.indexOf('const steps = [', mainStart))
+})
+
 test('publication verification requires real Windows and Linux underlay gates', () => {
   const localRelease = readFileSync(join(process.cwd(), 'scripts/local-release.mjs'), 'utf8')
   const verifyStart = localRelease.indexOf('function runVerify(')
@@ -1651,7 +1735,7 @@ test('StartOS staging uses an explicit inspected prebuilt directory without buil
   assert.match(build, /if \(prebuilt\) copyFileSync/)
 })
 
-test('release builds always include paid exit support', () => {
+test('release builds include paid exit support by default', () => {
   for (const manifest of [
     'crates/nostr-vpn-core/Cargo.toml',
     'crates/nostr-vpn-cli/Cargo.toml',
@@ -1662,7 +1746,12 @@ test('release builds always include paid exit support', () => {
   }
 
   const linuxBuilder = readFileSync('scripts/build-nvpn-linux-musl', 'utf8')
-  assert.doesNotMatch(linuxBuilder, /NO_DEFAULT_FEATURES|--no-default-features/)
+  const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8')
+  assert.match(
+    linuxBuilder,
+    /if \[\[ \$\{NVPN_LINUX_MUSL_NO_DEFAULT_FEATURES:-0\} == 1 \]\]; then[\s\S]*cargo_feature_args\+=\(--no-default-features\)/,
+  )
+  assert.doesNotMatch(releaseWorkflow, /NVPN_LINUX_MUSL_NO_DEFAULT_FEATURES/)
 })
 
 test('Linux musl builds extract only rustables instead of vendoring every dependency', () => {
@@ -2325,6 +2414,13 @@ test('every mutating Apple distribution entry point requires the canonical exact
   )
 })
 
+test('Cargo preflight handles unpublished dependencies and rejects package or build failures', () => {
+  const result = spawnSync('bash', [
+    join(process.cwd(), 'scripts/test-publish-preflight-harness.sh'),
+  ], { encoding: 'utf8', timeout: 60_000 })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+})
+
 test('crates publication has no dirty bypass and replays exact source immediately before publish', () => {
   const publisher = readFileSync(
     join(process.cwd(), 'scripts/publish.sh'),
@@ -2332,7 +2428,6 @@ test('crates publication has no dirty bypass and replays exact source immediatel
   )
   assert.doesNotMatch(publisher, /--allow-dirty/)
   assert.match(publisher, /require_release_mutation_gate "\$REPO_DIR"/)
-  assert.match(publisher, /cargo package --locked -p "\$crate"/)
   assert.match(publisher, /packageSha256/)
   assert.match(publisher, /preflight_crates_io_credentials/)
   assert.doesNotMatch(publisher, /import tomllib/)
@@ -2349,18 +2444,9 @@ test('crates publication has no dirty bypass and replays exact source immediatel
     publisher,
     /static\.crates\.io\/crates\/\$\{crate\}\/\$\{crate\}-\$\{version\}\.crate/,
   )
-  assert.match(
-    publisher,
-    /for crate in "\$\{TIER_1_CRATES\[@\]\}"; do[\s\S]*package_crate_and_bind_digest "\$crate"/,
-  )
-  assert.match(
-    publisher,
-    /for crate in "\$\{TIER_2_CRATES\[@\]\}"; do[\s\S]*cargo package --locked -p "\$crate" --list/,
-  )
-  assert.match(
-    publisher,
-    /package_crate_and_bind_digest "\$crate"\s*\n\s*verify_exact_release_source\s*\n\s*fi\s*\n\s*if output=\$\(cargo publish --locked/,
-  )
+  assert.match(publisher, /cargo package --locked "\$\{package_args\[@\]\}"/)
+  assert.doesNotMatch(publisher, /verify_dependent_dry_run|cargo check --locked -p/)
+  assert.match(publisher, /verify_cargo_packages[\s\S]*bind_package_digest "\$crate"/)
 })
 
 test('Linux publication reuses the VM-installed deb and real static-musl CLI archive', () => {
@@ -2416,7 +2502,7 @@ test('Linux publication reuses the VM-installed deb and real static-musl CLI arc
   )
   assert.doesNotMatch(linuxBuild, /cargo build/)
   assert.doesNotMatch(linuxBuild, /prepare-host-linux-vm-bundle\.sh/)
-  assert.match(githubRelease, /cargo build --release --locked -p nvpn/)
+  assert.doesNotMatch(githubRelease, /cargo build --release --locked -p nvpn/)
 })
 
 test('exact artifact copy safely replaces a stale read-only destination', (context) => {
@@ -2512,23 +2598,23 @@ test('Windows publication reuses the exact installer and CLI archive that passed
   assert.match(proof, /install directory overlaps the gated publish directory/)
 })
 
-test('Linux release reclaims Docker smoke storage before host packaging', () => {
+test('hosted release retains Rust and Docker verification without duplicate native packaging', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
   const verifyJobStart = workflow.indexOf('  verify:')
-  const linuxJobStart = workflow.indexOf('  build-linux-app:')
-  const linuxJobEnd = workflow.indexOf('  build-windows-app:', linuxJobStart)
-  const verifyJob = workflow.slice(verifyJobStart, workflow.indexOf('  build-cli:', verifyJobStart))
-  const linuxJob = workflow.slice(linuxJobStart, linuxJobEnd)
-  const buildx = linuxJob.indexOf('uses: docker/setup-buildx-action@v3')
-  const smoke = linuxJob.indexOf('- name: Smoke launch Linux GUI')
-  const cleanup = linuxJob.indexOf('- name: Reclaim Linux GUI smoke storage')
-  const desktopPackage = linuxJob.indexOf('- name: Build Linux desktop package')
-
-  assert.ok(verifyJobStart >= 0 && linuxJobStart >= 0 && linuxJobEnd > linuxJobStart)
+  const verifyJobEnd = workflow.indexOf('  macos-sdk-compat:', verifyJobStart)
+  const verifyJob = workflow.slice(verifyJobStart, verifyJobEnd)
+  assert.ok(verifyJobStart >= 0 && verifyJobEnd > verifyJobStart)
   assert.match(verifyJob, /uses: docker\/setup-buildx-action@v3/)
-  assert.ok(buildx >= 0 && smoke > buildx && cleanup > smoke && desktopPackage > cleanup)
-  assert.match(linuxJob, /docker compose down --volumes --remove-orphans/)
-  assert.match(linuxJob, /docker system prune --all --force --volumes/)
+  assert.match(verifyJob, /run: \.\/scripts\/release-gate\.sh/)
+  assert.doesNotMatch(workflow, /^  build-linux-app:/m)
+})
+
+test('hosted release selects the portable gate instead of maintaining fleet skip flags', () => {
+  const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
+  const verifyJob = workflow.slice(workflow.indexOf('  verify:'), workflow.indexOf('  macos-sdk-compat:'))
+  assert.match(verifyJob, /run: \.\/scripts\/release-gate\.sh --hosted/)
+  assert.match(verifyJob, /uses: pnpm\/action-setup@v4/)
+  assert.doesNotMatch(verifyJob, /NVPN_RELEASE_GATE_(?:WINDOWS|MACOS|MOBILE|LINUX_ARM64)_/)
 })
 
 test('dispatched release notes contain no build provenance text', () => {
@@ -2723,6 +2809,15 @@ test('Actions cannot mutate public releases and local promotion is exact-stage g
   const releaseJob = workflow.slice(workflow.indexOf('  release:'))
   assert.match(releaseJob, /htree get "\$\{LOCALLY_GATED_RELEASE_CID\}"/)
   assert.match(releaseJob, /verify-release-publication-bundle\.mjs/)
+  assert.match(releaseJob, /STARTOS_CLI_VERSION: '1\.1\.0'/)
+  assert.match(
+    releaseJob,
+    /STARTOS_CLI_SHA256: '70eff67b6e9a936acd8aaaf787b783819252ecedaa5c74d462e3b15ed4dd843a'/,
+  )
+  assert.match(
+    releaseJob,
+    /releases\/download\/start-cli\/v\$\{STARTOS_CLI_VERSION\}/,
+  )
   assert.match(releaseJob, /start-cli_x86_64-linux/)
   assert.doesNotMatch(releaseJob, /actions\/download-artifact/)
   assert.doesNotMatch(releaseJob, /contents:\s*write/)
@@ -2740,14 +2835,18 @@ test('Actions cannot mutate public releases and local promotion is exact-stage g
   assert.ok(preflight >= 0 && mutationGate > preflight && publish > mutationGate)
 })
 
-test('GitHub platform builds run beside verification and join before release', () => {
+test('GitHub release verifies the gated bytes without rebuilding unused platform packages', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
   const releaseJobStart = workflow.indexOf('  release:')
   const releaseJob = workflow.slice(releaseJobStart)
 
   assert.ok(releaseJobStart >= 0)
-  assert.doesNotMatch(workflow, /^    needs: verify$/m)
-  assert.match(releaseJob, /needs:\n      - verify/)
+  assert.doesNotMatch(releaseJob, /^    needs:/m)
+  assert.match(workflow, /^  verify:/m)
+  assert.match(workflow, /^  macos-sdk-compat:/m)
+  assert.match(workflow, /run: \.\/scripts\/release-gate\.sh/)
+  assert.match(releaseJob, /verify-release-publication-bundle\.mjs/)
+  assert.match(releaseJob, /--require-draft/)
   for (const job of [
     'build-cli',
     'build-macos-app',
@@ -2756,32 +2855,74 @@ test('GitHub platform builds run beside verification and join before release', (
     'build-android-app',
     'build-startos',
   ]) {
-    assert.match(releaseJob, new RegExp(`needs\\.${job}\\.result == 'success'`))
-    assert.match(releaseJob, new RegExp(`- ${job}`))
+    assert.doesNotMatch(workflow, new RegExp(`^  ${job}:`, 'm'))
   }
+  assert.doesNotMatch(workflow, /actions\/upload-artifact|MACOS_CERTIFICATE_P12|ANDROID_KEYSTORE|STARTOS_DEV_KEY/)
 })
 
-test('GitHub release requires and publishes both StartOS package architectures', () => {
+test('GitHub release inspects the exact gated StartOS packages without a signing key', () => {
   const workflow = readFileSync(join(process.cwd(), '.github/workflows/release.yml'), 'utf8')
-  const startosJobStart = workflow.indexOf('  build-startos:')
   const releaseJobStart = workflow.indexOf('  release:')
-  const startosJob = workflow.slice(startosJobStart, releaseJobStart)
   const releaseJob = workflow.slice(releaseJobStart)
-
-  assert.ok(startosJobStart >= 0 && releaseJobStart > startosJobStart)
-  assert.match(startosJob, /STARTOS_DEV_KEY/)
-  assert.match(startosJob, /STARTOS_CLI_VERSION: '0\.4\.0-beta\.9'/)
-  assert.match(startosJob, /startos_cli_sha256: 212686c28056b48810b383d7aa2cfc733db7332d406f4376a0bfd6ca94c6d88f/)
-  assert.match(startosJob, /startos_cli_sha256: eb09a55aeb8241a6ed0a7659ed8bd5f86f950fb3b5315bc2798a05d8edd07d29/)
-  assert.match(startosJob, /releases\/download\/v\$\{STARTOS_CLI_VERSION\}/)
-  assert.match(startosJob, /sha256sum --check/)
-  assert.match(startosJob, /start-cli \$\{STARTOS_CLI_VERSION\}/)
-  assert.match(startosJob, /target: x86/)
-  assert.match(startosJob, /target: arm/)
-  assert.match(startosJob, /scripts\/startos-release\.mjs/)
-  assert.match(releaseJob, /needs\.build-startos\.result == 'success'/)
-  assert.match(releaseJob, /- build-startos/)
+  assert.ok(releaseJobStart >= 0)
+  assert.match(releaseJob, /STARTOS_CLI_VERSION: '1\.1\.0'/)
+  assert.match(releaseJob, /STARTOS_CLI_SHA256: '70eff67b6e9a936acd8aaaf787b783819252ecedaa5c74d462e3b15ed4dd843a'/)
+  assert.match(releaseJob, /sha256sum --check/)
+  assert.match(releaseJob, /start-cli \$\{STARTOS_CLI_VERSION\}/)
+  assert.match(releaseJob, /verify-release-publication-bundle\.mjs/)
+  assert.doesNotMatch(workflow, /STARTOS_DEV_KEY|\.startos\/build\.key\.pem/)
   assert.doesNotMatch(releaseJob, /--built-line/)
+})
+
+test('GitHub bundle import resumes an incomplete fetch once and stops on other failures', () => {
+  const workflow = readFileSync('.github/workflows/release.yml', 'utf8')
+  const check = workflow.indexOf('Locally gated commit does not match the checked-out release tag.')
+  const start = workflow.indexOf('\n          fi\n', check) + '\n          fi\n'.length
+  const end = workflow.indexOf('          node scripts/verify-release-publication-bundle.mjs', start)
+  assert.ok(check >= 0 && start > check && end > start)
+  const download = workflow.slice(start, end).replace(/^          /gm, '')
+  for (const [scenario, expectedCalls, expectedStatus] of [
+    ['transient', 2, 0], ['persistent', 2, 1], ['invalid', 1, 1],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), 'nvpn-download-recovery-'))
+    try {
+      const bin = join(root, 'bin')
+      mkdirSync(bin)
+      const htree = join(bin, 'htree')
+      writeFileSync(htree, `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == get && "$2" == "$LOCALLY_GATED_RELEASE_CID" && "$3" == --output ]]
+printf 'get\\n' >> "$CALLS"
+mkdir -p "$4"
+if [[ -f "$4/cached-chunk" && "$SCENARIO" == transient ]]; then
+  printf 'complete\\n' > "$4/complete"
+  exit 0
+fi
+printf 'preserved\\n' > "$4/cached-chunk"
+if [[ "$SCENARIO" == invalid ]]; then
+  echo 'Error: Refusing an invalid destination' >&2
+else
+  echo 'Error: Failed to stream file chunk: Missing chunk: ${'a'.repeat(64)}' >&2
+fi
+exit 1
+`)
+      chmodSync(htree, 0o755)
+      const result = spawnSync('bash', ['-c', `set -euo pipefail\n${download}`], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: root,
+          LOCALLY_GATED_RELEASE_CID: 'immutable-test-cid', CALLS: join(root, 'calls'), SCENARIO: scenario },
+      })
+      assert.equal(result.status, expectedStatus, `${scenario}: ${result.stderr}`)
+      assert.equal(readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').length, expectedCalls)
+      assert.equal(readFileSync(join(root, 'locally-gated-release', 'cached-chunk'), 'utf8'), 'preserved\n')
+      if (scenario === 'transient') {
+        assert.equal(readFileSync(join(root, 'locally-gated-release', 'complete'), 'utf8'), 'complete\n')
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
 })
 
 test('corrected GitHub release is explicitly promoted as latest', () => {

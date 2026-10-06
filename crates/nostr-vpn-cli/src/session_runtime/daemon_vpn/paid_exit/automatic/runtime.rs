@@ -1,28 +1,15 @@
 use super::*;
 
-async fn paid_exit_automatic_probe_measurement(
+pub(crate) async fn paid_exit_route_probe_measurement(
+    dns_health: &crate::secure_dns_runtime::SecureDnsHealthProbe,
     app: &AppConfig,
     now_unix: u64,
+    bind_interface: &str,
 ) -> Result<PaidRouteProbeMeasurement> {
-    let args = PaidExitProbeArgs {
-        config: None,
-        session: String::new(),
-        ip_url: None,
-        stun_servers: Vec::new(),
-        no_stun: false,
-        geoip_url_template: None,
-        no_geoip: true,
-        download_url: None,
-        upload_url: None,
-        bandwidth_bytes: DEFAULT_PAID_ROUTE_BANDWIDTH_BYTES,
-        no_bandwidth: false,
-        samples: 1,
-        timeout_secs: 5,
-        no_reload_daemon: true,
-        json: false,
-    };
+    dns_health.check_paid_exit().await?;
+    let args = paid_exit_health_probe_args();
     let (measurement, _, bandwidth_error) =
-        paid_exit_probe_measurement(&args, app, now_unix).await?;
+        paid_exit_probe_measurement(&args, app, now_unix, Some(bind_interface)).await?;
     if let Some(error) = bandwidth_error {
         eprintln!("paid-exit: automatic bandwidth sample incomplete: {error}");
     }
@@ -34,12 +21,37 @@ async fn paid_exit_automatic_probe_measurement(
     Ok(measurement)
 }
 
+fn paid_exit_health_probe_args() -> PaidExitProbeArgs {
+    PaidExitProbeArgs {
+        config: None,
+        session: String::new(),
+        ip_url: None,
+        stun_servers: Vec::new(),
+        // The health gate needs to prove that ordinary routed Internet traffic
+        // works. Avoid waiting on UDP STUN before trying the HTTPS path.
+        no_stun: true,
+        geoip_url_template: None,
+        no_geoip: true,
+        download_url: None,
+        upload_url: None,
+        bandwidth_bytes: 0,
+        // A health check must not consume channel bandwidth merely to decide
+        // whether the route works. Users can run the explicit quality probe.
+        no_bandwidth: true,
+        samples: 1,
+        timeout_secs: 5,
+        no_reload_daemon: true,
+        json: false,
+    }
+}
+
 pub(super) fn automatic_probe_observed_public_ip(measurement: &PaidRouteProbeMeasurement) -> bool {
     measurement.realized_exit_ip.is_some() && measurement.success_count() > 0
 }
 
 pub(crate) async fn update_automatic_paid_exit(
     automatic: &mut PaidExitAutomaticBuyer,
+    feedback: &mut nostr_vpn_core::paid_route_ratings::ExitProbeFeedback,
     runtime: &crate::fips_private_mesh::FipsPrivateTunnelRuntime,
     app: &mut AppConfig,
     config_path: &Path,
@@ -56,24 +68,44 @@ pub(crate) async fn update_automatic_paid_exit(
         candidate.observe_usage(buyer_delta, now_unix);
     }
 
-    if automatic.probe.is_none()
-        && automatic.candidate.as_ref().is_some_and(|candidate| {
-            candidate.probe_started_at.is_none()
-                && candidate.last_authenticated_at.is_some_and(|observed| {
-                    now_unix.saturating_sub(observed) <= PAID_EXIT_AUTO_HEALTH_TTL_SECS
-                })
+    let seller_admitted = automatic
+        .candidate
+        .as_ref()
+        .map(|candidate| {
+            let store = load_paid_route_store(&paid_route_store_file_path(config_path))?;
+            Ok::<_, anyhow::Error>(
+                store.buyer_session_is_seller_admitted(&candidate.session_id)?
+                    && store.buyer_session_allows_routing(&candidate.session_id, now_unix)?,
+            )
         })
+        .transpose()?
+        .unwrap_or(false);
+    if automatic.probe.is_none()
+        && automatic
+            .candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.ready_to_probe(seller_admitted, now_unix))
+        && let Ok(dns_health) = runtime.paid_exit_dns_health_probe()
     {
         let probe_app = app.clone();
+        let bind_interface = runtime.iface().to_string();
         if let Some(candidate) = automatic.candidate.as_mut() {
             candidate.probe_started_at = Some(now_unix);
+            candidate.unanswered_since = None;
             candidate.last_tx_at = None;
             candidate.last_rx_at = None;
         }
         automatic.probe = Some(PaidExitAutomaticProbe {
+            feedback_generation: feedback.generation(),
             generation: automatic.generation,
             task: tokio::spawn(async move {
-                paid_exit_automatic_probe_measurement(&probe_app, now_unix).await
+                paid_exit_route_probe_measurement(
+                    &dns_health,
+                    &probe_app,
+                    now_unix,
+                    &bind_interface,
+                )
+                .await
             }),
         });
     }
@@ -96,21 +128,32 @@ pub(crate) async fn update_automatic_paid_exit(
                         .as_ref()
                         .map(|candidate| candidate.session_id.clone())
                         .ok_or_else(|| anyhow!("automatic paid exit probe lost its candidate"))?;
-                    record_automatic_paid_exit_probe(
+                    record_paid_exit_probe(config_path, &session_id, measurement, now_unix)?;
+                    record_paid_exit_feedback(
+                        feedback,
                         config_path,
                         &session_id,
-                        measurement,
+                        false,
                         now_unix,
-                    )?;
+                        probe.feedback_generation,
+                    );
                     if let Some(candidate) = automatic.candidate.as_mut() {
                         candidate.probe_succeeded = true;
-                        if candidate.health_evidence_fresh(now_unix) {
-                            candidate.last_healthy_at = Some(now_unix);
-                        }
+                        candidate.unanswered_since = None;
                     }
                 }
                 Err(error) => {
                     eprintln!("paid-exit: automatic free probe failed: {error}");
+                    if let Some(candidate) = &automatic.candidate {
+                        record_paid_exit_feedback(
+                            feedback,
+                            config_path,
+                            &candidate.session_id,
+                            true,
+                            now_unix,
+                            probe.feedback_generation,
+                        );
+                    }
                     if let Some(candidate) = automatic.candidate.as_mut() {
                         candidate.failed = true;
                     }
@@ -119,41 +162,9 @@ pub(crate) async fn update_automatic_paid_exit(
         }
     }
 
-    let fund = automatic.candidate.as_ref().is_some_and(|candidate| {
-        !candidate.failed
-            && !candidate.funding_attempted
-            && candidate.health_evidence_fresh(now_unix)
-    });
-    if fund {
-        let session_id = automatic
-            .candidate
-            .as_ref()
-            .map(|candidate| candidate.session_id.clone())
-            .expect("funding candidate exists");
-        if let Some(candidate) = automatic.candidate.as_mut() {
-            candidate.funding_attempted = true;
-        }
-        match fund_automatic_paid_exit(app, config_path, &session_id, now_unix).await {
-            Ok(envelope) => {
-                if let Some(candidate) = automatic.candidate.as_mut() {
-                    candidate.funded = true;
-                    candidate.last_healthy_at = Some(now_unix);
-                }
-                if let Err(error) = queue_paid_exit_payment(app, config_path, &envelope) {
-                    eprintln!("paid-exit: automatic channel-open queue failed: {error}");
-                    if let Some(candidate) = automatic.candidate.as_mut() {
-                        candidate.failed = true;
-                    }
-                }
-            }
-            Err(error) => {
-                eprintln!("paid-exit: automatic funding failed: {error}");
-                if let Some(candidate) = automatic.candidate.as_mut() {
-                    candidate.failed = true;
-                }
-            }
-        }
-    }
+    let funding_changed = funding::update_funding(automatic, app, config_path, now_unix).await?;
+
+    renewal::renew_automatic_paid_exit(automatic, runtime, app, config_path, now_unix).await?;
 
     if automatic
         .candidate
@@ -170,16 +181,17 @@ pub(crate) async fn update_automatic_paid_exit(
         return Ok(true);
     }
 
-    Ok(false)
+    Ok(funding_changed)
 }
 
-fn record_automatic_paid_exit_probe(
+pub(crate) fn record_paid_exit_probe(
     config_path: &Path,
     session_id: &str,
     measurement: PaidRouteProbeMeasurement,
     now_unix: u64,
 ) -> Result<()> {
     let store_path = paid_route_store_file_path(config_path);
+    let keys = load_or_default_config(config_path)?.nostr_keys()?;
     update_paid_route_store(&store_path, |store| {
         store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
             session_id: session_id.to_string(),
@@ -189,6 +201,105 @@ fn record_automatic_paid_exit_probe(
             quality: Some(measurement.quality),
             now_unix,
         })?;
+        if let Err(error) = store.record_exit_probe_rating(&keys, session_id, now_unix) {
+            eprintln!("paid-exit: could not save automatic rating: {error}");
+        }
         Ok(())
     })
+}
+
+pub(crate) fn record_paid_exit_feedback(
+    feedback: &mut nostr_vpn_core::paid_route_ratings::ExitProbeFeedback,
+    config_path: &Path,
+    session_id: &str,
+    failed: bool,
+    now: u64,
+    generation: u64,
+) {
+    let result = (|| -> Result<()> {
+        let keys = load_or_default_config(config_path)?.nostr_keys()?;
+        update_paid_route_store(&paid_route_store_file_path(config_path), |store| {
+            let score = if failed {
+                Some(-100)
+            } else {
+                store
+                    .sessions
+                    .get(session_id)
+                    .and_then(nostr_vpn_core::paid_route_ratings::exit_probe_rating)
+            };
+            if let Some(score) = score {
+                feedback.observe(store, &keys, session_id, score, now, generation)?;
+            }
+            Ok(())
+        })
+    })();
+    if let Err(error) = result {
+        eprintln!("paid-exit: could not save feedback: {error}");
+    }
+}
+
+#[cfg(test)]
+mod health_probe_tests {
+    use super::*;
+
+    #[test]
+    fn health_probe_uses_fast_https_without_bandwidth_traffic() {
+        let args = paid_exit_health_probe_args();
+
+        assert!(args.no_stun);
+        assert!(args.no_bandwidth);
+        assert_eq!(args.bandwidth_bytes, 0);
+        assert_eq!(args.samples, 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn health_probe_http_client_cannot_fall_back_from_bound_interface() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind loopback test server");
+        let address = listener.local_addr().expect("read test server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept test request");
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read test request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write test response");
+        });
+
+        #[cfg(target_os = "linux")]
+        let loopback_interface = "lo";
+        #[cfg(target_os = "macos")]
+        let loopback_interface = "lo0";
+        let client = paid_exit_probe_http_client(Duration::from_secs(2), Some(loopback_interface))
+            .expect("build interface-bound client");
+        let response = client
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("request through loopback interface");
+        assert_eq!(response.text().await.expect("read response"), "ok");
+        server.await.expect("test server task");
+
+        let missing_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind missing-interface test server");
+        let missing_address = missing_listener
+            .local_addr()
+            .expect("read missing-interface server address");
+        let missing_interface =
+            paid_exit_probe_http_client(Duration::from_secs(2), Some("nvpn-missing"))
+                .expect("build missing-interface client");
+        assert!(
+            missing_interface
+                .get(format!("http://{missing_address}"))
+                .send()
+                .await
+                .is_err(),
+            "an unavailable paid tunnel must fail instead of falling back"
+        );
+    }
 }

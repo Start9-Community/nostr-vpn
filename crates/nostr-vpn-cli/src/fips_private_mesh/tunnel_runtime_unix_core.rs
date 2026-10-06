@@ -1,5 +1,15 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl FipsPrivateTunnelRuntime {
+    #[cfg(feature = "paid-exit")]
+    pub(crate) fn paid_exit_dns_health_probe(
+        &self,
+    ) -> Result<crate::secure_dns_runtime::SecureDnsHealthProbe> {
+        self.secure_dns
+            .as_ref()
+            .ok_or_else(|| anyhow!("secure DNS is unavailable for paid exit health"))?
+            .health_probe()
+    }
+
     fn persist_network_cleanup_ownership(&self) -> Result<()> {
         crate::daemon_runtime::persist_fips_daemon_network_cleanup_state(
             &self.cleanup_journal_config_path,
@@ -80,6 +90,7 @@ impl FipsPrivateTunnelRuntime {
             control_pubsub,
             state_control,
             secure_dns: None,
+            pending_paid_exit_dns: None,
             manages_secure_dns: true,
             config: config.clone(),
             cleanup_journal_config_path: cleanup_journal_config_path.to_path_buf(),
@@ -98,8 +109,12 @@ impl FipsPrivateTunnelRuntime {
             endpoint_bypass_underlay: None,
             #[cfg(target_os = "macos")]
             macos_underlay_refresh_pending: true,
+            #[cfg(target_os = "macos")]
+            macos_endpoint_bypass_verified_at: None,
             #[cfg(target_os = "linux")]
             original_default_route: None,
+            #[cfg(target_os = "linux")]
+            ethernet_underlay_default_route: None,
             #[cfg(target_os = "linux")]
             original_default_ipv6_route: None,
             #[cfg(target_os = "linux")]
@@ -211,8 +226,22 @@ impl FipsPrivateTunnelRuntime {
         #[cfg(feature = "paid-exit")]
         self.mesh
             .set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
+        let endpoint_peers_to_refresh = endpoint_peers_with_changed_addresses(
+            &self.config.endpoint_peers,
+            &config.endpoint_peers,
+        );
         if let Err(error) = self.mesh.update_peers(&config.endpoint_peers).await {
             eprintln!("fips: update_peers during apply_config failed: {error}");
+        }
+        if !endpoint_peers_to_refresh.is_empty() {
+            match self.mesh.refresh_peer_paths(&endpoint_peers_to_refresh).await {
+                Ok(refreshed) => eprintln!(
+                    "fips: refreshed {refreshed} peer path(s) after endpoint address update"
+                ),
+                Err(error) => {
+                    eprintln!("fips: peer path refresh after endpoint address update failed: {error}");
+                }
+            }
         }
         if self.config.nostr_relays != config.nostr_relays {
             self.mesh.update_relays(&config.nostr_relays).await?;
@@ -304,6 +333,7 @@ impl FipsPrivateTunnelRuntime {
                 runtime.wg_upstream.take();
             }
         }
+        runtime.pending_paid_exit_dns.take();
         let dns_cleanup = if let Some(secure_dns) = runtime.secure_dns.as_mut() {
             secure_dns.stop().await
         } else {
@@ -380,6 +410,11 @@ impl FipsPrivateTunnelRuntime {
         // dispatch an in-flight Cloudflare query before finish_secure_dns
         // restores the profile resolver.
         let wireguard_active = self.wireguard_exit_active();
+        // The private-name responder must release the shared port and resolver
+        // file before secure exit DNS takes ownership after seller admission.
+        if !self.manages_secure_dns || !config.pending_paid_exit_split_dns_required() {
+            self.pending_paid_exit_dns.take();
+        }
         if self.manages_secure_dns && config.secure_dns_required() && self.secure_dns.is_none() {
             crate::secure_dns_runtime::SecureDnsRuntime::start_into(
                 &mut self.secure_dns,
@@ -426,6 +461,22 @@ impl FipsPrivateTunnelRuntime {
         {
             secure_dns.stop().await?;
             self.secure_dns.take();
+        }
+        if self.manages_secure_dns && config.pending_paid_exit_split_dns_required() {
+            if self.pending_paid_exit_dns.as_ref().is_some_and(|dns| {
+                dns.suffix
+                    != config.magic_dns_suffix.trim().trim_matches('.').to_ascii_lowercase()
+            }) {
+                self.pending_paid_exit_dns.take();
+            }
+            if let Some(dns) = self.pending_paid_exit_dns.as_ref() {
+                dns.update_records(config.magic_dns_records.clone());
+            } else {
+                self.pending_paid_exit_dns = crate::ConnectMagicDnsRuntime::start_records(
+                    &config.magic_dns_suffix,
+                    config.magic_dns_records.clone(),
+                );
+            }
         }
         Ok(())
     }
@@ -524,6 +575,24 @@ impl FipsPrivateTunnelRuntime {
             config.interface_mtu(),
         )
         .with_context(|| format!("failed to configure FIPS tunnel interface {}", self.iface))?;
+        // macOS may rewrite the route table while split defaults are added.
+        // Re-read and repair the seller/relay underlay escape routes after
+        // that mutation so a paid tunnel can never route its own transport
+        // back into itself.
+        if active_ipv4_exit
+            && has_peer_endpoint_hosts
+            && let Err(error) = self.reconcile_macos_endpoint_bypass_for_config(config).await
+        {
+            let rollback = crate::delete_macos_default_route_for_interface(&self.iface);
+            return match rollback {
+                Ok(()) => Err(error.context(
+                    "reassert macOS endpoint bypass after default route update; paid default route rolled back",
+                )),
+                Err(rollback_error) => Err(error.context(format!(
+                    "reassert macOS endpoint bypass after default route update; paid default route rollback failed: {rollback_error:#}"
+                ))),
+            };
+        }
         Ok(())
     }
 
@@ -532,17 +601,49 @@ impl FipsPrivateTunnelRuntime {
         &mut self,
         config: &FipsPrivateTunnelConfig,
     ) -> Result<(bool, Option<crate::MacosRouteSpec>)> {
-        let hosts = self.endpoint_bypass_ipv4_hosts(config).await?;
-        let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts);
+        let mut hosts = self.endpoint_bypass_ipv4_hosts(config).await?;
+        hosts.extend(config.control_plane_bypass_hosts.iter().copied());
+        hosts.sort_unstable();
+        hosts.dedup();
+        let interfaces = netdev::get_interfaces();
+        let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
+            &hosts,
+            self.endpoint_bypass_underlay.as_ref(),
+            &interfaces,
+        );
         let force_underlay_refresh = self.macos_underlay_refresh_pending
             || self.config.underlay_interface != config.underlay_interface;
-        // Peer events are frequent and normally leave both bypasses and the
-        // physical underlay unchanged. Only a real link/config transition
-        // invalidates the populated ownership cache.
+        // Peer heartbeats are frequent and normally leave both bypasses and
+        // the physical underlay unchanged. Link/config transitions still
+        // verify immediately; the bounded safety poll repairs external route
+        // removal without spawning `netstat` for every heartbeat.
+        let now = Instant::now();
+        let verify_current_routes = force_underlay_refresh
+            || macos_endpoint_bypass_verification_due(
+                self.macos_endpoint_bypass_verified_at,
+                now,
+            );
+        let current_routes_present = if verify_current_routes {
+            let present = self.endpoint_bypass_underlay.as_ref().is_some_and(|underlay| {
+                crate::macos_network::macos_managed_routes_present_in_system(
+                    &self.endpoint_bypass_routes,
+                    underlay,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("fips: failed to verify cached macOS endpoint bypasses: {error}");
+                    false
+                })
+            });
+            self.macos_endpoint_bypass_verified_at = Some(now);
+            present
+        } else {
+            true
+        };
         if !macos_endpoint_bypass_underlay_refresh_required(
             &self.endpoint_bypass_routes,
             self.endpoint_bypass_underlay.as_ref(),
             &routes,
+            current_routes_present,
         ) && !force_underlay_refresh
         {
             return Ok((!hosts.is_empty(), self.endpoint_bypass_underlay.clone()));
@@ -558,9 +659,15 @@ impl FipsPrivateTunnelRuntime {
                 None
             }
         };
+        let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
+            &hosts,
+            underlay.as_ref(),
+            &interfaces,
+        );
         self.reconcile_macos_endpoint_bypass_routes(
             underlay.as_ref().map_or(&[], |_| routes.as_slice()),
             underlay.as_ref(),
+            !current_routes_present,
         )?;
         self.macos_underlay_refresh_pending = false;
         Ok((!hosts.is_empty(), underlay))
@@ -571,48 +678,33 @@ impl FipsPrivateTunnelRuntime {
         &mut self,
         routes: &[String],
         underlay: Option<&crate::MacosRouteSpec>,
+        force_reapply: bool,
     ) -> Result<()> {
         // Reassert the currently owned identity before removing anything.
         // This also makes a previously successful runtime crash-repairable
         // even if an earlier post-apply journal update was interrupted.
         self.persist_network_cleanup_ownership()?;
         let mut failures = Vec::new();
-        let desired = routes
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        let underlay_changed = self.endpoint_bypass_underlay.as_ref() != underlay;
-        let current_underlay = self.endpoint_bypass_underlay.clone();
-        let current_gateway = current_underlay
-            .as_ref()
-            .and_then(|owner| owner.gateway.as_deref());
-        let current_interface = current_underlay
-            .as_ref()
-            .map(|owner| owner.interface.as_str());
-        let stale = self
-            .endpoint_bypass_routes
-            .iter()
-            .filter(|route| underlay_changed || !desired.contains(*route))
-            .cloned()
-            .collect::<Vec<_>>();
-        for route in stale {
-            if let Err(error) =
-                crate::delete_macos_managed_route(&route, current_gateway, current_interface)
-                && !crate::daemon_runtime::macos_route_delete_error_is_absent(&error.to_string())
-            {
-                failures.push(format!("remove endpoint bypass route {route}: {error:#}"));
-            }
-        }
-        if !failures.is_empty() {
-            return Err(anyhow!(failures.join("; ")));
-        }
-        if underlay_changed {
-            self.endpoint_bypass_routes.clear();
-            self.endpoint_bypass_underlay = None;
-        } else {
-            self.endpoint_bypass_routes
-                .retain(|route| desired.contains(route));
-        }
+        remove_obsolete_macos_endpoint_bypasses(
+            &mut self.endpoint_bypass_routes,
+            &mut self.endpoint_bypass_underlay,
+            routes,
+            underlay,
+            |route, owner| {
+                let result = crate::delete_macos_managed_route(
+                    route,
+                    owner.and_then(|owner| owner.gateway.as_deref()),
+                    owner.map(|owner| owner.interface.as_str()),
+                );
+                match result {
+                    Err(error)
+                        if crate::daemon_runtime::macos_route_delete_error_is_absent(
+                            &error.to_string(),
+                        ) => Ok(()),
+                    result => result,
+                }
+            },
+        )?;
         // Journal every exact desired route and underlay before the first
         // route add. Replaying this intent is safe if the crash happened
         // before an add because cleanup verifies exact route ownership and
@@ -630,6 +722,7 @@ impl FipsPrivateTunnelRuntime {
             &mut self.endpoint_bypass_underlay,
             routes,
             underlay,
+            force_reapply,
             |route, gateway| crate::apply_macos_route_spec(route, gateway, interface),
         ) {
             failures.push(format!("install endpoint bypass route {route}: {error:#}"));
@@ -640,7 +733,7 @@ impl FipsPrivateTunnelRuntime {
     #[cfg(target_os = "macos")]
     fn cleanup_macos_network_state(&mut self) -> Result<()> {
         let mut failures = Vec::new();
-        if let Err(error) = self.reconcile_macos_endpoint_bypass_routes(&[], None) {
+        if let Err(error) = self.reconcile_macos_endpoint_bypass_routes(&[], None, false) {
             failures.push(error.to_string());
         }
         if let Err(error) = crate::delete_macos_default_route_for_interface(&self.iface)
@@ -828,173 +921,4 @@ impl FipsPrivateTunnelRuntime {
     }
 }
 include!("macos_wg_transition.rs");
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn combined_failures(failures: Vec<String>) -> Result<()> {
-    if !failures.is_empty() {
-        return Err(anyhow!(failures.join("; ")));
-    }
-    Ok(())
-}
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
-fn fips_host_disabled_cleanup_due(runtime_running: bool, cleanup_complete: bool) -> bool {
-    !runtime_running && !cleanup_complete
-}
-macro_rules! mesh_delegate {
-    ($(#[$meta:meta])* async fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty) => {
-        $(#[$meta])*
-        pub(crate) async fn $name(&self, $($arg: $ty),*) -> $result {
-            self.mesh.$name($($arg),*).await
-        }
-    };
-    ($(#[$meta:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty) => {
-        $(#[$meta])*
-        pub(crate) fn $name(&self, $($arg: $ty),*) -> $result {
-            self.mesh.$name($($arg),*)
-        }
-    };
-}
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-impl FipsPrivateTunnelRuntime {
-    pub(crate) fn iface(&self) -> &str {
-        &self.iface
-    }
-    pub(crate) fn active_listen_port(&self) -> Option<u16> {
-        self.active_listen_port
-    }
-    #[cfg(all(
-        feature = "paid-exit",
-        any(target_os = "linux", target_os = "macos")
-    ))]
-    pub(crate) fn paid_exit_seller_ready(&self) -> bool {
-        self.active_listen_port.is_some() && self.local_exit_seller_egress_ready
-    }
-    pub(crate) fn client_dataplane_enabled(&self) -> bool {
-        self.config.client_dataplane_enabled
-    }
-    pub(crate) fn ethernet_underlay(&self) -> Option<&FipsEthernetUnderlayConfig> {
-        self.config.ethernet_underlay.as_ref()
-    }
-    mesh_delegate!(fn peer_statuses() -> Vec<MeshPeerStatus>);
-    mesh_delegate!(
-        #[cfg(feature = "paid-exit")]
-        fn drain_paid_route_usage(participant: &str) -> Result<PaidRouteUsage>
-    );
-    mesh_delegate!(fn stale_participants_needing_path_refresh(now: u64) -> Vec<String>);
-    mesh_delegate!(async fn relay_statuses() -> Result<Vec<FipsRelayStatus>>);
-    mesh_delegate!(async fn local_advertised_endpoints() -> Result<Vec<OverlayEndpointAdvert>>);
-    mesh_delegate!(fn peer_pubkeys() -> Vec<String>);
-    mesh_delegate!(async fn authenticated_endpoint_peers() -> Result<Vec<FipsEndpointPeer>>);
-    mesh_delegate!(fn peer_endpoint_hints() -> Vec<(String, Vec<(String, u64)>)>);
-    mesh_delegate!(
-        /// Forward a refreshed peer roster and address hints without restarting the endpoint.
-        async fn update_peers(endpoint_peers: &[FipsEndpointPeerTransportConfig])
-            -> Result<fips_endpoint::UpdatePeersOutcome>
-    );
-    mesh_delegate!(
-        async fn refresh_peer_paths(endpoint_peers: &[FipsEndpointPeerTransportConfig])
-            -> Result<usize>
-    );
-    mesh_delegate!(async fn rebind_network_transports(bind_interface: Option<String>) -> Result<usize>);
-    mesh_delegate!(async fn ping_peers(network_id: &str, now: u64) -> Result<usize>);
-    mesh_delegate!(async fn refresh_link_statuses() -> Result<()>);
-    mesh_delegate!(fn peer_advertised_routes(participant: &str) -> Vec<String>);
-    pub(crate) async fn send_join_request(
-        &self,
-        participant: &str,
-        requested_at: u64,
-        request: MeshJoinRequest,
-    ) -> Result<()> {
-        self.mesh
-            .send_join_request(&self.state_control, participant, requested_at, request)
-            .await
-    }
-    pub(crate) fn enqueue_roster(
-        &self,
-        participant: &str,
-        signed_roster: SignedRoster,
-    ) -> Result<()> {
-        self.mesh
-            .enqueue_roster(&self.state_control.sender(), participant, signed_roster)
-    }
-    pub(crate) fn join_roster_delivery(
-        &self,
-        participant: String,
-        join_roster: JoinRosterControl,
-    ) -> Result<FipsJoinRosterDelivery> {
-        self.mesh.join_roster_delivery(
-            self.state_control.sender(),
-            participant,
-            join_roster,
-        )
-    }
-    pub(crate) async fn send_join_roster_ack(
-        &self,
-        participant: &str,
-        roster_event_id: String,
-    ) -> Result<()> {
-        self.mesh
-            .send_join_roster_ack(&self.state_control, participant, roster_event_id)
-            .await
-    }
-    pub(crate) fn enqueue_capabilities(
-        &self,
-        participant: &str,
-        network_id: &str,
-        capabilities: PeerCapabilities,
-    ) -> Result<()> {
-        self.mesh.enqueue_capabilities(
-            &self.state_control.sender(),
-            participant,
-            network_id,
-            capabilities,
-        )
-    }
-    #[cfg(feature = "paid-exit")]
-    pub(crate) async fn send_paid_route_session_open(
-        &self,
-        seller: &str,
-        open: PaidRouteSessionOpen,
-    ) -> Result<()> {
-        self.mesh
-            .send_paid_route_session_open(&self.state_control, seller, open)
-            .await
-    }
-    #[cfg(feature = "paid-exit")]
-    pub(crate) async fn send_paid_route_session_open_ack(
-        &self,
-        buyer: &str,
-        lease_id: String,
-    ) -> Result<()> {
-        self.mesh
-            .send_paid_route_session_open_ack(&self.state_control, buyer, lease_id)
-            .await
-    }
-    #[cfg(feature = "paid-exit")]
-    pub(crate) fn enqueue_paid_route_payment(
-        &self,
-        seller: &str,
-        id: String,
-        envelope: StreamingRoutePaymentEnvelope,
-    ) -> Result<()> {
-        self.mesh
-            .enqueue_paid_route_payment(&self.state_control.sender(), seller, id, envelope)
-    }
-    #[cfg(feature = "paid-exit")]
-    pub(crate) async fn send_paid_route_payment_ack(&self, buyer: &str, id: String) -> Result<()> {
-        self.mesh
-            .send_paid_route_payment_ack(&self.state_control, buyer, id)
-            .await
-    }
-    pub(crate) fn drain_events(&mut self) -> Vec<FipsPrivateMeshEvent> {
-        let mut events = drain_event_batch(&mut self.event_rx, FIPS_MESH_EVENT_DRAIN_LIMIT);
-        let remaining = FIPS_MESH_EVENT_DRAIN_LIMIT.saturating_sub(events.len());
-        for received in self.state_control.drain().into_iter().take(remaining) {
-            match self.mesh.received_stateful_control_frame(received) {
-                Ok(Some(event)) => events.push(event),
-                Ok(None) => {}
-                Err(error) => eprintln!("discarding invalid FIPS-TCP control record: {error}"),
-            }
-        }
-        events
-    }
-}
+include!("tunnel_runtime_unix_core/delegates.rs");

@@ -12,15 +12,16 @@ usage: scripts/mobile-test-kit.sh [rust|fast|simulator|device|exit]
 Modes:
   rust       Run shared Rust mobile/core tests only.
   fast       Run Rust tests plus Android and iOS debug builds.
-  simulator  Run fast checks, then iOS simulator and Android adb launch smokes.
+  simulator  Build and test iOS simulator UI without any physical device.
   device     Run opt-in local physical-device VPN/TUN smokes.
   exit       Run physical Android/iOS WireGuard exit, DNS, and Direct restore e2e.
 
 Device identifiers are intentionally not stored in the repo. Use environment
 variables such as NVPN_ANDROID_SERIAL and NVPN_IOS_DEVICE when needed, or copy
 .env.mobile.example to .env.mobile.local for local ignored values. Device mode
-builds/installs the exact current iOS development-signed app and uses local iOS
-Packet Tunnel coverage without a private enrollment fixture by default.
+builds and installs the exact current iOS app with company Ad Hoc signing by
+default, then exercises the local Packet Tunnel without a private enrollment
+fixture.
 Android --vpn-cycle validates the app-private Rust runtime-state file after the
 OS VPN network becomes active; tune with NVPN_ANDROID_RUNTIME_STATE_WAIT_SECS
 or NVPN_ANDROID_RUNTIME_STATE_MAX_AGE_SECS if a slow device needs it. It also
@@ -36,8 +37,9 @@ behind.
 Simulator mode verifies app build/install/launch. Real VPN dataplane checks
 need physical devices. Device mode uses debug-created local networks for OS
 VPN/TUN coverage without private peer fixtures: Android may tap the system VPN
-consent prompt on a trusted local test device, and iOS builds/installs the
-current development-signed app before launch, requiring local signing env.
+consent prompt on a trusted local test device. The iOS run requires local
+signing credentials; set NVPN_IOS_DEVICE_SIGNING_MODE=development only for
+Xcode-managed development signing.
 EOF
 }
 
@@ -83,9 +85,7 @@ case "$mode" in
     run_fast
     ;;
   simulator|sim)
-    run_fast
     "$ROOT/scripts/mobile-ios-smoke.sh" simulator
-    "$ROOT/scripts/mobile-android-smoke.sh" --no-build
     ;;
   device)
     "$ROOT/scripts/mobile-android-smoke.sh" --create-network --accept-vpn-dialog --vpn-cycle

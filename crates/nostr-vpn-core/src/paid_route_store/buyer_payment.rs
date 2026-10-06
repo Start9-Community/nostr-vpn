@@ -81,9 +81,19 @@ impl PaidRouteStore {
         channel.status = status;
         channel.payment = payment.clone();
         channel.updated_at_unix = request.now_unix;
+        if session_record.funding_started_unix != 0 {
+            channel.error.clear();
+            self.buyer_session_admissions
+                .remove(&session_record.session.lease_id);
+            if self.selected_buyer_session_id == session_id {
+                self.buyer_session_open_attempts
+                    .insert(session_id.clone(), request.now_unix);
+            }
+        }
         self.channels.insert(channel_id.to_string(), channel);
 
         let mut session = session_record;
+        session.funding_started_unix = 0;
         session.session.payment = payment;
         session.updated_at_unix = request.now_unix;
         self.sessions.insert(session_id.clone(), session);
@@ -157,9 +167,15 @@ impl PaidRouteStore {
             delivered_units,
         );
         let previous_paid_msat = session_record.session.payment.paid_msat;
-        let paid_msat = request
-            .paid_msat
-            .unwrap_or_else(|| previous_paid_msat.max(amount_due_msat));
+        let paid_msat = request.paid_msat.unwrap_or_else(|| {
+            previous_paid_msat.max(amount_due_msat).min(
+                session_record
+                    .session
+                    .payment
+                    .capacity_sat
+                    .saturating_mul(1_000),
+            )
+        });
         validate_paid_route_payment_progress(
             "paid route buyer payment",
             paid_msat,
@@ -494,11 +510,31 @@ impl PaidRouteStore {
         context: &BuyerPaymentApplyContext<'_>,
         payment: CashuSpilmanPayment,
     ) -> Result<()> {
+        let previous_payment = self
+            .sessions
+            .get(context.session_id)
+            .and_then(|record| record.session.payment.cashu_spilman_payment.as_ref())
+            .or_else(|| {
+                self.channels
+                    .get(context.channel_id)
+                    .and_then(|channel| channel.payment.cashu_spilman_payment.as_ref())
+            });
+        let mut stored_payment = payment;
+        if let Some(previous) =
+            previous_payment.filter(|previous| previous.channel_id == stored_payment.channel_id)
+        {
+            if stored_payment.params.is_none() {
+                stored_payment.params = previous.params.clone();
+            }
+            if stored_payment.funding_proofs.is_none() {
+                stored_payment.funding_proofs = previous.funding_proofs.clone();
+            }
+        }
         if let Some(channel) = self.channels.get_mut(context.channel_id) {
             channel.payment.cashu_unit = context.unit.to_string();
             channel.payment.paid_msat = context.paid_msat;
             channel.payment.updated_at_unix = context.now_unix;
-            channel.payment.cashu_spilman_payment = Some(payment.clone());
+            channel.payment.cashu_spilman_payment = Some(stored_payment.clone());
             channel.payment.cashu_token_lease = None;
             channel.updated_at_unix = context.now_unix;
             if context.kind == BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose {
@@ -519,7 +555,7 @@ impl PaidRouteStore {
         record.session.payment.cashu_unit = context.unit.to_string();
         record.session.payment.paid_msat = context.paid_msat;
         record.session.payment.updated_at_unix = context.now_unix;
-        record.session.payment.cashu_spilman_payment = Some(payment);
+        record.session.payment.cashu_spilman_payment = Some(stored_payment);
         record.session.payment.cashu_token_lease = None;
         record.updated_at_unix = context.now_unix;
         Ok(())
@@ -562,7 +598,22 @@ impl PaidRouteStore {
         now_unix: u64,
     ) -> Option<PaidRouteBuyerUsageSession> {
         let mut best = None::<(u64, PaidRouteBuyerUsageSession)>;
+        let accounting_session = if self
+            .buyer_session_renewal_starts
+            .contains_key(&self.selected_buyer_session_id)
+        {
+            self.buyer_session_renewals
+                .get(&self.selected_buyer_session_id)
+                .unwrap_or(&self.selected_buyer_session_id)
+        } else {
+            &self.selected_buyer_session_id
+        };
         for record in self.sessions.values() {
+            // Preparing a newer channel must not divert accounting away from
+            // the route that is still selected and carrying the traffic.
+            if !accounting_session.is_empty() && record.session.session_id != *accounting_session {
+                continue;
+            }
             let Some(lease_record) = self.leases.get(&record.session.lease_id) else {
                 continue;
             };

@@ -28,7 +28,9 @@ const MAX_CONNECTIONS: usize = 256;
 const MAX_CONNECTIONS_PER_PEER: usize = 8;
 const IO_CHUNK_BYTES: usize = 16 * 1024;
 const DRIVE_INTERVAL: Duration = Duration::from_millis(20);
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+// FIPS may spend its full default 30-second handshake window recovering a
+// route. Keep state-control alive long enough to use the resulting session.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(35);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_CLOSE_RETENTION_MS: u64 = 250;
 const JOIN_ROSTER_ACK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -153,6 +155,7 @@ pub async fn send_join_roster_with_receipt(
         };
         match transport_sent {
             Some(Ok(_)) => {}
+            Some(Err(error)) if sender.command_tx.is_closed() => return Err(error),
             Some(Err(error)) => last_transport_error = Some(error.to_string()),
             None => {
                 last_transport_error.get_or_insert_with(|| {

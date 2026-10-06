@@ -12,7 +12,46 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
     }
 
     let store_path = paid_route_store_file_path(config_path);
-    let store = load_paid_route_store(&store_path)?;
+    let mut store = load_paid_route_store(&store_path)?;
+    let known_events = store
+        .offers
+        .values()
+        .map(|record| record.signed_offer.event.id)
+        .collect::<HashSet<_>>();
+    let events = crate::control_pubsub_runtime::load_control_pubsub_events(config_path)?;
+    let graph = nostr_vpn_core::paid_route_ratings::exit_rating_graph(
+        &app.nostr_keys()?.public_key().to_hex(),
+        &events,
+        &app.paid_exit.rating_discovery.trusted_authors,
+        now_unix,
+    )?;
+    let received_offers = events
+        .iter()
+        .filter(|event| !known_events.contains(&event.id))
+        .cloned()
+        .filter_map(|event| SignedPaidRouteOffer::from_event(event).ok())
+        .collect::<Vec<_>>();
+    if !received_offers.is_empty() {
+        persist_paid_exit_discovered_offers(&store_path, &received_offers, &[], None)?;
+    }
+    update_paid_route_store(&store_path, |store| {
+        store.refresh_exit_reputation(&events, &graph, now_unix);
+        Ok(())
+    })?;
+    store = load_paid_route_store(&store_path)?;
+    let reselect_from = store.automatic_reselect_from.clone();
+    if automatic.candidate.as_ref().is_some_and(|candidate| {
+        store.exit_provider_is_avoided(&candidate.seller_pubkey)
+            || normalize_nostr_pubkey(&reselect_from).ok().as_deref()
+                == Some(candidate.seller_pubkey.as_str())
+    }) {
+        // Finish any wallet operation before replacing its candidate. The
+        // routing gate already rejects the downvoted provider immediately.
+        if automatic.funding.is_some() {
+            return Ok(false);
+        }
+        automatic.cancel_candidate(false, now_unix);
+    }
     let selection = match automatic.selection(&store, now_unix) {
         Ok(selection) => selection,
         Err(_) => {
@@ -22,32 +61,79 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
             return Ok(false);
         }
     };
-    if let Some(candidate) = automatic.candidate.as_mut() {
-        if candidate.selection != selection {
-            candidate.failed = true;
+    let changing_mint = automatic.candidate.as_ref().is_some_and(|candidate| {
+        !candidate.funded
+            && candidate.selection.offer_key == selection.offer_key
+            && candidate.selection.mint_url != selection.mint_url
+    });
+    let exhausted = automatic.candidate.as_ref().is_some_and(|candidate| {
+        candidate.funded
+            && !store
+                .buyer_session_has_remaining_capacity(&candidate.session_id)
+                .unwrap_or(false)
+    });
+    if changing_mint || exhausted {
+        // A wallet operation may already be committing funds. Consume its
+        // result before deciding whether a replacement channel is necessary.
+        if automatic.funding.is_some() {
+            return Ok(false);
         }
-        return Ok(false);
+        // Keep the signed provider and its successful probe history. The old
+        // session remains available for recovery; its mint/request identity
+        // must never be rewritten underneath a wallet operation.
+        automatic.cancel_candidate(false, now_unix);
+    }
+    if let Some(candidate) = automatic.candidate.as_mut() {
+        candidate.reconcile_selection(selection);
+        if candidate.failed {
+            return Ok(false);
+        }
+        let changed =
+            select_automatic_paid_exit_route(app, config_path, &store, &candidate.session_id)?;
+        if changed {
+            // Config reloads can clear the selected exit without changing the
+            // automatic buyer. Restore its paid session, then prove the route
+            // again instead of keeping the previous connection's health result.
+            update_paid_route_store(&store_path, |store| {
+                store.begin_buyer_session_open_attempt(&candidate.session_id, now_unix)?;
+                Ok(())
+            })?;
+            if let Some(probe) = automatic.probe.take() {
+                probe.task.abort();
+            }
+            candidate.selected_at = now_unix;
+            candidate.probe_started_at = None;
+            candidate.probe_succeeded = false;
+            candidate.last_tx_at = None;
+            candidate.last_rx_at = None;
+            candidate.unanswered_since = None;
+        }
+        return Ok(changed);
     }
 
-    if let Some((seller_npub, seller_pubkey, session_id, funded)) =
+    if let Some((seller_pubkey, session_id, funded)) =
         recover_automatic_paid_exit_session(&store, &selection, now_unix)
     {
+        update_paid_route_store(&store_path, |store| {
+            store.begin_buyer_session_open_attempt(&session_id, now_unix)?;
+            Ok(())
+        })?;
         let route_changed =
-            app.public_paid_exit_node_pubkey_hex().as_deref() != Some(seller_pubkey.as_str());
-        app.select_public_paid_exit_node(&seller_npub)?;
-        if !PaidExitAutomaticBuyer::enabled(app) {
-            return Err(anyhow!(
-                "automatic paid exit recovery changed internet mode"
-            ));
-        }
-        if route_changed {
-            app.save(config_path)?;
-        }
+            select_automatic_paid_exit_route(app, config_path, &store, &session_id)?;
         if funded {
-            queue_recovered_automatic_channel_open(app, config_path, &session_id, now_unix)?;
+            queue_recovered_paid_exit_channel_open(app, config_path, &session_id, now_unix)?;
         }
+        let pending_funding = store.sessions[&session_id].funding_started_unix != 0;
         automatic.start_candidate(selection, seller_pubkey, session_id, funded, now_unix);
-        return Ok(route_changed);
+        if pending_funding {
+            automatic
+                .candidate
+                .as_mut()
+                .expect("recovered candidate")
+                .funding_attempted = true;
+        }
+        finish_automatic_reselection(&store_path, &reselect_from)?;
+        return Ok(changing_mint || exhausted || route_changed);
     }
 
     let buyer_npub = app
@@ -56,20 +142,27 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
         .to_bech32()
         .context("failed to encode automatic paid exit buyer npub")?;
     let session = update_paid_route_store(&store_path, |store| {
-        store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
+        let session = store.open_buyer_session(OpenPaidRouteBuyerSessionRequest {
             offer_selector: selection.offer_key.clone(),
             buyer_npub,
             mint_url: Some(selection.mint_url.clone()),
             channel_capacity_sat: Some(selection.channel_capacity_sat),
             initial_paid_msat: 0,
             now_unix,
-        })
+        })?;
+        store.begin_buyer_session_open_attempt(&session.session_id, now_unix)?;
+        Ok(session)
     })?;
     let seller_pubkey = normalize_nostr_pubkey(&session.seller_npub)
         .context("invalid automatically selected paid exit seller")?;
     if !PaidExitAutomaticBuyer::enabled(app) {
         return Ok(false);
     }
+    let endpoint_hints = store.offers[&selection.offer_key]
+        .offer
+        .fips_endpoints
+        .clone();
+    app.add_fips_peer_endpoint_hints(&session.seller_npub, &endpoint_hints)?;
     app.select_public_paid_exit_node(&session.seller_npub)?;
     if !PaidExitAutomaticBuyer::enabled(app) {
         return Err(anyhow!(
@@ -84,14 +177,53 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
         false,
         now_unix,
     );
+    finish_automatic_reselection(&store_path, &reselect_from)?;
     Ok(true)
+}
+
+fn finish_automatic_reselection(store_path: &Path, requested: &str) -> Result<()> {
+    if !requested.is_empty() {
+        update_paid_route_store(store_path, |store| {
+            if store.automatic_reselect_from == requested {
+                store.automatic_reselect_from.clear();
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Keep configuration in sync even when Automatic already has a candidate.
+fn select_automatic_paid_exit_route(
+    app: &mut AppConfig,
+    config_path: &Path,
+    store: &PaidRouteStore,
+    session_id: &str,
+) -> Result<bool> {
+    let seller_npub = store.buyer_session_seller_npub(session_id)?;
+    let seller_pubkey = normalize_nostr_pubkey(&seller_npub)?;
+    let endpoint_hints = store.buyer_session_seller_fips_endpoints(session_id)?;
+    let endpoints_before = app.fips_peer_endpoint_hints(&seller_npub);
+    app.add_fips_peer_endpoint_hints(&seller_npub, &endpoint_hints)?;
+    let changed = endpoints_before != app.fips_peer_endpoint_hints(&seller_npub)
+        || app.public_paid_exit_node_pubkey_hex().as_deref() != Some(seller_pubkey.as_str());
+    if changed {
+        app.select_public_paid_exit_node(&seller_npub)?;
+        if !PaidExitAutomaticBuyer::enabled(app) {
+            return Err(anyhow!(
+                "automatic paid exit selection changed internet mode"
+            ));
+        }
+        app.save(config_path)?;
+    }
+    Ok(changed)
 }
 
 fn recover_automatic_paid_exit_session(
     store: &PaidRouteStore,
     selection: &nostr_vpn_core::paid_route_store::PaidRouteAutomaticOfferSelection,
     now_unix: u64,
-) -> Option<(String, String, String, bool)> {
+) -> Option<(String, String, bool)> {
     let offer = &store.offers.get(&selection.offer_key)?.offer;
     let seller_pubkey = normalize_nostr_pubkey(&offer.seller_npub).ok()?;
     store
@@ -103,8 +235,12 @@ fn recover_automatic_paid_exit_session(
             (channel.role == PaidRouteChannelRole::Buyer
                 && channel.offer_id == offer.offer_id
                 && channel.counterparty_npub == offer.seller_npub
+                && channel.mint_url == selection.mint_url
                 && channel.expires_at_unix > now_unix
                 && lease.lease.expires_at_unix > now_unix
+                && store
+                    .buyer_session_has_remaining_capacity(&session.session.session_id)
+                    .ok()?
                 && matches!(
                     lease.status,
                     PaidRouteLifecycleStatus::Opening
@@ -122,11 +258,14 @@ fn recover_automatic_paid_exit_session(
             .then_some((
                 session.updated_at_unix,
                 session.session.session_id.clone(),
-                session.session.payment.cashu_spilman_payment.is_some(),
+                session
+                    .session
+                    .payment
+                    .cashu_spilman_payment
+                    .as_ref()
+                    .is_some_and(CashuSpilmanPayment::has_funding),
             ))
         })
         .max_by_key(|candidate| candidate.0)
-        .map(|(_, session_id, funded)| {
-            (offer.seller_npub.clone(), seller_pubkey, session_id, funded)
-        })
+        .map(|(_, session_id, funded)| (seller_pubkey, session_id, funded))
 }

@@ -142,8 +142,8 @@ fn buyer_payment_updates_due_reports_signable_balance_updates() {
     assert_eq!(due[0].delivered_units, 110);
     assert_eq!(due[0].amount_due_msat, 1_100);
     assert_eq!(due[0].paid_msat, 1_000);
-    assert_eq!(due[0].target_paid_msat, 2_000);
-    assert_eq!(due[0].payment_increment_msat, 1_000);
+    assert_eq!(due[0].target_paid_msat, 3_000);
+    assert_eq!(due[0].payment_increment_msat, 2_000);
     assert_eq!(due[0].remaining_unpaid_msat, 0);
     assert!(!due[0].capacity_exhausted);
 
@@ -152,7 +152,7 @@ fn buyer_payment_updates_due_reports_signable_balance_updates() {
         .expect("sign due update");
 
     assert_eq!(signed.due, due[0]);
-    assert_eq!(signed.payment.paid_msat, 2_000);
+    assert_eq!(signed.payment.paid_msat, 3_000);
     store = signed.store;
     assert!(
         store
@@ -248,6 +248,63 @@ fn buyer_signed_payment_envelope_uses_cashu_service_signer() {
         other => panic!("unexpected payload: {other:?}"),
     }
     assert_eq!(store.sessions[&session_id].session.payment.paid_msat, 1_000);
+}
+
+#[test]
+fn buyer_balance_update_retains_channel_funding_in_persisted_state() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
+    let (mut store, session_id, channel_id) =
+        buyer_store_with_session(&seller, &buyer, &sample_config());
+
+    store
+        .build_buyer_payment_envelope(BuildPaidRouteBuyerPaymentEnvelopeRequest {
+            session_id: session_id.clone(),
+            buyer_npub: buyer_npub.clone(),
+            kind: BuildPaidRouteBuyerPaymentEnvelopeKind::ChannelOpen,
+            payment: sample_spilman_payment(&channel_id, 0),
+            delivered_units: Some(0),
+            paid_msat: Some(0),
+            now_unix: 130,
+        })
+        .expect("persist funded channel open");
+
+    let update = store
+        .build_buyer_signed_payment_envelope(
+            &FakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id: session_id.clone(),
+                buyer_npub,
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::BalanceUpdate,
+                delivered_units: Some(100),
+                paid_msat: Some(1_000),
+                now_unix: 131,
+            },
+        )
+        .expect("persist balance update");
+
+    let StreamingRoutePaymentPayload::BalanceUpdate(wire_update) = update.envelope.payload else {
+        panic!("expected balance update payload");
+    };
+    assert!(!wire_update.payment.has_funding());
+    assert!(
+        store.sessions[&session_id]
+            .session
+            .payment
+            .cashu_spilman_payment
+            .as_ref()
+            .expect("stored session payment")
+            .has_funding()
+    );
+    assert!(
+        store.channels[&channel_id]
+            .payment
+            .cashu_spilman_payment
+            .as_ref()
+            .expect("stored channel payment")
+            .has_funding()
+    );
 }
 
 #[test]
@@ -607,4 +664,31 @@ fn seller_payment_balance_update_accepts_underreported_due_without_importing_usa
             .billable_bytes,
         150
     );
+}
+
+#[test]
+fn exhausted_buyer_channel_can_close_at_its_funded_capacity() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let mut config = sample_config();
+    config.pricing.price_msat_per_gb = 10_000_000_000;
+    config.channel.free_probe_units = 0;
+    config.channel.grace_units = 0;
+    let (mut store, session_id, _) = buyer_store_with_session(&seller, &buyer, &config);
+    let capacity = store.sessions[&session_id].session.payment.capacity_sat;
+    let result = store
+        .build_buyer_signed_payment_envelope(
+            &FakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id,
+                buyer_npub: buyer.public_key().to_bech32().unwrap(),
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::CooperativeClose,
+                delivered_units: Some(capacity * 100 + 50),
+                paid_msat: None,
+                now_unix: 150,
+            },
+        )
+        .expect("settle the funded capacity even if an in-flight packet exceeded it");
+    assert_eq!(result.paid_msat, capacity * 1_000);
+    assert!(result.amount_due_msat > result.paid_msat);
 }

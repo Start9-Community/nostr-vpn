@@ -23,6 +23,7 @@
                 paid_exit_free_probe_units: Some(65_536),
                 paid_exit_grace_units: Some(131_072),
                 paid_exit_country_code: Some("fi".to_string()),
+                paid_exit_network_class: Some("residential".to_string()),
                 paid_exit_asn: Some("AS12345".to_string()),
                 paid_exit_ipv4: Some(false),
                 paid_exit_ipv6: Some(true),
@@ -59,6 +60,7 @@
         assert_eq!(saved.paid_exit.channel.max_channel_capacity_sat, 100);
         assert_eq!(saved.paid_exit.channel.channel_expiry_secs, 3_600);
         assert_eq!(saved.paid_exit.channel.free_probe_units, 65_536);
+        assert_eq!(saved.paid_exit.location.network_class.as_str(), "residential");
         assert_eq!(saved.paid_exit.channel.grace_units, 131_072);
         assert_eq!(saved.paid_exit.location.country_code, "FI");
         assert_eq!(saved.paid_exit.location.asn, Some(12_345));
@@ -133,26 +135,54 @@
         };
 
         assert_eq!(
-            paid_exit::paid_exit_seller_status_text(
+            paid_exit::paid_exit_seller_status(
                 &app,
                 Some(&daemon_state),
                 &app.paid_exit,
                 true,
                 true,
             ),
-            "Waiting for the WireGuard handshake"
+            (false, "Waiting for the WireGuard handshake".to_string())
         );
 
         daemon_state.wireguard_exit_ready = true;
         assert_eq!(
-            paid_exit::paid_exit_seller_status_text(
+            paid_exit::paid_exit_seller_status(
                 &app,
                 Some(&daemon_state),
                 &app.paid_exit,
                 true,
                 true,
             ),
-            "Selling internet is ready"
+            (true, "Selling internet is ready".to_string())
+        );
+
+        // Losing the tunnel must turn a previously green seller amber.
+        daemon_state.wireguard_exit_ready = false;
+        assert!(
+            !paid_exit::paid_exit_seller_status(&app, Some(&daemon_state), &app.paid_exit, true, true,)
+                .0
+        );
+        daemon_state.wireguard_exit_ready = true;
+        daemon_state.paid_exit_seller_ready = false;
+        assert!(
+            !paid_exit::paid_exit_seller_status(&app, Some(&daemon_state), &app.paid_exit, true, true,)
+                .0
+        );
+        daemon_state.paid_exit_seller_ready = true;
+        app.paid_exit.channel.accepted_mints.clear();
+        assert!(
+            !paid_exit::paid_exit_seller_status(&app, Some(&daemon_state), &app.paid_exit, true, true,)
+                .0
+        );
+        app.paid_exit
+            .channel
+            .accepted_mints
+            .push("https://mint.example".to_string());
+        app.paid_exit.enabled = false;
+        assert_eq!(
+            paid_exit::paid_exit_seller_status(&app, Some(&daemon_state), &app.paid_exit, true, true,),
+            (false, "Selling internet is off".to_string())
         );
     }
 

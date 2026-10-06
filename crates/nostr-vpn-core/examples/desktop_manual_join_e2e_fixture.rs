@@ -575,18 +575,12 @@ fn verify_direct_runtime_state(
     }
 
     let expected_peer = normalize_nostr_pubkey(expected_peer)?;
-    let endpoint_peers = state["fips_endpoint_peers"]
-        .as_array()
-        .context("daemon state has no fips_endpoint_peers array")?;
-    let configured = endpoint_peers.iter().any(|peer| {
-        normalize_nostr_pubkey(peer["npub"].as_str().unwrap_or_default())
-            .is_ok_and(|npub| npub == expected_peer)
-            && peer["addresses"].as_array().is_some_and(|addresses| {
-                addresses.iter().any(|address| {
-                    address["addr"].as_str().is_some_and(|value| {
-                        value == expected_endpoint || value == format!("udp:{expected_endpoint}")
-                    })
-                })
+    // Enabling a paused daemon can precede its periodic endpoint-config
+    // snapshot. Check the durable pin and the authenticated live transport.
+    let configured = config.fips_peer_endpoints.iter().any(|(npub, addresses)| {
+        normalize_nostr_pubkey(npub).is_ok_and(|npub| npub == expected_peer)
+            && addresses.iter().any(|address| {
+                address == expected_endpoint || address == &format!("udp:{expected_endpoint}")
             })
     });
     if !configured {
@@ -601,11 +595,17 @@ fn verify_direct_runtime_state(
                 .or_else(|| peer["fips_endpoint_npub"].as_str())
                 .unwrap_or_default();
             normalize_nostr_pubkey(participant).is_ok_and(|npub| npub == expected_peer)
+                && normalize_nostr_pubkey(peer["fips_endpoint_npub"].as_str().unwrap_or_default())
+                    .is_ok_and(|npub| npub == expected_peer)
+                && peer["fips_transport_addr"].as_str() == Some(expected_endpoint)
+                && peer["fips_transport_type"].as_str() == Some("udp")
                 && peer["reachable"].as_bool() == Some(true)
         })
     });
     if !connected {
-        bail!("web/StartOS runtime did not authenticate its expected roster peer");
+        bail!(
+            "web/StartOS runtime did not authenticate its expected roster peer over the pinned UDP endpoint"
+        );
     }
     Ok(())
 }
@@ -822,5 +822,74 @@ fn main() -> ExitCode {
             eprintln!("desktop manual-join e2e fixture failed: {error:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_runtime_checks_the_saved_pin_and_authenticated_live_transport() -> Result<()> {
+        let peer = AppConfig::generated_without_networks();
+        let peer_npub = npub(&peer)?;
+        let endpoint = "10.254.99.2:25111";
+        let data_dir = env::temp_dir().join(format!("nvpn-direct-runtime-{}", peer_npub));
+        fs::create_dir_all(&data_dir)?;
+        let result = (|| -> Result<()> {
+            let mut config = AppConfig::generated_without_networks();
+            configure_direct_runtime(
+                &mut config,
+                "10.254.99.1:25110".parse()?,
+                &peer_npub,
+                endpoint.parse()?,
+            );
+            config.autoconnect = true;
+            config.save(&data_dir.join("config.toml"))?;
+            // A paused daemon can establish this live connection before its
+            // periodic endpoint-configuration snapshot has been populated.
+            let state = serde_json::json!({
+                "vpn_enabled": true,
+                "vpn_active": true,
+                "fips_direct_roster_peer_count": 1,
+                "fips_other_peer_count": 0,
+                "peers": [{
+                    "participant_pubkey": peer.own_nostr_pubkey_hex()?,
+                    "fips_endpoint_npub": peer_npub,
+                    "fips_transport_addr": endpoint,
+                    "fips_transport_type": "udp",
+                    "reachable": true,
+                }],
+            });
+            let state_path = data_dir.join("daemon.state.json");
+            write_result(&state_path, &state)?;
+            verify_direct_runtime_state(&data_dir, &peer_npub, endpoint)?;
+
+            for (field, value) in [
+                ("participant_pubkey", serde_json::json!(npub(&config)?)),
+                ("fips_endpoint_npub", serde_json::json!(npub(&config)?)),
+                (
+                    "fips_transport_addr",
+                    serde_json::json!("10.254.99.3:25111"),
+                ),
+                ("fips_transport_type", serde_json::json!("websocket")),
+                ("reachable", serde_json::json!(false)),
+            ] {
+                let mut invalid = state.clone();
+                invalid["peers"][0][field] = value;
+                write_result(&state_path, &invalid)?;
+                assert!(
+                    verify_direct_runtime_state(&data_dir, &peer_npub, endpoint).is_err(),
+                    "accepted invalid live peer field {field}",
+                );
+            }
+            write_result(&state_path, &state)?;
+            config.fips_peer_endpoints.clear();
+            config.save(&data_dir.join("config.toml"))?;
+            assert!(verify_direct_runtime_state(&data_dir, &peer_npub, endpoint).is_err());
+            Ok(())
+        })();
+        fs::remove_dir_all(data_dir)?;
+        result
     }
 }

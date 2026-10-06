@@ -2,7 +2,345 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 4.1.17 - 2026-09-27
+
+### Release notes
+
+This release hardens macOS background service installation and local file
+handling, and improves upgrades from older app versions. iOS does not support
+paid exits.
+
+### Fixed
+
+- Install and update the macOS background service with protected ownership and
+  permissions.
+- Protect macOS configuration, secrets, logs, and network recovery files against
+  unsafe filesystem links and permissions.
+- Preserve settings and identity during upgrades and migrate older network
+  recovery files into protected storage.
+- Show the macOS service update action when an older helper's version cannot be
+  safely determined.
+
+## 4.1.16 - 2026-09-25
+
+### Release notes
+
+This release fixes discovery of private exit nodes on iOS and Android,
+automatically collects pending earnings from expired seller channels, and adds
+local wallet transaction history on macOS. iOS does not support paid exits.
+
+### Improved
+
+- Automatically collect expired seller channels into the wallet while the daemon
+  runs, retry failed collections, and resume after a restart. Collection continues
+  for existing channels when new sales are disabled.
+- Show local wallet transaction history in an expandable section on macOS and
+  wait for pending wallet actions before refreshing it.
+- Make the full wallet mint row selectable on macOS and keep the selected mint
+  readable.
+- Put connection protection, DNS options, and WireGuard setup in macOS Settings.
+
+### Fixed
+
+- Show private exit nodes on iOS and Android before they are selected, using
+  their current authenticated Internet-sharing announcements.
+- Avoid unnecessary STUN DNS lookups delaying Linux route changes when Nostr
+  peer discovery and WebRTC are disabled.
+- Mark seller credit as collected only after the settled funds have been imported
+  into the wallet, preserving retries after an interrupted collection.
+
+## 4.1.15 - 2026-09-21
+
+### Release notes
+
+This release improves VPN pause behavior, keeps background refunds from delaying
+Internet payments, and simplifies connection controls on macOS. Prices and
+balances use your selected currency when Show fiat is enabled. iOS does not
+support paid exits.
+
+### Fixed
+
+- Stop client FIPS networking when the VPN is paused and accurately report
+  remaining FIPS connections.
+- Keep macOS LAN peers off gateway bypass routes so local connections retain
+  their direct routes.
+- Keep background refund recovery from blocking new payments and active paid
+  Internet connections.
+- Keep wallet mints reachable when a paid connection runs out of credit.
+- Start the web connection when joining a first network so QR approvals can arrive.
+- Refresh pending joins promptly on macOS when approval arrives.
+
+### Improved
+
+- Simplify macOS Internet navigation and keep automatic-exit status and provider
+  actions together with the selected connection.
+- Hide paid-exit diagnostics behind expandable provider and connection rows on
+  macOS, while keeping purchase, disconnect, and rating controls directly usable.
+- Use the selected fiat currency for prices, balances, fees, and payment summaries,
+  with enough precision for small bandwidth prices and a Bitcoin fallback when
+  exchange rates are unavailable.
+- Show Internet-sharing readiness in the macOS sidebar and menu bar, with the
+  selected Internet connection and sharing status available in the tray menu.
+
+## 4.1.14 - 2026-09-17
+
+### Release notes
+
+Paid exits now use trusted ratings to help choose providers and offer clearer
+selection controls. iOS does not support paid exits.
+
+### Added
+
+- Show provider-declared residential, datacenter, mobile, business, or unspecified
+  network types in paid-exit offers and marketplace views.
+- Rate previously used exits and share signed ratings through Nostr. Automatic
+  selection considers your preferences and ratings from trusted authors.
+- Rate the active automatic exit or choose Try another without losing purchased
+  credit. Downvoting an active provider stops using that provider.
+
+### Improved
+
+- Opening the Manual chooser preserves the current connection until you select
+  an exit, and keeps the active paid provider at the top of the list.
+- Keep connection measurements private and require a recent healthy alternative
+  before automatically blaming an exit for an ambiguous connection failure.
+- Bring exit feedback and selection controls to desktop, Android, and the CLI
+  where applicable.
+
+### Fixed
+
+- Keep locally stored paid-exit offers up to date after rapid configuration
+  changes or a system-clock rollback.
+
+## 4.1.13 - 2026-09-16
+
+### Cargo distribution repair
+
+This version repairs the Rust packages on crates.io. Native applications,
+installers, containers, and the App Store submission remain at 4.1.12.
+The VPN and payment Rust source is unchanged from that tested release.
+
+- Publish the maintained Cashu and Spilman dependencies under explicit Nostr VPN
+  package names, so Cargo installs receive the same payment implementation.
+- Pin the CLI to the matching core and Windows support packages.
+- Build all distributable Cargo packages together during early release preflight,
+  including unpublished workspace dependencies, without local registry patches.
+
+## 4.1.12 - 2026-09-15
+
+### Release notes
+
+This release updates TLS security and improves device approval and network
+roster recovery. It includes the connection and payment reliability improvements
+in 4.1.11. iOS does not support paid exits.
+
+### Fixed
+
+- Update rustls to 0.23.45 to address RUSTSEC-2026-0285 in TLS 1.3 handshake
+  encryption-level validation.
+- Keep device approval responsive while recovering the first Internet route,
+  preserve signed removals after roster revocation, and report join errors accurately.
+- Preserve active Windows DNS policy while refreshing peers and physical routes.
+- Start the private mesh promptly when the host has no default Internet route.
+- Update FIPS core and endpoint to 0.4.82 to retain in-flight path recovery and
+  recover sparse unanswered sessions without restarting the VPN.
+
+### Release process
+
+- Check dependency advisories, packaging tools, signing keys, and Linux builders before expensive tests,
+  and export iOS archives with the exact certificate selected by their profiles.
+- Prepare physical test artifacts before timed checks and retain verified results
+  when resuming interrupted device tests.
+- Check the exact Windows source before building its installer and avoid temporary
+  workspace snapshots during release preparation.
+- Reuse the verified native Linux build for network test peers and validate
+  temporary dependency state when resuming physical join tests.
+- Limit paid-mode testing to compatible fixtures, prepare QR approval carriers
+  explicitly, and keep cleanup checks scoped to processes owned by each test.
+
+## 4.1.11 - 2026-09-13
+
+### Release notes
+
+Internet connections recover more reliably when switching modes or changing
+networks. Paid exits preserve purchased credit through reconnects and renewals,
+and wallet funding recovers from mint outages. iOS does not support paid exits.
+
+### Fixed
+
+- Preserve shared endpoint routes during WireGuard handover and keep a healthy
+  public paid connection when private peers go offline.
+- Restore Automatic Internet routes after configuration reloads, preserve paid
+  credit across mode changes, and finish outstanding wallet operations safely.
+- Renew paid channels before credit runs out, bind purchased capacity to the
+  agreed offer, and cover actual Cashu redemption fees before committing funds.
+- Back off unavailable mints, prioritize waiting Internet funding, and try an
+  available wallet mint while another mint is cooling down.
+- Refresh wallet connections after Internet route changes and keep receive and
+  send dialogs aligned with the selected mint and current transaction.
+- Show the selected Internet connection's status, provider country, price,
+  funding cooldown, and per-provider traffic and payment totals more clearly.
+- Harden Cashu Spilman channel recovery and settlement with CDK 0.18 support.
+- Update FIPS core and endpoint to 0.4.81, TCP endpoint to 0.2.16, and the
+  pubsub adapter to 0.5.4 for compatible session recovery improvements.
+
+### Release process
+
+- Group physical phone checks into one window and seal completed iOS evidence
+  before later unattended checks, allowing validated receipts to be retained.
+- Resume incomplete publication-bundle downloads from the local cache.
+- Check Docker readiness before expensive source validation and bound stalled
+  daemon and image requests so unavailable infrastructure fails promptly.
+- Synchronize the main Rust lockfile during version bumps so locked release
+  builds do not fail on stale workspace versions.
+- Record interrupted release gates as failures instead of reporting a passed
+  progress ledger after cancellation.
+- Include all vendored payment dependencies in Docker and Umbrel builds, and
+  check Docker's source filter before compiling platform packages.
+- Compile the App Store feature configuration during early source validation
+  and keep its funding-status interface aligned with the shared app core.
+- Isolate automatic-exit status test fixtures from local wallet state.
+
+## 4.1.10 - 2026-09-09
+
+### Release notes
+
+Cashu paid exits now connect, recover, and bill reliably with either manual or
+automatic selection on platforms that support paid exits. iOS does not support
+paid exits. Device joining also recovers encrypted connections after a peer's
+VPN restarts, and iPhone joining starts its approval carrier before exchanging
+a signed roster.
+
+### Fixed
+
+- Keep the iPhone VPN running during temporary outbound packet bursts instead
+  of treating a full packet queue as a fatal tunnel error.
+- Discover signed paid-exit offers automatically without first importing a
+  provider, and use the selected seller's advertised connection addresses.
+- Show automatic paid exits as active only while the selected seller is
+  connected, including the provider and verified exit IP.
+- Protect local keys, payment state, device rosters, and privileged daemon
+  files against unsafe filesystem links, and reject untrusted web origins.
+- Safely stage downloaded updates and app replacements without following
+  precreated filesystem links or misinterpreting installation paths.
+- Preserve pending iOS join receipts when restoring VPN routes after relaunch.
+- Recover encrypted sessions automatically after the other device's VPN
+  restarts, so retained connections can deliver device approvals again.
+- Keep iOS Internet route changes visibly pending until the running VPN has
+  applied them, including switching back to This device while staying connected.
+- Fix Linux CLI startup through launchers such as `sudo` by distinguishing the
+  actual VPN daemon from the process launching it.
+- Preserve existing router port mappings during routine daemon reloads and
+  deliver device approvals before potentially slow router discovery.
+- Keep mobile devices' live approval connection until their durable receipt reaches
+  the admin, avoiding a tunnel restart in the middle of device joining.
+- Disable iOS FIPS settings while the previous VPN state is being restored so
+  taps cannot appear to succeed before their configuration can be saved.
+- Start the iOS VPN carrier when creating an admin network, matching Android
+  and allowing QR and manual approvals to reach the joining device within the
+  release deadline.
+- Refresh a pending phone's authenticated approval return route every three
+  seconds, avoiding ten-second blind spots that could push signed roster
+  delivery beyond the release deadline.
+- Prove the real iPhone and Android carriers are ready before cross-device join
+  approval, including QR flows whose VPN control has scrolled off-screen.
+- Apply iOS FIPS bootstrap and discovery setting changes to the running packet
+  tunnel, and require an authenticated bootstrap peer before join approval.
+- Normalize Apple signing fingerprints before comparison so equivalent
+  certificate output cannot cause a false release-gate failure.
+- Keep Linux mesh startup working on minimal and NAS kernels without the
+  iptables `comment` matcher while retaining fatal handling for real firewall
+  and lock failures.
+- Prefer authenticated UDP for the built-in public bootstrap pair while
+  retaining WebSocket as a fallback on networks that block UDP, and migrate
+  older native defaults to the same preference on desktop and mobile.
+- Keep public bootstrap admission available as the connected client population
+  grows, while reserving capacity for configured peers and handshakes.
+- Keep the public bootstrap pair connected by assigning one canonical dialer
+  across both UDP and WebSocket, avoiding cross-connection replacement races.
+- Stop redundant mobile configuration writes and reduce Android idle polling.
+- Update the FIPS consumer chain to core and endpoint 0.4.78, TCP 0.2.2,
+  TCP endpoint 0.2.14, and pubsub adapter 0.5.1. These preserve wire formats
+  while yielding after persistent socket errors and recovering retained routes
+  and lost TCP traffic after an outage.
+- Retain the v4.1.9 Cashu paid-exit fixes for funding, automatic selection,
+  routed health checks, DNS safety, billing, recovery, and seller settings.
+
+## 4.1.9 - 2026-08-31
+
+### Release notes
+
+Cashu paid exits now connect, recover, and bill reliably with either manual or
+automatic selection.
+
+- Strengthened Selling Internet settings and release coverage on every
+  platform that supports acting as a paid exit.
+- Improved paid-route activation, health checks, DNS safety, and recovery from
+  interrupted or rotated Cashu channels.
+
+### Added
+
+- Add exact shipped-GUI release checks for saving, enabling, restarting, and
+  restoring paid-exit seller price, country, and accepted mints on Linux and
+  macOS, the platforms where selling internet is supported.
+- Add a production-path automatic paid-exit E2E alongside the manual E2E,
+  proving signed offer discovery, tunnel-bound health, automatic Cashu
+  funding, routed traffic, and streaming seller payments.
+
+### Fixed
+
+- Fund paid exits before relying on billable routing, bind automatic health
+  checks to the paid tunnel, bound failed connection and payment retries, and
+  preserve the selected Internet mode during cancellation and fallback.
+- Refresh and select Cashu keysets for the wallet's exact currency unit before
+  channel funding, so mints exposing several active units cannot reject an
+  otherwise valid paid-exit purchase.
+- Recover delayed, cancelled, and orphaned Spilman channels and refund proofs
+  across daemon restarts and mint key rotation without losing funded value.
+- Keep Cashu control traffic outside the macOS paid tunnel, preserve MagicDNS
+  after paid-exit fallback, and fail closed when safe exit DNS is unavailable.
+- Retry one transient authenticated DNS request before failing closed, avoiding
+  a cached resolver outage when a provider connection is briefly interrupted.
+- Preserve the original Linux default-route priority while reconciling a
+  temporarily de-prioritized underlay, so leaving an exit restores Direct
+  internet through the correct interface.
+- Keep the daemon responsive while its owned Cashu wallet repairs or recovers,
+  and retry funded paid routes without activating an unverified exit.
+- Allow an active paid seller's Direct-to-WireGuard upstream transition to
+  finish before the configuration deadline, avoiding a false rollback while
+  the replacement tunnel is being proven.
+- Grant StartOS packages virtual networking access for `/dev/net/tun` and
+  `CAP_NET_ADMIN`, validate the permission in signed release artifacts, and
+  restore StartOS/Umbrel image builds after vendoring `cashu-service`.
+- Prefer authenticated UDP for the public native FIPS seeds while retaining
+  WSS as a fallback on UDP-blocked networks, and migrate prior WSS-only native
+  defaults without making the WebSocket transport dial independently. Resolve
+  UDP hostnames before selecting a family-specific local socket.
+- Update to FIPS 0.4.70, which re-arms authenticated direct-path handshakes
+  after repeated network outages, retries recovered paths every 1–2 seconds,
+  and preserves staged direct-payload validation across in-flight fallback
+  traffic and stale receiver reports, avoiding recovery stalls or immediate
+  re-degradation when an original or changed source address returns under load.
+- Deliver the signed roster when an admin accepts an inbound device request,
+  including across a desktop mesh reload, so the joining device completes
+  instead of remaining at the approval prompt.
+- Keep manual device additions responsive when the recipient is offline by
+  avoiding a duplicate blocking delivery wait while preserving background
+  retries from the durable approval outbox.
+- Print join-request reachability once, keep the approval wait quiet through
+  transient connectivity changes without polling the daemon, and stop creating
+  a replacement request immediately after approval.
+- Expand public FIPS WebSocket seed capacity so ordinary browser clients retain
+  admission headroom as the authenticated public mesh grows, and evict
+  persistently poisoned end-to-end sessions so seed receive loops recover.
+- Close a browser's physical WebSocket after its authenticated route becomes
+  link-dead, allowing WebVM to reconnect instead of waiting forever on an
+  orphaned carrier after approval.
+- Keep state-control delivery alive beyond the full FIPS route-recovery
+  window, so a public-transit join does not fail just as its route recovers.
+- Show the complete underlying cause chain in native app action errors instead
+  of hiding useful wallet, service, and network diagnostics behind a generic
+  top-level message.
 
 ## 4.1.8 - 2026-08-18
 
