@@ -1,6 +1,9 @@
 {
   "name": "nostr-vpn-startos",
   "private": true,
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
   "dependencies": {
     "@start9labs/start-sdk": "3.0.3"
   },
