@@ -121,20 +121,17 @@ extension RootView {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    TextField("Provider npub or paid exit link", text: $manualPaidExitProvider)
-                        .textFieldStyle(.roundedBorder)
+                    PaidExitProviderField(text: $manualPaidExitProvider) { provider in
+                        manager.setManualPaidExitProvider(provider)
+                    }
                         .accessibilityIdentifier("manual-paid-exit-provider")
-                        .onSubmit { manager.setManualPaidExitProvider(manualPaidExitProvider) }
                     Button("Paste") {
                         if let value = NSPasteboard.general.string(forType: .string) {
                             manualPaidExitProvider = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                            manager.setManualPaidExitProvider(manualPaidExitProvider)
                         }
                     }
                     .accessibilityIdentifier("paste-paid-exit-provider")
-                    Button("Open") {
-                        manager.setManualPaidExitProvider(manualPaidExitProvider)
-                    }
-                    .disabled(manager.actionInFlight || manualPaidExitProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     if !market.manualProviderLink.isEmpty {
                         Button("Clear") { manager.clearManualPaidExitProvider() }
                             .disabled(manager.actionInFlight)
@@ -751,4 +748,69 @@ extension RootView {
         value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : value
     }
 
+}
+
+// AppKit's field editor consumes Paste before SwiftUI's onPasteCommand runs.
+// Use its paste callback so ordinary typing and state refreshes never open a provider.
+struct PaidExitProviderField: NSViewRepresentable {
+    @Binding var text: String
+    var open: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        let cell = ProviderCell(textCell: "")
+        cell.isScrollable = true
+        cell.usesSingleLineMode = true
+        cell.sendsActionOnEndEditing = false
+        cell.editor.isFieldEditor = true
+        cell.editor.didPaste = { [weak coordinator = context.coordinator] value in
+            coordinator?.parent.text = value
+            coordinator?.parent.open(value)
+        }
+        field.cell = cell
+        field.placeholderString = "Provider npub or paid exit link"
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text {
+            field.stringValue = text
+            field.currentEditor()?.string = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PaidExitProviderField
+        init(_ parent: PaidExitProviderField) { self.parent = parent }
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+        @objc func submit(_ field: NSTextField) { parent.open(field.stringValue) }
+    }
+
+    final class ProviderCell: NSTextFieldCell {
+        let editor = ProviderEditor()
+        override func fieldEditor(for controlView: NSView) -> NSTextView? { editor }
+    }
+
+    final class ProviderEditor: NSTextView {
+        var didPaste: ((String) -> Void)?
+        override func paste(_ sender: Any?) {
+            super.paste(sender)
+            didPaste?(string)
+        }
+    }
 }

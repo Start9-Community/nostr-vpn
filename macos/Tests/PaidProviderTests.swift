@@ -64,6 +64,44 @@ struct PaidProviderTests {
         view.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
         view.layoutSubtreeIfNeeded()
+        // Exercise the actual text field's Paste command while an action is queued.
+        manager.paidExitChooserRequested = true
+        let deadline = Date(timeIntervalSinceNow: 3)
+        while providerField(in: view) == nil && Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        guard let field = providerField(in: view) else { fatalError("Provider field is missing") }
+        let clipboard = NSPasteboard.general.pasteboardItems?.map { item in
+            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+        } ?? []
+        defer {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects(clipboard.map { values in
+                let item = NSPasteboardItem()
+                for (type, data) in values { item.setData(data, forType: type) }
+                return item
+            })
+        }
+        let pasted = "nvpn://paid-exit/npub12mh8r6uetvj9fptwua9gtng0ycz8uvzn0vmxsaddk7vfegeu29ts3qngt3?maxMsatPerGb=1000"
+        manager.actionInFlight = true
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pasted, forType: .string)
+        window.makeFirstResponder(field)
+        guard let editor = window.firstResponder as? NSTextView else { fatalError("Provider field did not focus") }
+        editor.selectAll(nil)
+        editor.insertText("nvpn://paid-exit/", replacementRange: editor.selectedRange())
+        precondition(manager.pendingPaidExitLink == nil, "Typing an incomplete link must not open it")
+        editor.selectAll(nil)
+        editor.paste(nil)
+        let pasteDeadline = Date(timeIntervalSinceNow: 3)
+        while manager.pendingPaidExitLink == nil && Date() < pasteDeadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        precondition(manager.pendingPaidExitLink == pasted, "Pasting must open the provider without a button")
+        manager.actionInFlight = false
+        manager.openPendingPaidExitLink()
+        precondition(manager.pendingPaidExitLink == nil)
+        window.makeFirstResponder(nil)
         guard CommandLine.arguments.count > 1 else {
             print("Provider URL queue passed")
             return
@@ -72,5 +110,11 @@ struct PaidProviderTests {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[1]))
         print("Provider URL queue and failure-reason UI rendering passed")
+    }
+
+    @MainActor static func providerField(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField,
+           field.placeholderString == "Provider npub or paid exit link" { return field }
+        return view.subviews.lazy.compactMap { providerField(in: $0) }.first
     }
 }
