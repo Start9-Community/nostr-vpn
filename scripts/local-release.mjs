@@ -1975,6 +1975,7 @@ function publishRelease({
   draft,
   dryRun,
   beforeMutation = () => {},
+  env = process.env,
 }) {
   if (dryRun) {
     console.log(`Would publish ${tag} from ${stageDir} into ${releaseTree}`)
@@ -1990,6 +1991,7 @@ function publishRelease({
   if (!draft) {
     validatePromotableReleaseManifest(manifest)
   }
+  const hapsArgs = ['import-release', stageDir, '--config', join(repoRoot, 'haps-release.json'), '--tag', tag]
   // The validated stage is an exact allowlist; Git ignores must not omit assets.
   const addOutput = run('htree', ['add', '--no-ignore', stageDir], { capture: true, dryRun })
   const match = addOutput.match(/^\s*url:\s*(\S+)/m)
@@ -2012,6 +2014,10 @@ function publishRelease({
   }
   beforeMutation()
   run('htree', args, { dryRun })
+  if (!draft) {
+    beforeMutation()
+    run('haps', [...hapsArgs, '--publish'], { env, dryRun })
+  }
   return cid
 }
 
@@ -2021,6 +2027,7 @@ function promoteStagedDraft({
   tag,
   dryRun,
   beforeMutation = () => {},
+  env = process.env,
 }) {
   if (dryRun) {
     console.log(`Would promote staged draft ${tag} from ${stageDir} into ${releaseTree}`)
@@ -2069,6 +2076,7 @@ function promoteStagedDraft({
         draft: false,
         dryRun,
         beforeMutation,
+        env,
       }),
       finalManifest,
       stagedAndroidApkPath,
@@ -2621,6 +2629,10 @@ function main() {
         stagedManifest,
       })
     }
+    // Validate the draft's exact package bytes and signer before any channel mutates.
+    run('haps', ['import-release', stageDir, '--config', join(repoRoot, 'haps-release.json'), '--tag', tag, '--check'], {
+      env: mutationEnv, dryRun: options.dryRun,
+    })
     const apple = publishExactIosDistribution({
       repoRoot,
       stagedManifest,
@@ -2639,6 +2651,7 @@ function main() {
     )
     const promoted = promoteStagedDraft({
       stageDir,
+      env: mutationEnv,
       releaseTree,
       tag,
       dryRun: options.dryRun,
