@@ -213,7 +213,13 @@ impl PaidRouteStore {
             .lease
             .expires_at_unix
             .min(channel.expires_at_unix);
-        let due_at_unix = channel.routing_expires_at_unix(lease_record.lease.expires_at_unix);
+        let scheduled_collection =
+            channel.routing_expires_at_unix(lease_record.lease.expires_at_unix);
+        let due_at_unix = if channel.status == PaidRouteLifecycleStatus::Closing {
+            channel.updated_at_unix.min(scheduled_collection)
+        } else {
+            scheduled_collection
+        };
         let terminally_collected = matches!(
             channel.status,
             PaidRouteLifecycleStatus::Closed | PaidRouteLifecycleStatus::Failed

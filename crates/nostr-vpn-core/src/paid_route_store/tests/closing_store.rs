@@ -214,6 +214,9 @@ fn seller_payment_cooperative_close_suspends_admission() {
     assert_eq!(collection.len(), 1);
     assert!(collection[0].collectable);
     assert!(collection[0].manual_collect);
+    assert!(collection[0].auto_collect_due);
+    assert_eq!(collection[0].due_at_unix, 130);
+    assert!(collection[0].expires_at_unix > 131);
 
     let mut refreshed_payment = sample_spilman_payment("channel-1", 1);
     refreshed_payment.signature.push_str("-retry");
@@ -253,6 +256,7 @@ fn seller_payment_cooperative_close_suspends_admission() {
         store.channels["channel-1"].status,
         PaidRouteLifecycleStatus::Closed
     );
+    assert!(store.seller_collection_states(&config, 132).is_empty());
 }
 
 #[test]
