@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::normalize_nostr_pubkey;
 use crate::fips_control::JoinRosterControl;
 
+include!("join_delivery/confirmation.rs");
+
 const JOIN_ROSTER_OUTBOX_VERSION: u8 = 1;
 const MAX_QUEUED_JOIN_ROSTERS: usize = 8;
 pub const JOIN_ROSTER_OUTBOX_TTL_SECS: u64 = 15 * 60;
@@ -65,6 +67,7 @@ pub fn queue_join_roster(
     let event_id = queued.join_roster.signed_roster.event.id.to_hex();
     let destination = directory.join(format!("{recipient_npub}-{event_id}.json"));
     if destination.exists() {
+        record_pending_join_confirmation(&directory, &queued)?;
         return Ok(destination);
     }
     let temporary = directory.join(format!(
@@ -73,6 +76,12 @@ pub fn queue_join_roster(
     ));
     let bytes = serde_json::to_vec(&queued).context("failed to encode queued join roster")?;
     write_private_file(&temporary, &bytes)?;
+    // Persist the pending state before the daemon can see and deliver the
+    // payload. Otherwise a fast receipt can arrive before its pending marker.
+    if let Err(error) = record_pending_join_confirmation(&directory, &queued) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     if let Err(error) = fs::rename(&temporary, &destination) {
         let _ = fs::remove_file(&temporary);
         return Err(error).with_context(|| format!("failed to queue {}", destination.display()));
@@ -239,7 +248,31 @@ mod tests {
         assert_eq!(reloaded[0].1.attempts, 1);
         assert_eq!(reloaded[0].1.last_attempt_at, 123);
 
-        fs::remove_file(path).expect("remove queued roster");
+        // A later approval can be queued while the old receipt is in flight.
+        let mut newer_roster = roster.roster().expect("roster");
+        newer_roster.signed_at = 124;
+        let newer = JoinRosterControl::new(
+            SignedRoster::sign("network", newer_roster, &admin).expect("new signature"),
+            "new-request-secret",
+        )
+        .expect("new approval");
+        let newer_path = queue_join_roster(&config_path, &recipient, &newer).expect("queue newer");
+        assert!(pending_join_confirmations(&config_path, "network").contains(&recipient));
+        assert!(pending_join_confirmations(&config_path, "other-network").is_empty());
+
+        complete_join_roster_delivery(&path, &queued[0].1).expect("confirm queued roster");
+        assert!(
+            pending_join_confirmations(&config_path, "network").contains(&recipient),
+            "an old receipt must not confirm the new request"
+        );
+        let expired_path = queue_join_roster(&config_path, &recipient, &join_roster)
+            .expect("queue older approval again");
+        fs::remove_file(expired_path).expect("expire retry payload without confirming");
+        let newer_delivery = load_join_rosters(&config_path).remove(0).1;
+        complete_join_roster_delivery(&newer_path, &newer_delivery).expect("confirm newer roster");
+        complete_join_roster_delivery(&newer_path, &newer_delivery)
+            .expect("duplicate receipt is harmless");
+        assert!(pending_join_confirmations(&config_path, "network").is_empty());
         fs::remove_dir(join_roster_outbox_directory(&config_path)).expect("remove outbox");
     }
 }

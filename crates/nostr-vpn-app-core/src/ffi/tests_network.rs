@@ -1,4 +1,5 @@
     include!("tests_network/exit_state.rs");
+    include!("tests_network/join_confirmation.rs");
 
     #[test]
     fn native_state_reports_routed_fips_peer_latency() {

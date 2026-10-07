@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use nostr_vpn_core::config::AppConfig;
 use nostr_vpn_core::join_delivery::{
-    join_roster_delivery_expired, load_join_rosters, record_join_roster_attempt,
+    QueuedJoinRoster, join_roster_delivery_expired, load_join_rosters, record_join_roster_attempt,
 };
 
 use crate::fips_private_mesh::{FipsPrivateTunnelConfig, FipsPrivateTunnelRuntime};
@@ -181,13 +181,13 @@ impl Drop for JoinRosterDeliveryClaim {
 
 fn track_join_roster_delivery(
     path: PathBuf,
-    participant: String,
+    queued: QueuedJoinRoster,
     delivery: crate::fips_private_mesh::FipsJoinRosterDelivery,
 ) -> tokio::task::JoinHandle<bool> {
     tokio::spawn(async move {
         let _claim = JoinRosterDeliveryClaim(path.clone());
         let result = delivery.await;
-        finish_join_roster_delivery(&path, &participant, result)
+        finish_join_roster_delivery(&path, &queued, result)
     })
 }
 
@@ -223,7 +223,7 @@ pub(super) fn start_queued_join_roster_deliveries(
             release_join_roster_delivery(&path);
             finish_join_roster_delivery(
                 &path,
-                &queued.recipient_npub,
+                &queued,
                 Err(anyhow::anyhow!(
                     "recipient {} is not in the roster",
                     queued.recipient_npub
@@ -237,29 +237,38 @@ pub(super) fn start_queued_join_roster_deliveries(
                 Ok(delivery) => delivery,
                 Err(error) => {
                     release_join_roster_delivery(&path);
-                    finish_join_roster_delivery(&path, &participant, Err(error));
+                    finish_join_roster_delivery(&path, &queued, Err(error));
                     continue;
                 }
             };
         if let Err(error) = record_join_roster_attempt(&path, &mut queued, crate::unix_timestamp())
         {
             release_join_roster_delivery(&path);
-            finish_join_roster_delivery(&path, &participant, Err(error));
+            finish_join_roster_delivery(&path, &queued, Err(error));
             continue;
         }
 
-        deliveries.push(track_join_roster_delivery(path, participant, delivery));
+        deliveries.push(track_join_roster_delivery(path, queued, delivery));
     }
     deliveries
 }
 
-fn finish_join_roster_delivery(path: &Path, recipient: &str, delivery: anyhow::Result<()>) -> bool {
+fn finish_join_roster_delivery(
+    path: &Path,
+    queued: &QueuedJoinRoster,
+    delivery: anyhow::Result<()>,
+) -> bool {
     match delivery {
         Ok(()) => {
-            consume_join_roster(path);
+            if let Err(error) =
+                nostr_vpn_core::join_delivery::complete_join_roster_delivery(path, queued)
+            {
+                eprintln!("failed to record confirmed join roster: {error:#}");
+                return false;
+            }
             eprintln!(
                 "delivered and applied one signed join roster over FIPS-TCP to {}",
-                recipient
+                queued.recipient_npub
             );
             true
         }
@@ -334,39 +343,53 @@ mod tests {
         assert!(app.pending_nostr_join_request.is_none());
     }
 
+    fn queued_join_fixture() -> (PathBuf, QueuedJoinRoster) {
+        let mut app = AppConfig::generated_without_networks();
+        let network_id = app.add_owned_network("Home");
+        let recipient = app.own_nostr_pubkey_hex().expect("own key");
+        app.add_admin_to_network(&network_id, &recipient)
+            .expect("local admin");
+        let roster = nostr_vpn_core::join_requests::prepare_manual_join_delivery(
+            &app,
+            &network_id,
+            &recipient,
+        )
+        .expect("signed approval");
+        let config_path = std::env::temp_dir().join(format!(
+            "nvpn-join-roster-retry-{}-{recipient}",
+            std::process::id(),
+        ));
+        let path =
+            nostr_vpn_core::join_delivery::queue_join_roster(&config_path, &recipient, &roster)
+                .expect("queue approval");
+        let queued = load_join_rosters(&config_path).remove(0).1;
+        (path, queued)
+    }
+
     #[test]
     fn failed_join_roster_delivery_keeps_outbox_file_for_retry() {
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-join-roster-retry-{}-{}",
-            std::process::id(),
-            crate::unix_timestamp()
-        ));
-        fs::write(&path, b"queued").expect("write queued roster");
+        let (path, queued) = queued_join_fixture();
 
-        finish_join_roster_delivery(&path, "recipient", Err(anyhow::anyhow!("offline")));
+        finish_join_roster_delivery(&path, &queued, Err(anyhow::anyhow!("offline")));
         assert!(path.exists(), "failed delivery must retain the outbox file");
 
-        finish_join_roster_delivery(&path, "recipient", Ok(()));
+        assert!(finish_join_roster_delivery(&path, &queued, Ok(())));
         assert!(
             !path.exists(),
             "durable receipt may consume the outbox file"
         );
+        fs::remove_dir(path.parent().unwrap()).expect("no pending confirmation remains");
     }
 
     #[tokio::test]
     async fn pre_sync_join_delivery_remains_claimed_through_post_sync_retry() {
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-join-roster-background-{}-{}",
-            std::process::id(),
-            crate::unix_timestamp()
-        ));
-        fs::write(&path, b"queued").expect("write queued roster");
+        let (path, queued) = queued_join_fixture();
         assert!(claim_join_roster_delivery(&path));
 
         let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
         let delivery_task = track_join_roster_delivery(
             path.clone(),
-            "recipient".to_string(),
+            queued,
             Box::pin(async move {
                 complete_rx.await.expect("release delivery");
                 Ok(())
@@ -383,22 +406,18 @@ mod tests {
         assert!(!path.exists(), "background delivery did not finish");
         assert!(claim_join_roster_delivery(&path));
         release_join_roster_delivery(&path);
+        fs::remove_dir(path.parent().unwrap()).expect("confirmed outbox is empty");
     }
 
     #[tokio::test]
     async fn existing_route_join_delivery_finishes_before_runtime_sync() {
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-join-roster-convergence-{}-{}",
-            std::process::id(),
-            crate::unix_timestamp()
-        ));
-        fs::write(&path, b"queued").expect("write queued roster");
+        let (path, queued) = queued_join_fixture();
         assert!(claim_join_roster_delivery(&path));
 
         let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
         let delivery_task = track_join_roster_delivery(
             path.clone(),
-            "recipient".to_string(),
+            queued,
             Box::pin(async move {
                 complete_rx.await.expect("release delivery");
                 Ok(())
@@ -417,6 +436,7 @@ mod tests {
         complete_tx.send(()).expect("complete delivery");
         waiter.await.expect("delivery waiter");
         assert!(!path.exists(), "durable receipt did not consume outbox");
+        fs::remove_dir(path.parent().unwrap()).expect("confirmed outbox is empty");
     }
 
     #[tokio::test]
@@ -444,19 +464,11 @@ mod tests {
 
     #[tokio::test]
     async fn timed_out_reload_handoff_releases_delivery_for_current_runtime() {
-        let path = std::env::temp_dir().join(format!(
-            "nvpn-join-roster-handoff-timeout-{}-{}",
-            std::process::id(),
-            crate::unix_timestamp()
-        ));
-        fs::write(&path, b"queued").expect("write queued roster");
+        let (path, queued) = queued_join_fixture();
         assert!(claim_join_roster_delivery(&path));
 
-        let delivery_task = track_join_roster_delivery(
-            path.clone(),
-            "recipient".to_string(),
-            Box::pin(std::future::pending()),
-        );
+        let delivery_task =
+            track_join_roster_delivery(path.clone(), queued, Box::pin(std::future::pending()));
         assert_eq!(
             wait_for_join_roster_delivery_tasks(vec![delivery_task], Duration::from_millis(10))
                 .await,
@@ -468,6 +480,6 @@ mod tests {
             "timed-out old runtime retained the outbox claim"
         );
         release_join_roster_delivery(&path);
-        fs::remove_file(path).expect("remove queued roster");
+        fs::remove_dir_all(path.parent().unwrap()).expect("remove pending test approval");
     }
 }

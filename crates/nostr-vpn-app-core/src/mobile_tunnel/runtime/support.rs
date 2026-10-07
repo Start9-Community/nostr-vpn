@@ -136,7 +136,8 @@ async fn deliver_mobile_queued_join_roster(
         {
             Ok(_) => {
                 if let Some(path) = outbox_path.as_deref()
-                    && let Err(error) = fs::remove_file(path)
+                    && let Err(error) =
+                        nostr_vpn_core::join_delivery::complete_join_roster_delivery(path, &queued)
                 {
                     tracing::warn!(?error, "mobile: failed to consume delivered join approval");
                 }

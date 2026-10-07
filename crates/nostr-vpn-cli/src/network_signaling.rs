@@ -288,7 +288,8 @@ mod tests {
         assert_eq!(queued.len(), 1, "manual approval must remain retryable");
         assert_eq!(queued[0].1.recipient_npub, recipient);
 
-        fs::remove_file(&queued[0].0).expect("remove queued roster");
+        nostr_vpn_core::join_delivery::complete_join_roster_delivery(&queued[0].0, &queued[0].1)
+            .expect("confirm queued roster");
         fs::remove_dir(join_roster_outbox_directory(&config_path)).expect("remove outbox");
         fs::remove_file(config_path).expect("remove config");
     }

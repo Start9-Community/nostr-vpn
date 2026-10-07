@@ -170,15 +170,25 @@ impl NativeAppRuntime {
         {
             participant_keys.push(own_pubkey_hex.to_string());
         }
+        let pending_confirmations = nostr_vpn_core::join_delivery::pending_join_confirmations(
+            &self.config_path,
+            &normalize_runtime_network_id(&network.network_id),
+        );
         let participants = participant_keys
             .iter()
             .map(|participant| {
-                self.participant_state(participant, network, own_pubkey_hex, vpn_active)
+                self.participant_state(
+                    participant,
+                    network,
+                    own_pubkey_hex,
+                    vpn_active,
+                    pending_confirmations.contains(participant),
+                )
             })
             .collect::<Vec<_>>();
         let online_count = participants
             .iter()
-            .filter(|participant| participant.reachable)
+            .filter(|participant| participant.reachable && participant.roster_accepted)
             .count() as u64;
         let expected_count = participants.len() as u64;
         let join_request_qr_code_or_link = self.current_join_request_link();
@@ -220,6 +230,7 @@ impl NativeAppRuntime {
         network: &NetworkConfig,
         own_pubkey_hex: &str,
         vpn_active: bool,
+        confirmation_pending: bool,
     ) -> NativeParticipantState {
         let daemon_peer = vpn_active.then_some(()).and_then(|()| {
             self.daemon_state.as_ref().and_then(|state| {
@@ -230,7 +241,8 @@ impl NativeAppRuntime {
             })
         });
         let is_local = participant == own_pubkey_hex;
-        let roster_accepted = !self.network_access_pending(network, own_pubkey_hex);
+        let roster_accepted = !self.network_access_pending(network, own_pubkey_hex)
+            && (is_local || !confirmation_pending);
         let reachable = vpn_active && (is_local || daemon_peer.is_some_and(|peer| peer.reachable));
         let access_pending = !roster_accepted && !is_local;
         let assigned_magic_dns_alias = self.config.peer_alias(participant).unwrap_or_default();
@@ -274,7 +286,9 @@ impl NativeAppRuntime {
             self.peer_state_label(participant, daemon_peer, is_local, vpn_active)
         };
         let mesh_state = Self::peer_mesh_label(daemon_peer, is_local, vpn_active);
-        let status_text = if access_pending {
+        let status_text = if confirmation_pending && !is_local {
+            "Waiting for this device to confirm the network".to_string()
+        } else if access_pending {
             if network
                 .outbound_join_request
                 .as_ref()
