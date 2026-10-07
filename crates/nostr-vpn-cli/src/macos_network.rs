@@ -211,6 +211,8 @@ pub(crate) fn macos_endpoint_bypass_targets_for_hosts(
     });
     let mut targets = hosts
         .iter()
+        // Same-host FIPS rendezvous must keep the system loopback route.
+        .filter(|host| !host.is_loopback())
         // Connected prefixes already beat the tunnel's split defaults. A
         // gateway /32 would override ARP and divert all traffic to a LAN peer.
         .filter(|host| {

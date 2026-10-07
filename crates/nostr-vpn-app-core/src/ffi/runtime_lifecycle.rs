@@ -79,6 +79,7 @@ impl NativeAppRuntime {
             last_service_status_refresh_at: None,
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
+            #[cfg(feature = "paid-exit")]
             paid_route_wallet_history: NativePaidRouteWalletHistoryState::default(),
             #[cfg(feature = "paid-exit")]
             paid_route_wallet_next_refresh_at: None,
@@ -142,6 +143,7 @@ impl NativeAppRuntime {
             last_service_status_refresh_at: None,
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
+            #[cfg(feature = "paid-exit")]
             paid_route_wallet_history: NativePaidRouteWalletHistoryState::default(),
             #[cfg(feature = "paid-exit")]
             paid_route_wallet_next_refresh_at: None,

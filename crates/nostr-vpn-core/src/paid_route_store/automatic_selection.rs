@@ -267,7 +267,10 @@ fn probe_rank(quality: &PaidRouteQualityMetrics) -> Option<LocalProbeRank> {
     })
 }
 
-fn recommended_capacity_sat(offer: &PaidRouteOffer, balance_msat: Option<u64>) -> Option<u64> {
+pub(super) fn recommended_capacity_sat(
+    offer: &PaidRouteOffer,
+    balance_msat: Option<u64>,
+) -> Option<u64> {
     let traffic_msat = u64::try_from(
         u128::from(offer.pricing.price_msat_per_gb)
             .saturating_mul(u128::from(CHANNEL_TARGET_BYTES))

@@ -36,6 +36,7 @@ fn configured_update_events() -> Result<UpdateEventCache> {
 }
 
 impl ControlEventStore {
+    #[cfg(any(feature = "paid-exit", test))]
     fn load(path: Option<PathBuf>, update_events: UpdateEventCache) -> Result<Self> {
         Self::load_for_owner(path, update_events, None)
     }
@@ -127,10 +128,12 @@ impl ControlEventStore {
             return false;
         }
         let now_secs = now_ms() / 1_000;
-        if matches!(u16::from(event.kind), 3 | 10_000) {
-            if self.graph_root.is_some_and(|root| root != event.pubkey)
-                || event.created_at.as_secs() > now_secs.saturating_add(300)
-            {
+        if matches!(u16::from(event.kind), 0 | 3 | 10_000) {
+            #[cfg(not(feature = "paid-exit"))]
+            if self.graph_root.is_some_and(|root| root != event.pubkey) {
+                return false;
+            }
+            if event.created_at.as_secs() > now_secs.saturating_add(300) {
                 return false;
             }
             if let Some(previous) = self

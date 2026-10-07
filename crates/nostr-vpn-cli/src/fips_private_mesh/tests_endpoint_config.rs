@@ -192,6 +192,7 @@
         );
         assert!(config.node.discovery.nostr.share_local_candidates);
         assert!(config.node.discovery.lan.enabled);
+        assert_eq!(config.node.discovery.lan.scope.as_deref(), Some("nostr-vpn"));
         assert_eq!(config.node.discovery.nostr.app, FIPS_NOSTR_DISCOVERY_APP);
         assert_eq!(
             config.node.discovery.nostr.stun_servers,

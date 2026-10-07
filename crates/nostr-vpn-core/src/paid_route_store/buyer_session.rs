@@ -19,7 +19,19 @@ impl PaidRouteStore {
         let accepted_terms = PaidExitConfig::from_paid_route_offer(&offer);
         let buyer_npub = normalize_paid_route_npub(&request.buyer_npub, "buyer")?;
         let mint_url = select_buyer_mint(&offer, &self.wallet, request.mint_url.as_deref())?;
-        let capacity_sat = requested_channel_capacity(&offer, request.channel_capacity_sat)?;
+        let balance = self
+            .wallet
+            .mints
+            .iter()
+            .find(|mint| mint.url == mint_url)
+            .and_then(|mint| mint.balance_msat);
+        let capacity_sat = requested_channel_capacity(
+            &offer,
+            request.channel_capacity_sat.or_else(|| {
+                automatic_selection::recommended_capacity_sat(&offer, balance)
+                    .or_else(|| automatic_selection::recommended_capacity_sat(&offer, None))
+            }),
+        )?;
         let now_unix = request.now_unix;
         let expires_at_unix = now_unix.saturating_add(offer.channel.channel_expiry_secs.max(1));
         let seller_pubkey = PublicKey::parse(&offer.seller_npub)

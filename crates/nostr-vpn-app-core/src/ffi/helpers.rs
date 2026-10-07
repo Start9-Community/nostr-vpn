@@ -480,10 +480,10 @@ fn paid_exit_provider_display_name(market: &NativePaidRouteMarketState, pubkey_h
     else {
         return "Paid provider".to_string();
     };
-    let country = non_empty(&offer.country_code).unwrap_or_else(|| "Unknown country".to_string());
+    let name = &offer.display_name;
     match non_empty(&offer.price_text) {
-        Some(price) => format!("{country} · {price}"),
-        None => country,
+        Some(price) => format!("{name} · {price}"),
+        None => name.clone(),
     }
 }
 

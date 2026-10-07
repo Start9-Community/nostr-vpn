@@ -117,6 +117,7 @@ fn paid_route_offer_state(
     let offer = &record.offer;
     let quality = offer.quality.as_ref();
     NativePaidRouteOfferState {
+        display_name: nostr_vpn_core::paid_provider_names::provider_alias(&offer.seller_npub),
         key: key.to_string(),
         offer_id: offer.offer_id.clone(),
         seller_npub: offer.seller_npub.clone(),

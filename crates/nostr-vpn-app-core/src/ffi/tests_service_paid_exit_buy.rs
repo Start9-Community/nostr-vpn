@@ -375,6 +375,8 @@
         let mut store =
             approve_manual_provider_mint(&mut runtime, &seller_npub, &offer_config, &store_path);
         assert_eq!(store.wallet.mints[0].url, mint);
+        // This test exercises free-probe admission, without contacting a real mint.
+        store.wallet.mints[0].balance_msat = Some(0);
 
         store
             .upsert_signed_offer(signed, vec!["wss://relay.example".to_string()], unix_timestamp())

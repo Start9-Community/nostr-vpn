@@ -29,6 +29,8 @@ pub mod paid_route_probe;
 #[cfg(feature = "paid-exit")]
 pub mod paid_route_ratings;
 #[cfg(feature = "paid-exit")]
+pub mod paid_provider_names;
+#[cfg(feature = "paid-exit")]
 pub mod paid_route_store;
 pub mod paid_routes;
 pub mod paths;

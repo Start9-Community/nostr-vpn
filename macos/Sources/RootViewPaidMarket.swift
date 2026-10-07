@@ -119,12 +119,19 @@ extension RootView {
                     .foregroundStyle(.orange)
             }
 
-            DisclosureGroup("Add provider by link") {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     TextField("Provider npub or paid exit link", text: $manualPaidExitProvider)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("manual-paid-exit-provider")
-                    Button("Add") {
+                        .onSubmit { manager.setManualPaidExitProvider(manualPaidExitProvider) }
+                    Button("Paste") {
+                        if let value = NSPasteboard.general.string(forType: .string) {
+                            manualPaidExitProvider = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    }
+                    .accessibilityIdentifier("paste-paid-exit-provider")
+                    Button("Open") {
                         manager.setManualPaidExitProvider(manualPaidExitProvider)
                     }
                     .disabled(manager.actionInFlight || manualPaidExitProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -184,7 +191,7 @@ extension RootView {
     }
 
     func paidRouteOfferRow(_ offer: NativePaidRouteOfferState) -> some View {
-        let compatibleMint = offer.acceptedMints.contains { accepted in
+        let compatibleMint = offer.priceMsatPerGb == 0 || offer.acceptedMints.contains { accepted in
             state.paidRouteMarket.wallet.mints.contains { $0.url == accepted }
         }
         let expanded = Binding(
@@ -194,80 +201,108 @@ extension RootView {
                 else { expandedPaidRouteOffers.remove(offer.key) }
             }
         )
-        return DisclosureGroup(isExpanded: expanded) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(offer.statusText)
-                if offer.hasRating {
-                    Text("Rating \(offer.ratingScore)").help("Ratings from you and people you trust")
-                }
-                let metricText = paidRouteMetricText(
-                    fallbackText(
-                        offer.qualityText,
-                        paidRouteQualityText(
-                            latencyMs: offer.latencyMs, jitterMs: offer.jitterMs,
-                            packetLossPpm: offer.packetLossPpm)), offer.bandwidthText)
-                if !metricText.isEmpty { Text(metricText) }
-                Text(paidRouteIpText(ipv4: offer.ipv4, ipv6: offer.ipv6))
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 4)
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text(paidRouteOfferTitle(offer))
-                        .fontWeight(.medium)
-                        .lineLimit(1)
-                    Spacer(minLength: 12)
-                    if offer.canRate {
-                        paidExitRatingButtons(seller: offer.sellerNpub, rating: offer.personalRating)
+        return VStack(alignment: .leading, spacing: 6) {
+            DisclosureGroup(isExpanded: expanded) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(offer.statusText)
+                    if offer.hasRating {
+                        Text("Rating \(offer.ratingScore)").help("Ratings from you and people you trust")
                     }
-                    Text(offer.priceText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    if state.internetSource == "paid_manual" && state.exitNode == offer.sellerNpub {
-                        Label(
-                            state.exitNodeActive ? "Active" : "Connecting",
-                            systemImage: state.exitNodeActive ? "checkmark.circle.fill" : "clock.fill"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(state.exitNodeActive ? Color.green : Color.orange)
-                    } else if paidRouteOfferHasBuyerChannel(offer) {
-                        Label("Ready", systemImage: "checkmark.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Button {
-                            manager.buyPaidRouteOffer(offer)
-                        } label: {
-                            Label("Buy", systemImage: "cart.fill")
-                        }
-                        .controlSize(.small)
-                        .disabled(manager.actionInFlight || !compatibleMint || offer.personalRating < 0)
-                    }
-                }
-                HStack(spacing: 10) {
-                    if offer.networkClass != "unknown" && !offer.networkClass.isEmpty {
-                        Text(offer.networkClass.capitalized)
-                            .help("Network type is declared by the provider")
-                    }
-                    if offer.personalRating < 0 { Text("Avoided").foregroundStyle(.red) }
+                    let metricText = paidRouteMetricText(
+                        fallbackText(
+                            offer.qualityText,
+                            paidRouteQualityText(
+                                latencyMs: offer.latencyMs, jitterMs: offer.jitterMs,
+                                packetLossPpm: offer.packetLossPpm)), offer.bandwidthText)
+                    if !metricText.isEmpty { Text(metricText) }
+                    Text(paidRouteIpText(ipv4: offer.ipv4, ipv6: offer.ipv6))
+                    Text(offer.sellerNpub).textSelection(.enabled)
+                    if compatibleMint { paidRouteAcceptedMints(offer) }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                if !compatibleMint {
-                    Text("Add one of this seller’s accepted mints to buy")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(offer.displayName)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                        Spacer(minLength: 12)
+                        if offer.canRate {
+                            paidExitRatingButtons(seller: offer.sellerNpub, rating: offer.personalRating)
+                        }
+                        Text(offer.priceText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        if state.internetSource == "paid_manual" && state.exitNode == offer.sellerNpub {
+                            Label(
+                                state.exitNodeActive ? "Active" : "Connecting",
+                                systemImage: state.exitNodeActive ? "checkmark.circle.fill" : "clock.fill"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(state.exitNodeActive ? Color.green : Color.orange)
+                        } else if paidRouteOfferHasBuyerChannel(offer) {
+                            Label("Ready", systemImage: "checkmark.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Button {
+                                manager.buyPaidRouteOffer(offer)
+                            } label: {
+                                Label("Buy", systemImage: "cart.fill")
+                            }
+                            .controlSize(.small)
+                            .disabled(manager.actionInFlight || !compatibleMint || offer.personalRating < 0)
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        Text(paidRouteOfferTitle(offer))
+                        if offer.networkClass != "unknown" && !offer.networkClass.isEmpty {
+                            Text(offer.networkClass.capitalized)
+                                .help("Network type is declared by the provider")
+                        }
+                        if offer.personalRating < 0 { Text("Avoided").foregroundStyle(.red) }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
+                .padding(.leading, 6)
+                .contentShape(Rectangle())
+                .onTapGesture { expanded.wrappedValue.toggle() }
             }
-            .padding(.leading, 6)
-            .contentShape(Rectangle())
-            .onTapGesture { expanded.wrappedValue.toggle() }
+            if !compatibleMint {
+                paidRouteAcceptedMints(offer).padding(.leading, 20)
+            }
         }
         .accessibilityIdentifier("paid-exit-offer-details-\(offer.key)")
+    }
+
+    func paidRouteAcceptedMints(_ offer: NativePaidRouteOfferState) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Accepted mints")
+                .foregroundStyle(.secondary)
+            ForEach(offer.acceptedMints, id: \.self) { mint in
+                HStack(spacing: 8) {
+                    Text(mint)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .help(mint)
+                    Spacer(minLength: 8)
+                    if state.paidRouteMarket.wallet.mints.contains(where: { $0.url == mint }) {
+                        Label("Trusted", systemImage: "checkmark")
+                    } else {
+                        Button("Trust mint") { manager.addPaidRouteWalletMint(url: mint) }
+                            .controlSize(.small)
+                            .disabled(manager.actionInFlight)
+                            .help("Allow this wallet to hold funds at \(mint)")
+                    }
+                }
+            }
+        }
+        .font(.caption)
     }
 
     func paidRouteOfferHasBuyerChannel(_ offer: NativePaidRouteOfferState) -> Bool {
@@ -345,7 +380,8 @@ extension RootView {
         let channel = paidRouteMarketChannel(for: session)
         let offer = state.paidRouteMarket.offers.first { $0.sellerNpub == session.sellerNpub }
         let country = session.observedCountryCode.isEmpty ? session.claimedCountryCode : session.observedCountryCode
-        let provider = Locale.current.localizedString(forRegionCode: country) ?? country
+        let location = Locale.current.localizedString(forRegionCode: country) ?? country
+        let provider = offer?.displayName ?? paidRouteShortIdentifier(session.sellerNpub)
         let expanded = Binding(
             get: { expandedPaidRouteSessions.contains(session.sessionId) },
             set: { isExpanded in
@@ -424,6 +460,7 @@ extension RootView {
                     }
                 }
                 HStack(spacing: 12) {
+                    if !location.isEmpty { Text(location) }
                     if let offer { Text(offer.priceText) }
                     Text(fallbackText(session.usageText, paidRouteUsageText(session)))
                     Text(fallbackText(session.paidText, "\(formatPaidRouteMsat(session.paidMsat)) paid"))

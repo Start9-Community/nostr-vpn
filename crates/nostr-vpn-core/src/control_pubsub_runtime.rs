@@ -61,6 +61,7 @@ enum RuntimeCommand {
 }
 
 include!("control_pubsub_runtime/event_store.rs");
+include!("control_pubsub_runtime/relay_provider.rs");
 
 #[derive(Clone)]
 pub struct ControlPubsubClient {
@@ -329,52 +330,6 @@ impl Drop for ControlPubsubFipsRuntime {
     }
 }
 
-struct RelayProvider {
-    bus: Arc<RelayEventBus>,
-    notifications: mpsc::Receiver<QueryEvent>,
-    _subscription: Box<dyn NostrEventSubscription>,
-}
-
-impl RelayProvider {
-    async fn start(
-        mode: NostrPubsubMode,
-        relays: Vec<String>,
-        update_events: &UpdateEventCache,
-        target_advert_authors: &[PublicKey],
-        graph_root: PublicKey,
-    ) -> Result<Option<Self>> {
-        if mode != NostrPubsubMode::Relay || relays.is_empty() {
-            return Ok(None);
-        }
-        let bus = Arc::new(
-            RelayEventBus::new(relays, RELAY_QUERY_TIMEOUT)
-                .await
-                .context("failed to start configured Nostr pubsub relay provider")?,
-        );
-        let (notification_tx, notifications) = mpsc::channel(RELAY_REPLAY_LIMIT * 5);
-        let subscription = NostrEventSubscriber::subscribe(
-            bus.as_ref(),
-            {
-                let mut filters = relay_subscription_filters(update_events, target_advert_authors);
-                filters.push(exit_graph_filter(graph_root));
-                filters
-            },
-            Arc::new(move |event| {
-                if notification_tx.try_send(event).is_err() {
-                    tracing::warn!("dropping control pubsub relay event because the bounded ingress queue is full");
-                }
-            }),
-        )
-        .await
-        .context("failed to subscribe through configured Nostr pubsub relay provider")?;
-        Ok(Some(Self {
-            bus,
-            notifications,
-            _subscription: subscription,
-        }))
-    }
-}
-
 struct PubsubRunState {
     endpoint: Arc<FipsEndpoint>,
     fips_pubsub: Arc<FipsPubsubClient>,
@@ -512,6 +467,8 @@ async fn run(
                 advert_refresh.as_mut().reset(tokio::time::Instant::now() + refresh_after);
             }
             _ = maintenance_tick.tick() => {
+                #[cfg(feature = "paid-exit")]
+                sync_provider_profiles(&mut relay, &events).await;
                 let delivery = fips_pubsub.delivery_snapshot();
                 tracing::debug!(
                     req_frames_received = delivery.req_frames_received,
@@ -1025,7 +982,7 @@ fn is_control_event(event: &Event, update_events: &UpdateEventCache) -> bool {
     }
     matches!(
         u16::from(event.kind),
-        FIPS_PEER_ADVERT_KIND | RATING_FACT_KIND | 3 | 10_000
+        FIPS_PEER_ADVERT_KIND | RATING_FACT_KIND | 0 | 3 | 10_000
     ) || update_events
         .filter()
         .match_event(event, MatchEventOptions::new())
@@ -1033,6 +990,8 @@ fn is_control_event(event: &Event, update_events: &UpdateEventCache) -> bool {
 
 include!("control_pubsub_runtime/outbox.rs");
 include!("control_pubsub_runtime/exit_ratings.rs");
+#[cfg(feature = "paid-exit")]
+include!("control_pubsub_runtime/provider_profiles.rs");
 
 #[cfg(test)]
 #[path = "control_pubsub_runtime/tests.rs"]

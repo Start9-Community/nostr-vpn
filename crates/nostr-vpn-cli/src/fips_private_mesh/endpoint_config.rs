@@ -310,12 +310,15 @@ fn fips_endpoint_config_with_open_discovery_limit(
         && transport
             .map(|transport| transport.share_local_candidates)
             .unwrap_or(false);
+    // A QR joiner cannot know our private network scope before approval.
+    // FIPS authentication and roster ACLs still control admission.
+    config.node.discovery.lan.scope = Some(
+        nostr_vpn_core::fips_discovery::FIPS_LAN_DISCOVERY_SCOPE_PREFIX.to_string(),
+    );
     // Leave the relay-side `app` at fips-core's default ("fips-overlay-v1").
     // We deliberately do NOT bake the per-network mesh id into it: the relay
     // `protocol` tag is publicly visible, so per-network apps would let any
-    // observer count members of each private network. The builder receives a
-    // hashed per-network LAN discovery scope separately; that scope is carried
-    // only in mDNS TXT records on the local link, while the private data plane
+    // observer count members of each private network. The private data plane
     // still enforces roster ownership before packets reach the tun.
     let external_addr = transport
         .filter(|_| advertise_public_endpoint)

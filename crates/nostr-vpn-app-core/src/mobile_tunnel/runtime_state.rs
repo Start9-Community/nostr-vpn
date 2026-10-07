@@ -604,6 +604,19 @@ fn update_mobile_peer_hints(
     let mut peer_hints = peer_hints
         .write()
         .map_err(|_| anyhow!("mobile FIPS peer hint lock poisoned"))?;
+    // An announcement is one source of candidates. It must not erase static
+    // addresses or paths learned locally through Bonjour. FIPS evaluates their
+    // freshness and connectivity; keep this cache bounded to recent hints.
+    if let Some(previous) = peer_hints.get(source_pubkey) {
+        for hint in previous {
+            if !hints.iter().any(|current| current.addr == hint.addr) {
+                hints.push(hint.clone());
+            }
+        }
+    }
+    hints.sort_by_key(|hint| std::cmp::Reverse(hint.seen_at_ms.unwrap_or(u64::MAX)));
+    hints.truncate(16);
+    hints.sort_by(|left, right| left.addr.cmp(&right.addr));
     if peer_hints.get(source_pubkey) == Some(&hints) {
         return Ok(false);
     }

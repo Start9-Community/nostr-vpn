@@ -29,6 +29,7 @@ final class AppManager: ObservableObject {
     @Published var updateStatus = ""
     @Published var autoCheckUpdates = UserDefaults.standard.object(forKey: "updates.autoCheck") as? Bool ?? true {
         didSet {
+            guard !fixtureMode else { return }
             UserDefaults.standard.set(autoCheckUpdates, forKey: "updates.autoCheck")
             if autoCheckUpdates {
                 startAutomaticUpdateChecks()
@@ -39,6 +40,7 @@ final class AppManager: ObservableObject {
     }
     @Published var autoInstallUpdates = UserDefaults.standard.bool(forKey: "updates.autoInstall") {
         didSet {
+            guard !fixtureMode else { return }
             UserDefaults.standard.set(autoInstallUpdates, forKey: "updates.autoInstall")
         }
     }
@@ -54,6 +56,8 @@ final class AppManager: ObservableObject {
     var refreshInFlight = false
     var refreshPending = false
     var startupUrlsDrained = false
+    var pendingPaidExitLink: String?
+    var openingPaidExitLink: String?
     var startupUpdateCheckDone = false
     var updateAssetUrl: URL?
     var updateUsesCoreDownload = false
@@ -310,6 +314,7 @@ final class AppManager: ObservableObject {
                     self.startServiceSettlementPolling(attempts: 30)
                 }
                 completion?(nextState.error.isEmpty)
+                self.openPendingPaidExitLink()
             }
         }
     }

@@ -244,7 +244,7 @@
             })
         }).unwrap();
         runtime.config.select_public_paid_exit_node(&seller_npub).unwrap();
-        let provider_name = "IE · 25 sat/GB";
+        let provider_name = format!("{} · 25 sat/GB", nostr_vpn_core::paid_provider_names::provider_alias(&seller_hex));
         let connecting = runtime.state();
         assert!(!connecting.exit_node_active);
         assert_eq!(connecting.exit_node_status_text,

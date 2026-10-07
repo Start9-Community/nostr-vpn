@@ -35,9 +35,11 @@ use crate::native_state::{
     NativeNetworkSummary, NativeOutboundJoinRequestState, NativePaidExitSellerState,
     NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
     NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
-    NativePaidRouteWalletHistoryState, NativePaidRouteWalletState, NativeParticipantState,
+    NativePaidRouteWalletState, NativeParticipantState,
     NativePortMappingStatus, NativeProbeStatus, NativeRelayState,
 };
+#[cfg(feature = "paid-exit")]
+use crate::native_state::NativePaidRouteWalletHistoryState;
 use crate::platform::current_runtime_capabilities;
 use crate::state::{
     DaemonPeerState, DaemonRuntimeState, HealthIssue, NetworkSummary, PortMappingStatus,
@@ -198,6 +200,7 @@ struct NativeAppRuntime {
     last_service_status_refresh_at: Option<Instant>,
     paid_route_market_filter: NativePaidRouteMarketFilterState,
     paid_route_wallet_last_action: NativePaidRouteWalletActionState,
+    #[cfg(feature = "paid-exit")]
     paid_route_wallet_history: NativePaidRouteWalletHistoryState,
     #[cfg(feature = "paid-exit")]
     paid_route_wallet_next_refresh_at: Option<Instant>,

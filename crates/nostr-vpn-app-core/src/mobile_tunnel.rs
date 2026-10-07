@@ -72,6 +72,7 @@ include!("mobile_tunnel/config.rs");
 include!("mobile_tunnel/runtime.rs");
 include!("mobile_tunnel/endpoint_control.rs");
 include!("mobile_tunnel/runtime_state.rs");
+include!("mobile_tunnel/lan_discovery.rs");
 include!("mobile_tunnel/endpoint_config.rs");
 include!("mobile_tunnel/magic_dns.rs");
 #[cfg(feature = "paid-exit")]
@@ -79,6 +80,7 @@ include!("mobile_tunnel/paid_exit_offer.rs");
 
 #[cfg(test)]
 mod tests {
+    include!("mobile_tunnel/tests_lan_discovery.rs");
     include!("mobile_tunnel/tests_core.rs");
     include!("mobile_tunnel/tests_control_source.rs");
     include!("mobile_tunnel/tests_pending_identity.rs");

@@ -350,7 +350,8 @@ impl ManualPaidExitProvider {
     }
 
     pub fn new(npub: &str, max_price_msat_per_gb: Option<u64>, mint: Option<&str>) -> Result<Self> {
-        let public_key = PublicKey::parse(npub).context("invalid paid exit provider npub")?;
+        let public_key = PublicKey::parse(npub.trim().trim_start_matches('@'))
+            .context("invalid paid exit provider npub; paste the complete npub or provider link")?;
         let npub = public_key
             .to_bech32()
             .context("failed to encode paid exit provider npub")?;

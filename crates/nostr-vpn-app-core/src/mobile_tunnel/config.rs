@@ -729,6 +729,7 @@ pub(crate) struct MobileTunnel {
     mesh: MobileMesh,
     presence: Arc<RwLock<HashMap<String, MobilePeerPresence>>>,
     config: Arc<RwLock<MobileTunnelConfig>>,
+    peer_hints: Arc<RwLock<HashMap<String, Vec<FipsPeerAddressHint>>>>,
     app_config: Arc<RwLock<AppConfig>>,
     app_config_dirty: Arc<AtomicBool>,
     pending_join_roster_receipts: PendingJoinRosterReceipts,

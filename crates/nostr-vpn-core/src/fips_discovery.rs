@@ -2,11 +2,11 @@ use sha2::{Digest, Sha256};
 
 pub const FIPS_LAN_DISCOVERY_SCOPE_PREFIX: &str = "nostr-vpn";
 
-/// Derive the private LAN discovery scope shared by every nvpn platform.
+/// Derive the opaque per-network endpoint label shared by nvpn platforms.
 ///
-/// The network ID must not appear in public mDNS records, and every client
-/// must derive the exact same opaque scope or nearby peers silently ignore
-/// one another.
+/// The endpoint keeps this label for compatibility. Its explicit LAN discovery
+/// config uses the common application scope above so devices can find an
+/// approval recipient before it learns the private network ID.
 pub fn fips_lan_discovery_scope(network_id: &str) -> String {
     let digest = Sha256::digest(network_id.trim().as_bytes());
     format!(

@@ -565,6 +565,7 @@ extension AppManager {
                 ),
                 offers: [
                     NativePaidRouteOfferState(
+                        displayName: "Curious Otter",
                         key: "seller-fi:internet-exit",
                         offerId: "internet-exit",
                         sellerNpub: "npub1paidexitfinlanddemo",
@@ -602,6 +603,7 @@ extension AppManager {
                         relayUrls: ["wss://relay.damus.io"]
                     ),
                     NativePaidRouteOfferState(
+                        displayName: "Sunny Falcon",
                         key: "seller-de:internet-exit",
                         offerId: "internet-exit",
                         sellerNpub: "npub1paidexitgermanydemo",

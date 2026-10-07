@@ -260,13 +260,16 @@ fn fips_endpoint_config_for_platform(
     config.node.discovery.nostr.failure_streak_threshold = MOBILE_NOSTR_FAILURE_STREAK_THRESHOLD;
     config.node.discovery.nostr.startup_sweep_max_age_secs = FIPS_NOSTR_STARTUP_SWEEP_MAX_AGE_SECS;
     config.node.discovery.nostr.share_local_candidates = mobile.share_local_candidates;
-    // iOS requires Apple's managed multicast entitlement for raw mDNS. Our
-    // packet-tunnel profiles do not carry it, so keep LAN candidates available
-    // to encrypted Nostr traversal while leaving the multicast daemon closed.
-    // Packet-tunnel extensions may still use ordinary local unicast traffic.
+    // iOS supplies Bonjour candidates through its native DNS-SD adapter;
+    // raw multicast requires a separate managed entitlement there.
     config.node.discovery.lan.enabled = mobile.share_local_candidates
         && nostr_enabled
         && platform != RuntimePlatform::Ios;
+    // Joining devices do not know the private network ID yet. Discovery is
+    // application-scoped; roster admission and Noise still authenticate peers.
+    config.node.discovery.lan.scope = Some(
+        nostr_vpn_core::fips_discovery::FIPS_LAN_DISCOVERY_SCOPE_PREFIX.to_string(),
+    );
     // Leave the relay-side `app` at fips-core's default ("fips-overlay-v1");
     // see fips_private_mesh::fips_endpoint_config for the rationale (the relay
     // `protocol` tag is publicly visible, so per-network apps would let any

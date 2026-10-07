@@ -42,6 +42,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var underlayMonitorGeneration: UInt64?
     private var initializedUnderlaySources: Set<UnderlayPathSource> = []
     private var underlayRefreshWorkItem: DispatchWorkItem?
+    private let bonjourDiscovery = FipsBonjourDiscovery()
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -207,6 +208,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.stopRustTunnel(generation: startGeneration)
                 completionHandler(PacketTunnelError.startFailed)
                 return
+            }
+            let lanInfo = self.withTunnelHandle(generation: startGeneration) { handle in
+                consumeCString(nostr_vpn_mobile_tunnel_lan_discovery_info_json(handle))
+            } ?? ""
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tunnelIsActive(generation: startGeneration) else { return }
+                self.bonjourDiscovery.start(infoJson: lanInfo) { [weak self] npub, addresses in
+                    guard let json = try? JSONSerialization.data(withJSONObject: addresses),
+                          let text = String(data: json, encoding: .utf8) else { return }
+                    _ = self?.withTunnelHandle(generation: startGeneration) { handle in
+                        npub.withCString { peer in
+                            text.withCString { nostr_vpn_mobile_tunnel_observe_lan_peer(handle, peer, $0) }
+                        }
+                    }
+                }
             }
             NSLog("nvpn-pkt: completionHandler(nil) — VPN should transition to connected")
             packetDebugLog("completionHandler nil totalMs=\(totalMs)")
@@ -427,6 +443,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         tunnelRunning = false
+        let stoppedGeneration = tunnelGeneration
         let packetFlowBridge = self.packetFlowBridge
         self.packetFlowBridge = nil
         packetFlowBridge?.stop()
@@ -437,6 +454,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         tunnelCondition.unlock()
         stopUnderlayNetworkMonitor()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.tunnelCondition.lock()
+            let stillStopped = self.tunnelGeneration == stoppedGeneration && !self.tunnelRunning
+            self.tunnelCondition.unlock()
+            if stillStopped { self.bonjourDiscovery.stop() }
+        }
 
         if let handle {
             nostr_vpn_mobile_tunnel_free(handle)

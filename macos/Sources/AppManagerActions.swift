@@ -34,6 +34,13 @@ extension AppManager {
 
     func handle(url: URL) {
         let raw = url.absoluteString
+        if url.scheme?.lowercased() == "nvpn", url.host?.lowercased() == "paid-exit" {
+            paidExitChooserRequested = true
+            guard openingPaidExitLink != raw else { return }
+            pendingPaidExitLink = raw
+            openPendingPaidExitLink()
+            return
+        }
         if raw.lowercased().hasPrefix("nvpn://join-request") {
             importJoinRequest(raw)
             return
@@ -71,6 +78,15 @@ extension AppManager {
             break
         }
         #endif
+    }
+
+    func openPendingPaidExitLink() {
+        guard !actionInFlight, let link = pendingPaidExitLink else { return }
+        pendingPaidExitLink = nil
+        openingPaidExitLink = link
+        dispatch(.setManualPaidExitProvider(provider: link), status: "Opening provider") { [weak self] _ in
+            self?.openingPaidExitLink = nil
+        }
     }
 
     private static func debugQueryValue(_ name: String, aliases: [String], in url: URL) -> String? {
