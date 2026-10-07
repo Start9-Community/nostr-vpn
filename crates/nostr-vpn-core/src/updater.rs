@@ -40,6 +40,7 @@ const UPDATE_CONNECT_TIMEOUT_SECS: &str = "4";
 const UPDATE_MANIFEST_TIMEOUT_SECS: &str = "8";
 const UPDATE_DOWNLOAD_TIMEOUT_SECS: &str = "180";
 const UPDATE_USER_AGENT: &str = "nvpn-updater";
+const UPDATE_WORKER_STACK_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_BLOSSOM_READ_SERVERS: &[&str] = &[
     "https://cdn.iris.to",
     "https://upload.iris.to",
@@ -109,16 +110,21 @@ pub fn check_product_update_blocking_with_config(
     source: ProductUpdateSource,
     config_path: Option<&Path>,
 ) -> Result<ProductUpdateResult> {
+    let current_version = current_version.to_owned();
+    let config_path = config_path.map(Path::to_path_buf);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(UPDATE_WORKER_STACK_SIZE)
         .build()
         .context("failed to start update runtime")?;
-    runtime.block_on(check_product_update_with_config(
-        current_version,
-        mode,
-        source,
-        config_path,
-    ))
+    // block_on polls its root future on the caller. Swift's cooperative pool
+    // has a small stack, so FIPS startup must run on our runtime workers.
+    runtime
+        .block_on(runtime.spawn(async move {
+            check_product_update_with_config(&current_version, mode, source, config_path.as_deref())
+                .await
+        }))
+        .context("update check task failed")?
 }
 
 pub async fn check_product_update(
@@ -155,17 +161,26 @@ pub fn download_product_update_blocking_with_config(
     download_dir: Option<&Path>,
     config_path: Option<&Path>,
 ) -> Result<ProductUpdateResult> {
+    let current_version = current_version.to_owned();
+    let download_dir = download_dir.map(Path::to_path_buf);
+    let config_path = config_path.map(Path::to_path_buf);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(UPDATE_WORKER_STACK_SIZE)
         .build()
         .context("failed to start update runtime")?;
-    runtime.block_on(download_product_update_with_config(
-        current_version,
-        mode,
-        source,
-        download_dir,
-        config_path,
-    ))
+    runtime
+        .block_on(runtime.spawn(async move {
+            download_product_update_with_config(
+                &current_version,
+                mode,
+                source,
+                download_dir.as_deref(),
+                config_path.as_deref(),
+            )
+            .await
+        }))
+        .context("update download task failed")?
 }
 
 pub async fn download_product_update(
