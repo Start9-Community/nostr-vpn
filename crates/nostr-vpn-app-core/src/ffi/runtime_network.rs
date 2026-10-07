@@ -25,7 +25,7 @@ impl NativeAppRuntime {
                 blocked,
                 needs_attention,
                 text: if blocked {
-                    format!("Automatic paid exit · Blocked · {payment_status}")
+                    format!("Automatic paid exit · {payment_status} · Internet paused by nvpn to prevent leaks")
                 } else {
                     format!("Automatic paid exit · {payment_status}")
                 },
@@ -69,7 +69,17 @@ impl NativeAppRuntime {
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !selected_exit_active;
             let text = if blocked {
-                format!("{source} · Blocked, waiting for {name}")
+                let paid_error = paid_exit.then(|| self.selected_paid_route_error()).flatten();
+                let reason = paid_error.as_deref()
+                    .or_else(|| selected_peer.and_then(|peer| peer.error.as_deref()).filter(|error| !error.is_empty()));
+                let progress = reason.map_or_else(|| {
+                    if selected_peer.is_some_and(|peer| peer.reachable) {
+                        format!("Checking internet access through {name}")
+                    } else {
+                        format!("Connecting to {name}")
+                    }
+                }, |reason| format!("{name} · {reason}"));
+                format!("{source} · {progress} · Internet paused by nvpn to prevent leaks")
             } else if selected_exit_active {
                 let realized_exit_ip = active_paid_exit_ip.unwrap_or_default();
                 if realized_exit_ip.is_empty() {
@@ -112,7 +122,7 @@ impl NativeAppRuntime {
                 blocked,
                 needs_attention: blocked,
                 text: if blocked {
-                    format!("{source} · Blocked")
+                    format!("{source} · Selecting provider · Internet paused by nvpn to prevent leaks")
                 } else if self.config.internet_source == InternetSource::PaidAutomatic {
                     format!("{source} · Selecting provider")
                 } else {
@@ -128,7 +138,7 @@ impl NativeAppRuntime {
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !wireguard_exit_active;
             let text = if blocked {
-                "WireGuard exit · Blocked".to_string()
+                "WireGuard exit · Connecting · Internet paused by nvpn to prevent leaks".to_string()
             } else if wireguard_exit_active {
                 "WireGuard exit · Connected".to_string()
             } else {

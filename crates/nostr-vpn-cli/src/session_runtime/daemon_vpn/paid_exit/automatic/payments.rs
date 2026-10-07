@@ -80,6 +80,16 @@ pub(crate) async fn fund_paid_exit_session(
         Ok(value) => value,
         Err(error) => {
             update_paid_route_store(&store_path, |store| {
+                let session = store
+                    .sessions
+                    .get(session_id)
+                    .ok_or_else(|| anyhow!("missing funding session"))?;
+                let channel = store
+                    .channels
+                    .get_mut(&session.session.payment.channel_id)
+                    .ok_or_else(|| anyhow!("missing funding channel"))?;
+                channel.error = format!("Payment setup failed at {mint_url}: {error:#}");
+                channel.updated_at_unix = unix_timestamp();
                 if let Some(shortfall) =
                     error.downcast_ref::<cashu_service::CashuInsufficientFunds>()
                 {
@@ -91,7 +101,7 @@ pub(crate) async fn fund_paid_exit_session(
                 store.defer_buyer_mint_retry(
                     &mint_url,
                     unix_timestamp(),
-                    true,
+                    Some(&format!("{error:#}")),
                     error
                         .downcast_ref::<cashu_service::MintRetryAfter>()
                         .map(|delay| delay.0),

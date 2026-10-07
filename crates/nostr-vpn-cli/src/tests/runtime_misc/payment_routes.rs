@@ -26,6 +26,7 @@ fn paid_modes_keep_wallet_mints_reachable_outside_the_route_they_fund() {
     update_paid_route_store(&paid_route_store_file_path(&config_path), |store| {
         store.upsert_wallet_mint(mint, "Payment mint", Some(100_000), 1);
         store.upsert_wallet_mint("https://198.51.100.42/another", "Same host", None, 1);
+        store.upsert_wallet_mint("https://unresolvable.invalid", "Unavailable mint", None, 1);
         Ok(())
     })
     .unwrap();
@@ -73,6 +74,9 @@ fn paid_modes_keep_wallet_mints_reachable_outside_the_route_they_fund() {
         );
     }
     update_paid_route_store(&paid_route_store_file_path(&config_path), |store| {
+        let retry = &store.buyer_mint_retries["https://unresolvable.invalid"];
+        assert!(retry.error.contains("Cannot resolve payment mint unresolvable.invalid"));
+        assert!(retry.retry_at_unix > unix_timestamp());
         store.wallet.mints.clear();
         store.wallet.default_mint.clear();
         Ok(())

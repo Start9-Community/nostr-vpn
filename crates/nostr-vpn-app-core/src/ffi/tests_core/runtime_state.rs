@@ -508,6 +508,6 @@
         assert!(!state.exit_node_active);
         assert_eq!(
             state.exit_node_status_text,
-            "Private exit · Blocked, waiting for lab-exit.nvpn"
+            "Private exit · lab-exit.nvpn · fips link pending · Internet paused by nvpn to prevent leaks"
         );
     }

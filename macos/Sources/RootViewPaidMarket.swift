@@ -467,6 +467,13 @@ extension RootView {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let channel, !channel.error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(channel.error)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
                 if session.countryClaimStatus == "mismatch" {
                     Label(
                         "Provider location does not match its advertised country",

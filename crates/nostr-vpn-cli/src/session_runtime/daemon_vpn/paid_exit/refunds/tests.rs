@@ -15,13 +15,8 @@
 
     impl TestDirectory {
         fn new() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "nvpn-paid-exit-refund-worker-{}-{nonce}",
-                std::process::id()
+                "nvpn-paid-exit-refund-worker-{}", uuid::Uuid::new_v4()
             ));
             fs::create_dir_all(&path).expect("create refund worker test directory");
             Self(path)
@@ -228,7 +223,7 @@
             store.upsert_channel(channel("refund", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Closing));
             // The shared cooldown has just expired. A refund must not grab
             // the store lock and renew that cooldown before funding can run.
-            store.defer_buyer_mint_retry(mint, now - 12, true, None)?;
+            store.defer_buyer_mint_retry(mint, now - 12, Some("Mint unavailable"), None)?;
             Ok(session)
         }).unwrap();
         let mut runtime = PaidExitBuyerRefundRuntime::new().unwrap();
@@ -504,7 +499,7 @@
         let mut now = 1_900_000_000;
         for delay in [10, 20, 40, 80, 160, 320, 600, 600] {
             update_paid_route_store(&path, |store| {
-                store.defer_buyer_mint_retry(mint, now, true, None)
+                store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), None)
             })
             .unwrap();
             let store = load_paid_route_store(&path).unwrap();
@@ -514,9 +509,9 @@
             now = deadline;
         }
         update_paid_route_store(&path, |store| {
-            store.defer_buyer_mint_retry(mint, now, true, Some(3600))?;
+            store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), Some(3600))?;
             store.clear_buyer_mint_retry(mint, now + 1)?;
-            store.defer_buyer_mint_retry(mint, now + 2, false, None)
+            store.defer_buyer_mint_retry(mint, now + 2, None, None)
         })
         .unwrap();
         let store = load_paid_route_store(&path).unwrap();
@@ -527,7 +522,7 @@
         );
         now += 3601;
         update_paid_route_store(&path, |store| {
-            store.defer_buyer_mint_retry(mint, now, false, None)
+            store.defer_buyer_mint_retry(mint, now, None, None)
         })
         .unwrap();
         let store = load_paid_route_store(&path).unwrap();
@@ -539,7 +534,7 @@
         assert_eq!(store.buyer_mint_retry_at(mint), now + 11);
         now += 11;
         update_paid_route_store(&path, |store| {
-            store.defer_buyer_mint_retry(mint, now, true, None)
+            store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), None)
         })
         .unwrap();
         assert_eq!(

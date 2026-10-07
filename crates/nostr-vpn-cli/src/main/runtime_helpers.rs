@@ -535,9 +535,23 @@ fn fips_tunnel_config_from_app(
             let store = load_paid_route_store(&config.paid_route_store_path)?;
             for mint in &store.wallet.mints {
                 let url = reqwest::Url::parse(&mint.url)?;
-                let addresses = url
-                    .socket_addrs(|| None)
-                    .context("failed to resolve wallet mint for payment routing")?;
+                let addresses = match url.socket_addrs(|| None) {
+                    Ok(addresses) => addresses,
+                    Err(error) => {
+                        let reason = format!("Cannot resolve payment mint {}: {error}", url.host_str().unwrap_or(&mint.url));
+                        eprintln!("paid-exit: {reason}");
+                        update_paid_route_store(&config.paid_route_store_path, |store| {
+                            let now = unix_timestamp();
+                            if store.buyer_mint_failure_retry_at(&mint.url) <= now {
+                                store.defer_buyer_mint_retry(&mint.url, now, Some(&reason), None)?;
+                            }
+                            Ok(())
+                        })?;
+                        // A mint outage must not prevent applying the user's
+                        // configuration or connecting through a different mint.
+                        continue;
+                    }
+                };
                 config
                     .control_plane_bypass_hosts
                     .extend(addresses.into_iter().filter_map(|addr| match addr.ip() {

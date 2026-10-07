@@ -144,6 +144,12 @@ pub(crate) async fn update_automatic_paid_exit(
                 }
                 Err(error) => {
                     eprintln!("paid-exit: automatic free probe failed: {error}");
+                    update_paid_route_store(&paid_route_store_file_path(config_path), |store| {
+                        store.fail_selected_buyer_session(
+                            &format!("Provider internet check failed: {error:#}"),
+                            now_unix,
+                        )
+                    })?;
                     if let Some(candidate) = &automatic.candidate {
                         record_paid_exit_feedback(
                             feedback,
@@ -172,6 +178,27 @@ pub(crate) async fn update_automatic_paid_exit(
         .is_some_and(|candidate| candidate.should_failover(now_unix))
     {
         suspend_automatic_paid_exit(automatic, runtime, config_path, now_unix)?;
+        if let Some(candidate) = automatic.candidate.as_ref()
+            && (!candidate.funding_attempted || candidate.funded)
+        {
+            update_paid_route_store(&paid_route_store_file_path(config_path), |store| {
+                if store.selected_buyer_session_id != candidate.session_id {
+                    return Ok(false);
+                }
+                let channel = &store.channels[&store.sessions[&candidate.session_id]
+                    .session
+                    .payment
+                    .channel_id];
+                let reason = if !channel.error.is_empty() {
+                    channel.error.clone()
+                } else if candidate.probe_succeeded {
+                    "Provider stopped responding".to_string()
+                } else {
+                    "Provider connection timed out before internet access was verified".to_string()
+                };
+                store.fail_selected_buyer_session(&reason, now_unix)
+            })?;
+        }
         if !PaidExitAutomaticBuyer::enabled(app) {
             return Ok(false);
         }

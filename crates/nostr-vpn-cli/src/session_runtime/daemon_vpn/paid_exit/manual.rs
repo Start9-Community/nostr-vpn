@@ -388,7 +388,11 @@ pub(crate) async fn update_manual_paid_exit(
     // seller-health deadline could otherwise strand a successfully opened
     // channel before the route store observes its result.
     if manual.health_deadline_expired(now_unix) {
-        let reason = manual.timeout_reason();
+        let reason = load_paid_route_store(&store_path)?
+            .channels.get(&store.sessions[&session_id].session.payment.channel_id)
+            .map(|channel| channel.error.trim().to_string())
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| manual.timeout_reason());
         return fail_manual_paid_exit(manual, app, config_path, &reason, now_unix);
     }
     Ok(false)

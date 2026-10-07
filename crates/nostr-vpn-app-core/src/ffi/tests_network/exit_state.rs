@@ -80,14 +80,14 @@
         assert!(!state.exit_node_active);
         assert_eq!(
             state.exit_node_status_text,
-            "WireGuard exit · Blocked"
+            "WireGuard exit · Connecting · Internet paused by nvpn to prevent leaks"
         );
 
         runtime.vpn_active = true;
         let state = runtime.state();
         assert!(state.exit_node_blocked);
         assert!(!state.exit_node_active);
-        assert_eq!(state.exit_node_status_text, "WireGuard exit · Blocked");
+        assert_eq!(state.exit_node_status_text, "WireGuard exit · Connecting · Internet paused by nvpn to prevent leaks");
 
         runtime.daemon_state = Some(DaemonRuntimeState {
             vpn_enabled: true,
@@ -142,7 +142,7 @@
         let state = runtime.state();
         assert!(state.exit_node_blocked);
         assert!(!state.exit_node_active);
-        assert!(state.exit_node_status_text.contains("waiting"));
+        assert!(state.exit_node_status_text.contains("Checking internet access"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -172,7 +172,7 @@
         assert!(!state.exit_node_active);
         assert_eq!(
             state.exit_node_status_text,
-            "Automatic paid exit · Blocked"
+            "Automatic paid exit · Selecting provider · Internet paused by nvpn to prevent leaks"
         );
         let _ = fs::remove_dir_all(dir);
     }
@@ -250,6 +250,22 @@
         assert_eq!(connecting.exit_node_status_text,
             format!("Automatic paid exit · Selected {provider_name} · Connecting"));
 
+        update_paid_route_store(&nostr_vpn_core::paid_route_store::paid_route_store_file_path(&runtime.config_path), |store| {
+            store.begin_buyer_session_open_attempt(&session.session_id, now)?;
+            store.channels.get_mut(&session.channel_id).unwrap().error = "Provider did not acknowledge the connection".to_string();
+            Ok(())
+        }).unwrap();
+        runtime.config.exit_node_leak_protection = true;
+        let unavailable = runtime.state();
+        assert!(unavailable.exit_node_status_text.contains("Provider did not acknowledge the connection"));
+        assert!(!unavailable.exit_node_status_text.contains("Payment unavailable"),
+            "provider failures must not be mislabeled as mint failures");
+        update_paid_route_store(&nostr_vpn_core::paid_route_store::paid_route_store_file_path(&runtime.config_path), |store| {
+            store.channels.get_mut(&session.channel_id).unwrap().error.clear();
+            Ok(())
+        }).unwrap();
+        runtime.config.exit_node_leak_protection = false;
+
         runtime.daemon_state.as_mut().unwrap().peers.push(DaemonPeerState {
             participant_pubkey: seller_hex.clone(),
             reachable: true,
@@ -311,23 +327,23 @@
         assert!(!pending.exit_node_active);
         assert!(pending.exit_node_blocked);
         assert_eq!(pending.exit_node_status_text,
-            "Automatic paid exit · Blocked · Payment unavailable · mint.example · Retrying");
+            "Automatic paid exit · Payment unavailable · mint.example · mint connection refused · Retrying · Internet paused by nvpn to prevent leaks");
         // A refund can put the mint into cooldown before this session has
         // attempted funding. No channel-local error must not mean "working".
         update_paid_route_store(&nostr_vpn_core::paid_route_store::paid_route_store_file_path(&runtime.config_path), |store| {
             store.channels.get_mut(channel_id).unwrap().error.clear();
-            store.defer_buyer_mint_retry("https://mint.example", now, true, Some(600))
+            store.defer_buyer_mint_retry("https://mint.example", now, Some("Mint unavailable"), Some(600))
         }).unwrap();
         let cooldown = runtime.state();
         assert!(cooldown.exit_node_needs_attention);
-        assert!(cooldown.exit_node_status_text.contains("Payment unavailable · mint.example · Retrying in"));
+        assert!(cooldown.exit_node_status_text.contains("Payment unavailable · mint.example · Mint unavailable · No payable alternative · Retrying in"));
         update_paid_route_store(&nostr_vpn_core::paid_route_store::paid_route_store_file_path(&runtime.config_path), |store| {
             store.record_buyer_session_funding_shortfall(session_id, 12)?;
             store.upsert_wallet_mint("https://mint.example", "Mint", Some(10_000), now);
             Ok(())
         }).unwrap();
         assert_eq!(runtime.state().exit_node_status_text,
-            "Automatic paid exit · Blocked · More funds needed · mint.example");
+            "Automatic paid exit · More funds needed · mint.example · Internet paused by nvpn to prevent leaks");
         assert!(runtime.state().exit_node_needs_attention);
         runtime.config.set_internet_source(InternetSource::PaidAutomatic);
         update_paid_route_store(&nostr_vpn_core::paid_route_store::paid_route_store_file_path(&runtime.config_path), |store| {
@@ -357,6 +373,11 @@
             Ok(())
         }).unwrap();
         runtime.config.exit_node_leak_protection = false;
+        assert!(runtime.state().exit_node_status_text.contains("No payable alternative"),
+            "a top-up must not conceal a separate mint outage");
+        update_paid_route_store(&nostr_vpn_core::paid_route_store::paid_route_store_file_path(&runtime.config_path), |store| {
+            store.clear_buyer_mint_retry("https://mint.example", now + 601)
+        }).unwrap();
         assert!(!runtime.state().exit_node_needs_attention, "a top-up clears the funding blocker");
         assert!(runtime.state().exit_node_status_text.ends_with("Selecting provider"));
     }

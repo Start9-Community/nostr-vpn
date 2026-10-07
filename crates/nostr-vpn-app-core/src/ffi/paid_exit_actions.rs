@@ -111,6 +111,19 @@ impl NativeAppRuntime {
         paid_route_store_file_path(&self.config_path)
     }
 
+    pub(super) fn selected_paid_route_error(&self) -> Option<String> {
+        let store = load_paid_route_store(&self.paid_route_store_path()).ok()?;
+        let session = store.sessions.get(&store.selected_buyer_session_id)?;
+        let channel = store.channels.get(&session.session.payment.channel_id)?;
+        if normalize_nostr_pubkey(&channel.counterparty_npub).ok()?
+            != normalize_nostr_pubkey(&self.config.exit_node).ok()?
+        {
+            return None;
+        }
+        let error = channel.error.trim();
+        (!error.is_empty()).then(|| error.to_string())
+    }
+
     pub(super) fn pending_paid_route_funding_status(&self) -> Option<(String, bool)> {
         let store = load_paid_route_store(&self.paid_route_store_path()).ok()?;
         let now = unix_timestamp();
@@ -121,6 +134,15 @@ impl NativeAppRuntime {
             .is_some()
         {
             return None;
+        }
+        if let Some(session) = store.sessions.get(&store.selected_buyer_session_id)
+            && let Some(channel) = store.channels.get(&session.session.payment.channel_id)
+            && store.buyer_mint_needs_funds(&channel.mint_url, channel.payment.capacity_sat)
+        {
+            return Some((
+                format!("More funds needed · {}", paid_route_mint_host(&channel.mint_url)),
+                true,
+            ));
         }
         // Selection and recovery can temporarily leave no pending session
         // selected. Derive the blocker from the same mint choice as the buyer,
@@ -147,30 +169,53 @@ impl NativeAppRuntime {
         {
             return Some(("More funds needed · Wallet empty".to_string(), true));
         }
+        if let Some(selection) = selection.as_ref().filter(|selection| !selection.funded)
+            && store.buyer_mint_failure_retry_at(&selection.mint_url) > now
+        {
+            let retry = &store.buyer_mint_retries[&selection.mint_url];
+            let mint = paid_route_mint_host(&selection.mint_url);
+            let cause = if retry.error.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", retry.error)
+            };
+            return Some((
+                format!("Payment unavailable · {mint}{cause} · No payable alternative · Retrying in {} s", retry.retry_at_unix - now),
+                true,
+            ));
+        }
         let session = store.sessions.get(&store.selected_buyer_session_id)?;
         let channel = store.channels.get(&session.session.payment.channel_id)?;
-        if session.funding_started_unix == 0 || channel.routing_expires_at_unix(u64::MAX) <= now {
+        if session.session.payment.cashu_spilman_payment.is_some()
+            || session.session.payment.cashu_token_lease.is_some()
+            || channel.routing_expires_at_unix(u64::MAX) <= now
+            || (session.funding_started_unix == 0
+                && store.buyer_mint_failure_retry_at(&channel.mint_url) <= now)
+        {
             return None;
         }
         let mint = paid_route_mint_host(&channel.mint_url);
+        let error = if channel.error.trim().is_empty() {
+            store.buyer_mint_retries.get(&channel.mint_url)
+                .map_or("", |retry| retry.error.trim())
+        } else {
+            channel.error.trim()
+        };
+        let cause = if error.is_empty() {
+            String::new()
+        } else {
+            format!(" · {error}")
+        };
         Some(
-            if store.buyer_mint_needs_funds(&channel.mint_url, channel.payment.capacity_sat) {
-                (format!("More funds needed · {mint}"), true)
-            } else if store.buyer_mint_failure_retry_at(&channel.mint_url) > now {
-                let seconds = store.buyer_mint_failure_retry_at(&channel.mint_url) - now;
-                let remaining = if seconds >= 60 {
-                    format!("{} min", seconds.div_ceil(60))
-                } else {
-                    format!("{seconds} s")
-                };
+            if store.buyer_mint_failure_retry_at(&channel.mint_url) > now {
                 (
-                    format!("Payment unavailable · {mint} · Retrying in {remaining}"),
+                    format!("Payment unavailable · {mint}{cause} · Trying another provider"),
                     true,
                 )
             } else if channel.error.is_empty() {
                 (format!("Setting up payment · {mint}"), false)
             } else {
-                (format!("Payment unavailable · {mint} · Retrying"), true)
+                (format!("Payment unavailable · {mint}{cause} · Retrying"), true)
             },
         )
     }

@@ -429,7 +429,7 @@
     fn funded_channel_reconnect_ignores_mint_cooldown_but_new_funding_waits() {
         let mut store = recoverable_unfunded_route_store(10_000);
         store
-            .defer_buyer_mint_retry("https://mint.example/Bitcoin", 1000, true, Some(1800))
+            .defer_buyer_mint_retry("https://mint.example/Bitcoin", 1000, Some("Mint unavailable"), Some(1800))
             .unwrap();
         assert_eq!(store.buyer_session_funding_retry_at("session-1"), 2801);
         store

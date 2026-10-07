@@ -16,6 +16,7 @@ struct Candidate {
     mint_url: String,
     capacity_sat: u64,
     funded: bool,
+    payment_available: bool,
     local_probe: Option<LocalProbeRank>,
     local_probe_count: u32,
     previously_verified: bool,
@@ -99,9 +100,12 @@ impl PaidRouteStore {
         let (local_probe, local_probe_count) = self.local_probe_history(&offer, now_unix);
         Some(Candidate {
             offer_key: key.to_string(),
-            mint_url,
             capacity_sat,
             funded,
+            payment_available: funded
+                || (self.buyer_mint_failure_retry_at(&mint_url) <= now_unix
+                    && !self.buyer_mint_needs_funds(&mint_url, capacity_sat)),
+            mint_url,
             local_probe,
             local_probe_count,
             previously_verified,
@@ -239,8 +243,9 @@ fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
             .local_probe
             .map_or(1, |probe| if probe.usable { 2 } else { 0 })
     };
-    health(left)
-        .cmp(&health(right))
+    left.payment_available
+        .cmp(&right.payment_available)
+        .then_with(|| health(left).cmp(&health(right)))
         .then_with(|| left.personal_rating.cmp(&right.personal_rating))
         .then_with(|| left.local_probe.cmp(&right.local_probe))
         .then_with(|| left.rating_score.cmp(&right.rating_score))
