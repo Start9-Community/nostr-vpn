@@ -1562,6 +1562,15 @@ run_mobile_idle_cpu_gates() {
   # Android Release idle is sampled after the first real signed-app network
   # cycle. Simulator/debug idle runs belong to development smoke, not release.
   local ios_device="${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
+  local ios_sample_seconds="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_SAMPLE_SECONDS:-60}"
+  python3 - "$ios_sample_seconds" <<'PY'
+import math
+import sys
+
+seconds = float(sys.argv[1])
+if not math.isfinite(seconds) or not 60 <= seconds <= 120:
+    raise SystemExit("Release connected iOS CPU coverage requires 60–120 seconds")
+PY
   local ios_smoke_command=(./scripts/mobile-ios-smoke.sh device)
   if [[ -n "$ios_device" ]]; then
     ios_smoke_command+=(--device "$ios_device")
@@ -1573,8 +1582,8 @@ run_mobile_idle_cpu_gates() {
         NVPN_IOS_RUST_PROFILE=release \
         NVPN_IOS_IDLE_CPU_MAX_PERCENT="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_MAX_PERCENT:-$NVPN_IDLE_CPU_MAX_PERCENT}" \
         NVPN_IOS_IDLE_CPU_SETTLE_SECONDS="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_SETTLE_SECONDS:-15}" \
-        NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_SAMPLE_SECONDS:-60}" \
-        NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK=1 \
+        NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS="$ios_sample_seconds" \
+        NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK=0 \
         "${ios_smoke_command[@]}"
     MOBILE_IOS_APP_READY=1
   else

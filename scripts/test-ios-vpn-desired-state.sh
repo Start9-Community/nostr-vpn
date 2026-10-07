@@ -281,13 +281,17 @@ start_functions = (
     lifecycle.split("private func performVpnStart", 1)[1].split(
         "private func performVpnStop", 1
     )[0],
-    debug.split("private func startVpnForDebugProbe", 1)[1].split(
-        "private func fetchDebugProbe", 1
-    )[0],
 )
 for body in start_functions:
     if "vpnController.start(" not in body or "packetTunnelStartAllowed(" not in body:
         raise SystemExit("a PacketTunnel start path bypasses the disclosure policy")
+debug_start = debug.split("private func startVpnForDebugProbe", 1)[1].split(
+    "private func fetchDebugProbe", 1
+)[0]
+if ("setVpnEnabled(true, force: true)" not in debug_start
+        or "await packetTunnelTransitionTask?.value" not in debug_start
+        or "try await vpnController.start(" in debug_start):
+    raise SystemExit("debug VPN start bypasses the serialized shipped start path")
 controller_start = source.split("func start(", 1)[1].split(
     "static func routeState", 1
 )[0]

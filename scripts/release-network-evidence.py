@@ -445,6 +445,27 @@ def validate_fresh_dns_fixture_proof(
     return proof
 
 
+def validate_ios_connected_use(markers: list[str]) -> dict[str, int]:
+    def times(kind):
+        prefix = f"NVPN_IOS_RELEASE_CONNECTED_USE_{kind}_MS="
+        values = [line[len(prefix):] for line in markers if line.startswith(prefix)]
+        require(all(value.isdecimal() for value in values),
+                "iOS connected-use timestamp is invalid")
+        return [int(value) for value in values]
+
+    begin, end, samples = times("BEGIN"), times("END"), times("SAMPLE")
+    require(len(begin) == len(end) == 1 and len(samples) >= 7,
+            "iOS connected-use minute has missing or duplicate evidence")
+    require(end[0] - begin[0] >= 60_000 and samples[-1] - begin[0] >= 60_000,
+            "iOS connected-use traffic did not last a full minute")
+    require(begin[0] <= samples[0] and 0 <= end[0] - samples[-1] <= 2_000,
+            "iOS connected-use traffic does not cover the measured window")
+    require(all(0 < after - before <= 15_000
+                for before, after in zip([begin[0]] + samples, samples)),
+            "iOS connected-use traffic has a gap or unordered samples")
+    return {"durationMs": end[0] - begin[0], "sampleCount": len(samples)}
+
+
 def validate_ios_support(
     root: pathlib.Path,
     cases: list[str],
@@ -521,6 +542,8 @@ def validate_ios_support(
             "observedCheckpointCount": len(observed),
             "sampleCount": process.get("sampleCount"),
         }
+        if case == "automatic-profile":
+            summaries[case]["connectedUse"] = validate_ios_connected_use(markers)
         if case == "through-exit":
             summaries[case]["directCheckpointProcesses"] = direct_processes
         paths.extend((process_path, marker_path))

@@ -31,6 +31,7 @@ start_lane "release and Windows contracts" run_contract_batch \
 start_lane "mobile contracts" run_contract_batch \
   scripts/test-mobile-{physical-device-selection,ios-vpn-cleanup,android-release-cleanup,wireguard-exit-dns,wireguard-fixture-cleanup,release-provenance,release-artifact-reuse,underlay-change,release-join-gate}-harness.sh \
   scripts/test-android-release-network-evidence-harness.sh \
+  scripts/test-ios-connected-use-evidence.py \
   scripts/test-{ios-vpn-desired-state,ios-packet-tunnel-replacement}.sh
 start_lane "cross-platform artifact contracts" run_contract_batch \
   scripts/test-{desktop-mobile-manual-join-receipt,mobile-ios-release-runner,windows-release-mobile-join}-harness.sh \

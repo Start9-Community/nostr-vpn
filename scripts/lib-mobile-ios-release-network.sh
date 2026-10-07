@@ -1597,6 +1597,17 @@ ios_release_network_validate_markers() {
     }
   fi
   if bool_is_true "$lifecycle"; then
+    python3 - "$ROOT/scripts/release-network-evidence.py" "$markers" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("evidence", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.validate_ios_connected_use(Path(sys.argv[2]).read_text().splitlines())
+PY
+    [[ "$?" -eq 0 ]] || return 1
     local cycle
     for cycle in $(seq 1 "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}"); do
       grep -Fq "NVPN_IOS_RELEASE_BACKGROUND_${cycle}_REQUESTED_MS=" "$markers" \
